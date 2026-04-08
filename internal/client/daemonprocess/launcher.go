@@ -134,7 +134,7 @@ func (l *Launcher) Start(ctx context.Context) error {
 		return fmt.Errorf("start daemon %s: %w", bin, err)
 	}
 	if l.waitForReady != nil {
-		readyCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		readyCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		err := l.waitForReady(readyCtx, l.SocketPath)
 		cancel()
 		if err != nil {

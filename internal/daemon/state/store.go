@@ -28,11 +28,12 @@ const (
 
 // Session contains authoritative session state.
 type Session struct {
-	ID        string
-	IssueID   string
-	State     SessionState
-	StartedAt *time.Time
-	UpdatedAt time.Time
+	ID            string
+	IssueID       string
+	State         SessionState
+	ObservedState SessionState
+	StartedAt     *time.Time
+	UpdatedAt     time.Time
 }
 
 // Snapshot is a read model for frontend/client attach flows.
@@ -112,6 +113,7 @@ func (s *Store) UpsertSession(projectID, sessionID, issueID string, state Sessio
 	ps.revision++
 	now := s.nowFn().UTC()
 	var startedAt *time.Time
+	observedState := state
 	if ok && existing.StartedAt != nil && !existing.StartedAt.IsZero() {
 		resetStartTimestamp := existing.State == SessionStateStopped && state == SessionStateStarting
 		if !resetStartTimestamp {
@@ -123,12 +125,16 @@ func (s *Store) UpsertSession(projectID, sessionID, issueID string, state Sessio
 		start := now
 		startedAt = &start
 	}
+	if ok && strings.TrimSpace(string(existing.ObservedState)) != "" {
+		observedState = existing.ObservedState
+	}
 	next := Session{
-		ID:        sessionID,
-		IssueID:   issueID,
-		State:     state,
-		StartedAt: startedAt,
-		UpdatedAt: now,
+		ID:            sessionID,
+		IssueID:       issueID,
+		State:         state,
+		ObservedState: observedState,
+		StartedAt:     startedAt,
+		UpdatedAt:     now,
 	}
 	ps.sessions[sessionID] = next
 	return SessionEvent{

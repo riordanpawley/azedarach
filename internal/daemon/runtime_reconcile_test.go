@@ -1034,7 +1034,13 @@ func TestRuntimeReconcileRefreshesSessionProjectionWithoutWorktreeManager(t *tes
 	if err != nil {
 		t.Fatalf("list projection sessions: %v", err)
 	}
-	if len(rows) != 0 {
-		t.Fatalf("projection rows = %d, want 0 after session runtime refresh", len(rows))
+	if len(rows) != 1 {
+		t.Fatalf("projection rows = %d, want 1 after session runtime refresh", len(rows))
+	}
+	if rows[0].State != daemonstate.SessionStateAttached {
+		t.Fatalf("desired session state = %s, want %s", rows[0].State, daemonstate.SessionStateAttached)
+	}
+	if rows[0].ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("observed session state = %s, want %s", rows[0].ObservedState, daemonstate.SessionStateStopped)
 	}
 }

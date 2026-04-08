@@ -250,6 +250,34 @@ func TestLauncherStart_ErrorsWhenLockRecoveryFails(t *testing.T) {
 	}
 }
 
+func TestLauncherStartHonorsCallerContextDeadlineForReadyWait(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+
+	launcher := NewLauncher(repoDir, socketPath)
+	launcher.BinPath = "true"
+	launcher.waitForReady = func(ctx context.Context, _ string) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	launcher.sleepFn = func(time.Duration) {}
+	launcher.openLogFile = func(string) (io.WriteCloser, error) {
+		return &trackingWriteCloser{}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	err := launcher.Start(ctx)
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Start() error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("Start() elapsed = %s, want < 500ms", elapsed)
+	}
+}
+
 func TestLauncherStopUsesTerminateLockOwner(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")

@@ -583,7 +583,7 @@ func TestReconcileSkipsRecreateWhileStopInProgress(t *testing.T) {
 		if !stopResp.OK {
 			t.Fatalf("stop response before reconcile = %+v", stopResp)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(500 * time.Millisecond):
 		t.Fatal("timed out waiting for stop command to enter kill or complete")
 	}
 
@@ -611,7 +611,7 @@ func TestReconcileSkipsRecreateWhileStopInProgress(t *testing.T) {
 			if !resp.OK {
 				t.Fatalf("stop response = %+v", resp)
 			}
-		case <-time.After(2 * time.Second):
+		case <-time.After(500 * time.Millisecond):
 			t.Fatal("timed out waiting for stop command completion")
 		}
 	}
@@ -746,7 +746,146 @@ func TestHandleSessionStopDirectKillsLegacyIssueNamedSession(t *testing.T) {
 	}
 }
 
-func TestPersistTmuxSessionProjectionSnapshotRemovesMissingSessions(t *testing.T) {
+func TestHandleSessionStopDirectRecordsDesiredStateBeforeFreshnessWait(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+
+	sessionStore := daemonstate.NewStore()
+	if _, err := sessionStore.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed session store: %v", err)
+	}
+
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   issueID,
+		State:     daemonstate.SessionStateAttached,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed runtime state: %v", err)
+	}
+
+	recorder := &runtimeReconcileRecorder{
+		started:       make(chan struct{}, 1),
+		waitForCancel: true,
+	}
+	tmuxRunner := &testTmuxRunner{
+		sessions: map[string]bool{
+			sessionID: true,
+		},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir:                 ".",
+			RuntimeReconcileTimeout: 20 * time.Millisecond,
+			Logger:                  slog.Default(),
+		},
+		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
+		session:           daemonhandlers.NewSessionHandler(sessionStore),
+		sessionStore:      sessionStore,
+		runtimeReconciler: recorder,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			".": git.NewWorktreeManager(&testGitRunner{worktreePath: "/tmp/proj-az-1", branchName: "riordan/az-1/test"}, ".", slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(&testGitRunner{worktreePath: "/tmp/proj-az-1", branchName: "riordan/az-1/test"}, ".", slog.Default()),
+		},
+	}
+
+	body, err := json.Marshal(map[string]string{
+		"project_id": projectID,
+		"session_id": issueID,
+	})
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-stop-intent",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.stop",
+		Body:            body,
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+	}
+
+	done := make(chan protocol.ResponseEnvelope, 1)
+	stopErr := make(chan error, 1)
+	go func() {
+		resp, runErr := daemon.handleSessionStopDirect(context.Background(), req)
+		if runErr != nil {
+			stopErr <- runErr
+			return
+		}
+		done <- resp
+	}()
+
+	select {
+	case <-recorder.started:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for freshness reconcile to start")
+	}
+
+	rows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("list runtime state rows: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("runtime rows = %d, want 1", len(rows))
+	}
+	if rows[0].State != daemonstate.SessionStateStopped {
+		t.Fatalf("desired session state = %s, want %s", rows[0].State, daemonstate.SessionStateStopped)
+	}
+	if rows[0].ObservedState != daemonstate.SessionStateAttached {
+		t.Fatalf("observed session state = %s, want %s", rows[0].ObservedState, daemonstate.SessionStateAttached)
+	}
+
+	select {
+	case <-tmuxRunner.killEntered:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for tmux kill to begin")
+	}
+	close(tmuxRunner.killRelease)
+
+	select {
+	case runErr := <-stopErr:
+		t.Fatalf("stop command failed: %v", runErr)
+	case resp := <-done:
+		if !resp.OK {
+			t.Fatalf("stop response = %+v", resp)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for stop completion")
+	}
+
+	rows, err = runtimeStateStore.ListSessionStates(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("list runtime state rows after stop: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("runtime rows after stop = %d, want 1", len(rows))
+	}
+	if rows[0].State != daemonstate.SessionStateStopped {
+		t.Fatalf("desired session state after stop = %s, want %s", rows[0].State, daemonstate.SessionStateStopped)
+	}
+	if rows[0].ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("observed session state after stop = %s, want %s", rows[0].ObservedState, daemonstate.SessionStateStopped)
+	}
+}
+
+func TestPersistTmuxSessionProjectionSnapshotMarksMissingSessionsStopped(t *testing.T) {
 	const projectID = "proj"
 
 	sessionStore := daemonstate.NewStore()
@@ -807,11 +946,32 @@ func TestPersistTmuxSessionProjectionSnapshotRemovesMissingSessions(t *testing.T
 	if err != nil {
 		t.Fatalf("list projection sessions: %v", err)
 	}
-	if len(rows) != 1 {
-		t.Fatalf("projection sessions count = %d, want 1", len(rows))
+	if len(rows) != 2 {
+		t.Fatalf("projection sessions count = %d, want 2", len(rows))
 	}
-	if rows[0].ID != liveSessionID {
-		t.Fatalf("remaining projection session = %s, want %s", rows[0].ID, liveSessionID)
+	rowsByID := map[string]daemonstate.Session{}
+	for _, row := range rows {
+		rowsByID[row.ID] = row
+	}
+	liveRow, ok := rowsByID[liveSessionID]
+	if !ok {
+		t.Fatalf("missing live projection session %s", liveSessionID)
+	}
+	if liveRow.State != daemonstate.SessionStateAttached {
+		t.Fatalf("live desired state = %s, want %s", liveRow.State, daemonstate.SessionStateAttached)
+	}
+	if liveRow.ObservedState != daemonstate.SessionStateAttached {
+		t.Fatalf("live observed state = %s, want %s", liveRow.ObservedState, daemonstate.SessionStateAttached)
+	}
+	staleRow, ok := rowsByID[staleSessionID]
+	if !ok {
+		t.Fatalf("missing stale projection session %s", staleSessionID)
+	}
+	if staleRow.State != daemonstate.SessionStateAttached {
+		t.Fatalf("stale desired state = %s, want %s", staleRow.State, daemonstate.SessionStateAttached)
+	}
+	if staleRow.ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("stale observed state = %s, want %s", staleRow.ObservedState, daemonstate.SessionStateStopped)
 	}
 }
 
@@ -1023,8 +1183,8 @@ func TestHandleSessionStopDirectFreshnessTimeoutUsesDirectReconcileFallback(t *t
 
 	daemon := &Daemon{
 		cfg: Config{
-			RepoDir:                ".",
-			Logger:                 slog.Default(),
+			RepoDir:                 ".",
+			Logger:                  slog.Default(),
 			RuntimeReconcileTimeout: 20 * time.Millisecond,
 		},
 		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
@@ -1346,19 +1506,7 @@ func TestReconcilePublishesSessionProjectionEventsForRecovery(t *testing.T) {
 	)
 
 	store := daemonstate.NewStore()
-	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
-	t.Cleanup(func() {
-		_ = runtimeStateStore.Close()
-	})
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
-		ID:        sessionID,
-		IssueID:   issueID,
-		State:     daemonstate.SessionStateStopped,
-		UpdatedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("seed durable stopped session: %v", err)
-	}
 
 	tmuxRunner := newTestTmuxRunner(sessionID)
 	daemon := &Daemon{
@@ -1376,9 +1524,6 @@ func TestReconcilePublishesSessionProjectionEventsForRecovery(t *testing.T) {
 		},
 		worktreeManagersByProject: map[string]*git.WorktreeManager{
 			projectID: git.NewWorktreeManager(&testGitRunner{worktreePath: "/tmp/proj-az-1", branchName: "riordan/az-1/test"}, ".", slog.Default()),
-		},
-		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
-			".": runtimeStateStore,
 		},
 	}
 
@@ -1654,7 +1799,7 @@ func TestListTmuxSessionsCacheFirstUsesProjectionOnlyWhenCacheEmpty(t *testing.T
 func collectSessionProjectionEvents(t *testing.T, ch <-chan protocol.EventEnvelope, count int) []protocol.EventEnvelope {
 	t.Helper()
 	events := make([]protocol.EventEnvelope, 0, count)
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(500 * time.Millisecond)
 	for len(events) < count {
 		select {
 		case evt := <-ch:

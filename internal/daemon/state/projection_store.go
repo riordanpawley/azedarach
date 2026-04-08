@@ -147,6 +147,30 @@ func (s *RuntimeStateStore) UpsertSessionState(ctx context.Context, projectID st
 	if session.UpdatedAt.IsZero() {
 		session.UpdatedAt = time.Now().UTC()
 	}
+	existing, found, err := s.GetSessionState(ctx, projectID, session.ID)
+	if err == nil && found {
+		if strings.TrimSpace(string(session.ObservedState)) == "" && strings.TrimSpace(string(existing.ObservedState)) != "" {
+			session.ObservedState = existing.ObservedState
+		}
+		if session.StartedAt == nil || session.StartedAt.IsZero() {
+			if existing.StartedAt != nil && !existing.StartedAt.IsZero() {
+				started := existing.StartedAt.UTC()
+				session.StartedAt = &started
+			} else if session.State != SessionStateStopped {
+				started := session.UpdatedAt.UTC()
+				session.StartedAt = &started
+			}
+		}
+	}
+	if strings.TrimSpace(string(session.ObservedState)) == "" {
+		session.ObservedState = session.State
+	}
+	if session.StartedAt == nil || session.StartedAt.IsZero() {
+		if session.State != SessionStateStopped {
+			started := session.UpdatedAt.UTC()
+			session.StartedAt = &started
+		}
+	}
 	startedAt := nullableRuntimeStateTime(session.StartedAt)
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO `+sessionStateTable+` (
@@ -154,12 +178,14 @@ func (s *RuntimeStateStore) UpsertSessionState(ctx context.Context, projectID st
 			session_id,
 			issue_id,
 			state,
+			observed_state,
 			started_at,
 			updated_at
-		) VALUES (?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(project_id, session_id) DO UPDATE SET
 			issue_id = excluded.issue_id,
 			state = excluded.state,
+			observed_state = excluded.observed_state,
 			started_at = excluded.started_at,
 			updated_at = excluded.updated_at
 	`,
@@ -167,6 +193,7 @@ func (s *RuntimeStateStore) UpsertSessionState(ctx context.Context, projectID st
 		session.ID,
 		session.IssueID,
 		string(session.State),
+		string(session.ObservedState),
 		startedAt,
 		session.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	)
@@ -222,6 +249,9 @@ func (s *RuntimeStateStore) ReplaceSessionStates(ctx context.Context, projectID 
 		if updatedAt.IsZero() {
 			updatedAt = time.Now().UTC()
 		}
+		if strings.TrimSpace(string(session.ObservedState)) == "" {
+			session.ObservedState = session.State
+		}
 		startedAt := nullableRuntimeStateTime(session.StartedAt)
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO `+sessionStateTable+` (
@@ -229,12 +259,14 @@ func (s *RuntimeStateStore) ReplaceSessionStates(ctx context.Context, projectID 
 				session_id,
 				issue_id,
 				state,
+				observed_state,
 				started_at,
 				updated_at
-			) VALUES (?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(project_id, session_id) DO UPDATE SET
 				issue_id = excluded.issue_id,
 				state = excluded.state,
+				observed_state = excluded.observed_state,
 				started_at = excluded.started_at,
 				updated_at = excluded.updated_at
 		`,
@@ -242,6 +274,7 @@ func (s *RuntimeStateStore) ReplaceSessionStates(ctx context.Context, projectID 
 			sessionID,
 			session.IssueID,
 			string(session.State),
+			string(session.ObservedState),
 			startedAt,
 			updatedAt.UTC().Format(time.RFC3339Nano),
 		); err != nil {
@@ -288,6 +321,7 @@ func (s *RuntimeStateStore) ListSessionStates(ctx context.Context, projectID str
 			session_id,
 			issue_id,
 			state,
+			COALESCE(observed_state, state),
 			COALESCE(started_at, ''),
 			updated_at
 		FROM `+sessionStateTable+`
@@ -302,13 +336,14 @@ func (s *RuntimeStateStore) ListSessionStates(ctx context.Context, projectID str
 	sessions := make([]Session, 0)
 	for rows.Next() {
 		var (
-			sessionID string
-			issueID   string
-			stateRaw  string
-			startedAt string
-			updatedAt string
+			sessionID   string
+			issueID     string
+			stateRaw    string
+			observedRaw string
+			startedAt   string
+			updatedAt   string
 		)
-		if err := rows.Scan(&sessionID, &issueID, &stateRaw, &startedAt, &updatedAt); err != nil {
+		if err := rows.Scan(&sessionID, &issueID, &stateRaw, &observedRaw, &startedAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scan session state row: %w", err)
 		}
 		parsedStartedAt, err := parseOptionalRuntimeStateTime(startedAt)
@@ -320,11 +355,12 @@ func (s *RuntimeStateStore) ListSessionStates(ctx context.Context, projectID str
 			return nil, err
 		}
 		sessions = append(sessions, Session{
-			ID:        sessionID,
-			IssueID:   issueID,
-			State:     SessionState(stateRaw),
-			StartedAt: parsedStartedAt,
-			UpdatedAt: parsedUpdatedAt,
+			ID:            sessionID,
+			IssueID:       issueID,
+			State:         SessionState(stateRaw),
+			ObservedState: SessionState(observedRaw),
+			StartedAt:     parsedStartedAt,
+			UpdatedAt:     parsedUpdatedAt,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -349,6 +385,7 @@ func (s *RuntimeStateStore) GetSessionState(ctx context.Context, projectID, sess
 			session_id,
 			issue_id,
 			state,
+			COALESCE(observed_state, state),
 			COALESCE(started_at, ''),
 			updated_at
 		FROM `+sessionStateTable+`
@@ -358,10 +395,11 @@ func (s *RuntimeStateStore) GetSessionState(ctx context.Context, projectID, sess
 		rowSessionID string
 		issueID      string
 		stateRaw     string
+		observedRaw  string
 		startedAt    string
 		updatedAt    string
 	)
-	if err := row.Scan(&rowSessionID, &issueID, &stateRaw, &startedAt, &updatedAt); err != nil {
+	if err := row.Scan(&rowSessionID, &issueID, &stateRaw, &observedRaw, &startedAt, &updatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return Session{}, false, nil
 		}
@@ -376,11 +414,12 @@ func (s *RuntimeStateStore) GetSessionState(ctx context.Context, projectID, sess
 		return Session{}, false, err
 	}
 	return Session{
-		ID:        rowSessionID,
-		IssueID:   issueID,
-		State:     SessionState(stateRaw),
-		StartedAt: parsedStartedAt,
-		UpdatedAt: parsedUpdatedAt,
+		ID:            rowSessionID,
+		IssueID:       issueID,
+		State:         SessionState(stateRaw),
+		ObservedState: SessionState(observedRaw),
+		StartedAt:     parsedStartedAt,
+		UpdatedAt:     parsedUpdatedAt,
 	}, true, nil
 }
 
@@ -400,6 +439,7 @@ func (s *RuntimeStateStore) GetSessionStateByIssueID(ctx context.Context, projec
 			session_id,
 			issue_id,
 			state,
+			COALESCE(observed_state, state),
 			COALESCE(started_at, ''),
 			updated_at
 		FROM `+sessionStateTable+`
@@ -408,13 +448,14 @@ func (s *RuntimeStateStore) GetSessionStateByIssueID(ctx context.Context, projec
 		LIMIT 1
 	`, projectID, issueID)
 	var (
-		sessionID string
-		rowIssue  string
-		stateRaw  string
-		startedAt string
-		updatedAt string
+		sessionID   string
+		rowIssue    string
+		stateRaw    string
+		observedRaw string
+		startedAt   string
+		updatedAt   string
 	)
-	if err := row.Scan(&sessionID, &rowIssue, &stateRaw, &startedAt, &updatedAt); err != nil {
+	if err := row.Scan(&sessionID, &rowIssue, &stateRaw, &observedRaw, &startedAt, &updatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return Session{}, false, nil
 		}
@@ -429,11 +470,12 @@ func (s *RuntimeStateStore) GetSessionStateByIssueID(ctx context.Context, projec
 		return Session{}, false, err
 	}
 	return Session{
-		ID:        sessionID,
-		IssueID:   rowIssue,
-		State:     SessionState(stateRaw),
-		StartedAt: parsedStartedAt,
-		UpdatedAt: parsedUpdatedAt,
+		ID:            sessionID,
+		IssueID:       rowIssue,
+		State:         SessionState(stateRaw),
+		ObservedState: SessionState(observedRaw),
+		StartedAt:     parsedStartedAt,
+		UpdatedAt:     parsedUpdatedAt,
 	}, true, nil
 }
 
@@ -898,6 +940,7 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 			session_id TEXT NOT NULL,
 			issue_id TEXT NOT NULL,
 			state TEXT NOT NULL,
+			observed_state TEXT,
 			started_at TEXT,
 			updated_at TEXT NOT NULL,
 			PRIMARY KEY (project_id, session_id)
@@ -923,6 +966,9 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	if err := ensureColumn(ctx, db, sessionStateTable, "started_at", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, sessionStateTable, "observed_state", "TEXT"); err != nil {
 		return err
 	}
 	if err := ensureColumn(ctx, db, worktreeStateTable, "git_status_json", "TEXT"); err != nil {
