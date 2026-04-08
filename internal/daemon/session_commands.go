@@ -427,6 +427,16 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			"reused_worktree", reusedWorktree,
 		)
 	}
+	if err := d.applySessionLifecycleTransition(
+		ctx,
+		req,
+		cmd.ProjectID,
+		cmd.SessionID,
+		cmd.IssueID,
+		daemonhandlers.CommandSessionStart,
+	); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session start transition: %v", err)), nil
+	}
 	d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch)
 	if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -456,16 +466,6 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			"session_id", cmd.SessionID,
 			"error", updateErr,
 		)
-	}
-	if err := d.applySessionLifecycleTransition(
-		ctx,
-		req,
-		cmd.ProjectID,
-		cmd.SessionID,
-		cmd.IssueID,
-		daemonhandlers.CommandSessionStart,
-	); err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session start transition: %v", err)), nil
 	}
 
 	worktreeLine := fmt.Sprintf("Worktree created: %s", worktree.Path)
@@ -528,9 +528,6 @@ func (d *Daemon) handleSessionAttach(ctx context.Context, req protocol.RequestEn
 			"session_id", cmd.SessionID,
 		)
 	}
-	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionAttach); err != nil {
-		return d.mutationFreshnessErrorResponse(req, err), nil
-	}
 	attachTargetSource := d.sourceForSessionInvariant(sessionInvariantSessionAttachTarget)
 	exists, err := d.sessionExistsForInvariant(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, attachTargetSource)
 	if err != nil {
@@ -539,11 +536,6 @@ func (d *Daemon) handleSessionAttach(ctx context.Context, req protocol.RequestEn
 	if !exists {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found: %s (use 'az start %s' to create)", cmd.IssueID, cmd.IssueID)), nil
 	}
-	output := strings.Join([]string{
-		fmt.Sprintf("Attaching to session: %s", cmd.SessionID),
-		"(Press Ctrl+B then D to detach)",
-		"",
-	}, "\n")
 	if err := d.applySessionLifecycleTransition(
 		ctx,
 		req,
@@ -554,6 +546,14 @@ func (d *Daemon) handleSessionAttach(ctx context.Context, req protocol.RequestEn
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session attach transition: %v", err)), nil
 	}
+	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionAttach); err != nil {
+		return d.mutationFreshnessErrorResponse(req, err), nil
+	}
+	output := strings.Join([]string{
+		fmt.Sprintf("Attaching to session: %s", cmd.SessionID),
+		"(Press Ctrl+B then D to detach)",
+		"",
+	}, "\n")
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session attach completed",
 			"project_id", cmd.ProjectID,
@@ -576,9 +576,6 @@ func (d *Daemon) handleSessionPause(ctx context.Context, req protocol.RequestEnv
 			"session_id", cmd.SessionID,
 		)
 	}
-	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionPause); err != nil {
-		return d.mutationFreshnessErrorResponse(req, err), nil
-	}
 	if err := d.applySessionLifecycleTransition(
 		ctx,
 		req,
@@ -588,6 +585,9 @@ func (d *Daemon) handleSessionPause(ctx context.Context, req protocol.RequestEnv
 		daemonhandlers.CommandSessionPause,
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session pause transition: %v", err)), nil
+	}
+	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionPause); err != nil {
+		return d.mutationFreshnessErrorResponse(req, err), nil
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session pause completed",
@@ -611,9 +611,6 @@ func (d *Daemon) handleSessionResume(ctx context.Context, req protocol.RequestEn
 			"session_id", cmd.SessionID,
 		)
 	}
-	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionResume); err != nil {
-		return d.mutationFreshnessErrorResponse(req, err), nil
-	}
 	if err := d.applySessionLifecycleTransition(
 		ctx,
 		req,
@@ -623,6 +620,9 @@ func (d *Daemon) handleSessionResume(ctx context.Context, req protocol.RequestEn
 		daemonhandlers.CommandSessionResume,
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session resume transition: %v", err)), nil
+	}
+	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionResume); err != nil {
+		return d.mutationFreshnessErrorResponse(req, err), nil
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session resume completed",
@@ -662,6 +662,16 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 	clearStopPending := d.markSessionStopPending(cmd.ProjectID, cmd.IssueID)
 	defer clearStopPending()
 	d.writeSessionStopProjection(cmd.ProjectID, cmd.SessionID, cmd.IssueID)
+	if err := d.applySessionLifecycleTransition(
+		ctx,
+		req,
+		cmd.ProjectID,
+		cmd.SessionID,
+		cmd.IssueID,
+		daemonhandlers.CommandSessionStop,
+	); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session stop transition: %v", err)), nil
+	}
 	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionStop); err != nil {
 		if d.cfg.Logger != nil {
 			if errors.Is(err, context.Canceled) {
@@ -690,16 +700,6 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 		if errors.Is(err, context.Canceled) {
 			return d.mutationFreshnessErrorResponse(req, err), nil
 		}
-	}
-	if err := d.applySessionLifecycleTransition(
-		ctx,
-		req,
-		cmd.ProjectID,
-		cmd.SessionID,
-		cmd.IssueID,
-		daemonhandlers.CommandSessionStop,
-	); err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session stop transition: %v", err)), nil
 	}
 	sessionNamesToKill, err := d.tmuxSessionNamesForIssue(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, stopTargetsSource)
 	if err != nil {

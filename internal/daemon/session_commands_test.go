@@ -1356,8 +1356,8 @@ func TestHandleSessionStopDirectCanceledContextDoesNotContinueAfterFreshnessFail
 		t.Fatalf("expected tmux session %q to remain", sessionID)
 	}
 	snapshot := store.ReadSnapshot(projectID)
-	if got := snapshot.Sessions[sessionID].State; got != daemonstate.SessionStateAttached {
-		t.Fatalf("session state = %s, want %s", got, daemonstate.SessionStateAttached)
+	if got := snapshot.Sessions[sessionID].State; got != daemonstate.SessionStateStopped {
+		t.Fatalf("session state = %s, want %s", got, daemonstate.SessionStateStopped)
 	}
 
 	calls, projectIDs := recorder.snapshot()
@@ -1383,6 +1383,14 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvent(t *testing.T) {
 	t.Cleanup(func() {
 		_ = runtimeStateStore.Close()
 	})
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   issueID,
+		State:     daemonstate.SessionStateStopped,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed runtime session projection: %v", err)
+	}
 	daemon := &Daemon{
 		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
 		session:      daemonhandlers.NewSessionHandler(store),
@@ -1437,9 +1445,12 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvent(t *testing.T) {
 	if body.Runtime.Projection.IssueID != issueID || body.Runtime.Projection.Session.SessionID != sessionID {
 		t.Fatalf("runtime projection = %+v, want issue/session %s/%s", body.Runtime.Projection, issueID, sessionID)
 	}
+	if body.Runtime.Projection.Session.State != protocol.SessionLifecycleStateStopped {
+		t.Fatalf("runtime session state = %s, want observed %s", body.Runtime.Projection.Session.State, protocol.SessionLifecycleStateStopped)
+	}
 }
 
-func TestApplySessionLifecycleTransitionRefreshesDurableCacheBeforeTransition(t *testing.T) {
+func TestApplySessionLifecycleTransitionPreservesObservedRuntimeState(t *testing.T) {
 	const (
 		projectID = "proj-refresh-transition"
 		issueID   = "az-1"
@@ -1447,11 +1458,8 @@ func TestApplySessionLifecycleTransitionRefreshesDurableCacheBeforeTransition(t 
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
 
 	store := daemonstate.NewStore()
-	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateStarting); err != nil {
-		t.Fatalf("seed starting session: %v", err)
-	}
-	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
-		t.Fatalf("seed attached session: %v", err)
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateStopped); err != nil {
+		t.Fatalf("seed stopped session: %v", err)
 	}
 
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
@@ -1461,10 +1469,10 @@ func TestApplySessionLifecycleTransitionRefreshesDurableCacheBeforeTransition(t 
 	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
-		State:     daemonstate.SessionStateStopped,
+		State:     daemonstate.SessionStateAttached,
 		UpdatedAt: time.Now().UTC(),
 	}); err != nil {
-		t.Fatalf("seed durable stopped session: %v", err)
+		t.Fatalf("seed durable attached session: %v", err)
 	}
 
 	d := &Daemon{
@@ -1496,6 +1504,13 @@ func TestApplySessionLifecycleTransitionRefreshesDurableCacheBeforeTransition(t 
 	}
 	if got.State != daemonstate.SessionStateStarting {
 		t.Fatalf("session state = %s, want %s", got.State, daemonstate.SessionStateStarting)
+	}
+	runtimeRows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("load runtime rows: %v", err)
+	}
+	if len(runtimeRows) != 1 || runtimeRows[0].ObservedState != daemonstate.SessionStateAttached {
+		t.Fatalf("runtime rows = %+v, want observed attached state preserved", runtimeRows)
 	}
 }
 
@@ -2060,6 +2075,17 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvents(t *testing.T) 
 		t.Fatalf("apply start transition: %v", err)
 	}
 
+	startRows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("load runtime rows after start: %v", err)
+	}
+	if len(startRows) != 1 {
+		t.Fatalf("runtime rows after start = %+v, want 1 row", startRows)
+	}
+	if startRows[0].State != daemonstate.SessionStateStarting || startRows[0].ObservedState != daemonstate.SessionStateStarting {
+		t.Fatalf("runtime rows after start = %+v, want desired and observed starting", startRows)
+	}
+
 	stopReq := startReq
 	stopReq.RequestID = "req-session.stop"
 	stopReq.Command = daemonhandlers.CommandSessionStop
@@ -2110,7 +2136,14 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvents(t *testing.T) 
 		if body.Runtime.Projection.IssueID != issueID || body.Runtime.Projection.Session.SessionID != sessionID {
 			t.Fatalf("body runtime projection = %+v, want issue/session %s/%s", body.Runtime.Projection, issueID, sessionID)
 		}
+	if body.Runtime.Projection.Session.State != protocol.SessionLifecycleStateStarting {
+		runtimeRows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
+		if err != nil {
+			t.Fatalf("body runtime session state = %s, want observed %s (load runtime rows failed: %v)", body.Runtime.Projection.Session.State, protocol.SessionLifecycleStateStarting, err)
+		}
+		t.Fatalf("body runtime session state = %s, want observed %s (runtime rows = %+v)", body.Runtime.Projection.Session.State, protocol.SessionLifecycleStateStarting, runtimeRows)
 	}
+}
 }
 
 func TestEnrichTasksWithSessionStateSeedsStartedAtFromSnapshot(t *testing.T) {

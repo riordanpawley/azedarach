@@ -97,6 +97,15 @@ func (s *Store) CurrentRevision(projectID string) uint64 {
 
 // UpsertSession creates or updates session state and increments revision.
 func (s *Store) UpsertSession(projectID, sessionID, issueID string, state SessionState) (SessionEvent, error) {
+	return s.upsertSession(projectID, sessionID, issueID, state, true)
+}
+
+// ForceUpsertSession creates or updates session state without enforcing lifecycle transition validity.
+func (s *Store) ForceUpsertSession(projectID, sessionID, issueID string, state SessionState) (SessionEvent, error) {
+	return s.upsertSession(projectID, sessionID, issueID, state, false)
+}
+
+func (s *Store) upsertSession(projectID, sessionID, issueID string, state SessionState, validate bool) (SessionEvent, error) {
 	if sessionID == "" {
 		return SessionEvent{}, fmt.Errorf("%w: missing session id", ErrInvalidTransition)
 	}
@@ -105,7 +114,7 @@ func (s *Store) UpsertSession(projectID, sessionID, issueID string, state Sessio
 
 	ps := s.ensureProjectLocked(projectID)
 	existing, ok := ps.sessions[sessionID]
-	if ok {
+	if validate && ok {
 		if !isValidTransition(existing.State, state) {
 			return SessionEvent{}, fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, existing.State, state)
 		}

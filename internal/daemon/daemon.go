@@ -602,46 +602,59 @@ func (d *Daemon) applySessionLifecycleTransition(
 	issueID string,
 	command string,
 ) error {
-	if d.session == nil {
-		return errors.New("session handler unavailable")
-	}
-	if err := d.refreshSessionInvariantCacheIfConfigured(ctx, projectID); err != nil {
-		return fmt.Errorf("refresh session transition cache: %w", err)
+	if d.sessionStore == nil {
+		return errors.New("session store unavailable")
 	}
 
-	body, err := json.Marshal(struct {
-		ProjectID string `json:"project_id"`
-		SessionID string `json:"session_id"`
-		IssueID   string `json:"issue_id"`
-	}{
-		ProjectID: projectID,
-		SessionID: sessionID,
-		IssueID:   issueID,
-	})
+	state, ok := lifecycleCommandState(command)
+	if !ok {
+		return fmt.Errorf("unsupported session command: %s", command)
+	}
+
+	_, err := d.sessionStore.ForceUpsertSession(projectID, sessionID, issueID, state)
 	if err != nil {
 		return err
 	}
 
-	sessionReq := req
-	sessionReq.Command = command
-	sessionReq.Body = body
+	session, err := d.sessionStore.Session(projectID, sessionID)
+	if err != nil {
+		return err
+	}
+	if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil && strings.TrimSpace(issueID) != "" {
+		if observed, found, loadErr := runtimeStore.GetSessionStateByIssueID(ctx, projectID, issueID); loadErr == nil && found {
+			if strings.TrimSpace(string(observed.ObservedState)) != "" {
+				session.ObservedState = observed.ObservedState
+			}
+			if observed.StartedAt != nil && !observed.StartedAt.IsZero() {
+				started := observed.StartedAt.UTC()
+				session.StartedAt = &started
+			}
+			if observed.UpdatedAt.After(session.UpdatedAt) {
+				session.UpdatedAt = observed.UpdatedAt
+			}
+		} else if loadErr != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("load runtime session projection for transition failed", "project_id", projectID, "issue_id", issueID, "error", loadErr)
+		}
+	}
+	d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, req.Meta, session)
+	return nil
+}
 
-	resp := d.session.Handle(ctx, sessionReq)
-	if resp.OK {
-		if d.sessionStore == nil {
-			return errors.New("session store unavailable")
-		}
-		session, err := d.sessionStore.Session(projectID, sessionID)
-		if err != nil {
-			return err
-		}
-		d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, req.Meta, session)
-		return nil
+func lifecycleCommandState(command string) (daemonstate.SessionState, bool) {
+	switch command {
+	case daemonhandlers.CommandSessionStart:
+		return daemonstate.SessionStateStarting, true
+	case daemonhandlers.CommandSessionAttach:
+		return daemonstate.SessionStateAttached, true
+	case daemonhandlers.CommandSessionPause:
+		return daemonstate.SessionStatePaused, true
+	case daemonhandlers.CommandSessionResume:
+		return daemonstate.SessionStateAttached, true
+	case daemonhandlers.CommandSessionStop:
+		return daemonstate.SessionStateStopped, true
+	default:
+		return "", false
 	}
-	if resp.Error != nil {
-		return errors.New(resp.Error.Message)
-	}
-	return errors.New("session lifecycle transition failed")
 }
 
 func (d *Daemon) sessionRuntimeStateStore(projectID ...string) *daemonstate.RuntimeStateStore {
@@ -930,6 +943,12 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 		return
 	}
 	runtime := d.runtimeProjectionForEvent(ctx, projectID, session.IssueID, "", nil)
+	if strings.TrimSpace(session.ID) != "" {
+		sessionRuntime := buildRuntimeProjection(projectID, &session, nil)
+		runtime.IssueID = sessionRuntime.IssueID
+		runtime.Session = sessionRuntime.Session
+		runtime.Agent = sessionRuntime.Agent
+	}
 	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
 	body, err := json.Marshal(protocol.SessionProjectionEventBody{
 		ProjectID: projectID,
@@ -1034,14 +1053,19 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 
 	var session *daemonstate.Session
 	if issueID != "" {
-		if err := d.refreshSessionInvariantCache(ctx, projectID); err != nil {
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Debug("refresh session invariant cache failed", "project_id", projectID, "issue_id", issueID, "error", err)
+		if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil {
+			if loaded, found, err := runtimeStore.GetSessionStateByIssueID(ctx, projectID, issueID); err == nil && found {
+				copy := loaded
+				session = &copy
+			} else if err != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Debug("load runtime session projection failed", "project_id", projectID, "issue_id", issueID, "error", err)
 			}
 		}
-		if loaded, ok := d.sessionStore.SessionByIssueID(projectID, issueID); ok {
-			copy := loaded
-			session = &copy
+		if session == nil && d.sessionStore != nil {
+			if loaded, ok := d.sessionStore.SessionByIssueID(projectID, issueID); ok {
+				copy := loaded
+				session = &copy
+			}
 		}
 	}
 

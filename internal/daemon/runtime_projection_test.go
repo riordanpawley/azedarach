@@ -75,6 +75,24 @@ func TestBuildRuntimeProjectionPopulatesSessionAndWorktreeSignals(t *testing.T) 
 	}
 }
 
+func TestBuildRuntimeProjectionUsesObservedSessionStateWhenPresent(t *testing.T) {
+	updatedAt := time.Date(2026, time.April, 1, 11, 0, 0, 0, time.UTC)
+	projection := buildRuntimeProjection("proj-runtime", &daemonstate.Session{
+		ID:            "sess-7",
+		IssueID:       "az-7",
+		State:         daemonstate.SessionStateStarting,
+		ObservedState: daemonstate.SessionStateAttached,
+		UpdatedAt:     updatedAt,
+	}, nil)
+
+	if projection.Session.State != "attached" {
+		t.Fatalf("session state = %q, want attached observed state", projection.Session.State)
+	}
+	if projection.Agent.Status != "attached" {
+		t.Fatalf("agent status = %q, want attached observed state", projection.Agent.Status)
+	}
+}
+
 func TestBuildRuntimeProjectionZeroValueBehavior(t *testing.T) {
 	projection := buildRuntimeProjection("", nil, nil)
 
