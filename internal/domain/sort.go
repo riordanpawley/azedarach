@@ -9,6 +9,7 @@ const (
 	SortBySession  SortField = "session"
 	SortByPriority SortField = "priority"
 	SortByUpdated  SortField = "updated"
+	SortByGitDiff  SortField = "git_diff"
 )
 
 // SortOrder represents sort direction
@@ -81,6 +82,41 @@ func (s *Sort) Apply(tasks []Task) []Task {
 			}
 			return pi < pj // Lower priority first in descending
 		})
+
+	case SortByGitDiff:
+		sort.SliceStable(result, func(i, j int) bool {
+			di := gitDiffTotal(result[i])
+			dj := gitDiffTotal(result[j])
+			if di != dj {
+				if s.Order == SortAsc {
+					return di > dj // Higher diff first in ascending
+				}
+				return di < dj // Lower diff first in descending
+			}
+
+			ai := gitDiffSessionActivityPriority(result[i])
+			aj := gitDiffSessionActivityPriority(result[j])
+			if ai != aj {
+				if s.Order == SortAsc {
+					return ai > aj // Active sessions first
+				}
+				return ai < aj
+			}
+
+			wi := gitDiffWorktreePriority(result[i])
+			wj := gitDiffWorktreePriority(result[j])
+			if wi != wj {
+				if s.Order == SortAsc {
+					return wi > wj // Worktree-backed tasks next
+				}
+				return wi < wj
+			}
+
+			if s.Order == SortAsc {
+				return result[i].UpdatedAt.After(result[j].UpdatedAt) // Newer first
+			}
+			return result[i].UpdatedAt.Before(result[j].UpdatedAt) // Older first
+		})
 	}
 
 	return result
@@ -99,6 +135,32 @@ func sessionPriority(t Task) int {
 		return sessionStatePriority(t.Session.State)
 	}
 	// Worktree-only should be above fully idle/no-session tasks.
+	if t.HasWorktree {
+		return 1
+	}
+	return 0
+}
+
+func gitDiffTotal(t Task) int {
+	return t.GitAdditions + t.GitDeletions
+}
+
+func gitDiffSessionActivityPriority(t Task) int {
+	if t.HasTmuxSession {
+		return 1
+	}
+	if t.Session == nil {
+		return 0
+	}
+	switch t.Session.State {
+	case SessionWaiting, SessionBusy, SessionPaused, SessionError:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func gitDiffWorktreePriority(t Task) int {
 	if t.HasWorktree {
 		return 1
 	}

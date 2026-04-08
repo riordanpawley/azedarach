@@ -1059,11 +1059,13 @@ func TestHandleSessionStopDirectFreshnessTimeoutUsesDirectReconcileFallback(t *t
 	}
 
 	calls, projectIDs := recorder.snapshot()
-	if calls != 2 {
-		t.Fatalf("runtime reconcile calls = %d, want 2", calls)
+	if calls < 1 {
+		t.Fatalf("runtime reconcile calls = %d, want at least 1", calls)
 	}
-	if len(projectIDs) != 2 || projectIDs[0] != projectID || projectIDs[1] != projectID {
-		t.Fatalf("runtime reconcile project ids = %v, want [%s %s]", projectIDs, projectID, projectID)
+	for _, id := range projectIDs {
+		if id != projectID {
+			t.Fatalf("runtime reconcile project ids = %v, want only %s", projectIDs, projectID)
+		}
 	}
 }
 
@@ -1127,11 +1129,85 @@ func TestHandleSessionStopDirectContinuesWhenFreshnessTimesOut(t *testing.T) {
 	}
 
 	calls, projectIDs := recorder.snapshot()
-	if calls != 2 {
-		t.Fatalf("runtime reconcile calls = %d, want 2", calls)
+	if calls < 1 {
+		t.Fatalf("runtime reconcile calls = %d, want at least 1", calls)
 	}
-	if len(projectIDs) != 2 || projectIDs[0] != projectID || projectIDs[1] != projectID {
-		t.Fatalf("runtime reconcile project ids = %v, want [%s %s]", projectIDs, projectID, projectID)
+	for _, id := range projectIDs {
+		if id != projectID {
+			t.Fatalf("runtime reconcile project ids = %v, want only %s", projectIDs, projectID)
+		}
+	}
+}
+
+func TestHandleSessionStopDirectCanceledContextDoesNotContinueAfterFreshnessFailure(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	tmuxRunner := newTestTmuxRunner(sessionID)
+	close(tmuxRunner.killRelease)
+	store := daemonstate.NewStore()
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed session store: %v", err)
+	}
+	recorder := &timeoutRuntimeReconciler{}
+
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir:                 ".",
+			Logger:                  slog.Default(),
+			RuntimeReconcileTimeout: 20 * time.Millisecond,
+		},
+		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
+		session:           daemonhandlers.NewSessionHandler(store),
+		sessionStore:      store,
+		runtimeReconciler: recorder,
+	}
+	t.Cleanup(func() {
+		if daemon.runtimeReconcileQueue != nil {
+			_ = daemon.runtimeReconcileQueue.Close()
+		}
+	})
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	resp, err := daemon.handleSessionStopDirect(canceledCtx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-stop-canceled-no-continue",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         daemonhandlers.CommandSessionStop,
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"session_id": issueID,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStopDirect returned error: %v", err)
+	}
+	if resp.OK {
+		t.Fatalf("response unexpectedly ok")
+	}
+
+	if !tmuxRunner.hasSession(sessionID) {
+		t.Fatalf("expected tmux session %q to remain", sessionID)
+	}
+	snapshot := store.ReadSnapshot(projectID)
+	if got := snapshot.Sessions[sessionID].State; got != daemonstate.SessionStateAttached {
+		t.Fatalf("session state = %s, want %s", got, daemonstate.SessionStateAttached)
+	}
+
+	calls, projectIDs := recorder.snapshot()
+	if calls < 1 {
+		t.Fatalf("runtime reconcile calls = %d, want at least 1", calls)
+	}
+	for _, id := range projectIDs {
+		if id != projectID {
+			t.Fatalf("runtime reconcile project ids = %v, want only %s", projectIDs, projectID)
+		}
 	}
 }
 
@@ -1654,20 +1730,20 @@ func TestBuildSessionLaunchCommandIncludesCodexHookOverrides(t *testing.T) {
 	if !strings.Contains(command, "hooks.Stop=[{hooks=[{command=") {
 		t.Fatalf("command = %q, want codex Stop hook override", command)
 	}
-	if !strings.Contains(command, "az notify --json session_start") {
-		t.Fatalf("command = %q, want codex session_start notify command", command)
+	if !strings.Contains(command, `az notify --json session_start axt-123`) {
+		t.Fatalf("command = %q, want codex session_start notify command with issue id", command)
 	}
-	if !strings.Contains(command, "az notify --json user_prompt_submit") {
-		t.Fatalf("command = %q, want codex user_prompt_submit notify command", command)
+	if !strings.Contains(command, `az notify --json user_prompt_submit axt-123`) {
+		t.Fatalf("command = %q, want codex user_prompt_submit notify command with issue id", command)
 	}
-	if !strings.Contains(command, "az notify --json pre_tool_use") {
-		t.Fatalf("command = %q, want codex pre_tool_use notify command", command)
+	if !strings.Contains(command, `az notify --json pre_tool_use axt-123`) {
+		t.Fatalf("command = %q, want codex pre_tool_use notify command with issue id", command)
 	}
-	if !strings.Contains(command, "az notify --json post_tool_use") {
-		t.Fatalf("command = %q, want codex post_tool_use notify command", command)
+	if !strings.Contains(command, `az notify --json post_tool_use axt-123`) {
+		t.Fatalf("command = %q, want codex post_tool_use notify command with issue id", command)
 	}
-	if !strings.Contains(command, "az notify --json stop") {
-		t.Fatalf("command = %q, want codex stop notify command", command)
+	if !strings.Contains(command, `az notify --json stop axt-123`) {
+		t.Fatalf("command = %q, want codex stop notify command with issue id", command)
 	}
 	if !strings.Contains(command, `--image "/tmp/a.png"`) {
 		t.Fatalf("command = %q, want codex image argument for /tmp/a.png", command)

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -141,14 +142,54 @@ func (m Model) attachSessionCmd(issueID string) tea.Cmd {
 func (m Model) resolveConflictWithAICmd(issueID string) tea.Cmd {
 	return func() tea.Msg {
 		msg := m.attachSessionCmd(issueID)()
-		if errMsg, ok := msg.(sessionErrorMsg); ok {
-			return conflictResolveFallbackMsg{
-				issueID: issueID,
-				err:     errMsg.err,
-			}
+		errMsg, ok := msg.(sessionErrorMsg)
+		if !ok {
+			return msg
 		}
-		return msg
+
+		if isSessionNotFoundError(errMsg.err) {
+			startMsg := m.startSessionCmd(issueID, m.resolveBaseBranch(), false, true)()
+			if startErr, ok := startMsg.(sessionErrorMsg); ok {
+				return conflictResolveFallbackMsg{
+					issueID: issueID,
+					err:     fmt.Errorf("start AI session: %w", startErr.err),
+				}
+			}
+
+			if started, ok := startMsg.(sessionStartedMsg); ok {
+				if started.operationID != "" && !operationStateTerminal(started.state) {
+					return started
+				}
+				reattachMsg := m.attachSessionCmd(issueID)()
+				if reattachErr, ok := reattachMsg.(sessionErrorMsg); ok {
+					return conflictResolveFallbackMsg{
+						issueID: issueID,
+						err:     fmt.Errorf("attach started AI session: %w", reattachErr.err),
+					}
+				}
+				return reattachMsg
+			}
+			return startMsg
+		}
+
+		return conflictResolveFallbackMsg{
+			issueID: issueID,
+			err:     errMsg.err,
+		}
 	}
+}
+
+func isSessionNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var cmdErr *daemonclient.CommandError
+	if errors.As(err, &cmdErr) && cmdErr.Code == protocol.ErrorCodeInvalidRequest {
+		message := strings.ToLower(strings.TrimSpace(cmdErr.Message))
+		return strings.Contains(message, "session not found")
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "session not found")
 }
 
 // createPRCmd generates the gh pr create command

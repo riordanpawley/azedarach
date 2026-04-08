@@ -2724,12 +2724,12 @@ func (m Model) filterSummary() string {
 func (m Model) sortSummary() string {
 	sortState := m.editor.GetSort()
 	if sortState == nil {
-		return "S:session/asc"
+		return "S:git_diff/asc"
 	}
 
 	field := strings.TrimSpace(string(sortState.Field))
 	if field == "" {
-		field = string(domain.SortBySession)
+		field = string(domain.SortByGitDiff)
 	}
 	order := "asc"
 	if sortState.Order == domain.SortDesc {

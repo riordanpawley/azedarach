@@ -437,6 +437,75 @@ func TestGitHooksNotifyCommandAutostartsDaemonOnTransientGitStatusError(t *testi
 	}
 }
 
+func TestGitHooksNotifyCommandRetriesTransientGitStatusErrorsAcrossAttempts(t *testing.T) {
+	baseDir := t.TempDir()
+	if err := runGitCommandIsolated(baseDir, "init"); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "README.md"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write seed file: %v", err)
+	}
+	if err := runGitCommandIsolated(baseDir, "add", "README.md"); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	if err := runGitCommandIsolated(baseDir, "-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", "seed"); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+
+	worktreeDir := filepath.Join(t.TempDir(), "wt")
+	if err := runGitCommandIsolated(baseDir, "worktree", "add", worktreeDir, "-b", "hook-test-retry"); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(worktreeDir); err != nil {
+		t.Fatalf("chdir worktree: %v", err)
+	}
+	defer func() {
+		if chdirErr := os.Chdir(wd); chdirErr != nil {
+			t.Fatalf("restore cwd: %v", chdirErr)
+		}
+	}()
+
+	oldLauncher := newLauncher
+	t.Cleanup(func() { newLauncher = oldLauncher })
+
+	started := false
+	newLauncher = func(_, _ string) daemonStarter {
+		return &timeoutBudgetLauncher{minBudget: 1 * time.Second, started: &started}
+	}
+
+	attempts := 0
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandGitStatus {
+				return responseWithJSON(req, map[string]any{}), nil
+			}
+			attempts++
+			if attempts <= 2 {
+				return protocol.ResponseEnvelope{}, errors.New("dial unix /tmp/azedarach.sock: connect: connection refused")
+			}
+			return responseWithJSON(req, map[string]any{"status": map[string]any{}}), nil
+		},
+	}
+	deps := &Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
+		RepoDir:      baseDir,
+	}
+
+	if err := GitHooksNotifyCommand(deps, GitHooksNotifyOptions{Hook: "post-commit"}); err != nil {
+		t.Fatalf("GitHooksNotifyCommand error: %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("git status attempts = %d, want 3", attempts)
+	}
+}
+
 func runGitCommandIsolated(repoDir string, args ...string) error {
 	cmd := exec.Command("git", append([]string{"-C", repoDir}, args...)...)
 	env := os.Environ()
@@ -507,6 +576,47 @@ func TestNotifyCommandUpdatesDaemonSessionStateForIdlePrompt(t *testing.T) {
 
 	if gotReq.Command != daemonclient.CommandSessionPause {
 		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandSessionPause)
+	}
+	if strings.TrimSpace(output) != "{}" {
+		t.Fatalf("notify json output = %q, want {}", output)
+	}
+}
+
+func TestNotifyCommandStopTriggersPauseAndRuntimeReconcile(t *testing.T) {
+	opts, err := ParseNotifyArgs([]string{"--json", "stop", "az-123"})
+	if err != nil {
+		t.Fatalf("ParseNotifyArgs error: %v", err)
+	}
+
+	requests := make([]protocol.RequestEnvelope, 0, 2)
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			requests = append(requests, req)
+			if req.Command == daemonclient.CommandRuntimeReconcile {
+				return responseWithJSON(req, protocol.RuntimeReconcileResponseBody{
+					ProjectID: "proj-1",
+				}), nil
+			}
+			return responseWithOutput(req, "ok"), nil
+		},
+	}
+
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
+	}
+	output := captureStdout(t, func() error {
+		return NotifyCommand(deps, opts)
+	})
+
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d, want 2", len(requests))
+	}
+	if requests[0].Command != daemonclient.CommandSessionPause {
+		t.Fatalf("first command = %q, want %q", requests[0].Command, daemonclient.CommandSessionPause)
+	}
+	if requests[1].Command != daemonclient.CommandRuntimeReconcile {
+		t.Fatalf("second command = %q, want %q", requests[1].Command, daemonclient.CommandRuntimeReconcile)
 	}
 	if strings.TrimSpace(output) != "{}" {
 		t.Fatalf("notify json output = %q, want {}", output)
