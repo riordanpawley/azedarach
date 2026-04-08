@@ -755,7 +755,7 @@ func TestRuntimeReconcileKnownProjectIDsIncludesAllKnownSources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runtimeReconcileKnownProjectIDs: %v", err)
 	}
-	want := []string{repoProjectID, "proj-projection", "proj-revision", "proj-session"}
+	want := []string{repoProjectID}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("project ids = %v, want %v", got, want)
 	}
@@ -798,26 +798,11 @@ func TestRuntimeReconcileKnownProjectIDsScopedModePrioritizesRepoProject(t *test
 	if err != nil {
 		t.Fatalf("runtimeReconcileKnownProjectIDs: %v", err)
 	}
-	if len(got) != 4 {
-		t.Fatalf("project ids len = %d, want 4 (%v)", len(got), got)
+	if len(got) != 1 {
+		t.Fatalf("project ids len = %d, want 1 (%v)", len(got), got)
 	}
 	if got[0] != repoProjectID {
 		t.Fatalf("first project id = %q, want repo-scoped %q", got[0], repoProjectID)
-	}
-	wantSet := map[string]struct{}{
-		repoProjectID: {},
-		"proj-alpha":  {},
-		"proj-beta":   {},
-		"proj-zeta":   {},
-	}
-	for _, projectID := range got {
-		if _, ok := wantSet[projectID]; !ok {
-			t.Fatalf("unexpected project id %q in %v", projectID, got)
-		}
-		delete(wantSet, projectID)
-	}
-	if len(wantSet) != 0 {
-		t.Fatalf("missing project ids: %v (got %v)", wantSet, got)
 	}
 }
 
@@ -854,14 +839,11 @@ func TestRuntimeReconcileKnownProjectIDsCanonicalizesRepoAliases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runtimeReconcileKnownProjectIDs: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("project ids len = %d, want 2 (%v)", len(got), got)
+	if len(got) != 1 {
+		t.Fatalf("project ids len = %d, want 1 (%v)", len(got), got)
 	}
 	if got[0] != repoProjectID {
 		t.Fatalf("first project id = %q, want repo-scoped id %q", got[0], repoProjectID)
-	}
-	if got[1] != "proj-zeta" {
-		t.Fatalf("second project id = %q, want %q", got[1], "proj-zeta")
 	}
 }
 

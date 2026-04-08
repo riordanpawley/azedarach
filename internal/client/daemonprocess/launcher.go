@@ -179,13 +179,17 @@ func (l *Launcher) resolveBinary() string {
 		return env
 	}
 	candidates := []string{
+	}
+	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
+		// Prefer the caller's worktree-local build when present so daemon behavior
+		// matches the code under test/development.
+		candidates = append(candidates, filepath.Join(cwd, "bin", "azd"))
+	}
+	candidates = append(candidates,
 		filepath.Join(l.RepoDir, "bin", "azd"),
 		// Support monorepo root launcher repo dir with go-bubbletea-local binaries.
 		filepath.Join(l.RepoDir, "go-bubbletea", "bin", "azd"),
-	}
-	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
-		candidates = append(candidates, filepath.Join(cwd, "bin", "azd"))
-	}
+	)
 	for _, candidate := range candidates {
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate

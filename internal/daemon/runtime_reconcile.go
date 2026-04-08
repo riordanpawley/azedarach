@@ -473,6 +473,12 @@ func (d *Daemon) runtimeReconcileKnownProjectIDs(ctx context.Context) ([]string,
 	projectIDs := make([]string, 0, 8)
 	add := func(projectID string) {
 		normalized := d.canonicalProjectID(projectID)
+		if normalized == "" {
+			return
+		}
+		if strings.TrimSpace(d.cfg.RepoDir) != "" && strings.TrimSpace(d.resolveRepoDirForProjectExact(normalized)) == "" {
+			return
+		}
 		if _, exists := seen[normalized]; exists {
 			return
 		}

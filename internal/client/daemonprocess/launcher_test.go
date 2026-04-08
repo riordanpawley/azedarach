@@ -149,6 +149,36 @@ func TestLauncherResolveBinary_UsesWorkingDirBinFallback(t *testing.T) {
 	}
 }
 
+func TestLauncherResolveBinary_PrefersWorkingDirBinOverRepoBin(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	repoBinDir := filepath.Join(repoDir, "bin")
+	if err := os.MkdirAll(repoBinDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo bin): %v", err)
+	}
+	repoAzd := filepath.Join(repoBinDir, "azd")
+	if err := os.WriteFile(repoAzd, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(repo azd): %v", err)
+	}
+
+	cwdBinDir := filepath.Join(cwd, "bin")
+	if err := os.MkdirAll(cwdBinDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(cwd bin): %v", err)
+	}
+	cwdAzd := filepath.Join(cwdBinDir, "azd")
+	if err := os.WriteFile(cwdAzd, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(cwd azd): %v", err)
+	}
+
+	launcher := NewLauncher(repoDir, socketPath)
+	if got := launcher.resolveBinary(); got != cwdAzd {
+		t.Fatalf("resolveBinary() = %q, want %q", got, cwdAzd)
+	}
+}
+
 func TestLauncherStart_SkipsSpawnWhenLockOwnerAlive(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
