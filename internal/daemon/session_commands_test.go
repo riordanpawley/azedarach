@@ -1094,6 +1094,81 @@ func TestHandleSessionStopDirectWritesStoppedProjectionBeforeKillCompletes(t *te
 
 }
 
+func TestHandleSessionStopDirectFailsWhenStopIntentProjectionWriteFails(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+
+	store := daemonstate.NewStore()
+	badStorePath := filepath.Join(t.TempDir(), "runtime-store-dir")
+	if err := os.MkdirAll(badStorePath, 0o755); err != nil {
+		t.Fatalf("create bad runtime store path: %v", err)
+	}
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(badStorePath, slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	tmuxRunner := newTestTmuxRunner(sessionID)
+	close(tmuxRunner.killRelease)
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed cache session: %v", err)
+	}
+
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-stop-intent-write-fail",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.stop",
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"session_id": issueID,
+		}),
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+	}
+
+	resp, err := daemon.handleSessionStopDirect(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleSessionStopDirect returned error: %v", err)
+	}
+	if resp.OK {
+		t.Fatalf("expected stop response to fail when stop intent write fails: %+v", resp)
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInternal {
+		t.Fatalf("stop error = %+v, want internal error", resp.Error)
+	}
+	if !strings.Contains(strings.ToLower(resp.Error.Message), "record session stop intent") {
+		t.Fatalf("stop error message = %q, want record session stop intent", resp.Error.Message)
+	}
+
+	snapshot := store.ReadSnapshot(projectID)
+	if got := snapshot.Sessions[sessionID].State; got != daemonstate.SessionStateAttached {
+		t.Fatalf("cached session state = %s, want %s when stop intent write fails", got, daemonstate.SessionStateAttached)
+	}
+	tmuxRunner.mu.Lock()
+	_, sessionStillRunning := tmuxRunner.sessions[sessionID]
+	tmuxRunner.mu.Unlock()
+	if !sessionStillRunning {
+		t.Fatalf("expected tmux session %q to remain running when stop intent write fails", sessionID)
+	}
+}
+
 func TestListTmuxSessionsCacheFirstSkipsStopPendingCachedSession(t *testing.T) {
 	const (
 		projectID = "proj"

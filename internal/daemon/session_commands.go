@@ -709,7 +709,9 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 	// work is still in flight.
 	clearStopPending := d.markSessionStopPending(cmd.ProjectID, cmd.IssueID)
 	defer clearStopPending()
-	d.writeSessionStopProjection(cmd.ProjectID, cmd.SessionID, cmd.IssueID)
+	if err := d.writeSessionStopProjection(cmd.ProjectID, cmd.SessionID, cmd.IssueID); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session stop intent: %v", err)), nil
+	}
 	if err := d.applySessionLifecycleTransition(
 		ctx,
 		req,
@@ -811,16 +813,16 @@ func isRuntimeMutationFreshnessTimeout(err error) bool {
 		strings.Contains(message, "deadline exceeded")
 }
 
-func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string) {
+func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string) error {
 	if d.sessionRuntimeStateStoreIfConfigured(projectID) == nil {
-		return
+		return nil
 	}
 
 	projectID = protocol.NormalizeProjectID(projectID)
 	sessionID = strings.TrimSpace(sessionID)
 	issueID = strings.TrimSpace(issueID)
 	if sessionID == "" {
-		return
+		return errors.New("missing session_id for stop projection")
 	}
 	if issueID == "" {
 		if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(sessionID, d.sessionNamingScope(projectID)); ok {
@@ -839,14 +841,18 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 		State:     daemonstate.SessionStateStopped,
 		UpdatedAt: time.Now().UTC(),
 	}
-	if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, session); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("write-through stop session runtime state failed",
-			"project_id", projectID,
-			"session_id", sessionID,
-			"issue_id", issueID,
-			"error", err,
-		)
+	if err := d.sessionRuntimeStateStoreIfConfigured(projectID).UpsertSessionState(ctx, projectID, session); err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("write-through stop session runtime state failed",
+				"project_id", projectID,
+				"session_id", sessionID,
+				"issue_id", issueID,
+				"error", err,
+			)
+		}
+		return err
 	}
+	return nil
 }
 
 func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
