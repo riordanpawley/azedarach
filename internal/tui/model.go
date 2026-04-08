@@ -1494,14 +1494,31 @@ func (m Model) reduceDaemonEvent(evt protocol.EventEnvelope) daemonEventDecision
 
 func (m Model) daemonProjectID() string {
 	if m.currentProject != "" {
+		if m.projectRegistry != nil {
+			if project, err := m.projectRegistry.Get(m.currentProject); err == nil {
+				if projectID := daemonProjectIDForPath(project.Path); strings.TrimSpace(projectID) != "" {
+					return projectID
+				}
+			}
+		}
+		if projectPath := strings.TrimSpace(m.activeProjectPath()); projectPath != "" {
+			if strings.EqualFold(filepath.Base(projectPath), strings.TrimSpace(m.currentProject)) {
+				if projectID := daemonProjectIDForPath(projectPath); strings.TrimSpace(projectID) != "" {
+					return projectID
+				}
+			}
+		}
 		return m.currentProject
 	}
-	if m.projectRegistry != nil {
-		if project := m.projectRegistry.GetDefault(); project != nil && project.Name != "" {
-			return project.Name
+	if projectPath := strings.TrimSpace(m.activeProjectPath()); projectPath != "" {
+		if projectID := daemonProjectIDForPath(projectPath); strings.TrimSpace(projectID) != "" {
+			return projectID
 		}
 	}
 	if cwd, err := os.Getwd(); err == nil {
+		if projectID := daemonProjectIDForPath(cwd); strings.TrimSpace(projectID) != "" {
+			return projectID
+		}
 		return filepath.Base(cwd)
 	}
 	return "default"

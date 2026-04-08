@@ -46,7 +46,7 @@ func (m Model) View() string {
 
 	sb := statusbar.New(m.statusBarMode(), m.width, m.styles)
 	sb.SetEventTicker(m.eventTicker)
-	sb.SetCurrentProject(m.daemonProjectID())
+	sb.SetCurrentProject(m.currentProject)
 	sb.SetSelectionSummary(m.selectionSummary())
 	sb.SetFilterSummary(m.filterSummary())
 	sb.SetSortSummary(m.sortSummary())
