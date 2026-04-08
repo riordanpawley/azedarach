@@ -30,7 +30,7 @@ func (d *Daemon) issueClientForProject(projectID string) *issues.Client {
 	if d == nil {
 		return nil
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 
 	d.issueClientsMu.Lock()
 	defer d.issueClientsMu.Unlock()

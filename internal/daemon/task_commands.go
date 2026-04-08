@@ -102,7 +102,7 @@ const taskListSnapshotStaleAfter = 15 * time.Second
 
 func (d *Daemon) taskListSnapshotFreshness(ctx context.Context, projectID string) (time.Time, protocol.TaskListFreshness) {
 	lastCheckedAt := time.Time{}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 
 	sessionFreshnessSource := d.sourceForTaskInvariant(taskInvariantTaskListFreshness)
 	if usesProjectionSource(sessionFreshnessSource) && d.sessionStore != nil {
@@ -163,7 +163,7 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 	if d == nil || d.worktreeRuntimeStateStore(projectID) == nil {
 		return 0, nil
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	baseBranch := d.baseBranchForProject(projectID)
 	manager := d.worktreeManagerForProject(projectID)
 	if manager == nil {

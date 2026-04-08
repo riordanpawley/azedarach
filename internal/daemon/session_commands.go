@@ -193,6 +193,7 @@ func sessionStopPendingKey(projectID, issueID string) string {
 }
 
 func (d *Daemon) markSessionStopPending(projectID, issueID string) func() {
+	projectID = d.canonicalProjectID(projectID)
 	key := sessionStopPendingKey(projectID, issueID)
 	if key == "" {
 		return func() {}
@@ -221,6 +222,7 @@ func (d *Daemon) markSessionStopPending(projectID, issueID string) func() {
 }
 
 func (d *Daemon) isSessionStopPending(projectID, issueID string) bool {
+	projectID = d.canonicalProjectID(projectID)
 	key := sessionStopPendingKey(projectID, issueID)
 	if key == "" {
 		return false
@@ -294,7 +296,7 @@ func (d *Daemon) sessionProjectionSnapshot(ctx context.Context, projectID string
 	if d == nil || d.sessionStore == nil {
 		return nil, nil
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	if err := d.refreshSessionInvariantCacheIfConfigured(ctx, projectID); err != nil {
 		return nil, err
 	}
@@ -311,7 +313,7 @@ func (d *Daemon) tmuxSessionNamesForIssue(ctx context.Context, projectID, issueI
 	if issueErr != nil {
 		return nil, nil
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	namingScope := d.sessionNamingScope(projectID)
 	canonicalSessionID = strings.TrimSpace(canonicalSessionID)
 	names := map[string]struct{}{}
@@ -818,7 +820,7 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 		return nil
 	}
 
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	sessionID = strings.TrimSpace(sessionID)
 	issueID = strings.TrimSpace(issueID)
 	if sessionID == "" {
@@ -1203,7 +1205,7 @@ func (d *Daemon) sessionSnapshotForReconcile(ctx context.Context, projectID stri
 	if d == nil {
 		return nil, nil
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	if d.sessionRuntimeStateStoreIfConfigured(projectID) == nil {
 		return []daemonstate.Session{}, nil
 	}
@@ -1333,7 +1335,7 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 }
 
 func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID string) ([]string, error) {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	if store == nil {
@@ -1376,7 +1378,7 @@ func (d *Daemon) activeSessionIDsFromProjection(projectID string, sessions []dae
 }
 
 func (d *Daemon) listProjectionSessionsOnly(ctx context.Context, projectID string) ([]string, error) {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	if store == nil {
 		return []string{}, nil
@@ -1403,7 +1405,7 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 	if d.sessionRuntimeStateStoreIfConfigured(projectID) == nil || d.sessionStore == nil {
 		return nil
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 
 	namingScope := d.sessionNamingScope(projectID)
 	existingSessions, err := d.sessionRuntimeStateStoreIfConfigured(projectID).ListSessionStates(ctx, projectID)

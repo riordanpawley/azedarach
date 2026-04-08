@@ -38,16 +38,18 @@ type operationRuntimeConfig struct {
 }
 
 type operationRuntime struct {
-	logger          *slog.Logger
-	hub             *publish.Hub
-	nextRevision    func(string) uint64
-	store           *opstore.SQLiteStore
-	manager         *opmanager.Manager
-	sessionStart    func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
-	sessionStop     func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
-	gitHandler      *daemonhandlers.GitHandler
-	worktreeHandler *daemonhandlers.WorktreeHandler
-	pollInterval    time.Duration
+	logger           *slog.Logger
+	hub              *publish.Hub
+	nextRevision     func(string) uint64
+	store            *opstore.SQLiteStore
+	manager          *opmanager.Manager
+	sessionStart     func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	sessionStop      func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	gitHandler       *daemonhandlers.GitHandler
+	worktreeHandler  *daemonhandlers.WorktreeHandler
+	pollInterval     time.Duration
+	repoNameProject  string
+	canonicalProject string
 }
 
 type operationCommandExecutor struct {
@@ -59,10 +61,11 @@ type sessionOperationExecutor struct {
 }
 
 type operationStoreAdapter struct {
-	repo         opstore.Repository
-	hub          *publish.Hub
-	nextRevision func(string) uint64
-	logger       *slog.Logger
+	repo                  opstore.Repository
+	hub                   *publish.Hub
+	nextRevision          func(string) uint64
+	logger                *slog.Logger
+	canonicalizeProjectID func(string) string
 }
 
 type operationResultEnvelope struct {
@@ -92,24 +95,48 @@ func newOperationRuntime(cfg operationRuntimeConfig) *operationRuntime {
 		}
 	}
 	store := opstore.New(repoDir, logger)
+	repoNameProjectID := protocol.NormalizeProjectID(filepath.Base(repoDir))
+	canonicalProjectID := repoNameProjectID
+	if projectID, err := appconfig.ProjectIDForRoot(repoDir); err == nil {
+		canonicalProjectID = protocol.NormalizeProjectID(projectID)
+	}
+	if canonicalProjectID == "" {
+		canonicalProjectID = protocol.DefaultProjectID
+	}
+	canonicalizeProjectID := func(projectID string) string {
+		normalized := protocol.NormalizeProjectID(projectID)
+		if normalized == canonicalProjectID {
+			return canonicalProjectID
+		}
+		if normalized == protocol.DefaultProjectID {
+			return canonicalProjectID
+		}
+		if repoNameProjectID != "" && normalized == repoNameProjectID {
+			return canonicalProjectID
+		}
+		return normalized
+	}
 	adapter := &operationStoreAdapter{
-		repo:         store,
-		hub:          cfg.hub,
-		nextRevision: cfg.nextRevision,
-		logger:       logger,
+		repo:                  store,
+		hub:                   cfg.hub,
+		nextRevision:          cfg.nextRevision,
+		logger:                logger,
+		canonicalizeProjectID: canonicalizeProjectID,
 	}
 	manager := opmanager.New(adapter, opmanager.Config{})
 	return &operationRuntime{
-		logger:          logger,
-		hub:             cfg.hub,
-		nextRevision:    cfg.nextRevision,
-		store:           store,
-		manager:         manager,
-		sessionStart:    cfg.sessionStart,
-		sessionStop:     cfg.sessionStop,
-		gitHandler:      cfg.gitHandler,
-		worktreeHandler: cfg.worktreeHandler,
-		pollInterval:    defaultOperationPollDelay,
+		logger:           logger,
+		hub:              cfg.hub,
+		nextRevision:     cfg.nextRevision,
+		store:            store,
+		manager:          manager,
+		sessionStart:     cfg.sessionStart,
+		sessionStop:      cfg.sessionStop,
+		gitHandler:       cfg.gitHandler,
+		worktreeHandler:  cfg.worktreeHandler,
+		pollInterval:     defaultOperationPollDelay,
+		repoNameProject:  repoNameProjectID,
+		canonicalProject: canonicalProjectID,
 	}
 }
 
@@ -226,7 +253,7 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return r.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err))
 	}
-	projectID := coalesceProjectID(body.ProjectID, req.Meta.ProjectID.String())
+	projectID := r.coalesceProjectID(body.ProjectID, req.Meta.ProjectID.String())
 	if r.logger != nil {
 		r.logger.Info("daemon operation submit requested",
 			"project_id", projectID,
@@ -234,7 +261,7 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 			"issue_id", strings.TrimSpace(body.IssueID),
 		)
 	}
-	submitReq, err := r.buildSubmitRequest(body.Kind, coalesceProjectID(body.ProjectID, req.Meta.ProjectID.String()), body.Payload, operationSubmitOverrides{
+	submitReq, err := r.buildSubmitRequest(body.Kind, r.coalesceProjectID(body.ProjectID, req.Meta.ProjectID.String()), body.Payload, operationSubmitOverrides{
 		IssueID:      body.IssueID,
 		DedupeKey:    body.DedupeKey,
 		ResourceKeys: body.ResourceKeys,
@@ -252,7 +279,7 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 			RequestID:       req.RequestID,
 			Kind:            protocol.EnvelopeKindCommand,
 			Meta: protocol.Metadata{
-				ProjectID: naming.ProjectID(coalesceProjectID(body.ProjectID, req.Meta.ProjectID.String())),
+				ProjectID: naming.ProjectID(r.coalesceProjectID(body.ProjectID, req.Meta.ProjectID.String())),
 			},
 			Command: body.Kind,
 			Body:    append([]byte(nil), body.Payload...),
@@ -330,7 +357,7 @@ func (r *operationRuntime) handleOperationList(ctx context.Context, req protocol
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return r.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err))
 	}
-	projectID := coalesceProjectID(body.ProjectID, req.Meta.ProjectID.String())
+	projectID := r.coalesceProjectID(body.ProjectID, req.Meta.ProjectID.String())
 	if r.logger != nil {
 		r.logger.Info("daemon operation list requested",
 			"project_id", projectID,
@@ -418,8 +445,8 @@ func (r *operationRuntime) buildSubmitRequest(kind, projectID string, payload []
 	if _, err := r.directRunnerForKind(kind); err != nil {
 		return daemonops.SubmitRequest{}, err
 	}
-	projectID = coalesceProjectID(projectID, "")
-	issueID, resourceKeys, dedupeKey, err := deriveOperationRouting(kind, projectID, payload)
+	projectID = r.coalesceProjectID(projectID, "")
+	issueID, resourceKeys, dedupeKey, err := r.deriveOperationRouting(kind, projectID, payload)
 	if err != nil {
 		return daemonops.SubmitRequest{}, err
 	}
@@ -448,8 +475,8 @@ func (r *operationRuntime) buildSubmitRequest(kind, projectID string, payload []
 	}, nil
 }
 
-func deriveOperationRouting(kind, projectID string, payload []byte) (issueID string, resourceKeys []string, dedupeKey string, err error) {
-	projectID = coalesceProjectID(projectID, "")
+func (r *operationRuntime) deriveOperationRouting(kind, projectID string, payload []byte) (issueID string, resourceKeys []string, dedupeKey string, err error) {
+	projectID = r.coalesceProjectID(projectID, "")
 	switch kind {
 	case "session.start", "session.stop":
 		var body struct {
@@ -459,7 +486,7 @@ func deriveOperationRouting(kind, projectID string, payload []byte) (issueID str
 		if err = json.Unmarshal(payload, &body); err != nil {
 			return "", nil, "", fmt.Errorf("decode %s payload: %w", kind, err)
 		}
-		projectID = coalesceProjectID(body.ProjectID, projectID)
+		projectID = r.coalesceProjectID(body.ProjectID, projectID)
 		parsedIssueID, parseErr := naming.ParseIssueID(strings.TrimSpace(body.SessionID))
 		if parseErr != nil {
 			return "", nil, "", errors.New("missing required fields: project_id/session_id")
@@ -528,7 +555,7 @@ func deriveOperationRouting(kind, projectID string, payload []byte) (issueID str
 		if err = json.Unmarshal(payload, &body); err != nil {
 			return "", nil, "", fmt.Errorf("decode %s payload: %w", kind, err)
 		}
-		projectID = coalesceProjectID(body.ProjectID, projectID)
+		projectID = r.coalesceProjectID(body.ProjectID, projectID)
 		parsedIssueID, parseErr := naming.ParseIssueID(strings.TrimSpace(body.IssueID))
 		if parseErr != nil {
 			return "", nil, "", errors.New("missing required fields: project_id/issue_id")
@@ -544,7 +571,7 @@ func deriveOperationRouting(kind, projectID string, payload []byte) (issueID str
 		if err = json.Unmarshal(payload, &body); err != nil {
 			return "", nil, "", fmt.Errorf("decode %s payload: %w", kind, err)
 		}
-		projectID = coalesceProjectID(body.ProjectID, projectID)
+		projectID = r.coalesceProjectID(body.ProjectID, projectID)
 		issueID = "__project__"
 		resourceKeys = []string{"project:" + projectID + ":worktree.cleanup"}
 		dedupeKey = kind + ":" + projectID
@@ -685,9 +712,13 @@ func (r *operationRuntime) toProtocolRecord(record daemonops.Record) protocol.Op
 }
 
 func (s *operationStoreAdapter) Create(ctx context.Context, record daemonops.Record) (daemonops.Record, error) {
+	projectID := coalesceProjectID(record.ProjectID, "")
+	if s.canonicalizeProjectID != nil {
+		projectID = s.canonicalizeProjectID(projectID)
+	}
 	created, err := s.repo.Create(ctx, opstore.CreateParams{
 		OperationID:  record.ID,
-		ProjectID:    coalesceProjectID(record.ProjectID, ""),
+		ProjectID:    projectID,
 		IssueID:      sanitizeOperationIssueID(record),
 		Kind:         record.Kind,
 		DedupeKey:    record.DedupeKey,
@@ -766,6 +797,9 @@ func (s *operationStoreAdapter) publish(record daemonops.Record) {
 		return
 	}
 	projectID := coalesceProjectID(record.ProjectID, "")
+	if s.canonicalizeProjectID != nil {
+		projectID = s.canonicalizeProjectID(projectID)
+	}
 	eventRevision := s.nextRevision(projectID)
 	s.hub.Publish(protocol.EventEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -1044,6 +1078,31 @@ func coalesceProjectID(values ...string) string {
 		}
 	}
 	return protocol.NormalizeProjectID("")
+}
+
+func (r *operationRuntime) coalesceProjectID(values ...string) string {
+	return r.canonicalizeProjectID(coalesceProjectID(values...))
+}
+
+func (r *operationRuntime) canonicalizeProjectID(projectID string) string {
+	normalized := protocol.NormalizeProjectID(projectID)
+	if r == nil {
+		return normalized
+	}
+	canonical := protocol.NormalizeProjectID(r.canonicalProject)
+	if canonical == "" {
+		return normalized
+	}
+	if normalized == canonical {
+		return canonical
+	}
+	if normalized == protocol.DefaultProjectID {
+		return canonical
+	}
+	if repoName := protocol.NormalizeProjectID(r.repoNameProject); repoName != "" && normalized == repoName {
+		return canonical
+	}
+	return normalized
 }
 
 func isOperationTerminal(state daemonops.State) bool {

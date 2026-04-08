@@ -107,9 +107,9 @@ func (d *Daemon) runtimeReconcileTimeout() time.Duration {
 func (d *Daemon) runtimeReconcileProjectID(req protocol.RequestEnvelope) string {
 	projectID := strings.TrimSpace(d.projectID(req.Meta))
 	if projectID == "" {
-		return protocol.DefaultProjectID
+		return d.canonicalProjectID(protocol.DefaultProjectID)
 	}
-	return projectID
+	return d.canonicalProjectID(projectID)
 }
 
 func (d *Daemon) ensureRuntimeReconciler() runtimeReconciler {
@@ -170,7 +170,7 @@ func (d *Daemon) ensureRuntimeReconcileQueue() *reconcileQueue[protocol.RuntimeR
 }
 
 func (d *Daemon) queueRuntimeReconcile(ctx context.Context, projectID string, priority reconcileQueuePriority, reason string) (reconcileQueueSubmission[protocol.RuntimeReconcileResponseBody], error) {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	return d.ensureRuntimeReconcileQueue().Enqueue(reconcileQueueRequest[protocol.RuntimeReconcileResponseBody]{
 		Key:         projectID,
 		Priority:    priority,
@@ -192,7 +192,7 @@ func (d *Daemon) ensureFreshRuntimeForMutation(ctx context.Context, projectID st
 	if d == nil {
 		return nil
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		reason = "mutation"
@@ -261,7 +261,7 @@ func (d *Daemon) handleRuntimeReconcile(ctx context.Context, req protocol.Reques
 	if projectID == "" {
 		projectID = d.runtimeReconcileProjectID(req)
 	} else {
-		projectID = protocol.NormalizeProjectID(projectID)
+		projectID = d.canonicalProjectID(projectID)
 	}
 
 	submission, err := d.queueRuntimeReconcile(ctx, projectID, reconcilePriorityManual, "manual")

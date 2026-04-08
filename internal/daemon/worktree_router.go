@@ -3,7 +3,6 @@ package daemon
 import (
 	"strings"
 
-	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
 
@@ -11,7 +10,7 @@ func (d *Daemon) worktreeManagerForProject(projectID string) *git.WorktreeManage
 	if d == nil {
 		return nil
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 
 	d.worktreeManagersMu.Lock()
 	defer d.worktreeManagersMu.Unlock()

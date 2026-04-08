@@ -228,23 +228,19 @@ func New(cfg Config) *Daemon {
 		sessionStateLastRefresh:       map[string]time.Time{},
 		revision:                      map[string]uint64{},
 	}
+	canonicalProjectID := protocol.DefaultProjectID
+	if hashProjectID, err := appconfig.ProjectIDForRoot(strings.TrimSpace(cfg.RepoDir)); err == nil {
+		canonicalProjectID = protocol.NormalizeProjectID(hashProjectID)
+	} else if repoName := protocol.NormalizeProjectID(filepath.Base(strings.TrimSpace(cfg.RepoDir))); repoName != "" {
+		canonicalProjectID = repoName
+	}
 	d.issueClientsByRoot[strings.TrimSpace(cfg.RepoDir)] = issuesClient
-	d.issueClientsByProject[protocol.DefaultProjectID] = issuesClient
+	d.issueClientsByProject[canonicalProjectID] = issuesClient
 	baseWorktreeManager := git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger)
 	d.worktreeManagersByRoot[strings.TrimSpace(cfg.RepoDir)] = baseWorktreeManager
-	d.worktreeManagersByProject[protocol.DefaultProjectID] = baseWorktreeManager
+	d.worktreeManagersByProject[canonicalProjectID] = baseWorktreeManager
 	d.runtimeStoresByRoot[strings.TrimSpace(cfg.RepoDir)] = runtimeStateStore
-	d.runtimeStoresByProject[protocol.DefaultProjectID] = runtimeStateStore
-	if repoName := protocol.NormalizeProjectID(filepath.Base(strings.TrimSpace(cfg.RepoDir))); repoName != "" {
-		d.issueClientsByProject[repoName] = issuesClient
-		d.worktreeManagersByProject[repoName] = baseWorktreeManager
-		d.runtimeStoresByProject[repoName] = runtimeStateStore
-	}
-	if hashProjectID, err := appconfig.ProjectIDForRoot(strings.TrimSpace(cfg.RepoDir)); err == nil {
-		d.issueClientsByProject[protocol.NormalizeProjectID(hashProjectID)] = issuesClient
-		d.worktreeManagersByProject[protocol.NormalizeProjectID(hashProjectID)] = baseWorktreeManager
-		d.runtimeStoresByProject[protocol.NormalizeProjectID(hashProjectID)] = runtimeStateStore
-	}
+	d.runtimeStoresByProject[canonicalProjectID] = runtimeStateStore
 	specService.daemon = d
 	specHandler := daemonhandlers.NewSpecHandler(specService)
 	d.syncBootstrapFn = d.defaultSyncBootstrap
@@ -412,7 +408,7 @@ func (d *Daemon) handshake(_ context.Context, hello protocol.Hello) (protocol.He
 }
 
 func (d *Daemon) subscribe(_ context.Context, projectID string, fromRevision uint64) (<-chan protocol.EventEnvelope, func(), error) {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	ch, cancel := d.hub.Subscribe(projectID, fromRevision)
 	return ch, cancel, nil
 }
@@ -707,7 +703,7 @@ func (d *Daemon) refreshSessionInvariantCache(ctx context.Context, projectID str
 	if d == nil || d.sessionStore == nil {
 		return nil
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	if store == nil {
 		d.sessionStore.ReplaceProjectSessions(projectID, nil)
@@ -722,7 +718,7 @@ func (d *Daemon) refreshSessionInvariantCache(ctx context.Context, projectID str
 }
 
 func (d *Daemon) refreshSessionInvariantCacheIfConfigured(ctx context.Context, projectID string) error {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	if d.sessionRuntimeStateStoreIfConfigured(projectID) == nil {
 		return nil
 	}
@@ -881,7 +877,7 @@ func (d *Daemon) errorResponse(req protocol.RequestEnvelope, code protocol.Error
 }
 
 func (d *Daemon) projectID(meta protocol.Metadata) string {
-	return protocol.NormalizeProjectID(meta.ProjectID.String())
+	return d.canonicalProjectID(meta.ProjectID.String())
 }
 
 func (d *Daemon) nextRevision(projectID string) uint64 {
@@ -917,28 +913,28 @@ func (d *Daemon) publishTaskEvent(req protocol.RequestEnvelope, eventName string
 }
 
 func (d *Daemon) publishSessionProjectionEvent(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session) uint64 {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	rev := d.nextRevision(projectID)
 	d.publishSessionProjectionEventAtRevision(ctx, projectID, meta, session, rev)
 	return rev
 }
 
 func (d *Daemon) publishWorktreeProjectionEvent(ctx context.Context, projectID, issueID, worktree string) uint64 {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	rev := d.nextRevision(projectID)
 	d.publishWorktreeProjectionEventAtRevision(ctx, projectID, issueID, worktree, rev)
 	return rev
 }
 
 func (d *Daemon) publishGitStatusProjectionEvent(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) uint64 {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	rev := d.nextRevision(projectID)
 	d.publishGitStatusProjectionEventAtRevision(ctx, projectID, issueID, worktree, status, rev)
 	return rev
 }
 
 func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session, rev uint64) {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	if d.hub == nil {
 		return
 	}
@@ -983,7 +979,7 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 }
 
 func (d *Daemon) publishWorktreeProjectionEventAtRevision(ctx context.Context, projectID, issueID, worktree string, rev uint64) {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	if d.hub == nil {
 		return
 	}
@@ -1015,7 +1011,7 @@ func (d *Daemon) publishWorktreeProjectionEventAtRevision(ctx context.Context, p
 }
 
 func (d *Daemon) publishGitStatusProjectionEventAtRevision(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus, rev uint64) {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	if d.hub == nil {
 		return
 	}
