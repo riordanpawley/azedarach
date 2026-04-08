@@ -116,7 +116,7 @@ func shouldReplaceSessionProjection(existing, candidate daemonstate.Session) boo
 	return strings.TrimSpace(candidate.ID) < strings.TrimSpace(existing.ID)
 }
 
-func sessionProjectionByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]daemonstate.Session {
+func sessionProjectionLatestByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]daemonstate.Session {
 	byIssueKey := make(map[string]daemonstate.Session, len(sessions))
 	for _, session := range sessions {
 		key := sessionKey(sessionProjectionIssueID(session, namingScope))
@@ -129,6 +129,54 @@ func sessionProjectionByIssueKey(sessions []daemonstate.Session, namingScope str
 		}
 	}
 	return byIssueKey
+}
+
+func sessionProjectionForReconcileByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]daemonstate.Session {
+	return sessionProjectionLatestByIssueKey(sessions, namingScope)
+}
+
+func sessionProjectionForTmuxHydrationByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]daemonstate.Session {
+	return sessionProjectionLatestByIssueKey(sessions, namingScope)
+}
+
+func sessionProjectionForTaskDisplayByIssueKey(snapshotByIssueKey, projectionByIssueKey map[string]daemonstate.Session) map[string]daemonstate.Session {
+	byIssueKey := make(map[string]daemonstate.Session, len(snapshotByIssueKey)+len(projectionByIssueKey))
+	for key, session := range snapshotByIssueKey {
+		byIssueKey[key] = session
+	}
+	for key, session := range projectionByIssueKey {
+		existing, exists := byIssueKey[key]
+		if !exists || shouldReplaceSessionProjection(existing, session) {
+			byIssueKey[key] = session
+		}
+	}
+	return byIssueKey
+}
+
+func sessionProjectionStartedAtForTaskDisplay(snapshotSession daemonstate.Session, snapshotOK bool, projectionSession daemonstate.Session, projectionOK bool) *time.Time {
+	var startedSource *time.Time
+
+	if snapshotOK && snapshotSession.StartedAt != nil && !snapshotSession.StartedAt.IsZero() {
+		startedSource = snapshotSession.StartedAt
+	}
+	if projectionOK && projectionSession.StartedAt != nil && !projectionSession.StartedAt.IsZero() {
+		if startedSource == nil || startedSource.IsZero() || projectionSession.StartedAt.Before(*startedSource) {
+			startedSource = projectionSession.StartedAt
+		}
+	}
+	if startedSource == nil || startedSource.IsZero() {
+		switch {
+		case snapshotOK && !snapshotSession.UpdatedAt.IsZero():
+			startedSource = &snapshotSession.UpdatedAt
+		case projectionOK && !projectionSession.UpdatedAt.IsZero():
+			startedSource = &projectionSession.UpdatedAt
+		}
+	}
+	if startedSource == nil || startedSource.IsZero() {
+		return nil
+	}
+	started := startedSource.UTC()
+	return &started
 }
 
 func (d *Daemon) sourceForSessionInvariant(invariant daemonInvariantID) daemonInvariantSource {
@@ -1034,7 +1082,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 		result.RecreatedTmuxSessions++
 	}
 
-	snapshotByIssueKey := sessionProjectionByIssueKey(snapshotSessions, namingScope)
+	snapshotByIssueKey := sessionProjectionForReconcileByIssueKey(snapshotSessions, namingScope)
 
 	for issueKey := range tmuxSet {
 		sessionIDInTmux := tmuxNameByIssueKey[issueKey]
@@ -1228,8 +1276,8 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 	for _, session := range snapshot.Sessions {
 		snapshotSessions = append(snapshotSessions, session)
 	}
-	snapshotByKey := sessionProjectionByIssueKey(snapshotSessions, namingScope)
-
+	snapshotByKey := sessionProjectionLatestByIssueKey(snapshotSessions, namingScope)
+	var projectionSessions []daemonstate.Session
 	projectionByKey := map[string]daemonstate.Session{}
 	if d.sessionRuntimeStateStoreIfConfigured(projectID) != nil {
 		cachedSessions, err := d.sessionRuntimeStateStoreIfConfigured(projectID).ListSessionStates(ctx, projectID)
@@ -1238,9 +1286,11 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 				d.cfg.Logger.Debug("failed to load cached session runtime state while enriching tasks", "project_id", projectID, "error", err)
 			}
 		} else {
-			projectionByKey = sessionProjectionByIssueKey(cachedSessions, namingScope)
+			projectionSessions = cachedSessions
+			projectionByKey = sessionProjectionLatestByIssueKey(projectionSessions, namingScope)
 		}
 	}
+	sessionByKey := sessionProjectionForTaskDisplayByIssueKey(snapshotByKey, projectionByKey)
 
 	for i := range tasks {
 		taskID := tasks[i].ID
@@ -1253,24 +1303,9 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 		var startedAt *time.Time
 		snapshotSession, snapshotOK := snapshotByKey[taskKey]
 		projectionSession, projectionOK := projectionByKey[taskKey]
-		session, ok := snapshotSession, snapshotOK
-		if !ok {
-			session, ok = projectionSession, projectionOK
-		}
+		session, ok := sessionByKey[taskKey]
 		if ok {
-			startedSource := session.StartedAt
-			if projectionOK && projectionSession.StartedAt != nil && !projectionSession.StartedAt.IsZero() {
-				if startedSource == nil || startedSource.IsZero() || projectionSession.StartedAt.Before(*startedSource) {
-					startedSource = projectionSession.StartedAt
-				}
-			}
-			if (startedSource == nil || startedSource.IsZero()) && !session.UpdatedAt.IsZero() {
-				startedSource = &session.UpdatedAt
-			}
-			if startedSource != nil && !startedSource.IsZero() {
-				started := startedSource.UTC()
-				startedAt = &started
-			}
+			startedAt = sessionProjectionStartedAtForTaskDisplay(snapshotSession, snapshotOK, projectionSession, projectionOK)
 			switch session.State {
 			case daemonstate.SessionStatePaused:
 				state = domain.SessionPaused
@@ -1370,7 +1405,7 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 			d.cfg.Logger.Debug("load cached session runtime-state snapshot failed", "project_id", projectID, "error", err)
 		}
 	}
-	existingByIssueKey := sessionProjectionByIssueKey(existingSessions, namingScope)
+	existingByIssueKey := sessionProjectionForTmuxHydrationByIssueKey(existingSessions, namingScope)
 	liveSessionIDs := make(map[string]struct{}, len(tmuxSessions))
 	for _, info := range tmuxSessions {
 		name := strings.TrimSpace(info.Name)

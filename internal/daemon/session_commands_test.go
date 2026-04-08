@@ -177,7 +177,7 @@ func TestSessionProjectionByIssueKeyPrefersMostRecentState(t *testing.T) {
 			},
 		}
 
-		byIssue := sessionProjectionByIssueKey(sessions, "azedarach")
+		byIssue := sessionProjectionLatestByIssueKey(sessions, "azedarach")
 		entry, ok := byIssue["bra"]
 		if !ok {
 			t.Fatalf("missing projection for issue key bra: %+v", byIssue)
@@ -206,7 +206,7 @@ func TestSessionProjectionByIssueKeyPrefersMostRecentState(t *testing.T) {
 			},
 		}
 
-		byIssue := sessionProjectionByIssueKey(sessions, "azedarach")
+		byIssue := sessionProjectionLatestByIssueKey(sessions, "azedarach")
 		entry, ok := byIssue["bra"]
 		if !ok {
 			t.Fatalf("missing projection for issue key bra: %+v", byIssue)
@@ -2297,6 +2297,64 @@ func TestEnrichTasksWithSessionStateFallsBackToProjectionCache(t *testing.T) {
 	}
 }
 
+func TestEnrichTasksWithSessionStatePrefersNewerProjectionStateOverSnapshot(t *testing.T) {
+	const (
+		projectID = "proj-task-merge"
+		issueID   = "bix"
+	)
+
+	store := daemonstate.NewStore()
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	snapshotStartedAt := time.Date(2026, time.April, 1, 9, 0, 0, 0, time.UTC)
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed snapshot session: %v", err)
+	}
+	snapshot := store.ReadSnapshot(projectID)
+	snapshotSession, ok := snapshot.Sessions[sessionID]
+	if !ok {
+		t.Fatalf("missing snapshot session %q", sessionID)
+	}
+	snapshotSession.StartedAt = &snapshotStartedAt
+	snapshotSession.UpdatedAt = snapshotStartedAt
+	store.ReplaceProjectSessions(projectID, []daemonstate.Session{snapshotSession})
+
+	projectionStoppedAt := snapshotStartedAt.Add(1 * time.Minute)
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   issueID,
+		State:     daemonstate.SessionStateStopped,
+		UpdatedAt: projectionStoppedAt,
+	}); err != nil {
+		t.Fatalf("seed projection stopped session: %v", err)
+	}
+
+	tmuxRunner := newSessionStartTmuxRunner()
+	tmuxRunner.sessions[sessionID] = true
+
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	tasks := []domain.Task{{ID: issueID, Title: "projection should win", Type: domain.TypeTask}}
+	enriched := d.enrichTasksWithSessionState(context.Background(), projectID, tasks)
+	if len(enriched) != 1 {
+		t.Fatalf("len(enriched) = %d, want 1", len(enriched))
+	}
+	if enriched[0].Session != nil {
+		t.Fatalf("expected stopped projection to suppress task session, got %+v", enriched[0].Session)
+	}
+}
+
 func TestPersistTmuxSessionProjectionSnapshotPreservesCachedStartedAt(t *testing.T) {
 	const (
 		projectID = "proj-cache-preserve"
@@ -2434,7 +2492,7 @@ func TestPersistTmuxSessionRuntimeStatePrefersTmuxCreatedAtOverSnapshotStartedAt
 	}
 }
 
-func TestEnrichTasksWithSessionStatePrefersProjectionStartedAtOverSnapshot(t *testing.T) {
+func TestEnrichTasksWithSessionStateKeepsEarlierStartedAtAcrossSnapshotAndProjection(t *testing.T) {
 	const (
 		projectID = "proj-started-at-merge"
 		issueID   = "bif"
@@ -2448,6 +2506,18 @@ func TestEnrichTasksWithSessionStatePrefersProjectionStartedAtOverSnapshot(t *te
 	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
 		t.Fatalf("seed attached session: %v", err)
 	}
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStatePaused); err != nil {
+		t.Fatalf("seed paused session: %v", err)
+	}
+	snapshot := store.ReadSnapshot(projectID)
+	snapshotSession, ok := snapshot.Sessions[sessionID]
+	if !ok {
+		t.Fatalf("missing snapshot session %q", sessionID)
+	}
+	snapshotStartedAt := time.Date(2026, time.April, 1, 9, 0, 0, 0, time.UTC)
+	snapshotSession.StartedAt = &snapshotStartedAt
+	snapshotSession.UpdatedAt = snapshotStartedAt
+	store.ReplaceProjectSessions(projectID, []daemonstate.Session{snapshotSession})
 
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
 	t.Cleanup(func() {
@@ -2482,7 +2552,10 @@ func TestEnrichTasksWithSessionStatePrefersProjectionStartedAtOverSnapshot(t *te
 	if len(enriched) != 1 || enriched[0].Session == nil || enriched[0].Session.StartedAt == nil {
 		t.Fatalf("missing session started_at in enriched task: %+v", enriched)
 	}
-	if !enriched[0].Session.StartedAt.Equal(startedAt) {
-		t.Fatalf("started_at = %v, want %v", enriched[0].Session.StartedAt, startedAt)
+	if enriched[0].Session.State != domain.SessionBusy {
+		t.Fatalf("session state = %v, want %v", enriched[0].Session.State, domain.SessionBusy)
+	}
+	if !enriched[0].Session.StartedAt.Equal(snapshotStartedAt) {
+		t.Fatalf("started_at = %v, want %v", enriched[0].Session.StartedAt, snapshotStartedAt)
 	}
 }
