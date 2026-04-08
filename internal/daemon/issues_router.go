@@ -148,6 +148,26 @@ func (d *Daemon) resolveRepoDirForProjectExact(projectID string) string {
 	return strings.TrimSpace(repoDir)
 }
 
+func (d *Daemon) canonicalProjectID(projectID string) string {
+	projectID = protocol.NormalizeProjectID(projectID)
+	if d == nil {
+		return projectID
+	}
+	repoDir := strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
+	if repoDir == "" {
+		return projectID
+	}
+	if hashProjectID, err := appconfig.ProjectIDForRoot(repoDir); err == nil {
+		if normalized := protocol.NormalizeProjectID(hashProjectID); normalized != "" {
+			return normalized
+		}
+	}
+	if repoName := protocol.NormalizeProjectID(filepath.Base(repoDir)); repoName != "" {
+		return repoName
+	}
+	return projectID
+}
+
 func (d *Daemon) closeIssueClients() {
 	if d == nil {
 		return

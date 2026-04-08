@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
@@ -1700,7 +1701,10 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 	const issueID = "az-1"
 
 	repoDir := t.TempDir()
-	projectID := filepath.Base(repoDir)
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
 	sessionID := naming.CanonicalSessionID(repoDir, issueID)
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() {

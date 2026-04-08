@@ -251,7 +251,7 @@ func (d *Daemon) decodeSessionRequest(req protocol.RequestEnvelope, requireSessi
 	if cmd.ProjectID == "" {
 		cmd.ProjectID = req.Meta.ProjectID.String()
 	}
-	cmd.ProjectID = protocol.NormalizeProjectID(cmd.ProjectID)
+	cmd.ProjectID = d.canonicalProjectID(cmd.ProjectID)
 	if requireSession && cmd.SessionID == "" {
 		return resolvedSessionTarget{}, d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required fields: project_id/session_id"), false
 	}
@@ -936,7 +936,7 @@ func (d *Daemon) handleSessionRecover(ctx context.Context, req protocol.RequestE
 	if cmd.ProjectID == "" {
 		cmd.ProjectID = req.Meta.ProjectID.String()
 	}
-	cmd.ProjectID = protocol.NormalizeProjectID(cmd.ProjectID)
+	cmd.ProjectID = d.canonicalProjectID(cmd.ProjectID)
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session recover requested", "project_id", cmd.ProjectID, "target_issue_id", cmd.SessionID)
 	}
@@ -984,6 +984,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 	if d == nil || d.sessionStore == nil || d.tmux == nil {
 		return result, nil
 	}
+	projectID = d.canonicalProjectID(projectID)
 	worktreeManager := d.worktreeManagerForProject(projectID)
 	if worktreeManager == nil {
 		return result, nil

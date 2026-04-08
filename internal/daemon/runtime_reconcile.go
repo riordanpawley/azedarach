@@ -472,7 +472,7 @@ func (d *Daemon) runtimeReconcileKnownProjectIDs(ctx context.Context) ([]string,
 	seen := map[string]struct{}{}
 	projectIDs := make([]string, 0, 8)
 	add := func(projectID string) {
-		normalized := protocol.NormalizeProjectID(projectID)
+		normalized := d.canonicalProjectID(projectID)
 		if _, exists := seen[normalized]; exists {
 			return
 		}
@@ -488,14 +488,14 @@ func (d *Daemon) runtimeReconcileKnownProjectIDs(ctx context.Context) ([]string,
 	repoProjectID := ""
 	repoNameProjectID := ""
 	if repoDir != "" {
-		repoNameProjectID = protocol.NormalizeProjectID(filepath.Base(repoDir))
+		repoNameProjectID = d.canonicalProjectID(filepath.Base(repoDir))
 		projectID, err := appconfig.ProjectIDForRoot(repoDir)
 		if err != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("resolve runtime reconcile seed project id failed", "repo_dir", repoDir, "error", err)
 			}
 		} else {
-			repoProjectID = protocol.NormalizeProjectID(projectID)
+			repoProjectID = d.canonicalProjectID(projectID)
 			add(projectID)
 		}
 	}

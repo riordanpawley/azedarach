@@ -821,7 +821,7 @@ func TestRuntimeReconcileKnownProjectIDsScopedModePrioritizesRepoProject(t *test
 	}
 }
 
-func TestRuntimeReconcileKnownProjectIDsScopedModePrioritizesRepoNameProjectID(t *testing.T) {
+func TestRuntimeReconcileKnownProjectIDsCanonicalizesRepoAliases(t *testing.T) {
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
 	base := t.TempDir()
@@ -854,14 +854,14 @@ func TestRuntimeReconcileKnownProjectIDsScopedModePrioritizesRepoNameProjectID(t
 	if err != nil {
 		t.Fatalf("runtimeReconcileKnownProjectIDs: %v", err)
 	}
-	if len(got) < 2 {
-		t.Fatalf("project ids len = %d, want >=2 (%v)", len(got), got)
+	if len(got) != 2 {
+		t.Fatalf("project ids len = %d, want 2 (%v)", len(got), got)
 	}
-	if got[0] != "azedarach" {
-		t.Fatalf("first project id = %q, want %q", got[0], "azedarach")
+	if got[0] != repoProjectID {
+		t.Fatalf("first project id = %q, want repo-scoped id %q", got[0], repoProjectID)
 	}
-	if got[1] != repoProjectID {
-		t.Fatalf("second project id = %q, want repo-scoped id %q", got[1], repoProjectID)
+	if got[1] != "proj-zeta" {
+		t.Fatalf("second project id = %q, want %q", got[1], "proj-zeta")
 	}
 }
 
