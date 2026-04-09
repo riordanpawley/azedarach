@@ -181,10 +181,10 @@ func (sb StatusBar) Render() string {
 	widthBeforeMandatory := visibleWidth
 	for _, slot := range mandatorySlots {
 		if !appendSlot(slot.style, slot.text) {
-			if len(mandatorySlots) > 1 {
+			if fallback := sb.mandatoryFallbackToken(); fallback != "" {
 				parts = append([]string(nil), partsBeforeMandatory...)
 				visibleWidth = widthBeforeMandatory
-				_ = appendSlot(sb.styles.StatusInfo, "F/S")
+				_ = appendSlot(sb.styles.StatusInfo, fallback)
 			}
 			return sb.styles.StatusBar.Width(sb.width).Render(strings.Join(parts, ""))
 		}
@@ -317,6 +317,26 @@ func (sb StatusBar) compactMandatoryStatus() string {
 		parts = append(parts, compactSortToken(sb.sortSummary))
 	}
 	return strings.Join(parts, " ")
+}
+
+func (sb StatusBar) mandatoryFallbackToken() string {
+	hasAlert := strings.TrimSpace(sb.alertIndicator) != ""
+	hasFilter := strings.TrimSpace(sb.filterSummary) != ""
+	hasSort := strings.TrimSpace(sb.sortSummary) != ""
+	switch {
+	case hasAlert && (hasFilter || hasSort):
+		return "R!/F/S"
+	case hasAlert:
+		return "R!"
+	case hasFilter && hasSort:
+		return "F/S"
+	case hasFilter:
+		return "F"
+	case hasSort:
+		return "S"
+	default:
+		return ""
+	}
 }
 
 func compactFilterToken(summary string) string {

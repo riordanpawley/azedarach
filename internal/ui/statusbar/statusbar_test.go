@@ -231,6 +231,19 @@ func TestStatusBar_RenderKeepsRecoveryAlertOnNarrowWidth(t *testing.T) {
 	}
 }
 
+func TestStatusBar_RenderKeepsRecoveryAlertInMandatoryFallback(t *testing.T) {
+	style := styles.New()
+	sb := New(types.ModeNormal, 34, style)
+	sb.SetAlertIndicator("o recover:99 (n)")
+	sb.SetFilterSummary("F:q=very-long-filter-query,st:2,pr:3")
+	sb.SetSortSummary("S:priority/descending")
+
+	result := sb.Render()
+	if !strings.Contains(result, "R!/F/S") {
+		t.Fatalf("Expected medium-width mandatory fallback to retain alert marker, got: %s", result)
+	}
+}
+
 func TestStatusBar_RenderShowsLoadingIndicator(t *testing.T) {
 	style := styles.New()
 	sb := New(types.ModeNormal, 80, style)
