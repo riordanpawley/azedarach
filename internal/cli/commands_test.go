@@ -4600,6 +4600,12 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az session start <issue-id>`, `az session status [issue-id]`, `az daemon start|stop|restart`, `az export --format json [--out <path>]`") {
 		t.Fatalf("prime output missing session/runtime command examples: %q", output)
 	}
+	if !strings.Contains(output, "Optional (only when splitting work): `az issue create \"Child task\"`") {
+		t.Fatalf("prime output missing optional child-task split guidance: %q", output)
+	}
+	if strings.Contains(output, "`az issue create \"Title\"` (auto-parents under `AZEDARACH_ISSUE_ID`; use `--deferred` for non-immediate follow-ups)") {
+		t.Fatalf("prime output should not require unconditional child issue creation: %q", output)
+	}
 }
 
 func TestPrimeCommandWithActiveIssueContext(t *testing.T) {

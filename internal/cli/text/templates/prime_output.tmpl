@@ -5,7 +5,7 @@ Primer evidence key: `{{ .PrimeEvidenceKey }}`
 - First 3 commands for this session:
   - {{ if .ActiveIssueID }}`az issue get {{ .ActiveIssueID }}`{{ else }}`az issue get <issue-id>`{{ end }}
   - {{ if .SpecEnabled }}`az spec` (inspect linked requirements before behavior changes){{ else }}Spec workflows are disabled for this project (skip spec checks).{{ end }}
-  - `az issue create "Title"` (auto-parents under `AZEDARACH_ISSUE_ID`; use `--deferred` for non-immediate follow-ups)
+  - Optional (only when splitting work): `az issue create "Child task"` to break the active issue into smaller, independently actionable chunks
 - How to use `az` command map:
   - Issue lifecycle:
   - `az issue list --limit 20`, `az issue list --status in_progress --limit 20`, `az issue get <issue-id>`, `az issue create "Child task" [--json]` (auto-parent), `az issue create --deferred "Later task" [--json]`, `az issue update <issue-id> --status in_progress|blocked|open [--json]`, `az issue close <issue-id> [--json]`
