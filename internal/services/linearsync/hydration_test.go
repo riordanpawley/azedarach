@@ -7,7 +7,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
-func TestReconcileHydratedTasks_PreservesLocalRuntimeOverlayForMatchingTasks(t *testing.T) {
+func TestReconcileHydratedTasks_UsesHydratedRuntimeProjectionForMatchingTasks(t *testing.T) {
 	startedAt := time.Date(2026, 4, 2, 3, 15, 0, 0, time.UTC)
 	current := []domain.Task{
 		{
@@ -30,7 +30,23 @@ func TestReconcileHydratedTasks_PreservesLocalRuntimeOverlayForMatchingTasks(t *
 		},
 	}
 	hydrated := []domain.Task{
-		{ID: "az-1", Title: "Refreshed", Status: domain.StatusInProgress},
+		{
+			ID:                   "az-1",
+			Title:                "Refreshed",
+			Status:               domain.StatusInProgress,
+			HasWorktree:          true,
+			GitAheadCount:        0,
+			GitBehindCount:       1,
+			HasUncommittedChanges: false,
+			GitAdditions:         0,
+			GitDeletions:         0,
+			Session: &domain.Session{
+				IssueID:   "az-1",
+				State:     domain.SessionPaused,
+				StartedAt: &startedAt,
+			},
+			HasTmuxSession: true,
+		},
 		{ID: "az-2", Title: "Fresh", Status: domain.StatusOpen},
 	}
 
@@ -42,11 +58,11 @@ func TestReconcileHydratedTasks_PreservesLocalRuntimeOverlayForMatchingTasks(t *
 	if got[0].ID != "az-1" || got[0].Title != "Refreshed" || got[0].Status != domain.StatusInProgress {
 		t.Fatalf("merged task = %+v", got[0])
 	}
-	if got[0].Session == nil || got[0].Session.State != domain.SessionBusy {
-		t.Fatalf("session projection not preserved: %+v", got[0].Session)
+	if got[0].Session == nil || got[0].Session.State != domain.SessionPaused {
+		t.Fatalf("session projection = %+v, want hydrated paused session", got[0].Session)
 	}
-	if !got[0].HasTmuxSession || !got[0].HasWorktree || got[0].GitAheadCount != 1 || got[0].GitBehindCount != 3 || !got[0].HasUncommittedChanges || got[0].GitAdditions != 8 || got[0].GitDeletions != 2 {
-		t.Fatalf("overlay fields were not preserved: %+v", got[0])
+	if !got[0].HasTmuxSession || !got[0].HasWorktree || got[0].GitAheadCount != 0 || got[0].GitBehindCount != 1 || got[0].HasUncommittedChanges || got[0].GitAdditions != 0 || got[0].GitDeletions != 0 {
+		t.Fatalf("runtime fields = %+v, want hydrated values", got[0])
 	}
 	if got[1].ID != "az-2" || got[1].HasTmuxSession || got[1].HasWorktree || got[1].GitBehindCount != 0 {
 		t.Fatalf("unexpected overlay leakage into fresh task: %+v", got[1])
