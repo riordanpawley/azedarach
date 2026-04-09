@@ -499,7 +499,13 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			workspace := overlay.NewTaskWorkspaceOverlay(*task, m.tasks, m.pendingMutationForTask(task.ID.String()), m.width, m.height)
 			workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
-			return m, m.openOverlay(workspace)
+			if m.daemonClient == nil {
+				return m, m.openOverlay(workspace)
+			}
+			return m, tea.Batch(
+				m.openOverlay(workspace),
+				m.refreshTaskWorkspaceInBackgroundCmd(task.ID.String()),
+			)
 		}
 		return m, nil
 
@@ -2416,6 +2422,56 @@ type pendingWorktreeCleanupConfirmation struct {
 	taskID      string
 	deletedTask bool
 	force       bool
+}
+
+type refreshTaskWorkspaceResultMsg struct {
+	taskID        string
+	hasTask       bool
+	task          domain.Task
+	tasks         []domain.Task
+	lastCheckedAt time.Time
+	freshness     protocol.TaskListFreshness
+	reconcileErr  error
+	snapshotErr   error
+}
+
+func (m Model) refreshTaskWorkspaceInBackgroundCmd(taskID string) tea.Cmd {
+	return func() tea.Msg {
+		msg := refreshTaskWorkspaceResultMsg{taskID: taskID}
+		if m.daemonClient == nil {
+			return msg
+		}
+
+		issueID := strings.TrimSpace(taskID)
+		if issueID != "" && taskIDKey(issueID) != "main" {
+			reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 8*time.Second)
+			if _, err := m.daemonClient.ReconcileRuntimeIssues(reconcileCtx, []string{issueID}); err != nil {
+				msg.reconcileErr = err
+			}
+			reconcileCancel()
+		}
+
+		snapshotCtx, snapshotCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer snapshotCancel()
+		snapshot, err := m.readTaskSnapshot(snapshotCtx, m.daemonClient)
+		if err != nil {
+			msg.snapshotErr = err
+			return msg
+		}
+
+		msg.tasks = snapshot.Tasks
+		msg.lastCheckedAt = snapshot.LastCheckedAt
+		msg.freshness = snapshot.Freshness
+		for _, candidate := range snapshot.Tasks {
+			if candidate.ID.String() == msg.taskID {
+				msg.hasTask = true
+				msg.task = candidate
+				return msg
+			}
+		}
+		msg.snapshotErr = fmt.Errorf("task %s not found in refreshed snapshot", msg.taskID)
+		return msg
+	}
 }
 
 func (m Model) deleteTaskCmd(taskID string) tea.Cmd {

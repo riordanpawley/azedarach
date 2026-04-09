@@ -609,6 +609,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.followOnMergeIntoTargetCmd(msg.sourceWorktree, msg.targetWorktree, msg.sourceID, msg.targetID, msg.targetState, msg.refreshStatus)
 
+	case refreshTaskWorkspaceResultMsg:
+		if msg.reconcileErr != nil && m.logger != nil {
+			m.logger.Warn("task workspace issue reconcile failed", "task_id", msg.taskID, "error", msg.reconcileErr)
+		}
+		if msg.snapshotErr != nil || !msg.hasTask {
+			return m, nil
+		}
+		currentWorkspace, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+		if !ok || taskIDKey(currentWorkspace.TaskID()) != taskIDKey(msg.taskID) {
+			return m, nil
+		}
+		tasks := msg.tasks
+		if len(tasks) == 0 {
+			return m, nil
+		}
+		m.overlayStack.Pop()
+		workspace := overlay.NewTaskWorkspaceOverlay(msg.task, tasks, m.pendingMutationForTask(msg.taskID), m.width, m.height)
+		if !msg.lastCheckedAt.IsZero() && msg.freshness.Valid() {
+			workspace.SyncSnapshotFreshness(msg.lastCheckedAt, msg.freshness)
+		} else {
+			workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
+		}
+		return m, m.openOverlay(workspace)
+
 	case fetchAndMergeResultMsg:
 		if msg.operationID != "" && !operationStateTerminal(msg.state) {
 			action := "Merge"
