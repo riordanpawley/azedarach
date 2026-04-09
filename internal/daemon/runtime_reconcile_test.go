@@ -59,6 +59,10 @@ func (r *runtimeReconcileRecorder) Reconcile(ctx context.Context, projectID stri
 	return result, err
 }
 
+func (r *runtimeReconcileRecorder) ReconcileIssues(ctx context.Context, projectID string, _ []string) (protocol.RuntimeReconcileResponseBody, error) {
+	return r.Reconcile(ctx, projectID)
+}
+
 func (r *runtimeReconcileRecorder) snapshot() (calls int, projectIDs []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -80,9 +84,13 @@ func (r *sequentialRuntimeReconciler) Reconcile(ctx context.Context, projectID s
 
 	if call == 1 {
 		<-ctx.Done()
-			return protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(projectID)}, ctx.Err()
+		return protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(projectID)}, ctx.Err()
 	}
 	return protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(projectID)}, nil
+}
+
+func (r *sequentialRuntimeReconciler) ReconcileIssues(ctx context.Context, projectID string, _ []string) (protocol.RuntimeReconcileResponseBody, error) {
+	return r.Reconcile(ctx, projectID)
 }
 
 func (r *sequentialRuntimeReconciler) snapshot() (calls int, projectIDs []string) {
@@ -151,6 +159,10 @@ func (r *scriptedRuntimeReconciler) Reconcile(ctx context.Context, projectID str
 	r.current--
 	r.mu.Unlock()
 	return result, nil
+}
+
+func (r *scriptedRuntimeReconciler) ReconcileIssues(ctx context.Context, projectID string, _ []string) (protocol.RuntimeReconcileResponseBody, error) {
+	return r.Reconcile(ctx, projectID)
 }
 
 func (r *scriptedRuntimeReconciler) snapshot() (order []string, callCount map[string]int, maxConcurrent int) {

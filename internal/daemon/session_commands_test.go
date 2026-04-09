@@ -114,6 +114,10 @@ func (r *timeoutRuntimeReconciler) Reconcile(ctx context.Context, projectID stri
 	return protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(projectID)}, ctx.Err()
 }
 
+func (r *timeoutRuntimeReconciler) ReconcileIssues(ctx context.Context, projectID string, _ []string) (protocol.RuntimeReconcileResponseBody, error) {
+	return r.Reconcile(ctx, projectID)
+}
+
 func (r *timeoutRuntimeReconciler) snapshot() (calls int, projectIDs []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -2580,14 +2584,14 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvents(t *testing.T) 
 		if body.Runtime.Projection.IssueID != issueID || body.Runtime.Projection.Session.SessionID != sessionID {
 			t.Fatalf("body runtime projection = %+v, want issue/session %s/%s", body.Runtime.Projection, issueID, sessionID)
 		}
-	if body.Runtime.Projection.Session.State != protocol.SessionLifecycleStateStarting {
-		runtimeRows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
-		if err != nil {
-			t.Fatalf("body runtime session state = %s, want observed %s (load runtime rows failed: %v)", body.Runtime.Projection.Session.State, protocol.SessionLifecycleStateStarting, err)
+		if body.Runtime.Projection.Session.State != protocol.SessionLifecycleStateStarting {
+			runtimeRows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
+			if err != nil {
+				t.Fatalf("body runtime session state = %s, want observed %s (load runtime rows failed: %v)", body.Runtime.Projection.Session.State, protocol.SessionLifecycleStateStarting, err)
+			}
+			t.Fatalf("body runtime session state = %s, want observed %s (runtime rows = %+v)", body.Runtime.Projection.Session.State, protocol.SessionLifecycleStateStarting, runtimeRows)
 		}
-		t.Fatalf("body runtime session state = %s, want observed %s (runtime rows = %+v)", body.Runtime.Projection.Session.State, protocol.SessionLifecycleStateStarting, runtimeRows)
 	}
-}
 }
 
 func TestEnrichTasksWithSessionStateSeedsStartedAtFromSnapshot(t *testing.T) {

@@ -941,7 +941,7 @@ func (m *Model) applyOperationProgressEvent(evt protocol.EventEnvelope) {
 		if strings.TrimSpace(body.Operation.OperationID.String()) == "" {
 			return
 		}
-			taskID := m.resolveOperationTaskID(body.Operation.IssueID, body.Operation.ResourceKeys)
+		taskID := m.resolveOperationTaskID(body.Operation.IssueID, body.Operation.ResourceKeys)
 		if taskID == "" {
 			taskID = m.operationTaskID[body.Operation.OperationID.String()]
 		}
@@ -2479,8 +2479,10 @@ func (m Model) requestWorktreeCleanupConfirmationCmd(taskID string, deleteTask b
 			return msg
 		}
 
-		if _, err := m.daemonClient.ReconcileRuntime(ctx); err != nil {
-			msg.reconcileErr = err
+		if issueID := strings.TrimSpace(taskID); issueID != "" {
+			if _, err := m.daemonClient.ReconcileRuntimeIssues(ctx, []string{issueID}); err != nil {
+				msg.reconcileErr = err
+			}
 		}
 
 		snapshot, err := m.readTaskSnapshot(ctx, m.daemonClient)
@@ -3252,18 +3254,18 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			return taskCreatedResultMsg{err: fmt.Errorf("daemon client unavailable")}
 		}
 
-			var parentID *naming.IssueID
-			if msg.ParentID != nil {
-				parsedParentID, parseErr := naming.ParseIssueID(strings.TrimSpace(*msg.ParentID))
-				if parseErr != nil {
-					return taskCreatedResultMsg{taskID: "", err: fmt.Errorf("invalid parent_id: %w", parseErr), isUpdate: false}
-				}
-				parentID = &parsedParentID
+		var parentID *naming.IssueID
+		if msg.ParentID != nil {
+			parsedParentID, parseErr := naming.ParseIssueID(strings.TrimSpace(*msg.ParentID))
+			if parseErr != nil {
+				return taskCreatedResultMsg{taskID: "", err: fmt.Errorf("invalid parent_id: %w", parseErr), isUpdate: false}
 			}
-			taskID, err := m.daemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
-				Title:           msg.Title,
-				Description:     msg.Description,
-				Type:            msg.Type,
+			parentID = &parsedParentID
+		}
+		taskID, err := m.daemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
+			Title:           msg.Title,
+			Description:     msg.Description,
+			Type:            msg.Type,
 			Priority:        msg.Priority,
 			Status:          msg.Status,
 			Assignee:        msg.Assignee,
@@ -3273,8 +3275,8 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			Notes:           msg.Notes,
 			Acceptance:      msg.Acceptance,
 			Estimate:        msg.Estimate,
-				ParentID:        parentID,
-			})
+			ParentID:        parentID,
+		})
 		return taskCreatedResultMsg{taskID: taskID, err: err, isUpdate: false}
 	}
 }
@@ -3840,16 +3842,48 @@ func predictsMergeConflicts(output string, err error) bool {
 	return strings.Contains(err.Error(), "CONFLICT")
 }
 
-func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sourceWorktree, targetWorktree, targetRef, sourceBranch string, _ bool) *mergePreflightFailureMsg {
+func mergePreflightReconcileIssueIDs(sourceID, targetID string) []string {
+	seen := make(map[string]struct{}, 2)
+	ids := make([]string, 0, 2)
+	appendIssue := func(issueID string) {
+		normalized := strings.TrimSpace(issueID)
+		if normalized == "" || taskIDKey(normalized) == "main" {
+			return
+		}
+		if _, exists := seen[normalized]; exists {
+			return
+		}
+		seen[normalized] = struct{}{}
+		ids = append(ids, normalized)
+	}
+	appendIssue(sourceID)
+	appendIssue(targetID)
+	return ids
+}
+
+func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sourceWorktree, targetWorktree, targetRef, sourceBranch string, refreshStatus bool) *mergePreflightFailureMsg {
 	if m.daemonClient == nil {
 		return nil
+	}
+
+	if refreshStatus {
+		issueIDs := mergePreflightReconcileIssueIDs(sourceID, targetID)
+		if len(issueIDs) > 0 {
+			if _, err := m.daemonClient.ReconcileRuntimeIssues(ctx, issueIDs); err != nil && m.logger != nil {
+				m.logger.Warn("merge preflight issue reconcile failed", "source_id", sourceID, "target_id", targetID, "error", err)
+			}
+		}
 	}
 
 	reasons := make([]string, 0, 2)
 	sourceFiles := make([]string, 0, 8)
 	targetFiles := make([]string, 0, 8)
 
-	sourceStatus, sourceErr := m.daemonClient.GitStatus(ctx, sourceWorktree)
+	statusForWorktree := func(worktree string) (daemonclient.GitStatus, error) {
+		return m.daemonClient.GitStatus(ctx, worktree)
+	}
+
+	sourceStatus, sourceErr := statusForWorktree(sourceWorktree)
 	if sourceErr != nil {
 		reasons = append(reasons, fmt.Sprintf("Could not read source status (%s): %v", sourceID, sourceErr))
 	} else if sourceStatus.HasChanges {
@@ -3857,7 +3891,7 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 		sourceFiles = dirtyFilesFromStatus(sourceStatus)
 	}
 
-	targetStatus, targetErr := m.daemonClient.GitStatus(ctx, targetWorktree)
+	targetStatus, targetErr := statusForWorktree(targetWorktree)
 	if targetErr != nil {
 		reasons = append(reasons, fmt.Sprintf("Could not read target status (%s): %v", targetID, targetErr))
 	} else if targetStatus.HasChanges {
@@ -3909,9 +3943,6 @@ func (m Model) refreshMergePreflightCmd(selection overlay.MergePreflightRefreshS
 		if m.daemonClient == nil {
 			return mergePreflightRefreshResultMsg{err: fmt.Errorf("daemon client unavailable")}
 		}
-		if _, err := m.daemonClient.ReconcileRuntime(ctx); err != nil && m.logger != nil {
-			m.logger.Warn("merge preflight refresh reconcile failed", "error", err)
-		}
 		preflight := m.checkMergePreflight(
 			ctx,
 			strings.TrimSpace(selection.SourceID),
@@ -3920,7 +3951,7 @@ func (m Model) refreshMergePreflightCmd(selection overlay.MergePreflightRefreshS
 			strings.TrimSpace(selection.TargetWorktree),
 			"",
 			"",
-			false,
+			true,
 		)
 		if preflight != nil {
 			return *preflight

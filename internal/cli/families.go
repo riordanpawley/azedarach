@@ -397,7 +397,7 @@ func notifyDaemonSessionStatus(ctx context.Context, deps *Dependencies, issueID,
 		// reconcile now so task-list/session projections do not linger as busy.
 		if event == hookEventStop || event == hookEventSessionEnd {
 			if err := callWithAutostart(func(callCtx context.Context) error {
-				_, reconcileErr := deps.DaemonClient.ReconcileRuntime(callCtx)
+				_, reconcileErr := deps.DaemonClient.ReconcileRuntimeIssues(callCtx, []string{issueID})
 				return reconcileErr
 			}); err != nil {
 				return err

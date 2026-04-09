@@ -25,6 +25,7 @@ const (
 
 type runtimeReconciler interface {
 	Reconcile(context.Context, string) (protocol.RuntimeReconcileResponseBody, error)
+	ReconcileIssues(context.Context, string, []string) (protocol.RuntimeReconcileResponseBody, error)
 }
 
 type runtimeReconcileService struct {
@@ -33,6 +34,11 @@ type runtimeReconcileService struct {
 
 type runtimeReconcileCommandBody struct {
 	ProjectID string `json:"project_id"`
+}
+
+type runtimeReconcileIssueCommandBody struct {
+	ProjectID string   `json:"project_id"`
+	IssueIDs  []string `json:"issue_ids"`
 }
 
 type runtimeReconcileRequestContextKey struct{}
@@ -85,6 +91,42 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 		errs = append(errs, fmt.Errorf("refresh session runtime state: %w", err))
 	}
 
+	return result, errors.Join(errs...)
+}
+
+func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID string, issueIDs []string) (protocol.RuntimeReconcileResponseBody, error) {
+	result := protocol.RuntimeReconcileResponseBody{
+		ProjectID:        naming.ProjectID(protocol.NormalizeProjectID(projectID)),
+		InvariantSources: invariantSourceDebugMap(),
+	}
+	d := s.daemon
+	if d == nil {
+		return result, nil
+	}
+	issueIDs = normalizeRuntimeReconcileIssueIDs(issueIDs)
+	if len(issueIDs) == 0 {
+		return result, fmt.Errorf("at least one issue id is required")
+	}
+
+	var errs []error
+	if d.worktreeRuntimeStateStoreIfConfigured(result.ProjectID.String()) != nil && d.worktreeManagerForProject(result.ProjectID.String()) != nil {
+		if worktreeCount, err := d.refreshWorktreeRuntimeStateForIssues(ctx, result.ProjectID.String(), issueIDs); err != nil {
+			errs = append(errs, fmt.Errorf("refresh issue worktree runtime state: %w", err))
+		} else {
+			result.WorktreesRefreshed = worktreeCount
+		}
+	}
+	if d.tmux != nil && d.sessionStore != nil && d.sessionRuntimeStateStoreIfConfigured(result.ProjectID.String()) != nil {
+		for _, issueID := range issueIDs {
+			sessionResult, err := d.reconcileTmuxAndDaemonSessions(ctx, result.ProjectID.String(), issueID)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("reconcile issue session %s: %w", issueID, err))
+				continue
+			}
+			result.RecreatedTmuxSessions += sessionResult.RecreatedTmuxSessions
+			result.AlignedDaemonSessions += sessionResult.AlignedDaemonSessions
+		}
+	}
 	return result, errors.Join(errs...)
 }
 
@@ -286,6 +328,41 @@ func (d *Daemon) handleRuntimeReconcile(ctx context.Context, req protocol.Reques
 	bodyBytes, err := json.Marshal(result)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal response body: %v", err)), nil
+	}
+	resp.Body = bodyBytes
+	return resp, nil
+}
+
+func (d *Daemon) handleRuntimeReconcileIssue(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	var body runtimeReconcileIssueCommandBody
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+		}
+	}
+	projectID := strings.TrimSpace(body.ProjectID)
+	if projectID == "" {
+		projectID = d.runtimeReconcileProjectID(req)
+	} else {
+		projectID = d.canonicalProjectID(projectID)
+	}
+	issueIDs := normalizeRuntimeReconcileIssueIDs(body.IssueIDs)
+	if len(issueIDs) == 0 {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "issue_ids must include at least one issue id"), nil
+	}
+
+	result, err := d.ensureRuntimeReconciler().ReconcileIssues(ctx, projectID, issueIDs)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if len(result.InvariantSources) == 0 {
+		result.InvariantSources = invariantSourceDebugMap()
+	}
+	resp := d.successResponse(req)
+	resp.Revision = d.currentRevision(projectID)
+	bodyBytes, marshalErr := json.Marshal(result)
+	if marshalErr != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal response body: %v", marshalErr)), nil
 	}
 	resp.Body = bodyBytes
 	return resp, nil
@@ -631,6 +708,26 @@ func runtimeReconcileResultSignature(result protocol.RuntimeReconcileResponseBod
 		return ""
 	}
 	return string(raw)
+}
+
+func normalizeRuntimeReconcileIssueIDs(issueIDs []string) []string {
+	if len(issueIDs) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(issueIDs))
+	out := make([]string, 0, len(issueIDs))
+	for _, issueID := range issueIDs {
+		norm := strings.TrimSpace(issueID)
+		if norm == "" {
+			continue
+		}
+		if _, exists := seen[norm]; exists {
+			continue
+		}
+		seen[norm] = struct{}{}
+		out = append(out, norm)
+	}
+	return out
 }
 
 func runtimeReconcileRequestFromContext(ctx context.Context) runtimeReconcileRequestContext {

@@ -536,6 +536,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleSessionRecover(ctx, req)
 	case protocol.CommandRuntimeReconcile:
 		return d.handleRuntimeReconcile(ctx, req)
+	case protocol.CommandRuntimeReconcileIssue:
+		return d.handleRuntimeReconcileIssue(ctx, req)
 	default:
 		return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported command"), nil
 	}

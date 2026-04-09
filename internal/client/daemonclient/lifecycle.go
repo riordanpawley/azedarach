@@ -14,19 +14,20 @@ import (
 )
 
 const (
-	CommandSessionStart     = "session.start"
-	CommandSessionAttach    = "session.attach"
-	CommandSessionPause     = "session.pause"
-	CommandSessionResume    = "session.resume"
-	CommandSessionStop      = "session.stop"
-	CommandSessionStatus    = "session.status"
-	CommandRuntimeReconcile = "runtime.reconcile"
-	CommandDevServerStart   = "devserver.start"
-	CommandDevServerStop    = "devserver.stop"
-	CommandDevServerStatus  = "devserver.status"
-	CommandDevServerList    = "devserver.list"
-	CommandWorktreeList     = "worktree.list"
-	CommandWorktreeRemove   = "worktree.remove"
+	CommandSessionStart          = "session.start"
+	CommandSessionAttach         = "session.attach"
+	CommandSessionPause          = "session.pause"
+	CommandSessionResume         = "session.resume"
+	CommandSessionStop           = "session.stop"
+	CommandSessionStatus         = "session.status"
+	CommandRuntimeReconcile      = "runtime.reconcile"
+	CommandRuntimeReconcileIssue = "runtime.reconcile_issue"
+	CommandDevServerStart        = "devserver.start"
+	CommandDevServerStop         = "devserver.stop"
+	CommandDevServerStatus       = "devserver.status"
+	CommandDevServerList         = "devserver.list"
+	CommandWorktreeList          = "worktree.list"
+	CommandWorktreeRemove        = "worktree.remove"
 )
 
 type sessionCommandBody struct {
@@ -211,6 +212,36 @@ func (c *Client) ReconcileRuntime(ctx context.Context) (RuntimeReconcileResult, 
 	var out RuntimeReconcileResult
 	if err := c.commandJSON(ctx, CommandRuntimeReconcile, protocol.RuntimeReconcileRequestBody{
 		ProjectID: c.projectID,
+	}, &out); err != nil {
+		return RuntimeReconcileResult{}, err
+	}
+	return out, nil
+}
+
+// ReconcileRuntimeIssues asks the daemon to repair runtime state for specific issues in the current project route.
+func (c *Client) ReconcileRuntimeIssues(ctx context.Context, issueIDs []string) (RuntimeReconcileResult, error) {
+	parsed := make([]naming.IssueID, 0, len(issueIDs))
+	seen := make(map[string]struct{}, len(issueIDs))
+	for _, raw := range issueIDs {
+		issueID, err := parseIssueID(raw)
+		if err != nil {
+			return RuntimeReconcileResult{}, err
+		}
+		key := issueID.String()
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		parsed = append(parsed, issueID)
+	}
+	if len(parsed) == 0 {
+		return RuntimeReconcileResult{}, fmt.Errorf("at least one issue id is required")
+	}
+
+	var out RuntimeReconcileResult
+	if err := c.commandJSON(ctx, CommandRuntimeReconcileIssue, protocol.RuntimeReconcileIssueRequestBody{
+		ProjectID: c.projectID,
+		IssueIDs:  parsed,
 	}, &out); err != nil {
 		return RuntimeReconcileResult{}, err
 	}
