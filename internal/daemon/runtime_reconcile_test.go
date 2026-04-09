@@ -17,6 +17,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
@@ -58,6 +59,10 @@ func (r *runtimeReconcileRecorder) Reconcile(ctx context.Context, projectID stri
 	return result, err
 }
 
+func (r *runtimeReconcileRecorder) ReconcileIssues(ctx context.Context, projectID string, _ []string) (protocol.RuntimeReconcileResponseBody, error) {
+	return r.Reconcile(ctx, projectID)
+}
+
 func (r *runtimeReconcileRecorder) snapshot() (calls int, projectIDs []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -79,9 +84,13 @@ func (r *sequentialRuntimeReconciler) Reconcile(ctx context.Context, projectID s
 
 	if call == 1 {
 		<-ctx.Done()
-		return protocol.RuntimeReconcileResponseBody{ProjectID: projectID}, ctx.Err()
+		return protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(projectID)}, ctx.Err()
 	}
-	return protocol.RuntimeReconcileResponseBody{ProjectID: projectID}, nil
+	return protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(projectID)}, nil
+}
+
+func (r *sequentialRuntimeReconciler) ReconcileIssues(ctx context.Context, projectID string, _ []string) (protocol.RuntimeReconcileResponseBody, error) {
+	return r.Reconcile(ctx, projectID)
 }
 
 func (r *sequentialRuntimeReconciler) snapshot() (calls int, projectIDs []string) {
@@ -117,11 +126,11 @@ func (r *scriptedRuntimeReconciler) Reconcile(ctx context.Context, projectID str
 	if r.releaseByID != nil {
 		release = r.releaseByID
 	}
-	result := protocol.RuntimeReconcileResponseBody{ProjectID: projectID}
+	result := protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(projectID)}
 	if stored, ok := r.resultsByID[projectID]; ok {
 		result = stored
 		if result.ProjectID == "" {
-			result.ProjectID = projectID
+			result.ProjectID = naming.ProjectID(projectID)
 		}
 	}
 	r.mu.Unlock()
@@ -141,7 +150,7 @@ func (r *scriptedRuntimeReconciler) Reconcile(ctx context.Context, projectID str
 				r.mu.Lock()
 				r.current--
 				r.mu.Unlock()
-				return protocol.RuntimeReconcileResponseBody{ProjectID: projectID}, ctx.Err()
+				return protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(projectID)}, ctx.Err()
 			}
 		}
 	}
@@ -150,6 +159,10 @@ func (r *scriptedRuntimeReconciler) Reconcile(ctx context.Context, projectID str
 	r.current--
 	r.mu.Unlock()
 	return result, nil
+}
+
+func (r *scriptedRuntimeReconciler) ReconcileIssues(ctx context.Context, projectID string, _ []string) (protocol.RuntimeReconcileResponseBody, error) {
+	return r.Reconcile(ctx, projectID)
 }
 
 func (r *scriptedRuntimeReconciler) snapshot() (order []string, callCount map[string]int, maxConcurrent int) {
@@ -313,7 +326,7 @@ func TestRunStartupRuntimeReconcileUsesRepoScopedProjectID(t *testing.T) {
 		t.Fatalf("ProjectIDForRoot: %v", err)
 	}
 	recorder := &runtimeReconcileRecorder{
-		result: protocol.RuntimeReconcileResponseBody{ProjectID: wantProjectID},
+		result: protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(wantProjectID)},
 	}
 	d := &Daemon{
 		cfg: Config{
@@ -683,7 +696,7 @@ func TestRuntimeReconcileCycleUsesRepoScopedProjectID(t *testing.T) {
 		t.Fatalf("ProjectIDForRoot: %v", err)
 	}
 	recorder := &runtimeReconcileRecorder{
-		result: protocol.RuntimeReconcileResponseBody{ProjectID: wantProjectID},
+		result: protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(wantProjectID)},
 	}
 	d := &Daemon{
 		cfg: Config{
@@ -755,7 +768,7 @@ func TestRuntimeReconcileKnownProjectIDsIncludesAllKnownSources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runtimeReconcileKnownProjectIDs: %v", err)
 	}
-	want := []string{repoProjectID, "proj-projection", "proj-revision", "proj-session"}
+	want := []string{repoProjectID}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("project ids = %v, want %v", got, want)
 	}
@@ -798,30 +811,15 @@ func TestRuntimeReconcileKnownProjectIDsScopedModePrioritizesRepoProject(t *test
 	if err != nil {
 		t.Fatalf("runtimeReconcileKnownProjectIDs: %v", err)
 	}
-	if len(got) != 4 {
-		t.Fatalf("project ids len = %d, want 4 (%v)", len(got), got)
+	if len(got) != 1 {
+		t.Fatalf("project ids len = %d, want 1 (%v)", len(got), got)
 	}
 	if got[0] != repoProjectID {
 		t.Fatalf("first project id = %q, want repo-scoped %q", got[0], repoProjectID)
 	}
-	wantSet := map[string]struct{}{
-		repoProjectID: {},
-		"proj-alpha":  {},
-		"proj-beta":   {},
-		"proj-zeta":   {},
-	}
-	for _, projectID := range got {
-		if _, ok := wantSet[projectID]; !ok {
-			t.Fatalf("unexpected project id %q in %v", projectID, got)
-		}
-		delete(wantSet, projectID)
-	}
-	if len(wantSet) != 0 {
-		t.Fatalf("missing project ids: %v (got %v)", wantSet, got)
-	}
 }
 
-func TestRuntimeReconcileKnownProjectIDsScopedModePrioritizesRepoNameProjectID(t *testing.T) {
+func TestRuntimeReconcileKnownProjectIDsCanonicalizesRepoAliases(t *testing.T) {
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
 	base := t.TempDir()
@@ -854,14 +852,11 @@ func TestRuntimeReconcileKnownProjectIDsScopedModePrioritizesRepoNameProjectID(t
 	if err != nil {
 		t.Fatalf("runtimeReconcileKnownProjectIDs: %v", err)
 	}
-	if len(got) < 2 {
-		t.Fatalf("project ids len = %d, want >=2 (%v)", len(got), got)
+	if len(got) != 1 {
+		t.Fatalf("project ids len = %d, want 1 (%v)", len(got), got)
 	}
-	if got[0] != "azedarach" {
-		t.Fatalf("first project id = %q, want %q", got[0], "azedarach")
-	}
-	if got[1] != repoProjectID {
-		t.Fatalf("second project id = %q, want repo-scoped id %q", got[1], repoProjectID)
+	if got[0] != repoProjectID {
+		t.Fatalf("first project id = %q, want repo-scoped id %q", got[0], repoProjectID)
 	}
 }
 
@@ -1034,7 +1029,13 @@ func TestRuntimeReconcileRefreshesSessionProjectionWithoutWorktreeManager(t *tes
 	if err != nil {
 		t.Fatalf("list projection sessions: %v", err)
 	}
-	if len(rows) != 0 {
-		t.Fatalf("projection rows = %d, want 0 after session runtime refresh", len(rows))
+	if len(rows) != 1 {
+		t.Fatalf("projection rows = %d, want 1 after session runtime refresh", len(rows))
+	}
+	if rows[0].State != daemonstate.SessionStateAttached {
+		t.Fatalf("desired session state = %s, want %s", rows[0].State, daemonstate.SessionStateAttached)
+	}
+	if rows[0].ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("observed session state = %s, want %s", rows[0].ObservedState, daemonstate.SessionStateStopped)
 	}
 }

@@ -915,8 +915,8 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 	defer rows.Close()
 
 	tasks := make([]domain.Task, 0, 32)
-	taskIDs := make([]string, 0, 32)
-	taskIndexByID := map[string]int{}
+	taskIDs := make([]naming.IssueID, 0, 32)
+	taskIndexByID := map[naming.IssueID]int{}
 
 	for rows.Next() {
 		task := domain.Task{}
@@ -1022,8 +1022,8 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 	defer rows.Close()
 
 	tasks := make([]domain.Task, 0, 32)
-	taskIDs := make([]string, 0, 32)
-	taskIndexByID := map[string]int{}
+	taskIDs := make([]naming.IssueID, 0, 32)
+	taskIndexByID := map[naming.IssueID]int{}
 
 	for rows.Next() {
 		task := domain.Task{}
@@ -1076,12 +1076,8 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 				if startedAt == nil {
 					startedAt = parseOptionalTimestamp(sessionUpdatedRaw)
 				}
-				issueID, err := naming.ParseIssueID(task.ID)
-				if err != nil {
-					continue
-				}
 				task.Session = &domain.Session{
-					IssueID:   issueID,
+					IssueID:   task.ID,
 					State:     mapRuntimeSessionState(sessionStateRaw),
 					StartedAt: startedAt,
 					Worktree:  worktreePath,
@@ -1169,8 +1165,8 @@ func mapRuntimeSessionState(value string) domain.SessionState {
 func (c *Client) loadDependenciesForTasks(
 	ctx context.Context,
 	db *sql.DB,
-	taskIDs []string,
-	taskIndexByID map[string]int,
+	taskIDs []naming.IssueID,
+	taskIndexByID map[naming.IssueID]int,
 	tasks []domain.Task,
 ) error {
 	const maxPlaceholders = 500
@@ -1183,7 +1179,7 @@ func (c *Client) loadDependenciesForTasks(
 		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
 		depArgs := make([]any, 0, len(chunk))
 		for _, id := range chunk {
-			depArgs = append(depArgs, id)
+			depArgs = append(depArgs, id.String())
 		}
 
 		rows, err := db.QueryContext(ctx, fmt.Sprintf(`
@@ -1204,18 +1200,29 @@ func (c *Client) loadDependenciesForTasks(
 				_ = rows.Close()
 				return err
 			}
-			taskIndex, ok := taskIndexByID[issueID]
+			issueIDTyped, err := naming.ParseIssueID(issueID)
+			if err != nil {
+				continue
+			}
+			taskIndex, ok := taskIndexByID[issueIDTyped]
 			if !ok {
 				continue
 			}
 			task := &tasks[taskIndex]
 			if normalizeDependencyType(dependencyType) == string(domain.DependencyParentChild) {
-				parentID := dependsOnID
+				parentID, err := naming.ParseIssueID(dependsOnID)
+				if err != nil {
+					continue
+				}
 				task.ParentID = &parentID
 				continue
 			}
+			dependencyID, err := naming.ParseIssueID(dependsOnID)
+			if err != nil {
+				continue
+			}
 			task.Dependencies = append(task.Dependencies, domain.Dependency{
-				ID:   dependsOnID,
+				ID:   dependencyID,
 				Type: domain.DependencyType(normalizeDependencyType(dependencyType)),
 			})
 		}

@@ -1,12 +1,14 @@
 package overlay
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 func TestEpicDrillDown_Init(t *testing.T) {
@@ -96,7 +98,7 @@ func TestEpicDrillDown_Selection(t *testing.T) {
 		t.Errorf("Key = %s, want select_child", selMsg.Key)
 	}
 
-	if selMsg.Value != "az-3" {
+	if fmt.Sprint(selMsg.Value) != "az-3" {
 		t.Errorf("Value = %s, want az-3", selMsg.Value)
 	}
 }
@@ -328,7 +330,7 @@ func TestEpicDrillDown_Size(t *testing.T) {
 			children := make([]domain.Task, tt.childrenCount)
 			for i := range children {
 				children[i] = domain.Task{
-					ID:     "az-" + string(rune('2'+i)),
+					ID:     naming.IssueID("az-" + string(rune('2'+i))),
 					Status: domain.StatusOpen,
 				}
 			}

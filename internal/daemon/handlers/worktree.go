@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
 
@@ -257,10 +258,10 @@ func (h *WorktreeHandler) HandleDirect(ctx context.Context, req protocol.Request
 
 		normalizeCleanupOrphanedResult(result)
 
-		body, err := json.Marshal(protocol.CleanupOrphanedResponseBody{
-			ProjectID:        cmd.ProjectID,
-			WorktreesRemoved: len(result.Removed),
-		})
+			body, err := json.Marshal(protocol.CleanupOrphanedResponseBody{
+				ProjectID:        naming.ProjectID(cmd.ProjectID),
+				WorktreesRemoved: len(result.Removed),
+			})
 		if err != nil {
 			resp.Error = &protocol.ErrorEnvelope{
 				Code:      protocol.ErrorCodeInternal,

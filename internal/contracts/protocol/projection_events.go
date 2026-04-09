@@ -12,7 +12,7 @@ const (
 )
 
 type ProjectionUpdateEventBody struct {
-	ProjectID string                      `json:"project_id" msgpack:"project_id"`
+	ProjectID naming.ProjectID            `json:"project_id" msgpack:"project_id"`
 	IssueID   naming.IssueID              `json:"issue_id" msgpack:"issue_id"`
 	Worktree  string                      `json:"worktree,omitempty" msgpack:"worktree,omitempty"`
 	UpdatedAt time.Time                   `json:"updated_at" msgpack:"updated_at"`

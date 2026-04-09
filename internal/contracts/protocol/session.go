@@ -27,7 +27,7 @@ type SessionProjection struct {
 }
 
 type SessionProjectionEventBody struct {
-	ProjectID string                      `json:"project_id" msgpack:"project_id"`
+	ProjectID naming.ProjectID            `json:"project_id" msgpack:"project_id"`
 	Revision  uint64                      `json:"revision" msgpack:"revision"`
 	Session   SessionProjection           `json:"session" msgpack:"session"`
 	Runtime   *RuntimeProjectionEventBody `json:"runtime,omitempty" msgpack:"runtime,omitempty"`

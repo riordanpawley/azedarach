@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 func TestOperationCommandsRouteThroughDaemon(t *testing.T) {
@@ -24,7 +25,7 @@ func TestOperationCommandsRouteThroughDaemon(t *testing.T) {
 				respBody, _ := json.Marshal(protocol.OperationGetResponseBody{
 					Operation: protocol.OperationRecord{
 						OperationID: "op-1",
-						ProjectID:   "proj-a",
+							ProjectID:   naming.ProjectID("proj-a"),
 						Kind:        "session.start",
 						State:       protocol.OperationStateRunning,
 					},
@@ -41,19 +42,19 @@ func TestOperationCommandsRouteThroughDaemon(t *testing.T) {
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal list body: %v", err)
 				}
-				if body.ProjectID != "proj-a" || body.IssueID != "az-1" || body.Kind != "session.start" || body.Limit != 5 {
-					t.Fatalf("list body = %+v", body)
-				}
-				respBody, _ := json.Marshal(protocol.OperationListResponseBody{
-					ProjectID: "proj-a",
-					Operations: []protocol.OperationRecord{
-						{
-							OperationID: "op-1",
-							ProjectID:   "proj-a",
-							Kind:        "session.start",
-							State:       protocol.OperationStateQueued,
+					if body.ProjectID != naming.ProjectID("proj-a") || body.IssueID != naming.IssueID("az-1") || body.Kind != "session.start" || body.Limit != 5 {
+						t.Fatalf("list body = %+v", body)
+					}
+					respBody, _ := json.Marshal(protocol.OperationListResponseBody{
+						ProjectID: naming.ProjectID("proj-a"),
+						Operations: []protocol.OperationRecord{
+							{
+								OperationID: "op-1",
+								ProjectID:   naming.ProjectID("proj-a"),
+								Kind:        "session.start",
+								State:       protocol.OperationStateQueued,
+							},
 						},
-					},
 				})
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -70,15 +71,15 @@ func TestOperationCommandsRouteThroughDaemon(t *testing.T) {
 				if body.ProjectID != "proj-a" || body.OperationID != "op-1" || body.Reason != "user request" {
 					t.Fatalf("cancel body = %+v", body)
 				}
-				respBody, _ := json.Marshal(protocol.OperationCancelResponseBody{
-					Cancelled: true,
-					Operation: protocol.OperationRecord{
-						OperationID: "op-1",
-						ProjectID:   "proj-a",
-						Kind:        "session.start",
-						State:       protocol.OperationStateCancelled,
-					},
-				})
+					respBody, _ := json.Marshal(protocol.OperationCancelResponseBody{
+						Cancelled: true,
+						Operation: protocol.OperationRecord{
+							OperationID: "op-1",
+							ProjectID:   naming.ProjectID("proj-a"),
+							Kind:        "session.start",
+							State:       protocol.OperationStateCancelled,
+						},
+					})
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
@@ -137,7 +138,7 @@ func TestWaitForOperationPollsUntilTerminalState(t *testing.T) {
 			respBody, _ := json.Marshal(protocol.OperationGetResponseBody{
 				Operation: protocol.OperationRecord{
 					OperationID: "op-1",
-					ProjectID:   "proj-a",
+						ProjectID:   naming.ProjectID("proj-a"),
 					Kind:        "session.start",
 					State:       state,
 				},

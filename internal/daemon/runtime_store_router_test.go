@@ -32,6 +32,10 @@ func TestMigrateLegacyRuntimeStateCopiesRowsToProjectScopedStore(t *testing.T) {
 	t.Cleanup(func() { _ = source.Close() })
 
 	projectID := "other"
+	canonicalOtherProjectID, err := appconfig.ProjectIDForRoot(otherRepo)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot(other): %v", err)
+	}
 	now := time.Date(2026, time.April, 3, 7, 10, 0, 0, time.UTC)
 	if err := source.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
 		ID:        "sess-other",
@@ -77,14 +81,14 @@ func TestMigrateLegacyRuntimeStateCopiesRowsToProjectScopedStore(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = target.Close() })
 
-	sessions, err := target.ListSessionStates(context.Background(), projectID)
+	sessions, err := target.ListSessionStates(context.Background(), canonicalOtherProjectID)
 	if err != nil {
 		t.Fatalf("list migrated sessions: %v", err)
 	}
 	if len(sessions) != 1 || sessions[0].ID != "sess-other" {
 		t.Fatalf("migrated sessions = %+v, want sess-other", sessions)
 	}
-	worktrees, err := target.ListWorktreeStates(context.Background(), projectID)
+	worktrees, err := target.ListWorktreeStates(context.Background(), canonicalOtherProjectID)
 	if err != nil {
 		t.Fatalf("list migrated worktrees: %v", err)
 	}

@@ -15,6 +15,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,18 +37,18 @@ func TestClient_CRUDLifecycle(t *testing.T) {
 	tasks, err := client.List(ctx)
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
-	assert.Equal(t, createdID, tasks[0].ID)
+	assert.Equal(t, naming.IssueID(createdID), tasks[0].ID)
 	assert.Equal(t, "Create SQLite store client", tasks[0].Title)
 
 	searchResults, err := client.Search(ctx, "SQLite")
 	require.NoError(t, err)
 	require.Len(t, searchResults, 1)
-	assert.Equal(t, createdID, searchResults[0].ID)
+	assert.Equal(t, naming.IssueID(createdID), searchResults[0].ID)
 
 	ready, err := client.Ready(ctx)
 	require.NoError(t, err)
 	require.Len(t, ready, 1)
-	assert.Equal(t, createdID, ready[0].ID)
+	assert.Equal(t, naming.IssueID(createdID), ready[0].ID)
 
 	err = client.Update(ctx, createdID, domain.StatusInProgress)
 	require.NoError(t, err)
@@ -129,7 +130,7 @@ func TestClient_ListWithRuntimeReturnsJoinedProjectionFields(t *testing.T) {
 	require.Len(t, tasks, 1)
 
 	got := tasks[0]
-	assert.Equal(t, taskID, got.ID)
+	assert.Equal(t, naming.IssueID(taskID), got.ID)
 	require.NotNil(t, got.Session)
 	assert.Equal(t, domain.SessionBusy, got.Session.State)
 	assert.Equal(t, worktreePath, got.Session.Worktree)
@@ -190,7 +191,7 @@ func TestClient_CreateWithParentDependency(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	require.NotNil(t, tasks[0].ParentID)
-	assert.Equal(t, parentID, *tasks[0].ParentID)
+	assert.Equal(t, naming.IssueID(parentID), *tasks[0].ParentID)
 }
 
 func TestClient_CreateWithOpenChildReopensClosedParent(t *testing.T) {
@@ -306,7 +307,7 @@ func TestClient_AddAndRemoveDependency(t *testing.T) {
 	require.NoError(t, err)
 	var blockedTask *domain.Task
 	for i := range tasks {
-		if tasks[i].ID == blockedID {
+		if tasks[i].ID.String() == blockedID {
 			blockedTask = &tasks[i]
 			break
 		}
@@ -315,7 +316,7 @@ func TestClient_AddAndRemoveDependency(t *testing.T) {
 		t.Fatalf("blocked task %s not found", blockedID)
 	}
 	require.Len(t, blockedTask.Dependencies, 1)
-	assert.Equal(t, blockerID, blockedTask.Dependencies[0].ID)
+	assert.Equal(t, blockerID, blockedTask.Dependencies[0].ID.String())
 	assert.Equal(t, domain.DependencyBlocks, blockedTask.Dependencies[0].Type)
 
 	err = client.RemoveDependency(ctx, blockedID, blockerID, "blocks")
@@ -329,7 +330,7 @@ func TestClient_AddAndRemoveDependency(t *testing.T) {
 	require.NoError(t, err)
 	blockedTask = nil
 	for i := range tasks {
-		if tasks[i].ID == blockedID {
+		if tasks[i].ID.String() == blockedID {
 			blockedTask = &tasks[i]
 			break
 		}
@@ -366,7 +367,7 @@ func TestClient_RemoveDependencyConfirmationIsNotRequiredForRelatedEdges(t *test
 
 	var relatedTask *domain.Task
 	for i := range tasks {
-		if tasks[i].ID == relatedID {
+		if tasks[i].ID.String() == relatedID {
 			relatedTask = &tasks[i]
 			break
 		}
@@ -410,7 +411,7 @@ func TestClient_AddDependencyCanonicalizesLegacyAliasesOnNonEpicTasks(t *testing
 
 	var blockedTask, relatedTask *domain.Task
 	for i := range tasks {
-		switch tasks[i].ID {
+		switch tasks[i].ID.String() {
 		case blockedID:
 			blockedTask = &tasks[i]
 		case relatedID:
@@ -426,11 +427,11 @@ func TestClient_AddDependencyCanonicalizesLegacyAliasesOnNonEpicTasks(t *testing
 	}
 
 	require.Len(t, blockedTask.Dependencies, 1)
-	assert.Equal(t, sourceID, blockedTask.Dependencies[0].ID)
+	assert.Equal(t, sourceID, blockedTask.Dependencies[0].ID.String())
 	assert.Equal(t, domain.DependencyBlocks, blockedTask.Dependencies[0].Type)
 
 	require.Len(t, relatedTask.Dependencies, 1)
-	assert.Equal(t, sourceID, relatedTask.Dependencies[0].ID)
+	assert.Equal(t, sourceID, relatedTask.Dependencies[0].ID.String())
 	assert.Equal(t, domain.DependencyRelatedTo, relatedTask.Dependencies[0].Type)
 }
 
@@ -460,7 +461,7 @@ func TestClient_AddDependencyPreventsDuplicateEdges(t *testing.T) {
 
 	var blockedTask *domain.Task
 	for i := range tasks {
-		if tasks[i].ID == blockedID {
+		if tasks[i].ID.String() == blockedID {
 			blockedTask = &tasks[i]
 			break
 		}
@@ -470,7 +471,7 @@ func TestClient_AddDependencyPreventsDuplicateEdges(t *testing.T) {
 	}
 
 	require.Len(t, blockedTask.Dependencies, 1)
-	assert.Equal(t, sourceID, blockedTask.Dependencies[0].ID)
+	assert.Equal(t, sourceID, blockedTask.Dependencies[0].ID.String())
 	assert.Equal(t, domain.DependencyBlocks, blockedTask.Dependencies[0].Type)
 }
 
@@ -566,7 +567,7 @@ func TestClient_ListHydratesParentChildAfterTaskSliceGrowth(t *testing.T) {
 
 	var earlyChild *domain.Task
 	for i := range tasks {
-		if tasks[i].ID == earlyChildID {
+		if tasks[i].ID.String() == earlyChildID {
 			earlyChild = &tasks[i]
 			break
 		}
@@ -575,7 +576,7 @@ func TestClient_ListHydratesParentChildAfterTaskSliceGrowth(t *testing.T) {
 		t.Fatalf("early child task %s not found", earlyChildID)
 	}
 	require.NotNil(t, earlyChild.ParentID)
-	assert.Equal(t, parentID, *earlyChild.ParentID)
+	assert.Equal(t, parentID, earlyChild.ParentID.String())
 }
 
 func TestClient_AddDependencyRequiresExistingTargetIssue(t *testing.T) {

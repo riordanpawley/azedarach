@@ -51,8 +51,8 @@ func TestLoadIssuesCmd_UsesDaemonSQLiteSnapshot(t *testing.T) {
 	statusByID := make(map[string]string, len(loaded.tasks))
 	titleByID := make(map[string]string, len(loaded.tasks))
 	for _, task := range loaded.tasks {
-		statusByID[task.ID] = string(task.Status)
-		titleByID[task.ID] = task.Title
+		statusByID[task.ID.String()] = string(task.Status)
+		titleByID[task.ID.String()] = task.Title
 	}
 	if got, want := statusByID["agm"], "open"; got != want {
 		t.Fatalf("loaded task status for agm = %q, want %q", got, want)
@@ -112,7 +112,7 @@ func TestLoadIssuesCmd_HidesParentChildTasksFromBoardByDefault(t *testing.T) {
 
 	openIDs := make(map[string]struct{})
 	for _, task := range columns[domain.StatusOpen.Column()].Tasks {
-		openIDs[task.ID] = struct{}{}
+		openIDs[task.ID.String()] = struct{}{}
 	}
 	if _, ok := openIDs["az-parent"]; !ok {
 		t.Fatalf("expected parent issue to remain visible in open column: %+v", columns[domain.StatusOpen.Column()].Tasks)
@@ -261,11 +261,11 @@ func TestIssueSnapshotParityAcrossCLIAndTUIJSONListFields(t *testing.T) {
 
 	tuiByID := make(map[string]domain.Task, len(loaded.tasks))
 	for _, task := range loaded.tasks {
-		tuiByID[task.ID] = task
+		tuiByID[task.ID.String()] = task
 	}
 
 	for _, cliTask := range cliTasks {
-		tuiTask, ok := tuiByID[cliTask.ID]
+		tuiTask, ok := tuiByID[cliTask.ID.String()]
 		if !ok {
 			t.Fatalf("task %q exists in CLI snapshot but missing from TUI snapshot", cliTask.ID)
 		}

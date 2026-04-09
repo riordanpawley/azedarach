@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 // TaskListSnapshotSchemaVersion identifies the joined task-list snapshot payload contract.
@@ -38,7 +39,7 @@ type TaskListSnapshotPayload struct {
 	SchemaVersion    uint16            `json:"schema_version" msgpack:"schema_version"`
 	ProtocolVersion  Version           `json:"protocol_version" msgpack:"protocol_version"`
 	SnapshotRevision uint64            `json:"snapshot_revision" msgpack:"snapshot_revision"`
-	ProjectID        string            `json:"project_id" msgpack:"project_id"`
+	ProjectID        naming.ProjectID  `json:"project_id" msgpack:"project_id"`
 	LastCheckedAt    time.Time         `json:"last_checked_at" msgpack:"last_checked_at"`
 	Freshness        TaskListFreshness `json:"freshness" msgpack:"freshness"`
 	Tasks            []domain.Task     `json:"tasks" msgpack:"tasks"`

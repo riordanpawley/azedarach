@@ -53,7 +53,7 @@ func TestOperationRuntimeSubmitGetListPublishesLifecycleEvents(t *testing.T) {
 	submitReq := testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
 		ProjectID: "proj-1",
 		Kind:      "session.start",
-		IssueID:   "AZ-1",
+		IssueID:   naming.IssueID("AZ-1"),
 		Payload:   payload,
 	})
 	ch, cancel := runtime.hub.Subscribe("proj-1", 0)
@@ -144,7 +144,6 @@ func TestOperationRuntimeGitMergePublishesLifecycleEvents(t *testing.T) {
 	submitReq := testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
 		ProjectID: "proj-1",
 		Kind:      daemonhandlers.CommandGitMerge,
-		IssueID:   "/tmp/wt",
 		Payload:   payload,
 	})
 	ch, cancel := runtime.hub.Subscribe("proj-1", 0)
@@ -211,7 +210,6 @@ func TestOperationRuntimeWorktreeCleanupPublishesProgressEvents(t *testing.T) {
 	submitReq := testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
 		ProjectID: "proj-1",
 		Kind:      daemonhandlers.CommandWorktreeCleanupOrphaned,
-		IssueID:   "__project__",
 		Payload:   payload,
 	})
 	ch, cancel := runtime.hub.Subscribe("proj-1", 0)
@@ -279,7 +277,7 @@ func TestOperationRuntimeCancelMarksRunningOperationCancelled(t *testing.T) {
 	submitResp := runtime.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
 		ProjectID: "proj-1",
 		Kind:      "session.stop",
-		IssueID:   "AZ-2",
+		IssueID:   naming.IssueID("AZ-2"),
 		Payload:   payload,
 	}))
 	if !submitResp.OK {
@@ -470,8 +468,8 @@ func TestBuildSubmitRequestDefaultsGitFetchRemote(t *testing.T) {
 		}),
 	)
 
-	if req.IssueID != "/tmp/az-1" {
-		t.Fatalf("issue id = %q, want /tmp/az-1", req.IssueID)
+	if req.IssueID != "" {
+		t.Fatalf("issue id = %q, want empty for non-issue operation", req.IssueID)
 	}
 	if req.DedupeKey != "git.fetch:/tmp/az-1:origin" {
 		t.Fatalf("dedupe key = %q, want default origin remote", req.DedupeKey)
@@ -507,8 +505,8 @@ func TestBuildSubmitRequestNormalizesWorktreeForConflictSerialization(t *testing
 		}),
 	)
 
-	if firstReq.IssueID != "/tmp/az-1" || secondReq.IssueID != "/tmp/az-1" {
-		t.Fatalf("issue ids = %q and %q, want normalized /tmp/az-1", firstReq.IssueID, secondReq.IssueID)
+	if firstReq.IssueID != "" || secondReq.IssueID != "" {
+		t.Fatalf("issue ids = %q and %q, want empty for worktree operations", firstReq.IssueID, secondReq.IssueID)
 	}
 	if len(firstReq.ResourceKeys) != 1 || firstReq.ResourceKeys[0] != "worktree:/tmp/az-1" {
 		t.Fatalf("first resource keys = %v, want normalized worktree key", firstReq.ResourceKeys)

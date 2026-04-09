@@ -124,6 +124,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Expires: time.Now().Add(8 * time.Second),
 				})
 			}
+			if msg.reconcileWarn != nil {
+				m.addToast(Toast{
+					Level:   ToastWarning,
+					Message: fmt.Sprintf("Runtime reconcile warning: %v", msg.reconcileWarn),
+					Expires: time.Now().Add(6 * time.Second),
+				})
+			}
 			var cmds []tea.Cmd
 			if !m.hasRefreshLoop {
 				m.hasRefreshLoop = true
@@ -148,6 +155,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.taskSnapshotFreshness = msg.freshness
 		m.reconcileCursorAfterIssuesRefresh()
 		m.syncTaskWorkspaceOverlay()
+		if msg.reconcileWarn != nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Runtime reconcile warning: %v", msg.reconcileWarn),
+				Expires: time.Now().Add(6 * time.Second),
+			})
+		}
 		if msg.revision > m.daemonRevision {
 			m.daemonRevision = msg.revision
 		}
@@ -327,6 +341,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if projectID := strings.TrimSpace(msg.event.ProjectID.String()); projectID != "" && projectID != m.daemonProjectID() {
 			return m, m.waitForDaemonEventCmd()
 		}
+		cursor := protocol.StreamCursor{Revision: m.daemonRevision}
 		m.recordRuntimeEvent(msg.event)
 		if current := m.overlayStack.Current(); current != nil {
 			if logOverlay, ok := current.(*overlay.EventLogOverlay); ok {
@@ -338,12 +353,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.applySessionProjectionEvent(msg.event)
 		}
 		if msg.event.Event == protocol.EventWorktreeProjectionUpdated || msg.event.Event == protocol.EventGitStatusUpdated {
+			switch cursor.Decide(msg.event) {
+			case protocol.StreamProjectionDecisionIgnore:
+				return m, m.waitForDaemonEventCmd()
+			case protocol.StreamProjectionDecisionResync:
+				m.daemonEvents = nil
+				return m, m.attachDaemonCmd()
+			}
+
 			var body protocol.ProjectionUpdateEventBody
 			if err := json.Unmarshal(msg.event.Body, &body); err == nil && body.Runtime != nil {
 				m.applyRuntimeProjection(body.Runtime.Projection)
 			}
 			diffRefreshCmd := m.refreshOpenDiffOverlayFromProjectionBody(body)
-			cursor := protocol.StreamCursor{Revision: m.daemonRevision}
 			m.daemonRevision = cursor.Advance(msg.event).Revision
 			if diffRefreshCmd != nil {
 				return m, tea.Batch(diffRefreshCmd, m.waitForDaemonEventCmd())
@@ -555,6 +577,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+	case mergePreflightRefreshResultMsg:
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Merge preflight refresh failed: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		if msg.cleared {
+			m.addToast(Toast{
+				Level:   ToastSuccess,
+				Message: "Merge preconditions now clean",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+		}
+		return m, m.loadIssuesCmd()
+
 	case mergeTargetSelectionResolvedMsg:
 		if msg.err != nil {
 			m.addToast(Toast{
@@ -568,6 +608,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.mergeToMainCmd(msg.sourceWorktree, msg.sourceID, msg.refreshStatus)
 		}
 		return m, m.followOnMergeIntoTargetCmd(msg.sourceWorktree, msg.targetWorktree, msg.sourceID, msg.targetID, msg.targetState, msg.refreshStatus)
+
+	case refreshTaskWorkspaceResultMsg:
+		if msg.reconcileErr != nil && m.logger != nil {
+			m.logger.Warn("task workspace issue reconcile failed", "task_id", msg.taskID, "error", msg.reconcileErr)
+		}
+		if msg.snapshotErr != nil || !msg.hasTask {
+			return m, nil
+		}
+		currentWorkspace, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+		if !ok || taskIDKey(currentWorkspace.TaskID()) != taskIDKey(msg.taskID) {
+			return m, nil
+		}
+		tasks := msg.tasks
+		if len(tasks) == 0 {
+			return m, nil
+		}
+		m.overlayStack.Pop()
+		workspace := overlay.NewTaskWorkspaceOverlay(msg.task, tasks, m.pendingMutationForTask(msg.taskID), m.width, m.height)
+		if !msg.lastCheckedAt.IsZero() && msg.freshness.Valid() {
+			workspace.SyncSnapshotFreshness(msg.lastCheckedAt, msg.freshness)
+		} else {
+			workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
+		}
+		return m, m.openOverlay(workspace)
 
 	case fetchAndMergeResultMsg:
 		if msg.operationID != "" && !operationStateTerminal(msg.state) {

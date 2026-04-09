@@ -147,6 +147,44 @@ func TestDaemonProjectIDForPath(t *testing.T) {
 	}
 }
 
+func TestDaemonProjectID(t *testing.T) {
+	t.Run("uses canonical route id for registry-backed current project", func(t *testing.T) {
+		projectPath := t.TempDir()
+		wantProjectID := daemonProjectIDForPath(projectPath)
+		if strings.TrimSpace(wantProjectID) == "" {
+			t.Fatal("expected non-empty canonical project id")
+		}
+
+		m := newTestModel()
+		m.currentProject = "azedarach"
+		m.repoDir = projectPath
+		m.projectRegistry = &config.ProjectsRegistry{
+			Projects: []config.Project{
+				{Name: "azedarach", Path: projectPath},
+			},
+		}
+
+		if got := m.daemonProjectID(); got != wantProjectID {
+			t.Fatalf("daemonProjectID() = %q, want %q", got, wantProjectID)
+		}
+	})
+
+	t.Run("falls back to explicit current project when registry has no match", func(t *testing.T) {
+		m := newTestModel()
+		m.currentProject = "proj-test-alias"
+		m.repoDir = t.TempDir()
+		m.projectRegistry = &config.ProjectsRegistry{
+			Projects: []config.Project{
+				{Name: "different-project", Path: t.TempDir()},
+			},
+		}
+
+		if got := m.daemonProjectID(); got != "proj-test-alias" {
+			t.Fatalf("daemonProjectID() = %q, want %q", got, "proj-test-alias")
+		}
+	})
+}
+
 func TestProjectSwitchResultUpdatesModelConfig(t *testing.T) {
 	m := newTestModel()
 	m.config = &config.Config{

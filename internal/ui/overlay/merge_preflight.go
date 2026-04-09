@@ -23,6 +23,15 @@ type MergePreflightOverlay struct {
 	styles         *Styles
 }
 
+// MergePreflightRefreshSelection carries context required to recompute
+// merge preconditions after an explicit refresh action.
+type MergePreflightRefreshSelection struct {
+	SourceID       string
+	TargetID       string
+	SourceWorktree string
+	TargetWorktree string
+}
+
 func NewMergePreflightOverlay(
 	sourceID, targetID, sourceWorktree, targetWorktree string,
 	reasons, sourceFiles, targetFiles []string,
@@ -53,7 +62,17 @@ func (m *MergePreflightOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "r", "R":
-			return m, func() tea.Msg { return SelectionMsg{Key: "merge_preflight_refresh"} }
+			return m, func() tea.Msg {
+				return SelectionMsg{
+					Key: "merge_preflight_refresh",
+					Value: MergePreflightRefreshSelection{
+						SourceID:       m.sourceID,
+						TargetID:       m.targetID,
+						SourceWorktree: m.sourceWorktree,
+						TargetWorktree: m.targetWorktree,
+					},
+				}
+			}
 		case "a", "A":
 			if !m.canAbortTarget {
 				return m, nil

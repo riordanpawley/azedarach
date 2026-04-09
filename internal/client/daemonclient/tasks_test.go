@@ -10,6 +10,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 type taskRecordingTransport struct {
@@ -60,7 +61,7 @@ func mustMarshalTaskSnapshotPayload(t *testing.T, protocolVersion protocol.Versi
 		SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
 		ProtocolVersion:  protocolVersion,
 		SnapshotRevision: revision,
-		ProjectID:        projectID,
+		ProjectID:        naming.ProjectID(projectID),
 		LastCheckedAt:    mustTaskSnapshotCheckedAt(),
 		Freshness:        protocol.TaskListFreshnessFresh,
 		Tasks:            tasks,
@@ -345,10 +346,10 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal request: %v", err)
 				}
-				if body.Title != "Task 2" || body.ParentID == nil || *body.ParentID != parentID {
+				if body.Title != "Task 2" || body.ParentID == nil || body.ParentID.String() != parentID {
 					t.Fatalf("request body = %+v", body)
 				}
-				respBody, err := json.Marshal(TaskIDResponse{TaskID: "az-2"})
+				respBody, err := json.Marshal(TaskIDResponse{TaskID: naming.IssueID("az-2")})
 				if err != nil {
 					t.Fatalf("marshal response: %v", err)
 				}
@@ -363,12 +364,13 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
-		id, err := client.CreateTask(context.Background(), TaskCreateParams{
-			Title:    "Task 2",
-			Type:     domain.TypeTask,
-			Priority: domain.P1,
-			ParentID: &parentID,
-		})
+			typedParentID := naming.IssueID(parentID)
+			id, err := client.CreateTask(context.Background(), TaskCreateParams{
+				Title:    "Task 2",
+				Type:     domain.TypeTask,
+				Priority: domain.P1,
+				ParentID: &typedParentID,
+			})
 		if err != nil {
 			t.Fatalf("CreateTask error: %v", err)
 		}
@@ -578,20 +580,20 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 			},
 		}
 
-		client := New(transport).WithProjectID(wantProjectID)
-		if err := client.AddTaskDependency(context.Background(), TaskDependencyParams{
-			TaskID:      "az-6",
-			DependsOnID: "az-1",
-			Type:        "blocks",
-		}); err != nil {
-			t.Fatalf("AddTaskDependency error: %v", err)
-		}
-		if err := client.RemoveTaskDependency(context.Background(), TaskDependencyRemoveParams{
-			TaskID:      "az-6",
-			DependsOnID: "az-1",
-			Type:        "blocks",
-			Confirm:     true,
-		}); err != nil {
+			client := New(transport).WithProjectID(wantProjectID)
+			if err := client.AddTaskDependency(context.Background(), TaskDependencyParams{
+				TaskID:      naming.IssueID("az-6"),
+				DependsOnID: naming.IssueID("az-1"),
+				Type:        "blocks",
+			}); err != nil {
+				t.Fatalf("AddTaskDependency error: %v", err)
+			}
+			if err := client.RemoveTaskDependency(context.Background(), TaskDependencyRemoveParams{
+				TaskID:      naming.IssueID("az-6"),
+				DependsOnID: naming.IssueID("az-1"),
+				Type:        "blocks",
+				Confirm:     true,
+			}); err != nil {
 			t.Fatalf("RemoveTaskDependency error: %v", err)
 		}
 		if len(commands) != 2 || commands[0] != CommandTaskDependencyAdd || commands[1] != CommandTaskDependencyRemove {

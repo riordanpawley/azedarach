@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -13,7 +14,7 @@ import (
 func makeTask(id, title string, status domain.Status, taskType domain.TaskType) domain.Task {
 	now := time.Now()
 	return domain.Task{
-		ID:        id,
+		ID:        naming.IssueID(id),
 		Title:     title,
 		Status:    status,
 		Type:      taskType,

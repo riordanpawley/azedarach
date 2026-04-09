@@ -59,8 +59,9 @@ func ComputeDependencyPhases(childIDs map[string]bool, tasks map[string]domain.T
 		// Find blocking dependencies that are siblings
 		var siblingBlockers []string
 		for _, dep := range task.Dependencies {
-			if dep.Type == domain.DependencyBlocks && childIDs[dep.ID] {
-				siblingBlockers = append(siblingBlockers, dep.ID)
+			depID := dep.ID.String()
+			if dep.Type == domain.DependencyBlocks && childIDs[depID] {
+				siblingBlockers = append(siblingBlockers, depID)
 			}
 		}
 

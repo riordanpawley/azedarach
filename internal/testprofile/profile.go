@@ -1,6 +1,9 @@
 package testprofile
 
-import "github.com/riordanpawley/azedarach/internal/domain"
+import (
+	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
+)
 
 // Profile captures a canonical acceptance-test fixture profile.
 type Profile struct {
@@ -12,15 +15,23 @@ type Profile struct {
 }
 
 func dep(id string) domain.Dependency {
+	dependencyID, err := naming.ParseIssueID(id)
+	if err != nil {
+		panic(err)
+	}
 	return domain.Dependency{
-		ID:   id,
+		ID:   dependencyID,
 		Type: domain.DependencyBlocks,
 	}
 }
 
 func task(id, title string, status domain.Status, priority domain.Priority, taskType domain.TaskType, deps ...domain.Dependency) domain.Task {
+	taskID, err := naming.ParseIssueID(id)
+	if err != nil {
+		panic(err)
+	}
 	return domain.Task{
-		ID:           id,
+		ID:           taskID,
 		Title:        title,
 		Status:       status,
 		Priority:     priority,

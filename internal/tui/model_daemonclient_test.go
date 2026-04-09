@@ -58,8 +58,12 @@ func (r *refreshableDiffClient) Status(context.Context, string) (*git.GitStatus,
 	}, nil
 }
 
-func (*refreshableDiffClient) ChangedFiles(context.Context, string, string) ([]git.ChangedFile, error) {
-	return nil, nil
+func (r *refreshableDiffClient) ChangedFiles(context.Context, string, string) ([]git.ChangedFile, error) {
+	files := make([]git.ChangedFile, 0, len(r.paths))
+	for _, path := range r.paths {
+		files = append(files, git.ChangedFile{Path: path, Status: git.DiffFileModified})
+	}
+	return files, nil
 }
 
 func (*refreshableDiffClient) MergeBase(context.Context, string, string) (string, error) {
@@ -130,7 +134,7 @@ func mustMarshalTaskListSnapshot(t *testing.T, protocolVersion protocol.Version,
 		SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
 		ProtocolVersion:  protocolVersion,
 		SnapshotRevision: revision,
-		ProjectID:        projectID,
+		ProjectID:        naming.ProjectID(projectID),
 		LastCheckedAt:    daemonSnapshotCheckedAt(),
 		Freshness:        protocol.TaskListFreshnessFresh,
 		Tasks:            tasks,
@@ -148,7 +152,7 @@ func daemonSnapshotCheckedAt() time.Time {
 func setTaskSession(t *testing.T, m *Model, issueID string, session *domain.Session) {
 	t.Helper()
 	for i := range m.tasks {
-		if m.tasks[i].ID != issueID {
+		if m.tasks[i].ID.String() != issueID {
 			continue
 		}
 		m.tasks[i].Session = cloneSession(session)
@@ -699,15 +703,15 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 
 	makeProjectionBody := func(revision uint64, issueID, worktreePath string, gitAdditions, gitDeletions, gitAhead, gitBehind int, sessionState protocol.SessionLifecycleState, agentStatus string, updatedAt time.Time, activeOperation *protocol.RuntimeOperationProjection) []byte {
 		body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
-			ProjectID: projectID,
+			ProjectID: naming.ProjectID(projectID),
 			IssueID:   naming.IssueID(issueID),
 			Worktree:  worktreePath,
 			UpdatedAt: updatedAt,
 			Runtime: &protocol.RuntimeProjectionEventBody{
-				ProjectID: projectID,
+				ProjectID: naming.ProjectID(projectID),
 				Revision:  revision,
 				Projection: protocol.RuntimeProjection{
-					ProjectID: projectID,
+					ProjectID: naming.ProjectID(projectID),
 					IssueID:   naming.IssueID(issueID),
 					Worktree: protocol.RuntimeWorktreeProjection{
 						Exists:             worktreePath != "",
@@ -792,7 +796,7 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 				}),
 			}
 			sessionBody, err := json.Marshal(protocol.SessionProjectionEventBody{
-				ProjectID: projectID,
+				ProjectID: naming.ProjectID(projectID),
 				Revision:  10,
 				Session: protocol.SessionProjection{
 					SessionID: "sess-1",
@@ -801,10 +805,10 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 					UpdatedAt: sessionUpdatedAt,
 				},
 				Runtime: &protocol.RuntimeProjectionEventBody{
-					ProjectID: projectID,
+					ProjectID: naming.ProjectID(projectID),
 					Revision:  10,
 					Projection: protocol.RuntimeProjection{
-						ProjectID: projectID,
+						ProjectID: naming.ProjectID(projectID),
 						IssueID:   "az-1",
 						Worktree: protocol.RuntimeWorktreeProjection{
 							Exists:             true,
@@ -1495,23 +1499,26 @@ func TestFollowOnMergeCandidateOrderingAndEligibility(t *testing.T) {
 	parentID := "az-parent"
 	blockerID := "az-blocker"
 	nonReadyID := "az-open"
+	parentIssueID := naming.IssueID(parentID)
+	blockerIssueID := naming.IssueID(blockerID)
+	nonReadyIssueID := naming.IssueID(nonReadyID)
 
 	m := newTestModel()
 	m.tasks = []domain.Task{
 		{
-			ID:       "az-child",
+			ID:       naming.IssueID("az-child"),
 			Title:    "Child task",
 			Status:   domain.StatusInProgress,
 			Type:     domain.TypeTask,
-			ParentID: &parentID,
+			ParentID: &parentIssueID,
 			Dependencies: []domain.Dependency{
-				{ID: blockerID, Type: domain.DependencyBlocks},
-				{ID: nonReadyID, Type: domain.DependencyBlocks},
+				{ID: blockerIssueID, Type: domain.DependencyBlocks},
+				{ID: nonReadyIssueID, Type: domain.DependencyBlocks},
 			},
 		},
-		{ID: parentID, Title: "Parent epic", Status: domain.StatusInProgress, Type: domain.TypeEpic, HasWorktree: true},
-		{ID: blockerID, Title: "Ready blocker", Status: domain.StatusDone, Type: domain.TypeTask, HasWorktree: true},
-		{ID: nonReadyID, Title: "Non-ready blocker", Status: domain.StatusOpen, Type: domain.TypeTask},
+		{ID: parentIssueID, Title: "Parent epic", Status: domain.StatusInProgress, Type: domain.TypeEpic, HasWorktree: true},
+		{ID: blockerIssueID, Title: "Ready blocker", Status: domain.StatusDone, Type: domain.TypeTask, HasWorktree: true},
+		{ID: nonReadyIssueID, Title: "Non-ready blocker", Status: domain.StatusOpen, Type: domain.TypeTask},
 	}
 	m.sessions[parentID] = &domain.Session{IssueID: naming.IssueID(parentID), State: domain.SessionBusy, Worktree: "/tmp/parent"}
 	m.sessions[blockerID] = &domain.Session{IssueID: naming.IssueID(blockerID), State: domain.SessionBusy, Worktree: "/tmp/blocker"}
@@ -1537,6 +1544,8 @@ func TestFollowOnMergeCandidateOrderingAndEligibility(t *testing.T) {
 func TestFollowOnMergeSelectionDirectMergeFromPausedTarget(t *testing.T) {
 	parentID := "az-parent"
 	childID := "az-child"
+	parentIssueID := naming.IssueID(parentID)
+	childIssueID := naming.IssueID(childID)
 
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -1561,6 +1570,18 @@ func TestFollowOnMergeSelectionDirectMergeFromPausedTarget(t *testing.T) {
 				})
 				if err != nil {
 					t.Fatalf("marshal worktree response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandRuntimeReconcileIssue:
+				respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{ProjectID: "default"})
+				if err != nil {
+					t.Fatalf("marshal reconcile response: %v", err)
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -1635,14 +1656,14 @@ func TestFollowOnMergeSelectionDirectMergeFromPausedTarget(t *testing.T) {
 
 	m.tasks = []domain.Task{
 		{
-			ID:       childID,
+			ID:       childIssueID,
 			Title:    "Child task",
 			Status:   domain.StatusInProgress,
 			Type:     domain.TypeTask,
-			ParentID: &parentID,
+			ParentID: &parentIssueID,
 		},
 		{
-			ID:     parentID,
+			ID:     parentIssueID,
 			Title:  "Parent epic",
 			Status: domain.StatusInProgress,
 			Type:   domain.TypeEpic,
@@ -1673,7 +1694,7 @@ func TestFollowOnMergeSelectionDirectMergeFromPausedTarget(t *testing.T) {
 	if mergeMsg.err != nil {
 		t.Fatalf("merge err = %v", mergeMsg.err)
 	}
-	if got := transport.requests; len(got) != 5 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandGitStatus || got[2] != daemonclient.CommandGitStatus || got[3] != daemonclient.CommandGitMergePreflight || got[4] != daemonclient.CommandGitMerge {
+	if got := transport.requests; len(got) != 6 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandRuntimeReconcileIssue || got[2] != daemonclient.CommandGitStatus || got[3] != daemonclient.CommandGitStatus || got[4] != daemonclient.CommandGitMergePreflight || got[5] != daemonclient.CommandGitMerge {
 		t.Fatalf("requests = %v", got)
 	}
 }
@@ -1747,6 +1768,18 @@ func TestFollowOnMergeSelectionBusyOrWaitingStopsBeforeMerge(t *testing.T) {
 							OK:              true,
 							Body:            respBody,
 						}, nil
+					case daemonclient.CommandRuntimeReconcileIssue:
+						respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{ProjectID: "default"})
+						if err != nil {
+							t.Fatalf("marshal reconcile response: %v", err)
+						}
+						return protocol.ResponseEnvelope{
+							ProtocolVersion: req.ProtocolVersion,
+							RequestID:       req.RequestID,
+							Kind:            protocol.EnvelopeKindResponse,
+							OK:              true,
+							Body:            respBody,
+						}, nil
 					case daemonclient.CommandGitStatus:
 						respBody, err := json.Marshal(struct {
 							Status git.GitStatus `json:"status"`
@@ -1811,16 +1844,18 @@ func TestFollowOnMergeSelectionBusyOrWaitingStopsBeforeMerge(t *testing.T) {
 
 			m := newTestModel()
 			m.daemonClient = daemonclient.New(transport)
+			parentIssueID := naming.IssueID(parentID)
+			childIssueID := naming.IssueID(childID)
 			m.tasks = []domain.Task{
 				{
-					ID:       childID,
+					ID:       childIssueID,
 					Title:    "Child task",
 					Status:   domain.StatusInProgress,
 					Type:     domain.TypeTask,
-					ParentID: &parentID,
+					ParentID: &parentIssueID,
 				},
 				{
-					ID:     parentID,
+					ID:     parentIssueID,
 					Title:  "Parent epic",
 					Status: domain.StatusInProgress,
 					Type:   domain.TypeEpic,
@@ -1849,7 +1884,7 @@ func TestFollowOnMergeSelectionBusyOrWaitingStopsBeforeMerge(t *testing.T) {
 			if mergeMsg.err != nil {
 				t.Fatalf("merge err = %v", mergeMsg.err)
 			}
-			if got := transport.requests; len(got) != 6 || got[0] != daemonclient.CommandSessionStop || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandGitStatus || got[3] != daemonclient.CommandGitStatus || got[4] != daemonclient.CommandGitMergePreflight || got[5] != daemonclient.CommandGitMerge {
+			if got := transport.requests; len(got) != 7 || got[0] != daemonclient.CommandSessionStop || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandRuntimeReconcileIssue || got[3] != daemonclient.CommandGitStatus || got[4] != daemonclient.CommandGitStatus || got[5] != daemonclient.CommandGitMergePreflight || got[6] != daemonclient.CommandGitMerge {
 				t.Fatalf("requests = %v", got)
 			}
 		})
@@ -1893,16 +1928,18 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 					Body:            respBody,
 				}, nil
 			case daemonclient.CommandTaskList:
+				childIssueID := naming.IssueID(childID)
+				parentIssueID := naming.IssueID(parentID)
 				tasks := []domain.Task{
 					{
-						ID:      childID,
+						ID:      childIssueID,
 						Title:   "Child task",
 						Status:  domain.StatusInProgress,
 						Type:    domain.TypeTask,
 						Session: &domain.Session{IssueID: naming.IssueID(childID), State: domain.SessionBusy, Worktree: "/tmp/child"},
 					},
 					{
-						ID:      parentID,
+						ID:      parentIssueID,
 						Title:   "Parent epic",
 						Status:  domain.StatusInProgress,
 						Type:    domain.TypeEpic,
@@ -1932,6 +1969,18 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 				}{Output: "stopped"})
 				if err != nil {
 					t.Fatalf("marshal session stop response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandRuntimeReconcileIssue:
+				respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{ProjectID: "default"})
+				if err != nil {
+					t.Fatalf("marshal reconcile response: %v", err)
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -2004,16 +2053,18 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 
 	m := newTestModel()
 	m.daemonClient = daemonclient.New(transport)
+	parentIssueID := naming.IssueID(parentID)
+	childIssueID := naming.IssueID(childID)
 	m.tasks = []domain.Task{
 		{
-			ID:       childID,
+			ID:       childIssueID,
 			Title:    "Child task",
 			Status:   domain.StatusInProgress,
 			Type:     domain.TypeTask,
-			ParentID: &parentID,
+			ParentID: &parentIssueID,
 		},
 		{
-			ID:          parentID,
+			ID:          parentIssueID,
 			Title:       "Parent epic",
 			Status:      domain.StatusInProgress,
 			Type:        domain.TypeEpic,
@@ -2042,7 +2093,7 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 	if mergeMsg.err != nil {
 		t.Fatalf("merge err = %v", mergeMsg.err)
 	}
-	if got := transport.requests; len(got) != 9 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandTaskList || got[3] != daemonclient.CommandSessionStop || got[4] != daemonclient.CommandWorktreeList || got[5] != daemonclient.CommandGitStatus || got[6] != daemonclient.CommandGitStatus || got[7] != daemonclient.CommandGitMergePreflight || got[8] != daemonclient.CommandGitMerge {
+	if got := transport.requests; len(got) != 10 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandTaskList || got[3] != daemonclient.CommandSessionStop || got[4] != daemonclient.CommandWorktreeList || got[5] != daemonclient.CommandRuntimeReconcileIssue || got[6] != daemonclient.CommandGitStatus || got[7] != daemonclient.CommandGitStatus || got[8] != daemonclient.CommandGitMergePreflight || got[9] != daemonclient.CommandGitMerge {
 		t.Fatalf("requests = %v", got)
 	}
 }
@@ -2101,6 +2152,18 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 				})
 				if err != nil {
 					t.Fatalf("marshal worktree response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandRuntimeReconcileIssue:
+				respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{ProjectID: "default"})
+				if err != nil {
+					t.Fatalf("marshal reconcile response: %v", err)
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -2243,7 +2306,7 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 	if mergeMsg.err != nil {
 		t.Fatalf("merge err = %v", mergeMsg.err)
 	}
-	if got := transport.requests; len(got) != 8 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandGitStatus || got[3] != daemonclient.CommandGitStatus || got[4] != daemonclient.CommandGitMergePreflight || got[5] != daemonclient.CommandGitFetch || got[6] != daemonclient.CommandGitCheckout || got[7] != daemonclient.CommandGitMerge {
+	if got := transport.requests; len(got) != 9 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandRuntimeReconcileIssue || got[3] != daemonclient.CommandGitStatus || got[4] != daemonclient.CommandGitStatus || got[5] != daemonclient.CommandGitMergePreflight || got[6] != daemonclient.CommandGitFetch || got[7] != daemonclient.CommandGitCheckout || got[8] != daemonclient.CommandGitMerge {
 		t.Fatalf("requests = %v", got)
 	}
 }
@@ -2276,6 +2339,18 @@ func TestActionModeMergeKeyTriggersFollowOnMergeFlow(t *testing.T) {
 				})
 				if err != nil {
 					t.Fatalf("marshal worktree response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandRuntimeReconcileIssue:
+				respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{ProjectID: "default"})
+				if err != nil {
+					t.Fatalf("marshal reconcile response: %v", err)
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -2342,9 +2417,11 @@ func TestActionModeMergeKeyTriggersFollowOnMergeFlow(t *testing.T) {
 	m := newTestModel()
 	m.daemonClient = daemonclient.New(transport)
 	m.editor.EnterAction()
+	parentIssueID := naming.IssueID(parentID)
+	childIssueID := naming.IssueID(childID)
 	m.tasks = []domain.Task{
-		{ID: childID, Title: "Child task", Status: domain.StatusInProgress, Type: domain.TypeTask, ParentID: &parentID},
-		{ID: parentID, Title: "Parent task", Status: domain.StatusDone, Type: domain.TypeTask},
+		{ID: childIssueID, Title: "Child task", Status: domain.StatusInProgress, Type: domain.TypeTask, ParentID: &parentIssueID},
+		{ID: parentIssueID, Title: "Parent task", Status: domain.StatusDone, Type: domain.TypeTask},
 	}
 	setTaskSession(t, &m, childID, &domain.Session{IssueID: naming.IssueID(childID), State: domain.SessionPaused, Worktree: "/tmp/child"})
 	setTaskSession(t, &m, parentID, &domain.Session{IssueID: naming.IssueID(parentID), State: domain.SessionBusy, Worktree: "/tmp/parent"})
@@ -2389,6 +2466,18 @@ func TestFollowOnMergeSelectionTopLevelFallsBackToMergeMain(t *testing.T) {
 				})
 				if err != nil {
 					t.Fatalf("marshal worktree response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandRuntimeReconcileIssue:
+				respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{ProjectID: "default"})
+				if err != nil {
+					t.Fatalf("marshal reconcile response: %v", err)
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -2478,9 +2567,10 @@ func TestFollowOnMergeSelectionTopLevelFallsBackToMergeMain(t *testing.T) {
 
 	m := newTestModel()
 	m.daemonClient = daemonclient.New(transport)
+	issueIDTyped := naming.IssueID(issueID)
 	m.tasks = []domain.Task{
 		{
-			ID:     issueID,
+			ID:     issueIDTyped,
 			Title:  "Top-level task",
 			Status: domain.StatusInProgress,
 			Type:   domain.TypeTask,
@@ -2531,6 +2621,18 @@ func TestMergeToMainPreflightBlocksDirtySourceOrTarget(t *testing.T) {
 				})
 				if err != nil {
 					t.Fatalf("marshal worktree response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandRuntimeReconcileIssue:
+				respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{ProjectID: "default"})
+				if err != nil {
+					t.Fatalf("marshal reconcile response: %v", err)
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -2650,6 +2752,77 @@ func TestCheckMergePreflightUsesLiveGitStatusWhenRefreshFlagFalse(t *testing.T) 
 	}
 }
 
+func TestCheckMergePreflightReconcilesRuntimeWhenRefreshFlagTrue(t *testing.T) {
+	var reconcileBody protocol.RuntimeReconcileIssueRequestBody
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandRuntimeReconcileIssue:
+				if err := json.Unmarshal(req.Body, &reconcileBody); err != nil {
+					t.Fatalf("unmarshal reconcile issue body: %v", err)
+				}
+				respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{ProjectID: "default"})
+				if err != nil {
+					t.Fatalf("marshal reconcile response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandGitStatus:
+				respBody, err := json.Marshal(struct {
+					Status git.GitStatus `json:"status"`
+				}{Status: git.GitStatus{HasChanges: false}})
+				if err != nil {
+					t.Fatalf("marshal status response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newTestModel()
+	m.daemonClient = daemonclient.New(transport)
+
+	preflight := m.checkMergePreflight(
+		context.Background(),
+		"az-source",
+		"main",
+		"/tmp/az-source",
+		"/tmp/main",
+		"",
+		"",
+		true,
+	)
+	if preflight != nil {
+		t.Fatalf("preflight = %+v, want nil for clean status", preflight)
+	}
+	if len(transport.requests) < 3 {
+		t.Fatalf("requests = %v, want reconcile + two status calls", transport.requests)
+	}
+	if transport.requests[0] != daemonclient.CommandRuntimeReconcileIssue {
+		t.Fatalf("first command = %q, want %q", transport.requests[0], daemonclient.CommandRuntimeReconcileIssue)
+	}
+	if got := len(reconcileBody.IssueIDs); got != 1 {
+		t.Fatalf("reconcile issue IDs len = %d, want 1", got)
+	}
+	if got := reconcileBody.IssueIDs[0].String(); got != "az-source" {
+		t.Fatalf("reconcile issue ID = %q, want az-source", got)
+	}
+}
+
 func TestMergeToMainPreflightBlocksPredictedConflicts(t *testing.T) {
 	sourceID := "az-source"
 	targetWorktree := ""
@@ -2690,6 +2863,18 @@ func TestMergeToMainPreflightBlocksPredictedConflicts(t *testing.T) {
 				}{Status: git.GitStatus{HasChanges: false}})
 				if err != nil {
 					t.Fatalf("marshal status response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandRuntimeReconcileIssue:
+				respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{ProjectID: "default"})
+				if err != nil {
+					t.Fatalf("marshal reconcile response: %v", err)
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -3005,7 +3190,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		transport := &recordingDaemonTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
-				case daemonclient.CommandRuntimeReconcile:
+				case daemonclient.CommandRuntimeReconcileIssue:
 					respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{})
 					if err != nil {
 						t.Fatalf("marshal reconcile response: %v", err)
@@ -3095,31 +3280,31 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		if confirmCmd != nil {
 			_ = confirmCmd()
 		}
-			if updated.pendingCleanup == nil {
-				t.Fatal("expected pending cleanup confirmation")
-			}
-			if got := transport.requests; len(got) != 2 ||
-				got[0] != daemonclient.CommandRuntimeReconcile ||
-				got[1] != daemonclient.CommandTaskList {
-				t.Fatalf("requests before confirmation = %v", got)
-			}
+		if updated.pendingCleanup == nil {
+			t.Fatal("expected pending cleanup confirmation")
+		}
+		if got := transport.requests; len(got) != 2 ||
+			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
+			got[1] != daemonclient.CommandTaskList {
+			t.Fatalf("requests before confirmation = %v", got)
+		}
 
-			updatedAny, enterCmd := updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
-			updated, ok = updatedAny.(Model)
-			if !ok {
-				t.Fatalf("updated model type = %T, want Model", updatedAny)
-			}
-			if enterCmd != nil {
-				t.Fatal("expected enter to be ignored for cleanup confirmation")
-			}
-			if updated.pendingCleanup == nil {
-				t.Fatal("expected pending cleanup confirmation to remain after enter")
-			}
+		updatedAny, enterCmd := updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		updated, ok = updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if enterCmd != nil {
+			t.Fatal("expected enter to be ignored for cleanup confirmation")
+		}
+		if updated.pendingCleanup == nil {
+			t.Fatal("expected pending cleanup confirmation to remain after enter")
+		}
 
-			updatedAny, runCleanupCmd := updated.handleSelection(overlay.SelectionMsg{
-				Key:   "yes",
-				Value: overlay.ConfirmResult{Confirmed: true},
-			})
+		updatedAny, runCleanupCmd := updated.handleSelection(overlay.SelectionMsg{
+			Key:   "yes",
+			Value: overlay.ConfirmResult{Confirmed: true},
+		})
 		updated, ok = updatedAny.(Model)
 		if !ok {
 			t.Fatalf("updated model type = %T, want Model", updatedAny)
@@ -3140,7 +3325,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 			t.Fatalf("deletedTask = true, want false")
 		}
 		if got := transport.requests; len(got) != 4 ||
-			got[0] != daemonclient.CommandRuntimeReconcile ||
+			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
 			got[1] != daemonclient.CommandTaskList ||
 			got[2] != daemonclient.CommandSessionStop ||
 			got[3] != daemonclient.CommandWorktreeRemove {
@@ -3152,7 +3337,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		transport := &recordingDaemonTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
-				case daemonclient.CommandRuntimeReconcile:
+				case daemonclient.CommandRuntimeReconcileIssue:
 					respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{})
 					if err != nil {
 						t.Fatalf("marshal reconcile response: %v", err)
@@ -3250,7 +3435,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 			t.Fatalf("deletedTask = false, want true")
 		}
 		if got := transport.requests; len(got) != 5 ||
-			got[0] != daemonclient.CommandRuntimeReconcile ||
+			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
 			got[1] != daemonclient.CommandTaskList ||
 			got[2] != daemonclient.CommandSessionStop ||
 			got[3] != daemonclient.CommandWorktreeRemove ||
@@ -3263,7 +3448,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		transport := &recordingDaemonTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
-				case daemonclient.CommandRuntimeReconcile:
+				case daemonclient.CommandRuntimeReconcileIssue:
 					respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{})
 					if err != nil {
 						t.Fatalf("marshal reconcile response: %v", err)
@@ -3371,7 +3556,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		}
 
 		if got := transport.requests; len(got) != 4 ||
-			got[0] != daemonclient.CommandRuntimeReconcile ||
+			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
 			got[1] != daemonclient.CommandTaskList ||
 			got[2] != daemonclient.CommandSessionStop ||
 			got[3] != daemonclient.CommandWorktreeRemove {
@@ -3385,7 +3570,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		transport := &recordingDaemonTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
-				case daemonclient.CommandRuntimeReconcile:
+				case daemonclient.CommandRuntimeReconcileIssue:
 					respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{})
 					if err != nil {
 						t.Fatalf("marshal reconcile response: %v", err)
@@ -3557,7 +3742,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 			t.Fatalf("stop calls = %d, want 2", stopCalls)
 		}
 		if got := transport.requests; len(got) != 6 ||
-			got[0] != daemonclient.CommandRuntimeReconcile ||
+			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
 			got[1] != daemonclient.CommandTaskList ||
 			got[2] != daemonclient.CommandSessionStop ||
 			got[3] != daemonclient.CommandWorktreeRemove ||
@@ -3566,6 +3751,88 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 			t.Fatalf("requests = %v", got)
 		}
 	})
+}
+
+func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
+	const issueID = "az-1"
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandRuntimeReconcileIssue:
+				var body protocol.RuntimeReconcileIssueRequestBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal reconcile body: %v", err)
+				}
+				if len(body.IssueIDs) != 1 || body.IssueIDs[0].String() != issueID {
+					t.Fatalf("reconcile issue_ids = %+v, want [%s]", body.IssueIDs, issueID)
+				}
+				respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{ProjectID: "default"})
+				if err != nil {
+					t.Fatalf("marshal reconcile response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandTaskList:
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+						{ID: naming.IssueID(issueID), Title: "Task fresh", Status: domain.StatusInProgress, Type: domain.TypeTask},
+					}),
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.editor.EnterNormal()
+	m.tasks = []domain.Task{
+		{ID: naming.IssueID(issueID), Title: "Task stale", Status: domain.StatusInProgress, Type: domain.TypeTask},
+	}
+	m.nav.SelectTask(issueID, 0)
+
+	updatedAny, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+
+	current := updated.overlayStack.Current()
+	workspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected TaskWorkspaceOverlay on top, got %T", current)
+	}
+	if !strings.Contains(workspace.View(), "Task stale") {
+		t.Fatalf("workspace should open immediately with current projection, got %q", workspace.View())
+	}
+
+	refreshMsg := updated.refreshTaskWorkspaceInBackgroundCmd(issueID)()
+	nextAny, _ := updated.Update(refreshMsg)
+	next, ok := nextAny.(Model)
+	if !ok {
+		t.Fatalf("next model type = %T, want Model", nextAny)
+	}
+	refreshed, ok := next.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected TaskWorkspaceOverlay after refresh, got %T", next.overlayStack.Current())
+	}
+	if !strings.Contains(refreshed.View(), "Task fresh") {
+		t.Fatalf("workspace should refresh from daemon snapshot, got %q", refreshed.View())
+	}
+	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskList {
+		t.Fatalf("requests = %v", got)
+	}
 }
 
 func TestAbortMergeCmdUsesDaemonClient(t *testing.T) {
@@ -4516,7 +4783,7 @@ func TestMergeSourceOverlaySelectsUpstreamSource(t *testing.T) {
 	}
 
 	view := menu.View()
-	if !strings.Contains(view, "Merge into") || !strings.Contains(view, target.ID) {
+	if !strings.Contains(view, "Merge into") || !strings.Contains(view, target.ID.String()) {
 		t.Fatalf("view = %q, want upstream header", view)
 	}
 
@@ -4587,9 +4854,10 @@ func TestStartSessionShiftSStartsDirectlyFromBaseBranch(t *testing.T) {
 
 	m := newDaemonTestModel(transport)
 	m.config.Git.BaseBranch = baseBranch
+	childIssueID := naming.IssueID(childID)
 	m.tasks = []domain.Task{
 		{
-			ID:     childID,
+			ID:     childIssueID,
 			Title:  "Child task",
 			Status: domain.StatusInProgress,
 			Type:   domain.TypeTask,
@@ -4663,9 +4931,10 @@ func TestStartSessionLowercaseSStartsTmuxOnly(t *testing.T) {
 
 	m := newDaemonTestModel(transport)
 	m.config.Git.BaseBranch = baseBranch
+	childIssueID := naming.IssueID(childID)
 	m.tasks = []domain.Task{
 		{
-			ID:     childID,
+			ID:     childIssueID,
 			Title:  "Child task",
 			Status: domain.StatusInProgress,
 			Type:   domain.TypeTask,
@@ -4738,19 +5007,21 @@ func TestSessionOriginCandidatesIncludeBaseBranchAndUpstreamSource(t *testing.T)
 	baseBranch := "develop"
 	parentID := "az-parent"
 	childID := "az-child"
+	parentIssueID := naming.IssueID(parentID)
+	childIssueID := naming.IssueID(childID)
 
 	m := newDaemonTestModel(&recordingDaemonTransport{})
 	m.config.Git.BaseBranch = baseBranch
 	m.tasks = []domain.Task{
 		{
-			ID:       childID,
+			ID:       childIssueID,
 			Title:    "Child task",
 			Status:   domain.StatusInProgress,
 			Type:     domain.TypeTask,
-			ParentID: &parentID,
+			ParentID: &parentIssueID,
 		},
 		{
-			ID:     parentID,
+			ID:     parentIssueID,
 			Title:  "Parent task",
 			Status: domain.StatusDone,
 			Type:   domain.TypeTask,
@@ -4837,23 +5108,26 @@ func TestStartSessionShiftSIgnoresUpstreamChoices(t *testing.T) {
 
 	m := newDaemonTestModel(transport)
 	m.config.Git.BaseBranch = baseBranch
+	childIssueID := naming.IssueID(childID)
+	parentAIssueID := naming.IssueID(parentA)
+	parentBIssueID := naming.IssueID(parentB)
 	m.tasks = []domain.Task{
 		{
-			ID:           childID,
+			ID:           childIssueID,
 			Title:        "Child task",
 			Status:       domain.StatusInProgress,
 			Type:         domain.TypeTask,
-			ParentID:     &parentA,
-			Dependencies: []domain.Dependency{{ID: parentB, Type: domain.DependencyBlocks}},
+			ParentID:     &parentAIssueID,
+			Dependencies: []domain.Dependency{{ID: parentBIssueID, Type: domain.DependencyBlocks}},
 		},
 		{
-			ID:     parentA,
+			ID:     parentAIssueID,
 			Title:  "Parent A",
 			Status: domain.StatusDone,
 			Type:   domain.TypeTask,
 		},
 		{
-			ID:     parentB,
+			ID:     parentBIssueID,
 			Title:  "Parent B",
 			Status: domain.StatusInProgress,
 			Type:   domain.TypeTask,
@@ -4945,9 +5219,10 @@ func TestStartSessionBangStartsYoloFromBaseBranch(t *testing.T) {
 
 	m := newDaemonTestModel(transport)
 	m.config.Git.BaseBranch = baseBranch
+	childIssueID := naming.IssueID(childID)
 	m.tasks = []domain.Task{
 		{
-			ID:     childID,
+			ID:     childIssueID,
 			Title:  "Child task",
 			Status: domain.StatusInProgress,
 			Type:   domain.TypeTask,
@@ -5275,6 +5550,172 @@ func TestDaemonEventRevisionReducer(t *testing.T) {
 				t.Fatalf("model revision = %d, want %d", next.daemonRevision, tt.wantRevision)
 			}
 		})
+	}
+}
+
+func TestProjectionEventRevisionGate(t *testing.T) {
+	makeProjectionEvent := func(revision uint64, dirty bool) daemonStreamEventMsg {
+		body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
+			ProjectID: "azedarach-bte",
+			IssueID:   "az-1",
+			UpdatedAt: time.Date(2026, time.April, 9, 12, 0, 0, 0, time.UTC),
+			Runtime: &protocol.RuntimeProjectionEventBody{
+				ProjectID: "azedarach-bte",
+				Revision:  revision,
+				Projection: protocol.RuntimeProjection{
+					ProjectID: "azedarach-bte",
+					IssueID:   "az-1",
+					Worktree: protocol.RuntimeWorktreeProjection{
+						Exists:  true,
+						Path:    "/tmp/repo-az-1",
+						Healthy: true,
+					},
+					Git: protocol.RuntimeGitProjection{
+						HasUncommittedChanges: dirty,
+						GitAdditions:          3,
+						GitDeletions:          1,
+					},
+					Session: protocol.RuntimeSessionProjection{
+						HasSession: true,
+						State:      protocol.SessionLifecycleStateAttached,
+						Worktree:   "/tmp/repo-az-1",
+					},
+					Agent: protocol.RuntimeAgentProjection{Status: "attached"},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal projection body: %v", err)
+		}
+		return daemonStreamEventMsg{
+			event: protocol.EventEnvelope{
+				Event:    protocol.EventGitStatusUpdated,
+				Revision: revision,
+				Body:     body,
+			},
+		}
+	}
+
+	t.Run("stale projection event ignored", func(t *testing.T) {
+		m := newTestModel()
+		m.daemonRevision = 8
+		m.daemonEvents = make(chan protocol.EventEnvelope)
+		m.tasks[0].HasUncommittedChanges = false
+		m.tasks[0].GitAdditions = 0
+		m.tasks[0].GitDeletions = 0
+
+		updated, cmd := m.Update(makeProjectionEvent(7, true))
+		if cmd == nil {
+			t.Fatal("expected wait command")
+		}
+		next := updated.(Model)
+		if next.daemonRevision != 8 {
+			t.Fatalf("daemon revision = %d, want 8", next.daemonRevision)
+		}
+		if next.tasks[0].HasUncommittedChanges {
+			t.Fatalf("stale event should not update dirty flag: %+v", next.tasks[0])
+		}
+	})
+
+	t.Run("gap projection event triggers rehydrate", func(t *testing.T) {
+		m := newTestModel()
+		m.daemonRevision = 8
+		m.daemonEvents = make(chan protocol.EventEnvelope)
+		m.tasks[0].HasUncommittedChanges = false
+
+		updated, cmd := m.Update(makeProjectionEvent(10, true))
+		if cmd == nil {
+			t.Fatal("expected reattach command")
+		}
+		next := updated.(Model)
+		if next.daemonEvents != nil {
+			t.Fatal("expected daemon stream to be cleared for rehydrate")
+		}
+		if next.daemonRevision != 8 {
+			t.Fatalf("daemon revision = %d, want 8", next.daemonRevision)
+		}
+		if next.tasks[0].HasUncommittedChanges {
+			t.Fatalf("gap event should not apply projection before rehydrate: %+v", next.tasks[0])
+		}
+	})
+
+	t.Run("sequential projection event applies", func(t *testing.T) {
+		m := newTestModel()
+		m.daemonRevision = 8
+		m.daemonEvents = make(chan protocol.EventEnvelope)
+		m.tasks[0].HasUncommittedChanges = false
+
+		updated, cmd := m.Update(makeProjectionEvent(9, true))
+		if cmd == nil {
+			t.Fatal("expected wait command")
+		}
+		next := updated.(Model)
+		if next.daemonRevision != 9 {
+			t.Fatalf("daemon revision = %d, want 9", next.daemonRevision)
+		}
+		if !next.tasks[0].HasUncommittedChanges {
+			t.Fatalf("sequential projection should update dirty flag: %+v", next.tasks[0])
+		}
+	})
+}
+
+func TestLoadIssuesAfterRuntimeReconcileCmd_ReconcilesBeforeSnapshot(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandRuntimeReconcile:
+				body, err := json.Marshal(daemonclient.RuntimeReconcileResult{
+					ProjectID: "azedarach-bte",
+				})
+				if err != nil {
+					t.Fatalf("marshal runtime reconcile response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            body,
+				}, nil
+			case daemonclient.CommandTaskList:
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 12, "azedarach-bte", []domain.Task{
+						{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen},
+					}),
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.issueRefreshSeq = 42
+	cmd := m.loadIssuesAfterRuntimeReconcileCmd()
+	if cmd == nil {
+		t.Fatal("expected command")
+	}
+	msg := cmd()
+	loaded, ok := msg.(issuesLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
+	}
+	if loaded.refreshSeq != 42 {
+		t.Fatalf("refresh seq = %d, want 42", loaded.refreshSeq)
+	}
+	if loaded.revision != 12 {
+		t.Fatalf("revision = %d, want 12", loaded.revision)
+	}
+	if len(transport.requests) < 2 {
+		t.Fatalf("requests = %v, want at least two commands", transport.requests)
+	}
+	if transport.requests[0] != daemonclient.CommandRuntimeReconcile || transport.requests[1] != daemonclient.CommandTaskList {
+		t.Fatalf("command order = %v, want runtime reconcile before task list", transport.requests[:2])
 	}
 }
 

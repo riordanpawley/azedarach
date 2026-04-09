@@ -67,7 +67,7 @@ func TestSort_Apply_Priority(t *testing.T) {
 		// P0 < P1 < P2 < P4 (lower number = higher priority, should come first in asc)
 		want := []string{"az-2", "az-5", "az-3", "az-1", "az-4"}
 		for i, task := range result {
-			if task.ID != want[i] {
+			if task.ID.String() != want[i] {
 				t.Errorf("Apply()[%d] = %s, want %s", i, task.ID, want[i])
 			}
 		}
@@ -80,7 +80,7 @@ func TestSort_Apply_Priority(t *testing.T) {
 		// P4 > P2 > P1 > P0 (higher number = lower priority, should come first in desc)
 		want := []string{"az-4", "az-1", "az-3", "az-2", "az-5"}
 		for i, task := range result {
-			if task.ID != want[i] {
+			if task.ID.String() != want[i] {
 				t.Errorf("Apply()[%d] = %s, want %s", i, task.ID, want[i])
 			}
 		}
@@ -102,7 +102,7 @@ func TestSort_Apply_Updated(t *testing.T) {
 
 		want := []string{"az-4", "az-2", "az-1", "az-3"}
 		for i, task := range result {
-			if task.ID != want[i] {
+			if task.ID.String() != want[i] {
 				t.Errorf("Apply()[%d] = %s, want %s", i, task.ID, want[i])
 			}
 		}
@@ -114,7 +114,7 @@ func TestSort_Apply_Updated(t *testing.T) {
 
 		want := []string{"az-3", "az-1", "az-2", "az-4"}
 		for i, task := range result {
-			if task.ID != want[i] {
+			if task.ID.String() != want[i] {
 				t.Errorf("Apply()[%d] = %s, want %s", i, task.ID, want[i])
 			}
 		}
@@ -136,7 +136,7 @@ func TestSort_Apply_GitDiff(t *testing.T) {
 
 		want := []string{"az-1", "az-3", "az-2", "az-4"}
 		for i, task := range result {
-			if task.ID != want[i] {
+			if task.ID.String() != want[i] {
 				t.Errorf("Apply()[%d] = %s, want %s", i, task.ID, want[i])
 			}
 		}
@@ -148,7 +148,7 @@ func TestSort_Apply_GitDiff(t *testing.T) {
 
 		want := []string{"az-4", "az-2", "az-3", "az-1"}
 		for i, task := range result {
-			if task.ID != want[i] {
+			if task.ID.String() != want[i] {
 				t.Errorf("Apply()[%d] = %s, want %s", i, task.ID, want[i])
 			}
 		}
@@ -189,7 +189,7 @@ func TestSort_Apply_GitDiff(t *testing.T) {
 		result := s.Apply(tieTasks)
 		want := []string{"active-session", "worktree-recent", "worktree-old", "plain-newer"}
 		for i, task := range result {
-			if task.ID != want[i] {
+			if task.ID.String() != want[i] {
 				t.Errorf("Apply()[%d] = %s, want %s", i, task.ID, want[i])
 			}
 		}
@@ -215,7 +215,7 @@ func TestSort_Apply_Session(t *testing.T) {
 		// Waiting > Busy > Paused > Error > Done > Idle/Worktree-only > nil
 		want := []string{"az-3", "az-1", "az-5", "az-4", "az-2", "az-6", "az-7", "az-8"}
 		for i, task := range result {
-			if task.ID != want[i] {
+			if task.ID.String() != want[i] {
 				t.Errorf("Apply()[%d] = %s, want %s", i, task.ID, want[i])
 			}
 		}
@@ -228,7 +228,7 @@ func TestSort_Apply_Session(t *testing.T) {
 		// nil > Idle/Worktree-only > Done > Error > Paused > Busy > Waiting
 		want := []string{"az-8", "az-6", "az-7", "az-2", "az-4", "az-5", "az-1", "az-3"}
 		for i, task := range result {
-			if task.ID != want[i] {
+			if task.ID.String() != want[i] {
 				t.Errorf("Apply()[%d] = %s, want %s", i, task.ID, want[i])
 			}
 		}
@@ -282,7 +282,7 @@ func TestSort_Apply_StableSort(t *testing.T) {
 	// Should maintain original order when priorities are equal
 	want := []string{"az-1", "az-2", "az-3"}
 	for i, task := range result {
-		if task.ID != want[i] {
+		if task.ID.String() != want[i] {
 			t.Errorf("Apply()[%d] = %s, want %s (stable sort failed)", i, task.ID, want[i])
 		}
 	}

@@ -128,6 +128,8 @@ type Daemon struct {
 
 	shutdownMu       sync.Mutex
 	shuttingDown     bool
+	shutdownReqCh    chan struct{}
+	shutdownReqOnce  sync.Once
 	inFlightCommands sync.WaitGroup
 
 	syncBootstrapState syncBootstrapState
@@ -227,24 +229,21 @@ func New(cfg Config) *Daemon {
 		sessionStateRefreshing:        map[string]bool{},
 		sessionStateLastRefresh:       map[string]time.Time{},
 		revision:                      map[string]uint64{},
+		shutdownReqCh:                 make(chan struct{}),
+	}
+	canonicalProjectID := protocol.DefaultProjectID
+	if hashProjectID, err := appconfig.ProjectIDForRoot(strings.TrimSpace(cfg.RepoDir)); err == nil {
+		canonicalProjectID = protocol.NormalizeProjectID(hashProjectID)
+	} else if repoName := protocol.NormalizeProjectID(filepath.Base(strings.TrimSpace(cfg.RepoDir))); repoName != "" {
+		canonicalProjectID = repoName
 	}
 	d.issueClientsByRoot[strings.TrimSpace(cfg.RepoDir)] = issuesClient
-	d.issueClientsByProject[protocol.DefaultProjectID] = issuesClient
+	d.issueClientsByProject[canonicalProjectID] = issuesClient
 	baseWorktreeManager := git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger)
 	d.worktreeManagersByRoot[strings.TrimSpace(cfg.RepoDir)] = baseWorktreeManager
-	d.worktreeManagersByProject[protocol.DefaultProjectID] = baseWorktreeManager
+	d.worktreeManagersByProject[canonicalProjectID] = baseWorktreeManager
 	d.runtimeStoresByRoot[strings.TrimSpace(cfg.RepoDir)] = runtimeStateStore
-	d.runtimeStoresByProject[protocol.DefaultProjectID] = runtimeStateStore
-	if repoName := protocol.NormalizeProjectID(filepath.Base(strings.TrimSpace(cfg.RepoDir))); repoName != "" {
-		d.issueClientsByProject[repoName] = issuesClient
-		d.worktreeManagersByProject[repoName] = baseWorktreeManager
-		d.runtimeStoresByProject[repoName] = runtimeStateStore
-	}
-	if hashProjectID, err := appconfig.ProjectIDForRoot(strings.TrimSpace(cfg.RepoDir)); err == nil {
-		d.issueClientsByProject[protocol.NormalizeProjectID(hashProjectID)] = issuesClient
-		d.worktreeManagersByProject[protocol.NormalizeProjectID(hashProjectID)] = baseWorktreeManager
-		d.runtimeStoresByProject[protocol.NormalizeProjectID(hashProjectID)] = runtimeStateStore
-	}
+	d.runtimeStoresByProject[canonicalProjectID] = runtimeStateStore
 	specService.daemon = d
 	specHandler := daemonhandlers.NewSpecHandler(specService)
 	d.syncBootstrapFn = d.defaultSyncBootstrap
@@ -316,6 +315,7 @@ func New(cfg Config) *Daemon {
 // Run acquires singleton lock and serves daemon IPC until context cancellation.
 func (d *Daemon) Run(ctx context.Context) error {
 	startedAt := time.Now()
+	d.prepareRunShutdownState()
 	if err := d.validateCommandPolicyConfiguration(); err != nil {
 		return err
 	}
@@ -328,6 +328,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	defer cancelServe()
 	shutdownDone := make(chan struct{})
 	shutdownStop := make(chan struct{})
+	shutdownReqCh := d.shutdownRequestChannel()
 	go func() {
 		defer func() {
 			if r := recover(); r != nil && d.cfg.Logger != nil {
@@ -336,6 +337,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}()
 		select {
 		case <-ctx.Done():
+			d.requestShutdown()
+			d.drainInFlightCommands()
+			cancelServe()
+			close(shutdownDone)
+		case <-shutdownReqCh:
 			d.drainInFlightCommands()
 			cancelServe()
 			close(shutdownDone)
@@ -395,6 +401,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return err
 }
 
+func (d *Daemon) prepareRunShutdownState() {
+	d.shutdownMu.Lock()
+	defer d.shutdownMu.Unlock()
+	d.shuttingDown = false
+	d.shutdownReqCh = make(chan struct{})
+	d.shutdownReqOnce = sync.Once{}
+}
+
 func (d *Daemon) validateCommandPolicyConfiguration() error {
 	if err := daemonhandlers.ValidateCommandSpecs(); err != nil {
 		return fmt.Errorf("daemon command-spec registry validation failed: %w", err)
@@ -412,7 +426,7 @@ func (d *Daemon) handshake(_ context.Context, hello protocol.Hello) (protocol.He
 }
 
 func (d *Daemon) subscribe(_ context.Context, projectID string, fromRevision uint64) (<-chan protocol.EventEnvelope, func(), error) {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	ch, cancel := d.hub.Subscribe(projectID, fromRevision)
 	return ch, cancel, nil
 }
@@ -468,6 +482,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.router.Handle(ctx, req), nil
 	}
 	switch req.Command {
+	case protocol.CommandDaemonShutdown:
+		return d.handleDaemonShutdown(req), nil
 	case protocol.CommandIssueFanout:
 		return d.handleIssueFanout(ctx, req)
 	case protocol.CommandIssueFanoutDrift:
@@ -520,9 +536,32 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleSessionRecover(ctx, req)
 	case protocol.CommandRuntimeReconcile:
 		return d.handleRuntimeReconcile(ctx, req)
+	case protocol.CommandRuntimeReconcileIssue:
+		return d.handleRuntimeReconcileIssue(ctx, req)
 	default:
 		return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported command"), nil
 	}
+}
+
+func (d *Daemon) handleDaemonShutdown(req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+	d.requestShutdown()
+	return d.successResponse(req)
+}
+
+func (d *Daemon) shutdownRequestChannel() chan struct{} {
+	d.shutdownMu.Lock()
+	defer d.shutdownMu.Unlock()
+	if d.shutdownReqCh == nil {
+		d.shutdownReqCh = make(chan struct{})
+	}
+	return d.shutdownReqCh
+}
+
+func (d *Daemon) requestShutdown() {
+	ch := d.shutdownRequestChannel()
+	d.shutdownReqOnce.Do(func() {
+		close(ch)
+	})
 }
 
 func (d *Daemon) beginCommand() error {
@@ -602,46 +641,64 @@ func (d *Daemon) applySessionLifecycleTransition(
 	issueID string,
 	command string,
 ) error {
-	if d.session == nil {
-		return errors.New("session handler unavailable")
-	}
-	if err := d.refreshSessionInvariantCacheIfConfigured(ctx, projectID); err != nil {
-		return fmt.Errorf("refresh session transition cache: %w", err)
+	if d.sessionStore == nil {
+		return errors.New("session store unavailable")
 	}
 
-	body, err := json.Marshal(struct {
-		ProjectID string `json:"project_id"`
-		SessionID string `json:"session_id"`
-		IssueID   string `json:"issue_id"`
-	}{
-		ProjectID: projectID,
-		SessionID: sessionID,
-		IssueID:   issueID,
-	})
+	state, ok := lifecycleCommandState(command)
+	if !ok {
+		return fmt.Errorf("unsupported session command: %s", command)
+	}
+
+	_, err := d.sessionStore.UpsertSession(projectID, sessionID, issueID, state)
+	if err != nil && state == daemonstate.SessionStateStarting && errors.Is(err, daemonstate.ErrInvalidTransition) {
+		// Start uses tmux as source-of-truth for conflict detection; when tmux has no
+		// session but stale desired state exists, allow resetting desired->starting.
+		_, err = d.sessionStore.ForceUpsertSession(projectID, sessionID, issueID, state)
+	}
 	if err != nil {
 		return err
 	}
 
-	sessionReq := req
-	sessionReq.Command = command
-	sessionReq.Body = body
+	session, err := d.sessionStore.Session(projectID, sessionID)
+	if err != nil {
+		return err
+	}
+	if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil && strings.TrimSpace(issueID) != "" {
+		if observed, found, loadErr := runtimeStore.GetSessionStateByIssueID(ctx, projectID, issueID); loadErr == nil && found {
+			if strings.TrimSpace(string(observed.ObservedState)) != "" {
+				session.ObservedState = observed.ObservedState
+			}
+			if observed.StartedAt != nil && !observed.StartedAt.IsZero() {
+				started := observed.StartedAt.UTC()
+				session.StartedAt = &started
+			}
+			if observed.UpdatedAt.After(session.UpdatedAt) {
+				session.UpdatedAt = observed.UpdatedAt
+			}
+		} else if loadErr != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("load runtime session projection for transition failed", "project_id", projectID, "issue_id", issueID, "error", loadErr)
+		}
+	}
+	d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, req.Meta, session)
+	return nil
+}
 
-	resp := d.session.Handle(ctx, sessionReq)
-	if resp.OK {
-		if d.sessionStore == nil {
-			return errors.New("session store unavailable")
-		}
-		session, err := d.sessionStore.Session(projectID, sessionID)
-		if err != nil {
-			return err
-		}
-		d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, req.Meta, session)
-		return nil
+func lifecycleCommandState(command string) (daemonstate.SessionState, bool) {
+	switch command {
+	case daemonhandlers.CommandSessionStart:
+		return daemonstate.SessionStateStarting, true
+	case daemonhandlers.CommandSessionAttach:
+		return daemonstate.SessionStateAttached, true
+	case daemonhandlers.CommandSessionPause:
+		return daemonstate.SessionStatePaused, true
+	case daemonhandlers.CommandSessionResume:
+		return daemonstate.SessionStateAttached, true
+	case daemonhandlers.CommandSessionStop:
+		return daemonstate.SessionStateStopped, true
+	default:
+		return "", false
 	}
-	if resp.Error != nil {
-		return errors.New(resp.Error.Message)
-	}
-	return errors.New("session lifecycle transition failed")
 }
 
 func (d *Daemon) sessionRuntimeStateStore(projectID ...string) *daemonstate.RuntimeStateStore {
@@ -694,7 +751,7 @@ func (d *Daemon) refreshSessionInvariantCache(ctx context.Context, projectID str
 	if d == nil || d.sessionStore == nil {
 		return nil
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	if store == nil {
 		d.sessionStore.ReplaceProjectSessions(projectID, nil)
@@ -709,7 +766,7 @@ func (d *Daemon) refreshSessionInvariantCache(ctx context.Context, projectID str
 }
 
 func (d *Daemon) refreshSessionInvariantCacheIfConfigured(ctx context.Context, projectID string) error {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	if d.sessionRuntimeStateStoreIfConfigured(projectID) == nil {
 		return nil
 	}
@@ -868,7 +925,7 @@ func (d *Daemon) errorResponse(req protocol.RequestEnvelope, code protocol.Error
 }
 
 func (d *Daemon) projectID(meta protocol.Metadata) string {
-	return protocol.NormalizeProjectID(meta.ProjectID.String())
+	return d.canonicalProjectID(meta.ProjectID.String())
 }
 
 func (d *Daemon) nextRevision(projectID string) uint64 {
@@ -904,35 +961,41 @@ func (d *Daemon) publishTaskEvent(req protocol.RequestEnvelope, eventName string
 }
 
 func (d *Daemon) publishSessionProjectionEvent(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session) uint64 {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	rev := d.nextRevision(projectID)
 	d.publishSessionProjectionEventAtRevision(ctx, projectID, meta, session, rev)
 	return rev
 }
 
 func (d *Daemon) publishWorktreeProjectionEvent(ctx context.Context, projectID, issueID, worktree string) uint64 {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	rev := d.nextRevision(projectID)
 	d.publishWorktreeProjectionEventAtRevision(ctx, projectID, issueID, worktree, rev)
 	return rev
 }
 
 func (d *Daemon) publishGitStatusProjectionEvent(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) uint64 {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	rev := d.nextRevision(projectID)
 	d.publishGitStatusProjectionEventAtRevision(ctx, projectID, issueID, worktree, status, rev)
 	return rev
 }
 
 func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session, rev uint64) {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	if d.hub == nil {
 		return
 	}
 	runtime := d.runtimeProjectionForEvent(ctx, projectID, session.IssueID, "", nil)
+	if strings.TrimSpace(session.ID) != "" {
+		sessionRuntime := buildRuntimeProjection(projectID, &session, nil)
+		runtime.IssueID = sessionRuntime.IssueID
+		runtime.Session = sessionRuntime.Session
+		runtime.Agent = sessionRuntime.Agent
+	}
 	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
 	body, err := json.Marshal(protocol.SessionProjectionEventBody{
-		ProjectID: projectID,
+		ProjectID: naming.ProjectID(projectID),
 		Revision:  rev,
 		Session: protocol.SessionProjection{
 			SessionID: parseSessionIDOrZero(session.ID),
@@ -964,14 +1027,14 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 }
 
 func (d *Daemon) publishWorktreeProjectionEventAtRevision(ctx context.Context, projectID, issueID, worktree string, rev uint64) {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	if d.hub == nil {
 		return
 	}
 	runtime := d.runtimeProjectionForEvent(ctx, projectID, issueID, worktree, nil)
 	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
 	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
-		ProjectID: projectID,
+		ProjectID: naming.ProjectID(projectID),
 		IssueID:   parseIssueIDOrZero(issueID),
 		Worktree:  strings.TrimSpace(worktree),
 		UpdatedAt: time.Now().UTC(),
@@ -996,14 +1059,14 @@ func (d *Daemon) publishWorktreeProjectionEventAtRevision(ctx context.Context, p
 }
 
 func (d *Daemon) publishGitStatusProjectionEventAtRevision(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus, rev uint64) {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	if d.hub == nil {
 		return
 	}
 	runtime := d.runtimeProjectionForEvent(ctx, projectID, issueID, worktree, status)
 	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
 	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
-		ProjectID: projectID,
+		ProjectID: naming.ProjectID(projectID),
 		IssueID:   parseIssueIDOrZero(issueID),
 		Worktree:  strings.TrimSpace(worktree),
 		UpdatedAt: time.Now().UTC(),
@@ -1028,20 +1091,25 @@ func (d *Daemon) publishGitStatusProjectionEventAtRevision(ctx context.Context, 
 }
 
 func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) protocol.RuntimeProjection {
-	projectID = normalizeRuntimeProjectionProjectID(projectID)
+	projectID = normalizeRuntimeProjectionProjectID(projectID).String()
 	issueID = strings.TrimSpace(issueID)
 	worktree = strings.TrimSpace(worktree)
 
 	var session *daemonstate.Session
 	if issueID != "" {
-		if err := d.refreshSessionInvariantCache(ctx, projectID); err != nil {
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Debug("refresh session invariant cache failed", "project_id", projectID, "issue_id", issueID, "error", err)
+		if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil {
+			if loaded, found, err := runtimeStore.GetSessionStateByIssueID(ctx, projectID, issueID); err == nil && found {
+				copy := loaded
+				session = &copy
+			} else if err != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Debug("load runtime session projection failed", "project_id", projectID, "issue_id", issueID, "error", err)
 			}
 		}
-		if loaded, ok := d.sessionStore.SessionByIssueID(projectID, issueID); ok {
-			copy := loaded
-			session = &copy
+		if session == nil && d.sessionStore != nil {
+			if loaded, ok := d.sessionStore.SessionByIssueID(projectID, issueID); ok {
+				copy := loaded
+				session = &copy
+			}
 		}
 	}
 
@@ -1085,12 +1153,6 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 		fallbackStatus = status
 	}
 
-	if projection.Git.GitAdditions == 0 && fallbackStatus != nil {
-		projection.Git.GitAdditions = len(fallbackStatus.Added) + len(fallbackStatus.Modified) + len(fallbackStatus.Staged)
-	}
-	if projection.Git.GitDeletions == 0 && fallbackStatus != nil {
-		projection.Git.GitDeletions = len(fallbackStatus.Deleted)
-	}
 	if projection.Git.GitAheadCount == 0 && fallbackStatus != nil {
 		projection.Git.GitAheadCount = fallbackStatus.GitAheadCount
 	}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 )
 
@@ -282,7 +283,7 @@ func TestSessionAttachPauseResumeAndStatusCommandsRouteThroughDaemon(t *testing.
 			if body.ProjectID != "proj-a" {
 				t.Fatalf("body project_id = %q, want proj-a", body.ProjectID)
 			}
-			if body.SessionID != tt.sessionID {
+			if body.SessionID.String() != tt.sessionID {
 				t.Fatalf("body session_id = %q, want %q", body.SessionID, tt.sessionID)
 			}
 		})
@@ -293,7 +294,7 @@ func TestReconcileRuntimeRoutesThroughDaemon(t *testing.T) {
 	transport := &lifecycleRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			body, err := json.Marshal(protocol.RuntimeReconcileResponseBody{
-				ProjectID:             "proj-a",
+				ProjectID:             naming.ProjectID("proj-a"),
 				WorktreesRefreshed:    3,
 				RecreatedTmuxSessions: 2,
 				AlignedDaemonSessions: 1,
@@ -331,6 +332,62 @@ func TestReconcileRuntimeRoutesThroughDaemon(t *testing.T) {
 	}
 	if body.ProjectID != "proj-a" {
 		t.Fatalf("project_id = %q, want proj-a", body.ProjectID)
+	}
+}
+
+func TestReconcileRuntimeIssuesRoutesThroughDaemon(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			body, err := json.Marshal(protocol.RuntimeReconcileResponseBody{
+				ProjectID:             naming.ProjectID("proj-a"),
+				WorktreesRefreshed:    1,
+				RecreatedTmuxSessions: 1,
+				AlignedDaemonSessions: 0,
+			})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-a")
+	out, err := client.ReconcileRuntimeIssues(context.Background(), []string{"az-1", "az-1", "az-2"})
+	if err != nil {
+		t.Fatalf("ReconcileRuntimeIssues error: %v", err)
+	}
+	if out.ProjectID != "proj-a" {
+		t.Fatalf("project id = %q, want proj-a", out.ProjectID)
+	}
+	if transport.lastReq.Command != CommandRuntimeReconcileIssue {
+		t.Fatalf("command = %q, want %q", transport.lastReq.Command, CommandRuntimeReconcileIssue)
+	}
+	var body protocol.RuntimeReconcileIssueRequestBody
+	if err := json.Unmarshal(transport.lastReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if body.ProjectID != "proj-a" {
+		t.Fatalf("project_id = %q, want proj-a", body.ProjectID)
+	}
+	if len(body.IssueIDs) != 2 {
+		t.Fatalf("issue_ids len = %d, want 2", len(body.IssueIDs))
+	}
+	if body.IssueIDs[0].String() != "az-1" || body.IssueIDs[1].String() != "az-2" {
+		t.Fatalf("issue_ids = %+v, want [az-1 az-2]", body.IssueIDs)
+	}
+}
+
+func TestReconcileRuntimeIssuesRejectsEmptyIssueIDs(t *testing.T) {
+	client := New(&lifecycleRecordingTransport{}).WithProjectID("proj-a")
+	_, err := client.ReconcileRuntimeIssues(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected error for empty issue IDs")
 	}
 }
 
@@ -499,9 +556,9 @@ func TestListWorktreesUsesProjectRoute(t *testing.T) {
 	transport := &lifecycleRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			body, err := json.Marshal(worktreeListBody{
-				ProjectID: "proj-a",
+				ProjectID: naming.ProjectID("proj-a"),
 				Worktrees: []worktreePayload{
-					{Path: "/tmp/az-1", Branch: "az/az-1", IssueID: "az-1"},
+					{Path: "/tmp/az-1", Branch: "az/az-1", IssueID: naming.IssueID("az-1")},
 				},
 			})
 			if err != nil {
@@ -576,7 +633,7 @@ func TestCleanupOrphanedWorktreesRoutesAndDecodesResponse(t *testing.T) {
 	transport := &lifecycleRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			body, err := json.Marshal(protocol.CleanupOrphanedResponseBody{
-				ProjectID:        "proj-a",
+				ProjectID:        naming.ProjectID("proj-a"),
 				WorktreesRemoved: 2,
 			})
 			if err != nil {
@@ -611,7 +668,7 @@ func TestCleanupOrphanedWorktreesRoutesAndDecodesResponse(t *testing.T) {
 	if err := json.Unmarshal(transport.lastReq.Body, &body); err != nil {
 		t.Fatalf("unmarshal request body: %v", err)
 	}
-	if body.ProjectID != "proj-a" {
+	if body.ProjectID != naming.ProjectID("proj-a") {
 		t.Fatalf("request project_id = %q, want proj-a", body.ProjectID)
 	}
 }
@@ -620,7 +677,7 @@ func TestCleanupOrphanedWorktreesDecodesNestedOperationResult(t *testing.T) {
 	transport := &lifecycleRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			nested, err := json.Marshal(protocol.CleanupOrphanedResponseBody{
-				ProjectID:        "proj-a",
+				ProjectID:        naming.ProjectID("proj-a"),
 				WorktreesRemoved: 3,
 			})
 			if err != nil {

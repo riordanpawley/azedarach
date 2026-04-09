@@ -28,11 +28,12 @@ const (
 
 // Session contains authoritative session state.
 type Session struct {
-	ID        string
-	IssueID   string
-	State     SessionState
-	StartedAt *time.Time
-	UpdatedAt time.Time
+	ID            string
+	IssueID       string
+	State         SessionState
+	ObservedState SessionState
+	StartedAt     *time.Time
+	UpdatedAt     time.Time
 }
 
 // Snapshot is a read model for frontend/client attach flows.
@@ -96,6 +97,15 @@ func (s *Store) CurrentRevision(projectID string) uint64 {
 
 // UpsertSession creates or updates session state and increments revision.
 func (s *Store) UpsertSession(projectID, sessionID, issueID string, state SessionState) (SessionEvent, error) {
+	return s.upsertSession(projectID, sessionID, issueID, state, true)
+}
+
+// ForceUpsertSession creates or updates session state without enforcing lifecycle transition validity.
+func (s *Store) ForceUpsertSession(projectID, sessionID, issueID string, state SessionState) (SessionEvent, error) {
+	return s.upsertSession(projectID, sessionID, issueID, state, false)
+}
+
+func (s *Store) upsertSession(projectID, sessionID, issueID string, state SessionState, validate bool) (SessionEvent, error) {
 	if sessionID == "" {
 		return SessionEvent{}, fmt.Errorf("%w: missing session id", ErrInvalidTransition)
 	}
@@ -104,7 +114,7 @@ func (s *Store) UpsertSession(projectID, sessionID, issueID string, state Sessio
 
 	ps := s.ensureProjectLocked(projectID)
 	existing, ok := ps.sessions[sessionID]
-	if ok {
+	if validate && ok {
 		if !isValidTransition(existing.State, state) {
 			return SessionEvent{}, fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, existing.State, state)
 		}
@@ -112,6 +122,7 @@ func (s *Store) UpsertSession(projectID, sessionID, issueID string, state Sessio
 	ps.revision++
 	now := s.nowFn().UTC()
 	var startedAt *time.Time
+	observedState := state
 	if ok && existing.StartedAt != nil && !existing.StartedAt.IsZero() {
 		resetStartTimestamp := existing.State == SessionStateStopped && state == SessionStateStarting
 		if !resetStartTimestamp {
@@ -123,12 +134,16 @@ func (s *Store) UpsertSession(projectID, sessionID, issueID string, state Sessio
 		start := now
 		startedAt = &start
 	}
+	if ok && strings.TrimSpace(string(existing.ObservedState)) != "" {
+		observedState = existing.ObservedState
+	}
 	next := Session{
-		ID:        sessionID,
-		IssueID:   issueID,
-		State:     state,
-		StartedAt: startedAt,
-		UpdatedAt: now,
+		ID:            sessionID,
+		IssueID:       issueID,
+		State:         state,
+		ObservedState: observedState,
+		StartedAt:     startedAt,
+		UpdatedAt:     now,
 	}
 	ps.sessions[sessionID] = next
 	return SessionEvent{

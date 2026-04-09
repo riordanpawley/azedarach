@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
@@ -152,7 +153,7 @@ func NewEditTaskOverlayWithImplOptionsAndAttachmentService(task domain.Task, imp
 	acceptance.SetHeight(3)
 
 	overlay := &CreateTaskOverlay{
-		id:              task.ID,
+		id:              task.ID.String(),
 		title:           ti,
 		description:     ta,
 		acceptanceInput: acceptance,
@@ -161,7 +162,7 @@ func NewEditTaskOverlayWithImplOptionsAndAttachmentService(task domain.Task, imp
 		priority:        task.Priority,
 		status:          task.Status,
 		impls:           task.Implementations,
-		parentID:        task.ParentID,
+		parentID:        issueIDPtrToStringPtr(task.ParentID),
 		focusIndex:      focusTitle,
 		styles:          New(),
 		defaults: createTaskDefaults{
@@ -176,6 +177,14 @@ func NewEditTaskOverlayWithImplOptionsAndAttachmentService(task domain.Task, imp
 	}
 	overlay.syncImplementationSelection()
 	return overlay
+}
+
+func issueIDPtrToStringPtr(id *naming.IssueID) *string {
+	if id == nil {
+		return nil
+	}
+	value := id.String()
+	return &value
 }
 
 func NewCreateTaskOverlayWithParent(parentID *string) *CreateTaskOverlay {

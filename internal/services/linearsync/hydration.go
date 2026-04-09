@@ -2,35 +2,19 @@ package linearsync
 
 import "github.com/riordanpawley/azedarach/internal/domain"
 
-// ReconcileHydratedTasks overlays local runtime state onto a refreshed snapshot
-// while preserving the authoritative task payload from the daemon.
+// ReconcileHydratedTasks returns daemon-hydrated tasks while cloning nested
+// runtime pointers for local UI safety.
 func ReconcileHydratedTasks(current, hydrated []domain.Task) []domain.Task {
+	_ = current
 	if len(hydrated) == 0 {
 		return nil
-	}
-
-	currentByID := make(map[string]domain.Task, len(current))
-	for _, task := range current {
-		currentByID[task.ID] = task
 	}
 
 	reconciled := make([]domain.Task, 0, len(hydrated))
 	for _, task := range hydrated {
 		merged := task
-		if local, ok := currentByID[task.ID]; ok {
-			// Keep prior session projection when a refreshed snapshot temporarily
-			// omits session details for an otherwise unchanged task.
-			if merged.Session == nil && local.Session != nil {
-				merged.Session = cloneSession(local.Session)
-			}
-			merged.HasWorktree = local.HasWorktree
-			merged.GitAheadCount = local.GitAheadCount
-			merged.GitBehindCount = local.GitBehindCount
-			merged.HasUncommittedChanges = local.HasUncommittedChanges
-			merged.GitAdditions = local.GitAdditions
-			merged.GitDeletions = local.GitDeletions
-		}
-		merged.HasTmuxSession = merged.Session != nil
+		merged.Session = cloneSession(merged.Session)
+		merged.HasTmuxSession = merged.Session != nil || merged.HasTmuxSession
 		reconciled = append(reconciled, merged)
 	}
 

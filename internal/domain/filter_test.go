@@ -3,7 +3,17 @@ package domain
 import (
 	"testing"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
+
+func issueID(raw string) naming.IssueID {
+	id, err := naming.ParseIssueID(raw)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
 
 func TestNewFilter(t *testing.T) {
 	f := NewFilter()
@@ -89,7 +99,7 @@ func TestFilter_IsActive(t *testing.T) {
 func TestFilter_Matches_EmptyFilter(t *testing.T) {
 	f := NewFilter()
 	task := Task{
-		ID:       "az-1",
+		ID:       issueID("az-1"),
 		Title:    "Test task",
 		Status:   StatusOpen,
 		Priority: P1,
@@ -103,12 +113,12 @@ func TestFilter_Matches_EmptyFilter(t *testing.T) {
 
 func TestFilter_Apply_DefaultHidesChildIssues(t *testing.T) {
 	f := NewFilter()
-	parentID := "az-parent"
+	parentID := issueID("az-parent")
 	tasks := []Task{
 		{ID: parentID, Title: "Parent", Status: StatusOpen, Priority: P2, Type: TypeTask},
 		{ID: "az-child-parent-id", Title: "Child via parent_id", Status: StatusOpen, Priority: P2, Type: TypeTask, ParentID: &parentID},
 		{
-			ID:       "az-child-dep",
+			ID:       issueID("az-child-dep"),
 			Title:    "Child via dep",
 			Status:   StatusOpen,
 			Priority: P2,
@@ -118,7 +128,7 @@ func TestFilter_Apply_DefaultHidesChildIssues(t *testing.T) {
 			},
 		},
 		{
-			ID:       "az-blocks-only",
+			ID:       issueID("az-blocks-only"),
 			Title:    "Blocks-only relation is not a child",
 			Status:   StatusOpen,
 			Priority: P2,
@@ -133,7 +143,7 @@ func TestFilter_Apply_DefaultHidesChildIssues(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("Apply() with default filter should hide only parent-child tasks, got %+v", got)
 	}
-	if got[0].ID != parentID || got[1].ID != "az-blocks-only" {
+	if got[0].ID != parentID || got[1].ID != issueID("az-blocks-only") {
 		t.Fatalf("Apply() with default filter should hide children, got %+v", got)
 	}
 }
@@ -268,7 +278,7 @@ func TestFilter_Matches_SearchQuery(t *testing.T) {
 			name:  "matches title case-insensitive",
 			query: "auth",
 			task: Task{
-				ID:    "az-1",
+				ID:    issueID("az-1"),
 				Title: "Implement Authentication",
 			},
 			matches: true,
@@ -277,7 +287,7 @@ func TestFilter_Matches_SearchQuery(t *testing.T) {
 			name:  "matches ID",
 			query: "az-42",
 			task: Task{
-				ID:    "az-42",
+				ID:    issueID("az-42"),
 				Title: "Some task",
 			},
 			matches: true,
@@ -286,7 +296,7 @@ func TestFilter_Matches_SearchQuery(t *testing.T) {
 			name:  "partial ID match",
 			query: "42",
 			task: Task{
-				ID:    "az-42",
+				ID:    issueID("az-42"),
 				Title: "Some task",
 			},
 			matches: true,
@@ -295,7 +305,7 @@ func TestFilter_Matches_SearchQuery(t *testing.T) {
 			name:  "no match",
 			query: "database",
 			task: Task{
-				ID:    "az-1",
+				ID:    issueID("az-1"),
 				Title: "Fix authentication",
 			},
 			matches: false,
@@ -304,7 +314,7 @@ func TestFilter_Matches_SearchQuery(t *testing.T) {
 			name:  "case insensitive",
 			query: "FIX",
 			task: Task{
-				ID:    "az-1",
+				ID:    issueID("az-1"),
 				Title: "fix authentication",
 			},
 			matches: true,
@@ -326,10 +336,10 @@ func TestFilter_Matches_HideEpicChildren(t *testing.T) {
 	f := NewFilter()
 	f.HideEpicChildren = true
 
-	parentID := "az-epic"
+	parentID := issueID("az-epic")
 	tests := []struct {
 		name         string
-		parentID     *string
+		parentID     *naming.IssueID
 		dependencies []Dependency
 		matches      bool
 	}{
@@ -433,7 +443,7 @@ func TestFilter_Matches_Combined(t *testing.T) {
 		{
 			name: "all criteria match",
 			task: Task{
-				ID:       "az-1",
+				ID:       issueID("az-1"),
 				Title:    "Fix authentication bug",
 				Status:   StatusOpen,
 				Priority: P0,
@@ -444,7 +454,7 @@ func TestFilter_Matches_Combined(t *testing.T) {
 		{
 			name: "wrong status",
 			task: Task{
-				ID:       "az-2",
+				ID:       issueID("az-2"),
 				Title:    "Fix authentication bug",
 				Status:   StatusDone,
 				Priority: P0,
@@ -455,7 +465,7 @@ func TestFilter_Matches_Combined(t *testing.T) {
 		{
 			name: "wrong priority",
 			task: Task{
-				ID:       "az-3",
+				ID:       issueID("az-3"),
 				Title:    "Fix authentication bug",
 				Status:   StatusOpen,
 				Priority: P1,
@@ -466,7 +476,7 @@ func TestFilter_Matches_Combined(t *testing.T) {
 		{
 			name: "wrong type",
 			task: Task{
-				ID:       "az-4",
+				ID:       issueID("az-4"),
 				Title:    "Fix authentication bug",
 				Status:   StatusOpen,
 				Priority: P0,
@@ -477,7 +487,7 @@ func TestFilter_Matches_Combined(t *testing.T) {
 		{
 			name: "search does not match",
 			task: Task{
-				ID:       "az-5",
+				ID:       issueID("az-5"),
 				Title:    "Fix database bug",
 				Status:   StatusOpen,
 				Priority: P0,
@@ -498,10 +508,10 @@ func TestFilter_Matches_Combined(t *testing.T) {
 
 func TestFilter_Apply(t *testing.T) {
 	tasks := []Task{
-		{ID: "az-1", Title: "Task 1", Status: StatusOpen, Priority: P0, Type: TypeBug},
-		{ID: "az-2", Title: "Task 2", Status: StatusInProgress, Priority: P1, Type: TypeFeature},
-		{ID: "az-3", Title: "Task 3", Status: StatusOpen, Priority: P0, Type: TypeTask},
-		{ID: "az-4", Title: "Task 4", Status: StatusDone, Priority: P2, Type: TypeBug},
+		{ID: issueID("az-1"), Title: "Task 1", Status: StatusOpen, Priority: P0, Type: TypeBug},
+		{ID: issueID("az-2"), Title: "Task 2", Status: StatusInProgress, Priority: P1, Type: TypeFeature},
+		{ID: issueID("az-3"), Title: "Task 3", Status: StatusOpen, Priority: P0, Type: TypeTask},
+		{ID: issueID("az-4"), Title: "Task 4", Status: StatusDone, Priority: P2, Type: TypeBug},
 	}
 
 	f := NewFilter()
@@ -515,7 +525,7 @@ func TestFilter_Apply(t *testing.T) {
 		t.Errorf("Apply() returned %d tasks, want 2", len(result))
 	}
 
-	if result[0].ID != "az-1" || result[1].ID != "az-3" {
+	if result[0].ID != issueID("az-1") || result[1].ID != issueID("az-3") {
 		t.Errorf("Apply() returned wrong tasks: %v", result)
 	}
 }

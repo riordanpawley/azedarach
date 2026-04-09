@@ -96,6 +96,55 @@ func TestCommandLogsFailure(t *testing.T) {
 	}
 }
 
+func TestCommandDaemonShutdownRequestsRuntimeStop(t *testing.T) {
+	d := &Daemon{}
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-shutdown",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         protocol.CommandDaemonShutdown,
+		SentAt:          time.Now().UTC(),
+	}
+
+	resp, err := d.command(context.Background(), req)
+	if err != nil {
+		t.Fatalf("command returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("shutdown response = %+v", resp)
+	}
+
+	select {
+	case <-d.shutdownRequestChannel():
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected shutdown request channel to close")
+	}
+}
+
+func TestPrepareRunShutdownStateResetsSignals(t *testing.T) {
+	d := &Daemon{
+		shuttingDown:  true,
+		shutdownReqCh: make(chan struct{}),
+	}
+	d.requestShutdown()
+
+	d.prepareRunShutdownState()
+
+	if d.shuttingDown {
+		t.Fatal("expected shuttingDown reset to false")
+	}
+	if err := d.beginCommand(); err != nil {
+		t.Fatalf("beginCommand after reset: %v", err)
+	}
+	d.endCommand()
+
+	select {
+	case <-d.shutdownRequestChannel():
+		t.Fatal("expected fresh shutdown request channel to remain open after reset")
+	default:
+	}
+}
+
 func TestValidateCommandPolicyConfigurationFailsForIncompleteDispatcher(t *testing.T) {
 	d := &Daemon{
 		router: daemonhandlers.NewDispatcher(nil),
