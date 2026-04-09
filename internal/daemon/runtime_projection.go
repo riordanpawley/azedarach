@@ -103,8 +103,8 @@ func buildRuntimeProjectionEventBody(projectID string, revision uint64, projecti
 	}
 }
 
-func normalizeRuntimeProjectionProjectID(projectID string) string {
-	return protocol.NormalizeProjectID(projectID)
+func normalizeRuntimeProjectionProjectID(projectID string) naming.ProjectID {
+	return naming.ProjectID(protocol.NormalizeProjectID(projectID))
 }
 
 func timePtr(t time.Time) *time.Time {

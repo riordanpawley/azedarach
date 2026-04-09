@@ -266,7 +266,7 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	if got, want := payload.SchemaVersion, protocol.TaskListSnapshotSchemaVersion; got != want {
 		t.Fatalf("payload.SchemaVersion = %d, want %d", got, want)
 	}
-	if got, want := payload.ProjectID, projectID; got != want {
+	if got, want := payload.ProjectID.String(), projectID; got != want {
 		t.Fatalf("payload.ProjectID = %q, want %q", got, want)
 	}
 	if got, want := payload.SnapshotRevision, uint64(7); got != want {

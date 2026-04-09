@@ -78,7 +78,7 @@ func TestHookLogAppendAndList(t *testing.T) {
 	if events[0].Message != "hook run" || events[1].Message != "refresh failed" {
 		t.Fatalf("hook.log.list events = %+v", events)
 	}
-	if events[0].ProjectID != projectID || events[1].ProjectID != projectID {
+	if events[0].ProjectID.String() != projectID || events[1].ProjectID.String() != projectID {
 		t.Fatalf("hook.log.list project ids = [%q,%q], want %q", events[0].ProjectID, events[1].ProjectID, projectID)
 	}
 }

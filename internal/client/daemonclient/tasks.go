@@ -38,7 +38,7 @@ type TaskCreateParams struct {
 	Notes           string          `json:"notes,omitempty"`
 	Acceptance      string          `json:"acceptance,omitempty"`
 	Estimate        *int            `json:"estimate,omitempty"`
-	ParentID        *string         `json:"parent_id,omitempty"`
+	ParentID        *naming.IssueID `json:"parent_id,omitempty"`
 }
 
 // TaskUpdateParams contains the payload used to update task details through the shared daemon client.
@@ -52,39 +52,39 @@ type TaskUpdateParams struct {
 
 // TaskStatusRequest contains the payload used to update a task status.
 type TaskStatusRequest struct {
-	TaskID string        `json:"task_id"`
-	Status domain.Status `json:"status"`
+	TaskID naming.IssueID `json:"task_id"`
+	Status domain.Status  `json:"status"`
 }
 
 // TaskAppendNotesRequest appends a single line to task notes.
 type TaskAppendNotesRequest struct {
-	TaskID string `json:"task_id"`
-	Line   string `json:"line"`
+	TaskID naming.IssueID `json:"task_id"`
+	Line   string         `json:"line"`
 }
 
 // TaskIDRequest contains the payload used for delete/archive task operations.
 type TaskIDRequest struct {
-	TaskID string `json:"task_id"`
+	TaskID naming.IssueID `json:"task_id"`
 }
 
 // TaskDependencyParams contains the payload used for dependency operations.
 type TaskDependencyParams struct {
-	TaskID      string `json:"task_id"`
-	DependsOnID string `json:"depends_on_id"`
-	Type        string `json:"dependency_type"`
+	TaskID      naming.IssueID `json:"task_id"`
+	DependsOnID naming.IssueID `json:"depends_on_id"`
+	Type        string         `json:"dependency_type"`
 }
 
 // TaskDependencyRemoveParams extends dependency params with explicit confirmation.
 type TaskDependencyRemoveParams struct {
-	TaskID      string `json:"task_id"`
-	DependsOnID string `json:"depends_on_id"`
-	Type        string `json:"dependency_type"`
-	Confirm     bool   `json:"confirm"`
+	TaskID      naming.IssueID `json:"task_id"`
+	DependsOnID naming.IssueID `json:"depends_on_id"`
+	Type        string         `json:"dependency_type"`
+	Confirm     bool           `json:"confirm"`
 }
 
 // TaskIDResponse is returned by commands that allocate a new task identifier.
 type TaskIDResponse struct {
-	TaskID string `json:"task_id"`
+	TaskID naming.IssueID `json:"task_id"`
 }
 
 // TaskSnapshot captures a task list snapshot and the revision it was read at.
@@ -127,7 +127,7 @@ func (c *Client) commandJSONResponse(ctx context.Context, command string, body a
 		RequestID:       requestID,
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta: protocol.Metadata{
-			ProjectID: naming.ProjectID(c.projectRoute()),
+			ProjectID: c.projectID,
 		},
 		Command: command,
 		SentAt:  time.Now().UTC(),
@@ -266,24 +266,32 @@ func (c *Client) CreateTask(ctx context.Context, params TaskCreateParams) (strin
 	if resp.TaskID == "" {
 		return "", fmt.Errorf("%s returned empty task id", CommandTaskCreate)
 	}
-	return resp.TaskID, nil
+	return resp.TaskID.String(), nil
 }
 
 // UpdateTaskStatus updates a task's status through the daemon client boundary.
 func (c *Client) UpdateTaskStatus(ctx context.Context, taskID string, status domain.Status) error {
+	parsedTaskID, err := naming.ParseIssueID(taskID)
+	if err != nil {
+		return fmt.Errorf("invalid task id: %w", err)
+	}
 	return c.commandJSON(ctx, CommandTaskUpdateStatus, TaskStatusRequest{
-		TaskID: taskID,
+		TaskID: parsedTaskID,
 		Status: status,
 	}, nil)
 }
 
 // UpdateTaskDetails updates a task's details through the daemon client boundary.
 func (c *Client) UpdateTaskDetails(ctx context.Context, taskID string, params TaskUpdateParams) error {
+	parsedTaskID, err := naming.ParseIssueID(taskID)
+	if err != nil {
+		return fmt.Errorf("invalid task id: %w", err)
+	}
 	body := struct {
-		TaskID string `json:"task_id"`
+		TaskID naming.IssueID `json:"task_id"`
 		TaskUpdateParams
 	}{
-		TaskID:           taskID,
+		TaskID:           parsedTaskID,
 		TaskUpdateParams: params,
 	}
 	return c.commandJSON(ctx, CommandTaskUpdate, body, nil)
@@ -291,20 +299,32 @@ func (c *Client) UpdateTaskDetails(ctx context.Context, taskID string, params Ta
 
 // AppendTaskNotes appends a note line to task notes through the daemon boundary.
 func (c *Client) AppendTaskNotes(ctx context.Context, taskID, line string) error {
+	parsedTaskID, err := naming.ParseIssueID(taskID)
+	if err != nil {
+		return fmt.Errorf("invalid task id: %w", err)
+	}
 	return c.commandJSON(ctx, CommandTaskAppendNotes, TaskAppendNotesRequest{
-		TaskID: taskID,
+		TaskID: parsedTaskID,
 		Line:   line,
 	}, nil)
 }
 
 // DeleteTask deletes a task through the daemon client boundary.
 func (c *Client) DeleteTask(ctx context.Context, taskID string) error {
-	return c.commandJSON(ctx, CommandTaskDelete, TaskIDRequest{TaskID: taskID}, nil)
+	parsedTaskID, err := naming.ParseIssueID(taskID)
+	if err != nil {
+		return fmt.Errorf("invalid task id: %w", err)
+	}
+	return c.commandJSON(ctx, CommandTaskDelete, TaskIDRequest{TaskID: parsedTaskID}, nil)
 }
 
 // ArchiveTask archives a task through the daemon client boundary.
 func (c *Client) ArchiveTask(ctx context.Context, taskID string) error {
-	return c.commandJSON(ctx, CommandTaskArchive, TaskIDRequest{TaskID: taskID}, nil)
+	parsedTaskID, err := naming.ParseIssueID(taskID)
+	if err != nil {
+		return fmt.Errorf("invalid task id: %w", err)
+	}
+	return c.commandJSON(ctx, CommandTaskArchive, TaskIDRequest{TaskID: parsedTaskID}, nil)
 }
 
 // AddTaskDependency creates or restores a dependency between two tasks.

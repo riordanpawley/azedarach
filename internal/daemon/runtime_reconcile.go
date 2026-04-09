@@ -14,6 +14,7 @@ import (
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 const (
@@ -54,25 +55,25 @@ func newRuntimeReconcileService(d *Daemon) *runtimeReconcileService {
 
 func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID string) (protocol.RuntimeReconcileResponseBody, error) {
 	result := protocol.RuntimeReconcileResponseBody{
-		ProjectID:        protocol.NormalizeProjectID(projectID),
+		ProjectID:        naming.ProjectID(protocol.NormalizeProjectID(projectID)),
 		InvariantSources: invariantSourceDebugMap(),
 	}
 	d := s.daemon
 	if d == nil {
 		return result, nil
 	}
-	if d.tmux == nil || d.sessionStore == nil || d.sessionRuntimeStateStoreIfConfigured(result.ProjectID) == nil {
+	if d.tmux == nil || d.sessionStore == nil || d.sessionRuntimeStateStoreIfConfigured(result.ProjectID.String()) == nil {
 		return result, nil
 	}
 
 	var errs []error
-	if d.worktreeRuntimeStateStoreIfConfigured(result.ProjectID) != nil && d.worktreeManagerForProject(result.ProjectID) != nil {
-		if worktreeCount, err := d.refreshWorktreeRuntimeState(ctx, result.ProjectID); err != nil {
+	if d.worktreeRuntimeStateStoreIfConfigured(result.ProjectID.String()) != nil && d.worktreeManagerForProject(result.ProjectID.String()) != nil {
+		if worktreeCount, err := d.refreshWorktreeRuntimeState(ctx, result.ProjectID.String()); err != nil {
 			errs = append(errs, fmt.Errorf("refresh worktree runtime state: %w", err))
 		} else {
 			result.WorktreesRefreshed = worktreeCount
 		}
-		if sessionResult, err := d.reconcileTmuxAndDaemonSessions(ctx, result.ProjectID, ""); err != nil {
+		if sessionResult, err := d.reconcileTmuxAndDaemonSessions(ctx, result.ProjectID.String(), ""); err != nil {
 			errs = append(errs, fmt.Errorf("reconcile sessions: %w", err))
 		} else {
 			result.RecreatedTmuxSessions = sessionResult.RecreatedTmuxSessions
@@ -80,7 +81,7 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 		}
 	}
 
-	if err := d.refreshSessionRuntimeState(ctx, result.ProjectID); err != nil {
+	if err := d.refreshSessionRuntimeState(ctx, result.ProjectID.String()); err != nil {
 		errs = append(errs, fmt.Errorf("refresh session runtime state: %w", err))
 	}
 
@@ -605,7 +606,7 @@ func prioritizeProjectIDs(projectIDs []string, preferred []string) []string {
 func summarizeRuntimeReconcileSweep(results []protocol.RuntimeReconcileResponseBody) protocol.RuntimeReconcileResponseBody {
 	if len(results) == 0 {
 		return protocol.RuntimeReconcileResponseBody{
-			ProjectID:        protocol.DefaultProjectID,
+			ProjectID:        naming.ProjectID(protocol.DefaultProjectID),
 			InvariantSources: invariantSourceDebugMap(),
 		}
 	}
@@ -614,7 +615,7 @@ func summarizeRuntimeReconcileSweep(results []protocol.RuntimeReconcileResponseB
 		InvariantSources: invariantSourceDebugMap(),
 	}
 	if len(results) > 1 {
-		summary.ProjectID = "multi"
+		summary.ProjectID = naming.ProjectID("multi")
 	}
 	for _, result := range results {
 		summary.WorktreesRefreshed += result.WorktreesRefreshed

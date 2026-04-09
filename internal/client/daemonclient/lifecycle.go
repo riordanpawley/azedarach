@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
@@ -28,12 +30,12 @@ const (
 )
 
 type sessionCommandBody struct {
-	ProjectID  string   `json:"project_id"`
-	SessionID  string   `json:"session_id"`
-	BaseBranch string   `json:"base_branch,omitempty"`
-	Yolo       bool     `json:"yolo,omitempty"`
-	StartWork  *bool    `json:"start_work,omitempty"`
-	ImagePaths []string `json:"image_paths,omitempty"`
+	ProjectID  naming.ProjectID `json:"project_id"`
+	SessionID  naming.SessionID `json:"session_id,omitempty"`
+	BaseBranch string           `json:"base_branch,omitempty"`
+	Yolo       bool             `json:"yolo,omitempty"`
+	StartWork  *bool            `json:"start_work,omitempty"`
+	ImagePaths []string         `json:"image_paths,omitempty"`
 }
 
 // StartSessionParams captures lifecycle start options in a single payload
@@ -51,11 +53,11 @@ type commandOutputBody struct {
 }
 
 type devServerCommandBody struct {
-	IssueID string `json:"issue_id"`
+	IssueID naming.IssueID `json:"issue_id"`
 }
 
 type devServerResultBody struct {
-	IssueID string           `json:"issue_id"`
+	IssueID naming.IssueID   `json:"issue_id"`
 	Server  devserver.Server `json:"server"`
 }
 
@@ -64,28 +66,28 @@ type devServerListBody struct {
 }
 
 type worktreeListBody struct {
-	ProjectID string            `json:"project_id"`
+	ProjectID naming.ProjectID  `json:"project_id"`
 	Worktrees []worktreePayload `json:"worktrees"`
 }
 
 type worktreePayload struct {
-	Path    string `json:"path"`
-	Branch  string `json:"branch"`
-	IssueID string `json:"issue_id"`
+	Path    string         `json:"path"`
+	Branch  string         `json:"branch"`
+	IssueID naming.IssueID `json:"issue_id"`
 }
 
 type worktreeCommandBody struct {
-	ProjectID string `json:"project_id"`
-	IssueID   string `json:"issue_id,omitempty"`
-	Force     bool   `json:"force,omitempty"`
+	ProjectID naming.ProjectID `json:"project_id"`
+	IssueID   naming.IssueID   `json:"issue_id,omitempty"`
+	Force     bool             `json:"force,omitempty"`
 }
 
 // RuntimeReconcileResult captures the runtime repair summary returned by the daemon.
 type RuntimeReconcileResult struct {
-	ProjectID             string `json:"project_id"`
-	WorktreesRefreshed    int    `json:"worktrees_refreshed"`
-	RecreatedTmuxSessions int    `json:"recreated_tmux_sessions"`
-	AlignedDaemonSessions int    `json:"aligned_daemon_sessions"`
+	ProjectID             naming.ProjectID `json:"project_id"`
+	WorktreesRefreshed    int              `json:"worktrees_refreshed"`
+	RecreatedTmuxSessions int              `json:"recreated_tmux_sessions"`
+	AlignedDaemonSessions int              `json:"aligned_daemon_sessions"`
 }
 
 type longRunningResultEnvelope struct {
@@ -125,9 +127,13 @@ func (c *Client) projectRoute() string {
 
 // StartSession asks the daemon to start one session for issue/task id.
 func (c *Client) StartSession(ctx context.Context, params StartSessionParams) (string, error) {
+	issueID, err := parseIssueID(params.IssueID)
+	if err != nil {
+		return "", err
+	}
 	return c.commandOutput(ctx, CommandSessionStart, sessionCommandBody{
-		ProjectID:  c.projectRoute(),
-		SessionID:  params.IssueID,
+		ProjectID:  c.projectID,
+		SessionID:  naming.SessionID(issueID),
 		BaseBranch: params.BaseBranch,
 		Yolo:       params.Yolo,
 		StartWork:  params.StartWork,
@@ -137,41 +143,66 @@ func (c *Client) StartSession(ctx context.Context, params StartSessionParams) (s
 
 // StopSession asks the daemon to stop one session for issue/task id.
 func (c *Client) StopSession(ctx context.Context, issueID string) (string, error) {
+	parsedIssueID, err := parseIssueID(issueID)
+	if err != nil {
+		return "", err
+	}
 	return c.commandOutput(ctx, CommandSessionStop, sessionCommandBody{
-		ProjectID: c.projectRoute(),
-		SessionID: issueID,
+		ProjectID: c.projectID,
+		SessionID: naming.SessionID(parsedIssueID),
 	})
 }
 
 // AttachSession asks the daemon to attach to one session for issue/task id.
 func (c *Client) AttachSession(ctx context.Context, issueID string) (string, error) {
+	parsedIssueID, err := parseIssueID(issueID)
+	if err != nil {
+		return "", err
+	}
 	return c.commandOutput(ctx, CommandSessionAttach, sessionCommandBody{
-		ProjectID: c.projectRoute(),
-		SessionID: issueID,
+		ProjectID: c.projectID,
+		SessionID: naming.SessionID(parsedIssueID),
 	})
 }
 
 // PauseSession marks one issue/session as paused in daemon lifecycle state.
 func (c *Client) PauseSession(ctx context.Context, issueID string) (string, error) {
+	parsedIssueID, err := parseIssueID(issueID)
+	if err != nil {
+		return "", err
+	}
 	return c.commandOutput(ctx, CommandSessionPause, sessionCommandBody{
-		ProjectID: c.projectRoute(),
-		SessionID: issueID,
+		ProjectID: c.projectID,
+		SessionID: naming.SessionID(parsedIssueID),
 	})
 }
 
 // ResumeSession marks one issue/session as attached (active) in daemon lifecycle state.
 func (c *Client) ResumeSession(ctx context.Context, issueID string) (string, error) {
+	parsedIssueID, err := parseIssueID(issueID)
+	if err != nil {
+		return "", err
+	}
 	return c.commandOutput(ctx, CommandSessionResume, sessionCommandBody{
-		ProjectID: c.projectRoute(),
-		SessionID: issueID,
+		ProjectID: c.projectID,
+		SessionID: naming.SessionID(parsedIssueID),
 	})
 }
 
 // SessionStatus asks the daemon for the current session status view.
 func (c *Client) SessionStatus(ctx context.Context, issueID string) (string, error) {
+	var sessionID naming.SessionID
+	trimmedIssueID := strings.TrimSpace(issueID)
+	if trimmedIssueID != "" {
+		parsedIssueID, err := parseIssueID(trimmedIssueID)
+		if err != nil {
+			return "", err
+		}
+		sessionID = naming.SessionID(parsedIssueID)
+	}
 	return c.commandOutput(ctx, CommandSessionStatus, sessionCommandBody{
-		ProjectID: c.projectRoute(),
-		SessionID: issueID,
+		ProjectID: c.projectID,
+		SessionID: sessionID,
 	})
 }
 
@@ -179,7 +210,7 @@ func (c *Client) SessionStatus(ctx context.Context, issueID string) (string, err
 func (c *Client) ReconcileRuntime(ctx context.Context) (RuntimeReconcileResult, error) {
 	var out RuntimeReconcileResult
 	if err := c.commandJSON(ctx, CommandRuntimeReconcile, protocol.RuntimeReconcileRequestBody{
-		ProjectID: c.projectRoute(),
+		ProjectID: c.projectID,
 	}, &out); err != nil {
 		return RuntimeReconcileResult{}, err
 	}
@@ -188,8 +219,12 @@ func (c *Client) ReconcileRuntime(ctx context.Context) (RuntimeReconcileResult, 
 
 // DevServerStatus returns daemon-owned devserver status for one issue.
 func (c *Client) DevServerStatus(ctx context.Context, issueID string) (devserver.Server, error) {
+	parsedIssueID, err := parseIssueID(issueID)
+	if err != nil {
+		return devserver.Server{}, err
+	}
 	var out devServerResultBody
-	if err := c.commandJSON(ctx, CommandDevServerStatus, devServerCommandBody{IssueID: issueID}, &out); err != nil {
+	if err := c.commandJSON(ctx, CommandDevServerStatus, devServerCommandBody{IssueID: parsedIssueID}, &out); err != nil {
 		return devserver.Server{}, err
 	}
 	return out.Server, nil
@@ -206,8 +241,12 @@ func (c *Client) ListDevServers(ctx context.Context) ([]devserver.Server, error)
 
 // StartDevServer asks daemon to start one devserver.
 func (c *Client) StartDevServer(ctx context.Context, issueID string) (devserver.Server, error) {
+	parsedIssueID, err := parseIssueID(issueID)
+	if err != nil {
+		return devserver.Server{}, err
+	}
 	var out devServerResultBody
-	if err := c.commandJSON(ctx, CommandDevServerStart, devServerCommandBody{IssueID: issueID}, &out); err != nil {
+	if err := c.commandJSON(ctx, CommandDevServerStart, devServerCommandBody{IssueID: parsedIssueID}, &out); err != nil {
 		return devserver.Server{}, err
 	}
 	return out.Server, nil
@@ -215,8 +254,12 @@ func (c *Client) StartDevServer(ctx context.Context, issueID string) (devserver.
 
 // StopDevServer asks daemon to stop one devserver.
 func (c *Client) StopDevServer(ctx context.Context, issueID string) (devserver.Server, error) {
+	parsedIssueID, err := parseIssueID(issueID)
+	if err != nil {
+		return devserver.Server{}, err
+	}
 	var out devServerResultBody
-	if err := c.commandJSON(ctx, CommandDevServerStop, devServerCommandBody{IssueID: issueID}, &out); err != nil {
+	if err := c.commandJSON(ctx, CommandDevServerStop, devServerCommandBody{IssueID: parsedIssueID}, &out); err != nil {
 		return devserver.Server{}, err
 	}
 	return out.Server, nil
@@ -254,8 +297,8 @@ func (c *Client) RestartDevServer(ctx context.Context, issueID string) (devserve
 func (c *Client) ListWorktrees(ctx context.Context) ([]git.Worktree, error) {
 	var out worktreeListBody
 	if err := c.commandJSON(ctx, CommandWorktreeList, struct {
-		ProjectID string `json:"project_id"`
-	}{ProjectID: c.projectRoute()}, &out); err != nil {
+		ProjectID naming.ProjectID `json:"project_id"`
+	}{ProjectID: c.projectID}, &out); err != nil {
 		return nil, err
 	}
 
@@ -264,7 +307,7 @@ func (c *Client) ListWorktrees(ctx context.Context) ([]git.Worktree, error) {
 		worktrees = append(worktrees, git.Worktree{
 			Path:    wt.Path,
 			Branch:  wt.Branch,
-			IssueID: wt.IssueID,
+			IssueID: wt.IssueID.String(),
 		})
 	}
 	return worktrees, nil
@@ -277,9 +320,13 @@ func (c *Client) RemoveWorktree(ctx context.Context, issueID string) error {
 
 // RemoveWorktreeWithOptions asks the daemon to remove one worktree for an issue in the current project route.
 func (c *Client) RemoveWorktreeWithOptions(ctx context.Context, issueID string, force bool) error {
+	parsedIssueID, err := parseIssueID(issueID)
+	if err != nil {
+		return err
+	}
 	return c.commandJSON(ctx, CommandWorktreeRemove, worktreeCommandBody{
-		ProjectID: c.projectRoute(),
-		IssueID:   issueID,
+		ProjectID: c.projectID,
+		IssueID:   parsedIssueID,
 		Force:     force,
 	}, nil)
 }
@@ -287,7 +334,7 @@ func (c *Client) RemoveWorktreeWithOptions(ctx context.Context, issueID string, 
 // CleanupOrphanedWorktrees asks the daemon to remove orphaned worktrees for the current project route.
 func (c *Client) CleanupOrphanedWorktrees(ctx context.Context) (int, error) {
 	resp, err := c.commandJSONResponse(ctx, protocol.CommandWorktreeCleanupOrphaned, protocol.CleanupOrphanedRequestBody{
-		ProjectID: c.projectRoute(),
+		ProjectID: c.projectID,
 	})
 	if err != nil {
 		return 0, err
@@ -389,4 +436,12 @@ func stringValue(v *string) string {
 		return ""
 	}
 	return *v
+}
+
+func parseIssueID(raw string) (naming.IssueID, error) {
+	issueID, err := naming.ParseIssueID(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid issue id: %w", err)
+	}
+	return issueID, nil
 }

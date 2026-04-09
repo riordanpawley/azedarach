@@ -3,6 +3,7 @@ package daemonclient
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -25,7 +26,7 @@ func (c *Client) GetOperation(ctx context.Context, operationID string) (protocol
 	}
 	var out protocol.OperationGetResponseBody
 	if err := c.commandJSON(ctx, protocol.CommandOperationGet, protocol.OperationGetRequestBody{
-		ProjectID:   c.projectRoute(),
+		ProjectID:   c.projectID,
 		OperationID: parsedOperationID,
 	}, &out); err != nil {
 		return protocol.OperationRecord{}, err
@@ -34,10 +35,18 @@ func (c *Client) GetOperation(ctx context.Context, operationID string) (protocol
 }
 
 func (c *Client) ListOperations(ctx context.Context, opts OperationListOptions) ([]protocol.OperationRecord, error) {
+	var issueID naming.IssueID
+	if trimmed := strings.TrimSpace(opts.IssueID); trimmed != "" {
+		parsedIssueID, err := naming.ParseIssueID(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("invalid issue id: %w", err)
+		}
+		issueID = parsedIssueID
+	}
 	var out protocol.OperationListResponseBody
 	if err := c.commandJSON(ctx, protocol.CommandOperationList, protocol.OperationListRequestBody{
-		ProjectID: c.projectRoute(),
-		IssueID:   opts.IssueID,
+		ProjectID: c.projectID,
+		IssueID:   issueID,
 		Kind:      opts.Kind,
 		States:    opts.States,
 		Limit:     opts.Limit,
@@ -54,7 +63,7 @@ func (c *Client) CancelOperation(ctx context.Context, operationID, reason string
 	}
 	var out protocol.OperationCancelResponseBody
 	if err := c.commandJSON(ctx, protocol.CommandOperationCancel, protocol.OperationCancelRequestBody{
-		ProjectID:   c.projectRoute(),
+		ProjectID:   c.projectID,
 		OperationID: parsedOperationID,
 		Reason:      reason,
 	}, &out); err != nil {

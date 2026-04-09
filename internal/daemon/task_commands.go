@@ -91,7 +91,7 @@ func buildTaskListSnapshotPayload(projectID string, revision uint64, lastChecked
 		SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
 		ProtocolVersion:  protocol.CurrentVersion,
 		SnapshotRevision: revision,
-		ProjectID:        projectID,
+		ProjectID:        naming.ProjectID(projectID),
 		LastCheckedAt:    lastCheckedAt.UTC(),
 		Freshness:        freshness,
 		Tasks:            tasks,

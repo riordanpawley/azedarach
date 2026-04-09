@@ -22,7 +22,7 @@ func (d *Daemon) handleHookLogAppend(_ context.Context, req protocol.RequestEnve
 	}
 	projectID := d.projectID(req.Meta)
 	evt := cmd.Event
-	evt.ProjectID = projectID
+	evt.ProjectID = naming.ProjectID(projectID)
 	evt.Hook = strings.TrimSpace(evt.Hook)
 	evt.Worktree = strings.TrimSpace(evt.Worktree)
 	evt.Source = strings.TrimSpace(evt.Source)

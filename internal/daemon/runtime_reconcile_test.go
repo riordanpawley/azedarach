@@ -17,6 +17,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
@@ -79,9 +80,9 @@ func (r *sequentialRuntimeReconciler) Reconcile(ctx context.Context, projectID s
 
 	if call == 1 {
 		<-ctx.Done()
-		return protocol.RuntimeReconcileResponseBody{ProjectID: projectID}, ctx.Err()
+			return protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(projectID)}, ctx.Err()
 	}
-	return protocol.RuntimeReconcileResponseBody{ProjectID: projectID}, nil
+	return protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(projectID)}, nil
 }
 
 func (r *sequentialRuntimeReconciler) snapshot() (calls int, projectIDs []string) {
@@ -117,11 +118,11 @@ func (r *scriptedRuntimeReconciler) Reconcile(ctx context.Context, projectID str
 	if r.releaseByID != nil {
 		release = r.releaseByID
 	}
-	result := protocol.RuntimeReconcileResponseBody{ProjectID: projectID}
+	result := protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(projectID)}
 	if stored, ok := r.resultsByID[projectID]; ok {
 		result = stored
 		if result.ProjectID == "" {
-			result.ProjectID = projectID
+			result.ProjectID = naming.ProjectID(projectID)
 		}
 	}
 	r.mu.Unlock()
@@ -141,7 +142,7 @@ func (r *scriptedRuntimeReconciler) Reconcile(ctx context.Context, projectID str
 				r.mu.Lock()
 				r.current--
 				r.mu.Unlock()
-				return protocol.RuntimeReconcileResponseBody{ProjectID: projectID}, ctx.Err()
+				return protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(projectID)}, ctx.Err()
 			}
 		}
 	}
@@ -313,7 +314,7 @@ func TestRunStartupRuntimeReconcileUsesRepoScopedProjectID(t *testing.T) {
 		t.Fatalf("ProjectIDForRoot: %v", err)
 	}
 	recorder := &runtimeReconcileRecorder{
-		result: protocol.RuntimeReconcileResponseBody{ProjectID: wantProjectID},
+		result: protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(wantProjectID)},
 	}
 	d := &Daemon{
 		cfg: Config{
@@ -683,7 +684,7 @@ func TestRuntimeReconcileCycleUsesRepoScopedProjectID(t *testing.T) {
 		t.Fatalf("ProjectIDForRoot: %v", err)
 	}
 	recorder := &runtimeReconcileRecorder{
-		result: protocol.RuntimeReconcileResponseBody{ProjectID: wantProjectID},
+		result: protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(wantProjectID)},
 	}
 	d := &Daemon{
 		cfg: Config{

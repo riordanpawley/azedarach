@@ -1,6 +1,10 @@
 package protocol
 
-import "time"
+import (
+	"time"
+
+	"github.com/riordanpawley/azedarach/internal/naming"
+)
 
 const (
 	CommandHookLogAppend = "hook.log.append"
@@ -18,11 +22,11 @@ type HookLogListCommandBody struct {
 }
 
 type HookLogEvent struct {
-	ProjectID string    `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
-	Hook      string    `json:"hook,omitempty" msgpack:"hook,omitempty"`
-	Worktree  string    `json:"worktree,omitempty" msgpack:"worktree,omitempty"`
-	Source    string    `json:"source,omitempty" msgpack:"source,omitempty"`
-	Level     string    `json:"level,omitempty" msgpack:"level,omitempty"`
-	Message   string    `json:"message" msgpack:"message"`
-	CreatedAt time.Time `json:"created_at" msgpack:"created_at"`
+	ProjectID naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	Hook      string           `json:"hook,omitempty" msgpack:"hook,omitempty"`
+	Worktree  string           `json:"worktree,omitempty" msgpack:"worktree,omitempty"`
+	Source    string           `json:"source,omitempty" msgpack:"source,omitempty"`
+	Level     string           `json:"level,omitempty" msgpack:"level,omitempty"`
+	Message   string           `json:"message" msgpack:"message"`
+	CreatedAt time.Time        `json:"created_at" msgpack:"created_at"`
 }

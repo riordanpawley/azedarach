@@ -951,8 +951,8 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 		runtime.Agent = sessionRuntime.Agent
 	}
 	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
-	body, err := json.Marshal(protocol.SessionProjectionEventBody{
-		ProjectID: projectID,
+		body, err := json.Marshal(protocol.SessionProjectionEventBody{
+			ProjectID: naming.ProjectID(projectID),
 		Revision:  rev,
 		Session: protocol.SessionProjection{
 			SessionID: parseSessionIDOrZero(session.ID),
@@ -990,8 +990,8 @@ func (d *Daemon) publishWorktreeProjectionEventAtRevision(ctx context.Context, p
 	}
 	runtime := d.runtimeProjectionForEvent(ctx, projectID, issueID, worktree, nil)
 	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
-	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
-		ProjectID: projectID,
+		body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
+			ProjectID: naming.ProjectID(projectID),
 		IssueID:   parseIssueIDOrZero(issueID),
 		Worktree:  strings.TrimSpace(worktree),
 		UpdatedAt: time.Now().UTC(),
@@ -1022,8 +1022,8 @@ func (d *Daemon) publishGitStatusProjectionEventAtRevision(ctx context.Context, 
 	}
 	runtime := d.runtimeProjectionForEvent(ctx, projectID, issueID, worktree, status)
 	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
-	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
-		ProjectID: projectID,
+		body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
+			ProjectID: naming.ProjectID(projectID),
 		IssueID:   parseIssueIDOrZero(issueID),
 		Worktree:  strings.TrimSpace(worktree),
 		UpdatedAt: time.Now().UTC(),
@@ -1048,7 +1048,7 @@ func (d *Daemon) publishGitStatusProjectionEventAtRevision(ctx context.Context, 
 }
 
 func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) protocol.RuntimeProjection {
-	projectID = normalizeRuntimeProjectionProjectID(projectID)
+	projectID = normalizeRuntimeProjectionProjectID(projectID).String()
 	issueID = strings.TrimSpace(issueID)
 	worktree = strings.TrimSpace(worktree)
 
