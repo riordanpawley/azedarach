@@ -416,22 +416,42 @@ func (a *gitServiceAdapter) refreshGitStatusWriteThrough(ctx context.Context, pr
 }
 
 func (a *gitServiceAdapter) refreshGitStatusWriteThroughResult(ctx context.Context, projectID, worktree string, publishOnChange, forcePublish bool) (*git.GitStatus, error) {
-	status, err := a.client.Status(ctx, worktree)
-	if err != nil {
-		if a.logger != nil {
-			a.logger.Debug("git status refresh after mutation failed", "project_id", projectID, "worktree", worktree, "error", err)
+	projectID = normalizeProjectID(projectID)
+	baseBranch := a.resolvedBaseBranch(projectID)
+
+	var (
+		status *git.GitStatus
+		err    error
+	)
+	if baseBranch != "" {
+		status, err = a.client.RuntimeStatus(ctx, worktree, baseBranch)
+		if err != nil && a.logger != nil {
+			a.logger.Debug("runtime git status refresh failed; falling back to porcelain status",
+				"project_id", projectID,
+				"worktree", worktree,
+				"base_branch", baseBranch,
+				"error", err,
+			)
 		}
-		return nil, err
+	}
+	if status == nil {
+		status, err = a.client.Status(ctx, worktree)
+		if err != nil {
+			if a.logger != nil {
+				a.logger.Debug("git status refresh after mutation failed", "project_id", projectID, "worktree", worktree, "error", err)
+			}
+			return nil, err
+		}
 	}
 	if a.runtimeProjectionWriter != nil {
 		_ = a.runtimeProjectionWriter.PersistGitStatusProjectionAndPublish(ctx, projectID, "", worktree, status, publishOnChange, forcePublish)
-		a.invalidateRuntimeSignalCache(normalizeProjectID(projectID), worktree)
+		a.invalidateRuntimeSignalCache(projectID, worktree)
 		return status, nil
 	}
 	changed, issueID := a.persistStatusSnapshot(ctx, projectID, worktree, status)
-	a.invalidateRuntimeSignalCache(normalizeProjectID(projectID), worktree)
+	a.invalidateRuntimeSignalCache(projectID, worktree)
 	if (forcePublish || (publishOnChange && changed)) && a.onStatusUpdate != nil && strings.TrimSpace(issueID) != "" {
-		a.onStatusUpdate(ctx, normalizeProjectID(projectID), issueID, worktree, status)
+		a.onStatusUpdate(ctx, projectID, issueID, worktree, status)
 	}
 	return status, nil
 }
@@ -565,6 +585,16 @@ func gitStatusFiles(status git.GitStatus) []string {
 
 func normalizeProjectID(projectID string) string {
 	return protocol.NormalizeProjectID(projectID)
+}
+
+func (a *gitServiceAdapter) resolvedBaseBranch(projectID string) string {
+	projectID = normalizeProjectID(projectID)
+	if a.baseBranchForProject != nil {
+		if projectBase := strings.TrimSpace(a.baseBranchForProject(projectID)); projectBase != "" {
+			return projectBase
+		}
+	}
+	return strings.TrimSpace(a.baseBranch)
 }
 
 func gitStatusSignature(status *git.GitStatus) string {

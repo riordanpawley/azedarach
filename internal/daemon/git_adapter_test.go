@@ -126,6 +126,81 @@ func TestGitServiceAdapterMergeForcesStatusUpdatePublish(t *testing.T) {
 	}
 }
 
+func TestGitServiceAdapterRefreshWriteThroughUsesRuntimeStatusWhenBaseBranchConfigured(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	projectID := "default"
+	issueID := "az-target"
+	worktree := "/tmp/az-target"
+	store := newGitAdapterStore(t, projectID, issueID, worktree, cleanGitStatus())
+
+	runner := &recordingGitRunner{
+		runFn: func(args ...string) (string, error) {
+			if len(args) < 3 || args[0] != "-C" || args[1] != worktree {
+				t.Fatalf("unexpected git args: %v", args)
+			}
+			switch args[2] {
+			case "status":
+				if len(args) >= 4 && args[3] == "--porcelain" {
+					return "", nil
+				}
+			case "symbolic-ref":
+				// Keep candidate list deterministic in tests.
+				return "", errors.New("origin HEAD unavailable")
+			case "merge-base":
+				return "abc123", nil
+			case "diff":
+				if len(args) >= 4 && args[3] == "--shortstat" {
+					return " 3 files changed, 7 insertions(+), 3 deletions(-)", nil
+				}
+			case "rev-list":
+				if len(args) >= 5 && args[3] == "--count" {
+					switch args[4] {
+					case "HEAD..main":
+						return "1", nil
+					case "main..HEAD":
+						return "2", nil
+					}
+				}
+			}
+			t.Fatalf("unexpected git args: %v", args)
+			return "", nil
+		},
+	}
+
+	adapter := &gitServiceAdapter{
+		client:            git.NewClient(runner, slog.Default()),
+		runtimeStateStore: store,
+		baseBranch:        "main",
+	}
+
+	status, err := adapter.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, true, false)
+	if err != nil {
+		t.Fatalf("refreshGitStatusWriteThroughResult: %v", err)
+	}
+	if status == nil {
+		t.Fatal("expected status")
+	}
+	if status.GitAdditions != 7 || status.GitDeletions != 3 {
+		t.Fatalf("diff totals = %d/%d, want 7/3", status.GitAdditions, status.GitDeletions)
+	}
+	if status.GitAheadCount != 2 || status.GitBehindCount != 1 {
+		t.Fatalf("ahead/behind = %d/%d, want 2/1", status.GitAheadCount, status.GitBehindCount)
+	}
+
+	persisted, err := adapter.Status(ctx, projectID, worktree)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if persisted == nil {
+		t.Fatal("expected persisted status")
+	}
+	if persisted.GitAdditions != 7 || persisted.GitDeletions != 3 {
+		t.Fatalf("persisted diff totals = %d/%d, want 7/3", persisted.GitAdditions, persisted.GitDeletions)
+	}
+}
+
 func TestGitServiceAdapterMergePreflightUsesWorktreeAwareClient(t *testing.T) {
 	t.Parallel()
 
