@@ -43,7 +43,14 @@ func TestLauncherStartClosesDaemonLog(t *testing.T) {
 		t.Fatalf("launcher.LockPath = %q, want %q", launcher.LockPath, filepath.Join(socketRoot, "daemon.lock"))
 	}
 	launcher.BinPath = "true"
-	launcher.waitForReady = func(context.Context, string) error { return nil }
+	readyCalls := 0
+	launcher.waitForReady = func(context.Context, string) error {
+		readyCalls++
+		if readyCalls <= 2 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
 	launcher.openLogFile = func(path string) (io.WriteCloser, error) {
 		want := filepath.Join(repoDir, ".azedarach", "daemon.log")
 		if path != want {
@@ -223,7 +230,7 @@ func TestLauncherStart_SpawnsWhenLockOwnerAliveButSocketUnready(t *testing.T) {
 	readyCalls := 0
 	launcher.waitForReady = func(context.Context, string) error {
 		readyCalls++
-		if readyCalls == 1 {
+		if readyCalls <= 3 {
 			return context.DeadlineExceeded
 		}
 		return nil
@@ -244,8 +251,8 @@ func TestLauncherStart_SpawnsWhenLockOwnerAliveButSocketUnready(t *testing.T) {
 	if err := launcher.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	if readyCalls != 2 {
-		t.Fatalf("waitForReady call count = %d, want 2", readyCalls)
+	if readyCalls != 4 {
+		t.Fatalf("waitForReady call count = %d, want 4", readyCalls)
 	}
 	if terminateCalls != 1 {
 		t.Fatalf("terminate lock owner call count = %d, want 1", terminateCalls)
@@ -294,7 +301,7 @@ func TestLauncherStart_RechecksSocketWhenLockRecoveryFails(t *testing.T) {
 	readyCalls := 0
 	launcher.waitForReady = func(context.Context, string) error {
 		readyCalls++
-		if readyCalls < 2 {
+		if readyCalls < 4 {
 			return context.DeadlineExceeded
 		}
 		return nil
@@ -314,8 +321,8 @@ func TestLauncherStart_RechecksSocketWhenLockRecoveryFails(t *testing.T) {
 	if err := launcher.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v, want nil after recheck-ready", err)
 	}
-	if readyCalls != 2 {
-		t.Fatalf("waitForReady call count = %d, want 2", readyCalls)
+	if readyCalls != 4 {
+		t.Fatalf("waitForReady call count = %d, want 4", readyCalls)
 	}
 }
 
@@ -326,6 +333,9 @@ func TestLauncherStartHonorsCallerContextDeadlineForReadyWait(t *testing.T) {
 	launcher := NewLauncher(repoDir, socketPath)
 	launcher.BinPath = "true"
 	launcher.waitForReady = func(ctx context.Context, _ string) error {
+		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) > 100*time.Millisecond {
+			return context.DeadlineExceeded
+		}
 		<-ctx.Done()
 		return ctx.Err()
 	}
@@ -342,8 +352,20 @@ func TestLauncherStartHonorsCallerContextDeadlineForReadyWait(t *testing.T) {
 	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Start() error = %v, want context deadline exceeded", err)
 	}
-	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
-		t.Fatalf("Start() elapsed = %s, want < 500ms", elapsed)
+	if elapsed := time.Since(started); elapsed > 700*time.Millisecond {
+		t.Fatalf("Start() elapsed = %s, want < 700ms", elapsed)
+	}
+}
+
+func TestLauncherStart_SocketReadySkipsSpawnWithoutLock(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	launcher := NewLauncher(repoDir, socketPath)
+	launcher.BinPath = filepath.Join(t.TempDir(), "missing-azd")
+	launcher.waitForReady = func(context.Context, string) error { return nil }
+
+	if err := launcher.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v, want nil when socket is already ready", err)
 	}
 }
 

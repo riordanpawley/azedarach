@@ -78,13 +78,24 @@ func (l *Launcher) WithLogger(logger *slog.Logger) *Launcher {
 
 // Start spawns daemon process in background.
 func (l *Launcher) Start(ctx context.Context) error {
-	_ = ctx
+	// Socket readiness is authoritative for service availability. Lock state is
+	// advisory and used only to coordinate spawn/recovery.
+	if err := l.waitForSocketReadyWithin(250 * time.Millisecond); err == nil {
+		return nil
+	}
+
 	bin := l.resolveBinary()
 	releaseStartLock, err := l.acquireStartLock(ctx)
 	if err != nil {
 		return err
 	}
 	defer releaseStartLock()
+
+	// Re-check after acquiring start lock to avoid duplicate spawns from racing
+	// clients.
+	if err := l.waitForSocketReadyWithin(500 * time.Millisecond); err == nil {
+		return nil
+	}
 
 	if l.daemonLockOwnerAlive() {
 		if l.waitForReady != nil {
