@@ -688,7 +688,7 @@ func (d *DetailPanel) formatGitStatus() string {
 	}
 
 	status := "clean"
-	if d.task.HasUncommittedChanges || d.task.GitAdditions > 0 || d.task.GitDeletions > 0 {
+	if d.task.HasUncommittedChanges {
 		status = "dirty"
 	}
 

@@ -492,6 +492,11 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			task, _ = m.getCurrentTaskAndSession()
 		}
 		if task != nil {
+			// Resolve from authoritative task projection to avoid opening the
+			// workspace with a stale navigation-copy task payload.
+			if latestTask, _, ok := m.taskAndSessionByID(task.ID.String()); ok && latestTask != nil {
+				task = latestTask
+			}
 			workspace := overlay.NewTaskWorkspaceOverlay(*task, m.tasks, m.pendingMutationForTask(task.ID.String()), m.width, m.height)
 			workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
 			return m, m.openOverlay(workspace)
@@ -2029,6 +2034,9 @@ func (m Model) getCurrentTaskAndSession() (*domain.Task, *domain.Session) {
 	cursor := m.nav.GetCursor()
 	if task, session := m.nav.GetCurrentTask(columns); task != nil {
 		if cursor == nil || cursor.TaskID == "" || task.ID.String() == cursor.TaskID {
+			if latestTask, latestSession, ok := m.taskAndSessionByID(task.ID.String()); ok && latestTask != nil {
+				return latestTask, latestSession
+			}
 			return task, session
 		}
 	}

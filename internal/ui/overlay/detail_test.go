@@ -133,6 +133,24 @@ func TestDetailPanelViewShowsBehindOnlyDirectionalStatus(t *testing.T) {
 	assert.NotContains(t, view, "↑0/↓5")
 }
 
+func TestDetailPanelViewBaseDiffWithoutUncommittedShowsCleanStatus(t *testing.T) {
+	task := domain.Task{
+		ID:           "az-792",
+		Title:        "Task with committed divergence only",
+		Status:       domain.StatusInProgress,
+		HasWorktree:  true,
+		GitAdditions: 163,
+		GitDeletions: 1,
+		GitAheadCount: 2,
+	}
+
+	panel := NewDetailPanel(task)
+	view := panel.View()
+
+	assert.Contains(t, view, "clean (+163/-1; ↑2)")
+	assert.NotContains(t, view, "dirty (+163/-1; ↑2)")
+}
+
 func TestDetailPanelViewWithSessionShowsCleanGitStatusWithoutTelemetry(t *testing.T) {
 	task := domain.Task{
 		ID:          "az-789",

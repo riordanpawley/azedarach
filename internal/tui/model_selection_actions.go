@@ -409,8 +409,9 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
+		previousStatus := task.Status
 		m.applyOptimisticTaskStatus(task.ID.String(), newStatus)
-		return m, m.moveTaskStatusCmd(task.ID.String(), task.Status, newStatus)
+		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
 
 	case "l":
 		// Move task right (to next status)
@@ -431,8 +432,9 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
+		previousStatus := task.Status
 		m.applyOptimisticTaskStatus(task.ID.String(), newStatus)
-		return m, m.moveTaskStatusCmd(task.ID.String(), task.Status, newStatus)
+		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
 	case "e":
 		return m, m.openOverlay(overlay.NewEditTaskOverlayWithImplOptionsAndAttachmentService(*task, m.availableTaskImplementations(), m.attachmentService))
 	case "T":

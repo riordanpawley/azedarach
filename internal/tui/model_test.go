@@ -2576,6 +2576,50 @@ func TestSpaceWorkspaceUsesVisibleFilteredTaskWhenCursorTaskIDIsHidden(t *testin
 	}
 }
 
+func TestSpaceWorkspaceUsesAuthoritativeTaskProjection(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+	m.tasks = []domain.Task{
+		{
+			ID:                    "az-1",
+			Title:                 "Authoritative task",
+			Status:                domain.StatusInProgress,
+			Priority:              domain.P2,
+			Type:                  domain.TypeTask,
+			HasWorktree:           true,
+			HasUncommittedChanges: false,
+			GitAdditions:          0,
+			GitDeletions:          0,
+		},
+	}
+
+	m.nav.SelectTask("az-1", 1)
+	columns := m.buildColumns()
+	taskFromNav, _ := m.nav.GetCurrentTask(columns)
+	if taskFromNav == nil {
+		t.Fatal("expected selected nav task")
+	}
+	taskFromNav.HasUncommittedChanges = true
+	taskFromNav.GitAdditions = 163
+	taskFromNav.GitDeletions = 1
+
+	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	newModel := result.(Model)
+
+	current := newModel.overlayStack.Current()
+	taskWorkspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected TaskWorkspaceOverlay on top, got %T", current)
+	}
+	view := taskWorkspace.View()
+	if strings.Contains(view, "dirty (+163/-1") {
+		t.Fatalf("workspace should use authoritative clean task projection, got %q", view)
+	}
+	if !strings.Contains(view, "Worktree:  clean") {
+		t.Fatalf("workspace missing clean worktree summary, got %q", view)
+	}
+}
+
 func TestEnterOnLeafTaskShowsDrillDownGuidanceToast(t *testing.T) {
 	m := newTestModel()
 	m.editor.EnterNormal()
