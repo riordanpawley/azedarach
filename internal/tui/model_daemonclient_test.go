@@ -5300,6 +5300,112 @@ func TestDaemonEventRevisionReducer(t *testing.T) {
 	}
 }
 
+func TestProjectionEventRevisionGate(t *testing.T) {
+	makeProjectionEvent := func(revision uint64, dirty bool) daemonStreamEventMsg {
+		body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
+			ProjectID: "azedarach-bte",
+			IssueID:   "az-1",
+			UpdatedAt: time.Date(2026, time.April, 9, 12, 0, 0, 0, time.UTC),
+			Runtime: &protocol.RuntimeProjectionEventBody{
+				ProjectID: "azedarach-bte",
+				Revision:  revision,
+				Projection: protocol.RuntimeProjection{
+					ProjectID: "azedarach-bte",
+					IssueID:   "az-1",
+					Worktree: protocol.RuntimeWorktreeProjection{
+						Exists:  true,
+						Path:    "/tmp/repo-az-1",
+						Healthy: true,
+					},
+					Git: protocol.RuntimeGitProjection{
+						HasUncommittedChanges: dirty,
+						GitAdditions:          3,
+						GitDeletions:          1,
+					},
+					Session: protocol.RuntimeSessionProjection{
+						HasSession: true,
+						State:      protocol.SessionLifecycleStateAttached,
+						Worktree:   "/tmp/repo-az-1",
+					},
+					Agent: protocol.RuntimeAgentProjection{Status: "attached"},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal projection body: %v", err)
+		}
+		return daemonStreamEventMsg{
+			event: protocol.EventEnvelope{
+				Event:    protocol.EventGitStatusUpdated,
+				Revision: revision,
+				Body:     body,
+			},
+		}
+	}
+
+	t.Run("stale projection event ignored", func(t *testing.T) {
+		m := newTestModel()
+		m.daemonRevision = 8
+		m.daemonEvents = make(chan protocol.EventEnvelope)
+		m.tasks[0].HasUncommittedChanges = false
+		m.tasks[0].GitAdditions = 0
+		m.tasks[0].GitDeletions = 0
+
+		updated, cmd := m.Update(makeProjectionEvent(7, true))
+		if cmd == nil {
+			t.Fatal("expected wait command")
+		}
+		next := updated.(Model)
+		if next.daemonRevision != 8 {
+			t.Fatalf("daemon revision = %d, want 8", next.daemonRevision)
+		}
+		if next.tasks[0].HasUncommittedChanges {
+			t.Fatalf("stale event should not update dirty flag: %+v", next.tasks[0])
+		}
+	})
+
+	t.Run("gap projection event triggers rehydrate", func(t *testing.T) {
+		m := newTestModel()
+		m.daemonRevision = 8
+		m.daemonEvents = make(chan protocol.EventEnvelope)
+		m.tasks[0].HasUncommittedChanges = false
+
+		updated, cmd := m.Update(makeProjectionEvent(10, true))
+		if cmd == nil {
+			t.Fatal("expected reattach command")
+		}
+		next := updated.(Model)
+		if next.daemonEvents != nil {
+			t.Fatal("expected daemon stream to be cleared for rehydrate")
+		}
+		if next.daemonRevision != 8 {
+			t.Fatalf("daemon revision = %d, want 8", next.daemonRevision)
+		}
+		if next.tasks[0].HasUncommittedChanges {
+			t.Fatalf("gap event should not apply projection before rehydrate: %+v", next.tasks[0])
+		}
+	})
+
+	t.Run("sequential projection event applies", func(t *testing.T) {
+		m := newTestModel()
+		m.daemonRevision = 8
+		m.daemonEvents = make(chan protocol.EventEnvelope)
+		m.tasks[0].HasUncommittedChanges = false
+
+		updated, cmd := m.Update(makeProjectionEvent(9, true))
+		if cmd == nil {
+			t.Fatal("expected wait command")
+		}
+		next := updated.(Model)
+		if next.daemonRevision != 9 {
+			t.Fatalf("daemon revision = %d, want 9", next.daemonRevision)
+		}
+		if !next.tasks[0].HasUncommittedChanges {
+			t.Fatalf("sequential projection should update dirty flag: %+v", next.tasks[0])
+		}
+	})
+}
+
 func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 	t.Run("bulk status delete archive", func(t *testing.T) {
 		transport := &recordingDaemonTransport{
