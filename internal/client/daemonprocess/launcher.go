@@ -17,7 +17,10 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
+	"github.com/riordanpawley/azedarach/internal/ipc/transport"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 // Launcher starts/replaces the singleton daemon process for a user-global socket.
@@ -29,6 +32,7 @@ type Launcher struct {
 	Logger             *slog.Logger
 	openLogFile        func(path string) (io.WriteCloser, error)
 	waitForReady       func(ctx context.Context, socketPath string) error
+	shutdownViaSocket  func(ctx context.Context, socketPath string) error
 	sleepFn            func(time.Duration)
 	terminateLockOwner func(lockPath string) error
 }
@@ -55,6 +59,7 @@ func NewLauncher(repoDir, socketPath string) *Launcher {
 		Logger:             slog.Default(),
 		openLogFile:        openDaemonLog,
 		waitForReady:       waitForDaemonReady,
+		shutdownViaSocket:  gracefulShutdownViaSocket,
 		sleepFn:            time.Sleep,
 		terminateLockOwner: lifecycle.TerminateLockOwner,
 	}
@@ -168,7 +173,22 @@ func (l *Launcher) waitForSocketReadyWithin(timeout time.Duration) error {
 
 // Stop attempts to stop existing lock-owner process.
 func (l *Launcher) Stop(ctx context.Context) error {
-	_ = ctx
+	if strings.TrimSpace(l.SocketPath) != "" {
+		shutdown := l.shutdownViaSocket
+		if shutdown == nil {
+			shutdown = gracefulShutdownViaSocket
+		}
+		if err := shutdown(ctx, l.SocketPath); err == nil {
+			return nil
+		} else if l.Logger != nil {
+			l.Logger.Warn("graceful daemon socket shutdown failed; falling back to lock-owner termination",
+				"socket_path", l.SocketPath,
+				"lock_path", l.LockPath,
+				"error", err,
+			)
+		}
+	}
+
 	terminate := l.terminateLockOwner
 	if terminate == nil {
 		terminate = lifecycle.TerminateLockOwner
@@ -311,4 +331,58 @@ func processAlive(pid int) bool {
 	}
 	err := syscall.Kill(pid, 0)
 	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+func gracefulShutdownViaSocket(ctx context.Context, socketPath string) error {
+	shutdownCtx := ctx
+	if shutdownCtx == nil {
+		shutdownCtx = context.Background()
+	}
+	if _, hasDeadline := shutdownCtx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		shutdownCtx, cancel = context.WithTimeout(shutdownCtx, 2*time.Second)
+		defer cancel()
+	}
+
+	client := transport.NewClient(socketPath).WithTimeout(1 * time.Second)
+	resp, err := client.Command(shutdownCtx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       naming.RequestID(fmt.Sprintf("daemon-stop-%d", time.Now().UnixNano())),
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         protocol.CommandDaemonShutdown,
+		SentAt:          time.Now().UTC(),
+	})
+	if err != nil {
+		return fmt.Errorf("daemon shutdown command: %w", err)
+	}
+	if !resp.OK {
+		if resp.Error != nil {
+			return fmt.Errorf("daemon shutdown rejected: %s", resp.Error.Message)
+		}
+		return errors.New("daemon shutdown rejected")
+	}
+	if err := waitForSocketGone(shutdownCtx, socketPath); err != nil {
+		return fmt.Errorf("wait for daemon socket shutdown: %w", err)
+	}
+	return nil
+}
+
+func waitForSocketGone(ctx context.Context, socketPath string) error {
+	for {
+		if strings.TrimSpace(socketPath) == "" {
+			return nil
+		}
+		if _, err := os.Stat(socketPath); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }

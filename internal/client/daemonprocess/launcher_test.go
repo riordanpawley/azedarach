@@ -373,6 +373,7 @@ func TestLauncherStopUsesTerminateLockOwner(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
 	launcher := NewLauncher(repoDir, socketPath)
+	launcher.shutdownViaSocket = func(context.Context, string) error { return errors.New("socket unavailable") }
 
 	called := false
 	var gotLockPath string
@@ -397,10 +398,58 @@ func TestLauncherStopWrapsTerminateError(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
 	launcher := NewLauncher(repoDir, socketPath)
+	launcher.shutdownViaSocket = func(context.Context, string) error { return errors.New("socket unavailable") }
 	launcher.terminateLockOwner = func(string) error { return errors.New("boom") }
 
 	err := launcher.Stop(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "terminate daemon lock owner: boom") {
 		t.Fatalf("Stop() error = %v, want wrapped terminate error", err)
+	}
+}
+
+func TestLauncherStopUsesGracefulSocketShutdownWhenAvailable(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	launcher := NewLauncher(repoDir, socketPath)
+
+	socketShutdownCalls := 0
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		socketShutdownCalls++
+		return nil
+	}
+	terminateCalled := false
+	launcher.terminateLockOwner = func(string) error {
+		terminateCalled = true
+		return nil
+	}
+
+	if err := launcher.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if socketShutdownCalls != 1 {
+		t.Fatalf("socket shutdown calls = %d, want 1", socketShutdownCalls)
+	}
+	if terminateCalled {
+		t.Fatal("terminateLockOwner should not be called when graceful socket shutdown succeeds")
+	}
+}
+
+func TestLauncherStopFallsBackWhenGracefulSocketShutdownFails(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	launcher := NewLauncher(repoDir, socketPath)
+
+	launcher.shutdownViaSocket = func(context.Context, string) error { return errors.New("rpc failed") }
+	terminateCalled := false
+	launcher.terminateLockOwner = func(string) error {
+		terminateCalled = true
+		return nil
+	}
+
+	if err := launcher.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if !terminateCalled {
+		t.Fatal("expected terminateLockOwner fallback when graceful socket shutdown fails")
 	}
 }
