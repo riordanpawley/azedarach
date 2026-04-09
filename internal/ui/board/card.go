@@ -110,8 +110,9 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 		sessionRow = renderSessionStatus(task.Session, s)
 	}
 	sessionCompact := renderSessionStatusCompact(task.Session)
-	runtimeRow := renderRuntimeSignals(runtimeSignals, s)
-	runtimeCompact := renderRuntimeSignalsCompact(runtimeSignals, s)
+	visibleRuntimeSignals := runtimeSignalsForHeader(task.Session, runtimeSignals)
+	runtimeRow := renderRuntimeSignals(visibleRuntimeSignals, s)
+	runtimeCompact := renderRuntimeSignalsCompact(visibleRuntimeSignals, s)
 
 	headerLine := strings.Join(headerParts, " ")
 	preferCompact := maxLineLen < 44
@@ -172,6 +173,19 @@ func appendHeaderToken(headerLine string, maxLineLen int, full string, compact s
 		return candidate
 	}
 	return headerLine
+}
+
+func runtimeSignalsForHeader(session *domain.Session, signals *RuntimeSignals) *RuntimeSignals {
+	if signals == nil {
+		return nil
+	}
+	normalized := *signals
+	if session != nil {
+		// Session badge already communicates active session state; omit duplicate tmux tokens.
+		normalized.HasTmuxSession = false
+		normalized.HasDescendantTmuxSession = false
+	}
+	return &normalized
 }
 
 func renderTaskTypeBadge(taskType domain.TaskType, s *styles.Styles) string {

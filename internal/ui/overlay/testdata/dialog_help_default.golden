@@ -6,7 +6,7 @@
 ││   P0/P1/P2/...          Issue priority badge                                                │
 ││   T/F/B/E/C             Type badge letter (Task/Feature/Bug/Epic/Chore)                     │
 ││   ● B 23h / ◐ W 5m      Session icon + state code + elapsed                                 │
-││   T / Td / ✓            Tmux session / descendant tmux / worktree                           │
+││   T / Td / ✓            Runtime assets; T/Td are hidden when session badge is shown         │
 ││   ↑2 / ↓1               Git ahead / behind upstream                                         │
 ││   ✎                     Uncommitted file changes present                                    │
 ││   +171/-65              Added/removed line counts                                           │

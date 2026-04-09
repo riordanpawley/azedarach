@@ -585,7 +585,7 @@ func TestRenderCard_MetadataOnFirstLine(t *testing.T) {
 	if first == "" {
 		t.Fatalf("expected metadata line containing issue id, got: %s", result)
 	}
-	for _, token := range []string{"P2", "CHE-3002", " T ", " W ", "2d 2h", tmuxSessionToken, worktreeToken, "✎", "+12/-3", "[1/7]"} {
+	for _, token := range []string{"P2", "CHE-3002", " T ", " W ", "2d 2h", worktreeToken, "✎", "+12/-3", "[1/7]"} {
 		if !strings.Contains(first, token) {
 			t.Fatalf("first line should contain %q, got: %s", token, first)
 		}
@@ -725,6 +725,35 @@ func TestRenderRuntimeSignalsCompact(t *testing.T) {
 			t.Fatalf("renderRuntimeSignalsCompact(...) = %q, missing directional ahead/behind pairing", got)
 		}
 	})
+}
+
+func TestRuntimeSignalsForHeader_SuppressesTmuxMarkersWithSession(t *testing.T) {
+	startedAt := time.Now().Add(-10 * time.Minute)
+	session := &domain.Session{
+		IssueID:   "az-1",
+		State:     domain.SessionBusy,
+		StartedAt: &startedAt,
+	}
+	signals := &RuntimeSignals{
+		HasTmuxSession:           true,
+		HasDescendantTmuxSession: true,
+		HasWorktree:              true,
+		GitAheadCount:            1,
+	}
+
+	got := runtimeSignalsForHeader(session, signals)
+	if got == nil {
+		t.Fatalf("runtimeSignalsForHeader(...) returned nil")
+	}
+	if got.HasTmuxSession || got.HasDescendantTmuxSession {
+		t.Fatalf("runtimeSignalsForHeader(...) should hide tmux markers when session exists: %+v", got)
+	}
+	if !got.HasWorktree || got.GitAheadCount != 1 {
+		t.Fatalf("runtimeSignalsForHeader(...) should preserve non-tmux runtime signals: %+v", got)
+	}
+	if !signals.HasTmuxSession || !signals.HasDescendantTmuxSession {
+		t.Fatalf("runtimeSignalsForHeader(...) must not mutate original signals: %+v", signals)
+	}
 }
 
 func TestBuildChildProgress(t *testing.T) {

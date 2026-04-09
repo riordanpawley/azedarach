@@ -164,7 +164,7 @@ func cardHeaderLegendCategory() keybinds.Category {
 			{Key: "P0/P1/P2/...", Description: "Issue priority badge"},
 			{Key: "T/F/B/E/C", Description: "Type badge letter (Task/Feature/Bug/Epic/Chore)"},
 			{Key: "● B 23h / ◐ W 5m", Description: "Session icon + state code + elapsed"},
-			{Key: "T / Td / ✓", Description: "Tmux session / descendant tmux / worktree"},
+			{Key: "T / Td / ✓", Description: "Runtime assets; T/Td are hidden when session badge is shown"},
 			{Key: "↑2 / ↓1", Description: "Git ahead / behind upstream"},
 			{Key: "✎", Description: "Uncommitted file changes present"},
 			{Key: "+171/-65", Description: "Added/removed line counts"},
