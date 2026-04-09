@@ -124,6 +124,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Expires: time.Now().Add(8 * time.Second),
 				})
 			}
+			if msg.reconcileWarn != nil {
+				m.addToast(Toast{
+					Level:   ToastWarning,
+					Message: fmt.Sprintf("Runtime reconcile warning: %v", msg.reconcileWarn),
+					Expires: time.Now().Add(6 * time.Second),
+				})
+			}
 			var cmds []tea.Cmd
 			if !m.hasRefreshLoop {
 				m.hasRefreshLoop = true
@@ -148,6 +155,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.taskSnapshotFreshness = msg.freshness
 		m.reconcileCursorAfterIssuesRefresh()
 		m.syncTaskWorkspaceOverlay()
+		if msg.reconcileWarn != nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Runtime reconcile warning: %v", msg.reconcileWarn),
+				Expires: time.Now().Add(6 * time.Second),
+			})
+		}
 		if msg.revision > m.daemonRevision {
 			m.daemonRevision = msg.revision
 		}
