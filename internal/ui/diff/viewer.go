@@ -71,16 +71,10 @@ func (d *DiffViewer) loadChangedFilesCmd() tea.Cmd {
 		if d.gitClient == nil {
 			return loadChangedFilesMsg{Err: fmt.Errorf("git client unavailable")}
 		}
-		status, err := d.gitClient.Status(context.Background(), d.worktree)
+		files, err := d.gitClient.ChangedFiles(context.Background(), d.worktree, d.effectiveBaseBranch())
 		if err != nil {
 			return loadChangedFilesMsg{Err: err}
 		}
-		files := statusChangedFiles(status)
-		baseFiles, baseErr := d.gitClient.ChangedFiles(context.Background(), d.worktree, d.effectiveBaseBranch())
-		if baseErr != nil && len(files) == 0 {
-			return loadChangedFilesMsg{Err: baseErr}
-		}
-		files = mergeChangedFileLists(files, baseFiles)
 		return loadChangedFilesMsg{Files: files, Err: err}
 	}
 }

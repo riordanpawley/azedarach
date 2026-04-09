@@ -1153,12 +1153,6 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 		fallbackStatus = status
 	}
 
-	if projection.Git.GitAdditions == 0 && fallbackStatus != nil {
-		projection.Git.GitAdditions = len(fallbackStatus.Added) + len(fallbackStatus.Modified) + len(fallbackStatus.Staged)
-	}
-	if projection.Git.GitDeletions == 0 && fallbackStatus != nil {
-		projection.Git.GitDeletions = len(fallbackStatus.Deleted)
-	}
 	if projection.Git.GitAheadCount == 0 && fallbackStatus != nil {
 		projection.Git.GitAheadCount = fallbackStatus.GitAheadCount
 	}
