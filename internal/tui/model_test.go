@@ -459,6 +459,29 @@ func TestUpdate_AttachmentActionDeletedAddsToast(t *testing.T) {
 	}
 }
 
+func TestUpdate_AttachmentActionStagedAddsToast(t *testing.T) {
+	m := newTestModel()
+
+	updated, _ := m.Update(overlay.AttachmentActionMsg{
+		Action: "staged",
+		Attachment: &attachment.Attachment{
+			Filename: "clipboard.png",
+		},
+	})
+
+	next, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("expected Model return type, got %T", updated)
+	}
+	if len(next.toasts) == 0 {
+		t.Fatal("expected toast to be recorded")
+	}
+	last := next.toasts[len(next.toasts)-1]
+	if !strings.Contains(last.Message, "Image staged for new task") {
+		t.Fatalf("unexpected toast message: %q", last.Message)
+	}
+}
+
 func TestResolveDaemonBinaryForRepo(t *testing.T) {
 	t.Run("prefers azd sibling of invoked az command", func(t *testing.T) {
 		repoDir := t.TempDir()

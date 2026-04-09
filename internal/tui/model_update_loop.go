@@ -867,6 +867,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Expires: time.Now().Add(3 * time.Second),
 			})
 			return m, m.appendAttachmentNoteCmd(msg.Attachment)
+		} else if msg.Action == "staged" {
+			filename := "image"
+			if msg.Attachment != nil && strings.TrimSpace(msg.Attachment.Filename) != "" {
+				filename = msg.Attachment.Filename
+			}
+			m.addToast(Toast{
+				Level:   ToastSuccess,
+				Message: fmt.Sprintf("Image staged for new task: %s", filename),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
 		} else if msg.Action == "deleted" {
 			m.addToast(Toast{
 				Level:   ToastSuccess,
