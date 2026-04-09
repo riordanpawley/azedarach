@@ -128,6 +128,8 @@ type Daemon struct {
 
 	shutdownMu       sync.Mutex
 	shuttingDown     bool
+	shutdownReqCh    chan struct{}
+	shutdownReqOnce  sync.Once
 	inFlightCommands sync.WaitGroup
 
 	syncBootstrapState syncBootstrapState
@@ -227,6 +229,7 @@ func New(cfg Config) *Daemon {
 		sessionStateRefreshing:        map[string]bool{},
 		sessionStateLastRefresh:       map[string]time.Time{},
 		revision:                      map[string]uint64{},
+		shutdownReqCh:                 make(chan struct{}),
 	}
 	canonicalProjectID := protocol.DefaultProjectID
 	if hashProjectID, err := appconfig.ProjectIDForRoot(strings.TrimSpace(cfg.RepoDir)); err == nil {
@@ -312,6 +315,7 @@ func New(cfg Config) *Daemon {
 // Run acquires singleton lock and serves daemon IPC until context cancellation.
 func (d *Daemon) Run(ctx context.Context) error {
 	startedAt := time.Now()
+	d.prepareRunShutdownState()
 	if err := d.validateCommandPolicyConfiguration(); err != nil {
 		return err
 	}
@@ -324,6 +328,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	defer cancelServe()
 	shutdownDone := make(chan struct{})
 	shutdownStop := make(chan struct{})
+	shutdownReqCh := d.shutdownRequestChannel()
 	go func() {
 		defer func() {
 			if r := recover(); r != nil && d.cfg.Logger != nil {
@@ -332,6 +337,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}()
 		select {
 		case <-ctx.Done():
+			d.requestShutdown()
+			d.drainInFlightCommands()
+			cancelServe()
+			close(shutdownDone)
+		case <-shutdownReqCh:
 			d.drainInFlightCommands()
 			cancelServe()
 			close(shutdownDone)
@@ -389,6 +399,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		<-shutdownDone
 	}
 	return err
+}
+
+func (d *Daemon) prepareRunShutdownState() {
+	d.shutdownMu.Lock()
+	defer d.shutdownMu.Unlock()
+	d.shuttingDown = false
+	d.shutdownReqCh = make(chan struct{})
+	d.shutdownReqOnce = sync.Once{}
 }
 
 func (d *Daemon) validateCommandPolicyConfiguration() error {
@@ -464,6 +482,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.router.Handle(ctx, req), nil
 	}
 	switch req.Command {
+	case protocol.CommandDaemonShutdown:
+		return d.handleDaemonShutdown(req), nil
 	case protocol.CommandIssueFanout:
 		return d.handleIssueFanout(ctx, req)
 	case protocol.CommandIssueFanoutDrift:
@@ -519,6 +539,27 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	default:
 		return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported command"), nil
 	}
+}
+
+func (d *Daemon) handleDaemonShutdown(req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+	d.requestShutdown()
+	return d.successResponse(req)
+}
+
+func (d *Daemon) shutdownRequestChannel() chan struct{} {
+	d.shutdownMu.Lock()
+	defer d.shutdownMu.Unlock()
+	if d.shutdownReqCh == nil {
+		d.shutdownReqCh = make(chan struct{})
+	}
+	return d.shutdownReqCh
+}
+
+func (d *Daemon) requestShutdown() {
+	ch := d.shutdownRequestChannel()
+	d.shutdownReqOnce.Do(func() {
+		close(ch)
+	})
 }
 
 func (d *Daemon) beginCommand() error {
@@ -951,8 +992,8 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 		runtime.Agent = sessionRuntime.Agent
 	}
 	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
-		body, err := json.Marshal(protocol.SessionProjectionEventBody{
-			ProjectID: naming.ProjectID(projectID),
+	body, err := json.Marshal(protocol.SessionProjectionEventBody{
+		ProjectID: naming.ProjectID(projectID),
 		Revision:  rev,
 		Session: protocol.SessionProjection{
 			SessionID: parseSessionIDOrZero(session.ID),
@@ -990,8 +1031,8 @@ func (d *Daemon) publishWorktreeProjectionEventAtRevision(ctx context.Context, p
 	}
 	runtime := d.runtimeProjectionForEvent(ctx, projectID, issueID, worktree, nil)
 	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
-		body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
-			ProjectID: naming.ProjectID(projectID),
+	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
+		ProjectID: naming.ProjectID(projectID),
 		IssueID:   parseIssueIDOrZero(issueID),
 		Worktree:  strings.TrimSpace(worktree),
 		UpdatedAt: time.Now().UTC(),
@@ -1022,8 +1063,8 @@ func (d *Daemon) publishGitStatusProjectionEventAtRevision(ctx context.Context, 
 	}
 	runtime := d.runtimeProjectionForEvent(ctx, projectID, issueID, worktree, status)
 	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
-		body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
-			ProjectID: naming.ProjectID(projectID),
+	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
+		ProjectID: naming.ProjectID(projectID),
 		IssueID:   parseIssueIDOrZero(issueID),
 		Worktree:  strings.TrimSpace(worktree),
 		UpdatedAt: time.Now().UTC(),

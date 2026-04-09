@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"syscall"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -31,6 +32,8 @@ type Server struct {
 
 const serverFrameTimeout = 5 * time.Second
 
+var errSocketInUse = errors.New("socket path is already in use")
+
 // NewServer returns an unstarted IPC server.
 func NewServer(socketPath string, handlers Handlers) *Server {
 	return &Server{
@@ -48,7 +51,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err := os.MkdirAll(filepath.Dir(s.socketPath), 0o755); err != nil {
 		return fmt.Errorf("create socket dir: %w", err)
 	}
-	_ = os.Remove(s.socketPath)
+	if err := clearStaleSocketPath(s.socketPath); err != nil {
+		return err
+	}
 
 	l, err := net.Listen("unix", s.socketPath)
 	if err != nil {
@@ -75,6 +80,49 @@ func (s *Server) Serve(ctx context.Context) error {
 		}
 		go s.handleConn(ctx, conn)
 	}
+}
+
+func clearStaleSocketPath(socketPath string) error {
+	info, err := os.Stat(socketPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("stat socket path: %w", err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("socket path exists and is not a unix socket: %s", socketPath)
+	}
+
+	dialer := net.Dialer{Timeout: 150 * time.Millisecond}
+	conn, dialErr := dialer.Dial("unix", socketPath)
+	if dialErr == nil {
+		_ = conn.Close()
+		return fmt.Errorf("%w: %s", errSocketInUse, socketPath)
+	}
+	if isSocketDialPermissionError(dialErr) {
+		return fmt.Errorf("%w: %s: %v", errSocketInUse, socketPath, dialErr)
+	}
+	if !isSocketDialDefinitelyStale(dialErr) {
+		return fmt.Errorf("%w: %s: %v", errSocketInUse, socketPath, dialErr)
+	}
+	if rmErr := os.Remove(socketPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+		return fmt.Errorf("remove stale socket path: %w", rmErr)
+	}
+	return nil
+}
+
+func isSocketDialPermissionError(err error) bool {
+	return errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES)
+}
+
+func isSocketDialDefinitelyStale(err error) bool {
+	// Only classify as stale when the error strongly indicates there is no
+	// active listener behind the socket path.
+	return errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ENOENT) ||
+		errors.Is(err, syscall.ENOTSOCK) ||
+		errors.Is(err, net.ErrClosed)
 }
 
 func (s *Server) Close() error {
