@@ -116,7 +116,11 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, m.commitChangesCmd("target", worktree)
 	case "merge_preflight_refresh":
 		m.overlayStack.Pop()
-		return m, m.loadIssuesCmd()
+		selection, ok := msg.Value.(overlay.MergePreflightRefreshSelection)
+		if !ok {
+			return m, m.loadIssuesAfterRuntimeReconcileCmd()
+		}
+		return m, m.refreshMergePreflightCmd(selection)
 	case "projects":
 		// Settings -> Manage projects
 		m.overlayStack.Pop() // Close settings

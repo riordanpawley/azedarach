@@ -402,6 +402,11 @@ type mergePreflightActionResultMsg struct {
 	err      error
 }
 
+type mergePreflightRefreshResultMsg struct {
+	cleared bool
+	err     error
+}
+
 type mergeTargetSelectionResolvedMsg struct {
 	sourceID       string
 	targetID       string

@@ -3902,6 +3902,33 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	}
 }
 
+func (m Model) refreshMergePreflightCmd(selection overlay.MergePreflightRefreshSelection) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if m.daemonClient == nil {
+			return mergePreflightRefreshResultMsg{err: fmt.Errorf("daemon client unavailable")}
+		}
+		if _, err := m.daemonClient.ReconcileRuntime(ctx); err != nil && m.logger != nil {
+			m.logger.Warn("merge preflight refresh reconcile failed", "error", err)
+		}
+		preflight := m.checkMergePreflight(
+			ctx,
+			strings.TrimSpace(selection.SourceID),
+			strings.TrimSpace(selection.TargetID),
+			strings.TrimSpace(selection.SourceWorktree),
+			strings.TrimSpace(selection.TargetWorktree),
+			"",
+			"",
+			false,
+		)
+		if preflight != nil {
+			return *preflight
+		}
+		return mergePreflightRefreshResultMsg{cleared: true}
+	}
+}
+
 func (m Model) discardChangesCmd(side, worktree string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

@@ -577,6 +577,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+	case mergePreflightRefreshResultMsg:
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Merge preflight refresh failed: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		if msg.cleared {
+			m.addToast(Toast{
+				Level:   ToastSuccess,
+				Message: "Merge preconditions now clean",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+		}
+		return m, m.loadIssuesCmd()
+
 	case mergeTargetSelectionResolvedMsg:
 		if msg.err != nil {
 			m.addToast(Toast{
