@@ -6,7 +6,9 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestLockManagerRejectsActiveOwner(t *testing.T) {
@@ -155,5 +157,79 @@ func TestTerminateLockOwnerRemovesStaleLock(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("lock file should be removed, stat err = %v", err)
+	}
+}
+
+func TestTerminateLockOwnerPermissionDeniedKeepsLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "daemon.lock")
+	if err := os.WriteFile(path, []byte(`{"pid":42,"created_at":"2026-03-24T00:00:00Z"}`), 0o644); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+
+	err := terminateLockOwnerWith(
+		path,
+		func(int, syscall.Signal) error { return syscall.EPERM },
+		func(int) bool { return true },
+		time.Now,
+		func(time.Duration) {},
+	)
+	if !errors.Is(err, ErrLockOwnerPermissionDenied) {
+		t.Fatalf("terminateLockOwnerWith() err = %v, want ErrLockOwnerPermissionDenied", err)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("lock file should remain after permission-denied kill, stat err = %v", statErr)
+	}
+}
+
+func TestTerminateLockOwnerTimeoutKeepsLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "daemon.lock")
+	if err := os.WriteFile(path, []byte(`{"pid":42,"created_at":"2026-03-24T00:00:00Z"}`), 0o644); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+
+	now := time.Now()
+	err := terminateLockOwnerWith(
+		path,
+		func(int, syscall.Signal) error { return nil },
+		func(int) bool { return true },
+		func() time.Time {
+			now = now.Add(3 * time.Second)
+			return now
+		},
+		func(time.Duration) {},
+	)
+	if !errors.Is(err, ErrLockOwnerTerminationTimeout) {
+		t.Fatalf("terminateLockOwnerWith() err = %v, want ErrLockOwnerTerminationTimeout", err)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("lock file should remain after timeout, stat err = %v", statErr)
+	}
+}
+
+func TestTerminateLockOwnerWaitsForExitBeforeRemovingLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "daemon.lock")
+	if err := os.WriteFile(path, []byte(`{"pid":42,"created_at":"2026-03-24T00:00:00Z"}`), 0o644); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+
+	checks := 0
+	err := terminateLockOwnerWith(
+		path,
+		func(int, syscall.Signal) error { return nil },
+		func(int) bool {
+			checks++
+			return checks == 1
+		},
+		time.Now,
+		func(time.Duration) {},
+	)
+	if err != nil {
+		t.Fatalf("terminateLockOwnerWith() error = %v", err)
+	}
+	if checks < 2 {
+		t.Fatalf("isAlive checks = %d, want >= 2", checks)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("lock file should be removed after owner exits, stat err = %v", statErr)
 	}
 }

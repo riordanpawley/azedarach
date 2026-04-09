@@ -4,7 +4,6 @@ import (
 	"strings"
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
-	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
 
 type daemonProjectRuntimeConfig struct {
@@ -27,7 +26,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 			SessionShell: appconfig.DefaultSessionShell(),
 		}
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 
 	defaultConfig := daemonProjectRuntimeConfig{
 		BaseBranch:           strings.TrimSpace(d.cfg.BaseBranch),

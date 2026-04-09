@@ -52,19 +52,20 @@ func renderColumn(
 
 		task := tasks[i]
 		isCursor := isActive && i == cursorTask
-		isSelected := selectedTasks[task.ID]
+		taskID := task.ID.String()
+		isSelected := selectedTasks[taskID]
 
 		var phaseInfo *phases.TaskPhaseInfo
-		if info, exists := phaseData[task.ID]; exists {
+		if info, exists := phaseData[taskID]; exists {
 			phaseInfo = &info
 		}
 		var childProgress *ChildProgress
-		if progress, exists := childProgressByTask[task.ID]; exists && progress.Total > 0 {
+		if progress, exists := childProgressByTask[taskID]; exists && progress.Total > 0 {
 			progressCopy := progress
 			childProgress = &progressCopy
 		}
 		var runtimeSignals *RuntimeSignals
-		if signals, exists := runtimeSignalsByTask[task.ID]; exists {
+		if signals, exists := runtimeSignalsByTask[taskID]; exists {
 			signalsCopy := signals
 			runtimeSignals = &signalsCopy
 		}

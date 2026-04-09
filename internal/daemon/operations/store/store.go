@@ -461,9 +461,6 @@ func normalizeCreateParams(params CreateParams) (Record, error) {
 		return Record{}, fmt.Errorf("create operation %s: missing project id", operationID)
 	}
 	issueID := strings.TrimSpace(params.IssueID)
-	if issueID == "" {
-		return Record{}, fmt.Errorf("create operation %s: missing issue id", operationID)
-	}
 	kind := strings.TrimSpace(params.Kind)
 	if kind == "" {
 		return Record{}, fmt.Errorf("create operation %s: missing kind", operationID)

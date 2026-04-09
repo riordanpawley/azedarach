@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 func TestNewCompactView(t *testing.T) {
@@ -129,7 +130,7 @@ func TestRenderWithTasks(t *testing.T) {
 
 	// Check task IDs are present
 	for _, task := range tasks {
-		if !strings.Contains(output, task.ID) {
+		if !strings.Contains(output, task.ID.String()) {
 			t.Errorf("Expected output to contain task ID %s", task.ID)
 		}
 	}
@@ -347,7 +348,7 @@ func createTestTasks(count int) []domain.Task {
 
 	for i := 0; i < count; i++ {
 		tasks[i] = domain.Task{
-			ID:        fmt.Sprintf("az-%d", i+1),
+			ID:        naming.IssueID(fmt.Sprintf("az-%d", i+1)),
 			Title:     fmt.Sprintf("Task %d", i+1),
 			Status:    domain.StatusOpen,
 			Priority:  domain.Priority(i % 5),

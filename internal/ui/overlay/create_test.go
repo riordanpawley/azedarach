@@ -692,7 +692,7 @@ func TestEditTaskOverlayPasteKeyVariantsAttachFromClipboard(t *testing.T) {
 			svc := &createTestAttachmentService{
 				attached: &attachment.Attachment{
 					ID:       "att-variant",
-					IssueID:  task.ID,
+					IssueID:  task.ID.String(),
 					Filename: "clipboard.png",
 					Size:     1200,
 					Created:  time.Now(),
@@ -707,7 +707,7 @@ func TestEditTaskOverlayPasteKeyVariantsAttachFromClipboard(t *testing.T) {
 			addedMsg, ok := msg.(attachmentAddedMsg)
 			require.True(t, ok)
 			require.NotNil(t, addedMsg.attachment)
-			assert.Equal(t, task.ID, addedMsg.attachment.IssueID)
+			assert.Equal(t, task.ID.String(), addedMsg.attachment.IssueID)
 		})
 	}
 }
@@ -717,7 +717,7 @@ func TestEditTaskOverlayCtrlODoesNotAttachFromClipboard(t *testing.T) {
 	svc := &createTestAttachmentService{
 		attached: &attachment.Attachment{
 			ID:       "att-ctrl-o",
-			IssueID:  task.ID,
+			IssueID:  task.ID.String(),
 			Filename: "clipboard.png",
 			Size:     1200,
 			Created:  time.Now(),

@@ -212,17 +212,17 @@ func TestRenderCard_ShowsBlockedPhaseChip(t *testing.T) {
 	}
 
 	tasks := map[string]domain.Task{
-		blocker.ID: blocker,
-		blocked.ID: blocked,
+		blocker.ID.String(): blocker,
+		blocked.ID.String(): blocked,
 	}
 	taskIDs := map[string]bool{
-		blocker.ID: true,
-		blocked.ID: true,
+		blocker.ID.String(): true,
+		blocked.ID.String(): true,
 	}
 	phaseInfo := phases.ComputeDependencyPhases(taskIDs, tasks)
 
-	blockerPhase := phaseInfo.Phases[blocker.ID]
-	blockedPhase := phaseInfo.Phases[blocked.ID]
+	blockerPhase := phaseInfo.Phases[blocker.ID.String()]
+	blockedPhase := phaseInfo.Phases[blocked.ID.String()]
 
 	blockerView := normalizeBoardOutput(renderCard(blocker, nil, false, false, 80, nil, &blockerPhase, true, s))
 	blockedView := normalizeBoardOutput(renderCard(blocked, nil, false, false, 80, nil, &blockedPhase, true, s))

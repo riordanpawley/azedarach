@@ -44,7 +44,7 @@ func (c *Cursor) FindPosition(columns []board.Column) Position {
 	// Search for the task by ID
 	for colIdx, col := range columns {
 		for taskIdx, task := range col.Tasks {
-			if task.ID == c.TaskID {
+			if task.ID.String() == c.TaskID {
 				c.FallbackColumn = colIdx
 				c.FallbackTask = taskIdx
 				return Position{Column: colIdx, Task: taskIdx, Valid: true}
@@ -101,7 +101,7 @@ func (c *Cursor) MoveVertical(columns []board.Column, delta int) string {
 	}
 
 	if newIdx >= 0 && newIdx < len(col.Tasks) {
-		c.TaskID = col.Tasks[newIdx].ID
+		c.TaskID = col.Tasks[newIdx].ID.String()
 		c.FallbackColumn = pos.Column
 		c.FallbackTask = newIdx
 	}
@@ -144,7 +144,7 @@ func (c *Cursor) MoveHorizontal(columns []board.Column, delta int) string {
 	if taskIdx < 0 {
 		taskIdx = 0
 	}
-	c.TaskID = columns[targetCol].Tasks[taskIdx].ID
+	c.TaskID = columns[targetCol].Tasks[taskIdx].ID.String()
 	c.FallbackTask = taskIdx
 	return c.TaskID
 }
@@ -153,7 +153,7 @@ func (c *Cursor) MoveHorizontal(columns []board.Column, delta int) string {
 func (c *Cursor) JumpToStart(columns []board.Column) string {
 	pos := c.FindPosition(columns)
 	if pos.Column < len(columns) && len(columns[pos.Column].Tasks) > 0 {
-		c.TaskID = columns[pos.Column].Tasks[0].ID
+		c.TaskID = columns[pos.Column].Tasks[0].ID.String()
 		c.FallbackTask = 0
 	}
 	return c.TaskID
@@ -165,7 +165,7 @@ func (c *Cursor) JumpToEnd(columns []board.Column) string {
 	if pos.Column < len(columns) {
 		col := columns[pos.Column]
 		if len(col.Tasks) > 0 {
-			c.TaskID = col.Tasks[len(col.Tasks)-1].ID
+			c.TaskID = col.Tasks[len(col.Tasks)-1].ID.String()
 			c.FallbackTask = len(col.Tasks) - 1
 		}
 	}
@@ -190,7 +190,7 @@ func (c *Cursor) JumpToColumn(columns []board.Column, colIdx int) string {
 		if taskIdx >= len(columns[colIdx].Tasks) {
 			taskIdx = len(columns[colIdx].Tasks) - 1
 		}
-		c.TaskID = columns[colIdx].Tasks[taskIdx].ID
+		c.TaskID = columns[colIdx].Tasks[taskIdx].ID.String()
 		c.FallbackTask = taskIdx
 	} else {
 		c.TaskID = "" // No task in target column
@@ -313,7 +313,7 @@ func (s *Service) JumpToTaskByIndex(columns []board.Column, flatIndex int) bool 
 	for colIdx, col := range columns {
 		for taskIdx, task := range col.Tasks {
 			if currentIndex == flatIndex {
-				s.cursor.SetTaskAt(task.ID, colIdx, taskIdx)
+				s.cursor.SetTaskAt(task.ID.String(), colIdx, taskIdx)
 				return true
 			}
 			currentIndex++
@@ -326,8 +326,8 @@ func (s *Service) JumpToTaskByIndex(columns []board.Column, flatIndex int) bool 
 func (s *Service) JumpToTaskByID(columns []board.Column, taskID string) bool {
 	for colIdx, col := range columns {
 		for taskIdx, task := range col.Tasks {
-			if task.ID == taskID {
-				s.cursor.SetTaskAt(task.ID, colIdx, taskIdx)
+			if task.ID.String() == taskID {
+				s.cursor.SetTaskAt(task.ID.String(), colIdx, taskIdx)
 				return true
 			}
 		}

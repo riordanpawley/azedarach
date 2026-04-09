@@ -150,9 +150,9 @@ func (m *MergeSelectOverlay) View() string {
 func (m *MergeSelectOverlay) renderMergeContent() string {
 	var b strings.Builder
 
-	header := fmt.Sprintf("Merge %s into:", m.overlayStyles.MenuKey.Render(m.source.ID))
+	header := fmt.Sprintf("Merge %s into:", m.overlayStyles.MenuKey.Render(m.source.ID.String()))
 	if m.mode == MergeSelectModeUpstreamSource {
-		header = fmt.Sprintf("Merge into %s from:", m.overlayStyles.MenuKey.Render(m.source.ID))
+		header = fmt.Sprintf("Merge into %s from:", m.overlayStyles.MenuKey.Render(m.source.ID.String()))
 	}
 	b.WriteString(m.overlayStyles.Title.Render(header))
 	b.WriteString("\n\n")
@@ -262,15 +262,15 @@ func (m *MergeSelectOverlay) selectCurrent() tea.Cmd {
 			return SelectionMsg{
 				Key: "merge",
 				Value: MergeTargetSelectedMsg{
-					SourceID: target.ID,
-					TargetID: m.source.ID,
+				SourceID: target.ID,
+				TargetID: m.source.ID.String(),
 				},
 			}
 		}
 		return SelectionMsg{
 			Key: "merge",
 			Value: MergeTargetSelectedMsg{
-				SourceID: m.source.ID,
+				SourceID: m.source.ID.String(),
 				TargetID: target.ID,
 			},
 		}

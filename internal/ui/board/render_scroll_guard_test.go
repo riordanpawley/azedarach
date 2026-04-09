@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -70,7 +71,7 @@ func TestRender_UsesViewportOnlyOnActiveColumn(t *testing.T) {
 		tasks := make([]domain.Task, 0, count)
 		for i := 1; i <= count; i++ {
 			tasks = append(tasks, domain.Task{
-				ID:       fmt.Sprintf("%s-%02d", prefix, i),
+				ID:       naming.IssueID(fmt.Sprintf("%s-%02d", prefix, i)),
 				Title:    fmt.Sprintf("%s-task-%02d", prefix, i),
 				Status:   domain.StatusOpen,
 				Priority: domain.P2,

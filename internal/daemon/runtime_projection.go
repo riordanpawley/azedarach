@@ -18,17 +18,21 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 
 	if session != nil {
 		updatedAt := session.UpdatedAt.UTC()
+		observedState := session.ObservedState
+		if strings.TrimSpace(string(observedState)) == "" {
+			observedState = session.State
+		}
 		projection.IssueID = parseIssueIDOrZero(session.IssueID)
 		projection.Session = protocol.RuntimeSessionProjection{
 			HasSession: true,
 			SessionID:  parseSessionIDOrZero(session.ID),
-			State:      protocol.SessionLifecycleState(session.State),
+			State:      protocol.SessionLifecycleState(observedState),
 			StartedAt:  timePtrFrom(session.StartedAt),
 			UpdatedAt:  timePtr(updatedAt),
 			Worktree:   strings.TrimSpace(projection.Worktree.Path),
 		}
 		projection.Agent = protocol.RuntimeAgentProjection{
-			Status:    string(session.State),
+			Status:    string(observedState),
 			SessionID: parseSessionIDOrZero(session.ID),
 			UpdatedAt: timePtr(updatedAt),
 		}
@@ -55,6 +59,10 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 			var status git.GitStatus
 			if err := json.Unmarshal(worktree.GitStatusRaw, &status); err == nil {
 				projection.Git.HasUncommittedChanges = status.HasChanges
+				projection.Git.GitAdditions = status.GitAdditions
+				projection.Git.GitDeletions = status.GitDeletions
+				projection.Git.GitAheadCount = status.GitAheadCount
+				projection.Git.GitBehindCount = status.GitBehindCount
 			}
 		}
 		if projection.Agent.UpdatedAt == nil {
@@ -99,8 +107,8 @@ func buildRuntimeProjectionEventBody(projectID string, revision uint64, projecti
 	}
 }
 
-func normalizeRuntimeProjectionProjectID(projectID string) string {
-	return protocol.NormalizeProjectID(projectID)
+func normalizeRuntimeProjectionProjectID(projectID string) naming.ProjectID {
+	return naming.ProjectID(protocol.NormalizeProjectID(projectID))
 }
 
 func timePtr(t time.Time) *time.Time {

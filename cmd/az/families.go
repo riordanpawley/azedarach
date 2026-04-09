@@ -591,7 +591,7 @@ func runDevListCommand(deps *cli.Dependencies, opts devListOptions) error {
 	issueIDs := make([]string, 0, len(snapshot.Tasks))
 	seen := map[string]struct{}{}
 	for _, task := range snapshot.Tasks {
-		issueID := strings.TrimSpace(task.ID)
+		issueID := strings.TrimSpace(task.ID.String())
 		if issueID == "" {
 			continue
 		}

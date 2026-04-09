@@ -150,11 +150,12 @@ type Model struct {
 	runtimeSignalWorktreeByTask map[string]string
 
 	// Project
-	currentProject string
-	projects       []domain.Project
-	repoDir        string
-	runtimeRepoDir string
-	logFilePath    string
+	currentProject       string
+	daemonProjectRouteID naming.ProjectID
+	projects             []domain.Project
+	repoDir              string
+	runtimeRepoDir       string
+	logFilePath          string
 
 	// Toasts
 	toasts []Toast
@@ -290,7 +291,8 @@ func New(cfg *config.Config) Model {
 		currentProject:              resolveInitialProjectName(deps.ProjectRegistry, repoDir),
 	}
 	logger.Info("tui runtime initialized", "repo_dir", repoDir, "runtime_repo_dir", runtimeRepoDir, "daemon_socket", daemonSocketPath, "project", m.currentProject)
-	m.daemonClient.WithProjectID(m.daemonProjectID())
+	m.refreshDaemonProjectRouteID()
+	m.daemonClient.WithProjectRouteID(m.daemonProjectRouteIDValue())
 	return m
 }
 
@@ -305,7 +307,7 @@ func (m *Model) reconcileCursorAfterIssuesRefresh() {
 	if pos.Task < 0 || pos.Task >= len(col.Tasks) {
 		return
 	}
-	m.nav.SelectTask(col.Tasks[pos.Task].ID, pos.Column)
+	m.nav.SelectTask(col.Tasks[pos.Task].ID.String(), pos.Column)
 }
 
 func (m *Model) applyPendingCreatedTaskSelection() {
@@ -352,7 +354,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.editor.GetMode() != ModeAction {
 			m.boardRefreshing = true
 			m.issueRefreshSeq++
-			return m, tea.Batch(m.loadIssuesCmd(), m.gitSyncService.FetchAndCheck())
+			return m, tea.Batch(m.loadIssuesAfterRuntimeReconcileCmd(), m.gitSyncService.FetchAndCheck())
 		}
 	}
 
@@ -494,9 +496,20 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			task, _ = m.getCurrentTaskAndSession()
 		}
 		if task != nil {
-			workspace := overlay.NewTaskWorkspaceOverlay(*task, m.tasks, m.pendingMutationForTask(task.ID), m.width, m.height)
+			// Resolve from authoritative task projection to avoid opening the
+			// workspace with a stale navigation-copy task payload.
+			if latestTask, _, ok := m.taskAndSessionByID(task.ID.String()); ok && latestTask != nil {
+				task = latestTask
+			}
+			workspace := overlay.NewTaskWorkspaceOverlay(*task, m.tasks, m.pendingMutationForTask(task.ID.String()), m.width, m.height)
 			workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
-			return m, m.openOverlay(workspace)
+			if m.daemonClient == nil {
+				return m, m.openOverlay(workspace)
+			}
+			return m, tea.Batch(
+				m.openOverlay(workspace),
+				m.refreshTaskWorkspaceInBackgroundCmd(task.ID.String()),
+			)
 		}
 		return m, nil
 
@@ -520,11 +533,11 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keybinds.ActionDrillDown: // Drill into children
 		task, _ := m.getCurrentTaskAndSession()
 		if task != nil {
-			children := m.getTaskChildren(task.ID)
+			children := m.getTaskChildren(task.ID.String())
 			if len(children) > 0 {
-				m.enterDrillDown(task.ID, task.Title)
+				m.enterDrillDown(task.ID.String(), task.Title)
 				columns := m.buildColumns()
-				m.nav.JumpToTaskByID(columns, children[0].ID)
+				m.nav.JumpToTaskByID(columns, children[0].ID.String())
 				m.ensureCursorVisible(columns)
 				return m, nil
 			}
@@ -679,7 +692,7 @@ func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if session != nil {
 			worktreeHint = session.Worktree
 		}
-		return m, m.updateFromBaseCmd(task.ID, worktreeHint, false)
+		return m, m.updateFromBaseCmd(task.ID.String(), worktreeHint, false)
 	case "P":
 		m.addToast(Toast{
 			Level: ToastWarning,
@@ -705,7 +718,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keybinds.ActionMoveDown:
 		// Keep current task selected, then move down.
 		if task != nil {
-			m.editor.Select(task.ID)
+			m.editor.Select(task.ID.String())
 		}
 		m.nav.MoveDown(columns)
 		m.ensureCursorVisible(columns)
@@ -714,7 +727,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keybinds.ActionMoveUp:
 		// Keep current task selected, then move up.
 		if task != nil {
-			m.editor.Select(task.ID)
+			m.editor.Select(task.ID.String())
 		}
 		m.nav.MoveUp(columns)
 		m.ensureCursorVisible(columns)
@@ -734,7 +747,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Half-page movement with selection toggle
 	case keybinds.ActionHalfPageDown:
 		if task != nil {
-			m.editor.Select(task.ID)
+			m.editor.Select(task.ID.String())
 		}
 		m.nav.HalfPageDown(columns, m.halfPage())
 		m.ensureCursorVisible(columns)
@@ -742,7 +755,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keybinds.ActionHalfPageUp:
 		if task != nil {
-			m.editor.Select(task.ID)
+			m.editor.Select(task.ID.String())
 		}
 		m.nav.HalfPageUp(columns, m.halfPage())
 		m.ensureCursorVisible(columns)
@@ -751,7 +764,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Toggle current selection without moving.
 	case keybinds.ActionSelectToggle:
 		if task != nil {
-			m.editor.ToggleSelection(task.ID)
+			m.editor.ToggleSelection(task.ID.String())
 		}
 		return m, nil
 
@@ -760,7 +773,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		status := m.nav.GetCurrentStatus(columns)
 		for _, t := range m.tasks {
 			if t.Status == status {
-				m.editor.Select(t.ID)
+				m.editor.Select(t.ID.String())
 			}
 		}
 		return m, nil
@@ -774,10 +787,10 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Invert visible selection
 	case keybinds.ActionSelectInvert:
 		for _, t := range m.editor.ApplyFilter(m.tasks) {
-			if m.editor.IsSelected(t.ID) {
-				m.editor.Deselect(t.ID)
+			if m.editor.IsSelected(t.ID.String()) {
+				m.editor.Deselect(t.ID.String())
 			} else {
-				m.editor.Select(t.ID)
+				m.editor.Select(t.ID.String())
 			}
 		}
 		return m, nil
@@ -825,6 +838,7 @@ type issuesLoadedMsg struct {
 	daemonSocket  string
 	stale         bool
 	freshnessHint string
+	reconcileWarn error
 }
 
 type issuesErrorMsg struct {
@@ -1009,8 +1023,8 @@ func clampOperationPercent(percent int) int {
 	return percent
 }
 
-func (m Model) resolveOperationTaskID(issueID string, resourceKeys []string) string {
-	trimmedIssueID := strings.TrimSpace(issueID)
+func (m Model) resolveOperationTaskID(issueID naming.IssueID, resourceKeys []string) string {
+	trimmedIssueID := strings.TrimSpace(issueID.String())
 	if taskID := m.lookupTaskID(trimmedIssueID); taskID != "" {
 		return taskID
 	}
@@ -1047,8 +1061,8 @@ func (m Model) lookupTaskID(candidate string) string {
 		return ""
 	}
 	for _, task := range m.tasks {
-		if taskIDKey(task.ID) == key {
-			return task.ID
+		if taskIDKey(task.ID.String()) == key {
+			return task.ID.String()
 		}
 	}
 	return ""
@@ -1074,7 +1088,7 @@ func (m Model) lookupTaskIDByWorktree(worktree string) string {
 	}
 	for _, task := range m.tasks {
 		if task.Session != nil && strings.TrimSpace(task.Session.Worktree) == worktree {
-			return task.ID
+			return task.ID.String()
 		}
 	}
 	return ""
@@ -1114,6 +1128,50 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 			revision:      snapshot.Revision,
 			lastCheckedAt: snapshot.LastCheckedAt,
 			freshness:     snapshot.Freshness,
+		}
+	}
+}
+
+func (m Model) loadIssuesAfterRuntimeReconcileCmd() tea.Cmd {
+	projectID := m.daemonProjectID()
+	refreshSeq := m.issueRefreshSeq
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 8*time.Second)
+		reconcileWarn := error(nil)
+		if _, err := m.daemonClient.ReconcileRuntime(reconcileCtx); err != nil {
+			reconcileWarn = err
+		}
+		reconcileCancel()
+
+		snapshotCtx, snapshotCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer snapshotCancel()
+		snapshot, err := m.readTaskSnapshot(snapshotCtx, m.daemonClient)
+		if err != nil {
+			var timeoutErr *daemonclient.ReadWaitTimeoutError
+			if errors.As(err, &timeoutErr) {
+				return issuesLoadedMsg{
+					refreshSeq:    refreshSeq,
+					projectID:     projectID,
+					stale:         true,
+					freshnessHint: timeoutErr.Hint,
+					reconcileWarn: reconcileWarn,
+				}
+			}
+			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: err}
+		}
+
+		return issuesLoadedMsg{
+			refreshSeq:    refreshSeq,
+			projectID:     projectID,
+			tasks:         snapshot.Tasks,
+			revision:      snapshot.Revision,
+			lastCheckedAt: snapshot.LastCheckedAt,
+			freshness:     snapshot.Freshness,
+			reconcileWarn: reconcileWarn,
 		}
 	}
 }
@@ -1187,7 +1245,7 @@ func (m Model) filterSuppressedHydratedTasks(tasks []domain.Task) []domain.Task 
 
 	filtered := make([]domain.Task, 0, len(tasks))
 	for _, task := range tasks {
-		if m.isTaskHydrationSuppressed(task.ID) {
+		if m.isTaskHydrationSuppressed(task.ID.String()) {
 			continue
 		}
 		filtered = append(filtered, task)
@@ -1203,7 +1261,7 @@ func removeTaskByID(tasks []domain.Task, taskID string) []domain.Task {
 	target := taskIDKey(taskID)
 	filtered := make([]domain.Task, 0, len(tasks))
 	for _, task := range tasks {
-		if taskIDKey(task.ID) == target {
+		if taskIDKey(task.ID.String()) == target {
 			continue
 		}
 		filtered = append(filtered, task)
@@ -1212,16 +1270,20 @@ func removeTaskByID(tasks []domain.Task, taskID string) []domain.Task {
 }
 
 func (m Model) daemonClientForSocket(socketPath, projectID string) *daemonclient.Client {
+	routeID := naming.ProjectID(protocol.NormalizeProjectID(projectID))
+	if parsed, err := naming.ParseProjectID(routeID.String()); err == nil {
+		routeID = parsed
+	}
 	if m.daemonClient != nil {
 		if strings.TrimSpace(m.daemonSocketPath) == "" || m.daemonSocketPath == socketPath {
-			return m.daemonClient.WithProjectID(projectID)
+			return m.daemonClient.WithProjectRouteID(routeID)
 		}
 	}
 	readWaitPolicy := daemonclient.DefaultReadWaitPolicy()
 	if m.daemonClient != nil {
 		readWaitPolicy = m.daemonClient.ReadWaitPolicy()
 	}
-	return newScopedDaemonClient(socketPath, projectID, readWaitPolicy)
+	return newScopedDaemonClient(socketPath, routeID.String(), readWaitPolicy)
 }
 
 func (m Model) readTaskSnapshot(ctx context.Context, client *daemonclient.Client) (daemonclient.TaskSnapshot, error) {
@@ -1265,7 +1327,11 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		if socketPath == "" {
 			socketPath = config.DaemonSocketPathFor(m.activeProjectPath())
 		}
-		daemonClient := m.daemonClientForSocket(socketPath, project.Name)
+		projectRouteID, ok := daemonProjectRouteIDForPath(project.Path)
+		if !ok {
+			projectRouteID = naming.ProjectID(protocol.NormalizeProjectID(project.Name))
+		}
+		daemonClient := m.daemonClientForSocket(socketPath, projectRouteID.String())
 
 		snapshot, err := m.readTaskSnapshot(ctx, daemonClient)
 		if err != nil {
@@ -1278,10 +1344,10 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 				err:       err,
 			}
 		}
-		events, err := daemonClient.Subscribe(context.Background(), project.Name, snapshot.Revision)
+		events, err := daemonClient.Subscribe(context.Background(), projectRouteID.String(), snapshot.Revision)
 		if err != nil {
 			if m.logger != nil {
-				m.logger.Warn("project switch subscribe failed", "to_project", project.Name, "revision", snapshot.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
+				m.logger.Warn("project switch subscribe failed", "to_project", project.Name, "to_project_route", projectRouteID.String(), "revision", snapshot.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
 			}
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
@@ -1290,7 +1356,7 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 			}
 		}
 		if m.logger != nil {
-			m.logger.Info("project switch snapshot loaded", "from_project", m.currentProject, "to_project", project.Name, "revision", snapshot.Revision, "task_count", len(snapshot.Tasks), "elapsed_ms", time.Since(startedAt).Milliseconds())
+			m.logger.Info("project switch snapshot loaded", "from_project", m.currentProject, "to_project", project.Name, "to_project_route", projectRouteID.String(), "revision", snapshot.Revision, "task_count", len(snapshot.Tasks), "elapsed_ms", time.Since(startedAt).Milliseconds())
 		}
 
 		return projectSwitchResultMsg{
@@ -1403,9 +1469,10 @@ func (m *Model) rebindProjectContext(project config.Project, projectConfig *conf
 	}
 	m.currentProject = project.Name
 	m.repoDir = project.Path
+	m.refreshDaemonProjectRouteID()
 	m.rebuildProjectScopedServices()
 	if m.daemonClient != nil {
-		m.daemonClient.WithProjectID(m.daemonProjectID())
+		m.daemonClient.WithProjectRouteID(m.daemonProjectRouteIDValue())
 	}
 }
 
@@ -1480,7 +1547,7 @@ func (m *Model) applySessionProjectionEvent(evt protocol.EventEnvelope) {
 		}
 		return
 	}
-	if projectID := strings.TrimSpace(body.ProjectID); projectID != "" && projectID != m.daemonProjectID() {
+	if projectID := strings.TrimSpace(body.ProjectID.String()); projectID != "" && projectID != m.daemonProjectID() {
 		return
 	}
 	m.applyRuntimeProjectionFromSessionEvent(body)
@@ -1499,19 +1566,51 @@ func (m Model) reduceDaemonEvent(evt protocol.EventEnvelope) daemonEventDecision
 	}
 }
 
+func (m *Model) refreshDaemonProjectRouteID() {
+	m.daemonProjectRouteID = m.computeDaemonProjectRouteID()
+}
+
+func (m Model) daemonProjectRouteIDValue() naming.ProjectID {
+	return m.computeDaemonProjectRouteID()
+}
+
 func (m Model) daemonProjectID() string {
-	if m.currentProject != "" {
-		return m.currentProject
+	return m.daemonProjectRouteIDValue().String()
+}
+
+func (m Model) computeDaemonProjectRouteID() naming.ProjectID {
+	if m.currentProject != "" && m.projectRegistry != nil {
+		if project, err := m.projectRegistry.Get(m.currentProject); err == nil {
+			if projectID, ok := daemonProjectRouteIDForPath(project.Path); ok {
+				return projectID
+			}
+		}
 	}
-	if m.projectRegistry != nil {
-		if project := m.projectRegistry.GetDefault(); project != nil && project.Name != "" {
-			return project.Name
+	if projectPath := strings.TrimSpace(m.activeProjectPath()); projectPath != "" {
+		if m.currentProject == "" || strings.EqualFold(filepath.Base(projectPath), strings.TrimSpace(m.currentProject)) {
+			if projectID, ok := daemonProjectRouteIDForPath(projectPath); ok {
+				return projectID
+			}
+		}
+	}
+	if normalizedCurrent := protocol.NormalizeProjectID(m.currentProject); strings.TrimSpace(normalizedCurrent) != "" {
+		if projectID, err := naming.ParseProjectID(normalizedCurrent); err == nil {
+			return projectID
 		}
 	}
 	if cwd, err := os.Getwd(); err == nil {
-		return filepath.Base(cwd)
+		if projectID, ok := daemonProjectRouteIDForPath(cwd); ok {
+			return projectID
+		}
+		if fallback, parseErr := naming.ParseProjectID(protocol.NormalizeProjectID(filepath.Base(cwd))); parseErr == nil {
+			return fallback
+		}
 	}
-	return "default"
+	defaultProjectID, err := naming.ParseProjectID(protocol.DefaultProjectID)
+	if err == nil {
+		return defaultProjectID
+	}
+	return naming.ProjectID(protocol.DefaultProjectID)
 }
 
 func daemonProjectIDForPath(path string) string {
@@ -1524,6 +1623,18 @@ func daemonProjectIDForPath(path string) string {
 		return ""
 	}
 	return strings.TrimSpace(projectID)
+}
+
+func daemonProjectRouteIDForPath(path string) (naming.ProjectID, bool) {
+	projectID := daemonProjectIDForPath(path)
+	if strings.TrimSpace(projectID) == "" {
+		return "", false
+	}
+	parsed, err := naming.ParseProjectID(projectID)
+	if err != nil {
+		return "", false
+	}
+	return parsed, true
 }
 
 func resolveDaemonBinaryForRepo(repoDir string) string {
@@ -1721,7 +1832,7 @@ func (m Model) taskAndSessionByID(issueID string) (*domain.Task, *domain.Session
 	}
 
 	for i := range m.tasks {
-		if taskIDKey(m.tasks[i].ID) != targetID {
+		if taskIDKey(m.tasks[i].ID.String()) != targetID {
 			continue
 		}
 		task := &m.tasks[i]
@@ -1920,7 +2031,7 @@ func (m Model) sortTasksInColumn(filteredTasks []domain.Task, status domain.Stat
 		activeDescendantSessionByTask := buildActiveDescendantSessionByTask(m.tasks)
 		if len(activeDescendantSessionByTask) > 0 {
 			for i := range inColumn {
-				if activeDescendantSessionByTask[inColumn[i].ID] {
+				if activeDescendantSessionByTask[inColumn[i].ID.String()] {
 					inColumn[i].HasTmuxSession = true
 				}
 			}
@@ -1935,7 +2046,10 @@ func (m Model) getCurrentTaskAndSession() (*domain.Task, *domain.Session) {
 	columns := m.buildColumns()
 	cursor := m.nav.GetCursor()
 	if task, session := m.nav.GetCurrentTask(columns); task != nil {
-		if cursor == nil || cursor.TaskID == "" || task.ID == cursor.TaskID {
+		if cursor == nil || cursor.TaskID == "" || task.ID.String() == cursor.TaskID {
+			if latestTask, latestSession, ok := m.taskAndSessionByID(task.ID.String()); ok && latestTask != nil {
+				return latestTask, latestSession
+			}
 			return task, session
 		}
 	}
@@ -1947,7 +2061,7 @@ func (m Model) getCurrentTaskAndSession() (*domain.Task, *domain.Session) {
 		return nil, nil
 	}
 	for i := range m.tasks {
-		if m.tasks[i].ID == cursor.TaskID {
+		if m.tasks[i].ID.String() == cursor.TaskID {
 			task := m.tasks[i]
 			return &task, task.Session
 		}
@@ -2317,6 +2431,56 @@ type pendingWorktreeCleanupConfirmation struct {
 	force       bool
 }
 
+type refreshTaskWorkspaceResultMsg struct {
+	taskID        string
+	hasTask       bool
+	task          domain.Task
+	tasks         []domain.Task
+	lastCheckedAt time.Time
+	freshness     protocol.TaskListFreshness
+	reconcileErr  error
+	snapshotErr   error
+}
+
+func (m Model) refreshTaskWorkspaceInBackgroundCmd(taskID string) tea.Cmd {
+	return func() tea.Msg {
+		msg := refreshTaskWorkspaceResultMsg{taskID: taskID}
+		if m.daemonClient == nil {
+			return msg
+		}
+
+		issueID := strings.TrimSpace(taskID)
+		if issueID != "" && taskIDKey(issueID) != "main" {
+			reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 8*time.Second)
+			if _, err := m.daemonClient.ReconcileRuntimeIssues(reconcileCtx, []string{issueID}); err != nil {
+				msg.reconcileErr = err
+			}
+			reconcileCancel()
+		}
+
+		snapshotCtx, snapshotCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer snapshotCancel()
+		snapshot, err := m.readTaskSnapshot(snapshotCtx, m.daemonClient)
+		if err != nil {
+			msg.snapshotErr = err
+			return msg
+		}
+
+		msg.tasks = snapshot.Tasks
+		msg.lastCheckedAt = snapshot.LastCheckedAt
+		msg.freshness = snapshot.Freshness
+		for _, candidate := range snapshot.Tasks {
+			if candidate.ID.String() == msg.taskID {
+				msg.hasTask = true
+				msg.task = candidate
+				return msg
+			}
+		}
+		msg.snapshotErr = fmt.Errorf("task %s not found in refreshed snapshot", msg.taskID)
+		return msg
+	}
+}
+
 func (m Model) deleteTaskCmd(taskID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -2386,8 +2550,10 @@ func (m Model) requestWorktreeCleanupConfirmationCmd(taskID string, deleteTask b
 			return msg
 		}
 
-		if _, err := m.daemonClient.ReconcileRuntime(ctx); err != nil {
-			msg.reconcileErr = err
+		if issueID := strings.TrimSpace(taskID); issueID != "" {
+			if _, err := m.daemonClient.ReconcileRuntimeIssues(ctx, []string{issueID}); err != nil {
+				msg.reconcileErr = err
+			}
 		}
 
 		snapshot, err := m.readTaskSnapshot(ctx, m.daemonClient)
@@ -2401,7 +2567,7 @@ func (m Model) requestWorktreeCleanupConfirmationCmd(taskID string, deleteTask b
 		msg.checkedAt = snapshot.LastCheckedAt
 
 		for _, task := range snapshot.Tasks {
-			if taskIDKey(task.ID) != taskIDKey(taskID) {
+			if taskIDKey(task.ID.String()) != taskIDKey(taskID) {
 				continue
 			}
 			msg.hasTask = true
@@ -2671,7 +2837,7 @@ func (m Model) selectionSummary() string {
 	filtered := m.editor.ApplyFilter(m.tasks)
 	visible := make(map[string]struct{}, len(filtered))
 	for _, task := range filtered {
-		visible[task.ID] = struct{}{}
+		visible[task.ID.String()] = struct{}{}
 	}
 
 	hiddenCount := 0
@@ -2941,7 +3107,7 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 			// Find the task to get current status
 			var currentTask *domain.Task
 			for i := range m.tasks {
-				if m.tasks[i].ID == taskID {
+				if m.tasks[i].ID.String() == taskID {
 					currentTask = &m.tasks[i]
 					break
 				}
@@ -3094,7 +3260,7 @@ func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd 
 
 func (m Model) taskExists(taskID string) bool {
 	for i := range m.tasks {
-		if m.tasks[i].ID == taskID {
+		if m.tasks[i].ID.String() == taskID {
 			return true
 		}
 	}
@@ -3159,6 +3325,14 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			return taskCreatedResultMsg{err: fmt.Errorf("daemon client unavailable")}
 		}
 
+		var parentID *naming.IssueID
+		if msg.ParentID != nil {
+			parsedParentID, parseErr := naming.ParseIssueID(strings.TrimSpace(*msg.ParentID))
+			if parseErr != nil {
+				return taskCreatedResultMsg{taskID: "", err: fmt.Errorf("invalid parent_id: %w", parseErr), isUpdate: false}
+			}
+			parentID = &parsedParentID
+		}
 		taskID, err := m.daemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
 			Title:           msg.Title,
 			Description:     msg.Description,
@@ -3172,7 +3346,7 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			Notes:           msg.Notes,
 			Acceptance:      msg.Acceptance,
 			Estimate:        msg.Estimate,
-			ParentID:        msg.ParentID,
+			ParentID:        parentID,
 		})
 		return taskCreatedResultMsg{taskID: taskID, err: err, isUpdate: false}
 	}
@@ -3245,7 +3419,7 @@ func shiftedTaskStatus(current domain.Status, delta int) (domain.Status, bool) {
 
 func (m *Model) applyOptimisticTaskStatus(taskID string, status domain.Status) {
 	for i := range m.tasks {
-		if m.tasks[i].ID == taskID {
+		if m.tasks[i].ID.String() == taskID {
 			m.tasks[i].Status = status
 			break
 		}
@@ -3340,7 +3514,7 @@ func (m *Model) syncTaskWorkspaceOverlay() {
 
 	var task *domain.Task
 	for i := range m.tasks {
-		if m.tasks[i].ID == taskID {
+		if m.tasks[i].ID.String() == taskID {
 			task = &m.tasks[i]
 			break
 		}
@@ -3367,7 +3541,7 @@ func (m *Model) applyPendingStatusOverlays() {
 		return
 	}
 	for i := range m.tasks {
-		key := taskIDKey(m.tasks[i].ID)
+		key := taskIDKey(m.tasks[i].ID.String())
 		pending, ok := m.pendingStatuses[key]
 		if !ok {
 			continue
@@ -3390,7 +3564,7 @@ func (m *Model) reconcilePendingStatuses() {
 
 	taskByID := make(map[string]domain.Task, len(m.tasks))
 	for _, task := range m.tasks {
-		taskByID[task.ID] = task
+		taskByID[task.ID.String()] = task
 	}
 
 	const stalePendingTTL = 2 * time.Minute
@@ -3428,15 +3602,15 @@ func (m *Model) reconcilePendingStatuses() {
 func (m Model) getTaskChildren(parentID string) []domain.Task {
 	var children []domain.Task
 	for _, task := range m.tasks {
-		if task.ID == parentID {
+		if task.ID.String() == parentID {
 			continue
 		}
-		if task.ParentID != nil && *task.ParentID == parentID {
+		if task.ParentID != nil && task.ParentID.String() == parentID {
 			children = append(children, task)
 			continue
 		}
 		for _, dep := range task.Dependencies {
-			if dep.Type == domain.DependencyParentChild && dep.ID == parentID {
+			if dep.Type == domain.DependencyParentChild && dep.ID.String() == parentID {
 				children = append(children, task)
 				break
 			}
@@ -3638,7 +3812,7 @@ func (m Model) resolveIssueSessionStateFromSnapshot(ctx context.Context, issueID
 		return domain.SessionIdle, false, err
 	}
 	for _, task := range snapshot.Tasks {
-		if task.ID != issueID {
+		if task.ID.String() != issueID {
 			continue
 		}
 		if task.Session == nil {
@@ -3739,16 +3913,48 @@ func predictsMergeConflicts(output string, err error) bool {
 	return strings.Contains(err.Error(), "CONFLICT")
 }
 
-func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sourceWorktree, targetWorktree, targetRef, sourceBranch string, _ bool) *mergePreflightFailureMsg {
+func mergePreflightReconcileIssueIDs(sourceID, targetID string) []string {
+	seen := make(map[string]struct{}, 2)
+	ids := make([]string, 0, 2)
+	appendIssue := func(issueID string) {
+		normalized := strings.TrimSpace(issueID)
+		if normalized == "" || taskIDKey(normalized) == "main" {
+			return
+		}
+		if _, exists := seen[normalized]; exists {
+			return
+		}
+		seen[normalized] = struct{}{}
+		ids = append(ids, normalized)
+	}
+	appendIssue(sourceID)
+	appendIssue(targetID)
+	return ids
+}
+
+func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sourceWorktree, targetWorktree, targetRef, sourceBranch string, refreshStatus bool) *mergePreflightFailureMsg {
 	if m.daemonClient == nil {
 		return nil
+	}
+
+	if refreshStatus {
+		issueIDs := mergePreflightReconcileIssueIDs(sourceID, targetID)
+		if len(issueIDs) > 0 {
+			if _, err := m.daemonClient.ReconcileRuntimeIssues(ctx, issueIDs); err != nil && m.logger != nil {
+				m.logger.Warn("merge preflight issue reconcile failed", "source_id", sourceID, "target_id", targetID, "error", err)
+			}
+		}
 	}
 
 	reasons := make([]string, 0, 2)
 	sourceFiles := make([]string, 0, 8)
 	targetFiles := make([]string, 0, 8)
 
-	sourceStatus, sourceErr := m.daemonClient.GitStatus(ctx, sourceWorktree)
+	statusForWorktree := func(worktree string) (daemonclient.GitStatus, error) {
+		return m.daemonClient.GitStatus(ctx, worktree)
+	}
+
+	sourceStatus, sourceErr := statusForWorktree(sourceWorktree)
 	if sourceErr != nil {
 		reasons = append(reasons, fmt.Sprintf("Could not read source status (%s): %v", sourceID, sourceErr))
 	} else if sourceStatus.HasChanges {
@@ -3756,7 +3962,7 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 		sourceFiles = dirtyFilesFromStatus(sourceStatus)
 	}
 
-	targetStatus, targetErr := m.daemonClient.GitStatus(ctx, targetWorktree)
+	targetStatus, targetErr := statusForWorktree(targetWorktree)
 	if targetErr != nil {
 		reasons = append(reasons, fmt.Sprintf("Could not read target status (%s): %v", targetID, targetErr))
 	} else if targetStatus.HasChanges {
@@ -3798,6 +4004,30 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 		reasons:        reasons,
 		sourceFiles:    sourceFiles,
 		targetFiles:    targetFiles,
+	}
+}
+
+func (m Model) refreshMergePreflightCmd(selection overlay.MergePreflightRefreshSelection) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if m.daemonClient == nil {
+			return mergePreflightRefreshResultMsg{err: fmt.Errorf("daemon client unavailable")}
+		}
+		preflight := m.checkMergePreflight(
+			ctx,
+			strings.TrimSpace(selection.SourceID),
+			strings.TrimSpace(selection.TargetID),
+			strings.TrimSpace(selection.SourceWorktree),
+			strings.TrimSpace(selection.TargetWorktree),
+			"",
+			"",
+			true,
+		)
+		if preflight != nil {
+			return *preflight
+		}
+		return mergePreflightRefreshResultMsg{cleared: true}
 	}
 }
 
@@ -3983,7 +4213,7 @@ func (m Model) getMergeCandidates(source *domain.Task) []overlay.MergeTarget {
 		hasSession := task.Session != nil
 
 		candidates = append(candidates, overlay.MergeTarget{
-			ID:          task.ID,
+			ID:          task.ID.String(),
 			Label:       task.Title,
 			IsMain:      false,
 			Status:      task.Status,
@@ -4003,7 +4233,7 @@ func (m Model) openOrchestrationOverlay() tea.Cmd {
 	for _, task := range m.tasks {
 		if task.Session != nil {
 			sessions = append(sessions, overlay.SessionInfo{
-				IssueID:      task.ID,
+				IssueID:      task.ID.String(),
 				TaskTitle:    task.Title,
 				State:        task.Session.State,
 				StartedAt:    task.Session.StartedAt,
@@ -4063,7 +4293,7 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 						m.logger.Warn("daemon client unavailable for delete", "id", task.ID)
 						continue
 					}
-					err := m.daemonClient.DeleteTask(ctx, task.ID)
+					err := m.daemonClient.DeleteTask(ctx, task.ID.String())
 					if err != nil {
 						m.logger.Warn("failed to delete task", "id", task.ID, "error", err)
 						continue
@@ -4081,7 +4311,7 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 						m.logger.Warn("daemon client unavailable for archive", "id", task.ID)
 						continue
 					}
-					err := m.daemonClient.ArchiveTask(ctx, task.ID)
+					err := m.daemonClient.ArchiveTask(ctx, task.ID.String())
 					if err != nil {
 						m.logger.Warn("failed to archive task", "id", task.ID, "error", err)
 						continue

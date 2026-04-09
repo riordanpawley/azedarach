@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -132,6 +133,24 @@ func TestDetailPanelViewShowsBehindOnlyDirectionalStatus(t *testing.T) {
 	assert.NotContains(t, view, "↑0/↓5")
 }
 
+func TestDetailPanelViewBaseDiffWithoutUncommittedShowsCleanStatus(t *testing.T) {
+	task := domain.Task{
+		ID:           "az-792",
+		Title:        "Task with committed divergence only",
+		Status:       domain.StatusInProgress,
+		HasWorktree:  true,
+		GitAdditions: 163,
+		GitDeletions: 1,
+		GitAheadCount: 2,
+	}
+
+	panel := NewDetailPanel(task)
+	view := panel.View()
+
+	assert.Contains(t, view, "clean (+163/-1; ↑2)")
+	assert.NotContains(t, view, "dirty (+163/-1; ↑2)")
+}
+
 func TestDetailPanelViewWithSessionShowsCleanGitStatusWithoutTelemetry(t *testing.T) {
 	task := domain.Task{
 		ID:          "az-789",
@@ -172,7 +191,7 @@ func TestDetailPanelViewWithGitOnlyStillShowsSessionSection(t *testing.T) {
 }
 
 func TestDetailPanelViewWithParent(t *testing.T) {
-	parentID := "az-parent"
+	parentID := naming.IssueID("az-parent")
 	task := domain.Task{
 		ID:       "az-child",
 		Title:    "Child task",
@@ -190,7 +209,7 @@ func TestDetailPanelViewWithParent(t *testing.T) {
 func TestDetailPanelViewShowsTypedDependencies(t *testing.T) {
 	taskID := "az-current"
 	task := domain.Task{
-		ID:       taskID,
+		ID:       naming.IssueID(taskID),
 		Title:    "Current task",
 		Status:   domain.StatusOpen,
 		Priority: domain.P2,
@@ -209,7 +228,7 @@ func TestDetailPanelViewShowsTypedDependencies(t *testing.T) {
 			Priority: domain.P2,
 			Type:     domain.TypeTask,
 			Dependencies: []domain.Dependency{
-				{ID: taskID, Type: domain.DependencyRelatedTo},
+				{ID: naming.IssueID(taskID), Type: domain.DependencyRelatedTo},
 			},
 		},
 		{

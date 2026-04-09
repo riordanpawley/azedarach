@@ -118,7 +118,7 @@ func (f *Filter) Matches(t Task) bool {
 	if f.SearchQuery != "" {
 		query := strings.ToLower(f.SearchQuery)
 		title := strings.ToLower(t.Title)
-		id := strings.ToLower(t.ID)
+		id := strings.ToLower(t.ID.String())
 
 		if !strings.Contains(title, query) && !strings.Contains(id, query) {
 			return false
@@ -176,12 +176,12 @@ func (f *Filter) ToggleSessionState(s SessionState) {
 }
 
 func taskIsChildIssue(t Task) bool {
-	if t.ParentID != nil && strings.TrimSpace(*t.ParentID) != "" {
+	if t.ParentID != nil && strings.TrimSpace(t.ParentID.String()) != "" {
 		return true
 	}
 	for _, dep := range t.Dependencies {
 		depType := strings.TrimSpace(string(dep.Type))
-		if (depType == string(DependencyParentChild) || depType == "parent_child") && strings.TrimSpace(dep.ID) != "" {
+		if (depType == string(DependencyParentChild) || depType == "parent_child") && strings.TrimSpace(dep.ID.String()) != "" {
 			return true
 		}
 	}

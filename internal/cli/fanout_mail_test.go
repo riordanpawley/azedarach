@@ -12,6 +12,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 func TestFlattenFanoutAndPlan(t *testing.T) {
@@ -63,10 +64,10 @@ func TestFlattenFanoutAndPlan(t *testing.T) {
 }
 
 func TestComputeRunnableLeaves(t *testing.T) {
-	root := "az-root"
-	group := "az-group"
-	leafA := "az-a"
-	leafB := "az-b"
+	root := naming.IssueID("az-root")
+	group := naming.IssueID("az-group")
+	leafA := naming.IssueID("az-a")
+	leafB := naming.IssueID("az-b")
 	groupParent := root
 	leafAParent := group
 	leafBParent := group
@@ -86,12 +87,12 @@ func TestComputeRunnableLeaves(t *testing.T) {
 		},
 	}
 
-	result, err := computeRunnableLeaves(root, tasks)
+	result, err := computeRunnableLeaves(root.String(), tasks)
 	if err != nil {
 		t.Fatalf("computeRunnableLeaves error: %v", err)
 	}
-	if len(result.Runnable) != 1 || result.Runnable[0] != leafB {
-		t.Fatalf("runnable = %v, want [%s]", result.Runnable, leafB)
+	if len(result.Runnable) != 1 || result.Runnable[0] != leafB.String() {
+		t.Fatalf("runnable = %v, want [%s]", result.Runnable, leafB.String())
 	}
 }
 
@@ -251,9 +252,9 @@ func TestFlattenFanout_UnknownDependencyFails(t *testing.T) {
 }
 
 func TestComputeRunnableLeaves_DependencyGatingTimeline(t *testing.T) {
-	root := "az-root"
-	a := "az-a"
-	b := "az-b"
+	root := naming.IssueID("az-root")
+	a := naming.IssueID("az-a")
+	b := naming.IssueID("az-b")
 	aParent := root
 	bParent := root
 	done := domain.StatusDone
@@ -272,31 +273,31 @@ func TestComputeRunnableLeaves_DependencyGatingTimeline(t *testing.T) {
 		},
 	}
 
-	before, err := computeRunnableLeaves(root, base)
+	before, err := computeRunnableLeaves(root.String(), base)
 	if err != nil {
 		t.Fatalf("computeRunnableLeaves before error: %v", err)
 	}
-	if len(before.Runnable) != 1 || before.Runnable[0] != a {
-		t.Fatalf("before runnable = %v, want [%s]", before.Runnable, a)
+	if len(before.Runnable) != 1 || before.Runnable[0] != a.String() {
+		t.Fatalf("before runnable = %v, want [%s]", before.Runnable, a.String())
 	}
-	if got := before.Blocked[b]; !strings.Contains(got, a) {
-		t.Fatalf("before blocked[%s] = %q, want blocker %s", b, got, a)
+	if got := before.Blocked[b.String()]; !strings.Contains(got, a.String()) {
+		t.Fatalf("before blocked[%s] = %q, want blocker %s", b.String(), got, a.String())
 	}
 
 	after := append([]domain.Task(nil), base...)
 	after[1].Status = done
-	gotAfter, err := computeRunnableLeaves(root, after)
+	gotAfter, err := computeRunnableLeaves(root.String(), after)
 	if err != nil {
 		t.Fatalf("computeRunnableLeaves after error: %v", err)
 	}
-	if len(gotAfter.Runnable) != 1 || gotAfter.Runnable[0] != b {
-		t.Fatalf("after runnable = %v, want [%s]", gotAfter.Runnable, b)
+	if len(gotAfter.Runnable) != 1 || gotAfter.Runnable[0] != b.String() {
+		t.Fatalf("after runnable = %v, want [%s]", gotAfter.Runnable, b.String())
 	}
 }
 
 func TestComputeRunnableLeaves_MissingDependencyReported(t *testing.T) {
-	root := "az-root"
-	leaf := "az-leaf"
+	root := naming.IssueID("az-root")
+	leaf := naming.IssueID("az-leaf")
 	parent := root
 	tasks := []domain.Task{
 		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
@@ -306,20 +307,20 @@ func TestComputeRunnableLeaves_MissingDependencyReported(t *testing.T) {
 			Status:   domain.StatusOpen,
 			ParentID: &parent,
 			Dependencies: []domain.Dependency{
-				{ID: "az-missing", Type: domain.DependencyBlocks},
+				{ID: naming.IssueID("az-missing"), Type: domain.DependencyBlocks},
 			},
 		},
 	}
 
-	result, err := computeRunnableLeaves(root, tasks)
+	result, err := computeRunnableLeaves(root.String(), tasks)
 	if err != nil {
 		t.Fatalf("computeRunnableLeaves error: %v", err)
 	}
 	if len(result.Runnable) != 0 {
 		t.Fatalf("runnable = %v, want empty", result.Runnable)
 	}
-	if got := result.Blocked[leaf]; !strings.Contains(got, "missing") {
-		t.Fatalf("blocked[%s] = %q, want missing marker", leaf, got)
+	if got := result.Blocked[leaf.String()]; !strings.Contains(got, "missing") {
+		t.Fatalf("blocked[%s] = %q, want missing marker", leaf.String(), got)
 	}
 }
 

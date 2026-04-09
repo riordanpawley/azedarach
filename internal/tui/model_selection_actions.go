@@ -116,7 +116,11 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, m.commitChangesCmd("target", worktree)
 	case "merge_preflight_refresh":
 		m.overlayStack.Pop()
-		return m, m.loadIssuesCmd()
+		selection, ok := msg.Value.(overlay.MergePreflightRefreshSelection)
+		if !ok {
+			return m, m.loadIssuesAfterRuntimeReconcileCmd()
+		}
+		return m, m.refreshMergePreflightCmd(selection)
 	case "projects":
 		// Settings -> Manage projects
 		m.overlayStack.Pop() // Close settings
@@ -246,16 +250,16 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	// Session actions
 	case "s":
 		// Start tmux session only; do not launch work automatically.
-		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), false, false)
+		return m, m.startSessionCmd(task.ID.String(), m.resolveBaseBranch(), false, false)
 	case "S":
 		// Start session directly without origin/base selection prompt.
-		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), false, true)
+		return m, m.startSessionCmd(task.ID.String(), m.resolveBaseBranch(), false, true)
 	case "!":
 		// Start session with dangerous skip-permissions mode.
-		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), true, true)
+		return m, m.startSessionCmd(task.ID.String(), m.resolveBaseBranch(), true, true)
 	case "session_origin":
 		if originMsg, ok := msg.Value.(overlay.MergeTargetSelectedMsg); ok {
-			return m, m.startSessionCmd(task.ID, m.originBranchForSelection(originMsg.SourceID), false, true)
+			return m, m.startSessionCmd(task.ID.String(), m.originBranchForSelection(originMsg.SourceID), false, true)
 		}
 		return m, nil
 	case "a":
@@ -264,7 +268,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if session != nil {
 			worktreeHint = session.Worktree
 		}
-		return m, m.checkBranchBehindCmd(worktreeHint, task.ID)
+		return m, m.checkBranchBehindCmd(worktreeHint, task.ID.String())
 	case "p":
 		// TODO: Pause session
 		m.addToast(Toast{
@@ -274,7 +278,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		})
 	case "x":
 		// Delegate stop decision to daemon authority; projection can be stale.
-		return m, m.stopSessionCmd(task.ID)
+		return m, m.stopSessionCmd(task.ID.String())
 	case "R":
 		// TODO: Resume session
 		m.addToast(Toast{
@@ -290,7 +294,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if session != nil {
 			worktreeHint = session.Worktree
 		}
-		return m, m.updateFromBaseCmd(task.ID, worktreeHint, false)
+		return m, m.updateFromBaseCmd(task.ID.String(), worktreeHint, false)
 
 	case "m":
 		// Follow-on merge from dependency-aware context.
@@ -302,24 +306,24 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if session != nil {
 			worktreeHint = session.Worktree
 		}
-		return m, m.openPROverlayCmd(worktreeHint, task.ID)
+		return m, m.openPROverlayCmd(worktreeHint, task.ID.String())
 	case "O":
 		// Open PR in browser for current branch
 		worktreeHint := ""
 		if session != nil {
 			worktreeHint = session.Worktree
 		}
-		return m, m.openPRCmd(worktreeHint, task.ID)
+		return m, m.openPRCmd(worktreeHint, task.ID.String())
 	case "M":
 		// Abort in-progress merge in worktree
-		return m, m.abortMergeIssueCmd(task.ID)
+		return m, m.abortMergeIssueCmd(task.ID.String())
 	case "H":
 		// Open Helix in the task worktree.
 		worktreeHint := ""
 		if session != nil {
 			worktreeHint = session.Worktree
 		}
-		return m, m.openHelixCmd(worktreeHint, task.ID)
+		return m, m.openHelixCmd(worktreeHint, task.ID.String())
 
 	case "f":
 		// Show diff viewer
@@ -331,7 +335,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			diffWorktree = strings.TrimSpace(task.Session.Worktree)
 		}
 		if diffWorktree == "" {
-			if runtimeWorktree := strings.TrimSpace(m.runtimeSignalWorktreeByTask[task.ID]); runtimeWorktree != "" {
+			if runtimeWorktree := strings.TrimSpace(m.runtimeSignalWorktreeByTask[task.ID.String()]); runtimeWorktree != "" {
 				diffWorktree = runtimeWorktree
 			}
 		}
@@ -359,22 +363,22 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case "w":
 		// Cleanup worktree and keep task.
-		return m, m.requestWorktreeCleanupConfirmationCmd(task.ID, false)
+		return m, m.requestWorktreeCleanupConfirmationCmd(task.ID.String(), false)
 	case "W":
 		// Delete task and cleanup worktree.
-		return m, m.requestWorktreeCleanupConfirmationCmd(task.ID, true)
+		return m, m.requestWorktreeCleanupConfirmationCmd(task.ID.String(), true)
 
 	case "i":
 		// Image attachments
-		attachOverlay := overlay.NewImageAttachOverlay(task.ID, m.attachmentService)
+		attachOverlay := overlay.NewImageAttachOverlay(task.ID.String(), m.attachmentService)
 		return m, m.openOverlay(attachOverlay)
 
 	case "r":
 		// Dev server menu
-		servers := m.getDevServerInfo(task.ID)
+		servers := m.getDevServerInfo(task.ID.String())
 		devOverlay := overlay.NewDevServerOverlay(
 			servers,
-			task.ID,
+			task.ID.String(),
 			func(serverID string) tea.Cmd { return m.toggleDevServer(serverID) },
 			func(serverID string) tea.Cmd { return m.viewDevServer(serverID) },
 			func(serverID string) tea.Cmd { return m.restartDevServer(serverID) },
@@ -405,8 +409,9 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		m.applyOptimisticTaskStatus(task.ID, newStatus)
-		return m, m.moveTaskStatusCmd(task.ID, task.Status, newStatus)
+		previousStatus := task.Status
+		m.applyOptimisticTaskStatus(task.ID.String(), newStatus)
+		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
 
 	case "l":
 		// Move task right (to next status)
@@ -427,16 +432,17 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		m.applyOptimisticTaskStatus(task.ID, newStatus)
-		return m, m.moveTaskStatusCmd(task.ID, task.Status, newStatus)
+		previousStatus := task.Status
+		m.applyOptimisticTaskStatus(task.ID.String(), newStatus)
+		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
 	case "e":
 		return m, m.openOverlay(overlay.NewEditTaskOverlayWithImplOptionsAndAttachmentService(*task, m.availableTaskImplementations(), m.attachmentService))
 	case "T":
-		return m, m.deleteTaskCmd(task.ID)
+		return m, m.deleteTaskCmd(task.ID.String())
 	case "d":
-		return m, m.deleteTaskCmd(task.ID)
+		return m, m.deleteTaskCmd(task.ID.String())
 	case "c":
-		parentID := task.ID
+		parentID := task.ID.String()
 		return m, m.openOverlay(overlay.NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(&parentID, m.availableTaskImplementations(), m.attachmentService))
 	}
 

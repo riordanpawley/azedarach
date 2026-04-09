@@ -16,20 +16,20 @@ type RuntimeProjectionSnapshotPayload struct {
 	SchemaVersion    uint16              `json:"schema_version" msgpack:"schema_version"`
 	ProtocolVersion  Version             `json:"protocol_version" msgpack:"protocol_version"`
 	SnapshotRevision uint64              `json:"snapshot_revision" msgpack:"snapshot_revision"`
-	ProjectID        string              `json:"project_id" msgpack:"project_id"`
+	ProjectID        naming.ProjectID    `json:"project_id" msgpack:"project_id"`
 	Projections      []RuntimeProjection `json:"projections" msgpack:"projections"`
 }
 
 // RuntimeProjectionEventBody is the stream contract for a single runtime projection change.
 type RuntimeProjectionEventBody struct {
-	ProjectID  string            `json:"project_id" msgpack:"project_id"`
+	ProjectID  naming.ProjectID  `json:"project_id" msgpack:"project_id"`
 	Revision   uint64            `json:"revision" msgpack:"revision"`
 	Projection RuntimeProjection `json:"projection" msgpack:"projection"`
 }
 
 // RuntimeProjection captures the daemon-authoritative runtime state rendered on board and workspace surfaces.
 type RuntimeProjection struct {
-	ProjectID string                    `json:"project_id" msgpack:"project_id"`
+	ProjectID naming.ProjectID          `json:"project_id" msgpack:"project_id"`
 	IssueID   naming.IssueID            `json:"issue_id" msgpack:"issue_id"`
 	Worktree  RuntimeWorktreeProjection `json:"worktree" msgpack:"worktree"`
 	Git       RuntimeGitProjection      `json:"git" msgpack:"git"`

@@ -14,6 +14,7 @@ import (
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 const (
@@ -24,6 +25,7 @@ const (
 
 type runtimeReconciler interface {
 	Reconcile(context.Context, string) (protocol.RuntimeReconcileResponseBody, error)
+	ReconcileIssues(context.Context, string, []string) (protocol.RuntimeReconcileResponseBody, error)
 }
 
 type runtimeReconcileService struct {
@@ -32,6 +34,11 @@ type runtimeReconcileService struct {
 
 type runtimeReconcileCommandBody struct {
 	ProjectID string `json:"project_id"`
+}
+
+type runtimeReconcileIssueCommandBody struct {
+	ProjectID string   `json:"project_id"`
+	IssueIDs  []string `json:"issue_ids"`
 }
 
 type runtimeReconcileRequestContextKey struct{}
@@ -54,25 +61,25 @@ func newRuntimeReconcileService(d *Daemon) *runtimeReconcileService {
 
 func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID string) (protocol.RuntimeReconcileResponseBody, error) {
 	result := protocol.RuntimeReconcileResponseBody{
-		ProjectID:        protocol.NormalizeProjectID(projectID),
+		ProjectID:        naming.ProjectID(protocol.NormalizeProjectID(projectID)),
 		InvariantSources: invariantSourceDebugMap(),
 	}
 	d := s.daemon
 	if d == nil {
 		return result, nil
 	}
-	if d.tmux == nil || d.sessionStore == nil || d.sessionRuntimeStateStoreIfConfigured(result.ProjectID) == nil {
+	if d.tmux == nil || d.sessionStore == nil || d.sessionRuntimeStateStoreIfConfigured(result.ProjectID.String()) == nil {
 		return result, nil
 	}
 
 	var errs []error
-	if d.worktreeRuntimeStateStoreIfConfigured(result.ProjectID) != nil && d.worktreeManagerForProject(result.ProjectID) != nil {
-		if worktreeCount, err := d.refreshWorktreeRuntimeState(ctx, result.ProjectID); err != nil {
+	if d.worktreeRuntimeStateStoreIfConfigured(result.ProjectID.String()) != nil && d.worktreeManagerForProject(result.ProjectID.String()) != nil {
+		if worktreeCount, err := d.refreshWorktreeRuntimeState(ctx, result.ProjectID.String()); err != nil {
 			errs = append(errs, fmt.Errorf("refresh worktree runtime state: %w", err))
 		} else {
 			result.WorktreesRefreshed = worktreeCount
 		}
-		if sessionResult, err := d.reconcileTmuxAndDaemonSessions(ctx, result.ProjectID, ""); err != nil {
+		if sessionResult, err := d.reconcileTmuxAndDaemonSessions(ctx, result.ProjectID.String(), ""); err != nil {
 			errs = append(errs, fmt.Errorf("reconcile sessions: %w", err))
 		} else {
 			result.RecreatedTmuxSessions = sessionResult.RecreatedTmuxSessions
@@ -80,10 +87,46 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 		}
 	}
 
-	if err := d.refreshSessionRuntimeState(ctx, result.ProjectID); err != nil {
+	if err := d.refreshSessionRuntimeState(ctx, result.ProjectID.String()); err != nil {
 		errs = append(errs, fmt.Errorf("refresh session runtime state: %w", err))
 	}
 
+	return result, errors.Join(errs...)
+}
+
+func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID string, issueIDs []string) (protocol.RuntimeReconcileResponseBody, error) {
+	result := protocol.RuntimeReconcileResponseBody{
+		ProjectID:        naming.ProjectID(protocol.NormalizeProjectID(projectID)),
+		InvariantSources: invariantSourceDebugMap(),
+	}
+	d := s.daemon
+	if d == nil {
+		return result, nil
+	}
+	issueIDs = normalizeRuntimeReconcileIssueIDs(issueIDs)
+	if len(issueIDs) == 0 {
+		return result, fmt.Errorf("at least one issue id is required")
+	}
+
+	var errs []error
+	if d.worktreeRuntimeStateStoreIfConfigured(result.ProjectID.String()) != nil && d.worktreeManagerForProject(result.ProjectID.String()) != nil {
+		if worktreeCount, err := d.refreshWorktreeRuntimeStateForIssues(ctx, result.ProjectID.String(), issueIDs); err != nil {
+			errs = append(errs, fmt.Errorf("refresh issue worktree runtime state: %w", err))
+		} else {
+			result.WorktreesRefreshed = worktreeCount
+		}
+	}
+	if d.tmux != nil && d.sessionStore != nil && d.sessionRuntimeStateStoreIfConfigured(result.ProjectID.String()) != nil {
+		for _, issueID := range issueIDs {
+			sessionResult, err := d.reconcileTmuxAndDaemonSessions(ctx, result.ProjectID.String(), issueID)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("reconcile issue session %s: %w", issueID, err))
+				continue
+			}
+			result.RecreatedTmuxSessions += sessionResult.RecreatedTmuxSessions
+			result.AlignedDaemonSessions += sessionResult.AlignedDaemonSessions
+		}
+	}
 	return result, errors.Join(errs...)
 }
 
@@ -107,9 +150,9 @@ func (d *Daemon) runtimeReconcileTimeout() time.Duration {
 func (d *Daemon) runtimeReconcileProjectID(req protocol.RequestEnvelope) string {
 	projectID := strings.TrimSpace(d.projectID(req.Meta))
 	if projectID == "" {
-		return protocol.DefaultProjectID
+		return d.canonicalProjectID(protocol.DefaultProjectID)
 	}
-	return projectID
+	return d.canonicalProjectID(projectID)
 }
 
 func (d *Daemon) ensureRuntimeReconciler() runtimeReconciler {
@@ -170,7 +213,7 @@ func (d *Daemon) ensureRuntimeReconcileQueue() *reconcileQueue[protocol.RuntimeR
 }
 
 func (d *Daemon) queueRuntimeReconcile(ctx context.Context, projectID string, priority reconcileQueuePriority, reason string) (reconcileQueueSubmission[protocol.RuntimeReconcileResponseBody], error) {
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	return d.ensureRuntimeReconcileQueue().Enqueue(reconcileQueueRequest[protocol.RuntimeReconcileResponseBody]{
 		Key:         projectID,
 		Priority:    priority,
@@ -192,7 +235,7 @@ func (d *Daemon) ensureFreshRuntimeForMutation(ctx context.Context, projectID st
 	if d == nil {
 		return nil
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		reason = "mutation"
@@ -261,7 +304,7 @@ func (d *Daemon) handleRuntimeReconcile(ctx context.Context, req protocol.Reques
 	if projectID == "" {
 		projectID = d.runtimeReconcileProjectID(req)
 	} else {
-		projectID = protocol.NormalizeProjectID(projectID)
+		projectID = d.canonicalProjectID(projectID)
 	}
 
 	submission, err := d.queueRuntimeReconcile(ctx, projectID, reconcilePriorityManual, "manual")
@@ -285,6 +328,41 @@ func (d *Daemon) handleRuntimeReconcile(ctx context.Context, req protocol.Reques
 	bodyBytes, err := json.Marshal(result)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal response body: %v", err)), nil
+	}
+	resp.Body = bodyBytes
+	return resp, nil
+}
+
+func (d *Daemon) handleRuntimeReconcileIssue(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	var body runtimeReconcileIssueCommandBody
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+		}
+	}
+	projectID := strings.TrimSpace(body.ProjectID)
+	if projectID == "" {
+		projectID = d.runtimeReconcileProjectID(req)
+	} else {
+		projectID = d.canonicalProjectID(projectID)
+	}
+	issueIDs := normalizeRuntimeReconcileIssueIDs(body.IssueIDs)
+	if len(issueIDs) == 0 {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "issue_ids must include at least one issue id"), nil
+	}
+
+	result, err := d.ensureRuntimeReconciler().ReconcileIssues(ctx, projectID, issueIDs)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if len(result.InvariantSources) == 0 {
+		result.InvariantSources = invariantSourceDebugMap()
+	}
+	resp := d.successResponse(req)
+	resp.Revision = d.currentRevision(projectID)
+	bodyBytes, marshalErr := json.Marshal(result)
+	if marshalErr != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal response body: %v", marshalErr)), nil
 	}
 	resp.Body = bodyBytes
 	return resp, nil
@@ -472,7 +550,13 @@ func (d *Daemon) runtimeReconcileKnownProjectIDs(ctx context.Context) ([]string,
 	seen := map[string]struct{}{}
 	projectIDs := make([]string, 0, 8)
 	add := func(projectID string) {
-		normalized := protocol.NormalizeProjectID(projectID)
+		normalized := d.canonicalProjectID(projectID)
+		if normalized == "" {
+			return
+		}
+		if strings.TrimSpace(d.cfg.RepoDir) != "" && strings.TrimSpace(d.resolveRepoDirForProjectExact(normalized)) == "" {
+			return
+		}
 		if _, exists := seen[normalized]; exists {
 			return
 		}
@@ -488,14 +572,14 @@ func (d *Daemon) runtimeReconcileKnownProjectIDs(ctx context.Context) ([]string,
 	repoProjectID := ""
 	repoNameProjectID := ""
 	if repoDir != "" {
-		repoNameProjectID = protocol.NormalizeProjectID(filepath.Base(repoDir))
+		repoNameProjectID = d.canonicalProjectID(filepath.Base(repoDir))
 		projectID, err := appconfig.ProjectIDForRoot(repoDir)
 		if err != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("resolve runtime reconcile seed project id failed", "repo_dir", repoDir, "error", err)
 			}
 		} else {
-			repoProjectID = protocol.NormalizeProjectID(projectID)
+			repoProjectID = d.canonicalProjectID(projectID)
 			add(projectID)
 		}
 	}
@@ -599,7 +683,7 @@ func prioritizeProjectIDs(projectIDs []string, preferred []string) []string {
 func summarizeRuntimeReconcileSweep(results []protocol.RuntimeReconcileResponseBody) protocol.RuntimeReconcileResponseBody {
 	if len(results) == 0 {
 		return protocol.RuntimeReconcileResponseBody{
-			ProjectID:        protocol.DefaultProjectID,
+			ProjectID:        naming.ProjectID(protocol.DefaultProjectID),
 			InvariantSources: invariantSourceDebugMap(),
 		}
 	}
@@ -608,7 +692,7 @@ func summarizeRuntimeReconcileSweep(results []protocol.RuntimeReconcileResponseB
 		InvariantSources: invariantSourceDebugMap(),
 	}
 	if len(results) > 1 {
-		summary.ProjectID = "multi"
+		summary.ProjectID = naming.ProjectID("multi")
 	}
 	for _, result := range results {
 		summary.WorktreesRefreshed += result.WorktreesRefreshed
@@ -624,6 +708,26 @@ func runtimeReconcileResultSignature(result protocol.RuntimeReconcileResponseBod
 		return ""
 	}
 	return string(raw)
+}
+
+func normalizeRuntimeReconcileIssueIDs(issueIDs []string) []string {
+	if len(issueIDs) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(issueIDs))
+	out := make([]string, 0, len(issueIDs))
+	for _, issueID := range issueIDs {
+		norm := strings.TrimSpace(issueID)
+		if norm == "" {
+			continue
+		}
+		if _, exists := seen[norm]; exists {
+			continue
+		}
+		seen[norm] = struct{}{}
+		out = append(out, norm)
+	}
+	return out
 }
 
 func runtimeReconcileRequestFromContext(ctx context.Context) runtimeReconcileRequestContext {

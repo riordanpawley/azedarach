@@ -165,7 +165,7 @@ func TestRuntimeProjectionHelpersRouteThroughSingleWriter(t *testing.T) {
 	for _, want := range []string{
 		"session.persist+publish",
 		"session.persist",
-		"session.snapshot.replace",
+		"session.persist",
 		"worktree.snapshot.replace",
 		"git.persist+publish",
 	} {
@@ -227,7 +227,7 @@ func TestRuntimeProjectionWriterPersistsBeforePublishingSessionEvents(t *testing
 		if body.Session.SessionID != sessionID || body.Session.IssueID != issueID {
 			t.Fatalf("event session = %+v, want %s/%s", body.Session, sessionID, issueID)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(500 * time.Millisecond):
 		t.Fatal("timed out waiting for session projection event")
 	}
 

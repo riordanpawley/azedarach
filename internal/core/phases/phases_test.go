@@ -5,20 +5,30 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 // Helper to create a task with dependencies
 func makeTask(id, title string, blockedBy ...string) domain.Task {
 	var deps []domain.Dependency
 	for _, blockerID := range blockedBy {
+		parsedBlockerID, err := naming.ParseIssueID(blockerID)
+		if err != nil {
+			panic(err)
+		}
 		deps = append(deps, domain.Dependency{
-			ID:   blockerID,
+			ID:   parsedBlockerID,
 			Type: domain.DependencyBlocks,
 		})
 	}
 
+	parsedID, err := naming.ParseIssueID(id)
+	if err != nil {
+		panic(err)
+	}
+
 	return domain.Task{
-		ID:           id,
+		ID:           parsedID,
 		Title:        title,
 		Status:       domain.StatusOpen,
 		Priority:     domain.P2,
@@ -42,7 +52,7 @@ func makeIDSet(ids ...string) map[string]bool {
 func makeTaskMap(tasks ...domain.Task) map[string]domain.Task {
 	m := make(map[string]domain.Task)
 	for _, task := range tasks {
-		m[task.ID] = task
+		m[task.ID.String()] = task
 	}
 	return m
 }

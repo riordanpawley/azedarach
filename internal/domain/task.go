@@ -1,6 +1,10 @@
 package domain
 
-import "time"
+import (
+	"time"
+
+	"github.com/riordanpawley/azedarach/internal/naming"
+)
 
 // DependencyType represents the type of dependency relationship
 type DependencyType string
@@ -15,19 +19,19 @@ const (
 
 // Dependency represents a task dependency relationship
 type Dependency struct {
-	ID   string         `json:"id"`
+	ID   naming.IssueID `json:"id"`
 	Type DependencyType `json:"dependency_type"`
 }
 
 // Task represents a issue
 type Task struct {
-	ID                    string       `json:"id"`
+	ID                    naming.IssueID `json:"id"`
 	Title                 string       `json:"title"`
 	Description           string       `json:"description,omitempty"`
 	Status                Status       `json:"status"`
 	Priority              Priority     `json:"priority"`
 	Type                  TaskType     `json:"issue_type"`
-	ParentID              *string      `json:"parent_id,omitempty"`
+	ParentID              *naming.IssueID `json:"parent_id,omitempty"`
 	Dependencies          []Dependency `json:"dependencies,omitempty"`
 	Implementations       []string     `json:"implementations,omitempty"`
 	Session               *Session     `json:"session,omitempty"`

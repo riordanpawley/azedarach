@@ -51,7 +51,7 @@ func (w *daemonRuntimeProjectionWriter) PersistSessionProjectionAndPublish(ctx c
 	if w == nil || w.d == nil {
 		return 0
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = w.d.canonicalProjectID(projectID)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.d.persistSessionState(projectID, session)
@@ -64,7 +64,7 @@ func (w *daemonRuntimeProjectionWriter) PublishSessionProjectionEvent(ctx contex
 	if w == nil || w.d == nil {
 		return 0
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = w.d.canonicalProjectID(projectID)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	rev := w.d.nextRevision(projectID)
@@ -76,7 +76,7 @@ func (w *daemonRuntimeProjectionWriter) ReplaceSessionProjectionSnapshot(ctx con
 	if w == nil || w.d == nil || w.d.sessionRuntimeStateStore(projectID) == nil {
 		return nil
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = w.d.canonicalProjectID(projectID)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.d.sessionRuntimeStateStore(projectID).ReplaceSessionStates(ctx, projectID, sessions)
@@ -95,7 +95,7 @@ func (w *daemonRuntimeProjectionWriter) PersistWorktreeProjectionAndPublish(ctx 
 	if w == nil || w.d == nil {
 		return 0
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = w.d.canonicalProjectID(projectID)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	_ = w.d.persistWorktreeState(ctx, projectID, issueID, path, branch)
@@ -108,11 +108,11 @@ func (w *daemonRuntimeProjectionWriter) DeleteWorktreeProjectionAndPublish(ctx c
 	if w == nil || w.d == nil {
 		return 0
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = w.d.canonicalProjectID(projectID)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.d.worktreeRuntimeStateStore(projectID) != nil {
-		if err := w.d.worktreeRuntimeStateStore(projectID).DeleteWorktreeState(ctx, protocol.NormalizeProjectID(projectID), strings.TrimSpace(issueID)); err != nil && w.d.cfg.Logger != nil {
+		if err := w.d.worktreeRuntimeStateStore(projectID).DeleteWorktreeState(ctx, projectID, strings.TrimSpace(issueID)); err != nil && w.d.cfg.Logger != nil {
 			w.d.cfg.Logger.Warn("delete worktree runtime state failed", "project_id", projectID, "issue_id", issueID, "error", err)
 		}
 	}
@@ -125,7 +125,7 @@ func (w *daemonRuntimeProjectionWriter) PublishWorktreeProjectionEvent(ctx conte
 	if w == nil || w.d == nil {
 		return 0
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = w.d.canonicalProjectID(projectID)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	rev := w.d.nextRevision(projectID)
@@ -137,7 +137,7 @@ func (w *daemonRuntimeProjectionWriter) ReplaceWorktreeProjectionSnapshot(ctx co
 	if w == nil || w.d == nil || w.d.worktreeRuntimeStateStore(projectID) == nil {
 		return nil
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = w.d.canonicalProjectID(projectID)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.d.worktreeRuntimeStateStore(projectID).ReplaceWorktreeStates(ctx, projectID, rows)
@@ -152,7 +152,7 @@ func (w *daemonRuntimeProjectionWriter) PersistGitStatusProjectionAndPublish(
 	if w == nil || w.d == nil || w.d.worktreeRuntimeStateStore(projectID) == nil || status == nil {
 		return 0
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = w.d.canonicalProjectID(projectID)
 	issueID = strings.TrimSpace(issueID)
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -200,7 +200,7 @@ func (w *daemonRuntimeProjectionWriter) PublishGitStatusProjectionEvent(ctx cont
 	if w == nil || w.d == nil {
 		return 0
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = w.d.canonicalProjectID(projectID)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	rev := w.d.nextRevision(projectID)

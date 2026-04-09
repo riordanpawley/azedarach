@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 func TestOperationStateValid(t *testing.T) {
@@ -40,7 +42,7 @@ func TestOperationSubmitRequestBodyJSONRoundTrip(t *testing.T) {
 			OperationID:  "op-1",
 			ProjectID:    "proj",
 			Kind:         "session.start",
-			IssueID:      "az-1",
+			IssueID:      naming.IssueID("az-1"),
 			DedupeKey:    "proj::az-1::session.start",
 			ResourceKeys: []string{"issue:az-1", "session:az-1"},
 			State:        OperationStateDone,

@@ -592,7 +592,7 @@ func TestNotifyCommandStopTriggersPauseAndRuntimeReconcile(t *testing.T) {
 	transport := &fakeDaemonTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			requests = append(requests, req)
-			if req.Command == daemonclient.CommandRuntimeReconcile {
+			if req.Command == daemonclient.CommandRuntimeReconcileIssue {
 				return responseWithJSON(req, protocol.RuntimeReconcileResponseBody{
 					ProjectID: "proj-1",
 				}), nil
@@ -615,8 +615,8 @@ func TestNotifyCommandStopTriggersPauseAndRuntimeReconcile(t *testing.T) {
 	if requests[0].Command != daemonclient.CommandSessionPause {
 		t.Fatalf("first command = %q, want %q", requests[0].Command, daemonclient.CommandSessionPause)
 	}
-	if requests[1].Command != daemonclient.CommandRuntimeReconcile {
-		t.Fatalf("second command = %q, want %q", requests[1].Command, daemonclient.CommandRuntimeReconcile)
+	if requests[1].Command != daemonclient.CommandRuntimeReconcileIssue {
+		t.Fatalf("second command = %q, want %q", requests[1].Command, daemonclient.CommandRuntimeReconcileIssue)
 	}
 	if strings.TrimSpace(output) != "{}" {
 		t.Fatalf("notify json output = %q, want {}", output)

@@ -167,7 +167,7 @@ func (d *DetailPanel) viewStandard() string {
 	if d.task.ParentID != nil {
 		b.WriteString(labelStyle.Render("Parent:"))
 		b.WriteString("  ")
-		b.WriteString(valueStyle.Render(*d.task.ParentID))
+		b.WriteString(valueStyle.Render(d.task.ParentID.String()))
 		b.WriteString("\n")
 	}
 	if total, done := d.childProgress(); total > 0 {
@@ -281,7 +281,7 @@ func (d *DetailPanel) viewCompact() string {
 		addLine(labelStyle.Render("Issue Ops:") + "  " + valueStyle.Render(d.formatMutationProgress()))
 	}
 	if d.task.ParentID != nil {
-		addLine(labelStyle.Render("Parent:") + "  " + valueStyle.Render(*d.task.ParentID))
+		addLine(labelStyle.Render("Parent:") + "  " + valueStyle.Render(d.task.ParentID.String()))
 	}
 	if total, done := d.childProgress(); total > 0 {
 		addLine(labelStyle.Render("Children:") + "  " + valueStyle.Render(fmt.Sprintf("%d total (%d done)", total, done)))
@@ -688,7 +688,7 @@ func (d *DetailPanel) formatGitStatus() string {
 	}
 
 	status := "clean"
-	if d.task.HasUncommittedChanges || d.task.GitAdditions > 0 || d.task.GitDeletions > 0 {
+	if d.task.HasUncommittedChanges {
 		status = "dirty"
 	}
 

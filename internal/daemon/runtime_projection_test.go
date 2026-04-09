@@ -75,6 +75,24 @@ func TestBuildRuntimeProjectionPopulatesSessionAndWorktreeSignals(t *testing.T) 
 	}
 }
 
+func TestBuildRuntimeProjectionUsesObservedSessionStateWhenPresent(t *testing.T) {
+	updatedAt := time.Date(2026, time.April, 1, 11, 0, 0, 0, time.UTC)
+	projection := buildRuntimeProjection("proj-runtime", &daemonstate.Session{
+		ID:            "sess-7",
+		IssueID:       "az-7",
+		State:         daemonstate.SessionStateStarting,
+		ObservedState: daemonstate.SessionStateAttached,
+		UpdatedAt:     updatedAt,
+	}, nil)
+
+	if projection.Session.State != "attached" {
+		t.Fatalf("session state = %q, want attached observed state", projection.Session.State)
+	}
+	if projection.Agent.Status != "attached" {
+		t.Fatalf("agent status = %q, want attached observed state", projection.Agent.Status)
+	}
+}
+
 func TestBuildRuntimeProjectionZeroValueBehavior(t *testing.T) {
 	projection := buildRuntimeProjection("", nil, nil)
 
@@ -304,8 +322,8 @@ func TestPublishGitStatusProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	if body.Runtime.Projection.Git.HasUncommittedChanges != true {
 		t.Fatalf("runtime git dirty = %v, want true", body.Runtime.Projection.Git.HasUncommittedChanges)
 	}
-	if body.Runtime.Projection.Git.GitAdditions != 1 || body.Runtime.Projection.Git.GitDeletions != 0 {
-		t.Fatalf("runtime git stats = %+v, want additions/deletions 1/0", body.Runtime.Projection.Git)
+	if body.Runtime.Projection.Git.GitAdditions != 0 || body.Runtime.Projection.Git.GitDeletions != 0 {
+		t.Fatalf("runtime git stats = %+v, want additions/deletions 0/0 when line totals are unavailable", body.Runtime.Projection.Git)
 	}
 	if body.Runtime.Projection.Session.SessionID != sessionID || body.Runtime.Projection.Worktree.Path != worktree {
 		t.Fatalf("runtime projection = %+v, want session/worktree %s/%s", body.Runtime.Projection, sessionID, worktree)

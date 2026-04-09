@@ -49,9 +49,9 @@ type OperationError struct {
 
 type OperationRecord struct {
 	OperationID  naming.OperationID `json:"operation_id" msgpack:"operation_id"`
-	ProjectID    string             `json:"project_id" msgpack:"project_id"`
+	ProjectID    naming.ProjectID   `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
 	Kind         string             `json:"kind" msgpack:"kind"`
-	IssueID      string             `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
+	IssueID      naming.IssueID     `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
 	DedupeKey    string             `json:"dedupe_key,omitempty" msgpack:"dedupe_key,omitempty"`
 	ResourceKeys []string           `json:"resource_keys,omitempty" msgpack:"resource_keys,omitempty"`
 	State        OperationState     `json:"state" msgpack:"state"`
@@ -65,12 +65,12 @@ type OperationRecord struct {
 }
 
 type OperationSubmitRequestBody struct {
-	ProjectID    string          `json:"project_id" msgpack:"project_id"`
-	Kind         string          `json:"kind" msgpack:"kind"`
-	IssueID      string          `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
-	DedupeKey    string          `json:"dedupe_key,omitempty" msgpack:"dedupe_key,omitempty"`
-	ResourceKeys []string        `json:"resource_keys,omitempty" msgpack:"resource_keys,omitempty"`
-	Payload      json.RawMessage `json:"payload,omitempty" msgpack:"payload,omitempty"`
+	ProjectID    naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	Kind         string           `json:"kind" msgpack:"kind"`
+	IssueID      naming.IssueID   `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
+	DedupeKey    string           `json:"dedupe_key,omitempty" msgpack:"dedupe_key,omitempty"`
+	ResourceKeys []string         `json:"resource_keys,omitempty" msgpack:"resource_keys,omitempty"`
+	Payload      json.RawMessage  `json:"payload,omitempty" msgpack:"payload,omitempty"`
 }
 
 type OperationSubmitResponseBody struct {
@@ -79,7 +79,7 @@ type OperationSubmitResponseBody struct {
 }
 
 type OperationGetRequestBody struct {
-	ProjectID   string `json:"project_id" msgpack:"project_id"`
+	ProjectID   naming.ProjectID   `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
 	OperationID naming.OperationID `json:"operation_id" msgpack:"operation_id"`
 }
 
@@ -88,22 +88,22 @@ type OperationGetResponseBody struct {
 }
 
 type OperationListRequestBody struct {
-	ProjectID string           `json:"project_id" msgpack:"project_id"`
-	IssueID   string           `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
+	ProjectID naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	IssueID   naming.IssueID   `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
 	Kind      string           `json:"kind,omitempty" msgpack:"kind,omitempty"`
 	States    []OperationState `json:"states,omitempty" msgpack:"states,omitempty"`
 	Limit     int              `json:"limit,omitempty" msgpack:"limit,omitempty"`
 }
 
 type OperationListResponseBody struct {
-	ProjectID  string            `json:"project_id" msgpack:"project_id"`
+	ProjectID  naming.ProjectID  `json:"project_id" msgpack:"project_id"`
 	Operations []OperationRecord `json:"operations" msgpack:"operations"`
 }
 
 type OperationCancelRequestBody struct {
-	ProjectID   string `json:"project_id" msgpack:"project_id"`
+	ProjectID   naming.ProjectID   `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
 	OperationID naming.OperationID `json:"operation_id" msgpack:"operation_id"`
-	Reason      string `json:"reason,omitempty" msgpack:"reason,omitempty"`
+	Reason      string             `json:"reason,omitempty" msgpack:"reason,omitempty"`
 }
 
 type OperationCancelResponseBody struct {
@@ -117,7 +117,7 @@ type OperationEventBody struct {
 
 type OperationProgressEventBody struct {
 	OperationID naming.OperationID `json:"operation_id" msgpack:"operation_id"`
-	ProjectID   string            `json:"project_id" msgpack:"project_id"`
+	ProjectID   naming.ProjectID  `json:"project_id" msgpack:"project_id"`
 	State       OperationState    `json:"state" msgpack:"state"`
 	Progress    OperationProgress `json:"progress" msgpack:"progress"`
 }

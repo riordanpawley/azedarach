@@ -33,7 +33,7 @@ EOF
 
 if [ "$run_boundary_check" = "1" ]; then
   echo "pre-commit: running boundary validation checks"
-  just check-boundaries
+  timeout 1m just check-boundaries
 fi
 
 exit 0

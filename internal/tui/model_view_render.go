@@ -46,7 +46,7 @@ func (m Model) View() string {
 
 	sb := statusbar.New(m.statusBarMode(), m.width, m.styles)
 	sb.SetEventTicker(m.eventTicker)
-	sb.SetCurrentProject(m.daemonProjectID())
+	sb.SetCurrentProject(m.currentProject)
 	sb.SetSelectionSummary(m.selectionSummary())
 	sb.SetFilterSummary(m.filterSummary())
 	sb.SetSortSummary(m.sortSummary())
@@ -360,13 +360,13 @@ func (m Model) boardVisibleTasks(tasks []domain.Task) []domain.Task {
 	filtered := m.editor.ApplyFilter(tasks)
 	result := make([]domain.Task, 0, len(filtered))
 	for _, task := range filtered {
-		if task.ParentID != nil && strings.TrimSpace(*task.ParentID) != "" {
+		if task.ParentID != nil && strings.TrimSpace(task.ParentID.String()) != "" {
 			continue
 		}
 		childByDependency := false
 		for _, dep := range task.Dependencies {
 			depType := strings.TrimSpace(string(dep.Type))
-			if (depType == string(domain.DependencyParentChild) || depType == "parent_child") && strings.TrimSpace(dep.ID) != "" {
+			if (depType == string(domain.DependencyParentChild) || depType == "parent_child") && strings.TrimSpace(dep.ID.String()) != "" {
 				childByDependency = true
 				break
 			}
@@ -426,10 +426,11 @@ func (m Model) boardRenderedTasks() []domain.Task {
 		start, end := board.VisibleTaskWindow(len(col.Tasks), viewportStart, bodyHeight, linesPerCard)
 		for i := start; i < end; i++ {
 			task := col.Tasks[i]
-			if _, exists := seen[task.ID]; exists {
+			taskID := task.ID.String()
+			if _, exists := seen[taskID]; exists {
 				continue
 			}
-			seen[task.ID] = struct{}{}
+			seen[taskID] = struct{}{}
 			rendered = append(rendered, task)
 		}
 	}
@@ -480,12 +481,12 @@ func isChildOfParent(task domain.Task, parentID string) bool {
 	if parentID == "" {
 		return false
 	}
-	if task.ParentID != nil && strings.TrimSpace(*task.ParentID) == parentID {
+	if task.ParentID != nil && strings.TrimSpace(task.ParentID.String()) == parentID {
 		return true
 	}
 	for _, dep := range task.Dependencies {
 		depType := strings.TrimSpace(string(dep.Type))
-		if (depType == string(domain.DependencyParentChild) || depType == "parent_child") && strings.TrimSpace(dep.ID) == parentID {
+		if (depType == string(domain.DependencyParentChild) || depType == "parent_child") && strings.TrimSpace(dep.ID.String()) == parentID {
 			return true
 		}
 	}
@@ -575,32 +576,34 @@ func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {
 			GitAdditions:          task.GitAdditions,
 			GitDeletions:          task.GitDeletions,
 		}
-		if runtime, ok := m.runtimeSignalsByTask[task.ID]; ok {
+		taskID := task.ID.String()
+		if runtime, ok := m.runtimeSignalsByTask[taskID]; ok {
 			signals.PendingOperationState = runtime.PendingOperationState
 			signals.PendingOperationID = runtime.PendingOperationID
 			signals.PendingOperationPercent = runtime.PendingOperationPercent
 		}
-		taskID := taskIDKey(task.ID)
-		pending, ok := m.pendingStatuses[taskID]
+		taskKey := taskIDKey(taskID)
+		pending, ok := m.pendingStatuses[taskKey]
 		if !ok {
-			signalsByTask[task.ID] = signals
+			signalsByTask[taskID] = signals
 			continue
 		}
 		signals.PendingOperationState = string(pending.state)
 		signals.PendingOperationID = pending.operationID
-		signalsByTask[task.ID] = signals
+		signalsByTask[taskID] = signals
 	}
 	for i := range m.tasks {
 		task := m.tasks[i]
-		pending, ok := m.pendingOpsByTask[taskIDKey(task.ID)]
+		taskID := task.ID.String()
+		pending, ok := m.pendingOpsByTask[taskIDKey(taskID)]
 		if !ok {
 			continue
 		}
-		signals := signalsByTask[task.ID]
+		signals := signalsByTask[taskID]
 		signals.PendingOperationState = string(pending.state)
 		signals.PendingOperationID = pending.operationID
 		signals.PendingOperationPercent = pending.percent
-		signalsByTask[task.ID] = signals
+		signalsByTask[taskID] = signals
 	}
 	for taskID := range activeDescendantSessionByTask {
 		signals := signalsByTask[taskID]
@@ -618,14 +621,14 @@ func buildActiveDescendantSessionByTask(tasks []domain.Task) map[string]bool {
 
 	parentsByTask := make(map[string][]string, len(tasks))
 	for _, task := range tasks {
-		taskID := strings.TrimSpace(task.ID)
+		taskID := strings.TrimSpace(task.ID.String())
 		if taskID == "" {
 			continue
 		}
 
 		parentSet := make(map[string]struct{}, 2)
 		if task.ParentID != nil {
-			if parentID := strings.TrimSpace(*task.ParentID); parentID != "" {
+			if parentID := strings.TrimSpace(task.ParentID.String()); parentID != "" {
 				parentSet[parentID] = struct{}{}
 			}
 		}
@@ -634,7 +637,7 @@ func buildActiveDescendantSessionByTask(tasks []domain.Task) map[string]bool {
 			if depType != string(domain.DependencyParentChild) && depType != "parent_child" {
 				continue
 			}
-			if parentID := strings.TrimSpace(dep.ID); parentID != "" {
+			if parentID := strings.TrimSpace(dep.ID.String()); parentID != "" {
 				parentSet[parentID] = struct{}{}
 			}
 		}
@@ -651,7 +654,7 @@ func buildActiveDescendantSessionByTask(tasks []domain.Task) map[string]bool {
 
 	activeAncestorSessionByTask := make(map[string]bool)
 	for _, task := range tasks {
-		taskID := strings.TrimSpace(task.ID)
+		taskID := strings.TrimSpace(task.ID.String())
 		if taskID == "" {
 			continue
 		}

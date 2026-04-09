@@ -115,7 +115,7 @@ func (e *EpicDrillDown) View() string {
 
 // Title returns the overlay title.
 func (e *EpicDrillDown) Title() string {
-	return "Children: " + e.parent.ID
+	return "Children: " + e.parent.ID.String()
 }
 
 // Size returns the overlay dimensions
@@ -184,7 +184,7 @@ func (e *EpicDrillDown) renderChild(child domain.Task, active bool) string {
 
 	// Task ID
 	idStyle := lipgloss.NewStyle().Foreground(styles.Overlay1).Bold(true)
-	b.WriteString(idStyle.Render(child.ID))
+	b.WriteString(idStyle.Render(child.ID.String()))
 	b.WriteString(" ")
 
 	// Task title

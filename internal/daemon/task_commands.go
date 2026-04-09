@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -91,7 +92,7 @@ func buildTaskListSnapshotPayload(projectID string, revision uint64, lastChecked
 		SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
 		ProtocolVersion:  protocol.CurrentVersion,
 		SnapshotRevision: revision,
-		ProjectID:        projectID,
+		ProjectID:        naming.ProjectID(projectID),
 		LastCheckedAt:    lastCheckedAt.UTC(),
 		Freshness:        freshness,
 		Tasks:            tasks,
@@ -102,7 +103,7 @@ const taskListSnapshotStaleAfter = 15 * time.Second
 
 func (d *Daemon) taskListSnapshotFreshness(ctx context.Context, projectID string) (time.Time, protocol.TaskListFreshness) {
 	lastCheckedAt := time.Time{}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 
 	sessionFreshnessSource := d.sourceForTaskInvariant(taskInvariantTaskListFreshness)
 	if usesProjectionSource(sessionFreshnessSource) && d.sessionStore != nil {
@@ -163,7 +164,7 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 	if d == nil || d.worktreeRuntimeStateStore(projectID) == nil {
 		return 0, nil
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
+	projectID = d.canonicalProjectID(projectID)
 	baseBranch := d.baseBranchForProject(projectID)
 	manager := d.worktreeManagerForProject(projectID)
 	if manager == nil {
@@ -303,6 +304,73 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 		)
 	}
 	return len(rows), nil
+}
+
+func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, projectID string, issueIDs []string) (int, error) {
+	if d == nil || d.worktreeRuntimeStateStore(projectID) == nil {
+		return 0, nil
+	}
+	projectID = d.canonicalProjectID(projectID)
+	baseBranch := d.baseBranchForProject(projectID)
+	manager := d.worktreeManagerForProject(projectID)
+	if manager == nil {
+		return 0, nil
+	}
+
+	issueIDs = normalizeRuntimeReconcileIssueIDs(issueIDs)
+	if len(issueIDs) == 0 {
+		return 0, nil
+	}
+
+	worktrees, err := manager.List(ctx)
+	if err != nil {
+		return 0, err
+	}
+	worktreeByIssue := make(map[string]git.Worktree, len(worktrees))
+	for _, wt := range worktrees {
+		issueID := strings.TrimSpace(wt.IssueID)
+		if issueID == "" {
+			continue
+		}
+		worktreeByIssue[issueID] = wt
+	}
+
+	refreshed := 0
+	var errs []error
+	now := time.Now().UTC()
+	for _, issueID := range issueIDs {
+		wt, ok := worktreeByIssue[issueID]
+		if !ok || strings.TrimSpace(wt.Path) == "" {
+			d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID)
+			continue
+		}
+
+		worktreePath := strings.TrimSpace(wt.Path)
+		branch := strings.TrimSpace(wt.Branch)
+		d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktreePath, branch)
+		refreshed++
+
+		if d.git == nil {
+			continue
+		}
+		status, statusErr := d.git.RuntimeStatus(ctx, worktreePath, baseBranch)
+		if statusErr != nil {
+			errs = append(errs, fmt.Errorf("%s: refresh git status: %w", issueID, statusErr))
+			continue
+		}
+		rev := d.runtimeProjectionStateWriter().PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktreePath, status, true, true)
+		if rev == 0 && d.worktreeRuntimeStateStore(projectID) != nil {
+			rawStatus, marshalErr := json.Marshal(status)
+			if marshalErr != nil {
+				errs = append(errs, fmt.Errorf("%s: marshal git status: %w", issueID, marshalErr))
+				continue
+			}
+			if upsertErr := d.worktreeRuntimeStateStore(projectID).UpsertWorktreeStateGitStatus(ctx, projectID, issueID, rawStatus, now); upsertErr != nil {
+				errs = append(errs, fmt.Errorf("%s: persist git status: %w", issueID, upsertErr))
+			}
+		}
+	}
+	return refreshed, errors.Join(errs...)
 }
 
 func (d *Daemon) ensureWorktreeGitProbeThrottle() *reconcileThrottle {
@@ -703,14 +771,20 @@ func buildTaskSnapshotExportBody(projectID string, revision uint64, tasks []doma
 	}
 
 	for _, task := range taskCopy {
-		_, hasSession := sessionSet[sessionKey(task.ID)]
+		_, hasSession := sessionSet[sessionKey(task.ID.String())]
 		out.Tasks = append(out.Tasks, taskSnapshotExportTask{
-			ID:              task.ID,
-			Title:           task.Title,
-			Status:          task.Status,
-			Priority:        task.Priority,
-			Type:            task.Type,
-			ParentID:        task.ParentID,
+			ID:       task.ID.String(),
+			Title:    task.Title,
+			Status:   task.Status,
+			Priority: task.Priority,
+			Type:     task.Type,
+			ParentID: func() *string {
+				if task.ParentID == nil {
+					return nil
+				}
+				parentID := task.ParentID.String()
+				return &parentID
+			}(),
 			DependencyCount: len(task.Dependencies),
 			SessionAttached: hasSession,
 			Critical:        task.Status == domain.StatusBlocked,

@@ -259,7 +259,7 @@ func (s *Service) Deselect(taskID string) {
 // SelectAll selects all tasks from a list
 func (s *Service) SelectAll(tasks []domain.Task) {
 	for _, task := range tasks {
-		s.selectedTasks[task.ID] = true
+		s.selectedTasks[task.ID.String()] = true
 	}
 }
 
@@ -276,7 +276,7 @@ func (s *Service) ReconcileSelection(tasks []domain.Task) {
 
 	present := make(map[string]struct{}, len(tasks))
 	for _, task := range tasks {
-		present[task.ID] = struct{}{}
+		present[task.ID.String()] = struct{}{}
 	}
 
 	for id := range s.selectedTasks {

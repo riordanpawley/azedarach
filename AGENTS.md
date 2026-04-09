@@ -40,6 +40,15 @@ go test ./internal/daemon/... ./internal/client/...
 go test ./internal/tui ./internal/cli ./internal/daemon/...
 ```
 
+## Test Hang Debugging
+
+- If `just test` appears to "hang" at a package boundary, do not rely on aggregate per-test runtimes alone. Run the suspicious package or test with `go test -timeout <short-window>` so Go dumps goroutine stacks on timeout.
+- Use the stack trace to identify the exact blocked call, then inspect the test fixture for intent/runtime mismatches. Recovery and reconcile tests are especially sensitive to seeding the wrong lifecycle state.
+- For session/reconcile flows, model the intended production case explicitly:
+  - recovery tests should seed a live tmux runtime with empty daemon cache when validating event publication
+  - stop tests should seed desired-stopped intent before runtime cleanup
+  - do not seed a desired-stopped row when the assertion is about runtime recovery or reattachment
+
 ## Fast Search Commands
 
 ```bash

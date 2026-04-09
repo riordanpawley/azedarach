@@ -40,19 +40,20 @@ type CommandSpec struct {
 }
 
 const (
-	commandTaskList             = "task.list"
-	commandTaskCreate           = "task.create"
-	commandTaskUpdateStatus     = "task.update_status"
-	commandTaskUpdateDetails    = "task.update_details"
-	commandTaskAppendNotes      = "task.append_notes"
-	commandTaskDelete           = "task.delete"
-	commandTaskArchive          = "task.archive"
-	commandTaskDependencyAdd    = "task.dependency.add"
-	commandTaskDependencyRemove = "task.dependency.remove"
-	commandTaskSnapshotExport   = "task.snapshot.export"
-	commandSessionStatus        = "session.status"
-	commandSessionRecover       = "session.recover"
-	commandRuntimeReconcile     = "runtime.reconcile"
+	commandTaskList              = "task.list"
+	commandTaskCreate            = "task.create"
+	commandTaskUpdateStatus      = "task.update_status"
+	commandTaskUpdateDetails     = "task.update_details"
+	commandTaskAppendNotes       = "task.append_notes"
+	commandTaskDelete            = "task.delete"
+	commandTaskArchive           = "task.archive"
+	commandTaskDependencyAdd     = "task.dependency.add"
+	commandTaskDependencyRemove  = "task.dependency.remove"
+	commandTaskSnapshotExport    = "task.snapshot.export"
+	commandSessionStatus         = "session.status"
+	commandSessionRecover        = "session.recover"
+	commandRuntimeReconcile      = "runtime.reconcile"
+	commandRuntimeReconcileIssue = "runtime.reconcile_issue"
 )
 
 var commandSpecRegistry = map[string]CommandSpec{
@@ -64,6 +65,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	commandSessionStatus:                  {Command: commandSessionStatus, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandSessionRecover:                 {Command: commandSessionRecover, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandRuntimeReconcile:               {Command: commandRuntimeReconcile, RequiresProjectID: true},
+	commandRuntimeReconcileIssue:          {Command: commandRuntimeReconcileIssue, RequiresProjectID: true},
 	protocol.CommandOperationSubmit:       {Command: protocol.CommandOperationSubmit, DispatchTarget: CommandDispatchOperation, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyOperationKind},
 	protocol.CommandOperationGet:          {Command: protocol.CommandOperationGet, DispatchTarget: CommandDispatchOperation, RequiresProjectID: true},
 	protocol.CommandOperationList:         {Command: protocol.CommandOperationList, DispatchTarget: CommandDispatchOperation, RequiresProjectID: true},
