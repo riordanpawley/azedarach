@@ -130,7 +130,7 @@ func mustMarshalTaskListSnapshot(t *testing.T, protocolVersion protocol.Version,
 		SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
 		ProtocolVersion:  protocolVersion,
 		SnapshotRevision: revision,
-		ProjectID:        projectID,
+		ProjectID:        naming.ProjectID(projectID),
 		LastCheckedAt:    daemonSnapshotCheckedAt(),
 		Freshness:        protocol.TaskListFreshnessFresh,
 		Tasks:            tasks,
@@ -699,15 +699,15 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 
 	makeProjectionBody := func(revision uint64, issueID, worktreePath string, gitAdditions, gitDeletions, gitAhead, gitBehind int, sessionState protocol.SessionLifecycleState, agentStatus string, updatedAt time.Time, activeOperation *protocol.RuntimeOperationProjection) []byte {
 		body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
-			ProjectID: projectID,
+			ProjectID: naming.ProjectID(projectID),
 			IssueID:   naming.IssueID(issueID),
 			Worktree:  worktreePath,
 			UpdatedAt: updatedAt,
 			Runtime: &protocol.RuntimeProjectionEventBody{
-				ProjectID: projectID,
+				ProjectID: naming.ProjectID(projectID),
 				Revision:  revision,
 				Projection: protocol.RuntimeProjection{
-					ProjectID: projectID,
+					ProjectID: naming.ProjectID(projectID),
 					IssueID:   naming.IssueID(issueID),
 					Worktree: protocol.RuntimeWorktreeProjection{
 						Exists:             worktreePath != "",
@@ -792,7 +792,7 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 				}),
 			}
 			sessionBody, err := json.Marshal(protocol.SessionProjectionEventBody{
-				ProjectID: projectID,
+				ProjectID: naming.ProjectID(projectID),
 				Revision:  10,
 				Session: protocol.SessionProjection{
 					SessionID: "sess-1",
@@ -801,10 +801,10 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 					UpdatedAt: sessionUpdatedAt,
 				},
 				Runtime: &protocol.RuntimeProjectionEventBody{
-					ProjectID: projectID,
+					ProjectID: naming.ProjectID(projectID),
 					Revision:  10,
 					Projection: protocol.RuntimeProjection{
-						ProjectID: projectID,
+						ProjectID: naming.ProjectID(projectID),
 						IssueID:   "az-1",
 						Worktree: protocol.RuntimeWorktreeProjection{
 							Exists:             true,

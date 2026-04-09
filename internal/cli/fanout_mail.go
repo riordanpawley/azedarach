@@ -706,16 +706,20 @@ func applyFanoutPlan(ctx context.Context, deps *Dependencies, parentIssue string
 		if node.Kind == "group" {
 			tt = domain.TypeEpic
 		}
-		design := fanoutDesignMetadata(node)
-		id, err := deps.DaemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
-			Title:           node.Title,
-			Description:     node.Description,
-			Type:            tt,
-			Priority:        domain.P2,
-			Implementations: impl,
-			Design:          design,
-			ParentID:        &parentID,
-		})
+			design := fanoutDesignMetadata(node)
+			typedParentID, parentIDErr := naming.ParseIssueID(parentID)
+			if parentIDErr != nil {
+				return fanoutApplyResult{}, fmt.Errorf("invalid parent id for key %s: %w", node.Key, parentIDErr)
+			}
+			id, err := deps.DaemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
+				Title:           node.Title,
+				Description:     node.Description,
+				Type:            tt,
+				Priority:        domain.P2,
+				Implementations: impl,
+				Design:          design,
+				ParentID:        &typedParentID,
+			})
 		if err != nil {
 			return fanoutApplyResult{}, fmt.Errorf("create task for key %s: %w", node.Key, err)
 		}
@@ -738,9 +742,17 @@ func applyFanoutPlan(ctx context.Context, deps *Dependencies, parentIssue string
 				continue
 			}
 			toID := created[dep]
+			typedFromID, fromErr := naming.ParseIssueID(fromID)
+			if fromErr != nil {
+				return fanoutApplyResult{}, fmt.Errorf("invalid dependency source id %q for key %s: %w", fromID, node.Key, fromErr)
+			}
+			typedToID, toErr := naming.ParseIssueID(toID)
+			if toErr != nil {
+				return fanoutApplyResult{}, fmt.Errorf("invalid dependency target id %q for key %s: %w", toID, dep, toErr)
+			}
 			if err := deps.DaemonClient.AddTaskDependency(ctx, daemonclient.TaskDependencyParams{
-				TaskID:      fromID,
-				DependsOnID: toID,
+				TaskID:      typedFromID,
+				DependsOnID: typedToID,
 				Type:        string(domain.DependencyBlocks),
 			}); err != nil {
 				return fanoutApplyResult{}, fmt.Errorf("add blocks edge %s->%s: %w", node.Key, dep, err)

@@ -642,8 +642,16 @@ func OperationListCommand(deps *Dependencies, opts OperationListOptions) error {
 		return err
 	}
 
+	var issueID string
+	if trimmed := strings.TrimSpace(opts.IssueID); trimmed != "" {
+		typedIssueID, err := naming.ParseIssueID(trimmed)
+		if err != nil {
+			return fmt.Errorf("invalid issue id: %w", err)
+		}
+		issueID = typedIssueID.String()
+	}
 	records, err := deps.DaemonClient.ListOperations(ctx, daemonclient.OperationListOptions{
-		IssueID: opts.IssueID,
+		IssueID: issueID,
 		Kind:    opts.Kind,
 		States:  opts.States,
 		Limit:   opts.Limit,
@@ -2167,13 +2175,13 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), issueCreateCommandTimeout)
 	defer cancel()
 
-	var parentID *string
+	var parentID *naming.IssueID
 	implementations := append([]string{}, opts.Implementations...)
 	if !opts.Deferred && opts.AutoParentFromIssueID != nil && strings.TrimSpace(*opts.AutoParentFromIssueID) != "" {
-		parentIssueID := strings.TrimSpace(*opts.AutoParentFromIssueID)
-		snapshot, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskSnapshot, error) {
-			return deps.DaemonClient.ListTasksSnapshot(callCtx)
-		})
+			parentIssueID := strings.TrimSpace(*opts.AutoParentFromIssueID)
+			snapshot, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskSnapshot, error) {
+				return deps.DaemonClient.ListTasksSnapshot(callCtx)
+			})
 		if err != nil {
 			return fmt.Errorf("failed to resolve active parent issue %s: %w", parentIssueID, err)
 		}
@@ -2181,7 +2189,7 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 		if !ok {
 			return fmt.Errorf("active issue not found for auto-parenting: %s", parentIssueID)
 		}
-		parentID = &parentIssueID
+			parentID = &parentTask.ID
 		if len(implementations) == 0 {
 			implementations = append([]string{}, parentTask.Implementations...)
 		}
@@ -2215,8 +2223,8 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 	}
 
 	message := fmt.Sprintf("Created issue: %s", taskID)
-	if parentID != nil && strings.TrimSpace(*parentID) != "" {
-		message = fmt.Sprintf("%s (parent: %s, auto-parent from AZEDARACH_ISSUE_ID)", message, strings.TrimSpace(*parentID))
+	if parentID != nil && strings.TrimSpace(parentID.String()) != "" {
+		message = fmt.Sprintf("%s (parent: %s, auto-parent from AZEDARACH_ISSUE_ID)", message, strings.TrimSpace(parentID.String()))
 	}
 	if opts.Deferred {
 		message = fmt.Sprintf("%s [deferred]", message)
@@ -2224,7 +2232,7 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 	if opts.JSON {
 		var parentIDValue string
 		if parentID != nil {
-			parentIDValue = strings.TrimSpace(*parentID)
+			parentIDValue = strings.TrimSpace(parentID.String())
 		}
 		return printJSON(map[string]any{
 			"issue_id":   taskID,
@@ -2390,9 +2398,17 @@ func IssueDependencyAddCommand(deps *Dependencies, opts IssueDependencyAddOption
 		return err
 	}
 
+	typedIssueID, err := naming.ParseIssueID(strings.TrimSpace(opts.IssueID))
+	if err != nil {
+		return fmt.Errorf("invalid issue_id %q: %w", opts.IssueID, err)
+	}
+	typedDependsOnID, err := naming.ParseIssueID(strings.TrimSpace(opts.DependsOnID))
+	if err != nil {
+		return fmt.Errorf("invalid depends_on_id %q: %w", opts.DependsOnID, err)
+	}
 	if err := deps.DaemonClient.AddTaskDependency(ctx, daemonclient.TaskDependencyParams{
-		TaskID:      opts.IssueID,
-		DependsOnID: opts.DependsOnID,
+		TaskID:      typedIssueID,
+		DependsOnID: typedDependsOnID,
 		Type:        opts.Type,
 	}); err != nil {
 		return fmt.Errorf("failed to add dependency %s -> %s: %w", opts.IssueID, opts.DependsOnID, err)
@@ -2420,9 +2436,17 @@ func IssueDependencyRemoveCommand(deps *Dependencies, opts IssueDependencyRemove
 		return err
 	}
 
+	typedIssueID, err := naming.ParseIssueID(strings.TrimSpace(opts.IssueID))
+	if err != nil {
+		return fmt.Errorf("invalid issue_id %q: %w", opts.IssueID, err)
+	}
+	typedDependsOnID, err := naming.ParseIssueID(strings.TrimSpace(opts.DependsOnID))
+	if err != nil {
+		return fmt.Errorf("invalid depends_on_id %q: %w", opts.DependsOnID, err)
+	}
 	if err := deps.DaemonClient.RemoveTaskDependency(ctx, daemonclient.TaskDependencyRemoveParams{
-		TaskID:      opts.IssueID,
-		DependsOnID: opts.DependsOnID,
+		TaskID:      typedIssueID,
+		DependsOnID: typedDependsOnID,
 		Type:        opts.Type,
 		Confirm:     opts.Confirm,
 	}); err != nil {
@@ -2622,7 +2646,7 @@ func IssueBulkCreateCommand(deps *Dependencies, opts IssueBulkCreateOptions) err
 			Type:            taskType,
 			Priority:        priority,
 			Implementations: []string{impl},
-			ParentID:        item.ParentID,
+			ParentID:        parseOptionalIssueID(item.ParentID),
 		})
 		if err != nil {
 			return fmt.Errorf("marshal bulk-create item %d: %w", i, err)
@@ -2731,14 +2755,14 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 			update.Priority = priority
 			needsUpdate = true
 		}
-		if needsUpdate {
-			body, err := json.Marshal(struct {
-				TaskID string `json:"task_id"`
-				daemonclient.TaskUpdateParams
-			}{
-				TaskID:           taskID,
-				TaskUpdateParams: update,
-			})
+			if needsUpdate {
+				body, err := json.Marshal(struct {
+					TaskID naming.IssueID `json:"task_id"`
+					daemonclient.TaskUpdateParams
+				}{
+					TaskID:           typedTaskID,
+					TaskUpdateParams: update,
+				})
 			if err != nil {
 				return fmt.Errorf("marshal bulk-update item %d: %w", i, err)
 			}
@@ -2758,9 +2782,17 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 			if fromID == "" || toID == "" {
 				return fmt.Errorf("bulk-update item %d: dependency_retargets requires from_id and to_id", i)
 			}
+			typedFromID, fromErr := naming.ParseIssueID(fromID)
+			if fromErr != nil {
+				return fmt.Errorf("bulk-update item %d: invalid from_id %q: %w", i, fromID, fromErr)
+			}
+			typedToID, toErr := naming.ParseIssueID(toID)
+			if toErr != nil {
+				return fmt.Errorf("bulk-update item %d: invalid to_id %q: %w", i, toID, toErr)
+			}
 			removeBody, err := json.Marshal(daemonclient.TaskDependencyRemoveParams{
-				TaskID:      taskID,
-				DependsOnID: fromID,
+				TaskID:      typedTaskID,
+				DependsOnID: typedFromID,
 				Type:        depType,
 				Confirm:     true,
 			})
@@ -2773,8 +2805,8 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 			})
 
 			addBody, err := json.Marshal(daemonclient.TaskDependencyParams{
-				TaskID:      taskID,
-				DependsOnID: toID,
+				TaskID:      typedTaskID,
+				DependsOnID: typedToID,
 				Type:        depType,
 			})
 			if err != nil {
@@ -2850,6 +2882,21 @@ func dedupeOrderedIDs(ids []string) []string {
 		deduped = append(deduped, id)
 	}
 	return deduped
+}
+
+func parseOptionalIssueID(value *string) *naming.IssueID {
+	if value == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*value)
+	if trimmed == "" {
+		return nil
+	}
+	typed, err := naming.ParseIssueID(trimmed)
+	if err != nil {
+		return nil
+	}
+	return &typed
 }
 
 type dependencyEdgeKey struct {
@@ -2945,11 +2992,11 @@ func planDependencyMutation(
 		}
 		edges[key] = struct{}{}
 		outcome.Status = "planned"
-		body, err := json.Marshal(daemonclient.TaskDependencyParams{
-			TaskID:      issueID,
-			DependsOnID: depID,
-			Type:        string(depType),
-		})
+			body, err := json.Marshal(daemonclient.TaskDependencyParams{
+				TaskID:      typedIssueID,
+				DependsOnID: typedDepID,
+				Type:        string(depType),
+			})
 		if err != nil {
 			return outcome, nil, fmt.Errorf("marshal add payload: %w", err)
 		}
@@ -2975,12 +3022,12 @@ func planDependencyMutation(
 		}
 		delete(edges, key)
 		outcome.Status = "planned"
-		body, err := json.Marshal(daemonclient.TaskDependencyRemoveParams{
-			TaskID:      issueID,
-			DependsOnID: depID,
-			Type:        string(depType),
-			Confirm:     true,
-		})
+			body, err := json.Marshal(daemonclient.TaskDependencyRemoveParams{
+				TaskID:      typedIssueID,
+				DependsOnID: typedDepID,
+				Type:        string(depType),
+				Confirm:     true,
+			})
 		if err != nil {
 			return outcome, nil, fmt.Errorf("marshal remove payload: %w", err)
 		}
@@ -3025,12 +3072,12 @@ func planDependencyMutation(
 		plannedOps := make([]protocol.ApplyOperationBody, 0, 2)
 		if needsRemove {
 			delete(edges, removeKey)
-			body, err := json.Marshal(daemonclient.TaskDependencyRemoveParams{
-				TaskID:      issueID,
-				DependsOnID: fromID,
-				Type:        string(depType),
-				Confirm:     true,
-			})
+				body, err := json.Marshal(daemonclient.TaskDependencyRemoveParams{
+					TaskID:      typedIssueID,
+					DependsOnID: typedFromID,
+					Type:        string(depType),
+					Confirm:     true,
+				})
 			if err != nil {
 				return outcome, nil, fmt.Errorf("marshal retarget remove payload: %w", err)
 			}
@@ -3041,11 +3088,11 @@ func planDependencyMutation(
 		}
 		if needsAdd {
 			edges[addKey] = struct{}{}
-			body, err := json.Marshal(daemonclient.TaskDependencyParams{
-				TaskID:      issueID,
-				DependsOnID: toID,
-				Type:        string(depType),
-			})
+				body, err := json.Marshal(daemonclient.TaskDependencyParams{
+					TaskID:      typedIssueID,
+					DependsOnID: typedToID,
+					Type:        string(depType),
+				})
 			if err != nil {
 				return outcome, nil, fmt.Errorf("marshal retarget add payload: %w", err)
 			}

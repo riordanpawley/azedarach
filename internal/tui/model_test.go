@@ -3443,7 +3443,7 @@ func TestDaemonSessionUpdatedEventAllowsImmediateAttachFromWorkspace(t *testing.
 
 	updatedAt := time.Date(2026, time.March, 31, 1, 2, 3, 0, time.UTC)
 	body, err := json.Marshal(protocol.SessionProjectionEventBody{
-		ProjectID: m.daemonProjectID(),
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
 		Revision:  7,
 		Session: protocol.SessionProjection{
 			SessionID: "proj-az-1",
@@ -3562,15 +3562,15 @@ func TestDaemonStreamEventMsg_GitStatusEventAppliesRuntimeProjectionDirectly(t *
 	startedAt := time.Date(2026, time.April, 1, 13, 0, 0, 0, time.UTC)
 	updatedAt := startedAt.Add(5 * time.Minute)
 	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
-		ProjectID: m.daemonProjectID(),
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
 		IssueID:   naming.IssueID(task.ID),
 		Worktree:  "/tmp/az-1",
 		UpdatedAt: updatedAt,
 		Runtime: &protocol.RuntimeProjectionEventBody{
-			ProjectID: m.daemonProjectID(),
+			ProjectID: naming.ProjectID(m.daemonProjectID()),
 			Revision:  1,
 			Projection: protocol.RuntimeProjection{
-				ProjectID: m.daemonProjectID(),
+				ProjectID: naming.ProjectID(m.daemonProjectID()),
 				IssueID:   naming.IssueID(task.ID),
 				Worktree: protocol.RuntimeWorktreeProjection{
 					Exists:             true,
@@ -3741,15 +3741,15 @@ func TestRuntimeProjectionStreamSyncsOpenTaskWorkspaceOverlay(t *testing.T) {
 
 	updatedAt := time.Date(2026, time.April, 1, 15, 0, 0, 0, time.UTC)
 	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
-		ProjectID: m.daemonProjectID(),
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
 		IssueID:   task.ID,
 		Worktree:  "/tmp/wt-az-1",
 		UpdatedAt: updatedAt,
 		Runtime: &protocol.RuntimeProjectionEventBody{
-			ProjectID: m.daemonProjectID(),
+			ProjectID: naming.ProjectID(m.daemonProjectID()),
 			Revision:  2,
 			Projection: protocol.RuntimeProjection{
-				ProjectID: m.daemonProjectID(),
+				ProjectID: naming.ProjectID(m.daemonProjectID()),
 				IssueID:   naming.IssueID(task.ID),
 				Worktree: protocol.RuntimeWorktreeProjection{
 					Exists:             true,
@@ -4161,7 +4161,6 @@ func TestDaemonOperationProgressEventUpdatesRuntimeSignalsAndClearsOnDone(t *tes
 	startBody, err := json.Marshal(protocol.OperationEventBody{
 		Operation: protocol.OperationRecord{
 			OperationID: "op-merge",
-			IssueID:     "/tmp/wt-az-1",
 			Kind:        "git.merge",
 			State:       protocol.OperationStateRunning,
 			ResourceKeys: []string{
@@ -4212,7 +4211,6 @@ func TestDaemonOperationProgressEventUpdatesRuntimeSignalsAndClearsOnDone(t *tes
 	doneBody, err := json.Marshal(protocol.OperationEventBody{
 		Operation: protocol.OperationRecord{
 			OperationID: "op-merge",
-			IssueID:     "/tmp/wt-az-1",
 			Kind:        "git.merge",
 			State:       protocol.OperationStateDone,
 			ResourceKeys: []string{
@@ -4247,29 +4245,27 @@ func TestResolveOperationTaskIDCoversSessionGitAndWorktreeMutations(t *testing.T
 
 	cases := []struct {
 		name         string
-		issueID      string
+		issueID      naming.IssueID
 		resourceKeys []string
 		wantTaskID   string
 	}{
 		{
 			name:       "session lifecycle issue id",
-			issueID:    "az-1",
+			issueID:    naming.IssueID("az-1"),
 			wantTaskID: "az-1",
 		},
 		{
-			name:       "git merge uses worktree path issue id",
-			issueID:    "/tmp/wt-az-1",
+			name:         "git merge uses worktree resource key",
+			resourceKeys: []string{"worktree:/tmp/wt-az-1"},
 			wantTaskID: "az-1",
 		},
 		{
 			name:         "git fetch uses worktree resource key",
-			issueID:      "",
 			resourceKeys: []string{"worktree:/tmp/wt-az-2"},
 			wantTaskID:   "az-2",
 		},
 		{
 			name:         "worktree remove uses issue resource key",
-			issueID:      "__project__",
 			resourceKeys: []string{"issue:proj:az-2"},
 			wantTaskID:   "az-2",
 		},
@@ -4331,7 +4327,6 @@ func TestDaemonOperationLifecycleEventsTrackPendingForGitAndWorktreeMutations(t 
 	gitQueued, err := json.Marshal(protocol.OperationEventBody{
 		Operation: protocol.OperationRecord{
 			OperationID: "op-git-1",
-			IssueID:     "/tmp/wt-az-1",
 			Kind:        "git.merge",
 			State:       protocol.OperationStateQueued,
 			ResourceKeys: []string{
@@ -4347,7 +4342,7 @@ func TestDaemonOperationLifecycleEventsTrackPendingForGitAndWorktreeMutations(t 
 	worktreeRunning, err := json.Marshal(protocol.OperationEventBody{
 		Operation: protocol.OperationRecord{
 			OperationID: "op-wt-1",
-			IssueID:     "az-2",
+			IssueID:     naming.IssueID("az-2"),
 			Kind:        "worktree.remove",
 			State:       protocol.OperationStateRunning,
 			ResourceKeys: []string{

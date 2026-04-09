@@ -940,7 +940,7 @@ func (m *Model) applyOperationProgressEvent(evt protocol.EventEnvelope) {
 		if strings.TrimSpace(body.Operation.OperationID.String()) == "" {
 			return
 		}
-		taskID := m.resolveOperationTaskID(body.Operation.IssueID, body.Operation.ResourceKeys)
+			taskID := m.resolveOperationTaskID(body.Operation.IssueID, body.Operation.ResourceKeys)
 		if taskID == "" {
 			taskID = m.operationTaskID[body.Operation.OperationID.String()]
 		}
@@ -1004,8 +1004,8 @@ func clampOperationPercent(percent int) int {
 	return percent
 }
 
-func (m Model) resolveOperationTaskID(issueID string, resourceKeys []string) string {
-	trimmedIssueID := strings.TrimSpace(issueID)
+func (m Model) resolveOperationTaskID(issueID naming.IssueID, resourceKeys []string) string {
+	trimmedIssueID := strings.TrimSpace(issueID.String())
 	if taskID := m.lookupTaskID(trimmedIssueID); taskID != "" {
 		return taskID
 	}
@@ -1484,7 +1484,7 @@ func (m *Model) applySessionProjectionEvent(evt protocol.EventEnvelope) {
 		}
 		return
 	}
-	if projectID := strings.TrimSpace(body.ProjectID); projectID != "" && projectID != m.daemonProjectID() {
+	if projectID := strings.TrimSpace(body.ProjectID.String()); projectID != "" && projectID != m.daemonProjectID() {
 		return
 	}
 	m.applyRuntimeProjectionFromSessionEvent(body)
@@ -3207,10 +3207,18 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			return taskCreatedResultMsg{err: fmt.Errorf("daemon client unavailable")}
 		}
 
-		taskID, err := m.daemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
-			Title:           msg.Title,
-			Description:     msg.Description,
-			Type:            msg.Type,
+			var parentID *naming.IssueID
+			if msg.ParentID != nil {
+				parsedParentID, parseErr := naming.ParseIssueID(strings.TrimSpace(*msg.ParentID))
+				if parseErr != nil {
+					return taskCreatedResultMsg{taskID: "", err: fmt.Errorf("invalid parent_id: %w", parseErr), isUpdate: false}
+				}
+				parentID = &parsedParentID
+			}
+			taskID, err := m.daemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
+				Title:           msg.Title,
+				Description:     msg.Description,
+				Type:            msg.Type,
 			Priority:        msg.Priority,
 			Status:          msg.Status,
 			Assignee:        msg.Assignee,
@@ -3220,8 +3228,8 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			Notes:           msg.Notes,
 			Acceptance:      msg.Acceptance,
 			Estimate:        msg.Estimate,
-			ParentID:        msg.ParentID,
-		})
+				ParentID:        parentID,
+			})
 		return taskCreatedResultMsg{taskID: taskID, err: err, isUpdate: false}
 	}
 }

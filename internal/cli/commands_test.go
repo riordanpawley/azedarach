@@ -37,6 +37,7 @@ func marshalTaskListBody(tasks []domain.Task) ([]byte, error) {
 		SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
 		ProtocolVersion:  protocol.CurrentVersion,
 		SnapshotRevision: 0,
+		ProjectID:        naming.ProjectID(protocol.DefaultProjectID),
 		LastCheckedAt:    time.Date(2026, time.April, 2, 11, 2, 0, 0, time.UTC),
 		Freshness:        protocol.TaskListFreshnessFresh,
 		Tasks:            tasks,
