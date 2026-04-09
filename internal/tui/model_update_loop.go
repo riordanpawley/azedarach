@@ -327,6 +327,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if projectID := strings.TrimSpace(msg.event.ProjectID.String()); projectID != "" && projectID != m.daemonProjectID() {
 			return m, m.waitForDaemonEventCmd()
 		}
+		cursor := protocol.StreamCursor{Revision: m.daemonRevision}
 		m.recordRuntimeEvent(msg.event)
 		if current := m.overlayStack.Current(); current != nil {
 			if logOverlay, ok := current.(*overlay.EventLogOverlay); ok {
@@ -338,12 +339,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.applySessionProjectionEvent(msg.event)
 		}
 		if msg.event.Event == protocol.EventWorktreeProjectionUpdated || msg.event.Event == protocol.EventGitStatusUpdated {
+			switch cursor.Decide(msg.event) {
+			case protocol.StreamProjectionDecisionIgnore:
+				return m, m.waitForDaemonEventCmd()
+			case protocol.StreamProjectionDecisionResync:
+				m.daemonEvents = nil
+				return m, m.attachDaemonCmd()
+			}
+
 			var body protocol.ProjectionUpdateEventBody
 			if err := json.Unmarshal(msg.event.Body, &body); err == nil && body.Runtime != nil {
 				m.applyRuntimeProjection(body.Runtime.Projection)
 			}
 			diffRefreshCmd := m.refreshOpenDiffOverlayFromProjectionBody(body)
-			cursor := protocol.StreamCursor{Revision: m.daemonRevision}
 			m.daemonRevision = cursor.Advance(msg.event).Revision
 			if diffRefreshCmd != nil {
 				return m, tea.Batch(diffRefreshCmd, m.waitForDaemonEventCmd())

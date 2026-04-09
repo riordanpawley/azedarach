@@ -3730,6 +3730,7 @@ func TestPendingMutationForTaskFallsBackToRuntimeSignals(t *testing.T) {
 
 func TestRuntimeProjectionStreamSyncsOpenTaskWorkspaceOverlay(t *testing.T) {
 	m := newTestModel()
+	m.daemonRevision = 1
 	task := m.tasks[0]
 	task.HasWorktree = false
 	task.HasUncommittedChanges = false
