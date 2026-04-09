@@ -3749,6 +3749,88 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 	})
 }
 
+func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
+	const issueID = "az-1"
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandRuntimeReconcileIssue:
+				var body protocol.RuntimeReconcileIssueRequestBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal reconcile body: %v", err)
+				}
+				if len(body.IssueIDs) != 1 || body.IssueIDs[0].String() != issueID {
+					t.Fatalf("reconcile issue_ids = %+v, want [%s]", body.IssueIDs, issueID)
+				}
+				respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{ProjectID: "default"})
+				if err != nil {
+					t.Fatalf("marshal reconcile response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandTaskList:
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+						{ID: naming.IssueID(issueID), Title: "Task fresh", Status: domain.StatusInProgress, Type: domain.TypeTask},
+					}),
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.editor.EnterNormal()
+	m.tasks = []domain.Task{
+		{ID: naming.IssueID(issueID), Title: "Task stale", Status: domain.StatusInProgress, Type: domain.TypeTask},
+	}
+	m.nav.SelectTask(issueID, 0)
+
+	updatedAny, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+
+	current := updated.overlayStack.Current()
+	workspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected TaskWorkspaceOverlay on top, got %T", current)
+	}
+	if !strings.Contains(workspace.View(), "Task stale") {
+		t.Fatalf("workspace should open immediately with current projection, got %q", workspace.View())
+	}
+
+	refreshMsg := updated.refreshTaskWorkspaceInBackgroundCmd(issueID)()
+	nextAny, _ := updated.Update(refreshMsg)
+	next, ok := nextAny.(Model)
+	if !ok {
+		t.Fatalf("next model type = %T, want Model", nextAny)
+	}
+	refreshed, ok := next.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected TaskWorkspaceOverlay after refresh, got %T", next.overlayStack.Current())
+	}
+	if !strings.Contains(refreshed.View(), "Task fresh") {
+		t.Fatalf("workspace should refresh from daemon snapshot, got %q", refreshed.View())
+	}
+	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskList {
+		t.Fatalf("requests = %v", got)
+	}
+}
+
 func TestAbortMergeCmdUsesDaemonClient(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
