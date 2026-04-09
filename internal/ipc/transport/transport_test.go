@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"sync/atomic"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -289,6 +289,75 @@ func TestServerRecoversFromCommandHandlerPanic(t *testing.T) {
 	if !resp.OK || resp.Revision != 99 {
 		t.Fatalf("response = %+v", resp)
 	}
+}
+
+func TestServerServeFailsWhenSocketPathInUse(t *testing.T) {
+	t.Parallel()
+	socket := tempSocketPath(t)
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		if isSocketPermissionError(err) {
+			t.Skipf("sandbox does not permit socket bind/listen: %v", err)
+		}
+		t.Fatalf("listen existing socket: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = os.Remove(socket)
+	})
+
+	srv := NewServer(socket, Handlers{
+		Handshake: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+			return protocol.HelloAck{Accepted: true}, nil
+		},
+		Command: func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			return protocol.ResponseEnvelope{OK: true}, nil
+		},
+		Subscribe: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, func(), error) {
+			ch := make(chan protocol.EventEnvelope)
+			close(ch)
+			return ch, func() {}, nil
+		},
+	})
+
+	err = srv.Serve(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "already in use") {
+		t.Fatalf("Serve() error = %v, want active socket in-use error", err)
+	}
+}
+
+func TestServerServeRemovesStaleSocketPath(t *testing.T) {
+	t.Parallel()
+	socket := tempSocketPath(t)
+
+	stale, err := net.Listen("unix", socket)
+	if err != nil {
+		if isSocketPermissionError(err) {
+			t.Skipf("sandbox does not permit socket bind/listen: %v", err)
+		}
+		t.Fatalf("listen stale setup: %v", err)
+	}
+	_ = stale.Close()
+	t.Cleanup(func() { _ = os.Remove(socket) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := NewServer(socket, Handlers{
+		Handshake: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+			return protocol.HelloAck{Accepted: true}, nil
+		},
+		Command: func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			return protocol.ResponseEnvelope{OK: true}, nil
+		},
+		Subscribe: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, func(), error) {
+			ch := make(chan protocol.EventEnvelope)
+			close(ch)
+			return ch, func() {}, nil
+		},
+	})
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ctx) }()
+	waitForSocket(t, socket, errCh)
 }
 
 func waitForSocket(t *testing.T, socket string, errCh <-chan error) {

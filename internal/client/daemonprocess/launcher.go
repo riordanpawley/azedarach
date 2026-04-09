@@ -88,9 +88,7 @@ func (l *Launcher) Start(ctx context.Context) error {
 
 	if l.daemonLockOwnerAlive() {
 		if l.waitForReady != nil {
-			readyCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			err := l.waitForReady(readyCtx, l.SocketPath)
-			cancel()
+			err := l.waitForSocketReadyWithin(2 * time.Second)
 			if err == nil {
 				return nil
 			}
@@ -106,6 +104,10 @@ func (l *Launcher) Start(ctx context.Context) error {
 				terminate = lifecycle.TerminateLockOwner
 			}
 			if err := terminate(l.LockPath); err != nil {
+				readyErr := l.waitForSocketReadyWithin(1 * time.Second)
+				if readyErr == nil {
+					return nil
+				}
 				return fmt.Errorf("recover stale daemon lock owner: %w", err)
 			}
 		}
@@ -144,6 +146,15 @@ func (l *Launcher) Start(ctx context.Context) error {
 	return nil
 }
 
+func (l *Launcher) waitForSocketReadyWithin(timeout time.Duration) error {
+	if l.waitForReady == nil {
+		return nil
+	}
+	readyCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return l.waitForReady(readyCtx, l.SocketPath)
+}
+
 // Stop attempts to stop existing lock-owner process.
 func (l *Launcher) Stop(ctx context.Context) error {
 	_ = ctx
@@ -178,8 +189,7 @@ func (l *Launcher) resolveBinary() string {
 	if env := os.Getenv("AZEDARACH_DAEMON_BIN"); env != "" {
 		return env
 	}
-	candidates := []string{
-	}
+	candidates := []string{}
 	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
 		// Prefer the caller's worktree-local build when present so daemon behavior
 		// matches the code under test/development.

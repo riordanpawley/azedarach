@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 )
 
 type trackingWriteCloser struct {
@@ -277,6 +279,43 @@ func TestLauncherStart_ErrorsWhenLockRecoveryFails(t *testing.T) {
 	err = launcher.Start(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "recover stale daemon lock owner") {
 		t.Fatalf("Start() error = %v, want lock recovery failure", err)
+	}
+}
+
+func TestLauncherStart_RechecksSocketWhenLockRecoveryFails(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+
+	launcher := NewLauncher(repoDir, socketPath)
+	launcher.BinPath = filepath.Join(t.TempDir(), "missing-azd")
+	launcher.sleepFn = func(time.Duration) {}
+	launcher.terminateLockOwner = func(string) error { return lifecycle.ErrLockOwnerPermissionDenied }
+
+	readyCalls := 0
+	launcher.waitForReady = func(context.Context, string) error {
+		readyCalls++
+		if readyCalls < 2 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+
+	lockRecordBytes, err := json.Marshal(map[string]any{
+		"pid":        os.Getpid(),
+		"created_at": time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("Marshal(lockRecord): %v", err)
+	}
+	if err := os.WriteFile(launcher.LockPath, lockRecordBytes, 0o644); err != nil {
+		t.Fatalf("WriteFile(lock): %v", err)
+	}
+
+	if err := launcher.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v, want nil after recheck-ready", err)
+	}
+	if readyCalls != 2 {
+		t.Fatalf("waitForReady call count = %d, want 2", readyCalls)
 	}
 }
 

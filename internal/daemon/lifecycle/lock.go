@@ -16,6 +16,10 @@ import (
 var (
 	// ErrAlreadyRunning indicates an active daemon lock owner still exists.
 	ErrAlreadyRunning = errors.New("daemon already running")
+	// ErrLockOwnerPermissionDenied indicates the lock owner could not be signaled due to OS permission constraints.
+	ErrLockOwnerPermissionDenied = errors.New("lock owner permission denied")
+	// ErrLockOwnerTerminationTimeout indicates the lock owner did not exit after termination signal.
+	ErrLockOwnerTerminationTimeout = errors.New("lock owner did not exit after signal")
 )
 
 type lockRecord struct {
@@ -167,6 +171,16 @@ func isProcessAlive(pid int) bool {
 // TerminateLockOwner best-effort stops the process referenced by lockPath and
 // removes the lock. Missing or stale locks are treated as no-op success.
 func TerminateLockOwner(lockPath string) error {
+	return terminateLockOwnerWith(lockPath, syscall.Kill, isProcessAlive, time.Now, time.Sleep)
+}
+
+func terminateLockOwnerWith(
+	lockPath string,
+	killFn func(pid int, sig syscall.Signal) error,
+	isAliveFn func(pid int) bool,
+	nowFn func() time.Time,
+	sleepFn func(time.Duration),
+) error {
 	b, err := os.ReadFile(lockPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -176,9 +190,19 @@ func TerminateLockOwner(lockPath string) error {
 	}
 
 	pid, parseErr := parseLockPID(strings.TrimSpace(string(b)))
-	if parseErr == nil && pid > 0 && isProcessAlive(pid) {
-		if killErr := syscall.Kill(pid, syscall.SIGTERM); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
+	if parseErr == nil && pid > 0 && isAliveFn(pid) {
+		if killErr := killFn(pid, syscall.SIGTERM); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
+			if errors.Is(killErr, syscall.EPERM) || errors.Is(killErr, syscall.EACCES) {
+				return fmt.Errorf("%w: %v", ErrLockOwnerPermissionDenied, killErr)
+			}
 			return killErr
+		}
+		deadline := nowFn().Add(2 * time.Second)
+		for isAliveFn(pid) {
+			if nowFn().After(deadline) {
+				return fmt.Errorf("%w: pid %d", ErrLockOwnerTerminationTimeout, pid)
+			}
+			sleepFn(25 * time.Millisecond)
 		}
 	}
 
