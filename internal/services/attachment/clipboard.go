@@ -44,11 +44,11 @@ func readClipboardMacOS(ctx context.Context) ([]byte, error) {
 		attempts = append(attempts, "pngpaste not installed")
 	}
 
-	// Native screenshot clipboard payloads can require direct NSPasteboard access.
-	if data, err := readClipboardMacOSPasteboardData(ctx); err == nil && len(data) > 0 {
+	// Preserve compatibility with prior clipboard flows where pbpaste exposes raw payload bytes.
+	if data, err := readClipboardMacOSPBPasteRaw(ctx); err == nil && len(data) > 0 {
 		return data, nil
 	} else if err != nil {
-		attempts = append(attempts, "pasteboard fallback failed: "+compactWhitespace(err.Error()))
+		attempts = append(attempts, "pbpaste raw failed: "+compactWhitespace(err.Error()))
 	}
 
 	// Try the direct PNG AppleScript flow used in earlier implementations.
@@ -56,6 +56,13 @@ func readClipboardMacOS(ctx context.Context) ([]byte, error) {
 		return data, nil
 	} else if err != nil {
 		attempts = append(attempts, "png applescript failed: "+compactWhitespace(err.Error()))
+	}
+
+	// Native screenshot clipboard payloads can require direct NSPasteboard access.
+	if data, err := readClipboardMacOSPasteboardData(ctx); err == nil && len(data) > 0 {
+		return data, nil
+	} else if err != nil {
+		attempts = append(attempts, "pasteboard fallback failed: "+compactWhitespace(err.Error()))
 	}
 
 	// Some apps place a file alias on the clipboard instead of raw image bytes.
@@ -70,14 +77,6 @@ func readClipboardMacOS(ctx context.Context) ([]byte, error) {
 		return data, nil
 	} else if err != nil {
 		attempts = append(attempts, "text path fallback failed: "+compactWhitespace(err.Error()))
-	}
-
-	// Preserve compatibility with prior clipboard flows where pbpaste exposes raw payload bytes.
-	// Keep this late because pbpaste can return stale/non-image textual representations.
-	if data, err := readClipboardMacOSPBPasteRaw(ctx); err == nil && len(data) > 0 {
-		return data, nil
-	} else if err != nil {
-		attempts = append(attempts, "pbpaste raw failed: "+compactWhitespace(err.Error()))
 	}
 
 	// Fallback to osascript for PNG/TIFF/JPEG.
@@ -317,9 +316,6 @@ func readClipboardMacOSTextPath(ctx context.Context) ([]byte, error) {
 	}
 	if len(data) == 0 {
 		return nil, fmt.Errorf("clipboard text image path file is empty")
-	}
-	if mime := detectMimeType(data); !strings.HasPrefix(mime, "image/") {
-		return nil, fmt.Errorf("clipboard text path file is non-image mime: %s", mime)
 	}
 	return data, nil
 }
