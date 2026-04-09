@@ -18,6 +18,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/testprofile"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
@@ -63,6 +64,24 @@ func (m mockTmuxService) DisplayPopup(ctx context.Context, title, width, height,
 
 type recordingGitSyncService struct {
 	fetchCalls int
+}
+
+type testCreateOverlayAttachmentService struct{}
+
+func (testCreateOverlayAttachmentService) List(context.Context, string) ([]attachment.Attachment, error) {
+	return nil, nil
+}
+
+func (testCreateOverlayAttachmentService) AttachFromClipboard(context.Context, string) (*attachment.Attachment, error) {
+	return nil, nil
+}
+
+func (testCreateOverlayAttachmentService) Attach(context.Context, string, string) (*attachment.Attachment, error) {
+	return nil, nil
+}
+
+func (testCreateOverlayAttachmentService) Delete(context.Context, string, string) error {
+	return nil
 }
 
 func (s *recordingGitSyncService) FetchAndCheck() tea.Cmd {
@@ -2093,6 +2112,23 @@ func TestCreateTaskOverlayPersistsAcrossCloseReopen(t *testing.T) {
 	}
 	if second != first {
 		t.Fatal("expected create overlay state to persist across close/reopen")
+	}
+}
+
+func TestCreateTaskOverlayBindsAttachmentServiceInNormalMode(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+	m.attachmentService = testCreateOverlayAttachmentService{}
+
+	updated, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	m = updated.(Model)
+
+	current, ok := m.overlayStack.Current().(*overlay.CreateTaskOverlay)
+	if !ok || current == nil {
+		t.Fatalf("expected create overlay, got %T", m.overlayStack.Current())
+	}
+	if !current.HasAttachmentService() {
+		t.Fatal("expected create overlay to have attachment service bound")
 	}
 }
 
@@ -4302,7 +4338,7 @@ func TestResolveOperationTaskIDCoversSessionGitAndWorktreeMutations(t *testing.T
 		{
 			name:         "git merge uses worktree resource key",
 			resourceKeys: []string{"worktree:/tmp/wt-az-1"},
-			wantTaskID: "az-1",
+			wantTaskID:   "az-1",
 		},
 		{
 			name:         "git fetch uses worktree resource key",

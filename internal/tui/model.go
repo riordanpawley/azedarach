@@ -547,7 +547,9 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keybinds.ActionCreateTask: // Create task
 		if m.createTaskOverlay == nil {
-			m.createTaskOverlay = overlay.NewCreateTaskOverlayWithParentAndImplOptions(nil, m.availableTaskImplementations())
+			m.createTaskOverlay = overlay.NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(nil, m.availableTaskImplementations(), m.attachmentService)
+		} else {
+			m.createTaskOverlay.SetAttachmentService(m.attachmentService)
 		}
 		return m, m.openOverlay(m.createTaskOverlay)
 
@@ -1474,6 +1476,9 @@ func (m *Model) rebuildProjectScopedServices() {
 	m.gitSyncService = deps.GitSyncService
 	m.gitClient = deps.GitDiffClient
 	m.attachmentService = deps.AttachmentService
+	if m.createTaskOverlay != nil {
+		m.createTaskOverlay.SetAttachmentService(m.attachmentService)
+	}
 	m.diagnosticsService = deps.DiagnosticsService
 	m.projectRegistry = deps.ProjectRegistry
 }

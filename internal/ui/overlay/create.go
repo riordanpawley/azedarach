@@ -628,7 +628,7 @@ func (c *CreateTaskOverlay) View() string {
 				{Key: "T/B/F/E/C", Description: "Set type"},
 				{Key: "0/1/2/3/4", Description: "Set priority"},
 				{Key: "h/l or ←/→", Description: "Cycle impl combinations"},
-				{Key: "Ctrl+P", Description: "Paste image (edit task)"},
+				{Key: "Ctrl+P", Description: "Paste image"},
 				{Key: "j/k + d", Description: "Manage attachments"},
 				{Key: "Enter", Description: "Create task"},
 				{Key: "Ctrl+E", Description: "Edit in $EDITOR"},
@@ -637,6 +637,14 @@ func (c *CreateTaskOverlay) View() string {
 			})
 		},
 	})
+}
+
+func (c *CreateTaskOverlay) SetAttachmentService(svc ImageAttachmentService) {
+	c.attachmentSvc = svc
+}
+
+func (c *CreateTaskOverlay) HasAttachmentService() bool {
+	return c.attachmentSvc != nil
 }
 
 func (c *CreateTaskOverlay) clearToDefaults() {

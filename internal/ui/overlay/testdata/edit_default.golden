@@ -8,7 +8,7 @@
 ││ ┃                                                                            T/B/F/E/C Set type                   │
 ││ ┃                                                                            0/1/2/3/4 Set priority               │
 ││ ┃                                                                            h/l or ←/→ Cycle impl combinations   │
-││ ┃                                                                            Ctrl+P Paste image (edit task)       │
+││ ┃                                                                            Ctrl+P Paste image                   │
 ││ ┃                                                                            j/k + d Manage attachments           │
 ││ ┃                                                                            Enter Create task                    │
 ││ ┃                                                                            Ctrl+E Edit in $EDITOR               │
