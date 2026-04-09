@@ -55,7 +55,7 @@ func TestHelpOverlay_View_ContainsKeyBindings(t *testing.T) {
 	view := collectScrolledViews(help)
 
 	// Check that view contains expected category names
-	expectedCategories := []string{"Navigation", "Workspace", "Modes", "Selection", "Task Actions", "Other"}
+	expectedCategories := []string{"Card Header Legend", "Navigation", "Workspace", "Modes", "Selection", "Task Actions", "Other"}
 	for _, category := range expectedCategories {
 		if !strings.Contains(view, category) {
 			t.Errorf("view should contain category '%s'", category)
@@ -64,6 +64,9 @@ func TestHelpOverlay_View_ContainsKeyBindings(t *testing.T) {
 
 	// Check that view contains some key bindings from different categories
 	expectedBindings := []string{
+		"P0/P1/P2/...",             // Card header legend
+		"T / Td / ✓",               // Card header legend
+		"[1/3]",                    // Card header legend
 		"h/l",                      // Navigation
 		"j/k",                      // Navigation
 		"Open task workspace",      // Workspace

@@ -151,7 +151,27 @@ func (h *HelpOverlay) Size() (width, height int) {
 
 // getCategories returns all keybinding categories
 func (h *HelpOverlay) getCategories() []keybinds.Category {
-	return keybinds.HelpCategories()
+	categories := make([]keybinds.Category, 0, 1+len(keybinds.HelpCategories()))
+	categories = append(categories, cardHeaderLegendCategory())
+	categories = append(categories, keybinds.HelpCategories()...)
+	return categories
+}
+
+func cardHeaderLegendCategory() keybinds.Category {
+	return keybinds.Category{
+		Name: "Card Header Legend",
+		Bindings: []keybinds.Binding{
+			{Key: "P0/P1/P2/...", Description: "Issue priority badge"},
+			{Key: "T/F/B/E/C", Description: "Type badge letter (Task/Feature/Bug/Epic/Chore)"},
+			{Key: "● B 23h / ◐ W 5m", Description: "Session icon + state code + elapsed"},
+			{Key: "T / Td / ✓", Description: "Tmux session / descendant tmux / worktree"},
+			{Key: "↑2 / ↓1", Description: "Git ahead / behind upstream"},
+			{Key: "✎", Description: "Uncommitted file changes present"},
+			{Key: "+171/-65", Description: "Added/removed line counts"},
+			{Key: "M:running(40%)", Description: "Pending operation progress"},
+			{Key: "[1/3]", Description: "Completed child issues / total children"},
+		},
+	}
 }
 
 func (h *HelpOverlay) halfPageStep() int {
