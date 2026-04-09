@@ -120,11 +120,22 @@ func (l *Launcher) Start(ctx context.Context) error {
 				terminate = lifecycle.TerminateLockOwner
 			}
 			if err := terminate(l.LockPath); err != nil {
-				readyErr := l.waitForSocketReadyWithin(1 * time.Second)
-				if readyErr == nil {
-					return nil
+				if !errors.Is(err, syscall.EPERM) && !errors.Is(err, os.ErrPermission) {
+					readyErr := l.waitForSocketReadyWithin(1 * time.Second)
+					if readyErr == nil {
+						return nil
+					}
+					return fmt.Errorf("recover stale daemon lock owner: %w", err)
 				}
-				return fmt.Errorf("recover stale daemon lock owner: %w", err)
+				if l.Logger != nil {
+					l.Logger.Warn("permission denied terminating lock owner; force-clearing stale daemon lock",
+						"lock_path", l.LockPath,
+						"error", err,
+					)
+				}
+				if rmErr := os.Remove(l.LockPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+					return fmt.Errorf("recover stale daemon lock owner after permission fallback: %w", rmErr)
+				}
 			}
 		}
 	}

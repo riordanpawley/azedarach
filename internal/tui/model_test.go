@@ -2821,7 +2821,7 @@ func TestIssuesLoadedPreservesSnapshotSessionTaskState(t *testing.T) {
 	}
 }
 
-func TestIssuesLoadedPreservesLocalRuntimeOverlays(t *testing.T) {
+func TestIssuesLoadedUsesHydratedRuntimeOverlays(t *testing.T) {
 	m := newTestModel()
 	startedAt := time.Now().Add(-3 * time.Minute)
 	m.tasks[0].Session = &domain.Session{
@@ -2850,8 +2850,8 @@ func TestIssuesLoadedPreservesLocalRuntimeOverlays(t *testing.T) {
 	if task.ID != "az-1" || task.Title != "Task 1 refreshed" || task.Status != domain.StatusBlocked {
 		t.Fatalf("refreshed task = %+v", task)
 	}
-	if !task.HasTmuxSession || !task.HasWorktree || task.GitAheadCount != 2 || task.GitBehindCount != 7 || !task.HasUncommittedChanges || task.GitAdditions != 11 || task.GitDeletions != 4 {
-		t.Fatalf("local overlay fields were not preserved: %+v", task)
+	if task.HasTmuxSession || task.HasWorktree || task.GitAheadCount != 0 || task.GitBehindCount != 0 || task.HasUncommittedChanges || task.GitAdditions != 0 || task.GitDeletions != 0 {
+		t.Fatalf("task should reflect hydrated runtime projection, got: %+v", task)
 	}
 	if len(newModel.tasks) != 2 {
 		t.Fatalf("task count = %d, want 2", len(newModel.tasks))
