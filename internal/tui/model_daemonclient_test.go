@@ -58,8 +58,12 @@ func (r *refreshableDiffClient) Status(context.Context, string) (*git.GitStatus,
 	}, nil
 }
 
-func (*refreshableDiffClient) ChangedFiles(context.Context, string, string) ([]git.ChangedFile, error) {
-	return nil, nil
+func (r *refreshableDiffClient) ChangedFiles(context.Context, string, string) ([]git.ChangedFile, error) {
+	files := make([]git.ChangedFile, 0, len(r.paths))
+	for _, path := range r.paths {
+		files = append(files, git.ChangedFile{Path: path, Status: git.DiffFileModified})
+	}
+	return files, nil
 }
 
 func (*refreshableDiffClient) MergeBase(context.Context, string, string) (string, error) {

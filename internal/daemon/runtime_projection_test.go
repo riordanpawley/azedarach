@@ -322,8 +322,8 @@ func TestPublishGitStatusProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	if body.Runtime.Projection.Git.HasUncommittedChanges != true {
 		t.Fatalf("runtime git dirty = %v, want true", body.Runtime.Projection.Git.HasUncommittedChanges)
 	}
-	if body.Runtime.Projection.Git.GitAdditions != 1 || body.Runtime.Projection.Git.GitDeletions != 0 {
-		t.Fatalf("runtime git stats = %+v, want additions/deletions 1/0", body.Runtime.Projection.Git)
+	if body.Runtime.Projection.Git.GitAdditions != 0 || body.Runtime.Projection.Git.GitDeletions != 0 {
+		t.Fatalf("runtime git stats = %+v, want additions/deletions 0/0 when line totals are unavailable", body.Runtime.Projection.Git)
 	}
 	if body.Runtime.Projection.Session.SessionID != sessionID || body.Runtime.Projection.Worktree.Path != worktree {
 		t.Fatalf("runtime projection = %+v, want session/worktree %s/%s", body.Runtime.Projection, sessionID, worktree)

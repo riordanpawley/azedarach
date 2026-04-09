@@ -49,9 +49,8 @@ func (f *fakeDiffClient) MergeBase(context.Context, string, string) (string, err
 
 func TestDiffViewerInitLoadsChangedFiles(t *testing.T) {
 	client := &fakeDiffClient{
-		status: &gitservice.GitStatus{
-			HasChanges: true,
-			Modified:   []string{"internal/tui/model.go"},
+		changedFiles: []gitservice.ChangedFile{
+			{Path: "internal/tui/model.go", Status: gitservice.DiffFileModified},
 		},
 		mergeBase: "base123",
 	}
@@ -74,9 +73,8 @@ func TestDiffViewerInitLoadsChangedFiles(t *testing.T) {
 
 func TestDiffViewerEnterOpensSelectedFilePopup(t *testing.T) {
 	client := &fakeDiffClient{
-		status: &gitservice.GitStatus{
-			HasChanges: true,
-			Modified:   []string{"internal/tui/model.go"},
+		changedFiles: []gitservice.ChangedFile{
+			{Path: "internal/tui/model.go", Status: gitservice.DiffFileModified},
 		},
 		mergeBase: "base123",
 	}
@@ -118,9 +116,8 @@ func TestDiffViewerEnterOpensSelectedFilePopup(t *testing.T) {
 
 func TestDiffViewerAllDiffPopup(t *testing.T) {
 	client := &fakeDiffClient{
-		status: &gitservice.GitStatus{
-			HasChanges: true,
-			Modified:   []string{"a.go"},
+		changedFiles: []gitservice.ChangedFile{
+			{Path: "a.go", Status: gitservice.DiffFileModified},
 		},
 		mergeBase: "base456",
 	}
@@ -147,9 +144,9 @@ func TestDiffViewerAllDiffPopup(t *testing.T) {
 
 func TestDiffViewerSearchFiltersAndKeepsSelectionActions(t *testing.T) {
 	client := &fakeDiffClient{
-		status: &gitservice.GitStatus{
-			HasChanges: true,
-			Modified:   []string{"internal/tui/model.go", "internal/services/git/client.go"},
+		changedFiles: []gitservice.ChangedFile{
+			{Path: "internal/tui/model.go", Status: gitservice.DiffFileModified},
+			{Path: "internal/services/git/client.go", Status: gitservice.DiffFileModified},
 		},
 	}
 
@@ -200,9 +197,8 @@ func TestDiffViewerSearchFiltersAndKeepsSelectionActions(t *testing.T) {
 
 func TestDiffViewerEscInSearchModeClearsFilter(t *testing.T) {
 	client := &fakeDiffClient{
-		status: &gitservice.GitStatus{
-			HasChanges: true,
-			Modified:   []string{"internal/tui/model.go"},
+		changedFiles: []gitservice.ChangedFile{
+			{Path: "internal/tui/model.go", Status: gitservice.DiffFileModified},
 		},
 	}
 	viewer := NewDiffViewer("/tmp/az-1", "main", client, nil)
@@ -233,9 +229,11 @@ func TestDiffViewerEscInSearchModeClearsFilter(t *testing.T) {
 
 func TestDiffViewerSearchClampsCursorAfterFilterEdit(t *testing.T) {
 	client := &fakeDiffClient{
-		status: &gitservice.GitStatus{
-			HasChanges: true,
-			Modified:   []string{"alpha.go", "beta.go", "gamma.go", "internal/services/git/client.go"},
+		changedFiles: []gitservice.ChangedFile{
+			{Path: "alpha.go", Status: gitservice.DiffFileModified},
+			{Path: "beta.go", Status: gitservice.DiffFileModified},
+			{Path: "gamma.go", Status: gitservice.DiffFileModified},
+			{Path: "internal/services/git/client.go", Status: gitservice.DiffFileModified},
 		},
 	}
 

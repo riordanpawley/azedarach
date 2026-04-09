@@ -59,6 +59,10 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 			var status git.GitStatus
 			if err := json.Unmarshal(worktree.GitStatusRaw, &status); err == nil {
 				projection.Git.HasUncommittedChanges = status.HasChanges
+				projection.Git.GitAdditions = status.GitAdditions
+				projection.Git.GitDeletions = status.GitDeletions
+				projection.Git.GitAheadCount = status.GitAheadCount
+				projection.Git.GitBehindCount = status.GitBehindCount
 			}
 		}
 		if projection.Agent.UpdatedAt == nil {
