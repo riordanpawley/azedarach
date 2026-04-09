@@ -360,6 +360,21 @@ func TestServerServeRemovesStaleSocketPath(t *testing.T) {
 	waitForSocket(t, socket, errCh)
 }
 
+func TestSocketDialStaleClassification(t *testing.T) {
+	if !isSocketDialDefinitelyStale(syscall.ECONNREFUSED) {
+		t.Fatal("expected ECONNREFUSED to be classified as stale")
+	}
+	if !isSocketDialDefinitelyStale(syscall.ENOENT) {
+		t.Fatal("expected ENOENT to be classified as stale")
+	}
+	if isSocketDialDefinitelyStale(syscall.EAGAIN) {
+		t.Fatal("did not expect EAGAIN to be classified as stale")
+	}
+	if isSocketDialDefinitelyStale(syscall.ETIMEDOUT) {
+		t.Fatal("did not expect ETIMEDOUT to be classified as stale")
+	}
+}
+
 func waitForSocket(t *testing.T, socket string, errCh <-chan error) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

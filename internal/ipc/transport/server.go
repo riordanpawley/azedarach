@@ -100,13 +100,29 @@ func clearStaleSocketPath(socketPath string) error {
 		_ = conn.Close()
 		return fmt.Errorf("%w: %s", errSocketInUse, socketPath)
 	}
-	if errors.Is(dialErr, syscall.EPERM) || errors.Is(dialErr, syscall.EACCES) {
+	if isSocketDialPermissionError(dialErr) {
+		return fmt.Errorf("%w: %s: %v", errSocketInUse, socketPath, dialErr)
+	}
+	if !isSocketDialDefinitelyStale(dialErr) {
 		return fmt.Errorf("%w: %s: %v", errSocketInUse, socketPath, dialErr)
 	}
 	if rmErr := os.Remove(socketPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
 		return fmt.Errorf("remove stale socket path: %w", rmErr)
 	}
 	return nil
+}
+
+func isSocketDialPermissionError(err error) bool {
+	return errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES)
+}
+
+func isSocketDialDefinitelyStale(err error) bool {
+	// Only classify as stale when the error strongly indicates there is no
+	// active listener behind the socket path.
+	return errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ENOENT) ||
+		errors.Is(err, syscall.ENOTSOCK) ||
+		errors.Is(err, net.ErrClosed)
 }
 
 func (s *Server) Close() error {

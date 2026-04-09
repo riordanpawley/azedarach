@@ -315,6 +315,7 @@ func New(cfg Config) *Daemon {
 // Run acquires singleton lock and serves daemon IPC until context cancellation.
 func (d *Daemon) Run(ctx context.Context) error {
 	startedAt := time.Now()
+	d.prepareRunShutdownState()
 	if err := d.validateCommandPolicyConfiguration(); err != nil {
 		return err
 	}
@@ -398,6 +399,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		<-shutdownDone
 	}
 	return err
+}
+
+func (d *Daemon) prepareRunShutdownState() {
+	d.shutdownMu.Lock()
+	defer d.shutdownMu.Unlock()
+	d.shuttingDown = false
+	d.shutdownReqCh = make(chan struct{})
+	d.shutdownReqOnce = sync.Once{}
 }
 
 func (d *Daemon) validateCommandPolicyConfiguration() error {

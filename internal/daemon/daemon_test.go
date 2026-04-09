@@ -121,6 +121,30 @@ func TestCommandDaemonShutdownRequestsRuntimeStop(t *testing.T) {
 	}
 }
 
+func TestPrepareRunShutdownStateResetsSignals(t *testing.T) {
+	d := &Daemon{
+		shuttingDown:  true,
+		shutdownReqCh: make(chan struct{}),
+	}
+	d.requestShutdown()
+
+	d.prepareRunShutdownState()
+
+	if d.shuttingDown {
+		t.Fatal("expected shuttingDown reset to false")
+	}
+	if err := d.beginCommand(); err != nil {
+		t.Fatalf("beginCommand after reset: %v", err)
+	}
+	d.endCommand()
+
+	select {
+	case <-d.shutdownRequestChannel():
+		t.Fatal("expected fresh shutdown request channel to remain open after reset")
+	default:
+	}
+}
+
 func TestValidateCommandPolicyConfigurationFailsForIncompleteDispatcher(t *testing.T) {
 	d := &Daemon{
 		router: daemonhandlers.NewDispatcher(nil),
