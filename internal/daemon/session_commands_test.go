@@ -1404,7 +1404,7 @@ func TestListTmuxSessionsCacheFirstSkipsStopPendingCachedSession(t *testing.T) {
 	}
 }
 
-func TestSessionAttachRefreshesRuntimeBeforeMutation(t *testing.T) {
+func TestSessionAttachDoesNotRequireRuntimeReconcile(t *testing.T) {
 	const (
 		projectID = "proj"
 		issueID   = "az-1"
@@ -1452,11 +1452,11 @@ func TestSessionAttachRefreshesRuntimeBeforeMutation(t *testing.T) {
 		t.Fatalf("response not ok: %+v", resp.Error)
 	}
 	calls, projectIDs := recorder.snapshot()
-	if calls != 1 {
-		t.Fatalf("runtime reconcile calls = %d, want 1", calls)
+	if calls != 0 {
+		t.Fatalf("runtime reconcile calls = %d, want 0", calls)
 	}
-	if len(projectIDs) != 1 || projectIDs[0] != projectID {
-		t.Fatalf("runtime reconcile project ids = %v, want [%s]", projectIDs, projectID)
+	if len(projectIDs) != 0 {
+		t.Fatalf("runtime reconcile project ids = %v, want none", projectIDs)
 	}
 }
 

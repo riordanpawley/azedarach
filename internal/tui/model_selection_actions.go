@@ -263,12 +263,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "a":
-		// Delegate attach readiness to daemon authority; projection can be stale.
-		worktreeHint := ""
-		if session != nil {
-			worktreeHint = session.Worktree
-		}
-		return m, m.checkBranchBehindCmd(worktreeHint, task.ID.String())
+		return m, m.attachSessionCmd(task.ID.String())
 	case "p":
 		// TODO: Pause session
 		m.addToast(Toast{
