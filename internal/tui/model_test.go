@@ -18,6 +18,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/testprofile"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
@@ -63,6 +64,24 @@ func (m mockTmuxService) DisplayPopup(ctx context.Context, title, width, height,
 
 type recordingGitSyncService struct {
 	fetchCalls int
+}
+
+type testCreateOverlayAttachmentService struct{}
+
+func (testCreateOverlayAttachmentService) List(context.Context, string) ([]attachment.Attachment, error) {
+	return nil, nil
+}
+
+func (testCreateOverlayAttachmentService) AttachFromClipboard(context.Context, string) (*attachment.Attachment, error) {
+	return nil, nil
+}
+
+func (testCreateOverlayAttachmentService) Attach(context.Context, string, string) (*attachment.Attachment, error) {
+	return nil, nil
+}
+
+func (testCreateOverlayAttachmentService) Delete(context.Context, string, string) error {
+	return nil
 }
 
 func (s *recordingGitSyncService) FetchAndCheck() tea.Cmd {
@@ -437,6 +456,29 @@ func TestUpdate_AttachmentActionDeletedAddsToast(t *testing.T) {
 	}
 	if got := next.runtimeEvents[len(next.runtimeEvents)-1].Event; got != "ui.toast" {
 		t.Fatalf("last runtime event = %q, want %q", got, "ui.toast")
+	}
+}
+
+func TestUpdate_AttachmentActionStagedAddsToast(t *testing.T) {
+	m := newTestModel()
+
+	updated, _ := m.Update(overlay.AttachmentActionMsg{
+		Action: "staged",
+		Attachment: &attachment.Attachment{
+			Filename: "clipboard.png",
+		},
+	})
+
+	next, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("expected Model return type, got %T", updated)
+	}
+	if len(next.toasts) == 0 {
+		t.Fatal("expected toast to be recorded")
+	}
+	last := next.toasts[len(next.toasts)-1]
+	if !strings.Contains(last.Message, "Image staged for new task") {
+		t.Fatalf("unexpected toast message: %q", last.Message)
 	}
 }
 
@@ -2093,6 +2135,23 @@ func TestCreateTaskOverlayPersistsAcrossCloseReopen(t *testing.T) {
 	}
 	if second != first {
 		t.Fatal("expected create overlay state to persist across close/reopen")
+	}
+}
+
+func TestCreateTaskOverlayBindsAttachmentServiceInNormalMode(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+	m.attachmentService = testCreateOverlayAttachmentService{}
+
+	updated, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	m = updated.(Model)
+
+	current, ok := m.overlayStack.Current().(*overlay.CreateTaskOverlay)
+	if !ok || current == nil {
+		t.Fatalf("expected create overlay, got %T", m.overlayStack.Current())
+	}
+	if !current.HasAttachmentService() {
+		t.Fatal("expected create overlay to have attachment service bound")
 	}
 }
 
@@ -4302,7 +4361,7 @@ func TestResolveOperationTaskIDCoversSessionGitAndWorktreeMutations(t *testing.T
 		{
 			name:         "git merge uses worktree resource key",
 			resourceKeys: []string{"worktree:/tmp/wt-az-1"},
-			wantTaskID: "az-1",
+			wantTaskID:   "az-1",
 		},
 		{
 			name:         "git fetch uses worktree resource key",

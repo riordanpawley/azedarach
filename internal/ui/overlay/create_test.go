@@ -668,7 +668,7 @@ func TestCreateTaskOverlayWithAttachmentServiceShowsGuidance(t *testing.T) {
 
 	view := overlay.View()
 	assert.Contains(t, view, "Image Attachments:")
-	assert.Contains(t, view, "No staged attachments yet. Ctrl+P to paste before creating.")
+	assert.Contains(t, view, "No staged attachments yet.")
 }
 
 func TestEditTaskOverlayPasteKeyVariantsAttachFromClipboard(t *testing.T) {

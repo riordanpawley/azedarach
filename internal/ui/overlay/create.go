@@ -533,7 +533,15 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case attachmentAddedMsg:
 		c.attachmentError = ""
 		if strings.TrimSpace(c.id) == "" {
-			return c, c.loadAttachments()
+			return c, tea.Batch(
+				c.loadAttachments(),
+				func() tea.Msg {
+					return AttachmentActionMsg{
+						Action:     "staged",
+						Attachment: msg.attachment,
+					}
+				},
+			)
 		}
 		return c, tea.Batch(
 			c.loadAttachments(),
@@ -628,7 +636,7 @@ func (c *CreateTaskOverlay) View() string {
 				{Key: "T/B/F/E/C", Description: "Set type"},
 				{Key: "0/1/2/3/4", Description: "Set priority"},
 				{Key: "h/l or ←/→", Description: "Cycle impl combinations"},
-				{Key: "Ctrl+P", Description: "Paste image (edit task)"},
+				{Key: "Ctrl+P", Description: "Paste image"},
 				{Key: "j/k + d", Description: "Manage attachments"},
 				{Key: "Enter", Description: "Create task"},
 				{Key: "Ctrl+E", Description: "Edit in $EDITOR"},
@@ -637,6 +645,14 @@ func (c *CreateTaskOverlay) View() string {
 			})
 		},
 	})
+}
+
+func (c *CreateTaskOverlay) SetAttachmentService(svc ImageAttachmentService) {
+	c.attachmentSvc = svc
+}
+
+func (c *CreateTaskOverlay) HasAttachmentService() bool {
+	return c.attachmentSvc != nil
 }
 
 func (c *CreateTaskOverlay) clearToDefaults() {
@@ -907,14 +923,20 @@ func (c *CreateTaskOverlay) renderAttachmentList() string {
 	if len(c.attachments) == 0 {
 		empty := "No attachments yet. Ctrl+P to paste from clipboard."
 		if strings.TrimSpace(c.id) == "" {
-			empty = "No staged attachments yet. Ctrl+P to paste before creating."
+			empty = "No staged attachments yet."
 		}
 		if c.attachmentError != "" {
 			return c.styles.Footer.Render(empty + " Error: " + c.attachmentError)
 		}
-		return c.styles.Footer.Render(empty)
+		hints := []string{
+			c.styles.Footer.Render(empty),
+			c.styles.Footer.Render("Ctrl+P paste clipboard"),
+			c.styles.Footer.Render("j/k navigate  d/x delete"),
+		}
+		return strings.Join(hints, "\n")
 	}
-	lines := make([]string, 0, len(c.attachments)+1)
+	lines := make([]string, 0, len(c.attachments)+4)
+	lines = append(lines, c.styles.Footer.Render(fmt.Sprintf("%d attachment(s)", len(c.attachments))))
 	for idx, file := range c.attachments {
 		indicator := "  "
 		style := c.styles.MenuItem
@@ -922,9 +944,14 @@ func (c *CreateTaskOverlay) renderAttachmentList() string {
 			indicator = "▶ "
 			style = c.styles.MenuItemActive
 		}
-		entry := fmt.Sprintf("%s%-30s %8s", indicator, truncate(file.Filename, 30), formatFileSize(file.Size))
+		typeStr := strings.TrimPrefix(file.MimeType, "image/")
+		if strings.TrimSpace(typeStr) == "" || typeStr == file.MimeType {
+			typeStr = "img"
+		}
+		entry := fmt.Sprintf("%s%-30s %8s  %s", indicator, truncate(file.Filename, 30), formatFileSize(file.Size), typeStr)
 		lines = append(lines, style.Render(entry))
 	}
+	lines = append(lines, c.styles.Footer.Render("Ctrl+P paste clipboard  j/k navigate  d/x delete"))
 	if c.attachmentError != "" {
 		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f38ba8")).Render("Error: "+c.attachmentError))
 	}
