@@ -97,6 +97,13 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		return c.db, nil
 	}
 
+	dbDir := filepath.Dir(c.dbPath)
+	if dbDir != "" && dbDir != "." {
+		if err := os.MkdirAll(dbDir, 0o755); err != nil {
+			return nil, c.wrapError("open-db", "", fmt.Errorf("create db directory: %w", err))
+		}
+	}
+
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_txlock=immediate", filepath.ToSlash(c.dbPath))
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {

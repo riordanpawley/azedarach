@@ -1915,12 +1915,21 @@ func TestReconcilePublishesSessionProjectionEventsForRecovery(t *testing.T) {
 }
 
 func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
-	const issueID = "az-1"
-
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)
 	if err != nil {
 		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	issueID, err := issuesClient.Create(context.Background(), issues.CreateTaskParams{
+		Title: "Recoverable durable session issue",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create local issue: %v", err)
 	}
 	sessionID := naming.CanonicalSessionID(repoDir, issueID)
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
@@ -1951,12 +1960,12 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		session:      daemonhandlers.NewSessionHandler(store),
 		sessionStore: store,
-		worktreeManagersByRoot: map[string]*git.WorktreeManager{
-			repoDir: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/az-1/test"}, repoDir, slog.Default()),
-		},
-		worktreeManagersByProject: map[string]*git.WorktreeManager{
-			projectID: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/az-1/test"}, repoDir, slog.Default()),
-		},
+			worktreeManagersByRoot: map[string]*git.WorktreeManager{
+				repoDir: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/test"}, repoDir, slog.Default()),
+			},
+			worktreeManagersByProject: map[string]*git.WorktreeManager{
+				projectID: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/test"}, repoDir, slog.Default()),
+			},
 		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
 			repoDir: runtimeStateStore,
 		},

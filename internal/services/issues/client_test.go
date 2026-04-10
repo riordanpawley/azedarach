@@ -826,6 +826,21 @@ func TestClient_DBHandleReusedUntilExplicitClose(t *testing.T) {
 	assert.NotSame(t, first, third)
 }
 
+func TestClient_DBHandleCreatesMissingParentDirectory(t *testing.T) {
+	base := t.TempDir()
+	dbPath := filepath.Join(base, "missing", "nested", "azedarach.db")
+	client := NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		require.NoError(t, client.CloseDB())
+	})
+
+	_, err := client.dbHandle()
+	require.NoError(t, err)
+
+	_, statErr := os.Stat(filepath.Dir(dbPath))
+	require.NoError(t, statErr)
+}
+
 func TestClient_ConfiguresSQLitePragmas(t *testing.T) {
 	client := newTestClient(t)
 	db, err := client.dbHandle()
