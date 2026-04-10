@@ -3472,28 +3472,6 @@ func TestHandleSelection_AttachUsesTmuxPresenceWithoutSessionProjection(t *testi
 					OK:              true,
 					Body:            respBody,
 				}, nil
-			case daemonclient.CommandGitBranchBehind:
-				respBody, err := json.Marshal(struct {
-					Worktree      string `json:"worktree"`
-					BaseBranch    string `json:"base_branch"`
-					Remote        string `json:"remote"`
-					CommitsBehind int    `json:"commits_behind"`
-				}{
-					Worktree:      "/tmp/wt-az-1",
-					BaseBranch:    "main",
-					Remote:        "origin",
-					CommitsBehind: 0,
-				})
-				if err != nil {
-					t.Fatalf("marshal branch behind response: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
 			case daemonclient.CommandSessionAttach:
 				respBody, err := json.Marshal(struct {
 					Output string `json:"output"`
@@ -3509,7 +3487,7 @@ func TestHandleSelection_AttachUsesTmuxPresenceWithoutSessionProjection(t *testi
 					Body:            respBody,
 				}, nil
 			default:
-				t.Fatalf("command = %q, want one of %q/%q/%q", req.Command, daemonclient.CommandWorktreeList, daemonclient.CommandGitBranchBehind, daemonclient.CommandSessionAttach)
+				t.Fatalf("command = %q, want one of %q/%q", req.Command, daemonclient.CommandWorktreeList, daemonclient.CommandSessionAttach)
 			}
 			return protocol.ResponseEnvelope{}, nil
 		},
@@ -3521,18 +3499,8 @@ func TestHandleSelection_AttachUsesTmuxPresenceWithoutSessionProjection(t *testi
 		t.Fatal("expected attach command")
 	}
 	msg := cmd()
-	behind, ok := msg.(branchBehindMsg)
-	if !ok {
-		t.Fatalf("attach command returned %T, want branchBehindMsg", msg)
-	}
-	updated, nextCmd := m.Update(behind)
-	if nextCmd == nil {
-		t.Fatal("expected attach follow-up command")
-	}
-	m = updated.(Model)
-	attachMsg := nextCmd()
-	if _, ok := attachMsg.(sessionAttachedMsg); !ok {
-		t.Fatalf("attach follow-up returned %T, want sessionAttachedMsg", attachMsg)
+	if _, ok := msg.(sessionAttachedMsg); !ok {
+		t.Fatalf("attach command returned %T, want sessionAttachedMsg", msg)
 	}
 }
 
@@ -3587,8 +3555,8 @@ func TestDaemonSessionUpdatedEventAllowsImmediateAttachFromWorkspace(t *testing.
 	}
 	msg := cmd()
 	if _, ok := msg.(sessionAttachedMsg); !ok {
-		if _, behind := msg.(branchBehindMsg); !behind {
-			t.Fatalf("attach cmd returned %T, want sessionAttachedMsg or branchBehindMsg", msg)
+		if _, attachErr := msg.(sessionErrorMsg); !attachErr {
+			t.Fatalf("attach cmd returned %T, want sessionAttachedMsg or sessionErrorMsg", msg)
 		}
 	}
 }

@@ -618,9 +618,6 @@ func (d *Daemon) handleSessionAttach(ctx context.Context, req protocol.RequestEn
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session attach transition: %v", err)), nil
 	}
-	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionAttach); err != nil {
-		return d.mutationFreshnessErrorResponse(req, err), nil
-	}
 	output := strings.Join([]string{
 		fmt.Sprintf("Attaching to session: %s", cmd.SessionID),
 		"(Press Ctrl+B then D to detach)",
