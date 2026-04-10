@@ -416,7 +416,29 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		)
 	}
 	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionStart); err != nil {
-		return d.mutationFreshnessErrorResponse(req, err), nil
+		if d.cfg.Logger != nil {
+			if errors.Is(err, context.Canceled) {
+				d.cfg.Logger.Warn("daemon session start aborted after freshness cancellation",
+					"project_id", cmd.ProjectID,
+					"issue_id", cmd.IssueID,
+					"session_id", cmd.SessionID,
+					"error", err,
+				)
+			} else if isRuntimeMutationFreshnessTimeout(err) {
+				d.cfg.Logger.Warn("daemon session start continuing after freshness timeout",
+					"project_id", cmd.ProjectID,
+					"issue_id", cmd.IssueID,
+					"session_id", cmd.SessionID,
+					"error", err,
+				)
+			}
+		}
+		if errors.Is(err, context.Canceled) {
+			return d.mutationFreshnessErrorResponse(req, err), nil
+		}
+		if !isRuntimeMutationFreshnessTimeout(err) {
+			return d.mutationFreshnessErrorResponse(req, err), nil
+		}
 	}
 	startConflictSource := d.sourceForSessionInvariant(sessionInvariantSessionStartConflict)
 	exists, err := d.sessionExistsForInvariant(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, startConflictSource)
