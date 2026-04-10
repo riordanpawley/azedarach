@@ -857,6 +857,108 @@ func TestCodexHookRunCommandJSONMatchesGuardContract(t *testing.T) {
 	}
 }
 
+func TestCodexHookRunCommandAppendsHookLogWithIssueIDFromEnv(t *testing.T) {
+	projectDir := t.TempDir()
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-123")
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != protocol.CommandHookLogAppend {
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			var body protocol.HookLogAppendCommandBody
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal hook append body: %v", err)
+			}
+			if body.Event.IssueID.String() != "az-123" {
+				t.Fatalf("hook append issue_id = %q, want az-123", body.Event.IssueID)
+			}
+			if body.Event.Worktree != projectDir {
+				t.Fatalf("hook append worktree = %q, want %q", body.Event.Worktree, projectDir)
+			}
+			return responseWithJSON(req, body.Event), nil
+		},
+	}
+	deps := &Dependencies{
+		RepoDir:      projectDir,
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+	}
+
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.WriteString(`{"thread_id":"t-env-1"}`); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
+
+	output := captureStdout(t, func() error {
+		return CodexHookRunCommand(deps, CodexHookRunOptions{Event: "stop", JSON: true})
+	})
+	if strings.TrimSpace(output) != "{}" {
+		t.Fatalf("hook run output = %q, want {}", output)
+	}
+}
+
+func TestAppendHookLogEventBestEffortResolvesIssueIDFromWorktree(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	worktreePath := "/tmp/repo-az-7"
+	sawWorktreeList := false
+	sawAppend := false
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				sawWorktreeList = true
+				return responseWithJSON(req, map[string]any{
+					"project_id": "proj-1",
+					"worktrees": []map[string]any{
+						{
+							"path":     worktreePath,
+							"branch":   "riordan/az-7/task",
+							"issue_id": "az-7",
+						},
+					},
+				}), nil
+			case protocol.CommandHookLogAppend:
+				sawAppend = true
+				var body protocol.HookLogAppendCommandBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal hook append body: %v", err)
+				}
+				if body.Event.IssueID.String() != "az-7" {
+					t.Fatalf("hook append issue_id = %q, want az-7", body.Event.IssueID)
+				}
+				return responseWithJSON(req, body.Event), nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		},
+	}
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+	}
+	appendHookLogEventBestEffort(deps, protocol.HookLogEvent{
+		Worktree: worktreePath,
+		Source:   "githooks.hook",
+		Level:    "info",
+		Message:  "worktree reconcile",
+	})
+	if !sawWorktreeList {
+		t.Fatal("expected worktree list lookup before hook append")
+	}
+	if !sawAppend {
+		t.Fatal("expected hook append command")
+	}
+}
+
 func TestHooksInstallCommandMergesAndWritesSettings(t *testing.T) {
 	projectDir := t.TempDir()
 	settingsPath := filepath.Join(projectDir, ".claude", "settings.local.json")

@@ -805,9 +805,45 @@ func appendHookLogEventBestEffort(deps *Dependencies, evt protocol.HookLogEvent)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	evt = enrichHookLogEventIssueID(ctx, deps, evt)
 	if _, err := deps.DaemonClient.AppendHookLogEvent(ctx, evt); err != nil && deps.Logger != nil {
 		deps.Logger.Debug("githooks hook: append hook log event failed", "error", err)
 	}
+}
+
+func enrichHookLogEventIssueID(ctx context.Context, deps *Dependencies, evt protocol.HookLogEvent) protocol.HookLogEvent {
+	if strings.TrimSpace(evt.IssueID.String()) != "" {
+		return evt
+	}
+	if envIssueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID")); envIssueID != "" {
+		if parsedIssueID, err := naming.ParseIssueID(envIssueID); err == nil {
+			evt.IssueID = parsedIssueID
+			return evt
+		}
+	}
+	worktree := strings.TrimSpace(evt.Worktree)
+	if worktree == "" || deps == nil || deps.DaemonClient == nil {
+		return evt
+	}
+	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
+	if err != nil {
+		return evt
+	}
+	normalizedWorktree := filepath.Clean(worktree)
+	for _, daemonWorktree := range worktrees {
+		if filepath.Clean(strings.TrimSpace(daemonWorktree.Path)) != normalizedWorktree {
+			continue
+		}
+		issueID := strings.TrimSpace(daemonWorktree.IssueID)
+		if issueID == "" {
+			return evt
+		}
+		if parsedIssueID, parseErr := naming.ParseIssueID(issueID); parseErr == nil {
+			evt.IssueID = parsedIssueID
+		}
+		return evt
+	}
+	return evt
 }
 
 func shellSingleQuote(value string) string {
@@ -1220,10 +1256,11 @@ func CodexHookRunCommand(deps *Dependencies, opts CodexHookRunOptions) error {
 		return err
 	}
 	appendHookLogEventBestEffort(deps, protocol.HookLogEvent{
-		Hook:    strings.TrimSpace(opts.Event),
-		Source:  "codex.hook",
-		Level:   "info",
-		Message: fmt.Sprintf("codex hook run: %s", strings.TrimSpace(opts.Event)),
+		Hook:     strings.TrimSpace(opts.Event),
+		Worktree: strings.TrimSpace(projectDir),
+		Source:   "codex.hook",
+		Level:    "info",
+		Message:  fmt.Sprintf("codex hook run: %s", strings.TrimSpace(opts.Event)),
 	})
 	if !opts.JSON {
 		notifyOutput, err := renderNotifyOutput(NotifyOptions{Event: notifyEvent})

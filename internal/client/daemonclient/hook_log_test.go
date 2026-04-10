@@ -36,6 +36,7 @@ func TestHookLogCommands(t *testing.T) {
 			case protocol.CommandHookLogList:
 				respBody, err := json.Marshal([]protocol.HookLogEvent{{
 					ProjectID: wantProjectID,
+					IssueID:   "az-123",
 					Hook:      "post-commit",
 					Worktree:  "/tmp/wt",
 					Source:    "githooks.hook",
@@ -62,6 +63,7 @@ func TestHookLogCommands(t *testing.T) {
 
 	client := New(transport).WithProjectID(wantProjectID)
 	appended, err := client.AppendHookLogEvent(context.Background(), protocol.HookLogEvent{
+		IssueID:   "az-123",
 		Hook:      "post-commit",
 		Worktree:  "/tmp/wt",
 		Source:    "githooks.hook",
@@ -75,6 +77,9 @@ func TestHookLogCommands(t *testing.T) {
 	if appended.ProjectID != wantProjectID {
 		t.Fatalf("append project_id = %q, want %q", appended.ProjectID, wantProjectID)
 	}
+	if appended.IssueID != "az-123" {
+		t.Fatalf("append issue_id = %q, want az-123", appended.IssueID)
+	}
 
 	events, err := client.ListHookLogEvents(context.Background(), 100)
 	if err != nil {
@@ -83,5 +88,7 @@ func TestHookLogCommands(t *testing.T) {
 	if len(events) != 1 || events[0].Message != "refreshed daemon git state" {
 		t.Fatalf("list events = %+v", events)
 	}
+	if events[0].IssueID != "az-123" {
+		t.Fatalf("list issue_id = %q, want az-123", events[0].IssueID)
+	}
 }
-
