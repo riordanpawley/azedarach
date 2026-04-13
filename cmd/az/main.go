@@ -302,16 +302,32 @@ func main() {
 
 	case "impl":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az impl delete --confirm <implementation>\n")
+			fmt.Fprintf(os.Stderr, "Usage: az impl <list|delete|migrate> [arguments]\n")
 			os.Exit(1)
 		}
 		implCommand := commandArgs[0]
 		implArgs := commandArgs[1:]
 		if implCommand == "help" || implCommand == "-h" || implCommand == "--help" {
-			fmt.Println("Usage: az impl delete --confirm <implementation>")
+			fmt.Println("Usage:")
+			fmt.Println("  az impl list")
+			fmt.Println("  az impl delete --confirm <implementation>")
+			fmt.Println("  az impl migrate <from-implementation> <to-implementation>")
 			os.Exit(0)
 		}
 		switch implCommand {
+		case "list":
+			opts, err := cli.ParseImplListArgs(implArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az impl list\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.ImplListCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
 		case "delete":
 			opts, err := cli.ParseImplDeleteArgs(implArgs)
 			if err != nil {
@@ -325,9 +341,22 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
+		case "migrate":
+			opts, err := cli.ParseImplMigrateArgs(implArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az impl migrate <from-implementation> <to-implementation>\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.ImplMigrateCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown impl command: %s\n", implCommand)
-			fmt.Fprintf(os.Stderr, "Usage: az impl delete --confirm <implementation>\n")
+			fmt.Fprintf(os.Stderr, "Usage: az impl <list|delete|migrate> [arguments]\n")
 			os.Exit(1)
 		}
 

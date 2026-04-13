@@ -1493,6 +1493,87 @@ func TestParseImplDeleteArgs(t *testing.T) {
 	}
 }
 
+func TestParseImplListArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		errContains string
+	}{
+		{name: "valid"},
+		{
+			name:        "rejects extra args",
+			args:        []string{"extra"},
+			errContains: "usage: az impl list",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseImplListArgs(tt.args)
+			if tt.errContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseImplListArgs() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestParseImplMigrateArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		want        ImplMigrateOptions
+		errContains string
+	}{
+		{
+			name: "valid",
+			args: []string{"ts-opentui", "default"},
+			want: ImplMigrateOptions{
+				FromImplementation: "ts-opentui",
+				ToImplementation:   "default",
+			},
+		},
+		{
+			name:        "missing destination",
+			args:        []string{"ts-opentui"},
+			errContains: "usage: az impl migrate <from-implementation> <to-implementation>",
+		},
+		{
+			name:        "same source and destination",
+			args:        []string{"default", "default"},
+			errContains: "source and destination implementations must differ",
+		},
+		{
+			name:        "extra args",
+			args:        []string{"ts-opentui", "default", "extra"},
+			errContains: "usage: az impl migrate <from-implementation> <to-implementation>",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseImplMigrateArgs(tt.args)
+			if tt.errContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseImplMigrateArgs() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("ParseImplMigrateArgs() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestExportCommandWritesStdoutByDefault(t *testing.T) {
 	var gotReq protocol.RequestEnvelope
 	payload := mustSnapshotPayloadJSON(t, protocol.SnapshotPayload{
@@ -1865,6 +1946,133 @@ func TestImplDeleteCommandRemovesAssignmentsAcrossIssues(t *testing.T) {
 	}
 	if len(got["az-2"]) != 0 {
 		t.Fatalf("az-2 implementations = %+v, want empty", got["az-2"])
+	}
+	if _, ok := got["az-3"]; ok {
+		t.Fatalf("did not expect az-3 update, got map=%+v", got)
+	}
+}
+
+func TestImplListCommandPrintsSortedUniqueImplementations(t *testing.T) {
+	tasks := []domain.Task{
+		{ID: "az-1", Implementations: []string{"go-bubbletea", "ts-opentui"}},
+		{ID: "az-2", Implementations: []string{"default", "go-bubbletea"}},
+		{ID: "az-3", Implementations: []string{" ", ""}},
+	}
+	payload, err := marshalTaskListBody(tasks)
+	if err != nil {
+		t.Fatalf("marshal tasks: %v", err)
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskList {
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            payload,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return ImplListCommand(deps, ImplListOptions{})
+	})
+	if !strings.Contains(output, "Implementations: 3") {
+		t.Fatalf("output missing implementation count: %q", output)
+	}
+	if !strings.Contains(output, "default\ngo-bubbletea\nts-opentui\n") {
+		t.Fatalf("output missing sorted implementation rows: %q", output)
+	}
+}
+
+func TestImplMigrateCommandMigratesAssignmentsAcrossIssues(t *testing.T) {
+	tasks := []domain.Task{
+		{ID: "az-1", Title: "One", Description: "desc", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, Implementations: []string{"default", "ts-opentui"}},
+		{ID: "az-2", Title: "Two", Description: "desc", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeBug, Implementations: []string{"ts-opentui", "go-bubbletea", "default"}},
+		{ID: "az-3", Title: "Three", Description: "desc", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeFeature, Implementations: []string{"go-bubbletea"}},
+	}
+	payload, err := marshalTaskListBody(tasks)
+	if err != nil {
+		t.Fatalf("marshal tasks: %v", err)
+	}
+
+	type updateReq struct {
+		TaskID string `json:"task_id"`
+		daemonclient.TaskUpdateParams
+	}
+	updates := make([]updateReq, 0, 2)
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            payload,
+					}, nil
+				case daemonclient.CommandTaskUpdate:
+					var body updateReq
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal update request: %v", err)
+					}
+					updates = append(updates, body)
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return ImplMigrateCommand(deps, ImplMigrateOptions{FromImplementation: "ts-opentui", ToImplementation: "default"})
+	})
+	if !strings.Contains(output, "Migrated implementation assignment: ts-opentui -> default") {
+		t.Fatalf("output missing migrate summary: %q", output)
+	}
+	if !strings.Contains(output, "Updated issues: 2") {
+		t.Fatalf("output missing update count: %q", output)
+	}
+	if len(updates) != 2 {
+		t.Fatalf("update call count = %d, want 2", len(updates))
+	}
+
+	got := map[string][]string{}
+	for _, update := range updates {
+		got[update.TaskID] = update.Implementations
+	}
+	if !reflect.DeepEqual(got["az-1"], []string{"default"}) {
+		t.Fatalf("az-1 implementations = %+v, want [default]", got["az-1"])
+	}
+	if !reflect.DeepEqual(got["az-2"], []string{"default", "go-bubbletea"}) {
+		t.Fatalf("az-2 implementations = %+v, want [default go-bubbletea]", got["az-2"])
 	}
 	if _, ok := got["az-3"]; ok {
 		t.Fatalf("did not expect az-3 update, got map=%+v", got)
@@ -4531,11 +4739,23 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "impl delete --confirm <implementation>") {
 		t.Fatalf("usage missing impl delete command: %q", output)
 	}
+	if !strings.Contains(output, "impl list") {
+		t.Fatalf("usage missing impl list command: %q", output)
+	}
+	if !strings.Contains(output, "impl migrate <from> <to>") {
+		t.Fatalf("usage missing impl migrate command: %q", output)
+	}
 	if !strings.Contains(output, "az sync --all") {
 		t.Fatalf("usage missing sync example: %q", output)
 	}
+	if !strings.Contains(output, "az impl list") {
+		t.Fatalf("usage missing impl list example: %q", output)
+	}
 	if !strings.Contains(output, "az impl delete --confirm ts-opentui") {
 		t.Fatalf("usage missing impl delete example: %q", output)
+	}
+	if !strings.Contains(output, "az impl migrate ts-opentui default") {
+		t.Fatalf("usage missing impl migrate example: %q", output)
 	}
 	if !strings.Contains(output, "operation <subcommand>") {
 		t.Fatalf("usage missing operation command family: %q", output)

@@ -19,7 +19,9 @@ Commands:
   dev status <issue-id>      Show dev server status for an issue
   dev list                   List running dev servers across issues
   project <subcommand>       Project registry management (list|add|remove)
+  impl list                          List implementations currently assigned to issues
   impl delete --confirm <implementation>  Remove an implementation assignment from all issues
+  impl migrate <from> <to>           Migrate implementation assignments from one value to another
   operation <subcommand>     Inspect/cancel background operations (get|list|logs|cancel)
   log [sources]              Tail/stream daemon, TUI, and CLI log files
   opencode <init|plugin>     Manage OpenCode integration
@@ -109,7 +111,9 @@ Examples:
   az project list
   az project add /path/to/project --name azedarach
   az project remove azedarach
+  az impl list
   az impl delete --confirm ts-opentui
+  az impl migrate ts-opentui default
   az operation list --limit 20
   az operation get --id op-123 --wait
   az operation logs --id op-123

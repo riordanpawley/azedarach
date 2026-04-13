@@ -94,6 +94,13 @@ type ImplDeleteOptions struct {
 	Confirm        bool
 }
 
+type ImplListOptions struct{}
+
+type ImplMigrateOptions struct {
+	FromImplementation string
+	ToImplementation   string
+}
+
 type IssueListOptions struct {
 	Project string
 	JSON    bool
@@ -931,6 +938,39 @@ func ParseImplDeleteArgs(args []string) (ImplDeleteOptions, error) {
 	}
 	if !opts.Confirm {
 		return ImplDeleteOptions{}, fmt.Errorf("missing required flag: --confirm")
+	}
+	return opts, nil
+}
+
+func ParseImplListArgs(args []string) (ImplListOptions, error) {
+	fs := flag.NewFlagSet("impl list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return ImplListOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return ImplListOptions{}, fmt.Errorf("usage: az impl list")
+	}
+	return ImplListOptions{}, nil
+}
+
+func ParseImplMigrateArgs(args []string) (ImplMigrateOptions, error) {
+	opts := ImplMigrateOptions{}
+	fs := flag.NewFlagSet("impl migrate", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return ImplMigrateOptions{}, err
+	}
+	if fs.NArg() != 2 {
+		return ImplMigrateOptions{}, fmt.Errorf("usage: az impl migrate <from-implementation> <to-implementation>")
+	}
+	opts.FromImplementation = strings.TrimSpace(fs.Arg(0))
+	opts.ToImplementation = strings.TrimSpace(fs.Arg(1))
+	if opts.FromImplementation == "" || opts.ToImplementation == "" {
+		return ImplMigrateOptions{}, fmt.Errorf("usage: az impl migrate <from-implementation> <to-implementation>")
+	}
+	if opts.FromImplementation == opts.ToImplementation {
+		return ImplMigrateOptions{}, fmt.Errorf("source and destination implementations must differ")
 	}
 	return opts, nil
 }
@@ -1868,6 +1908,93 @@ func ImplDeleteCommand(deps *Dependencies, opts ImplDeleteOptions) error {
 	return nil
 }
 
+func ImplListCommand(deps *Dependencies, _ ImplListOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list issues for implementation list: %w", err)
+	}
+
+	impls := collectImplementations(snapshot.Tasks)
+	if len(impls) == 0 {
+		fmt.Println("No implementations found in issue assignments.")
+		return nil
+	}
+	fmt.Printf("Implementations: %d\n", len(impls))
+	for _, impl := range impls {
+		fmt.Println(impl)
+	}
+	return nil
+}
+
+func ImplMigrateCommand(deps *Dependencies, opts ImplMigrateOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	from := strings.TrimSpace(opts.FromImplementation)
+	to := strings.TrimSpace(opts.ToImplementation)
+	if from == "" || to == "" {
+		return fmt.Errorf("both source and destination implementations are required")
+	}
+	if from == to {
+		return fmt.Errorf("source and destination implementations must differ")
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list issues for implementation migrate: %w", err)
+	}
+
+	updated := make([]string, 0, 8)
+	for _, task := range snapshot.Tasks {
+		if len(task.Implementations) == 0 {
+			continue
+		}
+		nextImpls := make([]string, 0, len(task.Implementations))
+		changed := false
+		for _, existing := range task.Implementations {
+			if strings.TrimSpace(existing) == from {
+				nextImpls = append(nextImpls, to)
+				changed = true
+				continue
+			}
+			nextImpls = append(nextImpls, existing)
+		}
+		if !changed {
+			continue
+		}
+
+		nextImpls = dedupeTrimmed(nextImpls)
+		update := daemonclient.TaskUpdateParams{
+			Title:           task.Title,
+			Description:     task.Description,
+			Type:            task.Type,
+			Priority:        task.Priority,
+			Implementations: nextImpls,
+		}
+		if err := deps.DaemonClient.UpdateTaskDetails(ctx, task.ID.String(), update); err != nil {
+			return fmt.Errorf("failed to migrate implementation %s -> %s for issue %s: %w", from, to, task.ID, err)
+		}
+		updated = append(updated, task.ID.String())
+	}
+
+	if len(updated) == 0 {
+		fmt.Printf("No issues reference implementation: %s\n", from)
+		return nil
+	}
+	fmt.Printf("Migrated implementation assignment: %s -> %s\n", from, to)
+	fmt.Printf("Updated issues: %d\n", len(updated))
+	return nil
+}
+
 func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
@@ -2178,10 +2305,10 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 	var parentID *naming.IssueID
 	implementations := append([]string{}, opts.Implementations...)
 	if !opts.Deferred && opts.AutoParentFromIssueID != nil && strings.TrimSpace(*opts.AutoParentFromIssueID) != "" {
-			parentIssueID := strings.TrimSpace(*opts.AutoParentFromIssueID)
-			snapshot, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskSnapshot, error) {
-				return deps.DaemonClient.ListTasksSnapshot(callCtx)
-			})
+		parentIssueID := strings.TrimSpace(*opts.AutoParentFromIssueID)
+		snapshot, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskSnapshot, error) {
+			return deps.DaemonClient.ListTasksSnapshot(callCtx)
+		})
 		if err != nil {
 			return fmt.Errorf("failed to resolve active parent issue %s: %w", parentIssueID, err)
 		}
@@ -2189,7 +2316,7 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 		if !ok {
 			return fmt.Errorf("active issue not found for auto-parenting: %s", parentIssueID)
 		}
-			parentID = &parentTask.ID
+		parentID = &parentTask.ID
 		if len(implementations) == 0 {
 			implementations = append([]string{}, parentTask.Implementations...)
 		}
@@ -2755,14 +2882,14 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 			update.Priority = priority
 			needsUpdate = true
 		}
-			if needsUpdate {
-				body, err := json.Marshal(struct {
-					TaskID naming.IssueID `json:"task_id"`
-					daemonclient.TaskUpdateParams
-				}{
-					TaskID:           typedTaskID,
-					TaskUpdateParams: update,
-				})
+		if needsUpdate {
+			body, err := json.Marshal(struct {
+				TaskID naming.IssueID `json:"task_id"`
+				daemonclient.TaskUpdateParams
+			}{
+				TaskID:           typedTaskID,
+				TaskUpdateParams: update,
+			})
 			if err != nil {
 				return fmt.Errorf("marshal bulk-update item %d: %w", i, err)
 			}
@@ -2884,6 +3011,49 @@ func dedupeOrderedIDs(ids []string) []string {
 	return deduped
 }
 
+func dedupeTrimmed(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	deduped := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		deduped = append(deduped, trimmed)
+	}
+	return deduped
+}
+
+func collectImplementations(tasks []domain.Task) []string {
+	if len(tasks) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	impls := make([]string, 0, 4)
+	for _, task := range tasks {
+		for _, impl := range task.Implementations {
+			trimmed := strings.TrimSpace(impl)
+			if trimmed == "" {
+				continue
+			}
+			if _, ok := seen[trimmed]; ok {
+				continue
+			}
+			seen[trimmed] = struct{}{}
+			impls = append(impls, trimmed)
+		}
+	}
+	sort.Strings(impls)
+	return impls
+}
+
 func parseOptionalIssueID(value *string) *naming.IssueID {
 	if value == nil {
 		return nil
@@ -2992,11 +3162,11 @@ func planDependencyMutation(
 		}
 		edges[key] = struct{}{}
 		outcome.Status = "planned"
-			body, err := json.Marshal(daemonclient.TaskDependencyParams{
-				TaskID:      typedIssueID,
-				DependsOnID: typedDepID,
-				Type:        string(depType),
-			})
+		body, err := json.Marshal(daemonclient.TaskDependencyParams{
+			TaskID:      typedIssueID,
+			DependsOnID: typedDepID,
+			Type:        string(depType),
+		})
 		if err != nil {
 			return outcome, nil, fmt.Errorf("marshal add payload: %w", err)
 		}
@@ -3022,12 +3192,12 @@ func planDependencyMutation(
 		}
 		delete(edges, key)
 		outcome.Status = "planned"
-			body, err := json.Marshal(daemonclient.TaskDependencyRemoveParams{
-				TaskID:      typedIssueID,
-				DependsOnID: typedDepID,
-				Type:        string(depType),
-				Confirm:     true,
-			})
+		body, err := json.Marshal(daemonclient.TaskDependencyRemoveParams{
+			TaskID:      typedIssueID,
+			DependsOnID: typedDepID,
+			Type:        string(depType),
+			Confirm:     true,
+		})
 		if err != nil {
 			return outcome, nil, fmt.Errorf("marshal remove payload: %w", err)
 		}
@@ -3072,12 +3242,12 @@ func planDependencyMutation(
 		plannedOps := make([]protocol.ApplyOperationBody, 0, 2)
 		if needsRemove {
 			delete(edges, removeKey)
-				body, err := json.Marshal(daemonclient.TaskDependencyRemoveParams{
-					TaskID:      typedIssueID,
-					DependsOnID: typedFromID,
-					Type:        string(depType),
-					Confirm:     true,
-				})
+			body, err := json.Marshal(daemonclient.TaskDependencyRemoveParams{
+				TaskID:      typedIssueID,
+				DependsOnID: typedFromID,
+				Type:        string(depType),
+				Confirm:     true,
+			})
 			if err != nil {
 				return outcome, nil, fmt.Errorf("marshal retarget remove payload: %w", err)
 			}
@@ -3088,11 +3258,11 @@ func planDependencyMutation(
 		}
 		if needsAdd {
 			edges[addKey] = struct{}{}
-				body, err := json.Marshal(daemonclient.TaskDependencyParams{
-					TaskID:      typedIssueID,
-					DependsOnID: typedToID,
-					Type:        string(depType),
-				})
+			body, err := json.Marshal(daemonclient.TaskDependencyParams{
+				TaskID:      typedIssueID,
+				DependsOnID: typedToID,
+				Type:        string(depType),
+			})
 			if err != nil {
 				return outcome, nil, fmt.Errorf("marshal retarget add payload: %w", err)
 			}
