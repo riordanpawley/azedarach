@@ -2222,6 +2222,9 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 	if task.Description != "" {
 		fmt.Printf("Description: %s\n", task.Description)
 	}
+	if strings.TrimSpace(task.Notes) != "" {
+		fmt.Printf("Notes:\n%s\n", task.Notes)
+	}
 	fmt.Printf("Created: %s\n", task.CreatedAt.UTC().Format(time.RFC3339))
 	fmt.Printf("Updated: %s\n", task.UpdatedAt.UTC().Format(time.RFC3339))
 	return nil

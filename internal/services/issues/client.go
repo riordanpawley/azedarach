@@ -271,6 +271,7 @@ func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
 			id,
 			title,
 			COALESCE(description, ''),
+			COALESCE(notes, ''),
 			status,
 			priority,
 			issue_type,
@@ -321,6 +322,7 @@ func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error
 			id,
 			title,
 			COALESCE(description, ''),
+			COALESCE(notes, ''),
 			status,
 			priority,
 			issue_type,
@@ -351,6 +353,7 @@ func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
 			i.id,
 			i.title,
 			COALESCE(i.description, ''),
+			COALESCE(i.notes, ''),
 			i.status,
 			i.priority,
 			i.issue_type,
@@ -937,6 +940,7 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 			&task.ID,
 			&task.Title,
 			&task.Description,
+			&task.Notes,
 			&statusRaw,
 			&priorityRaw,
 			&typeRaw,
@@ -1005,6 +1009,7 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 			i.id,
 			i.title,
 			COALESCE(i.description, ''),
+			COALESCE(i.notes, ''),
 			i.status,
 			i.priority,
 			i.issue_type,
@@ -1051,6 +1056,7 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 			&task.ID,
 			&task.Title,
 			&task.Description,
+			&task.Notes,
 			&statusRaw,
 			&priorityRaw,
 			&typeRaw,
@@ -1078,17 +1084,17 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 			task.HasWorktree = true
 		}
 		sessionStateRaw = strings.TrimSpace(sessionStateRaw)
-			if sessionStateRaw != "" && sessionStateRaw != "stopped" {
-				startedAt := parseOptionalTimestamp(sessionStartedRaw)
-				if startedAt == nil {
-					startedAt = parseOptionalTimestamp(sessionUpdatedRaw)
-				}
-				task.Session = &domain.Session{
-					IssueID:   task.ID,
-					State:     mapRuntimeSessionState(sessionStateRaw),
-					StartedAt: startedAt,
-					Worktree:  worktreePath,
-				}
+		if sessionStateRaw != "" && sessionStateRaw != "stopped" {
+			startedAt := parseOptionalTimestamp(sessionStartedRaw)
+			if startedAt == nil {
+				startedAt = parseOptionalTimestamp(sessionUpdatedRaw)
+			}
+			task.Session = &domain.Session{
+				IssueID:   task.ID,
+				State:     mapRuntimeSessionState(sessionStateRaw),
+				StartedAt: startedAt,
+				Worktree:  worktreePath,
+			}
 			task.HasTmuxSession = true
 		}
 

@@ -3179,6 +3179,54 @@ func TestIssueGetCommandJSON(t *testing.T) {
 	}
 }
 
+func TestIssueGetCommandTextIncludesNotes(t *testing.T) {
+	now := time.Date(2026, 3, 25, 11, 0, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{
+			ID:          "az-5",
+			Title:       "Lookup issue",
+			Description: "Detailed context",
+			Notes:       "First note line\nSecond note line",
+			Status:      domain.StatusBlocked,
+			Priority:    domain.P0,
+			Type:        domain.TypeBug,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		},
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := marshalTaskListBody(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        4,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-5"})
+	})
+	if !strings.Contains(output, "Notes:\nFirst note line\nSecond note line\n") {
+		t.Fatalf("output missing notes section: %q", output)
+	}
+}
+
 func TestIssueGetCommandNotFound(t *testing.T) {
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
