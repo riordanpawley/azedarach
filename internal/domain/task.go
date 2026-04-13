@@ -29,6 +29,11 @@ type Task struct {
 	Title                 string          `json:"title"`
 	Description           string          `json:"description,omitempty"`
 	Notes                 string          `json:"notes,omitempty"`
+	Design                string          `json:"design,omitempty"`
+	Acceptance            string          `json:"acceptance,omitempty"`
+	Assignee              string          `json:"assignee,omitempty"`
+	Labels                []string        `json:"labels,omitempty"`
+	Estimate              *int            `json:"estimate,omitempty"`
 	Status                Status          `json:"status"`
 	Priority              Priority        `json:"priority"`
 	Type                  TaskType        `json:"issue_type"`

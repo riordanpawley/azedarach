@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -2065,25 +2066,37 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
 	if opts.Deps {
-		fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tDEPS\tTITLE")
+		fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tASSIGNEE\tEST\tIMPL\tDEPS\tTITLE")
 	} else {
-		fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tTITLE")
+		fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tASSIGNEE\tEST\tIMPL\tTITLE")
 	}
 	for _, task := range tasks {
+		assigneeSummary := "-"
+		if strings.TrimSpace(task.Assignee) != "" {
+			assigneeSummary = strings.TrimSpace(task.Assignee)
+		}
+		estimateSummary := "-"
+		if task.Estimate != nil {
+			estimateSummary = strconv.Itoa(*task.Estimate)
+		}
+		implSummary := formatIssueImplementationSummary(task.Implementations)
 		if opts.Deps {
 			fmt.Fprintf(
 				w,
-				"%s\t%s\t%s\t%s\t%s\t%s\n",
+				"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				task.ID,
 				task.Status,
 				task.Priority.String(),
 				task.Type,
+				assigneeSummary,
+				estimateSummary,
+				implSummary,
 				formatDependencySummary(task.Dependencies),
 				task.Title,
 			)
 			continue
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", task.ID, task.Status, task.Priority.String(), task.Type, task.Title)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", task.ID, task.Status, task.Priority.String(), task.Type, assigneeSummary, estimateSummary, implSummary, task.Title)
 	}
 	if err := w.Flush(); err != nil {
 		return err
@@ -2215,6 +2228,24 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 	if task.ParentID != nil {
 		fmt.Printf("Parent: %s\n", *task.ParentID)
 	}
+	if len(task.Implementations) > 0 {
+		fmt.Printf("Implementations: %s\n", strings.Join(task.Implementations, ", "))
+	}
+	if strings.TrimSpace(task.Assignee) != "" {
+		fmt.Printf("Assignee: %s\n", strings.TrimSpace(task.Assignee))
+	}
+	if len(task.Labels) > 0 {
+		fmt.Printf("Labels: %s\n", strings.Join(task.Labels, ", "))
+	}
+	if task.Estimate != nil {
+		fmt.Printf("Estimate: %d\n", *task.Estimate)
+	}
+	if runtimeSummary := renderIssueRuntimeSummary(task); runtimeSummary != "" {
+		fmt.Printf("Runtime: %s\n", runtimeSummary)
+	}
+	if gitSummary := renderIssueGitSummary(task); gitSummary != "" {
+		fmt.Printf("Git: %s\n", gitSummary)
+	}
 	dependencies, dependents := buildDependencyProjection(task, snapshot.Tasks)
 	fmt.Printf("Dependencies: %d\n", len(dependencies))
 	printDependencies(dependencies)
@@ -2224,6 +2255,12 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 	}
 	if strings.TrimSpace(task.Notes) != "" {
 		fmt.Printf("Notes:\n%s\n", task.Notes)
+	}
+	if strings.TrimSpace(task.Design) != "" {
+		fmt.Printf("Design:\n%s\n", task.Design)
+	}
+	if strings.TrimSpace(task.Acceptance) != "" {
+		fmt.Printf("Acceptance:\n%s\n", task.Acceptance)
 	}
 	fmt.Printf("Created: %s\n", task.CreatedAt.UTC().Format(time.RFC3339))
 	fmt.Printf("Updated: %s\n", task.UpdatedAt.UTC().Format(time.RFC3339))
@@ -3306,6 +3343,53 @@ func formatDependencySummary(deps []domain.Dependency) string {
 		return "-"
 	}
 	return strings.Join(parts, ",")
+}
+
+func formatIssueImplementationSummary(impls []string) string {
+	if len(impls) == 0 {
+		return "-"
+	}
+	filtered := make([]string, 0, len(impls))
+	for _, impl := range impls {
+		if trimmed := strings.TrimSpace(impl); trimmed != "" {
+			filtered = append(filtered, trimmed)
+		}
+	}
+	if len(filtered) == 0 {
+		return "-"
+	}
+	return strings.Join(filtered, ",")
+}
+
+func renderIssueRuntimeSummary(task domain.Task) string {
+	parts := make([]string, 0, 3)
+	if task.Session != nil {
+		sessionSummary := fmt.Sprintf("session=%s", task.Session.State)
+		if task.Session.StartedAt != nil {
+			sessionSummary = fmt.Sprintf("%s since %s", sessionSummary, task.Session.StartedAt.UTC().Format(time.RFC3339))
+		}
+		parts = append(parts, sessionSummary)
+	} else if task.HasTmuxSession {
+		parts = append(parts, "session=present")
+	}
+	if task.HasWorktree {
+		parts = append(parts, "worktree=yes")
+	}
+	return strings.Join(parts, ", ")
+}
+
+func renderIssueGitSummary(task domain.Task) string {
+	parts := make([]string, 0, 4)
+	if task.HasUncommittedChanges {
+		parts = append(parts, "dirty")
+	}
+	if task.GitAdditions > 0 || task.GitDeletions > 0 {
+		parts = append(parts, fmt.Sprintf("+%d/-%d", task.GitAdditions, task.GitDeletions))
+	}
+	if task.GitAheadCount != 0 || task.GitBehindCount != 0 {
+		parts = append(parts, fmt.Sprintf("ahead=%d behind=%d", task.GitAheadCount, task.GitBehindCount))
+	}
+	return strings.Join(parts, ", ")
 }
 
 type dependencyDetails struct {

@@ -2790,22 +2790,34 @@ func TestResolveIssueWriteImplementation(t *testing.T) {
 
 func TestIssueListCommandUsesDaemonTaskList(t *testing.T) {
 	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	estimateThree := 3
+	estimateEight := 8
 	tasks := []domain.Task{
 		{
-			ID:        "az-2",
-			Title:     "Older issue",
-			Status:    domain.StatusOpen,
-			Priority:  domain.P2,
-			Type:      domain.TypeTask,
+			ID:       "az-2",
+			Title:    "Older issue",
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+			Assignee: "alex",
+			Estimate: &estimateThree,
+			Implementations: []string{
+				"default",
+			},
 			CreatedAt: now,
 			UpdatedAt: now,
 		},
 		{
-			ID:        "az-1",
-			Title:     "Newest issue",
-			Status:    domain.StatusInProgress,
-			Priority:  domain.P1,
-			Type:      domain.TypeFeature,
+			ID:       "az-1",
+			Title:    "Newest issue",
+			Status:   domain.StatusInProgress,
+			Priority: domain.P1,
+			Type:     domain.TypeFeature,
+			Assignee: "sam",
+			Estimate: &estimateEight,
+			Implementations: []string{
+				"go-bubbletea",
+			},
 			CreatedAt: now,
 			UpdatedAt: now.Add(1 * time.Hour),
 		},
@@ -2844,8 +2856,13 @@ func TestIssueListCommandUsesDaemonTaskList(t *testing.T) {
 	if gotReq.Command != daemonclient.CommandTaskList {
 		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandTaskList)
 	}
-	if !strings.Contains(output, "ID") || !strings.Contains(output, "STATUS") || !strings.Contains(output, "PRIORITY") || !strings.Contains(output, "TITLE") {
+	if !strings.Contains(output, "ID") || !strings.Contains(output, "STATUS") || !strings.Contains(output, "PRIORITY") || !strings.Contains(output, "ASSIGNEE") || !strings.Contains(output, "EST") || !strings.Contains(output, "IMPL") || !strings.Contains(output, "TITLE") {
 		t.Fatalf("output missing header: %q", output)
+	}
+	for _, want := range []string{"go-bubbletea", "default", "sam", "alex", "8", "3"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q: %q", want, output)
+		}
 	}
 	if first, second := strings.Index(output, "az-1"), strings.Index(output, "az-2"); !(first >= 0 && second > first) {
 		t.Fatalf("expected newest issue first in output: %q", output)
@@ -3224,6 +3241,79 @@ func TestIssueGetCommandTextIncludesNotes(t *testing.T) {
 	})
 	if !strings.Contains(output, "Notes:\nFirst note line\nSecond note line\n") {
 		t.Fatalf("output missing notes section: %q", output)
+	}
+}
+
+func TestIssueGetCommandTextIncludesRuntimeGitAndImplementations(t *testing.T) {
+	now := time.Date(2026, 3, 25, 11, 0, 0, 0, time.UTC)
+	started := now.Add(-15 * time.Minute)
+	estimate := 13
+	tasks := []domain.Task{
+		{
+			ID:                    "az-5",
+			Title:                 "Lookup issue",
+			Design:                "Design notes",
+			Acceptance:            "- acceptance one",
+			Assignee:              "sam",
+			Labels:                []string{"cli", "notes"},
+			Estimate:              &estimate,
+			Status:                domain.StatusBlocked,
+			Priority:              domain.P0,
+			Type:                  domain.TypeBug,
+			Implementations:       []string{"default", "go-bubbletea"},
+			Session:               &domain.Session{IssueID: "az-5", State: domain.SessionBusy, StartedAt: &started},
+			HasTmuxSession:        true,
+			HasWorktree:           true,
+			HasUncommittedChanges: true,
+			GitAdditions:          12,
+			GitDeletions:          3,
+			GitAheadCount:         2,
+			GitBehindCount:        1,
+			CreatedAt:             now,
+			UpdatedAt:             now,
+		},
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := marshalTaskListBody(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        4,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-5"})
+	})
+	for _, want := range []string{
+		"Implementations: default, go-bubbletea",
+		"Assignee: sam",
+		"Labels: cli, notes",
+		"Estimate: 13",
+		"Runtime: session=busy since 2026-03-25T10:45:00Z, worktree=yes",
+		"Git: dirty, +12/-3, ahead=2 behind=1",
+		"Design:\nDesign notes\n",
+		"Acceptance:\n- acceptance one\n",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q: %q", want, output)
+		}
 	}
 }
 
