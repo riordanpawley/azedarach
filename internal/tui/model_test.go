@@ -2119,12 +2119,16 @@ func TestCreateTaskOverlayPersistsAcrossCloseReopen(t *testing.T) {
 	if !ok || first == nil {
 		t.Fatalf("expected create overlay, got %T", m.overlayStack.Current())
 	}
+	if first.ParentID() != nil {
+		t.Fatalf("expected no parent outside drill-down, got %v", *first.ParentID())
+	}
 
 	closed, _ := m.Update(overlay.CloseOverlayMsg{})
 	m = closed.(Model)
 	if !m.overlayStack.IsEmpty() {
 		t.Fatal("expected overlay stack to be empty after close")
 	}
+	m.drillDownParentID = "az-parent"
 
 	reopened, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	m = reopened.(Model)
@@ -2135,6 +2139,27 @@ func TestCreateTaskOverlayPersistsAcrossCloseReopen(t *testing.T) {
 	}
 	if second != first {
 		t.Fatal("expected create overlay state to persist across close/reopen")
+	}
+	parent := second.ParentID()
+	if parent == nil || *parent != "az-parent" {
+		t.Fatalf("expected parent to follow drill-down context, got %+v", parent)
+	}
+
+	closed, _ = m.Update(overlay.CloseOverlayMsg{})
+	m = closed.(Model)
+	m.drillDownParentID = ""
+
+	reopened, _ = m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	m = reopened.(Model)
+	third, ok := m.overlayStack.Current().(*overlay.CreateTaskOverlay)
+	if !ok || third == nil {
+		t.Fatalf("expected create overlay after second reopen, got %T", m.overlayStack.Current())
+	}
+	if third != first {
+		t.Fatal("expected create overlay state to persist across second reopen")
+	}
+	if third.ParentID() != nil {
+		t.Fatalf("expected parent to clear outside drill-down, got %v", *third.ParentID())
 	}
 }
 

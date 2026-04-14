@@ -547,10 +547,15 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case keybinds.ActionCreateTask: // Create task
+		var parentID *string
+		if drillDownParentID := strings.TrimSpace(m.drillDownParentID); drillDownParentID != "" {
+			parentID = &drillDownParentID
+		}
 		if m.createTaskOverlay == nil {
-			m.createTaskOverlay = overlay.NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(nil, m.availableTaskImplementations(), m.attachmentService)
+			m.createTaskOverlay = overlay.NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(parentID, m.availableTaskImplementations(), m.attachmentService)
 		} else {
 			m.createTaskOverlay.SetAttachmentService(m.attachmentService)
+			m.createTaskOverlay.SetParentID(parentID)
 		}
 		return m, m.openOverlay(m.createTaskOverlay)
 

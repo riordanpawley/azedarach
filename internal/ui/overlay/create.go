@@ -651,6 +651,30 @@ func (c *CreateTaskOverlay) SetAttachmentService(svc ImageAttachmentService) {
 	c.attachmentSvc = svc
 }
 
+func (c *CreateTaskOverlay) SetParentID(parentID *string) {
+	if parentID == nil {
+		c.parentID = nil
+		return
+	}
+	value := strings.TrimSpace(*parentID)
+	if value == "" {
+		c.parentID = nil
+		return
+	}
+	c.parentID = &value
+}
+
+func (c *CreateTaskOverlay) ParentID() *string {
+	if c.parentID == nil {
+		return nil
+	}
+	value := strings.TrimSpace(*c.parentID)
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
 func (c *CreateTaskOverlay) HasAttachmentService() bool {
 	return c.attachmentSvc != nil
 }
