@@ -5082,6 +5082,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "AZEDARACH_PRIMER_KEY:azedarach-prime-v1") {
 		t.Fatalf("prime output missing evidence key: %q", output)
 	}
+	if strings.Contains(output, "Active issue ID:") {
+		t.Fatalf("prime output should not print active issue id when unset: %q", output)
+	}
 	if !strings.Contains(output, "No active issue is preselected") {
 		t.Fatalf("prime output missing no-issue guardrail: %q", output)
 	}
@@ -5165,6 +5168,9 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 		return PrimeCommand(deps)
 	})
 
+	if !strings.Contains(output, "Active issue ID: `az-1`") {
+		t.Fatalf("prime output missing explicit active issue id: %q", output)
+	}
 	if !strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=az-1)") {
 		t.Fatalf("prime output missing active issue section: %q", output)
 	}
