@@ -30,6 +30,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/logstream"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/attachment"
 )
 
 var newLauncher = func(repoDir, socketPath string) daemonStarter {
@@ -196,6 +197,20 @@ type IssueDependencyBulkApplyOptions struct {
 	InputPath string
 	DryRun    bool
 	JSON      bool
+}
+
+type IssueImageAddOptions struct {
+	Project    string
+	IssueID    string
+	SourcePath string
+	JSON       bool
+}
+
+type IssueImageRemoveOptions struct {
+	Project      string
+	IssueID      string
+	AttachmentID string
+	JSON         bool
 }
 
 type IssueBulkCreateOptions struct {
@@ -1590,6 +1605,86 @@ func ParseIssueDependencyBulkApplyArgs(args []string) (IssueDependencyBulkApplyO
 	return opts, nil
 }
 
+func ParseIssueImageAddArgs(args []string) (IssueImageAddOptions, error) {
+	opts := IssueImageAddOptions{}
+	issueIDFlag := ""
+	pathFlag := ""
+	implFlag := ""
+	fs := flag.NewFlagSet("issue image add", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&pathFlag, "path", "", "source image path (named alternative to positional)")
+	fs.BoolVar(&opts.JSON, "json", false, "output image add result as JSON")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return IssueImageAddOptions{}, err
+	}
+	if fs.NArg() > 2 {
+		return IssueImageAddOptions{}, fmt.Errorf("usage: az issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]")
+	}
+	if strings.TrimSpace(implFlag) != "" {
+		return IssueImageAddOptions{}, fmt.Errorf("--impl is not supported for issue image add; issue implementations are already assigned")
+	}
+	if fs.NArg() >= 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if fs.NArg() >= 2 {
+		opts.SourcePath = fs.Arg(1)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(pathFlag) != "" {
+		opts.SourcePath = strings.TrimSpace(pathFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.SourcePath) == "" {
+		return IssueImageAddOptions{}, fmt.Errorf("usage: az issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]")
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
+func ParseIssueImageRemoveArgs(args []string) (IssueImageRemoveOptions, error) {
+	opts := IssueImageRemoveOptions{}
+	issueIDFlag := ""
+	attachmentIDFlag := ""
+	implFlag := ""
+	fs := flag.NewFlagSet("issue image remove", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&attachmentIDFlag, "attachment-id", "", "attachment id (named alternative to positional)")
+	fs.BoolVar(&opts.JSON, "json", false, "output image remove result as JSON")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return IssueImageRemoveOptions{}, err
+	}
+	if fs.NArg() > 2 {
+		return IssueImageRemoveOptions{}, fmt.Errorf("usage: az issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]")
+	}
+	if strings.TrimSpace(implFlag) != "" {
+		return IssueImageRemoveOptions{}, fmt.Errorf("--impl is not supported for issue image remove; issue implementations are already assigned")
+	}
+	if fs.NArg() >= 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if fs.NArg() >= 2 {
+		opts.AttachmentID = fs.Arg(1)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(attachmentIDFlag) != "" {
+		opts.AttachmentID = strings.TrimSpace(attachmentIDFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.AttachmentID) == "" {
+		return IssueImageRemoveOptions{}, fmt.Errorf("usage: az issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]")
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
 func ParseIssueBulkCreateArgs(args []string) (IssueBulkCreateOptions, error) {
 	opts := IssueBulkCreateOptions{}
 	fs := flag.NewFlagSet("issue bulk-create", flag.ContinueOnError)
@@ -2763,6 +2858,112 @@ func IssueDependencyBulkApplyCommand(deps *Dependencies, opts IssueDependencyBul
 		summary.Applied,
 	)
 	return nil
+}
+
+func IssueImageAddCommand(deps *Dependencies, opts IssueImageAddOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load issue %s for image attach: %w", opts.IssueID, err)
+	}
+	if _, ok := findTaskByID(snapshot.Tasks, opts.IssueID); !ok {
+		return fmt.Errorf("issue not found: %s", opts.IssueID)
+	}
+
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	service := attachment.NewService(filepath.Join(deps.RepoDir, ".azedarach"), logger)
+	attached, err := service.Attach(ctx, opts.IssueID, opts.SourcePath)
+	if err != nil {
+		return fmt.Errorf("failed to attach image %q to issue %s: %w", opts.SourcePath, opts.IssueID, err)
+	}
+
+	notesAppended := false
+	if line := formatIssueAttachmentNoteLine(attached); strings.TrimSpace(line) != "" {
+		if err := deps.DaemonClient.AppendTaskNotes(ctx, opts.IssueID, line); err != nil {
+			return fmt.Errorf("image attached but failed to append notes for issue %s: %w", opts.IssueID, err)
+		}
+		notesAppended = true
+	}
+
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id":       opts.IssueID,
+			"attachment_id":  attached.ID,
+			"filename":       attached.Filename,
+			"path":           attached.Path,
+			"notes_appended": notesAppended,
+			"updated":        true,
+		})
+	}
+	fmt.Printf("Attached image to issue %s: %s (attachment_id=%s)\n", opts.IssueID, attached.Filename, attached.ID)
+	return nil
+}
+
+func IssueImageRemoveCommand(deps *Dependencies, opts IssueImageRemoveOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load issue %s for image removal: %w", opts.IssueID, err)
+	}
+	if _, ok := findTaskByID(snapshot.Tasks, opts.IssueID); !ok {
+		return fmt.Errorf("issue not found: %s", opts.IssueID)
+	}
+
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	service := attachment.NewService(filepath.Join(deps.RepoDir, ".azedarach"), logger)
+	if err := service.Delete(ctx, opts.IssueID, opts.AttachmentID); err != nil {
+		return fmt.Errorf("failed to remove attachment %s from issue %s: %w", opts.AttachmentID, opts.IssueID, err)
+	}
+
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id":      opts.IssueID,
+			"attachment_id": opts.AttachmentID,
+			"removed":       true,
+		})
+	}
+	fmt.Printf("Removed image attachment %s from issue %s\n", opts.AttachmentID, opts.IssueID)
+	return nil
+}
+
+func formatIssueAttachmentNoteLine(att *attachment.Attachment) string {
+	if att == nil {
+		return ""
+	}
+	issueID := strings.TrimSpace(att.IssueID)
+	filename := strings.TrimSpace(att.Filename)
+	if issueID == "" || filename == "" {
+		return ""
+	}
+	relativePath := filepath.ToSlash(filepath.Join(".azedarach", "images", issueID, filename))
+	source := "file"
+	if strings.HasPrefix(strings.ToLower(filename), "clipboard-") {
+		source = "clipboard"
+	}
+	timestamp := att.Created.Local().Format("2006-01-02 15:04:05")
+	return fmt.Sprintf("📎 [%s](%s) (%s, %s)", filename, relativePath, source, timestamp)
 }
 
 func IssueBulkCreateCommand(deps *Dependencies, opts IssueBulkCreateOptions) error {

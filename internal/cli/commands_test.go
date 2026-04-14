@@ -2622,6 +2622,46 @@ func TestParseIssueDependencyArgs(t *testing.T) {
 	}
 }
 
+func TestParseIssueImageArgs(t *testing.T) {
+	add, err := ParseIssueImageAddArgs([]string{"--issue-id", "az-1", "--path", "image.png"})
+	if err != nil {
+		t.Fatalf("ParseIssueImageAddArgs() error = %v", err)
+	}
+	if add.IssueID != "az-1" || add.SourcePath != "image.png" {
+		t.Fatalf("ParseIssueImageAddArgs() = %+v", add)
+	}
+	add, err = ParseIssueImageAddArgs([]string{"az-2", "--path", "snap.png"})
+	if err != nil {
+		t.Fatalf("ParseIssueImageAddArgs() interspersed args error = %v", err)
+	}
+	if add.IssueID != "az-2" || add.SourcePath != "snap.png" {
+		t.Fatalf("ParseIssueImageAddArgs() interspersed args = %+v", add)
+	}
+	_, err = ParseIssueImageAddArgs([]string{"--impl", "go-bubbletea", "az-1", "image.png"})
+	if err == nil || !strings.Contains(err.Error(), "--impl is not supported for issue image add") {
+		t.Fatalf("expected impl forbidden error for image add, got %v", err)
+	}
+
+	remove, err := ParseIssueImageRemoveArgs([]string{"--issue-id", "az-1", "--attachment-id", "abc123"})
+	if err != nil {
+		t.Fatalf("ParseIssueImageRemoveArgs() error = %v", err)
+	}
+	if remove.IssueID != "az-1" || remove.AttachmentID != "abc123" {
+		t.Fatalf("ParseIssueImageRemoveArgs() = %+v", remove)
+	}
+	remove, err = ParseIssueImageRemoveArgs([]string{"az-2", "--attachment-id", "def456"})
+	if err != nil {
+		t.Fatalf("ParseIssueImageRemoveArgs() interspersed args error = %v", err)
+	}
+	if remove.IssueID != "az-2" || remove.AttachmentID != "def456" {
+		t.Fatalf("ParseIssueImageRemoveArgs() interspersed args = %+v", remove)
+	}
+	_, err = ParseIssueImageRemoveArgs([]string{"--impl", "go-bubbletea", "az-1", "abc123"})
+	if err == nil || !strings.Contains(err.Error(), "--impl is not supported for issue image remove") {
+		t.Fatalf("expected impl forbidden error for image remove, got %v", err)
+	}
+}
+
 func TestParseIssueBulkArgs(t *testing.T) {
 	create, err := ParseIssueBulkCreateArgs([]string{"--impl", "go-bubbletea", "--input", "bulk-create.json", "--dry-run"})
 	if err != nil {
@@ -4554,6 +4594,108 @@ func TestIssueDependencyCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 }
 
+func TestIssueImageCommands(t *testing.T) {
+	now := time.Date(2026, 4, 14, 12, 0, 0, 0, time.UTC)
+	tempRepo := t.TempDir()
+	sourceImage := filepath.Join(t.TempDir(), "screenshot.png")
+	if err := os.WriteFile(sourceImage, []byte("fake-png"), 0o644); err != nil {
+		t.Fatalf("write source image: %v", err)
+	}
+
+	var appendNotesReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := marshalTaskListBody([]domain.Task{
+						{
+							ID:        "az-1",
+							Title:     "Task",
+							Status:    domain.StatusOpen,
+							CreatedAt: now,
+							UpdatedAt: now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        1,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskAppendNotes:
+					appendNotesReq = req
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   tempRepo,
+	}
+
+	addOut := captureStdout(t, func() error {
+		return IssueImageAddCommand(deps, IssueImageAddOptions{
+			IssueID:    "az-1",
+			SourcePath: sourceImage,
+		})
+	})
+	if !strings.Contains(addOut, "Attached image to issue az-1:") {
+		t.Fatalf("add output = %q", addOut)
+	}
+	if appendNotesReq.Command != daemonclient.CommandTaskAppendNotes {
+		t.Fatalf("append notes command = %q, want %q", appendNotesReq.Command, daemonclient.CommandTaskAppendNotes)
+	}
+	var appendBody daemonclient.TaskAppendNotesRequest
+	if err := json.Unmarshal(appendNotesReq.Body, &appendBody); err != nil {
+		t.Fatalf("unmarshal append notes body: %v", err)
+	}
+	if appendBody.TaskID != "az-1" || !strings.Contains(appendBody.Line, ".azedarach/images/az-1/") {
+		t.Fatalf("append body = %+v", appendBody)
+	}
+
+	files, err := filepath.Glob(filepath.Join(tempRepo, ".azedarach", "images", "az-1", "*-screenshot.png"))
+	if err != nil {
+		t.Fatalf("glob attachments: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("attachment files = %v, want 1 file", files)
+	}
+	filename := filepath.Base(files[0])
+	parts := strings.SplitN(filename, "-", 2)
+	if len(parts) != 2 {
+		t.Fatalf("attachment filename = %q, want <id>-<name> format", filename)
+	}
+
+	removeOut := captureStdout(t, func() error {
+		return IssueImageRemoveCommand(deps, IssueImageRemoveOptions{
+			IssueID:      "az-1",
+			AttachmentID: parts[0],
+		})
+	})
+	if !strings.Contains(removeOut, "Removed image attachment "+parts[0]+" from issue az-1") {
+		t.Fatalf("remove output = %q", removeOut)
+	}
+	if _, statErr := os.Stat(files[0]); !os.IsNotExist(statErr) {
+		t.Fatalf("attachment file still exists after remove: statErr=%v", statErr)
+	}
+}
+
 func TestIssueBulkCommandsUseApplyCommand(t *testing.T) {
 	tempDir := t.TempDir()
 	bulkCreatePath := filepath.Join(tempDir, "bulk-create.json")
@@ -4849,6 +4991,12 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	}
 	if !strings.Contains(output, "issue delete [--project <project-id>] [--id <id>] [--json] [<id>] --confirm") {
 		t.Fatalf("usage missing issue delete command: %q", output)
+	}
+	if !strings.Contains(output, "issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]") {
+		t.Fatalf("usage missing issue image add command: %q", output)
+	}
+	if !strings.Contains(output, "issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]") {
+		t.Fatalf("usage missing issue image remove command: %q", output)
 	}
 	if !strings.Contains(output, "issue dep add [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--json]") {
 		t.Fatalf("usage missing issue dep add command: %q", output)
