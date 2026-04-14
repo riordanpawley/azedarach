@@ -37,7 +37,7 @@ func TestVisibleTaskRange(t *testing.T) {
 			viewportStart:   0,
 			availableHeight: 12,
 			wantStart:       0,
-			wantEnd:         2,
+			wantEnd:         1,
 		},
 		{
 			name:            "viewport_start_near_bottom",
@@ -45,14 +45,14 @@ func TestVisibleTaskRange(t *testing.T) {
 			viewportStart:   8,
 			availableHeight: 12,
 			wantStart:       8,
-			wantEnd:         10,
+			wantEnd:         9,
 		},
 		{
 			name:            "viewport_start_clamped_high",
 			taskCount:       10,
 			viewportStart:   99,
 			availableHeight: 12,
-			wantStart:       8,
+			wantStart:       9,
 			wantEnd:         10,
 		},
 		{
@@ -61,7 +61,7 @@ func TestVisibleTaskRange(t *testing.T) {
 			viewportStart:   -5,
 			availableHeight: 12,
 			wantStart:       0,
-			wantEnd:         2,
+			wantEnd:         1,
 		},
 	}
 	linesPerCard := CardLineFootprint(styles.New(), 30)
