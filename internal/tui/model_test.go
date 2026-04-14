@@ -2863,6 +2863,85 @@ func TestIssuesLoadedKeepsCursorOnValidTaskAfterRefresh(t *testing.T) {
 	}
 }
 
+func TestIssuesLoadedKeepsSelectedIssueInViewportAfterResort(t *testing.T) {
+	m := newTestModel()
+	m.height = 18
+	m.width = 80
+	m.editor.SetSortField(domain.SortByPriority)
+	m.editor.SetSortOrder(domain.SortAsc)
+
+	initialTasks := []domain.Task{
+		{ID: "az-selected", Title: "Selected", Status: domain.StatusOpen, Priority: domain.P0, Type: domain.TypeTask},
+		{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeTask},
+		{ID: "az-2", Title: "Task 2", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeTask},
+		{ID: "az-3", Title: "Task 3", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeTask},
+		{ID: "az-4", Title: "Task 4", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-5", Title: "Task 5", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-6", Title: "Task 6", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-7", Title: "Task 7", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask},
+		{ID: "az-8", Title: "Task 8", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask},
+		{ID: "az-9", Title: "Task 9", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask},
+		{ID: "az-10", Title: "Task 10", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask},
+		{ID: "az-11", Title: "Task 11", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask},
+	}
+	m.tasks = initialTasks
+	m.nav.SelectTask("az-selected", domain.StatusOpen.Column())
+	m.viewportStarts[domain.StatusOpen.Column()] = 0
+
+	refreshedTasks := make([]domain.Task, len(initialTasks))
+	copy(refreshedTasks, initialTasks)
+	for i := range refreshedTasks {
+		if refreshedTasks[i].ID == "az-selected" {
+			refreshedTasks[i].Priority = domain.P4
+			break
+		}
+	}
+
+	result, _ := m.Update(issuesLoadedMsg{
+		tasks:    refreshedTasks,
+		revision: 15,
+	})
+	newModel := result.(Model)
+
+	columns := newModel.buildColumns()
+	pos := newModel.nav.GetPosition(columns)
+	if !pos.Valid || pos.Column != domain.StatusOpen.Column() {
+		t.Fatalf("expected valid cursor in open column after refresh; got %+v", pos)
+	}
+	if columns[pos.Column].Tasks[pos.Task].ID != "az-selected" {
+		t.Fatalf("cursor selected %q, want az-selected", columns[pos.Column].Tasks[pos.Task].ID)
+	}
+
+	availableHeight := board.ColumnBodyHeight(board.BoardContentHeight(newModel.height))
+	if availableHeight < 1 {
+		availableHeight = 1
+	}
+	columnCount := newModel.boardVisibleColumnCount(len(columns))
+	if columnCount < 1 {
+		columnCount = board.DefaultColumnCount
+	}
+	columnWidth := newModel.width / columnCount
+	linesPerCard := board.CardLineFootprint(newModel.styles, board.CardContentWidth(columnWidth))
+	if linesPerCard < 1 {
+		linesPerCard = 1
+	}
+	windowStart, windowEnd := board.VisibleTaskWindow(
+		len(columns[pos.Column].Tasks),
+		newModel.viewportStarts[pos.Column],
+		availableHeight,
+		linesPerCard,
+	)
+	if pos.Task < windowStart || pos.Task >= windowEnd {
+		t.Fatalf(
+			"selected task index %d not visible in window [%d,%d) with viewport start %d",
+			pos.Task,
+			windowStart,
+			windowEnd,
+			newModel.viewportStarts[pos.Column],
+		)
+	}
+}
+
 func TestIssuesLoadedPreservesSnapshotSessionTaskState(t *testing.T) {
 	startedAt := time.Date(2026, time.March, 25, 10, 30, 0, 0, time.UTC)
 	devServer := &domain.DevServer{Port: 4242, Command: "npm run dev", Running: true}

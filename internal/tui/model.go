@@ -304,6 +304,7 @@ func (m *Model) reconcileCursorAfterIssuesRefresh() {
 		return
 	}
 	m.nav.SelectTask(col.Tasks[pos.Task].ID.String(), pos.Column)
+	m.ensureCursorVisible(columns)
 }
 
 func (m *Model) applyPendingCreatedTaskSelection() {
