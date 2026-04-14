@@ -1,6 +1,9 @@
 Azedarach Session Primer
 
 Primer evidence key: `{{ .PrimeEvidenceKey }}`
+{{ if .ActiveIssueID }}
+Active issue ID: `{{ .ActiveIssueID }}`
+{{ end }}
 
 - First 3 commands for this session:
   - {{ if .ActiveIssueID }}`az issue get {{ .ActiveIssueID }}`{{ else }}`az issue get <issue-id>`{{ end }}
