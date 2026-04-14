@@ -14,9 +14,7 @@ import (
 
 // CardContentHeight is the single source of truth for rendered card content height.
 const CardContentHeight = 4
-const narrowHeaderExpansionThreshold = 21
 const narrowCardExtraLines = 1
-const narrowHeaderExtraLines = 1
 
 const tmuxSessionToken = "T"
 const descendantTmuxSessionToken = "Td"
@@ -87,8 +85,6 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	if maxLineLen < 1 {
 		maxLineLen = 1
 	}
-	cardHeight, headerLineCount := cardLayoutHeights(maxLineLen)
-
 	// Cursor indicator (▶ symbol when cursor is on this card)
 	cursor := ""
 	if isCursor {
@@ -117,22 +113,33 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	visibleRuntimeSignals := runtimeSignalsForHeader(task.Session, runtimeSignals)
 	runtimeRow := renderRuntimeSignals(visibleRuntimeSignals, s)
 	runtimeCompact := renderRuntimeSignalsCompact(visibleRuntimeSignals, s)
-
-	headerLines := make([]string, max(1, headerLineCount))
-	headerLines[0] = strings.Join(headerParts, " ")
-	preferCompact := maxLineLen < 44
-	for _, token := range []struct {
+	headerTitle := strings.Join(headerParts, " ")
+	headerTokens := []struct {
 		full    string
 		compact string
 	}{
 		{full: sessionRow, compact: sessionCompact},
 		{full: runtimeRow, compact: runtimeCompact},
 		{full: renderChildProgressValue(childProgress, s), compact: renderChildProgressValue(childProgress, s)},
-	} {
-		appendHeaderToken(headerLines, maxLineLen, token.full, token.compact, preferCompact)
+	}
+	preferCompact := maxLineLen < 44
+	headerLines := []string{headerTitle}
+	droppedTokens := false
+	for _, token := range headerTokens {
+		if !appendHeaderToken(headerLines, maxLineLen, token.full, token.compact, preferCompact) {
+			droppedTokens = true
+		}
+	}
+	cardHeight := CardContentHeight
+	if droppedTokens {
+		headerLines = []string{headerTitle, ""}
+		for _, token := range headerTokens {
+			appendHeaderToken(headerLines, maxLineLen, token.full, token.compact, preferCompact)
+		}
+		cardHeight += narrowCardExtraLines
 	}
 
-	titleLines := renderTitleBodyLines(task.Title, maxLineLen, cardHeight-headerLineCount)
+	titleLines := renderTitleBodyLines(task.Title, maxLineLen, cardHeight-len(headerLines))
 
 	// Compose fixed content rows to guarantee stable card height.
 	lines := make([]string, 0, cardHeight)
@@ -147,19 +154,9 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	return cardStyle.Height(cardHeight).Render(content)
 }
 
-func cardLayoutHeights(maxLineLen int) (cardHeight int, headerLines int) {
-	cardHeight = CardContentHeight
-	headerLines = 1
-	if maxLineLen < narrowHeaderExpansionThreshold {
-		cardHeight += narrowCardExtraLines
-		headerLines += narrowHeaderExtraLines
-	}
-	return cardHeight, headerLines
-}
-
-func appendHeaderToken(headerLines []string, maxLineLen int, full string, compact string, preferCompact bool) {
+func appendHeaderToken(headerLines []string, maxLineLen int, full string, compact string, preferCompact bool) bool {
 	if full == "" && compact == "" {
-		return
+		return true
 	}
 
 	try := func(lineIdx int, token string) bool {
@@ -192,20 +189,21 @@ func appendHeaderToken(headerLines []string, maxLineLen int, full string, compac
 
 	if preferCompact {
 		if appendToAnyLine(compact) {
-			return
+			return true
 		}
 		if appendToAnyLine(full) {
-			return
+			return true
 		}
-		return
+		return false
 	}
 
 	if appendToAnyLine(full) {
-		return
+		return true
 	}
 	if appendToAnyLine(compact) {
-		return
+		return true
 	}
+	return false
 }
 
 func runtimeSignalsForHeader(session *domain.Session, signals *RuntimeSignals) *RuntimeSignals {

@@ -1,24 +1,24 @@
  Open (3)            In Progress (2)     Blocked (1)         Done (2)           
 ╭──────────────────╮╭──────────────────╮╭──────────────────╮╭──────────────────╮
 │  P2  ▶az-1  T    ││  P1  az-3  B     ││  P0  az-6  T     ││  P3  az-7  T     │
-│                  ││                  ││                  ││                  │
 │ Implement user   ││ API endpoint r   ││ Deploy to prod   ││ Setup CI/CD pi   │
 │  authenticatio   ││ efactor          ││ uction           ││ peline           │
 │ n                ││                  ││                  ││                  │
 ╰──────────────────╯╰──────────────────╯╰──────────────────╯╰──────────────────╯
 ╭──────────────────╮╭──────────────────╮                    ╭──────────────────╮
 │  P1  az-2  F     ││  P2  az-4  E     │                    │  P4  az-8  T     │
-│                  ││                  │                    │                  │
 │ Fix login redi   ││ Database migra   │                    │ Configure moni   │
 │ rect bug         ││ tion epic        │                    │ toring           │
 │                  ││                  │                    │                  │
 ╰──────────────────╯╰──────────────────╯                    ╰──────────────────╯
 ╭──────────────────╮                                                            
 │  P3  az-5  T     │                                                            
-│                  │                                                            
 │ Add password r   │                                                            
 │ eset flow        │                                                            
 │                  │                                                            
 ╰──────────────────╯                                                            
+                                                                                
+                                                                                
+                                                                                
                                                                                 
                                                                                 
