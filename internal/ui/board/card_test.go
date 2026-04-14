@@ -663,7 +663,7 @@ func TestRenderCard_NarrowWidthAddsOneCardRowAndOneHeaderRow(t *testing.T) {
 	}
 	progress := &ChildProgress{Total: 9, Done: 2}
 
-	wide := stripANSI(renderCard(task, signals, false, false, 30, progress, nil, false, s))
+	wide := stripANSI(renderCard(task, signals, false, false, 80, progress, nil, false, s))
 	narrow := stripANSI(renderCard(task, signals, false, false, 22, progress, nil, false, s))
 
 	wideLines := strings.Split(wide, "\n")
@@ -682,6 +682,42 @@ func TestRenderCard_NarrowWidthAddsOneCardRowAndOneHeaderRow(t *testing.T) {
 	}
 	if strings.TrimSpace(wideHeader) == strings.TrimSpace(narrowHeader2) {
 		t.Fatalf("expected additional narrow header row content, got wideHeader=%q narrowHeader2=%q", wideHeader, narrowHeader2)
+	}
+}
+
+func TestRenderCard_HeaderOverflowAddsExtraRows(t *testing.T) {
+	s := styles.New()
+	startedAt := time.Now().Add(-70 * time.Minute)
+	task := domain.Task{
+		ID:       "CHE-4011",
+		Title:    "header-overflow-check",
+		Status:   domain.StatusInProgress,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+		Session: &domain.Session{
+			IssueID:   "CHE-4011",
+			State:     domain.SessionWaiting,
+			StartedAt: &startedAt,
+		},
+	}
+	signals := &RuntimeSignals{
+		HasWorktree:           true,
+		HasUncommittedChanges: true,
+		GitAdditions:          12,
+		GitDeletions:          4,
+	}
+	progress := &ChildProgress{Total: 8, Done: 1}
+
+	narrow := stripANSI(renderCard(task, signals, false, false, 25, progress, nil, false, s))
+	wide := stripANSI(renderCard(task, signals, false, false, 80, progress, nil, false, s))
+
+	narrowLines := strings.Split(narrow, "\n")
+	wideLines := strings.Split(wide, "\n")
+	if len(narrowLines) != len(wideLines)+1 {
+		t.Fatalf("narrow card height = %d, want wide+1 (%d)", len(narrowLines), len(wideLines)+1)
+	}
+	if strings.TrimSpace(narrowLines[1]) == "" {
+		t.Fatalf("expected second header row when header overflows, got empty row in %q", narrow)
 	}
 }
 
