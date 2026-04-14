@@ -14,6 +14,9 @@ import (
 
 // CardContentHeight is the single source of truth for rendered card content height.
 const CardContentHeight = 4
+const narrowHeaderExpansionThreshold = 21
+const narrowCardExtraLines = 1
+const narrowHeaderExtraLines = 1
 
 const tmuxSessionToken = "T"
 const descendantTmuxSessionToken = "Td"
@@ -84,6 +87,7 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	if maxLineLen < 1 {
 		maxLineLen = 1
 	}
+	cardHeight, headerLineCount := cardLayoutHeights(maxLineLen)
 
 	// Cursor indicator (▶ symbol when cursor is on this card)
 	cursor := ""
@@ -114,7 +118,8 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	runtimeRow := renderRuntimeSignals(visibleRuntimeSignals, s)
 	runtimeCompact := renderRuntimeSignalsCompact(visibleRuntimeSignals, s)
 
-	headerLine := strings.Join(headerParts, " ")
+	headerLines := make([]string, max(1, headerLineCount))
+	headerLines[0] = strings.Join(headerParts, " ")
 	preferCompact := maxLineLen < 44
 	for _, token := range []struct {
 		full    string
@@ -124,55 +129,83 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 		{full: runtimeRow, compact: runtimeCompact},
 		{full: renderChildProgressValue(childProgress, s), compact: renderChildProgressValue(childProgress, s)},
 	} {
-		headerLine = appendHeaderToken(headerLine, maxLineLen, token.full, token.compact, preferCompact)
+		appendHeaderToken(headerLines, maxLineLen, token.full, token.compact, preferCompact)
 	}
 
-	titleLines := renderTitleBodyLines(task.Title, maxLineLen, CardContentHeight-1)
+	titleLines := renderTitleBodyLines(task.Title, maxLineLen, cardHeight-headerLineCount)
 
 	// Compose fixed content rows to guarantee stable card height.
-	lines := make([]string, 0, CardContentHeight)
-	lines = append(lines, ansi.Truncate(headerLine, maxLineLen, "…"))
+	lines := make([]string, 0, cardHeight)
+	for _, headerLine := range headerLines {
+		lines = append(lines, ansi.Truncate(headerLine, maxLineLen, "…"))
+	}
 	for _, line := range titleLines {
 		lines = append(lines, ansi.Truncate(line, maxLineLen, "…"))
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 
-	return cardStyle.Render(content)
+	return cardStyle.Height(cardHeight).Render(content)
 }
 
-func appendHeaderToken(headerLine string, maxLineLen int, full string, compact string, preferCompact bool) string {
+func cardLayoutHeights(maxLineLen int) (cardHeight int, headerLines int) {
+	cardHeight = CardContentHeight
+	headerLines = 1
+	if maxLineLen < narrowHeaderExpansionThreshold {
+		cardHeight += narrowCardExtraLines
+		headerLines += narrowHeaderExtraLines
+	}
+	return cardHeight, headerLines
+}
+
+func appendHeaderToken(headerLines []string, maxLineLen int, full string, compact string, preferCompact bool) {
 	if full == "" && compact == "" {
-		return headerLine
+		return
 	}
 
-	try := func(token string) (string, bool) {
+	try := func(lineIdx int, token string) bool {
 		if token == "" {
-			return "", false
+			return false
 		}
-		candidate := headerLine + " " + token
+		if lineIdx < 0 || lineIdx >= len(headerLines) {
+			return false
+		}
+		candidate := strings.TrimSpace(headerLines[lineIdx])
+		if candidate != "" {
+			candidate += " "
+		}
+		candidate += token
 		if ansi.StringWidth(candidate) <= maxLineLen {
-			return candidate, true
+			headerLines[lineIdx] = candidate
+			return true
 		}
-		return "", false
+		return false
+	}
+
+	appendToAnyLine := func(token string) bool {
+		for i := range headerLines {
+			if try(i, token) {
+				return true
+			}
+		}
+		return false
 	}
 
 	if preferCompact {
-		if candidate, ok := try(compact); ok {
-			return candidate
+		if appendToAnyLine(compact) {
+			return
 		}
-		if candidate, ok := try(full); ok {
-			return candidate
+		if appendToAnyLine(full) {
+			return
 		}
-		return headerLine
+		return
 	}
 
-	if candidate, ok := try(full); ok {
-		return candidate
+	if appendToAnyLine(full) {
+		return
 	}
-	if candidate, ok := try(compact); ok {
-		return candidate
+	if appendToAnyLine(compact) {
+		return
 	}
-	return headerLine
 }
 
 func runtimeSignalsForHeader(session *domain.Session, signals *RuntimeSignals) *RuntimeSignals {

@@ -640,6 +640,51 @@ func TestRenderCard_MetadataCompactsOnNarrowWidth(t *testing.T) {
 	}
 }
 
+func TestRenderCard_NarrowWidthAddsOneCardRowAndOneHeaderRow(t *testing.T) {
+	s := styles.New()
+	startedAt := time.Now().Add(-80 * time.Minute)
+	task := domain.Task{
+		ID:       "CHE-4010",
+		Title:    "narrow-height-check",
+		Status:   domain.StatusInProgress,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+		Session: &domain.Session{
+			IssueID:   "CHE-4010",
+			State:     domain.SessionWaiting,
+			StartedAt: &startedAt,
+		},
+	}
+	signals := &RuntimeSignals{
+		HasWorktree:           true,
+		HasUncommittedChanges: true,
+		GitAdditions:          9,
+		GitDeletions:          3,
+	}
+	progress := &ChildProgress{Total: 9, Done: 2}
+
+	wide := stripANSI(renderCard(task, signals, false, false, 30, progress, nil, false, s))
+	narrow := stripANSI(renderCard(task, signals, false, false, 22, progress, nil, false, s))
+
+	wideLines := strings.Split(wide, "\n")
+	narrowLines := strings.Split(narrow, "\n")
+	if len(narrowLines) != len(wideLines)+1 {
+		t.Fatalf("narrow card height = %d, want wide+1 (%d)", len(narrowLines), len(wideLines)+1)
+	}
+
+	wideHeader, wideTitle := wideLines[0], wideLines[1]
+	narrowHeader1, narrowHeader2, narrowTitle := narrowLines[0], narrowLines[1], narrowLines[2]
+	if strings.TrimSpace(narrowHeader1) == "" || strings.TrimSpace(narrowHeader2) == "" {
+		t.Fatalf("expected two non-empty header rows for narrow card, got: %q / %q", narrowHeader1, narrowHeader2)
+	}
+	if strings.TrimSpace(narrowTitle) == "" || strings.TrimSpace(wideTitle) == "" {
+		t.Fatalf("expected non-empty title rows, got narrow=%q wide=%q", narrowTitle, wideTitle)
+	}
+	if strings.TrimSpace(wideHeader) == strings.TrimSpace(narrowHeader2) {
+		t.Fatalf("expected additional narrow header row content, got wideHeader=%q narrowHeader2=%q", wideHeader, narrowHeader2)
+	}
+}
+
 func TestRenderRuntimeSignals(t *testing.T) {
 	t.Run("nil runtime signals", func(t *testing.T) {
 		if got := renderRuntimeSignals(nil, styles.New()); got != "" {
