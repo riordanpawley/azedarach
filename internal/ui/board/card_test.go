@@ -597,7 +597,7 @@ func TestRenderCard_MetadataOnFirstLine(t *testing.T) {
 	}
 }
 
-func TestRenderCard_MetadataCompactsOnNarrowWidth(t *testing.T) {
+func TestRenderCard_NarrowWidthUsesSecondHeaderRowBeforeCompaction(t *testing.T) {
 	s := styles.New()
 	startedAt := time.Now().Add(-90 * time.Minute)
 	task := domain.Task{
@@ -622,21 +622,28 @@ func TestRenderCard_MetadataCompactsOnNarrowWidth(t *testing.T) {
 
 	result := stripANSI(renderCard(task, signals, false, false, 40, &ChildProgress{Total: 7, Done: 1}, nil, false, s))
 	lines := strings.Split(result, "\n")
-	first := ""
-	for _, line := range lines {
+	firstIdx := -1
+	for i, line := range lines {
 		if strings.Contains(line, "CHE-3010") {
-			first = line
+			firstIdx = i
 			break
 		}
 	}
+	if firstIdx < 0 || firstIdx+1 >= len(lines) {
+		t.Fatalf("expected at least two header rows and a title row, got: %q", result)
+	}
+	first := lines[firstIdx]
 	if first == "" {
 		t.Fatalf("expected metadata line containing issue id, got: %s", result)
 	}
 	if !strings.Contains(first, "P2") || !strings.Contains(first, "CHE-3010") || !strings.Contains(first, " T ") {
 		t.Fatalf("first line must preserve core tokens, got: %s", first)
 	}
-	if strings.Contains(first, " W ") || strings.Contains(first, "+12/-3") {
-		t.Fatalf("first line should compact verbose metadata at narrow width, got: %s", first)
+	header := lines[firstIdx] + " " + lines[firstIdx+1]
+	for _, token := range []string{" W ", "✎", "+12/-3", "[1/7]"} {
+		if !strings.Contains(header, token) {
+			t.Fatalf("expected token %q to survive across narrow two-row header, got: %q", token, header)
+		}
 	}
 }
 
@@ -682,6 +689,48 @@ func TestRenderCard_NarrowWidthAddsOneCardRowAndOneHeaderRow(t *testing.T) {
 	}
 	if strings.TrimSpace(wideHeader) == strings.TrimSpace(narrowHeader2) {
 		t.Fatalf("expected additional narrow header row content, got wideHeader=%q narrowHeader2=%q", wideHeader, narrowHeader2)
+	}
+}
+
+func TestRenderCard_NarrowWidthKeepsVerboseHeaderTokensAcrossTwoRows(t *testing.T) {
+	s := styles.New()
+	startedAt := time.Now().Add(-75 * time.Minute)
+	task := domain.Task{
+		ID:       "CHE-4012",
+		Title:    "narrow-verbose-header-check",
+		Status:   domain.StatusInProgress,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+		Session: &domain.Session{
+			IssueID:   "CHE-4012",
+			State:     domain.SessionWaiting,
+			StartedAt: &startedAt,
+		},
+	}
+	signals := &RuntimeSignals{
+		HasWorktree:           true,
+		HasUncommittedChanges: true,
+		GitAdditions:          12,
+		GitDeletions:          3,
+	}
+
+	narrow := stripANSI(renderCard(task, signals, false, false, 25, &ChildProgress{Total: 7, Done: 1}, nil, false, s))
+	lines := strings.Split(narrow, "\n")
+	firstIdx := -1
+	for i, line := range lines {
+		if strings.Contains(line, "CHE-4012") {
+			firstIdx = i
+			break
+		}
+	}
+	if firstIdx < 0 || firstIdx+1 >= len(lines) {
+		t.Fatalf("expected at least two header rows and title row, got: %q", narrow)
+	}
+	header := lines[firstIdx] + " " + lines[firstIdx+1]
+	for _, token := range []string{" W ", "✎", "+12/-3", "[1/7]"} {
+		if !strings.Contains(header, token) {
+			t.Fatalf("expected verbose token %q to be preserved in narrow two-row header, got: %q", token, header)
+		}
 	}
 }
 

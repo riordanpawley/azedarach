@@ -15,6 +15,7 @@ import (
 // CardContentHeight is the single source of truth for rendered card content height.
 const CardContentHeight = 4
 const narrowCardExtraLines = 1
+const expandedHeaderWorstCase = "P2 CHE-1234 T Φ9 ◐ W 12h 34m ✓ M:queued(100%) ↑99 ↓99 ✎ +999/-999 [99/99]"
 
 const tmuxSessionToken = "T"
 const descendantTmuxSessionToken = "Td"
@@ -124,19 +125,16 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	}
 	preferCompact := maxLineLen < 44
 	headerLines := []string{headerTitle}
-	droppedTokens := false
-	for _, token := range headerTokens {
-		if !appendHeaderToken(headerLines, maxLineLen, token.full, token.compact, preferCompact) {
-			droppedTokens = true
-		}
-	}
 	cardHeight := CardContentHeight
-	if droppedTokens {
+	if shouldExpandCardHeader(maxLineLen) {
 		headerLines = []string{headerTitle, ""}
-		for _, token := range headerTokens {
-			appendHeaderToken(headerLines, maxLineLen, token.full, token.compact, preferCompact)
-		}
 		cardHeight += narrowCardExtraLines
+	}
+	for _, token := range headerTokens {
+		if appendHeaderToken(headerLines, maxLineLen, token.full, token.full, false) {
+			continue
+		}
+		appendHeaderToken(headerLines, maxLineLen, token.full, token.compact, preferCompact)
 	}
 
 	titleLines := renderTitleBodyLines(task.Title, maxLineLen, cardHeight-len(headerLines))
@@ -152,6 +150,10 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 
 	return cardStyle.Height(cardHeight).Render(content)
+}
+
+func shouldExpandCardHeader(maxLineLen int) bool {
+	return ansi.StringWidth(expandedHeaderWorstCase) > maxLineLen
 }
 
 func appendHeaderToken(headerLines []string, maxLineLen int, full string, compact string, preferCompact bool) bool {
