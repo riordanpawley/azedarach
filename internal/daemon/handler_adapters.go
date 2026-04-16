@@ -433,6 +433,20 @@ func (a *worktreeServiceAdapter) List(ctx context.Context, projectID string) ([]
 		}
 		return nil, cacheErr
 	}
+	if shouldSynchronouslyRefreshWorktreeProjection(cached, time.Now().UTC(), a.pollInterval) {
+		if a.logger != nil {
+			a.logger.Debug("refreshing stale worktree projection before list response", "project_id", projectID, "cached_worktrees", len(cached))
+		}
+		a.pollAndPersistWorktrees(ctx, projectID)
+		refreshed, refreshErr := runtimeStore.ListWorktreeStates(ctx, projectID)
+		if refreshErr != nil {
+			if a.logger != nil {
+				a.logger.Warn("failed to read refreshed worktree projection", "project_id", projectID, "error", refreshErr)
+			}
+		} else {
+			cached = refreshed
+		}
+	}
 	worktrees := mapProjectionWorktrees(cached)
 	if len(worktrees) > 0 {
 		a.observeWorktrees(ctx, projectID, worktrees)
@@ -663,6 +677,25 @@ func mapProjectionWorktrees(projections []daemonstate.WorktreeState) []git.Workt
 		})
 	}
 	return out
+}
+
+func shouldSynchronouslyRefreshWorktreeProjection(cached []daemonstate.WorktreeState, now time.Time, pollInterval time.Duration) bool {
+	if len(cached) == 0 {
+		return false
+	}
+	if pollInterval <= 0 {
+		pollInterval = 5 * time.Second
+	}
+	latest := cached[0].UpdatedAt
+	for _, row := range cached[1:] {
+		if row.UpdatedAt.After(latest) {
+			latest = row.UpdatedAt
+		}
+	}
+	if latest.IsZero() {
+		return true
+	}
+	return now.Sub(latest) > pollInterval
 }
 
 func publishWorktreeProjectionDelta(ctx context.Context, publish func(ctx context.Context, projectID, issueID, path string), projectID string, previous []daemonstate.WorktreeState, next []git.Worktree) {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
@@ -211,6 +212,19 @@ func (r *countingWorktreeListRunner) Run(_ context.Context, args ...string) (str
 	return "", nil
 }
 
+type staticWorktreeListRunner struct {
+	listCalls int
+	output    string
+}
+
+func (r *staticWorktreeListRunner) Run(_ context.Context, args ...string) (string, error) {
+	if len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" {
+		r.listCalls++
+		return r.output, nil
+	}
+	return "", nil
+}
+
 func TestWorktreeServiceAdapterListUsesProjectionOnlyWhenRuntimeStoreAvailable(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), logger)
@@ -233,5 +247,47 @@ func TestWorktreeServiceAdapterListUsesProjectionOnlyWhenRuntimeStoreAvailable(t
 	}
 	if runner.listCalls != 0 {
 		t.Fatalf("live worktree list calls = %d, want 0", runner.listCalls)
+	}
+}
+
+func TestWorktreeServiceAdapterListRefreshesStaleProjectionBeforeReturning(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), logger)
+	t.Cleanup(func() { _ = store.Close() })
+
+	projectID := "proj"
+	if err := store.UpsertWorktreeState(context.Background(), daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   "bux",
+		Path:      "/tmp/repo-bux",
+		Branch:    "riordan/bux/task",
+		UpdatedAt: time.Now().UTC().Add(-2 * time.Minute),
+	}); err != nil {
+		t.Fatalf("seed stale projection: %v", err)
+	}
+
+	runner := &staticWorktreeListRunner{
+		output: `worktree /tmp/repo
+HEAD abc123
+branch refs/heads/main
+`,
+	}
+	manager := git.NewWorktreeManager(runner, "/tmp/repo", logger)
+	adapter := &worktreeServiceAdapter{
+		manager:           manager,
+		runtimeStateStore: store,
+		logger:            logger,
+		pollInterval:      5 * time.Second,
+	}
+
+	worktrees, err := adapter.List(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+	if len(worktrees) != 0 {
+		t.Fatalf("worktrees = %v, want empty after stale refresh removed missing worktree", worktrees)
+	}
+	if runner.listCalls == 0 {
+		t.Fatal("expected live worktree list call for stale projection refresh")
 	}
 }
