@@ -170,8 +170,8 @@ func (i *ImagePreviewOverlay) handleConfirmMode(msg tea.KeyMsg) (tea.Model, tea.
 
 // View renders the overlay
 func (i *ImagePreviewOverlay) View() string {
+	width, height := i.Size()
 	if i.confirmDelete {
-		width, height := i.Clamp(72, 22)
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
 			width:             width,
@@ -195,7 +195,6 @@ func (i *ImagePreviewOverlay) View() string {
 			},
 		})
 	}
-	width, height := i.Clamp(82, 28)
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            i.styles,
 		width:             width,
@@ -360,9 +359,9 @@ func (i *ImagePreviewOverlay) Title() string {
 // Size returns the overlay dimensions
 func (i *ImagePreviewOverlay) Size() (width, height int) {
 	if i.confirmDelete {
-		return i.ClampResponsive(72, 22)
+		return i.Clamp(72, 22)
 	}
-	return i.ClampResponsive(82, 28)
+	return i.Clamp(82, 28)
 }
 
 // Commands

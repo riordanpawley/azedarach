@@ -122,7 +122,7 @@ func (m *MergeSelectOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the overlay
 func (m *MergeSelectOverlay) View() string {
-	width, height := m.Clamp(60, m.sizeHeight())
+	width, height := m.Size()
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            m.overlayStyles,
 		width:             width,
@@ -262,8 +262,8 @@ func (m *MergeSelectOverlay) selectCurrent() tea.Cmd {
 			return SelectionMsg{
 				Key: "merge",
 				Value: MergeTargetSelectedMsg{
-				SourceID: target.ID,
-				TargetID: m.source.ID.String(),
+					SourceID: target.ID,
+					TargetID: m.source.ID.String(),
 				},
 			}
 		}
@@ -287,7 +287,7 @@ func (m *MergeSelectOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (m *MergeSelectOverlay) Size() (width, height int) {
-	return m.ClampResponsive(60, m.sizeHeight())
+	return m.Clamp(60, m.sizeHeight())
 }
 
 func (m *MergeSelectOverlay) sizeHeight() int {

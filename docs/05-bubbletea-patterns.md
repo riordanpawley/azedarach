@@ -127,6 +127,15 @@ func (m Model) View() string {
 }
 ```
 
+## Overlay Sizing: Canonical Contract
+
+Overlays should follow the size-first contract in [12-overlay-sizing.md](12-overlay-sizing.md):
+
+- `View()` renders using `Size()`; do not recompute geometry in `View()`.
+- `Size()` owns the responsive policy, usually via a clamp-based helper.
+- Standard overlays should have default-size and small-viewport validation.
+- Fullscreen or special-case overlays are allowed only when the exception is explicit.
+
 ## Commands: Async I/O Patterns
 
 **Rule: Use commands for ALL I/O operations**
