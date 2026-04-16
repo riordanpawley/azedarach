@@ -141,6 +141,10 @@ func (w *WorktreeManager) DeleteWithOptions(ctx context.Context, issueID string,
 				err = retryErr
 			}
 		}
+		if isWorktreeAlreadyRemovedError(err) {
+			w.logger.Info("worktree already removed", "issueID", issueID, "path", worktree.Path)
+			err = nil
+		}
 		if err != nil {
 			return fmt.Errorf("failed to remove worktree: %w", err)
 		}
@@ -289,6 +293,14 @@ func isPermissionDeniedWorktreeDeleteError(err error) bool {
 	}
 	msg := strings.ToLower(strings.TrimSpace(err.Error()))
 	return strings.Contains(msg, "permission denied") && strings.Contains(msg, "failed to delete")
+}
+
+func isWorktreeAlreadyRemovedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "not a working tree")
 }
 
 func makeTreeUserWritable(root string) error {
