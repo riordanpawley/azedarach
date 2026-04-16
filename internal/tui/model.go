@@ -3680,25 +3680,98 @@ func (m Model) createTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 // PR creation with overlay
 
 type prCreatedResultMsg struct {
-	url string
-	err error
+	url   string
+	title string
+	err   error
 }
 
 type openPROverlayResultMsg struct {
-	branch  string
-	issueID string
-	err     error
+	branch   string
+	issueID  string
+	worktree string
+	err      error
 }
 
-// openPROverlayCmd gets the current branch and opens the PR creation overlay
+// openPROverlayCmd resolves branch/worktree context for automated PR creation.
 func (m Model) openPROverlayCmd(worktree, issueID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		branch, err := m.resolveWorktreeBranch(ctx, worktree, issueID)
+		resolvedWorktree := strings.TrimSpace(worktree)
+		if resolvedWorktree == "" {
+			if fallback, resolveErr := m.resolveIssueWorktreePath(ctx, issueID); resolveErr == nil {
+				resolvedWorktree = strings.TrimSpace(fallback)
+			}
+		}
+
+		branch, err := m.resolveWorktreeBranch(ctx, resolvedWorktree, issueID)
 		if err != nil {
 			return openPROverlayResultMsg{err: err}
 		}
-		return openPROverlayResultMsg{branch: branch, issueID: issueID}
+		return openPROverlayResultMsg{
+			branch:   branch,
+			issueID:  issueID,
+			worktree: resolvedWorktree,
+		}
+	}
+}
+
+func (m Model) createPRWithAICmd(msg openPROverlayResultMsg) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		if m.daemonClient == nil {
+			return prCreatedResultMsg{err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		issueTitle := ""
+		issueDescription := ""
+		for i := range m.tasks {
+			if m.tasks[i].ID.String() == msg.issueID {
+				issueTitle = strings.TrimSpace(m.tasks[i].Title)
+				issueDescription = strings.TrimSpace(m.tasks[i].Description)
+				break
+			}
+		}
+
+		baseBranch := strings.TrimSpace(m.resolveBaseBranch())
+		if baseBranch == "" {
+			baseBranch = "main"
+		}
+
+		generated, err := generatePRContent(ctx, prGenerationRequest{
+			Worktree:         msg.worktree,
+			IssueID:          msg.issueID,
+			IssueTitle:       issueTitle,
+			IssueDescription: issueDescription,
+			Branch:           msg.branch,
+			BaseBranch:       baseBranch,
+			Tool:             strings.TrimSpace(m.config.CLITool),
+		})
+		if err != nil {
+			return prCreatedResultMsg{err: err}
+		}
+
+		draft := true
+		if m.config != nil {
+			draft = m.config.PR.DraftByDefault
+		}
+		result, err := m.daemonClient.CreatePullRequest(ctx, daemonclient.CreatePullRequestParams{
+			Title:      generated.Title,
+			Body:       generated.Body,
+			Branch:     msg.branch,
+			BaseBranch: baseBranch,
+			Draft:      draft,
+			IssueID:    msg.issueID,
+		})
+		if err != nil {
+			return prCreatedResultMsg{err: err}
+		}
+
+		return prCreatedResultMsg{
+			url:   result.PullRequest.URL,
+			title: generated.Title,
+		}
 	}
 }
 

@@ -847,9 +847,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
+		message := fmt.Sprintf("PR created: %s", msg.url)
+		if strings.TrimSpace(msg.title) != "" {
+			message = fmt.Sprintf("PR created: %s (%s)", msg.title, msg.url)
+		}
 		m.addToast(Toast{
 			Level:   ToastSuccess,
-			Message: fmt.Sprintf("PR created: %s", msg.url),
+			Message: message,
 			Expires: time.Now().Add(5 * time.Second),
 		})
 		return m, nil
@@ -985,7 +989,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		return m, m.openOverlay(overlay.NewPRCreateOverlay(msg.branch, m.config.Git.BaseBranch, msg.issueID))
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: "Generating PR title/body with AI and creating PR...",
+			Expires: time.Now().Add(4 * time.Second),
+		})
+		return m, m.createPRWithAICmd(msg)
 
 	case openPRResultMsg:
 		if msg.err != nil {
