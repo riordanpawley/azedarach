@@ -60,6 +60,7 @@ const (
 	eventTickerCapacity      = 64
 	eventLogCapacity         = 256
 	eventSummaryMaxRunes     = 140
+	orphanedWorktreeCleanupTimeout = 2 * time.Minute
 )
 
 var ansiEscapeLinePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
@@ -4447,7 +4448,9 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 				m.logger.Warn("daemon client unavailable for orphaned worktree cleanup")
 				continue
 			}
-			removed, err := m.daemonClient.CleanupOrphanedWorktrees(ctx)
+			cleanupCtx, cleanupCancel := context.WithTimeout(ctx, orphanedWorktreeCleanupTimeout)
+			removed, err := m.daemonClient.CleanupOrphanedWorktrees(cleanupCtx)
+			cleanupCancel()
 			if err != nil {
 				m.logger.Warn("failed to clean orphaned worktrees", "error", err)
 				continue

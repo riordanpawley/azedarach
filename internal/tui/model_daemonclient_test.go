@@ -5497,6 +5497,54 @@ func TestPerformCleanupRoutesDaemonCleanupAndPreservesCounts(t *testing.T) {
 	}
 }
 
+func TestPerformCleanupOrphanedWorktreesUsesExtendedDeadline(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != protocol.CommandWorktreeCleanupOrphaned {
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			respBody, err := json.Marshal(protocol.CleanupOrphanedResponseBody{
+				ProjectID:        naming.ProjectID("proj-1"),
+				WorktreesRemoved: 1,
+			})
+			if err != nil {
+				t.Fatalf("marshal cleanup response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.currentProject = "proj-1"
+	m.daemonClient.WithProjectID(m.daemonProjectID())
+
+	result, err := m.performCleanup(context.Background(), []string{"remove_orphaned_worktrees"})
+	if err != nil {
+		t.Fatalf("performCleanup error: %v", err)
+	}
+	if result.WorktreesRemoved != 1 {
+		t.Fatalf("worktrees removed = %d, want 1", result.WorktreesRemoved)
+	}
+	if got := len(transport.requests); got != 1 {
+		t.Fatalf("request count = %d, want 1", got)
+	}
+	if transport.requests[0] != protocol.CommandWorktreeCleanupOrphaned {
+		t.Fatalf("command = %s, want %s", transport.requests[0], protocol.CommandWorktreeCleanupOrphaned)
+	}
+	if got := len(transport.commandBudgets); got != 1 {
+		t.Fatalf("command deadline count = %d, want 1", got)
+	}
+	if transport.commandBudgets[0] < (orphanedWorktreeCleanupTimeout - 10*time.Second) {
+		t.Fatalf("cleanup timeout budget = %s, want near %s", transport.commandBudgets[0], orphanedWorktreeCleanupTimeout)
+	}
+}
+
 func TestFetchAndMergeCommandReturnsPendingOperationToast(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
