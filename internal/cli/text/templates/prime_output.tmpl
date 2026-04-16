@@ -43,6 +43,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
 {{ end }}- Keep issue context current as you work:
   - Update design/notes as implementation decisions change.
   - Use status/priority/labels flags when state changes materially.
+- Overlay edits: check `az spec` requirements/links before behavior changes, keep `View()` and `Size()` aligned, validate default and narrow viewports, and update goldens when rendered output changes. If the work is docs/process-only, record `Spec impact: none (docs/process-only)` in issue notes.
 - `az issue --help`
 {{ if .SpecGuardrails }}- Spec workflow:
 {{ .SpecGuardrails }}
