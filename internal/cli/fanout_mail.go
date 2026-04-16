@@ -164,7 +164,7 @@ func ParseIssueFanoutArgs(args []string) (IssueFanoutOptions, error) {
 	fs := flag.NewFlagSet("issue fanout", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
-	fs.StringVar(&opts.InputPath, "input", "", "path to fanout spec JSON")
+	fs.StringVar(&opts.InputPath, "input", "", "path to pre-authored fanout spec JSON")
 	fs.BoolVar(&opts.Apply, "apply", false, "apply planned operations")
 	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
 	if err := fs.Parse(args); err != nil {
