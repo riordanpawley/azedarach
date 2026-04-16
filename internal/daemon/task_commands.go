@@ -56,6 +56,7 @@ func (d *Daemon) sourceForTaskInvariant(invariant daemonInvariantID) daemonInvar
 func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	resp := d.successResponse(req)
 	projectID := d.projectID(req.Meta)
+	d.triggerWorktreeStateRefresh(projectID)
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task list requested", "project_id", projectID)
 	}

@@ -250,7 +250,7 @@ func TestWorktreeServiceAdapterListUsesProjectionOnlyWhenRuntimeStoreAvailable(t
 	}
 }
 
-func TestWorktreeServiceAdapterListRefreshesStaleProjectionBeforeReturning(t *testing.T) {
+func TestWorktreeServiceAdapterPollerRefreshesProjection(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), logger)
 	t.Cleanup(func() { _ = store.Close() })
@@ -277,17 +277,24 @@ branch refs/heads/main
 		manager:           manager,
 		runtimeStateStore: store,
 		logger:            logger,
-		pollInterval:      5 * time.Second,
+		pollInterval:      20 * time.Millisecond,
 	}
 
-	worktrees, err := adapter.List(context.Background(), projectID)
-	if err != nil {
-		t.Fatalf("List returned error: %v", err)
+	adapter.ensureBackgroundPoller(projectID)
+
+	deadline := time.Now().Add(750 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		worktrees, err := store.ListWorktreeStates(context.Background(), projectID)
+		if err != nil {
+			t.Fatalf("ListWorktreeStates returned error: %v", err)
+		}
+		if len(worktrees) == 0 {
+			if runner.listCalls == 0 {
+				t.Fatal("expected live worktree list calls while poller reconciles projection")
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	if len(worktrees) != 0 {
-		t.Fatalf("worktrees = %v, want empty after stale refresh removed missing worktree", worktrees)
-	}
-	if runner.listCalls == 0 {
-		t.Fatal("expected live worktree list call for stale projection refresh")
-	}
+	t.Fatal("timed out waiting for poller to reconcile stale worktree projection")
 }
