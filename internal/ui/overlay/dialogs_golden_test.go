@@ -62,6 +62,7 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 		name string
 		view func(t *testing.T) string
 	}{
+		{name: "gitpull_small", view: goldenGitPullSmallView},
 		{name: "conflict_small", view: goldenConflictSmallView},
 		{name: "cleanup_small", view: goldenCleanupSmallView},
 		{name: "mergechoice_small", view: goldenMergeChoiceSmallView},
@@ -176,6 +177,13 @@ func goldenGitPullView(t *testing.T) string {
 	t.Helper()
 	overlay := NewGitPullOverlay(7)
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*GitPullOverlay).View()
+}
+
+func goldenGitPullSmallView(t *testing.T) string {
+	t.Helper()
+	overlay := NewGitPullOverlay(7)
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
 	return model.(*GitPullOverlay).View()
 }
 
