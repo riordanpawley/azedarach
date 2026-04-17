@@ -363,6 +363,51 @@ branch refs/heads/az/issue-123
 	assert.Contains(t, err.Error(), "worktree path still exists but git reports it is not a working tree")
 }
 
+func TestWorktreeManager_DeleteWithOptions_RemovesOrphanedWorktreeDirectory(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	issueID := "issue-123"
+	worktreePath := filepath.Join(t.TempDir(), "test-repo-issue-123")
+	require.NoError(t, os.MkdirAll(worktreePath, 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(worktreePath, "internal"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(worktreePath, "internal", "placeholder.txt"), []byte("stale"), 0o644))
+
+	// Simulate orphaned worktree: .git points to missing admin metadata under repo .git/worktrees.
+	missingAdminPath := filepath.Join(repoDir, ".git", "worktrees", "test-repo-issue-123")
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(worktreePath, ".git"), []byte("gitdir: "+missingAdminPath+"\n"), 0o644))
+
+	mock := NewMockRunner()
+	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "list" {
+			return fmt.Sprintf(`worktree %s
+HEAD abc123
+branch refs/heads/main
+
+worktree %s
+HEAD def456
+branch refs/heads/az/issue-123
+`, repoDir, worktreePath), nil
+		}
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "remove" {
+			return "", fmt.Errorf("git worktree remove %s failed: exit status 128: fatal: '%s' is not a working tree", worktreePath, worktreePath)
+		}
+		if len(args) > 1 && args[0] == "branch" && args[1] == "-D" {
+			return "", nil
+		}
+		return "", nil
+	}
+
+	manager := NewWorktreeManager(mock, repoDir, slog.Default())
+	err := manager.DeleteWithOptions(ctx, issueID, false)
+	require.NoError(t, err)
+
+	exists, statErr := pathExists(worktreePath)
+	require.NoError(t, statErr)
+	assert.False(t, exists, "orphaned worktree directory should be deleted")
+	mock.AssertCommand(t, "branch -D az/issue-123")
+}
+
 func TestWorktreeManager_Delete_NotFound(t *testing.T) {
 	ctx := context.Background()
 	repoDir := "/home/user/test-repo"

@@ -147,6 +147,19 @@ func (w *WorktreeManager) DeleteWithOptions(ctx context.Context, issueID string,
 				return fmt.Errorf("failed to verify worktree path after remove error: %w", statErr)
 			}
 			if exists {
+				orphaned, orphanErr := isOrphanedWorktreeDirectory(worktree.Path, w.repoDir)
+				if orphanErr != nil {
+					return fmt.Errorf("failed to verify orphaned worktree path: %w", orphanErr)
+				}
+				if orphaned {
+					if removeErr := os.RemoveAll(worktree.Path); removeErr != nil {
+						return fmt.Errorf("failed to remove orphaned worktree directory %s: %w", worktree.Path, removeErr)
+					}
+					w.logger.Info("removed orphaned worktree directory with missing git metadata", "issueID", issueID, "path", worktree.Path)
+					err = nil
+				}
+			}
+			if exists && err != nil {
 				return fmt.Errorf("worktree path still exists but git reports it is not a working tree: %s", worktree.Path)
 			}
 			w.logger.Info("worktree already removed", "issueID", issueID, "path", worktree.Path)
@@ -319,6 +332,45 @@ func pathExists(path string) (bool, error) {
 		return false, nil
 	}
 	return false, err
+}
+
+func isOrphanedWorktreeDirectory(worktreePath, repoDir string) (bool, error) {
+	gitFile := filepath.Join(strings.TrimSpace(worktreePath), ".git")
+	content, err := os.ReadFile(gitFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	line := strings.TrimSpace(string(content))
+	const gitdirPrefix = "gitdir:"
+	if !strings.HasPrefix(strings.ToLower(line), gitdirPrefix) {
+		return false, nil
+	}
+
+	gitDirPath := strings.TrimSpace(line[len(gitdirPrefix):])
+	if gitDirPath == "" {
+		return false, nil
+	}
+	if !filepath.IsAbs(gitDirPath) {
+		gitDirPath = filepath.Join(worktreePath, gitDirPath)
+	}
+	gitDirPath = filepath.Clean(gitDirPath)
+
+	expectedPrefix := filepath.Join(strings.TrimSpace(repoDir), ".git", "worktrees") + string(os.PathSeparator)
+	if !strings.HasPrefix(gitDirPath, expectedPrefix) {
+		return false, nil
+	}
+	_, statErr := os.Stat(gitDirPath)
+	if statErr == nil {
+		return false, nil
+	}
+	if errors.Is(statErr, os.ErrNotExist) {
+		return true, nil
+	}
+	return false, statErr
 }
 
 func makeTreeUserWritable(root string) error {
