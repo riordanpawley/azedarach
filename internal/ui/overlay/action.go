@@ -479,6 +479,8 @@ func (m *BulkActionMenu) buildActions() []Action {
 		{Key: "D", Label: "Set to Done", Enabled: true},
 		{Key: "", Label: "───────────────────", Enabled: false},
 		// Other actions
+		{Key: "w", Label: "Cleanup worktrees", Enabled: true},
+		{Key: "W", Label: "Delete + cleanup worktrees", Enabled: true},
 		{Key: "d", Label: "Delete selected", Enabled: true},
 		{Key: "x", Label: "Clear selection", Enabled: true},
 	}

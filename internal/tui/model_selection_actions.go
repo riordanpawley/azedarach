@@ -44,6 +44,12 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 	case "a":
 		return m, m.bulkArchiveCmd(msg.SelectedIDs)
 
+	case "w": // Cleanup selected worktrees
+		return m, m.bulkCleanupWorktreeCmd(msg.SelectedIDs, false)
+
+	case "W": // Delete selected tasks and cleanup worktrees
+		return m, m.bulkCleanupWorktreeCmd(msg.SelectedIDs, true)
+
 	case "x": // Clear selection
 		m.editor.ClearSelection()
 		m.editor.EnterNormal()

@@ -6012,6 +6012,89 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 			t.Fatalf("requests = %v", got)
 		}
 	})
+
+	t.Run("bulk cleanup and delete+cleanup use daemon lifecycle commands", func(t *testing.T) {
+		removeBodies := make([]struct {
+			IssueID string `json:"issue_id"`
+			Force   bool   `json:"force,omitempty"`
+		}, 0, 2)
+		deleteBodies := make([]daemonclient.TaskIDRequest, 0, 1)
+
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandSessionStop:
+					// No-op: stop may legitimately be called even when already stopped.
+				case daemonclient.CommandWorktreeRemove:
+					var body struct {
+						IssueID string `json:"issue_id"`
+						Force   bool   `json:"force,omitempty"`
+					}
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal worktree remove request: %v", err)
+					}
+					removeBodies = append(removeBodies, body)
+				case daemonclient.CommandTaskDelete:
+					var body daemonclient.TaskIDRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal task delete request: %v", err)
+					}
+					deleteBodies = append(deleteBodies, body)
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+				}, nil
+			},
+		}
+
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{
+			{ID: "az-1", Status: domain.StatusOpen},
+			{ID: "az-2", Status: domain.StatusOpen},
+		}
+
+		cleanupOnly := m.bulkCleanupWorktreeCmd([]string{"az-1"}, false)()
+		cleanupOnlyResult, ok := cleanupOnly.(bulkStatusResultMsg)
+		if !ok {
+			t.Fatalf("cleanup-only message type = %T, want bulkStatusResultMsg", cleanupOnly)
+		}
+		if cleanupOnlyResult.updated != 1 || cleanupOnlyResult.failed != 0 {
+			t.Fatalf("cleanup-only result = %+v", cleanupOnlyResult)
+		}
+
+		deleteAndCleanup := m.bulkCleanupWorktreeCmd([]string{"az-2"}, true)()
+		deleteAndCleanupResult, ok := deleteAndCleanup.(bulkStatusResultMsg)
+		if !ok {
+			t.Fatalf("delete+cleanup message type = %T, want bulkStatusResultMsg", deleteAndCleanup)
+		}
+		if deleteAndCleanupResult.updated != 1 || deleteAndCleanupResult.failed != 0 {
+			t.Fatalf("delete+cleanup result = %+v", deleteAndCleanupResult)
+		}
+
+		if len(removeBodies) != 2 || removeBodies[0].IssueID != "az-1" || removeBodies[1].IssueID != "az-2" {
+			t.Fatalf("worktree remove bodies = %+v, want az-1 and az-2", removeBodies)
+		}
+		if removeBodies[0].Force || removeBodies[1].Force {
+			t.Fatalf("worktree remove force flag = %+v, want false", removeBodies)
+		}
+		if len(deleteBodies) != 1 || deleteBodies[0].TaskID != "az-2" {
+			t.Fatalf("delete bodies = %+v, want one delete for az-2", deleteBodies)
+		}
+
+		if got := transport.requests; len(got) != 5 ||
+			got[0] != daemonclient.CommandSessionStop ||
+			got[1] != daemonclient.CommandWorktreeRemove ||
+			got[2] != daemonclient.CommandSessionStop ||
+			got[3] != daemonclient.CommandWorktreeRemove ||
+			got[4] != daemonclient.CommandTaskDelete {
+			t.Fatalf("requests = %v", got)
+		}
+	})
 }
 
 func TestBulkActionMenuPreviewAndFrozenSelection(t *testing.T) {

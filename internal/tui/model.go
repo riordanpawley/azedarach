@@ -3236,6 +3236,61 @@ func (m Model) bulkArchiveCmd(taskIDs []string) tea.Cmd {
 	}
 }
 
+func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		updated := 0
+		failed := 0
+		issues := make([]bulkTaskIssue, 0)
+
+		for _, taskID := range taskIDs {
+			if !m.taskExists(taskID) {
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "task not found"})
+				continue
+			}
+			if m.daemonClient == nil {
+				failed++
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "daemon client unavailable"})
+				continue
+			}
+
+			// Always ask daemon to stop first; local projection may be stale.
+			m.sessionMonitor.Stop(taskID)
+			_, stopErr := m.daemonClient.StopSession(ctx, taskID)
+			if stopErr != nil && !isSessionAlreadyStoppedError(stopErr) && !isSessionStopSkippableDuringCleanup(stopErr) {
+				failed++
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: stopErr.Error()})
+				continue
+			}
+
+			removeErr := m.daemonClient.RemoveWorktreeWithOptions(ctx, taskID, false)
+			if removeErr != nil {
+				failed++
+				reason := removeErr.Error()
+				if isDirtyWorktreeRemovalError(removeErr) {
+					reason = fmt.Sprintf("%s (single-task cleanup supports force)", strings.TrimSpace(removeErr.Error()))
+				}
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: reason})
+				continue
+			}
+
+			if deleteTask {
+				if err := m.daemonClient.DeleteTask(ctx, taskID); err != nil {
+					failed++
+					issues = append(issues, bulkTaskIssue{taskID: taskID, reason: err.Error()})
+					continue
+				}
+			}
+
+			updated++
+		}
+
+		return bulkStatusResultMsg{updated: updated, issues: issues, failed: failed}
+	}
+}
+
 // bulkSetStatusCmd sets all selected tasks to a specific status
 func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd {
 	return func() tea.Msg {
