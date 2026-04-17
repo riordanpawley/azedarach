@@ -106,6 +106,7 @@ type Daemon struct {
 	git                           *git.Client
 	gitHandler                    *daemonhandlers.GitHandler
 	worktreeHandler               *daemonhandlers.WorktreeHandler
+	worktreeAdapter               *worktreeServiceAdapter
 	session                       *daemonhandlers.SessionHandler
 	sessionStore                  *daemonstate.Store
 	runtimeProjectionWriter       runtimeProjectionWriter
@@ -122,6 +123,9 @@ type Daemon struct {
 	sessionStateRefreshMu         sync.Mutex
 	sessionStateRefreshing        map[string]bool
 	sessionStateLastRefresh       map[string]time.Time
+	worktreeStateRefreshMu        sync.Mutex
+	worktreeStateRefreshing       map[string]bool
+	worktreeStateLastRefresh      map[string]time.Time
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -228,6 +232,8 @@ func New(cfg Config) *Daemon {
 		sessionStopPending:            map[string]int{},
 		sessionStateRefreshing:        map[string]bool{},
 		sessionStateLastRefresh:       map[string]time.Time{},
+		worktreeStateRefreshing:       map[string]bool{},
+		worktreeStateLastRefresh:      map[string]time.Time{},
 		revision:                      map[string]uint64{},
 		shutdownReqCh:                 make(chan struct{}),
 	}
@@ -267,23 +273,25 @@ func New(cfg Config) *Daemon {
 	commandExecutor := operationCommandExecutor{runtime: runtime}
 	sessionExecutor := sessionOperationExecutor{runtime: runtime}
 	gitHandler := daemonhandlers.NewGitHandler(gitService, daemonhandlers.WithGitLongRunningExecutor(commandExecutor))
-	worktreeHandler := daemonhandlers.NewWorktreeHandler(
-		&worktreeServiceAdapter{
-			managerForProject: func(projectID string) *git.WorktreeManager { return d.worktreeManagerForProject(projectID) },
-			runtimeStateStore: d.worktreeRuntimeStateStore(),
-			runtimeStateStoreForProject: func(projectID string) *daemonstate.RuntimeStateStore {
-				return d.worktreeRuntimeStateStore(projectID)
-			},
-			runtimeProjectionWriter:       d.runtimeProjectionStateWriter(),
-			ensureRuntimeFreshForMutation: d.ensureFreshRuntimeForMutation,
-			logger:                        cfg.Logger,
-			onProjectionUpdate: func(ctx context.Context, projectID, issueID, path string) {
-				d.runtimeProjectionStateWriter().PublishWorktreeProjectionEvent(ctx, projectID, issueID, path)
-			},
-			onWorktreeObserved: func(_ context.Context, projectID, _ string, path string) {
-				gitService.refreshGitStatusAsync(projectID, path)
-			},
+	worktreeAdapter := &worktreeServiceAdapter{
+		managerForProject: func(projectID string) *git.WorktreeManager { return d.worktreeManagerForProject(projectID) },
+		runtimeStateStore: d.worktreeRuntimeStateStore(),
+		runtimeStateStoreForProject: func(projectID string) *daemonstate.RuntimeStateStore {
+			return d.worktreeRuntimeStateStore(projectID)
 		},
+		runtimeProjectionWriter:       d.runtimeProjectionStateWriter(),
+		ensureRuntimeFreshForMutation: d.ensureFreshRuntimeForMutation,
+		logger:                        cfg.Logger,
+		onProjectionUpdate: func(ctx context.Context, projectID, issueID, path string) {
+			d.runtimeProjectionStateWriter().PublishWorktreeProjectionEvent(ctx, projectID, issueID, path)
+		},
+		onWorktreeObserved: func(_ context.Context, projectID, _ string, path string) {
+			gitService.refreshGitStatusAsync(projectID, path)
+		},
+	}
+	d.worktreeAdapter = worktreeAdapter
+	worktreeHandler := daemonhandlers.NewWorktreeHandler(
+		worktreeAdapter,
 		daemonhandlers.WithWorktreeLongRunningExecutor(commandExecutor),
 	)
 	runtime.gitHandler = gitHandler
@@ -873,6 +881,52 @@ func (d *Daemon) triggerSessionStateRefresh(projectID string, refreshFn func(con
 		if err := refreshFn(ctx, projectID); err != nil && d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("session runtime-state refresh failed", "project_id", projectID, "error", err)
 		}
+	}()
+}
+
+func (d *Daemon) triggerWorktreeStateRefresh(projectID string) {
+	if d.worktreeAdapter == nil || d.worktreeRuntimeStateStore(projectID) == nil {
+		return
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = protocol.DefaultProjectID
+	}
+
+	const minRefreshInterval = 3 * time.Second
+	now := time.Now()
+
+	d.worktreeStateRefreshMu.Lock()
+	if d.worktreeStateRefreshing == nil {
+		d.worktreeStateRefreshing = map[string]bool{}
+	}
+	if d.worktreeStateLastRefresh == nil {
+		d.worktreeStateLastRefresh = map[string]time.Time{}
+	}
+	if d.worktreeStateRefreshing[projectID] {
+		d.worktreeStateRefreshMu.Unlock()
+		return
+	}
+	if last := d.worktreeStateLastRefresh[projectID]; !last.IsZero() && now.Sub(last) < minRefreshInterval {
+		d.worktreeStateRefreshMu.Unlock()
+		return
+	}
+	d.worktreeStateRefreshing[projectID] = true
+	d.worktreeStateLastRefresh[projectID] = now
+	d.worktreeStateRefreshMu.Unlock()
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Error("worktree runtime-state refresh goroutine panicked", "project_id", projectID, "panic", r, "stack", string(debug.Stack()))
+			}
+			d.worktreeStateRefreshMu.Lock()
+			d.worktreeStateRefreshing[projectID] = false
+			d.worktreeStateRefreshMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		d.worktreeAdapter.pollAndPersistWorktrees(ctx, projectID)
 	}()
 }
 

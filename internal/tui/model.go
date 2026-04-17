@@ -2502,22 +2502,25 @@ func (m Model) deleteTaskCmd(taskID string) tea.Cmd {
 
 func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
 		if m.daemonClient == nil {
 			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: fmt.Errorf("daemon client unavailable")}
 		}
 
 		// Always ask daemon to stop first; local projection may be stale.
 		m.sessionMonitor.Stop(taskID)
-		if _, err := m.daemonClient.StopSession(ctx, taskID); err != nil {
-			if !isSessionAlreadyStoppedError(err) && !isSessionStopSkippableDuringCleanup(err) {
-				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: err}
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, stopErr := m.daemonClient.StopSession(stopCtx, taskID)
+		stopCancel()
+		if stopErr != nil {
+			if !isSessionAlreadyStoppedError(stopErr) && !isSessionStopSkippableDuringCleanup(stopErr) {
+				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: stopErr}
 			}
 		}
 
-		if err := m.daemonClient.RemoveWorktreeWithOptions(ctx, taskID, force); err != nil {
+		removeCtx, removeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := m.daemonClient.RemoveWorktreeWithOptions(removeCtx, taskID, force)
+		removeCancel()
+		if err != nil {
 			if !force && isDirtyWorktreeRemovalError(err) {
 				return worktreeCleanupResultMsg{
 					taskID:      taskID,
@@ -2531,7 +2534,10 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 		}
 
 		if deleteTask {
-			if err := m.daemonClient.DeleteTask(ctx, taskID); err != nil {
+			deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := m.daemonClient.DeleteTask(deleteCtx, taskID)
+			deleteCancel()
+			if err != nil {
 				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: true, force: force, err: err}
 			}
 		}
