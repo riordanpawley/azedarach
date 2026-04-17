@@ -62,12 +62,17 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 		name string
 		view func(t *testing.T) string
 	}{
+		{name: "confirm_small", view: goldenConfirmSmallView},
+		{name: "gitpull_small", view: goldenGitPullSmallView},
 		{name: "conflict_small", view: goldenConflictSmallView},
 		{name: "cleanup_small", view: goldenCleanupSmallView},
 		{name: "mergechoice_small", view: goldenMergeChoiceSmallView},
 		{name: "imageattach_list_small", view: goldenImageAttachListSmallView},
 		{name: "merge_select_small", view: goldenMergeSelectSmallView},
+		{name: "merge_upstream_small", view: goldenMergeUpstreamSmallView},
 		{name: "imagepreview_default_small", view: goldenImagePreviewSmallView},
+		{name: "imageattach_preview_small", view: goldenImageAttachPreviewSmallView},
+		{name: "imagepreview_confirm_delete_small", view: goldenImagePreviewConfirmDeleteSmallView},
 		{name: "project_selector_small", view: goldenProjectSelectorSmallView},
 		{name: "settings_default_small", view: goldenSettingsDefaultSmallView},
 		{name: "diagnostics_overview_small", view: goldenDiagnosticsOverviewSmallView},
@@ -111,6 +116,13 @@ func goldenConfirmView(t *testing.T) string {
 	t.Helper()
 	dialog := NewConfirmDialog("Delete task", "Delete task az-321?")
 	model, _ := dialog.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*ConfirmDialog).View()
+}
+
+func goldenConfirmSmallView(t *testing.T) string {
+	t.Helper()
+	dialog := NewConfirmDialog("Delete task", "Delete task az-321?")
+	model, _ := dialog.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
 	return model.(*ConfirmDialog).View()
 }
 
@@ -179,6 +191,13 @@ func goldenGitPullView(t *testing.T) string {
 	return model.(*GitPullOverlay).View()
 }
 
+func goldenGitPullSmallView(t *testing.T) string {
+	t.Helper()
+	overlay := NewGitPullOverlay(7)
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	return model.(*GitPullOverlay).View()
+}
+
 func goldenMergeChoiceView(t *testing.T) string {
 	t.Helper()
 	overlay := NewMergeChoiceOverlay("az-123", 3, "main")
@@ -211,6 +230,16 @@ func goldenMergeUpstreamView(t *testing.T) string {
 		{ID: "az-456", Label: "Related task 1", Status: domain.StatusOpen, HasWorktree: true},
 	}, nil, nil)
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*MergeSelectOverlay).View()
+}
+
+func goldenMergeUpstreamSmallView(t *testing.T) string {
+	t.Helper()
+	source := &domain.Task{ID: "az-123", Title: "Implement feature X"}
+	overlay := NewMergeSourceSelectOverlay(source, []MergeTarget{
+		{ID: "az-456", Label: "Related task 1", Status: domain.StatusOpen, HasWorktree: true},
+	}, nil, nil)
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
 	return model.(*MergeSelectOverlay).View()
 }
 
@@ -382,6 +411,25 @@ func goldenImageAttachPreviewView(t *testing.T) string {
 	return model.(*ImageAttachOverlay).View()
 }
 
+func goldenImageAttachPreviewSmallView(t *testing.T) string {
+	t.Helper()
+	overlay := NewImageAttachOverlay("az-321", &mockClipboardAttachService{})
+	overlay.mode = imageAttachModePreview
+	overlay.files = []attachment.Attachment{
+		{
+			ID:       "a2",
+			IssueID:  "az-321",
+			Filename: "mobile-panel.png",
+			MimeType: "image/png",
+			Size:     99872,
+			Path:     "/tmp/mobile-panel.png",
+			Created:  time.Date(2026, time.March, 30, 8, 10, 0, 0, time.UTC),
+		},
+	}
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	return model.(*ImageAttachOverlay).View()
+}
+
 func goldenImagePreviewView(t *testing.T) string {
 	t.Helper()
 	overlay := NewImagePreviewOverlay("az-321", nil, 0)
@@ -404,6 +452,19 @@ func goldenImagePreviewConfirmDeleteView(t *testing.T) string {
 	overlay.currentIndex = 1
 	overlay.confirmDelete = true
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*ImagePreviewOverlay).View()
+}
+
+func goldenImagePreviewConfirmDeleteSmallView(t *testing.T) string {
+	t.Helper()
+	overlay := NewImagePreviewOverlay("az-321", nil, 1)
+	overlay.images = []attachment.Attachment{
+		{ID: "a1", Filename: "board-screen.png", MimeType: "image/png", Size: 340223},
+		{ID: "a2", Filename: "mobile-panel.png", MimeType: "image/png", Size: 99872},
+	}
+	overlay.currentIndex = 1
+	overlay.confirmDelete = true
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
 	return model.(*ImagePreviewOverlay).View()
 }
 

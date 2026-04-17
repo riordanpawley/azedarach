@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 )
@@ -30,6 +31,56 @@ func TestDevServerOverlay_UsesActionsSectionLayout(t *testing.T) {
 	}
 	if !strings.Contains(view, "Actions") {
 		t.Fatalf("expected actions section, got %q", view)
+	}
+}
+
+func TestProjectSelector_SizeUsesModeHelpers(t *testing.T) {
+	selector := NewProjectSelector(&config.ProjectsRegistry{
+		Projects: []config.Project{
+			{Name: "one", Path: "/tmp/one"},
+			{Name: "two", Path: "/tmp/two"},
+		},
+	})
+
+	selector.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	if width, height := selector.Size(); width != 96 || height != 27 {
+		t.Fatalf("expected responsive list size 96x27, got %dx%d", width, height)
+	}
+
+	selector.mode = projectModeActions
+	if width, height := selector.Size(); width != 50 || height != 10 {
+		t.Fatalf("expected action size 50x10, got %dx%d", width, height)
+	}
+}
+
+func TestProjectSelector_SizeResponsiveInListMode(t *testing.T) {
+	selector := NewProjectSelector(&config.ProjectsRegistry{
+		Projects: []config.Project{
+			{Name: "one", Path: "/tmp/one"},
+		},
+	})
+
+	selector.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	if width, height := selector.Size(); width != 70 || height != 20 {
+		t.Fatalf("expected small list size to use viewport clamp 70x20, got %dx%d", width, height)
+	}
+}
+
+func TestDevServerOverlay_SizeUsesDialogHelper(t *testing.T) {
+	overlay := NewDevServerOverlay([]DevServerInfo{
+		{ID: "one", Name: "web", Port: 3000, Status: "running"},
+		{ID: "two", Name: "api", Port: 3001, Status: "stopped"},
+		{ID: "three", Name: "queue", Port: 3002, Status: "error"},
+	}, "az-1", nil, nil, nil, nil)
+
+	overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	if width, height := overlay.Size(); width != 96 || height != 27 {
+		t.Fatalf("expected responsive devserver size 96x27, got %dx%d", width, height)
+	}
+
+	overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	if width, height := overlay.Size(); width != 70 || height != 20 {
+		t.Fatalf("expected small devserver size to use viewport clamp 70x20, got %dx%d", width, height)
 	}
 }
 

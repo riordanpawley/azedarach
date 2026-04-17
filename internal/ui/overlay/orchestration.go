@@ -127,7 +127,7 @@ func (o *OrchestrationOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the overlay
 func (o *OrchestrationOverlay) View() string {
-	width, height := o.Clamp(100, o.viewHeight())
+	width, height := o.Size()
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            o.styles,
 		width:             width,
@@ -164,7 +164,7 @@ func (o *OrchestrationOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (o *OrchestrationOverlay) Size() (width, height int) {
-	return o.ClampResponsive(100, o.viewHeight())
+	return o.Clamp(100, o.viewHeight())
 }
 
 func (o *OrchestrationOverlay) viewHeight() int {

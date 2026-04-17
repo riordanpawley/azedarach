@@ -48,9 +48,9 @@ func (c *ConfirmDialog) Init() tea.Cmd {
 // Update handles messages
 func (c *ConfirmDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-		case tea.KeyMsg:
-			switch msg.String() {
-			case "y", "Y":
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "y", "Y":
 			// Yes - confirm and close
 			return c, func() tea.Msg {
 				return SelectionMsg{
@@ -59,34 +59,34 @@ func (c *ConfirmDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
-			case "n", "N":
-				// No - cancel and close
-				return c, func() tea.Msg {
-					return SelectionMsg{
-						Key:   "no",
-						Value: ConfirmResult{Confirmed: false},
-					}
+		case "n", "N":
+			// No - cancel and close
+			return c, func() tea.Msg {
+				return SelectionMsg{
+					Key:   "no",
+					Value: ConfirmResult{Confirmed: false},
 				}
+			}
 
-			case "esc":
-				if c.requireExplicitYNKey {
-					return c, nil
+		case "esc":
+			if c.requireExplicitYNKey {
+				return c, nil
+			}
+			// Escape - cancel and close
+			return c, func() tea.Msg {
+				return SelectionMsg{
+					Key:   "no",
+					Value: ConfirmResult{Confirmed: false},
 				}
-				// Escape - cancel and close
-				return c, func() tea.Msg {
-					return SelectionMsg{
-						Key:   "no",
-						Value: ConfirmResult{Confirmed: false},
-					}
-				}
+			}
 
-			case "enter":
-				if c.requireExplicitYNKey {
-					return c, nil
-				}
-				// Confirm current selection
-				return c, func() tea.Msg {
-					return SelectionMsg{
+		case "enter":
+			if c.requireExplicitYNKey {
+				return c, nil
+			}
+			// Confirm current selection
+			return c, func() tea.Msg {
+				return SelectionMsg{
 					Key:   map[bool]string{true: "yes", false: "no"}[c.selected],
 					Value: ConfirmResult{Confirmed: c.selected},
 				}
@@ -111,7 +111,7 @@ func (c *ConfirmDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the dialog
 func (c *ConfirmDialog) View() string {
-	width, height := c.Clamp(60, 12)
+	width, height := c.Size()
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            c.styles,
 		width:             width,
@@ -141,21 +141,21 @@ func (c *ConfirmDialog) View() string {
 			b.WriteString(noStyle.Render("[N] No"))
 			return strings.TrimRight(b.String(), "\n")
 		},
-			renderRight: func(mode dialogLayoutMode, width, height int) string {
-				bindings := []keybinds.Binding{
-					{Key: "←/→/Tab", Description: "switch"},
-					{Key: "Y", Description: "confirm"},
-					{Key: "N", Description: "cancel"},
-				}
-				if !c.requireExplicitYNKey {
-					bindings = append(bindings,
-						keybinds.Binding{Key: "Enter", Description: "confirm"},
-						keybinds.Binding{Key: "Esc", Description: "cancel"},
-					)
-				}
-				return renderDialogActions(c.styles, bindings)
-			},
-		})
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			bindings := []keybinds.Binding{
+				{Key: "←/→/Tab", Description: "switch"},
+				{Key: "Y", Description: "confirm"},
+				{Key: "N", Description: "cancel"},
+			}
+			if !c.requireExplicitYNKey {
+				bindings = append(bindings,
+					keybinds.Binding{Key: "Enter", Description: "confirm"},
+					keybinds.Binding{Key: "Esc", Description: "cancel"},
+				)
+			}
+			return renderDialogActions(c.styles, bindings)
+		},
+	})
 }
 
 // Title returns the dialog title
@@ -165,8 +165,6 @@ func (c *ConfirmDialog) Title() string {
 
 // Size returns the dialog dimensions
 func (c *ConfirmDialog) Size() (width, height int) {
-	// Width: enough for message and buttons
-	// Height: message + buttons + footer + padding
 	messageLines := len(strings.Split(c.message, "\n"))
-	return 60, messageLines + 6
+	return c.Clamp(60, max(12, messageLines+11))
 }

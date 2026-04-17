@@ -109,7 +109,7 @@ func (m *DevServerOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the overlay
 func (m *DevServerOverlay) View() string {
-	width, height := m.Clamp(72, m.viewHeight())
+	width, height := m.dialogSize()
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            m.styles,
 		width:             width,
@@ -142,8 +142,11 @@ func (m *DevServerOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (m *DevServerOverlay) Size() (width, height int) {
-	view := m.View()
-	return lipgloss.Width(view), lipgloss.Height(view)
+	return m.dialogSize()
+}
+
+func (m *DevServerOverlay) dialogSize() (width, height int) {
+	return m.ClampResponsive(72, m.viewHeight())
 }
 
 // moveCursorDown moves the cursor to the next server

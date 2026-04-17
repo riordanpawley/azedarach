@@ -145,7 +145,7 @@ func (p *PRCreateOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the form
 func (p *PRCreateOverlay) View() string {
-	width, height := p.Clamp(80, 28)
+	width, height := p.Size()
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            p.styles,
 		width:             width,
@@ -310,5 +310,5 @@ func (p *PRCreateOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (p *PRCreateOverlay) Size() (width, height int) {
-	return p.ClampResponsive(80, 28)
+	return p.Clamp(80, 28)
 }

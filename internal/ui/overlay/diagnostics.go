@@ -165,7 +165,7 @@ func (d *DiagnosticsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the diagnostics panel
 func (d *DiagnosticsPanel) View() string {
-	width, height := d.Clamp(1000, 34)
+	width, height := d.Size()
 	title := d.Title()
 	if d.currentDiagnostics == nil {
 		title = "System Diagnostics"
@@ -210,7 +210,7 @@ func (d *DiagnosticsPanel) Title() string {
 
 // Size returns the overlay dimensions
 func (d *DiagnosticsPanel) Size() (width, height int) {
-	return d.ClampResponsive(100, 34)
+	return d.Clamp(1000, 34)
 }
 
 // refreshCmd returns a command to refresh diagnostics
