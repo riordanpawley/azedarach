@@ -17,6 +17,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from] [--json]`, `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from] [--json]`
   - Fanout orchestration:
   - `az issue fanout --input ./fanout.json`, `az issue fanout --input ./fanout.json --apply`, `az issue fanout ready --root <issue-id> --json`, `az issue fanout drift --issue <issue-id> --worktree <path> --fail-on-out`
+  - `az issue fanout` consumes a pre-authored `fanout.json` tree; it does not infer/split child issues from free-form issue text.
   - Mailbox coordination:
   - `az mail send --parent <parent-issue> --type dependency-ready --body "..."`, `az mail list --parent <parent-issue> --since <seq> --json`, `az mail watch --parent <parent-issue> --since <seq> --jsonl`
   - Spec traceability:
