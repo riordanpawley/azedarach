@@ -723,14 +723,6 @@ func reconcileDaemonGitState(projectDir string, deps *Dependencies, hookName str
 		}
 		return nil
 	}
-	appendHookLogEventBestEffort(deps, protocol.HookLogEvent{
-		Hook:     strings.TrimSpace(hookName),
-		Worktree: worktreeRoot,
-		Source:   "githooks.hook",
-		Level:    "info",
-		Message:  "reconciling daemon git state",
-	})
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	err = refreshDaemonGitStatusWithRetry(ctx, deps, worktreeRoot)

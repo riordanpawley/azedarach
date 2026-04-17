@@ -237,6 +237,24 @@ func TestGitHooksNotifyCommandRefreshesDaemonGitStatus(t *testing.T) {
 	if gotWorktree != wantWorktree {
 		t.Fatalf("worktree = %q (canon %q), want %q (canon %q)", body.Worktree, gotWorktree, projectDir, wantWorktree)
 	}
+
+	hookLogMessages := make([]string, 0, 2)
+	for _, req := range reqs {
+		if req.Command != protocol.CommandHookLogAppend {
+			continue
+		}
+		var appendBody protocol.HookLogAppendCommandBody
+		if err := json.Unmarshal(req.Body, &appendBody); err != nil {
+			t.Fatalf("unmarshal hook log append body: %v", err)
+		}
+		hookLogMessages = append(hookLogMessages, appendBody.Event.Message)
+	}
+	if len(hookLogMessages) != 1 {
+		t.Fatalf("hook log append count = %d, want 1; messages=%v", len(hookLogMessages), hookLogMessages)
+	}
+	if hookLogMessages[0] != "refreshed daemon git state" {
+		t.Fatalf("hook log message = %q, want %q", hookLogMessages[0], "refreshed daemon git state")
+	}
 }
 
 func TestGitHooksNotifyCommandPrefersCurrentWorktreeWhenProjectDirUnset(t *testing.T) {
