@@ -142,6 +142,13 @@ func (w *WorktreeManager) DeleteWithOptions(ctx context.Context, issueID string,
 			}
 		}
 		if isWorktreeAlreadyRemovedError(err) {
+			exists, statErr := pathExists(worktree.Path)
+			if statErr != nil {
+				return fmt.Errorf("failed to verify worktree path after remove error: %w", statErr)
+			}
+			if exists {
+				return fmt.Errorf("worktree path still exists but git reports it is not a working tree: %s", worktree.Path)
+			}
 			w.logger.Info("worktree already removed", "issueID", issueID, "path", worktree.Path)
 			err = nil
 		}
@@ -301,6 +308,17 @@ func isWorktreeAlreadyRemovedError(err error) bool {
 	}
 	msg := strings.ToLower(strings.TrimSpace(err.Error()))
 	return strings.Contains(msg, "not a working tree")
+}
+
+func pathExists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
 }
 
 func makeTreeUserWritable(root string) error {

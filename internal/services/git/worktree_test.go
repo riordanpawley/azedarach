@@ -332,6 +332,37 @@ branch refs/heads/az/issue-123
 	mock.AssertCommand(t, "branch -D az/issue-123")
 }
 
+func TestWorktreeManager_DeleteWithOptions_FailsWhenNotAWorkingTreeButPathStillExists(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	issueID := "issue-123"
+	worktreePath := filepath.Join(repoDir, "test-repo-issue-123")
+	require.NoError(t, os.MkdirAll(worktreePath, 0o755))
+
+	mock := NewMockRunner()
+	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "list" {
+			return fmt.Sprintf(`worktree %s
+HEAD abc123
+branch refs/heads/main
+
+worktree %s
+HEAD def456
+branch refs/heads/az/issue-123
+`, repoDir, worktreePath), nil
+		}
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "remove" {
+			return "", fmt.Errorf("git worktree remove %s failed: exit status 128: fatal: '%s' is not a working tree", worktreePath, worktreePath)
+		}
+		return "", nil
+	}
+
+	manager := NewWorktreeManager(mock, repoDir, slog.Default())
+	err := manager.DeleteWithOptions(ctx, issueID, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "worktree path still exists but git reports it is not a working tree")
+}
+
 func TestWorktreeManager_Delete_NotFound(t *testing.T) {
 	ctx := context.Background()
 	repoDir := "/home/user/test-repo"
