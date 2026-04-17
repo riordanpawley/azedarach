@@ -226,7 +226,7 @@ func (i *ImageAttachOverlay) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd
 // View renders the overlay
 func (i *ImageAttachOverlay) View() string {
 	if i.inputActive {
-		width, height := i.Clamp(84, 18)
+		width, height := i.ClampResponsive(84, 18)
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
 			width:             width,
@@ -252,7 +252,7 @@ func (i *ImageAttachOverlay) View() string {
 
 	switch i.mode {
 	case imageAttachModeList:
-		width, height := i.Clamp(84, i.listModeHeight())
+		width, height := i.ClampResponsive(84, i.listModeHeight())
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
 			width:             width,
@@ -272,7 +272,7 @@ func (i *ImageAttachOverlay) View() string {
 			},
 		})
 	case imageAttachModePreview:
-		width, height := i.Clamp(84, 24)
+		width, height := i.ClampResponsive(84, 24)
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
 			width:             width,

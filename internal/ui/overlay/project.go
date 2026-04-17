@@ -144,7 +144,7 @@ func (m *ProjectSelector) View() string {
 
 // viewList renders the project list
 func (m *ProjectSelector) viewList() string {
-	width, height := m.Clamp(88, m.listModeHeight())
+	width, height := m.dialogSize()
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            m.styles,
 		width:             width,
@@ -266,20 +266,15 @@ func (m *ProjectSelector) Title() string {
 
 // Size returns the overlay dimensions
 func (m *ProjectSelector) Size() (width, height int) {
+	return m.dialogSize()
+}
+
+func (m *ProjectSelector) dialogSize() (width, height int) {
 	if m.mode == projectModeActions {
-		return 50, 10
+		return m.Clamp(50, 10)
 	}
 
-	view := m.viewList()
-	width = lipgloss.Width(view)
-	height = lipgloss.Height(view)
-	if width < 52 {
-		width = 52
-	}
-	if height < 10 {
-		height = 10
-	}
-	return width, height
+	return m.ClampResponsive(88, m.listModeHeight())
 }
 
 func (m *ProjectSelector) UsesAppFrame() bool {

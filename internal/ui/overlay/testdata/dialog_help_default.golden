@@ -1,27 +1,27 @@
 ╭──────────────────────────────────────────────────────────────────────────────────────────────╮
 │Help                                                                                          │
 │──────────────────────────────────────────────────────────────────────────────────────────────│
+││ Card Header Legend:                                                                         │
+││ ────────────────────────────────────────────────                                            │
+││   P0/P1/P2/...          Issue priority badge                                                │
+││   T/F/B/E/C             Type badge letter (Task/Feature/Bug/Epic/Chore)                     │
+││   ● B 23h / ◐ W 5m      Session icon + state code + elapsed                                 │
+││   T / Td / ✓            Runtime assets; T/Td are hidden when session badge is shown         │
+││   ↑2 / ↓1               Git ahead / behind upstream                                         │
+││   ✎                     Uncommitted file changes present                                    │
+││   +171/-65              Added/removed line counts                                           │
+││   M:running(40%)        Pending operation progress                                          │
+││   [1/3]                 Completed child issues / total children                             │
+││                                                                                             │
 ││ Navigation:                                                                                 │
-││ ───────────────────────────────────────────                                                 │
-││   h/l              Move between columns                                                     │
-││   j/k              Move up/down in column                                                   │
-││   ctrl+u / ctrl+d  Half-page scroll                                                         │
-││   g then g/e/h/l   Jump in board                                                            │
-││   g then w/p/s     Jump / projects / spec                                                   │
-││   gg/ge            Jump to top/bottom of column                                             │
-││   gh/gl            Jump to first/last column                                                │
+││ ────────────────────────────────────────────────                                            │
+││   h/l                   Move between columns                                                │
+││   j/k                   Move up/down in column                                              │
+││   ctrl+u / ctrl+d       Half-page scroll                                                    │
+││   g then g/e/h/l        Jump in board                                                       │
+││   g then w/p/s          Jump / projects / spec                                              │
+││   gg/ge                 Jump to top/bottom of column                                        │
+││   gh/gl                 Jump to first/last column                                           │
 ││                                                                                             │
 ││ Workspace:                                                                                  │
-││ ───────────────────────────────────────────                                                 │
-││   Space            Open task workspace (details + actions)                                  │
-││   Enter            Drill into epic children                                                 │
-││                                                                                             │
-││ Modes:                                                                                      │
-││ ───────────────────────────────────────────                                                 │
-││   g                Goto mode                                                                │
-││   /                Search                                                                   │
-││   f                Filter menu                                                              │
-││   ,                Sort menu                                                                │
-││   v                Select mode                                                              │
-││   ?                Help (this screen)                                                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯

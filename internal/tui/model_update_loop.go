@@ -890,6 +890,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("Task created: %s", msg.taskID),
 			Expires: time.Now().Add(3 * time.Second),
 		})
+		if strings.TrimSpace(msg.attachmentWarning) != "" {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: msg.attachmentWarning,
+				Expires: time.Now().Add(6 * time.Second),
+			})
+		}
 
 		// Reload issues to show new task
 		return m, m.loadIssuesCmd()
@@ -908,9 +915,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
+		message := fmt.Sprintf("PR created: %s", msg.url)
+		if strings.TrimSpace(msg.title) != "" {
+			message = fmt.Sprintf("PR created: %s (%s)", msg.title, msg.url)
+		}
 		m.addToast(Toast{
 			Level:   ToastSuccess,
-			Message: fmt.Sprintf("PR created: %s", msg.url),
+			Message: message,
 			Expires: time.Now().Add(5 * time.Second),
 		})
 		return m, nil
@@ -928,6 +939,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Expires: time.Now().Add(3 * time.Second),
 			})
 			return m, m.appendAttachmentNoteCmd(msg.Attachment)
+		} else if msg.Action == "staged" {
+			filename := "image"
+			if msg.Attachment != nil && strings.TrimSpace(msg.Attachment.Filename) != "" {
+				filename = msg.Attachment.Filename
+			}
+			m.addToast(Toast{
+				Level:   ToastSuccess,
+				Message: fmt.Sprintf("Image staged for new task: %s", filename),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
 		} else if msg.Action == "deleted" {
 			m.addToast(Toast{
 				Level:   ToastSuccess,
@@ -1035,7 +1057,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		return m, m.openOverlay(overlay.NewPRCreateOverlay(msg.branch, m.config.Git.BaseBranch, msg.issueID))
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: "Generating PR title/body with AI and creating PR...",
+			Expires: time.Now().Add(4 * time.Second),
+		})
+		return m, m.createPRWithAICmd(msg)
 
 	case openPRResultMsg:
 		if msg.err != nil {

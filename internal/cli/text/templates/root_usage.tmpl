@@ -19,7 +19,9 @@ Commands:
   dev status <issue-id>      Show dev server status for an issue
   dev list                   List running dev servers across issues
   project <subcommand>       Project registry management (list|add|remove)
+  impl list                          List implementations currently assigned to issues
   impl delete --confirm <implementation>  Remove an implementation assignment from all issues
+  impl migrate <from> <to>           Migrate implementation assignments from one value to another
   operation <subcommand>     Inspect/cancel background operations (get|list|logs|cancel)
   log [sources]              Tail/stream daemon, TUI, and CLI log files
   opencode <init|plugin>     Manage OpenCode integration
@@ -34,12 +36,14 @@ Commands:
   issue update [--project <project-id>] [--id <id>] [--json] [<id>] [--title ...] [--description ...] [--append-notes ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields
   issue close [--project <project-id>] [--id <id>] [--json] [<id>]      Close an issue (sets status=closed)
   issue delete [--project <project-id>] [--id <id>] [--json] [<id>] --confirm  Permanently delete an issue
+  issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]  Attach an image to an issue
+  issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]  Remove an image attachment from an issue
   issue dep add [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--json]  Add a dependency edge
   issue dep remove [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--confirm] [--json]  Remove a dependency edge
   issue dep bulk apply [--project <project-id>] --input <path> [--dry-run] [--json]  Apply dependency edge mutations
   issue bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Execute bulk create operations
   issue bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Execute bulk update operations
-  issue fanout [--project <project-id>] --input <path> [--apply] [--json]  Plan/apply nested issue fanout
+  issue fanout [--project <project-id>] --input <path> [--apply] [--json]  Plan/apply a pre-authored nested issue tree from JSON
   issue fanout ready [--project <project-id>] --root <issue-id> [--json]  List runnable leaf issues under a fanout root
   issue fanout drift [--project <project-id>] --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
   mail <send|list|watch>  Mailbox event operations for orchestrator/worker coordination
@@ -76,6 +80,8 @@ Examples:
   az issue update --id az-123 --append-notes "Follow-up detail"
   az issue close --id az-123
   az issue delete --id az-123 --confirm
+  az issue image add --issue-id az-123 --path ./screenshot.png
+  az issue image remove --issue-id az-123 --attachment-id 1a2b3c4d
   az issue dep add --issue-id az-456 --depends-on-id az-123 --type blocks
   az issue dep remove --issue-id az-456 --depends-on-id az-123 --type blocks --confirm
   az issue dep bulk apply --input ./dep-bulk.json --dry-run --json
@@ -109,7 +115,9 @@ Examples:
   az project list
   az project add /path/to/project --name azedarach
   az project remove azedarach
+  az impl list
   az impl delete --confirm ts-opentui
+  az impl migrate ts-opentui default
   az operation list --limit 20
   az operation get --id op-123 --wait
   az operation logs --id op-123

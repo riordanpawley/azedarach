@@ -1,11 +1,14 @@
 Azedarach Session Primer
 
 Primer evidence key: `{{ .PrimeEvidenceKey }}`
+{{ if .ActiveIssueID }}
+Active issue ID: `{{ .ActiveIssueID }}`
+{{ end }}
 
 - First 3 commands for this session:
   - {{ if .ActiveIssueID }}`az issue get {{ .ActiveIssueID }}`{{ else }}`az issue get <issue-id>`{{ end }}
   - {{ if .SpecEnabled }}`az spec` (inspect linked requirements before behavior changes){{ else }}Spec workflows are disabled for this project (skip spec checks).{{ end }}
-  - `az issue create "Title"` (auto-parents under `AZEDARACH_ISSUE_ID`; use `--deferred` for non-immediate follow-ups)
+  - Optional (only when splitting work): `az issue create "Child task"` to break the active issue into smaller, independently actionable chunks
 - How to use `az` command map:
   - Issue lifecycle:
   - `az issue list --limit 20`, `az issue list --status in_progress --limit 20`, `az issue get <issue-id>`, `az issue create "Child task" [--json]` (auto-parent), `az issue create --deferred "Later task" [--json]`, `az issue update <issue-id> --status in_progress|blocked|open [--json]`, `az issue close <issue-id> [--json]`
@@ -14,6 +17,7 @@ Primer evidence key: `{{ .PrimeEvidenceKey }}`
   - `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from] [--json]`, `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from] [--json]`
   - Fanout orchestration:
   - `az issue fanout --input ./fanout.json`, `az issue fanout --input ./fanout.json --apply`, `az issue fanout ready --root <issue-id> --json`, `az issue fanout drift --issue <issue-id> --worktree <path> --fail-on-out`
+  - `az issue fanout` consumes a pre-authored `fanout.json` tree; it does not infer/split child issues from free-form issue text.
   - Mailbox coordination:
   - `az mail send --parent <parent-issue> --type dependency-ready --body "..."`, `az mail list --parent <parent-issue> --since <seq> --json`, `az mail watch --parent <parent-issue> --since <seq> --jsonl`
   - Spec traceability:
@@ -40,6 +44,7 @@ Primer evidence key: `{{ .PrimeEvidenceKey }}`
 {{ end }}- Keep issue context current as you work:
   - Update design/notes as implementation decisions change.
   - Use status/priority/labels flags when state changes materially.
+- Overlay edits: check `az spec` requirements/links before behavior changes, keep `View()` and `Size()` aligned, validate default and narrow viewports, and update goldens when rendered output changes. If the work is docs/process-only, record `Spec impact: none (docs/process-only)` in issue notes.
 - `az issue --help`
 {{ if .SpecGuardrails }}- Spec workflow:
 {{ .SpecGuardrails }}

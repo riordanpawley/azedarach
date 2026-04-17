@@ -97,6 +97,13 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		return c.db, nil
 	}
 
+	dbDir := filepath.Dir(c.dbPath)
+	if dbDir != "" && dbDir != "." {
+		if err := os.MkdirAll(dbDir, 0o755); err != nil {
+			return nil, c.wrapError("open-db", "", fmt.Errorf("create db directory: %w", err))
+		}
+	}
+
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_txlock=immediate", filepath.ToSlash(c.dbPath))
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -264,6 +271,12 @@ func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
 			id,
 			title,
 			COALESCE(description, ''),
+			COALESCE(notes, ''),
+			COALESCE(design, ''),
+			COALESCE(acceptance, ''),
+			COALESCE(assignee, ''),
+			COALESCE(labels_json, '[]'),
+			estimate,
 			status,
 			priority,
 			issue_type,
@@ -314,6 +327,12 @@ func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error
 			id,
 			title,
 			COALESCE(description, ''),
+			COALESCE(notes, ''),
+			COALESCE(design, ''),
+			COALESCE(acceptance, ''),
+			COALESCE(assignee, ''),
+			COALESCE(labels_json, '[]'),
+			estimate,
 			status,
 			priority,
 			issue_type,
@@ -344,6 +363,12 @@ func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
 			i.id,
 			i.title,
 			COALESCE(i.description, ''),
+			COALESCE(i.notes, ''),
+			COALESCE(i.design, ''),
+			COALESCE(i.acceptance, ''),
+			COALESCE(i.assignee, ''),
+			COALESCE(i.labels_json, '[]'),
+			i.estimate,
 			i.status,
 			i.priority,
 			i.issue_type,
@@ -925,11 +950,20 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 		var statusRaw string
 		var typeRaw string
 		var priorityRaw int
+		var assigneeRaw string
+		var labelsRaw string
+		var estimateRaw sql.NullInt64
 		var implementationsRaw string
 		if err := rows.Scan(
 			&task.ID,
 			&task.Title,
 			&task.Description,
+			&task.Notes,
+			&task.Design,
+			&task.Acceptance,
+			&assigneeRaw,
+			&labelsRaw,
+			&estimateRaw,
 			&statusRaw,
 			&priorityRaw,
 			&typeRaw,
@@ -944,6 +978,12 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 		task.Type = domain.TaskType(typeRaw)
 		task.CreatedAt = parseTimestamp(createdRaw)
 		task.UpdatedAt = parseTimestamp(updatedRaw)
+		task.Assignee = strings.TrimSpace(assigneeRaw)
+		task.Labels = decodeStringSliceJSON(labelsRaw)
+		if estimateRaw.Valid {
+			estimateValue := int(estimateRaw.Int64)
+			task.Estimate = &estimateValue
+		}
 		task.Implementations = decodeImplementationsJSON(implementationsRaw)
 
 		tasks = append(tasks, task)
@@ -998,6 +1038,12 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 			i.id,
 			i.title,
 			COALESCE(i.description, ''),
+			COALESCE(i.notes, ''),
+			COALESCE(i.design, ''),
+			COALESCE(i.acceptance, ''),
+			COALESCE(i.assignee, ''),
+			COALESCE(i.labels_json, '[]'),
+			i.estimate,
 			i.status,
 			i.priority,
 			i.issue_type,
@@ -1033,6 +1079,9 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 			statusRaw          string
 			typeRaw            string
 			priorityRaw        int
+			assigneeRaw        string
+			labelsRaw          string
+			estimateRaw        sql.NullInt64
 			implementationsRaw string
 			sessionStateRaw    string
 			sessionStartedRaw  string
@@ -1044,6 +1093,12 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 			&task.ID,
 			&task.Title,
 			&task.Description,
+			&task.Notes,
+			&task.Design,
+			&task.Acceptance,
+			&assigneeRaw,
+			&labelsRaw,
+			&estimateRaw,
 			&statusRaw,
 			&priorityRaw,
 			&typeRaw,
@@ -1064,6 +1119,12 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 		task.Type = domain.TaskType(typeRaw)
 		task.CreatedAt = parseTimestamp(createdRaw)
 		task.UpdatedAt = parseTimestamp(updatedRaw)
+		task.Assignee = strings.TrimSpace(assigneeRaw)
+		task.Labels = decodeStringSliceJSON(labelsRaw)
+		if estimateRaw.Valid {
+			estimateValue := int(estimateRaw.Int64)
+			task.Estimate = &estimateValue
+		}
 		task.Implementations = decodeImplementationsJSON(implementationsRaw)
 
 		worktreePath = strings.TrimSpace(worktreePath)
@@ -1071,17 +1132,17 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 			task.HasWorktree = true
 		}
 		sessionStateRaw = strings.TrimSpace(sessionStateRaw)
-			if sessionStateRaw != "" && sessionStateRaw != "stopped" {
-				startedAt := parseOptionalTimestamp(sessionStartedRaw)
-				if startedAt == nil {
-					startedAt = parseOptionalTimestamp(sessionUpdatedRaw)
-				}
-				task.Session = &domain.Session{
-					IssueID:   task.ID,
-					State:     mapRuntimeSessionState(sessionStateRaw),
-					StartedAt: startedAt,
-					Worktree:  worktreePath,
-				}
+		if sessionStateRaw != "" && sessionStateRaw != "stopped" {
+			startedAt := parseOptionalTimestamp(sessionStartedRaw)
+			if startedAt == nil {
+				startedAt = parseOptionalTimestamp(sessionUpdatedRaw)
+			}
+			task.Session = &domain.Session{
+				IssueID:   task.ID,
+				State:     mapRuntimeSessionState(sessionStateRaw),
+				StartedAt: startedAt,
+				Worktree:  worktreePath,
+			}
 			task.HasTmuxSession = true
 		}
 
@@ -1119,17 +1180,21 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 }
 
 func decodeImplementationsJSON(raw string) []string {
+	return decodeStringSliceJSON(raw)
+}
+
+func decodeStringSliceJSON(raw string) []string {
 	if strings.TrimSpace(raw) == "" {
 		return nil
 	}
-	var impls []string
-	if err := json.Unmarshal([]byte(raw), &impls); err != nil {
+	var values []string
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
 		return nil
 	}
-	if len(impls) == 0 {
+	if len(values) == 0 {
 		return nil
 	}
-	return impls
+	return values
 }
 
 func parseOptionalTimestamp(raw string) *time.Time {

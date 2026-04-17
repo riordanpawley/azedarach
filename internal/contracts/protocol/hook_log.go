@@ -23,6 +23,7 @@ type HookLogListCommandBody struct {
 
 type HookLogEvent struct {
 	ProjectID naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	IssueID   naming.IssueID   `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
 	Hook      string           `json:"hook,omitempty" msgpack:"hook,omitempty"`
 	Worktree  string           `json:"worktree,omitempty" msgpack:"worktree,omitempty"`
 	Source    string           `json:"source,omitempty" msgpack:"source,omitempty"`

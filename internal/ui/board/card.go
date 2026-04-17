@@ -14,6 +14,8 @@ import (
 
 // CardContentHeight is the single source of truth for rendered card content height.
 const CardContentHeight = 4
+const narrowCardExtraLines = 1
+const expandedHeaderWorstCase = "P2 CHE-1234 T Φ9 ◐ W 12h 34m ✓ M:queued(100%) ↑99 ↓99 ✎ +999/-999 [99/99]"
 
 const tmuxSessionToken = "T"
 const descendantTmuxSessionToken = "Td"
@@ -84,7 +86,6 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	if maxLineLen < 1 {
 		maxLineLen = 1
 	}
-
 	// Cursor indicator (▶ symbol when cursor is on this card)
 	cursor := ""
 	if isCursor {
@@ -110,68 +111,114 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 		sessionRow = renderSessionStatus(task.Session, s)
 	}
 	sessionCompact := renderSessionStatusCompact(task.Session)
-	runtimeRow := renderRuntimeSignals(runtimeSignals, s)
-	runtimeCompact := renderRuntimeSignalsCompact(runtimeSignals, s)
-
-	headerLine := strings.Join(headerParts, " ")
-	preferCompact := maxLineLen < 44
-	for _, token := range []struct {
+	visibleRuntimeSignals := runtimeSignalsForHeader(task.Session, runtimeSignals)
+	runtimeRow := renderRuntimeSignals(visibleRuntimeSignals, s)
+	runtimeCompact := renderRuntimeSignalsCompact(visibleRuntimeSignals, s)
+	headerTitle := strings.Join(headerParts, " ")
+	headerTokens := []struct {
 		full    string
 		compact string
 	}{
 		{full: sessionRow, compact: sessionCompact},
 		{full: runtimeRow, compact: runtimeCompact},
 		{full: renderChildProgressValue(childProgress, s), compact: renderChildProgressValue(childProgress, s)},
-	} {
-		headerLine = appendHeaderToken(headerLine, maxLineLen, token.full, token.compact, preferCompact)
+	}
+	preferCompact := maxLineLen < 44
+	headerLines := []string{headerTitle}
+	cardHeight := CardContentHeight
+	if shouldExpandCardHeader(maxLineLen) {
+		headerLines = []string{headerTitle, ""}
+		cardHeight += narrowCardExtraLines
+	}
+	for _, token := range headerTokens {
+		if appendHeaderToken(headerLines, maxLineLen, token.full, token.full, false) {
+			continue
+		}
+		appendHeaderToken(headerLines, maxLineLen, token.full, token.compact, preferCompact)
 	}
 
-	titleLines := renderTitleBodyLines(task.Title, maxLineLen, CardContentHeight-1)
+	titleLines := renderTitleBodyLines(task.Title, maxLineLen, cardHeight-len(headerLines))
 
 	// Compose fixed content rows to guarantee stable card height.
-	lines := make([]string, 0, CardContentHeight)
-	lines = append(lines, ansi.Truncate(headerLine, maxLineLen, "…"))
+	lines := make([]string, 0, cardHeight)
+	for _, headerLine := range headerLines {
+		lines = append(lines, ansi.Truncate(headerLine, maxLineLen, "…"))
+	}
 	for _, line := range titleLines {
 		lines = append(lines, ansi.Truncate(line, maxLineLen, "…"))
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 
-	return cardStyle.Render(content)
+	return cardStyle.Height(cardHeight).Render(content)
 }
 
-func appendHeaderToken(headerLine string, maxLineLen int, full string, compact string, preferCompact bool) string {
+func shouldExpandCardHeader(maxLineLen int) bool {
+	return ansi.StringWidth(expandedHeaderWorstCase) > maxLineLen
+}
+
+func appendHeaderToken(headerLines []string, maxLineLen int, full string, compact string, preferCompact bool) bool {
 	if full == "" && compact == "" {
-		return headerLine
+		return true
 	}
 
-	try := func(token string) (string, bool) {
+	try := func(lineIdx int, token string) bool {
 		if token == "" {
-			return "", false
+			return false
 		}
-		candidate := headerLine + " " + token
+		if lineIdx < 0 || lineIdx >= len(headerLines) {
+			return false
+		}
+		candidate := strings.TrimSpace(headerLines[lineIdx])
+		if candidate != "" {
+			candidate += " "
+		}
+		candidate += token
 		if ansi.StringWidth(candidate) <= maxLineLen {
-			return candidate, true
+			headerLines[lineIdx] = candidate
+			return true
 		}
-		return "", false
+		return false
+	}
+
+	appendToAnyLine := func(token string) bool {
+		for i := range headerLines {
+			if try(i, token) {
+				return true
+			}
+		}
+		return false
 	}
 
 	if preferCompact {
-		if candidate, ok := try(compact); ok {
-			return candidate
+		if appendToAnyLine(compact) {
+			return true
 		}
-		if candidate, ok := try(full); ok {
-			return candidate
+		if appendToAnyLine(full) {
+			return true
 		}
-		return headerLine
+		return false
 	}
 
-	if candidate, ok := try(full); ok {
-		return candidate
+	if appendToAnyLine(full) {
+		return true
 	}
-	if candidate, ok := try(compact); ok {
-		return candidate
+	if appendToAnyLine(compact) {
+		return true
 	}
-	return headerLine
+	return false
+}
+
+func runtimeSignalsForHeader(session *domain.Session, signals *RuntimeSignals) *RuntimeSignals {
+	if signals == nil {
+		return nil
+	}
+	normalized := *signals
+	if session != nil {
+		// Session badge already communicates active session state; omit duplicate tmux tokens.
+		normalized.HasTmuxSession = false
+		normalized.HasDescendantTmuxSession = false
+	}
+	return &normalized
 }
 
 func renderTaskTypeBadge(taskType domain.TaskType, s *styles.Styles) string {

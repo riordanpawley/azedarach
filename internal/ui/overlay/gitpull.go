@@ -58,7 +58,7 @@ func (g *GitPullOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (g *GitPullOverlay) View() string {
-	width, height := g.Clamp(64, 12)
+	width, height := g.Size()
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            g.styles,
 		width:             width,
@@ -102,5 +102,5 @@ func (g *GitPullOverlay) Title() string {
 }
 
 func (g *GitPullOverlay) Size() (width, height int) {
-	return 60, 8
+	return g.ClampResponsive(64, 12)
 }

@@ -97,6 +97,22 @@ fd "filename" -t f internal cmd
 8. Keep tests deterministic, table-driven, and mock via interfaces.
 9. Prefer context cancellation for goroutine lifecycle and buffered channels when capacity is known.
 
+## Overlay Sizing Contract
+
+1. `View()` must render using `Size()` for geometry. Do not recompute widths or heights in `View()`.
+2. `Size()` owns sizing policy. Standard overlays should use a responsive clamp helper; fullscreen or special-case overlays must document why they do not.
+3. Validate both the default viewport and a narrow viewport. Standard overlays should stay within bounds and remain readable when space is constrained.
+4. Keep golden coverage aligned with the contract: one default-size snapshot and one small-viewport snapshot for standard overlays.
+5. Review for anti-patterns: hardcoded dialog widths, duplicated sizing math, `View()` reading terminal size directly, or small-screen behavior left implicit.
+6. The canonical checklist lives in [docs/12-overlay-sizing.md](docs/12-overlay-sizing.md).
+
+## Overlay Edit Guardrails
+
+1. Before changing overlay behavior, check `az spec` requirements/links for the active issue and align the spec first. If the work is docs/process-only, note `Spec impact: none (docs/process-only)` in issue notes.
+2. Keep `View()` and `Size()` aligned: `View()` consumes `Size()` geometry, and `Size()` owns the responsive policy.
+3. After any overlay behavior edit, validate the default viewport and a narrow viewport.
+4. If rendered UI output changes, update or add the matching goldens in the same change.
+
 ## Thin-Client Boundary Contract (Critical)
 
 1. Daemon owns durable/project lifecycle authority; CLI/TUI are clients for presentation/runtime-ephemeral state.

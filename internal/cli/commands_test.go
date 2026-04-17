@@ -1493,6 +1493,87 @@ func TestParseImplDeleteArgs(t *testing.T) {
 	}
 }
 
+func TestParseImplListArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		errContains string
+	}{
+		{name: "valid"},
+		{
+			name:        "rejects extra args",
+			args:        []string{"extra"},
+			errContains: "usage: az impl list",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseImplListArgs(tt.args)
+			if tt.errContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseImplListArgs() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestParseImplMigrateArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		want        ImplMigrateOptions
+		errContains string
+	}{
+		{
+			name: "valid",
+			args: []string{"ts-opentui", "default"},
+			want: ImplMigrateOptions{
+				FromImplementation: "ts-opentui",
+				ToImplementation:   "default",
+			},
+		},
+		{
+			name:        "missing destination",
+			args:        []string{"ts-opentui"},
+			errContains: "usage: az impl migrate <from-implementation> <to-implementation>",
+		},
+		{
+			name:        "same source and destination",
+			args:        []string{"default", "default"},
+			errContains: "source and destination implementations must differ",
+		},
+		{
+			name:        "extra args",
+			args:        []string{"ts-opentui", "default", "extra"},
+			errContains: "usage: az impl migrate <from-implementation> <to-implementation>",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseImplMigrateArgs(tt.args)
+			if tt.errContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseImplMigrateArgs() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("ParseImplMigrateArgs() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestExportCommandWritesStdoutByDefault(t *testing.T) {
 	var gotReq protocol.RequestEnvelope
 	payload := mustSnapshotPayloadJSON(t, protocol.SnapshotPayload{
@@ -1865,6 +1946,133 @@ func TestImplDeleteCommandRemovesAssignmentsAcrossIssues(t *testing.T) {
 	}
 	if len(got["az-2"]) != 0 {
 		t.Fatalf("az-2 implementations = %+v, want empty", got["az-2"])
+	}
+	if _, ok := got["az-3"]; ok {
+		t.Fatalf("did not expect az-3 update, got map=%+v", got)
+	}
+}
+
+func TestImplListCommandPrintsSortedUniqueImplementations(t *testing.T) {
+	tasks := []domain.Task{
+		{ID: "az-1", Implementations: []string{"go-bubbletea", "ts-opentui"}},
+		{ID: "az-2", Implementations: []string{"default", "go-bubbletea"}},
+		{ID: "az-3", Implementations: []string{" ", ""}},
+	}
+	payload, err := marshalTaskListBody(tasks)
+	if err != nil {
+		t.Fatalf("marshal tasks: %v", err)
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskList {
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            payload,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return ImplListCommand(deps, ImplListOptions{})
+	})
+	if !strings.Contains(output, "Implementations: 3") {
+		t.Fatalf("output missing implementation count: %q", output)
+	}
+	if !strings.Contains(output, "default\ngo-bubbletea\nts-opentui\n") {
+		t.Fatalf("output missing sorted implementation rows: %q", output)
+	}
+}
+
+func TestImplMigrateCommandMigratesAssignmentsAcrossIssues(t *testing.T) {
+	tasks := []domain.Task{
+		{ID: "az-1", Title: "One", Description: "desc", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, Implementations: []string{"default", "ts-opentui"}},
+		{ID: "az-2", Title: "Two", Description: "desc", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeBug, Implementations: []string{"ts-opentui", "go-bubbletea", "default"}},
+		{ID: "az-3", Title: "Three", Description: "desc", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeFeature, Implementations: []string{"go-bubbletea"}},
+	}
+	payload, err := marshalTaskListBody(tasks)
+	if err != nil {
+		t.Fatalf("marshal tasks: %v", err)
+	}
+
+	type updateReq struct {
+		TaskID string `json:"task_id"`
+		daemonclient.TaskUpdateParams
+	}
+	updates := make([]updateReq, 0, 2)
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            payload,
+					}, nil
+				case daemonclient.CommandTaskUpdate:
+					var body updateReq
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal update request: %v", err)
+					}
+					updates = append(updates, body)
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return ImplMigrateCommand(deps, ImplMigrateOptions{FromImplementation: "ts-opentui", ToImplementation: "default"})
+	})
+	if !strings.Contains(output, "Migrated implementation assignment: ts-opentui -> default") {
+		t.Fatalf("output missing migrate summary: %q", output)
+	}
+	if !strings.Contains(output, "Updated issues: 2") {
+		t.Fatalf("output missing update count: %q", output)
+	}
+	if len(updates) != 2 {
+		t.Fatalf("update call count = %d, want 2", len(updates))
+	}
+
+	got := map[string][]string{}
+	for _, update := range updates {
+		got[update.TaskID] = update.Implementations
+	}
+	if !reflect.DeepEqual(got["az-1"], []string{"default"}) {
+		t.Fatalf("az-1 implementations = %+v, want [default]", got["az-1"])
+	}
+	if !reflect.DeepEqual(got["az-2"], []string{"default", "go-bubbletea"}) {
+		t.Fatalf("az-2 implementations = %+v, want [default go-bubbletea]", got["az-2"])
 	}
 	if _, ok := got["az-3"]; ok {
 		t.Fatalf("did not expect az-3 update, got map=%+v", got)
@@ -2414,6 +2622,46 @@ func TestParseIssueDependencyArgs(t *testing.T) {
 	}
 }
 
+func TestParseIssueImageArgs(t *testing.T) {
+	add, err := ParseIssueImageAddArgs([]string{"--issue-id", "az-1", "--path", "image.png"})
+	if err != nil {
+		t.Fatalf("ParseIssueImageAddArgs() error = %v", err)
+	}
+	if add.IssueID != "az-1" || add.SourcePath != "image.png" {
+		t.Fatalf("ParseIssueImageAddArgs() = %+v", add)
+	}
+	add, err = ParseIssueImageAddArgs([]string{"az-2", "--path", "snap.png"})
+	if err != nil {
+		t.Fatalf("ParseIssueImageAddArgs() interspersed args error = %v", err)
+	}
+	if add.IssueID != "az-2" || add.SourcePath != "snap.png" {
+		t.Fatalf("ParseIssueImageAddArgs() interspersed args = %+v", add)
+	}
+	_, err = ParseIssueImageAddArgs([]string{"--impl", "go-bubbletea", "az-1", "image.png"})
+	if err == nil || !strings.Contains(err.Error(), "--impl is not supported for issue image add") {
+		t.Fatalf("expected impl forbidden error for image add, got %v", err)
+	}
+
+	remove, err := ParseIssueImageRemoveArgs([]string{"--issue-id", "az-1", "--attachment-id", "abc123"})
+	if err != nil {
+		t.Fatalf("ParseIssueImageRemoveArgs() error = %v", err)
+	}
+	if remove.IssueID != "az-1" || remove.AttachmentID != "abc123" {
+		t.Fatalf("ParseIssueImageRemoveArgs() = %+v", remove)
+	}
+	remove, err = ParseIssueImageRemoveArgs([]string{"az-2", "--attachment-id", "def456"})
+	if err != nil {
+		t.Fatalf("ParseIssueImageRemoveArgs() interspersed args error = %v", err)
+	}
+	if remove.IssueID != "az-2" || remove.AttachmentID != "def456" {
+		t.Fatalf("ParseIssueImageRemoveArgs() interspersed args = %+v", remove)
+	}
+	_, err = ParseIssueImageRemoveArgs([]string{"--impl", "go-bubbletea", "az-1", "abc123"})
+	if err == nil || !strings.Contains(err.Error(), "--impl is not supported for issue image remove") {
+		t.Fatalf("expected impl forbidden error for image remove, got %v", err)
+	}
+}
+
 func TestParseIssueBulkArgs(t *testing.T) {
 	create, err := ParseIssueBulkCreateArgs([]string{"--impl", "go-bubbletea", "--input", "bulk-create.json", "--dry-run"})
 	if err != nil {
@@ -2582,22 +2830,34 @@ func TestResolveIssueWriteImplementation(t *testing.T) {
 
 func TestIssueListCommandUsesDaemonTaskList(t *testing.T) {
 	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	estimateThree := 3
+	estimateEight := 8
 	tasks := []domain.Task{
 		{
-			ID:        "az-2",
-			Title:     "Older issue",
-			Status:    domain.StatusOpen,
-			Priority:  domain.P2,
-			Type:      domain.TypeTask,
+			ID:       "az-2",
+			Title:    "Older issue",
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+			Assignee: "alex",
+			Estimate: &estimateThree,
+			Implementations: []string{
+				"default",
+			},
 			CreatedAt: now,
 			UpdatedAt: now,
 		},
 		{
-			ID:        "az-1",
-			Title:     "Newest issue",
-			Status:    domain.StatusInProgress,
-			Priority:  domain.P1,
-			Type:      domain.TypeFeature,
+			ID:       "az-1",
+			Title:    "Newest issue",
+			Status:   domain.StatusInProgress,
+			Priority: domain.P1,
+			Type:     domain.TypeFeature,
+			Assignee: "sam",
+			Estimate: &estimateEight,
+			Implementations: []string{
+				"go-bubbletea",
+			},
 			CreatedAt: now,
 			UpdatedAt: now.Add(1 * time.Hour),
 		},
@@ -2636,8 +2896,13 @@ func TestIssueListCommandUsesDaemonTaskList(t *testing.T) {
 	if gotReq.Command != daemonclient.CommandTaskList {
 		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandTaskList)
 	}
-	if !strings.Contains(output, "ID") || !strings.Contains(output, "STATUS") || !strings.Contains(output, "PRIORITY") || !strings.Contains(output, "TITLE") {
+	if !strings.Contains(output, "ID") || !strings.Contains(output, "STATUS") || !strings.Contains(output, "PRIORITY") || !strings.Contains(output, "ASSIGNEE") || !strings.Contains(output, "EST") || !strings.Contains(output, "IMPL") || !strings.Contains(output, "TITLE") {
 		t.Fatalf("output missing header: %q", output)
+	}
+	for _, want := range []string{"go-bubbletea", "default", "sam", "alex", "8", "3"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q: %q", want, output)
+		}
 	}
 	if first, second := strings.Index(output, "az-1"), strings.Index(output, "az-2"); !(first >= 0 && second > first) {
 		t.Fatalf("expected newest issue first in output: %q", output)
@@ -2968,6 +3233,127 @@ func TestIssueGetCommandJSON(t *testing.T) {
 	})
 	if !strings.Contains(output, "\"id\": \"az-5\"") || !strings.Contains(output, "\"title\": \"Lookup issue\"") {
 		t.Fatalf("output missing issue json fields: %q", output)
+	}
+}
+
+func TestIssueGetCommandTextIncludesNotes(t *testing.T) {
+	now := time.Date(2026, 3, 25, 11, 0, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{
+			ID:          "az-5",
+			Title:       "Lookup issue",
+			Description: "Detailed context",
+			Notes:       "First note line\nSecond note line",
+			Status:      domain.StatusBlocked,
+			Priority:    domain.P0,
+			Type:        domain.TypeBug,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		},
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := marshalTaskListBody(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        4,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-5"})
+	})
+	if !strings.Contains(output, "Notes:\nFirst note line\nSecond note line\n") {
+		t.Fatalf("output missing notes section: %q", output)
+	}
+}
+
+func TestIssueGetCommandTextIncludesRuntimeGitAndImplementations(t *testing.T) {
+	now := time.Date(2026, 3, 25, 11, 0, 0, 0, time.UTC)
+	started := now.Add(-15 * time.Minute)
+	estimate := 13
+	tasks := []domain.Task{
+		{
+			ID:                    "az-5",
+			Title:                 "Lookup issue",
+			Design:                "Design notes",
+			Acceptance:            "- acceptance one",
+			Assignee:              "sam",
+			Labels:                []string{"cli", "notes"},
+			Estimate:              &estimate,
+			Status:                domain.StatusBlocked,
+			Priority:              domain.P0,
+			Type:                  domain.TypeBug,
+			Implementations:       []string{"default", "go-bubbletea"},
+			Session:               &domain.Session{IssueID: "az-5", State: domain.SessionBusy, StartedAt: &started},
+			HasTmuxSession:        true,
+			HasWorktree:           true,
+			HasUncommittedChanges: true,
+			GitAdditions:          12,
+			GitDeletions:          3,
+			GitAheadCount:         2,
+			GitBehindCount:        1,
+			CreatedAt:             now,
+			UpdatedAt:             now,
+		},
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := marshalTaskListBody(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        4,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-5"})
+	})
+	for _, want := range []string{
+		"Implementations: default, go-bubbletea",
+		"Assignee: sam",
+		"Labels: cli, notes",
+		"Estimate: 13",
+		"Runtime: session=busy since 2026-03-25T10:45:00Z, worktree=yes",
+		"Git: dirty, +12/-3, ahead=2 behind=1",
+		"Design:\nDesign notes\n",
+		"Acceptance:\n- acceptance one\n",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q: %q", want, output)
+		}
 	}
 }
 
@@ -4208,6 +4594,108 @@ func TestIssueDependencyCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 }
 
+func TestIssueImageCommands(t *testing.T) {
+	now := time.Date(2026, 4, 14, 12, 0, 0, 0, time.UTC)
+	tempRepo := t.TempDir()
+	sourceImage := filepath.Join(t.TempDir(), "screenshot.png")
+	if err := os.WriteFile(sourceImage, []byte("fake-png"), 0o644); err != nil {
+		t.Fatalf("write source image: %v", err)
+	}
+
+	var appendNotesReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := marshalTaskListBody([]domain.Task{
+						{
+							ID:        "az-1",
+							Title:     "Task",
+							Status:    domain.StatusOpen,
+							CreatedAt: now,
+							UpdatedAt: now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        1,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskAppendNotes:
+					appendNotesReq = req
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   tempRepo,
+	}
+
+	addOut := captureStdout(t, func() error {
+		return IssueImageAddCommand(deps, IssueImageAddOptions{
+			IssueID:    "az-1",
+			SourcePath: sourceImage,
+		})
+	})
+	if !strings.Contains(addOut, "Attached image to issue az-1:") {
+		t.Fatalf("add output = %q", addOut)
+	}
+	if appendNotesReq.Command != daemonclient.CommandTaskAppendNotes {
+		t.Fatalf("append notes command = %q, want %q", appendNotesReq.Command, daemonclient.CommandTaskAppendNotes)
+	}
+	var appendBody daemonclient.TaskAppendNotesRequest
+	if err := json.Unmarshal(appendNotesReq.Body, &appendBody); err != nil {
+		t.Fatalf("unmarshal append notes body: %v", err)
+	}
+	if appendBody.TaskID != "az-1" || !strings.Contains(appendBody.Line, ".azedarach/images/az-1/") {
+		t.Fatalf("append body = %+v", appendBody)
+	}
+
+	files, err := filepath.Glob(filepath.Join(tempRepo, ".azedarach", "images", "az-1", "*-screenshot.png"))
+	if err != nil {
+		t.Fatalf("glob attachments: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("attachment files = %v, want 1 file", files)
+	}
+	filename := filepath.Base(files[0])
+	parts := strings.SplitN(filename, "-", 2)
+	if len(parts) != 2 {
+		t.Fatalf("attachment filename = %q, want <id>-<name> format", filename)
+	}
+
+	removeOut := captureStdout(t, func() error {
+		return IssueImageRemoveCommand(deps, IssueImageRemoveOptions{
+			IssueID:      "az-1",
+			AttachmentID: parts[0],
+		})
+	})
+	if !strings.Contains(removeOut, "Removed image attachment "+parts[0]+" from issue az-1") {
+		t.Fatalf("remove output = %q", removeOut)
+	}
+	if _, statErr := os.Stat(files[0]); !os.IsNotExist(statErr) {
+		t.Fatalf("attachment file still exists after remove: statErr=%v", statErr)
+	}
+}
+
 func TestIssueBulkCommandsUseApplyCommand(t *testing.T) {
 	tempDir := t.TempDir()
 	bulkCreatePath := filepath.Join(tempDir, "bulk-create.json")
@@ -4504,6 +4992,12 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue delete [--project <project-id>] [--id <id>] [--json] [<id>] --confirm") {
 		t.Fatalf("usage missing issue delete command: %q", output)
 	}
+	if !strings.Contains(output, "issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]") {
+		t.Fatalf("usage missing issue image add command: %q", output)
+	}
+	if !strings.Contains(output, "issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]") {
+		t.Fatalf("usage missing issue image remove command: %q", output)
+	}
 	if !strings.Contains(output, "issue dep add [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--json]") {
 		t.Fatalf("usage missing issue dep add command: %q", output)
 	}
@@ -4531,11 +5025,23 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "impl delete --confirm <implementation>") {
 		t.Fatalf("usage missing impl delete command: %q", output)
 	}
+	if !strings.Contains(output, "impl list") {
+		t.Fatalf("usage missing impl list command: %q", output)
+	}
+	if !strings.Contains(output, "impl migrate <from> <to>") {
+		t.Fatalf("usage missing impl migrate command: %q", output)
+	}
 	if !strings.Contains(output, "az sync --all") {
 		t.Fatalf("usage missing sync example: %q", output)
 	}
+	if !strings.Contains(output, "az impl list") {
+		t.Fatalf("usage missing impl list example: %q", output)
+	}
 	if !strings.Contains(output, "az impl delete --confirm ts-opentui") {
 		t.Fatalf("usage missing impl delete example: %q", output)
+	}
+	if !strings.Contains(output, "az impl migrate ts-opentui default") {
+		t.Fatalf("usage missing impl migrate example: %q", output)
 	}
 	if !strings.Contains(output, "operation <subcommand>") {
 		t.Fatalf("usage missing operation command family: %q", output)
@@ -4576,6 +5082,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "AZEDARACH_PRIMER_KEY:azedarach-prime-v1") {
 		t.Fatalf("prime output missing evidence key: %q", output)
 	}
+	if strings.Contains(output, "Active issue ID:") {
+		t.Fatalf("prime output should not print active issue id when unset: %q", output)
+	}
 	if !strings.Contains(output, "No active issue is preselected") {
 		t.Fatalf("prime output missing no-issue guardrail: %q", output)
 	}
@@ -4599,6 +5108,12 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "`az session start <issue-id>`, `az session status [issue-id]`, `az daemon start|stop|restart`, `az export --format json [--out <path>]`") {
 		t.Fatalf("prime output missing session/runtime command examples: %q", output)
+	}
+	if !strings.Contains(output, "Optional (only when splitting work): `az issue create \"Child task\"`") {
+		t.Fatalf("prime output missing optional child-task split guidance: %q", output)
+	}
+	if strings.Contains(output, "`az issue create \"Title\"` (auto-parents under `AZEDARACH_ISSUE_ID`; use `--deferred` for non-immediate follow-ups)") {
+		t.Fatalf("prime output should not require unconditional child issue creation: %q", output)
 	}
 }
 
@@ -4653,6 +5168,9 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 		return PrimeCommand(deps)
 	})
 
+	if !strings.Contains(output, "Active issue ID: `az-1`") {
+		t.Fatalf("prime output missing explicit active issue id: %q", output)
+	}
 	if !strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=az-1)") {
 		t.Fatalf("prime output missing active issue section: %q", output)
 	}

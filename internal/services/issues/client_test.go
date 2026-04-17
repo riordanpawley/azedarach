@@ -30,6 +30,12 @@ func TestClient_CRUDLifecycle(t *testing.T) {
 		Description: "Implement native Go sqlite path",
 		Type:        domain.TypeFeature,
 		Priority:    domain.P1,
+		Assignee:    "sam",
+		Labels:      []string{"cli", "form"},
+		Design:      "Use sqlite-backed issue store",
+		Notes:       "Initial note",
+		Acceptance:  "CRUD works",
+		Estimate:    intPtr(5),
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, createdID)
@@ -39,6 +45,13 @@ func TestClient_CRUDLifecycle(t *testing.T) {
 	require.Len(t, tasks, 1)
 	assert.Equal(t, naming.IssueID(createdID), tasks[0].ID)
 	assert.Equal(t, "Create SQLite store client", tasks[0].Title)
+	assert.Equal(t, "sam", tasks[0].Assignee)
+	assert.Equal(t, []string{"cli", "form"}, tasks[0].Labels)
+	assert.Equal(t, "Use sqlite-backed issue store", tasks[0].Design)
+	assert.Equal(t, "Initial note", tasks[0].Notes)
+	assert.Equal(t, "CRUD works", tasks[0].Acceptance)
+	require.NotNil(t, tasks[0].Estimate)
+	assert.Equal(t, 5, *tasks[0].Estimate)
 
 	searchResults, err := client.Search(ctx, "SQLite")
 	require.NoError(t, err)
@@ -82,6 +95,10 @@ func TestClient_CRUDLifecycle(t *testing.T) {
 	tasks, err = client.List(ctx)
 	require.NoError(t, err)
 	assert.Empty(t, tasks)
+}
+
+func intPtr(value int) *int {
+	return &value
 }
 
 func TestClient_ListWithRuntimeReturnsJoinedProjectionFields(t *testing.T) {
@@ -824,6 +841,21 @@ func TestClient_DBHandleReusedUntilExplicitClose(t *testing.T) {
 	third, err := client.dbHandle()
 	require.NoError(t, err)
 	assert.NotSame(t, first, third)
+}
+
+func TestClient_DBHandleCreatesMissingParentDirectory(t *testing.T) {
+	base := t.TempDir()
+	dbPath := filepath.Join(base, "missing", "nested", "azedarach.db")
+	client := NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		require.NoError(t, client.CloseDB())
+	})
+
+	_, err := client.dbHandle()
+	require.NoError(t, err)
+
+	_, statErr := os.Stat(filepath.Dir(dbPath))
+	require.NoError(t, statErr)
 }
 
 func TestClient_ConfiguresSQLitePragmas(t *testing.T) {

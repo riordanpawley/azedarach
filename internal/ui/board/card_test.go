@@ -585,7 +585,7 @@ func TestRenderCard_MetadataOnFirstLine(t *testing.T) {
 	if first == "" {
 		t.Fatalf("expected metadata line containing issue id, got: %s", result)
 	}
-	for _, token := range []string{"P2", "CHE-3002", " T ", " W ", "2d 2h", tmuxSessionToken, worktreeToken, "✎", "+12/-3", "[1/7]"} {
+	for _, token := range []string{"P2", "CHE-3002", " T ", " W ", "2d 2h", worktreeToken, "✎", "+12/-3", "[1/7]"} {
 		if !strings.Contains(first, token) {
 			t.Fatalf("first line should contain %q, got: %s", token, first)
 		}
@@ -597,7 +597,7 @@ func TestRenderCard_MetadataOnFirstLine(t *testing.T) {
 	}
 }
 
-func TestRenderCard_MetadataCompactsOnNarrowWidth(t *testing.T) {
+func TestRenderCard_NarrowWidthUsesSecondHeaderRowBeforeCompaction(t *testing.T) {
 	s := styles.New()
 	startedAt := time.Now().Add(-90 * time.Minute)
 	task := domain.Task{
@@ -622,21 +622,151 @@ func TestRenderCard_MetadataCompactsOnNarrowWidth(t *testing.T) {
 
 	result := stripANSI(renderCard(task, signals, false, false, 40, &ChildProgress{Total: 7, Done: 1}, nil, false, s))
 	lines := strings.Split(result, "\n")
-	first := ""
-	for _, line := range lines {
+	firstIdx := -1
+	for i, line := range lines {
 		if strings.Contains(line, "CHE-3010") {
-			first = line
+			firstIdx = i
 			break
 		}
 	}
+	if firstIdx < 0 || firstIdx+1 >= len(lines) {
+		t.Fatalf("expected at least two header rows and a title row, got: %q", result)
+	}
+	first := lines[firstIdx]
 	if first == "" {
 		t.Fatalf("expected metadata line containing issue id, got: %s", result)
 	}
 	if !strings.Contains(first, "P2") || !strings.Contains(first, "CHE-3010") || !strings.Contains(first, " T ") {
 		t.Fatalf("first line must preserve core tokens, got: %s", first)
 	}
-	if strings.Contains(first, " W ") || strings.Contains(first, "+12/-3") {
-		t.Fatalf("first line should compact verbose metadata at narrow width, got: %s", first)
+	header := lines[firstIdx] + " " + lines[firstIdx+1]
+	for _, token := range []string{" W ", "✎", "+12/-3", "[1/7]"} {
+		if !strings.Contains(header, token) {
+			t.Fatalf("expected token %q to survive across narrow two-row header, got: %q", token, header)
+		}
+	}
+}
+
+func TestRenderCard_NarrowWidthAddsOneCardRowAndOneHeaderRow(t *testing.T) {
+	s := styles.New()
+	startedAt := time.Now().Add(-80 * time.Minute)
+	task := domain.Task{
+		ID:       "CHE-4010",
+		Title:    "narrow-height-check",
+		Status:   domain.StatusInProgress,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+		Session: &domain.Session{
+			IssueID:   "CHE-4010",
+			State:     domain.SessionWaiting,
+			StartedAt: &startedAt,
+		},
+	}
+	signals := &RuntimeSignals{
+		HasWorktree:           true,
+		HasUncommittedChanges: true,
+		GitAdditions:          9,
+		GitDeletions:          3,
+	}
+	progress := &ChildProgress{Total: 9, Done: 2}
+
+	wide := stripANSI(renderCard(task, signals, false, false, 80, progress, nil, false, s))
+	narrow := stripANSI(renderCard(task, signals, false, false, 22, progress, nil, false, s))
+
+	wideLines := strings.Split(wide, "\n")
+	narrowLines := strings.Split(narrow, "\n")
+	if len(narrowLines) != len(wideLines)+1 {
+		t.Fatalf("narrow card height = %d, want wide+1 (%d)", len(narrowLines), len(wideLines)+1)
+	}
+
+	wideHeader, wideTitle := wideLines[0], wideLines[1]
+	narrowHeader1, narrowHeader2, narrowTitle := narrowLines[0], narrowLines[1], narrowLines[2]
+	if strings.TrimSpace(narrowHeader1) == "" || strings.TrimSpace(narrowHeader2) == "" {
+		t.Fatalf("expected two non-empty header rows for narrow card, got: %q / %q", narrowHeader1, narrowHeader2)
+	}
+	if strings.TrimSpace(narrowTitle) == "" || strings.TrimSpace(wideTitle) == "" {
+		t.Fatalf("expected non-empty title rows, got narrow=%q wide=%q", narrowTitle, wideTitle)
+	}
+	if strings.TrimSpace(wideHeader) == strings.TrimSpace(narrowHeader2) {
+		t.Fatalf("expected additional narrow header row content, got wideHeader=%q narrowHeader2=%q", wideHeader, narrowHeader2)
+	}
+}
+
+func TestRenderCard_NarrowWidthKeepsVerboseHeaderTokensAcrossTwoRows(t *testing.T) {
+	s := styles.New()
+	startedAt := time.Now().Add(-75 * time.Minute)
+	task := domain.Task{
+		ID:       "CHE-4012",
+		Title:    "narrow-verbose-header-check",
+		Status:   domain.StatusInProgress,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+		Session: &domain.Session{
+			IssueID:   "CHE-4012",
+			State:     domain.SessionWaiting,
+			StartedAt: &startedAt,
+		},
+	}
+	signals := &RuntimeSignals{
+		HasWorktree:           true,
+		HasUncommittedChanges: true,
+		GitAdditions:          12,
+		GitDeletions:          3,
+	}
+
+	narrow := stripANSI(renderCard(task, signals, false, false, 25, &ChildProgress{Total: 7, Done: 1}, nil, false, s))
+	lines := strings.Split(narrow, "\n")
+	firstIdx := -1
+	for i, line := range lines {
+		if strings.Contains(line, "CHE-4012") {
+			firstIdx = i
+			break
+		}
+	}
+	if firstIdx < 0 || firstIdx+1 >= len(lines) {
+		t.Fatalf("expected at least two header rows and title row, got: %q", narrow)
+	}
+	header := lines[firstIdx] + " " + lines[firstIdx+1]
+	for _, token := range []string{" W ", "✎", "+12/-3", "[1/7]"} {
+		if !strings.Contains(header, token) {
+			t.Fatalf("expected verbose token %q to be preserved in narrow two-row header, got: %q", token, header)
+		}
+	}
+}
+
+func TestRenderCard_HeaderOverflowAddsExtraRows(t *testing.T) {
+	s := styles.New()
+	startedAt := time.Now().Add(-70 * time.Minute)
+	task := domain.Task{
+		ID:       "CHE-4011",
+		Title:    "header-overflow-check",
+		Status:   domain.StatusInProgress,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+		Session: &domain.Session{
+			IssueID:   "CHE-4011",
+			State:     domain.SessionWaiting,
+			StartedAt: &startedAt,
+		},
+	}
+	signals := &RuntimeSignals{
+		HasWorktree:           true,
+		HasUncommittedChanges: true,
+		GitAdditions:          12,
+		GitDeletions:          4,
+	}
+	progress := &ChildProgress{Total: 8, Done: 1}
+
+	narrow := stripANSI(renderCard(task, signals, false, false, 25, progress, nil, false, s))
+	wide := stripANSI(renderCard(task, signals, false, false, 80, progress, nil, false, s))
+
+	narrowLines := strings.Split(narrow, "\n")
+	wideLines := strings.Split(wide, "\n")
+	if len(narrowLines) != len(wideLines)+1 {
+		t.Fatalf("narrow card height = %d, want wide+1 (%d)", len(narrowLines), len(wideLines)+1)
+	}
+	if strings.TrimSpace(narrowLines[1]) == "" {
+		t.Fatalf("expected second header row when header overflows, got empty row in %q", narrow)
 	}
 }
 
@@ -725,6 +855,35 @@ func TestRenderRuntimeSignalsCompact(t *testing.T) {
 			t.Fatalf("renderRuntimeSignalsCompact(...) = %q, missing directional ahead/behind pairing", got)
 		}
 	})
+}
+
+func TestRuntimeSignalsForHeader_SuppressesTmuxMarkersWithSession(t *testing.T) {
+	startedAt := time.Now().Add(-10 * time.Minute)
+	session := &domain.Session{
+		IssueID:   "az-1",
+		State:     domain.SessionBusy,
+		StartedAt: &startedAt,
+	}
+	signals := &RuntimeSignals{
+		HasTmuxSession:           true,
+		HasDescendantTmuxSession: true,
+		HasWorktree:              true,
+		GitAheadCount:            1,
+	}
+
+	got := runtimeSignalsForHeader(session, signals)
+	if got == nil {
+		t.Fatalf("runtimeSignalsForHeader(...) returned nil")
+	}
+	if got.HasTmuxSession || got.HasDescendantTmuxSession {
+		t.Fatalf("runtimeSignalsForHeader(...) should hide tmux markers when session exists: %+v", got)
+	}
+	if !got.HasWorktree || got.GitAheadCount != 1 {
+		t.Fatalf("runtimeSignalsForHeader(...) should preserve non-tmux runtime signals: %+v", got)
+	}
+	if !signals.HasTmuxSession || !signals.HasDescendantTmuxSession {
+		t.Fatalf("runtimeSignalsForHeader(...) must not mutate original signals: %+v", signals)
+	}
 }
 
 func TestBuildChildProgress(t *testing.T) {

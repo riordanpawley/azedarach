@@ -60,6 +60,7 @@ const (
 	eventTickerCapacity      = 64
 	eventLogCapacity         = 256
 	eventSummaryMaxRunes     = 140
+	orphanedWorktreeCleanupTimeout = 2 * time.Minute
 )
 
 var ansiEscapeLinePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
@@ -308,6 +309,7 @@ func (m *Model) reconcileCursorAfterIssuesRefresh() {
 		return
 	}
 	m.nav.SelectTask(col.Tasks[pos.Task].ID.String(), pos.Column)
+	m.ensureCursorVisible(columns)
 }
 
 func (m *Model) applyPendingCreatedTaskSelection() {
@@ -550,8 +552,15 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case keybinds.ActionCreateTask: // Create task
+		var parentID *string
+		if drillDownParentID := strings.TrimSpace(m.drillDownParentID); drillDownParentID != "" {
+			parentID = &drillDownParentID
+		}
 		if m.createTaskOverlay == nil {
-			m.createTaskOverlay = overlay.NewCreateTaskOverlayWithParentAndImplOptions(nil, m.availableTaskImplementations())
+			m.createTaskOverlay = overlay.NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(parentID, m.availableTaskImplementations(), m.attachmentService)
+		} else {
+			m.createTaskOverlay.SetAttachmentService(m.attachmentService)
+			m.createTaskOverlay.SetParentID(parentID)
 		}
 		return m, m.openOverlay(m.createTaskOverlay)
 
@@ -1481,6 +1490,9 @@ func (m *Model) rebuildProjectScopedServices() {
 	m.gitSyncService = deps.GitSyncService
 	m.gitClient = deps.GitDiffClient
 	m.attachmentService = deps.AttachmentService
+	if m.createTaskOverlay != nil {
+		m.createTaskOverlay.SetAttachmentService(m.attachmentService)
+	}
 	m.diagnosticsService = deps.DiagnosticsService
 	m.projectRegistry = deps.ProjectRegistry
 }
@@ -3348,7 +3360,17 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			Estimate:        msg.Estimate,
 			ParentID:        parentID,
 		})
-		return taskCreatedResultMsg{taskID: taskID, err: err, isUpdate: false}
+		if err != nil {
+			return taskCreatedResultMsg{taskID: taskID, err: err, isUpdate: false}
+		}
+
+		attachmentWarning := m.attachStagedAttachments(ctx, taskID, msg.AttachmentPaths)
+		return taskCreatedResultMsg{
+			taskID:            taskID,
+			err:               nil,
+			isUpdate:          false,
+			attachmentWarning: attachmentWarning,
+		}
 	}
 }
 
@@ -3620,9 +3642,43 @@ func (m Model) getTaskChildren(parentID string) []domain.Task {
 }
 
 type taskCreatedResultMsg struct {
-	taskID   string
-	err      error
-	isUpdate bool
+	taskID            string
+	err               error
+	isUpdate          bool
+	attachmentWarning string
+}
+
+func (m Model) attachStagedAttachments(ctx context.Context, issueID string, paths []string) string {
+	if strings.TrimSpace(issueID) == "" || len(paths) == 0 || m.attachmentService == nil {
+		return ""
+	}
+
+	failed := make([]string, 0)
+	for _, rawPath := range paths {
+		path := strings.TrimSpace(rawPath)
+		if path == "" {
+			continue
+		}
+
+		attached, err := m.attachmentService.Attach(ctx, issueID, path)
+		if err != nil {
+			failed = append(failed, filepath.Base(path))
+			continue
+		}
+
+		if attached != nil && m.daemonClient != nil {
+			if line := formatAttachmentNoteLine(attached); strings.TrimSpace(line) != "" {
+				_ = m.daemonClient.AppendTaskNotes(ctx, issueID, line)
+			}
+		}
+
+		_ = os.Remove(path)
+	}
+
+	if len(failed) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Task created, but %d image attachment(s) failed: %s", len(failed), strings.Join(failed, ", "))
 }
 
 func (m Model) createTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
@@ -3632,25 +3688,98 @@ func (m Model) createTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 // PR creation with overlay
 
 type prCreatedResultMsg struct {
-	url string
-	err error
+	url   string
+	title string
+	err   error
 }
 
 type openPROverlayResultMsg struct {
-	branch  string
-	issueID string
-	err     error
+	branch   string
+	issueID  string
+	worktree string
+	err      error
 }
 
-// openPROverlayCmd gets the current branch and opens the PR creation overlay
+// openPROverlayCmd resolves branch/worktree context for automated PR creation.
 func (m Model) openPROverlayCmd(worktree, issueID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		branch, err := m.resolveWorktreeBranch(ctx, worktree, issueID)
+		resolvedWorktree := strings.TrimSpace(worktree)
+		if resolvedWorktree == "" {
+			if fallback, resolveErr := m.resolveIssueWorktreePath(ctx, issueID); resolveErr == nil {
+				resolvedWorktree = strings.TrimSpace(fallback)
+			}
+		}
+
+		branch, err := m.resolveWorktreeBranch(ctx, resolvedWorktree, issueID)
 		if err != nil {
 			return openPROverlayResultMsg{err: err}
 		}
-		return openPROverlayResultMsg{branch: branch, issueID: issueID}
+		return openPROverlayResultMsg{
+			branch:   branch,
+			issueID:  issueID,
+			worktree: resolvedWorktree,
+		}
+	}
+}
+
+func (m Model) createPRWithAICmd(msg openPROverlayResultMsg) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		if m.daemonClient == nil {
+			return prCreatedResultMsg{err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		issueTitle := ""
+		issueDescription := ""
+		for i := range m.tasks {
+			if m.tasks[i].ID.String() == msg.issueID {
+				issueTitle = strings.TrimSpace(m.tasks[i].Title)
+				issueDescription = strings.TrimSpace(m.tasks[i].Description)
+				break
+			}
+		}
+
+		baseBranch := strings.TrimSpace(m.resolveBaseBranch())
+		if baseBranch == "" {
+			baseBranch = "main"
+		}
+
+		generated, err := generatePRContent(ctx, prGenerationRequest{
+			Worktree:         msg.worktree,
+			IssueID:          msg.issueID,
+			IssueTitle:       issueTitle,
+			IssueDescription: issueDescription,
+			Branch:           msg.branch,
+			BaseBranch:       baseBranch,
+			Tool:             strings.TrimSpace(m.config.CLITool),
+		})
+		if err != nil {
+			return prCreatedResultMsg{err: err}
+		}
+
+		draft := true
+		if m.config != nil {
+			draft = m.config.PR.DraftByDefault
+		}
+		result, err := m.daemonClient.CreatePullRequest(ctx, daemonclient.CreatePullRequestParams{
+			Title:      generated.Title,
+			Body:       generated.Body,
+			Branch:     msg.branch,
+			BaseBranch: baseBranch,
+			Draft:      draft,
+			IssueID:    msg.issueID,
+		})
+		if err != nil {
+			return prCreatedResultMsg{err: err}
+		}
+
+		return prCreatedResultMsg{
+			url:   result.PullRequest.URL,
+			title: generated.Title,
+		}
 	}
 }
 
@@ -4326,7 +4455,9 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 				m.logger.Warn("daemon client unavailable for orphaned worktree cleanup")
 				continue
 			}
-			removed, err := m.daemonClient.CleanupOrphanedWorktrees(ctx)
+			cleanupCtx, cleanupCancel := context.WithTimeout(ctx, orphanedWorktreeCleanupTimeout)
+			removed, err := m.daemonClient.CleanupOrphanedWorktrees(cleanupCtx)
+			cleanupCancel()
 			if err != nil {
 				m.logger.Warn("failed to clean orphaned worktrees", "error", err)
 				continue

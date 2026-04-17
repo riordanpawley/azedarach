@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/logstream"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/attachment"
 )
 
 var newLauncher = func(repoDir, socketPath string) daemonStarter {
@@ -92,6 +94,13 @@ type LogOptions struct {
 type ImplDeleteOptions struct {
 	Implementation string
 	Confirm        bool
+}
+
+type ImplListOptions struct{}
+
+type ImplMigrateOptions struct {
+	FromImplementation string
+	ToImplementation   string
 }
 
 type IssueListOptions struct {
@@ -188,6 +197,20 @@ type IssueDependencyBulkApplyOptions struct {
 	InputPath string
 	DryRun    bool
 	JSON      bool
+}
+
+type IssueImageAddOptions struct {
+	Project    string
+	IssueID    string
+	SourcePath string
+	JSON       bool
+}
+
+type IssueImageRemoveOptions struct {
+	Project      string
+	IssueID      string
+	AttachmentID string
+	JSON         bool
 }
 
 type IssueBulkCreateOptions struct {
@@ -935,6 +958,39 @@ func ParseImplDeleteArgs(args []string) (ImplDeleteOptions, error) {
 	return opts, nil
 }
 
+func ParseImplListArgs(args []string) (ImplListOptions, error) {
+	fs := flag.NewFlagSet("impl list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return ImplListOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return ImplListOptions{}, fmt.Errorf("usage: az impl list")
+	}
+	return ImplListOptions{}, nil
+}
+
+func ParseImplMigrateArgs(args []string) (ImplMigrateOptions, error) {
+	opts := ImplMigrateOptions{}
+	fs := flag.NewFlagSet("impl migrate", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return ImplMigrateOptions{}, err
+	}
+	if fs.NArg() != 2 {
+		return ImplMigrateOptions{}, fmt.Errorf("usage: az impl migrate <from-implementation> <to-implementation>")
+	}
+	opts.FromImplementation = strings.TrimSpace(fs.Arg(0))
+	opts.ToImplementation = strings.TrimSpace(fs.Arg(1))
+	if opts.FromImplementation == "" || opts.ToImplementation == "" {
+		return ImplMigrateOptions{}, fmt.Errorf("usage: az impl migrate <from-implementation> <to-implementation>")
+	}
+	if opts.FromImplementation == opts.ToImplementation {
+		return ImplMigrateOptions{}, fmt.Errorf("source and destination implementations must differ")
+	}
+	return opts, nil
+}
+
 func ParseOperationGetArgs(args []string) (OperationGetOptions, error) {
 	opts := OperationGetOptions{}
 	fs := flag.NewFlagSet("operation get", flag.ContinueOnError)
@@ -1549,6 +1605,86 @@ func ParseIssueDependencyBulkApplyArgs(args []string) (IssueDependencyBulkApplyO
 	return opts, nil
 }
 
+func ParseIssueImageAddArgs(args []string) (IssueImageAddOptions, error) {
+	opts := IssueImageAddOptions{}
+	issueIDFlag := ""
+	pathFlag := ""
+	implFlag := ""
+	fs := flag.NewFlagSet("issue image add", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&pathFlag, "path", "", "source image path (named alternative to positional)")
+	fs.BoolVar(&opts.JSON, "json", false, "output image add result as JSON")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return IssueImageAddOptions{}, err
+	}
+	if fs.NArg() > 2 {
+		return IssueImageAddOptions{}, fmt.Errorf("usage: az issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]")
+	}
+	if strings.TrimSpace(implFlag) != "" {
+		return IssueImageAddOptions{}, fmt.Errorf("--impl is not supported for issue image add; issue implementations are already assigned")
+	}
+	if fs.NArg() >= 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if fs.NArg() >= 2 {
+		opts.SourcePath = fs.Arg(1)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(pathFlag) != "" {
+		opts.SourcePath = strings.TrimSpace(pathFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.SourcePath) == "" {
+		return IssueImageAddOptions{}, fmt.Errorf("usage: az issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]")
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
+func ParseIssueImageRemoveArgs(args []string) (IssueImageRemoveOptions, error) {
+	opts := IssueImageRemoveOptions{}
+	issueIDFlag := ""
+	attachmentIDFlag := ""
+	implFlag := ""
+	fs := flag.NewFlagSet("issue image remove", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&attachmentIDFlag, "attachment-id", "", "attachment id (named alternative to positional)")
+	fs.BoolVar(&opts.JSON, "json", false, "output image remove result as JSON")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return IssueImageRemoveOptions{}, err
+	}
+	if fs.NArg() > 2 {
+		return IssueImageRemoveOptions{}, fmt.Errorf("usage: az issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]")
+	}
+	if strings.TrimSpace(implFlag) != "" {
+		return IssueImageRemoveOptions{}, fmt.Errorf("--impl is not supported for issue image remove; issue implementations are already assigned")
+	}
+	if fs.NArg() >= 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if fs.NArg() >= 2 {
+		opts.AttachmentID = fs.Arg(1)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(attachmentIDFlag) != "" {
+		opts.AttachmentID = strings.TrimSpace(attachmentIDFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.AttachmentID) == "" {
+		return IssueImageRemoveOptions{}, fmt.Errorf("usage: az issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]")
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
 func ParseIssueBulkCreateArgs(args []string) (IssueBulkCreateOptions, error) {
 	opts := IssueBulkCreateOptions{}
 	fs := flag.NewFlagSet("issue bulk-create", flag.ContinueOnError)
@@ -1868,6 +2004,93 @@ func ImplDeleteCommand(deps *Dependencies, opts ImplDeleteOptions) error {
 	return nil
 }
 
+func ImplListCommand(deps *Dependencies, _ ImplListOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list issues for implementation list: %w", err)
+	}
+
+	impls := collectImplementations(snapshot.Tasks)
+	if len(impls) == 0 {
+		fmt.Println("No implementations found in issue assignments.")
+		return nil
+	}
+	fmt.Printf("Implementations: %d\n", len(impls))
+	for _, impl := range impls {
+		fmt.Println(impl)
+	}
+	return nil
+}
+
+func ImplMigrateCommand(deps *Dependencies, opts ImplMigrateOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	from := strings.TrimSpace(opts.FromImplementation)
+	to := strings.TrimSpace(opts.ToImplementation)
+	if from == "" || to == "" {
+		return fmt.Errorf("both source and destination implementations are required")
+	}
+	if from == to {
+		return fmt.Errorf("source and destination implementations must differ")
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list issues for implementation migrate: %w", err)
+	}
+
+	updated := make([]string, 0, 8)
+	for _, task := range snapshot.Tasks {
+		if len(task.Implementations) == 0 {
+			continue
+		}
+		nextImpls := make([]string, 0, len(task.Implementations))
+		changed := false
+		for _, existing := range task.Implementations {
+			if strings.TrimSpace(existing) == from {
+				nextImpls = append(nextImpls, to)
+				changed = true
+				continue
+			}
+			nextImpls = append(nextImpls, existing)
+		}
+		if !changed {
+			continue
+		}
+
+		nextImpls = dedupeTrimmed(nextImpls)
+		update := daemonclient.TaskUpdateParams{
+			Title:           task.Title,
+			Description:     task.Description,
+			Type:            task.Type,
+			Priority:        task.Priority,
+			Implementations: nextImpls,
+		}
+		if err := deps.DaemonClient.UpdateTaskDetails(ctx, task.ID.String(), update); err != nil {
+			return fmt.Errorf("failed to migrate implementation %s -> %s for issue %s: %w", from, to, task.ID, err)
+		}
+		updated = append(updated, task.ID.String())
+	}
+
+	if len(updated) == 0 {
+		fmt.Printf("No issues reference implementation: %s\n", from)
+		return nil
+	}
+	fmt.Printf("Migrated implementation assignment: %s -> %s\n", from, to)
+	fmt.Printf("Updated issues: %d\n", len(updated))
+	return nil
+}
+
 func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
@@ -1938,25 +2161,37 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
 	if opts.Deps {
-		fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tDEPS\tTITLE")
+		fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tASSIGNEE\tEST\tIMPL\tDEPS\tTITLE")
 	} else {
-		fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tTITLE")
+		fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tASSIGNEE\tEST\tIMPL\tTITLE")
 	}
 	for _, task := range tasks {
+		assigneeSummary := "-"
+		if strings.TrimSpace(task.Assignee) != "" {
+			assigneeSummary = strings.TrimSpace(task.Assignee)
+		}
+		estimateSummary := "-"
+		if task.Estimate != nil {
+			estimateSummary = strconv.Itoa(*task.Estimate)
+		}
+		implSummary := formatIssueImplementationSummary(task.Implementations)
 		if opts.Deps {
 			fmt.Fprintf(
 				w,
-				"%s\t%s\t%s\t%s\t%s\t%s\n",
+				"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				task.ID,
 				task.Status,
 				task.Priority.String(),
 				task.Type,
+				assigneeSummary,
+				estimateSummary,
+				implSummary,
 				formatDependencySummary(task.Dependencies),
 				task.Title,
 			)
 			continue
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", task.ID, task.Status, task.Priority.String(), task.Type, task.Title)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", task.ID, task.Status, task.Priority.String(), task.Type, assigneeSummary, estimateSummary, implSummary, task.Title)
 	}
 	if err := w.Flush(); err != nil {
 		return err
@@ -2088,12 +2323,39 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 	if task.ParentID != nil {
 		fmt.Printf("Parent: %s\n", *task.ParentID)
 	}
+	if len(task.Implementations) > 0 {
+		fmt.Printf("Implementations: %s\n", strings.Join(task.Implementations, ", "))
+	}
+	if strings.TrimSpace(task.Assignee) != "" {
+		fmt.Printf("Assignee: %s\n", strings.TrimSpace(task.Assignee))
+	}
+	if len(task.Labels) > 0 {
+		fmt.Printf("Labels: %s\n", strings.Join(task.Labels, ", "))
+	}
+	if task.Estimate != nil {
+		fmt.Printf("Estimate: %d\n", *task.Estimate)
+	}
+	if runtimeSummary := renderIssueRuntimeSummary(task); runtimeSummary != "" {
+		fmt.Printf("Runtime: %s\n", runtimeSummary)
+	}
+	if gitSummary := renderIssueGitSummary(task); gitSummary != "" {
+		fmt.Printf("Git: %s\n", gitSummary)
+	}
 	dependencies, dependents := buildDependencyProjection(task, snapshot.Tasks)
 	fmt.Printf("Dependencies: %d\n", len(dependencies))
 	printDependencies(dependencies)
 	printDependents(dependents)
 	if task.Description != "" {
 		fmt.Printf("Description: %s\n", task.Description)
+	}
+	if strings.TrimSpace(task.Notes) != "" {
+		fmt.Printf("Notes:\n%s\n", task.Notes)
+	}
+	if strings.TrimSpace(task.Design) != "" {
+		fmt.Printf("Design:\n%s\n", task.Design)
+	}
+	if strings.TrimSpace(task.Acceptance) != "" {
+		fmt.Printf("Acceptance:\n%s\n", task.Acceptance)
 	}
 	fmt.Printf("Created: %s\n", task.CreatedAt.UTC().Format(time.RFC3339))
 	fmt.Printf("Updated: %s\n", task.UpdatedAt.UTC().Format(time.RFC3339))
@@ -2178,10 +2440,10 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 	var parentID *naming.IssueID
 	implementations := append([]string{}, opts.Implementations...)
 	if !opts.Deferred && opts.AutoParentFromIssueID != nil && strings.TrimSpace(*opts.AutoParentFromIssueID) != "" {
-			parentIssueID := strings.TrimSpace(*opts.AutoParentFromIssueID)
-			snapshot, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskSnapshot, error) {
-				return deps.DaemonClient.ListTasksSnapshot(callCtx)
-			})
+		parentIssueID := strings.TrimSpace(*opts.AutoParentFromIssueID)
+		snapshot, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskSnapshot, error) {
+			return deps.DaemonClient.ListTasksSnapshot(callCtx)
+		})
 		if err != nil {
 			return fmt.Errorf("failed to resolve active parent issue %s: %w", parentIssueID, err)
 		}
@@ -2189,7 +2451,7 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 		if !ok {
 			return fmt.Errorf("active issue not found for auto-parenting: %s", parentIssueID)
 		}
-			parentID = &parentTask.ID
+		parentID = &parentTask.ID
 		if len(implementations) == 0 {
 			implementations = append([]string{}, parentTask.Implementations...)
 		}
@@ -2598,6 +2860,112 @@ func IssueDependencyBulkApplyCommand(deps *Dependencies, opts IssueDependencyBul
 	return nil
 }
 
+func IssueImageAddCommand(deps *Dependencies, opts IssueImageAddOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load issue %s for image attach: %w", opts.IssueID, err)
+	}
+	if _, ok := findTaskByID(snapshot.Tasks, opts.IssueID); !ok {
+		return fmt.Errorf("issue not found: %s", opts.IssueID)
+	}
+
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	service := attachment.NewService(filepath.Join(deps.RepoDir, ".azedarach"), logger)
+	attached, err := service.Attach(ctx, opts.IssueID, opts.SourcePath)
+	if err != nil {
+		return fmt.Errorf("failed to attach image %q to issue %s: %w", opts.SourcePath, opts.IssueID, err)
+	}
+
+	notesAppended := false
+	if line := formatIssueAttachmentNoteLine(attached); strings.TrimSpace(line) != "" {
+		if err := deps.DaemonClient.AppendTaskNotes(ctx, opts.IssueID, line); err != nil {
+			return fmt.Errorf("image attached but failed to append notes for issue %s: %w", opts.IssueID, err)
+		}
+		notesAppended = true
+	}
+
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id":       opts.IssueID,
+			"attachment_id":  attached.ID,
+			"filename":       attached.Filename,
+			"path":           attached.Path,
+			"notes_appended": notesAppended,
+			"updated":        true,
+		})
+	}
+	fmt.Printf("Attached image to issue %s: %s (attachment_id=%s)\n", opts.IssueID, attached.Filename, attached.ID)
+	return nil
+}
+
+func IssueImageRemoveCommand(deps *Dependencies, opts IssueImageRemoveOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load issue %s for image removal: %w", opts.IssueID, err)
+	}
+	if _, ok := findTaskByID(snapshot.Tasks, opts.IssueID); !ok {
+		return fmt.Errorf("issue not found: %s", opts.IssueID)
+	}
+
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	service := attachment.NewService(filepath.Join(deps.RepoDir, ".azedarach"), logger)
+	if err := service.Delete(ctx, opts.IssueID, opts.AttachmentID); err != nil {
+		return fmt.Errorf("failed to remove attachment %s from issue %s: %w", opts.AttachmentID, opts.IssueID, err)
+	}
+
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id":      opts.IssueID,
+			"attachment_id": opts.AttachmentID,
+			"removed":       true,
+		})
+	}
+	fmt.Printf("Removed image attachment %s from issue %s\n", opts.AttachmentID, opts.IssueID)
+	return nil
+}
+
+func formatIssueAttachmentNoteLine(att *attachment.Attachment) string {
+	if att == nil {
+		return ""
+	}
+	issueID := strings.TrimSpace(att.IssueID)
+	filename := strings.TrimSpace(att.Filename)
+	if issueID == "" || filename == "" {
+		return ""
+	}
+	relativePath := filepath.ToSlash(filepath.Join(".azedarach", "images", issueID, filename))
+	source := "file"
+	if strings.HasPrefix(strings.ToLower(filename), "clipboard-") {
+		source = "clipboard"
+	}
+	timestamp := att.Created.Local().Format("2006-01-02 15:04:05")
+	return fmt.Sprintf("📎 [%s](%s) (%s, %s)", filename, relativePath, source, timestamp)
+}
+
 func IssueBulkCreateCommand(deps *Dependencies, opts IssueBulkCreateOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
@@ -2755,14 +3123,14 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 			update.Priority = priority
 			needsUpdate = true
 		}
-			if needsUpdate {
-				body, err := json.Marshal(struct {
-					TaskID naming.IssueID `json:"task_id"`
-					daemonclient.TaskUpdateParams
-				}{
-					TaskID:           typedTaskID,
-					TaskUpdateParams: update,
-				})
+		if needsUpdate {
+			body, err := json.Marshal(struct {
+				TaskID naming.IssueID `json:"task_id"`
+				daemonclient.TaskUpdateParams
+			}{
+				TaskID:           typedTaskID,
+				TaskUpdateParams: update,
+			})
 			if err != nil {
 				return fmt.Errorf("marshal bulk-update item %d: %w", i, err)
 			}
@@ -2884,6 +3252,49 @@ func dedupeOrderedIDs(ids []string) []string {
 	return deduped
 }
 
+func dedupeTrimmed(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	deduped := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		deduped = append(deduped, trimmed)
+	}
+	return deduped
+}
+
+func collectImplementations(tasks []domain.Task) []string {
+	if len(tasks) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	impls := make([]string, 0, 4)
+	for _, task := range tasks {
+		for _, impl := range task.Implementations {
+			trimmed := strings.TrimSpace(impl)
+			if trimmed == "" {
+				continue
+			}
+			if _, ok := seen[trimmed]; ok {
+				continue
+			}
+			seen[trimmed] = struct{}{}
+			impls = append(impls, trimmed)
+		}
+	}
+	sort.Strings(impls)
+	return impls
+}
+
 func parseOptionalIssueID(value *string) *naming.IssueID {
 	if value == nil {
 		return nil
@@ -2992,11 +3403,11 @@ func planDependencyMutation(
 		}
 		edges[key] = struct{}{}
 		outcome.Status = "planned"
-			body, err := json.Marshal(daemonclient.TaskDependencyParams{
-				TaskID:      typedIssueID,
-				DependsOnID: typedDepID,
-				Type:        string(depType),
-			})
+		body, err := json.Marshal(daemonclient.TaskDependencyParams{
+			TaskID:      typedIssueID,
+			DependsOnID: typedDepID,
+			Type:        string(depType),
+		})
 		if err != nil {
 			return outcome, nil, fmt.Errorf("marshal add payload: %w", err)
 		}
@@ -3022,12 +3433,12 @@ func planDependencyMutation(
 		}
 		delete(edges, key)
 		outcome.Status = "planned"
-			body, err := json.Marshal(daemonclient.TaskDependencyRemoveParams{
-				TaskID:      typedIssueID,
-				DependsOnID: typedDepID,
-				Type:        string(depType),
-				Confirm:     true,
-			})
+		body, err := json.Marshal(daemonclient.TaskDependencyRemoveParams{
+			TaskID:      typedIssueID,
+			DependsOnID: typedDepID,
+			Type:        string(depType),
+			Confirm:     true,
+		})
 		if err != nil {
 			return outcome, nil, fmt.Errorf("marshal remove payload: %w", err)
 		}
@@ -3072,12 +3483,12 @@ func planDependencyMutation(
 		plannedOps := make([]protocol.ApplyOperationBody, 0, 2)
 		if needsRemove {
 			delete(edges, removeKey)
-				body, err := json.Marshal(daemonclient.TaskDependencyRemoveParams{
-					TaskID:      typedIssueID,
-					DependsOnID: typedFromID,
-					Type:        string(depType),
-					Confirm:     true,
-				})
+			body, err := json.Marshal(daemonclient.TaskDependencyRemoveParams{
+				TaskID:      typedIssueID,
+				DependsOnID: typedFromID,
+				Type:        string(depType),
+				Confirm:     true,
+			})
 			if err != nil {
 				return outcome, nil, fmt.Errorf("marshal retarget remove payload: %w", err)
 			}
@@ -3088,11 +3499,11 @@ func planDependencyMutation(
 		}
 		if needsAdd {
 			edges[addKey] = struct{}{}
-				body, err := json.Marshal(daemonclient.TaskDependencyParams{
-					TaskID:      typedIssueID,
-					DependsOnID: typedToID,
-					Type:        string(depType),
-				})
+			body, err := json.Marshal(daemonclient.TaskDependencyParams{
+				TaskID:      typedIssueID,
+				DependsOnID: typedToID,
+				Type:        string(depType),
+			})
 			if err != nil {
 				return outcome, nil, fmt.Errorf("marshal retarget add payload: %w", err)
 			}
@@ -3133,6 +3544,53 @@ func formatDependencySummary(deps []domain.Dependency) string {
 		return "-"
 	}
 	return strings.Join(parts, ",")
+}
+
+func formatIssueImplementationSummary(impls []string) string {
+	if len(impls) == 0 {
+		return "-"
+	}
+	filtered := make([]string, 0, len(impls))
+	for _, impl := range impls {
+		if trimmed := strings.TrimSpace(impl); trimmed != "" {
+			filtered = append(filtered, trimmed)
+		}
+	}
+	if len(filtered) == 0 {
+		return "-"
+	}
+	return strings.Join(filtered, ",")
+}
+
+func renderIssueRuntimeSummary(task domain.Task) string {
+	parts := make([]string, 0, 3)
+	if task.Session != nil {
+		sessionSummary := fmt.Sprintf("session=%s", task.Session.State)
+		if task.Session.StartedAt != nil {
+			sessionSummary = fmt.Sprintf("%s since %s", sessionSummary, task.Session.StartedAt.UTC().Format(time.RFC3339))
+		}
+		parts = append(parts, sessionSummary)
+	} else if task.HasTmuxSession {
+		parts = append(parts, "session=present")
+	}
+	if task.HasWorktree {
+		parts = append(parts, "worktree=yes")
+	}
+	return strings.Join(parts, ", ")
+}
+
+func renderIssueGitSummary(task domain.Task) string {
+	parts := make([]string, 0, 4)
+	if task.HasUncommittedChanges {
+		parts = append(parts, "dirty")
+	}
+	if task.GitAdditions > 0 || task.GitDeletions > 0 {
+		parts = append(parts, fmt.Sprintf("+%d/-%d", task.GitAdditions, task.GitDeletions))
+	}
+	if task.GitAheadCount != 0 || task.GitBehindCount != 0 {
+		parts = append(parts, fmt.Sprintf("ahead=%d behind=%d", task.GitAheadCount, task.GitBehindCount))
+	}
+	return strings.Join(parts, ", ")
 }
 
 type dependencyDetails struct {

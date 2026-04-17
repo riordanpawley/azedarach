@@ -1,4 +1,4 @@
-Usage: az issue <list|get|get-many|check|doctor|create|update|close|delete|dep|bulk-create|bulk-update|fanout> [arguments]
+Usage: az issue <list|get|get-many|check|doctor|create|update|close|delete|image|dep|bulk-create|bulk-update|fanout> [arguments]
 
 Commands:
   list [--project <project-id>] [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
@@ -10,12 +10,14 @@ Commands:
   update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title ...] [--description ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields
   close [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]       Close an issue (sets status=closed)
   delete [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] --confirm  Permanently delete an issue
+  image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]  Attach an image to an issue
+  image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]  Remove an image attachment from an issue
   dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--json]  Add a dependency edge
   dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--confirm] [--json]  Remove a dependency edge
   dep bulk apply [--project <project-id>] --input <path> [--dry-run] [--json]  Apply dependency edge mutations
   bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Execute bulk create operations
   bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Execute bulk update operations
-  fanout [--project <project-id>] --input <path> [--apply] [--json]  Plan/apply nested issue fanout
+  fanout [--project <project-id>] --input <path> [--apply] [--json]  Plan/apply a pre-authored nested issue tree from JSON
   fanout ready [--project <project-id>] --root <issue-id> [--json]  List runnable leaf issues under a fanout root
   fanout drift [--project <project-id>] --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
 

@@ -20,6 +20,7 @@ This directory primarily contains **developer/internal documentation**.
 - [09-boundary-hardening-policy.md](09-boundary-hardening-policy.md)
 - [10-go-release-and-homebrew.md](10-go-release-and-homebrew.md)
 - [11-az-spec-v1-contract.md](11-az-spec-v1-contract.md)
+- [12-overlay-sizing.md](12-overlay-sizing.md)
 - [adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
 
 ## Daemon Invariant Rule

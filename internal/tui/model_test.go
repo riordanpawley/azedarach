@@ -18,6 +18,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/testprofile"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
@@ -63,6 +64,24 @@ func (m mockTmuxService) DisplayPopup(ctx context.Context, title, width, height,
 
 type recordingGitSyncService struct {
 	fetchCalls int
+}
+
+type testCreateOverlayAttachmentService struct{}
+
+func (testCreateOverlayAttachmentService) List(context.Context, string) ([]attachment.Attachment, error) {
+	return nil, nil
+}
+
+func (testCreateOverlayAttachmentService) AttachFromClipboard(context.Context, string) (*attachment.Attachment, error) {
+	return nil, nil
+}
+
+func (testCreateOverlayAttachmentService) Attach(context.Context, string, string) (*attachment.Attachment, error) {
+	return nil, nil
+}
+
+func (testCreateOverlayAttachmentService) Delete(context.Context, string, string) error {
+	return nil
 }
 
 func (s *recordingGitSyncService) FetchAndCheck() tea.Cmd {
@@ -437,6 +456,29 @@ func TestUpdate_AttachmentActionDeletedAddsToast(t *testing.T) {
 	}
 	if got := next.runtimeEvents[len(next.runtimeEvents)-1].Event; got != "ui.toast" {
 		t.Fatalf("last runtime event = %q, want %q", got, "ui.toast")
+	}
+}
+
+func TestUpdate_AttachmentActionStagedAddsToast(t *testing.T) {
+	m := newTestModel()
+
+	updated, _ := m.Update(overlay.AttachmentActionMsg{
+		Action: "staged",
+		Attachment: &attachment.Attachment{
+			Filename: "clipboard.png",
+		},
+	})
+
+	next, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("expected Model return type, got %T", updated)
+	}
+	if len(next.toasts) == 0 {
+		t.Fatal("expected toast to be recorded")
+	}
+	last := next.toasts[len(next.toasts)-1]
+	if !strings.Contains(last.Message, "Image staged for new task") {
+		t.Fatalf("unexpected toast message: %q", last.Message)
 	}
 }
 
@@ -2077,12 +2119,16 @@ func TestCreateTaskOverlayPersistsAcrossCloseReopen(t *testing.T) {
 	if !ok || first == nil {
 		t.Fatalf("expected create overlay, got %T", m.overlayStack.Current())
 	}
+	if first.ParentID() != nil {
+		t.Fatalf("expected no parent outside drill-down, got %v", *first.ParentID())
+	}
 
 	closed, _ := m.Update(overlay.CloseOverlayMsg{})
 	m = closed.(Model)
 	if !m.overlayStack.IsEmpty() {
 		t.Fatal("expected overlay stack to be empty after close")
 	}
+	m.drillDownParentID = "az-parent"
 
 	reopened, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	m = reopened.(Model)
@@ -2093,6 +2139,44 @@ func TestCreateTaskOverlayPersistsAcrossCloseReopen(t *testing.T) {
 	}
 	if second != first {
 		t.Fatal("expected create overlay state to persist across close/reopen")
+	}
+	parent := second.ParentID()
+	if parent == nil || *parent != "az-parent" {
+		t.Fatalf("expected parent to follow drill-down context, got %+v", parent)
+	}
+
+	closed, _ = m.Update(overlay.CloseOverlayMsg{})
+	m = closed.(Model)
+	m.drillDownParentID = ""
+
+	reopened, _ = m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	m = reopened.(Model)
+	third, ok := m.overlayStack.Current().(*overlay.CreateTaskOverlay)
+	if !ok || third == nil {
+		t.Fatalf("expected create overlay after second reopen, got %T", m.overlayStack.Current())
+	}
+	if third != first {
+		t.Fatal("expected create overlay state to persist across second reopen")
+	}
+	if third.ParentID() != nil {
+		t.Fatalf("expected parent to clear outside drill-down, got %v", *third.ParentID())
+	}
+}
+
+func TestCreateTaskOverlayBindsAttachmentServiceInNormalMode(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+	m.attachmentService = testCreateOverlayAttachmentService{}
+
+	updated, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	m = updated.(Model)
+
+	current, ok := m.overlayStack.Current().(*overlay.CreateTaskOverlay)
+	if !ok || current == nil {
+		t.Fatalf("expected create overlay, got %T", m.overlayStack.Current())
+	}
+	if !current.HasAttachmentService() {
+		t.Fatal("expected create overlay to have attachment service bound")
 	}
 }
 
@@ -2804,6 +2888,85 @@ func TestIssuesLoadedKeepsCursorOnValidTaskAfterRefresh(t *testing.T) {
 	}
 }
 
+func TestIssuesLoadedKeepsSelectedIssueInViewportAfterResort(t *testing.T) {
+	m := newTestModel()
+	m.height = 18
+	m.width = 80
+	m.editor.SetSortField(domain.SortByPriority)
+	m.editor.SetSortOrder(domain.SortAsc)
+
+	initialTasks := []domain.Task{
+		{ID: "az-selected", Title: "Selected", Status: domain.StatusOpen, Priority: domain.P0, Type: domain.TypeTask},
+		{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeTask},
+		{ID: "az-2", Title: "Task 2", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeTask},
+		{ID: "az-3", Title: "Task 3", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeTask},
+		{ID: "az-4", Title: "Task 4", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-5", Title: "Task 5", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-6", Title: "Task 6", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-7", Title: "Task 7", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask},
+		{ID: "az-8", Title: "Task 8", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask},
+		{ID: "az-9", Title: "Task 9", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask},
+		{ID: "az-10", Title: "Task 10", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask},
+		{ID: "az-11", Title: "Task 11", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask},
+	}
+	m.tasks = initialTasks
+	m.nav.SelectTask("az-selected", domain.StatusOpen.Column())
+	m.viewportStarts[domain.StatusOpen.Column()] = 0
+
+	refreshedTasks := make([]domain.Task, len(initialTasks))
+	copy(refreshedTasks, initialTasks)
+	for i := range refreshedTasks {
+		if refreshedTasks[i].ID == "az-selected" {
+			refreshedTasks[i].Priority = domain.P4
+			break
+		}
+	}
+
+	result, _ := m.Update(issuesLoadedMsg{
+		tasks:    refreshedTasks,
+		revision: 15,
+	})
+	newModel := result.(Model)
+
+	columns := newModel.buildColumns()
+	pos := newModel.nav.GetPosition(columns)
+	if !pos.Valid || pos.Column != domain.StatusOpen.Column() {
+		t.Fatalf("expected valid cursor in open column after refresh; got %+v", pos)
+	}
+	if columns[pos.Column].Tasks[pos.Task].ID != "az-selected" {
+		t.Fatalf("cursor selected %q, want az-selected", columns[pos.Column].Tasks[pos.Task].ID)
+	}
+
+	availableHeight := board.ColumnBodyHeight(board.BoardContentHeight(newModel.height))
+	if availableHeight < 1 {
+		availableHeight = 1
+	}
+	columnCount := newModel.boardVisibleColumnCount(len(columns))
+	if columnCount < 1 {
+		columnCount = board.DefaultColumnCount
+	}
+	columnWidth := newModel.width / columnCount
+	linesPerCard := board.CardLineFootprint(newModel.styles, board.CardContentWidth(columnWidth))
+	if linesPerCard < 1 {
+		linesPerCard = 1
+	}
+	windowStart, windowEnd := board.VisibleTaskWindow(
+		len(columns[pos.Column].Tasks),
+		newModel.viewportStarts[pos.Column],
+		availableHeight,
+		linesPerCard,
+	)
+	if pos.Task < windowStart || pos.Task >= windowEnd {
+		t.Fatalf(
+			"selected task index %d not visible in window [%d,%d) with viewport start %d",
+			pos.Task,
+			windowStart,
+			windowEnd,
+			newModel.viewportStarts[pos.Column],
+		)
+	}
+}
+
 func TestIssuesLoadedPreservesSnapshotSessionTaskState(t *testing.T) {
 	startedAt := time.Date(2026, time.March, 25, 10, 30, 0, 0, time.UTC)
 	devServer := &domain.DevServer{Port: 4242, Command: "npm run dev", Running: true}
@@ -3413,28 +3576,6 @@ func TestHandleSelection_AttachUsesTmuxPresenceWithoutSessionProjection(t *testi
 					OK:              true,
 					Body:            respBody,
 				}, nil
-			case daemonclient.CommandGitBranchBehind:
-				respBody, err := json.Marshal(struct {
-					Worktree      string `json:"worktree"`
-					BaseBranch    string `json:"base_branch"`
-					Remote        string `json:"remote"`
-					CommitsBehind int    `json:"commits_behind"`
-				}{
-					Worktree:      "/tmp/wt-az-1",
-					BaseBranch:    "main",
-					Remote:        "origin",
-					CommitsBehind: 0,
-				})
-				if err != nil {
-					t.Fatalf("marshal branch behind response: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
 			case daemonclient.CommandSessionAttach:
 				respBody, err := json.Marshal(struct {
 					Output string `json:"output"`
@@ -3450,7 +3591,7 @@ func TestHandleSelection_AttachUsesTmuxPresenceWithoutSessionProjection(t *testi
 					Body:            respBody,
 				}, nil
 			default:
-				t.Fatalf("command = %q, want one of %q/%q/%q", req.Command, daemonclient.CommandWorktreeList, daemonclient.CommandGitBranchBehind, daemonclient.CommandSessionAttach)
+				t.Fatalf("command = %q, want one of %q/%q", req.Command, daemonclient.CommandWorktreeList, daemonclient.CommandSessionAttach)
 			}
 			return protocol.ResponseEnvelope{}, nil
 		},
@@ -3462,18 +3603,8 @@ func TestHandleSelection_AttachUsesTmuxPresenceWithoutSessionProjection(t *testi
 		t.Fatal("expected attach command")
 	}
 	msg := cmd()
-	behind, ok := msg.(branchBehindMsg)
-	if !ok {
-		t.Fatalf("attach command returned %T, want branchBehindMsg", msg)
-	}
-	updated, nextCmd := m.Update(behind)
-	if nextCmd == nil {
-		t.Fatal("expected attach follow-up command")
-	}
-	m = updated.(Model)
-	attachMsg := nextCmd()
-	if _, ok := attachMsg.(sessionAttachedMsg); !ok {
-		t.Fatalf("attach follow-up returned %T, want sessionAttachedMsg", attachMsg)
+	if _, ok := msg.(sessionAttachedMsg); !ok {
+		t.Fatalf("attach command returned %T, want sessionAttachedMsg", msg)
 	}
 }
 
@@ -3528,8 +3659,8 @@ func TestDaemonSessionUpdatedEventAllowsImmediateAttachFromWorkspace(t *testing.
 	}
 	msg := cmd()
 	if _, ok := msg.(sessionAttachedMsg); !ok {
-		if _, behind := msg.(branchBehindMsg); !behind {
-			t.Fatalf("attach cmd returned %T, want sessionAttachedMsg or branchBehindMsg", msg)
+		if _, attachErr := msg.(sessionErrorMsg); !attachErr {
+			t.Fatalf("attach cmd returned %T, want sessionAttachedMsg or sessionErrorMsg", msg)
 		}
 	}
 }
@@ -4302,7 +4433,7 @@ func TestResolveOperationTaskIDCoversSessionGitAndWorktreeMutations(t *testing.T
 		{
 			name:         "git merge uses worktree resource key",
 			resourceKeys: []string{"worktree:/tmp/wt-az-1"},
-			wantTaskID: "az-1",
+			wantTaskID:   "az-1",
 		},
 		{
 			name:         "git fetch uses worktree resource key",

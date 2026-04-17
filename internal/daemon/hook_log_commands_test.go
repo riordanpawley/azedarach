@@ -33,6 +33,7 @@ func TestHookLogAppendAndList(t *testing.T) {
 			Command:         protocol.CommandHookLogAppend,
 			Body: mustMarshal(t, protocol.HookLogAppendCommandBody{
 				Event: protocol.HookLogEvent{
+					IssueID:   "az-42",
 					Hook:      "post-commit",
 					Worktree:  "/tmp/wt",
 					Source:    "githooks.hook",
@@ -80,5 +81,8 @@ func TestHookLogAppendAndList(t *testing.T) {
 	}
 	if events[0].ProjectID.String() != projectID || events[1].ProjectID.String() != projectID {
 		t.Fatalf("hook.log.list project ids = [%q,%q], want %q", events[0].ProjectID, events[1].ProjectID, projectID)
+	}
+	if events[0].IssueID.String() != "az-42" || events[1].IssueID.String() != "az-42" {
+		t.Fatalf("hook.log.list issue ids = [%q,%q], want az-42", events[0].IssueID, events[1].IssueID)
 	}
 }

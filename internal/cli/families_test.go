@@ -237,6 +237,24 @@ func TestGitHooksNotifyCommandRefreshesDaemonGitStatus(t *testing.T) {
 	if gotWorktree != wantWorktree {
 		t.Fatalf("worktree = %q (canon %q), want %q (canon %q)", body.Worktree, gotWorktree, projectDir, wantWorktree)
 	}
+
+	hookLogMessages := make([]string, 0, 2)
+	for _, req := range reqs {
+		if req.Command != protocol.CommandHookLogAppend {
+			continue
+		}
+		var appendBody protocol.HookLogAppendCommandBody
+		if err := json.Unmarshal(req.Body, &appendBody); err != nil {
+			t.Fatalf("unmarshal hook log append body: %v", err)
+		}
+		hookLogMessages = append(hookLogMessages, appendBody.Event.Message)
+	}
+	if len(hookLogMessages) != 1 {
+		t.Fatalf("hook log append count = %d, want 1; messages=%v", len(hookLogMessages), hookLogMessages)
+	}
+	if hookLogMessages[0] != "refreshed daemon git state" {
+		t.Fatalf("hook log message = %q, want %q", hookLogMessages[0], "refreshed daemon git state")
+	}
 }
 
 func TestGitHooksNotifyCommandPrefersCurrentWorktreeWhenProjectDirUnset(t *testing.T) {
@@ -854,6 +872,108 @@ func TestCodexHookRunCommandJSONMatchesGuardContract(t *testing.T) {
 	})
 	if strings.TrimSpace(output) != "{}" {
 		t.Fatalf("hook run output = %q, want {}", output)
+	}
+}
+
+func TestCodexHookRunCommandAppendsHookLogWithIssueIDFromEnv(t *testing.T) {
+	projectDir := t.TempDir()
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-123")
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != protocol.CommandHookLogAppend {
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			var body protocol.HookLogAppendCommandBody
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal hook append body: %v", err)
+			}
+			if body.Event.IssueID.String() != "az-123" {
+				t.Fatalf("hook append issue_id = %q, want az-123", body.Event.IssueID)
+			}
+			if body.Event.Worktree != projectDir {
+				t.Fatalf("hook append worktree = %q, want %q", body.Event.Worktree, projectDir)
+			}
+			return responseWithJSON(req, body.Event), nil
+		},
+	}
+	deps := &Dependencies{
+		RepoDir:      projectDir,
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+	}
+
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.WriteString(`{"thread_id":"t-env-1"}`); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
+
+	output := captureStdout(t, func() error {
+		return CodexHookRunCommand(deps, CodexHookRunOptions{Event: "stop", JSON: true})
+	})
+	if strings.TrimSpace(output) != "{}" {
+		t.Fatalf("hook run output = %q, want {}", output)
+	}
+}
+
+func TestAppendHookLogEventBestEffortResolvesIssueIDFromWorktree(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	worktreePath := "/tmp/repo-az-7"
+	sawWorktreeList := false
+	sawAppend := false
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				sawWorktreeList = true
+				return responseWithJSON(req, map[string]any{
+					"project_id": "proj-1",
+					"worktrees": []map[string]any{
+						{
+							"path":     worktreePath,
+							"branch":   "riordan/az-7/task",
+							"issue_id": "az-7",
+						},
+					},
+				}), nil
+			case protocol.CommandHookLogAppend:
+				sawAppend = true
+				var body protocol.HookLogAppendCommandBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal hook append body: %v", err)
+				}
+				if body.Event.IssueID.String() != "az-7" {
+					t.Fatalf("hook append issue_id = %q, want az-7", body.Event.IssueID)
+				}
+				return responseWithJSON(req, body.Event), nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		},
+	}
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+	}
+	appendHookLogEventBestEffort(deps, protocol.HookLogEvent{
+		Worktree: worktreePath,
+		Source:   "githooks.hook",
+		Level:    "info",
+		Message:  "worktree reconcile",
+	})
+	if !sawWorktreeList {
+		t.Fatal("expected worktree list lookup before hook append")
+	}
+	if !sawAppend {
+		t.Fatal("expected hook append command")
 	}
 }
 

@@ -460,6 +460,100 @@ func TestSessionStartIgnoresStaleProjectionWhenTmuxHasNoSession(t *testing.T) {
 	}
 }
 
+func TestSessionStartContinuesWhenFreshnessTimesOut(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Start should continue after reconcile timeout",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	worktreeRunner := &recoveringWorktreeRunner{
+		worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID),
+		branchName:   "testuser/" + issueID + "/freshness-timeout-continue",
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+	recorder := &timeoutRuntimeReconciler{}
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:                 repoDir,
+			BaseBranch:              "main",
+			CLITool:                 "codex",
+			SessionShell:            "zsh",
+			Logger:                  slog.Default(),
+			RuntimeReconcileTimeout: 20 * time.Millisecond,
+		},
+		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:            issuesClient,
+		session:           daemonhandlers.NewSessionHandler(store),
+		sessionStore:      store,
+		runtimeReconciler: recorder,
+		revision:          map[string]uint64{},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+	t.Cleanup(func() {
+		if d.runtimeReconcileQueue != nil {
+			_ = d.runtimeReconcileQueue.Close()
+		}
+	})
+
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-timeout-continue",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.start",
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"session_id": issueID,
+		}),
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, req)
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("session start response not OK: %+v", resp)
+	}
+
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	if !tmuxRunner.sessions[sessionID] {
+		t.Fatalf("expected tmux session %q to be created", sessionID)
+	}
+
+	calls, projectIDs := recorder.snapshot()
+	if calls < 1 {
+		t.Fatalf("runtime reconcile calls = %d, want at least 1", calls)
+	}
+	for _, id := range projectIDs {
+		if id != projectID {
+			t.Fatalf("runtime reconcile project ids = %v, want only %s", projectIDs, projectID)
+		}
+	}
+}
+
 func TestSessionStartWithStartWorkFalseSkipsLaunchCommand(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -1310,7 +1404,7 @@ func TestListTmuxSessionsCacheFirstSkipsStopPendingCachedSession(t *testing.T) {
 	}
 }
 
-func TestSessionAttachRefreshesRuntimeBeforeMutation(t *testing.T) {
+func TestSessionAttachDoesNotRequireRuntimeReconcile(t *testing.T) {
 	const (
 		projectID = "proj"
 		issueID   = "az-1"
@@ -1358,11 +1452,11 @@ func TestSessionAttachRefreshesRuntimeBeforeMutation(t *testing.T) {
 		t.Fatalf("response not ok: %+v", resp.Error)
 	}
 	calls, projectIDs := recorder.snapshot()
-	if calls != 1 {
-		t.Fatalf("runtime reconcile calls = %d, want 1", calls)
+	if calls != 0 {
+		t.Fatalf("runtime reconcile calls = %d, want 0", calls)
 	}
-	if len(projectIDs) != 1 || projectIDs[0] != projectID {
-		t.Fatalf("runtime reconcile project ids = %v, want [%s]", projectIDs, projectID)
+	if len(projectIDs) != 0 {
+		t.Fatalf("runtime reconcile project ids = %v, want none", projectIDs)
 	}
 }
 
@@ -1821,12 +1915,21 @@ func TestReconcilePublishesSessionProjectionEventsForRecovery(t *testing.T) {
 }
 
 func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
-	const issueID = "az-1"
-
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)
 	if err != nil {
 		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	issueID, err := issuesClient.Create(context.Background(), issues.CreateTaskParams{
+		Title: "Recoverable durable session issue",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create local issue: %v", err)
 	}
 	sessionID := naming.CanonicalSessionID(repoDir, issueID)
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
@@ -1857,12 +1960,12 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		session:      daemonhandlers.NewSessionHandler(store),
 		sessionStore: store,
-		worktreeManagersByRoot: map[string]*git.WorktreeManager{
-			repoDir: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/az-1/test"}, repoDir, slog.Default()),
-		},
-		worktreeManagersByProject: map[string]*git.WorktreeManager{
-			projectID: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/az-1/test"}, repoDir, slog.Default()),
-		},
+			worktreeManagersByRoot: map[string]*git.WorktreeManager{
+				repoDir: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/test"}, repoDir, slog.Default()),
+			},
+			worktreeManagersByProject: map[string]*git.WorktreeManager{
+				projectID: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/test"}, repoDir, slog.Default()),
+			},
 		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
 			repoDir: runtimeStateStore,
 		},

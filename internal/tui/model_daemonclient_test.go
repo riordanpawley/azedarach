@@ -4487,42 +4487,99 @@ func TestHandleSelectionTombstoneActionDeletesTask(t *testing.T) {
 }
 
 func TestOpenPROverlayUsesDaemonWorktreeBranch(t *testing.T) {
+	origGeneratePRContent := generatePRContent
+	t.Cleanup(func() { generatePRContent = origGeneratePRContent })
+	generatePRContent = func(_ context.Context, req prGenerationRequest) (prGeneratedContent, error) {
+		if req.IssueID != "az-1" || req.Branch != "az/az-1" || req.BaseBranch != "main" {
+			t.Fatalf("generation request = %+v", req)
+		}
+		if req.IssueTitle != "Task 1" || req.IssueDescription != "Desc 1" {
+			t.Fatalf("generation context = %+v", req)
+		}
+		return prGeneratedContent{
+			Title: "Generated PR title",
+			Body:  "Generated PR body",
+		}, nil
+	}
+
+	expectedDraft := true
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandWorktreeList {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandWorktreeList)
-			}
-			respBody, err := json.Marshal(struct {
-				ProjectID string `json:"project_id"`
-				Worktrees []struct {
-					Path    string `json:"path"`
-					Branch  string `json:"branch"`
-					IssueID string `json:"issue_id"`
-				} `json:"worktrees"`
-			}{
-				ProjectID: "default",
-				Worktrees: []struct {
-					Path    string `json:"path"`
-					Branch  string `json:"branch"`
-					IssueID string `json:"issue_id"`
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				respBody, err := json.Marshal(struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
 				}{
-					{Path: "/tmp/az-1", Branch: "az/az-1", IssueID: "az-1"},
-				},
-			})
-			if err != nil {
-				t.Fatalf("marshal response: %v", err)
+					ProjectID: "default",
+					Worktrees: []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					}{
+						{Path: "/tmp/az-1", Branch: "az/az-1", IssueID: "az-1"},
+					},
+				})
+				if err != nil {
+					t.Fatalf("marshal response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandPRCreate:
+				var body daemonclient.CreatePullRequestParams
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal request: %v", err)
+				}
+				if body.Title != "Generated PR title" || body.Body != "Generated PR body" {
+					t.Fatalf("unexpected generated payload: %+v", body)
+				}
+				if body.Branch != "az/az-1" || body.BaseBranch != "main" || body.IssueID != "az-1" {
+					t.Fatalf("request body = %+v", body)
+				}
+				if body.Draft != expectedDraft {
+					t.Fatalf("draft = %v, want %v", body.Draft, expectedDraft)
+				}
+				respBody, err := json.Marshal(daemonclient.CreatePullRequestResult{
+					IssueID: "az-1",
+					PullRequest: pr.PRInfo{
+						Number:  7,
+						Title:   body.Title,
+						URL:     "https://example.com/pr/7",
+						State:   "open",
+						Draft:   body.Draft,
+						Branch:  body.Branch,
+						BaseRef: body.BaseBranch,
+					},
+				})
+				if err != nil {
+					t.Fatalf("marshal response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command %q", req.Command)
 			}
-			return protocol.ResponseEnvelope{
-				ProtocolVersion: req.ProtocolVersion,
-				RequestID:       req.RequestID,
-				Kind:            protocol.EnvelopeKindResponse,
-				OK:              true,
-				Body:            respBody,
-			}, nil
+			return protocol.ResponseEnvelope{}, nil
 		},
 	}
 
 	m := newDaemonTestModel(transport)
+	expectedDraft = m.config.PR.DraftByDefault
+	m.tasks = []domain.Task{{ID: "az-1", Title: "Task 1", Description: "Desc 1"}}
 	msg := m.openPROverlayCmd("/tmp/az-1", "az-1")()
 	result, ok := msg.(openPROverlayResultMsg)
 	if !ok {
@@ -4534,22 +4591,29 @@ func TestOpenPROverlayUsesDaemonWorktreeBranch(t *testing.T) {
 
 	updated, cmd := m.Update(result)
 	if cmd == nil {
-		t.Fatal("expected overlay push command")
+		t.Fatal("expected PR create command")
 	}
 	updatedModel, ok := updated.(Model)
 	if !ok {
 		t.Fatalf("updated model type = %T, want Model", updated)
 	}
-	current := updatedModel.overlayStack.Current()
-	prOverlay, ok := current.(*overlay.PRCreateOverlay)
+	prCreatedMsg := cmd()
+	created, ok := prCreatedMsg.(prCreatedResultMsg)
 	if !ok {
-		t.Fatalf("overlay type = %T, want *overlay.PRCreateOverlay", current)
+		t.Fatalf("message type = %T, want prCreatedResultMsg", prCreatedMsg)
 	}
-	view := prOverlay.View()
-	if !strings.Contains(view, "az/az-1") || !strings.Contains(view, "az-1") {
-		t.Fatalf("overlay view = %q, want branch and issue", view)
+	if created.err != nil || created.url != "https://example.com/pr/7" || created.title != "Generated PR title" {
+		t.Fatalf("create result = %+v", created)
 	}
-	if got := transport.requests; len(got) != 1 || got[0] != daemonclient.CommandWorktreeList {
+	afterCreate, _ := updatedModel.Update(created)
+	afterModel, ok := afterCreate.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", afterCreate)
+	}
+	if len(afterModel.toasts) == 0 {
+		t.Fatal("expected success toast after PR creation")
+	}
+	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandPRCreate {
 		t.Fatalf("requests = %v", got)
 	}
 }
@@ -5430,6 +5494,54 @@ func TestPerformCleanupRoutesDaemonCleanupAndPreservesCounts(t *testing.T) {
 		transport.requests[3] != protocol.CommandWorktreeCleanupOrphaned ||
 		transport.requests[4] != daemonclient.CommandSessionStop {
 		t.Fatalf("requests = %v", transport.requests)
+	}
+}
+
+func TestPerformCleanupOrphanedWorktreesUsesExtendedDeadline(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != protocol.CommandWorktreeCleanupOrphaned {
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			respBody, err := json.Marshal(protocol.CleanupOrphanedResponseBody{
+				ProjectID:        naming.ProjectID("proj-1"),
+				WorktreesRemoved: 1,
+			})
+			if err != nil {
+				t.Fatalf("marshal cleanup response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.currentProject = "proj-1"
+	m.daemonClient.WithProjectID(m.daemonProjectID())
+
+	result, err := m.performCleanup(context.Background(), []string{"remove_orphaned_worktrees"})
+	if err != nil {
+		t.Fatalf("performCleanup error: %v", err)
+	}
+	if result.WorktreesRemoved != 1 {
+		t.Fatalf("worktrees removed = %d, want 1", result.WorktreesRemoved)
+	}
+	if got := len(transport.requests); got != 1 {
+		t.Fatalf("request count = %d, want 1", got)
+	}
+	if transport.requests[0] != protocol.CommandWorktreeCleanupOrphaned {
+		t.Fatalf("command = %s, want %s", transport.requests[0], protocol.CommandWorktreeCleanupOrphaned)
+	}
+	if got := len(transport.commandBudgets); got != 1 {
+		t.Fatalf("command deadline count = %d, want 1", got)
+	}
+	if transport.commandBudgets[0] < (orphanedWorktreeCleanupTimeout - 10*time.Second) {
+		t.Fatalf("cleanup timeout budget = %s, want near %s", transport.commandBudgets[0], orphanedWorktreeCleanupTimeout)
 	}
 }
 
