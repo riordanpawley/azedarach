@@ -183,10 +183,19 @@ func (l *Launcher) waitForSocketReadyWithin(timeout time.Duration) error {
 }
 
 func isLockOwnerPermissionError(err error) bool {
-	return errors.Is(err, lifecycle.ErrLockOwnerPermissionDenied) ||
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, lifecycle.ErrLockOwnerPermissionDenied) ||
 		errors.Is(err, syscall.EPERM) ||
 		errors.Is(err, syscall.EACCES) ||
-		errors.Is(err, os.ErrPermission)
+		errors.Is(err, os.ErrPermission) {
+		return true
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "lock owner permission denied") ||
+		strings.Contains(msg, "operation not permitted") ||
+		strings.Contains(msg, "permission denied")
 }
 
 // Stop attempts to stop existing lock-owner process.
