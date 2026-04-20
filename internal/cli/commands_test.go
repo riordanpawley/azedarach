@@ -245,6 +245,81 @@ func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 	}
 }
 
+func TestStartCommandUsesParentWorktreeBranchForChildIssue(t *testing.T) {
+	var gotReq protocol.RequestEnvelope
+	commands := []string{}
+	parentID := naming.IssueID("az-parent")
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: parentID, Title: "Parent", Status: domain.StatusInProgress},
+		{ID: "az-child", Title: "Child", Status: domain.StatusOpen, ParentID: &parentID},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+	worktreeListBody, err := json.Marshal(map[string]any{
+		"project_id": "proj",
+		"worktrees": []map[string]any{
+			{"path": "/tmp/parent", "branch": "az/az-parent", "issue_id": "az-parent"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal worktree list: %v", err)
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				case daemonclient.CommandWorktreeList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            worktreeListBody,
+					}, nil
+				case commandSessionStart:
+					gotReq = req
+					return responseWithOutput(req, "ok\n"), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	if err := StartCommand(deps, "az-child"); err != nil {
+		t.Fatalf("StartCommand error: %v", err)
+	}
+	if len(commands) != 3 || commands[0] != daemonclient.CommandTaskList || commands[1] != daemonclient.CommandWorktreeList || commands[2] != commandSessionStart {
+		t.Fatalf("commands = %v", commands)
+	}
+	var body sessionRequestBody
+	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if body.BaseBranch != "az/az-parent" {
+		t.Fatalf("base_branch = %q, want %q", body.BaseBranch, "az/az-parent")
+	}
+}
+
 func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -5106,8 +5181,11 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az mail send --parent <parent-issue> --type dependency-ready --body \"...\"`") {
 		t.Fatalf("prime output missing mail send command example: %q", output)
 	}
-	if !strings.Contains(output, "`az session start <issue-id>`, `az session status [issue-id]`, `az daemon start|stop|restart`, `az export --format json [--out <path>]`") {
+	if !strings.Contains(output, "`az session status [issue-id]`, `az daemon start|stop|restart`, `az export --format json [--out <path>]`") {
 		t.Fatalf("prime output missing session/runtime command examples: %q", output)
+	}
+	if !strings.Contains(output, "`az session start <issue-id>` is for explicit/manual orchestration; agents should not run it unless the user asks.") {
+		t.Fatalf("prime output missing session start guardrail: %q", output)
 	}
 	if !strings.Contains(output, "Optional (only when splitting work): `az issue create \"Child task\"`") {
 		t.Fatalf("prime output missing optional child-task split guidance: %q", output)

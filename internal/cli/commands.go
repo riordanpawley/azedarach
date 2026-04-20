@@ -320,13 +320,18 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	if err := validateSessionIssueID(ctx, deps, issueID); err != nil {
+	task, err := validateSessionIssueID(ctx, deps, issueID)
+	if err != nil {
+		return err
+	}
+	baseBranch, err := resolveSessionStartBaseBranch(ctx, deps, task)
+	if err != nil {
 		return err
 	}
 
 	deps.Logger.Info("starting session", "issue_id", issueID)
 
-	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStart, deps.ProjectID, issueID, "main"))
+	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStart, deps.ProjectID, issueID, baseBranch))
 	if err != nil {
 		return fmt.Errorf("failed to start session: %w", err)
 	}
@@ -342,7 +347,7 @@ func AttachCommand(deps *Dependencies, issueID string) error {
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	if err := validateSessionIssueID(ctx, deps, issueID); err != nil {
+	if _, err := validateSessionIssueID(ctx, deps, issueID); err != nil {
 		return err
 	}
 
@@ -368,7 +373,7 @@ func KillCommandWithOptions(deps *Dependencies, issueID string, opts SessionComm
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	if err := validateSessionIssueID(ctx, deps, issueID); err != nil {
+	if _, err := validateSessionIssueID(ctx, deps, issueID); err != nil {
 		return err
 	}
 
@@ -405,23 +410,51 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 	return printCommandOutput(resp)
 }
 
-func validateSessionIssueID(ctx context.Context, deps *Dependencies, issueID string) error {
+func validateSessionIssueID(ctx context.Context, deps *Dependencies, issueID string) (domain.Task, error) {
 	trimmed := strings.TrimSpace(issueID)
 	if trimmed == "" {
-		return fmt.Errorf("issue id is required")
+		return domain.Task{}, fmt.Errorf("issue id is required")
 	}
 	if _, err := naming.ParseIssueID(trimmed); err != nil {
-		return fmt.Errorf("invalid issue id %q: %w", issueID, err)
+		return domain.Task{}, fmt.Errorf("invalid issue id %q: %w", issueID, err)
 	}
 
 	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to validate issue %s: %w", trimmed, err)
+		return domain.Task{}, fmt.Errorf("failed to validate issue %s: %w", trimmed, err)
 	}
-	if _, ok := findTaskByID(snapshot.Tasks, trimmed); !ok {
-		return fmt.Errorf("issue not found: %s", trimmed)
+	task, ok := findTaskByID(snapshot.Tasks, trimmed)
+	if !ok {
+		return domain.Task{}, fmt.Errorf("issue not found: %s", trimmed)
 	}
-	return nil
+	return task, nil
+}
+
+func resolveSessionStartBaseBranch(ctx context.Context, deps *Dependencies, task domain.Task) (string, error) {
+	baseBranch := resolveCLIBaseBranch(deps.Config)
+	if task.ParentID == nil {
+		return baseBranch, nil
+	}
+	parentID := strings.TrimSpace(task.ParentID.String())
+	if parentID == "" {
+		return baseBranch, nil
+	}
+
+	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve parent worktree branch for %s: %w", task.ID, err)
+	}
+	for _, worktree := range worktrees {
+		if !naming.IssueIDsEqual(worktree.IssueID, parentID) {
+			continue
+		}
+		branch := strings.TrimSpace(worktree.Branch)
+		if branch != "" {
+			return branch, nil
+		}
+		break
+	}
+	return baseBranch, nil
 }
 
 // BranchMergeToMainCommand merges one issue worktree branch into the base branch using daemon git commands.
