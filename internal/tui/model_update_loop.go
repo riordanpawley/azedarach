@@ -1070,6 +1070,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		confirm := overlay.NewConfirmDialogExplicitYN(title, formatWorktreeCleanupConfirmPrompt(msg))
 		return m, m.openOverlay(confirm)
 
+	case bulkCleanupPreflightMsg:
+		if len(msg.risks) == 0 && msg.snapshotErr == nil {
+			return m, m.bulkCleanupWorktreeCmd(msg.taskIDs, msg.deletedTasks)
+		}
+		m.pendingBulkCleanup = &pendingBulkCleanupConfirmation{
+			taskIDs:      append([]string(nil), msg.taskIDs...),
+			deletedTasks: msg.deletedTasks,
+		}
+		confirm := overlay.NewConfirmDialogExplicitYN("Bulk cleanup preflight", formatBulkCleanupPreflightPrompt(msg))
+		return m, m.openOverlay(confirm)
+
 	case worktreeCleanupResultMsg:
 		if msg.needsForce {
 			m.pendingCleanup = &pendingWorktreeCleanupConfirmation{

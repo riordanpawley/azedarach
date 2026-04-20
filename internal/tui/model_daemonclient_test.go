@@ -6095,6 +6095,165 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 			t.Fatalf("requests = %v", got)
 		}
 	})
+
+	t.Run("bulk cleanup preflight prompts when selected tasks are dirty or ahead", func(t *testing.T) {
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandRuntimeReconcileIssue:
+					respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{})
+					if err != nil {
+						t.Fatalf("marshal reconcile response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            respBody,
+					}, nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+							{ID: "az-1", Status: domain.StatusOpen, HasUncommittedChanges: true, GitAdditions: 3, GitDeletions: 1},
+							{ID: "az-2", Status: domain.StatusOpen, GitAheadCount: 2},
+						}),
+					}, nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{
+			{ID: "az-1", Status: domain.StatusOpen},
+			{ID: "az-2", Status: domain.StatusOpen},
+		}
+
+		updatedAny, cmd := m.handleBulkAction(overlay.BulkActionMsg{
+			Action:      "w",
+			SelectedIDs: []string{"az-1", "az-2"},
+		})
+		updated, ok := updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if cmd == nil {
+			t.Fatal("expected bulk cleanup preflight command")
+		}
+
+		preflightMsg := cmd()
+		preflight, ok := preflightMsg.(bulkCleanupPreflightMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want bulkCleanupPreflightMsg", preflightMsg)
+		}
+		if len(preflight.risks) != 2 {
+			t.Fatalf("preflight risks = %+v, want 2 flagged tasks", preflight.risks)
+		}
+
+		nextAny, _ := updated.Update(preflight)
+		next, ok := nextAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", nextAny)
+		}
+		if next.pendingBulkCleanup == nil {
+			t.Fatal("expected pending bulk cleanup confirmation")
+		}
+		if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskList {
+			t.Fatalf("requests = %v", got)
+		}
+	})
+
+	t.Run("bulk cleanup preflight proceeds immediately when no selected task is dirty/ahead", func(t *testing.T) {
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandRuntimeReconcileIssue:
+					respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{})
+					if err != nil {
+						t.Fatalf("marshal reconcile response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            respBody,
+					}, nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+							{ID: "az-1", Status: domain.StatusOpen, HasUncommittedChanges: false, GitAheadCount: 0},
+						}),
+					}, nil
+				case daemonclient.CommandSessionStop, daemonclient.CommandWorktreeRemove:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+					}, nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{
+			{ID: "az-1", Status: domain.StatusOpen},
+		}
+
+		_, cmd := m.handleBulkAction(overlay.BulkActionMsg{
+			Action:      "w",
+			SelectedIDs: []string{"az-1"},
+		})
+		if cmd == nil {
+			t.Fatal("expected bulk cleanup preflight command")
+		}
+
+		preflightMsg := cmd()
+		preflight, ok := preflightMsg.(bulkCleanupPreflightMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want bulkCleanupPreflightMsg", preflightMsg)
+		}
+
+		updatedAny, runCleanupCmd := m.Update(preflight)
+		updated, ok := updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if updated.pendingBulkCleanup != nil {
+			t.Fatal("did not expect pending bulk cleanup confirmation for clean preflight")
+		}
+		if runCleanupCmd == nil {
+			t.Fatal("expected cleanup command to run immediately for clean preflight")
+		}
+		resultMsg := runCleanupCmd()
+		result, ok := resultMsg.(bulkStatusResultMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want bulkStatusResultMsg", resultMsg)
+		}
+		if result.updated != 1 || result.failed != 0 {
+			t.Fatalf("bulk cleanup result = %+v", result)
+		}
+		if got := transport.requests; len(got) != 4 ||
+			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
+			got[1] != daemonclient.CommandTaskList ||
+			got[2] != daemonclient.CommandSessionStop ||
+			got[3] != daemonclient.CommandWorktreeRemove {
+			t.Fatalf("requests = %v", got)
+		}
+	})
 }
 
 func TestBulkActionMenuPreviewAndFrozenSelection(t *testing.T) {

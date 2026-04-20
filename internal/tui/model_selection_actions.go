@@ -45,10 +45,10 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 		return m, m.bulkArchiveCmd(msg.SelectedIDs)
 
 	case "w": // Cleanup selected worktrees
-		return m, m.bulkCleanupWorktreeCmd(msg.SelectedIDs, false)
+		return m, m.bulkCleanupPreflightCmd(msg.SelectedIDs, false)
 
 	case "W": // Delete selected tasks and cleanup worktrees
-		return m, m.bulkCleanupWorktreeCmd(msg.SelectedIDs, true)
+		return m, m.bulkCleanupPreflightCmd(msg.SelectedIDs, true)
 
 	case "x": // Clear selection
 		m.editor.ClearSelection()
@@ -219,6 +219,22 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	// full detail/actions panel after attach without reopening it.
 	if !(msg.Key == "a" && isTaskWorkspaceOverlay(m.overlayStack.Current())) {
 		m.overlayStack.Pop()
+	}
+
+	if msg.Key == "yes" && m.pendingBulkCleanup != nil {
+		pending := m.pendingBulkCleanup
+		m.pendingBulkCleanup = nil
+		return m, m.bulkCleanupWorktreeCmd(pending.taskIDs, pending.deletedTasks)
+	}
+	if msg.Key == "no" && m.pendingBulkCleanup != nil {
+		pending := m.pendingBulkCleanup
+		m.pendingBulkCleanup = nil
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: fmt.Sprintf("Cancelled bulk cleanup for %d task(s)", len(pending.taskIDs)),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
 	}
 
 	if msg.Key == "yes" && m.pendingCleanup != nil {

@@ -130,6 +130,7 @@ type Model struct {
 	operationTaskID  map[string]string
 	pendingOpsByTask map[string]pendingOperationProgress
 	pendingCleanup   *pendingWorktreeCleanupConfirmation
+	pendingBulkCleanup *pendingBulkCleanupConfirmation
 
 	// Navigation (using NavigationService)
 	nav *navigation.Service
@@ -2436,6 +2437,29 @@ type pendingWorktreeCleanupConfirmation struct {
 	force       bool
 }
 
+type bulkCleanupRisk struct {
+	taskID    string
+	dirty     bool
+	ahead     int
+	additions int
+	deletions int
+}
+
+type bulkCleanupPreflightMsg struct {
+	taskIDs      []string
+	deletedTasks bool
+	risks        []bulkCleanupRisk
+	freshness    protocol.TaskListFreshness
+	checkedAt    time.Time
+	reconcileErr error
+	snapshotErr  error
+}
+
+type pendingBulkCleanupConfirmation struct {
+	taskIDs      []string
+	deletedTasks bool
+}
+
 type refreshTaskWorkspaceResultMsg struct {
 	taskID        string
 	hasTask       bool
@@ -3291,6 +3315,62 @@ func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd
 	}
 }
 
+func (m Model) bulkCleanupPreflightCmd(taskIDs []string, deleteTask bool) tea.Cmd {
+	selected := append([]string(nil), taskIDs...)
+	return func() tea.Msg {
+		msg := bulkCleanupPreflightMsg{
+			taskIDs:      selected,
+			deletedTasks: deleteTask,
+		}
+		if len(selected) == 0 {
+			return msg
+		}
+		if m.daemonClient == nil {
+			msg.snapshotErr = fmt.Errorf("daemon client unavailable")
+			return msg
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		if _, err := m.daemonClient.ReconcileRuntimeIssues(ctx, selected); err != nil {
+			msg.reconcileErr = err
+		}
+
+		snapshot, err := m.readTaskSnapshot(ctx, m.daemonClient)
+		if err != nil {
+			msg.snapshotErr = err
+			return msg
+		}
+		msg.freshness = snapshot.Freshness
+		msg.checkedAt = snapshot.LastCheckedAt
+
+		tasksByID := make(map[string]domain.Task, len(snapshot.Tasks))
+		for _, task := range snapshot.Tasks {
+			tasksByID[taskIDKey(task.ID.String())] = task
+		}
+
+		for _, taskID := range selected {
+			task, ok := tasksByID[taskIDKey(taskID)]
+			if !ok {
+				continue
+			}
+			if !task.HasUncommittedChanges && task.GitAheadCount <= 0 {
+				continue
+			}
+			msg.risks = append(msg.risks, bulkCleanupRisk{
+				taskID:    task.ID.String(),
+				dirty:     task.HasUncommittedChanges,
+				ahead:     task.GitAheadCount,
+				additions: task.GitAdditions,
+				deletions: task.GitDeletions,
+			})
+		}
+
+		return msg
+	}
+}
+
 // bulkSetStatusCmd sets all selected tasks to a specific status
 func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd {
 	return func() tea.Msg {
@@ -3366,6 +3446,45 @@ func summarizeBulkIssues(issues []bulkTaskIssue) string {
 		parts = append(parts, fmt.Sprintf("%s: %s", item.taskID, item.reason))
 	}
 	return strings.Join(parts, "; ")
+}
+
+func formatBulkCleanupPreflightPrompt(msg bulkCleanupPreflightMsg) string {
+	action := "cleanup worktrees"
+	if msg.deletedTasks {
+		action = "delete tasks and cleanup worktrees"
+	}
+	lines := []string{
+		fmt.Sprintf("Action: %s", action),
+		fmt.Sprintf("Selected tasks: %d", len(msg.taskIDs)),
+		"",
+	}
+
+	if msg.snapshotErr != nil {
+		lines = append(lines, fmt.Sprintf("Preflight unavailable: %v", msg.snapshotErr))
+	} else if len(msg.risks) == 0 {
+		lines = append(lines, "No selected tasks are currently dirty or ahead.")
+	} else {
+		lines = append(lines, "Selected tasks with dirty/ahead git state:")
+		for _, risk := range msg.risks {
+			stateParts := make([]string, 0, 2)
+			if risk.dirty {
+				stateParts = append(stateParts, fmt.Sprintf("dirty (+%d/-%d)", risk.additions, risk.deletions))
+			}
+			if risk.ahead > 0 {
+				stateParts = append(stateParts, fmt.Sprintf("ahead %d", risk.ahead))
+			}
+			lines = append(lines, fmt.Sprintf("- %s: %s", risk.taskID, strings.Join(stateParts, ", ")))
+		}
+	}
+
+	if !msg.checkedAt.IsZero() {
+		lines = append(lines, "", fmt.Sprintf("Snapshot: %s at %s", msg.freshness, msg.checkedAt.Local().Format("2006-01-02 15:04:05")))
+	}
+	if msg.reconcileErr != nil {
+		lines = append(lines, fmt.Sprintf("Reconcile warning: %v", msg.reconcileErr))
+	}
+	lines = append(lines, "", "Proceed?")
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
