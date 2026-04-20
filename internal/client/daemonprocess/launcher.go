@@ -120,7 +120,7 @@ func (l *Launcher) Start(ctx context.Context) error {
 				terminate = lifecycle.TerminateLockOwner
 			}
 			if err := terminate(l.LockPath); err != nil {
-				if !errors.Is(err, syscall.EPERM) && !errors.Is(err, os.ErrPermission) {
+				if !isLockOwnerPermissionError(err) {
 					readyErr := l.waitForSocketReadyWithin(1 * time.Second)
 					if readyErr == nil {
 						return nil
@@ -180,6 +180,13 @@ func (l *Launcher) waitForSocketReadyWithin(timeout time.Duration) error {
 	readyCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return l.waitForReady(readyCtx, l.SocketPath)
+}
+
+func isLockOwnerPermissionError(err error) bool {
+	return errors.Is(err, lifecycle.ErrLockOwnerPermissionDenied) ||
+		errors.Is(err, syscall.EPERM) ||
+		errors.Is(err, syscall.EACCES) ||
+		errors.Is(err, os.ErrPermission)
 }
 
 // Stop attempts to stop existing lock-owner process.
