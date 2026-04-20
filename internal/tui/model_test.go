@@ -3619,7 +3619,7 @@ func TestDaemonSessionUpdatedEventAllowsImmediateAttachFromWorkspace(t *testing.
 	updatedAt := time.Date(2026, time.March, 31, 1, 2, 3, 0, time.UTC)
 	body, err := json.Marshal(protocol.SessionProjectionEventBody{
 		ProjectID: naming.ProjectID(m.daemonProjectID()),
-		Revision:  7,
+		Revision:  1,
 		Session: protocol.SessionProjection{
 			SessionID: "proj-az-1",
 			IssueID:   naming.IssueID(issueID),
@@ -3633,7 +3633,7 @@ func TestDaemonSessionUpdatedEventAllowsImmediateAttachFromWorkspace(t *testing.
 
 	updatedAny, _ := m.Update(daemonStreamEventMsg{
 		event: protocol.EventEnvelope{
-			Revision: 7,
+			Revision: 1,
 			Event:    protocol.EventSessionUpdated,
 			Body:     body,
 		},
