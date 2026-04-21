@@ -90,9 +90,12 @@ func (l *Launcher) Start(ctx context.Context) error {
 	}
 
 	bin := l.resolveBinary()
-	releaseStartLock, err := l.acquireStartLock(ctx)
+	releaseStartLock, lockAcquired, err := l.acquireStartLock(ctx)
 	if err != nil {
 		return err
+	}
+	if !lockAcquired {
+		return nil
 	}
 	defer releaseStartLock()
 
@@ -294,29 +297,36 @@ func openDaemonLog(path string) (io.WriteCloser, error) {
 	return os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 }
 
-func (l *Launcher) acquireStartLock(ctx context.Context) (func(), error) {
+func (l *Launcher) acquireStartLock(ctx context.Context) (func(), bool, error) {
 	startLockPath := l.LockPath + ".start"
 	if err := os.MkdirAll(filepath.Dir(startLockPath), 0o755); err != nil {
-		return nil, fmt.Errorf("create start lock dir: %w", err)
+		return nil, false, fmt.Errorf("create start lock dir: %w", err)
 	}
 	f, err := os.OpenFile(startLockPath, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
-		return nil, fmt.Errorf("open start lock: %w", err)
+		return nil, false, fmt.Errorf("open start lock: %w", err)
 	}
 	for {
 		if lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); lockErr == nil {
 			return func() {
 				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 				_ = f.Close()
-			}, nil
+			}, true, nil
 		} else if !errors.Is(lockErr, syscall.EWOULDBLOCK) && !errors.Is(lockErr, syscall.EAGAIN) {
 			_ = f.Close()
-			return nil, fmt.Errorf("acquire start lock: %w", lockErr)
+			return nil, false, fmt.Errorf("acquire start lock: %w", lockErr)
+		}
+		// Another client currently owns startup. If daemon socket becomes ready
+		// while we are queued on the lock, return early rather than timing out
+		// waiting for lock ownership we no longer need.
+		if err := l.waitForSocketReadyWithin(100 * time.Millisecond); err == nil {
+			_ = f.Close()
+			return func() {}, false, nil
 		}
 
 		if ctx.Err() != nil {
 			_ = f.Close()
-			return nil, fmt.Errorf("acquire start lock: %w", ctx.Err())
+			return nil, false, fmt.Errorf("acquire start lock: %w", ctx.Err())
 		}
 		sleep := l.sleepFn
 		if sleep == nil {
