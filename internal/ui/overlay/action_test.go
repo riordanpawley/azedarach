@@ -718,3 +718,22 @@ func TestBulkActionMenu_Update_ArrowSelection(t *testing.T) {
 		t.Fatalf("right arrow action = %q, want %q", rightMsg.Action, "l")
 	}
 }
+
+func TestBulkActionMenu_ExposeCleanupCommands(t *testing.T) {
+	menu := NewBulkActionMenu([]string{"az-1", "az-2"}, 2)
+
+	if cmd := menu.selectByKey("w"); cmd == nil {
+		t.Fatal("expected bulk cleanup command for key w")
+	}
+	if cmd := menu.selectByKey("W"); cmd == nil {
+		t.Fatal("expected bulk delete+cleanup command for key W")
+	}
+
+	view := menu.View()
+	if !strings.Contains(view, "Cleanup worktrees") {
+		t.Fatalf("view = %q, want cleanup worktrees command", view)
+	}
+	if !strings.Contains(view, "Delete + cleanup worktrees") {
+		t.Fatalf("view = %q, want delete+cleanup worktrees command", view)
+	}
+}
