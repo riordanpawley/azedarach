@@ -4216,6 +4216,38 @@ func TestIssueCreateCommandRequiresImplWhenMultipleConfigured(t *testing.T) {
 	}
 }
 
+func TestIssueCreateCommandSuggestsImplWhenInferenceUnavailable(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command == daemonclient.CommandTaskList {
+					return protocol.ResponseEnvelope{}, errors.New("transport unavailable")
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	err := IssueCreateCommand(deps, IssueCreateOptions{
+		Title:    "Needs impl",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl (unable to infer implementation automatically:") || !strings.Contains(err.Error(), "Specify --impl <implementation>") {
+		t.Fatalf("expected actionable impl inference failure, got %v", err)
+	}
+}
+
 func TestIssueCheckDoctorAndDeleteCommandsUseDaemonTaskCommands(t *testing.T) {
 	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	var gotDeleteReq protocol.RequestEnvelope
@@ -5179,6 +5211,64 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "Dependencies:\n- blocks: az-2") {
 		t.Fatalf("prime output missing dependency summary: %q", output)
+	}
+}
+
+func TestPrimeCommandTruncatesLargeIssueDescription(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
+	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+	longDescription := strings.Repeat("line content for noisy transcript output\n", 40)
+
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskList {
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+				body, err := marshalTaskListBody([]domain.Task{{
+					ID:              "az-1",
+					Title:           "Prime issue",
+					Description:     longDescription,
+					Status:          domain.StatusOpen,
+					Priority:        domain.P2,
+					Type:            domain.TypeTask,
+					Implementations: []string{"default"},
+					CreatedAt:       now,
+					UpdatedAt:       now,
+				}})
+				if err != nil {
+					t.Fatalf("marshal task list: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            body,
+				}, nil
+			},
+		}),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(deps)
+	})
+
+	if !strings.Contains(output, "… (truncated; run `az issue get az-1` for full context)") {
+		t.Fatalf("prime output should include truncated description sentinel: %q", output)
+	}
+	if strings.Count(output, "line content for noisy transcript output") >= 12 {
+		t.Fatalf("prime output should not include full long description: %q", output)
 	}
 }
 

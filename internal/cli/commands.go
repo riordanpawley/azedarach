@@ -1762,7 +1762,7 @@ func resolveIssueWriteImplementation(ctx context.Context, deps *Dependencies, pr
 		return deps.DaemonClient.ListTasksSnapshot(callCtx)
 	})
 	if err != nil {
-		return "", fmt.Errorf("resolve implementation context: %w", err)
+		return "", fmt.Errorf("missing required flag: --impl (unable to infer implementation automatically: %v). Specify --impl <implementation>", err)
 	}
 	impls := configuredIssueImplementations(snapshot.Tasks)
 	switch len(impls) {
@@ -4005,7 +4005,7 @@ func PrimeCommand(deps *Dependencies) error {
 func renderPrimeIssueSection(issueID string, task domain.Task) string {
 	description := ""
 	if strings.TrimSpace(task.Description) != "" {
-		description = fmt.Sprintf("\nDescription: %s", task.Description)
+		description = fmt.Sprintf("\nDescription: %s", summarizePrimeDescription(issueID, task.Description))
 	}
 	implementations := formatPrimeImplementations(task.Implementations)
 	parent := ""
@@ -4026,6 +4026,37 @@ func renderPrimeIssueSection(issueID string, task domain.Task) string {
 		description,
 		formatPrimeDependencyLines(task.Dependencies),
 	)
+}
+
+func summarizePrimeDescription(issueID, description string) string {
+	const (
+		maxLines = 8
+		maxRunes = 800
+	)
+
+	trimmed := strings.TrimSpace(description)
+	if trimmed == "" {
+		return ""
+	}
+
+	truncated := false
+	runes := []rune(trimmed)
+	if len(runes) > maxRunes {
+		trimmed = string(runes[:maxRunes])
+		truncated = true
+	}
+
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
+		truncated = true
+	}
+
+	snippet := strings.TrimSpace(strings.Join(lines, "\n"))
+	if !truncated {
+		return snippet
+	}
+	return fmt.Sprintf("%s\n… (truncated; run `az issue get %s` for full context)", snippet, issueID)
 }
 
 func formatPrimeImplementations(implementations []string) string {
