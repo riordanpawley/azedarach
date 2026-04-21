@@ -308,7 +308,7 @@ func readClipboardMacOSTextPath(ctx context.Context) ([]byte, error) {
 	}
 	path = filepath.Clean(path)
 	if !isLikelyImagePath(path) {
-		return nil, fmt.Errorf("clipboard text is not image path")
+		return nil, fmt.Errorf("clipboard text is not image path: %q", raw)
 	}
 	data, readErr := os.ReadFile(path)
 	if readErr != nil {

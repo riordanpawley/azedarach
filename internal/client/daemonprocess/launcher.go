@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -23,13 +22,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
-
-const staleDaemonLockWarnInterval = 30 * time.Second
-
-var staleDaemonLockWarnState struct {
-	mu   sync.Mutex
-	last map[string]time.Time
-}
 
 // Launcher starts/replaces the singleton daemon process for a user-global socket.
 type Launcher struct {
@@ -100,6 +92,9 @@ func (l *Launcher) Start(ctx context.Context) error {
 	bin := l.resolveBinary()
 	releaseStartLock, err := l.acquireStartLock(ctx)
 	if err != nil {
+		if (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) && l.waitForSocketReadyWithin(300*time.Millisecond) == nil {
+			return nil
+		}
 		return err
 	}
 	defer releaseStartLock()
@@ -116,7 +111,7 @@ func (l *Launcher) Start(ctx context.Context) error {
 			if err == nil {
 				return nil
 			}
-			if l.Logger != nil && shouldLogStaleDaemonLockWarning(l.LockPath, l.SocketPath, time.Now()) {
+			if l.Logger != nil {
 				l.Logger.Warn("daemon lock owner alive but socket is not ready; attempting fresh spawn",
 					"lock_path", l.LockPath,
 					"socket_path", l.SocketPath,
@@ -128,7 +123,7 @@ func (l *Launcher) Start(ctx context.Context) error {
 				terminate = lifecycle.TerminateLockOwner
 			}
 			if err := terminate(l.LockPath); err != nil {
-				if !isLockOwnerPermissionError(err) {
+				if !isRecoverableLockOwnerTerminationError(err) {
 					readyErr := l.waitForSocketReadyWithin(1 * time.Second)
 					if readyErr == nil {
 						return nil
@@ -136,13 +131,13 @@ func (l *Launcher) Start(ctx context.Context) error {
 					return fmt.Errorf("recover stale daemon lock owner: %w", err)
 				}
 				if l.Logger != nil {
-					l.Logger.Warn("permission denied terminating lock owner; force-clearing stale daemon lock",
+					l.Logger.Warn("lock owner termination did not complete cleanly; force-clearing stale daemon lock",
 						"lock_path", l.LockPath,
 						"error", err,
 					)
 				}
 				if rmErr := os.Remove(l.LockPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-					return fmt.Errorf("recover stale daemon lock owner after permission fallback: %w", rmErr)
+					return fmt.Errorf("recover stale daemon lock owner after forced lock clear: %w", rmErr)
 				}
 			}
 		}
@@ -190,26 +185,12 @@ func (l *Launcher) waitForSocketReadyWithin(timeout time.Duration) error {
 	return l.waitForReady(readyCtx, l.SocketPath)
 }
 
-func isLockOwnerPermissionError(err error) bool {
+func isRecoverableLockOwnerTerminationError(err error) bool {
 	return errors.Is(err, lifecycle.ErrLockOwnerPermissionDenied) ||
+		errors.Is(err, lifecycle.ErrLockOwnerTerminationTimeout) ||
 		errors.Is(err, syscall.EPERM) ||
 		errors.Is(err, syscall.EACCES) ||
 		errors.Is(err, os.ErrPermission)
-}
-
-func shouldLogStaleDaemonLockWarning(lockPath, socketPath string, now time.Time) bool {
-	key := strings.TrimSpace(lockPath) + "|" + strings.TrimSpace(socketPath)
-	staleDaemonLockWarnState.mu.Lock()
-	defer staleDaemonLockWarnState.mu.Unlock()
-
-	if staleDaemonLockWarnState.last == nil {
-		staleDaemonLockWarnState.last = make(map[string]time.Time)
-	}
-	if prev, ok := staleDaemonLockWarnState.last[key]; ok && now.Sub(prev) < staleDaemonLockWarnInterval {
-		return false
-	}
-	staleDaemonLockWarnState.last[key] = now
-	return true
 }
 
 // Stop attempts to stop existing lock-owner process.
