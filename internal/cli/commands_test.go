@@ -299,6 +299,49 @@ func TestStartCommandUsesExtendedTimeout(t *testing.T) {
 	}
 }
 
+func TestStartCommandPrintsProgressStatus(t *testing.T) {
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: "issue-1", Title: "Example", Status: domain.StatusOpen},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				case commandSessionStart:
+					return responseWithOutput(req, "started\n"), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	stderr := captureStderr(t, func() error {
+		return StartCommand(deps, "issue-1")
+	})
+	if !strings.Contains(stderr, "Starting session for issue-1...") {
+		t.Fatalf("stderr = %q, want start progress message", stderr)
+	}
+}
+
 func TestStartCommandUsesParentWorktreeBranchForChildIssue(t *testing.T) {
 	var gotReq protocol.RequestEnvelope
 	commands := []string{}
@@ -5847,6 +5890,37 @@ func captureStdout(t *testing.T, fn func() error) string {
 	runErr := <-resultCh
 	if copyErr != nil {
 		t.Fatalf("copy stdout: %v", copyErr)
+	}
+	if runErr != nil {
+		t.Fatalf("command error: %v", runErr)
+	}
+
+	return buf.String()
+}
+
+func captureStderr(t *testing.T, fn func() error) string {
+	t.Helper()
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+
+	resultCh := make(chan error, 1)
+	go func() {
+		resultCh <- fn()
+		_ = w.Close()
+	}()
+
+	var buf bytes.Buffer
+	_, copyErr := io.Copy(&buf, r)
+
+	os.Stderr = oldStderr
+	runErr := <-resultCh
+	if copyErr != nil {
+		t.Fatalf("copy stderr: %v", copyErr)
 	}
 	if runErr != nil {
 		t.Fatalf("command error: %v", runErr)
