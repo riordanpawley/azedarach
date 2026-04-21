@@ -46,12 +46,15 @@ const (
 	defaultExportFormat         = "json"
 	defaultIssueListLimit       = 200
 	defaultOperationListLimit   = 50
+	sessionStartCommandTimeout  = 5 * time.Minute
 	branchMergeToMainTimeout    = 2 * time.Minute
 	issueCreateCommandTimeout   = 10 * time.Second
 	issueCreateAutostartTimeout = 12 * time.Second
 	exitCodeHardFailure         = 1
 	exitCodePartialFailure      = 2
 )
+
+var sessionStartProgressTick = 15 * time.Second
 
 type Dependencies struct {
 	Config         *config.Config
@@ -316,7 +319,8 @@ func StartCommand(deps *Dependencies, issueID string) error {
 }
 
 func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCommandOptions) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), sessionStartCommandTimeout)
+	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
@@ -330,6 +334,8 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 	}
 
 	deps.Logger.Info("starting session", "issue_id", issueID)
+	stopProgress := startSessionProgressReporter(ctx, issueID)
+	defer stopProgress()
 
 	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStart, deps.ProjectID, issueID, baseBranch))
 	if err != nil {
@@ -340,6 +346,35 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 	}
 
 	return printCommandOutputWithWait(ctx, deps, resp, opts)
+}
+
+func startSessionProgressReporter(ctx context.Context, issueID string) func() {
+	trimmedIssueID := strings.TrimSpace(issueID)
+	if trimmedIssueID == "" {
+		trimmedIssueID = "unknown"
+	}
+	startedAt := time.Now()
+	fmt.Fprintf(os.Stderr, "Starting session for %s... this can take up to %s.\n", trimmedIssueID, sessionStartCommandTimeout)
+
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(sessionStartProgressTick)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				elapsed := time.Since(startedAt).Round(time.Second)
+				fmt.Fprintf(os.Stderr, "Still starting session for %s... elapsed %s.\n", trimmedIssueID, elapsed)
+			}
+		}
+	}()
+	return func() {
+		close(done)
+	}
 }
 
 func AttachCommand(deps *Dependencies, issueID string) error {
