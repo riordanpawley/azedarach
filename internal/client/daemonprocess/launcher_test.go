@@ -526,6 +526,50 @@ func TestLauncherStart_SocketReadySkipsSpawnWithoutLock(t *testing.T) {
 	}
 }
 
+func TestLauncherStart_SocketReadyWhileWaitingForStartLockReturnsNil(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	launcher := NewLauncher(repoDir, socketPath)
+	launcher.BinPath = filepath.Join(t.TempDir(), "missing-azd")
+
+	startLockPath := launcher.LockPath + ".start"
+	if err := os.MkdirAll(filepath.Dir(startLockPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(start lock dir): %v", err)
+	}
+	lockFile, err := os.OpenFile(startLockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("OpenFile(start lock): %v", err)
+	}
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lockFile.Close()
+		t.Fatalf("Flock(start lock): %v", err)
+	}
+	defer func() {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+	}()
+
+	readyCalls := 0
+	launcher.waitForReady = func(context.Context, string) error {
+		readyCalls++
+		if readyCalls >= 2 {
+			return nil
+		}
+		return context.DeadlineExceeded
+	}
+	launcher.sleepFn = func(time.Duration) {}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+
+	if err := launcher.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v, want nil when socket becomes ready under lock contention", err)
+	}
+	if readyCalls < 2 {
+		t.Fatalf("waitForReady call count = %d, want >= 2", readyCalls)
+	}
+}
+
 func TestLauncherStopUsesTerminateLockOwner(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
