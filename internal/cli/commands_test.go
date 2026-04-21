@@ -245,6 +245,60 @@ func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 	}
 }
 
+func TestStartCommandUsesExtendedTimeout(t *testing.T) {
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: "issue-1", Title: "Example", Status: domain.StatusOpen},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	var startDeadline time.Time
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				case commandSessionStart:
+					var ok bool
+					startDeadline, ok = ctx.Deadline()
+					if !ok {
+						t.Fatal("session.start context missing deadline")
+					}
+					return responseWithOutput(req, "started\n"), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	if err := StartCommand(deps, "issue-1"); err != nil {
+		t.Fatalf("StartCommand error: %v", err)
+	}
+
+	remaining := time.Until(startDeadline)
+	if remaining < 4*time.Minute {
+		t.Fatalf("session.start deadline too short: remaining=%s", remaining)
+	}
+	if remaining > sessionStartCommandTimeout+2*time.Second {
+		t.Fatalf("session.start deadline too long: remaining=%s", remaining)
+	}
+}
+
 func TestStartCommandUsesParentWorktreeBranchForChildIssue(t *testing.T) {
 	var gotReq protocol.RequestEnvelope
 	commands := []string{}

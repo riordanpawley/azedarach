@@ -46,6 +46,7 @@ const (
 	defaultExportFormat         = "json"
 	defaultIssueListLimit       = 200
 	defaultOperationListLimit   = 50
+	sessionStartCommandTimeout  = 5 * time.Minute
 	branchMergeToMainTimeout    = 2 * time.Minute
 	issueCreateCommandTimeout   = 10 * time.Second
 	issueCreateAutostartTimeout = 12 * time.Second
@@ -316,7 +317,8 @@ func StartCommand(deps *Dependencies, issueID string) error {
 }
 
 func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCommandOptions) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), sessionStartCommandTimeout)
+	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
