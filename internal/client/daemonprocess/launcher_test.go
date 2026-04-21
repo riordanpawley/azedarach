@@ -71,6 +71,25 @@ func TestLauncherStartClosesDaemonLog(t *testing.T) {
 	}
 }
 
+func TestShouldLogStaleDaemonLockWarningRateLimited(t *testing.T) {
+	staleDaemonLockWarnState.mu.Lock()
+	staleDaemonLockWarnState.last = make(map[string]time.Time)
+	staleDaemonLockWarnState.mu.Unlock()
+
+	base := time.Date(2026, time.April, 21, 12, 0, 0, 0, time.UTC)
+	lockPath := "/tmp/daemon.lock"
+	socketPath := "/tmp/daemon.sock"
+	if !shouldLogStaleDaemonLockWarning(lockPath, socketPath, base) {
+		t.Fatal("first stale-lock warning should be logged")
+	}
+	if shouldLogStaleDaemonLockWarning(lockPath, socketPath, base.Add(5*time.Second)) {
+		t.Fatal("stale-lock warning should be suppressed within rate-limit window")
+	}
+	if !shouldLogStaleDaemonLockWarning(lockPath, socketPath, base.Add(staleDaemonLockWarnInterval+time.Second)) {
+		t.Fatal("stale-lock warning should log again after rate-limit window")
+	}
+}
+
 func TestNewLauncherNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")

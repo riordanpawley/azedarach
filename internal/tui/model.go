@@ -287,7 +287,7 @@ func New(cfg *config.Config) Model {
 		logFilePath:                 logFilePath,
 		currentProject:              resolveInitialProjectName(deps.ProjectRegistry, repoDir),
 	}
-	logger.Info("tui runtime initialized", "repo_dir", repoDir, "runtime_repo_dir", runtimeRepoDir, "daemon_socket", daemonSocketPath, "project", m.currentProject)
+	logger.Debug("tui runtime initialized", "repo_dir", repoDir, "runtime_repo_dir", runtimeRepoDir, "daemon_socket", daemonSocketPath, "project", m.currentProject)
 	m.refreshDaemonProjectRouteID()
 	m.daemonClient.WithProjectRouteID(m.daemonProjectRouteIDValue())
 	return m

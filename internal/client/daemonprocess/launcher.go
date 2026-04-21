@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,6 +23,13 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
+
+const staleDaemonLockWarnInterval = 30 * time.Second
+
+var staleDaemonLockWarnState struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
 
 // Launcher starts/replaces the singleton daemon process for a user-global socket.
 type Launcher struct {
@@ -108,7 +116,7 @@ func (l *Launcher) Start(ctx context.Context) error {
 			if err == nil {
 				return nil
 			}
-			if l.Logger != nil {
+			if l.Logger != nil && shouldLogStaleDaemonLockWarning(l.LockPath, l.SocketPath, time.Now()) {
 				l.Logger.Warn("daemon lock owner alive but socket is not ready; attempting fresh spawn",
 					"lock_path", l.LockPath,
 					"socket_path", l.SocketPath,
@@ -187,6 +195,21 @@ func isLockOwnerPermissionError(err error) bool {
 		errors.Is(err, syscall.EPERM) ||
 		errors.Is(err, syscall.EACCES) ||
 		errors.Is(err, os.ErrPermission)
+}
+
+func shouldLogStaleDaemonLockWarning(lockPath, socketPath string, now time.Time) bool {
+	key := strings.TrimSpace(lockPath) + "|" + strings.TrimSpace(socketPath)
+	staleDaemonLockWarnState.mu.Lock()
+	defer staleDaemonLockWarnState.mu.Unlock()
+
+	if staleDaemonLockWarnState.last == nil {
+		staleDaemonLockWarnState.last = make(map[string]time.Time)
+	}
+	if prev, ok := staleDaemonLockWarnState.last[key]; ok && now.Sub(prev) < staleDaemonLockWarnInterval {
+		return false
+	}
+	staleDaemonLockWarnState.last[key] = now
+	return true
 }
 
 // Stop attempts to stop existing lock-owner process.
