@@ -245,6 +245,178 @@ func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 	}
 }
 
+func TestStartCommandUsesExtendedTimeout(t *testing.T) {
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: "issue-1", Title: "Example", Status: domain.StatusOpen},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	var startDeadline time.Time
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				case commandSessionStart:
+					var ok bool
+					startDeadline, ok = ctx.Deadline()
+					if !ok {
+						t.Fatal("session.start context missing deadline")
+					}
+					return responseWithOutput(req, "started\n"), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	if err := StartCommand(deps, "issue-1"); err != nil {
+		t.Fatalf("StartCommand error: %v", err)
+	}
+
+	remaining := time.Until(startDeadline)
+	if remaining < 4*time.Minute {
+		t.Fatalf("session.start deadline too short: remaining=%s", remaining)
+	}
+	if remaining > sessionStartCommandTimeout+2*time.Second {
+		t.Fatalf("session.start deadline too long: remaining=%s", remaining)
+	}
+}
+
+func TestStartCommandPrintsProgressStatus(t *testing.T) {
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: "issue-1", Title: "Example", Status: domain.StatusOpen},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				case commandSessionStart:
+					return responseWithOutput(req, "started\n"), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	stderr := captureStderr(t, func() error {
+		return StartCommand(deps, "issue-1")
+	})
+	if !strings.Contains(stderr, "Starting session for issue-1...") {
+		t.Fatalf("stderr = %q, want start progress message", stderr)
+	}
+}
+
+func TestStartCommandUsesParentWorktreeBranchForChildIssue(t *testing.T) {
+	var gotReq protocol.RequestEnvelope
+	commands := []string{}
+	parentID := naming.IssueID("az-parent")
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: parentID, Title: "Parent", Status: domain.StatusInProgress},
+		{ID: "az-child", Title: "Child", Status: domain.StatusOpen, ParentID: &parentID},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+	worktreeListBody, err := json.Marshal(map[string]any{
+		"project_id": "proj",
+		"worktrees": []map[string]any{
+			{"path": "/tmp/parent", "branch": "az/az-parent", "issue_id": "az-parent"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal worktree list: %v", err)
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				case daemonclient.CommandWorktreeList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            worktreeListBody,
+					}, nil
+				case commandSessionStart:
+					gotReq = req
+					return responseWithOutput(req, "ok\n"), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	if err := StartCommand(deps, "az-child"); err != nil {
+		t.Fatalf("StartCommand error: %v", err)
+	}
+	if len(commands) != 3 || commands[0] != daemonclient.CommandTaskList || commands[1] != daemonclient.CommandWorktreeList || commands[2] != commandSessionStart {
+		t.Fatalf("commands = %v", commands)
+	}
+	var body sessionRequestBody
+	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if body.BaseBranch != "az/az-parent" {
+		t.Fatalf("base_branch = %q, want %q", body.BaseBranch, "az/az-parent")
+	}
+}
+
 func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -5138,8 +5310,11 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az mail send --parent <parent-issue> --type dependency-ready --body \"...\"`") {
 		t.Fatalf("prime output missing mail send command example: %q", output)
 	}
-	if !strings.Contains(output, "`az session start <issue-id>`, `az session status [issue-id]`, `az daemon start|stop|restart`, `az export --format json [--out <path>]`") {
+	if !strings.Contains(output, "`az session status [issue-id]`, `az daemon start|stop|restart`, `az export --format json [--out <path>]`") {
 		t.Fatalf("prime output missing session/runtime command examples: %q", output)
+	}
+	if !strings.Contains(output, "`az session start <issue-id>` is for explicit/manual orchestration; agents should not run it unless the user asks.") {
+		t.Fatalf("prime output missing session start guardrail: %q", output)
 	}
 	if !strings.Contains(output, "Optional (only when splitting work): `az issue create \"Child task\"`") {
 		t.Fatalf("prime output missing optional child-task split guidance: %q", output)
@@ -5805,6 +5980,37 @@ func captureStdout(t *testing.T, fn func() error) string {
 	runErr := <-resultCh
 	if copyErr != nil {
 		t.Fatalf("copy stdout: %v", copyErr)
+	}
+	if runErr != nil {
+		t.Fatalf("command error: %v", runErr)
+	}
+
+	return buf.String()
+}
+
+func captureStderr(t *testing.T, fn func() error) string {
+	t.Helper()
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+
+	resultCh := make(chan error, 1)
+	go func() {
+		resultCh <- fn()
+		_ = w.Close()
+	}()
+
+	var buf bytes.Buffer
+	_, copyErr := io.Copy(&buf, r)
+
+	os.Stderr = oldStderr
+	runErr := <-resultCh
+	if copyErr != nil {
+		t.Fatalf("copy stderr: %v", copyErr)
 	}
 	if runErr != nil {
 		t.Fatalf("command error: %v", runErr)

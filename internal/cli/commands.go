@@ -46,12 +46,16 @@ const (
 	defaultExportFormat         = "json"
 	defaultIssueListLimit       = 200
 	defaultOperationListLimit   = 50
+	sessionStartCommandTimeout  = 5 * time.Minute
 	branchMergeToMainTimeout    = 2 * time.Minute
+	daemonCommandTimeout        = 15 * time.Second
 	issueCreateCommandTimeout   = 10 * time.Second
 	issueCreateAutostartTimeout = 12 * time.Second
 	exitCodeHardFailure         = 1
 	exitCodePartialFailure      = 2
 )
+
+var sessionStartProgressTick = 15 * time.Second
 
 type Dependencies struct {
 	Config         *config.Config
@@ -316,17 +320,25 @@ func StartCommand(deps *Dependencies, issueID string) error {
 }
 
 func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCommandOptions) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), sessionStartCommandTimeout)
+	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	if err := validateSessionIssueID(ctx, deps, issueID); err != nil {
+	task, err := validateSessionIssueID(ctx, deps, issueID)
+	if err != nil {
+		return err
+	}
+	baseBranch, err := resolveSessionStartBaseBranch(ctx, deps, task)
+	if err != nil {
 		return err
 	}
 
 	deps.Logger.Info("starting session", "issue_id", issueID)
+	stopProgress := startSessionProgressReporter(ctx, issueID)
+	defer stopProgress()
 
-	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStart, deps.ProjectID, issueID, "main"))
+	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStart, deps.ProjectID, issueID, baseBranch))
 	if err != nil {
 		return fmt.Errorf("failed to start session: %w", err)
 	}
@@ -337,12 +349,41 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 	return printCommandOutputWithWait(ctx, deps, resp, opts)
 }
 
+func startSessionProgressReporter(ctx context.Context, issueID string) func() {
+	trimmedIssueID := strings.TrimSpace(issueID)
+	if trimmedIssueID == "" {
+		trimmedIssueID = "unknown"
+	}
+	startedAt := time.Now()
+	fmt.Fprintf(os.Stderr, "Starting session for %s... this can take up to %s.\n", trimmedIssueID, sessionStartCommandTimeout)
+
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(sessionStartProgressTick)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				elapsed := time.Since(startedAt).Round(time.Second)
+				fmt.Fprintf(os.Stderr, "Still starting session for %s... elapsed %s.\n", trimmedIssueID, elapsed)
+			}
+		}
+	}()
+	return func() {
+		close(done)
+	}
+}
+
 func AttachCommand(deps *Dependencies, issueID string) error {
 	ctx := context.Background()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	if err := validateSessionIssueID(ctx, deps, issueID); err != nil {
+	if _, err := validateSessionIssueID(ctx, deps, issueID); err != nil {
 		return err
 	}
 
@@ -368,7 +409,7 @@ func KillCommandWithOptions(deps *Dependencies, issueID string, opts SessionComm
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	if err := validateSessionIssueID(ctx, deps, issueID); err != nil {
+	if _, err := validateSessionIssueID(ctx, deps, issueID); err != nil {
 		return err
 	}
 
@@ -386,7 +427,7 @@ func KillCommandWithOptions(deps *Dependencies, issueID string, opts SessionComm
 }
 
 func StatusCommand(deps *Dependencies, issueID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -405,23 +446,51 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 	return printCommandOutput(resp)
 }
 
-func validateSessionIssueID(ctx context.Context, deps *Dependencies, issueID string) error {
+func validateSessionIssueID(ctx context.Context, deps *Dependencies, issueID string) (domain.Task, error) {
 	trimmed := strings.TrimSpace(issueID)
 	if trimmed == "" {
-		return fmt.Errorf("issue id is required")
+		return domain.Task{}, fmt.Errorf("issue id is required")
 	}
 	if _, err := naming.ParseIssueID(trimmed); err != nil {
-		return fmt.Errorf("invalid issue id %q: %w", issueID, err)
+		return domain.Task{}, fmt.Errorf("invalid issue id %q: %w", issueID, err)
 	}
 
 	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to validate issue %s: %w", trimmed, err)
+		return domain.Task{}, fmt.Errorf("failed to validate issue %s: %w", trimmed, err)
 	}
-	if _, ok := findTaskByID(snapshot.Tasks, trimmed); !ok {
-		return fmt.Errorf("issue not found: %s", trimmed)
+	task, ok := findTaskByID(snapshot.Tasks, trimmed)
+	if !ok {
+		return domain.Task{}, fmt.Errorf("issue not found: %s", trimmed)
 	}
-	return nil
+	return task, nil
+}
+
+func resolveSessionStartBaseBranch(ctx context.Context, deps *Dependencies, task domain.Task) (string, error) {
+	baseBranch := resolveCLIBaseBranch(deps.Config)
+	if task.ParentID == nil {
+		return baseBranch, nil
+	}
+	parentID := strings.TrimSpace(task.ParentID.String())
+	if parentID == "" {
+		return baseBranch, nil
+	}
+
+	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve parent worktree branch for %s: %w", task.ID, err)
+	}
+	for _, worktree := range worktrees {
+		if !naming.IssueIDsEqual(worktree.IssueID, parentID) {
+			continue
+		}
+		branch := strings.TrimSpace(worktree.Branch)
+		if branch != "" {
+			return branch, nil
+		}
+		break
+	}
+	return baseBranch, nil
 }
 
 // BranchMergeToMainCommand merges one issue worktree branch into the base branch using daemon git commands.
@@ -2095,7 +2164,7 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2228,7 +2297,7 @@ func IssueGetManyCommand(deps *Dependencies, opts IssueGetManyOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2293,7 +2362,7 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2374,7 +2443,7 @@ func IssueDoctorCommand(deps *Dependencies, opts IssueDoctorOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2513,7 +2582,7 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2537,7 +2606,7 @@ func IssueDeleteCommand(deps *Dependencies, opts IssueDeleteOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2588,7 +2657,7 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2654,7 +2723,7 @@ func IssueDependencyAddCommand(deps *Dependencies, opts IssueDependencyAddOption
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2692,7 +2761,7 @@ func IssueDependencyRemoveCommand(deps *Dependencies, opts IssueDependencyRemove
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2864,7 +2933,7 @@ func IssueImageAddCommand(deps *Dependencies, opts IssueImageAddOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2914,7 +2983,7 @@ func IssueImageRemoveCommand(deps *Dependencies, opts IssueImageRemoveOptions) e
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
