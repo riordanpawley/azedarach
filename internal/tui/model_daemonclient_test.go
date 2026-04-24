@@ -5375,7 +5375,7 @@ func TestStopSessionCommandPreservesDaemonProjection(t *testing.T) {
 }
 
 func TestPerformCleanupRoutesDaemonCleanupAndPreservesCounts(t *testing.T) {
-	base := time.Date(2026, time.March, 24, 12, 0, 0, 0, time.UTC)
+	base := time.Now().UTC()
 	oldSessionStart := base.Add(-48 * time.Hour)
 
 	transport := &recordingDaemonTransport{
@@ -5448,7 +5448,7 @@ func TestPerformCleanupRoutesDaemonCleanupAndPreservesCounts(t *testing.T) {
 	m.daemonClient.WithProjectID(m.daemonProjectID())
 	m.tasks = []domain.Task{
 		{ID: "az-old", Status: domain.StatusDone, UpdatedAt: base.AddDate(0, 0, -31)},
-		{ID: "az-recent", Status: domain.StatusDone, UpdatedAt: base},
+		{ID: "az-recent", Status: domain.StatusDone, UpdatedAt: base.Add(-1 * time.Hour)},
 		{ID: "az-open", Status: domain.StatusOpen, UpdatedAt: base},
 	}
 	m.sessions = map[string]*domain.Session{
