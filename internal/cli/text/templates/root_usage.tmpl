@@ -33,7 +33,7 @@ Commands:
   issue check [--project <project-id>] [--id <id>] [--json] [<id>]  Alias for issue get
   issue doctor [--project <project-id>] [--id <id>] [--json] [<id>]  Run integrity checks for one issue
   issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create an issue (auto-parent when AZEDARACH_ISSUE_ID is set)
-  issue update [--project <project-id>] [--id <id>] [--json] [<id>] [--title ...] [--description ...] [--append-notes ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields
+  issue update [--project <project-id>] [--id <id>] [--json] [<id>] [--title ...] [--description ...] [--append-notes ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields (`--update-impl` only changes implementation assignments)
   issue close [--project <project-id>] [--id <id>] [--json] [<id>]      Close an issue (sets status=closed)
   issue delete [--project <project-id>] [--id <id>] [--json] [<id>] --confirm  Permanently delete an issue
   issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]  Attach an image to an issue
@@ -76,7 +76,8 @@ Examples:
   az issue create --impl go-bubbletea "New task"
   az issue create "Follow-up task"                # auto-parent under AZEDARACH_ISSUE_ID
   az issue create --deferred "Investigate later"  # deferred follow-up (defaults priority to P4)
-  az issue update --id az-123 --status in_progress --title "Renamed task" --priority P1 --update-impl go-bubbletea
+  az issue update --id az-123 --status in_progress --title "Renamed task" --priority P1
+  az issue update --id az-123 --update-impl go-bubbletea
   az issue update --id az-123 --append-notes "Follow-up detail"
   az issue close --id az-123
   az issue delete --id az-123 --confirm
