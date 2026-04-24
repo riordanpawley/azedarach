@@ -1498,7 +1498,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	fs := flag.NewFlagSet("issue update", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
-	fs.StringVar(&implFlag, "impl", "", "issue implementation scope (non-mutating; use --update-impl to change assignments)")
+	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
 	fs.StringVar(&opts.Title, "title", "", "updated issue title")
 	fs.StringVar(&opts.Description, "description", "", "updated issue description")
 	fs.StringVar(&opts.AppendNotes, "append-notes", "", "append a note line to issue notes")
@@ -1520,6 +1520,9 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	}
 	if fs.NArg() > 1 {
 		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--append-notes text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+	}
+	if strings.TrimSpace(implFlag) != "" {
+		return IssueUpdateOptions{}, fmt.Errorf("--impl is not supported for issue update; use --update-impl to change issue implementations")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)

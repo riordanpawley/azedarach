@@ -2675,12 +2675,9 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 			},
 		},
 		{
-			name: "allow impl as non-mutating scope",
-			args: []string{"--impl", "go-bubbletea", "--title", "Renamed", "az-1"},
-			want: IssueUpdateOptions{
-				IssueID: "az-1",
-				Title:   "Renamed",
-			},
+			name:        "forbid impl",
+			args:        []string{"--impl", "go-bubbletea", "--title", "Renamed", "az-1"},
+			errContains: "--impl is not supported for issue update",
 		},
 		{
 			name:        "no update fields",
