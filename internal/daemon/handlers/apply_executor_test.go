@@ -23,36 +23,48 @@ type recordingApplyService struct {
 	archiveErr       error
 }
 
-func (r *recordingApplyService) Create(_ context.Context, params issues.CreateTaskParams) (string, error) {
+func (r *recordingApplyService) Create(_ context.Context, params issues.CreateTaskParams) (domain.Task, error) {
 	parentID := ""
 	if params.ParentID != nil {
 		parentID = *params.ParentID
 	}
 	r.calls = append(r.calls, fmt.Sprintf("create:%s:%s:%s:%s", params.Title, params.Priority.String(), params.Type, parentID))
 	if r.createErr != nil {
-		return "", r.createErr
+		return domain.Task{}, r.createErr
 	}
-	return "az-new", nil
+	return domain.Task{ID: "az-new", Title: params.Title, Status: params.Status, Priority: params.Priority, Type: params.Type}, nil
 }
 
-func (r *recordingApplyService) Update(_ context.Context, id string, status domain.Status) error {
+func (r *recordingApplyService) Update(_ context.Context, id string, status domain.Status) (domain.Task, error) {
 	r.calls = append(r.calls, fmt.Sprintf("status:%s:%s", id, status))
-	return r.updateErr
+	if r.updateErr != nil {
+		return domain.Task{}, r.updateErr
+	}
+	return domain.Task{ID: naming.IssueID(id), Title: "status " + id, Status: status}, nil
 }
 
-func (r *recordingApplyService) UpdateDetails(_ context.Context, id string, params issues.UpdateTaskParams) error {
+func (r *recordingApplyService) UpdateDetails(_ context.Context, id string, params issues.UpdateTaskParams) (domain.Task, error) {
 	r.calls = append(r.calls, fmt.Sprintf("update:%s:%s:%s:%s", id, params.Title, params.Priority.String(), params.Type))
-	return r.updateDetailsErr
+	if r.updateDetailsErr != nil {
+		return domain.Task{}, r.updateDetailsErr
+	}
+	return domain.Task{ID: naming.IssueID(id), Title: params.Title, Status: domain.StatusOpen, Priority: params.Priority, Type: params.Type}, nil
 }
 
-func (r *recordingApplyService) AddDependency(_ context.Context, issueID, dependsOnID, dependencyType string) error {
+func (r *recordingApplyService) AddDependency(_ context.Context, issueID, dependsOnID, dependencyType string) (domain.Task, error) {
 	r.calls = append(r.calls, fmt.Sprintf("dep-add:%s:%s:%s", issueID, dependsOnID, dependencyType))
-	return r.addDepErr
+	if r.addDepErr != nil {
+		return domain.Task{}, r.addDepErr
+	}
+	return domain.Task{ID: naming.IssueID(issueID), Title: "dep " + issueID, Status: domain.StatusOpen}, nil
 }
 
-func (r *recordingApplyService) RemoveDependency(_ context.Context, issueID, dependsOnID, dependencyType string) error {
+func (r *recordingApplyService) RemoveDependency(_ context.Context, issueID, dependsOnID, dependencyType string) (domain.Task, error) {
 	r.calls = append(r.calls, fmt.Sprintf("dep-remove:%s:%s:%s", issueID, dependsOnID, dependencyType))
-	return r.removeDepErr
+	if r.removeDepErr != nil {
+		return domain.Task{}, r.removeDepErr
+	}
+	return domain.Task{ID: naming.IssueID(issueID), Title: "dep " + issueID, Status: domain.StatusOpen}, nil
 }
 
 func (r *recordingApplyService) Delete(_ context.Context, id string) error {

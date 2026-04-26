@@ -14,6 +14,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
@@ -36,6 +37,11 @@ type fanoutRegistryEntry struct {
 	Kind         string   `json:"kind"`
 	FileBudget   []string `json:"file_budget,omitempty"`
 	CreatedAtUTC string   `json:"created_at_utc"`
+}
+
+type fanoutApplyExecution struct {
+	result protocol.FanoutApplyResult
+	tasks  map[string]domain.Task
 }
 
 func (d *Daemon) handleIssueFanout(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -85,32 +91,41 @@ func (d *Daemon) handleIssueFanout(ctx context.Context, req protocol.RequestEnve
 		return resp, nil
 	}
 
-	result, err := d.applyFanoutPlan(ctx, parentIssue, flat, repoDir)
+	execution, err := d.applyFanoutPlan(ctx, parentIssue, flat, repoDir)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	body, err := json.Marshal(result)
+	body, err := json.Marshal(execution.result)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp.Body = body
 	projectID := d.projectID(req.Meta)
-	createdKeys := make([]string, 0, len(result.Created))
-	for key := range result.Created {
+	createdKeys := make([]string, 0, len(execution.result.Created))
+	for key := range execution.result.Created {
 		createdKeys = append(createdKeys, key)
 	}
 	sort.Strings(createdKeys)
 	for _, key := range createdKeys {
-		taskID := result.Created[key]
+		taskID := execution.result.Created[key]
+		task, ok := execution.tasks[key]
 		resp.Revision = d.nextRevision(projectID)
-		d.publishTaskEvent(req, protocol.EventTaskCreated, resp.Revision, d.taskEventBody(ctx, projectID, taskID))
+		if ok {
+			d.publishTaskEvent(req, protocol.EventTaskCreated, resp.Revision, taskEventBodyFromTask(projectID, task))
+		} else {
+			d.publishTaskEvent(req, protocol.EventTaskCreated, resp.Revision, protocol.TaskEventBody{
+				ProjectID: naming.ProjectID(projectID),
+				TaskID:    naming.IssueID(taskID),
+				UpdatedAt: timeNow().UTC(),
+			})
+		}
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon fanout apply completed",
 			"repo_dir", repoDir,
-			"parent_issue", result.ParentIssue,
-			"created_count", len(result.Created),
-			"blocks_added", result.BlocksAdded,
+			"parent_issue", execution.result.ParentIssue,
+			"created_count", len(execution.result.Created),
+			"blocks_added", execution.result.BlocksAdded,
 			"revision", resp.Revision,
 		)
 	}
@@ -287,12 +302,14 @@ func buildFanoutPlan(parentIssue string, flat []fanoutFlatNode, warnings []strin
 	}
 }
 
-func (d *Daemon) applyFanoutPlan(ctx context.Context, parentIssue string, flat []fanoutFlatNode, repoDir string) (protocol.FanoutApplyResult, error) {
+func (d *Daemon) applyFanoutPlan(ctx context.Context, parentIssue string, flat []fanoutFlatNode, repoDir string) (fanoutApplyExecution, error) {
 	issueClient := d.issueClientForProject(daemonProjectIDFromContext(ctx))
 	if issueClient == nil {
-		return protocol.FanoutApplyResult{}, fmt.Errorf("issue store unavailable")
+		return fanoutApplyExecution{}, fmt.Errorf("issue store unavailable")
 	}
+	projectID := daemonProjectIDFromContext(ctx)
 	created := make(map[string]string, len(flat))
+	tasks := make(map[string]domain.Task, len(flat))
 	registry := make(map[string]fanoutRegistryEntry, len(flat))
 	blocksAdded := 0
 	for _, node := range flat {
@@ -300,7 +317,7 @@ func (d *Daemon) applyFanoutPlan(ctx context.Context, parentIssue string, flat [
 		if node.ParentKey != "" {
 			id, ok := created[node.ParentKey]
 			if !ok {
-				return protocol.FanoutApplyResult{}, fmt.Errorf("parent key not resolved yet for %s: %s", node.Key, node.ParentKey)
+				return fanoutApplyExecution{}, fmt.Errorf("parent key not resolved yet for %s: %s", node.Key, node.ParentKey)
 			}
 			parentID = id
 		}
@@ -309,7 +326,7 @@ func (d *Daemon) applyFanoutPlan(ctx context.Context, parentIssue string, flat [
 		estimate := 0
 		notes := fmt.Sprintf("fanout.key=%s\nfanout.parent=%s", node.Key, node.ParentKey)
 		design := fanoutDesignMetadata(node)
-		id, err := issueClient.Create(ctx, issues.CreateTaskParams{
+		task, err := issueClient.CreateWithRuntime(ctx, projectID, issues.CreateTaskParams{
 			Title:           node.Title,
 			Description:     node.Description,
 			Type:            taskType,
@@ -322,9 +339,11 @@ func (d *Daemon) applyFanoutPlan(ctx context.Context, parentIssue string, flat [
 			ParentID:        &parentID,
 		})
 		if err != nil {
-			return protocol.FanoutApplyResult{}, fmt.Errorf("create task for key %s: %w", node.Key, err)
+			return fanoutApplyExecution{}, fmt.Errorf("create task for key %s: %w", node.Key, err)
 		}
+		id := task.ID.String()
 		created[node.Key] = id
+		tasks[node.Key] = task
 		registry[id] = fanoutRegistryEntry{
 			IssueID:      id,
 			ParentIssue:  parentIssue,
@@ -339,21 +358,26 @@ func (d *Daemon) applyFanoutPlan(ctx context.Context, parentIssue string, flat [
 		for _, dep := range node.DependsOn {
 			depID := created[dep]
 			if depID == "" {
-				return protocol.FanoutApplyResult{}, fmt.Errorf("depends_on key unresolved for %s: %s", node.Key, dep)
+				return fanoutApplyExecution{}, fmt.Errorf("depends_on key unresolved for %s: %s", node.Key, dep)
 			}
-			if err := issueClient.AddDependency(ctx, issueID, depID, string(domain.DependencyBlocks)); err != nil {
-				return protocol.FanoutApplyResult{}, fmt.Errorf("add blocks edge %s->%s: %w", node.Key, dep, err)
+			task, err := issueClient.AddDependencyWithRuntime(ctx, projectID, issueID, depID, string(domain.DependencyBlocks))
+			if err != nil {
+				return fanoutApplyExecution{}, fmt.Errorf("add blocks edge %s->%s: %w", node.Key, dep, err)
 			}
+			tasks[node.Key] = task
 			blocksAdded++
 		}
 	}
 	if err := saveFanoutRegistry(repoDir, registry); err != nil {
-		return protocol.FanoutApplyResult{}, err
+		return fanoutApplyExecution{}, err
 	}
-	return protocol.FanoutApplyResult{
-		ParentIssue: parentIssue,
-		Created:     created,
-		BlocksAdded: blocksAdded,
+	return fanoutApplyExecution{
+		result: protocol.FanoutApplyResult{
+			ParentIssue: parentIssue,
+			Created:     created,
+			BlocksAdded: blocksAdded,
+		},
+		tasks: tasks,
 	}, nil
 }
 
