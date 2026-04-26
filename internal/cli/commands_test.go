@@ -4247,7 +4247,7 @@ func TestIssueCreateCommandDeferredIgnoresAutoParentFromIssueID(t *testing.T) {
 	if !reflect.DeepEqual(createReq.Implementations, []string{"default"}) {
 		t.Fatalf("create implementations = %+v, want [default]", createReq.Implementations)
 	}
-	if !strings.Contains(output, "Created issue: az-child [deferred]") {
+	if !strings.Contains(output, "Created issue: az-child [deferred: standalone later work, not auto-parented]") {
 		t.Fatalf("output missing deferred message: %q", output)
 	}
 }
@@ -5322,6 +5322,15 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if strings.Contains(output, "`az issue create \"Title\"` (auto-parents under `AZEDARACH_ISSUE_ID`; use `--deferred` for non-immediate follow-ups)") {
 		t.Fatalf("prime output should not require unconditional child issue creation: %q", output)
 	}
+	if !strings.Contains(output, "immediate child work; auto-parents under `AZEDARACH_ISSUE_ID`") {
+		t.Fatalf("prime output missing auto-parent semantics: %q", output)
+	}
+	if !strings.Contains(output, "standalone later work; does not auto-parent") {
+		t.Fatalf("prime output missing deferred standalone semantics: %q", output)
+	}
+	if !strings.Contains(output, "Do not use `--deferred` for child tasks, blockers, or work required before closing the active issue") {
+		t.Fatalf("prime output missing deferred blocker guardrail: %q", output)
+	}
 }
 
 func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
@@ -5498,8 +5507,11 @@ func TestPrimeCommandWarnsWhenActiveIssueClosed(t *testing.T) {
 	if !strings.Contains(output, "Active issue `az-closed` is currently `closed`") {
 		t.Fatalf("prime output missing closed-issue warning: %q", output)
 	}
-	if !strings.Contains(output, "`az issue create \"Next task\" --deferred`") {
+	if !strings.Contains(output, "`az issue list --limit 20` or `az issue create \"Next task\"") {
 		t.Fatalf("prime output missing closed-issue next-step guidance: %q", output)
+	}
+	if !strings.Contains(output, "Use `--deferred` only for standalone backlog work.") {
+		t.Fatalf("prime output missing closed-issue deferred caveat: %q", output)
 	}
 }
 

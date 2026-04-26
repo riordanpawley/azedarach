@@ -1340,7 +1340,7 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	})
 	fs.StringVar(&opts.Description, "description", "", "issue description")
 	fs.StringVar(&priorityRaw, "priority", "", "issue priority (P0-P4)")
-	fs.BoolVar(&opts.Deferred, "deferred", false, "mark follow-up as deferred (defaults priority to P4 unless --priority provided)")
+	fs.BoolVar(&opts.Deferred, "deferred", false, "create standalone later/backlog work; skips AZEDARACH_ISSUE_ID auto-parenting and defaults priority to P4 unless --priority is provided")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue create result as JSON")
 	fs.StringVar(&typeRaw, "type", string(domain.TypeTask), "issue type (task|bug|feature|epic|chore)")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
@@ -2558,7 +2558,7 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 		message = fmt.Sprintf("%s (parent: %s, auto-parent from AZEDARACH_ISSUE_ID)", message, strings.TrimSpace(parentID.String()))
 	}
 	if opts.Deferred {
-		message = fmt.Sprintf("%s [deferred]", message)
+		message = fmt.Sprintf("%s [deferred: standalone later work, not auto-parented]", message)
 	}
 	if opts.JSON {
 		var parentIDValue string
@@ -4046,7 +4046,7 @@ func PrimeCommand(deps *Dependencies) error {
 		} else if task, ok := findTaskByID(snapshot.Tasks, issueID); ok {
 			issueSection = renderPrimeIssueSection(issueID, task)
 			if task.Status == domain.StatusDone {
-				activeIssueClosedWarning = fmt.Sprintf("- Active issue `%s` is currently `closed`; start by picking/opening actionable work (for example `az issue create \"Next task\" --deferred` or `az issue list --limit 20`).", task.ID)
+				activeIssueClosedWarning = fmt.Sprintf("- Active issue `%s` is currently `closed`; start by picking/opening actionable work (for example `az issue list --limit 20` or `az issue create \"Next task\"`). Use `--deferred` only for standalone backlog work.", task.ID)
 			}
 		} else {
 			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nIssue not found in current project snapshot; run `az issue get %s`.\n", issueID, issueID)
