@@ -100,6 +100,39 @@ func buildTaskListSnapshotPayload(projectID string, revision uint64, lastChecked
 	}
 }
 
+func (d *Daemon) taskEventBody(ctx context.Context, projectID, taskID string) protocol.TaskEventBody {
+	body := protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(projectID),
+		TaskID:    naming.IssueID(taskID),
+		UpdatedAt: timeNow().UTC(),
+	}
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return body
+	}
+	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("load task event body failed", "project_id", projectID, "task_id", taskID, "error", err)
+		}
+		return body
+	}
+	target := strings.ToLower(strings.TrimSpace(taskID))
+	for i := range tasks {
+		if strings.ToLower(strings.TrimSpace(tasks[i].ID.String())) != target {
+			continue
+		}
+		task := tasks[i]
+		body.Task = &task
+		body.TaskID = naming.IssueID(task.ID)
+		if !task.UpdatedAt.IsZero() {
+			body.UpdatedAt = task.UpdatedAt.UTC()
+		}
+		return body
+	}
+	return body
+}
+
 const taskListSnapshotStaleAfter = 15 * time.Second
 
 func (d *Daemon) taskListSnapshotFreshness(ctx context.Context, projectID string) (time.Time, protocol.TaskListFreshness) {
@@ -461,7 +494,7 @@ func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvel
 	}{TaskID: taskID})
 	resp.Body = body
 	resp.Revision = d.nextRevision(projectID)
-	d.publishTaskEvent(req, "task.created", resp.Revision)
+	d.publishTaskEvent(req, protocol.EventTaskCreated, resp.Revision, d.taskEventBody(ctx, projectID, taskID))
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task create completed", "project_id", projectID, "task_id", taskID, "revision", resp.Revision)
 	}
@@ -489,7 +522,7 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 	}
 	resp := d.successResponse(req)
 	resp.Revision = d.nextRevision(projectID)
-	d.publishTaskEvent(req, "task.updated", resp.Revision)
+	d.publishTaskEvent(req, protocol.EventTaskUpdated, resp.Revision, d.taskEventBody(ctx, projectID, cmd.TaskID))
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task status update completed", "project_id", projectID, "task_id", cmd.TaskID, "status", cmd.Status, "revision", resp.Revision)
 	}
@@ -527,7 +560,7 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 	}
 	resp := d.successResponse(req)
 	resp.Revision = d.nextRevision(projectID)
-	d.publishTaskEvent(req, "task.updated", resp.Revision)
+	d.publishTaskEvent(req, protocol.EventTaskUpdated, resp.Revision, d.taskEventBody(ctx, projectID, cmd.TaskID))
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task details update completed", "project_id", projectID, "task_id", cmd.TaskID, "revision", resp.Revision)
 	}
@@ -555,7 +588,7 @@ func (d *Daemon) handleTaskAppendNotes(ctx context.Context, req protocol.Request
 	}
 	resp := d.successResponse(req)
 	resp.Revision = d.nextRevision(projectID)
-	d.publishTaskEvent(req, "task.updated", resp.Revision)
+	d.publishTaskEvent(req, protocol.EventTaskUpdated, resp.Revision, d.taskEventBody(ctx, projectID, cmd.TaskID))
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task append notes completed", "project_id", projectID, "task_id", cmd.TaskID, "revision", resp.Revision)
 	}
@@ -582,7 +615,11 @@ func (d *Daemon) handleTaskDelete(ctx context.Context, req protocol.RequestEnvel
 	}
 	resp := d.successResponse(req)
 	resp.Revision = d.nextRevision(projectID)
-	d.publishTaskEvent(req, "task.deleted", resp.Revision)
+	d.publishTaskEvent(req, protocol.EventTaskDeleted, resp.Revision, protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(projectID),
+		TaskID:    naming.IssueID(cmd.TaskID),
+		UpdatedAt: timeNow().UTC(),
+	})
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task delete completed", "project_id", projectID, "task_id", cmd.TaskID, "revision", resp.Revision)
 	}
@@ -609,7 +646,11 @@ func (d *Daemon) handleTaskArchive(ctx context.Context, req protocol.RequestEnve
 	}
 	resp := d.successResponse(req)
 	resp.Revision = d.nextRevision(projectID)
-	d.publishTaskEvent(req, "task.archived", resp.Revision)
+	d.publishTaskEvent(req, protocol.EventTaskArchived, resp.Revision, protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(projectID),
+		TaskID:    naming.IssueID(cmd.TaskID),
+		UpdatedAt: timeNow().UTC(),
+	})
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task archive completed", "project_id", projectID, "task_id", cmd.TaskID, "revision", resp.Revision)
 	}
@@ -643,7 +684,7 @@ func (d *Daemon) handleTaskDependencyAdd(ctx context.Context, req protocol.Reque
 	}
 	resp := d.successResponse(req)
 	resp.Revision = d.nextRevision(projectID)
-	d.publishTaskEvent(req, "task.updated", resp.Revision)
+	d.publishTaskEvent(req, protocol.EventTaskUpdated, resp.Revision, d.taskEventBody(ctx, projectID, cmd.TaskID))
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task dependency add completed",
 			"project_id", projectID,
@@ -689,7 +730,7 @@ func (d *Daemon) handleTaskDependencyRemove(ctx context.Context, req protocol.Re
 	}
 	resp := d.successResponse(req)
 	resp.Revision = d.nextRevision(projectID)
-	d.publishTaskEvent(req, "task.updated", resp.Revision)
+	d.publishTaskEvent(req, protocol.EventTaskUpdated, resp.Revision, d.taskEventBody(ctx, projectID, cmd.TaskID))
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task dependency remove completed",
 			"project_id", projectID,

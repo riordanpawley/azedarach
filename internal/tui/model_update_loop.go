@@ -349,6 +349,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.applyOperationProgressEvent(msg.event)
+		if isTaskMutationEvent(msg.event.Event) && len(msg.event.Body) > 0 {
+			switch cursor.Decide(msg.event) {
+			case protocol.StreamProjectionDecisionIgnore:
+				return m, m.waitForDaemonEventCmd()
+			case protocol.StreamProjectionDecisionResync:
+				m.daemonEvents = nil
+				return m, m.attachDaemonCmd()
+			}
+			if m.applyTaskEvent(msg.event) {
+				m.daemonRevision = cursor.Advance(msg.event).Revision
+				return m, m.waitForDaemonEventCmd()
+			}
+		}
 		if msg.event.Event == protocol.EventSessionUpdated {
 			switch cursor.Decide(msg.event) {
 			case protocol.StreamProjectionDecisionIgnore:

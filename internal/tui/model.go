@@ -56,10 +56,10 @@ const (
 )
 
 const (
-	diffPreviewMaxCharacters = 200
-	eventTickerCapacity      = 64
-	eventLogCapacity         = 256
-	eventSummaryMaxRunes     = 140
+	diffPreviewMaxCharacters       = 200
+	eventTickerCapacity            = 64
+	eventLogCapacity               = 256
+	eventSummaryMaxRunes           = 140
 	orphanedWorktreeCleanupTimeout = 2 * time.Minute
 )
 
@@ -123,13 +123,13 @@ type pendingOperationProgress struct {
 // Model is the main application state
 type Model struct {
 	// Core data
-	tasks            []domain.Task
-	sessions         map[string]*domain.Session
-	suppressedTasks  map[string]struct{}
-	pendingStatuses  map[string]pendingTaskStatus
-	operationTaskID  map[string]string
-	pendingOpsByTask map[string]pendingOperationProgress
-	pendingCleanup   *pendingWorktreeCleanupConfirmation
+	tasks              []domain.Task
+	sessions           map[string]*domain.Session
+	suppressedTasks    map[string]struct{}
+	pendingStatuses    map[string]pendingTaskStatus
+	operationTaskID    map[string]string
+	pendingOpsByTask   map[string]pendingOperationProgress
+	pendingCleanup     *pendingWorktreeCleanupConfirmation
 	pendingBulkCleanup *pendingBulkCleanupConfirmation
 
 	// Navigation (using NavigationService)
@@ -3026,13 +3026,13 @@ func humanizeRuntimeEventName(eventName string) string {
 		return ""
 	case "ui.toast":
 		return ""
-	case "task.created":
+	case protocol.EventTaskCreated:
 		return "Task created"
-	case "task.updated":
+	case protocol.EventTaskUpdated:
 		return "Task updated"
-	case "task.deleted":
+	case protocol.EventTaskDeleted:
 		return "Task deleted"
-	case "task.archived":
+	case protocol.EventTaskArchived:
 		return "Task archived"
 	case "session.started":
 		return "Session started"
