@@ -226,6 +226,9 @@ func TestGitHooksNotifyCommandRefreshesDaemonGitStatus(t *testing.T) {
 	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
 		t.Fatalf("unmarshal request body: %v", err)
 	}
+	if !body.Refresh {
+		t.Fatal("expected hook daemon git status request to force a refresh")
+	}
 	gotWorktree, err := filepath.EvalSymlinks(body.Worktree)
 	if err != nil {
 		gotWorktree = body.Worktree
@@ -321,6 +324,9 @@ func TestGitHooksNotifyCommandPrefersCurrentWorktreeWhenProjectDirUnset(t *testi
 	var body daemonclient.GitCommandRequest
 	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
 		t.Fatalf("unmarshal request body: %v", err)
+	}
+	if !body.Refresh {
+		t.Fatal("expected hook daemon git status request to force a refresh")
 	}
 	gotWorktree, err := filepath.EvalSymlinks(body.Worktree)
 	if err != nil {

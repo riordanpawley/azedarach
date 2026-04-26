@@ -18,6 +18,7 @@ type fakeGitService struct {
 	abortMergeFn     func(context.Context, string, string) error
 	diffStatFn       func(context.Context, string, string, string) (string, error)
 	statusFn         func(context.Context, string, string) (*git.GitStatus, error)
+	refreshStatusFn  func(context.Context, string, string) (*git.GitStatus, error)
 	runtimeSignalsFn func(context.Context, string, []GitRuntimeSignalsTarget, string, bool, string) ([]GitRuntimeSignalsResult, int, error)
 	preflightFn      func(context.Context, string, GitMergePreflightRequest) (*GitMergePreflightResult, error)
 	discardFn        func(context.Context, string, string) (*GitDiscardChangesResult, error)
@@ -71,6 +72,13 @@ func (f *fakeGitService) DiffStat(ctx context.Context, projectID, worktree, base
 func (f *fakeGitService) Status(ctx context.Context, projectID, worktree string) (*git.GitStatus, error) {
 	if f.statusFn != nil {
 		return f.statusFn(ctx, projectID, worktree)
+	}
+	return &git.GitStatus{}, nil
+}
+
+func (f *fakeGitService) RefreshStatus(ctx context.Context, projectID, worktree string) (*git.GitStatus, error) {
+	if f.refreshStatusFn != nil {
+		return f.refreshStatusFn(ctx, projectID, worktree)
 	}
 	return &git.GitStatus{}, nil
 }
@@ -338,6 +346,45 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGitHandlerStatusRefreshUsesRefreshService(t *testing.T) {
+	var statusCalls int
+	var refreshCalls int
+	handler := NewGitHandler(&fakeGitService{
+		statusFn: func(context.Context, string, string) (*git.GitStatus, error) {
+			statusCalls++
+			return &git.GitStatus{}, nil
+		},
+		refreshStatusFn: func(_ context.Context, _ string, worktree string) (*git.GitStatus, error) {
+			refreshCalls++
+			if worktree != "/tmp/az-1" {
+				t.Fatalf("refresh status worktree = %q, want /tmp/az-1", worktree)
+			}
+			return &git.GitStatus{HasChanges: true, Modified: []string{"README.md"}}, nil
+		},
+	})
+
+	resp := handler.Handle(context.Background(), gitRequest(t, CommandGitStatus, gitCommandBody{
+		Worktree: "/tmp/az-1",
+		Refresh:  true,
+	}))
+	if !resp.OK {
+		t.Fatalf("response = %+v", resp)
+	}
+	if statusCalls != 0 {
+		t.Fatalf("status calls = %d, want 0 for refresh path", statusCalls)
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("refresh calls = %d, want 1", refreshCalls)
+	}
+	var body gitStatusResultBody
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("unmarshal response body: %v", err)
+	}
+	if !body.Status.HasChanges {
+		t.Fatalf("status = %+v, want refreshed dirty status", body.Status)
 	}
 }
 

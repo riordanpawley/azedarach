@@ -764,7 +764,7 @@ func refreshDaemonGitStatusWithRetry(ctx context.Context, deps *Dependencies, wo
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		_, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (struct{}, error) {
-			_, callErr := deps.DaemonClient.GitStatus(callCtx, worktreeRoot)
+			_, callErr := deps.DaemonClient.GitStatusRefresh(callCtx, worktreeRoot)
 			return struct{}{}, callErr
 		})
 		if err == nil {
