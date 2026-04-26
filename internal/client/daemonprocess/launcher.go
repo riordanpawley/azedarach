@@ -233,18 +233,60 @@ func (l *Launcher) Stop(ctx context.Context) error {
 	return nil
 }
 
-// Replace attempts to stop existing lock-owner process, then starts daemon.
+// Replace attempts to stop an existing daemon process, then starts daemon.
 func (l *Launcher) Replace(ctx context.Context) error {
-	if pid, ok := l.readLockedPID(); ok {
-		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && l.Logger != nil {
-			l.Logger.Warn("failed to terminate existing daemon process before replace",
-				"pid", pid,
+	if strings.TrimSpace(l.SocketPath) != "" {
+		shutdown := l.shutdownViaSocket
+		if shutdown == nil {
+			shutdown = gracefulShutdownViaSocket
+		}
+		if err := shutdown(ctx, l.SocketPath); err == nil {
+			if err := l.waitForSocketUnavailable(ctx, 2*time.Second); err != nil {
+				return fmt.Errorf("wait for daemon socket shutdown before replace: %w", err)
+			}
+			return l.Start(ctx)
+		} else if l.Logger != nil {
+			l.Logger.Warn("graceful daemon socket shutdown failed before replace; falling back to lock-owner termination",
+				"socket_path", l.SocketPath,
 				"lock_path", l.LockPath,
 				"error", err,
 			)
 		}
 	}
+
+	terminate := l.terminateLockOwner
+	if terminate == nil {
+		terminate = lifecycle.TerminateLockOwner
+	}
+	if err := terminate(l.LockPath); err != nil {
+		return fmt.Errorf("terminate daemon lock owner before replace: %w", err)
+	}
 	return l.Start(ctx)
+}
+
+func (l *Launcher) waitForSocketUnavailable(ctx context.Context, timeout time.Duration) error {
+	if l.waitForReady == nil {
+		return nil
+	}
+	deadlineCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	for {
+		readyCtx, readyCancel := context.WithTimeout(deadlineCtx, 100*time.Millisecond)
+		err := l.waitForReady(readyCtx, l.SocketPath)
+		readyCancel()
+		if err != nil {
+			return nil
+		}
+		if deadlineCtx.Err() != nil {
+			return deadlineCtx.Err()
+		}
+		sleep := l.sleepFn
+		if sleep == nil {
+			sleep = time.Sleep
+		}
+		sleep(50 * time.Millisecond)
+	}
 }
 
 func (l *Launcher) resolveBinary() string {

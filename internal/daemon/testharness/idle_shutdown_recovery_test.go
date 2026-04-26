@@ -57,7 +57,7 @@ func (d *idleRecoveryDaemon) Handshake(ctx context.Context, hello protocol.Hello
 		return protocol.HelloAck{}, errors.New("daemon unavailable")
 	}
 
-	ack := protocol.NegotiateHello(hello, "daemon-test")
+	ack := protocol.NegotiateHello(hello, testDaemonVersion)
 	d.handshakeOK.Add(1)
 
 	if err := d.harness.appendEvent("daemon.handshake.compatible", map[string]any{
@@ -304,7 +304,7 @@ func TestIdleShutdownRecoveryScenarioAC(t *testing.T) {
 	hello := protocol.Hello{
 		ProtocolVersion: protocol.CurrentVersion,
 		ClientName:      "client-1",
-		ClientVersion:   "dev",
+		ClientVersion:   testDaemonVersion,
 		Capabilities:    []string{"attach", "snapshot"},
 	}
 
@@ -364,7 +364,7 @@ func TestIdleShutdownRecoveryScenarioAC(t *testing.T) {
 	secondAck, secondSnap, err := daemon.attachAndSnapshot(ctx, secondOrch, protocol.Hello{
 		ProtocolVersion: protocol.CurrentVersion,
 		ClientName:      "client-2",
-		ClientVersion:   "dev",
+		ClientVersion:   testDaemonVersion,
 		Capabilities:    []string{"attach", "snapshot"},
 	})
 	if err != nil {

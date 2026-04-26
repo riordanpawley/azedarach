@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	autoclient "github.com/riordanpawley/azedarach/internal/client"
 	"github.com/riordanpawley/azedarach/internal/client/appdeps"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
@@ -56,10 +57,10 @@ const (
 )
 
 const (
-	diffPreviewMaxCharacters = 200
-	eventTickerCapacity      = 64
-	eventLogCapacity         = 256
-	eventSummaryMaxRunes     = 140
+	diffPreviewMaxCharacters       = 200
+	eventTickerCapacity            = 64
+	eventLogCapacity               = 256
+	eventSummaryMaxRunes           = 140
 	orphanedWorktreeCleanupTimeout = 2 * time.Minute
 )
 
@@ -123,13 +124,13 @@ type pendingOperationProgress struct {
 // Model is the main application state
 type Model struct {
 	// Core data
-	tasks            []domain.Task
-	sessions         map[string]*domain.Session
-	suppressedTasks  map[string]struct{}
-	pendingStatuses  map[string]pendingTaskStatus
-	operationTaskID  map[string]string
-	pendingOpsByTask map[string]pendingOperationProgress
-	pendingCleanup   *pendingWorktreeCleanupConfirmation
+	tasks              []domain.Task
+	sessions           map[string]*domain.Session
+	suppressedTasks    map[string]struct{}
+	pendingStatuses    map[string]pendingTaskStatus
+	operationTaskID    map[string]string
+	pendingOpsByTask   map[string]pendingOperationProgress
+	pendingCleanup     *pendingWorktreeCleanupConfirmation
 	pendingBulkCleanup *pendingBulkCleanupConfirmation
 
 	// Navigation (using NavigationService)
@@ -1406,7 +1407,7 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		ack, err := orch.EnsureAttached(ctx, protocol.Hello{
 			ProtocolVersion: protocol.CurrentVersion,
 			ClientName:      "tui",
-			ClientVersion:   "dev",
+			ClientVersion:   buildinfo.VersionString(),
 			Capabilities:    []string{"snapshot", "subscribe"},
 		})
 		if err != nil {
