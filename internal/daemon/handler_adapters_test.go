@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -215,14 +216,53 @@ func (r *countingWorktreeListRunner) Run(_ context.Context, args ...string) (str
 type staticWorktreeListRunner struct {
 	listCalls int
 	output    string
+	commands  []string
 }
 
 func (r *staticWorktreeListRunner) Run(_ context.Context, args ...string) (string, error) {
+	r.commands = append(r.commands, strings.Join(args, " "))
 	if len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" {
 		r.listCalls++
 		return r.output, nil
 	}
 	return "", nil
+}
+
+func TestWorktreeServiceAdapterDeleteDoesNotRequireProjectWideRuntimeFreshness(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	repoDir := t.TempDir()
+	worktreePath := filepath.Join(t.TempDir(), "repo-bvx")
+	runner := &staticWorktreeListRunner{
+		output: `worktree ` + repoDir + `
+HEAD abc123
+branch refs/heads/main
+
+worktree ` + worktreePath + `
+HEAD def456
+branch refs/heads/riordan/bvx/worktree-delete
+`,
+	}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	adapter := &worktreeServiceAdapter{
+		manager: manager,
+		logger:  logger,
+		ensureRuntimeFreshForMutation: func(context.Context, string, string) error {
+			return errors.New("project-wide runtime freshness should not block targeted worktree deletion")
+		},
+	}
+
+	if err := adapter.Delete(context.Background(), "proj", "bvx", false); err != nil {
+		t.Fatalf("Delete returned error: %v", err)
+	}
+	wantCommands := []string{
+		"worktree list --porcelain",
+		"worktree list --porcelain",
+		"worktree remove " + worktreePath,
+		"branch -D riordan/bvx/worktree-delete",
+	}
+	if strings.Join(runner.commands, "\n") != strings.Join(wantCommands, "\n") {
+		t.Fatalf("commands = %v, want %v", runner.commands, wantCommands)
+	}
 }
 
 func TestWorktreeServiceAdapterListUsesProjectionOnlyWhenRuntimeStoreAvailable(t *testing.T) {
