@@ -11,6 +11,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
@@ -29,7 +30,12 @@ type ApplyTaskService interface {
 type ApplyRevisionManager interface {
 	CurrentRevision(projectID string) uint64
 	NextRevision(projectID string) uint64
-	PublishTaskEvent(req protocol.RequestEnvelope, eventName string, rev uint64)
+	PublishTaskEvent(req protocol.RequestEnvelope, eventName string, rev uint64, bodies ...protocol.TaskEventBody)
+}
+
+// ApplyTaskEventBodyProvider can attach the changed task projection to mutation events.
+type ApplyTaskEventBodyProvider interface {
+	TaskEventBody(ctx context.Context, projectID, taskID string) protocol.TaskEventBody
 }
 
 // ApplyExecutionOperation captures one committed operation in deterministic input order.
@@ -175,7 +181,7 @@ func (h *ApplyHandler) execute(ctx context.Context, req protocol.RequestEnvelope
 
 		if h.revisions != nil {
 			rev := h.revisions.NextRevision(projectID)
-			h.revisions.PublishTaskEvent(req, applyEventName(op.Command), rev)
+			h.revisions.PublishTaskEvent(req, applyEventName(op.Command), rev, h.taskEventBody(ctx, projectID, op.Command, executed.TaskID))
 			executed.Revision = rev
 			result.Revision = rev
 			outcome.Revision = rev
@@ -197,6 +203,34 @@ func (h *ApplyHandler) execute(ctx context.Context, req protocol.RequestEnvelope
 	}
 
 	return result, nil
+}
+
+func (h *ApplyHandler) taskEventBody(ctx context.Context, projectID, command, taskID string) protocol.TaskEventBody {
+	body := protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(projectID),
+		TaskID:    naming.IssueID(taskID),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if strings.TrimSpace(taskID) == "" {
+		return body
+	}
+	switch applyEventName(command) {
+	case protocol.EventTaskCreated, protocol.EventTaskUpdated:
+		if provider, ok := h.revisions.(ApplyTaskEventBodyProvider); ok {
+			provided := provider.TaskEventBody(ctx, projectID, taskID)
+			if provided.ProjectID == "" {
+				provided.ProjectID = body.ProjectID
+			}
+			if provided.TaskID == "" {
+				provided.TaskID = body.TaskID
+			}
+			if provided.UpdatedAt.IsZero() {
+				provided.UpdatedAt = body.UpdatedAt
+			}
+			return provided
+		}
+	}
+	return body
 }
 
 func (h *ApplyHandler) executeOperation(ctx context.Context, index int, op protocol.ApplyOperationBody) (ApplyExecutionOperation, error) {
@@ -385,15 +419,15 @@ func parseApplyStatus(value string) (domain.Status, error) {
 func applyEventName(command string) string {
 	switch command {
 	case applyCommandTaskCreate:
-		return "task.created"
+		return protocol.EventTaskCreated
 	case applyCommandTaskUpdate, applyCommandTaskUpdateStatus:
-		return "task.updated"
+		return protocol.EventTaskUpdated
 	case applyCommandTaskDelete:
-		return "task.deleted"
+		return protocol.EventTaskDeleted
 	case applyCommandTaskArchive:
-		return "task.archived"
+		return protocol.EventTaskArchived
 	default:
-		return "task.updated"
+		return protocol.EventTaskUpdated
 	}
 }
 

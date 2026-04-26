@@ -8,6 +8,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
@@ -69,6 +70,7 @@ type recordingApplyRevisions struct {
 	currentCalls int
 	next         []uint64
 	published    []string
+	bodies       []protocol.TaskEventBody
 }
 
 func (r *recordingApplyRevisions) CurrentRevision(string) uint64 {
@@ -82,8 +84,23 @@ func (r *recordingApplyRevisions) NextRevision(string) uint64 {
 	return r.current
 }
 
-func (r *recordingApplyRevisions) PublishTaskEvent(_ protocol.RequestEnvelope, eventName string, rev uint64) {
+func (r *recordingApplyRevisions) PublishTaskEvent(_ protocol.RequestEnvelope, eventName string, rev uint64, bodies ...protocol.TaskEventBody) {
 	r.published = append(r.published, fmt.Sprintf("%s:%d", eventName, rev))
+	if len(bodies) > 0 {
+		r.bodies = append(r.bodies, bodies[0])
+	}
+}
+
+func (r *recordingApplyRevisions) TaskEventBody(_ context.Context, projectID, taskID string) protocol.TaskEventBody {
+	return protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(projectID),
+		TaskID:    naming.IssueID(taskID),
+		Task: &domain.Task{
+			ID:     naming.IssueID(taskID),
+			Title:  "projection " + taskID,
+			Status: domain.StatusOpen,
+		},
+	}
 }
 
 func TestApplyHandlerExecutesOperationsInOrder(t *testing.T) {
@@ -217,6 +234,19 @@ func TestApplyHandlerExecutesOperationsInOrder(t *testing.T) {
 		"task.archived:12",
 	}; !equalStrings(got, want) {
 		t.Fatalf("published events = %v, want %v", got, want)
+	}
+	if got, want := len(revisions.bodies), 5; got != want {
+		t.Fatalf("published bodies len = %d, want %d", got, want)
+	}
+	for i, body := range revisions.bodies[:3] {
+		if body.Task == nil {
+			t.Fatalf("published bodies[%d].Task = nil, want changed task payload", i)
+		}
+	}
+	for i, body := range revisions.bodies[3:] {
+		if body.Task != nil {
+			t.Fatalf("delete/archive bodies[%d].Task = %+v, want nil", i+3, body.Task)
+		}
 	}
 }
 

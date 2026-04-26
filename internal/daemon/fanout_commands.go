@@ -94,8 +94,17 @@ func (d *Daemon) handleIssueFanout(ctx context.Context, req protocol.RequestEnve
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp.Body = body
-	resp.Revision = d.nextRevision(d.projectID(req.Meta))
-	d.publishTaskEvent(req, "task.updated", resp.Revision)
+	projectID := d.projectID(req.Meta)
+	createdKeys := make([]string, 0, len(result.Created))
+	for key := range result.Created {
+		createdKeys = append(createdKeys, key)
+	}
+	sort.Strings(createdKeys)
+	for _, key := range createdKeys {
+		taskID := result.Created[key]
+		resp.Revision = d.nextRevision(projectID)
+		d.publishTaskEvent(req, protocol.EventTaskCreated, resp.Revision, d.taskEventBody(ctx, projectID, taskID))
+	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon fanout apply completed",
 			"repo_dir", repoDir,

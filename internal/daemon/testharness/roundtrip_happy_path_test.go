@@ -109,7 +109,7 @@ func (r *roundtripApplyRevisions) NextRevision(string) uint64 {
 	return r.current
 }
 
-func (r *roundtripApplyRevisions) PublishTaskEvent(_ protocol.RequestEnvelope, eventName string, rev uint64) {
+func (r *roundtripApplyRevisions) PublishTaskEvent(_ protocol.RequestEnvelope, eventName string, rev uint64, _ ...protocol.TaskEventBody) {
 	r.published = append(r.published, fmt.Sprintf("%s:%d", eventName, rev))
 }
 

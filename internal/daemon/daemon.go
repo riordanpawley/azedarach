@@ -1260,6 +1260,10 @@ func (a applyRevisionAdapter) NextRevision(projectID string) uint64 {
 	return a.daemon.nextRevision(projectID)
 }
 
-func (a applyRevisionAdapter) PublishTaskEvent(req protocol.RequestEnvelope, eventName string, rev uint64) {
-	a.daemon.publishTaskEvent(req, eventName, rev)
+func (a applyRevisionAdapter) PublishTaskEvent(req protocol.RequestEnvelope, eventName string, rev uint64, bodies ...protocol.TaskEventBody) {
+	a.daemon.publishTaskEvent(req, eventName, rev, bodies...)
+}
+
+func (a applyRevisionAdapter) TaskEventBody(ctx context.Context, projectID, taskID string) protocol.TaskEventBody {
+	return a.daemon.taskEventBody(ctx, projectID, taskID)
 }
