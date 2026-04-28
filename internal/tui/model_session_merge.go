@@ -417,6 +417,8 @@ type mergeTargetSelectionResolvedMsg struct {
 	err            error
 }
 
+// mergeBaseTargetID is a UI-only merge target sentinel. It means "merge into
+// the configured git.baseBranch" and is not a literal branch name.
 const mergeBaseTargetID = "base"
 
 func (m Model) mergeToBaseCmd(sourceWorktree, sourceID string, refreshStatus bool) tea.Cmd {
