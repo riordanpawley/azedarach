@@ -7,7 +7,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
 
 - First 3 commands for this session:
   - {{ if .ActiveIssueID }}`az issue get {{ .ActiveIssueID }}`{{ else }}`az issue get <issue-id>`{{ end }}
-  - {{ if .SpecEnabled }}`az spec` (inspect linked requirements before behavior changes){{ else }}Spec workflows are disabled for this project (skip spec checks).{{ end }}
+  - {{ if .SpecEnabled }}{{ if .ActiveIssueID }}`az spec read --issue {{ .ActiveIssueID }}`{{ else }}`az spec read --issue <issue-id>`{{ end }} (inspect linked requirements before behavior changes){{ else }}Spec workflows are disabled for this project (skip spec checks).{{ end }}
   - Optional (only when splitting work): `az issue create "Child task"` to break the active issue into smaller, independently actionable chunks
 - How to use `az` command map:
   - Issue lifecycle:
@@ -47,7 +47,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
 {{ end }}- Keep issue context current as you work:
   - Update design/notes as implementation decisions change.
   - Use status/priority/labels flags when state changes materially.
-- Overlay edits: check `az spec` requirements/links before behavior changes, keep `View()` and `Size()` aligned, validate default and narrow viewports, and update goldens when rendered output changes. If the work is docs/process-only, record `Spec impact: none (docs/process-only)` in issue notes.
+- Overlay edits: check `az spec read --issue <issue-id>` before behavior changes, keep `View()` and `Size()` aligned, validate default and narrow viewports, and update goldens when rendered output changes. If the work is docs/process-only, record `Spec impact: none (docs/process-only)` in issue notes.
 - `az issue --help`
 {{ if .SpecGuardrails }}- Spec workflow:
 {{ .SpecGuardrails }}

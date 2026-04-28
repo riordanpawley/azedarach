@@ -4033,12 +4033,12 @@ func PrimeCommand(deps *Dependencies) error {
   - MUST record unknowns/open questions in the issue description so scope is explicit.`
 	}
 	if deps.Config != nil && deps.Config.Spec.Enabled {
-		specGuardrails = `  - In this repo, when guidance says ` + "`spec`" + `, it means ` + "`az spec`" + ` requirement/link records, not README.md, AGENTS.md, or other internal docs.
-  - ALWAYS check ` + "`az spec`" + ` requirements/links before starting behavior work.
+		specGuardrails = `  - In this repo, when guidance says ` + "`spec`" + `, it means records managed by ` + "`az spec req ...`" + ` and ` + "`az spec link ...`" + `, not README.md, AGENTS.md, or other internal docs.
+  - ALWAYS run ` + "`az spec read --issue <issue-id>`" + ` before starting behavior work; use ` + "`az spec link list --issue <issue-id>`" + ` when you need link-only detail.
   - If implementation is not aligned with spec, update spec first, then implement.
   - Ensure implementation issue(s) are linked to relevant spec requirement(s) before execution.
   - Treat ` + "`az spec link`" + ` records as required traceability for behavior work.
-  - Before implementing behavior changes, inspect relevant ` + "`az spec`" + ` requirements/links and align the plan.
+  - Before implementing behavior changes, inspect relevant ` + "`az spec read --issue <issue-id>`" + ` output and align the plan.
   - If this project should not use spec workflows, disable them with ` + "`az config set spec.enabled false`" + ` (or set ` + "`spec.enabled`" + ` to false in ` + "`.azedarach/config.json`" + `).`
 	}
 

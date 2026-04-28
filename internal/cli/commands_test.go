@@ -5456,6 +5456,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Optional (only when splitting work): `az issue create \"Child task\"`") {
 		t.Fatalf("prime output missing optional child-task split guidance: %q", output)
 	}
+	if strings.Contains(output, "`az spec` (inspect linked requirements before behavior changes)") {
+		t.Fatalf("prime output should not instruct agents to run bare az spec: %q", output)
+	}
 	if strings.Contains(output, "`az issue create \"Title\"` (auto-parents under `AZEDARACH_ISSUE_ID`; use `--deferred` for non-immediate follow-ups)") {
 		t.Fatalf("prime output should not require unconditional child issue creation: %q", output)
 	}
@@ -5515,6 +5518,7 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 			},
 		}),
 		ProjectID: "proj",
+		Config:    &config.Config{Spec: config.SpecConfig{Enabled: true}},
 	}
 
 	output := captureStdout(t, func() error {
@@ -5523,6 +5527,9 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 
 	if !strings.Contains(output, "Active issue ID: `az-1`") {
 		t.Fatalf("prime output missing explicit active issue id: %q", output)
+	}
+	if !strings.Contains(output, "`az spec read --issue az-1` (inspect linked requirements before behavior changes)") {
+		t.Fatalf("prime output missing active-issue spec read command: %q", output)
 	}
 	if !strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=az-1)") {
 		t.Fatalf("prime output missing active issue section: %q", output)
@@ -5666,7 +5673,10 @@ func TestPrimeCommandQuestionFirstAndSpecBlock(t *testing.T) {
 	if !strings.Contains(output, "- Spec workflow:") {
 		t.Fatalf("prime output missing spec workflow block: %q", output)
 	}
-	if !strings.Contains(output, "ALWAYS check `az spec` requirements/links before starting behavior work.") {
+	if !strings.Contains(output, "`az spec read --issue <issue-id>` (inspect linked requirements before behavior changes)") {
+		t.Fatalf("prime output missing concrete spec read command: %q", output)
+	}
+	if !strings.Contains(output, "ALWAYS run `az spec read --issue <issue-id>` before starting behavior work; use `az spec link list --issue <issue-id>` when you need link-only detail.") {
 		t.Fatalf("prime output missing mandatory pre-work spec check guardrail: %q", output)
 	}
 	if !strings.Contains(output, "If implementation is not aligned with spec, update spec first, then implement.") {
@@ -5674,6 +5684,9 @@ func TestPrimeCommandQuestionFirstAndSpecBlock(t *testing.T) {
 	}
 	if !strings.Contains(output, "Ensure implementation issue(s) are linked to relevant spec requirement(s) before execution.") {
 		t.Fatalf("prime output missing issue/spec linking guardrail: %q", output)
+	}
+	if strings.Contains(output, "ALWAYS check `az spec` requirements/links") {
+		t.Fatalf("prime output should not include bare az spec guardrail: %q", output)
 	}
 }
 
