@@ -307,14 +307,14 @@ func (c *Client) MergeBase(ctx context.Context, worktree, baseBranch string) (st
 	return "", fmt.Errorf("failed to resolve merge-base for %s", baseBranch)
 }
 
-// ChangedFiles returns changed files from merge-base..HEAD excluding .azedarach metadata.
+// ChangedFiles returns changed files from merge-base to the current worktree excluding .azedarach metadata.
 func (c *Client) ChangedFiles(ctx context.Context, worktree, baseBranch string) ([]ChangedFile, error) {
 	mergeBase, err := c.MergeBase(ctx, worktree, baseBranch)
 	if err != nil {
 		return nil, err
 	}
 
-	output, err := c.runInWorktree(ctx, worktree, "diff", "--name-status", mergeBase, "HEAD", "--", ":^.azedarach")
+	output, err := c.runInWorktree(ctx, worktree, "diff", "--name-status", mergeBase, "--", ":^.azedarach")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get changed files: %w", err)
 	}

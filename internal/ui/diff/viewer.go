@@ -71,11 +71,23 @@ func (d *DiffViewer) loadChangedFilesCmd() tea.Cmd {
 		if d.gitClient == nil {
 			return loadChangedFilesMsg{Err: fmt.Errorf("git client unavailable")}
 		}
-		files, err := d.gitClient.ChangedFiles(context.Background(), d.worktree, d.effectiveBaseBranch())
-		if err != nil {
-			return loadChangedFilesMsg{Err: err}
+		ctx := context.Background()
+		files, changedErr := d.gitClient.ChangedFiles(ctx, d.worktree, d.effectiveBaseBranch())
+		status, statusErr := d.gitClient.Status(ctx, d.worktree)
+		statusFiles := statusChangedFiles(status)
+
+		switch {
+		case changedErr == nil && statusErr == nil:
+			return loadChangedFilesMsg{Files: mergeChangedFileLists(files, statusFiles)}
+		case changedErr == nil:
+			return loadChangedFilesMsg{Files: files}
+		case len(statusFiles) > 0:
+			return loadChangedFilesMsg{Files: statusFiles}
+		case statusErr != nil:
+			return loadChangedFilesMsg{Err: fmt.Errorf("failed to load changed files: %w; failed to load git status: %v", changedErr, statusErr)}
+		default:
+			return loadChangedFilesMsg{Err: changedErr}
 		}
-		return loadChangedFilesMsg{Files: files, Err: err}
 	}
 }
 
@@ -101,20 +113,20 @@ func (d *DiffViewer) openPopupCmd(filePath string, all bool) tea.Cmd {
 		}
 
 		baseBranch := shellSingleQuote(d.effectiveBaseBranch())
-		resolveBaseRef := fmt.Sprintf("BASE_BRANCH=%s; BASE_REF=\"$BASE_BRANCH\"; git rev-parse --verify \"$BASE_REF\" >/dev/null 2>&1 || BASE_REF=\"origin/$BASE_BRANCH\";", baseBranch)
+		resolveBaseRef := fmt.Sprintf("BASE_BRANCH=%s; BASE_REF=\"$BASE_BRANCH\"; git rev-parse --verify \"$BASE_REF\" >/dev/null 2>&1 || BASE_REF=\"origin/$BASE_BRANCH\"; MERGE_BASE=$(git merge-base \"$BASE_REF\" HEAD 2>/dev/null) && BASE_REF=\"$MERGE_BASE\";", baseBranch)
 
 		var title string
 		var command string
 		if all {
 			title = " All Changes "
 			command = fmt.Sprintf(
-				"%s git diff \"$BASE_REF\"...HEAD --stat --color=always -- ':^.azedarach' && echo \"\" && ( if command -v difft >/dev/null 2>&1; then DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff \"$BASE_REF\"...HEAD -- ':^.azedarach'; else git diff \"$BASE_REF\"...HEAD --color=always -- ':^.azedarach'; fi ) | less -RS",
+				"%s git diff \"$BASE_REF\" --stat --color=always -- ':^.azedarach' && echo \"\" && ( if command -v difft >/dev/null 2>&1; then DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff \"$BASE_REF\" -- ':^.azedarach'; else git diff \"$BASE_REF\" --color=always -- ':^.azedarach'; fi ) | less -RS",
 				resolveBaseRef,
 			)
 		} else {
 			title = " " + filePath + " "
 			command = fmt.Sprintf(
-				"%s ( if command -v difft >/dev/null 2>&1; then DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff \"$BASE_REF\"...HEAD -- %s; else git diff \"$BASE_REF\"...HEAD --color=always -- %s; fi ) | less -RS",
+				"%s ( if command -v difft >/dev/null 2>&1; then DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff \"$BASE_REF\" -- %s; else git diff \"$BASE_REF\" --color=always -- %s; fi ) | less -RS",
 				resolveBaseRef,
 				shellSingleQuote(filePath),
 				shellSingleQuote(filePath),

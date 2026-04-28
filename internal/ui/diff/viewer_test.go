@@ -11,8 +11,8 @@ import (
 )
 
 type fakeDiffClient struct {
-	status      *gitservice.GitStatus
-	statusErr   error
+	status       *gitservice.GitStatus
+	statusErr    error
 	changedFiles []gitservice.ChangedFile
 	changedErr   error
 	mergeBase    string
@@ -106,7 +106,10 @@ func TestDiffViewerEnterOpensSelectedFilePopup(t *testing.T) {
 	if !strings.Contains(gotCommand, "BASE_BRANCH='main'; BASE_REF=\"$BASE_BRANCH\";") {
 		t.Fatalf("popup command=%q", gotCommand)
 	}
-	if !strings.Contains(gotCommand, "git diff \"$BASE_REF\"...HEAD -- 'internal/tui/model.go'") {
+	if !strings.Contains(gotCommand, "MERGE_BASE=$(git merge-base \"$BASE_REF\" HEAD 2>/dev/null) && BASE_REF=\"$MERGE_BASE\";") {
+		t.Fatalf("popup command=%q", gotCommand)
+	}
+	if !strings.Contains(gotCommand, "git diff \"$BASE_REF\" -- 'internal/tui/model.go'") {
 		t.Fatalf("popup command=%q", gotCommand)
 	}
 	if !strings.Contains(viewer.popupStatus, "Opened diff popup") {
@@ -137,7 +140,7 @@ func TestDiffViewerAllDiffPopup(t *testing.T) {
 		t.Fatal("expected all-diff popup command")
 	}
 	_ = cmd()
-	if !strings.Contains(gotCommand, "git diff \"$BASE_REF\"...HEAD --stat --color=always -- ':^.azedarach'") {
+	if !strings.Contains(gotCommand, "git diff \"$BASE_REF\" --stat --color=always -- ':^.azedarach'") {
 		t.Fatalf("popup command=%q", gotCommand)
 	}
 }
@@ -336,5 +339,62 @@ func TestDiffViewerInitFallsBackToBaseChangedFilesWhenStatusClean(t *testing.T) 
 	}
 	if viewer.files[0].Path != "internal/tui/model.go" {
 		t.Fatalf("file path=%q, want internal/tui/model.go", viewer.files[0].Path)
+	}
+}
+
+func TestDiffViewerInitIncludesStatusOnlyFiles(t *testing.T) {
+	client := &fakeDiffClient{
+		status: &gitservice.GitStatus{
+			Modified:   []string{"edited.go"},
+			Untracked:  []string{"new-note.md"},
+			HasChanges: true,
+		},
+		changedFiles: []gitservice.ChangedFile{
+			{Path: "committed.go", Status: gitservice.DiffFileModified},
+		},
+	}
+
+	viewer := NewDiffViewer("/tmp/az-1", "main", client, nil)
+	msg := viewer.Init()()
+	updated, _ := viewer.Update(msg)
+	viewer = updated.(*DiffViewer)
+
+	if len(viewer.files) != 3 {
+		t.Fatalf("files=%d, want 3: %+v", len(viewer.files), viewer.files)
+	}
+	got := make(map[string]gitservice.DiffFileStatus, len(viewer.files))
+	for _, file := range viewer.files {
+		got[file.Path] = file.Status
+	}
+	if got["committed.go"] != gitservice.DiffFileModified {
+		t.Fatalf("committed.go status=%q", got["committed.go"])
+	}
+	if got["edited.go"] != gitservice.DiffFileModified {
+		t.Fatalf("edited.go status=%q", got["edited.go"])
+	}
+	if got["new-note.md"] != gitservice.DiffFileAdded {
+		t.Fatalf("new-note.md status=%q", got["new-note.md"])
+	}
+}
+
+func TestDiffViewerInitFallsBackToStatusWhenBaseChangedFilesFail(t *testing.T) {
+	client := &fakeDiffClient{
+		changedErr: context.Canceled,
+		status: &gitservice.GitStatus{
+			Untracked:  []string{"scratch.md"},
+			HasChanges: true,
+		},
+	}
+
+	viewer := NewDiffViewer("/tmp/az-1", "main", client, nil)
+	msg := viewer.Init()()
+	updated, _ := viewer.Update(msg)
+	viewer = updated.(*DiffViewer)
+
+	if viewer.err != nil {
+		t.Fatalf("viewer err=%v", viewer.err)
+	}
+	if len(viewer.files) != 1 || viewer.files[0].Path != "scratch.md" || viewer.files[0].Status != gitservice.DiffFileAdded {
+		t.Fatalf("files=%+v, want scratch.md added", viewer.files)
 	}
 }
