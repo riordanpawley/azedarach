@@ -348,6 +348,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				logOverlay.AddEvent(msg.event)
 			}
 		}
+		if cmd, handled := m.handlePendingWorktreeCleanupOperationEvent(msg.event); handled {
+			m.daemonRevision = cursor.Advance(msg.event).Revision
+			if cmd != nil {
+				return m, tea.Batch(cmd, m.waitForDaemonEventCmd())
+			}
+			return m, m.waitForDaemonEventCmd()
+		}
 		m.applyOperationProgressEvent(msg.event)
 		if isTaskMutationEvent(msg.event.Event) && len(msg.event.Body) > 0 {
 			switch cursor.Decide(msg.event) {
@@ -1083,11 +1090,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pendingCleanup = &pendingWorktreeCleanupConfirmation{
 			taskID:      msg.taskID,
 			deletedTask: msg.deletedTask,
-			force:       false,
+			force:       msg.force,
 		}
 		title := "Confirm worktree cleanup?"
 		if msg.deletedTask {
 			title = "Confirm delete + cleanup?"
+		}
+		if msg.force {
+			title = "Force worktree cleanup?"
+			if msg.deletedTask {
+				title = "Force delete + cleanup?"
+			}
 		}
 		confirm := overlay.NewConfirmDialogExplicitYN(title, formatWorktreeCleanupConfirmPrompt(msg))
 		return m, m.openOverlay(confirm)
@@ -1104,6 +1117,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.openOverlay(confirm)
 
 	case worktreeCleanupResultMsg:
+		if msg.operationID != "" && !operationStateTerminal(msg.state) {
+			m.pendingCleanupOps[msg.operationID] = pendingWorktreeCleanupConfirmation{
+				taskID:      msg.taskID,
+				deletedTask: msg.deletedTask,
+				force:       msg.force,
+			}
+			m.markTaskOperationPending(msg.taskID, "worktree_cleanup", msg.operationID, msg.state)
+			m.syncTaskWorkspaceOverlay()
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: formatPendingOperationMessage("Worktree cleanup", msg.taskID, msg.operationID, msg.state),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, m.loadIssuesCmd()
+		}
 		if msg.needsForce {
 			m.pendingCleanup = &pendingWorktreeCleanupConfirmation{
 				taskID:      msg.taskID,

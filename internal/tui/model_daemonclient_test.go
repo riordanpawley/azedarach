@@ -3678,7 +3678,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		}
 	})
 
-	t.Run("dirty worktree prompts before forced cleanup", func(t *testing.T) {
+	t.Run("stale clean preflight prompts before forced cleanup after daemon conflict", func(t *testing.T) {
 		forceFlags := []bool{}
 		stopCalls := 0
 		transport := &recordingDaemonTransport{
@@ -3703,7 +3703,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 						Kind:            protocol.EnvelopeKindResponse,
 						OK:              true,
 						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
-							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true, HasUncommittedChanges: true, GitAdditions: 4, GitDeletions: 2},
+							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true, HasUncommittedChanges: false, GitAdditions: 4, GitDeletions: 2},
 						}),
 					}, nil
 				case daemonclient.CommandSessionStop:
@@ -3863,6 +3863,115 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 			got[4] != daemonclient.CommandSessionStop ||
 			got[5] != daemonclient.CommandWorktreeRemove {
 			t.Fatalf("requests = %v", got)
+		}
+	})
+
+	t.Run("dirty preflight forces first removal after confirmation", func(t *testing.T) {
+		forceFlags := []bool{}
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandRuntimeReconcileIssue:
+					respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{})
+					if err != nil {
+						t.Fatalf("marshal reconcile response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            respBody,
+					}, nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true, HasUncommittedChanges: true, GitAdditions: 4, GitDeletions: 2},
+						}),
+					}, nil
+				case daemonclient.CommandSessionStop:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+					}, nil
+				case daemonclient.CommandWorktreeRemove:
+					var body struct {
+						Force bool `json:"force,omitempty"`
+					}
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal worktree remove request: %v", err)
+					}
+					forceFlags = append(forceFlags, body.Force)
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+					}, nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}
+
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress}}
+		setTaskSession(t, &m, "az-1", &domain.Session{
+			IssueID:  "az-1",
+			State:    domain.SessionBusy,
+			Worktree: "/tmp/az-1",
+		})
+		m.nav.SelectTask("az-1", 1)
+
+		_, cmd := m.handleSelection(overlay.SelectionMsg{Key: "w"})
+		if cmd == nil {
+			t.Fatal("expected cleanup preflight command")
+		}
+		preflightMsg := cmd()
+		prompt, ok := preflightMsg.(worktreeCleanupConfirmPromptMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want worktreeCleanupConfirmPromptMsg", preflightMsg)
+		}
+		if !prompt.force {
+			t.Fatal("prompt.force = false, want true for dirty preflight")
+		}
+		if promptText := formatWorktreeCleanupConfirmPrompt(prompt); !strings.Contains(promptText, "Force removal will discard modified/untracked files.") {
+			t.Fatalf("prompt = %q, want force warning", promptText)
+		}
+
+		updatedAny, confirmCmd := m.Update(prompt)
+		updated := updatedAny.(Model)
+		if confirmCmd != nil {
+			_ = confirmCmd()
+		}
+		if updated.pendingCleanup == nil || !updated.pendingCleanup.force {
+			t.Fatalf("pending cleanup = %+v, want force confirmation", updated.pendingCleanup)
+		}
+
+		_, runCleanupCmd := updated.handleSelection(overlay.SelectionMsg{
+			Key:   "yes",
+			Value: overlay.ConfirmResult{Confirmed: true},
+		})
+		if runCleanupCmd == nil {
+			t.Fatal("expected cleanup command")
+		}
+		cleanupMsg := runCleanupCmd()
+		result, ok := cleanupMsg.(worktreeCleanupResultMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want worktreeCleanupResultMsg", cleanupMsg)
+		}
+		if result.err != nil {
+			t.Fatalf("cleanup result err = %v", result.err)
+		}
+		if len(forceFlags) != 1 || !forceFlags[0] {
+			t.Fatalf("force flags = %v, want [true]", forceFlags)
 		}
 	})
 }

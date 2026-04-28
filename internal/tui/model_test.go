@@ -4539,3 +4539,55 @@ func TestDaemonOperationLifecycleEventsTrackPendingForGitAndWorktreeMutations(t 
 		t.Fatalf("az-2 pending = %+v, want running op-wt-1", got)
 	}
 }
+
+func TestPendingWorktreeCleanupOperationFailureOpensForceConfirmation(t *testing.T) {
+	m := newTestModel()
+	m.pendingCleanupOps["op-cleanup"] = pendingWorktreeCleanupConfirmation{
+		taskID:      "az-1",
+		deletedTask: false,
+		force:       false,
+	}
+	m.operationTaskID["op-cleanup"] = "az-1"
+	m.pendingOpsByTask["az-1"] = pendingOperationProgress{
+		operationID: "op-cleanup",
+		state:       protocol.OperationStateRunning,
+	}
+
+	body, err := json.Marshal(protocol.OperationEventBody{
+		Operation: protocol.OperationRecord{
+			OperationID: "op-cleanup",
+			IssueID:     naming.IssueID("az-1"),
+			Kind:        daemonclient.CommandWorktreeRemove,
+			State:       protocol.OperationStateFailed,
+			Error: &protocol.OperationError{
+				Code:      protocol.ErrorCodeInternal,
+				Message:   "failed to remove worktree: git worktree remove /tmp/az-1 failed: exit status 128: fatal: '/tmp/az-1' contains modified or untracked files, use --force to delete it",
+				Retryable: false,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal operation failed body: %v", err)
+	}
+
+	cmd, handled := m.handlePendingWorktreeCleanupOperationEvent(protocol.EventEnvelope{
+		Event: protocol.EventOperationFailed,
+		Body:  body,
+	})
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if cmd == nil {
+		t.Fatal("expected force confirmation overlay command")
+	}
+	_ = cmd()
+	if m.pendingCleanup == nil || !m.pendingCleanup.force || m.pendingCleanup.taskID != "az-1" {
+		t.Fatalf("pending cleanup = %+v, want forced az-1 cleanup", m.pendingCleanup)
+	}
+	if _, ok := m.pendingCleanupOps["op-cleanup"]; ok {
+		t.Fatal("pending cleanup operation was not cleared")
+	}
+	if _, ok := m.pendingOpsByTask["az-1"]; ok {
+		t.Fatal("pending board operation was not cleared")
+	}
+}
