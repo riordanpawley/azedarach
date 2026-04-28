@@ -4139,18 +4139,22 @@ func summarizeStatusChangeCounts(status daemonclient.GitStatus) string {
 	if n := len(status.Deleted); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d deleted", n))
 	}
-	if n := len(status.Untracked); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d untracked", n))
-	}
 	if len(parts) == 0 {
 		return "working tree has changes"
 	}
 	return strings.Join(parts, ", ")
 }
 
+func hasMergeBlockingStatusChanges(status daemonclient.GitStatus) bool {
+	return len(status.Staged) > 0 ||
+		len(status.Modified) > 0 ||
+		len(status.Added) > 0 ||
+		len(status.Deleted) > 0
+}
+
 func dirtyFilesFromStatus(status daemonclient.GitStatus) []string {
 	seen := make(map[string]struct{}, 16)
-	out := make([]string, 0, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Untracked))
+	out := make([]string, 0, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted))
 	appendUnique := func(files []string) {
 		for _, file := range files {
 			file = strings.TrimSpace(file)
@@ -4168,7 +4172,6 @@ func dirtyFilesFromStatus(status daemonclient.GitStatus) []string {
 	appendUnique(status.Modified)
 	appendUnique(status.Added)
 	appendUnique(status.Deleted)
-	appendUnique(status.Untracked)
 	sort.Strings(out)
 	return out
 }
@@ -4259,7 +4262,7 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	sourceStatus, sourceErr := statusForWorktree(sourceWorktree)
 	if sourceErr != nil {
 		reasons = append(reasons, fmt.Sprintf("Could not read source status (%s): %v", sourceID, sourceErr))
-	} else if sourceStatus.HasChanges {
+	} else if hasMergeBlockingStatusChanges(sourceStatus) {
 		reasons = append(reasons, fmt.Sprintf("Source %s is not clean: %s", sourceID, summarizeStatusChangeCounts(sourceStatus)))
 		sourceFiles = dirtyFilesFromStatus(sourceStatus)
 	}
@@ -4267,7 +4270,7 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	targetStatus, targetErr := statusForWorktree(targetWorktree)
 	if targetErr != nil {
 		reasons = append(reasons, fmt.Sprintf("Could not read target status (%s): %v", targetID, targetErr))
-	} else if targetStatus.HasChanges {
+	} else if hasMergeBlockingStatusChanges(targetStatus) {
 		reasons = append(reasons, fmt.Sprintf("Target %s is not clean: %s", targetID, summarizeStatusChangeCounts(targetStatus)))
 		targetFiles = dirtyFilesFromStatus(targetStatus)
 	}

@@ -2752,6 +2752,73 @@ func TestCheckMergePreflightUsesLiveGitStatusWhenRefreshFlagFalse(t *testing.T) 
 	}
 }
 
+func TestCheckMergePreflightDoesNotBlockUntrackedOnlyStatus(t *testing.T) {
+	var sawPreflight bool
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandGitStatus:
+				respBody, err := json.Marshal(struct {
+					Status git.GitStatus `json:"status"`
+				}{Status: git.GitStatus{HasChanges: true, Untracked: []string{".azedarach/images/", "docs/"}}})
+				if err != nil {
+					t.Fatalf("marshal status response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandGitMergePreflight:
+				sawPreflight = true
+				respBody, err := json.Marshal(daemonclient.GitMergePreflightResponse{
+					SourceID:       "az-source",
+					SourceWorktree: "/tmp/az-source",
+					TargetID:       "main",
+					TargetWorktree: "/tmp/main",
+					Clean:          true,
+				})
+				if err != nil {
+					t.Fatalf("marshal preflight response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newTestModel()
+	m.daemonClient = daemonclient.New(transport)
+
+	preflight := m.checkMergePreflight(
+		context.Background(),
+		"az-source",
+		"main",
+		"/tmp/az-source",
+		"/tmp/main",
+		"main",
+		"az/source",
+		false,
+	)
+
+	if preflight != nil {
+		t.Fatalf("preflight = %+v, want nil for untracked-only live status", preflight)
+	}
+	if !sawPreflight {
+		t.Fatalf("requests = %v, want merge preflight after untracked-only status", transport.requests)
+	}
+}
+
 func TestCheckMergePreflightReconcilesRuntimeWhenRefreshFlagTrue(t *testing.T) {
 	var reconcileBody protocol.RuntimeReconcileIssueRequestBody
 	transport := &recordingDaemonTransport{

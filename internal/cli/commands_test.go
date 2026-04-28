@@ -167,6 +167,38 @@ func TestNewDependenciesAtIgnoresAmbientGitDirRoutingVars(t *testing.T) {
 	}
 }
 
+func TestMergePreflightDirtyFilesIgnoreUntrackedOnlyStatus(t *testing.T) {
+	status := daemonclient.GitStatus{
+		HasChanges: true,
+		Untracked:  []string{".azedarach/images/", "docs/"},
+	}
+
+	if got := dirtyFilesFromGitStatus(status); len(got) != 0 {
+		t.Fatalf("dirty files = %v, want none for untracked-only status", got)
+	}
+	if got := summarizeGitStatusCounts(status); got != "clean" {
+		t.Fatalf("summary = %q, want clean", got)
+	}
+}
+
+func TestMergePreflightDirtyFilesKeepTrackedChanges(t *testing.T) {
+	status := daemonclient.GitStatus{
+		HasChanges: true,
+		Modified:   []string{"b.go"},
+		Staged:     []string{"a.go"},
+		Untracked:  []string{"scratch/"},
+	}
+
+	got := dirtyFilesFromGitStatus(status)
+	want := []string{"a.go", "b.go"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("dirty files = %v, want %v", got, want)
+	}
+	if got := summarizeGitStatusCounts(status); got != "1 staged, 1 modified" {
+		t.Fatalf("summary = %q, want tracked-only summary", got)
+	}
+}
+
 func (f *fakeDaemonTransport) Handshake(ctx context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
 	if f.handshakeFn != nil {
 		return f.handshakeFn(ctx, hello)

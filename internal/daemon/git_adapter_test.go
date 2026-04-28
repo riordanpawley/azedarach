@@ -244,6 +244,46 @@ func TestGitServiceAdapterMergePreflightUsesWorktreeAwareClient(t *testing.T) {
 	}
 }
 
+func TestGitServiceAdapterMergePreflightDoesNotBlockUntrackedOnlyStatus(t *testing.T) {
+	t.Parallel()
+
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) >= 4 && args[0] == "-C" && args[1] == "/tmp/source" && args[2] == "status" && args[3] == "--porcelain":
+			return "?? scratch/", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == "/tmp/target" && args[2] == "status" && args[3] == "--porcelain":
+			return "?? .azedarach/images/\n?? docs/", nil
+		case len(args) >= 6 && args[0] == "-C" && args[1] == "/tmp/target" && args[2] == "merge-tree" && args[3] == "--write-tree" && args[4] == "main" && args[5] == "az/source":
+			return "abc123", nil
+		default:
+			t.Fatalf("unexpected git args: %v", args)
+			return "", nil
+		}
+	}}
+
+	adapter := &gitServiceAdapter{client: git.NewClient(runner, slog.Default())}
+	result, err := adapter.MergePreflight(context.Background(), "default", daemonhandlers.GitMergePreflightRequest{
+		SourceID:       "az-source",
+		SourceWorktree: "/tmp/source",
+		TargetID:       "main",
+		TargetWorktree: "/tmp/target",
+		TargetRef:      "main",
+		SourceBranch:   "az/source",
+	})
+	if err != nil {
+		t.Fatalf("MergePreflight: %v", err)
+	}
+	if result == nil {
+		t.Fatal("MergePreflight result is nil")
+	}
+	if !result.Clean {
+		t.Fatalf("preflight clean = false; reasons=%v sourceFiles=%v targetFiles=%v", result.Reasons, result.SourceFiles, result.TargetFiles)
+	}
+	if len(result.SourceFiles) != 0 || len(result.TargetFiles) != 0 {
+		t.Fatalf("dirty files = source %v target %v, want none", result.SourceFiles, result.TargetFiles)
+	}
+}
+
 func TestGitServiceAdapterDiscardChangesPublishesOnStatusChange(t *testing.T) {
 	t.Parallel()
 
