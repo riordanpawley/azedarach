@@ -901,6 +901,7 @@ func (c *Client) Archive(ctx context.Context, id string) error {
 type UpdateTaskParams struct {
 	Title           string
 	Description     string
+	Notes           *string
 	Type            domain.TaskType
 	Priority        domain.Priority
 	Implementations []string
@@ -957,6 +958,28 @@ func (c *Client) UpdateDetails(ctx context.Context, id string, params UpdateTask
 		if err != nil {
 			return c.wrapError("update-details", id, err)
 		}
+		if params.Notes != nil {
+			res, err := db.ExecContext(ctx, `
+		UPDATE issues
+		SET
+			title = ?,
+			description = ?,
+			notes = ?,
+			issue_type = ?,
+			priority = ?,
+			implementations_json = ?,
+			updated_at = ?
+		WHERE id = ? AND deleted_at IS NULL
+	`, params.Title, nullableString(params.Description), nullableString(*params.Notes), string(params.Type), int(params.Priority), string(implsJSON), now, id)
+			if err != nil {
+				return c.wrapError("update-details", id, err)
+			}
+			affected, _ := res.RowsAffected()
+			if affected == 0 {
+				return c.wrapError("update-details", id, domain.ErrNotFound)
+			}
+			return nil
+		}
 		res, err := db.ExecContext(ctx, `
 		UPDATE issues
 		SET
@@ -968,6 +991,27 @@ func (c *Client) UpdateDetails(ctx context.Context, id string, params UpdateTask
 			updated_at = ?
 		WHERE id = ? AND deleted_at IS NULL
 	`, params.Title, nullableString(params.Description), string(params.Type), int(params.Priority), string(implsJSON), now, id)
+		if err != nil {
+			return c.wrapError("update-details", id, err)
+		}
+		affected, _ := res.RowsAffected()
+		if affected == 0 {
+			return c.wrapError("update-details", id, domain.ErrNotFound)
+		}
+		return nil
+	}
+	if params.Notes != nil {
+		res, err := db.ExecContext(ctx, `
+		UPDATE issues
+		SET
+			title = ?,
+			description = ?,
+			notes = ?,
+			issue_type = ?,
+			priority = ?,
+			updated_at = ?
+		WHERE id = ? AND deleted_at IS NULL
+	`, params.Title, nullableString(params.Description), nullableString(*params.Notes), string(params.Type), int(params.Priority), now, id)
 		if err != nil {
 			return c.wrapError("update-details", id, err)
 		}

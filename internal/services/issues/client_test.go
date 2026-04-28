@@ -80,6 +80,37 @@ func TestClient_CRUDLifecycle(t *testing.T) {
 	assert.Equal(t, domain.StatusInProgress, tasks[0].Status)
 	assert.Equal(t, "Create native sqlite issue store", tasks[0].Title)
 	assert.Equal(t, domain.P0, tasks[0].Priority)
+	assert.Equal(t, "Initial note", tasks[0].Notes)
+
+	replacementNotes := "Replacement note"
+	err = client.UpdateDetails(ctx, createdID, UpdateTaskParams{
+		Title:       "Create native sqlite issue store",
+		Description: "No bd shell calls",
+		Notes:       &replacementNotes,
+		Type:        domain.TypeTask,
+		Priority:    domain.P0,
+	})
+	require.NoError(t, err)
+
+	tasks, err = client.Search(ctx, createdID)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, "Replacement note", tasks[0].Notes)
+
+	clearNotes := ""
+	err = client.UpdateDetails(ctx, createdID, UpdateTaskParams{
+		Title:       "Create native sqlite issue store",
+		Description: "No bd shell calls",
+		Notes:       &clearNotes,
+		Type:        domain.TypeTask,
+		Priority:    domain.P0,
+	})
+	require.NoError(t, err)
+
+	tasks, err = client.Search(ctx, createdID)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, "", tasks[0].Notes)
 
 	err = client.Close(ctx, createdID, "done")
 	require.NoError(t, err)
@@ -197,6 +228,17 @@ func TestClient_UpdateWithRuntimeReturnsChangedTask(t *testing.T) {
 	assert.Equal(t, "Runtime update changed", task.Title)
 	assert.Equal(t, domain.TypeBug, task.Type)
 	assert.Equal(t, domain.P1, task.Priority)
+
+	runtimeNotes := "Runtime replacement notes"
+	task, err = client.UpdateDetailsWithRuntime(ctx, projectID, taskID, UpdateTaskParams{
+		Title:       "Runtime update changed",
+		Description: "Changed through returning API",
+		Notes:       &runtimeNotes,
+		Type:        domain.TypeBug,
+		Priority:    domain.P1,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Runtime replacement notes", task.Notes)
 }
 
 func TestClient_AppendNotes(t *testing.T) {
