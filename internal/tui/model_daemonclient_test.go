@@ -3445,6 +3445,12 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 			got[3] != daemonclient.CommandWorktreeRemove {
 			t.Fatalf("requests = %v", got)
 		}
+		if len(transport.commandBudgets) != 4 {
+			t.Fatalf("command budget count = %d, want 4", len(transport.commandBudgets))
+		}
+		if removeBudget := transport.commandBudgets[3]; removeBudget < (worktreeCleanupMutationTimeout - 10*time.Second) {
+			t.Fatalf("worktree remove timeout budget = %s, want near %s", removeBudget, worktreeCleanupMutationTimeout)
+		}
 	})
 
 	t.Run("delete task and cleanup worktree", func(t *testing.T) {

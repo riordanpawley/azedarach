@@ -61,6 +61,7 @@ const (
 	eventTickerCapacity            = 64
 	eventLogCapacity               = 256
 	eventSummaryMaxRunes           = 140
+	worktreeCleanupMutationTimeout = 2 * time.Minute
 	orphanedWorktreeCleanupTimeout = 2 * time.Minute
 )
 
@@ -2610,7 +2611,7 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 			}
 		}
 
-		removeCtx, removeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		removeCtx, removeCancel := context.WithTimeout(context.Background(), worktreeCleanupMutationTimeout)
 		err := m.daemonClient.RemoveWorktreeWithOptions(removeCtx, taskID, force)
 		removeCancel()
 		if err != nil {
