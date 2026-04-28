@@ -649,9 +649,6 @@ func summarizeGitStatusCounts(status daemonclient.GitStatus) string {
 	if n := len(status.Deleted); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d deleted", n))
 	}
-	if n := len(status.Untracked); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d untracked", n))
-	}
 	if len(parts) == 0 {
 		return "clean"
 	}
@@ -659,7 +656,7 @@ func summarizeGitStatusCounts(status daemonclient.GitStatus) string {
 }
 
 func dirtyFilesFromGitStatus(status daemonclient.GitStatus) []string {
-	seen := make(map[string]struct{}, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Untracked))
+	seen := make(map[string]struct{}, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted))
 	out := make([]string, 0, len(seen))
 
 	appendUnique := func(files []string) {
@@ -680,7 +677,6 @@ func dirtyFilesFromGitStatus(status daemonclient.GitStatus) []string {
 	appendUnique(status.Modified)
 	appendUnique(status.Added)
 	appendUnique(status.Deleted)
-	appendUnique(status.Untracked)
 
 	sort.Strings(out)
 	return out

@@ -123,14 +123,14 @@ func (a *gitServiceAdapter) MergePreflight(ctx context.Context, _ string, req da
 		ConflictFiles:  append([]string(nil), result.ConflictFiles...),
 	}
 
-	if result.SourceStatus.HasChanges {
+	if hasMergeBlockingGitStatusChanges(result.SourceStatus) {
 		resp.Clean = false
-		resp.SourceFiles = gitStatusFiles(result.SourceStatus)
+		resp.SourceFiles = mergeBlockingGitStatusFiles(result.SourceStatus)
 		resp.Reasons = append(resp.Reasons, "Source worktree has uncommitted changes")
 	}
-	if result.TargetStatus.HasChanges {
+	if hasMergeBlockingGitStatusChanges(result.TargetStatus) {
 		resp.Clean = false
-		resp.TargetFiles = gitStatusFiles(result.TargetStatus)
+		resp.TargetFiles = mergeBlockingGitStatusFiles(result.TargetStatus)
 		resp.Reasons = append(resp.Reasons, "Target worktree has uncommitted changes")
 	}
 	if result.HasConflicts {
@@ -576,9 +576,16 @@ func gitStatusRefreshQueueKey(projectID, worktree string) string {
 	return normalizeProjectID(projectID) + "|" + strings.TrimSpace(worktree)
 }
 
-func gitStatusFiles(status git.GitStatus) []string {
+func hasMergeBlockingGitStatusChanges(status git.GitStatus) bool {
+	return len(status.Modified) > 0 ||
+		len(status.Added) > 0 ||
+		len(status.Deleted) > 0 ||
+		len(status.Staged) > 0
+}
+
+func mergeBlockingGitStatusFiles(status git.GitStatus) []string {
 	seen := make(map[string]struct{})
-	files := make([]string, 0, len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Untracked)+len(status.Staged))
+	files := make([]string, 0, len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Staged))
 	add := func(list []string) {
 		for _, file := range list {
 			file = strings.TrimSpace(file)
@@ -595,7 +602,6 @@ func gitStatusFiles(status git.GitStatus) []string {
 	add(status.Modified)
 	add(status.Added)
 	add(status.Deleted)
-	add(status.Untracked)
 	add(status.Staged)
 	return files
 }
