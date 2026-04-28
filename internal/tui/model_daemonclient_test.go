@@ -2351,7 +2351,7 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 	if mergeMsg.err != nil {
 		t.Fatalf("merge err = %v", mergeMsg.err)
 	}
-	if got := transport.requests; len(got) != 9 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandRuntimeReconcileIssue || got[3] != daemonclient.CommandGitStatus || got[4] != daemonclient.CommandGitStatus || got[5] != daemonclient.CommandGitMergePreflight || got[6] != daemonclient.CommandGitFetch || got[7] != daemonclient.CommandGitCheckout || got[8] != daemonclient.CommandGitMerge {
+	if got := transport.requests; len(got) != 10 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandRuntimeReconcileIssue || got[3] != daemonclient.CommandGitStatus || got[4] != daemonclient.CommandGitStatus || got[5] != daemonclient.CommandGitMergePreflight || got[6] != daemonclient.CommandGitFetch || got[7] != daemonclient.CommandGitCheckout || got[8] != daemonclient.CommandGitMerge || got[9] != daemonclient.CommandGitStatus {
 		t.Fatalf("requests = %v", got)
 	}
 }
@@ -5948,20 +5948,22 @@ func TestProjectionEventRevisionGate(t *testing.T) {
 }
 
 func TestSessionProjectionEventRevisionGate(t *testing.T) {
+	testProjectID := newTestModel().daemonProjectID()
 	makeSessionEvent := func(revision uint64, dirty bool) daemonStreamEventMsg {
 		body, err := json.Marshal(protocol.SessionProjectionEventBody{
-			ProjectID: "azedarach-bte",
+			ProjectID: naming.ProjectID(testProjectID),
 			Revision:  revision,
 			Session: protocol.SessionProjection{
+				SessionID: naming.SessionID("azedarach-bte-az-1"),
 				IssueID:   "az-1",
 				State:     protocol.SessionLifecycleStateAttached,
 				UpdatedAt: time.Date(2026, time.April, 10, 8, 0, 0, 0, time.UTC),
 			},
 			Runtime: &protocol.RuntimeProjectionEventBody{
-				ProjectID: "azedarach-bte",
+				ProjectID: "default",
 				Revision:  revision,
 				Projection: protocol.RuntimeProjection{
-					ProjectID: "azedarach-bte",
+					ProjectID: "default",
 					IssueID:   "az-1",
 					Worktree: protocol.RuntimeWorktreeProjection{
 						Exists:  true,
@@ -5975,6 +5977,7 @@ func TestSessionProjectionEventRevisionGate(t *testing.T) {
 					},
 					Session: protocol.RuntimeSessionProjection{
 						HasSession: true,
+						SessionID:  naming.SessionID("azedarach-bte-az-1"),
 						State:      protocol.SessionLifecycleStateAttached,
 						Worktree:   "/tmp/repo-az-1",
 					},
@@ -6033,6 +6036,27 @@ func TestSessionProjectionEventRevisionGate(t *testing.T) {
 		}
 		if next.tasks[0].HasUncommittedChanges {
 			t.Fatalf("gap session event should not apply projection before rehydrate: %+v", next.tasks[0])
+		}
+	})
+
+	t.Run("sequential session projection event applies and advances", func(t *testing.T) {
+		m := newTestModel()
+		m.daemonRevision = 8
+		m.daemonEvents = make(chan protocol.EventEnvelope)
+		m.tasks[0].HasUncommittedChanges = false
+		m.tasks[0].GitAdditions = 0
+		m.tasks[0].GitDeletions = 0
+
+		updated, cmd := m.Update(makeSessionEvent(9, true))
+		if cmd == nil {
+			t.Fatal("expected wait command")
+		}
+		next := updated.(Model)
+		if next.daemonRevision != 9 {
+			t.Fatalf("daemon revision = %d, want 9", next.daemonRevision)
+		}
+		if !next.tasks[0].HasUncommittedChanges || next.tasks[0].GitAdditions != 4 || next.tasks[0].GitDeletions != 2 {
+			t.Fatalf("sequential session event should update runtime projection: %+v", next.tasks[0])
 		}
 	})
 }

@@ -481,6 +481,9 @@ func (m Model) mergeToMainCmd(sourceWorktree, sourceID string, refreshStatus boo
 				operationID: pending.OperationID,
 			}
 		}
+		if err == nil && result.Result.Success {
+			_, _ = m.daemonClient.GitStatusRefresh(ctx, sourceWorktree)
+		}
 		return mergeResultMsg{sourceID: sourceID, targetID: "main", result: &result.Result, err: err}
 	}
 }

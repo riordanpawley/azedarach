@@ -1741,6 +1741,9 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvent(t *testing.T) {
 	if body.Runtime.Projection.Session.State != protocol.SessionLifecycleStateStopped {
 		t.Fatalf("runtime session state = %s, want observed %s", body.Runtime.Projection.Session.State, protocol.SessionLifecycleStateStopped)
 	}
+	if body.Runtime.Projection.Session.HasSession {
+		t.Fatalf("runtime session = %+v, want stopped session inactive", body.Runtime.Projection.Session)
+	}
 }
 
 func TestApplySessionLifecycleTransitionPreservesObservedRuntimeState(t *testing.T) {

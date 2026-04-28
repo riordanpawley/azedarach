@@ -371,6 +371,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.attachDaemonCmd()
 			}
 			m.applySessionProjectionEvent(msg.event)
+			m.daemonRevision = cursor.Advance(msg.event).Revision
+			return m, m.waitForDaemonEventCmd()
 		}
 		if msg.event.Event == protocol.EventWorktreeProjectionUpdated || msg.event.Event == protocol.EventGitStatusUpdated {
 			switch cursor.Decide(msg.event) {

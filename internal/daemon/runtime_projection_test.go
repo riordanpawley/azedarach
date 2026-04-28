@@ -93,6 +93,27 @@ func TestBuildRuntimeProjectionUsesObservedSessionStateWhenPresent(t *testing.T)
 	}
 }
 
+func TestBuildRuntimeProjectionReportsStoppedSessionInactive(t *testing.T) {
+	updatedAt := time.Date(2026, time.April, 1, 11, 0, 0, 0, time.UTC)
+	projection := buildRuntimeProjection("proj-runtime", &daemonstate.Session{
+		ID:            "sess-7",
+		IssueID:       "az-7",
+		State:         daemonstate.SessionStateStopped,
+		ObservedState: daemonstate.SessionStateStopped,
+		UpdatedAt:     updatedAt,
+	}, nil)
+
+	if projection.Session.HasSession {
+		t.Fatalf("session = %+v, want inactive stopped projection", projection.Session)
+	}
+	if projection.Session.State != protocol.SessionLifecycleStateStopped {
+		t.Fatalf("session state = %q, want stopped", projection.Session.State)
+	}
+	if projection.Agent.Status != "stopped" {
+		t.Fatalf("agent status = %q, want stopped", projection.Agent.Status)
+	}
+}
+
 func TestBuildRuntimeProjectionZeroValueBehavior(t *testing.T) {
 	projection := buildRuntimeProjection("", nil, nil)
 

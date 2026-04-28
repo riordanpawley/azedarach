@@ -22,9 +22,10 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 		if strings.TrimSpace(string(observedState)) == "" {
 			observedState = session.State
 		}
+		hasSession := observedState != daemonstate.SessionStateStopped
 		projection.IssueID = parseIssueIDOrZero(session.IssueID)
 		projection.Session = protocol.RuntimeSessionProjection{
-			HasSession: true,
+			HasSession: hasSession,
 			SessionID:  parseSessionIDOrZero(session.ID),
 			State:      protocol.SessionLifecycleState(observedState),
 			StartedAt:  timePtrFrom(session.StartedAt),
