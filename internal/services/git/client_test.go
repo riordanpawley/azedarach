@@ -657,13 +657,12 @@ func TestChangedFiles(t *testing.T) {
 			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "HEAD" {
 				return "abc123\n", nil
 			}
-			if len(args) >= 6 &&
+			if len(args) >= 5 &&
 				args[0] == "diff" &&
 				args[1] == "--name-status" &&
 				args[2] == "abc123" &&
-				args[3] == "HEAD" &&
-				args[4] == "--" &&
-				args[5] == ":^.azedarach" {
+				args[3] == "--" &&
+				args[4] == ":^.azedarach" {
 				return "M\tinternal/tui/model.go\nA\tnew.go\nD\told.go\nR100\tfrom.go\tto.go", nil
 			}
 			return "", fmt.Errorf("unexpected command: %v", args)
