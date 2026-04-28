@@ -21,9 +21,9 @@
 ││                                                                              [W] Delete task + cleanup worktree     │
 ││                                                                              [i] Image attachments                  │
 ││                                                                              ───────────────────                    │
+││                                                                              [1] Set status: Open                   │
+││                                                                              [2] Set status: In Progress            │
+││                                                                              [3] Set status: Blocked                │
+││                                                                              [4] Set status: Done                   │
 ││                                                                              [h] Move left                          │
-││                                                                              [l] Move right                         │
-││                                                                              [c] Create child task                  │
-││                                                                              [e] Edit task                          │
-││                                                                              [T] Tombstone task                     │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

@@ -516,6 +516,56 @@ func TestActionMenu_MoveActions(t *testing.T) {
 	}
 }
 
+func TestActionMenu_StatusKeyActions(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-123",
+		Status: domain.StatusInProgress,
+	}
+	menu := NewActionMenu(task, nil)
+
+	statusActions := map[string]struct {
+		label   string
+		enabled bool
+	}{
+		"1": {label: "Set status: Open", enabled: true},
+		"2": {label: "Set status: In Progress", enabled: false},
+		"3": {label: "Set status: Blocked", enabled: true},
+		"4": {label: "Set status: Done", enabled: true},
+	}
+	for key, want := range statusActions {
+		t.Run(key, func(t *testing.T) {
+			var got *Action
+			for i := range menu.actions {
+				if menu.actions[i].Key == key {
+					got = &menu.actions[i]
+					break
+				}
+			}
+			if got == nil {
+				t.Fatalf("expected status action %q", key)
+			}
+			if got.Label != want.label {
+				t.Fatalf("label = %q, want %q", got.Label, want.label)
+			}
+			if got.Enabled != want.enabled {
+				t.Fatalf("enabled = %v, want %v", got.Enabled, want.enabled)
+			}
+		})
+	}
+}
+
+func TestActionMenu_StatusBindingsIncludeStatusKeys(t *testing.T) {
+	menu := NewActionMenu(domain.Task{ID: "az-123", Status: domain.StatusOpen}, nil)
+	bindings := menu.StatusBindings()
+	joined := ""
+	for _, binding := range bindings {
+		joined += binding.Key + " " + binding.Description + " "
+	}
+	if !strings.Contains(joined, "1/2/3/4") {
+		t.Fatalf("expected action menu status bindings to include exact status hint, got %q", joined)
+	}
+}
+
 func TestActionMenu_Navigation(t *testing.T) {
 	task := domain.Task{
 		ID:     "az-123",

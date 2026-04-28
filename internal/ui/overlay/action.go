@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 // Action represents a menu action
@@ -127,6 +128,10 @@ func (m *ActionMenu) buildActions() []Action {
 
 	// Task actions (always available)
 	actions = append(actions,
+		Action{Key: "1", Label: "Set status: Open", Enabled: m.task.Status != domain.StatusOpen},
+		Action{Key: "2", Label: "Set status: In Progress", Enabled: m.task.Status != domain.StatusInProgress},
+		Action{Key: "3", Label: "Set status: Blocked", Enabled: m.task.Status != domain.StatusBlocked},
+		Action{Key: "4", Label: "Set status: Done", Enabled: m.task.Status != domain.StatusDone},
 		Action{Key: "h", Label: "Move left", Enabled: m.task.Status != domain.StatusOpen},
 		Action{Key: "l", Label: "Move right", Enabled: m.task.Status != domain.StatusDone},
 		Action{Key: "c", Label: "Create child task", Enabled: true},
@@ -308,6 +313,16 @@ func clampOverlayLineWidth(line string, maxWidth int) string {
 // Title returns the overlay title
 func (m *ActionMenu) Title() string {
 	return "Task"
+}
+
+func (m *ActionMenu) StatusBindings() []keybinds.Binding {
+	return []keybinds.Binding{
+		{Key: "j/k/↑/↓", Description: "move"},
+		{Key: "Enter", Description: "run action"},
+		{Key: "1/2/3/4", Description: "set status"},
+		{Key: "h/l", Description: "move status"},
+		{Key: "Esc/q", Description: "close"},
+	}
 }
 
 // Size returns the overlay dimensions

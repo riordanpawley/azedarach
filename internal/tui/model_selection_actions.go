@@ -452,6 +452,22 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		previousStatus := task.Status
 		m.applyOptimisticTaskStatus(task.ID.String(), newStatus)
 		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
+	case "1", "2", "3", "4":
+		newStatus, ok := exactTaskStatusForKey(msg.Key)
+		if !ok {
+			return m, nil
+		}
+		if task.Status == newStatus {
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: fmt.Sprintf("Task is already in %s status", statusDisplayName(newStatus)),
+				Expires: time.Now().Add(2 * time.Second),
+			})
+			return m, nil
+		}
+		previousStatus := task.Status
+		m.applyOptimisticTaskStatus(task.ID.String(), newStatus)
+		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
 	case "e":
 		return m, m.openOverlay(overlay.NewEditTaskOverlayWithImplOptionsAndAttachmentService(*task, m.availableTaskImplementations(), m.attachmentService))
 	case "T":
