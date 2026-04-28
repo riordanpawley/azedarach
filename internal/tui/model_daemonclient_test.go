@@ -5665,6 +5665,70 @@ func TestDaemonEventRevisionReducer(t *testing.T) {
 	}
 }
 
+func TestTaskEventBodyAppliesWithoutSnapshotRefresh(t *testing.T) {
+	m := newTestModel()
+	m.daemonRevision = 4
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+	m.tasks = []domain.Task{{ID: "az-1", Title: "Old", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask}}
+	m.nav.SelectTask("az-1", 0)
+
+	updatedTask := domain.Task{ID: "az-1", Title: "Updated", Status: domain.StatusBlocked, Priority: domain.P1, Type: domain.TypeBug}
+	body, err := json.Marshal(protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		TaskID:    "az-1",
+		Task:      &updatedTask,
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal task event body: %v", err)
+	}
+
+	updatedAny, cmd := m.Update(daemonStreamEventMsg{event: protocol.EventEnvelope{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		Revision:  5,
+		Event:     protocol.EventTaskUpdated,
+		Body:      body,
+	}})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if cmd == nil {
+		t.Fatal("expected next stream wait command")
+	}
+	if updated.daemonRevision != 5 {
+		t.Fatalf("daemonRevision = %d, want 5", updated.daemonRevision)
+	}
+	if len(updated.tasks) != 1 || updated.tasks[0].Title != "Updated" || updated.tasks[0].Status != domain.StatusBlocked {
+		t.Fatalf("tasks after task event = %+v", updated.tasks)
+	}
+	if got := updated.nav.GetCursor().TaskID; got != "az-1" {
+		t.Fatalf("cursor task = %q, want az-1", got)
+	}
+
+	deleteBody, err := json.Marshal(protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(updated.daemonProjectID()),
+		TaskID:    "az-1",
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal delete task event body: %v", err)
+	}
+	deletedAny, _ := updated.Update(daemonStreamEventMsg{event: protocol.EventEnvelope{
+		ProjectID: naming.ProjectID(updated.daemonProjectID()),
+		Revision:  6,
+		Event:     protocol.EventTaskDeleted,
+		Body:      deleteBody,
+	}})
+	deleted := deletedAny.(Model)
+	if deleted.daemonRevision != 6 {
+		t.Fatalf("daemonRevision after delete = %d, want 6", deleted.daemonRevision)
+	}
+	if len(deleted.tasks) != 0 {
+		t.Fatalf("tasks after delete event = %+v, want empty", deleted.tasks)
+	}
+}
+
 func TestProjectionEventRevisionGate(t *testing.T) {
 	makeProjectionEvent := func(revision uint64, dirty bool) daemonStreamEventMsg {
 		body, err := json.Marshal(protocol.ProjectionUpdateEventBody{

@@ -197,44 +197,44 @@ func (d *Daemon) issueClientFromContext(ctx context.Context) (*issues.Client, st
 }
 
 // ApplyTaskService implementation for project-aware task bulk apply routing.
-func (d *Daemon) Create(ctx context.Context, params issues.CreateTaskParams) (string, error) {
-	client, _, err := d.issueClientFromContext(ctx)
+func (d *Daemon) Create(ctx context.Context, params issues.CreateTaskParams) (domain.Task, error) {
+	client, projectID, err := d.issueClientFromContext(ctx)
 	if err != nil {
-		return "", err
+		return domain.Task{}, err
 	}
-	return client.Create(ctx, params)
+	return client.CreateWithRuntime(ctx, projectID, params)
 }
 
-func (d *Daemon) Update(ctx context.Context, issueID string, status domain.Status) error {
-	client, _, err := d.issueClientFromContext(ctx)
+func (d *Daemon) Update(ctx context.Context, issueID string, status domain.Status) (domain.Task, error) {
+	client, projectID, err := d.issueClientFromContext(ctx)
 	if err != nil {
-		return err
+		return domain.Task{}, err
 	}
-	return client.Update(ctx, issueID, status)
+	return client.UpdateWithRuntime(ctx, projectID, issueID, status)
 }
 
-func (d *Daemon) UpdateDetails(ctx context.Context, issueID string, params issues.UpdateTaskParams) error {
-	client, _, err := d.issueClientFromContext(ctx)
+func (d *Daemon) UpdateDetails(ctx context.Context, issueID string, params issues.UpdateTaskParams) (domain.Task, error) {
+	client, projectID, err := d.issueClientFromContext(ctx)
 	if err != nil {
-		return err
+		return domain.Task{}, err
 	}
-	return client.UpdateDetails(ctx, issueID, params)
+	return client.UpdateDetailsWithRuntime(ctx, projectID, issueID, params)
 }
 
-func (d *Daemon) AddDependency(ctx context.Context, issueID, dependsOnID, dependencyType string) error {
-	client, _, err := d.issueClientFromContext(ctx)
+func (d *Daemon) AddDependency(ctx context.Context, issueID, dependsOnID, dependencyType string) (domain.Task, error) {
+	client, projectID, err := d.issueClientFromContext(ctx)
 	if err != nil {
-		return err
+		return domain.Task{}, err
 	}
-	return client.AddDependency(ctx, issueID, dependsOnID, dependencyType)
+	return client.AddDependencyWithRuntime(ctx, projectID, issueID, dependsOnID, dependencyType)
 }
 
-func (d *Daemon) RemoveDependency(ctx context.Context, issueID, dependsOnID, dependencyType string) error {
-	client, _, err := d.issueClientFromContext(ctx)
+func (d *Daemon) RemoveDependency(ctx context.Context, issueID, dependsOnID, dependencyType string) (domain.Task, error) {
+	client, projectID, err := d.issueClientFromContext(ctx)
 	if err != nil {
-		return err
+		return domain.Task{}, err
 	}
-	return client.RemoveDependency(ctx, issueID, dependsOnID, dependencyType)
+	return client.RemoveDependencyWithRuntime(ctx, projectID, issueID, dependsOnID, dependencyType)
 }
 
 func (d *Daemon) Delete(ctx context.Context, issueID string) error {

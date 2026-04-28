@@ -40,6 +40,10 @@ type GitMergePreflightService interface {
 	MergePreflight(ctx context.Context, projectID string, req GitMergePreflightRequest) (*GitMergePreflightResult, error)
 }
 
+type GitStatusRefreshService interface {
+	RefreshStatus(ctx context.Context, projectID, worktree string) (*git.GitStatus, error)
+}
+
 type GitDiscardChangesService interface {
 	DiscardChanges(ctx context.Context, projectID, worktree string) (*GitDiscardChangesResult, error)
 }
@@ -85,6 +89,7 @@ type gitCommandBody struct {
 	BaseBranch    string                    `json:"base_branch,omitempty"`
 	Targets       []GitRuntimeSignalsTarget `json:"targets,omitempty"`
 	CompareRemote bool                      `json:"compare_remote,omitempty"`
+	Refresh       bool                      `json:"refresh,omitempty"`
 }
 
 type GitRuntimeSignalsTarget struct {
@@ -485,7 +490,24 @@ func (h *GitHandler) handleStatus(ctx context.Context, resp protocol.ResponseEnv
 		return resp
 	}
 
-	status, err := h.service.Status(ctx, cmd.ProjectID, cmd.Worktree)
+	var (
+		status *git.GitStatus
+		err    error
+	)
+	if cmd.Refresh {
+		refresher, ok := h.service.(GitStatusRefreshService)
+		if !ok {
+			resp.Error = &protocol.ErrorEnvelope{
+				Code:      protocol.ErrorCodeInternal,
+				Message:   "git status refresh unavailable",
+				Retryable: false,
+			}
+			return resp
+		}
+		status, err = refresher.RefreshStatus(ctx, cmd.ProjectID, cmd.Worktree)
+	} else {
+		status, err = h.service.Status(ctx, cmd.ProjectID, cmd.Worktree)
+	}
 	if err != nil {
 		resp.Error = mapGitError(err)
 		return resp

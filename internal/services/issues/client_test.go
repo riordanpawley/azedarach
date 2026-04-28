@@ -159,6 +159,44 @@ func TestClient_ListWithRuntimeReturnsJoinedProjectionFields(t *testing.T) {
 	assert.Equal(t, 3, got.GitDeletions)
 	assert.Equal(t, 2, got.GitAheadCount)
 	assert.Equal(t, 1, got.GitBehindCount)
+
+	one, err := client.GetWithRuntime(ctx, projectID, taskID)
+	require.NoError(t, err)
+	assert.Equal(t, got.ID, one.ID)
+	require.NotNil(t, one.Session)
+	assert.Equal(t, worktreePath, one.Session.Worktree)
+	assert.True(t, one.HasWorktree)
+	assert.Equal(t, 7, one.GitAdditions)
+}
+
+func TestClient_UpdateWithRuntimeReturnsChangedTask(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-update-runtime"
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Runtime update",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	require.NoError(t, err)
+
+	task, err := client.UpdateWithRuntime(ctx, projectID, taskID, domain.StatusInProgress)
+	require.NoError(t, err)
+	assert.Equal(t, naming.IssueID(taskID), task.ID)
+	assert.Equal(t, domain.StatusInProgress, task.Status)
+
+	task, err = client.UpdateDetailsWithRuntime(ctx, projectID, taskID, UpdateTaskParams{
+		Title:       "Runtime update changed",
+		Description: "Changed through returning API",
+		Type:        domain.TypeBug,
+		Priority:    domain.P1,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Runtime update changed", task.Title)
+	assert.Equal(t, domain.TypeBug, task.Type)
+	assert.Equal(t, domain.P1, task.Priority)
 }
 
 func TestClient_AppendNotes(t *testing.T) {

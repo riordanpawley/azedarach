@@ -303,6 +303,23 @@ func (a *gitServiceAdapter) Status(ctx context.Context, projectID, worktree stri
 	return &git.GitStatus{}, nil
 }
 
+func (a *gitServiceAdapter) RefreshStatus(ctx context.Context, projectID, worktree string) (*git.GitStatus, error) {
+	projectID = normalizeProjectID(projectID)
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return &git.GitStatus{}, nil
+	}
+	status, err := a.refreshGitStatusManual(ctx, projectID, worktree)
+	if err != nil {
+		return nil, err
+	}
+	a.ensureStatusPoller(projectID, worktree)
+	if status == nil {
+		return &git.GitStatus{}, nil
+	}
+	return status, nil
+}
+
 func (a *gitServiceAdapter) ensureStatusRefreshQueue() *reconcileQueue[*git.GitStatus] {
 	if a == nil {
 		return newReconcileQueue[*git.GitStatus](reconcileQueueConfig{

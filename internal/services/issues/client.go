@@ -310,6 +310,30 @@ func (c *Client) ListWithRuntime(ctx context.Context, projectID string) ([]domai
 	return tasks, nil
 }
 
+// GetWithRuntime fetches one active issue with runtime projection fields.
+func (c *Client) GetWithRuntime(ctx context.Context, projectID, id string) (domain.Task, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return domain.Task{}, err
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return domain.Task{}, c.wrapError("get-with-runtime", id, domain.ErrNotFound)
+	}
+	tasks, err := c.queryTasksWithRuntime(ctx, db, projectID, id)
+	if err != nil {
+		return domain.Task{}, c.wrapError("get-with-runtime", id, err)
+	}
+	if len(tasks) == 0 {
+		return domain.Task{}, c.wrapError("get-with-runtime", id, domain.ErrNotFound)
+	}
+	return tasks[0], nil
+}
+
 // Search queries issues by id/title/description.
 func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error) {
 	db, err := c.dbHandle()
@@ -434,6 +458,14 @@ func (c *Client) Update(ctx context.Context, id string, status domain.Status) er
 		return c.wrapError("update", id, domain.ErrNotFound)
 	}
 	return nil
+}
+
+// UpdateWithRuntime changes an issue status and returns the changed issue.
+func (c *Client) UpdateWithRuntime(ctx context.Context, projectID, id string, status domain.Status) (domain.Task, error) {
+	if err := c.Update(ctx, id, status); err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, id)
 }
 
 func (c *Client) countOpenChildren(ctx context.Context, db *sql.DB, parentID string) (int, error) {
@@ -597,6 +629,15 @@ func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, e
 	return issueID, nil
 }
 
+// CreateWithRuntime inserts a new issue and returns the created task with runtime projection fields.
+func (c *Client) CreateWithRuntime(ctx context.Context, projectID string, params CreateTaskParams) (domain.Task, error) {
+	id, err := c.Create(ctx, params)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, id)
+}
+
 // AddDependency creates or restores a dependency edge between two issues.
 func (c *Client) AddDependency(ctx context.Context, issueID, dependsOnID, dependencyType string) error {
 	db, err := c.dbHandle()
@@ -661,6 +702,14 @@ func (c *Client) AddDependency(ctx context.Context, issueID, dependsOnID, depend
 	}
 
 	return nil
+}
+
+// AddDependencyWithRuntime creates or restores a dependency edge and returns the changed issue.
+func (c *Client) AddDependencyWithRuntime(ctx context.Context, projectID, issueID, dependsOnID, dependencyType string) (domain.Task, error) {
+	if err := c.AddDependency(ctx, issueID, dependsOnID, dependencyType); err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, issueID)
 }
 
 func (c *Client) reopenClosedParentForActiveChild(ctx context.Context, execer sqlIssueExecer, childID, parentID string) error {
@@ -741,6 +790,14 @@ func (c *Client) RemoveDependency(ctx context.Context, issueID, dependsOnID, dep
 	}
 
 	return nil
+}
+
+// RemoveDependencyWithRuntime tombstones a dependency edge and returns the changed issue.
+func (c *Client) RemoveDependencyWithRuntime(ctx context.Context, projectID, issueID, dependsOnID, dependencyType string) (domain.Task, error) {
+	if err := c.RemoveDependency(ctx, issueID, dependsOnID, dependencyType); err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, issueID)
 }
 
 func dependencyTypeRequiresConfirmation(dependencyType string) bool {
@@ -880,6 +937,14 @@ func (c *Client) AppendNotes(ctx context.Context, id, line string) error {
 	return nil
 }
 
+// AppendNotesWithRuntime appends notes and returns the changed issue.
+func (c *Client) AppendNotesWithRuntime(ctx context.Context, projectID, id, line string) (domain.Task, error) {
+	if err := c.AppendNotes(ctx, id, line); err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, id)
+}
+
 // UpdateDetails updates non-status issue metadata.
 func (c *Client) UpdateDetails(ctx context.Context, id string, params UpdateTaskParams) error {
 	db, err := c.dbHandle()
@@ -930,6 +995,14 @@ func (c *Client) UpdateDetails(ctx context.Context, id string, params UpdateTask
 		return c.wrapError("update-details", id, domain.ErrNotFound)
 	}
 	return nil
+}
+
+// UpdateDetailsWithRuntime updates issue metadata and returns the changed issue.
+func (c *Client) UpdateDetailsWithRuntime(ctx context.Context, projectID, id string, params UpdateTaskParams) (domain.Task, error) {
+	if err := c.UpdateDetails(ctx, id, params); err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, id)
 }
 
 func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args ...any) ([]domain.Task, error) {
@@ -1004,8 +1077,8 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 	return tasks, nil
 }
 
-func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectID string) ([]domain.Task, error) {
-	rows, err := db.QueryContext(ctx, `
+func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectID string, issueIDs ...string) ([]domain.Task, error) {
+	query := `
 		WITH ranked_session AS (
 			SELECT
 				issue_id,
@@ -1060,8 +1133,14 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 		LEFT JOIN daemon_worktree_projections w
 			ON w.project_id = ? AND w.issue_id = i.id
 		WHERE i.deleted_at IS NULL
-		ORDER BY i.updated_at DESC
-	`, projectID, projectID)
+	`
+	args := []any{projectID, projectID}
+	if len(issueIDs) > 0 {
+		query += " AND i.id = ?\n"
+		args = append(args, strings.TrimSpace(issueIDs[0]))
+	}
+	query += " ORDER BY i.updated_at DESC"
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

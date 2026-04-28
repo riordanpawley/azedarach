@@ -11,16 +11,17 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
 // ApplyTaskService captures the task mutation operations needed by the bulk apply executor.
 type ApplyTaskService interface {
-	Create(context.Context, issues.CreateTaskParams) (string, error)
-	Update(context.Context, string, domain.Status) error
-	UpdateDetails(context.Context, string, issues.UpdateTaskParams) error
-	AddDependency(context.Context, string, string, string) error
-	RemoveDependency(context.Context, string, string, string) error
+	Create(context.Context, issues.CreateTaskParams) (domain.Task, error)
+	Update(context.Context, string, domain.Status) (domain.Task, error)
+	UpdateDetails(context.Context, string, issues.UpdateTaskParams) (domain.Task, error)
+	AddDependency(context.Context, string, string, string) (domain.Task, error)
+	RemoveDependency(context.Context, string, string, string) (domain.Task, error)
 	Delete(context.Context, string) error
 	Archive(context.Context, string) error
 }
@@ -29,15 +30,21 @@ type ApplyTaskService interface {
 type ApplyRevisionManager interface {
 	CurrentRevision(projectID string) uint64
 	NextRevision(projectID string) uint64
-	PublishTaskEvent(req protocol.RequestEnvelope, eventName string, rev uint64)
+	PublishTaskEvent(req protocol.RequestEnvelope, eventName string, rev uint64, bodies ...protocol.TaskEventBody)
+}
+
+// ApplyTaskEventBodyProvider can attach the changed task projection to mutation events.
+type ApplyTaskEventBodyProvider interface {
+	TaskEventBody(ctx context.Context, projectID, taskID string) protocol.TaskEventBody
 }
 
 // ApplyExecutionOperation captures one committed operation in deterministic input order.
 type ApplyExecutionOperation struct {
-	Index    int    `json:"index"`
-	Command  string `json:"command"`
-	TaskID   string `json:"task_id,omitempty"`
-	Revision uint64 `json:"revision,omitempty"`
+	Index    int          `json:"index"`
+	Command  string       `json:"command"`
+	TaskID   string       `json:"task_id,omitempty"`
+	Revision uint64       `json:"revision,omitempty"`
+	Task     *domain.Task `json:"-"`
 }
 
 const (
@@ -175,7 +182,7 @@ func (h *ApplyHandler) execute(ctx context.Context, req protocol.RequestEnvelope
 
 		if h.revisions != nil {
 			rev := h.revisions.NextRevision(projectID)
-			h.revisions.PublishTaskEvent(req, applyEventName(op.Command), rev)
+			h.revisions.PublishTaskEvent(req, applyEventName(op.Command), rev, h.taskEventBody(ctx, projectID, op.Command, executed))
 			executed.Revision = rev
 			result.Revision = rev
 			outcome.Revision = rev
@@ -197,6 +204,51 @@ func (h *ApplyHandler) execute(ctx context.Context, req protocol.RequestEnvelope
 	}
 
 	return result, nil
+}
+
+func (h *ApplyHandler) taskEventBody(ctx context.Context, projectID, command string, executed ApplyExecutionOperation) protocol.TaskEventBody {
+	taskID := executed.TaskID
+	body := protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(projectID),
+		TaskID:    naming.IssueID(taskID),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if strings.TrimSpace(taskID) == "" {
+		return body
+	}
+	switch applyEventName(command) {
+	case protocol.EventTaskCreated, protocol.EventTaskUpdated:
+		if executed.Task != nil {
+			return taskEventBodyFromTask(projectID, *executed.Task)
+		}
+		if provider, ok := h.revisions.(ApplyTaskEventBodyProvider); ok {
+			provided := provider.TaskEventBody(ctx, projectID, taskID)
+			if provided.ProjectID == "" {
+				provided.ProjectID = body.ProjectID
+			}
+			if provided.TaskID == "" {
+				provided.TaskID = body.TaskID
+			}
+			if provided.UpdatedAt.IsZero() {
+				provided.UpdatedAt = body.UpdatedAt
+			}
+			return provided
+		}
+	}
+	return body
+}
+
+func taskEventBodyFromTask(projectID string, task domain.Task) protocol.TaskEventBody {
+	updatedAt := time.Now().UTC()
+	if !task.UpdatedAt.IsZero() {
+		updatedAt = task.UpdatedAt.UTC()
+	}
+	return protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(projectID),
+		TaskID:    naming.IssueID(task.ID),
+		Task:      &task,
+		UpdatedAt: updatedAt,
+	}
 }
 
 func (h *ApplyHandler) executeOperation(ctx context.Context, index int, op protocol.ApplyOperationBody) (ApplyExecutionOperation, error) {
@@ -221,7 +273,7 @@ func (h *ApplyHandler) executeOperation(ctx context.Context, index int, op proto
 			return ApplyExecutionOperation{}, err
 		}
 
-		taskID, err := h.service.Create(ctx, issues.CreateTaskParams{
+		task, err := h.service.Create(ctx, issues.CreateTaskParams{
 			Title:       payload.Title,
 			Description: payload.Description,
 			Type:        taskType,
@@ -232,7 +284,8 @@ func (h *ApplyHandler) executeOperation(ctx context.Context, index int, op proto
 			return ApplyExecutionOperation{}, err
 		}
 
-		operation.TaskID = taskID
+		operation.TaskID = task.ID.String()
+		operation.Task = &task
 		return operation, nil
 
 	case applyCommandTaskUpdate:
@@ -250,16 +303,18 @@ func (h *ApplyHandler) executeOperation(ctx context.Context, index int, op proto
 			return ApplyExecutionOperation{}, err
 		}
 
-		if err := h.service.UpdateDetails(ctx, payload.TaskID, issues.UpdateTaskParams{
+		task, err := h.service.UpdateDetails(ctx, payload.TaskID, issues.UpdateTaskParams{
 			Title:       payload.Title,
 			Description: payload.Description,
 			Type:        taskType,
 			Priority:    priority,
-		}); err != nil {
+		})
+		if err != nil {
 			return ApplyExecutionOperation{}, err
 		}
 
 		operation.TaskID = payload.TaskID
+		operation.Task = &task
 		return operation, nil
 
 	case applyCommandTaskUpdateStatus:
@@ -273,11 +328,13 @@ func (h *ApplyHandler) executeOperation(ctx context.Context, index int, op proto
 			return ApplyExecutionOperation{}, err
 		}
 
-		if err := h.service.Update(ctx, payload.TaskID, status); err != nil {
+		task, err := h.service.Update(ctx, payload.TaskID, status)
+		if err != nil {
 			return ApplyExecutionOperation{}, err
 		}
 
 		operation.TaskID = payload.TaskID
+		operation.Task = &task
 		return operation, nil
 
 	case applyCommandTaskDelete:
@@ -311,10 +368,12 @@ func (h *ApplyHandler) executeOperation(ctx context.Context, index int, op proto
 		if err := json.Unmarshal(op.Body, &payload); err != nil {
 			return ApplyExecutionOperation{}, fmt.Errorf("decode apply dependency add payload: %w", err)
 		}
-		if err := h.service.AddDependency(ctx, payload.TaskID, payload.DependsOnID, payload.Type); err != nil {
+		task, err := h.service.AddDependency(ctx, payload.TaskID, payload.DependsOnID, payload.Type)
+		if err != nil {
 			return ApplyExecutionOperation{}, err
 		}
 		operation.TaskID = payload.TaskID
+		operation.Task = &task
 		return operation, nil
 
 	case applyCommandDependencyRemove:
@@ -322,10 +381,12 @@ func (h *ApplyHandler) executeOperation(ctx context.Context, index int, op proto
 		if err := json.Unmarshal(op.Body, &payload); err != nil {
 			return ApplyExecutionOperation{}, fmt.Errorf("decode apply dependency remove payload: %w", err)
 		}
-		if err := h.service.RemoveDependency(issues.WithDependencyRemovalConfirmation(ctx), payload.TaskID, payload.DependsOnID, payload.Type); err != nil {
+		task, err := h.service.RemoveDependency(issues.WithDependencyRemovalConfirmation(ctx), payload.TaskID, payload.DependsOnID, payload.Type)
+		if err != nil {
 			return ApplyExecutionOperation{}, err
 		}
 		operation.TaskID = payload.TaskID
+		operation.Task = &task
 		return operation, nil
 
 	default:
@@ -385,15 +446,15 @@ func parseApplyStatus(value string) (domain.Status, error) {
 func applyEventName(command string) string {
 	switch command {
 	case applyCommandTaskCreate:
-		return "task.created"
+		return protocol.EventTaskCreated
 	case applyCommandTaskUpdate, applyCommandTaskUpdateStatus:
-		return "task.updated"
+		return protocol.EventTaskUpdated
 	case applyCommandTaskDelete:
-		return "task.deleted"
+		return protocol.EventTaskDeleted
 	case applyCommandTaskArchive:
-		return "task.archived"
+		return protocol.EventTaskArchived
 	default:
-		return "task.updated"
+		return protocol.EventTaskUpdated
 	}
 }
 

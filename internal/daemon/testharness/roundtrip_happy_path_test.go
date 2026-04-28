@@ -18,6 +18,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
@@ -55,34 +56,34 @@ type roundtripApplyService struct {
 	calls     []string
 }
 
-func (s *roundtripApplyService) Create(_ context.Context, params issues.CreateTaskParams) (string, error) {
+func (s *roundtripApplyService) Create(_ context.Context, params issues.CreateTaskParams) (domain.Task, error) {
 	if len(s.createIDs) == 0 {
-		return "", errors.New("no task ids left")
+		return domain.Task{}, errors.New("no task ids left")
 	}
 	taskID := s.createIDs[0]
 	s.createIDs = s.createIDs[1:]
 	s.calls = append(s.calls, fmt.Sprintf("create:%s:%s:%s", params.Title, params.Priority.String(), params.Type))
-	return taskID, nil
+	return domain.Task{ID: naming.IssueID(taskID), Title: params.Title, Status: params.Status, Priority: params.Priority, Type: params.Type}, nil
 }
 
-func (s *roundtripApplyService) Update(_ context.Context, id string, status domain.Status) error {
+func (s *roundtripApplyService) Update(_ context.Context, id string, status domain.Status) (domain.Task, error) {
 	s.calls = append(s.calls, fmt.Sprintf("status:%s:%s", id, status))
-	return nil
+	return domain.Task{ID: naming.IssueID(id), Title: "status " + id, Status: status}, nil
 }
 
-func (s *roundtripApplyService) UpdateDetails(_ context.Context, id string, params issues.UpdateTaskParams) error {
+func (s *roundtripApplyService) UpdateDetails(_ context.Context, id string, params issues.UpdateTaskParams) (domain.Task, error) {
 	s.calls = append(s.calls, fmt.Sprintf("update:%s:%s:%s:%s", id, params.Title, params.Priority.String(), params.Type))
-	return nil
+	return domain.Task{ID: naming.IssueID(id), Title: params.Title, Status: domain.StatusOpen, Priority: params.Priority, Type: params.Type}, nil
 }
 
-func (s *roundtripApplyService) AddDependency(_ context.Context, issueID, dependsOnID, dependencyType string) error {
+func (s *roundtripApplyService) AddDependency(_ context.Context, issueID, dependsOnID, dependencyType string) (domain.Task, error) {
 	s.calls = append(s.calls, fmt.Sprintf("dep-add:%s:%s:%s", issueID, dependsOnID, dependencyType))
-	return nil
+	return domain.Task{ID: naming.IssueID(issueID), Title: "dep " + issueID, Status: domain.StatusOpen}, nil
 }
 
-func (s *roundtripApplyService) RemoveDependency(_ context.Context, issueID, dependsOnID, dependencyType string) error {
+func (s *roundtripApplyService) RemoveDependency(_ context.Context, issueID, dependsOnID, dependencyType string) (domain.Task, error) {
 	s.calls = append(s.calls, fmt.Sprintf("dep-remove:%s:%s:%s", issueID, dependsOnID, dependencyType))
-	return nil
+	return domain.Task{ID: naming.IssueID(issueID), Title: "dep " + issueID, Status: domain.StatusOpen}, nil
 }
 
 func (s *roundtripApplyService) Delete(_ context.Context, id string) error {
@@ -109,7 +110,7 @@ func (r *roundtripApplyRevisions) NextRevision(string) uint64 {
 	return r.current
 }
 
-func (r *roundtripApplyRevisions) PublishTaskEvent(_ protocol.RequestEnvelope, eventName string, rev uint64) {
+func (r *roundtripApplyRevisions) PublishTaskEvent(_ protocol.RequestEnvelope, eventName string, rev uint64, _ ...protocol.TaskEventBody) {
 	r.published = append(r.published, fmt.Sprintf("%s:%d", eventName, rev))
 }
 

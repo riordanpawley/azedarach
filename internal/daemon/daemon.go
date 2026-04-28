@@ -1001,8 +1001,26 @@ func (d *Daemon) currentRevision(projectID string) uint64 {
 	return d.revision[projectID]
 }
 
-func (d *Daemon) publishTaskEvent(req protocol.RequestEnvelope, eventName string, rev uint64) {
+func (d *Daemon) publishTaskEvent(req protocol.RequestEnvelope, eventName string, rev uint64, bodies ...protocol.TaskEventBody) {
 	projectID := d.projectID(req.Meta)
+	var body []byte
+	if len(bodies) > 0 {
+		eventBody := bodies[0]
+		if eventBody.ProjectID == "" {
+			eventBody.ProjectID = naming.ProjectID(projectID)
+		}
+		if eventBody.UpdatedAt.IsZero() {
+			eventBody.UpdatedAt = time.Now().UTC()
+		}
+		encoded, err := json.Marshal(eventBody)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("marshal task event body failed", "project_id", projectID, "event", eventName, "revision", rev, "error", err)
+			}
+		} else {
+			body = encoded
+		}
+	}
 	d.hub.Publish(protocol.EventEnvelope{
 		ProtocolVersion: req.ProtocolVersion,
 		ProjectID:       naming.ProjectID(projectID),
@@ -1011,6 +1029,7 @@ func (d *Daemon) publishTaskEvent(req protocol.RequestEnvelope, eventName string
 		Event:           eventName,
 		Kind:            protocol.EnvelopeKindEvent,
 		EmittedAt:       time.Now().UTC(),
+		Body:            body,
 	})
 }
 
@@ -1241,6 +1260,10 @@ func (a applyRevisionAdapter) NextRevision(projectID string) uint64 {
 	return a.daemon.nextRevision(projectID)
 }
 
-func (a applyRevisionAdapter) PublishTaskEvent(req protocol.RequestEnvelope, eventName string, rev uint64) {
-	a.daemon.publishTaskEvent(req, eventName, rev)
+func (a applyRevisionAdapter) PublishTaskEvent(req protocol.RequestEnvelope, eventName string, rev uint64, bodies ...protocol.TaskEventBody) {
+	a.daemon.publishTaskEvent(req, eventName, rev, bodies...)
+}
+
+func (a applyRevisionAdapter) TaskEventBody(ctx context.Context, projectID, taskID string) protocol.TaskEventBody {
+	return a.daemon.taskEventBody(ctx, projectID, taskID)
 }
