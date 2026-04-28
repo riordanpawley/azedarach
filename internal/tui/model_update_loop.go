@@ -626,8 +626,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		if msg.targetID == "main" {
-			return m, m.mergeToMainCmd(msg.sourceWorktree, msg.sourceID, msg.refreshStatus)
+		if msg.targetID == mergeBaseTargetID {
+			return m, m.mergeToBaseCmd(msg.sourceWorktree, msg.sourceID, msg.refreshStatus)
 		}
 		return m, m.followOnMergeIntoTargetCmd(msg.sourceWorktree, msg.targetWorktree, msg.sourceID, msg.targetID, msg.targetState, msg.refreshStatus)
 

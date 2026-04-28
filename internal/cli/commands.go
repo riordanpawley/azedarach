@@ -48,7 +48,7 @@ const (
 	defaultIssueListLimit       = 200
 	defaultOperationListLimit   = 50
 	sessionStartCommandTimeout  = 5 * time.Minute
-	branchMergeToMainTimeout    = 2 * time.Minute
+	branchMergeToBaseTimeout    = 2 * time.Minute
 	daemonCommandTimeout        = 15 * time.Second
 	issueCreateCommandTimeout   = 10 * time.Second
 	issueCreateAutostartTimeout = 12 * time.Second
@@ -495,25 +495,25 @@ func resolveSessionStartBaseBranch(ctx context.Context, deps *Dependencies, task
 	return baseBranch, nil
 }
 
-// BranchMergeToMainCommand merges one issue worktree branch into the base branch using daemon git commands.
-func BranchMergeToMainCommand(deps *Dependencies, issueID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), branchMergeToMainTimeout)
+// BranchMergeToBaseCommand merges one issue worktree branch into the base branch using daemon git commands.
+func BranchMergeToBaseCommand(deps *Dependencies, issueID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), branchMergeToBaseTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
 
-	source, err := resolveMergeToMainSourceWorktree(ctx, deps, issueID)
+	source, err := resolveMergeToBaseSourceWorktree(ctx, deps, issueID)
 	if err != nil {
 		return err
 	}
 	baseBranch := resolveCLIBaseBranch(deps.Config)
-	mainWorktree := strings.TrimSpace(deps.RepoDir)
-	if mainWorktree == "" {
-		mainWorktree = "."
+	baseWorktree := strings.TrimSpace(deps.RepoDir)
+	if baseWorktree == "" {
+		baseWorktree = "."
 	}
 
-	if err := checkMergeToMainPreflight(ctx, deps, source, mainWorktree); err != nil {
+	if err := checkMergeToBasePreflight(ctx, deps, source, baseWorktree); err != nil {
 		return err
 	}
 
@@ -524,13 +524,13 @@ func BranchMergeToMainCommand(deps *Dependencies, issueID string) error {
 		"base_branch", baseBranch,
 	)
 
-	if _, err := deps.DaemonClient.GitFetch(ctx, mainWorktree, "origin"); err != nil {
+	if _, err := deps.DaemonClient.GitFetch(ctx, baseWorktree, "origin"); err != nil {
 		return wrapPendingGitOperation("fetch", err)
 	}
-	if _, err := deps.DaemonClient.GitCheckout(ctx, mainWorktree, baseBranch); err != nil {
+	if _, err := deps.DaemonClient.GitCheckout(ctx, baseWorktree, baseBranch); err != nil {
 		return wrapPendingGitOperation("checkout", err)
 	}
-	result, err := deps.DaemonClient.GitMerge(ctx, mainWorktree, source.Branch)
+	result, err := deps.DaemonClient.GitMerge(ctx, baseWorktree, source.Branch)
 	if err != nil {
 		return wrapPendingGitOperation("merge", err)
 	}
@@ -546,7 +546,7 @@ func BranchMergeToMainCommand(deps *Dependencies, issueID string) error {
 	return nil
 }
 
-func resolveMergeToMainSourceWorktree(ctx context.Context, deps *Dependencies, issueID string) (daemonclient.Worktree, error) {
+func resolveMergeToBaseSourceWorktree(ctx context.Context, deps *Dependencies, issueID string) (daemonclient.Worktree, error) {
 	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
 	if err != nil {
 		return daemonclient.Worktree{}, fmt.Errorf("list daemon worktrees: %w", err)
@@ -600,7 +600,7 @@ func resolveCLIBaseBranch(cfg *config.Config) string {
 	return base
 }
 
-func checkMergeToMainPreflight(ctx context.Context, deps *Dependencies, source daemonclient.Worktree, targetWorktree string) error {
+func checkMergeToBasePreflight(ctx context.Context, deps *Dependencies, source daemonclient.Worktree, targetWorktree string) error {
 	sourceStatus, err := deps.DaemonClient.GitStatus(ctx, source.Path)
 	if err != nil {
 		return fmt.Errorf("read source status for %s: %w", source.IssueID, err)

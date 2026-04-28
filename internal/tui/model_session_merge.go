@@ -342,7 +342,7 @@ func (m Model) resolveMergeTargetSelectionCmd(sourceID, targetID string, targetS
 			}
 		}
 
-		if targetID == "main" {
+		if targetID == mergeBaseTargetID {
 			return mergeTargetSelectionResolvedMsg{
 				sourceID:       sourceID,
 				targetID:       targetID,
@@ -417,65 +417,67 @@ type mergeTargetSelectionResolvedMsg struct {
 	err            error
 }
 
-func (m Model) mergeToMainCmd(sourceWorktree, sourceID string, refreshStatus bool) tea.Cmd {
+const mergeBaseTargetID = "base"
+
+func (m Model) mergeToBaseCmd(sourceWorktree, sourceID string, refreshStatus bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		baseBranch := m.resolveBaseBranch()
-		mainWorktree := m.activeProjectPath()
-		if strings.TrimSpace(mainWorktree) == "" {
-			mainWorktree = "."
+		baseWorktree := m.activeProjectPath()
+		if strings.TrimSpace(baseWorktree) == "" {
+			baseWorktree = "."
 		}
 
 		branch, err := m.resolveWorktreeBranch(ctx, sourceWorktree, sourceID)
 		if err != nil {
-			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: err}
+			return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, err: err}
 		}
 
-		m.logger.Info("merging upstream source into main",
+		m.logger.Info("merging upstream source into base branch",
 			"sourceID", sourceID,
 			"sourceBranch", branch,
 			"targetBranch", baseBranch,
 		)
 
 		if m.daemonClient == nil {
-			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: fmt.Errorf("daemon client unavailable")}
+			return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, err: fmt.Errorf("daemon client unavailable")}
 		}
 
-		if preflight := m.checkMergePreflight(ctx, sourceID, "main", sourceWorktree, mainWorktree, baseBranch, branch, refreshStatus); preflight != nil {
+		if preflight := m.checkMergePreflight(ctx, sourceID, mergeBaseTargetID, sourceWorktree, baseWorktree, baseBranch, branch, refreshStatus); preflight != nil {
 			return *preflight
 		}
 
-		if _, err := m.daemonClient.GitFetch(ctx, mainWorktree, "origin"); err != nil {
+		if _, err := m.daemonClient.GitFetch(ctx, baseWorktree, "origin"); err != nil {
 			if pending, ok := pendingOperationDetails(err); ok {
 				return mergeResultMsg{
 					sourceID:    sourceID,
-					targetID:    "main",
+					targetID:    mergeBaseTargetID,
 					stage:       "fetch",
 					state:       pending.State,
 					operationID: pending.OperationID,
 				}
 			}
-			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: err}
+			return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, err: err}
 		}
 
-		if _, err := m.daemonClient.GitCheckout(ctx, mainWorktree, baseBranch); err != nil {
+		if _, err := m.daemonClient.GitCheckout(ctx, baseWorktree, baseBranch); err != nil {
 			if pending, ok := pendingOperationDetails(err); ok {
 				return mergeResultMsg{
 					sourceID:    sourceID,
-					targetID:    "main",
+					targetID:    mergeBaseTargetID,
 					stage:       "checkout",
 					state:       pending.State,
 					operationID: pending.OperationID,
 				}
 			}
-			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: err}
+			return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, err: err}
 		}
 
-		result, err := m.daemonClient.GitMerge(ctx, mainWorktree, branch)
+		result, err := m.daemonClient.GitMerge(ctx, baseWorktree, branch)
 		if pending, ok := pendingOperationDetails(err); ok {
 			return mergeResultMsg{
 				sourceID:    sourceID,
-				targetID:    "main",
+				targetID:    mergeBaseTargetID,
 				stage:       "merge",
 				state:       pending.State,
 				operationID: pending.OperationID,
@@ -484,7 +486,7 @@ func (m Model) mergeToMainCmd(sourceWorktree, sourceID string, refreshStatus boo
 		if err == nil && result.Result.Success {
 			_, _ = m.daemonClient.GitStatusRefresh(ctx, sourceWorktree)
 		}
-		return mergeResultMsg{sourceID: sourceID, targetID: "main", result: &result.Result, err: err}
+		return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, result: &result.Result, err: err}
 	}
 }
 
@@ -574,7 +576,7 @@ func (m *Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Ses
 	candidates := m.getFollowOnMergeCandidates(task)
 	if len(candidates) == 0 {
 		if task.ParentID == nil {
-			return m.resolveMergeToMainCmd(task.ID.String(), true)
+			return m.resolveMergeToBaseCmd(task.ID.String(), true)
 		}
 		m.addToast(Toast{
 			Level:   ToastWarning,
@@ -611,7 +613,7 @@ func projectedSessionState(primary, fallback *domain.Session) (domain.SessionSta
 	return domain.SessionIdle, false
 }
 
-func (m Model) resolveMergeToMainCmd(sourceID string, refreshStatus bool) tea.Cmd {
+func (m Model) resolveMergeToBaseCmd(sourceID string, refreshStatus bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
 		defer cancel()
@@ -620,11 +622,11 @@ func (m Model) resolveMergeToMainCmd(sourceID string, refreshStatus bool) tea.Cm
 		if err != nil || sourceWorktree == "" {
 			return mergeResultMsg{
 				sourceID: sourceID,
-				targetID: "main",
+				targetID: mergeBaseTargetID,
 				err:      fmt.Errorf("no active session/worktree - start session first"),
 			}
 		}
-		return m.mergeToMainCmd(sourceWorktree, sourceID, refreshStatus)()
+		return m.mergeToBaseCmd(sourceWorktree, sourceID, refreshStatus)()
 	}
 }
 

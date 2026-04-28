@@ -687,11 +687,13 @@ func TestStartCommandPrintsNestedOperationOutput(t *testing.T) {
 	}
 }
 
-func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
+func TestBranchMergeToBaseCommandUsesDaemonGitFlow(t *testing.T) {
 	commands := make([]string, 0, 8)
-	mainWorktree := t.TempDir()
+	baseWorktree := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Git.BaseBranch = "trunk"
 	deps := &Dependencies{
-		Config: config.DefaultConfig(),
+		Config: cfg,
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
@@ -711,7 +713,7 @@ func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal git status body: %v", err)
 					}
-					if body.Worktree != "/tmp/azedarach-az-123" && body.Worktree != mainWorktree {
+					if body.Worktree != "/tmp/azedarach-az-123" && body.Worktree != baseWorktree {
 						t.Fatalf("git status worktree = %q", body.Worktree)
 					}
 					return responseWithJSON(req, map[string]any{
@@ -719,17 +721,17 @@ func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
 					}), nil
 				case daemonclient.CommandGitFetch:
 					return responseWithJSON(req, daemonclient.GitCommandResponse{
-						Worktree: mainWorktree,
+						Worktree: baseWorktree,
 						Remote:   "origin",
 					}), nil
 				case daemonclient.CommandGitCheckout:
 					return responseWithJSON(req, daemonclient.GitCommandResponse{
-						Worktree: mainWorktree,
-						Branch:   "main",
+						Worktree: baseWorktree,
+						Branch:   "trunk",
 					}), nil
 				case daemonclient.CommandGitMerge:
 					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
-						Worktree: mainWorktree,
+						Worktree: baseWorktree,
 						Branch:   "riordan/az-123/some-change",
 						Result: gitservice.MergeResult{
 							Success: true,
@@ -743,16 +745,16 @@ func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
 		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
-		RepoDir:   mainWorktree,
+		RepoDir:   baseWorktree,
 	}
 
 	output := captureStdout(t, func() error {
-		return BranchMergeToMainCommand(deps, "az-123")
+		return BranchMergeToBaseCommand(deps, "az-123")
 	})
 	if !strings.Contains(output, "merge complete") {
 		t.Fatalf("output = %q, want merge output", output)
 	}
-	if !strings.Contains(output, "Merged riordan/az-123/some-change into main (az-123)") {
+	if !strings.Contains(output, "Merged riordan/az-123/some-change into trunk (az-123)") {
 		t.Fatalf("output = %q, want final summary", output)
 	}
 
@@ -776,7 +778,7 @@ func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
 	}
 }
 
-func TestBranchMergeToMainCommandFailsOnDirtyPreflight(t *testing.T) {
+func TestBranchMergeToBaseCommandFailsOnDirtyPreflight(t *testing.T) {
 	commands := make([]string, 0, 8)
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
@@ -820,7 +822,7 @@ func TestBranchMergeToMainCommandFailsOnDirtyPreflight(t *testing.T) {
 		RepoDir:   t.TempDir(),
 	}
 
-	err := BranchMergeToMainCommand(deps, "az-123")
+	err := BranchMergeToBaseCommand(deps, "az-123")
 	if err == nil || !strings.Contains(err.Error(), "merge preflight failed") {
 		t.Fatalf("err = %v, want preflight failure", err)
 	}
@@ -831,12 +833,14 @@ func TestBranchMergeToMainCommandFailsOnDirtyPreflight(t *testing.T) {
 	}
 }
 
-func TestBranchMergeToMainCommandUsesEnvIssueIDWhenArgumentMissing(t *testing.T) {
+func TestBranchMergeToBaseCommandUsesEnvIssueIDWhenArgumentMissing(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-999")
 
 	commands := make([]string, 0, 8)
+	cfg := config.DefaultConfig()
+	cfg.Git.BaseBranch = "trunk"
 	deps := &Dependencies{
-		Config: config.DefaultConfig(),
+		Config: cfg,
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
@@ -858,7 +862,7 @@ func TestBranchMergeToMainCommandUsesEnvIssueIDWhenArgumentMissing(t *testing.T)
 				case daemonclient.CommandGitFetch:
 					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: ".", Remote: "origin"}), nil
 				case daemonclient.CommandGitCheckout:
-					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: ".", Branch: "main"}), nil
+					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: ".", Branch: "trunk"}), nil
 				case daemonclient.CommandGitMerge:
 					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
 						Worktree: ".",
@@ -877,8 +881,8 @@ func TestBranchMergeToMainCommandUsesEnvIssueIDWhenArgumentMissing(t *testing.T)
 		RepoDir:   t.TempDir(),
 	}
 
-	if err := BranchMergeToMainCommand(deps, ""); err != nil {
-		t.Fatalf("BranchMergeToMainCommand error = %v", err)
+	if err := BranchMergeToBaseCommand(deps, ""); err != nil {
+		t.Fatalf("BranchMergeToBaseCommand error = %v", err)
 	}
 
 	foundMerge := false
@@ -893,11 +897,13 @@ func TestBranchMergeToMainCommandUsesEnvIssueIDWhenArgumentMissing(t *testing.T)
 	}
 }
 
-func TestBranchMergeToMainCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(t *testing.T) {
+func TestBranchMergeToBaseCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(t *testing.T) {
 	commands := make([]string, 0, 8)
-	mainWorktree := t.TempDir()
+	baseWorktree := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Git.BaseBranch = "trunk"
 	deps := &Dependencies{
-		Config: config.DefaultConfig(),
+		Config: cfg,
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
@@ -917,7 +923,7 @@ func TestBranchMergeToMainCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal git status body: %v", err)
 					}
-					if body.Worktree == mainWorktree {
+					if body.Worktree == baseWorktree {
 						return responseWithJSON(req, map[string]any{
 							"status": gitservice.GitStatus{
 								HasChanges: true,
@@ -929,12 +935,12 @@ func TestBranchMergeToMainCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(
 						"status": gitservice.GitStatus{HasChanges: false},
 					}), nil
 				case daemonclient.CommandGitFetch:
-					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: mainWorktree, Remote: "origin"}), nil
+					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: baseWorktree, Remote: "origin"}), nil
 				case daemonclient.CommandGitCheckout:
-					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: mainWorktree, Branch: "main"}), nil
+					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: baseWorktree, Branch: "trunk"}), nil
 				case daemonclient.CommandGitMerge:
 					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
-						Worktree: mainWorktree,
+						Worktree: baseWorktree,
 						Branch:   "riordan/bhv/fix-mtm-timeout",
 						Result: gitservice.MergeResult{
 							Success: true,
@@ -947,10 +953,10 @@ func TestBranchMergeToMainCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(
 		}),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
-		RepoDir:   mainWorktree,
+		RepoDir:   baseWorktree,
 	}
 
-	err := BranchMergeToMainCommand(deps, "bhv")
+	err := BranchMergeToBaseCommand(deps, "bhv")
 	if err == nil || !strings.Contains(err.Error(), "merge preflight failed") {
 		t.Fatalf("err = %v, want preflight failure", err)
 	}

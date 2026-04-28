@@ -2170,9 +2170,9 @@ func TestHandleMergeResultPendingOperationShowsInfoToast(t *testing.T) {
 	}
 }
 
-func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T) {
+func TestHandleMergeTargetSelectionToBaseUsesWorktreeLookupFallback(t *testing.T) {
 	sourceID := "az-source"
-	mainWorktree := ""
+	baseWorktree := ""
 
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -2236,7 +2236,7 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal fetch request: %v", err)
 				}
-				if body.Worktree != mainWorktree || body.Remote != "origin" {
+				if body.Worktree != baseWorktree || body.Remote != "origin" {
 					t.Fatalf("fetch body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitCommandResponse{Worktree: body.Worktree, Remote: body.Remote})
@@ -2255,7 +2255,7 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal checkout request: %v", err)
 				}
-				if body.Worktree != mainWorktree || body.Branch != "main" {
+				if body.Worktree != baseWorktree || body.Branch != "trunk" {
 					t.Fatalf("checkout body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitCommandResponse{Worktree: body.Worktree, Branch: body.Branch})
@@ -2274,7 +2274,7 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal merge request: %v", err)
 				}
-				if body.Worktree != mainWorktree || body.Branch != "az/az-source" {
+				if body.Worktree != baseWorktree || body.Branch != "az/az-source" {
 					t.Fatalf("merge body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
@@ -2296,8 +2296,8 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 				respBody, err := json.Marshal(daemonclient.GitMergePreflightResponse{
 					SourceID:       sourceID,
 					SourceWorktree: "/tmp/az-source",
-					TargetID:       "main",
-					TargetWorktree: mainWorktree,
+					TargetID:       mergeBaseTargetID,
+					TargetWorktree: baseWorktree,
 					Clean:          true,
 				})
 				if err != nil {
@@ -2318,12 +2318,13 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 	}
 
 	m := newTestModel()
-	mainWorktree = m.activeProjectPath()
+	m.config.Git.BaseBranch = "trunk"
+	baseWorktree = m.activeProjectPath()
 	m.daemonClient = daemonclient.New(transport)
 
 	updated, cmd := m.handleMergeTargetSelection(overlay.MergeTargetSelectedMsg{
 		SourceID: sourceID,
-		TargetID: "main",
+		TargetID: mergeBaseTargetID,
 	})
 	if _, ok := updated.(Model); !ok {
 		t.Fatalf("updated model type = %T, want Model", updated)
@@ -2558,7 +2559,7 @@ func TestFollowOnMergeSelectionTopLevelFallsBackToMergeMain(t *testing.T) {
 					Body:            respBody,
 				}, nil
 			case daemonclient.CommandGitCheckout:
-				respBody, err := json.Marshal(daemonclient.GitCommandResponse{Worktree: ".", Branch: "main"})
+				respBody, err := json.Marshal(daemonclient.GitCommandResponse{Worktree: ".", Branch: "trunk"})
 				if err != nil {
 					t.Fatalf("marshal checkout response: %v", err)
 				}
@@ -2573,7 +2574,7 @@ func TestFollowOnMergeSelectionTopLevelFallsBackToMergeMain(t *testing.T) {
 				respBody, err := json.Marshal(daemonclient.GitMergePreflightResponse{
 					SourceID:       issueID,
 					SourceWorktree: "/tmp/az-top",
-					TargetID:       "main",
+					TargetID:       mergeBaseTargetID,
 					TargetWorktree: ".",
 					Clean:          true,
 				})
@@ -2629,19 +2630,19 @@ func TestFollowOnMergeSelectionTopLevelFallsBackToMergeMain(t *testing.T) {
 		t.Fatalf("updated model type = %T, want Model", updated)
 	}
 	if cmd == nil {
-		t.Fatal("expected merge-to-main command for top-level issue")
+		t.Fatal("expected merge-to-base command for top-level issue")
 	}
 	msg := cmd()
 	mergeMsg, ok := msg.(mergeResultMsg)
 	if !ok {
 		t.Fatalf("message type = %T, want mergeResultMsg", msg)
 	}
-	if mergeMsg.targetID != "main" || mergeMsg.err != nil {
+	if mergeMsg.targetID != mergeBaseTargetID || mergeMsg.err != nil {
 		t.Fatalf("merge message = %+v", mergeMsg)
 	}
 }
 
-func TestMergeToMainPreflightBlocksDirtySourceOrTarget(t *testing.T) {
+func TestMergeToBasePreflightBlocksDirtySourceOrTarget(t *testing.T) {
 	sourceID := "az-source"
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -2717,13 +2718,13 @@ func TestMergeToMainPreflightBlocksDirtySourceOrTarget(t *testing.T) {
 
 	m := newTestModel()
 	m.daemonClient = daemonclient.New(transport)
-	msg := m.mergeToMainCmd("/tmp/az-source", sourceID, true)()
+	msg := m.mergeToBaseCmd("/tmp/az-source", sourceID, true)()
 
 	preflight, ok := msg.(mergePreflightFailureMsg)
 	if !ok {
 		t.Fatalf("msg type = %T, want mergePreflightFailureMsg", msg)
 	}
-	if preflight.sourceID != sourceID || preflight.targetID != "main" {
+	if preflight.sourceID != sourceID || preflight.targetID != mergeBaseTargetID {
 		t.Fatalf("preflight msg = %+v", preflight)
 	}
 	if preflight.targetWorktree != m.activeProjectPath() {
@@ -2768,15 +2769,15 @@ func TestCheckMergePreflightUsesLiveGitStatusWhenRefreshFlagFalse(t *testing.T) 
 	m.daemonClient = daemonclient.New(transport)
 	m.tasks = []domain.Task{
 		{ID: "az-source", HasUncommittedChanges: true},
-		{ID: "main", HasUncommittedChanges: true},
+		{ID: mergeBaseTargetID, HasUncommittedChanges: true},
 	}
 
 	preflight := m.checkMergePreflight(
 		context.Background(),
 		"az-source",
-		"main",
+		mergeBaseTargetID,
 		"/tmp/az-source",
-		"/tmp/main",
+		"/tmp/base",
 		"",
 		"",
 		false, // legacy flag value; should still do live status checks
@@ -2821,8 +2822,8 @@ func TestCheckMergePreflightDoesNotBlockUntrackedOnlyStatus(t *testing.T) {
 				respBody, err := json.Marshal(daemonclient.GitMergePreflightResponse{
 					SourceID:       "az-source",
 					SourceWorktree: "/tmp/az-source",
-					TargetID:       "main",
-					TargetWorktree: "/tmp/main",
+					TargetID:       mergeBaseTargetID,
+					TargetWorktree: "/tmp/base",
 					Clean:          true,
 				})
 				if err != nil {
@@ -2848,10 +2849,10 @@ func TestCheckMergePreflightDoesNotBlockUntrackedOnlyStatus(t *testing.T) {
 	preflight := m.checkMergePreflight(
 		context.Background(),
 		"az-source",
-		"main",
+		mergeBaseTargetID,
 		"/tmp/az-source",
-		"/tmp/main",
-		"main",
+		"/tmp/base",
+		"trunk",
 		"az/source",
 		false,
 	)
@@ -2935,7 +2936,7 @@ func TestCheckMergePreflightReconcilesRuntimeWhenRefreshFlagTrue(t *testing.T) {
 	}
 }
 
-func TestMergeToMainPreflightBlocksPredictedConflicts(t *testing.T) {
+func TestMergeToBasePreflightBlocksPredictedConflicts(t *testing.T) {
 	sourceID := "az-source"
 	targetWorktree := ""
 	transport := &recordingDaemonTransport{
@@ -3003,16 +3004,16 @@ func TestMergeToMainPreflightBlocksPredictedConflicts(t *testing.T) {
 				if body.SourceID != sourceID || body.SourceWorktree != "/tmp/az-source" {
 					t.Fatalf("preflight source = %+v", body)
 				}
-				if body.TargetID != "main" || body.TargetWorktree != targetWorktree {
+				if body.TargetID != mergeBaseTargetID || body.TargetWorktree != targetWorktree {
 					t.Fatalf("preflight target = %+v, want target worktree %q", body, targetWorktree)
 				}
-				if body.TargetRef != "main" || body.SourceBranch != "az/az-source" {
+				if body.TargetRef != "trunk" || body.SourceBranch != "az/az-source" {
 					t.Fatalf("preflight refs = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitMergePreflightResponse{
 					SourceID:       sourceID,
 					SourceWorktree: "/tmp/az-source",
-					TargetID:       "main",
+					TargetID:       mergeBaseTargetID,
 					TargetWorktree: targetWorktree,
 					Clean:          false,
 					ConflictFiles:  []string{"cmd/az/main.go"},
@@ -3035,9 +3036,10 @@ func TestMergeToMainPreflightBlocksPredictedConflicts(t *testing.T) {
 	}
 
 	m := newTestModel()
+	m.config.Git.BaseBranch = "trunk"
 	targetWorktree = m.activeProjectPath()
 	m.daemonClient = daemonclient.New(transport)
-	msg := m.mergeToMainCmd("/tmp/az-source", sourceID, true)()
+	msg := m.mergeToBaseCmd("/tmp/az-source", sourceID, true)()
 
 	preflight, ok := msg.(mergePreflightFailureMsg)
 	if !ok {

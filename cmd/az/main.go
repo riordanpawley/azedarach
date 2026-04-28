@@ -939,7 +939,7 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 
 func runBranchCommand(cfg *config.Config, command string, args []string) error {
 	switch command {
-	case "merge", "merge-to-main":
+	case "merge", "merge-to-base":
 		if len(args) > 1 {
 			return fmt.Errorf("usage: az branch merge [issue-id]")
 		}
@@ -948,7 +948,7 @@ func runBranchCommand(cfg *config.Config, command string, args []string) error {
 			issueID = args[0]
 		}
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
-			return cli.BranchMergeToMainCommand(deps, issueID)
+			return cli.BranchMergeToBaseCommand(deps, issueID)
 		})
 	default:
 		if command == "m2m" {
