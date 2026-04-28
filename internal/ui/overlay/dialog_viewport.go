@@ -21,14 +21,19 @@ func (v dialogViewportState) Clamp(desiredWidth, desiredHeight int) (int, int) {
 }
 
 func (v dialogViewportState) ClampResponsive(minWidth, minHeight int) (int, int) {
-	if v.width <= 0 || v.height <= 0 {
-		return v.Clamp(minWidth, minHeight)
+	return ClampResponsiveDialogSize(minWidth, minHeight, v.width, v.height)
+}
+
+// ClampResponsiveDialogSize applies the standard responsive overlay sizing policy.
+func ClampResponsiveDialogSize(minWidth, minHeight, viewportWidth, viewportHeight int) (int, int) {
+	if viewportWidth <= 0 || viewportHeight <= 0 {
+		return clampDialogSize(minWidth, minHeight, viewportWidth, viewportHeight)
 	}
 
-	targetWidth := (v.width * 8) / 10
-	targetHeight := (v.height * 8) / 10
+	targetWidth := (viewportWidth * 8) / 10
+	targetHeight := (viewportHeight * 8) / 10
 	if targetWidth < minWidth || targetHeight < minHeight {
-		return v.Clamp(v.width, v.height)
+		return clampDialogSize(viewportWidth, viewportHeight, viewportWidth, viewportHeight)
 	}
-	return v.Clamp(targetWidth, targetHeight)
+	return clampDialogSize(targetWidth, targetHeight, viewportWidth, viewportHeight)
 }

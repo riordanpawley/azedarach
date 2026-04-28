@@ -145,6 +145,66 @@ func TestDiffViewerAllDiffPopup(t *testing.T) {
 	}
 }
 
+func TestDiffViewerDirtyFilesTab(t *testing.T) {
+	client := &fakeDiffClient{
+		status: &gitservice.GitStatus{
+			Modified:  []string{"dirty.go"},
+			Untracked: []string{"new.go"},
+		},
+		changedFiles: []gitservice.ChangedFile{
+			{Path: "committed.go", Status: gitservice.DiffFileModified},
+		},
+	}
+
+	var gotCommand string
+	viewer := NewDiffViewer("/tmp/az-1", "main", client, func(_ context.Context, _ string, command string) error {
+		gotCommand = command
+		return nil
+	}).WithIssueID("az-1")
+	msg := viewer.Init()()
+	updated, _ := viewer.Update(msg)
+	viewer = updated.(*DiffViewer)
+
+	if title := viewer.Title(); !strings.Contains(title, "az-1") || !strings.Contains(title, "1 committed, 2 dirty") {
+		t.Fatalf("title=%q, want issue and file counts", title)
+	}
+	if view := viewer.View(); !strings.Contains(view, "Committed diff (1)") || !strings.Contains(view, "Dirty files (2)") || !strings.Contains(view, "committed.go") {
+		t.Fatalf("committed tab view=%q", view)
+	}
+
+	updated, _ = viewer.Update(tea.KeyMsg{Type: tea.KeyTab})
+	viewer = updated.(*DiffViewer)
+	if view := viewer.View(); !strings.Contains(view, "dirty.go") || !strings.Contains(view, "new.go") || strings.Contains(view, "committed.go") {
+		t.Fatalf("dirty tab view=%q", view)
+	}
+
+	updated, cmd := viewer.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	viewer = updated.(*DiffViewer)
+	if cmd == nil {
+		t.Fatal("expected dirty file popup command")
+	}
+	_ = cmd()
+	if !strings.Contains(gotCommand, "git diff HEAD -- 'dirty.go'") {
+		t.Fatalf("dirty popup command=%q", gotCommand)
+	}
+}
+
+func TestDiffViewerSizeResponsive(t *testing.T) {
+	viewer := NewDiffViewer("/tmp/az-1", "main", &fakeDiffClient{}, nil)
+
+	updated, _ := viewer.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	viewer = updated.(*DiffViewer)
+	if width, height := viewer.Size(); width != 118 || height != 32 {
+		t.Fatalf("large size = %dx%d, want 118x32", width, height)
+	}
+
+	updated, _ = viewer.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	viewer = updated.(*DiffViewer)
+	if width, height := viewer.Size(); width != 70 || height != 20 {
+		t.Fatalf("narrow size = %dx%d, want 70x20", width, height)
+	}
+}
+
 func TestDiffViewerSearchFiltersAndKeepsSelectionActions(t *testing.T) {
 	client := &fakeDiffClient{
 		changedFiles: []gitservice.ChangedFile{
