@@ -375,7 +375,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			popupCommand := fmt.Sprintf("cd %s && %s", shellSingleQuote(diffWorktree), command)
 			return m.tmuxClient.DisplayPopup(ctx, title, "95%", "95%", popupCommand)
 		}
-		viewer := diff.NewDiffViewer(diffWorktree, m.config.Git.BaseBranch, m.gitClient, openPopup)
+		viewer := diff.NewDiffViewer(diffWorktree, m.config.Git.BaseBranch, m.gitClient, openPopup).WithIssueID(task.ID.String())
 		cmd := m.openOverlay(viewer)
 		return m, cmd
 	case "w":
