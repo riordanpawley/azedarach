@@ -3613,6 +3613,36 @@ func shiftedTaskStatus(current domain.Status, delta int) (domain.Status, bool) {
 	return statusOrder[newIdx], true
 }
 
+func exactTaskStatusForKey(key string) (domain.Status, bool) {
+	switch key {
+	case "1":
+		return domain.StatusOpen, true
+	case "2":
+		return domain.StatusInProgress, true
+	case "3":
+		return domain.StatusBlocked, true
+	case "4":
+		return domain.StatusDone, true
+	default:
+		return "", false
+	}
+}
+
+func statusDisplayName(status domain.Status) string {
+	switch status {
+	case domain.StatusOpen:
+		return "Open"
+	case domain.StatusInProgress:
+		return "In Progress"
+	case domain.StatusBlocked:
+		return "Blocked"
+	case domain.StatusDone:
+		return "Done"
+	default:
+		return status.String()
+	}
+}
+
 func (m *Model) applyOptimisticTaskStatus(taskID string, status domain.Status) {
 	for i := range m.tasks {
 		if m.tasks[i].ID.String() == taskID {

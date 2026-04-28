@@ -396,6 +396,51 @@ func TestTaskStatusMovePendingKeepsOptimisticOverlayAcrossHydration(t *testing.T
 	}
 }
 
+func TestTaskStatusExactKeyUsesDaemonClient(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskUpdateStatus {
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			var body daemonclient.TaskStatusRequest
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal status request: %v", err)
+			}
+			if body.TaskID != "az-1" || body.Status != domain.StatusBlocked {
+				t.Fatalf("status body = %+v, want az-1 -> blocked", body)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{ID: "az-1", Status: domain.StatusOpen}}
+	m.nav.SelectTask("az-1", 0)
+
+	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "3"})
+	if cmd == nil {
+		t.Fatal("expected exact status command")
+	}
+	optimistic := updated.(Model)
+	if optimistic.tasks[0].Status != domain.StatusBlocked {
+		t.Fatalf("optimistic status = %s, want %s", optimistic.tasks[0].Status, domain.StatusBlocked)
+	}
+
+	result := cmd()
+	status, ok := result.(taskStatusResultMsg)
+	if !ok {
+		t.Fatalf("result = %T, want taskStatusResultMsg", result)
+	}
+	if status.previousStatus != domain.StatusOpen || status.newStatus != domain.StatusBlocked || status.err != nil {
+		t.Fatalf("status result = %#v", status)
+	}
+}
+
 func TestTaskStatusMoveFailureRollsBackOptimisticState(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
