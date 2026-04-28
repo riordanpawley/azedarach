@@ -18,6 +18,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	clitext "github.com/riordanpawley/azedarach/internal/cli/text"
 	autoclient "github.com/riordanpawley/azedarach/internal/client"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
@@ -4697,7 +4698,7 @@ func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) er
 	ack, err := orch.EnsureAttached(ctx, protocol.Hello{
 		ProtocolVersion: protocol.CurrentVersion,
 		ClientName:      clientName,
-		ClientVersion:   "dev",
+		ClientVersion:   buildinfo.VersionString(),
 		Capabilities:    []string{"snapshot", "subscribe"},
 	})
 	if err != nil {

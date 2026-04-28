@@ -15,6 +15,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
 
+const testDaemonVersion = "daemon-test"
+
 type scenarioDaemon struct {
 	harness     *Harness
 	startCalls  atomic.Int32
@@ -45,7 +47,7 @@ func (s *scenarioDaemon) Handshake(ctx context.Context, hello protocol.Hello) (p
 		return protocol.HelloAck{}, errors.New("daemon unavailable")
 	}
 
-	ack := protocol.NegotiateHello(hello, "daemon-test")
+	ack := protocol.NegotiateHello(hello, testDaemonVersion)
 	s.handshakeOK.Add(1)
 	if err := s.harness.appendEvent("daemon.handshake.compatible", map[string]any{
 		"client_name":      hello.ClientName,
@@ -168,13 +170,13 @@ func TestStartupReconnectScenarioAC(t *testing.T) {
 	hello1 := protocol.Hello{
 		ProtocolVersion: protocol.CurrentVersion,
 		ClientName:      "client-1",
-		ClientVersion:   "dev",
+		ClientVersion:   testDaemonVersion,
 		Capabilities:    []string{"attach", "snapshot"},
 	}
 	hello2 := protocol.Hello{
 		ProtocolVersion: protocol.CurrentVersion,
 		ClientName:      "client-2",
-		ClientVersion:   "dev",
+		ClientVersion:   testDaemonVersion,
 		Capabilities:    []string{"attach", "snapshot"},
 	}
 
@@ -238,7 +240,7 @@ func TestStartupReconnectScenarioAC(t *testing.T) {
 	ack, err := scenario.attachClient(ctx, reconnectOrch, protocol.Hello{
 		ProtocolVersion: protocol.CurrentVersion,
 		ClientName:      "client-reconnect",
-		ClientVersion:   "dev",
+		ClientVersion:   testDaemonVersion,
 		Capabilities:    []string{"attach", "snapshot"},
 	})
 	if err != nil {
@@ -313,7 +315,7 @@ func TestStartupBootstrapFailureDiagnosticsMatrix(t *testing.T) {
 	_, err := orch.EnsureAttached(ctx, protocol.Hello{
 		ProtocolVersion: protocol.CurrentVersion,
 		ClientName:      "client-bootstrap-failure",
-		ClientVersion:   "dev",
+		ClientVersion:   testDaemonVersion,
 		Capabilities:    []string{"attach", "snapshot"},
 	})
 	if err == nil {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -211,7 +212,7 @@ func (c *Client) ListTasksSnapshotWithMode(ctx context.Context, mode ReadWaitMod
 		ack, diag := c.Handshake(waitCtx, protocol.Hello{
 			ProtocolVersion: protocol.CurrentVersion,
 			ClientName:      "client",
-			ClientVersion:   "dev",
+			ClientVersion:   buildinfo.VersionString(),
 			Capabilities:    []string{"snapshot", "subscribe"},
 		})
 		if diag != nil {

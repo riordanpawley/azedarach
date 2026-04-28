@@ -212,6 +212,67 @@ func TestEnsureAttachedRetryAfterRestart(t *testing.T) {
 	}
 }
 
+func TestEnsureAttachedReplacesAcceptedVersionMismatch(t *testing.T) {
+	var replaced atomic.Bool
+	h := &fakeHandshaker{
+		fn: func() (protocol.HelloAck, error) {
+			if replaced.Load() {
+				return protocol.HelloAck{Accepted: true, DaemonVersion: "dev-new"}, nil
+			}
+			return protocol.HelloAck{Accepted: true, DaemonVersion: "dev-old"}, nil
+		},
+	}
+	s := &fakeStarter{
+		replace: func(context.Context) error {
+			replaced.Store(true)
+			return nil
+		},
+	}
+	o := NewAutostartOrchestrator(h, s)
+	o.sleepFn = func(_ time.Duration) {}
+	o.backoffFn = func(_ int) time.Duration { return 0 }
+
+	ack, err := o.EnsureAttached(context.Background(), protocol.Hello{
+		ProtocolVersion: protocol.CurrentVersion,
+		ClientName:      "cli",
+		ClientVersion:   "dev-new",
+	})
+	if err != nil {
+		t.Fatalf("EnsureAttached err: %v", err)
+	}
+	if !ack.Accepted || ack.DaemonVersion != "dev-new" {
+		t.Fatalf("ack = %+v, want accepted new daemon", ack)
+	}
+	if got := s.replaceCalls.Load(); got != 1 {
+		t.Fatalf("replace calls = %d, want 1", got)
+	}
+}
+
+func TestEnsureAttachedAcceptsEmptyDaemonVersion(t *testing.T) {
+	h := &fakeHandshaker{
+		fn: func() (protocol.HelloAck, error) {
+			return protocol.HelloAck{Accepted: true}, nil
+		},
+	}
+	s := &fakeStarter{}
+	o := NewAutostartOrchestrator(h, s)
+
+	ack, err := o.EnsureAttached(context.Background(), protocol.Hello{
+		ProtocolVersion: protocol.CurrentVersion,
+		ClientName:      "cli",
+		ClientVersion:   "dev-new",
+	})
+	if err != nil {
+		t.Fatalf("EnsureAttached err: %v", err)
+	}
+	if !ack.Accepted {
+		t.Fatalf("ack.Accepted = false, want true")
+	}
+	if got := s.replaceCalls.Load(); got != 0 {
+		t.Fatalf("replace calls = %d, want 0", got)
+	}
+}
+
 func TestEnsureAttachedReplacementFailureTypedError(t *testing.T) {
 	h := &fakeHandshaker{
 		fn: func() (protocol.HelloAck, error) {

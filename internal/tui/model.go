@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	autoclient "github.com/riordanpawley/azedarach/internal/client"
 	"github.com/riordanpawley/azedarach/internal/client/appdeps"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
@@ -1406,7 +1407,7 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		ack, err := orch.EnsureAttached(ctx, protocol.Hello{
 			ProtocolVersion: protocol.CurrentVersion,
 			ClientName:      "tui",
-			ClientVersion:   "dev",
+			ClientVersion:   buildinfo.VersionString(),
 			Capabilities:    []string{"snapshot", "subscribe"},
 		})
 		if err != nil {

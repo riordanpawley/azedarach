@@ -264,6 +264,103 @@ func TestLauncherStart_SpawnsWhenLockOwnerAliveButSocketUnready(t *testing.T) {
 	}
 }
 
+func TestLauncherReplaceTerminatesBeforeStart(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	tracker := &trackingWriteCloser{}
+
+	launcher := NewLauncher(repoDir, socketPath)
+	launcher.BinPath = "true"
+	launcher.sleepFn = func(time.Duration) {}
+
+	terminated := false
+	launcher.terminateLockOwner = func(lockPath string) error {
+		terminated = true
+		return os.Remove(lockPath)
+	}
+
+	readyCalls := 0
+	launcher.waitForReady = func(context.Context, string) error {
+		readyCalls++
+		if !terminated {
+			return nil
+		}
+		if readyCalls <= 2 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return tracker, nil }
+
+	lockRecordBytes, err := json.Marshal(map[string]any{
+		"pid":        os.Getpid(),
+		"created_at": time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("Marshal(lockRecord): %v", err)
+	}
+	if err := os.WriteFile(launcher.LockPath, lockRecordBytes, 0o644); err != nil {
+		t.Fatalf("WriteFile(lock): %v", err)
+	}
+
+	if err := launcher.Replace(context.Background()); err != nil {
+		t.Fatalf("Replace() error = %v", err)
+	}
+	if !terminated {
+		t.Fatal("Replace() did not terminate lock owner before Start")
+	}
+	if !tracker.closed.Load() {
+		t.Fatal("daemon log file was not closed after replacement Start() returned")
+	}
+}
+
+func TestLauncherReplaceGracefullyStopsSocketBeforeStart(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	tracker := &trackingWriteCloser{}
+
+	launcher := NewLauncher(repoDir, socketPath)
+	launcher.BinPath = "true"
+	launcher.sleepFn = func(time.Duration) {}
+
+	socketUp := true
+	spawned := false
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		socketUp = false
+		return nil
+	}
+	launcher.terminateLockOwner = func(string) error {
+		t.Fatal("Replace() should not terminate lock owner after graceful socket shutdown")
+		return nil
+	}
+
+	readyCalls := 0
+	launcher.waitForReady = func(context.Context, string) error {
+		readyCalls++
+		if socketUp || spawned {
+			return nil
+		}
+		return context.DeadlineExceeded
+	}
+	launcher.openLogFile = func(string) (io.WriteCloser, error) {
+		spawned = true
+		return tracker, nil
+	}
+
+	if err := launcher.Replace(context.Background()); err != nil {
+		t.Fatalf("Replace() error = %v", err)
+	}
+	if socketUp {
+		t.Fatal("Replace() did not request socket shutdown")
+	}
+	if !spawned {
+		t.Fatal("Replace() did not start a replacement daemon")
+	}
+	if !tracker.closed.Load() {
+		t.Fatal("daemon log file was not closed after replacement Start() returned")
+	}
+}
+
 func TestLauncherStart_ErrorsWhenLockRecoveryFails(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")

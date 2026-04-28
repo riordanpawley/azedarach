@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
@@ -27,8 +28,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/pr"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
-
-const daemonVersion = "dev"
 
 const (
 	defaultRuntimeReconcileQueueWorkers = 2
@@ -430,7 +429,7 @@ func (d *Daemon) validateCommandPolicyConfiguration() error {
 }
 
 func (d *Daemon) handshake(_ context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
-	return protocol.NegotiateHello(hello, daemonVersion), nil
+	return protocol.NegotiateHello(hello, buildinfo.VersionString()), nil
 }
 
 func (d *Daemon) subscribe(_ context.Context, projectID string, fromRevision uint64) (<-chan protocol.EventEnvelope, func(), error) {
