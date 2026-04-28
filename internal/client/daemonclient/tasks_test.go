@@ -364,13 +364,13 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
-			typedParentID := naming.IssueID(parentID)
-			id, err := client.CreateTask(context.Background(), TaskCreateParams{
-				Title:    "Task 2",
-				Type:     domain.TypeTask,
-				Priority: domain.P1,
-				ParentID: &typedParentID,
-			})
+		typedParentID := naming.IssueID(parentID)
+		id, err := client.CreateTask(context.Background(), TaskCreateParams{
+			Title:    "Task 2",
+			Type:     domain.TypeTask,
+			Priority: domain.P1,
+			ParentID: &typedParentID,
+		})
 		if err != nil {
 			t.Fatalf("CreateTask error: %v", err)
 		}
@@ -460,7 +460,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal request: %v", err)
 				}
-				if body.TaskID != "az-4" || body.Title != "Updated" {
+				if body.TaskID != "az-4" || body.Title != "Updated" || body.Notes == nil || *body.Notes != "Replacement notes" {
 					t.Fatalf("request body = %+v", body)
 				}
 				return protocol.ResponseEnvelope{
@@ -473,8 +473,10 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
+		notes := "Replacement notes"
 		if err := client.UpdateTaskDetails(context.Background(), "az-4", TaskUpdateParams{
 			Title:    "Updated",
+			Notes:    &notes,
 			Type:     domain.TypeBug,
 			Priority: domain.P0,
 		}); err != nil {
@@ -580,20 +582,20 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 			},
 		}
 
-			client := New(transport).WithProjectID(wantProjectID)
-			if err := client.AddTaskDependency(context.Background(), TaskDependencyParams{
-				TaskID:      naming.IssueID("az-6"),
-				DependsOnID: naming.IssueID("az-1"),
-				Type:        "blocks",
-			}); err != nil {
-				t.Fatalf("AddTaskDependency error: %v", err)
-			}
-			if err := client.RemoveTaskDependency(context.Background(), TaskDependencyRemoveParams{
-				TaskID:      naming.IssueID("az-6"),
-				DependsOnID: naming.IssueID("az-1"),
-				Type:        "blocks",
-				Confirm:     true,
-			}); err != nil {
+		client := New(transport).WithProjectID(wantProjectID)
+		if err := client.AddTaskDependency(context.Background(), TaskDependencyParams{
+			TaskID:      naming.IssueID("az-6"),
+			DependsOnID: naming.IssueID("az-1"),
+			Type:        "blocks",
+		}); err != nil {
+			t.Fatalf("AddTaskDependency error: %v", err)
+		}
+		if err := client.RemoveTaskDependency(context.Background(), TaskDependencyRemoveParams{
+			TaskID:      naming.IssueID("az-6"),
+			DependsOnID: naming.IssueID("az-1"),
+			Type:        "blocks",
+			Confirm:     true,
+		}); err != nil {
 			t.Fatalf("RemoveTaskDependency error: %v", err)
 		}
 		if len(commands) != 2 || commands[0] != CommandTaskDependencyAdd || commands[1] != CommandTaskDependencyRemove {

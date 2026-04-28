@@ -26,11 +26,12 @@ type applyTaskCreateBody struct {
 }
 
 type applyTaskUpdateBody struct {
-	TaskID      string `json:"task_id"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Type        string `json:"type"`
-	Priority    string `json:"priority"`
+	TaskID      string  `json:"task_id"`
+	Title       string  `json:"title"`
+	Description string  `json:"description"`
+	Notes       *string `json:"notes,omitempty"`
+	Type        string  `json:"type"`
+	Priority    string  `json:"priority"`
 }
 
 type applyTaskStatusBody struct {

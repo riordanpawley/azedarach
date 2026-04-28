@@ -306,6 +306,7 @@ func (h *ApplyHandler) executeOperation(ctx context.Context, index int, op proto
 		task, err := h.service.UpdateDetails(ctx, payload.TaskID, issues.UpdateTaskParams{
 			Title:       payload.Title,
 			Description: payload.Description,
+			Notes:       payload.Notes,
 			Type:        taskType,
 			Priority:    priority,
 		})

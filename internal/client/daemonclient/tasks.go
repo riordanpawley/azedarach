@@ -46,6 +46,7 @@ type TaskCreateParams struct {
 type TaskUpdateParams struct {
 	Title           string          `json:"title"`
 	Description     string          `json:"description"`
+	Notes           *string         `json:"notes,omitempty"`
 	Type            domain.TaskType `json:"type"`
 	Priority        domain.Priority `json:"priority"`
 	Implementations []string        `json:"implementations"`

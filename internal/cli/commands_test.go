@@ -2707,6 +2707,28 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 			},
 		},
 		{
+			name: "replace notes",
+			args: []string{"--notes", "Replacement", "az-1"},
+			want: func() IssueUpdateOptions {
+				notes := "Replacement"
+				return IssueUpdateOptions{
+					IssueID: "az-1",
+					Notes:   &notes,
+				}
+			}(),
+		},
+		{
+			name: "clear notes",
+			args: []string{"--notes", "", "az-1"},
+			want: func() IssueUpdateOptions {
+				notes := ""
+				return IssueUpdateOptions{
+					IssueID: "az-1",
+					Notes:   &notes,
+				}
+			}(),
+		},
+		{
 			name:        "forbid impl",
 			args:        []string{"--impl", "go-bubbletea", "--title", "Renamed", "az-1"},
 			errContains: "--impl is not supported for issue update",
@@ -4681,6 +4703,83 @@ func TestIssueUpdateCommandUsesDaemonTaskUpdateCommand(t *testing.T) {
 	})
 	if gotUpdateReq.Command != daemonclient.CommandTaskUpdate {
 		t.Fatalf("update command = %q, want %q", gotUpdateReq.Command, daemonclient.CommandTaskUpdate)
+	}
+	if !strings.Contains(updateOut, "Updated issue: az-1") {
+		t.Fatalf("update output = %q", updateOut)
+	}
+}
+
+func TestIssueUpdateCommandReplacesNotesWhenRequested(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	var gotUpdateReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := marshalTaskListBody([]domain.Task{
+						{
+							ID:          "az-1",
+							Title:       "Old",
+							Description: "OldDesc",
+							Notes:       "Existing notes",
+							Type:        domain.TypeTask,
+							Priority:    domain.P2,
+							Status:      domain.StatusOpen,
+							CreatedAt:   now,
+							UpdatedAt:   now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskUpdate:
+					gotUpdateReq = req
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	notes := "Replacement notes"
+	updateOut := captureStdout(t, func() error {
+		return IssueUpdateCommand(deps, IssueUpdateOptions{
+			IssueID: "az-1",
+			Notes:   &notes,
+		})
+	})
+	if gotUpdateReq.Command != daemonclient.CommandTaskUpdate {
+		t.Fatalf("update command = %q, want %q", gotUpdateReq.Command, daemonclient.CommandTaskUpdate)
+	}
+	var updateBody struct {
+		TaskID string `json:"task_id"`
+		daemonclient.TaskUpdateParams
+	}
+	if err := json.Unmarshal(gotUpdateReq.Body, &updateBody); err != nil {
+		t.Fatalf("unmarshal update body: %v", err)
+	}
+	if updateBody.TaskID != "az-1" || updateBody.Notes == nil || *updateBody.Notes != "Replacement notes" {
+		t.Fatalf("update body = %+v", updateBody)
 	}
 	if !strings.Contains(updateOut, "Updated issue: az-1") {
 		t.Fatalf("update output = %q", updateOut)
