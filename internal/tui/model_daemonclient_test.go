@@ -5768,6 +5768,64 @@ func TestPerformCleanupOrphanedWorktreesUsesExtendedDeadline(t *testing.T) {
 	}
 }
 
+func TestCleanupWorktreeUsesExtendedDaemonDeadlines(t *testing.T) {
+	transport := &recordingDaemonTransport{}
+	m := newDaemonTestModel(transport)
+
+	msg := m.cleanupWorktreeCmd("az-1", false, false)()
+	result, ok := msg.(worktreeCleanupResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want worktreeCleanupResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("cleanup result err = %v", result.err)
+	}
+	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandSessionStop || got[1] != daemonclient.CommandWorktreeRemove {
+		t.Fatalf("requests = %v, want session.stop then worktree.remove", got)
+	}
+	if got := len(transport.commandBudgets); got != 2 {
+		t.Fatalf("command deadline count = %d, want 2", got)
+	}
+	for i, budget := range transport.commandBudgets {
+		if budget < worktreeCleanupCommandTimeout-10*time.Second {
+			t.Fatalf("command budget[%d] = %s, want near %s", i, budget, worktreeCleanupCommandTimeout)
+		}
+	}
+}
+
+func TestBulkCleanupWorktreeUsesPerStepExtendedDaemonDeadlines(t *testing.T) {
+	transport := &recordingDaemonTransport{}
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{ID: "az-1", Status: domain.StatusOpen}}
+
+	msg := m.bulkCleanupWorktreeCmd([]string{"az-1"}, true)()
+	result, ok := msg.(bulkStatusResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want bulkStatusResultMsg", msg)
+	}
+	if result.failed != 0 || result.updated != 1 {
+		t.Fatalf("bulk result = %+v, want one success", result)
+	}
+	if got := transport.requests; len(got) != 3 ||
+		got[0] != daemonclient.CommandSessionStop ||
+		got[1] != daemonclient.CommandWorktreeRemove ||
+		got[2] != daemonclient.CommandTaskDelete {
+		t.Fatalf("requests = %v, want stop/remove/delete", got)
+	}
+	if got := len(transport.commandBudgets); got != 3 {
+		t.Fatalf("command deadline count = %d, want 3", got)
+	}
+	if transport.commandBudgets[0] < worktreeCleanupCommandTimeout-10*time.Second {
+		t.Fatalf("stop budget = %s, want near %s", transport.commandBudgets[0], worktreeCleanupCommandTimeout)
+	}
+	if transport.commandBudgets[1] < worktreeCleanupCommandTimeout-10*time.Second {
+		t.Fatalf("remove budget = %s, want near %s", transport.commandBudgets[1], worktreeCleanupCommandTimeout)
+	}
+	if transport.commandBudgets[2] < 5*time.Second {
+		t.Fatalf("delete budget = %s, want explicit delete budget", transport.commandBudgets[2])
+	}
+}
+
 func TestFetchAndMergeCommandReturnsPendingOperationToast(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

@@ -61,6 +61,7 @@ const (
 	eventTickerCapacity            = 64
 	eventLogCapacity               = 256
 	eventSummaryMaxRunes           = 140
+	worktreeCleanupCommandTimeout  = 2 * time.Minute
 	orphanedWorktreeCleanupTimeout = 2 * time.Minute
 )
 
@@ -2593,7 +2594,7 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 
 		// Always ask daemon to stop first; local projection may be stale.
 		m.sessionMonitor.Stop(taskID)
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), worktreeCleanupCommandTimeout)
 		_, stopErr := m.daemonClient.StopSession(stopCtx, taskID)
 		stopCancel()
 		if stopErr != nil {
@@ -2602,7 +2603,7 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 			}
 		}
 
-		removeCtx, removeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		removeCtx, removeCancel := context.WithTimeout(context.Background(), worktreeCleanupCommandTimeout)
 		err := m.daemonClient.RemoveWorktreeWithOptions(removeCtx, taskID, force)
 		removeCancel()
 		if err != nil {
@@ -3337,9 +3338,6 @@ func (m Model) bulkArchiveCmd(taskIDs []string) tea.Cmd {
 
 func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
 		updated := 0
 		failed := 0
 		issues := make([]bulkTaskIssue, 0)
@@ -3357,14 +3355,18 @@ func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd
 
 			// Always ask daemon to stop first; local projection may be stale.
 			m.sessionMonitor.Stop(taskID)
-			_, stopErr := m.daemonClient.StopSession(ctx, taskID)
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), worktreeCleanupCommandTimeout)
+			_, stopErr := m.daemonClient.StopSession(stopCtx, taskID)
+			stopCancel()
 			if stopErr != nil && !isSessionAlreadyStoppedError(stopErr) && !isSessionStopSkippableDuringCleanup(stopErr) {
 				failed++
 				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: stopErr.Error()})
 				continue
 			}
 
-			removeErr := m.daemonClient.RemoveWorktreeWithOptions(ctx, taskID, false)
+			removeCtx, removeCancel := context.WithTimeout(context.Background(), worktreeCleanupCommandTimeout)
+			removeErr := m.daemonClient.RemoveWorktreeWithOptions(removeCtx, taskID, false)
+			removeCancel()
 			if removeErr != nil {
 				failed++
 				reason := removeErr.Error()
@@ -3376,7 +3378,10 @@ func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd
 			}
 
 			if deleteTask {
-				if err := m.daemonClient.DeleteTask(ctx, taskID); err != nil {
+				deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 15*time.Second)
+				err := m.daemonClient.DeleteTask(deleteCtx, taskID)
+				deleteCancel()
+				if err != nil {
 					failed++
 					issues = append(issues, bulkTaskIssue{taskID: taskID, reason: err.Error()})
 					continue
