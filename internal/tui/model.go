@@ -132,6 +132,7 @@ type Model struct {
 	pendingStatuses    map[string]pendingTaskStatus
 	operationTaskID    map[string]string
 	pendingOpsByTask   map[string]pendingOperationProgress
+	pendingCleanupOps  map[string]pendingWorktreeCleanupConfirmation
 	pendingCleanup     *pendingWorktreeCleanupConfirmation
 	pendingBulkCleanup *pendingBulkCleanupConfirmation
 
@@ -261,6 +262,7 @@ func New(cfg *config.Config) Model {
 		pendingStatuses:             make(map[string]pendingTaskStatus),
 		operationTaskID:             make(map[string]string),
 		pendingOpsByTask:            make(map[string]pendingOperationProgress),
+		pendingCleanupOps:           make(map[string]pendingWorktreeCleanupConfirmation),
 		nav:                         navigation.NewService(),
 		editor:                      editor.NewService(),
 		overlayStack:                overlay.NewStack(),
@@ -1022,6 +1024,61 @@ func (m *Model) applyOperationProgressEvent(evt protocol.EventEnvelope) {
 		}
 		m.syncTaskWorkspaceOverlay()
 	}
+}
+
+func (m *Model) handlePendingWorktreeCleanupOperationEvent(evt protocol.EventEnvelope) (tea.Cmd, bool) {
+	if evt.Event != protocol.EventOperationDone &&
+		evt.Event != protocol.EventOperationFailed &&
+		evt.Event != protocol.EventOperationCancelled {
+		return nil, false
+	}
+
+	var body protocol.OperationEventBody
+	if err := json.Unmarshal(evt.Body, &body); err != nil {
+		return nil, false
+	}
+	opID := strings.TrimSpace(body.Operation.OperationID.String())
+	if opID == "" {
+		return nil, false
+	}
+	pending, ok := m.pendingCleanupOps[opID]
+	if !ok {
+		return nil, false
+	}
+
+	delete(m.pendingCleanupOps, opID)
+	delete(m.pendingOpsByTask, taskIDKey(pending.taskID))
+	delete(m.operationTaskID, opID)
+	m.syncTaskWorkspaceOverlay()
+
+	if evt.Event != protocol.EventOperationFailed || pending.force {
+		return nil, false
+	}
+	reason := ""
+	if body.Operation.Error != nil {
+		reason = strings.TrimSpace(body.Operation.Error.Message)
+	}
+	if reason == "" && body.Operation.Progress != nil {
+		reason = strings.TrimSpace(body.Operation.Progress.Message)
+	}
+	if !isDirtyWorktreeRemovalError(errors.New(reason)) {
+		return nil, false
+	}
+
+	m.pendingCleanup = &pendingWorktreeCleanupConfirmation{
+		taskID:      pending.taskID,
+		deletedTask: pending.deletedTask,
+		force:       true,
+	}
+	action := "cleanup worktree"
+	if pending.deletedTask {
+		action = "delete task and cleanup worktree"
+	}
+	confirm := overlay.NewConfirmDialogExplicitYN(
+		"Force worktree cleanup?",
+		fmt.Sprintf("Worktree has local changes.\n\nAction: %s\nTask: %s\n\nDetails: %s\n\nForce removal will discard modified/untracked files.\nProceed?", action, pending.taskID, reason),
+	)
+	return m.openOverlay(confirm), true
 }
 
 func clampOperationPercent(percent int) int {
@@ -2418,6 +2475,8 @@ type worktreeCleanupResultMsg struct {
 	taskID      string
 	deletedTask bool
 	force       bool
+	operationID string
+	state       protocol.OperationState
 	needsForce  bool
 	reason      string
 	err         error
@@ -2426,6 +2485,7 @@ type worktreeCleanupResultMsg struct {
 type worktreeCleanupConfirmPromptMsg struct {
 	taskID       string
 	deletedTask  bool
+	force        bool
 	freshness    protocol.TaskListFreshness
 	checkedAt    time.Time
 	hasSnapshot  bool
@@ -2554,6 +2614,15 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 		err := m.daemonClient.RemoveWorktreeWithOptions(removeCtx, taskID, force)
 		removeCancel()
 		if err != nil {
+			if pending, ok := pendingOperationDetails(err); ok {
+				return worktreeCleanupResultMsg{
+					taskID:      taskID,
+					deletedTask: deleteTask,
+					force:       force,
+					operationID: pending.OperationID,
+					state:       pending.State,
+				}
+			}
 			if !force && isDirtyWorktreeRemovalError(err) {
 				return worktreeCleanupResultMsg{
 					taskID:      taskID,
@@ -2621,6 +2690,7 @@ func (m Model) requestWorktreeCleanupConfirmationCmd(taskID string, deleteTask b
 			msg.additions = task.GitAdditions
 			msg.deletions = task.GitDeletions
 			msg.dirty = task.HasUncommittedChanges
+			msg.force = msg.dirty
 			break
 		}
 
@@ -2667,6 +2737,10 @@ func formatWorktreeCleanupConfirmPrompt(msg worktreeCleanupConfirmPromptMsg) str
 
 	if msg.reconcileErr != nil {
 		lines = append(lines, "", fmt.Sprintf("Note: reconcile warning: %v", msg.reconcileErr))
+	}
+
+	if msg.force {
+		lines = append(lines, "", "Force removal will discard modified/untracked files.")
 	}
 
 	lines = append(lines, "", "Proceed?")
