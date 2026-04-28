@@ -4296,6 +4296,91 @@ func TestReconcilePendingStatusesClearsSessionMarkersFromHydratedProjection(t *t
 	})
 }
 
+func TestReconcilePendingOperationsClearsSessionProgressFromHydratedProjection(t *testing.T) {
+	now := time.Now()
+
+	t.Run("session start", func(t *testing.T) {
+		m := newTestModel()
+		m.tasks = []domain.Task{
+			{
+				ID:             "az-1",
+				Title:          "Task",
+				Status:         domain.StatusOpen,
+				Priority:       domain.P2,
+				Type:           domain.TypeTask,
+				HasTmuxSession: true,
+				Session:        &domain.Session{IssueID: "az-1", State: domain.SessionBusy},
+			},
+		}
+		m.pendingOpsByTask = map[string]pendingOperationProgress{
+			taskIDKey("az-1"): {
+				operationID: "op-session",
+				kind:        "session.start",
+				state:       protocol.OperationStateRunning,
+				percent:     50,
+				updatedAt:   now,
+			},
+		}
+
+		m.reconcilePendingOperations()
+		if _, ok := m.pendingOpsByTask[taskIDKey("az-1")]; ok {
+			t.Fatal("expected session.start pending operation to clear after session hydration")
+		}
+	})
+
+	t.Run("session stop", func(t *testing.T) {
+		m := newTestModel()
+		m.tasks = []domain.Task{
+			{
+				ID:       "az-1",
+				Title:    "Task",
+				Status:   domain.StatusOpen,
+				Priority: domain.P2,
+				Type:     domain.TypeTask,
+			},
+		}
+		m.pendingOpsByTask = map[string]pendingOperationProgress{
+			taskIDKey("az-1"): {
+				operationID: "op-stop",
+				kind:        "session.stop",
+				state:       protocol.OperationStateRunning,
+				percent:     50,
+				updatedAt:   now,
+			},
+		}
+
+		m.reconcilePendingOperations()
+		if _, ok := m.pendingOpsByTask[taskIDKey("az-1")]; ok {
+			t.Fatal("expected session.stop pending operation to clear when session projection is absent")
+		}
+	})
+}
+
+func TestSyncProjectionIndexesDoesNotPreserveStaleRuntimePendingOperation(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task", Status: domain.StatusInProgress, Priority: domain.P2, Type: domain.TypeTask, HasWorktree: true},
+	}
+	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
+		"az-1": {
+			HasWorktree:             true,
+			PendingOperationID:      "op-stale",
+			PendingOperationState:   string(protocol.OperationStateRunning),
+			PendingOperationPercent: 50,
+		},
+	}
+
+	m.syncProjectionIndexesFromTasks()
+
+	signals := m.runtimeSignalsByTask["az-1"]
+	if signals.PendingOperationID != "" || signals.PendingOperationState != "" || signals.PendingOperationPercent != 0 {
+		t.Fatalf("expected stale pending operation cleared, got %+v", signals)
+	}
+	if !signals.HasWorktree {
+		t.Fatalf("expected non-operation runtime signal preserved, got %+v", signals)
+	}
+}
+
 func TestPendingMutationForTaskIncludesOperationProgressPayload(t *testing.T) {
 	m := newTestModel()
 	m.pendingOpsByTask = map[string]pendingOperationProgress{

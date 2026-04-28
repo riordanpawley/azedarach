@@ -116,9 +116,11 @@ type pendingTaskStatus struct {
 
 type pendingOperationProgress struct {
 	operationID string
+	kind        string
 	state       protocol.OperationState
 	percent     int
 	message     string
+	updatedAt   time.Time
 }
 
 // Model is the main application state
@@ -985,8 +987,10 @@ func (m *Model) applyOperationProgressEvent(evt protocol.EventEnvelope) {
 		}
 		m.pendingOpsByTask[taskIDKey(taskID)] = pendingOperationProgress{
 			operationID: body.Operation.OperationID.String(),
+			kind:        strings.TrimSpace(body.Operation.Kind),
 			state:       state,
 			percent:     percent,
+			updatedAt:   time.Now(),
 		}
 		m.syncTaskWorkspaceOverlay()
 	case protocol.EventOperationProgress:
@@ -1007,11 +1011,14 @@ func (m *Model) applyOperationProgressEvent(evt protocol.EventEnvelope) {
 			m.syncTaskWorkspaceOverlay()
 			return
 		}
+		current := m.pendingOpsByTask[taskIDKey(taskID)]
 		m.pendingOpsByTask[taskIDKey(taskID)] = pendingOperationProgress{
 			operationID: body.OperationID.String(),
+			kind:        current.kind,
 			state:       body.State,
 			percent:     clampOperationPercent(body.Progress.Percent),
 			message:     strings.TrimSpace(body.Progress.Message),
+			updatedAt:   time.Now(),
 		}
 		m.syncTaskWorkspaceOverlay()
 	}
@@ -1559,6 +1566,7 @@ func (m *Model) applySessionProjectionEvent(evt protocol.EventEnvelope) {
 	}
 	m.applyRuntimeProjectionFromSessionEvent(body)
 	m.reconcilePendingStatuses()
+	m.reconcilePendingOperations()
 }
 
 func (m Model) reduceDaemonEvent(evt protocol.EventEnvelope) daemonEventDecision {
@@ -3817,6 +3825,44 @@ func (m *Model) reconcilePendingStatuses() {
 		case "session_stop":
 			if task.Session == nil && !task.HasTmuxSession {
 				delete(m.pendingStatuses, key)
+			}
+		}
+	}
+}
+
+func (m *Model) reconcilePendingOperations() {
+	if len(m.pendingOpsByTask) == 0 {
+		return
+	}
+
+	taskByID := make(map[string]domain.Task, len(m.tasks))
+	for _, task := range m.tasks {
+		taskByID[taskIDKey(task.ID.String())] = task
+	}
+
+	const stalePendingTTL = 2 * time.Minute
+	now := time.Now()
+
+	for key, pending := range m.pendingOpsByTask {
+		task, ok := taskByID[key]
+		if !ok {
+			delete(m.pendingOpsByTask, key)
+			continue
+		}
+
+		if !pending.updatedAt.IsZero() && now.Sub(pending.updatedAt) > stalePendingTTL {
+			delete(m.pendingOpsByTask, key)
+			continue
+		}
+
+		switch strings.TrimSpace(pending.kind) {
+		case "session.start":
+			if task.Session != nil || task.HasTmuxSession {
+				delete(m.pendingOpsByTask, key)
+			}
+		case "session.stop":
+			if task.Session == nil && !task.HasTmuxSession {
+				delete(m.pendingOpsByTask, key)
 			}
 		}
 	}
