@@ -5542,6 +5542,83 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	}
 }
 
+func TestPrimeCommandShowsImplementationOptionsWhenMultipleConfigured(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskList {
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+				body, err := marshalTaskListBody([]domain.Task{
+					{
+						ID:              "az-1",
+						Title:           "Default work",
+						Status:          domain.StatusOpen,
+						Priority:        domain.P2,
+						Type:            domain.TypeTask,
+						Implementations: []string{"default"},
+						CreatedAt:       now,
+						UpdatedAt:       now,
+					},
+					{
+						ID:              "az-2",
+						Title:           "Marketing work",
+						Status:          domain.StatusOpen,
+						Priority:        domain.P2,
+						Type:            domain.TypeTask,
+						Implementations: []string{"marketing"},
+						CreatedAt:       now,
+						UpdatedAt:       now,
+					},
+				})
+				if err != nil {
+					t.Fatalf("marshal task list: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            body,
+				}, nil
+			},
+		}),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(deps)
+	})
+
+	if !strings.Contains(output, "Implementation selection (multi-implementation project):") {
+		t.Fatalf("prime output missing implementation selection block: %q", output)
+	}
+	if !strings.Contains(output, "Available implementations: `default`, `marketing`") {
+		t.Fatalf("prime output missing available implementation options: %q", output)
+	}
+	if !strings.Contains(output, "Use `az impl list` to refresh the available options.") {
+		t.Fatalf("prime output missing impl list guidance: %q", output)
+	}
+	if !strings.Contains(output, "`az issue create --impl default \"Child task\"`") {
+		t.Fatalf("prime output missing create-with-impl example: %q", output)
+	}
+	if !strings.Contains(output, "Existing issue updates do not use `--impl`; use `--update-impl` only when changing assignments.") {
+		t.Fatalf("prime output missing update impl distinction: %q", output)
+	}
+}
+
 func TestPrimeCommandTruncatesLargeIssueDescription(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
 	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
