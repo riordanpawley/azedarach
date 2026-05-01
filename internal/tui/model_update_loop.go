@@ -149,6 +149,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncProjectionIndexesFromTasks()
 		m.applyPendingStatusOverlays()
 		m.reconcilePendingStatuses()
+		m.reconcilePendingOperations()
 		m.editor.ReconcileSelection(m.tasks)
 		m.applyPendingCreatedTaskSelection()
 		m.taskSnapshotCheckedAt = msg.lastCheckedAt

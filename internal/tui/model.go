@@ -61,7 +61,7 @@ const (
 	eventTickerCapacity            = 64
 	eventLogCapacity               = 256
 	eventSummaryMaxRunes           = 140
-	worktreeCleanupCommandTimeout  = 2 * time.Minute
+	worktreeCleanupMutationTimeout = 2 * time.Minute
 	orphanedWorktreeCleanupTimeout = 2 * time.Minute
 )
 
@@ -117,9 +117,11 @@ type pendingTaskStatus struct {
 
 type pendingOperationProgress struct {
 	operationID string
+	kind        string
 	state       protocol.OperationState
 	percent     int
 	message     string
+	updatedAt   time.Time
 }
 
 // Model is the main application state
@@ -988,8 +990,10 @@ func (m *Model) applyOperationProgressEvent(evt protocol.EventEnvelope) {
 		}
 		m.pendingOpsByTask[taskIDKey(taskID)] = pendingOperationProgress{
 			operationID: body.Operation.OperationID.String(),
+			kind:        strings.TrimSpace(body.Operation.Kind),
 			state:       state,
 			percent:     percent,
+			updatedAt:   time.Now(),
 		}
 		m.syncTaskWorkspaceOverlay()
 	case protocol.EventOperationProgress:
@@ -1010,11 +1014,14 @@ func (m *Model) applyOperationProgressEvent(evt protocol.EventEnvelope) {
 			m.syncTaskWorkspaceOverlay()
 			return
 		}
+		current := m.pendingOpsByTask[taskIDKey(taskID)]
 		m.pendingOpsByTask[taskIDKey(taskID)] = pendingOperationProgress{
 			operationID: body.OperationID.String(),
+			kind:        current.kind,
 			state:       body.State,
 			percent:     clampOperationPercent(body.Progress.Percent),
 			message:     strings.TrimSpace(body.Progress.Message),
+			updatedAt:   time.Now(),
 		}
 		m.syncTaskWorkspaceOverlay()
 	}
@@ -1617,6 +1624,7 @@ func (m *Model) applySessionProjectionEvent(evt protocol.EventEnvelope) {
 	}
 	m.applyRuntimeProjectionFromSessionEvent(body)
 	m.reconcilePendingStatuses()
+	m.reconcilePendingOperations()
 }
 
 func (m Model) reduceDaemonEvent(evt protocol.EventEnvelope) daemonEventDecision {
@@ -2594,7 +2602,7 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 
 		// Always ask daemon to stop first; local projection may be stale.
 		m.sessionMonitor.Stop(taskID)
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), worktreeCleanupCommandTimeout)
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), worktreeCleanupMutationTimeout)
 		_, stopErr := m.daemonClient.StopSession(stopCtx, taskID)
 		stopCancel()
 		if stopErr != nil {
@@ -2603,7 +2611,7 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 			}
 		}
 
-		removeCtx, removeCancel := context.WithTimeout(context.Background(), worktreeCleanupCommandTimeout)
+		removeCtx, removeCancel := context.WithTimeout(context.Background(), worktreeCleanupMutationTimeout)
 		err := m.daemonClient.RemoveWorktreeWithOptions(removeCtx, taskID, force)
 		removeCancel()
 		if err != nil {
@@ -3355,7 +3363,7 @@ func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd
 
 			// Always ask daemon to stop first; local projection may be stale.
 			m.sessionMonitor.Stop(taskID)
-			stopCtx, stopCancel := context.WithTimeout(context.Background(), worktreeCleanupCommandTimeout)
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), worktreeCleanupMutationTimeout)
 			_, stopErr := m.daemonClient.StopSession(stopCtx, taskID)
 			stopCancel()
 			if stopErr != nil && !isSessionAlreadyStoppedError(stopErr) && !isSessionStopSkippableDuringCleanup(stopErr) {
@@ -3364,7 +3372,7 @@ func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd
 				continue
 			}
 
-			removeCtx, removeCancel := context.WithTimeout(context.Background(), worktreeCleanupCommandTimeout)
+			removeCtx, removeCancel := context.WithTimeout(context.Background(), worktreeCleanupMutationTimeout)
 			removeErr := m.daemonClient.RemoveWorktreeWithOptions(removeCtx, taskID, false)
 			removeCancel()
 			if removeErr != nil {
@@ -3896,6 +3904,44 @@ func (m *Model) reconcilePendingStatuses() {
 		case "session_stop":
 			if task.Session == nil && !task.HasTmuxSession {
 				delete(m.pendingStatuses, key)
+			}
+		}
+	}
+}
+
+func (m *Model) reconcilePendingOperations() {
+	if len(m.pendingOpsByTask) == 0 {
+		return
+	}
+
+	taskByID := make(map[string]domain.Task, len(m.tasks))
+	for _, task := range m.tasks {
+		taskByID[taskIDKey(task.ID.String())] = task
+	}
+
+	const stalePendingTTL = 2 * time.Minute
+	now := time.Now()
+
+	for key, pending := range m.pendingOpsByTask {
+		task, ok := taskByID[key]
+		if !ok {
+			delete(m.pendingOpsByTask, key)
+			continue
+		}
+
+		if !pending.updatedAt.IsZero() && now.Sub(pending.updatedAt) > stalePendingTTL {
+			delete(m.pendingOpsByTask, key)
+			continue
+		}
+
+		switch strings.TrimSpace(pending.kind) {
+		case "session.start":
+			if task.Session != nil || task.HasTmuxSession {
+				delete(m.pendingOpsByTask, key)
+			}
+		case "session.stop":
+			if task.Session == nil && !task.HasTmuxSession {
+				delete(m.pendingOpsByTask, key)
 			}
 		}
 	}

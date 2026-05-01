@@ -3445,6 +3445,12 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 			got[3] != daemonclient.CommandWorktreeRemove {
 			t.Fatalf("requests = %v", got)
 		}
+		if len(transport.commandBudgets) != 4 {
+			t.Fatalf("command budget count = %d, want 4", len(transport.commandBudgets))
+		}
+		if removeBudget := transport.commandBudgets[3]; removeBudget < (worktreeCleanupMutationTimeout - 10*time.Second) {
+			t.Fatalf("worktree remove timeout budget = %s, want near %s", removeBudget, worktreeCleanupMutationTimeout)
+		}
 	})
 
 	t.Run("delete task and cleanup worktree", func(t *testing.T) {
@@ -5787,8 +5793,8 @@ func TestCleanupWorktreeUsesExtendedDaemonDeadlines(t *testing.T) {
 		t.Fatalf("command deadline count = %d, want 2", got)
 	}
 	for i, budget := range transport.commandBudgets {
-		if budget < worktreeCleanupCommandTimeout-10*time.Second {
-			t.Fatalf("command budget[%d] = %s, want near %s", i, budget, worktreeCleanupCommandTimeout)
+		if budget < worktreeCleanupMutationTimeout-10*time.Second {
+			t.Fatalf("command budget[%d] = %s, want near %s", i, budget, worktreeCleanupMutationTimeout)
 		}
 	}
 }
@@ -5815,11 +5821,11 @@ func TestBulkCleanupWorktreeUsesPerStepExtendedDaemonDeadlines(t *testing.T) {
 	if got := len(transport.commandBudgets); got != 3 {
 		t.Fatalf("command deadline count = %d, want 3", got)
 	}
-	if transport.commandBudgets[0] < worktreeCleanupCommandTimeout-10*time.Second {
-		t.Fatalf("stop budget = %s, want near %s", transport.commandBudgets[0], worktreeCleanupCommandTimeout)
+	if transport.commandBudgets[0] < worktreeCleanupMutationTimeout-10*time.Second {
+		t.Fatalf("stop budget = %s, want near %s", transport.commandBudgets[0], worktreeCleanupMutationTimeout)
 	}
-	if transport.commandBudgets[1] < worktreeCleanupCommandTimeout-10*time.Second {
-		t.Fatalf("remove budget = %s, want near %s", transport.commandBudgets[1], worktreeCleanupCommandTimeout)
+	if transport.commandBudgets[1] < worktreeCleanupMutationTimeout-10*time.Second {
+		t.Fatalf("remove budget = %s, want near %s", transport.commandBudgets[1], worktreeCleanupMutationTimeout)
 	}
 	if transport.commandBudgets[2] < 5*time.Second {
 		t.Fatalf("delete budget = %s, want explicit delete budget", transport.commandBudgets[2])

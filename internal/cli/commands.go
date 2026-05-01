@@ -4012,6 +4012,7 @@ type primeTemplateData struct {
 	ActiveIssueClosedWarning string
 	ContextGuardrail         string
 	QuestionFirstGuardrails  string
+	ImplementationSection    string
 	ImplementationGuardrails string
 	SpecGuardrails           string
 }
@@ -4024,7 +4025,9 @@ func PrimeCommand(deps *Dependencies) error {
 	activeIssueClosedWarning := ""
 	specGuardrails := ""
 	questionFirstGuardrails := ""
-	implementationGuardrails := "- Implementation guardrails: in multi-implementation repos, include explicit `--impl <impl>` on new `az issue`/`az spec link` writes and use repeated `--impl` only for intentional shared work. For `az issue update`, `--update-impl` is only for changing implementation assignments; status/title/notes updates do not require it."
+	implementationSection := ""
+	implementationGuardrails := "- Implementation guardrails: in multi-implementation repos, include explicit `--impl <impl>` on new `az issue` writes and use repeated `--impl` only for intentional shared work. For `az issue update`, `--update-impl` is only for changing implementation assignments; status/title/notes updates do not require it."
+	specEnabled := deps != nil && deps.Config != nil && deps.Config.Spec.Enabled
 
 	if primeMode == "question-first" {
 		questionFirstGuardrails = `- Question-first execution rules (Space+Q mode):
@@ -4032,20 +4035,30 @@ func PrimeCommand(deps *Dependencies) error {
   - MUST improve the current issue title and description before implementation work begins.
   - MUST record unknowns/open questions in the issue description so scope is explicit.`
 	}
-	if deps.Config != nil && deps.Config.Spec.Enabled {
-		specGuardrails = `  - In this repo, when guidance says ` + "`spec`" + `, it means ` + "`az spec`" + ` requirement/link records, not README.md, AGENTS.md, or other internal docs.
-  - ALWAYS check ` + "`az spec`" + ` requirements/links before starting behavior work.
+	if specEnabled {
+		specGuardrails = `  - In this repo, when guidance says ` + "`spec`" + `, it means records managed by ` + "`az spec req ...`" + ` and ` + "`az spec link ...`" + `, not README.md, AGENTS.md, or other internal docs.
+  - ALWAYS run ` + "`az spec read --issue <issue-id>`" + ` before starting behavior work; use ` + "`az spec link list --issue <issue-id>`" + ` when you need link-only detail.
   - If implementation is not aligned with spec, update spec first, then implement.
   - Ensure implementation issue(s) are linked to relevant spec requirement(s) before execution.
   - Treat ` + "`az spec link`" + ` records as required traceability for behavior work.
-  - Before implementing behavior changes, inspect relevant ` + "`az spec`" + ` requirements/links and align the plan.
+  - Before implementing behavior changes, inspect relevant ` + "`az spec read --issue <issue-id>`" + ` output and align the plan.
   - If this project should not use spec workflows, disable them with ` + "`az config set spec.enabled false`" + ` (or set ` + "`spec.enabled`" + ` to false in ` + "`.azedarach/config.json`" + `).`
+	}
+
+	var snapshot daemonclient.TaskSnapshot
+	snapshotLoaded := false
+	if deps != nil && deps.DaemonClient != nil {
+		loaded, err := deps.DaemonClient.ListTasksSnapshot(context.Background())
+		if err == nil {
+			snapshot = loaded
+			snapshotLoaded = true
+			implementationSection = renderPrimeImplementationSection(configuredIssueImplementations(snapshot.Tasks))
+		}
 	}
 
 	if issueID != "" {
 		guardrail = fmt.Sprintf("- `AZEDARACH_ISSUE_ID` is set to `%s`; use it as the default issue scope and refresh stale context with `az issue get %s`.", issueID, issueID)
-		snapshot, err := deps.DaemonClient.ListTasksSnapshot(context.Background())
-		if err != nil {
+		if !snapshotLoaded {
 			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nCould not load issue details automatically; run `az issue get %s`.\n", issueID, issueID)
 		} else if task, ok := findTaskByID(snapshot.Tasks, issueID); ok {
 			issueSection = renderPrimeIssueSection(issueID, task)
@@ -4059,12 +4072,13 @@ func PrimeCommand(deps *Dependencies) error {
 
 	output, err := clitext.Render("prime_output", primeTemplateData{
 		ActiveIssueID:            issueID,
-		SpecEnabled:              deps.Config != nil && deps.Config.Spec.Enabled,
+		SpecEnabled:              specEnabled,
 		PrimeEvidenceKey:         primeEvidenceKey,
 		IssueSection:             issueSection,
 		ActiveIssueClosedWarning: activeIssueClosedWarning,
 		ContextGuardrail:         guardrail,
 		QuestionFirstGuardrails:  questionFirstGuardrails,
+		ImplementationSection:    implementationSection,
 		ImplementationGuardrails: implementationGuardrails,
 		SpecGuardrails:           specGuardrails,
 	})
@@ -4073,6 +4087,23 @@ func PrimeCommand(deps *Dependencies) error {
 	}
 	fmt.Print(output)
 	return nil
+}
+
+func renderPrimeImplementationSection(implementations []string) string {
+	if len(implementations) <= 1 {
+		return ""
+	}
+	quoted := make([]string, 0, len(implementations))
+	for _, impl := range implementations {
+		quoted = append(quoted, fmt.Sprintf("`%s`", impl))
+	}
+	exampleImpl := implementations[0]
+	return fmt.Sprintf("- Implementation selection (multi-implementation project):\n"+
+		"  - Available implementations: %s\n"+
+		"  - Use `az impl list` to refresh the available options.\n"+
+		"  - New issue writes must choose an implementation: `az issue create --impl %s \"Child task\"`\n"+
+		"  - Repeat `--impl` only for intentionally shared work. Existing issue updates do not use `--impl`; use `--update-impl` only when changing assignments.\n",
+		strings.Join(quoted, ", "), exampleImpl)
 }
 
 func renderPrimeIssueSection(issueID string, task domain.Task) string {

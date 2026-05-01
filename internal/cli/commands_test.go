@@ -5456,6 +5456,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Optional (only when splitting work): `az issue create \"Child task\"`") {
 		t.Fatalf("prime output missing optional child-task split guidance: %q", output)
 	}
+	if strings.Contains(output, "`az spec` (inspect linked requirements before behavior changes)") {
+		t.Fatalf("prime output should not instruct agents to run bare az spec: %q", output)
+	}
 	if strings.Contains(output, "`az issue create \"Title\"` (auto-parents under `AZEDARACH_ISSUE_ID`; use `--deferred` for non-immediate follow-ups)") {
 		t.Fatalf("prime output should not require unconditional child issue creation: %q", output)
 	}
@@ -5515,6 +5518,7 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 			},
 		}),
 		ProjectID: "proj",
+		Config:    &config.Config{Spec: config.SpecConfig{Enabled: true}},
 	}
 
 	output := captureStdout(t, func() error {
@@ -5524,6 +5528,9 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Active issue ID: `az-1`") {
 		t.Fatalf("prime output missing explicit active issue id: %q", output)
 	}
+	if !strings.Contains(output, "`az spec read --issue az-1` (inspect linked requirements before behavior changes)") {
+		t.Fatalf("prime output missing active-issue spec read command: %q", output)
+	}
 	if !strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=az-1)") {
 		t.Fatalf("prime output missing active issue section: %q", output)
 	}
@@ -5532,6 +5539,83 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "Dependencies:\n- blocks: az-2") {
 		t.Fatalf("prime output missing dependency summary: %q", output)
+	}
+}
+
+func TestPrimeCommandShowsImplementationOptionsWhenMultipleConfigured(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskList {
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+				body, err := marshalTaskListBody([]domain.Task{
+					{
+						ID:              "az-1",
+						Title:           "Default work",
+						Status:          domain.StatusOpen,
+						Priority:        domain.P2,
+						Type:            domain.TypeTask,
+						Implementations: []string{"default"},
+						CreatedAt:       now,
+						UpdatedAt:       now,
+					},
+					{
+						ID:              "az-2",
+						Title:           "Marketing work",
+						Status:          domain.StatusOpen,
+						Priority:        domain.P2,
+						Type:            domain.TypeTask,
+						Implementations: []string{"marketing"},
+						CreatedAt:       now,
+						UpdatedAt:       now,
+					},
+				})
+				if err != nil {
+					t.Fatalf("marshal task list: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            body,
+				}, nil
+			},
+		}),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(deps)
+	})
+
+	if !strings.Contains(output, "Implementation selection (multi-implementation project):") {
+		t.Fatalf("prime output missing implementation selection block: %q", output)
+	}
+	if !strings.Contains(output, "Available implementations: `default`, `marketing`") {
+		t.Fatalf("prime output missing available implementation options: %q", output)
+	}
+	if !strings.Contains(output, "Use `az impl list` to refresh the available options.") {
+		t.Fatalf("prime output missing impl list guidance: %q", output)
+	}
+	if !strings.Contains(output, "`az issue create --impl default \"Child task\"`") {
+		t.Fatalf("prime output missing create-with-impl example: %q", output)
+	}
+	if !strings.Contains(output, "Existing issue updates do not use `--impl`; use `--update-impl` only when changing assignments.") {
+		t.Fatalf("prime output missing update impl distinction: %q", output)
 	}
 }
 
@@ -5666,7 +5750,10 @@ func TestPrimeCommandQuestionFirstAndSpecBlock(t *testing.T) {
 	if !strings.Contains(output, "- Spec workflow:") {
 		t.Fatalf("prime output missing spec workflow block: %q", output)
 	}
-	if !strings.Contains(output, "ALWAYS check `az spec` requirements/links before starting behavior work.") {
+	if !strings.Contains(output, "`az spec read --issue <issue-id>` (inspect linked requirements before behavior changes)") {
+		t.Fatalf("prime output missing concrete spec read command: %q", output)
+	}
+	if !strings.Contains(output, "ALWAYS run `az spec read --issue <issue-id>` before starting behavior work; use `az spec link list --issue <issue-id>` when you need link-only detail.") {
 		t.Fatalf("prime output missing mandatory pre-work spec check guardrail: %q", output)
 	}
 	if !strings.Contains(output, "If implementation is not aligned with spec, update spec first, then implement.") {
@@ -5674,6 +5761,9 @@ func TestPrimeCommandQuestionFirstAndSpecBlock(t *testing.T) {
 	}
 	if !strings.Contains(output, "Ensure implementation issue(s) are linked to relevant spec requirement(s) before execution.") {
 		t.Fatalf("prime output missing issue/spec linking guardrail: %q", output)
+	}
+	if strings.Contains(output, "ALWAYS check `az spec` requirements/links") {
+		t.Fatalf("prime output should not include bare az spec guardrail: %q", output)
 	}
 }
 
