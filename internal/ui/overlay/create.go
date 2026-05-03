@@ -31,6 +31,9 @@ const (
 	taskTemplateDivider           = "───────────────────────────────────────────────────"
 	createTaskOverlayWidth        = 100
 	createTaskOverlayHeight       = 30
+	taskTitleCharLimit            = 200
+	taskDescriptionCharLimit      = 0
+	taskAcceptanceCharLimit       = 4000
 )
 
 var overlayExecProcess = tea.ExecProcess
@@ -137,18 +140,18 @@ func NewEditTaskOverlayWithImplOptionsAndAttachmentService(task domain.Task, imp
 	ti := textinput.New()
 	ti.SetValue(task.Title)
 	ti.Focus()
-	ti.CharLimit = 200
+	ti.CharLimit = taskTitleCharLimit
 	ti.Width = 56
 
 	ta := textarea.New()
 	ta.SetValue(task.Description)
-	ta.CharLimit = 2000
+	ta.CharLimit = taskDescriptionCharLimit
 	ta.SetWidth(56)
 	ta.SetHeight(4)
 
 	acceptance := textarea.New()
 	acceptance.SetValue("")
-	acceptance.CharLimit = 4000
+	acceptance.CharLimit = taskAcceptanceCharLimit
 	acceptance.SetWidth(56)
 	acceptance.SetHeight(3)
 
@@ -200,19 +203,19 @@ func NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(parentID *str
 	ti := textinput.New()
 	ti.Placeholder = "Task title..."
 	ti.Focus()
-	ti.CharLimit = 200
+	ti.CharLimit = taskTitleCharLimit
 	ti.Width = 56
 
 	// Initialize description textarea
 	ta := textarea.New()
 	ta.Placeholder = "Task description (optional)..."
-	ta.CharLimit = 2000
+	ta.CharLimit = taskDescriptionCharLimit
 	ta.SetWidth(56)
 	ta.SetHeight(4)
 
 	acceptance := textarea.New()
 	acceptance.Placeholder = "Acceptance criteria (optional)..."
-	acceptance.CharLimit = 4000
+	acceptance.CharLimit = taskAcceptanceCharLimit
 	acceptance.SetWidth(56)
 	acceptance.SetHeight(3)
 
