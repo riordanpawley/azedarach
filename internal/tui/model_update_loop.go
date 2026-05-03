@@ -844,6 +844,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.createTaskOverlay = nil
 			if taskID := strings.TrimSpace(msg.taskID); taskID != "" {
 				m.pendingCreatedTaskID = taskID
+				m.applyPendingCreatedTaskSelection()
 			}
 		}
 

@@ -2244,6 +2244,49 @@ func TestTaskCreatedResultSelectsNewTaskAfterRefresh(t *testing.T) {
 	}
 }
 
+func TestTaskCreatedResultSelectsTaskAlreadyAppliedFromEvent(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+	m.nav.SelectTask("az-1", 0)
+
+	createdTask := domain.Task{ID: "az-new", Title: "New Task", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeTask}
+	body, err := json.Marshal(protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		TaskID:    "az-new",
+		Task:      &createdTask,
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal task event body: %v", err)
+	}
+
+	eventApplied, _ := m.Update(daemonStreamEventMsg{event: protocol.EventEnvelope{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		Revision:  1,
+		Event:     protocol.EventTaskCreated,
+		Body:      body,
+	}})
+	eventModel := eventApplied.(Model)
+	if got := eventModel.nav.GetCursor().TaskID; got != "az-1" {
+		t.Fatalf("cursor before create result = %q, want existing selection", got)
+	}
+
+	createdResult, _ := eventModel.Update(taskCreatedResultMsg{
+		taskID:   "az-new",
+		err:      nil,
+		isUpdate: false,
+	})
+	createdModel := createdResult.(Model)
+	if got := createdModel.nav.GetCursor().TaskID; got != "az-new" {
+		t.Fatalf("cursor task = %q, want az-new", got)
+	}
+	if createdModel.pendingCreatedTaskID != "" {
+		t.Fatalf("pendingCreatedTaskID = %q, want cleared state", createdModel.pendingCreatedTaskID)
+	}
+}
+
 func TestModeTransitions(t *testing.T) {
 	m := newTestModel()
 
