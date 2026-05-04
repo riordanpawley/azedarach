@@ -167,6 +167,38 @@ func TestTaskWorkspaceOverlay_StatusKeysWorkFromDetailFocus(t *testing.T) {
 	}
 }
 
+func TestTaskWorkspaceOverlay_EnterOnDetailOpensSelectedGraphTask(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-parent",
+		Title:  "Parent",
+		Status: domain.StatusOpen,
+		Dependencies: []domain.Dependency{
+			{ID: "az-child", Type: domain.DependencyBlocks},
+		},
+	}
+	related := []domain.Task{
+		task,
+		{ID: "az-child", Title: "Child", Status: domain.StatusInProgress},
+	}
+	overlay := NewTaskWorkspaceOverlay(task, related, nil, 120, 30)
+	overlay.focus = taskWorkspaceFocusDetail
+
+	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
+	overlay = model.(*TaskWorkspaceOverlay)
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if cmd == nil {
+		t.Fatal("expected graph navigation command")
+	}
+	msg, ok := cmd().(SelectionMsg)
+	if !ok {
+		t.Fatalf("command emitted %T, want SelectionMsg", cmd())
+	}
+	if msg.Key != "task_workspace_open_task" || msg.Value != "az-child" {
+		t.Fatalf("selection = %+v, want task_workspace_open_task az-child", msg)
+	}
+}
+
 func TestTaskWorkspaceOverlay_WindowResizeUpdatesDimensions(t *testing.T) {
 	task := domain.Task{
 		ID:     "az-1",

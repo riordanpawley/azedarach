@@ -184,6 +184,31 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			m.ensureCursorVisible(columns)
 		}
 		return m, nil
+	case "task_workspace_open_task":
+		targetID, ok := msg.Value.(string)
+		if !ok || strings.TrimSpace(targetID) == "" {
+			return m, nil
+		}
+		task, _, ok := m.taskAndSessionByID(targetID)
+		if !ok || task == nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Related task %s is not loaded", strings.TrimSpace(targetID)),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		columns := m.buildColumns()
+		m.nav.JumpToTaskByID(columns, task.ID.String())
+		m.ensureCursorVisible(columns)
+		if workspace, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); ok {
+			workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
+			workspace.SyncTask(*task, m.tasks, m.pendingMutationForTask(task.ID.String()))
+		}
+		if m.daemonClient == nil {
+			return m, nil
+		}
+		return m, m.refreshTaskWorkspaceInBackgroundCmd(task.ID.String())
 	case "set-default-success", "remove-success", "detect-success":
 		// Project registry actions succeeded - just show success toast
 		if name, ok := msg.Value.(string); ok {

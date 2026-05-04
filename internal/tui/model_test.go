@@ -2703,6 +2703,47 @@ func TestSpaceWorkspaceUsesVisibleFilteredTaskWhenCursorTaskIDIsHidden(t *testin
 	}
 }
 
+func TestTaskWorkspaceGraphNavigationOpensRelatedTask(t *testing.T) {
+	m := newTestModel()
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	m.tasks = []domain.Task{
+		{
+			ID:     parentID,
+			Title:  "Parent task",
+			Status: domain.StatusOpen,
+			Dependencies: []domain.Dependency{
+				{ID: childID, Type: domain.DependencyBlocks},
+			},
+		},
+		{
+			ID:     childID,
+			Title:  "Child task",
+			Status: domain.StatusInProgress,
+		},
+	}
+	m.nav.SelectTask(parentID.String(), 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30))
+
+	updated, _ := m.handleSelection(overlay.SelectionMsg{
+		Key:   "task_workspace_open_task",
+		Value: childID.String(),
+	})
+	next := updated.(Model)
+
+	current := next.overlayStack.Current()
+	workspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace to remain open, got %T", current)
+	}
+	if got := workspace.TaskID(); got != childID.String() {
+		t.Fatalf("workspace task ID = %q, want %q", got, childID)
+	}
+	if view := workspace.View(); !strings.Contains(view, "Child task") {
+		t.Fatalf("workspace did not render selected child task, got %q", view)
+	}
+}
+
 func TestSpaceWorkspaceUsesAuthoritativeTaskProjection(t *testing.T) {
 	m := newTestModel()
 	m.editor.EnterNormal()

@@ -80,8 +80,25 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "tab", "h", "l":
 			w.toggleFocus()
 			return w, nil
+		case "[", "shift+tab":
+			if w.detail.GraphLinkCount() > 0 {
+				w.focus = taskWorkspaceFocusDetail
+				w.detail.MoveGraphCursor(-1)
+			}
+			return w, nil
+		case "]":
+			if w.detail.GraphLinkCount() > 0 {
+				w.focus = taskWorkspaceFocusDetail
+				w.detail.MoveGraphCursor(1)
+			}
+			return w, nil
 		case "enter":
 			if w.focus == taskWorkspaceFocusDetail {
+				if taskID, ok := w.detail.SelectedGraphTaskID(); ok {
+					return w, func() tea.Msg {
+						return SelectionMsg{Key: "task_workspace_open_task", Value: taskID}
+					}
+				}
 				w.focus = taskWorkspaceFocusActions
 				return w, nil
 			}
@@ -201,6 +218,7 @@ func (w *TaskWorkspaceOverlay) StatusBindings() []keybinds.Binding {
 		{Key: "ctrl+u/d", Description: "half-page"},
 		{Key: "g/G", Description: "top/bottom"},
 		{Key: "Tab/h/l", Description: "focus"},
+		{Key: "[/]", Description: "relation"},
 		{Key: "Enter", Description: "run action"},
 		{Key: "1/2/3/4", Description: "set status"},
 		{Key: "n/p", Description: "action up/down"},
