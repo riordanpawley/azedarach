@@ -19,6 +19,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
+	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/testprofile"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
@@ -3345,6 +3346,95 @@ func TestHandleConflictResolution_ResolveWithClaudeAttachesSession(t *testing.T)
 	}
 	if len(switchTargets) == 0 || switchTargets[0] != "az-1" {
 		t.Fatalf("switch targets = %v, want first target az-1", switchTargets)
+	}
+}
+
+func TestConflictDialogResolveWithClaudeUsesMergeResultIssue(t *testing.T) {
+	t.Setenv("TMUX", "client")
+	m := newTestModel()
+	m.currentProject = "Chefy"
+	m.tmuxAvailable = true
+	m.nav.SelectTask("az-1", 0)
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandSessionAttach {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
+			}
+			var body struct {
+				ProjectID string `json:"project_id"`
+				SessionID string `json:"session_id"`
+			}
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal attach request: %v", err)
+			}
+			if body.SessionID != "az-2" {
+				t.Fatalf("session id = %q, want conflicted issue az-2", body.SessionID)
+			}
+			respBody, err := json.Marshal(struct {
+				Output string `json:"output"`
+			}{Output: "attached"})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m.daemonClient = daemonclient.New(transport)
+
+	var switchTargets []string
+	m.tmuxClient = mockTmuxService{
+		switchFn: func(_ context.Context, target string) error {
+			switchTargets = append(switchTargets, target)
+			return nil
+		},
+	}
+
+	updatedAny, _ := m.Update(fetchAndMergeResultMsg{
+		issueID:  "az-2",
+		worktree: "/tmp/az-2",
+		result: &git.MergeResult{
+			HasConflicts:  true,
+			ConflictFiles: []string{"conflict.go"},
+		},
+	})
+	updated := updatedAny.(Model)
+	current, ok := updated.overlayStack.Current().(*overlay.ConflictOverlay)
+	if !ok {
+		t.Fatalf("overlay = %T, want ConflictOverlay", updated.overlayStack.Current())
+	}
+
+	_, selectCmd := current.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if selectCmd == nil {
+		t.Fatal("expected selection command")
+	}
+	selectMsg := selectCmd()
+	selected, ok := selectMsg.(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("selection message = %T, want SelectionMsg", selectMsg)
+	}
+	nextAny, cmd := updated.Update(selected)
+	if cmd == nil {
+		t.Fatal("expected attach command from conflict resolution")
+	}
+	_ = nextAny.(Model)
+
+	msg := cmd()
+	attached, ok := msg.(sessionAttachedMsg)
+	if !ok {
+		t.Fatalf("attach command returned %T, want sessionAttachedMsg", msg)
+	}
+	if attached.issueID != "az-2" {
+		t.Fatalf("attached issue id = %q, want az-2", attached.issueID)
+	}
+	if len(switchTargets) == 0 || switchTargets[0] != "az-2" {
+		t.Fatalf("switch targets = %v, want first target az-2", switchTargets)
 	}
 }
 

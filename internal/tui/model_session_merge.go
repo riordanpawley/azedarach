@@ -273,30 +273,57 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 	m.overlayStack.Pop()
 
 	task, session := m.getCurrentTaskAndSession()
-	if task == nil || session == nil {
+	issueID := strings.TrimSpace(resolution.IssueID)
+	worktree := strings.TrimSpace(resolution.Worktree)
+	if task != nil && issueID == "" {
+		issueID = task.ID.String()
+	}
+	if session != nil && worktree == "" {
+		worktree = strings.TrimSpace(session.Worktree)
+	}
+	if issueID != "" {
+		if _, selectedSession, ok := m.taskAndSessionByID(issueID); ok {
+			if selectedSession != nil {
+				session = selectedSession
+				if worktree == "" {
+					worktree = strings.TrimSpace(selectedSession.Worktree)
+				}
+			}
+		}
+	}
+	if issueID == "" && task == nil {
 		return m, nil
 	}
 
 	switch {
 	case resolution.Abort:
 		// Abort the merge
-		return m, m.abortMergeCmd(session.Worktree)
+		if worktree == "" {
+			return m, nil
+		}
+		return m, m.abortMergeCmd(worktree)
 
 	case resolution.OpenManually:
 		// Show instructions to open in editor
+		if worktree == "" {
+			return m, nil
+		}
 		m.addToast(Toast{
 			Level:   ToastInfo,
-			Message: fmt.Sprintf("Open conflicted files in your editor at: %s", session.Worktree),
+			Message: fmt.Sprintf("Open conflicted files in your editor at: %s", worktree),
 			Expires: time.Now().Add(8 * time.Second),
 		})
 		return m, nil
 
 	case resolution.ResolveWithClaude:
+		if issueID == "" {
+			return m, nil
+		}
 		// Attach to tmux session so AI can resolve merge conflicts in-session.
 		if !m.tmuxAvailable {
 			m.addToast(Toast{
 				Level:   ToastWarning,
-				Message: fmt.Sprintf("tmux attach-session -t %s is unavailable outside tmux; launch az inside tmux to use tmux actions", task.ID),
+				Message: fmt.Sprintf("tmux attach-session -t %s is unavailable outside tmux; launch az inside tmux to use tmux actions", issueID),
 				Expires: time.Now().Add(8 * time.Second),
 			})
 			return m, nil
@@ -304,12 +331,12 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 		if m.daemonClient == nil {
 			m.addToast(Toast{
 				Level:   ToastWarning,
-				Message: fmt.Sprintf("Daemon unavailable. Run: tmux attach-session -t %s (AI can help resolve)", task.ID),
+				Message: fmt.Sprintf("Daemon unavailable. Run: tmux attach-session -t %s (AI can help resolve)", issueID),
 				Expires: time.Now().Add(8 * time.Second),
 			})
 			return m, nil
 		}
-		return m, m.resolveConflictWithAICmd(task.ID.String())
+		return m, m.resolveConflictWithAICmd(issueID)
 
 	default:
 		return m, nil

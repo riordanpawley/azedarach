@@ -692,7 +692,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Message: fmt.Sprintf("Merge conflicts in %d files", len(msg.result.ConflictFiles)),
 				Expires: time.Now().Add(3 * time.Second),
 			})
-			return m, m.openOverlay(overlay.NewConflictDialog(msg.result.ConflictFiles))
+			return m, m.openOverlay(overlay.NewConflictDialogForIssue(msg.result.ConflictFiles, msg.issueID, msg.worktree))
 		}
 
 		// Successful merge

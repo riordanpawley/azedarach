@@ -14,6 +14,8 @@ type ConflictOverlay struct {
 	twoPaneDialogChrome
 	dialogViewportState
 	files               []string
+	issueID             string
+	worktree            string
 	cursor              int
 	onResolveWithClaude func() tea.Cmd
 	onAbort             func() tea.Cmd
@@ -25,6 +27,8 @@ type ConflictResolutionMsg struct {
 	ResolveWithClaude bool
 	Abort             bool
 	OpenManually      bool
+	IssueID           string
+	Worktree          string
 }
 
 // NewConflictOverlay creates a new conflict resolution overlay
@@ -45,6 +49,13 @@ func NewConflictOverlay(
 // NewConflictDialog creates a new conflict resolution dialog (deprecated, use NewConflictOverlay)
 func NewConflictDialog(files []string) *ConflictOverlay {
 	return NewConflictOverlay(files, nil, nil)
+}
+
+func NewConflictDialogForIssue(files []string, issueID, worktree string) *ConflictOverlay {
+	dialog := NewConflictDialog(files)
+	dialog.issueID = strings.TrimSpace(issueID)
+	dialog.worktree = strings.TrimSpace(worktree)
+	return dialog
 }
 
 // Init initializes the overlay
@@ -74,6 +85,8 @@ func (c *ConflictOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Key: "claude",
 					Value: ConflictResolutionMsg{
 						ResolveWithClaude: true,
+						IssueID:           c.issueID,
+						Worktree:          c.worktree,
 					},
 				}
 			}
@@ -87,7 +100,9 @@ func (c *ConflictOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return SelectionMsg{
 					Key: "abort",
 					Value: ConflictResolutionMsg{
-						Abort: true,
+						Abort:    true,
+						IssueID:  c.issueID,
+						Worktree: c.worktree,
 					},
 				}
 			}
@@ -99,6 +114,8 @@ func (c *ConflictOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Key: "manual",
 					Value: ConflictResolutionMsg{
 						OpenManually: true,
+						IssueID:      c.issueID,
+						Worktree:     c.worktree,
 					},
 				}
 			}
