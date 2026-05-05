@@ -53,6 +53,8 @@ const (
 	sessionInvariantSessionAttachTarget  daemonInvariantID = daemonInvariantSessionAttachTarget
 	sessionInvariantSessionStopTargets   daemonInvariantID = daemonInvariantSessionStopTargets
 	sessionInvariantSessionReconcile     daemonInvariantID = daemonInvariantSessionReconcile
+
+	sessionConflictWindowName = "resolve-conflict"
 )
 
 type SessionLongRunningExecutor interface {
@@ -813,6 +815,198 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 		)
 	}
 	return d.commandOutput(req, output), nil
+}
+
+func (d *Daemon) handleSessionResolveConflict(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	if d.sessionLongRunning != nil {
+		return d.sessionLongRunning.Execute(ctx, req, req.Command, func(execCtx context.Context) (protocol.ResponseEnvelope, error) {
+			return d.handleSessionResolveConflictDirect(execCtx, req)
+		})
+	}
+	return d.handleSessionResolveConflictDirect(ctx, req)
+}
+
+func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	var body protocol.SessionResolveConflictRequestBody
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	projectID := protocol.TrimProjectID(body.ProjectID.String())
+	if projectID == "" {
+		projectID = req.Meta.ProjectID.String()
+	}
+	projectID = d.canonicalProjectID(projectID)
+	issueID, err := naming.ParseIssueID(strings.TrimSpace(body.IssueID.String()))
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required fields: project_id/issue_id"), nil
+	}
+	issueIDString := issueID.String()
+	conflictFiles := normalizeConflictFiles(body.ConflictFiles)
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon session conflict resolution requested",
+			"project_id", projectID,
+			"issue_id", issueIDString,
+			"worktree", strings.TrimSpace(body.Worktree),
+			"conflict_file_count", len(conflictFiles),
+		)
+	}
+
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
+	tasks, err := issueClient.Search(ctx, issueIDString)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	task, ok := resolveSessionIssue(tasks, issueIDString)
+	if !ok {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("issue not found: %s", issueIDString)), nil
+	}
+
+	worktreePath, worktreeBranch, reusedWorktree, err := d.ensureConflictWorktree(ctx, projectID, issueIDString, task.Title, body.Worktree)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueIDString, worktreePath, worktreeBranch)
+
+	canonicalSessionID := naming.CanonicalSessionIDForIssue(d.sessionNamingScope(projectID), issueID).String()
+	sessionName, reusedSession, err := d.ensureConflictSession(ctx, projectID, issueIDString, canonicalSessionID, worktreePath)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if err := d.recordConflictSessionAttached(ctx, req, projectID, canonicalSessionID, issueIDString, reusedSession); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record conflict session projection: %v", err)), nil
+	}
+
+	reusedWindow, err := d.tmux.EnsureWindow(ctx, sessionName, sessionConflictWindowName, worktreePath)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	prompt := strings.TrimSpace(body.Prompt)
+	if prompt == "" {
+		prompt = buildConflictResolutionPrompt(issueIDString, conflictFiles)
+	}
+	launchCommand := d.buildSessionLaunchCommand(projectID, issueIDString, canonicalSessionID, body.Yolo, body.ImagePaths, prompt)
+	if err := d.tmux.SendKeys(ctx, sessionName+":"+sessionConflictWindowName, launchCommand); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+
+	resp := d.successResponse(req)
+	out := protocol.SessionResolveConflictResponseBody{
+		ProjectID:     naming.ProjectID(projectID),
+		IssueID:       issueID,
+		SessionID:     naming.SessionID(canonicalSessionID),
+		Worktree:      worktreePath,
+		WindowName:    sessionConflictWindowName,
+		ConflictFiles: conflictFiles,
+		ReusedSession: reusedSession,
+		ReusedWindow:  reusedWindow,
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal response body: %v", err)), nil
+	}
+	resp.Body = encoded
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon session conflict resolution launched",
+			"project_id", projectID,
+			"issue_id", issueIDString,
+			"session_id", canonicalSessionID,
+			"tmux_session", sessionName,
+			"window", sessionConflictWindowName,
+			"worktree", worktreePath,
+			"reused_session", reusedSession,
+			"reused_window", reusedWindow,
+			"reused_worktree", reusedWorktree,
+		)
+	}
+	return resp, nil
+}
+
+func (d *Daemon) ensureConflictWorktree(ctx context.Context, projectID, issueID, issueTitle, requestedWorktree string) (path, branch string, reused bool, err error) {
+	if worktree := strings.TrimSpace(requestedWorktree); worktree != "" {
+		return filepath.Clean(worktree), "", true, nil
+	}
+	worktreeManager := d.worktreeManagerForProject(projectID)
+	if worktreeManager == nil {
+		return "", "", false, errors.New("worktree manager unavailable")
+	}
+	if worktree, getErr := worktreeManager.Get(ctx, issueID); getErr == nil {
+		return worktree.Path, worktree.Branch, true, nil
+	}
+
+	baseBranch := d.baseBranchForProject(projectID)
+	worktree, createErr := worktreeManager.CreateWithTitle(ctx, issueID, issueTitle, baseBranch)
+	if createErr != nil {
+		if recoveredWorktree, recoverErr := worktreeManager.Get(ctx, issueID); recoverErr == nil {
+			return recoveredWorktree.Path, recoveredWorktree.Branch, true, nil
+		}
+		return "", "", false, createErr
+	}
+	if err := d.runWorktreeInitCommands(ctx, projectID, worktree.Path); err != nil {
+		return "", "", false, fmt.Errorf("worktree init failed: %w", err)
+	}
+	return worktree.Path, worktree.Branch, false, nil
+}
+
+func (d *Daemon) ensureConflictSession(ctx context.Context, projectID, issueID, canonicalSessionID, worktreePath string) (sessionName string, reused bool, err error) {
+	names, err := d.tmuxSessionNamesForIssue(ctx, projectID, issueID, canonicalSessionID, daemonInvariantSourceTmux)
+	if err != nil {
+		return "", false, err
+	}
+	for _, name := range names {
+		if strings.EqualFold(strings.TrimSpace(name), canonicalSessionID) {
+			return strings.TrimSpace(name), true, nil
+		}
+	}
+	if len(names) > 0 {
+		return strings.TrimSpace(names[0]), true, nil
+	}
+	if d.tmux == nil {
+		return "", false, errors.New("tmux service unavailable")
+	}
+	if err := d.tmux.NewSession(ctx, canonicalSessionID, worktreePath); err != nil {
+		return "", false, err
+	}
+	return canonicalSessionID, false, nil
+}
+
+func (d *Daemon) recordConflictSessionAttached(ctx context.Context, req protocol.RequestEnvelope, projectID, sessionID, issueID string, reusedSession bool) error {
+	if !reusedSession {
+		return d.applySessionLifecycleTransition(ctx, req, projectID, sessionID, issueID, daemonhandlers.CommandSessionStart)
+	}
+	err := d.applySessionLifecycleTransition(ctx, req, projectID, sessionID, issueID, daemonhandlers.CommandSessionAttach)
+	if err == nil || !errors.Is(err, daemonstate.ErrInvalidTransition) {
+		return err
+	}
+	if d.sessionStore == nil {
+		return errors.New("session store unavailable")
+	}
+	event, forceErr := d.sessionStore.ForceUpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached)
+	if forceErr != nil {
+		return forceErr
+	}
+	d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, req.Meta, event.Session)
+	return nil
+}
+
+func normalizeConflictFiles(files []string) []string {
+	seen := make(map[string]struct{}, len(files))
+	out := make([]string, 0, len(files))
+	for _, file := range files {
+		trimmed := strings.TrimSpace(file)
+		if trimmed == "" {
+			continue
+		}
+		cleaned := filepath.Clean(trimmed)
+		if _, exists := seen[cleaned]; exists {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		out = append(out, cleaned)
+	}
+	return out
 }
 
 func (d *Daemon) mutationFreshnessErrorResponse(req protocol.RequestEnvelope, err error) protocol.ResponseEnvelope {
@@ -1712,6 +1906,20 @@ func buildStartWorkPrompt(issueID, issueType, title string) string {
 		safeIssueType,
 		safeTitle,
 	)
+}
+
+func buildConflictResolutionPrompt(issueID string, conflictFiles []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Resolve merge conflicts for issue %s.\n\n", issueID)
+	b.WriteString("Start by running `az prime`. Inspect the conflicted files, resolve conflict markers, and run the focused checks needed to verify the merge.\n")
+	if len(conflictFiles) > 0 {
+		b.WriteString("\nConflicted files:\n")
+		for _, file := range conflictFiles {
+			fmt.Fprintf(&b, "- %s\n", sanitizePromptInline(file, 240))
+		}
+	}
+	b.WriteString("\nDo not create a PR or push unless explicitly asked. Leave a concise summary of resolved files and validation results.")
+	return b.String()
 }
 
 func sanitizePromptInline(value string, maxLength int) string {

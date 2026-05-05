@@ -128,6 +128,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		CommandSessionPause,
 		CommandSessionResume,
 		CommandSessionStop,
+		CommandSessionResolveConflict,
 		commandSessionStatus,
 		commandSessionRecover,
 		commandRuntimeReconcile,

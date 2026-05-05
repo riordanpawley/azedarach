@@ -468,6 +468,68 @@ func TestSessionLifecycleCommandsReturnPendingOperationError(t *testing.T) {
 	}
 }
 
+func TestResolveConflictRoutesThroughDaemon(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			body, err := json.Marshal(protocol.SessionResolveConflictResponseBody{
+				ProjectID:     naming.ProjectID("proj-a"),
+				IssueID:       naming.IssueID("az-1"),
+				SessionID:     naming.SessionID("proj-a-az-1"),
+				Worktree:      "/tmp/project-az-1",
+				WindowName:    "resolve-conflict",
+				ConflictFiles: []string{"README.md"},
+				ReusedSession: true,
+				ReusedWindow:  true,
+			})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-a")
+	out, err := client.ResolveConflict(context.Background(), ResolveConflictParams{
+		IssueID:       "az-1",
+		Worktree:      "/tmp/project-az-1",
+		ConflictFiles: []string{"README.md"},
+		Yolo:          true,
+		ImagePaths:    []string{"/tmp/conflict.png"},
+		Prompt:        "extra instructions",
+	})
+	if err != nil {
+		t.Fatalf("ResolveConflict error: %v", err)
+	}
+	if out.WindowName != "resolve-conflict" || !out.ReusedSession || !out.ReusedWindow {
+		t.Fatalf("resolve conflict output = %+v", out)
+	}
+	if transport.lastReq.Command != CommandSessionResolveConflict {
+		t.Fatalf("command = %q, want %q", transport.lastReq.Command, CommandSessionResolveConflict)
+	}
+	if transport.lastReq.Meta.ProjectID != "proj-a" {
+		t.Fatalf("project_id = %q, want proj-a", transport.lastReq.Meta.ProjectID)
+	}
+	var body protocol.SessionResolveConflictRequestBody
+	if err := json.Unmarshal(transport.lastReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	if body.ProjectID != "proj-a" || body.IssueID != "az-1" || body.Worktree != "/tmp/project-az-1" {
+		t.Fatalf("request body = %+v", body)
+	}
+	if len(body.ConflictFiles) != 1 || body.ConflictFiles[0] != "README.md" {
+		t.Fatalf("conflict files = %+v", body.ConflictFiles)
+	}
+	if !body.Yolo || len(body.ImagePaths) != 1 || body.Prompt != "extra instructions" {
+		t.Fatalf("request body options = %+v", body)
+	}
+}
+
 func TestDevServerLifecycleHelpers(t *testing.T) {
 	transport := &lifecycleRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

@@ -242,14 +242,20 @@ func TestSourceForSessionInvariant(t *testing.T) {
 }
 
 type sessionStartTmuxRunner struct {
-	sessions      map[string]bool
-	sendKeysCalls int
-	newSessionErr error
-	sendKeysErr   error
+	sessions         map[string]bool
+	windows          map[string]map[string]bool
+	sendKeysCalls    int
+	sendKeysTargets  []string
+	sendKeysPayloads []string
+	newSessionErr    error
+	sendKeysErr      error
 }
 
 func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
-	return &sessionStartTmuxRunner{sessions: map[string]bool{}}
+	return &sessionStartTmuxRunner{
+		sessions: map[string]bool{},
+		windows:  map[string]map[string]bool{},
+	}
 }
 
 func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string, error) {
@@ -273,9 +279,37 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 			return "", r.newSessionErr
 		}
 		r.sessions[args[3]] = true
+		if r.windows[args[3]] == nil {
+			r.windows[args[3]] = map[string]bool{"shell": true}
+		}
+		return "", nil
+	case "list-windows":
+		if len(args) < 3 {
+			return "", errors.New("missing session name")
+		}
+		windows := r.windows[args[2]]
+		names := make([]string, 0, len(windows))
+		for name := range windows {
+			names = append(names, name)
+		}
+		return strings.Join(names, "\n"), nil
+	case "new-window":
+		if len(args) < 6 {
+			return "", errors.New("missing window args")
+		}
+		session := args[3]
+		window := args[5]
+		if r.windows[session] == nil {
+			r.windows[session] = map[string]bool{}
+		}
+		r.windows[session][window] = true
 		return "", nil
 	case "send-keys":
 		r.sendKeysCalls++
+		if len(args) >= 3 {
+			r.sendKeysTargets = append(r.sendKeysTargets, args[2])
+			r.sendKeysPayloads = append(r.sendKeysPayloads, args[3])
+		}
 		if r.sendKeysErr != nil {
 			return "", r.sendKeysErr
 		}
@@ -718,6 +752,112 @@ func TestSessionStartDoesNotPersistTransitionWhenTmuxCreateFails(t *testing.T) {
 	snapshot := store.ReadSnapshot(projectID)
 	if len(snapshot.Sessions) != 0 {
 		t.Fatalf("session snapshot = %+v, want empty after failed start", snapshot.Sessions)
+	}
+}
+
+func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Resolve merge conflicts",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			Logger:       slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+	}
+	worktreePath := filepath.Join(t.TempDir(), "project-"+issueID)
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-resolve-conflict",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         protocol.CommandSessionResolveConflict,
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+		Body: marshalJSON(protocol.SessionResolveConflictRequestBody{
+			ProjectID:     naming.ProjectID(projectID),
+			IssueID:       naming.IssueID(issueID),
+			Worktree:      worktreePath,
+			ConflictFiles: []string{"README.md", " README.md ", "sub/../main.go"},
+			Yolo:          true,
+		}),
+	}
+
+	resp, err := daemon.handleSessionResolveConflictDirect(ctx, req)
+	if err != nil {
+		t.Fatalf("handleSessionResolveConflictDirect returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("resolve conflict response not OK: %+v", resp)
+	}
+
+	var out protocol.SessionResolveConflictResponseBody
+	if err := json.Unmarshal(resp.Body, &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	if out.SessionID.String() != sessionID || out.Worktree != worktreePath || out.WindowName != sessionConflictWindowName {
+		t.Fatalf("response = %+v, want session=%s worktree=%s window=%s", out, sessionID, worktreePath, sessionConflictWindowName)
+	}
+	if out.ReusedSession || out.ReusedWindow {
+		t.Fatalf("response reused flags = session:%v window:%v, want false/false", out.ReusedSession, out.ReusedWindow)
+	}
+	if len(out.ConflictFiles) != 2 || out.ConflictFiles[0] != "README.md" || out.ConflictFiles[1] != "main.go" {
+		t.Fatalf("conflict files = %+v, want [README.md main.go]", out.ConflictFiles)
+	}
+	if !tmuxRunner.sessions[sessionID] {
+		t.Fatalf("expected tmux session %q to be created", sessionID)
+	}
+	if !tmuxRunner.windows[sessionID][sessionConflictWindowName] {
+		t.Fatalf("expected conflict window to be created in session %q", sessionID)
+	}
+	if tmuxRunner.sendKeysCalls != 1 {
+		t.Fatalf("send-keys calls = %d, want 1", tmuxRunner.sendKeysCalls)
+	}
+	if gotTarget := tmuxRunner.sendKeysTargets[0]; gotTarget != sessionID+":"+sessionConflictWindowName {
+		t.Fatalf("send-keys target = %q, want %q", gotTarget, sessionID+":"+sessionConflictWindowName)
+	}
+	launchCommand := tmuxRunner.sendKeysPayloads[0]
+	if !strings.Contains(launchCommand, "Resolve merge conflicts for issue "+issueID) ||
+		!strings.Contains(launchCommand, "README.md") ||
+		!strings.Contains(launchCommand, "main.go") ||
+		!strings.Contains(launchCommand, "--dangerously-skip-permissions") {
+		t.Fatalf("launch command missing conflict prompt or yolo flag: %s", launchCommand)
+	}
+
+	snapshot := store.ReadSnapshot(projectID)
+	session, ok := snapshot.Sessions[sessionID]
+	if !ok {
+		t.Fatalf("missing session %q in snapshot", sessionID)
+	}
+	if session.State != daemonstate.SessionStateStarting {
+		t.Fatalf("session state = %s, want %s", session.State, daemonstate.SessionStateStarting)
 	}
 }
 
@@ -1963,12 +2103,12 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		session:      daemonhandlers.NewSessionHandler(store),
 		sessionStore: store,
-			worktreeManagersByRoot: map[string]*git.WorktreeManager{
-				repoDir: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/test"}, repoDir, slog.Default()),
-			},
-			worktreeManagersByProject: map[string]*git.WorktreeManager{
-				projectID: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/test"}, repoDir, slog.Default()),
-			},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/test"}, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/test"}, repoDir, slog.Default()),
+		},
 		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
 			repoDir: runtimeStateStore,
 		},
