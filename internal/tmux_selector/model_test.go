@@ -194,6 +194,54 @@ func TestModelViewUsesGridOnWideViewport(t *testing.T) {
 	}
 }
 
+func TestModelGridNavigationFollowsVisualRowsAndColumns(t *testing.T) {
+	entries := []InventoryEntry{
+		{SessionID: "az-one", IssueID: "one", TaskTitle: "One", HasTmuxSession: true},
+		{SessionID: "az-two", IssueID: "two", TaskTitle: "Two", HasTmuxSession: true},
+		{SessionID: "az-three", IssueID: "three", TaskTitle: "Three", HasTmuxSession: true},
+		{SessionID: "az-four", IssueID: "four", TaskTitle: "Four", HasTmuxSession: true},
+		{SessionID: "az-five", IssueID: "five", TaskTitle: "Five", HasTmuxSession: true},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 160, Height: 28})
+	model = updated.(Model)
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	model = updateKey(t, model, "right")
+	if model.cursor != 1 {
+		t.Fatalf("right cursor = %d, want 1", model.cursor)
+	}
+	model = updateKey(t, model, "down")
+	if model.cursor != 4 {
+		t.Fatalf("down cursor = %d, want 4", model.cursor)
+	}
+	model = updateKey(t, model, "right")
+	if model.cursor != 4 {
+		t.Fatalf("right from incomplete bottom row cursor = %d, want 4", model.cursor)
+	}
+	model = updateKey(t, model, "left")
+	if model.cursor != 3 {
+		t.Fatalf("left cursor = %d, want 3", model.cursor)
+	}
+	model = updateKey(t, model, "up")
+	if model.cursor != 0 {
+		t.Fatalf("up cursor = %d, want 0", model.cursor)
+	}
+}
+
+func updateKey(t *testing.T, model Model, key string) Model {
+	t.Helper()
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+	if cmd != nil {
+		t.Fatalf("key %q returned command", key)
+	}
+	return updated.(Model)
+}
+
 func TestRenderVisibleRowsFitsMeasuredHeight(t *testing.T) {
 	rows := []SessionRow{
 		{SessionID: "az-one", IssueID: "one", TaskTitle: "One title wraps enough to make this card taller than a fixed row assumption", HasTmuxSession: true},

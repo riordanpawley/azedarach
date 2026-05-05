@@ -232,14 +232,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "q", "esc":
 			return m, tea.Quit
 		case "j", "down":
-			if m.cursor < len(m.snapshot.Entries)-1 {
-				m.cursor++
-			}
+			m.moveCursor(0, 1)
 			return m, nil
 		case "k", "up":
-			if m.cursor > 0 {
-				m.cursor--
-			}
+			m.moveCursor(0, -1)
+			return m, nil
+		case "h", "left":
+			m.moveCursor(-1, 0)
+			return m, nil
+		case "l", "right":
+			m.moveCursor(1, 0)
 			return m, nil
 		case "r":
 			m.loading = true
@@ -311,9 +313,47 @@ func (m Model) View() string {
 		}
 		b.WriteString("\n")
 	}
-	b.WriteString(m.styles.StatusHint.Render("j/k move  enter/a switch  o/space open in az  r refresh  q close"))
+	b.WriteString(m.styles.StatusHint.Render("h/j/k/l move  enter/a switch  o/space open in az  r refresh  q close"))
 	b.WriteString("\n")
 	return b.String()
+}
+
+func (m *Model) moveCursor(dx int, dy int) {
+	count := len(m.snapshot.Entries)
+	if count == 0 {
+		m.cursor = 0
+		return
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	if m.cursor >= count {
+		m.cursor = count - 1
+	}
+	columns := gridColumnCount(m.width)
+	if columns <= 1 {
+		next := m.cursor + dy
+		if dx < 0 {
+			next = m.cursor - 1
+		} else if dx > 0 {
+			next = m.cursor + 1
+		}
+		if next >= 0 && next < count {
+			m.cursor = next
+		}
+		return
+	}
+	row := m.cursor / columns
+	col := m.cursor % columns
+	nextRow := row + dy
+	nextCol := col + dx
+	if nextRow < 0 || nextCol < 0 || nextCol >= columns {
+		return
+	}
+	next := nextRow*columns + nextCol
+	if next >= 0 && next < count {
+		m.cursor = next
+	}
 }
 
 func (m Model) selectedEntry() (InventoryEntry, bool) {
