@@ -31,6 +31,7 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"dev gate <issue-id>",
 		"opencode <init|plugin>",
 		"codex <install|guard|hook>",
+		"tmux <selector|install-selector>",
 		"spec <subcommand>",
 		"az notify idle_prompt az-123",
 		"az hooks install az-123",
@@ -45,6 +46,8 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"az opencode plugin install",
 		"az codex install",
 		"az codex hook run --json pre-tool-use",
+		"az tmux install-selector",
+		"az tmux selector",
 		"az spec req list --json",
 		"az spec req create --id bfs-req-1 --title \"Restore az spec grammar\" --issue bgh",
 		"az spec link add --issue bgh --req bfs-req-1 --role implements",
@@ -53,6 +56,55 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("usage missing %q: %q", want, output)
 		}
+	}
+}
+
+func TestTmuxInstallSelectorCommandWritesManagedBinding(t *testing.T) {
+	projectDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), ".tmux.conf")
+
+	opts, err := ParseTmuxInstallSelectorArgs([]string{
+		"--config", configPath,
+		"--project-dir", projectDir,
+		"--key", "S",
+		"--az-command", "az-dev",
+	})
+	if err != nil {
+		t.Fatalf("ParseTmuxInstallSelectorArgs error: %v", err)
+	}
+
+	output := captureStdout(t, func() error {
+		return TmuxInstallSelectorCommand(&Dependencies{RepoDir: projectDir}, opts)
+	})
+	if !strings.Contains(output, "Installed Azedarach tmux session selector") {
+		t.Fatalf("install output = %q", output)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read tmux config: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		"azedarach managed tmux session selector",
+		"bind-key S display-popup",
+		"az-dev tmux selector",
+		projectDir,
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("tmux config missing %q: %s", want, content)
+		}
+	}
+
+	if err := TmuxInstallSelectorCommand(&Dependencies{RepoDir: projectDir}, opts); err != nil {
+		t.Fatalf("second install error: %v", err)
+	}
+	data, err = os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read tmux config after second install: %v", err)
+	}
+	if got := strings.Count(string(data), "az-dev tmux selector"); got != 1 {
+		t.Fatalf("managed selector count = %d, want 1: %s", got, string(data))
 	}
 }
 

@@ -188,6 +188,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.daemonEvents = msg.events
 			cmds = append(cmds, m.waitForDaemonEventCmd())
 		}
+		if m.openSessionSelectorOnLoad {
+			m.openSessionSelectorOnLoad = false
+			cmds = append(cmds, m.openOrchestrationOverlay())
+		}
 		if len(cmds) == 0 {
 			return m, nil
 		}

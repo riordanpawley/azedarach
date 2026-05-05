@@ -17,6 +17,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
+	app "github.com/riordanpawley/azedarach/internal/tui"
 )
 
 func runNotifyCommand(cfg *config.Config, args []string) error {
@@ -286,6 +287,38 @@ func runCodexCommand(cfg *config.Config, args []string) error {
 		}
 	default:
 		return fmt.Errorf("unknown codex command: %s", args[0])
+	}
+}
+
+func runTmuxCommand(cfg *config.Config, args []string) error {
+	if len(args) == 0 || isHelpArg(args[0]) {
+		cli.PrintTmuxUsage()
+		return nil
+	}
+
+	switch args[0] {
+	case "selector":
+		if len(args) > 1 {
+			cli.PrintTmuxUsage()
+			return fmt.Errorf("usage: az tmux selector")
+		}
+		runTUIWithOptions(cfg, app.WithSessionSelectorOnLoad())
+		return nil
+	case "install-selector":
+		if len(args) > 1 && sessionHelpRequested(args[1:]...) {
+			cli.PrintTmuxUsage()
+			return nil
+		}
+		opts, err := cli.ParseTmuxInstallSelectorArgs(args[1:])
+		if err != nil {
+			cli.PrintTmuxUsage()
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.TmuxInstallSelectorCommand(deps, opts)
+		})
+	default:
+		return fmt.Errorf("unknown tmux command: %s", args[0])
 	}
 }
 

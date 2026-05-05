@@ -155,6 +155,7 @@ type Model struct {
 	pendingCreatedTaskID          string
 	pendingCreatedWorkspaceTaskID string
 	openCreatedTaskInWorkspace    bool
+	openSessionSelectorOnLoad     bool
 	runtimeSignalsByTask          map[string]board.RuntimeSignals
 	runtimeSignalWorktreeByTask   map[string]string
 
@@ -228,8 +229,23 @@ type Model struct {
 	logger *slog.Logger
 }
 
+// Option configures initial TUI behavior.
+type Option func(*Model)
+
+// WithSessionSelectorOnLoad opens the tmux session selector after the first task snapshot loads.
+func WithSessionSelectorOnLoad() Option {
+	return func(m *Model) {
+		m.openSessionSelectorOnLoad = true
+	}
+}
+
 // New creates a new application model with the given config
 func New(cfg *config.Config) Model {
+	return NewWithOptions(cfg)
+}
+
+// NewWithOptions creates a new application model with optional initial behavior.
+func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 	// Initialize spinner
 	s := spinner.New()
 	s.Spinner = spinner.Dot
@@ -299,6 +315,11 @@ func New(cfg *config.Config) Model {
 	logger.Info("tui runtime initialized", "repo_dir", repoDir, "runtime_repo_dir", runtimeRepoDir, "daemon_socket", daemonSocketPath, "project", m.currentProject)
 	m.refreshDaemonProjectRouteID()
 	m.daemonClient.WithProjectRouteID(m.daemonProjectRouteIDValue())
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&m)
+		}
+	}
 	return m
 }
 

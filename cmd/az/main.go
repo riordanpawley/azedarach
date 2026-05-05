@@ -397,6 +397,12 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "tmux":
+		if err := runTmuxCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "prime":
 		if len(commandArgs) > 0 {
 			fmt.Fprintf(os.Stderr, "Usage: az prime\n")
@@ -830,7 +836,11 @@ func main() {
 
 // runTUI starts the terminal user interface
 func runTUI(cfg *config.Config) {
-	model := app.New(cfg)
+	runTUIWithOptions(cfg)
+}
+
+func runTUIWithOptions(cfg *config.Config, opts ...app.Option) {
+	model := app.NewWithOptions(cfg, opts...)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
