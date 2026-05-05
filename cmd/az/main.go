@@ -21,7 +21,7 @@ func main() {
 			fmt.Println(buildinfo.VersionString())
 			return
 		case "help", "-h", "--help":
-			cli.PrintUsage()
+			printRootUsage()
 			return
 		}
 	}
@@ -46,18 +46,16 @@ func main() {
 	switch command {
 	case "session":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az session <start|attach|kill|status> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az session <start|attach|stop|status> [arguments]\n")
 			os.Exit(1)
 		}
 		sessionCommand := commandArgs[0]
 		sessionArgs := commandArgs[1:]
 		if sessionCommand == "help" || sessionCommand == "-h" || sessionCommand == "--help" {
-			helpText, err := clitext.Render("session_help", nil)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-			fmt.Print(helpText)
+			printSessionUsage()
+			os.Exit(0)
+		}
+		if sessionHelpRequested(sessionArgs...) && printSessionCommandUsage(sessionCommand, true) {
 			os.Exit(0)
 		}
 		if err := runSessionCommand(cfg, sessionCommand, sessionArgs, true); err != nil {
@@ -67,35 +65,62 @@ func main() {
 
 	case "branch":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az branch <merge> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az branch <merge|agent-merge> [arguments]\n")
 			os.Exit(1)
 		}
 		branchCommand := commandArgs[0]
 		branchArgs := commandArgs[1:]
+		if sessionHelpRequested(branchArgs...) {
+			if usage, ok := branchCommandUsage(branchCommand); ok {
+				fmt.Println(usage)
+				os.Exit(0)
+			}
+		}
 		if err := runBranchCommand(cfg, branchCommand, branchArgs); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 
 	case "start":
+		if sessionHelpRequested(commandArgs...) && printSessionCommandUsage(command, false) {
+			os.Exit(0)
+		}
 		if err := runSessionCommand(cfg, command, commandArgs, false); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 
 	case "attach":
+		if sessionHelpRequested(commandArgs...) && printSessionCommandUsage(command, false) {
+			os.Exit(0)
+		}
+		if err := runSessionCommand(cfg, command, commandArgs, false); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "stop":
+		if sessionHelpRequested(commandArgs...) && printSessionCommandUsage(command, false) {
+			os.Exit(0)
+		}
 		if err := runSessionCommand(cfg, command, commandArgs, false); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 
 	case "kill":
+		if sessionHelpRequested(commandArgs...) && printSessionCommandUsage(command, false) {
+			os.Exit(0)
+		}
 		if err := runSessionCommand(cfg, command, commandArgs, false); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 
 	case "status":
+		if sessionHelpRequested(commandArgs...) && printSessionCommandUsage(command, false) {
+			os.Exit(0)
+		}
 		if err := runSessionCommand(cfg, command, commandArgs, false); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -798,7 +823,7 @@ func main() {
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", command)
-		cli.PrintUsage()
+		printRootUsage()
 		os.Exit(1)
 	}
 }
@@ -812,6 +837,98 @@ func runTUI(cfg *config.Config) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func printRootUsage() {
+	usage, err := clitext.Render("root_usage", nil)
+	if err != nil {
+		cli.PrintUsage()
+		return
+	}
+	replacements := map[string]string{
+		"session <subcommand>  Session commands (start|attach|kill|status)":             "session <subcommand>  Session commands (start|attach|stop|status|resolve-conflict)",
+		"branch <subcommand>   Branch commands (merge)":                                 "branch <subcommand>   Branch commands (merge|agent-merge)",
+		"kill <issue-id>       Alias for 'az session kill <issue-id>'":                  "stop <issue-id>       Alias for 'az session stop <issue-id>'",
+		"az session kill az-123    # Kill issue az-123's session":                       "az session stop az-123    # Stop issue az-123's session",
+		"az session status az-123  # Show status for az-123":                            "az session status az-123  # Show status for az-123\n  az session resolve-conflict az-123 --file README.md",
+		"az branch merge az-123    # Merge issue branch into base branch (daemon path)": "az branch merge az-123    # Merge issue branch into base branch (daemon path)\n  az branch agent-merge az-123 --target base",
+	}
+	for old, new := range replacements {
+		usage = strings.ReplaceAll(usage, old, new)
+	}
+	usage = strings.TrimRight(usage, "\n") + "\n\nDeprecated aliases:\n  az session kill <issue-id> [--wait]  Alias for az session stop\n  az kill <issue-id> [--wait]          Alias for az stop\n"
+	fmt.Print(usage)
+}
+
+func printSessionUsage() {
+	fmt.Println("Usage: az session <start|attach|stop|status|resolve-conflict> [arguments]")
+	fmt.Println()
+	fmt.Println("Commands:")
+	fmt.Println("  start <issue-id>      Start a session for an issue")
+	fmt.Println("  attach <issue-id>     Attach to an existing issue session")
+	fmt.Println("  stop <issue-id>       Stop an issue session")
+	fmt.Println("  status [issue-id]     Show all sessions or one issue session status")
+	fmt.Println("  resolve-conflict <issue-id> [--worktree <path>] [--file <path> ...] [--prompt <text>]")
+	fmt.Println("                        Launch conflict-resolution agent")
+	fmt.Println()
+	fmt.Println("Deprecated aliases:")
+	fmt.Println("  kill <issue-id>       Deprecated alias for stop")
+}
+
+func printSessionCommandUsage(command string, namespaced bool) bool {
+	usage, ok := sessionCommandUsage(command, namespaced)
+	if !ok {
+		return false
+	}
+	fmt.Println(usage)
+	return true
+}
+
+func sessionCommandUsage(command string, namespaced bool) (string, bool) {
+	switch command {
+	case "start":
+		if namespaced {
+			return "usage: az session start <issue-id> [--wait]", true
+		}
+		return "usage: az start <issue-id> [--wait]", true
+	case "attach":
+		if namespaced {
+			return "usage: az session attach <issue-id>", true
+		}
+		return "usage: az attach <issue-id>", true
+	case "stop":
+		if namespaced {
+			return "usage: az session stop <issue-id> [--wait]", true
+		}
+		return "usage: az stop <issue-id> [--wait]", true
+	case "kill":
+		if namespaced {
+			return "usage: az session kill <issue-id> [--wait] (deprecated alias for az session stop)", true
+		}
+		return "usage: az kill <issue-id> [--wait] (deprecated alias for az stop)", true
+	case "status":
+		if namespaced {
+			return "usage: az session status [issue-id]", true
+		}
+		return "usage: az status [issue-id]", true
+	case "resolve-conflict":
+		if namespaced {
+			return "usage: az session resolve-conflict <issue-id> [--worktree <path>] [--file <path> ...] [--prompt <text>]", true
+		}
+		return "", false
+	default:
+		return "", false
+	}
+}
+
+func sessionHelpRequested(values ...string) bool {
+	for _, value := range values {
+		switch strings.TrimSpace(value) {
+		case "-h", "--help":
+			return true
+		}
+	}
+	return false
 }
 
 // runCommand executes a CLI command with dependency injection
@@ -832,15 +949,6 @@ func runCommandAtRepoDir(cfg *config.Config, repoDir string, fn func(*cli.Depend
 }
 
 func runSessionCommand(cfg *config.Config, command string, args []string, namespaced bool) error {
-	sessionHelpRequested := func(values ...string) bool {
-		for _, value := range values {
-			switch strings.TrimSpace(value) {
-			case "-h", "--help":
-				return true
-			}
-		}
-		return false
-	}
 	switch command {
 	case "start":
 		if sessionHelpRequested(args...) {
@@ -884,26 +992,35 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
 			return cli.AttachCommand(deps, args[0])
 		})
-	case "kill":
+	case "stop", "kill":
+		canonicalUsage := "usage: az session stop <issue-id> [--wait]"
+		aliasUsage := "usage: az stop <issue-id> [--wait]"
+		if command == "kill" {
+			if namespaced {
+				canonicalUsage = "usage: az session kill <issue-id> [--wait] (deprecated alias for az session stop)"
+			} else {
+				aliasUsage = "usage: az kill <issue-id> [--wait] (deprecated alias for az stop)"
+			}
+		}
 		if sessionHelpRequested(args...) {
 			if namespaced {
-				return fmt.Errorf("usage: az session kill <issue-id> [--wait]")
+				return fmt.Errorf("%s", canonicalUsage)
 			}
-			return fmt.Errorf("usage: az kill <issue-id> [--wait]")
+			return fmt.Errorf("%s", aliasUsage)
 		}
 		if len(args) < 1 || len(args) > 2 {
 			if namespaced {
-				return fmt.Errorf("usage: az session kill <issue-id> [--wait]")
+				return fmt.Errorf("%s", canonicalUsage)
 			}
-			return fmt.Errorf("usage: az kill <issue-id> [--wait]")
+			return fmt.Errorf("%s", aliasUsage)
 		}
 		opts := cli.SessionCommandOptions{}
 		if len(args) == 2 {
 			if args[1] != "--wait" {
 				if namespaced {
-					return fmt.Errorf("usage: az session kill <issue-id> [--wait]")
+					return fmt.Errorf("%s", canonicalUsage)
 				}
-				return fmt.Errorf("usage: az kill <issue-id> [--wait]")
+				return fmt.Errorf("%s", aliasUsage)
 			}
 			opts.Wait = true
 		}
@@ -929,9 +1046,23 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
 			return cli.StatusCommand(deps, issueID)
 		})
+	case "resolve-conflict":
+		if !namespaced {
+			return fmt.Errorf("unknown session command: %s", command)
+		}
+		if sessionHelpRequested(args...) {
+			return fmt.Errorf("usage: az session resolve-conflict <issue-id> [--worktree <path>] [--file <path> ...] [--prompt <text>]")
+		}
+		opts, err := parseSessionResolveConflictArgs(args)
+		if err != nil {
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.SessionResolveConflictCommand(deps, opts)
+		})
 	default:
 		if namespaced {
-			return fmt.Errorf("unknown session command: %s (usage: az session <start|attach|kill|status>)", command)
+			return fmt.Errorf("unknown session command: %s (usage: az session <start|attach|stop|status|resolve-conflict>)", command)
 		}
 		return fmt.Errorf("unknown session command: %s", command)
 	}
@@ -950,10 +1081,98 @@ func runBranchCommand(cfg *config.Config, command string, args []string) error {
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
 			return cli.BranchMergeToBaseCommand(deps, issueID)
 		})
+	case "agent-merge":
+		if sessionHelpRequested(args...) {
+			return fmt.Errorf("usage: az branch agent-merge <issue-id> [--target base|<issue-id>]")
+		}
+		opts, err := parseBranchAgentMergeArgs(args)
+		if err != nil {
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.BranchAgentMergeCommand(deps, opts)
+		})
 	default:
 		if command == "m2m" {
 			return fmt.Errorf("unknown branch command: %s (did you mean `az branch merge`?)", command)
 		}
-		return fmt.Errorf("unknown branch command: %s (usage: az branch <merge>)", command)
+		return fmt.Errorf("unknown branch command: %s (usage: az branch <merge|agent-merge>)", command)
 	}
+}
+
+func branchCommandUsage(command string) (string, bool) {
+	switch command {
+	case "merge", "merge-to-base":
+		return "usage: az branch merge [issue-id]", true
+	case "agent-merge":
+		return "usage: az branch agent-merge <issue-id> [--target base|<issue-id>]", true
+	default:
+		return "", false
+	}
+}
+
+func parseSessionResolveConflictArgs(args []string) (cli.SessionResolveConflictOptions, error) {
+	opts := cli.SessionResolveConflictOptions{}
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		switch arg {
+		case "--worktree":
+			i++
+			if i >= len(args) {
+				return opts, fmt.Errorf("usage: az session resolve-conflict <issue-id> [--worktree <path>] [--file <path> ...] [--prompt <text>]")
+			}
+			opts.Worktree = args[i]
+		case "--file":
+			i++
+			if i >= len(args) {
+				return opts, fmt.Errorf("usage: az session resolve-conflict <issue-id> [--worktree <path>] [--file <path> ...] [--prompt <text>]")
+			}
+			opts.ConflictFiles = append(opts.ConflictFiles, args[i])
+		case "--prompt":
+			i++
+			if i >= len(args) {
+				return opts, fmt.Errorf("usage: az session resolve-conflict <issue-id> [--worktree <path>] [--file <path> ...] [--prompt <text>]")
+			}
+			opts.Prompt = args[i]
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return opts, fmt.Errorf("usage: az session resolve-conflict <issue-id> [--worktree <path>] [--file <path> ...] [--prompt <text>]")
+			}
+			if strings.TrimSpace(opts.IssueID) != "" {
+				return opts, fmt.Errorf("usage: az session resolve-conflict <issue-id> [--worktree <path>] [--file <path> ...] [--prompt <text>]")
+			}
+			opts.IssueID = arg
+		}
+	}
+	if strings.TrimSpace(opts.IssueID) == "" {
+		return opts, fmt.Errorf("usage: az session resolve-conflict <issue-id> [--worktree <path>] [--file <path> ...] [--prompt <text>]")
+	}
+	return opts, nil
+}
+
+func parseBranchAgentMergeArgs(args []string) (cli.BranchAgentMergeOptions, error) {
+	opts := cli.BranchAgentMergeOptions{Target: "base"}
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		switch arg {
+		case "--target":
+			i++
+			if i >= len(args) {
+				return opts, fmt.Errorf("usage: az branch agent-merge <issue-id> [--target base|<issue-id>]")
+			}
+			opts.Target = args[i]
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return opts, fmt.Errorf("usage: az branch agent-merge <issue-id> [--target base|<issue-id>]")
+			}
+			if strings.TrimSpace(opts.IssueID) != "" {
+				return opts, fmt.Errorf("usage: az branch agent-merge <issue-id> [--target base|<issue-id>]")
+			}
+			opts.IssueID = arg
+		}
+	}
+	if strings.TrimSpace(opts.IssueID) == "" {
+		return opts, fmt.Errorf("usage: az branch agent-merge <issue-id> [--target base|<issue-id>]")
+	}
+	return opts, nil
 }

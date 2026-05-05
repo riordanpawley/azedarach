@@ -968,6 +968,126 @@ func TestBranchMergeToBaseCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(
 	}
 }
 
+func TestBranchAgentMergeCommandLaunchesAgentWhenPreflightConflicts(t *testing.T) {
+	commands := make([]string, 0, 4)
+	var resolveBody protocol.SessionResolveConflictRequestBody
+	baseWorktree := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Git.BaseBranch = "trunk"
+	deps := &Dependencies{
+		Config: cfg,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"worktrees": []map[string]any{
+							{
+								"path":     "/tmp/azedarach-az-123",
+								"branch":   "riordan/az-123/some-change",
+								"issue_id": "az-123",
+							},
+						},
+					}), nil
+				case daemonclient.CommandGitMergePreflight:
+					var body daemonclient.GitMergePreflightRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal preflight body: %v", err)
+					}
+					if body.SourceID != "az-123" || body.TargetID != "base" || body.TargetRef != "trunk" || body.SourceBranch != "riordan/az-123/some-change" {
+						t.Fatalf("preflight body = %+v", body)
+					}
+					return responseWithJSON(req, daemonclient.GitMergePreflightResponse{
+						SourceID:       "az-123",
+						SourceWorktree: "/tmp/azedarach-az-123",
+						TargetID:       "base",
+						TargetWorktree: baseWorktree,
+						Clean:          false,
+						Reasons:        []string{"Merge would conflict in 1 files: README.md"},
+						ConflictFiles:  []string{"README.md"},
+					}), nil
+				case daemonclient.CommandSessionResolveConflict:
+					if err := json.Unmarshal(req.Body, &resolveBody); err != nil {
+						t.Fatalf("unmarshal resolve body: %v", err)
+					}
+					return responseWithJSON(req, protocol.SessionResolveConflictResponseBody{
+						ProjectID:  naming.ProjectID("proj"),
+						IssueID:    naming.IssueID("az-123"),
+						SessionID:  naming.SessionID("az-123"),
+						Worktree:   "/tmp/azedarach-az-123",
+						WindowName: "resolve-conflict",
+					}), nil
+				default:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   baseWorktree,
+	}
+
+	output := captureStdout(t, func() error {
+		return BranchAgentMergeCommand(deps, BranchAgentMergeOptions{IssueID: "az-123", Target: "base"})
+	})
+	if !strings.Contains(output, "Agent merge launched for az-123 -> base") {
+		t.Fatalf("output = %q, want launched summary", output)
+	}
+	if resolveBody.IssueID != "az-123" || resolveBody.Worktree != "/tmp/azedarach-az-123" {
+		t.Fatalf("resolve body = %+v", resolveBody)
+	}
+	if !reflect.DeepEqual(resolveBody.ConflictFiles, []string{"README.md"}) {
+		t.Fatalf("resolve conflict files = %+v", resolveBody.ConflictFiles)
+	}
+	if !strings.Contains(resolveBody.Prompt, "merge trunk into riordan/az-123/some-change") {
+		t.Fatalf("prompt = %q, want base merge instruction", resolveBody.Prompt)
+	}
+	want := []string{daemonclient.CommandWorktreeList, daemonclient.CommandGitMergePreflight, daemonclient.CommandSessionResolveConflict}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands = %#v, want %#v", commands, want)
+	}
+}
+
+func TestBranchAgentMergeCommandCleanPreflightDoesNotLaunchAgent(t *testing.T) {
+	commands := make([]string, 0, 4)
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"worktrees": []map[string]any{
+							{"path": "/tmp/azedarach-az-123", "branch": "az/az-123", "issue_id": "az-123"},
+						},
+					}), nil
+				case daemonclient.CommandGitMergePreflight:
+					return responseWithJSON(req, daemonclient.GitMergePreflightResponse{Clean: true}), nil
+				default:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   t.TempDir(),
+	}
+
+	output := captureStdout(t, func() error {
+		return BranchAgentMergeCommand(deps, BranchAgentMergeOptions{IssueID: "az-123"})
+	})
+	if !strings.Contains(output, "Merge preflight clean for az-123 -> base; no agent needed.") {
+		t.Fatalf("output = %q, want clean preflight message", output)
+	}
+	for _, command := range commands {
+		if command == daemonclient.CommandSessionResolveConflict {
+			t.Fatalf("unexpected resolve conflict command: %v", commands)
+		}
+	}
+}
+
 func TestStartCommandPrintsPendingOperationState(t *testing.T) {
 	taskListBody, err := marshalTaskListBody([]domain.Task{
 		{ID: "issue-1", Title: "Example", Status: domain.StatusOpen},
@@ -1427,6 +1547,92 @@ func TestCommandErrorUsesTransportMessage(t *testing.T) {
 
 	err = StartCommand(deps, "issue-1")
 	if err == nil || err.Error() != "session already exists: issue-1 (use 'az attach issue-1' to connect)" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSessionResolveConflictCommandUsesDaemonClient(t *testing.T) {
+	var gotReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				gotReq = req
+				if req.Command != daemonclient.CommandSessionResolveConflict {
+					t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionResolveConflict)
+				}
+				return responseWithJSON(req, protocol.SessionResolveConflictResponseBody{
+					ProjectID:  naming.ProjectID("proj"),
+					IssueID:    naming.IssueID("bxc"),
+					SessionID:  naming.SessionID("bxc"),
+					Worktree:   "/tmp/bxc",
+					WindowName: "resolve-conflict",
+				}), nil
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return SessionResolveConflictCommand(deps, SessionResolveConflictOptions{
+			IssueID:       " bxc ",
+			Worktree:      "/tmp/bxc",
+			ConflictFiles: []string{"README.md", "cmd/az/main.go"},
+			Prompt:        "Resolve the conflict and keep tests green.",
+		})
+	})
+
+	if gotReq.Command != daemonclient.CommandSessionResolveConflict {
+		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandSessionResolveConflict)
+	}
+	var body protocol.SessionResolveConflictRequestBody
+	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if body.ProjectID != "proj" || body.IssueID != "bxc" || body.Worktree != "/tmp/bxc" {
+		t.Fatalf("body route fields = %+v", body)
+	}
+	if !reflect.DeepEqual(body.ConflictFiles, []string{"README.md", "cmd/az/main.go"}) {
+		t.Fatalf("conflict files = %+v", body.ConflictFiles)
+	}
+	if body.Prompt != "Resolve the conflict and keep tests green." {
+		t.Fatalf("prompt = %q", body.Prompt)
+	}
+	wantOutput := "Conflict resolution agent launched for bxc\nWorktree: /tmp/bxc\nWindow: resolve-conflict\n"
+	if output != wantOutput {
+		t.Fatalf("output = %q, want %q", output, wantOutput)
+	}
+}
+
+func TestSessionResolveConflictCommandReturnsDaemonError(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandSessionResolveConflict {
+					t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionResolveConflict)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					CompletedAt:     req.SentAt,
+					OK:              false,
+					Error: &protocol.ErrorEnvelope{
+						Code:    protocol.ErrorCodeConflict,
+						Message: "session is not attached",
+					},
+				}, nil
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	err := SessionResolveConflictCommand(deps, SessionResolveConflictOptions{IssueID: "bxc"})
+	if err == nil || err.Error() != "failed to resolve conflicts for bxc: conflict: session is not attached" {
 		t.Fatalf("error = %v", err)
 	}
 }

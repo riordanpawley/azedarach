@@ -46,7 +46,8 @@ azd --help
 ### CLI + TUI
 
 - Start interactive board: `az`
-- Session lifecycle commands: `az session start|attach|kill|status`
+- Session lifecycle commands: `az session start|attach|stop|status`
+- Deprecated session stop aliases remain available: `az session kill`, `az kill`
 - Project registry commands: `az project list|add|remove|switch`
 - Snapshot and support commands: `az export`, `az sync`, `az prime`
 
