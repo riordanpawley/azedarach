@@ -15,7 +15,8 @@
 ││                                                                              [M] Abort merge                        │
 ││                                                                              [H] Open Helix                         │
 ││                                                                              [i] Attachments                        │
-││                                                                              [r] Dev servers                        │
+││                                                                              [r] Refresh issue                      │
+││                                                                              [V] Dev servers                        │
 ││                                                                              [f] Show diff                          │
 ││                                                                              [w] Cleanup worktree                   │
 ││                                                                              [W] Delete task + cleanup worktree     │
@@ -25,5 +26,4 @@
 ││                                                                              [2] Set status: In Progress            │
 ││                                                                              [3] Set status: Blocked                │
 ││                                                                              [4] Set status: Done                   │
-││                                                                              [c] Create child task                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

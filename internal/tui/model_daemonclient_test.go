@@ -3362,7 +3362,8 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 
 		m := newDaemonTestModel(transport)
 		m.tasks = []domain.Task{
-			{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress},
+			{ID: "az-1", Title: "Task 1 stale", Status: domain.StatusOpen},
+			{ID: "az-2", Title: "Unrelated", Status: domain.StatusBlocked},
 		}
 		setTaskSession(t, &m, "az-1", &domain.Session{
 			IssueID:  "az-1",
@@ -3396,6 +3397,12 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		}
 		if updated.pendingCleanup == nil {
 			t.Fatal("expected pending cleanup confirmation")
+		}
+		if len(updated.tasks) != 2 || updated.tasks[0].Title != "Task 1" || updated.tasks[0].Status != domain.StatusInProgress || !updated.tasks[0].HasWorktree {
+			t.Fatalf("selected task after cleanup preflight = %+v, want refreshed task plus unrelated task", updated.tasks)
+		}
+		if updated.tasks[1].ID.String() != "az-2" || updated.tasks[1].Status != domain.StatusBlocked {
+			t.Fatalf("unrelated task after cleanup preflight = %+v, want preserved blocked az-2", updated.tasks[1])
 		}
 		if got := transport.requests; len(got) != 2 ||
 			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
@@ -4014,7 +4021,7 @@ func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
 					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
-						{ID: naming.IssueID(issueID), Title: "Task fresh", Status: domain.StatusInProgress, Type: domain.TypeTask},
+						{ID: naming.IssueID(issueID), Title: "Task fresh", Status: domain.StatusDone, Type: domain.TypeTask},
 					}),
 				}, nil
 			default:
@@ -4027,7 +4034,8 @@ func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
 	m := newDaemonTestModel(transport)
 	m.editor.EnterNormal()
 	m.tasks = []domain.Task{
-		{ID: naming.IssueID(issueID), Title: "Task stale", Status: domain.StatusInProgress, Type: domain.TypeTask},
+		{ID: naming.IssueID(issueID), Title: "Task stale", Status: domain.StatusOpen, Type: domain.TypeTask},
+		{ID: naming.IssueID("az-2"), Title: "Unrelated board task", Status: domain.StatusBlocked, Type: domain.TypeTask},
 	}
 	m.nav.SelectTask(issueID, 0)
 
@@ -4058,6 +4066,105 @@ func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
 	}
 	if !strings.Contains(refreshed.View(), "Task fresh") {
 		t.Fatalf("workspace should refresh from daemon snapshot, got %q", refreshed.View())
+	}
+	if len(next.tasks) != 2 || next.tasks[0].Title != "Task fresh" || next.tasks[0].Status != domain.StatusDone {
+		t.Fatalf("board task after workspace refresh = %+v, want fresh done task plus preserved unrelated task", next.tasks)
+	}
+	if next.tasks[1].ID.String() != "az-2" || next.tasks[1].Status != domain.StatusBlocked {
+		t.Fatalf("unrelated board task after workspace refresh = %+v, want preserved blocked az-2", next.tasks[1])
+	}
+	columns := next.buildColumns()
+	doneTasks := columns[domain.StatusDone.Column()].Tasks
+	if len(doneTasks) != 1 || doneTasks[0].ID.String() != issueID {
+		t.Fatalf("done column after workspace refresh = %+v, want %s", doneTasks, issueID)
+	}
+	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskList {
+		t.Fatalf("requests = %v", got)
+	}
+}
+
+func TestTaskWorkspaceRKeyRefreshesCurrentIssue(t *testing.T) {
+	const issueID = "az-1"
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandRuntimeReconcileIssue:
+				var body protocol.RuntimeReconcileIssueRequestBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal reconcile body: %v", err)
+				}
+				if len(body.IssueIDs) != 1 || body.IssueIDs[0].String() != issueID {
+					t.Fatalf("reconcile issue_ids = %+v, want [%s]", body.IssueIDs, issueID)
+				}
+				respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{ProjectID: "default"})
+				if err != nil {
+					t.Fatalf("marshal reconcile response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandTaskList:
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+						{ID: naming.IssueID(issueID), Title: "Task fresh from r", Status: domain.StatusBlocked, Type: domain.TypeTask},
+					}),
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{
+		{ID: naming.IssueID(issueID), Title: "Task stale", Status: domain.StatusOpen, Type: domain.TypeTask},
+	}
+	m.nav.SelectTask(issueID, 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30))
+
+	updatedAny, selectionCmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if selectionCmd == nil {
+		t.Fatal("expected r key in workspace to emit a selection command")
+	}
+
+	nextAny, refreshCmd := updated.Update(selectionCmd())
+	next, ok := nextAny.(Model)
+	if !ok {
+		t.Fatalf("next model type = %T, want Model", nextAny)
+	}
+	if refreshCmd == nil {
+		t.Fatal("expected r selection to start issue refresh")
+	}
+
+	refreshedMsg := refreshCmd()
+	refreshedAny, _ := next.Update(refreshedMsg)
+	refreshed, ok := refreshedAny.(Model)
+	if !ok {
+		t.Fatalf("refreshed model type = %T, want Model", refreshedAny)
+	}
+	workspace, ok := refreshed.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected TaskWorkspaceOverlay after refresh, got %T", refreshed.overlayStack.Current())
+	}
+	if !strings.Contains(workspace.View(), "Task fresh from r") {
+		t.Fatalf("workspace should refresh current issue on r, got %q", workspace.View())
+	}
+	if len(refreshed.tasks) != 1 || refreshed.tasks[0].Title != "Task fresh from r" || refreshed.tasks[0].Status != domain.StatusBlocked {
+		t.Fatalf("board task after r refresh = %+v", refreshed.tasks)
 	}
 	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskList {
 		t.Fatalf("requests = %v", got)
@@ -4308,8 +4415,11 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 		if !ok {
 			t.Fatalf("updated model type = %T, want Model", updated)
 		}
-		if len(updatedModel.toasts) != 0 {
-			t.Fatalf("unexpected immediate toast; command should report result asynchronously: %+v", updatedModel.toasts)
+		if len(updatedModel.toasts) == 0 {
+			t.Fatal("expected immediate feedback toast")
+		}
+		if got := updatedModel.toasts[len(updatedModel.toasts)-1].Message; got != "Opening PR for az-1" {
+			t.Fatalf("toast = %q, want Opening PR for az-1", got)
 		}
 	})
 
@@ -6598,6 +6708,7 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		m.tasks = []domain.Task{
 			{ID: "az-1", Status: domain.StatusOpen},
 			{ID: "az-2", Status: domain.StatusOpen},
+			{ID: "az-3", Status: domain.StatusBlocked},
 		}
 
 		updatedAny, cmd := m.handleBulkAction(overlay.BulkActionMsg{
@@ -6628,6 +6739,18 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		}
 		if next.pendingBulkCleanup == nil {
 			t.Fatal("expected pending bulk cleanup confirmation")
+		}
+		if len(next.tasks) != 3 {
+			t.Fatalf("tasks after preflight = %+v, want selected refreshes plus unrelated task", next.tasks)
+		}
+		if !next.tasks[0].HasUncommittedChanges || next.tasks[0].GitAdditions != 3 || next.tasks[0].GitDeletions != 1 {
+			t.Fatalf("selected dirty task after preflight = %+v, want refreshed git status", next.tasks[0])
+		}
+		if next.tasks[1].GitAheadCount != 2 {
+			t.Fatalf("selected ahead task after preflight = %+v, want refreshed ahead count", next.tasks[1])
+		}
+		if next.tasks[2].ID.String() != "az-3" || next.tasks[2].Status != domain.StatusBlocked {
+			t.Fatalf("unrelated task after preflight = %+v, want preserved blocked az-3", next.tasks[2])
 		}
 		if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskList {
 			t.Fatalf("requests = %v", got)
@@ -6699,6 +6822,9 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		}
 		if updated.pendingBulkCleanup != nil {
 			t.Fatal("did not expect pending bulk cleanup confirmation for clean preflight")
+		}
+		if len(updated.tasks) != 1 || updated.tasks[0].HasUncommittedChanges || updated.tasks[0].GitAheadCount != 0 {
+			t.Fatalf("tasks after clean preflight = %+v, want refreshed clean selected task", updated.tasks)
 		}
 		if runCleanupCmd == nil {
 			t.Fatal("expected cleanup command to run immediately for clean preflight")

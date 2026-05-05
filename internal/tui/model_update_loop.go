@@ -681,12 +681,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !ok || taskIDKey(currentWorkspace.TaskID()) != taskIDKey(msg.taskID) {
 			return m, nil
 		}
-		tasks := msg.tasks
-		if len(tasks) == 0 {
+		task, ok := m.applySingleTaskWorkspaceRefresh(msg.taskID, msg.task)
+		if !ok {
 			return m, nil
 		}
+
 		m.overlayStack.Pop()
-		workspace := overlay.NewTaskWorkspaceOverlay(msg.task, tasks, m.pendingMutationForTask(msg.taskID), m.width, m.height)
+		workspace := overlay.NewTaskWorkspaceOverlay(task, m.tasks, m.pendingMutationForTask(msg.taskID), m.width, m.height)
 		if !msg.lastCheckedAt.IsZero() && msg.freshness.Valid() {
 			workspace.SyncSnapshotFreshness(msg.lastCheckedAt, msg.freshness)
 		} else {
@@ -791,6 +792,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.projectSwitchInFlight = true
 		m.issueRefreshSeq++
 		m.projectSwitchSeq++
+		m.beginMutationFeedback(fmt.Sprintf("Switching project: %s", msg.Project.Name))
 
 		// Switch project runtime context and reload issues.
 		return m, m.switchProjectCmd(msg.Project)
@@ -853,6 +855,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if _, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); ok && msg.ParentID != nil {
 			m.openCreatedTaskInWorkspace = true
 		}
+		if strings.TrimSpace(msg.ID) != "" {
+			m.beginMutationFeedback(fmt.Sprintf("Saving task %s", msg.ID))
+		} else {
+			m.beginMutationFeedback("Creating task")
+		}
 		return m, m.saveTaskCmd(msg)
 
 	case overlay.OpenTaskImageAttachMsg:
@@ -909,6 +916,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// PR creation overlay messages
 	case overlay.PRCreatedMsg:
 		m.overlayStack.Pop()
+		m.beginMutationFeedback("Creating PR")
 		return m, m.createPRWithOverlayCmd(msg)
 
 	case prCreatedResultMsg:
@@ -1053,6 +1061,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		return m, nil
 
+	case devServerResultMsg:
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Dev server update failed: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		if devOverlay, ok := m.overlayStack.Current().(*overlay.DevServerOverlay); ok {
+			devOverlay.SyncServer(msg.server)
+		}
+		m.addToast(Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Dev server %s: %s", msg.server.Name, msg.server.Status),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+
 	case openPROverlayResultMsg:
 		if msg.err != nil {
 			m.addToast(Toast{
@@ -1131,6 +1158,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadIssuesCmd()
 
 	case worktreeCleanupConfirmPromptMsg:
+		if msg.hasTask {
+			m.applySingleTaskWorkspaceRefresh(msg.taskID, msg.task)
+		}
 		m.pendingCleanup = &pendingWorktreeCleanupConfirmation{
 			taskID:      msg.taskID,
 			deletedTask: msg.deletedTask,
@@ -1150,6 +1180,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.openOverlay(confirm)
 
 	case bulkCleanupPreflightMsg:
+		m.applyTaskRefreshes(msg.refreshedTasks)
 		if len(msg.risks) == 0 && msg.snapshotErr == nil {
 			return m, m.bulkCleanupWorktreeCmd(msg.taskIDs, msg.deletedTasks)
 		}

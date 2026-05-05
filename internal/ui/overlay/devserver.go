@@ -145,6 +145,16 @@ func (m *DevServerOverlay) Size() (width, height int) {
 	return m.dialogSize()
 }
 
+func (m *DevServerOverlay) SyncServer(server DevServerInfo) {
+	for i := range m.servers {
+		if m.servers[i].ID == server.ID {
+			m.servers[i] = server
+			return
+		}
+	}
+	m.servers = append(m.servers, server)
+}
+
 func (m *DevServerOverlay) dialogSize() (width, height int) {
 	return m.ClampResponsive(72, m.viewHeight())
 }

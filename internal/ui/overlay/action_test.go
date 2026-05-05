@@ -112,11 +112,26 @@ func TestActionMenu_BuildActions_NoSession(t *testing.T) {
 
 	// Always-available task-workspace actions should remain enabled.
 	for _, action := range menu.actions {
-		if action.Key == "b" || action.Key == "i" || action.Key == "r" {
+		if action.Key == "b" || action.Key == "i" || action.Key == "r" || action.Key == "V" {
 			if !action.Enabled {
 				t.Errorf("expected action '%s' to be enabled without session", action.Key)
 			}
 		}
+	}
+}
+
+func TestActionMenu_RefreshAndDevServerKeys(t *testing.T) {
+	menu := NewActionMenu(domain.Task{ID: "az-123", Status: domain.StatusOpen}, nil)
+
+	actions := map[string]string{}
+	for _, action := range menu.actions {
+		actions[action.Key] = action.Label
+	}
+	if actions["r"] != "Refresh issue" {
+		t.Fatalf("r action = %q, want Refresh issue", actions["r"])
+	}
+	if actions["V"] != "Dev servers" {
+		t.Fatalf("V action = %q, want Dev servers", actions["V"])
 	}
 }
 
@@ -563,6 +578,12 @@ func TestActionMenu_StatusBindingsIncludeStatusKeys(t *testing.T) {
 	}
 	if !strings.Contains(joined, "1/2/3/4") {
 		t.Fatalf("expected action menu status bindings to include exact status hint, got %q", joined)
+	}
+	if !strings.Contains(joined, "r refresh issue") {
+		t.Fatalf("expected action menu status bindings to include refresh hint, got %q", joined)
+	}
+	if !strings.Contains(joined, "V dev servers") {
+		t.Fatalf("expected action menu status bindings to include dev server hint, got %q", joined)
 	}
 }
 

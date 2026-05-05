@@ -260,6 +260,8 @@ func (w *TaskWorkspaceOverlay) StatusBindings() []keybinds.Binding {
 			{Key: "h/l/←/→/Enter", Description: "open relation"},
 			{Key: "[/]", Description: "select relation"},
 			{Key: "Tab", Description: "focus"},
+			{Key: "r", Description: "refresh issue"},
+			{Key: "V", Description: "dev servers"},
 			{Key: "1/2/3/4", Description: "set status"},
 			{Key: "Esc/q", Description: "close"},
 		}
@@ -269,6 +271,8 @@ func (w *TaskWorkspaceOverlay) StatusBindings() []keybinds.Binding {
 			{Key: "Enter", Description: "run action"},
 			{Key: "1/2/3/4", Description: "set status"},
 			{Key: "n/p", Description: "action select"},
+			{Key: "r", Description: "refresh issue"},
+			{Key: "V", Description: "dev servers"},
 			{Key: "Tab", Description: "focus"},
 			{Key: "Esc/q", Description: "close"},
 		}
@@ -278,6 +282,8 @@ func (w *TaskWorkspaceOverlay) StatusBindings() []keybinds.Binding {
 			{Key: "ctrl+u/d", Description: "half-page"},
 			{Key: "g/G", Description: "top/bottom"},
 			{Key: "Tab", Description: "focus"},
+			{Key: "r", Description: "refresh issue"},
+			{Key: "V", Description: "dev servers"},
 			{Key: "1/2/3/4", Description: "set status"},
 			{Key: "Esc/q", Description: "close"},
 		}

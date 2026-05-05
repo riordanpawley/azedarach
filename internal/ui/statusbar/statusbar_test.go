@@ -303,7 +303,7 @@ func TestGetHints_AllModes(t *testing.T) {
 		{types.ModeSelect, "a/5: toggle  A: column  %: all  *: invert  x: clear  Space/Enter: bulk  v/Esc: exit"},
 		{types.ModeSearch, "Type: search  Enter: confirm  Esc: cancel"},
 		{types.ModeGoto, "g g: top  g e: bottom  g h: first col  g l: last col  g w: labels  g p: projects  g s: spec  Esc: cancel"},
-		{types.ModeAction, "h/l: move  s/S/!: start  a: attach  p: pause  R: resume  r: dev  x: stop  u: update  m/b: merge  P/O: PR  M: abort  H: helix  i: attachments  f: diff  w/W: cleanup  e: edit  c: child  T/d: tombstone/delete  Esc/q: cancel"},
+		{types.ModeAction, "h/l: move  s/S/!: start  a: attach  p: pause  R: resume  r: refresh  V: dev  x: stop  u: update  m/b: merge  P/O: PR  M: abort  H: helix  i: attachments  f: diff  w/W: cleanup  e: edit  c: child  T/d: tombstone/delete  Esc/q: cancel"},
 	}
 
 	for _, tt := range tests {

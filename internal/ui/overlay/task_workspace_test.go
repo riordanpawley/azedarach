@@ -149,6 +149,12 @@ func TestTaskWorkspaceOverlay_StatusBindingsIncludeScroll(t *testing.T) {
 	if !strings.Contains(graphJoined, "1/2/3/4") {
 		t.Fatalf("expected graph status bindings to preserve exact status hint, got %q", graphJoined)
 	}
+	if !strings.Contains(joined, "r refresh issue") {
+		t.Fatalf("expected status bindings to include refresh hint, got %q", joined)
+	}
+	if !strings.Contains(joined, "V dev servers") {
+		t.Fatalf("expected status bindings to include dev server hint, got %q", joined)
+	}
 }
 
 func TestTaskWorkspaceOverlay_ActionFocusUsesArrowNavigation(t *testing.T) {
