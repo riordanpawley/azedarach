@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -164,6 +165,35 @@ func TestModelViewFitsViewportHeightWithWrappedCards(t *testing.T) {
 	}
 }
 
+func TestModelViewUsesGridOnWideViewport(t *testing.T) {
+	started := time.Unix(1775209200, 0).UTC()
+	entries := []InventoryEntry{
+		{SessionID: "az-one", IssueID: "one", TaskTitle: "One", StartedAt: &started, HasTmuxSession: true},
+		{SessionID: "az-two", IssueID: "two", TaskTitle: "Two", StartedAt: &started, HasTmuxSession: true},
+		{SessionID: "az-three", IssueID: "three", TaskTitle: "Three", StartedAt: &started, HasTmuxSession: true},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 160, Height: 28})
+	model = updated.(Model)
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	view := model.View()
+	lineWithCards := ""
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "one") && strings.Contains(line, "two") && strings.Contains(line, "three") {
+			lineWithCards = line
+			break
+		}
+	}
+	if lineWithCards == "" {
+		t.Fatalf("wide view did not render issue cards in a horizontal grid:\n%s", view)
+	}
+}
+
 func TestRenderVisibleRowsFitsMeasuredHeight(t *testing.T) {
 	rows := []SessionRow{
 		{SessionID: "az-one", IssueID: "one", TaskTitle: "One title wraps enough to make this card taller than a fixed row assumption", HasTmuxSession: true},
@@ -189,5 +219,31 @@ func TestRenderVisibleRowsFitsMeasuredHeight(t *testing.T) {
 	}
 	if totalHeight > availableHeight {
 		t.Fatalf("rendered rows height = %d, want <= %d\n%s", totalHeight, availableHeight, strings.Join(rendered, "\n"))
+	}
+}
+
+func TestRenderVisibleGridFitsMeasuredHeight(t *testing.T) {
+	rows := []SessionRow{
+		{SessionID: "az-one", IssueID: "one", TaskTitle: "One title wraps enough to make this card taller than a fixed row assumption", HasTmuxSession: true},
+		{SessionID: "az-two", IssueID: "two", TaskTitle: "Two title wraps enough to make this card taller than a fixed row assumption", HasTmuxSession: true},
+		{SessionID: "az-three", IssueID: "three", TaskTitle: "Three title wraps enough to make this card taller than a fixed row assumption", HasTmuxSession: true},
+		{SessionID: "az-four", IssueID: "four", TaskTitle: "Four title wraps enough to make this card taller than a fixed row assumption", HasTmuxSession: true},
+	}
+	firstGridRow := RenderVisibleGrid(rows, 0, 2, 42, 100, styles.New())[0]
+	availableHeight := lipgloss.Height(firstGridRow) + 1
+
+	rendered := RenderVisibleGrid(rows, 0, 2, 42, availableHeight, styles.New())
+	if len(rendered) != 1 {
+		t.Fatalf("grid rows = %d, want only one visible grid row", len(rendered))
+	}
+	if !strings.Contains(rendered[0], "az-one") || !strings.Contains(rendered[0], "az-two") {
+		t.Fatalf("selected grid row missing expected cells:\n%s", rendered[0])
+	}
+	totalHeight := 0
+	for _, row := range rendered {
+		totalHeight += lipgloss.Height(row) + 1
+	}
+	if totalHeight > availableHeight {
+		t.Fatalf("rendered grid height = %d, want <= %d\n%s", totalHeight, availableHeight, strings.Join(rendered, "\n"))
 	}
 }

@@ -302,8 +302,9 @@ func (m Model) View() string {
 	if len(m.snapshot.Entries) == 0 {
 		b.WriteString("No Azedarach issue sessions found.\n\n")
 	} else {
-		cardWidth := clampInt(m.width-4, 36, 96)
-		rows := RenderVisibleRows(m.snapshot.Entries, m.cursor, cardWidth, maxInt(1, m.height-7), m.styles)
+		columns := gridColumnCount(m.width)
+		cardWidth := gridCardWidth(m.width, columns)
+		rows := RenderVisibleGrid(m.snapshot.Entries, m.cursor, columns, cardWidth, maxInt(1, m.height-7), m.styles)
 		for _, row := range rows {
 			b.WriteString(row)
 			b.WriteString("\n")
@@ -560,8 +561,15 @@ func VisibleRows(rows []SessionRow, cursor int, maxRows int) []VisibleRow {
 }
 
 func RenderVisibleRows(rows []SessionRow, cursor int, width int, availableHeight int, s *styles.Styles) []string {
+	return RenderVisibleGrid(rows, cursor, 1, width, availableHeight, s)
+}
+
+func RenderVisibleGrid(rows []SessionRow, cursor int, columns int, cardWidth int, availableHeight int, s *styles.Styles) []string {
 	if len(rows) == 0 || availableHeight <= 0 {
 		return nil
+	}
+	if columns <= 0 {
+		columns = 1
 	}
 	if cursor < 0 {
 		cursor = 0
@@ -570,14 +578,34 @@ func RenderVisibleRows(rows []SessionRow, cursor int, width int, availableHeight
 		cursor = len(rows) - 1
 	}
 	rendered := make([]string, len(rows))
-	heights := make([]int, len(rows))
 	for i, row := range rows {
-		rendered[i] = RenderSessionRow(row, i == cursor, width, lipgloss.Style{}, lipgloss.Style{}, lipgloss.Style{}, s)
-		heights[i] = lipgloss.Height(rendered[i]) + 1
+		rendered[i] = RenderSessionRow(row, i == cursor, cardWidth, lipgloss.Style{}, lipgloss.Style{}, lipgloss.Style{}, s)
 	}
 
-	start, end := cursor, cursor+1
-	used := heights[cursor]
+	gridRows := (len(rows) + columns - 1) / columns
+	renderedGridRows := make([]string, gridRows)
+	heights := make([]int, gridRows)
+	for gridRow := 0; gridRow < gridRows; gridRow++ {
+		start := gridRow * columns
+		end := start + columns
+		if end > len(rendered) {
+			end = len(rendered)
+		}
+		cells := make([]string, 0, end-start)
+		for i := start; i < end; i++ {
+			cell := rendered[i]
+			if i < end-1 {
+				cell = lipgloss.NewStyle().MarginRight(2).Render(cell)
+			}
+			cells = append(cells, cell)
+		}
+		renderedGridRows[gridRow] = lipgloss.JoinHorizontal(lipgloss.Top, cells...)
+		heights[gridRow] = lipgloss.Height(renderedGridRows[gridRow]) + 1
+	}
+
+	cursorGridRow := cursor / columns
+	start, end := cursorGridRow, cursorGridRow+1
+	used := heights[cursorGridRow]
 	for {
 		added := false
 		if start > 0 && used+heights[start-1] <= availableHeight {
@@ -585,7 +613,7 @@ func RenderVisibleRows(rows []SessionRow, cursor int, width int, availableHeight
 			used += heights[start]
 			added = true
 		}
-		if end < len(rows) && used+heights[end] <= availableHeight {
+		if end < len(renderedGridRows) && used+heights[end] <= availableHeight {
 			used += heights[end]
 			end++
 			added = true
@@ -597,9 +625,30 @@ func RenderVisibleRows(rows []SessionRow, cursor int, width int, availableHeight
 
 	out := make([]string, 0, end-start)
 	for i := start; i < end; i++ {
-		out = append(out, rendered[i])
+		out = append(out, renderedGridRows[i])
 	}
 	return out
+}
+
+func gridColumnCount(width int) int {
+	const (
+		minCardWidth = 42
+		gapWidth     = 2
+		maxColumns   = 3
+	)
+	available := maxInt(1, width-4)
+	columns := (available + gapWidth) / (minCardWidth + gapWidth)
+	return clampInt(columns, 1, maxColumns)
+}
+
+func gridCardWidth(width int, columns int) int {
+	if columns <= 0 {
+		columns = 1
+	}
+	const gapWidth = 2
+	available := maxInt(1, width-4)
+	cardWidth := (available - gapWidth*(columns-1)) / columns
+	return clampInt(cardWidth, 36, 96)
 }
 
 func formatSnapshotStatus(snapshot Snapshot, rows int) string {

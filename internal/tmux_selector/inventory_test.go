@@ -2,6 +2,7 @@ package tmuxselector
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -111,5 +112,33 @@ func TestGlobalInventoryLoaderHonorsLimit(t *testing.T) {
 	}
 	if len(snapshot.Entries) != 1 || snapshot.Entries[0].SessionID != "az-one" {
 		t.Fatalf("limited entries = %#v", snapshot.Entries)
+	}
+}
+
+func TestGlobalInventoryLoaderSortsBySessionStartOldestFirst(t *testing.T) {
+	oldest := time.Unix(1775200000, 0).UTC()
+	middle := oldest.Add(30 * time.Minute)
+	youngest := oldest.Add(90 * time.Minute)
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{infos: []tmux.SessionInfo{
+			{Name: "az-youngest", CreatedAt: &youngest},
+			{Name: "plain-unknown"},
+			{Name: "az-oldest", CreatedAt: &oldest},
+			{Name: "az-middle", CreatedAt: &middle},
+		}},
+		nil,
+	)
+
+	snapshot, err := loader.ListLiveSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("ListLiveSnapshot: %v", err)
+	}
+	got := make([]string, 0, len(snapshot.Entries))
+	for _, entry := range snapshot.Entries {
+		got = append(got, entry.SessionID)
+	}
+	want := []string{"az-oldest", "az-middle", "az-youngest", "plain-unknown"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("session order = %v, want %v", got, want)
 	}
 }
