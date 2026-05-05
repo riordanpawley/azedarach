@@ -178,6 +178,9 @@ func TestModelViewUsesTmuxCopyAndBottomToolbar(t *testing.T) {
 	if !strings.Contains(last, "h/j/k/l: move") || !strings.Contains(last, "q/Esc: close") {
 		t.Fatalf("last line should be key toolbar, got %q\n%s", last, view)
 	}
+	if height := lipgloss.Height(view); height != 18 {
+		t.Fatalf("view height = %d, want exactly 18\n%q", height, view)
+	}
 	if strings.HasSuffix(view, "\n") {
 		t.Fatalf("view should not leave a blank row under toolbar:\n%q", view)
 	}

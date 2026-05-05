@@ -305,19 +305,15 @@ func (m Model) View() string {
 	} else {
 		columns := gridColumnCount(m.width)
 		cardWidth := gridCardWidth(m.width, columns)
-		rows := RenderVisibleGrid(m.snapshot.Entries, m.cursor, columns, cardWidth, maxInt(1, m.height-8), m.styles)
+		rows := RenderVisibleGrid(m.snapshot.Entries, m.cursor, columns, cardWidth, maxInt(1, m.height-7), m.styles)
 		for _, row := range rows {
 			b.WriteString(row)
 			b.WriteString("\n")
 		}
 	}
-	content := b.String()
+	contentLines := linesForHeight(b.String(), maxInt(0, m.height-1))
 	footer := m.renderFooter()
-	for lipgloss.Height(content)+lipgloss.Height(footer) < maxInt(1, m.height) {
-		content += "\n"
-	}
-	content += footer
-	return content
+	return strings.Join(append(contentLines, footer), "\n")
 }
 
 func (m Model) renderFooter() string {
@@ -333,6 +329,23 @@ func (m Model) renderFooter() string {
 		return strings.Repeat(" ", gap) + right
 	}
 	return ansi.Truncate(right, maxInt(1, m.width), "…")
+}
+
+func linesForHeight(view string, height int) []string {
+	if height <= 0 {
+		return nil
+	}
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		lines = nil
+	}
+	if len(lines) > height {
+		return lines[:height]
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	return lines
 }
 
 func (m *Model) moveCursor(dx int, dy int) {
