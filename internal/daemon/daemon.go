@@ -936,7 +936,7 @@ func (d *Daemon) triggerWorktreeStateRefresh(projectID string) {
 	}()
 }
 
-func (d *Daemon) triggerIssueWorktreeStateRefresh(ctx context.Context, projectID, issueID string) {
+func (d *Daemon) refreshIssueWorktreeState(ctx context.Context, projectID, issueID string) {
 	if d == nil || d.gitStatusAdapter == nil {
 		return
 	}
@@ -962,7 +962,11 @@ func (d *Daemon) triggerIssueWorktreeStateRefresh(ctx context.Context, projectID
 	if !found || strings.TrimSpace(projection.Path) == "" {
 		return
 	}
-	d.gitStatusAdapter.refreshGitStatusVisible(projectID, projection.Path)
+	refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err := d.gitStatusAdapter.refreshGitStatusManual(refreshCtx, projectID, projection.Path); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("issue worktree refresh failed", "project_id", projectID, "issue_id", issueID, "worktree", projection.Path, "error", err)
+	}
 }
 
 func (d *Daemon) persistWorktreeState(ctx context.Context, projectID, issueID, path, branch string) error {

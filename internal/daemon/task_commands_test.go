@@ -619,7 +619,7 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueWorktree(t *testing.T) {
 
 	targetWorktree := filepath.Join(repoDir, "target-worktree")
 	otherWorktree := filepath.Join(repoDir, "other-worktree")
-	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
 	for _, row := range []daemonstate.WorktreeState{
 		{ProjectID: projectID, IssueID: targetID, Path: targetWorktree, Branch: "az/" + targetID, UpdatedAt: time.Now().UTC()},
@@ -631,9 +631,12 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueWorktree(t *testing.T) {
 	}
 
 	statusPaths := make(chan string, 4)
+	statusRelease := make(chan struct{})
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		if len(args) >= 4 && args[0] == "-C" && args[2] == "status" && args[3] == "--porcelain" {
 			statusPaths <- args[1]
+			<-statusRelease
+			return " M changed.go\n", nil
 		}
 		return "", nil
 	}}
@@ -669,20 +672,22 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal task get request: %v", err)
 	}
-	resp, err := d.handleTaskGet(ctx, protocol.RequestEnvelope{
-		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-task-get-refresh",
-		Kind:            protocol.EnvelopeKindCommand,
-		Command:         "task.get",
-		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-		Body:            reqBody,
-	})
-	if err != nil {
-		t.Fatalf("handleTaskGet returned error: %v", err)
+	type taskGetResult struct {
+		resp protocol.ResponseEnvelope
+		err  error
 	}
-	if !resp.OK {
-		t.Fatalf("task.get response not OK: %+v", resp.Error)
-	}
+	resultCh := make(chan taskGetResult, 1)
+	go func() {
+		resp, err := d.handleTaskGet(ctx, protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-task-get-refresh",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         "task.get",
+			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+			Body:            reqBody,
+		})
+		resultCh <- taskGetResult{resp: resp, err: err}
+	}()
 
 	select {
 	case got := <-statusPaths:
@@ -691,6 +696,40 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueWorktree(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for target issue worktree refresh")
+	}
+
+	select {
+	case result := <-resultCh:
+		t.Fatalf("task.get returned before git status refresh completed: %+v", result.resp)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(statusRelease)
+
+	var result taskGetResult
+	select {
+	case result = <-resultCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for task.get result after git status refresh")
+	}
+	if result.err != nil {
+		t.Fatalf("handleTaskGet returned error: %v", result.err)
+	}
+	if !result.resp.OK {
+		t.Fatalf("task.get response not OK: %+v", result.resp.Error)
+	}
+
+	payload, err := protocol.DecodeTaskListSnapshotPayload(result.resp.Body)
+	if err != nil {
+		t.Fatalf("decode task.get body: %v", err)
+	}
+	if len(payload.Tasks) != 1 {
+		t.Fatalf("response task count = %d, want 1", len(payload.Tasks))
+	}
+	if !payload.Tasks[0].HasUncommittedChanges {
+		t.Fatalf("response task git state was not refreshed: %+v", payload.Tasks[0])
+	}
+	if payload.Tasks[0].GitAdditions != 1 {
+		t.Fatalf("response git additions = %d, want 1", payload.Tasks[0].GitAdditions)
 	}
 
 	select {
