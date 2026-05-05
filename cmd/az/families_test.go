@@ -120,7 +120,7 @@ func TestRunSpecCommandHelpAndValidation(t *testing.T) {
 	helpOut := captureMainStdout(t, func() error {
 		return runSpecCommand(config.DefaultConfig(), []string{"--help"})
 	})
-	if !strings.Contains(helpOut, "Usage: az spec <req|link|read|lint|parity|sync> [arguments]") {
+	if !strings.Contains(helpOut, "Usage: az spec <req|link|read|lint|parity|export> [arguments]") {
 		t.Fatalf("help output = %q", helpOut)
 	}
 	if !strings.Contains(helpOut, "az spec req create --id <req-id> --title <text>") {
@@ -129,8 +129,8 @@ func TestRunSpecCommandHelpAndValidation(t *testing.T) {
 	if !strings.Contains(helpOut, "az spec link add --issue <issue-id> --req <req-id>") {
 		t.Fatalf("help output missing link add grammar = %q", helpOut)
 	}
-	if !strings.Contains(helpOut, "az spec sync --target md --check") {
-		t.Fatalf("help output missing sync example = %q", helpOut)
+	if !strings.Contains(helpOut, "az spec export --target md --check") {
+		t.Fatalf("help output missing export example = %q", helpOut)
 	}
 
 	cfgDisabled := config.DefaultConfig()
@@ -147,8 +147,8 @@ func TestRunSpecCommandHelpAndValidation(t *testing.T) {
 		t.Fatalf("unknown command error = %v", err)
 	}
 
-	err = runSpecCommand(cfgEnabled, []string{"sync", "--target", "html"})
-	if err == nil || !strings.Contains(err.Error(), "usage: az spec sync --target md") {
+	err = runSpecCommand(cfgEnabled, []string{"export", "--target", "html"})
+	if err == nil || !strings.Contains(err.Error(), "usage: az spec export --target md") {
 		t.Fatalf("invalid target error = %v", err)
 	}
 }

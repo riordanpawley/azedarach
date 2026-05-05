@@ -17,6 +17,7 @@ const (
 	CommandSpecRead              = "spec.read"
 	CommandSpecLint              = "spec.lint"
 	CommandSpecParity            = "spec.parity"
+	CommandSpecExport            = "spec.export"
 	CommandSpecSync              = "spec.sync"
 )
 
@@ -453,10 +454,15 @@ func (c *Client) ParitySpec(ctx context.Context, req SpecParityRequest) (SpecPar
 	return out, nil
 }
 
-func (c *Client) SyncSpecMarkdown(ctx context.Context, req SpecSyncRequest) (SpecMarkdownSyncResult, error) {
+func (c *Client) ExportSpecMarkdown(ctx context.Context, req SpecSyncRequest) (SpecMarkdownSyncResult, error) {
 	var out SpecMarkdownSyncResult
-	if err := c.commandJSON(ctx, CommandSpecSync, req, &out); err != nil {
+	if err := c.commandJSON(ctx, CommandSpecExport, req, &out); err != nil {
 		return SpecMarkdownSyncResult{}, err
 	}
 	return out, nil
+}
+
+// SyncSpecMarkdown is retained for compatibility with older callers.
+func (c *Client) SyncSpecMarkdown(ctx context.Context, req SpecSyncRequest) (SpecMarkdownSyncResult, error) {
+	return c.ExportSpecMarkdown(ctx, req)
 }

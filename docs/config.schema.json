@@ -165,7 +165,7 @@
             },
             "command": {
               "type": "string",
-              "default": "az spec sync --target md"
+              "default": "az spec export --target md"
             },
             "autoStageDocs": {
               "type": "boolean",

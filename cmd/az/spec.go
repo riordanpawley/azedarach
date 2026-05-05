@@ -115,8 +115,10 @@ func runSpecCommand(cfg *config.Config, args []string) error {
 		return runSpecLintCommand(cfg, args[1:])
 	case "parity":
 		return runSpecParityCommand(cfg, args[1:])
+	case "export":
+		return runSpecExportCommand(args[1:])
 	case "sync":
-		return runSpecSyncCommand(args[1:])
+		return runSpecExportCommand(args[1:])
 	default:
 		return fmt.Errorf("unknown spec command: %s", args[0])
 	}
@@ -241,14 +243,14 @@ func runSpecParityCommand(cfg *config.Config, args []string) error {
 	return runSpecParityRPC(cfg, opts)
 }
 
-func runSpecSyncCommand(args []string) error {
+func runSpecExportCommand(args []string) error {
 	if len(args) > 0 && isHelpArg(args[0]) {
-		cli.PrintSpecSyncUsage()
+		cli.PrintSpecExportUsage()
 		return nil
 	}
-	opts, err := parseSpecSyncArgs(args)
+	opts, err := parseSpecExportArgs(args)
 	if err != nil {
-		cli.PrintSpecSyncUsage()
+		cli.PrintSpecExportUsage()
 		return err
 	}
 
@@ -261,11 +263,11 @@ func runSpecSyncCommand(args []string) error {
 		if opts.JSON {
 			data, err := json.MarshalIndent(result, "", "  ")
 			if err != nil {
-				return fmt.Errorf("marshal spec sync result: %w", err)
+				return fmt.Errorf("marshal spec export result: %w", err)
 			}
 			fmt.Println(string(data))
 		} else {
-			printSpecSyncResult(result)
+			printSpecExportResult(result)
 		}
 	}
 	return runErr
@@ -743,18 +745,18 @@ func parseSpecParityArgs(args []string) (specParityOptions, error) {
 	return opts, nil
 }
 
-func parseSpecSyncArgs(args []string) (specSyncOptions, error) {
+func parseSpecExportArgs(args []string) (specSyncOptions, error) {
 	opts := specSyncOptions{}
-	fs := flag.NewFlagSet("spec sync", flag.ContinueOnError)
+	fs := flag.NewFlagSet("spec export", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.StringVar(&opts.Target, "target", "", "sync target")
+	fs.StringVar(&opts.Target, "target", "", "export target")
 	fs.BoolVar(&opts.Check, "check", false, "check mode")
 	fs.BoolVar(&opts.JSON, "json", false, "json output")
 	if err := fs.Parse(args); err != nil {
 		return specSyncOptions{}, err
 	}
 	if fs.NArg() != 0 || strings.TrimSpace(opts.Target) != "md" {
-		return specSyncOptions{}, fmt.Errorf("usage: az spec sync --target md [--check] [--json]")
+		return specSyncOptions{}, fmt.Errorf("usage: az spec export --target md [--check] [--json]")
 	}
 	return opts, nil
 }
@@ -876,8 +878,8 @@ func specRepoDir() (string, error) {
 	return repoDir, nil
 }
 
-func printSpecSyncResult(result cli.SpecMarkdownSyncResult) {
-	fmt.Printf("Spec markdown sync target: %s\n", result.Target)
+func printSpecExportResult(result cli.SpecMarkdownSyncResult) {
+	fmt.Printf("Spec markdown export target: %s\n", result.Target)
 	fmt.Printf("Mode: %s\n", result.Mode)
 	fmt.Printf("Changed: %t\n", result.Changed)
 	for _, file := range result.Files {

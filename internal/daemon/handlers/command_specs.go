@@ -86,6 +86,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandSpecRead:              {Command: protocol.CommandSpecRead, DispatchTarget: CommandDispatchSpec},
 	protocol.CommandSpecLint:              {Command: protocol.CommandSpecLint, DispatchTarget: CommandDispatchSpec},
 	protocol.CommandSpecParity:            {Command: protocol.CommandSpecParity, DispatchTarget: CommandDispatchSpec},
+	protocol.CommandSpecExport:            {Command: protocol.CommandSpecExport, DispatchTarget: CommandDispatchSpec},
 	protocol.CommandSpecSync:              {Command: protocol.CommandSpecSync, DispatchTarget: CommandDispatchSpec},
 	protocol.CommandSpecSyncMD:            {Command: protocol.CommandSpecSyncMD, DispatchTarget: CommandDispatchSpec},
 	CommandGitFetch:                       {Command: CommandGitFetch, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},

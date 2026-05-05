@@ -150,6 +150,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		protocol.CommandSpecRead,
 		protocol.CommandSpecLint,
 		protocol.CommandSpecParity,
+		protocol.CommandSpecExport,
 		protocol.CommandSpecSync,
 		protocol.CommandSpecSyncMD,
 		CommandGitFetch,

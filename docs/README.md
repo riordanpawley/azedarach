@@ -37,6 +37,6 @@ This directory primarily contains **developer/internal documentation**.
 
 ## Generated Spec Docs
 
-- `az spec sync --target md` generates deterministic Markdown under `docs/spec/`.
+- `az spec export --target md` generates deterministic Markdown under `docs/spec/`.
 - When `docs/spec/` is present, treat it as the spec source of truth for synced command grammar/status.
 - [spec/README.md](spec/README.md)

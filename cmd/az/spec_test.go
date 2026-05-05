@@ -54,7 +54,7 @@ func TestRunSpecCommandValidationDeterminism(t *testing.T) {
 		{name: "req update invalid status", args: []string{"req", "update", "--id", "req-1", "--status", "done"}, errContains: "invalid requirement status \"done\""},
 		{name: "link add invalid role", args: []string{"link", "add", "--issue", "bgh", "--req", "req-1", "--role", "owns"}, errContains: "invalid link role \"owns\""},
 		{name: "read positional rejected", args: []string{"read", "bgh"}, errContains: "usage: az spec read [--json] [--issue <issue-id>] [--req <req-id>]"},
-		{name: "sync target required", args: []string{"sync", "--check"}, errContains: "usage: az spec sync --target md [--check] [--json]"},
+		{name: "export target required", args: []string{"export", "--check"}, errContains: "usage: az spec export --target md [--check] [--json]"},
 		{name: "unknown req command", args: []string{"req", "inspect"}, errContains: "unknown spec req command: inspect"},
 	}
 
@@ -77,7 +77,7 @@ func TestRunSpecCommandHelpIncludesRestoredGrammar(t *testing.T) {
 		"az spec req create --id <req-id> --title <text>",
 		"az spec link add --issue <issue-id> --req <req-id>",
 		"az spec parity [--json] [--fail-on-out]",
-		"az spec sync --target md [--check] [--json]",
+		"az spec export --target md [--check] [--json]",
 	} {
 		if !strings.Contains(helpOut, want) {
 			t.Fatalf("help output missing %q: %q", want, helpOut)
@@ -85,27 +85,27 @@ func TestRunSpecCommandHelpIncludesRestoredGrammar(t *testing.T) {
 	}
 }
 
-func TestRunSpecSyncCommandWritesAndChecksMarkdown(t *testing.T) {
+func TestRunSpecExportCommandWritesAndChecksMarkdown(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Spec.Enabled = true
 	projectDir := t.TempDir()
 
 	withWorkingDir(t, projectDir, func() {
 		out, err := captureMainStdoutWithError(t, func() error {
-			return runSpecCommand(cfg, []string{"sync", "--target", "md"})
+			return runSpecCommand(cfg, []string{"export", "--target", "md"})
 		})
 		if err != nil {
-			t.Fatalf("initial sync error = %v", err)
+			t.Fatalf("initial export error = %v", err)
 		}
 		if !strings.Contains(out, "Changed: true") {
-			t.Fatalf("initial sync output = %q", out)
+			t.Fatalf("initial export output = %q", out)
 		}
 		if _, err := os.Stat(filepath.Join(projectDir, "docs", "spec", "README.md")); err != nil {
 			t.Fatalf("expected docs/spec/README.md: %v", err)
 		}
 
 		checkOut, err := captureMainStdoutWithError(t, func() error {
-			return runSpecCommand(cfg, []string{"sync", "--target", "md", "--check"})
+			return runSpecCommand(cfg, []string{"export", "--target", "md", "--check"})
 		})
 		if err != nil {
 			t.Fatalf("clean check error = %v", err)
@@ -119,13 +119,31 @@ func TestRunSpecSyncCommandWritesAndChecksMarkdown(t *testing.T) {
 			t.Fatalf("write drifted README: %v", err)
 		}
 		driftOut, err := captureMainStdoutWithError(t, func() error {
-			return runSpecCommand(cfg, []string{"sync", "--target", "md", "--check"})
+			return runSpecCommand(cfg, []string{"export", "--target", "md", "--check"})
 		})
 		if !errors.Is(err, cli.ErrSpecMarkdownDrift) {
 			t.Fatalf("drift check error = %v, want ErrSpecMarkdownDrift", err)
 		}
 		if !strings.Contains(driftOut, "docs/spec/README.md: drift") {
 			t.Fatalf("drift check output = %q", driftOut)
+		}
+	})
+}
+
+func TestRunSpecSyncAliasExportsMarkdown(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Spec.Enabled = true
+	projectDir := t.TempDir()
+
+	withWorkingDir(t, projectDir, func() {
+		out, err := captureMainStdoutWithError(t, func() error {
+			return runSpecCommand(cfg, []string{"sync", "--target", "md"})
+		})
+		if err != nil {
+			t.Fatalf("sync alias error = %v", err)
+		}
+		if !strings.Contains(out, "Spec markdown export target: md") {
+			t.Fatalf("sync alias output = %q", out)
 		}
 	})
 }

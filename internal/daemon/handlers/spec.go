@@ -190,7 +190,7 @@ func (h *SpecHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) 
 		}
 		return specJSONResponse(ctx, resp, h.service.Parity, cmd)
 
-	case protocol.CommandSpecSync, protocol.CommandSpecSyncMD:
+	case protocol.CommandSpecExport, protocol.CommandSpecSync, protocol.CommandSpecSyncMD:
 		var cmd protocol.SpecSyncMDRequestBody
 		if !decodeSpecRequest(req.Body, &cmd, &resp) {
 			return resp

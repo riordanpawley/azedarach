@@ -66,8 +66,8 @@ fd "filename" -t f internal cmd
 
 - Treat spec-synced Markdown under `docs/spec/` as the spec source of truth when present.
 - Keep broader docs in `docs/` aligned with those spec files.
-- Pre-commit runs `scripts/spec-sync-precommit.sh`; when spec sync is configured, it auto-stages `docs/spec/` updates.
-- Configure one explicit sync command via `AZ_SPEC_SYNC_CMD` when your environment provides spec tooling.
+- Pre-commit runs `scripts/spec-sync-precommit.sh`; when spec export is configured, it auto-stages `docs/spec/` updates.
+- Configure one explicit export command via `AZ_SPEC_SYNC_CMD` when your environment provides spec tooling.
 
 ## Developer Docs Map
 
