@@ -2879,6 +2879,80 @@ func TestTaskWorkspaceGraphNavigationOpensRelatedTask(t *testing.T) {
 	}
 }
 
+func TestTaskWorkspaceGraphNavigationRefreshPreservesGraphFocus(t *testing.T) {
+	m := newTestModel()
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	m.tasks = []domain.Task{
+		{
+			ID:     parentID,
+			Title:  "Parent task",
+			Status: domain.StatusOpen,
+			Dependencies: []domain.Dependency{
+				{ID: childID, Type: domain.DependencyBlocks},
+			},
+		},
+		{
+			ID:     childID,
+			Title:  "Child task",
+			Status: domain.StatusInProgress,
+		},
+	}
+	m.nav.SelectTask(parentID.String(), 0)
+	workspace := overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30)
+	model, _ := workspace.Update(tea.KeyMsg{Type: tea.KeyTab})
+	workspace = model.(*overlay.TaskWorkspaceOverlay)
+	m.overlayStack.Push(workspace)
+
+	updated, _ := m.handleSelection(overlay.SelectionMsg{
+		Key:   "task_workspace_open_task",
+		Value: childID.String(),
+	})
+	next := updated.(Model)
+	assertTaskWorkspaceGraphFocus(t, next)
+
+	refreshedChild := m.tasks[1]
+	refreshedChild.Title = "Child task refreshed"
+	updated, _ = next.Update(refreshTaskWorkspaceResultMsg{
+		taskID:  childID.String(),
+		hasTask: true,
+		task:    refreshedChild,
+	})
+	next = updated.(Model)
+
+	current := next.overlayStack.Current()
+	refreshedWorkspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace to remain open, got %T", current)
+	}
+	if got := refreshedWorkspace.TaskID(); got != childID.String() {
+		t.Fatalf("workspace task ID = %q, want %q", got, childID)
+	}
+	assertTaskWorkspaceGraphFocus(t, next)
+	if view := refreshedWorkspace.View(); !strings.Contains(view, "Child task refreshed") {
+		t.Fatalf("workspace did not render refreshed child task, got %q", view)
+	}
+}
+
+func assertTaskWorkspaceGraphFocus(t *testing.T, m Model) {
+	t.Helper()
+	current := m.overlayStack.Current()
+	workspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace to remain open, got %T", current)
+	}
+	joined := ""
+	for _, binding := range workspace.StatusBindings() {
+		joined += binding.Key + " " + binding.Description + " "
+	}
+	if !strings.Contains(joined, "select relation") {
+		t.Fatalf("expected task workspace to stay on graph focus, got bindings %q", joined)
+	}
+	if strings.Contains(joined, "j/k/↑/↓ scroll") {
+		t.Fatalf("expected task workspace not to revert to detail scroll focus, got bindings %q", joined)
+	}
+}
+
 func TestSpaceWorkspaceUsesAuthoritativeTaskProjection(t *testing.T) {
 	m := newTestModel()
 	m.editor.EnterNormal()

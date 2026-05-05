@@ -689,14 +689,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		m.overlayStack.Pop()
-		workspace := overlay.NewTaskWorkspaceOverlay(task, m.tasks, m.pendingMutationForTask(msg.taskID), m.width, m.height)
 		if !msg.lastCheckedAt.IsZero() && msg.freshness.Valid() {
-			workspace.SyncSnapshotFreshness(msg.lastCheckedAt, msg.freshness)
+			currentWorkspace.SyncSnapshotFreshness(msg.lastCheckedAt, msg.freshness)
 		} else {
-			workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
+			currentWorkspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
 		}
-		return m, m.openOverlay(workspace)
+		currentWorkspace.SyncTask(task, m.tasks, m.pendingMutationForTask(msg.taskID))
+		return m, nil
 
 	case fetchAndMergeResultMsg:
 		if msg.operationID != "" && !operationStateTerminal(msg.state) {
