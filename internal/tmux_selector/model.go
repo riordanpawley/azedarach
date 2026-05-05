@@ -303,9 +303,9 @@ func (m Model) View() string {
 		b.WriteString("No Azedarach issue sessions found.\n\n")
 	} else {
 		cardWidth := clampInt(m.width-4, 36, 96)
-		maxRows := maxInt(1, (m.height-6)/6)
-		for _, visible := range VisibleRows(m.snapshot.Entries, m.cursor, maxRows) {
-			b.WriteString(RenderSessionRow(visible.Row, visible.Index == m.cursor, cardWidth, lipgloss.Style{}, lipgloss.Style{}, lipgloss.Style{}, m.styles))
+		rows := RenderVisibleRows(m.snapshot.Entries, m.cursor, cardWidth, maxInt(1, m.height-7), m.styles)
+		for _, row := range rows {
+			b.WriteString(row)
 			b.WriteString("\n")
 		}
 		b.WriteString("\n")
@@ -555,6 +555,49 @@ func VisibleRows(rows []SessionRow, cursor int, maxRows int) []VisibleRow {
 	out := make([]VisibleRow, 0, maxRows)
 	for i := start; i < start+maxRows; i++ {
 		out = append(out, VisibleRow{Index: i, Row: rows[i]})
+	}
+	return out
+}
+
+func RenderVisibleRows(rows []SessionRow, cursor int, width int, availableHeight int, s *styles.Styles) []string {
+	if len(rows) == 0 || availableHeight <= 0 {
+		return nil
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= len(rows) {
+		cursor = len(rows) - 1
+	}
+	rendered := make([]string, len(rows))
+	heights := make([]int, len(rows))
+	for i, row := range rows {
+		rendered[i] = RenderSessionRow(row, i == cursor, width, lipgloss.Style{}, lipgloss.Style{}, lipgloss.Style{}, s)
+		heights[i] = lipgloss.Height(rendered[i]) + 1
+	}
+
+	start, end := cursor, cursor+1
+	used := heights[cursor]
+	for {
+		added := false
+		if start > 0 && used+heights[start-1] <= availableHeight {
+			start--
+			used += heights[start]
+			added = true
+		}
+		if end < len(rows) && used+heights[end] <= availableHeight {
+			used += heights[end]
+			end++
+			added = true
+		}
+		if !added {
+			break
+		}
+	}
+
+	out := make([]string, 0, end-start)
+	for i := start; i < end; i++ {
+		out = append(out, rendered[i])
 	}
 	return out
 }

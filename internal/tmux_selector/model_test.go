@@ -7,7 +7,9 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
 type fakeSnapshotLoader struct {
@@ -138,5 +140,54 @@ func TestModelShowsLoaderError(t *testing.T) {
 	model = updated.(Model)
 	if !strings.Contains(model.View(), "boom") {
 		t.Fatalf("view missing loader error: %q", model.View())
+	}
+}
+
+func TestModelViewFitsViewportHeightWithWrappedCards(t *testing.T) {
+	entries := []InventoryEntry{
+		{SessionID: "az-one", IssueID: "one", TaskTitle: "One title wraps enough to make this card taller than a fixed row assumption", HasTmuxSession: true},
+		{SessionID: "az-two", IssueID: "two", TaskTitle: "Two title wraps enough to make this card taller than a fixed row assumption", HasTmuxSession: true},
+		{SessionID: "az-three", IssueID: "three", TaskTitle: "Three title wraps enough to make this card taller than a fixed row assumption", HasTmuxSession: true},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 50, Height: 20})
+	model = updated.(Model)
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	view := model.View()
+	if height := lipgloss.Height(view); height > 20 {
+		t.Fatalf("view height = %d, want <= 20\n%s", height, view)
+	}
+}
+
+func TestRenderVisibleRowsFitsMeasuredHeight(t *testing.T) {
+	rows := []SessionRow{
+		{SessionID: "az-one", IssueID: "one", TaskTitle: "One title wraps enough to make this card taller than a fixed row assumption", HasTmuxSession: true},
+		{SessionID: "az-two", IssueID: "two", TaskTitle: "Two title wraps enough to make this card taller than a fixed row assumption", HasTmuxSession: true},
+		{SessionID: "az-three", IssueID: "three", TaskTitle: "Three title wraps enough to make this card taller than a fixed row assumption", HasTmuxSession: true},
+	}
+	rowHeight := lipgloss.Height(RenderSessionRow(rows[0], true, 42, lipgloss.Style{}, lipgloss.Style{}, lipgloss.Style{}, styles.New())) + 1
+	availableHeight := rowHeight
+
+	rendered := RenderVisibleRows(rows, 0, 42, availableHeight, styles.New())
+	if len(rendered) == 0 {
+		t.Fatal("expected selected row to render")
+	}
+	if len(rendered) != 1 {
+		t.Fatalf("rendered rows = %d, want 1 row within measured height budget", len(rendered))
+	}
+	if !strings.Contains(rendered[0], "az-one") {
+		t.Fatalf("selected row missing from rendered rows: %q", strings.Join(rendered, "\n"))
+	}
+	totalHeight := 0
+	for _, row := range rendered {
+		totalHeight += lipgloss.Height(row) + 1
+	}
+	if totalHeight > availableHeight {
+		t.Fatalf("rendered rows height = %d, want <= %d\n%s", totalHeight, availableHeight, strings.Join(rendered, "\n"))
 	}
 }
