@@ -106,10 +106,10 @@ func TestClient_NewSessionWithCommand(t *testing.T) {
 	runner := &recordingRunner{}
 	client := NewClient(runner, slog.Default())
 
-	err := client.NewSessionWithCommand(context.Background(), "az", "/repo", "az --open-issue bxn")
+	err := client.NewSessionWithCommand(context.Background(), "az", "/repo", "az")
 
 	require.NoError(t, err)
-	assert.Equal(t, [][]string{{"new-session", "-d", "-s", "az", "-c", "/repo", "az --open-issue bxn"}}, runner.commands)
+	assert.Equal(t, [][]string{{"new-session", "-d", "-s", "az", "-c", "/repo", "az"}}, runner.commands)
 }
 
 func TestClient_EnsureWindow(t *testing.T) {

@@ -38,14 +38,6 @@ func main() {
 		runTUI(cfg)
 		return
 	}
-	if args[0] == "--open-issue" {
-		if len(args) != 2 || strings.TrimSpace(args[1]) == "" {
-			fmt.Fprintf(os.Stderr, "Usage: az --open-issue <issue-id>\n")
-			os.Exit(1)
-		}
-		runTUIWithOptions(cfg, app.WithOpenTaskWorkspaceOnLoad(args[1]))
-		return
-	}
 
 	// Handle subcommands
 	command := args[0]
