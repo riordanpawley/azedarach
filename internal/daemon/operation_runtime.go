@@ -861,29 +861,33 @@ func operationProgressForState(state daemonops.State, kind string) protocol.Oper
 	progress := protocol.OperationProgress{
 		Unit: "percent",
 	}
+	action := strings.TrimSpace(kind)
+	if kind == protocol.CommandSessionResolveConflict {
+		action = "agent conflict resolution"
+	}
 	switch state {
 	case daemonops.StateQueued:
-		progress.Message = "queued " + strings.TrimSpace(kind)
+		progress.Message = "queued " + action
 		progress.Current = 0
 		progress.Total = 100
 		progress.Percent = 0
 	case daemonops.StateRunning:
-		progress.Message = "running " + strings.TrimSpace(kind)
+		progress.Message = "running " + action
 		progress.Current = 50
 		progress.Total = 100
 		progress.Percent = 50
 	case daemonops.StateFailed:
-		progress.Message = "failed " + strings.TrimSpace(kind)
+		progress.Message = "failed " + action
 		progress.Current = 100
 		progress.Total = 100
 		progress.Percent = 100
 	case daemonops.StateCancelled:
-		progress.Message = "cancelled " + strings.TrimSpace(kind)
+		progress.Message = "cancelled " + action
 		progress.Current = 100
 		progress.Total = 100
 		progress.Percent = 100
 	default:
-		progress.Message = "completed " + strings.TrimSpace(kind)
+		progress.Message = "completed " + action
 		progress.Current = 100
 		progress.Total = 100
 		progress.Percent = 100

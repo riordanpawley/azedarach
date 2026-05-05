@@ -27,7 +27,9 @@ type GitStatus struct {
 	Deleted        []string `json:"deleted"`
 	Untracked      []string `json:"untracked"`
 	Staged         []string `json:"staged"`
+	Conflicted     []string `json:"conflicted,omitempty"`
 	HasChanges     bool     `json:"has_changes"`
+	HasConflicts   bool     `json:"has_conflicts,omitempty"`
 	GitAdditions   int      `json:"git_additions,omitempty"`
 	GitDeletions   int      `json:"git_deletions,omitempty"`
 	GitAheadCount  int      `json:"git_ahead_count,omitempty"`
@@ -88,6 +90,7 @@ func (c *Client) Status(ctx context.Context, worktree string) (*GitStatus, error
 		"deleted", len(status.Deleted),
 		"untracked", len(status.Untracked),
 		"staged", len(status.Staged),
+		"conflicted", len(status.Conflicted),
 	)
 
 	return status, nil
@@ -514,11 +517,12 @@ func (c *Client) FetchRef(ctx context.Context, worktree, remote, refSpec string)
 //	MM file.txt  - modified in both index and working tree
 func parseGitStatus(output string) *GitStatus {
 	status := &GitStatus{
-		Modified:  make([]string, 0),
-		Added:     make([]string, 0),
-		Deleted:   make([]string, 0),
-		Untracked: make([]string, 0),
-		Staged:    make([]string, 0),
+		Modified:   make([]string, 0),
+		Added:      make([]string, 0),
+		Deleted:    make([]string, 0),
+		Untracked:  make([]string, 0),
+		Staged:     make([]string, 0),
+		Conflicted: make([]string, 0),
 	}
 
 	if output == "" {
@@ -534,6 +538,7 @@ func parseGitStatus(output string) *GitStatus {
 		indexStatus := line[0]
 		workTreeStatus := line[1]
 		path := strings.TrimSpace(line[2:])
+		statusCode := line[:2]
 
 		// Check if file is staged (index status is not space or ?)
 		if indexStatus != ' ' && indexStatus != '?' {
@@ -542,7 +547,9 @@ func parseGitStatus(output string) *GitStatus {
 
 		// Parse status codes
 		switch {
-		case line[:2] == "??":
+		case isUnmergedStatus(statusCode):
+			status.Conflicted = append(status.Conflicted, path)
+		case statusCode == "??":
 			status.Untracked = append(status.Untracked, path)
 		case indexStatus == 'A' || workTreeStatus == 'A':
 			status.Added = append(status.Added, path)
@@ -557,9 +564,20 @@ func parseGitStatus(output string) *GitStatus {
 		len(status.Added) > 0 ||
 		len(status.Deleted) > 0 ||
 		len(status.Untracked) > 0 ||
-		len(status.Staged) > 0
+		len(status.Staged) > 0 ||
+		len(status.Conflicted) > 0
+	status.HasConflicts = len(status.Conflicted) > 0
 
 	return status
+}
+
+func isUnmergedStatus(statusCode string) bool {
+	switch statusCode {
+	case "DD", "AU", "UD", "UA", "DU", "AA", "UU":
+		return true
+	default:
+		return false
+	}
 }
 
 // parseConflicts extracts conflict file paths from git merge output.

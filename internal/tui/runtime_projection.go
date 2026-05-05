@@ -31,6 +31,8 @@ func (m *Model) syncProjectionIndexesFromTasks() {
 		signals.GitAheadCount = task.GitAheadCount
 		signals.GitBehindCount = task.GitBehindCount
 		signals.HasUncommittedChanges = task.HasUncommittedChanges
+		signals.HasConflicts = task.HasConflicts
+		signals.ConflictFiles = append([]string(nil), task.ConflictFiles...)
 		signals.GitAdditions = task.GitAdditions
 		signals.GitDeletions = task.GitDeletions
 		signals.PendingOperationID = ""
@@ -70,6 +72,8 @@ func (m *Model) applyRuntimeProjection(projection protocol.RuntimeProjection) bo
 		task.GitAheadCount = projection.Git.GitAheadCount
 		task.GitBehindCount = projection.Git.GitBehindCount
 		task.HasUncommittedChanges = projection.Git.HasUncommittedChanges
+		task.HasConflicts = projection.Git.HasConflicts
+		task.ConflictFiles = append([]string(nil), projection.Git.ConflictFiles...)
 		task.GitAdditions = projection.Git.GitAdditions
 		task.GitDeletions = projection.Git.GitDeletions
 
@@ -80,6 +84,8 @@ func (m *Model) applyRuntimeProjection(projection protocol.RuntimeProjection) bo
 		signals.GitAheadCount = projection.Git.GitAheadCount
 		signals.GitBehindCount = projection.Git.GitBehindCount
 		signals.HasUncommittedChanges = projection.Git.HasUncommittedChanges
+		signals.HasConflicts = projection.Git.HasConflicts
+		signals.ConflictFiles = append([]string(nil), projection.Git.ConflictFiles...)
 		signals.GitAdditions = projection.Git.GitAdditions
 		signals.GitDeletions = projection.Git.GitDeletions
 		if op := projection.Git.ActiveOperation; op != nil {

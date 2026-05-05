@@ -327,13 +327,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.addToast(Toast{
 			Level: ToastWarning,
 			Message: fmt.Sprintf(
-				"Could not attach via daemon (%v). Run: tmux attach-session -t %s (AI can help resolve)",
+				"Could not attach via daemon (%v). Run: tmux attach-session -t %s (agent can help resolve)",
 				msg.err,
 				msg.issueID,
 			),
 			Expires: time.Now().Add(8 * time.Second),
 		})
 		return m, nil
+
+	case conflictResolveAgentResultMsg:
+		if msg.operationID != "" && !operationStateTerminal(msg.state) {
+			m.markTaskOperationPending(msg.issueID, protocol.CommandSessionResolveConflict, msg.operationID, msg.state)
+			m.syncTaskWorkspaceOverlay()
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: formatPendingOperationMessage("Agent conflict resolution", msg.issueID, msg.operationID, msg.state),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, m.loadIssuesCmd()
+		}
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Agent conflict resolution failed: %v", msg.err),
+				Expires: time.Now().Add(6 * time.Second),
+			})
+			return m, nil
+		}
+		target := strings.TrimSpace(msg.windowName)
+		if target == "" {
+			target = "resolve-conflict"
+		}
+		m.addToast(Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Agent conflict resolution launched for %s in %s", msg.issueID, target),
+			Expires: time.Now().Add(4 * time.Second),
+		})
+		return m, m.loadIssuesCmd()
 
 	case daemonStreamEventMsg:
 		if msg.stream != nil && msg.stream != m.daemonEvents {

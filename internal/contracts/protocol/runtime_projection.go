@@ -40,6 +40,8 @@ type RuntimeProjection struct {
 // RuntimeGitProjection captures git status signals used for board badges and workspace summaries.
 type RuntimeGitProjection struct {
 	HasUncommittedChanges bool                        `json:"has_uncommitted_changes" msgpack:"has_uncommitted_changes"`
+	HasConflicts          bool                        `json:"has_conflicts,omitempty" msgpack:"has_conflicts,omitempty"`
+	ConflictFiles         []string                    `json:"conflict_files,omitempty" msgpack:"conflict_files,omitempty"`
 	GitAdditions          int                         `json:"git_additions" msgpack:"git_additions"`
 	GitDeletions          int                         `json:"git_deletions" msgpack:"git_deletions"`
 	GitAheadCount         int                         `json:"git_ahead_count" msgpack:"git_ahead_count"`
@@ -50,9 +52,9 @@ type RuntimeGitProjection struct {
 // RuntimeOperationProjection captures the active long-running operation metadata rendered in the UI.
 type RuntimeOperationProjection struct {
 	OperationID     naming.OperationID `json:"operation_id" msgpack:"operation_id"`
-	State           OperationState `json:"state" msgpack:"state"`
-	ProgressPercent int            `json:"progress_percent" msgpack:"progress_percent"`
-	Message         string         `json:"message,omitempty" msgpack:"message,omitempty"`
+	State           OperationState     `json:"state" msgpack:"state"`
+	ProgressPercent int                `json:"progress_percent" msgpack:"progress_percent"`
+	Message         string             `json:"message,omitempty" msgpack:"message,omitempty"`
 }
 
 // RuntimeSessionProjection captures tmux/session lifecycle signals used by the workspace detail panel.

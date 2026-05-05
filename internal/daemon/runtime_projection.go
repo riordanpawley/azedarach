@@ -60,6 +60,8 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 			var status git.GitStatus
 			if err := json.Unmarshal(worktree.GitStatusRaw, &status); err == nil {
 				projection.Git.HasUncommittedChanges = status.HasChanges
+				projection.Git.HasConflicts = status.HasConflicts
+				projection.Git.ConflictFiles = append([]string(nil), status.Conflicted...)
 				projection.Git.GitAdditions = status.GitAdditions
 				projection.Git.GitDeletions = status.GitDeletions
 				projection.Git.GitAheadCount = status.GitAheadCount

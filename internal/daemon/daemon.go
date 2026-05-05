@@ -1221,6 +1221,8 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 
 	if status != nil {
 		projection.Git.HasUncommittedChanges = status.HasChanges
+		projection.Git.HasConflicts = status.HasConflicts
+		projection.Git.ConflictFiles = append([]string(nil), status.Conflicted...)
 		projection.Git.GitAdditions = status.GitAdditions
 		projection.Git.GitDeletions = status.GitDeletions
 		projection.Git.GitAheadCount = status.GitAheadCount

@@ -99,6 +99,22 @@ A  staged-added.txt
 				HasChanges: true,
 			},
 		},
+		{
+			name: "unmerged conflict files",
+			gitOutput: `UU conflicted.txt
+AA both-added.txt
+DU deleted-by-us.txt`,
+			expectedStatus: &GitStatus{
+				Modified:     []string{},
+				Added:        []string{},
+				Deleted:      []string{},
+				Untracked:    []string{},
+				Staged:       []string{"conflicted.txt", "both-added.txt", "deleted-by-us.txt"},
+				Conflicted:   []string{"conflicted.txt", "both-added.txt", "deleted-by-us.txt"},
+				HasChanges:   true,
+				HasConflicts: true,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -123,12 +139,16 @@ A  staged-added.txt
 			if status.HasChanges != tt.expectedStatus.HasChanges {
 				t.Errorf("HasChanges = %v, want %v", status.HasChanges, tt.expectedStatus.HasChanges)
 			}
+			if status.HasConflicts != tt.expectedStatus.HasConflicts {
+				t.Errorf("HasConflicts = %v, want %v", status.HasConflicts, tt.expectedStatus.HasConflicts)
+			}
 
 			compareStringSlices(t, "Modified", status.Modified, tt.expectedStatus.Modified)
 			compareStringSlices(t, "Added", status.Added, tt.expectedStatus.Added)
 			compareStringSlices(t, "Deleted", status.Deleted, tt.expectedStatus.Deleted)
 			compareStringSlices(t, "Untracked", status.Untracked, tt.expectedStatus.Untracked)
 			compareStringSlices(t, "Staged", status.Staged, tt.expectedStatus.Staged)
+			compareStringSlices(t, "Conflicted", status.Conflicted, tt.expectedStatus.Conflicted)
 		})
 	}
 }

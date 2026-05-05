@@ -13,36 +13,37 @@ import (
 type ConflictOverlay struct {
 	twoPaneDialogChrome
 	dialogViewportState
-	files               []string
-	issueID             string
-	worktree            string
-	cursor              int
-	onResolveWithClaude func() tea.Cmd
-	onAbort             func() tea.Cmd
-	overlayStyles       *Styles
+	files              []string
+	issueID            string
+	worktree           string
+	cursor             int
+	onResolveWithAgent func() tea.Cmd
+	onAbort            func() tea.Cmd
+	overlayStyles      *Styles
 }
 
 // ConflictResolutionMsg is sent when the user chooses a resolution method
 type ConflictResolutionMsg struct {
-	ResolveWithClaude bool
-	Abort             bool
-	OpenManually      bool
-	IssueID           string
-	Worktree          string
+	ResolveWithAgent bool
+	Abort            bool
+	OpenManually     bool
+	IssueID          string
+	Worktree         string
+	ConflictFiles    []string
 }
 
 // NewConflictOverlay creates a new conflict resolution overlay
 func NewConflictOverlay(
 	files []string,
-	onResolveWithClaude func() tea.Cmd,
+	onResolveWithAgent func() tea.Cmd,
 	onAbort func() tea.Cmd,
 ) *ConflictOverlay {
 	return &ConflictOverlay{
-		files:               files,
-		cursor:              0,
-		onResolveWithClaude: onResolveWithClaude,
-		onAbort:             onAbort,
-		overlayStyles:       New(),
+		files:              files,
+		cursor:             0,
+		onResolveWithAgent: onResolveWithAgent,
+		onAbort:            onAbort,
+		overlayStyles:      New(),
 	}
 }
 
@@ -76,17 +77,18 @@ func (c *ConflictOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return c, func() tea.Msg { return CloseOverlayMsg{} }
 
 		case "c", "C":
-			// Resolve with Claude
-			if c.onResolveWithClaude != nil {
-				return c, c.onResolveWithClaude()
+			// Resolve with the configured agent.
+			if c.onResolveWithAgent != nil {
+				return c, c.onResolveWithAgent()
 			}
 			return c, func() tea.Msg {
 				return SelectionMsg{
-					Key: "claude",
+					Key: "agent",
 					Value: ConflictResolutionMsg{
-						ResolveWithClaude: true,
-						IssueID:           c.issueID,
-						Worktree:          c.worktree,
+						ResolveWithAgent: true,
+						IssueID:          c.issueID,
+						Worktree:         c.worktree,
+						ConflictFiles:    append([]string(nil), c.files...),
 					},
 				}
 			}
@@ -100,9 +102,10 @@ func (c *ConflictOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return SelectionMsg{
 					Key: "abort",
 					Value: ConflictResolutionMsg{
-						Abort:    true,
-						IssueID:  c.issueID,
-						Worktree: c.worktree,
+						Abort:         true,
+						IssueID:       c.issueID,
+						Worktree:      c.worktree,
+						ConflictFiles: append([]string(nil), c.files...),
 					},
 				}
 			}
@@ -113,9 +116,10 @@ func (c *ConflictOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return SelectionMsg{
 					Key: "manual",
 					Value: ConflictResolutionMsg{
-						OpenManually: true,
-						IssueID:      c.issueID,
-						Worktree:     c.worktree,
+						OpenManually:  true,
+						IssueID:       c.issueID,
+						Worktree:      c.worktree,
+						ConflictFiles: append([]string(nil), c.files...),
 					},
 				}
 			}
@@ -157,7 +161,7 @@ func (c *ConflictOverlay) View() string {
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
 			return renderDialogActions(c.overlayStyles, []keybinds.Binding{
 				{Key: "j/k", Description: "navigate"},
-				{Key: "c", Description: "ai resolve"},
+				{Key: "c", Description: "agent resolve"},
 				{Key: "o", Description: "open"},
 				{Key: "a", Description: "abort"},
 				{Key: "Esc", Description: "close"},
@@ -188,7 +192,7 @@ func (c *ConflictOverlay) renderConflictList(width int) string {
 		Bold(true)
 	b.WriteString(headerStyle.Render("⚠ Merge conflicts detected!"))
 	b.WriteString("\n")
-	b.WriteString(c.overlayStyles.Footer.Render("AI resolve now? Press c."))
+	b.WriteString(c.overlayStyles.Footer.Render("Agent resolve now? Press c."))
 	b.WriteString("\n")
 
 	if len(c.files) == 0 {
@@ -216,7 +220,7 @@ func (c *ConflictOverlay) renderConflictList(width int) string {
 func (c *ConflictOverlay) StatusBindings() []keybinds.Binding {
 	return []keybinds.Binding{
 		{Key: "j/k/↑/↓", Description: "navigate"},
-		{Key: "c", Description: "ai resolve"},
+		{Key: "c", Description: "agent resolve"},
 		{Key: "o", Description: "open"},
 		{Key: "a", Description: "abort"},
 		{Key: "Esc/q", Description: "close"},

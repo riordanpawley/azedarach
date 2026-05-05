@@ -139,42 +139,36 @@ func (m Model) attachSessionCmd(issueID string) tea.Cmd {
 	}
 }
 
-func (m Model) resolveConflictWithAICmd(issueID string) tea.Cmd {
+func (m Model) resolveConflictWithAgentCmd(issueID, worktree string, conflictFiles []string) tea.Cmd {
 	return func() tea.Msg {
-		msg := m.attachSessionCmd(issueID)()
-		errMsg, ok := msg.(sessionErrorMsg)
-		if !ok {
-			return msg
+		if m.daemonClient == nil {
+			return conflictResolveAgentResultMsg{issueID: issueID, err: fmt.Errorf("daemon client unavailable")}
 		}
 
-		if isSessionNotFoundError(errMsg.err) {
-			startMsg := m.startSessionCmd(issueID, m.resolveBaseBranch(), false, true)()
-			if startErr, ok := startMsg.(sessionErrorMsg); ok {
-				return conflictResolveFallbackMsg{
-					issueID: issueID,
-					err:     fmt.Errorf("start AI session: %w", startErr.err),
-				}
-			}
+		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
+		defer cancel()
 
-			if started, ok := startMsg.(sessionStartedMsg); ok {
-				if started.operationID != "" && !operationStateTerminal(started.state) {
-					return started
-				}
-				reattachMsg := m.attachSessionCmd(issueID)()
-				if reattachErr, ok := reattachMsg.(sessionErrorMsg); ok {
-					return conflictResolveFallbackMsg{
-						issueID: issueID,
-						err:     fmt.Errorf("attach started AI session: %w", reattachErr.err),
-					}
-				}
-				return reattachMsg
+		result, err := m.daemonClient.ResolveConflict(ctx, daemonclient.ResolveConflictParams{
+			IssueID:       issueID,
+			Worktree:      worktree,
+			ConflictFiles: append([]string(nil), conflictFiles...),
+			ImagePaths:    m.sessionImagePaths(ctx, issueID),
+		})
+		if pending, ok := pendingOperationDetails(err); ok {
+			return conflictResolveAgentResultMsg{
+				issueID:     issueID,
+				worktree:    worktree,
+				operationID: pending.OperationID,
+				state:       pending.State,
 			}
-			return startMsg
 		}
-
-		return conflictResolveFallbackMsg{
-			issueID: issueID,
-			err:     errMsg.err,
+		if err != nil {
+			return conflictResolveAgentResultMsg{issueID: issueID, worktree: worktree, err: err}
+		}
+		return conflictResolveAgentResultMsg{
+			issueID:    result.IssueID.String(),
+			worktree:   result.Worktree,
+			windowName: result.WindowName,
 		}
 	}
 }
@@ -315,28 +309,19 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 		})
 		return m, nil
 
-	case resolution.ResolveWithClaude:
+	case resolution.ResolveWithAgent:
 		if issueID == "" {
-			return m, nil
-		}
-		// Attach to tmux session so AI can resolve merge conflicts in-session.
-		if !m.tmuxAvailable {
-			m.addToast(Toast{
-				Level:   ToastWarning,
-				Message: fmt.Sprintf("tmux attach-session -t %s is unavailable outside tmux; launch az inside tmux to use tmux actions", issueID),
-				Expires: time.Now().Add(8 * time.Second),
-			})
 			return m, nil
 		}
 		if m.daemonClient == nil {
 			m.addToast(Toast{
 				Level:   ToastWarning,
-				Message: fmt.Sprintf("Daemon unavailable. Run: tmux attach-session -t %s (AI can help resolve)", issueID),
+				Message: fmt.Sprintf("Daemon unavailable. Run: tmux attach-session -t %s (agent can help resolve)", issueID),
 				Expires: time.Now().Add(8 * time.Second),
 			})
 			return m, nil
 		}
-		return m, m.resolveConflictWithAICmd(issueID)
+		return m, m.resolveConflictWithAgentCmd(issueID, worktree, resolution.ConflictFiles)
 
 	default:
 		return m, nil

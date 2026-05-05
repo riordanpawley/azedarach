@@ -72,7 +72,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 
 	// Handle special overlay-specific messages first (before popping overlay)
 	switch msg.Key {
-	case "abort", "claude", "manual":
+	case "abort", "agent", "manual":
 		// Conflict resolution messages - extract the value
 		if resolution, ok := msg.Value.(overlay.ConflictResolutionMsg); ok {
 			return m.handleConflictResolution(resolution)
