@@ -714,6 +714,7 @@ func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "b":
 		return m, m.openMergeTargetSelection(task)
 	case "m":
+		m.beginMutationFeedback("Preparing merge")
 		return m, m.followOnMergeSelectionCmd(task, session)
 	case "u":
 		if task == nil {
@@ -728,6 +729,7 @@ func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if session != nil {
 			worktreeHint = session.Worktree
 		}
+		m.beginMutationFeedback(fmt.Sprintf("Update from base queued for %s", task.ID))
 		return m, m.updateFromBaseCmd(task.ID.String(), worktreeHint, false)
 	case "P":
 		m.addToast(Toast{
@@ -3864,6 +3866,18 @@ func (m *Model) beginTaskMutationFeedback(taskID, action, label string) {
 	m.addToast(Toast{
 		Level:   ToastInfo,
 		Message: fmt.Sprintf("%s queued for %s", strings.TrimSpace(label), taskID),
+		Expires: time.Now().Add(3 * time.Second),
+	})
+}
+
+func (m *Model) beginMutationFeedback(message string) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return
+	}
+	m.addToast(Toast{
+		Level:   ToastInfo,
+		Message: message,
 		Expires: time.Now().Add(3 * time.Second),
 	})
 }

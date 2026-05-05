@@ -295,6 +295,7 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 		if worktree == "" {
 			return m, nil
 		}
+		m.beginMutationFeedback("Abort merge queued")
 		return m, m.abortMergeCmd(worktree)
 
 	case resolution.OpenManually:
@@ -321,6 +322,7 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 			})
 			return m, nil
 		}
+		m.beginMutationFeedback(fmt.Sprintf("Conflict resolution queued for %s", issueID))
 		return m, m.resolveConflictWithAgentCmd(issueID, worktree, resolution.ConflictFiles)
 
 	default:
@@ -335,6 +337,7 @@ func (m Model) handleMergeTargetSelection(msg overlay.MergeTargetSelectedMsg) (t
 	if targetSession := m.sessionForIssue(msg.TargetID); targetSession != nil {
 		targetState = targetSession.State
 	}
+	m.beginMutationFeedback(fmt.Sprintf("Resolving merge %s -> %s", msg.SourceID, msg.TargetID))
 	return m, m.resolveMergeTargetSelectionCmd(msg.SourceID, msg.TargetID, targetState, !msg.SkipPreflightStatusRefresh)
 }
 

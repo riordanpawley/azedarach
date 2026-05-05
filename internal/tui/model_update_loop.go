@@ -792,6 +792,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.projectSwitchInFlight = true
 		m.issueRefreshSeq++
 		m.projectSwitchSeq++
+		m.beginMutationFeedback(fmt.Sprintf("Switching project: %s", msg.Project.Name))
 
 		// Switch project runtime context and reload issues.
 		return m, m.switchProjectCmd(msg.Project)
@@ -854,6 +855,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if _, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); ok && msg.ParentID != nil {
 			m.openCreatedTaskInWorkspace = true
 		}
+		if strings.TrimSpace(msg.ID) != "" {
+			m.beginMutationFeedback(fmt.Sprintf("Saving task %s", msg.ID))
+		} else {
+			m.beginMutationFeedback("Creating task")
+		}
 		return m, m.saveTaskCmd(msg)
 
 	case overlay.OpenTaskImageAttachMsg:
@@ -910,6 +916,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// PR creation overlay messages
 	case overlay.PRCreatedMsg:
 		m.overlayStack.Pop()
+		m.beginMutationFeedback("Creating PR")
 		return m, m.createPRWithOverlayCmd(msg)
 
 	case prCreatedResultMsg:

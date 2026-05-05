@@ -4415,8 +4415,11 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 		if !ok {
 			t.Fatalf("updated model type = %T, want Model", updated)
 		}
-		if len(updatedModel.toasts) != 0 {
-			t.Fatalf("unexpected immediate toast; command should report result asynchronously: %+v", updatedModel.toasts)
+		if len(updatedModel.toasts) == 0 {
+			t.Fatal("expected immediate feedback toast")
+		}
+		if got := updatedModel.toasts[len(updatedModel.toasts)-1].Message; got != "Opening PR for az-1" {
+			t.Fatalf("toast = %q, want Opening PR for az-1", got)
 		}
 	})
 

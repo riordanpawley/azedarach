@@ -4531,6 +4531,126 @@ func TestHandleSelectionSessionMutationsShowImmediatePendingFeedback(t *testing.
 	}
 }
 
+func TestHandleSelectionAsyncActionsShowImmediateFeedback(t *testing.T) {
+	tests := []struct {
+		name      string
+		key       string
+		wantToast string
+	}{
+		{name: "attach", key: "a", wantToast: "Attach queued for az-1"},
+		{name: "update from base", key: "u", wantToast: "Update from base queued for az-1"},
+		{name: "merge", key: "m", wantToast: "Preparing merge for az-1"},
+		{name: "prepare pr", key: "P", wantToast: "Preparing PR for az-1"},
+		{name: "open pr", key: "O", wantToast: "Opening PR for az-1"},
+		{name: "abort merge", key: "M", wantToast: "Abort merge queued for az-1"},
+		{name: "open helix", key: "H", wantToast: "Opening Helix for az-1"},
+		{name: "cleanup preflight", key: "w", wantToast: "Cleanup preflight queued for az-1"},
+		{name: "delete cleanup preflight", key: "W", wantToast: "Delete + cleanup preflight queued for az-1"},
+		{name: "refresh workspace", key: "r", wantToast: "Refreshing az-1"},
+		{name: "archive tombstone", key: "T", wantToast: "Archive queued for az-1"},
+		{name: "archive delete", key: "d", wantToast: "Archive queued for az-1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModel()
+			m.nav.SelectTask("az-1", 0)
+
+			updatedAny, cmd := m.handleSelection(overlay.SelectionMsg{Key: tt.key})
+			if cmd == nil {
+				t.Fatal("expected async command")
+			}
+			updated := updatedAny.(Model)
+			if len(updated.toasts) == 0 {
+				t.Fatal("expected immediate feedback toast")
+			}
+			if got := updated.toasts[len(updated.toasts)-1].Message; got != tt.wantToast {
+				t.Fatalf("toast = %q, want %q", got, tt.wantToast)
+			}
+		})
+	}
+}
+
+func TestHandleBulkActionShowsImmediateFeedback(t *testing.T) {
+	tests := []struct {
+		name      string
+		action    string
+		wantToast string
+	}{
+		{name: "move left", action: "h", wantToast: "Bulk move queued for 2 task(s)"},
+		{name: "move right", action: "l", wantToast: "Bulk move queued for 2 task(s)"},
+		{name: "open", action: "o", wantToast: "Bulk status update queued for 2 task(s)"},
+		{name: "in progress", action: "i", wantToast: "Bulk status update queued for 2 task(s)"},
+		{name: "blocked", action: "b", wantToast: "Bulk status update queued for 2 task(s)"},
+		{name: "done", action: "D", wantToast: "Bulk status update queued for 2 task(s)"},
+		{name: "delete", action: "d", wantToast: "Bulk delete queued for 2 task(s)"},
+		{name: "archive", action: "a", wantToast: "Bulk archive queued for 2 task(s)"},
+		{name: "cleanup", action: "w", wantToast: "Bulk cleanup preflight queued for 2 task(s)"},
+		{name: "delete cleanup", action: "W", wantToast: "Bulk delete + cleanup preflight queued for 2 task(s)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModel()
+			updatedAny, cmd := m.handleBulkAction(overlay.BulkActionMsg{
+				Action:      tt.action,
+				SelectedIDs: []string{"az-1", "az-2"},
+			})
+			if cmd == nil {
+				t.Fatal("expected bulk command")
+			}
+			updated := updatedAny.(Model)
+			if len(updated.toasts) == 0 {
+				t.Fatal("expected immediate feedback toast")
+			}
+			if got := updated.toasts[len(updated.toasts)-1].Message; got != tt.wantToast {
+				t.Fatalf("toast = %q, want %q", got, tt.wantToast)
+			}
+		})
+	}
+}
+
+func TestSubmittedOverlayMutationsShowImmediateFeedback(t *testing.T) {
+	t.Run("create task", func(t *testing.T) {
+		m := newTestModel()
+
+		updatedAny, cmd := m.Update(overlay.TaskCreatedMsg{Title: "New task"})
+		if cmd == nil {
+			t.Fatal("expected save command")
+		}
+		updated := updatedAny.(Model)
+		if got := updated.toasts[len(updated.toasts)-1].Message; got != "Creating task" {
+			t.Fatalf("toast = %q, want Creating task", got)
+		}
+	})
+
+	t.Run("edit task", func(t *testing.T) {
+		m := newTestModel()
+
+		updatedAny, cmd := m.Update(overlay.TaskCreatedMsg{ID: "az-1", Title: "Updated"})
+		if cmd == nil {
+			t.Fatal("expected save command")
+		}
+		updated := updatedAny.(Model)
+		if got := updated.toasts[len(updated.toasts)-1].Message; got != "Saving task az-1" {
+			t.Fatalf("toast = %q, want Saving task az-1", got)
+		}
+	})
+
+	t.Run("create pr", func(t *testing.T) {
+		m := newTestModel()
+
+		updatedAny, cmd := m.Update(overlay.PRCreatedMsg{})
+		if cmd == nil {
+			t.Fatal("expected pr create command")
+		}
+		updated := updatedAny.(Model)
+		if got := updated.toasts[len(updated.toasts)-1].Message; got != "Creating PR" {
+			t.Fatalf("toast = %q, want Creating PR", got)
+		}
+	})
+}
+
 func TestSessionStartedPendingMarksBoardAndDetailProgress(t *testing.T) {
 	m := newTestModel()
 	m.tasks = []domain.Task{
