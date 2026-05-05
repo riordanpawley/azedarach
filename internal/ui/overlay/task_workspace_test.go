@@ -128,8 +128,8 @@ func TestTaskWorkspaceOverlay_StatusBindingsIncludeScroll(t *testing.T) {
 	if strings.Contains(joined, "Tab/h/l") {
 		t.Fatalf("expected h/l not to be advertised as pane focus switches, got %q", joined)
 	}
-	if !strings.Contains(joined, "</>/") {
-		t.Fatalf("expected status bindings to advertise </> graph navigation, got %q", joined)
+	if !strings.Contains(joined, "h/l/") {
+		t.Fatalf("expected status bindings to advertise h/l graph navigation, got %q", joined)
 	}
 }
 

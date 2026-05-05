@@ -237,7 +237,7 @@ func (w *TaskWorkspaceOverlay) UsesInternalTitle() bool {
 func (w *TaskWorkspaceOverlay) StatusBindings() []keybinds.Binding {
 	return []keybinds.Binding{
 		{Key: "j/k/↑/↓", Description: "select relation"},
-		{Key: "</>/←/→", Description: "open relation"},
+		{Key: "h/l/←/→", Description: "open relation"},
 		{Key: "ctrl+u/d", Description: "half-page"},
 		{Key: "g/G", Description: "top/bottom"},
 		{Key: "Tab", Description: "focus"},
