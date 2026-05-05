@@ -5,7 +5,7 @@ import (
 	"os"
 
 	"github.com/riordanpawley/azedarach/internal/config"
-	tmuxselector "github.com/riordanpawley/azedarach/internal/tmuxselector"
+	tmuxselector "github.com/riordanpawley/azedarach/internal/tmux_selector"
 )
 
 func runGlobalTmuxSelector(cfg *config.Config) {
