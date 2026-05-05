@@ -240,9 +240,10 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Keep task workspace open when attaching so users can return to the
-	// full detail/actions panel after attach without reopening it.
-	if !(msg.Key == "a" && isTaskWorkspaceOverlay(m.overlayStack.Current())) {
+	// Keep task workspace open for actions that should layer over it or return
+	// to it without forcing users to reopen the details.
+	keepWorkspaceOpen := isTaskWorkspaceOverlay(m.overlayStack.Current()) && (msg.Key == "a" || msg.Key == "c")
+	if !keepWorkspaceOpen {
 		m.overlayStack.Pop()
 	}
 

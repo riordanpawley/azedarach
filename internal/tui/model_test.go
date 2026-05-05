@@ -1095,6 +1095,27 @@ func TestActionSelectionCOpensCreateOverlay(t *testing.T) {
 	}
 }
 
+func TestTaskWorkspaceCreateChildKeepsWorkspaceBehindForm(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+	parent := domain.Task{ID: "az-1", Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask}
+	m.tasks = []domain.Task{parent}
+	m.nav.SelectTask(parent.ID.String(), 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(parent, m.tasks, nil, 120, 30))
+
+	result, _ := m.handleSelection(overlay.SelectionMsg{Key: "c"})
+	newModel := result.(Model)
+
+	current := newModel.overlayStack.Current()
+	if _, ok := current.(*overlay.CreateTaskOverlay); !ok {
+		t.Fatalf("expected create overlay on top, got %T", current)
+	}
+	newModel.overlayStack.Pop()
+	if _, ok := newModel.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
+		t.Fatalf("expected task workspace to remain underneath create overlay, got %T", newModel.overlayStack.Current())
+	}
+}
+
 func TestFollowOnMergeSelectionNoEligibleUpstreamShowsToast(t *testing.T) {
 	m := newTestModel()
 	parentID := "az-parent"
@@ -2241,6 +2262,48 @@ func TestTaskCreatedResultSelectsNewTaskAfterRefresh(t *testing.T) {
 	}
 	if refreshedModel.pendingCreatedTaskID != "" {
 		t.Fatalf("pendingCreatedTaskID = %q, want cleared state", refreshedModel.pendingCreatedTaskID)
+	}
+}
+
+func TestTaskCreatedResultOpensChildInWorkspaceAfterRefresh(t *testing.T) {
+	m := newTestModel()
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	parent := domain.Task{ID: parentID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask}
+	m.tasks = []domain.Task{parent}
+	m.nav.SelectTask(parentID.String(), 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(parent, m.tasks, nil, 120, 30))
+	m.openCreatedTaskInWorkspace = true
+
+	createdResult, _ := m.Update(taskCreatedResultMsg{
+		taskID:   childID.String(),
+		err:      nil,
+		isUpdate: false,
+	})
+	createdModel := createdResult.(Model)
+	if createdModel.pendingCreatedWorkspaceTaskID != childID.String() {
+		t.Fatalf("pendingCreatedWorkspaceTaskID = %q, want %q", createdModel.pendingCreatedWorkspaceTaskID, childID)
+	}
+
+	refreshedResult, _ := createdModel.Update(issuesLoadedMsg{
+		tasks: []domain.Task{
+			parent,
+			{ID: childID, Title: "Child", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID},
+		},
+		revision: 42,
+	})
+	refreshedModel := refreshedResult.(Model)
+
+	current := refreshedModel.overlayStack.Current()
+	workspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace to remain open, got %T", current)
+	}
+	if got := workspace.TaskID(); got != childID.String() {
+		t.Fatalf("workspace task ID = %q, want %q", got, childID)
+	}
+	if refreshedModel.pendingCreatedWorkspaceTaskID != "" {
+		t.Fatalf("pendingCreatedWorkspaceTaskID = %q, want cleared state", refreshedModel.pendingCreatedWorkspaceTaskID)
 	}
 }
 
