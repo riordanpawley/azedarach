@@ -278,6 +278,63 @@ func TestModelGridNavigationFollowsVisualRowsAndColumns(t *testing.T) {
 	}
 }
 
+func TestModelGotoWordJumpSelectsVisibleSession(t *testing.T) {
+	entries := []InventoryEntry{
+		{SessionID: "az-one", IssueID: "one", TaskTitle: "One", HasTmuxSession: true},
+		{SessionID: "az-two", IssueID: "two", TaskTitle: "Two", HasTmuxSession: true},
+		{SessionID: "az-three", IssueID: "three", TaskTitle: "Three", HasTmuxSession: true},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
+	model = updated.(Model)
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("g returned command")
+	}
+	if !model.gotoArmed {
+		t.Fatal("expected g to arm goto mode")
+	}
+
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("w returned command")
+	}
+	if model.jumpMode == nil {
+		t.Fatal("expected gw to start jump mode")
+	}
+	if got, want := model.jumpMode.GetLabel(1), "b"; got != want {
+		t.Fatalf("jump label 1 = %q, want %q", got, want)
+	}
+	if !strings.Contains(model.View(), "jump: type label") {
+		t.Fatalf("view missing jump status:\n%s", model.View())
+	}
+
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("jump label did not return selection command")
+	}
+	updated, cmd = model.Update(cmd())
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("jump selected returned command")
+	}
+	if model.cursor != 1 {
+		t.Fatalf("cursor = %d, want selected entry 1", model.cursor)
+	}
+	if model.jumpMode != nil || model.gotoArmed {
+		t.Fatal("expected jump mode to clear after selection")
+	}
+}
+
 func updateKey(t *testing.T, model Model, key string) Model {
 	t.Helper()
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})

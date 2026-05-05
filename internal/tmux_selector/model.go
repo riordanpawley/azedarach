@@ -15,6 +15,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
+	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -131,6 +132,10 @@ type Model struct {
 	loading  bool
 	err      error
 	status   string
+
+	gotoArmed   bool
+	jumpMode    *overlay.JumpMode
+	jumpTargets []int
 }
 
 type LoadedMsg struct {
@@ -228,10 +233,49 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, tea.Quit
+	case overlay.JumpSelectedMsg:
+		if msg.TaskIndex >= 0 && msg.TaskIndex < len(m.jumpTargets) {
+			m.cursor = m.jumpTargets[msg.TaskIndex]
+		}
+		m.clearJumpMode()
+		return m, nil
+	case overlay.CloseOverlayMsg:
+		m.clearJumpMode()
+		return m, nil
 	case tea.KeyMsg:
+		if m.jumpMode != nil {
+			next, cmd := m.jumpMode.Update(msg)
+			if jump, ok := next.(*overlay.JumpMode); ok {
+				m.jumpMode = jump
+			}
+			return m, cmd
+		}
+		if m.gotoArmed {
+			switch msg.String() {
+			case "esc", "ctrl+c", "q":
+				m.gotoArmed = false
+				m.status = formatSnapshotStatus(m.snapshot, len(m.snapshot.Entries))
+				if msg.String() == "ctrl+c" || msg.String() == "q" {
+					return m, tea.Quit
+				}
+				return m, nil
+			case "w":
+				m.gotoArmed = false
+				m.startJumpMode()
+				return m, nil
+			default:
+				m.gotoArmed = false
+				m.status = formatSnapshotStatus(m.snapshot, len(m.snapshot.Entries))
+				return m, nil
+			}
+		}
 		switch msg.String() {
 		case "ctrl+c", "q", "esc":
 			return m, tea.Quit
+		case "g":
+			m.gotoArmed = true
+			m.status = "goto: press w for labels"
+			return m, nil
 		case "j", "down":
 			m.moveCursor(0, 1)
 			return m, nil
@@ -303,7 +347,7 @@ func (m Model) View() string {
 	} else {
 		columns := gridColumnCount(m.width)
 		cardWidth := gridCardWidth(m.width, columns)
-		rows := RenderVisibleGrid(m.snapshot.Entries, m.cursor, columns, cardWidth, maxInt(1, m.height-7), m.styles)
+		rows := RenderVisibleGridWithLabels(m.snapshot.Entries, m.cursor, columns, cardWidth, maxInt(1, m.height-7), m.styles, m.jumpLabelsByEntry())
 		for _, row := range rows {
 			b.WriteString(row)
 			b.WriteString("\n")
@@ -314,9 +358,24 @@ func (m Model) View() string {
 	return strings.Join(append(contentLines, footer), "\n")
 }
 
+func (m Model) jumpLabelsByEntry() map[int]string {
+	if m.jumpMode == nil || len(m.jumpTargets) == 0 {
+		return nil
+	}
+	labels := make(map[int]string, len(m.jumpTargets))
+	for jumpIndex, entryIndex := range m.jumpTargets {
+		label := m.jumpMode.GetLabel(jumpIndex)
+		if label != "" {
+			labels[entryIndex] = label
+		}
+	}
+	return labels
+}
+
 func (m Model) renderFooter() string {
 	right := m.styles.StatusHint.Render(keybinds.RenderPlain([]keybinds.Binding{
 		{Key: "h/j/k/l", Description: "move"},
+		{Key: "gw", Description: "labels"},
 		{Key: "Enter/a", Description: "switch"},
 		{Key: "o/Space", Description: "open in az"},
 		{Key: "r", Description: "refresh"},
@@ -344,6 +403,24 @@ func linesForHeight(view string, height int) []string {
 		lines = append(lines, "")
 	}
 	return lines
+}
+
+func (m *Model) startJumpMode() {
+	targets := m.visibleEntryIndices()
+	if len(targets) == 0 {
+		m.clearJumpMode()
+		return
+	}
+	m.jumpTargets = targets
+	m.jumpMode = overlay.NewJumpMode(len(targets))
+	m.status = "jump: type label"
+}
+
+func (m *Model) clearJumpMode() {
+	m.jumpMode = nil
+	m.jumpTargets = nil
+	m.gotoArmed = false
+	m.status = formatSnapshotStatus(m.snapshot, len(m.snapshot.Entries))
 }
 
 func (m *Model) moveCursor(dx int, dy int) {
@@ -382,6 +459,16 @@ func (m *Model) moveCursor(dx int, dy int) {
 	if next >= 0 && next < count {
 		m.cursor = next
 	}
+}
+
+func (m Model) visibleEntryIndices() []int {
+	if len(m.snapshot.Entries) == 0 {
+		return nil
+	}
+	columns := gridColumnCount(m.width)
+	cardWidth := gridCardWidth(m.width, columns)
+	availableHeight := maxInt(1, m.height-7)
+	return VisibleGridIndices(m.snapshot.Entries, m.cursor, columns, cardWidth, availableHeight, m.styles)
 }
 
 func (m Model) selectedEntry() (InventoryEntry, bool) {
@@ -654,6 +741,39 @@ func RenderVisibleRows(rows []SessionRow, cursor int, width int, availableHeight
 }
 
 func RenderVisibleGrid(rows []SessionRow, cursor int, columns int, cardWidth int, availableHeight int, s *styles.Styles) []string {
+	return RenderVisibleGridWithLabels(rows, cursor, columns, cardWidth, availableHeight, s, nil)
+}
+
+func RenderVisibleGridWithLabels(rows []SessionRow, cursor int, columns int, cardWidth int, availableHeight int, s *styles.Styles, labels map[int]string) []string {
+	if len(rows) == 0 || availableHeight <= 0 {
+		return nil
+	}
+	if columns <= 0 {
+		columns = 1
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= len(rows) {
+		cursor = len(rows) - 1
+	}
+	rendered := make([]string, len(rows))
+	for i, row := range rows {
+		rendered[i] = RenderSessionRow(row, i == cursor, cardWidth, lipgloss.Style{}, lipgloss.Style{}, lipgloss.Style{}, s)
+		if label := strings.TrimSpace(labels[i]); label != "" {
+			rendered[i] = insertJumpLabel(rendered[i], label, s)
+		}
+	}
+
+	start, end := visibleGridRowRange(rendered, cursor, columns, availableHeight)
+	out := make([]string, 0, end-start)
+	for i := start; i < end; i++ {
+		out = append(out, renderGridRow(rendered, i, columns))
+	}
+	return out
+}
+
+func VisibleGridIndices(rows []SessionRow, cursor int, columns int, cardWidth int, availableHeight int, s *styles.Styles) []int {
 	if len(rows) == 0 || availableHeight <= 0 {
 		return nil
 	}
@@ -670,26 +790,38 @@ func RenderVisibleGrid(rows []SessionRow, cursor int, columns int, cardWidth int
 	for i, row := range rows {
 		rendered[i] = RenderSessionRow(row, i == cursor, cardWidth, lipgloss.Style{}, lipgloss.Style{}, lipgloss.Style{}, s)
 	}
+	start, end := visibleGridRowRange(rendered, cursor, columns, availableHeight)
+	indices := make([]int, 0, (end-start)*columns)
+	for gridRow := start; gridRow < end; gridRow++ {
+		rowStart := gridRow * columns
+		rowEnd := rowStart + columns
+		if rowEnd > len(rows) {
+			rowEnd = len(rows)
+		}
+		for i := rowStart; i < rowEnd; i++ {
+			indices = append(indices, i)
+		}
+	}
+	return indices
+}
 
-	gridRows := (len(rows) + columns - 1) / columns
-	renderedGridRows := make([]string, gridRows)
+func visibleGridRowRange(rendered []string, cursor int, columns int, availableHeight int) (int, int) {
+	if len(rendered) == 0 {
+		return 0, 0
+	}
+	if columns <= 0 {
+		columns = 1
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= len(rendered) {
+		cursor = len(rendered) - 1
+	}
+	gridRows := (len(rendered) + columns - 1) / columns
 	heights := make([]int, gridRows)
 	for gridRow := 0; gridRow < gridRows; gridRow++ {
-		start := gridRow * columns
-		end := start + columns
-		if end > len(rendered) {
-			end = len(rendered)
-		}
-		cells := make([]string, 0, end-start)
-		for i := start; i < end; i++ {
-			cell := rendered[i]
-			if i < end-1 {
-				cell = lipgloss.NewStyle().MarginRight(2).Render(cell)
-			}
-			cells = append(cells, cell)
-		}
-		renderedGridRows[gridRow] = lipgloss.JoinHorizontal(lipgloss.Top, cells...)
-		heights[gridRow] = lipgloss.Height(renderedGridRows[gridRow]) + 1
+		heights[gridRow] = lipgloss.Height(renderGridRow(rendered, gridRow, columns)) + 1
 	}
 
 	cursorGridRow := cursor / columns
@@ -702,7 +834,7 @@ func RenderVisibleGrid(rows []SessionRow, cursor int, columns int, cardWidth int
 			used += heights[start]
 			added = true
 		}
-		if end < len(renderedGridRows) && used+heights[end] <= availableHeight {
+		if end < gridRows && used+heights[end] <= availableHeight {
 			used += heights[end]
 			end++
 			added = true
@@ -711,12 +843,40 @@ func RenderVisibleGrid(rows []SessionRow, cursor int, columns int, cardWidth int
 			break
 		}
 	}
+	return start, end
+}
 
-	out := make([]string, 0, end-start)
-	for i := start; i < end; i++ {
-		out = append(out, renderedGridRows[i])
+func renderGridRow(rendered []string, gridRow int, columns int) string {
+	start := gridRow * columns
+	end := start + columns
+	if end > len(rendered) {
+		end = len(rendered)
 	}
-	return out
+	cells := make([]string, 0, end-start)
+	for i := start; i < end; i++ {
+		cell := rendered[i]
+		if i < end-1 {
+			cell = lipgloss.NewStyle().MarginRight(2).Render(cell)
+		}
+		cells = append(cells, cell)
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, cells...)
+}
+
+func insertJumpLabel(card string, label string, s *styles.Styles) string {
+	lines := strings.Split(card, "\n")
+	if len(lines) == 0 {
+		return card
+	}
+	label = s.MenuKey.Render(label)
+	for i, line := range lines {
+		if strings.Contains(line, "│ ") {
+			lines[i] = strings.Replace(line, "│ ", "│ "+label+" ", 1)
+			return strings.Join(lines, "\n")
+		}
+	}
+	lines[0] = label + " " + lines[0]
+	return strings.Join(lines, "\n")
 }
 
 func gridColumnCount(width int) int {
