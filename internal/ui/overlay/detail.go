@@ -108,6 +108,12 @@ func (d *DetailPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				d.scrollY--
 			}
 			return d, nil
+		case "h", "left":
+			d.MoveGraphCursor(-1)
+			return d, nil
+		case "l", "right":
+			d.MoveGraphCursor(1)
+			return d, nil
 		case "ctrl+d":
 			d.scrollY = min(d.maxScroll(), d.scrollY+d.halfPageStep())
 			return d, nil

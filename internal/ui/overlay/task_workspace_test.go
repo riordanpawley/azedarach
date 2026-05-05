@@ -119,6 +119,12 @@ func TestTaskWorkspaceOverlay_StatusBindingsIncludeScroll(t *testing.T) {
 	if !strings.Contains(joined, "1/2/3/4") {
 		t.Fatalf("expected status bindings to include exact status hint, got %q", joined)
 	}
+	if !strings.Contains(joined, "Tab focus") {
+		t.Fatalf("expected status bindings to show Tab as pane focus switch, got %q", joined)
+	}
+	if strings.Contains(joined, "Tab/h/l") {
+		t.Fatalf("expected h/l not to be advertised as pane focus switches, got %q", joined)
+	}
 }
 
 func TestTaskWorkspaceOverlay_ActionFocusUsesArrowNavigation(t *testing.T) {
@@ -142,6 +148,48 @@ func TestTaskWorkspaceOverlay_ActionFocusUsesArrowNavigation(t *testing.T) {
 	overlay = model.(*TaskWorkspaceOverlay)
 	if overlay.actions.cursor == beforeUp {
 		t.Fatalf("expected up arrow to move actions cursor when actions focused")
+	}
+
+	beforeRight := overlay.actions.cursor
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyRight})
+	overlay = model.(*TaskWorkspaceOverlay)
+	if overlay.actions.cursor == beforeRight {
+		t.Fatalf("expected right arrow to move actions cursor down when actions focused")
+	}
+
+	beforeLeft := overlay.actions.cursor
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	overlay = model.(*TaskWorkspaceOverlay)
+	if overlay.actions.cursor == beforeLeft {
+		t.Fatalf("expected left arrow to move actions cursor up when actions focused")
+	}
+}
+
+func TestTaskWorkspaceOverlay_HJKLDoNotSwitchPaneFocus(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-1",
+		Title:  "Task",
+		Status: domain.StatusOpen,
+	}
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	overlay.focus = taskWorkspaceFocusDetail
+
+	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	overlay = model.(*TaskWorkspaceOverlay)
+	if overlay.focus != taskWorkspaceFocusDetail {
+		t.Fatalf("expected l to keep detail focus, got %v", overlay.focus)
+	}
+
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
+	overlay = model.(*TaskWorkspaceOverlay)
+	if overlay.focus != taskWorkspaceFocusActions {
+		t.Fatalf("expected Tab to switch to actions, got %v", overlay.focus)
+	}
+
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	overlay = model.(*TaskWorkspaceOverlay)
+	if overlay.focus != taskWorkspaceFocusActions {
+		t.Fatalf("expected h to keep actions focus, got %v", overlay.focus)
 	}
 }
 
