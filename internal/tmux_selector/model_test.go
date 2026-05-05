@@ -162,11 +162,8 @@ func TestModelViewUsesTmuxCopyAndBottomToolbar(t *testing.T) {
 	}
 
 	view := model.View()
-	if !strings.Contains(view, "Tmux sessions") {
-		t.Fatalf("view missing tmux title: %q", view)
-	}
-	if strings.Contains(view, "Az tmux sessions") || strings.Contains(view, "Azedarach issue sessions") {
-		t.Fatalf("view should not use Az-only selector copy: %q", view)
+	if strings.Contains(view, "Tmux sessions") || strings.Contains(view, "Az tmux sessions") || strings.Contains(view, "Azedarach issue sessions") {
+		t.Fatalf("view should not repeat popup title or use Az-only selector copy: %q", view)
 	}
 	if !strings.Contains(view, "tmux az-one") || !strings.Contains(view, "/tmp/project") {
 		t.Fatalf("view missing tmux metadata inside card: %q", view)
@@ -180,6 +177,9 @@ func TestModelViewUsesTmuxCopyAndBottomToolbar(t *testing.T) {
 	last := lines[len(lines)-1]
 	if !strings.Contains(last, "h/j/k/l: move") || !strings.Contains(last, "q/Esc: close") {
 		t.Fatalf("last line should be key toolbar, got %q\n%s", last, view)
+	}
+	if strings.HasSuffix(view, "\n") {
+		t.Fatalf("view should not leave a blank row under toolbar:\n%q", view)
 	}
 }
 

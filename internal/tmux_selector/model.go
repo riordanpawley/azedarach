@@ -291,8 +291,6 @@ func (m Model) View() string {
 	}
 	var b strings.Builder
 	b.WriteString("\n")
-	b.WriteString(m.styles.ColumnHeaderActive.Render("Tmux sessions"))
-	b.WriteString("\n")
 	if strings.TrimSpace(m.status) != "" {
 		b.WriteString(m.styles.StatusInfo.Render(m.status))
 		b.WriteString("\n")
@@ -319,7 +317,6 @@ func (m Model) View() string {
 		content += "\n"
 	}
 	content += footer
-	content += "\n"
 	return content
 }
 
