@@ -263,6 +263,7 @@ func (m Model) View() string {
 		return "Loading tmux sessions...\n"
 	}
 	var b strings.Builder
+	b.WriteString("\n")
 	b.WriteString(m.styles.ColumnHeaderActive.Render("Az tmux sessions"))
 	b.WriteString("\n")
 	if strings.TrimSpace(m.status) != "" {
@@ -427,6 +428,9 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 	task := row.Task
 	if task.ID.String() == "" {
 		task.ID = naming.IssueID(row.IssueID)
+	}
+	if task.ID.String() == "" {
+		task.ID = naming.IssueID(row.SessionID)
 	}
 	if task.Title == "" {
 		task.Title = row.TaskTitle

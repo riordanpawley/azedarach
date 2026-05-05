@@ -9,10 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
-	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
@@ -27,17 +28,21 @@ type SessionInventory interface {
 	ListSessionInfos(context.Context) ([]tmux.SessionInfo, error)
 }
 
-// RuntimeProjectionStore is the projection read surface used to enrich live tmux inventory.
-type RuntimeProjectionStore interface {
-	ListProjectIDs(context.Context) ([]string, error)
-	ListSessionStates(context.Context, string) ([]daemonstate.Session, error)
-	ListWorktreeStates(context.Context, string) ([]daemonstate.WorktreeState, error)
+// ProjectSnapshotSource is the thin daemon-client read surface used to enrich live tmux inventory.
+type ProjectSnapshotSource interface {
+	ListProjectSnapshots(context.Context) ([]ProjectInventorySnapshot, error)
+}
+
+type ProjectInventorySnapshot struct {
+	ProjectID   string
+	ProjectPath string
+	Tasks       []domain.Task
 }
 
 // GlobalInventoryLoader builds inventory from live tmux first, then projection metadata.
 type GlobalInventoryLoader struct {
 	tmux        SessionInventory
-	stores      []RuntimeProjectionStore
+	source      ProjectSnapshotSource
 	projectDirs []string
 	logger      *slog.Logger
 	limit       int
@@ -45,9 +50,9 @@ type GlobalInventoryLoader struct {
 
 type GlobalInventoryOption func(*GlobalInventoryLoader)
 
-func WithRuntimeProjectionStores(stores ...RuntimeProjectionStore) GlobalInventoryOption {
+func WithProjectSnapshotSource(source ProjectSnapshotSource) GlobalInventoryOption {
 	return func(l *GlobalInventoryLoader) {
-		l.stores = append([]RuntimeProjectionStore(nil), stores...)
+		l.source = source
 	}
 }
 
@@ -85,18 +90,11 @@ func NewGlobalInventoryLoader(tmuxInventory SessionInventory, logger *slog.Logge
 
 func NewDefaultGlobalInventoryLoader(tmuxInventory SessionInventory, logger *slog.Logger) *GlobalInventoryLoader {
 	projectDirs := KnownProjectDirs()
-	stores := make([]RuntimeProjectionStore, 0, intMin(len(projectDirs), defaultInventoryProjectLimit))
-	for _, projectDir := range projectDirs {
-		stores = append(stores, daemonstate.NewRuntimeStateStore(projectDir, logger))
-		if len(stores) >= defaultInventoryProjectLimit {
-			break
-		}
-	}
 	return NewGlobalInventoryLoader(
 		tmuxInventory,
 		logger,
 		WithProjectDirs(projectDirs...),
-		WithRuntimeProjectionStores(stores...),
+		WithProjectSnapshotSource(NewDaemonSnapshotSource(projectDirs, logger)),
 	)
 }
 
@@ -143,7 +141,8 @@ func (l *GlobalInventoryLoader) ListTasksSnapshot(ctx context.Context) (Snapshot
 	if len(live) > l.limit {
 		live = live[:l.limit]
 	}
-	projections := l.loadProjections(ctx)
+	projectDirs := l.projectDirsForLiveSessions(live)
+	projections := l.loadProjections(ctx, projectDirs)
 	entries := make([]InventoryEntry, 0, len(live))
 	seen := make(map[string]struct{}, len(live))
 	for _, info := range live {
@@ -163,12 +162,8 @@ func (l *GlobalInventoryLoader) ListTasksSnapshot(ctx context.Context) (Snapshot
 				ok = true
 			}
 		}
-		if !ok || parsed.IssueID.IsZero() {
-			continue
-		}
 		entry := InventoryEntry{
 			SessionID:      sessionName,
-			IssueID:        parsed.IssueID.String(),
 			ProjectID:      parsed.Project,
 			Worktree:       strings.TrimSpace(info.Path),
 			StartedAt:      info.CreatedAt,
@@ -176,16 +171,23 @@ func (l *GlobalInventoryLoader) ListTasksSnapshot(ctx context.Context) (Snapshot
 			HasWorktree:    strings.TrimSpace(info.Path) != "",
 			State:          domain.SessionWaiting,
 			IssueStatus:    domain.StatusInProgress,
-			TaskTitle:      parsed.IssueID.String(),
+			Priority:       domain.P2,
+			Type:           domain.TypeTask,
+			TaskTitle:      sessionName,
+		}
+		if ok && !parsed.IssueID.IsZero() {
+			entry.IssueID = parsed.IssueID.String()
+			entry.TaskTitle = parsed.IssueID.String()
 		}
 		if projection, ok := projections[sessionName]; ok {
 			entry = mergeProjectedInventory(entry, projection)
+		} else if entry.IssueID != "" {
+			if projection, ok := projections[entry.IssueID]; ok {
+				entry = mergeProjectedInventory(entry, projection)
+			}
 		}
 		if entry.ProjectPath == "" && entry.Worktree != "" {
 			entry.ProjectPath = inferProjectPath(entry.Worktree, l.projectDirs)
-		}
-		if entry.ProjectPath != "" {
-			entry.TaskTitle = entry.IssueID + " (" + filepath.Base(entry.ProjectPath) + ")"
 		}
 		entries = append(entries, entry)
 	}
@@ -197,6 +199,11 @@ func (l *GlobalInventoryLoader) ListTasksSnapshot(ctx context.Context) (Snapshot
 		}
 		if entries[i].ProjectPath != entries[j].ProjectPath {
 			return entries[i].ProjectPath < entries[j].ProjectPath
+		}
+		leftIssue := entries[i].IssueID != ""
+		rightIssue := entries[j].IssueID != ""
+		if leftIssue != rightIssue {
+			return leftIssue
 		}
 		if entries[i].IssueID != entries[j].IssueID {
 			return entries[i].IssueID < entries[j].IssueID
@@ -222,54 +229,95 @@ type projectedInventory struct {
 	state       domain.SessionState
 	startedAt   *time.Time
 	worktree    string
+	task        domain.Task
 }
 
-func (l *GlobalInventoryLoader) loadProjections(ctx context.Context) map[string]projectedInventory {
-	out := map[string]projectedInventory{}
-	for _, store := range l.stores {
-		if store == nil {
-			continue
+func (l *GlobalInventoryLoader) projectDirsForLiveSessions(live []tmux.SessionInfo) []string {
+	seen := map[string]struct{}{}
+	var dirs []string
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
 		}
-		projectIDs, err := store.ListProjectIDs(ctx)
+		if root, err := config.ResolveProjectRoot(path); err == nil {
+			path = root
+		}
+		abs, err := filepath.Abs(path)
 		if err != nil {
-			continue
+			return
 		}
-		if len(projectIDs) == 0 {
-			projectIDs = []string{protocol.DefaultProjectID}
+		if _, exists := seen[abs]; exists {
+			return
 		}
-		for _, projectID := range projectIDs {
-			projectID = protocol.NormalizeProjectID(projectID)
-			worktreeByIssue := map[string]string{}
-			if worktrees, err := store.ListWorktreeStates(ctx, projectID); err == nil {
-				for _, worktree := range worktrees {
-					if strings.TrimSpace(worktree.IssueID) != "" {
-						worktreeByIssue[worktree.IssueID] = strings.TrimSpace(worktree.Path)
-					}
-				}
-			}
-			sessions, err := store.ListSessionStates(ctx, projectID)
-			if err != nil {
+		seen[abs] = struct{}{}
+		dirs = append(dirs, abs)
+	}
+	for _, projectDir := range l.projectDirs {
+		add(projectDir)
+	}
+	for _, info := range live {
+		add(info.Path)
+	}
+	sort.Strings(dirs)
+	if len(dirs) > defaultInventoryProjectLimit {
+		dirs = dirs[:defaultInventoryProjectLimit]
+	}
+	return dirs
+}
+
+func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs []string) map[string]projectedInventory {
+	out := map[string]projectedInventory{}
+	source := l.source
+	if source == nil {
+		return out
+	}
+	if _, ok := source.(*DaemonSnapshotSource); ok {
+		source = NewDaemonSnapshotSource(projectDirs, l.logger)
+	}
+	snapshots, err := source.ListProjectSnapshots(ctx)
+	if err != nil {
+		if l.logger != nil {
+			l.logger.Debug("global selector daemon snapshot enrichment failed", "error", err)
+		}
+		return out
+	}
+	for _, snapshot := range snapshots {
+		projectID := protocol.NormalizeProjectID(snapshot.ProjectID)
+		projectPath := strings.TrimSpace(snapshot.ProjectPath)
+		for _, task := range snapshot.Tasks {
+			issueID := task.ID.String()
+			if issueID == "" {
 				continue
 			}
-			projectPath := projectPathForID(projectID, l.projectDirs)
-			for _, session := range sessions {
-				sessionID := strings.TrimSpace(session.ID)
-				issueID := strings.TrimSpace(session.IssueID)
-				if sessionID == "" || issueID == "" {
-					continue
-				}
-				out[sessionID] = projectedInventory{
-					projectID:   projectID,
-					projectPath: projectPath,
-					issueID:     issueID,
-					state:       domainStateFromProjection(session),
-					startedAt:   session.StartedAt,
-					worktree:    worktreeByIssue[issueID],
-				}
+			projection := projectedInventory{
+				projectID:   projectID,
+				projectPath: projectPath,
+				issueID:     issueID,
+				task:        task,
 			}
+			if task.Session != nil {
+				projection.state = task.Session.State
+				projection.startedAt = task.Session.StartedAt
+				projection.worktree = task.Session.Worktree
+			}
+			if projection.worktree == "" {
+				projection.worktree = taskWorktree(task)
+			}
+			addProjection(out, issueID, projection)
+			addProjection(out, naming.CanonicalSessionID(projectID, issueID), projection)
+			addProjection(out, naming.CanonicalSessionID(projectPath, issueID), projection)
 		}
 	}
 	return out
+}
+
+func addProjection(out map[string]projectedInventory, key string, projection projectedInventory) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	out[key] = projection
 }
 
 func mergeProjectedInventory(entry InventoryEntry, projection projectedInventory) InventoryEntry {
@@ -292,6 +340,20 @@ func mergeProjectedInventory(entry InventoryEntry, projection projectedInventory
 	if projection.state != "" {
 		entry.State = projection.state
 	}
+	if projection.task.ID.String() != "" {
+		entry.Task = projection.task
+		entry.TaskTitle = projection.task.Title
+		entry.IssueStatus = projection.task.Status
+		entry.Priority = projection.task.Priority
+		entry.Type = projection.task.Type
+		entry.HasWorktree = entry.HasWorktree || projection.task.HasWorktree
+		entry.GitAheadCount = projection.task.GitAheadCount
+		entry.GitBehindCount = projection.task.GitBehindCount
+		entry.HasUncommittedChanges = projection.task.HasUncommittedChanges
+		entry.HasConflicts = projection.task.HasConflicts
+		entry.GitAdditions = projection.task.GitAdditions
+		entry.GitDeletions = projection.task.GitDeletions
+	}
 	return entry
 }
 
@@ -301,8 +363,8 @@ func taskFromInventoryEntry(entry InventoryEntry) domain.Task {
 		ID:             issueID,
 		Title:          entry.TaskTitle,
 		Status:         entry.IssueStatus,
-		Priority:       domain.P2,
-		Type:           domain.TypeTask,
+		Priority:       entry.Priority,
+		Type:           entry.Type,
 		HasTmuxSession: entry.HasTmuxSession,
 		HasWorktree:    entry.HasWorktree,
 		Session: &domain.Session{
@@ -311,31 +373,6 @@ func taskFromInventoryEntry(entry InventoryEntry) domain.Task {
 			StartedAt: entry.StartedAt,
 			Worktree:  entry.Worktree,
 		},
-	}
-}
-
-func domainStateFromProjection(session daemonstate.Session) domain.SessionState {
-	switch session.ObservedState {
-	case daemonstate.SessionStateStarting:
-		return domain.SessionBusy
-	case daemonstate.SessionStateAttached:
-		return domain.SessionWaiting
-	case daemonstate.SessionStatePaused:
-		return domain.SessionPaused
-	case daemonstate.SessionStateStopped:
-		return domain.SessionDone
-	}
-	switch session.State {
-	case daemonstate.SessionStateStarting:
-		return domain.SessionBusy
-	case daemonstate.SessionStateAttached:
-		return domain.SessionWaiting
-	case daemonstate.SessionStatePaused:
-		return domain.SessionPaused
-	case daemonstate.SessionStateStopped:
-		return domain.SessionDone
-	default:
-		return domain.SessionWaiting
 	}
 }
 
@@ -350,12 +387,9 @@ func projectIDForPath(path string) string {
 	return protocol.NormalizeProjectID(projectID)
 }
 
-func projectPathForID(projectID string, projectDirs []string) string {
-	projectID = protocol.NormalizeProjectID(projectID)
-	for _, projectDir := range projectDirs {
-		if projectIDForPath(projectDir) == projectID {
-			return projectDir
-		}
+func taskWorktree(task domain.Task) string {
+	if task.Session != nil && strings.TrimSpace(task.Session.Worktree) != "" {
+		return strings.TrimSpace(task.Session.Worktree)
 	}
 	return ""
 }
@@ -395,4 +429,48 @@ func intMin(a, b int) int {
 		return a
 	}
 	return b
+}
+
+type DaemonSnapshotSource struct {
+	projectDirs []string
+	logger      *slog.Logger
+}
+
+func NewDaemonSnapshotSource(projectDirs []string, logger *slog.Logger) *DaemonSnapshotSource {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	limited := append([]string(nil), projectDirs...)
+	if len(limited) > defaultInventoryProjectLimit {
+		limited = limited[:defaultInventoryProjectLimit]
+	}
+	return &DaemonSnapshotSource{projectDirs: limited, logger: logger}
+}
+
+func (s *DaemonSnapshotSource) ListProjectSnapshots(ctx context.Context) ([]ProjectInventorySnapshot, error) {
+	if s == nil {
+		return nil, nil
+	}
+	out := make([]ProjectInventorySnapshot, 0, len(s.projectDirs))
+	for _, projectDir := range s.projectDirs {
+		projectID := projectIDForPath(projectDir)
+		if projectID == "" {
+			continue
+		}
+		socketPath := config.DaemonSocketPathFor(projectDir)
+		client := daemonclient.New(transport.NewClient(socketPath)).WithProjectID(projectID)
+		snapshot, err := client.ListTasksSnapshot(ctx)
+		if err != nil {
+			if s.logger != nil {
+				s.logger.Debug("global selector project snapshot failed", "project_dir", projectDir, "project_id", projectID, "error", err)
+			}
+			continue
+		}
+		out = append(out, ProjectInventorySnapshot{
+			ProjectID:   projectID,
+			ProjectPath: projectDir,
+			Tasks:       snapshot.Tasks,
+		})
+	}
+	return out, nil
 }

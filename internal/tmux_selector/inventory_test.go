@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
@@ -20,22 +19,12 @@ func (f fakeSessionInventory) ListSessionInfos(context.Context) ([]tmux.SessionI
 	return f.infos, f.err
 }
 
-type fakeProjectionStore struct {
-	projectIDs []string
-	sessions   map[string][]daemonstate.Session
-	worktrees  map[string][]daemonstate.WorktreeState
+type fakeProjectSnapshotSource struct {
+	snapshots []ProjectInventorySnapshot
 }
 
-func (f fakeProjectionStore) ListProjectIDs(context.Context) ([]string, error) {
-	return append([]string(nil), f.projectIDs...), nil
-}
-
-func (f fakeProjectionStore) ListSessionStates(_ context.Context, projectID string) ([]daemonstate.Session, error) {
-	return append([]daemonstate.Session(nil), f.sessions[projectID]...), nil
-}
-
-func (f fakeProjectionStore) ListWorktreeStates(_ context.Context, projectID string) ([]daemonstate.WorktreeState, error) {
-	return append([]daemonstate.WorktreeState(nil), f.worktrees[projectID]...), nil
+func (f fakeProjectSnapshotSource) ListProjectSnapshots(context.Context) ([]ProjectInventorySnapshot, error) {
+	return append([]ProjectInventorySnapshot(nil), f.snapshots...), nil
 }
 
 func TestGlobalInventoryLoaderUsesTmuxFirstAcrossProjects(t *testing.T) {
@@ -52,20 +41,29 @@ func TestGlobalInventoryLoaderUsesTmuxFirstAcrossProjects(t *testing.T) {
 		}},
 		nil,
 		WithProjectDirs(projectDir),
-		WithRuntimeProjectionStores(fakeProjectionStore{
-			projectIDs: []string{projectID},
-			sessions: map[string][]daemonstate.Session{
-				projectID: {
-					{
-						ID:            sessionID,
-						IssueID:       "bxo",
-						ObservedState: daemonstate.SessionStatePaused,
-						StartedAt:     &started,
-					},
+		WithProjectSnapshotSource(fakeProjectSnapshotSource{
+			snapshots: []ProjectInventorySnapshot{
+				{
+					ProjectID:   projectID,
+					ProjectPath: projectDir,
+					Tasks: []domain.Task{{
+						ID:       "bxo",
+						Title:    "Global session inventory",
+						Status:   domain.StatusInProgress,
+						Priority: domain.P1,
+						Type:     domain.TypeTask,
+						Session: &domain.Session{
+							IssueID:   "bxo",
+							State:     domain.SessionPaused,
+							StartedAt: &started,
+							Worktree:  worktree,
+						},
+						HasTmuxSession:        true,
+						HasWorktree:           true,
+						GitAheadCount:         2,
+						HasUncommittedChanges: true,
+					}},
 				},
-			},
-			worktrees: map[string][]daemonstate.WorktreeState{
-				projectID: {{ProjectID: projectID, IssueID: "bxo", Path: worktree}},
 			},
 		}),
 	)
@@ -74,8 +72,8 @@ func TestGlobalInventoryLoaderUsesTmuxFirstAcrossProjects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTasksSnapshot: %v", err)
 	}
-	if len(snapshot.Entries) != 2 {
-		t.Fatalf("entries = %#v, want 2 Az sessions", snapshot.Entries)
+	if len(snapshot.Entries) != 3 {
+		t.Fatalf("entries = %#v, want 3 tmux sessions", snapshot.Entries)
 	}
 	first := snapshot.Entries[0]
 	if first.SessionID != sessionID || first.IssueID != "bxo" || first.ProjectID != projectID {
@@ -84,8 +82,14 @@ func TestGlobalInventoryLoaderUsesTmuxFirstAcrossProjects(t *testing.T) {
 	if first.Worktree != worktree || !first.HasWorktree || first.State != domain.SessionPaused {
 		t.Fatalf("first runtime metadata = %#v", first)
 	}
+	if first.TaskTitle != "Global session inventory" || first.GitAheadCount != 2 || !first.HasUncommittedChanges {
+		t.Fatalf("first task metadata = %#v", first)
+	}
 	if snapshot.Entries[1].SessionID != "az-bxk" || snapshot.Entries[1].IssueID != "bxk" {
 		t.Fatalf("az-prefixed fallback entry = %#v", snapshot.Entries[1])
+	}
+	if snapshot.Entries[2].SessionID != "plain-tmux" || snapshot.Entries[2].IssueID != "" {
+		t.Fatalf("plain tmux fallback entry = %#v", snapshot.Entries[2])
 	}
 	if len(snapshot.Tasks) != len(snapshot.Entries) {
 		t.Fatalf("tasks = %d, entries = %d", len(snapshot.Tasks), len(snapshot.Entries))
