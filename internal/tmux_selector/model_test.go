@@ -114,7 +114,7 @@ func TestModelUsesFakeInventoryAndSwitchesSessionID(t *testing.T) {
 	}
 }
 
-func TestModelOpenDetailSupportsOAndSpaceKeys(t *testing.T) {
+func TestModelOpenDetailSupportsOAndSpaceKeysWithoutOpenIssueCommand(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		key  tea.KeyMsg
@@ -146,16 +146,11 @@ func TestModelOpenDetailSupportsOAndSpaceKeys(t *testing.T) {
 			if !ok {
 				t.Fatalf("open msg = %T, want DetailOpenResultMsg", msg)
 			}
-			if msg.Err != nil {
-				t.Fatalf("open detail returned error: %v", msg.Err)
+			if msg.Err == nil || !strings.Contains(msg.Err.Error(), "not implemented yet") {
+				t.Fatalf("open detail error = %v, want tracked not implemented error", msg.Err)
 			}
 
-			want := []string{
-				"has az",
-				"key az C-c",
-				`keys az cd "/tmp/project one" && az --open-issue "one"`,
-				"switch az",
-			}
+			want := []string{"has az"}
 			if got := strings.Join(switcher.commands, "\n"); got != strings.Join(want, "\n") {
 				t.Fatalf("commands:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
 			}
@@ -163,7 +158,7 @@ func TestModelOpenDetailSupportsOAndSpaceKeys(t *testing.T) {
 	}
 }
 
-func TestModelOpenDetailCreatesFullAzSessionWhenMissing(t *testing.T) {
+func TestModelOpenDetailErrorsWhenFullAzSessionMissing(t *testing.T) {
 	switcher := &fakeFullAzSwitcher{}
 	entries := []InventoryEntry{{
 		SessionID:   "az-two",
@@ -183,14 +178,10 @@ func TestModelOpenDetailCreatesFullAzSessionWhenMissing(t *testing.T) {
 		t.Fatal("o did not produce detail command")
 	}
 	msg := cmd().(DetailOpenResultMsg)
-	if msg.Err != nil {
-		t.Fatalf("open detail returned error: %v", msg.Err)
+	if msg.Err == nil || !strings.Contains(msg.Err.Error(), "not found") {
+		t.Fatalf("open detail error = %v, want missing full az session", msg.Err)
 	}
-	want := []string{
-		"has az",
-		`new az /tmp/project cd "/tmp/project" && az --open-issue "two"`,
-		"switch az",
-	}
+	want := []string{"has az"}
 	if got := strings.Join(switcher.commands, "\n"); got != strings.Join(want, "\n") {
 		t.Fatalf("commands:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
 	}

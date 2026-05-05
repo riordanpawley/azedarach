@@ -192,16 +192,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.openSessionSelectorOnLoad = false
 			cmds = append(cmds, m.openOrchestrationOverlay())
 		}
-		if issueID := strings.TrimSpace(m.openTaskWorkspaceOnLoadID); issueID != "" {
-			m.openTaskWorkspaceOnLoadID = ""
-			updatedModel, cmd := m.openTaskWorkspaceByID(issueID)
-			if opened, ok := updatedModel.(Model); ok {
-				m = opened
-			}
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		}
 		if len(cmds) == 0 {
 			return m, nil
 		}

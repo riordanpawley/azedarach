@@ -156,7 +156,6 @@ type Model struct {
 	pendingCreatedWorkspaceTaskID string
 	openCreatedTaskInWorkspace    bool
 	openSessionSelectorOnLoad     bool
-	openTaskWorkspaceOnLoadID     string
 	runtimeSignalsByTask          map[string]board.RuntimeSignals
 	runtimeSignalWorktreeByTask   map[string]string
 
@@ -237,13 +236,6 @@ type Option func(*Model)
 func WithSessionSelectorOnLoad() Option {
 	return func(m *Model) {
 		m.openSessionSelectorOnLoad = true
-	}
-}
-
-// WithOpenTaskWorkspaceOnLoad opens an issue workspace after the first task snapshot loads.
-func WithOpenTaskWorkspaceOnLoad(issueID string) Option {
-	return func(m *Model) {
-		m.openTaskWorkspaceOnLoadID = strings.TrimSpace(issueID)
 	}
 }
 

@@ -3,8 +3,6 @@ package tmuxselector
 import (
 	"context"
 	"fmt"
-	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -547,38 +545,14 @@ func openFullAzDetail(ctx context.Context, switcher fullAzSwitcher, entry Invent
 	if issueID == "" {
 		return fmt.Errorf("selected session has no issue id")
 	}
-	projectDir := firstNonEmpty(entry.ProjectPath, entry.Worktree)
-	if projectDir == "" && entry.Task.Session != nil {
-		projectDir = strings.TrimSpace(entry.Task.Session.Worktree)
-	}
-	if projectDir == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("resolve cwd for full az session: %w", err)
-		}
-		projectDir = cwd
-	}
-	command := fmt.Sprintf("cd %s && az --open-issue %s", shellQuote(projectDir), shellQuote(issueID))
 	exists, err := switcher.HasSession(ctx, defaultFullAzSession)
 	if err != nil {
 		return fmt.Errorf("check full az tmux session: %w", err)
 	}
 	if !exists {
-		if err := switcher.NewSessionWithCommand(ctx, defaultFullAzSession, projectDir, command); err != nil {
-			return fmt.Errorf("create full az tmux session: %w", err)
-		}
-	} else {
-		if err := switcher.SendKey(ctx, defaultFullAzSession, "C-c"); err != nil {
-			return fmt.Errorf("reset full az tmux pane: %w", err)
-		}
-		if err := switcher.SendKeys(ctx, defaultFullAzSession, command); err != nil {
-			return fmt.Errorf("open issue in full az tmux session: %w", err)
-		}
+		return fmt.Errorf("full az tmux session %q not found", defaultFullAzSession)
 	}
-	if err := switcher.SwitchClient(ctx, defaultFullAzSession); err != nil {
-		return fmt.Errorf("switch to full az tmux session: %w", err)
-	}
-	return nil
+	return fmt.Errorf("open selected issue in running az TUI is not implemented yet; tracked by az issue bxz")
 }
 
 func EntriesFromTasks(tasks []domain.Task) []InventoryEntry {
@@ -921,10 +895,6 @@ func ParseAzedarachSessionName(sessionName string) (ParsedSessionName, bool) {
 		return ParsedSessionName{IssueID: naming.IssueID(rest), Project: prefix}, true
 	}
 	return ParsedSessionName{}, false
-}
-
-func shellQuote(value string) string {
-	return strconv.Quote(value)
 }
 
 func firstNonEmpty(values ...string) string {
