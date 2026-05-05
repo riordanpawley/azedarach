@@ -1270,6 +1270,10 @@ func TmuxInstallSelectorCommand(deps *Dependencies, opts TmuxInstallSelectorOpti
 	if err != nil {
 		return err
 	}
+	projectDir, err = filepath.Abs(projectDir)
+	if err != nil {
+		return fmt.Errorf("resolve absolute project directory: %w", err)
+	}
 
 	configPath := strings.TrimSpace(opts.ConfigPath)
 	if configPath == "" {
@@ -1278,6 +1282,10 @@ func TmuxInstallSelectorCommand(deps *Dependencies, opts TmuxInstallSelectorOpti
 			return fmt.Errorf("resolve home directory for tmux config: %w", homeErr)
 		}
 		configPath = filepath.Join(home, ".tmux.conf")
+	}
+	configPath, err = filepath.Abs(configPath)
+	if err != nil {
+		return fmt.Errorf("resolve absolute tmux config path: %w", err)
 	}
 
 	managedBlock := buildTmuxSelectorBlock(opts.Key, opts.AZCommand, projectDir)
@@ -1307,6 +1315,12 @@ func buildTmuxSelectorBlock(key, azCommand, projectDir string) string {
 
 func upsertManagedTextBlock(path, startMarker, endMarker, managedBlock string, mode os.FileMode) error {
 	content := ""
+	writeMode := mode
+	if info, err := os.Stat(path); err == nil {
+		writeMode = info.Mode().Perm()
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	if raw, err := os.ReadFile(path); err == nil {
 		content = string(raw)
 	} else if !os.IsNotExist(err) {
@@ -1314,11 +1328,11 @@ func upsertManagedTextBlock(path, startMarker, endMarker, managedBlock string, m
 	}
 	base := stripManagedTextBlocks(content, startMarker, endMarker)
 	if strings.TrimSpace(base) == "" {
-		return os.WriteFile(path, []byte(managedBlock), mode)
+		return os.WriteFile(path, []byte(managedBlock), writeMode)
 	}
 	normalized := strings.ReplaceAll(base, "\r\n", "\n")
 	normalized = strings.TrimRight(normalized, "\n") + "\n\n"
-	return os.WriteFile(path, []byte(normalized+managedBlock), mode)
+	return os.WriteFile(path, []byte(normalized+managedBlock), writeMode)
 }
 
 func stripManagedTextBlocks(content, startMarker, endMarker string) string {
