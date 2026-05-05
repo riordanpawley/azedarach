@@ -103,6 +103,7 @@ type Daemon struct {
 	hookLogByProject              map[string][]protocol.HookLogEvent
 	tmux                          *tmux.Client
 	git                           *git.Client
+	gitStatusAdapter              *gitServiceAdapter
 	gitHandler                    *daemonhandlers.GitHandler
 	worktreeHandler               *daemonhandlers.WorktreeHandler
 	worktreeAdapter               *worktreeServiceAdapter
@@ -224,6 +225,7 @@ func New(cfg Config) *Daemon {
 		hookLogByProject:              map[string][]protocol.HookLogEvent{},
 		tmux:                          tmux.NewClient(tmuxRunner, cfg.Logger),
 		git:                           gitClient,
+		gitStatusAdapter:              gitService,
 		session:                       sessionHandler,
 		sessionStore:                  sessionStore,
 		runtimeReconcileQueue:         runtimeReconcileQueue,
@@ -932,6 +934,35 @@ func (d *Daemon) triggerWorktreeStateRefresh(projectID string) {
 		defer cancel()
 		d.worktreeAdapter.pollAndPersistWorktrees(ctx, projectID)
 	}()
+}
+
+func (d *Daemon) triggerIssueWorktreeStateRefresh(ctx context.Context, projectID, issueID string) {
+	if d == nil || d.gitStatusAdapter == nil {
+		return
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = protocol.DefaultProjectID
+	}
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return
+	}
+	store := d.worktreeRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return
+	}
+	projection, found, err := store.GetWorktreeStateByIssueID(ctx, projectID, issueID)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("issue worktree refresh lookup failed", "project_id", projectID, "issue_id", issueID, "error", err)
+		}
+		return
+	}
+	if !found || strings.TrimSpace(projection.Path) == "" {
+		return
+	}
+	d.gitStatusAdapter.refreshGitStatusVisible(projectID, projection.Path)
 }
 
 func (d *Daemon) persistWorktreeState(ctx context.Context, projectID, issueID, path, branch string) error {

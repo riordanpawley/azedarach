@@ -99,6 +99,7 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task get requested", "project_id", projectID, "task_id", taskID)
 	}
+	d.triggerIssueWorktreeStateRefresh(ctx, projectID, taskID)
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
