@@ -148,6 +148,8 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			return m, m.openLogEditorCmd(path)
 		}
 		return m, nil
+	case "editor":
+		return m, m.openSettingsEditorCmd()
 	case "event-log-error":
 		if err, ok := msg.Value.(error); ok {
 			m.addToast(Toast{
@@ -184,6 +186,31 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			m.ensureCursorVisible(columns)
 		}
 		return m, nil
+	case "task_workspace_open_task":
+		targetID, ok := msg.Value.(string)
+		if !ok || strings.TrimSpace(targetID) == "" {
+			return m, nil
+		}
+		task, _, ok := m.taskAndSessionByID(targetID)
+		if !ok || task == nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Related task %s is not loaded", strings.TrimSpace(targetID)),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		columns := m.buildColumns()
+		m.nav.JumpToTaskByID(columns, task.ID.String())
+		m.ensureCursorVisible(columns)
+		if workspace, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); ok {
+			workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
+			workspace.SyncTask(*task, m.tasks, m.pendingMutationForTask(task.ID.String()))
+		}
+		if m.daemonClient == nil {
+			return m, nil
+		}
+		return m, m.refreshTaskWorkspaceInBackgroundCmd(task.ID.String())
 	case "set-default-success", "remove-success", "detect-success":
 		// Project registry actions succeeded - just show success toast
 		if name, ok := msg.Value.(string); ok {
@@ -215,9 +242,10 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Keep task workspace open when attaching so users can return to the
-	// full detail/actions panel after attach without reopening it.
-	if !(msg.Key == "a" && isTaskWorkspaceOverlay(m.overlayStack.Current())) {
+	// Keep task workspace open for actions that should layer over it or return
+	// to it without forcing users to reopen the details.
+	keepWorkspaceOpen := isTaskWorkspaceOverlay(m.overlayStack.Current()) && (msg.Key == "a" || msg.Key == "c")
+	if !keepWorkspaceOpen {
 		m.overlayStack.Pop()
 	}
 

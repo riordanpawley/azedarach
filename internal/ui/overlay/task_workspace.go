@@ -36,7 +36,7 @@ func NewTaskWorkspaceOverlay(
 	viewportHeight int,
 ) *TaskWorkspaceOverlay {
 	detail := NewDetailPanel(task).WithRelatedTasks(relatedTasks).WithMutationProgress(mutation)
-	actions := NewActionMenu(task, task.Session).WithRelatedTasks(relatedTasks)
+	actions := NewActionMenu(task, task.Session).WithRelatedTasks(relatedTasks).WithoutStatusMoveActions()
 
 	overlayWidth := viewportWidth
 	overlayHeight := viewportHeight - 1
@@ -77,18 +77,55 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "esc", "q":
 			return w, func() tea.Msg { return CloseOverlayMsg{} }
-		case "tab", "h", "l":
+		case "tab":
 			w.toggleFocus()
+			return w, nil
+		case "[", "shift+tab":
+			if w.detail.GraphLinkCount() > 0 {
+				w.focus = taskWorkspaceFocusDetail
+				w.detail.MoveGraphCursor(-1)
+			}
+			return w, nil
+		case "]":
+			if w.detail.GraphLinkCount() > 0 {
+				w.focus = taskWorkspaceFocusDetail
+				w.detail.MoveGraphCursor(1)
+			}
 			return w, nil
 		case "enter":
 			if w.focus == taskWorkspaceFocusDetail {
+				if taskID, ok := w.detail.SelectedGraphTaskID(); ok {
+					return w, func() tea.Msg {
+						return SelectionMsg{Key: "task_workspace_open_task", Value: taskID}
+					}
+				}
 				w.focus = taskWorkspaceFocusActions
 				return w, nil
 			}
 			return w, w.actions.selectCurrentAction()
+		case "h", "left", "<":
+			if w.focus == taskWorkspaceFocusActions {
+				w.actions.moveCursorUp()
+			} else if taskID, ok := w.detail.SelectedGraphTaskIDForDirection("ascendant"); ok {
+				return w, func() tea.Msg {
+					return SelectionMsg{Key: "task_workspace_open_task", Value: taskID}
+				}
+			}
+			return w, nil
+		case "l", "right", ">":
+			if w.focus == taskWorkspaceFocusActions {
+				w.actions.moveCursorDown()
+			} else if taskID, ok := w.detail.SelectedGraphTaskIDForDirection("descendant"); ok {
+				return w, func() tea.Msg {
+					return SelectionMsg{Key: "task_workspace_open_task", Value: taskID}
+				}
+			}
+			return w, nil
 		case "j", "down":
 			if w.focus == taskWorkspaceFocusActions {
 				w.actions.moveCursorDown()
+			} else if w.detail.GraphLinkCount() > 0 {
+				w.detail.MoveGraphCursor(1)
 			} else if w.detail.scrollY < w.detail.maxScroll() {
 				w.detail.scrollY++
 			}
@@ -96,6 +133,8 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "k", "up":
 			if w.focus == taskWorkspaceFocusActions {
 				w.actions.moveCursorUp()
+			} else if w.detail.GraphLinkCount() > 0 {
+				w.detail.MoveGraphCursor(-1)
 			} else if w.detail.scrollY > 0 {
 				w.detail.scrollY--
 			}
@@ -197,13 +236,14 @@ func (w *TaskWorkspaceOverlay) UsesInternalTitle() bool {
 
 func (w *TaskWorkspaceOverlay) StatusBindings() []keybinds.Binding {
 	return []keybinds.Binding{
-		{Key: "j/k/↑/↓", Description: "scroll"},
+		{Key: "j/k/↑/↓", Description: "select relation"},
+		{Key: "h/l/←/→", Description: "open relation"},
 		{Key: "ctrl+u/d", Description: "half-page"},
 		{Key: "g/G", Description: "top/bottom"},
-		{Key: "Tab/h/l", Description: "focus"},
+		{Key: "Tab", Description: "focus"},
 		{Key: "Enter", Description: "run action"},
 		{Key: "1/2/3/4", Description: "set status"},
-		{Key: "n/p", Description: "action up/down"},
+		{Key: "n/p", Description: "action select"},
 		{Key: "Esc/q", Description: "close"},
 	}
 }
@@ -244,6 +284,7 @@ func (w *TaskWorkspaceOverlay) SyncTask(task domain.Task, relatedTasks []domain.
 	w.actions.task = task
 	w.actions.session = task.Session
 	w.actions.relatedTasks = append([]domain.Task(nil), relatedTasks...)
+	w.actions.hideStatusMoveActions = true
 	w.actions.actions = w.actions.buildActions()
 	if len(w.actions.actions) == 0 {
 		w.actions.cursor = 0

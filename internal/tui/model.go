@@ -144,17 +144,19 @@ type Model struct {
 	editor *editor.Service
 
 	// UI state
-	overlayStack                *overlay.Stack
-	createTaskOverlay           *overlay.CreateTaskOverlay
-	viewMode                    ViewMode
-	viewportStarts              [board.DefaultColumnCount]int
-	columnViewportStart         int
-	drillDownParentID           string
-	drillDownParentName         string
-	drillDownTrail              []drillDownContext
-	pendingCreatedTaskID        string
-	runtimeSignalsByTask        map[string]board.RuntimeSignals
-	runtimeSignalWorktreeByTask map[string]string
+	overlayStack                  *overlay.Stack
+	createTaskOverlay             *overlay.CreateTaskOverlay
+	viewMode                      ViewMode
+	viewportStarts                [board.DefaultColumnCount]int
+	columnViewportStart           int
+	drillDownParentID             string
+	drillDownParentName           string
+	drillDownTrail                []drillDownContext
+	pendingCreatedTaskID          string
+	pendingCreatedWorkspaceTaskID string
+	openCreatedTaskInWorkspace    bool
+	runtimeSignalsByTask          map[string]board.RuntimeSignals
+	runtimeSignalWorktreeByTask   map[string]string
 
 	// Project
 	currentProject       string
@@ -333,6 +335,31 @@ func (m *Model) applyPendingCreatedTaskSelection() {
 	if m.taskExists(taskID) {
 		m.pendingCreatedTaskID = ""
 	}
+}
+
+func (m *Model) applyPendingCreatedWorkspaceTask() {
+	taskID := strings.TrimSpace(m.pendingCreatedWorkspaceTaskID)
+	if taskID == "" {
+		return
+	}
+	workspace, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		return
+	}
+	task, _, ok := m.taskAndSessionByID(taskID)
+	if !ok || task == nil {
+		if m.taskExists(taskID) {
+			m.pendingCreatedWorkspaceTaskID = ""
+		}
+		return
+	}
+	columns := m.buildColumns()
+	if m.nav.JumpToTaskByID(columns, task.ID.String()) {
+		m.ensureCursorVisible(columns)
+	}
+	workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
+	workspace.SyncTask(*task, m.tasks, m.pendingMutationForTask(task.ID.String()))
+	m.pendingCreatedWorkspaceTaskID = ""
 }
 
 // handleKey processes keyboard input based on current mode
@@ -2228,6 +2255,48 @@ func (m Model) configSourcePath() string {
 		base = "."
 	}
 	return filepath.Join(base, config.ConfigDirName, config.ConfigFileName)
+}
+
+func (m Model) openSettingsEditorCmd() tea.Cmd {
+	configPath := m.configSourcePath()
+	projectPath := strings.TrimSpace(m.repoDir)
+	if projectPath == "" {
+		projectPath = "."
+	}
+
+	editorName := strings.TrimSpace(os.Getenv("EDITOR"))
+	if editorName == "" {
+		editorName = strings.TrimSpace(os.Getenv("VISUAL"))
+	}
+	if editorName == "" {
+		editorName = "vim"
+	}
+
+	return func() tea.Msg {
+		if strings.TrimSpace(os.Getenv("TMUX")) == "" || m.tmuxClient == nil {
+			return overlay.SelectionMsg{
+				Key:   "editor-error",
+				Value: fmt.Errorf("settings editor unavailable outside tmux; run inside tmux and retry"),
+			}
+		}
+		if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+			return overlay.SelectionMsg{
+				Key:   "editor-error",
+				Value: fmt.Errorf("prepare settings directory: %w", err),
+			}
+		}
+		popupCommand := fmt.Sprintf("cd %s && %s %s", shellSingleQuote(projectPath), shellSingleQuote(editorName), shellSingleQuote(configPath))
+		if err := m.tmuxClient.DisplayPopup(context.Background(), "az.settings", "90%", "90%", popupCommand); err != nil {
+			return overlay.SelectionMsg{
+				Key:   "editor-error",
+				Value: fmt.Errorf("open settings editor in tmux popup: %w", err),
+			}
+		}
+		return overlay.SelectionMsg{
+			Key:   "editor-closed",
+			Value: configPath,
+		}
+	}
 }
 
 func (m Model) openLogStreamCmd(logPaths ...string) tea.Cmd {

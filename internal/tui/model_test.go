@@ -1096,6 +1096,27 @@ func TestActionSelectionCOpensCreateOverlay(t *testing.T) {
 	}
 }
 
+func TestTaskWorkspaceCreateChildKeepsWorkspaceBehindForm(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+	parent := domain.Task{ID: "az-1", Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask}
+	m.tasks = []domain.Task{parent}
+	m.nav.SelectTask(parent.ID.String(), 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(parent, m.tasks, nil, 120, 30))
+
+	result, _ := m.handleSelection(overlay.SelectionMsg{Key: "c"})
+	newModel := result.(Model)
+
+	current := newModel.overlayStack.Current()
+	if _, ok := current.(*overlay.CreateTaskOverlay); !ok {
+		t.Fatalf("expected create overlay on top, got %T", current)
+	}
+	newModel.overlayStack.Pop()
+	if _, ok := newModel.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
+		t.Fatalf("expected task workspace to remain underneath create overlay, got %T", newModel.overlayStack.Current())
+	}
+}
+
 func TestFollowOnMergeSelectionNoEligibleUpstreamShowsToast(t *testing.T) {
 	m := newTestModel()
 	parentID := "az-parent"
@@ -1205,6 +1226,77 @@ func TestSettingsSaveErrorKeepsOverlayOpen(t *testing.T) {
 
 	if got := len(newModel.toasts); got == 0 {
 		t.Fatal("expected a toast to be recorded for settings save error")
+	}
+}
+
+func TestSettingsEditorOpensCurrentProjectConfigInTmuxPopup(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/tmux-123/default,1,0")
+	t.Setenv("EDITOR", "vim")
+
+	projectDir := t.TempDir()
+	wantConfigPath := filepath.Join(projectDir, config.ConfigDirName, config.ConfigFileName)
+
+	var gotTitle, gotWidth, gotHeight, gotCommand string
+	m := newTestModel()
+	m.repoDir = projectDir
+	m.tmuxClient = mockTmuxService{
+		popupFn: func(_ context.Context, title, width, height, command string) error {
+			gotTitle = title
+			gotWidth = width
+			gotHeight = height
+			gotCommand = command
+			return nil
+		},
+	}
+	m.overlayStack.Push(overlay.NewDefaultSettingsOverlay())
+
+	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "editor"})
+	if cmd == nil {
+		t.Fatal("expected editor popup command")
+	}
+	msg, ok := cmd().(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("command message = %T, want overlay.SelectionMsg", msg)
+	}
+	if msg.Key != "editor-closed" {
+		t.Fatalf("message key = %q, want editor-closed", msg.Key)
+	}
+
+	newModel := updated.(Model)
+	if newModel.overlayStack.IsEmpty() {
+		t.Fatal("expected settings overlay to remain open until editor-closed is handled")
+	}
+	if gotTitle != "az.settings" || gotWidth != "90%" || gotHeight != "90%" {
+		t.Fatalf("popup title/size = %q %q %q, want az.settings 90%% 90%%", gotTitle, gotWidth, gotHeight)
+	}
+	if !strings.Contains(gotCommand, "cd "+shellSingleQuote(projectDir)) {
+		t.Fatalf("popup command = %q, want current project cd", gotCommand)
+	}
+	if !strings.Contains(gotCommand, shellSingleQuote(wantConfigPath)) {
+		t.Fatalf("popup command = %q, want config path %q", gotCommand, wantConfigPath)
+	}
+	if _, err := os.Stat(filepath.Dir(wantConfigPath)); err != nil {
+		t.Fatalf("expected config directory to exist: %v", err)
+	}
+}
+
+func TestSettingsEditorRequiresTmuxPopup(t *testing.T) {
+	t.Setenv("TMUX", "")
+
+	m := newTestModel()
+	m.repoDir = t.TempDir()
+	m.tmuxClient = mockTmuxService{}
+
+	_, cmd := m.handleSelection(overlay.SelectionMsg{Key: "editor"})
+	if cmd == nil {
+		t.Fatal("expected editor command")
+	}
+	msg, ok := cmd().(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("command message = %T, want overlay.SelectionMsg", msg)
+	}
+	if msg.Key != "editor-error" {
+		t.Fatalf("message key = %q, want editor-error", msg.Key)
 	}
 }
 
@@ -2245,6 +2337,48 @@ func TestTaskCreatedResultSelectsNewTaskAfterRefresh(t *testing.T) {
 	}
 }
 
+func TestTaskCreatedResultOpensChildInWorkspaceAfterRefresh(t *testing.T) {
+	m := newTestModel()
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	parent := domain.Task{ID: parentID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask}
+	m.tasks = []domain.Task{parent}
+	m.nav.SelectTask(parentID.String(), 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(parent, m.tasks, nil, 120, 30))
+	m.openCreatedTaskInWorkspace = true
+
+	createdResult, _ := m.Update(taskCreatedResultMsg{
+		taskID:   childID.String(),
+		err:      nil,
+		isUpdate: false,
+	})
+	createdModel := createdResult.(Model)
+	if createdModel.pendingCreatedWorkspaceTaskID != childID.String() {
+		t.Fatalf("pendingCreatedWorkspaceTaskID = %q, want %q", createdModel.pendingCreatedWorkspaceTaskID, childID)
+	}
+
+	refreshedResult, _ := createdModel.Update(issuesLoadedMsg{
+		tasks: []domain.Task{
+			parent,
+			{ID: childID, Title: "Child", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID},
+		},
+		revision: 42,
+	})
+	refreshedModel := refreshedResult.(Model)
+
+	current := refreshedModel.overlayStack.Current()
+	workspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace to remain open, got %T", current)
+	}
+	if got := workspace.TaskID(); got != childID.String() {
+		t.Fatalf("workspace task ID = %q, want %q", got, childID)
+	}
+	if refreshedModel.pendingCreatedWorkspaceTaskID != "" {
+		t.Fatalf("pendingCreatedWorkspaceTaskID = %q, want cleared state", refreshedModel.pendingCreatedWorkspaceTaskID)
+	}
+}
+
 func TestTaskCreatedResultSelectsTaskAlreadyAppliedFromEvent(t *testing.T) {
 	m := newTestModel()
 	m.tasks = []domain.Task{
@@ -2701,6 +2835,47 @@ func TestSpaceWorkspaceUsesVisibleFilteredTaskWhenCursorTaskIDIsHidden(t *testin
 	}
 	if got := taskWorkspace.TaskID(); got != "az-visible" {
 		t.Fatalf("workspace task ID = %q, want %q", got, "az-visible")
+	}
+}
+
+func TestTaskWorkspaceGraphNavigationOpensRelatedTask(t *testing.T) {
+	m := newTestModel()
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	m.tasks = []domain.Task{
+		{
+			ID:     parentID,
+			Title:  "Parent task",
+			Status: domain.StatusOpen,
+			Dependencies: []domain.Dependency{
+				{ID: childID, Type: domain.DependencyBlocks},
+			},
+		},
+		{
+			ID:     childID,
+			Title:  "Child task",
+			Status: domain.StatusInProgress,
+		},
+	}
+	m.nav.SelectTask(parentID.String(), 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30))
+
+	updated, _ := m.handleSelection(overlay.SelectionMsg{
+		Key:   "task_workspace_open_task",
+		Value: childID.String(),
+	})
+	next := updated.(Model)
+
+	current := next.overlayStack.Current()
+	workspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace to remain open, got %T", current)
+	}
+	if got := workspace.TaskID(); got != childID.String() {
+		t.Fatalf("workspace task ID = %q, want %q", got, childID)
+	}
+	if view := workspace.View(); !strings.Contains(view, "Child task") {
+		t.Fatalf("workspace did not render selected child task, got %q", view)
 	}
 }
 

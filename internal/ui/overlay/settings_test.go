@@ -319,6 +319,24 @@ func TestSettingsOverlay_ActionSetting(t *testing.T) {
 	}
 }
 
+func TestSettingsOverlay_EditKeyRequestsAppEditor(t *testing.T) {
+	menu := NewDefaultSettingsOverlay()
+
+	_, cmd := menu.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if cmd == nil {
+		t.Fatal("expected editor command")
+	}
+
+	rawMsg := cmd()
+	msg, ok := rawMsg.(SelectionMsg)
+	if !ok {
+		t.Fatalf("expected SelectionMsg, got %T", rawMsg)
+	}
+	if msg.Key != "editor" {
+		t.Fatalf("selection key = %q, want editor", msg.Key)
+	}
+}
+
 func TestSettingsOverlay_KeyboardNavigation(t *testing.T) {
 	items := []SettingItem{
 		{Key: "1", Label: "First", Type: SettingToggle, Value: true},

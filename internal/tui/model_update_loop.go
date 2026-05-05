@@ -155,6 +155,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.taskSnapshotCheckedAt = msg.lastCheckedAt
 		m.taskSnapshotFreshness = msg.freshness
 		m.reconcileCursorAfterIssuesRefresh()
+		m.applyPendingCreatedWorkspaceTask()
 		m.syncTaskWorkspaceOverlay()
 		if msg.reconcileWarn != nil {
 			m.addToast(Toast{
@@ -849,6 +850,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case overlay.TaskCreatedMsg:
 		m.overlayStack.Pop()
+		if _, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); ok && msg.ParentID != nil {
+			m.openCreatedTaskInWorkspace = true
+		}
 		return m, m.saveTaskCmd(msg)
 
 	case overlay.OpenTaskImageAttachMsg:
@@ -861,6 +865,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case taskCreatedResultMsg:
 		if msg.err != nil {
+			m.openCreatedTaskInWorkspace = false
 			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Failed to create task: %v", msg.err),
@@ -874,7 +879,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.createTaskOverlay = nil
 			if taskID := strings.TrimSpace(msg.taskID); taskID != "" {
 				m.pendingCreatedTaskID = taskID
+				if m.openCreatedTaskInWorkspace {
+					m.pendingCreatedWorkspaceTaskID = taskID
+					m.openCreatedTaskInWorkspace = false
+					m.applyPendingCreatedWorkspaceTask()
+				}
 				m.applyPendingCreatedTaskSelection()
+			} else {
+				m.openCreatedTaskInWorkspace = false
 			}
 		}
 

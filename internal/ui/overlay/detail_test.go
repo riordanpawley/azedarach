@@ -135,12 +135,12 @@ func TestDetailPanelViewShowsBehindOnlyDirectionalStatus(t *testing.T) {
 
 func TestDetailPanelViewBaseDiffWithoutUncommittedShowsCleanStatus(t *testing.T) {
 	task := domain.Task{
-		ID:           "az-792",
-		Title:        "Task with committed divergence only",
-		Status:       domain.StatusInProgress,
-		HasWorktree:  true,
-		GitAdditions: 163,
-		GitDeletions: 1,
+		ID:            "az-792",
+		Title:         "Task with committed divergence only",
+		Status:        domain.StatusInProgress,
+		HasWorktree:   true,
+		GitAdditions:  163,
+		GitDeletions:  1,
 		GitAheadCount: 2,
 	}
 
@@ -248,6 +248,99 @@ func TestDetailPanelViewShowsTypedDependencies(t *testing.T) {
 	assert.Contains(t, view, "blocks -> az-downstream")
 	assert.Contains(t, view, "Incoming")
 	assert.Contains(t, view, "related <- az-upstream")
+}
+
+func TestDetailPanelViewShowsLoadedIssueMetadata(t *testing.T) {
+	estimate := 5
+	task := domain.Task{
+		ID:              "az-full",
+		Title:           "Full task detail",
+		Status:          domain.StatusInProgress,
+		Priority:        domain.P1,
+		Type:            domain.TypeFeature,
+		Assignee:        "riordan",
+		Labels:          []string{"tui", "detail"},
+		Estimate:        &estimate,
+		Implementations: []string{"go"},
+		Design:          "Use the existing detail panel.",
+		Acceptance:      "Every projected field is visible.",
+		Notes:           "Keep this in the task workspace.",
+	}
+
+	panel := NewDetailPanel(task)
+	view := panel.View()
+
+	assert.Contains(t, view, "Assignee:")
+	assert.Contains(t, view, "riordan")
+	assert.Contains(t, view, "Estimate:")
+	assert.Contains(t, view, "5")
+	assert.Contains(t, view, "Labels:")
+	assert.Contains(t, view, "tui, detail")
+	assert.Contains(t, view, "Impls:")
+	assert.Contains(t, view, "go")
+	assert.Contains(t, view, "Design")
+	assert.Contains(t, view, "Use the existing detail panel.")
+	assert.Contains(t, view, "Acceptance")
+	assert.Contains(t, view, "Every projected field is visible.")
+	assert.Contains(t, view, "Notes")
+	assert.Contains(t, view, "Keep this in the task workspace.")
+}
+
+func TestDetailPanelViewShowsReachableGraphContext(t *testing.T) {
+	parentID := naming.IssueID("az-parent")
+	rootID := naming.IssueID("az-root")
+	task := domain.Task{
+		ID:       "az-current",
+		Title:    "Current task",
+		Status:   domain.StatusInProgress,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+		Dependencies: []domain.Dependency{
+			{ID: "az-child", Type: domain.DependencyBlocks},
+		},
+		ParentID: &parentID,
+	}
+	related := []domain.Task{
+		task,
+		{
+			ID:       "az-parent",
+			Title:    "Parent task",
+			Status:   domain.StatusOpen,
+			ParentID: &rootID,
+		},
+		{
+			ID:     rootID,
+			Title:  "Root task",
+			Status: domain.StatusOpen,
+		},
+		{
+			ID:     "az-child",
+			Title:  "Child task",
+			Status: domain.StatusBlocked,
+			Dependencies: []domain.Dependency{
+				{ID: "az-grandchild", Type: domain.DependencyBlocks},
+			},
+		},
+		{ID: "az-grandchild", Title: "Grandchild task", Status: domain.StatusDone},
+	}
+
+	panel := NewDetailPanel(task).WithRelatedTasks(related)
+	view := panel.View()
+
+	assert.Contains(t, view, "Graph")
+	assert.Contains(t, view, "Ascendants")
+	assert.Contains(t, view, "az-root [Open] Root task")
+	assert.Contains(t, view, "az-parent [Open] Parent task")
+	assert.Contains(t, view, "Descendants")
+	assert.Contains(t, view, "az-child [Blocked] Child task")
+	assert.Contains(t, view, "az-grandchild [Done] Grandchild task")
+	assert.Contains(t, view, "< az-parent [Open] Parent task")
+	assert.Contains(t, view, "> az-child [Blocked] Child task")
+
+	panel.MoveGraphCursor(1)
+	selected, ok := panel.SelectedGraphTaskID()
+	require.True(t, ok)
+	assert.Equal(t, "az-root", selected)
 }
 
 func TestDetailPanelScrolling(t *testing.T) {

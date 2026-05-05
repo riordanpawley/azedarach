@@ -110,14 +110,26 @@ func TestTaskWorkspaceOverlay_StatusBindingsIncludeScroll(t *testing.T) {
 	for _, b := range bindings {
 		joined += b.Key + " " + b.Description + " "
 	}
-	if !strings.Contains(joined, "scroll") {
-		t.Fatalf("expected status bindings to include scroll hint, got %q", joined)
+	if !strings.Contains(joined, "select relation") {
+		t.Fatalf("expected status bindings to include graph selection hint, got %q", joined)
+	}
+	if !strings.Contains(joined, "open relation") {
+		t.Fatalf("expected status bindings to include graph open hint, got %q", joined)
 	}
 	if !strings.Contains(joined, "ctrl+u/d") {
 		t.Fatalf("expected status bindings to include ctrl+u/d hint, got %q", joined)
 	}
 	if !strings.Contains(joined, "1/2/3/4") {
 		t.Fatalf("expected status bindings to include exact status hint, got %q", joined)
+	}
+	if !strings.Contains(joined, "Tab focus") {
+		t.Fatalf("expected status bindings to show Tab as pane focus switch, got %q", joined)
+	}
+	if strings.Contains(joined, "Tab/h/l") {
+		t.Fatalf("expected h/l not to be advertised as pane focus switches, got %q", joined)
+	}
+	if !strings.Contains(joined, "h/l/") {
+		t.Fatalf("expected status bindings to advertise h/l graph navigation, got %q", joined)
 	}
 }
 
@@ -143,6 +155,88 @@ func TestTaskWorkspaceOverlay_ActionFocusUsesArrowNavigation(t *testing.T) {
 	if overlay.actions.cursor == beforeUp {
 		t.Fatalf("expected up arrow to move actions cursor when actions focused")
 	}
+
+	beforeRight := overlay.actions.cursor
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyRight})
+	overlay = model.(*TaskWorkspaceOverlay)
+	if overlay.actions.cursor == beforeRight {
+		t.Fatalf("expected right arrow to move actions cursor down when actions focused")
+	}
+
+	beforeLeft := overlay.actions.cursor
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	overlay = model.(*TaskWorkspaceOverlay)
+	if overlay.actions.cursor == beforeLeft {
+		t.Fatalf("expected left arrow to move actions cursor up when actions focused")
+	}
+}
+
+func TestTaskWorkspaceOverlay_HJKLDoNotSwitchPaneFocus(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-1",
+		Title:  "Task",
+		Status: domain.StatusOpen,
+	}
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	overlay.focus = taskWorkspaceFocusDetail
+
+	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	overlay = model.(*TaskWorkspaceOverlay)
+	if overlay.focus != taskWorkspaceFocusDetail {
+		t.Fatalf("expected l to keep detail focus, got %v", overlay.focus)
+	}
+
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
+	overlay = model.(*TaskWorkspaceOverlay)
+	if overlay.focus != taskWorkspaceFocusActions {
+		t.Fatalf("expected Tab to switch to actions, got %v", overlay.focus)
+	}
+
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	overlay = model.(*TaskWorkspaceOverlay)
+	if overlay.focus != taskWorkspaceFocusActions {
+		t.Fatalf("expected h to keep actions focus, got %v", overlay.focus)
+	}
+}
+
+func TestTaskWorkspaceOverlay_DetailGraphUsesVerticalSelectionAndHorizontalOpen(t *testing.T) {
+	parentID := domain.Task{ID: "az-parent", Title: "Parent", Status: domain.StatusOpen}
+	task := domain.Task{
+		ID:       "az-current",
+		Title:    "Current",
+		Status:   domain.StatusInProgress,
+		ParentID: &parentID.ID,
+		Dependencies: []domain.Dependency{
+			{ID: "az-child", Type: domain.DependencyBlocks},
+		},
+	}
+	related := []domain.Task{
+		parentID,
+		task,
+		{ID: "az-child", Title: "Child", Status: domain.StatusOpen},
+	}
+	overlay := NewTaskWorkspaceOverlay(task, related, nil, 120, 30)
+	overlay.focus = taskWorkspaceFocusDetail
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if cmd == nil {
+		t.Fatal("expected left arrow to open selected ancestor")
+	}
+	msg, ok := cmd().(SelectionMsg)
+	if !ok || msg.Key != "task_workspace_open_task" || msg.Value != "az-parent" {
+		t.Fatalf("left command emitted %+v, want az-parent graph selection", msg)
+	}
+
+	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyDown})
+	overlay = model.(*TaskWorkspaceOverlay)
+	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if cmd == nil {
+		t.Fatal("expected right arrow to open selected descendant")
+	}
+	msg, ok = cmd().(SelectionMsg)
+	if !ok || msg.Key != "task_workspace_open_task" || msg.Value != "az-child" {
+		t.Fatalf("right command emitted %+v, want az-child graph selection", msg)
+	}
 }
 
 func TestTaskWorkspaceOverlay_StatusKeysWorkFromDetailFocus(t *testing.T) {
@@ -164,6 +258,55 @@ func TestTaskWorkspaceOverlay_StatusKeysWorkFromDetailFocus(t *testing.T) {
 	}
 	if msg.Key != "3" {
 		t.Fatalf("selection key = %q, want 3", msg.Key)
+	}
+}
+
+func TestTaskWorkspaceOverlay_ActionsPaneHidesReservedMoveRows(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-1",
+		Title:  "Task",
+		Status: domain.StatusInProgress,
+	}
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	view := overlay.View()
+
+	if strings.Contains(view, "[h] Move left") || strings.Contains(view, "[l] Move right") {
+		t.Fatalf("workspace actions should not advertise reserved h/l status movement, got %q", view)
+	}
+	if !strings.Contains(view, "[1] Set status: Open") || !strings.Contains(view, "[4] Set status: Done") {
+		t.Fatalf("workspace actions should keep explicit status keys, got %q", view)
+	}
+}
+
+func TestTaskWorkspaceOverlay_EnterOnDetailOpensSelectedGraphTask(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-parent",
+		Title:  "Parent",
+		Status: domain.StatusOpen,
+		Dependencies: []domain.Dependency{
+			{ID: "az-child", Type: domain.DependencyBlocks},
+		},
+	}
+	related := []domain.Task{
+		task,
+		{ID: "az-child", Title: "Child", Status: domain.StatusInProgress},
+	}
+	overlay := NewTaskWorkspaceOverlay(task, related, nil, 120, 30)
+	overlay.focus = taskWorkspaceFocusDetail
+
+	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
+	overlay = model.(*TaskWorkspaceOverlay)
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if cmd == nil {
+		t.Fatal("expected graph navigation command")
+	}
+	msg, ok := cmd().(SelectionMsg)
+	if !ok {
+		t.Fatalf("command emitted %T, want SelectionMsg", cmd())
+	}
+	if msg.Key != "task_workspace_open_task" || msg.Value != "az-child" {
+		t.Fatalf("selection = %+v, want task_workspace_open_task az-child", msg)
 	}
 }
 
