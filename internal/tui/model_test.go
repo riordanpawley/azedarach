@@ -4623,6 +4623,27 @@ func TestPendingMutationForTaskBuildsOverlayProgress(t *testing.T) {
 	}
 }
 
+func TestLocalGitActivityMarkerBuildsBoardAndDetailProgress(t *testing.T) {
+	m := newTestModel()
+	m.markMergeOperationPreparing("az-1", mergeBaseTargetID, "preparing merge")
+
+	signals := m.runtimeSignalsForBoard()["az-1"]
+	if signals.PendingOperationID != "" {
+		t.Fatalf("pending operation id = %q, want empty before daemon operation", signals.PendingOperationID)
+	}
+	if signals.PendingOperationState != "preparing" {
+		t.Fatalf("pending operation state = %q, want preparing", signals.PendingOperationState)
+	}
+
+	progress := m.pendingMutationForTask("az-1")
+	if progress == nil {
+		t.Fatal("expected detail pending progress")
+	}
+	if progress.OperationID != "" || progress.State != "preparing" || progress.ProgressMessage != "preparing merge" {
+		t.Fatalf("detail progress = %+v", progress)
+	}
+}
+
 func TestHandleSelectionSessionMutationsShowImmediatePendingFeedback(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -4674,6 +4695,16 @@ func TestHandleSelectionSessionMutationsShowImmediatePendingFeedback(t *testing.
 			}
 			if got := updated.toasts[len(updated.toasts)-1].Message; got != tt.wantToast {
 				t.Fatalf("toast = %q, want %q", got, tt.wantToast)
+			}
+			if tt.key == "u" || tt.key == "m" {
+				signals := updated.runtimeSignalsForBoard()["az-1"]
+				if signals.PendingOperationState != "preparing" {
+					t.Fatalf("board pending state = %q, want preparing", signals.PendingOperationState)
+				}
+				progress := updated.pendingMutationForTask("az-1")
+				if progress == nil || progress.State != "preparing" || strings.TrimSpace(progress.ProgressMessage) == "" {
+					t.Fatalf("detail progress = %+v, want preparing marker", progress)
+				}
 			}
 		})
 	}
@@ -4828,6 +4859,12 @@ func TestSessionStartedPendingMarksBoardAndDetailProgress(t *testing.T) {
 	if pending.state != protocol.OperationStateQueued {
 		t.Fatalf("pending state = %q, want %q", pending.state, protocol.OperationStateQueued)
 	}
+	if pending.targetStatus != domain.StatusInProgress {
+		t.Fatalf("pending target status = %q, want %q", pending.targetStatus, domain.StatusInProgress)
+	}
+	if updated.tasks[0].Status != domain.StatusInProgress {
+		t.Fatalf("task status = %q, want optimistic %q", updated.tasks[0].Status, domain.StatusInProgress)
+	}
 
 	signals := updated.runtimeSignalsForBoard()
 	got := signals["az-1"]
@@ -4848,8 +4885,8 @@ func TestSessionStartedPendingMarksBoardAndDetailProgress(t *testing.T) {
 	if progress.OperationID != "op-session" {
 		t.Fatalf("progress operation id = %q, want %q", progress.OperationID, "op-session")
 	}
-	if progress.TargetStatus != "" {
-		t.Fatalf("progress target status = %q, want empty", progress.TargetStatus)
+	if progress.TargetStatus != domain.StatusInProgress {
+		t.Fatalf("progress target status = %q, want %q", progress.TargetStatus, domain.StatusInProgress)
 	}
 }
 
@@ -4871,6 +4908,32 @@ func TestApplyPendingStatusOverlaysIgnoresNonStatusPending(t *testing.T) {
 
 	if m.tasks[0].Status != domain.StatusOpen {
 		t.Fatalf("task status = %q, want %q", m.tasks[0].Status, domain.StatusOpen)
+	}
+}
+
+func TestSessionStartPendingSurvivesPartialInProgressSnapshot(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+	m.markTaskOperationPending("az-1", "session_start", "op-session", protocol.OperationStateQueued)
+
+	updatedAny, _ := m.Update(issuesLoadedMsg{
+		tasks: []domain.Task{
+			{ID: "az-1", Title: "Task", Status: domain.StatusInProgress, Priority: domain.P2, Type: domain.TypeTask},
+		},
+	})
+	updated := updatedAny.(Model)
+
+	if _, ok := updated.pendingStatuses[taskIDKey("az-1")]; !ok {
+		t.Fatal("expected session_start pending marker to survive in_progress snapshot without session")
+	}
+	if updated.tasks[0].Status != domain.StatusInProgress {
+		t.Fatalf("task status = %q, want %q", updated.tasks[0].Status, domain.StatusInProgress)
+	}
+	progress := updated.pendingMutationForTask("az-1")
+	if progress == nil || progress.OperationID != "op-session" || progress.State != string(protocol.OperationStateQueued) {
+		t.Fatalf("pending mutation progress = %+v", progress)
 	}
 }
 
