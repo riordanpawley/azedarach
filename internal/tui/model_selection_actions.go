@@ -272,7 +272,8 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 
 	// Keep task workspace open for actions that should layer over it or return
 	// to it without forcing users to reopen the details.
-	keepWorkspaceOpen := isTaskWorkspaceOverlay(m.overlayStack.Current()) && (msg.Key == "a" || msg.Key == "c" || msg.Key == "r")
+	keepWorkspaceOpen := isTaskWorkspaceOverlay(m.overlayStack.Current()) &&
+		(msg.Key == "a" || msg.Key == "c" || msg.Key == "r" || msg.Key == "x")
 	if !keepWorkspaceOpen {
 		m.overlayStack.Pop()
 	}

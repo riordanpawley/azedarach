@@ -5713,6 +5713,76 @@ func TestStopSessionCommandPreservesDaemonProjection(t *testing.T) {
 	}
 }
 
+func TestTaskWorkspaceStopSessionKeyKeepsOverlayOpen(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandSessionStop {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionStop)
+			}
+			var body struct {
+				SessionID string `json:"session_id"`
+			}
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal stop request: %v", err)
+			}
+			if body.SessionID != "az-1" {
+				t.Fatalf("stop body = %+v, want az-1", body)
+			}
+			respBody, _ := json.Marshal(struct {
+				Output string `json:"output"`
+			}{Output: "stopped"})
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	task := m.tasks[0]
+	task.HasTmuxSession = true
+	task.Session = &domain.Session{IssueID: "az-1", State: domain.SessionBusy}
+	m.tasks[0] = task
+	m.nav.SelectTask(task.ID.String(), 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(task, m.tasks, nil, 120, 30))
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if cmd == nil {
+		t.Fatal("expected selection command from task workspace")
+	}
+	selectionMsg := cmd()
+	selection, ok := selectionMsg.(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("command message type = %T, want overlay.SelectionMsg", selectionMsg)
+	}
+	if selection.Key != "x" {
+		t.Fatalf("selection key = %q, want x", selection.Key)
+	}
+	updated, cmd := next.(Model).Update(selection)
+	if cmd == nil {
+		t.Fatal("expected stop session command")
+	}
+	stopMsg := cmd()
+	stopped, ok := stopMsg.(sessionStoppedMsg)
+	if !ok {
+		t.Fatalf("stop command message type = %T, want sessionStoppedMsg", stopMsg)
+	}
+	if stopped.issueID != "az-1" {
+		t.Fatalf("stopped issue = %q, want az-1", stopped.issueID)
+	}
+
+	updatedModel := updated.(Model)
+	if _, ok := updatedModel.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
+		t.Fatalf("expected task workspace overlay to remain open, got %T", updatedModel.overlayStack.Current())
+	}
+	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStop {
+		t.Fatalf("requests = %v", transport.requests)
+	}
+}
+
 func TestPerformCleanupRoutesDaemonCleanupAndPreservesCounts(t *testing.T) {
 	base := time.Now().UTC()
 	oldSessionStart := base.Add(-48 * time.Hour)
