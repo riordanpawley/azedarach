@@ -174,6 +174,9 @@ func TestModelViewUsesTmuxCopyAndBottomToolbar(t *testing.T) {
 		}
 	}
 	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	if strings.TrimSpace(lines[0]) == "" {
+		t.Fatalf("view should not start with top padding:\n%q", view)
+	}
 	last := lines[len(lines)-1]
 	if !strings.Contains(last, "h/j/k/l: move") || !strings.Contains(last, "q/Esc: close") {
 		t.Fatalf("last line should be key toolbar, got %q\n%s", last, view)

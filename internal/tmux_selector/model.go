@@ -290,12 +290,10 @@ func (m Model) View() string {
 		return "Loading tmux sessions...\n"
 	}
 	var b strings.Builder
-	b.WriteString("\n")
 	if strings.TrimSpace(m.status) != "" {
 		b.WriteString(m.styles.StatusInfo.Render(m.status))
 		b.WriteString("\n")
 	}
-	b.WriteString("\n")
 	if m.err != nil {
 		b.WriteString(m.styles.ToastError.Render("Error: " + m.err.Error()))
 		b.WriteString("\n\n")
