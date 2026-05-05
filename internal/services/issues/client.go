@@ -1273,6 +1273,8 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 			var status git.GitStatus
 			if err := json.Unmarshal([]byte(gitStatusRaw), &status); err == nil {
 				task.HasUncommittedChanges = status.HasChanges
+				task.HasConflicts = status.HasConflicts
+				task.ConflictFiles = append([]string(nil), status.Conflicted...)
 				task.GitAdditions = status.GitAdditions
 				task.GitDeletions = status.GitDeletions
 				task.GitAheadCount = status.GitAheadCount

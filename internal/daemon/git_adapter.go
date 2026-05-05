@@ -652,6 +652,8 @@ func (a *gitServiceAdapter) computeRuntimeSignalFromProjection(ctx context.Conte
 		return out, false, err
 	}
 	out.HasUncommittedChanges = status.HasChanges
+	out.HasConflicts = status.HasConflicts
+	out.ConflictFiles = append([]string(nil), status.Conflicted...)
 	out.GitAdditions = status.GitAdditions
 	out.GitDeletions = status.GitDeletions
 	out.GitAheadCount = status.GitAheadCount

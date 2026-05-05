@@ -3,8 +3,8 @@
 │────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
 ││ ⚠ Merge conflicts detected!                                                 Actions                               │
 ││                                                                             ──────────────────────────────────────│
-││ AI resolve now? Press c.                                                     j/k navigate                         │
-││ ▸ internal/ui/app.go                                                         c ai resolve                         │
+││ Agent resolve now? Press c.                                                  j/k navigate                         │
+││ ▸ internal/ui/app.go                                                         c agent resolve                      │
 ││   internal/domain/task.go                                                    o open                               │
 ││   internal/services/git.go                                                   a abort                              │
 ││                                                                              Esc close                            │

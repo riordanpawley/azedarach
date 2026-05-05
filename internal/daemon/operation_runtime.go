@@ -27,29 +27,31 @@ const (
 )
 
 type operationRuntimeConfig struct {
-	repoDir         string
-	logger          *slog.Logger
-	hub             *publish.Hub
-	nextRevision    func(string) uint64
-	sessionStart    func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
-	sessionStop     func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
-	gitHandler      *daemonhandlers.GitHandler
-	worktreeHandler *daemonhandlers.WorktreeHandler
+	repoDir                string
+	logger                 *slog.Logger
+	hub                    *publish.Hub
+	nextRevision           func(string) uint64
+	sessionStart           func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	sessionStop            func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	sessionResolveConflict func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	gitHandler             *daemonhandlers.GitHandler
+	worktreeHandler        *daemonhandlers.WorktreeHandler
 }
 
 type operationRuntime struct {
-	logger           *slog.Logger
-	hub              *publish.Hub
-	nextRevision     func(string) uint64
-	store            *opstore.SQLiteStore
-	manager          *opmanager.Manager
-	sessionStart     func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
-	sessionStop      func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
-	gitHandler       *daemonhandlers.GitHandler
-	worktreeHandler  *daemonhandlers.WorktreeHandler
-	pollInterval     time.Duration
-	repoNameProject  string
-	canonicalProject string
+	logger                 *slog.Logger
+	hub                    *publish.Hub
+	nextRevision           func(string) uint64
+	store                  *opstore.SQLiteStore
+	manager                *opmanager.Manager
+	sessionStart           func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	sessionStop            func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	sessionResolveConflict func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	gitHandler             *daemonhandlers.GitHandler
+	worktreeHandler        *daemonhandlers.WorktreeHandler
+	pollInterval           time.Duration
+	repoNameProject        string
+	canonicalProject       string
 }
 
 type operationCommandExecutor struct {
@@ -125,18 +127,19 @@ func newOperationRuntime(cfg operationRuntimeConfig) *operationRuntime {
 	}
 	manager := opmanager.New(adapter, opmanager.Config{})
 	return &operationRuntime{
-		logger:           logger,
-		hub:              cfg.hub,
-		nextRevision:     cfg.nextRevision,
-		store:            store,
-		manager:          manager,
-		sessionStart:     cfg.sessionStart,
-		sessionStop:      cfg.sessionStop,
-		gitHandler:       cfg.gitHandler,
-		worktreeHandler:  cfg.worktreeHandler,
-		pollInterval:     defaultOperationPollDelay,
-		repoNameProject:  repoNameProjectID,
-		canonicalProject: canonicalProjectID,
+		logger:                 logger,
+		hub:                    cfg.hub,
+		nextRevision:           cfg.nextRevision,
+		store:                  store,
+		manager:                manager,
+		sessionStart:           cfg.sessionStart,
+		sessionStop:            cfg.sessionStop,
+		sessionResolveConflict: cfg.sessionResolveConflict,
+		gitHandler:             cfg.gitHandler,
+		worktreeHandler:        cfg.worktreeHandler,
+		pollInterval:           defaultOperationPollDelay,
+		repoNameProject:        repoNameProjectID,
+		canonicalProject:       canonicalProjectID,
 	}
 }
 
@@ -279,8 +282,8 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 			RequestID:       req.RequestID,
 			Kind:            protocol.EnvelopeKindCommand,
 			Meta: protocol.Metadata{
-					ProjectID: naming.ProjectID(r.coalesceProjectID(body.ProjectID.String(), req.Meta.ProjectID.String())),
-				},
+				ProjectID: naming.ProjectID(r.coalesceProjectID(body.ProjectID.String(), req.Meta.ProjectID.String())),
+			},
 			Command: body.Kind,
 			Body:    append([]byte(nil), body.Payload...),
 		}
@@ -492,6 +495,27 @@ func (r *operationRuntime) deriveOperationRouting(kind, projectID string, payloa
 		resourceKeys = []string{"issue:" + projectID + ":" + issueID}
 		dedupeKey = kind + ":" + issueID
 		return issueID, resourceKeys, dedupeKey, nil
+	case protocol.CommandSessionResolveConflict:
+		var body struct {
+			ProjectID string `json:"project_id"`
+			IssueID   string `json:"issue_id"`
+			Worktree  string `json:"worktree"`
+		}
+		if err = json.Unmarshal(payload, &body); err != nil {
+			return "", nil, "", fmt.Errorf("decode %s payload: %w", kind, err)
+		}
+		projectID = r.coalesceProjectID(body.ProjectID, projectID)
+		parsedIssueID, parseErr := naming.ParseIssueID(strings.TrimSpace(body.IssueID))
+		if parseErr != nil {
+			return "", nil, "", errors.New("missing required fields: project_id/issue_id")
+		}
+		issueID = parsedIssueID.String()
+		resourceKeys = []string{"issue:" + projectID + ":" + issueID}
+		if worktree := normalizeOperationWorktree(body.Worktree); worktree != "" {
+			resourceKeys = append(resourceKeys, "worktree:"+worktree)
+		}
+		dedupeKey = kind + ":" + issueID
+		return issueID, resourceKeys, dedupeKey, nil
 	case daemonhandlers.CommandGitFetch:
 		var body struct {
 			Worktree string `json:"worktree"`
@@ -594,6 +618,11 @@ func (r *operationRuntime) directRunnerForKind(kind string) (operationDirectRunn
 			return nil, errors.New("session.stop handler unavailable")
 		}
 		return r.sessionStop, nil
+	case protocol.CommandSessionResolveConflict:
+		if r.sessionResolveConflict == nil {
+			return nil, errors.New("session.resolve_conflict handler unavailable")
+		}
+		return r.sessionResolveConflict, nil
 	case daemonhandlers.CommandGitFetch,
 		daemonhandlers.CommandGitMerge,
 		daemonhandlers.CommandGitCheckout,
@@ -832,29 +861,33 @@ func operationProgressForState(state daemonops.State, kind string) protocol.Oper
 	progress := protocol.OperationProgress{
 		Unit: "percent",
 	}
+	action := strings.TrimSpace(kind)
+	if kind == protocol.CommandSessionResolveConflict {
+		action = "agent conflict resolution"
+	}
 	switch state {
 	case daemonops.StateQueued:
-		progress.Message = "queued " + strings.TrimSpace(kind)
+		progress.Message = "queued " + action
 		progress.Current = 0
 		progress.Total = 100
 		progress.Percent = 0
 	case daemonops.StateRunning:
-		progress.Message = "running " + strings.TrimSpace(kind)
+		progress.Message = "running " + action
 		progress.Current = 50
 		progress.Total = 100
 		progress.Percent = 50
 	case daemonops.StateFailed:
-		progress.Message = "failed " + strings.TrimSpace(kind)
+		progress.Message = "failed " + action
 		progress.Current = 100
 		progress.Total = 100
 		progress.Percent = 100
 	case daemonops.StateCancelled:
-		progress.Message = "cancelled " + strings.TrimSpace(kind)
+		progress.Message = "cancelled " + action
 		progress.Current = 100
 		progress.Total = 100
 		progress.Percent = 100
 	default:
-		progress.Message = "completed " + strings.TrimSpace(kind)
+		progress.Message = "completed " + action
 		progress.Current = 100
 		progress.Total = 100
 		progress.Percent = 100

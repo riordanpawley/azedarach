@@ -262,12 +262,13 @@ func New(cfg Config) *Daemon {
 		d.runtimeProjectionStateWriter().PublishGitStatusProjectionEvent(ctx, projectID, issueID, worktree, status)
 	}
 	runtime := newOperationRuntime(operationRuntimeConfig{
-		repoDir:      cfg.RepoDir,
-		logger:       cfg.Logger,
-		hub:          d.hub,
-		nextRevision: d.nextRevision,
-		sessionStart: d.handleSessionStartDirect,
-		sessionStop:  d.handleSessionStopDirect,
+		repoDir:                cfg.RepoDir,
+		logger:                 cfg.Logger,
+		hub:                    d.hub,
+		nextRevision:           d.nextRevision,
+		sessionStart:           d.handleSessionStartDirect,
+		sessionStop:            d.handleSessionStopDirect,
+		sessionResolveConflict: d.handleSessionResolveConflictDirect,
 	})
 	commandExecutor := operationCommandExecutor{runtime: runtime}
 	sessionExecutor := sessionOperationExecutor{runtime: runtime}
@@ -537,6 +538,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleSessionResume(ctx, req)
 	case "session.stop":
 		return d.handleSessionStop(ctx, req)
+	case protocol.CommandSessionResolveConflict:
+		return d.handleSessionResolveConflict(ctx, req)
 	case "session.status":
 		return d.handleSessionStatus(ctx, req)
 	case "session.recover":
@@ -1218,6 +1221,8 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 
 	if status != nil {
 		projection.Git.HasUncommittedChanges = status.HasChanges
+		projection.Git.HasConflicts = status.HasConflicts
+		projection.Git.ConflictFiles = append([]string(nil), status.Conflicted...)
 		projection.Git.GitAdditions = status.GitAdditions
 		projection.Git.GitDeletions = status.GitDeletions
 		projection.Git.GitAheadCount = status.GitAheadCount

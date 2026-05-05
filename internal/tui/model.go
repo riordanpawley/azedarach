@@ -959,6 +959,15 @@ type conflictResolveFallbackMsg struct {
 	err     error
 }
 
+type conflictResolveAgentResultMsg struct {
+	issueID     string
+	worktree    string
+	windowName  string
+	operationID string
+	state       protocol.OperationState
+	err         error
+}
+
 func pendingOperationDetails(err error) (*daemonclient.OperationPendingError, bool) {
 	var pending *daemonclient.OperationPendingError
 	if !errors.As(err, &pending) {

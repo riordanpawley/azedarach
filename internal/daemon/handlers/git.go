@@ -98,13 +98,15 @@ type GitRuntimeSignalsTarget struct {
 }
 
 type GitRuntimeSignalsResult struct {
-	IssueID               string `json:"issue_id"`
-	Worktree              string `json:"worktree"`
-	HasUncommittedChanges bool   `json:"has_uncommitted_changes"`
-	GitAdditions          int    `json:"git_additions"`
-	GitDeletions          int    `json:"git_deletions"`
-	GitAheadCount         int    `json:"git_ahead_count"`
-	GitBehindCount        int    `json:"git_behind_count"`
+	IssueID               string   `json:"issue_id"`
+	Worktree              string   `json:"worktree"`
+	HasUncommittedChanges bool     `json:"has_uncommitted_changes"`
+	HasConflicts          bool     `json:"has_conflicts,omitempty"`
+	ConflictFiles         []string `json:"conflict_files,omitempty"`
+	GitAdditions          int      `json:"git_additions"`
+	GitDeletions          int      `json:"git_deletions"`
+	GitAheadCount         int      `json:"git_ahead_count"`
+	GitBehindCount        int      `json:"git_behind_count"`
 }
 
 type GitMergePreflightRequest struct {

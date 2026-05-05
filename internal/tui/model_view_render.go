@@ -572,6 +572,8 @@ func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {
 			GitAheadCount:         task.GitAheadCount,
 			GitBehindCount:        task.GitBehindCount,
 			HasUncommittedChanges: task.HasUncommittedChanges,
+			HasConflicts:          task.HasConflicts,
+			ConflictFiles:         append([]string(nil), task.ConflictFiles...),
 			GitAdditions:          task.GitAdditions,
 			GitDeletions:          task.GitDeletions,
 		}

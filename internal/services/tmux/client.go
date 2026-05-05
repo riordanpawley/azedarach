@@ -50,6 +50,34 @@ func (c *Client) NewSession(ctx context.Context, name string, workdir string) er
 	return nil
 }
 
+// EnsureWindow creates a named window in an existing session when it is absent.
+// It returns true when the window already existed.
+func (c *Client) EnsureWindow(ctx context.Context, sessionName, windowName, workdir string) (bool, error) {
+	c.logger.Debug("ensuring tmux window", "session", sessionName, "window", windowName, "workdir", workdir)
+
+	out, err := c.runner.Run(ctx, "list-windows", "-t", sessionName, "-F", "#{window_name}")
+	if err != nil {
+		return false, &domain.TmuxError{Op: "list-windows", Session: sessionName, Err: err}
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == windowName {
+			c.logger.Debug("tmux window exists", "session", sessionName, "window", windowName)
+			return true, nil
+		}
+	}
+
+	args := []string{"new-window", "-d", "-t", sessionName, "-n", windowName}
+	if workdir != "" {
+		args = append(args, "-c", workdir)
+	}
+	if _, err := c.runner.Run(ctx, args...); err != nil {
+		return false, &domain.TmuxError{Op: "new-window", Session: sessionName, Err: err}
+	}
+
+	c.logger.Debug("tmux window created", "session", sessionName, "window", windowName)
+	return false, nil
+}
+
 // HasSession checks if a tmux session with the given name exists
 // Uses: tmux has-session -t <name>
 func (c *Client) HasSession(ctx context.Context, name string) (bool, error) {

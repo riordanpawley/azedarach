@@ -46,6 +46,8 @@ type Task struct {
 	GitAheadCount         int             `json:"git_ahead_count,omitempty"`
 	GitBehindCount        int             `json:"git_behind_count,omitempty"`
 	HasUncommittedChanges bool            `json:"has_uncommitted_changes,omitempty"`
+	HasConflicts          bool            `json:"has_conflicts,omitempty"`
+	ConflictFiles         []string        `json:"conflict_files,omitempty"`
 	GitAdditions          int             `json:"git_additions,omitempty"`
 	GitDeletions          int             `json:"git_deletions,omitempty"`
 	CreatedAt             time.Time       `json:"created_at"`

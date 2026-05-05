@@ -479,6 +479,43 @@ func TestBuildSubmitRequestDefaultsGitFetchRemote(t *testing.T) {
 	}
 }
 
+func TestBuildSubmitRequestRoutesSessionResolveConflictByIssueAndWorktree(t *testing.T) {
+	runtime := newOperationRuntime(operationRuntimeConfig{
+		repoDir:      t.TempDir(),
+		nextRevision: sequentialRevision(),
+	})
+	runtime.sessionResolveConflict = func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		return testResponse(req, protocol.SessionResolveConflictResponseBody{}), nil
+	}
+
+	req := runtime.buildSubmitRequestForTest(
+		t,
+		protocol.CommandSessionResolveConflict,
+		"proj-1",
+		mustJSON(t, protocol.SessionResolveConflictRequestBody{
+			ProjectID: naming.ProjectID("proj-1"),
+			IssueID:   naming.IssueID("AZ-10"),
+			Worktree:  "/tmp/project-az-10/",
+		}),
+	)
+
+	if req.IssueID != "AZ-10" {
+		t.Fatalf("issue id = %q, want AZ-10", req.IssueID)
+	}
+	if req.DedupeKey != protocol.CommandSessionResolveConflict+":AZ-10" {
+		t.Fatalf("dedupe key = %q, want resolve conflict issue key", req.DedupeKey)
+	}
+	wantResources := []string{"issue:proj-1:AZ-10", "worktree:/tmp/project-az-10"}
+	if len(req.ResourceKeys) != len(wantResources) {
+		t.Fatalf("resource keys = %v, want %v", req.ResourceKeys, wantResources)
+	}
+	for i := range wantResources {
+		if req.ResourceKeys[i] != wantResources[i] {
+			t.Fatalf("resource key[%d] = %q, want %q", i, req.ResourceKeys[i], wantResources[i])
+		}
+	}
+}
+
 func TestBuildSubmitRequestNormalizesWorktreeForConflictSerialization(t *testing.T) {
 	runtime := newOperationRuntime(operationRuntimeConfig{
 		repoDir:      t.TempDir(),
