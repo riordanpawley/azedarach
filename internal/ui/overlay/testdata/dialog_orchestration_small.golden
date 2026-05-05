@@ -1,15 +1,15 @@
 ╭────────────────────────────────────────────────────────────────────╮
-│Session Orchestration                                               │
+│Tmux Sessions                                                       │
 │────────────────────────────────────────────────────────────────────│
-││  Active Sessions: 1                         Actions               │
+││  Azedarach tmux sessions: 1                 Keys                  │
 ││                                             ──────────────────────│
-││  ▶ az-123   ● busy                           j/k navigate         │
-││    Implement feature X with caref...         Enter/a attach       │
+││  ▶ az-123  in_progress    ● busy             j/k navigate         │
+││    Implement feature X with caref...         Enter/a switch       │
 ││    ⏱ not started  📁                         x kill               │
 ││ /Users/riordan/prog/azedarach                r refresh            │
-││    💬 renderDialogTwoPane ok                 Esc close            │
-││                                                                   │
-││                                                                   │
+││    tmux yes  worktree yes  git dirty (+8/    Esc close            │
+││ 2; ↑2)                                                            │
+││    💬 renderDialogTwoPane ok                                      │
 ││                                                                   │
 ││                                                                   │
 ││                                                                   │

@@ -4866,14 +4866,52 @@ func (m Model) openOrchestrationOverlay() tea.Cmd {
 	// Gather session information
 	var sessions []overlay.SessionInfo
 	for _, task := range m.tasks {
+		if task.Session == nil && !task.HasTmuxSession {
+			continue
+		}
+
+		state := domain.SessionIdle
+		var startedAt *time.Time
+		worktree := ""
 		if task.Session != nil {
+			state = task.Session.State
+			startedAt = task.Session.StartedAt
+			worktree = task.Session.Worktree
+		}
+
+		sessions = append(sessions, overlay.SessionInfo{
+			IssueID:               task.ID.String(),
+			TaskTitle:             task.Title,
+			IssueStatus:           task.Status,
+			State:                 state,
+			StartedAt:             startedAt,
+			Worktree:              worktree,
+			HasTmuxSession:        task.Session != nil || task.HasTmuxSession,
+			HasWorktree:           task.HasWorktree,
+			GitAheadCount:         task.GitAheadCount,
+			GitBehindCount:        task.GitBehindCount,
+			HasUncommittedChanges: task.HasUncommittedChanges,
+			HasConflicts:          task.HasConflicts,
+			GitAdditions:          task.GitAdditions,
+			GitDeletions:          task.GitDeletions,
+			RecentOutput:          "", // TODO: Capture recent output from tmux
+		})
+	}
+
+	if len(sessions) == 0 {
+		for _, session := range m.sessions {
+			if session == nil {
+				continue
+			}
 			sessions = append(sessions, overlay.SessionInfo{
-				IssueID:      task.ID.String(),
-				TaskTitle:    task.Title,
-				State:        task.Session.State,
-				StartedAt:    task.Session.StartedAt,
-				Worktree:     task.Session.Worktree,
-				RecentOutput: "", // TODO: Capture recent output from tmux
+				IssueID:        session.IssueID.String(),
+				TaskTitle:      session.IssueID.String(),
+				IssueStatus:    domain.StatusInProgress,
+				State:          session.State,
+				StartedAt:      session.StartedAt,
+				Worktree:       session.Worktree,
+				HasTmuxSession: true,
+				HasWorktree:    strings.TrimSpace(session.Worktree) != "",
 			})
 		}
 	}
@@ -4883,22 +4921,7 @@ func (m Model) openOrchestrationOverlay() tea.Cmd {
 		sessions,
 		// onAttach
 		func(issueID string) tea.Cmd {
-			return func() tea.Msg {
-				if !m.tmuxAvailable {
-					return Toast{
-						Level:   ToastWarning,
-						Message: fmt.Sprintf("tmux attach-session -t %s is unavailable outside tmux; launch az inside tmux to use tmux actions", issueID),
-						Expires: time.Now().Add(8 * time.Second),
-					}
-				}
-
-				// Show attach instructions
-				return Toast{
-					Level:   ToastInfo,
-					Message: fmt.Sprintf("Run: tmux attach-session -t %s", issueID),
-					Expires: time.Now().Add(5 * time.Second),
-				}
-			}
+			return m.attachSessionCmd(issueID)
 		},
 		// onKill
 		func(issueID string) tea.Cmd {

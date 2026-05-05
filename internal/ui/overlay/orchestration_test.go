@@ -12,18 +12,21 @@ import (
 
 func TestOrchestrationOverlay_Title(t *testing.T) {
 	overlay := NewOrchestrationOverlay(nil, nil, nil, nil)
-	assert.Equal(t, "Session Orchestration", overlay.Title())
+	assert.Equal(t, "Tmux Sessions", overlay.Title())
 }
 
 func TestOrchestrationOverlay_Size(t *testing.T) {
 	started := time.Date(2026, time.March, 30, 8, 0, 0, 0, time.UTC)
 	overlay := NewOrchestrationOverlay([]SessionInfo{
 		{
-			IssueID:   "az-123",
-			TaskTitle: "Implement feature X",
-			State:     domain.SessionBusy,
-			StartedAt: &started,
-			Worktree:  "/Users/riordan/prog/azedarach",
+			IssueID:        "az-123",
+			TaskTitle:      "Implement feature X",
+			IssueStatus:    domain.StatusInProgress,
+			State:          domain.SessionBusy,
+			StartedAt:      &started,
+			Worktree:       "/Users/riordan/prog/azedarach",
+			HasTmuxSession: true,
+			HasWorktree:    true,
 		},
 	}, nil, nil, nil)
 
@@ -36,12 +39,16 @@ func TestOrchestrationOverlay_View(t *testing.T) {
 	started := time.Date(2026, time.March, 30, 8, 0, 0, 0, time.UTC)
 	overlay := NewOrchestrationOverlay([]SessionInfo{
 		{
-			IssueID:      "az-123",
-			TaskTitle:    "Implement feature X with careful layout handling",
-			State:        domain.SessionBusy,
-			StartedAt:    &started,
-			Worktree:     "/Users/riordan/prog/azedarach",
-			RecentOutput: "build finished\nview rendered\nrenderDialogTwoPane ok",
+			IssueID:        "az-123",
+			TaskTitle:      "Implement feature X with careful layout handling",
+			IssueStatus:    domain.StatusInProgress,
+			State:          domain.SessionBusy,
+			StartedAt:      &started,
+			Worktree:       "/Users/riordan/prog/azedarach",
+			HasTmuxSession: true,
+			HasWorktree:    true,
+			GitAheadCount:  1,
+			RecentOutput:   "build finished\nview rendered\nrenderDialogTwoPane ok",
 		},
 	}, nil, nil, nil)
 
@@ -50,9 +57,10 @@ func TestOrchestrationOverlay_View(t *testing.T) {
 
 	view := overlay.View()
 	require.NotEmpty(t, view)
-	assert.Contains(t, view, "Session Orchestration")
-	assert.Contains(t, view, "Active Sessions")
-	assert.Contains(t, view, "Actions")
+	assert.Contains(t, view, "Tmux Sessions")
+	assert.Contains(t, view, "Azedarach tmux sessions")
+	assert.Contains(t, view, "Keys")
+	assert.Contains(t, view, "git clean")
 	assert.Contains(t, view, "Enter/a")
 }
 
@@ -60,11 +68,14 @@ func TestOrchestrationOverlay_WindowSizeFitsNarrowViewport(t *testing.T) {
 	started := time.Date(2026, time.March, 30, 8, 0, 0, 0, time.UTC)
 	overlay := NewOrchestrationOverlay([]SessionInfo{
 		{
-			IssueID:   "az-123",
-			TaskTitle: "Implement feature X with careful layout handling",
-			State:     domain.SessionBusy,
-			StartedAt: &started,
-			Worktree:  "/Users/riordan/prog/azedarach",
+			IssueID:        "az-123",
+			TaskTitle:      "Implement feature X with careful layout handling",
+			IssueStatus:    domain.StatusInProgress,
+			State:          domain.SessionBusy,
+			StartedAt:      &started,
+			Worktree:       "/Users/riordan/prog/azedarach",
+			HasTmuxSession: true,
+			HasWorktree:    true,
 		},
 	}, nil, nil, nil)
 

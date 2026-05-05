@@ -14,12 +14,21 @@ import (
 
 // SessionInfo represents information about an active session for orchestration view
 type SessionInfo struct {
-	IssueID      string
-	TaskTitle    string
-	State        domain.SessionState
-	StartedAt    *time.Time
-	Worktree     string
-	RecentOutput string // Last few lines of output
+	IssueID               string
+	TaskTitle             string
+	IssueStatus           domain.Status
+	State                 domain.SessionState
+	StartedAt             *time.Time
+	Worktree              string
+	HasTmuxSession        bool
+	HasWorktree           bool
+	GitAheadCount         int
+	GitBehindCount        int
+	HasUncommittedChanges bool
+	HasConflicts          bool
+	GitAdditions          int
+	GitDeletions          int
+	RecentOutput          string // Last few lines of output
 }
 
 // OrchestrationOverlay displays all active Claude sessions in a monitoring view
@@ -133,7 +142,7 @@ func (o *OrchestrationOverlay) View() string {
 		width:             width,
 		height:            height,
 		title:             o.Title(),
-		rightSectionTitle: "Actions",
+		rightSectionTitle: "Keys",
 		breakpoint:        58,
 		gap:               3,
 		minLeft:           30,
@@ -148,7 +157,7 @@ func (o *OrchestrationOverlay) View() string {
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
 			return renderDialogActions(o.styles, []keybinds.Binding{
 				{Key: "j/k", Description: "navigate"},
-				{Key: "Enter/a", Description: "attach"},
+				{Key: "Enter/a", Description: "switch"},
 				{Key: "x", Description: "kill"},
 				{Key: "r", Description: "refresh"},
 				{Key: "Esc", Description: "close"},
@@ -159,7 +168,7 @@ func (o *OrchestrationOverlay) View() string {
 
 // Title returns the overlay title
 func (o *OrchestrationOverlay) Title() string {
-	return "Session Orchestration"
+	return "Tmux Sessions"
 }
 
 // Size returns the overlay dimensions
@@ -206,7 +215,12 @@ func (o *OrchestrationOverlay) renderSession(index int, session SessionInfo, wid
 		Bold(true)
 	idStr := idStyle.Render(session.IssueID)
 
-	line1 := baseStyle.Render(fmt.Sprintf("%s%s %s", cursor, idStr, stateStr))
+	statusStyle := lipgloss.NewStyle().
+		Foreground(styles.Overlay1).
+		Bold(true)
+	statusStr := statusStyle.Render(fmt.Sprintf(" %s ", session.IssueStatus.String()))
+
+	line1 := baseStyle.Render(fmt.Sprintf("%s%s %s %s", cursor, idStr, statusStr, stateStr))
 	b.WriteString(line1)
 	b.WriteString("\n")
 
@@ -256,8 +270,23 @@ func (o *OrchestrationOverlay) renderSession(index int, session SessionInfo, wid
 	b.WriteString(line3)
 	b.WriteString("\n")
 
-	// Line 4: Recent output preview (if available)
+	// Line 4: tmux + git state
+	runtimeStyle := lipgloss.NewStyle().
+		Foreground(styles.Overlay1).
+		Padding(0, 1, 0, 3)
+	if isActive {
+		runtimeStyle = runtimeStyle.Background(styles.Surface0)
+	}
+	line4 := runtimeStyle.Render(fmt.Sprintf("tmux %s  worktree %s  git %s",
+		formatBoolSignal(session.HasTmuxSession),
+		formatBoolSignal(session.HasWorktree || strings.TrimSpace(session.Worktree) != ""),
+		formatSessionGitStatus(session),
+	))
+	b.WriteString(line4)
+
+	// Line 5: Recent output preview (if available)
 	if session.RecentOutput != "" {
+		b.WriteString("\n")
 		outputStyle := lipgloss.NewStyle().
 			Foreground(styles.Overlay0).
 			Italic(true).
@@ -282,8 +311,8 @@ func (o *OrchestrationOverlay) renderSession(index int, session SessionInfo, wid
 		}
 
 		if preview != "" {
-			line4 := outputStyle.Render(fmt.Sprintf("💬 %s", preview))
-			b.WriteString(line4)
+			line5 := outputStyle.Render(fmt.Sprintf("💬 %s", preview))
+			b.WriteString(line5)
 		}
 	}
 
@@ -298,7 +327,7 @@ func (o *OrchestrationOverlay) renderSessions(width int) string {
 		Foreground(styles.Text).
 		Bold(true).
 		Padding(0, 1)
-	header := headerStyle.Render(fmt.Sprintf("Active Sessions: %d", len(o.sessions)))
+	header := headerStyle.Render(fmt.Sprintf("Azedarach tmux sessions: %d", len(o.sessions)))
 	b.WriteString(header)
 	b.WriteString("\n\n")
 
@@ -323,7 +352,62 @@ func (o *OrchestrationOverlay) renderEmptyState(width int) string {
 		Width(max(1, width-4)).
 		Padding(4, 0)
 
-	return emptyStyle.Render("No active sessions\n\nPress Space on a task to start a session")
+	return emptyStyle.Render("No tmux sessions\n\nStart a session from a task workspace")
+}
+
+func formatBoolSignal(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
+}
+
+func formatSessionGitStatus(session SessionInfo) string {
+	if session.HasConflicts {
+		return "conflicts"
+	}
+
+	hasTelemetry := session.HasUncommittedChanges ||
+		session.GitAheadCount > 0 ||
+		session.GitBehindCount > 0 ||
+		session.GitAdditions > 0 ||
+		session.GitDeletions > 0
+	if !hasTelemetry {
+		if session.HasWorktree || strings.TrimSpace(session.Worktree) != "" {
+			return "clean"
+		}
+		return "unknown"
+	}
+
+	status := "clean"
+	if session.HasUncommittedChanges {
+		status = "dirty"
+	}
+
+	parts := make([]string, 0, 2)
+	if session.GitAdditions > 0 || session.GitDeletions > 0 {
+		parts = append(parts, fmt.Sprintf("+%d/-%d", session.GitAdditions, session.GitDeletions))
+	}
+	if divergence := formatSessionAheadBehind(session.GitAheadCount, session.GitBehindCount); divergence != "" {
+		parts = append(parts, divergence)
+	}
+	if len(parts) == 0 {
+		return status
+	}
+	return fmt.Sprintf("%s (%s)", status, strings.Join(parts, "; "))
+}
+
+func formatSessionAheadBehind(ahead, behind int) string {
+	if ahead > 0 && behind > 0 {
+		return fmt.Sprintf("↑%d/↓%d", ahead, behind)
+	}
+	if ahead > 0 {
+		return fmt.Sprintf("↑%d", ahead)
+	}
+	if behind > 0 {
+		return fmt.Sprintf("↓%d", behind)
+	}
+	return ""
 }
 
 // getStateStyle returns the appropriate style for a session state

@@ -1,13 +1,13 @@
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
-│Session Orchestration                                                                             │
+│Tmux Sessions                                                                                     │
 │──────────────────────────────────────────────────────────────────────────────────────────────────│
-││                                                                 Actions                         │
+││                                                                 Keys                            │
 ││                                                                 ────────────────────────────────│
 ││                                                                  j/k navigate                   │
-││                                                                  Enter/a attach                 │
-││                     No active sessions                           x kill                         │
+││                                                                  Enter/a switch                 │
+││                      No tmux sessions                            x kill                         │
 ││                                                                  r refresh                      │
-││          Press Space on a task to start a session                Esc close                      │
+││            Start a session from a task workspace                 Esc close                      │
 ││                                                                                                 │
 ││                                                                                                 │
 ││                                                                                                 │
