@@ -25,5 +25,5 @@
 ││                                                                              [2] Set status: In Progress            │
 ││                                                                              [3] Set status: Blocked                │
 ││                                                                              [4] Set status: Done                   │
-││                                                                              [h] Move left                          │
+││                                                                              [c] Create child task                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

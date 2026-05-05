@@ -98,22 +98,32 @@ func (d *DetailPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d, func() tea.Msg { return CloseOverlayMsg{} }
 
 		case "j", "down":
+			if d.GraphLinkCount() > 0 {
+				d.MoveGraphCursor(1)
+				return d, nil
+			}
 			if d.scrollY < d.maxScroll() {
 				d.scrollY++
 			}
 			return d, nil
 
 		case "k", "up":
+			if d.GraphLinkCount() > 0 {
+				d.MoveGraphCursor(-1)
+				return d, nil
+			}
 			if d.scrollY > 0 {
 				d.scrollY--
 			}
 			return d, nil
 		case "h", "left":
-			d.MoveGraphCursor(-1)
-			return d, nil
+			return d, d.graphNavigationCmd("ascendant")
 		case "l", "right":
-			d.MoveGraphCursor(1)
-			return d, nil
+			return d, d.graphNavigationCmd("descendant")
+		case "<":
+			return d, d.graphNavigationCmd("ascendant")
+		case ">":
+			return d, d.graphNavigationCmd("descendant")
 		case "ctrl+d":
 			d.scrollY = min(d.maxScroll(), d.scrollY+d.halfPageStep())
 			return d, nil
@@ -541,6 +551,10 @@ func (d *DetailPanel) MoveGraphCursor(delta int) {
 }
 
 func (d *DetailPanel) SelectedGraphTaskID() (string, bool) {
+	return d.SelectedGraphTaskIDForDirection("")
+}
+
+func (d *DetailPanel) SelectedGraphTaskIDForDirection(direction string) (string, bool) {
 	links := d.graphLinks()
 	if len(links) == 0 {
 		return "", false
@@ -551,7 +565,20 @@ func (d *DetailPanel) SelectedGraphTaskID() (string, bool) {
 	if d.graphCursor >= len(links) {
 		d.graphCursor = len(links) - 1
 	}
+	if direction != "" && links[d.graphCursor].Direction != direction {
+		return "", false
+	}
 	return links[d.graphCursor].Task.ID.String(), true
+}
+
+func (d *DetailPanel) graphNavigationCmd(direction string) tea.Cmd {
+	taskID, ok := d.SelectedGraphTaskIDForDirection(direction)
+	if !ok {
+		return nil
+	}
+	return func() tea.Msg {
+		return SelectionMsg{Key: "task_workspace_open_task", Value: taskID}
+	}
 }
 
 func (d *DetailPanel) reachableTasks(ascendants bool) []domain.Task {

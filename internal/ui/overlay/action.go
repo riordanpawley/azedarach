@@ -19,14 +19,15 @@ type Action struct {
 
 // ActionMenu is a menu overlay for task actions
 type ActionMenu struct {
-	task         domain.Task
-	relatedTasks []domain.Task
-	session      *domain.Session
-	actions      []Action
-	cursor       int
-	scrollOffset int
-	viewportRows int
-	styles       *Styles
+	task                  domain.Task
+	relatedTasks          []domain.Task
+	session               *domain.Session
+	actions               []Action
+	cursor                int
+	scrollOffset          int
+	viewportRows          int
+	hideStatusMoveActions bool
+	styles                *Styles
 }
 
 // NewActionMenu creates a new action menu for the given task
@@ -45,6 +46,14 @@ func NewActionMenu(task domain.Task, session *domain.Session) *ActionMenu {
 // child summary information for the selected task.
 func (m *ActionMenu) WithRelatedTasks(tasks []domain.Task) *ActionMenu {
 	m.relatedTasks = append([]domain.Task(nil), tasks...)
+	m.actions = m.buildActions()
+	return m
+}
+
+// WithoutStatusMoveActions hides h/l status movement rows for surfaces where
+// those keys are reserved for local navigation.
+func (m *ActionMenu) WithoutStatusMoveActions() *ActionMenu {
+	m.hideStatusMoveActions = true
 	m.actions = m.buildActions()
 	return m
 }
@@ -132,8 +141,14 @@ func (m *ActionMenu) buildActions() []Action {
 		Action{Key: "2", Label: "Set status: In Progress", Enabled: m.task.Status != domain.StatusInProgress},
 		Action{Key: "3", Label: "Set status: Blocked", Enabled: m.task.Status != domain.StatusBlocked},
 		Action{Key: "4", Label: "Set status: Done", Enabled: m.task.Status != domain.StatusDone},
-		Action{Key: "h", Label: "Move left", Enabled: m.task.Status != domain.StatusOpen},
-		Action{Key: "l", Label: "Move right", Enabled: m.task.Status != domain.StatusDone},
+	)
+	if !m.hideStatusMoveActions {
+		actions = append(actions,
+			Action{Key: "h", Label: "Move left", Enabled: m.task.Status != domain.StatusOpen},
+			Action{Key: "l", Label: "Move right", Enabled: m.task.Status != domain.StatusDone},
+		)
+	}
+	actions = append(actions,
 		Action{Key: "c", Label: "Create child task", Enabled: true},
 		Action{Key: "e", Label: "Edit task", Enabled: true},
 		Action{Key: "T", Label: "Tombstone task", Enabled: true},
