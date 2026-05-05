@@ -50,6 +50,8 @@ const (
 	commandTaskDependencyAdd     = "task.dependency.add"
 	commandTaskDependencyRemove  = "task.dependency.remove"
 	commandTaskSnapshotExport    = "task.snapshot.export"
+	commandSyncRun               = "sync.run"
+	commandSyncConflicts         = "sync.conflicts"
 	commandSessionStatus         = "session.status"
 	commandSessionRecover        = "session.recover"
 	commandRuntimeReconcile      = "runtime.reconcile"
@@ -121,6 +123,8 @@ var commandSpecRegistry = map[string]CommandSpec{
 	commandTaskDependencyAdd:              {Command: commandTaskDependencyAdd, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskDependencyRemove:           {Command: commandTaskDependencyRemove, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskSnapshotExport:             {Command: commandTaskSnapshotExport, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
+	commandSyncRun:                        {Command: commandSyncRun, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
+	commandSyncConflicts:                  {Command: commandSyncConflicts, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	protocol.CommandTaskBulkApply:         {Command: protocol.CommandTaskBulkApply, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 }
 

@@ -1833,7 +1833,7 @@ func TestParseSyncArgs(t *testing.T) {
 		{
 			name:        "rejects conflicting project dir inputs",
 			args:        []string{"--project-dir", "workspace", "other"},
-			errContains: "usage: az sync [--all] [<directory>] [--project-dir <dir>]",
+			errContains: "usage: az sync [conflicts] [--all] [<directory>] [--project-dir <dir>] [--json]",
 		},
 	}
 
@@ -2179,16 +2179,20 @@ func TestConfigSetCommandRejectsUnsupportedKey(t *testing.T) {
 	}
 }
 
-func TestSyncCommandAllUsesDaemonWorktreeTargetsAndDaemonSnapshot(t *testing.T) {
+func TestSyncCommandAllUsesDaemonWorktreeTargetsAndDaemonSyncRun(t *testing.T) {
 	var gotWorktreeReq protocol.RequestEnvelope
-	var gotSnapshotReq protocol.RequestEnvelope
-	tasks := []domain.Task{
-		{ID: "az-1", Title: "Sync task one", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
-		{ID: "az-2", Title: "Sync task two", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeTask},
-	}
-	payload, err := marshalTaskListBody(tasks)
+	var gotSyncReq protocol.RequestEnvelope
+	payload, err := json.Marshal(daemonclient.IssueSyncSummary{
+		Provider:     "linear",
+		Enabled:      true,
+		RemoteIssues: 2,
+		LocalIssues:  2,
+		Imported:     1,
+		UpdatedLocal: 1,
+		PushedRemote: 1,
+	})
 	if err != nil {
-		t.Fatalf("marshal tasks: %v", err)
+		t.Fatalf("marshal sync summary: %v", err)
 	}
 
 	deps := &Dependencies{
@@ -2226,8 +2230,8 @@ func TestSyncCommandAllUsesDaemonWorktreeTargetsAndDaemonSnapshot(t *testing.T) 
 						Revision:        41,
 						Body:            body,
 					}, nil
-				case daemonclient.CommandTaskList:
-					gotSnapshotReq = req
+				case daemonclient.CommandSyncRun:
+					gotSyncReq = req
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
@@ -2235,7 +2239,6 @@ func TestSyncCommandAllUsesDaemonWorktreeTargetsAndDaemonSnapshot(t *testing.T) 
 						Meta:            req.Meta,
 						OK:              true,
 						CompletedAt:     req.SentAt,
-						Revision:        42,
 						Body:            payload,
 					}, nil
 				default:
@@ -2268,8 +2271,8 @@ func TestSyncCommandAllUsesDaemonWorktreeTargetsAndDaemonSnapshot(t *testing.T) 
 	if worktreeBody.ProjectID != "proj" {
 		t.Fatalf("worktree request project_id = %q, want proj", worktreeBody.ProjectID)
 	}
-	if gotSnapshotReq.Command != daemonclient.CommandTaskList {
-		t.Fatalf("snapshot command = %q, want %q", gotSnapshotReq.Command, daemonclient.CommandTaskList)
+	if gotSyncReq.Command != daemonclient.CommandSyncRun {
+		t.Fatalf("sync command = %q, want %q", gotSyncReq.Command, daemonclient.CommandSyncRun)
 	}
 	if !strings.Contains(output, "Syncing issue tracker state...") {
 		t.Fatalf("sync output missing heading: %q", output)
@@ -2280,8 +2283,8 @@ func TestSyncCommandAllUsesDaemonWorktreeTargetsAndDaemonSnapshot(t *testing.T) 
 	if !strings.Contains(output, "worktree-a") || !strings.Contains(output, "worktree-b") {
 		t.Fatalf("sync output missing worktree paths: %q", output)
 	}
-	if !strings.Contains(output, "Snapshot: tasks=2 revision=42") {
-		t.Fatalf("sync output missing snapshot summary: %q", output)
+	if !strings.Contains(output, "Linear: remote=2 local=2 imported=1 updated_local=1 pushed_remote=1 conflicts=0") {
+		t.Fatalf("sync output missing sync summary: %q", output)
 	}
 }
 
@@ -5566,7 +5569,7 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "az config set spec.enabled false") {
 		t.Fatalf("usage missing config example: %q", output)
 	}
-	if !strings.Contains(output, "sync [--all] [<directory>] [--project-dir <dir>]") {
+	if !strings.Contains(output, "sync [conflicts] [--all] [<directory>] [--project-dir <dir>] [--json]") {
 		t.Fatalf("usage missing sync command: %q", output)
 	}
 	if !strings.Contains(output, "impl delete --confirm <implementation>") {

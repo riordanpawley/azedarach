@@ -88,6 +88,8 @@ type ConfigSetOptions struct {
 type SyncOptions struct {
 	All        bool
 	ProjectDir string
+	Conflicts  bool
+	JSON       bool
 }
 
 type LogOptions struct {
@@ -995,10 +997,15 @@ func ParseConfigSetArgs(args []string) (ConfigSetOptions, error) {
 
 func ParseSyncArgs(args []string) (SyncOptions, error) {
 	opts := SyncOptions{}
+	if len(args) > 0 && strings.TrimSpace(args[0]) == "conflicts" {
+		opts.Conflicts = true
+		args = args[1:]
+	}
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.All, "all", false, "sync all worktrees")
 	fs.StringVar(&opts.ProjectDir, "project-dir", "", "project directory")
+	fs.BoolVar(&opts.JSON, "json", false, "print JSON")
 	if err := fs.Parse(args); err != nil {
 		return SyncOptions{}, err
 	}
@@ -1006,11 +1013,11 @@ func ParseSyncArgs(args []string) (SyncOptions, error) {
 	case 0:
 	case 1:
 		if strings.TrimSpace(opts.ProjectDir) != "" {
-			return SyncOptions{}, fmt.Errorf("usage: az sync [--all] [<directory>] [--project-dir <dir>]")
+			return SyncOptions{}, fmt.Errorf("usage: az sync [conflicts] [--all] [<directory>] [--project-dir <dir>] [--json]")
 		}
 		opts.ProjectDir = strings.TrimSpace(fs.Arg(0))
 	default:
-		return SyncOptions{}, fmt.Errorf("usage: az sync [--all] [<directory>] [--project-dir <dir>]")
+		return SyncOptions{}, fmt.Errorf("usage: az sync [conflicts] [--all] [<directory>] [--project-dir <dir>] [--json]")
 	}
 	return opts, nil
 }
@@ -2081,6 +2088,29 @@ func SyncCommand(deps *Dependencies, opts SyncOptions) error {
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
+	if opts.Conflicts {
+		conflicts, err := deps.DaemonClient.ListIssueSyncConflicts(ctx, false)
+		if err != nil {
+			return fmt.Errorf("list sync conflicts: %w", err)
+		}
+		if opts.JSON {
+			data, err := json.MarshalIndent(conflicts, "", "  ")
+			if err != nil {
+				return fmt.Errorf("marshal sync conflicts: %w", err)
+			}
+			fmt.Println(string(data))
+			return nil
+		}
+		if len(conflicts.Conflicts) == 0 {
+			fmt.Println("No unresolved sync conflicts.")
+			return nil
+		}
+		fmt.Printf("Unresolved sync conflicts: %d\n", len(conflicts.Conflicts))
+		for _, conflict := range conflicts.Conflicts {
+			fmt.Printf("- %s %s: local=%q remote=%q\n", conflict.IssueID, conflict.Field, conflict.LocalValue, conflict.RemoteValue)
+		}
+		return nil
+	}
 
 	projectDir := strings.TrimSpace(opts.ProjectDir)
 	if projectDir == "" {
@@ -2111,23 +2141,36 @@ func SyncCommand(deps *Dependencies, opts SyncOptions) error {
 		}
 	}
 
-	fmt.Println("Syncing issue tracker state...")
-	fmt.Printf("Project: %s\n", projectDir)
-	if opts.All {
-		fmt.Printf("Targets: %d worktree(s)\n", len(targetPaths))
-		for _, targetPath := range targetPaths {
-			fmt.Printf("  %s\n", targetPath)
+	if !opts.JSON {
+		fmt.Println("Syncing issue tracker state...")
+		fmt.Printf("Project: %s\n", projectDir)
+		if opts.All {
+			fmt.Printf("Targets: %d worktree(s)\n", len(targetPaths))
+			for _, targetPath := range targetPaths {
+				fmt.Printf("  %s\n", targetPath)
+			}
 		}
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	summary, err := deps.DaemonClient.RunIssueSync(ctx)
 	if err != nil {
-		return fmt.Errorf("refresh issue tracker snapshot: %w", err)
+		return fmt.Errorf("run issue tracker sync: %w", err)
 	}
-
+	if opts.JSON {
+		data, err := json.MarshalIndent(summary, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal sync summary: %w", err)
+		}
+		fmt.Println(string(data))
+		return nil
+	}
 	fmt.Println("")
-	fmt.Printf("Snapshot: tasks=%d revision=%d\n", len(snapshot.Tasks), snapshot.Revision)
-	fmt.Printf("Sync summary: targets=%d, tasks=%d, revision=%d\n", len(targetPaths), len(snapshot.Tasks), snapshot.Revision)
+	if summary.Skipped {
+		fmt.Printf("Sync skipped: %s\n", summary.Reason)
+		return nil
+	}
+	fmt.Printf("Linear: remote=%d local=%d imported=%d updated_local=%d pushed_remote=%d conflicts=%d\n", summary.RemoteIssues, summary.LocalIssues, summary.Imported, summary.UpdatedLocal, summary.PushedRemote, summary.Conflicts)
+	fmt.Printf("Sync summary: targets=%d, provider=%s\n", len(targetPaths), summary.Provider)
 	return nil
 }
 

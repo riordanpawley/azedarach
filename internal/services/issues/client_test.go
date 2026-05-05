@@ -1089,6 +1089,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0003_issue_indexes",
 		"0004_spec_tables",
 		"0005_spec_audit_log",
+		"0006_external_issue_sync",
 	}, got)
 }
 

@@ -187,6 +187,8 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		commandTaskDependencyAdd,
 		commandTaskDependencyRemove,
 		commandTaskSnapshotExport,
+		commandSyncRun,
+		commandSyncConflicts,
 		protocol.CommandTaskBulkApply,
 	}
 

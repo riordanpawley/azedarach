@@ -23,6 +23,8 @@ const (
 	CommandTaskArchive          = "task.archive"
 	CommandTaskDependencyAdd    = "task.dependency.add"
 	CommandTaskDependencyRemove = "task.dependency.remove"
+	CommandSyncRun              = "sync.run"
+	CommandSyncConflicts        = "sync.conflicts"
 )
 
 // TaskCreateParams contains the payload used to create a task through the shared daemon client.
@@ -95,6 +97,36 @@ type TaskSnapshot struct {
 	Revision      uint64
 	LastCheckedAt time.Time
 	Freshness     protocol.TaskListFreshness
+}
+
+type IssueSyncSummary struct {
+	Provider     string `json:"provider"`
+	Enabled      bool   `json:"enabled"`
+	Skipped      bool   `json:"skipped"`
+	Reason       string `json:"reason,omitempty"`
+	Imported     int    `json:"imported"`
+	UpdatedLocal int    `json:"updated_local"`
+	PushedRemote int    `json:"pushed_remote"`
+	Conflicts    int    `json:"conflicts"`
+	RemoteIssues int    `json:"remote_issues"`
+	LocalIssues  int    `json:"local_issues"`
+}
+
+type IssueSyncConflict struct {
+	ID          string `json:"id"`
+	Provider    string `json:"provider"`
+	ProjectID   string `json:"project_id"`
+	IssueID     string `json:"issue_id"`
+	Field       string `json:"field"`
+	LocalValue  string `json:"local_value,omitempty"`
+	RemoteValue string `json:"remote_value,omitempty"`
+	DetectedAt  string `json:"detected_at"`
+}
+
+type IssueSyncConflictsResponse struct {
+	Provider  string              `json:"provider"`
+	ProjectID string              `json:"project_id"`
+	Conflicts []IssueSyncConflict `json:"conflicts"`
 }
 
 // CommandError wraps typed daemon command failures.
@@ -186,6 +218,22 @@ func (c *Client) ListTasks(ctx context.Context) ([]domain.Task, error) {
 		return nil, err
 	}
 	return snapshot.Tasks, nil
+}
+
+func (c *Client) RunIssueSync(ctx context.Context) (IssueSyncSummary, error) {
+	var out IssueSyncSummary
+	if err := c.commandJSON(ctx, CommandSyncRun, map[string]any{}, &out); err != nil {
+		return IssueSyncSummary{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) ListIssueSyncConflicts(ctx context.Context, includeResolved bool) (IssueSyncConflictsResponse, error) {
+	var out IssueSyncConflictsResponse
+	if err := c.commandJSON(ctx, CommandSyncConflicts, map[string]any{"include_resolved": includeResolved}, &out); err != nil {
+		return IssueSyncConflictsResponse{}, err
+	}
+	return out, nil
 }
 
 // ListTasksSnapshot fetches the current task set and revision through the daemon client boundary.

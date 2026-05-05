@@ -401,6 +401,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.cfg.Logger.Info("daemon startup phase", "phase", "runtime_reconcile", "project_id", result.ProjectID, "duration_ms", time.Since(reconcileStartedAt).Milliseconds())
 	}
 	d.startRuntimeReconcileWorker(serveCtx)
+	d.startLinearSyncWorker(serveCtx)
 	d.cfg.Logger.Info("daemon startup phase", "phase", "startup_ready", "duration_ms", time.Since(startedAt).Milliseconds())
 	err = d.serve.Serve(serveCtx)
 	if ctx.Err() != nil {
@@ -526,6 +527,10 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleTaskDependencyRemove(ctx, req)
 	case "task.snapshot.export":
 		return d.handleTaskSnapshotExport(ctx, req)
+	case commandSyncRun:
+		return d.handleSyncRun(ctx, req)
+	case commandSyncConflicts:
+		return d.handleSyncConflicts(ctx, req)
 	case protocol.CommandTaskBulkApply:
 		return d.apply.Handle(ctx, req), nil
 	case "session.start":

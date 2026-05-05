@@ -266,13 +266,13 @@ func main() {
 	case "sync":
 		if len(commandArgs) > 0 {
 			if commandArgs[0] == "help" || commandArgs[0] == "-h" || commandArgs[0] == "--help" {
-				fmt.Println("Usage: az sync [--all] [<directory>] [--project-dir <dir>]")
+				fmt.Println("Usage: az sync [conflicts] [--all] [<directory>] [--project-dir <dir>] [--json]")
 				os.Exit(0)
 			}
 		}
 		syncOpts, err := cli.ParseSyncArgs(commandArgs)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Usage: az sync [--all] [<directory>] [--project-dir <dir>]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az sync [conflicts] [--all] [<directory>] [--project-dir <dir>] [--json]\n")
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
