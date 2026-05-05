@@ -144,6 +144,45 @@ func TestModelShowsLoaderError(t *testing.T) {
 	}
 }
 
+func TestModelViewUsesTmuxCopyAndBottomToolbar(t *testing.T) {
+	entries := []InventoryEntry{{
+		SessionID:      "az-one",
+		IssueID:        "one",
+		TaskTitle:      "One",
+		ProjectPath:    "/tmp/project",
+		HasTmuxSession: true,
+	}}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 96, Height: 18})
+	model = updated.(Model)
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	view := model.View()
+	if !strings.Contains(view, "Tmux sessions") {
+		t.Fatalf("view missing tmux title: %q", view)
+	}
+	if strings.Contains(view, "Az tmux sessions") || strings.Contains(view, "Azedarach issue sessions") {
+		t.Fatalf("view should not use Az-only selector copy: %q", view)
+	}
+	if !strings.Contains(view, "tmux az-one") || !strings.Contains(view, "/tmp/project") {
+		t.Fatalf("view missing tmux metadata inside card: %q", view)
+	}
+	for _, line := range strings.Split(view, "\n") {
+		if strings.HasPrefix(line, "  tmux ") {
+			t.Fatalf("tmux metadata rendered outside card: %q\n%s", line, view)
+		}
+	}
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "h/j/k/l: move") || !strings.Contains(last, "q/Esc: close") {
+		t.Fatalf("last line should be key toolbar, got %q\n%s", last, view)
+	}
+}
+
 func TestModelViewFitsViewportHeightWithWrappedCards(t *testing.T) {
 	entries := []InventoryEntry{
 		{SessionID: "az-one", IssueID: "one", TaskTitle: "One title wraps enough to make this card taller than a fixed row assumption", HasTmuxSession: true},

@@ -1307,7 +1307,7 @@ func buildTmuxSelectorBlock(key, azCommand, projectDir string) string {
 	command := fmt.Sprintf("cd %s && %s tmux selector", shellSingleQuote(projectDir), strings.TrimSpace(azCommand))
 	return strings.Join([]string{
 		tmuxSelectorBlockStart,
-		fmt.Sprintf("bind-key %s display-popup -E -w 95%% -h 95%% -T %s %s", strings.TrimSpace(key), shellSingleQuote("az sessions"), shellSingleQuote(command)),
+		fmt.Sprintf("bind-key %s display-popup -E -w 95%% -h 95%% -T %s %s", strings.TrimSpace(key), shellSingleQuote("tmux sessions"), shellSingleQuote(command)),
 		tmuxSelectorBlockEnd,
 		"",
 	}, "\n")

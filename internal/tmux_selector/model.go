@@ -14,6 +14,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -290,7 +291,7 @@ func (m Model) View() string {
 	}
 	var b strings.Builder
 	b.WriteString("\n")
-	b.WriteString(m.styles.ColumnHeaderActive.Render("Az tmux sessions"))
+	b.WriteString(m.styles.ColumnHeaderActive.Render("Tmux sessions"))
 	b.WriteString("\n")
 	if strings.TrimSpace(m.status) != "" {
 		b.WriteString(m.styles.StatusInfo.Render(m.status))
@@ -302,20 +303,39 @@ func (m Model) View() string {
 		b.WriteString("\n\n")
 	}
 	if len(m.snapshot.Entries) == 0 {
-		b.WriteString("No Azedarach issue sessions found.\n\n")
+		b.WriteString("No tmux sessions found.\n")
 	} else {
 		columns := gridColumnCount(m.width)
 		cardWidth := gridCardWidth(m.width, columns)
-		rows := RenderVisibleGrid(m.snapshot.Entries, m.cursor, columns, cardWidth, maxInt(1, m.height-7), m.styles)
+		rows := RenderVisibleGrid(m.snapshot.Entries, m.cursor, columns, cardWidth, maxInt(1, m.height-8), m.styles)
 		for _, row := range rows {
 			b.WriteString(row)
 			b.WriteString("\n")
 		}
-		b.WriteString("\n")
 	}
-	b.WriteString(m.styles.StatusHint.Render("h/j/k/l move  enter/a switch  o/space open in az  r refresh  q close"))
-	b.WriteString("\n")
-	return b.String()
+	content := b.String()
+	footer := m.renderFooter()
+	for lipgloss.Height(content)+lipgloss.Height(footer) < maxInt(1, m.height) {
+		content += "\n"
+	}
+	content += footer
+	content += "\n"
+	return content
+}
+
+func (m Model) renderFooter() string {
+	right := m.styles.StatusHint.Render(keybinds.RenderPlain([]keybinds.Binding{
+		{Key: "h/j/k/l", Description: "move"},
+		{Key: "Enter/a", Description: "switch"},
+		{Key: "o/Space", Description: "open in az"},
+		{Key: "r", Description: "refresh"},
+		{Key: "q/Esc", Description: "close"},
+	}, "  "))
+	gap := maxInt(0, m.width-ansi.StringWidth(right))
+	if gap > 0 {
+		return strings.Repeat(" ", gap) + right
+	}
+	return ansi.Truncate(right, maxInt(1, m.width), "…")
 }
 
 func (m *Model) moveCursor(dx int, dy int) {
@@ -569,8 +589,29 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 	if len(metaParts) == 0 {
 		return card
 	}
-	meta := ansi.Truncate("  "+strings.Join(metaParts, "  "), maxInt(1, width), "")
-	return lipgloss.JoinVertical(lipgloss.Left, card, s.StatusInfo.Render(meta))
+	meta := strings.Join(metaParts, "  ")
+	return insertCardMetaLine(card, meta, s)
+}
+
+func insertCardMetaLine(card string, meta string, s *styles.Styles) string {
+	meta = strings.TrimSpace(meta)
+	if meta == "" {
+		return card
+	}
+	lines := strings.Split(card, "\n")
+	if len(lines) < 2 {
+		return lipgloss.JoinVertical(lipgloss.Left, card, s.StatusInfo.Render(meta))
+	}
+	width := ansi.StringWidth(lines[0])
+	innerWidth := maxInt(1, width-4)
+	meta = ansi.Truncate(meta, innerWidth, "…")
+	padding := maxInt(0, innerWidth-ansi.StringWidth(meta))
+	metaLine := "│ " + s.StatusInfo.Render(meta) + strings.Repeat(" ", padding) + " │"
+	out := make([]string, 0, len(lines)+1)
+	out = append(out, lines[:len(lines)-1]...)
+	out = append(out, metaLine)
+	out = append(out, lines[len(lines)-1])
+	return strings.Join(out, "\n")
 }
 
 type VisibleRow struct {
@@ -692,7 +733,7 @@ func gridCardWidth(width int, columns int) int {
 }
 
 func formatSnapshotStatus(snapshot Snapshot, rows int) string {
-	parts := []string{fmt.Sprintf("%d active sessions", rows)}
+	parts := []string{fmt.Sprintf("%d sessions", rows)}
 	if snapshot.Revision > 0 {
 		parts = append(parts, fmt.Sprintf("rev %d", snapshot.Revision))
 	}
