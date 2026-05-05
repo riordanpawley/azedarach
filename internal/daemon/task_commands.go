@@ -56,6 +56,7 @@ func (d *Daemon) sourceForTaskInvariant(invariant daemonInvariantID) daemonInvar
 func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	resp := d.successResponse(req)
 	projectID := d.projectID(req.Meta)
+	startedAt := time.Now()
 	d.triggerWorktreeStateRefresh(projectID)
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task list requested", "project_id", projectID)
@@ -77,7 +78,56 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	resp.Body = body
 	resp.Revision = payload.SnapshotRevision
 	if d.cfg.Logger != nil {
-		d.cfg.Logger.Info("daemon task list completed", "project_id", projectID, "task_count", len(tasks), "revision", resp.Revision)
+		d.cfg.Logger.Info("daemon task list completed", "project_id", projectID, "task_count", len(tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds())
+	}
+	return resp, nil
+}
+
+func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
+	startedAt := time.Now()
+	var cmd struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	taskID := strings.TrimSpace(cmd.TaskID)
+	if taskID == "" {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "task_id is required"), nil
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task get requested", "project_id", projectID, "task_id", taskID)
+	}
+	d.refreshIssueWorktreeState(ctx, projectID, taskID)
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
+	tasks, err := issueClient.GetWithDependencyContextRuntime(ctx, projectID, taskID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) || strings.Contains(err.Error(), domain.ErrNotFound.Error()) {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Info("daemon task get not found", "project_id", projectID, "task_id", taskID, "elapsed_ms", time.Since(startedAt).Milliseconds())
+			}
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue not found: %s", taskID)), nil
+		}
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("daemon task get failed", "project_id", projectID, "task_id", taskID, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
+		}
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
+	payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), lastCheckedAt, freshness, tasks)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	resp := d.successResponse(req)
+	resp.Body = body
+	resp.Revision = payload.SnapshotRevision
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task get completed", "project_id", projectID, "task_id", taskID, "context_task_count", len(tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds())
 	}
 	return resp, nil
 }
