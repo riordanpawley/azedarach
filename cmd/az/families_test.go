@@ -101,7 +101,7 @@ func TestRunTmuxCommandHelpAndDispatch(t *testing.T) {
 	output := captureMainStdout(t, func() error {
 		return runTmuxCommand(config.DefaultConfig(), []string{"--help"})
 	})
-	if !strings.Contains(output, "Usage: az tmux <selector|install-selector>") {
+	if !strings.Contains(output, "Usage: az tmux <selector|install-selector|uninstall-selector>") {
 		t.Fatalf("help output = %q", output)
 	}
 
@@ -115,6 +115,13 @@ func TestRunTmuxCommandHelpAndDispatch(t *testing.T) {
 	}
 	if _, err := os.Stat(configPath); err != nil {
 		t.Fatalf("expected tmux config file: %v", err)
+	}
+
+	output = captureMainStdout(t, func() error {
+		return runTmuxCommand(config.DefaultConfig(), []string{"uninstall-selector", "--config", configPath})
+	})
+	if !strings.Contains(output, "Uninstalled Azedarach tmux session selector") {
+		t.Fatalf("uninstall dispatch output = %q", output)
 	}
 }
 

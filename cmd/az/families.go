@@ -316,6 +316,19 @@ func runTmuxCommand(cfg *config.Config, args []string) error {
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
 			return cli.TmuxInstallSelectorCommand(deps, opts)
 		})
+	case "uninstall-selector":
+		if len(args) > 1 && sessionHelpRequested(args[1:]...) {
+			cli.PrintTmuxUsage()
+			return nil
+		}
+		opts, err := cli.ParseTmuxUninstallSelectorArgs(args[1:])
+		if err != nil {
+			cli.PrintTmuxUsage()
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.TmuxUninstallSelectorCommand(deps, opts)
+		})
 	default:
 		return fmt.Errorf("unknown tmux command: %s", args[0])
 	}

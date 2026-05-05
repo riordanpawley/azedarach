@@ -135,6 +135,11 @@ type TmuxInstallSelectorOptions struct {
 	Verbose    bool
 }
 
+type TmuxUninstallSelectorOptions struct {
+	ConfigPath string
+	Verbose    bool
+}
+
 type CodexGuardOptions struct {
 	Event string
 	JSON  bool
@@ -347,6 +352,22 @@ func ParseTmuxInstallSelectorArgs(args []string) (TmuxInstallSelectorOptions, er
 	}
 	if opts.AZCommand == "" {
 		return TmuxInstallSelectorOptions{}, fmt.Errorf("az command cannot be empty")
+	}
+	return opts, nil
+}
+
+func ParseTmuxUninstallSelectorArgs(args []string) (TmuxUninstallSelectorOptions, error) {
+	opts := TmuxUninstallSelectorOptions{}
+	fs := flag.NewFlagSet("tmux uninstall-selector", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.ConfigPath, "config", "", "tmux config path")
+	fs.BoolVar(&opts.Verbose, "verbose", false, "verbose output")
+
+	if err := fs.Parse(args); err != nil {
+		return TmuxUninstallSelectorOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return TmuxUninstallSelectorOptions{}, fmt.Errorf("usage: az tmux uninstall-selector [--config <path>] [--verbose]")
 	}
 	return opts, nil
 }
@@ -1275,17 +1296,9 @@ func TmuxInstallSelectorCommand(deps *Dependencies, opts TmuxInstallSelectorOpti
 		return fmt.Errorf("resolve absolute project directory: %w", err)
 	}
 
-	configPath := strings.TrimSpace(opts.ConfigPath)
-	if configPath == "" {
-		home, homeErr := os.UserHomeDir()
-		if homeErr != nil {
-			return fmt.Errorf("resolve home directory for tmux config: %w", homeErr)
-		}
-		configPath = filepath.Join(home, ".tmux.conf")
-	}
-	configPath, err = filepath.Abs(configPath)
+	configPath, err := resolveTmuxConfigPath(opts.ConfigPath)
 	if err != nil {
-		return fmt.Errorf("resolve absolute tmux config path: %w", err)
+		return err
 	}
 
 	managedBlock := buildTmuxSelectorBlock(opts.Key, opts.AZCommand, projectDir)
@@ -1303,6 +1316,29 @@ func TmuxInstallSelectorCommand(deps *Dependencies, opts TmuxInstallSelectorOpti
 	return nil
 }
 
+func TmuxUninstallSelectorCommand(_ *Dependencies, opts TmuxUninstallSelectorOptions) error {
+	configPath, err := resolveTmuxConfigPath(opts.ConfigPath)
+	if err != nil {
+		return err
+	}
+
+	changed, err := removeManagedTextBlocksFromFile(configPath, tmuxSelectorBlockStart, tmuxSelectorBlockEnd)
+	if err != nil {
+		return fmt.Errorf("remove tmux selector config: %w", err)
+	}
+	if changed {
+		fmt.Printf("Uninstalled Azedarach tmux session selector from %s\n", configPath)
+		fmt.Println("  Reload tmux config with: tmux source-file " + shellSingleQuote(configPath))
+		return nil
+	}
+
+	fmt.Printf("Azedarach tmux session selector is not installed in %s\n", configPath)
+	if opts.Verbose {
+		fmt.Println("  No managed selector block found.")
+	}
+	return nil
+}
+
 func buildTmuxSelectorBlock(key, azCommand, projectDir string) string {
 	command := fmt.Sprintf("cd %s && %s tmux selector", shellSingleQuote(projectDir), strings.TrimSpace(azCommand))
 	return strings.Join([]string{
@@ -1311,6 +1347,22 @@ func buildTmuxSelectorBlock(key, azCommand, projectDir string) string {
 		tmuxSelectorBlockEnd,
 		"",
 	}, "\n")
+}
+
+func resolveTmuxConfigPath(configPath string) (string, error) {
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		home, homeErr := os.UserHomeDir()
+		if homeErr != nil {
+			return "", fmt.Errorf("resolve home directory for tmux config: %w", homeErr)
+		}
+		configPath = filepath.Join(home, ".tmux.conf")
+	}
+	absPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve absolute tmux config path: %w", err)
+	}
+	return absPath, nil
 }
 
 func upsertManagedTextBlock(path, startMarker, endMarker, managedBlock string, mode os.FileMode) error {
@@ -1333,6 +1385,30 @@ func upsertManagedTextBlock(path, startMarker, endMarker, managedBlock string, m
 	normalized := strings.ReplaceAll(base, "\r\n", "\n")
 	normalized = strings.TrimRight(normalized, "\n") + "\n\n"
 	return os.WriteFile(path, []byte(normalized+managedBlock), writeMode)
+}
+
+func removeManagedTextBlocksFromFile(path, startMarker, endMarker string) (bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	content := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	stripped := stripManagedTextBlocks(content, startMarker, endMarker)
+	if stripped == content {
+		return false, nil
+	}
+	stripped = strings.TrimRight(stripped, "\n")
+	if strings.TrimSpace(stripped) != "" {
+		stripped += "\n"
+	}
+	return true, os.WriteFile(path, []byte(stripped), info.Mode().Perm())
 }
 
 func stripManagedTextBlocks(content, startMarker, endMarker string) string {
@@ -1663,10 +1739,11 @@ func PrintCodexUsage() {
 }
 
 func PrintTmuxUsage() {
-	fmt.Println("Usage: az tmux <selector|install-selector>")
+	fmt.Println("Usage: az tmux <selector|install-selector|uninstall-selector>")
 	fmt.Println("Manage Azedarach tmux integration.")
 	fmt.Println("  az tmux selector")
 	fmt.Println("  az tmux install-selector [--config <path>] [--project-dir <dir>] [--key <key>] [--az-command <command>] [--verbose]")
+	fmt.Println("  az tmux uninstall-selector [--config <path>] [--verbose]")
 }
 
 func PrintSpecUsage() {
