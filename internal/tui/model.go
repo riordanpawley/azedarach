@@ -156,6 +156,7 @@ type Model struct {
 	pendingCreatedWorkspaceTaskID string
 	openCreatedTaskInWorkspace    bool
 	openSessionSelectorOnLoad     bool
+	openTaskWorkspaceOnLoadID     string
 	runtimeSignalsByTask          map[string]board.RuntimeSignals
 	runtimeSignalWorktreeByTask   map[string]string
 
@@ -236,6 +237,13 @@ type Option func(*Model)
 func WithSessionSelectorOnLoad() Option {
 	return func(m *Model) {
 		m.openSessionSelectorOnLoad = true
+	}
+}
+
+// WithOpenTaskWorkspaceOnLoad opens an issue workspace after the first task snapshot loads.
+func WithOpenTaskWorkspaceOnLoad(issueID string) Option {
+	return func(m *Model) {
+		m.openTaskWorkspaceOnLoadID = strings.TrimSpace(issueID)
 	}
 }
 
@@ -381,6 +389,39 @@ func (m *Model) applyPendingCreatedWorkspaceTask() {
 	workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
 	workspace.SyncTask(*task, m.tasks, m.pendingMutationForTask(task.ID.String()))
 	m.pendingCreatedWorkspaceTaskID = ""
+}
+
+func (m Model) openCurrentTaskWorkspace() (tea.Model, tea.Cmd) {
+	columns := m.buildColumns()
+	task, _ := m.nav.GetCurrentTask(columns)
+	if task == nil {
+		task, _ = m.getCurrentTaskAndSession()
+	}
+	if task == nil {
+		return m, nil
+	}
+	return m.openTaskWorkspaceByID(task.ID.String())
+}
+
+func (m Model) openTaskWorkspaceByID(taskID string) (tea.Model, tea.Cmd) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return m, nil
+	}
+	task, _, ok := m.taskAndSessionByID(taskID)
+	if !ok || task == nil {
+		return m, nil
+	}
+
+	workspace := overlay.NewTaskWorkspaceOverlay(*task, m.tasks, m.pendingMutationForTask(taskID), m.width, m.height)
+	workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
+	if m.daemonClient == nil {
+		return m, m.openOverlay(workspace)
+	}
+	return m, tea.Batch(
+		m.openOverlay(workspace),
+		m.refreshTaskWorkspaceInBackgroundCmd(taskID),
+	)
 }
 
 // handleKey processes keyboard input based on current mode
@@ -543,28 +584,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case keybinds.ActionOpenWorkspace: // Space - open task panel (details + actions)
-		columns := m.buildColumns()
-		task, _ := m.nav.GetCurrentTask(columns)
-		if task == nil {
-			task, _ = m.getCurrentTaskAndSession()
-		}
-		if task != nil {
-			// Resolve from authoritative task projection to avoid opening the
-			// workspace with a stale navigation-copy task payload.
-			if latestTask, _, ok := m.taskAndSessionByID(task.ID.String()); ok && latestTask != nil {
-				task = latestTask
-			}
-			workspace := overlay.NewTaskWorkspaceOverlay(*task, m.tasks, m.pendingMutationForTask(task.ID.String()), m.width, m.height)
-			workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
-			if m.daemonClient == nil {
-				return m, m.openOverlay(workspace)
-			}
-			return m, tea.Batch(
-				m.openOverlay(workspace),
-				m.refreshTaskWorkspaceInBackgroundCmd(task.ID.String()),
-			)
-		}
-		return m, nil
+		return m.openCurrentTaskWorkspace()
 
 	case keybinds.ActionEnterSearch: // Search
 		m.editor.EnterSearch()

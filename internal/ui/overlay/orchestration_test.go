@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -84,4 +85,64 @@ func TestOrchestrationOverlay_WindowSizeFitsNarrowViewport(t *testing.T) {
 
 	width, _ := overlay.Size()
 	assert.LessOrEqual(t, width, 72)
+}
+
+func TestOrchestrationOverlay_RowRenderingIsStandalone(t *testing.T) {
+	overlay := NewOrchestrationOverlay([]SessionInfo{{
+		IssueID:               "bxl",
+		TaskTitle:             "Add selector tests without booting full TUI",
+		IssueStatus:           domain.StatusInProgress,
+		State:                 domain.SessionBusy,
+		Worktree:              "/Users/riordan/prog/azedarach-bxf/worktrees/bxl",
+		HasTmuxSession:        true,
+		HasWorktree:           true,
+		GitAheadCount:         2,
+		GitBehindCount:        1,
+		HasUncommittedChanges: true,
+		GitAdditions:          5,
+		GitDeletions:          3,
+	}}, nil, nil, nil)
+
+	row := overlay.renderSession(0, overlay.sessions[0], 64)
+
+	assert.Contains(t, row, "bxl")
+	assert.Contains(t, row, "Add selector tests")
+	assert.Contains(t, row, "tmux yes")
+	assert.Contains(t, row, "worktree yes")
+	assert.Contains(t, row, "git dirty")
+	assert.NotContains(t, row, "No tmux sessions")
+}
+
+func TestOrchestrationOverlay_EnterAAndRefreshCallbacks(t *testing.T) {
+	overlay := NewOrchestrationOverlay(
+		[]SessionInfo{
+			{IssueID: "bxl", TaskTitle: "Selector tests", HasTmuxSession: true},
+			{IssueID: "bxf", TaskTitle: "Root epic", HasTmuxSession: true},
+		},
+		func(issueID string) tea.Cmd {
+			return func() tea.Msg { return "attach:" + issueID }
+		},
+		nil,
+		func() tea.Cmd {
+			return func() tea.Msg { return "refresh" }
+		},
+	)
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	require.NotNil(t, cmd)
+	assert.Equal(t, "attach:bxl", cmd())
+
+	_, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	require.NotNil(t, cmd)
+	assert.Equal(t, "attach:bxf", cmd())
+
+	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	require.NotNil(t, cmd)
+	assert.Equal(t, "refresh", cmd())
+
+	view := overlay.View()
+	if strings.Count(view, "Selector tests") != 1 {
+		t.Fatalf("view should render selector row once, got %q", view)
+	}
 }

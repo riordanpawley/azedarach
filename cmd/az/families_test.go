@@ -118,6 +118,31 @@ func TestRunTmuxCommandHelpAndDispatch(t *testing.T) {
 	}
 }
 
+func TestRunTmuxSelectorCommandWiresGlobalSelector(t *testing.T) {
+	var calls int
+	previous := runTmuxSelectorForCommand
+	runTmuxSelectorForCommand = func(_ *config.Config) {
+		calls++
+	}
+	t.Cleanup(func() {
+		runTmuxSelectorForCommand = previous
+	})
+
+	if err := runTmuxCommand(config.DefaultConfig(), []string{"selector"}); err != nil {
+		t.Fatalf("selector command error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("global selector calls = %d, want 1", calls)
+	}
+}
+
+func TestRunTmuxSelectorCommandValidatesArguments(t *testing.T) {
+	err := runTmuxCommand(config.DefaultConfig(), []string{"selector", "extra"})
+	if err == nil || !strings.Contains(err.Error(), "usage: az tmux selector") {
+		t.Fatalf("selector validation error = %v, want usage", err)
+	}
+}
+
 func TestRunDevHelpAndGateRegression(t *testing.T) {
 	helpOut := captureMainStdout(t, func() error {
 		return runDevCommand(config.DefaultConfig(), []string{"--help"})

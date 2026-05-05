@@ -17,7 +17,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
-	app "github.com/riordanpawley/azedarach/internal/tui"
 )
 
 func runNotifyCommand(cfg *config.Config, args []string) error {
@@ -302,7 +301,7 @@ func runTmuxCommand(cfg *config.Config, args []string) error {
 			cli.PrintTmuxUsage()
 			return fmt.Errorf("usage: az tmux selector")
 		}
-		runTUIWithOptions(cfg, app.WithSessionSelectorOnLoad())
+		runTmuxSelectorForCommand(cfg)
 		return nil
 	case "install-selector":
 		if len(args) > 1 && sessionHelpRequested(args[1:]...) {

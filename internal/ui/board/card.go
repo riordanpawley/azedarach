@@ -530,6 +530,11 @@ func RenderCard(task domain.Task, isCursor bool, isSelected bool, width int, s *
 	return renderCard(task, nil, isCursor, isSelected, width, nil, nil, false, s)
 }
 
+// RenderCardWithRuntimeSignals renders a task card with daemon-authored runtime metadata.
+func RenderCardWithRuntimeSignals(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool, isSelected bool, width int, s *styles.Styles) string {
+	return renderCard(task, runtimeSignals, isCursor, isSelected, width, nil, nil, false, s)
+}
+
 // CardLineFootprint returns the number of terminal lines consumed by one card.
 // Column rendering stacks cards with newline separators and uses this value as
 // the row stride for cursor/viewport math.
