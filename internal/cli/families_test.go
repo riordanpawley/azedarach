@@ -31,7 +31,7 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"dev gate <issue-id>",
 		"opencode <init|plugin>",
 		"codex <install|guard|hook>",
-		"tmux <selector|install-selector>",
+		"tmux <selector|install-selector|uninstall-selector>",
 		"spec <subcommand>",
 		"az notify idle_prompt az-123",
 		"az hooks install az-123",
@@ -47,6 +47,7 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"az codex install",
 		"az codex hook run --json pre-tool-use",
 		"az tmux install-selector",
+		"az tmux uninstall-selector",
 		"az tmux selector",
 		"az spec req list --json",
 		"az spec req create --id bfs-req-1 --title \"Restore az spec grammar\" --issue bgh",
@@ -176,6 +177,84 @@ func TestTmuxInstallSelectorCommandPreservesExistingConfigPermissions(t *testing
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("tmux config mode = %o, want 0600", got)
+	}
+}
+
+func TestTmuxUninstallSelectorCommandRemovesManagedBindingOnly(t *testing.T) {
+	projectDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), ".tmux.conf")
+
+	installOpts, err := ParseTmuxInstallSelectorArgs([]string{
+		"--config", configPath,
+		"--project-dir", projectDir,
+		"--key", "S",
+		"--az-command", "az-dev",
+	})
+	if err != nil {
+		t.Fatalf("ParseTmuxInstallSelectorArgs error: %v", err)
+	}
+	seed := "set -g mouse on\n"
+	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
+		t.Fatalf("seed tmux config: %v", err)
+	}
+	if err := TmuxInstallSelectorCommand(&Dependencies{RepoDir: projectDir}, installOpts); err != nil {
+		t.Fatalf("TmuxInstallSelectorCommand error: %v", err)
+	}
+
+	uninstallOpts, err := ParseTmuxUninstallSelectorArgs([]string{"--config", configPath})
+	if err != nil {
+		t.Fatalf("ParseTmuxUninstallSelectorArgs error: %v", err)
+	}
+	output := captureStdout(t, func() error {
+		return TmuxUninstallSelectorCommand(&Dependencies{RepoDir: projectDir}, uninstallOpts)
+	})
+	if !strings.Contains(output, "Uninstalled Azedarach tmux session selector") {
+		t.Fatalf("uninstall output = %q", output)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read tmux config: %v", err)
+	}
+	content := string(data)
+	if content != seed {
+		t.Fatalf("tmux config content = %q, want %q", content, seed)
+	}
+	if strings.Contains(content, "azedarach managed tmux session selector") {
+		t.Fatalf("managed block remained: %s", content)
+	}
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("stat tmux config: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("tmux config mode = %o, want 0600", got)
+	}
+}
+
+func TestTmuxUninstallSelectorCommandHandlesMissingManagedBinding(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), ".tmux.conf")
+	seed := "set -g status on\n"
+	if err := os.WriteFile(configPath, []byte(seed), 0o644); err != nil {
+		t.Fatalf("seed tmux config: %v", err)
+	}
+
+	opts, err := ParseTmuxUninstallSelectorArgs([]string{"--config", configPath, "--verbose"})
+	if err != nil {
+		t.Fatalf("ParseTmuxUninstallSelectorArgs error: %v", err)
+	}
+	output := captureStdout(t, func() error {
+		return TmuxUninstallSelectorCommand(&Dependencies{RepoDir: t.TempDir()}, opts)
+	})
+	if !strings.Contains(output, "is not installed") {
+		t.Fatalf("uninstall output = %q", output)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read tmux config: %v", err)
+	}
+	if string(data) != seed {
+		t.Fatalf("tmux config content changed: %q", string(data))
 	}
 }
 
