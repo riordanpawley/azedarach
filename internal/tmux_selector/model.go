@@ -299,7 +299,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, m.switchCmd(entry)
-		case " ", "o":
+		case " ", "space", "o":
 			entry, ok := m.selectedEntry()
 			if !ok {
 				return m, nil

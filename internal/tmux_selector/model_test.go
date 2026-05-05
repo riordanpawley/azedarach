@@ -53,6 +53,36 @@ func (f *fakeSwitcher) SwitchClient(_ context.Context, sessionID string) error {
 	return f.err
 }
 
+type fakeFullAzSwitcher struct {
+	hasSession bool
+	commands   []string
+}
+
+func (f *fakeFullAzSwitcher) HasSession(_ context.Context, sessionID string) (bool, error) {
+	f.commands = append(f.commands, "has "+sessionID)
+	return f.hasSession, nil
+}
+
+func (f *fakeFullAzSwitcher) NewSessionWithCommand(_ context.Context, sessionID, workdir, command string) error {
+	f.commands = append(f.commands, "new "+sessionID+" "+workdir+" "+command)
+	return nil
+}
+
+func (f *fakeFullAzSwitcher) SendKey(_ context.Context, sessionID, key string) error {
+	f.commands = append(f.commands, "key "+sessionID+" "+key)
+	return nil
+}
+
+func (f *fakeFullAzSwitcher) SendKeys(_ context.Context, sessionID, keys string) error {
+	f.commands = append(f.commands, "keys "+sessionID+" "+keys)
+	return nil
+}
+
+func (f *fakeFullAzSwitcher) SwitchClient(_ context.Context, sessionID string) error {
+	f.commands = append(f.commands, "switch "+sessionID)
+	return nil
+}
+
 func TestModelUsesFakeInventoryAndSwitchesSessionID(t *testing.T) {
 	switcher := &fakeSwitcher{}
 	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: []InventoryEntry{
@@ -81,6 +111,115 @@ func TestModelUsesFakeInventoryAndSwitchesSessionID(t *testing.T) {
 	}
 	if switcher.sessionID != "ch-two" {
 		t.Fatalf("switched session = %q, want ch-two", switcher.sessionID)
+	}
+}
+
+func TestModelOpenDetailSupportsOAndSpaceKeys(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		key  tea.KeyMsg
+	}{
+		{name: "o", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}}},
+		{name: "space rune", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}}},
+		{name: "key space", key: tea.KeyMsg{Type: tea.KeySpace}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			switcher := &fakeFullAzSwitcher{hasSession: true}
+			entries := []InventoryEntry{{
+				SessionID:   "az-one",
+				IssueID:     "one",
+				TaskTitle:   "One",
+				ProjectPath: "/tmp/project one",
+			}}
+			model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}}, WithSwitcher(switcher))
+			updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+			model = updated.(Model)
+			if cmd != nil {
+				t.Fatalf("snapshot update returned command")
+			}
+
+			_, cmd = model.Update(tt.key)
+			if cmd == nil {
+				t.Fatal("open key did not produce detail command")
+			}
+			msg, ok := cmd().(DetailOpenResultMsg)
+			if !ok {
+				t.Fatalf("open msg = %T, want DetailOpenResultMsg", msg)
+			}
+			if msg.Err != nil {
+				t.Fatalf("open detail returned error: %v", msg.Err)
+			}
+
+			want := []string{
+				"has az",
+				"key az C-c",
+				`keys az cd "/tmp/project one" && az --open-issue "one"`,
+				"switch az",
+			}
+			if got := strings.Join(switcher.commands, "\n"); got != strings.Join(want, "\n") {
+				t.Fatalf("commands:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
+			}
+		})
+	}
+}
+
+func TestModelOpenDetailCreatesFullAzSessionWhenMissing(t *testing.T) {
+	switcher := &fakeFullAzSwitcher{}
+	entries := []InventoryEntry{{
+		SessionID:   "az-two",
+		IssueID:     "two",
+		TaskTitle:   "Two",
+		ProjectPath: "/tmp/project",
+	}}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}}, WithSwitcher(switcher))
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	_, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	if cmd == nil {
+		t.Fatal("o did not produce detail command")
+	}
+	msg := cmd().(DetailOpenResultMsg)
+	if msg.Err != nil {
+		t.Fatalf("open detail returned error: %v", msg.Err)
+	}
+	want := []string{
+		"has az",
+		`new az /tmp/project cd "/tmp/project" && az --open-issue "two"`,
+		"switch az",
+	}
+	if got := strings.Join(switcher.commands, "\n"); got != strings.Join(want, "\n") {
+		t.Fatalf("commands:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
+	}
+}
+
+func TestModelOpenDetailRequiresIssueID(t *testing.T) {
+	switcher := &fakeFullAzSwitcher{hasSession: true}
+	entries := []InventoryEntry{{
+		SessionID:      "az",
+		TaskTitle:      "az",
+		HasTmuxSession: true,
+	}}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}}, WithSwitcher(switcher))
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	_, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	if cmd == nil {
+		t.Fatal("o did not produce detail command")
+	}
+	msg := cmd().(DetailOpenResultMsg)
+	if msg.Err == nil || !strings.Contains(msg.Err.Error(), "no issue id") {
+		t.Fatalf("open detail error = %v, want missing issue id", msg.Err)
+	}
+	if len(switcher.commands) != 0 {
+		t.Fatalf("commands = %v, want none", switcher.commands)
 	}
 }
 
