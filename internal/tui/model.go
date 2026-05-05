@@ -4557,6 +4557,7 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	reasons := make([]string, 0, 2)
 	sourceFiles := make([]string, 0, 8)
 	targetFiles := make([]string, 0, 8)
+	conflictFiles := make([]string, 0, 8)
 
 	statusForWorktree := func(worktree string) (daemonclient.GitStatus, error) {
 		return m.daemonClient.GitStatus(ctx, worktree)
@@ -4598,6 +4599,9 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 			if len(resp.TargetFiles) > 0 {
 				targetFiles = append(targetFiles[:0], resp.TargetFiles...)
 			}
+			if len(resp.ConflictFiles) > 0 {
+				conflictFiles = append(conflictFiles[:0], resp.ConflictFiles...)
+			}
 		}
 	}
 
@@ -4612,6 +4616,9 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 		reasons:        reasons,
 		sourceFiles:    sourceFiles,
 		targetFiles:    targetFiles,
+		conflictFiles:  conflictFiles,
+		targetRef:      targetRef,
+		sourceBranch:   sourceBranch,
 	}
 }
 
@@ -4628,8 +4635,8 @@ func (m Model) refreshMergePreflightCmd(selection overlay.MergePreflightRefreshS
 			strings.TrimSpace(selection.TargetID),
 			strings.TrimSpace(selection.SourceWorktree),
 			strings.TrimSpace(selection.TargetWorktree),
-			"",
-			"",
+			strings.TrimSpace(selection.TargetRef),
+			strings.TrimSpace(selection.SourceBranch),
 			true,
 		)
 		if preflight != nil {

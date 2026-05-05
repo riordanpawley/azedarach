@@ -240,6 +240,18 @@ type SessionCommandOptions struct {
 	PollInterval time.Duration
 }
 
+type SessionResolveConflictOptions struct {
+	IssueID       string
+	Worktree      string
+	ConflictFiles []string
+	Prompt        string
+}
+
+type BranchAgentMergeOptions struct {
+	IssueID string
+	Target  string
+}
+
 type OperationGetOptions struct {
 	OperationID  string
 	JSON         bool
@@ -448,6 +460,39 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 	return printCommandOutput(resp)
 }
 
+func SessionResolveConflictCommand(deps *Dependencies, opts SessionResolveConflictOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+
+	trimmedIssueID := strings.TrimSpace(opts.IssueID)
+	if trimmedIssueID == "" {
+		return fmt.Errorf("issue id is required")
+	}
+	issueID, err := naming.ParseIssueID(trimmedIssueID)
+	if err != nil {
+		return fmt.Errorf("invalid issue id %q: %w", opts.IssueID, err)
+	}
+
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	out, err := deps.DaemonClient.ResolveConflict(ctx, daemonclient.ResolveConflictParams{
+		IssueID:       issueID.String(),
+		Worktree:      opts.Worktree,
+		ConflictFiles: append([]string(nil), opts.ConflictFiles...),
+		Prompt:        opts.Prompt,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to resolve conflicts for %s: %w", issueID.String(), err)
+	}
+
+	fmt.Printf("Conflict resolution agent launched for %s\n", issueID.String())
+	fmt.Printf("Worktree: %s\n", out.Worktree)
+	fmt.Printf("Window: %s\n", out.WindowName)
+	return nil
+}
+
 func validateSessionIssueID(ctx context.Context, deps *Dependencies, issueID string) (domain.Task, error) {
 	trimmed := strings.TrimSpace(issueID)
 	if trimmed == "" {
@@ -544,6 +589,126 @@ func BranchMergeToBaseCommand(deps *Dependencies, issueID string) error {
 	}
 	fmt.Printf("Merged %s into %s (%s)\n", source.Branch, baseBranch, source.IssueID)
 	return nil
+}
+
+func BranchAgentMergeCommand(deps *Dependencies, opts BranchAgentMergeOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), branchMergeToBaseTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	source, err := resolveMergeToBaseSourceWorktree(ctx, deps, opts.IssueID)
+	if err != nil {
+		return err
+	}
+
+	targetID := strings.TrimSpace(opts.Target)
+	if targetID == "" {
+		targetID = "base"
+	}
+
+	targetWorktree := strings.TrimSpace(deps.RepoDir)
+	targetRef := resolveCLIBaseBranch(deps.Config)
+	agentIssueID := source.IssueID
+	agentWorktree := source.Path
+	if !isBaseMergeTarget(targetID) {
+		target, err := resolveWorktreeForIssue(ctx, deps, targetID)
+		if err != nil {
+			return err
+		}
+		targetID = target.IssueID
+		targetWorktree = target.Path
+		targetRef = "HEAD"
+		agentIssueID = target.IssueID
+		agentWorktree = target.Path
+	}
+	if strings.TrimSpace(targetWorktree) == "" {
+		return fmt.Errorf("target worktree unavailable")
+	}
+
+	preflight, err := deps.DaemonClient.GitMergePreflight(ctx, source.IssueID, source.Path, targetID, targetWorktree, targetRef, source.Branch)
+	if err != nil {
+		return fmt.Errorf("merge preflight failed: %w", err)
+	}
+	if preflight.Clean {
+		fmt.Printf("Merge preflight clean for %s -> %s; no agent needed.\n", source.IssueID, targetID)
+		if isBaseMergeTarget(targetID) {
+			fmt.Printf("Run: az branch merge %s\n", source.IssueID)
+		}
+		return nil
+	}
+
+	conflictFiles := preflight.ConflictFiles
+	if len(conflictFiles) == 0 {
+		conflictFiles = append(conflictFiles, preflight.SourceFiles...)
+		conflictFiles = append(conflictFiles, preflight.TargetFiles...)
+	}
+	prompt := buildBranchAgentMergePrompt(source, targetID, targetWorktree, targetRef, conflictFiles)
+	out, err := deps.DaemonClient.ResolveConflict(ctx, daemonclient.ResolveConflictParams{
+		IssueID:       agentIssueID,
+		Worktree:      agentWorktree,
+		ConflictFiles: append([]string(nil), conflictFiles...),
+		Prompt:        prompt,
+	})
+	if err != nil {
+		return fmt.Errorf("launch merge agent for %s -> %s: %w", source.IssueID, targetID, err)
+	}
+
+	fmt.Printf("Agent merge launched for %s -> %s\n", source.IssueID, targetID)
+	fmt.Printf("Worktree: %s\n", out.Worktree)
+	fmt.Printf("Window: %s\n", out.WindowName)
+	if len(conflictFiles) > 0 {
+		fmt.Printf("Predicted conflicts: %s\n", strings.Join(uniqueTrimmedStrings(conflictFiles), ", "))
+	}
+	return nil
+}
+
+func isBaseMergeTarget(targetID string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(targetID))
+	return normalized == "" || normalized == "base" || normalized == "main"
+}
+
+func resolveWorktreeForIssue(ctx context.Context, deps *Dependencies, issueID string) (daemonclient.Worktree, error) {
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return daemonclient.Worktree{}, fmt.Errorf("target issue id is required")
+	}
+	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
+	if err != nil {
+		return daemonclient.Worktree{}, fmt.Errorf("list daemon worktrees: %w", err)
+	}
+	for _, wt := range worktrees {
+		if naming.IssueIDsEqual(wt.IssueID, issueID) {
+			return wt, nil
+		}
+	}
+	return daemonclient.Worktree{}, fmt.Errorf("worktree not found for issue %s", issueID)
+}
+
+func buildBranchAgentMergePrompt(source daemonclient.Worktree, targetID, targetWorktree, targetRef string, conflictFiles []string) string {
+	targetID = strings.TrimSpace(targetID)
+	targetRef = strings.TrimSpace(targetRef)
+	if targetRef == "" {
+		targetRef = "target branch"
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Auto-merge the blocked preflight for %s -> %s.\n\n", source.IssueID, targetID)
+	b.WriteString("Start by running `az prime`. Inspect the predicted conflict files, perform the merge in the appropriate worktree, resolve conflicts, commit the resolution, and run focused validation.\n\n")
+	if isBaseMergeTarget(targetID) {
+		fmt.Fprintf(&b, "This preflight blocked merging source branch %s into base ref %s. Work in source issue %s at %s: merge %s into %s, resolve conflicts there, and leave the source branch clean so `az branch merge %s` can be retried.\n", source.Branch, targetRef, source.IssueID, source.Path, targetRef, source.Branch, source.IssueID)
+	} else {
+		fmt.Fprintf(&b, "This preflight blocked merging source branch %s from %s into target issue %s at %s. Work in the target worktree, merge %s, resolve conflicts there, and leave the target branch clean.\n", source.Branch, source.Path, targetID, targetWorktree, source.Branch)
+	}
+	if files := uniqueTrimmedStrings(conflictFiles); len(files) > 0 {
+		b.WriteString("\nPredicted conflict files:\n")
+		for _, file := range files {
+			fmt.Fprintf(&b, "- %s\n", file)
+		}
+	}
+	b.WriteString("\nDo not push or create a PR unless explicitly asked. Leave a concise summary of resolved files and validation results.")
+	return b.String()
 }
 
 func resolveMergeToBaseSourceWorktree(ctx context.Context, deps *Dependencies, issueID string) (daemonclient.Worktree, error) {
@@ -680,6 +845,23 @@ func dirtyFilesFromGitStatus(status daemonclient.GitStatus) []string {
 	appendUnique(status.Deleted)
 
 	sort.Strings(out)
+	return out
+}
+
+func uniqueTrimmedStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
 	return out
 }
 

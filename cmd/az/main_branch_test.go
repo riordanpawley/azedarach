@@ -22,7 +22,17 @@ func TestRunBranchCommandUnknownUsageListsMerge(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unknown command")
 	}
-	if !strings.Contains(err.Error(), "usage: az branch <merge>") {
-		t.Fatalf("err = %q, want usage with merge command", err)
+	if !strings.Contains(err.Error(), "usage: az branch <merge|agent-merge>") {
+		t.Fatalf("err = %q, want usage with branch commands", err)
+	}
+}
+
+func TestParseBranchAgentMergeArgs(t *testing.T) {
+	opts, err := parseBranchAgentMergeArgs([]string{"az-1", "--target", "az-2"})
+	if err != nil {
+		t.Fatalf("parseBranchAgentMergeArgs error = %v", err)
+	}
+	if opts.IssueID != "az-1" || opts.Target != "az-2" {
+		t.Fatalf("opts = %+v, want issue az-1 target az-2", opts)
 	}
 }

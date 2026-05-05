@@ -29,7 +29,7 @@ This directory primarily contains **developer/internal documentation**.
 - For `projection` and `hybrid`, refresh in-memory cache from durable SQLite projections, then evaluate from the refreshed cache.
 - For `tmux`, use live tmux runtime as source of truth (do not infer runtime presence from projection alone).
 - Current source-policy examples:
-- `session.start` conflict / `session.attach` target / `session.stop` kill targets: `tmux`.
+- `session.start` conflict / `session.attach` target / `session.stop` targets: `tmux`.
 - `session.recover` reconciliation: `hybrid` (projection intent + tmux runtime).
 - `task.list` freshness/session timestamps: `projection` (refresh-then-cache).
 - `runtime.reconcile` includes `invariant_sources` debug output reflecting the active source-policy matrix.
