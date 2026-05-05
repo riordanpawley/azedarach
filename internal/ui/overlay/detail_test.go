@@ -334,7 +334,8 @@ func TestDetailPanelViewShowsReachableGraphContext(t *testing.T) {
 	assert.Contains(t, view, "Descendants")
 	assert.Contains(t, view, "az-child [Blocked] Child task")
 	assert.Contains(t, view, "az-grandchild [Done] Grandchild task")
-	assert.Contains(t, view, "> az-parent [Open] Parent task")
+	assert.Contains(t, view, "< az-parent [Open] Parent task")
+	assert.Contains(t, view, "> az-child [Blocked] Child task")
 
 	panel.MoveGraphCursor(1)
 	selected, ok := panel.SelectedGraphTaskID()

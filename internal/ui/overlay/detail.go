@@ -510,10 +510,10 @@ func (d *DetailPanel) writeGraphRows(b *strings.Builder, links []taskGraphLink, 
 			continue
 		}
 		wrote = true
-		prefix := "-"
+		prefix := d.graphDirectionPrefix(direction, false)
 		style := d.styles.MenuItem
 		if i == d.graphCursor {
-			prefix = ">"
+			prefix = d.graphDirectionPrefix(direction, true)
 			style = d.styles.MenuItemActive
 		}
 		b.WriteString(style.Render(fmt.Sprintf("%s %s [%s] %s", prefix, link.Task.ID, d.formatStatus(link.Task.Status), link.Task.Title)))
@@ -521,6 +521,20 @@ func (d *DetailPanel) writeGraphRows(b *strings.Builder, links []taskGraphLink, 
 	}
 	if !wrote {
 		b.WriteString("- none\n")
+	}
+}
+
+func (d *DetailPanel) graphDirectionPrefix(direction string, selected bool) string {
+	switch direction {
+	case "ascendant":
+		return "<"
+	case "descendant":
+		return ">"
+	default:
+		if selected {
+			return ">"
+		}
+		return "-"
 	}
 }
 
