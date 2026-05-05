@@ -21,6 +21,7 @@ type DetailPanel struct {
 	mutation       *TaskMutationProgress
 	scrollY        int
 	graphCursor    int
+	graphFocused   bool
 	contentHeight  int
 	viewHeight     int
 	descViewHeight int
@@ -514,7 +515,7 @@ func (d *DetailPanel) writeGraphRows(b *strings.Builder, links []taskGraphLink, 
 		wrote = true
 		prefix := d.graphDirectionPrefix(direction, false)
 		style := d.styles.MenuItem
-		if i == d.graphCursor {
+		if d.graphFocused && i == d.graphCursor {
 			prefix = d.graphDirectionPrefix(direction, true)
 			style = d.styles.MenuItemActive
 		}

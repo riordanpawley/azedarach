@@ -14,6 +14,7 @@ type taskWorkspaceFocus int
 
 const (
 	taskWorkspaceFocusDetail taskWorkspaceFocus = iota
+	taskWorkspaceFocusGraph
 	taskWorkspaceFocusActions
 )
 
@@ -74,39 +75,49 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return w, nil
 	case tea.KeyMsg:
+		w.normalizeFocus()
 		switch msg.String() {
 		case "esc", "q":
 			return w, func() tea.Msg { return CloseOverlayMsg{} }
 		case "tab":
-			w.toggleFocus()
+			w.moveFocus(1)
 			return w, nil
-		case "[", "shift+tab":
+		case "shift+tab":
+			w.moveFocus(-1)
+			return w, nil
+		case "[":
 			if w.detail.GraphLinkCount() > 0 {
-				w.focus = taskWorkspaceFocusDetail
+				w.focus = taskWorkspaceFocusGraph
 				w.detail.MoveGraphCursor(-1)
 			}
 			return w, nil
 		case "]":
 			if w.detail.GraphLinkCount() > 0 {
-				w.focus = taskWorkspaceFocusDetail
+				w.focus = taskWorkspaceFocusGraph
 				w.detail.MoveGraphCursor(1)
 			}
 			return w, nil
 		case "enter":
-			if w.focus == taskWorkspaceFocusDetail {
+			if w.focus == taskWorkspaceFocusGraph {
 				if taskID, ok := w.detail.SelectedGraphTaskID(); ok {
 					return w, func() tea.Msg {
 						return SelectionMsg{Key: "task_workspace_open_task", Value: taskID}
 					}
 				}
-				w.focus = taskWorkspaceFocusActions
+				return w, nil
+			}
+			if w.focus == taskWorkspaceFocusDetail {
 				return w, nil
 			}
 			return w, w.actions.selectCurrentAction()
 		case "h", "left", "<":
 			if w.focus == taskWorkspaceFocusActions {
 				w.actions.moveCursorUp()
-			} else if taskID, ok := w.detail.SelectedGraphTaskIDForDirection("ascendant"); ok {
+			} else if w.focus == taskWorkspaceFocusGraph {
+				taskID, ok := w.detail.SelectedGraphTaskIDForDirection("ascendant")
+				if !ok {
+					return w, nil
+				}
 				return w, func() tea.Msg {
 					return SelectionMsg{Key: "task_workspace_open_task", Value: taskID}
 				}
@@ -115,7 +126,11 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "l", "right", ">":
 			if w.focus == taskWorkspaceFocusActions {
 				w.actions.moveCursorDown()
-			} else if taskID, ok := w.detail.SelectedGraphTaskIDForDirection("descendant"); ok {
+			} else if w.focus == taskWorkspaceFocusGraph {
+				taskID, ok := w.detail.SelectedGraphTaskIDForDirection("descendant")
+				if !ok {
+					return w, nil
+				}
 				return w, func() tea.Msg {
 					return SelectionMsg{Key: "task_workspace_open_task", Value: taskID}
 				}
@@ -124,6 +139,8 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "j", "down":
 			if w.focus == taskWorkspaceFocusActions {
 				w.actions.moveCursorDown()
+			} else if w.focus == taskWorkspaceFocusGraph && w.detail.GraphLinkCount() > 0 {
+				w.detail.MoveGraphCursor(1)
 			} else if w.detail.scrollY < w.detail.maxScroll() {
 				w.detail.scrollY++
 			}
@@ -131,6 +148,8 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "k", "up":
 			if w.focus == taskWorkspaceFocusActions {
 				w.actions.moveCursorUp()
+			} else if w.focus == taskWorkspaceFocusGraph && w.detail.GraphLinkCount() > 0 {
+				w.detail.MoveGraphCursor(-1)
 			} else if w.detail.scrollY > 0 {
 				w.detail.scrollY--
 			}
@@ -178,6 +197,7 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (w *TaskWorkspaceOverlay) View() string {
+	w.normalizeFocus()
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            w.styles,
 		width:             w.overlayWidth,
@@ -188,10 +208,11 @@ func (w *TaskWorkspaceOverlay) View() string {
 		gap:               1,
 		minLeft:           28,
 		minRight:          20,
-		leftFocused:       w.focus == taskWorkspaceFocusDetail,
+		leftFocused:       w.focus == taskWorkspaceFocusDetail || w.focus == taskWorkspaceFocusGraph,
 		rightFocused:      w.focus == taskWorkspaceFocusActions,
 		renderLeft: func(mode dialogLayoutMode, width, height int) string {
 			w.detail.viewHeight = max(4, height)
+			w.detail.graphFocused = w.focus == taskWorkspaceFocusGraph
 			if mode == dialogLayoutStacked {
 				w.detail.wrapWidth = max(4, width-4)
 			} else {
@@ -231,26 +252,63 @@ func (w *TaskWorkspaceOverlay) UsesInternalTitle() bool {
 }
 
 func (w *TaskWorkspaceOverlay) StatusBindings() []keybinds.Binding {
-	return []keybinds.Binding{
-		{Key: "j/k/↑/↓", Description: "scroll"},
-		{Key: "[/]", Description: "select relation"},
-		{Key: "h/l/←/→", Description: "open relation"},
-		{Key: "ctrl+u/d", Description: "half-page"},
-		{Key: "g/G", Description: "top/bottom"},
-		{Key: "Tab", Description: "focus"},
-		{Key: "Enter", Description: "run action"},
-		{Key: "1/2/3/4", Description: "set status"},
-		{Key: "n/p", Description: "action select"},
-		{Key: "Esc/q", Description: "close"},
+	w.normalizeFocus()
+	switch w.focus {
+	case taskWorkspaceFocusGraph:
+		return []keybinds.Binding{
+			{Key: "j/k/↑/↓", Description: "select relation"},
+			{Key: "h/l/←/→/Enter", Description: "open relation"},
+			{Key: "[/]", Description: "select relation"},
+			{Key: "Tab", Description: "focus"},
+			{Key: "1/2/3/4", Description: "set status"},
+			{Key: "Esc/q", Description: "close"},
+		}
+	case taskWorkspaceFocusActions:
+		return []keybinds.Binding{
+			{Key: "j/k/↑/↓", Description: "select action"},
+			{Key: "Enter", Description: "run action"},
+			{Key: "1/2/3/4", Description: "set status"},
+			{Key: "n/p", Description: "action select"},
+			{Key: "Tab", Description: "focus"},
+			{Key: "Esc/q", Description: "close"},
+		}
+	default:
+		return []keybinds.Binding{
+			{Key: "j/k/↑/↓", Description: "scroll"},
+			{Key: "ctrl+u/d", Description: "half-page"},
+			{Key: "g/G", Description: "top/bottom"},
+			{Key: "Tab", Description: "focus"},
+			{Key: "1/2/3/4", Description: "set status"},
+			{Key: "Esc/q", Description: "close"},
+		}
 	}
 }
 
-func (w *TaskWorkspaceOverlay) toggleFocus() {
-	if w.focus == taskWorkspaceFocusDetail {
-		w.focus = taskWorkspaceFocusActions
-		return
+func (w *TaskWorkspaceOverlay) moveFocus(delta int) {
+	foci := []taskWorkspaceFocus{taskWorkspaceFocusDetail}
+	if w.detail.GraphLinkCount() > 0 {
+		foci = append(foci, taskWorkspaceFocusGraph)
 	}
-	w.focus = taskWorkspaceFocusDetail
+	foci = append(foci, taskWorkspaceFocusActions)
+
+	index := 0
+	for i, focus := range foci {
+		if focus == w.focus {
+			index = i
+			break
+		}
+	}
+	next := (index + delta) % len(foci)
+	if next < 0 {
+		next += len(foci)
+	}
+	w.focus = foci[next]
+}
+
+func (w *TaskWorkspaceOverlay) normalizeFocus() {
+	if w.focus == taskWorkspaceFocusGraph && w.detail.GraphLinkCount() == 0 {
+		w.focus = taskWorkspaceFocusDetail
+	}
 }
 
 func (w *TaskWorkspaceOverlay) halfPageStep() int {
@@ -286,6 +344,7 @@ func (w *TaskWorkspaceOverlay) SyncTask(task domain.Task, relatedTasks []domain.
 	if len(w.actions.actions) == 0 {
 		w.actions.cursor = 0
 		w.actions.scrollOffset = 0
+		w.normalizeFocus()
 		return
 	}
 	if w.actions.cursor < 0 {
@@ -295,4 +354,5 @@ func (w *TaskWorkspaceOverlay) SyncTask(task domain.Task, relatedTasks []domain.
 		w.actions.cursor = len(w.actions.actions) - 1
 	}
 	w.actions.ensureCursorVisible()
+	w.normalizeFocus()
 }

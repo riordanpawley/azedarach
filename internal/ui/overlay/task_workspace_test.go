@@ -102,23 +102,21 @@ func TestTaskWorkspaceOverlay_DetailScrollKeybinds(t *testing.T) {
 }
 
 func TestTaskWorkspaceOverlay_StatusBindingsIncludeScroll(t *testing.T) {
+	child := domain.Task{ID: "az-child", Title: "Child", Status: domain.StatusOpen}
 	task := domain.Task{
 		ID:          "az-1",
 		Title:       "Task",
 		Status:      domain.StatusOpen,
 		Description: strings.Repeat("line\n", 50),
+		Dependencies: []domain.Dependency{
+			{ID: child.ID, Type: domain.DependencyBlocks},
+		},
 	}
-	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	overlay := NewTaskWorkspaceOverlay(task, []domain.Task{task, child}, nil, 120, 30)
 	bindings := overlay.StatusBindings()
 	joined := ""
 	for _, b := range bindings {
 		joined += b.Key + " " + b.Description + " "
-	}
-	if !strings.Contains(joined, "[/] select relation") {
-		t.Fatalf("expected status bindings to include graph selection hint, got %q", joined)
-	}
-	if !strings.Contains(joined, "open relation") {
-		t.Fatalf("expected status bindings to include graph open hint, got %q", joined)
 	}
 	if !strings.Contains(joined, "ctrl+u/d") {
 		t.Fatalf("expected status bindings to include ctrl+u/d hint, got %q", joined)
@@ -132,8 +130,24 @@ func TestTaskWorkspaceOverlay_StatusBindingsIncludeScroll(t *testing.T) {
 	if strings.Contains(joined, "Tab/h/l") {
 		t.Fatalf("expected h/l not to be advertised as pane focus switches, got %q", joined)
 	}
-	if !strings.Contains(joined, "h/l/") {
-		t.Fatalf("expected status bindings to advertise h/l graph navigation, got %q", joined)
+
+	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
+	overlay = model.(*TaskWorkspaceOverlay)
+	if overlay.focus != taskWorkspaceFocusGraph {
+		t.Fatalf("expected Tab to focus graph when links exist, got %v", overlay.focus)
+	}
+	graphJoined := ""
+	for _, b := range overlay.StatusBindings() {
+		graphJoined += b.Key + " " + b.Description + " "
+	}
+	if !strings.Contains(graphJoined, "[/] select relation") {
+		t.Fatalf("expected graph status bindings to include graph selection hint, got %q", graphJoined)
+	}
+	if !strings.Contains(graphJoined, "open relation") {
+		t.Fatalf("expected graph status bindings to include graph open hint, got %q", graphJoined)
+	}
+	if !strings.Contains(graphJoined, "1/2/3/4") {
+		t.Fatalf("expected graph status bindings to preserve exact status hint, got %q", graphJoined)
 	}
 }
 
@@ -203,7 +217,7 @@ func TestTaskWorkspaceOverlay_HJKLDoNotSwitchPaneFocus(t *testing.T) {
 	}
 }
 
-func TestTaskWorkspaceOverlay_DetailGraphUsesBracketSelectionAndHorizontalOpen(t *testing.T) {
+func TestTaskWorkspaceOverlay_GraphFocusUsesSelectionAndHorizontalOpen(t *testing.T) {
 	parentID := domain.Task{ID: "az-parent", Title: "Parent", Status: domain.StatusOpen}
 	task := domain.Task{
 		ID:       "az-current",
@@ -220,7 +234,7 @@ func TestTaskWorkspaceOverlay_DetailGraphUsesBracketSelectionAndHorizontalOpen(t
 		{ID: "az-child", Title: "Child", Status: domain.StatusOpen},
 	}
 	overlay := NewTaskWorkspaceOverlay(task, related, nil, 120, 30)
-	overlay.focus = taskWorkspaceFocusDetail
+	overlay.focus = taskWorkspaceFocusGraph
 
 	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyLeft})
 	if cmd == nil {
@@ -243,14 +257,17 @@ func TestTaskWorkspaceOverlay_DetailGraphUsesBracketSelectionAndHorizontalOpen(t
 	}
 }
 
-func TestTaskWorkspaceOverlay_StatusKeysWorkFromDetailFocus(t *testing.T) {
+func TestTaskWorkspaceOverlay_ActionShortcutsWorkFromNonActionFocus(t *testing.T) {
+	child := domain.Task{ID: "az-child", Title: "Child", Status: domain.StatusOpen}
 	task := domain.Task{
 		ID:     "az-1",
 		Title:  "Task",
 		Status: domain.StatusOpen,
+		Dependencies: []domain.Dependency{
+			{ID: child.ID, Type: domain.DependencyBlocks},
+		},
 	}
-	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
-	overlay.focus = taskWorkspaceFocusDetail
+	overlay := NewTaskWorkspaceOverlay(task, []domain.Task{task, child}, nil, 120, 30)
 
 	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
 	if cmd == nil {
@@ -262,6 +279,19 @@ func TestTaskWorkspaceOverlay_StatusKeysWorkFromDetailFocus(t *testing.T) {
 	}
 	if msg.Key != "3" {
 		t.Fatalf("selection key = %q, want 3", msg.Key)
+	}
+
+	overlay.focus = taskWorkspaceFocusGraph
+	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
+	if cmd == nil {
+		t.Fatal("expected status key command from graph focus")
+	}
+	msg, ok = cmd().(SelectionMsg)
+	if !ok {
+		t.Fatalf("command emitted %T, want SelectionMsg", cmd())
+	}
+	if msg.Key != "4" {
+		t.Fatalf("selection key = %q, want 4", msg.Key)
 	}
 }
 
@@ -282,7 +312,7 @@ func TestTaskWorkspaceOverlay_ActionsPaneHidesReservedMoveRows(t *testing.T) {
 	}
 }
 
-func TestTaskWorkspaceOverlay_EnterOnDetailOpensSelectedGraphTask(t *testing.T) {
+func TestTaskWorkspaceOverlay_EnterOnGraphFocusOpensSelectedGraphTask(t *testing.T) {
 	task := domain.Task{
 		ID:     "az-parent",
 		Title:  "Parent",
@@ -296,7 +326,7 @@ func TestTaskWorkspaceOverlay_EnterOnDetailOpensSelectedGraphTask(t *testing.T) 
 		{ID: "az-child", Title: "Child", Status: domain.StatusInProgress},
 	}
 	overlay := NewTaskWorkspaceOverlay(task, related, nil, 120, 30)
-	overlay.focus = taskWorkspaceFocusDetail
+	overlay.focus = taskWorkspaceFocusGraph
 
 	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
 	overlay = model.(*TaskWorkspaceOverlay)
