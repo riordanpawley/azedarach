@@ -17,6 +17,75 @@
       "enum": ["claude", "opencode", "codex"],
       "default": "claude"
     },
+    "issueTracker": {
+      "type": "object",
+      "description": "Canonical issue backend configuration. Use backend=local for the embedded store or backend=linear for optional two-way Linear sync.",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": ["local", "linear"],
+          "default": "local"
+        },
+        "sync": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "linear": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "type": "string",
+              "default": "linear-cli"
+            },
+            "team": {
+              "type": "string"
+            },
+            "project": {
+              "type": "string"
+            },
+            "webhooks": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "transport": {
+                  "type": "string",
+                  "enum": ["sdk", "cli"],
+                  "default": "sdk"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "port": {
+                  "type": "integer"
+                },
+                "events": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": []
+                },
+                "secret": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "git": {
       "type": "object",
       "additionalProperties": false,

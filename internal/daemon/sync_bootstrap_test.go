@@ -6,10 +6,13 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
@@ -194,5 +197,56 @@ func TestSyncBootstrapFailureDiagnosticContract(t *testing.T) {
 	}
 	if got, want := resp.Error.Message, "sync bootstrap failed: open issue store: boom"; got != want {
 		t.Fatalf("guarded error message = %q, want %q", got, want)
+	}
+}
+
+func TestDefaultSyncBootstrapOpensRegisteredProjectStores(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	baseRepo := newBootstrapTestRepo(t, "azedarach")
+	chefyRepo := newBootstrapTestRepo(t, "Chefy")
+	registry := &appconfig.ProjectsRegistry{
+		Projects: []appconfig.Project{
+			{Name: "Chefy", Path: chefyRepo},
+		},
+		DefaultProject: "azedarach",
+	}
+	if err := appconfig.SaveProjectsRegistry(registry); err != nil {
+		t.Fatalf("save projects registry: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir: baseRepo,
+			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	t.Cleanup(d.closeIssueClients)
+
+	if err := d.defaultSyncBootstrap(context.Background()); err != nil {
+		t.Fatalf("default sync bootstrap: %v", err)
+	}
+
+	assertBootstrapDBExists(t, baseRepo)
+	assertBootstrapDBExists(t, chefyRepo)
+	if got := d.resolveRepoDirForProject("Chefy"); got != chefyRepo {
+		t.Fatalf("Chefy project repo = %q, want %q", got, chefyRepo)
+	}
+}
+
+func newBootstrapTestRepo(t *testing.T, name string) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	return root
+}
+
+func assertBootstrapDBExists(t *testing.T, repoDir string) {
+	t.Helper()
+	dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Fatalf("expected bootstrap db at %s: %v", dbPath, err)
 	}
 }

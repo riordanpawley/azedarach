@@ -23,6 +23,11 @@ func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
 	assert.Equal(t, "claude", cfg.CLITool)
+	assert.Equal(t, "local", cfg.IssueTracker.Backend)
+	assert.False(t, cfg.IssueTracker.Sync.Enabled)
+	assert.Equal(t, "linear-cli", cfg.IssueTracker.Linear.Command)
+	assert.Equal(t, "sdk", cfg.IssueTracker.Linear.Webhooks.Transport)
+	assert.NotNil(t, cfg.IssueTracker.Linear.Webhooks.Events)
 	assert.Equal(t, "main", cfg.Git.BaseBranch)
 	assert.Equal(t, "worktree", cfg.Git.WorkflowMode)
 	assert.True(t, cfg.Git.ShowLineChanges)
@@ -169,6 +174,66 @@ func TestLoadConfigKeepsSessionAndWorktreeInitCommandsDistinct(t *testing.T) {
 	assert.Equal(t, []string{"worktree one"}, cfg.Worktree.InitCommands)
 }
 
+func TestLoadAndSaveConfigUsesSingleIssueTrackerBackendConfig(t *testing.T) {
+	root := t.TempDir()
+	cfgPath := writeConfigFile(t, root, `{
+  "$schema": "./config.schema.json",
+  "$version": 7,
+  "issueTracker": {
+    "backend": "linear",
+    "sync": {
+      "enabled": true
+    },
+    "linear": {
+      "team": "CHE",
+      "project": "Chefy",
+      "webhooks": {
+        "enabled": true,
+        "transport": "cli",
+        "events": ["Issue", "Comment"]
+      }
+    }
+  }
+}`)
+
+	cfg, err := LoadConfig(root)
+	require.NoError(t, err)
+	assert.Equal(t, "linear", cfg.IssueTracker.Backend)
+	assert.True(t, cfg.IssueTracker.Sync.Enabled)
+	assert.Equal(t, "linear-cli", cfg.IssueTracker.Linear.Command)
+	assert.Equal(t, "CHE", cfg.IssueTracker.Linear.Team)
+	assert.Equal(t, "Chefy", cfg.IssueTracker.Linear.Project)
+	assert.True(t, cfg.IssueTracker.Linear.Webhooks.Enabled)
+	assert.Equal(t, "cli", cfg.IssueTracker.Linear.Webhooks.Transport)
+	assert.Equal(t, []string{"Issue", "Comment"}, cfg.IssueTracker.Linear.Webhooks.Events)
+
+	require.NoError(t, SaveConfig(cfg, cfgPath))
+	data, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+	require.Contains(t, raw, "issueTracker")
+	require.NotContains(t, raw, "linear")
+	require.JSONEq(t, `{
+	  "backend": "linear",
+	  "sync": {"enabled": true},
+	  "linear": {
+	    "command": "linear-cli",
+	    "team": "CHE",
+	    "project": "Chefy",
+	    "webhooks": {
+	      "enabled": true,
+	      "transport": "cli",
+	      "url": "",
+	      "port": 0,
+	      "events": ["Issue", "Comment"],
+	      "secret": ""
+	    }
+	  }
+	}`, mustMarshalJSON(t, raw["issueTracker"]))
+}
+
 func TestLoadConfigFromNestedPathUsesWorktreeBaseConfig(t *testing.T) {
 	root := t.TempDir()
 	writeConfigFile(t, root, `{"$schema":"./config.schema.json","$version":7,"git":{"baseBranch":"release"}}`)
@@ -178,6 +243,13 @@ func TestLoadConfigFromNestedPathUsesWorktreeBaseConfig(t *testing.T) {
 	cfg, err := LoadConfig(nested)
 	require.NoError(t, err)
 	assert.Equal(t, "release", cfg.Git.BaseBranch)
+}
+
+func mustMarshalJSON(t *testing.T, value any) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	require.NoError(t, err)
+	return string(data)
 }
 
 func TestLoadConfigNoConfigReturnsDefaults(t *testing.T) {

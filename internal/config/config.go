@@ -10,19 +10,46 @@ import (
 
 // Config represents the full Azedarach configuration
 type Config struct {
-	CLITool       string          `json:"cliTool"`
-	Git           GitConfig       `json:"git"`
-	GitHooks      GitHooksConfig  `json:"githooks"`
-	Keyboard      KeyboardConfig  `json:"keyboard"`
-	Session       SessionConfig   `json:"session"`
-	PR            PRConfig        `json:"pr"`
-	Merge         MergeConfig     `json:"merge"`
-	Notifications NotifyConfig    `json:"notifications"`
-	Issues        IssuesConfig    `json:"issues"`
-	Network       NetworkConfig   `json:"network"`
-	DevServer     DevServerConfig `json:"devServer"`
-	Worktree      WorktreeConfig  `json:"worktree"`
-	Spec          SpecConfig      `json:"spec"`
+	CLITool       string             `json:"cliTool"`
+	IssueTracker  IssueTrackerConfig `json:"issueTracker"`
+	Git           GitConfig          `json:"git"`
+	GitHooks      GitHooksConfig     `json:"githooks"`
+	Keyboard      KeyboardConfig     `json:"keyboard"`
+	Session       SessionConfig      `json:"session"`
+	PR            PRConfig           `json:"pr"`
+	Merge         MergeConfig        `json:"merge"`
+	Notifications NotifyConfig       `json:"notifications"`
+	Issues        IssuesConfig       `json:"issues"`
+	Network       NetworkConfig      `json:"network"`
+	DevServer     DevServerConfig    `json:"devServer"`
+	Worktree      WorktreeConfig     `json:"worktree"`
+	Spec          SpecConfig         `json:"spec"`
+}
+
+type IssueTrackerConfig struct {
+	Backend string              `json:"backend"`
+	Sync    IssueSyncConfig     `json:"sync"`
+	Linear  LinearTrackerConfig `json:"linear"`
+}
+
+type IssueSyncConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
+type LinearTrackerConfig struct {
+	Command  string               `json:"command"`
+	Team     string               `json:"team"`
+	Project  string               `json:"project"`
+	Webhooks LinearWebhooksConfig `json:"webhooks"`
+}
+
+type LinearWebhooksConfig struct {
+	Enabled   bool     `json:"enabled"`
+	Transport string   `json:"transport"`
+	URL       string   `json:"url"`
+	Port      int      `json:"port"`
+	Events    []string `json:"events"`
+	Secret    string   `json:"secret"`
 }
 
 // GitConfig contains Git-related settings
@@ -138,6 +165,19 @@ func DefaultConfig() *Config {
 
 	return &Config{
 		CLITool: "claude",
+		IssueTracker: IssueTrackerConfig{
+			Backend: "local",
+			Sync: IssueSyncConfig{
+				Enabled: false,
+			},
+			Linear: LinearTrackerConfig{
+				Command: "linear-cli",
+				Webhooks: LinearWebhooksConfig{
+					Transport: "sdk",
+					Events:    []string{},
+				},
+			},
+		},
 		Git: GitConfig{
 			BaseBranch:           "main",
 			WorkflowMode:         "worktree",
@@ -344,6 +384,18 @@ func MergeWithDefaults(cfg *Config) *Config {
 	// Merge CLITool
 	if cfg.CLITool == "" {
 		cfg.CLITool = defaults.CLITool
+	}
+	if cfg.IssueTracker.Backend == "" {
+		cfg.IssueTracker.Backend = defaults.IssueTracker.Backend
+	}
+	if cfg.IssueTracker.Linear.Command == "" {
+		cfg.IssueTracker.Linear.Command = defaults.IssueTracker.Linear.Command
+	}
+	if cfg.IssueTracker.Linear.Webhooks.Transport == "" {
+		cfg.IssueTracker.Linear.Webhooks.Transport = defaults.IssueTracker.Linear.Webhooks.Transport
+	}
+	if cfg.IssueTracker.Linear.Webhooks.Events == nil {
+		cfg.IssueTracker.Linear.Webhooks.Events = defaults.IssueTracker.Linear.Webhooks.Events
 	}
 
 	// Merge Git config
