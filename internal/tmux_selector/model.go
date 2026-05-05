@@ -86,20 +86,17 @@ func (f SwitcherFunc) SwitchClient(ctx context.Context, sessionID string) error 
 }
 
 type DetailOpener interface {
-	OpenDetail(context.Context, string, string) error
+	OpenDetail(context.Context, InventoryEntry) error
 }
 
-type DetailOpenerFunc func(context.Context, string, string) error
+type DetailOpenerFunc func(context.Context, InventoryEntry) error
 
-func (f DetailOpenerFunc) OpenDetail(ctx context.Context, projectPath, issueID string) error {
-	return f(ctx, projectPath, issueID)
+func (f DetailOpenerFunc) OpenDetail(ctx context.Context, entry InventoryEntry) error {
+	return f(ctx, entry)
 }
 
 type fullAzSwitcher interface {
 	HasSession(context.Context, string) (bool, error)
-	NewSessionWithCommand(context.Context, string, string, string) error
-	SendKey(context.Context, string, string) error
-	SendKeys(context.Context, string, string) error
 	SwitchClient(context.Context, string) error
 }
 
@@ -524,20 +521,20 @@ func (m Model) switchCmd(entry InventoryEntry) tea.Cmd {
 
 func (m Model) openDetailCmd(entry InventoryEntry) tea.Cmd {
 	return func() tea.Msg {
-		if m.detailOpener != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			return DetailOpenResultMsg{Err: m.detailOpener.OpenDetail(ctx, entry.ProjectPath, entry.IssueID)}
-		}
 		switcher, ok := m.switcher.(fullAzSwitcher)
 		if !ok {
+			return DetailOpenResultMsg{Err: fmt.Errorf("full az tmux switcher unavailable")}
+		}
+		if m.detailOpener == nil {
 			return DetailOpenResultMsg{Err: fmt.Errorf("detail opener unavailable")}
 		}
-		return DetailOpenResultMsg{Err: openFullAzDetail(context.Background(), switcher, entry)}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return DetailOpenResultMsg{Err: openFullAzDetail(ctx, switcher, m.detailOpener, entry)}
 	}
 }
 
-func openFullAzDetail(ctx context.Context, switcher fullAzSwitcher, entry InventoryEntry) error {
+func openFullAzDetail(ctx context.Context, switcher fullAzSwitcher, opener DetailOpener, entry InventoryEntry) error {
 	issueID := strings.TrimSpace(entry.IssueID)
 	if issueID == "" {
 		issueID = entry.Task.ID.String()
@@ -552,7 +549,14 @@ func openFullAzDetail(ctx context.Context, switcher fullAzSwitcher, entry Invent
 	if !exists {
 		return fmt.Errorf("full az tmux session %q not found", defaultFullAzSession)
 	}
-	return fmt.Errorf("open selected issue in running az TUI is not implemented yet; tracked by az issue bxz")
+	entry.IssueID = issueID
+	if err := opener.OpenDetail(ctx, entry); err != nil {
+		return fmt.Errorf("request full az detail open: %w", err)
+	}
+	if err := switcher.SwitchClient(ctx, defaultFullAzSession); err != nil {
+		return fmt.Errorf("switch to full az tmux session: %w", err)
+	}
+	return nil
 }
 
 func EntriesFromTasks(tasks []domain.Task) []InventoryEntry {
