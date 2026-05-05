@@ -138,6 +138,14 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 		m.beginMutationFeedback("Commit target changes queued")
 		return m, m.commitChangesCmd("target", worktree)
+	case "merge_preflight_agent":
+		m.overlayStack.Pop()
+		selection, ok := msg.Value.(overlay.MergePreflightAgentSelection)
+		if !ok {
+			return m, nil
+		}
+		m.beginMutationFeedback(fmt.Sprintf("Agent merge queued for %s -> %s", selection.SourceID, selection.TargetID))
+		return m, m.resolveMergePreflightWithAgentCmd(selection)
 	case "merge_preflight_refresh":
 		m.overlayStack.Pop()
 		selection, ok := msg.Value.(overlay.MergePreflightRefreshSelection)

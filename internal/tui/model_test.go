@@ -3609,6 +3609,80 @@ func TestConflictDialogResolveWithAgentUsesMergeResultContext(t *testing.T) {
 	}
 }
 
+func TestMergePreflightAgentSelectionLaunchesPreflightPrompt(t *testing.T) {
+	t.Setenv("TMUX", "client")
+	m := newTestModel()
+	m.currentProject = "Chefy"
+	m.tmuxAvailable = true
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandSessionResolveConflict {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionResolveConflict)
+			}
+			var body protocol.SessionResolveConflictRequestBody
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal resolve request: %v", err)
+			}
+			if body.IssueID != "az-1" || body.Worktree != "/tmp/az-1" {
+				t.Fatalf("resolve body = %+v, want issue az-1 worktree /tmp/az-1", body)
+			}
+			if !strings.Contains(body.Prompt, "Auto-merge the blocked preflight for az-1 -> base") {
+				t.Fatalf("prompt = %q, want preflight merge context", body.Prompt)
+			}
+			if !strings.Contains(body.Prompt, "merge main into az/az-1") {
+				t.Fatalf("prompt = %q, want base-into-source instruction", body.Prompt)
+			}
+			if len(body.ConflictFiles) != 1 || body.ConflictFiles[0] != "conflict.go" {
+				t.Fatalf("conflict files = %+v, want conflict.go", body.ConflictFiles)
+			}
+			respBody, err := json.Marshal(protocol.SessionResolveConflictResponseBody{
+				ProjectID:     "Chefy",
+				IssueID:       "az-1",
+				SessionID:     "Chefy-az-1",
+				Worktree:      "/tmp/az-1",
+				WindowName:    "resolve-conflict",
+				ConflictFiles: []string{"conflict.go"},
+			})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m.daemonClient = daemonclient.New(transport)
+
+	_, cmd := m.handleSelection(overlay.SelectionMsg{
+		Key: "merge_preflight_agent",
+		Value: overlay.MergePreflightAgentSelection{
+			SourceID:       "az-1",
+			TargetID:       "base",
+			SourceWorktree: "/tmp/az-1",
+			TargetWorktree: "/repo",
+			TargetRef:      "main",
+			SourceBranch:   "az/az-1",
+			ConflictFiles:  []string{"conflict.go"},
+		},
+	})
+	if cmd == nil {
+		t.Fatal("expected resolve command")
+	}
+	msg := cmd()
+	resolved, ok := msg.(conflictResolveAgentResultMsg)
+	if !ok {
+		t.Fatalf("resolve command returned %T, want conflictResolveAgentResultMsg", msg)
+	}
+	if resolved.issueID != "az-1" || resolved.worktree != "/tmp/az-1" || resolved.windowName != "resolve-conflict" {
+		t.Fatalf("resolve result = %+v, want az-1 /tmp/az-1 resolve-conflict", resolved)
+	}
+}
+
 func TestHandleConflictResolution_ResolveWithAgentDaemonUnavailableFallsBackToManualHint(t *testing.T) {
 	t.Setenv("TMUX", "client")
 	m := newTestModel()

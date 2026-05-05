@@ -598,6 +598,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.reasons,
 			msg.sourceFiles,
 			msg.targetFiles,
+			msg.conflictFiles,
+			msg.targetRef,
+			msg.sourceBranch,
 			strings.TrimSpace(msg.targetWorktree) != "",
 		))
 
