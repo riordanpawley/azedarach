@@ -1207,6 +1207,77 @@ func TestSettingsSaveErrorKeepsOverlayOpen(t *testing.T) {
 	}
 }
 
+func TestSettingsEditorOpensCurrentProjectConfigInTmuxPopup(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/tmux-123/default,1,0")
+	t.Setenv("EDITOR", "vim")
+
+	projectDir := t.TempDir()
+	wantConfigPath := filepath.Join(projectDir, config.ConfigDirName, config.ConfigFileName)
+
+	var gotTitle, gotWidth, gotHeight, gotCommand string
+	m := newTestModel()
+	m.repoDir = projectDir
+	m.tmuxClient = mockTmuxService{
+		popupFn: func(_ context.Context, title, width, height, command string) error {
+			gotTitle = title
+			gotWidth = width
+			gotHeight = height
+			gotCommand = command
+			return nil
+		},
+	}
+	m.overlayStack.Push(overlay.NewDefaultSettingsOverlay())
+
+	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "editor"})
+	if cmd == nil {
+		t.Fatal("expected editor popup command")
+	}
+	msg, ok := cmd().(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("command message = %T, want overlay.SelectionMsg", msg)
+	}
+	if msg.Key != "editor-closed" {
+		t.Fatalf("message key = %q, want editor-closed", msg.Key)
+	}
+
+	newModel := updated.(Model)
+	if newModel.overlayStack.IsEmpty() {
+		t.Fatal("expected settings overlay to remain open until editor-closed is handled")
+	}
+	if gotTitle != "az.settings" || gotWidth != "90%" || gotHeight != "90%" {
+		t.Fatalf("popup title/size = %q %q %q, want az.settings 90%% 90%%", gotTitle, gotWidth, gotHeight)
+	}
+	if !strings.Contains(gotCommand, "cd "+shellSingleQuote(projectDir)) {
+		t.Fatalf("popup command = %q, want current project cd", gotCommand)
+	}
+	if !strings.Contains(gotCommand, shellSingleQuote(wantConfigPath)) {
+		t.Fatalf("popup command = %q, want config path %q", gotCommand, wantConfigPath)
+	}
+	if _, err := os.Stat(filepath.Dir(wantConfigPath)); err != nil {
+		t.Fatalf("expected config directory to exist: %v", err)
+	}
+}
+
+func TestSettingsEditorRequiresTmuxPopup(t *testing.T) {
+	t.Setenv("TMUX", "")
+
+	m := newTestModel()
+	m.repoDir = t.TempDir()
+	m.tmuxClient = mockTmuxService{}
+
+	_, cmd := m.handleSelection(overlay.SelectionMsg{Key: "editor"})
+	if cmd == nil {
+		t.Fatal("expected editor command")
+	}
+	msg, ok := cmd().(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("command message = %T, want overlay.SelectionMsg", msg)
+	}
+	if msg.Key != "editor-error" {
+		t.Fatalf("message key = %q, want editor-error", msg.Key)
+	}
+}
+
 func TestHalfPageScroll(t *testing.T) {
 	m := newTestModel()
 

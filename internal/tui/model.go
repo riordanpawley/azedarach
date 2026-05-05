@@ -2221,6 +2221,48 @@ func (m Model) configSourcePath() string {
 	return filepath.Join(base, config.ConfigDirName, config.ConfigFileName)
 }
 
+func (m Model) openSettingsEditorCmd() tea.Cmd {
+	configPath := m.configSourcePath()
+	projectPath := strings.TrimSpace(m.repoDir)
+	if projectPath == "" {
+		projectPath = "."
+	}
+
+	editorName := strings.TrimSpace(os.Getenv("EDITOR"))
+	if editorName == "" {
+		editorName = strings.TrimSpace(os.Getenv("VISUAL"))
+	}
+	if editorName == "" {
+		editorName = "vim"
+	}
+
+	return func() tea.Msg {
+		if strings.TrimSpace(os.Getenv("TMUX")) == "" || m.tmuxClient == nil {
+			return overlay.SelectionMsg{
+				Key:   "editor-error",
+				Value: fmt.Errorf("settings editor unavailable outside tmux; run inside tmux and retry"),
+			}
+		}
+		if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+			return overlay.SelectionMsg{
+				Key:   "editor-error",
+				Value: fmt.Errorf("prepare settings directory: %w", err),
+			}
+		}
+		popupCommand := fmt.Sprintf("cd %s && %s %s", shellSingleQuote(projectPath), shellSingleQuote(editorName), shellSingleQuote(configPath))
+		if err := m.tmuxClient.DisplayPopup(context.Background(), "az.settings", "90%", "90%", popupCommand); err != nil {
+			return overlay.SelectionMsg{
+				Key:   "editor-error",
+				Value: fmt.Errorf("open settings editor in tmux popup: %w", err),
+			}
+		}
+		return overlay.SelectionMsg{
+			Key:   "editor-closed",
+			Value: configPath,
+		}
+	}
+}
+
 func (m Model) openLogStreamCmd(logPaths ...string) tea.Cmd {
 	return func() tea.Msg {
 		paths := make([]string, 0, len(logPaths))

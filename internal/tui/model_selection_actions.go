@@ -148,6 +148,8 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			return m, m.openLogEditorCmd(path)
 		}
 		return m, nil
+	case "editor":
+		return m, m.openSettingsEditorCmd()
 	case "event-log-error":
 		if err, ok := msg.Value.(error); ok {
 			m.addToast(Toast{
