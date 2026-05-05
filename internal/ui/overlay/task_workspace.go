@@ -124,8 +124,6 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "j", "down":
 			if w.focus == taskWorkspaceFocusActions {
 				w.actions.moveCursorDown()
-			} else if w.detail.GraphLinkCount() > 0 {
-				w.detail.MoveGraphCursor(1)
 			} else if w.detail.scrollY < w.detail.maxScroll() {
 				w.detail.scrollY++
 			}
@@ -133,8 +131,6 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "k", "up":
 			if w.focus == taskWorkspaceFocusActions {
 				w.actions.moveCursorUp()
-			} else if w.detail.GraphLinkCount() > 0 {
-				w.detail.MoveGraphCursor(-1)
 			} else if w.detail.scrollY > 0 {
 				w.detail.scrollY--
 			}
@@ -236,7 +232,8 @@ func (w *TaskWorkspaceOverlay) UsesInternalTitle() bool {
 
 func (w *TaskWorkspaceOverlay) StatusBindings() []keybinds.Binding {
 	return []keybinds.Binding{
-		{Key: "j/k/↑/↓", Description: "select relation"},
+		{Key: "j/k/↑/↓", Description: "scroll"},
+		{Key: "[/]", Description: "select relation"},
 		{Key: "h/l/←/→", Description: "open relation"},
 		{Key: "ctrl+u/d", Description: "half-page"},
 		{Key: "g/G", Description: "top/bottom"},

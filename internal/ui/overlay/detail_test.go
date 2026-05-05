@@ -398,6 +398,33 @@ func TestDetailPanelScrolling(t *testing.T) {
 	assert.Greater(t, panel.scrollY, 0)
 }
 
+func TestDetailPanelScrollsWhenGraphLinksExist(t *testing.T) {
+	child := domain.Task{ID: "az-child", Title: "Child", Status: domain.StatusOpen}
+	task := domain.Task{
+		ID:          "az-parent",
+		Title:       "Parent",
+		Status:      domain.StatusOpen,
+		Description: strings.Repeat("line\n", 80),
+		Dependencies: []domain.Dependency{
+			{ID: child.ID, Type: domain.DependencyBlocks},
+		},
+	}
+	panel := NewDetailPanel(task).WithRelatedTasks([]domain.Task{task, child})
+
+	m, _ := panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	panel = m.(*DetailPanel)
+	assert.Equal(t, 1, panel.scrollY)
+	assert.Equal(t, 0, panel.graphCursor)
+
+	m, _ = panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
+	panel = m.(*DetailPanel)
+	assert.Equal(t, 1, panel.scrollY)
+
+	selected, ok := panel.SelectedGraphTaskID()
+	require.True(t, ok)
+	assert.Equal(t, child.ID.String(), selected)
+}
+
 func TestDetailPanelScrollLimits(t *testing.T) {
 	task := domain.Task{
 		ID:          "test",

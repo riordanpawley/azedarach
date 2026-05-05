@@ -98,20 +98,12 @@ func (d *DetailPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d, func() tea.Msg { return CloseOverlayMsg{} }
 
 		case "j", "down":
-			if d.GraphLinkCount() > 0 {
-				d.MoveGraphCursor(1)
-				return d, nil
-			}
 			if d.scrollY < d.maxScroll() {
 				d.scrollY++
 			}
 			return d, nil
 
 		case "k", "up":
-			if d.GraphLinkCount() > 0 {
-				d.MoveGraphCursor(-1)
-				return d, nil
-			}
 			if d.scrollY > 0 {
 				d.scrollY--
 			}
@@ -120,6 +112,16 @@ func (d *DetailPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d, d.graphNavigationCmd("ascendant")
 		case "l", "right":
 			return d, d.graphNavigationCmd("descendant")
+		case "[":
+			if d.GraphLinkCount() > 0 {
+				d.MoveGraphCursor(-1)
+			}
+			return d, nil
+		case "]":
+			if d.GraphLinkCount() > 0 {
+				d.MoveGraphCursor(1)
+			}
+			return d, nil
 		case "<":
 			return d, d.graphNavigationCmd("ascendant")
 		case ">":

@@ -52,13 +52,17 @@ func TestTaskWorkspaceOverlay_UsesFullScreen(t *testing.T) {
 }
 
 func TestTaskWorkspaceOverlay_DetailScrollKeybinds(t *testing.T) {
+	child := domain.Task{ID: "az-child", Title: "Child", Status: domain.StatusOpen}
 	task := domain.Task{
 		ID:          "az-1",
 		Title:       "Task",
 		Status:      domain.StatusOpen,
 		Description: strings.Repeat("line\n", 200),
+		Dependencies: []domain.Dependency{
+			{ID: child.ID, Type: domain.DependencyBlocks},
+		},
 	}
-	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	overlay := NewTaskWorkspaceOverlay(task, []domain.Task{task, child}, nil, 120, 30)
 	overlay.focus = taskWorkspaceFocusDetail
 
 	initial := overlay.detail.scrollY
@@ -110,7 +114,7 @@ func TestTaskWorkspaceOverlay_StatusBindingsIncludeScroll(t *testing.T) {
 	for _, b := range bindings {
 		joined += b.Key + " " + b.Description + " "
 	}
-	if !strings.Contains(joined, "select relation") {
+	if !strings.Contains(joined, "[/] select relation") {
 		t.Fatalf("expected status bindings to include graph selection hint, got %q", joined)
 	}
 	if !strings.Contains(joined, "open relation") {
@@ -199,7 +203,7 @@ func TestTaskWorkspaceOverlay_HJKLDoNotSwitchPaneFocus(t *testing.T) {
 	}
 }
 
-func TestTaskWorkspaceOverlay_DetailGraphUsesVerticalSelectionAndHorizontalOpen(t *testing.T) {
+func TestTaskWorkspaceOverlay_DetailGraphUsesBracketSelectionAndHorizontalOpen(t *testing.T) {
 	parentID := domain.Task{ID: "az-parent", Title: "Parent", Status: domain.StatusOpen}
 	task := domain.Task{
 		ID:       "az-current",
@@ -227,7 +231,7 @@ func TestTaskWorkspaceOverlay_DetailGraphUsesVerticalSelectionAndHorizontalOpen(
 		t.Fatalf("left command emitted %+v, want az-parent graph selection", msg)
 	}
 
-	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
 	overlay = model.(*TaskWorkspaceOverlay)
 	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyRight})
 	if cmd == nil {
