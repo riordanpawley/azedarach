@@ -3854,6 +3854,20 @@ func (m *Model) markTaskOperationPending(taskID, action, operationID string, sta
 	m.pendingStatuses[key] = current
 }
 
+func (m *Model) beginTaskMutationFeedback(taskID, action, label string) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return
+	}
+	m.markTaskOperationPending(taskID, action, "", protocol.OperationStateQueued)
+	m.syncTaskWorkspaceOverlay()
+	m.addToast(Toast{
+		Level:   ToastInfo,
+		Message: fmt.Sprintf("%s queued for %s", strings.TrimSpace(label), taskID),
+		Expires: time.Now().Add(3 * time.Second),
+	})
+}
+
 func (m *Model) clearPendingTaskStatus(taskID string) {
 	if len(m.pendingStatuses) == 0 {
 		return

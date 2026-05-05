@@ -300,15 +300,19 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	// Session actions
 	case "s":
 		// Start tmux session only; do not launch work automatically.
+		m.beginTaskMutationFeedback(task.ID.String(), "session_start", "Session start")
 		return m, m.startSessionCmd(task.ID.String(), m.resolveBaseBranch(), false, false)
 	case "S":
 		// Start session directly without origin/base selection prompt.
+		m.beginTaskMutationFeedback(task.ID.String(), "session_start", "Session start")
 		return m, m.startSessionCmd(task.ID.String(), m.resolveBaseBranch(), false, true)
 	case "!":
 		// Start session with dangerous skip-permissions mode.
+		m.beginTaskMutationFeedback(task.ID.String(), "session_start", "Session start")
 		return m, m.startSessionCmd(task.ID.String(), m.resolveBaseBranch(), true, true)
 	case "session_origin":
 		if originMsg, ok := msg.Value.(overlay.MergeTargetSelectedMsg); ok {
+			m.beginTaskMutationFeedback(task.ID.String(), "session_start", "Session start")
 			return m, m.startSessionCmd(task.ID.String(), m.originBranchForSelection(originMsg.SourceID), false, true)
 		}
 		return m, nil
@@ -323,6 +327,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		})
 	case "x":
 		// Delegate stop decision to daemon authority; projection can be stale.
+		m.beginTaskMutationFeedback(task.ID.String(), "session_stop", "Session stop")
 		return m, m.stopSessionCmd(task.ID.String())
 	case "R":
 		// TODO: Resume session

@@ -4475,6 +4475,62 @@ func TestPendingMutationForTaskBuildsOverlayProgress(t *testing.T) {
 	}
 }
 
+func TestHandleSelectionSessionMutationsShowImmediatePendingFeedback(t *testing.T) {
+	tests := []struct {
+		name       string
+		key        string
+		wantAction string
+		wantToast  string
+	}{
+		{name: "start tmux only", key: "s", wantAction: "session_start", wantToast: "Session start queued for az-1"},
+		{name: "start work", key: "S", wantAction: "session_start", wantToast: "Session start queued for az-1"},
+		{name: "start yolo", key: "!", wantAction: "session_start", wantToast: "Session start queued for az-1"},
+		{name: "stop", key: "x", wantAction: "session_stop", wantToast: "Session stop queued for az-1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModel()
+			m.nav.SelectTask("az-1", 0)
+
+			updatedAny, cmd := m.handleSelection(overlay.SelectionMsg{Key: tt.key})
+			if cmd == nil {
+				t.Fatal("expected session mutation command")
+			}
+			updated := updatedAny.(Model)
+
+			pending, ok := updated.pendingStatuses[taskIDKey("az-1")]
+			if !ok {
+				t.Fatal("expected immediate pending mutation marker")
+			}
+			if pending.action != tt.wantAction {
+				t.Fatalf("pending action = %q, want %q", pending.action, tt.wantAction)
+			}
+			if pending.state != protocol.OperationStateQueued {
+				t.Fatalf("pending state = %q, want %q", pending.state, protocol.OperationStateQueued)
+			}
+			if pending.operationID != "" {
+				t.Fatalf("pending operation id = %q, want empty before daemon response", pending.operationID)
+			}
+
+			signals := updated.runtimeSignalsForBoard()
+			if got := signals["az-1"].PendingOperationState; got != string(protocol.OperationStateQueued) {
+				t.Fatalf("board pending state = %q, want %q", got, protocol.OperationStateQueued)
+			}
+			progress := updated.pendingMutationForTask("az-1")
+			if progress == nil || progress.State != string(protocol.OperationStateQueued) {
+				t.Fatalf("pending mutation progress = %+v, want queued", progress)
+			}
+			if len(updated.toasts) == 0 {
+				t.Fatal("expected immediate feedback toast")
+			}
+			if got := updated.toasts[len(updated.toasts)-1].Message; got != tt.wantToast {
+				t.Fatalf("toast = %q, want %q", got, tt.wantToast)
+			}
+		})
+	}
+}
+
 func TestSessionStartedPendingMarksBoardAndDetailProgress(t *testing.T) {
 	m := newTestModel()
 	m.tasks = []domain.Task{
