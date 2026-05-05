@@ -2529,6 +2529,7 @@ type worktreeCleanupConfirmPromptMsg struct {
 	taskID       string
 	deletedTask  bool
 	force        bool
+	task         domain.Task
 	freshness    protocol.TaskListFreshness
 	checkedAt    time.Time
 	hasSnapshot  bool
@@ -2558,13 +2559,14 @@ type bulkCleanupRisk struct {
 }
 
 type bulkCleanupPreflightMsg struct {
-	taskIDs      []string
-	deletedTasks bool
-	risks        []bulkCleanupRisk
-	freshness    protocol.TaskListFreshness
-	checkedAt    time.Time
-	reconcileErr error
-	snapshotErr  error
+	taskIDs        []string
+	deletedTasks   bool
+	refreshedTasks []domain.Task
+	risks          []bulkCleanupRisk
+	freshness      protocol.TaskListFreshness
+	checkedAt      time.Time
+	reconcileErr   error
+	snapshotErr    error
 }
 
 type pendingBulkCleanupConfirmation struct {
@@ -2726,6 +2728,7 @@ func (m Model) requestWorktreeCleanupConfirmationCmd(taskID string, deleteTask b
 			if taskIDKey(task.ID.String()) != taskIDKey(taskID) {
 				continue
 			}
+			msg.task = task
 			msg.hasTask = true
 			msg.hasWorktree = task.HasWorktree
 			msg.ahead = task.GitAheadCount
@@ -3485,6 +3488,7 @@ func (m Model) bulkCleanupPreflightCmd(taskIDs []string, deleteTask bool) tea.Cm
 			if !ok {
 				continue
 			}
+			msg.refreshedTasks = append(msg.refreshedTasks, task)
 			if !task.HasUncommittedChanges && task.GitAheadCount <= 0 {
 				continue
 			}
@@ -3889,6 +3893,43 @@ func (m *Model) syncTaskWorkspaceOverlay() {
 
 	workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
 	workspace.SyncTask(taskView, m.tasks, m.pendingMutationForTask(taskID))
+}
+
+func (m *Model) applySingleTaskWorkspaceRefresh(taskID string, refreshed domain.Task) (domain.Task, bool) {
+	return m.applyTaskRefresh(taskID, refreshed, true)
+}
+
+func (m *Model) applyTaskRefreshes(refreshed []domain.Task) {
+	updated := false
+	for _, task := range refreshed {
+		if _, ok := m.applyTaskRefresh(task.ID.String(), task, false); ok {
+			updated = true
+		}
+	}
+	if updated {
+		m.syncProjectionIndexesFromTasks()
+		m.reconcileCursorAfterIssuesRefresh()
+	}
+}
+
+func (m *Model) applyTaskRefresh(taskID string, refreshed domain.Task, syncAfter bool) (domain.Task, bool) {
+	key := taskIDKey(taskID)
+	if key == "" {
+		return domain.Task{}, false
+	}
+	for i := range m.tasks {
+		if taskIDKey(m.tasks[i].ID.String()) != key {
+			continue
+		}
+		m.tasks[i] = refreshed
+		m.tasks[i].Session = cloneSession(m.tasks[i].Session)
+		if syncAfter {
+			m.syncProjectionIndexesFromTasks()
+			m.reconcileCursorAfterIssuesRefresh()
+		}
+		return m.tasks[i], true
+	}
+	return domain.Task{}, false
 }
 
 func (m *Model) applyPendingStatusOverlays() {
@@ -4663,17 +4704,30 @@ func (m Model) getDevServerInfo(issueID string) []overlay.DevServerInfo {
 	}}
 }
 
+type devServerResultMsg struct {
+	issueID string
+	server  overlay.DevServerInfo
+	err     error
+}
+
 func (m Model) toggleDevServer(serverID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if m.daemonClient == nil {
-			return sessionErrorMsg{issueID: serverID, err: fmt.Errorf("daemon client unavailable")}
+			return devServerResultMsg{issueID: serverID, err: fmt.Errorf("daemon client unavailable")}
 		}
-		if _, err := m.daemonClient.ToggleDevServer(ctx, serverID); err != nil {
-			return sessionErrorMsg{issueID: serverID, err: err}
+		srv, err := m.daemonClient.ToggleDevServer(ctx, serverID)
+		if err != nil {
+			return devServerResultMsg{issueID: serverID, err: err}
 		}
-		return nil
+		return devServerResultMsg{issueID: serverID, server: overlay.DevServerInfo{
+			ID:     srv.ID,
+			Name:   srv.Name,
+			Port:   srv.Port,
+			Status: srv.Status,
+			Uptime: srv.Uptime,
+		}}
 	}
 }
 
@@ -4686,12 +4740,19 @@ func (m Model) restartDevServer(serverID string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if m.daemonClient == nil {
-			return sessionErrorMsg{issueID: serverID, err: fmt.Errorf("daemon client unavailable")}
+			return devServerResultMsg{issueID: serverID, err: fmt.Errorf("daemon client unavailable")}
 		}
-		if _, err := m.daemonClient.RestartDevServer(ctx, serverID); err != nil {
-			return sessionErrorMsg{issueID: serverID, err: err}
+		srv, err := m.daemonClient.RestartDevServer(ctx, serverID)
+		if err != nil {
+			return devServerResultMsg{issueID: serverID, err: err}
 		}
-		return nil
+		return devServerResultMsg{issueID: serverID, server: overlay.DevServerInfo{
+			ID:     srv.ID,
+			Name:   srv.Name,
+			Port:   srv.Port,
+			Status: srv.Status,
+			Uptime: srv.Uptime,
+		}}
 	}
 }
 

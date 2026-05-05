@@ -115,7 +115,8 @@ func (m *ActionMenu) buildActions() []Action {
 		Action{Key: "M", Label: "Abort merge", Enabled: hasWorktree},
 		Action{Key: "H", Label: "Open Helix", Enabled: hasWorktree},
 		Action{Key: "i", Label: "Attachments", Enabled: true},
-		Action{Key: "r", Label: "Dev servers", Enabled: true},
+		Action{Key: "r", Label: "Refresh issue", Enabled: true},
+		Action{Key: "V", Label: "Dev servers", Enabled: true},
 		Action{Key: "f", Label: "Show diff", Enabled: hasWorktree},
 		Action{Key: "w", Label: "Cleanup worktree", Enabled: hasIssueScopedCleanupTarget},
 		Action{Key: "W", Label: "Delete task + cleanup worktree", Enabled: hasIssueScopedCleanupTarget},
@@ -319,6 +320,8 @@ func (m *ActionMenu) StatusBindings() []keybinds.Binding {
 	return []keybinds.Binding{
 		{Key: "j/k/↑/↓", Description: "move"},
 		{Key: "Enter", Description: "run action"},
+		{Key: "r", Description: "refresh issue"},
+		{Key: "V", Description: "dev servers"},
 		{Key: "1/2/3/4", Description: "set status"},
 		{Key: "h/l", Description: "move status"},
 		{Key: "Esc/q", Description: "close"},

@@ -650,12 +650,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !ok || taskIDKey(currentWorkspace.TaskID()) != taskIDKey(msg.taskID) {
 			return m, nil
 		}
-		tasks := msg.tasks
-		if len(tasks) == 0 {
+		task, ok := m.applySingleTaskWorkspaceRefresh(msg.taskID, msg.task)
+		if !ok {
 			return m, nil
 		}
+
 		m.overlayStack.Pop()
-		workspace := overlay.NewTaskWorkspaceOverlay(msg.task, tasks, m.pendingMutationForTask(msg.taskID), m.width, m.height)
+		workspace := overlay.NewTaskWorkspaceOverlay(task, m.tasks, m.pendingMutationForTask(msg.taskID), m.width, m.height)
 		if !msg.lastCheckedAt.IsZero() && msg.freshness.Valid() {
 			workspace.SyncSnapshotFreshness(msg.lastCheckedAt, msg.freshness)
 		} else {
@@ -1011,6 +1012,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		return m, nil
 
+	case devServerResultMsg:
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Dev server update failed: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		if devOverlay, ok := m.overlayStack.Current().(*overlay.DevServerOverlay); ok {
+			devOverlay.SyncServer(msg.server)
+		}
+		m.addToast(Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Dev server %s: %s", msg.server.Name, msg.server.Status),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+
 	case openPROverlayResultMsg:
 		if msg.err != nil {
 			m.addToast(Toast{
@@ -1089,6 +1109,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadIssuesCmd()
 
 	case worktreeCleanupConfirmPromptMsg:
+		if msg.hasTask {
+			m.applySingleTaskWorkspaceRefresh(msg.taskID, msg.task)
+		}
 		m.pendingCleanup = &pendingWorktreeCleanupConfirmation{
 			taskID:      msg.taskID,
 			deletedTask: msg.deletedTask,
@@ -1108,6 +1131,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.openOverlay(confirm)
 
 	case bulkCleanupPreflightMsg:
+		m.applyTaskRefreshes(msg.refreshedTasks)
 		if len(msg.risks) == 0 && msg.snapshotErr == nil {
 			return m, m.bulkCleanupWorktreeCmd(msg.taskIDs, msg.deletedTasks)
 		}

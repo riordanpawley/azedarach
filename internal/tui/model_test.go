@@ -3779,6 +3779,66 @@ func TestDaemonSessionUpdatedEventAllowsImmediateAttachFromWorkspace(t *testing.
 	}
 }
 
+func TestDevServerResultUpdatesOpenOverlay(t *testing.T) {
+	m := newTestModel()
+	m.overlayStack.Push(overlay.NewDevServerOverlay(
+		[]overlay.DevServerInfo{{
+			ID:     "az-1",
+			Name:   "web",
+			Port:   3000,
+			Status: "stopped",
+		}},
+		"az-1",
+		nil,
+		nil,
+		nil,
+		nil,
+	))
+
+	updatedAny, _ := m.Update(devServerResultMsg{
+		issueID: "az-1",
+		server: overlay.DevServerInfo{
+			ID:     "az-1",
+			Name:   "web",
+			Port:   3000,
+			Status: "running",
+			Uptime: 2 * time.Minute,
+		},
+	})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+
+	current, ok := updated.overlayStack.Current().(*overlay.DevServerOverlay)
+	if !ok {
+		t.Fatalf("current overlay = %T, want DevServerOverlay", updated.overlayStack.Current())
+	}
+	view := current.View()
+	if !strings.Contains(view, "●") || !strings.Contains(view, "2m") {
+		t.Fatalf("devserver overlay view = %q, want running status and uptime", view)
+	}
+}
+
+func TestHandleSelectionVOpensDevServerOverlay(t *testing.T) {
+	m := newTestModel()
+	task := m.tasks[0]
+	m.nav.SelectTask(task.ID.String(), 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(task, nil, nil, 120, 30))
+
+	updatedAny, cmd := m.handleSelection(overlay.SelectionMsg{Key: "V"})
+	if cmd == nil {
+		t.Fatal("expected dev server overlay command")
+	}
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if _, ok := updated.overlayStack.Current().(*overlay.DevServerOverlay); !ok {
+		t.Fatalf("current overlay = %T, want DevServerOverlay", updated.overlayStack.Current())
+	}
+}
+
 func TestHandleSelection_AttachFromTaskWorkspaceKeepsOverlayOpen(t *testing.T) {
 	m := newTestModel()
 	task := m.tasks[0]

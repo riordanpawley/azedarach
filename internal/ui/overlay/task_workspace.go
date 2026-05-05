@@ -202,6 +202,8 @@ func (w *TaskWorkspaceOverlay) StatusBindings() []keybinds.Binding {
 		{Key: "g/G", Description: "top/bottom"},
 		{Key: "Tab/h/l", Description: "focus"},
 		{Key: "Enter", Description: "run action"},
+		{Key: "r", Description: "refresh issue"},
+		{Key: "V", Description: "dev servers"},
 		{Key: "1/2/3/4", Description: "set status"},
 		{Key: "n/p", Description: "action up/down"},
 		{Key: "Esc/q", Description: "close"},
