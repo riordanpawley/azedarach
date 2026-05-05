@@ -35,6 +35,8 @@ func TestRuntimeProjectionSnapshotPayloadJSONShapeIsDeterministic(t *testing.T) 
 				},
 				Git: RuntimeGitProjection{
 					HasUncommittedChanges: true,
+					HasConflicts:          true,
+					ConflictFiles:         []string{"conflicted.go"},
 					GitAdditions:          7,
 					GitDeletions:          3,
 					GitAheadCount:         2,
@@ -67,7 +69,7 @@ func TestRuntimeProjectionSnapshotPayloadJSONShapeIsDeterministic(t *testing.T) 
 	if err != nil {
 		t.Fatalf("marshal runtime projection snapshot: %v", err)
 	}
-	want := `{"schema_version":1,"protocol_version":3,"snapshot_revision":11,"project_id":"proj-1","projections":[{"project_id":"proj-1","issue_id":"az-42","worktree":{"exists":true,"path":"/tmp/repo-az-42","branch":"riordan/az-42/task","healthy":true,"git_status_updated_at":"2026-04-01T08:05:00.654321Z"},"git":{"has_uncommitted_changes":true,"git_additions":7,"git_deletions":3,"git_ahead_count":2,"git_behind_count":1,"active_operation":{"operation_id":"op-123","state":"running","progress_percent":45,"message":"syncing runtime projection"}},"session":{"has_session":true,"session_id":"sess-42","state":"attached","started_at":"2026-04-01T08:00:00.123456Z","updated_at":"2026-04-01T08:05:00.654321Z","worktree":"/tmp/repo-az-42"},"agent":{"status":"attached","session_id":"sess-42","updated_at":"2026-04-01T08:05:00.654321Z"}}]}`
+	want := `{"schema_version":1,"protocol_version":3,"snapshot_revision":11,"project_id":"proj-1","projections":[{"project_id":"proj-1","issue_id":"az-42","worktree":{"exists":true,"path":"/tmp/repo-az-42","branch":"riordan/az-42/task","healthy":true,"git_status_updated_at":"2026-04-01T08:05:00.654321Z"},"git":{"has_uncommitted_changes":true,"has_conflicts":true,"conflict_files":["conflicted.go"],"git_additions":7,"git_deletions":3,"git_ahead_count":2,"git_behind_count":1,"active_operation":{"operation_id":"op-123","state":"running","progress_percent":45,"message":"syncing runtime projection"}},"session":{"has_session":true,"session_id":"sess-42","state":"attached","started_at":"2026-04-01T08:00:00.123456Z","updated_at":"2026-04-01T08:05:00.654321Z","worktree":"/tmp/repo-az-42"},"agent":{"status":"attached","session_id":"sess-42","updated_at":"2026-04-01T08:05:00.654321Z"}}]}`
 	if string(got) != want {
 		t.Fatalf("json = %s, want %s", string(got), want)
 	}

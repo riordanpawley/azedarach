@@ -30,6 +30,8 @@ type RuntimeSignals struct {
 	GitAheadCount            int
 	GitBehindCount           int
 	HasUncommittedChanges    bool
+	HasConflicts             bool
+	ConflictFiles            []string
 	GitAdditions             int
 	GitDeletions             int
 	PendingOperationState    string
@@ -367,6 +369,9 @@ func renderRuntimeSignals(signals *RuntimeSignals, s *styles.Styles) string {
 	if pendingToken := renderPendingOperationToken(signals.PendingOperationState, signals.PendingOperationPercent, false); pendingToken != "" {
 		parts = append(parts, renderRuntimeSignalToken(pendingToken, styles.Mauve, s))
 	}
+	if signals.HasConflicts {
+		parts = append(parts, renderRuntimeSignalToken("conflict", styles.Red, s))
+	}
 	if signals.GitAheadCount > 0 {
 		parts = append(parts, renderRuntimeSignalToken(fmt.Sprintf("↑%d", signals.GitAheadCount), styles.Green, s))
 	}
@@ -407,6 +412,9 @@ func renderRuntimeSignalsCompact(signals *RuntimeSignals, s *styles.Styles) stri
 	}
 	if pendingToken := renderPendingOperationToken(signals.PendingOperationState, signals.PendingOperationPercent, true); pendingToken != "" {
 		parts = append(parts, renderRuntimeSignalToken(pendingToken, styles.Mauve, s))
+	}
+	if signals.HasConflicts {
+		parts = append(parts, renderRuntimeSignalToken("C!", styles.Red, s))
 	}
 
 	hasChanges := signals.HasUncommittedChanges || signals.GitAdditions > 0 || signals.GitDeletions > 0

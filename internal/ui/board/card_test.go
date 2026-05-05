@@ -785,6 +785,7 @@ func TestRenderRuntimeSignals(t *testing.T) {
 			GitAheadCount:            1,
 			GitBehindCount:           2,
 			HasUncommittedChanges:    true,
+			HasConflicts:             true,
 			GitAdditions:             10,
 			GitDeletions:             3,
 			PendingOperationState:    "queued",
@@ -797,6 +798,7 @@ func TestRenderRuntimeSignals(t *testing.T) {
 			!strings.Contains(got, "M:queued(25%)") ||
 			!strings.Contains(got, "↑1") ||
 			!strings.Contains(got, "↓2") ||
+			!strings.Contains(got, "conflict") ||
 			!strings.Contains(got, "✎") ||
 			!strings.Contains(got, "+10/-3") {
 			t.Fatalf("renderRuntimeSignals(...) = %q, missing expected token(s)", got)
@@ -829,6 +831,7 @@ func TestRenderRuntimeSignalsCompact(t *testing.T) {
 			HasDescendantTmuxSession: true,
 			HasWorktree:              true,
 			HasUncommittedChanges:    true,
+			HasConflicts:             true,
 			GitAdditions:             10,
 			GitDeletions:             3,
 			GitBehindCount:           4,
@@ -836,7 +839,7 @@ func TestRenderRuntimeSignalsCompact(t *testing.T) {
 			PendingOperationPercent:  50,
 		}
 		got := stripANSI(renderRuntimeSignalsCompact(signals, styles.New()))
-		if !strings.Contains(got, "T") || !strings.Contains(got, "Td") || !strings.Contains(got, worktreeToken) || !strings.Contains(got, "M:R50") || !strings.Contains(got, "G*↓4") {
+		if !strings.Contains(got, "T") || !strings.Contains(got, "Td") || !strings.Contains(got, worktreeToken) || !strings.Contains(got, "M:R50") || !strings.Contains(got, "C!") || !strings.Contains(got, "G*↓4") {
 			t.Fatalf("renderRuntimeSignalsCompact(...) = %q, missing expected compact token(s)", got)
 		}
 		if strings.Contains(got, "+10/-3") {

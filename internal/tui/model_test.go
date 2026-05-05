@@ -19,6 +19,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
+	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/testprofile"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
@@ -1092,6 +1093,27 @@ func TestActionSelectionCOpensCreateOverlay(t *testing.T) {
 	current := newModel.overlayStack.Current()
 	if _, ok := current.(*overlay.CreateTaskOverlay); !ok {
 		t.Fatalf("expected CreateTaskOverlay from action selection c, got %T", current)
+	}
+}
+
+func TestTaskWorkspaceCreateChildKeepsWorkspaceBehindForm(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+	parent := domain.Task{ID: "az-1", Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask}
+	m.tasks = []domain.Task{parent}
+	m.nav.SelectTask(parent.ID.String(), 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(parent, m.tasks, nil, 120, 30))
+
+	result, _ := m.handleSelection(overlay.SelectionMsg{Key: "c"})
+	newModel := result.(Model)
+
+	current := newModel.overlayStack.Current()
+	if _, ok := current.(*overlay.CreateTaskOverlay); !ok {
+		t.Fatalf("expected create overlay on top, got %T", current)
+	}
+	newModel.overlayStack.Pop()
+	if _, ok := newModel.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
+		t.Fatalf("expected task workspace to remain underneath create overlay, got %T", newModel.overlayStack.Current())
 	}
 }
 
@@ -2315,6 +2337,48 @@ func TestTaskCreatedResultSelectsNewTaskAfterRefresh(t *testing.T) {
 	}
 }
 
+func TestTaskCreatedResultOpensChildInWorkspaceAfterRefresh(t *testing.T) {
+	m := newTestModel()
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	parent := domain.Task{ID: parentID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask}
+	m.tasks = []domain.Task{parent}
+	m.nav.SelectTask(parentID.String(), 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(parent, m.tasks, nil, 120, 30))
+	m.openCreatedTaskInWorkspace = true
+
+	createdResult, _ := m.Update(taskCreatedResultMsg{
+		taskID:   childID.String(),
+		err:      nil,
+		isUpdate: false,
+	})
+	createdModel := createdResult.(Model)
+	if createdModel.pendingCreatedWorkspaceTaskID != childID.String() {
+		t.Fatalf("pendingCreatedWorkspaceTaskID = %q, want %q", createdModel.pendingCreatedWorkspaceTaskID, childID)
+	}
+
+	refreshedResult, _ := createdModel.Update(issuesLoadedMsg{
+		tasks: []domain.Task{
+			parent,
+			{ID: childID, Title: "Child", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID},
+		},
+		revision: 42,
+	})
+	refreshedModel := refreshedResult.(Model)
+
+	current := refreshedModel.overlayStack.Current()
+	workspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace to remain open, got %T", current)
+	}
+	if got := workspace.TaskID(); got != childID.String() {
+		t.Fatalf("workspace task ID = %q, want %q", got, childID)
+	}
+	if refreshedModel.pendingCreatedWorkspaceTaskID != "" {
+		t.Fatalf("pendingCreatedWorkspaceTaskID = %q, want cleared state", refreshedModel.pendingCreatedWorkspaceTaskID)
+	}
+}
+
 func TestTaskCreatedResultSelectsTaskAlreadyAppliedFromEvent(t *testing.T) {
 	m := newTestModel()
 	m.tasks = []domain.Task{
@@ -2771,6 +2835,47 @@ func TestSpaceWorkspaceUsesVisibleFilteredTaskWhenCursorTaskIDIsHidden(t *testin
 	}
 	if got := taskWorkspace.TaskID(); got != "az-visible" {
 		t.Fatalf("workspace task ID = %q, want %q", got, "az-visible")
+	}
+}
+
+func TestTaskWorkspaceGraphNavigationOpensRelatedTask(t *testing.T) {
+	m := newTestModel()
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	m.tasks = []domain.Task{
+		{
+			ID:     parentID,
+			Title:  "Parent task",
+			Status: domain.StatusOpen,
+			Dependencies: []domain.Dependency{
+				{ID: childID, Type: domain.DependencyBlocks},
+			},
+		},
+		{
+			ID:     childID,
+			Title:  "Child task",
+			Status: domain.StatusInProgress,
+		},
+	}
+	m.nav.SelectTask(parentID.String(), 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30))
+
+	updated, _ := m.handleSelection(overlay.SelectionMsg{
+		Key:   "task_workspace_open_task",
+		Value: childID.String(),
+	})
+	next := updated.(Model)
+
+	current := next.overlayStack.Current()
+	workspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace to remain open, got %T", current)
+	}
+	if got := workspace.TaskID(); got != childID.String() {
+		t.Fatalf("workspace task ID = %q, want %q", got, childID)
+	}
+	if view := workspace.View(); !strings.Contains(view, "Child task") {
+		t.Fatalf("workspace did not render selected child task, got %q", view)
 	}
 }
 
@@ -3329,24 +3434,9 @@ func TestTmuxActionsDegradeOutsideTmux(t *testing.T) {
 		t.Fatalf("requests = %v", transport.requests)
 	}
 
-	m.tasks[0].Session = &domain.Session{IssueID: "az-1", Worktree: "/tmp/az-1"}
-	m.nav.SelectTask("az-1", 0)
-
-	result, _ := m.handleConflictResolution(overlay.ConflictResolutionMsg{ResolveWithClaude: true})
-	newModel := result.(Model)
-	if len(newModel.toasts) == 0 {
-		t.Fatal("expected tmux-unavailable toast from conflict resolution")
-	}
-	lastToast := newModel.toasts[len(newModel.toasts)-1]
-	if lastToast.Level != ToastWarning {
-		t.Fatalf("conflict resolution toast level = %v, want warning", lastToast.Level)
-	}
-	if !strings.Contains(lastToast.Message, "unavailable outside tmux") {
-		t.Fatalf("conflict resolution toast message = %q, want tmux-unavailable guidance", lastToast.Message)
-	}
 }
 
-func TestHandleConflictResolution_ResolveWithClaudeAttachesSession(t *testing.T) {
+func TestHandleConflictResolution_ResolveWithAgentLaunchesDaemonCommand(t *testing.T) {
 	t.Setenv("TMUX", "client")
 	m := newTestModel()
 	m.currentProject = "Chefy"
@@ -3356,22 +3446,97 @@ func TestHandleConflictResolution_ResolveWithClaudeAttachesSession(t *testing.T)
 
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandSessionAttach {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
+			if req.Command != daemonclient.CommandSessionResolveConflict {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionResolveConflict)
 			}
-			var body struct {
-				ProjectID string `json:"project_id"`
-				SessionID string `json:"session_id"`
-			}
+			var body protocol.SessionResolveConflictRequestBody
 			if err := json.Unmarshal(req.Body, &body); err != nil {
-				t.Fatalf("unmarshal attach request: %v", err)
+				t.Fatalf("unmarshal resolve request: %v", err)
 			}
-			if body.SessionID != "az-1" {
-				t.Fatalf("session id = %q, want az-1", body.SessionID)
+			if body.IssueID != "az-1" || body.Worktree != "/tmp/az-1" {
+				t.Fatalf("resolve request = %+v, want az-1 /tmp/az-1", body)
 			}
-			respBody, err := json.Marshal(struct {
-				Output string `json:"output"`
-			}{Output: "attached"})
+			if len(body.ConflictFiles) != 1 || body.ConflictFiles[0] != "conflict.go" {
+				t.Fatalf("conflict files = %+v, want conflict.go", body.ConflictFiles)
+			}
+			respBody, err := json.Marshal(protocol.SessionResolveConflictResponseBody{
+				ProjectID:     "Chefy",
+				IssueID:       "az-1",
+				SessionID:     "Chefy-az-1",
+				Worktree:      "/tmp/az-1",
+				WindowName:    "resolve-conflict",
+				ConflictFiles: []string{"conflict.go"},
+				ReusedSession: true,
+				ReusedWindow:  false,
+			})
+			if err != nil {
+				t.Fatalf("marshal resolve response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m.daemonClient = daemonclient.New(transport)
+
+	result, cmd := m.handleConflictResolution(overlay.ConflictResolutionMsg{
+		ResolveWithAgent: true,
+		IssueID:          "az-1",
+		Worktree:         "/tmp/az-1",
+		ConflictFiles:    []string{"conflict.go"},
+	})
+	if cmd == nil {
+		t.Fatal("expected daemon resolve command")
+	}
+	_ = result.(Model)
+
+	msg := cmd()
+	resolved, ok := msg.(conflictResolveAgentResultMsg)
+	if !ok {
+		t.Fatalf("resolve cmd returned %T, want conflictResolveAgentResultMsg", msg)
+	}
+	if resolved.issueID != "az-1" || resolved.windowName != "resolve-conflict" || resolved.err != nil {
+		t.Fatalf("resolve result = %+v, want az-1 resolve-conflict nil error", resolved)
+	}
+	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionResolveConflict {
+		t.Fatalf("requests = %v", transport.requests)
+	}
+}
+
+func TestConflictDialogResolveWithAgentUsesMergeResultContext(t *testing.T) {
+	t.Setenv("TMUX", "client")
+	m := newTestModel()
+	m.currentProject = "Chefy"
+	m.tmuxAvailable = true
+	m.nav.SelectTask("az-1", 0)
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandSessionResolveConflict {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionResolveConflict)
+			}
+			var body protocol.SessionResolveConflictRequestBody
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal resolve request: %v", err)
+			}
+			if body.IssueID != "az-2" || body.Worktree != "/tmp/az-2" {
+				t.Fatalf("resolve body = %+v, want issue az-2 worktree /tmp/az-2", body)
+			}
+			if len(body.ConflictFiles) != 1 || body.ConflictFiles[0] != "conflict.go" {
+				t.Fatalf("conflict files = %+v, want conflict.go", body.ConflictFiles)
+			}
+			respBody, err := json.Marshal(protocol.SessionResolveConflictResponseBody{
+				ProjectID:     "Chefy",
+				IssueID:       "az-2",
+				SessionID:     "Chefy-az-2",
+				Worktree:      "/tmp/az-2",
+				WindowName:    "resolve-conflict",
+				ConflictFiles: []string{"conflict.go"},
+			})
 			if err != nil {
 				t.Fatalf("marshal response: %v", err)
 			}
@@ -3386,40 +3551,65 @@ func TestHandleConflictResolution_ResolveWithClaudeAttachesSession(t *testing.T)
 	}
 	m.daemonClient = daemonclient.New(transport)
 
-	var switchTargets []string
-	m.tmuxClient = mockTmuxService{
-		switchFn: func(_ context.Context, target string) error {
-			switchTargets = append(switchTargets, target)
-			return nil
+	updatedAny, _ := m.Update(fetchAndMergeResultMsg{
+		issueID:  "az-2",
+		worktree: "/tmp/az-2",
+		result: &git.MergeResult{
+			HasConflicts:  true,
+			ConflictFiles: []string{"conflict.go"},
 		},
+	})
+	updated := updatedAny.(Model)
+	current, ok := updated.overlayStack.Current().(*overlay.ConflictOverlay)
+	if !ok {
+		t.Fatalf("overlay = %T, want ConflictOverlay", updated.overlayStack.Current())
 	}
 
-	result, cmd := m.handleConflictResolution(overlay.ConflictResolutionMsg{ResolveWithClaude: true})
-	if cmd == nil {
-		t.Fatal("expected attach command from resolve with Claude")
+	_, selectCmd := current.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if selectCmd == nil {
+		t.Fatal("expected selection command")
 	}
-	_ = result.(Model)
+	selectMsg := selectCmd()
+	selected, ok := selectMsg.(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("selection message = %T, want SelectionMsg", selectMsg)
+	}
+	if selected.Key != "agent" {
+		t.Fatalf("selection key = %q, want agent", selected.Key)
+	}
+	resolution, ok := selected.Value.(overlay.ConflictResolutionMsg)
+	if !ok {
+		t.Fatalf("selection value = %T, want ConflictResolutionMsg", selected.Value)
+	}
+	if !resolution.ResolveWithAgent {
+		t.Fatal("expected resolve-with-agent selection")
+	}
+	if resolution.IssueID != "az-2" {
+		t.Fatalf("resolution issue id = %q, want az-2", resolution.IssueID)
+	}
+	if resolution.Worktree != "/tmp/az-2" {
+		t.Fatalf("resolution worktree = %q, want /tmp/az-2", resolution.Worktree)
+	}
+	if len(resolution.ConflictFiles) != 1 || resolution.ConflictFiles[0] != "conflict.go" {
+		t.Fatalf("resolution conflict files = %+v, want conflict.go", resolution.ConflictFiles)
+	}
+	nextAny, cmd := updated.Update(selected)
+	if cmd == nil {
+		t.Fatal("expected daemon resolve command from conflict resolution")
+	}
+	_ = nextAny.(Model)
 
 	msg := cmd()
-	attached, ok := msg.(sessionAttachedMsg)
+	resolved, ok := msg.(conflictResolveAgentResultMsg)
 	if !ok {
-		t.Fatalf("attach cmd returned %T, want sessionAttachedMsg", msg)
+		t.Fatalf("resolve command returned %T, want conflictResolveAgentResultMsg", msg)
 	}
-	if attached.issueID != "az-1" {
-		t.Fatalf("attached issue id = %q, want az-1", attached.issueID)
-	}
-	if !attached.switchedTmux {
-		t.Fatal("expected tmux switch on conflict resolution attach")
-	}
-	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionAttach {
-		t.Fatalf("requests = %v", transport.requests)
-	}
-	if len(switchTargets) == 0 || switchTargets[0] != "az-1" {
-		t.Fatalf("switch targets = %v, want first target az-1", switchTargets)
+	if resolved.issueID != "az-2" || resolved.worktree != "/tmp/az-2" || resolved.windowName != "resolve-conflict" {
+		t.Fatalf("resolve result = %+v, want az-2 /tmp/az-2 resolve-conflict", resolved)
 	}
 }
 
-func TestHandleConflictResolution_ResolveWithClaudeDaemonUnavailableFallsBackToManualHint(t *testing.T) {
+func TestHandleConflictResolution_ResolveWithAgentDaemonUnavailableFallsBackToManualHint(t *testing.T) {
 	t.Setenv("TMUX", "client")
 	m := newTestModel()
 	m.tmuxAvailable = true
@@ -3427,7 +3617,7 @@ func TestHandleConflictResolution_ResolveWithClaudeDaemonUnavailableFallsBackToM
 	m.tasks[0].Session = &domain.Session{IssueID: "az-1", Worktree: "/tmp/az-1"}
 	m.nav.SelectTask("az-1", 0)
 
-	result, cmd := m.handleConflictResolution(overlay.ConflictResolutionMsg{ResolveWithClaude: true})
+	result, cmd := m.handleConflictResolution(overlay.ConflictResolutionMsg{ResolveWithAgent: true})
 	if cmd != nil {
 		t.Fatal("expected no attach command when daemon is unavailable")
 	}
@@ -3447,7 +3637,7 @@ func TestHandleConflictResolution_ResolveWithClaudeDaemonUnavailableFallsBackToM
 	}
 }
 
-func TestResolveConflictWithAICmd_AttachFailureReturnsManualFallbackMsg(t *testing.T) {
+func TestResolveConflictWithAgentCmd_DaemonFailureReturnsResultError(t *testing.T) {
 	t.Setenv("TMUX", "client")
 	m := newTestModel()
 	m.currentProject = "Chefy"
@@ -3455,142 +3645,80 @@ func TestResolveConflictWithAICmd_AttachFailureReturnsManualFallbackMsg(t *testi
 
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandSessionAttach {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
+			if req.Command != daemonclient.CommandSessionResolveConflict {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionResolveConflict)
 			}
 			return protocol.ResponseEnvelope{}, fmt.Errorf("daemon offline")
 		},
 	}
 	m.daemonClient = daemonclient.New(transport)
 
-	msg := m.resolveConflictWithAICmd("az-1")()
-	fallback, ok := msg.(conflictResolveFallbackMsg)
+	msg := m.resolveConflictWithAgentCmd("az-1", "/tmp/az-1", []string{"conflict.go"})()
+	result, ok := msg.(conflictResolveAgentResultMsg)
 	if !ok {
-		t.Fatalf("resolveConflictWithAICmd returned %T, want conflictResolveFallbackMsg", msg)
+		t.Fatalf("resolveConflictWithAgentCmd returned %T, want conflictResolveAgentResultMsg", msg)
 	}
-	if fallback.issueID != "az-1" {
-		t.Fatalf("fallback issue id = %q, want az-1", fallback.issueID)
+	if result.issueID != "az-1" {
+		t.Fatalf("result issue id = %q, want az-1", result.issueID)
 	}
-	if fallback.err == nil || !strings.Contains(fallback.err.Error(), "daemon offline") {
-		t.Fatalf("fallback err = %v, want daemon offline", fallback.err)
+	if result.err == nil || !strings.Contains(result.err.Error(), "daemon offline") {
+		t.Fatalf("result err = %v, want daemon offline", result.err)
 	}
 
-	result, _ := m.Update(fallback)
-	newModel := result.(Model)
+	updated, _ := m.Update(result)
+	newModel := updated.(Model)
 	if len(newModel.toasts) == 0 {
-		t.Fatal("expected warning toast for fallback guidance")
+		t.Fatal("expected error toast for daemon failure")
 	}
 	lastToast := newModel.toasts[len(newModel.toasts)-1]
-	if lastToast.Level != ToastWarning {
-		t.Fatalf("toast level = %v, want warning", lastToast.Level)
+	if lastToast.Level != ToastError {
+		t.Fatalf("toast level = %v, want error", lastToast.Level)
 	}
-	if !strings.Contains(lastToast.Message, "tmux attach-session -t az-1") {
-		t.Fatalf("toast message = %q, want manual attach command", lastToast.Message)
+	if !strings.Contains(lastToast.Message, "daemon offline") {
+		t.Fatalf("toast message = %q, want daemon offline", lastToast.Message)
 	}
 }
 
-func TestResolveConflictWithAICmd_SessionNotFoundStartsSessionAndAttaches(t *testing.T) {
+func TestResolveConflictWithAgentCmd_PendingOperationMarksTask(t *testing.T) {
 	t.Setenv("TMUX", "client")
 	m := newTestModel()
 	m.currentProject = "Chefy"
 	m.tmuxAvailable = true
 
-	var attachCalls int
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			switch req.Command {
-			case daemonclient.CommandSessionAttach:
-				attachCalls++
-				if attachCalls == 1 {
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						OK:              false,
-						Error: &protocol.ErrorEnvelope{
-							Code:    protocol.ErrorCodeInvalidRequest,
-							Message: "session not found: az-1 (use 'az start az-1' to create)",
-						},
-					}, nil
-				}
-				respBody, err := json.Marshal(struct {
-					Output string `json:"output"`
-				}{Output: "attached"})
-				if err != nil {
-					t.Fatalf("marshal attach response: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
-
-			case daemonclient.CommandSessionStart:
-				var body struct {
-					SessionID string `json:"session_id"`
-					StartWork bool   `json:"start_work"`
-				}
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal start body: %v", err)
-				}
-				if body.SessionID != "az-1" {
-					t.Fatalf("session id = %q, want az-1", body.SessionID)
-				}
-				if !body.StartWork {
-					t.Fatal("expected start_work=true when conflict resolve starts AI session")
-				}
-				respBody, err := json.Marshal(struct {
-					Output string `json:"output"`
-				}{Output: "started"})
-				if err != nil {
-					t.Fatalf("marshal start response: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
-
-			default:
-				t.Fatalf("unexpected command %q", req.Command)
-				return protocol.ResponseEnvelope{}, nil
+			if req.Command != daemonclient.CommandSessionResolveConflict {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionResolveConflict)
 			}
+			body := []byte(`{"operation_id":"op-conflict","state":"running"}`)
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            body,
+			}, nil
 		},
 	}
 	m.daemonClient = daemonclient.New(transport)
 
-	var switchTargets []string
-	m.tmuxClient = mockTmuxService{
-		switchFn: func(_ context.Context, target string) error {
-			switchTargets = append(switchTargets, target)
-			return nil
-		},
+	msg := m.resolveConflictWithAgentCmd("az-1", "/tmp/az-1", []string{"conflict.go"})()
+	started, ok := msg.(conflictResolveAgentResultMsg)
+	if !ok {
+		t.Fatalf("resolveConflictWithAgentCmd returned %T, want conflictResolveAgentResultMsg", msg)
+	}
+	if started.operationID != "op-conflict" || started.state != protocol.OperationStateRunning {
+		t.Fatalf("pending result = %+v, want op-conflict running", started)
 	}
 
-	msg := m.resolveConflictWithAICmd("az-1")()
-	attached, ok := msg.(sessionAttachedMsg)
-	if !ok {
-		t.Fatalf("resolveConflictWithAICmd returned %T, want sessionAttachedMsg", msg)
+	updatedAny, refreshCmd := m.Update(started)
+	updated := updatedAny.(Model)
+	if refreshCmd == nil {
+		t.Fatal("expected refresh command after pending conflict operation")
 	}
-	if attached.issueID != "az-1" {
-		t.Fatalf("attached issue id = %q, want az-1", attached.issueID)
-	}
-	if !attached.switchedTmux {
-		t.Fatal("expected tmux switch after starting and attaching conflict-resolution session")
-	}
-	if !reflect.DeepEqual(transport.requests, []string{
-		daemonclient.CommandSessionAttach,
-		daemonclient.CommandSessionStart,
-		daemonclient.CommandSessionAttach,
-	}) {
-		t.Fatalf("requests = %v", transport.requests)
-	}
-	if len(switchTargets) == 0 || switchTargets[0] != "az-1" {
-		t.Fatalf("switch targets = %v, want first target az-1", switchTargets)
+	progress := updated.pendingMutationForTask("az-1")
+	if progress == nil || progress.OperationID != "op-conflict" || progress.State != string(protocol.OperationStateRunning) {
+		t.Fatalf("pending progress = %+v, want op-conflict running", progress)
 	}
 }
 
@@ -3930,6 +4058,8 @@ func TestDaemonStreamEventMsg_GitStatusEventAppliesRuntimeProjectionDirectly(t *
 				},
 				Git: protocol.RuntimeGitProjection{
 					HasUncommittedChanges: true,
+					HasConflicts:          true,
+					ConflictFiles:         []string{"conflict.go"},
 					GitAdditions:          3,
 					GitDeletions:          1,
 					GitAheadCount:         2,
@@ -3972,6 +4102,9 @@ func TestDaemonStreamEventMsg_GitStatusEventAppliesRuntimeProjectionDirectly(t *
 	if !got.HasUncommittedChanges || got.GitAdditions != 3 || got.GitDeletions != 1 {
 		t.Fatalf("task git runtime = %+v, want dirty diff stat", got)
 	}
+	if !got.HasConflicts || len(got.ConflictFiles) != 1 || got.ConflictFiles[0] != "conflict.go" {
+		t.Fatalf("task conflicts = %+v, want conflict.go", got.ConflictFiles)
+	}
 	if got.Session == nil || got.Session.Worktree != "/tmp/az-1" || got.Session.State != domain.SessionBusy {
 		t.Fatalf("task session = %+v, want busy session with runtime worktree", got.Session)
 	}
@@ -3998,6 +4131,8 @@ func TestRuntimeSignalsForBoardUsesTaskProjectionFields(t *testing.T) {
 			GitAheadCount:         4,
 			GitBehindCount:        1,
 			HasUncommittedChanges: true,
+			HasConflicts:          true,
+			ConflictFiles:         []string{"conflict.go"},
 			GitAdditions:          9,
 			GitDeletions:          2,
 			Session: &domain.Session{
@@ -4019,6 +4154,9 @@ func TestRuntimeSignalsForBoardUsesTaskProjectionFields(t *testing.T) {
 	}
 	if !got.HasUncommittedChanges || got.GitAdditions != 9 || got.GitDeletions != 2 {
 		t.Fatalf("runtime signals = %+v, want git projection fields", got)
+	}
+	if !got.HasConflicts || len(got.ConflictFiles) != 1 || got.ConflictFiles[0] != "conflict.go" {
+		t.Fatalf("runtime signals = %+v, want conflict projection fields", got)
 	}
 }
 

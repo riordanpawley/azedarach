@@ -32,6 +32,25 @@ func (r *recordingRunner) Run(ctx context.Context, args ...string) (string, erro
 	return "", r.err
 }
 
+type recordingOutputRunner struct {
+	outputs  []string
+	err      error
+	commands [][]string
+}
+
+func (r *recordingOutputRunner) Run(ctx context.Context, args ...string) (string, error) {
+	r.commands = append(r.commands, append([]string(nil), args...))
+	if r.err != nil {
+		return "", r.err
+	}
+	if len(r.outputs) == 0 {
+		return "", nil
+	}
+	out := r.outputs[0]
+	r.outputs = r.outputs[1:]
+	return out, nil
+}
+
 func TestClient_NewSession(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -79,6 +98,65 @@ func TestClient_NewSession(t *testing.T) {
 			}
 
 			require.NoError(t, err)
+		})
+	}
+}
+
+func TestClient_EnsureWindow(t *testing.T) {
+	tests := []struct {
+		name        string
+		listOutput  string
+		runErr      error
+		wantReused  bool
+		wantErr     bool
+		wantCommand [][]string
+	}{
+		{
+			name:       "reuses existing window",
+			listOutput: "shell\nresolve-conflict\n",
+			wantReused: true,
+			wantCommand: [][]string{
+				{"list-windows", "-t", "test-session", "-F", "#{window_name}"},
+			},
+		},
+		{
+			name:       "creates missing window with workdir",
+			listOutput: "shell\n",
+			wantCommand: [][]string{
+				{"list-windows", "-t", "test-session", "-F", "#{window_name}"},
+				{"new-window", "-d", "-t", "test-session", "-n", "resolve-conflict", "-c", "/tmp/worktree"},
+			},
+		},
+		{
+			name:       "list error",
+			listOutput: "",
+			runErr:     errors.New("list failed"),
+			wantErr:    true,
+			wantCommand: [][]string{
+				{"list-windows", "-t", "test-session", "-F", "#{window_name}"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &recordingOutputRunner{
+				outputs: []string{tt.listOutput},
+				err:     tt.runErr,
+			}
+			client := NewClient(runner, slog.Default())
+
+			reused, err := client.EnsureWindow(context.Background(), "test-session", "resolve-conflict", "/tmp/worktree")
+			if tt.wantErr {
+				require.Error(t, err)
+				var tmuxErr *domain.TmuxError
+				assert.ErrorAs(t, err, &tmuxErr)
+				assert.Equal(t, "list-windows", tmuxErr.Op)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantReused, reused)
+			}
+			assert.Equal(t, tt.wantCommand, runner.commands)
 		})
 	}
 }

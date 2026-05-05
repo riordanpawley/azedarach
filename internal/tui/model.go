@@ -144,17 +144,19 @@ type Model struct {
 	editor *editor.Service
 
 	// UI state
-	overlayStack                *overlay.Stack
-	createTaskOverlay           *overlay.CreateTaskOverlay
-	viewMode                    ViewMode
-	viewportStarts              [board.DefaultColumnCount]int
-	columnViewportStart         int
-	drillDownParentID           string
-	drillDownParentName         string
-	drillDownTrail              []drillDownContext
-	pendingCreatedTaskID        string
-	runtimeSignalsByTask        map[string]board.RuntimeSignals
-	runtimeSignalWorktreeByTask map[string]string
+	overlayStack                  *overlay.Stack
+	createTaskOverlay             *overlay.CreateTaskOverlay
+	viewMode                      ViewMode
+	viewportStarts                [board.DefaultColumnCount]int
+	columnViewportStart           int
+	drillDownParentID             string
+	drillDownParentName           string
+	drillDownTrail                []drillDownContext
+	pendingCreatedTaskID          string
+	pendingCreatedWorkspaceTaskID string
+	openCreatedTaskInWorkspace    bool
+	runtimeSignalsByTask          map[string]board.RuntimeSignals
+	runtimeSignalWorktreeByTask   map[string]string
 
 	// Project
 	currentProject       string
@@ -333,6 +335,31 @@ func (m *Model) applyPendingCreatedTaskSelection() {
 	if m.taskExists(taskID) {
 		m.pendingCreatedTaskID = ""
 	}
+}
+
+func (m *Model) applyPendingCreatedWorkspaceTask() {
+	taskID := strings.TrimSpace(m.pendingCreatedWorkspaceTaskID)
+	if taskID == "" {
+		return
+	}
+	workspace, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		return
+	}
+	task, _, ok := m.taskAndSessionByID(taskID)
+	if !ok || task == nil {
+		if m.taskExists(taskID) {
+			m.pendingCreatedWorkspaceTaskID = ""
+		}
+		return
+	}
+	columns := m.buildColumns()
+	if m.nav.JumpToTaskByID(columns, task.ID.String()) {
+		m.ensureCursorVisible(columns)
+	}
+	workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
+	workspace.SyncTask(*task, m.tasks, m.pendingMutationForTask(task.ID.String()))
+	m.pendingCreatedWorkspaceTaskID = ""
 }
 
 // handleKey processes keyboard input based on current mode
@@ -930,6 +957,15 @@ type sessionErrorMsg struct {
 type conflictResolveFallbackMsg struct {
 	issueID string
 	err     error
+}
+
+type conflictResolveAgentResultMsg struct {
+	issueID     string
+	worktree    string
+	windowName  string
+	operationID string
+	state       protocol.OperationState
+	err         error
 }
 
 func pendingOperationDetails(err error) (*daemonclient.OperationPendingError, bool) {

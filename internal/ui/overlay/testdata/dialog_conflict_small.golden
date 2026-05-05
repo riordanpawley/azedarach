@@ -3,7 +3,7 @@
 │────────────────────────────────────────────────────────────────────│
 │⚠ Merge conflicts detected!                                         │
 │                                                                    │
-│AI resolve now? Press c.                                            │
+│Agent resolve now? Press c.                                         │
 │▸ internal/ui/app.go                                                │
 │  internal/domain/task.go                                           │
 │                                                                    │
@@ -12,7 +12,7 @@
 │Actions                                                             │
 │────────────────────────────────────────────────────────────────────│
 │ j/k navigate                                                       │
-│ c ai resolve                                                       │
+│ c agent resolve                                                    │
 │ o open                                                             │
 │ a abort                                                            │
 │ Esc close                                                          │

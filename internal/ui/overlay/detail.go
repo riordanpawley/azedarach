@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	uistyles "github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -19,6 +20,7 @@ type DetailPanel struct {
 	relatedTasks   []domain.Task
 	mutation       *TaskMutationProgress
 	scrollY        int
+	graphCursor    int
 	contentHeight  int
 	viewHeight     int
 	descViewHeight int
@@ -36,6 +38,11 @@ type TaskMutationProgress struct {
 	ProgressMessage string
 	PreviousStatus  domain.Status
 	TargetStatus    domain.Status
+}
+
+type taskGraphLink struct {
+	Direction string
+	Task      domain.Task
 }
 
 // NewDetailPanel creates a new detail panel for the given task and optional session
@@ -91,16 +98,32 @@ func (d *DetailPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d, func() tea.Msg { return CloseOverlayMsg{} }
 
 		case "j", "down":
+			if d.GraphLinkCount() > 0 {
+				d.MoveGraphCursor(1)
+				return d, nil
+			}
 			if d.scrollY < d.maxScroll() {
 				d.scrollY++
 			}
 			return d, nil
 
 		case "k", "up":
+			if d.GraphLinkCount() > 0 {
+				d.MoveGraphCursor(-1)
+				return d, nil
+			}
 			if d.scrollY > 0 {
 				d.scrollY--
 			}
 			return d, nil
+		case "h", "left":
+			return d, d.graphNavigationCmd("ascendant")
+		case "l", "right":
+			return d, d.graphNavigationCmd("descendant")
+		case "<":
+			return d, d.graphNavigationCmd("ascendant")
+		case ">":
+			return d, d.graphNavigationCmd("descendant")
 		case "ctrl+d":
 			d.scrollY = min(d.maxScroll(), d.scrollY+d.halfPageStep())
 			return d, nil
@@ -155,6 +178,9 @@ func (d *DetailPanel) viewStandard() string {
 	b.WriteString("  ")
 	b.WriteString(d.formatIssueCardSummary())
 	b.WriteString("\n")
+	if metadata := d.renderIssueMetadataLines(labelStyle, valueStyle); metadata != "" {
+		b.WriteString(metadata)
+	}
 
 	if d.mutation != nil {
 		b.WriteString(labelStyle.Render("Issue Ops:"))
@@ -222,6 +248,17 @@ func (d *DetailPanel) viewStandard() string {
 		b.WriteString("\n")
 	}
 
+	d.writeTextSection(&b, headerStyle, valueStyle, "Design", d.task.Design)
+	d.writeTextSection(&b, headerStyle, valueStyle, "Acceptance", d.task.Acceptance)
+	d.writeTextSection(&b, headerStyle, valueStyle, "Notes", d.task.Notes)
+	if graph := d.renderGraphContext(); graph != "" {
+		b.WriteString("\n")
+		b.WriteString(headerStyle.Render("Graph"))
+		b.WriteString("\n")
+		b.WriteString(graph)
+		b.WriteString("\n")
+	}
+
 	// Description section with scrolling
 	if d.task.Description != "" {
 		b.WriteString("\n")
@@ -277,6 +314,11 @@ func (d *DetailPanel) viewCompact() string {
 	addLine(headerStyle.Render(fmt.Sprintf("[%s] %s", d.task.ID, d.task.Title)))
 	addLine("")
 	addLine(labelStyle.Render("Issue:") + "  " + d.formatIssueCardSummary())
+	if metadata := d.renderIssueMetadataLines(labelStyle, valueStyle); metadata != "" {
+		for _, line := range strings.Split(strings.TrimSuffix(metadata, "\n"), "\n") {
+			addLine(line)
+		}
+	}
 	if d.mutation != nil {
 		addLine(labelStyle.Render("Issue Ops:") + "  " + valueStyle.Render(d.formatMutationProgress()))
 	}
@@ -306,6 +348,17 @@ func (d *DetailPanel) viewCompact() string {
 		addLine(headerStyle.Render("Runtime"))
 		addLine(labelStyle.Render("Session:") + "  " + d.formatSessionSummary())
 		addLine(labelStyle.Render("Worktree:") + "  " + valueStyle.Render(d.formatGitWorktreeSummary()))
+	}
+
+	d.addTextSectionLines(&lines, headerStyle, valueStyle, "Design", d.task.Design)
+	d.addTextSectionLines(&lines, headerStyle, valueStyle, "Acceptance", d.task.Acceptance)
+	d.addTextSectionLines(&lines, headerStyle, valueStyle, "Notes", d.task.Notes)
+	if graph := d.renderGraphContext(); graph != "" {
+		addLine("")
+		addLine(headerStyle.Render("Graph"))
+		for _, line := range strings.Split(graph, "\n") {
+			addLine(line)
+		}
 	}
 
 	if d.task.Description != "" {
@@ -376,6 +429,228 @@ func (d *DetailPanel) renderDependencies() string {
 	}
 
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+func (d *DetailPanel) renderIssueMetadataLines(labelStyle, valueStyle lipgloss.Style) string {
+	var b strings.Builder
+	write := func(label, value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		b.WriteString(labelStyle.Render(label + ":"))
+		b.WriteString("  ")
+		b.WriteString(valueStyle.Render(value))
+		b.WriteString("\n")
+	}
+	write("Assignee", d.task.Assignee)
+	if d.task.Estimate != nil {
+		write("Estimate", fmt.Sprintf("%d", *d.task.Estimate))
+	}
+	if len(d.task.Labels) > 0 {
+		write("Labels", strings.Join(d.task.Labels, ", "))
+	}
+	if len(d.task.Implementations) > 0 {
+		write("Impls", strings.Join(d.task.Implementations, ", "))
+	}
+	return b.String()
+}
+
+func (d *DetailPanel) writeTextSection(b *strings.Builder, headerStyle, valueStyle lipgloss.Style, title, text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	b.WriteString("\n")
+	b.WriteString(headerStyle.Render(title))
+	b.WriteString("\n")
+	for _, line := range wrapDescriptionLines(text, max(10, d.wrapWidth)) {
+		b.WriteString(valueStyle.Render(line))
+		b.WriteString("\n")
+	}
+}
+
+func (d *DetailPanel) addTextSectionLines(lines *[]string, headerStyle, valueStyle lipgloss.Style, title, text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	*lines = append(*lines, "", headerStyle.Render(title))
+	for _, line := range wrapDescriptionLines(text, max(10, d.wrapWidth)) {
+		*lines = append(*lines, valueStyle.Render(line))
+	}
+}
+
+func (d *DetailPanel) renderGraphContext() string {
+	links := d.graphLinks()
+	if len(links) == 0 {
+		return ""
+	}
+	if d.graphCursor >= len(links) {
+		d.graphCursor = len(links) - 1
+	}
+	if d.graphCursor < 0 {
+		d.graphCursor = 0
+	}
+
+	var b strings.Builder
+	b.WriteString(d.styles.MenuItem.Render("Ascendants"))
+	b.WriteString("\n")
+	d.writeGraphRows(&b, links, "ascendant")
+	b.WriteString(d.styles.MenuItem.Render("Descendants"))
+	b.WriteString("\n")
+	d.writeGraphRows(&b, links, "descendant")
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+func (d *DetailPanel) writeGraphRows(b *strings.Builder, links []taskGraphLink, direction string) {
+	wrote := false
+	for i, link := range links {
+		if link.Direction != direction {
+			continue
+		}
+		wrote = true
+		prefix := d.graphDirectionPrefix(direction, false)
+		style := d.styles.MenuItem
+		if i == d.graphCursor {
+			prefix = d.graphDirectionPrefix(direction, true)
+			style = d.styles.MenuItemActive
+		}
+		b.WriteString(style.Render(fmt.Sprintf("%s %s [%s] %s", prefix, link.Task.ID, d.formatStatus(link.Task.Status), link.Task.Title)))
+		b.WriteString("\n")
+	}
+	if !wrote {
+		b.WriteString("- none\n")
+	}
+}
+
+func (d *DetailPanel) graphDirectionPrefix(direction string, selected bool) string {
+	switch direction {
+	case "ascendant":
+		return "<"
+	case "descendant":
+		return ">"
+	default:
+		if selected {
+			return ">"
+		}
+		return "-"
+	}
+}
+
+func (d *DetailPanel) graphLinks() []taskGraphLink {
+	ancestors := d.reachableTasks(true)
+	descendants := d.reachableTasks(false)
+	links := make([]taskGraphLink, 0, len(ancestors)+len(descendants))
+	for _, task := range ancestors {
+		links = append(links, taskGraphLink{Direction: "ascendant", Task: task})
+	}
+	for _, task := range descendants {
+		links = append(links, taskGraphLink{Direction: "descendant", Task: task})
+	}
+	return links
+}
+
+func (d *DetailPanel) GraphLinkCount() int {
+	return len(d.graphLinks())
+}
+
+func (d *DetailPanel) MoveGraphCursor(delta int) {
+	count := d.GraphLinkCount()
+	if count == 0 {
+		d.graphCursor = 0
+		return
+	}
+	d.graphCursor = (d.graphCursor + delta + count) % count
+}
+
+func (d *DetailPanel) SelectedGraphTaskID() (string, bool) {
+	return d.SelectedGraphTaskIDForDirection("")
+}
+
+func (d *DetailPanel) SelectedGraphTaskIDForDirection(direction string) (string, bool) {
+	links := d.graphLinks()
+	if len(links) == 0 {
+		return "", false
+	}
+	if d.graphCursor < 0 {
+		d.graphCursor = 0
+	}
+	if d.graphCursor >= len(links) {
+		d.graphCursor = len(links) - 1
+	}
+	if direction != "" && links[d.graphCursor].Direction != direction {
+		return "", false
+	}
+	return links[d.graphCursor].Task.ID.String(), true
+}
+
+func (d *DetailPanel) graphNavigationCmd(direction string) tea.Cmd {
+	taskID, ok := d.SelectedGraphTaskIDForDirection(direction)
+	if !ok {
+		return nil
+	}
+	return func() tea.Msg {
+		return SelectionMsg{Key: "task_workspace_open_task", Value: taskID}
+	}
+}
+
+func (d *DetailPanel) reachableTasks(ascendants bool) []domain.Task {
+	if len(d.relatedTasks) == 0 {
+		return nil
+	}
+	byID := make(map[naming.IssueID]domain.Task, len(d.relatedTasks))
+	for _, task := range d.relatedTasks {
+		byID[task.ID] = task
+	}
+	adjacency := make(map[naming.IssueID][]naming.IssueID, len(d.relatedTasks))
+	addEdge := func(from, to naming.IssueID) {
+		adjacency[from] = append(adjacency[from], to)
+	}
+	for _, task := range d.relatedTasks {
+		for _, dep := range task.Dependencies {
+			if dep.Type == domain.DependencyParentChild {
+				if ascendants {
+					addEdge(task.ID, dep.ID)
+				} else {
+					addEdge(dep.ID, task.ID)
+				}
+			} else if ascendants {
+				addEdge(dep.ID, task.ID)
+			} else {
+				addEdge(task.ID, dep.ID)
+			}
+		}
+		if task.ParentID != nil {
+			if ascendants {
+				addEdge(task.ID, *task.ParentID)
+			} else {
+				addEdge(*task.ParentID, task.ID)
+			}
+		}
+	}
+
+	queue := append([]naming.IssueID(nil), adjacency[d.task.ID]...)
+	seen := map[naming.IssueID]struct{}{d.task.ID: {}}
+	var out []domain.Task
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		if task, ok := byID[id]; ok {
+			out = append(out, task)
+		}
+		for _, next := range adjacency[id] {
+			if _, ok := seen[next]; ok {
+				continue
+			}
+			queue = append(queue, next)
+		}
+	}
+	return out
 }
 
 func (d *DetailPanel) incomingDependencies() []domain.Dependency {
