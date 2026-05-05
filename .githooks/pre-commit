@@ -5,9 +5,6 @@ az githooks hook --hook pre-commit "$@" >/dev/null 2>&1 || true
 
 set -eu
 
-# Keep spec markdown docs in sync and auto-stage generated files when configured.
-"$(git rev-parse --show-toplevel)/scripts/spec-sync-precommit.sh"
-
 # During merge/rebase continuations, block commit progress when build/tests fail.
 if git rev-parse -q --verify REBASE_HEAD >/dev/null 2>&1 || git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
   "$(git rev-parse --show-toplevel)/scripts/git-merge-rebase-gate.sh"

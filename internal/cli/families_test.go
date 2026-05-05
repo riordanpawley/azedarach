@@ -51,11 +51,13 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"az spec req list --json",
 		"az spec req create --id bfs-req-1 --title \"Restore az spec grammar\" --issue bgh",
 		"az spec link add --issue bgh --req bfs-req-1 --role implements",
-		"az spec sync --target md --check",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("usage missing %q: %q", want, output)
 		}
+	}
+	if strings.Contains(output, "az spec sync") {
+		t.Fatalf("usage should not mention disabled sync command: %q", output)
 	}
 }
 

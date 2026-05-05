@@ -93,3 +93,4 @@ coverage/
 /staged.txt
 /.runtime
 **/daemon.lock
+/docs/spec

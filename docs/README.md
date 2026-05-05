@@ -35,8 +35,7 @@ This directory primarily contains **developer/internal documentation**.
 - `runtime.reconcile` includes `invariant_sources` debug output reflecting the active source-policy matrix.
 - Treat this as the required cross-daemon safety contract for session/worktree/runtime invariants.
 
-## Generated Spec Docs
+## Spec Records
 
-- `az spec sync --target md` generates deterministic Markdown under `docs/spec/`.
-- When `docs/spec/` is present, treat it as the spec source of truth for synced command grammar/status.
-- [spec/README.md](spec/README.md)
+- `az spec read --json` reads daemon-backed requirement/link records.
+- Markdown spec export is disabled until it can export the real stored spec data.

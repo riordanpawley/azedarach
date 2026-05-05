@@ -1670,13 +1670,12 @@ func PrintTmuxUsage() {
 }
 
 func PrintSpecUsage() {
-	fmt.Println("Usage: az spec <req|link|read|lint|parity|sync> [arguments]")
+	fmt.Println("Usage: az spec <req|link|read|lint|parity> [arguments]")
 	fmt.Println("  req      Manage spec requirements (list|get|create|update|delete)")
 	fmt.Println("  link     Manage issue/requirement traceability links (list|add|remove)")
 	fmt.Println("  read     Read consolidated spec view")
 	fmt.Println("  lint     Validate spec consistency")
 	fmt.Println("  parity   Report issue/spec drift")
-	fmt.Println("  sync     Sync spec artifacts to Markdown (phase-1 target: md)")
 	fmt.Println("")
 	fmt.Println("Requirement commands:")
 	fmt.Println("  az spec req list [--json] [--issue <issue-id>] [--status <open|accepted|superseded>] [--id <req-id> ...] [--ids a,b,c]")
@@ -1690,11 +1689,10 @@ func PrintSpecUsage() {
 	fmt.Println("  az spec link add --issue <issue-id> --req <req-id> [--role <implements|verifies|relates>] [--note <text>] [--json]")
 	fmt.Println("  az spec link remove --issue <issue-id> --req <req-id> [--json]")
 	fmt.Println("")
-	fmt.Println("Read/lint/parity/sync:")
+	fmt.Println("Read/lint/parity:")
 	fmt.Println("  az spec read [--json] [--issue <issue-id>] [--req <req-id>]")
 	fmt.Println("  az spec lint [--json] [--strict]")
 	fmt.Println("  az spec parity [--json] [--fail-on-out]")
-	fmt.Println("  az spec sync --target md [--check] [--json]")
 	fmt.Println("")
 	fmt.Println("Examples:")
 	fmt.Println("  az spec req list --json")
@@ -1705,7 +1703,6 @@ func PrintSpecUsage() {
 	fmt.Println("  az spec read --issue az-123")
 	fmt.Println("  az spec lint --strict")
 	fmt.Println("  az spec parity --fail-on-out")
-	fmt.Println("  az spec sync --target md --check")
 }
 
 func PrintSpecReqUsage() {
@@ -1746,10 +1743,6 @@ func PrintSpecLintUsage() {
 
 func PrintSpecParityUsage() {
 	fmt.Println("Usage: az spec parity [--json] [--fail-on-out]")
-}
-
-func PrintSpecSyncUsage() {
-	fmt.Println("Usage: az spec sync --target md [--check] [--json]")
 }
 
 func readJSONObject(path string) (map[string]any, error) {
