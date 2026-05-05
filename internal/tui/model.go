@@ -155,6 +155,8 @@ type Model struct {
 	pendingCreatedTaskID          string
 	pendingCreatedWorkspaceTaskID string
 	openCreatedTaskInWorkspace    bool
+	openSessionSelectorOnLoad     bool
+	openTaskWorkspaceOnLoadID     string
 	runtimeSignalsByTask          map[string]board.RuntimeSignals
 	runtimeSignalWorktreeByTask   map[string]string
 
@@ -228,8 +230,30 @@ type Model struct {
 	logger *slog.Logger
 }
 
+// Option configures initial TUI behavior.
+type Option func(*Model)
+
+// WithSessionSelectorOnLoad opens the tmux session selector after the first task snapshot loads.
+func WithSessionSelectorOnLoad() Option {
+	return func(m *Model) {
+		m.openSessionSelectorOnLoad = true
+	}
+}
+
+// WithOpenTaskWorkspaceOnLoad opens an issue workspace after the first task snapshot loads.
+func WithOpenTaskWorkspaceOnLoad(issueID string) Option {
+	return func(m *Model) {
+		m.openTaskWorkspaceOnLoadID = strings.TrimSpace(issueID)
+	}
+}
+
 // New creates a new application model with the given config
 func New(cfg *config.Config) Model {
+	return NewWithOptions(cfg)
+}
+
+// NewWithOptions creates a new application model with optional initial behavior.
+func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 	// Initialize spinner
 	s := spinner.New()
 	s.Spinner = spinner.Dot
@@ -299,6 +323,11 @@ func New(cfg *config.Config) Model {
 	logger.Info("tui runtime initialized", "repo_dir", repoDir, "runtime_repo_dir", runtimeRepoDir, "daemon_socket", daemonSocketPath, "project", m.currentProject)
 	m.refreshDaemonProjectRouteID()
 	m.daemonClient.WithProjectRouteID(m.daemonProjectRouteIDValue())
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&m)
+		}
+	}
 	return m
 }
 
@@ -360,6 +389,39 @@ func (m *Model) applyPendingCreatedWorkspaceTask() {
 	workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
 	workspace.SyncTask(*task, m.tasks, m.pendingMutationForTask(task.ID.String()))
 	m.pendingCreatedWorkspaceTaskID = ""
+}
+
+func (m Model) openCurrentTaskWorkspace() (tea.Model, tea.Cmd) {
+	columns := m.buildColumns()
+	task, _ := m.nav.GetCurrentTask(columns)
+	if task == nil {
+		task, _ = m.getCurrentTaskAndSession()
+	}
+	if task == nil {
+		return m, nil
+	}
+	return m.openTaskWorkspaceByID(task.ID.String())
+}
+
+func (m Model) openTaskWorkspaceByID(taskID string) (tea.Model, tea.Cmd) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return m, nil
+	}
+	task, _, ok := m.taskAndSessionByID(taskID)
+	if !ok || task == nil {
+		return m, nil
+	}
+
+	workspace := overlay.NewTaskWorkspaceOverlay(*task, m.tasks, m.pendingMutationForTask(taskID), m.width, m.height)
+	workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
+	if m.daemonClient == nil {
+		return m, m.openOverlay(workspace)
+	}
+	return m, tea.Batch(
+		m.openOverlay(workspace),
+		m.refreshTaskWorkspaceInBackgroundCmd(taskID),
+	)
 }
 
 // handleKey processes keyboard input based on current mode
@@ -522,28 +584,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case keybinds.ActionOpenWorkspace: // Space - open task panel (details + actions)
-		columns := m.buildColumns()
-		task, _ := m.nav.GetCurrentTask(columns)
-		if task == nil {
-			task, _ = m.getCurrentTaskAndSession()
-		}
-		if task != nil {
-			// Resolve from authoritative task projection to avoid opening the
-			// workspace with a stale navigation-copy task payload.
-			if latestTask, _, ok := m.taskAndSessionByID(task.ID.String()); ok && latestTask != nil {
-				task = latestTask
-			}
-			workspace := overlay.NewTaskWorkspaceOverlay(*task, m.tasks, m.pendingMutationForTask(task.ID.String()), m.width, m.height)
-			workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
-			if m.daemonClient == nil {
-				return m, m.openOverlay(workspace)
-			}
-			return m, tea.Batch(
-				m.openOverlay(workspace),
-				m.refreshTaskWorkspaceInBackgroundCmd(task.ID.String()),
-			)
-		}
-		return m, nil
+		return m.openCurrentTaskWorkspace()
 
 	case keybinds.ActionEnterSearch: // Search
 		m.editor.EnterSearch()
@@ -4866,14 +4907,52 @@ func (m Model) openOrchestrationOverlay() tea.Cmd {
 	// Gather session information
 	var sessions []overlay.SessionInfo
 	for _, task := range m.tasks {
+		if task.Session == nil && !task.HasTmuxSession {
+			continue
+		}
+
+		state := domain.SessionIdle
+		var startedAt *time.Time
+		worktree := ""
 		if task.Session != nil {
+			state = task.Session.State
+			startedAt = task.Session.StartedAt
+			worktree = task.Session.Worktree
+		}
+
+		sessions = append(sessions, overlay.SessionInfo{
+			IssueID:               task.ID.String(),
+			TaskTitle:             task.Title,
+			IssueStatus:           task.Status,
+			State:                 state,
+			StartedAt:             startedAt,
+			Worktree:              worktree,
+			HasTmuxSession:        task.Session != nil || task.HasTmuxSession,
+			HasWorktree:           task.HasWorktree,
+			GitAheadCount:         task.GitAheadCount,
+			GitBehindCount:        task.GitBehindCount,
+			HasUncommittedChanges: task.HasUncommittedChanges,
+			HasConflicts:          task.HasConflicts,
+			GitAdditions:          task.GitAdditions,
+			GitDeletions:          task.GitDeletions,
+			RecentOutput:          "", // TODO: Capture recent output from tmux
+		})
+	}
+
+	if len(sessions) == 0 {
+		for _, session := range m.sessions {
+			if session == nil {
+				continue
+			}
 			sessions = append(sessions, overlay.SessionInfo{
-				IssueID:      task.ID.String(),
-				TaskTitle:    task.Title,
-				State:        task.Session.State,
-				StartedAt:    task.Session.StartedAt,
-				Worktree:     task.Session.Worktree,
-				RecentOutput: "", // TODO: Capture recent output from tmux
+				IssueID:        session.IssueID.String(),
+				TaskTitle:      session.IssueID.String(),
+				IssueStatus:    domain.StatusInProgress,
+				State:          session.State,
+				StartedAt:      session.StartedAt,
+				Worktree:       session.Worktree,
+				HasTmuxSession: true,
+				HasWorktree:    strings.TrimSpace(session.Worktree) != "",
 			})
 		}
 	}
@@ -4883,22 +4962,7 @@ func (m Model) openOrchestrationOverlay() tea.Cmd {
 		sessions,
 		// onAttach
 		func(issueID string) tea.Cmd {
-			return func() tea.Msg {
-				if !m.tmuxAvailable {
-					return Toast{
-						Level:   ToastWarning,
-						Message: fmt.Sprintf("tmux attach-session -t %s is unavailable outside tmux; launch az inside tmux to use tmux actions", issueID),
-						Expires: time.Now().Add(8 * time.Second),
-					}
-				}
-
-				// Show attach instructions
-				return Toast{
-					Level:   ToastInfo,
-					Message: fmt.Sprintf("Run: tmux attach-session -t %s", issueID),
-					Expires: time.Now().Add(5 * time.Second),
-				}
-			}
+			return m.attachSessionCmd(issueID)
 		},
 		// onKill
 		func(issueID string) tea.Cmd {

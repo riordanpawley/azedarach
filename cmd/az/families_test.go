@@ -97,6 +97,52 @@ func TestRunCodexCommandHelpAndDispatch(t *testing.T) {
 	}
 }
 
+func TestRunTmuxCommandHelpAndDispatch(t *testing.T) {
+	output := captureMainStdout(t, func() error {
+		return runTmuxCommand(config.DefaultConfig(), []string{"--help"})
+	})
+	if !strings.Contains(output, "Usage: az tmux <selector|install-selector>") {
+		t.Fatalf("help output = %q", output)
+	}
+
+	projectDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), ".tmux.conf")
+	output = captureMainStdout(t, func() error {
+		return runTmuxCommand(config.DefaultConfig(), []string{"install-selector", "--config", configPath, "--project-dir", projectDir})
+	})
+	if !strings.Contains(output, "Installed Azedarach tmux session selector") {
+		t.Fatalf("dispatch output = %q", output)
+	}
+	if _, err := os.Stat(configPath); err != nil {
+		t.Fatalf("expected tmux config file: %v", err)
+	}
+}
+
+func TestRunTmuxSelectorCommandWiresGlobalSelector(t *testing.T) {
+	var calls int
+	previous := runTmuxSelectorForCommand
+	runTmuxSelectorForCommand = func(_ *config.Config) {
+		calls++
+	}
+	t.Cleanup(func() {
+		runTmuxSelectorForCommand = previous
+	})
+
+	if err := runTmuxCommand(config.DefaultConfig(), []string{"selector"}); err != nil {
+		t.Fatalf("selector command error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("global selector calls = %d, want 1", calls)
+	}
+}
+
+func TestRunTmuxSelectorCommandValidatesArguments(t *testing.T) {
+	err := runTmuxCommand(config.DefaultConfig(), []string{"selector", "extra"})
+	if err == nil || !strings.Contains(err.Error(), "usage: az tmux selector") {
+		t.Fatalf("selector validation error = %v, want usage", err)
+	}
+}
+
 func TestRunDevHelpAndGateRegression(t *testing.T) {
 	helpOut := captureMainStdout(t, func() error {
 		return runDevCommand(config.DefaultConfig(), []string{"--help"})

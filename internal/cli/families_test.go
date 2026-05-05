@@ -31,6 +31,7 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"dev gate <issue-id>",
 		"opencode <init|plugin>",
 		"codex <install|guard|hook>",
+		"tmux <selector|install-selector>",
 		"spec <subcommand>",
 		"az notify idle_prompt az-123",
 		"az hooks install az-123",
@@ -45,6 +46,8 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"az opencode plugin install",
 		"az codex install",
 		"az codex hook run --json pre-tool-use",
+		"az tmux install-selector",
+		"az tmux selector",
 		"az spec req list --json",
 		"az spec req create --id bfs-req-1 --title \"Restore az spec grammar\" --issue bgh",
 		"az spec link add --issue bgh --req bfs-req-1 --role implements",
@@ -53,6 +56,126 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("usage missing %q: %q", want, output)
 		}
+	}
+}
+
+func TestTmuxInstallSelectorCommandWritesManagedBinding(t *testing.T) {
+	projectDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), ".tmux.conf")
+
+	opts, err := ParseTmuxInstallSelectorArgs([]string{
+		"--config", configPath,
+		"--project-dir", projectDir,
+		"--key", "S",
+		"--az-command", "az-dev",
+	})
+	if err != nil {
+		t.Fatalf("ParseTmuxInstallSelectorArgs error: %v", err)
+	}
+
+	output := captureStdout(t, func() error {
+		return TmuxInstallSelectorCommand(&Dependencies{RepoDir: projectDir}, opts)
+	})
+	if !strings.Contains(output, "Installed Azedarach tmux session selector") {
+		t.Fatalf("install output = %q", output)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read tmux config: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		"azedarach managed tmux session selector",
+		"bind-key S display-popup",
+		"-T 'tmux sessions'",
+		"az-dev tmux selector",
+		projectDir,
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("tmux config missing %q: %s", want, content)
+		}
+	}
+
+	if err := TmuxInstallSelectorCommand(&Dependencies{RepoDir: projectDir}, opts); err != nil {
+		t.Fatalf("second install error: %v", err)
+	}
+	data, err = os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read tmux config after second install: %v", err)
+	}
+	if got := strings.Count(string(data), "az-dev tmux selector"); got != 1 {
+		t.Fatalf("managed selector count = %d, want 1: %s", got, string(data))
+	}
+}
+
+func TestTmuxInstallSelectorCommandPersistsAbsoluteProjectDir(t *testing.T) {
+	baseDir := t.TempDir()
+	projectDir := filepath.Join(baseDir, "repo")
+	if err := os.Mkdir(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	configPath := filepath.Join(t.TempDir(), ".tmux.conf")
+
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldwd); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	})
+	if err := os.Chdir(baseDir); err != nil {
+		t.Fatalf("chdir base: %v", err)
+	}
+	wantProjectDir, err := filepath.Abs("." + string(os.PathSeparator) + "repo")
+	if err != nil {
+		t.Fatalf("abs project dir: %v", err)
+	}
+
+	opts, err := ParseTmuxInstallSelectorArgs([]string{"--config", configPath, "--project-dir", "." + string(os.PathSeparator) + "repo"})
+	if err != nil {
+		t.Fatalf("ParseTmuxInstallSelectorArgs error: %v", err)
+	}
+	if err := TmuxInstallSelectorCommand(&Dependencies{RepoDir: baseDir}, opts); err != nil {
+		t.Fatalf("TmuxInstallSelectorCommand error: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read tmux config: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, shellSingleQuote(wantProjectDir)) {
+		t.Fatalf("tmux config should persist absolute project dir %q: %s", wantProjectDir, content)
+	}
+	if strings.Contains(content, "cd './repo'") {
+		t.Fatalf("tmux config persisted relative project dir: %s", content)
+	}
+}
+
+func TestTmuxInstallSelectorCommandPreservesExistingConfigPermissions(t *testing.T) {
+	projectDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), ".tmux.conf")
+	if err := os.WriteFile(configPath, []byte("set -g mouse on\n"), 0o600); err != nil {
+		t.Fatalf("write tmux config: %v", err)
+	}
+
+	opts, err := ParseTmuxInstallSelectorArgs([]string{"--config", configPath, "--project-dir", projectDir})
+	if err != nil {
+		t.Fatalf("ParseTmuxInstallSelectorArgs error: %v", err)
+	}
+	if err := TmuxInstallSelectorCommand(&Dependencies{RepoDir: projectDir}, opts); err != nil {
+		t.Fatalf("TmuxInstallSelectorCommand error: %v", err)
+	}
+
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("stat tmux config: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("tmux config mode = %o, want 0600", got)
 	}
 }
 

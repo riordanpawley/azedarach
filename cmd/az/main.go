@@ -10,7 +10,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/cli"
 	clitext "github.com/riordanpawley/azedarach/internal/cli/text"
 	"github.com/riordanpawley/azedarach/internal/config"
-	"github.com/riordanpawley/azedarach/internal/tui"
+	app "github.com/riordanpawley/azedarach/internal/tui"
 )
 
 func main() {
@@ -36,6 +36,14 @@ func main() {
 	// If no arguments, run the TUI
 	if len(args) == 0 {
 		runTUI(cfg)
+		return
+	}
+	if args[0] == "--open-issue" {
+		if len(args) != 2 || strings.TrimSpace(args[1]) == "" {
+			fmt.Fprintf(os.Stderr, "Usage: az --open-issue <issue-id>\n")
+			os.Exit(1)
+		}
+		runTUIWithOptions(cfg, app.WithOpenTaskWorkspaceOnLoad(args[1]))
 		return
 	}
 
@@ -393,6 +401,12 @@ func main() {
 
 	case "codex":
 		if err := runCodexCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "tmux":
+		if err := runTmuxCommand(cfg, commandArgs); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -830,7 +844,13 @@ func main() {
 
 // runTUI starts the terminal user interface
 func runTUI(cfg *config.Config) {
-	model := app.New(cfg)
+	runTUIWithOptions(cfg)
+}
+
+var runTmuxSelectorForCommand = runGlobalTmuxSelector
+
+func runTUIWithOptions(cfg *config.Config, opts ...app.Option) {
+	model := app.NewWithOptions(cfg, opts...)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
