@@ -37,6 +37,11 @@ func TestCommandSpecRegistrySyncBootstrapPolicy(t *testing.T) {
 		t.Fatal("expected task.list to require sync bootstrap")
 	}
 
+	taskGetResp := CommandRequiresSyncBootstrap(protocol.RequestEnvelope{Command: "task.get"})
+	if taskGetResp {
+		t.Fatal("expected task.get not to require sync bootstrap")
+	}
+
 	sessionResp := CommandRequiresSyncBootstrap(protocol.RequestEnvelope{Command: CommandSessionPause})
 	if !sessionResp {
 		t.Fatal("expected session.pause to require sync bootstrap")
@@ -178,6 +183,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		protocol.CommandHookLogAppend,
 		protocol.CommandHookLogList,
 		commandTaskList,
+		commandTaskGet,
 		commandTaskCreate,
 		commandTaskUpdateStatus,
 		commandTaskUpdateDetails,

@@ -3674,6 +3674,57 @@ func TestIssueGetCommandJSON(t *testing.T) {
 	}
 }
 
+func TestIssueGetCommandUsesSingleIssueDaemonRead(t *testing.T) {
+	now := time.Date(2026, 3, 25, 11, 0, 0, 0, time.UTC)
+	var gotCommand string
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				gotCommand = req.Command
+				var body daemonclient.TaskIDRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal task get body: %v", err)
+				}
+				if body.TaskID != "az-5" {
+					t.Fatalf("task_id = %q, want az-5", body.TaskID)
+				}
+				bodyBytes, err := marshalTaskListBody([]domain.Task{{
+					ID:        "az-5",
+					Title:     "Lookup issue",
+					Status:    domain.StatusOpen,
+					Priority:  domain.P2,
+					Type:      domain.TypeTask,
+					CreatedAt: now,
+					UpdatedAt: now,
+				}})
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        4,
+					Body:            bodyBytes,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	_ = captureStdout(t, func() error {
+		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-5"})
+	})
+	if gotCommand != daemonclient.CommandTaskGet {
+		t.Fatalf("daemon command = %q, want %q", gotCommand, daemonclient.CommandTaskGet)
+	}
+}
+
 func TestIssueGetCommandTextIncludesNotes(t *testing.T) {
 	now := time.Date(2026, 3, 25, 11, 0, 0, 0, time.UTC)
 	tasks := []domain.Task{
@@ -4694,6 +4745,39 @@ func TestIssueCheckDoctorAndDeleteCommandsUseDaemonTaskCommands(t *testing.T) {
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
+				case daemonclient.CommandTaskGet:
+					var getBody daemonclient.TaskIDRequest
+					if err := json.Unmarshal(req.Body, &getBody); err != nil {
+						t.Fatalf("unmarshal task get body: %v", err)
+					}
+					if getBody.TaskID != "az-1" {
+						t.Fatalf("task_id = %q, want az-1", getBody.TaskID)
+					}
+					body, err := marshalTaskListBody([]domain.Task{
+						{
+							ID:          "az-1",
+							Title:       "Check target",
+							Description: "Desc",
+							Type:        domain.TypeTask,
+							Priority:    domain.P2,
+							Status:      domain.StatusOpen,
+							CreatedAt:   now,
+							UpdatedAt:   now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task get: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
 				case daemonclient.CommandTaskList:
 					body, err := marshalTaskListBody([]domain.Task{
 						{

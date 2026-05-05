@@ -508,6 +508,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleHookLogList(ctx, req)
 	case "task.list":
 		return d.handleTaskList(ctx, req)
+	case "task.get":
+		return d.handleTaskGet(ctx, req)
 	case "task.create":
 		return d.handleTaskCreate(ctx, req)
 	case "task.update_status":
