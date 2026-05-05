@@ -141,8 +141,36 @@ func (l *GlobalInventoryLoader) ListTasksSnapshot(ctx context.Context) (Snapshot
 	if len(live) > l.limit {
 		live = live[:l.limit]
 	}
+	snapshot := l.snapshotFromLive(live, nil, true)
 	projectDirs := l.projectDirsForLiveSessions(live)
 	projections := l.loadProjections(ctx, projectDirs)
+	return l.enrichEntries(snapshot, projections), nil
+}
+
+func (l *GlobalInventoryLoader) ListLiveSnapshot(ctx context.Context) (Snapshot, error) {
+	if l == nil || l.tmux == nil {
+		return Snapshot{}, errInventoryUnavailable()
+	}
+	live, err := l.tmux.ListSessionInfos(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if len(live) > l.limit {
+		live = live[:l.limit]
+	}
+	return l.snapshotFromLive(live, nil, true), nil
+}
+
+func (l *GlobalInventoryLoader) EnrichSnapshot(ctx context.Context, snapshot Snapshot) (Snapshot, error) {
+	if l == nil {
+		return snapshot, errInventoryUnavailable()
+	}
+	projectDirs := l.projectDirsForEntries(snapshot.Entries)
+	projections := l.loadProjections(ctx, projectDirs)
+	return l.enrichEntries(snapshot, projections), nil
+}
+
+func (l *GlobalInventoryLoader) snapshotFromLive(live []tmux.SessionInfo, projections map[string]projectedInventory, enriching bool) Snapshot {
 	entries := make([]InventoryEntry, 0, len(live))
 	seen := make(map[string]struct{}, len(live))
 	for _, info := range live {
@@ -191,6 +219,28 @@ func (l *GlobalInventoryLoader) ListTasksSnapshot(ctx context.Context) (Snapshot
 		}
 		entries = append(entries, entry)
 	}
+	return l.snapshotFromEntries(entries, enriching)
+}
+
+func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map[string]projectedInventory) Snapshot {
+	entries := make([]InventoryEntry, 0, len(snapshot.Entries))
+	for _, entry := range snapshot.Entries {
+		if projection, ok := projections[entry.SessionID]; ok {
+			entry = mergeProjectedInventory(entry, projection)
+		} else if entry.IssueID != "" {
+			if projection, ok := projections[entry.IssueID]; ok {
+				entry = mergeProjectedInventory(entry, projection)
+			}
+		}
+		if entry.ProjectPath == "" && entry.Worktree != "" {
+			entry.ProjectPath = inferProjectPath(entry.Worktree, l.projectDirs)
+		}
+		entries = append(entries, entry)
+	}
+	return l.snapshotFromEntries(entries, false)
+}
+
+func (l *GlobalInventoryLoader) snapshotFromEntries(entries []InventoryEntry, enriching bool) Snapshot {
 	sort.SliceStable(entries, func(i, j int) bool {
 		leftKnown := entries[i].ProjectPath != ""
 		rightKnown := entries[j].ProjectPath != ""
@@ -219,7 +269,8 @@ func (l *GlobalInventoryLoader) ListTasksSnapshot(ctx context.Context) (Snapshot
 		Tasks:         tasks,
 		LastCheckedAt: time.Now().UTC(),
 		Freshness:     "fresh",
-	}, nil
+		Enriching:     enriching,
+	}
 }
 
 type projectedInventory struct {
@@ -258,6 +309,41 @@ func (l *GlobalInventoryLoader) projectDirsForLiveSessions(live []tmux.SessionIn
 	}
 	for _, info := range live {
 		add(info.Path)
+	}
+	sort.Strings(dirs)
+	if len(dirs) > defaultInventoryProjectLimit {
+		dirs = dirs[:defaultInventoryProjectLimit]
+	}
+	return dirs
+}
+
+func (l *GlobalInventoryLoader) projectDirsForEntries(entries []InventoryEntry) []string {
+	seen := map[string]struct{}{}
+	var dirs []string
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		if root, err := config.ResolveProjectRoot(path); err == nil {
+			path = root
+		}
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return
+		}
+		if _, exists := seen[abs]; exists {
+			return
+		}
+		seen[abs] = struct{}{}
+		dirs = append(dirs, abs)
+	}
+	for _, projectDir := range l.projectDirs {
+		add(projectDir)
+	}
+	for _, entry := range entries {
+		add(entry.ProjectPath)
+		add(entry.Worktree)
 	}
 	sort.Strings(dirs)
 	if len(dirs) > defaultInventoryProjectLimit {

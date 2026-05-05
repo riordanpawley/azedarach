@@ -56,10 +56,17 @@ type Snapshot struct {
 	Revision      uint64
 	LastCheckedAt time.Time
 	Freshness     string
+	Enriching     bool
 }
 
 type SnapshotLoader interface {
 	ListTasksSnapshot(context.Context) (Snapshot, error)
+}
+
+type LiveSnapshotLoader interface {
+	SnapshotLoader
+	ListLiveSnapshot(context.Context) (Snapshot, error)
+	EnrichSnapshot(context.Context, Snapshot) (Snapshot, error)
 }
 
 type SnapshotLoaderFunc func(context.Context) (Snapshot, error)
@@ -133,6 +140,11 @@ type LoadFailedMsg struct {
 	Err error
 }
 
+type EnrichedMsg struct {
+	Snapshot Snapshot
+	Err      error
+}
+
 type SwitchResultMsg struct {
 	Err error
 }
@@ -180,6 +192,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.snapshot = msg.Snapshot
 		m.normalizeSnapshot()
 		m.status = formatSnapshotStatus(m.snapshot, len(m.snapshot.Entries))
+		if liveLoader, ok := m.loader.(LiveSnapshotLoader); ok && m.snapshot.Enriching {
+			return m, m.enrichCmd(liveLoader, m.snapshot)
+		}
 		return m, nil
 	case snapshotLoadedMsg:
 		if msg.err != nil {
@@ -189,6 +204,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case LoadFailedMsg:
 		m.loading = false
 		m.err = msg.Err
+		return m, nil
+	case EnrichedMsg:
+		if msg.Err != nil {
+			m.status = strings.TrimSpace(m.status + "  enrichment failed")
+			return m, nil
+		}
+		m.snapshot = msg.Snapshot
+		m.normalizeSnapshot()
+		m.status = formatSnapshotStatus(m.snapshot, len(m.snapshot.Entries))
 		return m, nil
 	case SwitchResultMsg:
 		if msg.Err != nil {
@@ -305,11 +329,27 @@ func (m Model) loadCmd() tea.Cmd {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
+		if liveLoader, ok := m.loader.(LiveSnapshotLoader); ok {
+			snapshot, err := liveLoader.ListLiveSnapshot(ctx)
+			if err != nil {
+				return LoadFailedMsg{Err: err}
+			}
+			return LoadedMsg{Snapshot: snapshot}
+		}
 		snapshot, err := m.loader.ListTasksSnapshot(ctx)
 		if err != nil {
 			return LoadFailedMsg{Err: err}
 		}
 		return LoadedMsg{Snapshot: snapshot}
+	}
+}
+
+func (m Model) enrichCmd(loader LiveSnapshotLoader, snapshot Snapshot) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		enriched, err := loader.EnrichSnapshot(ctx, snapshot)
+		return EnrichedMsg{Snapshot: enriched, Err: err}
 	}
 }
 

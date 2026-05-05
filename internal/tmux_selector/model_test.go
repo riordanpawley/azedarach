@@ -19,6 +19,27 @@ func (f fakeSnapshotLoader) ListTasksSnapshot(context.Context) (Snapshot, error)
 	return f.snapshot, f.err
 }
 
+type fakeLiveSnapshotLoader struct {
+	liveCalls   int
+	enrichCalls int
+	live        Snapshot
+	enriched    Snapshot
+}
+
+func (f *fakeLiveSnapshotLoader) ListTasksSnapshot(context.Context) (Snapshot, error) {
+	return f.enriched, nil
+}
+
+func (f *fakeLiveSnapshotLoader) ListLiveSnapshot(context.Context) (Snapshot, error) {
+	f.liveCalls++
+	return f.live, nil
+}
+
+func (f *fakeLiveSnapshotLoader) EnrichSnapshot(_ context.Context, _ Snapshot) (Snapshot, error) {
+	f.enrichCalls++
+	return f.enriched, nil
+}
+
 type fakeSwitcher struct {
 	sessionID string
 	err       error
@@ -57,6 +78,57 @@ func TestModelUsesFakeInventoryAndSwitchesSessionID(t *testing.T) {
 	}
 	if switcher.sessionID != "ch-two" {
 		t.Fatalf("switched session = %q, want ch-two", switcher.sessionID)
+	}
+}
+
+func TestModelInitialLoadUsesLiveSnapshotBeforeEnrichment(t *testing.T) {
+	loader := &fakeLiveSnapshotLoader{
+		live: Snapshot{
+			Enriching: true,
+			Entries: []InventoryEntry{{
+				SessionID: "az-bxf",
+				IssueID:   "bxf",
+				TaskTitle: "bxf",
+			}},
+		},
+		enriched: Snapshot{Entries: []InventoryEntry{{
+			SessionID:     "az-bxf",
+			IssueID:       "bxf",
+			TaskTitle:     "Standalone selector performance",
+			GitAheadCount: 3,
+		}}},
+	}
+	model := New(loader)
+
+	msg := model.Init()()
+	loaded, ok := msg.(LoadedMsg)
+	if !ok {
+		t.Fatalf("init msg = %T, want LoadedMsg", msg)
+	}
+	if loader.liveCalls != 1 || loader.enrichCalls != 0 {
+		t.Fatalf("calls after init cmd live=%d enrich=%d, want live=1 enrich=0", loader.liveCalls, loader.enrichCalls)
+	}
+	if loaded.Snapshot.Entries[0].TaskTitle != "bxf" {
+		t.Fatalf("initial title = %q, want live fallback", loaded.Snapshot.Entries[0].TaskTitle)
+	}
+
+	updated, cmd := model.Update(loaded)
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected background enrichment command")
+	}
+	if !strings.Contains(model.View(), "az-bxf") {
+		t.Fatalf("first interactive view missing live row: %q", model.View())
+	}
+	enrichedMsg, ok := cmd().(EnrichedMsg)
+	if !ok {
+		t.Fatalf("enrich cmd msg = %T, want EnrichedMsg", enrichedMsg)
+	}
+	if loader.enrichCalls != 1 {
+		t.Fatalf("enrich calls = %d, want 1", loader.enrichCalls)
+	}
+	if enrichedMsg.Snapshot.Entries[0].TaskTitle != "Standalone selector performance" {
+		t.Fatalf("enriched title = %q", enrichedMsg.Snapshot.Entries[0].TaskTitle)
 	}
 }
 
