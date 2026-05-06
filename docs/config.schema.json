@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json",
   "title": "Azedarach Config",
+  "description": "Schema for .azedarach/config.json and optional local override .azedarach/config.local.json. Runtime loading layers defaults, config.json, then config.local.json.",
   "type": "object",
   "additionalProperties": false,
   "properties": {

@@ -266,6 +266,7 @@ func DefaultSessionShell() string {
 const (
 	ConfigDirName        = ".azedarach"
 	ConfigFileName       = "config.json"
+	LocalConfigFileName  = "config.local.json"
 	ConfigSchemaFileName = "config.schema.json"
 	ConfigSchemaURL      = "https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json"
 	CurrentConfigVersion = 7
@@ -277,35 +278,47 @@ type configFileMetadata struct {
 }
 
 // LoadConfig loads configuration from the nearest project/worktree base containing
-// .azedarach/config.json. If no config file exists, defaults are returned.
+// .azedarach/config.json or .azedarach/config.local.json. Config files are layered
+// as defaults < config.json < config.local.json. If no config file exists,
+// defaults are returned.
 func LoadConfig(projectPath string) (*Config, error) {
 	baseDir, err := ResolveConfigBase(projectPath)
 	if err != nil {
 		return nil, err
 	}
-	configPath := filepath.Join(baseDir, ConfigDirName, ConfigFileName)
+
+	cfg := DefaultConfig()
+	for _, name := range []string{ConfigFileName, LocalConfigFileName} {
+		configPath := filepath.Join(baseDir, ConfigDirName, name)
+		if err := loadConfigLayer(cfg, configPath); err != nil {
+			return nil, err
+		}
+	}
+
+	return MergeWithDefaults(cfg), nil
+}
+
+func loadConfigLayer(cfg *Config, configPath string) error {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return DefaultConfig(), nil
+			return nil
 		}
-		return nil, fmt.Errorf("failed to read %s: %w", configPath, err)
+		return fmt.Errorf("failed to read %s: %w", configPath, err)
 	}
 
 	var meta configFileMetadata
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return nil, fmt.Errorf("failed to parse %s metadata: %w", configPath, err)
+		return fmt.Errorf("failed to parse %s metadata: %w", configPath, err)
 	}
 	if meta.Version > CurrentConfigVersion {
-		return nil, fmt.Errorf("unsupported config version %d in %s (max supported %d)", meta.Version, configPath, CurrentConfigVersion)
+		return fmt.Errorf("unsupported config version %d in %s (max supported %d)", meta.Version, configPath, CurrentConfigVersion)
 	}
 
-	cfg := DefaultConfig()
 	if err := json.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse %s: %w", configPath, err)
+		return fmt.Errorf("failed to parse %s: %w", configPath, err)
 	}
-
-	return MergeWithDefaults(cfg), nil
+	return nil
 }
 
 // SaveConfig saves configuration to the specified path with version information
@@ -365,9 +378,11 @@ func ResolveConfigBase(startPath string) (string, error) {
 	// Fallback for non-git test/directories.
 	dir := abs
 	for {
-		configPath := filepath.Join(dir, ConfigDirName, ConfigFileName)
-		if _, err := os.Stat(configPath); err == nil {
-			return dir, nil
+		for _, name := range []string{ConfigFileName, LocalConfigFileName} {
+			configPath := filepath.Join(dir, ConfigDirName, name)
+			if _, err := os.Stat(configPath); err == nil {
+				return dir, nil
+			}
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
