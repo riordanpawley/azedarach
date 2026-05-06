@@ -303,6 +303,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !ok {
 				return m, nil
 			}
+			if m.shouldOpenDetailOnSwitch(entry) {
+				if issueID := entryIssueID(entry); issueID != "" {
+					m.status = fmt.Sprintf("Opening %s in full az...", issueID)
+				}
+				return m, m.openDetailAndSwitchCmd(entry)
+			}
 			return m, m.switchCmd(entry)
 		case " ", "space", "o":
 			entry, ok := m.selectedEntry()
@@ -552,6 +558,36 @@ func (m Model) switchCmd(entry InventoryEntry) tea.Cmd {
 	}
 }
 
+func (m Model) shouldOpenDetailOnSwitch(entry InventoryEntry) bool {
+	return m.detailOpener != nil && strings.TrimSpace(entry.SessionID) != defaultFullAzSession && entryIssueID(entry) != ""
+}
+
+func (m Model) openDetailAndSwitchCmd(entry InventoryEntry) tea.Cmd {
+	return func() tea.Msg {
+		if m.switcher == nil {
+			return SwitchResultMsg{Err: fmt.Errorf("tmux switcher unavailable")}
+		}
+		if m.detailOpener == nil {
+			return SwitchResultMsg{Err: fmt.Errorf("detail opener unavailable")}
+		}
+		issueID := entryIssueID(entry)
+		if issueID == "" {
+			return SwitchResultMsg{Err: fmt.Errorf("selected session has no issue id")}
+		}
+		entry.IssueID = issueID
+		target := strings.TrimSpace(entry.SessionID)
+		if target == "" {
+			target = issueID
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := m.detailOpener.OpenDetail(ctx, entry); err != nil {
+			return SwitchResultMsg{Err: fmt.Errorf("request full az detail open: %w", err)}
+		}
+		return SwitchResultMsg{Err: m.switcher.SwitchClient(ctx, target)}
+	}
+}
+
 func (m Model) openDetailCmd(entry InventoryEntry) tea.Cmd {
 	return func() tea.Msg {
 		switcher, ok := m.switcher.(fullAzSwitcher)
@@ -590,6 +626,14 @@ func openFullAzDetail(ctx context.Context, switcher fullAzSwitcher, opener Detai
 		return fmt.Errorf("switch to full az tmux session: %w", err)
 	}
 	return nil
+}
+
+func entryIssueID(entry InventoryEntry) string {
+	issueID := strings.TrimSpace(entry.IssueID)
+	if issueID == "" {
+		issueID = strings.TrimSpace(entry.Task.ID.String())
+	}
+	return issueID
 }
 
 func EntriesFromTasks(tasks []domain.Task) []InventoryEntry {
