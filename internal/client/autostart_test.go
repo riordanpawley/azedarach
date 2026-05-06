@@ -212,14 +212,14 @@ func TestEnsureAttachedRetryAfterRestart(t *testing.T) {
 	}
 }
 
-func TestEnsureAttachedReplacesAcceptedReleaseVersionMismatch(t *testing.T) {
+func TestEnsureAttachedReplacesAcceptedVersionMismatch(t *testing.T) {
 	var replaced atomic.Bool
 	h := &fakeHandshaker{
 		fn: func() (protocol.HelloAck, error) {
 			if replaced.Load() {
-				return protocol.HelloAck{Accepted: true, DaemonVersion: "1.2.0 (new)"}, nil
+				return protocol.HelloAck{Accepted: true, DaemonVersion: "dev-new"}, nil
 			}
-			return protocol.HelloAck{Accepted: true, DaemonVersion: "1.1.0 (old)"}, nil
+			return protocol.HelloAck{Accepted: true, DaemonVersion: "dev-old"}, nil
 		},
 	}
 	s := &fakeStarter{
@@ -235,41 +235,16 @@ func TestEnsureAttachedReplacesAcceptedReleaseVersionMismatch(t *testing.T) {
 	ack, err := o.EnsureAttached(context.Background(), protocol.Hello{
 		ProtocolVersion: protocol.CurrentVersion,
 		ClientName:      "cli",
-		ClientVersion:   "1.2.0 (new)",
+		ClientVersion:   "dev-new",
 	})
 	if err != nil {
 		t.Fatalf("EnsureAttached err: %v", err)
 	}
-	if !ack.Accepted || ack.DaemonVersion != "1.2.0 (new)" {
+	if !ack.Accepted || ack.DaemonVersion != "dev-new" {
 		t.Fatalf("ack = %+v, want accepted new daemon", ack)
 	}
 	if got := s.replaceCalls.Load(); got != 1 {
 		t.Fatalf("replace calls = %d, want 1", got)
-	}
-}
-
-func TestEnsureAttachedAcceptsDevBuildCommitMismatch(t *testing.T) {
-	h := &fakeHandshaker{
-		fn: func() (protocol.HelloAck, error) {
-			return protocol.HelloAck{Accepted: true, DaemonVersion: "dev (old-sha)"}, nil
-		},
-	}
-	s := &fakeStarter{}
-	o := NewAutostartOrchestrator(h, s)
-
-	ack, err := o.EnsureAttached(context.Background(), protocol.Hello{
-		ProtocolVersion: protocol.CurrentVersion,
-		ClientName:      "cli",
-		ClientVersion:   "dev (new-sha)",
-	})
-	if err != nil {
-		t.Fatalf("EnsureAttached err: %v", err)
-	}
-	if !ack.Accepted {
-		t.Fatalf("ack.Accepted = false, want true")
-	}
-	if got := s.replaceCalls.Load(); got != 0 {
-		t.Fatalf("replace calls = %d, want 0", got)
 	}
 }
 

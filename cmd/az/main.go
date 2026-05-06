@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -842,6 +843,10 @@ func runTUI(cfg *config.Config) {
 var runTmuxSelectorForCommand = runGlobalTmuxSelector
 
 func runTUIWithOptions(cfg *config.Config, opts ...app.Option) {
+	if err := validateTUILaunchContext(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 	model := app.NewWithOptions(cfg, opts...)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
@@ -849,6 +854,39 @@ func runTUIWithOptions(cfg *config.Config, opts ...app.Option) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func validateTUILaunchContext() error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+	if !isLinkedGitWorktree(cwd) || tuiScopedDaemonRuntimeEnabled() {
+		return nil
+	}
+	return fmt.Errorf("refusing to start the TUI from a linked worktree without the scoped just-run environment; run `just run` from this worktree so ./bin/az and ./bin/azd are paired and AZEDARACH_DAEMON_SCOPE=worktree is set")
+}
+
+func tuiScopedDaemonRuntimeEnabled() bool {
+	mode := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
+	source := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")))
+	modeEnabled := mode == "worktree" || mode == "scoped" || mode == "local"
+	return modeEnabled && source == "just-run"
+}
+
+func isLinkedGitWorktree(startDir string) bool {
+	worktreeRoot, err := config.ResolveWorktreeRoot(startDir)
+	if err != nil {
+		return false
+	}
+	projectRoot, err := config.ResolveProjectRoot(startDir)
+	if err != nil {
+		return false
+	}
+	if strings.TrimSpace(worktreeRoot) == "" || strings.TrimSpace(projectRoot) == "" {
+		return false
+	}
+	return filepath.Clean(worktreeRoot) != filepath.Clean(projectRoot)
 }
 
 func printRootUsage() {

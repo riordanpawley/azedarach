@@ -810,7 +810,7 @@ func TestRefreshWorktreeRuntimeStatePersistsGitMetricsFromWorktreeList(t *testin
 	}
 }
 
-func TestRefreshWorktreeRuntimeStateMutationHonorsGitProbeBudget(t *testing.T) {
+func TestRefreshWorktreeRuntimeStateMutationDoesNotBypassGitProbeBudget(t *testing.T) {
 	ctx := context.WithValue(context.Background(), runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
 		Priority: reconcilePriorityManual,
 		Reason:   "mutation:session.stop",

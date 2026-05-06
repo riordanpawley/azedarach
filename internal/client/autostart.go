@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -163,26 +162,10 @@ func shouldReplaceAcceptedDaemon(hello protocol.Hello, ack protocol.HelloAck) bo
 	if !ack.Accepted {
 		return false
 	}
-	clientVersion := comparableBuildVersion(hello.ClientVersion)
-	daemonVersion := comparableBuildVersion(ack.DaemonVersion)
-	if clientVersion == "" || daemonVersion == "" {
+	if hello.ClientVersion == "" || ack.DaemonVersion == "" {
 		return false
 	}
-	if clientVersion == "dev" || daemonVersion == "dev" {
-		return false
-	}
-	return clientVersion != daemonVersion
-}
-
-func comparableBuildVersion(version string) string {
-	version = strings.TrimSpace(version)
-	if version == "" {
-		return ""
-	}
-	if before, _, ok := strings.Cut(version, " "); ok {
-		version = before
-	}
-	return strings.TrimSpace(version)
+	return hello.ClientVersion != ack.DaemonVersion
 }
 
 func (o *AutostartOrchestrator) startDaemon(ctx context.Context) error {
