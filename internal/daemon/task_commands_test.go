@@ -809,3 +809,64 @@ func TestRefreshWorktreeRuntimeStatePersistsGitMetricsFromWorktreeList(t *testin
 		t.Fatalf("persisted git ahead/behind = %d/%d, want 2/5", status.GitAheadCount, status.GitBehindCount)
 	}
 }
+
+func TestRefreshWorktreeRuntimeStateMutationHonorsGitProbeBudget(t *testing.T) {
+	ctx := context.WithValue(context.Background(), runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
+		Priority: reconcilePriorityManual,
+		Reason:   "mutation:session.stop",
+	})
+	projectID := "proj-refresh-budget"
+	statusCalls := 0
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain":
+			return "worktree /tmp/repo-root\nbranch refs/heads/main\n\n" +
+				"worktree /tmp/repo-az-1\nbranch refs/heads/az/az-1\n\n" +
+				"worktree /tmp/repo-az-2\nbranch refs/heads/az/az-2\n", nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "status" && args[3] == "--porcelain":
+			statusCalls++
+			return "", nil
+		default:
+			return "", nil
+		}
+	}}
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+
+	now := time.Date(2026, time.May, 6, 12, 0, 0, 0, time.UTC)
+	d := &Daemon{
+		cfg: Config{RepoDir: "/tmp/repo-root", BaseBranch: "main", Logger: slog.Default()},
+		git: git.NewClient(runner, slog.Default()),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			"/tmp/repo-root": store,
+		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			"/tmp/repo-root": git.NewWorktreeManager(runner, "/tmp/repo-root", slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(runner, "/tmp/repo-root", slog.Default()),
+		},
+		worktreeGitProbeThrottle: newReconcileThrottle(reconcileThrottleConfig{
+			Name:                 "worktree_git_probe_test",
+			Budget:               1,
+			Cadence:              time.Hour,
+			UnchangedBackoffBase: time.Hour,
+			UnchangedBackoffMax:  time.Hour,
+			FailureBackoffBase:   time.Hour,
+			FailureBackoffMax:    time.Hour,
+			Now:                  func() time.Time { return now },
+		}),
+	}
+
+	count, err := d.refreshWorktreeRuntimeState(ctx, projectID)
+	if err != nil {
+		t.Fatalf("refreshWorktreeRuntimeState error: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("refreshWorktreeRuntimeState count = %d, want 2", count)
+	}
+	if statusCalls != 1 {
+		t.Fatalf("status calls = %d, want 1", statusCalls)
+	}
+}

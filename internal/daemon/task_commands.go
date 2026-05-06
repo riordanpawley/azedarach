@@ -273,7 +273,7 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 	worktreePathByIssue := make(map[string]string, len(worktrees))
 	throttle := d.ensureWorktreeGitProbeThrottle()
 	trigger := runtimeReconcileRequestFromContext(ctx)
-	forceProbe := trigger.Priority >= reconcilePriorityManual
+	forceProbe := trigger.Priority >= reconcilePriorityManual && strings.TrimSpace(trigger.Reason) == "manual"
 	processedProbes := 0
 	skippedProbes := 0
 	deferredProbes := 0
