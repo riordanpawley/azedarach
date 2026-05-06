@@ -2168,6 +2168,93 @@ func TestHandleMergeResultPendingOperationShowsInfoToast(t *testing.T) {
 	if !strings.Contains(gotToast, "Merge queued for az-1 (operation op-merge)") {
 		t.Fatalf("toast = %q, want queued merge message", gotToast)
 	}
+	signals := updatedModel.runtimeSignalsForBoard()["az-1"]
+	if signals.PendingOperationID != "op-merge" || signals.PendingOperationState != string(protocol.OperationStateQueued) {
+		t.Fatalf("pending merge signals = %+v", signals)
+	}
+	progress := updatedModel.pendingMutationForTask("az-1")
+	if progress == nil || progress.OperationID != "op-merge" || progress.State != string(protocol.OperationStateQueued) {
+		t.Fatalf("pending merge detail progress = %+v", progress)
+	}
+}
+
+func TestHandleFollowOnMergePendingOperationMarksSourceAndTarget(t *testing.T) {
+	m := newTestModel()
+
+	updated, _ := m.Update(mergeResultMsg{
+		sourceID:    "az-1",
+		targetID:    "az-3",
+		stage:       "merge",
+		operationID: "op-merge",
+		state:       protocol.OperationStateRunning,
+	})
+
+	updatedModel := updated.(Model)
+	for _, taskID := range []string{"az-1", "az-3"} {
+		signals := updatedModel.runtimeSignalsForBoard()[taskID]
+		if signals.PendingOperationID != "op-merge" || signals.PendingOperationState != string(protocol.OperationStateRunning) {
+			t.Fatalf("pending merge signals for %s = %+v", taskID, signals)
+		}
+		progress := updatedModel.pendingMutationForTask(taskID)
+		if progress == nil || progress.OperationID != "op-merge" || progress.State != string(protocol.OperationStateRunning) {
+			t.Fatalf("pending merge detail progress for %s = %+v", taskID, progress)
+		}
+	}
+}
+
+func TestPendingMergeOperationSurvivesStaleIssueSnapshot(t *testing.T) {
+	m := newTestModel()
+
+	pendingAny, _ := m.Update(mergeResultMsg{
+		sourceID:    "az-1",
+		targetID:    "az-3",
+		stage:       "merge",
+		operationID: "op-merge",
+		state:       protocol.OperationStateRunning,
+	})
+	pendingModel := pendingAny.(Model)
+
+	refreshedAny, _ := pendingModel.Update(issuesLoadedMsg{
+		tasks: []domain.Task{
+			{ID: "az-1", Title: "Task 1 stale", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+			{ID: "az-3", Title: "Task 3 stale", Status: domain.StatusInProgress, Priority: domain.P0, Type: domain.TypeFeature},
+		},
+	})
+	refreshed := refreshedAny.(Model)
+
+	for _, taskID := range []string{"az-1", "az-3"} {
+		signals := refreshed.runtimeSignalsForBoard()[taskID]
+		if signals.PendingOperationID != "op-merge" || signals.PendingOperationState != string(protocol.OperationStateRunning) {
+			t.Fatalf("pending merge signals after stale snapshot for %s = %+v", taskID, signals)
+		}
+		progress := refreshed.pendingMutationForTask(taskID)
+		if progress == nil || progress.OperationID != "op-merge" || progress.State != string(protocol.OperationStateRunning) {
+			t.Fatalf("pending merge detail progress after stale snapshot for %s = %+v", taskID, progress)
+		}
+	}
+}
+
+func TestLocalMergeActivityMarkerClearsOnMergeFailure(t *testing.T) {
+	m := newTestModel()
+	m.markMergeOperationPreparing("az-1", "az-3", "preparing merge")
+
+	updatedAny, _ := m.Update(mergeResultMsg{
+		sourceID: "az-1",
+		targetID: "az-3",
+		stage:    "merge",
+		err:      fmt.Errorf("preflight failed"),
+	})
+	updated := updatedAny.(Model)
+
+	for _, taskID := range []string{"az-1", "az-3"} {
+		signals := updated.runtimeSignalsForBoard()[taskID]
+		if signals.PendingOperationState != "" || signals.PendingOperationID != "" {
+			t.Fatalf("pending merge marker for %s = %+v, want cleared", taskID, signals)
+		}
+		if progress := updated.pendingMutationForTask(taskID); progress != nil {
+			t.Fatalf("detail progress for %s = %+v, want nil", taskID, progress)
+		}
+	}
 }
 
 func TestHandleMergeTargetSelectionToBaseUsesWorktreeLookupFallback(t *testing.T) {
@@ -6048,6 +6135,7 @@ func TestFetchAndMergeCommandReturnsPendingOperationToast(t *testing.T) {
 	}
 
 	m := newDaemonTestModel(transport)
+	m.tasks = append(m.tasks, domain.Task{ID: "az-child", Title: "Child", Status: domain.StatusInProgress, Priority: domain.P2, Type: domain.TypeTask})
 	msg := m.fetchAndMergeCmd("/tmp/az-child", "main", "az-child", false)()
 	result, ok := msg.(fetchAndMergeResultMsg)
 	if !ok {
@@ -6068,6 +6156,10 @@ func TestFetchAndMergeCommandReturnsPendingOperationToast(t *testing.T) {
 	gotToast := updatedModel.toasts[len(updatedModel.toasts)-1].Message
 	if !strings.Contains(gotToast, "Merge running for az-child (operation op-merge)") {
 		t.Fatalf("toast = %q, want merge running message", gotToast)
+	}
+	signals := updatedModel.runtimeSignalsForBoard()["az-child"]
+	if signals.PendingOperationID != "op-merge" || signals.PendingOperationState != string(protocol.OperationStateRunning) {
+		t.Fatalf("pending update-from-base signals = %+v", signals)
 	}
 }
 

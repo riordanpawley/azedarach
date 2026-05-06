@@ -575,7 +575,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			action := "Merge"
 			if msg.stage == "stop_session" {
 				action = "Stop session"
+				m.markTaskOperationPending(msg.targetID, "session_stop", msg.operationID, msg.state)
+			} else {
+				m.markMergeOperationPending(msg.sourceID, msg.targetID, msg.operationID, msg.state)
 			}
+			m.syncTaskWorkspaceOverlay()
 			m.addToast(Toast{
 				Level:   ToastInfo,
 				Message: formatPendingOperationMessage(action, msg.sourceID, msg.operationID, msg.state),
@@ -584,6 +588,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.loadIssuesCmd()
 		}
 		if msg.err != nil {
+			m.clearLocalMergeOperationPending(msg.sourceID, msg.targetID)
 			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Merge failed: %v", msg.err),
@@ -593,6 +598,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.result.HasConflicts {
+			m.clearLocalMergeOperationPending(msg.sourceID, msg.targetID)
 			m.addToast(Toast{
 				Level:   ToastWarning,
 				Message: fmt.Sprintf("Merge conflicts: %s", strings.Join(msg.result.ConflictFiles, ", ")),
@@ -601,6 +607,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.openOverlay(overlay.NewConflictDialog(msg.result.ConflictFiles))
 		}
 
+		m.clearLocalMergeOperationPending(msg.sourceID, msg.targetID)
 		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Successfully merged %s into %s", msg.sourceID, msg.targetID),
@@ -609,6 +616,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadIssuesCmd()
 
 	case mergePreflightFailureMsg:
+		m.clearLocalMergeOperationPending(msg.sourceID, msg.targetID)
 		return m, m.overlayStack.Push(overlay.NewMergePreflightOverlay(
 			msg.sourceID,
 			msg.targetID,
@@ -680,6 +688,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case mergeTargetSelectionResolvedMsg:
 		if msg.err != nil {
+			m.clearLocalMergeOperationPending(msg.sourceID, msg.targetID)
 			m.addToast(Toast{
 				Level:   ToastError,
 				Message: msg.err.Error(),
@@ -722,6 +731,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.stage == "fetch" {
 				action = "Fetch"
 			}
+			m.markTaskGitOperationPending(msg.issueID, "git.merge", msg.operationID, msg.state)
+			m.syncTaskWorkspaceOverlay()
 			m.addToast(Toast{
 				Level:   ToastInfo,
 				Message: formatPendingOperationMessage(action, msg.issueID, msg.operationID, msg.state),
@@ -730,6 +741,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.loadIssuesCmd()
 		}
 		if msg.err != nil {
+			m.clearLocalTaskGitOperationPending(msg.issueID)
+			m.syncTaskWorkspaceOverlay()
 			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Merge failed: %v", msg.err),
@@ -739,6 +752,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.result.HasConflicts {
+			m.clearLocalTaskGitOperationPending(msg.issueID)
+			m.syncTaskWorkspaceOverlay()
 			// Show conflict dialog
 			m.addToast(Toast{
 				Level:   ToastWarning,
@@ -749,6 +764,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Successful merge
+		m.clearLocalTaskGitOperationPending(msg.issueID)
+		m.syncTaskWorkspaceOverlay()
 		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: "Updated from main successfully",

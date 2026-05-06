@@ -342,6 +342,7 @@ func (m Model) handleMergeTargetSelection(msg overlay.MergeTargetSelectedMsg) (t
 	if targetSession := m.sessionForIssue(msg.TargetID); targetSession != nil {
 		targetState = targetSession.State
 	}
+	m.markMergeOperationPreparing(msg.SourceID, msg.TargetID, "preparing merge")
 	m.beginMutationFeedback(fmt.Sprintf("Resolving merge %s -> %s", msg.SourceID, msg.TargetID))
 	return m, m.resolveMergeTargetSelectionCmd(msg.SourceID, msg.TargetID, targetState, !msg.SkipPreflightStatusRefresh)
 }
@@ -601,6 +602,7 @@ func (m *Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Ses
 	candidates := m.getFollowOnMergeCandidates(task)
 	if len(candidates) == 0 {
 		if task.ParentID == nil {
+			m.markMergeOperationPreparing(task.ID.String(), mergeBaseTargetID, "preparing merge")
 			return m.resolveMergeToBaseCmd(task.ID.String(), true)
 		}
 		m.addToast(Toast{
@@ -617,6 +619,7 @@ func (m *Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Ses
 			"targetID", task.ID,
 			"relation", candidates[0].relation,
 		)
+		m.markMergeOperationPreparing(candidates[0].target.ID, task.ID.String(), "preparing merge")
 		return m.resolveFollowOnMergeCmd(candidates[0].target.ID, task.ID.String(), targetState, targetStateKnown, true)
 	}
 

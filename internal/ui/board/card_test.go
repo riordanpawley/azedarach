@@ -816,6 +816,16 @@ func TestRenderRuntimeSignals(t *testing.T) {
 			t.Fatalf("renderRuntimeSignals(...) = %q, missing ahead token", got)
 		}
 	})
+
+	t.Run("local preparing operation", func(t *testing.T) {
+		signals := &RuntimeSignals{
+			PendingOperationState: "preparing",
+		}
+		got := stripANSI(renderRuntimeSignals(signals, styles.New()))
+		if !strings.Contains(got, "M:preparing") {
+			t.Fatalf("renderRuntimeSignals(...) = %q, missing preparing token", got)
+		}
+	})
 }
 
 func TestRenderRuntimeSignalsCompact(t *testing.T) {
