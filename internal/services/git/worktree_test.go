@@ -773,15 +773,15 @@ branch refs/heads/az/issue-123`,
 		},
 		{
 			name: "deterministic author issue slug branch",
-			output: `worktree /home/user/test-repo-che-3002
+			output: `worktree /home/user/test-repo-CHE-3002
 HEAD abc123
 branch refs/heads/riordanpawley/che-3002/migrate-prep-lists-to-db
 `,
 			expected: []Worktree{
 				{
-					Path:    "/home/user/test-repo-che-3002",
+					Path:    "/home/user/test-repo-CHE-3002",
 					Branch:  "riordanpawley/che-3002/migrate-prep-lists-to-db",
-					IssueID: "che-3002",
+					IssueID: "CHE-3002",
 				},
 			},
 		},
@@ -796,6 +796,20 @@ branch refs/heads/revive/ch-l566-auth-codex
 					Path:    "/home/user/test-repo-hn",
 					Branch:  "revive/ch-l566-auth-codex",
 					IssueID: "hn",
+				},
+			},
+		},
+		{
+			name: "fallback extracts linear native ticket issue id from worktree path",
+			output: `worktree /home/user/test-repo-CHE-02091
+HEAD abc123
+branch refs/heads/revive/native-linear-id
+`,
+			expected: []Worktree{
+				{
+					Path:    "/home/user/test-repo-CHE-02091",
+					Branch:  "revive/native-linear-id",
+					IssueID: "CHE-02091",
 				},
 			},
 		},

@@ -971,9 +971,12 @@ func ParseAzedarachSessionName(sessionName string) (ParsedSessionName, bool) {
 	if sessionName == "" || sessionName == defaultFullAzSession {
 		return ParsedSessionName{}, false
 	}
-	prefix, rest, ok := strings.Cut(sessionName, "-")
-	if ok && len(prefix) == 2 && strings.TrimSpace(rest) != "" {
-		return ParsedSessionName{IssueID: naming.IssueID(rest), Project: prefix}, true
+	prefix, _, ok := strings.Cut(sessionName, "-")
+	if ok && len(prefix) == 2 {
+		issueID, parsed := naming.ParseIssueIDFromSessionName(sessionName, prefix)
+		if parsed && strings.TrimSpace(issueID) != "" {
+			return ParsedSessionName{IssueID: naming.IssueID(issueID), Project: prefix}, true
+		}
 	}
 	return ParsedSessionName{}, false
 }
