@@ -23,7 +23,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Mailbox coordination:
   - `az mail send --parent <parent-issue> --type dependency-ready --body "..."`, `az mail list --parent <parent-issue> --since <seq> --json`, `az mail watch --parent <parent-issue> --since <seq> --jsonl`
   - Spec traceability:
-  - {{ if .SpecEnabled }}`az spec req list/get/create/update/delete`, `az spec link list/add/remove`, `az spec read`, `az spec lint`, `az spec parity`, and `az spec export --target md` before behavior changes and after behavior edits to keep requirements/links aligned.{{ else }}Spec workflows disabled for this project (`az config set spec.enabled false`).{{ end }}
+  - {{ if .SpecEnabled }}`az spec req list/get/create/update/delete`, `az spec link list/add/remove`, `az spec read`, `az spec lint`, and `az spec parity` before behavior changes and after behavior edits to keep requirements/links aligned.{{ else }}Spec workflows disabled for this project (`az config set spec.enabled false`).{{ end }}
   - Session/runtime operations:
   - `az session status [issue-id]`, `az daemon start|stop|restart`, `az export --format json [--out <path>]`
   - `az session start <issue-id>` is for explicit/manual orchestration; agents should not run it unless the user asks.

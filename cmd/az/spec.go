@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 
@@ -89,12 +88,6 @@ type specParityOptions struct {
 	FailOnOut bool
 }
 
-type specSyncOptions struct {
-	Target string
-	Check  bool
-	JSON   bool
-}
-
 func runSpecCommand(cfg *config.Config, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
 		cli.PrintSpecUsage()
@@ -115,10 +108,6 @@ func runSpecCommand(cfg *config.Config, args []string) error {
 		return runSpecLintCommand(cfg, args[1:])
 	case "parity":
 		return runSpecParityCommand(cfg, args[1:])
-	case "export":
-		return runSpecExportCommand(args[1:])
-	case "sync":
-		return runSpecExportCommand(args[1:])
 	default:
 		return fmt.Errorf("unknown spec command: %s", args[0])
 	}
@@ -241,36 +230,6 @@ func runSpecParityCommand(cfg *config.Config, args []string) error {
 		return err
 	}
 	return runSpecParityRPC(cfg, opts)
-}
-
-func runSpecExportCommand(args []string) error {
-	if len(args) > 0 && isHelpArg(args[0]) {
-		cli.PrintSpecExportUsage()
-		return nil
-	}
-	opts, err := parseSpecExportArgs(args)
-	if err != nil {
-		cli.PrintSpecExportUsage()
-		return err
-	}
-
-	repoDir, err := specRepoDir()
-	if err != nil {
-		return err
-	}
-	result, runErr := cli.RunSpecMarkdownSync(repoDir, opts.Check)
-	if result.Target != "" {
-		if opts.JSON {
-			data, err := json.MarshalIndent(result, "", "  ")
-			if err != nil {
-				return fmt.Errorf("marshal spec export result: %w", err)
-			}
-			fmt.Println(string(data))
-		} else {
-			printSpecExportResult(result)
-		}
-	}
-	return runErr
 }
 
 func runSpecReqListRPC(cfg *config.Config, opts specReqListOptions) error {
@@ -745,22 +704,6 @@ func parseSpecParityArgs(args []string) (specParityOptions, error) {
 	return opts, nil
 }
 
-func parseSpecExportArgs(args []string) (specSyncOptions, error) {
-	opts := specSyncOptions{}
-	fs := flag.NewFlagSet("spec export", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	fs.StringVar(&opts.Target, "target", "", "export target")
-	fs.BoolVar(&opts.Check, "check", false, "check mode")
-	fs.BoolVar(&opts.JSON, "json", false, "json output")
-	if err := fs.Parse(args); err != nil {
-		return specSyncOptions{}, err
-	}
-	if fs.NArg() != 0 || strings.TrimSpace(opts.Target) != "md" {
-		return specSyncOptions{}, fmt.Errorf("usage: az spec export --target md [--check] [--json]")
-	}
-	return opts, nil
-}
-
 func addSelectorFlags(fs *flag.FlagSet, ids *[]string, kind string) {
 	fs.Func("id", fmt.Sprintf("restrict to a specific %s id (repeatable)", kind), func(v string) error {
 		trimmed := strings.TrimSpace(v)
@@ -860,29 +803,4 @@ func linkIDsFromStrings(ids []string) []naming.SpecLinkID {
 		return nil
 	}
 	return out
-}
-
-func specNotImplementedError(parts ...string) error {
-	return fmt.Errorf("az spec %s is not implemented in Go runtime yet", strings.Join(parts, " "))
-}
-
-func specRepoDir() (string, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("resolve working directory: %w", err)
-	}
-	repoDir, err := config.ResolveProjectRoot(cwd)
-	if err != nil {
-		return "", fmt.Errorf("resolve project root: %w", err)
-	}
-	return repoDir, nil
-}
-
-func printSpecExportResult(result cli.SpecMarkdownSyncResult) {
-	fmt.Printf("Spec markdown export target: %s\n", result.Target)
-	fmt.Printf("Mode: %s\n", result.Mode)
-	fmt.Printf("Changed: %t\n", result.Changed)
-	for _, file := range result.Files {
-		fmt.Printf("- %s: %s\n", file.Path, file.Status)
-	}
 }

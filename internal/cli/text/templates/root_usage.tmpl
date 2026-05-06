@@ -26,7 +26,8 @@ Commands:
   log [sources]              Tail/stream daemon, TUI, and CLI log files
   opencode <init|plugin>     Manage OpenCode integration
   codex <install|guard|hook>  Install Codex hook configuration and run hook commands
-  spec <subcommand>          Spec workflows (req|link|read|lint|parity|sync)
+  tmux <selector|install-selector|uninstall-selector>  Manage tmux selector integration
+  spec <subcommand>          Spec workflows (req|link|read|lint|parity)
   issue list [--project <project-id>] [--json] [--deps] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
   issue get [--project <project-id>] [--id <id>] [--json] [<id>]  Show a single issue from daemon-backed store
   issue get-many [--project <project-id>] --id <id> [--id <id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
@@ -48,7 +49,7 @@ Commands:
   issue fanout drift [--project <project-id>] --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
   mail <send|list|watch>  Mailbox event operations for orchestrator/worker coordination
   config set spec.enabled <true|false> [--project-dir <dir>]  Update project config
-  sync [conflicts] [--all] [<directory>] [--project-dir <dir>] [--json]  Refresh issue tracker state or list sync conflicts
+  sync [conflicts] [--all] [<directory>] [--project-dir <dir>] [--json]  Refresh issue tracker state for the current project or all worktrees
   prime                Print AI session primer with current issue context
   export               Export a snapshot (use --format json [--out <path>])
   daemon start         Start daemon and verify client attach
@@ -130,6 +131,9 @@ Examples:
   az opencode plugin install
   az codex install
   az codex hook run --json pre-tool-use
+  az tmux install-selector
+  az tmux uninstall-selector
+  az tmux selector
   az spec req list --json
   az spec req get --id bfs-req-1
   az spec req create --id bfs-req-1 --title "Restore az spec grammar" --issue bgh
@@ -137,7 +141,6 @@ Examples:
   az spec read --issue bgh
   az spec lint --strict
   az spec parity --fail-on-out
-  az spec export --target md --check
   az prime
   az export --format json
   az export --format json --out snapshot.json

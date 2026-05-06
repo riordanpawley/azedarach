@@ -26,6 +26,7 @@ type runtimeReconcileRecorder struct {
 	mu            sync.Mutex
 	calls         int
 	projectIDs    []string
+	issueIDs      [][]string
 	started       chan struct{}
 	waitForCancel bool
 	result        protocol.RuntimeReconcileResponseBody
@@ -59,7 +60,10 @@ func (r *runtimeReconcileRecorder) Reconcile(ctx context.Context, projectID stri
 	return result, err
 }
 
-func (r *runtimeReconcileRecorder) ReconcileIssues(ctx context.Context, projectID string, _ []string) (protocol.RuntimeReconcileResponseBody, error) {
+func (r *runtimeReconcileRecorder) ReconcileIssues(ctx context.Context, projectID string, issueIDs []string) (protocol.RuntimeReconcileResponseBody, error) {
+	r.mu.Lock()
+	r.issueIDs = append(r.issueIDs, append([]string(nil), issueIDs...))
+	r.mu.Unlock()
 	return r.Reconcile(ctx, projectID)
 }
 
@@ -67,6 +71,16 @@ func (r *runtimeReconcileRecorder) snapshot() (calls int, projectIDs []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.calls, append([]string(nil), r.projectIDs...)
+}
+
+func (r *runtimeReconcileRecorder) issueSnapshot() [][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([][]string, 0, len(r.issueIDs))
+	for _, issueIDs := range r.issueIDs {
+		out = append(out, append([]string(nil), issueIDs...))
+	}
+	return out
 }
 
 type sequentialRuntimeReconciler struct {
@@ -916,6 +930,32 @@ func TestEnsureFreshRuntimeForMutationFallsBackToDirectReconcileAfterTimeout(t *
 	}
 	if len(projectIDs) != 2 || projectIDs[0] != "proj-fresh" || projectIDs[1] != "proj-fresh" {
 		t.Fatalf("reconcile project ids = %v, want [proj-fresh proj-fresh]", projectIDs)
+	}
+}
+
+func TestEnsureFreshRuntimeForIssueMutationUsesIssueScopedReconcile(t *testing.T) {
+	recorder := &runtimeReconcileRecorder{}
+	d := &Daemon{
+		cfg: Config{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		runtimeReconciler: recorder,
+	}
+
+	if err := d.ensureFreshRuntimeForIssueMutation(context.Background(), "proj-fresh", " az-1 ", "session.pause"); err != nil {
+		t.Fatalf("ensureFreshRuntimeForIssueMutation returned error: %v", err)
+	}
+
+	calls, projectIDs := recorder.snapshot()
+	if calls != 1 {
+		t.Fatalf("reconcile calls = %d, want 1", calls)
+	}
+	if len(projectIDs) != 1 || projectIDs[0] != "proj-fresh" {
+		t.Fatalf("reconcile project ids = %v, want [proj-fresh]", projectIDs)
+	}
+	issueCalls := recorder.issueSnapshot()
+	if len(issueCalls) != 1 || !reflect.DeepEqual(issueCalls[0], []string{"az-1"}) {
+		t.Fatalf("reconcile issue ids = %v, want [[az-1]]", issueCalls)
 	}
 }
 

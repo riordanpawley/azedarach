@@ -15,6 +15,7 @@ import (
 
 const (
 	CommandTaskList             = "task.list"
+	CommandTaskGet              = "task.get"
 	CommandTaskCreate           = "task.create"
 	CommandTaskUpdateStatus     = "task.update_status"
 	CommandTaskUpdate           = "task.update_details"
@@ -247,6 +248,35 @@ func (c *Client) ListIssueSyncConflicts(ctx context.Context, includeResolved boo
 		return IssueSyncConflictsResponse{}, err
 	}
 	return out, nil
+}
+
+// GetTaskSnapshot fetches one task and its direct dependency context.
+func (c *Client) GetTaskSnapshot(ctx context.Context, taskID string) (TaskSnapshot, error) {
+	return c.GetTaskSnapshotWithMode(ctx, taskID, ReadWaitModeDefault)
+}
+
+// GetTaskSnapshotWithMode fetches one task and its direct dependency context with the requested bounded read budget.
+func (c *Client) GetTaskSnapshotWithMode(ctx context.Context, taskID string, mode ReadWaitMode) (TaskSnapshot, error) {
+	parsedTaskID, err := naming.ParseIssueID(taskID)
+	if err != nil {
+		return TaskSnapshot{}, fmt.Errorf("invalid task id: %w", err)
+	}
+
+	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
+	defer cancel()
+
+	resp, err := c.commandJSONResponse(waitCtx, CommandTaskGet, TaskIDRequest{TaskID: parsedTaskID})
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
+		}
+		return TaskSnapshot{}, err
+	}
+	snapshot, decodeErr := c.decodeTaskSnapshotResponse(resp)
+	if decodeErr != nil {
+		return TaskSnapshot{}, fmt.Errorf("decode %s response: %w (expected %s payload; daemon likely outdated)", CommandTaskGet, decodeErr, "TaskListSnapshotPayload")
+	}
+	return snapshot, nil
 }
 
 // ListTasksSnapshot fetches the current task set and revision through the daemon client boundary.

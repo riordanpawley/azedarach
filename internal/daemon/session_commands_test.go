@@ -103,6 +103,7 @@ type timeoutRuntimeReconciler struct {
 	mu         sync.Mutex
 	calls      int
 	projectIDs []string
+	issueIDs   [][]string
 }
 
 func (r *timeoutRuntimeReconciler) Reconcile(ctx context.Context, projectID string) (protocol.RuntimeReconcileResponseBody, error) {
@@ -114,7 +115,10 @@ func (r *timeoutRuntimeReconciler) Reconcile(ctx context.Context, projectID stri
 	return protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(projectID)}, ctx.Err()
 }
 
-func (r *timeoutRuntimeReconciler) ReconcileIssues(ctx context.Context, projectID string, _ []string) (protocol.RuntimeReconcileResponseBody, error) {
+func (r *timeoutRuntimeReconciler) ReconcileIssues(ctx context.Context, projectID string, issueIDs []string) (protocol.RuntimeReconcileResponseBody, error) {
+	r.mu.Lock()
+	r.issueIDs = append(r.issueIDs, append([]string(nil), issueIDs...))
+	r.mu.Unlock()
 	return r.Reconcile(ctx, projectID)
 }
 
@@ -122,6 +126,16 @@ func (r *timeoutRuntimeReconciler) snapshot() (calls int, projectIDs []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.calls, append([]string(nil), r.projectIDs...)
+}
+
+func (r *timeoutRuntimeReconciler) issueSnapshot() [][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([][]string, 0, len(r.issueIDs))
+	for _, issueIDs := range r.issueIDs {
+		out = append(out, append([]string(nil), issueIDs...))
+	}
+	return out
 }
 
 func (r *testGitRunner) Run(_ context.Context, args ...string) (string, error) {
@@ -585,6 +599,10 @@ func TestSessionStartContinuesWhenFreshnessTimesOut(t *testing.T) {
 		if id != projectID {
 			t.Fatalf("runtime reconcile project ids = %v, want only %s", projectIDs, projectID)
 		}
+	}
+	issueCalls := recorder.issueSnapshot()
+	if len(issueCalls) != 1 || len(issueCalls[0]) != 1 || issueCalls[0][0] != issueID {
+		t.Fatalf("runtime reconcile issue ids = %v, want [[%s]]", issueCalls, issueID)
 	}
 }
 
@@ -1104,7 +1122,7 @@ func TestHandleSessionStopDirectKillsLegacyIssueNamedSession(t *testing.T) {
 	}
 }
 
-func TestHandleSessionStopDirectRecordsDesiredStateBeforeFreshnessWait(t *testing.T) {
+func TestHandleSessionStopDirectRecordsDesiredStateBeforeTmuxKillCompletes(t *testing.T) {
 	const (
 		projectID = "proj"
 		issueID   = "az-1"
@@ -1129,10 +1147,6 @@ func TestHandleSessionStopDirectRecordsDesiredStateBeforeFreshnessWait(t *testin
 		t.Fatalf("seed runtime state: %v", err)
 	}
 
-	recorder := &runtimeReconcileRecorder{
-		started:       make(chan struct{}, 1),
-		waitForCancel: true,
-	}
 	tmuxRunner := &testTmuxRunner{
 		sessions: map[string]bool{
 			sessionID: true,
@@ -1146,10 +1160,9 @@ func TestHandleSessionStopDirectRecordsDesiredStateBeforeFreshnessWait(t *testin
 			RuntimeReconcileTimeout: 20 * time.Millisecond,
 			Logger:                  slog.Default(),
 		},
-		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
-		session:           daemonhandlers.NewSessionHandler(sessionStore),
-		sessionStore:      sessionStore,
-		runtimeReconciler: recorder,
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(sessionStore),
+		sessionStore: sessionStore,
 		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
 			".": runtimeStateStore,
 		},
@@ -1191,9 +1204,9 @@ func TestHandleSessionStopDirectRecordsDesiredStateBeforeFreshnessWait(t *testin
 	}()
 
 	select {
-	case <-recorder.started:
+	case <-tmuxRunner.killEntered:
 	case <-time.After(500 * time.Millisecond):
-		t.Fatal("timed out waiting for freshness reconcile to start")
+		t.Fatal("timed out waiting for tmux kill to begin")
 	}
 
 	rows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
@@ -1208,12 +1221,6 @@ func TestHandleSessionStopDirectRecordsDesiredStateBeforeFreshnessWait(t *testin
 	}
 	if rows[0].ObservedState != daemonstate.SessionStateAttached {
 		t.Fatalf("observed session state = %s, want %s", rows[0].ObservedState, daemonstate.SessionStateAttached)
-	}
-
-	select {
-	case <-tmuxRunner.killEntered:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("timed out waiting for tmux kill to begin")
 	}
 	close(tmuxRunner.killRelease)
 
@@ -1600,7 +1607,79 @@ func TestSessionAttachDoesNotRequireRuntimeReconcile(t *testing.T) {
 	}
 }
 
-func TestHandleSessionStopDirectFreshnessTimeoutUsesDirectReconcileFallback(t *testing.T) {
+func TestSessionPauseResumeUseIssueScopedRuntimeReconcile(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	store := daemonstate.NewStore()
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed attached session: %v", err)
+	}
+	recorder := &runtimeReconcileRecorder{}
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  slog.Default(),
+		},
+		session:           daemonhandlers.NewSessionHandler(store),
+		sessionStore:      store,
+		runtimeReconciler: recorder,
+	}
+
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-pause",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         daemonhandlers.CommandSessionPause,
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"session_id": issueID,
+		}),
+	}
+	resp, err := daemon.handleSessionPause(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleSessionPause returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("pause response not ok: %+v", resp.Error)
+	}
+
+	req.RequestID = "req-resume"
+	req.Command = daemonhandlers.CommandSessionResume
+	resp, err = daemon.handleSessionResume(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleSessionResume returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("resume response not ok: %+v", resp.Error)
+	}
+
+	calls, projectIDs := recorder.snapshot()
+	if calls != 2 {
+		t.Fatalf("runtime reconcile calls = %d, want 2", calls)
+	}
+	for _, gotProjectID := range projectIDs {
+		if gotProjectID != projectID {
+			t.Fatalf("runtime reconcile project ids = %v, want only %s", projectIDs, projectID)
+		}
+	}
+	issueCalls := recorder.issueSnapshot()
+	if len(issueCalls) != 2 {
+		t.Fatalf("runtime reconcile issue calls = %v, want two calls", issueCalls)
+	}
+	for _, gotIssueIDs := range issueCalls {
+		if len(gotIssueIDs) != 1 || gotIssueIDs[0] != issueID {
+			t.Fatalf("runtime reconcile issue ids = %v, want only %s", issueCalls, issueID)
+		}
+	}
+}
+
+func TestHandleSessionStopDirectDoesNotWaitForRuntimeFreshness(t *testing.T) {
 	const (
 		projectID = "proj"
 		issueID   = "az-1"
@@ -1612,13 +1691,13 @@ func TestHandleSessionStopDirectFreshnessTimeoutUsesDirectReconcileFallback(t *t
 	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
 		t.Fatalf("seed session store: %v", err)
 	}
-	recorder := &sequentialRuntimeReconciler{}
+	recorder := &timeoutRuntimeReconciler{}
 
 	daemon := &Daemon{
 		cfg: Config{
 			RepoDir:                 ".",
 			Logger:                  slog.Default(),
-			RuntimeReconcileTimeout: 20 * time.Millisecond,
+			RuntimeReconcileTimeout: time.Hour,
 		},
 		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
 		session:           daemonhandlers.NewSessionHandler(store),
@@ -1652,17 +1731,12 @@ func TestHandleSessionStopDirectFreshnessTimeoutUsesDirectReconcileFallback(t *t
 	}
 
 	calls, projectIDs := recorder.snapshot()
-	if calls < 1 {
-		t.Fatalf("runtime reconcile calls = %d, want at least 1", calls)
-	}
-	for _, id := range projectIDs {
-		if id != projectID {
-			t.Fatalf("runtime reconcile project ids = %v, want only %s", projectIDs, projectID)
-		}
+	if calls != 0 {
+		t.Fatalf("runtime reconcile calls = %d (%v), want 0 for lightweight stop", calls, projectIDs)
 	}
 }
 
-func TestHandleSessionStopDirectContinuesWhenFreshnessTimesOut(t *testing.T) {
+func TestHandleSessionStopDirectStopsTmuxWhenRuntimeFreshnessWouldTimeout(t *testing.T) {
 	const (
 		projectID = "proj"
 		issueID   = "az-1"
@@ -1722,13 +1796,93 @@ func TestHandleSessionStopDirectContinuesWhenFreshnessTimesOut(t *testing.T) {
 	}
 
 	calls, projectIDs := recorder.snapshot()
-	if calls < 1 {
-		t.Fatalf("runtime reconcile calls = %d, want at least 1", calls)
+	if calls != 0 {
+		t.Fatalf("runtime reconcile calls = %d (%v), want 0 for lightweight stop", calls, projectIDs)
 	}
-	for _, id := range projectIDs {
-		if id != projectID {
-			t.Fatalf("runtime reconcile project ids = %v, want only %s", projectIDs, projectID)
+}
+
+func TestHandleSessionStopDirectPostKillRefreshIsIssueScoped(t *testing.T) {
+	const (
+		projectID    = "proj"
+		issueID      = "az-1"
+		otherIssueID = "az-2"
+	)
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	otherSessionID := naming.CanonicalSessionID(projectID, otherIssueID)
+	tmuxRunner := newTestTmuxRunner(sessionID)
+	close(tmuxRunner.killRelease)
+	store := daemonstate.NewStore()
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed target session store: %v", err)
+	}
+	if _, err := store.UpsertSession(projectID, otherSessionID, otherIssueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed other session store: %v", err)
+	}
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	for _, seed := range []daemonstate.Session{
+		{ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateAttached, ObservedState: daemonstate.SessionStateAttached, UpdatedAt: time.Now().UTC()},
+		{ID: otherSessionID, IssueID: otherIssueID, State: daemonstate.SessionStateAttached, ObservedState: daemonstate.SessionStateAttached, UpdatedAt: time.Now().UTC()},
+	} {
+		if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, seed); err != nil {
+			t.Fatalf("seed runtime state %s: %v", seed.IssueID, err)
 		}
+	}
+
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	resp, err := daemon.handleSessionStopDirect(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-stop-issue-scoped-refresh",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         daemonhandlers.CommandSessionStop,
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"session_id": issueID,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStopDirect returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("response not ok: %+v", resp.Error)
+	}
+
+	target, found, err := runtimeStateStore.GetSessionStateByIssueID(context.Background(), projectID, issueID)
+	if err != nil {
+		t.Fatalf("get target session state: %v", err)
+	}
+	if !found {
+		t.Fatal("target runtime session state not found")
+	}
+	if target.State != daemonstate.SessionStateStopped || target.ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("target runtime state = desired %s observed %s, want stopped/stopped", target.State, target.ObservedState)
+	}
+	other, found, err := runtimeStateStore.GetSessionStateByIssueID(context.Background(), projectID, otherIssueID)
+	if err != nil {
+		t.Fatalf("get other session state: %v", err)
+	}
+	if !found {
+		t.Fatal("other runtime session state not found")
+	}
+	if other.State != daemonstate.SessionStateAttached || other.ObservedState != daemonstate.SessionStateAttached {
+		t.Fatalf("other runtime state = desired %s observed %s, want attached/attached", other.State, other.ObservedState)
 	}
 }
 
@@ -1794,13 +1948,8 @@ func TestHandleSessionStopDirectCanceledContextDoesNotContinueAfterFreshnessFail
 	}
 
 	calls, projectIDs := recorder.snapshot()
-	if calls < 1 {
-		t.Fatalf("runtime reconcile calls = %d, want at least 1", calls)
-	}
-	for _, id := range projectIDs {
-		if id != projectID {
-			t.Fatalf("runtime reconcile project ids = %v, want only %s", projectIDs, projectID)
-		}
+	if calls != 0 {
+		t.Fatalf("runtime reconcile calls = %d (%v), want 0 when request is already canceled", calls, projectIDs)
 	}
 }
 

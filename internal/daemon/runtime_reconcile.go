@@ -275,6 +275,38 @@ func (d *Daemon) ensureFreshRuntimeForMutation(ctx context.Context, projectID st
 	return nil
 }
 
+func (d *Daemon) ensureFreshRuntimeForIssueMutation(ctx context.Context, projectID string, issueID string, reason string) error {
+	if d == nil {
+		return nil
+	}
+	projectID = d.canonicalProjectID(projectID)
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "mutation"
+	}
+	issueIDs := normalizeRuntimeReconcileIssueIDs([]string{issueID})
+	if len(issueIDs) == 0 {
+		return nil
+	}
+
+	timeout := d.runtimeReconcileTimeout()
+	if timeout <= 0 {
+		timeout = defaultRuntimeReconcileTimeout
+	}
+	reconcileCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	reconcileCtx = context.WithValue(reconcileCtx, runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
+		Priority: reconcilePriorityManual,
+		Reason:   "mutation-issue:" + reason,
+	})
+	result, err := d.ensureRuntimeReconciler().ReconcileIssues(reconcileCtx, projectID, issueIDs)
+	d.ensureRuntimeReconcileThrottle().Record(projectID, runtimeReconcileResultSignature(result), err)
+	if err != nil {
+		return fmt.Errorf("runtime reconcile issues failed: %w", err)
+	}
+	return nil
+}
+
 func (d *Daemon) directRuntimeReconcileForMutation(ctx context.Context, projectID string, reason string, timeout time.Duration) error {
 	if timeout <= 0 {
 		timeout = defaultRuntimeReconcileTimeout

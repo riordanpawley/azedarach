@@ -103,6 +103,7 @@ type Daemon struct {
 	hookLogByProject              map[string][]protocol.HookLogEvent
 	tmux                          *tmux.Client
 	git                           *git.Client
+	gitStatusAdapter              *gitServiceAdapter
 	gitHandler                    *daemonhandlers.GitHandler
 	worktreeHandler               *daemonhandlers.WorktreeHandler
 	worktreeAdapter               *worktreeServiceAdapter
@@ -224,6 +225,7 @@ func New(cfg Config) *Daemon {
 		hookLogByProject:              map[string][]protocol.HookLogEvent{},
 		tmux:                          tmux.NewClient(tmuxRunner, cfg.Logger),
 		git:                           gitClient,
+		gitStatusAdapter:              gitService,
 		session:                       sessionHandler,
 		sessionStore:                  sessionStore,
 		runtimeReconcileQueue:         runtimeReconcileQueue,
@@ -279,9 +281,10 @@ func New(cfg Config) *Daemon {
 		runtimeStateStoreForProject: func(projectID string) *daemonstate.RuntimeStateStore {
 			return d.worktreeRuntimeStateStore(projectID)
 		},
-		runtimeProjectionWriter:       d.runtimeProjectionStateWriter(),
-		ensureRuntimeFreshForMutation: d.ensureFreshRuntimeForMutation,
-		logger:                        cfg.Logger,
+		runtimeProjectionWriter:            d.runtimeProjectionStateWriter(),
+		ensureRuntimeFreshForMutation:      d.ensureFreshRuntimeForMutation,
+		ensureRuntimeFreshForIssueMutation: d.ensureFreshRuntimeForIssueMutation,
+		logger:                             cfg.Logger,
 		onProjectionUpdate: func(ctx context.Context, projectID, issueID, path string) {
 			d.runtimeProjectionStateWriter().PublishWorktreeProjectionEvent(ctx, projectID, issueID, path)
 		},
@@ -507,8 +510,12 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleHookLogAppend(ctx, req)
 	case protocol.CommandHookLogList:
 		return d.handleHookLogList(ctx, req)
+	case protocol.CommandUIOpenTaskWorkspace:
+		return d.handleUIOpenTaskWorkspace(ctx, req)
 	case "task.list":
 		return d.handleTaskList(ctx, req)
+	case "task.get":
+		return d.handleTaskGet(ctx, req)
 	case "task.create":
 		return d.handleTaskCreate(ctx, req)
 	case "task.update_status":
@@ -935,6 +942,39 @@ func (d *Daemon) triggerWorktreeStateRefresh(projectID string) {
 		defer cancel()
 		d.worktreeAdapter.pollAndPersistWorktrees(ctx, projectID)
 	}()
+}
+
+func (d *Daemon) refreshIssueWorktreeState(ctx context.Context, projectID, issueID string) {
+	if d == nil || d.gitStatusAdapter == nil {
+		return
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = protocol.DefaultProjectID
+	}
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return
+	}
+	store := d.worktreeRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return
+	}
+	projection, found, err := store.GetWorktreeStateByIssueID(ctx, projectID, issueID)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("issue worktree refresh lookup failed", "project_id", projectID, "issue_id", issueID, "error", err)
+		}
+		return
+	}
+	if !found || strings.TrimSpace(projection.Path) == "" {
+		return
+	}
+	refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err := d.gitStatusAdapter.refreshGitStatusManual(refreshCtx, projectID, projection.Path); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("issue worktree refresh failed", "project_id", projectID, "issue_id", issueID, "worktree", projection.Path, "error", err)
+	}
 }
 
 func (d *Daemon) persistWorktreeState(ctx context.Context, projectID, issueID, path, branch string) error {

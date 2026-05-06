@@ -33,6 +33,8 @@ const (
 	commandDevServerList       = "devserver.list"
 	gitHookManagedBlockStart   = "# >>> azedarach managed githook >>>"
 	gitHookManagedBlockEnd     = "# <<< azedarach managed githook <<<"
+	tmuxSelectorBlockStart     = "# >>> azedarach managed tmux session selector >>>"
+	tmuxSelectorBlockEnd       = "# <<< azedarach managed tmux session selector <<<"
 	primeEvidenceKey           = "AZEDARACH_PRIMER_KEY:azedarach-prime-v1"
 )
 
@@ -122,6 +124,19 @@ type OpenCodePluginInstallOptions struct {
 
 type CodexInstallOptions struct {
 	ProjectDir string
+	Verbose    bool
+}
+
+type TmuxInstallSelectorOptions struct {
+	ConfigPath string
+	ProjectDir string
+	Key        string
+	AZCommand  string
+	Verbose    bool
+}
+
+type TmuxUninstallSelectorOptions struct {
+	ConfigPath string
 	Verbose    bool
 }
 
@@ -307,6 +322,52 @@ func ParseCodexInstallArgs(args []string) (CodexInstallOptions, error) {
 	}
 	if fs.NArg() != 0 {
 		return CodexInstallOptions{}, fmt.Errorf("usage: az codex install [--project-dir <dir>] [--verbose]")
+	}
+	return opts, nil
+}
+
+func ParseTmuxInstallSelectorArgs(args []string) (TmuxInstallSelectorOptions, error) {
+	opts := TmuxInstallSelectorOptions{
+		Key:       "s",
+		AZCommand: "az",
+	}
+	fs := flag.NewFlagSet("tmux install-selector", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.ConfigPath, "config", "", "tmux config path")
+	fs.StringVar(&opts.ProjectDir, "project-dir", "", "project directory")
+	fs.StringVar(&opts.Key, "key", opts.Key, "tmux prefix key to bind")
+	fs.StringVar(&opts.AZCommand, "az-command", opts.AZCommand, "az executable command")
+	fs.BoolVar(&opts.Verbose, "verbose", false, "verbose output")
+
+	if err := fs.Parse(args); err != nil {
+		return TmuxInstallSelectorOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return TmuxInstallSelectorOptions{}, fmt.Errorf("usage: az tmux install-selector [--config <path>] [--project-dir <dir>] [--key <key>] [--az-command <command>] [--verbose]")
+	}
+	opts.Key = strings.TrimSpace(opts.Key)
+	opts.AZCommand = strings.TrimSpace(opts.AZCommand)
+	if opts.Key == "" {
+		return TmuxInstallSelectorOptions{}, fmt.Errorf("tmux selector key cannot be empty")
+	}
+	if opts.AZCommand == "" {
+		return TmuxInstallSelectorOptions{}, fmt.Errorf("az command cannot be empty")
+	}
+	return opts, nil
+}
+
+func ParseTmuxUninstallSelectorArgs(args []string) (TmuxUninstallSelectorOptions, error) {
+	opts := TmuxUninstallSelectorOptions{}
+	fs := flag.NewFlagSet("tmux uninstall-selector", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.ConfigPath, "config", "", "tmux config path")
+	fs.BoolVar(&opts.Verbose, "verbose", false, "verbose output")
+
+	if err := fs.Parse(args); err != nil {
+		return TmuxUninstallSelectorOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return TmuxUninstallSelectorOptions{}, fmt.Errorf("usage: az tmux uninstall-selector [--config <path>] [--verbose]")
 	}
 	return opts, nil
 }
@@ -1225,6 +1286,177 @@ func CodexInstallCommand(deps *Dependencies, opts CodexInstallOptions) error {
 	return nil
 }
 
+func TmuxInstallSelectorCommand(deps *Dependencies, opts TmuxInstallSelectorOptions) error {
+	projectDir, err := resolveProjectDir(opts.ProjectDir, deps)
+	if err != nil {
+		return err
+	}
+	projectDir, err = filepath.Abs(projectDir)
+	if err != nil {
+		return fmt.Errorf("resolve absolute project directory: %w", err)
+	}
+
+	configPath, err := resolveTmuxConfigPath(opts.ConfigPath)
+	if err != nil {
+		return err
+	}
+
+	managedBlock := buildTmuxSelectorBlock(opts.Key, opts.AZCommand, projectDir)
+	if err := upsertManagedTextBlock(configPath, tmuxSelectorBlockStart, tmuxSelectorBlockEnd, managedBlock, 0o644); err != nil {
+		return fmt.Errorf("write tmux selector config: %w", err)
+	}
+
+	fmt.Printf("Installed Azedarach tmux session selector in %s\n", configPath)
+	fmt.Printf("  Binding: prefix %s -> az tmux selector\n", opts.Key)
+	fmt.Println("  Reload tmux config with: tmux source-file " + shellSingleQuote(configPath))
+	if opts.Verbose {
+		fmt.Printf("  Project: %s\n", projectDir)
+		fmt.Printf("  Command: %s\n", strings.TrimSpace(opts.AZCommand))
+	}
+	return nil
+}
+
+func TmuxUninstallSelectorCommand(_ *Dependencies, opts TmuxUninstallSelectorOptions) error {
+	configPath, err := resolveTmuxConfigPath(opts.ConfigPath)
+	if err != nil {
+		return err
+	}
+
+	changed, err := removeManagedTextBlocksFromFile(configPath, tmuxSelectorBlockStart, tmuxSelectorBlockEnd)
+	if err != nil {
+		return fmt.Errorf("remove tmux selector config: %w", err)
+	}
+	if changed {
+		fmt.Printf("Uninstalled Azedarach tmux session selector from %s\n", configPath)
+		fmt.Println("  Reload tmux config with: tmux source-file " + shellSingleQuote(configPath))
+		return nil
+	}
+
+	fmt.Printf("Azedarach tmux session selector is not installed in %s\n", configPath)
+	if opts.Verbose {
+		fmt.Println("  No managed selector block found.")
+	}
+	return nil
+}
+
+func buildTmuxSelectorBlock(key, azCommand, projectDir string) string {
+	command := buildTmuxSelectorPopupCommand(azCommand, projectDir)
+	popupCommand := fmt.Sprintf(
+		"tmux display-popup -E -w 95%% -h 95%% -T %s -e AZEDARACH_TMUX_CURRENT_SESSION=#{session_name} %s",
+		shellSingleQuote("tmux sessions"),
+		shellSingleQuote(command),
+	)
+	return strings.Join([]string{
+		tmuxSelectorBlockStart,
+		fmt.Sprintf("bind-key %s run-shell %s", strings.TrimSpace(key), shellSingleQuote(popupCommand)),
+		tmuxSelectorBlockEnd,
+		"",
+	}, "\n")
+}
+
+func buildTmuxSelectorPopupCommand(azCommand, projectDir string) string {
+	selectorCommand := strings.TrimSpace(azCommand) + " tmux selector"
+	return strings.Join([]string{
+		"set +e",
+		"log_dir=\"${AZEDARACH_LOG_DIR:-$HOME/.azedarach/logs}\"",
+		"mkdir -p \"$log_dir\"",
+		"log=\"$log_dir/tmux-selector.log\"",
+		"printf '\\n[%s] az tmux selector popup start\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >>\"$log\"",
+		"printf 'cwd=%s\\ncommand=%s\\nPATH=%s\\nTMUX=%s\\n' " +
+			shellSingleQuote(projectDir) + " " +
+			shellSingleQuote(selectorCommand) + " " +
+			"\"$PATH\" \"${TMUX:-}\" >>\"$log\"",
+		"cd " + shellSingleQuote(projectDir),
+		selectorCommand,
+		"status=$?",
+		"printf '[%s] az tmux selector popup exit status=%s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$status\" >>\"$log\"",
+		"if [ \"$status\" -ne 0 ]; then printf '\\nAzedarach tmux selector failed (exit %s).\\nLog: %s\\nCommand: %s\\n\\nPress Enter to close.' \"$status\" \"$log\" " + shellSingleQuote(selectorCommand) + "; read -r _ </dev/tty 2>/dev/null || sleep 5; fi",
+		"exit \"$status\"",
+	}, "; ")
+}
+
+func resolveTmuxConfigPath(configPath string) (string, error) {
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		home, homeErr := os.UserHomeDir()
+		if homeErr != nil {
+			return "", fmt.Errorf("resolve home directory for tmux config: %w", homeErr)
+		}
+		configPath = filepath.Join(home, ".tmux.conf")
+	}
+	absPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve absolute tmux config path: %w", err)
+	}
+	return absPath, nil
+}
+
+func upsertManagedTextBlock(path, startMarker, endMarker, managedBlock string, mode os.FileMode) error {
+	content := ""
+	writeMode := mode
+	if info, err := os.Stat(path); err == nil {
+		writeMode = info.Mode().Perm()
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if raw, err := os.ReadFile(path); err == nil {
+		content = string(raw)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	base := stripManagedTextBlocks(content, startMarker, endMarker)
+	if strings.TrimSpace(base) == "" {
+		return os.WriteFile(path, []byte(managedBlock), writeMode)
+	}
+	normalized := strings.ReplaceAll(base, "\r\n", "\n")
+	normalized = strings.TrimRight(normalized, "\n") + "\n\n"
+	return os.WriteFile(path, []byte(normalized+managedBlock), writeMode)
+}
+
+func removeManagedTextBlocksFromFile(path, startMarker, endMarker string) (bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	content := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	stripped := stripManagedTextBlocks(content, startMarker, endMarker)
+	if stripped == content {
+		return false, nil
+	}
+	stripped = strings.TrimRight(stripped, "\n")
+	if strings.TrimSpace(stripped) != "" {
+		stripped += "\n"
+	}
+	return true, os.WriteFile(path, []byte(stripped), info.Mode().Perm())
+}
+
+func stripManagedTextBlocks(content, startMarker, endMarker string) string {
+	out := strings.ReplaceAll(content, "\r\n", "\n")
+	for {
+		start := strings.Index(out, startMarker)
+		if start < 0 {
+			break
+		}
+		endRel := strings.Index(out[start:], endMarker)
+		if endRel < 0 {
+			break
+		}
+		end := start + endRel + len(endMarker)
+		if end < len(out) && out[end] == '\n' {
+			end++
+		}
+		out = out[:start] + out[end:]
+	}
+	return out
+}
+
 func buildCodexHookJSONCommand(event string) string {
 	event = strings.TrimSpace(event)
 	return fmt.Sprintf(
@@ -1532,15 +1764,21 @@ func PrintCodexUsage() {
 	fmt.Println("Install Codex hook configuration and run Codex hook/guard commands.")
 }
 
+func PrintTmuxUsage() {
+	fmt.Println("Usage: az tmux <selector|install-selector|uninstall-selector>")
+	fmt.Println("Manage Azedarach tmux integration.")
+	fmt.Println("  az tmux selector")
+	fmt.Println("  az tmux install-selector [--config <path>] [--project-dir <dir>] [--key <key>] [--az-command <command>] [--verbose]")
+	fmt.Println("  az tmux uninstall-selector [--config <path>] [--verbose]")
+}
+
 func PrintSpecUsage() {
-	fmt.Println("Usage: az spec <req|link|read|lint|parity|export> [arguments]")
+	fmt.Println("Usage: az spec <req|link|read|lint|parity> [arguments]")
 	fmt.Println("  req      Manage spec requirements (list|get|create|update|delete)")
 	fmt.Println("  link     Manage issue/requirement traceability links (list|add|remove)")
 	fmt.Println("  read     Read consolidated spec view")
 	fmt.Println("  lint     Validate spec consistency")
 	fmt.Println("  parity   Report issue/spec drift")
-	fmt.Println("  export   Export spec artifacts to Markdown (phase-1 target: md)")
-	fmt.Println("  sync     Deprecated alias for export")
 	fmt.Println("")
 	fmt.Println("Requirement commands:")
 	fmt.Println("  az spec req list [--json] [--issue <issue-id>] [--status <open|accepted|superseded>] [--id <req-id> ...] [--ids a,b,c]")
@@ -1554,11 +1792,10 @@ func PrintSpecUsage() {
 	fmt.Println("  az spec link add --issue <issue-id> --req <req-id> [--role <implements|verifies|relates>] [--note <text>] [--json]")
 	fmt.Println("  az spec link remove --issue <issue-id> --req <req-id> [--json]")
 	fmt.Println("")
-	fmt.Println("Read/lint/parity/export:")
+	fmt.Println("Read/lint/parity:")
 	fmt.Println("  az spec read [--json] [--issue <issue-id>] [--req <req-id>]")
 	fmt.Println("  az spec lint [--json] [--strict]")
 	fmt.Println("  az spec parity [--json] [--fail-on-out]")
-	fmt.Println("  az spec export --target md [--check] [--json]")
 	fmt.Println("")
 	fmt.Println("Examples:")
 	fmt.Println("  az spec req list --json")
@@ -1569,7 +1806,6 @@ func PrintSpecUsage() {
 	fmt.Println("  az spec read --issue az-123")
 	fmt.Println("  az spec lint --strict")
 	fmt.Println("  az spec parity --fail-on-out")
-	fmt.Println("  az spec export --target md --check")
 }
 
 func PrintSpecReqUsage() {
@@ -1610,10 +1846,6 @@ func PrintSpecLintUsage() {
 
 func PrintSpecParityUsage() {
 	fmt.Println("Usage: az spec parity [--json] [--fail-on-out]")
-}
-
-func PrintSpecExportUsage() {
-	fmt.Println("Usage: az spec export --target md [--check] [--json]")
 }
 
 func readJSONObject(path string) (map[string]any, error) {

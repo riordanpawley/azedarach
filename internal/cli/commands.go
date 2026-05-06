@@ -2603,20 +2603,36 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
+	startedAt := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("issue get failed during daemon ensure", "issue_id", opts.IssueID, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
+		}
 		return err
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := deps.DaemonClient.GetTaskSnapshot(ctx, opts.IssueID)
 	if err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("issue get failed during daemon read", "issue_id", opts.IssueID, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
+		}
+		if strings.Contains(err.Error(), fmt.Sprintf("issue not found: %s", opts.IssueID)) {
+			return fmt.Errorf("issue not found: %s", opts.IssueID)
+		}
 		return fmt.Errorf("failed to get issue %s: %w", opts.IssueID, err)
 	}
 
 	task, ok := findTaskByID(snapshot.Tasks, opts.IssueID)
 	if !ok {
+		if deps.Logger != nil {
+			deps.Logger.Info("issue get not found", "issue_id", opts.IssueID, "elapsed_ms", time.Since(startedAt).Milliseconds())
+		}
 		return fmt.Errorf("issue not found: %s", opts.IssueID)
+	}
+	if deps.Logger != nil {
+		deps.Logger.Info("issue get completed", "issue_id", opts.IssueID, "context_task_count", len(snapshot.Tasks), "elapsed_ms", time.Since(startedAt).Milliseconds())
 	}
 
 	if opts.JSON {

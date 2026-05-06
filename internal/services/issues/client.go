@@ -334,6 +334,70 @@ func (c *Client) GetWithRuntime(ctx context.Context, projectID, id string) (doma
 	return tasks[0], nil
 }
 
+// GetWithDependencyContextRuntime fetches one issue plus direct dependencies and dependents.
+func (c *Client) GetWithDependencyContextRuntime(ctx context.Context, projectID, id string) ([]domain.Task, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, c.wrapError("get-with-dependency-context-runtime", id, domain.ErrNotFound)
+	}
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT DISTINCT id
+		FROM (
+			SELECT ? AS id
+			UNION ALL
+			SELECT depends_on_id AS id
+			FROM issue_dependencies
+			WHERE issue_id = ? AND tombstoned_at IS NULL
+			UNION ALL
+			SELECT issue_id AS id
+			FROM issue_dependencies
+			WHERE depends_on_id = ? AND tombstoned_at IS NULL
+		)
+	`, id, id, id)
+	if err != nil {
+		return nil, c.wrapError("get-with-dependency-context-runtime", id, err)
+	}
+
+	issueIDs := make([]string, 0, 8)
+	for rows.Next() {
+		var issueID string
+		if err := rows.Scan(&issueID); err != nil {
+			_ = rows.Close()
+			return nil, c.wrapError("get-with-dependency-context-runtime", id, err)
+		}
+		if strings.TrimSpace(issueID) != "" {
+			issueIDs = append(issueIDs, issueID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, c.wrapError("get-with-dependency-context-runtime", id, err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, c.wrapError("get-with-dependency-context-runtime", id, err)
+	}
+
+	tasks, err := c.queryTasksWithRuntime(ctx, db, projectID, issueIDs...)
+	if err != nil {
+		return nil, c.wrapError("get-with-dependency-context-runtime", id, err)
+	}
+	for _, task := range tasks {
+		if task.ID.String() == id {
+			return tasks, nil
+		}
+	}
+	return nil, c.wrapError("get-with-dependency-context-runtime", id, domain.ErrNotFound)
+}
+
 // Search queries issues by id/title/description.
 func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error) {
 	db, err := c.dbHandle()
@@ -1180,8 +1244,26 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 	`
 	args := []any{projectID, projectID}
 	if len(issueIDs) > 0 {
-		query += " AND i.id = ?\n"
-		args = append(args, strings.TrimSpace(issueIDs[0]))
+		seen := map[string]struct{}{}
+		trimmedIDs := make([]string, 0, len(issueIDs))
+		for _, issueID := range issueIDs {
+			issueID = strings.TrimSpace(issueID)
+			if issueID == "" {
+				continue
+			}
+			if _, ok := seen[issueID]; ok {
+				continue
+			}
+			seen[issueID] = struct{}{}
+			trimmedIDs = append(trimmedIDs, issueID)
+		}
+		if len(trimmedIDs) > 0 {
+			placeholders := strings.TrimSuffix(strings.Repeat("?,", len(trimmedIDs)), ",")
+			query += fmt.Sprintf(" AND i.id IN (%s)\n", placeholders)
+			for _, issueID := range trimmedIDs {
+				args = append(args, issueID)
+			}
+		}
 	}
 	query += " ORDER BY i.updated_at DESC"
 	rows, err := db.QueryContext(ctx, query, args...)

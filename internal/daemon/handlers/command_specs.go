@@ -41,6 +41,7 @@ type CommandSpec struct {
 
 const (
 	commandTaskList              = "task.list"
+	commandTaskGet               = "task.get"
 	commandTaskCreate            = "task.create"
 	commandTaskUpdateStatus      = "task.update_status"
 	commandTaskUpdateDetails     = "task.update_details"
@@ -114,7 +115,9 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandMailWatch:             {Command: protocol.CommandMailWatch, RequiresProjectID: true},
 	protocol.CommandHookLogAppend:         {Command: protocol.CommandHookLogAppend, RequiresProjectID: true},
 	protocol.CommandHookLogList:           {Command: protocol.CommandHookLogList, RequiresProjectID: true},
+	protocol.CommandUIOpenTaskWorkspace:   {Command: protocol.CommandUIOpenTaskWorkspace, RequiresProjectID: true},
 	commandTaskList:                       {Command: commandTaskList, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
+	commandTaskGet:                        {Command: commandTaskGet, RequiresProjectID: true},
 	commandTaskCreate:                     {Command: commandTaskCreate, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskUpdateStatus:               {Command: commandTaskUpdateStatus, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskUpdateDetails:              {Command: commandTaskUpdateDetails, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},

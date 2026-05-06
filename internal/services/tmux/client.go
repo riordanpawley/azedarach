@@ -21,6 +21,7 @@ type Client struct {
 type SessionInfo struct {
 	Name      string
 	CreatedAt *time.Time
+	Path      string
 }
 
 // NewClient creates a new tmux client with dependency injection
@@ -39,6 +40,28 @@ func (c *Client) NewSession(ctx context.Context, name string, workdir string) er
 	args := []string{"new-session", "-d", "-s", name}
 	if workdir != "" {
 		args = append(args, "-c", workdir)
+	}
+
+	_, err := c.runner.Run(ctx, args...)
+	if err != nil {
+		return &domain.TmuxError{Op: "new-session", Session: name, Err: err}
+	}
+
+	c.logger.Debug("tmux session created", "name", name)
+	return nil
+}
+
+// NewSessionWithCommand creates a detached tmux session running command.
+// Uses: tmux new-session -d -s <name> -c <workdir> <command>
+func (c *Client) NewSessionWithCommand(ctx context.Context, name, workdir, command string) error {
+	c.logger.Debug("creating tmux session with command", "name", name, "workdir", workdir, "command", command)
+
+	args := []string{"new-session", "-d", "-s", name}
+	if workdir != "" {
+		args = append(args, "-c", workdir)
+	}
+	if strings.TrimSpace(command) != "" {
+		args = append(args, command)
 	}
 
 	_, err := c.runner.Run(ctx, args...)
@@ -137,6 +160,19 @@ func (c *Client) SendKeys(ctx context.Context, name string, keys string) error {
 	return nil
 }
 
+// SendKey sends a single tmux key token without appending Enter.
+func (c *Client) SendKey(ctx context.Context, name string, key string) error {
+	c.logger.Debug("sending key to tmux session", "name", name, "key", key)
+
+	_, err := c.runner.Run(ctx, "send-keys", "-t", name, key)
+	if err != nil {
+		return &domain.TmuxError{Op: "send-keys", Session: name, Err: err}
+	}
+
+	c.logger.Debug("key sent to tmux session", "name", name)
+	return nil
+}
+
 // CapturePane captures the last N lines from a tmux session's pane
 // Uses: tmux capture-pane -t <name> -p -S -<lines>
 func (c *Client) CapturePane(ctx context.Context, name string, lines int) (string, error) {
@@ -167,11 +203,11 @@ func (c *Client) ListSessions(ctx context.Context) ([]string, error) {
 }
 
 // ListSessionInfos returns tmux sessions with creation timestamps.
-// Uses: tmux list-sessions -F "#{session_name}\t#{session_created}"
+// Uses: tmux list-sessions -F "#{session_name}\t#{session_created}\t#{session_path}"
 func (c *Client) ListSessionInfos(ctx context.Context) ([]SessionInfo, error) {
 	c.logger.Debug("listing tmux sessions")
 
-	out, err := c.runner.Run(ctx, "list-sessions", "-F", "#{session_name}\t#{session_created}")
+	out, err := c.runner.Run(ctx, "list-sessions", "-F", "#{session_name}\t#{session_created}\t#{session_path}")
 	if err != nil {
 		// If no sessions exist, tmux returns an error
 		// Return empty list instead
@@ -190,13 +226,13 @@ func (c *Client) ListSessionInfos(ctx context.Context) ([]SessionInfo, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 2)
+		parts := strings.SplitN(line, "\t", 3)
 		name := strings.TrimSpace(parts[0])
 		if name == "" {
 			continue
 		}
 		info := SessionInfo{Name: name}
-		if len(parts) == 2 {
+		if len(parts) >= 2 {
 			createdRaw := strings.TrimSpace(parts[1])
 			if createdRaw != "" {
 				if sec, parseErr := strconv.ParseInt(createdRaw, 10, 64); parseErr == nil && sec > 0 {
@@ -205,11 +241,24 @@ func (c *Client) ListSessionInfos(ctx context.Context) ([]SessionInfo, error) {
 				}
 			}
 		}
+		if len(parts) == 3 {
+			info.Path = strings.TrimSpace(parts[2])
+		}
 		sessions = append(sessions, info)
 	}
 
 	c.logger.Debug("tmux sessions listed", "count", len(sessions))
 	return sessions, nil
+}
+
+func (c *Client) CurrentSession(ctx context.Context) (string, error) {
+	c.logger.Debug("getting current tmux session")
+
+	out, err := c.runner.Run(ctx, "display-message", "-p", "#{client_session}")
+	if err != nil {
+		return "", &domain.TmuxError{Op: "display-message", Err: err}
+	}
+	return strings.TrimSpace(out), nil
 }
 
 // SetEnvironment sets an environment variable in a tmux session

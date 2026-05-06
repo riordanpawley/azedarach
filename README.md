@@ -73,9 +73,8 @@ azd --help
 - Project-level spec gate toggle:
   - `az config set spec.enabled true`
   - `az config set spec.enabled false`
-- Use exported spec Markdown under `docs/spec/` as the spec documentation source of truth.
-- Keep implementation/planning docs in `docs/` aligned to those exported spec files.
-- Pre-commit runs spec export (when configured) and auto-stages `docs/spec/` updates.
+- Use `az spec read --json` for stored requirement/link data.
+- Markdown spec export is disabled until it can export the real stored spec data.
 
 ### Daemon + Operations
 
@@ -235,18 +234,9 @@ just run           # restart daemon + run az
 just test          # go test -v ./...
 just type-check    # go build ./...
 just check-boundaries
-just spec-sync     # run spec export hook logic and auto-stage docs/spec when configured
 just git-config-lock
 just git-config-unlock
 just git-config-status
-```
-
-Spec export hook configuration:
-
-```bash
-# Optional: configure the exact command used by pre-commit for this shell/session.
-# Replace with your actual spec export command.
-export AZ_SPEC_SYNC_CMD='az spec export --target md'
 ```
 
 Direct Go entrypoint examples:

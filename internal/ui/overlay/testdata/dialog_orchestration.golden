@@ -1,18 +1,18 @@
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
-│Session Orchestration                                                                             │
+│Tmux Sessions                                                                                     │
 │──────────────────────────────────────────────────────────────────────────────────────────────────│
-││  Active Sessions: 2                                             Actions                         │
+││  Azedarach tmux sessions: 2                                     Keys                            │
 ││                                                                 ────────────────────────────────│
-││  ▶ az-123   ● busy                                               j/k navigate                   │
-││    Implement feature X with careful layout handling              Enter/a attach                 │
+││  ▶ az-123  in_progress    ● busy                                 j/k navigate                   │
+││    Implement feature X with careful layout handling              Enter/a switch                 │
 ││    ⏱ not started  📁 /Users/riordan/prog/azedarach               x kill                         │
-││    💬 renderDialogTwoPane ok                                     r refresh                      │
-││ ───────────────────────────────────────────────────────────      Esc close                      │
-││    az-456   ◐ waiting                                                                           │
+││    tmux yes  worktree yes  git dirty (+8/-2; ↑2)                 r refresh                      │
+││    💬 renderDialogTwoPane ok                                     Esc close                      │
+││ ───────────────────────────────────────────────────────────                                     │
+││    az-456  blocked    ◐ waiting                                                                 │
 ││    Fix selector overflow on mobile                                                              │
 ││    ⏱ not started  📁 /Users/riordan/prog/Chefy                                                  │
-││                                                                                                 │
-││                                                                                                 │
+││    tmux yes  worktree yes  git clean                                                            │
 ││                                                                                                 │
 ││                                                                                                 │
 ││                                                                                                 │

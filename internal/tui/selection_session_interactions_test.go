@@ -118,7 +118,11 @@ func TestSessionLifecycleMessagesPreserveCurrentSelection(t *testing.T) {
 			before := getCursorPosition(m)
 
 			result, cmd := m.Update(tt.msg)
-			if cmd != nil {
+			if tt.name == "stopped" {
+				if cmd == nil {
+					t.Fatal("expected stopped lifecycle message to refresh daemon projection")
+				}
+			} else if cmd != nil {
 				t.Fatalf("update command = %T, want nil", cmd)
 			}
 

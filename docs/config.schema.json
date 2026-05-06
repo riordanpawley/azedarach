@@ -2,7 +2,6 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json",
   "title": "Azedarach Config",
-  "description": "Schema for .azedarach/config.json and optional local override .azedarach/config.local.json. Runtime loading layers defaults, config.json, then config.local.json.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -17,85 +16,6 @@
       "type": "string",
       "enum": ["claude", "opencode", "codex"],
       "default": "claude"
-    },
-    "issueTracker": {
-      "type": "object",
-      "description": "Canonical issue backend configuration. Use backend=local for the embedded store or backend=linear for optional two-way Linear sync.",
-      "additionalProperties": false,
-      "properties": {
-        "backend": {
-          "type": "string",
-          "enum": ["local", "linear"],
-          "default": "local"
-        },
-        "sync": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "enabled": {
-              "type": "boolean",
-              "default": false
-            }
-          }
-        },
-        "linear": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "command": {
-              "type": "string",
-              "default": "linear-cli"
-            },
-            "team": {
-              "type": "string"
-            },
-            "project": {
-              "type": "string"
-            },
-            "filter": {
-              "type": "object",
-              "description": "Optional Linear issue filters. Use assignee=\"me\" to sync issues assigned to the active LINEAR_API_KEY viewer, or set a Linear user id.",
-              "additionalProperties": false,
-              "properties": {
-                "assignee": {
-                  "type": "string"
-                }
-              }
-            },
-            "webhooks": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "enabled": {
-                  "type": "boolean",
-                  "default": false
-                },
-                "transport": {
-                  "type": "string",
-                  "enum": ["sdk", "cli"],
-                  "default": "sdk"
-                },
-                "url": {
-                  "type": "string"
-                },
-                "port": {
-                  "type": "integer"
-                },
-                "events": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  },
-                  "default": []
-                },
-                "secret": {
-                  "type": "string"
-                }
-              }
-            }
-          }
-        }
-      }
     },
     "git": {
       "type": "object",
@@ -176,7 +96,7 @@
             },
             "command": {
               "type": "string",
-              "default": "az spec export --target md"
+              "default": ""
             },
             "autoStageDocs": {
               "type": "boolean",

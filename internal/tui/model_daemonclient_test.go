@@ -2168,6 +2168,93 @@ func TestHandleMergeResultPendingOperationShowsInfoToast(t *testing.T) {
 	if !strings.Contains(gotToast, "Merge queued for az-1 (operation op-merge)") {
 		t.Fatalf("toast = %q, want queued merge message", gotToast)
 	}
+	signals := updatedModel.runtimeSignalsForBoard()["az-1"]
+	if signals.PendingOperationID != "op-merge" || signals.PendingOperationState != string(protocol.OperationStateQueued) {
+		t.Fatalf("pending merge signals = %+v", signals)
+	}
+	progress := updatedModel.pendingMutationForTask("az-1")
+	if progress == nil || progress.OperationID != "op-merge" || progress.State != string(protocol.OperationStateQueued) {
+		t.Fatalf("pending merge detail progress = %+v", progress)
+	}
+}
+
+func TestHandleFollowOnMergePendingOperationMarksSourceAndTarget(t *testing.T) {
+	m := newTestModel()
+
+	updated, _ := m.Update(mergeResultMsg{
+		sourceID:    "az-1",
+		targetID:    "az-3",
+		stage:       "merge",
+		operationID: "op-merge",
+		state:       protocol.OperationStateRunning,
+	})
+
+	updatedModel := updated.(Model)
+	for _, taskID := range []string{"az-1", "az-3"} {
+		signals := updatedModel.runtimeSignalsForBoard()[taskID]
+		if signals.PendingOperationID != "op-merge" || signals.PendingOperationState != string(protocol.OperationStateRunning) {
+			t.Fatalf("pending merge signals for %s = %+v", taskID, signals)
+		}
+		progress := updatedModel.pendingMutationForTask(taskID)
+		if progress == nil || progress.OperationID != "op-merge" || progress.State != string(protocol.OperationStateRunning) {
+			t.Fatalf("pending merge detail progress for %s = %+v", taskID, progress)
+		}
+	}
+}
+
+func TestPendingMergeOperationSurvivesStaleIssueSnapshot(t *testing.T) {
+	m := newTestModel()
+
+	pendingAny, _ := m.Update(mergeResultMsg{
+		sourceID:    "az-1",
+		targetID:    "az-3",
+		stage:       "merge",
+		operationID: "op-merge",
+		state:       protocol.OperationStateRunning,
+	})
+	pendingModel := pendingAny.(Model)
+
+	refreshedAny, _ := pendingModel.Update(issuesLoadedMsg{
+		tasks: []domain.Task{
+			{ID: "az-1", Title: "Task 1 stale", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+			{ID: "az-3", Title: "Task 3 stale", Status: domain.StatusInProgress, Priority: domain.P0, Type: domain.TypeFeature},
+		},
+	})
+	refreshed := refreshedAny.(Model)
+
+	for _, taskID := range []string{"az-1", "az-3"} {
+		signals := refreshed.runtimeSignalsForBoard()[taskID]
+		if signals.PendingOperationID != "op-merge" || signals.PendingOperationState != string(protocol.OperationStateRunning) {
+			t.Fatalf("pending merge signals after stale snapshot for %s = %+v", taskID, signals)
+		}
+		progress := refreshed.pendingMutationForTask(taskID)
+		if progress == nil || progress.OperationID != "op-merge" || progress.State != string(protocol.OperationStateRunning) {
+			t.Fatalf("pending merge detail progress after stale snapshot for %s = %+v", taskID, progress)
+		}
+	}
+}
+
+func TestLocalMergeActivityMarkerClearsOnMergeFailure(t *testing.T) {
+	m := newTestModel()
+	m.markMergeOperationPreparing("az-1", "az-3", "preparing merge")
+
+	updatedAny, _ := m.Update(mergeResultMsg{
+		sourceID: "az-1",
+		targetID: "az-3",
+		stage:    "merge",
+		err:      fmt.Errorf("preflight failed"),
+	})
+	updated := updatedAny.(Model)
+
+	for _, taskID := range []string{"az-1", "az-3"} {
+		signals := updated.runtimeSignalsForBoard()[taskID]
+		if signals.PendingOperationState != "" || signals.PendingOperationID != "" {
+			t.Fatalf("pending merge marker for %s = %+v, want cleared", taskID, signals)
+		}
+		if progress := updated.pendingMutationForTask(taskID); progress != nil {
+			t.Fatalf("detail progress for %s = %+v, want nil", taskID, progress)
+		}
+	}
 }
 
 func TestHandleMergeTargetSelectionToBaseUsesWorktreeLookupFallback(t *testing.T) {
@@ -5698,8 +5785,8 @@ func TestStopSessionCommandPreservesDaemonProjection(t *testing.T) {
 	}
 
 	updated, cmd := m.Update(msg)
-	if cmd != nil {
-		t.Fatalf("update command = %T, want nil", cmd)
+	if cmd == nil {
+		t.Fatal("expected session stop completion to refresh daemon projection")
 	}
 	updatedModel, ok := updated.(Model)
 	if !ok {
@@ -5716,28 +5803,45 @@ func TestStopSessionCommandPreservesDaemonProjection(t *testing.T) {
 func TestTaskWorkspaceStopSessionKeyKeepsOverlayOpen(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandSessionStop {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionStop)
+			switch req.Command {
+			case daemonclient.CommandSessionStop:
+				var body struct {
+					SessionID string `json:"session_id"`
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal stop request: %v", err)
+				}
+				if body.SessionID != "az-1" {
+					t.Fatalf("stop body = %+v, want az-1", body)
+				}
+				respBody, _ := json.Marshal(struct {
+					Output string `json:"output"`
+				}{Output: "stopped"})
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandTaskList:
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{{
+						ID:          "az-1",
+						Title:       "Task 1",
+						Status:      domain.StatusInProgress,
+						Type:        domain.TypeTask,
+						HasWorktree: true,
+					}}),
+				}, nil
+			default:
+				t.Fatalf("command = %q, want %q or %q", req.Command, daemonclient.CommandSessionStop, daemonclient.CommandTaskList)
 			}
-			var body struct {
-				SessionID string `json:"session_id"`
-			}
-			if err := json.Unmarshal(req.Body, &body); err != nil {
-				t.Fatalf("unmarshal stop request: %v", err)
-			}
-			if body.SessionID != "az-1" {
-				t.Fatalf("stop body = %+v, want az-1", body)
-			}
-			respBody, _ := json.Marshal(struct {
-				Output string `json:"output"`
-			}{Output: "stopped"})
-			return protocol.ResponseEnvelope{
-				ProtocolVersion: req.ProtocolVersion,
-				RequestID:       req.RequestID,
-				Kind:            protocol.EnvelopeKindResponse,
-				OK:              true,
-				Body:            respBody,
-			}, nil
+			return protocol.ResponseEnvelope{}, nil
 		},
 	}
 
@@ -5780,6 +5884,33 @@ func TestTaskWorkspaceStopSessionKeyKeepsOverlayOpen(t *testing.T) {
 	}
 	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStop {
 		t.Fatalf("requests = %v", transport.requests)
+	}
+
+	stoppedModelAny, refreshCmd := updatedModel.Update(stopMsg)
+	if refreshCmd == nil {
+		t.Fatal("expected stop completion to refresh daemon projection")
+	}
+	stoppedModel := stoppedModelAny.(Model)
+	if _, ok := stoppedModel.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
+		t.Fatalf("expected task workspace overlay to remain open after stop completion, got %T", stoppedModel.overlayStack.Current())
+	}
+
+	loadedMsg := refreshCmd()
+	loadedModelAny, _ := stoppedModel.Update(loadedMsg)
+	loadedModel := loadedModelAny.(Model)
+	workspace, ok := loadedModel.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace overlay after refresh, got %T", loadedModel.overlayStack.Current())
+	}
+	view := workspace.View()
+	if strings.Contains(view, "Pause session") || strings.Contains(view, "Stop session") {
+		t.Fatalf("stopped session actions should not remain after daemon refresh: %q", view)
+	}
+	if !strings.Contains(view, "Start session") {
+		t.Fatalf("expected start action after daemon refresh removed session: %q", view)
+	}
+	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandSessionStop || got[1] != daemonclient.CommandTaskList {
+		t.Fatalf("requests = %v", got)
 	}
 }
 
@@ -6048,6 +6179,7 @@ func TestFetchAndMergeCommandReturnsPendingOperationToast(t *testing.T) {
 	}
 
 	m := newDaemonTestModel(transport)
+	m.tasks = append(m.tasks, domain.Task{ID: "az-child", Title: "Child", Status: domain.StatusInProgress, Priority: domain.P2, Type: domain.TypeTask})
 	msg := m.fetchAndMergeCmd("/tmp/az-child", "main", "az-child", false)()
 	result, ok := msg.(fetchAndMergeResultMsg)
 	if !ok {
@@ -6068,6 +6200,10 @@ func TestFetchAndMergeCommandReturnsPendingOperationToast(t *testing.T) {
 	gotToast := updatedModel.toasts[len(updatedModel.toasts)-1].Message
 	if !strings.Contains(gotToast, "Merge running for az-child (operation op-merge)") {
 		t.Fatalf("toast = %q, want merge running message", gotToast)
+	}
+	signals := updatedModel.runtimeSignalsForBoard()["az-child"]
+	if signals.PendingOperationID != "op-merge" || signals.PendingOperationState != string(protocol.OperationStateRunning) {
+		t.Fatalf("pending update-from-base signals = %+v", signals)
 	}
 }
 

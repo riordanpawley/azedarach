@@ -102,6 +102,16 @@ func TestClient_NewSession(t *testing.T) {
 	}
 }
 
+func TestClient_NewSessionWithCommand(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(runner, slog.Default())
+
+	err := client.NewSessionWithCommand(context.Background(), "az", "/repo", "az")
+
+	require.NoError(t, err)
+	assert.Equal(t, [][]string{{"new-session", "-d", "-s", "az", "-c", "/repo", "az"}}, runner.commands)
+}
+
 func TestClient_EnsureWindow(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -159,6 +169,16 @@ func TestClient_EnsureWindow(t *testing.T) {
 			assert.Equal(t, tt.wantCommand, runner.commands)
 		})
 	}
+}
+
+func TestClient_SendKey(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(runner, slog.Default())
+
+	err := client.SendKey(context.Background(), "az", "C-c")
+
+	require.NoError(t, err)
+	assert.Equal(t, [][]string{{"send-keys", "-t", "az", "C-c"}}, runner.commands)
 }
 
 func TestClient_HasSession(t *testing.T) {
@@ -559,6 +579,30 @@ func TestClient_SwitchClient(t *testing.T) {
 		require.ErrorAs(t, err, &tmuxErr)
 		assert.Equal(t, "switch-client", tmuxErr.Op)
 		assert.Equal(t, "ch-em", tmuxErr.Session)
+	})
+}
+
+func TestClient_CurrentSession(t *testing.T) {
+	t.Run("reads current client session", func(t *testing.T) {
+		runner := &recordingOutputRunner{outputs: []string{"az-two\n"}}
+		client := NewClient(runner, slog.Default())
+
+		got, err := client.CurrentSession(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, "az-two", got)
+		require.Len(t, runner.commands, 1)
+		assert.Equal(t, []string{"display-message", "-p", "#{client_session}"}, runner.commands[0])
+	})
+
+	t.Run("wraps display error", func(t *testing.T) {
+		runner := &recordingRunner{err: errors.New("display failed")}
+		client := NewClient(runner, slog.Default())
+
+		_, err := client.CurrentSession(context.Background())
+		require.Error(t, err)
+		var tmuxErr *domain.TmuxError
+		require.ErrorAs(t, err, &tmuxErr)
+		assert.Equal(t, "display-message", tmuxErr.Op)
 	})
 }
 

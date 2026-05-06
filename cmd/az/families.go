@@ -289,6 +289,51 @@ func runCodexCommand(cfg *config.Config, args []string) error {
 	}
 }
 
+func runTmuxCommand(cfg *config.Config, args []string) error {
+	if len(args) == 0 || isHelpArg(args[0]) {
+		cli.PrintTmuxUsage()
+		return nil
+	}
+
+	switch args[0] {
+	case "selector":
+		if len(args) > 1 {
+			cli.PrintTmuxUsage()
+			return fmt.Errorf("usage: az tmux selector")
+		}
+		runTmuxSelectorForCommand(cfg)
+		return nil
+	case "install-selector":
+		if len(args) > 1 && sessionHelpRequested(args[1:]...) {
+			cli.PrintTmuxUsage()
+			return nil
+		}
+		opts, err := cli.ParseTmuxInstallSelectorArgs(args[1:])
+		if err != nil {
+			cli.PrintTmuxUsage()
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.TmuxInstallSelectorCommand(deps, opts)
+		})
+	case "uninstall-selector":
+		if len(args) > 1 && sessionHelpRequested(args[1:]...) {
+			cli.PrintTmuxUsage()
+			return nil
+		}
+		opts, err := cli.ParseTmuxUninstallSelectorArgs(args[1:])
+		if err != nil {
+			cli.PrintTmuxUsage()
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.TmuxUninstallSelectorCommand(deps, opts)
+		})
+	default:
+		return fmt.Errorf("unknown tmux command: %s", args[0])
+	}
+}
+
 type projectAddOptions struct {
 	Path string
 	Name string
