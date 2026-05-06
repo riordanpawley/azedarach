@@ -104,10 +104,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.refreshSeq != 0 && msg.refreshSeq < m.issueRefreshSeq {
 			return m, nil
 		}
-		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
-			return m, nil
-		}
-		if msg.revision != 0 && msg.revision < m.daemonRevision {
+		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
 			return m, nil
 		}
 		if msg.daemonClient != nil {
@@ -714,6 +711,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.followOnMergeIntoTargetCmd(msg.sourceWorktree, msg.targetWorktree, msg.sourceID, msg.targetID, msg.targetState, msg.refreshStatus)
 
 	case refreshTaskWorkspaceResultMsg:
+		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
+			return m, nil
+		}
 		if msg.reconcileErr != nil && m.logger != nil {
 			m.logger.Warn("task workspace issue reconcile failed", "task_id", msg.taskID, "error", msg.reconcileErr)
 		}
@@ -884,9 +884,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.taskSnapshotFreshness = msg.freshness
 		m.reconcileCursorAfterIssuesRefresh()
 		m.syncTaskWorkspaceOverlay()
-		if msg.revision > m.daemonRevision {
-			m.daemonRevision = msg.revision
-		}
+		m.daemonRevision = msg.revision
 		m.loading = false
 		m.boardRefreshing = false
 		m.projectSwitchInFlight = false
@@ -1226,6 +1224,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadIssuesCmd()
 
 	case worktreeCleanupConfirmPromptMsg:
+		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
+			return m, nil
+		}
 		if msg.hasTask {
 			m.applySingleTaskWorkspaceRefresh(msg.taskID, msg.task)
 		}
@@ -1248,6 +1249,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.openOverlay(confirm)
 
 	case bulkCleanupPreflightMsg:
+		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
+			return m, nil
+		}
 		m.applyTaskRefreshes(msg.refreshedTasks)
 		if len(msg.risks) == 0 && msg.snapshotErr == nil {
 			return m, m.bulkCleanupWorktreeCmd(msg.taskIDs, msg.deletedTasks)
