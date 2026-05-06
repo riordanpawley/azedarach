@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -188,6 +189,84 @@ func TestClientViewerIDUsesActiveAPIKey(t *testing.T) {
 	}
 	if gotAuth != "lin_api_test" {
 		t.Fatalf("Authorization header = %q", gotAuth)
+	}
+}
+
+func TestClientUpdateIssuesBatchesAliasedMutations(t *testing.T) {
+	var gotVariables map[string]any
+	var gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		gotQuery = body.Query
+		gotVariables = body.Variables
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"data": {
+				"u0": {
+					"success": true,
+					"issue": {
+						"id": "lin-1",
+						"identifier": "CHE-1",
+						"title": "One",
+						"description": "",
+						"url": "",
+						"priority": 2,
+						"createdAt": "2026-05-05T00:00:00Z",
+						"updatedAt": "2026-05-05T01:00:00Z",
+						"state": {"name": "Todo", "type": "unstarted"},
+						"assignee": {"name": "", "email": ""},
+						"labels": {"nodes": []},
+						"project": {"name": ""}
+					}
+				},
+				"u1": {
+					"success": true,
+					"issue": {
+						"id": "lin-2",
+						"identifier": "CHE-2",
+						"title": "Two",
+						"description": "",
+						"url": "",
+						"priority": 3,
+						"createdAt": "2026-05-05T00:00:00Z",
+						"updatedAt": "2026-05-05T01:00:00Z",
+						"state": {"name": "Todo", "type": "unstarted"},
+						"assignee": {"name": "", "email": ""},
+						"labels": {"nodes": []},
+						"project": {"name": ""}
+					}
+				}
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	priority := 2
+	client := &Client{Endpoint: server.URL, APIKey: "lin_api_test", HTTPClient: server.Client()}
+	issues, err := client.UpdateIssues(context.Background(), []IssueUpdateRequest{
+		{ID: "lin-1", Input: IssueInput{Title: "One", Priority: &priority}},
+		{ID: "lin-2", Input: IssueInput{Title: "Two"}},
+	})
+	if err != nil {
+		t.Fatalf("UpdateIssues() error = %v", err)
+	}
+	if len(issues) != 2 || issues[0].Identifier != "CHE-1" || issues[1].Identifier != "CHE-2" {
+		t.Fatalf("issues = %#v", issues)
+	}
+	if !strings.Contains(gotQuery, "u0: issueUpdate") || !strings.Contains(gotQuery, "u1: issueUpdate") {
+		t.Fatalf("query missing aliases: %s", gotQuery)
+	}
+	if gotVariables["id0"] != "lin-1" || gotVariables["id1"] != "lin-2" {
+		t.Fatalf("variables = %#v", gotVariables)
+	}
+	if client.Metrics().RequestCount != 1 {
+		t.Fatalf("request count = %d, want 1", client.Metrics().RequestCount)
 	}
 }
 

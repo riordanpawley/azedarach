@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 
@@ -325,6 +326,9 @@ func TestServiceRunCapsPushesPerRun(t *testing.T) {
 	if summary.PushedRemote != defaultMaxPushesPerRun || !summary.PushBudgetExhausted {
 		t.Fatalf("summary = %+v", summary)
 	}
+	if got, want := linear.updateBatch, []int{25}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("update batches = %v, want %v", got, want)
+	}
 }
 
 func TestServiceRunStopsPushesWhenRateLimitBudgetIsLow(t *testing.T) {
@@ -428,6 +432,8 @@ func TestServiceRunDoesNotRetryNonRetryablePush(t *testing.T) {
 type fakeLinear struct {
 	issues      []linearapi.Issue
 	updates     []linearapi.IssueInput
+	updateIDs   []string
+	updateBatch []int
 	updateErrs  []error
 	lastTeam    string
 	lastProject string
@@ -458,21 +464,33 @@ func (f *fakeLinear) ViewerID(context.Context) (string, error) {
 	return f.viewerID, nil
 }
 
-func (f *fakeLinear) UpdateIssue(_ context.Context, id string, input linearapi.IssueInput) (linearapi.Issue, error) {
-	f.updates = append(f.updates, input)
+func (f *fakeLinear) UpdateIssues(_ context.Context, requests []linearapi.IssueUpdateRequest) ([]linearapi.Issue, error) {
+	f.updateBatch = append(f.updateBatch, len(requests))
+	updated := make([]linearapi.Issue, 0, len(requests))
+	for _, req := range requests {
+		f.updateIDs = append(f.updateIDs, req.ID)
+		f.updates = append(f.updates, req.Input)
+	}
 	if len(f.updateErrs) > 0 {
 		err := f.updateErrs[0]
 		f.updateErrs = f.updateErrs[1:]
 		if err != nil {
-			return linearapi.Issue{}, err
+			return nil, err
 		}
 	}
+	for _, req := range requests {
+		updated = append(updated, f.updatedIssue(req.ID, req.Input))
+	}
+	return updated, nil
+}
+
+func (f *fakeLinear) updatedIssue(id string, input linearapi.IssueInput) linearapi.Issue {
 	for _, issue := range f.issues {
 		if issue.ID == id {
-			return issue, nil
+			return issue
 		}
 	}
-	return linearapi.Issue{ID: id, Identifier: id, Title: input.Title, UpdatedAt: time.Now().UTC()}, nil
+	return linearapi.Issue{ID: id, Identifier: id, Title: input.Title, UpdatedAt: time.Now().UTC()}
 }
 
 func (f *fakeLinear) Metrics() linearapi.Metrics {

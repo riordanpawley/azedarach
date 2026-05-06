@@ -16,6 +16,8 @@ import (
 
 const DefaultEndpoint = "https://api.linear.app/graphql"
 
+const MaxIssueUpdateBatchSize = 25
+
 type Client struct {
 	Endpoint   string
 	APIKey     string
@@ -54,6 +56,11 @@ type IssueInput struct {
 	Title       string
 	Description *string
 	Priority    *int
+}
+
+type IssueUpdateRequest struct {
+	ID    string
+	Input IssueInput
 }
 
 type RateLimit struct {
@@ -168,9 +175,48 @@ query AzedarachViewer {
 }
 
 func (c *Client) UpdateIssue(ctx context.Context, id string, input IssueInput) (Issue, error) {
-	query := `
-mutation AzedarachUpdateIssue($id: String!, $input: IssueUpdateInput!) {
-  issueUpdate(id: $id, input: $input) {
+	updated, err := c.UpdateIssues(ctx, []IssueUpdateRequest{{ID: id, Input: input}})
+	if err != nil {
+		return Issue{}, err
+	}
+	if len(updated) != 1 {
+		return Issue{}, errors.New("linear issue update response missing issue")
+	}
+	return updated[0], nil
+}
+
+func (c *Client) UpdateIssues(ctx context.Context, requests []IssueUpdateRequest) ([]Issue, error) {
+	cleaned := make([]IssueUpdateRequest, 0, len(requests))
+	for _, req := range requests {
+		req.ID = strings.TrimSpace(req.ID)
+		if req.ID == "" {
+			return nil, errors.New("linear issue update id is required")
+		}
+		cleaned = append(cleaned, req)
+	}
+	if len(cleaned) == 0 {
+		return nil, nil
+	}
+	if len(cleaned) > MaxIssueUpdateBatchSize {
+		return nil, fmt.Errorf("linear issue update batch size %d exceeds max %d", len(cleaned), MaxIssueUpdateBatchSize)
+	}
+	return c.updateIssuesSingleRequest(ctx, cleaned)
+}
+
+func (c *Client) updateIssuesSingleRequest(ctx context.Context, requests []IssueUpdateRequest) ([]Issue, error) {
+	vars := map[string]any{}
+	var varDefs strings.Builder
+	var fields strings.Builder
+	for i, req := range requests {
+		if i > 0 {
+			varDefs.WriteString(", ")
+			fields.WriteString("\n")
+		}
+		idName := fmt.Sprintf("id%d", i)
+		inputName := fmt.Sprintf("input%d", i)
+		alias := fmt.Sprintf("u%d", i)
+		varDefs.WriteString(fmt.Sprintf("$%s: String!, $%s: IssueUpdateInput!", idName, inputName))
+		fields.WriteString(fmt.Sprintf(`  %s: issueUpdate(id: $%s, input: $%s) {
     success
     issue {
       id
@@ -186,21 +232,31 @@ mutation AzedarachUpdateIssue($id: String!, $input: IssueUpdateInput!) {
       labels { nodes { name } }
       project { name }
     }
-  }
-}`
-	var out struct {
-		IssueUpdate struct {
-			Success bool      `json:"success"`
-			Issue   issueNode `json:"issue"`
-		} `json:"issueUpdate"`
+  }`, alias, idName, inputName))
+		vars[idName] = req.ID
+		vars[inputName] = inputMap(req.Input)
 	}
-	if err := c.graphql(ctx, query, map[string]any{"id": strings.TrimSpace(id), "input": inputMap(input)}, &out); err != nil {
-		return Issue{}, err
+	query := fmt.Sprintf("mutation AzedarachUpdateIssues(%s) {\n%s\n}", varDefs.String(), fields.String())
+	out := map[string]struct {
+		Success bool      `json:"success"`
+		Issue   issueNode `json:"issue"`
+	}{}
+	if err := c.graphql(ctx, query, vars, &out); err != nil {
+		return nil, err
 	}
-	if !out.IssueUpdate.Success {
-		return Issue{}, errors.New("linear issue update was not successful")
+	issues := make([]Issue, 0, len(requests))
+	for i := range requests {
+		alias := fmt.Sprintf("u%d", i)
+		payload, ok := out[alias]
+		if !ok {
+			return nil, fmt.Errorf("linear issue update response missing %s", alias)
+		}
+		if !payload.Success {
+			return nil, fmt.Errorf("linear issue update %s was not successful", requests[i].ID)
+		}
+		issues = append(issues, payload.Issue.toIssue())
 	}
-	return out.IssueUpdate.Issue.toIssue(), nil
+	return issues, nil
 }
 
 func (c *Client) graphql(ctx context.Context, query string, variables map[string]any, out any) error {

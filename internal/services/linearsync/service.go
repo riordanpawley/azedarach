@@ -19,6 +19,7 @@ const ProviderLinear = "linear"
 
 const (
 	defaultMaxPushesPerRun = 25
+	defaultPushBatchSize   = linearapi.MaxIssueUpdateBatchSize
 	defaultRetryAttempts   = 3
 	defaultRetryDelay      = time.Second
 	minRemainingRequests   = 5
@@ -27,7 +28,7 @@ const (
 type LinearClient interface {
 	ListIssues(ctx context.Context, opts linearapi.ListIssuesOptions) ([]linearapi.Issue, error)
 	ViewerID(ctx context.Context) (string, error)
-	UpdateIssue(ctx context.Context, id string, input linearapi.IssueInput) (linearapi.Issue, error)
+	UpdateIssues(ctx context.Context, requests []linearapi.IssueUpdateRequest) ([]linearapi.Issue, error)
 	Metrics() linearapi.Metrics
 }
 
@@ -59,6 +60,7 @@ type Summary struct {
 	Imported              int    `json:"imported"`
 	UpdatedLocal          int    `json:"updated_local"`
 	PushedRemote          int    `json:"pushed_remote"`
+	PushBatches           int    `json:"push_batches"`
 	Conflicts             int    `json:"conflicts"`
 	RemoteIssues          int    `json:"remote_issues"`
 	LocalIssues           int    `json:"local_issues"`
@@ -225,7 +227,7 @@ func (s Service) Run(ctx context.Context) (Summary, error) {
 			}
 		}
 	}
-	pushedThisRun := 0
+	pendingBatch := []pendingPush{}
 	for _, local := range localTasks {
 		ref, ok := refByIssueID[local.ID.String()]
 		if !ok || ref.ExternalID == "" {
@@ -240,7 +242,7 @@ func (s Service) Run(ctx context.Context) (Summary, error) {
 			summary.OutOfScopeRefs++
 			continue
 		}
-		if pushedThisRun >= defaultMaxPushesPerRun {
+		if len(pendingBatch)+summary.PushedRemote >= defaultMaxPushesPerRun {
 			summary.PushBudgetExhausted = true
 			continue
 		}
@@ -250,19 +252,27 @@ func (s Service) Run(ctx context.Context) (Summary, error) {
 		}
 		description := local.Description
 		priority := int(local.Priority)
-		updated, retried, err := s.updateIssueWithRetry(ctx, ref.ExternalID, linearapi.IssueInput{
-			Title:       local.Title,
-			Description: &description,
-			Priority:    &priority,
+		pendingBatch = append(pendingBatch, pendingPush{
+			IssueID:   local.ID.String(),
+			LocalHash: localHash,
+			Request: linearapi.IssueUpdateRequest{
+				ID: ref.ExternalID,
+				Input: linearapi.IssueInput{
+					Title:       local.Title,
+					Description: &description,
+					Priority:    &priority,
+				},
+			},
 		})
-		summary.RetriedRequests += retried
-		if err != nil {
-			_ = s.recordSyncStateError(ctx, stateID, state.Cursor, err, now())
-			return summary, fmt.Errorf("push linear issue %s: %w", local.ID, err)
+		if len(pendingBatch) >= defaultPushBatchSize {
+			if err := s.flushPushBatch(ctx, pendingBatch, &summary, stateID, state.Cursor, now()); err != nil {
+				return summary, err
+			}
+			pendingBatch = pendingBatch[:0]
 		}
-		summary.PushedRemote++
-		pushedThisRun++
-		if err := s.Store.UpsertExternalRef(ctx, externalRef(updated, local.ID.String(), localHash, now())); err != nil {
+	}
+	if len(pendingBatch) > 0 {
+		if err := s.flushPushBatch(ctx, pendingBatch, &summary, stateID, state.Cursor, now()); err != nil {
 			return summary, err
 		}
 	}
@@ -281,11 +291,47 @@ func (s Service) Run(ctx context.Context) (Summary, error) {
 	return summary, nil
 }
 
-func (s Service) updateIssueWithRetry(ctx context.Context, id string, input linearapi.IssueInput) (linearapi.Issue, int, error) {
+type pendingPush struct {
+	IssueID   string
+	LocalHash string
+	Request   linearapi.IssueUpdateRequest
+}
+
+func (s Service) flushPushBatch(ctx context.Context, batch []pendingPush, summary *Summary, stateID, cursor string, now time.Time) error {
+	if len(batch) == 0 {
+		return nil
+	}
+	requests := make([]linearapi.IssueUpdateRequest, 0, len(batch))
+	for _, item := range batch {
+		requests = append(requests, item.Request)
+	}
+	updated, retried, err := s.updateIssuesWithRetry(ctx, requests)
+	summary.RetriedRequests += retried
+	if err != nil {
+		_ = s.recordSyncStateError(ctx, stateID, cursor, err, now)
+		return fmt.Errorf("push %d linear issue(s): %w", len(batch), err)
+	}
+	if len(updated) != len(batch) {
+		err := fmt.Errorf("linear batch update returned %d issue(s), want %d", len(updated), len(batch))
+		_ = s.recordSyncStateError(ctx, stateID, cursor, err, now)
+		return err
+	}
+	summary.PushBatches++
+	for i, issue := range updated {
+		item := batch[i]
+		summary.PushedRemote++
+		if err := s.Store.UpsertExternalRef(ctx, externalRef(issue, item.IssueID, item.LocalHash, now)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s Service) updateIssuesWithRetry(ctx context.Context, requests []linearapi.IssueUpdateRequest) ([]linearapi.Issue, int, error) {
 	var lastErr error
 	retries := 0
 	for attempt := 1; attempt <= defaultRetryAttempts; attempt++ {
-		updated, err := s.Linear.UpdateIssue(ctx, id, input)
+		updated, err := s.Linear.UpdateIssues(ctx, requests)
 		if err == nil {
 			return updated, retries, nil
 		}
@@ -294,11 +340,11 @@ func (s Service) updateIssueWithRetry(ctx context.Context, id string, input line
 			break
 		}
 		if err := s.sleep(ctx, time.Duration(attempt)*defaultRetryDelay); err != nil {
-			return linearapi.Issue{}, retries, err
+			return nil, retries, err
 		}
 		retries++
 	}
-	return linearapi.Issue{}, retries, lastErr
+	return nil, retries, lastErr
 }
 
 func (s Service) sleep(ctx context.Context, delay time.Duration) error {
