@@ -148,6 +148,45 @@ func TestGlobalInventoryLoaderSortsBySessionStartOldestFirst(t *testing.T) {
 	}
 }
 
+func TestGlobalInventoryLoaderUsesSessionPrefixBeforeGitRootResolution(t *testing.T) {
+	root := t.TempDir()
+	azRoot := root + "/azedarach"
+	chRoot := root + "/Chefy"
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{},
+		nil,
+		WithProjectDirs(azRoot, chRoot),
+	)
+
+	dirs := loader.projectDirsForLiveSessions([]tmux.SessionInfo{
+		{Name: "az-byh", Path: root + "/azedarach-byh"},
+		{Name: "ch-wb", Path: root + "/Chefy-wb"},
+	})
+
+	want := []string{chRoot, azRoot}
+	if strings.Join(dirs, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("project dirs = %#v, want configured roots %#v", dirs, want)
+	}
+}
+
+func TestGlobalInventoryLoaderDoesNotDiscoverProjectsFromUnmatchedSessions(t *testing.T) {
+	root := t.TempDir()
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{},
+		nil,
+		WithProjectDirs(root+"/azedarach"),
+	)
+
+	dirs := loader.projectDirsForLiveSessions([]tmux.SessionInfo{
+		{Name: "plain-tmux", Path: root + "/plain-repo"},
+		{Name: "xy-unknown", Path: root + "/unknown-worktree"},
+	})
+
+	if len(dirs) != 0 {
+		t.Fatalf("project dirs = %#v, want none for unmatched/plain sessions", dirs)
+	}
+}
+
 func TestGlobalInventoryLoaderIncludesCurrentTmuxSession(t *testing.T) {
 	t.Setenv("TMUX", "/tmp/tmux-123/default,1,0")
 	loader := NewGlobalInventoryLoader(
@@ -166,5 +205,26 @@ func TestGlobalInventoryLoaderIncludesCurrentTmuxSession(t *testing.T) {
 	}
 	if snapshot.CurrentSessionID != "az-two" {
 		t.Fatalf("current session = %q, want az-two", snapshot.CurrentSessionID)
+	}
+}
+
+func TestGlobalInventoryLoaderUsesExplicitCurrentSessionEnv(t *testing.T) {
+	t.Setenv(currentSessionEnvKey, "az-env")
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{
+			infos: []tmux.SessionInfo{
+				{Name: "az-one"},
+				{Name: "az-env"},
+			},
+			current: "az-one",
+		},
+		nil,
+	)
+	snapshot, err := loader.ListLiveSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("ListLiveSnapshot: %v", err)
+	}
+	if snapshot.CurrentSessionID != "az-env" {
+		t.Fatalf("current session = %q, want env override az-env", snapshot.CurrentSessionID)
 	}
 }
