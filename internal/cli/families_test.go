@@ -90,8 +90,11 @@ func TestTmuxInstallSelectorCommandWritesManagedBinding(t *testing.T) {
 	content := string(data)
 	for _, want := range []string{
 		"azedarach managed tmux session selector",
-		"bind-key S display-popup",
-		"-T 'tmux sessions'",
+		"bind-key S run-shell",
+		"display-popup -E",
+		"AZEDARACH_TMUX_CURRENT_SESSION=#{session_name}",
+		"-T",
+		"tmux sessions",
 		"az-dev tmux selector",
 		"tmux-selector.log",
 		"Azedarach tmux selector failed",
@@ -109,7 +112,7 @@ func TestTmuxInstallSelectorCommandWritesManagedBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read tmux config after second install: %v", err)
 	}
-	if got := strings.Count(string(data), "bind-key S display-popup"); got != 1 {
+	if got := strings.Count(string(data), "bind-key S run-shell"); got != 1 {
 		t.Fatalf("managed selector binding count = %d, want 1: %s", got, string(data))
 	}
 }
@@ -149,8 +152,16 @@ func TestTmuxInstallSelectorCommandLogsPopupFailureDiagnostics(t *testing.T) {
 			t.Fatalf("popup command missing diagnostic %q: %s", want, command)
 		}
 	}
-	if !strings.Contains(content, shellSingleQuote(command)) {
-		t.Fatalf("tmux config should include quoted diagnostic command: %s", content)
+	for _, want := range []string{
+		"bind-key s run-shell",
+		"tmux display-popup -E",
+		"AZEDARACH_TMUX_CURRENT_SESSION=#{session_name}",
+		"tmux-selector.log",
+		"/missing/worktree/bin/az tmux selector",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("tmux config missing diagnostic binding %q: %s", want, content)
+		}
 	}
 }
 
