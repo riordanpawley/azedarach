@@ -279,6 +279,50 @@ func TestModelInitialLoadUsesLiveSnapshotBeforeEnrichment(t *testing.T) {
 	}
 }
 
+func TestModelDefaultsCursorToCurrentTmuxSession(t *testing.T) {
+	entries := []InventoryEntry{
+		{SessionID: "az-one", IssueID: "one", TaskTitle: "One", HasTmuxSession: true},
+		{SessionID: "az-two", IssueID: "two", TaskTitle: "Two", HasTmuxSession: true},
+		{SessionID: "az-three", IssueID: "three", TaskTitle: "Three", HasTmuxSession: true},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{
+		Entries:          entries,
+		CurrentSessionID: "az-two",
+	}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	if model.cursor != 1 {
+		t.Fatalf("cursor = %d, want current session index 1", model.cursor)
+	}
+
+	model = updateKey(t, model, "down")
+	if model.cursor != 2 {
+		t.Fatalf("cursor after user move = %d, want 2", model.cursor)
+	}
+	updated, cmd = model.Update(EnrichedMsg{Snapshot: Snapshot{
+		Entries: []InventoryEntry{
+			entries[2],
+			entries[1],
+			entries[0],
+		},
+		CurrentSessionID: "az-two",
+	}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("enriched update returned command")
+	}
+	if model.cursor != 0 {
+		t.Fatalf("cursor after enrichment = %d, want moved session index 0", model.cursor)
+	}
+	selected, ok := model.selectedEntry()
+	if !ok || selected.SessionID != "az-three" {
+		t.Fatalf("selected after enrichment = %#v, want az-three", selected)
+	}
+}
+
 func TestModelShowsLoaderError(t *testing.T) {
 	model := New(fakeSnapshotLoader{})
 	updated, _ := model.Update(snapshotLoadedMsg{err: errors.New("boom")})

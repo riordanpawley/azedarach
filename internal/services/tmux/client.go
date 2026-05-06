@@ -251,6 +251,16 @@ func (c *Client) ListSessionInfos(ctx context.Context) ([]SessionInfo, error) {
 	return sessions, nil
 }
 
+func (c *Client) CurrentSession(ctx context.Context) (string, error) {
+	c.logger.Debug("getting current tmux session")
+
+	out, err := c.runner.Run(ctx, "display-message", "-p", "#{client_session}")
+	if err != nil {
+		return "", &domain.TmuxError{Op: "display-message", Err: err}
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // SetEnvironment sets an environment variable in a tmux session
 // Uses: tmux set-environment -t <name> <key> <value>
 func (c *Client) SetEnvironment(ctx context.Context, name, key, value string) error {

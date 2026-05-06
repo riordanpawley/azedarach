@@ -582,6 +582,30 @@ func TestClient_SwitchClient(t *testing.T) {
 	})
 }
 
+func TestClient_CurrentSession(t *testing.T) {
+	t.Run("reads current client session", func(t *testing.T) {
+		runner := &recordingOutputRunner{outputs: []string{"az-two\n"}}
+		client := NewClient(runner, slog.Default())
+
+		got, err := client.CurrentSession(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, "az-two", got)
+		require.Len(t, runner.commands, 1)
+		assert.Equal(t, []string{"display-message", "-p", "#{client_session}"}, runner.commands[0])
+	})
+
+	t.Run("wraps display error", func(t *testing.T) {
+		runner := &recordingRunner{err: errors.New("display failed")}
+		client := NewClient(runner, slog.Default())
+
+		_, err := client.CurrentSession(context.Background())
+		require.Error(t, err)
+		var tmuxErr *domain.TmuxError
+		require.ErrorAs(t, err, &tmuxErr)
+		assert.Equal(t, "display-message", tmuxErr.Op)
+	})
+}
+
 func TestClient_DisplayPopup(t *testing.T) {
 	t.Run("builds popup command with title", func(t *testing.T) {
 		runner := &recordingRunner{}
