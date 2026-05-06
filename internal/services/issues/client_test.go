@@ -128,6 +128,169 @@ func TestClient_CRUDLifecycle(t *testing.T) {
 	assert.Empty(t, tasks)
 }
 
+func TestClient_ExternalIssueRefsAreBackendNeutralMetadata(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Imported provider task",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	ref, err := client.UpsertExternalIssueRef(ctx, UpsertExternalIssueRefParams{
+		IssueID:       issueID,
+		Provider:      "linear",
+		ProviderScope: "team:CHE",
+		RemoteKey:     "lin_opaque_key",
+		DisplayKey:    "CHE-02091",
+		URL:           "https://linear.app/acme/issue/CHE-02091",
+		Metadata:      map[string]string{"status": "started"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, issueID, ref.IssueID)
+	assert.Equal(t, "linear", ref.Provider)
+	assert.Equal(t, "team:CHE", ref.ProviderScope)
+	assert.Equal(t, "lin_opaque_key", ref.RemoteKey)
+	assert.Equal(t, "CHE-02091", ref.DisplayKey)
+	assert.Equal(t, "started", ref.Metadata["status"])
+
+	found, ok, err := client.GetExternalIssueRef(ctx, "linear", "team:CHE", "lin_opaque_key")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, naming.IssueID(issueID), naming.IssueID(found.IssueID))
+	assert.Equal(t, "CHE-02091", found.DisplayKey)
+
+	foundByDisplay, ok, err := client.GetExternalIssueRefByDisplayKey(ctx, "linear", "team:CHE", "CHE-02091")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, naming.IssueID(issueID), naming.IssueID(foundByDisplay.IssueID))
+	assert.Equal(t, "lin_opaque_key", foundByDisplay.RemoteKey)
+
+	refs, err := client.ListExternalIssueRefs(ctx, issueID)
+	require.NoError(t, err)
+	require.Len(t, refs, 1)
+	assert.Equal(t, "lin_opaque_key", refs[0].RemoteKey)
+
+	task, err := client.GetWithRuntime(ctx, "proj", issueID)
+	require.NoError(t, err)
+	assert.Equal(t, naming.IssueID(issueID), task.ID, "runtime task id stays Az-owned, not provider-owned")
+}
+
+func TestClient_NormalizeProviderDisplayKeyIssueIDsMigratesDurableRefs(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	azID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Existing Az issue",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "a", azID)
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+
+	now := time.Date(2026, time.May, 6, 12, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO issues (
+			id,
+			title,
+			description,
+			status,
+			priority,
+			issue_type,
+			created_at,
+			updated_at,
+			labels_json,
+			implementations_json
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "CHE-02091", "Imported Linear issue", "legacy id", string(domain.StatusInProgress), int(domain.P1), string(domain.TypeTask), now, now, "[]", "[]")
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at)
+		VALUES (?, ?, ?, NULL), (?, ?, ?, NULL)
+	`, "CHE-02091", "a", string(domain.DependencyBlocks), "a", "CHE-02091", string(domain.DependencyRelatedTo))
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO spec_requirements (local_id, title, issue_id, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, "REQ-1", "Requirement", "CHE-02091", "draft", now, now)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO spec_links (issue_id, requirement_id, role, implementations_json, created_at, updated_at)
+		VALUES (?, 1, ?, ?, ?, ?)
+	`, "CHE-02091", "implements", "[]", now, now)
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO issue_external_refs (
+			issue_id,
+			provider,
+			provider_scope,
+			remote_key,
+			display_key,
+			created_at,
+			updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, "CHE-02091", "linear", "team:CHE", "lin_opaque_id", "CHE-02091", now, now)
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, "proj", "session-CHE-02091", "CHE-02091", "attached", now, now)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, "proj", "CHE-02091", "/tmp/repo-CHE-02091", "riordan/che-02091/task", now)
+	require.NoError(t, err)
+
+	require.NoError(t, client.normalizeProviderDisplayKeyIssueIDs(ctx, db))
+
+	var count int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = 'CHE-02091'`).Scan(&count))
+	assert.Equal(t, 0, count)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = 'b' AND title = 'Imported Linear issue'`).Scan(&count))
+	assert.Equal(t, 1, count)
+
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_dependencies WHERE issue_id = 'b' AND depends_on_id = 'a'`).Scan(&count))
+	assert.Equal(t, 1, count)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_dependencies WHERE issue_id = 'a' AND depends_on_id = 'b'`).Scan(&count))
+	assert.Equal(t, 1, count)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM spec_requirements WHERE issue_id = 'b'`).Scan(&count))
+	assert.Equal(t, 1, count)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM spec_links WHERE issue_id = 'b'`).Scan(&count))
+	assert.Equal(t, 1, count)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_session_projections WHERE issue_id = 'b'`).Scan(&count))
+	assert.Equal(t, 1, count)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_worktree_projections WHERE issue_id = 'b'`).Scan(&count))
+	assert.Equal(t, 1, count)
+
+	refs, err := client.ListExternalIssueRefs(ctx, "b")
+	require.NoError(t, err)
+	require.Len(t, refs, 2)
+	remoteKeys := map[string]string{}
+	for _, ref := range refs {
+		remoteKeys[ref.RemoteKey] = ref.DisplayKey
+		assert.Equal(t, "linear", ref.Provider)
+		assert.Equal(t, "team:CHE", ref.ProviderScope)
+	}
+	assert.Equal(t, "CHE-02091", remoteKeys["lin_opaque_id"])
+	assert.Equal(t, "CHE-02091", remoteKeys["CHE-02091"])
+
+	var nextIndex string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, nextAlphaIssueIndexMetaKey).Scan(&nextIndex))
+	assert.Equal(t, "2", nextIndex)
+}
+
 func intPtr(value int) *int {
 	return &value
 }
@@ -1090,6 +1253,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0004_spec_tables",
 		"0005_spec_audit_log",
 		"0006_external_issue_sync",
+		"0006_issue_external_refs",
 	}, got)
 }
 

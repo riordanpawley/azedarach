@@ -22,7 +22,10 @@ type lifecycleContext struct {
 	ProjectPath   string
 	PendingItems  int
 	IssueID       string
-	LinearIssueID string
+	Provider      string
+	ProviderScope string
+	RemoteKey     string
+	DisplayKey    string
 	Operation     Operation
 	Attempt       int
 	MaxAttempts   int
@@ -61,7 +64,10 @@ func emitLifecycleLog(logger *slog.Logger, level slog.Level, message string, ctx
 		"project_path", strings.TrimSpace(ctx.ProjectPath),
 		"pending_items", ctx.PendingItems,
 		"issue_id", strings.TrimSpace(ctx.IssueID),
-		"linear_issue_id", strings.TrimSpace(ctx.LinearIssueID),
+		"external_provider", strings.TrimSpace(ctx.Provider),
+		"external_provider_scope", strings.TrimSpace(ctx.ProviderScope),
+		"external_remote_key", strings.TrimSpace(ctx.RemoteKey),
+		"external_display_key", strings.TrimSpace(ctx.DisplayKey),
 		"operation", ctx.Operation,
 		"attempts", ctx.Attempt,
 		"max_attempts", ctx.MaxAttempts,
@@ -84,7 +90,7 @@ func emitLifecycleLog(logger *slog.Logger, level slog.Level, message string, ctx
 }
 
 func logFlushRunStart(logger *slog.Logger, runID, projectPath string, pendingItems int) {
-	emitLifecycleLog(logger, slog.LevelInfo, "Linear flush run start", lifecycleContext{
+	emitLifecycleLog(logger, slog.LevelInfo, "Sync flush run start", lifecycleContext{
 		RunID:        runID,
 		ProjectPath:  projectPath,
 		PendingItems: pendingItems,
@@ -92,7 +98,7 @@ func logFlushRunStart(logger *slog.Logger, runID, projectPath string, pendingIte
 }
 
 func logFlushSkipped(logger *slog.Logger, runID, projectPath, reason string) {
-	emitLifecycleLog(logger, slog.LevelInfo, "Linear flush skipped", lifecycleContext{
+	emitLifecycleLog(logger, slog.LevelInfo, "Sync flush skipped", lifecycleContext{
 		RunID:       runID,
 		ProjectPath: projectPath,
 		Reason:      reason,
@@ -100,11 +106,14 @@ func logFlushSkipped(logger *slog.Logger, runID, projectPath, reason string) {
 }
 
 func logDispatchStart(logger *slog.Logger, runID, projectPath string, item DispatchItem, maxAttempts int) {
-	emitLifecycleLog(logger, slog.LevelInfo, "Linear sync dispatch start", lifecycleContext{
+	emitLifecycleLog(logger, slog.LevelInfo, "Sync dispatch start", lifecycleContext{
 		RunID:         runID,
 		ProjectPath:   projectPath,
 		IssueID:       item.IssueID,
-		LinearIssueID: item.LinearIssueID,
+		Provider:      item.ExternalRef.Provider,
+		ProviderScope: item.ExternalRef.ProviderScope,
+		RemoteKey:     item.ExternalRef.RemoteKey,
+		DisplayKey:    item.ExternalRef.DisplayKey,
 		Operation:     item.Operation,
 		Attempt:       normalizedAttempt(item.Attempts) + 1,
 		MaxAttempts:   normalizedMaxAttempts(maxAttempts),
@@ -112,11 +121,14 @@ func logDispatchStart(logger *slog.Logger, runID, projectPath string, item Dispa
 }
 
 func logDispatchSuccess(logger *slog.Logger, runID, projectPath string, item DispatchItem, maxAttempts int) {
-	emitLifecycleLog(logger, slog.LevelInfo, "Linear sync dispatch success", lifecycleContext{
+	emitLifecycleLog(logger, slog.LevelInfo, "Sync dispatch success", lifecycleContext{
 		RunID:         runID,
 		ProjectPath:   projectPath,
 		IssueID:       item.IssueID,
-		LinearIssueID: item.LinearIssueID,
+		Provider:      item.ExternalRef.Provider,
+		ProviderScope: item.ExternalRef.ProviderScope,
+		RemoteKey:     item.ExternalRef.RemoteKey,
+		DisplayKey:    item.ExternalRef.DisplayKey,
 		Operation:     item.Operation,
 		Attempt:       normalizedAttempt(item.Attempts) + 1,
 		MaxAttempts:   normalizedMaxAttempts(maxAttempts),
@@ -124,11 +136,14 @@ func logDispatchSuccess(logger *slog.Logger, runID, projectPath string, item Dis
 }
 
 func logDispatchRetryScheduled(logger *slog.Logger, runID, projectPath string, item DispatchItem, maxAttempts int, delaySeconds int, err error) {
-	emitLifecycleLog(logger, slog.LevelWarn, "Linear sync dispatch retry scheduled", lifecycleContext{
+	emitLifecycleLog(logger, slog.LevelWarn, "Sync dispatch retry scheduled", lifecycleContext{
 		RunID:         runID,
 		ProjectPath:   projectPath,
 		IssueID:       item.IssueID,
-		LinearIssueID: item.LinearIssueID,
+		Provider:      item.ExternalRef.Provider,
+		ProviderScope: item.ExternalRef.ProviderScope,
+		RemoteKey:     item.ExternalRef.RemoteKey,
+		DisplayKey:    item.ExternalRef.DisplayKey,
 		Operation:     item.Operation,
 		Attempt:       normalizedAttempt(item.Attempts) + 1,
 		MaxAttempts:   normalizedMaxAttempts(maxAttempts),
@@ -138,11 +153,14 @@ func logDispatchRetryScheduled(logger *slog.Logger, runID, projectPath string, i
 }
 
 func logDispatchTerminalFailure(logger *slog.Logger, runID, projectPath string, item DispatchItem, maxAttempts int, err error) {
-	emitLifecycleLog(logger, slog.LevelWarn, "Linear sync dispatch terminal failure", lifecycleContext{
+	emitLifecycleLog(logger, slog.LevelWarn, "Sync dispatch terminal failure", lifecycleContext{
 		RunID:         runID,
 		ProjectPath:   projectPath,
 		IssueID:       item.IssueID,
-		LinearIssueID: item.LinearIssueID,
+		Provider:      item.ExternalRef.Provider,
+		ProviderScope: item.ExternalRef.ProviderScope,
+		RemoteKey:     item.ExternalRef.RemoteKey,
+		DisplayKey:    item.ExternalRef.DisplayKey,
 		Operation:     item.Operation,
 		Attempt:       normalizedAttempt(item.Attempts) + 1,
 		MaxAttempts:   normalizedMaxAttempts(maxAttempts),
