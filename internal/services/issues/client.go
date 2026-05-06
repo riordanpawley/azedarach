@@ -148,6 +148,10 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		_ = db.Close()
 		return nil, c.wrapError("open-db", "", err)
 	}
+	if err := c.normalizeProviderDisplayKeyIssueIDs(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, c.wrapError("open-db", "", err)
+	}
 	specAuditDoneAt := time.Now()
 
 	c.db = db
@@ -258,6 +262,227 @@ func (c *Client) normalizeDependencyEnumRows(db *sql.DB) error {
 		return fmt.Errorf("normalize dependency enum rows: %w", err)
 	}
 	return nil
+}
+
+type issueIDMigration struct {
+	OldID         string
+	NewID         string
+	Provider      string
+	ProviderScope string
+	RemoteKey     string
+	DisplayKey    string
+}
+
+func (c *Client) normalizeProviderDisplayKeyIssueIDs(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `
+		SELECT id
+		FROM issues
+		WHERE deleted_at IS NULL
+		ORDER BY id
+	`)
+	if err != nil {
+		return fmt.Errorf("list issues for provider display-key normalization: %w", err)
+	}
+	defer rows.Close()
+
+	existing := map[string]struct{}{}
+	legacyIDs := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("scan issue id for provider display-key normalization: %w", err)
+		}
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		existing[id] = struct{}{}
+		if isLinearDisplayKeyIssueID(id) {
+			legacyIDs = append(legacyIDs, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate issue ids for provider display-key normalization: %w", err)
+	}
+	if len(legacyIDs) == 0 {
+		return nil
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin provider display-key normalization: %w", err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	nextIndex := 0
+	if raw, err := c.getMetaValue(ctx, tx, nextAlphaIssueIndexMetaKey); err == nil {
+		nextIndex = parseNextAlphaIssueIndex(raw)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("read next alpha id for provider display-key normalization: %w", err)
+	}
+
+	migrations := make([]issueIDMigration, 0, len(legacyIDs))
+	for _, oldID := range legacyIDs {
+		newID, nextReserved := allocateNextAlphaIssueID(nextIndex, existing)
+		nextIndex = nextReserved
+		existing[newID] = struct{}{}
+		prefix := strings.TrimSpace(strings.SplitN(oldID, "-", 2)[0])
+		migrations = append(migrations, issueIDMigration{
+			OldID:         oldID,
+			NewID:         newID,
+			Provider:      "linear",
+			ProviderScope: "team:" + prefix,
+			RemoteKey:     oldID,
+			DisplayKey:    oldID,
+		})
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, migration := range migrations {
+		if err := c.migrateProviderDisplayKeyIssueID(ctx, tx, migration, now); err != nil {
+			return err
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO meta (key, value) VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value
+	`, nextAlphaIssueIndexMetaKey, strconv.Itoa(nextIndex)); err != nil {
+		return fmt.Errorf("persist next alpha id after provider display-key normalization: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit provider display-key normalization: %w", err)
+	}
+	tx = nil
+	if c.logger != nil {
+		c.logger.Info("normalized provider display-key issue ids", "count", len(migrations))
+	}
+	return nil
+}
+
+func (c *Client) migrateProviderDisplayKeyIssueID(ctx context.Context, tx *sql.Tx, migration issueIDMigration, now string) error {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO issues (
+			id,
+			title,
+			description,
+			status,
+			priority,
+			issue_type,
+			created_at,
+			updated_at,
+			closed_at,
+			assignee,
+			labels_json,
+			implementations_json,
+			design,
+			notes,
+			acceptance,
+			estimate,
+			deleted_at
+		)
+		SELECT
+			?,
+			title,
+			description,
+			status,
+			priority,
+			issue_type,
+			created_at,
+			?,
+			closed_at,
+			assignee,
+			labels_json,
+			implementations_json,
+			design,
+			notes,
+			acceptance,
+			estimate,
+			deleted_at
+		FROM issues
+		WHERE id = ?
+	`, migration.NewID, now, migration.OldID); err != nil {
+		return fmt.Errorf("copy provider display-key issue %s to %s: %w", migration.OldID, migration.NewID, err)
+	}
+
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{`UPDATE issue_dependencies SET issue_id = ? WHERE issue_id = ?`, []any{migration.NewID, migration.OldID}},
+		{`UPDATE issue_dependencies SET depends_on_id = ? WHERE depends_on_id = ?`, []any{migration.NewID, migration.OldID}},
+		{`UPDATE spec_requirements SET issue_id = ? WHERE issue_id = ?`, []any{migration.NewID, migration.OldID}},
+		{`UPDATE spec_links SET issue_id = ? WHERE issue_id = ?`, []any{migration.NewID, migration.OldID}},
+		{`UPDATE issue_external_refs SET issue_id = ?, updated_at = ? WHERE issue_id = ?`, []any{migration.NewID, now, migration.OldID}},
+		{`UPDATE daemon_session_projections SET issue_id = ?, updated_at = ? WHERE issue_id = ?`, []any{migration.NewID, now, migration.OldID}},
+		{`UPDATE daemon_worktree_projections SET issue_id = ?, updated_at = ? WHERE issue_id = ?`, []any{migration.NewID, now, migration.OldID}},
+	}
+	for _, stmt := range statements {
+		if _, err := tx.ExecContext(ctx, stmt.query, stmt.args...); err != nil {
+			return fmt.Errorf("rewrite references from provider display-key issue %s to %s: %w", migration.OldID, migration.NewID, err)
+		}
+	}
+
+	metadataJSON, err := marshalStringMap(map[string]string{
+		"migrated_from_issue_id": migration.OldID,
+		"migration":              "provider-display-key-issue-id",
+	})
+	if err != nil {
+		return fmt.Errorf("marshal provider display-key migration metadata %s: %w", migration.OldID, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO issue_external_refs (
+			issue_id,
+			provider,
+			provider_scope,
+			remote_key,
+			display_key,
+			url,
+			metadata_json,
+			created_at,
+			updated_at
+		)
+		SELECT ?, ?, ?, ?, ?, NULL, ?, ?, ?
+		WHERE NOT EXISTS (
+			SELECT 1
+			FROM issue_external_refs
+			WHERE provider = ?
+				AND provider_scope = ?
+				AND remote_key = ?
+				AND deleted_at IS NULL
+		)
+	`, migration.NewID, migration.Provider, migration.ProviderScope, migration.RemoteKey, migration.DisplayKey, metadataJSON, now, now, migration.Provider, migration.ProviderScope, migration.RemoteKey); err != nil {
+		return fmt.Errorf("record external ref for provider display-key issue %s: %w", migration.OldID, err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM issues WHERE id = ?`, migration.OldID); err != nil {
+		return fmt.Errorf("delete provider display-key issue %s after migration to %s: %w", migration.OldID, migration.NewID, err)
+	}
+	return nil
+}
+
+func isLinearDisplayKeyIssueID(id string) bool {
+	id = strings.TrimSpace(id)
+	prefix, numeric, ok := strings.Cut(id, "-")
+	if !ok || prefix == "" || numeric == "" {
+		return false
+	}
+	for _, r := range prefix {
+		if r < 'A' || r > 'Z' {
+			return false
+		}
+	}
+	for _, r := range numeric {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // List fetches all active issues from local SQLite store.
@@ -790,6 +1015,45 @@ func (c *Client) GetExternalIssueRef(ctx context.Context, provider, providerScop
 	}
 	if err != nil {
 		return domain.ExternalIssueRef{}, false, c.wrapError("get-external-ref", "", err)
+	}
+	return ref, true, nil
+}
+
+func (c *Client) GetExternalIssueRefByDisplayKey(ctx context.Context, provider, providerScope, displayKey string) (domain.ExternalIssueRef, bool, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return domain.ExternalIssueRef{}, false, err
+	}
+	provider = strings.TrimSpace(provider)
+	providerScope = strings.TrimSpace(providerScope)
+	displayKey = strings.TrimSpace(displayKey)
+	if provider == "" || displayKey == "" {
+		return domain.ExternalIssueRef{}, false, nil
+	}
+	ref, err := scanExternalIssueRef(db.QueryRowContext(ctx, `
+		SELECT
+			issue_id,
+			provider,
+			provider_scope,
+			remote_key,
+			COALESCE(display_key, ''),
+			COALESCE(url, ''),
+			COALESCE(metadata_json, ''),
+			created_at,
+			updated_at
+		FROM issue_external_refs
+		WHERE provider = ?
+			AND provider_scope = ?
+			AND display_key = ?
+			AND deleted_at IS NULL
+		ORDER BY updated_at DESC, issue_id ASC
+		LIMIT 1
+	`, provider, providerScope, displayKey))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.ExternalIssueRef{}, false, nil
+		}
+		return domain.ExternalIssueRef{}, false, c.wrapError("get-external-ref-by-display-key", displayKey, err)
 	}
 	return ref, true, nil
 }
