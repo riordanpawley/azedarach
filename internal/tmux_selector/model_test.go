@@ -124,6 +124,19 @@ func TestModelUsesFakeInventoryAndSwitchesSessionID(t *testing.T) {
 	}
 }
 
+func TestParseAzedarachSessionNameDecodesEscapedIssueID(t *testing.T) {
+	parsed, ok := ParseAzedarachSessionName("az-native_x2e_id_x5f_1")
+	if !ok {
+		t.Fatal("expected parse to succeed")
+	}
+	if parsed.Project != "az" {
+		t.Fatalf("project = %q, want az", parsed.Project)
+	}
+	if got, want := parsed.IssueID.String(), "native.id_1"; got != want {
+		t.Fatalf("issue id = %q, want %q", got, want)
+	}
+}
+
 func TestModelOpenDetailSupportsOAndSpaceKeysWithoutOpenIssueCommand(t *testing.T) {
 	for _, tt := range []struct {
 		name string

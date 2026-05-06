@@ -30,7 +30,7 @@ type Worktree struct {
 var (
 	ErrWorktreeNotFound      = errors.New("worktree not found")
 	ErrWorktreeAlreadyExists = errors.New("worktree already exists")
-	// Accept short local IDs (e.g. hn, bmd) and ticket-style IDs (e.g. che-3002, issue-123).
+	// Accept short local IDs (e.g. hn, bmd) and ticket-style IDs (e.g. CHE-02091, issue-123).
 	worktreePathIssuePattern = regexp.MustCompile(`(?i)^(?:[a-z]{1,4}|[a-z][a-z0-9]*-[0-9][a-z0-9-]*)$`)
 )
 
@@ -239,10 +239,7 @@ func (w *WorktreeManager) parseWorktreeList(output string) []Worktree {
 			branchRef := strings.TrimPrefix(line, "branch ")
 			currentBranch = strings.TrimPrefix(branchRef, "refs/heads/")
 		} else if line == "" && currentPath != "" && currentBranch != "" {
-			issueID, ok := naming.ExtractIssueIDFromBranchName(currentBranch)
-			if !ok {
-				issueID, ok = w.extractIssueIDFromWorktreePath(currentPath)
-			}
+			issueID, ok := w.extractCanonicalIssueID(currentBranch, currentPath)
 			if ok {
 				worktrees = append(worktrees, Worktree{
 					Path:    currentPath,
@@ -257,10 +254,7 @@ func (w *WorktreeManager) parseWorktreeList(output string) []Worktree {
 
 	// Handle last entry if output doesn't end with blank line.
 	if currentPath != "" && currentBranch != "" {
-		issueID, ok := naming.ExtractIssueIDFromBranchName(currentBranch)
-		if !ok {
-			issueID, ok = w.extractIssueIDFromWorktreePath(currentPath)
-		}
+		issueID, ok := w.extractCanonicalIssueID(currentBranch, currentPath)
 		if !ok {
 			return worktrees
 		}
@@ -272,6 +266,21 @@ func (w *WorktreeManager) parseWorktreeList(output string) []Worktree {
 	}
 
 	return worktrees
+}
+
+func (w *WorktreeManager) extractCanonicalIssueID(branchName, worktreePath string) (string, bool) {
+	branchIssueID, branchOK := naming.ExtractIssueIDFromBranchName(branchName)
+	pathIssueID, pathOK := w.extractIssueIDFromWorktreePath(worktreePath)
+	if branchOK && pathOK && naming.IssueIDsEqual(branchIssueID, pathIssueID) {
+		return pathIssueID, true
+	}
+	if branchOK {
+		return branchIssueID, true
+	}
+	if pathOK {
+		return pathIssueID, true
+	}
+	return "", false
 }
 
 func (w *WorktreeManager) extractIssueIDFromWorktreePath(worktreePath string) (string, bool) {
