@@ -5698,8 +5698,8 @@ func TestStopSessionCommandPreservesDaemonProjection(t *testing.T) {
 	}
 
 	updated, cmd := m.Update(msg)
-	if cmd != nil {
-		t.Fatalf("update command = %T, want nil", cmd)
+	if cmd == nil {
+		t.Fatal("expected session stop completion to refresh daemon projection")
 	}
 	updatedModel, ok := updated.(Model)
 	if !ok {
@@ -5716,28 +5716,45 @@ func TestStopSessionCommandPreservesDaemonProjection(t *testing.T) {
 func TestTaskWorkspaceStopSessionKeyKeepsOverlayOpen(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandSessionStop {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionStop)
+			switch req.Command {
+			case daemonclient.CommandSessionStop:
+				var body struct {
+					SessionID string `json:"session_id"`
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal stop request: %v", err)
+				}
+				if body.SessionID != "az-1" {
+					t.Fatalf("stop body = %+v, want az-1", body)
+				}
+				respBody, _ := json.Marshal(struct {
+					Output string `json:"output"`
+				}{Output: "stopped"})
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandTaskList:
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{{
+						ID:          "az-1",
+						Title:       "Task 1",
+						Status:      domain.StatusInProgress,
+						Type:        domain.TypeTask,
+						HasWorktree: true,
+					}}),
+				}, nil
+			default:
+				t.Fatalf("command = %q, want %q or %q", req.Command, daemonclient.CommandSessionStop, daemonclient.CommandTaskList)
 			}
-			var body struct {
-				SessionID string `json:"session_id"`
-			}
-			if err := json.Unmarshal(req.Body, &body); err != nil {
-				t.Fatalf("unmarshal stop request: %v", err)
-			}
-			if body.SessionID != "az-1" {
-				t.Fatalf("stop body = %+v, want az-1", body)
-			}
-			respBody, _ := json.Marshal(struct {
-				Output string `json:"output"`
-			}{Output: "stopped"})
-			return protocol.ResponseEnvelope{
-				ProtocolVersion: req.ProtocolVersion,
-				RequestID:       req.RequestID,
-				Kind:            protocol.EnvelopeKindResponse,
-				OK:              true,
-				Body:            respBody,
-			}, nil
+			return protocol.ResponseEnvelope{}, nil
 		},
 	}
 
@@ -5780,6 +5797,33 @@ func TestTaskWorkspaceStopSessionKeyKeepsOverlayOpen(t *testing.T) {
 	}
 	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStop {
 		t.Fatalf("requests = %v", transport.requests)
+	}
+
+	stoppedModelAny, refreshCmd := updatedModel.Update(stopMsg)
+	if refreshCmd == nil {
+		t.Fatal("expected stop completion to refresh daemon projection")
+	}
+	stoppedModel := stoppedModelAny.(Model)
+	if _, ok := stoppedModel.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
+		t.Fatalf("expected task workspace overlay to remain open after stop completion, got %T", stoppedModel.overlayStack.Current())
+	}
+
+	loadedMsg := refreshCmd()
+	loadedModelAny, _ := stoppedModel.Update(loadedMsg)
+	loadedModel := loadedModelAny.(Model)
+	workspace, ok := loadedModel.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace overlay after refresh, got %T", loadedModel.overlayStack.Current())
+	}
+	view := workspace.View()
+	if strings.Contains(view, "Pause session") || strings.Contains(view, "Stop session") {
+		t.Fatalf("stopped session actions should not remain after daemon refresh: %q", view)
+	}
+	if !strings.Contains(view, "Start session") {
+		t.Fatalf("expected start action after daemon refresh removed session: %q", view)
+	}
+	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandSessionStop || got[1] != daemonclient.CommandTaskList {
+		t.Fatalf("requests = %v", got)
 	}
 }
 

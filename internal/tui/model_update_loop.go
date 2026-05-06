@@ -316,7 +316,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("Session stopped: %s", msg.issueID),
 			Expires: time.Now().Add(3 * time.Second),
 		})
-		return m, nil
+		return m, m.loadIssuesCmd()
 
 	case sessionErrorMsg:
 		m.clearPendingTaskStatus(msg.issueID)
