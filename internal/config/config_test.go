@@ -255,6 +255,44 @@ func TestLoadConfigFromNestedPathUsesWorktreeBaseConfig(t *testing.T) {
 	assert.Equal(t, "release", cfg.Git.BaseBranch)
 }
 
+func TestLoadConfigWorktreeLocalOverridesBaseRepositoryConfig(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "wt")
+	nested := filepath.Join(worktree, "internal", "config")
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755))
+	require.NoError(t, os.MkdirAll(nested, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644))
+
+	writeConfigFile(t, repo, `{
+  "$schema": "./config.schema.json",
+  "$version": 7,
+  "cliTool": "claude",
+  "git": {
+    "baseBranch": "main"
+  },
+  "session": {
+    "shell": "bash"
+  }
+}`)
+	writeLocalConfigFile(t, worktree, `{
+  "$schema": "./config.schema.json",
+  "$version": 7,
+  "cliTool": "codex",
+  "git": {
+    "baseBranch": "local"
+  }
+}`)
+
+	t.Setenv("PATH", "")
+	cfg, err := LoadConfig(nested)
+	require.NoError(t, err)
+
+	assert.Equal(t, "codex", cfg.CLITool)
+	assert.Equal(t, "local", cfg.Git.BaseBranch)
+	assert.Equal(t, "bash", cfg.Session.Shell)
+}
+
 func TestLoadConfigLocalOverridesWorkspaceConfig(t *testing.T) {
 	root := t.TempDir()
 	writeConfigFile(t, root, `{
