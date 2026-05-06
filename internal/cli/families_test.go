@@ -93,6 +93,8 @@ func TestTmuxInstallSelectorCommandWritesManagedBinding(t *testing.T) {
 		"bind-key S display-popup",
 		"-T 'tmux sessions'",
 		"az-dev tmux selector",
+		"tmux-selector.log",
+		"Azedarach tmux selector failed",
 		projectDir,
 	} {
 		if !strings.Contains(content, want) {
@@ -107,8 +109,48 @@ func TestTmuxInstallSelectorCommandWritesManagedBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read tmux config after second install: %v", err)
 	}
-	if got := strings.Count(string(data), "az-dev tmux selector"); got != 1 {
-		t.Fatalf("managed selector count = %d, want 1: %s", got, string(data))
+	if got := strings.Count(string(data), "bind-key S display-popup"); got != 1 {
+		t.Fatalf("managed selector binding count = %d, want 1: %s", got, string(data))
+	}
+}
+
+func TestTmuxInstallSelectorCommandLogsPopupFailureDiagnostics(t *testing.T) {
+	projectDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), ".tmux.conf")
+
+	opts, err := ParseTmuxInstallSelectorArgs([]string{
+		"--config", configPath,
+		"--project-dir", projectDir,
+		"--az-command", "/missing/worktree/bin/az",
+	})
+	if err != nil {
+		t.Fatalf("ParseTmuxInstallSelectorArgs error: %v", err)
+	}
+	if err := TmuxInstallSelectorCommand(&Dependencies{RepoDir: projectDir}, opts); err != nil {
+		t.Fatalf("TmuxInstallSelectorCommand error: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read tmux config: %v", err)
+	}
+	content := string(data)
+	command := buildTmuxSelectorPopupCommand("/missing/worktree/bin/az", projectDir)
+	for _, want := range []string{
+		"az tmux selector popup start",
+		"command=%s",
+		"'/missing/worktree/bin/az tmux selector'",
+		"PATH=%s",
+		"TMUX=%s",
+		"Azedarach tmux selector failed",
+		"Press Enter to close",
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("popup command missing diagnostic %q: %s", want, command)
+		}
+	}
+	if !strings.Contains(content, shellSingleQuote(command)) {
+		t.Fatalf("tmux config should include quoted diagnostic command: %s", content)
 	}
 }
 
