@@ -169,6 +169,24 @@ func TestGlobalInventoryLoaderUsesSessionPrefixBeforeGitRootResolution(t *testin
 	}
 }
 
+func TestGlobalInventoryLoaderDoesNotDiscoverProjectsFromUnmatchedSessions(t *testing.T) {
+	root := t.TempDir()
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{},
+		nil,
+		WithProjectDirs(root+"/azedarach"),
+	)
+
+	dirs := loader.projectDirsForLiveSessions([]tmux.SessionInfo{
+		{Name: "plain-tmux", Path: root + "/plain-repo"},
+		{Name: "xy-unknown", Path: root + "/unknown-worktree"},
+	})
+
+	if len(dirs) != 0 {
+		t.Fatalf("project dirs = %#v, want none for unmatched/plain sessions", dirs)
+	}
+}
+
 func TestGlobalInventoryLoaderIncludesCurrentTmuxSession(t *testing.T) {
 	t.Setenv("TMUX", "/tmp/tmux-123/default,1,0")
 	loader := NewGlobalInventoryLoader(

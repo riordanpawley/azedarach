@@ -326,34 +326,14 @@ func (l *GlobalInventoryLoader) projectDirsForLiveSessions(live []tmux.SessionIn
 	seen := map[string]struct{}{}
 	var dirs []string
 	entries := entriesFromLive(live)
-	matched := l.addMatchingConfiguredProjectDirs(&dirs, seen, entries)
-	for _, entry := range entries {
-		if _, ok := matched[entry.SessionID]; ok {
-			continue
-		}
-		if root := projectRoot(entry.Worktree); root != "" {
-			addProjectDir(&dirs, seen, root)
-		}
-	}
+	l.addMatchingConfiguredProjectDirs(&dirs, seen, entries)
 	return limitSortedProjectDirs(dirs)
 }
 
 func (l *GlobalInventoryLoader) projectDirsForEntries(entries []InventoryEntry) []string {
 	seen := map[string]struct{}{}
 	var dirs []string
-	matched := l.addMatchingConfiguredProjectDirs(&dirs, seen, entries)
-	for _, entry := range entries {
-		if _, ok := matched[entry.SessionID]; ok {
-			continue
-		}
-		if root := projectRoot(entry.ProjectPath); root != "" {
-			addProjectDir(&dirs, seen, root)
-			continue
-		}
-		if root := projectRoot(entry.Worktree); root != "" {
-			addProjectDir(&dirs, seen, root)
-		}
-	}
+	l.addMatchingConfiguredProjectDirs(&dirs, seen, entries)
 	return limitSortedProjectDirs(dirs)
 }
 
@@ -429,21 +409,6 @@ func addProjectDir(dirs *[]string, seen map[string]struct{}, path string) {
 	}
 	seen[abs] = struct{}{}
 	*dirs = append(*dirs, abs)
-}
-
-func projectRoot(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return ""
-	}
-	if root, err := config.ResolveProjectRoot(path); err == nil {
-		path = root
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return ""
-	}
-	return abs
 }
 
 func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs []string) map[string]projectedInventory {
