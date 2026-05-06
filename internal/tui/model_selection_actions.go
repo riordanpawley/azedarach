@@ -376,6 +376,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if session != nil {
 			worktreeHint = session.Worktree
 		}
+		m.markMergeOperationPreparing(task.ID.String(), "", "preparing update")
 		m.beginMutationFeedback(fmt.Sprintf("Update from base queued for %s", task.ID))
 		return m, m.updateFromBaseCmd(task.ID.String(), worktreeHint, false)
 

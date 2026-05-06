@@ -762,6 +762,7 @@ func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if session != nil {
 			worktreeHint = session.Worktree
 		}
+		m.markMergeOperationPreparing(task.ID.String(), "", "preparing update")
 		m.beginMutationFeedback(fmt.Sprintf("Update from base queued for %s", task.ID))
 		return m, m.updateFromBaseCmd(task.ID.String(), worktreeHint, false)
 	case "P":
@@ -3882,11 +3883,18 @@ func (m *Model) markTaskOperationPending(taskID, action, operationID string, sta
 	}
 	key := taskIDKey(taskID)
 	current := m.pendingStatuses[key]
+	if action == "session_start" && current.targetStatus == "" {
+		if status, ok := m.taskStatusByID(taskID); ok && status != domain.StatusDone {
+			current.previousStatus = status
+			current.targetStatus = domain.StatusInProgress
+		}
+	}
 	current.operationID = operationID
 	current.state = state
 	current.action = action
 	current.updatedAt = time.Now()
 	m.pendingStatuses[key] = current
+	m.applyPendingStatusOverlays()
 }
 
 func (m *Model) beginTaskMutationFeedback(taskID, action, label string) {
@@ -3901,6 +3909,108 @@ func (m *Model) beginTaskMutationFeedback(taskID, action, label string) {
 		Message: fmt.Sprintf("%s queued for %s", strings.TrimSpace(label), taskID),
 		Expires: time.Now().Add(3 * time.Second),
 	})
+}
+
+func (m *Model) markTaskGitOperationPending(taskID, kind, operationID string, state protocol.OperationState) {
+	key := taskIDKey(taskID)
+	if key == "" {
+		return
+	}
+	if m.pendingOpsByTask == nil {
+		m.pendingOpsByTask = make(map[string]pendingOperationProgress)
+	}
+	current := m.pendingOpsByTask[key]
+	if strings.TrimSpace(operationID) == "" {
+		operationID = current.operationID
+	}
+	if strings.TrimSpace(kind) == "" {
+		kind = current.kind
+	}
+	if strings.TrimSpace(kind) == "" {
+		kind = "git.merge"
+	}
+	percent := current.percent
+	if state == protocol.OperationStateRunning && percent == 0 {
+		percent = 50
+	}
+	m.pendingOpsByTask[key] = pendingOperationProgress{
+		operationID: strings.TrimSpace(operationID),
+		kind:        strings.TrimSpace(kind),
+		state:       state,
+		percent:     percent,
+		message:     current.message,
+		updatedAt:   time.Now(),
+	}
+}
+
+func (m *Model) markTaskGitOperationPreparing(taskID, message string) {
+	key := taskIDKey(taskID)
+	if key == "" {
+		return
+	}
+	if m.pendingOpsByTask == nil {
+		m.pendingOpsByTask = make(map[string]pendingOperationProgress)
+	}
+	m.pendingOpsByTask[key] = pendingOperationProgress{
+		kind:      "git.merge",
+		state:     protocol.OperationState("preparing"),
+		message:   strings.TrimSpace(message),
+		updatedAt: time.Now(),
+	}
+}
+
+func (m *Model) markMergeOperationPending(sourceID, targetID, operationID string, state protocol.OperationState) {
+	m.markTaskGitOperationPending(sourceID, "git.merge", operationID, state)
+	if targetKey := taskIDKey(targetID); targetKey != "" && targetKey != "base" && targetKey != taskIDKey(sourceID) {
+		m.markTaskGitOperationPending(targetID, "git.merge", operationID, state)
+	}
+}
+
+func (m *Model) markMergeOperationPreparing(sourceID, targetID, message string) {
+	m.markTaskGitOperationPreparing(sourceID, message)
+	if targetKey := taskIDKey(targetID); targetKey != "" && targetKey != "base" && targetKey != taskIDKey(sourceID) {
+		m.markTaskGitOperationPreparing(targetID, message)
+	}
+	m.syncTaskWorkspaceOverlay()
+}
+
+func (m *Model) clearLocalMergeOperationPending(sourceID, targetID string) {
+	m.clearLocalTaskGitOperationPending(sourceID)
+	if targetKey := taskIDKey(targetID); targetKey != "" && targetKey != "base" && targetKey != taskIDKey(sourceID) {
+		m.clearLocalTaskGitOperationPending(targetID)
+	}
+	m.syncTaskWorkspaceOverlay()
+}
+
+func (m *Model) clearLocalTaskGitOperationPending(taskID string) {
+	key := taskIDKey(taskID)
+	if key == "" || len(m.pendingOpsByTask) == 0 {
+		return
+	}
+	current, ok := m.pendingOpsByTask[key]
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(current.operationID) != "" {
+		return
+	}
+	if strings.TrimSpace(current.kind) != "git.merge" {
+		return
+	}
+	delete(m.pendingOpsByTask, key)
+}
+
+func (m Model) taskStatusByID(taskID string) (domain.Status, bool) {
+	key := taskIDKey(taskID)
+	if key == "" {
+		return "", false
+	}
+	for _, task := range m.tasks {
+		if taskIDKey(task.ID.String()) == key {
+			return task.Status, true
+		}
+	}
+	return "", false
 }
 
 func (m *Model) beginMutationFeedback(message string) {
@@ -4043,7 +4153,9 @@ func (m *Model) applyPendingStatusOverlays() {
 			continue
 		}
 		if m.tasks[i].Status == pending.targetStatus {
-			delete(m.pendingStatuses, key)
+			if pending.action != "session_start" {
+				delete(m.pendingStatuses, key)
+			}
 			continue
 		}
 		m.tasks[i].Status = pending.targetStatus

@@ -83,6 +83,16 @@ func (f *fakeFullAzSwitcher) SwitchClient(_ context.Context, sessionID string) e
 	return nil
 }
 
+type fakeDetailOpener struct {
+	entries []InventoryEntry
+	err     error
+}
+
+func (f *fakeDetailOpener) OpenDetail(_ context.Context, entry InventoryEntry) error {
+	f.entries = append(f.entries, entry)
+	return f.err
+}
+
 func TestModelUsesFakeInventoryAndSwitchesSessionID(t *testing.T) {
 	switcher := &fakeSwitcher{}
 	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: []InventoryEntry{
@@ -125,13 +135,14 @@ func TestModelOpenDetailSupportsOAndSpaceKeysWithoutOpenIssueCommand(t *testing.
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			switcher := &fakeFullAzSwitcher{hasSession: true}
+			opener := &fakeDetailOpener{}
 			entries := []InventoryEntry{{
 				SessionID:   "az-one",
 				IssueID:     "one",
 				TaskTitle:   "One",
 				ProjectPath: "/tmp/project one",
 			}}
-			model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}}, WithSwitcher(switcher))
+			model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}}, WithSwitcher(switcher), WithDetailOpener(opener))
 			updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
 			model = updated.(Model)
 			if cmd != nil {
@@ -146,13 +157,16 @@ func TestModelOpenDetailSupportsOAndSpaceKeysWithoutOpenIssueCommand(t *testing.
 			if !ok {
 				t.Fatalf("open msg = %T, want DetailOpenResultMsg", msg)
 			}
-			if msg.Err == nil || !strings.Contains(msg.Err.Error(), "not implemented yet") {
-				t.Fatalf("open detail error = %v, want tracked not implemented error", msg.Err)
+			if msg.Err != nil {
+				t.Fatalf("open detail returned error: %v", msg.Err)
 			}
 
-			want := []string{"has az"}
+			want := []string{"has az", "switch az"}
 			if got := strings.Join(switcher.commands, "\n"); got != strings.Join(want, "\n") {
 				t.Fatalf("commands:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
+			}
+			if len(opener.entries) != 1 || opener.entries[0].IssueID != "one" {
+				t.Fatalf("opener entries = %+v, want issue one", opener.entries)
 			}
 		})
 	}
@@ -166,7 +180,7 @@ func TestModelOpenDetailErrorsWhenFullAzSessionMissing(t *testing.T) {
 		TaskTitle:   "Two",
 		ProjectPath: "/tmp/project",
 	}}
-	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}}, WithSwitcher(switcher))
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}}, WithSwitcher(switcher), WithDetailOpener(&fakeDetailOpener{}))
 	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
 	model = updated.(Model)
 	if cmd != nil {
@@ -194,7 +208,7 @@ func TestModelOpenDetailRequiresIssueID(t *testing.T) {
 		TaskTitle:      "az",
 		HasTmuxSession: true,
 	}}
-	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}}, WithSwitcher(switcher))
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}}, WithSwitcher(switcher), WithDetailOpener(&fakeDetailOpener{}))
 	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
 	model = updated.(Model)
 	if cmd != nil {
