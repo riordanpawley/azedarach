@@ -6552,6 +6552,102 @@ func TestSessionProjectionEventRevisionGate(t *testing.T) {
 	})
 }
 
+func TestIssuesLoadedIgnoresSnapshotOlderThanAppliedSessionEvent(t *testing.T) {
+	projectID := newTestModel().daemonProjectID()
+	startedAt := time.Date(2026, time.May, 6, 6, 0, 0, 0, time.UTC)
+	staleSession := &domain.Session{
+		IssueID:   "az-1",
+		State:     domain.SessionBusy,
+		StartedAt: &startedAt,
+		Worktree:  "/tmp/repo-az-1",
+	}
+	m := newTestModel()
+	m.daemonRevision = 8
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+	m.tasks[0].Session = cloneSession(staleSession)
+	m.tasks[0].HasTmuxSession = true
+	m.tasks[0].HasWorktree = true
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30))
+	m.syncProjectionIndexesFromTasks()
+	m.syncTaskWorkspaceOverlay()
+
+	body, err := json.Marshal(protocol.SessionProjectionEventBody{
+		ProjectID: naming.ProjectID(projectID),
+		Revision:  9,
+		Session: protocol.SessionProjection{
+			SessionID: naming.SessionID("azedarach-bte-az-1"),
+			IssueID:   "az-1",
+			State:     protocol.SessionLifecycleStateStopped,
+			UpdatedAt: startedAt.Add(time.Minute),
+		},
+		Runtime: &protocol.RuntimeProjectionEventBody{
+			ProjectID: naming.ProjectID(projectID),
+			Revision:  9,
+			Projection: protocol.RuntimeProjection{
+				ProjectID: naming.ProjectID(projectID),
+				IssueID:   "az-1",
+				Worktree: protocol.RuntimeWorktreeProjection{
+					Exists: true,
+					Path:   "/tmp/repo-az-1",
+				},
+				Session: protocol.RuntimeSessionProjection{
+					HasSession: false,
+					State:      protocol.SessionLifecycleStateStopped,
+					UpdatedAt:  &startedAt,
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal stopped session event: %v", err)
+	}
+
+	updated, cmd := m.Update(daemonStreamEventMsg{
+		event: protocol.EventEnvelope{
+			Event:    protocol.EventSessionUpdated,
+			Revision: 9,
+			Body:     body,
+		},
+	})
+	if cmd == nil {
+		t.Fatal("expected wait command after session event")
+	}
+	afterStop := updated.(Model)
+	workspace, ok := afterStop.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace overlay after stop event, got %T", afterStop.overlayStack.Current())
+	}
+	if view := workspace.View(); strings.Contains(view, "Attach to session") || strings.Contains(view, "Stop session") {
+		t.Fatalf("stopped session event should remove active session actions: %q", view)
+	}
+
+	staleSnapshot := []domain.Task{{
+		ID:             "az-1",
+		Title:          "Task 1",
+		Status:         domain.StatusInProgress,
+		Type:           domain.TypeTask,
+		Session:        cloneSession(staleSession),
+		HasTmuxSession: true,
+		HasWorktree:    true,
+	}}
+	replayedAny, _ := afterStop.Update(issuesLoadedMsg{
+		projectID: projectID,
+		revision:  8,
+		tasks:     staleSnapshot,
+	})
+	replayed := replayedAny.(Model)
+	workspace, ok = replayed.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace overlay after stale snapshot, got %T", replayed.overlayStack.Current())
+	}
+	if view := workspace.View(); strings.Contains(view, "Attach to session") || strings.Contains(view, "Stop session") {
+		t.Fatalf("stale snapshot should not restore stopped session actions: %q", view)
+	}
+	if replayed.daemonRevision != 9 {
+		t.Fatalf("daemon revision = %d, want 9", replayed.daemonRevision)
+	}
+}
+
 func TestLoadIssuesAfterRuntimeReconcileCmd_ReconcilesBeforeSnapshot(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

@@ -63,8 +63,9 @@ func (m *ActionMenu) buildActions() []Action {
 	actions := []Action{}
 
 	// Session actions
-	hasTmuxSession := m.task.HasTmuxSession || m.session != nil
-	if m.session == nil {
+	hasProjectedSession := m.session != nil && strings.TrimSpace(string(m.session.State)) != ""
+	hasTmuxSession := m.task.HasTmuxSession || hasProjectedSession
+	if !hasProjectedSession {
 		// Keep start actions available when there is no projected session.
 		// Runtime/tmux presence can be stale, and users still need a direct
 		// start path from the task workspace.
