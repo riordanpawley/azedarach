@@ -49,12 +49,45 @@ func TestServiceRunImportsRemoteIssueAndRecordsRef(t *testing.T) {
 	}
 }
 
-type fakeLinear struct {
-	issues  []linearapi.Issue
-	updates []linearapi.IssueInput
+func TestServiceRunTreatsMissingLinearProjectAsTeamOnlySync(t *testing.T) {
+	store := &fakeStore{}
+	linear := &fakeLinear{}
+	service := Service{
+		Store:  store,
+		Linear: linear,
+		Config: config.IssueTrackerConfig{
+			Backend: "linear",
+			Sync:    config.IssueSyncConfig{Enabled: true},
+			Linear:  config.LinearTrackerConfig{Team: "CHE"},
+		},
+		ProjectID: "chefy",
+	}
+
+	summary, err := service.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if summary.Skipped || !summary.Enabled {
+		t.Fatalf("summary = %+v, want enabled non-skipped sync", summary)
+	}
+	if got, want := linear.lastTeam, "CHE"; got != want {
+		t.Fatalf("linear team = %q, want %q", got, want)
+	}
+	if got := linear.lastProject; got != "" {
+		t.Fatalf("linear project = %q, want blank team-only filter", got)
+	}
 }
 
-func (f *fakeLinear) ListIssues(context.Context, string, string) ([]linearapi.Issue, error) {
+type fakeLinear struct {
+	issues      []linearapi.Issue
+	updates     []linearapi.IssueInput
+	lastTeam    string
+	lastProject string
+}
+
+func (f *fakeLinear) ListIssues(_ context.Context, team, project string) ([]linearapi.Issue, error) {
+	f.lastTeam = team
+	f.lastProject = project
 	return append([]linearapi.Issue(nil), f.issues...), nil
 }
 

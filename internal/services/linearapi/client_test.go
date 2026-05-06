@@ -60,3 +60,41 @@ func TestClientListIssuesUsesFilterAndAuthorization(t *testing.T) {
 		t.Fatalf("issues = %#v", issues)
 	}
 }
+
+func TestClientListIssuesOmitsProjectFilterWhenProjectNameBlank(t *testing.T) {
+	var gotVariables map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotVariables); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"data": {
+				"issues": {
+					"nodes": [],
+					"pageInfo": {"hasNextPage": false, "endCursor": null}
+				}
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	client := &Client{Endpoint: server.URL, APIKey: "lin_api_test", HTTPClient: server.Client()}
+	if _, err := client.ListIssues(context.Background(), "CHE", ""); err != nil {
+		t.Fatalf("ListIssues() error = %v", err)
+	}
+	variables, ok := gotVariables["variables"].(map[string]any)
+	if !ok {
+		t.Fatalf("variables missing: %#v", gotVariables)
+	}
+	filter, ok := variables["filter"].(map[string]any)
+	if !ok {
+		t.Fatalf("filter missing: %#v", variables)
+	}
+	if _, ok := filter["team"]; !ok {
+		t.Fatalf("team filter missing: %#v", filter)
+	}
+	if _, ok := filter["project"]; ok {
+		t.Fatalf("project filter should be omitted when project name is blank: %#v", filter)
+	}
+}
