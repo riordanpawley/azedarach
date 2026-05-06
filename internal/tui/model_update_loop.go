@@ -107,6 +107,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
 			return m, nil
 		}
+		if msg.revision != 0 && msg.revision < m.daemonRevision {
+			return m, nil
+		}
 		if msg.daemonClient != nil {
 			m.daemonClient = msg.daemonClient
 			if strings.TrimSpace(msg.daemonSocket) != "" {
