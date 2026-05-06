@@ -58,6 +58,18 @@ func DaemonSocketPathFor(startPath string) string {
 	return GlobalDaemonSocketPath()
 }
 
+// PreferredDaemonSocketPathFor returns the best daemon socket for commands that
+// target a specific project from a process that may not share that project's
+// daemon-scope environment.
+func PreferredDaemonSocketPathFor(startPath string) string {
+	scoped := ScopedDaemonSocketPath(startPath)
+	defaultPath := DaemonSocketPathFor(startPath)
+	if scoped != defaultPath && pathExists(scoped) {
+		return scoped
+	}
+	return defaultPath
+}
+
 // DaemonLockPathFor returns either the global or worktree-scoped daemon lock path
 // depending on runtime mode.
 func DaemonLockPathFor(startPath string) string {
@@ -111,4 +123,12 @@ func daemonRuntimeDirWritable(dir string) bool {
 	_ = f.Close()
 	_ = os.Remove(f.Name())
 	return true
+}
+
+func pathExists(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
 }

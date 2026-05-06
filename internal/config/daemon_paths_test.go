@@ -118,3 +118,31 @@ func TestDaemonPathsUseScopedWhenEnabled(t *testing.T) {
 		t.Fatalf("DaemonLockPathFor() = %q, want %q", got, ScopedDaemonLockPath(start))
 	}
 }
+
+func TestPreferredDaemonSocketPathForUsesLiveScopedSocketOutsideScopedEnvironment(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+
+	start := filepath.Join(t.TempDir(), "repo")
+	scoped := ScopedDaemonSocketPath(start)
+	if err := os.MkdirAll(filepath.Dir(scoped), 0o755); err != nil {
+		t.Fatalf("mkdir scoped runtime: %v", err)
+	}
+	if err := os.WriteFile(scoped, []byte("socket placeholder"), 0o644); err != nil {
+		t.Fatalf("write scoped socket placeholder: %v", err)
+	}
+
+	if got := PreferredDaemonSocketPathFor(start); got != scoped {
+		t.Fatalf("PreferredDaemonSocketPathFor() = %q, want %q", got, scoped)
+	}
+}
+
+func TestPreferredDaemonSocketPathForFallsBackToDefaultWhenScopedSocketMissing(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+
+	start := filepath.Join(t.TempDir(), "repo")
+	if got := PreferredDaemonSocketPathFor(start); got != GlobalDaemonSocketPath() {
+		t.Fatalf("PreferredDaemonSocketPathFor() = %q, want %q", got, GlobalDaemonSocketPath())
+	}
+}
