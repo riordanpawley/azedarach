@@ -477,6 +477,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.stream != nil && msg.stream != m.logStreamEvents {
 			return m, nil
 		}
+		if msg.event.Event == protocol.EventUICommandRequested &&
+			strings.TrimSpace(msg.event.ProjectID.String()) != "" &&
+			strings.TrimSpace(msg.event.ProjectID.String()) != m.daemonProjectID() {
+			cmd := m.applyUICommandEvent(msg.event)
+			if cmd != nil {
+				return m, tea.Batch(cmd, m.waitForLogStreamEventCmd())
+			}
+			return m, m.waitForLogStreamEventCmd()
+		}
 		// Primary daemon stream already carries current-project events used for
 		// projection/state updates. Keep this stream for cross-project logging.
 		if strings.TrimSpace(msg.event.ProjectID.String()) == m.daemonProjectID() {
@@ -886,7 +895,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("Switched to project: %s", msg.project.Name),
 			Expires: time.Now().Add(3 * time.Second),
 		})
-		return m, m.waitForDaemonEventCmd()
+		cmds := []tea.Cmd{m.waitForDaemonEventCmd()}
+		if taskID := strings.TrimSpace(m.pendingUIOpenTaskID); taskID != "" {
+			m.pendingUIOpenTaskID = ""
+			opened, openCmd := m.openTaskWorkspaceByID(taskID)
+			if openedModel, ok := opened.(Model); ok {
+				m = openedModel
+			}
+			if openCmd != nil {
+				cmds = append(cmds, openCmd)
+			}
+			if m.overlayStack.Current() == nil {
+				m.addToast(Toast{
+					Level:   ToastWarning,
+					Message: fmt.Sprintf("Task %s not found in project %s", taskID, msg.project.Name),
+					Expires: time.Now().Add(5 * time.Second),
+				})
+			}
+		}
+		return m, tea.Batch(cmds...)
 
 	case overlay.TaskCreatedMsg:
 		m.overlayStack.Pop()
@@ -1371,6 +1398,29 @@ func (m *Model) applyUICommandEvent(event protocol.EventEnvelope) tea.Cmd {
 	issueID := strings.TrimSpace(body.IssueID.String())
 	if issueID == "" {
 		return nil
+	}
+	projectID := strings.TrimSpace(body.ProjectID.String())
+	if projectID == "" {
+		projectID = strings.TrimSpace(event.ProjectID.String())
+	}
+	if projectID != "" && projectID != m.daemonProjectID() {
+		project, ok := m.projectByDaemonRouteID(projectID)
+		if !ok {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Project for task %s is not registered", issueID),
+				Expires: time.Now().Add(6 * time.Second),
+			})
+			return nil
+		}
+		m.pendingUIOpenTaskID = issueID
+		m.loading = false
+		m.boardRefreshing = true
+		m.projectSwitchInFlight = true
+		m.issueRefreshSeq++
+		m.projectSwitchSeq++
+		m.beginMutationFeedback(fmt.Sprintf("Switching project: %s", project.Name))
+		return m.switchProjectCmd(project)
 	}
 	updatedModel, cmd := m.openTaskWorkspaceByID(issueID)
 	if opened, ok := updatedModel.(Model); ok {

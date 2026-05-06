@@ -154,6 +154,7 @@ type Model struct {
 	drillDownTrail                []drillDownContext
 	pendingCreatedTaskID          string
 	pendingCreatedWorkspaceTaskID string
+	pendingUIOpenTaskID           string
 	openCreatedTaskInWorkspace    bool
 	openSessionSelectorOnLoad     bool
 	runtimeSignalsByTask          map[string]board.RuntimeSignals
@@ -1721,6 +1722,22 @@ func (m Model) daemonProjectRouteIDValue() naming.ProjectID {
 
 func (m Model) daemonProjectID() string {
 	return m.daemonProjectRouteIDValue().String()
+}
+
+func (m Model) projectByDaemonRouteID(projectID string) (config.Project, bool) {
+	projectID = strings.TrimSpace(protocol.NormalizeProjectID(projectID))
+	if projectID == "" || m.projectRegistry == nil {
+		return config.Project{}, false
+	}
+	for _, project := range m.projectRegistry.Projects {
+		if routeID, ok := daemonProjectRouteIDForPath(project.Path); ok && routeID.String() == projectID {
+			return project, true
+		}
+		if protocol.NormalizeProjectID(project.Name) == projectID {
+			return project, true
+		}
+	}
+	return config.Project{}, false
 }
 
 func (m Model) computeDaemonProjectRouteID() naming.ProjectID {

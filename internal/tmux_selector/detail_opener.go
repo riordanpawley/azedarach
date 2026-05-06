@@ -6,8 +6,12 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/riordanpawley/azedarach/internal/buildinfo"
+	autoclient "github.com/riordanpawley/azedarach/internal/client"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/client/daemonprocess"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
@@ -44,6 +48,20 @@ func (o *DaemonDetailOpener) OpenDetail(ctx context.Context, entry InventoryEntr
 	}
 	socketPath := config.DaemonSocketPathFor(projectPath)
 	client := daemonclient.New(transport.NewClient(socketPath)).WithProjectID(projectID)
+	launcher := daemonprocess.NewLauncher(projectPath, socketPath).WithLogger(o.logger)
+	orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(client), launcher)
+	ack, err := orch.EnsureAttached(ctx, protocol.Hello{
+		ProtocolVersion: protocol.CurrentVersion,
+		ClientName:      "tmux-selector",
+		ClientVersion:   buildinfo.VersionString(),
+		Capabilities:    []string{"ui-command"},
+	})
+	if err != nil {
+		return fmt.Errorf("daemon attach: %w", err)
+	}
+	if !ack.Accepted {
+		return fmt.Errorf("daemon handshake rejected: %s", ack.Reason)
+	}
 	if _, err := client.OpenTaskWorkspace(ctx, issueID); err != nil {
 		return err
 	}
