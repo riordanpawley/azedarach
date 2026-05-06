@@ -90,8 +90,11 @@ func TestTmuxInstallSelectorCommandWritesManagedBinding(t *testing.T) {
 	content := string(data)
 	for _, want := range []string{
 		"azedarach managed tmux session selector",
-		"bind-key S display-popup",
-		"-T 'tmux sessions'",
+		"bind-key S run-shell",
+		"display-popup -E",
+		"AZEDARACH_TMUX_CURRENT_SESSION=#{session_name}",
+		"-T",
+		"tmux sessions",
 		"az-dev tmux selector",
 		projectDir,
 	} {

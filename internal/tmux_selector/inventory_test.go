@@ -189,3 +189,24 @@ func TestGlobalInventoryLoaderIncludesCurrentTmuxSession(t *testing.T) {
 		t.Fatalf("current session = %q, want az-two", snapshot.CurrentSessionID)
 	}
 }
+
+func TestGlobalInventoryLoaderUsesExplicitCurrentSessionEnv(t *testing.T) {
+	t.Setenv(currentSessionEnvKey, "az-env")
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{
+			infos: []tmux.SessionInfo{
+				{Name: "az-one"},
+				{Name: "az-env"},
+			},
+			current: "az-one",
+		},
+		nil,
+	)
+	snapshot, err := loader.ListLiveSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("ListLiveSnapshot: %v", err)
+	}
+	if snapshot.CurrentSessionID != "az-env" {
+		t.Fatalf("current session = %q, want env override az-env", snapshot.CurrentSessionID)
+	}
+}

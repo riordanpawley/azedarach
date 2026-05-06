@@ -22,6 +22,7 @@ import (
 const (
 	defaultInventorySessionLimit = 200
 	defaultInventoryProjectLimit = 64
+	currentSessionEnvKey         = "AZEDARACH_TMUX_CURRENT_SESSION"
 )
 
 // SessionInventory lists live tmux sessions for the global loader.
@@ -291,6 +292,9 @@ func (l *GlobalInventoryLoader) snapshotFromEntries(entries []InventoryEntry, en
 }
 
 func (l *GlobalInventoryLoader) currentSession(ctx context.Context) string {
+	if current := strings.TrimSpace(os.Getenv(currentSessionEnvKey)); current != "" {
+		return current
+	}
 	if strings.TrimSpace(os.Getenv("TMUX")) == "" {
 		return ""
 	}

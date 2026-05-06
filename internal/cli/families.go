@@ -1341,9 +1341,14 @@ func TmuxUninstallSelectorCommand(_ *Dependencies, opts TmuxUninstallSelectorOpt
 
 func buildTmuxSelectorBlock(key, azCommand, projectDir string) string {
 	command := fmt.Sprintf("cd %s && %s tmux selector", shellSingleQuote(projectDir), strings.TrimSpace(azCommand))
+	popupCommand := fmt.Sprintf(
+		"tmux display-popup -E -w 95%% -h 95%% -T %s -e AZEDARACH_TMUX_CURRENT_SESSION=#{session_name} %s",
+		shellSingleQuote("tmux sessions"),
+		shellSingleQuote(command),
+	)
 	return strings.Join([]string{
 		tmuxSelectorBlockStart,
-		fmt.Sprintf("bind-key %s display-popup -E -w 95%% -h 95%% -T %s %s", strings.TrimSpace(key), shellSingleQuote("tmux sessions"), shellSingleQuote(command)),
+		fmt.Sprintf("bind-key %s run-shell %s", strings.TrimSpace(key), shellSingleQuote(popupCommand)),
 		tmuxSelectorBlockEnd,
 		"",
 	}, "\n")
