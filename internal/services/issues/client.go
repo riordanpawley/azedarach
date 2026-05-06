@@ -568,6 +568,16 @@ type CreateTaskParams struct {
 	ParentID        *string
 }
 
+type UpsertExternalIssueRefParams struct {
+	IssueID       string
+	Provider      string
+	ProviderScope string
+	RemoteKey     string
+	DisplayKey    string
+	URL           string
+	Metadata      map[string]string
+}
+
 // Create inserts a new issue and returns its generated id.
 func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, error) {
 	db, err := c.dbHandle()
@@ -700,6 +710,122 @@ func (c *Client) CreateWithRuntime(ctx context.Context, projectID string, params
 		return domain.Task{}, err
 	}
 	return c.GetWithRuntime(ctx, projectID, id)
+}
+
+func (c *Client) UpsertExternalIssueRef(ctx context.Context, params UpsertExternalIssueRefParams) (domain.ExternalIssueRef, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return domain.ExternalIssueRef{}, err
+	}
+	normalized, err := normalizeExternalIssueRefParams(params)
+	if err != nil {
+		return domain.ExternalIssueRef{}, c.wrapError("upsert-external-ref", params.IssueID, err)
+	}
+	exists, err := c.issueExists(ctx, db, normalized.IssueID)
+	if err != nil {
+		return domain.ExternalIssueRef{}, c.wrapError("upsert-external-ref", normalized.IssueID, err)
+	}
+	if !exists {
+		return domain.ExternalIssueRef{}, c.wrapError("upsert-external-ref", normalized.IssueID, fmt.Errorf("issue not found: %s", normalized.IssueID))
+	}
+
+	metadataJSON, err := marshalStringMap(normalized.Metadata)
+	if err != nil {
+		return domain.ExternalIssueRef{}, c.wrapError("upsert-external-ref", normalized.IssueID, err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO issue_external_refs (
+			issue_id,
+			provider,
+			provider_scope,
+			remote_key,
+			display_key,
+			url,
+			metadata_json,
+			created_at,
+			updated_at,
+			deleted_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+		ON CONFLICT(issue_id, provider, provider_scope, remote_key)
+		DO UPDATE SET
+			display_key = excluded.display_key,
+			url = excluded.url,
+			metadata_json = excluded.metadata_json,
+			updated_at = excluded.updated_at,
+			deleted_at = NULL
+	`, normalized.IssueID, normalized.Provider, normalized.ProviderScope, normalized.RemoteKey, nullableString(normalized.DisplayKey), nullableString(normalized.URL), nullableString(metadataJSON), now, now); err != nil {
+		return domain.ExternalIssueRef{}, c.wrapError("upsert-external-ref", normalized.IssueID, err)
+	}
+	ref, found, err := c.GetExternalIssueRef(ctx, normalized.Provider, normalized.ProviderScope, normalized.RemoteKey)
+	if err != nil {
+		return domain.ExternalIssueRef{}, err
+	}
+	if !found {
+		return domain.ExternalIssueRef{}, c.wrapError("upsert-external-ref", normalized.IssueID, errors.New("external ref not found after upsert"))
+	}
+	return ref, nil
+}
+
+func (c *Client) GetExternalIssueRef(ctx context.Context, provider, providerScope, remoteKey string) (domain.ExternalIssueRef, bool, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return domain.ExternalIssueRef{}, false, err
+	}
+	provider = strings.TrimSpace(provider)
+	providerScope = strings.TrimSpace(providerScope)
+	remoteKey = strings.TrimSpace(remoteKey)
+	if provider == "" || remoteKey == "" {
+		return domain.ExternalIssueRef{}, false, c.wrapError("get-external-ref", "", errors.New("provider and remote key are required"))
+	}
+	row := db.QueryRowContext(ctx, `
+		SELECT issue_id, provider, provider_scope, remote_key, COALESCE(display_key, ''), COALESCE(url, ''), COALESCE(metadata_json, ''), created_at, updated_at
+		FROM issue_external_refs
+		WHERE provider = ? AND provider_scope = ? AND remote_key = ? AND deleted_at IS NULL
+	`, provider, providerScope, remoteKey)
+	ref, err := scanExternalIssueRef(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.ExternalIssueRef{}, false, nil
+	}
+	if err != nil {
+		return domain.ExternalIssueRef{}, false, c.wrapError("get-external-ref", "", err)
+	}
+	return ref, true, nil
+}
+
+func (c *Client) ListExternalIssueRefs(ctx context.Context, issueID string) ([]domain.ExternalIssueRef, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return nil, c.wrapError("list-external-refs", "", errors.New("issue id is required"))
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT issue_id, provider, provider_scope, remote_key, COALESCE(display_key, ''), COALESCE(url, ''), COALESCE(metadata_json, ''), created_at, updated_at
+		FROM issue_external_refs
+		WHERE issue_id = ? AND deleted_at IS NULL
+		ORDER BY provider, provider_scope, remote_key
+	`, issueID)
+	if err != nil {
+		return nil, c.wrapError("list-external-refs", issueID, err)
+	}
+	defer rows.Close()
+
+	var refs []domain.ExternalIssueRef
+	for rows.Next() {
+		ref, err := scanExternalIssueRef(rows)
+		if err != nil {
+			return nil, c.wrapError("list-external-refs", issueID, err)
+		}
+		refs = append(refs, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, c.wrapError("list-external-refs", issueID, err)
+	}
+	return refs, nil
 }
 
 // AddDependency creates or restores a dependency edge between two issues.
@@ -1622,6 +1748,73 @@ func marshalOptionalStringSlice(values []string) (any, error) {
 		return nil, err
 	}
 	return string(payload), nil
+}
+
+func marshalStringMap(values map[string]string) (string, error) {
+	if len(values) == 0 {
+		return "", nil
+	}
+	normalized := make(map[string]string, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		normalized[key] = strings.TrimSpace(value)
+	}
+	if len(normalized) == 0 {
+		return "", nil
+	}
+	payload, err := json.Marshal(normalized)
+	if err != nil {
+		return "", err
+	}
+	return string(payload), nil
+}
+
+func normalizeExternalIssueRefParams(params UpsertExternalIssueRefParams) (UpsertExternalIssueRefParams, error) {
+	params.IssueID = strings.TrimSpace(params.IssueID)
+	params.Provider = strings.TrimSpace(params.Provider)
+	params.ProviderScope = strings.TrimSpace(params.ProviderScope)
+	params.RemoteKey = strings.TrimSpace(params.RemoteKey)
+	params.DisplayKey = strings.TrimSpace(params.DisplayKey)
+	params.URL = strings.TrimSpace(params.URL)
+	if params.IssueID == "" {
+		return UpsertExternalIssueRefParams{}, errors.New("issue id is required")
+	}
+	if params.Provider == "" {
+		return UpsertExternalIssueRefParams{}, errors.New("provider is required")
+	}
+	if params.RemoteKey == "" {
+		return UpsertExternalIssueRefParams{}, errors.New("remote key is required")
+	}
+	return params, nil
+}
+
+type scanner interface {
+	Scan(dest ...any) error
+}
+
+func scanExternalIssueRef(row scanner) (domain.ExternalIssueRef, error) {
+	var ref domain.ExternalIssueRef
+	var metadataRaw string
+	var createdRaw string
+	var updatedRaw string
+	if err := row.Scan(&ref.IssueID, &ref.Provider, &ref.ProviderScope, &ref.RemoteKey, &ref.DisplayKey, &ref.URL, &metadataRaw, &createdRaw, &updatedRaw); err != nil {
+		return domain.ExternalIssueRef{}, err
+	}
+	ref.CreatedAt = parseTimestamp(createdRaw)
+	ref.UpdatedAt = parseTimestamp(updatedRaw)
+	ref.Metadata = map[string]string{}
+	if strings.TrimSpace(metadataRaw) != "" {
+		if err := json.Unmarshal([]byte(metadataRaw), &ref.Metadata); err != nil {
+			return domain.ExternalIssueRef{}, err
+		}
+	}
+	if len(ref.Metadata) == 0 {
+		ref.Metadata = nil
+	}
+	return ref, nil
 }
 
 func (c *Client) getMetaValue(ctx context.Context, tx *sql.Tx, key string) (string, error) {

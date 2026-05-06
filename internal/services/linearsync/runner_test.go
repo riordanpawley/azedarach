@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+
+	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
 type retryableTestError struct {
@@ -114,19 +116,29 @@ func TestRunnerFlushEmitsLifecycleLogs(t *testing.T) {
 		ProjectPath: "/workspace/project",
 	}, []DispatchItem{
 		{
-			IssueID:       "az-1",
-			LinearIssueID: "lin-1",
-			Operation:     OperationUpsert,
-			Attempts:      0,
+			IssueID: "az-1",
+			ExternalRef: domain.ExternalIssueRef{
+				Provider:      "linear",
+				ProviderScope: "team:CHE",
+				RemoteKey:     "lin-1",
+				DisplayKey:    "CHE-00001",
+			},
+			Operation: OperationUpsert,
+			Attempts:  0,
 			Work: func(context.Context) error {
 				return nil
 			},
 		},
 		{
-			IssueID:       "az-2",
-			LinearIssueID: "lin-2",
-			Operation:     OperationClose,
-			Attempts:      0,
+			IssueID: "az-2",
+			ExternalRef: domain.ExternalIssueRef{
+				Provider:      "linear",
+				ProviderScope: "team:CHE",
+				RemoteKey:     "lin-2",
+				DisplayKey:    "CHE-00002",
+			},
+			Operation: OperationClose,
+			Attempts:  0,
 			Work: func(context.Context) error {
 				return retryableTestError{msg: "temporary failure"}
 			},
@@ -157,7 +169,7 @@ func TestRunnerFlushEmitsLifecycleLogs(t *testing.T) {
 		return record
 	}
 
-	start := check(0, "Linear flush run start")
+	start := check(0, "Sync flush run start")
 	if got := attrString(t, start.attrs, "run"); got != "run-1" {
 		t.Fatalf("run = %q, want run-1", got)
 	}
@@ -168,12 +180,21 @@ func TestRunnerFlushEmitsLifecycleLogs(t *testing.T) {
 		t.Fatalf("pending_items = %d, want 2", got)
 	}
 
-	firstStart := check(1, "Linear sync dispatch start")
+	firstStart := check(1, "Sync dispatch start")
 	if got := attrString(t, firstStart.attrs, "issue_id"); got != "az-1" {
 		t.Fatalf("issue_id = %q, want az-1", got)
 	}
-	if got := attrString(t, firstStart.attrs, "linear_issue_id"); got != "lin-1" {
-		t.Fatalf("linear_issue_id = %q, want lin-1", got)
+	if got := attrString(t, firstStart.attrs, "external_provider"); got != "linear" {
+		t.Fatalf("external_provider = %q, want linear", got)
+	}
+	if got := attrString(t, firstStart.attrs, "external_provider_scope"); got != "team:CHE" {
+		t.Fatalf("external_provider_scope = %q, want team:CHE", got)
+	}
+	if got := attrString(t, firstStart.attrs, "external_remote_key"); got != "lin-1" {
+		t.Fatalf("external_remote_key = %q, want lin-1", got)
+	}
+	if got := attrString(t, firstStart.attrs, "external_display_key"); got != "CHE-00001" {
+		t.Fatalf("external_display_key = %q, want CHE-00001", got)
 	}
 	if got := attrString(t, firstStart.attrs, "operation"); got != string(OperationUpsert) {
 		t.Fatalf("operation = %q, want upsert", got)
@@ -185,17 +206,17 @@ func TestRunnerFlushEmitsLifecycleLogs(t *testing.T) {
 		t.Fatalf("max_attempts = %d, want 5", got)
 	}
 
-	firstSuccess := check(2, "Linear sync dispatch success")
+	firstSuccess := check(2, "Sync dispatch success")
 	if got := attrString(t, firstSuccess.attrs, "issue_id"); got != "az-1" {
 		t.Fatalf("success issue_id = %q, want az-1", got)
 	}
 
-	secondStart := check(3, "Linear sync dispatch start")
+	secondStart := check(3, "Sync dispatch start")
 	if got := attrString(t, secondStart.attrs, "issue_id"); got != "az-2" {
 		t.Fatalf("second issue_id = %q, want az-2", got)
 	}
 
-	retry := check(4, "Linear sync dispatch retry scheduled")
+	retry := check(4, "Sync dispatch retry scheduled")
 	if got := attrString(t, retry.attrs, "issue_id"); got != "az-2" {
 		t.Fatalf("retry issue_id = %q, want az-2", got)
 	}
@@ -216,10 +237,14 @@ func TestRunnerFlushLogsTerminalFailure(t *testing.T) {
 		ProjectPath: "/workspace/project",
 	}, []DispatchItem{
 		{
-			IssueID:       "az-3",
-			LinearIssueID: "lin-3",
-			Operation:     OperationUpsert,
-			Attempts:      4,
+			IssueID: "az-3",
+			ExternalRef: domain.ExternalIssueRef{
+				Provider:   "other",
+				RemoteKey:  "remote-3",
+				DisplayKey: "EXT-3",
+			},
+			Operation: OperationUpsert,
+			Attempts:  4,
 			Work: func(context.Context) error {
 				return retryableTestError{msg: "still failing"}
 			},
@@ -239,7 +264,7 @@ func TestRunnerFlushLogsTerminalFailure(t *testing.T) {
 	}
 
 	terminal := records[2]
-	if terminal.message != "Linear sync dispatch terminal failure" {
+	if terminal.message != "Sync dispatch terminal failure" {
 		t.Fatalf("terminal message = %q, want terminal failure", terminal.message)
 	}
 	if got := attrString(t, terminal.attrs, "issue_id"); got != "az-3" {
@@ -275,7 +300,7 @@ func TestRunnerFlushLogsSkipWhenEmpty(t *testing.T) {
 	}
 
 	skipped := records[1]
-	if skipped.message != "Linear flush skipped" {
+	if skipped.message != "Sync flush skipped" {
 		t.Fatalf("skip message = %q, want skip", skipped.message)
 	}
 	if got := attrString(t, skipped.attrs, "reason"); got != "no_pending_items" {

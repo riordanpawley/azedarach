@@ -128,6 +128,50 @@ func TestClient_CRUDLifecycle(t *testing.T) {
 	assert.Empty(t, tasks)
 }
 
+func TestClient_ExternalIssueRefsAreBackendNeutralMetadata(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Imported provider task",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	ref, err := client.UpsertExternalIssueRef(ctx, UpsertExternalIssueRefParams{
+		IssueID:       issueID,
+		Provider:      "linear",
+		ProviderScope: "team:CHE",
+		RemoteKey:     "lin_opaque_key",
+		DisplayKey:    "CHE-02091",
+		URL:           "https://linear.app/acme/issue/CHE-02091",
+		Metadata:      map[string]string{"status": "started"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, issueID, ref.IssueID)
+	assert.Equal(t, "linear", ref.Provider)
+	assert.Equal(t, "team:CHE", ref.ProviderScope)
+	assert.Equal(t, "lin_opaque_key", ref.RemoteKey)
+	assert.Equal(t, "CHE-02091", ref.DisplayKey)
+	assert.Equal(t, "started", ref.Metadata["status"])
+
+	found, ok, err := client.GetExternalIssueRef(ctx, "linear", "team:CHE", "lin_opaque_key")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, naming.IssueID(issueID), naming.IssueID(found.IssueID))
+	assert.Equal(t, "CHE-02091", found.DisplayKey)
+
+	refs, err := client.ListExternalIssueRefs(ctx, issueID)
+	require.NoError(t, err)
+	require.Len(t, refs, 1)
+	assert.Equal(t, "lin_opaque_key", refs[0].RemoteKey)
+
+	task, err := client.GetWithRuntime(ctx, "proj", issueID)
+	require.NoError(t, err)
+	assert.Equal(t, naming.IssueID(issueID), task.ID, "runtime task id stays Az-owned, not provider-owned")
+}
+
 func intPtr(value int) *int {
 	return &value
 }
@@ -1089,6 +1133,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0003_issue_indexes",
 		"0004_spec_tables",
 		"0005_spec_audit_log",
+		"0006_issue_external_refs",
 	}, got)
 }
 
