@@ -1361,6 +1361,13 @@ func taskIDKey(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
 
+func (m Model) shouldIgnoreDaemonSnapshot(projectID string, revision uint64) bool {
+	if projectID = strings.TrimSpace(projectID); projectID != "" && projectID != m.daemonProjectID() {
+		return true
+	}
+	return revision != 0 && revision < m.daemonRevision
+}
+
 func (m *Model) suppressTaskHydration(taskID string) {
 	key := taskIDKey(taskID)
 	if key == "" {
@@ -2615,6 +2622,8 @@ type worktreeCleanupResultMsg struct {
 }
 
 type worktreeCleanupConfirmPromptMsg struct {
+	projectID    string
+	revision     uint64
 	taskID       string
 	deletedTask  bool
 	force        bool
@@ -2648,6 +2657,8 @@ type bulkCleanupRisk struct {
 }
 
 type bulkCleanupPreflightMsg struct {
+	projectID      string
+	revision       uint64
 	taskIDs        []string
 	deletedTasks   bool
 	refreshedTasks []domain.Task
@@ -2664,6 +2675,8 @@ type pendingBulkCleanupConfirmation struct {
 }
 
 type refreshTaskWorkspaceResultMsg struct {
+	projectID     string
+	revision      uint64
 	taskID        string
 	hasTask       bool
 	task          domain.Task
@@ -2675,8 +2688,9 @@ type refreshTaskWorkspaceResultMsg struct {
 }
 
 func (m Model) refreshTaskWorkspaceInBackgroundCmd(taskID string) tea.Cmd {
+	projectID := m.daemonProjectID()
 	return func() tea.Msg {
-		msg := refreshTaskWorkspaceResultMsg{taskID: taskID}
+		msg := refreshTaskWorkspaceResultMsg{projectID: projectID, taskID: taskID}
 		if m.daemonClient == nil {
 			return msg
 		}
@@ -2699,6 +2713,7 @@ func (m Model) refreshTaskWorkspaceInBackgroundCmd(taskID string) tea.Cmd {
 		}
 
 		msg.tasks = snapshot.Tasks
+		msg.revision = snapshot.Revision
 		msg.lastCheckedAt = snapshot.LastCheckedAt
 		msg.freshness = snapshot.Freshness
 		for _, candidate := range snapshot.Tasks {
@@ -2783,8 +2798,10 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 }
 
 func (m Model) requestWorktreeCleanupConfirmationCmd(taskID string, deleteTask bool) tea.Cmd {
+	projectID := m.daemonProjectID()
 	return func() tea.Msg {
 		msg := worktreeCleanupConfirmPromptMsg{
+			projectID:   projectID,
 			taskID:      taskID,
 			deletedTask: deleteTask,
 		}
@@ -2810,6 +2827,7 @@ func (m Model) requestWorktreeCleanupConfirmationCmd(taskID string, deleteTask b
 		}
 
 		msg.hasSnapshot = true
+		msg.revision = snapshot.Revision
 		msg.freshness = snapshot.Freshness
 		msg.checkedAt = snapshot.LastCheckedAt
 
@@ -3539,8 +3557,10 @@ func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd
 
 func (m Model) bulkCleanupPreflightCmd(taskIDs []string, deleteTask bool) tea.Cmd {
 	selected := append([]string(nil), taskIDs...)
+	projectID := m.daemonProjectID()
 	return func() tea.Msg {
 		msg := bulkCleanupPreflightMsg{
+			projectID:    projectID,
 			taskIDs:      selected,
 			deletedTasks: deleteTask,
 		}
@@ -3564,6 +3584,7 @@ func (m Model) bulkCleanupPreflightCmd(taskIDs []string, deleteTask bool) tea.Cm
 			msg.snapshotErr = err
 			return msg
 		}
+		msg.revision = snapshot.Revision
 		msg.freshness = snapshot.Freshness
 		msg.checkedAt = snapshot.LastCheckedAt
 

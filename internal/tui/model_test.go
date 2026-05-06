@@ -3449,6 +3449,98 @@ func TestIssuesLoaded_IgnoresStaleProjectResponses(t *testing.T) {
 	}
 }
 
+func TestSnapshotBackedLocalRefreshesIgnoreOlderRevisions(t *testing.T) {
+	projectID := newTestModel().daemonProjectID()
+
+	t.Run("task workspace refresh", func(t *testing.T) {
+		m := newTestModel()
+		m.daemonRevision = 8
+		m.tasks = []domain.Task{{ID: "az-1", Title: "Current", Status: domain.StatusOpen, Type: domain.TypeTask}}
+		m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30))
+
+		result, cmd := m.Update(refreshTaskWorkspaceResultMsg{
+			projectID: projectID,
+			revision:  7,
+			taskID:    "az-1",
+			hasTask:   true,
+			task:      domain.Task{ID: "az-1", Title: "Stale", Status: domain.StatusDone, Type: domain.TypeTask},
+		})
+		updated := result.(Model)
+		if cmd != nil {
+			t.Fatalf("stale workspace refresh command = %T, want nil", cmd)
+		}
+		if updated.tasks[0].Title != "Current" || updated.tasks[0].Status != domain.StatusOpen {
+			t.Fatalf("stale workspace refresh applied task = %+v", updated.tasks[0])
+		}
+	})
+
+	t.Run("cleanup confirmation", func(t *testing.T) {
+		m := newTestModel()
+		m.daemonRevision = 8
+		m.tasks = []domain.Task{{ID: "az-1", Title: "Current", Status: domain.StatusOpen, Type: domain.TypeTask}}
+
+		result, cmd := m.Update(worktreeCleanupConfirmPromptMsg{
+			projectID: "chefy",
+			revision:  99,
+			taskID:    "az-1",
+			hasTask:   true,
+			task:      domain.Task{ID: "az-1", Title: "Wrong project", Status: domain.StatusDone, Type: domain.TypeTask},
+		})
+		updated := result.(Model)
+		if cmd != nil {
+			t.Fatalf("cross-project cleanup confirm command = %T, want nil", cmd)
+		}
+		if updated.pendingCleanup != nil {
+			t.Fatal("cross-project cleanup confirm should not set pending cleanup")
+		}
+		if updated.tasks[0].Title != "Current" || updated.tasks[0].Status != domain.StatusOpen {
+			t.Fatalf("cross-project cleanup confirm applied task = %+v", updated.tasks[0])
+		}
+
+		result, cmd = m.Update(worktreeCleanupConfirmPromptMsg{
+			projectID: projectID,
+			revision:  7,
+			taskID:    "az-1",
+			hasTask:   true,
+			task:      domain.Task{ID: "az-1", Title: "Stale", Status: domain.StatusDone, Type: domain.TypeTask},
+		})
+		updated = result.(Model)
+		if cmd != nil {
+			t.Fatalf("stale cleanup confirm command = %T, want nil", cmd)
+		}
+		if updated.pendingCleanup != nil {
+			t.Fatal("stale cleanup confirm should not set pending cleanup")
+		}
+		if updated.tasks[0].Title != "Current" || updated.tasks[0].Status != domain.StatusOpen {
+			t.Fatalf("stale cleanup confirm applied task = %+v", updated.tasks[0])
+		}
+	})
+
+	t.Run("bulk cleanup preflight", func(t *testing.T) {
+		m := newTestModel()
+		m.daemonRevision = 8
+		m.tasks = []domain.Task{{ID: "az-1", Title: "Current", Status: domain.StatusOpen, Type: domain.TypeTask}}
+
+		result, cmd := m.Update(bulkCleanupPreflightMsg{
+			projectID:      projectID,
+			revision:       7,
+			taskIDs:        []string{"az-1"},
+			refreshedTasks: []domain.Task{{ID: "az-1", Title: "Stale", Status: domain.StatusDone, Type: domain.TypeTask, HasUncommittedChanges: true}},
+			risks:          []bulkCleanupRisk{{taskID: "az-1", dirty: true}},
+		})
+		updated := result.(Model)
+		if cmd != nil {
+			t.Fatalf("stale bulk cleanup preflight command = %T, want nil", cmd)
+		}
+		if updated.pendingBulkCleanup != nil {
+			t.Fatal("stale bulk cleanup preflight should not set pending cleanup")
+		}
+		if updated.tasks[0].Title != "Current" || updated.tasks[0].Status != domain.StatusOpen {
+			t.Fatalf("stale bulk cleanup preflight applied task = %+v", updated.tasks[0])
+		}
+	})
+}
+
 func TestTmuxActionsDegradeOutsideTmux(t *testing.T) {
 	t.Setenv("TMUX", "")
 

@@ -384,6 +384,7 @@ func TestCrossProjectUICommandStartsProjectSwitch(t *testing.T) {
 func TestProjectSwitchResultOpensPendingUICommandWorkspace(t *testing.T) {
 	betaPath := t.TempDir()
 	m := newTestModel()
+	m.daemonRevision = 99
 	m.pendingUIOpenTaskID = "che-1"
 	m.projectSwitchInFlight = true
 
@@ -415,6 +416,9 @@ func TestProjectSwitchResultOpensPendingUICommandWorkspace(t *testing.T) {
 	}
 	if updated.currentProject != "beta" {
 		t.Fatalf("currentProject = %q, want beta", updated.currentProject)
+	}
+	if updated.daemonRevision != 7 {
+		t.Fatalf("daemonRevision = %d, want project switch snapshot revision 7", updated.daemonRevision)
 	}
 }
 
