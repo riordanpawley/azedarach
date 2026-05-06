@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -112,9 +111,9 @@ func (d *Daemon) linearSyncService(ctx context.Context, projectID string) (*line
 		summary.Reason = "linear sync is not enabled"
 		return nil, summary, nil
 	}
-	apiKey := strings.TrimSpace(os.Getenv("LINEAR_API_KEY"))
+	apiKey := resolveLinearAPIKey(repoDir)
 	if apiKey == "" {
-		return nil, linearsync.Summary{}, fmt.Errorf("LINEAR_API_KEY is required for Linear sync")
+		return nil, linearsync.Summary{}, fmt.Errorf("LINEAR_API_KEY is required for Linear sync; export it or set it in project .env.local")
 	}
 	store := d.issueClientForProject(projectID)
 	if store == nil {
