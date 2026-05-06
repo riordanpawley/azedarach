@@ -16,7 +16,8 @@ import (
 const ProviderLinear = "linear"
 
 type LinearClient interface {
-	ListIssues(ctx context.Context, teamKey, projectName string) ([]linearapi.Issue, error)
+	ListIssues(ctx context.Context, opts linearapi.ListIssuesOptions) ([]linearapi.Issue, error)
+	ViewerID(ctx context.Context) (string, error)
 	UpdateIssue(ctx context.Context, id string, input linearapi.IssueInput) (linearapi.Issue, error)
 }
 
@@ -38,16 +39,18 @@ type Service struct {
 }
 
 type Summary struct {
-	Provider     string `json:"provider"`
-	Enabled      bool   `json:"enabled"`
-	Skipped      bool   `json:"skipped"`
-	Reason       string `json:"reason,omitempty"`
-	Imported     int    `json:"imported"`
-	UpdatedLocal int    `json:"updated_local"`
-	PushedRemote int    `json:"pushed_remote"`
-	Conflicts    int    `json:"conflicts"`
-	RemoteIssues int    `json:"remote_issues"`
-	LocalIssues  int    `json:"local_issues"`
+	Provider              string `json:"provider"`
+	Enabled               bool   `json:"enabled"`
+	Skipped               bool   `json:"skipped"`
+	Reason                string `json:"reason,omitempty"`
+	Imported              int    `json:"imported"`
+	UpdatedLocal          int    `json:"updated_local"`
+	PushedRemote          int    `json:"pushed_remote"`
+	Conflicts             int    `json:"conflicts"`
+	RemoteIssues          int    `json:"remote_issues"`
+	LocalIssues           int    `json:"local_issues"`
+	SkippedPushOutOfScope int    `json:"skipped_push_out_of_scope"`
+	OutOfScopeRefs        int    `json:"out_of_scope_refs"`
 }
 
 func (s Service) Run(ctx context.Context) (Summary, error) {
@@ -86,12 +89,20 @@ func (s Service) Run(ctx context.Context) (Summary, error) {
 		refByIdentifier[strings.ToUpper(ref.ExternalIdentifier)] = ref
 		refByIssueID[ref.IssueID] = ref
 	}
-	remoteIssues, err := s.Linear.ListIssues(ctx, s.Config.Linear.Team, s.Config.Linear.Project)
+	listOpts, err := s.listOptions(ctx)
+	if err != nil {
+		return summary, err
+	}
+	remoteIssues, err := s.Linear.ListIssues(ctx, listOpts)
 	if err != nil {
 		return summary, fmt.Errorf("list linear issues: %w", err)
 	}
 	summary.RemoteIssues = len(remoteIssues)
+	remoteExternalIDs := map[string]struct{}{}
 	for _, remote := range remoteIssues {
+		if strings.TrimSpace(remote.ID) != "" {
+			remoteExternalIDs[strings.TrimSpace(remote.ID)] = struct{}{}
+		}
 		task, ok := taskFromLinear(remote)
 		if !ok {
 			continue
@@ -153,6 +164,11 @@ func (s Service) Run(ctx context.Context) (Summary, error) {
 		if !ok || ref.ExternalID == "" {
 			continue
 		}
+		if _, inScope := remoteExternalIDs[strings.TrimSpace(ref.ExternalID)]; !inScope {
+			summary.SkippedPushOutOfScope++
+			summary.OutOfScopeRefs++
+			continue
+		}
 		localHash := issues.HashTaskForSync(local)
 		if ref.LastSyncHash == localHash {
 			continue
@@ -173,6 +189,30 @@ func (s Service) Run(ctx context.Context) (Summary, error) {
 		}
 	}
 	return summary, nil
+}
+
+func (s Service) listOptions(ctx context.Context) (linearapi.ListIssuesOptions, error) {
+	opts := linearapi.ListIssuesOptions{
+		TeamKey: strings.TrimSpace(s.Config.Linear.Team),
+		Project: strings.TrimSpace(s.Config.Linear.Project),
+	}
+	var assignee string
+	if s.Config.Linear.Filter != nil {
+		assignee = strings.TrimSpace(s.Config.Linear.Filter.Assignee)
+	}
+	if assignee == "" {
+		return opts, nil
+	}
+	if strings.EqualFold(assignee, "me") {
+		viewerID, err := s.Linear.ViewerID(ctx)
+		if err != nil {
+			return opts, fmt.Errorf("resolve linear filter assignee me: %w", err)
+		}
+		opts.AssigneeID = viewerID
+		return opts, nil
+	}
+	opts.AssigneeID = assignee
+	return opts, nil
 }
 
 func (s Service) Conflicts(ctx context.Context, includeResolved bool) ([]issues.SyncConflict, error) {

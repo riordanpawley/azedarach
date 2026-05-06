@@ -40,7 +40,12 @@ type LinearTrackerConfig struct {
 	Command  string               `json:"command"`
 	Team     string               `json:"team"`
 	Project  string               `json:"project"`
+	Filter   *LinearFilterConfig  `json:"filter,omitempty"`
 	Webhooks LinearWebhooksConfig `json:"webhooks"`
+}
+
+type LinearFilterConfig struct {
+	Assignee string `json:"assignee"`
 }
 
 type LinearWebhooksConfig struct {

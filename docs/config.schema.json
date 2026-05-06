@@ -52,6 +52,16 @@
             "project": {
               "type": "string"
             },
+            "filter": {
+              "type": "object",
+              "description": "Optional Linear issue filters. Use assignee=\"me\" to sync issues assigned to the active LINEAR_API_KEY viewer, or set a Linear user id.",
+              "additionalProperties": false,
+              "properties": {
+                "assignee": {
+                  "type": "string"
+                }
+              }
+            },
             "webhooks": {
               "type": "object",
               "additionalProperties": false,

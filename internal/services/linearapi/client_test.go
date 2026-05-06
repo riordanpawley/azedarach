@@ -42,7 +42,7 @@ func TestClientListIssuesUsesFilterAndAuthorization(t *testing.T) {
 	defer server.Close()
 
 	client := &Client{Endpoint: server.URL, APIKey: "lin_api_test", HTTPClient: server.Client()}
-	issues, err := client.ListIssues(context.Background(), "CHE", "Chefy")
+	issues, err := client.ListIssues(context.Background(), ListIssuesOptions{TeamKey: "CHE", Project: "Chefy"})
 	if err != nil {
 		t.Fatalf("ListIssues() error = %v", err)
 	}
@@ -80,7 +80,7 @@ func TestClientListIssuesOmitsProjectFilterWhenProjectNameBlank(t *testing.T) {
 	defer server.Close()
 
 	client := &Client{Endpoint: server.URL, APIKey: "lin_api_test", HTTPClient: server.Client()}
-	if _, err := client.ListIssues(context.Background(), "CHE", ""); err != nil {
+	if _, err := client.ListIssues(context.Background(), ListIssuesOptions{TeamKey: "CHE"}); err != nil {
 		t.Fatalf("ListIssues() error = %v", err)
 	}
 	variables, ok := gotVariables["variables"].(map[string]any)
@@ -96,5 +96,67 @@ func TestClientListIssuesOmitsProjectFilterWhenProjectNameBlank(t *testing.T) {
 	}
 	if _, ok := filter["project"]; ok {
 		t.Fatalf("project filter should be omitted when project name is blank: %#v", filter)
+	}
+}
+
+func TestClientListIssuesAppliesAssigneeFilter(t *testing.T) {
+	var gotVariables map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotVariables); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"data": {
+				"issues": {
+					"nodes": [],
+					"pageInfo": {"hasNextPage": false, "endCursor": null}
+				}
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	client := &Client{Endpoint: server.URL, APIKey: "lin_api_test", HTTPClient: server.Client()}
+	if _, err := client.ListIssues(context.Background(), ListIssuesOptions{TeamKey: "CHE", Project: "Chefy", AssigneeID: "usr_123"}); err != nil {
+		t.Fatalf("ListIssues() error = %v", err)
+	}
+	variables, ok := gotVariables["variables"].(map[string]any)
+	if !ok {
+		t.Fatalf("variables missing: %#v", gotVariables)
+	}
+	filter, ok := variables["filter"].(map[string]any)
+	if !ok {
+		t.Fatalf("filter missing: %#v", variables)
+	}
+	assignee, ok := filter["assignee"].(map[string]any)
+	if !ok {
+		t.Fatalf("assignee filter missing: %#v", filter)
+	}
+	id, ok := assignee["id"].(map[string]any)
+	if !ok || id["eq"] != "usr_123" {
+		t.Fatalf("assignee id filter = %#v", assignee)
+	}
+}
+
+func TestClientViewerIDUsesActiveAPIKey(t *testing.T) {
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"viewer":{"id":"usr_viewer"}}}`))
+	}))
+	defer server.Close()
+
+	client := &Client{Endpoint: server.URL, APIKey: "lin_api_test", HTTPClient: server.Client()}
+	viewerID, err := client.ViewerID(context.Background())
+	if err != nil {
+		t.Fatalf("ViewerID() error = %v", err)
+	}
+	if viewerID != "usr_viewer" {
+		t.Fatalf("viewer id = %q, want usr_viewer", viewerID)
+	}
+	if gotAuth != "lin_api_test" {
+		t.Fatalf("Authorization header = %q", gotAuth)
 	}
 }

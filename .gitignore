@@ -1,6 +1,7 @@
 # Azedarach session cache
 .azedarach/*
 !.azedarach/config.json
+.azedarach/config.local.json
 
 # Dependencies
 node_modules/

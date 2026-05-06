@@ -7,6 +7,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/linearapi"
 )
@@ -78,17 +79,138 @@ func TestServiceRunTreatsMissingLinearProjectAsTeamOnlySync(t *testing.T) {
 	}
 }
 
+func TestServiceRunResolvesMeAssigneeFilter(t *testing.T) {
+	linear := &fakeLinear{viewerID: "usr_viewer"}
+	service := Service{
+		Store:  &fakeStore{},
+		Linear: linear,
+		Config: config.IssueTrackerConfig{
+			Backend: "linear",
+			Sync:    config.IssueSyncConfig{Enabled: true},
+			Linear: config.LinearTrackerConfig{
+				Team:    "CHE",
+				Project: "Chefy",
+				Filter:  &config.LinearFilterConfig{Assignee: "me"},
+			},
+		},
+		ProjectID: "chefy",
+	}
+
+	if _, err := service.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if linear.viewerCalls != 1 {
+		t.Fatalf("viewer calls = %d, want 1", linear.viewerCalls)
+	}
+	if got := linear.lastOptions.AssigneeID; got != "usr_viewer" {
+		t.Fatalf("assignee id = %q, want usr_viewer", got)
+	}
+}
+
+func TestServiceRunPassesExplicitAssigneeFilter(t *testing.T) {
+	linear := &fakeLinear{}
+	service := Service{
+		Store:  &fakeStore{},
+		Linear: linear,
+		Config: config.IssueTrackerConfig{
+			Backend: "linear",
+			Sync:    config.IssueSyncConfig{Enabled: true},
+			Linear: config.LinearTrackerConfig{
+				Team:    "CHE",
+				Project: "Chefy",
+				Filter:  &config.LinearFilterConfig{Assignee: "usr_123"},
+			},
+		},
+		ProjectID: "chefy",
+	}
+
+	if _, err := service.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if linear.viewerCalls != 0 {
+		t.Fatalf("viewer calls = %d, want 0", linear.viewerCalls)
+	}
+	if got := linear.lastOptions.AssigneeID; got != "usr_123" {
+		t.Fatalf("assignee id = %q, want usr_123", got)
+	}
+}
+
+func TestServiceRunSkipsPushForOutOfScopeRef(t *testing.T) {
+	remoteUpdated := time.Date(2026, 5, 5, 1, 0, 0, 0, time.UTC)
+	local := domain.Task{
+		ID:          mustIssueID(t, "CHE-1"),
+		Title:       "Local changed",
+		Description: "Body",
+		Priority:    domain.P2,
+		Status:      domain.StatusOpen,
+		UpdatedAt:   remoteUpdated.Add(time.Hour),
+	}
+	store := &fakeStore{
+		tasks: []domain.Task{local},
+		refs: []issues.ExternalRef{{
+			Provider:     ProviderLinear,
+			IssueID:      "CHE-1",
+			ExternalID:   "lin-away",
+			LastSyncHash: "previous",
+		}},
+	}
+	linear := &fakeLinear{
+		issues: []linearapi.Issue{{
+			ID:         "lin-in-scope",
+			Identifier: "CHE-2",
+			Title:      "In scope",
+			Priority:   2,
+			State:      linearapi.State{Name: "Todo", Type: "unstarted"},
+			CreatedAt:  remoteUpdated,
+			UpdatedAt:  remoteUpdated,
+		}},
+	}
+	service := Service{
+		Store:  store,
+		Linear: linear,
+		Config: config.IssueTrackerConfig{
+			Backend: "linear",
+			Sync:    config.IssueSyncConfig{Enabled: true},
+			Linear: config.LinearTrackerConfig{
+				Team:   "CHE",
+				Filter: &config.LinearFilterConfig{Assignee: "usr_123"},
+			},
+		},
+		ProjectID: "chefy",
+	}
+
+	summary, err := service.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(linear.updates) != 0 {
+		t.Fatalf("updates = %+v, want none", linear.updates)
+	}
+	if summary.SkippedPushOutOfScope != 1 || summary.OutOfScopeRefs != 1 {
+		t.Fatalf("summary = %+v", summary)
+	}
+}
+
 type fakeLinear struct {
 	issues      []linearapi.Issue
 	updates     []linearapi.IssueInput
 	lastTeam    string
 	lastProject string
+	lastOptions linearapi.ListIssuesOptions
+	viewerID    string
+	viewerCalls int
 }
 
-func (f *fakeLinear) ListIssues(_ context.Context, team, project string) ([]linearapi.Issue, error) {
-	f.lastTeam = team
-	f.lastProject = project
+func (f *fakeLinear) ListIssues(_ context.Context, opts linearapi.ListIssuesOptions) ([]linearapi.Issue, error) {
+	f.lastOptions = opts
+	f.lastTeam = opts.TeamKey
+	f.lastProject = opts.Project
 	return append([]linearapi.Issue(nil), f.issues...), nil
+}
+
+func (f *fakeLinear) ViewerID(context.Context) (string, error) {
+	f.viewerCalls++
+	return f.viewerID, nil
 }
 
 func (f *fakeLinear) UpdateIssue(_ context.Context, id string, input linearapi.IssueInput) (linearapi.Issue, error) {
@@ -144,4 +266,13 @@ func (s *fakeStore) RecordSyncConflict(_ context.Context, conflict issues.SyncCo
 
 func (s *fakeStore) ListSyncConflicts(context.Context, string, string, bool) ([]issues.SyncConflict, error) {
 	return append([]issues.SyncConflict(nil), s.conflicts...), nil
+}
+
+func mustIssueID(t *testing.T, raw string) naming.IssueID {
+	t.Helper()
+	id, err := naming.ParseIssueID(raw)
+	if err != nil {
+		t.Fatalf("ParseIssueID(%q) error = %v", raw, err)
+	}
+	return id
 }

@@ -51,13 +51,22 @@ type IssueInput struct {
 	Priority    *int
 }
 
-func (c *Client) ListIssues(ctx context.Context, teamKey, projectName string) ([]Issue, error) {
+type ListIssuesOptions struct {
+	TeamKey    string
+	Project    string
+	AssigneeID string
+}
+
+func (c *Client) ListIssues(ctx context.Context, opts ListIssuesOptions) ([]Issue, error) {
 	filter := map[string]any{}
-	if strings.TrimSpace(teamKey) != "" {
-		filter["team"] = map[string]any{"key": map[string]any{"eq": strings.TrimSpace(teamKey)}}
+	if strings.TrimSpace(opts.TeamKey) != "" {
+		filter["team"] = map[string]any{"key": map[string]any{"eq": strings.TrimSpace(opts.TeamKey)}}
 	}
-	if strings.TrimSpace(projectName) != "" {
-		filter["project"] = map[string]any{"name": map[string]any{"eq": strings.TrimSpace(projectName)}}
+	if strings.TrimSpace(opts.Project) != "" {
+		filter["project"] = map[string]any{"name": map[string]any{"eq": strings.TrimSpace(opts.Project)}}
+	}
+	if strings.TrimSpace(opts.AssigneeID) != "" {
+		filter["assignee"] = map[string]any{"id": map[string]any{"eq": strings.TrimSpace(opts.AssigneeID)}}
 	}
 	query := `
 query AzedarachIssues($filter: IssueFilter, $after: String) {
@@ -103,6 +112,25 @@ query AzedarachIssues($filter: IssueFilter, $after: String) {
 		after = out.Issues.PageInfo.EndCursor
 	}
 	return all, nil
+}
+
+func (c *Client) ViewerID(ctx context.Context) (string, error) {
+	query := `
+query AzedarachViewer {
+  viewer { id }
+}`
+	var out struct {
+		Viewer struct {
+			ID string `json:"id"`
+		} `json:"viewer"`
+	}
+	if err := c.graphql(ctx, query, map[string]any{}, &out); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(out.Viewer.ID) == "" {
+		return "", errors.New("linear viewer id missing")
+	}
+	return strings.TrimSpace(out.Viewer.ID), nil
 }
 
 func (c *Client) UpdateIssue(ctx context.Context, id string, input IssueInput) (Issue, error) {
