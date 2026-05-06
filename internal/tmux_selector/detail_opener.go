@@ -2,7 +2,6 @@ package tmuxselector
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -43,27 +42,10 @@ func (o *DaemonDetailOpener) OpenDetail(ctx context.Context, entry InventoryEntr
 	if projectID == "" {
 		return fmt.Errorf("resolve project id for %s", projectPath)
 	}
-	var lastErr error
-	for _, socketPath := range detailOpenSocketCandidates(projectPath) {
-		client := daemonclient.New(transport.NewClient(socketPath)).WithProjectID(projectID)
-		if _, err := client.OpenTaskWorkspace(ctx, issueID); err != nil {
-			lastErr = err
-			var commandErr *daemonclient.CommandError
-			if errors.As(err, &commandErr) {
-				return err
-			}
-			continue
-		}
-		return nil
+	socketPath := config.DaemonSocketPathFor(projectPath)
+	client := daemonclient.New(transport.NewClient(socketPath)).WithProjectID(projectID)
+	if _, err := client.OpenTaskWorkspace(ctx, issueID); err != nil {
+		return err
 	}
-	return lastErr
-}
-
-func detailOpenSocketCandidates(projectPath string) []string {
-	preferred := config.PreferredDaemonSocketPathFor(projectPath)
-	fallback := config.DaemonSocketPathFor(projectPath)
-	if preferred == fallback {
-		return []string{preferred}
-	}
-	return []string{preferred, fallback}
+	return nil
 }
