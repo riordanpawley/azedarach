@@ -188,6 +188,9 @@ func TestViewWithOverlayStatusBindingsUsesOverlayHints(t *testing.T) {
 	if !strings.Contains(last, "j/k") || !strings.Contains(last, "scroll") {
 		t.Fatalf("expected status bar to include overlay-provided hints; last line=%q", last)
 	}
+	if !strings.Contains(last, "ctrl+g") || !strings.Contains(last, "close all") {
+		t.Fatalf("expected status bar to include close-all hint; last line=%q", last)
+	}
 }
 
 func TestWindowSizeMsgForwardedToActiveOverlay(t *testing.T) {

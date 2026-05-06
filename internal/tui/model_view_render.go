@@ -54,10 +54,15 @@ func (m Model) View() string {
 		sb.SetModeSuffix(m.spinner.View())
 	}
 	if current := m.overlayStack.Current(); current != nil {
+		bindings := []keybinds.Binding(nil)
 		if hintOverlay, ok := current.(interface {
 			StatusBindings() []keybinds.Binding
 		}); ok {
-			sb.SetHintBindings(hintOverlay.StatusBindings())
+			bindings = append(bindings, hintOverlay.StatusBindings()...)
+		}
+		bindings = append(bindings, keybinds.Binding{Key: "ctrl+g", Description: "close all"})
+		if len(bindings) > 0 {
+			sb.SetHintBindings(bindings)
 		}
 	}
 	statusBarView := sb.Render()

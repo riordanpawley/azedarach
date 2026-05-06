@@ -404,6 +404,33 @@ func TestUpdate_ForwardsNonKeyMessagesToActiveOverlay(t *testing.T) {
 	}
 }
 
+func TestOverlayCtrlGClosesEntireStack(t *testing.T) {
+	m := newTestModel()
+	bottom := &probeOverlay{}
+	top := &probeOverlay{}
+	m.overlayStack.Push(bottom)
+	m.overlayStack.Push(top)
+
+	updated, cmd := m.handleOverlayKey(tea.KeyMsg{Type: tea.KeyCtrlG})
+	if cmd == nil {
+		t.Fatal("expected ctrl+g to emit a close-all command")
+	}
+	next := updated.(Model)
+	if top.updated {
+		t.Fatal("expected ctrl+g to be handled globally before forwarding to top overlay")
+	}
+
+	closeMsg := cmd()
+	if _, ok := closeMsg.(overlay.CloseAllOverlaysMsg); !ok {
+		t.Fatalf("ctrl+g command emitted %T, want overlay.CloseAllOverlaysMsg", closeMsg)
+	}
+	closed, _ := next.Update(closeMsg)
+	finalModel := closed.(Model)
+	if !finalModel.overlayStack.IsEmpty() {
+		t.Fatalf("expected ctrl+g to close the whole overlay stack, current=%T", finalModel.overlayStack.Current())
+	}
+}
+
 func TestUpdate_OpenImagePreviewMsgPushesPreviewOverlay(t *testing.T) {
 	m := newTestModel()
 	m.overlayStack.Push(overlay.NewImageAttachOverlay("axu", m.attachmentService))

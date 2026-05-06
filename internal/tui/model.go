@@ -893,6 +893,9 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleOverlayKey routes keyboard messages to the overlay stack
 func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "ctrl+g" {
+		return m, func() tea.Msg { return overlay.CloseAllOverlaysMsg{} }
+	}
 	cmd := m.overlayStack.Update(msg)
 	return m, cmd
 }

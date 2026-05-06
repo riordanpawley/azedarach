@@ -176,6 +176,7 @@ var registry = []ActionSpec{
 
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "Tab", Help: "Toggle compact/kanban view"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "esc", Help: "Close overlay / exit mode"},
+	{Mode: types.ModeNormal, Category: "Other", HelpKey: "ctrl+g", Help: "Close all stacked overlays"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "q", Help: "Quit"},
 }
 

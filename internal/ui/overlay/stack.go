@@ -51,14 +51,18 @@ func (s *Stack) Clear() {
 	s.overlays = make([]Overlay, 0)
 }
 
-// Update forwards the message to the current overlay and handles CloseOverlayMsg
+// Update forwards the message to the current overlay and handles close messages.
 func (s *Stack) Update(msg tea.Msg) tea.Cmd {
 	// If stack is empty, nothing to update
 	if s.IsEmpty() {
 		return nil
 	}
 
-	// Check if message is a CloseOverlayMsg
+	if _, ok := msg.(CloseAllOverlaysMsg); ok {
+		s.Clear()
+		return nil
+	}
+
 	if _, ok := msg.(CloseOverlayMsg); ok {
 		s.Pop()
 		return nil

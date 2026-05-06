@@ -66,6 +66,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case overlay.CloseAllOverlaysMsg:
+		if _, isSearchOverlay := m.overlayStack.Current().(*overlay.SearchOverlay); isSearchOverlay {
+			m.editor.EnterNormal()
+		}
+		m.overlayStack.Clear()
+		return m, nil
+
 	case overlay.SelectionMsg:
 		if msg.Key == "git_pull" {
 			m.overlayStack.Pop()

@@ -247,6 +247,22 @@ func TestStackUpdateWithCloseMsg(t *testing.T) {
 	}
 }
 
+func TestStackUpdateWithCloseAllMsg(t *testing.T) {
+	stack := NewStack()
+
+	stack.Push(mockOverlay{title: "Overlay 1", width: 40, height: 10})
+	stack.Push(mockOverlay{title: "Overlay 2", width: 50, height: 15})
+	stack.Push(mockOverlay{title: "Overlay 3", width: 60, height: 20})
+
+	cmd := stack.Update(CloseAllOverlaysMsg{})
+	if cmd != nil {
+		t.Error("Update with CloseAllOverlaysMsg should return nil")
+	}
+	if !stack.IsEmpty() {
+		t.Fatalf("stack should be empty after close all, current=%q", stack.Current().Title())
+	}
+}
+
 func TestStackUpdateForwardsMessages(t *testing.T) {
 	stack := NewStack()
 
