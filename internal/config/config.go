@@ -282,21 +282,23 @@ type configFileMetadata struct {
 	Version int    `json:"$version,omitempty"`
 }
 
-// LoadConfig loads configuration from the nearest project/worktree base containing
-// .azedarach/config.json or .azedarach/config.local.json. Config files are layered
-// as defaults < config.json < config.local.json. If no config file exists,
-// defaults are returned.
+// LoadConfig loads configuration from the project and worktree config roots.
+// Config files are layered as defaults < config.json < config.local.json, with
+// linked worktree config loaded after base-repository config. If no config file
+// exists, defaults are returned.
 func LoadConfig(projectPath string) (*Config, error) {
-	baseDir, err := ResolveConfigBase(projectPath)
+	baseDirs, err := ResolveConfigLayerBases(projectPath)
 	if err != nil {
 		return nil, err
 	}
 
 	cfg := DefaultConfig()
-	for _, name := range []string{ConfigFileName, LocalConfigFileName} {
-		configPath := filepath.Join(baseDir, ConfigDirName, name)
-		if err := loadConfigLayer(cfg, configPath); err != nil {
-			return nil, err
+	for _, baseDir := range baseDirs {
+		for _, name := range []string{ConfigFileName, LocalConfigFileName} {
+			configPath := filepath.Join(baseDir, ConfigDirName, name)
+			if err := loadConfigLayer(cfg, configPath); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -395,6 +397,50 @@ func ResolveConfigBase(startPath string) (string, error) {
 		}
 		dir = parent
 	}
+}
+
+func ResolveConfigLayerBases(startPath string) ([]string, error) {
+	if strings.TrimSpace(startPath) == "" {
+		var err error
+		startPath, err = os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve cwd: %w", err)
+		}
+	}
+	abs, err := filepath.Abs(startPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve config base from %q: %w", startPath, err)
+	}
+	if info, statErr := os.Stat(abs); statErr == nil && !info.IsDir() {
+		abs = filepath.Dir(abs)
+	}
+
+	if baseRoot, err := ResolveBaseGitRoot(abs); err == nil {
+		bases := []string{baseRoot}
+		if worktreeRoot, wtErr := ResolveWorktreeRoot(abs); wtErr == nil && !samePath(worktreeRoot, baseRoot) {
+			bases = append(bases, worktreeRoot)
+		}
+		return bases, nil
+	}
+
+	base, err := ResolveConfigBase(abs)
+	if err != nil {
+		return nil, err
+	}
+	return []string{base}, nil
+}
+
+func samePath(a, b string) bool {
+	if a == "" || b == "" {
+		return a == b
+	}
+	cleanA, errA := filepath.Abs(a)
+	cleanB, errB := filepath.Abs(b)
+	if errA == nil && errB == nil {
+		a = cleanA
+		b = cleanB
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
 }
 
 // MergeWithDefaults fills in missing values with defaults
