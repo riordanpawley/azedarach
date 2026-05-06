@@ -51,12 +51,13 @@ type SessionRow = InventoryEntry
 type Entry = InventoryEntry
 
 type Snapshot struct {
-	Entries       []InventoryEntry
-	Tasks         []domain.Task
-	Revision      uint64
-	LastCheckedAt time.Time
-	Freshness     string
-	Enriching     bool
+	Entries          []InventoryEntry
+	Tasks            []domain.Task
+	Revision         uint64
+	LastCheckedAt    time.Time
+	Freshness        string
+	Enriching        bool
+	CurrentSessionID string
 }
 
 type SnapshotLoader interface {
@@ -120,13 +121,14 @@ type Model struct {
 	detailOpener DetailOpener
 	styles       *styles.Styles
 
-	snapshot Snapshot
-	cursor   int
-	width    int
-	height   int
-	loading  bool
-	err      error
-	status   string
+	snapshot           Snapshot
+	cursor             int
+	width              int
+	height             int
+	loading            bool
+	err                error
+	status             string
+	defaultedToCurrent bool
 
 	gotoArmed   bool
 	jumpMode    *overlay.JumpMode
@@ -211,8 +213,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = strings.TrimSpace(m.status + "  enrichment failed")
 			return m, nil
 		}
+		selectedSessionID := ""
+		if selected, ok := m.selectedEntry(); ok {
+			selectedSessionID = strings.TrimSpace(selected.SessionID)
+		}
 		m.snapshot = msg.Snapshot
 		m.normalizeSnapshot()
+		if selectedSessionID != "" {
+			m.selectSessionID(selectedSessionID)
+		}
 		m.status = formatSnapshotStatus(m.snapshot, len(m.snapshot.Entries))
 		return m, nil
 	case SwitchResultMsg:
@@ -287,6 +296,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.loading = true
 			m.err = nil
 			m.status = "refreshing"
+			m.defaultedToCurrent = false
 			return m, m.loadCmd()
 		case "enter", "a":
 			entry, ok := m.selectedEntry()
@@ -316,12 +326,35 @@ func (m *Model) normalizeSnapshot() {
 	if len(m.snapshot.Entries) == 0 && len(m.snapshot.Tasks) > 0 {
 		m.snapshot.Entries = EntriesFromTasks(m.snapshot.Tasks)
 	}
+	if current := strings.TrimSpace(m.snapshot.CurrentSessionID); current != "" && !m.defaultedToCurrent {
+		for i, entry := range m.snapshot.Entries {
+			if strings.TrimSpace(entry.SessionID) == current {
+				m.cursor = i
+				m.defaultedToCurrent = true
+				break
+			}
+		}
+	}
 	if m.cursor >= len(m.snapshot.Entries) {
 		m.cursor = len(m.snapshot.Entries) - 1
 	}
 	if m.cursor < 0 {
 		m.cursor = 0
 	}
+}
+
+func (m *Model) selectSessionID(sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false
+	}
+	for i, entry := range m.snapshot.Entries {
+		if strings.TrimSpace(entry.SessionID) == sessionID {
+			m.cursor = i
+			return true
+		}
+	}
+	return false
 }
 
 func (m Model) View() string {

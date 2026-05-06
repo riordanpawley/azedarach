@@ -12,12 +12,17 @@ import (
 )
 
 type fakeSessionInventory struct {
-	infos []tmux.SessionInfo
-	err   error
+	infos   []tmux.SessionInfo
+	err     error
+	current string
 }
 
 func (f fakeSessionInventory) ListSessionInfos(context.Context) ([]tmux.SessionInfo, error) {
 	return f.infos, f.err
+}
+
+func (f fakeSessionInventory) CurrentSession(context.Context) (string, error) {
+	return f.current, nil
 }
 
 type fakeProjectSnapshotSource struct {
@@ -140,5 +145,26 @@ func TestGlobalInventoryLoaderSortsBySessionStartOldestFirst(t *testing.T) {
 	want := []string{"az-oldest", "az-middle", "az-youngest", "plain-unknown"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("session order = %v, want %v", got, want)
+	}
+}
+
+func TestGlobalInventoryLoaderIncludesCurrentTmuxSession(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/tmux-123/default,1,0")
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{
+			infos: []tmux.SessionInfo{
+				{Name: "az-one"},
+				{Name: "az-two"},
+			},
+			current: "az-two",
+		},
+		nil,
+	)
+	snapshot, err := loader.ListLiveSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("ListLiveSnapshot: %v", err)
+	}
+	if snapshot.CurrentSessionID != "az-two" {
+		t.Fatalf("current session = %q, want az-two", snapshot.CurrentSessionID)
 	}
 }
