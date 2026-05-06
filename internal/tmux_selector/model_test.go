@@ -172,6 +172,51 @@ func TestModelOpenDetailSupportsOAndSpaceKeysWithoutOpenIssueCommand(t *testing.
 	}
 }
 
+func TestModelEnterAndAOpenDetailThenSwitchSelectedIssueSession(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		key  tea.KeyMsg
+	}{
+		{name: "enter", key: tea.KeyMsg{Type: tea.KeyEnter}},
+		{name: "a", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			switcher := &fakeSwitcher{}
+			opener := &fakeDetailOpener{}
+			entries := []InventoryEntry{{
+				SessionID:   "az-one",
+				IssueID:     "one",
+				TaskTitle:   "One",
+				ProjectPath: "/tmp/project one",
+			}}
+			model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}}, WithSwitcher(switcher), WithDetailOpener(opener))
+			updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+			model = updated.(Model)
+			if cmd != nil {
+				t.Fatalf("snapshot update returned command")
+			}
+
+			_, cmd = model.Update(tt.key)
+			if cmd == nil {
+				t.Fatal("switch key did not produce command")
+			}
+			msg, ok := cmd().(SwitchResultMsg)
+			if !ok {
+				t.Fatalf("switch msg = %T, want SwitchResultMsg", msg)
+			}
+			if msg.Err != nil {
+				t.Fatalf("switch detail command error = %v", msg.Err)
+			}
+			if switcher.sessionID != "az-one" {
+				t.Fatalf("switched session = %q, want selected session az-one", switcher.sessionID)
+			}
+			if len(opener.entries) != 1 || opener.entries[0].IssueID != "one" {
+				t.Fatalf("opener entries = %+v, want issue one", opener.entries)
+			}
+		})
+	}
+}
+
 func TestModelOpenDetailErrorsWhenFullAzSessionMissing(t *testing.T) {
 	switcher := &fakeFullAzSwitcher{}
 	entries := []InventoryEntry{{
