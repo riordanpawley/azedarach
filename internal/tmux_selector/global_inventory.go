@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
@@ -320,61 +321,39 @@ type projectedInventory struct {
 func (l *GlobalInventoryLoader) projectDirsForLiveSessions(live []tmux.SessionInfo) []string {
 	seen := map[string]struct{}{}
 	var dirs []string
-	add := func(path string) {
-		path = strings.TrimSpace(path)
-		if path == "" {
-			return
+	entries := entriesFromLive(live)
+	matched := l.addMatchingConfiguredProjectDirs(&dirs, seen, entries)
+	for _, entry := range entries {
+		if _, ok := matched[entry.SessionID]; ok {
+			continue
 		}
-		if root, err := config.ResolveProjectRoot(path); err == nil {
-			path = root
+		if root := projectRoot(entry.Worktree); root != "" {
+			addProjectDir(&dirs, seen, root)
 		}
-		abs, err := filepath.Abs(path)
-		if err != nil {
-			return
-		}
-		if _, exists := seen[abs]; exists {
-			return
-		}
-		seen[abs] = struct{}{}
-		dirs = append(dirs, abs)
 	}
-	for _, info := range live {
-		add(info.Path)
-	}
-	l.addMatchingConfiguredProjectDirs(&dirs, seen, entriesFromLive(live))
-	sort.Strings(dirs)
-	if len(dirs) > defaultInventoryProjectLimit {
-		dirs = dirs[:defaultInventoryProjectLimit]
-	}
-	return dirs
+	return limitSortedProjectDirs(dirs)
 }
 
 func (l *GlobalInventoryLoader) projectDirsForEntries(entries []InventoryEntry) []string {
 	seen := map[string]struct{}{}
 	var dirs []string
-	add := func(path string) {
-		path = strings.TrimSpace(path)
-		if path == "" {
-			return
-		}
-		if root, err := config.ResolveProjectRoot(path); err == nil {
-			path = root
-		}
-		abs, err := filepath.Abs(path)
-		if err != nil {
-			return
-		}
-		if _, exists := seen[abs]; exists {
-			return
-		}
-		seen[abs] = struct{}{}
-		dirs = append(dirs, abs)
-	}
+	matched := l.addMatchingConfiguredProjectDirs(&dirs, seen, entries)
 	for _, entry := range entries {
-		add(entry.ProjectPath)
-		add(entry.Worktree)
+		if _, ok := matched[entry.SessionID]; ok {
+			continue
+		}
+		if root := projectRoot(entry.ProjectPath); root != "" {
+			addProjectDir(&dirs, seen, root)
+			continue
+		}
+		if root := projectRoot(entry.Worktree); root != "" {
+			addProjectDir(&dirs, seen, root)
+		}
 	}
-	l.addMatchingConfiguredProjectDirs(&dirs, seen, entries)
+	return limitSortedProjectDirs(dirs)
+}
+
+func limitSortedProjectDirs(dirs []string) []string {
 	sort.Strings(dirs)
 	if len(dirs) > defaultInventoryProjectLimit {
 		dirs = dirs[:defaultInventoryProjectLimit]
@@ -382,39 +361,37 @@ func (l *GlobalInventoryLoader) projectDirsForEntries(entries []InventoryEntry) 
 	return dirs
 }
 
-func (l *GlobalInventoryLoader) addMatchingConfiguredProjectDirs(dirs *[]string, seen map[string]struct{}, entries []InventoryEntry) {
+func (l *GlobalInventoryLoader) addMatchingConfiguredProjectDirs(dirs *[]string, seen map[string]struct{}, entries []InventoryEntry) map[string]struct{} {
+	matched := map[string]struct{}{}
 	if len(l.projectDirs) == 0 || len(entries) == 0 {
-		return
+		return matched
 	}
-	wantedProjects := map[string]struct{}{}
-	wantedPaths := map[string]struct{}{}
+	entriesByPrefix := map[string][]InventoryEntry{}
 	for _, entry := range entries {
-		if projectID := protocol.NormalizeProjectID(entry.ProjectID); projectID != "" {
-			wantedProjects[projectID] = struct{}{}
+		prefix := strings.TrimSpace(entry.ProjectID)
+		if prefix == "" {
+			continue
 		}
-		for _, path := range []string{entry.ProjectPath, entry.Worktree} {
-			if root := projectRoot(path); root != "" {
-				wantedPaths[root] = struct{}{}
-			}
-		}
+		entriesByPrefix[prefix] = append(entriesByPrefix[prefix], entry)
 	}
 	for _, projectDir := range l.projectDirs {
-		root := projectRoot(projectDir)
+		root := strings.TrimSpace(projectDir)
 		if root == "" {
 			continue
 		}
-		if _, ok := wantedPaths[root]; ok {
-			addProjectDir(dirs, seen, root)
+		prefix := naming.ProjectSessionPrefix(root)
+		matchingEntries := entriesByPrefix[prefix]
+		if len(matchingEntries) == 0 {
 			continue
 		}
-		if len(wantedProjects) == 0 {
-			continue
-		}
-		projectID := projectIDForPath(root)
-		if _, ok := wantedProjects[projectID]; ok {
-			addProjectDir(dirs, seen, root)
+		addProjectDir(dirs, seen, root)
+		for _, entry := range matchingEntries {
+			if entry.SessionID != "" {
+				matched[entry.SessionID] = struct{}{}
+			}
 		}
 	}
+	return matched
 }
 
 func entriesFromLive(live []tmux.SessionInfo) []InventoryEntry {
@@ -650,26 +627,46 @@ func (s *DaemonSnapshotSource) ListProjectSnapshots(ctx context.Context) ([]Proj
 	if s == nil {
 		return nil, nil
 	}
-	out := make([]ProjectInventorySnapshot, 0, len(s.projectDirs))
-	for _, projectDir := range s.projectDirs {
-		projectID := projectIDForPath(projectDir)
-		if projectID == "" {
-			continue
-		}
-		socketPath := config.DaemonSocketPathFor(projectDir)
-		client := daemonclient.New(transport.NewClient(socketPath)).WithProjectID(projectID)
-		snapshot, err := client.ListTasksSnapshot(ctx)
-		if err != nil {
-			if s.logger != nil {
-				s.logger.Debug("global selector project snapshot failed", "project_dir", projectDir, "project_id", projectID, "error", err)
+	type projectResult struct {
+		snapshot ProjectInventorySnapshot
+		ok       bool
+	}
+	results := make([]projectResult, len(s.projectDirs))
+	var wg sync.WaitGroup
+	for i, projectDir := range s.projectDirs {
+		i, projectDir := i, projectDir
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			projectID := projectIDForPath(projectDir)
+			if projectID == "" {
+				return
 			}
-			continue
+			socketPath := config.DaemonSocketPathFor(projectDir)
+			client := daemonclient.New(transport.NewClient(socketPath)).WithProjectID(projectID)
+			snapshot, err := client.ListTasksSnapshot(ctx)
+			if err != nil {
+				if s.logger != nil {
+					s.logger.Debug("global selector project snapshot failed", "project_dir", projectDir, "project_id", projectID, "error", err)
+				}
+				return
+			}
+			results[i] = projectResult{
+				snapshot: ProjectInventorySnapshot{
+					ProjectID:   projectID,
+					ProjectPath: projectDir,
+					Tasks:       snapshot.Tasks,
+				},
+				ok: true,
+			}
+		}()
+	}
+	wg.Wait()
+	out := make([]ProjectInventorySnapshot, 0, len(results))
+	for _, result := range results {
+		if result.ok {
+			out = append(out, result.snapshot)
 		}
-		out = append(out, ProjectInventorySnapshot{
-			ProjectID:   projectID,
-			ProjectPath: projectDir,
-			Tasks:       snapshot.Tasks,
-		})
 	}
 	return out, nil
 }

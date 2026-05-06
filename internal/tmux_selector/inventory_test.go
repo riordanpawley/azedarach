@@ -148,6 +148,27 @@ func TestGlobalInventoryLoaderSortsBySessionStartOldestFirst(t *testing.T) {
 	}
 }
 
+func TestGlobalInventoryLoaderUsesSessionPrefixBeforeGitRootResolution(t *testing.T) {
+	root := t.TempDir()
+	azRoot := root + "/azedarach"
+	chRoot := root + "/Chefy"
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{},
+		nil,
+		WithProjectDirs(azRoot, chRoot),
+	)
+
+	dirs := loader.projectDirsForLiveSessions([]tmux.SessionInfo{
+		{Name: "az-byh", Path: root + "/azedarach-byh"},
+		{Name: "ch-wb", Path: root + "/Chefy-wb"},
+	})
+
+	want := []string{chRoot, azRoot}
+	if strings.Join(dirs, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("project dirs = %#v, want configured roots %#v", dirs, want)
+	}
+}
+
 func TestGlobalInventoryLoaderIncludesCurrentTmuxSession(t *testing.T) {
 	t.Setenv("TMUX", "/tmp/tmux-123/default,1,0")
 	loader := NewGlobalInventoryLoader(
