@@ -417,7 +417,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			"image_count", len(cmd.ImagePaths),
 		)
 	}
-	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionStart); err != nil {
+	if err := d.ensureFreshRuntimeForIssueMutation(ctx, cmd.ProjectID, cmd.IssueID, daemonhandlers.CommandSessionStart); err != nil {
 		if d.cfg.Logger != nil {
 			if errors.Is(err, context.Canceled) {
 				d.cfg.Logger.Warn("daemon session start aborted after freshness cancellation",
@@ -657,7 +657,7 @@ func (d *Daemon) handleSessionPause(ctx context.Context, req protocol.RequestEnv
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session pause transition: %v", err)), nil
 	}
-	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionPause); err != nil {
+	if err := d.ensureFreshRuntimeForIssueMutation(ctx, cmd.ProjectID, cmd.IssueID, daemonhandlers.CommandSessionPause); err != nil {
 		return d.mutationFreshnessErrorResponse(req, err), nil
 	}
 	if d.cfg.Logger != nil {
@@ -692,7 +692,7 @@ func (d *Daemon) handleSessionResume(ctx context.Context, req protocol.RequestEn
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session resume transition: %v", err)), nil
 	}
-	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionResume); err != nil {
+	if err := d.ensureFreshRuntimeForIssueMutation(ctx, cmd.ProjectID, cmd.IssueID, daemonhandlers.CommandSessionResume); err != nil {
 		return d.mutationFreshnessErrorResponse(req, err), nil
 	}
 	if d.cfg.Logger != nil {
@@ -745,34 +745,8 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session stop transition: %v", err)), nil
 	}
-	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionStop); err != nil {
-		if d.cfg.Logger != nil {
-			if errors.Is(err, context.Canceled) {
-				d.cfg.Logger.Warn("daemon session stop aborted after freshness cancellation",
-					"project_id", cmd.ProjectID,
-					"issue_id", cmd.IssueID,
-					"session_id", cmd.SessionID,
-					"error", err,
-				)
-			} else if isRuntimeMutationFreshnessTimeout(err) {
-				d.cfg.Logger.Warn("daemon session stop continuing after freshness timeout",
-					"project_id", cmd.ProjectID,
-					"issue_id", cmd.IssueID,
-					"session_id", cmd.SessionID,
-					"error", err,
-				)
-			} else {
-				d.cfg.Logger.Warn("daemon session stop continuing after freshness refresh error",
-					"project_id", cmd.ProjectID,
-					"issue_id", cmd.IssueID,
-					"session_id", cmd.SessionID,
-					"error", err,
-				)
-			}
-		}
-		if errors.Is(err, context.Canceled) {
-			return d.mutationFreshnessErrorResponse(req, err), nil
-		}
+	if err := ctx.Err(); err != nil {
+		return d.mutationFreshnessErrorResponse(req, err), nil
 	}
 	sessionNamesToKill, err := d.tmuxSessionNamesForIssue(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, stopTargetsSource)
 	if err != nil {
@@ -786,8 +760,8 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 			}
 		}
 	}
-	if err := d.refreshSessionRuntimeState(ctx, cmd.ProjectID); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("daemon session stop post-kill refresh failed",
+	if err := d.refreshStoppedSessionRuntimeState(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("daemon session stop post-kill issue refresh failed",
 			"project_id", cmd.ProjectID,
 			"issue_id", cmd.IssueID,
 			"session_id", cmd.SessionID,
@@ -1698,6 +1672,43 @@ func (d *Daemon) refreshSessionRuntimeState(ctx context.Context, projectID strin
 		return err
 	}
 	return d.persistTmuxSessionRuntimeState(ctx, projectID, tmuxSessions)
+}
+
+func (d *Daemon) refreshStoppedSessionRuntimeState(ctx context.Context, projectID, issueID, sessionID string) error {
+	if d == nil || d.sessionRuntimeStateStoreIfConfigured(projectID) == nil || d.sessionStore == nil {
+		return nil
+	}
+	projectID = d.canonicalProjectID(projectID)
+	issueID = strings.TrimSpace(issueID)
+	sessionID = strings.TrimSpace(sessionID)
+	if issueID == "" && sessionID == "" {
+		return nil
+	}
+
+	var session daemonstate.Session
+	if issueID != "" {
+		if existing, found, err := d.sessionRuntimeStateStoreIfConfigured(projectID).GetSessionStateByIssueID(ctx, projectID, issueID); err != nil {
+			return err
+		} else if found {
+			session = existing
+		}
+	}
+	if strings.TrimSpace(session.ID) == "" {
+		session = daemonstate.Session{
+			ID:      sessionID,
+			IssueID: issueID,
+		}
+	}
+	if strings.TrimSpace(session.ID) == "" {
+		session.ID = sessionID
+	}
+	if strings.TrimSpace(session.IssueID) == "" {
+		session.IssueID = issueID
+	}
+	session.State = daemonstate.SessionStateStopped
+	session.ObservedState = daemonstate.SessionStateStopped
+	session.UpdatedAt = time.Now().UTC()
+	return d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, session)
 }
 
 func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID string, tmuxSessions []tmux.SessionInfo) error {
