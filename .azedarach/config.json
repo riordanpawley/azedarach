@@ -30,6 +30,13 @@
     "path": ".azedarach",
     "syncInterval": 300
   },
+  "issueTracker": {
+    "linear": {
+      "filter": {
+        "assignee": "me"
+      }
+    }
+  },
   "keyboard": {
     "jumpLabelChars": "cieahtsn"
   },

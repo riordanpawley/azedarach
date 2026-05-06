@@ -2170,6 +2170,20 @@ func SyncCommand(deps *Dependencies, opts SyncOptions) error {
 		return nil
 	}
 	fmt.Printf("Linear: remote=%d local=%d imported=%d updated_local=%d pushed_remote=%d conflicts=%d\n", summary.RemoteIssues, summary.LocalIssues, summary.Imported, summary.UpdatedLocal, summary.PushedRemote, summary.Conflicts)
+	if summary.Incremental {
+		fmt.Printf("Incremental: cursor=%s", summary.Cursor)
+		if summary.RemoteScopeIssues > 0 {
+			fmt.Printf(" remote_scope=%d", summary.RemoteScopeIssues)
+		}
+		fmt.Println("")
+	}
+	fmt.Printf("Efficiency: api_requests=%d skipped_unchanged=%d pending_pushes=%d skipped_push_out_of_scope=%d out_of_scope_refs=%d retried_requests=%d\n", summary.APIRequests, summary.SkippedUnchanged, summary.PendingPushes, summary.SkippedPushOutOfScope, summary.OutOfScopeRefs, summary.RetriedRequests)
+	if summary.PushBudgetExhausted {
+		fmt.Println("Push budget exhausted; remaining local changes will be retried in a later sync.")
+	}
+	if summary.RateLimitLimit > 0 || summary.RateLimitRemaining > 0 || summary.RateLimitReset != "" {
+		fmt.Printf("Rate limit: remaining=%d limit=%d reset=%s\n", summary.RateLimitRemaining, summary.RateLimitLimit, summary.RateLimitReset)
+	}
 	fmt.Printf("Sync summary: targets=%d, provider=%s\n", len(targetPaths), summary.Provider)
 	return nil
 }

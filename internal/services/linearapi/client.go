@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,6 +20,9 @@ type Client struct {
 	Endpoint   string
 	APIKey     string
 	HTTPClient *http.Client
+
+	mu      sync.Mutex
+	metrics Metrics
 }
 
 type Issue struct {
@@ -51,10 +56,36 @@ type IssueInput struct {
 	Priority    *int
 }
 
+type RateLimit struct {
+	Limit     int       `json:"limit,omitempty"`
+	Remaining int       `json:"remaining,omitempty"`
+	Reset     time.Time `json:"reset,omitempty"`
+}
+
+type Metrics struct {
+	RequestCount int       `json:"request_count"`
+	RateLimit    RateLimit `json:"rate_limit"`
+}
+
+type APIError struct {
+	StatusCode int
+	Body       string
+	RateLimit  RateLimit
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("linear graphql status %d: %s", e.StatusCode, strings.TrimSpace(e.Body))
+}
+
+func (e *APIError) Retryable() bool {
+	return e != nil && (e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= 500)
+}
+
 type ListIssuesOptions struct {
-	TeamKey    string
-	Project    string
-	AssigneeID string
+	TeamKey      string
+	Project      string
+	AssigneeID   string
+	UpdatedAfter *time.Time
 }
 
 func (c *Client) ListIssues(ctx context.Context, opts ListIssuesOptions) ([]Issue, error) {
@@ -67,6 +98,9 @@ func (c *Client) ListIssues(ctx context.Context, opts ListIssuesOptions) ([]Issu
 	}
 	if strings.TrimSpace(opts.AssigneeID) != "" {
 		filter["assignee"] = map[string]any{"id": map[string]any{"eq": strings.TrimSpace(opts.AssigneeID)}}
+	}
+	if opts.UpdatedAfter != nil && !opts.UpdatedAfter.IsZero() {
+		filter["updatedAt"] = map[string]any{"gt": opts.UpdatedAfter.UTC().Format(time.RFC3339Nano)}
 	}
 	query := `
 query AzedarachIssues($filter: IssueFilter, $after: String) {
@@ -197,12 +231,14 @@ func (c *Client) graphql(ctx context.Context, query string, variables map[string
 		return fmt.Errorf("linear graphql request: %w", err)
 	}
 	defer resp.Body.Close()
+	rateLimit := parseRateLimit(resp.Header)
+	c.recordRequest(rateLimit)
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("read linear graphql response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("linear graphql status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return &APIError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(respBody)), RateLimit: rateLimit}
 	}
 	var envelope struct {
 		Data   json.RawMessage `json:"data"`
@@ -223,6 +259,47 @@ func (c *Client) graphql(ctx context.Context, query string, variables map[string
 		return fmt.Errorf("decode linear graphql data: %w", err)
 	}
 	return nil
+}
+
+func (c *Client) Metrics() Metrics {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.metrics
+}
+
+func (c *Client) recordRequest(rateLimit RateLimit) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.metrics.RequestCount++
+	if rateLimit != (RateLimit{}) {
+		c.metrics.RateLimit = rateLimit
+	}
+}
+
+func parseRateLimit(header http.Header) RateLimit {
+	return RateLimit{
+		Limit:     parseHeaderInt(header.Get("X-RateLimit-Requests-Limit")),
+		Remaining: parseHeaderInt(header.Get("X-RateLimit-Requests-Remaining")),
+		Reset:     parseHeaderEpochMillis(header.Get("X-RateLimit-Requests-Reset")),
+	}
+}
+
+func parseHeaderInt(raw string) int {
+	value, _ := strconv.Atoi(strings.TrimSpace(raw))
+	return value
+}
+
+func parseHeaderEpochMillis(raw string) time.Time {
+	value, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || value <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(value).UTC()
+}
+
+func IsRetryable(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Retryable()
 }
 
 type issueNode struct {

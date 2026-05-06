@@ -3,6 +3,7 @@ package issues
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -39,6 +40,17 @@ type SyncConflict struct {
 	RemoteUpdatedAt *time.Time `json:"remote_updated_at,omitempty"`
 	DetectedAt      time.Time  `json:"detected_at"`
 	ResolvedAt      *time.Time `json:"resolved_at,omitempty"`
+}
+
+// ExternalSyncState stores per-provider/per-scope cursor state for efficient
+// incremental external tracker sync.
+type ExternalSyncState struct {
+	Provider      string    `json:"provider"`
+	ProjectID     string    `json:"project_id"`
+	Cursor        string    `json:"cursor,omitempty"`
+	LastSuccessAt time.Time `json:"last_success_at,omitempty"`
+	LastError     string    `json:"last_error,omitempty"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // UpsertSyncedTask inserts or updates a local issue using an externally-owned
@@ -176,6 +188,60 @@ func (c *Client) ListExternalRefs(ctx context.Context, provider string) ([]Exter
 		refs = append(refs, ref)
 	}
 	return refs, rows.Err()
+}
+
+func (c *Client) GetExternalSyncState(ctx context.Context, provider, projectID string) (ExternalSyncState, bool, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return ExternalSyncState{}, false, err
+	}
+	var state ExternalSyncState
+	var lastSuccessRaw, updatedRaw string
+	err = db.QueryRowContext(ctx, `
+		SELECT provider, project_id, COALESCE(cursor, ''), COALESCE(last_success_at, ''),
+			COALESCE(last_error, ''), updated_at
+		FROM azedarach_external_sync_state
+		WHERE provider = ? AND project_id = ?
+	`, strings.TrimSpace(provider), strings.TrimSpace(projectID)).Scan(&state.Provider, &state.ProjectID, &state.Cursor, &lastSuccessRaw, &state.LastError, &updatedRaw)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ExternalSyncState{}, false, nil
+		}
+		return ExternalSyncState{}, false, c.wrapError("external-sync-state-get", projectID, err)
+	}
+	state.LastSuccessAt = parseTimestamp(lastSuccessRaw)
+	state.UpdatedAt = parseTimestamp(updatedRaw)
+	return state, true, nil
+}
+
+func (c *Client) UpsertExternalSyncState(ctx context.Context, state ExternalSyncState) error {
+	db, err := c.dbHandle()
+	if err != nil {
+		return err
+	}
+	state.Provider = strings.TrimSpace(state.Provider)
+	state.ProjectID = strings.TrimSpace(state.ProjectID)
+	if state.Provider == "" || state.ProjectID == "" {
+		return c.wrapError("external-sync-state-upsert", state.ProjectID, errors.New("provider and project id are required"))
+	}
+	if state.UpdatedAt.IsZero() {
+		state.UpdatedAt = time.Now().UTC()
+	}
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO azedarach_external_sync_state (
+			provider, project_id, cursor, last_success_at, last_error, updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(provider, project_id) DO UPDATE SET
+			cursor = excluded.cursor,
+			last_success_at = excluded.last_success_at,
+			last_error = excluded.last_error,
+			updated_at = excluded.updated_at
+	`, state.Provider, state.ProjectID, nullableString(state.Cursor), formatOptionalTime(state.LastSuccessAt), nullableString(state.LastError), state.UpdatedAt.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return c.wrapError("external-sync-state-upsert", state.ProjectID, err)
+	}
+	return nil
 }
 
 func (c *Client) RecordSyncConflict(ctx context.Context, conflict SyncConflict) error {

@@ -100,16 +100,29 @@ type TaskSnapshot struct {
 }
 
 type IssueSyncSummary struct {
-	Provider     string `json:"provider"`
-	Enabled      bool   `json:"enabled"`
-	Skipped      bool   `json:"skipped"`
-	Reason       string `json:"reason,omitempty"`
-	Imported     int    `json:"imported"`
-	UpdatedLocal int    `json:"updated_local"`
-	PushedRemote int    `json:"pushed_remote"`
-	Conflicts    int    `json:"conflicts"`
-	RemoteIssues int    `json:"remote_issues"`
-	LocalIssues  int    `json:"local_issues"`
+	Provider              string `json:"provider"`
+	Enabled               bool   `json:"enabled"`
+	Skipped               bool   `json:"skipped"`
+	Reason                string `json:"reason,omitempty"`
+	Imported              int    `json:"imported"`
+	UpdatedLocal          int    `json:"updated_local"`
+	PushedRemote          int    `json:"pushed_remote"`
+	Conflicts             int    `json:"conflicts"`
+	RemoteIssues          int    `json:"remote_issues"`
+	LocalIssues           int    `json:"local_issues"`
+	SkippedPushOutOfScope int    `json:"skipped_push_out_of_scope"`
+	OutOfScopeRefs        int    `json:"out_of_scope_refs"`
+	SkippedUnchanged      int    `json:"skipped_unchanged"`
+	PendingPushes         int    `json:"pending_pushes"`
+	PushBudgetExhausted   bool   `json:"push_budget_exhausted"`
+	RetriedRequests       int    `json:"retried_requests"`
+	APIRequests           int    `json:"api_requests"`
+	RateLimitLimit        int    `json:"rate_limit_limit,omitempty"`
+	RateLimitRemaining    int    `json:"rate_limit_remaining,omitempty"`
+	RateLimitReset        string `json:"rate_limit_reset,omitempty"`
+	Incremental           bool   `json:"incremental"`
+	Cursor                string `json:"cursor,omitempty"`
+	RemoteScopeIssues     int    `json:"remote_scope_issues,omitempty"`
 }
 
 type IssueSyncConflict struct {

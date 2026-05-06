@@ -2,6 +2,8 @@ package linearsync
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -15,10 +17,18 @@ import (
 
 const ProviderLinear = "linear"
 
+const (
+	defaultMaxPushesPerRun = 25
+	defaultRetryAttempts   = 3
+	defaultRetryDelay      = time.Second
+	minRemainingRequests   = 5
+)
+
 type LinearClient interface {
 	ListIssues(ctx context.Context, opts linearapi.ListIssuesOptions) ([]linearapi.Issue, error)
 	ViewerID(ctx context.Context) (string, error)
 	UpdateIssue(ctx context.Context, id string, input linearapi.IssueInput) (linearapi.Issue, error)
+	Metrics() linearapi.Metrics
 }
 
 type IssueStore interface {
@@ -26,6 +36,8 @@ type IssueStore interface {
 	UpsertSyncedTask(ctx context.Context, task domain.Task) (bool, error)
 	UpsertExternalRef(ctx context.Context, ref issues.ExternalRef) error
 	ListExternalRefs(ctx context.Context, provider string) ([]issues.ExternalRef, error)
+	GetExternalSyncState(ctx context.Context, provider, projectID string) (issues.ExternalSyncState, bool, error)
+	UpsertExternalSyncState(ctx context.Context, state issues.ExternalSyncState) error
 	RecordSyncConflict(ctx context.Context, conflict issues.SyncConflict) error
 	ListSyncConflicts(ctx context.Context, provider, projectID string, includeResolved bool) ([]issues.SyncConflict, error)
 }
@@ -36,6 +48,7 @@ type Service struct {
 	Config    config.IssueTrackerConfig
 	ProjectID string
 	Now       func() time.Time
+	Sleep     func(context.Context, time.Duration) error
 }
 
 type Summary struct {
@@ -51,6 +64,17 @@ type Summary struct {
 	LocalIssues           int    `json:"local_issues"`
 	SkippedPushOutOfScope int    `json:"skipped_push_out_of_scope"`
 	OutOfScopeRefs        int    `json:"out_of_scope_refs"`
+	SkippedUnchanged      int    `json:"skipped_unchanged"`
+	PendingPushes         int    `json:"pending_pushes"`
+	PushBudgetExhausted   bool   `json:"push_budget_exhausted"`
+	RetriedRequests       int    `json:"retried_requests"`
+	APIRequests           int    `json:"api_requests"`
+	RateLimitLimit        int    `json:"rate_limit_limit,omitempty"`
+	RateLimitRemaining    int    `json:"rate_limit_remaining,omitempty"`
+	RateLimitReset        string `json:"rate_limit_reset,omitempty"`
+	Incremental           bool   `json:"incremental"`
+	Cursor                string `json:"cursor,omitempty"`
+	RemoteScopeIssues     int    `json:"remote_scope_issues,omitempty"`
 }
 
 func (s Service) Run(ctx context.Context) (Summary, error) {
@@ -93,11 +117,24 @@ func (s Service) Run(ctx context.Context) (Summary, error) {
 	if err != nil {
 		return summary, err
 	}
+	stateID := s.syncStateID(listOpts)
+	state, _, err := s.Store.GetExternalSyncState(ctx, ProviderLinear, stateID)
+	if err != nil {
+		return summary, fmt.Errorf("load linear sync state: %w", err)
+	}
+	if cursorTime := parseCursor(state.Cursor); !cursorTime.IsZero() {
+		after := cursorTime.Add(-time.Second)
+		listOpts.UpdatedAfter = &after
+		summary.Incremental = true
+		summary.Cursor = cursorTime.UTC().Format(time.RFC3339Nano)
+	}
 	remoteIssues, err := s.Linear.ListIssues(ctx, listOpts)
 	if err != nil {
+		_ = s.recordSyncStateError(ctx, stateID, state.Cursor, err, now())
 		return summary, fmt.Errorf("list linear issues: %w", err)
 	}
 	summary.RemoteIssues = len(remoteIssues)
+	maxRemoteUpdated := maxIssueUpdatedAt(remoteIssues)
 	remoteExternalIDs := map[string]struct{}{}
 	for _, remote := range remoteIssues {
 		if strings.TrimSpace(remote.ID) != "" {
@@ -153,7 +190,7 @@ func (s Service) Run(ctx context.Context) (Summary, error) {
 			localByID[issueID] = task
 			localHash = remoteHash
 		}
-		ref = externalRef(remote, issueID, localHash, now())
+		ref = externalRef(remote, issueID, remoteHash, now())
 		if err := s.Store.UpsertExternalRef(ctx, ref); err != nil {
 			return summary, err
 		}
@@ -164,31 +201,157 @@ func (s Service) Run(ctx context.Context) (Summary, error) {
 		if !ok || ref.ExternalID == "" {
 			continue
 		}
-		if _, inScope := remoteExternalIDs[strings.TrimSpace(ref.ExternalID)]; !inScope {
-			summary.SkippedPushOutOfScope++
-			summary.OutOfScopeRefs++
+		localHash := issues.HashTaskForSync(local)
+		if ref.LastSyncHash == localHash {
+			summary.SkippedUnchanged++
+			continue
+		}
+		summary.PendingPushes++
+	}
+	if summary.PendingPushes > 0 && summary.Incremental {
+		scopeOpts := listOpts
+		scopeOpts.UpdatedAfter = nil
+		scopeIssues, err := s.Linear.ListIssues(ctx, scopeOpts)
+		if err != nil {
+			_ = s.recordSyncStateError(ctx, stateID, state.Cursor, err, now())
+			return summary, fmt.Errorf("list linear issue push scope: %w", err)
+		}
+		summary.RemoteScopeIssues = len(scopeIssues)
+		maxRemoteUpdated = maxTime(maxRemoteUpdated, maxIssueUpdatedAt(scopeIssues))
+		remoteExternalIDs = map[string]struct{}{}
+		for _, remote := range scopeIssues {
+			if strings.TrimSpace(remote.ID) != "" {
+				remoteExternalIDs[strings.TrimSpace(remote.ID)] = struct{}{}
+			}
+		}
+	}
+	pushedThisRun := 0
+	for _, local := range localTasks {
+		ref, ok := refByIssueID[local.ID.String()]
+		if !ok || ref.ExternalID == "" {
 			continue
 		}
 		localHash := issues.HashTaskForSync(local)
 		if ref.LastSyncHash == localHash {
 			continue
 		}
+		if _, inScope := remoteExternalIDs[strings.TrimSpace(ref.ExternalID)]; !inScope {
+			summary.SkippedPushOutOfScope++
+			summary.OutOfScopeRefs++
+			continue
+		}
+		if pushedThisRun >= defaultMaxPushesPerRun {
+			summary.PushBudgetExhausted = true
+			continue
+		}
+		if s.rateLimitBudgetLow() {
+			summary.PushBudgetExhausted = true
+			continue
+		}
 		description := local.Description
 		priority := int(local.Priority)
-		updated, err := s.Linear.UpdateIssue(ctx, ref.ExternalID, linearapi.IssueInput{
+		updated, retried, err := s.updateIssueWithRetry(ctx, ref.ExternalID, linearapi.IssueInput{
 			Title:       local.Title,
 			Description: &description,
 			Priority:    &priority,
 		})
+		summary.RetriedRequests += retried
 		if err != nil {
+			_ = s.recordSyncStateError(ctx, stateID, state.Cursor, err, now())
 			return summary, fmt.Errorf("push linear issue %s: %w", local.ID, err)
 		}
 		summary.PushedRemote++
+		pushedThisRun++
 		if err := s.Store.UpsertExternalRef(ctx, externalRef(updated, local.ID.String(), localHash, now())); err != nil {
 			return summary, err
 		}
 	}
+	if !maxRemoteUpdated.IsZero() {
+		state.Cursor = maxRemoteUpdated.UTC().Format(time.RFC3339Nano)
+	}
+	state.Provider = ProviderLinear
+	state.ProjectID = stateID
+	state.LastSuccessAt = now()
+	state.LastError = ""
+	state.UpdatedAt = now()
+	if err := s.Store.UpsertExternalSyncState(ctx, state); err != nil {
+		return summary, fmt.Errorf("save linear sync state: %w", err)
+	}
+	s.applyLinearMetrics(&summary)
 	return summary, nil
+}
+
+func (s Service) updateIssueWithRetry(ctx context.Context, id string, input linearapi.IssueInput) (linearapi.Issue, int, error) {
+	var lastErr error
+	retries := 0
+	for attempt := 1; attempt <= defaultRetryAttempts; attempt++ {
+		updated, err := s.Linear.UpdateIssue(ctx, id, input)
+		if err == nil {
+			return updated, retries, nil
+		}
+		lastErr = err
+		if !linearapi.IsRetryable(err) || attempt == defaultRetryAttempts {
+			break
+		}
+		if err := s.sleep(ctx, time.Duration(attempt)*defaultRetryDelay); err != nil {
+			return linearapi.Issue{}, retries, err
+		}
+		retries++
+	}
+	return linearapi.Issue{}, retries, lastErr
+}
+
+func (s Service) sleep(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	if s.Sleep != nil {
+		return s.Sleep(ctx, delay)
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (s Service) recordSyncStateError(ctx context.Context, stateID, cursor string, err error, now time.Time) error {
+	return s.Store.UpsertExternalSyncState(ctx, issues.ExternalSyncState{
+		Provider:  ProviderLinear,
+		ProjectID: stateID,
+		Cursor:    cursor,
+		LastError: err.Error(),
+		UpdatedAt: now,
+	})
+}
+
+func (s Service) applyLinearMetrics(summary *Summary) {
+	metrics := s.Linear.Metrics()
+	summary.APIRequests = metrics.RequestCount
+	summary.RateLimitLimit = metrics.RateLimit.Limit
+	summary.RateLimitRemaining = metrics.RateLimit.Remaining
+	if !metrics.RateLimit.Reset.IsZero() {
+		summary.RateLimitReset = metrics.RateLimit.Reset.UTC().Format(time.RFC3339Nano)
+	}
+}
+
+func (s Service) rateLimitBudgetLow() bool {
+	remaining := s.Linear.Metrics().RateLimit.Remaining
+	return remaining > 0 && remaining <= minRemainingRequests
+}
+
+func (s Service) syncStateID(opts linearapi.ListIssuesOptions) string {
+	raw := strings.Join([]string{
+		strings.TrimSpace(s.ProjectID),
+		strings.TrimSpace(opts.TeamKey),
+		strings.TrimSpace(opts.Project),
+		strings.TrimSpace(opts.AssigneeID),
+	}, "\x00")
+	sum := sha256.Sum256([]byte(raw))
+	return strings.TrimSpace(s.ProjectID) + ":" + hex.EncodeToString(sum[:8])
 }
 
 func (s Service) listOptions(ctx context.Context) (linearapi.ListIssuesOptions, error) {
@@ -213,6 +376,31 @@ func (s Service) listOptions(ctx context.Context) (linearapi.ListIssuesOptions, 
 	}
 	opts.AssigneeID = assignee
 	return opts, nil
+}
+
+func parseCursor(raw string) time.Time {
+	if t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(raw)); err == nil {
+		return t.UTC()
+	}
+	if t, err := time.Parse(time.RFC3339, strings.TrimSpace(raw)); err == nil {
+		return t.UTC()
+	}
+	return time.Time{}
+}
+
+func maxIssueUpdatedAt(items []linearapi.Issue) time.Time {
+	var max time.Time
+	for _, item := range items {
+		max = maxTime(max, item.UpdatedAt)
+	}
+	return max
+}
+
+func maxTime(left, right time.Time) time.Time {
+	if right.After(left) {
+		return right
+	}
+	return left
 }
 
 func (s Service) Conflicts(ctx context.Context, includeResolved bool) ([]issues.SyncConflict, error) {
