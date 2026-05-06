@@ -1340,7 +1340,7 @@ func TmuxUninstallSelectorCommand(_ *Dependencies, opts TmuxUninstallSelectorOpt
 }
 
 func buildTmuxSelectorBlock(key, azCommand, projectDir string) string {
-	command := fmt.Sprintf("cd %s && %s tmux selector", shellSingleQuote(projectDir), strings.TrimSpace(azCommand))
+	command := buildTmuxSelectorPopupCommand(azCommand, projectDir)
 	popupCommand := fmt.Sprintf(
 		"tmux display-popup -E -w 95%% -h 95%% -T %s -e AZEDARACH_TMUX_CURRENT_SESSION=#{session_name} %s",
 		shellSingleQuote("tmux sessions"),
@@ -1352,6 +1352,27 @@ func buildTmuxSelectorBlock(key, azCommand, projectDir string) string {
 		tmuxSelectorBlockEnd,
 		"",
 	}, "\n")
+}
+
+func buildTmuxSelectorPopupCommand(azCommand, projectDir string) string {
+	selectorCommand := strings.TrimSpace(azCommand) + " tmux selector"
+	return strings.Join([]string{
+		"set +e",
+		"log_dir=\"${AZEDARACH_LOG_DIR:-$HOME/.azedarach/logs}\"",
+		"mkdir -p \"$log_dir\"",
+		"log=\"$log_dir/tmux-selector.log\"",
+		"printf '\\n[%s] az tmux selector popup start\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >>\"$log\"",
+		"printf 'cwd=%s\\ncommand=%s\\nPATH=%s\\nTMUX=%s\\n' " +
+			shellSingleQuote(projectDir) + " " +
+			shellSingleQuote(selectorCommand) + " " +
+			"\"$PATH\" \"${TMUX:-}\" >>\"$log\"",
+		"cd " + shellSingleQuote(projectDir),
+		selectorCommand,
+		"status=$?",
+		"printf '[%s] az tmux selector popup exit status=%s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$status\" >>\"$log\"",
+		"if [ \"$status\" -ne 0 ]; then printf '\\nAzedarach tmux selector failed (exit %s).\\nLog: %s\\nCommand: %s\\n\\nPress Enter to close.' \"$status\" \"$log\" " + shellSingleQuote(selectorCommand) + "; read -r _ </dev/tty 2>/dev/null || sleep 5; fi",
+		"exit \"$status\"",
+	}, "; ")
 }
 
 func resolveTmuxConfigPath(configPath string) (string, error) {
