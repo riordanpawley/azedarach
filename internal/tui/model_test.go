@@ -4264,6 +4264,73 @@ func TestDaemonStreamEventMsg_GitStatusEventAppliesRuntimeProjectionDirectly(t *
 	}
 }
 
+func TestDaemonStreamUICommandOpensTaskWorkspace(t *testing.T) {
+	m := newTestModel()
+	m.daemonRevision = 1
+	m.nav.SelectTask("az-1", 0)
+	body, err := json.Marshal(protocol.UICommandEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		IssueID:   "az-3",
+		Command:   protocol.UICommandOpenTaskWorkspace,
+		RequestID: "req-ui-open",
+		CreatedAt: time.Date(2026, time.May, 5, 15, 45, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("marshal ui command body: %v", err)
+	}
+
+	updatedAny, _ := m.Update(daemonStreamEventMsg{
+		event: protocol.EventEnvelope{
+			ProjectID: naming.ProjectID(m.daemonProjectID()),
+			Revision:  2,
+			Event:     protocol.EventUICommandRequested,
+			Body:      body,
+		},
+	})
+	updated := updatedAny.(Model)
+
+	current := updated.overlayStack.Current()
+	workspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected TaskWorkspaceOverlay, got %T", current)
+	}
+	if workspace.TaskID() != "az-3" {
+		t.Fatalf("workspace task = %q, want az-3", workspace.TaskID())
+	}
+	if updated.daemonRevision != 2 {
+		t.Fatalf("daemon revision = %d, want 2", updated.daemonRevision)
+	}
+}
+
+func TestDaemonStreamUICommandIgnoresUnknownCommand(t *testing.T) {
+	m := newTestModel()
+	body, err := json.Marshal(protocol.UICommandEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		IssueID:   "az-3",
+		Command:   "ui.unknown",
+	})
+	if err != nil {
+		t.Fatalf("marshal ui command body: %v", err)
+	}
+
+	updatedAny, _ := m.Update(daemonStreamEventMsg{
+		event: protocol.EventEnvelope{
+			ProjectID: naming.ProjectID(m.daemonProjectID()),
+			Revision:  1,
+			Event:     protocol.EventUICommandRequested,
+			Body:      body,
+		},
+	})
+	updated := updatedAny.(Model)
+
+	if current := updated.overlayStack.Current(); current != nil {
+		t.Fatalf("expected no overlay for unknown command, got %T", current)
+	}
+	if updated.daemonRevision != 1 {
+		t.Fatalf("daemon revision = %d, want 1", updated.daemonRevision)
+	}
+}
+
 func TestRuntimeSignalsForBoardUsesTaskProjectionFields(t *testing.T) {
 	m := newTestModel()
 	startedAt := time.Date(2026, time.April, 1, 14, 0, 0, 0, time.UTC)

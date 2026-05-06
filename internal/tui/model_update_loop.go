@@ -437,6 +437,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.waitForDaemonEventCmd()
 		}
+		if msg.event.Event == protocol.EventUICommandRequested {
+			switch cursor.Decide(msg.event) {
+			case protocol.StreamProjectionDecisionIgnore:
+				return m, m.waitForDaemonEventCmd()
+			case protocol.StreamProjectionDecisionResync:
+				m.daemonEvents = nil
+				return m, m.attachDaemonCmd()
+			}
+			cmd := m.applyUICommandEvent(msg.event)
+			m.daemonRevision = cursor.Advance(msg.event).Revision
+			if cmd != nil {
+				return m, tea.Batch(cmd, m.waitForDaemonEventCmd())
+			}
+			return m, m.waitForDaemonEventCmd()
+		}
 		switch m.reduceDaemonEvent(msg.event) {
 		case daemonEventIgnore:
 			return m, m.waitForDaemonEventCmd()
@@ -1326,6 +1341,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *Model) applyUICommandEvent(event protocol.EventEnvelope) tea.Cmd {
+	var body protocol.UICommandEventBody
+	if err := json.Unmarshal(event.Body, &body); err != nil {
+		return nil
+	}
+	if body.Command != protocol.UICommandOpenTaskWorkspace {
+		return nil
+	}
+	issueID := strings.TrimSpace(body.IssueID.String())
+	if issueID == "" {
+		return nil
+	}
+	updatedModel, cmd := m.openTaskWorkspaceByID(issueID)
+	if opened, ok := updatedModel.(Model); ok {
+		*m = opened
+	}
+	return cmd
 }
 
 func (m Model) refreshOpenDiffOverlayFromProjectionBody(body protocol.ProjectionUpdateEventBody) tea.Cmd {
