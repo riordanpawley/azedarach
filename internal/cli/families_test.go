@@ -942,6 +942,40 @@ func TestNotifyCommandResolvesIssueIDFromEnvForSessionStart(t *testing.T) {
 	}
 }
 
+func TestNotifyCommandToolEventsResumeDaemonSessionState(t *testing.T) {
+	for _, event := range []string{"pre_tool_use", "post_tool_use"} {
+		t.Run(event, func(t *testing.T) {
+			opts, err := ParseNotifyArgs([]string{"--json", event, "az-123"})
+			if err != nil {
+				t.Fatalf("ParseNotifyArgs error: %v", err)
+			}
+
+			var gotReq protocol.RequestEnvelope
+			transport := &fakeDaemonTransport{
+				commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+					gotReq = req
+					return responseWithOutput(req, "ok"), nil
+				},
+			}
+			deps := &Dependencies{
+				DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+				ProjectID:    "proj-1",
+			}
+
+			output := captureStdout(t, func() error {
+				return NotifyCommand(deps, opts)
+			})
+
+			if gotReq.Command != daemonclient.CommandSessionResume {
+				t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandSessionResume)
+			}
+			if strings.TrimSpace(output) != "{}" {
+				t.Fatalf("notify json output = %q, want {}", output)
+			}
+		})
+	}
+}
+
 func TestParseNotifyArgsRejectsFlagsAfterPositionals(t *testing.T) {
 	_, err := ParseNotifyArgs([]string{"post_tool_use", "--json"})
 	if err == nil {

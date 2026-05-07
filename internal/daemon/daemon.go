@@ -706,6 +706,21 @@ func (d *Daemon) applySessionLifecycleTransition(
 	return nil
 }
 
+func (d *Daemon) sessionLifecycleTransitionNeeded(projectID, sessionID, issueID string, state daemonstate.SessionState) bool {
+	if d.sessionStore == nil {
+		return true
+	}
+	session, err := d.sessionStore.Session(projectID, sessionID)
+	if err != nil {
+		return true
+	}
+	if session.State != state {
+		return true
+	}
+	issueID = strings.TrimSpace(issueID)
+	return issueID != "" && strings.TrimSpace(session.IssueID) != issueID
+}
+
 func lifecycleCommandState(command string) (daemonstate.SessionState, bool) {
 	switch command {
 	case daemonhandlers.CommandSessionStart:

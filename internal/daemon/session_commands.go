@@ -647,6 +647,16 @@ func (d *Daemon) handleSessionPause(ctx context.Context, req protocol.RequestEnv
 			"session_id", cmd.SessionID,
 		)
 	}
+	if !d.sessionLifecycleTransitionNeeded(cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonstate.SessionStatePaused) {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("daemon session pause unchanged",
+				"project_id", cmd.ProjectID,
+				"issue_id", cmd.IssueID,
+				"session_id", cmd.SessionID,
+			)
+		}
+		return d.commandOutput(req, fmt.Sprintf("Paused session: %s\n", cmd.IssueID)), nil
+	}
 	if err := d.applySessionLifecycleTransition(
 		ctx,
 		req,
@@ -681,6 +691,16 @@ func (d *Daemon) handleSessionResume(ctx context.Context, req protocol.RequestEn
 			"issue_id", cmd.IssueID,
 			"session_id", cmd.SessionID,
 		)
+	}
+	if !d.sessionLifecycleTransitionNeeded(cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonstate.SessionStateAttached) {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("daemon session resume unchanged",
+				"project_id", cmd.ProjectID,
+				"issue_id", cmd.IssueID,
+				"session_id", cmd.SessionID,
+			)
+		}
+		return d.commandOutput(req, fmt.Sprintf("Resumed session: %s\n", cmd.IssueID)), nil
 	}
 	if err := d.applySessionLifecycleTransition(
 		ctx,
