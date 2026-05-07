@@ -18,6 +18,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	clitext "github.com/riordanpawley/azedarach/internal/cli/text"
 	autoclient "github.com/riordanpawley/azedarach/internal/client"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
@@ -46,12 +47,16 @@ const (
 	defaultExportFormat         = "json"
 	defaultIssueListLimit       = 200
 	defaultOperationListLimit   = 50
-	branchMergeToMainTimeout    = 2 * time.Minute
+	sessionStartCommandTimeout  = 5 * time.Minute
+	branchMergeToBaseTimeout    = 2 * time.Minute
+	daemonCommandTimeout        = 15 * time.Second
 	issueCreateCommandTimeout   = 10 * time.Second
 	issueCreateAutostartTimeout = 12 * time.Second
 	exitCodeHardFailure         = 1
 	exitCodePartialFailure      = 2
 )
+
+var sessionStartProgressTick = 15 * time.Second
 
 type Dependencies struct {
 	Config         *config.Config
@@ -155,6 +160,7 @@ type IssueUpdateOptions struct {
 	JSON        bool
 	Title       string
 	Description string
+	Notes       *string
 	AppendNotes string
 	Type        *domain.TaskType
 	Priority    *domain.Priority
@@ -316,17 +322,25 @@ func StartCommand(deps *Dependencies, issueID string) error {
 }
 
 func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCommandOptions) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), sessionStartCommandTimeout)
+	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	if err := validateSessionIssueID(ctx, deps, issueID); err != nil {
+	task, err := validateSessionIssueID(ctx, deps, issueID)
+	if err != nil {
+		return err
+	}
+	baseBranch, err := resolveSessionStartBaseBranch(ctx, deps, task)
+	if err != nil {
 		return err
 	}
 
 	deps.Logger.Info("starting session", "issue_id", issueID)
+	stopProgress := startSessionProgressReporter(ctx, issueID)
+	defer stopProgress()
 
-	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStart, deps.ProjectID, issueID, "main"))
+	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStart, deps.ProjectID, issueID, baseBranch))
 	if err != nil {
 		return fmt.Errorf("failed to start session: %w", err)
 	}
@@ -337,12 +351,41 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 	return printCommandOutputWithWait(ctx, deps, resp, opts)
 }
 
+func startSessionProgressReporter(ctx context.Context, issueID string) func() {
+	trimmedIssueID := strings.TrimSpace(issueID)
+	if trimmedIssueID == "" {
+		trimmedIssueID = "unknown"
+	}
+	startedAt := time.Now()
+	fmt.Fprintf(os.Stderr, "Starting session for %s... this can take up to %s.\n", trimmedIssueID, sessionStartCommandTimeout)
+
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(sessionStartProgressTick)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				elapsed := time.Since(startedAt).Round(time.Second)
+				fmt.Fprintf(os.Stderr, "Still starting session for %s... elapsed %s.\n", trimmedIssueID, elapsed)
+			}
+		}
+	}()
+	return func() {
+		close(done)
+	}
+}
+
 func AttachCommand(deps *Dependencies, issueID string) error {
 	ctx := context.Background()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	if err := validateSessionIssueID(ctx, deps, issueID); err != nil {
+	if _, err := validateSessionIssueID(ctx, deps, issueID); err != nil {
 		return err
 	}
 
@@ -368,7 +411,7 @@ func KillCommandWithOptions(deps *Dependencies, issueID string, opts SessionComm
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	if err := validateSessionIssueID(ctx, deps, issueID); err != nil {
+	if _, err := validateSessionIssueID(ctx, deps, issueID); err != nil {
 		return err
 	}
 
@@ -386,7 +429,7 @@ func KillCommandWithOptions(deps *Dependencies, issueID string, opts SessionComm
 }
 
 func StatusCommand(deps *Dependencies, issueID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -405,44 +448,72 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 	return printCommandOutput(resp)
 }
 
-func validateSessionIssueID(ctx context.Context, deps *Dependencies, issueID string) error {
+func validateSessionIssueID(ctx context.Context, deps *Dependencies, issueID string) (domain.Task, error) {
 	trimmed := strings.TrimSpace(issueID)
 	if trimmed == "" {
-		return fmt.Errorf("issue id is required")
+		return domain.Task{}, fmt.Errorf("issue id is required")
 	}
 	if _, err := naming.ParseIssueID(trimmed); err != nil {
-		return fmt.Errorf("invalid issue id %q: %w", issueID, err)
+		return domain.Task{}, fmt.Errorf("invalid issue id %q: %w", issueID, err)
 	}
 
 	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to validate issue %s: %w", trimmed, err)
+		return domain.Task{}, fmt.Errorf("failed to validate issue %s: %w", trimmed, err)
 	}
-	if _, ok := findTaskByID(snapshot.Tasks, trimmed); !ok {
-		return fmt.Errorf("issue not found: %s", trimmed)
+	task, ok := findTaskByID(snapshot.Tasks, trimmed)
+	if !ok {
+		return domain.Task{}, fmt.Errorf("issue not found: %s", trimmed)
 	}
-	return nil
+	return task, nil
 }
 
-// BranchMergeToMainCommand merges one issue worktree branch into the base branch using daemon git commands.
-func BranchMergeToMainCommand(deps *Dependencies, issueID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), branchMergeToMainTimeout)
+func resolveSessionStartBaseBranch(ctx context.Context, deps *Dependencies, task domain.Task) (string, error) {
+	baseBranch := resolveCLIBaseBranch(deps.Config)
+	if task.ParentID == nil {
+		return baseBranch, nil
+	}
+	parentID := strings.TrimSpace(task.ParentID.String())
+	if parentID == "" {
+		return baseBranch, nil
+	}
+
+	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve parent worktree branch for %s: %w", task.ID, err)
+	}
+	for _, worktree := range worktrees {
+		if !naming.IssueIDsEqual(worktree.IssueID, parentID) {
+			continue
+		}
+		branch := strings.TrimSpace(worktree.Branch)
+		if branch != "" {
+			return branch, nil
+		}
+		break
+	}
+	return baseBranch, nil
+}
+
+// BranchMergeToBaseCommand merges one issue worktree branch into the base branch using daemon git commands.
+func BranchMergeToBaseCommand(deps *Dependencies, issueID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), branchMergeToBaseTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
 
-	source, err := resolveMergeToMainSourceWorktree(ctx, deps, issueID)
+	source, err := resolveMergeToBaseSourceWorktree(ctx, deps, issueID)
 	if err != nil {
 		return err
 	}
 	baseBranch := resolveCLIBaseBranch(deps.Config)
-	mainWorktree := strings.TrimSpace(deps.RepoDir)
-	if mainWorktree == "" {
-		mainWorktree = "."
+	baseWorktree := strings.TrimSpace(deps.RepoDir)
+	if baseWorktree == "" {
+		baseWorktree = "."
 	}
 
-	if err := checkMergeToMainPreflight(ctx, deps, source, mainWorktree); err != nil {
+	if err := checkMergeToBasePreflight(ctx, deps, source, baseWorktree); err != nil {
 		return err
 	}
 
@@ -453,13 +524,13 @@ func BranchMergeToMainCommand(deps *Dependencies, issueID string) error {
 		"base_branch", baseBranch,
 	)
 
-	if _, err := deps.DaemonClient.GitFetch(ctx, mainWorktree, "origin"); err != nil {
+	if _, err := deps.DaemonClient.GitFetch(ctx, baseWorktree, "origin"); err != nil {
 		return wrapPendingGitOperation("fetch", err)
 	}
-	if _, err := deps.DaemonClient.GitCheckout(ctx, mainWorktree, baseBranch); err != nil {
+	if _, err := deps.DaemonClient.GitCheckout(ctx, baseWorktree, baseBranch); err != nil {
 		return wrapPendingGitOperation("checkout", err)
 	}
-	result, err := deps.DaemonClient.GitMerge(ctx, mainWorktree, source.Branch)
+	result, err := deps.DaemonClient.GitMerge(ctx, baseWorktree, source.Branch)
 	if err != nil {
 		return wrapPendingGitOperation("merge", err)
 	}
@@ -475,7 +546,7 @@ func BranchMergeToMainCommand(deps *Dependencies, issueID string) error {
 	return nil
 }
 
-func resolveMergeToMainSourceWorktree(ctx context.Context, deps *Dependencies, issueID string) (daemonclient.Worktree, error) {
+func resolveMergeToBaseSourceWorktree(ctx context.Context, deps *Dependencies, issueID string) (daemonclient.Worktree, error) {
 	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
 	if err != nil {
 		return daemonclient.Worktree{}, fmt.Errorf("list daemon worktrees: %w", err)
@@ -529,7 +600,7 @@ func resolveCLIBaseBranch(cfg *config.Config) string {
 	return base
 }
 
-func checkMergeToMainPreflight(ctx context.Context, deps *Dependencies, source daemonclient.Worktree, targetWorktree string) error {
+func checkMergeToBasePreflight(ctx context.Context, deps *Dependencies, source daemonclient.Worktree, targetWorktree string) error {
 	sourceStatus, err := deps.DaemonClient.GitStatus(ctx, source.Path)
 	if err != nil {
 		return fmt.Errorf("read source status for %s: %w", source.IssueID, err)
@@ -579,9 +650,6 @@ func summarizeGitStatusCounts(status daemonclient.GitStatus) string {
 	if n := len(status.Deleted); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d deleted", n))
 	}
-	if n := len(status.Untracked); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d untracked", n))
-	}
 	if len(parts) == 0 {
 		return "clean"
 	}
@@ -589,7 +657,7 @@ func summarizeGitStatusCounts(status daemonclient.GitStatus) string {
 }
 
 func dirtyFilesFromGitStatus(status daemonclient.GitStatus) []string {
-	seen := make(map[string]struct{}, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Untracked))
+	seen := make(map[string]struct{}, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted))
 	out := make([]string, 0, len(seen))
 
 	appendUnique := func(files []string) {
@@ -610,7 +678,6 @@ func dirtyFilesFromGitStatus(status daemonclient.GitStatus) []string {
 	appendUnique(status.Modified)
 	appendUnique(status.Added)
 	appendUnique(status.Deleted)
-	appendUnique(status.Untracked)
 
 	sort.Strings(out)
 	return out
@@ -1271,7 +1338,7 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	})
 	fs.StringVar(&opts.Description, "description", "", "issue description")
 	fs.StringVar(&priorityRaw, "priority", "", "issue priority (P0-P4)")
-	fs.BoolVar(&opts.Deferred, "deferred", false, "mark follow-up as deferred (defaults priority to P4 unless --priority provided)")
+	fs.BoolVar(&opts.Deferred, "deferred", false, "create standalone later/backlog work; skips AZEDARACH_ISSUE_ID auto-parenting and defaults priority to P4 unless --priority is provided")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue create result as JSON")
 	fs.StringVar(&typeRaw, "type", string(domain.TypeTask), "issue type (task|bug|feature|epic|chore)")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
@@ -1432,6 +1499,10 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
 	fs.StringVar(&opts.Title, "title", "", "updated issue title")
 	fs.StringVar(&opts.Description, "description", "", "updated issue description")
+	fs.Func("notes", "replace issue notes", func(v string) error {
+		opts.Notes = &v
+		return nil
+	})
 	fs.StringVar(&opts.AppendNotes, "append-notes", "", "append a note line to issue notes")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue update result as JSON")
@@ -1450,10 +1521,10 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		return IssueUpdateOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--append-notes text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
-		return IssueUpdateOptions{}, fmt.Errorf("--impl is not supported for issue update; use --update-impl to change issue implementations")
+		return IssueUpdateOptions{}, fmt.Errorf("--impl is not supported for issue update (it is create-only); normal field updates do not need --update-impl, and --update-impl is only for changing issue implementations")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -1462,7 +1533,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--append-notes text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if typeRaw != "" {
 		tt, err := parseTaskType(typeRaw)
@@ -1489,7 +1560,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		opts.AppendNotes = ""
 	}
 	opts.UpdateImpls = dedupeOrderedIDs(updateImpls)
-	if opts.Title == "" && opts.Description == "" && opts.AppendNotes == "" && opts.Type == nil && opts.Priority == nil && opts.Status == nil && len(opts.UpdateImpls) == 0 {
+	if opts.Title == "" && opts.Description == "" && opts.Notes == nil && opts.AppendNotes == "" && opts.Type == nil && opts.Priority == nil && opts.Status == nil && len(opts.UpdateImpls) == 0 {
 		return IssueUpdateOptions{}, fmt.Errorf("no update fields provided")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
@@ -1762,7 +1833,7 @@ func resolveIssueWriteImplementation(ctx context.Context, deps *Dependencies, pr
 		return deps.DaemonClient.ListTasksSnapshot(callCtx)
 	})
 	if err != nil {
-		return "", fmt.Errorf("resolve implementation context: %w", err)
+		return "", fmt.Errorf("missing required flag: --impl (unable to infer implementation automatically: %v). Specify --impl <implementation>", err)
 	}
 	impls := configuredIssueImplementations(snapshot.Tasks)
 	switch len(impls) {
@@ -2095,7 +2166,7 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2228,7 +2299,7 @@ func IssueGetManyCommand(deps *Dependencies, opts IssueGetManyOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2293,7 +2364,7 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2374,7 +2445,7 @@ func IssueDoctorCommand(deps *Dependencies, opts IssueDoctorOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2489,7 +2560,7 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 		message = fmt.Sprintf("%s (parent: %s, auto-parent from AZEDARACH_ISSUE_ID)", message, strings.TrimSpace(parentID.String()))
 	}
 	if opts.Deferred {
-		message = fmt.Sprintf("%s [deferred]", message)
+		message = fmt.Sprintf("%s [deferred: standalone later work, not auto-parented]", message)
 	}
 	if opts.JSON {
 		var parentIDValue string
@@ -2513,7 +2584,7 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2537,7 +2608,7 @@ func IssueDeleteCommand(deps *Dependencies, opts IssueDeleteOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2588,7 +2659,7 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2606,6 +2677,7 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 	update := daemonclient.TaskUpdateParams{
 		Title:       task.Title,
 		Description: task.Description,
+		Notes:       opts.Notes,
 		Type:        task.Type,
 		Priority:    task.Priority,
 	}
@@ -2643,6 +2715,7 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 			"issue_id":       opts.IssueID,
 			"updated":        true,
 			"status_set":     opts.Status != nil,
+			"notes_replaced": opts.Notes != nil,
 			"notes_appended": opts.AppendNotes != "",
 		})
 	}
@@ -2654,7 +2727,7 @@ func IssueDependencyAddCommand(deps *Dependencies, opts IssueDependencyAddOption
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2692,7 +2765,7 @@ func IssueDependencyRemoveCommand(deps *Dependencies, opts IssueDependencyRemove
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2864,7 +2937,7 @@ func IssueImageAddCommand(deps *Dependencies, opts IssueImageAddOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -2914,7 +2987,7 @@ func IssueImageRemoveCommand(deps *Dependencies, opts IssueImageRemoveOptions) e
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -3951,7 +4024,7 @@ func PrimeCommand(deps *Dependencies) error {
 	activeIssueClosedWarning := ""
 	specGuardrails := ""
 	questionFirstGuardrails := ""
-	implementationGuardrails := "- Implementation guardrails: in multi-implementation repos, include explicit `--impl <impl>` on new `az issue`/`az spec link` writes and use repeated `--impl` only for intentional shared work."
+	implementationGuardrails := "- Implementation guardrails: in multi-implementation repos, include explicit `--impl <impl>` on new `az issue`/`az spec link` writes and use repeated `--impl` only for intentional shared work. For `az issue update`, `--update-impl` is only for changing implementation assignments; status/title/notes updates do not require it."
 
 	if primeMode == "question-first" {
 		questionFirstGuardrails = `- Question-first execution rules (Space+Q mode):
@@ -3960,12 +4033,12 @@ func PrimeCommand(deps *Dependencies) error {
   - MUST record unknowns/open questions in the issue description so scope is explicit.`
 	}
 	if deps.Config != nil && deps.Config.Spec.Enabled {
-		specGuardrails = `  - In this repo, when guidance says ` + "`spec`" + `, it means ` + "`az spec`" + ` requirement/link records, not README.md, AGENTS.md, or other internal docs.
-  - ALWAYS check ` + "`az spec`" + ` requirements/links before starting behavior work.
+		specGuardrails = `  - In this repo, when guidance says ` + "`spec`" + `, it means records managed by ` + "`az spec req ...`" + ` and ` + "`az spec link ...`" + `, not README.md, AGENTS.md, or other internal docs.
+  - ALWAYS run ` + "`az spec read --issue <issue-id>`" + ` before starting behavior work; use ` + "`az spec link list --issue <issue-id>`" + ` when you need link-only detail.
   - If implementation is not aligned with spec, update spec first, then implement.
   - Ensure implementation issue(s) are linked to relevant spec requirement(s) before execution.
   - Treat ` + "`az spec link`" + ` records as required traceability for behavior work.
-  - Before implementing behavior changes, inspect relevant ` + "`az spec`" + ` requirements/links and align the plan.
+  - Before implementing behavior changes, inspect relevant ` + "`az spec read --issue <issue-id>`" + ` output and align the plan.
   - If this project should not use spec workflows, disable them with ` + "`az config set spec.enabled false`" + ` (or set ` + "`spec.enabled`" + ` to false in ` + "`.azedarach/config.json`" + `).`
 	}
 
@@ -3977,7 +4050,7 @@ func PrimeCommand(deps *Dependencies) error {
 		} else if task, ok := findTaskByID(snapshot.Tasks, issueID); ok {
 			issueSection = renderPrimeIssueSection(issueID, task)
 			if task.Status == domain.StatusDone {
-				activeIssueClosedWarning = fmt.Sprintf("- Active issue `%s` is currently `closed`; start by picking/opening actionable work (for example `az issue create \"Next task\" --deferred` or `az issue list --limit 20`).", task.ID)
+				activeIssueClosedWarning = fmt.Sprintf("- Active issue `%s` is currently `closed`; start by picking/opening actionable work (for example `az issue list --limit 20` or `az issue create \"Next task\"`). Use `--deferred` only for standalone backlog work.", task.ID)
 			}
 		} else {
 			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nIssue not found in current project snapshot; run `az issue get %s`.\n", issueID, issueID)
@@ -4005,7 +4078,7 @@ func PrimeCommand(deps *Dependencies) error {
 func renderPrimeIssueSection(issueID string, task domain.Task) string {
 	description := ""
 	if strings.TrimSpace(task.Description) != "" {
-		description = fmt.Sprintf("\nDescription: %s", task.Description)
+		description = fmt.Sprintf("\nDescription: %s", summarizePrimeDescription(issueID, task.Description))
 	}
 	implementations := formatPrimeImplementations(task.Implementations)
 	parent := ""
@@ -4026,6 +4099,37 @@ func renderPrimeIssueSection(issueID string, task domain.Task) string {
 		description,
 		formatPrimeDependencyLines(task.Dependencies),
 	)
+}
+
+func summarizePrimeDescription(issueID, description string) string {
+	const (
+		maxLines = 8
+		maxRunes = 800
+	)
+
+	trimmed := strings.TrimSpace(description)
+	if trimmed == "" {
+		return ""
+	}
+
+	truncated := false
+	runes := []rune(trimmed)
+	if len(runes) > maxRunes {
+		trimmed = string(runes[:maxRunes])
+		truncated = true
+	}
+
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
+		truncated = true
+	}
+
+	snippet := strings.TrimSpace(strings.Join(lines, "\n"))
+	if !truncated {
+		return snippet
+	}
+	return fmt.Sprintf("%s\n… (truncated; run `az issue get %s` for full context)", snippet, issueID)
 }
 
 func formatPrimeImplementations(implementations []string) string {
@@ -4597,7 +4701,7 @@ func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) er
 	ack, err := orch.EnsureAttached(ctx, protocol.Hello{
 		ProtocolVersion: protocol.CurrentVersion,
 		ClientName:      clientName,
-		ClientVersion:   "dev",
+		ClientVersion:   buildinfo.VersionString(),
 		Capabilities:    []string{"snapshot", "subscribe"},
 	})
 	if err != nil {

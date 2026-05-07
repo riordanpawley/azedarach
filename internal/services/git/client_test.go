@@ -657,14 +657,13 @@ func TestChangedFiles(t *testing.T) {
 			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "HEAD" {
 				return "abc123\n", nil
 			}
-			if len(args) >= 6 &&
+			if len(args) >= 5 &&
 				args[0] == "diff" &&
 				args[1] == "--name-status" &&
 				args[2] == "abc123" &&
 				args[3] == "HEAD" &&
-				args[4] == "--" &&
-				args[5] == ":^.azedarach" {
-				return "M\tinternal/tui/model.go\nA\tnew.go\nD\told.go\nR100\tfrom.go\tto.go", nil
+				args[4] == "--" {
+				return "M\tinternal/tui/model.go\nM\t.azedarach/config.json\nA\tnew.go\nD\told.go\nR100\tfrom.go\tto.go", nil
 			}
 			return "", fmt.Errorf("unexpected command: %v", args)
 		},
@@ -675,21 +674,24 @@ func TestChangedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ChangedFiles() error = %v", err)
 	}
-	if len(files) != 4 {
-		t.Fatalf("ChangedFiles() len = %d, want 4", len(files))
+	if len(files) != 5 {
+		t.Fatalf("ChangedFiles() len = %d, want 5", len(files))
 	}
 
 	if files[0].Path != "internal/tui/model.go" || files[0].Status != DiffFileModified {
 		t.Fatalf("first file = %+v", files[0])
 	}
-	if files[1].Path != "new.go" || files[1].Status != DiffFileAdded {
+	if files[1].Path != ".azedarach/config.json" || files[1].Status != DiffFileModified {
 		t.Fatalf("second file = %+v", files[1])
 	}
-	if files[2].Path != "old.go" || files[2].Status != DiffFileDeleted {
+	if files[2].Path != "new.go" || files[2].Status != DiffFileAdded {
 		t.Fatalf("third file = %+v", files[2])
 	}
-	if files[3].OldPath != "from.go" || files[3].Path != "to.go" || files[3].Status != DiffFileRenamed {
+	if files[3].Path != "old.go" || files[3].Status != DiffFileDeleted {
 		t.Fatalf("fourth file = %+v", files[3])
+	}
+	if files[4].OldPath != "from.go" || files[4].Path != "to.go" || files[4].Status != DiffFileRenamed {
+		t.Fatalf("fifth file = %+v", files[4])
 	}
 }
 

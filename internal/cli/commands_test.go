@@ -167,6 +167,38 @@ func TestNewDependenciesAtIgnoresAmbientGitDirRoutingVars(t *testing.T) {
 	}
 }
 
+func TestMergePreflightDirtyFilesIgnoreUntrackedOnlyStatus(t *testing.T) {
+	status := daemonclient.GitStatus{
+		HasChanges: true,
+		Untracked:  []string{".azedarach/images/", "docs/"},
+	}
+
+	if got := dirtyFilesFromGitStatus(status); len(got) != 0 {
+		t.Fatalf("dirty files = %v, want none for untracked-only status", got)
+	}
+	if got := summarizeGitStatusCounts(status); got != "clean" {
+		t.Fatalf("summary = %q, want clean", got)
+	}
+}
+
+func TestMergePreflightDirtyFilesKeepTrackedChanges(t *testing.T) {
+	status := daemonclient.GitStatus{
+		HasChanges: true,
+		Modified:   []string{"b.go"},
+		Staged:     []string{"a.go"},
+		Untracked:  []string{"scratch/"},
+	}
+
+	got := dirtyFilesFromGitStatus(status)
+	want := []string{"a.go", "b.go"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("dirty files = %v, want %v", got, want)
+	}
+	if got := summarizeGitStatusCounts(status); got != "1 staged, 1 modified" {
+		t.Fatalf("summary = %q, want tracked-only summary", got)
+	}
+}
+
 func (f *fakeDaemonTransport) Handshake(ctx context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
 	if f.handshakeFn != nil {
 		return f.handshakeFn(ctx, hello)
@@ -242,6 +274,178 @@ func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 	}
 	if output != "Starting session for: issue-1 - Example\nCreating worktree from branch: main\nWorktree created: /tmp/repo-issue-1\nCreating tmux session: issue-1\n\n✓ Session started successfully\n  To attach: az attach issue-1\n  Or run:    tmux attach-session -t issue-1\n" {
 		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestStartCommandUsesExtendedTimeout(t *testing.T) {
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: "issue-1", Title: "Example", Status: domain.StatusOpen},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	var startDeadline time.Time
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				case commandSessionStart:
+					var ok bool
+					startDeadline, ok = ctx.Deadline()
+					if !ok {
+						t.Fatal("session.start context missing deadline")
+					}
+					return responseWithOutput(req, "started\n"), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	if err := StartCommand(deps, "issue-1"); err != nil {
+		t.Fatalf("StartCommand error: %v", err)
+	}
+
+	remaining := time.Until(startDeadline)
+	if remaining < 4*time.Minute {
+		t.Fatalf("session.start deadline too short: remaining=%s", remaining)
+	}
+	if remaining > sessionStartCommandTimeout+2*time.Second {
+		t.Fatalf("session.start deadline too long: remaining=%s", remaining)
+	}
+}
+
+func TestStartCommandPrintsProgressStatus(t *testing.T) {
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: "issue-1", Title: "Example", Status: domain.StatusOpen},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				case commandSessionStart:
+					return responseWithOutput(req, "started\n"), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	stderr := captureStderr(t, func() error {
+		return StartCommand(deps, "issue-1")
+	})
+	if !strings.Contains(stderr, "Starting session for issue-1...") {
+		t.Fatalf("stderr = %q, want start progress message", stderr)
+	}
+}
+
+func TestStartCommandUsesParentWorktreeBranchForChildIssue(t *testing.T) {
+	var gotReq protocol.RequestEnvelope
+	commands := []string{}
+	parentID := naming.IssueID("az-parent")
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: parentID, Title: "Parent", Status: domain.StatusInProgress},
+		{ID: "az-child", Title: "Child", Status: domain.StatusOpen, ParentID: &parentID},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+	worktreeListBody, err := json.Marshal(map[string]any{
+		"project_id": "proj",
+		"worktrees": []map[string]any{
+			{"path": "/tmp/parent", "branch": "az/az-parent", "issue_id": "az-parent"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal worktree list: %v", err)
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				case daemonclient.CommandWorktreeList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            worktreeListBody,
+					}, nil
+				case commandSessionStart:
+					gotReq = req
+					return responseWithOutput(req, "ok\n"), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	if err := StartCommand(deps, "az-child"); err != nil {
+		t.Fatalf("StartCommand error: %v", err)
+	}
+	if len(commands) != 3 || commands[0] != daemonclient.CommandTaskList || commands[1] != daemonclient.CommandWorktreeList || commands[2] != commandSessionStart {
+		t.Fatalf("commands = %v", commands)
+	}
+	var body sessionRequestBody
+	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if body.BaseBranch != "az/az-parent" {
+		t.Fatalf("base_branch = %q, want %q", body.BaseBranch, "az/az-parent")
 	}
 }
 
@@ -483,11 +687,13 @@ func TestStartCommandPrintsNestedOperationOutput(t *testing.T) {
 	}
 }
 
-func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
+func TestBranchMergeToBaseCommandUsesDaemonGitFlow(t *testing.T) {
 	commands := make([]string, 0, 8)
-	mainWorktree := t.TempDir()
+	baseWorktree := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Git.BaseBranch = "trunk"
 	deps := &Dependencies{
-		Config: config.DefaultConfig(),
+		Config: cfg,
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
@@ -507,7 +713,7 @@ func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal git status body: %v", err)
 					}
-					if body.Worktree != "/tmp/azedarach-az-123" && body.Worktree != mainWorktree {
+					if body.Worktree != "/tmp/azedarach-az-123" && body.Worktree != baseWorktree {
 						t.Fatalf("git status worktree = %q", body.Worktree)
 					}
 					return responseWithJSON(req, map[string]any{
@@ -515,17 +721,17 @@ func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
 					}), nil
 				case daemonclient.CommandGitFetch:
 					return responseWithJSON(req, daemonclient.GitCommandResponse{
-						Worktree: mainWorktree,
+						Worktree: baseWorktree,
 						Remote:   "origin",
 					}), nil
 				case daemonclient.CommandGitCheckout:
 					return responseWithJSON(req, daemonclient.GitCommandResponse{
-						Worktree: mainWorktree,
-						Branch:   "main",
+						Worktree: baseWorktree,
+						Branch:   "trunk",
 					}), nil
 				case daemonclient.CommandGitMerge:
 					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
-						Worktree: mainWorktree,
+						Worktree: baseWorktree,
 						Branch:   "riordan/az-123/some-change",
 						Result: gitservice.MergeResult{
 							Success: true,
@@ -539,16 +745,16 @@ func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
 		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
-		RepoDir:   mainWorktree,
+		RepoDir:   baseWorktree,
 	}
 
 	output := captureStdout(t, func() error {
-		return BranchMergeToMainCommand(deps, "az-123")
+		return BranchMergeToBaseCommand(deps, "az-123")
 	})
 	if !strings.Contains(output, "merge complete") {
 		t.Fatalf("output = %q, want merge output", output)
 	}
-	if !strings.Contains(output, "Merged riordan/az-123/some-change into main (az-123)") {
+	if !strings.Contains(output, "Merged riordan/az-123/some-change into trunk (az-123)") {
 		t.Fatalf("output = %q, want final summary", output)
 	}
 
@@ -572,7 +778,7 @@ func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
 	}
 }
 
-func TestBranchMergeToMainCommandFailsOnDirtyPreflight(t *testing.T) {
+func TestBranchMergeToBaseCommandFailsOnDirtyPreflight(t *testing.T) {
 	commands := make([]string, 0, 8)
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
@@ -616,7 +822,7 @@ func TestBranchMergeToMainCommandFailsOnDirtyPreflight(t *testing.T) {
 		RepoDir:   t.TempDir(),
 	}
 
-	err := BranchMergeToMainCommand(deps, "az-123")
+	err := BranchMergeToBaseCommand(deps, "az-123")
 	if err == nil || !strings.Contains(err.Error(), "merge preflight failed") {
 		t.Fatalf("err = %v, want preflight failure", err)
 	}
@@ -627,12 +833,14 @@ func TestBranchMergeToMainCommandFailsOnDirtyPreflight(t *testing.T) {
 	}
 }
 
-func TestBranchMergeToMainCommandUsesEnvIssueIDWhenArgumentMissing(t *testing.T) {
+func TestBranchMergeToBaseCommandUsesEnvIssueIDWhenArgumentMissing(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-999")
 
 	commands := make([]string, 0, 8)
+	cfg := config.DefaultConfig()
+	cfg.Git.BaseBranch = "trunk"
 	deps := &Dependencies{
-		Config: config.DefaultConfig(),
+		Config: cfg,
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
@@ -654,7 +862,7 @@ func TestBranchMergeToMainCommandUsesEnvIssueIDWhenArgumentMissing(t *testing.T)
 				case daemonclient.CommandGitFetch:
 					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: ".", Remote: "origin"}), nil
 				case daemonclient.CommandGitCheckout:
-					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: ".", Branch: "main"}), nil
+					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: ".", Branch: "trunk"}), nil
 				case daemonclient.CommandGitMerge:
 					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
 						Worktree: ".",
@@ -673,8 +881,8 @@ func TestBranchMergeToMainCommandUsesEnvIssueIDWhenArgumentMissing(t *testing.T)
 		RepoDir:   t.TempDir(),
 	}
 
-	if err := BranchMergeToMainCommand(deps, ""); err != nil {
-		t.Fatalf("BranchMergeToMainCommand error = %v", err)
+	if err := BranchMergeToBaseCommand(deps, ""); err != nil {
+		t.Fatalf("BranchMergeToBaseCommand error = %v", err)
 	}
 
 	foundMerge := false
@@ -689,11 +897,13 @@ func TestBranchMergeToMainCommandUsesEnvIssueIDWhenArgumentMissing(t *testing.T)
 	}
 }
 
-func TestBranchMergeToMainCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(t *testing.T) {
+func TestBranchMergeToBaseCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(t *testing.T) {
 	commands := make([]string, 0, 8)
-	mainWorktree := t.TempDir()
+	baseWorktree := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Git.BaseBranch = "trunk"
 	deps := &Dependencies{
-		Config: config.DefaultConfig(),
+		Config: cfg,
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
@@ -713,7 +923,7 @@ func TestBranchMergeToMainCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal git status body: %v", err)
 					}
-					if body.Worktree == mainWorktree {
+					if body.Worktree == baseWorktree {
 						return responseWithJSON(req, map[string]any{
 							"status": gitservice.GitStatus{
 								HasChanges: true,
@@ -725,12 +935,12 @@ func TestBranchMergeToMainCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(
 						"status": gitservice.GitStatus{HasChanges: false},
 					}), nil
 				case daemonclient.CommandGitFetch:
-					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: mainWorktree, Remote: "origin"}), nil
+					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: baseWorktree, Remote: "origin"}), nil
 				case daemonclient.CommandGitCheckout:
-					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: mainWorktree, Branch: "main"}), nil
+					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: baseWorktree, Branch: "trunk"}), nil
 				case daemonclient.CommandGitMerge:
 					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
-						Worktree: mainWorktree,
+						Worktree: baseWorktree,
 						Branch:   "riordan/bhv/fix-mtm-timeout",
 						Result: gitservice.MergeResult{
 							Success: true,
@@ -743,10 +953,10 @@ func TestBranchMergeToMainCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(
 		}),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
-		RepoDir:   mainWorktree,
+		RepoDir:   baseWorktree,
 	}
 
-	err := BranchMergeToMainCommand(deps, "bhv")
+	err := BranchMergeToBaseCommand(deps, "bhv")
 	if err == nil || !strings.Contains(err.Error(), "merge preflight failed") {
 		t.Fatalf("err = %v, want preflight failure", err)
 	}
@@ -2503,6 +2713,28 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 			},
 		},
 		{
+			name: "replace notes",
+			args: []string{"--notes", "Replacement", "az-1"},
+			want: func() IssueUpdateOptions {
+				notes := "Replacement"
+				return IssueUpdateOptions{
+					IssueID: "az-1",
+					Notes:   &notes,
+				}
+			}(),
+		},
+		{
+			name: "clear notes",
+			args: []string{"--notes", "", "az-1"},
+			want: func() IssueUpdateOptions {
+				notes := ""
+				return IssueUpdateOptions{
+					IssueID: "az-1",
+					Notes:   &notes,
+				}
+			}(),
+		},
+		{
 			name:        "forbid impl",
 			args:        []string{"--impl", "go-bubbletea", "--title", "Renamed", "az-1"},
 			errContains: "--impl is not supported for issue update",
@@ -4075,7 +4307,7 @@ func TestIssueCreateCommandDeferredIgnoresAutoParentFromIssueID(t *testing.T) {
 	if !reflect.DeepEqual(createReq.Implementations, []string{"default"}) {
 		t.Fatalf("create implementations = %+v, want [default]", createReq.Implementations)
 	}
-	if !strings.Contains(output, "Created issue: az-child [deferred]") {
+	if !strings.Contains(output, "Created issue: az-child [deferred: standalone later work, not auto-parented]") {
 		t.Fatalf("output missing deferred message: %q", output)
 	}
 }
@@ -4213,6 +4445,38 @@ func TestIssueCreateCommandRequiresImplWhenMultipleConfigured(t *testing.T) {
 	}
 	if createCalled {
 		t.Fatalf("task.create should not be called when implementation selection is ambiguous")
+	}
+}
+
+func TestIssueCreateCommandSuggestsImplWhenInferenceUnavailable(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command == daemonclient.CommandTaskList {
+					return protocol.ResponseEnvelope{}, errors.New("transport unavailable")
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	err := IssueCreateCommand(deps, IssueCreateOptions{
+		Title:    "Needs impl",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl (unable to infer implementation automatically:") || !strings.Contains(err.Error(), "Specify --impl <implementation>") {
+		t.Fatalf("expected actionable impl inference failure, got %v", err)
 	}
 }
 
@@ -4445,6 +4709,83 @@ func TestIssueUpdateCommandUsesDaemonTaskUpdateCommand(t *testing.T) {
 	})
 	if gotUpdateReq.Command != daemonclient.CommandTaskUpdate {
 		t.Fatalf("update command = %q, want %q", gotUpdateReq.Command, daemonclient.CommandTaskUpdate)
+	}
+	if !strings.Contains(updateOut, "Updated issue: az-1") {
+		t.Fatalf("update output = %q", updateOut)
+	}
+}
+
+func TestIssueUpdateCommandReplacesNotesWhenRequested(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	var gotUpdateReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := marshalTaskListBody([]domain.Task{
+						{
+							ID:          "az-1",
+							Title:       "Old",
+							Description: "OldDesc",
+							Notes:       "Existing notes",
+							Type:        domain.TypeTask,
+							Priority:    domain.P2,
+							Status:      domain.StatusOpen,
+							CreatedAt:   now,
+							UpdatedAt:   now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskUpdate:
+					gotUpdateReq = req
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	notes := "Replacement notes"
+	updateOut := captureStdout(t, func() error {
+		return IssueUpdateCommand(deps, IssueUpdateOptions{
+			IssueID: "az-1",
+			Notes:   &notes,
+		})
+	})
+	if gotUpdateReq.Command != daemonclient.CommandTaskUpdate {
+		t.Fatalf("update command = %q, want %q", gotUpdateReq.Command, daemonclient.CommandTaskUpdate)
+	}
+	var updateBody struct {
+		TaskID string `json:"task_id"`
+		daemonclient.TaskUpdateParams
+	}
+	if err := json.Unmarshal(gotUpdateReq.Body, &updateBody); err != nil {
+		t.Fatalf("unmarshal update body: %v", err)
+	}
+	if updateBody.TaskID != "az-1" || updateBody.Notes == nil || *updateBody.Notes != "Replacement notes" {
+		t.Fatalf("update body = %+v", updateBody)
 	}
 	if !strings.Contains(updateOut, "Updated issue: az-1") {
 		t.Fatalf("update output = %q", updateOut)
@@ -5106,14 +5447,29 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az mail send --parent <parent-issue> --type dependency-ready --body \"...\"`") {
 		t.Fatalf("prime output missing mail send command example: %q", output)
 	}
-	if !strings.Contains(output, "`az session start <issue-id>`, `az session status [issue-id]`, `az daemon start|stop|restart`, `az export --format json [--out <path>]`") {
+	if !strings.Contains(output, "`az session status [issue-id]`, `az daemon start|stop|restart`, `az export --format json [--out <path>]`") {
 		t.Fatalf("prime output missing session/runtime command examples: %q", output)
+	}
+	if !strings.Contains(output, "`az session start <issue-id>` is for explicit/manual orchestration; agents should not run it unless the user asks.") {
+		t.Fatalf("prime output missing session start guardrail: %q", output)
 	}
 	if !strings.Contains(output, "Optional (only when splitting work): `az issue create \"Child task\"`") {
 		t.Fatalf("prime output missing optional child-task split guidance: %q", output)
 	}
+	if strings.Contains(output, "`az spec` (inspect linked requirements before behavior changes)") {
+		t.Fatalf("prime output should not instruct agents to run bare az spec: %q", output)
+	}
 	if strings.Contains(output, "`az issue create \"Title\"` (auto-parents under `AZEDARACH_ISSUE_ID`; use `--deferred` for non-immediate follow-ups)") {
 		t.Fatalf("prime output should not require unconditional child issue creation: %q", output)
+	}
+	if !strings.Contains(output, "immediate child work; auto-parents under `AZEDARACH_ISSUE_ID`") {
+		t.Fatalf("prime output missing auto-parent semantics: %q", output)
+	}
+	if !strings.Contains(output, "standalone later work; does not auto-parent") {
+		t.Fatalf("prime output missing deferred standalone semantics: %q", output)
+	}
+	if !strings.Contains(output, "Do not use `--deferred` for child tasks, blockers, or work required before closing the active issue") {
+		t.Fatalf("prime output missing deferred blocker guardrail: %q", output)
 	}
 }
 
@@ -5162,6 +5518,7 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 			},
 		}),
 		ProjectID: "proj",
+		Config:    &config.Config{Spec: config.SpecConfig{Enabled: true}},
 	}
 
 	output := captureStdout(t, func() error {
@@ -5171,6 +5528,9 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Active issue ID: `az-1`") {
 		t.Fatalf("prime output missing explicit active issue id: %q", output)
 	}
+	if !strings.Contains(output, "`az spec read --issue az-1` (inspect linked requirements before behavior changes)") {
+		t.Fatalf("prime output missing active-issue spec read command: %q", output)
+	}
 	if !strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=az-1)") {
 		t.Fatalf("prime output missing active issue section: %q", output)
 	}
@@ -5179,6 +5539,64 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "Dependencies:\n- blocks: az-2") {
 		t.Fatalf("prime output missing dependency summary: %q", output)
+	}
+}
+
+func TestPrimeCommandTruncatesLargeIssueDescription(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
+	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+	longDescription := strings.Repeat("line content for noisy transcript output\n", 40)
+
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskList {
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+				body, err := marshalTaskListBody([]domain.Task{{
+					ID:              "az-1",
+					Title:           "Prime issue",
+					Description:     longDescription,
+					Status:          domain.StatusOpen,
+					Priority:        domain.P2,
+					Type:            domain.TypeTask,
+					Implementations: []string{"default"},
+					CreatedAt:       now,
+					UpdatedAt:       now,
+				}})
+				if err != nil {
+					t.Fatalf("marshal task list: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            body,
+				}, nil
+			},
+		}),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(deps)
+	})
+
+	if !strings.Contains(output, "… (truncated; run `az issue get az-1` for full context)") {
+		t.Fatalf("prime output should include truncated description sentinel: %q", output)
+	}
+	if strings.Count(output, "line content for noisy transcript output") >= 12 {
+		t.Fatalf("prime output should not include full long description: %q", output)
 	}
 }
 
@@ -5233,8 +5651,11 @@ func TestPrimeCommandWarnsWhenActiveIssueClosed(t *testing.T) {
 	if !strings.Contains(output, "Active issue `az-closed` is currently `closed`") {
 		t.Fatalf("prime output missing closed-issue warning: %q", output)
 	}
-	if !strings.Contains(output, "`az issue create \"Next task\" --deferred`") {
+	if !strings.Contains(output, "`az issue list --limit 20` or `az issue create \"Next task\"") {
 		t.Fatalf("prime output missing closed-issue next-step guidance: %q", output)
+	}
+	if !strings.Contains(output, "Use `--deferred` only for standalone backlog work.") {
+		t.Fatalf("prime output missing closed-issue deferred caveat: %q", output)
 	}
 }
 
@@ -5252,7 +5673,10 @@ func TestPrimeCommandQuestionFirstAndSpecBlock(t *testing.T) {
 	if !strings.Contains(output, "- Spec workflow:") {
 		t.Fatalf("prime output missing spec workflow block: %q", output)
 	}
-	if !strings.Contains(output, "ALWAYS check `az spec` requirements/links before starting behavior work.") {
+	if !strings.Contains(output, "`az spec read --issue <issue-id>` (inspect linked requirements before behavior changes)") {
+		t.Fatalf("prime output missing concrete spec read command: %q", output)
+	}
+	if !strings.Contains(output, "ALWAYS run `az spec read --issue <issue-id>` before starting behavior work; use `az spec link list --issue <issue-id>` when you need link-only detail.") {
 		t.Fatalf("prime output missing mandatory pre-work spec check guardrail: %q", output)
 	}
 	if !strings.Contains(output, "If implementation is not aligned with spec, update spec first, then implement.") {
@@ -5260,6 +5684,9 @@ func TestPrimeCommandQuestionFirstAndSpecBlock(t *testing.T) {
 	}
 	if !strings.Contains(output, "Ensure implementation issue(s) are linked to relevant spec requirement(s) before execution.") {
 		t.Fatalf("prime output missing issue/spec linking guardrail: %q", output)
+	}
+	if strings.Contains(output, "ALWAYS check `az spec` requirements/links") {
+		t.Fatalf("prime output should not include bare az spec guardrail: %q", output)
 	}
 }
 
@@ -5715,6 +6142,37 @@ func captureStdout(t *testing.T, fn func() error) string {
 	runErr := <-resultCh
 	if copyErr != nil {
 		t.Fatalf("copy stdout: %v", copyErr)
+	}
+	if runErr != nil {
+		t.Fatalf("command error: %v", runErr)
+	}
+
+	return buf.String()
+}
+
+func captureStderr(t *testing.T, fn func() error) string {
+	t.Helper()
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+
+	resultCh := make(chan error, 1)
+	go func() {
+		resultCh <- fn()
+		_ = w.Close()
+	}()
+
+	var buf bytes.Buffer
+	_, copyErr := io.Copy(&buf, r)
+
+	os.Stderr = oldStderr
+	runErr := <-resultCh
+	if copyErr != nil {
+		t.Fatalf("copy stderr: %v", copyErr)
 	}
 	if runErr != nil {
 		t.Fatalf("command error: %v", runErr)

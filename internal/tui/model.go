@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	autoclient "github.com/riordanpawley/azedarach/internal/client"
 	"github.com/riordanpawley/azedarach/internal/client/appdeps"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
@@ -56,10 +57,11 @@ const (
 )
 
 const (
-	diffPreviewMaxCharacters = 200
-	eventTickerCapacity      = 64
-	eventLogCapacity         = 256
-	eventSummaryMaxRunes     = 140
+	diffPreviewMaxCharacters       = 200
+	eventTickerCapacity            = 64
+	eventLogCapacity               = 256
+	eventSummaryMaxRunes           = 140
+	worktreeCleanupMutationTimeout = 2 * time.Minute
 	orphanedWorktreeCleanupTimeout = 2 * time.Minute
 )
 
@@ -115,21 +117,25 @@ type pendingTaskStatus struct {
 
 type pendingOperationProgress struct {
 	operationID string
+	kind        string
 	state       protocol.OperationState
 	percent     int
 	message     string
+	updatedAt   time.Time
 }
 
 // Model is the main application state
 type Model struct {
 	// Core data
-	tasks            []domain.Task
-	sessions         map[string]*domain.Session
-	suppressedTasks  map[string]struct{}
-	pendingStatuses  map[string]pendingTaskStatus
-	operationTaskID  map[string]string
-	pendingOpsByTask map[string]pendingOperationProgress
-	pendingCleanup   *pendingWorktreeCleanupConfirmation
+	tasks              []domain.Task
+	sessions           map[string]*domain.Session
+	suppressedTasks    map[string]struct{}
+	pendingStatuses    map[string]pendingTaskStatus
+	operationTaskID    map[string]string
+	pendingOpsByTask   map[string]pendingOperationProgress
+	pendingCleanupOps  map[string]pendingWorktreeCleanupConfirmation
+	pendingCleanup     *pendingWorktreeCleanupConfirmation
+	pendingBulkCleanup *pendingBulkCleanupConfirmation
 
 	// Navigation (using NavigationService)
 	nav *navigation.Service
@@ -260,6 +266,7 @@ func New(cfg *config.Config) Model {
 		pendingStatuses:             make(map[string]pendingTaskStatus),
 		operationTaskID:             make(map[string]string),
 		pendingOpsByTask:            make(map[string]pendingOperationProgress),
+		pendingCleanupOps:           make(map[string]pendingWorktreeCleanupConfirmation),
 		nav:                         navigation.NewService(),
 		editor:                      editor.NewService(),
 		overlayStack:                overlay.NewStack(),
@@ -990,8 +997,10 @@ func (m *Model) applyOperationProgressEvent(evt protocol.EventEnvelope) {
 		}
 		m.pendingOpsByTask[taskIDKey(taskID)] = pendingOperationProgress{
 			operationID: body.Operation.OperationID.String(),
+			kind:        strings.TrimSpace(body.Operation.Kind),
 			state:       state,
 			percent:     percent,
+			updatedAt:   time.Now(),
 		}
 		m.syncTaskWorkspaceOverlay()
 	case protocol.EventOperationProgress:
@@ -1012,14 +1021,72 @@ func (m *Model) applyOperationProgressEvent(evt protocol.EventEnvelope) {
 			m.syncTaskWorkspaceOverlay()
 			return
 		}
+		current := m.pendingOpsByTask[taskIDKey(taskID)]
 		m.pendingOpsByTask[taskIDKey(taskID)] = pendingOperationProgress{
 			operationID: body.OperationID.String(),
+			kind:        current.kind,
 			state:       body.State,
 			percent:     clampOperationPercent(body.Progress.Percent),
 			message:     strings.TrimSpace(body.Progress.Message),
+			updatedAt:   time.Now(),
 		}
 		m.syncTaskWorkspaceOverlay()
 	}
+}
+
+func (m *Model) handlePendingWorktreeCleanupOperationEvent(evt protocol.EventEnvelope) (tea.Cmd, bool) {
+	if evt.Event != protocol.EventOperationDone &&
+		evt.Event != protocol.EventOperationFailed &&
+		evt.Event != protocol.EventOperationCancelled {
+		return nil, false
+	}
+
+	var body protocol.OperationEventBody
+	if err := json.Unmarshal(evt.Body, &body); err != nil {
+		return nil, false
+	}
+	opID := strings.TrimSpace(body.Operation.OperationID.String())
+	if opID == "" {
+		return nil, false
+	}
+	pending, ok := m.pendingCleanupOps[opID]
+	if !ok {
+		return nil, false
+	}
+
+	delete(m.pendingCleanupOps, opID)
+	delete(m.pendingOpsByTask, taskIDKey(pending.taskID))
+	delete(m.operationTaskID, opID)
+	m.syncTaskWorkspaceOverlay()
+
+	if evt.Event != protocol.EventOperationFailed || pending.force {
+		return nil, false
+	}
+	reason := ""
+	if body.Operation.Error != nil {
+		reason = strings.TrimSpace(body.Operation.Error.Message)
+	}
+	if reason == "" && body.Operation.Progress != nil {
+		reason = strings.TrimSpace(body.Operation.Progress.Message)
+	}
+	if !isDirtyWorktreeRemovalError(errors.New(reason)) {
+		return nil, false
+	}
+
+	m.pendingCleanup = &pendingWorktreeCleanupConfirmation{
+		taskID:      pending.taskID,
+		deletedTask: pending.deletedTask,
+		force:       true,
+	}
+	action := "cleanup worktree"
+	if pending.deletedTask {
+		action = "delete task and cleanup worktree"
+	}
+	confirm := overlay.NewConfirmDialogExplicitYN(
+		"Force worktree cleanup?",
+		fmt.Sprintf("Worktree has local changes.\n\nAction: %s\nTask: %s\n\nDetails: %s\n\nForce removal will discard modified/untracked files.\nProceed?", action, pending.taskID, reason),
+	)
+	return m.openOverlay(confirm), true
 }
 
 func clampOperationPercent(percent int) int {
@@ -1412,7 +1479,7 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		ack, err := orch.EnsureAttached(ctx, protocol.Hello{
 			ProtocolVersion: protocol.CurrentVersion,
 			ClientName:      "tui",
-			ClientVersion:   "dev",
+			ClientVersion:   buildinfo.VersionString(),
 			Capabilities:    []string{"snapshot", "subscribe"},
 		})
 		if err != nil {
@@ -1564,6 +1631,7 @@ func (m *Model) applySessionProjectionEvent(evt protocol.EventEnvelope) {
 	}
 	m.applyRuntimeProjectionFromSessionEvent(body)
 	m.reconcilePendingStatuses()
+	m.reconcilePendingOperations()
 }
 
 func (m Model) reduceDaemonEvent(evt protocol.EventEnvelope) daemonEventDecision {
@@ -2415,6 +2483,8 @@ type worktreeCleanupResultMsg struct {
 	taskID      string
 	deletedTask bool
 	force       bool
+	operationID string
+	state       protocol.OperationState
 	needsForce  bool
 	reason      string
 	err         error
@@ -2423,6 +2493,7 @@ type worktreeCleanupResultMsg struct {
 type worktreeCleanupConfirmPromptMsg struct {
 	taskID       string
 	deletedTask  bool
+	force        bool
 	freshness    protocol.TaskListFreshness
 	checkedAt    time.Time
 	hasSnapshot  bool
@@ -2441,6 +2512,29 @@ type pendingWorktreeCleanupConfirmation struct {
 	taskID      string
 	deletedTask bool
 	force       bool
+}
+
+type bulkCleanupRisk struct {
+	taskID    string
+	dirty     bool
+	ahead     int
+	additions int
+	deletions int
+}
+
+type bulkCleanupPreflightMsg struct {
+	taskIDs      []string
+	deletedTasks bool
+	risks        []bulkCleanupRisk
+	freshness    protocol.TaskListFreshness
+	checkedAt    time.Time
+	reconcileErr error
+	snapshotErr  error
+}
+
+type pendingBulkCleanupConfirmation struct {
+	taskIDs      []string
+	deletedTasks bool
 }
 
 type refreshTaskWorkspaceResultMsg struct {
@@ -2509,22 +2603,34 @@ func (m Model) deleteTaskCmd(taskID string) tea.Cmd {
 
 func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
 		if m.daemonClient == nil {
 			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: fmt.Errorf("daemon client unavailable")}
 		}
 
 		// Always ask daemon to stop first; local projection may be stale.
 		m.sessionMonitor.Stop(taskID)
-		if _, err := m.daemonClient.StopSession(ctx, taskID); err != nil {
-			if !isSessionAlreadyStoppedError(err) && !isSessionStopSkippableDuringCleanup(err) {
-				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: err}
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, stopErr := m.daemonClient.StopSession(stopCtx, taskID)
+		stopCancel()
+		if stopErr != nil {
+			if !isSessionAlreadyStoppedError(stopErr) && !isSessionStopSkippableDuringCleanup(stopErr) {
+				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: stopErr}
 			}
 		}
 
-		if err := m.daemonClient.RemoveWorktreeWithOptions(ctx, taskID, force); err != nil {
+		removeCtx, removeCancel := context.WithTimeout(context.Background(), worktreeCleanupMutationTimeout)
+		err := m.daemonClient.RemoveWorktreeWithOptions(removeCtx, taskID, force)
+		removeCancel()
+		if err != nil {
+			if pending, ok := pendingOperationDetails(err); ok {
+				return worktreeCleanupResultMsg{
+					taskID:      taskID,
+					deletedTask: deleteTask,
+					force:       force,
+					operationID: pending.OperationID,
+					state:       pending.State,
+				}
+			}
 			if !force && isDirtyWorktreeRemovalError(err) {
 				return worktreeCleanupResultMsg{
 					taskID:      taskID,
@@ -2538,7 +2644,10 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 		}
 
 		if deleteTask {
-			if err := m.daemonClient.DeleteTask(ctx, taskID); err != nil {
+			deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := m.daemonClient.DeleteTask(deleteCtx, taskID)
+			deleteCancel()
+			if err != nil {
 				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: true, force: force, err: err}
 			}
 		}
@@ -2589,6 +2698,7 @@ func (m Model) requestWorktreeCleanupConfirmationCmd(taskID string, deleteTask b
 			msg.additions = task.GitAdditions
 			msg.deletions = task.GitDeletions
 			msg.dirty = task.HasUncommittedChanges
+			msg.force = msg.dirty
 			break
 		}
 
@@ -2635,6 +2745,10 @@ func formatWorktreeCleanupConfirmPrompt(msg worktreeCleanupConfirmPromptMsg) str
 
 	if msg.reconcileErr != nil {
 		lines = append(lines, "", fmt.Sprintf("Note: reconcile warning: %v", msg.reconcileErr))
+	}
+
+	if msg.force {
+		lines = append(lines, "", "Force removal will discard modified/untracked files.")
 	}
 
 	lines = append(lines, "", "Proceed?")
@@ -3003,13 +3117,13 @@ func humanizeRuntimeEventName(eventName string) string {
 		return ""
 	case "ui.toast":
 		return ""
-	case "task.created":
+	case protocol.EventTaskCreated:
 		return "Task created"
-	case "task.updated":
+	case protocol.EventTaskUpdated:
 		return "Task updated"
-	case "task.deleted":
+	case protocol.EventTaskDeleted:
 		return "Task deleted"
-	case "task.archived":
+	case protocol.EventTaskArchived:
 		return "Task archived"
 	case "session.started":
 		return "Session started"
@@ -3237,6 +3351,117 @@ func (m Model) bulkArchiveCmd(taskIDs []string) tea.Cmd {
 	}
 }
 
+func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		updated := 0
+		failed := 0
+		issues := make([]bulkTaskIssue, 0)
+
+		for _, taskID := range taskIDs {
+			if !m.taskExists(taskID) {
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "task not found"})
+				continue
+			}
+			if m.daemonClient == nil {
+				failed++
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "daemon client unavailable"})
+				continue
+			}
+
+			// Always ask daemon to stop first; local projection may be stale.
+			m.sessionMonitor.Stop(taskID)
+			_, stopErr := m.daemonClient.StopSession(ctx, taskID)
+			if stopErr != nil && !isSessionAlreadyStoppedError(stopErr) && !isSessionStopSkippableDuringCleanup(stopErr) {
+				failed++
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: stopErr.Error()})
+				continue
+			}
+
+			removeErr := m.daemonClient.RemoveWorktreeWithOptions(ctx, taskID, false)
+			if removeErr != nil {
+				failed++
+				reason := removeErr.Error()
+				if isDirtyWorktreeRemovalError(removeErr) {
+					reason = fmt.Sprintf("%s (single-task cleanup supports force)", strings.TrimSpace(removeErr.Error()))
+				}
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: reason})
+				continue
+			}
+
+			if deleteTask {
+				if err := m.daemonClient.DeleteTask(ctx, taskID); err != nil {
+					failed++
+					issues = append(issues, bulkTaskIssue{taskID: taskID, reason: err.Error()})
+					continue
+				}
+			}
+
+			updated++
+		}
+
+		return bulkStatusResultMsg{updated: updated, issues: issues, failed: failed}
+	}
+}
+
+func (m Model) bulkCleanupPreflightCmd(taskIDs []string, deleteTask bool) tea.Cmd {
+	selected := append([]string(nil), taskIDs...)
+	return func() tea.Msg {
+		msg := bulkCleanupPreflightMsg{
+			taskIDs:      selected,
+			deletedTasks: deleteTask,
+		}
+		if len(selected) == 0 {
+			return msg
+		}
+		if m.daemonClient == nil {
+			msg.snapshotErr = fmt.Errorf("daemon client unavailable")
+			return msg
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		if _, err := m.daemonClient.ReconcileRuntimeIssues(ctx, selected); err != nil {
+			msg.reconcileErr = err
+		}
+
+		snapshot, err := m.readTaskSnapshot(ctx, m.daemonClient)
+		if err != nil {
+			msg.snapshotErr = err
+			return msg
+		}
+		msg.freshness = snapshot.Freshness
+		msg.checkedAt = snapshot.LastCheckedAt
+
+		tasksByID := make(map[string]domain.Task, len(snapshot.Tasks))
+		for _, task := range snapshot.Tasks {
+			tasksByID[taskIDKey(task.ID.String())] = task
+		}
+
+		for _, taskID := range selected {
+			task, ok := tasksByID[taskIDKey(taskID)]
+			if !ok {
+				continue
+			}
+			if !task.HasUncommittedChanges && task.GitAheadCount <= 0 {
+				continue
+			}
+			msg.risks = append(msg.risks, bulkCleanupRisk{
+				taskID:    task.ID.String(),
+				dirty:     task.HasUncommittedChanges,
+				ahead:     task.GitAheadCount,
+				additions: task.GitAdditions,
+				deletions: task.GitDeletions,
+			})
+		}
+
+		return msg
+	}
+}
+
 // bulkSetStatusCmd sets all selected tasks to a specific status
 func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd {
 	return func() tea.Msg {
@@ -3312,6 +3537,45 @@ func summarizeBulkIssues(issues []bulkTaskIssue) string {
 		parts = append(parts, fmt.Sprintf("%s: %s", item.taskID, item.reason))
 	}
 	return strings.Join(parts, "; ")
+}
+
+func formatBulkCleanupPreflightPrompt(msg bulkCleanupPreflightMsg) string {
+	action := "cleanup worktrees"
+	if msg.deletedTasks {
+		action = "delete tasks and cleanup worktrees"
+	}
+	lines := []string{
+		fmt.Sprintf("Action: %s", action),
+		fmt.Sprintf("Selected tasks: %d", len(msg.taskIDs)),
+		"",
+	}
+
+	if msg.snapshotErr != nil {
+		lines = append(lines, fmt.Sprintf("Preflight unavailable: %v", msg.snapshotErr))
+	} else if len(msg.risks) == 0 {
+		lines = append(lines, "No selected tasks are currently dirty or ahead.")
+	} else {
+		lines = append(lines, "Selected tasks with dirty/ahead git state:")
+		for _, risk := range msg.risks {
+			stateParts := make([]string, 0, 2)
+			if risk.dirty {
+				stateParts = append(stateParts, fmt.Sprintf("dirty (+%d/-%d)", risk.additions, risk.deletions))
+			}
+			if risk.ahead > 0 {
+				stateParts = append(stateParts, fmt.Sprintf("ahead %d", risk.ahead))
+			}
+			lines = append(lines, fmt.Sprintf("- %s: %s", risk.taskID, strings.Join(stateParts, ", ")))
+		}
+	}
+
+	if !msg.checkedAt.IsZero() {
+		lines = append(lines, "", fmt.Sprintf("Snapshot: %s at %s", msg.freshness, msg.checkedAt.Local().Format("2006-01-02 15:04:05")))
+	}
+	if msg.reconcileErr != nil {
+		lines = append(lines, fmt.Sprintf("Reconcile warning: %v", msg.reconcileErr))
+	}
+	lines = append(lines, "", "Proceed?")
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
@@ -3437,6 +3701,36 @@ func shiftedTaskStatus(current domain.Status, delta int) (domain.Status, bool) {
 		return "", false
 	}
 	return statusOrder[newIdx], true
+}
+
+func exactTaskStatusForKey(key string) (domain.Status, bool) {
+	switch key {
+	case "1":
+		return domain.StatusOpen, true
+	case "2":
+		return domain.StatusInProgress, true
+	case "3":
+		return domain.StatusBlocked, true
+	case "4":
+		return domain.StatusDone, true
+	default:
+		return "", false
+	}
+}
+
+func statusDisplayName(status domain.Status) string {
+	switch status {
+	case domain.StatusOpen:
+		return "Open"
+	case domain.StatusInProgress:
+		return "In Progress"
+	case domain.StatusBlocked:
+		return "Blocked"
+	case domain.StatusDone:
+		return "Done"
+	default:
+		return status.String()
+	}
 }
 
 func (m *Model) applyOptimisticTaskStatus(taskID string, status domain.Status) {
@@ -3613,6 +3907,44 @@ func (m *Model) reconcilePendingStatuses() {
 		case "session_stop":
 			if task.Session == nil && !task.HasTmuxSession {
 				delete(m.pendingStatuses, key)
+			}
+		}
+	}
+}
+
+func (m *Model) reconcilePendingOperations() {
+	if len(m.pendingOpsByTask) == 0 {
+		return
+	}
+
+	taskByID := make(map[string]domain.Task, len(m.tasks))
+	for _, task := range m.tasks {
+		taskByID[taskIDKey(task.ID.String())] = task
+	}
+
+	const stalePendingTTL = 2 * time.Minute
+	now := time.Now()
+
+	for key, pending := range m.pendingOpsByTask {
+		task, ok := taskByID[key]
+		if !ok {
+			delete(m.pendingOpsByTask, key)
+			continue
+		}
+
+		if !pending.updatedAt.IsZero() && now.Sub(pending.updatedAt) > stalePendingTTL {
+			delete(m.pendingOpsByTask, key)
+			continue
+		}
+
+		switch strings.TrimSpace(pending.kind) {
+		case "session.start":
+			if task.Session != nil || task.HasTmuxSession {
+				delete(m.pendingOpsByTask, key)
+			}
+		case "session.stop":
+			if task.Session == nil && !task.HasTmuxSession {
+				delete(m.pendingOpsByTask, key)
 			}
 		}
 	}
@@ -3966,18 +4298,22 @@ func summarizeStatusChangeCounts(status daemonclient.GitStatus) string {
 	if n := len(status.Deleted); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d deleted", n))
 	}
-	if n := len(status.Untracked); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d untracked", n))
-	}
 	if len(parts) == 0 {
 		return "working tree has changes"
 	}
 	return strings.Join(parts, ", ")
 }
 
+func hasMergeBlockingStatusChanges(status daemonclient.GitStatus) bool {
+	return len(status.Staged) > 0 ||
+		len(status.Modified) > 0 ||
+		len(status.Added) > 0 ||
+		len(status.Deleted) > 0
+}
+
 func dirtyFilesFromStatus(status daemonclient.GitStatus) []string {
 	seen := make(map[string]struct{}, 16)
-	out := make([]string, 0, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Untracked))
+	out := make([]string, 0, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted))
 	appendUnique := func(files []string) {
 		for _, file := range files {
 			file = strings.TrimSpace(file)
@@ -3995,7 +4331,6 @@ func dirtyFilesFromStatus(status daemonclient.GitStatus) []string {
 	appendUnique(status.Modified)
 	appendUnique(status.Added)
 	appendUnique(status.Deleted)
-	appendUnique(status.Untracked)
 	sort.Strings(out)
 	return out
 }
@@ -4086,7 +4421,7 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	sourceStatus, sourceErr := statusForWorktree(sourceWorktree)
 	if sourceErr != nil {
 		reasons = append(reasons, fmt.Sprintf("Could not read source status (%s): %v", sourceID, sourceErr))
-	} else if sourceStatus.HasChanges {
+	} else if hasMergeBlockingStatusChanges(sourceStatus) {
 		reasons = append(reasons, fmt.Sprintf("Source %s is not clean: %s", sourceID, summarizeStatusChangeCounts(sourceStatus)))
 		sourceFiles = dirtyFilesFromStatus(sourceStatus)
 	}
@@ -4094,7 +4429,7 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	targetStatus, targetErr := statusForWorktree(targetWorktree)
 	if targetErr != nil {
 		reasons = append(reasons, fmt.Sprintf("Could not read target status (%s): %v", targetID, targetErr))
-	} else if targetStatus.HasChanges {
+	} else if hasMergeBlockingStatusChanges(targetStatus) {
 		reasons = append(reasons, fmt.Sprintf("Target %s is not clean: %s", targetID, summarizeStatusChangeCounts(targetStatus)))
 		targetFiles = dirtyFilesFromStatus(targetStatus)
 	}

@@ -116,6 +116,9 @@ func TestTaskWorkspaceOverlay_StatusBindingsIncludeScroll(t *testing.T) {
 	if !strings.Contains(joined, "ctrl+u/d") {
 		t.Fatalf("expected status bindings to include ctrl+u/d hint, got %q", joined)
 	}
+	if !strings.Contains(joined, "1/2/3/4") {
+		t.Fatalf("expected status bindings to include exact status hint, got %q", joined)
+	}
 }
 
 func TestTaskWorkspaceOverlay_ActionFocusUsesArrowNavigation(t *testing.T) {
@@ -139,6 +142,28 @@ func TestTaskWorkspaceOverlay_ActionFocusUsesArrowNavigation(t *testing.T) {
 	overlay = model.(*TaskWorkspaceOverlay)
 	if overlay.actions.cursor == beforeUp {
 		t.Fatalf("expected up arrow to move actions cursor when actions focused")
+	}
+}
+
+func TestTaskWorkspaceOverlay_StatusKeysWorkFromDetailFocus(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-1",
+		Title:  "Task",
+		Status: domain.StatusOpen,
+	}
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	overlay.focus = taskWorkspaceFocusDetail
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	if cmd == nil {
+		t.Fatal("expected status key command from detail focus")
+	}
+	msg, ok := cmd().(SelectionMsg)
+	if !ok {
+		t.Fatalf("command emitted %T, want SelectionMsg", cmd())
+	}
+	if msg.Key != "3" {
+		t.Fatalf("selection key = %q, want 3", msg.Key)
 	}
 }
 
@@ -199,7 +224,7 @@ func TestTaskWorkspaceOverlay_View_ShowsMutationProgress(t *testing.T) {
 		Status: domain.StatusInProgress,
 	}
 	overlay := NewTaskWorkspaceOverlay(task, nil, &TaskMutationProgress{
-		OperationID:     "op-status", State:           "queued", ProgressPercent: 40,
+		OperationID: "op-status", State: "queued", ProgressPercent: 40,
 		ProgressMessage: "queued task.update_status",
 		PreviousStatus:  domain.StatusOpen,
 		TargetStatus:    domain.StatusInProgress,

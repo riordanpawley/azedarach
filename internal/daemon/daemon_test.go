@@ -236,6 +236,13 @@ func TestCommandCanonicalizesProjectIDAcrossTaskCommands(t *testing.T) {
 	if createEvt.Meta.ProjectID.String() != "bmd" {
 		t.Fatalf("task.create event meta project_id = %q, want bmd", createEvt.Meta.ProjectID)
 	}
+	var createEventBody protocol.TaskEventBody
+	if err := json.Unmarshal(createEvt.Body, &createEventBody); err != nil {
+		t.Fatalf("unmarshal task.create event body: %v", err)
+	}
+	if createEventBody.TaskID.String() != createBody.TaskID || createEventBody.Task == nil || createEventBody.Task.Title != "Normalize project IDs" {
+		t.Fatalf("task.create event body = %+v", createEventBody)
+	}
 
 	updateResp, err := d.command(ctx, mkReq("task.update_status", "bmd", struct {
 		TaskID string        `json:"task_id"`
@@ -263,6 +270,13 @@ func TestCommandCanonicalizesProjectIDAcrossTaskCommands(t *testing.T) {
 	}
 	if updateEvt.Meta.ProjectID.String() != "bmd" {
 		t.Fatalf("task.update_status event meta project_id = %q, want bmd", updateEvt.Meta.ProjectID)
+	}
+	var updateEventBody protocol.TaskEventBody
+	if err := json.Unmarshal(updateEvt.Body, &updateEventBody); err != nil {
+		t.Fatalf("unmarshal task.update_status event body: %v", err)
+	}
+	if updateEventBody.TaskID.String() != createBody.TaskID || updateEventBody.Task == nil || updateEventBody.Task.Status != domain.StatusInProgress {
+		t.Fatalf("task.update_status event body = %+v", updateEventBody)
 	}
 }
 

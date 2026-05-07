@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
@@ -211,6 +213,58 @@ func (r *countingWorktreeListRunner) Run(_ context.Context, args ...string) (str
 	return "", nil
 }
 
+type staticWorktreeListRunner struct {
+	listCalls int
+	output    string
+	commands  []string
+}
+
+func (r *staticWorktreeListRunner) Run(_ context.Context, args ...string) (string, error) {
+	r.commands = append(r.commands, strings.Join(args, " "))
+	if len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" {
+		r.listCalls++
+		return r.output, nil
+	}
+	return "", nil
+}
+
+func TestWorktreeServiceAdapterDeleteDoesNotRequireProjectWideRuntimeFreshness(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	repoDir := t.TempDir()
+	worktreePath := filepath.Join(t.TempDir(), "repo-bvx")
+	runner := &staticWorktreeListRunner{
+		output: `worktree ` + repoDir + `
+HEAD abc123
+branch refs/heads/main
+
+worktree ` + worktreePath + `
+HEAD def456
+branch refs/heads/riordan/bvx/worktree-delete
+`,
+	}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	adapter := &worktreeServiceAdapter{
+		manager: manager,
+		logger:  logger,
+		ensureRuntimeFreshForMutation: func(context.Context, string, string) error {
+			return errors.New("project-wide runtime freshness should not block targeted worktree deletion")
+		},
+	}
+
+	if err := adapter.Delete(context.Background(), "proj", "bvx", false); err != nil {
+		t.Fatalf("Delete returned error: %v", err)
+	}
+	wantCommands := []string{
+		"worktree list --porcelain",
+		"worktree list --porcelain",
+		"worktree remove " + worktreePath,
+		"branch -D riordan/bvx/worktree-delete",
+	}
+	if strings.Join(runner.commands, "\n") != strings.Join(wantCommands, "\n") {
+		t.Fatalf("commands = %v, want %v", runner.commands, wantCommands)
+	}
+}
+
 func TestWorktreeServiceAdapterListUsesProjectionOnlyWhenRuntimeStoreAvailable(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), logger)
@@ -234,4 +288,53 @@ func TestWorktreeServiceAdapterListUsesProjectionOnlyWhenRuntimeStoreAvailable(t
 	if runner.listCalls != 0 {
 		t.Fatalf("live worktree list calls = %d, want 0", runner.listCalls)
 	}
+}
+
+func TestWorktreeServiceAdapterPollerRefreshesProjection(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), logger)
+	t.Cleanup(func() { _ = store.Close() })
+
+	projectID := "proj"
+	if err := store.UpsertWorktreeState(context.Background(), daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   "bux",
+		Path:      "/tmp/repo-bux",
+		Branch:    "riordan/bux/task",
+		UpdatedAt: time.Now().UTC().Add(-2 * time.Minute),
+	}); err != nil {
+		t.Fatalf("seed stale projection: %v", err)
+	}
+
+	runner := &staticWorktreeListRunner{
+		output: `worktree /tmp/repo
+HEAD abc123
+branch refs/heads/main
+`,
+	}
+	manager := git.NewWorktreeManager(runner, "/tmp/repo", logger)
+	adapter := &worktreeServiceAdapter{
+		manager:           manager,
+		runtimeStateStore: store,
+		logger:            logger,
+		pollInterval:      20 * time.Millisecond,
+	}
+
+	adapter.ensureBackgroundPoller(projectID)
+
+	deadline := time.Now().Add(750 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		worktrees, err := store.ListWorktreeStates(context.Background(), projectID)
+		if err != nil {
+			t.Fatalf("ListWorktreeStates returned error: %v", err)
+		}
+		if len(worktrees) == 0 {
+			if runner.listCalls == 0 {
+				t.Fatal("expected live worktree list calls while poller reconciles projection")
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for poller to reconcile stale worktree projection")
 }

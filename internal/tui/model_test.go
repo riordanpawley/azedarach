@@ -3619,7 +3619,7 @@ func TestDaemonSessionUpdatedEventAllowsImmediateAttachFromWorkspace(t *testing.
 	updatedAt := time.Date(2026, time.March, 31, 1, 2, 3, 0, time.UTC)
 	body, err := json.Marshal(protocol.SessionProjectionEventBody{
 		ProjectID: naming.ProjectID(m.daemonProjectID()),
-		Revision:  7,
+		Revision:  1,
 		Session: protocol.SessionProjection{
 			SessionID: "proj-az-1",
 			IssueID:   naming.IssueID(issueID),
@@ -3633,7 +3633,7 @@ func TestDaemonSessionUpdatedEventAllowsImmediateAttachFromWorkspace(t *testing.
 
 	updatedAny, _ := m.Update(daemonStreamEventMsg{
 		event: protocol.EventEnvelope{
-			Revision: 7,
+			Revision: 1,
 			Event:    protocol.EventSessionUpdated,
 			Body:     body,
 		},
@@ -4296,6 +4296,91 @@ func TestReconcilePendingStatusesClearsSessionMarkersFromHydratedProjection(t *t
 	})
 }
 
+func TestReconcilePendingOperationsClearsSessionProgressFromHydratedProjection(t *testing.T) {
+	now := time.Now()
+
+	t.Run("session start", func(t *testing.T) {
+		m := newTestModel()
+		m.tasks = []domain.Task{
+			{
+				ID:             "az-1",
+				Title:          "Task",
+				Status:         domain.StatusOpen,
+				Priority:       domain.P2,
+				Type:           domain.TypeTask,
+				HasTmuxSession: true,
+				Session:        &domain.Session{IssueID: "az-1", State: domain.SessionBusy},
+			},
+		}
+		m.pendingOpsByTask = map[string]pendingOperationProgress{
+			taskIDKey("az-1"): {
+				operationID: "op-session",
+				kind:        "session.start",
+				state:       protocol.OperationStateRunning,
+				percent:     50,
+				updatedAt:   now,
+			},
+		}
+
+		m.reconcilePendingOperations()
+		if _, ok := m.pendingOpsByTask[taskIDKey("az-1")]; ok {
+			t.Fatal("expected session.start pending operation to clear after session hydration")
+		}
+	})
+
+	t.Run("session stop", func(t *testing.T) {
+		m := newTestModel()
+		m.tasks = []domain.Task{
+			{
+				ID:       "az-1",
+				Title:    "Task",
+				Status:   domain.StatusOpen,
+				Priority: domain.P2,
+				Type:     domain.TypeTask,
+			},
+		}
+		m.pendingOpsByTask = map[string]pendingOperationProgress{
+			taskIDKey("az-1"): {
+				operationID: "op-stop",
+				kind:        "session.stop",
+				state:       protocol.OperationStateRunning,
+				percent:     50,
+				updatedAt:   now,
+			},
+		}
+
+		m.reconcilePendingOperations()
+		if _, ok := m.pendingOpsByTask[taskIDKey("az-1")]; ok {
+			t.Fatal("expected session.stop pending operation to clear when session projection is absent")
+		}
+	})
+}
+
+func TestSyncProjectionIndexesDoesNotPreserveStaleRuntimePendingOperation(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task", Status: domain.StatusInProgress, Priority: domain.P2, Type: domain.TypeTask, HasWorktree: true},
+	}
+	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
+		"az-1": {
+			HasWorktree:             true,
+			PendingOperationID:      "op-stale",
+			PendingOperationState:   string(protocol.OperationStateRunning),
+			PendingOperationPercent: 50,
+		},
+	}
+
+	m.syncProjectionIndexesFromTasks()
+
+	signals := m.runtimeSignalsByTask["az-1"]
+	if signals.PendingOperationID != "" || signals.PendingOperationState != "" || signals.PendingOperationPercent != 0 {
+		t.Fatalf("expected stale pending operation cleared, got %+v", signals)
+	}
+	if !signals.HasWorktree {
+		t.Fatalf("expected non-operation runtime signal preserved, got %+v", signals)
+	}
+}
+
 func TestPendingMutationForTaskIncludesOperationProgressPayload(t *testing.T) {
 	m := newTestModel()
 	m.pendingOpsByTask = map[string]pendingOperationProgress{
@@ -4537,5 +4622,57 @@ func TestDaemonOperationLifecycleEventsTrackPendingForGitAndWorktreeMutations(t 
 	}
 	if got := signals["az-2"]; got.PendingOperationID != "op-wt-1" || got.PendingOperationState != string(protocol.OperationStateRunning) {
 		t.Fatalf("az-2 pending = %+v, want running op-wt-1", got)
+	}
+}
+
+func TestPendingWorktreeCleanupOperationFailureOpensForceConfirmation(t *testing.T) {
+	m := newTestModel()
+	m.pendingCleanupOps["op-cleanup"] = pendingWorktreeCleanupConfirmation{
+		taskID:      "az-1",
+		deletedTask: false,
+		force:       false,
+	}
+	m.operationTaskID["op-cleanup"] = "az-1"
+	m.pendingOpsByTask["az-1"] = pendingOperationProgress{
+		operationID: "op-cleanup",
+		state:       protocol.OperationStateRunning,
+	}
+
+	body, err := json.Marshal(protocol.OperationEventBody{
+		Operation: protocol.OperationRecord{
+			OperationID: "op-cleanup",
+			IssueID:     naming.IssueID("az-1"),
+			Kind:        daemonclient.CommandWorktreeRemove,
+			State:       protocol.OperationStateFailed,
+			Error: &protocol.OperationError{
+				Code:      protocol.ErrorCodeInternal,
+				Message:   "failed to remove worktree: git worktree remove /tmp/az-1 failed: exit status 128: fatal: '/tmp/az-1' contains modified or untracked files, use --force to delete it",
+				Retryable: false,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal operation failed body: %v", err)
+	}
+
+	cmd, handled := m.handlePendingWorktreeCleanupOperationEvent(protocol.EventEnvelope{
+		Event: protocol.EventOperationFailed,
+		Body:  body,
+	})
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if cmd == nil {
+		t.Fatal("expected force confirmation overlay command")
+	}
+	_ = cmd()
+	if m.pendingCleanup == nil || !m.pendingCleanup.force || m.pendingCleanup.taskID != "az-1" {
+		t.Fatalf("pending cleanup = %+v, want forced az-1 cleanup", m.pendingCleanup)
+	}
+	if _, ok := m.pendingCleanupOps["op-cleanup"]; ok {
+		t.Fatal("pending cleanup operation was not cleared")
+	}
+	if _, ok := m.pendingOpsByTask["az-1"]; ok {
+		t.Fatal("pending board operation was not cleared")
 	}
 }

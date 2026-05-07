@@ -44,6 +44,12 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 	case "a":
 		return m, m.bulkArchiveCmd(msg.SelectedIDs)
 
+	case "w": // Cleanup selected worktrees
+		return m, m.bulkCleanupPreflightCmd(msg.SelectedIDs, false)
+
+	case "W": // Delete selected tasks and cleanup worktrees
+		return m, m.bulkCleanupPreflightCmd(msg.SelectedIDs, true)
+
 	case "x": // Clear selection
 		m.editor.ClearSelection()
 		m.editor.EnterNormal()
@@ -215,6 +221,22 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		m.overlayStack.Pop()
 	}
 
+	if msg.Key == "yes" && m.pendingBulkCleanup != nil {
+		pending := m.pendingBulkCleanup
+		m.pendingBulkCleanup = nil
+		return m, m.bulkCleanupWorktreeCmd(pending.taskIDs, pending.deletedTasks)
+	}
+	if msg.Key == "no" && m.pendingBulkCleanup != nil {
+		pending := m.pendingBulkCleanup
+		m.pendingBulkCleanup = nil
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: fmt.Sprintf("Cancelled bulk cleanup for %d task(s)", len(pending.taskIDs)),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+	}
+
 	if msg.Key == "yes" && m.pendingCleanup != nil {
 		pending := m.pendingCleanup
 		m.pendingCleanup = nil
@@ -353,7 +375,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			popupCommand := fmt.Sprintf("cd %s && %s", shellSingleQuote(diffWorktree), command)
 			return m.tmuxClient.DisplayPopup(ctx, title, "95%", "95%", popupCommand)
 		}
-		viewer := diff.NewDiffViewer(diffWorktree, m.config.Git.BaseBranch, m.gitClient, openPopup)
+		viewer := diff.NewDiffViewer(diffWorktree, m.config.Git.BaseBranch, m.gitClient, openPopup).WithIssueID(task.ID.String())
 		cmd := m.openOverlay(viewer)
 		return m, cmd
 	case "w":
@@ -423,6 +445,22 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			m.addToast(Toast{
 				Level:   ToastError,
 				Message: "Failed to compute next status",
+				Expires: time.Now().Add(2 * time.Second),
+			})
+			return m, nil
+		}
+		previousStatus := task.Status
+		m.applyOptimisticTaskStatus(task.ID.String(), newStatus)
+		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
+	case "1", "2", "3", "4":
+		newStatus, ok := exactTaskStatusForKey(msg.Key)
+		if !ok {
+			return m, nil
+		}
+		if task.Status == newStatus {
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: fmt.Sprintf("Task is already in %s status", statusDisplayName(newStatus)),
 				Expires: time.Now().Add(2 * time.Second),
 			})
 			return m, nil

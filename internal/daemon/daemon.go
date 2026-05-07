@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
@@ -27,8 +28,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/pr"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
-
-const daemonVersion = "dev"
 
 const (
 	defaultRuntimeReconcileQueueWorkers = 2
@@ -106,6 +105,7 @@ type Daemon struct {
 	git                           *git.Client
 	gitHandler                    *daemonhandlers.GitHandler
 	worktreeHandler               *daemonhandlers.WorktreeHandler
+	worktreeAdapter               *worktreeServiceAdapter
 	session                       *daemonhandlers.SessionHandler
 	sessionStore                  *daemonstate.Store
 	runtimeProjectionWriter       runtimeProjectionWriter
@@ -122,6 +122,9 @@ type Daemon struct {
 	sessionStateRefreshMu         sync.Mutex
 	sessionStateRefreshing        map[string]bool
 	sessionStateLastRefresh       map[string]time.Time
+	worktreeStateRefreshMu        sync.Mutex
+	worktreeStateRefreshing       map[string]bool
+	worktreeStateLastRefresh      map[string]time.Time
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -228,6 +231,8 @@ func New(cfg Config) *Daemon {
 		sessionStopPending:            map[string]int{},
 		sessionStateRefreshing:        map[string]bool{},
 		sessionStateLastRefresh:       map[string]time.Time{},
+		worktreeStateRefreshing:       map[string]bool{},
+		worktreeStateLastRefresh:      map[string]time.Time{},
 		revision:                      map[string]uint64{},
 		shutdownReqCh:                 make(chan struct{}),
 	}
@@ -267,23 +272,25 @@ func New(cfg Config) *Daemon {
 	commandExecutor := operationCommandExecutor{runtime: runtime}
 	sessionExecutor := sessionOperationExecutor{runtime: runtime}
 	gitHandler := daemonhandlers.NewGitHandler(gitService, daemonhandlers.WithGitLongRunningExecutor(commandExecutor))
-	worktreeHandler := daemonhandlers.NewWorktreeHandler(
-		&worktreeServiceAdapter{
-			managerForProject: func(projectID string) *git.WorktreeManager { return d.worktreeManagerForProject(projectID) },
-			runtimeStateStore: d.worktreeRuntimeStateStore(),
-			runtimeStateStoreForProject: func(projectID string) *daemonstate.RuntimeStateStore {
-				return d.worktreeRuntimeStateStore(projectID)
-			},
-			runtimeProjectionWriter:       d.runtimeProjectionStateWriter(),
-			ensureRuntimeFreshForMutation: d.ensureFreshRuntimeForMutation,
-			logger:                        cfg.Logger,
-			onProjectionUpdate: func(ctx context.Context, projectID, issueID, path string) {
-				d.runtimeProjectionStateWriter().PublishWorktreeProjectionEvent(ctx, projectID, issueID, path)
-			},
-			onWorktreeObserved: func(_ context.Context, projectID, _ string, path string) {
-				gitService.refreshGitStatusAsync(projectID, path)
-			},
+	worktreeAdapter := &worktreeServiceAdapter{
+		managerForProject: func(projectID string) *git.WorktreeManager { return d.worktreeManagerForProject(projectID) },
+		runtimeStateStore: d.worktreeRuntimeStateStore(),
+		runtimeStateStoreForProject: func(projectID string) *daemonstate.RuntimeStateStore {
+			return d.worktreeRuntimeStateStore(projectID)
 		},
+		runtimeProjectionWriter:       d.runtimeProjectionStateWriter(),
+		ensureRuntimeFreshForMutation: d.ensureFreshRuntimeForMutation,
+		logger:                        cfg.Logger,
+		onProjectionUpdate: func(ctx context.Context, projectID, issueID, path string) {
+			d.runtimeProjectionStateWriter().PublishWorktreeProjectionEvent(ctx, projectID, issueID, path)
+		},
+		onWorktreeObserved: func(_ context.Context, projectID, _ string, path string) {
+			gitService.refreshGitStatusAsync(projectID, path)
+		},
+	}
+	d.worktreeAdapter = worktreeAdapter
+	worktreeHandler := daemonhandlers.NewWorktreeHandler(
+		worktreeAdapter,
 		daemonhandlers.WithWorktreeLongRunningExecutor(commandExecutor),
 	)
 	runtime.gitHandler = gitHandler
@@ -422,7 +429,7 @@ func (d *Daemon) validateCommandPolicyConfiguration() error {
 }
 
 func (d *Daemon) handshake(_ context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
-	return protocol.NegotiateHello(hello, daemonVersion), nil
+	return protocol.NegotiateHello(hello, buildinfo.VersionString()), nil
 }
 
 func (d *Daemon) subscribe(_ context.Context, projectID string, fromRevision uint64) (<-chan protocol.EventEnvelope, func(), error) {
@@ -876,6 +883,52 @@ func (d *Daemon) triggerSessionStateRefresh(projectID string, refreshFn func(con
 	}()
 }
 
+func (d *Daemon) triggerWorktreeStateRefresh(projectID string) {
+	if d.worktreeAdapter == nil || d.worktreeRuntimeStateStore(projectID) == nil {
+		return
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = protocol.DefaultProjectID
+	}
+
+	const minRefreshInterval = 3 * time.Second
+	now := time.Now()
+
+	d.worktreeStateRefreshMu.Lock()
+	if d.worktreeStateRefreshing == nil {
+		d.worktreeStateRefreshing = map[string]bool{}
+	}
+	if d.worktreeStateLastRefresh == nil {
+		d.worktreeStateLastRefresh = map[string]time.Time{}
+	}
+	if d.worktreeStateRefreshing[projectID] {
+		d.worktreeStateRefreshMu.Unlock()
+		return
+	}
+	if last := d.worktreeStateLastRefresh[projectID]; !last.IsZero() && now.Sub(last) < minRefreshInterval {
+		d.worktreeStateRefreshMu.Unlock()
+		return
+	}
+	d.worktreeStateRefreshing[projectID] = true
+	d.worktreeStateLastRefresh[projectID] = now
+	d.worktreeStateRefreshMu.Unlock()
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Error("worktree runtime-state refresh goroutine panicked", "project_id", projectID, "panic", r, "stack", string(debug.Stack()))
+			}
+			d.worktreeStateRefreshMu.Lock()
+			d.worktreeStateRefreshing[projectID] = false
+			d.worktreeStateRefreshMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		d.worktreeAdapter.pollAndPersistWorktrees(ctx, projectID)
+	}()
+}
+
 func (d *Daemon) persistWorktreeState(ctx context.Context, projectID, issueID, path, branch string) error {
 	if d.worktreeRuntimeStateStore(projectID) == nil {
 		return nil
@@ -947,8 +1000,26 @@ func (d *Daemon) currentRevision(projectID string) uint64 {
 	return d.revision[projectID]
 }
 
-func (d *Daemon) publishTaskEvent(req protocol.RequestEnvelope, eventName string, rev uint64) {
+func (d *Daemon) publishTaskEvent(req protocol.RequestEnvelope, eventName string, rev uint64, bodies ...protocol.TaskEventBody) {
 	projectID := d.projectID(req.Meta)
+	var body []byte
+	if len(bodies) > 0 {
+		eventBody := bodies[0]
+		if eventBody.ProjectID == "" {
+			eventBody.ProjectID = naming.ProjectID(projectID)
+		}
+		if eventBody.UpdatedAt.IsZero() {
+			eventBody.UpdatedAt = time.Now().UTC()
+		}
+		encoded, err := json.Marshal(eventBody)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("marshal task event body failed", "project_id", projectID, "event", eventName, "revision", rev, "error", err)
+			}
+		} else {
+			body = encoded
+		}
+	}
 	d.hub.Publish(protocol.EventEnvelope{
 		ProtocolVersion: req.ProtocolVersion,
 		ProjectID:       naming.ProjectID(projectID),
@@ -957,6 +1028,7 @@ func (d *Daemon) publishTaskEvent(req protocol.RequestEnvelope, eventName string
 		Event:           eventName,
 		Kind:            protocol.EnvelopeKindEvent,
 		EmittedAt:       time.Now().UTC(),
+		Body:            body,
 	})
 }
 
@@ -1187,6 +1259,10 @@ func (a applyRevisionAdapter) NextRevision(projectID string) uint64 {
 	return a.daemon.nextRevision(projectID)
 }
 
-func (a applyRevisionAdapter) PublishTaskEvent(req protocol.RequestEnvelope, eventName string, rev uint64) {
-	a.daemon.publishTaskEvent(req, eventName, rev)
+func (a applyRevisionAdapter) PublishTaskEvent(req protocol.RequestEnvelope, eventName string, rev uint64, bodies ...protocol.TaskEventBody) {
+	a.daemon.publishTaskEvent(req, eventName, rev, bodies...)
+}
+
+func (a applyRevisionAdapter) TaskEventBody(ctx context.Context, projectID, taskID string) protocol.TaskEventBody {
+	return a.daemon.taskEventBody(ctx, projectID, taskID)
 }

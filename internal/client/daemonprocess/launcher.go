@@ -90,9 +90,15 @@ func (l *Launcher) Start(ctx context.Context) error {
 	}
 
 	bin := l.resolveBinary()
-	releaseStartLock, err := l.acquireStartLock(ctx)
+	releaseStartLock, lockAcquired, err := l.acquireStartLock(ctx)
 	if err != nil {
+		if (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) && l.waitForSocketReadyWithin(300*time.Millisecond) == nil {
+			return nil
+		}
 		return err
+	}
+	if !lockAcquired {
+		return nil
 	}
 	defer releaseStartLock()
 
@@ -120,7 +126,7 @@ func (l *Launcher) Start(ctx context.Context) error {
 				terminate = lifecycle.TerminateLockOwner
 			}
 			if err := terminate(l.LockPath); err != nil {
-				if !errors.Is(err, syscall.EPERM) && !errors.Is(err, os.ErrPermission) {
+				if !isRecoverableLockOwnerTerminationError(err) {
 					readyErr := l.waitForSocketReadyWithin(1 * time.Second)
 					if readyErr == nil {
 						return nil
@@ -128,13 +134,13 @@ func (l *Launcher) Start(ctx context.Context) error {
 					return fmt.Errorf("recover stale daemon lock owner: %w", err)
 				}
 				if l.Logger != nil {
-					l.Logger.Warn("permission denied terminating lock owner; force-clearing stale daemon lock",
+					l.Logger.Warn("lock owner termination did not complete cleanly; force-clearing stale daemon lock",
 						"lock_path", l.LockPath,
 						"error", err,
 					)
 				}
 				if rmErr := os.Remove(l.LockPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-					return fmt.Errorf("recover stale daemon lock owner after permission fallback: %w", rmErr)
+					return fmt.Errorf("recover stale daemon lock owner after forced lock clear: %w", rmErr)
 				}
 			}
 		}
@@ -182,6 +188,23 @@ func (l *Launcher) waitForSocketReadyWithin(timeout time.Duration) error {
 	return l.waitForReady(readyCtx, l.SocketPath)
 }
 
+func isRecoverableLockOwnerTerminationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, lifecycle.ErrLockOwnerPermissionDenied) ||
+		errors.Is(err, lifecycle.ErrLockOwnerTerminationTimeout) ||
+		errors.Is(err, syscall.EPERM) ||
+		errors.Is(err, syscall.EACCES) ||
+		errors.Is(err, os.ErrPermission) {
+		return true
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "lock owner permission denied") ||
+		strings.Contains(msg, "operation not permitted") ||
+		strings.Contains(msg, "permission denied")
+}
+
 // Stop attempts to stop existing lock-owner process.
 func (l *Launcher) Stop(ctx context.Context) error {
 	if strings.TrimSpace(l.SocketPath) != "" {
@@ -210,18 +233,60 @@ func (l *Launcher) Stop(ctx context.Context) error {
 	return nil
 }
 
-// Replace attempts to stop existing lock-owner process, then starts daemon.
+// Replace attempts to stop an existing daemon process, then starts daemon.
 func (l *Launcher) Replace(ctx context.Context) error {
-	if pid, ok := l.readLockedPID(); ok {
-		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && l.Logger != nil {
-			l.Logger.Warn("failed to terminate existing daemon process before replace",
-				"pid", pid,
+	if strings.TrimSpace(l.SocketPath) != "" {
+		shutdown := l.shutdownViaSocket
+		if shutdown == nil {
+			shutdown = gracefulShutdownViaSocket
+		}
+		if err := shutdown(ctx, l.SocketPath); err == nil {
+			if err := l.waitForSocketUnavailable(ctx, 2*time.Second); err != nil {
+				return fmt.Errorf("wait for daemon socket shutdown before replace: %w", err)
+			}
+			return l.Start(ctx)
+		} else if l.Logger != nil {
+			l.Logger.Warn("graceful daemon socket shutdown failed before replace; falling back to lock-owner termination",
+				"socket_path", l.SocketPath,
 				"lock_path", l.LockPath,
 				"error", err,
 			)
 		}
 	}
+
+	terminate := l.terminateLockOwner
+	if terminate == nil {
+		terminate = lifecycle.TerminateLockOwner
+	}
+	if err := terminate(l.LockPath); err != nil {
+		return fmt.Errorf("terminate daemon lock owner before replace: %w", err)
+	}
 	return l.Start(ctx)
+}
+
+func (l *Launcher) waitForSocketUnavailable(ctx context.Context, timeout time.Duration) error {
+	if l.waitForReady == nil {
+		return nil
+	}
+	deadlineCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	for {
+		readyCtx, readyCancel := context.WithTimeout(deadlineCtx, 100*time.Millisecond)
+		err := l.waitForReady(readyCtx, l.SocketPath)
+		readyCancel()
+		if err != nil {
+			return nil
+		}
+		if deadlineCtx.Err() != nil {
+			return deadlineCtx.Err()
+		}
+		sleep := l.sleepFn
+		if sleep == nil {
+			sleep = time.Sleep
+		}
+		sleep(50 * time.Millisecond)
+	}
 }
 
 func (l *Launcher) resolveBinary() string {
@@ -278,29 +343,36 @@ func openDaemonLog(path string) (io.WriteCloser, error) {
 	return os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 }
 
-func (l *Launcher) acquireStartLock(ctx context.Context) (func(), error) {
+func (l *Launcher) acquireStartLock(ctx context.Context) (func(), bool, error) {
 	startLockPath := l.LockPath + ".start"
 	if err := os.MkdirAll(filepath.Dir(startLockPath), 0o755); err != nil {
-		return nil, fmt.Errorf("create start lock dir: %w", err)
+		return nil, false, fmt.Errorf("create start lock dir: %w", err)
 	}
 	f, err := os.OpenFile(startLockPath, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
-		return nil, fmt.Errorf("open start lock: %w", err)
+		return nil, false, fmt.Errorf("open start lock: %w", err)
 	}
 	for {
 		if lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); lockErr == nil {
 			return func() {
 				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 				_ = f.Close()
-			}, nil
+			}, true, nil
 		} else if !errors.Is(lockErr, syscall.EWOULDBLOCK) && !errors.Is(lockErr, syscall.EAGAIN) {
 			_ = f.Close()
-			return nil, fmt.Errorf("acquire start lock: %w", lockErr)
+			return nil, false, fmt.Errorf("acquire start lock: %w", lockErr)
+		}
+		// Another client currently owns startup. If daemon socket becomes ready
+		// while we are queued on the lock, return early rather than timing out
+		// waiting for lock ownership we no longer need.
+		if err := l.waitForSocketReadyWithin(100 * time.Millisecond); err == nil {
+			_ = f.Close()
+			return func() {}, false, nil
 		}
 
 		if ctx.Err() != nil {
 			_ = f.Close()
-			return nil, fmt.Errorf("acquire start lock: %w", ctx.Err())
+			return nil, false, fmt.Errorf("acquire start lock: %w", ctx.Err())
 		}
 		sleep := l.sleepFn
 		if sleep == nil {

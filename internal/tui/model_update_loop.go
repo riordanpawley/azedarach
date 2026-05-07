@@ -202,6 +202,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncProjectionIndexesFromTasks()
 		m.applyPendingStatusOverlays()
 		m.reconcilePendingStatuses()
+		m.reconcilePendingOperations()
 		m.editor.ReconcileSelection(m.tasks)
 		m.applyPendingCreatedTaskSelection()
 		m.taskSnapshotCheckedAt = msg.lastCheckedAt
@@ -401,9 +402,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				logOverlay.AddEvent(msg.event)
 			}
 		}
+		if cmd, handled := m.handlePendingWorktreeCleanupOperationEvent(msg.event); handled {
+			m.daemonRevision = cursor.Advance(msg.event).Revision
+			if cmd != nil {
+				return m, tea.Batch(cmd, m.waitForDaemonEventCmd())
+			}
+			return m, m.waitForDaemonEventCmd()
+		}
 		m.applyOperationProgressEvent(msg.event)
+		if isTaskMutationEvent(msg.event.Event) && len(msg.event.Body) > 0 {
+			switch cursor.Decide(msg.event) {
+			case protocol.StreamProjectionDecisionIgnore:
+				return m, m.waitForDaemonEventCmd()
+			case protocol.StreamProjectionDecisionResync:
+				m.daemonEvents = nil
+				return m, m.attachDaemonCmd()
+			}
+			if m.applyTaskEvent(msg.event) {
+				m.daemonRevision = cursor.Advance(msg.event).Revision
+				return m, m.waitForDaemonEventCmd()
+			}
+		}
 		if msg.event.Event == protocol.EventSessionUpdated {
+			switch cursor.Decide(msg.event) {
+			case protocol.StreamProjectionDecisionIgnore:
+				return m, m.waitForDaemonEventCmd()
+			case protocol.StreamProjectionDecisionResync:
+				m.daemonEvents = nil
+				return m, m.attachDaemonCmd()
+			}
 			m.applySessionProjectionEvent(msg.event)
+			m.daemonRevision = cursor.Advance(msg.event).Revision
+			return m, m.waitForDaemonEventCmd()
 		}
 		if msg.event.Event == protocol.EventWorktreeProjectionUpdated || msg.event.Event == protocol.EventGitStatusUpdated {
 			switch cursor.Decide(msg.event) {
@@ -665,8 +695,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		if msg.targetID == "main" {
-			return m, m.mergeToMainCmd(msg.sourceWorktree, msg.sourceID, msg.refreshStatus)
+		if msg.targetID == mergeBaseTargetID {
+			return m, m.mergeToBaseCmd(msg.sourceWorktree, msg.sourceID, msg.refreshStatus)
 		}
 		return m, m.followOnMergeIntoTargetCmd(msg.sourceWorktree, msg.targetWorktree, msg.sourceID, msg.targetID, msg.targetState, msg.refreshStatus)
 
@@ -1129,16 +1159,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pendingCleanup = &pendingWorktreeCleanupConfirmation{
 			taskID:      msg.taskID,
 			deletedTask: msg.deletedTask,
-			force:       false,
+			force:       msg.force,
 		}
 		title := "Confirm worktree cleanup?"
 		if msg.deletedTask {
 			title = "Confirm delete + cleanup?"
 		}
+		if msg.force {
+			title = "Force worktree cleanup?"
+			if msg.deletedTask {
+				title = "Force delete + cleanup?"
+			}
+		}
 		confirm := overlay.NewConfirmDialogExplicitYN(title, formatWorktreeCleanupConfirmPrompt(msg))
 		return m, m.openOverlay(confirm)
 
+	case bulkCleanupPreflightMsg:
+		if len(msg.risks) == 0 && msg.snapshotErr == nil {
+			return m, m.bulkCleanupWorktreeCmd(msg.taskIDs, msg.deletedTasks)
+		}
+		m.pendingBulkCleanup = &pendingBulkCleanupConfirmation{
+			taskIDs:      append([]string(nil), msg.taskIDs...),
+			deletedTasks: msg.deletedTasks,
+		}
+		confirm := overlay.NewConfirmDialogExplicitYN("Bulk cleanup preflight", formatBulkCleanupPreflightPrompt(msg))
+		return m, m.openOverlay(confirm)
+
 	case worktreeCleanupResultMsg:
+		if msg.operationID != "" && !operationStateTerminal(msg.state) {
+			m.pendingCleanupOps[msg.operationID] = pendingWorktreeCleanupConfirmation{
+				taskID:      msg.taskID,
+				deletedTask: msg.deletedTask,
+				force:       msg.force,
+			}
+			m.markTaskOperationPending(msg.taskID, "worktree_cleanup", msg.operationID, msg.state)
+			m.syncTaskWorkspaceOverlay()
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: formatPendingOperationMessage("Worktree cleanup", msg.taskID, msg.operationID, msg.state),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, m.loadIssuesCmd()
+		}
 		if msg.needsForce {
 			m.pendingCleanup = &pendingWorktreeCleanupConfirmation{
 				taskID:      msg.taskID,

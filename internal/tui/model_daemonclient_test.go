@@ -396,6 +396,51 @@ func TestTaskStatusMovePendingKeepsOptimisticOverlayAcrossHydration(t *testing.T
 	}
 }
 
+func TestTaskStatusExactKeyUsesDaemonClient(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskUpdateStatus {
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			var body daemonclient.TaskStatusRequest
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal status request: %v", err)
+			}
+			if body.TaskID != "az-1" || body.Status != domain.StatusBlocked {
+				t.Fatalf("status body = %+v, want az-1 -> blocked", body)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{ID: "az-1", Status: domain.StatusOpen}}
+	m.nav.SelectTask("az-1", 0)
+
+	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "3"})
+	if cmd == nil {
+		t.Fatal("expected exact status command")
+	}
+	optimistic := updated.(Model)
+	if optimistic.tasks[0].Status != domain.StatusBlocked {
+		t.Fatalf("optimistic status = %s, want %s", optimistic.tasks[0].Status, domain.StatusBlocked)
+	}
+
+	result := cmd()
+	status, ok := result.(taskStatusResultMsg)
+	if !ok {
+		t.Fatalf("result = %T, want taskStatusResultMsg", result)
+	}
+	if status.previousStatus != domain.StatusOpen || status.newStatus != domain.StatusBlocked || status.err != nil {
+		t.Fatalf("status result = %#v", status)
+	}
+}
+
 func TestTaskStatusMoveFailureRollsBackOptimisticState(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -2125,9 +2170,9 @@ func TestHandleMergeResultPendingOperationShowsInfoToast(t *testing.T) {
 	}
 }
 
-func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T) {
+func TestHandleMergeTargetSelectionToBaseUsesWorktreeLookupFallback(t *testing.T) {
 	sourceID := "az-source"
-	mainWorktree := ""
+	baseWorktree := ""
 
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -2191,7 +2236,7 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal fetch request: %v", err)
 				}
-				if body.Worktree != mainWorktree || body.Remote != "origin" {
+				if body.Worktree != baseWorktree || body.Remote != "origin" {
 					t.Fatalf("fetch body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitCommandResponse{Worktree: body.Worktree, Remote: body.Remote})
@@ -2210,7 +2255,7 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal checkout request: %v", err)
 				}
-				if body.Worktree != mainWorktree || body.Branch != "main" {
+				if body.Worktree != baseWorktree || body.Branch != "trunk" {
 					t.Fatalf("checkout body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitCommandResponse{Worktree: body.Worktree, Branch: body.Branch})
@@ -2229,7 +2274,7 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal merge request: %v", err)
 				}
-				if body.Worktree != mainWorktree || body.Branch != "az/az-source" {
+				if body.Worktree != baseWorktree || body.Branch != "az/az-source" {
 					t.Fatalf("merge body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
@@ -2251,8 +2296,8 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 				respBody, err := json.Marshal(daemonclient.GitMergePreflightResponse{
 					SourceID:       sourceID,
 					SourceWorktree: "/tmp/az-source",
-					TargetID:       "main",
-					TargetWorktree: mainWorktree,
+					TargetID:       mergeBaseTargetID,
+					TargetWorktree: baseWorktree,
 					Clean:          true,
 				})
 				if err != nil {
@@ -2273,12 +2318,13 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 	}
 
 	m := newTestModel()
-	mainWorktree = m.activeProjectPath()
+	m.config.Git.BaseBranch = "trunk"
+	baseWorktree = m.activeProjectPath()
 	m.daemonClient = daemonclient.New(transport)
 
 	updated, cmd := m.handleMergeTargetSelection(overlay.MergeTargetSelectedMsg{
 		SourceID: sourceID,
-		TargetID: "main",
+		TargetID: mergeBaseTargetID,
 	})
 	if _, ok := updated.(Model); !ok {
 		t.Fatalf("updated model type = %T, want Model", updated)
@@ -2306,7 +2352,7 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 	if mergeMsg.err != nil {
 		t.Fatalf("merge err = %v", mergeMsg.err)
 	}
-	if got := transport.requests; len(got) != 9 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandRuntimeReconcileIssue || got[3] != daemonclient.CommandGitStatus || got[4] != daemonclient.CommandGitStatus || got[5] != daemonclient.CommandGitMergePreflight || got[6] != daemonclient.CommandGitFetch || got[7] != daemonclient.CommandGitCheckout || got[8] != daemonclient.CommandGitMerge {
+	if got := transport.requests; len(got) != 10 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandRuntimeReconcileIssue || got[3] != daemonclient.CommandGitStatus || got[4] != daemonclient.CommandGitStatus || got[5] != daemonclient.CommandGitMergePreflight || got[6] != daemonclient.CommandGitFetch || got[7] != daemonclient.CommandGitCheckout || got[8] != daemonclient.CommandGitMerge || got[9] != daemonclient.CommandGitStatus {
 		t.Fatalf("requests = %v", got)
 	}
 }
@@ -2513,7 +2559,7 @@ func TestFollowOnMergeSelectionTopLevelFallsBackToMergeMain(t *testing.T) {
 					Body:            respBody,
 				}, nil
 			case daemonclient.CommandGitCheckout:
-				respBody, err := json.Marshal(daemonclient.GitCommandResponse{Worktree: ".", Branch: "main"})
+				respBody, err := json.Marshal(daemonclient.GitCommandResponse{Worktree: ".", Branch: "trunk"})
 				if err != nil {
 					t.Fatalf("marshal checkout response: %v", err)
 				}
@@ -2528,7 +2574,7 @@ func TestFollowOnMergeSelectionTopLevelFallsBackToMergeMain(t *testing.T) {
 				respBody, err := json.Marshal(daemonclient.GitMergePreflightResponse{
 					SourceID:       issueID,
 					SourceWorktree: "/tmp/az-top",
-					TargetID:       "main",
+					TargetID:       mergeBaseTargetID,
 					TargetWorktree: ".",
 					Clean:          true,
 				})
@@ -2584,19 +2630,19 @@ func TestFollowOnMergeSelectionTopLevelFallsBackToMergeMain(t *testing.T) {
 		t.Fatalf("updated model type = %T, want Model", updated)
 	}
 	if cmd == nil {
-		t.Fatal("expected merge-to-main command for top-level issue")
+		t.Fatal("expected merge-to-base command for top-level issue")
 	}
 	msg := cmd()
 	mergeMsg, ok := msg.(mergeResultMsg)
 	if !ok {
 		t.Fatalf("message type = %T, want mergeResultMsg", msg)
 	}
-	if mergeMsg.targetID != "main" || mergeMsg.err != nil {
+	if mergeMsg.targetID != mergeBaseTargetID || mergeMsg.err != nil {
 		t.Fatalf("merge message = %+v", mergeMsg)
 	}
 }
 
-func TestMergeToMainPreflightBlocksDirtySourceOrTarget(t *testing.T) {
+func TestMergeToBasePreflightBlocksDirtySourceOrTarget(t *testing.T) {
 	sourceID := "az-source"
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -2672,13 +2718,13 @@ func TestMergeToMainPreflightBlocksDirtySourceOrTarget(t *testing.T) {
 
 	m := newTestModel()
 	m.daemonClient = daemonclient.New(transport)
-	msg := m.mergeToMainCmd("/tmp/az-source", sourceID, true)()
+	msg := m.mergeToBaseCmd("/tmp/az-source", sourceID, true)()
 
 	preflight, ok := msg.(mergePreflightFailureMsg)
 	if !ok {
 		t.Fatalf("msg type = %T, want mergePreflightFailureMsg", msg)
 	}
-	if preflight.sourceID != sourceID || preflight.targetID != "main" {
+	if preflight.sourceID != sourceID || preflight.targetID != mergeBaseTargetID {
 		t.Fatalf("preflight msg = %+v", preflight)
 	}
 	if preflight.targetWorktree != m.activeProjectPath() {
@@ -2723,15 +2769,15 @@ func TestCheckMergePreflightUsesLiveGitStatusWhenRefreshFlagFalse(t *testing.T) 
 	m.daemonClient = daemonclient.New(transport)
 	m.tasks = []domain.Task{
 		{ID: "az-source", HasUncommittedChanges: true},
-		{ID: "main", HasUncommittedChanges: true},
+		{ID: mergeBaseTargetID, HasUncommittedChanges: true},
 	}
 
 	preflight := m.checkMergePreflight(
 		context.Background(),
 		"az-source",
-		"main",
+		mergeBaseTargetID,
 		"/tmp/az-source",
-		"/tmp/main",
+		"/tmp/base",
 		"",
 		"",
 		false, // legacy flag value; should still do live status checks
@@ -2749,6 +2795,73 @@ func TestCheckMergePreflightUsesLiveGitStatusWhenRefreshFlagFalse(t *testing.T) 
 	}
 	if statusCalls != 2 {
 		t.Fatalf("git status calls = %d, want 2", statusCalls)
+	}
+}
+
+func TestCheckMergePreflightDoesNotBlockUntrackedOnlyStatus(t *testing.T) {
+	var sawPreflight bool
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandGitStatus:
+				respBody, err := json.Marshal(struct {
+					Status git.GitStatus `json:"status"`
+				}{Status: git.GitStatus{HasChanges: true, Untracked: []string{".azedarach/images/", "docs/"}}})
+				if err != nil {
+					t.Fatalf("marshal status response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandGitMergePreflight:
+				sawPreflight = true
+				respBody, err := json.Marshal(daemonclient.GitMergePreflightResponse{
+					SourceID:       "az-source",
+					SourceWorktree: "/tmp/az-source",
+					TargetID:       mergeBaseTargetID,
+					TargetWorktree: "/tmp/base",
+					Clean:          true,
+				})
+				if err != nil {
+					t.Fatalf("marshal preflight response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newTestModel()
+	m.daemonClient = daemonclient.New(transport)
+
+	preflight := m.checkMergePreflight(
+		context.Background(),
+		"az-source",
+		mergeBaseTargetID,
+		"/tmp/az-source",
+		"/tmp/base",
+		"trunk",
+		"az/source",
+		false,
+	)
+
+	if preflight != nil {
+		t.Fatalf("preflight = %+v, want nil for untracked-only live status", preflight)
+	}
+	if !sawPreflight {
+		t.Fatalf("requests = %v, want merge preflight after untracked-only status", transport.requests)
 	}
 }
 
@@ -2823,7 +2936,7 @@ func TestCheckMergePreflightReconcilesRuntimeWhenRefreshFlagTrue(t *testing.T) {
 	}
 }
 
-func TestMergeToMainPreflightBlocksPredictedConflicts(t *testing.T) {
+func TestMergeToBasePreflightBlocksPredictedConflicts(t *testing.T) {
 	sourceID := "az-source"
 	targetWorktree := ""
 	transport := &recordingDaemonTransport{
@@ -2891,16 +3004,16 @@ func TestMergeToMainPreflightBlocksPredictedConflicts(t *testing.T) {
 				if body.SourceID != sourceID || body.SourceWorktree != "/tmp/az-source" {
 					t.Fatalf("preflight source = %+v", body)
 				}
-				if body.TargetID != "main" || body.TargetWorktree != targetWorktree {
+				if body.TargetID != mergeBaseTargetID || body.TargetWorktree != targetWorktree {
 					t.Fatalf("preflight target = %+v, want target worktree %q", body, targetWorktree)
 				}
-				if body.TargetRef != "main" || body.SourceBranch != "az/az-source" {
+				if body.TargetRef != "trunk" || body.SourceBranch != "az/az-source" {
 					t.Fatalf("preflight refs = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitMergePreflightResponse{
 					SourceID:       sourceID,
 					SourceWorktree: "/tmp/az-source",
-					TargetID:       "main",
+					TargetID:       mergeBaseTargetID,
 					TargetWorktree: targetWorktree,
 					Clean:          false,
 					ConflictFiles:  []string{"cmd/az/main.go"},
@@ -2923,9 +3036,10 @@ func TestMergeToMainPreflightBlocksPredictedConflicts(t *testing.T) {
 	}
 
 	m := newTestModel()
+	m.config.Git.BaseBranch = "trunk"
 	targetWorktree = m.activeProjectPath()
 	m.daemonClient = daemonclient.New(transport)
-	msg := m.mergeToMainCmd("/tmp/az-source", sourceID, true)()
+	msg := m.mergeToBaseCmd("/tmp/az-source", sourceID, true)()
 
 	preflight, ok := msg.(mergePreflightFailureMsg)
 	if !ok {
@@ -3331,6 +3445,12 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 			got[3] != daemonclient.CommandWorktreeRemove {
 			t.Fatalf("requests = %v", got)
 		}
+		if len(transport.commandBudgets) != 4 {
+			t.Fatalf("command budget count = %d, want 4", len(transport.commandBudgets))
+		}
+		if removeBudget := transport.commandBudgets[3]; removeBudget < (worktreeCleanupMutationTimeout - 10*time.Second) {
+			t.Fatalf("worktree remove timeout budget = %s, want near %s", removeBudget, worktreeCleanupMutationTimeout)
+		}
 	})
 
 	t.Run("delete task and cleanup worktree", func(t *testing.T) {
@@ -3564,7 +3684,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		}
 	})
 
-	t.Run("dirty worktree prompts before forced cleanup", func(t *testing.T) {
+	t.Run("stale clean preflight prompts before forced cleanup after daemon conflict", func(t *testing.T) {
 		forceFlags := []bool{}
 		stopCalls := 0
 		transport := &recordingDaemonTransport{
@@ -3589,7 +3709,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 						Kind:            protocol.EnvelopeKindResponse,
 						OK:              true,
 						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
-							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true, HasUncommittedChanges: true, GitAdditions: 4, GitDeletions: 2},
+							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true, HasUncommittedChanges: false, GitAdditions: 4, GitDeletions: 2},
 						}),
 					}, nil
 				case daemonclient.CommandSessionStop:
@@ -3749,6 +3869,115 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 			got[4] != daemonclient.CommandSessionStop ||
 			got[5] != daemonclient.CommandWorktreeRemove {
 			t.Fatalf("requests = %v", got)
+		}
+	})
+
+	t.Run("dirty preflight forces first removal after confirmation", func(t *testing.T) {
+		forceFlags := []bool{}
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandRuntimeReconcileIssue:
+					respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{})
+					if err != nil {
+						t.Fatalf("marshal reconcile response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            respBody,
+					}, nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true, HasUncommittedChanges: true, GitAdditions: 4, GitDeletions: 2},
+						}),
+					}, nil
+				case daemonclient.CommandSessionStop:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+					}, nil
+				case daemonclient.CommandWorktreeRemove:
+					var body struct {
+						Force bool `json:"force,omitempty"`
+					}
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal worktree remove request: %v", err)
+					}
+					forceFlags = append(forceFlags, body.Force)
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+					}, nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}
+
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress}}
+		setTaskSession(t, &m, "az-1", &domain.Session{
+			IssueID:  "az-1",
+			State:    domain.SessionBusy,
+			Worktree: "/tmp/az-1",
+		})
+		m.nav.SelectTask("az-1", 1)
+
+		_, cmd := m.handleSelection(overlay.SelectionMsg{Key: "w"})
+		if cmd == nil {
+			t.Fatal("expected cleanup preflight command")
+		}
+		preflightMsg := cmd()
+		prompt, ok := preflightMsg.(worktreeCleanupConfirmPromptMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want worktreeCleanupConfirmPromptMsg", preflightMsg)
+		}
+		if !prompt.force {
+			t.Fatal("prompt.force = false, want true for dirty preflight")
+		}
+		if promptText := formatWorktreeCleanupConfirmPrompt(prompt); !strings.Contains(promptText, "Force removal will discard modified/untracked files.") {
+			t.Fatalf("prompt = %q, want force warning", promptText)
+		}
+
+		updatedAny, confirmCmd := m.Update(prompt)
+		updated := updatedAny.(Model)
+		if confirmCmd != nil {
+			_ = confirmCmd()
+		}
+		if updated.pendingCleanup == nil || !updated.pendingCleanup.force {
+			t.Fatalf("pending cleanup = %+v, want force confirmation", updated.pendingCleanup)
+		}
+
+		_, runCleanupCmd := updated.handleSelection(overlay.SelectionMsg{
+			Key:   "yes",
+			Value: overlay.ConfirmResult{Confirmed: true},
+		})
+		if runCleanupCmd == nil {
+			t.Fatal("expected cleanup command")
+		}
+		cleanupMsg := runCleanupCmd()
+		result, ok := cleanupMsg.(worktreeCleanupResultMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want worktreeCleanupResultMsg", cleanupMsg)
+		}
+		if result.err != nil {
+			t.Fatalf("cleanup result err = %v", result.err)
+		}
+		if len(forceFlags) != 1 || !forceFlags[0] {
+			t.Fatalf("force flags = %v, want [true]", forceFlags)
 		}
 	})
 }
@@ -5375,7 +5604,7 @@ func TestStopSessionCommandPreservesDaemonProjection(t *testing.T) {
 }
 
 func TestPerformCleanupRoutesDaemonCleanupAndPreservesCounts(t *testing.T) {
-	base := time.Date(2026, time.March, 24, 12, 0, 0, 0, time.UTC)
+	base := time.Now().UTC()
 	oldSessionStart := base.Add(-48 * time.Hour)
 
 	transport := &recordingDaemonTransport{
@@ -5448,7 +5677,7 @@ func TestPerformCleanupRoutesDaemonCleanupAndPreservesCounts(t *testing.T) {
 	m.daemonClient.WithProjectID(m.daemonProjectID())
 	m.tasks = []domain.Task{
 		{ID: "az-old", Status: domain.StatusDone, UpdatedAt: base.AddDate(0, 0, -31)},
-		{ID: "az-recent", Status: domain.StatusDone, UpdatedAt: base},
+		{ID: "az-recent", Status: domain.StatusDone, UpdatedAt: base.Add(-1 * time.Hour)},
 		{ID: "az-open", Status: domain.StatusOpen, UpdatedAt: base},
 	}
 	m.sessions = map[string]*domain.Session{
@@ -5665,6 +5894,70 @@ func TestDaemonEventRevisionReducer(t *testing.T) {
 	}
 }
 
+func TestTaskEventBodyAppliesWithoutSnapshotRefresh(t *testing.T) {
+	m := newTestModel()
+	m.daemonRevision = 4
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+	m.tasks = []domain.Task{{ID: "az-1", Title: "Old", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask}}
+	m.nav.SelectTask("az-1", 0)
+
+	updatedTask := domain.Task{ID: "az-1", Title: "Updated", Status: domain.StatusBlocked, Priority: domain.P1, Type: domain.TypeBug}
+	body, err := json.Marshal(protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		TaskID:    "az-1",
+		Task:      &updatedTask,
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal task event body: %v", err)
+	}
+
+	updatedAny, cmd := m.Update(daemonStreamEventMsg{event: protocol.EventEnvelope{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		Revision:  5,
+		Event:     protocol.EventTaskUpdated,
+		Body:      body,
+	}})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if cmd == nil {
+		t.Fatal("expected next stream wait command")
+	}
+	if updated.daemonRevision != 5 {
+		t.Fatalf("daemonRevision = %d, want 5", updated.daemonRevision)
+	}
+	if len(updated.tasks) != 1 || updated.tasks[0].Title != "Updated" || updated.tasks[0].Status != domain.StatusBlocked {
+		t.Fatalf("tasks after task event = %+v", updated.tasks)
+	}
+	if got := updated.nav.GetCursor().TaskID; got != "az-1" {
+		t.Fatalf("cursor task = %q, want az-1", got)
+	}
+
+	deleteBody, err := json.Marshal(protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(updated.daemonProjectID()),
+		TaskID:    "az-1",
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal delete task event body: %v", err)
+	}
+	deletedAny, _ := updated.Update(daemonStreamEventMsg{event: protocol.EventEnvelope{
+		ProjectID: naming.ProjectID(updated.daemonProjectID()),
+		Revision:  6,
+		Event:     protocol.EventTaskDeleted,
+		Body:      deleteBody,
+	}})
+	deleted := deletedAny.(Model)
+	if deleted.daemonRevision != 6 {
+		t.Fatalf("daemonRevision after delete = %d, want 6", deleted.daemonRevision)
+	}
+	if len(deleted.tasks) != 0 {
+		t.Fatalf("tasks after delete event = %+v, want empty", deleted.tasks)
+	}
+}
+
 func TestProjectionEventRevisionGate(t *testing.T) {
 	makeProjectionEvent := func(revision uint64, dirty bool) daemonStreamEventMsg {
 		body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
@@ -5767,6 +6060,120 @@ func TestProjectionEventRevisionGate(t *testing.T) {
 		}
 		if !next.tasks[0].HasUncommittedChanges {
 			t.Fatalf("sequential projection should update dirty flag: %+v", next.tasks[0])
+		}
+	})
+}
+
+func TestSessionProjectionEventRevisionGate(t *testing.T) {
+	testProjectID := newTestModel().daemonProjectID()
+	makeSessionEvent := func(revision uint64, dirty bool) daemonStreamEventMsg {
+		body, err := json.Marshal(protocol.SessionProjectionEventBody{
+			ProjectID: naming.ProjectID(testProjectID),
+			Revision:  revision,
+			Session: protocol.SessionProjection{
+				SessionID: naming.SessionID("azedarach-bte-az-1"),
+				IssueID:   "az-1",
+				State:     protocol.SessionLifecycleStateAttached,
+				UpdatedAt: time.Date(2026, time.April, 10, 8, 0, 0, 0, time.UTC),
+			},
+			Runtime: &protocol.RuntimeProjectionEventBody{
+				ProjectID: "default",
+				Revision:  revision,
+				Projection: protocol.RuntimeProjection{
+					ProjectID: "default",
+					IssueID:   "az-1",
+					Worktree: protocol.RuntimeWorktreeProjection{
+						Exists:  true,
+						Path:    "/tmp/repo-az-1",
+						Healthy: true,
+					},
+					Git: protocol.RuntimeGitProjection{
+						HasUncommittedChanges: dirty,
+						GitAdditions:          4,
+						GitDeletions:          2,
+					},
+					Session: protocol.RuntimeSessionProjection{
+						HasSession: true,
+						SessionID:  naming.SessionID("azedarach-bte-az-1"),
+						State:      protocol.SessionLifecycleStateAttached,
+						Worktree:   "/tmp/repo-az-1",
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal session projection body: %v", err)
+		}
+		return daemonStreamEventMsg{
+			event: protocol.EventEnvelope{
+				Event:    protocol.EventSessionUpdated,
+				Revision: revision,
+				Body:     body,
+			},
+		}
+	}
+
+	t.Run("stale session projection event ignored", func(t *testing.T) {
+		m := newTestModel()
+		m.daemonRevision = 8
+		m.daemonEvents = make(chan protocol.EventEnvelope)
+		m.tasks[0].HasUncommittedChanges = false
+		m.tasks[0].GitAdditions = 0
+		m.tasks[0].GitDeletions = 0
+
+		updated, cmd := m.Update(makeSessionEvent(7, true))
+		if cmd == nil {
+			t.Fatal("expected wait command")
+		}
+		next := updated.(Model)
+		if next.daemonRevision != 8 {
+			t.Fatalf("daemon revision = %d, want 8", next.daemonRevision)
+		}
+		if next.tasks[0].HasUncommittedChanges {
+			t.Fatalf("stale session event should not update dirty flag: %+v", next.tasks[0])
+		}
+	})
+
+	t.Run("gap session projection event rehydrates before apply", func(t *testing.T) {
+		m := newTestModel()
+		m.daemonRevision = 8
+		m.daemonEvents = make(chan protocol.EventEnvelope)
+		m.tasks[0].HasUncommittedChanges = false
+
+		updated, cmd := m.Update(makeSessionEvent(10, true))
+		if cmd == nil {
+			t.Fatal("expected reattach command")
+		}
+		next := updated.(Model)
+		if next.daemonEvents != nil {
+			t.Fatal("expected daemon stream to be cleared for rehydrate")
+		}
+		if next.daemonRevision != 8 {
+			t.Fatalf("daemon revision = %d, want 8", next.daemonRevision)
+		}
+		if next.tasks[0].HasUncommittedChanges {
+			t.Fatalf("gap session event should not apply projection before rehydrate: %+v", next.tasks[0])
+		}
+	})
+
+	t.Run("sequential session projection event applies and advances", func(t *testing.T) {
+		m := newTestModel()
+		m.daemonRevision = 8
+		m.daemonEvents = make(chan protocol.EventEnvelope)
+		m.tasks[0].HasUncommittedChanges = false
+		m.tasks[0].GitAdditions = 0
+		m.tasks[0].GitDeletions = 0
+
+		updated, cmd := m.Update(makeSessionEvent(9, true))
+		if cmd == nil {
+			t.Fatal("expected wait command")
+		}
+		next := updated.(Model)
+		if next.daemonRevision != 9 {
+			t.Fatalf("daemon revision = %d, want 9", next.daemonRevision)
+		}
+		if !next.tasks[0].HasUncommittedChanges || next.tasks[0].GitAdditions != 4 || next.tasks[0].GitDeletions != 2 {
+			t.Fatalf("sequential session event should update runtime projection: %+v", next.tasks[0])
 		}
 	})
 }
@@ -6009,6 +6416,248 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		if got := transport.requests; len(got) != 2 ||
 			got[0] != daemonclient.CommandTaskUpdateStatus ||
 			got[1] != daemonclient.CommandTaskUpdateStatus {
+			t.Fatalf("requests = %v", got)
+		}
+	})
+
+	t.Run("bulk cleanup and delete+cleanup use daemon lifecycle commands", func(t *testing.T) {
+		removeBodies := make([]struct {
+			IssueID string `json:"issue_id"`
+			Force   bool   `json:"force,omitempty"`
+		}, 0, 2)
+		deleteBodies := make([]daemonclient.TaskIDRequest, 0, 1)
+
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandSessionStop:
+					// No-op: stop may legitimately be called even when already stopped.
+				case daemonclient.CommandWorktreeRemove:
+					var body struct {
+						IssueID string `json:"issue_id"`
+						Force   bool   `json:"force,omitempty"`
+					}
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal worktree remove request: %v", err)
+					}
+					removeBodies = append(removeBodies, body)
+				case daemonclient.CommandTaskDelete:
+					var body daemonclient.TaskIDRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal task delete request: %v", err)
+					}
+					deleteBodies = append(deleteBodies, body)
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+				}, nil
+			},
+		}
+
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{
+			{ID: "az-1", Status: domain.StatusOpen},
+			{ID: "az-2", Status: domain.StatusOpen},
+		}
+
+		cleanupOnly := m.bulkCleanupWorktreeCmd([]string{"az-1"}, false)()
+		cleanupOnlyResult, ok := cleanupOnly.(bulkStatusResultMsg)
+		if !ok {
+			t.Fatalf("cleanup-only message type = %T, want bulkStatusResultMsg", cleanupOnly)
+		}
+		if cleanupOnlyResult.updated != 1 || cleanupOnlyResult.failed != 0 {
+			t.Fatalf("cleanup-only result = %+v", cleanupOnlyResult)
+		}
+
+		deleteAndCleanup := m.bulkCleanupWorktreeCmd([]string{"az-2"}, true)()
+		deleteAndCleanupResult, ok := deleteAndCleanup.(bulkStatusResultMsg)
+		if !ok {
+			t.Fatalf("delete+cleanup message type = %T, want bulkStatusResultMsg", deleteAndCleanup)
+		}
+		if deleteAndCleanupResult.updated != 1 || deleteAndCleanupResult.failed != 0 {
+			t.Fatalf("delete+cleanup result = %+v", deleteAndCleanupResult)
+		}
+
+		if len(removeBodies) != 2 || removeBodies[0].IssueID != "az-1" || removeBodies[1].IssueID != "az-2" {
+			t.Fatalf("worktree remove bodies = %+v, want az-1 and az-2", removeBodies)
+		}
+		if removeBodies[0].Force || removeBodies[1].Force {
+			t.Fatalf("worktree remove force flag = %+v, want false", removeBodies)
+		}
+		if len(deleteBodies) != 1 || deleteBodies[0].TaskID != "az-2" {
+			t.Fatalf("delete bodies = %+v, want one delete for az-2", deleteBodies)
+		}
+
+		if got := transport.requests; len(got) != 5 ||
+			got[0] != daemonclient.CommandSessionStop ||
+			got[1] != daemonclient.CommandWorktreeRemove ||
+			got[2] != daemonclient.CommandSessionStop ||
+			got[3] != daemonclient.CommandWorktreeRemove ||
+			got[4] != daemonclient.CommandTaskDelete {
+			t.Fatalf("requests = %v", got)
+		}
+	})
+
+	t.Run("bulk cleanup preflight prompts when selected tasks are dirty or ahead", func(t *testing.T) {
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandRuntimeReconcileIssue:
+					respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{})
+					if err != nil {
+						t.Fatalf("marshal reconcile response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            respBody,
+					}, nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+							{ID: "az-1", Status: domain.StatusOpen, HasUncommittedChanges: true, GitAdditions: 3, GitDeletions: 1},
+							{ID: "az-2", Status: domain.StatusOpen, GitAheadCount: 2},
+						}),
+					}, nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{
+			{ID: "az-1", Status: domain.StatusOpen},
+			{ID: "az-2", Status: domain.StatusOpen},
+		}
+
+		updatedAny, cmd := m.handleBulkAction(overlay.BulkActionMsg{
+			Action:      "w",
+			SelectedIDs: []string{"az-1", "az-2"},
+		})
+		updated, ok := updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if cmd == nil {
+			t.Fatal("expected bulk cleanup preflight command")
+		}
+
+		preflightMsg := cmd()
+		preflight, ok := preflightMsg.(bulkCleanupPreflightMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want bulkCleanupPreflightMsg", preflightMsg)
+		}
+		if len(preflight.risks) != 2 {
+			t.Fatalf("preflight risks = %+v, want 2 flagged tasks", preflight.risks)
+		}
+
+		nextAny, _ := updated.Update(preflight)
+		next, ok := nextAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", nextAny)
+		}
+		if next.pendingBulkCleanup == nil {
+			t.Fatal("expected pending bulk cleanup confirmation")
+		}
+		if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskList {
+			t.Fatalf("requests = %v", got)
+		}
+	})
+
+	t.Run("bulk cleanup preflight proceeds immediately when no selected task is dirty/ahead", func(t *testing.T) {
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandRuntimeReconcileIssue:
+					respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{})
+					if err != nil {
+						t.Fatalf("marshal reconcile response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            respBody,
+					}, nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+							{ID: "az-1", Status: domain.StatusOpen, HasUncommittedChanges: false, GitAheadCount: 0},
+						}),
+					}, nil
+				case daemonclient.CommandSessionStop, daemonclient.CommandWorktreeRemove:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+					}, nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{
+			{ID: "az-1", Status: domain.StatusOpen},
+		}
+
+		_, cmd := m.handleBulkAction(overlay.BulkActionMsg{
+			Action:      "w",
+			SelectedIDs: []string{"az-1"},
+		})
+		if cmd == nil {
+			t.Fatal("expected bulk cleanup preflight command")
+		}
+
+		preflightMsg := cmd()
+		preflight, ok := preflightMsg.(bulkCleanupPreflightMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want bulkCleanupPreflightMsg", preflightMsg)
+		}
+
+		updatedAny, runCleanupCmd := m.Update(preflight)
+		updated, ok := updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if updated.pendingBulkCleanup != nil {
+			t.Fatal("did not expect pending bulk cleanup confirmation for clean preflight")
+		}
+		if runCleanupCmd == nil {
+			t.Fatal("expected cleanup command to run immediately for clean preflight")
+		}
+		resultMsg := runCleanupCmd()
+		result, ok := resultMsg.(bulkStatusResultMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want bulkStatusResultMsg", resultMsg)
+		}
+		if result.updated != 1 || result.failed != 0 {
+			t.Fatalf("bulk cleanup result = %+v", result)
+		}
+		if got := transport.requests; len(got) != 4 ||
+			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
+			got[1] != daemonclient.CommandTaskList ||
+			got[2] != daemonclient.CommandSessionStop ||
+			got[3] != daemonclient.CommandWorktreeRemove {
 			t.Fatalf("requests = %v", got)
 		}
 	})

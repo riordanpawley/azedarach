@@ -35,6 +35,7 @@ type GitCommandRequest struct {
 	BaseBranch    string                    `json:"base_branch,omitempty"`
 	Targets       []GitRuntimeSignalsTarget `json:"targets,omitempty"`
 	CompareRemote bool                      `json:"compare_remote,omitempty"`
+	Refresh       bool                      `json:"refresh,omitempty"`
 }
 
 // GitCommandResponse captures the daemon response body for git workflow commands.
@@ -203,6 +204,18 @@ func (c *Client) GitStatus(ctx context.Context, worktree string) (git.GitStatus,
 	var resp gitStatusBody
 	if err := c.commandJSON(ctx, CommandGitStatus, GitCommandRequest{
 		Worktree: worktree,
+	}, &resp); err != nil {
+		return git.GitStatus{}, err
+	}
+	return resp.Status, nil
+}
+
+// GitStatusRefresh asks the daemon to refresh and publish git status for the requested worktree before returning.
+func (c *Client) GitStatusRefresh(ctx context.Context, worktree string) (git.GitStatus, error) {
+	var resp gitStatusBody
+	if err := c.commandJSON(ctx, CommandGitStatus, GitCommandRequest{
+		Worktree: worktree,
+		Refresh:  true,
 	}, &resp); err != nil {
 		return git.GitStatus{}, err
 	}

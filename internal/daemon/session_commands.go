@@ -1684,7 +1684,7 @@ func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo 
 
 func buildCodexConfigOverrideArg(key, command string) string {
 	tomlCommand := strings.ReplaceAll(strings.ReplaceAll(command, `\`, `\\`), `"`, `\"`)
-	override := fmt.Sprintf(`%s=[{hooks=[{command="%s"}]}]`, key, tomlCommand)
+	override := fmt.Sprintf(`%s=[{hooks=[{type="command",command="%s"}]}]`, key, tomlCommand)
 	return fmt.Sprintf(`-c "%s"`, escapeForShellDoubleQuotes(override))
 }
 

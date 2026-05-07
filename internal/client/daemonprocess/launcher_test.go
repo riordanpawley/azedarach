@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -263,6 +264,103 @@ func TestLauncherStart_SpawnsWhenLockOwnerAliveButSocketUnready(t *testing.T) {
 	}
 }
 
+func TestLauncherReplaceTerminatesBeforeStart(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	tracker := &trackingWriteCloser{}
+
+	launcher := NewLauncher(repoDir, socketPath)
+	launcher.BinPath = "true"
+	launcher.sleepFn = func(time.Duration) {}
+
+	terminated := false
+	launcher.terminateLockOwner = func(lockPath string) error {
+		terminated = true
+		return os.Remove(lockPath)
+	}
+
+	readyCalls := 0
+	launcher.waitForReady = func(context.Context, string) error {
+		readyCalls++
+		if !terminated {
+			return nil
+		}
+		if readyCalls <= 2 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return tracker, nil }
+
+	lockRecordBytes, err := json.Marshal(map[string]any{
+		"pid":        os.Getpid(),
+		"created_at": time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("Marshal(lockRecord): %v", err)
+	}
+	if err := os.WriteFile(launcher.LockPath, lockRecordBytes, 0o644); err != nil {
+		t.Fatalf("WriteFile(lock): %v", err)
+	}
+
+	if err := launcher.Replace(context.Background()); err != nil {
+		t.Fatalf("Replace() error = %v", err)
+	}
+	if !terminated {
+		t.Fatal("Replace() did not terminate lock owner before Start")
+	}
+	if !tracker.closed.Load() {
+		t.Fatal("daemon log file was not closed after replacement Start() returned")
+	}
+}
+
+func TestLauncherReplaceGracefullyStopsSocketBeforeStart(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	tracker := &trackingWriteCloser{}
+
+	launcher := NewLauncher(repoDir, socketPath)
+	launcher.BinPath = "true"
+	launcher.sleepFn = func(time.Duration) {}
+
+	socketUp := true
+	spawned := false
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		socketUp = false
+		return nil
+	}
+	launcher.terminateLockOwner = func(string) error {
+		t.Fatal("Replace() should not terminate lock owner after graceful socket shutdown")
+		return nil
+	}
+
+	readyCalls := 0
+	launcher.waitForReady = func(context.Context, string) error {
+		readyCalls++
+		if socketUp || spawned {
+			return nil
+		}
+		return context.DeadlineExceeded
+	}
+	launcher.openLogFile = func(string) (io.WriteCloser, error) {
+		spawned = true
+		return tracker, nil
+	}
+
+	if err := launcher.Replace(context.Background()); err != nil {
+		t.Fatalf("Replace() error = %v", err)
+	}
+	if socketUp {
+		t.Fatal("Replace() did not request socket shutdown")
+	}
+	if !spawned {
+		t.Fatal("Replace() did not start a replacement daemon")
+	}
+	if !tracker.closed.Load() {
+		t.Fatal("daemon log file was not closed after replacement Start() returned")
+	}
+}
+
 func TestLauncherStart_ErrorsWhenLockRecoveryFails(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
@@ -342,6 +440,162 @@ func TestLauncherStart_ForceClearsLockWhenTerminateReturnsEPERM(t *testing.T) {
 	}
 }
 
+func TestLauncherStart_ForceClearsLockWhenTerminateReturnsWrappedPermissionDenied(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	tracker := &trackingWriteCloser{}
+
+	launcher := NewLauncher(repoDir, socketPath)
+	launcher.BinPath = "true"
+	launcher.sleepFn = func(time.Duration) {}
+	terminateCalls := 0
+	launcher.terminateLockOwner = func(string) error {
+		terminateCalls++
+		return lifecycle.ErrLockOwnerPermissionDenied
+	}
+
+	readyCalls := 0
+	launcher.waitForReady = func(context.Context, string) error {
+		readyCalls++
+		if readyCalls <= 3 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return tracker, nil }
+
+	lockRecordBytes, err := json.Marshal(map[string]any{
+		"pid":        os.Getpid(),
+		"created_at": time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("Marshal(lockRecord): %v", err)
+	}
+	if err := os.WriteFile(launcher.LockPath, lockRecordBytes, 0o644); err != nil {
+		t.Fatalf("WriteFile(lock): %v", err)
+	}
+
+	if err := launcher.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if readyCalls != 4 {
+		t.Fatalf("waitForReady call count = %d, want 4", readyCalls)
+	}
+	if terminateCalls != 1 {
+		t.Fatalf("terminate lock owner call count = %d, want 1", terminateCalls)
+	}
+	if _, err := os.Stat(launcher.LockPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock file should be removed by permission fallback, stat err = %v", err)
+	}
+	if !tracker.closed.Load() {
+		t.Fatal("daemon log file was not closed after Start() returned")
+	}
+}
+
+func TestLauncherStart_ForceClearsLockWhenTerminateReturnsTerminationTimeout(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	tracker := &trackingWriteCloser{}
+
+	launcher := NewLauncher(repoDir, socketPath)
+	launcher.BinPath = "true"
+	launcher.sleepFn = func(time.Duration) {}
+	terminateCalls := 0
+	launcher.terminateLockOwner = func(string) error {
+		terminateCalls++
+		return fmt.Errorf("%w: pid %d", lifecycle.ErrLockOwnerTerminationTimeout, os.Getpid())
+	}
+
+	readyCalls := 0
+	launcher.waitForReady = func(context.Context, string) error {
+		readyCalls++
+		if readyCalls <= 3 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return tracker, nil }
+
+	lockRecordBytes, err := json.Marshal(map[string]any{
+		"pid":        os.Getpid(),
+		"created_at": time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("Marshal(lockRecord): %v", err)
+	}
+	if err := os.WriteFile(launcher.LockPath, lockRecordBytes, 0o644); err != nil {
+		t.Fatalf("WriteFile(lock): %v", err)
+	}
+
+	if err := launcher.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if readyCalls != 4 {
+		t.Fatalf("waitForReady call count = %d, want 4", readyCalls)
+	}
+	if terminateCalls != 1 {
+		t.Fatalf("terminate lock owner call count = %d, want 1", terminateCalls)
+	}
+	if _, err := os.Stat(launcher.LockPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock file should be removed by timeout fallback, stat err = %v", err)
+	}
+	if !tracker.closed.Load() {
+		t.Fatal("daemon log file was not closed after Start() returned")
+	}
+}
+
+func TestLauncherStart_ForceClearsLockWhenTerminateReturnsPermissionDeniedString(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	tracker := &trackingWriteCloser{}
+
+	launcher := NewLauncher(repoDir, socketPath)
+	launcher.BinPath = "true"
+	launcher.sleepFn = func(time.Duration) {}
+	terminateCalls := 0
+	launcher.terminateLockOwner = func(string) error {
+		terminateCalls++
+		return errors.New("lock owner permission denied: operation not permitted")
+	}
+
+	readyCalls := 0
+	launcher.waitForReady = func(context.Context, string) error {
+		readyCalls++
+		if readyCalls <= 3 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return tracker, nil }
+
+	lockRecordBytes, err := json.Marshal(map[string]any{
+		"pid":        os.Getpid(),
+		"created_at": time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("Marshal(lockRecord): %v", err)
+	}
+	if err := os.WriteFile(launcher.LockPath, lockRecordBytes, 0o644); err != nil {
+		t.Fatalf("WriteFile(lock): %v", err)
+	}
+
+	if err := launcher.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if readyCalls != 4 {
+		t.Fatalf("waitForReady call count = %d, want 4", readyCalls)
+	}
+	if terminateCalls != 1 {
+		t.Fatalf("terminate lock owner call count = %d, want 1", terminateCalls)
+	}
+	if _, err := os.Stat(launcher.LockPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock file should be removed by permission fallback, stat err = %v", err)
+	}
+	if !tracker.closed.Load() {
+		t.Fatal("daemon log file was not closed after Start() returned")
+	}
+}
+
 func TestLauncherStart_RechecksSocketWhenLockRecoveryFails(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
@@ -349,7 +603,7 @@ func TestLauncherStart_RechecksSocketWhenLockRecoveryFails(t *testing.T) {
 	launcher := NewLauncher(repoDir, socketPath)
 	launcher.BinPath = filepath.Join(t.TempDir(), "missing-azd")
 	launcher.sleepFn = func(time.Duration) {}
-	launcher.terminateLockOwner = func(string) error { return lifecycle.ErrLockOwnerPermissionDenied }
+	launcher.terminateLockOwner = func(string) error { return errors.New("kill denied") }
 
 	readyCalls := 0
 	launcher.waitForReady = func(context.Context, string) error {
@@ -419,6 +673,50 @@ func TestLauncherStart_SocketReadySkipsSpawnWithoutLock(t *testing.T) {
 
 	if err := launcher.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v, want nil when socket is already ready", err)
+	}
+}
+
+func TestLauncherStart_SocketReadyWhileWaitingForStartLockReturnsNil(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	launcher := NewLauncher(repoDir, socketPath)
+	launcher.BinPath = filepath.Join(t.TempDir(), "missing-azd")
+
+	startLockPath := launcher.LockPath + ".start"
+	if err := os.MkdirAll(filepath.Dir(startLockPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(start lock dir): %v", err)
+	}
+	lockFile, err := os.OpenFile(startLockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("OpenFile(start lock): %v", err)
+	}
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lockFile.Close()
+		t.Fatalf("Flock(start lock): %v", err)
+	}
+	defer func() {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+	}()
+
+	readyCalls := 0
+	launcher.waitForReady = func(context.Context, string) error {
+		readyCalls++
+		if readyCalls >= 2 {
+			return nil
+		}
+		return context.DeadlineExceeded
+	}
+	launcher.sleepFn = func(time.Duration) {}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+
+	if err := launcher.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v, want nil when socket becomes ready under lock contention", err)
+	}
+	if readyCalls < 2 {
+		t.Fatalf("waitForReady call count = %d, want >= 2", readyCalls)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
@@ -35,23 +36,23 @@ type applyIntegrationService struct {
 	deleteErr error
 }
 
-func (s *applyIntegrationService) Create(_ context.Context, params issues.CreateTaskParams) (string, error) {
+func (s *applyIntegrationService) Create(_ context.Context, params issues.CreateTaskParams) (domain.Task, error) {
 	parentID := ""
 	if params.ParentID != nil {
 		parentID = *params.ParentID
 	}
 	s.calls = append(s.calls, fmt.Sprintf("create:%s:%s:%s:%s", params.Title, params.Priority.String(), params.Type, parentID))
-	return "az-new", nil
+	return domain.Task{ID: "az-new", Title: params.Title, Status: params.Status, Priority: params.Priority, Type: params.Type}, nil
 }
 
-func (s *applyIntegrationService) Update(_ context.Context, id string, status domain.Status) error {
+func (s *applyIntegrationService) Update(_ context.Context, id string, status domain.Status) (domain.Task, error) {
 	s.calls = append(s.calls, fmt.Sprintf("status:%s:%s", id, status))
-	return nil
+	return domain.Task{ID: naming.IssueID(id), Title: "status " + id, Status: status}, nil
 }
 
-func (s *applyIntegrationService) UpdateDetails(_ context.Context, id string, params issues.UpdateTaskParams) error {
+func (s *applyIntegrationService) UpdateDetails(_ context.Context, id string, params issues.UpdateTaskParams) (domain.Task, error) {
 	s.calls = append(s.calls, fmt.Sprintf("update:%s:%s:%s:%s", id, params.Title, params.Priority.String(), params.Type))
-	return nil
+	return domain.Task{ID: naming.IssueID(id), Title: params.Title, Status: domain.StatusOpen, Priority: params.Priority, Type: params.Type}, nil
 }
 
 func (s *applyIntegrationService) Delete(_ context.Context, id string) error {
@@ -64,14 +65,14 @@ func (s *applyIntegrationService) Archive(_ context.Context, id string) error {
 	return nil
 }
 
-func (s *applyIntegrationService) AddDependency(_ context.Context, issueID, dependsOnID, dependencyType string) error {
+func (s *applyIntegrationService) AddDependency(_ context.Context, issueID, dependsOnID, dependencyType string) (domain.Task, error) {
 	s.calls = append(s.calls, fmt.Sprintf("dep-add:%s:%s:%s", issueID, dependsOnID, dependencyType))
-	return nil
+	return domain.Task{ID: naming.IssueID(issueID), Title: "dep " + issueID, Status: domain.StatusOpen}, nil
 }
 
-func (s *applyIntegrationService) RemoveDependency(_ context.Context, issueID, dependsOnID, dependencyType string) error {
+func (s *applyIntegrationService) RemoveDependency(_ context.Context, issueID, dependsOnID, dependencyType string) (domain.Task, error) {
 	s.calls = append(s.calls, fmt.Sprintf("dep-remove:%s:%s:%s", issueID, dependsOnID, dependencyType))
-	return nil
+	return domain.Task{ID: naming.IssueID(issueID), Title: "dep " + issueID, Status: domain.StatusOpen}, nil
 }
 
 type applyIntegrationRevisions struct {
@@ -88,7 +89,7 @@ func (r *applyIntegrationRevisions) NextRevision(string) uint64 {
 	return r.current
 }
 
-func (r *applyIntegrationRevisions) PublishTaskEvent(_ protocol.RequestEnvelope, eventName string, rev uint64) {
+func (r *applyIntegrationRevisions) PublishTaskEvent(_ protocol.RequestEnvelope, eventName string, rev uint64, _ ...protocol.TaskEventBody) {
 	r.published = append(r.published, fmt.Sprintf("%s:%d", eventName, rev))
 }
 

@@ -33,6 +33,9 @@ func (m *Model) syncProjectionIndexesFromTasks() {
 		signals.HasUncommittedChanges = task.HasUncommittedChanges
 		signals.GitAdditions = task.GitAdditions
 		signals.GitDeletions = task.GitDeletions
+		signals.PendingOperationID = ""
+		signals.PendingOperationState = ""
+		signals.PendingOperationPercent = 0
 		nextSignals[taskID] = signals
 
 		if task.Session != nil {

@@ -1741,6 +1741,9 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvent(t *testing.T) {
 	if body.Runtime.Projection.Session.State != protocol.SessionLifecycleStateStopped {
 		t.Fatalf("runtime session state = %s, want observed %s", body.Runtime.Projection.Session.State, protocol.SessionLifecycleStateStopped)
 	}
+	if body.Runtime.Projection.Session.HasSession {
+		t.Fatalf("runtime session = %+v, want stopped session inactive", body.Runtime.Projection.Session)
+	}
 }
 
 func TestApplySessionLifecycleTransitionPreservesObservedRuntimeState(t *testing.T) {
@@ -2426,19 +2429,19 @@ func TestBuildSessionLaunchCommandIncludesCodexHookOverrides(t *testing.T) {
 		[]string{"/tmp/a.png", "/tmp/with space/image.png", "   "},
 		`work on issue axt-123 (task): Verify startup behavior`,
 	)
-	if !strings.Contains(command, "hooks.SessionStart=[{hooks=[{command=") {
+	if !strings.Contains(command, `hooks.SessionStart=[{hooks=[{type=\"command\",command=`) {
 		t.Fatalf("command = %q, want codex SessionStart hook override", command)
 	}
-	if !strings.Contains(command, "hooks.UserPromptSubmit=[{hooks=[{command=") {
+	if !strings.Contains(command, `hooks.UserPromptSubmit=[{hooks=[{type=\"command\",command=`) {
 		t.Fatalf("command = %q, want codex UserPromptSubmit hook override", command)
 	}
-	if !strings.Contains(command, "hooks.PreToolUse=[{hooks=[{command=") {
+	if !strings.Contains(command, `hooks.PreToolUse=[{hooks=[{type=\"command\",command=`) {
 		t.Fatalf("command = %q, want codex PreToolUse hook override", command)
 	}
-	if !strings.Contains(command, "hooks.PostToolUse=[{hooks=[{command=") {
+	if !strings.Contains(command, `hooks.PostToolUse=[{hooks=[{type=\"command\",command=`) {
 		t.Fatalf("command = %q, want codex PostToolUse hook override", command)
 	}
-	if !strings.Contains(command, "hooks.Stop=[{hooks=[{command=") {
+	if !strings.Contains(command, `hooks.Stop=[{hooks=[{type=\"command\",command=`) {
 		t.Fatalf("command = %q, want codex Stop hook override", command)
 	}
 	if !strings.Contains(command, `az notify --json session_start axt-123`) {

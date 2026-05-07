@@ -7,11 +7,12 @@ Active issue ID: `{{ .ActiveIssueID }}`
 
 - First 3 commands for this session:
   - {{ if .ActiveIssueID }}`az issue get {{ .ActiveIssueID }}`{{ else }}`az issue get <issue-id>`{{ end }}
-  - {{ if .SpecEnabled }}`az spec` (inspect linked requirements before behavior changes){{ else }}Spec workflows are disabled for this project (skip spec checks).{{ end }}
+  - {{ if .SpecEnabled }}{{ if .ActiveIssueID }}`az spec read --issue {{ .ActiveIssueID }}`{{ else }}`az spec read --issue <issue-id>`{{ end }} (inspect linked requirements before behavior changes){{ else }}Spec workflows are disabled for this project (skip spec checks).{{ end }}
   - Optional (only when splitting work): `az issue create "Child task"` to break the active issue into smaller, independently actionable chunks
 - How to use `az` command map:
   - Issue lifecycle:
-  - `az issue list --limit 20`, `az issue list --status in_progress --limit 20`, `az issue get <issue-id>`, `az issue create "Child task" [--json]` (auto-parent), `az issue create --deferred "Later task" [--json]`, `az issue update <issue-id> --status in_progress|blocked|open [--json]`, `az issue close <issue-id> [--json]`
+  - `az issue list --limit 20`, `az issue list --status in_progress --limit 20`, `az issue get <issue-id>`, `az issue create "Child task" [--json]` (immediate child work; auto-parents under `AZEDARACH_ISSUE_ID`), `az issue create --deferred "Later backlog task" [--json]` (standalone later work; does not auto-parent), `az issue update <issue-id> --status in_progress|blocked|open [--json]`, `az issue close <issue-id> [--json]`
+  - `az issue update`: use `--update-impl` only when changing implementation assignments; status/title/notes updates do not need it.
   - `az issue bulk-create --input issues.json --json`, `az issue bulk-update --input updates.json --json`, `az issue update <issue-id> --design "..."`, `az issue update <issue-id> --notes "..."`, `az issue update <issue-id> --append-notes "..."`
   - Issue dependency graph:
   - `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from] [--json]`, `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from] [--json]`
@@ -23,7 +24,8 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Spec traceability:
   - {{ if .SpecEnabled }}`az spec req list/get/create/update/delete`, `az spec link list/add/remove`, `az spec read`, `az spec lint`, `az spec parity`, and `az spec sync --target md` before behavior changes and after behavior edits to keep requirements/links aligned.{{ else }}Spec workflows disabled for this project (`az config set spec.enabled false`).{{ end }}
   - Session/runtime operations:
-  - `az session start <issue-id>`, `az session status [issue-id]`, `az daemon start|stop|restart`, `az export --format json [--out <path>]`
+  - `az session status [issue-id]`, `az daemon start|stop|restart`, `az export --format json [--out <path>]`
+  - `az session start <issue-id>` is for explicit/manual orchestration; agents should not run it unless the user asks.
 - Use `az issue` commands as the task-tracker interface for this repo.
 - Prefer `az issue` operations over direct backend issue CLI commands in sessions.
 - Create follow-up/child work in the tracker instead of local TODOs.
@@ -32,8 +34,9 @@ Active issue ID: `{{ .ActiveIssueID }}`
 {{ if .IssueSection }}{{ .IssueSection }}
 {{ end }}{{ if .QuestionFirstGuardrails }}{{ .QuestionFirstGuardrails }}
 {{ end }}- Follow-up and dependency rules:
-  - Create follow-up scope with `az issue create "Title"`; when `AZEDARACH_ISSUE_ID` is set this auto-creates a child issue under that parent.
-  - Use `az issue create --deferred "Title"` for follow-up scope that should be tracked now but not executed immediately.
+  - Create immediate child/blocking scope with `az issue create "Title"`; when `AZEDARACH_ISSUE_ID` is set this auto-creates a child issue under that parent.
+  - Use `az issue create --deferred "Title"` only for standalone later/backlog work that should be tracked now but not executed before the active issue closes.
+  - Do not use `--deferred` for child tasks, blockers, or work required before closing the active issue; create normal child issues instead.
   - When fanning out to subagents, split work until each child issue is independently actionable and fits within a single subagent context window.
   - Then assign one subagent per child issue, tell each subagent to use `az issue` and create/maintain its own child issue under the active parent, and reserve `az prime` for the orchestrator unless a subagent explicitly needs a fresh primer.
   - Shorthand: `single-window fanout` means split until each child is ready for one subagent, then fan out one subagent per child.
@@ -44,7 +47,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
 {{ end }}- Keep issue context current as you work:
   - Update design/notes as implementation decisions change.
   - Use status/priority/labels flags when state changes materially.
-- Overlay edits: check `az spec` requirements/links before behavior changes, keep `View()` and `Size()` aligned, validate default and narrow viewports, and update goldens when rendered output changes. If the work is docs/process-only, record `Spec impact: none (docs/process-only)` in issue notes.
+- Overlay edits: check `az spec read --issue <issue-id>` before behavior changes, keep `View()` and `Size()` aligned, validate default and narrow viewports, and update goldens when rendered output changes. If the work is docs/process-only, record `Spec impact: none (docs/process-only)` in issue notes.
 - `az issue --help`
 {{ if .SpecGuardrails }}- Spec workflow:
 {{ .SpecGuardrails }}

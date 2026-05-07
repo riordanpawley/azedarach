@@ -22,8 +22,10 @@ type DiffClient interface {
 type PopupOpener func(ctx context.Context, title, command string) error
 
 type loadChangedFilesMsg struct {
-	Files []gitservice.ChangedFile
-	Err   error
+	Files      []gitservice.ChangedFile
+	DirtyFiles []gitservice.ChangedFile
+	DirtyErr   error
+	Err        error
 }
 
 type popupResultMsg struct {
@@ -37,19 +39,32 @@ type ExternalRefreshMsg struct{}
 type DiffViewer struct {
 	worktree    string
 	baseBranch  string
+	issueID     string
 	gitClient   DiffClient
 	openPopup   PopupOpener
 	files       []gitservice.ChangedFile
+	dirtyFiles  []gitservice.ChangedFile
 	cursor      int
 	scrollY     int
 	styles      *Styles
 	viewHeight  int
+	viewportW   int
+	viewportH   int
 	loading     bool
 	searchMode  bool
 	filterText  string
 	err         error
+	dirtyErr    error
 	popupStatus string
+	activeTab   diffViewerTab
 }
+
+type diffViewerTab int
+
+const (
+	diffViewerTabCommitted diffViewerTab = iota
+	diffViewerTabDirty
+)
 
 // NewDiffViewer creates a new diff viewer for the specified worktree.
 func NewDiffViewer(worktree, baseBranch string, gitClient DiffClient, openPopup PopupOpener) *DiffViewer {
@@ -59,11 +74,19 @@ func NewDiffViewer(worktree, baseBranch string, gitClient DiffClient, openPopup 
 		gitClient:  gitClient,
 		openPopup:  openPopup,
 		files:      []gitservice.ChangedFile{},
+		dirtyFiles: []gitservice.ChangedFile{},
 		cursor:     0,
 		scrollY:    0,
 		styles:     New(),
 		viewHeight: 20,
+		activeTab:  diffViewerTabCommitted,
 	}
+}
+
+// WithIssueID annotates the viewer title with the issue/task being inspected.
+func (d *DiffViewer) WithIssueID(issueID string) *DiffViewer {
+	d.issueID = strings.TrimSpace(issueID)
+	return d
 }
 
 func (d *DiffViewer) loadChangedFilesCmd() tea.Cmd {
@@ -75,7 +98,13 @@ func (d *DiffViewer) loadChangedFilesCmd() tea.Cmd {
 		if err != nil {
 			return loadChangedFilesMsg{Err: err}
 		}
-		return loadChangedFilesMsg{Files: files, Err: err}
+		status, statusErr := d.gitClient.Status(context.Background(), d.worktree)
+		return loadChangedFilesMsg{
+			Files:      files,
+			DirtyFiles: statusChangedFiles(status),
+			DirtyErr:   statusErr,
+			Err:        err,
+		}
 	}
 }
 
@@ -105,10 +134,26 @@ func (d *DiffViewer) openPopupCmd(filePath string, all bool) tea.Cmd {
 
 		var title string
 		var command string
-		if all {
+		if d.activeTab == diffViewerTabDirty {
+			if all {
+				title = " Dirty Files "
+				command = "git status --short && echo \"\" && git diff HEAD --stat --color=always && echo \"\" && ( if command -v difft >/dev/null 2>&1; then DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff HEAD; else git diff HEAD --color=always; fi ) | less -RS"
+			} else {
+				quotedFile := shellSingleQuote(filePath)
+				title = " " + filePath + " "
+				command = fmt.Sprintf(
+					"( if git ls-files --error-unmatch -- %s >/dev/null 2>&1; then if command -v difft >/dev/null 2>&1; then DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff HEAD -- %s; else git diff HEAD --color=always -- %s; fi; else printf 'Untracked file: %%s\\n\\n' %s; sed -n '1,240p' %s; fi ) | less -RS",
+					quotedFile,
+					quotedFile,
+					quotedFile,
+					quotedFile,
+					quotedFile,
+				)
+			}
+		} else if all {
 			title = " All Changes "
 			command = fmt.Sprintf(
-				"%s git diff \"$BASE_REF\"...HEAD --stat --color=always -- ':^.azedarach' && echo \"\" && ( if command -v difft >/dev/null 2>&1; then DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff \"$BASE_REF\"...HEAD -- ':^.azedarach'; else git diff \"$BASE_REF\"...HEAD --color=always -- ':^.azedarach'; fi ) | less -RS",
+				"%s git diff \"$BASE_REF\"...HEAD --stat --color=always && echo \"\" && ( if command -v difft >/dev/null 2>&1; then DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff \"$BASE_REF\"...HEAD; else git diff \"$BASE_REF\"...HEAD --color=always; fi ) | less -RS",
 				resolveBaseRef,
 			)
 		} else {
@@ -148,12 +193,23 @@ func (d *DiffViewer) Worktree() string {
 
 func (d *DiffViewer) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		if msg.Width > 0 {
+			d.viewportW = msg.Width
+		}
+		if msg.Height > 0 {
+			d.viewportH = msg.Height
+		}
+		d.Size()
+		return d, nil
+
 	case ExternalRefreshMsg:
 		if d.loading {
 			return d, nil
 		}
 		d.loading = true
 		d.err = nil
+		d.dirtyErr = nil
 		d.popupStatus = ""
 		return d, d.loadChangedFilesCmd()
 
@@ -162,6 +218,7 @@ func (d *DiffViewer) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		d.cursor = 0
 		d.scrollY = 0
 		d.files = nil
+		d.dirtyFiles = nil
 		d.searchMode = false
 		d.filterText = ""
 		d.popupStatus = ""
@@ -174,7 +231,9 @@ func (d *DiffViewer) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d, nil
 		}
 		d.err = nil
+		d.dirtyErr = msg.DirtyErr
 		d.files = msg.Files
+		d.dirtyFiles = msg.DirtyFiles
 		return d, nil
 
 	case popupResultMsg:
@@ -245,6 +304,10 @@ func (d *DiffViewer) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc", "q":
 			return d, func() tea.Msg { return overlay.CloseOverlayMsg{} }
 
+		case "tab":
+			d.toggleTab()
+			return d, nil
+
 		case "j", "down":
 			if d.cursor < len(filtered)-1 {
 				d.cursor++
@@ -293,6 +356,7 @@ func (d *DiffViewer) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (d *DiffViewer) View() string {
+	d.Size()
 	if d.loading {
 		return d.styles.Dimmed.Render("Loading changed files...")
 	}
@@ -301,15 +365,25 @@ func (d *DiffViewer) View() string {
 		return d.styles.DeleteLine.Render(fmt.Sprintf("Error loading changed files: %v", d.err))
 	}
 
-	if len(d.files) == 0 {
+	if len(d.files) == 0 && len(d.dirtyFiles) == 0 {
 		return d.styles.Dimmed.Render(fmt.Sprintf("No changes vs %s", d.effectiveBaseBranch()))
 	}
 	filtered := d.filteredFiles()
 	if len(filtered) == 0 {
-		return d.styles.Dimmed.Render(fmt.Sprintf("No matches for %q", d.filterText))
+		if strings.TrimSpace(d.filterText) != "" {
+			return lipgloss.JoinVertical(lipgloss.Left, d.renderTabs(), d.styles.Dimmed.Render(fmt.Sprintf("No matches for %q", d.filterText)), d.renderFooter())
+		}
+		return lipgloss.JoinVertical(lipgloss.Left, d.renderTabs(), d.styles.Dimmed.Render(d.emptyTabMessage()), d.renderFooter())
 	}
 
 	var content strings.Builder
+
+	content.WriteString(d.renderTabs())
+	content.WriteString("\n")
+	if d.dirtyErr != nil && d.activeTab == diffViewerTabDirty {
+		content.WriteString(d.styles.DeleteLine.Render(fmt.Sprintf("Could not load dirty files: %v", d.dirtyErr)))
+		content.WriteString("\n")
+	}
 
 	lines := d.renderFiles(filtered)
 
@@ -333,19 +407,21 @@ func (d *DiffViewer) View() string {
 }
 
 func (d *DiffViewer) Title() string {
-	if len(d.files) == 0 {
-		return fmt.Sprintf("Diff vs %s", d.effectiveBaseBranch())
+	scope := ""
+	if d.issueID != "" {
+		scope = fmt.Sprintf(" | %s", d.issueID)
 	}
 	filterSuffix := ""
 	if strings.TrimSpace(d.filterText) != "" {
-		filterSuffix = fmt.Sprintf(" | %d/%d match", len(d.filteredFiles()), len(d.files))
+		filterSuffix = fmt.Sprintf(" | %d/%d match", len(d.filteredFiles()), len(d.activeFiles()))
 	}
-	return fmt.Sprintf("Diff vs %s (%d file%s%s)", d.effectiveBaseBranch(), len(d.files), plural(len(d.files)), filterSuffix)
+	return fmt.Sprintf("Diff%s vs %s (%d committed, %d dirty%s)", scope, d.effectiveBaseBranch(), len(d.files), len(d.dirtyFiles), filterSuffix)
 }
 
 func (d *DiffViewer) Size() (width, height int) {
-	d.viewHeight = 20
-	return 100, 30
+	width, height = overlay.ClampResponsiveDialogSize(100, 30, d.viewportW, d.viewportH)
+	d.viewHeight = max(1, height-7)
+	return width, height
 }
 
 func (d *DiffViewer) renderFiles(files []gitservice.ChangedFile) []string {
@@ -387,6 +463,7 @@ func (d *DiffViewer) renderFiles(files []gitservice.ChangedFile) []string {
 
 func (d *DiffViewer) renderFooter() string {
 	hints := []keybinds.Binding{
+		{Key: "Tab", Description: "switch section"},
 		{Key: "j/k", Description: "navigate files"},
 		{Key: "Enter", Description: "popup selected"},
 		{Key: "a", Description: "popup all"},
@@ -424,11 +501,12 @@ func (d *DiffViewer) ensureCursorVisible() {
 
 func (d *DiffViewer) filteredFiles() []gitservice.ChangedFile {
 	query := strings.ToLower(strings.TrimSpace(d.filterText))
+	files := d.activeFiles()
 	if query == "" {
-		return d.files
+		return files
 	}
-	filtered := make([]gitservice.ChangedFile, 0, len(d.files))
-	for _, file := range d.files {
+	filtered := make([]gitservice.ChangedFile, 0, len(files))
+	for _, file := range files {
 		path := strings.ToLower(file.Path)
 		oldPath := strings.ToLower(file.OldPath)
 		if strings.Contains(path, query) || strings.Contains(oldPath, query) {
@@ -436,6 +514,52 @@ func (d *DiffViewer) filteredFiles() []gitservice.ChangedFile {
 		}
 	}
 	return filtered
+}
+
+func (d *DiffViewer) activeFiles() []gitservice.ChangedFile {
+	if d.activeTab == diffViewerTabDirty {
+		return d.dirtyFiles
+	}
+	return d.files
+}
+
+func (d *DiffViewer) toggleTab() {
+	if d.activeTab == diffViewerTabDirty {
+		d.activeTab = diffViewerTabCommitted
+	} else {
+		d.activeTab = diffViewerTabDirty
+	}
+	d.cursor = 0
+	d.scrollY = 0
+	d.searchMode = false
+	d.filterText = ""
+}
+
+func (d *DiffViewer) renderTabs() string {
+	committed := fmt.Sprintf("Committed diff (%d)", len(d.files))
+	dirty := fmt.Sprintf("Dirty files (%d)", len(d.dirtyFiles))
+	if d.activeTab == diffViewerTabCommitted {
+		committed = d.styles.FileHeaderSelected.Render(committed)
+		dirty = d.styles.Dimmed.Render(dirty)
+	} else {
+		committed = d.styles.Dimmed.Render(committed)
+		dirty = d.styles.FileHeaderSelected.Render(dirty)
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Left, committed, d.styles.Footer.Render("  |  "), dirty)
+}
+
+func (d *DiffViewer) emptyTabMessage() string {
+	if d.activeTab == diffViewerTabDirty {
+		return "No dirty files"
+	}
+	return fmt.Sprintf("No committed diff vs %s", d.effectiveBaseBranch())
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func min(a, b int) int {

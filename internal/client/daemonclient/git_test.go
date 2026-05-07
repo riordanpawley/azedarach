@@ -270,6 +270,45 @@ func TestGitFetchCheckoutAndMergeCommandsRouteThroughDaemon(t *testing.T) {
 	})
 }
 
+func TestGitStatusRefreshCommandSetsRefreshFlag(t *testing.T) {
+	const worktree = "/tmp/az-1"
+	transport := &gitRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != CommandGitStatus {
+				t.Fatalf("command = %q, want %q", req.Command, CommandGitStatus)
+			}
+			var body GitCommandRequest
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal request: %v", err)
+			}
+			if body.Worktree != worktree || !body.Refresh {
+				t.Fatalf("request body = %+v, want worktree with refresh", body)
+			}
+			respBody, err := json.Marshal(gitStatusBody{
+				Status: git.GitStatus{HasChanges: true, Modified: []string{"README.md"}},
+			})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	status, err := New(transport).GitStatusRefresh(context.Background(), worktree)
+	if err != nil {
+		t.Fatalf("GitStatusRefresh error: %v", err)
+	}
+	if !status.HasChanges {
+		t.Fatalf("status = %+v, want refreshed dirty status", status)
+	}
+}
+
 func TestGitCommandsDecodeNestedOperationResult(t *testing.T) {
 	const worktree = "/tmp/az-1"
 	transport := &gitRecordingTransport{

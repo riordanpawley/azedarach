@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -45,6 +46,7 @@ type TaskCreateParams struct {
 type TaskUpdateParams struct {
 	Title           string          `json:"title"`
 	Description     string          `json:"description"`
+	Notes           *string         `json:"notes,omitempty"`
 	Type            domain.TaskType `json:"type"`
 	Priority        domain.Priority `json:"priority"`
 	Implementations []string        `json:"implementations"`
@@ -211,7 +213,7 @@ func (c *Client) ListTasksSnapshotWithMode(ctx context.Context, mode ReadWaitMod
 		ack, diag := c.Handshake(waitCtx, protocol.Hello{
 			ProtocolVersion: protocol.CurrentVersion,
 			ClientName:      "client",
-			ClientVersion:   "dev",
+			ClientVersion:   buildinfo.VersionString(),
 			Capabilities:    []string{"snapshot", "subscribe"},
 		})
 		if diag != nil {

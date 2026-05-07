@@ -475,11 +475,6 @@ func (a *worktreeServiceAdapter) Delete(ctx context.Context, projectID string, i
 	if manager == nil {
 		return errors.New("worktree manager unavailable")
 	}
-	if a.ensureRuntimeFreshForMutation != nil {
-		if err := a.ensureRuntimeFreshForMutation(ctx, normalizedProjectID(projectID), daemonhandlers.CommandWorktreeRemove); err != nil {
-			return err
-		}
-	}
 	worktree, err := manager.Get(ctx, issueID)
 	if err != nil {
 		return err
