@@ -94,6 +94,11 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 	case "m":
 		task, session := m.getCurrentTaskAndSession()
+		if selectionTaskID != "" {
+			if selectedTask, selectedSession, ok := m.taskAndSessionByID(selectionTaskID); ok {
+				task, session = selectedTask, selectedSession
+			}
+		}
 		if task != nil {
 			m.beginMutationFeedback(fmt.Sprintf("Preparing merge for %s", task.ID))
 		}
