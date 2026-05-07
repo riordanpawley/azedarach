@@ -756,7 +756,10 @@ func insertCardMetaLine(card string, meta string, s *styles.Styles) string {
 	innerWidth := maxInt(1, width-4)
 	meta = ansi.Truncate(meta, innerWidth, "…")
 	padding := maxInt(0, innerWidth-ansi.StringWidth(meta))
-	metaLine := "│ " + s.StatusInfo.Render(meta) + strings.Repeat(" ", padding) + " │"
+	referenceLine := lines[maxInt(0, len(lines)-2)]
+	leftBorder := ansi.Cut(referenceLine, 0, 1)
+	rightBorder := ansi.Cut(referenceLine, maxInt(0, width-1), width)
+	metaLine := leftBorder + " " + s.StatusInfo.Render(meta) + strings.Repeat(" ", padding) + " " + rightBorder
 	out := make([]string, 0, len(lines)+1)
 	out = append(out, lines[:len(lines)-1]...)
 	out = append(out, metaLine)
@@ -925,13 +928,34 @@ func insertJumpLabel(card string, label string, s *styles.Styles) string {
 	}
 	label = s.MenuKey.Render(label)
 	for i, line := range lines {
-		if strings.Contains(line, "│ ") {
-			lines[i] = strings.Replace(line, "│ ", "│ "+label+" ", 1)
+		if next, ok := insertJumpLabelInCardLine(line, label); ok {
+			lines[i] = next
 			return strings.Join(lines, "\n")
 		}
 	}
 	lines[0] = label + " " + lines[0]
 	return strings.Join(lines, "\n")
+}
+
+func insertJumpLabelInCardLine(line string, label string) (string, bool) {
+	left := strings.Index(line, "│ ")
+	right := strings.LastIndex(line, " │")
+	if left < 0 || right <= left+len("│ ") {
+		return "", false
+	}
+
+	prefixEnd := left + len("│ ")
+	prefix := line[:prefixEnd]
+	inner := line[prefixEnd:right]
+	suffix := line[right:]
+	labelPrefix := label + " "
+	innerWidth := ansi.StringWidth(line) - ansi.StringWidth(prefix) - ansi.StringWidth(suffix) - ansi.StringWidth(labelPrefix)
+	if innerWidth < 0 {
+		innerWidth = 0
+	}
+	inner = ansi.Truncate(inner, innerWidth, "…")
+	padding := maxInt(0, innerWidth-ansi.StringWidth(inner))
+	return prefix + labelPrefix + inner + strings.Repeat(" ", padding) + suffix, true
 }
 
 func gridColumnCount(width int) int {
@@ -951,7 +975,7 @@ func gridCardWidth(width int, columns int) int {
 	}
 	const gapWidth = 2
 	available := maxInt(1, width-4)
-	cardWidth := (available - gapWidth*(columns-1)) / columns
+	cardWidth := (available-gapWidth*(columns-1))/columns - 2
 	return clampInt(cardWidth, 36, 96)
 }
 

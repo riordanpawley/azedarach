@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
@@ -435,6 +436,38 @@ func TestModelViewUsesTmuxCopyAndBottomToolbar(t *testing.T) {
 	}
 }
 
+func TestRenderSessionRowStylesInsertedMetaBordersLikeCardBorders(t *testing.T) {
+	rendered := RenderSessionRow(SessionRow{
+		SessionID:      "az-one",
+		IssueID:        "one",
+		TaskTitle:      "One",
+		ProjectPath:    "/tmp/project",
+		HasTmuxSession: true,
+	}, true, 42, lipgloss.Style{}, lipgloss.Style{}, lipgloss.Style{}, styles.New())
+	lines := strings.Split(rendered, "\n")
+	if len(lines) < 4 {
+		t.Fatalf("rendered card too short:\n%s", rendered)
+	}
+	metaLine := ""
+	for _, line := range lines {
+		if strings.Contains(ansi.Strip(line), "tmux az-one") {
+			metaLine = line
+			break
+		}
+	}
+	if metaLine == "" {
+		t.Fatalf("missing tmux metadata line:\n%s", rendered)
+	}
+	referenceLine := lines[len(lines)-3]
+	width := ansi.StringWidth(referenceLine)
+	if got, want := ansi.Cut(metaLine, 0, 1), ansi.Cut(referenceLine, 0, 1); got != want {
+		t.Fatalf("left meta border should reuse styled card border:\ngot  %q\nwant %q\n%s", got, want, rendered)
+	}
+	if got, want := ansi.Cut(metaLine, width-1, width), ansi.Cut(referenceLine, width-1, width); got != want {
+		t.Fatalf("right meta border should reuse styled card border:\ngot  %q\nwant %q\n%s", got, want, rendered)
+	}
+}
+
 func TestModelViewFitsViewportHeightWithWrappedCards(t *testing.T) {
 	entries := []InventoryEntry{
 		{SessionID: "az-one", IssueID: "one", TaskTitle: "One title wraps enough to make this card taller than a fixed row assumption", HasTmuxSession: true},
@@ -578,6 +611,38 @@ func TestModelGotoWordJumpSelectsVisibleSession(t *testing.T) {
 	}
 	if model.jumpMode != nil || model.gotoArmed {
 		t.Fatal("expected jump mode to clear after selection")
+	}
+}
+
+func TestModelGotoWordJumpLabelsKeepGridWithinViewport(t *testing.T) {
+	entries := []InventoryEntry{
+		{SessionID: "az-one", IssueID: "one", TaskTitle: "One", HasTmuxSession: true},
+		{SessionID: "az-two", IssueID: "two", TaskTitle: "Two", HasTmuxSession: true},
+		{SessionID: "az-three", IssueID: "three", TaskTitle: "Three", HasTmuxSession: true},
+		{SessionID: "az-four", IssueID: "four", TaskTitle: "Four", HasTmuxSession: true},
+		{SessionID: "az-five", IssueID: "five", TaskTitle: "Five", HasTmuxSession: true},
+		{SessionID: "az-six", IssueID: "six", TaskTitle: "Six", HasTmuxSession: true},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
+	model = updated.(Model)
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	model = updateKey(t, model, "g")
+	model = updateKey(t, model, "w")
+
+	view := model.View()
+	if !strings.Contains(view, "jump: type label") {
+		t.Fatalf("view missing jump status:\n%s", view)
+	}
+	for _, line := range strings.Split(view, "\n") {
+		if got := ansi.StringWidth(line); got > model.width {
+			t.Fatalf("gw line width = %d, want <= %d:\n%q\n\n%s", got, model.width, line, view)
+		}
 	}
 }
 
