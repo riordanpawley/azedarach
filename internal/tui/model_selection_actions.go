@@ -273,7 +273,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	// Keep task workspace open for actions that should layer over it or return
 	// to it without forcing users to reopen the details.
 	keepWorkspaceOpen := isTaskWorkspaceOverlay(m.overlayStack.Current()) &&
-		(msg.Key == "a" || msg.Key == "c" || msg.Key == "r" || msg.Key == "x")
+		(msg.Key == "a" || msg.Key == "c" || msg.Key == "r" || msg.Key == "w" || msg.Key == "W" || msg.Key == "x")
 	if !keepWorkspaceOpen {
 		m.overlayStack.Pop()
 	}
@@ -452,10 +452,12 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case "w":
 		// Cleanup worktree and keep task.
+		m.selectTaskByID(task.ID.String())
 		m.beginMutationFeedback(fmt.Sprintf("Cleanup preflight queued for %s", task.ID))
 		return m, m.requestWorktreeCleanupConfirmationCmd(task.ID.String(), false)
 	case "W":
 		// Delete task and cleanup worktree.
+		m.selectTaskByID(task.ID.String())
 		m.beginMutationFeedback(fmt.Sprintf("Delete + cleanup preflight queued for %s", task.ID))
 		return m, m.requestWorktreeCleanupConfirmationCmd(task.ID.String(), true)
 
