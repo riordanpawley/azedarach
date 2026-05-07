@@ -220,6 +220,9 @@ func (l *GlobalInventoryLoader) snapshotFromLive(ctx context.Context, live []tmu
 				entry = mergeProjectedInventory(entry, projection)
 			}
 		}
+		if entry.ProjectPath == "" {
+			entry.ProjectPath = projectPathForSessionPrefix(entry, l.projectDirs)
+		}
 		if entry.ProjectPath == "" && entry.Worktree != "" {
 			entry.ProjectPath = inferProjectPath(entry.Worktree, l.projectDirs)
 		}
@@ -239,6 +242,9 @@ func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map
 			if projection, ok := projections[entry.IssueID]; ok {
 				entry = mergeProjectedInventory(entry, projection)
 			}
+		}
+		if entry.ProjectPath == "" {
+			entry.ProjectPath = projectPathForSessionPrefix(entry, l.projectDirs)
 		}
 		if entry.ProjectPath == "" && entry.Worktree != "" {
 			entry.ProjectPath = inferProjectPath(entry.Worktree, l.projectDirs)
@@ -535,6 +541,23 @@ func projectIDForPath(path string) string {
 func taskWorktree(task domain.Task) string {
 	if task.Session != nil && strings.TrimSpace(task.Session.Worktree) != "" {
 		return strings.TrimSpace(task.Session.Worktree)
+	}
+	return ""
+}
+
+func projectPathForSessionPrefix(entry InventoryEntry, projectDirs []string) string {
+	prefix := strings.TrimSpace(entry.ProjectID)
+	if prefix == "" {
+		return ""
+	}
+	for _, projectDir := range projectDirs {
+		projectDir = strings.TrimSpace(projectDir)
+		if projectDir == "" {
+			continue
+		}
+		if naming.ProjectSessionPrefix(projectDir) == prefix {
+			return projectDir
+		}
 	}
 	return ""
 }
