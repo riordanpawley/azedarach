@@ -35,6 +35,9 @@ func (o *DaemonDetailOpener) OpenDetail(ctx context.Context, entry InventoryEntr
 	if projectPath == "" {
 		return fmt.Errorf("selected session has no project path")
 	}
+	if projectRoot, err := config.ResolveProjectRoot(projectPath); err == nil && strings.TrimSpace(projectRoot) != "" {
+		projectPath = projectRoot
+	}
 	projectID := projectIDForPath(projectPath)
 	if projectID == "" {
 		projectID = strings.TrimSpace(entry.ProjectID)

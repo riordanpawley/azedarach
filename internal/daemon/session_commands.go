@@ -454,13 +454,12 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if issueClient == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
-	tasks, err := issueClient.Search(ctx, cmd.IssueID)
+	task, err := issueClient.GetWithRuntime(ctx, cmd.ProjectID, cmd.IssueID)
+	if errors.Is(err, domain.ErrNotFound) {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("issue not found: %s", cmd.IssueID)), nil
+	}
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-	}
-	task, ok := resolveSessionIssue(tasks, cmd.IssueID)
-	if !ok {
-		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("issue not found: %s", cmd.IssueID)), nil
 	}
 	baseBranch := cmd.BaseBranch
 	if baseBranch == "" {
@@ -576,9 +575,6 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 }
 
 func resolveSessionIssue(tasks []domain.Task, requestedIssueID string) (domain.Task, bool) {
-	if len(tasks) == 0 {
-		return domain.Task{}, false
-	}
 	requestedKey := sessionKey(requestedIssueID)
 	if requestedKey != "" {
 		for _, task := range tasks {
@@ -587,7 +583,7 @@ func resolveSessionIssue(tasks []domain.Task, requestedIssueID string) (domain.T
 			}
 		}
 	}
-	return tasks[0], true
+	return domain.Task{}, false
 }
 
 func (d *Daemon) handleSessionAttach(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -849,13 +845,12 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 	if issueClient == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
-	tasks, err := issueClient.Search(ctx, issueIDString)
+	task, err := issueClient.GetWithRuntime(ctx, projectID, issueIDString)
+	if errors.Is(err, domain.ErrNotFound) {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("issue not found: %s", issueIDString)), nil
+	}
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-	}
-	task, ok := resolveSessionIssue(tasks, issueIDString)
-	if !ok {
-		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("issue not found: %s", issueIDString)), nil
 	}
 
 	worktreePath, worktreeBranch, reusedWorktree, err := d.ensureConflictWorktree(ctx, projectID, issueIDString, task.Title, body.Worktree)

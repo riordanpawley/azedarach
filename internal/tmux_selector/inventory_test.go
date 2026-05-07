@@ -169,6 +169,38 @@ func TestGlobalInventoryLoaderUsesSessionPrefixBeforeGitRootResolution(t *testin
 	}
 }
 
+func TestGlobalInventoryLoaderBindsLiveEntryToConfiguredProjectRootByPrefix(t *testing.T) {
+	root := t.TempDir()
+	azRoot := root + "/azedarach"
+	chRoot := root + "/Chefy"
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{infos: []tmux.SessionInfo{
+			{Name: "az-cfp", Path: root + "/azedarach-cfp"},
+			{Name: "ch-we", Path: root + "/Chefy-we"},
+		}},
+		nil,
+		WithProjectDirs(azRoot, chRoot),
+	)
+
+	snapshot, err := loader.ListLiveSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("ListLiveSnapshot: %v", err)
+	}
+	if len(snapshot.Entries) != 2 {
+		t.Fatalf("entries = %#v, want 2", snapshot.Entries)
+	}
+	bySession := map[string]InventoryEntry{}
+	for _, entry := range snapshot.Entries {
+		bySession[entry.SessionID] = entry
+	}
+	if got := bySession["az-cfp"].ProjectPath; got != azRoot {
+		t.Fatalf("az-cfp project path = %q, want %q", got, azRoot)
+	}
+	if got := bySession["ch-we"].ProjectPath; got != chRoot {
+		t.Fatalf("ch-we project path = %q, want %q", got, chRoot)
+	}
+}
+
 func TestGlobalInventoryLoaderDoesNotDiscoverProjectsFromUnmatchedSessions(t *testing.T) {
 	root := t.TempDir()
 	loader := NewGlobalInventoryLoader(

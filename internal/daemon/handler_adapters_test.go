@@ -304,8 +304,15 @@ branch refs/heads/main
 
 func TestWorktreeServiceAdapterListUsesProjectionOnlyWhenRuntimeStoreAvailable(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), logger)
-	t.Cleanup(func() { _ = store.Close() })
+	dir, err := os.MkdirTemp("", "azedarach-worktree-adapter-*")
+	if err != nil {
+		t.Fatalf("create runtime state temp dir: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(dir, "projection.db"), logger)
+	t.Cleanup(func() {
+		_ = store.Close()
+		_ = os.RemoveAll(dir)
+	})
 
 	runner := &countingWorktreeListRunner{}
 	manager := git.NewWorktreeManager(runner, t.TempDir(), logger)
@@ -329,8 +336,11 @@ func TestWorktreeServiceAdapterListUsesProjectionOnlyWhenRuntimeStoreAvailable(t
 
 func TestWorktreeServiceAdapterPollerRefreshesProjection(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), logger)
-	t.Cleanup(func() { _ = store.Close() })
+	dir, err := os.MkdirTemp("", "azedarach-worktree-poller-*")
+	if err != nil {
+		t.Fatalf("create runtime state temp dir: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(dir, "projection.db"), logger)
 
 	projectID := "proj"
 	if err := store.UpsertWorktreeState(context.Background(), daemonstate.WorktreeState{
@@ -356,6 +366,15 @@ branch refs/heads/main
 		logger:            logger,
 		pollInterval:      20 * time.Millisecond,
 	}
+	t.Cleanup(func() {
+		adapter.mu.Lock()
+		for _, cancel := range adapter.pollers {
+			cancel()
+		}
+		adapter.mu.Unlock()
+		_ = store.Close()
+		_ = os.RemoveAll(dir)
+	})
 
 	adapter.ensureBackgroundPoller(projectID)
 
