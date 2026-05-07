@@ -13,11 +13,12 @@ import (
 )
 
 const (
-	CommandSessionStart  = "session.start"
-	CommandSessionAttach = "session.attach"
-	CommandSessionPause  = "session.pause"
-	CommandSessionResume = "session.resume"
-	CommandSessionStop   = "session.stop"
+	CommandSessionStart           = "session.start"
+	CommandSessionAttach          = "session.attach"
+	CommandSessionPause           = "session.pause"
+	CommandSessionResume          = "session.resume"
+	CommandSessionStop            = "session.stop"
+	CommandSessionResolveConflict = protocol.CommandSessionResolveConflict
 )
 
 // SessionHandler routes and applies session lifecycle commands.

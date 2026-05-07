@@ -12,6 +12,9 @@ type Overlay interface {
 // CloseOverlayMsg signals that the overlay should be closed
 type CloseOverlayMsg struct{}
 
+// CloseAllOverlaysMsg signals that the entire overlay stack should be closed.
+type CloseAllOverlaysMsg struct{}
+
 // SelectionMsg is sent when an action is selected
 type SelectionMsg struct {
 	Key   string

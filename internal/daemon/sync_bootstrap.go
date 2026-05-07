@@ -7,9 +7,11 @@ import (
 	"strings"
 	"sync"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
+	"github.com/riordanpawley/azedarach/internal/services/linearsync"
 )
 
 type daemonLockManager interface {
@@ -91,22 +93,13 @@ func (d *Daemon) bootstrapSyncOrchestrator(ctx context.Context) error {
 }
 
 func (d *Daemon) defaultSyncBootstrap(ctx context.Context) error {
-	client := d.issueClientForProject(protocol.DefaultProjectID)
-	if client == nil {
-		return errors.New("issue store unavailable")
+	if err := d.bootstrapProjectStores(ctx, protocol.DefaultProjectID); err != nil {
+		return err
 	}
-	if _, err := client.DBStats(); err != nil {
-		return fmt.Errorf("open issue store: %w", err)
-	}
-	runtimeStore := d.runtimeStateStoreForProject(protocol.DefaultProjectID)
-	if runtimeStore == nil {
-		return nil
-	}
-	if _, err := runtimeStore.ListProjectIDs(ctx); err != nil {
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.Warn("open runtime state store failed during bootstrap", "error", err)
+	for _, project := range d.bootstrapProjectSelection().Projects {
+		if err := d.bootstrapProjectStores(ctx, project.Name); err != nil {
+			return err
 		}
-		return nil
 	}
 	if err := d.migrateLegacyRuntimeState(ctx); err != nil {
 		if d.cfg.Logger != nil {
@@ -114,6 +107,44 @@ func (d *Daemon) defaultSyncBootstrap(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (d *Daemon) bootstrapProjectStores(ctx context.Context, projectID string) error {
+	client := d.issueClientForProject(projectID)
+	if client == nil {
+		return errors.New("issue store unavailable")
+	}
+	if _, err := client.DBStats(); err != nil {
+		return fmt.Errorf("open issue store %s: %w", protocol.NormalizeProjectID(projectID), err)
+	}
+	runtimeStore := d.runtimeStateStoreForProject(projectID)
+	if runtimeStore == nil {
+		return nil
+	}
+	if _, err := runtimeStore.ListProjectIDs(ctx); err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("open runtime state store failed during bootstrap", "project_id", protocol.NormalizeProjectID(projectID), "error", err)
+		}
+		return nil
+	}
+	return nil
+}
+
+func (d *Daemon) bootstrapProjectSelection() linearsync.BootstrapProjectSelection {
+	registry, err := appconfig.LoadProjectsRegistry()
+	if err != nil || registry == nil {
+		if d.cfg.Logger != nil && err != nil {
+			d.cfg.Logger.Warn("load projects registry failed during sync bootstrap", "error", err)
+		}
+		return linearsync.BootstrapProjectSelection{}
+	}
+	policy := linearsync.NormalizeBootstrapProjectPolicyInput(registry.Projects)
+	selection := linearsync.SelectBootstrapProjectSet(policy)
+	if d.cfg.Logger != nil {
+		snapshot := linearsync.NewBootstrapProjectSnapshot(policy, selection)
+		d.cfg.Logger.Info("sync bootstrap project selection", "snapshot", snapshot.String())
+	}
+	return selection
 }
 
 func (d *Daemon) syncBootstrapDiagnostic() syncBootstrapDiagnostic {

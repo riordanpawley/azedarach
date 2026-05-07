@@ -12,9 +12,19 @@ import (
 
 func writeConfigFile(t *testing.T, baseDir string, body string) string {
 	t.Helper()
+	return writeConfigFileNamed(t, baseDir, ConfigFileName, body)
+}
+
+func writeLocalConfigFile(t *testing.T, baseDir string, body string) string {
+	t.Helper()
+	return writeConfigFileNamed(t, baseDir, LocalConfigFileName, body)
+}
+
+func writeConfigFileNamed(t *testing.T, baseDir string, name string, body string) string {
+	t.Helper()
 	cfgDir := filepath.Join(baseDir, ConfigDirName)
 	require.NoError(t, os.MkdirAll(cfgDir, 0o755))
-	cfgPath := filepath.Join(cfgDir, ConfigFileName)
+	cfgPath := filepath.Join(cfgDir, name)
 	require.NoError(t, os.WriteFile(cfgPath, []byte(body), 0o644))
 	return cfgPath
 }
@@ -23,6 +33,11 @@ func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
 	assert.Equal(t, "claude", cfg.CLITool)
+	assert.Equal(t, "local", cfg.IssueTracker.Backend)
+	assert.False(t, cfg.IssueTracker.Sync.Enabled)
+	assert.Equal(t, "linear-cli", cfg.IssueTracker.Linear.Command)
+	assert.Equal(t, "sdk", cfg.IssueTracker.Linear.Webhooks.Transport)
+	assert.NotNil(t, cfg.IssueTracker.Linear.Webhooks.Events)
 	assert.Equal(t, "main", cfg.Git.BaseBranch)
 	assert.Equal(t, "worktree", cfg.Git.WorkflowMode)
 	assert.True(t, cfg.Git.ShowLineChanges)
@@ -169,6 +184,66 @@ func TestLoadConfigKeepsSessionAndWorktreeInitCommandsDistinct(t *testing.T) {
 	assert.Equal(t, []string{"worktree one"}, cfg.Worktree.InitCommands)
 }
 
+func TestLoadAndSaveConfigUsesSingleIssueTrackerBackendConfig(t *testing.T) {
+	root := t.TempDir()
+	cfgPath := writeConfigFile(t, root, `{
+  "$schema": "./config.schema.json",
+  "$version": 7,
+  "issueTracker": {
+    "backend": "linear",
+    "sync": {
+      "enabled": true
+    },
+    "linear": {
+      "team": "CHE",
+      "project": "Chefy",
+      "webhooks": {
+        "enabled": true,
+        "transport": "cli",
+        "events": ["Issue", "Comment"]
+      }
+    }
+  }
+}`)
+
+	cfg, err := LoadConfig(root)
+	require.NoError(t, err)
+	assert.Equal(t, "linear", cfg.IssueTracker.Backend)
+	assert.True(t, cfg.IssueTracker.Sync.Enabled)
+	assert.Equal(t, "linear-cli", cfg.IssueTracker.Linear.Command)
+	assert.Equal(t, "CHE", cfg.IssueTracker.Linear.Team)
+	assert.Equal(t, "Chefy", cfg.IssueTracker.Linear.Project)
+	assert.True(t, cfg.IssueTracker.Linear.Webhooks.Enabled)
+	assert.Equal(t, "cli", cfg.IssueTracker.Linear.Webhooks.Transport)
+	assert.Equal(t, []string{"Issue", "Comment"}, cfg.IssueTracker.Linear.Webhooks.Events)
+
+	require.NoError(t, SaveConfig(cfg, cfgPath))
+	data, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+	require.Contains(t, raw, "issueTracker")
+	require.NotContains(t, raw, "linear")
+	require.JSONEq(t, `{
+	  "backend": "linear",
+	  "sync": {"enabled": true},
+	  "linear": {
+	    "command": "linear-cli",
+	    "team": "CHE",
+	    "project": "Chefy",
+	    "webhooks": {
+	      "enabled": true,
+	      "transport": "cli",
+	      "url": "",
+	      "port": 0,
+	      "events": ["Issue", "Comment"],
+	      "secret": ""
+	    }
+	  }
+	}`, mustMarshalJSON(t, raw["issueTracker"]))
+}
+
 func TestLoadConfigFromNestedPathUsesWorktreeBaseConfig(t *testing.T) {
 	root := t.TempDir()
 	writeConfigFile(t, root, `{"$schema":"./config.schema.json","$version":7,"git":{"baseBranch":"release"}}`)
@@ -178,6 +253,194 @@ func TestLoadConfigFromNestedPathUsesWorktreeBaseConfig(t *testing.T) {
 	cfg, err := LoadConfig(nested)
 	require.NoError(t, err)
 	assert.Equal(t, "release", cfg.Git.BaseBranch)
+}
+
+func TestLoadConfigWorktreeLocalOverridesBaseRepositoryConfig(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "wt")
+	nested := filepath.Join(worktree, "internal", "config")
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755))
+	require.NoError(t, os.MkdirAll(nested, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644))
+
+	writeConfigFile(t, repo, `{
+  "$schema": "./config.schema.json",
+  "$version": 7,
+  "cliTool": "claude",
+  "git": {
+    "baseBranch": "main"
+  },
+  "session": {
+    "shell": "bash"
+  }
+}`)
+	writeLocalConfigFile(t, worktree, `{
+  "$schema": "./config.schema.json",
+  "$version": 7,
+  "cliTool": "codex",
+  "git": {
+    "baseBranch": "local"
+  }
+}`)
+
+	t.Setenv("PATH", "")
+	cfg, err := LoadConfig(nested)
+	require.NoError(t, err)
+
+	assert.Equal(t, "codex", cfg.CLITool)
+	assert.Equal(t, "local", cfg.Git.BaseBranch)
+	assert.Equal(t, "bash", cfg.Session.Shell)
+}
+
+func TestLoadConfigLocalOverridesWorkspaceConfig(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFile(t, root, `{
+  "$schema": "./config.schema.json",
+  "$version": 7,
+  "cliTool": "claude",
+  "git": {
+    "baseBranch": "develop",
+    "pushEnabled": true
+  },
+  "session": {
+    "shell": "bash"
+  }
+}`)
+	writeLocalConfigFile(t, root, `{
+  "$schema": "./config.schema.json",
+  "$version": 7,
+  "cliTool": "codex",
+  "git": {
+    "baseBranch": "local",
+    "pushEnabled": false
+  }
+}`)
+
+	cfg, err := LoadConfig(root)
+	require.NoError(t, err)
+
+	assert.Equal(t, "codex", cfg.CLITool)
+	assert.Equal(t, "local", cfg.Git.BaseBranch)
+	assert.False(t, cfg.Git.PushEnabled)
+	assert.Equal(t, "bash", cfg.Session.Shell)
+}
+
+func TestLoadConfigDeepMergesObjectsAcrossWorkspaceAndLocal(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFile(t, root, `{
+  "$schema": "./config.schema.json",
+  "$version": 7,
+  "devServer": {
+    "environments": {
+      "NODE_ENV": "development",
+      "SHARED": "workspace"
+    }
+  },
+  "issueTracker": {
+    "linear": {
+      "team": "AZD",
+      "webhooks": {
+        "transport": "cli"
+      }
+    }
+  }
+}`)
+	writeLocalConfigFile(t, root, `{
+  "$schema": "./config.schema.json",
+  "$version": 7,
+  "devServer": {
+    "environments": {
+      "LOCAL_ONLY": "true",
+      "SHARED": "local"
+    }
+  },
+  "issueTracker": {
+    "linear": {
+      "project": "Workbench",
+      "webhooks": {
+        "enabled": true
+      }
+    }
+  }
+}`)
+
+	cfg, err := LoadConfig(root)
+	require.NoError(t, err)
+
+	assert.Equal(t, "development", cfg.DevServer.Environments["NODE_ENV"])
+	assert.Equal(t, "true", cfg.DevServer.Environments["LOCAL_ONLY"])
+	assert.Equal(t, "local", cfg.DevServer.Environments["SHARED"])
+	assert.Equal(t, "AZD", cfg.IssueTracker.Linear.Team)
+	assert.Equal(t, "Workbench", cfg.IssueTracker.Linear.Project)
+	assert.Equal(t, "cli", cfg.IssueTracker.Linear.Webhooks.Transport)
+	assert.True(t, cfg.IssueTracker.Linear.Webhooks.Enabled)
+}
+
+func TestLoadConfigLocalArraysReplaceWorkspaceArrays(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFile(t, root, `{
+  "$schema": "./config.schema.json",
+  "$version": 7,
+  "session": {
+    "initCommands": ["workspace one", "workspace two"]
+  },
+  "issueTracker": {
+    "linear": {
+      "webhooks": {
+        "events": ["Issue", "Comment"]
+      }
+    }
+  }
+}`)
+	writeLocalConfigFile(t, root, `{
+  "$schema": "./config.schema.json",
+  "$version": 7,
+  "session": {
+    "initCommands": ["local one"]
+  },
+  "issueTracker": {
+    "linear": {
+      "webhooks": {
+        "events": ["Issue"]
+      }
+    }
+  }
+}`)
+
+	cfg, err := LoadConfig(root)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"local one"}, cfg.Session.InitCommands)
+	assert.Equal(t, []string{"Issue"}, cfg.IssueTracker.Linear.Webhooks.Events)
+}
+
+func TestLoadConfigMissingWorkspaceConfigWithLocalConfig(t *testing.T) {
+	root := t.TempDir()
+	writeLocalConfigFile(t, root, `{
+  "$schema": "./config.schema.json",
+  "$version": 7,
+  "cliTool": "opencode",
+  "git": {
+    "baseBranch": "local-only"
+  }
+}`)
+	nested := filepath.Join(root, "internal", "config")
+	require.NoError(t, os.MkdirAll(nested, 0o755))
+
+	cfg, err := LoadConfig(nested)
+	require.NoError(t, err)
+
+	assert.Equal(t, "opencode", cfg.CLITool)
+	assert.Equal(t, "local-only", cfg.Git.BaseBranch)
+	assert.Equal(t, "worktree", cfg.Git.WorkflowMode)
+}
+
+func mustMarshalJSON(t *testing.T, value any) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	require.NoError(t, err)
+	return string(data)
 }
 
 func TestLoadConfigNoConfigReturnsDefaults(t *testing.T) {
@@ -207,6 +470,25 @@ func TestLoadConfigRejectsFutureVersion(t *testing.T) {
 	_, err := LoadConfig(root)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported config version")
+}
+
+func TestLoadConfigRejectsFutureVersionInLocalConfigWithPath(t *testing.T) {
+	root := t.TempDir()
+	writeLocalConfigFile(t, root, `{"$schema":"./config.schema.json","$version":999}`)
+
+	_, err := LoadConfig(root)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported config version")
+	assert.Contains(t, err.Error(), ".azedarach/config.local.json")
+}
+
+func TestLoadConfigInvalidLocalJSONReturnsErrorWithPath(t *testing.T) {
+	root := t.TempDir()
+	writeLocalConfigFile(t, root, `{"$schema":"./config.schema.json",`)
+
+	_, err := LoadConfig(root)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), ".azedarach/config.local.json")
 }
 
 func TestSaveConfigWritesSchemaAndVersion(t *testing.T) {

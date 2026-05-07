@@ -10,19 +10,51 @@ import (
 
 // Config represents the full Azedarach configuration
 type Config struct {
-	CLITool       string          `json:"cliTool"`
-	Git           GitConfig       `json:"git"`
-	GitHooks      GitHooksConfig  `json:"githooks"`
-	Keyboard      KeyboardConfig  `json:"keyboard"`
-	Session       SessionConfig   `json:"session"`
-	PR            PRConfig        `json:"pr"`
-	Merge         MergeConfig     `json:"merge"`
-	Notifications NotifyConfig    `json:"notifications"`
-	Issues        IssuesConfig    `json:"issues"`
-	Network       NetworkConfig   `json:"network"`
-	DevServer     DevServerConfig `json:"devServer"`
-	Worktree      WorktreeConfig  `json:"worktree"`
-	Spec          SpecConfig      `json:"spec"`
+	CLITool       string             `json:"cliTool"`
+	IssueTracker  IssueTrackerConfig `json:"issueTracker"`
+	Git           GitConfig          `json:"git"`
+	GitHooks      GitHooksConfig     `json:"githooks"`
+	Keyboard      KeyboardConfig     `json:"keyboard"`
+	Session       SessionConfig      `json:"session"`
+	PR            PRConfig           `json:"pr"`
+	Merge         MergeConfig        `json:"merge"`
+	Notifications NotifyConfig       `json:"notifications"`
+	Issues        IssuesConfig       `json:"issues"`
+	Network       NetworkConfig      `json:"network"`
+	DevServer     DevServerConfig    `json:"devServer"`
+	Worktree      WorktreeConfig     `json:"worktree"`
+	Spec          SpecConfig         `json:"spec"`
+}
+
+type IssueTrackerConfig struct {
+	Backend string              `json:"backend"`
+	Sync    IssueSyncConfig     `json:"sync"`
+	Linear  LinearTrackerConfig `json:"linear"`
+}
+
+type IssueSyncConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
+type LinearTrackerConfig struct {
+	Command  string               `json:"command"`
+	Team     string               `json:"team"`
+	Project  string               `json:"project"`
+	Filter   *LinearFilterConfig  `json:"filter,omitempty"`
+	Webhooks LinearWebhooksConfig `json:"webhooks"`
+}
+
+type LinearFilterConfig struct {
+	Assignee string `json:"assignee"`
+}
+
+type LinearWebhooksConfig struct {
+	Enabled   bool     `json:"enabled"`
+	Transport string   `json:"transport"`
+	URL       string   `json:"url"`
+	Port      int      `json:"port"`
+	Events    []string `json:"events"`
+	Secret    string   `json:"secret"`
 }
 
 // GitConfig contains Git-related settings
@@ -138,6 +170,19 @@ func DefaultConfig() *Config {
 
 	return &Config{
 		CLITool: "claude",
+		IssueTracker: IssueTrackerConfig{
+			Backend: "local",
+			Sync: IssueSyncConfig{
+				Enabled: false,
+			},
+			Linear: LinearTrackerConfig{
+				Command: "linear-cli",
+				Webhooks: LinearWebhooksConfig{
+					Transport: "sdk",
+					Events:    []string{},
+				},
+			},
+		},
 		Git: GitConfig{
 			BaseBranch:           "main",
 			WorkflowMode:         "worktree",
@@ -226,6 +271,7 @@ func DefaultSessionShell() string {
 const (
 	ConfigDirName        = ".azedarach"
 	ConfigFileName       = "config.json"
+	LocalConfigFileName  = "config.local.json"
 	ConfigSchemaFileName = "config.schema.json"
 	ConfigSchemaURL      = "https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json"
 	CurrentConfigVersion = 7
@@ -236,36 +282,50 @@ type configFileMetadata struct {
 	Version int    `json:"$version,omitempty"`
 }
 
-// LoadConfig loads configuration from the nearest project/worktree base containing
-// .azedarach/config.json. If no config file exists, defaults are returned.
+// LoadConfig loads configuration from the project and worktree config roots.
+// Config files are layered as defaults < config.json < config.local.json, with
+// linked worktree config loaded after base-repository config. If no config file
+// exists, defaults are returned.
 func LoadConfig(projectPath string) (*Config, error) {
-	baseDir, err := ResolveConfigBase(projectPath)
+	baseDirs, err := ResolveConfigLayerBases(projectPath)
 	if err != nil {
 		return nil, err
 	}
-	configPath := filepath.Join(baseDir, ConfigDirName, ConfigFileName)
+
+	cfg := DefaultConfig()
+	for _, baseDir := range baseDirs {
+		for _, name := range []string{ConfigFileName, LocalConfigFileName} {
+			configPath := filepath.Join(baseDir, ConfigDirName, name)
+			if err := loadConfigLayer(cfg, configPath); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	return MergeWithDefaults(cfg), nil
+}
+
+func loadConfigLayer(cfg *Config, configPath string) error {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return DefaultConfig(), nil
+			return nil
 		}
-		return nil, fmt.Errorf("failed to read %s: %w", configPath, err)
+		return fmt.Errorf("failed to read %s: %w", configPath, err)
 	}
 
 	var meta configFileMetadata
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return nil, fmt.Errorf("failed to parse %s metadata: %w", configPath, err)
+		return fmt.Errorf("failed to parse %s metadata: %w", configPath, err)
 	}
 	if meta.Version > CurrentConfigVersion {
-		return nil, fmt.Errorf("unsupported config version %d in %s (max supported %d)", meta.Version, configPath, CurrentConfigVersion)
+		return fmt.Errorf("unsupported config version %d in %s (max supported %d)", meta.Version, configPath, CurrentConfigVersion)
 	}
 
-	cfg := DefaultConfig()
 	if err := json.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse %s: %w", configPath, err)
+		return fmt.Errorf("failed to parse %s: %w", configPath, err)
 	}
-
-	return MergeWithDefaults(cfg), nil
+	return nil
 }
 
 // SaveConfig saves configuration to the specified path with version information
@@ -325,9 +385,11 @@ func ResolveConfigBase(startPath string) (string, error) {
 	// Fallback for non-git test/directories.
 	dir := abs
 	for {
-		configPath := filepath.Join(dir, ConfigDirName, ConfigFileName)
-		if _, err := os.Stat(configPath); err == nil {
-			return dir, nil
+		for _, name := range []string{ConfigFileName, LocalConfigFileName} {
+			configPath := filepath.Join(dir, ConfigDirName, name)
+			if _, err := os.Stat(configPath); err == nil {
+				return dir, nil
+			}
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -337,6 +399,50 @@ func ResolveConfigBase(startPath string) (string, error) {
 	}
 }
 
+func ResolveConfigLayerBases(startPath string) ([]string, error) {
+	if strings.TrimSpace(startPath) == "" {
+		var err error
+		startPath, err = os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve cwd: %w", err)
+		}
+	}
+	abs, err := filepath.Abs(startPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve config base from %q: %w", startPath, err)
+	}
+	if info, statErr := os.Stat(abs); statErr == nil && !info.IsDir() {
+		abs = filepath.Dir(abs)
+	}
+
+	if baseRoot, err := ResolveBaseGitRoot(abs); err == nil {
+		bases := []string{baseRoot}
+		if worktreeRoot, wtErr := ResolveWorktreeRoot(abs); wtErr == nil && !samePath(worktreeRoot, baseRoot) {
+			bases = append(bases, worktreeRoot)
+		}
+		return bases, nil
+	}
+
+	base, err := ResolveConfigBase(abs)
+	if err != nil {
+		return nil, err
+	}
+	return []string{base}, nil
+}
+
+func samePath(a, b string) bool {
+	if a == "" || b == "" {
+		return a == b
+	}
+	cleanA, errA := filepath.Abs(a)
+	cleanB, errB := filepath.Abs(b)
+	if errA == nil && errB == nil {
+		a = cleanA
+		b = cleanB
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
 // MergeWithDefaults fills in missing values with defaults
 func MergeWithDefaults(cfg *Config) *Config {
 	defaults := DefaultConfig()
@@ -344,6 +450,18 @@ func MergeWithDefaults(cfg *Config) *Config {
 	// Merge CLITool
 	if cfg.CLITool == "" {
 		cfg.CLITool = defaults.CLITool
+	}
+	if cfg.IssueTracker.Backend == "" {
+		cfg.IssueTracker.Backend = defaults.IssueTracker.Backend
+	}
+	if cfg.IssueTracker.Linear.Command == "" {
+		cfg.IssueTracker.Linear.Command = defaults.IssueTracker.Linear.Command
+	}
+	if cfg.IssueTracker.Linear.Webhooks.Transport == "" {
+		cfg.IssueTracker.Linear.Webhooks.Transport = defaults.IssueTracker.Linear.Webhooks.Transport
+	}
+	if cfg.IssueTracker.Linear.Webhooks.Events == nil {
+		cfg.IssueTracker.Linear.Webhooks.Events = defaults.IssueTracker.Linear.Webhooks.Events
 	}
 
 	// Merge Git config

@@ -56,9 +56,6 @@ check-boundaries:
 boundary-check:
     @just check-boundaries
 
-spec-sync:
-    ./scripts/spec-sync-precommit.sh
-
 release-homebrew *ARGS:
     ./scripts/release-homebrew.sh {{ARGS}}
 

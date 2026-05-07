@@ -2,6 +2,8 @@ package overlay
 
 import tea "github.com/charmbracelet/bubbletea"
 
+const maxOverlayStackDepth = 2
+
 // Stack manages a stack of overlays with push/pop operations
 type Stack struct {
 	overlays []Overlay
@@ -17,6 +19,9 @@ func NewStack() *Stack {
 // Push adds an overlay to the top of the stack
 func (s *Stack) Push(o Overlay) tea.Cmd {
 	s.overlays = append(s.overlays, o)
+	if len(s.overlays) > maxOverlayStackDepth {
+		s.overlays = s.overlays[len(s.overlays)-maxOverlayStackDepth:]
+	}
 	return o.Init()
 }
 
@@ -51,14 +56,18 @@ func (s *Stack) Clear() {
 	s.overlays = make([]Overlay, 0)
 }
 
-// Update forwards the message to the current overlay and handles CloseOverlayMsg
+// Update forwards the message to the current overlay and handles close messages.
 func (s *Stack) Update(msg tea.Msg) tea.Cmd {
 	// If stack is empty, nothing to update
 	if s.IsEmpty() {
 		return nil
 	}
 
-	// Check if message is a CloseOverlayMsg
+	if _, ok := msg.(CloseAllOverlaysMsg); ok {
+		s.Clear()
+		return nil
+	}
+
 	if _, ok := msg.(CloseOverlayMsg); ok {
 		s.Pop()
 		return nil

@@ -41,6 +41,7 @@ type CommandSpec struct {
 
 const (
 	commandTaskList              = "task.list"
+	commandTaskGet               = "task.get"
 	commandTaskCreate            = "task.create"
 	commandTaskUpdateStatus      = "task.update_status"
 	commandTaskUpdateDetails     = "task.update_details"
@@ -50,6 +51,8 @@ const (
 	commandTaskDependencyAdd     = "task.dependency.add"
 	commandTaskDependencyRemove  = "task.dependency.remove"
 	commandTaskSnapshotExport    = "task.snapshot.export"
+	commandSyncRun               = "sync.run"
+	commandSyncConflicts         = "sync.conflicts"
 	commandSessionStatus         = "session.status"
 	commandSessionRecover        = "session.recover"
 	commandRuntimeReconcile      = "runtime.reconcile"
@@ -62,6 +65,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	CommandSessionPause:                   {Command: CommandSessionPause, DispatchTarget: CommandDispatchSession, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	CommandSessionResume:                  {Command: CommandSessionResume, DispatchTarget: CommandDispatchSession, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	CommandSessionStop:                    {Command: CommandSessionStop, DispatchTarget: CommandDispatchSession, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
+	CommandSessionResolveConflict:         {Command: CommandSessionResolveConflict, DispatchTarget: CommandDispatchSession, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandSessionStatus:                  {Command: commandSessionStatus, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandSessionRecover:                 {Command: commandSessionRecover, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandRuntimeReconcile:               {Command: commandRuntimeReconcile, RequiresProjectID: true},
@@ -83,6 +87,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandSpecRead:              {Command: protocol.CommandSpecRead, DispatchTarget: CommandDispatchSpec},
 	protocol.CommandSpecLint:              {Command: protocol.CommandSpecLint, DispatchTarget: CommandDispatchSpec},
 	protocol.CommandSpecParity:            {Command: protocol.CommandSpecParity, DispatchTarget: CommandDispatchSpec},
+	protocol.CommandSpecExport:            {Command: protocol.CommandSpecExport, DispatchTarget: CommandDispatchSpec},
 	protocol.CommandSpecSync:              {Command: protocol.CommandSpecSync, DispatchTarget: CommandDispatchSpec},
 	protocol.CommandSpecSyncMD:            {Command: protocol.CommandSpecSyncMD, DispatchTarget: CommandDispatchSpec},
 	CommandGitFetch:                       {Command: CommandGitFetch, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
@@ -110,7 +115,9 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandMailWatch:             {Command: protocol.CommandMailWatch, RequiresProjectID: true},
 	protocol.CommandHookLogAppend:         {Command: protocol.CommandHookLogAppend, RequiresProjectID: true},
 	protocol.CommandHookLogList:           {Command: protocol.CommandHookLogList, RequiresProjectID: true},
+	protocol.CommandUIOpenTaskWorkspace:   {Command: protocol.CommandUIOpenTaskWorkspace, RequiresProjectID: true},
 	commandTaskList:                       {Command: commandTaskList, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
+	commandTaskGet:                        {Command: commandTaskGet, RequiresProjectID: true},
 	commandTaskCreate:                     {Command: commandTaskCreate, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskUpdateStatus:               {Command: commandTaskUpdateStatus, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskUpdateDetails:              {Command: commandTaskUpdateDetails, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
@@ -120,6 +127,8 @@ var commandSpecRegistry = map[string]CommandSpec{
 	commandTaskDependencyAdd:              {Command: commandTaskDependencyAdd, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskDependencyRemove:           {Command: commandTaskDependencyRemove, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskSnapshotExport:             {Command: commandTaskSnapshotExport, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
+	commandSyncRun:                        {Command: commandSyncRun, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
+	commandSyncConflicts:                  {Command: commandSyncConflicts, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	protocol.CommandTaskBulkApply:         {Command: protocol.CommandTaskBulkApply, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 }
 

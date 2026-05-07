@@ -2,9 +2,6 @@ package overlay
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -133,7 +130,7 @@ func NewDefaultSettingsOverlay() *SettingsOverlay {
 			Value:      nil,
 			ActionHint: "open",
 			OnAction: func() tea.Cmd {
-				return openConfigInEditor()
+				return openConfigEditorMsg()
 			},
 		},
 		{
@@ -516,47 +513,13 @@ func (m *SettingsOverlay) persistConfig() tea.Cmd {
 	}
 }
 
-// openConfigInEditor opens the config file in $EDITOR
-func openConfigInEditor() tea.Cmd {
-	editor := strings.TrimSpace(os.Getenv("EDITOR"))
-	if editor == "" {
-		editor = strings.TrimSpace(os.Getenv("VISUAL"))
-	}
-	if editor == "" {
-		editor = "vim"
-	}
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		return func() tea.Msg {
-			return SelectionMsg{
-				Key:   "editor-error",
-				Value: fmt.Errorf("failed to resolve cwd: %w", err),
-			}
-		}
-	}
-	baseDir, err := config.ResolveConfigBase(cwd)
-	if err != nil {
-		baseDir = cwd
-	}
-	configPath := filepath.Join(baseDir, config.ConfigDirName, config.ConfigFileName)
-
-	cmd := exec.Command(editor, configPath)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return overlayExecProcess(cmd, func(err error) tea.Msg {
-		if err != nil {
-			return SelectionMsg{
-				Key:   "editor-error",
-				Value: fmt.Errorf("failed to open editor: %w", err),
-			}
-		}
+func openConfigEditorMsg() tea.Cmd {
+	return func() tea.Msg {
 		return SelectionMsg{
-			Key:   "editor-closed",
+			Key:   "editor",
 			Value: nil,
 		}
-	})
+	}
 }
 
 // NewSettingsOverlayWithEditor creates a settings overlay with editor service integration.
@@ -1084,7 +1047,7 @@ func NewSettingsOverlayWithEditorAndConfig(editor interface {
 			Value:      nil,
 			ActionHint: "open",
 			OnAction: func() tea.Cmd {
-				return openConfigInEditor()
+				return openConfigEditorMsg()
 			},
 		},
 		{

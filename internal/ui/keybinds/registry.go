@@ -48,6 +48,7 @@ const (
 	ActionOpenRecovery   ActionID = "open_recovery"
 	ActionToggleView     ActionID = "toggle_view"
 	ActionRefresh        ActionID = "refresh"
+	ActionAttachSession  ActionID = "attach_session"
 
 	ActionSelectToggle     ActionID = "select_toggle"
 	ActionSelectColumnAll  ActionID = "select_column_all"
@@ -81,6 +82,7 @@ var registry = []ActionSpec{
 	{ID: ActionOpenSort, Mode: types.ModeNormal, Keys: []KeySpec{{Input: ",", Display: ","}}, Hint: "sort"},
 	{ID: ActionEnterSelect, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "v", Display: "v"}}, Hint: "select"},
 	{ID: ActionDrillDown, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "enter", Display: "Enter"}}, Hint: "drill"},
+	{ID: ActionAttachSession, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "a", Display: "a"}}, Hint: "attach"},
 	{ID: ActionCreateTask, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "c", Display: "c"}}, Hint: "create"},
 	{ID: ActionOpenSettings, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "s", Display: "s"}}, Hint: "settings"},
 	{ID: ActionRefresh, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "r", Display: "r"}}, Hint: "refresh"},
@@ -126,7 +128,8 @@ var registry = []ActionSpec{
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "a"}}, Hint: "attach"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "p"}}, Hint: "pause"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "R"}}, Hint: "resume"},
-	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "r"}}, Hint: "dev"},
+	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "r"}}, Hint: "refresh"},
+	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "V"}}, Hint: "dev"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "x"}}, Hint: "stop"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "u"}}, Hint: "update"},
 	{Mode: types.ModeAction, Keys: []KeySpec{{Display: "m/b"}}, Hint: "merge"},
@@ -160,23 +163,26 @@ var registry = []ActionSpec{
 	{Mode: types.ModeNormal, Category: "Modes", HelpKey: "v", Help: "Select mode"},
 	{Mode: types.ModeNormal, Category: "Modes", HelpKey: "?", Help: "Help (this screen)"},
 
-	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "a/5", Help: "Toggle selection on current task"},
-	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "A", Help: "Select all in current column"},
-	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "%", Help: "Select all visible tasks"},
-	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "*", Help: "Invert visible selection"},
-	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "x", Help: "Clear selection"},
-	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "Space/Enter", Help: "Open bulk actions for selected tasks"},
+	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "v then a/5", Help: "Toggle selection on current task"},
+	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "v then A", Help: "Select all in current column"},
+	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "v then %", Help: "Select all visible tasks"},
+	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "v then *", Help: "Invert visible selection"},
+	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "v then x", Help: "Clear selection"},
+	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "v then Space/Enter", Help: "Open bulk actions for selected tasks"},
 	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "v/Esc", Help: "Exit select mode"},
 
+	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "a", Help: "Attach to selected issue session"},
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "r (board)", Help: "Refresh board data"},
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "i", Help: "Open attachment manager in workspace"},
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "b", Help: "Open merge-into selector in workspace"},
-	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "r (workspace)", Help: "Open dev server menu"},
+	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "r (workspace)", Help: "Refresh issue in workspace"},
+	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "V (workspace)", Help: "Open dev server menu"},
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "w/W", Help: "Cleanup worktree / delete + cleanup"},
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "n", Help: "Open async failure recovery overlay"},
 
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "Tab", Help: "Toggle compact/kanban view"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "esc", Help: "Close overlay / exit mode"},
+	{Mode: types.ModeNormal, Category: "Other", HelpKey: "ctrl+g", Help: "Close all stacked overlays"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "q", Help: "Quit"},
 }
 

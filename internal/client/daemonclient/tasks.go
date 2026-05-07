@@ -15,6 +15,7 @@ import (
 
 const (
 	CommandTaskList             = "task.list"
+	CommandTaskGet              = "task.get"
 	CommandTaskCreate           = "task.create"
 	CommandTaskUpdateStatus     = "task.update_status"
 	CommandTaskUpdate           = "task.update_details"
@@ -23,6 +24,8 @@ const (
 	CommandTaskArchive          = "task.archive"
 	CommandTaskDependencyAdd    = "task.dependency.add"
 	CommandTaskDependencyRemove = "task.dependency.remove"
+	CommandSyncRun              = "sync.run"
+	CommandSyncConflicts        = "sync.conflicts"
 )
 
 // TaskCreateParams contains the payload used to create a task through the shared daemon client.
@@ -95,6 +98,49 @@ type TaskSnapshot struct {
 	Revision      uint64
 	LastCheckedAt time.Time
 	Freshness     protocol.TaskListFreshness
+}
+
+type IssueSyncSummary struct {
+	Provider              string `json:"provider"`
+	Enabled               bool   `json:"enabled"`
+	Skipped               bool   `json:"skipped"`
+	Reason                string `json:"reason,omitempty"`
+	Imported              int    `json:"imported"`
+	UpdatedLocal          int    `json:"updated_local"`
+	PushedRemote          int    `json:"pushed_remote"`
+	Conflicts             int    `json:"conflicts"`
+	RemoteIssues          int    `json:"remote_issues"`
+	LocalIssues           int    `json:"local_issues"`
+	SkippedPushOutOfScope int    `json:"skipped_push_out_of_scope"`
+	OutOfScopeRefs        int    `json:"out_of_scope_refs"`
+	SkippedUnchanged      int    `json:"skipped_unchanged"`
+	PendingPushes         int    `json:"pending_pushes"`
+	PushBudgetExhausted   bool   `json:"push_budget_exhausted"`
+	RetriedRequests       int    `json:"retried_requests"`
+	APIRequests           int    `json:"api_requests"`
+	RateLimitLimit        int    `json:"rate_limit_limit,omitempty"`
+	RateLimitRemaining    int    `json:"rate_limit_remaining,omitempty"`
+	RateLimitReset        string `json:"rate_limit_reset,omitempty"`
+	Incremental           bool   `json:"incremental"`
+	Cursor                string `json:"cursor,omitempty"`
+	RemoteScopeIssues     int    `json:"remote_scope_issues,omitempty"`
+}
+
+type IssueSyncConflict struct {
+	ID          string `json:"id"`
+	Provider    string `json:"provider"`
+	ProjectID   string `json:"project_id"`
+	IssueID     string `json:"issue_id"`
+	Field       string `json:"field"`
+	LocalValue  string `json:"local_value,omitempty"`
+	RemoteValue string `json:"remote_value,omitempty"`
+	DetectedAt  string `json:"detected_at"`
+}
+
+type IssueSyncConflictsResponse struct {
+	Provider  string              `json:"provider"`
+	ProjectID string              `json:"project_id"`
+	Conflicts []IssueSyncConflict `json:"conflicts"`
 }
 
 // CommandError wraps typed daemon command failures.
@@ -186,6 +232,51 @@ func (c *Client) ListTasks(ctx context.Context) ([]domain.Task, error) {
 		return nil, err
 	}
 	return snapshot.Tasks, nil
+}
+
+func (c *Client) RunIssueSync(ctx context.Context) (IssueSyncSummary, error) {
+	var out IssueSyncSummary
+	if err := c.commandJSON(ctx, CommandSyncRun, map[string]any{}, &out); err != nil {
+		return IssueSyncSummary{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) ListIssueSyncConflicts(ctx context.Context, includeResolved bool) (IssueSyncConflictsResponse, error) {
+	var out IssueSyncConflictsResponse
+	if err := c.commandJSON(ctx, CommandSyncConflicts, map[string]any{"include_resolved": includeResolved}, &out); err != nil {
+		return IssueSyncConflictsResponse{}, err
+	}
+	return out, nil
+}
+
+// GetTaskSnapshot fetches one task and its direct dependency context.
+func (c *Client) GetTaskSnapshot(ctx context.Context, taskID string) (TaskSnapshot, error) {
+	return c.GetTaskSnapshotWithMode(ctx, taskID, ReadWaitModeDefault)
+}
+
+// GetTaskSnapshotWithMode fetches one task and its direct dependency context with the requested bounded read budget.
+func (c *Client) GetTaskSnapshotWithMode(ctx context.Context, taskID string, mode ReadWaitMode) (TaskSnapshot, error) {
+	parsedTaskID, err := naming.ParseIssueID(taskID)
+	if err != nil {
+		return TaskSnapshot{}, fmt.Errorf("invalid task id: %w", err)
+	}
+
+	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
+	defer cancel()
+
+	resp, err := c.commandJSONResponse(waitCtx, CommandTaskGet, TaskIDRequest{TaskID: parsedTaskID})
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
+		}
+		return TaskSnapshot{}, err
+	}
+	snapshot, decodeErr := c.decodeTaskSnapshotResponse(resp)
+	if decodeErr != nil {
+		return TaskSnapshot{}, fmt.Errorf("decode %s response: %w (expected %s payload; daemon likely outdated)", CommandTaskGet, decodeErr, "TaskListSnapshotPayload")
+	}
+	return snapshot, nil
 }
 
 // ListTasksSnapshot fetches the current task set and revision through the daemon client boundary.

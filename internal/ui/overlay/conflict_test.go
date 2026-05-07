@@ -90,8 +90,8 @@ func TestConflictDialog_Navigation(t *testing.T) {
 	assert.Equal(t, 0, dialog.cursor)
 }
 
-func TestConflictDialog_ResolveWithClaude(t *testing.T) {
-	dialog := NewConflictDialog([]string{"file1.go"})
+func TestConflictDialog_ResolveWithAgent(t *testing.T) {
+	dialog := NewConflictDialogForIssue([]string{"file1.go"}, "az-1", "/tmp/az-1")
 
 	_, cmd := dialog.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	require.NotNil(t, cmd)
@@ -99,13 +99,15 @@ func TestConflictDialog_ResolveWithClaude(t *testing.T) {
 	msg := cmd()
 	selMsg, ok := msg.(SelectionMsg)
 	require.True(t, ok)
-	assert.Equal(t, "claude", selMsg.Key)
+	assert.Equal(t, "agent", selMsg.Key)
 
 	result, ok := selMsg.Value.(ConflictResolutionMsg)
 	require.True(t, ok)
-	assert.True(t, result.ResolveWithClaude)
+	assert.True(t, result.ResolveWithAgent)
 	assert.False(t, result.Abort)
 	assert.False(t, result.OpenManually)
+	assert.Equal(t, "az-1", result.IssueID)
+	assert.Equal(t, "/tmp/az-1", result.Worktree)
 }
 
 func TestConflictDialog_Abort(t *testing.T) {
@@ -122,12 +124,12 @@ func TestConflictDialog_Abort(t *testing.T) {
 	result, ok := selMsg.Value.(ConflictResolutionMsg)
 	require.True(t, ok)
 	assert.True(t, result.Abort)
-	assert.False(t, result.ResolveWithClaude)
+	assert.False(t, result.ResolveWithAgent)
 	assert.False(t, result.OpenManually)
 }
 
 func TestConflictDialog_OpenManually(t *testing.T) {
-	dialog := NewConflictDialog([]string{"file1.go"})
+	dialog := NewConflictDialogForIssue([]string{"file1.go"}, "az-1", "/tmp/az-1")
 
 	_, cmd := dialog.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
 	require.NotNil(t, cmd)
@@ -140,8 +142,10 @@ func TestConflictDialog_OpenManually(t *testing.T) {
 	result, ok := selMsg.Value.(ConflictResolutionMsg)
 	require.True(t, ok)
 	assert.True(t, result.OpenManually)
-	assert.False(t, result.ResolveWithClaude)
+	assert.False(t, result.ResolveWithAgent)
 	assert.False(t, result.Abort)
+	assert.Equal(t, "az-1", result.IssueID)
+	assert.Equal(t, "/tmp/az-1", result.Worktree)
 }
 
 func TestConflictDialog_EscapeClose(t *testing.T) {
@@ -164,10 +168,10 @@ func TestConflictDialog_View(t *testing.T) {
 	// Check that view contains expected elements
 	assert.Contains(t, view, "MERGE CONFLICTS")
 	assert.Contains(t, view, "Actions")
-	assert.Contains(t, view, "AI resolve now? Press c.")
+	assert.Contains(t, view, "Agent resolve now? Press c.")
 	assert.Contains(t, view, files[0])
 	assert.Contains(t, view, files[1])
-	assert.Contains(t, view, "ai resolve")
+	assert.Contains(t, view, "agent resolve")
 	assert.Contains(t, view, "open")
 	assert.Contains(t, view, "abort")
 	assert.Contains(t, view, "j/k")
@@ -183,7 +187,7 @@ func TestConflictDialog_StatusBindings(t *testing.T) {
 	dialog := NewConflictDialog([]string{"file1.go"})
 	bindings := dialog.StatusBindings()
 
-	assert.Contains(t, bindings, keybinds.Binding{Key: "c", Description: "ai resolve"})
+	assert.Contains(t, bindings, keybinds.Binding{Key: "c", Description: "agent resolve"})
 	assert.Contains(t, bindings, keybinds.Binding{Key: "a", Description: "abort"})
 	assert.Contains(t, bindings, keybinds.Binding{Key: "Esc/q", Description: "close"})
 }

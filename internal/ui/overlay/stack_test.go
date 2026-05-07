@@ -79,6 +79,30 @@ func TestStackPush(t *testing.T) {
 	}
 }
 
+func TestStackPushCapsDepthWithFIFOEviction(t *testing.T) {
+	stack := NewStack()
+
+	stack.Push(mockOverlay{title: "Overlay 1", width: 40, height: 10})
+	stack.Push(mockOverlay{title: "Overlay 2", width: 50, height: 15})
+	stack.Push(mockOverlay{title: "Overlay 3", width: 60, height: 20})
+
+	if stack.Current().Title() != "Overlay 3" {
+		t.Fatalf("expected newest overlay on top, got %q", stack.Current().Title())
+	}
+
+	popped := stack.Pop()
+	if popped.Title() != "Overlay 3" {
+		t.Fatalf("first pop = %q, want Overlay 3", popped.Title())
+	}
+	popped = stack.Pop()
+	if popped.Title() != "Overlay 2" {
+		t.Fatalf("second pop = %q, want Overlay 2 after FIFO eviction", popped.Title())
+	}
+	if popped = stack.Pop(); popped != nil {
+		t.Fatalf("third pop = %q, want nil because Overlay 1 was evicted", popped.Title())
+	}
+}
+
 func TestStackPop(t *testing.T) {
 	stack := NewStack()
 	overlay1 := mockOverlay{title: "Overlay 1", width: 40, height: 10}
@@ -244,6 +268,22 @@ func TestStackUpdateWithCloseMsg(t *testing.T) {
 	// Stack should be empty
 	if !stack.IsEmpty() {
 		t.Error("Stack should be empty after closing all overlays")
+	}
+}
+
+func TestStackUpdateWithCloseAllMsg(t *testing.T) {
+	stack := NewStack()
+
+	stack.Push(mockOverlay{title: "Overlay 1", width: 40, height: 10})
+	stack.Push(mockOverlay{title: "Overlay 2", width: 50, height: 15})
+	stack.Push(mockOverlay{title: "Overlay 3", width: 60, height: 20})
+
+	cmd := stack.Update(CloseAllOverlaysMsg{})
+	if cmd != nil {
+		t.Error("Update with CloseAllOverlaysMsg should return nil")
+	}
+	if !stack.IsEmpty() {
+		t.Fatalf("stack should be empty after close all, current=%q", stack.Current().Title())
 	}
 }
 

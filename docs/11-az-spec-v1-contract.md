@@ -12,7 +12,7 @@ Scope: Go runtime restoration of `az spec` commands with daemon-authoritative ex
 ## Current Slice Status
 
 - CLI grammar and help text are restored for the phase-1 command surface.
-- `az spec sync --target md` is implemented in the Go CLI layer and generates deterministic `docs/spec/` Markdown.
+- Markdown spec export is disabled until it can export the real stored spec data.
 - `req`, `link`, `read`, `lint`, and `parity` still require daemon-backed authority contracts for real execution; until then they validate syntax and fail with a consistent not-implemented error.
 
 ## Command Surface (Phase 1)
@@ -24,7 +24,6 @@ Scope: Go runtime restoration of `az spec` commands with daemon-authoritative ex
 - `read`
 - `lint`
 - `parity`
-- `sync --target md`
 
 `az --help` must list `spec` and `az spec --help` must list all subcommands above.
 
@@ -53,12 +52,11 @@ Scope: Go runtime restoration of `az spec` commands with daemon-authoritative ex
 2. `az spec link add --issue <issue-id> --req <req-id> [--role <implements|verifies|relates>] [--note <text>] [--json]`
 3. `az spec link remove --issue <issue-id> --req <req-id> [--json]`
 
-### Read/lint/parity/sync commands
+### Read/lint/parity commands
 
 1. `az spec read [--json] [--issue <issue-id>] [--req <req-id>]`
 2. `az spec lint [--json] [--strict]`
 3. `az spec parity [--json] [--fail-on-out]`
-4. `az spec sync --target md [--check] [--json]`
 
 ### Alias policy
 

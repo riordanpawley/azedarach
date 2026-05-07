@@ -315,6 +315,42 @@ func TestCreateTaskOverlaySubmitWithDescription(t *testing.T) {
 	assert.Equal(t, "This is a test description", taskMsg.Description)
 }
 
+func TestCreateTaskOverlayDescriptionAcceptsInputAfterLargePaste(t *testing.T) {
+	overlay := NewCreateTaskOverlay()
+	overlay.focusIndex = focusDescription
+	overlay.title.Blur()
+	overlay.description.Focus()
+	overlay.description.SetValue(strings.Repeat("l", 2000))
+
+	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+
+	overlay = model.(*CreateTaskOverlay)
+	assert.Equal(t, strings.Repeat("l", 2000)+"x", overlay.description.Value())
+}
+
+func TestEditTaskOverlayPreservesLongDescription(t *testing.T) {
+	longDescription := strings.Repeat("log line\n", 400)
+	task := domain.Task{
+		ID:          "az-long",
+		Title:       "Long description",
+		Description: longDescription,
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+		Status:      domain.StatusOpen,
+	}
+
+	overlay := NewEditTaskOverlay(task)
+
+	assert.Equal(t, longDescription, overlay.description.Value())
+}
+
+func TestCreateTaskOverlayKeepsExplicitTitleAndAcceptanceLimits(t *testing.T) {
+	overlay := NewCreateTaskOverlay()
+
+	assert.Equal(t, taskTitleCharLimit, overlay.title.CharLimit)
+	assert.Equal(t, taskAcceptanceCharLimit, overlay.acceptanceInput.CharLimit)
+}
+
 func TestCreateTaskOverlaySubmitWithAcceptance(t *testing.T) {
 	overlay := NewCreateTaskOverlay()
 	overlay.title.SetValue("Test Task")

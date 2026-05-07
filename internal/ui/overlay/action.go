@@ -19,14 +19,15 @@ type Action struct {
 
 // ActionMenu is a menu overlay for task actions
 type ActionMenu struct {
-	task         domain.Task
-	relatedTasks []domain.Task
-	session      *domain.Session
-	actions      []Action
-	cursor       int
-	scrollOffset int
-	viewportRows int
-	styles       *Styles
+	task                  domain.Task
+	relatedTasks          []domain.Task
+	session               *domain.Session
+	actions               []Action
+	cursor                int
+	scrollOffset          int
+	viewportRows          int
+	hideStatusMoveActions bool
+	styles                *Styles
 }
 
 // NewActionMenu creates a new action menu for the given task
@@ -49,13 +50,22 @@ func (m *ActionMenu) WithRelatedTasks(tasks []domain.Task) *ActionMenu {
 	return m
 }
 
+// WithoutStatusMoveActions hides h/l status movement rows for surfaces where
+// those keys are reserved for local navigation.
+func (m *ActionMenu) WithoutStatusMoveActions() *ActionMenu {
+	m.hideStatusMoveActions = true
+	m.actions = m.buildActions()
+	return m
+}
+
 // buildActions creates the action list based on task and session state
 func (m *ActionMenu) buildActions() []Action {
 	actions := []Action{}
 
 	// Session actions
-	hasTmuxSession := m.task.HasTmuxSession || m.session != nil
-	if m.session == nil {
+	hasProjectedSession := m.session != nil && strings.TrimSpace(string(m.session.State)) != ""
+	hasTmuxSession := m.task.HasTmuxSession || hasProjectedSession
+	if !hasProjectedSession {
 		// Keep start actions available when there is no projected session.
 		// Runtime/tmux presence can be stale, and users still need a direct
 		// start path from the task workspace.
@@ -115,7 +125,8 @@ func (m *ActionMenu) buildActions() []Action {
 		Action{Key: "M", Label: "Abort merge", Enabled: hasWorktree},
 		Action{Key: "H", Label: "Open Helix", Enabled: hasWorktree},
 		Action{Key: "i", Label: "Attachments", Enabled: true},
-		Action{Key: "r", Label: "Dev servers", Enabled: true},
+		Action{Key: "r", Label: "Refresh issue", Enabled: true},
+		Action{Key: "V", Label: "Dev servers", Enabled: true},
 		Action{Key: "f", Label: "Show diff", Enabled: hasWorktree},
 		Action{Key: "w", Label: "Cleanup worktree", Enabled: hasIssueScopedCleanupTarget},
 		Action{Key: "W", Label: "Delete task + cleanup worktree", Enabled: hasIssueScopedCleanupTarget},
@@ -132,8 +143,14 @@ func (m *ActionMenu) buildActions() []Action {
 		Action{Key: "2", Label: "Set status: In Progress", Enabled: m.task.Status != domain.StatusInProgress},
 		Action{Key: "3", Label: "Set status: Blocked", Enabled: m.task.Status != domain.StatusBlocked},
 		Action{Key: "4", Label: "Set status: Done", Enabled: m.task.Status != domain.StatusDone},
-		Action{Key: "h", Label: "Move left", Enabled: m.task.Status != domain.StatusOpen},
-		Action{Key: "l", Label: "Move right", Enabled: m.task.Status != domain.StatusDone},
+	)
+	if !m.hideStatusMoveActions {
+		actions = append(actions,
+			Action{Key: "h", Label: "Move left", Enabled: m.task.Status != domain.StatusOpen},
+			Action{Key: "l", Label: "Move right", Enabled: m.task.Status != domain.StatusDone},
+		)
+	}
+	actions = append(actions,
 		Action{Key: "c", Label: "Create child task", Enabled: true},
 		Action{Key: "e", Label: "Edit task", Enabled: true},
 		Action{Key: "T", Label: "Tombstone task", Enabled: true},
@@ -319,6 +336,8 @@ func (m *ActionMenu) StatusBindings() []keybinds.Binding {
 	return []keybinds.Binding{
 		{Key: "j/k/↑/↓", Description: "move"},
 		{Key: "Enter", Description: "run action"},
+		{Key: "r", Description: "refresh issue"},
+		{Key: "V", Description: "dev servers"},
 		{Key: "1/2/3/4", Description: "set status"},
 		{Key: "h/l", Description: "move status"},
 		{Key: "Esc/q", Description: "close"},

@@ -66,6 +66,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case overlay.CloseAllOverlaysMsg:
+		if _, isSearchOverlay := m.overlayStack.Current().(*overlay.SearchOverlay); isSearchOverlay {
+			m.editor.EnterNormal()
+		}
+		m.overlayStack.Clear()
+		return m, nil
+
 	case overlay.SelectionMsg:
 		if msg.Key == "async_recovery_recover" {
 			id, _ := msg.Value.(string)
@@ -157,7 +164,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.refreshSeq != 0 && msg.refreshSeq < m.issueRefreshSeq {
 			return m, nil
 		}
-		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
+		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
 			return m, nil
 		}
 		if msg.daemonClient != nil {
@@ -208,6 +215,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.taskSnapshotCheckedAt = msg.lastCheckedAt
 		m.taskSnapshotFreshness = msg.freshness
 		m.reconcileCursorAfterIssuesRefresh()
+		m.applyPendingCreatedWorkspaceTask()
 		m.syncTaskWorkspaceOverlay()
 		if msg.reconcileWarn != nil {
 			m.addToast(Toast{
@@ -239,6 +247,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.events != nil {
 			m.daemonEvents = msg.events
 			cmds = append(cmds, m.waitForDaemonEventCmd())
+		}
+		if m.openSessionSelectorOnLoad {
+			m.openSessionSelectorOnLoad = false
+			cmds = append(cmds, m.openOrchestrationOverlay())
 		}
 		if len(cmds) == 0 {
 			return m, nil
@@ -364,7 +376,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("Session stopped: %s", msg.issueID),
 			Expires: time.Now().Add(3 * time.Second),
 		})
-		return m, nil
+		return m, m.loadIssuesCmd()
 
 	case sessionErrorMsg:
 		m.clearPendingTaskStatus(msg.issueID)
@@ -380,13 +392,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.addToast(Toast{
 			Level: ToastWarning,
 			Message: fmt.Sprintf(
-				"Could not attach via daemon (%v). Run: tmux attach-session -t %s (AI can help resolve)",
+				"Could not attach via daemon (%v). Run: tmux attach-session -t %s (agent can help resolve)",
 				msg.err,
 				msg.issueID,
 			),
 			Expires: time.Now().Add(8 * time.Second),
 		})
 		return m, nil
+
+	case conflictResolveAgentResultMsg:
+		if msg.operationID != "" && !operationStateTerminal(msg.state) {
+			m.markTaskOperationPending(msg.issueID, protocol.CommandSessionResolveConflict, msg.operationID, msg.state)
+			m.syncTaskWorkspaceOverlay()
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: formatPendingOperationMessage("Agent conflict resolution", msg.issueID, msg.operationID, msg.state),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, m.loadIssuesCmd()
+		}
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Agent conflict resolution failed: %v", msg.err),
+				Expires: time.Now().Add(6 * time.Second),
+			})
+			return m, nil
+		}
+		target := strings.TrimSpace(msg.windowName)
+		if target == "" {
+			target = "resolve-conflict"
+		}
+		m.addToast(Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Agent conflict resolution launched for %s in %s", msg.issueID, target),
+			Expires: time.Now().Add(4 * time.Second),
+		})
+		return m, m.loadIssuesCmd()
 
 	case daemonStreamEventMsg:
 		if msg.stream != nil && msg.stream != m.daemonEvents {
@@ -455,6 +497,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.waitForDaemonEventCmd()
 		}
+		if msg.event.Event == protocol.EventUICommandRequested {
+			switch cursor.Decide(msg.event) {
+			case protocol.StreamProjectionDecisionIgnore:
+				return m, m.waitForDaemonEventCmd()
+			case protocol.StreamProjectionDecisionResync:
+				m.daemonEvents = nil
+				return m, m.attachDaemonCmd()
+			}
+			cmd := m.applyUICommandEvent(msg.event)
+			m.daemonRevision = cursor.Advance(msg.event).Revision
+			if cmd != nil {
+				return m, tea.Batch(cmd, m.waitForDaemonEventCmd())
+			}
+			return m, m.waitForDaemonEventCmd()
+		}
 		switch m.reduceDaemonEvent(msg.event) {
 		case daemonEventIgnore:
 			return m, m.waitForDaemonEventCmd()
@@ -479,6 +536,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case logStreamEventMsg:
 		if msg.stream != nil && msg.stream != m.logStreamEvents {
 			return m, nil
+		}
+		if msg.event.Event == protocol.EventUICommandRequested &&
+			strings.TrimSpace(msg.event.ProjectID.String()) != "" &&
+			strings.TrimSpace(msg.event.ProjectID.String()) != m.daemonProjectID() {
+			cmd := m.applyUICommandEvent(msg.event)
+			if cmd != nil {
+				return m, tea.Batch(cmd, m.waitForLogStreamEventCmd())
+			}
+			return m, m.waitForLogStreamEventCmd()
 		}
 		// Primary daemon stream already carries current-project events used for
 		// projection/state updates. Keep this stream for cross-project logging.
@@ -578,7 +644,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			action := "Merge"
 			if msg.stage == "stop_session" {
 				action = "Stop session"
+				m.markTaskOperationPending(msg.targetID, "session_stop", msg.operationID, msg.state)
+			} else {
+				m.markMergeOperationPending(msg.sourceID, msg.targetID, msg.operationID, msg.state)
 			}
+			m.syncTaskWorkspaceOverlay()
 			m.addToast(Toast{
 				Level:   ToastInfo,
 				Message: formatPendingOperationMessage(action, msg.sourceID, msg.operationID, msg.state),
@@ -595,6 +665,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				SourceID: msg.sourceID,
 				TargetID: msg.targetID,
 			})
+			m.clearLocalMergeOperationPending(msg.sourceID, msg.targetID)
 			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Merge failed: %v (press n for recovery)", msg.err),
@@ -604,6 +675,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.result.HasConflicts {
+			m.clearLocalMergeOperationPending(msg.sourceID, msg.targetID)
 			m.addToast(Toast{
 				Level:   ToastWarning,
 				Message: fmt.Sprintf("Merge conflicts: %s", strings.Join(msg.result.ConflictFiles, ", ")),
@@ -612,6 +684,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.openOverlay(overlay.NewConflictDialog(msg.result.ConflictFiles))
 		}
 
+		m.clearLocalMergeOperationPending(msg.sourceID, msg.targetID)
 		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Successfully merged %s into %s", msg.sourceID, msg.targetID),
@@ -620,6 +693,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadIssuesCmd()
 
 	case mergePreflightFailureMsg:
+		m.clearLocalMergeOperationPending(msg.sourceID, msg.targetID)
 		return m, m.overlayStack.Push(overlay.NewMergePreflightOverlay(
 			msg.sourceID,
 			msg.targetID,
@@ -628,6 +702,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.reasons,
 			msg.sourceFiles,
 			msg.targetFiles,
+			msg.conflictFiles,
+			msg.targetRef,
+			msg.sourceBranch,
 			strings.TrimSpace(msg.targetWorktree) != "",
 		))
 
@@ -688,6 +765,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case mergeTargetSelectionResolvedMsg:
 		if msg.err != nil {
+			m.clearLocalMergeOperationPending(msg.sourceID, msg.targetID)
 			m.addToast(Toast{
 				Level:   ToastError,
 				Message: msg.err.Error(),
@@ -701,6 +779,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.followOnMergeIntoTargetCmd(msg.sourceWorktree, msg.targetWorktree, msg.sourceID, msg.targetID, msg.targetState, msg.refreshStatus)
 
 	case refreshTaskWorkspaceResultMsg:
+		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
+			return m, nil
+		}
 		if msg.reconcileErr != nil && m.logger != nil {
 			m.logger.Warn("task workspace issue reconcile failed", "task_id", msg.taskID, "error", msg.reconcileErr)
 		}
@@ -711,18 +792,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !ok || taskIDKey(currentWorkspace.TaskID()) != taskIDKey(msg.taskID) {
 			return m, nil
 		}
-		tasks := msg.tasks
-		if len(tasks) == 0 {
+		task, ok := m.applySingleTaskWorkspaceRefresh(msg.taskID, msg.task)
+		if !ok {
 			return m, nil
 		}
-		m.overlayStack.Pop()
-		workspace := overlay.NewTaskWorkspaceOverlay(msg.task, tasks, m.pendingMutationForTask(msg.taskID), m.width, m.height)
+
 		if !msg.lastCheckedAt.IsZero() && msg.freshness.Valid() {
-			workspace.SyncSnapshotFreshness(msg.lastCheckedAt, msg.freshness)
+			currentWorkspace.SyncSnapshotFreshness(msg.lastCheckedAt, msg.freshness)
 		} else {
-			workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
+			currentWorkspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
 		}
-		return m, m.openOverlay(workspace)
+		currentWorkspace.SyncTask(task, m.tasks, m.pendingMutationForTask(msg.taskID))
+		return m, nil
 
 	case fetchAndMergeResultMsg:
 		if msg.operationID != "" && !operationStateTerminal(msg.state) {
@@ -730,6 +811,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.stage == "fetch" {
 				action = "Fetch"
 			}
+			m.markTaskGitOperationPending(msg.issueID, "git.merge", msg.operationID, msg.state)
+			m.syncTaskWorkspaceOverlay()
 			m.addToast(Toast{
 				Level:   ToastInfo,
 				Message: formatPendingOperationMessage(action, msg.issueID, msg.operationID, msg.state),
@@ -745,6 +828,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Message:  msg.err.Error(),
 				Action:   asyncRecoveryActionRetryUpdate,
 			})
+			m.clearLocalTaskGitOperationPending(msg.issueID)
+			m.syncTaskWorkspaceOverlay()
 			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Merge failed: %v (press n for recovery)", msg.err),
@@ -754,16 +839,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.result.HasConflicts {
+			m.clearLocalTaskGitOperationPending(msg.issueID)
+			m.syncTaskWorkspaceOverlay()
 			// Show conflict dialog
 			m.addToast(Toast{
 				Level:   ToastWarning,
 				Message: fmt.Sprintf("Merge conflicts in %d files", len(msg.result.ConflictFiles)),
 				Expires: time.Now().Add(3 * time.Second),
 			})
-			return m, m.openOverlay(overlay.NewConflictDialog(msg.result.ConflictFiles))
+			return m, m.openOverlay(overlay.NewConflictDialogForIssue(msg.result.ConflictFiles, msg.issueID, msg.worktree))
 		}
 
 		// Successful merge
+		m.clearLocalTaskGitOperationPending(msg.issueID)
+		m.syncTaskWorkspaceOverlay()
 		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: "Updated from main successfully",
@@ -828,6 +917,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.projectSwitchInFlight = true
 		m.issueRefreshSeq++
 		m.projectSwitchSeq++
+		m.beginMutationFeedback(fmt.Sprintf("Switching project: %s", msg.Project.Name))
 
 		// Switch project runtime context and reload issues.
 		return m, m.switchProjectCmd(msg.Project)
@@ -869,9 +959,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.taskSnapshotFreshness = msg.freshness
 		m.reconcileCursorAfterIssuesRefresh()
 		m.syncTaskWorkspaceOverlay()
-		if msg.revision > m.daemonRevision {
-			m.daemonRevision = msg.revision
-		}
+		m.daemonRevision = msg.revision
 		m.loading = false
 		m.boardRefreshing = false
 		m.projectSwitchInFlight = false
@@ -883,10 +971,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("Switched to project: %s", msg.project.Name),
 			Expires: time.Now().Add(3 * time.Second),
 		})
-		return m, m.waitForDaemonEventCmd()
+		cmds := []tea.Cmd{m.waitForDaemonEventCmd()}
+		if taskID := strings.TrimSpace(m.pendingUIOpenTaskID); taskID != "" {
+			m.pendingUIOpenTaskID = ""
+			opened, openCmd := m.openTaskWorkspaceByID(taskID)
+			if openedModel, ok := opened.(Model); ok {
+				m = openedModel
+			}
+			if openCmd != nil {
+				cmds = append(cmds, openCmd)
+			}
+			if m.overlayStack.Current() == nil {
+				m.addToast(Toast{
+					Level:   ToastWarning,
+					Message: fmt.Sprintf("Task %s not found in project %s", taskID, msg.project.Name),
+					Expires: time.Now().Add(5 * time.Second),
+				})
+			}
+		}
+		return m, tea.Batch(cmds...)
 
 	case overlay.TaskCreatedMsg:
 		m.overlayStack.Pop()
+		if _, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); ok && msg.ParentID != nil {
+			m.openCreatedTaskInWorkspace = true
+		}
+		if strings.TrimSpace(msg.ID) != "" {
+			m.beginMutationFeedback(fmt.Sprintf("Saving task %s", msg.ID))
+		} else {
+			m.beginMutationFeedback("Creating task")
+		}
 		return m, m.saveTaskCmd(msg)
 
 	case overlay.OpenTaskImageAttachMsg:
@@ -899,6 +1013,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case taskCreatedResultMsg:
 		if msg.err != nil {
+			m.openCreatedTaskInWorkspace = false
 			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Failed to create task: %v", msg.err),
@@ -912,6 +1027,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.createTaskOverlay = nil
 			if taskID := strings.TrimSpace(msg.taskID); taskID != "" {
 				m.pendingCreatedTaskID = taskID
+				if m.openCreatedTaskInWorkspace {
+					m.pendingCreatedWorkspaceTaskID = taskID
+					m.openCreatedTaskInWorkspace = false
+					m.applyPendingCreatedWorkspaceTask()
+				}
+				m.applyPendingCreatedTaskSelection()
+			} else {
+				m.openCreatedTaskInWorkspace = false
 			}
 		}
 
@@ -934,6 +1057,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// PR creation overlay messages
 	case overlay.PRCreatedMsg:
 		m.overlayStack.Pop()
+		m.beginMutationFeedback("Creating PR")
 		return m, m.createPRWithOverlayCmd(msg)
 
 	case prCreatedResultMsg:
@@ -1078,6 +1202,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		return m, nil
 
+	case devServerResultMsg:
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Dev server update failed: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		if devOverlay, ok := m.overlayStack.Current().(*overlay.DevServerOverlay); ok {
+			devOverlay.SyncServer(msg.server)
+		}
+		m.addToast(Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Dev server %s: %s", msg.server.Name, msg.server.Status),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+
 	case openPROverlayResultMsg:
 		if msg.err != nil {
 			m.addToast(Toast{
@@ -1156,6 +1299,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadIssuesCmd()
 
 	case worktreeCleanupConfirmPromptMsg:
+		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
+			return m, nil
+		}
+		m.selectTaskByID(msg.taskID)
+		if msg.hasTask {
+			m.applySingleTaskWorkspaceRefresh(msg.taskID, msg.task)
+		}
 		m.pendingCleanup = &pendingWorktreeCleanupConfirmation{
 			taskID:      msg.taskID,
 			deletedTask: msg.deletedTask,
@@ -1175,6 +1325,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.openOverlay(confirm)
 
 	case bulkCleanupPreflightMsg:
+		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
+			return m, nil
+		}
+		m.applyTaskRefreshes(msg.refreshedTasks)
 		if len(msg.risks) == 0 && msg.snapshotErr == nil {
 			return m, m.bulkCleanupWorktreeCmd(msg.taskIDs, msg.deletedTasks)
 		}
@@ -1314,6 +1468,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *Model) applyUICommandEvent(event protocol.EventEnvelope) tea.Cmd {
+	var body protocol.UICommandEventBody
+	if err := json.Unmarshal(event.Body, &body); err != nil {
+		return nil
+	}
+	if body.Command != protocol.UICommandOpenTaskWorkspace {
+		return nil
+	}
+	issueID := strings.TrimSpace(body.IssueID.String())
+	if issueID == "" {
+		return nil
+	}
+	projectID := strings.TrimSpace(body.ProjectID.String())
+	if projectID == "" {
+		projectID = strings.TrimSpace(event.ProjectID.String())
+	}
+	if projectID != "" && projectID != m.daemonProjectID() {
+		project, ok := m.projectByDaemonRouteID(projectID)
+		if !ok {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Project for task %s is not registered", issueID),
+				Expires: time.Now().Add(6 * time.Second),
+			})
+			return nil
+		}
+		m.pendingUIOpenTaskID = issueID
+		m.loading = false
+		m.boardRefreshing = true
+		m.projectSwitchInFlight = true
+		m.issueRefreshSeq++
+		m.projectSwitchSeq++
+		m.beginMutationFeedback(fmt.Sprintf("Switching project: %s", project.Name))
+		return m.switchProjectCmd(project)
+	}
+	updatedModel, cmd := m.openTaskWorkspaceByID(issueID)
+	if opened, ok := updatedModel.(Model); ok {
+		*m = opened
+	}
+	return cmd
 }
 
 func (m Model) refreshOpenDiffOverlayFromProjectionBody(body protocol.ProjectionUpdateEventBody) tea.Cmd {

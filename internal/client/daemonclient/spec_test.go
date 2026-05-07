@@ -602,11 +602,11 @@ func TestSpecLinkAndReadParitySyncCommandsEncodeAndDecode(t *testing.T) {
 		}
 	})
 
-	t.Run("sync", func(t *testing.T) {
+	t.Run("export", func(t *testing.T) {
 		transport := &specRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				if req.Command != CommandSpecSync {
-					t.Fatalf("command = %q, want %q", req.Command, CommandSpecSync)
+				if req.Command != CommandSpecExport {
+					t.Fatalf("command = %q, want %q", req.Command, CommandSpecExport)
 				}
 				assertSpecProjectID(t, req, wantProjectID)
 				var body SpecSyncRequest
@@ -640,12 +640,12 @@ func TestSpecLinkAndReadParitySyncCommandsEncodeAndDecode(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
-		out, err := client.SyncSpecMarkdown(context.Background(), SpecSyncRequest{
+		out, err := client.ExportSpecMarkdown(context.Background(), SpecSyncRequest{
 			Target: "md",
 			Check:  true,
 		})
 		if err != nil {
-			t.Fatalf("SyncSpecMarkdown error: %v", err)
+			t.Fatalf("ExportSpecMarkdown error: %v", err)
 		}
 		if !out.Ok || out.OutDir != "docs/spec" || len(out.Documents) != 1 {
 			t.Fatalf("sync result = %+v", out)

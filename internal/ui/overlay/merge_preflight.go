@@ -19,6 +19,9 @@ type MergePreflightOverlay struct {
 	reasons        []string
 	sourceFiles    []string
 	targetFiles    []string
+	conflictFiles  []string
+	targetRef      string
+	sourceBranch   string
 	canAbortTarget bool
 	styles         *Styles
 }
@@ -30,11 +33,26 @@ type MergePreflightRefreshSelection struct {
 	TargetID       string
 	SourceWorktree string
 	TargetWorktree string
+	TargetRef      string
+	SourceBranch   string
+}
+
+// MergePreflightAgentSelection carries context required to launch an agent
+// against a merge-preflight conflict without first dirtying the target tree.
+type MergePreflightAgentSelection struct {
+	SourceID       string
+	TargetID       string
+	SourceWorktree string
+	TargetWorktree string
+	TargetRef      string
+	SourceBranch   string
+	ConflictFiles  []string
 }
 
 func NewMergePreflightOverlay(
 	sourceID, targetID, sourceWorktree, targetWorktree string,
-	reasons, sourceFiles, targetFiles []string,
+	reasons, sourceFiles, targetFiles, conflictFiles []string,
+	targetRef, sourceBranch string,
 	canAbortTarget bool,
 ) *MergePreflightOverlay {
 	return &MergePreflightOverlay{
@@ -45,6 +63,9 @@ func NewMergePreflightOverlay(
 		reasons:        append([]string(nil), reasons...),
 		sourceFiles:    append([]string(nil), sourceFiles...),
 		targetFiles:    append([]string(nil), targetFiles...),
+		conflictFiles:  append([]string(nil), conflictFiles...),
+		targetRef:      strings.TrimSpace(targetRef),
+		sourceBranch:   strings.TrimSpace(sourceBranch),
 		canAbortTarget: canAbortTarget,
 		styles:         New(),
 	}
@@ -70,6 +91,26 @@ func (m *MergePreflightOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						TargetID:       m.targetID,
 						SourceWorktree: m.sourceWorktree,
 						TargetWorktree: m.targetWorktree,
+						TargetRef:      m.targetRef,
+						SourceBranch:   m.sourceBranch,
+					},
+				}
+			}
+		case "g", "G":
+			if strings.TrimSpace(m.sourceID) == "" || len(m.conflictFiles) == 0 {
+				return m, nil
+			}
+			return m, func() tea.Msg {
+				return SelectionMsg{
+					Key: "merge_preflight_agent",
+					Value: MergePreflightAgentSelection{
+						SourceID:       m.sourceID,
+						TargetID:       m.targetID,
+						SourceWorktree: m.sourceWorktree,
+						TargetWorktree: m.targetWorktree,
+						TargetRef:      m.targetRef,
+						SourceBranch:   m.sourceBranch,
+						ConflictFiles:  append([]string(nil), m.conflictFiles...),
 					},
 				}
 			}
@@ -172,6 +213,15 @@ func (m *MergePreflightOverlay) renderDetails(width int) string {
 			b.WriteString("\n")
 		}
 	}
+	if len(m.conflictFiles) > 0 {
+		b.WriteString("\n")
+		b.WriteString(m.styles.MenuKey.Render("Predicted conflict files:"))
+		b.WriteString("\n")
+		for _, file := range m.conflictFiles {
+			b.WriteString(m.styles.MenuItem.Render("  • " + file))
+			b.WriteString("\n")
+		}
+	}
 	b.WriteString("\n")
 	b.WriteString(m.styles.MenuKey.Render("Source dirty files:"))
 	b.WriteString("\n")
@@ -226,9 +276,13 @@ func (m *MergePreflightOverlay) Size() (width, height int) {
 
 func (m *MergePreflightOverlay) sizeHeight() int {
 	reasonLines := min(8, len(m.reasons))
+	conflictFileLines := min(6, len(m.conflictFiles))
 	sourceFileLines := min(8, len(m.sourceFiles))
 	targetFileLines := min(8, len(m.targetFiles))
-	h := 15 + reasonLines + sourceFileLines + targetFileLines
+	h := 15 + reasonLines + conflictFileLines + sourceFileLines + targetFileLines
+	if len(m.conflictFiles) > 0 {
+		h += 2
+	}
 	if m.canAbortTarget {
 		h++
 	}
@@ -240,6 +294,9 @@ func (m *MergePreflightOverlay) actionBindings() []keybinds.Binding {
 		{Key: "R", Description: "refresh"},
 		{Key: "c/d", Description: "commit/discard source"},
 		{Key: "C/D", Description: "commit/discard target"},
+	}
+	if len(m.conflictFiles) > 0 {
+		bindings = append(bindings, keybinds.Binding{Key: "G", Description: "agent merge"})
 	}
 	if m.canAbortTarget {
 		bindings = append(bindings, keybinds.Binding{Key: "A", Description: "abort target merge"})

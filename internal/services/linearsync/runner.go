@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
 type RetryableError interface {
@@ -14,20 +16,20 @@ type RetryableError interface {
 }
 
 type DispatchItem struct {
-	IssueID       string
-	LinearIssueID string
-	Operation     Operation
-	Attempts      int
-	Work          func(context.Context) error
+	IssueID     string
+	ExternalRef domain.ExternalIssueRef
+	Operation   Operation
+	Attempts    int
+	Work        func(context.Context) error
 }
 
 type DispatchOutcome struct {
-	IssueID       string
-	LinearIssueID string
-	Operation     Operation
-	Attempts      int
-	Retried       bool
-	Err           error
+	IssueID     string
+	ExternalRef domain.ExternalIssueRef
+	Operation   Operation
+	Attempts    int
+	Retried     bool
+	Err         error
 }
 
 type FlushOptions struct {
@@ -80,11 +82,11 @@ func (r *Runner) Flush(ctx context.Context, opts FlushOptions, items []DispatchI
 			err := errors.New("missing work func")
 			logDispatchTerminalFailure(r.logger, opts.RunID, opts.ProjectPath, item, r.retryPolicy.MaxAttempts, err)
 			outcomes = append(outcomes, DispatchOutcome{
-				IssueID:       item.IssueID,
-				LinearIssueID: item.LinearIssueID,
-				Operation:     item.Operation,
-				Attempts:      attempts + 1,
-				Err:           err,
+				IssueID:     item.IssueID,
+				ExternalRef: item.ExternalRef,
+				Operation:   item.Operation,
+				Attempts:    attempts + 1,
+				Err:         err,
 			})
 			continue
 		}
@@ -94,10 +96,10 @@ func (r *Runner) Flush(ctx context.Context, opts FlushOptions, items []DispatchI
 		if err == nil {
 			logDispatchSuccess(r.logger, opts.RunID, opts.ProjectPath, item, r.retryPolicy.MaxAttempts)
 			outcomes = append(outcomes, DispatchOutcome{
-				IssueID:       item.IssueID,
-				LinearIssueID: item.LinearIssueID,
-				Operation:     item.Operation,
-				Attempts:      attempts + 1,
+				IssueID:     item.IssueID,
+				ExternalRef: item.ExternalRef,
+				Operation:   item.Operation,
+				Attempts:    attempts + 1,
 			})
 			continue
 		}
@@ -106,23 +108,23 @@ func (r *Runner) Flush(ctx context.Context, opts FlushOptions, items []DispatchI
 			delaySeconds := r.retryPolicy.DelaySeconds(attempts)
 			logDispatchRetryScheduled(r.logger, opts.RunID, opts.ProjectPath, item, r.retryPolicy.MaxAttempts, delaySeconds, err)
 			outcomes = append(outcomes, DispatchOutcome{
-				IssueID:       item.IssueID,
-				LinearIssueID: item.LinearIssueID,
-				Operation:     item.Operation,
-				Attempts:      attempts + 1,
-				Retried:       true,
-				Err:           err,
+				IssueID:     item.IssueID,
+				ExternalRef: item.ExternalRef,
+				Operation:   item.Operation,
+				Attempts:    attempts + 1,
+				Retried:     true,
+				Err:         err,
 			})
 			continue
 		}
 
 		logDispatchTerminalFailure(r.logger, opts.RunID, opts.ProjectPath, item, r.retryPolicy.MaxAttempts, err)
 		outcomes = append(outcomes, DispatchOutcome{
-			IssueID:       item.IssueID,
-			LinearIssueID: item.LinearIssueID,
-			Operation:     item.Operation,
-			Attempts:      attempts + 1,
-			Err:           err,
+			IssueID:     item.IssueID,
+			ExternalRef: item.ExternalRef,
+			Operation:   item.Operation,
+			Attempts:    attempts + 1,
+			Err:         err,
 		})
 	}
 
@@ -135,5 +137,5 @@ func isRetryable(err error) bool {
 }
 
 func (o DispatchOutcome) String() string {
-	return fmt.Sprintf("issue=%s linear_issue=%s operation=%s attempts=%d retried=%t err=%v", o.IssueID, o.LinearIssueID, o.Operation, o.Attempts, o.Retried, o.Err)
+	return fmt.Sprintf("issue=%s external_provider=%s external_remote=%s external_display=%s operation=%s attempts=%d retried=%t err=%v", o.IssueID, o.ExternalRef.Provider, o.ExternalRef.RemoteKey, o.ExternalRef.DisplayKey, o.Operation, o.Attempts, o.Retried, o.Err)
 }

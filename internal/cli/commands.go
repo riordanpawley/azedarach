@@ -88,6 +88,8 @@ type ConfigSetOptions struct {
 type SyncOptions struct {
 	All        bool
 	ProjectDir string
+	Conflicts  bool
+	JSON       bool
 }
 
 type LogOptions struct {
@@ -238,6 +240,18 @@ type IssueBulkUpdateOptions struct {
 type SessionCommandOptions struct {
 	Wait         bool
 	PollInterval time.Duration
+}
+
+type SessionResolveConflictOptions struct {
+	IssueID       string
+	Worktree      string
+	ConflictFiles []string
+	Prompt        string
+}
+
+type BranchAgentMergeOptions struct {
+	IssueID string
+	Target  string
 }
 
 type OperationGetOptions struct {
@@ -448,6 +462,39 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 	return printCommandOutput(resp)
 }
 
+func SessionResolveConflictCommand(deps *Dependencies, opts SessionResolveConflictOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+
+	trimmedIssueID := strings.TrimSpace(opts.IssueID)
+	if trimmedIssueID == "" {
+		return fmt.Errorf("issue id is required")
+	}
+	issueID, err := naming.ParseIssueID(trimmedIssueID)
+	if err != nil {
+		return fmt.Errorf("invalid issue id %q: %w", opts.IssueID, err)
+	}
+
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	out, err := deps.DaemonClient.ResolveConflict(ctx, daemonclient.ResolveConflictParams{
+		IssueID:       issueID.String(),
+		Worktree:      opts.Worktree,
+		ConflictFiles: append([]string(nil), opts.ConflictFiles...),
+		Prompt:        opts.Prompt,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to resolve conflicts for %s: %w", issueID.String(), err)
+	}
+
+	fmt.Printf("Conflict resolution agent launched for %s\n", issueID.String())
+	fmt.Printf("Worktree: %s\n", out.Worktree)
+	fmt.Printf("Window: %s\n", out.WindowName)
+	return nil
+}
+
 func validateSessionIssueID(ctx context.Context, deps *Dependencies, issueID string) (domain.Task, error) {
 	trimmed := strings.TrimSpace(issueID)
 	if trimmed == "" {
@@ -544,6 +591,126 @@ func BranchMergeToBaseCommand(deps *Dependencies, issueID string) error {
 	}
 	fmt.Printf("Merged %s into %s (%s)\n", source.Branch, baseBranch, source.IssueID)
 	return nil
+}
+
+func BranchAgentMergeCommand(deps *Dependencies, opts BranchAgentMergeOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), branchMergeToBaseTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	source, err := resolveMergeToBaseSourceWorktree(ctx, deps, opts.IssueID)
+	if err != nil {
+		return err
+	}
+
+	targetID := strings.TrimSpace(opts.Target)
+	if targetID == "" {
+		targetID = "base"
+	}
+
+	targetWorktree := strings.TrimSpace(deps.RepoDir)
+	targetRef := resolveCLIBaseBranch(deps.Config)
+	agentIssueID := source.IssueID
+	agentWorktree := source.Path
+	if !isBaseMergeTarget(targetID) {
+		target, err := resolveWorktreeForIssue(ctx, deps, targetID)
+		if err != nil {
+			return err
+		}
+		targetID = target.IssueID
+		targetWorktree = target.Path
+		targetRef = "HEAD"
+		agentIssueID = target.IssueID
+		agentWorktree = target.Path
+	}
+	if strings.TrimSpace(targetWorktree) == "" {
+		return fmt.Errorf("target worktree unavailable")
+	}
+
+	preflight, err := deps.DaemonClient.GitMergePreflight(ctx, source.IssueID, source.Path, targetID, targetWorktree, targetRef, source.Branch)
+	if err != nil {
+		return fmt.Errorf("merge preflight failed: %w", err)
+	}
+	if preflight.Clean {
+		fmt.Printf("Merge preflight clean for %s -> %s; no agent needed.\n", source.IssueID, targetID)
+		if isBaseMergeTarget(targetID) {
+			fmt.Printf("Run: az branch merge %s\n", source.IssueID)
+		}
+		return nil
+	}
+
+	conflictFiles := preflight.ConflictFiles
+	if len(conflictFiles) == 0 {
+		conflictFiles = append(conflictFiles, preflight.SourceFiles...)
+		conflictFiles = append(conflictFiles, preflight.TargetFiles...)
+	}
+	prompt := buildBranchAgentMergePrompt(source, targetID, targetWorktree, targetRef, conflictFiles)
+	out, err := deps.DaemonClient.ResolveConflict(ctx, daemonclient.ResolveConflictParams{
+		IssueID:       agentIssueID,
+		Worktree:      agentWorktree,
+		ConflictFiles: append([]string(nil), conflictFiles...),
+		Prompt:        prompt,
+	})
+	if err != nil {
+		return fmt.Errorf("launch merge agent for %s -> %s: %w", source.IssueID, targetID, err)
+	}
+
+	fmt.Printf("Agent merge launched for %s -> %s\n", source.IssueID, targetID)
+	fmt.Printf("Worktree: %s\n", out.Worktree)
+	fmt.Printf("Window: %s\n", out.WindowName)
+	if len(conflictFiles) > 0 {
+		fmt.Printf("Predicted conflicts: %s\n", strings.Join(uniqueTrimmedStrings(conflictFiles), ", "))
+	}
+	return nil
+}
+
+func isBaseMergeTarget(targetID string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(targetID))
+	return normalized == "" || normalized == "base" || normalized == "main"
+}
+
+func resolveWorktreeForIssue(ctx context.Context, deps *Dependencies, issueID string) (daemonclient.Worktree, error) {
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return daemonclient.Worktree{}, fmt.Errorf("target issue id is required")
+	}
+	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
+	if err != nil {
+		return daemonclient.Worktree{}, fmt.Errorf("list daemon worktrees: %w", err)
+	}
+	for _, wt := range worktrees {
+		if naming.IssueIDsEqual(wt.IssueID, issueID) {
+			return wt, nil
+		}
+	}
+	return daemonclient.Worktree{}, fmt.Errorf("worktree not found for issue %s", issueID)
+}
+
+func buildBranchAgentMergePrompt(source daemonclient.Worktree, targetID, targetWorktree, targetRef string, conflictFiles []string) string {
+	targetID = strings.TrimSpace(targetID)
+	targetRef = strings.TrimSpace(targetRef)
+	if targetRef == "" {
+		targetRef = "target branch"
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Auto-merge the blocked preflight for %s -> %s.\n\n", source.IssueID, targetID)
+	b.WriteString("Start by running `az prime`. Inspect the predicted conflict files, perform the merge in the appropriate worktree, resolve conflicts, commit the resolution, and run focused validation.\n\n")
+	if isBaseMergeTarget(targetID) {
+		fmt.Fprintf(&b, "This preflight blocked merging source branch %s into base ref %s. Work in source issue %s at %s: merge %s into %s, resolve conflicts there, and leave the source branch clean so `az branch merge %s` can be retried.\n", source.Branch, targetRef, source.IssueID, source.Path, targetRef, source.Branch, source.IssueID)
+	} else {
+		fmt.Fprintf(&b, "This preflight blocked merging source branch %s from %s into target issue %s at %s. Work in the target worktree, merge %s, resolve conflicts there, and leave the target branch clean.\n", source.Branch, source.Path, targetID, targetWorktree, source.Branch)
+	}
+	if files := uniqueTrimmedStrings(conflictFiles); len(files) > 0 {
+		b.WriteString("\nPredicted conflict files:\n")
+		for _, file := range files {
+			fmt.Fprintf(&b, "- %s\n", file)
+		}
+	}
+	b.WriteString("\nDo not push or create a PR unless explicitly asked. Leave a concise summary of resolved files and validation results.")
+	return b.String()
 }
 
 func resolveMergeToBaseSourceWorktree(ctx context.Context, deps *Dependencies, issueID string) (daemonclient.Worktree, error) {
@@ -683,6 +850,23 @@ func dirtyFilesFromGitStatus(status daemonclient.GitStatus) []string {
 	return out
 }
 
+func uniqueTrimmedStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
 func wrapPendingGitOperation(stage string, err error) error {
 	var pending *daemonclient.OperationPendingError
 	if !errors.As(err, &pending) {
@@ -813,10 +997,15 @@ func ParseConfigSetArgs(args []string) (ConfigSetOptions, error) {
 
 func ParseSyncArgs(args []string) (SyncOptions, error) {
 	opts := SyncOptions{}
+	if len(args) > 0 && strings.TrimSpace(args[0]) == "conflicts" {
+		opts.Conflicts = true
+		args = args[1:]
+	}
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.All, "all", false, "sync all worktrees")
 	fs.StringVar(&opts.ProjectDir, "project-dir", "", "project directory")
+	fs.BoolVar(&opts.JSON, "json", false, "print JSON")
 	if err := fs.Parse(args); err != nil {
 		return SyncOptions{}, err
 	}
@@ -824,11 +1013,11 @@ func ParseSyncArgs(args []string) (SyncOptions, error) {
 	case 0:
 	case 1:
 		if strings.TrimSpace(opts.ProjectDir) != "" {
-			return SyncOptions{}, fmt.Errorf("usage: az sync [--all] [<directory>] [--project-dir <dir>]")
+			return SyncOptions{}, fmt.Errorf("usage: az sync [conflicts] [--all] [<directory>] [--project-dir <dir>] [--json]")
 		}
 		opts.ProjectDir = strings.TrimSpace(fs.Arg(0))
 	default:
-		return SyncOptions{}, fmt.Errorf("usage: az sync [--all] [<directory>] [--project-dir <dir>]")
+		return SyncOptions{}, fmt.Errorf("usage: az sync [conflicts] [--all] [<directory>] [--project-dir <dir>] [--json]")
 	}
 	return opts, nil
 }
@@ -1899,6 +2088,29 @@ func SyncCommand(deps *Dependencies, opts SyncOptions) error {
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
+	if opts.Conflicts {
+		conflicts, err := deps.DaemonClient.ListIssueSyncConflicts(ctx, false)
+		if err != nil {
+			return fmt.Errorf("list sync conflicts: %w", err)
+		}
+		if opts.JSON {
+			data, err := json.MarshalIndent(conflicts, "", "  ")
+			if err != nil {
+				return fmt.Errorf("marshal sync conflicts: %w", err)
+			}
+			fmt.Println(string(data))
+			return nil
+		}
+		if len(conflicts.Conflicts) == 0 {
+			fmt.Println("No unresolved sync conflicts.")
+			return nil
+		}
+		fmt.Printf("Unresolved sync conflicts: %d\n", len(conflicts.Conflicts))
+		for _, conflict := range conflicts.Conflicts {
+			fmt.Printf("- %s %s: local=%q remote=%q\n", conflict.IssueID, conflict.Field, conflict.LocalValue, conflict.RemoteValue)
+		}
+		return nil
+	}
 
 	projectDir := strings.TrimSpace(opts.ProjectDir)
 	if projectDir == "" {
@@ -1929,23 +2141,50 @@ func SyncCommand(deps *Dependencies, opts SyncOptions) error {
 		}
 	}
 
-	fmt.Println("Syncing issue tracker state...")
-	fmt.Printf("Project: %s\n", projectDir)
-	if opts.All {
-		fmt.Printf("Targets: %d worktree(s)\n", len(targetPaths))
-		for _, targetPath := range targetPaths {
-			fmt.Printf("  %s\n", targetPath)
+	if !opts.JSON {
+		fmt.Println("Syncing issue tracker state...")
+		fmt.Printf("Project: %s\n", projectDir)
+		if opts.All {
+			fmt.Printf("Targets: %d worktree(s)\n", len(targetPaths))
+			for _, targetPath := range targetPaths {
+				fmt.Printf("  %s\n", targetPath)
+			}
 		}
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	summary, err := deps.DaemonClient.RunIssueSync(ctx)
 	if err != nil {
-		return fmt.Errorf("refresh issue tracker snapshot: %w", err)
+		return fmt.Errorf("run issue tracker sync: %w", err)
 	}
-
+	if opts.JSON {
+		data, err := json.MarshalIndent(summary, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal sync summary: %w", err)
+		}
+		fmt.Println(string(data))
+		return nil
+	}
 	fmt.Println("")
-	fmt.Printf("Snapshot: tasks=%d revision=%d\n", len(snapshot.Tasks), snapshot.Revision)
-	fmt.Printf("Sync summary: targets=%d, tasks=%d, revision=%d\n", len(targetPaths), len(snapshot.Tasks), snapshot.Revision)
+	if summary.Skipped {
+		fmt.Printf("Sync skipped: %s\n", summary.Reason)
+		return nil
+	}
+	fmt.Printf("Linear: remote=%d local=%d imported=%d updated_local=%d pushed_remote=%d conflicts=%d\n", summary.RemoteIssues, summary.LocalIssues, summary.Imported, summary.UpdatedLocal, summary.PushedRemote, summary.Conflicts)
+	if summary.Incremental {
+		fmt.Printf("Incremental: cursor=%s", summary.Cursor)
+		if summary.RemoteScopeIssues > 0 {
+			fmt.Printf(" remote_scope=%d", summary.RemoteScopeIssues)
+		}
+		fmt.Println("")
+	}
+	fmt.Printf("Efficiency: api_requests=%d skipped_unchanged=%d pending_pushes=%d skipped_push_out_of_scope=%d out_of_scope_refs=%d retried_requests=%d\n", summary.APIRequests, summary.SkippedUnchanged, summary.PendingPushes, summary.SkippedPushOutOfScope, summary.OutOfScopeRefs, summary.RetriedRequests)
+	if summary.PushBudgetExhausted {
+		fmt.Println("Push budget exhausted; remaining local changes will be retried in a later sync.")
+	}
+	if summary.RateLimitLimit > 0 || summary.RateLimitRemaining > 0 || summary.RateLimitReset != "" {
+		fmt.Printf("Rate limit: remaining=%d limit=%d reset=%s\n", summary.RateLimitRemaining, summary.RateLimitLimit, summary.RateLimitReset)
+	}
+	fmt.Printf("Sync summary: targets=%d, provider=%s\n", len(targetPaths), summary.Provider)
 	return nil
 }
 
@@ -2364,20 +2603,36 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
+	startedAt := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("issue get failed during daemon ensure", "issue_id", opts.IssueID, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
+		}
 		return err
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := deps.DaemonClient.GetTaskSnapshot(ctx, opts.IssueID)
 	if err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("issue get failed during daemon read", "issue_id", opts.IssueID, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
+		}
+		if strings.Contains(err.Error(), fmt.Sprintf("issue not found: %s", opts.IssueID)) {
+			return fmt.Errorf("issue not found: %s", opts.IssueID)
+		}
 		return fmt.Errorf("failed to get issue %s: %w", opts.IssueID, err)
 	}
 
 	task, ok := findTaskByID(snapshot.Tasks, opts.IssueID)
 	if !ok {
+		if deps.Logger != nil {
+			deps.Logger.Info("issue get not found", "issue_id", opts.IssueID, "elapsed_ms", time.Since(startedAt).Milliseconds())
+		}
 		return fmt.Errorf("issue not found: %s", opts.IssueID)
+	}
+	if deps.Logger != nil {
+		deps.Logger.Info("issue get completed", "issue_id", opts.IssueID, "context_task_count", len(snapshot.Tasks), "elapsed_ms", time.Since(startedAt).Milliseconds())
 	}
 
 	if opts.JSON {
@@ -4012,6 +4267,7 @@ type primeTemplateData struct {
 	ActiveIssueClosedWarning string
 	ContextGuardrail         string
 	QuestionFirstGuardrails  string
+	ImplementationSection    string
 	ImplementationGuardrails string
 	SpecGuardrails           string
 }
@@ -4024,7 +4280,9 @@ func PrimeCommand(deps *Dependencies) error {
 	activeIssueClosedWarning := ""
 	specGuardrails := ""
 	questionFirstGuardrails := ""
-	implementationGuardrails := "- Implementation guardrails: in multi-implementation repos, include explicit `--impl <impl>` on new `az issue`/`az spec link` writes and use repeated `--impl` only for intentional shared work. For `az issue update`, `--update-impl` is only for changing implementation assignments; status/title/notes updates do not require it."
+	implementationSection := ""
+	implementationGuardrails := "- Implementation guardrails: in multi-implementation repos, include explicit `--impl <impl>` on new `az issue` writes and use repeated `--impl` only for intentional shared work. For `az issue update`, `--update-impl` is only for changing implementation assignments; status/title/notes updates do not require it."
+	specEnabled := deps != nil && deps.Config != nil && deps.Config.Spec.Enabled
 
 	if primeMode == "question-first" {
 		questionFirstGuardrails = `- Question-first execution rules (Space+Q mode):
@@ -4032,7 +4290,7 @@ func PrimeCommand(deps *Dependencies) error {
   - MUST improve the current issue title and description before implementation work begins.
   - MUST record unknowns/open questions in the issue description so scope is explicit.`
 	}
-	if deps.Config != nil && deps.Config.Spec.Enabled {
+	if specEnabled {
 		specGuardrails = `  - In this repo, when guidance says ` + "`spec`" + `, it means records managed by ` + "`az spec req ...`" + ` and ` + "`az spec link ...`" + `, not README.md, AGENTS.md, or other internal docs.
   - ALWAYS run ` + "`az spec read --issue <issue-id>`" + ` before starting behavior work; use ` + "`az spec link list --issue <issue-id>`" + ` when you need link-only detail.
   - If implementation is not aligned with spec, update spec first, then implement.
@@ -4042,10 +4300,20 @@ func PrimeCommand(deps *Dependencies) error {
   - If this project should not use spec workflows, disable them with ` + "`az config set spec.enabled false`" + ` (or set ` + "`spec.enabled`" + ` to false in ` + "`.azedarach/config.json`" + `).`
 	}
 
+	var snapshot daemonclient.TaskSnapshot
+	snapshotLoaded := false
+	if deps != nil && deps.DaemonClient != nil {
+		loaded, err := deps.DaemonClient.ListTasksSnapshot(context.Background())
+		if err == nil {
+			snapshot = loaded
+			snapshotLoaded = true
+			implementationSection = renderPrimeImplementationSection(configuredIssueImplementations(snapshot.Tasks))
+		}
+	}
+
 	if issueID != "" {
 		guardrail = fmt.Sprintf("- `AZEDARACH_ISSUE_ID` is set to `%s`; use it as the default issue scope and refresh stale context with `az issue get %s`.", issueID, issueID)
-		snapshot, err := deps.DaemonClient.ListTasksSnapshot(context.Background())
-		if err != nil {
+		if !snapshotLoaded {
 			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nCould not load issue details automatically; run `az issue get %s`.\n", issueID, issueID)
 		} else if task, ok := findTaskByID(snapshot.Tasks, issueID); ok {
 			issueSection = renderPrimeIssueSection(issueID, task)
@@ -4059,12 +4327,13 @@ func PrimeCommand(deps *Dependencies) error {
 
 	output, err := clitext.Render("prime_output", primeTemplateData{
 		ActiveIssueID:            issueID,
-		SpecEnabled:              deps.Config != nil && deps.Config.Spec.Enabled,
+		SpecEnabled:              specEnabled,
 		PrimeEvidenceKey:         primeEvidenceKey,
 		IssueSection:             issueSection,
 		ActiveIssueClosedWarning: activeIssueClosedWarning,
 		ContextGuardrail:         guardrail,
 		QuestionFirstGuardrails:  questionFirstGuardrails,
+		ImplementationSection:    implementationSection,
 		ImplementationGuardrails: implementationGuardrails,
 		SpecGuardrails:           specGuardrails,
 	})
@@ -4073,6 +4342,23 @@ func PrimeCommand(deps *Dependencies) error {
 	}
 	fmt.Print(output)
 	return nil
+}
+
+func renderPrimeImplementationSection(implementations []string) string {
+	if len(implementations) <= 1 {
+		return ""
+	}
+	quoted := make([]string, 0, len(implementations))
+	for _, impl := range implementations {
+		quoted = append(quoted, fmt.Sprintf("`%s`", impl))
+	}
+	exampleImpl := implementations[0]
+	return fmt.Sprintf("- Implementation selection (multi-implementation project):\n"+
+		"  - Available implementations: %s\n"+
+		"  - Use `az impl list` to refresh the available options.\n"+
+		"  - New issue writes must choose an implementation: `az issue create --impl %s \"Child task\"`\n"+
+		"  - Repeat `--impl` only for intentionally shared work. Existing issue updates do not use `--impl`; use `--update-impl` only when changing assignments.\n",
+		strings.Join(quoted, ", "), exampleImpl)
 }
 
 func renderPrimeIssueSection(issueID string, task domain.Task) string {

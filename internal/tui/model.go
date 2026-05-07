@@ -144,17 +144,21 @@ type Model struct {
 	editor *editor.Service
 
 	// UI state
-	overlayStack                *overlay.Stack
-	createTaskOverlay           *overlay.CreateTaskOverlay
-	viewMode                    ViewMode
-	viewportStarts              [board.DefaultColumnCount]int
-	columnViewportStart         int
-	drillDownParentID           string
-	drillDownParentName         string
-	drillDownTrail              []drillDownContext
-	pendingCreatedTaskID        string
-	runtimeSignalsByTask        map[string]board.RuntimeSignals
-	runtimeSignalWorktreeByTask map[string]string
+	overlayStack                  *overlay.Stack
+	createTaskOverlay             *overlay.CreateTaskOverlay
+	viewMode                      ViewMode
+	viewportStarts                [board.DefaultColumnCount]int
+	columnViewportStart           int
+	drillDownParentID             string
+	drillDownParentName           string
+	drillDownTrail                []drillDownContext
+	pendingCreatedTaskID          string
+	pendingCreatedWorkspaceTaskID string
+	pendingUIOpenTaskID           string
+	openCreatedTaskInWorkspace    bool
+	openSessionSelectorOnLoad     bool
+	runtimeSignalsByTask          map[string]board.RuntimeSignals
+	runtimeSignalWorktreeByTask   map[string]string
 
 	// Project
 	currentProject       string
@@ -229,8 +233,23 @@ type Model struct {
 	logger *slog.Logger
 }
 
+// Option configures initial TUI behavior.
+type Option func(*Model)
+
+// WithSessionSelectorOnLoad opens the tmux session selector after the first task snapshot loads.
+func WithSessionSelectorOnLoad() Option {
+	return func(m *Model) {
+		m.openSessionSelectorOnLoad = true
+	}
+}
+
 // New creates a new application model with the given config
 func New(cfg *config.Config) Model {
+	return NewWithOptions(cfg)
+}
+
+// NewWithOptions creates a new application model with optional initial behavior.
+func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 	// Initialize spinner
 	s := spinner.New()
 	s.Spinner = spinner.Dot
@@ -301,6 +320,11 @@ func New(cfg *config.Config) Model {
 	logger.Info("tui runtime initialized", "repo_dir", repoDir, "runtime_repo_dir", runtimeRepoDir, "daemon_socket", daemonSocketPath, "project", m.currentProject)
 	m.refreshDaemonProjectRouteID()
 	m.daemonClient.WithProjectRouteID(m.daemonProjectRouteIDValue())
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&m)
+		}
+	}
 	return m
 }
 
@@ -337,6 +361,64 @@ func (m *Model) applyPendingCreatedTaskSelection() {
 	if m.taskExists(taskID) {
 		m.pendingCreatedTaskID = ""
 	}
+}
+
+func (m *Model) applyPendingCreatedWorkspaceTask() {
+	taskID := strings.TrimSpace(m.pendingCreatedWorkspaceTaskID)
+	if taskID == "" {
+		return
+	}
+	workspace, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		return
+	}
+	task, _, ok := m.taskAndSessionByID(taskID)
+	if !ok || task == nil {
+		if m.taskExists(taskID) {
+			m.pendingCreatedWorkspaceTaskID = ""
+		}
+		return
+	}
+	columns := m.buildColumns()
+	if m.nav.JumpToTaskByID(columns, task.ID.String()) {
+		m.ensureCursorVisible(columns)
+	}
+	workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
+	workspace.SyncTask(*task, m.tasks, m.pendingMutationForTask(task.ID.String()))
+	m.pendingCreatedWorkspaceTaskID = ""
+}
+
+func (m Model) openCurrentTaskWorkspace() (tea.Model, tea.Cmd) {
+	columns := m.buildColumns()
+	task, _ := m.nav.GetCurrentTask(columns)
+	if task == nil {
+		task, _ = m.getCurrentTaskAndSession()
+	}
+	if task == nil {
+		return m, nil
+	}
+	return m.openTaskWorkspaceByID(task.ID.String())
+}
+
+func (m Model) openTaskWorkspaceByID(taskID string) (tea.Model, tea.Cmd) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return m, nil
+	}
+	task, _, ok := m.taskAndSessionByID(taskID)
+	if !ok || task == nil {
+		return m, nil
+	}
+
+	workspace := overlay.NewTaskWorkspaceOverlay(*task, m.tasks, m.pendingMutationForTask(taskID), m.width, m.height)
+	workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
+	if m.daemonClient == nil {
+		return m, m.openOverlay(workspace)
+	}
+	return m, tea.Batch(
+		m.openOverlay(workspace),
+		m.refreshTaskWorkspaceInBackgroundCmd(taskID),
+	)
 }
 
 // handleKey processes keyboard input based on current mode
@@ -499,28 +581,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case keybinds.ActionOpenWorkspace: // Space - open task panel (details + actions)
-		columns := m.buildColumns()
-		task, _ := m.nav.GetCurrentTask(columns)
-		if task == nil {
-			task, _ = m.getCurrentTaskAndSession()
-		}
-		if task != nil {
-			// Resolve from authoritative task projection to avoid opening the
-			// workspace with a stale navigation-copy task payload.
-			if latestTask, _, ok := m.taskAndSessionByID(task.ID.String()); ok && latestTask != nil {
-				task = latestTask
-			}
-			workspace := overlay.NewTaskWorkspaceOverlay(*task, m.tasks, m.pendingMutationForTask(task.ID.String()), m.width, m.height)
-			workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
-			if m.daemonClient == nil {
-				return m, m.openOverlay(workspace)
-			}
-			return m, tea.Batch(
-				m.openOverlay(workspace),
-				m.refreshTaskWorkspaceInBackgroundCmd(task.ID.String()),
-			)
-		}
-		return m, nil
+		return m.openCurrentTaskWorkspace()
 
 	case keybinds.ActionEnterSearch: // Search
 		m.editor.EnterSearch()
@@ -557,6 +618,14 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			})
 		}
 		return m, nil
+
+	case keybinds.ActionAttachSession: // Attach to selected issue session
+		task, _ := m.getCurrentTaskAndSession()
+		if task == nil {
+			return m, nil
+		}
+		m.beginMutationFeedback(fmt.Sprintf("Attach queued for %s", task.ID))
+		return m, m.attachSessionCmd(task.ID.String())
 
 	case keybinds.ActionCreateTask: // Create task
 		var parentID *string
@@ -694,6 +763,7 @@ func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "b":
 		return m, m.openMergeTargetSelection(task)
 	case "m":
+		m.beginMutationFeedback("Preparing merge")
 		return m, m.followOnMergeSelectionCmd(task, session)
 	case "u":
 		if task == nil {
@@ -708,6 +778,8 @@ func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if session != nil {
 			worktreeHint = session.Worktree
 		}
+		m.markMergeOperationPreparing(task.ID.String(), "", "preparing update")
+		m.beginMutationFeedback(fmt.Sprintf("Update from base queued for %s", task.ID))
 		return m, m.updateFromBaseCmd(task.ID.String(), worktreeHint, false)
 	case "P":
 		m.addToast(Toast{
@@ -836,6 +908,9 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleOverlayKey routes keyboard messages to the overlay stack
 func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "ctrl+g" {
+		return m, func() tea.Msg { return overlay.CloseAllOverlaysMsg{} }
+	}
 	cmd := m.overlayStack.Update(msg)
 	return m, cmd
 }
@@ -937,6 +1012,15 @@ type sessionErrorMsg struct {
 type conflictResolveFallbackMsg struct {
 	issueID string
 	err     error
+}
+
+type conflictResolveAgentResultMsg struct {
+	issueID     string
+	worktree    string
+	windowName  string
+	operationID string
+	state       protocol.OperationState
+	err         error
 }
 
 func pendingOperationDetails(err error) (*daemonclient.OperationPendingError, bool) {
@@ -1293,6 +1377,13 @@ func parseDiffStatTotals(diffStat string) (int, int) {
 
 func taskIDKey(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func (m Model) shouldIgnoreDaemonSnapshot(projectID string, revision uint64) bool {
+	if projectID = strings.TrimSpace(projectID); projectID != "" && projectID != m.daemonProjectID() {
+		return true
+	}
+	return revision != 0 && revision < m.daemonRevision
 }
 
 func (m *Model) suppressTaskHydration(taskID string) {
@@ -1656,6 +1747,22 @@ func (m Model) daemonProjectRouteIDValue() naming.ProjectID {
 
 func (m Model) daemonProjectID() string {
 	return m.daemonProjectRouteIDValue().String()
+}
+
+func (m Model) projectByDaemonRouteID(projectID string) (config.Project, bool) {
+	projectID = strings.TrimSpace(protocol.NormalizeProjectID(projectID))
+	if projectID == "" || m.projectRegistry == nil {
+		return config.Project{}, false
+	}
+	for _, project := range m.projectRegistry.Projects {
+		if routeID, ok := daemonProjectRouteIDForPath(project.Path); ok && routeID.String() == projectID {
+			return project, true
+		}
+		if protocol.NormalizeProjectID(project.Name) == projectID {
+			return project, true
+		}
+	}
+	return config.Project{}, false
 }
 
 func (m Model) computeDaemonProjectRouteID() naming.ProjectID {
@@ -2158,6 +2265,17 @@ func isTaskWorkspaceOverlay(current overlay.Overlay) bool {
 	return ok
 }
 
+func (m *Model) selectTaskByID(taskID string) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return
+	}
+	columns := m.buildColumns()
+	if m.nav.JumpToTaskByID(columns, taskID) {
+		m.ensureCursorVisible(columns)
+	}
+}
+
 func (m Model) eventLogFilePath() string {
 	if strings.TrimSpace(m.logFilePath) != "" {
 		return m.logFilePath
@@ -2226,6 +2344,48 @@ func (m Model) configSourcePath() string {
 		base = "."
 	}
 	return filepath.Join(base, config.ConfigDirName, config.ConfigFileName)
+}
+
+func (m Model) openSettingsEditorCmd() tea.Cmd {
+	configPath := m.configSourcePath()
+	projectPath := strings.TrimSpace(m.repoDir)
+	if projectPath == "" {
+		projectPath = "."
+	}
+
+	editorName := strings.TrimSpace(os.Getenv("EDITOR"))
+	if editorName == "" {
+		editorName = strings.TrimSpace(os.Getenv("VISUAL"))
+	}
+	if editorName == "" {
+		editorName = "vim"
+	}
+
+	return func() tea.Msg {
+		if strings.TrimSpace(os.Getenv("TMUX")) == "" || m.tmuxClient == nil {
+			return overlay.SelectionMsg{
+				Key:   "editor-error",
+				Value: fmt.Errorf("settings editor unavailable outside tmux; run inside tmux and retry"),
+			}
+		}
+		if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+			return overlay.SelectionMsg{
+				Key:   "editor-error",
+				Value: fmt.Errorf("prepare settings directory: %w", err),
+			}
+		}
+		popupCommand := fmt.Sprintf("cd %s && %s %s", shellSingleQuote(projectPath), shellSingleQuote(editorName), shellSingleQuote(configPath))
+		if err := m.tmuxClient.DisplayPopup(context.Background(), "az.settings", "90%", "90%", popupCommand); err != nil {
+			return overlay.SelectionMsg{
+				Key:   "editor-error",
+				Value: fmt.Errorf("open settings editor in tmux popup: %w", err),
+			}
+		}
+		return overlay.SelectionMsg{
+			Key:   "editor-closed",
+			Value: configPath,
+		}
+	}
 }
 
 func (m Model) openLogStreamCmd(logPaths ...string) tea.Cmd {
@@ -2491,9 +2651,12 @@ type worktreeCleanupResultMsg struct {
 }
 
 type worktreeCleanupConfirmPromptMsg struct {
+	projectID    string
+	revision     uint64
 	taskID       string
 	deletedTask  bool
 	force        bool
+	task         domain.Task
 	freshness    protocol.TaskListFreshness
 	checkedAt    time.Time
 	hasSnapshot  bool
@@ -2523,13 +2686,16 @@ type bulkCleanupRisk struct {
 }
 
 type bulkCleanupPreflightMsg struct {
-	taskIDs      []string
-	deletedTasks bool
-	risks        []bulkCleanupRisk
-	freshness    protocol.TaskListFreshness
-	checkedAt    time.Time
-	reconcileErr error
-	snapshotErr  error
+	projectID      string
+	revision       uint64
+	taskIDs        []string
+	deletedTasks   bool
+	refreshedTasks []domain.Task
+	risks          []bulkCleanupRisk
+	freshness      protocol.TaskListFreshness
+	checkedAt      time.Time
+	reconcileErr   error
+	snapshotErr    error
 }
 
 type pendingBulkCleanupConfirmation struct {
@@ -2538,6 +2704,8 @@ type pendingBulkCleanupConfirmation struct {
 }
 
 type refreshTaskWorkspaceResultMsg struct {
+	projectID     string
+	revision      uint64
 	taskID        string
 	hasTask       bool
 	task          domain.Task
@@ -2549,8 +2717,9 @@ type refreshTaskWorkspaceResultMsg struct {
 }
 
 func (m Model) refreshTaskWorkspaceInBackgroundCmd(taskID string) tea.Cmd {
+	projectID := m.daemonProjectID()
 	return func() tea.Msg {
-		msg := refreshTaskWorkspaceResultMsg{taskID: taskID}
+		msg := refreshTaskWorkspaceResultMsg{projectID: projectID, taskID: taskID}
 		if m.daemonClient == nil {
 			return msg
 		}
@@ -2573,6 +2742,7 @@ func (m Model) refreshTaskWorkspaceInBackgroundCmd(taskID string) tea.Cmd {
 		}
 
 		msg.tasks = snapshot.Tasks
+		msg.revision = snapshot.Revision
 		msg.lastCheckedAt = snapshot.LastCheckedAt
 		msg.freshness = snapshot.Freshness
 		for _, candidate := range snapshot.Tasks {
@@ -2609,7 +2779,7 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 
 		// Always ask daemon to stop first; local projection may be stale.
 		m.sessionMonitor.Stop(taskID)
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), worktreeCleanupMutationTimeout)
 		_, stopErr := m.daemonClient.StopSession(stopCtx, taskID)
 		stopCancel()
 		if stopErr != nil {
@@ -2657,8 +2827,10 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 }
 
 func (m Model) requestWorktreeCleanupConfirmationCmd(taskID string, deleteTask bool) tea.Cmd {
+	projectID := m.daemonProjectID()
 	return func() tea.Msg {
 		msg := worktreeCleanupConfirmPromptMsg{
+			projectID:   projectID,
 			taskID:      taskID,
 			deletedTask: deleteTask,
 		}
@@ -2684,6 +2856,7 @@ func (m Model) requestWorktreeCleanupConfirmationCmd(taskID string, deleteTask b
 		}
 
 		msg.hasSnapshot = true
+		msg.revision = snapshot.Revision
 		msg.freshness = snapshot.Freshness
 		msg.checkedAt = snapshot.LastCheckedAt
 
@@ -2691,6 +2864,7 @@ func (m Model) requestWorktreeCleanupConfirmationCmd(taskID string, deleteTask b
 			if taskIDKey(task.ID.String()) != taskIDKey(taskID) {
 				continue
 			}
+			msg.task = task
 			msg.hasTask = true
 			msg.hasWorktree = task.HasWorktree
 			msg.ahead = task.GitAheadCount
@@ -3353,9 +3527,6 @@ func (m Model) bulkArchiveCmd(taskIDs []string) tea.Cmd {
 
 func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
 		updated := 0
 		failed := 0
 		issues := make([]bulkTaskIssue, 0)
@@ -3373,14 +3544,18 @@ func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd
 
 			// Always ask daemon to stop first; local projection may be stale.
 			m.sessionMonitor.Stop(taskID)
-			_, stopErr := m.daemonClient.StopSession(ctx, taskID)
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), worktreeCleanupMutationTimeout)
+			_, stopErr := m.daemonClient.StopSession(stopCtx, taskID)
+			stopCancel()
 			if stopErr != nil && !isSessionAlreadyStoppedError(stopErr) && !isSessionStopSkippableDuringCleanup(stopErr) {
 				failed++
 				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: stopErr.Error()})
 				continue
 			}
 
-			removeErr := m.daemonClient.RemoveWorktreeWithOptions(ctx, taskID, false)
+			removeCtx, removeCancel := context.WithTimeout(context.Background(), worktreeCleanupMutationTimeout)
+			removeErr := m.daemonClient.RemoveWorktreeWithOptions(removeCtx, taskID, false)
+			removeCancel()
 			if removeErr != nil {
 				failed++
 				reason := removeErr.Error()
@@ -3392,7 +3567,10 @@ func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd
 			}
 
 			if deleteTask {
-				if err := m.daemonClient.DeleteTask(ctx, taskID); err != nil {
+				deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 15*time.Second)
+				err := m.daemonClient.DeleteTask(deleteCtx, taskID)
+				deleteCancel()
+				if err != nil {
 					failed++
 					issues = append(issues, bulkTaskIssue{taskID: taskID, reason: err.Error()})
 					continue
@@ -3408,8 +3586,10 @@ func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd
 
 func (m Model) bulkCleanupPreflightCmd(taskIDs []string, deleteTask bool) tea.Cmd {
 	selected := append([]string(nil), taskIDs...)
+	projectID := m.daemonProjectID()
 	return func() tea.Msg {
 		msg := bulkCleanupPreflightMsg{
+			projectID:    projectID,
 			taskIDs:      selected,
 			deletedTasks: deleteTask,
 		}
@@ -3433,6 +3613,7 @@ func (m Model) bulkCleanupPreflightCmd(taskIDs []string, deleteTask bool) tea.Cm
 			msg.snapshotErr = err
 			return msg
 		}
+		msg.revision = snapshot.Revision
 		msg.freshness = snapshot.Freshness
 		msg.checkedAt = snapshot.LastCheckedAt
 
@@ -3446,6 +3627,7 @@ func (m Model) bulkCleanupPreflightCmd(taskIDs []string, deleteTask bool) tea.Cm
 			if !ok {
 				continue
 			}
+			msg.refreshedTasks = append(msg.refreshedTasks, task)
 			if !task.HasUncommittedChanges && task.GitAheadCount <= 0 {
 				continue
 			}
@@ -3768,11 +3950,146 @@ func (m *Model) markTaskOperationPending(taskID, action, operationID string, sta
 	}
 	key := taskIDKey(taskID)
 	current := m.pendingStatuses[key]
+	if action == "session_start" && current.targetStatus == "" {
+		if status, ok := m.taskStatusByID(taskID); ok && status != domain.StatusDone {
+			current.previousStatus = status
+			current.targetStatus = domain.StatusInProgress
+		}
+	}
 	current.operationID = operationID
 	current.state = state
 	current.action = action
 	current.updatedAt = time.Now()
 	m.pendingStatuses[key] = current
+	m.applyPendingStatusOverlays()
+}
+
+func (m *Model) beginTaskMutationFeedback(taskID, action, label string) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return
+	}
+	m.markTaskOperationPending(taskID, action, "", protocol.OperationStateQueued)
+	m.syncTaskWorkspaceOverlay()
+	m.addToast(Toast{
+		Level:   ToastInfo,
+		Message: fmt.Sprintf("%s queued for %s", strings.TrimSpace(label), taskID),
+		Expires: time.Now().Add(3 * time.Second),
+	})
+}
+
+func (m *Model) markTaskGitOperationPending(taskID, kind, operationID string, state protocol.OperationState) {
+	key := taskIDKey(taskID)
+	if key == "" {
+		return
+	}
+	if m.pendingOpsByTask == nil {
+		m.pendingOpsByTask = make(map[string]pendingOperationProgress)
+	}
+	current := m.pendingOpsByTask[key]
+	if strings.TrimSpace(operationID) == "" {
+		operationID = current.operationID
+	}
+	if strings.TrimSpace(kind) == "" {
+		kind = current.kind
+	}
+	if strings.TrimSpace(kind) == "" {
+		kind = "git.merge"
+	}
+	percent := current.percent
+	if state == protocol.OperationStateRunning && percent == 0 {
+		percent = 50
+	}
+	m.pendingOpsByTask[key] = pendingOperationProgress{
+		operationID: strings.TrimSpace(operationID),
+		kind:        strings.TrimSpace(kind),
+		state:       state,
+		percent:     percent,
+		message:     current.message,
+		updatedAt:   time.Now(),
+	}
+}
+
+func (m *Model) markTaskGitOperationPreparing(taskID, message string) {
+	key := taskIDKey(taskID)
+	if key == "" {
+		return
+	}
+	if m.pendingOpsByTask == nil {
+		m.pendingOpsByTask = make(map[string]pendingOperationProgress)
+	}
+	m.pendingOpsByTask[key] = pendingOperationProgress{
+		kind:      "git.merge",
+		state:     protocol.OperationState("preparing"),
+		message:   strings.TrimSpace(message),
+		updatedAt: time.Now(),
+	}
+}
+
+func (m *Model) markMergeOperationPending(sourceID, targetID, operationID string, state protocol.OperationState) {
+	m.markTaskGitOperationPending(sourceID, "git.merge", operationID, state)
+	if targetKey := taskIDKey(targetID); targetKey != "" && targetKey != "base" && targetKey != taskIDKey(sourceID) {
+		m.markTaskGitOperationPending(targetID, "git.merge", operationID, state)
+	}
+}
+
+func (m *Model) markMergeOperationPreparing(sourceID, targetID, message string) {
+	m.markTaskGitOperationPreparing(sourceID, message)
+	if targetKey := taskIDKey(targetID); targetKey != "" && targetKey != "base" && targetKey != taskIDKey(sourceID) {
+		m.markTaskGitOperationPreparing(targetID, message)
+	}
+	m.syncTaskWorkspaceOverlay()
+}
+
+func (m *Model) clearLocalMergeOperationPending(sourceID, targetID string) {
+	m.clearLocalTaskGitOperationPending(sourceID)
+	if targetKey := taskIDKey(targetID); targetKey != "" && targetKey != "base" && targetKey != taskIDKey(sourceID) {
+		m.clearLocalTaskGitOperationPending(targetID)
+	}
+	m.syncTaskWorkspaceOverlay()
+}
+
+func (m *Model) clearLocalTaskGitOperationPending(taskID string) {
+	key := taskIDKey(taskID)
+	if key == "" || len(m.pendingOpsByTask) == 0 {
+		return
+	}
+	current, ok := m.pendingOpsByTask[key]
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(current.operationID) != "" {
+		return
+	}
+	if strings.TrimSpace(current.kind) != "git.merge" {
+		return
+	}
+	delete(m.pendingOpsByTask, key)
+}
+
+func (m Model) taskStatusByID(taskID string) (domain.Status, bool) {
+	key := taskIDKey(taskID)
+	if key == "" {
+		return "", false
+	}
+	for _, task := range m.tasks {
+		if taskIDKey(task.ID.String()) == key {
+			return task.Status, true
+		}
+	}
+	return "", false
+}
+
+func (m *Model) beginMutationFeedback(message string) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return
+	}
+	m.addToast(Toast{
+		Level:   ToastInfo,
+		Message: message,
+		Expires: time.Now().Add(3 * time.Second),
+	})
 }
 
 func (m *Model) clearPendingTaskStatus(taskID string) {
@@ -3852,6 +4169,43 @@ func (m *Model) syncTaskWorkspaceOverlay() {
 	workspace.SyncTask(taskView, m.tasks, m.pendingMutationForTask(taskID))
 }
 
+func (m *Model) applySingleTaskWorkspaceRefresh(taskID string, refreshed domain.Task) (domain.Task, bool) {
+	return m.applyTaskRefresh(taskID, refreshed, true)
+}
+
+func (m *Model) applyTaskRefreshes(refreshed []domain.Task) {
+	updated := false
+	for _, task := range refreshed {
+		if _, ok := m.applyTaskRefresh(task.ID.String(), task, false); ok {
+			updated = true
+		}
+	}
+	if updated {
+		m.syncProjectionIndexesFromTasks()
+		m.reconcileCursorAfterIssuesRefresh()
+	}
+}
+
+func (m *Model) applyTaskRefresh(taskID string, refreshed domain.Task, syncAfter bool) (domain.Task, bool) {
+	key := taskIDKey(taskID)
+	if key == "" {
+		return domain.Task{}, false
+	}
+	for i := range m.tasks {
+		if taskIDKey(m.tasks[i].ID.String()) != key {
+			continue
+		}
+		m.tasks[i] = refreshed
+		m.tasks[i].Session = cloneSession(m.tasks[i].Session)
+		if syncAfter {
+			m.syncProjectionIndexesFromTasks()
+			m.reconcileCursorAfterIssuesRefresh()
+		}
+		return m.tasks[i], true
+	}
+	return domain.Task{}, false
+}
+
 func (m *Model) applyPendingStatusOverlays() {
 	if len(m.pendingStatuses) == 0 {
 		return
@@ -3866,7 +4220,9 @@ func (m *Model) applyPendingStatusOverlays() {
 			continue
 		}
 		if m.tasks[i].Status == pending.targetStatus {
-			delete(m.pendingStatuses, key)
+			if pending.action != "session_start" {
+				delete(m.pendingStatuses, key)
+			}
 			continue
 		}
 		m.tasks[i].Status = pending.targetStatus
@@ -4413,6 +4769,7 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	reasons := make([]string, 0, 2)
 	sourceFiles := make([]string, 0, 8)
 	targetFiles := make([]string, 0, 8)
+	conflictFiles := make([]string, 0, 8)
 
 	statusForWorktree := func(worktree string) (daemonclient.GitStatus, error) {
 		return m.daemonClient.GitStatus(ctx, worktree)
@@ -4454,6 +4811,9 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 			if len(resp.TargetFiles) > 0 {
 				targetFiles = append(targetFiles[:0], resp.TargetFiles...)
 			}
+			if len(resp.ConflictFiles) > 0 {
+				conflictFiles = append(conflictFiles[:0], resp.ConflictFiles...)
+			}
 		}
 	}
 
@@ -4468,6 +4828,9 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 		reasons:        reasons,
 		sourceFiles:    sourceFiles,
 		targetFiles:    targetFiles,
+		conflictFiles:  conflictFiles,
+		targetRef:      targetRef,
+		sourceBranch:   sourceBranch,
 	}
 }
 
@@ -4484,8 +4847,8 @@ func (m Model) refreshMergePreflightCmd(selection overlay.MergePreflightRefreshS
 			strings.TrimSpace(selection.TargetID),
 			strings.TrimSpace(selection.SourceWorktree),
 			strings.TrimSpace(selection.TargetWorktree),
-			"",
-			"",
+			strings.TrimSpace(selection.TargetRef),
+			strings.TrimSpace(selection.SourceBranch),
 			true,
 		)
 		if preflight != nil {
@@ -4624,17 +4987,30 @@ func (m Model) getDevServerInfo(issueID string) []overlay.DevServerInfo {
 	}}
 }
 
+type devServerResultMsg struct {
+	issueID string
+	server  overlay.DevServerInfo
+	err     error
+}
+
 func (m Model) toggleDevServer(serverID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if m.daemonClient == nil {
-			return sessionErrorMsg{issueID: serverID, err: fmt.Errorf("daemon client unavailable")}
+			return devServerResultMsg{issueID: serverID, err: fmt.Errorf("daemon client unavailable")}
 		}
-		if _, err := m.daemonClient.ToggleDevServer(ctx, serverID); err != nil {
-			return sessionErrorMsg{issueID: serverID, err: err}
+		srv, err := m.daemonClient.ToggleDevServer(ctx, serverID)
+		if err != nil {
+			return devServerResultMsg{issueID: serverID, err: err}
 		}
-		return nil
+		return devServerResultMsg{issueID: serverID, server: overlay.DevServerInfo{
+			ID:     srv.ID,
+			Name:   srv.Name,
+			Port:   srv.Port,
+			Status: srv.Status,
+			Uptime: srv.Uptime,
+		}}
 	}
 }
 
@@ -4647,12 +5023,19 @@ func (m Model) restartDevServer(serverID string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if m.daemonClient == nil {
-			return sessionErrorMsg{issueID: serverID, err: fmt.Errorf("daemon client unavailable")}
+			return devServerResultMsg{issueID: serverID, err: fmt.Errorf("daemon client unavailable")}
 		}
-		if _, err := m.daemonClient.RestartDevServer(ctx, serverID); err != nil {
-			return sessionErrorMsg{issueID: serverID, err: err}
+		srv, err := m.daemonClient.RestartDevServer(ctx, serverID)
+		if err != nil {
+			return devServerResultMsg{issueID: serverID, err: err}
 		}
-		return nil
+		return devServerResultMsg{issueID: serverID, server: overlay.DevServerInfo{
+			ID:     srv.ID,
+			Name:   srv.Name,
+			Port:   srv.Port,
+			Status: srv.Status,
+			Uptime: srv.Uptime,
+		}}
 	}
 }
 
@@ -4695,14 +5078,52 @@ func (m Model) openOrchestrationOverlay() tea.Cmd {
 	// Gather session information
 	var sessions []overlay.SessionInfo
 	for _, task := range m.tasks {
+		if task.Session == nil && !task.HasTmuxSession {
+			continue
+		}
+
+		state := domain.SessionIdle
+		var startedAt *time.Time
+		worktree := ""
 		if task.Session != nil {
+			state = task.Session.State
+			startedAt = task.Session.StartedAt
+			worktree = task.Session.Worktree
+		}
+
+		sessions = append(sessions, overlay.SessionInfo{
+			IssueID:               task.ID.String(),
+			TaskTitle:             task.Title,
+			IssueStatus:           task.Status,
+			State:                 state,
+			StartedAt:             startedAt,
+			Worktree:              worktree,
+			HasTmuxSession:        task.Session != nil || task.HasTmuxSession,
+			HasWorktree:           task.HasWorktree,
+			GitAheadCount:         task.GitAheadCount,
+			GitBehindCount:        task.GitBehindCount,
+			HasUncommittedChanges: task.HasUncommittedChanges,
+			HasConflicts:          task.HasConflicts,
+			GitAdditions:          task.GitAdditions,
+			GitDeletions:          task.GitDeletions,
+			RecentOutput:          "", // TODO: Capture recent output from tmux
+		})
+	}
+
+	if len(sessions) == 0 {
+		for _, session := range m.sessions {
+			if session == nil {
+				continue
+			}
 			sessions = append(sessions, overlay.SessionInfo{
-				IssueID:      task.ID.String(),
-				TaskTitle:    task.Title,
-				State:        task.Session.State,
-				StartedAt:    task.Session.StartedAt,
-				Worktree:     task.Session.Worktree,
-				RecentOutput: "", // TODO: Capture recent output from tmux
+				IssueID:        session.IssueID.String(),
+				TaskTitle:      session.IssueID.String(),
+				IssueStatus:    domain.StatusInProgress,
+				State:          session.State,
+				StartedAt:      session.StartedAt,
+				Worktree:       session.Worktree,
+				HasTmuxSession: true,
+				HasWorktree:    strings.TrimSpace(session.Worktree) != "",
 			})
 		}
 	}
@@ -4712,22 +5133,7 @@ func (m Model) openOrchestrationOverlay() tea.Cmd {
 		sessions,
 		// onAttach
 		func(issueID string) tea.Cmd {
-			return func() tea.Msg {
-				if !m.tmuxAvailable {
-					return Toast{
-						Level:   ToastWarning,
-						Message: fmt.Sprintf("tmux attach-session -t %s is unavailable outside tmux; launch az inside tmux to use tmux actions", issueID),
-						Expires: time.Now().Add(8 * time.Second),
-					}
-				}
-
-				// Show attach instructions
-				return Toast{
-					Level:   ToastInfo,
-					Message: fmt.Sprintf("Run: tmux attach-session -t %s", issueID),
-					Expires: time.Now().Add(5 * time.Second),
-				}
-			}
+			return m.attachSessionCmd(issueID)
 		},
 		// onKill
 		func(issueID string) tea.Cmd {

@@ -103,6 +103,7 @@ type Daemon struct {
 	hookLogByProject              map[string][]protocol.HookLogEvent
 	tmux                          *tmux.Client
 	git                           *git.Client
+	gitStatusAdapter              *gitServiceAdapter
 	gitHandler                    *daemonhandlers.GitHandler
 	worktreeHandler               *daemonhandlers.WorktreeHandler
 	worktreeAdapter               *worktreeServiceAdapter
@@ -224,6 +225,7 @@ func New(cfg Config) *Daemon {
 		hookLogByProject:              map[string][]protocol.HookLogEvent{},
 		tmux:                          tmux.NewClient(tmuxRunner, cfg.Logger),
 		git:                           gitClient,
+		gitStatusAdapter:              gitService,
 		session:                       sessionHandler,
 		sessionStore:                  sessionStore,
 		runtimeReconcileQueue:         runtimeReconcileQueue,
@@ -262,12 +264,13 @@ func New(cfg Config) *Daemon {
 		d.runtimeProjectionStateWriter().PublishGitStatusProjectionEvent(ctx, projectID, issueID, worktree, status)
 	}
 	runtime := newOperationRuntime(operationRuntimeConfig{
-		repoDir:      cfg.RepoDir,
-		logger:       cfg.Logger,
-		hub:          d.hub,
-		nextRevision: d.nextRevision,
-		sessionStart: d.handleSessionStartDirect,
-		sessionStop:  d.handleSessionStopDirect,
+		repoDir:                cfg.RepoDir,
+		logger:                 cfg.Logger,
+		hub:                    d.hub,
+		nextRevision:           d.nextRevision,
+		sessionStart:           d.handleSessionStartDirect,
+		sessionStop:            d.handleSessionStopDirect,
+		sessionResolveConflict: d.handleSessionResolveConflictDirect,
 	})
 	commandExecutor := operationCommandExecutor{runtime: runtime}
 	sessionExecutor := sessionOperationExecutor{runtime: runtime}
@@ -278,9 +281,10 @@ func New(cfg Config) *Daemon {
 		runtimeStateStoreForProject: func(projectID string) *daemonstate.RuntimeStateStore {
 			return d.worktreeRuntimeStateStore(projectID)
 		},
-		runtimeProjectionWriter:       d.runtimeProjectionStateWriter(),
-		ensureRuntimeFreshForMutation: d.ensureFreshRuntimeForMutation,
-		logger:                        cfg.Logger,
+		runtimeProjectionWriter:            d.runtimeProjectionStateWriter(),
+		ensureRuntimeFreshForMutation:      d.ensureFreshRuntimeForMutation,
+		ensureRuntimeFreshForIssueMutation: d.ensureFreshRuntimeForIssueMutation,
+		logger:                             cfg.Logger,
 		onProjectionUpdate: func(ctx context.Context, projectID, issueID, path string) {
 			d.runtimeProjectionStateWriter().PublishWorktreeProjectionEvent(ctx, projectID, issueID, path)
 		},
@@ -400,6 +404,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.cfg.Logger.Info("daemon startup phase", "phase", "runtime_reconcile", "project_id", result.ProjectID, "duration_ms", time.Since(reconcileStartedAt).Milliseconds())
 	}
 	d.startRuntimeReconcileWorker(serveCtx)
+	d.startLinearSyncWorker(serveCtx)
 	d.cfg.Logger.Info("daemon startup phase", "phase", "startup_ready", "duration_ms", time.Since(startedAt).Milliseconds())
 	err = d.serve.Serve(serveCtx)
 	if ctx.Err() != nil {
@@ -505,8 +510,12 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleHookLogAppend(ctx, req)
 	case protocol.CommandHookLogList:
 		return d.handleHookLogList(ctx, req)
+	case protocol.CommandUIOpenTaskWorkspace:
+		return d.handleUIOpenTaskWorkspace(ctx, req)
 	case "task.list":
 		return d.handleTaskList(ctx, req)
+	case "task.get":
+		return d.handleTaskGet(ctx, req)
 	case "task.create":
 		return d.handleTaskCreate(ctx, req)
 	case "task.update_status":
@@ -525,6 +534,10 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleTaskDependencyRemove(ctx, req)
 	case "task.snapshot.export":
 		return d.handleTaskSnapshotExport(ctx, req)
+	case commandSyncRun:
+		return d.handleSyncRun(ctx, req)
+	case commandSyncConflicts:
+		return d.handleSyncConflicts(ctx, req)
 	case protocol.CommandTaskBulkApply:
 		return d.apply.Handle(ctx, req), nil
 	case "session.start":
@@ -537,6 +550,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleSessionResume(ctx, req)
 	case "session.stop":
 		return d.handleSessionStop(ctx, req)
+	case protocol.CommandSessionResolveConflict:
+		return d.handleSessionResolveConflict(ctx, req)
 	case "session.status":
 		return d.handleSessionStatus(ctx, req)
 	case "session.recover":
@@ -689,6 +704,21 @@ func (d *Daemon) applySessionLifecycleTransition(
 	}
 	d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, req.Meta, session)
 	return nil
+}
+
+func (d *Daemon) sessionLifecycleTransitionNeeded(projectID, sessionID, issueID string, state daemonstate.SessionState) bool {
+	if d.sessionStore == nil {
+		return true
+	}
+	session, err := d.sessionStore.Session(projectID, sessionID)
+	if err != nil {
+		return true
+	}
+	if session.State != state {
+		return true
+	}
+	issueID = strings.TrimSpace(issueID)
+	return issueID != "" && strings.TrimSpace(session.IssueID) != issueID
 }
 
 func lifecycleCommandState(command string) (daemonstate.SessionState, bool) {
@@ -927,6 +957,39 @@ func (d *Daemon) triggerWorktreeStateRefresh(projectID string) {
 		defer cancel()
 		d.worktreeAdapter.pollAndPersistWorktrees(ctx, projectID)
 	}()
+}
+
+func (d *Daemon) refreshIssueWorktreeState(ctx context.Context, projectID, issueID string) {
+	if d == nil || d.gitStatusAdapter == nil {
+		return
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = protocol.DefaultProjectID
+	}
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return
+	}
+	store := d.worktreeRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return
+	}
+	projection, found, err := store.GetWorktreeStateByIssueID(ctx, projectID, issueID)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("issue worktree refresh lookup failed", "project_id", projectID, "issue_id", issueID, "error", err)
+		}
+		return
+	}
+	if !found || strings.TrimSpace(projection.Path) == "" {
+		return
+	}
+	refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err := d.gitStatusAdapter.refreshGitStatusManual(refreshCtx, projectID, projection.Path); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("issue worktree refresh failed", "project_id", projectID, "issue_id", issueID, "worktree", projection.Path, "error", err)
+	}
 }
 
 func (d *Daemon) persistWorktreeState(ctx context.Context, projectID, issueID, path, branch string) error {
@@ -1218,6 +1281,8 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 
 	if status != nil {
 		projection.Git.HasUncommittedChanges = status.HasChanges
+		projection.Git.HasConflicts = status.HasConflicts
+		projection.Git.ConflictFiles = append([]string(nil), status.Conflicted...)
 		projection.Git.GitAdditions = status.GitAdditions
 		projection.Git.GitDeletions = status.GitDeletions
 		projection.Git.GitAheadCount = status.GitAheadCount

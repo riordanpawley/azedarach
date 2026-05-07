@@ -2168,6 +2168,93 @@ func TestHandleMergeResultPendingOperationShowsInfoToast(t *testing.T) {
 	if !strings.Contains(gotToast, "Merge queued for az-1 (operation op-merge)") {
 		t.Fatalf("toast = %q, want queued merge message", gotToast)
 	}
+	signals := updatedModel.runtimeSignalsForBoard()["az-1"]
+	if signals.PendingOperationID != "op-merge" || signals.PendingOperationState != string(protocol.OperationStateQueued) {
+		t.Fatalf("pending merge signals = %+v", signals)
+	}
+	progress := updatedModel.pendingMutationForTask("az-1")
+	if progress == nil || progress.OperationID != "op-merge" || progress.State != string(protocol.OperationStateQueued) {
+		t.Fatalf("pending merge detail progress = %+v", progress)
+	}
+}
+
+func TestHandleFollowOnMergePendingOperationMarksSourceAndTarget(t *testing.T) {
+	m := newTestModel()
+
+	updated, _ := m.Update(mergeResultMsg{
+		sourceID:    "az-1",
+		targetID:    "az-3",
+		stage:       "merge",
+		operationID: "op-merge",
+		state:       protocol.OperationStateRunning,
+	})
+
+	updatedModel := updated.(Model)
+	for _, taskID := range []string{"az-1", "az-3"} {
+		signals := updatedModel.runtimeSignalsForBoard()[taskID]
+		if signals.PendingOperationID != "op-merge" || signals.PendingOperationState != string(protocol.OperationStateRunning) {
+			t.Fatalf("pending merge signals for %s = %+v", taskID, signals)
+		}
+		progress := updatedModel.pendingMutationForTask(taskID)
+		if progress == nil || progress.OperationID != "op-merge" || progress.State != string(protocol.OperationStateRunning) {
+			t.Fatalf("pending merge detail progress for %s = %+v", taskID, progress)
+		}
+	}
+}
+
+func TestPendingMergeOperationSurvivesStaleIssueSnapshot(t *testing.T) {
+	m := newTestModel()
+
+	pendingAny, _ := m.Update(mergeResultMsg{
+		sourceID:    "az-1",
+		targetID:    "az-3",
+		stage:       "merge",
+		operationID: "op-merge",
+		state:       protocol.OperationStateRunning,
+	})
+	pendingModel := pendingAny.(Model)
+
+	refreshedAny, _ := pendingModel.Update(issuesLoadedMsg{
+		tasks: []domain.Task{
+			{ID: "az-1", Title: "Task 1 stale", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+			{ID: "az-3", Title: "Task 3 stale", Status: domain.StatusInProgress, Priority: domain.P0, Type: domain.TypeFeature},
+		},
+	})
+	refreshed := refreshedAny.(Model)
+
+	for _, taskID := range []string{"az-1", "az-3"} {
+		signals := refreshed.runtimeSignalsForBoard()[taskID]
+		if signals.PendingOperationID != "op-merge" || signals.PendingOperationState != string(protocol.OperationStateRunning) {
+			t.Fatalf("pending merge signals after stale snapshot for %s = %+v", taskID, signals)
+		}
+		progress := refreshed.pendingMutationForTask(taskID)
+		if progress == nil || progress.OperationID != "op-merge" || progress.State != string(protocol.OperationStateRunning) {
+			t.Fatalf("pending merge detail progress after stale snapshot for %s = %+v", taskID, progress)
+		}
+	}
+}
+
+func TestLocalMergeActivityMarkerClearsOnMergeFailure(t *testing.T) {
+	m := newTestModel()
+	m.markMergeOperationPreparing("az-1", "az-3", "preparing merge")
+
+	updatedAny, _ := m.Update(mergeResultMsg{
+		sourceID: "az-1",
+		targetID: "az-3",
+		stage:    "merge",
+		err:      fmt.Errorf("preflight failed"),
+	})
+	updated := updatedAny.(Model)
+
+	for _, taskID := range []string{"az-1", "az-3"} {
+		signals := updated.runtimeSignalsForBoard()[taskID]
+		if signals.PendingOperationState != "" || signals.PendingOperationID != "" {
+			t.Fatalf("pending merge marker for %s = %+v, want cleared", taskID, signals)
+		}
+		if progress := updated.pendingMutationForTask(taskID); progress != nil {
+			t.Fatalf("detail progress for %s = %+v, want nil", taskID, progress)
+		}
+	}
 }
 
 func TestHandleMergeTargetSelectionToBaseUsesWorktreeLookupFallback(t *testing.T) {
@@ -3362,7 +3449,8 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 
 		m := newDaemonTestModel(transport)
 		m.tasks = []domain.Task{
-			{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress},
+			{ID: "az-1", Title: "Task 1 stale", Status: domain.StatusOpen},
+			{ID: "az-2", Title: "Unrelated", Status: domain.StatusBlocked},
 		}
 		setTaskSession(t, &m, "az-1", &domain.Session{
 			IssueID:  "az-1",
@@ -3396,6 +3484,12 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		}
 		if updated.pendingCleanup == nil {
 			t.Fatal("expected pending cleanup confirmation")
+		}
+		if len(updated.tasks) != 2 || updated.tasks[0].Title != "Task 1" || updated.tasks[0].Status != domain.StatusInProgress || !updated.tasks[0].HasWorktree {
+			t.Fatalf("selected task after cleanup preflight = %+v, want refreshed task plus unrelated task", updated.tasks)
+		}
+		if updated.tasks[1].ID.String() != "az-2" || updated.tasks[1].Status != domain.StatusBlocked {
+			t.Fatalf("unrelated task after cleanup preflight = %+v, want preserved blocked az-2", updated.tasks[1])
 		}
 		if got := transport.requests; len(got) != 2 ||
 			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
@@ -4014,7 +4108,7 @@ func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
 					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
-						{ID: naming.IssueID(issueID), Title: "Task fresh", Status: domain.StatusInProgress, Type: domain.TypeTask},
+						{ID: naming.IssueID(issueID), Title: "Task fresh", Status: domain.StatusDone, Type: domain.TypeTask},
 					}),
 				}, nil
 			default:
@@ -4027,7 +4121,8 @@ func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
 	m := newDaemonTestModel(transport)
 	m.editor.EnterNormal()
 	m.tasks = []domain.Task{
-		{ID: naming.IssueID(issueID), Title: "Task stale", Status: domain.StatusInProgress, Type: domain.TypeTask},
+		{ID: naming.IssueID(issueID), Title: "Task stale", Status: domain.StatusOpen, Type: domain.TypeTask},
+		{ID: naming.IssueID("az-2"), Title: "Unrelated board task", Status: domain.StatusBlocked, Type: domain.TypeTask},
 	}
 	m.nav.SelectTask(issueID, 0)
 
@@ -4058,6 +4153,105 @@ func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
 	}
 	if !strings.Contains(refreshed.View(), "Task fresh") {
 		t.Fatalf("workspace should refresh from daemon snapshot, got %q", refreshed.View())
+	}
+	if len(next.tasks) != 2 || next.tasks[0].Title != "Task fresh" || next.tasks[0].Status != domain.StatusDone {
+		t.Fatalf("board task after workspace refresh = %+v, want fresh done task plus preserved unrelated task", next.tasks)
+	}
+	if next.tasks[1].ID.String() != "az-2" || next.tasks[1].Status != domain.StatusBlocked {
+		t.Fatalf("unrelated board task after workspace refresh = %+v, want preserved blocked az-2", next.tasks[1])
+	}
+	columns := next.buildColumns()
+	doneTasks := columns[domain.StatusDone.Column()].Tasks
+	if len(doneTasks) != 1 || doneTasks[0].ID.String() != issueID {
+		t.Fatalf("done column after workspace refresh = %+v, want %s", doneTasks, issueID)
+	}
+	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskList {
+		t.Fatalf("requests = %v", got)
+	}
+}
+
+func TestTaskWorkspaceRKeyRefreshesCurrentIssue(t *testing.T) {
+	const issueID = "az-1"
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandRuntimeReconcileIssue:
+				var body protocol.RuntimeReconcileIssueRequestBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal reconcile body: %v", err)
+				}
+				if len(body.IssueIDs) != 1 || body.IssueIDs[0].String() != issueID {
+					t.Fatalf("reconcile issue_ids = %+v, want [%s]", body.IssueIDs, issueID)
+				}
+				respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{ProjectID: "default"})
+				if err != nil {
+					t.Fatalf("marshal reconcile response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandTaskList:
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+						{ID: naming.IssueID(issueID), Title: "Task fresh from r", Status: domain.StatusBlocked, Type: domain.TypeTask},
+					}),
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{
+		{ID: naming.IssueID(issueID), Title: "Task stale", Status: domain.StatusOpen, Type: domain.TypeTask},
+	}
+	m.nav.SelectTask(issueID, 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30))
+
+	updatedAny, selectionCmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if selectionCmd == nil {
+		t.Fatal("expected r key in workspace to emit a selection command")
+	}
+
+	nextAny, refreshCmd := updated.Update(selectionCmd())
+	next, ok := nextAny.(Model)
+	if !ok {
+		t.Fatalf("next model type = %T, want Model", nextAny)
+	}
+	if refreshCmd == nil {
+		t.Fatal("expected r selection to start issue refresh")
+	}
+
+	refreshedMsg := refreshCmd()
+	refreshedAny, _ := next.Update(refreshedMsg)
+	refreshed, ok := refreshedAny.(Model)
+	if !ok {
+		t.Fatalf("refreshed model type = %T, want Model", refreshedAny)
+	}
+	workspace, ok := refreshed.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected TaskWorkspaceOverlay after refresh, got %T", refreshed.overlayStack.Current())
+	}
+	if !strings.Contains(workspace.View(), "Task fresh from r") {
+		t.Fatalf("workspace should refresh current issue on r, got %q", workspace.View())
+	}
+	if len(refreshed.tasks) != 1 || refreshed.tasks[0].Title != "Task fresh from r" || refreshed.tasks[0].Status != domain.StatusBlocked {
+		t.Fatalf("board task after r refresh = %+v", refreshed.tasks)
 	}
 	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskList {
 		t.Fatalf("requests = %v", got)
@@ -4308,8 +4502,11 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 		if !ok {
 			t.Fatalf("updated model type = %T, want Model", updated)
 		}
-		if len(updatedModel.toasts) != 0 {
-			t.Fatalf("unexpected immediate toast; command should report result asynchronously: %+v", updatedModel.toasts)
+		if len(updatedModel.toasts) == 0 {
+			t.Fatal("expected immediate feedback toast")
+		}
+		if got := updatedModel.toasts[len(updatedModel.toasts)-1].Message; got != "Opening PR for az-1" {
+			t.Fatalf("toast = %q, want Opening PR for az-1", got)
 		}
 	})
 
@@ -5588,8 +5785,8 @@ func TestStopSessionCommandPreservesDaemonProjection(t *testing.T) {
 	}
 
 	updated, cmd := m.Update(msg)
-	if cmd != nil {
-		t.Fatalf("update command = %T, want nil", cmd)
+	if cmd == nil {
+		t.Fatal("expected session stop completion to refresh daemon projection")
 	}
 	updatedModel, ok := updated.(Model)
 	if !ok {
@@ -5600,6 +5797,204 @@ func TestStopSessionCommandPreservesDaemonProjection(t *testing.T) {
 	}
 	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStop {
 		t.Fatalf("requests = %v", transport.requests)
+	}
+}
+
+func TestTaskWorkspaceStopSessionKeyKeepsOverlayOpen(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandSessionStop:
+				var body struct {
+					SessionID string `json:"session_id"`
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal stop request: %v", err)
+				}
+				if body.SessionID != "az-1" {
+					t.Fatalf("stop body = %+v, want az-1", body)
+				}
+				respBody, _ := json.Marshal(struct {
+					Output string `json:"output"`
+				}{Output: "stopped"})
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandTaskList:
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{{
+						ID:          "az-1",
+						Title:       "Task 1",
+						Status:      domain.StatusInProgress,
+						Type:        domain.TypeTask,
+						HasWorktree: true,
+					}}),
+				}, nil
+			default:
+				t.Fatalf("command = %q, want %q or %q", req.Command, daemonclient.CommandSessionStop, daemonclient.CommandTaskList)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	task := m.tasks[0]
+	task.HasTmuxSession = true
+	task.Session = &domain.Session{IssueID: "az-1", State: domain.SessionBusy}
+	m.tasks[0] = task
+	m.nav.SelectTask(task.ID.String(), 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(task, m.tasks, nil, 120, 30))
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if cmd == nil {
+		t.Fatal("expected selection command from task workspace")
+	}
+	selectionMsg := cmd()
+	selection, ok := selectionMsg.(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("command message type = %T, want overlay.SelectionMsg", selectionMsg)
+	}
+	if selection.Key != "x" {
+		t.Fatalf("selection key = %q, want x", selection.Key)
+	}
+	updated, cmd := next.(Model).Update(selection)
+	if cmd == nil {
+		t.Fatal("expected stop session command")
+	}
+	stopMsg := cmd()
+	stopped, ok := stopMsg.(sessionStoppedMsg)
+	if !ok {
+		t.Fatalf("stop command message type = %T, want sessionStoppedMsg", stopMsg)
+	}
+	if stopped.issueID != "az-1" {
+		t.Fatalf("stopped issue = %q, want az-1", stopped.issueID)
+	}
+
+	updatedModel := updated.(Model)
+	if _, ok := updatedModel.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
+		t.Fatalf("expected task workspace overlay to remain open, got %T", updatedModel.overlayStack.Current())
+	}
+	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStop {
+		t.Fatalf("requests = %v", transport.requests)
+	}
+
+	stoppedModelAny, refreshCmd := updatedModel.Update(stopMsg)
+	if refreshCmd == nil {
+		t.Fatal("expected stop completion to refresh daemon projection")
+	}
+	stoppedModel := stoppedModelAny.(Model)
+	if _, ok := stoppedModel.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
+		t.Fatalf("expected task workspace overlay to remain open after stop completion, got %T", stoppedModel.overlayStack.Current())
+	}
+
+	loadedMsg := refreshCmd()
+	loadedModelAny, _ := stoppedModel.Update(loadedMsg)
+	loadedModel := loadedModelAny.(Model)
+	workspace, ok := loadedModel.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace overlay after refresh, got %T", loadedModel.overlayStack.Current())
+	}
+	view := workspace.View()
+	if strings.Contains(view, "Pause session") || strings.Contains(view, "Stop session") {
+		t.Fatalf("stopped session actions should not remain after daemon refresh: %q", view)
+	}
+	if !strings.Contains(view, "Start session") {
+		t.Fatalf("expected start action after daemon refresh removed session: %q", view)
+	}
+	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandSessionStop || got[1] != daemonclient.CommandTaskList {
+		t.Fatalf("requests = %v", got)
+	}
+}
+
+func TestTaskWorkspaceCleanupSelectsTargetAndKeepsWorkspaceUnderConfirm(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandRuntimeReconcileIssue:
+				respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{})
+				if err != nil {
+					t.Fatalf("marshal reconcile response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandTaskList:
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+						{ID: "az-1", Title: "Cleanup target", Status: domain.StatusOpen, HasWorktree: true},
+						{ID: "az-2", Title: "Previous board selection", Status: domain.StatusOpen},
+					}),
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Cleanup target", Status: domain.StatusOpen, HasWorktree: true},
+		{ID: "az-2", Title: "Previous board selection", Status: domain.StatusOpen},
+	}
+	m.nav.SelectTask("az-2", 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30))
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	if cmd == nil {
+		t.Fatal("expected cleanup selection command from task workspace")
+	}
+	selection, ok := cmd().(overlay.SelectionMsg)
+	if !ok || selection.Key != "w" {
+		t.Fatalf("selection = %#v, want w", selection)
+	}
+
+	updatedAny, preflightCmd := next.(Model).Update(selection)
+	updated := updatedAny.(Model)
+	if preflightCmd == nil {
+		t.Fatal("expected cleanup preflight command")
+	}
+	if got := updated.nav.GetCursor().TaskID; got != "az-1" {
+		t.Fatalf("cursor task after cleanup action = %q, want az-1", got)
+	}
+	if _, ok := updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
+		t.Fatalf("expected task workspace to remain under cleanup preflight, got %T", updated.overlayStack.Current())
+	}
+
+	preflightMsg := preflightCmd()
+	prompt, ok := preflightMsg.(worktreeCleanupConfirmPromptMsg)
+	if !ok {
+		t.Fatalf("preflight message = %T, want worktreeCleanupConfirmPromptMsg", preflightMsg)
+	}
+	promptedAny, _ := updated.Update(prompt)
+	prompted := promptedAny.(Model)
+	if _, ok := prompted.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); ok {
+		t.Fatal("expected confirm dialog on top of task workspace")
+	}
+	if got := prompted.nav.GetCursor().TaskID; got != "az-1" {
+		t.Fatalf("cursor task after cleanup prompt = %q, want az-1", got)
+	}
+
+	cancelledAny, _ := prompted.handleSelection(overlay.SelectionMsg{Key: "no"})
+	cancelled := cancelledAny.(Model)
+	if _, ok := cancelled.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
+		t.Fatalf("expected task workspace after cancelling cleanup, got %T", cancelled.overlayStack.Current())
 	}
 }
 
@@ -5774,6 +6169,64 @@ func TestPerformCleanupOrphanedWorktreesUsesExtendedDeadline(t *testing.T) {
 	}
 }
 
+func TestCleanupWorktreeUsesExtendedDaemonDeadlines(t *testing.T) {
+	transport := &recordingDaemonTransport{}
+	m := newDaemonTestModel(transport)
+
+	msg := m.cleanupWorktreeCmd("az-1", false, false)()
+	result, ok := msg.(worktreeCleanupResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want worktreeCleanupResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("cleanup result err = %v", result.err)
+	}
+	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandSessionStop || got[1] != daemonclient.CommandWorktreeRemove {
+		t.Fatalf("requests = %v, want session.stop then worktree.remove", got)
+	}
+	if got := len(transport.commandBudgets); got != 2 {
+		t.Fatalf("command deadline count = %d, want 2", got)
+	}
+	for i, budget := range transport.commandBudgets {
+		if budget < worktreeCleanupMutationTimeout-10*time.Second {
+			t.Fatalf("command budget[%d] = %s, want near %s", i, budget, worktreeCleanupMutationTimeout)
+		}
+	}
+}
+
+func TestBulkCleanupWorktreeUsesPerStepExtendedDaemonDeadlines(t *testing.T) {
+	transport := &recordingDaemonTransport{}
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{ID: "az-1", Status: domain.StatusOpen}}
+
+	msg := m.bulkCleanupWorktreeCmd([]string{"az-1"}, true)()
+	result, ok := msg.(bulkStatusResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want bulkStatusResultMsg", msg)
+	}
+	if result.failed != 0 || result.updated != 1 {
+		t.Fatalf("bulk result = %+v, want one success", result)
+	}
+	if got := transport.requests; len(got) != 3 ||
+		got[0] != daemonclient.CommandSessionStop ||
+		got[1] != daemonclient.CommandWorktreeRemove ||
+		got[2] != daemonclient.CommandTaskDelete {
+		t.Fatalf("requests = %v, want stop/remove/delete", got)
+	}
+	if got := len(transport.commandBudgets); got != 3 {
+		t.Fatalf("command deadline count = %d, want 3", got)
+	}
+	if transport.commandBudgets[0] < worktreeCleanupMutationTimeout-10*time.Second {
+		t.Fatalf("stop budget = %s, want near %s", transport.commandBudgets[0], worktreeCleanupMutationTimeout)
+	}
+	if transport.commandBudgets[1] < worktreeCleanupMutationTimeout-10*time.Second {
+		t.Fatalf("remove budget = %s, want near %s", transport.commandBudgets[1], worktreeCleanupMutationTimeout)
+	}
+	if transport.commandBudgets[2] < 5*time.Second {
+		t.Fatalf("delete budget = %s, want explicit delete budget", transport.commandBudgets[2])
+	}
+}
+
 func TestFetchAndMergeCommandReturnsPendingOperationToast(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -5810,6 +6263,7 @@ func TestFetchAndMergeCommandReturnsPendingOperationToast(t *testing.T) {
 	}
 
 	m := newDaemonTestModel(transport)
+	m.tasks = append(m.tasks, domain.Task{ID: "az-child", Title: "Child", Status: domain.StatusInProgress, Priority: domain.P2, Type: domain.TypeTask})
 	msg := m.fetchAndMergeCmd("/tmp/az-child", "main", "az-child", false)()
 	result, ok := msg.(fetchAndMergeResultMsg)
 	if !ok {
@@ -5830,6 +6284,10 @@ func TestFetchAndMergeCommandReturnsPendingOperationToast(t *testing.T) {
 	gotToast := updatedModel.toasts[len(updatedModel.toasts)-1].Message
 	if !strings.Contains(gotToast, "Merge running for az-child (operation op-merge)") {
 		t.Fatalf("toast = %q, want merge running message", gotToast)
+	}
+	signals := updatedModel.runtimeSignalsForBoard()["az-child"]
+	if signals.PendingOperationID != "op-merge" || signals.PendingOperationState != string(protocol.OperationStateRunning) {
+		t.Fatalf("pending update-from-base signals = %+v", signals)
 	}
 }
 
@@ -6176,6 +6634,102 @@ func TestSessionProjectionEventRevisionGate(t *testing.T) {
 			t.Fatalf("sequential session event should update runtime projection: %+v", next.tasks[0])
 		}
 	})
+}
+
+func TestIssuesLoadedIgnoresSnapshotOlderThanAppliedSessionEvent(t *testing.T) {
+	projectID := newTestModel().daemonProjectID()
+	startedAt := time.Date(2026, time.May, 6, 6, 0, 0, 0, time.UTC)
+	staleSession := &domain.Session{
+		IssueID:   "az-1",
+		State:     domain.SessionBusy,
+		StartedAt: &startedAt,
+		Worktree:  "/tmp/repo-az-1",
+	}
+	m := newTestModel()
+	m.daemonRevision = 8
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+	m.tasks[0].Session = cloneSession(staleSession)
+	m.tasks[0].HasTmuxSession = true
+	m.tasks[0].HasWorktree = true
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30))
+	m.syncProjectionIndexesFromTasks()
+	m.syncTaskWorkspaceOverlay()
+
+	body, err := json.Marshal(protocol.SessionProjectionEventBody{
+		ProjectID: naming.ProjectID(projectID),
+		Revision:  9,
+		Session: protocol.SessionProjection{
+			SessionID: naming.SessionID("azedarach-bte-az-1"),
+			IssueID:   "az-1",
+			State:     protocol.SessionLifecycleStateStopped,
+			UpdatedAt: startedAt.Add(time.Minute),
+		},
+		Runtime: &protocol.RuntimeProjectionEventBody{
+			ProjectID: naming.ProjectID(projectID),
+			Revision:  9,
+			Projection: protocol.RuntimeProjection{
+				ProjectID: naming.ProjectID(projectID),
+				IssueID:   "az-1",
+				Worktree: protocol.RuntimeWorktreeProjection{
+					Exists: true,
+					Path:   "/tmp/repo-az-1",
+				},
+				Session: protocol.RuntimeSessionProjection{
+					HasSession: false,
+					State:      protocol.SessionLifecycleStateStopped,
+					UpdatedAt:  &startedAt,
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal stopped session event: %v", err)
+	}
+
+	updated, cmd := m.Update(daemonStreamEventMsg{
+		event: protocol.EventEnvelope{
+			Event:    protocol.EventSessionUpdated,
+			Revision: 9,
+			Body:     body,
+		},
+	})
+	if cmd == nil {
+		t.Fatal("expected wait command after session event")
+	}
+	afterStop := updated.(Model)
+	workspace, ok := afterStop.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace overlay after stop event, got %T", afterStop.overlayStack.Current())
+	}
+	if view := workspace.View(); strings.Contains(view, "Attach to session") || strings.Contains(view, "Stop session") {
+		t.Fatalf("stopped session event should remove active session actions: %q", view)
+	}
+
+	staleSnapshot := []domain.Task{{
+		ID:             "az-1",
+		Title:          "Task 1",
+		Status:         domain.StatusInProgress,
+		Type:           domain.TypeTask,
+		Session:        cloneSession(staleSession),
+		HasTmuxSession: true,
+		HasWorktree:    true,
+	}}
+	replayedAny, _ := afterStop.Update(issuesLoadedMsg{
+		projectID: projectID,
+		revision:  8,
+		tasks:     staleSnapshot,
+	})
+	replayed := replayedAny.(Model)
+	workspace, ok = replayed.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace overlay after stale snapshot, got %T", replayed.overlayStack.Current())
+	}
+	if view := workspace.View(); strings.Contains(view, "Attach to session") || strings.Contains(view, "Stop session") {
+		t.Fatalf("stale snapshot should not restore stopped session actions: %q", view)
+	}
+	if replayed.daemonRevision != 9 {
+		t.Fatalf("daemon revision = %d, want 9", replayed.daemonRevision)
+	}
 }
 
 func TestLoadIssuesAfterRuntimeReconcileCmd_ReconcilesBeforeSnapshot(t *testing.T) {
@@ -6540,6 +7094,7 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		m.tasks = []domain.Task{
 			{ID: "az-1", Status: domain.StatusOpen},
 			{ID: "az-2", Status: domain.StatusOpen},
+			{ID: "az-3", Status: domain.StatusBlocked},
 		}
 
 		updatedAny, cmd := m.handleBulkAction(overlay.BulkActionMsg{
@@ -6570,6 +7125,18 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		}
 		if next.pendingBulkCleanup == nil {
 			t.Fatal("expected pending bulk cleanup confirmation")
+		}
+		if len(next.tasks) != 3 {
+			t.Fatalf("tasks after preflight = %+v, want selected refreshes plus unrelated task", next.tasks)
+		}
+		if !next.tasks[0].HasUncommittedChanges || next.tasks[0].GitAdditions != 3 || next.tasks[0].GitDeletions != 1 {
+			t.Fatalf("selected dirty task after preflight = %+v, want refreshed git status", next.tasks[0])
+		}
+		if next.tasks[1].GitAheadCount != 2 {
+			t.Fatalf("selected ahead task after preflight = %+v, want refreshed ahead count", next.tasks[1])
+		}
+		if next.tasks[2].ID.String() != "az-3" || next.tasks[2].Status != domain.StatusBlocked {
+			t.Fatalf("unrelated task after preflight = %+v, want preserved blocked az-3", next.tasks[2])
 		}
 		if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskList {
 			t.Fatalf("requests = %v", got)
@@ -6641,6 +7208,9 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		}
 		if updated.pendingBulkCleanup != nil {
 			t.Fatal("did not expect pending bulk cleanup confirmation for clean preflight")
+		}
+		if len(updated.tasks) != 1 || updated.tasks[0].HasUncommittedChanges || updated.tasks[0].GitAheadCount != 0 {
+			t.Fatalf("tasks after clean preflight = %+v, want refreshed clean selected task", updated.tasks)
 		}
 		if runCleanupCmd == nil {
 			t.Fatal("expected cleanup command to run immediately for clean preflight")

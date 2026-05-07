@@ -27,5 +27,5 @@ func Example() {
 func ExampleGetHints() {
 	normalHints := statusbar.GetHints(types.ModeNormal)
 	fmt.Println(normalHints)
-	// Output: Space: task workspace  g: goto  /: search  f: filter  ,: sort  v: select  Enter: drill  c: create  s: settings  r: refresh  n: recover  Tab: view  ?: help  q: quit
+	// Output: Space: task workspace  g: goto  /: search  f: filter  ,: sort  v: select  Enter: drill  a: attach  c: create  s: settings  r: refresh  n: recover  Tab: view  ?: help  q: quit
 }

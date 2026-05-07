@@ -9,6 +9,7 @@ import (
 type daemonProjectRuntimeConfig struct {
 	BaseBranch           string
 	CLITool              string
+	IssueTracker         appconfig.IssueTrackerConfig
 	SessionShell         string
 	SessionInitCommands  []string
 	WorktreeInitCommands []string
@@ -31,6 +32,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	defaultConfig := daemonProjectRuntimeConfig{
 		BaseBranch:           strings.TrimSpace(d.cfg.BaseBranch),
 		CLITool:              strings.TrimSpace(d.cfg.CLITool),
+		IssueTracker:         appconfig.DefaultConfig().IssueTracker,
 		SessionShell:         strings.TrimSpace(d.cfg.SessionShell),
 		SessionInitCommands:  append([]string(nil), d.cfg.SessionInitCommands...),
 		WorktreeInitCommands: append([]string(nil), d.cfg.WorktreeInitCommands...),
@@ -132,6 +134,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 			if tool := strings.TrimSpace(loaded.CLITool); tool != "" {
 				cfg.CLITool = tool
 			}
+			cfg.IssueTracker = loaded.IssueTracker
 			if shell := strings.TrimSpace(loaded.Session.Shell); shell != "" {
 				cfg.SessionShell = shell
 			}

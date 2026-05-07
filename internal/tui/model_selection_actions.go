@@ -21,33 +21,43 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 
 	switch msg.Action {
 	case "h": // Move left (previous status)
+		m.beginMutationFeedback(fmt.Sprintf("Bulk move queued for %d task(s)", count))
 		return m, m.bulkMoveStatusCmd(msg.SelectedIDs, -1)
 
 	case "l": // Move right (next status)
+		m.beginMutationFeedback(fmt.Sprintf("Bulk move queued for %d task(s)", count))
 		return m, m.bulkMoveStatusCmd(msg.SelectedIDs, 1)
 
 	case "o": // Set to Open
+		m.beginMutationFeedback(fmt.Sprintf("Bulk status update queued for %d task(s)", count))
 		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusOpen)
 
 	case "i": // Set to In Progress
+		m.beginMutationFeedback(fmt.Sprintf("Bulk status update queued for %d task(s)", count))
 		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusInProgress)
 
 	case "b": // Set to Blocked
+		m.beginMutationFeedback(fmt.Sprintf("Bulk status update queued for %d task(s)", count))
 		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusBlocked)
 
 	case "D": // Set to Done
+		m.beginMutationFeedback(fmt.Sprintf("Bulk status update queued for %d task(s)", count))
 		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusDone)
 
 	case "d": // Delete selected
+		m.beginMutationFeedback(fmt.Sprintf("Bulk delete queued for %d task(s)", count))
 		return m, m.bulkDeleteCmd(msg.SelectedIDs)
 
 	case "a":
+		m.beginMutationFeedback(fmt.Sprintf("Bulk archive queued for %d task(s)", count))
 		return m, m.bulkArchiveCmd(msg.SelectedIDs)
 
 	case "w": // Cleanup selected worktrees
+		m.beginMutationFeedback(fmt.Sprintf("Bulk cleanup preflight queued for %d task(s)", count))
 		return m, m.bulkCleanupPreflightCmd(msg.SelectedIDs, false)
 
 	case "W": // Delete selected tasks and cleanup worktrees
+		m.beginMutationFeedback(fmt.Sprintf("Bulk delete + cleanup preflight queued for %d task(s)", count))
 		return m, m.bulkCleanupPreflightCmd(msg.SelectedIDs, true)
 
 	case "x": // Clear selection
@@ -72,7 +82,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 
 	// Handle special overlay-specific messages first (before popping overlay)
 	switch msg.Key {
-	case "abort", "claude", "manual":
+	case "abort", "agent", "manual":
 		// Conflict resolution messages - extract the value
 		if resolution, ok := msg.Value.(overlay.ConflictResolutionMsg); ok {
 			return m.handleConflictResolution(resolution)
@@ -84,6 +94,14 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 	case "m":
 		task, session := m.getCurrentTaskAndSession()
+		if selectionTaskID != "" {
+			if selectedTask, selectedSession, ok := m.taskAndSessionByID(selectionTaskID); ok {
+				task, session = selectedTask, selectedSession
+			}
+		}
+		if task != nil {
+			m.beginMutationFeedback(fmt.Sprintf("Preparing merge for %s", task.ID))
+		}
 		return m, m.followOnMergeSelectionCmd(task, session)
 	case "merge_preflight_abort":
 		m.overlayStack.Pop()
@@ -91,6 +109,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if !ok || strings.TrimSpace(worktree) == "" {
 			return m, nil
 		}
+		m.beginMutationFeedback("Abort merge queued")
 		return m, m.abortMergeCmd(worktree)
 	case "merge_preflight_discard_source":
 		m.overlayStack.Pop()
@@ -98,6 +117,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if !ok || strings.TrimSpace(worktree) == "" {
 			return m, nil
 		}
+		m.beginMutationFeedback("Discard source changes queued")
 		return m, m.discardChangesCmd("source", worktree)
 	case "merge_preflight_discard_target":
 		m.overlayStack.Pop()
@@ -105,6 +125,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if !ok || strings.TrimSpace(worktree) == "" {
 			return m, nil
 		}
+		m.beginMutationFeedback("Discard target changes queued")
 		return m, m.discardChangesCmd("target", worktree)
 	case "merge_preflight_commit_source":
 		m.overlayStack.Pop()
@@ -112,6 +133,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if !ok || strings.TrimSpace(worktree) == "" {
 			return m, nil
 		}
+		m.beginMutationFeedback("Commit source changes queued")
 		return m, m.commitChangesCmd("source", worktree)
 	case "merge_preflight_commit_target":
 		m.overlayStack.Pop()
@@ -119,13 +141,24 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if !ok || strings.TrimSpace(worktree) == "" {
 			return m, nil
 		}
+		m.beginMutationFeedback("Commit target changes queued")
 		return m, m.commitChangesCmd("target", worktree)
+	case "merge_preflight_agent":
+		m.overlayStack.Pop()
+		selection, ok := msg.Value.(overlay.MergePreflightAgentSelection)
+		if !ok {
+			return m, nil
+		}
+		m.beginMutationFeedback(fmt.Sprintf("Agent merge queued for %s -> %s", selection.SourceID, selection.TargetID))
+		return m, m.resolveMergePreflightWithAgentCmd(selection)
 	case "merge_preflight_refresh":
 		m.overlayStack.Pop()
 		selection, ok := msg.Value.(overlay.MergePreflightRefreshSelection)
 		if !ok {
+			m.beginMutationFeedback("Refreshing merge preflight")
 			return m, m.loadIssuesAfterRuntimeReconcileCmd()
 		}
+		m.beginMutationFeedback("Refreshing merge preflight")
 		return m, m.refreshMergePreflightCmd(selection)
 	case "projects":
 		// Settings -> Manage projects
@@ -148,6 +181,8 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			return m, m.openLogEditorCmd(path)
 		}
 		return m, nil
+	case "editor":
+		return m, m.openSettingsEditorCmd()
 	case "event-log-error":
 		if err, ok := msg.Value.(error); ok {
 			m.addToast(Toast{
@@ -184,6 +219,31 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			m.ensureCursorVisible(columns)
 		}
 		return m, nil
+	case "task_workspace_open_task":
+		targetID, ok := msg.Value.(string)
+		if !ok || strings.TrimSpace(targetID) == "" {
+			return m, nil
+		}
+		task, _, ok := m.taskAndSessionByID(targetID)
+		if !ok || task == nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Related task %s is not loaded", strings.TrimSpace(targetID)),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		columns := m.buildColumns()
+		m.nav.JumpToTaskByID(columns, task.ID.String())
+		m.ensureCursorVisible(columns)
+		if workspace, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); ok {
+			workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
+			workspace.SyncTask(*task, m.tasks, m.pendingMutationForTask(task.ID.String()))
+		}
+		if m.daemonClient == nil {
+			return m, nil
+		}
+		return m, m.refreshTaskWorkspaceInBackgroundCmd(task.ID.String())
 	case "set-default-success", "remove-success", "detect-success":
 		// Project registry actions succeeded - just show success toast
 		if name, ok := msg.Value.(string); ok {
@@ -215,15 +275,18 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Keep task workspace open when attaching so users can return to the
-	// full detail/actions panel after attach without reopening it.
-	if !(msg.Key == "a" && isTaskWorkspaceOverlay(m.overlayStack.Current())) {
+	// Keep task workspace open for actions that should layer over it or return
+	// to it without forcing users to reopen the details.
+	keepWorkspaceOpen := isTaskWorkspaceOverlay(m.overlayStack.Current()) &&
+		(msg.Key == "a" || msg.Key == "c" || msg.Key == "r" || msg.Key == "w" || msg.Key == "W" || msg.Key == "x")
+	if !keepWorkspaceOpen {
 		m.overlayStack.Pop()
 	}
 
 	if msg.Key == "yes" && m.pendingBulkCleanup != nil {
 		pending := m.pendingBulkCleanup
 		m.pendingBulkCleanup = nil
+		m.beginMutationFeedback(fmt.Sprintf("Bulk cleanup queued for %d task(s)", len(pending.taskIDs)))
 		return m, m.bulkCleanupWorktreeCmd(pending.taskIDs, pending.deletedTasks)
 	}
 	if msg.Key == "no" && m.pendingBulkCleanup != nil {
@@ -240,6 +303,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	if msg.Key == "yes" && m.pendingCleanup != nil {
 		pending := m.pendingCleanup
 		m.pendingCleanup = nil
+		m.beginMutationFeedback(fmt.Sprintf("Worktree cleanup queued for %s", pending.taskID))
 		return m, m.cleanupWorktreeCmd(pending.taskID, pending.deletedTask, pending.force)
 	}
 	if msg.Key == "no" && m.pendingCleanup != nil {
@@ -272,19 +336,24 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	// Session actions
 	case "s":
 		// Start tmux session only; do not launch work automatically.
+		m.beginTaskMutationFeedback(task.ID.String(), "session_start", "Session start")
 		return m, m.startSessionCmd(task.ID.String(), m.resolveBaseBranch(), false, false)
 	case "S":
 		// Start session directly without origin/base selection prompt.
+		m.beginTaskMutationFeedback(task.ID.String(), "session_start", "Session start")
 		return m, m.startSessionCmd(task.ID.String(), m.resolveBaseBranch(), false, true)
 	case "!":
 		// Start session with dangerous skip-permissions mode.
+		m.beginTaskMutationFeedback(task.ID.String(), "session_start", "Session start")
 		return m, m.startSessionCmd(task.ID.String(), m.resolveBaseBranch(), true, true)
 	case "session_origin":
 		if originMsg, ok := msg.Value.(overlay.MergeTargetSelectedMsg); ok {
+			m.beginTaskMutationFeedback(task.ID.String(), "session_start", "Session start")
 			return m, m.startSessionCmd(task.ID.String(), m.originBranchForSelection(originMsg.SourceID), false, true)
 		}
 		return m, nil
 	case "a":
+		m.beginMutationFeedback(fmt.Sprintf("Attach queued for %s", task.ID))
 		return m, m.attachSessionCmd(task.ID.String())
 	case "p":
 		// TODO: Pause session
@@ -295,6 +364,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		})
 	case "x":
 		// Delegate stop decision to daemon authority; projection can be stale.
+		m.beginTaskMutationFeedback(task.ID.String(), "session_stop", "Session stop")
 		return m, m.stopSessionCmd(task.ID.String())
 	case "R":
 		// TODO: Resume session
@@ -311,10 +381,13 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if session != nil {
 			worktreeHint = session.Worktree
 		}
+		m.markMergeOperationPreparing(task.ID.String(), "", "preparing update")
+		m.beginMutationFeedback(fmt.Sprintf("Update from base queued for %s", task.ID))
 		return m, m.updateFromBaseCmd(task.ID.String(), worktreeHint, false)
 
 	case "m":
 		// Follow-on merge from dependency-aware context.
+		m.beginMutationFeedback(fmt.Sprintf("Preparing merge for %s", task.ID))
 		return m, m.followOnMergeSelectionCmd(task, session)
 
 	case "P":
@@ -323,6 +396,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if session != nil {
 			worktreeHint = session.Worktree
 		}
+		m.beginMutationFeedback(fmt.Sprintf("Preparing PR for %s", task.ID))
 		return m, m.openPROverlayCmd(worktreeHint, task.ID.String())
 	case "O":
 		// Open PR in browser for current branch
@@ -330,9 +404,11 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if session != nil {
 			worktreeHint = session.Worktree
 		}
+		m.beginMutationFeedback(fmt.Sprintf("Opening PR for %s", task.ID))
 		return m, m.openPRCmd(worktreeHint, task.ID.String())
 	case "M":
 		// Abort in-progress merge in worktree
+		m.beginMutationFeedback(fmt.Sprintf("Abort merge queued for %s", task.ID))
 		return m, m.abortMergeIssueCmd(task.ID.String())
 	case "H":
 		// Open Helix in the task worktree.
@@ -340,6 +416,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if session != nil {
 			worktreeHint = session.Worktree
 		}
+		m.beginMutationFeedback(fmt.Sprintf("Opening Helix for %s", task.ID))
 		return m, m.openHelixCmd(worktreeHint, task.ID.String())
 
 	case "f":
@@ -380,9 +457,13 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case "w":
 		// Cleanup worktree and keep task.
+		m.selectTaskByID(task.ID.String())
+		m.beginMutationFeedback(fmt.Sprintf("Cleanup preflight queued for %s", task.ID))
 		return m, m.requestWorktreeCleanupConfirmationCmd(task.ID.String(), false)
 	case "W":
 		// Delete task and cleanup worktree.
+		m.selectTaskByID(task.ID.String())
+		m.beginMutationFeedback(fmt.Sprintf("Delete + cleanup preflight queued for %s", task.ID))
 		return m, m.requestWorktreeCleanupConfirmationCmd(task.ID.String(), true)
 
 	case "i":
@@ -391,6 +472,10 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, m.openOverlay(attachOverlay)
 
 	case "r":
+		m.beginMutationFeedback(fmt.Sprintf("Refreshing %s", task.ID))
+		return m, m.refreshTaskWorkspaceInBackgroundCmd(task.ID.String())
+
+	case "V":
 		// Dev server menu
 		servers := m.getDevServerInfo(task.ID.String())
 		devOverlay := overlay.NewDevServerOverlay(
@@ -471,8 +556,10 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "e":
 		return m, m.openOverlay(overlay.NewEditTaskOverlayWithImplOptionsAndAttachmentService(*task, m.availableTaskImplementations(), m.attachmentService))
 	case "T":
+		m.beginMutationFeedback(fmt.Sprintf("Archive queued for %s", task.ID))
 		return m, m.deleteTaskCmd(task.ID.String())
 	case "d":
+		m.beginMutationFeedback(fmt.Sprintf("Archive queued for %s", task.ID))
 		return m, m.deleteTaskCmd(task.ID.String())
 	case "c":
 		parentID := task.ID.String()

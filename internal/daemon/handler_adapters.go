@@ -371,16 +371,17 @@ func mapSpecStoreError(err error) error {
 }
 
 type worktreeServiceAdapter struct {
-	manager                       *git.WorktreeManager
-	managerForProject             func(string) *git.WorktreeManager
-	runtimeStateStore             *daemonstate.RuntimeStateStore
-	runtimeStateStoreForProject   func(string) *daemonstate.RuntimeStateStore
-	runtimeProjectionWriter       runtimeProjectionWriter
-	ensureRuntimeFreshForMutation func(context.Context, string, string) error
-	logger                        *slog.Logger
-	pollInterval                  time.Duration
-	onProjectionUpdate            func(ctx context.Context, projectID, issueID, path string)
-	onWorktreeObserved            func(ctx context.Context, projectID, issueID, path string)
+	manager                            *git.WorktreeManager
+	managerForProject                  func(string) *git.WorktreeManager
+	runtimeStateStore                  *daemonstate.RuntimeStateStore
+	runtimeStateStoreForProject        func(string) *daemonstate.RuntimeStateStore
+	runtimeProjectionWriter            runtimeProjectionWriter
+	ensureRuntimeFreshForMutation      func(context.Context, string, string) error
+	ensureRuntimeFreshForIssueMutation func(context.Context, string, string, string) error
+	logger                             *slog.Logger
+	pollInterval                       time.Duration
+	onProjectionUpdate                 func(ctx context.Context, projectID, issueID, path string)
+	onWorktreeObserved                 func(ctx context.Context, projectID, issueID, path string)
 
 	mu      sync.Mutex
 	pollers map[string]context.CancelFunc
@@ -452,8 +453,8 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 	if manager == nil {
 		return nil, errors.New("worktree manager unavailable")
 	}
-	if a.ensureRuntimeFreshForMutation != nil {
-		if err := a.ensureRuntimeFreshForMutation(ctx, normalizedProjectID(projectID), daemonhandlers.CommandWorktreeCreate); err != nil {
+	if a.ensureRuntimeFreshForIssueMutation != nil {
+		if err := a.ensureRuntimeFreshForIssueMutation(ctx, normalizedProjectID(projectID), issueID, daemonhandlers.CommandWorktreeCreate); err != nil {
 			return nil, err
 		}
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
+	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/testprofile"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
@@ -400,6 +401,33 @@ func TestUpdate_ForwardsNonKeyMessagesToActiveOverlay(t *testing.T) {
 	}
 	if got, ok := current.lastMsg.(struct{ name string }); !ok || got.name != customMsg.name {
 		t.Fatalf("overlay received wrong message: %#v", current.lastMsg)
+	}
+}
+
+func TestOverlayCtrlGClosesEntireStack(t *testing.T) {
+	m := newTestModel()
+	bottom := &probeOverlay{}
+	top := &probeOverlay{}
+	m.overlayStack.Push(bottom)
+	m.overlayStack.Push(top)
+
+	updated, cmd := m.handleOverlayKey(tea.KeyMsg{Type: tea.KeyCtrlG})
+	if cmd == nil {
+		t.Fatal("expected ctrl+g to emit a close-all command")
+	}
+	next := updated.(Model)
+	if top.updated {
+		t.Fatal("expected ctrl+g to be handled globally before forwarding to top overlay")
+	}
+
+	closeMsg := cmd()
+	if _, ok := closeMsg.(overlay.CloseAllOverlaysMsg); !ok {
+		t.Fatalf("ctrl+g command emitted %T, want overlay.CloseAllOverlaysMsg", closeMsg)
+	}
+	closed, _ := next.Update(closeMsg)
+	finalModel := closed.(Model)
+	if !finalModel.overlayStack.IsEmpty() {
+		t.Fatalf("expected ctrl+g to close the whole overlay stack, current=%T", finalModel.overlayStack.Current())
 	}
 }
 
@@ -1095,6 +1123,27 @@ func TestActionSelectionCOpensCreateOverlay(t *testing.T) {
 	}
 }
 
+func TestTaskWorkspaceCreateChildKeepsWorkspaceBehindForm(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+	parent := domain.Task{ID: "az-1", Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask}
+	m.tasks = []domain.Task{parent}
+	m.nav.SelectTask(parent.ID.String(), 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(parent, m.tasks, nil, 120, 30))
+
+	result, _ := m.handleSelection(overlay.SelectionMsg{Key: "c"})
+	newModel := result.(Model)
+
+	current := newModel.overlayStack.Current()
+	if _, ok := current.(*overlay.CreateTaskOverlay); !ok {
+		t.Fatalf("expected create overlay on top, got %T", current)
+	}
+	newModel.overlayStack.Pop()
+	if _, ok := newModel.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
+		t.Fatalf("expected task workspace to remain underneath create overlay, got %T", newModel.overlayStack.Current())
+	}
+}
+
 func TestFollowOnMergeSelectionNoEligibleUpstreamShowsToast(t *testing.T) {
 	m := newTestModel()
 	parentID := "az-parent"
@@ -1134,6 +1183,47 @@ func TestFollowOnMergeSelectionNoEligibleUpstreamShowsToast(t *testing.T) {
 	lastToast := newModel.toasts[len(newModel.toasts)-1]
 	if !strings.Contains(lastToast.Message, "No eligible upstream sources") {
 		t.Fatalf("unexpected toast message: %q", lastToast.Message)
+	}
+}
+
+func TestTaskWorkspaceMergeUsesWorkspaceTask(t *testing.T) {
+	m := newTestModel()
+	boardTask := domain.Task{
+		ID:          "az-board",
+		Title:       "Board selection",
+		Status:      domain.StatusInProgress,
+		Priority:    domain.P2,
+		Type:        domain.TypeTask,
+		HasWorktree: false,
+	}
+	workspaceTask := domain.Task{
+		ID:          "az-workspace",
+		Title:       "Workspace task",
+		Status:      domain.StatusInProgress,
+		Priority:    domain.P2,
+		Type:        domain.TypeTask,
+		HasWorktree: true,
+		Session: &domain.Session{
+			IssueID:  "az-workspace",
+			State:    domain.SessionBusy,
+			Worktree: "/tmp/az-workspace",
+		},
+	}
+	m.tasks = []domain.Task{boardTask, workspaceTask}
+	m.nav.SelectTask(boardTask.ID.String(), boardTask.Status.Column())
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(workspaceTask, m.tasks, nil, 120, 30))
+
+	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
+	if cmd == nil {
+		t.Fatal("expected workspace merge command")
+	}
+
+	newModel := updated.(Model)
+	if _, ok := newModel.pendingOpsByTask[taskIDKey(workspaceTask.ID.String())]; !ok {
+		t.Fatalf("expected merge preparation on workspace task %s, got %+v", workspaceTask.ID, newModel.pendingOpsByTask)
+	}
+	if _, ok := newModel.pendingOpsByTask[taskIDKey(boardTask.ID.String())]; ok {
+		t.Fatalf("merge preparation used board-selected task %s, got %+v", boardTask.ID, newModel.pendingOpsByTask)
 	}
 }
 
@@ -1204,6 +1294,77 @@ func TestSettingsSaveErrorKeepsOverlayOpen(t *testing.T) {
 
 	if got := len(newModel.toasts); got == 0 {
 		t.Fatal("expected a toast to be recorded for settings save error")
+	}
+}
+
+func TestSettingsEditorOpensCurrentProjectConfigInTmuxPopup(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/tmux-123/default,1,0")
+	t.Setenv("EDITOR", "vim")
+
+	projectDir := t.TempDir()
+	wantConfigPath := filepath.Join(projectDir, config.ConfigDirName, config.ConfigFileName)
+
+	var gotTitle, gotWidth, gotHeight, gotCommand string
+	m := newTestModel()
+	m.repoDir = projectDir
+	m.tmuxClient = mockTmuxService{
+		popupFn: func(_ context.Context, title, width, height, command string) error {
+			gotTitle = title
+			gotWidth = width
+			gotHeight = height
+			gotCommand = command
+			return nil
+		},
+	}
+	m.overlayStack.Push(overlay.NewDefaultSettingsOverlay())
+
+	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "editor"})
+	if cmd == nil {
+		t.Fatal("expected editor popup command")
+	}
+	msg, ok := cmd().(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("command message = %T, want overlay.SelectionMsg", msg)
+	}
+	if msg.Key != "editor-closed" {
+		t.Fatalf("message key = %q, want editor-closed", msg.Key)
+	}
+
+	newModel := updated.(Model)
+	if newModel.overlayStack.IsEmpty() {
+		t.Fatal("expected settings overlay to remain open until editor-closed is handled")
+	}
+	if gotTitle != "az.settings" || gotWidth != "90%" || gotHeight != "90%" {
+		t.Fatalf("popup title/size = %q %q %q, want az.settings 90%% 90%%", gotTitle, gotWidth, gotHeight)
+	}
+	if !strings.Contains(gotCommand, "cd "+shellSingleQuote(projectDir)) {
+		t.Fatalf("popup command = %q, want current project cd", gotCommand)
+	}
+	if !strings.Contains(gotCommand, shellSingleQuote(wantConfigPath)) {
+		t.Fatalf("popup command = %q, want config path %q", gotCommand, wantConfigPath)
+	}
+	if _, err := os.Stat(filepath.Dir(wantConfigPath)); err != nil {
+		t.Fatalf("expected config directory to exist: %v", err)
+	}
+}
+
+func TestSettingsEditorRequiresTmuxPopup(t *testing.T) {
+	t.Setenv("TMUX", "")
+
+	m := newTestModel()
+	m.repoDir = t.TempDir()
+	m.tmuxClient = mockTmuxService{}
+
+	_, cmd := m.handleSelection(overlay.SelectionMsg{Key: "editor"})
+	if cmd == nil {
+		t.Fatal("expected editor command")
+	}
+	msg, ok := cmd().(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("command message = %T, want overlay.SelectionMsg", msg)
+	}
+	if msg.Key != "editor-error" {
+		t.Fatalf("message key = %q, want editor-error", msg.Key)
 	}
 }
 
@@ -2244,6 +2405,91 @@ func TestTaskCreatedResultSelectsNewTaskAfterRefresh(t *testing.T) {
 	}
 }
 
+func TestTaskCreatedResultOpensChildInWorkspaceAfterRefresh(t *testing.T) {
+	m := newTestModel()
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	parent := domain.Task{ID: parentID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask}
+	m.tasks = []domain.Task{parent}
+	m.nav.SelectTask(parentID.String(), 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(parent, m.tasks, nil, 120, 30))
+	m.openCreatedTaskInWorkspace = true
+
+	createdResult, _ := m.Update(taskCreatedResultMsg{
+		taskID:   childID.String(),
+		err:      nil,
+		isUpdate: false,
+	})
+	createdModel := createdResult.(Model)
+	if createdModel.pendingCreatedWorkspaceTaskID != childID.String() {
+		t.Fatalf("pendingCreatedWorkspaceTaskID = %q, want %q", createdModel.pendingCreatedWorkspaceTaskID, childID)
+	}
+
+	refreshedResult, _ := createdModel.Update(issuesLoadedMsg{
+		tasks: []domain.Task{
+			parent,
+			{ID: childID, Title: "Child", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID},
+		},
+		revision: 42,
+	})
+	refreshedModel := refreshedResult.(Model)
+
+	current := refreshedModel.overlayStack.Current()
+	workspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace to remain open, got %T", current)
+	}
+	if got := workspace.TaskID(); got != childID.String() {
+		t.Fatalf("workspace task ID = %q, want %q", got, childID)
+	}
+	if refreshedModel.pendingCreatedWorkspaceTaskID != "" {
+		t.Fatalf("pendingCreatedWorkspaceTaskID = %q, want cleared state", refreshedModel.pendingCreatedWorkspaceTaskID)
+	}
+}
+
+func TestTaskCreatedResultSelectsTaskAlreadyAppliedFromEvent(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+	m.nav.SelectTask("az-1", 0)
+
+	createdTask := domain.Task{ID: "az-new", Title: "New Task", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeTask}
+	body, err := json.Marshal(protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		TaskID:    "az-new",
+		Task:      &createdTask,
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal task event body: %v", err)
+	}
+
+	eventApplied, _ := m.Update(daemonStreamEventMsg{event: protocol.EventEnvelope{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		Revision:  1,
+		Event:     protocol.EventTaskCreated,
+		Body:      body,
+	}})
+	eventModel := eventApplied.(Model)
+	if got := eventModel.nav.GetCursor().TaskID; got != "az-1" {
+		t.Fatalf("cursor before create result = %q, want existing selection", got)
+	}
+
+	createdResult, _ := eventModel.Update(taskCreatedResultMsg{
+		taskID:   "az-new",
+		err:      nil,
+		isUpdate: false,
+	})
+	createdModel := createdResult.(Model)
+	if got := createdModel.nav.GetCursor().TaskID; got != "az-new" {
+		t.Fatalf("cursor task = %q, want az-new", got)
+	}
+	if createdModel.pendingCreatedTaskID != "" {
+		t.Fatalf("pendingCreatedTaskID = %q, want cleared state", createdModel.pendingCreatedTaskID)
+	}
+}
+
 func TestModeTransitions(t *testing.T) {
 	m := newTestModel()
 
@@ -2657,6 +2903,121 @@ func TestSpaceWorkspaceUsesVisibleFilteredTaskWhenCursorTaskIDIsHidden(t *testin
 	}
 	if got := taskWorkspace.TaskID(); got != "az-visible" {
 		t.Fatalf("workspace task ID = %q, want %q", got, "az-visible")
+	}
+}
+
+func TestTaskWorkspaceGraphNavigationOpensRelatedTask(t *testing.T) {
+	m := newTestModel()
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	m.tasks = []domain.Task{
+		{
+			ID:     parentID,
+			Title:  "Parent task",
+			Status: domain.StatusOpen,
+			Dependencies: []domain.Dependency{
+				{ID: childID, Type: domain.DependencyBlocks},
+			},
+		},
+		{
+			ID:     childID,
+			Title:  "Child task",
+			Status: domain.StatusInProgress,
+		},
+	}
+	m.nav.SelectTask(parentID.String(), 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30))
+
+	updated, _ := m.handleSelection(overlay.SelectionMsg{
+		Key:   "task_workspace_open_task",
+		Value: childID.String(),
+	})
+	next := updated.(Model)
+
+	current := next.overlayStack.Current()
+	workspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace to remain open, got %T", current)
+	}
+	if got := workspace.TaskID(); got != childID.String() {
+		t.Fatalf("workspace task ID = %q, want %q", got, childID)
+	}
+	if view := workspace.View(); !strings.Contains(view, "Child task") {
+		t.Fatalf("workspace did not render selected child task, got %q", view)
+	}
+}
+
+func TestTaskWorkspaceGraphNavigationRefreshPreservesGraphFocus(t *testing.T) {
+	m := newTestModel()
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	m.tasks = []domain.Task{
+		{
+			ID:     parentID,
+			Title:  "Parent task",
+			Status: domain.StatusOpen,
+			Dependencies: []domain.Dependency{
+				{ID: childID, Type: domain.DependencyBlocks},
+			},
+		},
+		{
+			ID:     childID,
+			Title:  "Child task",
+			Status: domain.StatusInProgress,
+		},
+	}
+	m.nav.SelectTask(parentID.String(), 0)
+	workspace := overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30)
+	model, _ := workspace.Update(tea.KeyMsg{Type: tea.KeyTab})
+	workspace = model.(*overlay.TaskWorkspaceOverlay)
+	m.overlayStack.Push(workspace)
+
+	updated, _ := m.handleSelection(overlay.SelectionMsg{
+		Key:   "task_workspace_open_task",
+		Value: childID.String(),
+	})
+	next := updated.(Model)
+	assertTaskWorkspaceGraphFocus(t, next)
+
+	refreshedChild := m.tasks[1]
+	refreshedChild.Title = "Child task refreshed"
+	updated, _ = next.Update(refreshTaskWorkspaceResultMsg{
+		taskID:  childID.String(),
+		hasTask: true,
+		task:    refreshedChild,
+	})
+	next = updated.(Model)
+
+	current := next.overlayStack.Current()
+	refreshedWorkspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace to remain open, got %T", current)
+	}
+	if got := refreshedWorkspace.TaskID(); got != childID.String() {
+		t.Fatalf("workspace task ID = %q, want %q", got, childID)
+	}
+	assertTaskWorkspaceGraphFocus(t, next)
+	if view := refreshedWorkspace.View(); !strings.Contains(view, "Child task refreshed") {
+		t.Fatalf("workspace did not render refreshed child task, got %q", view)
+	}
+}
+
+func assertTaskWorkspaceGraphFocus(t *testing.T, m Model) {
+	t.Helper()
+	current := m.overlayStack.Current()
+	workspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace to remain open, got %T", current)
+	}
+	joined := ""
+	for _, binding := range workspace.StatusBindings() {
+		joined += binding.Key + " " + binding.Description + " "
+	}
+	if !strings.Contains(joined, "select relation") {
+		t.Fatalf("expected task workspace to stay on graph focus, got bindings %q", joined)
+	}
+	if strings.Contains(joined, "j/k/↑/↓ scroll") {
+		t.Fatalf("expected task workspace not to revert to detail scroll focus, got bindings %q", joined)
 	}
 }
 
@@ -3156,6 +3517,98 @@ func TestIssuesLoaded_IgnoresStaleProjectResponses(t *testing.T) {
 	}
 }
 
+func TestSnapshotBackedLocalRefreshesIgnoreOlderRevisions(t *testing.T) {
+	projectID := newTestModel().daemonProjectID()
+
+	t.Run("task workspace refresh", func(t *testing.T) {
+		m := newTestModel()
+		m.daemonRevision = 8
+		m.tasks = []domain.Task{{ID: "az-1", Title: "Current", Status: domain.StatusOpen, Type: domain.TypeTask}}
+		m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30))
+
+		result, cmd := m.Update(refreshTaskWorkspaceResultMsg{
+			projectID: projectID,
+			revision:  7,
+			taskID:    "az-1",
+			hasTask:   true,
+			task:      domain.Task{ID: "az-1", Title: "Stale", Status: domain.StatusDone, Type: domain.TypeTask},
+		})
+		updated := result.(Model)
+		if cmd != nil {
+			t.Fatalf("stale workspace refresh command = %T, want nil", cmd)
+		}
+		if updated.tasks[0].Title != "Current" || updated.tasks[0].Status != domain.StatusOpen {
+			t.Fatalf("stale workspace refresh applied task = %+v", updated.tasks[0])
+		}
+	})
+
+	t.Run("cleanup confirmation", func(t *testing.T) {
+		m := newTestModel()
+		m.daemonRevision = 8
+		m.tasks = []domain.Task{{ID: "az-1", Title: "Current", Status: domain.StatusOpen, Type: domain.TypeTask}}
+
+		result, cmd := m.Update(worktreeCleanupConfirmPromptMsg{
+			projectID: "chefy",
+			revision:  99,
+			taskID:    "az-1",
+			hasTask:   true,
+			task:      domain.Task{ID: "az-1", Title: "Wrong project", Status: domain.StatusDone, Type: domain.TypeTask},
+		})
+		updated := result.(Model)
+		if cmd != nil {
+			t.Fatalf("cross-project cleanup confirm command = %T, want nil", cmd)
+		}
+		if updated.pendingCleanup != nil {
+			t.Fatal("cross-project cleanup confirm should not set pending cleanup")
+		}
+		if updated.tasks[0].Title != "Current" || updated.tasks[0].Status != domain.StatusOpen {
+			t.Fatalf("cross-project cleanup confirm applied task = %+v", updated.tasks[0])
+		}
+
+		result, cmd = m.Update(worktreeCleanupConfirmPromptMsg{
+			projectID: projectID,
+			revision:  7,
+			taskID:    "az-1",
+			hasTask:   true,
+			task:      domain.Task{ID: "az-1", Title: "Stale", Status: domain.StatusDone, Type: domain.TypeTask},
+		})
+		updated = result.(Model)
+		if cmd != nil {
+			t.Fatalf("stale cleanup confirm command = %T, want nil", cmd)
+		}
+		if updated.pendingCleanup != nil {
+			t.Fatal("stale cleanup confirm should not set pending cleanup")
+		}
+		if updated.tasks[0].Title != "Current" || updated.tasks[0].Status != domain.StatusOpen {
+			t.Fatalf("stale cleanup confirm applied task = %+v", updated.tasks[0])
+		}
+	})
+
+	t.Run("bulk cleanup preflight", func(t *testing.T) {
+		m := newTestModel()
+		m.daemonRevision = 8
+		m.tasks = []domain.Task{{ID: "az-1", Title: "Current", Status: domain.StatusOpen, Type: domain.TypeTask}}
+
+		result, cmd := m.Update(bulkCleanupPreflightMsg{
+			projectID:      projectID,
+			revision:       7,
+			taskIDs:        []string{"az-1"},
+			refreshedTasks: []domain.Task{{ID: "az-1", Title: "Stale", Status: domain.StatusDone, Type: domain.TypeTask, HasUncommittedChanges: true}},
+			risks:          []bulkCleanupRisk{{taskID: "az-1", dirty: true}},
+		})
+		updated := result.(Model)
+		if cmd != nil {
+			t.Fatalf("stale bulk cleanup preflight command = %T, want nil", cmd)
+		}
+		if updated.pendingBulkCleanup != nil {
+			t.Fatal("stale bulk cleanup preflight should not set pending cleanup")
+		}
+		if updated.tasks[0].Title != "Current" || updated.tasks[0].Status != domain.StatusOpen {
+			t.Fatalf("stale bulk cleanup preflight applied task = %+v", updated.tasks[0])
+		}
+	})
+}
+
 func TestTmuxActionsDegradeOutsideTmux(t *testing.T) {
 	t.Setenv("TMUX", "")
 
@@ -3215,24 +3668,9 @@ func TestTmuxActionsDegradeOutsideTmux(t *testing.T) {
 		t.Fatalf("requests = %v", transport.requests)
 	}
 
-	m.tasks[0].Session = &domain.Session{IssueID: "az-1", Worktree: "/tmp/az-1"}
-	m.nav.SelectTask("az-1", 0)
-
-	result, _ := m.handleConflictResolution(overlay.ConflictResolutionMsg{ResolveWithClaude: true})
-	newModel := result.(Model)
-	if len(newModel.toasts) == 0 {
-		t.Fatal("expected tmux-unavailable toast from conflict resolution")
-	}
-	lastToast := newModel.toasts[len(newModel.toasts)-1]
-	if lastToast.Level != ToastWarning {
-		t.Fatalf("conflict resolution toast level = %v, want warning", lastToast.Level)
-	}
-	if !strings.Contains(lastToast.Message, "unavailable outside tmux") {
-		t.Fatalf("conflict resolution toast message = %q, want tmux-unavailable guidance", lastToast.Message)
-	}
 }
 
-func TestHandleConflictResolution_ResolveWithClaudeAttachesSession(t *testing.T) {
+func TestHandleConflictResolution_ResolveWithAgentLaunchesDaemonCommand(t *testing.T) {
 	t.Setenv("TMUX", "client")
 	m := newTestModel()
 	m.currentProject = "Chefy"
@@ -3242,22 +3680,97 @@ func TestHandleConflictResolution_ResolveWithClaudeAttachesSession(t *testing.T)
 
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandSessionAttach {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
+			if req.Command != daemonclient.CommandSessionResolveConflict {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionResolveConflict)
 			}
-			var body struct {
-				ProjectID string `json:"project_id"`
-				SessionID string `json:"session_id"`
-			}
+			var body protocol.SessionResolveConflictRequestBody
 			if err := json.Unmarshal(req.Body, &body); err != nil {
-				t.Fatalf("unmarshal attach request: %v", err)
+				t.Fatalf("unmarshal resolve request: %v", err)
 			}
-			if body.SessionID != "az-1" {
-				t.Fatalf("session id = %q, want az-1", body.SessionID)
+			if body.IssueID != "az-1" || body.Worktree != "/tmp/az-1" {
+				t.Fatalf("resolve request = %+v, want az-1 /tmp/az-1", body)
 			}
-			respBody, err := json.Marshal(struct {
-				Output string `json:"output"`
-			}{Output: "attached"})
+			if len(body.ConflictFiles) != 1 || body.ConflictFiles[0] != "conflict.go" {
+				t.Fatalf("conflict files = %+v, want conflict.go", body.ConflictFiles)
+			}
+			respBody, err := json.Marshal(protocol.SessionResolveConflictResponseBody{
+				ProjectID:     "Chefy",
+				IssueID:       "az-1",
+				SessionID:     "Chefy-az-1",
+				Worktree:      "/tmp/az-1",
+				WindowName:    "resolve-conflict",
+				ConflictFiles: []string{"conflict.go"},
+				ReusedSession: true,
+				ReusedWindow:  false,
+			})
+			if err != nil {
+				t.Fatalf("marshal resolve response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m.daemonClient = daemonclient.New(transport)
+
+	result, cmd := m.handleConflictResolution(overlay.ConflictResolutionMsg{
+		ResolveWithAgent: true,
+		IssueID:          "az-1",
+		Worktree:         "/tmp/az-1",
+		ConflictFiles:    []string{"conflict.go"},
+	})
+	if cmd == nil {
+		t.Fatal("expected daemon resolve command")
+	}
+	_ = result.(Model)
+
+	msg := cmd()
+	resolved, ok := msg.(conflictResolveAgentResultMsg)
+	if !ok {
+		t.Fatalf("resolve cmd returned %T, want conflictResolveAgentResultMsg", msg)
+	}
+	if resolved.issueID != "az-1" || resolved.windowName != "resolve-conflict" || resolved.err != nil {
+		t.Fatalf("resolve result = %+v, want az-1 resolve-conflict nil error", resolved)
+	}
+	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionResolveConflict {
+		t.Fatalf("requests = %v", transport.requests)
+	}
+}
+
+func TestConflictDialogResolveWithAgentUsesMergeResultContext(t *testing.T) {
+	t.Setenv("TMUX", "client")
+	m := newTestModel()
+	m.currentProject = "Chefy"
+	m.tmuxAvailable = true
+	m.nav.SelectTask("az-1", 0)
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandSessionResolveConflict {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionResolveConflict)
+			}
+			var body protocol.SessionResolveConflictRequestBody
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal resolve request: %v", err)
+			}
+			if body.IssueID != "az-2" || body.Worktree != "/tmp/az-2" {
+				t.Fatalf("resolve body = %+v, want issue az-2 worktree /tmp/az-2", body)
+			}
+			if len(body.ConflictFiles) != 1 || body.ConflictFiles[0] != "conflict.go" {
+				t.Fatalf("conflict files = %+v, want conflict.go", body.ConflictFiles)
+			}
+			respBody, err := json.Marshal(protocol.SessionResolveConflictResponseBody{
+				ProjectID:     "Chefy",
+				IssueID:       "az-2",
+				SessionID:     "Chefy-az-2",
+				Worktree:      "/tmp/az-2",
+				WindowName:    "resolve-conflict",
+				ConflictFiles: []string{"conflict.go"},
+			})
 			if err != nil {
 				t.Fatalf("marshal response: %v", err)
 			}
@@ -3272,40 +3785,139 @@ func TestHandleConflictResolution_ResolveWithClaudeAttachesSession(t *testing.T)
 	}
 	m.daemonClient = daemonclient.New(transport)
 
-	var switchTargets []string
-	m.tmuxClient = mockTmuxService{
-		switchFn: func(_ context.Context, target string) error {
-			switchTargets = append(switchTargets, target)
-			return nil
+	updatedAny, _ := m.Update(fetchAndMergeResultMsg{
+		issueID:  "az-2",
+		worktree: "/tmp/az-2",
+		result: &git.MergeResult{
+			HasConflicts:  true,
+			ConflictFiles: []string{"conflict.go"},
 		},
+	})
+	updated := updatedAny.(Model)
+	current, ok := updated.overlayStack.Current().(*overlay.ConflictOverlay)
+	if !ok {
+		t.Fatalf("overlay = %T, want ConflictOverlay", updated.overlayStack.Current())
 	}
 
-	result, cmd := m.handleConflictResolution(overlay.ConflictResolutionMsg{ResolveWithClaude: true})
-	if cmd == nil {
-		t.Fatal("expected attach command from resolve with Claude")
+	_, selectCmd := current.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if selectCmd == nil {
+		t.Fatal("expected selection command")
 	}
-	_ = result.(Model)
+	selectMsg := selectCmd()
+	selected, ok := selectMsg.(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("selection message = %T, want SelectionMsg", selectMsg)
+	}
+	if selected.Key != "agent" {
+		t.Fatalf("selection key = %q, want agent", selected.Key)
+	}
+	resolution, ok := selected.Value.(overlay.ConflictResolutionMsg)
+	if !ok {
+		t.Fatalf("selection value = %T, want ConflictResolutionMsg", selected.Value)
+	}
+	if !resolution.ResolveWithAgent {
+		t.Fatal("expected resolve-with-agent selection")
+	}
+	if resolution.IssueID != "az-2" {
+		t.Fatalf("resolution issue id = %q, want az-2", resolution.IssueID)
+	}
+	if resolution.Worktree != "/tmp/az-2" {
+		t.Fatalf("resolution worktree = %q, want /tmp/az-2", resolution.Worktree)
+	}
+	if len(resolution.ConflictFiles) != 1 || resolution.ConflictFiles[0] != "conflict.go" {
+		t.Fatalf("resolution conflict files = %+v, want conflict.go", resolution.ConflictFiles)
+	}
+	nextAny, cmd := updated.Update(selected)
+	if cmd == nil {
+		t.Fatal("expected daemon resolve command from conflict resolution")
+	}
+	_ = nextAny.(Model)
 
 	msg := cmd()
-	attached, ok := msg.(sessionAttachedMsg)
+	resolved, ok := msg.(conflictResolveAgentResultMsg)
 	if !ok {
-		t.Fatalf("attach cmd returned %T, want sessionAttachedMsg", msg)
+		t.Fatalf("resolve command returned %T, want conflictResolveAgentResultMsg", msg)
 	}
-	if attached.issueID != "az-1" {
-		t.Fatalf("attached issue id = %q, want az-1", attached.issueID)
-	}
-	if !attached.switchedTmux {
-		t.Fatal("expected tmux switch on conflict resolution attach")
-	}
-	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionAttach {
-		t.Fatalf("requests = %v", transport.requests)
-	}
-	if len(switchTargets) == 0 || switchTargets[0] != "az-1" {
-		t.Fatalf("switch targets = %v, want first target az-1", switchTargets)
+	if resolved.issueID != "az-2" || resolved.worktree != "/tmp/az-2" || resolved.windowName != "resolve-conflict" {
+		t.Fatalf("resolve result = %+v, want az-2 /tmp/az-2 resolve-conflict", resolved)
 	}
 }
 
-func TestHandleConflictResolution_ResolveWithClaudeDaemonUnavailableFallsBackToManualHint(t *testing.T) {
+func TestMergePreflightAgentSelectionLaunchesPreflightPrompt(t *testing.T) {
+	t.Setenv("TMUX", "client")
+	m := newTestModel()
+	m.currentProject = "Chefy"
+	m.tmuxAvailable = true
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandSessionResolveConflict {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionResolveConflict)
+			}
+			var body protocol.SessionResolveConflictRequestBody
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal resolve request: %v", err)
+			}
+			if body.IssueID != "az-1" || body.Worktree != "/tmp/az-1" {
+				t.Fatalf("resolve body = %+v, want issue az-1 worktree /tmp/az-1", body)
+			}
+			if !strings.Contains(body.Prompt, "Auto-merge the blocked preflight for az-1 -> base") {
+				t.Fatalf("prompt = %q, want preflight merge context", body.Prompt)
+			}
+			if !strings.Contains(body.Prompt, "merge main into az/az-1") {
+				t.Fatalf("prompt = %q, want base-into-source instruction", body.Prompt)
+			}
+			if len(body.ConflictFiles) != 1 || body.ConflictFiles[0] != "conflict.go" {
+				t.Fatalf("conflict files = %+v, want conflict.go", body.ConflictFiles)
+			}
+			respBody, err := json.Marshal(protocol.SessionResolveConflictResponseBody{
+				ProjectID:     "Chefy",
+				IssueID:       "az-1",
+				SessionID:     "Chefy-az-1",
+				Worktree:      "/tmp/az-1",
+				WindowName:    "resolve-conflict",
+				ConflictFiles: []string{"conflict.go"},
+			})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m.daemonClient = daemonclient.New(transport)
+
+	_, cmd := m.handleSelection(overlay.SelectionMsg{
+		Key: "merge_preflight_agent",
+		Value: overlay.MergePreflightAgentSelection{
+			SourceID:       "az-1",
+			TargetID:       "base",
+			SourceWorktree: "/tmp/az-1",
+			TargetWorktree: "/repo",
+			TargetRef:      "main",
+			SourceBranch:   "az/az-1",
+			ConflictFiles:  []string{"conflict.go"},
+		},
+	})
+	if cmd == nil {
+		t.Fatal("expected resolve command")
+	}
+	msg := cmd()
+	resolved, ok := msg.(conflictResolveAgentResultMsg)
+	if !ok {
+		t.Fatalf("resolve command returned %T, want conflictResolveAgentResultMsg", msg)
+	}
+	if resolved.issueID != "az-1" || resolved.worktree != "/tmp/az-1" || resolved.windowName != "resolve-conflict" {
+		t.Fatalf("resolve result = %+v, want az-1 /tmp/az-1 resolve-conflict", resolved)
+	}
+}
+
+func TestHandleConflictResolution_ResolveWithAgentDaemonUnavailableFallsBackToManualHint(t *testing.T) {
 	t.Setenv("TMUX", "client")
 	m := newTestModel()
 	m.tmuxAvailable = true
@@ -3313,7 +3925,7 @@ func TestHandleConflictResolution_ResolveWithClaudeDaemonUnavailableFallsBackToM
 	m.tasks[0].Session = &domain.Session{IssueID: "az-1", Worktree: "/tmp/az-1"}
 	m.nav.SelectTask("az-1", 0)
 
-	result, cmd := m.handleConflictResolution(overlay.ConflictResolutionMsg{ResolveWithClaude: true})
+	result, cmd := m.handleConflictResolution(overlay.ConflictResolutionMsg{ResolveWithAgent: true})
 	if cmd != nil {
 		t.Fatal("expected no attach command when daemon is unavailable")
 	}
@@ -3333,7 +3945,7 @@ func TestHandleConflictResolution_ResolveWithClaudeDaemonUnavailableFallsBackToM
 	}
 }
 
-func TestResolveConflictWithAICmd_AttachFailureReturnsManualFallbackMsg(t *testing.T) {
+func TestResolveConflictWithAgentCmd_DaemonFailureReturnsResultError(t *testing.T) {
 	t.Setenv("TMUX", "client")
 	m := newTestModel()
 	m.currentProject = "Chefy"
@@ -3341,142 +3953,80 @@ func TestResolveConflictWithAICmd_AttachFailureReturnsManualFallbackMsg(t *testi
 
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandSessionAttach {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
+			if req.Command != daemonclient.CommandSessionResolveConflict {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionResolveConflict)
 			}
 			return protocol.ResponseEnvelope{}, fmt.Errorf("daemon offline")
 		},
 	}
 	m.daemonClient = daemonclient.New(transport)
 
-	msg := m.resolveConflictWithAICmd("az-1")()
-	fallback, ok := msg.(conflictResolveFallbackMsg)
+	msg := m.resolveConflictWithAgentCmd("az-1", "/tmp/az-1", []string{"conflict.go"})()
+	result, ok := msg.(conflictResolveAgentResultMsg)
 	if !ok {
-		t.Fatalf("resolveConflictWithAICmd returned %T, want conflictResolveFallbackMsg", msg)
+		t.Fatalf("resolveConflictWithAgentCmd returned %T, want conflictResolveAgentResultMsg", msg)
 	}
-	if fallback.issueID != "az-1" {
-		t.Fatalf("fallback issue id = %q, want az-1", fallback.issueID)
+	if result.issueID != "az-1" {
+		t.Fatalf("result issue id = %q, want az-1", result.issueID)
 	}
-	if fallback.err == nil || !strings.Contains(fallback.err.Error(), "daemon offline") {
-		t.Fatalf("fallback err = %v, want daemon offline", fallback.err)
+	if result.err == nil || !strings.Contains(result.err.Error(), "daemon offline") {
+		t.Fatalf("result err = %v, want daemon offline", result.err)
 	}
 
-	result, _ := m.Update(fallback)
-	newModel := result.(Model)
+	updated, _ := m.Update(result)
+	newModel := updated.(Model)
 	if len(newModel.toasts) == 0 {
-		t.Fatal("expected warning toast for fallback guidance")
+		t.Fatal("expected error toast for daemon failure")
 	}
 	lastToast := newModel.toasts[len(newModel.toasts)-1]
-	if lastToast.Level != ToastWarning {
-		t.Fatalf("toast level = %v, want warning", lastToast.Level)
+	if lastToast.Level != ToastError {
+		t.Fatalf("toast level = %v, want error", lastToast.Level)
 	}
-	if !strings.Contains(lastToast.Message, "tmux attach-session -t az-1") {
-		t.Fatalf("toast message = %q, want manual attach command", lastToast.Message)
+	if !strings.Contains(lastToast.Message, "daemon offline") {
+		t.Fatalf("toast message = %q, want daemon offline", lastToast.Message)
 	}
 }
 
-func TestResolveConflictWithAICmd_SessionNotFoundStartsSessionAndAttaches(t *testing.T) {
+func TestResolveConflictWithAgentCmd_PendingOperationMarksTask(t *testing.T) {
 	t.Setenv("TMUX", "client")
 	m := newTestModel()
 	m.currentProject = "Chefy"
 	m.tmuxAvailable = true
 
-	var attachCalls int
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			switch req.Command {
-			case daemonclient.CommandSessionAttach:
-				attachCalls++
-				if attachCalls == 1 {
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						OK:              false,
-						Error: &protocol.ErrorEnvelope{
-							Code:    protocol.ErrorCodeInvalidRequest,
-							Message: "session not found: az-1 (use 'az start az-1' to create)",
-						},
-					}, nil
-				}
-				respBody, err := json.Marshal(struct {
-					Output string `json:"output"`
-				}{Output: "attached"})
-				if err != nil {
-					t.Fatalf("marshal attach response: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
-
-			case daemonclient.CommandSessionStart:
-				var body struct {
-					SessionID string `json:"session_id"`
-					StartWork bool   `json:"start_work"`
-				}
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal start body: %v", err)
-				}
-				if body.SessionID != "az-1" {
-					t.Fatalf("session id = %q, want az-1", body.SessionID)
-				}
-				if !body.StartWork {
-					t.Fatal("expected start_work=true when conflict resolve starts AI session")
-				}
-				respBody, err := json.Marshal(struct {
-					Output string `json:"output"`
-				}{Output: "started"})
-				if err != nil {
-					t.Fatalf("marshal start response: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
-
-			default:
-				t.Fatalf("unexpected command %q", req.Command)
-				return protocol.ResponseEnvelope{}, nil
+			if req.Command != daemonclient.CommandSessionResolveConflict {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionResolveConflict)
 			}
+			body := []byte(`{"operation_id":"op-conflict","state":"running"}`)
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            body,
+			}, nil
 		},
 	}
 	m.daemonClient = daemonclient.New(transport)
 
-	var switchTargets []string
-	m.tmuxClient = mockTmuxService{
-		switchFn: func(_ context.Context, target string) error {
-			switchTargets = append(switchTargets, target)
-			return nil
-		},
+	msg := m.resolveConflictWithAgentCmd("az-1", "/tmp/az-1", []string{"conflict.go"})()
+	started, ok := msg.(conflictResolveAgentResultMsg)
+	if !ok {
+		t.Fatalf("resolveConflictWithAgentCmd returned %T, want conflictResolveAgentResultMsg", msg)
+	}
+	if started.operationID != "op-conflict" || started.state != protocol.OperationStateRunning {
+		t.Fatalf("pending result = %+v, want op-conflict running", started)
 	}
 
-	msg := m.resolveConflictWithAICmd("az-1")()
-	attached, ok := msg.(sessionAttachedMsg)
-	if !ok {
-		t.Fatalf("resolveConflictWithAICmd returned %T, want sessionAttachedMsg", msg)
+	updatedAny, refreshCmd := m.Update(started)
+	updated := updatedAny.(Model)
+	if refreshCmd == nil {
+		t.Fatal("expected refresh command after pending conflict operation")
 	}
-	if attached.issueID != "az-1" {
-		t.Fatalf("attached issue id = %q, want az-1", attached.issueID)
-	}
-	if !attached.switchedTmux {
-		t.Fatal("expected tmux switch after starting and attaching conflict-resolution session")
-	}
-	if !reflect.DeepEqual(transport.requests, []string{
-		daemonclient.CommandSessionAttach,
-		daemonclient.CommandSessionStart,
-		daemonclient.CommandSessionAttach,
-	}) {
-		t.Fatalf("requests = %v", transport.requests)
-	}
-	if len(switchTargets) == 0 || switchTargets[0] != "az-1" {
-		t.Fatalf("switch targets = %v, want first target az-1", switchTargets)
+	progress := updated.pendingMutationForTask("az-1")
+	if progress == nil || progress.OperationID != "op-conflict" || progress.State != string(protocol.OperationStateRunning) {
+		t.Fatalf("pending progress = %+v, want op-conflict running", progress)
 	}
 }
 
@@ -3665,6 +4215,66 @@ func TestDaemonSessionUpdatedEventAllowsImmediateAttachFromWorkspace(t *testing.
 	}
 }
 
+func TestDevServerResultUpdatesOpenOverlay(t *testing.T) {
+	m := newTestModel()
+	m.overlayStack.Push(overlay.NewDevServerOverlay(
+		[]overlay.DevServerInfo{{
+			ID:     "az-1",
+			Name:   "web",
+			Port:   3000,
+			Status: "stopped",
+		}},
+		"az-1",
+		nil,
+		nil,
+		nil,
+		nil,
+	))
+
+	updatedAny, _ := m.Update(devServerResultMsg{
+		issueID: "az-1",
+		server: overlay.DevServerInfo{
+			ID:     "az-1",
+			Name:   "web",
+			Port:   3000,
+			Status: "running",
+			Uptime: 2 * time.Minute,
+		},
+	})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+
+	current, ok := updated.overlayStack.Current().(*overlay.DevServerOverlay)
+	if !ok {
+		t.Fatalf("current overlay = %T, want DevServerOverlay", updated.overlayStack.Current())
+	}
+	view := current.View()
+	if !strings.Contains(view, "●") || !strings.Contains(view, "2m") {
+		t.Fatalf("devserver overlay view = %q, want running status and uptime", view)
+	}
+}
+
+func TestHandleSelectionVOpensDevServerOverlay(t *testing.T) {
+	m := newTestModel()
+	task := m.tasks[0]
+	m.nav.SelectTask(task.ID.String(), 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(task, nil, nil, 120, 30))
+
+	updatedAny, cmd := m.handleSelection(overlay.SelectionMsg{Key: "V"})
+	if cmd == nil {
+		t.Fatal("expected dev server overlay command")
+	}
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if _, ok := updated.overlayStack.Current().(*overlay.DevServerOverlay); !ok {
+		t.Fatalf("current overlay = %T, want DevServerOverlay", updated.overlayStack.Current())
+	}
+}
+
 func TestHandleSelection_AttachFromTaskWorkspaceKeepsOverlayOpen(t *testing.T) {
 	m := newTestModel()
 	task := m.tasks[0]
@@ -3756,6 +4366,8 @@ func TestDaemonStreamEventMsg_GitStatusEventAppliesRuntimeProjectionDirectly(t *
 				},
 				Git: protocol.RuntimeGitProjection{
 					HasUncommittedChanges: true,
+					HasConflicts:          true,
+					ConflictFiles:         []string{"conflict.go"},
 					GitAdditions:          3,
 					GitDeletions:          1,
 					GitAheadCount:         2,
@@ -3798,6 +4410,9 @@ func TestDaemonStreamEventMsg_GitStatusEventAppliesRuntimeProjectionDirectly(t *
 	if !got.HasUncommittedChanges || got.GitAdditions != 3 || got.GitDeletions != 1 {
 		t.Fatalf("task git runtime = %+v, want dirty diff stat", got)
 	}
+	if !got.HasConflicts || len(got.ConflictFiles) != 1 || got.ConflictFiles[0] != "conflict.go" {
+		t.Fatalf("task conflicts = %+v, want conflict.go", got.ConflictFiles)
+	}
 	if got.Session == nil || got.Session.Worktree != "/tmp/az-1" || got.Session.State != domain.SessionBusy {
 		t.Fatalf("task session = %+v, want busy session with runtime worktree", got.Session)
 	}
@@ -3806,6 +4421,73 @@ func TestDaemonStreamEventMsg_GitStatusEventAppliesRuntimeProjectionDirectly(t *
 	}
 	if updated.daemonRevision != 1 {
 		t.Fatalf("daemonRevision = %d, want 1", updated.daemonRevision)
+	}
+}
+
+func TestDaemonStreamUICommandOpensTaskWorkspace(t *testing.T) {
+	m := newTestModel()
+	m.daemonRevision = 1
+	m.nav.SelectTask("az-1", 0)
+	body, err := json.Marshal(protocol.UICommandEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		IssueID:   "az-3",
+		Command:   protocol.UICommandOpenTaskWorkspace,
+		RequestID: "req-ui-open",
+		CreatedAt: time.Date(2026, time.May, 5, 15, 45, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("marshal ui command body: %v", err)
+	}
+
+	updatedAny, _ := m.Update(daemonStreamEventMsg{
+		event: protocol.EventEnvelope{
+			ProjectID: naming.ProjectID(m.daemonProjectID()),
+			Revision:  2,
+			Event:     protocol.EventUICommandRequested,
+			Body:      body,
+		},
+	})
+	updated := updatedAny.(Model)
+
+	current := updated.overlayStack.Current()
+	workspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected TaskWorkspaceOverlay, got %T", current)
+	}
+	if workspace.TaskID() != "az-3" {
+		t.Fatalf("workspace task = %q, want az-3", workspace.TaskID())
+	}
+	if updated.daemonRevision != 2 {
+		t.Fatalf("daemon revision = %d, want 2", updated.daemonRevision)
+	}
+}
+
+func TestDaemonStreamUICommandIgnoresUnknownCommand(t *testing.T) {
+	m := newTestModel()
+	body, err := json.Marshal(protocol.UICommandEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		IssueID:   "az-3",
+		Command:   "ui.unknown",
+	})
+	if err != nil {
+		t.Fatalf("marshal ui command body: %v", err)
+	}
+
+	updatedAny, _ := m.Update(daemonStreamEventMsg{
+		event: protocol.EventEnvelope{
+			ProjectID: naming.ProjectID(m.daemonProjectID()),
+			Revision:  1,
+			Event:     protocol.EventUICommandRequested,
+			Body:      body,
+		},
+	})
+	updated := updatedAny.(Model)
+
+	if current := updated.overlayStack.Current(); current != nil {
+		t.Fatalf("expected no overlay for unknown command, got %T", current)
+	}
+	if updated.daemonRevision != 1 {
+		t.Fatalf("daemon revision = %d, want 1", updated.daemonRevision)
 	}
 }
 
@@ -3824,6 +4506,8 @@ func TestRuntimeSignalsForBoardUsesTaskProjectionFields(t *testing.T) {
 			GitAheadCount:         4,
 			GitBehindCount:        1,
 			HasUncommittedChanges: true,
+			HasConflicts:          true,
+			ConflictFiles:         []string{"conflict.go"},
 			GitAdditions:          9,
 			GitDeletions:          2,
 			Session: &domain.Session{
@@ -3845,6 +4529,9 @@ func TestRuntimeSignalsForBoardUsesTaskProjectionFields(t *testing.T) {
 	}
 	if !got.HasUncommittedChanges || got.GitAdditions != 9 || got.GitDeletions != 2 {
 		t.Fatalf("runtime signals = %+v, want git projection fields", got)
+	}
+	if !got.HasConflicts || len(got.ConflictFiles) != 1 || got.ConflictFiles[0] != "conflict.go" {
+		t.Fatalf("runtime signals = %+v, want conflict projection fields", got)
 	}
 }
 
@@ -4163,6 +4850,230 @@ func TestPendingMutationForTaskBuildsOverlayProgress(t *testing.T) {
 	}
 }
 
+func TestLocalGitActivityMarkerBuildsBoardAndDetailProgress(t *testing.T) {
+	m := newTestModel()
+	m.markMergeOperationPreparing("az-1", mergeBaseTargetID, "preparing merge")
+
+	signals := m.runtimeSignalsForBoard()["az-1"]
+	if signals.PendingOperationID != "" {
+		t.Fatalf("pending operation id = %q, want empty before daemon operation", signals.PendingOperationID)
+	}
+	if signals.PendingOperationState != "preparing" {
+		t.Fatalf("pending operation state = %q, want preparing", signals.PendingOperationState)
+	}
+
+	progress := m.pendingMutationForTask("az-1")
+	if progress == nil {
+		t.Fatal("expected detail pending progress")
+	}
+	if progress.OperationID != "" || progress.State != "preparing" || progress.ProgressMessage != "preparing merge" {
+		t.Fatalf("detail progress = %+v", progress)
+	}
+}
+
+func TestHandleSelectionSessionMutationsShowImmediatePendingFeedback(t *testing.T) {
+	tests := []struct {
+		name       string
+		key        string
+		wantAction string
+		wantToast  string
+	}{
+		{name: "start tmux only", key: "s", wantAction: "session_start", wantToast: "Session start queued for az-1"},
+		{name: "start work", key: "S", wantAction: "session_start", wantToast: "Session start queued for az-1"},
+		{name: "start yolo", key: "!", wantAction: "session_start", wantToast: "Session start queued for az-1"},
+		{name: "stop", key: "x", wantAction: "session_stop", wantToast: "Session stop queued for az-1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModel()
+			m.nav.SelectTask("az-1", 0)
+
+			updatedAny, cmd := m.handleSelection(overlay.SelectionMsg{Key: tt.key})
+			if cmd == nil {
+				t.Fatal("expected session mutation command")
+			}
+			updated := updatedAny.(Model)
+
+			pending, ok := updated.pendingStatuses[taskIDKey("az-1")]
+			if !ok {
+				t.Fatal("expected immediate pending mutation marker")
+			}
+			if pending.action != tt.wantAction {
+				t.Fatalf("pending action = %q, want %q", pending.action, tt.wantAction)
+			}
+			if pending.state != protocol.OperationStateQueued {
+				t.Fatalf("pending state = %q, want %q", pending.state, protocol.OperationStateQueued)
+			}
+			if pending.operationID != "" {
+				t.Fatalf("pending operation id = %q, want empty before daemon response", pending.operationID)
+			}
+
+			signals := updated.runtimeSignalsForBoard()
+			if got := signals["az-1"].PendingOperationState; got != string(protocol.OperationStateQueued) {
+				t.Fatalf("board pending state = %q, want %q", got, protocol.OperationStateQueued)
+			}
+			progress := updated.pendingMutationForTask("az-1")
+			if progress == nil || progress.State != string(protocol.OperationStateQueued) {
+				t.Fatalf("pending mutation progress = %+v, want queued", progress)
+			}
+			if len(updated.toasts) == 0 {
+				t.Fatal("expected immediate feedback toast")
+			}
+			if got := updated.toasts[len(updated.toasts)-1].Message; got != tt.wantToast {
+				t.Fatalf("toast = %q, want %q", got, tt.wantToast)
+			}
+			if tt.key == "u" || tt.key == "m" {
+				signals := updated.runtimeSignalsForBoard()["az-1"]
+				if signals.PendingOperationState != "preparing" {
+					t.Fatalf("board pending state = %q, want preparing", signals.PendingOperationState)
+				}
+				progress := updated.pendingMutationForTask("az-1")
+				if progress == nil || progress.State != "preparing" || strings.TrimSpace(progress.ProgressMessage) == "" {
+					t.Fatalf("detail progress = %+v, want preparing marker", progress)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleSelectionAsyncActionsShowImmediateFeedback(t *testing.T) {
+	tests := []struct {
+		name      string
+		key       string
+		wantToast string
+	}{
+		{name: "attach", key: "a", wantToast: "Attach queued for az-1"},
+		{name: "update from base", key: "u", wantToast: "Update from base queued for az-1"},
+		{name: "merge", key: "m", wantToast: "Preparing merge for az-1"},
+		{name: "prepare pr", key: "P", wantToast: "Preparing PR for az-1"},
+		{name: "open pr", key: "O", wantToast: "Opening PR for az-1"},
+		{name: "abort merge", key: "M", wantToast: "Abort merge queued for az-1"},
+		{name: "open helix", key: "H", wantToast: "Opening Helix for az-1"},
+		{name: "cleanup preflight", key: "w", wantToast: "Cleanup preflight queued for az-1"},
+		{name: "delete cleanup preflight", key: "W", wantToast: "Delete + cleanup preflight queued for az-1"},
+		{name: "refresh workspace", key: "r", wantToast: "Refreshing az-1"},
+		{name: "archive tombstone", key: "T", wantToast: "Archive queued for az-1"},
+		{name: "archive delete", key: "d", wantToast: "Archive queued for az-1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModel()
+			m.nav.SelectTask("az-1", 0)
+
+			updatedAny, cmd := m.handleSelection(overlay.SelectionMsg{Key: tt.key})
+			if cmd == nil {
+				t.Fatal("expected async command")
+			}
+			updated := updatedAny.(Model)
+			if len(updated.toasts) == 0 {
+				t.Fatal("expected immediate feedback toast")
+			}
+			if got := updated.toasts[len(updated.toasts)-1].Message; got != tt.wantToast {
+				t.Fatalf("toast = %q, want %q", got, tt.wantToast)
+			}
+		})
+	}
+}
+
+func TestHandleNormalModeAttachShortcutQueuesSelectedIssueAttach(t *testing.T) {
+	m := newTestModel()
+	m.nav.SelectTask("az-3", 1)
+
+	updatedAny, cmd := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if cmd == nil {
+		t.Fatal("expected attach command")
+	}
+	updated := updatedAny.(Model)
+	if len(updated.toasts) == 0 {
+		t.Fatal("expected immediate feedback toast")
+	}
+	if got := updated.toasts[len(updated.toasts)-1].Message; got != "Attach queued for az-3" {
+		t.Fatalf("toast = %q, want %q", got, "Attach queued for az-3")
+	}
+}
+
+func TestHandleBulkActionShowsImmediateFeedback(t *testing.T) {
+	tests := []struct {
+		name      string
+		action    string
+		wantToast string
+	}{
+		{name: "move left", action: "h", wantToast: "Bulk move queued for 2 task(s)"},
+		{name: "move right", action: "l", wantToast: "Bulk move queued for 2 task(s)"},
+		{name: "open", action: "o", wantToast: "Bulk status update queued for 2 task(s)"},
+		{name: "in progress", action: "i", wantToast: "Bulk status update queued for 2 task(s)"},
+		{name: "blocked", action: "b", wantToast: "Bulk status update queued for 2 task(s)"},
+		{name: "done", action: "D", wantToast: "Bulk status update queued for 2 task(s)"},
+		{name: "delete", action: "d", wantToast: "Bulk delete queued for 2 task(s)"},
+		{name: "archive", action: "a", wantToast: "Bulk archive queued for 2 task(s)"},
+		{name: "cleanup", action: "w", wantToast: "Bulk cleanup preflight queued for 2 task(s)"},
+		{name: "delete cleanup", action: "W", wantToast: "Bulk delete + cleanup preflight queued for 2 task(s)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModel()
+			updatedAny, cmd := m.handleBulkAction(overlay.BulkActionMsg{
+				Action:      tt.action,
+				SelectedIDs: []string{"az-1", "az-2"},
+			})
+			if cmd == nil {
+				t.Fatal("expected bulk command")
+			}
+			updated := updatedAny.(Model)
+			if len(updated.toasts) == 0 {
+				t.Fatal("expected immediate feedback toast")
+			}
+			if got := updated.toasts[len(updated.toasts)-1].Message; got != tt.wantToast {
+				t.Fatalf("toast = %q, want %q", got, tt.wantToast)
+			}
+		})
+	}
+}
+
+func TestSubmittedOverlayMutationsShowImmediateFeedback(t *testing.T) {
+	t.Run("create task", func(t *testing.T) {
+		m := newTestModel()
+
+		updatedAny, cmd := m.Update(overlay.TaskCreatedMsg{Title: "New task"})
+		if cmd == nil {
+			t.Fatal("expected save command")
+		}
+		updated := updatedAny.(Model)
+		if got := updated.toasts[len(updated.toasts)-1].Message; got != "Creating task" {
+			t.Fatalf("toast = %q, want Creating task", got)
+		}
+	})
+
+	t.Run("edit task", func(t *testing.T) {
+		m := newTestModel()
+
+		updatedAny, cmd := m.Update(overlay.TaskCreatedMsg{ID: "az-1", Title: "Updated"})
+		if cmd == nil {
+			t.Fatal("expected save command")
+		}
+		updated := updatedAny.(Model)
+		if got := updated.toasts[len(updated.toasts)-1].Message; got != "Saving task az-1" {
+			t.Fatalf("toast = %q, want Saving task az-1", got)
+		}
+	})
+
+	t.Run("create pr", func(t *testing.T) {
+		m := newTestModel()
+
+		updatedAny, cmd := m.Update(overlay.PRCreatedMsg{})
+		if cmd == nil {
+			t.Fatal("expected pr create command")
+		}
+		updated := updatedAny.(Model)
+		if got := updated.toasts[len(updated.toasts)-1].Message; got != "Creating PR" {
+			t.Fatalf("toast = %q, want Creating PR", got)
+		}
+	})
+}
+
 func TestSessionStartedPendingMarksBoardAndDetailProgress(t *testing.T) {
 	m := newTestModel()
 	m.tasks = []domain.Task{
@@ -4192,6 +5103,12 @@ func TestSessionStartedPendingMarksBoardAndDetailProgress(t *testing.T) {
 	if pending.state != protocol.OperationStateQueued {
 		t.Fatalf("pending state = %q, want %q", pending.state, protocol.OperationStateQueued)
 	}
+	if pending.targetStatus != domain.StatusInProgress {
+		t.Fatalf("pending target status = %q, want %q", pending.targetStatus, domain.StatusInProgress)
+	}
+	if updated.tasks[0].Status != domain.StatusInProgress {
+		t.Fatalf("task status = %q, want optimistic %q", updated.tasks[0].Status, domain.StatusInProgress)
+	}
 
 	signals := updated.runtimeSignalsForBoard()
 	got := signals["az-1"]
@@ -4212,8 +5129,8 @@ func TestSessionStartedPendingMarksBoardAndDetailProgress(t *testing.T) {
 	if progress.OperationID != "op-session" {
 		t.Fatalf("progress operation id = %q, want %q", progress.OperationID, "op-session")
 	}
-	if progress.TargetStatus != "" {
-		t.Fatalf("progress target status = %q, want empty", progress.TargetStatus)
+	if progress.TargetStatus != domain.StatusInProgress {
+		t.Fatalf("progress target status = %q, want %q", progress.TargetStatus, domain.StatusInProgress)
 	}
 }
 
@@ -4235,6 +5152,32 @@ func TestApplyPendingStatusOverlaysIgnoresNonStatusPending(t *testing.T) {
 
 	if m.tasks[0].Status != domain.StatusOpen {
 		t.Fatalf("task status = %q, want %q", m.tasks[0].Status, domain.StatusOpen)
+	}
+}
+
+func TestSessionStartPendingSurvivesPartialInProgressSnapshot(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+	m.markTaskOperationPending("az-1", "session_start", "op-session", protocol.OperationStateQueued)
+
+	updatedAny, _ := m.Update(issuesLoadedMsg{
+		tasks: []domain.Task{
+			{ID: "az-1", Title: "Task", Status: domain.StatusInProgress, Priority: domain.P2, Type: domain.TypeTask},
+		},
+	})
+	updated := updatedAny.(Model)
+
+	if _, ok := updated.pendingStatuses[taskIDKey("az-1")]; !ok {
+		t.Fatal("expected session_start pending marker to survive in_progress snapshot without session")
+	}
+	if updated.tasks[0].Status != domain.StatusInProgress {
+		t.Fatalf("task status = %q, want %q", updated.tasks[0].Status, domain.StatusInProgress)
+	}
+	progress := updated.pendingMutationForTask("az-1")
+	if progress == nil || progress.OperationID != "op-session" || progress.State != string(protocol.OperationStateQueued) {
+		t.Fatalf("pending mutation progress = %+v", progress)
 	}
 }
 

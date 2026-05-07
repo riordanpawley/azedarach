@@ -29,14 +29,13 @@ This directory primarily contains **developer/internal documentation**.
 - For `projection` and `hybrid`, refresh in-memory cache from durable SQLite projections, then evaluate from the refreshed cache.
 - For `tmux`, use live tmux runtime as source of truth (do not infer runtime presence from projection alone).
 - Current source-policy examples:
-- `session.start` conflict / `session.attach` target / `session.stop` kill targets: `tmux`.
+- `session.start` conflict / `session.attach` target / `session.stop` targets: `tmux`.
 - `session.recover` reconciliation: `hybrid` (projection intent + tmux runtime).
 - `task.list` freshness/session timestamps: `projection` (refresh-then-cache).
 - `runtime.reconcile` includes `invariant_sources` debug output reflecting the active source-policy matrix.
 - Treat this as the required cross-daemon safety contract for session/worktree/runtime invariants.
 
-## Generated Spec Docs
+## Spec Records
 
-- `az spec sync --target md` generates deterministic Markdown under `docs/spec/`.
-- When `docs/spec/` is present, treat it as the spec source of truth for synced command grammar/status.
-- [spec/README.md](spec/README.md)
+- `az spec read --json` reads daemon-backed requirement/link records.
+- Markdown spec export is disabled until it can export the real stored spec data.

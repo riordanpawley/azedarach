@@ -163,7 +163,7 @@ func (m Model) recoverAsyncFailureCmd(notification asyncRecoveryNotification) te
 			return nil
 		}
 		if notification.TargetID == "" || notification.TargetID == "main" {
-			return m.resolveMergeToMainCmd(notification.SourceID, true)
+			return m.resolveMergeToBaseCmd(notification.SourceID, true)
 		}
 		return m.resolveFollowOnMergeCmd(notification.SourceID, notification.TargetID, domain.SessionIdle, false, true)
 	default:

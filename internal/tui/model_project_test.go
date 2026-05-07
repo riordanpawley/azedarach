@@ -2,15 +2,19 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
@@ -326,6 +330,95 @@ func TestProjectSwitchFailureRetainsPreviousBoardState(t *testing.T) {
 	}
 	if len(updated.tasks) != 1 || updated.tasks[0].ID != "old-1" {
 		t.Fatalf("tasks = %+v, want previous board tasks retained after switch failure", updated.tasks)
+	}
+}
+
+func TestCrossProjectUICommandStartsProjectSwitch(t *testing.T) {
+	alphaPath := t.TempDir()
+	betaPath := t.TempDir()
+	m := newTestModel()
+	m.currentProject = "alpha"
+	m.repoDir = alphaPath
+	m.projectRegistry = &config.ProjectsRegistry{
+		Projects: []config.Project{
+			{Name: "alpha", Path: alphaPath},
+			{Name: "beta", Path: betaPath},
+		},
+	}
+	betaProjectID := daemonProjectIDForPath(betaPath)
+	body, err := json.Marshal(protocol.UICommandEventBody{
+		ProjectID: naming.ProjectID(betaProjectID),
+		IssueID:   "che-1",
+		Command:   protocol.UICommandOpenTaskWorkspace,
+		RequestID: "req-cross-project",
+		CreatedAt: time.Date(2026, time.May, 6, 12, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("marshal ui command: %v", err)
+	}
+
+	next, cmd := m.Update(logStreamEventMsg{
+		event: protocol.EventEnvelope{
+			ProjectID: naming.ProjectID(betaProjectID),
+			Revision:  7,
+			Event:     protocol.EventUICommandRequested,
+			Body:      body,
+		},
+	})
+	updated := next.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected project switch command for cross-project ui command")
+	}
+	if !updated.projectSwitchInFlight {
+		t.Fatal("expected project switch to be in flight")
+	}
+	if got := updated.pendingUIOpenTaskID; got != "che-1" {
+		t.Fatalf("pendingUIOpenTaskID = %q, want che-1", got)
+	}
+	if updated.currentProject != "alpha" {
+		t.Fatalf("currentProject = %q, want alpha until switch completes", updated.currentProject)
+	}
+}
+
+func TestProjectSwitchResultOpensPendingUICommandWorkspace(t *testing.T) {
+	betaPath := t.TempDir()
+	m := newTestModel()
+	m.daemonRevision = 99
+	m.pendingUIOpenTaskID = "che-1"
+	m.projectSwitchInFlight = true
+
+	next, cmd := m.Update(projectSwitchResultMsg{
+		project: config.Project{
+			Name: "beta",
+			Path: betaPath,
+		},
+		projectConfig: &config.Config{},
+		tasks: []domain.Task{
+			{ID: "che-1", Title: "Cross project task", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		},
+		revision: 7,
+	})
+	updated := next.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected command batch after project switch")
+	}
+	if updated.pendingUIOpenTaskID != "" {
+		t.Fatalf("pendingUIOpenTaskID = %q, want cleared", updated.pendingUIOpenTaskID)
+	}
+	workspace, ok := updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("overlay = %T, want TaskWorkspaceOverlay", updated.overlayStack.Current())
+	}
+	if workspace.TaskID() != "che-1" {
+		t.Fatalf("workspace task = %q, want che-1", workspace.TaskID())
+	}
+	if updated.currentProject != "beta" {
+		t.Fatalf("currentProject = %q, want beta", updated.currentProject)
+	}
+	if updated.daemonRevision != 7 {
+		t.Fatalf("daemonRevision = %d, want project switch snapshot revision 7", updated.daemonRevision)
 	}
 }
 

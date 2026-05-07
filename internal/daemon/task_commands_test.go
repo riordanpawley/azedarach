@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -389,6 +390,85 @@ func TestTaskListSnapshotFreshnessMarksStaleProjection(t *testing.T) {
 	}
 }
 
+func TestRefreshWorktreeRuntimeStateForIssuesDoesNotPublishUnchangedGitStatus(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+
+	const (
+		projectID = "proj-refresh-issue"
+		issueID   = "az-1"
+		worktree  = "/tmp/proj-refresh-issue-az-1"
+		branch    = "riordan/az-1/refresh"
+	)
+	status := cleanGitStatus()
+	rawStatus, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), logger)
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	if err := runtimeStateStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   issueID,
+		Path:      worktree,
+		Branch:    branch,
+		UpdatedAt: time.Date(2026, time.April, 2, 11, 1, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+	if err := runtimeStateStore.UpsertWorktreeStateGitStatus(ctx, projectID, issueID, rawStatus, time.Date(2026, time.April, 2, 11, 2, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("seed git status projection: %v", err)
+	}
+
+	runner := &recordingGitRunner{
+		runFn: func(args ...string) (string, error) {
+			switch {
+			case len(args) == 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain":
+				return "worktree " + worktree + "\nbranch refs/heads/" + branch + "\n\n", nil
+			case len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "status" && args[3] == "--porcelain":
+				return "", nil
+			case len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "symbolic-ref":
+				return "origin/main\n", nil
+			case len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "merge-base":
+				return "merge-base-sha\n", nil
+			case len(args) >= 7 && args[0] == "-C" && args[1] == worktree && args[2] == "diff" && args[3] == "--shortstat":
+				return "", nil
+			case len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "rev-list":
+				return "0\n", nil
+			default:
+				t.Fatalf("unexpected git args: %v", args)
+				return "", nil
+			}
+		},
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: ".", BaseBranch: "main", Logger: logger},
+		hub: publish.NewHub(16, 8, logger),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(runner, ".", logger),
+		},
+		git: git.NewClient(runner, logger),
+	}
+
+	ch, cancel := d.hub.Subscribe(projectID, 0)
+	defer cancel()
+
+	if _, err := d.refreshWorktreeRuntimeStateForIssues(ctx, projectID, []string{issueID}); err != nil {
+		t.Fatalf("refreshWorktreeRuntimeStateForIssues: %v", err)
+	}
+	cancel()
+	for evt := range ch {
+		if evt.Event == protocol.EventGitStatusUpdated {
+			t.Fatalf("unexpected unchanged git status event: %+v", evt)
+		}
+	}
+}
+
 func TestTaskListSnapshotFreshnessRefreshesSessionCacheBeforeEvaluation(t *testing.T) {
 	originalNow := timeNow
 	t.Cleanup(func() {
@@ -592,6 +672,153 @@ func TestHandleTaskSnapshotExportUsesProjectionSessions(t *testing.T) {
 	}
 }
 
+func TestHandleTaskGetRefreshesOnlyRequestedIssueWorktree(t *testing.T) {
+	ctx := context.Background()
+	projectID := protocol.DefaultProjectID
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	targetID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "target issue",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create target issue: %v", err)
+	}
+	otherID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "other issue",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create other issue: %v", err)
+	}
+
+	targetWorktree := filepath.Join(repoDir, "target-worktree")
+	otherWorktree := filepath.Join(repoDir, "other-worktree")
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	for _, row := range []daemonstate.WorktreeState{
+		{ProjectID: projectID, IssueID: targetID, Path: targetWorktree, Branch: "az/" + targetID, UpdatedAt: time.Now().UTC()},
+		{ProjectID: projectID, IssueID: otherID, Path: otherWorktree, Branch: "az/" + otherID, UpdatedAt: time.Now().UTC()},
+	} {
+		if err := store.UpsertWorktreeState(ctx, row); err != nil {
+			t.Fatalf("seed worktree state: %v", err)
+		}
+	}
+
+	statusPaths := make(chan string, 4)
+	statusRelease := make(chan struct{})
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		if len(args) >= 4 && args[0] == "-C" && args[2] == "status" && args[3] == "--porcelain" {
+			statusPaths <- args[1]
+			<-statusRelease
+			return " M changed.go\n", nil
+		}
+		return "", nil
+	}}
+	queue := newReconcileQueue[*git.GitStatus](reconcileQueueConfig{
+		Name:    "test_git_status_refresh",
+		Workers: 1,
+		Logger:  slog.Default(),
+	})
+	t.Cleanup(func() { _ = queue.Close() })
+	gitAdapter := &gitServiceAdapter{
+		client:             git.NewClient(runner, slog.Default()),
+		runtimeStateStore:  store,
+		statusRefreshQueue: queue,
+		logger:             slog.Default(),
+		baseBranch:         "main",
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return store
+		},
+	}
+	d := &Daemon{
+		cfg:              Config{BaseBranch: "main", Logger: slog.Default()},
+		issues:           issuesClient,
+		gitStatusAdapter: gitAdapter,
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+	}
+
+	reqBody, err := json.Marshal(map[string]string{"task_id": targetID})
+	if err != nil {
+		t.Fatalf("marshal task get request: %v", err)
+	}
+	type taskGetResult struct {
+		resp protocol.ResponseEnvelope
+		err  error
+	}
+	resultCh := make(chan taskGetResult, 1)
+	go func() {
+		resp, err := d.handleTaskGet(ctx, protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-task-get-refresh",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         "task.get",
+			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+			Body:            reqBody,
+		})
+		resultCh <- taskGetResult{resp: resp, err: err}
+	}()
+
+	select {
+	case got := <-statusPaths:
+		if got != targetWorktree {
+			t.Fatalf("refreshed worktree = %q, want %q", got, targetWorktree)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for target issue worktree refresh")
+	}
+
+	select {
+	case result := <-resultCh:
+		t.Fatalf("task.get returned before git status refresh completed: %+v", result.resp)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(statusRelease)
+
+	var result taskGetResult
+	select {
+	case result = <-resultCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for task.get result after git status refresh")
+	}
+	if result.err != nil {
+		t.Fatalf("handleTaskGet returned error: %v", result.err)
+	}
+	if !result.resp.OK {
+		t.Fatalf("task.get response not OK: %+v", result.resp.Error)
+	}
+
+	payload, err := protocol.DecodeTaskListSnapshotPayload(result.resp.Body)
+	if err != nil {
+		t.Fatalf("decode task.get body: %v", err)
+	}
+	if len(payload.Tasks) != 1 {
+		t.Fatalf("response task count = %d, want 1", len(payload.Tasks))
+	}
+	if !payload.Tasks[0].HasUncommittedChanges {
+		t.Fatalf("response task git state was not refreshed: %+v", payload.Tasks[0])
+	}
+	if payload.Tasks[0].GitAdditions != 1 {
+		t.Fatalf("response git additions = %d, want 1", payload.Tasks[0].GitAdditions)
+	}
+
+	select {
+	case got := <-statusPaths:
+		t.Fatalf("unexpected extra worktree refresh for %q", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestRefreshWorktreeRuntimeStatePersistsGitMetricsFromWorktreeList(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-refresh-worktrees"
@@ -660,5 +887,66 @@ func TestRefreshWorktreeRuntimeStatePersistsGitMetricsFromWorktreeList(t *testin
 	}
 	if status.GitAheadCount != 2 || status.GitBehindCount != 5 {
 		t.Fatalf("persisted git ahead/behind = %d/%d, want 2/5", status.GitAheadCount, status.GitBehindCount)
+	}
+}
+
+func TestRefreshWorktreeRuntimeStateMutationDoesNotBypassGitProbeBudget(t *testing.T) {
+	ctx := context.WithValue(context.Background(), runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
+		Priority: reconcilePriorityManual,
+		Reason:   "mutation:session.stop",
+	})
+	projectID := "proj-refresh-budget"
+	statusCalls := 0
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain":
+			return "worktree /tmp/repo-root\nbranch refs/heads/main\n\n" +
+				"worktree /tmp/repo-az-1\nbranch refs/heads/az/az-1\n\n" +
+				"worktree /tmp/repo-az-2\nbranch refs/heads/az/az-2\n", nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "status" && args[3] == "--porcelain":
+			statusCalls++
+			return "", nil
+		default:
+			return "", nil
+		}
+	}}
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+
+	now := time.Date(2026, time.May, 6, 12, 0, 0, 0, time.UTC)
+	d := &Daemon{
+		cfg: Config{RepoDir: "/tmp/repo-root", BaseBranch: "main", Logger: slog.Default()},
+		git: git.NewClient(runner, slog.Default()),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			"/tmp/repo-root": store,
+		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			"/tmp/repo-root": git.NewWorktreeManager(runner, "/tmp/repo-root", slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(runner, "/tmp/repo-root", slog.Default()),
+		},
+		worktreeGitProbeThrottle: newReconcileThrottle(reconcileThrottleConfig{
+			Name:                 "worktree_git_probe_test",
+			Budget:               1,
+			Cadence:              time.Hour,
+			UnchangedBackoffBase: time.Hour,
+			UnchangedBackoffMax:  time.Hour,
+			FailureBackoffBase:   time.Hour,
+			FailureBackoffMax:    time.Hour,
+			Now:                  func() time.Time { return now },
+		}),
+	}
+
+	count, err := d.refreshWorktreeRuntimeState(ctx, projectID)
+	if err != nil {
+		t.Fatalf("refreshWorktreeRuntimeState error: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("refreshWorktreeRuntimeState count = %d, want 2", count)
+	}
+	if statusCalls != 1 {
+		t.Fatalf("status calls = %d, want 1", statusCalls)
 	}
 }

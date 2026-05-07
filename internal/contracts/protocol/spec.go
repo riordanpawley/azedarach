@@ -14,6 +14,7 @@ const (
 	CommandSpecRead              = "spec.read"
 	CommandSpecLint              = "spec.lint"
 	CommandSpecParity            = "spec.parity"
+	CommandSpecExport            = "spec.export"
 	CommandSpecSync              = "spec.sync"
 	CommandSpecSyncMD            = "spec.sync_md"
 )

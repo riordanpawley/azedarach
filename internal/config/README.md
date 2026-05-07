@@ -4,18 +4,21 @@ Comprehensive configuration system for the Go Bubbletea Azedarach rewrite.
 
 ## Features
 
-- **Hierarchical Configuration Loading**: Loads from multiple sources with priority
+- **Layered Configuration Loading**: Loads committed workspace config plus optional local overrides
 - **Sensible Defaults**: All fields have reasonable default values
-- **Flexible Storage**: Supports `.azedarach/config.json` or `package.json` "azedarach" key
+- **Flexible Storage**: Supports `.azedarach/config.json` and optional `.azedarach/config.local.json`
 - **Type Safety**: Strongly typed configuration with Go structs
-- **Easy Merging**: Automatically merges partial configs with defaults
+- **Easy Merging**: Automatically merges partial configs with defaults and local overrides
 
 ## Configuration Loading Priority
 
 1. CLI flags (not implemented yet)
-2. `.azedarach/config.json` in project root
-3. `package.json` "azedarach" key
+2. `.azedarach/config.local.json` in project root
+3. `.azedarach/config.json` in project root
 4. Built-in defaults
+
+Objects are deep-merged between layers. Scalars and arrays replace the value
+from the lower-priority layer.
 
 ## Usage
 
@@ -151,7 +154,7 @@ type WorktreeConfig struct {
 
 ### .azedarach/config.json
 
-Create a `.azedarach/config.json` file in your project root:
+Create a committed `.azedarach/config.json` file in your project root:
 
 ```json
 {
@@ -173,18 +176,19 @@ Create a `.azedarach/config.json` file in your project root:
 }
 ```
 
-### package.json
+### .azedarach/config.local.json
 
-Or add an "azedarach" key to your `package.json`:
+Create an optional local-only `.azedarach/config.local.json` file for machine or
+developer-specific overrides. It is loaded after `.azedarach/config.json`:
 
 ```json
 {
-  "name": "my-project",
-  "version": "1.0.0",
-  "azedarach": {
-    "cliTool": "claude",
-    "git": {
-      "baseBranch": "develop"
+  "session": {
+    "shell": "bash"
+  },
+  "devServer": {
+    "environments": {
+      "LOCAL_ONLY": "true"
     }
   }
 }
@@ -217,7 +221,7 @@ go test ./internal/config/...
 Tests cover:
 - Default configuration
 - Loading from `.azedarach/config.json`
-- Loading from `package.json`
+- Loading from `.azedarach/config.local.json`
 - Configuration priority
 - Saving configuration
 - Merging with defaults

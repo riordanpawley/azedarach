@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -41,8 +42,15 @@ func (r *recordingGitRunner) Run(_ context.Context, args ...string) (string, err
 func newGitAdapterStore(t *testing.T, projectID, issueID, worktree string, status *git.GitStatus) *daemonstate.RuntimeStateStore {
 	t.Helper()
 
-	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projections.db"), slog.Default())
-	t.Cleanup(func() { _ = store.Close() })
+	dir, err := os.MkdirTemp("", "azedarach-git-adapter-*")
+	if err != nil {
+		t.Fatalf("create runtime state temp dir: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(dir, "projections.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = store.Close()
+		_ = os.RemoveAll(dir)
+	})
 
 	ctx := context.Background()
 	if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{

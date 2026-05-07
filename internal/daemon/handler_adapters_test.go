@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -265,10 +266,53 @@ branch refs/heads/riordan/bvx/worktree-delete
 	}
 }
 
+func TestWorktreeServiceAdapterCreateUsesIssueScopedRuntimeFreshness(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	repoDir := t.TempDir()
+	runner := &staticWorktreeListRunner{
+		output: `worktree ` + repoDir + `
+HEAD abc123
+branch refs/heads/main
+`,
+	}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	var issueFreshCalls []string
+	adapter := &worktreeServiceAdapter{
+		manager: manager,
+		logger:  logger,
+		ensureRuntimeFreshForMutation: func(context.Context, string, string) error {
+			return errors.New("project-wide runtime freshness should not run for targeted worktree create")
+		},
+		ensureRuntimeFreshForIssueMutation: func(_ context.Context, projectID, issueID, reason string) error {
+			issueFreshCalls = append(issueFreshCalls, projectID+":"+issueID+":"+reason)
+			return nil
+		},
+	}
+
+	wt, err := adapter.Create(context.Background(), "proj", "bvx", "main")
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if wt == nil || wt.IssueID != "bvx" {
+		t.Fatalf("worktree = %+v, want issue bvx", wt)
+	}
+	wantFreshCalls := []string{"proj:bvx:" + daemonhandlers.CommandWorktreeCreate}
+	if strings.Join(issueFreshCalls, "\n") != strings.Join(wantFreshCalls, "\n") {
+		t.Fatalf("issue-scoped freshness calls = %v, want %v", issueFreshCalls, wantFreshCalls)
+	}
+}
+
 func TestWorktreeServiceAdapterListUsesProjectionOnlyWhenRuntimeStoreAvailable(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), logger)
-	t.Cleanup(func() { _ = store.Close() })
+	dir, err := os.MkdirTemp("", "azedarach-worktree-adapter-*")
+	if err != nil {
+		t.Fatalf("create runtime state temp dir: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(dir, "projection.db"), logger)
+	t.Cleanup(func() {
+		_ = store.Close()
+		_ = os.RemoveAll(dir)
+	})
 
 	runner := &countingWorktreeListRunner{}
 	manager := git.NewWorktreeManager(runner, t.TempDir(), logger)
@@ -292,8 +336,11 @@ func TestWorktreeServiceAdapterListUsesProjectionOnlyWhenRuntimeStoreAvailable(t
 
 func TestWorktreeServiceAdapterPollerRefreshesProjection(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), logger)
-	t.Cleanup(func() { _ = store.Close() })
+	dir, err := os.MkdirTemp("", "azedarach-worktree-poller-*")
+	if err != nil {
+		t.Fatalf("create runtime state temp dir: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(dir, "projection.db"), logger)
 
 	projectID := "proj"
 	if err := store.UpsertWorktreeState(context.Background(), daemonstate.WorktreeState{
@@ -319,6 +366,15 @@ branch refs/heads/main
 		logger:            logger,
 		pollInterval:      20 * time.Millisecond,
 	}
+	t.Cleanup(func() {
+		adapter.mu.Lock()
+		for _, cancel := range adapter.pollers {
+			cancel()
+		}
+		adapter.mu.Unlock()
+		_ = store.Close()
+		_ = os.RemoveAll(dir)
+	})
 
 	adapter.ensureBackgroundPoller(projectID)
 

@@ -121,16 +121,27 @@ func (m *LockManager) tryCreateLock() error {
 		return fmt.Errorf("marshal lock record: %w", err)
 	}
 
-	f, err := os.OpenFile(m.path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	dir := filepath.Dir(m.path)
+	tmp, err := os.CreateTemp(dir, ".daemon.lock-*")
 	if err != nil {
+		return fmt.Errorf("create temp lock record: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = os.Remove(tmpPath)
+	}()
+	if _, err := tmp.Write(append(b, '\n')); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write lock record: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close lock record: %w", err)
+	}
+	if err := os.Link(tmpPath, m.path); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return ErrAlreadyRunning
 		}
 		return err
-	}
-	defer f.Close()
-	if _, err := f.Write(append(b, '\n')); err != nil {
-		return fmt.Errorf("write lock record: %w", err)
 	}
 	return nil
 }

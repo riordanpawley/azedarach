@@ -14,20 +14,21 @@ import (
 )
 
 const (
-	CommandSessionStart          = "session.start"
-	CommandSessionAttach         = "session.attach"
-	CommandSessionPause          = "session.pause"
-	CommandSessionResume         = "session.resume"
-	CommandSessionStop           = "session.stop"
-	CommandSessionStatus         = "session.status"
-	CommandRuntimeReconcile      = "runtime.reconcile"
-	CommandRuntimeReconcileIssue = "runtime.reconcile_issue"
-	CommandDevServerStart        = "devserver.start"
-	CommandDevServerStop         = "devserver.stop"
-	CommandDevServerStatus       = "devserver.status"
-	CommandDevServerList         = "devserver.list"
-	CommandWorktreeList          = "worktree.list"
-	CommandWorktreeRemove        = "worktree.remove"
+	CommandSessionStart           = "session.start"
+	CommandSessionAttach          = "session.attach"
+	CommandSessionPause           = "session.pause"
+	CommandSessionResume          = "session.resume"
+	CommandSessionStop            = "session.stop"
+	CommandSessionStatus          = "session.status"
+	CommandSessionResolveConflict = protocol.CommandSessionResolveConflict
+	CommandRuntimeReconcile       = "runtime.reconcile"
+	CommandRuntimeReconcileIssue  = "runtime.reconcile_issue"
+	CommandDevServerStart         = "devserver.start"
+	CommandDevServerStop          = "devserver.stop"
+	CommandDevServerStatus        = "devserver.status"
+	CommandDevServerList          = "devserver.list"
+	CommandWorktreeList           = "worktree.list"
+	CommandWorktreeRemove         = "worktree.remove"
 )
 
 type sessionCommandBody struct {
@@ -47,6 +48,15 @@ type StartSessionParams struct {
 	Yolo       bool
 	StartWork  *bool
 	ImagePaths []string
+}
+
+type ResolveConflictParams struct {
+	IssueID       string
+	Worktree      string
+	ConflictFiles []string
+	Yolo          bool
+	ImagePaths    []string
+	Prompt        string
 }
 
 type commandOutputBody struct {
@@ -205,6 +215,28 @@ func (c *Client) SessionStatus(ctx context.Context, issueID string) (string, err
 		ProjectID: c.projectID,
 		SessionID: sessionID,
 	})
+}
+
+// ResolveConflict asks the daemon to launch an agent in the issue session's
+// dedicated conflict-resolution tmux window.
+func (c *Client) ResolveConflict(ctx context.Context, params ResolveConflictParams) (protocol.SessionResolveConflictResponseBody, error) {
+	issueID, err := parseIssueID(params.IssueID)
+	if err != nil {
+		return protocol.SessionResolveConflictResponseBody{}, err
+	}
+	var out protocol.SessionResolveConflictResponseBody
+	if err := c.commandJSON(ctx, CommandSessionResolveConflict, protocol.SessionResolveConflictRequestBody{
+		ProjectID:     c.projectID,
+		IssueID:       issueID,
+		Worktree:      params.Worktree,
+		ConflictFiles: append([]string(nil), params.ConflictFiles...),
+		Yolo:          params.Yolo,
+		ImagePaths:    append([]string(nil), params.ImagePaths...),
+		Prompt:        params.Prompt,
+	}, &out); err != nil {
+		return protocol.SessionResolveConflictResponseBody{}, err
+	}
+	return out, nil
 }
 
 // ReconcileRuntime asks the daemon to repair runtime, session, and worktree consistency for the current project route.
