@@ -1679,6 +1679,81 @@ func TestSessionPauseResumeUseIssueScopedRuntimeReconcile(t *testing.T) {
 	}
 }
 
+func TestSessionPauseResumeSkipRuntimeReconcileWhenLifecycleUnchanged(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	tests := []struct {
+		name    string
+		state   daemonstate.SessionState
+		command string
+		handle  func(*Daemon, context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	}{
+		{
+			name:    "pause already paused",
+			state:   daemonstate.SessionStatePaused,
+			command: daemonhandlers.CommandSessionPause,
+			handle:  (*Daemon).handleSessionPause,
+		},
+		{
+			name:    "resume already attached",
+			state:   daemonstate.SessionStateAttached,
+			command: daemonhandlers.CommandSessionResume,
+			handle:  (*Daemon).handleSessionResume,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := daemonstate.NewStore()
+			if _, err := store.UpsertSession(projectID, sessionID, issueID, tt.state); err != nil {
+				t.Fatalf("seed session: %v", err)
+			}
+			recorder := &runtimeReconcileRecorder{}
+			daemon := &Daemon{
+				cfg: Config{
+					RepoDir: ".",
+					Logger:  slog.Default(),
+				},
+				session:           daemonhandlers.NewSessionHandler(store),
+				sessionStore:      store,
+				runtimeReconciler: recorder,
+			}
+
+			resp, err := tt.handle(daemon, context.Background(), protocol.RequestEnvelope{
+				ProtocolVersion: protocol.CurrentVersion,
+				RequestID:       "req-noop-lifecycle",
+				Kind:            protocol.EnvelopeKindCommand,
+				Command:         tt.command,
+				Meta: protocol.Metadata{
+					ProjectID: naming.ProjectID(projectID),
+				},
+				Body: marshalJSON(map[string]string{
+					"project_id": projectID,
+					"session_id": issueID,
+				}),
+			})
+			if err != nil {
+				t.Fatalf("handler returned error: %v", err)
+			}
+			if !resp.OK {
+				t.Fatalf("response not ok: %+v", resp.Error)
+			}
+			if got := store.CurrentRevision(projectID); got != 1 {
+				t.Fatalf("store revision = %d, want unchanged revision 1", got)
+			}
+			calls, projectIDs := recorder.snapshot()
+			if calls != 0 {
+				t.Fatalf("runtime reconcile calls = %d, want 0", calls)
+			}
+			if len(projectIDs) != 0 {
+				t.Fatalf("runtime reconcile project ids = %v, want none", projectIDs)
+			}
+		})
+	}
+}
+
 func TestHandleSessionStopDirectDoesNotWaitForRuntimeFreshness(t *testing.T) {
 	const (
 		projectID = "proj"
