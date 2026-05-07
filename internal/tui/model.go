@@ -4754,6 +4754,9 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	conflictFiles := make([]string, 0, 8)
 
 	statusForWorktree := func(worktree string) (daemonclient.GitStatus, error) {
+		if refreshStatus {
+			return m.daemonClient.GitStatusRefresh(ctx, worktree)
+		}
 		return m.daemonClient.GitStatus(ctx, worktree)
 	}
 

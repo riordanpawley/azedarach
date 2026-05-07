@@ -2954,6 +2954,7 @@ func TestCheckMergePreflightDoesNotBlockUntrackedOnlyStatus(t *testing.T) {
 
 func TestCheckMergePreflightReconcilesRuntimeWhenRefreshFlagTrue(t *testing.T) {
 	var reconcileBody protocol.RuntimeReconcileIssueRequestBody
+	var statusBodies []map[string]any
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
@@ -2973,6 +2974,11 @@ func TestCheckMergePreflightReconcilesRuntimeWhenRefreshFlagTrue(t *testing.T) {
 					Body:            respBody,
 				}, nil
 			case daemonclient.CommandGitStatus:
+				var body map[string]any
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal git status body: %v", err)
+				}
+				statusBodies = append(statusBodies, body)
 				respBody, err := json.Marshal(struct {
 					Status git.GitStatus `json:"status"`
 				}{Status: git.GitStatus{HasChanges: false}})
@@ -3020,6 +3026,14 @@ func TestCheckMergePreflightReconcilesRuntimeWhenRefreshFlagTrue(t *testing.T) {
 	}
 	if got := reconcileBody.IssueIDs[0].String(); got != "az-source" {
 		t.Fatalf("reconcile issue ID = %q, want az-source", got)
+	}
+	if len(statusBodies) != 2 {
+		t.Fatalf("git status bodies = %+v, want 2", statusBodies)
+	}
+	for _, body := range statusBodies {
+		if body["refresh"] != true {
+			t.Fatalf("git status body = %+v, want refresh=true", body)
+		}
 	}
 }
 
