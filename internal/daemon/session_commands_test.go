@@ -2797,18 +2797,14 @@ func TestResolveSessionIssuePrefersExactID(t *testing.T) {
 	}
 }
 
-func TestResolveSessionIssueFallsBackToFirstResult(t *testing.T) {
+func TestResolveSessionIssueRejectsFuzzyOnlyResults(t *testing.T) {
 	tasks := []domain.Task{
 		{ID: "bgr", Title: "first result"},
 		{ID: "bfs", Title: "second result"},
 	}
 
-	got, ok := resolveSessionIssue(tasks, "missing")
-	if !ok {
-		t.Fatal("resolveSessionIssue returned not found, want fallback to first result")
-	}
-	if got.ID != "bgr" {
-		t.Fatalf("resolved issue = %s, want bgr", got.ID)
+	if got, ok := resolveSessionIssue(tasks, "missing"); ok {
+		t.Fatalf("resolveSessionIssue = %+v, want not found for fuzzy-only result", got)
 	}
 }
 
