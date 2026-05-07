@@ -1186,6 +1186,47 @@ func TestFollowOnMergeSelectionNoEligibleUpstreamShowsToast(t *testing.T) {
 	}
 }
 
+func TestTaskWorkspaceMergeUsesWorkspaceTask(t *testing.T) {
+	m := newTestModel()
+	boardTask := domain.Task{
+		ID:          "az-board",
+		Title:       "Board selection",
+		Status:      domain.StatusInProgress,
+		Priority:    domain.P2,
+		Type:        domain.TypeTask,
+		HasWorktree: false,
+	}
+	workspaceTask := domain.Task{
+		ID:          "az-workspace",
+		Title:       "Workspace task",
+		Status:      domain.StatusInProgress,
+		Priority:    domain.P2,
+		Type:        domain.TypeTask,
+		HasWorktree: true,
+		Session: &domain.Session{
+			IssueID:  "az-workspace",
+			State:    domain.SessionBusy,
+			Worktree: "/tmp/az-workspace",
+		},
+	}
+	m.tasks = []domain.Task{boardTask, workspaceTask}
+	m.nav.SelectTask(boardTask.ID.String(), boardTask.Status.Column())
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(workspaceTask, m.tasks, nil, 120, 30))
+
+	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
+	if cmd == nil {
+		t.Fatal("expected workspace merge command")
+	}
+
+	newModel := updated.(Model)
+	if _, ok := newModel.pendingOpsByTask[taskIDKey(workspaceTask.ID.String())]; !ok {
+		t.Fatalf("expected merge preparation on workspace task %s, got %+v", workspaceTask.ID, newModel.pendingOpsByTask)
+	}
+	if _, ok := newModel.pendingOpsByTask[taskIDKey(boardTask.ID.String())]; ok {
+		t.Fatalf("merge preparation used board-selected task %s, got %+v", boardTask.ID, newModel.pendingOpsByTask)
+	}
+}
+
 func TestGetFollowOnMergeCandidatesRequiresUpstreamWorktree(t *testing.T) {
 	m := newTestModel()
 	parentID := "az-parent"

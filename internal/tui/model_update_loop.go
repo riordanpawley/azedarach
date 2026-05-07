@@ -1234,6 +1234,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
 			return m, nil
 		}
+		m.selectTaskByID(msg.taskID)
 		if msg.hasTask {
 			m.applySingleTaskWorkspaceRefresh(msg.taskID, msg.task)
 		}

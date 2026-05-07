@@ -5928,6 +5928,90 @@ func TestTaskWorkspaceStopSessionKeyKeepsOverlayOpen(t *testing.T) {
 	}
 }
 
+func TestTaskWorkspaceCleanupSelectsTargetAndKeepsWorkspaceUnderConfirm(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandRuntimeReconcileIssue:
+				respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{})
+				if err != nil {
+					t.Fatalf("marshal reconcile response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandTaskList:
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+						{ID: "az-1", Title: "Cleanup target", Status: domain.StatusOpen, HasWorktree: true},
+						{ID: "az-2", Title: "Previous board selection", Status: domain.StatusOpen},
+					}),
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Cleanup target", Status: domain.StatusOpen, HasWorktree: true},
+		{ID: "az-2", Title: "Previous board selection", Status: domain.StatusOpen},
+	}
+	m.nav.SelectTask("az-2", 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30))
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	if cmd == nil {
+		t.Fatal("expected cleanup selection command from task workspace")
+	}
+	selection, ok := cmd().(overlay.SelectionMsg)
+	if !ok || selection.Key != "w" {
+		t.Fatalf("selection = %#v, want w", selection)
+	}
+
+	updatedAny, preflightCmd := next.(Model).Update(selection)
+	updated := updatedAny.(Model)
+	if preflightCmd == nil {
+		t.Fatal("expected cleanup preflight command")
+	}
+	if got := updated.nav.GetCursor().TaskID; got != "az-1" {
+		t.Fatalf("cursor task after cleanup action = %q, want az-1", got)
+	}
+	if _, ok := updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
+		t.Fatalf("expected task workspace to remain under cleanup preflight, got %T", updated.overlayStack.Current())
+	}
+
+	preflightMsg := preflightCmd()
+	prompt, ok := preflightMsg.(worktreeCleanupConfirmPromptMsg)
+	if !ok {
+		t.Fatalf("preflight message = %T, want worktreeCleanupConfirmPromptMsg", preflightMsg)
+	}
+	promptedAny, _ := updated.Update(prompt)
+	prompted := promptedAny.(Model)
+	if _, ok := prompted.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); ok {
+		t.Fatal("expected confirm dialog on top of task workspace")
+	}
+	if got := prompted.nav.GetCursor().TaskID; got != "az-1" {
+		t.Fatalf("cursor task after cleanup prompt = %q, want az-1", got)
+	}
+
+	cancelledAny, _ := prompted.handleSelection(overlay.SelectionMsg{Key: "no"})
+	cancelled := cancelledAny.(Model)
+	if _, ok := cancelled.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
+		t.Fatalf("expected task workspace after cancelling cleanup, got %T", cancelled.overlayStack.Current())
+	}
+}
+
 func TestPerformCleanupRoutesDaemonCleanupAndPreservesCounts(t *testing.T) {
 	base := time.Now().UTC()
 	oldSessionStart := base.Add(-48 * time.Hour)
