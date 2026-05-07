@@ -92,7 +92,7 @@ func TestRender(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := Render(columns, tt.cursor, tt.selectedTasks, map[string]RuntimeSignals{}, BuildChildProgress(columnsToTasks(columns)), nil, false, 0, s, tt.width, tt.height)
+			got := Render(columns, tt.cursor, tt.selectedTasks, map[string]RuntimeSignals{}, BuildChildProgress(columnsToTasks(columns)), nil, false, nil, 0, s, tt.width, tt.height)
 
 			goldenFile := filepath.Join("testdata", tt.name+".golden")
 
@@ -224,8 +224,8 @@ func TestRenderCard_ShowsBlockedPhaseChip(t *testing.T) {
 	blockerPhase := phaseInfo.Phases[blocker.ID.String()]
 	blockedPhase := phaseInfo.Phases[blocked.ID.String()]
 
-	blockerView := normalizeBoardOutput(renderCard(blocker, nil, false, false, 80, nil, &blockerPhase, true, s))
-	blockedView := normalizeBoardOutput(renderCard(blocked, nil, false, false, 80, nil, &blockedPhase, true, s))
+	blockerView := normalizeBoardOutput(renderCard(blocker, nil, false, false, 80, nil, &blockerPhase, true, "", s))
+	blockedView := normalizeBoardOutput(renderCard(blocked, nil, false, false, 80, nil, &blockedPhase, true, "", s))
 
 	if !strings.Contains(blockerView, "Φ0") {
 		t.Fatalf("expected ready blocker chip in view, got %q", blockerView)
@@ -237,7 +237,7 @@ func TestRenderCard_ShowsBlockedPhaseChip(t *testing.T) {
 
 func TestRenderEmptyBoard(t *testing.T) {
 	s := styles.New()
-	got := Render([]Column{}, Cursor{}, make(map[string]bool), map[string]RuntimeSignals{}, nil, nil, false, 0, s, 120, 30)
+	got := Render([]Column{}, Cursor{}, make(map[string]bool), map[string]RuntimeSignals{}, nil, nil, false, nil, 0, s, 120, 30)
 
 	if got != "" {
 		t.Errorf("Render() with empty columns should return empty string, got: %q", got)
@@ -266,7 +266,7 @@ func TestCursorBounds(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Should not panic
-			_ = Render(columns, tt.cursor, make(map[string]bool), map[string]RuntimeSignals{}, BuildChildProgress(columnsToTasks(columns)), nil, false, 0, s, 120, 30)
+			_ = Render(columns, tt.cursor, make(map[string]bool), map[string]RuntimeSignals{}, BuildChildProgress(columnsToTasks(columns)), nil, false, nil, 0, s, 120, 30)
 		})
 	}
 }

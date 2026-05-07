@@ -46,7 +46,7 @@ type ChildProgress struct {
 }
 
 // renderCard renders a task card
-func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool, isSelected bool, width int, childProgress *ChildProgress, phaseInfo *phases.TaskPhaseInfo, showPhases bool, s *styles.Styles) string {
+func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool, isSelected bool, width int, childProgress *ChildProgress, phaseInfo *phases.TaskPhaseInfo, showPhases bool, jumpLabel string, s *styles.Styles) string {
 	if width < 1 {
 		width = 1
 	}
@@ -100,9 +100,11 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	}
 	headerParts := []string{
 		priorityBadge,
-		issueToken,
-		renderTaskTypeBadge(task.Type, s),
 	}
+	if jumpLabel != "" {
+		headerParts = append(headerParts, renderJumpLabel(jumpLabel, s))
+	}
+	headerParts = append(headerParts, issueToken, renderTaskTypeBadge(task.Type, s))
 	if phaseBadge != "" {
 		headerParts = append(headerParts, phaseBadge)
 	}
@@ -152,6 +154,25 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 
 	return cardStyle.Height(cardHeight).Render(content)
+}
+
+func renderJumpLabel(label string, s *styles.Styles) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return ""
+	}
+	labelStyle := lipgloss.NewStyle().
+		Foreground(styles.Base).
+		Background(styles.Yellow).
+		Bold(true).
+		Padding(0, 1)
+	if s != nil {
+		labelStyle = s.MenuKey.Copy().
+			Foreground(styles.Base).
+			Background(styles.Yellow).
+			Bold(true)
+	}
+	return labelStyle.Render(label)
 }
 
 func shouldExpandCardHeader(maxLineLen int) bool {
@@ -527,12 +548,12 @@ func renderChildProgressValue(progress *ChildProgress, s *styles.Styles) string 
 
 // RenderCard is the exported version for testing
 func RenderCard(task domain.Task, isCursor bool, isSelected bool, width int, s *styles.Styles) string {
-	return renderCard(task, nil, isCursor, isSelected, width, nil, nil, false, s)
+	return renderCard(task, nil, isCursor, isSelected, width, nil, nil, false, "", s)
 }
 
 // RenderCardWithRuntimeSignals renders a task card with daemon-authored runtime metadata.
 func RenderCardWithRuntimeSignals(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool, isSelected bool, width int, s *styles.Styles) string {
-	return renderCard(task, runtimeSignals, isCursor, isSelected, width, nil, nil, false, s)
+	return renderCard(task, runtimeSignals, isCursor, isSelected, width, nil, nil, false, "", s)
 }
 
 // CardLineFootprint returns the number of terminal lines consumed by one card.
@@ -549,7 +570,7 @@ func CardLineFootprint(s *styles.Styles, width int) int {
 		Priority: domain.P2,
 		Type:     domain.TypeTask,
 	}
-	cardLines := lipgloss.Height(renderCard(sample, nil, false, false, width, nil, nil, false, s))
+	cardLines := lipgloss.Height(renderCard(sample, nil, false, false, width, nil, nil, false, "", s))
 	if cardLines < 1 {
 		cardLines = 1
 	}

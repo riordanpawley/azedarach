@@ -442,6 +442,21 @@ func (m Model) boardRenderedTasks() []domain.Task {
 	return rendered
 }
 
+func (m Model) jumpLabelsByTask() map[string]string {
+	if m.jumpMode == nil || len(m.jumpTargets) == 0 {
+		return nil
+	}
+	labels := make(map[string]string, len(m.jumpTargets))
+	for i, taskID := range m.jumpTargets {
+		taskID = strings.TrimSpace(taskID)
+		label := strings.TrimSpace(m.jumpMode.GetLabel(i))
+		if taskID != "" && label != "" {
+			labels[taskID] = label
+		}
+	}
+	return labels
+}
+
 func (m Model) compactRenderedTasks() []domain.Task {
 	filtered := m.editor.ApplySort(m.boardVisibleTasks(m.tasks))
 	if len(filtered) == 0 {
@@ -546,6 +561,7 @@ func (m Model) renderBoardView() string {
 		board.BuildChildProgress(m.tasks),
 		phaseData,
 		m.editor.GetShowPhases(),
+		m.jumpLabelsByTask(),
 		activeViewportStart,
 		m.styles,
 		m.width,

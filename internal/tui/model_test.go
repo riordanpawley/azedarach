@@ -13,6 +13,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -2076,10 +2077,11 @@ func TestGotoMode(t *testing.T) {
 		}
 	})
 
-	t.Run("gw opens jump labels and selects a double-char target", func(t *testing.T) {
+	t.Run("gw renders jump labels in place and selects a double-char target", func(t *testing.T) {
 		jumpModel := newTestModel()
 		jumpModel.width = 120
 		jumpModel.height = 120
+		jumpModel.loading = false
 		jumpModel.config.Keyboard.JumpLabelChars = "abc"
 		jumpModel.editor.EnterGoto()
 		jumpModel.nav.SelectTask("az-1", 0)
@@ -2097,19 +2099,22 @@ func TestGotoMode(t *testing.T) {
 		result, _ := jumpModel.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
 		newModel := result.(Model)
 
-		current := newModel.overlayStack.Current()
-		if current == nil {
-			t.Fatal("expected jump overlay to be pushed")
+		if !newModel.overlayStack.IsEmpty() {
+			t.Fatalf("expected jump labels without centered overlay, got %T", newModel.overlayStack.Current())
 		}
-		jump, ok := current.(*overlay.JumpMode)
-		if !ok {
-			t.Fatalf("overlay type = %T, want *overlay.JumpMode", current)
+		jump := newModel.jumpMode
+		if jump == nil {
+			t.Fatal("expected jump mode to be active")
 		}
-		if got, want := jump.GetLabel(0), "a"; got != want {
+		if got, want := jump.GetLabel(0), "aa"; got != want {
 			t.Fatalf("label 0 = %q, want %q", got, want)
 		}
-		if got, want := jump.GetLabel(3), "aa"; got != want {
+		if got, want := jump.GetLabel(3), "ba"; got != want {
 			t.Fatalf("label 3 = %q, want %q", got, want)
+		}
+		view := ansi.Strip(newModel.View())
+		if !strings.Contains(view, "aa") || !strings.Contains(view, "ba") {
+			t.Fatalf("view missing in-place jump labels:\n%s", view)
 		}
 
 		seen := make(map[string]int, 7)
@@ -2127,10 +2132,13 @@ func TestGotoMode(t *testing.T) {
 			t.Fatalf("unique label count = %d, want 7", got)
 		}
 
-		if cmd := newModel.overlayStack.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}); cmd != nil {
+		result, cmd := newModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+		newModel = result.(Model)
+		if cmd != nil {
 			t.Fatal("expected first jump key to wait for a two-char label")
 		}
-		cmd := newModel.overlayStack.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+		result, cmd = newModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+		newModel = result.(Model)
 		if cmd == nil {
 			t.Fatal("expected second jump key to emit a selection command")
 		}
@@ -2149,8 +2157,8 @@ func TestGotoMode(t *testing.T) {
 		if pos.Column != 0 || pos.Task != 3 {
 			t.Fatalf("expected cursor on jump target at (0,3), got (%d,%d)", pos.Column, pos.Task)
 		}
-		if !finalModel.overlayStack.IsEmpty() {
-			t.Fatal("expected jump overlay to close after selection")
+		if finalModel.jumpMode != nil {
+			t.Fatal("expected jump mode to clear after selection")
 		}
 	})
 

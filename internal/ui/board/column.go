@@ -21,6 +21,7 @@ func renderColumn(
 	childProgressByTask map[string]ChildProgress,
 	phaseData map[string]phases.TaskPhaseInfo,
 	showPhases bool,
+	jumpLabelsByTask map[string]string,
 	width int,
 	height int,
 	s *styles.Styles,
@@ -70,7 +71,7 @@ func renderColumn(
 			runtimeSignals = &signalsCopy
 		}
 
-		cardContent.WriteString(renderCard(task, runtimeSignals, isCursor, isSelected, cardWidth, childProgress, phaseInfo, showPhases, s))
+		cardContent.WriteString(renderCard(task, runtimeSignals, isCursor, isSelected, cardWidth, childProgress, phaseInfo, showPhases, jumpLabelsByTask[taskID], s))
 	}
 
 	if bottomIndicator {

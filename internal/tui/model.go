@@ -147,6 +147,8 @@ type Model struct {
 	overlayStack                  *overlay.Stack
 	createTaskOverlay             *overlay.CreateTaskOverlay
 	viewMode                      ViewMode
+	jumpMode                      *overlay.JumpMode
+	jumpTargets                   []string
 	viewportStarts                [board.DefaultColumnCount]int
 	columnViewportStart           int
 	drillDownParentID             string
@@ -434,6 +436,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.ClearScreen
 	}
 
+	if m.jumpMode != nil {
+		return m.handleJumpMode(msg)
+	}
+
 	// Freeze board interactions while switching project contexts.
 	if m.projectSwitchInFlight {
 		return m, nil
@@ -701,33 +707,8 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.nav.GotoLastColumn(columns)
 		m.ensureCursorVisible(columns)
 	case keybinds.ActionGotoJump:
-		// Jump mode - quick navigation with labels for VISIBLE tasks only
-		// Calculate visible tasks per column based on screen height/card footprint.
-		visibleStart, visibleEnd := m.boardVisibleColumnRange(columns)
-		visibleColumns := columns[visibleStart:visibleEnd]
-		columnCount := len(visibleColumns)
-		if columnCount < 1 {
-			columnCount = board.DefaultColumnCount
-		}
-		columnWidth := m.width / columnCount
-		cardWidth := board.CardContentWidth(columnWidth)
-		linesPerCard := board.CardLineFootprint(m.styles, cardWidth)
-		availableHeight := board.ColumnBodyHeight(board.BoardContentHeight(m.height))
-		visiblePerColumn := availableHeight / linesPerCard
-		if visiblePerColumn < 1 {
-			visiblePerColumn = 1
-		}
-
-		// Count visible tasks (capped by actual task count per column)
-		visibleCount := 0
-		for _, col := range visibleColumns {
-			colVisible := len(col.Tasks)
-			if colVisible > visiblePerColumn {
-				colVisible = visiblePerColumn
-			}
-			visibleCount += colVisible
-		}
-		return m, m.openOverlay(overlay.NewJumpModeWithChars(visibleCount, m.config.Keyboard.JumpLabelChars))
+		m.startJumpMode()
+		return m, nil
 	case keybinds.ActionGotoProjects:
 		// Project selector
 		return m, m.openOverlay(overlay.NewProjectSelectorWithOptions(
@@ -741,6 +722,47 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m Model) handleJumpMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.clearJumpMode()
+		return m, nil
+	}
+
+	next, cmd := m.jumpMode.Update(msg)
+	if jump, ok := next.(*overlay.JumpMode); ok {
+		m.jumpMode = jump
+	}
+	return m, cmd
+}
+
+func (m *Model) startJumpMode() {
+	targets := m.boardRenderedTasks()
+	if len(targets) == 0 {
+		m.clearJumpMode()
+		return
+	}
+
+	m.jumpTargets = make([]string, 0, len(targets))
+	for _, task := range targets {
+		taskID := strings.TrimSpace(task.ID.String())
+		if taskID != "" {
+			m.jumpTargets = append(m.jumpTargets, taskID)
+		}
+	}
+	if len(m.jumpTargets) == 0 {
+		m.clearJumpMode()
+		return
+	}
+
+	m.jumpMode = overlay.NewJumpModeWithChars(len(m.jumpTargets), m.config.Keyboard.JumpLabelChars)
+}
+
+func (m *Model) clearJumpMode() {
+	m.jumpMode = nil
+	m.jumpTargets = nil
 }
 
 // handleSearchMode processes keyboard input in search mode

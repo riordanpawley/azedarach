@@ -300,7 +300,7 @@ func TestRenderCard_WithChildProgress(t *testing.T) {
 		Type:     domain.TypeTask,
 	}
 
-	result := renderCard(task, nil, false, false, 56, &ChildProgress{Total: 5, Done: 3}, nil, false, s)
+	result := renderCard(task, nil, false, false, 56, &ChildProgress{Total: 5, Done: 3}, nil, false, "", s)
 	stripped := stripANSI(result)
 
 	// Should contain epic progress bar
@@ -334,7 +334,7 @@ func TestRenderCard_WithChildProgressAndSession(t *testing.T) {
 		},
 	}
 
-	result := renderCard(task, nil, false, false, 46, &ChildProgress{Total: 2, Done: 1}, nil, false, s)
+	result := renderCard(task, nil, false, false, 46, &ChildProgress{Total: 2, Done: 1}, nil, false, "", s)
 	stripped := stripANSI(result)
 
 	// Should contain both session status and child progress
@@ -526,7 +526,7 @@ func TestRenderCard_WithRuntimeSignals(t *testing.T) {
 		GitDeletions:          2,
 	}
 
-	result := renderCard(task, signals, false, false, 72, nil, nil, false, s)
+	result := renderCard(task, signals, false, false, 72, nil, nil, false, "", s)
 	stripped := stripANSI(result)
 	var headerLine string
 	for _, line := range strings.Split(stripped, "\n") {
@@ -569,7 +569,7 @@ func TestRenderCard_MetadataOnFirstLine(t *testing.T) {
 		GitDeletions:          3,
 	}
 
-	result := stripANSI(renderCard(task, signals, false, false, 90, &ChildProgress{Total: 7, Done: 1}, nil, false, s))
+	result := stripANSI(renderCard(task, signals, false, false, 90, &ChildProgress{Total: 7, Done: 1}, nil, false, "", s))
 	lines := strings.Split(result, "\n")
 	if len(lines) == 0 {
 		t.Fatalf("expected rendered lines, got %q", result)
@@ -620,7 +620,7 @@ func TestRenderCard_NarrowWidthUsesSecondHeaderRowBeforeCompaction(t *testing.T)
 		GitDeletions:          3,
 	}
 
-	result := stripANSI(renderCard(task, signals, false, false, 40, &ChildProgress{Total: 7, Done: 1}, nil, false, s))
+	result := stripANSI(renderCard(task, signals, false, false, 40, &ChildProgress{Total: 7, Done: 1}, nil, false, "", s))
 	lines := strings.Split(result, "\n")
 	firstIdx := -1
 	for i, line := range lines {
@@ -670,8 +670,8 @@ func TestRenderCard_NarrowWidthAddsOneCardRowAndOneHeaderRow(t *testing.T) {
 	}
 	progress := &ChildProgress{Total: 9, Done: 2}
 
-	wide := stripANSI(renderCard(task, signals, false, false, 80, progress, nil, false, s))
-	narrow := stripANSI(renderCard(task, signals, false, false, 22, progress, nil, false, s))
+	wide := stripANSI(renderCard(task, signals, false, false, 80, progress, nil, false, "", s))
+	narrow := stripANSI(renderCard(task, signals, false, false, 22, progress, nil, false, "", s))
 
 	wideLines := strings.Split(wide, "\n")
 	narrowLines := strings.Split(narrow, "\n")
@@ -714,7 +714,7 @@ func TestRenderCard_NarrowWidthKeepsVerboseHeaderTokensAcrossTwoRows(t *testing.
 		GitDeletions:          3,
 	}
 
-	narrow := stripANSI(renderCard(task, signals, false, false, 25, &ChildProgress{Total: 7, Done: 1}, nil, false, s))
+	narrow := stripANSI(renderCard(task, signals, false, false, 25, &ChildProgress{Total: 7, Done: 1}, nil, false, "", s))
 	lines := strings.Split(narrow, "\n")
 	firstIdx := -1
 	for i, line := range lines {
@@ -757,8 +757,8 @@ func TestRenderCard_HeaderOverflowAddsExtraRows(t *testing.T) {
 	}
 	progress := &ChildProgress{Total: 8, Done: 1}
 
-	narrow := stripANSI(renderCard(task, signals, false, false, 25, progress, nil, false, s))
-	wide := stripANSI(renderCard(task, signals, false, false, 80, progress, nil, false, s))
+	narrow := stripANSI(renderCard(task, signals, false, false, 25, progress, nil, false, "", s))
+	wide := stripANSI(renderCard(task, signals, false, false, 80, progress, nil, false, "", s))
 
 	narrowLines := strings.Split(narrow, "\n")
 	wideLines := strings.Split(wide, "\n")

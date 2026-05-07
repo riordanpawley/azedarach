@@ -19,8 +19,8 @@ func GenerateLabels(count int) []string {
 	return GenerateLabelsWithChars(count, defaultJumpLabelChars)
 }
 
-// GenerateLabelsWithChars generates jump labels for the given count using
-// single-character labels first, then double-character combinations.
+// GenerateLabelsWithChars generates deterministic two-character jump labels
+// for the given count using the configured set.
 func GenerateLabelsWithChars(count int, chars string) []string {
 	if count <= 0 {
 		return []string{}
@@ -32,16 +32,6 @@ func GenerateLabelsWithChars(count int, chars string) []string {
 
 	labels := make([]string, 0, count)
 
-	// Single-character labels first (fast access).
-	for i := 0; i < count && i < len(normalizedChars); i++ {
-		labels = append(labels, string(normalizedChars[i]))
-	}
-
-	if len(labels) >= count {
-		return labels
-	}
-
-	// Double-character labels using the configured set.
 	for first := 0; first < len(normalizedChars) && len(labels) < count; first++ {
 		for second := 0; second < len(normalizedChars) && len(labels) < count; second++ {
 			label := string(normalizedChars[first]) + string(normalizedChars[second])

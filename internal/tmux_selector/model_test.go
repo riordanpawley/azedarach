@@ -589,13 +589,18 @@ func TestModelGotoWordJumpSelectsVisibleSession(t *testing.T) {
 	if model.jumpMode == nil {
 		t.Fatal("expected gw to start jump mode")
 	}
-	if got, want := model.jumpMode.GetLabel(1), "b"; got != want {
+	if got, want := model.jumpMode.GetLabel(1), "ab"; got != want {
 		t.Fatalf("jump label 1 = %q, want %q", got, want)
 	}
 	if !strings.Contains(model.View(), "jump: type label") {
 		t.Fatalf("view missing jump status:\n%s", model.View())
 	}
 
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatal("first jump key returned command")
+	}
 	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
 	model = updated.(Model)
 	if cmd == nil {

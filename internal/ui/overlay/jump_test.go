@@ -8,7 +8,7 @@ import (
 
 func TestGenerateLabelsWithChars(t *testing.T) {
 	got := GenerateLabelsWithChars(7, "abc")
-	want := []string{"a", "b", "c", "aa", "ab", "ac", "ba"}
+	want := []string{"aa", "ab", "ac", "ba", "bb", "bc", "ca"}
 	if len(got) != len(want) {
 		t.Fatalf("label count = %d, want %d (%v)", len(got), len(want), got)
 	}
@@ -38,7 +38,7 @@ func TestJumpModeAcceptsConfiguredSecondCharacter(t *testing.T) {
 	if !ok {
 		t.Fatalf("cmd() returned %T, want JumpSelectedMsg", msg)
 	}
-	if got, want := selected.TaskIndex, 4; got != want {
+	if got, want := selected.TaskIndex, 1; got != want {
 		t.Fatalf("selected TaskIndex = %d, want %d", got, want)
 	}
 }

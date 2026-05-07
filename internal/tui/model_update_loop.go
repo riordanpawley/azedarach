@@ -900,11 +900,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Phase 6: Advanced features
 	case overlay.JumpSelectedMsg:
-		// Close overlay
-		m.overlayStack.Pop()
-
-		// Jump to selected task by flat index
 		columns := m.buildColumns()
+		if m.jumpMode != nil {
+			if msg.TaskIndex >= 0 && msg.TaskIndex < len(m.jumpTargets) {
+				m.nav.JumpToTaskByID(columns, m.jumpTargets[msg.TaskIndex])
+			}
+			m.clearJumpMode()
+			m.ensureCursorVisible(columns)
+			return m, nil
+		}
+
+		m.overlayStack.Pop()
 		m.nav.JumpToTaskByIndex(columns, msg.TaskIndex)
 		m.ensureCursorVisible(columns)
 		return m, nil

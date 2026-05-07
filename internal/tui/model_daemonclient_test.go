@@ -946,6 +946,7 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 			board.BuildChildProgress([]domain.Task{task}),
 			nil,
 			false,
+			nil,
 			0,
 			styles.New(),
 			120,
