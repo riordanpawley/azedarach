@@ -824,21 +824,13 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch action {
-	// Navigation with selection toggle
+	// Navigation without selection toggle.
 	case keybinds.ActionMoveDown:
-		// Keep current task selected, then move down.
-		if task != nil {
-			m.editor.Select(task.ID.String())
-		}
 		m.nav.MoveDown(columns)
 		m.ensureCursorVisible(columns)
 		return m, nil
 
 	case keybinds.ActionMoveUp:
-		// Keep current task selected, then move up.
-		if task != nil {
-			m.editor.Select(task.ID.String())
-		}
 		m.nav.MoveUp(columns)
 		m.ensureCursorVisible(columns)
 		return m, nil
@@ -854,19 +846,13 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureCursorVisible(columns)
 		return m, nil
 
-	// Half-page movement with selection toggle
+	// Half-page movement without selection toggle.
 	case keybinds.ActionHalfPageDown:
-		if task != nil {
-			m.editor.Select(task.ID.String())
-		}
 		m.nav.HalfPageDown(columns, m.halfPage())
 		m.ensureCursorVisible(columns)
 		return m, nil
 
 	case keybinds.ActionHalfPageUp:
-		if task != nil {
-			m.editor.Select(task.ID.String())
-		}
 		m.nav.HalfPageUp(columns, m.halfPage())
 		m.ensureCursorVisible(columns)
 		return m, nil
