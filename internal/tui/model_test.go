@@ -4936,6 +4936,23 @@ func TestHandleSelectionAsyncActionsShowImmediateFeedback(t *testing.T) {
 	}
 }
 
+func TestHandleNormalModeAttachShortcutQueuesSelectedIssueAttach(t *testing.T) {
+	m := newTestModel()
+	m.nav.SelectTask("az-3", 1)
+
+	updatedAny, cmd := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if cmd == nil {
+		t.Fatal("expected attach command")
+	}
+	updated := updatedAny.(Model)
+	if len(updated.toasts) == 0 {
+		t.Fatal("expected immediate feedback toast")
+	}
+	if got := updated.toasts[len(updated.toasts)-1].Message; got != "Attach queued for az-3" {
+		t.Fatalf("toast = %q, want %q", got, "Attach queued for az-3")
+	}
+}
+
 func TestHandleBulkActionShowsImmediateFeedback(t *testing.T) {
 	tests := []struct {
 		name      string

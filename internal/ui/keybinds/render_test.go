@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/types"
 )
 
 func TestKeyColumnWidth(t *testing.T) {
@@ -76,6 +77,16 @@ func TestRenderPlain(t *testing.T) {
 	want := "h/l: columns  j/k: tasks"
 	if rendered != want {
 		t.Fatalf("RenderPlain = %q, want %q", rendered, want)
+	}
+}
+
+func TestNormalModeAttachShortcutLookup(t *testing.T) {
+	action, ok := LookupAction(types.ModeNormal, "a")
+	if !ok {
+		t.Fatal("expected normal mode a key to resolve")
+	}
+	if action != ActionAttachSession {
+		t.Fatalf("action = %q, want %q", action, ActionAttachSession)
 	}
 }
 

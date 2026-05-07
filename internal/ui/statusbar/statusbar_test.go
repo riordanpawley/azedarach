@@ -299,7 +299,7 @@ func TestGetHints_AllModes(t *testing.T) {
 		mode     types.Mode
 		expected string
 	}{
-		{types.ModeNormal, "Space: task workspace  g: goto  /: search  f: filter  ,: sort  v: select  Enter: drill  c: create  s: settings  r: refresh  Tab: view  ?: help  q: quit"},
+		{types.ModeNormal, "Space: task workspace  g: goto  /: search  f: filter  ,: sort  v: select  Enter: drill  a: attach  c: create  s: settings  r: refresh  Tab: view  ?: help  q: quit"},
 		{types.ModeSelect, "a/5: toggle  A: column  %: all  *: invert  x: clear  Space/Enter: bulk  v/Esc: exit"},
 		{types.ModeSearch, "Type: search  Enter: confirm  Esc: cancel"},
 		{types.ModeGoto, "g g: top  g e: bottom  g h: first col  g l: last col  g w: labels  g p: projects  g s: spec  Esc: cancel"},

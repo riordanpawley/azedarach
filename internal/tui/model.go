@@ -615,6 +615,14 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case keybinds.ActionAttachSession: // Attach to selected issue session
+		task, _ := m.getCurrentTaskAndSession()
+		if task == nil {
+			return m, nil
+		}
+		m.beginMutationFeedback(fmt.Sprintf("Attach queued for %s", task.ID))
+		return m, m.attachSessionCmd(task.ID.String())
+
 	case keybinds.ActionCreateTask: // Create task
 		var parentID *string
 		if drillDownParentID := strings.TrimSpace(m.drillDownParentID); drillDownParentID != "" {
