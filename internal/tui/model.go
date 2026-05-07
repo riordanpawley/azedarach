@@ -170,6 +170,9 @@ type Model struct {
 
 	// Toasts
 	toasts []Toast
+	// Recoverable async failures surfaced in notifications/recovery overlay.
+	recoveryNotifications   []asyncRecoveryNotification
+	recoveryNotificationSeq uint64
 
 	// Runtime event stream (status ticker + event-log overlay source)
 	eventTicker   *eventticker.Ring
@@ -290,6 +293,7 @@ func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 		runtimeSignalsByTask:        make(map[string]board.RuntimeSignals),
 		runtimeSignalWorktreeByTask: make(map[string]string),
 		toasts:                      []Toast{},
+		recoveryNotifications:       []asyncRecoveryNotification{},
 		eventTicker:                 eventticker.NewRing(eventTickerCapacity),
 		runtimeEvents:               []protocol.EventEnvelope{},
 		styles:                      styles.New(),
@@ -642,6 +646,9 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keybinds.ActionOpenDiagnostic: // Diagnostics (Shift+D)
 		diagPanel := overlay.NewDiagnosticsPanel(m.diagnosticsService, m.sessions)
 		return m, m.openOverlay(diagPanel)
+
+	case keybinds.ActionOpenRecovery:
+		return m, m.openRecoveryOverlayCmd()
 
 	case keybinds.ActionToggleView: // Toggle view mode
 		if m.viewMode == ViewModeBoard {

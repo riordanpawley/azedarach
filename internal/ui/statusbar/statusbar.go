@@ -16,6 +16,7 @@ import (
 type StatusBar struct {
 	mode             types.Mode
 	modeSuffix       string
+	alertIndicator   string
 	width            int
 	hintBindings     []keybinds.Binding
 	currentProject   string
@@ -75,6 +76,11 @@ func (sb *StatusBar) SetModeSuffix(suffix string) {
 	sb.modeSuffix = strings.TrimSpace(suffix)
 }
 
+// SetAlertIndicator sets an optional alert label rendered near the mode badge.
+func (sb *StatusBar) SetAlertIndicator(indicator string) {
+	sb.alertIndicator = strings.TrimSpace(indicator)
+}
+
 // Render renders the status bar as a string
 func (sb StatusBar) Render() string {
 	if sb.width < 1 {
@@ -118,6 +124,9 @@ func (sb StatusBar) Render() string {
 	}
 
 	mandatorySlots := make([]statusSlot, 0, 2)
+	if strings.TrimSpace(sb.alertIndicator) != "" {
+		mandatorySlots = append(mandatorySlots, statusSlot{style: sb.styles.StatusHint.Copy().Bold(true), text: sb.alertIndicator})
+	}
 	if strings.TrimSpace(sb.filterSummary) != "" {
 		mandatorySlots = append(mandatorySlots, statusSlot{style: sb.styles.StatusInfo, text: sb.filterSummary})
 	}
@@ -172,10 +181,10 @@ func (sb StatusBar) Render() string {
 	widthBeforeMandatory := visibleWidth
 	for _, slot := range mandatorySlots {
 		if !appendSlot(slot.style, slot.text) {
-			if len(mandatorySlots) > 1 {
+			if fallback := sb.mandatoryFallbackToken(); fallback != "" {
 				parts = append([]string(nil), partsBeforeMandatory...)
 				visibleWidth = widthBeforeMandatory
-				_ = appendSlot(sb.styles.StatusInfo, "F/S")
+				_ = appendSlot(sb.styles.StatusInfo, fallback)
 			}
 			return sb.styles.StatusBar.Width(sb.width).Render(strings.Join(parts, ""))
 		}
@@ -298,6 +307,9 @@ func shortModeLabel(mode types.Mode) string {
 
 func (sb StatusBar) compactMandatoryStatus() string {
 	parts := []string{shortModeLabel(sb.mode)}
+	if strings.TrimSpace(sb.alertIndicator) != "" {
+		parts = append(parts, "R!")
+	}
 	if strings.TrimSpace(sb.filterSummary) != "" {
 		parts = append(parts, compactFilterToken(sb.filterSummary))
 	}
@@ -305,6 +317,26 @@ func (sb StatusBar) compactMandatoryStatus() string {
 		parts = append(parts, compactSortToken(sb.sortSummary))
 	}
 	return strings.Join(parts, " ")
+}
+
+func (sb StatusBar) mandatoryFallbackToken() string {
+	hasAlert := strings.TrimSpace(sb.alertIndicator) != ""
+	hasFilter := strings.TrimSpace(sb.filterSummary) != ""
+	hasSort := strings.TrimSpace(sb.sortSummary) != ""
+	switch {
+	case hasAlert && (hasFilter || hasSort):
+		return "R!/F/S"
+	case hasAlert:
+		return "R!"
+	case hasFilter && hasSort:
+		return "F/S"
+	case hasFilter:
+		return "F"
+	case hasSort:
+		return "S"
+	default:
+		return ""
+	}
 }
 
 func compactFilterToken(summary string) string {

@@ -12,7 +12,7 @@ import (
 
 func TestStatusBar_RenderNormalMode(t *testing.T) {
 	style := styles.New()
-	sb := New(types.ModeNormal, 160, style)
+	sb := New(types.ModeNormal, 200, style)
 
 	result := sb.Render()
 
@@ -218,6 +218,32 @@ func TestStatusBar_RenderKeepsFilterAndSortOnNarrowWidth(t *testing.T) {
 	}
 }
 
+func TestStatusBar_RenderKeepsRecoveryAlertOnNarrowWidth(t *testing.T) {
+	style := styles.New()
+	sb := New(types.ModeNormal, 18, style)
+	sb.SetAlertIndicator("o recover:2 (n)")
+	sb.SetFilterSummary("F:st:2")
+	sb.SetSortSummary("S:priority/asc")
+
+	result := sb.Render()
+	if !strings.Contains(result, "R!") {
+		t.Fatalf("Expected narrow status bar to keep compact recovery alert marker, got: %s", result)
+	}
+}
+
+func TestStatusBar_RenderKeepsRecoveryAlertInMandatoryFallback(t *testing.T) {
+	style := styles.New()
+	sb := New(types.ModeNormal, 34, style)
+	sb.SetAlertIndicator("o recover:99 (n)")
+	sb.SetFilterSummary("F:q=very-long-filter-query,st:2,pr:3")
+	sb.SetSortSummary("S:priority/descending")
+
+	result := sb.Render()
+	if !strings.Contains(result, "R!/F/S") {
+		t.Fatalf("Expected medium-width mandatory fallback to retain alert marker, got: %s", result)
+	}
+}
+
 func TestStatusBar_RenderShowsLoadingIndicator(t *testing.T) {
 	style := styles.New()
 	sb := New(types.ModeNormal, 80, style)
@@ -299,7 +325,7 @@ func TestGetHints_AllModes(t *testing.T) {
 		mode     types.Mode
 		expected string
 	}{
-		{types.ModeNormal, "Space: task workspace  g: goto  /: search  f: filter  ,: sort  v: select  Enter: drill  a: attach  c: create  s: settings  r: refresh  Tab: view  ?: help  q: quit"},
+		{types.ModeNormal, "Space: task workspace  g: goto  /: search  f: filter  ,: sort  v: select  Enter: drill  a: attach  c: create  s: settings  r: refresh  n: recover  Tab: view  ?: help  q: quit"},
 		{types.ModeSelect, "a/5: toggle  A: column  %: all  *: invert  x: clear  Space/Enter: bulk  v/Esc: exit"},
 		{types.ModeSearch, "Type: search  Enter: confirm  Esc: cancel"},
 		{types.ModeGoto, "g g: top  g e: bottom  g h: first col  g l: last col  g w: labels  g p: projects  g s: spec  Esc: cancel"},
