@@ -1490,7 +1490,7 @@ func TestSelectModeHalfPageNavigation(t *testing.T) {
 	m.height = 24
 	m.editor.EnterSelect()
 
-	t.Run("ctrl+d moves selection in select mode", func(t *testing.T) {
+	t.Run("ctrl+d moves cursor without selecting in select mode", func(t *testing.T) {
 		m.nav.SelectTask("az-1", 0)
 		initialTaskID := m.nav.GetCursor().TaskID
 		initialPos := getCursorPosition(m)
@@ -1505,9 +1505,12 @@ func TestSelectModeHalfPageNavigation(t *testing.T) {
 		if newModel.nav.GetCursor().TaskID == initialTaskID {
 			t.Errorf("Expected selected task to change after ctrl+d in select mode, still on %s", initialTaskID)
 		}
+		if newModel.editor.SelectionCount() != 0 {
+			t.Fatalf("selection count = %d, want 0", newModel.editor.SelectionCount())
+		}
 	})
 
-	t.Run("ctrl+u moves selection in select mode", func(t *testing.T) {
+	t.Run("ctrl+u moves cursor without selecting in select mode", func(t *testing.T) {
 		m.nav.SelectTask("e", 0)
 		initialTaskID := m.nav.GetCursor().TaskID
 		initialPos := getCursorPosition(m)
@@ -1521,6 +1524,9 @@ func TestSelectModeHalfPageNavigation(t *testing.T) {
 		}
 		if newModel.nav.GetCursor().TaskID == initialTaskID {
 			t.Errorf("Expected selected task to change after ctrl+u in select mode, still on %s", initialTaskID)
+		}
+		if newModel.editor.SelectionCount() != 0 {
+			t.Fatalf("selection count = %d, want 0", newModel.editor.SelectionCount())
 		}
 	})
 }
@@ -1592,6 +1598,22 @@ func TestSelectModeSelectionAndBulkEntry(t *testing.T) {
 
 		if !newModel.editor.IsSelected("az-1") {
 			t.Fatal("expected az-1 to remain selected after moving down in select mode")
+		}
+		if got := newModel.nav.GetCursor().TaskID; got != "az-2" {
+			t.Fatalf("cursor task = %q, want az-2", got)
+		}
+	})
+
+	t.Run("move down in select mode does not select an unselected task", func(t *testing.T) {
+		m := newTestModel()
+		m.editor.EnterSelect()
+		m.nav.SelectTask("az-1", 0)
+
+		result, _ := m.handleSelectMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+		newModel := result.(Model)
+
+		if newModel.editor.SelectionCount() != 0 {
+			t.Fatalf("selection count = %d, want 0", newModel.editor.SelectionCount())
 		}
 		if got := newModel.nav.GetCursor().TaskID; got != "az-2" {
 			t.Fatalf("cursor task = %q, want az-2", got)
