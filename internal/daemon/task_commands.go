@@ -447,7 +447,7 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 			errs = append(errs, fmt.Errorf("%s: refresh git status: %w", issueID, statusErr))
 			continue
 		}
-		rev := d.runtimeProjectionStateWriter().PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktreePath, status, true, true)
+		rev := d.runtimeProjectionStateWriter().PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktreePath, status, true, false)
 		if rev == 0 && d.worktreeRuntimeStateStore(projectID) != nil {
 			rawStatus, marshalErr := json.Marshal(status)
 			if marshalErr != nil {
