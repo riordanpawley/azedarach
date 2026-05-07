@@ -2258,6 +2258,17 @@ func isTaskWorkspaceOverlay(current overlay.Overlay) bool {
 	return ok
 }
 
+func (m *Model) selectTaskByID(taskID string) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return
+	}
+	columns := m.buildColumns()
+	if m.nav.JumpToTaskByID(columns, taskID) {
+		m.ensureCursorVisible(columns)
+	}
+}
+
 func (m Model) eventLogFilePath() string {
 	if strings.TrimSpace(m.logFilePath) != "" {
 		return m.logFilePath
