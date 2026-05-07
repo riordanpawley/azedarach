@@ -213,6 +213,7 @@ func TestLoadAndSaveConfigUsesSingleIssueTrackerBackendConfig(t *testing.T) {
 	assert.Equal(t, "linear-cli", cfg.IssueTracker.Linear.Command)
 	assert.Equal(t, "CHE", cfg.IssueTracker.Linear.Team)
 	assert.Equal(t, "Chefy", cfg.IssueTracker.Linear.Project)
+	assert.Equal(t, "last_write_wins", cfg.IssueTracker.Linear.ConflictPolicy)
 	assert.True(t, cfg.IssueTracker.Linear.Webhooks.Enabled)
 	assert.Equal(t, "cli", cfg.IssueTracker.Linear.Webhooks.Transport)
 	assert.Equal(t, []string{"Issue", "Comment"}, cfg.IssueTracker.Linear.Webhooks.Events)
@@ -232,6 +233,7 @@ func TestLoadAndSaveConfigUsesSingleIssueTrackerBackendConfig(t *testing.T) {
 	    "command": "linear-cli",
 	    "team": "CHE",
 	    "project": "Chefy",
+	    "conflictPolicy": "last_write_wins",
 	    "webhooks": {
 	      "enabled": true,
 	      "transport": "cli",

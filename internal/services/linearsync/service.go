@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -23,6 +24,11 @@ const (
 	defaultRetryAttempts   = 3
 	defaultRetryDelay      = time.Second
 	minRemainingRequests   = 5
+)
+
+const (
+	conflictPolicyConflict      = "conflict"
+	conflictPolicyLastWriteWins = "last_write_wins"
 )
 
 type LinearClient interface {
@@ -138,6 +144,7 @@ func (s Service) Run(ctx context.Context) (Summary, error) {
 	summary.RemoteIssues = len(remoteIssues)
 	maxRemoteUpdated := maxIssueUpdatedAt(remoteIssues)
 	remoteExternalIDs := map[string]struct{}{}
+	conflictedIssueIDs := map[string]struct{}{}
 	for _, remote := range remoteIssues {
 		if strings.TrimSpace(remote.ID) != "" {
 			remoteExternalIDs[strings.TrimSpace(remote.ID)] = struct{}{}
@@ -147,6 +154,7 @@ func (s Service) Run(ctx context.Context) (Summary, error) {
 			continue
 		}
 		issueID := task.ID.String()
+		remotePayload := syncPayloadFromTask(task)
 		remoteHash := issues.HashTaskForSync(task)
 		ref, hasRef := refByIdentifier[strings.ToUpper(remote.Identifier)]
 		local, hasLocal := localByID[issueID]
@@ -155,51 +163,58 @@ func (s Service) Run(ctx context.Context) (Summary, error) {
 				return summary, fmt.Errorf("import linear issue %s: %w", remote.Identifier, err)
 			}
 			summary.Imported++
-			if err := s.Store.UpsertExternalRef(ctx, externalRef(remote, issueID, remoteHash, now())); err != nil {
+			if err := s.Store.UpsertExternalRef(ctx, externalRef(remote, issueID, remoteHash, remotePayload, now())); err != nil {
 				return summary, err
 			}
-			refByIdentifier[strings.ToUpper(remote.Identifier)] = externalRef(remote, issueID, remoteHash, now())
+			refByIdentifier[strings.ToUpper(remote.Identifier)] = externalRef(remote, issueID, remoteHash, remotePayload, now())
 			continue
 		}
 		if !hasRef {
-			ref = externalRef(remote, issueID, remoteHash, now())
+			ref = externalRef(remote, issueID, remoteHash, remotePayload, now())
 		}
 		localHash := issues.HashTaskForSync(local)
-		localChanged := ref.LastSyncHash != "" && localHash != ref.LastSyncHash
-		remoteChanged := ref.LastSyncHash != "" && remoteHash != ref.LastSyncHash
-		if localChanged && remoteChanged {
-			if err := s.Store.RecordSyncConflict(ctx, issues.SyncConflict{
-				Provider:        ProviderLinear,
-				ProjectID:       strings.TrimSpace(s.ProjectID),
-				IssueID:         issueID,
-				Field:           "issue",
-				LocalValue:      local.Title,
-				RemoteValue:     task.Title,
-				LocalUpdatedAt:  &local.UpdatedAt,
-				RemoteUpdatedAt: &task.UpdatedAt,
-				DetectedAt:      now(),
-			}); err != nil {
-				return summary, err
+		basePayload, hasBasePayload := parseSyncPayload(ref.LastSyncPayload)
+		if !hasBasePayload {
+			basePayload = fallbackSyncPayload(ref, local, task)
+		}
+		merge := s.mergeLinearWritableFields(local, task, basePayload)
+		if len(merge.Conflicts) > 0 {
+			for _, conflict := range merge.Conflicts {
+				if err := s.Store.RecordSyncConflict(ctx, conflict); err != nil {
+					return summary, err
+				}
+				summary.Conflicts++
 			}
-			summary.Conflicts++
+			conflictedIssueIDs[issueID] = struct{}{}
 			continue
 		}
-		if remoteChanged || ref.LastSyncHash == "" {
-			if _, err := s.Store.UpsertSyncedTask(ctx, task); err != nil {
+		if merge.UpdateLocal {
+			if _, err := s.Store.UpsertSyncedTask(ctx, merge.Local); err != nil {
 				return summary, fmt.Errorf("update local issue %s: %w", issueID, err)
 			}
 			summary.UpdatedLocal++
-			localByID[issueID] = task
-			localHash = remoteHash
+			localByID[issueID] = merge.Local
+			localHash = issues.HashTaskForSync(merge.Local)
 		}
-		ref = externalRef(remote, issueID, remoteHash, now())
-		if err := s.Store.UpsertExternalRef(ctx, ref); err != nil {
-			return summary, err
+		if !merge.PushRemote && (remoteHash != ref.LastSyncHash || localHash != ref.LastSyncHash || ref.LastSyncPayload == "") {
+			ref = externalRef(remote, issueID, localHash, syncPayloadFromTask(merge.Local), now())
+			if err := s.Store.UpsertExternalRef(ctx, ref); err != nil {
+				return summary, err
+			}
+			refByIssueID[issueID] = ref
+			continue
 		}
 		refByIssueID[issueID] = ref
 	}
 	for _, local := range localTasks {
-		ref, ok := refByIssueID[local.ID.String()]
+		issueID := local.ID.String()
+		if _, conflicted := conflictedIssueIDs[issueID]; conflicted {
+			continue
+		}
+		if current, ok := localByID[issueID]; ok {
+			local = current
+		}
+		ref, ok := refByIssueID[issueID]
 		if !ok || ref.ExternalID == "" {
 			continue
 		}
@@ -229,7 +244,14 @@ func (s Service) Run(ctx context.Context) (Summary, error) {
 	}
 	pendingBatch := []pendingPush{}
 	for _, local := range localTasks {
-		ref, ok := refByIssueID[local.ID.String()]
+		issueID := local.ID.String()
+		if _, conflicted := conflictedIssueIDs[issueID]; conflicted {
+			continue
+		}
+		if current, ok := localByID[issueID]; ok {
+			local = current
+		}
+		ref, ok := refByIssueID[issueID]
 		if !ok || ref.ExternalID == "" {
 			continue
 		}
@@ -253,8 +275,9 @@ func (s Service) Run(ctx context.Context) (Summary, error) {
 		description := local.Description
 		priority := int(local.Priority)
 		pendingBatch = append(pendingBatch, pendingPush{
-			IssueID:   local.ID.String(),
-			LocalHash: localHash,
+			IssueID:         issueID,
+			LocalHash:       localHash,
+			LastSyncPayload: syncPayloadFromTask(local),
 			Request: linearapi.IssueUpdateRequest{
 				ID: ref.ExternalID,
 				Input: linearapi.IssueInput{
@@ -292,9 +315,10 @@ func (s Service) Run(ctx context.Context) (Summary, error) {
 }
 
 type pendingPush struct {
-	IssueID   string
-	LocalHash string
-	Request   linearapi.IssueUpdateRequest
+	IssueID         string
+	LocalHash       string
+	LastSyncPayload syncPayload
+	Request         linearapi.IssueUpdateRequest
 }
 
 func (s Service) flushPushBatch(ctx context.Context, batch []pendingPush, summary *Summary, stateID, cursor string, now time.Time) error {
@@ -320,7 +344,7 @@ func (s Service) flushPushBatch(ctx context.Context, batch []pendingPush, summar
 	for i, issue := range updated {
 		item := batch[i]
 		summary.PushedRemote++
-		if err := s.Store.UpsertExternalRef(ctx, externalRef(issue, item.IssueID, item.LocalHash, now)); err != nil {
+		if err := s.Store.UpsertExternalRef(ctx, externalRef(issue, item.IssueID, item.LocalHash, item.LastSyncPayload, now)); err != nil {
 			return err
 		}
 	}
@@ -387,6 +411,150 @@ func (s Service) applyLinearMetrics(summary *Summary) {
 func (s Service) rateLimitBudgetLow() bool {
 	remaining := s.Linear.Metrics().RateLimit.Remaining
 	return remaining > 0 && remaining <= minRemainingRequests
+}
+
+type syncPayload struct {
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Priority    int    `json:"priority"`
+}
+
+type syncMergeResult struct {
+	Local       domain.Task
+	UpdateLocal bool
+	PushRemote  bool
+	Conflicts   []issues.SyncConflict
+}
+
+func (s Service) mergeLinearWritableFields(local, remote domain.Task, base syncPayload) syncMergeResult {
+	result := syncMergeResult{Local: local}
+	policy := normalizeConflictPolicy(s.Config.Linear.ConflictPolicy)
+	mergeStringField := func(field string, baseValue, localValue, remoteValue string) string {
+		localChanged := localValue != baseValue
+		remoteChanged := remoteValue != baseValue
+		switch {
+		case !localChanged && !remoteChanged:
+			return localValue
+		case remoteChanged && !localChanged:
+			result.UpdateLocal = true
+			return remoteValue
+		case localChanged && !remoteChanged:
+			result.PushRemote = true
+			return localValue
+		case localValue == remoteValue:
+			return localValue
+		case policy == conflictPolicyConflict:
+			result.Conflicts = append(result.Conflicts, s.syncConflict(local, remote, field, localValue, remoteValue))
+			return localValue
+		case localWinsLWW(local.UpdatedAt, remote.UpdatedAt):
+			result.PushRemote = true
+			return localValue
+		default:
+			result.UpdateLocal = true
+			return remoteValue
+		}
+	}
+	mergeIntField := func(field string, baseValue, localValue, remoteValue int) int {
+		localChanged := localValue != baseValue
+		remoteChanged := remoteValue != baseValue
+		switch {
+		case !localChanged && !remoteChanged:
+			return localValue
+		case remoteChanged && !localChanged:
+			result.UpdateLocal = true
+			return remoteValue
+		case localChanged && !remoteChanged:
+			result.PushRemote = true
+			return localValue
+		case localValue == remoteValue:
+			return localValue
+		case policy == conflictPolicyConflict:
+			result.Conflicts = append(result.Conflicts, s.syncConflict(local, remote, field, fmt.Sprintf("%d", localValue), fmt.Sprintf("%d", remoteValue)))
+			return localValue
+		case localWinsLWW(local.UpdatedAt, remote.UpdatedAt):
+			result.PushRemote = true
+			return localValue
+		default:
+			result.UpdateLocal = true
+			return remoteValue
+		}
+	}
+	result.Local.Title = mergeStringField("title", base.Title, strings.TrimSpace(local.Title), strings.TrimSpace(remote.Title))
+	result.Local.Description = mergeStringField("description", base.Description, strings.TrimSpace(local.Description), strings.TrimSpace(remote.Description))
+	result.Local.Priority = domain.Priority(mergeIntField("priority", base.Priority, int(local.Priority), int(remote.Priority)))
+	if result.UpdateLocal && remote.UpdatedAt.After(result.Local.UpdatedAt) {
+		result.Local.UpdatedAt = remote.UpdatedAt
+	}
+	if len(result.Conflicts) > 0 {
+		result.PushRemote = false
+	}
+	return result
+}
+
+func (s Service) syncConflict(local, remote domain.Task, field, localValue, remoteValue string) issues.SyncConflict {
+	now := time.Now().UTC()
+	if s.Now != nil {
+		now = s.Now().UTC()
+	}
+	return issues.SyncConflict{
+		Provider:        ProviderLinear,
+		ProjectID:       strings.TrimSpace(s.ProjectID),
+		IssueID:         local.ID.String(),
+		Field:           field,
+		LocalValue:      localValue,
+		RemoteValue:     remoteValue,
+		LocalUpdatedAt:  &local.UpdatedAt,
+		RemoteUpdatedAt: &remote.UpdatedAt,
+		DetectedAt:      now,
+	}
+}
+
+func normalizeConflictPolicy(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case conflictPolicyConflict:
+		return conflictPolicyConflict
+	default:
+		return conflictPolicyLastWriteWins
+	}
+}
+
+func localWinsLWW(localUpdatedAt, remoteUpdatedAt time.Time) bool {
+	return localUpdatedAt.Equal(remoteUpdatedAt) || localUpdatedAt.After(remoteUpdatedAt)
+}
+
+func syncPayloadFromTask(task domain.Task) syncPayload {
+	return syncPayload{
+		Title:       strings.TrimSpace(task.Title),
+		Description: strings.TrimSpace(task.Description),
+		Priority:    int(task.Priority),
+	}
+}
+
+func parseSyncPayload(raw string) (syncPayload, bool) {
+	if strings.TrimSpace(raw) == "" {
+		return syncPayload{}, false
+	}
+	var payload syncPayload
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return syncPayload{}, false
+	}
+	return payload, true
+}
+
+func encodeSyncPayload(payload syncPayload) string {
+	raw, _ := json.Marshal(payload)
+	return string(raw)
+}
+
+func fallbackSyncPayload(ref issues.ExternalRef, local, remote domain.Task) syncPayload {
+	switch {
+	case ref.LastSyncHash != "" && issues.HashTaskForSync(local) == ref.LastSyncHash:
+		return syncPayloadFromTask(local)
+	case ref.LastSyncHash != "" && issues.HashTaskForSync(remote) == ref.LastSyncHash:
+		return syncPayloadFromTask(remote)
+	default:
+		return syncPayloadFromTask(remote)
+	}
 }
 
 func (s Service) syncStateID(opts linearapi.ListIssuesOptions) string {
@@ -525,7 +693,7 @@ func mapLinearPriority(priority int) domain.Priority {
 	}
 }
 
-func externalRef(issue linearapi.Issue, issueID, hash string, syncedAt time.Time) issues.ExternalRef {
+func externalRef(issue linearapi.Issue, issueID, hash string, payload syncPayload, syncedAt time.Time) issues.ExternalRef {
 	return issues.ExternalRef{
 		Provider:           ProviderLinear,
 		IssueID:            strings.TrimSpace(issueID),
@@ -535,5 +703,6 @@ func externalRef(issue linearapi.Issue, issueID, hash string, syncedAt time.Time
 		ExternalUpdatedAt:  issue.UpdatedAt,
 		LastSyncedAt:       syncedAt.UTC(),
 		LastSyncHash:       hash,
+		LastSyncPayload:    encodeSyncPayload(payload),
 	}
 }

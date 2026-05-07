@@ -37,11 +37,12 @@ type IssueSyncConfig struct {
 }
 
 type LinearTrackerConfig struct {
-	Command  string               `json:"command"`
-	Team     string               `json:"team"`
-	Project  string               `json:"project"`
-	Filter   *LinearFilterConfig  `json:"filter,omitempty"`
-	Webhooks LinearWebhooksConfig `json:"webhooks"`
+	Command        string               `json:"command"`
+	Team           string               `json:"team"`
+	Project        string               `json:"project"`
+	ConflictPolicy string               `json:"conflictPolicy"`
+	Filter         *LinearFilterConfig  `json:"filter,omitempty"`
+	Webhooks       LinearWebhooksConfig `json:"webhooks"`
 }
 
 type LinearFilterConfig struct {
@@ -176,7 +177,8 @@ func DefaultConfig() *Config {
 				Enabled: false,
 			},
 			Linear: LinearTrackerConfig{
-				Command: "linear-cli",
+				Command:        "linear-cli",
+				ConflictPolicy: "last_write_wins",
 				Webhooks: LinearWebhooksConfig{
 					Transport: "sdk",
 					Events:    []string{},

@@ -25,6 +25,7 @@ type ExternalRef struct {
 	ExternalUpdatedAt  time.Time `json:"external_updated_at,omitempty"`
 	LastSyncedAt       time.Time `json:"last_synced_at"`
 	LastSyncHash       string    `json:"last_sync_hash"`
+	LastSyncPayload    string    `json:"last_sync_payload,omitempty"`
 }
 
 // SyncConflict captures an unresolved field-level external sync conflict.
@@ -143,17 +144,18 @@ func (c *Client) UpsertExternalRef(ctx context.Context, ref ExternalRef) error {
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO azedarach_external_issue_refs (
 			provider, issue_id, external_id, external_identifier, external_url,
-			external_updated_at, last_synced_at, last_sync_hash
+			external_updated_at, last_synced_at, last_sync_hash, last_sync_payload
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(provider, issue_id) DO UPDATE SET
 			external_id = excluded.external_id,
 			external_identifier = excluded.external_identifier,
 			external_url = excluded.external_url,
 			external_updated_at = excluded.external_updated_at,
 			last_synced_at = excluded.last_synced_at,
-			last_sync_hash = excluded.last_sync_hash
-	`, ref.Provider, ref.IssueID, ref.ExternalID, ref.ExternalIdentifier, nullableString(ref.ExternalURL), formatOptionalTime(ref.ExternalUpdatedAt), ref.LastSyncedAt.UTC().Format(time.RFC3339Nano), ref.LastSyncHash)
+			last_sync_hash = excluded.last_sync_hash,
+			last_sync_payload = excluded.last_sync_payload
+	`, ref.Provider, ref.IssueID, ref.ExternalID, ref.ExternalIdentifier, nullableString(ref.ExternalURL), formatOptionalTime(ref.ExternalUpdatedAt), ref.LastSyncedAt.UTC().Format(time.RFC3339Nano), ref.LastSyncHash, nullableString(ref.LastSyncPayload))
 	if err != nil {
 		return c.wrapError("external-ref-upsert", ref.IssueID, err)
 	}
@@ -168,7 +170,7 @@ func (c *Client) ListExternalRefs(ctx context.Context, provider string) ([]Exter
 	rows, err := db.QueryContext(ctx, `
 		SELECT provider, issue_id, external_id, external_identifier,
 			COALESCE(external_url, ''), COALESCE(external_updated_at, ''),
-			last_synced_at, last_sync_hash
+			last_synced_at, last_sync_hash, COALESCE(last_sync_payload, '')
 		FROM azedarach_external_issue_refs
 		WHERE provider = ?
 	`, strings.TrimSpace(provider))
@@ -180,7 +182,7 @@ func (c *Client) ListExternalRefs(ctx context.Context, provider string) ([]Exter
 	for rows.Next() {
 		var ref ExternalRef
 		var externalUpdatedRaw, lastSyncedRaw string
-		if err := rows.Scan(&ref.Provider, &ref.IssueID, &ref.ExternalID, &ref.ExternalIdentifier, &ref.ExternalURL, &externalUpdatedRaw, &lastSyncedRaw, &ref.LastSyncHash); err != nil {
+		if err := rows.Scan(&ref.Provider, &ref.IssueID, &ref.ExternalID, &ref.ExternalIdentifier, &ref.ExternalURL, &externalUpdatedRaw, &lastSyncedRaw, &ref.LastSyncHash, &ref.LastSyncPayload); err != nil {
 			return nil, err
 		}
 		ref.ExternalUpdatedAt = parseTimestamp(externalUpdatedRaw)

@@ -83,6 +83,296 @@ func TestServiceRunTreatsMissingLinearProjectAsTeamOnlySync(t *testing.T) {
 	}
 }
 
+func TestServiceRunUpdatesLocalWhenOnlyLinearChanged(t *testing.T) {
+	base := time.Date(2026, 5, 5, 1, 0, 0, 0, time.UTC)
+	local := domain.Task{
+		ID:          mustIssueID(t, "CHE-1"),
+		Title:       "Original title",
+		Description: "Original body",
+		Priority:    domain.P2,
+		Status:      domain.StatusOpen,
+		CreatedAt:   base,
+		UpdatedAt:   base,
+	}
+	remote := linearapi.Issue{
+		ID:          "lin-1",
+		Identifier:  "CHE-1",
+		Title:       "Linear title",
+		Description: "Original body",
+		Priority:    3,
+		State:       linearapi.State{Name: "Todo", Type: "unstarted"},
+		CreatedAt:   base,
+		UpdatedAt:   base.Add(time.Hour),
+	}
+	store := &fakeStore{
+		tasks: []domain.Task{local},
+		refs: []issues.ExternalRef{{
+			Provider:           ProviderLinear,
+			IssueID:            "CHE-1",
+			ExternalID:         "lin-1",
+			ExternalIdentifier: "CHE-1",
+			LastSyncHash:       issues.HashTaskForSync(local),
+			LastSyncPayload:    encodeSyncPayload(syncPayloadFromTask(local)),
+		}},
+	}
+	linear := &fakeLinear{issues: []linearapi.Issue{remote}}
+	service := Service{
+		Store:     store,
+		Linear:    linear,
+		Config:    config.IssueTrackerConfig{Backend: "linear", Sync: config.IssueSyncConfig{Enabled: true}, Linear: config.LinearTrackerConfig{Team: "CHE"}},
+		ProjectID: "chefy",
+	}
+
+	summary, err := service.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if summary.UpdatedLocal != 1 || summary.PushedRemote != 0 || summary.Conflicts != 0 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	if got := store.tasks[0].Title; got != "Linear title" {
+		t.Fatalf("local title = %q, want Linear title", got)
+	}
+	if len(linear.updates) != 0 {
+		t.Fatalf("updates = %+v, want none", linear.updates)
+	}
+}
+
+func TestServiceRunPushesRemoteWhenOnlyLocalChanged(t *testing.T) {
+	base := time.Date(2026, 5, 5, 1, 0, 0, 0, time.UTC)
+	remote := linearapi.Issue{
+		ID:          "lin-1",
+		Identifier:  "CHE-1",
+		Title:       "Original title",
+		Description: "Original body",
+		Priority:    3,
+		State:       linearapi.State{Name: "Todo", Type: "unstarted"},
+		CreatedAt:   base,
+		UpdatedAt:   base,
+	}
+	remoteTask, ok := taskFromLinear(remote)
+	if !ok {
+		t.Fatal("remote issue did not map to task")
+	}
+	local := remoteTask
+	local.Title = "Local title"
+	local.UpdatedAt = base.Add(time.Hour)
+	store := &fakeStore{
+		tasks: []domain.Task{local},
+		refs: []issues.ExternalRef{{
+			Provider:           ProviderLinear,
+			IssueID:            "CHE-1",
+			ExternalID:         "lin-1",
+			ExternalIdentifier: "CHE-1",
+			LastSyncHash:       issues.HashTaskForSync(remoteTask),
+			LastSyncPayload:    encodeSyncPayload(syncPayloadFromTask(remoteTask)),
+		}},
+	}
+	linear := &fakeLinear{issues: []linearapi.Issue{remote}}
+	service := Service{
+		Store:     store,
+		Linear:    linear,
+		Config:    config.IssueTrackerConfig{Backend: "linear", Sync: config.IssueSyncConfig{Enabled: true}, Linear: config.LinearTrackerConfig{Team: "CHE"}},
+		ProjectID: "chefy",
+	}
+
+	summary, err := service.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if summary.PushedRemote != 1 || summary.UpdatedLocal != 0 || summary.Conflicts != 0 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	if len(linear.updates) != 1 || linear.updates[0].Title != "Local title" {
+		t.Fatalf("updates = %+v, want one local title push", linear.updates)
+	}
+}
+
+func TestServiceRunMergesNonOverlappingLocalAndLinearChanges(t *testing.T) {
+	base := time.Date(2026, 5, 5, 1, 0, 0, 0, time.UTC)
+	original := domain.Task{
+		ID:          mustIssueID(t, "CHE-1"),
+		Title:       "Original title",
+		Description: "Original body",
+		Priority:    domain.P2,
+		Status:      domain.StatusOpen,
+		CreatedAt:   base,
+		UpdatedAt:   base,
+	}
+	local := original
+	local.Title = "Local title"
+	local.UpdatedAt = base.Add(time.Hour)
+	remote := linearapi.Issue{
+		ID:          "lin-1",
+		Identifier:  "CHE-1",
+		Title:       "Original title",
+		Description: "Linear body",
+		Priority:    3,
+		State:       linearapi.State{Name: "Todo", Type: "unstarted"},
+		CreatedAt:   base,
+		UpdatedAt:   base.Add(2 * time.Hour),
+	}
+	store := &fakeStore{
+		tasks: []domain.Task{local},
+		refs: []issues.ExternalRef{{
+			Provider:           ProviderLinear,
+			IssueID:            "CHE-1",
+			ExternalID:         "lin-1",
+			ExternalIdentifier: "CHE-1",
+			LastSyncHash:       issues.HashTaskForSync(original),
+			LastSyncPayload:    encodeSyncPayload(syncPayloadFromTask(original)),
+		}},
+	}
+	linear := &fakeLinear{issues: []linearapi.Issue{remote}}
+	service := Service{
+		Store:     store,
+		Linear:    linear,
+		Config:    config.IssueTrackerConfig{Backend: "linear", Sync: config.IssueSyncConfig{Enabled: true}, Linear: config.LinearTrackerConfig{Team: "CHE"}},
+		ProjectID: "chefy",
+	}
+
+	summary, err := service.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if summary.Conflicts != 0 || summary.PushedRemote != 1 || summary.UpdatedLocal != 1 || summary.PendingPushes != 1 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	if len(linear.updates) != 1 || linear.updates[0].Title != "Local title" {
+		t.Fatalf("updates = %+v, want local title push", linear.updates)
+	}
+	if got := store.tasks[0].Title; got != "Local title" {
+		t.Fatalf("local title = %q, want local value preserved", got)
+	}
+	if got := store.tasks[0].Description; got != "Linear body" {
+		t.Fatalf("local description = %q, want Linear body", got)
+	}
+	if len(store.conflicts) != 0 {
+		t.Fatalf("conflicts = %+v, want none", store.conflicts)
+	}
+}
+
+func TestServiceRunUsesLastWriteWinsForSameFieldByDefault(t *testing.T) {
+	base := time.Date(2026, 5, 5, 1, 0, 0, 0, time.UTC)
+	original := domain.Task{
+		ID:          mustIssueID(t, "CHE-1"),
+		Title:       "Original title",
+		Description: "Original body",
+		Priority:    domain.P2,
+		Status:      domain.StatusOpen,
+		CreatedAt:   base,
+		UpdatedAt:   base,
+	}
+	local := original
+	local.Title = "Local title"
+	local.UpdatedAt = base.Add(time.Hour)
+	remote := linearapi.Issue{
+		ID:          "lin-1",
+		Identifier:  "CHE-1",
+		Title:       "Linear title",
+		Description: "Original body",
+		Priority:    3,
+		State:       linearapi.State{Name: "Todo", Type: "unstarted"},
+		CreatedAt:   base,
+		UpdatedAt:   base.Add(2 * time.Hour),
+	}
+	store := &fakeStore{
+		tasks: []domain.Task{local},
+		refs: []issues.ExternalRef{{
+			Provider:           ProviderLinear,
+			IssueID:            "CHE-1",
+			ExternalID:         "lin-1",
+			ExternalIdentifier: "CHE-1",
+			LastSyncHash:       issues.HashTaskForSync(original),
+			LastSyncPayload:    encodeSyncPayload(syncPayloadFromTask(original)),
+		}},
+	}
+	linear := &fakeLinear{issues: []linearapi.Issue{remote}}
+	service := Service{
+		Store:     store,
+		Linear:    linear,
+		Config:    config.IssueTrackerConfig{Backend: "linear", Sync: config.IssueSyncConfig{Enabled: true}, Linear: config.LinearTrackerConfig{Team: "CHE"}},
+		ProjectID: "chefy",
+	}
+
+	summary, err := service.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if summary.Conflicts != 0 || summary.PushedRemote != 0 || summary.UpdatedLocal != 1 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	if got := store.tasks[0].Title; got != "Linear title" {
+		t.Fatalf("local title = %q, want Linear title", got)
+	}
+	if len(linear.updates) != 0 {
+		t.Fatalf("updates = %+v, want none because Linear won LWW", linear.updates)
+	}
+	if len(store.conflicts) != 0 {
+		t.Fatalf("conflicts = %+v, want none", store.conflicts)
+	}
+}
+
+func TestServiceRunRecordsConflictForSameFieldWhenConfigured(t *testing.T) {
+	base := time.Date(2026, 5, 5, 1, 0, 0, 0, time.UTC)
+	original := domain.Task{
+		ID:          mustIssueID(t, "CHE-1"),
+		Title:       "Original title",
+		Description: "Original body",
+		Priority:    domain.P2,
+		Status:      domain.StatusOpen,
+		CreatedAt:   base,
+		UpdatedAt:   base,
+	}
+	local := original
+	local.Title = "Local title"
+	local.UpdatedAt = base.Add(time.Hour)
+	remote := linearapi.Issue{
+		ID:          "lin-1",
+		Identifier:  "CHE-1",
+		Title:       "Linear title",
+		Description: "Original body",
+		Priority:    3,
+		State:       linearapi.State{Name: "Todo", Type: "unstarted"},
+		CreatedAt:   base,
+		UpdatedAt:   base.Add(2 * time.Hour),
+	}
+	store := &fakeStore{
+		tasks: []domain.Task{local},
+		refs: []issues.ExternalRef{{
+			Provider:           ProviderLinear,
+			IssueID:            "CHE-1",
+			ExternalID:         "lin-1",
+			ExternalIdentifier: "CHE-1",
+			LastSyncHash:       issues.HashTaskForSync(original),
+			LastSyncPayload:    encodeSyncPayload(syncPayloadFromTask(original)),
+		}},
+	}
+	linear := &fakeLinear{issues: []linearapi.Issue{remote}}
+	service := Service{
+		Store:  store,
+		Linear: linear,
+		Config: config.IssueTrackerConfig{
+			Backend: "linear",
+			Sync:    config.IssueSyncConfig{Enabled: true},
+			Linear:  config.LinearTrackerConfig{Team: "CHE", ConflictPolicy: conflictPolicyConflict},
+		},
+		ProjectID: "chefy",
+	}
+
+	summary, err := service.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if summary.Conflicts != 1 || summary.PushedRemote != 0 || summary.UpdatedLocal != 0 || summary.PendingPushes != 0 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	conflict := store.conflicts[0]
+	if conflict.Field != "title" || conflict.LocalValue != "Local title" || conflict.RemoteValue != "Linear title" {
+		t.Fatalf("conflict = %+v", conflict)
+	}
+}
+
 func TestServiceRunResolvesMeAssigneeFilter(t *testing.T) {
 	linear := &fakeLinear{viewerID: "usr_viewer"}
 	service := Service{
