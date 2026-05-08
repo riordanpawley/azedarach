@@ -46,6 +46,17 @@ func (s *Stack) Current() Overlay {
 	return s.overlays[len(s.overlays)-1]
 }
 
+// HasTaskWorkspace reports whether the stack already contains a workspace for taskID.
+func (s *Stack) HasTaskWorkspace(taskID string) bool {
+	for _, candidate := range s.overlays {
+		workspace, ok := candidate.(*TaskWorkspaceOverlay)
+		if ok && workspace.TaskID() == taskID {
+			return true
+		}
+	}
+	return false
+}
+
 // IsEmpty returns true if the stack has no overlays
 func (s *Stack) IsEmpty() bool {
 	return len(s.overlays) == 0
