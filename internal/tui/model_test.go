@@ -3051,6 +3051,32 @@ func assertTaskWorkspaceGraphFocus(t *testing.T, m Model) {
 	}
 }
 
+func TestOpenTaskWorkspaceByIDDoesNotPushDuplicateCurrentWorkspace(t *testing.T) {
+	m := newTestModel()
+	m.nav.SelectTask("az-1", 0)
+
+	updated, cmd := m.openTaskWorkspaceByID("az-1")
+	if cmd == nil {
+		t.Fatal("expected initial workspace open command")
+	}
+	m = updated.(Model)
+
+	updated, _ = m.openTaskWorkspaceByID("az-1")
+	m = updated.(Model)
+
+	current := m.overlayStack.Pop()
+	workspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace overlay, got %T", current)
+	}
+	if got := workspace.TaskID(); got != "az-1" {
+		t.Fatalf("workspace task ID = %q, want az-1", got)
+	}
+	if next := m.overlayStack.Pop(); next != nil {
+		t.Fatalf("expected a single workspace overlay on stack, got extra %T", next)
+	}
+}
+
 func TestSpaceWorkspaceUsesAuthoritativeTaskProjection(t *testing.T) {
 	m := newTestModel()
 	m.editor.EnterNormal()
