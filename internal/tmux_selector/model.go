@@ -36,6 +36,7 @@ type InventoryEntry struct {
 	ProjectPath           string
 	Worktree              string
 	StartedAt             *time.Time
+	LastAttachedAt        *time.Time
 	HasTmuxSession        bool
 	HasWorktree           bool
 	GitAheadCount         int

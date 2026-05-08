@@ -120,16 +120,18 @@ func TestGlobalInventoryLoaderHonorsLimit(t *testing.T) {
 	}
 }
 
-func TestGlobalInventoryLoaderSortsBySessionStartOldestFirst(t *testing.T) {
+func TestGlobalInventoryLoaderSortsByLastAttachedDescending(t *testing.T) {
 	oldest := time.Unix(1775200000, 0).UTC()
 	middle := oldest.Add(30 * time.Minute)
 	youngest := oldest.Add(90 * time.Minute)
+	olderAttach := oldest.Add(2 * time.Hour)
+	newerAttach := oldest.Add(3 * time.Hour)
 	loader := NewGlobalInventoryLoader(
 		fakeSessionInventory{infos: []tmux.SessionInfo{
-			{Name: "az-youngest", CreatedAt: &youngest},
+			{Name: "az-youngest", CreatedAt: &youngest, LastAttachedAt: &olderAttach},
 			{Name: "plain-unknown"},
 			{Name: "az-oldest", CreatedAt: &oldest},
-			{Name: "az-middle", CreatedAt: &middle},
+			{Name: "az-middle", CreatedAt: &middle, LastAttachedAt: &newerAttach},
 		}},
 		nil,
 	)
@@ -142,7 +144,7 @@ func TestGlobalInventoryLoaderSortsBySessionStartOldestFirst(t *testing.T) {
 	for _, entry := range snapshot.Entries {
 		got = append(got, entry.SessionID)
 	}
-	want := []string{"az-oldest", "az-middle", "az-youngest", "plain-unknown"}
+	want := []string{"az-middle", "az-youngest", "az-oldest", "plain-unknown"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("session order = %v, want %v", got, want)
 	}

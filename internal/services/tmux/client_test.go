@@ -424,6 +424,7 @@ func TestClient_ListSessions(t *testing.T) {
 
 func TestClient_ListSessionInfos(t *testing.T) {
 	createdOne := time.Unix(1775209200, 0).UTC()
+	attachedOne := time.Unix(1775212800, 0).UTC()
 	tests := []struct {
 		name    string
 		output  string
@@ -432,11 +433,11 @@ func TestClient_ListSessionInfos(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:   "parses names and created at",
-			output: "session1\t1775209200\nsession2\t\nsession3\tgarbage\n",
+			name:   "parses names created at last attached and path",
+			output: "session1\t1775209200\t1775212800\t/tmp/session1\nsession2\t\t\t/tmp/session2\nsession3\tgarbage\tbad\t\n",
 			want: []SessionInfo{
-				{Name: "session1", CreatedAt: &createdOne},
-				{Name: "session2"},
+				{Name: "session1", CreatedAt: &createdOne, LastAttachedAt: &attachedOne, Path: "/tmp/session1"},
+				{Name: "session2", Path: "/tmp/session2"},
 				{Name: "session3"},
 			},
 		},
@@ -466,15 +467,22 @@ func TestClient_ListSessionInfos(t *testing.T) {
 			require.Len(t, got, len(tt.want))
 			for i := range tt.want {
 				assert.Equal(t, tt.want[i].Name, got[i].Name)
-				if tt.want[i].CreatedAt == nil {
-					assert.Nil(t, got[i].CreatedAt)
-					continue
-				}
-				require.NotNil(t, got[i].CreatedAt)
-				assert.True(t, got[i].CreatedAt.Equal(*tt.want[i].CreatedAt))
+				assertTmuxTimePtrEqual(t, "CreatedAt", tt.want[i].CreatedAt, got[i].CreatedAt)
+				assertTmuxTimePtrEqual(t, "LastAttachedAt", tt.want[i].LastAttachedAt, got[i].LastAttachedAt)
+				assert.Equal(t, tt.want[i].Path, got[i].Path)
 			}
 		})
 	}
+}
+
+func assertTmuxTimePtrEqual(t *testing.T, field string, want, got *time.Time) {
+	t.Helper()
+	if want == nil {
+		assert.Nil(t, got, field)
+		return
+	}
+	require.NotNil(t, got, field)
+	assert.True(t, got.Equal(*want), "%s = %v, want %v", field, got, want)
 }
 
 func TestClient_SetEnvironment(t *testing.T) {

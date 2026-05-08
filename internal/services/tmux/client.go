@@ -17,11 +17,12 @@ type Client struct {
 	logger *slog.Logger
 }
 
-// SessionInfo captures tmux session identity plus creation time.
+// SessionInfo captures tmux session identity plus tmux timestamps.
 type SessionInfo struct {
-	Name      string
-	CreatedAt *time.Time
-	Path      string
+	Name           string
+	CreatedAt      *time.Time
+	LastAttachedAt *time.Time
+	Path           string
 }
 
 // NewClient creates a new tmux client with dependency injection
@@ -202,12 +203,12 @@ func (c *Client) ListSessions(ctx context.Context) ([]string, error) {
 	return sessions, nil
 }
 
-// ListSessionInfos returns tmux sessions with creation timestamps.
-// Uses: tmux list-sessions -F "#{session_name}\t#{session_created}\t#{session_path}"
+// ListSessionInfos returns tmux sessions with timestamps.
+// Uses: tmux list-sessions -F "#{session_name}\t#{session_created}\t#{session_last_attached}\t#{session_path}"
 func (c *Client) ListSessionInfos(ctx context.Context) ([]SessionInfo, error) {
 	c.logger.Debug("listing tmux sessions")
 
-	out, err := c.runner.Run(ctx, "list-sessions", "-F", "#{session_name}\t#{session_created}\t#{session_path}")
+	out, err := c.runner.Run(ctx, "list-sessions", "-F", "#{session_name}\t#{session_created}\t#{session_last_attached}\t#{session_path}")
 	if err != nil {
 		// If no sessions exist, tmux returns an error
 		// Return empty list instead
@@ -226,29 +227,39 @@ func (c *Client) ListSessionInfos(ctx context.Context) ([]SessionInfo, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 3)
+		parts := strings.SplitN(line, "\t", 4)
 		name := strings.TrimSpace(parts[0])
 		if name == "" {
 			continue
 		}
 		info := SessionInfo{Name: name}
 		if len(parts) >= 2 {
-			createdRaw := strings.TrimSpace(parts[1])
-			if createdRaw != "" {
-				if sec, parseErr := strconv.ParseInt(createdRaw, 10, 64); parseErr == nil && sec > 0 {
-					createdAt := time.Unix(sec, 0).UTC()
-					info.CreatedAt = &createdAt
-				}
-			}
+			info.CreatedAt = parseTmuxUnixTime(parts[1])
 		}
-		if len(parts) == 3 {
-			info.Path = strings.TrimSpace(parts[2])
+		if len(parts) >= 3 {
+			info.LastAttachedAt = parseTmuxUnixTime(parts[2])
+		}
+		if len(parts) == 4 {
+			info.Path = strings.TrimSpace(parts[3])
 		}
 		sessions = append(sessions, info)
 	}
 
 	c.logger.Debug("tmux sessions listed", "count", len(sessions))
 	return sessions, nil
+}
+
+func parseTmuxUnixTime(raw string) *time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	sec, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || sec <= 0 {
+		return nil
+	}
+	parsed := time.Unix(sec, 0).UTC()
+	return &parsed
 }
 
 func (c *Client) CurrentSession(ctx context.Context) (string, error) {

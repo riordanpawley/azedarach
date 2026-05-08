@@ -201,6 +201,7 @@ func (l *GlobalInventoryLoader) snapshotFromLive(ctx context.Context, live []tmu
 			ProjectID:      parsed.Project,
 			Worktree:       strings.TrimSpace(info.Path),
 			StartedAt:      info.CreatedAt,
+			LastAttachedAt: info.LastAttachedAt,
 			HasTmuxSession: true,
 			HasWorktree:    strings.TrimSpace(info.Path) != "",
 			State:          domain.SessionWaiting,
@@ -258,13 +259,21 @@ func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map
 
 func (l *GlobalInventoryLoader) snapshotFromEntries(entries []InventoryEntry, enriching bool) Snapshot {
 	sort.SliceStable(entries, func(i, j int) bool {
+		leftAttached := entries[i].LastAttachedAt != nil
+		rightAttached := entries[j].LastAttachedAt != nil
+		if leftAttached != rightAttached {
+			return leftAttached
+		}
+		if leftAttached && rightAttached && !entries[i].LastAttachedAt.Equal(*entries[j].LastAttachedAt) {
+			return entries[i].LastAttachedAt.After(*entries[j].LastAttachedAt)
+		}
 		leftStarted := entries[i].StartedAt != nil
 		rightStarted := entries[j].StartedAt != nil
 		if leftStarted != rightStarted {
 			return leftStarted
 		}
 		if leftStarted && rightStarted && !entries[i].StartedAt.Equal(*entries[j].StartedAt) {
-			return entries[i].StartedAt.Before(*entries[j].StartedAt)
+			return entries[i].StartedAt.After(*entries[j].StartedAt)
 		}
 		leftKnown := entries[i].ProjectPath != ""
 		rightKnown := entries[j].ProjectPath != ""
