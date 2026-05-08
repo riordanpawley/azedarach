@@ -557,6 +557,72 @@ func TestModelGridNavigationFollowsVisualRowsAndColumns(t *testing.T) {
 	}
 }
 
+func TestModelDigitHotkeysSelectFirstTenCardsOnly(t *testing.T) {
+	entries := make([]InventoryEntry, 10)
+	for i := range entries {
+		issueID := string(rune('a' + i))
+		entries[i] = InventoryEntry{
+			SessionID:      "az-" + issueID,
+			IssueID:        issueID,
+			TaskTitle:      issueID,
+			HasTmuxSession: true,
+		}
+	}
+	switcher := &fakeSwitcher{}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}}, WithSwitcher(switcher))
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	for _, tt := range []struct {
+		key  string
+		want int
+	}{
+		{key: "1", want: 0},
+		{key: "2", want: 1},
+		{key: "9", want: 8},
+		{key: "0", want: 9},
+	} {
+		updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tt.key)})
+		model = updated.(Model)
+		if cmd != nil {
+			t.Fatalf("digit key %q returned command", tt.key)
+		}
+		if model.cursor != tt.want {
+			t.Fatalf("digit key %q cursor = %d, want %d", tt.key, model.cursor, tt.want)
+		}
+		if switcher.sessionID != "" {
+			t.Fatalf("digit key %q switched session %q; want selection only", tt.key, switcher.sessionID)
+		}
+	}
+}
+
+func TestModelDigitHotkeyOutOfRangeKeepsCurrentSelection(t *testing.T) {
+	entries := []InventoryEntry{
+		{SessionID: "az-one", IssueID: "one", TaskTitle: "One", HasTmuxSession: true},
+		{SessionID: "az-two", IssueID: "two", TaskTitle: "Two", HasTmuxSession: true},
+		{SessionID: "az-three", IssueID: "three", TaskTitle: "Three", HasTmuxSession: true},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	model.cursor = 1
+
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'0'}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("out-of-range digit returned command")
+	}
+	if model.cursor != 1 {
+		t.Fatalf("cursor = %d, want unchanged index 1", model.cursor)
+	}
+}
+
 func TestModelGotoWordJumpSelectsVisibleSession(t *testing.T) {
 	entries := []InventoryEntry{
 		{SessionID: "az-one", IssueID: "one", TaskTitle: "One", HasTmuxSession: true},

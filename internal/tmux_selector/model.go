@@ -276,6 +276,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q", "esc":
 			return m, tea.Quit
+		case "1", "2", "3", "4", "5", "6", "7", "8", "9", "0":
+			m.selectCardHotkey(msg.String())
+			return m, nil
 		case "g":
 			m.gotoArmed = true
 			m.status = "goto: press w for labels"
@@ -492,6 +495,19 @@ func (m *Model) moveCursor(dx int, dy int) {
 	next := nextRow*columns + nextCol
 	if next >= 0 && next < count {
 		m.cursor = next
+	}
+}
+
+func (m *Model) selectCardHotkey(key string) {
+	index := -1
+	switch key {
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		index = int(key[0] - '1')
+	case "0":
+		index = 9
+	}
+	if index >= 0 && index < len(m.snapshot.Entries) {
+		m.cursor = index
 	}
 }
 
