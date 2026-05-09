@@ -12,7 +12,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
 {{ if .ImplementationSection }}{{ .ImplementationSection }}{{ end }}
 - How to use `az` command map:
   - Issue lifecycle:
-  - `az issue list --limit 20`, `az issue list --status in_progress --limit 20`, `az issue get <issue-id>`, `az issue create "Child task" [--json]` (immediate child work; auto-parents under `AZEDARACH_ISSUE_ID`), `az issue create --deferred "Later backlog task" [--json]` (standalone later work; does not auto-parent), `az issue update <issue-id> --status in_progress|blocked|open [--json]`, `az issue close <issue-id> [--json]`
+  - `az issue list --limit 20`, `az issue list --status in_progress --limit 20`, `az issue get <issue-id>`, `az issue create "Child task" [--json]` (immediate child work; auto-parents under `AZEDARACH_ISSUE_ID`), `az issue create --deferred "Later backlog task" [--json]` (standalone later work; does not auto-parent), `az issue update <issue-id> --status in_progress|blocked|open [--json]`, `az issue close <issue-id> [--json]`, `az issue finalize <issue-id> [--remove-worktree] [--json]`
   - `az issue update`: use `--update-impl` only when changing implementation assignments; status/title/notes updates do not need it.
   - `az issue bulk-create --input issues.json --json`, `az issue bulk-update --input updates.json --json`, `az issue update <issue-id> --design "..."`, `az issue update <issue-id> --notes "..."`, `az issue update <issue-id> --append-notes "..."`
   - Issue dependency graph:
@@ -56,4 +56,4 @@ Active issue ID: `{{ .ActiveIssueID }}`
 {{ end }}- When work is complete:
   - Commit your changes first (`git add -A && git commit -m "<issue-id>: ..."`).
   - Always include the issue ID in the commit message.
-  - Close the issue when implementation is ready for review (`az issue close <issue-id>`).
+  - Close the issue when implementation is ready for review (`az issue close <issue-id>`). Only run `az issue finalize <issue-id>` after the user has reviewed the work and explicitly asked to finalize/clean up the flow.

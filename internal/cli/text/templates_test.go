@@ -16,6 +16,7 @@ func TestRenderIssueHelpPrefersNamedFlagForms(t *testing.T) {
 		"check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]",
 		"doctor [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]",
 		"create [--project <project-id>] [--impl <implementation> ...] [--deferred]",
+		"finalize [--project <project-id>] [--id <issue-id>] [--json] [--remove-worktree] [<issue-id>]",
 		"Argument ordering: place flags/options before positional arguments for deterministic parsing.",
 	} {
 		if !strings.Contains(output, want) {

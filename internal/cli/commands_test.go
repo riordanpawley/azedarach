@@ -2885,6 +2885,64 @@ func TestParseIssueDeleteArgs(t *testing.T) {
 	}
 }
 
+func TestParseIssueFinalizeArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		want        IssueFinalizeOptions
+		errContains string
+	}{
+		{
+			name: "valid",
+			args: []string{"az-1"},
+			want: IssueFinalizeOptions{IssueID: "az-1"},
+		},
+		{
+			name: "named id with worktree removal",
+			args: []string{"--id", "az-2", "--remove-worktree", "--json"},
+			want: IssueFinalizeOptions{IssueID: "az-2", RemoveWorktree: true, JSON: true},
+		},
+		{
+			name:        "forbid impl",
+			args:        []string{"--impl", "go-bubbletea", "az-1"},
+			errContains: "--impl is not supported for issue finalize",
+		},
+		{
+			name:        "missing id",
+			args:        []string{},
+			errContains: "usage: az issue finalize [--project <project-id>] [--id <issue-id>] [--json] [--remove-worktree] [<issue-id>]",
+		},
+		{
+			name:        "extra args",
+			args:        []string{"az-1", "extra"},
+			errContains: "usage: az issue finalize [--project <project-id>] [--id <issue-id>] [--json] [--remove-worktree] [<issue-id>]",
+		},
+		{
+			name: "interspersed named id overrides positional",
+			args: []string{"az-1", "--id", "az-2"},
+			want: IssueFinalizeOptions{IssueID: "az-2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseIssueFinalizeArgs(tt.args)
+			if tt.errContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseIssueFinalizeArgs() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("ParseIssueFinalizeArgs() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseIssueUpdateArgs(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -4422,6 +4480,72 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 }
 
+func TestIssueFinalizeCommandStopsClosesAndOptionallyRemovesWorktree(t *testing.T) {
+	var commands []string
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: "az-9", Title: "Finish flow", Status: domain.StatusInProgress},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            taskListBody,
+					}, nil
+				case commandSessionStop:
+					return responseWithOutput(req, "Session not found in tmux: az-9\n✓ Session marked stopped: az-9\n"), nil
+				case daemonclient.CommandTaskUpdateStatus, daemonclient.CommandWorktreeRemove:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueFinalizeCommand(deps, IssueFinalizeOptions{
+			IssueID:        "az-9",
+			RemoveWorktree: true,
+		})
+	})
+
+	wantCommands := []string{
+		daemonclient.CommandTaskList,
+		commandSessionStop,
+		daemonclient.CommandTaskUpdateStatus,
+		daemonclient.CommandWorktreeRemove,
+	}
+	if !reflect.DeepEqual(commands, wantCommands) {
+		t.Fatalf("commands = %v, want %v", commands, wantCommands)
+	}
+	if !strings.Contains(output, "Finalized issue: az-9") || !strings.Contains(output, "- Worktree removed") {
+		t.Fatalf("output = %q", output)
+	}
+}
+
 func TestIssueCreateCommandAutoParentsAndInheritsImplsFromActiveIssue(t *testing.T) {
 	var requests []protocol.RequestEnvelope
 	deps := &Dependencies{
@@ -5622,6 +5746,9 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	}
 	if !strings.Contains(output, "issue close [--project <project-id>] [--id <id>] [--json] [<id>]") {
 		t.Fatalf("usage missing issue close command: %q", output)
+	}
+	if !strings.Contains(output, "issue finalize [--project <project-id>] [--id <id>] [--json] [--remove-worktree] [<id>]") {
+		t.Fatalf("usage missing issue finalize command: %q", output)
 	}
 	if !strings.Contains(output, "issue delete [--project <project-id>] [--id <id>] [--json] [<id>] --confirm") {
 		t.Fatalf("usage missing issue delete command: %q", output)
