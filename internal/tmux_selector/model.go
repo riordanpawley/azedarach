@@ -385,7 +385,7 @@ func (m Model) View() string {
 	} else {
 		columns := gridColumnCount(m.width)
 		cardWidth := gridCardWidth(m.width, columns)
-		rows := RenderVisibleGridWithLabels(m.snapshot.Entries, m.cursor, columns, cardWidth, maxInt(1, m.height-7), m.styles, m.jumpLabelsByEntry())
+		rows := RenderVisibleGridWithLabels(m.snapshot.Entries, m.cursor, columns, cardWidth, m.gridAvailableHeight(), m.styles, m.jumpLabelsByEntry())
 		for _, row := range rows {
 			b.WriteString(row)
 			b.WriteString("\n")
@@ -518,8 +518,20 @@ func (m Model) visibleEntryIndices() []int {
 	}
 	columns := gridColumnCount(m.width)
 	cardWidth := gridCardWidth(m.width, columns)
-	availableHeight := maxInt(1, m.height-7)
+	availableHeight := m.gridAvailableHeight()
 	return VisibleGridIndices(m.snapshot.Entries, m.cursor, columns, cardWidth, availableHeight, m.styles)
+}
+
+func (m Model) gridAvailableHeight() int {
+	contentHeight := maxInt(0, m.height-1)
+	used := 0
+	if strings.TrimSpace(m.status) != "" {
+		used += lipgloss.Height(m.styles.StatusInfo.Render(m.status))
+	}
+	if m.err != nil {
+		used += lipgloss.Height(m.styles.ToastError.Render("Error: "+m.err.Error())) + 1
+	}
+	return maxInt(1, contentHeight-used)
 }
 
 func (m Model) selectedEntry() (InventoryEntry, bool) {

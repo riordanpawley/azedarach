@@ -489,6 +489,41 @@ func TestModelViewFitsViewportHeightWithWrappedCards(t *testing.T) {
 	}
 }
 
+func TestModelViewUsesRemainingHeightOnNarrowViewport(t *testing.T) {
+	entries := []InventoryEntry{
+		{SessionID: "az-one", IssueID: "one", TaskTitle: "One", HasTmuxSession: true},
+		{SessionID: "az-two", IssueID: "two", TaskTitle: "Two", HasTmuxSession: true},
+		{SessionID: "az-three", IssueID: "three", TaskTitle: "Three", HasTmuxSession: true},
+		{SessionID: "az-four", IssueID: "four", TaskTitle: "Four", HasTmuxSession: true},
+		{SessionID: "az-five", IssueID: "five", TaskTitle: "Five", HasTmuxSession: true},
+		{SessionID: "az-six", IssueID: "six", TaskTitle: "Six", HasTmuxSession: true},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 48, Height: 32})
+	model = updated.(Model)
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	if columns := gridColumnCount(model.width); columns != 1 {
+		t.Fatalf("columns = %d, want narrow one-column layout", columns)
+	}
+	if got, want := model.gridAvailableHeight(), 30; got != want {
+		t.Fatalf("grid height budget = %d, want remaining viewport height %d", got, want)
+	}
+	view := model.View()
+	for _, sessionID := range []string{"az-one", "az-two", "az-three"} {
+		if !strings.Contains(view, sessionID) {
+			t.Fatalf("narrow view should use vertical space and include %s:\n%s", sessionID, view)
+		}
+	}
+	if height := lipgloss.Height(view); height != 32 {
+		t.Fatalf("view height = %d, want exactly 32\n%s", height, view)
+	}
+}
+
 func TestModelViewUsesGridOnWideViewport(t *testing.T) {
 	started := time.Unix(1775209200, 0).UTC()
 	entries := []InventoryEntry{
