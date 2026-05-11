@@ -54,6 +54,16 @@ func (f *fakeSwitcher) SwitchClient(_ context.Context, sessionID string) error {
 	return f.err
 }
 
+type fakeKiller struct {
+	killed []InventoryEntry
+	err    error
+}
+
+func (f *fakeKiller) KillSession(_ context.Context, entry InventoryEntry) error {
+	f.killed = append(f.killed, entry)
+	return f.err
+}
+
 type fakeFullAzSwitcher struct {
 	hasSession bool
 	commands   []string
@@ -400,7 +410,7 @@ func TestModelViewUsesTmuxCopyAndBottomToolbar(t *testing.T) {
 		HasTmuxSession: true,
 	}}
 	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
-	updated, _ := model.Update(tea.WindowSizeMsg{Width: 96, Height: 18})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 112, Height: 18})
 	model = updated.(Model)
 	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
 	model = updated.(Model)
@@ -615,10 +625,10 @@ func TestModelDigitHotkeysSelectFirstTenCardsOnly(t *testing.T) {
 		key  string
 		want int
 	}{
-		{key: "1", want: 0},
-		{key: "2", want: 1},
-		{key: "9", want: 8},
-		{key: "0", want: 9},
+		{key: "0", want: 0},
+		{key: "1", want: 1},
+		{key: "2", want: 2},
+		{key: "9", want: 9},
 	} {
 		updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tt.key)})
 		model = updated.(Model)
@@ -631,6 +641,35 @@ func TestModelDigitHotkeysSelectFirstTenCardsOnly(t *testing.T) {
 		if switcher.sessionID != "" {
 			t.Fatalf("digit key %q switched session %q; want selection only", tt.key, switcher.sessionID)
 		}
+	}
+}
+
+func TestModelDigitHotkeysSelectAzAsFirstCard(t *testing.T) {
+	entries := []InventoryEntry{
+		{SessionID: "aa-task", IssueID: "task-a", TaskTitle: "Task A", HasTmuxSession: true},
+		{SessionID: "az", IssueID: "az", TaskTitle: "az", HasTmuxSession: true},
+		{SessionID: "ab-task", IssueID: "task-b", TaskTitle: "Task B", HasTmuxSession: true},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	if model.snapshot.Entries[0].SessionID != "az" {
+		t.Fatalf("first entry = %q, want az", model.snapshot.Entries[0].SessionID)
+	}
+	if model.cursor != 0 {
+		t.Fatalf("cursor = %d, want 0", model.cursor)
+	}
+
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'0'}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("digit key returned command")
+	}
+	if model.cursor != 0 {
+		t.Fatalf("cursor after 0 = %d, want 0", model.cursor)
 	}
 }
 
@@ -648,13 +687,44 @@ func TestModelDigitHotkeyOutOfRangeKeepsCurrentSelection(t *testing.T) {
 	}
 	model.cursor = 1
 
-	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'0'}})
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'9'}})
 	model = updated.(Model)
 	if cmd != nil {
 		t.Fatalf("out-of-range digit returned command")
 	}
 	if model.cursor != 1 {
 		t.Fatalf("cursor = %d, want unchanged index 1", model.cursor)
+	}
+}
+
+func TestModelViewShowsNumericSelectionLabelsForFirstTenCards(t *testing.T) {
+	entries := make([]InventoryEntry, 10)
+	for i := range entries {
+		entries[i] = InventoryEntry{
+			SessionID:      "az-" + string(rune('a'+i)),
+			IssueID:        "issue-" + string(rune('a'+i)),
+			TaskTitle:      "issue " + string(rune('a'+i)),
+			HasTmuxSession: true,
+		}
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, cmd := model.Update(tea.WindowSizeMsg{Width: 220, Height: 40})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("window resize returned command")
+	}
+	updated, cmd = model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	view := ansi.Strip(model.View())
+	for i := 0; i <= 9; i++ {
+		want := string(rune('0' + i))
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing hotkey %q\n%s", want, view)
+		}
 	}
 }
 
@@ -786,6 +856,145 @@ func TestRenderVisibleRowsFitsMeasuredHeight(t *testing.T) {
 	}
 	if totalHeight > availableHeight {
 		t.Fatalf("rendered rows height = %d, want <= %d\n%s", totalHeight, availableHeight, strings.Join(rendered, "\n"))
+	}
+}
+
+func TestModelHidesEntriesWithoutTmuxSession(t *testing.T) {
+	entries := []InventoryEntry{
+		{SessionID: "az-one", IssueID: "one", TaskTitle: "One", HasTmuxSession: true},
+		{SessionID: "", IssueID: "stale-task", TaskTitle: "Stale", HasTmuxSession: false},
+		{SessionID: "az-two", IssueID: "two", TaskTitle: "Two", HasTmuxSession: true},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	if got := len(model.snapshot.Entries); got != 2 {
+		t.Fatalf("snapshot entries after normalization = %d, want 2 (issue-only entry dropped)", got)
+	}
+	for _, entry := range model.snapshot.Entries {
+		if strings.TrimSpace(entry.SessionID) == "" {
+			t.Fatalf("normalization left an entry with empty SessionID: %+v", entry)
+		}
+	}
+	view := model.View()
+	if strings.Contains(view, "Stale") {
+		t.Fatalf("view should not show issue-only entries: %s", view)
+	}
+}
+
+func TestModelXKillsSelectedSessionAndRefreshes(t *testing.T) {
+	entries := []InventoryEntry{
+		{SessionID: "az-one", IssueID: "one", TaskTitle: "One", HasTmuxSession: true},
+		{SessionID: "az-two", IssueID: "two", TaskTitle: "Two", HasTmuxSession: true},
+	}
+	killer := &fakeKiller{}
+	loader := fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}}
+	model := New(loader, WithKiller(killer))
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: loader.snapshot})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	model = updated.(Model)
+
+	_, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if cmd == nil {
+		t.Fatal("x did not produce kill command")
+	}
+	msg, ok := cmd().(KillResultMsg)
+	if !ok {
+		t.Fatalf("kill msg = %T, want KillResultMsg", msg)
+	}
+	if msg.Err != nil {
+		t.Fatalf("kill returned error: %v", msg.Err)
+	}
+	if got := killer.killed; len(got) != 1 || got[0].SessionID != "az-two" {
+		t.Fatalf("killed entries = %+v, want one entry with SessionID az-two", got)
+	}
+
+	updated, cmd = model.Update(msg)
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("kill success did not trigger a refresh load command")
+	}
+	if !model.loading {
+		t.Fatalf("model should re-enter loading state after kill, got loading=%v", model.loading)
+	}
+	if !strings.Contains(model.status, "killed az-two") {
+		t.Fatalf("status = %q, want killed az-two announcement", model.status)
+	}
+}
+
+func TestModelXFailsGracefullyWhenKillerMissing(t *testing.T) {
+	entries := []InventoryEntry{{SessionID: "az-one", IssueID: "one", TaskTitle: "One", HasTmuxSession: true}}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	_, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if cmd == nil {
+		t.Fatal("x did not produce kill command even without killer")
+	}
+	msg, ok := cmd().(KillResultMsg)
+	if !ok {
+		t.Fatalf("kill msg = %T, want KillResultMsg", msg)
+	}
+	if msg.Err == nil || !strings.Contains(msg.Err.Error(), "unavailable") {
+		t.Fatalf("kill err = %v, want unavailable", msg.Err)
+	}
+	updated, _ = model.Update(msg)
+	model = updated.(Model)
+	if model.err == nil {
+		t.Fatal("expected model err to be populated after kill failure")
+	}
+}
+
+func TestModelXSurfacesKillerError(t *testing.T) {
+	entries := []InventoryEntry{{SessionID: "az-one", IssueID: "one", TaskTitle: "One", HasTmuxSession: true}}
+	killer := &fakeKiller{err: errors.New("kill boom")}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}}, WithKiller(killer))
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	_, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if cmd == nil {
+		t.Fatal("x did not produce kill command")
+	}
+	msg := cmd().(KillResultMsg)
+	if msg.Err == nil {
+		t.Fatal("expected killer error to surface")
+	}
+	updated, refresh := model.Update(msg)
+	model = updated.(Model)
+	if refresh != nil {
+		t.Fatalf("error path should not trigger refresh, got cmd=%v", refresh)
+	}
+	if !strings.Contains(model.status, "kill az-one failed") {
+		t.Fatalf("status = %q, want failure note", model.status)
+	}
+}
+
+func TestModelFooterAdvertisesKillBinding(t *testing.T) {
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: []InventoryEntry{{SessionID: "az-one", IssueID: "one", TaskTitle: "One", HasTmuxSession: true}}}})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	model = updated.(Model)
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: []InventoryEntry{{SessionID: "az-one", IssueID: "one", TaskTitle: "One", HasTmuxSession: true}}}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	if got := ansi.Strip(model.View()); !strings.Contains(got, "x: kill") {
+		t.Fatalf("view missing kill binding hint:\n%s", got)
 	}
 }
 

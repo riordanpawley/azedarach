@@ -51,6 +51,8 @@ type InventoryEntry struct {
 type SessionRow = InventoryEntry
 type Entry = InventoryEntry
 
+type switchCompleteMsg = SwitchResultMsg
+
 type Snapshot struct {
 	Entries          []InventoryEntry
 	Tasks            []domain.Task
@@ -87,6 +89,16 @@ func (f SwitcherFunc) SwitchClient(ctx context.Context, sessionID string) error 
 	return f(ctx, sessionID)
 }
 
+type Killer interface {
+	KillSession(context.Context, InventoryEntry) error
+}
+
+type KillerFunc func(context.Context, InventoryEntry) error
+
+func (f KillerFunc) KillSession(ctx context.Context, entry InventoryEntry) error {
+	return f(ctx, entry)
+}
+
 type DetailOpener interface {
 	OpenDetail(context.Context, InventoryEntry) error
 }
@@ -116,9 +128,16 @@ func WithDetailOpener(opener DetailOpener) Option {
 	}
 }
 
+func WithKiller(killer Killer) Option {
+	return func(m *Model) {
+		m.killer = killer
+	}
+}
+
 type Model struct {
 	loader       SnapshotLoader
 	switcher     Switcher
+	killer       Killer
 	detailOpener DetailOpener
 	styles       *styles.Styles
 
@@ -157,12 +176,15 @@ type DetailOpenResultMsg struct {
 	Err error
 }
 
+type KillResultMsg struct {
+	SessionID string
+	Err       error
+}
+
 type snapshotLoadedMsg struct {
 	snapshot Snapshot
 	err      error
 }
-
-type switchCompleteMsg = SwitchResultMsg
 
 func New(loader SnapshotLoader, opts ...Option) Model {
 	m := Model{
@@ -238,6 +260,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, tea.Quit
+	case KillResultMsg:
+		if msg.Err != nil {
+			m.err = msg.Err
+			m.status = fmt.Sprintf("kill %s failed", msg.SessionID)
+			return m, nil
+		}
+		m.status = fmt.Sprintf("killed %s, refreshing", msg.SessionID)
+		m.loading = true
+		m.err = nil
+		return m, m.loadCmd()
 	case overlay.JumpSelectedMsg:
 		if msg.TaskIndex >= 0 && msg.TaskIndex < len(m.jumpTargets) {
 			m.cursor = m.jumpTargets[msg.TaskIndex]
@@ -321,6 +353,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.status = fmt.Sprintf("Opening %s in full az...", entry.IssueID)
 			return m, m.openDetailCmd(entry)
+		case "x":
+			entry, ok := m.selectedEntry()
+			if !ok {
+				return m, nil
+			}
+			m.status = fmt.Sprintf("killing %s...", killTargetLabel(entry))
+			return m, m.killCmd(entry)
 		}
 	}
 	return m, nil
@@ -336,6 +375,8 @@ func (m *Model) normalizeSnapshot() {
 	if len(m.snapshot.Entries) == 0 && len(m.snapshot.Tasks) > 0 {
 		m.snapshot.Entries = EntriesFromTasks(m.snapshot.Tasks)
 	}
+	m.snapshot.Entries = keepTmuxEntries(m.snapshot.Entries)
+	m.snapshot.Entries = prioritizeAzSessionFirst(m.snapshot.Entries)
 	if current := strings.TrimSpace(m.snapshot.CurrentSessionID); current != "" && !m.defaultedToCurrent {
 		for i, entry := range m.snapshot.Entries {
 			if strings.TrimSpace(entry.SessionID) == current {
@@ -385,7 +426,15 @@ func (m Model) View() string {
 	} else {
 		columns := gridColumnCount(m.width)
 		cardWidth := gridCardWidth(m.width, columns)
-		rows := RenderVisibleGridWithLabels(m.snapshot.Entries, m.cursor, columns, cardWidth, m.gridAvailableHeight(), m.styles, m.jumpLabelsByEntry())
+		rows := RenderVisibleGridWithLabels(
+			m.snapshot.Entries,
+			m.cursor,
+			columns,
+			cardWidth,
+			m.gridAvailableHeight(),
+			m.styles,
+			m.labelsByEntry(),
+		)
 		for _, row := range rows {
 			b.WriteString(row)
 			b.WriteString("\n")
@@ -410,12 +459,35 @@ func (m Model) jumpLabelsByEntry() map[int]string {
 	return labels
 }
 
+func (m Model) cardSelectionLabels() map[int]string {
+	labels := make(map[int]string)
+	limit := len(m.snapshot.Entries)
+	if limit > 10 {
+		limit = 10
+	}
+	for i := 0; i < limit; i++ {
+		labels[i] = string(rune('0' + i))
+	}
+	return labels
+}
+
+func (m Model) labelsByEntry() map[int]string {
+	if m.jumpMode != nil {
+		labels := m.jumpLabelsByEntry()
+		if labels != nil {
+			return labels
+		}
+	}
+	return m.cardSelectionLabels()
+}
+
 func (m Model) renderFooter() string {
 	right := m.styles.StatusHint.Render(keybinds.RenderPlain([]keybinds.Binding{
 		{Key: "h/j/k/l", Description: "move"},
 		{Key: "gw", Description: "labels"},
 		{Key: "Enter/a", Description: "switch"},
 		{Key: "o/Space", Description: "open in az"},
+		{Key: "x", Description: "kill"},
 		{Key: "r", Description: "refresh"},
 		{Key: "q/Esc", Description: "close"},
 	}, "  "))
@@ -502,14 +574,49 @@ func (m *Model) moveCursor(dx int, dy int) {
 func (m *Model) selectCardHotkey(key string) {
 	index := -1
 	switch key {
-	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
-		index = int(key[0] - '1')
-	case "0":
-		index = 9
+	case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		index = int(key[0] - '0')
 	}
 	if index >= 0 && index < len(m.snapshot.Entries) {
 		m.cursor = index
 	}
+}
+
+// keepTmuxEntries enforces the selector invariant: every visible card represents a real tmux session
+// (with an optional az issue id). Today every entry source already populates SessionID — entriesFromLive
+// skips empty session names, EntriesFromTasks computes a canonical id, and daemon enrichment only mutates
+// existing entries — so this filter should be a no-op in production. It exists to document the rule and
+// catch malformed entries from tests or any future enrichment path that forgets it.
+func keepTmuxEntries(entries []InventoryEntry) []InventoryEntry {
+	out := entries[:0]
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.SessionID) == "" {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func prioritizeAzSessionFirst(entries []InventoryEntry) []InventoryEntry {
+	if len(entries) == 0 {
+		return entries
+	}
+	azIndex := -1
+	for i, entry := range entries {
+		if strings.TrimSpace(entry.SessionID) == defaultFullAzSession {
+			azIndex = i
+			break
+		}
+	}
+	if azIndex <= 0 {
+		return entries
+	}
+	reordered := make([]InventoryEntry, len(entries))
+	reordered[0] = entries[azIndex]
+	copy(reordered[1:], entries[:azIndex])
+	copy(reordered[azIndex+1:], entries[azIndex+1:])
+	return reordered
 }
 
 func (m Model) visibleEntryIndices() []int {
@@ -585,6 +692,28 @@ func (m Model) switchCmd(entry InventoryEntry) tea.Cmd {
 		defer cancel()
 		return SwitchResultMsg{Err: m.switcher.SwitchClient(ctx, target)}
 	}
+}
+
+func (m Model) killCmd(entry InventoryEntry) tea.Cmd {
+	label := killTargetLabel(entry)
+	return func() tea.Msg {
+		if m.killer == nil {
+			return KillResultMsg{SessionID: label, Err: fmt.Errorf("tmux killer unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return KillResultMsg{SessionID: label, Err: m.killer.KillSession(ctx, entry)}
+	}
+}
+
+func killTargetLabel(entry InventoryEntry) string {
+	if id := strings.TrimSpace(entry.SessionID); id != "" {
+		return id
+	}
+	if id := strings.TrimSpace(entry.IssueID); id != "" {
+		return id
+	}
+	return "(unknown)"
 }
 
 func (m Model) shouldOpenDetailOnSwitch(entry InventoryEntry) bool {
