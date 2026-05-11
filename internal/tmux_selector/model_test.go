@@ -580,10 +580,10 @@ func TestModelDigitHotkeysSelectFirstTenCardsOnly(t *testing.T) {
 		key  string
 		want int
 	}{
-		{key: "1", want: 0},
-		{key: "2", want: 1},
-		{key: "9", want: 8},
-		{key: "0", want: 9},
+		{key: "0", want: 0},
+		{key: "1", want: 1},
+		{key: "2", want: 2},
+		{key: "9", want: 9},
 	} {
 		updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tt.key)})
 		model = updated.(Model)
@@ -596,6 +596,35 @@ func TestModelDigitHotkeysSelectFirstTenCardsOnly(t *testing.T) {
 		if switcher.sessionID != "" {
 			t.Fatalf("digit key %q switched session %q; want selection only", tt.key, switcher.sessionID)
 		}
+	}
+}
+
+func TestModelDigitHotkeysSelectAzAsFirstCard(t *testing.T) {
+	entries := []InventoryEntry{
+		{SessionID: "aa-task", IssueID: "task-a", TaskTitle: "Task A", HasTmuxSession: true},
+		{SessionID: "az", IssueID: "az", TaskTitle: "az", HasTmuxSession: true},
+		{SessionID: "ab-task", IssueID: "task-b", TaskTitle: "Task B", HasTmuxSession: true},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	if model.snapshot.Entries[0].SessionID != "az" {
+		t.Fatalf("first entry = %q, want az", model.snapshot.Entries[0].SessionID)
+	}
+	if model.cursor != 0 {
+		t.Fatalf("cursor = %d, want 0", model.cursor)
+	}
+
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'0'}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("digit key returned command")
+	}
+	if model.cursor != 0 {
+		t.Fatalf("cursor after 0 = %d, want 0", model.cursor)
 	}
 }
 
@@ -613,13 +642,44 @@ func TestModelDigitHotkeyOutOfRangeKeepsCurrentSelection(t *testing.T) {
 	}
 	model.cursor = 1
 
-	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'0'}})
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'9'}})
 	model = updated.(Model)
 	if cmd != nil {
 		t.Fatalf("out-of-range digit returned command")
 	}
 	if model.cursor != 1 {
 		t.Fatalf("cursor = %d, want unchanged index 1", model.cursor)
+	}
+}
+
+func TestModelViewShowsNumericSelectionLabelsForFirstTenCards(t *testing.T) {
+	entries := make([]InventoryEntry, 10)
+	for i := range entries {
+		entries[i] = InventoryEntry{
+			SessionID:      "az-" + string(rune('a'+i)),
+			IssueID:        "issue-" + string(rune('a'+i)),
+			TaskTitle:      "issue " + string(rune('a'+i)),
+			HasTmuxSession: true,
+		}
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, cmd := model.Update(tea.WindowSizeMsg{Width: 220, Height: 40})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("window resize returned command")
+	}
+	updated, cmd = model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	view := ansi.Strip(model.View())
+	for i := 0; i <= 9; i++ {
+		want := string(rune('0' + i))
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing hotkey %q\n%s", want, view)
+		}
 	}
 }
 

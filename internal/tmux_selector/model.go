@@ -335,6 +335,7 @@ func (m *Model) normalizeSnapshot() {
 	if len(m.snapshot.Entries) == 0 && len(m.snapshot.Tasks) > 0 {
 		m.snapshot.Entries = EntriesFromTasks(m.snapshot.Tasks)
 	}
+	m.snapshot.Entries = prioritizeAzSessionFirst(m.snapshot.Entries)
 	if current := strings.TrimSpace(m.snapshot.CurrentSessionID); current != "" && !m.defaultedToCurrent {
 		for i, entry := range m.snapshot.Entries {
 			if strings.TrimSpace(entry.SessionID) == current {
@@ -384,7 +385,15 @@ func (m Model) View() string {
 	} else {
 		columns := gridColumnCount(m.width)
 		cardWidth := gridCardWidth(m.width, columns)
-		rows := RenderVisibleGridWithLabels(m.snapshot.Entries, m.cursor, columns, cardWidth, maxInt(1, m.height-7), m.styles, m.jumpLabelsByEntry())
+		rows := RenderVisibleGridWithLabels(
+			m.snapshot.Entries,
+			m.cursor,
+			columns,
+			cardWidth,
+			maxInt(1, m.height-7),
+			m.styles,
+			m.labelsByEntry(),
+		)
 		for _, row := range rows {
 			b.WriteString(row)
 			b.WriteString("\n")
@@ -407,6 +416,28 @@ func (m Model) jumpLabelsByEntry() map[int]string {
 		}
 	}
 	return labels
+}
+
+func (m Model) cardSelectionLabels() map[int]string {
+	labels := make(map[int]string)
+	limit := len(m.snapshot.Entries)
+	if limit > 10 {
+		limit = 10
+	}
+	for i := 0; i < limit; i++ {
+		labels[i] = string(rune('0' + i))
+	}
+	return labels
+}
+
+func (m Model) labelsByEntry() map[int]string {
+	if m.jumpMode != nil {
+		labels := m.jumpLabelsByEntry()
+		if labels != nil {
+			return labels
+		}
+	}
+	return m.cardSelectionLabels()
 }
 
 func (m Model) renderFooter() string {
@@ -501,14 +532,33 @@ func (m *Model) moveCursor(dx int, dy int) {
 func (m *Model) selectCardHotkey(key string) {
 	index := -1
 	switch key {
-	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
-		index = int(key[0] - '1')
-	case "0":
-		index = 9
+	case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		index = int(key[0] - '0')
 	}
 	if index >= 0 && index < len(m.snapshot.Entries) {
 		m.cursor = index
 	}
+}
+
+func prioritizeAzSessionFirst(entries []InventoryEntry) []InventoryEntry {
+	if len(entries) == 0 {
+		return entries
+	}
+	azIndex := -1
+	for i, entry := range entries {
+		if strings.TrimSpace(entry.SessionID) == defaultFullAzSession {
+			azIndex = i
+			break
+		}
+	}
+	if azIndex <= 0 {
+		return entries
+	}
+	reordered := make([]InventoryEntry, len(entries))
+	reordered[0] = entries[azIndex]
+	copy(reordered[1:], entries[:azIndex])
+	copy(reordered[azIndex+1:], entries[azIndex+1:])
+	return reordered
 }
 
 func (m Model) visibleEntryIndices() []int {
