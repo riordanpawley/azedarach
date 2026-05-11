@@ -581,6 +581,11 @@ func (m *Model) selectCardHotkey(key string) {
 	}
 }
 
+// keepTmuxEntries enforces the selector invariant: every visible card represents a real tmux session
+// (with an optional az issue id). Today every entry source already populates SessionID — entriesFromLive
+// skips empty session names, EntriesFromTasks computes a canonical id, and daemon enrichment only mutates
+// existing entries — so this filter should be a no-op in production. It exists to document the rule and
+// catch malformed entries from tests or any future enrichment path that forgets it.
 func keepTmuxEntries(entries []InventoryEntry) []InventoryEntry {
 	out := entries[:0]
 	for _, entry := range entries {
