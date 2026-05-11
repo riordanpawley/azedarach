@@ -1096,24 +1096,34 @@ func insertJumpLabel(card string, label string, s *styles.Styles) string {
 }
 
 func insertJumpLabelInCardLine(line string, label string) (string, bool) {
-	left := strings.Index(line, "│ ")
-	right := strings.LastIndex(line, " │")
-	if left < 0 || right <= left+len("│ ") {
+	// Cards are styled with BorderForeground(...), so each "│" is wrapped in
+	// ANSI escape codes (e.g. "\x1b[38;...m│\x1b[0m"). The literal "│ "
+	// substring therefore never appears in colored output, which is why a
+	// byte-level Index/LastIndex search would fall through to the
+	// outside-the-card fallback in production.
+	stripped := ansi.Strip(line)
+	if !strings.HasPrefix(stripped, "│") || !strings.HasSuffix(stripped, "│") {
+		return "", false
+	}
+	visWidth := ansi.StringWidth(line)
+	if visWidth < 5 {
+		return "", false
+	}
+	contentWidth := visWidth - 4 // strip 1 border + 1 padding on each side
+	labelPrefix := label + " "
+	labelWidth := ansi.StringWidth(labelPrefix)
+	if labelWidth >= contentWidth {
 		return "", false
 	}
 
-	prefixEnd := left + len("│ ")
-	prefix := line[:prefixEnd]
-	inner := line[prefixEnd:right]
-	suffix := line[right:]
-	labelPrefix := label + " "
-	innerWidth := ansi.StringWidth(line) - ansi.StringWidth(prefix) - ansi.StringWidth(suffix) - ansi.StringWidth(labelPrefix)
-	if innerWidth < 0 {
-		innerWidth = 0
-	}
-	inner = ansi.Truncate(inner, innerWidth, "…")
-	padding := maxInt(0, innerWidth-ansi.StringWidth(inner))
-	return prefix + labelPrefix + inner + strings.Repeat(" ", padding) + suffix, true
+	leftBorder := ansi.Cut(line, 0, 1)
+	rightBorder := ansi.Cut(line, visWidth-1, visWidth)
+	content := ansi.Cut(line, 2, visWidth-2)
+
+	keepWidth := contentWidth - labelWidth
+	truncated := ansi.Truncate(content, keepWidth, "…")
+	padding := maxInt(0, contentWidth-labelWidth-ansi.StringWidth(truncated))
+	return leftBorder + " " + labelPrefix + truncated + strings.Repeat(" ", padding) + " " + rightBorder, true
 }
 
 func gridColumnCount(width int) int {
