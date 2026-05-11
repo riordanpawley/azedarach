@@ -87,13 +87,13 @@ func (f SwitcherFunc) SwitchClient(ctx context.Context, sessionID string) error 
 }
 
 type Killer interface {
-	KillSession(context.Context, string) error
+	KillSession(context.Context, InventoryEntry) error
 }
 
-type KillerFunc func(context.Context, string) error
+type KillerFunc func(context.Context, InventoryEntry) error
 
-func (f KillerFunc) KillSession(ctx context.Context, sessionID string) error {
-	return f(ctx, sessionID)
+func (f KillerFunc) KillSession(ctx context.Context, entry InventoryEntry) error {
+	return f(ctx, entry)
 }
 
 type DetailOpener interface {
@@ -357,12 +357,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !ok {
 				return m, nil
 			}
-			target := strings.TrimSpace(entry.SessionID)
-			if target == "" {
+			if strings.TrimSpace(entry.SessionID) == "" && strings.TrimSpace(entry.IssueID) == "" {
 				return m, nil
 			}
-			m.status = fmt.Sprintf("killing %s...", target)
-			return m, m.killCmd(target)
+			m.status = fmt.Sprintf("killing %s...", killTargetLabel(entry))
+			return m, m.killCmd(entry)
 		}
 	}
 	return m, nil
@@ -668,15 +667,26 @@ func (m Model) switchCmd(entry InventoryEntry) tea.Cmd {
 	}
 }
 
-func (m Model) killCmd(sessionID string) tea.Cmd {
+func (m Model) killCmd(entry InventoryEntry) tea.Cmd {
+	label := killTargetLabel(entry)
 	return func() tea.Msg {
 		if m.killer == nil {
-			return KillResultMsg{SessionID: sessionID, Err: fmt.Errorf("tmux killer unavailable")}
+			return KillResultMsg{SessionID: label, Err: fmt.Errorf("tmux killer unavailable")}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return KillResultMsg{SessionID: sessionID, Err: m.killer.KillSession(ctx, sessionID)}
+		return KillResultMsg{SessionID: label, Err: m.killer.KillSession(ctx, entry)}
 	}
+}
+
+func killTargetLabel(entry InventoryEntry) string {
+	if id := strings.TrimSpace(entry.SessionID); id != "" {
+		return id
+	}
+	if id := strings.TrimSpace(entry.IssueID); id != "" {
+		return id
+	}
+	return "(unknown)"
 }
 
 func (m Model) shouldOpenDetailOnSwitch(entry InventoryEntry) bool {

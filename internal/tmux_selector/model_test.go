@@ -55,12 +55,12 @@ func (f *fakeSwitcher) SwitchClient(_ context.Context, sessionID string) error {
 }
 
 type fakeKiller struct {
-	killed []string
+	killed []InventoryEntry
 	err    error
 }
 
-func (f *fakeKiller) KillSession(_ context.Context, sessionID string) error {
-	f.killed = append(f.killed, sessionID)
+func (f *fakeKiller) KillSession(_ context.Context, entry InventoryEntry) error {
+	f.killed = append(f.killed, entry)
 	return f.err
 }
 
@@ -851,8 +851,8 @@ func TestModelXKillsSelectedSessionAndRefreshes(t *testing.T) {
 	if msg.Err != nil {
 		t.Fatalf("kill returned error: %v", msg.Err)
 	}
-	if got, want := killer.killed, []string{"az-two"}; len(got) != 1 || got[0] != want[0] {
-		t.Fatalf("killed sessions = %v, want %v", got, want)
+	if got := killer.killed; len(got) != 1 || got[0].SessionID != "az-two" {
+		t.Fatalf("killed entries = %+v, want one entry with SessionID az-two", got)
 	}
 
 	updated, cmd = model.Update(msg)

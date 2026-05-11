@@ -15,7 +15,7 @@ func Run(cfg *config.Config) error {
 	model := New(
 		NewDefaultGlobalInventoryLoader(tmuxClient, logger),
 		WithSwitcher(tmuxClient),
-		WithKiller(tmuxClient),
+		WithKiller(NewDaemonKiller(tmuxClient, logger)),
 		WithDetailOpener(NewDaemonDetailOpener(logger)),
 	)
 	p := tea.NewProgram(model, tea.WithAltScreen())
