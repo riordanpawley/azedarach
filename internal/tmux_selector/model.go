@@ -357,9 +357,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !ok {
 				return m, nil
 			}
-			if strings.TrimSpace(entry.SessionID) == "" && strings.TrimSpace(entry.IssueID) == "" {
-				return m, nil
-			}
 			m.status = fmt.Sprintf("killing %s...", killTargetLabel(entry))
 			return m, m.killCmd(entry)
 		}
@@ -377,6 +374,7 @@ func (m *Model) normalizeSnapshot() {
 	if len(m.snapshot.Entries) == 0 && len(m.snapshot.Tasks) > 0 {
 		m.snapshot.Entries = EntriesFromTasks(m.snapshot.Tasks)
 	}
+	m.snapshot.Entries = keepTmuxEntries(m.snapshot.Entries)
 	m.snapshot.Entries = prioritizeAzSessionFirst(m.snapshot.Entries)
 	if current := strings.TrimSpace(m.snapshot.CurrentSessionID); current != "" && !m.defaultedToCurrent {
 		for i, entry := range m.snapshot.Entries {
@@ -581,6 +579,17 @@ func (m *Model) selectCardHotkey(key string) {
 	if index >= 0 && index < len(m.snapshot.Entries) {
 		m.cursor = index
 	}
+}
+
+func keepTmuxEntries(entries []InventoryEntry) []InventoryEntry {
+	out := entries[:0]
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.SessionID) == "" {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 func prioritizeAzSessionFirst(entries []InventoryEntry) []InventoryEntry {

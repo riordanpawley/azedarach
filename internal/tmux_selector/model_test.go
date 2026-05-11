@@ -824,6 +824,32 @@ func TestRenderVisibleRowsFitsMeasuredHeight(t *testing.T) {
 	}
 }
 
+func TestModelHidesEntriesWithoutTmuxSession(t *testing.T) {
+	entries := []InventoryEntry{
+		{SessionID: "az-one", IssueID: "one", TaskTitle: "One", HasTmuxSession: true},
+		{SessionID: "", IssueID: "stale-task", TaskTitle: "Stale", HasTmuxSession: false},
+		{SessionID: "az-two", IssueID: "two", TaskTitle: "Two", HasTmuxSession: true},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	if got := len(model.snapshot.Entries); got != 2 {
+		t.Fatalf("snapshot entries after normalization = %d, want 2 (issue-only entry dropped)", got)
+	}
+	for _, entry := range model.snapshot.Entries {
+		if strings.TrimSpace(entry.SessionID) == "" {
+			t.Fatalf("normalization left an entry with empty SessionID: %+v", entry)
+		}
+	}
+	view := model.View()
+	if strings.Contains(view, "Stale") {
+		t.Fatalf("view should not show issue-only entries: %s", view)
+	}
+}
+
 func TestModelXKillsSelectedSessionAndRefreshes(t *testing.T) {
 	entries := []InventoryEntry{
 		{SessionID: "az-one", IssueID: "one", TaskTitle: "One", HasTmuxSession: true},
