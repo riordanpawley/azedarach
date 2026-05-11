@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json",
   "$version": 7,
-  "cliTool": "codex",
+  "cliTool": "claude",
   "devServer": {
     "basePort": 3000,
     "environments": {},
@@ -16,9 +16,15 @@
     "workflowMode": "local"
   },
   "githooks": {
+    "bestEffort": true,
     "boundaryCheck": {
       "command": "",
       "enabled": false
+    },
+    "commands": {},
+    "restage": {
+      "enabled": false,
+      "paths": []
     },
     "specSync": {
       "autoStageDocs": true,
@@ -26,16 +32,32 @@
       "enabled": false
     }
   },
+  "issueTracker": {
+    "backend": "local",
+    "linear": {
+      "command": "linear-cli",
+      "conflictPolicy": "last_write_wins",
+      "filter": {
+        "assignee": "me"
+      },
+      "project": "",
+      "team": "",
+      "webhooks": {
+        "enabled": false,
+        "events": [],
+        "port": 0,
+        "secret": "",
+        "transport": "sdk",
+        "url": ""
+      }
+    },
+    "sync": {
+      "enabled": false
+    }
+  },
   "issues": {
     "path": ".azedarach",
     "syncInterval": 300
-  },
-  "issueTracker": {
-    "linear": {
-      "filter": {
-        "assignee": "me"
-      }
-    }
   },
   "keyboard": {
     "jumpLabelChars": "cieahtsn"
