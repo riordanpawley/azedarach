@@ -86,6 +86,16 @@ func (f SwitcherFunc) SwitchClient(ctx context.Context, sessionID string) error 
 	return f(ctx, sessionID)
 }
 
+type Killer interface {
+	KillSession(context.Context, string) error
+}
+
+type KillerFunc func(context.Context, string) error
+
+func (f KillerFunc) KillSession(ctx context.Context, sessionID string) error {
+	return f(ctx, sessionID)
+}
+
 type DetailOpener interface {
 	OpenDetail(context.Context, InventoryEntry) error
 }
@@ -115,9 +125,16 @@ func WithDetailOpener(opener DetailOpener) Option {
 	}
 }
 
+func WithKiller(killer Killer) Option {
+	return func(m *Model) {
+		m.killer = killer
+	}
+}
+
 type Model struct {
 	loader       SnapshotLoader
 	switcher     Switcher
+	killer       Killer
 	detailOpener DetailOpener
 	styles       *styles.Styles
 
@@ -154,6 +171,11 @@ type SwitchResultMsg struct {
 
 type DetailOpenResultMsg struct {
 	Err error
+}
+
+type KillResultMsg struct {
+	SessionID string
+	Err       error
 }
 
 type snapshotLoadedMsg struct {
@@ -237,6 +259,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, tea.Quit
+	case KillResultMsg:
+		if msg.Err != nil {
+			m.err = msg.Err
+			m.status = fmt.Sprintf("kill %s failed", msg.SessionID)
+			return m, nil
+		}
+		m.status = fmt.Sprintf("killed %s, refreshing", msg.SessionID)
+		m.loading = true
+		m.err = nil
+		return m, m.loadCmd()
 	case overlay.JumpSelectedMsg:
 		if msg.TaskIndex >= 0 && msg.TaskIndex < len(m.jumpTargets) {
 			m.cursor = m.jumpTargets[msg.TaskIndex]
@@ -320,6 +352,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.status = fmt.Sprintf("Opening %s in full az...", entry.IssueID)
 			return m, m.openDetailCmd(entry)
+		case "x":
+			entry, ok := m.selectedEntry()
+			if !ok {
+				return m, nil
+			}
+			target := strings.TrimSpace(entry.SessionID)
+			if target == "" {
+				return m, nil
+			}
+			m.status = fmt.Sprintf("killing %s...", target)
+			return m, m.killCmd(target)
 		}
 	}
 	return m, nil
@@ -446,6 +489,7 @@ func (m Model) renderFooter() string {
 		{Key: "gw", Description: "labels"},
 		{Key: "Enter/a", Description: "switch"},
 		{Key: "o/Space", Description: "open in az"},
+		{Key: "x", Description: "kill"},
 		{Key: "r", Description: "refresh"},
 		{Key: "q/Esc", Description: "close"},
 	}, "  "))
@@ -621,6 +665,17 @@ func (m Model) switchCmd(entry InventoryEntry) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		return SwitchResultMsg{Err: m.switcher.SwitchClient(ctx, target)}
+	}
+}
+
+func (m Model) killCmd(sessionID string) tea.Cmd {
+	return func() tea.Msg {
+		if m.killer == nil {
+			return KillResultMsg{SessionID: sessionID, Err: fmt.Errorf("tmux killer unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return KillResultMsg{SessionID: sessionID, Err: m.killer.KillSession(ctx, sessionID)}
 	}
 }
 
