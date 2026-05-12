@@ -3077,6 +3077,60 @@ func TestOpenTaskWorkspaceByIDDoesNotPushDuplicateCurrentWorkspace(t *testing.T)
 	}
 }
 
+func TestOpenTaskWorkspaceByIDPromotesBuriedWorkspaceToTop(t *testing.T) {
+	m := newTestModel()
+
+	updated, _ := m.openTaskWorkspaceByID("az-1")
+	m = updated.(Model)
+	updated, _ = m.openTaskWorkspaceByID("az-2")
+	m = updated.(Model)
+
+	updated, _ = m.openTaskWorkspaceByID("az-1")
+	m = updated.(Model)
+
+	top, ok := m.overlayStack.Pop().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace on top")
+	}
+	if got := top.TaskID(); got != "az-1" {
+		t.Fatalf("top workspace task ID = %q, want az-1 (should be promoted to top)", got)
+	}
+
+	below, ok := m.overlayStack.Pop().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace below the top")
+	}
+	if got := below.TaskID(); got != "az-2" {
+		t.Fatalf("buried workspace task ID = %q, want az-2", got)
+	}
+
+	if extra := m.overlayStack.Pop(); extra != nil {
+		t.Fatalf("expected only two workspaces, got extra %T", extra)
+	}
+}
+
+func TestOpenTaskWorkspaceByIDPromoteWithoutDuplicating(t *testing.T) {
+	m := newTestModel()
+
+	updated, _ := m.openTaskWorkspaceByID("az-1")
+	m = updated.(Model)
+	updated, _ = m.openTaskWorkspaceByID("az-2")
+	m = updated.(Model)
+	updated, _ = m.openTaskWorkspaceByID("az-1")
+	m = updated.(Model)
+
+	count := 0
+	for {
+		if m.overlayStack.Pop() == nil {
+			break
+		}
+		count++
+	}
+	if count != 2 {
+		t.Fatalf("expected exactly two overlays on the stack, got %d", count)
+	}
+}
+
 func TestSpaceWorkspaceUsesAuthoritativeTaskProjection(t *testing.T) {
 	m := newTestModel()
 	m.editor.EnterNormal()

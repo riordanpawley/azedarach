@@ -412,16 +412,13 @@ func (m Model) openTaskWorkspaceByID(taskID string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if workspace, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); ok && workspace.TaskID() == taskID {
+	if workspace, ok := m.overlayStack.PromoteTaskWorkspace(taskID); ok {
 		workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
 		workspace.SyncTask(*task, m.tasks, m.pendingMutationForTask(taskID))
 		if m.daemonClient == nil {
 			return m, nil
 		}
 		return m, m.refreshTaskWorkspaceInBackgroundCmd(taskID)
-	}
-	if m.overlayStack.HasTaskWorkspace(taskID) {
-		return m, nil
 	}
 
 	workspace := overlay.NewTaskWorkspaceOverlay(*task, m.tasks, m.pendingMutationForTask(taskID), m.width, m.height)

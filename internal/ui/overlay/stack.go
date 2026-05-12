@@ -46,15 +46,23 @@ func (s *Stack) Current() Overlay {
 	return s.overlays[len(s.overlays)-1]
 }
 
-// HasTaskWorkspace reports whether the stack already contains a workspace for taskID.
-func (s *Stack) HasTaskWorkspace(taskID string) bool {
-	for _, candidate := range s.overlays {
+// PromoteTaskWorkspace moves the workspace for taskID to the top of the stack
+// while preserving its in-memory state (scroll position, graph focus, freshness).
+// Returns the promoted workspace and true if found; nil and false otherwise.
+func (s *Stack) PromoteTaskWorkspace(taskID string) (*TaskWorkspaceOverlay, bool) {
+	for i, candidate := range s.overlays {
 		workspace, ok := candidate.(*TaskWorkspaceOverlay)
-		if ok && workspace.TaskID() == taskID {
-			return true
+		if !ok || workspace.TaskID() != taskID {
+			continue
 		}
+		if i == len(s.overlays)-1 {
+			return workspace, true
+		}
+		s.overlays = append(s.overlays[:i], s.overlays[i+1:]...)
+		s.overlays = append(s.overlays, workspace)
+		return workspace, true
 	}
-	return false
+	return nil, false
 }
 
 // IsEmpty returns true if the stack has no overlays
