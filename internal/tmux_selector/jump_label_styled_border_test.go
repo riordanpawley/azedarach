@@ -89,3 +89,23 @@ func TestInsertJumpLabelStaysInsideStyledBorder(t *testing.T) {
 		}
 	}
 }
+
+// TestInsertJumpLabelHasContrastingBackground verifies the label is rendered
+// with a high-contrast badge style (foreground + background + bold) so it
+// pops against the surrounding cell content. This guards against a regression
+// to the prior MenuKey rendering, which used only foreground+bold and could
+// blend in next to the equally-bold yellow P2 priority badge.
+func TestInsertJumpLabelHasContrastingBackground(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+
+	rendered := jumpLabelStyle.Render("9")
+	// Background SGR codes use parameter "48" (e.g. "\x1b[48;2;...m").
+	if !strings.Contains(rendered, "\x1b[") || !strings.Contains(rendered, ";48;") && !strings.Contains(rendered, "[48;") {
+		t.Fatalf("jump label is missing a background SGR — won't pop visually:\n%q", rendered)
+	}
+	if !strings.Contains(rendered, "[1;") && !strings.Contains(rendered, ";1m") && !strings.Contains(rendered, "[1m") {
+		t.Fatalf("jump label is missing the bold SGR:\n%q", rendered)
+	}
+}

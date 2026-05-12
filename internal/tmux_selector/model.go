@@ -1079,12 +1079,16 @@ func renderGridRow(rendered []string, gridRow int, columns int) string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, cells...)
 }
 
-func insertJumpLabel(card string, label string, s *styles.Styles) string {
+func insertJumpLabel(card string, label string, _ *styles.Styles) string {
 	lines := strings.Split(card, "\n")
 	if len(lines) == 0 {
 		return card
 	}
-	label = s.MenuKey.Render(label)
+	// Pink background with the dark base foreground keeps the label readable
+	// against any cell content and avoids the colors used by priority badges
+	// (Red/Peach/Yellow/Green/Overlay0) and type badges (Mauve/Green/Red/Blue/
+	// Yellow), so it pops without colliding with existing semantics.
+	label = jumpLabelStyle.Render(label)
 	for i, line := range lines {
 		if next, ok := insertJumpLabelInCardLine(line, label); ok {
 			lines[i] = next
@@ -1094,6 +1098,11 @@ func insertJumpLabel(card string, label string, s *styles.Styles) string {
 	lines[0] = label + " " + lines[0]
 	return strings.Join(lines, "\n")
 }
+
+var jumpLabelStyle = lipgloss.NewStyle().
+	Foreground(styles.Base).
+	Background(styles.Pink).
+	Bold(true)
 
 func insertJumpLabelInCardLine(line string, label string) (string, bool) {
 	// Cards are styled with BorderForeground(...), so each "│" is wrapped in
