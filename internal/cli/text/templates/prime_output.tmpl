@@ -30,6 +30,10 @@ Active issue ID: `{{ .ActiveIssueID }}`
 - Use `az issue` commands as the task-tracker interface for this repo.
 - Prefer `az issue` operations over direct backend issue CLI commands in sessions.
 - Create follow-up/child work in the tracker instead of local TODOs.
+- Parent vs child issue scope:
+  - Parent/epic issues describe the overarching goal, scope, and success criteria; keep their description high-level and stable.
+  - Track subtask goals, implementation steps, and nitty-gritty decisions in child issues created with `az issue create "Child task"`, not buried inside the parent's description or notes.
+  - When a new subtask surfaces mid-work, create a child issue immediately rather than expanding the parent's description; link extra dependencies with `az issue dep add` when needed.
 {{ if .ActiveIssueClosedWarning }}{{ .ActiveIssueClosedWarning }}
 {{ end }}
 {{ if .IssueSection }}{{ .IssueSection }}
@@ -46,7 +50,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Missing fields (for example description/notes) are valid. Treat absent or empty fields as intentional and continue execution.
 {{ if .ImplementationGuardrails }}{{ .ImplementationGuardrails }}
 {{ end }}- Keep issue context current as you work:
-  - Update design/notes as implementation decisions change.
+  - Update the active issue's design/notes as decisions change; capture subtask-level detail on the relevant child issue instead of bloating a parent/epic description.
   - Use status/priority/labels flags when state changes materially.
 - Overlay edits: check `az spec read --issue <issue-id>` before behavior changes, keep `View()` and `Size()` aligned, validate default and narrow viewports, and update goldens when rendered output changes. If the work is docs/process-only, record `Spec impact: none (docs/process-only)` in issue notes.
 - `az issue --help`

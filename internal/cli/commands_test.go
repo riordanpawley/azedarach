@@ -5891,6 +5891,21 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Do not use `--deferred` for child tasks, blockers, or work required before closing the active issue") {
 		t.Fatalf("prime output missing deferred blocker guardrail: %q", output)
 	}
+	if !strings.Contains(output, "Parent vs child issue scope:") {
+		t.Fatalf("prime output missing parent-vs-child scope section: %q", output)
+	}
+	if !strings.Contains(output, "Parent/epic issues describe the overarching goal, scope, and success criteria; keep their description high-level and stable.") {
+		t.Fatalf("prime output missing parent overarching-goal guidance: %q", output)
+	}
+	if !strings.Contains(output, "Track subtask goals, implementation steps, and nitty-gritty decisions in child issues created with `az issue create \"Child task\"`, not buried inside the parent's description or notes.") {
+		t.Fatalf("prime output missing subtask-detail-into-child-issue guidance: %q", output)
+	}
+	if !strings.Contains(output, "When a new subtask surfaces mid-work, create a child issue immediately rather than expanding the parent's description") {
+		t.Fatalf("prime output missing mid-work child-issue creation guidance: %q", output)
+	}
+	if !strings.Contains(output, "capture subtask-level detail on the relevant child issue instead of bloating a parent/epic description") {
+		t.Fatalf("prime output missing keep-current parent/child notes guidance: %q", output)
+	}
 }
 
 func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
