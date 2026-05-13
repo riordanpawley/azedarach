@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -475,6 +476,62 @@ func TestRenderSessionRowStylesInsertedMetaBordersLikeCardBorders(t *testing.T) 
 	}
 	if got, want := ansi.Cut(metaLine, width-1, width), ansi.Cut(referenceLine, width-1, width); got != want {
 		t.Fatalf("right meta border should reuse styled card border:\ngot  %q\nwant %q\n%s", got, want, rendered)
+	}
+}
+
+func TestRenderSessionRow_OriginBadgeOnMetaLine(t *testing.T) {
+	cases := []struct {
+		name     string
+		origin   string
+		want     string
+		expected bool
+	}{
+		{name: "linear", origin: "linear", want: "lin", expected: true},
+		{name: "local", origin: "local", want: "loc", expected: true},
+		{name: "github", origin: "github", want: "gh", expected: true},
+		{name: "empty_omits_badge", origin: "", want: "", expected: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			row := SessionRow{
+				SessionID:      "az-proj-one",
+				IssueID:        "one",
+				TaskTitle:      "Origin badge test",
+				HasTmuxSession: true,
+				Task: domain.Task{
+					ID:       naming.IssueID("one"),
+					Title:    "Origin badge test",
+					Status:   domain.StatusInProgress,
+					Priority: domain.P2,
+					Type:     domain.TypeTask,
+					Origin:   tc.origin,
+				},
+			}
+			rendered := RenderSessionRow(row, false, 50, lipgloss.Style{}, lipgloss.Style{}, lipgloss.Style{}, styles.New())
+			lines := strings.Split(ansi.Strip(rendered), "\n")
+			var metaLine string
+			for _, line := range lines {
+				if strings.Contains(line, "tmux az-proj-one") {
+					metaLine = line
+					break
+				}
+			}
+			if metaLine == "" {
+				t.Fatalf("missing tmux metadata line:\n%s", rendered)
+			}
+			trimmed := strings.TrimRight(strings.TrimSuffix(strings.TrimPrefix(metaLine, "│"), "│"), " ")
+			if !tc.expected {
+				for _, marker := range []string{"lin", "loc", "gh"} {
+					if strings.HasSuffix(trimmed, marker) {
+						t.Fatalf("expected no badge on meta line for empty origin, found %q in %q", marker, metaLine)
+					}
+				}
+				return
+			}
+			if !strings.HasSuffix(trimmed, tc.want) {
+				t.Fatalf("expected meta line to end with badge %q, got %q\nfull view:\n%s", tc.want, metaLine, rendered)
+			}
+		})
 	}
 }
 

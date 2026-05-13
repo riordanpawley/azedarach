@@ -26,6 +26,7 @@ func CreatePlaceholderData() []Column {
 					Priority: domain.P2,
 					Type:     domain.TypeTask,
 					Status:   domain.StatusOpen,
+					Origin:   "local",
 				},
 				{
 					ID:       "az-2",
@@ -33,6 +34,7 @@ func CreatePlaceholderData() []Column {
 					Priority: domain.P1,
 					Type:     domain.TypeFeature,
 					Status:   domain.StatusOpen,
+					Origin:   "linear",
 				},
 				{
 					ID:       "az-5",
@@ -40,6 +42,7 @@ func CreatePlaceholderData() []Column {
 					Priority: domain.P3,
 					Type:     domain.TypeTask,
 					Status:   domain.StatusOpen,
+					Origin:   "local",
 				},
 			},
 		},
@@ -52,6 +55,7 @@ func CreatePlaceholderData() []Column {
 					Priority: domain.P1,
 					Type:     domain.TypeBug,
 					Status:   domain.StatusInProgress,
+					Origin:   "linear",
 				},
 				{
 					ID:       "az-4",
@@ -59,6 +63,7 @@ func CreatePlaceholderData() []Column {
 					Priority: domain.P2,
 					Type:     domain.TypeEpic,
 					Status:   domain.StatusInProgress,
+					Origin:   "local",
 				},
 			},
 		},
@@ -71,6 +76,7 @@ func CreatePlaceholderData() []Column {
 					Priority: domain.P0,
 					Type:     domain.TypeTask,
 					Status:   domain.StatusBlocked,
+					Origin:   "local",
 				},
 			},
 		},
@@ -83,6 +89,7 @@ func CreatePlaceholderData() []Column {
 					Priority: domain.P3,
 					Type:     domain.TypeTask,
 					Status:   domain.StatusDone,
+					Origin:   "linear",
 				},
 				{
 					ID:       "az-8",
@@ -90,6 +97,7 @@ func CreatePlaceholderData() []Column {
 					Priority: domain.P4,
 					Type:     domain.TypeTask,
 					Status:   domain.StatusDone,
+					Origin:   "local",
 				},
 			},
 		},

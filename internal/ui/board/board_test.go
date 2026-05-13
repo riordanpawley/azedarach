@@ -239,14 +239,15 @@ func TestRenderCard_OriginBadgeBottomRight(t *testing.T) {
 	s := styles.New()
 
 	cases := []struct {
-		name   string
-		origin string
-		want   string
+		name      string
+		origin    string
+		want      string
+		expectAny bool
 	}{
-		{name: "linear", origin: "linear", want: "lin"},
-		{name: "local_explicit", origin: "local", want: "loc"},
-		{name: "local_default_when_unset", origin: "", want: "loc"},
-		{name: "github", origin: "github", want: "gh"},
+		{name: "linear", origin: "linear", want: "lin", expectAny: true},
+		{name: "local_explicit", origin: "local", want: "loc", expectAny: true},
+		{name: "github", origin: "github", want: "gh", expectAny: true},
+		{name: "empty_renders_no_badge", origin: "", want: "", expectAny: false},
 	}
 
 	for _, tc := range cases {
@@ -265,6 +266,14 @@ func TestRenderCard_OriginBadgeBottomRight(t *testing.T) {
 				t.Fatalf("unexpected card with %d lines: %q", len(lines), view)
 			}
 			lastContent := lines[len(lines)-2]
+			if !tc.expectAny {
+				for _, marker := range []string{"lin", "loc", "gh"} {
+					if strings.Contains(lastContent, marker) {
+						t.Fatalf("expected no badge for empty origin, got %q in %q", marker, lastContent)
+					}
+				}
+				return
+			}
 			if !strings.Contains(lastContent, tc.want) {
 				t.Fatalf("expected last content line to contain %q (origin=%q), got %q\nfull view:\n%s", tc.want, tc.origin, lastContent, view)
 			}
