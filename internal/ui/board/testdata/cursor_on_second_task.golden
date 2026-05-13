@@ -4,14 +4,14 @@
 │                            ││                            ││                            ││                            │
 │ Implement user authentic   ││ API endpoint refactor      ││ Deploy to production       ││ Setup CI/CD pipeline       │
 │ ation                      ││                            ││                            ││                            │
-│                      loc   ││                      loc   ││                      loc   ││                      loc   │
+│                      loc   ││                      lin   ││                      loc   ││                      lin   │
 ╰────────────────────────────╯╰────────────────────────────╯╰────────────────────────────╯╰────────────────────────────╯
 ╭────────────────────────────╮╭────────────────────────────╮                              ╭────────────────────────────╮
 │  P1  ▶az-2  F              ││  P2  az-4  E               │                              │  P4  az-8  T               │
 │                            ││                            │                              │                            │
 │ Fix login redirect bug     ││ Database migration epic    │                              │ Configure monitoring       │
 │                            ││                            │                              │                            │
-│                      loc   ││                      loc   │                              │                      loc   │
+│                      lin   ││                      loc   │                              │                      loc   │
 ╰────────────────────────────╯╰────────────────────────────╯                              ╰────────────────────────────╯
 ╭────────────────────────────╮                                                                                          
 │  P3  az-5  T               │                                                                                          

@@ -885,7 +885,6 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 		GitAdditions:          row.GitAdditions,
 		GitDeletions:          row.GitDeletions,
 	}
-	card := board.RenderCardWithRuntimeSignals(task, signals, selected, false, width, s)
 	project := firstNonEmpty(row.ProjectPath, row.ProjectID)
 	metaParts := []string{}
 	if row.SessionID != "" {
@@ -894,14 +893,21 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 	if project != "" {
 		metaParts = append(metaParts, project)
 	}
+	origin := task.Origin
+	if len(metaParts) > 0 {
+		// Origin badge will be rendered at the bottom-right of the meta line
+		// instead of the inner content line, so suppress the in-card overlay.
+		task.Origin = ""
+	}
+	card := board.RenderCardWithRuntimeSignals(task, signals, selected, false, width, s)
 	if len(metaParts) == 0 {
 		return card
 	}
 	meta := strings.Join(metaParts, "  ")
-	return insertCardMetaLine(card, meta, s)
+	return insertCardMetaLine(card, meta, origin, s)
 }
 
-func insertCardMetaLine(card string, meta string, s *styles.Styles) string {
+func insertCardMetaLine(card string, meta string, origin string, s *styles.Styles) string {
 	meta = strings.TrimSpace(meta)
 	if meta == "" {
 		return card
@@ -912,12 +918,28 @@ func insertCardMetaLine(card string, meta string, s *styles.Styles) string {
 	}
 	width := ansi.StringWidth(lines[0])
 	innerWidth := maxInt(1, width-4)
-	meta = ansi.Truncate(meta, innerWidth, "…")
-	padding := maxInt(0, innerWidth-ansi.StringWidth(meta))
+
+	badge := board.RenderOriginBadge(origin)
+	badgeWidth := ansi.StringWidth(badge)
+	if badgeWidth >= innerWidth-1 {
+		// Card is too narrow to fit both meta and badge; drop the badge.
+		badge = ""
+		badgeWidth = 0
+	}
+	metaRoom := innerWidth - badgeWidth
+	if badgeWidth > 0 {
+		metaRoom -= 1 // single-space gap before badge
+	}
+	if metaRoom < 1 {
+		metaRoom = 1
+	}
+	meta = ansi.Truncate(meta, metaRoom, "…")
+	renderedMeta := s.StatusInfo.Render(meta)
+	padding := maxInt(0, innerWidth-ansi.StringWidth(renderedMeta)-badgeWidth)
 	referenceLine := lines[maxInt(0, len(lines)-2)]
 	leftBorder := ansi.Cut(referenceLine, 0, 1)
 	rightBorder := ansi.Cut(referenceLine, maxInt(0, width-1), width)
-	metaLine := leftBorder + " " + s.StatusInfo.Render(meta) + strings.Repeat(" ", padding) + " " + rightBorder
+	metaLine := leftBorder + " " + renderedMeta + strings.Repeat(" ", padding) + badge + " " + rightBorder
 	out := make([]string, 0, len(lines)+1)
 	out = append(out, lines[:len(lines)-1]...)
 	out = append(out, metaLine)

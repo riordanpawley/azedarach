@@ -183,13 +183,17 @@ func overlayOriginBadge(line string, maxLineLen int, origin string) string {
 	return truncated + strings.Repeat(" ", gap) + badge
 }
 
-// renderOriginBadge returns a styled badge identifying the origination of an
+// RenderOriginBadge returns a styled badge identifying the origination of an
 // issue (e.g. "linear" vs "local"). Unknown providers render with a neutral
 // fallback style so new providers are still visible without code changes.
+func RenderOriginBadge(origin string) string {
+	return renderOriginBadge(origin)
+}
+
 func renderOriginBadge(origin string) string {
 	origin = strings.TrimSpace(strings.ToLower(origin))
 	if origin == "" {
-		origin = "local"
+		return ""
 	}
 	var (
 		label string
