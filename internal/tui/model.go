@@ -748,7 +748,7 @@ func (m Model) handleJumpMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) startJumpMode() {
-	targets := m.boardRenderedTasks()
+	targets := m.runtimeSignalRefreshTasks()
 	if len(targets) == 0 {
 		m.clearJumpMode()
 		return
