@@ -170,8 +170,8 @@ func (m *ProjectSelector) viewList() string {
 				{Key: "Esc", Description: "close"},
 			}, 0, keybinds.Theme{
 				KeyStyle:         m.styles.MenuKey,
-				DescriptionStyle: m.styles.Footer.Copy().MarginTop(0),
-				FooterStyle:      m.styles.Footer.Copy().MarginTop(0),
+				DescriptionStyle: m.styles.Footer.MarginTop(0),
+				FooterStyle:      m.styles.Footer.MarginTop(0),
 			})
 		},
 	})
@@ -206,7 +206,7 @@ func (m *ProjectSelector) renderProjectListContent() string {
 
 		list.WriteString(style.Render(line))
 		list.WriteString("\n")
-		list.WriteString(m.styles.Footer.Copy().MarginTop(0).Render(fmt.Sprintf("   %s", project.Path)))
+		list.WriteString(m.styles.Footer.MarginTop(0).Render(fmt.Sprintf("   %s", project.Path)))
 		list.WriteString("\n")
 	}
 	return strings.TrimRight(list.String(), "\n")

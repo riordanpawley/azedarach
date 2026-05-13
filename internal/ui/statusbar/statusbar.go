@@ -125,7 +125,7 @@ func (sb StatusBar) Render() string {
 
 	mandatorySlots := make([]statusSlot, 0, 2)
 	if strings.TrimSpace(sb.alertIndicator) != "" {
-		mandatorySlots = append(mandatorySlots, statusSlot{style: sb.styles.StatusHint.Copy().Bold(true), text: sb.alertIndicator})
+		mandatorySlots = append(mandatorySlots, statusSlot{style: sb.styles.StatusHint.Bold(true), text: sb.alertIndicator})
 	}
 	if strings.TrimSpace(sb.filterSummary) != "" {
 		mandatorySlots = append(mandatorySlots, statusSlot{style: sb.styles.StatusInfo, text: sb.filterSummary})
@@ -154,7 +154,7 @@ func (sb StatusBar) Render() string {
 	}
 
 	if sb.currentProject != "" {
-		projectStyle := sb.styles.StatusInfo.Copy().Bold(true)
+		projectStyle := sb.styles.StatusInfo.Bold(true)
 		reservedForMode := modeLabelWidth
 		switch {
 		case len(mandatorySlots) > 1:

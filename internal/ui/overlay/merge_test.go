@@ -24,58 +24,43 @@ func makeTask(id, title string, status domain.Status, taskType domain.TaskType) 
 	}
 }
 
-func TestNewMergeSelectOverlay(t *testing.T) {
-	source := makeTask("az-123", "Source task", domain.StatusInProgress, domain.TypeTask)
+func TestNewMergeSourceSelectOverlay(t *testing.T) {
+	target := makeTask("az-123", "Target task", domain.StatusInProgress, domain.TypeTask)
 	candidates := []MergeTarget{
-		{ID: "az-456", Label: "Target 1", Status: domain.StatusOpen, HasWorktree: true},
-		{ID: "az-789", Label: "Target 2", Status: domain.StatusDone, HasWorktree: true},
+		{ID: "az-456", Label: "Source 1", Status: domain.StatusInProgress, HasWorktree: true},
+		{ID: "az-789", Label: "Source 2", Status: domain.StatusDone, HasWorktree: true},
 	}
 
-	overlay := NewMergeSelectOverlay(&source, candidates, nil, nil)
+	overlay := NewMergeSourceSelectOverlay(&target, candidates, nil, nil)
 
 	require.NotNil(t, overlay)
-	assert.Equal(t, source.ID, overlay.source.ID)
+	assert.Equal(t, target.ID, overlay.target.ID)
 	assert.Equal(t, 2, len(overlay.candidates))
 	assert.Equal(t, 0, overlay.cursor)
 }
 
-func TestMergeSelectOverlay_Title(t *testing.T) {
-	source := makeTask("az-123", "Source", domain.StatusOpen, domain.TypeTask)
-	overlay := NewMergeSelectOverlay(&source, []MergeTarget{}, nil, nil)
+func TestMergeSourceSelectOverlay_Title(t *testing.T) {
+	target := makeTask("az-123", "Target", domain.StatusOpen, domain.TypeTask)
+	overlay := NewMergeSourceSelectOverlay(&target, []MergeTarget{}, nil, nil)
 
-	assert.Equal(t, "Select Merge Target", overlay.Title())
+	assert.Equal(t, "Select Upstream Source", overlay.Title())
 }
 
-func TestMergeSelectOverlay_Size(t *testing.T) {
+func TestMergeSourceSelectOverlay_Size(t *testing.T) {
 	tests := []struct {
 		name            string
 		candidatesCount int
 		expectedHeight  int
 		expectedWidth   int
 	}{
-		{
-			name:            "no candidates",
-			candidatesCount: 0,
-			expectedHeight:  10, // minimum dialog height with actions section
-			expectedWidth:   60,
-		},
-		{
-			name:            "few candidates",
-			candidatesCount: 5,
-			expectedHeight:  13, // enough for header + list + actions
-			expectedWidth:   60,
-		},
-		{
-			name:            "many candidates capped at 15",
-			candidatesCount: 20,
-			expectedHeight:  23, // capped list plus actions
-			expectedWidth:   60,
-		},
+		{name: "no candidates", candidatesCount: 0, expectedHeight: 10, expectedWidth: 60},
+		{name: "few candidates", candidatesCount: 5, expectedHeight: 13, expectedWidth: 60},
+		{name: "many candidates capped at 15", candidatesCount: 20, expectedHeight: 23, expectedWidth: 60},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			source := makeTask("az-123", "Source", domain.StatusOpen, domain.TypeTask)
+			target := makeTask("az-123", "Target", domain.StatusOpen, domain.TypeTask)
 			candidates := make([]MergeTarget, tt.candidatesCount)
 			for i := 0; i < tt.candidatesCount; i++ {
 				candidates[i] = MergeTarget{
@@ -86,7 +71,7 @@ func TestMergeSelectOverlay_Size(t *testing.T) {
 				}
 			}
 
-			overlay := NewMergeSelectOverlay(&source, candidates, nil, nil)
+			overlay := NewMergeSourceSelectOverlay(&target, candidates, nil, nil)
 			width, height := overlay.Size()
 
 			assert.Equal(t, tt.expectedWidth, width)
@@ -95,54 +80,51 @@ func TestMergeSelectOverlay_Size(t *testing.T) {
 	}
 }
 
-func TestMergeSelectOverlay_Navigation(t *testing.T) {
-	source := makeTask("az-123", "Source", domain.StatusOpen, domain.TypeTask)
+func TestMergeSourceSelectOverlay_Navigation(t *testing.T) {
+	target := makeTask("az-123", "Target", domain.StatusOpen, domain.TypeTask)
 	candidates := []MergeTarget{
-		{ID: "az-456", Label: "Target 1", Status: domain.StatusOpen, HasWorktree: true},
-		{ID: "az-789", Label: "Target 2", Status: domain.StatusDone, HasWorktree: true},
-		{ID: "az-101", Label: "Target 3", Status: domain.StatusBlocked, HasWorktree: true},
+		{ID: "az-456", Label: "Source 1", Status: domain.StatusOpen, HasWorktree: true},
+		{ID: "az-789", Label: "Source 2", Status: domain.StatusDone, HasWorktree: true},
+		{ID: "az-101", Label: "Source 3", Status: domain.StatusBlocked, HasWorktree: true},
 	}
 
-	overlay := NewMergeSelectOverlay(&source, candidates, nil, nil)
+	overlay := NewMergeSourceSelectOverlay(&target, candidates, nil, nil)
 
 	// Move down
 	m, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	overlay = m.(*MergeSelectOverlay)
+	overlay = m.(*MergeSourceSelectOverlay)
 	assert.Equal(t, 1, overlay.cursor)
 
 	m, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyDown})
-	overlay = m.(*MergeSelectOverlay)
+	overlay = m.(*MergeSourceSelectOverlay)
 	assert.Equal(t, 2, overlay.cursor)
 
 	// Wraps around to start
 	m, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyDown})
-	overlay = m.(*MergeSelectOverlay)
+	overlay = m.(*MergeSourceSelectOverlay)
 	assert.Equal(t, 0, overlay.cursor)
 
 	// Move up wraps to end
 	m, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyUp})
-	overlay = m.(*MergeSelectOverlay)
+	overlay = m.(*MergeSourceSelectOverlay)
 	assert.Equal(t, 2, overlay.cursor)
 
 	m, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
-	overlay = m.(*MergeSelectOverlay)
+	overlay = m.(*MergeSourceSelectOverlay)
 	assert.Equal(t, 1, overlay.cursor)
 }
 
-func TestMergeSelectOverlay_SelectTarget(t *testing.T) {
-	source := makeTask("az-123", "Source", domain.StatusInProgress, domain.TypeTask)
+func TestMergeSourceSelectOverlay_SelectEmitsSourceAndTarget(t *testing.T) {
+	target := makeTask("az-123", "Target", domain.StatusInProgress, domain.TypeTask)
 	candidates := []MergeTarget{
-		{ID: "az-456", Label: "Target 1", Status: domain.StatusOpen, HasWorktree: true},
-		{ID: "az-789", Label: "Target 2", Status: domain.StatusDone, HasWorktree: true},
+		{ID: "az-456", Label: "Source 1", Status: domain.StatusInProgress, HasWorktree: true},
+		{ID: "az-789", Label: "Source 2", Status: domain.StatusDone, HasWorktree: true},
 	}
 
-	overlay := NewMergeSelectOverlay(&source, candidates, nil, nil)
-
-	// Move to second candidate
+	overlay := NewMergeSourceSelectOverlay(&target, candidates, nil, nil)
 	m, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyDown})
-	overlay = m.(*MergeSelectOverlay)
+	overlay = m.(*MergeSourceSelectOverlay)
 
-	// Select it
 	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	require.NotNil(t, cmd)
 
@@ -153,13 +135,15 @@ func TestMergeSelectOverlay_SelectTarget(t *testing.T) {
 
 	result, ok := selMsg.Value.(MergeTargetSelectedMsg)
 	require.True(t, ok)
-	assert.Equal(t, "az-123", result.SourceID)
-	assert.Equal(t, "az-789", result.TargetID)
+	// The selected upstream candidate becomes the SOURCE; the focused task is
+	// the TARGET that receives the merge.
+	assert.Equal(t, "az-789", result.SourceID)
+	assert.Equal(t, "az-123", result.TargetID)
 }
 
-func TestMergeSelectOverlay_EscapeClose(t *testing.T) {
-	source := makeTask("az-123", "Source", domain.StatusOpen, domain.TypeTask)
-	overlay := NewMergeSelectOverlay(&source, []MergeTarget{}, nil, nil)
+func TestMergeSourceSelectOverlay_EscapeClose(t *testing.T) {
+	target := makeTask("az-123", "Target", domain.StatusOpen, domain.TypeTask)
+	overlay := NewMergeSourceSelectOverlay(&target, []MergeTarget{}, nil, nil)
 
 	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	require.NotNil(t, cmd)
@@ -169,9 +153,9 @@ func TestMergeSelectOverlay_EscapeClose(t *testing.T) {
 	assert.True(t, ok)
 }
 
-func TestMergeSelectOverlay_QuitClose(t *testing.T) {
-	source := makeTask("az-123", "Source", domain.StatusOpen, domain.TypeTask)
-	overlay := NewMergeSelectOverlay(&source, []MergeTarget{}, nil, nil)
+func TestMergeSourceSelectOverlay_QuitClose(t *testing.T) {
+	target := makeTask("az-123", "Target", domain.StatusOpen, domain.TypeTask)
+	overlay := NewMergeSourceSelectOverlay(&target, []MergeTarget{}, nil, nil)
 
 	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	require.NotNil(t, cmd)
@@ -181,20 +165,19 @@ func TestMergeSelectOverlay_QuitClose(t *testing.T) {
 	assert.True(t, ok)
 }
 
-func TestMergeSelectOverlay_View(t *testing.T) {
-	source := makeTask("az-123", "Implement feature X", domain.StatusInProgress, domain.TypeFeature)
+func TestMergeSourceSelectOverlay_View(t *testing.T) {
+	target := makeTask("az-123", "Implement feature X", domain.StatusInProgress, domain.TypeFeature)
 	candidates := []MergeTarget{
-		{ID: "az-456", Label: "Related task 1", Status: domain.StatusOpen, HasWorktree: true},
-		{ID: "az-789", Label: "Related task 2", Status: domain.StatusDone, HasWorktree: true},
+		{ID: "az-456", Label: "Upstream 1", Status: domain.StatusInProgress, HasWorktree: true},
+		{ID: "az-789", Label: "Upstream 2", Status: domain.StatusDone, HasWorktree: true},
 	}
 
-	overlay := NewMergeSelectOverlay(&source, candidates, nil, nil)
+	overlay := NewMergeSourceSelectOverlay(&target, candidates, nil, nil)
 	view := overlay.View()
 
-	// Check that view contains expected elements
-	assert.Contains(t, view, "Merge")
-	assert.Contains(t, view, source.ID)
-	assert.Contains(t, view, "into:")
+	assert.Contains(t, view, "Merge into")
+	assert.Contains(t, view, target.ID)
+	assert.Contains(t, view, "from:")
 	assert.Contains(t, view, candidates[0].ID)
 	assert.Contains(t, view, candidates[0].Label)
 	assert.Contains(t, view, candidates[1].ID)
@@ -203,85 +186,83 @@ func TestMergeSelectOverlay_View(t *testing.T) {
 	assert.Contains(t, view, "Enter")
 }
 
-func TestMergeSelectOverlay_ViewNoCandidates(t *testing.T) {
-	source := makeTask("az-123", "Lonely task", domain.StatusOpen, domain.TypeTask)
-	overlay := NewMergeSelectOverlay(&source, []MergeTarget{}, nil, nil)
+func TestMergeSourceSelectOverlay_ViewNoCandidates(t *testing.T) {
+	target := makeTask("az-123", "Lonely task", domain.StatusOpen, domain.TypeTask)
+	overlay := NewMergeSourceSelectOverlay(&target, []MergeTarget{}, nil, nil)
 
 	view := overlay.View()
 
-	assert.Contains(t, view, "Merge")
-	assert.Contains(t, view, source.ID)
-	assert.Contains(t, view, "No eligible merge targets")
+	assert.Contains(t, view, "Merge into")
+	assert.Contains(t, view, target.ID)
+	assert.Contains(t, view, "No eligible upstream sources")
 }
 
-func TestMergeSelectOverlay_RenderCandidate(t *testing.T) {
-	source := makeTask("az-123", "Source", domain.StatusOpen, domain.TypeTask)
-	target := MergeTarget{
+func TestMergeSourceSelectOverlay_RenderCandidate(t *testing.T) {
+	target := makeTask("az-123", "Target", domain.StatusOpen, domain.TypeTask)
+	src := MergeTarget{
 		ID:          "az-456",
 		Label:       "Test task",
 		Status:      domain.StatusInProgress,
 		HasWorktree: true,
 	}
 
-	overlay := NewMergeSelectOverlay(&source, []MergeTarget{target}, nil, nil)
+	overlay := NewMergeSourceSelectOverlay(&target, []MergeTarget{src}, nil, nil)
 
-	// Test unselected
-	formatted := overlay.renderCandidate(target, false)
-	assert.Contains(t, formatted, target.ID)
-	assert.Contains(t, formatted, target.Label)
-	assert.Contains(t, formatted, string(target.Status))
+	formatted := overlay.renderCandidate(src, false)
+	assert.Contains(t, formatted, src.ID)
+	assert.Contains(t, formatted, src.Label)
+	assert.Contains(t, formatted, string(src.Status))
 
-	// Test selected
-	formatted = overlay.renderCandidate(target, true)
+	formatted = overlay.renderCandidate(src, true)
 	assert.Contains(t, formatted, "▸")
-	assert.Contains(t, formatted, target.ID)
-	assert.Contains(t, formatted, target.Label)
+	assert.Contains(t, formatted, src.ID)
+	assert.Contains(t, formatted, src.Label)
 }
 
-func TestMergeSelectOverlay_RenderMainBranch(t *testing.T) {
-	source := makeTask("az-123", "Source", domain.StatusOpen, domain.TypeTask)
-	mainTarget := MergeTarget{
+func TestMergeSourceSelectOverlay_RenderMainBranch(t *testing.T) {
+	target := makeTask("az-123", "Target", domain.StatusOpen, domain.TypeTask)
+	mainSource := MergeTarget{
 		ID:          "main",
 		Label:       "develop",
 		IsMain:      true,
 		HasWorktree: false,
 	}
 
-	overlay := NewMergeSelectOverlay(&source, []MergeTarget{mainTarget}, nil, nil)
+	overlay := NewMergeSourceSelectOverlay(&target, []MergeTarget{mainSource}, nil, nil)
 
-	formatted := overlay.renderCandidate(mainTarget, false)
+	formatted := overlay.renderCandidate(mainSource, false)
 	assert.Contains(t, formatted, "develop")
 	assert.Contains(t, formatted, "(base branch)")
 }
 
-func TestMergeSelectOverlay_Init(t *testing.T) {
-	source := makeTask("az-123", "Source", domain.StatusOpen, domain.TypeTask)
-	overlay := NewMergeSelectOverlay(&source, []MergeTarget{}, nil, nil)
+func TestMergeSourceSelectOverlay_Init(t *testing.T) {
+	target := makeTask("az-123", "Target", domain.StatusOpen, domain.TypeTask)
+	overlay := NewMergeSourceSelectOverlay(&target, []MergeTarget{}, nil, nil)
 
 	cmd := overlay.Init()
 	assert.Nil(t, cmd)
 }
 
-func TestMergeSelectOverlay_EnterWithNoCandidates(t *testing.T) {
-	source := makeTask("az-123", "Source", domain.StatusOpen, domain.TypeTask)
-	overlay := NewMergeSelectOverlay(&source, []MergeTarget{}, nil, nil)
+func TestMergeSourceSelectOverlay_EnterWithNoCandidates(t *testing.T) {
+	target := makeTask("az-123", "Target", domain.StatusOpen, domain.TypeTask)
+	overlay := NewMergeSourceSelectOverlay(&target, []MergeTarget{}, nil, nil)
 
 	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Nil(t, cmd, "should not send message when no candidates")
 }
 
-func TestMergeSelectOverlay_WithCallbacks(t *testing.T) {
-	source := makeTask("az-123", "Source", domain.StatusInProgress, domain.TypeTask)
+func TestMergeSourceSelectOverlay_WithCallbacks(t *testing.T) {
+	target := makeTask("az-123", "Target", domain.StatusInProgress, domain.TypeTask)
 	candidates := []MergeTarget{
-		{ID: "az-456", Label: "Target 1", Status: domain.StatusOpen, HasWorktree: true},
+		{ID: "az-456", Label: "Source 1", Status: domain.StatusOpen, HasWorktree: true},
 	}
 
 	mergeCalled := false
 	cancelCalled := false
 
-	onMerge := func(targetID string) tea.Cmd {
+	onMerge := func(sourceID string) tea.Cmd {
 		mergeCalled = true
-		assert.Equal(t, "az-456", targetID)
+		assert.Equal(t, "az-456", sourceID)
 		return nil
 	}
 
@@ -290,16 +271,14 @@ func TestMergeSelectOverlay_WithCallbacks(t *testing.T) {
 		return nil
 	}
 
-	overlay := NewMergeSelectOverlay(&source, candidates, onMerge, onCancel)
+	overlay := NewMergeSourceSelectOverlay(&target, candidates, onMerge, onCancel)
 
-	// Test merge callback
 	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd != nil {
 		cmd()
 	}
 	assert.True(t, mergeCalled)
 
-	// Test cancel callback
 	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if cmd != nil {
 		cmd()

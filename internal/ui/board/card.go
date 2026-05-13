@@ -45,17 +45,29 @@ type ChildProgress struct {
 	Done  int
 }
 
+// CardState bundles the per-card display flags resolved by the column layer so
+// renderCard takes one struct instead of an ever-growing positional list.
+type CardState struct {
+	IsCursor         bool
+	IsSelected       bool
+	IsMergeCandidate bool
+	ShowPhases       bool
+	JumpLabel        string
+}
+
 // renderCard renders a task card
-func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool, isSelected bool, width int, childProgress *ChildProgress, phaseInfo *phases.TaskPhaseInfo, showPhases bool, jumpLabel string, s *styles.Styles) string {
+func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignals, childProgress *ChildProgress, phaseInfo *phases.TaskPhaseInfo, width int, s *styles.Styles) string {
 	if width < 1 {
 		width = 1
 	}
 
-	// Choose card style based on state
+	// Choose card style based on state. The card border is a fixed channel for
+	// cursor + selection state; the merge-candidate hint lives in its own
+	// header badge below so it doesn't fight those colours.
 	cardStyle := s.Card
-	if isSelected {
+	if state.IsSelected {
 		cardStyle = s.CardSelected
-	} else if isCursor {
+	} else if state.IsCursor {
 		cardStyle = s.CardActive
 	}
 
@@ -68,8 +80,8 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 
 	// Phase badge (if enabled and phase info available)
 	var phaseBadge string
-	if showPhases && phaseInfo != nil {
-		phaseStyle := s.Card.Copy().
+	if state.ShowPhases && phaseInfo != nil {
+		phaseStyle := s.Card.
 			Foreground(styles.Blue).
 			Bold(true)
 		if phaseInfo.Phase == 0 {
@@ -90,7 +102,7 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	}
 	// Cursor indicator (▶ symbol when cursor is on this card)
 	cursor := ""
-	if isCursor {
+	if state.IsCursor {
 		cursor = "▶"
 	}
 
@@ -101,8 +113,11 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	headerParts := []string{
 		priorityBadge,
 	}
-	if jumpLabel != "" {
-		headerParts = append(headerParts, renderJumpLabel(jumpLabel, s))
+	if state.JumpLabel != "" {
+		headerParts = append(headerParts, renderJumpLabel(state.JumpLabel, s))
+	}
+	if state.IsMergeCandidate {
+		headerParts = append(headerParts, renderMergeCandidateBadge(s))
 	}
 	headerParts = append(headerParts, issueToken, renderTaskTypeBadge(task.Type, s))
 	if phaseBadge != "" {
@@ -224,6 +239,25 @@ func renderOriginBadge(origin string) string {
 		Render(label)
 }
 
+// renderMergeCandidateBadge paints a single-character badge in the card
+// header indicating that this task is an eligible merge target while the
+// in-board merge picker is active. Using a header badge (rather than the
+// card border) avoids colliding with the cursor and selection styles.
+func renderMergeCandidateBadge(s *styles.Styles) string {
+	style := lipgloss.NewStyle().
+		Foreground(styles.Base).
+		Background(styles.Green).
+		Bold(true).
+		Padding(0, 1)
+	if s != nil {
+		style = s.MenuKey.
+			Foreground(styles.Base).
+			Background(styles.Green).
+			Bold(true)
+	}
+	return style.Render("M")
+}
+
 func renderJumpLabel(label string, s *styles.Styles) string {
 	label = strings.TrimSpace(label)
 	if label == "" {
@@ -235,7 +269,7 @@ func renderJumpLabel(label string, s *styles.Styles) string {
 		Bold(true).
 		Padding(0, 1)
 	if s != nil {
-		labelStyle = s.MenuKey.Copy().
+		labelStyle = s.MenuKey.
 			Foreground(styles.Base).
 			Background(styles.Yellow).
 			Bold(true)
@@ -336,7 +370,7 @@ func renderTaskTypeBadge(taskType domain.TaskType, s *styles.Styles) string {
 		Padding(0, 1)
 
 	if s != nil {
-		badgeStyle = s.TypeBadge.Copy().
+		badgeStyle = s.TypeBadge.
 			Foreground(styles.Base).
 			Background(background).
 			Bold(true)
@@ -616,12 +650,12 @@ func renderChildProgressValue(progress *ChildProgress, s *styles.Styles) string 
 
 // RenderCard is the exported version for testing
 func RenderCard(task domain.Task, isCursor bool, isSelected bool, width int, s *styles.Styles) string {
-	return renderCard(task, nil, isCursor, isSelected, width, nil, nil, false, "", s)
+	return renderCard(task, CardState{IsCursor: isCursor, IsSelected: isSelected}, nil, nil, nil, width, s)
 }
 
 // RenderCardWithRuntimeSignals renders a task card with daemon-authored runtime metadata.
 func RenderCardWithRuntimeSignals(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool, isSelected bool, width int, s *styles.Styles) string {
-	return renderCard(task, runtimeSignals, isCursor, isSelected, width, nil, nil, false, "", s)
+	return renderCard(task, CardState{IsCursor: isCursor, IsSelected: isSelected}, runtimeSignals, nil, nil, width, s)
 }
 
 // CardLineFootprint returns the number of terminal lines consumed by one card.
@@ -638,7 +672,7 @@ func CardLineFootprint(s *styles.Styles, width int) int {
 		Priority: domain.P2,
 		Type:     domain.TypeTask,
 	}
-	cardLines := lipgloss.Height(renderCard(sample, nil, false, false, width, nil, nil, false, "", s))
+	cardLines := lipgloss.Height(renderCard(sample, CardState{}, nil, nil, nil, width, s))
 	if cardLines < 1 {
 		cardLines = 1
 	}

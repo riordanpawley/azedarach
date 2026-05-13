@@ -549,8 +549,22 @@ func (m Model) renderBoardView() string {
 		toolbar = m.renderDrillDownToolbar()
 		contentHeight -= lipgloss.Height(toolbar) + 1
 	}
+	if pickToolbar := m.renderMergePickToolbar(); pickToolbar != "" {
+		if toolbar != "" {
+			toolbar = lipgloss.JoinVertical(lipgloss.Left, toolbar, pickToolbar)
+			contentHeight -= lipgloss.Height(pickToolbar)
+		} else {
+			toolbar = pickToolbar
+			contentHeight -= lipgloss.Height(pickToolbar) + 1
+		}
+	}
 	if contentHeight < 6 {
 		contentHeight = 6
+	}
+
+	renderOpts := []board.RenderOption{}
+	if candidates := m.mergePickCandidatesByTask(); len(candidates) > 0 {
+		renderOpts = append(renderOpts, board.WithMergeCandidates(candidates))
 	}
 
 	boardView := board.Render(
@@ -566,6 +580,7 @@ func (m Model) renderBoardView() string {
 		m.styles,
 		m.width,
 		contentHeight,
+		renderOpts...,
 	)
 	boardView = m.overlayFreshnessIndicator(boardView, contentHeight)
 	if toolbar == "" {

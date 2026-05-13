@@ -766,36 +766,6 @@ func (m Model) resolveFollowOnMergeCmd(sourceID, targetID string, targetState do
 	}
 }
 
-func (m Model) openMergeTargetSelection(task *domain.Task) tea.Cmd {
-	if task == nil {
-		m.addToast(Toast{
-			Level:   ToastWarning,
-			Message: "No focused issue to merge",
-			Expires: time.Now().Add(3 * time.Second),
-		})
-		return nil
-	}
-
-	candidates := m.getMergeCandidates(task)
-	mergeOverlay := overlay.NewMergeSelectOverlay(
-		task,
-		candidates,
-		func(targetID string) tea.Cmd {
-			return func() tea.Msg {
-				return overlay.SelectionMsg{
-					Key: "merge",
-					Value: overlay.MergeTargetSelectedMsg{
-						SourceID: task.ID.String(),
-						TargetID: targetID,
-					},
-				}
-			}
-		},
-		func() tea.Cmd { return func() tea.Msg { return overlay.CloseOverlayMsg{} } },
-	)
-	return m.openOverlay(mergeOverlay)
-}
-
 func (m Model) sessionForIssue(issueID string) *domain.Session {
 	if issueID == "" {
 		return nil

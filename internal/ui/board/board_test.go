@@ -224,8 +224,8 @@ func TestRenderCard_ShowsBlockedPhaseChip(t *testing.T) {
 	blockerPhase := phaseInfo.Phases[blocker.ID.String()]
 	blockedPhase := phaseInfo.Phases[blocked.ID.String()]
 
-	blockerView := normalizeBoardOutput(renderCard(blocker, nil, false, false, 80, nil, &blockerPhase, true, "", s))
-	blockedView := normalizeBoardOutput(renderCard(blocked, nil, false, false, 80, nil, &blockedPhase, true, "", s))
+	blockerView := normalizeBoardOutput(renderCard(blocker, CardState{ShowPhases: true}, nil, nil, &blockerPhase, 80, s))
+	blockedView := normalizeBoardOutput(renderCard(blocked, CardState{ShowPhases: true}, nil, nil, &blockedPhase, 80, s))
 
 	if !strings.Contains(blockerView, "Φ0") {
 		t.Fatalf("expected ready blocker chip in view, got %q", blockerView)
@@ -260,7 +260,7 @@ func TestRenderCard_OriginBadgeBottomRight(t *testing.T) {
 				Type:     domain.TypeTask,
 				Origin:   tc.origin,
 			}
-			view := normalizeBoardOutput(renderCard(task, nil, false, false, 30, nil, nil, false, "", s))
+			view := normalizeBoardOutput(renderCard(task, CardState{}, nil, nil, nil, 30, s))
 			lines := strings.Split(view, "\n")
 			if len(lines) < 2 {
 				t.Fatalf("unexpected card with %d lines: %q", len(lines), view)

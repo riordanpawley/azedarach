@@ -22,9 +22,15 @@ func Render(
 	s *styles.Styles,
 	width int,
 	height int,
+	opts ...RenderOption,
 ) string {
 	if len(columns) == 0 {
 		return ""
+	}
+
+	cfg := renderConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
 	}
 
 	columnWidth := width / len(columns)
@@ -51,6 +57,7 @@ func Render(
 			phaseData,
 			showPhases,
 			jumpLabelsByTask,
+			cfg.mergeCandidates,
 			columnWidth,
 			height,
 			s,
@@ -59,4 +66,20 @@ func Render(
 
 	// Join columns horizontally
 	return lipgloss.JoinHorizontal(lipgloss.Top, columnStrings...)
+}
+
+// RenderOption configures optional render behavior without expanding the
+// positional argument list of Render.
+type RenderOption func(*renderConfig)
+
+type renderConfig struct {
+	mergeCandidates map[string]bool
+}
+
+// WithMergeCandidates marks the supplied task IDs as eligible merge targets so
+// the board can paint a candidate badge while the merge-pick mode is active.
+func WithMergeCandidates(candidates map[string]bool) RenderOption {
+	return func(cfg *renderConfig) {
+		cfg.mergeCandidates = candidates
+	}
 }

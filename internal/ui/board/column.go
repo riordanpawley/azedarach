@@ -22,6 +22,7 @@ func renderColumn(
 	phaseData map[string]phases.TaskPhaseInfo,
 	showPhases bool,
 	jumpLabelsByTask map[string]string,
+	mergeCandidatesByTask map[string]bool,
 	width int,
 	height int,
 	s *styles.Styles,
@@ -52,9 +53,7 @@ func renderColumn(
 		}
 
 		task := tasks[i]
-		isCursor := isActive && i == cursorTask
 		taskID := task.ID.String()
-		isSelected := selectedTasks[taskID]
 
 		var phaseInfo *phases.TaskPhaseInfo
 		if info, exists := phaseData[taskID]; exists {
@@ -71,7 +70,14 @@ func renderColumn(
 			runtimeSignals = &signalsCopy
 		}
 
-		cardContent.WriteString(renderCard(task, runtimeSignals, isCursor, isSelected, cardWidth, childProgress, phaseInfo, showPhases, jumpLabelsByTask[taskID], s))
+		state := CardState{
+			IsCursor:         isActive && i == cursorTask,
+			IsSelected:       selectedTasks[taskID],
+			IsMergeCandidate: mergeCandidatesByTask[taskID],
+			ShowPhases:       showPhases,
+			JumpLabel:        jumpLabelsByTask[taskID],
+		}
+		cardContent.WriteString(renderCard(task, state, runtimeSignals, childProgress, phaseInfo, cardWidth, s))
 	}
 
 	if bottomIndicator {
@@ -167,7 +173,7 @@ func renderScrollIndicator(count int, up bool, width int, s *styles.Styles) stri
 		arrow = "^"
 	}
 	text := fmt.Sprintf("%d more %s", count, arrow)
-	return s.Separator.Copy().
+	return s.Separator.
 		Foreground(styles.Text).
 		Bold(true).
 		Width(width).

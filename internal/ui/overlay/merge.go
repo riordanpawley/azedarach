@@ -11,7 +11,9 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
-// MergeTarget represents a target that can be merged into
+// MergeTarget describes one candidate row rendered in the merge overlay. The
+// same struct is reused by the merge-pick mode (on the board) and the upstream
+// source picker (this overlay).
 type MergeTarget struct {
 	ID          string        // "main" sentinel or task ID
 	Label       string        // Display label
@@ -20,79 +22,55 @@ type MergeTarget struct {
 	HasWorktree bool          // Whether this target has a worktree
 }
 
-// MergeSelectMode determines whether the overlay is picking a merge target or an upstream source.
-type MergeSelectMode int
-
-const (
-	MergeSelectModeTarget MergeSelectMode = iota
-	MergeSelectModeUpstreamSource
-)
-
-// MergeSelectOverlay allows selecting a merge target task
-type MergeSelectOverlay struct {
-	twoPaneDialogChrome
-	dialogViewportState
-	source        *domain.Task  // The issue being merged FROM
-	candidates    []MergeTarget // Issues that can be merged INTO (including base branch)
-	cursor        int
-	onMerge       func(targetID string) tea.Cmd
-	onCancel      func() tea.Cmd
-	overlayStyles *Styles
-	mode          MergeSelectMode
-}
-
-// MergeTargetSelectedMsg is sent when a merge target is selected
+// MergeTargetSelectedMsg is sent when a merge target/source is selected. The
+// payload always names the side that will be merged FROM as SourceID and the
+// side that will receive the merge as TargetID.
 type MergeTargetSelectedMsg struct {
 	SourceID                   string
 	TargetID                   string
 	SkipPreflightStatusRefresh bool
 }
 
-// NewMergeSelectOverlay creates a new merge target selection overlay
-func NewMergeSelectOverlay(
-	source *domain.Task,
-	candidates []MergeTarget,
-	onMerge func(targetID string) tea.Cmd,
-	onCancel func() tea.Cmd,
-) *MergeSelectOverlay {
-	return newMergeSelectOverlay(source, candidates, onMerge, onCancel, MergeSelectModeTarget)
+// MergeSourceSelectOverlay lets the user pick which upstream issue's branch
+// to merge INTO the currently-focused task. It is only used when the focused
+// task has multiple eligible upstream sources (parents, blockers). Picking a
+// merge TARGET (the reverse direction) happens on the board via the merge-pick
+// mode and does not need an overlay.
+type MergeSourceSelectOverlay struct {
+	twoPaneDialogChrome
+	dialogViewportState
+	target        *domain.Task  // the focused task (the merge destination)
+	candidates    []MergeTarget // upstream sources whose branches can be merged in
+	cursor        int
+	onMerge       func(sourceID string) tea.Cmd
+	onCancel      func() tea.Cmd
+	overlayStyles *Styles
 }
 
 // NewMergeSourceSelectOverlay creates a new upstream-source selection overlay.
 func NewMergeSourceSelectOverlay(
 	target *domain.Task,
 	candidates []MergeTarget,
-	onMerge func(targetID string) tea.Cmd,
+	onMerge func(sourceID string) tea.Cmd,
 	onCancel func() tea.Cmd,
-) *MergeSelectOverlay {
-	return newMergeSelectOverlay(target, candidates, onMerge, onCancel, MergeSelectModeUpstreamSource)
-}
-
-func newMergeSelectOverlay(
-	source *domain.Task,
-	candidates []MergeTarget,
-	onMerge func(targetID string) tea.Cmd,
-	onCancel func() tea.Cmd,
-	mode MergeSelectMode,
-) *MergeSelectOverlay {
-	return &MergeSelectOverlay{
-		source:        source,
+) *MergeSourceSelectOverlay {
+	return &MergeSourceSelectOverlay{
+		target:        target,
 		candidates:    candidates,
 		cursor:        0,
 		onMerge:       onMerge,
 		onCancel:      onCancel,
 		overlayStyles: New(),
-		mode:          mode,
 	}
 }
 
 // Init initializes the overlay
-func (m *MergeSelectOverlay) Init() tea.Cmd {
+func (m *MergeSourceSelectOverlay) Init() tea.Cmd {
 	return nil
 }
 
 // Update handles messages
-func (m *MergeSelectOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *MergeSourceSelectOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -121,7 +99,7 @@ func (m *MergeSelectOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View renders the overlay
-func (m *MergeSelectOverlay) View() string {
+func (m *MergeSourceSelectOverlay) View() string {
 	width, height := m.Size()
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            m.overlayStyles,
@@ -135,7 +113,7 @@ func (m *MergeSelectOverlay) View() string {
 		minRight:          18,
 		leftFocused:       true,
 		renderLeft: func(mode dialogLayoutMode, width, height int) string {
-			return m.renderMergeContent()
+			return m.renderContent()
 		},
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
 			return renderDialogActions(m.overlayStyles, []keybinds.Binding{
@@ -147,18 +125,15 @@ func (m *MergeSelectOverlay) View() string {
 	})
 }
 
-func (m *MergeSelectOverlay) renderMergeContent() string {
+func (m *MergeSourceSelectOverlay) renderContent() string {
 	var b strings.Builder
 
-	header := fmt.Sprintf("Merge %s into:", m.overlayStyles.MenuKey.Render(m.source.ID.String()))
-	if m.mode == MergeSelectModeUpstreamSource {
-		header = fmt.Sprintf("Merge into %s from:", m.overlayStyles.MenuKey.Render(m.source.ID.String()))
-	}
+	header := fmt.Sprintf("Merge into %s from:", m.overlayStyles.MenuKey.Render(m.target.ID.String()))
 	b.WriteString(m.overlayStyles.Title.Render(header))
 	b.WriteString("\n\n")
 
 	if len(m.candidates) == 0 {
-		noTasks := m.overlayStyles.MenuItemDisabled.Render("No eligible merge targets found")
+		noTasks := m.overlayStyles.MenuItemDisabled.Render("No eligible upstream sources found")
 		b.WriteString("  " + noTasks)
 		return strings.TrimRight(b.String(), "\n")
 	}
@@ -172,8 +147,8 @@ func (m *MergeSelectOverlay) renderMergeContent() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// renderCandidate renders a single merge target candidate
-func (m *MergeSelectOverlay) renderCandidate(target MergeTarget, isActive bool) string {
+// renderCandidate renders a single upstream-source candidate
+func (m *MergeSourceSelectOverlay) renderCandidate(target MergeTarget, isActive bool) string {
 	var parts []string
 
 	// Cursor indicator
@@ -231,7 +206,7 @@ func (m *MergeSelectOverlay) renderCandidate(target MergeTarget, isActive bool) 
 }
 
 // moveCursorDown moves the cursor to the next candidate
-func (m *MergeSelectOverlay) moveCursorDown() {
+func (m *MergeSourceSelectOverlay) moveCursorDown() {
 	if len(m.candidates) == 0 {
 		return
 	}
@@ -239,7 +214,7 @@ func (m *MergeSelectOverlay) moveCursorDown() {
 }
 
 // moveCursorUp moves the cursor to the previous candidate
-func (m *MergeSelectOverlay) moveCursorUp() {
+func (m *MergeSourceSelectOverlay) moveCursorUp() {
 	if len(m.candidates) == 0 {
 		return
 	}
@@ -247,50 +222,38 @@ func (m *MergeSelectOverlay) moveCursorUp() {
 }
 
 // selectCurrent selects the current candidate
-func (m *MergeSelectOverlay) selectCurrent() tea.Cmd {
+func (m *MergeSourceSelectOverlay) selectCurrent() tea.Cmd {
 	if m.cursor < 0 || m.cursor >= len(m.candidates) {
 		return nil
 	}
 
-	target := m.candidates[m.cursor]
+	source := m.candidates[m.cursor]
 	if m.onMerge != nil {
-		return m.onMerge(target.ID)
+		return m.onMerge(source.ID)
 	}
 
 	return func() tea.Msg {
-		if m.mode == MergeSelectModeUpstreamSource {
-			return SelectionMsg{
-				Key: "merge",
-				Value: MergeTargetSelectedMsg{
-					SourceID: target.ID,
-					TargetID: m.source.ID.String(),
-				},
-			}
-		}
 		return SelectionMsg{
 			Key: "merge",
 			Value: MergeTargetSelectedMsg{
-				SourceID: m.source.ID.String(),
-				TargetID: target.ID,
+				SourceID: source.ID,
+				TargetID: m.target.ID.String(),
 			},
 		}
 	}
 }
 
 // Title returns the overlay title
-func (m *MergeSelectOverlay) Title() string {
-	if m.mode == MergeSelectModeUpstreamSource {
-		return "Select Upstream Source"
-	}
-	return "Select Merge Target"
+func (m *MergeSourceSelectOverlay) Title() string {
+	return "Select Upstream Source"
 }
 
 // Size returns the overlay dimensions
-func (m *MergeSelectOverlay) Size() (width, height int) {
+func (m *MergeSourceSelectOverlay) Size() (width, height int) {
 	return m.Clamp(60, m.sizeHeight())
 }
 
-func (m *MergeSelectOverlay) sizeHeight() int {
+func (m *MergeSourceSelectOverlay) sizeHeight() int {
 	candidateLines := len(m.candidates)
 	if candidateLines == 0 {
 		candidateLines = 1
