@@ -766,7 +766,26 @@ func (m Model) resolveFollowOnMergeCmd(sourceID, targetID string, targetState do
 	}
 }
 
-func (m Model) openMergeTargetSelection(task *domain.Task) tea.Cmd {
+// mergePickState tracks the in-progress board-driven merge target selection.
+// It mirrors jumpMode in spirit: a short-lived overlay-free mode that
+// intercepts key handling while active and lets the user pick a target by
+// navigating the existing kanban board.
+type mergePickState struct {
+	sourceID    string
+	candidates  map[string]struct{} // task IDs eligible as merge targets
+	hasBase     bool                // whether the configured base branch is selectable
+	candidateID []string            // stable order for banner / hints
+}
+
+func (s *mergePickState) isCandidate(taskID string) bool {
+	if s == nil {
+		return false
+	}
+	_, ok := s.candidates[strings.TrimSpace(taskID)]
+	return ok
+}
+
+func (m *Model) openMergeTargetSelection(task *domain.Task) tea.Cmd {
 	if task == nil {
 		m.addToast(Toast{
 			Level:   ToastWarning,
@@ -776,24 +795,130 @@ func (m Model) openMergeTargetSelection(task *domain.Task) tea.Cmd {
 		return nil
 	}
 
+	// Exit action mode so the board responds to plain navigation keys while
+	// the user picks a target. The picker has its own dedicated key handler.
+	if m.editor != nil && m.editor.IsAction() {
+		m.editor.EnterNormal()
+	}
+
 	candidates := m.getMergeCandidates(task)
-	mergeOverlay := overlay.NewMergeSelectOverlay(
-		task,
-		candidates,
-		func(targetID string) tea.Cmd {
-			return func() tea.Msg {
-				return overlay.SelectionMsg{
-					Key: "merge",
-					Value: overlay.MergeTargetSelectedMsg{
-						SourceID: task.ID.String(),
-						TargetID: targetID,
-					},
-				}
-			}
-		},
-		func() tea.Cmd { return func() tea.Msg { return overlay.CloseOverlayMsg{} } },
-	)
-	return m.openOverlay(mergeOverlay)
+	state := &mergePickState{
+		sourceID:   task.ID.String(),
+		candidates: make(map[string]struct{}, len(candidates)),
+	}
+	for _, c := range candidates {
+		if c.IsMain {
+			state.hasBase = true
+			continue
+		}
+		id := strings.TrimSpace(c.ID)
+		if id == "" {
+			continue
+		}
+		if _, exists := state.candidates[id]; exists {
+			continue
+		}
+		state.candidates[id] = struct{}{}
+		state.candidateID = append(state.candidateID, id)
+	}
+	m.mergePickMode = state
+	return nil
+}
+
+func (m *Model) clearMergePickMode() {
+	m.mergePickMode = nil
+}
+
+// handleMergePickMode routes key input while the board-driven merge picker is
+// active. The board itself keeps rendering normally; only navigation, enter,
+// the base-branch hotkey, and cancel are interpreted here.
+func (m Model) handleMergePickMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	state := m.mergePickMode
+	if state == nil {
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "esc", "q":
+		m.clearMergePickMode()
+		return m, nil
+	case "enter":
+		return m.confirmMergePickAtCursor()
+	case "B", "0":
+		if !state.hasBase {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "Base branch is not an eligible merge target",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		return m.confirmMergePick(mergeBaseTargetID)
+	}
+
+	// Fall back to standard board navigation so the cursor moves between
+	// cards (j/k/h/l, g/G, ctrl+d/u, etc.).
+	columns := m.buildColumns()
+	switch msg.String() {
+	case "j", "down":
+		m.nav.MoveDown(columns)
+		m.ensureCursorVisible(columns)
+	case "k", "up":
+		m.nav.MoveUp(columns)
+		m.ensureCursorVisible(columns)
+	case "h", "left":
+		m.nav.MoveLeft(columns)
+		m.ensureCursorVisible(columns)
+	case "l", "right":
+		m.nav.MoveRight(columns)
+		m.ensureCursorVisible(columns)
+	case "g":
+		m.nav.GotoTop(columns)
+		m.ensureCursorVisible(columns)
+	case "G":
+		m.nav.GotoBottom(columns)
+		m.ensureCursorVisible(columns)
+	}
+	return m, nil
+}
+
+func (m Model) confirmMergePickAtCursor() (tea.Model, tea.Cmd) {
+	state := m.mergePickMode
+	if state == nil {
+		return m, nil
+	}
+	columns := m.buildColumns()
+	task, _ := m.nav.GetCurrentTask(columns)
+	if task == nil {
+		m.addToast(Toast{
+			Level:   ToastWarning,
+			Message: "Move the cursor to an eligible card and press Enter",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+	}
+	if !state.isCandidate(task.ID.String()) {
+		m.addToast(Toast{
+			Level:   ToastWarning,
+			Message: fmt.Sprintf("%s is not an eligible merge target", task.ID),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+	}
+	return m.confirmMergePick(task.ID.String())
+}
+
+func (m Model) confirmMergePick(targetID string) (tea.Model, tea.Cmd) {
+	state := m.mergePickMode
+	if state == nil {
+		return m, nil
+	}
+	sourceID := state.sourceID
+	m.clearMergePickMode()
+	return m.handleMergeTargetSelection(overlay.MergeTargetSelectedMsg{
+		SourceID: sourceID,
+		TargetID: targetID,
+	})
 }
 
 func (m Model) sessionForIssue(issueID string) *domain.Session {

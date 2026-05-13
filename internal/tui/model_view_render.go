@@ -549,8 +549,22 @@ func (m Model) renderBoardView() string {
 		toolbar = m.renderDrillDownToolbar()
 		contentHeight -= lipgloss.Height(toolbar) + 1
 	}
+	if pickToolbar := m.renderMergePickToolbar(); pickToolbar != "" {
+		if toolbar != "" {
+			toolbar = lipgloss.JoinVertical(lipgloss.Left, toolbar, pickToolbar)
+			contentHeight -= lipgloss.Height(pickToolbar)
+		} else {
+			toolbar = pickToolbar
+			contentHeight -= lipgloss.Height(pickToolbar) + 1
+		}
+	}
 	if contentHeight < 6 {
 		contentHeight = 6
+	}
+
+	renderOpts := []board.RenderOption{}
+	if candidates := m.mergePickCandidatesByTask(); len(candidates) > 0 {
+		renderOpts = append(renderOpts, board.WithMergeCandidates(candidates))
 	}
 
 	boardView := board.Render(
@@ -566,6 +580,7 @@ func (m Model) renderBoardView() string {
 		m.styles,
 		m.width,
 		contentHeight,
+		renderOpts...,
 	)
 	boardView = m.overlayFreshnessIndicator(boardView, contentHeight)
 	if toolbar == "" {
@@ -836,6 +851,35 @@ func (m Model) renderDrillDownToolbar() string {
 	body := m.styles.MenuItem.Render("Children of " + target)
 	right := m.styles.StatusHint.Render("Esc: back to board  Space: details+actions")
 	return lipgloss.JoinHorizontal(lipgloss.Left, left+"  ", body+"  ", right)
+}
+
+func (m Model) renderMergePickToolbar() string {
+	state := m.mergePickMode
+	if state == nil {
+		return ""
+	}
+	left := m.styles.OverlayTitle.Render("Merge pick")
+	body := m.styles.MenuItem.Render(fmt.Sprintf("Pick target for %s — navigate cards and press Enter", state.sourceID))
+	hint := "Esc: cancel"
+	if state.hasBase {
+		hint = "Enter: confirm  B: base branch  Esc: cancel"
+	} else {
+		hint = "Enter: confirm  Esc: cancel"
+	}
+	right := m.styles.StatusHint.Render(hint)
+	return lipgloss.JoinHorizontal(lipgloss.Left, left+"  ", body+"  ", right)
+}
+
+func (m Model) mergePickCandidatesByTask() map[string]bool {
+	state := m.mergePickMode
+	if state == nil || len(state.candidates) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(state.candidates))
+	for id := range state.candidates {
+		out[id] = true
+	}
+	return out
 }
 
 // openOrchestrationOverlay creates and opens the orchestration overlay

@@ -46,7 +46,7 @@ type ChildProgress struct {
 }
 
 // renderCard renders a task card
-func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool, isSelected bool, width int, childProgress *ChildProgress, phaseInfo *phases.TaskPhaseInfo, showPhases bool, jumpLabel string, s *styles.Styles) string {
+func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool, isSelected bool, width int, childProgress *ChildProgress, phaseInfo *phases.TaskPhaseInfo, showPhases bool, jumpLabel string, isMergeCandidate bool, s *styles.Styles) string {
 	if width < 1 {
 		width = 1
 	}
@@ -57,6 +57,9 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 		cardStyle = s.CardSelected
 	} else if isCursor {
 		cardStyle = s.CardActive
+	}
+	if isMergeCandidate {
+		cardStyle = cardStyle.Copy().BorderForeground(styles.Green)
 	}
 
 	// Apply fixed size to keep all cards same height regardless of content.
@@ -548,12 +551,12 @@ func renderChildProgressValue(progress *ChildProgress, s *styles.Styles) string 
 
 // RenderCard is the exported version for testing
 func RenderCard(task domain.Task, isCursor bool, isSelected bool, width int, s *styles.Styles) string {
-	return renderCard(task, nil, isCursor, isSelected, width, nil, nil, false, "", s)
+	return renderCard(task, nil, isCursor, isSelected, width, nil, nil, false, "", false, s)
 }
 
 // RenderCardWithRuntimeSignals renders a task card with daemon-authored runtime metadata.
 func RenderCardWithRuntimeSignals(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool, isSelected bool, width int, s *styles.Styles) string {
-	return renderCard(task, runtimeSignals, isCursor, isSelected, width, nil, nil, false, "", s)
+	return renderCard(task, runtimeSignals, isCursor, isSelected, width, nil, nil, false, "", false, s)
 }
 
 // CardLineFootprint returns the number of terminal lines consumed by one card.
@@ -570,7 +573,7 @@ func CardLineFootprint(s *styles.Styles, width int) int {
 		Priority: domain.P2,
 		Type:     domain.TypeTask,
 	}
-	cardLines := lipgloss.Height(renderCard(sample, nil, false, false, width, nil, nil, false, "", s))
+	cardLines := lipgloss.Height(renderCard(sample, nil, false, false, width, nil, nil, false, "", false, s))
 	if cardLines < 1 {
 		cardLines = 1
 	}

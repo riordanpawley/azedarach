@@ -22,6 +22,7 @@ func renderColumn(
 	phaseData map[string]phases.TaskPhaseInfo,
 	showPhases bool,
 	jumpLabelsByTask map[string]string,
+	mergeCandidatesByTask map[string]bool,
 	width int,
 	height int,
 	s *styles.Styles,
@@ -71,7 +72,11 @@ func renderColumn(
 			runtimeSignals = &signalsCopy
 		}
 
-		cardContent.WriteString(renderCard(task, runtimeSignals, isCursor, isSelected, cardWidth, childProgress, phaseInfo, showPhases, jumpLabelsByTask[taskID], s))
+		isMergeCandidate := false
+		if mergeCandidatesByTask != nil {
+			isMergeCandidate = mergeCandidatesByTask[taskID]
+		}
+		cardContent.WriteString(renderCard(task, runtimeSignals, isCursor, isSelected, cardWidth, childProgress, phaseInfo, showPhases, jumpLabelsByTask[taskID], isMergeCandidate, s))
 	}
 
 	if bottomIndicator {

@@ -149,6 +149,7 @@ type Model struct {
 	viewMode                      ViewMode
 	jumpMode                      *overlay.JumpMode
 	jumpTargets                   []string
+	mergePickMode                 *mergePickState
 	viewportStarts                [board.DefaultColumnCount]int
 	columnViewportStart           int
 	drillDownParentID             string
@@ -447,6 +448,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.jumpMode != nil {
 		return m.handleJumpMode(msg)
+	}
+
+	if m.mergePickMode != nil {
+		return m.handleMergePickMode(msg)
 	}
 
 	// Freeze board interactions while switching project contexts.

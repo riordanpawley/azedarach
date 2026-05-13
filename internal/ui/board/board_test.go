@@ -224,8 +224,8 @@ func TestRenderCard_ShowsBlockedPhaseChip(t *testing.T) {
 	blockerPhase := phaseInfo.Phases[blocker.ID.String()]
 	blockedPhase := phaseInfo.Phases[blocked.ID.String()]
 
-	blockerView := normalizeBoardOutput(renderCard(blocker, nil, false, false, 80, nil, &blockerPhase, true, "", s))
-	blockedView := normalizeBoardOutput(renderCard(blocked, nil, false, false, 80, nil, &blockedPhase, true, "", s))
+	blockerView := normalizeBoardOutput(renderCard(blocker, nil, false, false, 80, nil, &blockerPhase, true, "", false, s))
+	blockedView := normalizeBoardOutput(renderCard(blocked, nil, false, false, 80, nil, &blockedPhase, true, "", false, s))
 
 	if !strings.Contains(blockerView, "Φ0") {
 		t.Fatalf("expected ready blocker chip in view, got %q", blockerView)
