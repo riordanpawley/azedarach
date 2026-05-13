@@ -81,7 +81,7 @@ func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignal
 	// Phase badge (if enabled and phase info available)
 	var phaseBadge string
 	if state.ShowPhases && phaseInfo != nil {
-		phaseStyle := s.Card.Copy().
+		phaseStyle := s.Card.
 			Foreground(styles.Blue).
 			Bold(true)
 		if phaseInfo.Phase == 0 {
@@ -201,7 +201,7 @@ func renderJumpLabel(label string, s *styles.Styles) string {
 		Bold(true).
 		Padding(0, 1)
 	if s != nil {
-		labelStyle = s.MenuKey.Copy().
+		labelStyle = s.MenuKey.
 			Foreground(styles.Base).
 			Background(styles.Yellow).
 			Bold(true)
@@ -302,7 +302,7 @@ func renderTaskTypeBadge(taskType domain.TaskType, s *styles.Styles) string {
 		Padding(0, 1)
 
 	if s != nil {
-		badgeStyle = s.TypeBadge.Copy().
+		badgeStyle = s.TypeBadge.
 			Foreground(styles.Base).
 			Background(background).
 			Bold(true)

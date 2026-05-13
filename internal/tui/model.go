@@ -446,12 +446,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.ClearScreen
 	}
 
-	if m.jumpMode != nil {
-		return m.handleJumpMode(msg)
-	}
-
-	if m.mergePickMode != nil {
-		return m.handleMergePickMode(msg)
+	if next, cmd, handled := m.routeTransientMode(msg); handled {
+		return next, cmd
 	}
 
 	// Freeze board interactions while switching project contexts.

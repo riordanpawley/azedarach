@@ -173,7 +173,7 @@ func renderScrollIndicator(count int, up bool, width int, s *styles.Styles) stri
 		arrow = "^"
 	}
 	text := fmt.Sprintf("%d more %s", count, arrow)
-	return s.Separator.Copy().
+	return s.Separator.
 		Foreground(styles.Text).
 		Bold(true).
 		Width(width).
