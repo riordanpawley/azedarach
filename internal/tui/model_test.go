@@ -973,6 +973,53 @@ func TestRuntimeSignalRefreshTasks_CompactUsesVisibleRows(t *testing.T) {
 	}
 }
 
+func TestStartJumpMode_CompactOnlyLabelsVisibleRows(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.viewMode = ViewModeCompact
+	m.width = 100
+	m.height = 10
+	m.tasks = make([]domain.Task, 0, 16)
+	for i := 1; i <= 16; i++ {
+		m.tasks = append(m.tasks, domain.Task{
+			ID:       naming.IssueID(fmt.Sprintf("az-%02d", i)),
+			Title:    fmt.Sprintf("Task %d", i),
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+		})
+	}
+	// Park the cursor near the bottom so compact-mode scrolling pushes the
+	// head of the list off-screen. With viewMode == ViewModeCompact, gw must
+	// only label rows that compact actually drew.
+	m.nav.SelectTask("az-14", 0)
+
+	rendered := m.runtimeSignalRefreshTasks()
+	if len(rendered) == 0 {
+		t.Fatalf("expected compact view to render some rows")
+	}
+	if len(rendered) >= len(m.tasks) {
+		t.Fatalf("expected some rows to be off-screen, got %d rendered of %d total", len(rendered), len(m.tasks))
+	}
+
+	m.startJumpMode()
+	if m.jumpMode == nil {
+		t.Fatalf("expected jump mode to be active")
+	}
+	if len(m.jumpTargets) != len(rendered) {
+		t.Fatalf("jumpTargets len = %d, want %d (only currently rendered rows)", len(m.jumpTargets), len(rendered))
+	}
+	wantIDs := make(map[string]struct{}, len(rendered))
+	for _, task := range rendered {
+		wantIDs[task.ID.String()] = struct{}{}
+	}
+	for _, gotID := range m.jumpTargets {
+		if _, ok := wantIDs[gotID]; !ok {
+			t.Fatalf("jumpTargets includes off-screen task %q", gotID)
+		}
+	}
+}
+
 func TestNormalModeNavigation(t *testing.T) {
 	m := newTestModel()
 
