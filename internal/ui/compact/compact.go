@@ -221,12 +221,12 @@ func (cv *CompactView) renderNumberCell(index int, isActive, isSelected bool, ro
 	number := fmt.Sprintf("%2d", index+1)
 	content := indicator + number
 
-	return rowStyle.Copy().Width(width).Render(content)
+	return rowStyle.Width(width).Render(content)
 }
 
 // renderIDCell renders the task ID
 func (cv *CompactView) renderIDCell(id string, rowStyle lipgloss.Style, width int) string {
-	return rowStyle.Copy().
+	return rowStyle.
 		Width(width).
 		Foreground(cv.styles.ColID.GetForeground()).
 		Bold(true).
@@ -236,7 +236,7 @@ func (cv *CompactView) renderIDCell(id string, rowStyle lipgloss.Style, width in
 // renderTitleCell renders the task title with truncation
 func (cv *CompactView) renderTitleCell(title string, rowStyle lipgloss.Style, width int) string {
 	truncated := truncateString(title, width)
-	return rowStyle.Copy().Width(width).Render(truncated)
+	return rowStyle.Width(width).Render(truncated)
 }
 
 // renderStatusCell renders the status with color and abbreviation

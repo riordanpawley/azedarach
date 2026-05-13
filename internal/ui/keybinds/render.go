@@ -29,7 +29,7 @@ type Theme struct {
 func normalizeInlineStyle(style lipgloss.Style) lipgloss.Style {
 	// Keep color/weight semantics but remove layout-affecting properties
 	// that can inject unexpected line breaks in inline keybind rows.
-	return style.Copy().Margin(0).Padding(0)
+	return style.Margin(0).Padding(0)
 }
 
 func KeyColumnWidth(categories []Category, minWidth int) int {
