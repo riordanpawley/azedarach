@@ -5906,6 +5906,27 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "capture subtask-level detail on the relevant child issue instead of bloating a parent/epic description") {
 		t.Fatalf("prime output missing keep-current parent/child notes guidance: %q", output)
 	}
+	if !strings.Contains(output, "Atomic-merge test before using `--deferred`") {
+		t.Fatalf("prime output missing atomic-merge test heading in parent/child scope section: %q", output)
+	}
+	if !strings.Contains(output, "would the parent be correct and complete if it lands in the base branch without this new piece?") {
+		t.Fatalf("prime output missing atomic-merge test framing: %q", output)
+	}
+	if !strings.Contains(output, "child issues are part of the parent's merge unit and land in the same base-branch commit") {
+		t.Fatalf("prime output missing child-merge-unit clarification: %q", output)
+	}
+	if !strings.Contains(output, "Atomic-merge test before reaching for `--deferred`") {
+		t.Fatalf("prime output missing pre-deferred atomic-merge guardrail in follow-up rules: %q", output)
+	}
+	if !strings.Contains(output, "child issues land in the same base-branch commit as the parent") {
+		t.Fatalf("prime output missing child-lands-with-parent clarification in follow-up rules: %q", output)
+	}
+	if !strings.Contains(output, "Reserve `--deferred` for work that can land separately later.") {
+		t.Fatalf("prime output missing deferred-purpose clarification: %q", output)
+	}
+	if strings.Contains(output, "same PR") || strings.Contains(output, "one PR") {
+		t.Fatalf("prime output should frame the heuristic around base-branch atomic merges, not PRs: %q", output)
+	}
 }
 
 func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
