@@ -853,33 +853,4 @@ func (m Model) renderDrillDownToolbar() string {
 	return lipgloss.JoinHorizontal(lipgloss.Left, left+"  ", body+"  ", right)
 }
 
-func (m Model) renderMergePickToolbar() string {
-	state := m.mergePickMode
-	if state == nil {
-		return ""
-	}
-	left := m.styles.OverlayTitle.Render("Merge pick")
-	body := m.styles.MenuItem.Render(fmt.Sprintf("Pick target for %s — navigate cards and press Enter", state.sourceID))
-	hint := "Esc: cancel"
-	if state.hasBase {
-		hint = "Enter: confirm  B: base branch  Esc: cancel"
-	} else {
-		hint = "Enter: confirm  Esc: cancel"
-	}
-	right := m.styles.StatusHint.Render(hint)
-	return lipgloss.JoinHorizontal(lipgloss.Left, left+"  ", body+"  ", right)
-}
-
-func (m Model) mergePickCandidatesByTask() map[string]bool {
-	state := m.mergePickMode
-	if state == nil || len(state.candidates) == 0 {
-		return nil
-	}
-	out := make(map[string]bool, len(state.candidates))
-	for id := range state.candidates {
-		out[id] = true
-	}
-	return out
-}
-
 // openOrchestrationOverlay creates and opens the orchestration overlay

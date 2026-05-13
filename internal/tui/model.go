@@ -556,44 +556,15 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.applyBoardNavigationAction(action, columns) {
+		return m, nil
+	}
+
 	switch action {
 	case keybinds.ActionQuit:
 		// Cleanup before quitting
 		m.sessionMonitor.StopAll()
 		return m, tea.Quit
-
-	// Vertical navigation
-	case keybinds.ActionMoveDown:
-		m.nav.MoveDown(columns)
-		m.ensureCursorVisible(columns)
-		return m, nil
-
-	case keybinds.ActionMoveUp:
-		m.nav.MoveUp(columns)
-		m.ensureCursorVisible(columns)
-		return m, nil
-
-	// Horizontal navigation
-	case keybinds.ActionMoveLeft:
-		m.nav.MoveLeft(columns)
-		m.ensureCursorVisible(columns)
-		return m, nil
-
-	case keybinds.ActionMoveRight:
-		m.nav.MoveRight(columns)
-		m.ensureCursorVisible(columns)
-		return m, nil
-
-	// Half-page scroll
-	case keybinds.ActionHalfPageDown:
-		m.nav.HalfPageDown(columns, m.halfPage())
-		m.ensureCursorVisible(columns)
-		return m, nil
-
-	case keybinds.ActionHalfPageUp:
-		m.nav.HalfPageUp(columns, m.halfPage())
-		m.ensureCursorVisible(columns)
-		return m, nil
 
 	// Mode switches
 	case keybinds.ActionEnterGoto:

@@ -53,9 +53,7 @@ func renderColumn(
 		}
 
 		task := tasks[i]
-		isCursor := isActive && i == cursorTask
 		taskID := task.ID.String()
-		isSelected := selectedTasks[taskID]
 
 		var phaseInfo *phases.TaskPhaseInfo
 		if info, exists := phaseData[taskID]; exists {
@@ -72,11 +70,14 @@ func renderColumn(
 			runtimeSignals = &signalsCopy
 		}
 
-		isMergeCandidate := false
-		if mergeCandidatesByTask != nil {
-			isMergeCandidate = mergeCandidatesByTask[taskID]
+		state := CardState{
+			IsCursor:         isActive && i == cursorTask,
+			IsSelected:       selectedTasks[taskID],
+			IsMergeCandidate: mergeCandidatesByTask[taskID],
+			ShowPhases:       showPhases,
+			JumpLabel:        jumpLabelsByTask[taskID],
 		}
-		cardContent.WriteString(renderCard(task, runtimeSignals, isCursor, isSelected, cardWidth, childProgress, phaseInfo, showPhases, jumpLabelsByTask[taskID], isMergeCandidate, s))
+		cardContent.WriteString(renderCard(task, state, runtimeSignals, childProgress, phaseInfo, cardWidth, s))
 	}
 
 	if bottomIndicator {

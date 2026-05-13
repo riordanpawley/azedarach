@@ -28,7 +28,6 @@ func TestDialogs_View_Golden(t *testing.T) {
 		{name: "confirm", view: goldenConfirmView},
 		{name: "gitpull", view: goldenGitPullView},
 		{name: "mergechoice", view: goldenMergeChoiceView},
-		{name: "merge_select", view: goldenMergeSelectView},
 		{name: "merge_upstream", view: goldenMergeUpstreamView},
 		{name: "devserver", view: goldenDevServerView},
 		{name: "project_selector", view: goldenProjectSelectorView},
@@ -68,7 +67,6 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 		{name: "cleanup_small", view: goldenCleanupSmallView},
 		{name: "mergechoice_small", view: goldenMergeChoiceSmallView},
 		{name: "imageattach_list_small", view: goldenImageAttachListSmallView},
-		{name: "merge_select_small", view: goldenMergeSelectSmallView},
 		{name: "merge_upstream_small", view: goldenMergeUpstreamSmallView},
 		{name: "imagepreview_default_small", view: goldenImagePreviewSmallView},
 		{name: "imageattach_preview_small", view: goldenImageAttachPreviewSmallView},
@@ -212,35 +210,24 @@ func goldenMergeChoiceSmallView(t *testing.T) string {
 	return model.(*MergeChoiceOverlay).View()
 }
 
-func goldenMergeSelectView(t *testing.T) string {
-	t.Helper()
-	source := &domain.Task{ID: "az-123", Title: "Implement feature X"}
-	overlay := NewMergeSelectOverlay(source, []MergeTarget{
-		{ID: "az-456", Label: "Related task 1", Status: domain.StatusOpen, HasWorktree: true},
-		{ID: "az-789", Label: "Related task 2", Status: domain.StatusDone, HasWorktree: false},
-	}, nil, nil)
-	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
-	return model.(*MergeSelectOverlay).View()
-}
-
 func goldenMergeUpstreamView(t *testing.T) string {
 	t.Helper()
-	source := &domain.Task{ID: "az-123", Title: "Implement feature X"}
-	overlay := NewMergeSourceSelectOverlay(source, []MergeTarget{
-		{ID: "az-456", Label: "Related task 1", Status: domain.StatusOpen, HasWorktree: true},
+	target := &domain.Task{ID: "az-123", Title: "Implement feature X"}
+	overlay := NewMergeSourceSelectOverlay(target, []MergeTarget{
+		{ID: "az-456", Label: "Related task 1", Status: domain.StatusInProgress, HasWorktree: true},
 	}, nil, nil)
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
-	return model.(*MergeSelectOverlay).View()
+	return model.(*MergeSourceSelectOverlay).View()
 }
 
 func goldenMergeUpstreamSmallView(t *testing.T) string {
 	t.Helper()
-	source := &domain.Task{ID: "az-123", Title: "Implement feature X"}
-	overlay := NewMergeSourceSelectOverlay(source, []MergeTarget{
-		{ID: "az-456", Label: "Related task 1", Status: domain.StatusOpen, HasWorktree: true},
+	target := &domain.Task{ID: "az-123", Title: "Implement feature X"}
+	overlay := NewMergeSourceSelectOverlay(target, []MergeTarget{
+		{ID: "az-456", Label: "Related task 1", Status: domain.StatusInProgress, HasWorktree: true},
 	}, nil, nil)
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
-	return model.(*MergeSelectOverlay).View()
+	return model.(*MergeSourceSelectOverlay).View()
 }
 
 func goldenDevServerView(t *testing.T) string {
@@ -487,17 +474,6 @@ func goldenImagePreviewSmallView(t *testing.T) string {
 	}
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
 	return model.(*ImagePreviewOverlay).View()
-}
-
-func goldenMergeSelectSmallView(t *testing.T) string {
-	t.Helper()
-	source := &domain.Task{ID: "az-123", Title: "Implement feature X"}
-	overlay := NewMergeSelectOverlay(source, []MergeTarget{
-		{ID: "az-456", Label: "Related task 1", Status: domain.StatusOpen, HasWorktree: true},
-		{ID: "az-789", Label: "Related task 2", Status: domain.StatusDone, HasWorktree: false},
-	}, nil, nil)
-	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
-	return model.(*MergeSelectOverlay).View()
 }
 
 func goldenProjectSelectorSmallView(t *testing.T) string {
