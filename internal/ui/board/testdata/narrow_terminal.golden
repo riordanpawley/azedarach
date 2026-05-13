@@ -4,21 +4,21 @@
 │                  ││                  ││                  ││                  │
 │ Implement user   ││ API endpoint r   ││ Deploy to prod   ││ Setup CI/CD pi   │
 │  authenticatio   ││ efactor          ││ uction           ││ peline           │
-│ n                ││                  ││                  ││                  │
+│ n          loc   ││            loc   ││            loc   ││            loc   │
 ╰──────────────────╯╰──────────────────╯╰──────────────────╯╰──────────────────╯
 ╭──────────────────╮╭──────────────────╮                    ╭──────────────────╮
 │  P1  az-2  F     ││  P2  az-4  E     │                    │  P4  az-8  T     │
 │                  ││                  │                    │                  │
 │ Fix login redi   ││ Database migra   │                    │ Configure moni   │
 │ rect bug         ││ tion epic        │                    │ toring           │
-│                  ││                  │                    │                  │
+│            loc   ││            loc   │                    │            loc   │
 ╰──────────────────╯╰──────────────────╯                    ╰──────────────────╯
 ╭──────────────────╮                                                            
 │  P3  az-5  T     │                                                            
 │                  │                                                            
 │ Add password r   │                                                            
 │ eset flow        │                                                            
-│                  │                                                            
+│            loc   │                                                            
 ╰──────────────────╯                                                            
                                                                                 
                                                                                 

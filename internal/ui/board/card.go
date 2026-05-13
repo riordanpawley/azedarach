@@ -151,9 +151,73 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	for _, line := range titleLines {
 		lines = append(lines, ansi.Truncate(line, maxLineLen, "…"))
 	}
+	if len(lines) > 0 {
+		lines[len(lines)-1] = overlayOriginBadge(lines[len(lines)-1], maxLineLen, task.Origin)
+	}
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 
 	return cardStyle.Height(cardHeight).Render(content)
+}
+
+// overlayOriginBadge composes the last content line so that an origin badge
+// occupies the bottom-right corner of the card. When the rendered badge would
+// not fit, the badge is omitted and the original line is returned unchanged.
+func overlayOriginBadge(line string, maxLineLen int, origin string) string {
+	badge := renderOriginBadge(origin)
+	if badge == "" {
+		return line
+	}
+	badgeWidth := ansi.StringWidth(badge)
+	if badgeWidth <= 0 || badgeWidth >= maxLineLen {
+		return line
+	}
+	contentRoom := maxLineLen - badgeWidth - 1
+	if contentRoom < 0 {
+		contentRoom = 0
+	}
+	truncated := ansi.Truncate(line, contentRoom, "…")
+	gap := maxLineLen - ansi.StringWidth(truncated) - badgeWidth
+	if gap < 1 {
+		gap = 1
+	}
+	return truncated + strings.Repeat(" ", gap) + badge
+}
+
+// renderOriginBadge returns a styled badge identifying the origination of an
+// issue (e.g. "linear" vs "local"). Unknown providers render with a neutral
+// fallback style so new providers are still visible without code changes.
+func renderOriginBadge(origin string) string {
+	origin = strings.TrimSpace(strings.ToLower(origin))
+	if origin == "" {
+		origin = "local"
+	}
+	var (
+		label string
+		bg    lipgloss.Color
+	)
+	switch origin {
+	case "local":
+		label = "loc"
+		bg = styles.Overlay1
+	case "linear":
+		label = "lin"
+		bg = styles.Lavender
+	case "github", "gh":
+		label = "gh "
+		bg = styles.Mauve
+	default:
+		runes := []rune(origin)
+		label = string(runes[:1])
+		if len(runes) > 1 {
+			label += string(runes[1:2])
+		}
+		bg = styles.Overlay2
+	}
+	return lipgloss.NewStyle().
+		Foreground(styles.Base).
+		Background(bg).
+		Bold(true).
+		Render(label)
 }
 
 func renderJumpLabel(label string, s *styles.Styles) string {

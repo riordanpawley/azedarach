@@ -50,6 +50,7 @@ type Task struct {
 	ConflictFiles         []string        `json:"conflict_files,omitempty"`
 	GitAdditions          int             `json:"git_additions,omitempty"`
 	GitDeletions          int             `json:"git_deletions,omitempty"`
+	Origin                string          `json:"origin,omitempty"`
 	CreatedAt             time.Time       `json:"created_at"`
 	UpdatedAt             time.Time       `json:"updated_at"`
 }

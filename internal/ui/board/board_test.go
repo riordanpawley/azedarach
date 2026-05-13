@@ -235,6 +235,47 @@ func TestRenderCard_ShowsBlockedPhaseChip(t *testing.T) {
 	}
 }
 
+func TestRenderCard_OriginBadgeBottomRight(t *testing.T) {
+	s := styles.New()
+
+	cases := []struct {
+		name   string
+		origin string
+		want   string
+	}{
+		{name: "linear", origin: "linear", want: "lin"},
+		{name: "local_explicit", origin: "local", want: "loc"},
+		{name: "local_default_when_unset", origin: "", want: "loc"},
+		{name: "github", origin: "github", want: "gh"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			task := domain.Task{
+				ID:       "az-1",
+				Title:    "Origin test",
+				Status:   domain.StatusOpen,
+				Priority: domain.P2,
+				Type:     domain.TypeTask,
+				Origin:   tc.origin,
+			}
+			view := normalizeBoardOutput(renderCard(task, nil, false, false, 30, nil, nil, false, "", s))
+			lines := strings.Split(view, "\n")
+			if len(lines) < 2 {
+				t.Fatalf("unexpected card with %d lines: %q", len(lines), view)
+			}
+			lastContent := lines[len(lines)-2]
+			if !strings.Contains(lastContent, tc.want) {
+				t.Fatalf("expected last content line to contain %q (origin=%q), got %q\nfull view:\n%s", tc.want, tc.origin, lastContent, view)
+			}
+			trimmed := strings.TrimRight(strings.TrimSuffix(strings.TrimPrefix(lastContent, "│"), "│"), " ")
+			if !strings.HasSuffix(trimmed, tc.want) {
+				t.Fatalf("expected badge %q to be right-aligned on last content line, got %q", tc.want, lastContent)
+			}
+		})
+	}
+}
+
 func TestRenderEmptyBoard(t *testing.T) {
 	s := styles.New()
 	got := Render([]Column{}, Cursor{}, make(map[string]bool), map[string]RuntimeSignals{}, nil, nil, false, nil, 0, s, 120, 30)

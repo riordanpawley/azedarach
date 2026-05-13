@@ -1604,6 +1604,12 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 			SELECT issue_id, state, started_at, updated_at
 			FROM ranked_session
 			WHERE rn = 1
+		),
+		origin_pick AS (
+			SELECT issue_id, MIN(provider) AS provider
+			FROM issue_external_refs
+			WHERE deleted_at IS NULL
+			GROUP BY issue_id
 		)
 		SELECT
 			i.id,
@@ -1625,11 +1631,13 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 			COALESCE(sp.started_at, ''),
 			COALESCE(sp.updated_at, ''),
 			COALESCE(w.path, ''),
-			COALESCE(w.git_status_json, '')
+			COALESCE(w.git_status_json, ''),
+			COALESCE(o.provider, '')
 		FROM issues i
 		LEFT JOIN session_pick sp ON sp.issue_id = i.id
 		LEFT JOIN daemon_worktree_projections w
 			ON w.project_id = ? AND w.issue_id = i.id
+		LEFT JOIN origin_pick o ON o.issue_id = i.id
 		WHERE i.deleted_at IS NULL
 	`
 	args := []any{projectID, projectID}
@@ -1683,6 +1691,7 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 			sessionUpdatedRaw  string
 			worktreePath       string
 			gitStatusRaw       string
+			originProvider     string
 		)
 		if err := rows.Scan(
 			&task.ID,
@@ -1705,8 +1714,14 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 			&sessionUpdatedRaw,
 			&worktreePath,
 			&gitStatusRaw,
+			&originProvider,
 		); err != nil {
 			return nil, err
+		}
+		if origin := strings.TrimSpace(strings.ToLower(originProvider)); origin != "" {
+			task.Origin = origin
+		} else {
+			task.Origin = "local"
 		}
 
 		task.Status = domain.Status(statusRaw)
