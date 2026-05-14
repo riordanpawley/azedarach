@@ -335,9 +335,11 @@ func TestDetailPanelViewGroupsGraphRelationsByType(t *testing.T) {
 	assert.NotContains(t, view, "Descendants")
 
 	// Each relation has its own section with the expected row.
-	assert.Contains(t, view, "Parents")
+	// "Parent" is singular because a task has at most one parent;
+	// the chain is not walked transitively here (use l/> to navigate up).
+	assert.Contains(t, view, "Parent")
 	assert.Contains(t, view, "< az-parent [Open] Parent task")
-	assert.Contains(t, view, "< az-root [Open] Root task")
+	assert.NotContains(t, view, "az-root [Open] Root task")
 
 	assert.Contains(t, view, "Children")
 	assert.Contains(t, view, "> az-direct-child [Open] Direct child")

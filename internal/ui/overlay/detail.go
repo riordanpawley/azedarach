@@ -68,7 +68,7 @@ var graphRelationOrder = []string{
 }
 
 var graphRelationLabels = map[string]string{
-	graphRelParent:         "Parents",
+	graphRelParent:         "Parent",
 	graphRelChild:          "Children",
 	graphRelBlocks:         "Blocks",
 	graphRelBlockedBy:      "Blocked by",
@@ -461,7 +461,7 @@ func (d *DetailPanel) graphLinks() []taskGraphLink {
 		})
 	}
 
-	for _, parent := range d.collectParentChain(byID) {
+	if parent, ok := d.directParent(byID); ok {
 		add(graphRelParent, parent)
 	}
 	for _, child := range d.collectChildTree(byID) {
@@ -553,31 +553,15 @@ func (d *DetailPanel) graphNavigationCmd(direction string) tea.Cmd {
 	}
 }
 
-// collectParentChain walks the parent chain upward from the current task,
-// following both ParentID and parent-child dependency edges. Order is nearest
-// parent first; cycles are broken by visiting each task at most once.
-func (d *DetailPanel) collectParentChain(byID map[naming.IssueID]domain.Task) []domain.Task {
-	visited := map[naming.IssueID]struct{}{d.task.ID: {}}
-	var chain []domain.Task
-
-	current := d.task
-	for {
-		nextID, ok := parentOf(current)
-		if !ok {
-			break
-		}
-		if _, seen := visited[nextID]; seen {
-			break
-		}
-		next, ok := byID[nextID]
-		if !ok {
-			break
-		}
-		visited[nextID] = struct{}{}
-		chain = append(chain, next)
-		current = next
+// directParent resolves the current task's direct parent if any, preferring
+// the ParentID field and falling back to a parent-child dependency edge.
+func (d *DetailPanel) directParent(byID map[naming.IssueID]domain.Task) (domain.Task, bool) {
+	parentID, ok := parentOf(d.task)
+	if !ok || parentID == d.task.ID {
+		return domain.Task{}, false
 	}
-	return chain
+	task, ok := byID[parentID]
+	return task, ok
 }
 
 // collectChildTree walks the child sub-tree rooted at the current task in BFS
