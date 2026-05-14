@@ -26,6 +26,7 @@ Commands:
   log [sources]              Tail/stream daemon, TUI, and CLI log files
   opencode <init|plugin>     Manage OpenCode integration
   codex <install|guard|hook>  Install Codex hook configuration and run hook commands
+  ai install [--target=auto|rulesync|claude|codex|opencode,...] [--issue <id>] [--generate=auto|never]  Unified hook install across AI agent harnesses
   ai hook run --agent=<claude|codex> [--json] <event>  Run an agent hook through the shared internal port
   tmux <selector|install-selector|uninstall-selector>  Manage tmux selector integration
   spec <subcommand>          Spec workflows (req|link|read|lint|parity)
@@ -134,6 +135,9 @@ Examples:
   az opencode plugin install
   az codex install
   az codex hook run --json pre-tool-use
+  az ai install
+  az ai install --target=rulesync --issue az-123
+  az ai install --target=claude,codex --issue az-123
   az ai hook run --agent=codex --json permission-request
   az tmux install-selector
   az tmux uninstall-selector

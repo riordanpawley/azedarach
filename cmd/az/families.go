@@ -292,6 +292,7 @@ func runCodexCommand(cfg *config.Config, args []string) error {
 func runAICommand(cfg *config.Config, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
 		cli.PrintAIUsage()
+		cli.PrintAIInstallUsage()
 		return nil
 	}
 
@@ -314,6 +315,15 @@ func runAICommand(cfg *config.Config, args []string) error {
 		default:
 			return fmt.Errorf("unknown ai hook command: %s", args[1])
 		}
+	case "install":
+		opts, err := cli.ParseAIInstallArgs(args[1:])
+		if err != nil {
+			cli.PrintAIInstallUsage()
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.AIInstallCommand(deps, opts)
+		})
 	default:
 		return fmt.Errorf("unknown ai command: %s", args[0])
 	}

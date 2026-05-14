@@ -47,6 +47,8 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"az opencode plugin install",
 		"az codex install",
 		"az codex hook run --json pre-tool-use",
+		"az ai install",
+		"az ai install --target=rulesync --issue az-123",
 		"az tmux install-selector",
 		"az tmux uninstall-selector",
 		"az tmux selector",
