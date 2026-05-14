@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1177,20 +1178,27 @@ func TestCodexHookRunCommandAppendsHookLogWithIssueIDFromEnv(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-123")
 	transport := &fakeDaemonTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != protocol.CommandHookLogAppend {
+			switch req.Command {
+			case protocol.CommandHookLogAppend:
+				var body protocol.HookLogAppendCommandBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal hook append body: %v", err)
+				}
+				if body.Event.IssueID.String() != "az-123" {
+					t.Fatalf("hook append issue_id = %q, want az-123", body.Event.IssueID)
+				}
+				if body.Event.Worktree != projectDir {
+					t.Fatalf("hook append worktree = %q, want %q", body.Event.Worktree, projectDir)
+				}
+				return responseWithJSON(req, body.Event), nil
+			case daemonclient.CommandSessionPause:
+				return responseWithOutput(req, "ok"), nil
+			case daemonclient.CommandRuntimeReconcileIssue:
+				return responseWithJSON(req, protocol.RuntimeReconcileResponseBody{ProjectID: "proj-1"}), nil
+			default:
 				t.Fatalf("unexpected command: %s", req.Command)
+				return protocol.ResponseEnvelope{}, nil
 			}
-			var body protocol.HookLogAppendCommandBody
-			if err := json.Unmarshal(req.Body, &body); err != nil {
-				t.Fatalf("unmarshal hook append body: %v", err)
-			}
-			if body.Event.IssueID.String() != "az-123" {
-				t.Fatalf("hook append issue_id = %q, want az-123", body.Event.IssueID)
-			}
-			if body.Event.Worktree != projectDir {
-				t.Fatalf("hook append worktree = %q, want %q", body.Event.Worktree, projectDir)
-			}
-			return responseWithJSON(req, body.Event), nil
 		},
 	}
 	deps := &Dependencies{
@@ -1218,6 +1226,178 @@ func TestCodexHookRunCommandAppendsHookLogWithIssueIDFromEnv(t *testing.T) {
 	})
 	if strings.TrimSpace(output) != "{}" {
 		t.Fatalf("hook run output = %q, want {}", output)
+	}
+}
+
+func TestCodexHookRunCommandStopPausesDaemonSessionAndReconciles(t *testing.T) {
+	projectDir := t.TempDir()
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-456")
+
+	var sessionCommands []string
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case protocol.CommandHookLogAppend:
+				var body protocol.HookLogAppendCommandBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal hook append body: %v", err)
+				}
+				return responseWithJSON(req, body.Event), nil
+			case daemonclient.CommandSessionPause:
+				sessionCommands = append(sessionCommands, req.Command)
+				return responseWithOutput(req, "ok"), nil
+			case daemonclient.CommandRuntimeReconcileIssue:
+				sessionCommands = append(sessionCommands, req.Command)
+				return responseWithJSON(req, protocol.RuntimeReconcileResponseBody{ProjectID: "proj-1"}), nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		},
+	}
+	deps := &Dependencies{
+		RepoDir:      projectDir,
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+	}
+
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.WriteString(`{"thread_id":"t-stop"}`); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
+
+	if err := CodexHookRunCommand(deps, CodexHookRunOptions{Event: "stop", JSON: true}); err != nil {
+		t.Fatalf("CodexHookRunCommand error: %v", err)
+	}
+
+	wantOrder := []string{daemonclient.CommandSessionPause, daemonclient.CommandRuntimeReconcileIssue}
+	if !reflect.DeepEqual(sessionCommands, wantOrder) {
+		t.Fatalf("session commands = %v, want %v", sessionCommands, wantOrder)
+	}
+}
+
+func TestCodexHookRunCommandSessionStartResumesDaemonSession(t *testing.T) {
+	projectDir := t.TempDir()
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-789")
+
+	var gotResume *protocol.RequestEnvelope
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case protocol.CommandHookLogAppend:
+				var body protocol.HookLogAppendCommandBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal hook append body: %v", err)
+				}
+				return responseWithJSON(req, body.Event), nil
+			case daemonclient.CommandSessionResume:
+				captured := req
+				gotResume = &captured
+				return responseWithOutput(req, "ok"), nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		},
+	}
+	deps := &Dependencies{
+		RepoDir:      projectDir,
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+	}
+
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.WriteString(`{"thread_id":"t-start"}`); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
+
+	if err := CodexHookRunCommand(deps, CodexHookRunOptions{Event: "session-start", JSON: true}); err != nil {
+		t.Fatalf("CodexHookRunCommand error: %v", err)
+	}
+
+	if gotResume == nil {
+		t.Fatalf("expected session.resume command, got none")
+	}
+	var body struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(gotResume.Body, &body); err != nil {
+		t.Fatalf("unmarshal session.resume body: %v", err)
+	}
+	if body.SessionID != "az-789" {
+		t.Fatalf("session_id = %q, want az-789", body.SessionID)
+	}
+}
+
+func TestCodexHookRunCommandSkipsDaemonNotifyWithoutIssueID(t *testing.T) {
+	projectDir := t.TempDir()
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case protocol.CommandHookLogAppend:
+				var body protocol.HookLogAppendCommandBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal hook append body: %v", err)
+				}
+				return responseWithJSON(req, body.Event), nil
+			case daemonclient.CommandWorktreeList:
+				// appendHookLogEventBestEffort may fall back to resolving issue id
+				// via worktree list when AZEDARACH_ISSUE_ID is empty.
+				return responseWithJSON(req, map[string]any{
+					"project_id": "proj-1",
+					"worktrees":  []map[string]any{},
+				}), nil
+			case daemonclient.CommandSessionPause, daemonclient.CommandSessionResume,
+				daemonclient.CommandRuntimeReconcileIssue:
+				t.Fatalf("unexpected session lifecycle command without AZEDARACH_ISSUE_ID: %s", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			default:
+				return responseWithJSON(req, map[string]any{}), nil
+			}
+		},
+	}
+	deps := &Dependencies{
+		RepoDir:      projectDir,
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+	}
+
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.WriteString(`{"thread_id":"t-noenv"}`); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
+
+	if err := CodexHookRunCommand(deps, CodexHookRunOptions{Event: "stop", JSON: true}); err != nil {
+		t.Fatalf("CodexHookRunCommand error: %v", err)
 	}
 }
 

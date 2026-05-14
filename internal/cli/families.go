@@ -1486,6 +1486,17 @@ func CodexHookRunCommand(deps *Dependencies, opts CodexHookRunOptions) error {
 		Level:    "info",
 		Message:  fmt.Sprintf("codex hook run: %s", strings.TrimSpace(opts.Event)),
 	})
+
+	if issueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID")); issueID != "" && deps != nil && deps.DaemonClient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		// Best-effort daemon lifecycle update so codex hook events drive the same
+		// session pause/resume transitions that NotifyCommand triggers for Claude
+		// Code hooks. Errors are intentionally swallowed: this hook runs inside
+		// Codex and any stderr would pollute the hook output channel.
+		_ = notifyDaemonSessionStatus(ctx, deps, issueID, notifyEvent)
+		cancel()
+	}
+
 	if !opts.JSON {
 		notifyOutput, err := renderNotifyOutput(NotifyOptions{Event: notifyEvent})
 		if err != nil {
