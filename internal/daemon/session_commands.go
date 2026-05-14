@@ -1860,20 +1860,21 @@ func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo 
 	}
 
 	if strings.EqualFold(tool, "codex") {
-		sanitizedIssueID := strings.TrimSpace(issueID)
-		if sanitizedIssueID == "" {
-			sanitizedIssueID = "unknown-issue"
-		}
-		sessionStartCommand := fmt.Sprintf("az notify --json session_start %s", sanitizedIssueID)
-		userPromptSubmitCommand := fmt.Sprintf("az notify --json user_prompt_submit %s", sanitizedIssueID)
-		preToolUseCommand := fmt.Sprintf("az notify --json pre_tool_use %s", sanitizedIssueID)
-		postToolUseCommand := fmt.Sprintf("az notify --json post_tool_use %s", sanitizedIssueID)
-		stopCommand := fmt.Sprintf("az notify --json stop %s", sanitizedIssueID)
+		// Codex inherits AZEDARACH_ISSUE_ID from the launch command env (set in
+		// the parts prefix above), so the hook commands don't need to bake it
+		// in. Route through the unified `az ai hook run` port.
+		sessionStartCommand := "az ai hook run --agent=codex --json session_start"
+		userPromptSubmitCommand := "az ai hook run --agent=codex --json user_prompt_submit"
+		preToolUseCommand := "az ai hook run --agent=codex --json pre_tool_use"
+		postToolUseCommand := "az ai hook run --agent=codex --json post_tool_use"
+		permissionRequestCommand := "az ai hook run --agent=codex --json permission_request"
+		stopCommand := "az ai hook run --agent=codex --json stop"
 		parts = append(parts,
 			buildCodexConfigOverrideArg("hooks.SessionStart", sessionStartCommand),
 			buildCodexConfigOverrideArg("hooks.UserPromptSubmit", userPromptSubmitCommand),
 			buildCodexConfigOverrideArg("hooks.PreToolUse", preToolUseCommand),
 			buildCodexConfigOverrideArg("hooks.PostToolUse", postToolUseCommand),
+			buildCodexConfigOverrideArg("hooks.PermissionRequest", permissionRequestCommand),
 			buildCodexConfigOverrideArg("hooks.Stop", stopCommand),
 		)
 		for _, imagePath := range imagePaths {

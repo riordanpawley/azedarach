@@ -33,6 +33,23 @@ func (t AgentInstallTarget) IsKnown() bool {
 	return false
 }
 
+// legacyAzCommandPrefixes are command prefixes from deleted CLI commands that
+// installers and the standalone migrate flow strip from existing hook configs
+// before writing the new managed entries. Listed here so additions are seen by
+// every adapter.
+var legacyAzCommandPrefixes = []string{
+	"az notify ",
+	"az notify\t",
+	"az codex hook run ",
+	"az codex hook run\t",
+	"az codex guard ",
+	"az codex guard\t",
+	"az hooks install ",
+	"az hooks install\t",
+	`/bin/sh -c 'out="$(az codex hook run`,
+	`/bin/sh -c 'out="$(az notify`,
+}
+
 // AIInstallOptions configures `az ai install`.
 type AIInstallOptions struct {
 	Targets    []AgentInstallTarget
@@ -96,6 +113,7 @@ func ParseAIInstallArgs(args []string) (AIInstallOptions, error) {
 func PrintAIInstallUsage() {
 	fmt.Println("Usage: az ai install [--target=auto|rulesync|claude|codex|opencode,...] [--issue <id>] [--project-dir <dir>] [--generate=auto|never] [--verbose]")
 	fmt.Println("Install az hooks into one or more AI agent harnesses. Auto-detects targets when --target=auto (default).")
+	fmt.Println("Migrates any legacy hook commands (az notify, az codex hook run, az codex guard, az hooks install) in place.")
 }
 
 // agentInstaller is the port each install adapter implements.
@@ -228,20 +246,75 @@ func installerForTarget(target AgentInstallTarget) agentInstaller {
 
 // ----- claude adapter --------------------------------------------------------
 
+const claudeAIHookCommandPrefix = "az ai hook run --agent=claude"
+
 type claudeInstaller struct{}
 
 func (claudeInstaller) Name() AgentInstallTarget { return AgentInstallTargetClaude }
 
 func (claudeInstaller) Install(_ context.Context, deps *Dependencies, opts AIInstallOptions) error {
+	_ = deps
 	issueID := strings.TrimSpace(opts.IssueID)
 	if issueID == "" {
 		return fmt.Errorf("claude install requires --issue <id> or AZEDARACH_ISSUE_ID")
 	}
-	return HooksInstallCommand(deps, HooksInstallOptions{
-		IssueID:    issueID,
-		ProjectDir: opts.ProjectDir,
-		Verbose:    opts.Verbose,
-	})
+
+	settingsPath := filepath.Join(opts.ProjectDir, ".claude", "settings.local.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		return fmt.Errorf("create .claude directory: %w", err)
+	}
+	settings, err := readJSONObject(settingsPath)
+	if err != nil {
+		return fmt.Errorf("read claude settings: %w", err)
+	}
+	hooks, _ := settings["hooks"].(map[string]any)
+	if hooks == nil {
+		hooks = map[string]any{}
+	}
+
+	command := func(event string) string {
+		return fmt.Sprintf("%s --json %s --issue=%s", claudeAIHookCommandPrefix, event, issueID)
+	}
+
+	// Each entry is one Claude hook event we manage. Issue ID is baked into
+	// the command since Claude hook entries don't get to read env at runtime
+	// in the same way Codex does.
+	entries := []struct {
+		key     string
+		event   string
+		matcher string
+	}{
+		{"Notification", hookEventIdlePrompt, hookEventIdlePrompt},
+		{"PermissionRequest", hookEventPermissionRequest, ""},
+		{"Stop", hookEventStop, ""},
+		{"SessionEnd", hookEventSessionEnd, ""},
+	}
+
+	pruner := newLegacyPrefixPruner(append([]string{claudeAIHookCommandPrefix}, legacyAzCommandPrefixes...))
+	for _, e := range entries {
+		hooks[e.key] = pruner.prune(hooks[e.key])
+		desired := map[string]any{
+			"hooks": []any{
+				map[string]any{"type": "command", "command": command(e.event)},
+			},
+		}
+		if e.matcher != "" {
+			desired["matcher"] = e.matcher
+		}
+		hooks[e.key] = mergeHookEntries(hooks[e.key], desired, command(e.event))
+	}
+
+	settings["hooks"] = hooks
+	if err := writeJSONObject(settingsPath, settings); err != nil {
+		return fmt.Errorf("write claude settings: %w", err)
+	}
+
+	fmt.Printf("Installed claude hooks for issue %s\n", issueID)
+	if opts.Verbose {
+		fmt.Printf("  File: %s\n", settingsPath)
+		fmt.Println("  Events: idle_prompt, permission_request, stop, session_end")
+	}
+	return nil
 }
 
 // ----- codex adapter ---------------------------------------------------------
@@ -251,10 +324,77 @@ type codexInstaller struct{}
 func (codexInstaller) Name() AgentInstallTarget { return AgentInstallTargetCodex }
 
 func (codexInstaller) Install(_ context.Context, deps *Dependencies, opts AIInstallOptions) error {
-	return CodexInstallCommand(deps, CodexInstallOptions{
-		ProjectDir: opts.ProjectDir,
-		Verbose:    opts.Verbose,
-	})
+	_ = deps
+	hooksPath := filepath.Join(opts.ProjectDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o755); err != nil {
+		return fmt.Errorf("create codex hooks directory: %w", err)
+	}
+	hooksConfig, err := readJSONObject(hooksPath)
+	if err != nil {
+		return fmt.Errorf("read codex hooks config: %w", err)
+	}
+	hooks, _ := hooksConfig["hooks"].(map[string]any)
+	if hooks == nil {
+		hooks = map[string]any{}
+	}
+
+	specs := []struct {
+		eventName  string
+		guardEvent string
+		matcher    string
+	}{
+		{"SessionStart", "session-start", "startup|resume"},
+		{"UserPromptSubmit", "user-prompt-submit", ""},
+		{"PreToolUse", "pre-tool-use", ""},
+		{"PostToolUse", "post-tool-use", ""},
+		{"PermissionRequest", "permission-request", ""},
+		{"Stop", "stop", ""},
+	}
+
+	pruner := newLegacyPrefixPruner(legacyAzCommandPrefixes)
+	for _, spec := range specs {
+		combined := buildCodexHookJSONCommand(spec.guardEvent)
+		hooks[spec.eventName] = pruner.prune(hooks[spec.eventName])
+		// Also strip our own current managed form so re-install replaces
+		// rather than accreting duplicates.
+		hooks[spec.eventName] = removeHookCommands(hooks[spec.eventName], combined)
+
+		desired := map[string]any{
+			"hooks": []any{
+				map[string]any{
+					"type":    "command",
+					"command": combined,
+				},
+			},
+		}
+		if spec.matcher != "" {
+			desired["matcher"] = spec.matcher
+		}
+		hooks[spec.eventName] = mergeHookEntries(hooks[spec.eventName], desired, combined)
+	}
+
+	hooksConfig["hooks"] = hooks
+	if err := writeJSONObject(hooksPath, hooksConfig); err != nil {
+		return fmt.Errorf("write codex hooks config: %w", err)
+	}
+
+	fmt.Printf("Installed codex hooks in %s\n", hooksPath)
+	if opts.Verbose {
+		fmt.Println("  Events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest, Stop")
+	}
+	return nil
+}
+
+// buildCodexHookJSONCommand wraps the shared `az ai hook run` invocation in a
+// /bin/sh chain that defaults to printf "{}" if the binary fails — Codex
+// schema requires a JSON-shaped response, so we never want a missing binary
+// to brick the hook chain.
+func buildCodexHookJSONCommand(event string) string {
+	event = strings.TrimSpace(event)
+	return fmt.Sprintf(
+		`/bin/sh -c 'out="$(az ai hook run --agent=codex --json %s 2>/dev/null | tail -n 1)"; [ -n "$out" ] && printf "%%s\n" "$out" || printf "{}\n"'`,
+		event,
+	)
 }
 
 // ----- opencode adapter ------------------------------------------------------
@@ -264,16 +404,65 @@ type opencodeInstaller struct{}
 func (opencodeInstaller) Name() AgentInstallTarget { return AgentInstallTargetOpencode }
 
 func (opencodeInstaller) Install(_ context.Context, deps *Dependencies, opts AIInstallOptions) error {
-	if err := OpenCodeInitCommand(deps, OpenCodeInitOptions{
-		ProjectDir: opts.ProjectDir,
-		Verbose:    opts.Verbose,
-	}); err != nil {
+	if err := opencodeInitConfig(opts); err != nil {
 		return err
 	}
-	return OpenCodePluginInstallCommand(deps, OpenCodePluginInstallOptions{
-		ProjectDir: opts.ProjectDir,
-		Verbose:    opts.Verbose,
-	})
+	return opencodeInstallPlugin(deps, opts)
+}
+
+func opencodeInitConfig(opts AIInstallOptions) error {
+	configPath := filepath.Join(opts.ProjectDir, "opencode.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return fmt.Errorf("prepare opencode config directory: %w", err)
+	}
+	config, err := readJSONObject(configPath)
+	if err != nil {
+		return fmt.Errorf("read opencode config: %w", err)
+	}
+	if _, ok := config["$schema"]; !ok {
+		config["$schema"] = "https://opencode.ai/config.json"
+	}
+	if _, ok := config["instructions"]; !ok {
+		config["instructions"] = []string{"CLAUDE.md"}
+	}
+	if _, ok := config["theme"]; !ok {
+		config["theme"] = "tokyonight"
+	}
+	config["plugins"] = mergeStrings(config["plugins"], "opencode-tracker")
+	if err := writeJSONObject(configPath, config); err != nil {
+		return fmt.Errorf("write opencode config: %w", err)
+	}
+	fmt.Printf("Initialized opencode support in %s\n", configPath)
+	if opts.Verbose {
+		fmt.Printf("  Plugins: %s\n", strings.Join(normalizeStrings(config["plugins"]), ", "))
+	}
+	return nil
+}
+
+func opencodeInstallPlugin(deps *Dependencies, opts AIInstallOptions) error {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		if deps != nil && strings.TrimSpace(deps.RepoDir) != "" {
+			configDir = filepath.Join(deps.RepoDir, ".config")
+		} else {
+			return fmt.Errorf("resolve user config dir: %w", err)
+		}
+	}
+	globalPath := filepath.Join(configDir, "opencode", "plugins", openCodePluginFilename)
+	if err := writePlaceholderFile(globalPath, openCodePluginSource()); err != nil {
+		return fmt.Errorf("install global opencode plugin: %w", err)
+	}
+
+	projectPath := filepath.Join(opts.ProjectDir, ".opencode", "plugins", openCodePluginFilename)
+	if err := writePlaceholderFile(projectPath, openCodePluginSource()); err != nil {
+		return fmt.Errorf("install project opencode plugin: %w", err)
+	}
+
+	fmt.Printf("Installed opencode plugin: %s\n", globalPath)
+	if opts.Verbose {
+		fmt.Printf("  Project copy: %s\n", projectPath)
+	}
+	return nil
 }
 
 // ----- rulesync adapter ------------------------------------------------------
@@ -283,6 +472,7 @@ type rulesyncInstaller struct{}
 func (rulesyncInstaller) Name() AgentInstallTarget { return AgentInstallTargetRulesync }
 
 func (rulesyncInstaller) Install(_ context.Context, deps *Dependencies, opts AIInstallOptions) error {
+	_ = deps
 	hooksPath := filepath.Join(opts.ProjectDir, ".rulesync", "hooks.json")
 	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o755); err != nil {
 		return fmt.Errorf("create .rulesync directory: %w", err)
@@ -365,15 +555,11 @@ func mergeRulesyncSection(config map[string]any, sectionKey string, desired map[
 
 	for event, entries := range desired {
 		existing := normalizeAnySlice(hooks[event])
-		azManagedCommands := make([]string, 0, len(entries))
-		for _, entry := range entries {
-			azManagedCommands = append(azManagedCommands, entry.Command)
-		}
 		// Strip any previously managed az command so a re-install replaces
 		// stale flag changes (e.g., issue id) rather than accreting copies.
-		existing = pruneRulesyncManagedEntries(existing, "az ai hook run")
-		// Also strip any explicit copies of our exact target commands.
-		existing = pruneRulesyncManagedEntries(existing, azManagedCommands...)
+		// Also strip legacy command prefixes from removed commands.
+		stripPrefixes := append([]string{"az ai hook run"}, legacyAzCommandPrefixes...)
+		existing = pruneRulesyncManagedEntries(existing, stripPrefixes...)
 		for _, entry := range entries {
 			existing = append(existing, rulesyncEntryToMap(entry))
 		}
@@ -407,22 +593,267 @@ func pruneRulesyncManagedEntries(entries []any, prefixes ...string) []any {
 		}
 		cmd, _ := typed["command"].(string)
 		cmd = strings.TrimSpace(cmd)
-		drop := false
-		for _, prefix := range prefixes {
-			prefix = strings.TrimSpace(prefix)
-			if prefix == "" {
-				continue
-			}
-			if cmd == prefix || strings.HasPrefix(cmd, prefix) {
-				drop = true
-				break
-			}
+		if commandMatchesAnyPrefix(cmd, prefixes) {
+			continue
 		}
-		if !drop {
-			out = append(out, entry)
+		out = append(out, entry)
+	}
+	return out
+}
+
+// ----- legacy prefix pruning (claude / codex nested hook structures) --------
+
+// legacyPrefixPruner recursively walks Claude/Codex hook entries (which can be
+// nested `{matcher, hooks: [...]}` structures) and removes any leaf hook whose
+// `command` starts with one of the configured prefixes.
+type legacyPrefixPruner struct {
+	prefixes []string
+}
+
+func newLegacyPrefixPruner(prefixes []string) *legacyPrefixPruner {
+	return &legacyPrefixPruner{prefixes: prefixes}
+}
+
+func (p *legacyPrefixPruner) prune(existing any) []any {
+	entries := normalizeAnySlice(existing)
+	out := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		pruned, keep := p.pruneEntry(entry)
+		if keep {
+			out = append(out, pruned)
 		}
 	}
 	return out
+}
+
+func (p *legacyPrefixPruner) pruneEntry(entry any) (any, bool) {
+	typed, ok := entry.(map[string]any)
+	if !ok {
+		return entry, true
+	}
+	if cmd, ok := typed["command"].(string); ok {
+		if commandMatchesAnyPrefix(strings.TrimSpace(cmd), p.prefixes) {
+			return nil, false
+		}
+	}
+	if nested, ok := typed["hooks"]; ok {
+		pruned := p.prune(nested)
+		if len(pruned) == 0 {
+			delete(typed, "hooks")
+		} else {
+			typed["hooks"] = pruned
+		}
+	}
+	if _, hasCommand := typed["command"]; hasCommand {
+		return typed, true
+	}
+	if nested, hasNested := typed["hooks"]; hasNested && len(normalizeAnySlice(nested)) > 0 {
+		return typed, true
+	}
+	return nil, false
+}
+
+func commandMatchesAnyPrefix(cmd string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		prefix = strings.TrimSpace(prefix)
+		if prefix == "" {
+			continue
+		}
+		if cmd == prefix || strings.HasPrefix(cmd, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// ----- standalone az ai migrate ---------------------------------------------
+
+// AIMigrateOptions configures `az ai migrate`.
+type AIMigrateOptions struct {
+	ProjectDir string
+	Verbose    bool
+}
+
+// ParseAIMigrateArgs parses `az ai migrate` arguments.
+func ParseAIMigrateArgs(args []string) (AIMigrateOptions, error) {
+	opts := AIMigrateOptions{}
+	fs := flag.NewFlagSet("ai migrate", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.ProjectDir, "project-dir", "", "project directory")
+	fs.BoolVar(&opts.Verbose, "verbose", false, "verbose output")
+	if err := fs.Parse(args); err != nil {
+		return AIMigrateOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return AIMigrateOptions{}, fmt.Errorf("usage: az ai migrate [--project-dir <dir>] [--verbose]")
+	}
+	return opts, nil
+}
+
+// PrintAIMigrateUsage prints usage for `az ai migrate`.
+func PrintAIMigrateUsage() {
+	fmt.Println("Usage: az ai migrate [--project-dir <dir>] [--verbose]")
+	fmt.Println("Strip legacy az notify / az codex hook run / az codex guard / az hooks install entries from existing hook configs.")
+	fmt.Println("Does not write new managed entries — use `az ai install` for that.")
+}
+
+// AIMigrateCommand strips legacy entries from known hook config files in place.
+func AIMigrateCommand(deps *Dependencies, opts AIMigrateOptions) error {
+	projectDir, err := resolveProjectDir(opts.ProjectDir, deps)
+	if err != nil {
+		return err
+	}
+	totalRemoved := 0
+	if removed, err := migrateClaudeSettings(projectDir, opts.Verbose); err != nil {
+		return err
+	} else {
+		totalRemoved += removed
+	}
+	if removed, err := migrateCodexHooks(projectDir, opts.Verbose); err != nil {
+		return err
+	} else {
+		totalRemoved += removed
+	}
+	if removed, err := migrateRulesyncHooks(projectDir, opts.Verbose); err != nil {
+		return err
+	} else {
+		totalRemoved += removed
+	}
+	if totalRemoved == 0 {
+		fmt.Println("az ai migrate: no legacy az commands found.")
+	} else {
+		fmt.Printf("az ai migrate: removed %d legacy hook entries.\n", totalRemoved)
+	}
+	return nil
+}
+
+func migrateClaudeSettings(projectDir string, verbose bool) (int, error) {
+	path := filepath.Join(projectDir, ".claude", "settings.local.json")
+	if !fileExists(path) {
+		return 0, nil
+	}
+	settings, err := readJSONObject(path)
+	if err != nil {
+		return 0, fmt.Errorf("read %s: %w", path, err)
+	}
+	hooks, _ := settings["hooks"].(map[string]any)
+	if hooks == nil {
+		return 0, nil
+	}
+	pruner := newLegacyPrefixPruner(legacyAzCommandPrefixes)
+	removed := 0
+	for key := range hooks {
+		before := countCommandsRecursive(hooks[key])
+		hooks[key] = pruner.prune(hooks[key])
+		after := countCommandsRecursive(hooks[key])
+		removed += before - after
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+	settings["hooks"] = hooks
+	if err := writeJSONObject(path, settings); err != nil {
+		return removed, fmt.Errorf("write %s: %w", path, err)
+	}
+	if verbose {
+		fmt.Printf("  %s: pruned %d legacy entries\n", path, removed)
+	}
+	return removed, nil
+}
+
+func migrateCodexHooks(projectDir string, verbose bool) (int, error) {
+	path := filepath.Join(projectDir, ".codex", "hooks.json")
+	if !fileExists(path) {
+		return 0, nil
+	}
+	config, err := readJSONObject(path)
+	if err != nil {
+		return 0, fmt.Errorf("read %s: %w", path, err)
+	}
+	hooks, _ := config["hooks"].(map[string]any)
+	if hooks == nil {
+		return 0, nil
+	}
+	pruner := newLegacyPrefixPruner(legacyAzCommandPrefixes)
+	removed := 0
+	for key := range hooks {
+		before := countCommandsRecursive(hooks[key])
+		hooks[key] = pruner.prune(hooks[key])
+		after := countCommandsRecursive(hooks[key])
+		removed += before - after
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+	config["hooks"] = hooks
+	if err := writeJSONObject(path, config); err != nil {
+		return removed, fmt.Errorf("write %s: %w", path, err)
+	}
+	if verbose {
+		fmt.Printf("  %s: pruned %d legacy entries\n", path, removed)
+	}
+	return removed, nil
+}
+
+func migrateRulesyncHooks(projectDir string, verbose bool) (int, error) {
+	path := filepath.Join(projectDir, ".rulesync", "hooks.json")
+	if !fileExists(path) {
+		return 0, nil
+	}
+	config, err := readJSONObject(path)
+	if err != nil {
+		return 0, fmt.Errorf("read %s: %w", path, err)
+	}
+	removed := 0
+	for _, sectionKey := range []string{"claudecode", "codexcli"} {
+		section, _ := config[sectionKey].(map[string]any)
+		if section == nil {
+			continue
+		}
+		hooks, _ := section["hooks"].(map[string]any)
+		if hooks == nil {
+			continue
+		}
+		for event := range hooks {
+			before := len(normalizeAnySlice(hooks[event]))
+			hooks[event] = pruneRulesyncManagedEntries(normalizeAnySlice(hooks[event]), legacyAzCommandPrefixes...)
+			after := len(normalizeAnySlice(hooks[event]))
+			removed += before - after
+		}
+		section["hooks"] = hooks
+		config[sectionKey] = section
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+	if err := writeJSONObject(path, config); err != nil {
+		return removed, fmt.Errorf("write %s: %w", path, err)
+	}
+	if verbose {
+		fmt.Printf("  %s: pruned %d legacy entries\n", path, removed)
+	}
+	return removed, nil
+}
+
+func countCommandsRecursive(entry any) int {
+	switch typed := entry.(type) {
+	case []any:
+		total := 0
+		for _, item := range typed {
+			total += countCommandsRecursive(item)
+		}
+		return total
+	case map[string]any:
+		total := 0
+		if _, ok := typed["command"].(string); ok {
+			total++
+		}
+		if nested, ok := typed["hooks"]; ok {
+			total += countCommandsRecursive(nested)
+		}
+		return total
+	}
+	return 0
 }
 
 // ----- rulesync generate runner ---------------------------------------------
@@ -484,4 +915,3 @@ func runRulesyncGenerate(ctx context.Context, projectDir string, verbose bool) e
 	}
 	return nil
 }
-

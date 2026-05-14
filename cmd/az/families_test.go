@@ -21,26 +21,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 )
 
-func TestRunHooksCommandHelpAndDispatch(t *testing.T) {
-	output := captureMainStdout(t, func() error {
-		return runHooksCommand(config.DefaultConfig(), []string{"--help"})
-	})
-	if !strings.Contains(output, "Usage: az hooks install <issue-id>") {
-		t.Fatalf("help output = %q", output)
-	}
-
-	projectDir := t.TempDir()
-	output = captureMainStdout(t, func() error {
-		return runHooksCommand(config.DefaultConfig(), []string{"install", "--project-dir", projectDir, "az-123"})
-	})
-	if !strings.Contains(output, "Installed hooks for issue az-123") {
-		t.Fatalf("dispatch output = %q", output)
-	}
-	if _, err := os.Stat(filepath.Join(projectDir, ".claude", "settings.local.json")); err != nil {
-		t.Fatalf("expected hooks file: %v", err)
-	}
-}
-
 func TestRunGitHooksCommandHelpAndDispatch(t *testing.T) {
 	output := captureMainStdout(t, func() error {
 		return runGitHooksCommand(config.DefaultConfig(), []string{"--help"})
@@ -74,26 +54,6 @@ func TestRunGitHooksCommandHelpAndDispatch(t *testing.T) {
 	})
 	if !strings.Contains(output, "Installed/updated git hooks in") {
 		t.Fatalf("update dispatch output = %q", output)
-	}
-}
-
-func TestRunCodexCommandHelpAndDispatch(t *testing.T) {
-	output := captureMainStdout(t, func() error {
-		return runCodexCommand(config.DefaultConfig(), []string{"--help"})
-	})
-	if !strings.Contains(output, "Usage: az codex <install|guard|hook>") {
-		t.Fatalf("help output = %q", output)
-	}
-
-	projectDir := t.TempDir()
-	output = captureMainStdout(t, func() error {
-		return runCodexCommand(config.DefaultConfig(), []string{"install", "--project-dir", projectDir})
-	})
-	if !strings.Contains(output, "Installed Codex hooks in") {
-		t.Fatalf("dispatch output = %q", output)
-	}
-	if _, err := os.Stat(filepath.Join(projectDir, ".codex", "hooks.json")); err != nil {
-		t.Fatalf("expected codex hooks file: %v", err)
 	}
 }
 
@@ -293,12 +253,6 @@ func TestRunDevCommandsAgainstDaemonClient(t *testing.T) {
 	}
 	deps := newDevDependencies(t, projectDir, transport)
 
-	notifyOut := captureMainStdout(t, func() error {
-		return runNotifyCommand(config.DefaultConfig(), []string{"--verbose", "stop", "az-123"})
-	})
-	if !strings.Contains(notifyOut, "Hook notification: stop for az-123 -> stopped") {
-		t.Fatalf("notify output = %q", notifyOut)
-	}
 	startOut := captureMainStdout(t, func() error {
 		return runDevStartCommand(deps, devIssueOptions{IssueID: "az-123"})
 	})

@@ -19,43 +19,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 )
 
-func runNotifyCommand(cfg *config.Config, args []string) error {
-	if len(args) == 0 || isHelpArg(args[0]) {
-		cli.PrintNotifyUsage()
-		return nil
-	}
-
-	opts, err := cli.ParseNotifyArgs(args)
-	if err != nil {
-		cli.PrintNotifyUsage()
-		return err
-	}
-	return runCommand(cfg, func(deps *cli.Dependencies) error {
-		return cli.NotifyCommand(deps, opts)
-	})
-}
-
-func runHooksCommand(cfg *config.Config, args []string) error {
-	if len(args) == 0 || isHelpArg(args[0]) {
-		cli.PrintHooksUsage()
-		return nil
-	}
-
-	switch args[0] {
-	case "install":
-		opts, err := cli.ParseHooksInstallArgs(args[1:])
-		if err != nil {
-			cli.PrintHooksUsage()
-			return err
-		}
-		return runCommand(cfg, func(deps *cli.Dependencies) error {
-			return cli.HooksInstallCommand(deps, opts)
-		})
-	default:
-		return fmt.Errorf("unknown hooks command: %s", args[0])
-	}
-}
-
 func runGitHooksCommand(cfg *config.Config, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
 		cli.PrintGitHooksUsage()
@@ -188,111 +151,11 @@ func runDevCommand(cfg *config.Config, args []string) error {
 	}
 }
 
-func runOpenCodeCommand(cfg *config.Config, args []string) error {
-	if len(args) == 0 || isHelpArg(args[0]) {
-		cli.PrintOpenCodeUsage()
-		return nil
-	}
-
-	switch args[0] {
-	case "init":
-		return runOpenCodeInitCommand(cfg, args[1:])
-	case "plugin":
-		return runOpenCodePluginCommand(cfg, args[1:])
-	default:
-		return fmt.Errorf("unknown opencode command: %s", args[0])
-	}
-}
-
-func runOpenCodeInitCommand(cfg *config.Config, args []string) error {
-	if len(args) > 0 && isHelpArg(args[0]) {
-		cli.PrintOpenCodeInitUsage()
-		return nil
-	}
-
-	opts, err := cli.ParseOpenCodeInitArgs(args)
-	if err != nil {
-		cli.PrintOpenCodeInitUsage()
-		return err
-	}
-	return runCommand(cfg, func(deps *cli.Dependencies) error {
-		return cli.OpenCodeInitCommand(deps, opts)
-	})
-}
-
-func runOpenCodePluginCommand(cfg *config.Config, args []string) error {
-	if len(args) == 0 || isHelpArg(args[0]) {
-		cli.PrintOpenCodePluginUsage()
-		return nil
-	}
-
-	switch args[0] {
-	case "install":
-		opts, err := cli.ParseOpenCodePluginInstallArgs(args[1:])
-		if err != nil {
-			cli.PrintOpenCodePluginUsage()
-			return err
-		}
-		return runCommand(cfg, func(deps *cli.Dependencies) error {
-			return cli.OpenCodePluginInstallCommand(deps, opts)
-		})
-	default:
-		return fmt.Errorf("unknown opencode plugin command: %s", args[0])
-	}
-}
-
-func runCodexCommand(cfg *config.Config, args []string) error {
-	if len(args) == 0 || isHelpArg(args[0]) {
-		cli.PrintCodexUsage()
-		return nil
-	}
-
-	switch args[0] {
-	case "install":
-		opts, err := cli.ParseCodexInstallArgs(args[1:])
-		if err != nil {
-			cli.PrintCodexUsage()
-			return err
-		}
-		return runCommand(cfg, func(deps *cli.Dependencies) error {
-			return cli.CodexInstallCommand(deps, opts)
-		})
-	case "guard":
-		opts, err := cli.ParseCodexGuardArgs(args[1:])
-		if err != nil {
-			cli.PrintCodexUsage()
-			return err
-		}
-		return runCommand(cfg, func(deps *cli.Dependencies) error {
-			return cli.CodexGuardCommand(deps, opts)
-		})
-	case "hook":
-		if len(args) < 2 || isHelpArg(args[1]) {
-			cli.PrintCodexUsage()
-			return nil
-		}
-		switch args[1] {
-		case "run":
-			opts, err := cli.ParseCodexHookRunArgs(args[2:])
-			if err != nil {
-				cli.PrintCodexUsage()
-				return err
-			}
-			return runCommand(cfg, func(deps *cli.Dependencies) error {
-				return cli.CodexHookRunCommand(deps, opts)
-			})
-		default:
-			return fmt.Errorf("unknown codex hook command: %s", args[1])
-		}
-	default:
-		return fmt.Errorf("unknown codex command: %s", args[0])
-	}
-}
-
 func runAICommand(cfg *config.Config, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
 		cli.PrintAIUsage()
 		cli.PrintAIInstallUsage()
+		cli.PrintAIMigrateUsage()
 		return nil
 	}
 
@@ -323,6 +186,15 @@ func runAICommand(cfg *config.Config, args []string) error {
 		}
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
 			return cli.AIInstallCommand(deps, opts)
+		})
+	case "migrate":
+		opts, err := cli.ParseAIMigrateArgs(args[1:])
+		if err != nil {
+			cli.PrintAIMigrateUsage()
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.AIMigrateCommand(deps, opts)
 		})
 	default:
 		return fmt.Errorf("unknown ai command: %s", args[0])

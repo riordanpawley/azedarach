@@ -2808,20 +2808,23 @@ func TestBuildSessionLaunchCommandIncludesCodexHookOverrides(t *testing.T) {
 	if !strings.Contains(command, `hooks.Stop=[{hooks=[{type=\"command\",command=`) {
 		t.Fatalf("command = %q, want codex Stop hook override", command)
 	}
-	if !strings.Contains(command, `az notify --json session_start axt-123`) {
-		t.Fatalf("command = %q, want codex session_start notify command with issue id", command)
+	// Codex inherits AZEDARACH_ISSUE_ID from the launch env (prefixed earlier
+	// in the command); hook commands run through the unified `az ai hook run`
+	// port with --agent=codex.
+	for _, want := range []string{
+		`az ai hook run --agent=codex --json session_start`,
+		`az ai hook run --agent=codex --json user_prompt_submit`,
+		`az ai hook run --agent=codex --json pre_tool_use`,
+		`az ai hook run --agent=codex --json post_tool_use`,
+		`az ai hook run --agent=codex --json permission_request`,
+		`az ai hook run --agent=codex --json stop`,
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("command = %q, want %q in codex hook overrides", command, want)
+		}
 	}
-	if !strings.Contains(command, `az notify --json user_prompt_submit axt-123`) {
-		t.Fatalf("command = %q, want codex user_prompt_submit notify command with issue id", command)
-	}
-	if !strings.Contains(command, `az notify --json pre_tool_use axt-123`) {
-		t.Fatalf("command = %q, want codex pre_tool_use notify command with issue id", command)
-	}
-	if !strings.Contains(command, `az notify --json post_tool_use axt-123`) {
-		t.Fatalf("command = %q, want codex post_tool_use notify command with issue id", command)
-	}
-	if !strings.Contains(command, `az notify --json stop axt-123`) {
-		t.Fatalf("command = %q, want codex stop notify command with issue id", command)
+	if !strings.Contains(command, `AZEDARACH_ISSUE_ID="axt-123"`) {
+		t.Fatalf("command = %q, want AZEDARACH_ISSUE_ID env exported for the launched codex", command)
 	}
 	if !strings.Contains(command, `--image "/tmp/a.png"`) {
 		t.Fatalf("command = %q, want codex image argument for /tmp/a.png", command)

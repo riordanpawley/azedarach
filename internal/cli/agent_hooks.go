@@ -91,7 +91,7 @@ func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookCont
 		if !ok {
 			break
 		}
-		response, err := codexGuardResponse(hookCtx.ProjectDir, CodexGuardOptions{Event: guardEvent}, hookCtx.Payload)
+		response, err := codexGuardResponse(hookCtx.ProjectDir, guardEvent, hookCtx.Payload)
 		if err != nil {
 			return outcome, err
 		}
@@ -203,14 +203,14 @@ func AIHookRunCommand(deps *Dependencies, opts AIHookRunOptions) error {
 			fmt.Println(string(encoded))
 			return nil
 		}
-		notifyOutput, err := renderNotifyOutput(NotifyOptions{Event: opts.Event})
+		notifyOutput, err := renderNotifyOutput(opts.Event, false, false, "")
 		if err != nil {
 			return err
 		}
 		fmt.Println(notifyOutput)
 		printCodexGuardResponse(outcome.GuardResponse)
 	default: // claude
-		notifyOutput, err := renderNotifyOutput(NotifyOptions{Event: opts.Event, JSON: opts.JSON})
+		notifyOutput, err := renderNotifyOutput(opts.Event, opts.JSON, false, "")
 		if err != nil {
 			return err
 		}
