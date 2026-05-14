@@ -4,12 +4,12 @@
 ││ [bal] add grom renderer for detail view maybe?                               Actions                                │
 ││                                                                              ───────────────────────────────────────│
 ││       Issue:   P2   T  Open                                                  [s] Start session                      │
-││     Created:  0001-01-01 00:00:00                                            [S] Start session + work               │
-││     Updated:  0001-01-01 00:00:00                                            [!] Start session (yolo)               │
-││                                                                              ───────────────────                    │
-││ Description                                                                  [u] Update from base branch            │
-││ review panel structure and preserve layout                                   [m] Follow-on merge                    │
-││                                                                              [b] Merge into...                      │
+││                                                                              [S] Start session + work               │
+││     Created:  0001-01-01 00:00:00                                            [!] Start session (yolo)               │
+││     Updated:  0001-01-01 00:00:00                                            ───────────────────                    │
+││                                                                              [u] Update from base branch            │
+││ Description                                                                  [m] Follow-on merge                    │
+││ review panel structure and preserve layout                                   [b] Merge into...                      │
 ││                                                                              [P] Create PR                          │
 ││                                                                              [O] Open PR                            │
 ││                                                                              [M] Abort merge                        │

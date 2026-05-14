@@ -151,159 +151,49 @@ func (d *DetailPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the detail panel
 func (d *DetailPanel) View() string {
-	if d.useCompactScrollMode() {
-		return d.viewCompact()
-	}
-	return d.viewStandard()
-}
+	lines, graphCursorLine := d.buildLines()
 
-func (d *DetailPanel) viewStandard() string {
+	visible := max(1, d.viewHeight)
+	d.descViewHeight = visible
+	d.contentHeight = len(lines)
+
+	if d.graphFocused && graphCursorLine >= 0 {
+		if graphCursorLine < d.scrollY {
+			d.scrollY = graphCursorLine
+		} else if graphCursorLine >= d.scrollY+visible {
+			d.scrollY = graphCursorLine - visible + 1
+		}
+	}
+
+	if d.scrollY > d.maxScroll() {
+		d.scrollY = d.maxScroll()
+	}
+	if d.scrollY < 0 {
+		d.scrollY = 0
+	}
+
+	start := d.scrollY
+	end := min(len(lines), start+visible)
+
 	var b strings.Builder
-
-	// Section style for headers
-	headerStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#89b4fa")).
-		Bold(true)
-
-	labelStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#94e2d5")).
-		Width(12).
-		Align(lipgloss.Right)
-
-	valueStyle := d.styles.MenuItem
-
-	// Task ID and Title
-	b.WriteString(headerStyle.Render(fmt.Sprintf("[%s] %s", d.task.ID, d.task.Title)))
-	b.WriteString("\n\n")
-
-	// Card-like issue summary (priority/type/status on one line).
-	b.WriteString(labelStyle.Render("Issue:"))
-	b.WriteString("  ")
-	b.WriteString(d.formatIssueCardSummary())
-	b.WriteString("\n")
-	if metadata := d.renderIssueMetadataLines(labelStyle, valueStyle); metadata != "" {
-		b.WriteString(metadata)
-	}
-
-	if d.mutation != nil {
-		b.WriteString(labelStyle.Render("Issue Ops:"))
-		b.WriteString("  ")
-		b.WriteString(valueStyle.Render(d.formatMutationProgress()))
-		b.WriteString("\n")
-	}
-
-	// Parent ID if present
-	if d.task.ParentID != nil {
-		b.WriteString(labelStyle.Render("Parent:"))
-		b.WriteString("  ")
-		b.WriteString(valueStyle.Render(d.task.ParentID.String()))
-		b.WriteString("\n")
-	}
-	if total, done := d.childProgress(); total > 0 {
-		b.WriteString(labelStyle.Render("Children:"))
-		b.WriteString("  ")
-		b.WriteString(valueStyle.Render(fmt.Sprintf("%d total (%d done)", total, done)))
-		b.WriteString("\n")
-	}
-
-	if deps := d.renderDependencies(); deps != "" {
-		b.WriteString("\n")
-		b.WriteString(headerStyle.Render("Dependencies"))
-		b.WriteString("\n")
-		b.WriteString(deps)
-		b.WriteString("\n")
-	}
-
-	// Timestamps
-	b.WriteString(labelStyle.Render("Created:"))
-	b.WriteString("  ")
-	b.WriteString(valueStyle.Render(d.formatTime(d.task.CreatedAt)))
-	b.WriteString("\n")
-
-	b.WriteString(labelStyle.Render("Updated:"))
-	b.WriteString("  ")
-	b.WriteString(valueStyle.Render(d.formatTime(d.task.UpdatedAt)))
-	b.WriteString("\n")
-
-	if d.hasSnapshotFreshness() {
-		b.WriteString(labelStyle.Render("Freshness:"))
-		b.WriteString("  ")
-		b.WriteString(d.formatSnapshotFreshness())
-		b.WriteString("\n")
-		b.WriteString(labelStyle.Render("Checked:"))
-		b.WriteString("  ")
-		b.WriteString(valueStyle.Render(d.formatTime(d.checkedAt)))
-		b.WriteString("\n")
-	}
-
-	// Runtime info
-	if d.showRuntimeSections() {
-		b.WriteString("\n")
-		b.WriteString(headerStyle.Render("Runtime"))
-		b.WriteString("\n")
-		b.WriteString(labelStyle.Render("Session:"))
-		b.WriteString("  ")
-		b.WriteString(d.formatSessionSummary())
-		b.WriteString("\n")
-		b.WriteString(labelStyle.Render("Worktree:"))
-		b.WriteString("  ")
-		b.WriteString(valueStyle.Render(d.formatGitWorktreeSummary()))
-		b.WriteString("\n")
-	}
-
-	d.writeTextSection(&b, headerStyle, valueStyle, "Design", d.task.Design)
-	d.writeTextSection(&b, headerStyle, valueStyle, "Acceptance", d.task.Acceptance)
-	d.writeTextSection(&b, headerStyle, valueStyle, "Notes", d.task.Notes)
-	if graph := d.renderGraphContext(); graph != "" {
-		b.WriteString("\n")
-		b.WriteString(headerStyle.Render("Graph"))
-		b.WriteString("\n")
-		b.WriteString(graph)
-		b.WriteString("\n")
-	}
-
-	// Description section with scrolling
-	if d.task.Description != "" {
-		b.WriteString("\n")
-		b.WriteString(headerStyle.Render("Description"))
-		b.WriteString("\n")
-
-		wrapWidth := d.wrapWidth
-		if wrapWidth < 10 {
-			wrapWidth = 10
-		}
-		descLines := wrapDescriptionLines(d.task.Description, wrapWidth)
-		d.contentHeight = len(descLines)
-		reservedLines := lipgloss.Height(b.String())
-		descViewport := max(1, d.viewHeight-reservedLines-2)
-		d.descViewHeight = descViewport
-
-		start := d.scrollY
-		end := min(d.scrollY+d.descViewHeight, len(descLines))
-
-		for i := start; i < end; i++ {
-			b.WriteString(valueStyle.Render(descLines[i]))
+	for i := start; i < end; i++ {
+		b.WriteString(lines[i])
+		if i < end-1 {
 			b.WriteString("\n")
 		}
-
-		// Scroll indicator if needed
-		if d.maxScroll() > 0 {
-			scrollInfo := d.styles.Footer.Render(
-				fmt.Sprintf("[j/k or ctrl+u/d to scroll, g/G to jump] (line %d/%d)", d.scrollY+1, d.contentHeight),
-			)
-			b.WriteString("\n")
-			b.WriteString(scrollInfo)
-		}
+	}
+	if d.maxScroll() > 0 {
+		b.WriteString("\n")
+		b.WriteString(d.styles.Footer.Render(
+			fmt.Sprintf("[j/k or ctrl+u/d to scroll, g/G to jump] (line %d/%d)", d.scrollY+1, d.contentHeight),
+		))
 	}
 
 	return b.String()
 }
 
-func (d *DetailPanel) viewCompact() string {
-	var lines []string
-	addLine := func(line string) {
-		lines = append(lines, line)
-	}
+func (d *DetailPanel) buildLines() ([]string, int) {
+	graphCursorLine := -1
 
 	headerStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#89b4fa")).
@@ -313,6 +203,11 @@ func (d *DetailPanel) viewCompact() string {
 		Width(12).
 		Align(lipgloss.Right)
 	valueStyle := d.styles.MenuItem
+
+	var lines []string
+	addLine := func(line string) {
+		lines = append(lines, line)
+	}
 
 	addLine(headerStyle.Render(fmt.Sprintf("[%s] %s", d.task.ID, d.task.Title)))
 	addLine("")
@@ -356,12 +251,20 @@ func (d *DetailPanel) viewCompact() string {
 	d.addTextSectionLines(&lines, headerStyle, valueStyle, "Design", d.task.Design)
 	d.addTextSectionLines(&lines, headerStyle, valueStyle, "Acceptance", d.task.Acceptance)
 	d.addTextSectionLines(&lines, headerStyle, valueStyle, "Notes", d.task.Notes)
-	if graph := d.renderGraphContext(); graph != "" {
+
+	if links := d.graphLinks(); len(links) > 0 {
+		if d.graphCursor >= len(links) {
+			d.graphCursor = len(links) - 1
+		}
+		if d.graphCursor < 0 {
+			d.graphCursor = 0
+		}
 		addLine("")
 		addLine(headerStyle.Render("Graph"))
-		for _, line := range strings.Split(graph, "\n") {
-			addLine(line)
-		}
+		addLine(d.styles.MenuItem.Render("Ascendants"))
+		graphCursorLine = d.appendGraphRows(&lines, links, "ascendant", graphCursorLine)
+		addLine(d.styles.MenuItem.Render("Descendants"))
+		graphCursorLine = d.appendGraphRows(&lines, links, "descendant", graphCursorLine)
 	}
 
 	if d.task.Description != "" {
@@ -377,30 +280,29 @@ func (d *DetailPanel) viewCompact() string {
 		}
 	}
 
-	visible := max(1, d.viewHeight)
-	d.descViewHeight = visible
-	d.contentHeight = len(lines)
-	if d.scrollY > d.maxScroll() {
-		d.scrollY = d.maxScroll()
-	}
-	start := d.scrollY
-	end := min(len(lines), start+visible)
+	return lines, graphCursorLine
+}
 
-	var b strings.Builder
-	for i := start; i < end; i++ {
-		b.WriteString(lines[i])
-		if i < end-1 {
-			b.WriteString("\n")
+func (d *DetailPanel) appendGraphRows(lines *[]string, links []taskGraphLink, direction string, cursorLine int) int {
+	wrote := false
+	for i, link := range links {
+		if link.Direction != direction {
+			continue
 		}
+		wrote = true
+		prefix := d.graphDirectionPrefix(direction, false)
+		style := d.styles.MenuItem
+		if d.graphFocused && i == d.graphCursor {
+			prefix = d.graphDirectionPrefix(direction, true)
+			style = d.styles.MenuItemActive
+			cursorLine = len(*lines)
+		}
+		*lines = append(*lines, style.Render(fmt.Sprintf("%s %s [%s] %s", prefix, link.Task.ID, d.formatStatus(link.Task.Status), link.Task.Title)))
 	}
-	if d.maxScroll() > 0 {
-		b.WriteString("\n")
-		b.WriteString(d.styles.Footer.Render(
-			fmt.Sprintf("[j/k or ctrl+u/d to scroll, g/G to jump] (line %d/%d)", d.scrollY+1, d.contentHeight),
-		))
+	if !wrote {
+		*lines = append(*lines, "- none")
 	}
-
-	return b.String()
+	return cursorLine
 }
 
 func (d *DetailPanel) renderDependencies() string {
@@ -459,20 +361,6 @@ func (d *DetailPanel) renderIssueMetadataLines(labelStyle, valueStyle lipgloss.S
 	return b.String()
 }
 
-func (d *DetailPanel) writeTextSection(b *strings.Builder, headerStyle, valueStyle lipgloss.Style, title, text string) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return
-	}
-	b.WriteString("\n")
-	b.WriteString(headerStyle.Render(title))
-	b.WriteString("\n")
-	for _, line := range wrapDescriptionLines(text, max(10, d.wrapWidth)) {
-		b.WriteString(valueStyle.Render(line))
-		b.WriteString("\n")
-	}
-}
-
 func (d *DetailPanel) addTextSectionLines(lines *[]string, headerStyle, valueStyle lipgloss.Style, title, text string) {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -481,49 +369,6 @@ func (d *DetailPanel) addTextSectionLines(lines *[]string, headerStyle, valueSty
 	*lines = append(*lines, "", headerStyle.Render(title))
 	for _, line := range wrapDescriptionLines(text, max(10, d.wrapWidth)) {
 		*lines = append(*lines, valueStyle.Render(line))
-	}
-}
-
-func (d *DetailPanel) renderGraphContext() string {
-	links := d.graphLinks()
-	if len(links) == 0 {
-		return ""
-	}
-	if d.graphCursor >= len(links) {
-		d.graphCursor = len(links) - 1
-	}
-	if d.graphCursor < 0 {
-		d.graphCursor = 0
-	}
-
-	var b strings.Builder
-	b.WriteString(d.styles.MenuItem.Render("Ascendants"))
-	b.WriteString("\n")
-	d.writeGraphRows(&b, links, "ascendant")
-	b.WriteString(d.styles.MenuItem.Render("Descendants"))
-	b.WriteString("\n")
-	d.writeGraphRows(&b, links, "descendant")
-	return strings.TrimSuffix(b.String(), "\n")
-}
-
-func (d *DetailPanel) writeGraphRows(b *strings.Builder, links []taskGraphLink, direction string) {
-	wrote := false
-	for i, link := range links {
-		if link.Direction != direction {
-			continue
-		}
-		wrote = true
-		prefix := d.graphDirectionPrefix(direction, false)
-		style := d.styles.MenuItem
-		if d.graphFocused && i == d.graphCursor {
-			prefix = d.graphDirectionPrefix(direction, true)
-			style = d.styles.MenuItemActive
-		}
-		b.WriteString(style.Render(fmt.Sprintf("%s %s [%s] %s", prefix, link.Task.ID, d.formatStatus(link.Task.Status), link.Task.Title)))
-		b.WriteString("\n")
-	}
-	if !wrote {
-		b.WriteString("- none\n")
 	}
 }
 
@@ -807,10 +652,6 @@ func (d *DetailPanel) halfPageStep() int {
 		return 1
 	}
 	return step
-}
-
-func (d *DetailPanel) useCompactScrollMode() bool {
-	return d.viewHeight <= 12
 }
 
 func (d *DetailPanel) showRuntimeSections() bool {

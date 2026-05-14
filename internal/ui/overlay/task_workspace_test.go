@@ -101,6 +101,43 @@ func TestTaskWorkspaceOverlay_DetailScrollKeybinds(t *testing.T) {
 	}
 }
 
+func TestTaskWorkspaceOverlay_TabToGraphScrollsItIntoView(t *testing.T) {
+	// Build a task with enough top-of-panel content that the Graph section
+	// sits below the visible viewport at scrollY=0.
+	child := domain.Task{ID: "az-child", Title: "Child", Status: domain.StatusOpen}
+	task := domain.Task{
+		ID:     "az-1",
+		Title:  "Parent task with offscreen graph",
+		Status: domain.StatusOpen,
+		Design: strings.Repeat("design line\n", 30),
+		Notes:  strings.Repeat("notes line\n", 30),
+		Dependencies: []domain.Dependency{
+			{ID: child.ID, Type: domain.DependencyBlocks},
+		},
+	}
+	overlay := NewTaskWorkspaceOverlay(task, []domain.Task{task, child}, nil, 80, 20)
+	// First render to settle internal sizes.
+	_ = overlay.View()
+	if overlay.detail.scrollY != 0 {
+		t.Fatalf("expected detail to start at scrollY=0, got %d", overlay.detail.scrollY)
+	}
+
+	// Tab from detail -> graph focus.
+	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
+	overlay = model.(*TaskWorkspaceOverlay)
+	if overlay.focus != taskWorkspaceFocusGraph {
+		t.Fatalf("expected focus to land on graph after Tab, got %v", overlay.focus)
+	}
+
+	view := overlay.View()
+	if overlay.detail.scrollY <= 0 {
+		t.Fatalf("expected detail panel to auto-scroll past the design/notes block; scrollY=%d", overlay.detail.scrollY)
+	}
+	if !strings.Contains(view, "> az-child") {
+		t.Fatalf("expected focused graph row to be visible after Tab; view did not contain '> az-child':\n%s", view)
+	}
+}
+
 func TestTaskWorkspaceOverlay_StatusBindingsIncludeScroll(t *testing.T) {
 	child := domain.Task{ID: "az-child", Title: "Child", Status: domain.StatusOpen}
 	task := domain.Task{

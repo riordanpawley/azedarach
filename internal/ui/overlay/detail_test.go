@@ -325,6 +325,7 @@ func TestDetailPanelViewShowsReachableGraphContext(t *testing.T) {
 	}
 
 	panel := NewDetailPanel(task).WithRelatedTasks(related)
+	panel.viewHeight = 40
 	view := panel.View()
 
 	assert.Contains(t, view, "Graph")
@@ -482,6 +483,56 @@ func TestDetailPanelCompactModeScrollsEntirePanel(t *testing.T) {
 	scrolledView := panel.View()
 
 	assert.NotContains(t, scrolledView, "Unique Compact Header")
+}
+
+func TestDetailPanelAutoScrollsToFocusedGraphRow(t *testing.T) {
+	child := domain.Task{ID: "az-child", Title: "Child", Status: domain.StatusOpen}
+	task := domain.Task{
+		ID:    "az-parent",
+		Title: "Parent",
+		// Push the Graph section far below the viewport by adding long
+		// Design/Notes content above it.
+		Design: strings.Repeat("design line\n", 30),
+		Notes:  strings.Repeat("notes line\n", 30),
+		Status: domain.StatusOpen,
+		Dependencies: []domain.Dependency{
+			{ID: child.ID, Type: domain.DependencyBlocks},
+		},
+	}
+	panel := NewDetailPanel(task).WithRelatedTasks([]domain.Task{task, child})
+	panel.viewHeight = 10
+	panel.wrapWidth = 40
+
+	// Render once unfocused: graph is below the fold, scrollY stays put.
+	_ = panel.View()
+	assert.Equal(t, 0, panel.scrollY)
+
+	// Focus the graph; the next render must scroll until the highlighted row is visible.
+	panel.graphFocused = true
+	view := panel.View()
+	assert.Greater(t, panel.scrollY, 0, "expected scrollY to advance so the focused graph row enters the viewport")
+	assert.Contains(t, view, "> az-child [Open] Child")
+}
+
+func TestDetailPanelEntirePanelScrollsWhenContentExceedsHeight(t *testing.T) {
+	// The whole panel must be reachable via scroll, not just the description.
+	task := domain.Task{
+		ID:     "az-stack",
+		Title:  "Stacked sections",
+		Status: domain.StatusOpen,
+		Design: strings.Repeat("design row\n", 20),
+		Notes:  "FINAL_NOTES_MARKER",
+	}
+	panel := NewDetailPanel(task)
+	panel.viewHeight = 8
+	panel.wrapWidth = 60
+
+	initial := panel.View()
+	assert.NotContains(t, initial, "FINAL_NOTES_MARKER", "marker should start below the fold")
+
+	panel.scrollY = panel.maxScroll()
+	scrolled := panel.View()
+	assert.Contains(t, scrolled, "FINAL_NOTES_MARKER", "scrolling to the bottom must reveal late sections")
 }
 
 func TestWrapDescriptionLines_HardWrapFallbackForLongToken(t *testing.T) {
