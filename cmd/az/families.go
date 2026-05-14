@@ -289,6 +289,36 @@ func runCodexCommand(cfg *config.Config, args []string) error {
 	}
 }
 
+func runAICommand(cfg *config.Config, args []string) error {
+	if len(args) == 0 || isHelpArg(args[0]) {
+		cli.PrintAIUsage()
+		return nil
+	}
+
+	switch args[0] {
+	case "hook":
+		if len(args) < 2 || isHelpArg(args[1]) {
+			cli.PrintAIUsage()
+			return nil
+		}
+		switch args[1] {
+		case "run":
+			opts, err := cli.ParseAIHookRunArgs(args[2:])
+			if err != nil {
+				cli.PrintAIUsage()
+				return err
+			}
+			return runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.AIHookRunCommand(deps, opts)
+			})
+		default:
+			return fmt.Errorf("unknown ai hook command: %s", args[1])
+		}
+	default:
+		return fmt.Errorf("unknown ai command: %s", args[0])
+	}
+}
+
 func runTmuxCommand(cfg *config.Config, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
 		cli.PrintTmuxUsage()

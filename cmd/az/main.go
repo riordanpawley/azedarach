@@ -398,6 +398,12 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "ai":
+		if err := runAICommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "tmux":
 		if err := runTmuxCommand(cfg, commandArgs); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)

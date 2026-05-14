@@ -840,10 +840,15 @@ func TestNotifyCommandUpdatesDaemonSessionStateForIdlePrompt(t *testing.T) {
 		t.Fatalf("ParseNotifyArgs error: %v", err)
 	}
 
-	var gotReq protocol.RequestEnvelope
+	var gotLifecycle protocol.RequestEnvelope
 	transport := &fakeDaemonTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			gotReq = req
+			if req.Command == protocol.CommandHookLogAppend {
+				var body protocol.HookLogAppendCommandBody
+				_ = json.Unmarshal(req.Body, &body)
+				return responseWithJSON(req, body.Event), nil
+			}
+			gotLifecycle = req
 			return responseWithOutput(req, "ok"), nil
 		},
 	}
@@ -856,30 +861,36 @@ func TestNotifyCommandUpdatesDaemonSessionStateForIdlePrompt(t *testing.T) {
 		return NotifyCommand(deps, opts)
 	})
 
-	if gotReq.Command != daemonclient.CommandSessionPause {
-		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandSessionPause)
+	if gotLifecycle.Command != daemonclient.CommandSessionPause {
+		t.Fatalf("command = %q, want %q", gotLifecycle.Command, daemonclient.CommandSessionPause)
 	}
 	if strings.TrimSpace(output) != "{}" {
 		t.Fatalf("notify json output = %q, want {}", output)
 	}
 }
 
-func TestNotifyCommandStopTriggersPauseAndRuntimeReconcile(t *testing.T) {
+func TestNotifyCommandStopPausesDaemonSessionOnly(t *testing.T) {
 	opts, err := ParseNotifyArgs([]string{"--json", "stop", "az-123"})
 	if err != nil {
 		t.Fatalf("ParseNotifyArgs error: %v", err)
 	}
 
-	requests := make([]protocol.RequestEnvelope, 0, 2)
+	var sessionLifecycleRequests []protocol.RequestEnvelope
 	transport := &fakeDaemonTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			requests = append(requests, req)
-			if req.Command == daemonclient.CommandRuntimeReconcileIssue {
-				return responseWithJSON(req, protocol.RuntimeReconcileResponseBody{
-					ProjectID: "proj-1",
-				}), nil
+			switch req.Command {
+			case protocol.CommandHookLogAppend:
+				// Universal observability emit; not part of the lifecycle assertion.
+				var body protocol.HookLogAppendCommandBody
+				_ = json.Unmarshal(req.Body, &body)
+				return responseWithJSON(req, body.Event), nil
+			case daemonclient.CommandRuntimeReconcileIssue:
+				t.Fatalf("unexpected client-side runtime reconcile; daemon handleSessionPause already reconciles the issue")
+				return protocol.ResponseEnvelope{}, nil
+			default:
+				sessionLifecycleRequests = append(sessionLifecycleRequests, req)
+				return responseWithOutput(req, "ok"), nil
 			}
-			return responseWithOutput(req, "ok"), nil
 		},
 	}
 
@@ -891,14 +902,11 @@ func TestNotifyCommandStopTriggersPauseAndRuntimeReconcile(t *testing.T) {
 		return NotifyCommand(deps, opts)
 	})
 
-	if len(requests) != 2 {
-		t.Fatalf("request count = %d, want 2", len(requests))
+	if len(sessionLifecycleRequests) != 1 {
+		t.Fatalf("session lifecycle request count = %d, want 1 (pause only)", len(sessionLifecycleRequests))
 	}
-	if requests[0].Command != daemonclient.CommandSessionPause {
-		t.Fatalf("first command = %q, want %q", requests[0].Command, daemonclient.CommandSessionPause)
-	}
-	if requests[1].Command != daemonclient.CommandRuntimeReconcileIssue {
-		t.Fatalf("second command = %q, want %q", requests[1].Command, daemonclient.CommandRuntimeReconcileIssue)
+	if sessionLifecycleRequests[0].Command != daemonclient.CommandSessionPause {
+		t.Fatalf("command = %q, want %q", sessionLifecycleRequests[0].Command, daemonclient.CommandSessionPause)
 	}
 	if strings.TrimSpace(output) != "{}" {
 		t.Fatalf("notify json output = %q, want {}", output)
@@ -912,10 +920,15 @@ func TestNotifyCommandResolvesIssueIDFromEnvForSessionStart(t *testing.T) {
 		t.Fatalf("ParseNotifyArgs error: %v", err)
 	}
 
-	var gotReq protocol.RequestEnvelope
+	var gotLifecycle protocol.RequestEnvelope
 	transport := &fakeDaemonTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			gotReq = req
+			if req.Command == protocol.CommandHookLogAppend {
+				var body protocol.HookLogAppendCommandBody
+				_ = json.Unmarshal(req.Body, &body)
+				return responseWithJSON(req, body.Event), nil
+			}
+			gotLifecycle = req
 			return responseWithOutput(req, "ok"), nil
 		},
 	}
@@ -928,14 +941,14 @@ func TestNotifyCommandResolvesIssueIDFromEnvForSessionStart(t *testing.T) {
 		t.Fatalf("NotifyCommand error: %v", err)
 	}
 
-	if gotReq.Command != daemonclient.CommandSessionResume {
-		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandSessionResume)
+	if gotLifecycle.Command != daemonclient.CommandSessionResume {
+		t.Fatalf("command = %q, want %q", gotLifecycle.Command, daemonclient.CommandSessionResume)
 	}
 
 	var body struct {
 		SessionID string `json:"session_id"`
 	}
-	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
+	if err := json.Unmarshal(gotLifecycle.Body, &body); err != nil {
 		t.Fatalf("unmarshal request body: %v", err)
 	}
 	if body.SessionID != "az-from-env" {
@@ -951,10 +964,15 @@ func TestNotifyCommandToolEventsResumeDaemonSessionState(t *testing.T) {
 				t.Fatalf("ParseNotifyArgs error: %v", err)
 			}
 
-			var gotReq protocol.RequestEnvelope
+			var gotLifecycle protocol.RequestEnvelope
 			transport := &fakeDaemonTransport{
 				commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-					gotReq = req
+					if req.Command == protocol.CommandHookLogAppend {
+						var body protocol.HookLogAppendCommandBody
+						_ = json.Unmarshal(req.Body, &body)
+						return responseWithJSON(req, body.Event), nil
+					}
+					gotLifecycle = req
 					return responseWithOutput(req, "ok"), nil
 				},
 			}
@@ -967,8 +985,8 @@ func TestNotifyCommandToolEventsResumeDaemonSessionState(t *testing.T) {
 				return NotifyCommand(deps, opts)
 			})
 
-			if gotReq.Command != daemonclient.CommandSessionResume {
-				t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandSessionResume)
+			if gotLifecycle.Command != daemonclient.CommandSessionResume {
+				t.Fatalf("command = %q, want %q", gotLifecycle.Command, daemonclient.CommandSessionResume)
 			}
 			if strings.TrimSpace(output) != "{}" {
 				t.Fatalf("notify json output = %q, want {}", output)
@@ -1008,13 +1026,21 @@ func TestCodexInstallCommandWritesHooksConfig(t *testing.T) {
 	}
 	content := string(data)
 	for _, want := range []string{
-		"az codex hook run --json session-start",
-		"az codex hook run --json stop",
+		"az ai hook run --agent=codex --json session-start",
+		"az ai hook run --agent=codex --json user-prompt-submit",
+		"az ai hook run --agent=codex --json pre-tool-use",
+		"az ai hook run --agent=codex --json post-tool-use",
+		"az ai hook run --agent=codex --json permission-request",
+		"az ai hook run --agent=codex --json stop",
 		"tail -n 1",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("hooks config missing %q: %s", want, content)
 		}
+	}
+	// Legacy az codex hook run form should not be reinstalled by the latest installer.
+	if strings.Contains(content, "az codex hook run --json") {
+		t.Fatalf("installer should no longer write legacy az codex hook run commands: %s", content)
 	}
 }
 
@@ -1054,14 +1080,17 @@ func TestCodexInstallCommandMergesExistingHooks(t *testing.T) {
 	if strings.Contains(content, "az codex guard --json post-tool-use") {
 		t.Fatalf("legacy guard hook should be removed: %s", content)
 	}
-	if strings.Contains(content, "az codex hook run --json post-tool-use") {
-		t.Fatalf("post-tool-use hook should not be installed: %s", content)
-	}
-	if strings.Contains(content, "az codex hook run --json user-prompt-submit") {
-		t.Fatalf("user-prompt-submit hook should not be installed: %s", content)
-	}
-	if strings.Contains(content, "az codex hook run --json pre-tool-use") {
-		t.Fatalf("pre-tool-use hook should not be installed: %s", content)
+	// Latest Codex install covers the full event surface; assert each event has
+	// the unified `az ai hook run` command wired up.
+	for _, want := range []string{
+		"az ai hook run --agent=codex --json post-tool-use",
+		"az ai hook run --agent=codex --json user-prompt-submit",
+		"az ai hook run --agent=codex --json pre-tool-use",
+		"az ai hook run --agent=codex --json permission-request",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("hooks config missing %q: %s", want, content)
+		}
 	}
 }
 
@@ -1194,7 +1223,8 @@ func TestCodexHookRunCommandAppendsHookLogWithIssueIDFromEnv(t *testing.T) {
 			case daemonclient.CommandSessionPause:
 				return responseWithOutput(req, "ok"), nil
 			case daemonclient.CommandRuntimeReconcileIssue:
-				return responseWithJSON(req, protocol.RuntimeReconcileResponseBody{ProjectID: "proj-1"}), nil
+				t.Fatalf("unexpected client-side runtime reconcile; daemon reconciles internally on pause")
+				return protocol.ResponseEnvelope{}, nil
 			default:
 				t.Fatalf("unexpected command: %s", req.Command)
 				return protocol.ResponseEnvelope{}, nil
@@ -1229,7 +1259,7 @@ func TestCodexHookRunCommandAppendsHookLogWithIssueIDFromEnv(t *testing.T) {
 	}
 }
 
-func TestCodexHookRunCommandStopPausesDaemonSessionAndReconciles(t *testing.T) {
+func TestCodexHookRunCommandStopPausesDaemonSessionOnly(t *testing.T) {
 	projectDir := t.TempDir()
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-456")
 
@@ -1247,8 +1277,8 @@ func TestCodexHookRunCommandStopPausesDaemonSessionAndReconciles(t *testing.T) {
 				sessionCommands = append(sessionCommands, req.Command)
 				return responseWithOutput(req, "ok"), nil
 			case daemonclient.CommandRuntimeReconcileIssue:
-				sessionCommands = append(sessionCommands, req.Command)
-				return responseWithJSON(req, protocol.RuntimeReconcileResponseBody{ProjectID: "proj-1"}), nil
+				t.Fatalf("unexpected client-side runtime reconcile; daemon reconciles internally on pause")
+				return protocol.ResponseEnvelope{}, nil
 			default:
 				t.Fatalf("unexpected command: %s", req.Command)
 				return protocol.ResponseEnvelope{}, nil
@@ -1279,7 +1309,7 @@ func TestCodexHookRunCommandStopPausesDaemonSessionAndReconciles(t *testing.T) {
 		t.Fatalf("CodexHookRunCommand error: %v", err)
 	}
 
-	wantOrder := []string{daemonclient.CommandSessionPause, daemonclient.CommandRuntimeReconcileIssue}
+	wantOrder := []string{daemonclient.CommandSessionPause}
 	if !reflect.DeepEqual(sessionCommands, wantOrder) {
 		t.Fatalf("session commands = %v, want %v", sessionCommands, wantOrder)
 	}
@@ -1398,6 +1428,154 @@ func TestCodexHookRunCommandSkipsDaemonNotifyWithoutIssueID(t *testing.T) {
 
 	if err := CodexHookRunCommand(deps, CodexHookRunOptions{Event: "stop", JSON: true}); err != nil {
 		t.Fatalf("CodexHookRunCommand error: %v", err)
+	}
+}
+
+func TestAIHookRunCommandRoutesCodexAgentThroughPort(t *testing.T) {
+	projectDir := t.TempDir()
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")
+
+	var sessionLifecycle []string
+	var hookLogSources []string
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case protocol.CommandHookLogAppend:
+				var body protocol.HookLogAppendCommandBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal hook append body: %v", err)
+				}
+				hookLogSources = append(hookLogSources, body.Event.Source)
+				return responseWithJSON(req, body.Event), nil
+			case daemonclient.CommandSessionPause, daemonclient.CommandSessionResume:
+				sessionLifecycle = append(sessionLifecycle, req.Command)
+				return responseWithOutput(req, "ok"), nil
+			case daemonclient.CommandRuntimeReconcileIssue:
+				t.Fatalf("unexpected client-side reconcile; daemon reconciles internally")
+				return protocol.ResponseEnvelope{}, nil
+			default:
+				return responseWithJSON(req, map[string]any{}), nil
+			}
+		},
+	}
+	deps := &Dependencies{
+		RepoDir:      projectDir,
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+	}
+
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.WriteString(`{"thread_id":"t-port-1"}`); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
+
+	opts, err := ParseAIHookRunArgs([]string{"--agent=codex", "--json", "permission-request"})
+	if err != nil {
+		t.Fatalf("ParseAIHookRunArgs error: %v", err)
+	}
+	output := captureStdout(t, func() error {
+		return AIHookRunCommand(deps, opts)
+	})
+	if strings.TrimSpace(output) != "{}" {
+		t.Fatalf("ai hook run json output = %q, want {}", output)
+	}
+
+	if !reflect.DeepEqual(sessionLifecycle, []string{daemonclient.CommandSessionPause}) {
+		t.Fatalf("session lifecycle = %v, want [session.pause]", sessionLifecycle)
+	}
+	if len(hookLogSources) != 1 || hookLogSources[0] != "codex.hook" {
+		t.Fatalf("hook log sources = %v, want one codex.hook", hookLogSources)
+	}
+}
+
+func TestAIHookRunCommandRoutesClaudeAgentThroughPort(t *testing.T) {
+	projectDir := t.TempDir()
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-2")
+
+	var sessionLifecycle []string
+	var hookLogSources []string
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case protocol.CommandHookLogAppend:
+				var body protocol.HookLogAppendCommandBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal hook append body: %v", err)
+				}
+				hookLogSources = append(hookLogSources, body.Event.Source)
+				return responseWithJSON(req, body.Event), nil
+			case daemonclient.CommandSessionPause, daemonclient.CommandSessionResume:
+				sessionLifecycle = append(sessionLifecycle, req.Command)
+				return responseWithOutput(req, "ok"), nil
+			default:
+				return responseWithJSON(req, map[string]any{}), nil
+			}
+		},
+	}
+	deps := &Dependencies{
+		RepoDir:      projectDir,
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+	}
+
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.WriteString(``); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
+
+	opts, err := ParseAIHookRunArgs([]string{"--agent=claude", "--json", "idle_prompt"})
+	if err != nil {
+		t.Fatalf("ParseAIHookRunArgs error: %v", err)
+	}
+	if err := AIHookRunCommand(deps, opts); err != nil {
+		t.Fatalf("AIHookRunCommand error: %v", err)
+	}
+
+	if !reflect.DeepEqual(sessionLifecycle, []string{daemonclient.CommandSessionPause}) {
+		t.Fatalf("session lifecycle = %v, want [session.pause] for claude idle_prompt", sessionLifecycle)
+	}
+	if len(hookLogSources) != 1 || hookLogSources[0] != "claude.hook" {
+		t.Fatalf("hook log sources = %v, want one claude.hook", hookLogSources)
+	}
+}
+
+func TestParseAIHookRunArgsValidatesAgentAndEvent(t *testing.T) {
+	if _, err := ParseAIHookRunArgs([]string{"--json", "stop"}); err == nil || !strings.Contains(err.Error(), "--agent is required") {
+		t.Fatalf("missing agent error = %v", err)
+	}
+	if _, err := ParseAIHookRunArgs([]string{"--agent=banana", "stop"}); err == nil || !strings.Contains(err.Error(), "unsupported agent") {
+		t.Fatalf("bad agent error = %v", err)
+	}
+	if _, err := ParseAIHookRunArgs([]string{"--agent=codex", "made-up"}); err == nil || !strings.Contains(err.Error(), "invalid hook event") {
+		t.Fatalf("bad event error = %v", err)
+	}
+	opts, err := ParseAIHookRunArgs([]string{"--agent=codex", "--json", "session-start"})
+	if err != nil {
+		t.Fatalf("ParseAIHookRunArgs error: %v", err)
+	}
+	if opts.Agent != AgentCodex {
+		t.Fatalf("agent = %q, want codex", opts.Agent)
+	}
+	if opts.Event != hookEventSessionStart {
+		t.Fatalf("event = %q, want %q", opts.Event, hookEventSessionStart)
 	}
 }
 

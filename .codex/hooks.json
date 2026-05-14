@@ -1,10 +1,40 @@
 {
   "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "command": "/bin/sh -c 'out=\"$(az ai hook run --agent=codex --json permission-request 2\u003e/dev/null | tail -n 1)\"; [ -n \"$out\" ] \u0026\u0026 printf \"%s\\n\" \"$out\" || printf \"{}\\n\"'",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "/bin/sh -c 'out=\"$(az ai hook run --agent=codex --json post-tool-use 2\u003e/dev/null | tail -n 1)\"; [ -n \"$out\" ] \u0026\u0026 printf \"%s\\n\" \"$out\" || printf \"{}\\n\"'",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "/bin/sh -c 'out=\"$(az ai hook run --agent=codex --json pre-tool-use 2\u003e/dev/null | tail -n 1)\"; [ -n \"$out\" ] \u0026\u0026 printf \"%s\\n\" \"$out\" || printf \"{}\\n\"'",
+            "type": "command"
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [
           {
-            "command": "/bin/sh -c 'out=\"$(az codex hook run --json session-start 2\u003e/dev/null | tail -n 1)\"; [ -n \"$out\" ] \u0026\u0026 printf \"%s\\n\" \"$out\" || printf \"{}\\n\"'",
+            "command": "/bin/sh -c 'out=\"$(az ai hook run --agent=codex --json session-start 2\u003e/dev/null | tail -n 1)\"; [ -n \"$out\" ] \u0026\u0026 printf \"%s\\n\" \"$out\" || printf \"{}\\n\"'",
             "type": "command"
           }
         ],
@@ -15,7 +45,17 @@
       {
         "hooks": [
           {
-            "command": "/bin/sh -c 'out=\"$(az codex hook run --json stop 2\u003e/dev/null | tail -n 1)\"; [ -n \"$out\" ] \u0026\u0026 printf \"%s\\n\" \"$out\" || printf \"{}\\n\"'",
+            "command": "/bin/sh -c 'out=\"$(az ai hook run --agent=codex --json stop 2\u003e/dev/null | tail -n 1)\"; [ -n \"$out\" ] \u0026\u0026 printf \"%s\\n\" \"$out\" || printf \"{}\\n\"'",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "/bin/sh -c 'out=\"$(az ai hook run --agent=codex --json user-prompt-submit 2\u003e/dev/null | tail -n 1)\"; [ -n \"$out\" ] \u0026\u0026 printf \"%s\\n\" \"$out\" || printf \"{}\\n\"'",
             "type": "command"
           }
         ]

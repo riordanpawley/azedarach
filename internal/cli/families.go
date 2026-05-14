@@ -410,7 +410,7 @@ func ParseCodexHookRunArgs(args []string) (CodexHookRunOptions, error) {
 
 func isCodexGuardEvent(event string) bool {
 	switch event {
-	case "session-start", "user-prompt-submit", "pre-tool-use", "post-tool-use", "stop":
+	case "session-start", "user-prompt-submit", "pre-tool-use", "post-tool-use", "permission-request", "stop":
 		return true
 	default:
 		return false
@@ -422,12 +422,18 @@ func NotifyCommand(deps *Dependencies, opts NotifyOptions) error {
 	if issueID == "" {
 		issueID = strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID"))
 	}
-	if issueID != "" && deps != nil && deps.DaemonClient != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if err := notifyDaemonSessionStatus(ctx, deps, issueID, opts.Event); err != nil && opts.Verbose {
-			fmt.Fprintf(os.Stderr, "notify daemon update failed: %v\n", err)
-		}
+
+	projectDir, _ := resolveProjectDir("", deps)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := RunAgentHook(ctx, deps, AgentHookContext{
+		Agent:      AgentClaude,
+		Event:      opts.Event,
+		IssueID:    issueID,
+		ProjectDir: projectDir,
+	}); err != nil && opts.Verbose {
+		fmt.Fprintf(os.Stderr, "agent hook run failed: %v\n", err)
 	}
 
 	output, err := renderNotifyOutput(opts)
@@ -446,25 +452,16 @@ func notifyDaemonSessionStatus(ctx context.Context, deps *Dependencies, issueID,
 		return err
 	}
 
+	// We trust the daemon to keep its runtime projection fresh: handleSessionPause
+	// and handleSessionResume already call ensureFreshRuntimeForIssueMutation for
+	// the specific issue, which reconciles only that issue's projection. No
+	// client-side reconcile fan-out is needed.
 	switch event {
 	case hookEventIdlePrompt, hookEventPermissionRequest, hookEventStop, hookEventSessionEnd:
-		if err := callWithAutostart(func(callCtx context.Context) error {
+		return callWithAutostart(func(callCtx context.Context) error {
 			_, pauseErr := deps.DaemonClient.PauseSession(callCtx, issueID)
 			return pauseErr
-		}); err != nil {
-			return err
-		}
-		// Stop/session-end events indicate a likely lifecycle boundary; force a
-		// reconcile now so task-list/session projections do not linger as busy.
-		if event == hookEventStop || event == hookEventSessionEnd {
-			if err := callWithAutostart(func(callCtx context.Context) error {
-				_, reconcileErr := deps.DaemonClient.ReconcileRuntimeIssues(callCtx, []string{issueID})
-				return reconcileErr
-			}); err != nil {
-				return err
-			}
-		}
-		return nil
+		})
 	case hookEventSessionStart, hookEventUserPromptSubmit, hookEventPreToolUse, hookEventPostToolUse:
 		return callWithAutostart(func(callCtx context.Context) error {
 			_, resumeErr := deps.DaemonClient.ResumeSession(callCtx, issueID)
@@ -1247,31 +1244,29 @@ func CodexInstallCommand(deps *Dependencies, opts CodexInstallOptions) error {
 	specs := []codexHookInstallSpec{
 		{eventName: "SessionStart", notifyEvent: hookEventSessionStart, guardEvent: "session-start", matcher: "startup|resume"},
 		{eventName: "UserPromptSubmit", notifyEvent: hookEventUserPromptSubmit, guardEvent: "user-prompt-submit"},
-		// {eventName: "PreToolUse", notifyEvent: hookEventPreToolUse, guardEvent: "pre-tool-use"},
-		// Intentionally disabled for now: current Codex clients print very noisy
-		// per-tool hook status lines ("Running PreToolUse hook"), which overwhelms
-		// normal output when multiple tools run in quick succession.
+		{eventName: "PreToolUse", notifyEvent: hookEventPreToolUse, guardEvent: "pre-tool-use"},
 		{eventName: "PostToolUse", notifyEvent: hookEventPostToolUse, guardEvent: "post-tool-use"},
+		{eventName: "PermissionRequest", notifyEvent: hookEventPermissionRequest, guardEvent: "permission-request"},
 		{eventName: "Stop", notifyEvent: hookEventStop, guardEvent: "stop"},
 	}
 	for _, spec := range specs {
 		legacyNotifyCommand := fmt.Sprintf("az notify --json %s", spec.notifyEvent)
 		legacyGuardCommand := fmt.Sprintf("az codex guard --json %s", spec.guardEvent)
-		legacyCombinedCommand := fmt.Sprintf("az codex hook run --json %s", spec.guardEvent)
+		legacyCodexHookRunCommand := fmt.Sprintf("az codex hook run --json %s", spec.guardEvent)
+		legacyCodexHookRunShell := fmt.Sprintf(
+			`/bin/sh -c 'out="$(az codex hook run --json %s 2>/dev/null | tail -n 1)"; [ -n "$out" ] && printf "%%s\n" "$out" || printf "{}\n"'`,
+			spec.guardEvent,
+		)
 		combinedCommand := buildCodexHookJSONCommand(spec.guardEvent)
 		hooks[spec.eventName] = removeHookCommands(
 			hooks[spec.eventName],
 			legacyNotifyCommand,
 			legacyGuardCommand,
-			legacyCombinedCommand,
+			legacyCodexHookRunCommand,
+			legacyCodexHookRunShell,
 			combinedCommand,
 		)
-		shouldInstall := spec.eventName == "SessionStart" || spec.eventName == "Stop"
-		if shouldInstall {
-			mergeCodexHookEntry(spec.eventName, combinedCommand, spec.matcher)
-		} else if len(normalizeAnySlice(hooks[spec.eventName])) == 0 {
-			delete(hooks, spec.eventName)
-		}
+		mergeCodexHookEntry(spec.eventName, combinedCommand, spec.matcher)
 	}
 
 	hooksConfig["hooks"] = hooks
@@ -1281,7 +1276,7 @@ func CodexInstallCommand(deps *Dependencies, opts CodexInstallOptions) error {
 
 	fmt.Printf("Installed Codex hooks in %s\n", hooksPath)
 	if opts.Verbose {
-		fmt.Println("  Events: SessionStart, Stop")
+		fmt.Println("  Events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest, Stop")
 	}
 	return nil
 }
@@ -1460,7 +1455,7 @@ func stripManagedTextBlocks(content, startMarker, endMarker string) string {
 func buildCodexHookJSONCommand(event string) string {
 	event = strings.TrimSpace(event)
 	return fmt.Sprintf(
-		`/bin/sh -c 'out="$(az codex hook run --json %s 2>/dev/null | tail -n 1)"; [ -n "$out" ] && printf "%%s\n" "$out" || printf "{}\n"'`,
+		`/bin/sh -c 'out="$(az ai hook run --agent=codex --json %s 2>/dev/null | tail -n 1)"; [ -n "$out" ] && printf "%%s\n" "$out" || printf "{}\n"'`,
 		event,
 	)
 }
@@ -1479,22 +1474,19 @@ func CodexHookRunCommand(deps *Dependencies, opts CodexHookRunOptions) error {
 	if err != nil {
 		return err
 	}
-	appendHookLogEventBestEffort(deps, protocol.HookLogEvent{
-		Hook:     strings.TrimSpace(opts.Event),
-		Worktree: strings.TrimSpace(projectDir),
-		Source:   "codex.hook",
-		Level:    "info",
-		Message:  fmt.Sprintf("codex hook run: %s", strings.TrimSpace(opts.Event)),
-	})
+	issueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID"))
 
-	if issueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID")); issueID != "" && deps != nil && deps.DaemonClient != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		// Best-effort daemon lifecycle update so codex hook events drive the same
-		// session pause/resume transitions that NotifyCommand triggers for Claude
-		// Code hooks. Errors are intentionally swallowed: this hook runs inside
-		// Codex and any stderr would pollute the hook output channel.
-		_ = notifyDaemonSessionStatus(ctx, deps, issueID, notifyEvent)
-		cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	outcome, err := RunAgentHook(ctx, deps, AgentHookContext{
+		Agent:      AgentCodex,
+		Event:      notifyEvent,
+		IssueID:    issueID,
+		ProjectDir: projectDir,
+		Payload:    payloadMap,
+	})
+	if err != nil {
+		return err
 	}
 
 	if !opts.JSON {
@@ -1505,19 +1497,15 @@ func CodexHookRunCommand(deps *Dependencies, opts CodexHookRunOptions) error {
 		fmt.Println(notifyOutput)
 	}
 
-	response, err := codexGuardResponse(projectDir, CodexGuardOptions{Event: opts.Event}, payloadMap)
-	if err != nil {
-		return err
-	}
 	if opts.JSON {
-		encoded, err := json.Marshal(response)
+		encoded, err := json.Marshal(outcome.GuardResponse)
 		if err != nil {
 			return err
 		}
 		fmt.Println(string(encoded))
 		return nil
 	}
-	printCodexGuardResponse(response)
+	printCodexGuardResponse(outcome.GuardResponse)
 	return nil
 }
 
@@ -1578,6 +1566,8 @@ func codexNotifyEventForGuardEvent(event string) (string, error) {
 		return hookEventPreToolUse, nil
 	case "post-tool-use":
 		return hookEventPostToolUse, nil
+	case "permission-request":
+		return hookEventPermissionRequest, nil
 	case "stop":
 		return hookEventStop, nil
 	default:
@@ -1621,6 +1611,10 @@ func codexGuardResponse(projectDir string, opts CodexGuardOptions, payloadMap ma
 		}
 		// bpn: Temporary workaround. Pre-tool enforcement remains disabled.
 	case "post-tool-use":
+	case "permission-request":
+		// PermissionRequest is purely observational from the guard's perspective:
+		// it surfaces "waiting for human" via the daemon-notify path but does not
+		// alter prime evidence state.
 	case "stop":
 		delete(state.Threads, threadID)
 	}

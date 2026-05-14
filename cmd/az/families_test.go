@@ -97,6 +97,25 @@ func TestRunCodexCommandHelpAndDispatch(t *testing.T) {
 	}
 }
 
+func TestRunAICommandHelpAndDispatch(t *testing.T) {
+	output := captureMainStdout(t, func() error {
+		return runAICommand(config.DefaultConfig(), []string{"--help"})
+	})
+	if !strings.Contains(output, "az ai hook run --agent=<claude|codex>") {
+		t.Fatalf("help output = %q", output)
+	}
+
+	err := runAICommand(config.DefaultConfig(), []string{"hook", "run", "--agent=banana", "--json", "stop"})
+	if err == nil || !strings.Contains(err.Error(), "unsupported agent") {
+		t.Fatalf("unsupported agent error = %v", err)
+	}
+
+	err = runAICommand(config.DefaultConfig(), []string{"hook", "run", "--agent=codex", "--json", "not-a-real-event"})
+	if err == nil || !strings.Contains(err.Error(), "invalid hook event") {
+		t.Fatalf("invalid event error = %v", err)
+	}
+}
+
 func TestRunTmuxCommandHelpAndDispatch(t *testing.T) {
 	output := captureMainStdout(t, func() error {
 		return runTmuxCommand(config.DefaultConfig(), []string{"--help"})
