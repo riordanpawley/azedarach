@@ -361,21 +361,16 @@ func (d *DetailPanel) renderDependencies() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(d.styles.MenuItem.Render("Outgoing"))
-	b.WriteString("\n")
-	if len(outgoing) == 0 {
-		b.WriteString("- none\n")
-	} else {
+	if len(outgoing) > 0 {
+		b.WriteString(d.styles.MenuItem.Render("Outgoing"))
+		b.WriteString("\n")
 		for _, dep := range outgoing {
 			b.WriteString(fmt.Sprintf("- %s -> %s\n", dep.Type, dep.ID))
 		}
 	}
-
-	b.WriteString(d.styles.MenuItem.Render("Incoming"))
-	b.WriteString("\n")
-	if len(incoming) == 0 {
-		b.WriteString("- none\n")
-	} else {
+	if len(incoming) > 0 {
+		b.WriteString(d.styles.MenuItem.Render("Incoming"))
+		b.WriteString("\n")
 		for _, dep := range incoming {
 			b.WriteString(fmt.Sprintf("- %s <- %s\n", dep.Type, dep.ID))
 		}

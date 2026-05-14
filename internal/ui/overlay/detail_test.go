@@ -405,10 +405,50 @@ func TestDetailPanelGraphOmitsEmptySections(t *testing.T) {
 	panel := NewDetailPanel(task).WithRelatedTasks(related)
 	view := panel.View()
 
+	// Only the relation that actually has a row is rendered.
 	assert.Contains(t, view, "Related")
-	assert.NotContains(t, view, "Parents")
+	assert.NotContains(t, view, "Parent")
 	assert.NotContains(t, view, "Children")
 	assert.NotContains(t, view, "Blocked by")
+	assert.NotContains(t, view, "Discovered from")
+	assert.NotContains(t, view, "Discovered\n")
+	// No "- none" placeholders either.
+	assert.NotContains(t, view, "- none")
+}
+
+func TestDetailPanelGraphHeaderHiddenWhenNoLinks(t *testing.T) {
+	task := domain.Task{ID: "az-solo", Title: "Truly alone"}
+	panel := NewDetailPanel(task).WithRelatedTasks([]domain.Task{task})
+	view := panel.View()
+
+	assert.NotContains(t, view, "Graph")
+	assert.NotContains(t, view, "Parent")
+	assert.NotContains(t, view, "Children")
+	assert.NotContains(t, view, "Blocks")
+	assert.NotContains(t, view, "Related")
+}
+
+func TestDetailPanelDependenciesOmitsEmptySides(t *testing.T) {
+	taskID := naming.IssueID("az-outgoing-only")
+	task := domain.Task{
+		ID:    taskID,
+		Title: "Outgoing-only",
+		Dependencies: []domain.Dependency{
+			{ID: "az-downstream", Type: domain.DependencyBlocks},
+		},
+	}
+	related := []domain.Task{
+		task,
+		{ID: "az-downstream", Title: "Downstream", Status: domain.StatusOpen},
+	}
+	panel := NewDetailPanel(task).WithRelatedTasks(related)
+	view := panel.View()
+
+	assert.Contains(t, view, "Outgoing")
+	assert.Contains(t, view, "blocks -> az-downstream")
+	// Incoming side has no rows, so the subheader is suppressed.
+	assert.NotContains(t, view, "Incoming")
+	assert.NotContains(t, view, "- none")
 }
 
 func pointerToIssueID(id naming.IssueID) *naming.IssueID {
