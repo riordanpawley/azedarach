@@ -286,7 +286,7 @@ func TestDetailPanelViewShowsLoadedIssueMetadata(t *testing.T) {
 	assert.Contains(t, view, "Keep this in the task workspace.")
 }
 
-func TestDetailPanelViewShowsReachableGraphContext(t *testing.T) {
+func TestDetailPanelViewGroupsGraphRelationsByType(t *testing.T) {
 	parentID := naming.IssueID("az-parent")
 	rootID := naming.IssueID("az-root")
 	task := domain.Task{
@@ -296,52 +296,121 @@ func TestDetailPanelViewShowsReachableGraphContext(t *testing.T) {
 		Priority: domain.P2,
 		Type:     domain.TypeTask,
 		Dependencies: []domain.Dependency{
-			{ID: "az-child", Type: domain.DependencyBlocks},
+			{ID: "az-blocked-target", Type: domain.DependencyBlocks},
+			{ID: "az-related-peer", Type: domain.DependencyRelatedTo},
+			{ID: "az-discovered-source", Type: domain.DependencyDiscovered},
 		},
 		ParentID: &parentID,
 	}
 	related := []domain.Task{
 		task,
+		{ID: "az-parent", Title: "Parent task", Status: domain.StatusOpen, ParentID: &rootID},
+		{ID: rootID, Title: "Root task", Status: domain.StatusOpen},
+		{ID: "az-direct-child", Title: "Direct child", Status: domain.StatusOpen, ParentID: pointerToIssueID("az-current")},
+		{ID: "az-blocked-target", Title: "Downstream blockee", Status: domain.StatusBlocked},
 		{
-			ID:       "az-parent",
-			Title:    "Parent task",
-			Status:   domain.StatusOpen,
-			ParentID: &rootID,
+			ID:           "az-blocker",
+			Title:        "Upstream blocker",
+			Status:       domain.StatusOpen,
+			Dependencies: []domain.Dependency{{ID: "az-current", Type: domain.DependencyBlocks}},
 		},
+		{ID: "az-related-peer", Title: "Related peer", Status: domain.StatusOpen},
+		{ID: "az-discovered-source", Title: "Discovered-from origin", Status: domain.StatusDone},
 		{
-			ID:     rootID,
-			Title:  "Root task",
-			Status: domain.StatusOpen,
+			ID:           "az-spinoff",
+			Title:        "Spinoff",
+			Status:       domain.StatusOpen,
+			Dependencies: []domain.Dependency{{ID: "az-current", Type: domain.DependencyDiscovered}},
 		},
-		{
-			ID:     "az-child",
-			Title:  "Child task",
-			Status: domain.StatusBlocked,
-			Dependencies: []domain.Dependency{
-				{ID: "az-grandchild", Type: domain.DependencyBlocks},
-			},
-		},
-		{ID: "az-grandchild", Title: "Grandchild task", Status: domain.StatusDone},
 	}
 
 	panel := NewDetailPanel(task).WithRelatedTasks(related)
-	panel.viewHeight = 40
+	panel.viewHeight = 60
 	view := panel.View()
 
 	assert.Contains(t, view, "Graph")
-	assert.Contains(t, view, "Ascendants")
-	assert.Contains(t, view, "az-root [Open] Root task")
-	assert.Contains(t, view, "az-parent [Open] Parent task")
-	assert.Contains(t, view, "Descendants")
-	assert.Contains(t, view, "az-child [Blocked] Child task")
-	assert.Contains(t, view, "az-grandchild [Done] Grandchild task")
+
+	// Old flat labels are gone.
+	assert.NotContains(t, view, "Ascendants")
+	assert.NotContains(t, view, "Descendants")
+
+	// Each relation has its own section with the expected row.
+	assert.Contains(t, view, "Parents")
 	assert.Contains(t, view, "< az-parent [Open] Parent task")
-	assert.Contains(t, view, "> az-child [Blocked] Child task")
+	assert.Contains(t, view, "< az-root [Open] Root task")
+
+	assert.Contains(t, view, "Children")
+	assert.Contains(t, view, "> az-direct-child [Open] Direct child")
+
+	assert.Contains(t, view, "Blocks")
+	assert.Contains(t, view, "> az-blocked-target [Blocked] Downstream blockee")
+
+	assert.Contains(t, view, "Blocked by")
+	assert.Contains(t, view, "< az-blocker [Open] Upstream blocker")
+
+	assert.Contains(t, view, "Related")
+	assert.Contains(t, view, "> az-related-peer [Open] Related peer")
+
+	assert.Contains(t, view, "Discovered from")
+	assert.Contains(t, view, "< az-discovered-source [Done] Discovered-from origin")
+
+	assert.Contains(t, view, "Discovered")
+	assert.Contains(t, view, "> az-spinoff [Open] Spinoff")
+}
+
+func TestDetailPanelGraphCursorWalksAllSections(t *testing.T) {
+	parentID := naming.IssueID("az-parent")
+	task := domain.Task{
+		ID:       "az-current",
+		Title:    "Current task",
+		Status:   domain.StatusInProgress,
+		ParentID: &parentID,
+		Dependencies: []domain.Dependency{
+			{ID: "az-blocked-target", Type: domain.DependencyBlocks},
+		},
+	}
+	related := []domain.Task{
+		task,
+		{ID: "az-parent", Title: "Parent task", Status: domain.StatusOpen},
+		{ID: "az-blocked-target", Title: "Downstream blockee", Status: domain.StatusBlocked},
+	}
+
+	panel := NewDetailPanel(task).WithRelatedTasks(related)
+	require.Equal(t, 2, panel.GraphLinkCount())
+
+	first, ok := panel.SelectedGraphTaskID()
+	require.True(t, ok)
+	assert.Equal(t, "az-parent", first, "cursor starts on the first parent")
 
 	panel.MoveGraphCursor(1)
-	selected, ok := panel.SelectedGraphTaskID()
+	second, ok := panel.SelectedGraphTaskID()
 	require.True(t, ok)
-	assert.Equal(t, "az-root", selected)
+	assert.Equal(t, "az-blocked-target", second, "cursor crosses into the Blocks section")
+}
+
+func TestDetailPanelGraphOmitsEmptySections(t *testing.T) {
+	task := domain.Task{
+		ID:    "az-loner",
+		Title: "Lonely",
+		Dependencies: []domain.Dependency{
+			{ID: "az-related-peer", Type: domain.DependencyRelatedTo},
+		},
+	}
+	related := []domain.Task{
+		task,
+		{ID: "az-related-peer", Title: "Related peer", Status: domain.StatusOpen},
+	}
+	panel := NewDetailPanel(task).WithRelatedTasks(related)
+	view := panel.View()
+
+	assert.Contains(t, view, "Related")
+	assert.NotContains(t, view, "Parents")
+	assert.NotContains(t, view, "Children")
+	assert.NotContains(t, view, "Blocked by")
+}
+
+func pointerToIssueID(id naming.IssueID) *naming.IssueID {
+	return &id
 }
 
 func TestDetailPanelScrolling(t *testing.T) {

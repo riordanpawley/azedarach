@@ -43,7 +43,48 @@ type TaskMutationProgress struct {
 
 type taskGraphLink struct {
 	Direction string
+	Relation  string
 	Task      domain.Task
+}
+
+const (
+	graphRelParent         = "parent"
+	graphRelChild          = "child"
+	graphRelBlocks         = "blocks"
+	graphRelBlockedBy      = "blocked-by"
+	graphRelRelated        = "related"
+	graphRelDiscoveredFrom = "discovered-from"
+	graphRelDiscovered     = "discovered"
+)
+
+var graphRelationOrder = []string{
+	graphRelParent,
+	graphRelChild,
+	graphRelBlocks,
+	graphRelBlockedBy,
+	graphRelRelated,
+	graphRelDiscoveredFrom,
+	graphRelDiscovered,
+}
+
+var graphRelationLabels = map[string]string{
+	graphRelParent:         "Parents",
+	graphRelChild:          "Children",
+	graphRelBlocks:         "Blocks",
+	graphRelBlockedBy:      "Blocked by",
+	graphRelRelated:        "Related",
+	graphRelDiscoveredFrom: "Discovered from",
+	graphRelDiscovered:     "Discovered",
+}
+
+var graphRelationDirection = map[string]string{
+	graphRelParent:         "ascendant",
+	graphRelBlockedBy:      "ascendant",
+	graphRelDiscoveredFrom: "ascendant",
+	graphRelChild:          "descendant",
+	graphRelBlocks:         "descendant",
+	graphRelDiscovered:     "descendant",
+	graphRelRelated:        "descendant",
 }
 
 // NewDetailPanel creates a new detail panel for the given task and optional session
@@ -261,10 +302,13 @@ func (d *DetailPanel) buildLines() ([]string, int) {
 		}
 		addLine("")
 		addLine(headerStyle.Render("Graph"))
-		addLine(d.styles.MenuItem.Render("Ascendants"))
-		graphCursorLine = d.appendGraphRows(&lines, links, "ascendant", graphCursorLine)
-		addLine(d.styles.MenuItem.Render("Descendants"))
-		graphCursorLine = d.appendGraphRows(&lines, links, "descendant", graphCursorLine)
+		for _, rel := range graphRelationOrder {
+			if !hasRelation(links, rel) {
+				continue
+			}
+			addLine(d.styles.MenuItem.Render(graphRelationLabels[rel]))
+			graphCursorLine = d.appendGraphRows(&lines, links, rel, graphCursorLine)
+		}
 	}
 
 	if d.task.Description != "" {
@@ -283,26 +327,30 @@ func (d *DetailPanel) buildLines() ([]string, int) {
 	return lines, graphCursorLine
 }
 
-func (d *DetailPanel) appendGraphRows(lines *[]string, links []taskGraphLink, direction string, cursorLine int) int {
-	wrote := false
+func (d *DetailPanel) appendGraphRows(lines *[]string, links []taskGraphLink, relation string, cursorLine int) int {
 	for i, link := range links {
-		if link.Direction != direction {
+		if link.Relation != relation {
 			continue
 		}
-		wrote = true
-		prefix := d.graphDirectionPrefix(direction, false)
+		prefix := d.graphDirectionPrefix(link.Direction, false)
 		style := d.styles.MenuItem
 		if d.graphFocused && i == d.graphCursor {
-			prefix = d.graphDirectionPrefix(direction, true)
+			prefix = d.graphDirectionPrefix(link.Direction, true)
 			style = d.styles.MenuItemActive
 			cursorLine = len(*lines)
 		}
 		*lines = append(*lines, style.Render(fmt.Sprintf("%s %s [%s] %s", prefix, link.Task.ID, d.formatStatus(link.Task.Status), link.Task.Title)))
 	}
-	if !wrote {
-		*lines = append(*lines, "- none")
-	}
 	return cursorLine
+}
+
+func hasRelation(links []taskGraphLink, relation string) bool {
+	for _, link := range links {
+		if link.Relation == relation {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *DetailPanel) renderDependencies() string {
@@ -387,15 +435,77 @@ func (d *DetailPanel) graphDirectionPrefix(direction string, selected bool) stri
 }
 
 func (d *DetailPanel) graphLinks() []taskGraphLink {
-	ancestors := d.reachableTasks(true)
-	descendants := d.reachableTasks(false)
-	links := make([]taskGraphLink, 0, len(ancestors)+len(descendants))
-	for _, task := range ancestors {
-		links = append(links, taskGraphLink{Direction: "ascendant", Task: task})
+	if len(d.relatedTasks) == 0 {
+		return nil
 	}
-	for _, task := range descendants {
-		links = append(links, taskGraphLink{Direction: "descendant", Task: task})
+	byID := make(map[naming.IssueID]domain.Task, len(d.relatedTasks))
+	for _, task := range d.relatedTasks {
+		byID[task.ID] = task
 	}
+
+	var links []taskGraphLink
+	seen := make(map[string]struct{})
+	add := func(relation string, task domain.Task) {
+		if task.ID == d.task.ID {
+			return
+		}
+		key := relation + ":" + task.ID.String()
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		links = append(links, taskGraphLink{
+			Relation:  relation,
+			Direction: graphRelationDirection[relation],
+			Task:      task,
+		})
+	}
+
+	for _, parent := range d.collectParentChain(byID) {
+		add(graphRelParent, parent)
+	}
+	for _, child := range d.collectChildTree(byID) {
+		add(graphRelChild, child)
+	}
+
+	for _, dep := range d.task.Dependencies {
+		target, ok := byID[dep.ID]
+		if !ok {
+			continue
+		}
+		switch dep.Type {
+		case domain.DependencyBlocks:
+			add(graphRelBlocks, target)
+		case domain.DependencyBlockedBy:
+			add(graphRelBlockedBy, target)
+		case domain.DependencyRelatedTo:
+			add(graphRelRelated, target)
+		case domain.DependencyDiscovered:
+			add(graphRelDiscoveredFrom, target)
+		}
+	}
+
+	for _, other := range d.relatedTasks {
+		if other.ID == d.task.ID {
+			continue
+		}
+		for _, dep := range other.Dependencies {
+			if dep.ID != d.task.ID {
+				continue
+			}
+			switch dep.Type {
+			case domain.DependencyBlocks:
+				add(graphRelBlockedBy, other)
+			case domain.DependencyBlockedBy:
+				add(graphRelBlocks, other)
+			case domain.DependencyRelatedTo:
+				add(graphRelRelated, other)
+			case domain.DependencyDiscovered:
+				add(graphRelDiscovered, other)
+			}
+		}
+	}
+
 	return links
 }
 
@@ -443,62 +553,77 @@ func (d *DetailPanel) graphNavigationCmd(direction string) tea.Cmd {
 	}
 }
 
-func (d *DetailPanel) reachableTasks(ascendants bool) []domain.Task {
-	if len(d.relatedTasks) == 0 {
-		return nil
+// collectParentChain walks the parent chain upward from the current task,
+// following both ParentID and parent-child dependency edges. Order is nearest
+// parent first; cycles are broken by visiting each task at most once.
+func (d *DetailPanel) collectParentChain(byID map[naming.IssueID]domain.Task) []domain.Task {
+	visited := map[naming.IssueID]struct{}{d.task.ID: {}}
+	var chain []domain.Task
+
+	current := d.task
+	for {
+		nextID, ok := parentOf(current)
+		if !ok {
+			break
+		}
+		if _, seen := visited[nextID]; seen {
+			break
+		}
+		next, ok := byID[nextID]
+		if !ok {
+			break
+		}
+		visited[nextID] = struct{}{}
+		chain = append(chain, next)
+		current = next
 	}
-	byID := make(map[naming.IssueID]domain.Task, len(d.relatedTasks))
+	return chain
+}
+
+// collectChildTree walks the child sub-tree rooted at the current task in BFS
+// order. Parent → child edges come from either a child's ParentID or a
+// parent-child dependency on the child pointing at the parent.
+func (d *DetailPanel) collectChildTree(byID map[naming.IssueID]domain.Task) []domain.Task {
+	childrenOf := make(map[naming.IssueID][]naming.IssueID)
 	for _, task := range d.relatedTasks {
-		byID[task.ID] = task
-	}
-	adjacency := make(map[naming.IssueID][]naming.IssueID, len(d.relatedTasks))
-	addEdge := func(from, to naming.IssueID) {
-		adjacency[from] = append(adjacency[from], to)
-	}
-	for _, task := range d.relatedTasks {
+		if task.ParentID != nil {
+			childrenOf[*task.ParentID] = append(childrenOf[*task.ParentID], task.ID)
+		}
 		for _, dep := range task.Dependencies {
 			if dep.Type == domain.DependencyParentChild {
-				if ascendants {
-					addEdge(task.ID, dep.ID)
-				} else {
-					addEdge(dep.ID, task.ID)
-				}
-			} else if ascendants {
-				addEdge(dep.ID, task.ID)
-			} else {
-				addEdge(task.ID, dep.ID)
-			}
-		}
-		if task.ParentID != nil {
-			if ascendants {
-				addEdge(task.ID, *task.ParentID)
-			} else {
-				addEdge(*task.ParentID, task.ID)
+				childrenOf[dep.ID] = append(childrenOf[dep.ID], task.ID)
 			}
 		}
 	}
 
-	queue := append([]naming.IssueID(nil), adjacency[d.task.ID]...)
-	seen := map[naming.IssueID]struct{}{d.task.ID: {}}
+	visited := map[naming.IssueID]struct{}{d.task.ID: {}}
+	queue := append([]naming.IssueID(nil), childrenOf[d.task.ID]...)
 	var out []domain.Task
 	for len(queue) > 0 {
 		id := queue[0]
 		queue = queue[1:]
-		if _, ok := seen[id]; ok {
+		if _, seen := visited[id]; seen {
 			continue
 		}
-		seen[id] = struct{}{}
+		visited[id] = struct{}{}
 		if task, ok := byID[id]; ok {
 			out = append(out, task)
 		}
-		for _, next := range adjacency[id] {
-			if _, ok := seen[next]; ok {
-				continue
-			}
-			queue = append(queue, next)
-		}
+		queue = append(queue, childrenOf[id]...)
 	}
 	return out
+}
+
+func parentOf(task domain.Task) (naming.IssueID, bool) {
+	if task.ParentID != nil {
+		return *task.ParentID, true
+	}
+	for _, dep := range task.Dependencies {
+		if dep.Type == domain.DependencyParentChild {
+			return dep.ID, true
+		}
+	}
+	return "", false
 }
 
 func (d *DetailPanel) incomingDependencies() []domain.Dependency {
