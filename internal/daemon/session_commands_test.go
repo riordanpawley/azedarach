@@ -2777,7 +2777,7 @@ func TestBuildSessionLaunchCommandIncludesInitCommandsAndIssueEnv(t *testing.T) 
 	}
 }
 
-func TestBuildSessionLaunchCommandIncludesCodexHookOverrides(t *testing.T) {
+func TestBuildSessionLaunchCommandDoesNotInjectCodexHookOverrides(t *testing.T) {
 	d := &Daemon{
 		cfg: Config{
 			CLITool:      "codex",
@@ -2793,36 +2793,28 @@ func TestBuildSessionLaunchCommandIncludesCodexHookOverrides(t *testing.T) {
 		[]string{"/tmp/a.png", "/tmp/with space/image.png", "   "},
 		`work on issue axt-123 (task): Verify startup behavior`,
 	)
-	if !strings.Contains(command, `hooks.SessionStart=[{hooks=[{type=\"command\",command=`) {
-		t.Fatalf("command = %q, want codex SessionStart hook override", command)
-	}
-	if !strings.Contains(command, `hooks.UserPromptSubmit=[{hooks=[{type=\"command\",command=`) {
-		t.Fatalf("command = %q, want codex UserPromptSubmit hook override", command)
-	}
-	if !strings.Contains(command, `hooks.PreToolUse=[{hooks=[{type=\"command\",command=`) {
-		t.Fatalf("command = %q, want codex PreToolUse hook override", command)
-	}
-	if !strings.Contains(command, `hooks.PostToolUse=[{hooks=[{type=\"command\",command=`) {
-		t.Fatalf("command = %q, want codex PostToolUse hook override", command)
-	}
-	if !strings.Contains(command, `hooks.Stop=[{hooks=[{type=\"command\",command=`) {
-		t.Fatalf("command = %q, want codex Stop hook override", command)
-	}
-	// Codex inherits AZEDARACH_ISSUE_ID from the launch env (prefixed earlier
-	// in the command); hook commands run through the unified `az ai hook run`
-	// port with --agent=codex.
-	for _, want := range []string{
-		`az ai hook run --agent=codex --json session_start`,
-		`az ai hook run --agent=codex --json user_prompt_submit`,
-		`az ai hook run --agent=codex --json pre_tool_use`,
-		`az ai hook run --agent=codex --json post_tool_use`,
-		`az ai hook run --agent=codex --json permission_request`,
-		`az ai hook run --agent=codex --json stop`,
+
+	// Negative space: codex hooks live in <repo>/.codex/hooks.json (managed by
+	// `az ai install --target=codex`). The daemon must NOT inject duplicate
+	// `-c hooks.*=...` overrides at launch — that caused double-firing per
+	// event.
+	for _, mustNotContain := range []string{
+		`hooks.SessionStart=`,
+		`hooks.UserPromptSubmit=`,
+		`hooks.PreToolUse=`,
+		`hooks.PostToolUse=`,
+		`hooks.PermissionRequest=`,
+		`hooks.Stop=`,
+		`az ai hook run`,
+		`az notify`,
 	} {
-		if !strings.Contains(command, want) {
-			t.Fatalf("command = %q, want %q in codex hook overrides", command, want)
+		if strings.Contains(command, mustNotContain) {
+			t.Fatalf("command = %q, must NOT contain %q (hook injection removed; rely on .codex/hooks.json)", command, mustNotContain)
 		}
 	}
+
+	// Surrounding launch behaviour stays intact: env prefix, image flags, and
+	// prompt with option terminator.
 	if !strings.Contains(command, `AZEDARACH_ISSUE_ID="axt-123"`) {
 		t.Fatalf("command = %q, want AZEDARACH_ISSUE_ID env exported for the launched codex", command)
 	}

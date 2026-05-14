@@ -1860,23 +1860,12 @@ func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo 
 	}
 
 	if strings.EqualFold(tool, "codex") {
-		// Codex inherits AZEDARACH_ISSUE_ID from the launch command env (set in
-		// the parts prefix above), so the hook commands don't need to bake it
-		// in. Route through the unified `az ai hook run` port.
-		sessionStartCommand := "az ai hook run --agent=codex --json session_start"
-		userPromptSubmitCommand := "az ai hook run --agent=codex --json user_prompt_submit"
-		preToolUseCommand := "az ai hook run --agent=codex --json pre_tool_use"
-		postToolUseCommand := "az ai hook run --agent=codex --json post_tool_use"
-		permissionRequestCommand := "az ai hook run --agent=codex --json permission_request"
-		stopCommand := "az ai hook run --agent=codex --json stop"
-		parts = append(parts,
-			buildCodexConfigOverrideArg("hooks.SessionStart", sessionStartCommand),
-			buildCodexConfigOverrideArg("hooks.UserPromptSubmit", userPromptSubmitCommand),
-			buildCodexConfigOverrideArg("hooks.PreToolUse", preToolUseCommand),
-			buildCodexConfigOverrideArg("hooks.PostToolUse", postToolUseCommand),
-			buildCodexConfigOverrideArg("hooks.PermissionRequest", permissionRequestCommand),
-			buildCodexConfigOverrideArg("hooks.Stop", stopCommand),
-		)
+		// Codex hook wiring lives entirely in <repo>/.codex/hooks.json, written
+		// by `az ai install --target=codex`. Launch-time `-c hooks.*` injection
+		// was removed because it duplicated those entries — Codex merged the
+		// override with the file config and every event fired twice (double
+		// daemon notify, double hook-log row, double guard mutation, double
+		// shell spawn). The single source of truth is now the install file.
 		for _, imagePath := range imagePaths {
 			trimmedPath := strings.TrimSpace(imagePath)
 			if trimmedPath == "" {
@@ -1901,12 +1890,6 @@ func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo 
 	}
 
 	return strings.Join(parts, " ")
-}
-
-func buildCodexConfigOverrideArg(key, command string) string {
-	tomlCommand := strings.ReplaceAll(strings.ReplaceAll(command, `\`, `\\`), `"`, `\"`)
-	override := fmt.Sprintf(`%s=[{hooks=[{type="command",command="%s"}]}]`, key, tomlCommand)
-	return fmt.Sprintf(`-c "%s"`, escapeForShellDoubleQuotes(override))
 }
 
 func escapeForShellDoubleQuotes(value string) string {
