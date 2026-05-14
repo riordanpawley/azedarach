@@ -2777,7 +2777,7 @@ func TestBuildSessionLaunchCommandIncludesInitCommandsAndIssueEnv(t *testing.T) 
 	}
 }
 
-func TestBuildSessionLaunchCommandIncludesCodexHookOverrides(t *testing.T) {
+func TestBuildSessionLaunchCommandDoesNotInjectCodexHookOverrides(t *testing.T) {
 	d := &Daemon{
 		cfg: Config{
 			CLITool:      "codex",
@@ -2793,35 +2793,30 @@ func TestBuildSessionLaunchCommandIncludesCodexHookOverrides(t *testing.T) {
 		[]string{"/tmp/a.png", "/tmp/with space/image.png", "   "},
 		`work on issue axt-123 (task): Verify startup behavior`,
 	)
-	if !strings.Contains(command, `hooks.SessionStart=[{hooks=[{type=\"command\",command=`) {
-		t.Fatalf("command = %q, want codex SessionStart hook override", command)
+
+	// Negative space: codex hooks live in <repo>/.codex/hooks.json (managed by
+	// `az ai install --target=codex`). The daemon must NOT inject duplicate
+	// `-c hooks.*=...` overrides at launch — that caused double-firing per
+	// event.
+	for _, mustNotContain := range []string{
+		`hooks.SessionStart=`,
+		`hooks.UserPromptSubmit=`,
+		`hooks.PreToolUse=`,
+		`hooks.PostToolUse=`,
+		`hooks.PermissionRequest=`,
+		`hooks.Stop=`,
+		`az ai hook run`,
+		`az notify`,
+	} {
+		if strings.Contains(command, mustNotContain) {
+			t.Fatalf("command = %q, must NOT contain %q (hook injection removed; rely on .codex/hooks.json)", command, mustNotContain)
+		}
 	}
-	if !strings.Contains(command, `hooks.UserPromptSubmit=[{hooks=[{type=\"command\",command=`) {
-		t.Fatalf("command = %q, want codex UserPromptSubmit hook override", command)
-	}
-	if !strings.Contains(command, `hooks.PreToolUse=[{hooks=[{type=\"command\",command=`) {
-		t.Fatalf("command = %q, want codex PreToolUse hook override", command)
-	}
-	if !strings.Contains(command, `hooks.PostToolUse=[{hooks=[{type=\"command\",command=`) {
-		t.Fatalf("command = %q, want codex PostToolUse hook override", command)
-	}
-	if !strings.Contains(command, `hooks.Stop=[{hooks=[{type=\"command\",command=`) {
-		t.Fatalf("command = %q, want codex Stop hook override", command)
-	}
-	if !strings.Contains(command, `az notify --json session_start axt-123`) {
-		t.Fatalf("command = %q, want codex session_start notify command with issue id", command)
-	}
-	if !strings.Contains(command, `az notify --json user_prompt_submit axt-123`) {
-		t.Fatalf("command = %q, want codex user_prompt_submit notify command with issue id", command)
-	}
-	if !strings.Contains(command, `az notify --json pre_tool_use axt-123`) {
-		t.Fatalf("command = %q, want codex pre_tool_use notify command with issue id", command)
-	}
-	if !strings.Contains(command, `az notify --json post_tool_use axt-123`) {
-		t.Fatalf("command = %q, want codex post_tool_use notify command with issue id", command)
-	}
-	if !strings.Contains(command, `az notify --json stop axt-123`) {
-		t.Fatalf("command = %q, want codex stop notify command with issue id", command)
+
+	// Surrounding launch behaviour stays intact: env prefix, image flags, and
+	// prompt with option terminator.
+	if !strings.Contains(command, `AZEDARACH_ISSUE_ID="axt-123"`) {
+		t.Fatalf("command = %q, want AZEDARACH_ISSUE_ID env exported for the launched codex", command)
 	}
 	if !strings.Contains(command, `--image "/tmp/a.png"`) {
 		t.Fatalf("command = %q, want codex image argument for /tmp/a.png", command)

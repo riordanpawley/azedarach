@@ -1860,22 +1860,12 @@ func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo 
 	}
 
 	if strings.EqualFold(tool, "codex") {
-		sanitizedIssueID := strings.TrimSpace(issueID)
-		if sanitizedIssueID == "" {
-			sanitizedIssueID = "unknown-issue"
-		}
-		sessionStartCommand := fmt.Sprintf("az notify --json session_start %s", sanitizedIssueID)
-		userPromptSubmitCommand := fmt.Sprintf("az notify --json user_prompt_submit %s", sanitizedIssueID)
-		preToolUseCommand := fmt.Sprintf("az notify --json pre_tool_use %s", sanitizedIssueID)
-		postToolUseCommand := fmt.Sprintf("az notify --json post_tool_use %s", sanitizedIssueID)
-		stopCommand := fmt.Sprintf("az notify --json stop %s", sanitizedIssueID)
-		parts = append(parts,
-			buildCodexConfigOverrideArg("hooks.SessionStart", sessionStartCommand),
-			buildCodexConfigOverrideArg("hooks.UserPromptSubmit", userPromptSubmitCommand),
-			buildCodexConfigOverrideArg("hooks.PreToolUse", preToolUseCommand),
-			buildCodexConfigOverrideArg("hooks.PostToolUse", postToolUseCommand),
-			buildCodexConfigOverrideArg("hooks.Stop", stopCommand),
-		)
+		// Codex hook wiring lives entirely in <repo>/.codex/hooks.json, written
+		// by `az ai install --target=codex`. Launch-time `-c hooks.*` injection
+		// was removed because it duplicated those entries — Codex merged the
+		// override with the file config and every event fired twice (double
+		// daemon notify, double hook-log row, double guard mutation, double
+		// shell spawn). The single source of truth is now the install file.
 		for _, imagePath := range imagePaths {
 			trimmedPath := strings.TrimSpace(imagePath)
 			if trimmedPath == "" {
@@ -1900,12 +1890,6 @@ func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo 
 	}
 
 	return strings.Join(parts, " ")
-}
-
-func buildCodexConfigOverrideArg(key, command string) string {
-	tomlCommand := strings.ReplaceAll(strings.ReplaceAll(command, `\`, `\\`), `"`, `\"`)
-	override := fmt.Sprintf(`%s=[{hooks=[{type="command",command="%s"}]}]`, key, tomlCommand)
-	return fmt.Sprintf(`-c "%s"`, escapeForShellDoubleQuotes(override))
 }
 
 func escapeForShellDoubleQuotes(value string) string {

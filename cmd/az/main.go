@@ -290,18 +290,6 @@ func main() {
 			os.Exit(1)
 		}
 
-	case "notify":
-		if err := runNotifyCommand(cfg, commandArgs); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-
-	case "hooks":
-		if err := runHooksCommand(cfg, commandArgs); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-
 	case "githooks":
 		if err := runGitHooksCommand(cfg, commandArgs); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -386,14 +374,8 @@ func main() {
 			os.Exit(1)
 		}
 
-	case "opencode":
-		if err := runOpenCodeCommand(cfg, commandArgs); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-
-	case "codex":
-		if err := runCodexCommand(cfg, commandArgs); err != nil {
+	case "ai":
+		if err := runAICommand(cfg, commandArgs); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}

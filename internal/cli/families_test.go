@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -24,17 +25,14 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 	})
 
 	for _, want := range []string{
-		"notify <event> <issue-id>",
-		"hooks install <issue-id>",
 		"githooks <install|update|run|notify|hook>",
 		"gate <issue-id>",
 		"dev gate <issue-id>",
-		"opencode <init|plugin>",
-		"codex <install|guard|hook>",
+		"ai install [--target=",
+		"ai migrate",
+		"ai hook run --agent=<claude|codex>",
 		"tmux <selector|install-selector|uninstall-selector>",
 		"spec <subcommand>",
-		"az notify idle_prompt az-123",
-		"az hooks install az-123",
 		"az githooks install",
 		"az githooks update",
 		"az githooks run",
@@ -42,10 +40,10 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"az githooks hook --hook pre-commit",
 		"az gate az-123",
 		"az dev gate az-123",
-		"az opencode init",
-		"az opencode plugin install",
-		"az codex install",
-		"az codex hook run --json pre-tool-use",
+		"az ai install",
+		"az ai install --target=rulesync --issue az-123",
+		"az ai migrate",
+		"az ai hook run --agent=codex --json permission-request",
 		"az tmux install-selector",
 		"az tmux uninstall-selector",
 		"az tmux selector",
@@ -803,394 +801,32 @@ func runGitCommandIsolated(repoDir string, args ...string) error {
 	return cmd.Run()
 }
 
-func TestNotifyCommandParsesAndPrintsStatus(t *testing.T) {
-	opts, err := ParseNotifyArgs([]string{"--verbose", "idle_prompt", "az-123"})
-	if err != nil {
-		t.Fatalf("ParseNotifyArgs error: %v", err)
-	}
 
-	output := captureStdout(t, func() error {
-		return NotifyCommand(&Dependencies{}, opts)
-	})
+func TestAIHookRunCommandRoutesCodexAgentThroughPort(t *testing.T) {
+	projectDir := t.TempDir()
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")
 
-	if !strings.Contains(output, "Hook notification: idle_prompt for az-123 -> waiting") {
-		t.Fatalf("notify output = %q", output)
-	}
-}
-
-func TestNotifyCommandJSONOutput(t *testing.T) {
-	opts, err := ParseNotifyArgs([]string{"--json", "post_tool_use"})
-	if err != nil {
-		t.Fatalf("ParseNotifyArgs error: %v", err)
-	}
-
-	output := captureStdout(t, func() error {
-		return NotifyCommand(&Dependencies{}, opts)
-	})
-
-	if strings.TrimSpace(output) != "{}" {
-		t.Fatalf("notify json output = %q, want {}", output)
-	}
-}
-
-func TestNotifyCommandUpdatesDaemonSessionStateForIdlePrompt(t *testing.T) {
-	opts, err := ParseNotifyArgs([]string{"--json", "idle_prompt", "az-123"})
-	if err != nil {
-		t.Fatalf("ParseNotifyArgs error: %v", err)
-	}
-
-	var gotReq protocol.RequestEnvelope
+	var sessionLifecycle []string
+	var hookLogSources []string
 	transport := &fakeDaemonTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			gotReq = req
-			return responseWithOutput(req, "ok"), nil
-		},
-	}
-
-	deps := &Dependencies{
-		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
-		ProjectID:    "proj-1",
-	}
-	output := captureStdout(t, func() error {
-		return NotifyCommand(deps, opts)
-	})
-
-	if gotReq.Command != daemonclient.CommandSessionPause {
-		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandSessionPause)
-	}
-	if strings.TrimSpace(output) != "{}" {
-		t.Fatalf("notify json output = %q, want {}", output)
-	}
-}
-
-func TestNotifyCommandStopTriggersPauseAndRuntimeReconcile(t *testing.T) {
-	opts, err := ParseNotifyArgs([]string{"--json", "stop", "az-123"})
-	if err != nil {
-		t.Fatalf("ParseNotifyArgs error: %v", err)
-	}
-
-	requests := make([]protocol.RequestEnvelope, 0, 2)
-	transport := &fakeDaemonTransport{
-		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			requests = append(requests, req)
-			if req.Command == daemonclient.CommandRuntimeReconcileIssue {
-				return responseWithJSON(req, protocol.RuntimeReconcileResponseBody{
-					ProjectID: "proj-1",
-				}), nil
+			switch req.Command {
+			case protocol.CommandHookLogAppend:
+				var body protocol.HookLogAppendCommandBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal hook append body: %v", err)
+				}
+				hookLogSources = append(hookLogSources, body.Event.Source)
+				return responseWithJSON(req, body.Event), nil
+			case daemonclient.CommandSessionPause, daemonclient.CommandSessionResume:
+				sessionLifecycle = append(sessionLifecycle, req.Command)
+				return responseWithOutput(req, "ok"), nil
+			case daemonclient.CommandRuntimeReconcileIssue:
+				t.Fatalf("unexpected client-side reconcile; daemon reconciles internally")
+				return protocol.ResponseEnvelope{}, nil
+			default:
+				return responseWithJSON(req, map[string]any{}), nil
 			}
-			return responseWithOutput(req, "ok"), nil
-		},
-	}
-
-	deps := &Dependencies{
-		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
-		ProjectID:    "proj-1",
-	}
-	output := captureStdout(t, func() error {
-		return NotifyCommand(deps, opts)
-	})
-
-	if len(requests) != 2 {
-		t.Fatalf("request count = %d, want 2", len(requests))
-	}
-	if requests[0].Command != daemonclient.CommandSessionPause {
-		t.Fatalf("first command = %q, want %q", requests[0].Command, daemonclient.CommandSessionPause)
-	}
-	if requests[1].Command != daemonclient.CommandRuntimeReconcileIssue {
-		t.Fatalf("second command = %q, want %q", requests[1].Command, daemonclient.CommandRuntimeReconcileIssue)
-	}
-	if strings.TrimSpace(output) != "{}" {
-		t.Fatalf("notify json output = %q, want {}", output)
-	}
-}
-
-func TestNotifyCommandResolvesIssueIDFromEnvForSessionStart(t *testing.T) {
-	t.Setenv("AZEDARACH_ISSUE_ID", "az-from-env")
-	opts, err := ParseNotifyArgs([]string{"--json", "session_start"})
-	if err != nil {
-		t.Fatalf("ParseNotifyArgs error: %v", err)
-	}
-
-	var gotReq protocol.RequestEnvelope
-	transport := &fakeDaemonTransport{
-		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			gotReq = req
-			return responseWithOutput(req, "ok"), nil
-		},
-	}
-
-	deps := &Dependencies{
-		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
-		ProjectID:    "proj-1",
-	}
-	if err := NotifyCommand(deps, opts); err != nil {
-		t.Fatalf("NotifyCommand error: %v", err)
-	}
-
-	if gotReq.Command != daemonclient.CommandSessionResume {
-		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandSessionResume)
-	}
-
-	var body struct {
-		SessionID string `json:"session_id"`
-	}
-	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
-		t.Fatalf("unmarshal request body: %v", err)
-	}
-	if body.SessionID != "az-from-env" {
-		t.Fatalf("session_id = %q, want az-from-env", body.SessionID)
-	}
-}
-
-func TestNotifyCommandToolEventsResumeDaemonSessionState(t *testing.T) {
-	for _, event := range []string{"pre_tool_use", "post_tool_use"} {
-		t.Run(event, func(t *testing.T) {
-			opts, err := ParseNotifyArgs([]string{"--json", event, "az-123"})
-			if err != nil {
-				t.Fatalf("ParseNotifyArgs error: %v", err)
-			}
-
-			var gotReq protocol.RequestEnvelope
-			transport := &fakeDaemonTransport{
-				commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-					gotReq = req
-					return responseWithOutput(req, "ok"), nil
-				},
-			}
-			deps := &Dependencies{
-				DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
-				ProjectID:    "proj-1",
-			}
-
-			output := captureStdout(t, func() error {
-				return NotifyCommand(deps, opts)
-			})
-
-			if gotReq.Command != daemonclient.CommandSessionResume {
-				t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandSessionResume)
-			}
-			if strings.TrimSpace(output) != "{}" {
-				t.Fatalf("notify json output = %q, want {}", output)
-			}
-		})
-	}
-}
-
-func TestParseNotifyArgsRejectsFlagsAfterPositionals(t *testing.T) {
-	_, err := ParseNotifyArgs([]string{"post_tool_use", "--json"})
-	if err == nil {
-		t.Fatal("expected parse error for flags after positional arguments")
-	}
-	if !strings.Contains(err.Error(), "flags must come before positional arguments") {
-		t.Fatalf("unexpected parse error: %v", err)
-	}
-}
-
-func TestCodexInstallCommandWritesHooksConfig(t *testing.T) {
-	projectDir := t.TempDir()
-	opts, err := ParseCodexInstallArgs([]string{"--project-dir", projectDir})
-	if err != nil {
-		t.Fatalf("ParseCodexInstallArgs error: %v", err)
-	}
-
-	output := captureStdout(t, func() error {
-		return CodexInstallCommand(&Dependencies{RepoDir: projectDir}, opts)
-	})
-	if !strings.Contains(output, "Installed Codex hooks in") {
-		t.Fatalf("codex install output = %q", output)
-	}
-
-	hooksPath := filepath.Join(projectDir, ".codex", "hooks.json")
-	data, err := os.ReadFile(hooksPath)
-	if err != nil {
-		t.Fatalf("read hooks: %v", err)
-	}
-	content := string(data)
-	for _, want := range []string{
-		"az codex hook run --json session-start",
-		"az codex hook run --json stop",
-		"tail -n 1",
-	} {
-		if !strings.Contains(content, want) {
-			t.Fatalf("hooks config missing %q: %s", want, content)
-		}
-	}
-}
-
-func TestCodexInstallCommandMergesExistingHooks(t *testing.T) {
-	projectDir := t.TempDir()
-	hooksPath := filepath.Join(projectDir, ".codex", "hooks.json")
-	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o755); err != nil {
-		t.Fatalf("mkdir hooks dir: %v", err)
-	}
-	initial := `{"hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":"echo keep-me"}]}],"CustomEvent":[{"hooks":[{"type":"command","command":"echo custom"}]}]}}`
-	if err := os.WriteFile(hooksPath, []byte(initial), 0o644); err != nil {
-		t.Fatalf("seed hooks config: %v", err)
-	}
-
-	opts, err := ParseCodexInstallArgs([]string{"--project-dir", projectDir})
-	if err != nil {
-		t.Fatalf("ParseCodexInstallArgs error: %v", err)
-	}
-	if err := CodexInstallCommand(&Dependencies{RepoDir: projectDir}, opts); err != nil {
-		t.Fatalf("CodexInstallCommand error: %v", err)
-	}
-
-	data, err := os.ReadFile(hooksPath)
-	if err != nil {
-		t.Fatalf("read hooks: %v", err)
-	}
-	content := string(data)
-	if !strings.Contains(content, "echo keep-me") {
-		t.Fatalf("existing post-tool hook removed: %s", content)
-	}
-	if !strings.Contains(content, "echo custom") {
-		t.Fatalf("existing custom event hook removed: %s", content)
-	}
-	if strings.Contains(content, "az notify --json post_tool_use") {
-		t.Fatalf("legacy notify hook should be removed: %s", content)
-	}
-	if strings.Contains(content, "az codex guard --json post-tool-use") {
-		t.Fatalf("legacy guard hook should be removed: %s", content)
-	}
-	if strings.Contains(content, "az codex hook run --json post-tool-use") {
-		t.Fatalf("post-tool-use hook should not be installed: %s", content)
-	}
-	if strings.Contains(content, "az codex hook run --json user-prompt-submit") {
-		t.Fatalf("user-prompt-submit hook should not be installed: %s", content)
-	}
-	if strings.Contains(content, "az codex hook run --json pre-tool-use") {
-		t.Fatalf("pre-tool-use hook should not be installed: %s", content)
-	}
-}
-
-func TestCodexGuardSessionStartAllowsWhenPromptMissingPrime(t *testing.T) {
-	projectDir := t.TempDir()
-	deps := &Dependencies{RepoDir: projectDir}
-
-	original := os.Stdin
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	if _, err := w.WriteString(`{"thread_id":"t-1"}`); err != nil {
-		t.Fatalf("write payload: %v", err)
-	}
-	_ = w.Close()
-	os.Stdin = r
-	defer func() {
-		os.Stdin = original
-		_ = r.Close()
-	}()
-
-	output := captureStdout(t, func() error {
-		return CodexGuardCommand(deps, CodexGuardOptions{Event: "session-start", JSON: true})
-	})
-	if strings.TrimSpace(output) != "{}" {
-		t.Fatalf("session-start output = %q, want {}", output)
-	}
-}
-
-func TestCodexGuardSessionStartAllowsWhenPrimeEvidenceKeyPresent(t *testing.T) {
-	projectDir := t.TempDir()
-	deps := &Dependencies{RepoDir: projectDir}
-
-	original := os.Stdin
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	if _, err := w.WriteString(`{"thread_id":"t-2","last_assistant_message":"Azedarach Session Primer\nPrimer evidence key: AZEDARACH_PRIMER_KEY:azedarach-prime-v1"}`); err != nil {
-		t.Fatalf("write payload: %v", err)
-	}
-	_ = w.Close()
-	os.Stdin = r
-	defer func() {
-		os.Stdin = original
-		_ = r.Close()
-	}()
-
-	output := captureStdout(t, func() error {
-		return CodexGuardCommand(deps, CodexGuardOptions{Event: "session-start", JSON: true})
-	})
-	if strings.TrimSpace(output) != "{}" {
-		t.Fatalf("session-start output = %q, want {}", output)
-	}
-}
-
-func TestCodexGuardSessionStartAllowsWhenOnlyPrimeCommandMentioned(t *testing.T) {
-	projectDir := t.TempDir()
-	deps := &Dependencies{RepoDir: projectDir}
-
-	original := os.Stdin
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	if _, err := w.WriteString(`{"thread_id":"t-2","prompt":"run az prime first"}`); err != nil {
-		t.Fatalf("write payload: %v", err)
-	}
-	_ = w.Close()
-	os.Stdin = r
-	defer func() {
-		os.Stdin = original
-		_ = r.Close()
-	}()
-
-	output := captureStdout(t, func() error {
-		return CodexGuardCommand(deps, CodexGuardOptions{Event: "session-start", JSON: true})
-	})
-	if strings.TrimSpace(output) != "{}" {
-		t.Fatalf("session-start output = %q, want {}", output)
-	}
-}
-
-func TestCodexHookRunCommandJSONMatchesGuardContract(t *testing.T) {
-	projectDir := t.TempDir()
-	deps := &Dependencies{RepoDir: projectDir}
-
-	original := os.Stdin
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	if _, err := w.WriteString(`{"thread_id":"t-3","tool_input":{"command":"pwd"}}`); err != nil {
-		t.Fatalf("write payload: %v", err)
-	}
-	_ = w.Close()
-	os.Stdin = r
-	defer func() {
-		os.Stdin = original
-		_ = r.Close()
-	}()
-
-	output := captureStdout(t, func() error {
-		return CodexHookRunCommand(deps, CodexHookRunOptions{Event: "session-start", JSON: true})
-	})
-	if strings.TrimSpace(output) != "{}" {
-		t.Fatalf("hook run output = %q, want {}", output)
-	}
-}
-
-func TestCodexHookRunCommandAppendsHookLogWithIssueIDFromEnv(t *testing.T) {
-	projectDir := t.TempDir()
-	t.Setenv("AZEDARACH_ISSUE_ID", "az-123")
-	transport := &fakeDaemonTransport{
-		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != protocol.CommandHookLogAppend {
-				t.Fatalf("unexpected command: %s", req.Command)
-			}
-			var body protocol.HookLogAppendCommandBody
-			if err := json.Unmarshal(req.Body, &body); err != nil {
-				t.Fatalf("unmarshal hook append body: %v", err)
-			}
-			if body.Event.IssueID.String() != "az-123" {
-				t.Fatalf("hook append issue_id = %q, want az-123", body.Event.IssueID)
-			}
-			if body.Event.Worktree != projectDir {
-				t.Fatalf("hook append worktree = %q, want %q", body.Event.Worktree, projectDir)
-			}
-			return responseWithJSON(req, body.Event), nil
 		},
 	}
 	deps := &Dependencies{
@@ -1203,7 +839,7 @@ func TestCodexHookRunCommandAppendsHookLogWithIssueIDFromEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pipe: %v", err)
 	}
-	if _, err := w.WriteString(`{"thread_id":"t-env-1"}`); err != nil {
+	if _, err := w.WriteString(`{"thread_id":"t-port-1"}`); err != nil {
 		t.Fatalf("write payload: %v", err)
 	}
 	_ = w.Close()
@@ -1213,11 +849,104 @@ func TestCodexHookRunCommandAppendsHookLogWithIssueIDFromEnv(t *testing.T) {
 		_ = r.Close()
 	}()
 
+	opts, err := ParseAIHookRunArgs([]string{"--agent=codex", "--json", "permission-request"})
+	if err != nil {
+		t.Fatalf("ParseAIHookRunArgs error: %v", err)
+	}
 	output := captureStdout(t, func() error {
-		return CodexHookRunCommand(deps, CodexHookRunOptions{Event: "stop", JSON: true})
+		return AIHookRunCommand(deps, opts)
 	})
 	if strings.TrimSpace(output) != "{}" {
-		t.Fatalf("hook run output = %q, want {}", output)
+		t.Fatalf("ai hook run json output = %q, want {}", output)
+	}
+
+	if !reflect.DeepEqual(sessionLifecycle, []string{daemonclient.CommandSessionPause}) {
+		t.Fatalf("session lifecycle = %v, want [session.pause]", sessionLifecycle)
+	}
+	if len(hookLogSources) != 1 || hookLogSources[0] != "codex.hook" {
+		t.Fatalf("hook log sources = %v, want one codex.hook", hookLogSources)
+	}
+}
+
+func TestAIHookRunCommandRoutesClaudeAgentThroughPort(t *testing.T) {
+	projectDir := t.TempDir()
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-2")
+
+	var sessionLifecycle []string
+	var hookLogSources []string
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case protocol.CommandHookLogAppend:
+				var body protocol.HookLogAppendCommandBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal hook append body: %v", err)
+				}
+				hookLogSources = append(hookLogSources, body.Event.Source)
+				return responseWithJSON(req, body.Event), nil
+			case daemonclient.CommandSessionPause, daemonclient.CommandSessionResume:
+				sessionLifecycle = append(sessionLifecycle, req.Command)
+				return responseWithOutput(req, "ok"), nil
+			default:
+				return responseWithJSON(req, map[string]any{}), nil
+			}
+		},
+	}
+	deps := &Dependencies{
+		RepoDir:      projectDir,
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+	}
+
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.WriteString(``); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
+
+	opts, err := ParseAIHookRunArgs([]string{"--agent=claude", "--json", "idle_prompt"})
+	if err != nil {
+		t.Fatalf("ParseAIHookRunArgs error: %v", err)
+	}
+	if err := AIHookRunCommand(deps, opts); err != nil {
+		t.Fatalf("AIHookRunCommand error: %v", err)
+	}
+
+	if !reflect.DeepEqual(sessionLifecycle, []string{daemonclient.CommandSessionPause}) {
+		t.Fatalf("session lifecycle = %v, want [session.pause] for claude idle_prompt", sessionLifecycle)
+	}
+	if len(hookLogSources) != 1 || hookLogSources[0] != "claude.hook" {
+		t.Fatalf("hook log sources = %v, want one claude.hook", hookLogSources)
+	}
+}
+
+func TestParseAIHookRunArgsValidatesAgentAndEvent(t *testing.T) {
+	if _, err := ParseAIHookRunArgs([]string{"--json", "stop"}); err == nil || !strings.Contains(err.Error(), "--agent is required") {
+		t.Fatalf("missing agent error = %v", err)
+	}
+	if _, err := ParseAIHookRunArgs([]string{"--agent=banana", "stop"}); err == nil || !strings.Contains(err.Error(), "unsupported agent") {
+		t.Fatalf("bad agent error = %v", err)
+	}
+	if _, err := ParseAIHookRunArgs([]string{"--agent=codex", "made-up"}); err == nil || !strings.Contains(err.Error(), "invalid hook event") {
+		t.Fatalf("bad event error = %v", err)
+	}
+	opts, err := ParseAIHookRunArgs([]string{"--agent=codex", "--json", "session-start"})
+	if err != nil {
+		t.Fatalf("ParseAIHookRunArgs error: %v", err)
+	}
+	if opts.Agent != AgentCodex {
+		t.Fatalf("agent = %q, want codex", opts.Agent)
+	}
+	if opts.Event != hookEventSessionStart {
+		t.Fatalf("event = %q, want %q", opts.Event, hookEventSessionStart)
 	}
 }
 
@@ -1271,61 +1000,6 @@ func TestAppendHookLogEventBestEffortResolvesIssueIDFromWorktree(t *testing.T) {
 	}
 	if !sawAppend {
 		t.Fatal("expected hook append command")
-	}
-}
-
-func TestHooksInstallCommandMergesAndWritesSettings(t *testing.T) {
-	projectDir := t.TempDir()
-	settingsPath := filepath.Join(projectDir, ".claude", "settings.local.json")
-	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
-		t.Fatalf("mkdir hooks dir: %v", err)
-	}
-	if err := os.WriteFile(settingsPath, []byte(`{"permissions":{"shell":["git status"]},"hooks":{"Notification":[{"matcher":"idle_prompt","hooks":[{"type":"command","command":"az notify idle_prompt existing"}]}]}}`), 0o644); err != nil {
-		t.Fatalf("seed settings: %v", err)
-	}
-
-	opts, err := ParseHooksInstallArgs([]string{"--project-dir", projectDir, "az-123"})
-	if err != nil {
-		t.Fatalf("ParseHooksInstallArgs error: %v", err)
-	}
-
-	output := captureStdout(t, func() error {
-		return HooksInstallCommand(&Dependencies{RepoDir: projectDir}, opts)
-	})
-
-	if !strings.Contains(output, "Installed hooks for issue az-123") {
-		t.Fatalf("hooks output = %q", output)
-	}
-
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		t.Fatalf("read settings: %v", err)
-	}
-
-	var settings map[string]any
-	if err := json.Unmarshal(data, &settings); err != nil {
-		t.Fatalf("unmarshal settings: %v", err)
-	}
-	hooks, ok := settings["hooks"].(map[string]any)
-	if !ok {
-		t.Fatalf("hooks section missing: %#v", settings["hooks"])
-	}
-
-	notification := hooks["Notification"].([]any)
-	if len(notification) != 2 {
-		t.Fatalf("notification hook count = %d, want 2", len(notification))
-	}
-	lastNotification := notification[1].(map[string]any)
-	lastHooks := lastNotification["hooks"].([]any)
-	lastHook := lastHooks[0].(map[string]any)
-	if got := lastHook["command"]; got != "az notify idle_prompt az-123" {
-		t.Fatalf("notification hook command = %v, want az notify idle_prompt az-123", got)
-	}
-	if !strings.Contains(string(data), "az notify idle_prompt az-123") {
-		t.Fatalf("settings missing idle_prompt hook command: %s", string(data))
-	}
-	if !strings.Contains(string(data), "az notify stop az-123") {
-		t.Fatalf("settings missing stop hook command: %s", string(data))
 	}
 }
 
@@ -1561,66 +1235,6 @@ func TestDevServerListCommandFiltersRunningServers(t *testing.T) {
 	}
 	if strings.Contains(output, "az-2") {
 		t.Fatalf("output = %q, want stopped server filtered out", output)
-	}
-}
-
-func TestOpenCodeInitCommandCreatesConfig(t *testing.T) {
-	projectDir := t.TempDir()
-	opts, err := ParseOpenCodeInitArgs([]string{"--project-dir", projectDir, "--verbose"})
-	if err != nil {
-		t.Fatalf("ParseOpenCodeInitArgs error: %v", err)
-	}
-
-	output := captureStdout(t, func() error {
-		return OpenCodeInitCommand(&Dependencies{RepoDir: projectDir}, opts)
-	})
-
-	if !strings.Contains(output, "Initialized OpenCode support in") {
-		t.Fatalf("init output = %q", output)
-	}
-
-	data, err := os.ReadFile(filepath.Join(projectDir, "opencode.json"))
-	if err != nil {
-		t.Fatalf("read opencode.json: %v", err)
-	}
-	for _, want := range []string{
-		`"$schema": "https://opencode.ai/config.json"`,
-		`"opencode-tracker"`,
-		`"theme": "tokyonight"`,
-	} {
-		if !strings.Contains(string(data), want) {
-			t.Fatalf("opencode config missing %q: %s", want, string(data))
-		}
-	}
-}
-
-func TestOpenCodePluginInstallCommandCreatesPlaceholderFiles(t *testing.T) {
-	projectDir := t.TempDir()
-	globalDir := filepath.Join(t.TempDir(), "plugins")
-	opts, err := ParseOpenCodePluginInstallArgs([]string{
-		"--global-dir", globalDir,
-		"--project-dir", projectDir,
-		"--verbose",
-	})
-	if err != nil {
-		t.Fatalf("ParseOpenCodePluginInstallArgs error: %v", err)
-	}
-
-	output := captureStdout(t, func() error {
-		return OpenCodePluginInstallCommand(&Dependencies{RepoDir: projectDir}, opts)
-	})
-
-	if !strings.Contains(output, "Installed global plugin:") {
-		t.Fatalf("plugin install output = %q", output)
-	}
-
-	for _, path := range []string{
-		filepath.Join(globalDir, openCodePluginFilename),
-		filepath.Join(projectDir, ".opencode", "plugins", openCodePluginFilename),
-	} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("expected plugin file %s: %v", path, err)
-		}
 	}
 }
 

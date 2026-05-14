@@ -21,26 +21,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 )
 
-func TestRunHooksCommandHelpAndDispatch(t *testing.T) {
-	output := captureMainStdout(t, func() error {
-		return runHooksCommand(config.DefaultConfig(), []string{"--help"})
-	})
-	if !strings.Contains(output, "Usage: az hooks install <issue-id>") {
-		t.Fatalf("help output = %q", output)
-	}
-
-	projectDir := t.TempDir()
-	output = captureMainStdout(t, func() error {
-		return runHooksCommand(config.DefaultConfig(), []string{"install", "--project-dir", projectDir, "az-123"})
-	})
-	if !strings.Contains(output, "Installed hooks for issue az-123") {
-		t.Fatalf("dispatch output = %q", output)
-	}
-	if _, err := os.Stat(filepath.Join(projectDir, ".claude", "settings.local.json")); err != nil {
-		t.Fatalf("expected hooks file: %v", err)
-	}
-}
-
 func TestRunGitHooksCommandHelpAndDispatch(t *testing.T) {
 	output := captureMainStdout(t, func() error {
 		return runGitHooksCommand(config.DefaultConfig(), []string{"--help"})
@@ -77,23 +57,22 @@ func TestRunGitHooksCommandHelpAndDispatch(t *testing.T) {
 	}
 }
 
-func TestRunCodexCommandHelpAndDispatch(t *testing.T) {
+func TestRunAICommandHelpAndDispatch(t *testing.T) {
 	output := captureMainStdout(t, func() error {
-		return runCodexCommand(config.DefaultConfig(), []string{"--help"})
+		return runAICommand(config.DefaultConfig(), []string{"--help"})
 	})
-	if !strings.Contains(output, "Usage: az codex <install|guard|hook>") {
+	if !strings.Contains(output, "az ai hook run --agent=<claude|codex>") {
 		t.Fatalf("help output = %q", output)
 	}
 
-	projectDir := t.TempDir()
-	output = captureMainStdout(t, func() error {
-		return runCodexCommand(config.DefaultConfig(), []string{"install", "--project-dir", projectDir})
-	})
-	if !strings.Contains(output, "Installed Codex hooks in") {
-		t.Fatalf("dispatch output = %q", output)
+	err := runAICommand(config.DefaultConfig(), []string{"hook", "run", "--agent=banana", "--json", "stop"})
+	if err == nil || !strings.Contains(err.Error(), "unsupported agent") {
+		t.Fatalf("unsupported agent error = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(projectDir, ".codex", "hooks.json")); err != nil {
-		t.Fatalf("expected codex hooks file: %v", err)
+
+	err = runAICommand(config.DefaultConfig(), []string{"hook", "run", "--agent=codex", "--json", "not-a-real-event"})
+	if err == nil || !strings.Contains(err.Error(), "invalid hook event") {
+		t.Fatalf("invalid event error = %v", err)
 	}
 }
 
@@ -274,12 +253,6 @@ func TestRunDevCommandsAgainstDaemonClient(t *testing.T) {
 	}
 	deps := newDevDependencies(t, projectDir, transport)
 
-	notifyOut := captureMainStdout(t, func() error {
-		return runNotifyCommand(config.DefaultConfig(), []string{"--verbose", "stop", "az-123"})
-	})
-	if !strings.Contains(notifyOut, "Hook notification: stop for az-123 -> stopped") {
-		t.Fatalf("notify output = %q", notifyOut)
-	}
 	startOut := captureMainStdout(t, func() error {
 		return runDevStartCommand(deps, devIssueOptions{IssueID: "az-123"})
 	})
