@@ -155,6 +155,7 @@ func runAICommand(cfg *config.Config, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
 		cli.PrintAIUsage()
 		cli.PrintAIInstallUsage()
+		cli.PrintAIUninstallUsage()
 		cli.PrintAIMigrateUsage()
 		return nil
 	}
@@ -186,6 +187,15 @@ func runAICommand(cfg *config.Config, args []string) error {
 		}
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
 			return cli.AIInstallCommand(deps, opts)
+		})
+	case "uninstall":
+		opts, err := cli.ParseAIUninstallArgs(args[1:])
+		if err != nil {
+			cli.PrintAIUninstallUsage()
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.AIUninstallCommand(deps, opts)
 		})
 	case "migrate":
 		opts, err := cli.ParseAIMigrateArgs(args[1:])
