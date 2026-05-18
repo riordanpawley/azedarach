@@ -29,6 +29,7 @@ var orderedMigrations = []migration{
 	{id: "0006_issue_external_refs", path: "migrations/0006_issue_external_refs.sql"},
 	{id: "0007_external_issue_sync_payload", path: "migrations/0007_external_issue_sync_payload.sql"},
 	{id: "0008_decision_tables", path: "migrations/0008_decision_tables.sql"},
+	{id: "0009_decision_audit_log", path: "migrations/0009_decision_audit_log.sql"},
 }
 
 func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
@@ -666,6 +667,44 @@ func (c *Client) ensureDecisionSchema(db *sql.DB) error {
 	} {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("ensure decision schema index: %w", err)
+		}
+	}
+	return nil
+}
+
+func (c *Client) ensureDecisionAuditSchema(db *sql.DB) error {
+	auditDDL := `
+		CREATE TABLE IF NOT EXISTS decision_audit_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			entity_type TEXT NOT NULL,
+			entity_id TEXT NOT NULL,
+			operation TEXT NOT NULL,
+			actor_source TEXT NOT NULL,
+			before_json TEXT NOT NULL,
+			after_json TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		)
+	`
+	if _, err := db.Exec(auditDDL); err != nil {
+		return fmt.Errorf("ensure decision_audit_log table: %w", err)
+	}
+	if err := ensureTableColumns(db, "decision_audit_log", []sqliteColumnSpec{
+		{name: "entity_type", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "entity_id", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "operation", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "actor_source", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "before_json", ddl: "TEXT NOT NULL DEFAULT 'null'"},
+		{name: "after_json", ddl: "TEXT NOT NULL DEFAULT 'null'"},
+		{name: "created_at", ddl: "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'"},
+	}); err != nil {
+		return fmt.Errorf("ensure decision_audit_log columns: %w", err)
+	}
+	for _, stmt := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_decision_audit_entity_created_at ON decision_audit_log(entity_type, entity_id, created_at, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_decision_audit_created_at ON decision_audit_log(created_at, id)`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("ensure decision audit index: %w", err)
 		}
 	}
 	return nil

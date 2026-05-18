@@ -12,9 +12,31 @@ import (
 )
 
 const (
-	decisionAuditEntityDecision = "decision"
-	decisionAuditEntityLink     = "decision_link"
+	decisionEntityKind     = "decision"
+	decisionLinkEntityKind = "decision_link"
+
+	decisionOpCreate = "create"
+	decisionOpUpdate = "update"
+	decisionOpDelete = "delete"
 )
+
+func (c *Client) insertDecisionAuditRow(ctx context.Context, execer sqlRequirementExecer, entityType, entityID, operation string, before, after any) error {
+	beforeJSON, err := marshalAuditSnapshot(before)
+	if err != nil {
+		return err
+	}
+	afterJSON, err := marshalAuditSnapshot(after)
+	if err != nil {
+		return err
+	}
+	_, err = execer.ExecContext(ctx, `
+		INSERT INTO decision_audit_log (
+			entity_type, entity_id, operation, actor_source,
+			before_json, after_json, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, entityType, entityID, operation, specAuditActorSource(ctx), string(beforeJSON), string(afterJSON), formatTimestamp(time.Now().UTC()))
+	return err
+}
 
 type DecisionStatus string
 
@@ -200,7 +222,7 @@ func (c *Client) CreateDecision(ctx context.Context, params CreateDecisionParams
 		return Decision{}, c.wrapError("create-decision", decision.LocalID, classifySQLiteConstraint(err))
 	}
 
-	if err := c.insertSpecAuditRow(ctx, tx, decisionAuditEntityDecision, decision.LocalID, specAuditOpCreate, nil, decision); err != nil {
+	if err := c.insertDecisionAuditRow(ctx, tx, decisionEntityKind, decision.LocalID, decisionOpCreate, nil, decision); err != nil {
 		return Decision{}, c.wrapError("create-decision", decision.LocalID, err)
 	}
 
@@ -362,7 +384,7 @@ func (c *Client) UpdateDecision(ctx context.Context, selector string, params Upd
 		return Decision{}, c.wrapError("update-decision", before.LocalID, classifySQLiteConstraint(err))
 	}
 
-	if err := c.insertSpecAuditRow(ctx, tx, decisionAuditEntityDecision, before.LocalID, specAuditOpUpdate, before.Decision, after); err != nil {
+	if err := c.insertDecisionAuditRow(ctx, tx, decisionEntityKind, before.LocalID, decisionOpUpdate, before.Decision, after); err != nil {
 		return Decision{}, c.wrapError("update-decision", before.LocalID, err)
 	}
 
@@ -415,7 +437,7 @@ func (c *Client) DeleteDecision(ctx context.Context, selector string) error {
 		`, formatTimestamp(now), formatTimestamp(now), link.rowID); err != nil {
 			return c.wrapError("delete-decision", decision.LocalID, err)
 		}
-		if err := c.insertSpecAuditRow(ctx, tx, decisionAuditEntityLink, link.DecisionLink.ID, specAuditOpDelete, link.DecisionLink, after); err != nil {
+		if err := c.insertDecisionAuditRow(ctx, tx, decisionLinkEntityKind, link.DecisionLink.ID, decisionOpDelete, link.DecisionLink, after); err != nil {
 			return c.wrapError("delete-decision", decision.LocalID, err)
 		}
 	}
@@ -430,7 +452,7 @@ func (c *Client) DeleteDecision(ctx context.Context, selector string) error {
 	`, formatTimestamp(now), formatTimestamp(now), decision.rowID); err != nil {
 		return c.wrapError("delete-decision", decision.LocalID, err)
 	}
-	if err := c.insertSpecAuditRow(ctx, tx, decisionAuditEntityDecision, decision.LocalID, specAuditOpDelete, decision.Decision, afterDecision); err != nil {
+	if err := c.insertDecisionAuditRow(ctx, tx, decisionEntityKind, decision.LocalID, decisionOpDelete, decision.Decision, afterDecision); err != nil {
 		return c.wrapError("delete-decision", decision.LocalID, err)
 	}
 
@@ -487,12 +509,12 @@ func (c *Client) AddDecisionLink(ctx context.Context, params AddDecisionLinkPara
 		UpdatedAt:  now,
 	}
 
-	operation := specAuditOpCreate
+	operation := decisionOpCreate
 	var before any
 	if err == nil {
 		before = existing.DecisionLink
 		if existing.DeletedAt == nil {
-			operation = specAuditOpUpdate
+			operation = decisionOpUpdate
 		}
 		link.CreatedAt = existing.CreatedAt
 		if _, updateErr := tx.ExecContext(ctx, `
@@ -521,7 +543,7 @@ func (c *Client) AddDecisionLink(ctx context.Context, params AddDecisionLinkPara
 		}
 	}
 
-	if err := c.insertSpecAuditRow(ctx, tx, decisionAuditEntityLink, link.ID, operation, before, link); err != nil {
+	if err := c.insertDecisionAuditRow(ctx, tx, decisionLinkEntityKind, link.ID, operation, before, link); err != nil {
 		return DecisionLink{}, c.wrapError("add-decision-link", normalized.DecisionID, err)
 	}
 
@@ -576,7 +598,7 @@ func (c *Client) RemoveDecisionLink(ctx context.Context, decisionSelector string
 	`, formatTimestamp(now), formatTimestamp(now), link.rowID); err != nil {
 		return c.wrapError("remove-decision-link", decisionSelector, err)
 	}
-	if err := c.insertSpecAuditRow(ctx, tx, decisionAuditEntityLink, link.DecisionLink.ID, specAuditOpDelete, link.DecisionLink, after); err != nil {
+	if err := c.insertDecisionAuditRow(ctx, tx, decisionLinkEntityKind, link.DecisionLink.ID, decisionOpDelete, link.DecisionLink, after); err != nil {
 		return c.wrapError("remove-decision-link", decisionSelector, err)
 	}
 

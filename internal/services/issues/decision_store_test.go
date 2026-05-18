@@ -158,6 +158,73 @@ func TestDecisionStore_ValidationErrors(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestDecisionStore_AuditLogIsolatedFromSpecAudit(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	seedIssue(t, client, "cgn", "issue")
+
+	_, err := client.CreateRequirement(ctx, CreateRequirementParams{
+		LocalID: "cgn-req-1",
+		Title:   "req",
+		Status:  RequirementStatusOpen,
+	})
+	require.NoError(t, err)
+
+	// Mutating spec writes to spec_audit_log only.
+	_, err = client.AddSpecLink(ctx, AddSpecLinkParams{
+		IssueID:       "cgn",
+		RequirementID: "cgn-req-1",
+		Role:          LinkRoleImplements,
+	})
+	require.NoError(t, err)
+
+	// Mutating decisions writes to decision_audit_log only.
+	_, err = client.CreateDecision(ctx, CreateDecisionParams{
+		LocalID: "d1",
+		Title:   "test decision",
+		Status:  DecisionStatusAccepted,
+	})
+	require.NoError(t, err)
+	_, err = client.AddDecisionLink(ctx, AddDecisionLinkParams{
+		DecisionID: "d1",
+		TargetKind: DecisionTargetIssue,
+		TargetID:   "cgn",
+		Relation:   DecisionRelationRelates,
+	})
+	require.NoError(t, err)
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+
+	var specEntities []string
+	rows, err := db.Query(`SELECT DISTINCT entity_type FROM spec_audit_log ORDER BY entity_type`)
+	require.NoError(t, err)
+	for rows.Next() {
+		var et string
+		require.NoError(t, rows.Scan(&et))
+		specEntities = append(specEntities, et)
+	}
+	require.NoError(t, rows.Close())
+
+	for _, et := range specEntities {
+		assert.NotContains(t, []string{"decision", "decision_link"}, et,
+			"spec_audit_log must not contain decision audit rows; found %q", et)
+	}
+
+	var decisionEntities []string
+	rows, err = db.Query(`SELECT DISTINCT entity_type FROM decision_audit_log ORDER BY entity_type`)
+	require.NoError(t, err)
+	for rows.Next() {
+		var et string
+		require.NoError(t, rows.Scan(&et))
+		decisionEntities = append(decisionEntities, et)
+	}
+	require.NoError(t, rows.Close())
+
+	assert.ElementsMatch(t, []string{"decision", "decision_link"}, decisionEntities,
+		"decision_audit_log should carry decision and decision_link rows")
+}
+
 func TestDecisionStore_FilterByQuery(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
