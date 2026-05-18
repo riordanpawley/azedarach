@@ -111,12 +111,14 @@ type ImplMigrateOptions struct {
 }
 
 type IssueListOptions struct {
-	Project string
-	JSON    bool
-	Deps    bool
-	Limit   int
-	IDs     []string
-	States  []domain.Status
+	Project      string
+	JSON         bool
+	Deps         bool
+	Limit        int
+	IDs          []string
+	States       []domain.Status
+	ParentIDs    []string
+	DependsOnIDs []string
 }
 
 type IssueGetOptions struct {
@@ -1392,6 +1394,10 @@ func ParseIssueListArgs(args []string) (IssueListOptions, error) {
 	opts := IssueListOptions{Limit: defaultIssueListLimit}
 	ids := make([]string, 0, 4)
 	idsCSV := ""
+	parentIDs := make([]string, 0, 2)
+	parentsCSV := ""
+	depIDs := make([]string, 0, 2)
+	depIDsCSV := ""
 	stateInputs := make([]string, 0, 4)
 	statesCSV := ""
 	fs := flag.NewFlagSet("issue list", flag.ContinueOnError)
@@ -1417,6 +1423,24 @@ func ParseIssueListArgs(args []string) (IssueListOptions, error) {
 		return nil
 	})
 	fs.StringVar(&idsCSV, "ids", "", "comma-separated issue ids to include")
+	fs.Func("parent", "restrict list to issues with one of the provided parent issue ids (repeatable)", func(v string) error {
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return fmt.Errorf("empty parent issue id")
+		}
+		parentIDs = append(parentIDs, trimmed)
+		return nil
+	})
+	fs.StringVar(&parentsCSV, "parents", "", "comma-separated parent issue ids")
+	fs.Func("depends-on", "restrict list to issues depending on one of the provided issue ids (repeatable)", func(v string) error {
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return fmt.Errorf("empty dependency issue id")
+		}
+		depIDs = append(depIDs, trimmed)
+		return nil
+	})
+	fs.StringVar(&depIDsCSV, "depends-on-ids", "", "comma-separated dependency issue ids")
 	if err := fs.Parse(args); err != nil {
 		return IssueListOptions{}, err
 	}
@@ -1437,6 +1461,26 @@ func ParseIssueListArgs(args []string) (IssueListOptions, error) {
 		}
 	}
 	opts.IDs = dedupeOrderedIDs(ids)
+	if strings.TrimSpace(parentsCSV) != "" {
+		for _, raw := range strings.Split(parentsCSV, ",") {
+			trimmed := strings.TrimSpace(raw)
+			if trimmed == "" {
+				continue
+			}
+			parentIDs = append(parentIDs, trimmed)
+		}
+	}
+	opts.ParentIDs = dedupeOrderedIDs(parentIDs)
+	if strings.TrimSpace(depIDsCSV) != "" {
+		for _, raw := range strings.Split(depIDsCSV, ",") {
+			trimmed := strings.TrimSpace(raw)
+			if trimmed == "" {
+				continue
+			}
+			depIDs = append(depIDs, trimmed)
+		}
+	}
+	opts.DependsOnIDs = dedupeOrderedIDs(depIDs)
 	if strings.TrimSpace(statesCSV) != "" {
 		stateInputs = append(stateInputs, strings.Split(statesCSV, ",")...)
 	}
@@ -2461,6 +2505,12 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 	}
 	if len(opts.States) > 0 {
 		tasks = filterTasksByStatus(tasks, opts.States)
+	}
+	if len(opts.ParentIDs) > 0 {
+		tasks = filterTasksByParentIDs(tasks, opts.ParentIDs)
+	}
+	if len(opts.DependsOnIDs) > 0 {
+		tasks = filterTasksByDependencyIDs(tasks, opts.DependsOnIDs)
 	}
 	sort.SliceStable(tasks, func(i, j int) bool {
 		if tasks[i].UpdatedAt.Equal(tasks[j].UpdatedAt) {
@@ -3640,6 +3690,50 @@ func filterTasksByStatus(tasks []domain.Task, statuses []domain.Status) []domain
 	filtered := make([]domain.Task, 0, len(tasks))
 	for _, task := range tasks {
 		if _, ok := statusSet[task.Status]; ok {
+			filtered = append(filtered, task)
+		}
+	}
+	return filtered
+}
+
+func filterTasksByParentIDs(tasks []domain.Task, parentIDs []string) []domain.Task {
+	if len(parentIDs) == 0 {
+		return tasks
+	}
+	allow := make(map[string]struct{}, len(parentIDs))
+	for _, id := range parentIDs {
+		allow[strings.TrimSpace(id)] = struct{}{}
+	}
+	filtered := make([]domain.Task, 0, len(tasks))
+	for _, task := range tasks {
+		if task.ParentID == nil {
+			continue
+		}
+		if _, ok := allow[strings.TrimSpace(task.ParentID.String())]; ok {
+			filtered = append(filtered, task)
+		}
+	}
+	return filtered
+}
+
+func filterTasksByDependencyIDs(tasks []domain.Task, dependencyIDs []string) []domain.Task {
+	if len(dependencyIDs) == 0 {
+		return tasks
+	}
+	allow := make(map[string]struct{}, len(dependencyIDs))
+	for _, id := range dependencyIDs {
+		allow[strings.TrimSpace(id)] = struct{}{}
+	}
+	filtered := make([]domain.Task, 0, len(tasks))
+	for _, task := range tasks {
+		matched := false
+		for _, dep := range task.Dependencies {
+			if _, ok := allow[strings.TrimSpace(dep.ID.String())]; ok {
+				matched = true
+				break
+			}
+		}
+		if matched {
 			filtered = append(filtered, task)
 		}
 	}

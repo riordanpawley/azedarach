@@ -2540,6 +2540,17 @@ func TestParseIssueListArgs(t *testing.T) {
 			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, IDs: []string{"az-1", "az-2", "az-3", "az-4"}},
 		},
 		{
+			name: "parent and dependency filters",
+			args: []string{"--parent", "az-parent-1", "--parents", "az-parent-2", "--depends-on", "az-upstream-1", "--depends-on-ids", "az-upstream-2"},
+			want: IssueListOptions{
+				JSON:         false,
+				Deps:         false,
+				Limit:        defaultIssueListLimit,
+				ParentIDs:    []string{"az-parent-1", "az-parent-2"},
+				DependsOnIDs: []string{"az-upstream-1", "az-upstream-2"},
+			},
+		},
+		{
 			name:        "invalid limit",
 			args:        []string{"--limit", "0"},
 			errContains: "limit must be >= 1",
@@ -3603,6 +3614,102 @@ func TestIssueListCommand_StatusFilter(t *testing.T) {
 	}
 	if !strings.Contains(output, "az-1") || !strings.Contains(output, "az-2") {
 		t.Fatalf("status filter should include matching issues: %q", output)
+	}
+}
+
+func TestIssueListCommand_ParentFilter(t *testing.T) {
+	now := time.Date(2026, 3, 26, 2, 0, 0, 0, time.UTC)
+	parentID := naming.IssueID("az-parent")
+	otherParentID := naming.IssueID("az-other-parent")
+	tasks := []domain.Task{
+		{ID: "az-1", ParentID: &parentID, Title: "Child One", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(3 * time.Hour)},
+		{ID: "az-2", ParentID: &otherParentID, Title: "Child Two", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(2 * time.Hour)},
+		{ID: "az-3", Title: "Top Level", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(1 * time.Hour)},
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := marshalTaskListBody(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        2,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueListCommand(deps, IssueListOptions{ParentIDs: []string{"az-parent"}})
+	})
+	if strings.Contains(output, "az-2") || strings.Contains(output, "az-3") {
+		t.Fatalf("parent filter should exclude non-matching tasks: %q", output)
+	}
+	if !strings.Contains(output, "az-1") {
+		t.Fatalf("parent filter should include matching task: %q", output)
+	}
+}
+
+func TestIssueListCommand_DependencyTargetFilter(t *testing.T) {
+	now := time.Date(2026, 3, 26, 2, 0, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{
+			ID: "az-1", Title: "Depends on az-100", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(3 * time.Hour),
+			Dependencies: []domain.Dependency{{ID: "az-100", Type: domain.DependencyBlocks}},
+		},
+		{
+			ID: "az-2", Title: "Depends on az-200", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(2 * time.Hour),
+			Dependencies: []domain.Dependency{{ID: "az-200", Type: domain.DependencyRelatedTo}},
+		},
+		{
+			ID: "az-3", Title: "No dependencies", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(1 * time.Hour),
+		},
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := marshalTaskListBody(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        2,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueListCommand(deps, IssueListOptions{DependsOnIDs: []string{"az-100"}})
+	})
+	if strings.Contains(output, "az-2") || strings.Contains(output, "az-3") {
+		t.Fatalf("dependency filter should exclude non-matching tasks: %q", output)
+	}
+	if !strings.Contains(output, "az-1") {
+		t.Fatalf("dependency filter should include matching task: %q", output)
 	}
 }
 
