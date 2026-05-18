@@ -253,6 +253,7 @@ func New(cfg Config) *Daemon {
 	d.runtimeStoresByProject[canonicalProjectID] = runtimeStateStore
 	specService.daemon = d
 	specHandler := daemonhandlers.NewSpecHandler(specService)
+	decisionHandler := daemonhandlers.NewDecisionHandler(issueDecisionService{daemon: d})
 	d.syncBootstrapFn = d.defaultSyncBootstrap
 	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
 	gitService.runtimeProjectionWriter = d.runtimeProjectionStateWriter()
@@ -311,6 +312,7 @@ func New(cfg Config) *Daemon {
 		devServerHandler,
 		prHandler,
 		specHandler,
+		decisionHandler,
 		runtime,
 	)
 	d.apply = daemonhandlers.NewApplyHandler(d, applyRevisionAdapter{daemon: d})

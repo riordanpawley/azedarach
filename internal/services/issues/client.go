@@ -144,6 +144,10 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		_ = db.Close()
 		return nil, c.wrapError("open-db", "", err)
 	}
+	if err := c.ensureDecisionSchema(db); err != nil {
+		_ = db.Close()
+		return nil, c.wrapError("open-db", "", err)
+	}
 	if err := c.ensureRuntimeProjectionSchema(db); err != nil {
 		_ = db.Close()
 		return nil, c.wrapError("open-db", "", err)

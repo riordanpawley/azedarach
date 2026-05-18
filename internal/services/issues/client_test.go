@@ -1255,6 +1255,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0006_external_issue_sync",
 		"0006_issue_external_refs",
 		"0007_external_issue_sync_payload",
+		"0008_decision_tables",
 	}, got)
 }
 
