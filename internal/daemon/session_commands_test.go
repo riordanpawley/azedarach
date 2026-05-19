@@ -2892,6 +2892,34 @@ func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsInYoloMode(t *test
 	}
 }
 
+func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsFromConfigAcrossTools(t *testing.T) {
+	tests := []struct {
+		name string
+		tool string
+	}{
+		{name: "claude", tool: "claude"},
+		{name: "codex", tool: "codex"},
+		{name: "opencode", tool: "opencode"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &Daemon{
+				cfg: Config{
+					CLITool:                    tt.tool,
+					SessionShell:               "zsh",
+					DangerouslySkipPermissions: true,
+				},
+			}
+
+			command := d.buildSessionLaunchCommand(protocol.DefaultProjectID, "axt-123", "session-axt-123", false, nil, "")
+			if !strings.Contains(command, "--dangerously-skip-permissions") {
+				t.Fatalf("tool %s command = %q, want config-driven skip-permissions flag", tt.tool, command)
+			}
+		})
+	}
+}
+
 func TestRunWorktreeInitCommandsExecutesInWorktreeDirectory(t *testing.T) {
 	worktree := t.TempDir()
 	d := &Daemon{

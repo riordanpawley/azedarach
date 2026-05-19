@@ -66,15 +66,16 @@ func main() {
 	slog.SetDefault(logger)
 
 	d := daemon.New(daemon.Config{
-		RepoDir:              repoDir,
-		SocketPath:           socketPath,
-		LockPath:             lockPath,
-		BaseBranch:           cfg.Git.BaseBranch,
-		CLITool:              cfg.CLITool,
-		SessionShell:         cfg.Session.Shell,
-		SessionInitCommands:  cfg.Session.InitCommands,
-		Logger:               logger,
-		WorktreeInitCommands: cfg.Worktree.InitCommands,
+		RepoDir:                    repoDir,
+		SocketPath:                 socketPath,
+		LockPath:                   lockPath,
+		BaseBranch:                 cfg.Git.BaseBranch,
+		CLITool:                    cfg.CLITool,
+		DangerouslySkipPermissions: cfg.Session.DangerouslySkipPermissions,
+		SessionShell:               cfg.Session.Shell,
+		SessionInitCommands:        cfg.Session.InitCommands,
+		Logger:                     logger,
+		WorktreeInitCommands:       cfg.Worktree.InitCommands,
 	})
 	if err := d.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon failed: %v\n", err)

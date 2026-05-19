@@ -55,18 +55,19 @@ const (
 
 // Config configures daemon runtime wiring.
 type Config struct {
-	RepoDir                  string
-	SocketPath               string
-	LockPath                 string
-	BaseBranch               string
-	CLITool                  string
-	SessionShell             string
-	SessionInitCommands      []string
-	WorktreeInitCommands     []string
-	Logger                   *slog.Logger
-	IdleTimeout              time.Duration
-	RuntimeReconcileInterval time.Duration
-	RuntimeReconcileTimeout  time.Duration
+	RepoDir                    string
+	SocketPath                 string
+	LockPath                   string
+	BaseBranch                 string
+	CLITool                    string
+	DangerouslySkipPermissions bool
+	SessionShell               string
+	SessionInitCommands        []string
+	WorktreeInitCommands       []string
+	Logger                     *slog.Logger
+	IdleTimeout                time.Duration
+	RuntimeReconcileInterval   time.Duration
+	RuntimeReconcileTimeout    time.Duration
 }
 
 // Daemon is the daemon runtime root.

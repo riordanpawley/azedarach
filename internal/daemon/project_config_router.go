@@ -7,12 +7,13 @@ import (
 )
 
 type daemonProjectRuntimeConfig struct {
-	BaseBranch           string
-	CLITool              string
-	IssueTracker         appconfig.IssueTrackerConfig
-	SessionShell         string
-	SessionInitCommands  []string
-	WorktreeInitCommands []string
+	BaseBranch                 string
+	CLITool                    string
+	IssueTracker               appconfig.IssueTrackerConfig
+	DangerouslySkipPermissions bool
+	SessionShell               string
+	SessionInitCommands        []string
+	WorktreeInitCommands       []string
 }
 
 func (d *Daemon) baseBranchForProject(projectID string) string {
@@ -30,12 +31,13 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	projectID = d.canonicalProjectID(projectID)
 
 	defaultConfig := daemonProjectRuntimeConfig{
-		BaseBranch:           strings.TrimSpace(d.cfg.BaseBranch),
-		CLITool:              strings.TrimSpace(d.cfg.CLITool),
-		IssueTracker:         appconfig.DefaultConfig().IssueTracker,
-		SessionShell:         strings.TrimSpace(d.cfg.SessionShell),
-		SessionInitCommands:  append([]string(nil), d.cfg.SessionInitCommands...),
-		WorktreeInitCommands: append([]string(nil), d.cfg.WorktreeInitCommands...),
+		BaseBranch:                 strings.TrimSpace(d.cfg.BaseBranch),
+		CLITool:                    strings.TrimSpace(d.cfg.CLITool),
+		IssueTracker:               appconfig.DefaultConfig().IssueTracker,
+		DangerouslySkipPermissions: d.cfg.DangerouslySkipPermissions,
+		SessionShell:               strings.TrimSpace(d.cfg.SessionShell),
+		SessionInitCommands:        append([]string(nil), d.cfg.SessionInitCommands...),
+		WorktreeInitCommands:       append([]string(nil), d.cfg.WorktreeInitCommands...),
 	}
 	if defaultConfig.BaseBranch == "" {
 		defaultConfig.BaseBranch = "main"
@@ -135,6 +137,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 				cfg.CLITool = tool
 			}
 			cfg.IssueTracker = loaded.IssueTracker
+			cfg.DangerouslySkipPermissions = loaded.Session.DangerouslySkipPermissions
 			if shell := strings.TrimSpace(loaded.Session.Shell); shell != "" {
 				cfg.SessionShell = shell
 			}
