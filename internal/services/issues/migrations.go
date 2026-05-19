@@ -28,6 +28,10 @@ var orderedMigrations = []migration{
 	{id: "0006_external_issue_sync", path: "migrations/0006_external_issue_sync.sql"},
 	{id: "0006_issue_external_refs", path: "migrations/0006_issue_external_refs.sql"},
 	{id: "0007_external_issue_sync_payload", path: "migrations/0007_external_issue_sync_payload.sql"},
+	{id: "0008_decision_tables", path: "migrations/0008_decision_tables.sql"},
+	{id: "0009_decision_audit_log", path: "migrations/0009_decision_audit_log.sql"},
+	{id: "0010_decisions_refresh", path: "migrations/0010_decisions_refresh.sql"},
+	{id: "0011_decisions_consequences", path: "migrations/0011_decisions_consequences.sql"},
 }
 
 func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
@@ -593,6 +597,117 @@ func tableExistsInTx(tx *sql.Tx, tableName string) bool {
 		return false
 	}
 	return exists > 0
+}
+
+func (c *Client) ensureDecisionSchema(db *sql.DB) error {
+	decisionsDDL := `
+		CREATE TABLE IF NOT EXISTS decisions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			local_id TEXT NOT NULL,
+			title TEXT NOT NULL,
+			rationale TEXT,
+			context TEXT,
+			consequences TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			deleted_at TEXT
+		)
+	`
+	if _, err := db.Exec(decisionsDDL); err != nil {
+		return fmt.Errorf("ensure decisions table: %w", err)
+	}
+	if err := ensureTableColumns(db, "decisions", []sqliteColumnSpec{
+		{name: "local_id", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "title", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "rationale", ddl: "TEXT"},
+		{name: "context", ddl: "TEXT"},
+		{name: "consequences", ddl: "TEXT"},
+		{name: "created_at", ddl: "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'"},
+		{name: "updated_at", ddl: "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'"},
+		{name: "deleted_at", ddl: "TEXT"},
+	}); err != nil {
+		return fmt.Errorf("ensure decisions columns: %w", err)
+	}
+
+	linksDDL := `
+		CREATE TABLE IF NOT EXISTS decision_links (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			decision_id INTEGER NOT NULL,
+			target_kind TEXT NOT NULL,
+			target_id TEXT NOT NULL,
+			relation TEXT NOT NULL,
+			note TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			deleted_at TEXT,
+			FOREIGN KEY (decision_id) REFERENCES decisions(id) ON DELETE CASCADE
+		)
+	`
+	if _, err := db.Exec(linksDDL); err != nil {
+		return fmt.Errorf("ensure decision_links table: %w", err)
+	}
+	if err := ensureTableColumns(db, "decision_links", []sqliteColumnSpec{
+		{name: "decision_id", ddl: "INTEGER NOT NULL DEFAULT 0"},
+		{name: "target_kind", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "target_id", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "relation", ddl: "TEXT NOT NULL DEFAULT 'relates'"},
+		{name: "note", ddl: "TEXT"},
+		{name: "created_at", ddl: "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'"},
+		{name: "updated_at", ddl: "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'"},
+		{name: "deleted_at", ddl: "TEXT"},
+	}); err != nil {
+		return fmt.Errorf("ensure decision_links columns: %w", err)
+	}
+
+	for _, stmt := range []string{
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_active_local_id ON decisions(local_id) WHERE deleted_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_decisions_updated ON decisions(updated_at DESC, local_id) WHERE deleted_at IS NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_links_active_unique ON decision_links(decision_id, target_kind, target_id) WHERE deleted_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_decision_links_target ON decision_links(target_kind, target_id, updated_at DESC) WHERE deleted_at IS NULL`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("ensure decision schema index: %w", err)
+		}
+	}
+	return nil
+}
+
+func (c *Client) ensureDecisionAuditSchema(db *sql.DB) error {
+	auditDDL := `
+		CREATE TABLE IF NOT EXISTS decision_audit_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			entity_type TEXT NOT NULL,
+			entity_id TEXT NOT NULL,
+			operation TEXT NOT NULL,
+			actor_source TEXT NOT NULL,
+			before_json TEXT NOT NULL,
+			after_json TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		)
+	`
+	if _, err := db.Exec(auditDDL); err != nil {
+		return fmt.Errorf("ensure decision_audit_log table: %w", err)
+	}
+	if err := ensureTableColumns(db, "decision_audit_log", []sqliteColumnSpec{
+		{name: "entity_type", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "entity_id", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "operation", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "actor_source", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "before_json", ddl: "TEXT NOT NULL DEFAULT 'null'"},
+		{name: "after_json", ddl: "TEXT NOT NULL DEFAULT 'null'"},
+		{name: "created_at", ddl: "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'"},
+	}); err != nil {
+		return fmt.Errorf("ensure decision_audit_log columns: %w", err)
+	}
+	for _, stmt := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_decision_audit_entity_created_at ON decision_audit_log(entity_type, entity_id, created_at, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_decision_audit_created_at ON decision_audit_log(created_at, id)`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("ensure decision audit index: %w", err)
+		}
+	}
+	return nil
 }
 
 func (c *Client) ensureSpecAuditSchema(db *sql.DB) error {

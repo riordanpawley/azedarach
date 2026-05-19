@@ -2725,10 +2725,15 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 		deps.Logger.Info("issue get completed", "issue_id", opts.IssueID, "context_task_count", len(snapshot.Tasks), "elapsed_ms", time.Since(startedAt).Milliseconds())
 	}
 
+	decisions := fetchIssueDecisions(ctx, deps, opts.IssueID)
+
 	if opts.JSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(task)
+		return enc.Encode(issueGetJSONEnvelope{
+			Task:      &task,
+			Decisions: decisions,
+		})
 	}
 
 	fmt.Printf("ID: %s\n", task.ID)
@@ -2761,6 +2766,7 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 	fmt.Printf("Dependencies: %d\n", len(dependencies))
 	printDependencies(dependencies)
 	printDependents(dependents)
+	printIssueDecisions(decisions)
 	if task.Description != "" {
 		fmt.Printf("Description: %s\n", task.Description)
 	}
@@ -2776,6 +2782,93 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 	fmt.Printf("Created: %s\n", task.CreatedAt.UTC().Format(time.RFC3339))
 	fmt.Printf("Updated: %s\n", task.UpdatedAt.UTC().Format(time.RFC3339))
 	return nil
+}
+
+// issueDecisionSummary is the per-decision payload embedded in `az issue get`
+// output (text + JSON). It merges link-level fields (relation, note) with the
+// linked decision's identity (slug, title) so a single row is self-describing.
+type issueDecisionSummary struct {
+	ID       string `json:"id"`
+	Title    string `json:"title,omitempty"`
+	Relation string `json:"relation"`
+	Note     string `json:"note,omitempty"`
+}
+
+// issueGetJSONEnvelope is the JSON shape produced by `az issue get --json`.
+// The Task is embedded so existing top-level keys (id, title, status, ...) keep
+// their position in the output; consumers that unmarshal into domain.Task
+// continue to work. The new Decisions key is omitted when empty so issues
+// without linked decisions render the same as before.
+type issueGetJSONEnvelope struct {
+	*domain.Task
+	Decisions []issueDecisionSummary `json:"decisions,omitempty"`
+}
+
+// fetchIssueDecisions queries the daemon for decisions linked to the given
+// issue. Errors are treated as non-fatal: callers see an empty slice and the
+// rest of the issue render proceeds. This is symmetric with the TUI's
+// graceful-degradation path and keeps `az issue get` reliable when the daemon
+// is older than the decisions feature.
+func fetchIssueDecisions(ctx context.Context, deps *Dependencies, issueID string) []issueDecisionSummary {
+	if deps == nil || deps.DaemonClient == nil || strings.TrimSpace(issueID) == "" {
+		return nil
+	}
+	result, err := deps.DaemonClient.ListDecisionLinks(ctx, daemonclient.DecisionLinkListRequest{
+		TargetKind:       daemonclient.DecisionTargetIssue,
+		TargetID:         issueID,
+		IncludeDecisions: true,
+	})
+	if err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Debug("issue get decision link fetch failed", "issue_id", issueID, "error", err)
+		}
+		return nil
+	}
+	if len(result.Links) == 0 {
+		return nil
+	}
+	byID := make(map[string]daemonclient.Decision, len(result.Decisions))
+	for _, d := range result.Decisions {
+		byID[d.ID] = d
+	}
+	out := make([]issueDecisionSummary, 0, len(result.Links))
+	for _, link := range result.Links {
+		summary := issueDecisionSummary{
+			ID:       link.DecisionID,
+			Relation: string(link.Relation),
+			Note:     link.Note,
+		}
+		if d, ok := byID[link.DecisionID]; ok {
+			summary.Title = d.Title
+		}
+		out = append(out, summary)
+	}
+	return out
+}
+
+// printIssueDecisions writes the Decisions section of `az issue get`. Output
+// format mirrors the TUI's issue detail panel: a header line with the count,
+// then one row per decision with relation, slug, status, and title/note when
+// available. Emits nothing when there are no decisions.
+func printIssueDecisions(decisions []issueDecisionSummary) {
+	fmt.Printf("Decisions: %d\n", len(decisions))
+	for _, d := range decisions {
+		relation := strings.TrimSpace(d.Relation)
+		if relation == "" {
+			relation = "applies-to"
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "  %-12s %s", relation, d.ID)
+		if title := strings.TrimSpace(d.Title); title != "" {
+			b.WriteString("  ")
+			b.WriteString(title)
+		}
+		if note := strings.TrimSpace(d.Note); note != "" {
+			b.WriteString("  — ")
+			b.WriteString(note)
+		}
+		fmt.Println(b.String())
+	}
 }
 
 func IssueCheckCommand(deps *Dependencies, opts IssueCheckOptions) error {

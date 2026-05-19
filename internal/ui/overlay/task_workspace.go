@@ -336,6 +336,12 @@ func (w *TaskWorkspaceOverlay) SyncSnapshotFreshness(checkedAt time.Time, freshn
 	w.detail.freshness = freshness
 }
 
+// SyncDecisionLinks updates the Decisions section in the detail panel.
+// Passing a nil/empty slice clears the section.
+func (w *TaskWorkspaceOverlay) SyncDecisionLinks(links []DecisionLinkSummary) {
+	w.detail.decisionLinks = append([]DecisionLinkSummary(nil), links...)
+}
+
 // SyncTask updates workspace detail/actions from refreshed task projection data.
 func (w *TaskWorkspaceOverlay) SyncTask(task domain.Task, relatedTasks []domain.Task, mutation *TaskMutationProgress) {
 	w.detail.task = task

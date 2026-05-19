@@ -863,9 +863,10 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 	}
 	launchCommand := tmuxRunner.sendKeysPayloads[0]
 	if !strings.Contains(launchCommand, "Resolve merge conflicts for issue "+issueID) ||
+		!strings.Contains(launchCommand, `AZEDARACH_ISSUE_ID="`+issueID+`" codex`) ||
 		!strings.Contains(launchCommand, "README.md") ||
 		!strings.Contains(launchCommand, "main.go") ||
-		!strings.Contains(launchCommand, "--dangerously-skip-permissions") {
+		!strings.Contains(launchCommand, "--dangerously-bypass-approvals-and-sandbox") {
 		t.Fatalf("launch command missing conflict prompt or yolo flag: %s", launchCommand)
 	}
 
@@ -2894,7 +2895,7 @@ func TestResolveSessionIssueRejectsFuzzyOnlyResults(t *testing.T) {
 	}
 }
 
-func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsInYoloMode(t *testing.T) {
+func TestBuildSessionLaunchCommandAddsCodexDangerousBypassFlagInYoloMode(t *testing.T) {
 	d := &Daemon{
 		cfg: Config{
 			CLITool:      "codex",
@@ -2903,8 +2904,37 @@ func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsInYoloMode(t *test
 	}
 
 	command := d.buildSessionLaunchCommand(protocol.DefaultProjectID, "axt-123", "codex-axt-123", true, nil, "")
-	if !strings.Contains(command, "--dangerously-skip-permissions") {
-		t.Fatalf("command = %q, want yolo skip-permissions flag", command)
+	if !strings.Contains(command, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("command = %q, want yolo codex bypass flag", command)
+	}
+}
+
+func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsFromConfigAcrossTools(t *testing.T) {
+	tests := []struct {
+		name string
+		tool string
+		want string
+	}{
+		{name: "claude", tool: "claude", want: "--dangerously-skip-permissions"},
+		{name: "codex", tool: "codex", want: "--dangerously-bypass-approvals-and-sandbox"},
+		{name: "opencode", tool: "opencode", want: "--dangerously-skip-permissions"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &Daemon{
+				cfg: Config{
+					CLITool:                    tt.tool,
+					SessionShell:               "zsh",
+					DangerouslySkipPermissions: true,
+				},
+			}
+
+			command := d.buildSessionLaunchCommand(protocol.DefaultProjectID, "axt-123", "session-axt-123", false, nil, "")
+			if !strings.Contains(command, tt.want) {
+				t.Fatalf("tool %s command = %q, want config-driven permissions flag %q", tt.tool, command, tt.want)
+			}
+		})
 	}
 }
 

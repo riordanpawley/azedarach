@@ -55,18 +55,19 @@ const (
 
 // Config configures daemon runtime wiring.
 type Config struct {
-	RepoDir                  string
-	SocketPath               string
-	LockPath                 string
-	BaseBranch               string
-	CLITool                  string
-	SessionShell             string
-	SessionInitCommands      []string
-	WorktreeInitCommands     []string
-	Logger                   *slog.Logger
-	IdleTimeout              time.Duration
-	RuntimeReconcileInterval time.Duration
-	RuntimeReconcileTimeout  time.Duration
+	RepoDir                    string
+	SocketPath                 string
+	LockPath                   string
+	BaseBranch                 string
+	CLITool                    string
+	DangerouslySkipPermissions bool
+	SessionShell               string
+	SessionInitCommands        []string
+	WorktreeInitCommands       []string
+	Logger                     *slog.Logger
+	IdleTimeout                time.Duration
+	RuntimeReconcileInterval   time.Duration
+	RuntimeReconcileTimeout    time.Duration
 }
 
 // Daemon is the daemon runtime root.
@@ -256,6 +257,7 @@ func New(cfg Config) *Daemon {
 	d.runtimeStoresByProject[canonicalProjectID] = runtimeStateStore
 	specService.daemon = d
 	specHandler := daemonhandlers.NewSpecHandler(specService)
+	decisionHandler := daemonhandlers.NewDecisionHandler(issueDecisionService{daemon: d})
 	d.syncBootstrapFn = d.defaultSyncBootstrap
 	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
 	gitService.runtimeProjectionWriter = d.runtimeProjectionStateWriter()
@@ -314,6 +316,7 @@ func New(cfg Config) *Daemon {
 		devServerHandler,
 		prHandler,
 		specHandler,
+		decisionHandler,
 		runtime,
 	)
 	d.apply = daemonhandlers.NewApplyHandler(d, applyRevisionAdapter{daemon: d})

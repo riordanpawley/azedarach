@@ -1849,7 +1849,8 @@ func (d *Daemon) runWorktreeInitCommands(ctx context.Context, projectID string, 
 }
 
 func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {
-	tool := strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool)
+	projectCfg := d.runtimeConfigForProject(projectID)
+	tool := strings.TrimSpace(projectCfg.CLITool)
 	if tool == "" {
 		tool = "claude"
 	}
@@ -1874,8 +1875,13 @@ func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo 
 			parts = append(parts, fmt.Sprintf(`--image "%s"`, escapeForShellDoubleQuotes(trimmedPath)))
 		}
 	}
-	if yolo {
-		parts = append(parts, "--dangerously-skip-permissions")
+	if yolo || projectCfg.DangerouslySkipPermissions {
+		switch strings.ToLower(tool) {
+		case "codex":
+			parts = append(parts, "--dangerously-bypass-approvals-and-sandbox")
+		default:
+			parts = append(parts, "--dangerously-skip-permissions")
+		}
 	}
 	if initialPrompt != "" {
 		escapedPrompt := escapeForShellDoubleQuotes(initialPrompt)

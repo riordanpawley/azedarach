@@ -822,6 +822,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			currentWorkspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
 		}
 		currentWorkspace.SyncTask(task, m.tasks, m.pendingMutationForTask(msg.taskID))
+		if msg.decisionErr != nil {
+			if m.logger != nil {
+				m.logger.Debug("task workspace decision link refresh failed", "task_id", msg.taskID, "error", msg.decisionErr)
+			}
+		} else {
+			currentWorkspace.SyncDecisionLinks(msg.decisionLinks)
+		}
 		return m, nil
 
 	case fetchAndMergeResultMsg:

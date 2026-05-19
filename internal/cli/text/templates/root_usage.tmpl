@@ -27,6 +27,7 @@ Commands:
   ai hook run --agent=<claude|codex> [--json] <event>  Run an agent hook through the shared internal port
   tmux <selector|install-selector|uninstall-selector>  Manage tmux selector integration
   spec <subcommand>          Spec workflows (req|link|read|lint|parity)
+  decision <subcommand>      Decision records with rationale (list|get|create|update|delete|link)
   issue list [--project <project-id>] [--json] [--deps] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
   issue get [--project <project-id>] [--id <id>] [--json] [<id>]  Show a single issue from daemon-backed store
   issue get-many [--project <project-id>] --id <id> [--id <id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
@@ -146,6 +147,10 @@ Examples:
   az spec read --issue bgh
   az spec lint --strict
   az spec parity --fail-on-out
+  az decision create --id use-sqlite --title "Use SQLite for store" --status accepted --issue cgn
+  az decision list --issue cgn
+  az decision get --id use-sqlite --with-links
+  az decision link add --id use-sqlite --req cgn-req-1 --relation implements
   az prime
   az export --format json
   az export --format json --out snapshot.json
