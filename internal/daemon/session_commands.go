@@ -1876,7 +1876,12 @@ func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo 
 		}
 	}
 	if yolo || projectCfg.DangerouslySkipPermissions {
-		parts = append(parts, "--dangerously-skip-permissions")
+		switch strings.ToLower(tool) {
+		case "codex":
+			parts = append(parts, "--dangerously-bypass-approvals-and-sandbox")
+		default:
+			parts = append(parts, "--dangerously-skip-permissions")
+		}
 	}
 	if initialPrompt != "" {
 		escapedPrompt := escapeForShellDoubleQuotes(initialPrompt)

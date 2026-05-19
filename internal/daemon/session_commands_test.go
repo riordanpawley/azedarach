@@ -2878,7 +2878,7 @@ func TestResolveSessionIssueRejectsFuzzyOnlyResults(t *testing.T) {
 	}
 }
 
-func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsInYoloMode(t *testing.T) {
+func TestBuildSessionLaunchCommandAddsCodexDangerousBypassFlagInYoloMode(t *testing.T) {
 	d := &Daemon{
 		cfg: Config{
 			CLITool:      "codex",
@@ -2887,8 +2887,8 @@ func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsInYoloMode(t *test
 	}
 
 	command := d.buildSessionLaunchCommand(protocol.DefaultProjectID, "axt-123", "codex-axt-123", true, nil, "")
-	if !strings.Contains(command, "--dangerously-skip-permissions") {
-		t.Fatalf("command = %q, want yolo skip-permissions flag", command)
+	if !strings.Contains(command, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("command = %q, want yolo codex bypass flag", command)
 	}
 }
 
@@ -2896,10 +2896,11 @@ func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsFromConfigAcrossTo
 	tests := []struct {
 		name string
 		tool string
+		want string
 	}{
-		{name: "claude", tool: "claude"},
-		{name: "codex", tool: "codex"},
-		{name: "opencode", tool: "opencode"},
+		{name: "claude", tool: "claude", want: "--dangerously-skip-permissions"},
+		{name: "codex", tool: "codex", want: "--dangerously-bypass-approvals-and-sandbox"},
+		{name: "opencode", tool: "opencode", want: "--dangerously-skip-permissions"},
 	}
 
 	for _, tt := range tests {
@@ -2913,8 +2914,8 @@ func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsFromConfigAcrossTo
 			}
 
 			command := d.buildSessionLaunchCommand(protocol.DefaultProjectID, "axt-123", "session-axt-123", false, nil, "")
-			if !strings.Contains(command, "--dangerously-skip-permissions") {
-				t.Fatalf("tool %s command = %q, want config-driven skip-permissions flag", tt.tool, command)
+			if !strings.Contains(command, tt.want) {
+				t.Fatalf("tool %s command = %q, want config-driven permissions flag %q", tt.tool, command, tt.want)
 			}
 		})
 	}
