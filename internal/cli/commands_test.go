@@ -3844,41 +3844,58 @@ func TestIssueGetCommandJSON(t *testing.T) {
 
 func TestIssueGetCommandUsesSingleIssueDaemonRead(t *testing.T) {
 	now := time.Date(2026, 3, 25, 11, 0, 0, 0, time.UTC)
-	var gotCommand string
+	var taskGetCalled bool
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				gotCommand = req.Command
-				var body daemonclient.TaskIDRequest
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal task get body: %v", err)
+				switch req.Command {
+				case daemonclient.CommandTaskGet:
+					taskGetCalled = true
+					var body daemonclient.TaskIDRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal task get body: %v", err)
+					}
+					if body.TaskID != "az-5" {
+						t.Fatalf("task_id = %q, want az-5", body.TaskID)
+					}
+					bodyBytes, err := marshalTaskListBody([]domain.Task{{
+						ID:        "az-5",
+						Title:     "Lookup issue",
+						Status:    domain.StatusOpen,
+						Priority:  domain.P2,
+						Type:      domain.TypeTask,
+						CreatedAt: now,
+						UpdatedAt: now,
+					}})
+					if err != nil {
+						t.Fatalf("marshal tasks: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        4,
+						Body:            bodyBytes,
+					}, nil
+				case daemonclient.CommandDecisionLinkList:
+					body, _ := json.Marshal(daemonclient.DecisionLinkListResult{})
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            body,
+					}, nil
+				default:
+					t.Fatalf("unexpected daemon command: %q", req.Command)
+					return protocol.ResponseEnvelope{}, nil
 				}
-				if body.TaskID != "az-5" {
-					t.Fatalf("task_id = %q, want az-5", body.TaskID)
-				}
-				bodyBytes, err := marshalTaskListBody([]domain.Task{{
-					ID:        "az-5",
-					Title:     "Lookup issue",
-					Status:    domain.StatusOpen,
-					Priority:  domain.P2,
-					Type:      domain.TypeTask,
-					CreatedAt: now,
-					UpdatedAt: now,
-				}})
-				if err != nil {
-					t.Fatalf("marshal tasks: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					Meta:            req.Meta,
-					OK:              true,
-					CompletedAt:     req.SentAt,
-					Revision:        4,
-					Body:            bodyBytes,
-				}, nil
 			},
 		}),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -3888,8 +3905,8 @@ func TestIssueGetCommandUsesSingleIssueDaemonRead(t *testing.T) {
 	_ = captureStdout(t, func() error {
 		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-5"})
 	})
-	if gotCommand != daemonclient.CommandTaskGet {
-		t.Fatalf("daemon command = %q, want %q", gotCommand, daemonclient.CommandTaskGet)
+	if !taskGetCalled {
+		t.Fatalf("expected task.get to be invoked")
 	}
 }
 
@@ -3938,6 +3955,175 @@ func TestIssueGetCommandTextIncludesNotes(t *testing.T) {
 	})
 	if !strings.Contains(output, "Notes:\nFirst note line\nSecond note line\n") {
 		t.Fatalf("output missing notes section: %q", output)
+	}
+}
+
+// issueGetDecisionMock answers task.get with the given task list and
+// decision.link.list with the given enriched result. Other commands fail
+// the test.
+func issueGetDecisionMock(t *testing.T, tasks []domain.Task, decisionResult daemonclient.DecisionLinkListResult) *fakeDaemonTransport {
+	t.Helper()
+	return &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandTaskGet, daemonclient.CommandTaskList:
+				body, err := marshalTaskListBody(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        4,
+					Body:            body,
+				}, nil
+			case daemonclient.CommandDecisionLinkList:
+				body, err := json.Marshal(decisionResult)
+				if err != nil {
+					t.Fatalf("marshal decision result: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            body,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		},
+	}
+}
+
+func TestIssueGetCommandTextRendersDecisions(t *testing.T) {
+	now := time.Date(2026, 3, 25, 11, 0, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{
+			ID:        "az-5",
+			Title:     "Lookup issue",
+			Status:    domain.StatusInProgress,
+			Priority:  domain.P1,
+			Type:      domain.TypeTask,
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	}
+	decisions := daemonclient.DecisionLinkListResult{
+		Links: []daemonclient.DecisionLink{
+			{DecisionID: "use-sqlite-store", TargetKind: daemonclient.DecisionTargetIssue, TargetID: "az-5", Relation: "implements"},
+			{DecisionID: "polymorphic-link-table", TargetKind: daemonclient.DecisionTargetIssue, TargetID: "az-5", Relation: "relates", Note: "discussed at sync"},
+		},
+		Decisions: []daemonclient.Decision{
+			{ID: "use-sqlite-store", Title: "Use SQLite for decision store", Status: "accepted"},
+			{ID: "polymorphic-link-table", Title: "Polymorphic decision_links table", Status: "proposed"},
+		},
+	}
+
+	deps := &Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: daemonclient.New(issueGetDecisionMock(t, tasks, decisions)),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:    "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-5"})
+	})
+
+	for _, want := range []string{
+		"Decisions: 2",
+		"implements",
+		"use-sqlite-store",
+		"[accepted]",
+		"Use SQLite for decision store",
+		"relates",
+		"polymorphic-link-table",
+		"Polymorphic decision_links table",
+		"discussed at sync",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q\nfull output:\n%s", want, output)
+		}
+	}
+}
+
+func TestIssueGetCommandJSONIncludesDecisions(t *testing.T) {
+	now := time.Date(2026, 3, 25, 11, 0, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{
+			ID:        "az-5",
+			Title:     "Lookup issue",
+			Status:    domain.StatusInProgress,
+			Priority:  domain.P1,
+			Type:      domain.TypeTask,
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	}
+	decisions := daemonclient.DecisionLinkListResult{
+		Links: []daemonclient.DecisionLink{
+			{DecisionID: "use-sqlite-store", TargetKind: daemonclient.DecisionTargetIssue, TargetID: "az-5", Relation: "implements"},
+		},
+		Decisions: []daemonclient.Decision{
+			{ID: "use-sqlite-store", Title: "Use SQLite for decision store", Status: "accepted"},
+		},
+	}
+
+	deps := &Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: daemonclient.New(issueGetDecisionMock(t, tasks, decisions)),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:    "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-5", JSON: true})
+	})
+
+	if !strings.Contains(output, "\"id\": \"az-5\"") {
+		t.Fatalf("output missing task id: %q", output)
+	}
+	if !strings.Contains(output, "\"decisions\"") {
+		t.Fatalf("output missing decisions key: %q", output)
+	}
+	for _, want := range []string{
+		"\"id\": \"use-sqlite-store\"",
+		"\"title\": \"Use SQLite for decision store\"",
+		"\"status\": \"accepted\"",
+		"\"relation\": \"implements\"",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("decisions json missing %q\nfull output:\n%s", want, output)
+		}
+	}
+
+	// And the JSON must still parse with the task fields at the top level so
+	// existing consumers that unmarshal into a Task-like shape keep working.
+	var parsed struct {
+		ID        string `json:"id"`
+		Title     string `json:"title"`
+		Decisions []struct {
+			ID     string `json:"id"`
+			Title  string `json:"title"`
+			Status string `json:"status"`
+		} `json:"decisions"`
+	}
+	if err := json.Unmarshal([]byte(output), &parsed); err != nil {
+		t.Fatalf("decode envelope: %v\nraw=%s", err, output)
+	}
+	if parsed.ID != "az-5" || parsed.Title != "Lookup issue" {
+		t.Fatalf("envelope task fields = %+v", parsed)
+	}
+	if len(parsed.Decisions) != 1 || parsed.Decisions[0].ID != "use-sqlite-store" {
+		t.Fatalf("envelope decisions = %+v", parsed.Decisions)
 	}
 }
 
