@@ -30,23 +30,26 @@ type decisionGetOpts struct {
 }
 
 type decisionRecordOpts struct {
-	JSON      bool
-	Title     string
-	Rationale string
-	Context   string
-	Issues    []string
-	Reqs      []string
+	JSON         bool
+	Title        string
+	Rationale    string
+	Context      string
+	Consequences string
+	Issues       []string
+	Reqs         []string
 }
 
 type decisionUpdateOpts struct {
-	JSON      bool
-	ID        string
-	Title     string
-	Rationale string
-	Context   string
-	titleSet  bool
-	ratSet    bool
-	ctxSet    bool
+	JSON         bool
+	ID           string
+	Title        string
+	Rationale    string
+	Context      string
+	Consequences string
+	titleSet     bool
+	ratSet       bool
+	ctxSet       bool
+	consSet      bool
 }
 
 type decisionDeleteOpts struct {
@@ -63,6 +66,11 @@ type decisionRevisitOpts struct {
 	Context   string
 	New       string
 	Note      string
+}
+
+type decisionSyncOpts struct {
+	JSON  bool
+	Check bool
 }
 
 type decisionLinkListOpts struct {
@@ -138,6 +146,13 @@ func runDecisionCommand(cfg *config.Config, args []string) error {
 			return err
 		}
 		return runDecisionRevisitRPC(cfg, opts)
+	case "sync":
+		opts, err := parseDecisionSyncArgs(args[1:])
+		if err != nil {
+			printDecisionUsage()
+			return err
+		}
+		return runDecisionSyncRPC(cfg, opts)
 	case "link":
 		return runDecisionLinkCommand(cfg, args[1:])
 	default:
@@ -213,6 +228,9 @@ func runDecisionGetRPC(cfg *config.Config, opts decisionGetOpts) error {
 	if out.Decision.Context != "" {
 		fmt.Printf("\nContext:\n%s\n", out.Decision.Context)
 	}
+	if out.Decision.Consequences != "" {
+		fmt.Printf("\nConsequences:\n%s\n", out.Decision.Consequences)
+	}
 	if opts.WithLinks && len(out.Links) > 0 {
 		fmt.Println("\nLinks:")
 		for _, l := range out.Links {
@@ -228,9 +246,10 @@ func runDecisionGetRPC(cfg *config.Config, opts decisionGetOpts) error {
 
 func runDecisionRecordRPC(cfg *config.Config, opts decisionRecordOpts) error {
 	req := protocol.DecisionRecordRequestBody{
-		Title:     opts.Title,
-		Rationale: opts.Rationale,
-		Context:   opts.Context,
+		Title:        opts.Title,
+		Rationale:    opts.Rationale,
+		Context:      opts.Context,
+		Consequences: opts.Consequences,
 	}
 	var out protocol.DecisionRecordResponseBody
 	if err := runDecisionRPC(cfg, protocol.CommandDecisionRecord, req, &out); err != nil {
@@ -278,6 +297,10 @@ func runDecisionUpdateRPC(cfg *config.Config, opts decisionUpdateOpts) error {
 	if opts.ctxSet {
 		v := opts.Context
 		req.Context = &v
+	}
+	if opts.consSet {
+		v := opts.Consequences
+		req.Consequences = &v
 	}
 	var out protocol.DecisionUpdateResponseBody
 	if err := runDecisionRPC(cfg, protocol.CommandDecisionUpdate, req, &out); err != nil {
@@ -336,6 +359,49 @@ func runDecisionRevisitRPC(cfg *config.Config, opts decisionRevisitOpts) error {
 	}
 	fmt.Printf("%s revises %s\n", newID, opts.Old)
 	return nil
+}
+
+func runDecisionSyncRPC(cfg *config.Config, opts decisionSyncOpts) error {
+	req := protocol.DecisionSyncMDRequestBody{Check: opts.Check}
+	var out protocol.DecisionSyncMDResponseBody
+	if err := runDecisionRPC(cfg, protocol.CommandDecisionSyncMD, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	switch {
+	case opts.Check && out.Changed:
+		fmt.Printf("Drift detected (%d files would change):\n", len(out.Files))
+		for _, f := range out.Files {
+			fmt.Printf("  %s\n", f)
+		}
+	case opts.Check:
+		fmt.Println("No drift; markdown files are in sync.")
+	case out.Changed:
+		fmt.Printf("Wrote %d file(s):\n", len(out.Files))
+		for _, f := range out.Files {
+			fmt.Printf("  %s\n", f)
+		}
+	default:
+		fmt.Println("No changes; markdown files are already in sync.")
+	}
+	return nil
+}
+
+func parseDecisionSyncArgs(args []string) (decisionSyncOpts, error) {
+	opts := decisionSyncOpts{}
+	fs := flag.NewFlagSet("decision sync", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "json output")
+	fs.BoolVar(&opts.Check, "check", false, "report drift without writing files")
+	if err := fs.Parse(args); err != nil {
+		return decisionSyncOpts{}, err
+	}
+	if fs.NArg() != 0 {
+		return decisionSyncOpts{}, fmt.Errorf("usage: az decision sync [--check] [--json]")
+	}
+	return opts, nil
 }
 
 func runDecisionLinkListRPC(cfg *config.Config, opts decisionLinkListOpts) error {
@@ -520,6 +586,7 @@ func parseDecisionRecordArgs(args []string) (decisionRecordOpts, error) {
 	fs.StringVar(&opts.Title, "title", "", "one-line summary of what was decided")
 	fs.StringVar(&opts.Rationale, "rationale", "", "why this was chosen (required)")
 	fs.StringVar(&opts.Context, "context", "", "situational backdrop (optional)")
+	fs.StringVar(&opts.Consequences, "consequences", "", "downstream effects / trade-offs (optional)")
 	fs.Func("issue", "link to issue (repeatable)", func(v string) error {
 		trimmed := strings.TrimSpace(v)
 		if trimmed == "" {
@@ -540,7 +607,7 @@ func parseDecisionRecordArgs(args []string) (decisionRecordOpts, error) {
 		return decisionRecordOpts{}, err
 	}
 	if fs.NArg() != 0 {
-		return decisionRecordOpts{}, fmt.Errorf("usage: az decision record --title <text> --rationale <text> [--context <text>] [--issue <id> ...] [--req <id> ...] [--json]")
+		return decisionRecordOpts{}, fmt.Errorf("usage: az decision record --title <text> --rationale <text> [--context <text>] [--consequences <text>] [--issue <id> ...] [--req <id> ...] [--json]")
 	}
 	if strings.TrimSpace(opts.Title) == "" {
 		return decisionRecordOpts{}, fmt.Errorf("missing required flag: --title")
@@ -572,16 +639,21 @@ func parseDecisionUpdateArgs(args []string) (decisionUpdateOpts, error) {
 		opts.ctxSet = true
 		return nil
 	})
+	fs.Func("consequences", "new consequences", func(v string) error {
+		opts.Consequences = v
+		opts.consSet = true
+		return nil
+	})
 	if err := fs.Parse(args); err != nil {
 		return decisionUpdateOpts{}, err
 	}
 	if fs.NArg() != 0 {
-		return decisionUpdateOpts{}, fmt.Errorf("usage: az decision update --id <id> [--title ...] [--rationale ...] [--context ...] [--json]")
+		return decisionUpdateOpts{}, fmt.Errorf("usage: az decision update --id <id> [--title ...] [--rationale ...] [--context ...] [--consequences ...] [--json]")
 	}
 	if strings.TrimSpace(opts.ID) == "" {
 		return decisionUpdateOpts{}, fmt.Errorf("missing required flag: --id")
 	}
-	if !opts.titleSet && !opts.ratSet && !opts.ctxSet {
+	if !opts.titleSet && !opts.ratSet && !opts.ctxSet && !opts.consSet {
 		return decisionUpdateOpts{}, fmt.Errorf("no update fields provided")
 	}
 	return opts, nil
@@ -722,22 +794,24 @@ func parseDecisionRelationFlag(value string) (string, error) {
 }
 
 func printDecisionUsage() {
-	fmt.Println("Usage: az decision <list|get|record|update|delete|revisit|link> [arguments]")
+	fmt.Println("Usage: az decision <list|get|record|update|delete|revisit|sync|link> [arguments]")
 	fmt.Println("  list     List recorded decisions (optionally filtered by linked issue/requirement)")
 	fmt.Println("  get      Show a single decision (use --with-links for links)")
 	fmt.Println("  record   Record a new decision (id auto-allocated as dec-N)")
 	fmt.Println("  update   Update fields on an existing decision")
 	fmt.Println("  delete   Soft-delete a decision (requires --confirm)")
 	fmt.Println("  revisit  Replace an older decision with a new one (creates the revises link)")
+	fmt.Println("  sync     Write docs/decisions/dec-NNN-<slug>.md from the store (use --check for drift)")
 	fmt.Println("  link     Manage decision-to-issue/requirement/decision links")
 	fmt.Println("")
 	fmt.Println("Grammar:")
 	fmt.Println("  az decision list [--json] [--issue <id>] [--req <id>] [--id <id> ...] [--query <text>]")
 	fmt.Println("  az decision get --id <id> [--with-links] [--json]")
-	fmt.Println("  az decision record --title <text> --rationale <text> [--context <text>] [--issue <id> ...] [--req <id> ...] [--json]")
-	fmt.Println("  az decision update --id <id> [--title ...] [--rationale ...] [--context ...] [--json]")
+	fmt.Println("  az decision record --title <text> --rationale <text> [--context <text>] [--consequences <text>] [--issue <id> ...] [--req <id> ...] [--json]")
+	fmt.Println("  az decision update --id <id> [--title ...] [--rationale ...] [--context ...] [--consequences ...] [--json]")
 	fmt.Println("  az decision delete --id <id> --confirm [--json]")
 	fmt.Println("  az decision revisit --id <old-id> (--new <existing-id> | --title <text> --rationale <text>) [--context ...] [--note ...] [--json]")
+	fmt.Println("  az decision sync [--check] [--json]")
 	fmt.Println("  az decision link list|add|remove ...")
 	fmt.Println("")
 	fmt.Println("Examples:")

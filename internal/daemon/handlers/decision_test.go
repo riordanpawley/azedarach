@@ -17,6 +17,7 @@ type fakeDecisionService struct {
 	listLinksFn  func(context.Context, protocol.DecisionLinkListRequestBody) (protocol.DecisionLinkListResponseBody, error)
 	addLinkFn    func(context.Context, protocol.DecisionLinkAddRequestBody) (protocol.DecisionLinkAddResponseBody, error)
 	removeLinkFn func(context.Context, protocol.DecisionLinkRemoveRequestBody) (protocol.DecisionLinkRemoveResponseBody, error)
+	syncMDFn     func(context.Context, protocol.DecisionSyncMDRequestBody) (protocol.DecisionSyncMDResponseBody, error)
 }
 
 func (f *fakeDecisionService) ListDecisions(ctx context.Context, req protocol.DecisionListRequestBody) (protocol.DecisionListResponseBody, error) {
@@ -66,6 +67,12 @@ func (f *fakeDecisionService) RemoveDecisionLink(ctx context.Context, req protoc
 		return f.removeLinkFn(ctx, req)
 	}
 	return protocol.DecisionLinkRemoveResponseBody{}, nil
+}
+func (f *fakeDecisionService) SyncMD(ctx context.Context, req protocol.DecisionSyncMDRequestBody) (protocol.DecisionSyncMDResponseBody, error) {
+	if f.syncMDFn != nil {
+		return f.syncMDFn(ctx, req)
+	}
+	return protocol.DecisionSyncMDResponseBody{Check: req.Check}, nil
 }
 
 func TestDecisionHandler_RecordValidation(t *testing.T) {

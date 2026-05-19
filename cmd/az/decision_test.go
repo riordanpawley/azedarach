@@ -159,6 +159,30 @@ func TestResolveDecisionLinkTarget(t *testing.T) {
 	}
 }
 
+func TestParseDecisionSyncArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		ok   bool
+	}{
+		{name: "no flags", args: nil, ok: true},
+		{name: "with --check", args: []string{"--check"}, ok: true},
+		{name: "with --json --check", args: []string{"--json", "--check"}, ok: true},
+		{name: "positional rejected", args: []string{"--check", "extra"}, ok: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseDecisionSyncArgs(tc.args)
+			if tc.ok && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatalf("expected error")
+			}
+		})
+	}
+}
+
 func TestPrintDecisionUsageRunsCleanly(t *testing.T) {
 	defer func() {
 		if r := recover(); r != nil {

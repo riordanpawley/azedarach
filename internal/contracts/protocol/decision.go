@@ -15,6 +15,7 @@ const (
 	CommandDecisionLinkList   = "decision.link.list"
 	CommandDecisionLinkAdd    = "decision.link.add"
 	CommandDecisionLinkRemove = "decision.link.remove"
+	CommandDecisionSyncMD     = "decision.sync_md"
 )
 
 // DecisionTargetKind enumerates the things a decision link can point at.
@@ -55,12 +56,13 @@ func (r DecisionRelation) Valid() bool {
 
 // Decision is the recorded fact of a choice plus its rationale.
 type Decision struct {
-	ID        string    `json:"id" msgpack:"id"`
-	Title     string    `json:"title" msgpack:"title"`
-	Rationale string    `json:"rationale" msgpack:"rationale"`
-	Context   string    `json:"context,omitempty" msgpack:"context,omitempty"`
-	CreatedAt time.Time `json:"created_at" msgpack:"created_at"`
-	UpdatedAt time.Time `json:"updated_at" msgpack:"updated_at"`
+	ID           string    `json:"id" msgpack:"id"`
+	Title        string    `json:"title" msgpack:"title"`
+	Rationale    string    `json:"rationale" msgpack:"rationale"`
+	Context      string    `json:"context,omitempty" msgpack:"context,omitempty"`
+	Consequences string    `json:"consequences,omitempty" msgpack:"consequences,omitempty"`
+	CreatedAt    time.Time `json:"created_at" msgpack:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at" msgpack:"updated_at"`
 }
 
 // DecisionLink connects a decision to an issue, requirement, or another decision.
@@ -99,9 +101,10 @@ type DecisionGetResponseBody struct {
 // store (dec-N) so the caller doesn't have to pick a slug; title and rationale
 // are required.
 type DecisionRecordRequestBody struct {
-	Title     string `json:"title" msgpack:"title"`
-	Rationale string `json:"rationale" msgpack:"rationale"`
-	Context   string `json:"context,omitempty" msgpack:"context,omitempty"`
+	Title        string `json:"title" msgpack:"title"`
+	Rationale    string `json:"rationale" msgpack:"rationale"`
+	Context      string `json:"context,omitempty" msgpack:"context,omitempty"`
+	Consequences string `json:"consequences,omitempty" msgpack:"consequences,omitempty"`
 }
 
 type DecisionRecordResponseBody struct {
@@ -109,10 +112,11 @@ type DecisionRecordResponseBody struct {
 }
 
 type DecisionUpdateRequestBody struct {
-	ID        string  `json:"id" msgpack:"id"`
-	Title     *string `json:"title,omitempty" msgpack:"title,omitempty"`
-	Rationale *string `json:"rationale,omitempty" msgpack:"rationale,omitempty"`
-	Context   *string `json:"context,omitempty" msgpack:"context,omitempty"`
+	ID           string  `json:"id" msgpack:"id"`
+	Title        *string `json:"title,omitempty" msgpack:"title,omitempty"`
+	Rationale    *string `json:"rationale,omitempty" msgpack:"rationale,omitempty"`
+	Context      *string `json:"context,omitempty" msgpack:"context,omitempty"`
+	Consequences *string `json:"consequences,omitempty" msgpack:"consequences,omitempty"`
 }
 
 type DecisionUpdateResponseBody struct {
@@ -164,4 +168,19 @@ type DecisionLinkRemoveResponseBody struct {
 	TargetKind DecisionTargetKind `json:"target_kind" msgpack:"target_kind"`
 	TargetID   string             `json:"target_id" msgpack:"target_id"`
 	Removed    bool               `json:"removed" msgpack:"removed"`
+}
+
+// DecisionSyncMDRequestBody asks the daemon to write decision records to
+// markdown files under docs/decisions/. When Check is true the daemon
+// computes what would change without writing anything.
+type DecisionSyncMDRequestBody struct {
+	Check bool `json:"check,omitempty" msgpack:"check,omitempty"`
+}
+
+// DecisionSyncMDResponseBody reports the outcome of the sync. Files is the
+// list of paths that were written (or would be written, in --check mode).
+type DecisionSyncMDResponseBody struct {
+	Check   bool     `json:"check" msgpack:"check"`
+	Changed bool     `json:"changed" msgpack:"changed"`
+	Files   []string `json:"files,omitempty" msgpack:"files,omitempty"`
 }

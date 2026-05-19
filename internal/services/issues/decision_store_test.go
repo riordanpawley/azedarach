@@ -183,6 +183,30 @@ func TestDecisionStore_AuditLogIsolatedFromSpecAudit(t *testing.T) {
 	assert.ElementsMatch(t, []string{"decision", "decision_link"}, decisionEntities)
 }
 
+func TestDecisionStore_ConsequencesRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	created, err := client.RecordDecision(ctx, RecordDecisionParams{
+		Title:        "Move sessions to remote daemon",
+		Rationale:    "Latency budget exceeded.",
+		Consequences: "Local-only mode breaks until offline support is added.",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Local-only mode breaks until offline support is added.", created.Consequences)
+
+	got, err := client.GetDecision(ctx, created.LocalID)
+	require.NoError(t, err)
+	assert.Equal(t, created.Consequences, got.Consequences)
+
+	// Update only the consequences field.
+	newCons := "Local-only mode WORKS again now."
+	updated, err := client.UpdateDecision(ctx, created.LocalID, UpdateDecisionParams{Consequences: &newCons})
+	require.NoError(t, err)
+	assert.Equal(t, newCons, updated.Consequences)
+	assert.Equal(t, "Move sessions to remote daemon", updated.Title)
+}
+
 func TestDecisionStore_ValidationErrors(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)

@@ -20,6 +20,7 @@ type DecisionService interface {
 	ListDecisionLinks(context.Context, protocol.DecisionLinkListRequestBody) (protocol.DecisionLinkListResponseBody, error)
 	AddDecisionLink(context.Context, protocol.DecisionLinkAddRequestBody) (protocol.DecisionLinkAddResponseBody, error)
 	RemoveDecisionLink(context.Context, protocol.DecisionLinkRemoveRequestBody) (protocol.DecisionLinkRemoveResponseBody, error)
+	SyncMD(context.Context, protocol.DecisionSyncMDRequestBody) (protocol.DecisionSyncMDResponseBody, error)
 }
 
 type DecisionHandler struct {
@@ -75,6 +76,7 @@ func (h *DecisionHandler) Handle(ctx context.Context, req protocol.RequestEnvelo
 		cmd.Title = strings.TrimSpace(cmd.Title)
 		cmd.Rationale = strings.TrimSpace(cmd.Rationale)
 		cmd.Context = strings.TrimSpace(cmd.Context)
+		cmd.Consequences = strings.TrimSpace(cmd.Consequences)
 		if cmd.Title == "" || cmd.Rationale == "" {
 			return specInvalidRequest(resp, "missing required fields: title/rationale")
 		}
@@ -92,7 +94,8 @@ func (h *DecisionHandler) Handle(ctx context.Context, req protocol.RequestEnvelo
 		cmd.Title = trimOptionalString(cmd.Title)
 		cmd.Rationale = trimOptionalString(cmd.Rationale)
 		cmd.Context = trimOptionalString(cmd.Context)
-		if cmd.Title == nil && cmd.Rationale == nil && cmd.Context == nil {
+		cmd.Consequences = trimOptionalString(cmd.Consequences)
+		if cmd.Title == nil && cmd.Rationale == nil && cmd.Context == nil && cmd.Consequences == nil {
 			return specInvalidRequest(resp, "no update fields provided")
 		}
 		if cmd.Title != nil && *cmd.Title == "" {
@@ -150,6 +153,13 @@ func (h *DecisionHandler) Handle(ctx context.Context, req protocol.RequestEnvelo
 			return specInvalidRequest(resp, "invalid relation: expected applies-to|revises|informs")
 		}
 		return specJSONResponse(ctx, resp, h.service.AddDecisionLink, cmd)
+
+	case protocol.CommandDecisionSyncMD:
+		var cmd protocol.DecisionSyncMDRequestBody
+		if !decodeSpecRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		return specJSONResponse(ctx, resp, h.service.SyncMD, cmd)
 
 	case protocol.CommandDecisionLinkRemove:
 		var cmd protocol.DecisionLinkRemoveRequestBody

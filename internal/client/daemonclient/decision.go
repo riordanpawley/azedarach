@@ -34,12 +34,13 @@ const (
 
 // Decision is the daemonclient-side projection of a decision record.
 type Decision struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Rationale string    `json:"rationale,omitempty"`
-	Context   string    `json:"context,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID           string    `json:"id"`
+	Title        string    `json:"title"`
+	Rationale    string    `json:"rationale,omitempty"`
+	Context      string    `json:"context,omitempty"`
+	Consequences string    `json:"consequences,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // DecisionLink is the daemonclient-side projection of a decision_links row.

@@ -62,13 +62,14 @@ func ValidDecisionRelation(r DecisionRelation) bool {
 // Status is intentionally absent — whether a decision was revisited is
 // inferred from the presence of an incoming revises link, not from a column.
 type Decision struct {
-	LocalID   string     `json:"id"`
-	Title     string     `json:"title"`
-	Rationale string     `json:"rationale"`
-	Context   string     `json:"context,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
-	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+	LocalID      string     `json:"id"`
+	Title        string     `json:"title"`
+	Rationale    string     `json:"rationale"`
+	Context      string     `json:"context,omitempty"`
+	Consequences string     `json:"consequences,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	DeletedAt    *time.Time `json:"deleted_at,omitempty"`
 }
 
 // DecisionLink connects a decision to an issue, a requirement, or another
@@ -87,15 +88,17 @@ type DecisionLink struct {
 }
 
 type RecordDecisionParams struct {
-	Title     string
-	Rationale string
-	Context   string
+	Title        string
+	Rationale    string
+	Context      string
+	Consequences string
 }
 
 type UpdateDecisionParams struct {
-	Title     *string
-	Rationale *string
-	Context   *string
+	Title        *string
+	Rationale    *string
+	Context      *string
+	Consequences *string
 }
 
 type DecisionFilter struct {
@@ -158,13 +161,14 @@ func (c *Client) RecordDecision(ctx context.Context, params RecordDecisionParams
 	now := time.Now().UTC()
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO decisions (
-			local_id, title, rationale, context, created_at, updated_at, deleted_at
-		) VALUES (?, ?, ?, ?, ?, ?, NULL)
+			local_id, title, rationale, context, consequences, created_at, updated_at, deleted_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
 	`,
 		"", // placeholder; filled in via UPDATE below using the assigned rowid
 		normalized.Title,
 		nullableString(normalized.Rationale),
 		nullableString(normalized.Context),
+		nullableString(normalized.Consequences),
 		formatTimestamp(now),
 		formatTimestamp(now),
 	)
@@ -181,12 +185,13 @@ func (c *Client) RecordDecision(ctx context.Context, params RecordDecisionParams
 	}
 
 	decision := Decision{
-		LocalID:   localID,
-		Title:     normalized.Title,
-		Rationale: normalized.Rationale,
-		Context:   normalized.Context,
-		CreatedAt: now,
-		UpdatedAt: now,
+		LocalID:      localID,
+		Title:        normalized.Title,
+		Rationale:    normalized.Rationale,
+		Context:      normalized.Context,
+		Consequences: normalized.Consequences,
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 	if err := c.insertDecisionAuditRow(ctx, tx, decisionEntityKind, localID, decisionOpCreate, nil, decision); err != nil {
 		return Decision{}, c.wrapError("record-decision", localID, err)
@@ -222,6 +227,7 @@ func (c *Client) ListDecisions(ctx context.Context, filter DecisionFilter) ([]De
 			d.id, d.local_id, d.title,
 			COALESCE(d.rationale, ''),
 			COALESCE(d.context, ''),
+			COALESCE(d.consequences, ''),
 			d.created_at, d.updated_at, d.deleted_at
 		FROM decisions d
 	`)
@@ -252,8 +258,8 @@ func (c *Client) ListDecisions(ctx context.Context, filter DecisionFilter) ([]De
 	}
 	if trimmed := strings.TrimSpace(filter.Query); trimmed != "" {
 		like := "%" + trimmed + "%"
-		query.WriteString(` AND (d.local_id LIKE ? OR d.title LIKE ? OR COALESCE(d.rationale, '') LIKE ? OR COALESCE(d.context, '') LIKE ?)`)
-		args = append(args, like, like, like, like)
+		query.WriteString(` AND (d.local_id LIKE ? OR d.title LIKE ? OR COALESCE(d.rationale, '') LIKE ? OR COALESCE(d.context, '') LIKE ? OR COALESCE(d.consequences, '') LIKE ?)`)
+		args = append(args, like, like, like, like, like)
 	}
 	query.WriteString(` ORDER BY d.updated_at DESC, d.local_id ASC`)
 
@@ -317,12 +323,13 @@ func (c *Client) UpdateDecision(ctx context.Context, selector string, params Upd
 	after.UpdatedAt = time.Now().UTC()
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE decisions
-		SET title = ?, rationale = ?, context = ?, updated_at = ?
+		SET title = ?, rationale = ?, context = ?, consequences = ?, updated_at = ?
 		WHERE id = ?
 	`,
 		after.Title,
 		nullableString(after.Rationale),
 		nullableString(after.Context),
+		nullableString(after.Consequences),
 		formatTimestamp(after.UpdatedAt),
 		before.rowID,
 	); err != nil {
@@ -614,6 +621,7 @@ func (c *Client) lookupDecisionByLocalID(ctx context.Context, queryer sqlRequire
 			id, local_id, title,
 			COALESCE(rationale, ''),
 			COALESCE(context, ''),
+			COALESCE(consequences, ''),
 			created_at, updated_at, deleted_at
 		FROM decisions
 		WHERE local_id = ?
@@ -702,6 +710,7 @@ func scanDecisionRecord(scanner interface {
 		&record.Decision.Title,
 		&record.Decision.Rationale,
 		&record.Decision.Context,
+		&record.Decision.Consequences,
 		&createdRaw,
 		&updatedRaw,
 		&deletedRaw,
@@ -813,6 +822,7 @@ func normalizeRecordDecisionParams(params RecordDecisionParams) (RecordDecisionP
 	params.Title = strings.TrimSpace(params.Title)
 	params.Rationale = strings.TrimSpace(params.Rationale)
 	params.Context = strings.TrimSpace(params.Context)
+	params.Consequences = strings.TrimSpace(params.Consequences)
 	if params.Title == "" {
 		return params, errors.New("decision title is required")
 	}
@@ -840,6 +850,9 @@ func applyDecisionUpdate(current Decision, params UpdateDecisionParams) (Decisio
 	}
 	if params.Context != nil {
 		after.Context = strings.TrimSpace(*params.Context)
+	}
+	if params.Consequences != nil {
+		after.Consequences = strings.TrimSpace(*params.Consequences)
 	}
 	return after, nil
 }

@@ -77,9 +77,10 @@ func (s issueDecisionService) RecordDecision(ctx context.Context, req protocol.D
 		return protocol.DecisionRecordResponseBody{}, err
 	}
 	decision, err := c.RecordDecision(ctx, issues.RecordDecisionParams{
-		Title:     req.Title,
-		Rationale: req.Rationale,
-		Context:   req.Context,
+		Title:        req.Title,
+		Rationale:    req.Rationale,
+		Context:      req.Context,
+		Consequences: req.Consequences,
 	})
 	if err != nil {
 		return protocol.DecisionRecordResponseBody{}, err
@@ -93,9 +94,10 @@ func (s issueDecisionService) UpdateDecision(ctx context.Context, req protocol.D
 		return protocol.DecisionUpdateResponseBody{}, err
 	}
 	params := issues.UpdateDecisionParams{
-		Title:     req.Title,
-		Rationale: req.Rationale,
-		Context:   req.Context,
+		Title:        req.Title,
+		Rationale:    req.Rationale,
+		Context:      req.Context,
+		Consequences: req.Consequences,
 	}
 	decision, err := c.UpdateDecision(ctx, req.ID, params)
 	if err != nil {
@@ -198,12 +200,13 @@ func (s issueDecisionService) RemoveDecisionLink(ctx context.Context, req protoc
 
 func mapDecisionToProtocol(d issues.Decision) protocol.Decision {
 	return protocol.Decision{
-		ID:        d.LocalID,
-		Title:     d.Title,
-		Rationale: d.Rationale,
-		Context:   d.Context,
-		CreatedAt: d.CreatedAt,
-		UpdatedAt: d.UpdatedAt,
+		ID:           d.LocalID,
+		Title:        d.Title,
+		Rationale:    d.Rationale,
+		Context:      d.Context,
+		Consequences: d.Consequences,
+		CreatedAt:    d.CreatedAt,
+		UpdatedAt:    d.UpdatedAt,
 	}
 }
 

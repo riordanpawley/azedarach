@@ -31,6 +31,7 @@ var orderedMigrations = []migration{
 	{id: "0008_decision_tables", path: "migrations/0008_decision_tables.sql"},
 	{id: "0009_decision_audit_log", path: "migrations/0009_decision_audit_log.sql"},
 	{id: "0010_decisions_refresh", path: "migrations/0010_decisions_refresh.sql"},
+	{id: "0011_decisions_consequences", path: "migrations/0011_decisions_consequences.sql"},
 }
 
 func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
@@ -606,6 +607,7 @@ func (c *Client) ensureDecisionSchema(db *sql.DB) error {
 			title TEXT NOT NULL,
 			rationale TEXT,
 			context TEXT,
+			consequences TEXT,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
 			deleted_at TEXT
@@ -619,6 +621,7 @@ func (c *Client) ensureDecisionSchema(db *sql.DB) error {
 		{name: "title", ddl: "TEXT NOT NULL DEFAULT ''"},
 		{name: "rationale", ddl: "TEXT"},
 		{name: "context", ddl: "TEXT"},
+		{name: "consequences", ddl: "TEXT"},
 		{name: "created_at", ddl: "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'"},
 		{name: "updated_at", ddl: "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'"},
 		{name: "deleted_at", ddl: "TEXT"},
