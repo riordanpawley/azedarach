@@ -4126,6 +4126,15 @@ func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
 						{ID: naming.IssueID(issueID), Title: "Task fresh", Status: domain.StatusDone, Type: domain.TypeTask},
 					}),
 				}, nil
+			case daemonclient.CommandDecisionLinkList:
+				body, _ := json.Marshal(daemonclient.DecisionLinkListResult{})
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            body,
+				}, nil
 			default:
 				t.Fatalf("unexpected command: %s", req.Command)
 			}
@@ -4180,7 +4189,7 @@ func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
 	if len(doneTasks) != 1 || doneTasks[0].ID.String() != issueID {
 		t.Fatalf("done column after workspace refresh = %+v, want %s", doneTasks, issueID)
 	}
-	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskList {
+	if got := transport.requests; len(got) != 3 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskList || got[2] != daemonclient.CommandDecisionLinkList {
 		t.Fatalf("requests = %v", got)
 	}
 }
@@ -4219,6 +4228,15 @@ func TestTaskWorkspaceRKeyRefreshesCurrentIssue(t *testing.T) {
 					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
 						{ID: naming.IssueID(issueID), Title: "Task fresh from r", Status: domain.StatusBlocked, Type: domain.TypeTask},
 					}),
+				}, nil
+			case daemonclient.CommandDecisionLinkList:
+				body, _ := json.Marshal(daemonclient.DecisionLinkListResult{})
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            body,
 				}, nil
 			default:
 				t.Fatalf("unexpected command: %s", req.Command)
@@ -4268,7 +4286,7 @@ func TestTaskWorkspaceRKeyRefreshesCurrentIssue(t *testing.T) {
 	if len(refreshed.tasks) != 1 || refreshed.tasks[0].Title != "Task fresh from r" || refreshed.tasks[0].Status != domain.StatusBlocked {
 		t.Fatalf("board task after r refresh = %+v", refreshed.tasks)
 	}
-	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskList {
+	if got := transport.requests; len(got) != 3 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskList || got[2] != daemonclient.CommandDecisionLinkList {
 		t.Fatalf("requests = %v", got)
 	}
 }

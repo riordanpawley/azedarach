@@ -2703,6 +2703,8 @@ type refreshTaskWorkspaceResultMsg struct {
 	freshness     protocol.TaskListFreshness
 	reconcileErr  error
 	snapshotErr   error
+	decisionLinks []overlay.DecisionLinkSummary
+	decisionErr   error
 }
 
 func (m Model) refreshTaskWorkspaceInBackgroundCmd(taskID string) tea.Cmd {
@@ -2734,6 +2736,25 @@ func (m Model) refreshTaskWorkspaceInBackgroundCmd(taskID string) tea.Cmd {
 		msg.revision = snapshot.Revision
 		msg.lastCheckedAt = snapshot.LastCheckedAt
 		msg.freshness = snapshot.Freshness
+
+		// Fetch decision links for this issue. Failure here is non-fatal — the rest of the
+		// refresh continues without a Decisions section. The decision feature is new and
+		// the daemon may not yet expose it on older builds.
+		if issueID != "" && taskIDKey(issueID) != "main" {
+			decisionCtx, decisionCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			result, decisionErr := m.daemonClient.ListDecisionLinks(decisionCtx, daemonclient.DecisionLinkListRequest{
+				TargetKind:       daemonclient.DecisionTargetIssue,
+				TargetID:         issueID,
+				IncludeDecisions: true,
+			})
+			decisionCancel()
+			if decisionErr != nil {
+				msg.decisionErr = decisionErr
+			} else {
+				msg.decisionLinks = decisionLinkSummariesFrom(result)
+			}
+		}
+
 		for _, candidate := range snapshot.Tasks {
 			if candidate.ID.String() == msg.taskID {
 				msg.hasTask = true
@@ -2744,6 +2765,32 @@ func (m Model) refreshTaskWorkspaceInBackgroundCmd(taskID string) tea.Cmd {
 		msg.snapshotErr = fmt.Errorf("task %s not found in refreshed snapshot", msg.taskID)
 		return msg
 	}
+}
+
+// decisionLinkSummariesFrom maps a daemonclient response into the overlay-local
+// DecisionLinkSummary type. Decisions are joined by slug so the rendered row can
+// show the title and status alongside the link relation.
+func decisionLinkSummariesFrom(result daemonclient.DecisionLinkListResult) []overlay.DecisionLinkSummary {
+	if len(result.Links) == 0 {
+		return nil
+	}
+	decisionsByID := make(map[string]daemonclient.Decision, len(result.Decisions))
+	for _, d := range result.Decisions {
+		decisionsByID[d.ID] = d
+	}
+	out := make([]overlay.DecisionLinkSummary, 0, len(result.Links))
+	for _, link := range result.Links {
+		summary := overlay.DecisionLinkSummary{
+			DecisionID: link.DecisionID,
+			Relation:   string(link.Relation),
+			Note:       link.Note,
+		}
+		if d, ok := decisionsByID[link.DecisionID]; ok {
+			summary.DecisionTitle = d.Title
+		}
+		out = append(out, summary)
+	}
+	return out
 }
 
 func (m Model) deleteTaskCmd(taskID string) tea.Cmd {

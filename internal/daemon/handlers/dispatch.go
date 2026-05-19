@@ -13,6 +13,7 @@ type Dispatcher struct {
 	git       *GitHandler
 	pr        *PRHandler
 	spec      *SpecHandler
+	decision  *DecisionHandler
 	operation OperationHandler
 	worktree  *WorktreeHandler
 	devserver *DevServerHandler
@@ -38,6 +39,8 @@ func NewDispatcher(session *SessionHandler, handlers ...any) *Dispatcher {
 			d.pr = h
 		case *SpecHandler:
 			d.spec = h
+		case *DecisionHandler:
+			d.decision = h
 		case *WorktreeHandler:
 			d.worktree = h
 		case *DevServerHandler:
@@ -49,6 +52,7 @@ func NewDispatcher(session *SessionHandler, handlers ...any) *Dispatcher {
 		git:       d.git,
 		pr:        d.pr,
 		spec:      d.spec,
+		decision:  d.decision,
 		operation: d.operation,
 		worktree:  d.worktree,
 		devserver: d.devserver,
@@ -83,6 +87,11 @@ func (d *Dispatcher) Handle(ctx context.Context, req protocol.RequestEnvelope) p
 			return unsupportedCommandResponse(req)
 		}
 		return d.spec.Handle(ctx, req)
+	case CommandDispatchDecision:
+		if d.decision == nil {
+			return unsupportedCommandResponse(req)
+		}
+		return d.decision.Handle(ctx, req)
 	case CommandDispatchGit:
 		if d.git == nil {
 			return unsupportedCommandResponse(req)

@@ -384,7 +384,15 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 		return nil
 	}
 
-	for _, command := range configuredCommandsForHook(cfg, hookName) {
+	// Built-in decision sync commands fire before user-configured commands so
+	// that the markdown reflects SQLite by the time other pre-commit checks
+	// (lint, formatter, etc.) inspect the tree. Built-ins are best-effort and
+	// silent unless --verbose: the daemon may not be running on a fresh clone,
+	// and a missing decision feature must not block a commit.
+	allCommands := append([]string{}, builtInDecisionCommandsForHook(hookName)...)
+	allCommands = append(allCommands, configuredCommandsForHook(cfg, hookName)...)
+
+	for _, command := range allCommands {
 		if opts.Verbose {
 			fmt.Printf("githooks %s: %s\n", hookName, command)
 		}
@@ -397,8 +405,18 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 			}
 		}
 	}
-	if cfg.GitHooks.Restage.Enabled {
-		if err := restageHookChanges(projectDir, cfg.GitHooks.Restage.Paths); err != nil {
+
+	// On pre-commit, always restage docs/decisions/ in addition to any
+	// user-configured restage paths, so newly synced markdown lands in the
+	// same commit as the SQLite mutation that produced it.
+	restageEnabled := cfg.GitHooks.Restage.Enabled
+	restagePaths := append([]string{}, cfg.GitHooks.Restage.Paths...)
+	if hookName == "pre-commit" {
+		restageEnabled = true
+		restagePaths = append(restagePaths, "docs/decisions")
+	}
+	if restageEnabled {
+		if err := restageHookChanges(projectDir, restagePaths); err != nil {
 			if !cfg.GitHooks.BestEffort {
 				return fmt.Errorf("githooks %s restage failed: %w", hookName, err)
 			}
@@ -427,6 +445,28 @@ func loadConfigForHook(projectDir string, deps *Dependencies) (*config.Config, e
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 	return cfg, nil
+}
+
+// builtInDecisionCommandsForHook returns the auto-injected decision sync
+// commands for a given hook. These fire regardless of whether the user has
+// populated cfg.GitHooks.Commands, so a freshly installed hook setup
+// automatically keeps SQLite and markdown in sync.
+//
+// pre-commit: write SQLite → docs/decisions/*.md so the markdown that lands
+// in the commit reflects the current store state.
+//
+// post-merge / post-checkout / post-rewrite: read docs/decisions/*.md back
+// into SQLite so a freshly pulled branch sees teammates' decisions without a
+// manual import. The import is clean-changes-only; conflicts are reported
+// but neither side is overwritten (use az decision import --force for that).
+func builtInDecisionCommandsForHook(hookName string) []string {
+	switch hookName {
+	case "pre-commit":
+		return []string{"az decision sync"}
+	case "post-merge", "post-checkout", "post-rewrite":
+		return []string{"az decision import"}
+	}
+	return nil
 }
 
 func configuredCommandsForHook(cfg *config.Config, hookName string) []string {
