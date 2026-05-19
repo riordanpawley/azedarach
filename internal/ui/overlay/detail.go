@@ -18,6 +18,7 @@ import (
 type DetailPanel struct {
 	task           domain.Task
 	relatedTasks   []domain.Task
+	decisionLinks  []DecisionLinkSummary
 	mutation       *TaskMutationProgress
 	scrollY        int
 	graphCursor    int
@@ -29,6 +30,17 @@ type DetailPanel struct {
 	checkedAt      time.Time
 	freshness      protocol.TaskListFreshness
 	styles         *Styles
+}
+
+// DecisionLinkSummary is a read-only projection of a decision link rendered
+// in the issue detail panel. The TUI model assembles these from daemonclient
+// responses so the overlay package can stay decoupled from daemonclient.
+type DecisionLinkSummary struct {
+	DecisionID    string
+	DecisionTitle string
+	Status        string
+	Relation      string
+	Note          string
 }
 
 // TaskMutationProgress represents in-flight mutation metadata for a task.
@@ -117,6 +129,19 @@ func (d *DetailPanel) WithMutationProgress(progress *TaskMutationProgress) *Deta
 func (d *DetailPanel) WithRelatedTasks(tasks []domain.Task) *DetailPanel {
 	d.relatedTasks = append([]domain.Task(nil), tasks...)
 	return d
+}
+
+// WithDecisionLinks attaches the set of decisions linked to this issue.
+// The order of the slice is preserved in the rendered output.
+func (d *DetailPanel) WithDecisionLinks(links []DecisionLinkSummary) *DetailPanel {
+	d.decisionLinks = append([]DecisionLinkSummary(nil), links...)
+	return d
+}
+
+// DecisionLinks returns the decision link summaries currently attached to the
+// panel. Exported for tests and for the workspace overlay's syncing path.
+func (d *DetailPanel) DecisionLinks() []DecisionLinkSummary {
+	return append([]DecisionLinkSummary(nil), d.decisionLinks...)
 }
 
 // WithSnapshotFreshness attaches daemon-authored snapshot freshness metadata.
@@ -292,6 +317,14 @@ func (d *DetailPanel) buildLines() ([]string, int) {
 	d.addTextSectionLines(&lines, headerStyle, valueStyle, "Design", d.task.Design)
 	d.addTextSectionLines(&lines, headerStyle, valueStyle, "Acceptance", d.task.Acceptance)
 	d.addTextSectionLines(&lines, headerStyle, valueStyle, "Notes", d.task.Notes)
+
+	if len(d.decisionLinks) > 0 {
+		addLine("")
+		addLine(headerStyle.Render("Decisions"))
+		for _, link := range d.decisionLinks {
+			addLine(valueStyle.Render(d.formatDecisionLink(link)))
+		}
+	}
 
 	if links := d.graphLinks(); len(links) > 0 {
 		if d.graphCursor >= len(links) {
@@ -686,6 +719,36 @@ func (d *DetailPanel) formatStatus(status domain.Status) string {
 // formatTime formats a timestamp for display
 func (d *DetailPanel) formatTime(t time.Time) string {
 	return t.Format("2006-01-02 15:04:05")
+}
+
+// formatDecisionLink renders a single Decisions section row. Format:
+//
+//	relation  decision-slug [status]  Title (optional)  — note (optional)
+//
+// All fields except DecisionID are optional and skipped when empty.
+func (d *DetailPanel) formatDecisionLink(link DecisionLinkSummary) string {
+	relation := strings.TrimSpace(link.Relation)
+	if relation == "" {
+		relation = "relates"
+	}
+	status := strings.TrimSpace(link.Status)
+	title := strings.TrimSpace(link.DecisionTitle)
+	note := strings.TrimSpace(link.Note)
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("%-13s %s", relation, link.DecisionID))
+	if status != "" {
+		b.WriteString(fmt.Sprintf(" [%s]", status))
+	}
+	if title != "" {
+		b.WriteString("  ")
+		b.WriteString(title)
+	}
+	if note != "" {
+		b.WriteString("  — ")
+		b.WriteString(note)
+	}
+	return b.String()
 }
 
 // formatDuration formats a duration for display

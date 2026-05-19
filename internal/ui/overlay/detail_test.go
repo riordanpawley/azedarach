@@ -720,3 +720,65 @@ func TestDetailPanelFormatDuration(t *testing.T) {
 		})
 	}
 }
+
+func TestDetailPanelRendersDecisionLinks(t *testing.T) {
+	task := domain.Task{
+		ID:        "az-42",
+		Title:     "Implement decisions",
+		Status:    domain.StatusInProgress,
+		Priority:  domain.P1,
+		Type:      domain.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	panel := NewDetailPanel(task).WithDecisionLinks([]DecisionLinkSummary{
+		{
+			DecisionID:    "use-sqlite-store",
+			DecisionTitle: "Use SQLite for decision store",
+			Status:        "accepted",
+			Relation:      "implements",
+		},
+		{
+			DecisionID: "polymorphic-link-table",
+			Relation:   "relates",
+			Note:       "discussed at sync",
+		},
+	})
+
+	view := panel.View()
+
+	assert.Contains(t, view, "Decisions")
+	assert.Contains(t, view, "implements")
+	assert.Contains(t, view, "use-sqlite-store")
+	assert.Contains(t, view, "[accepted]")
+	assert.Contains(t, view, "Use SQLite for decision store")
+	assert.Contains(t, view, "relates")
+	assert.Contains(t, view, "polymorphic-link-table")
+	assert.Contains(t, view, "discussed at sync")
+}
+
+func TestDetailPanelOmitsDecisionsSectionWhenEmpty(t *testing.T) {
+	task := domain.Task{
+		ID:        "az-43",
+		Title:     "No decisions linked",
+		Status:    domain.StatusOpen,
+		Priority:  domain.P2,
+		Type:      domain.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	view := NewDetailPanel(task).View()
+	assert.NotContains(t, view, "Decisions")
+}
+
+func TestDecisionLinksAccessorReturnsCopy(t *testing.T) {
+	panel := NewDetailPanel(domain.Task{ID: "x"}).WithDecisionLinks([]DecisionLinkSummary{
+		{DecisionID: "d-1", Relation: "relates"},
+	})
+	copy := panel.DecisionLinks()
+	require.Len(t, copy, 1)
+	copy[0].Relation = "mutated"
+	again := panel.DecisionLinks()
+	assert.Equal(t, "relates", again[0].Relation, "DecisionLinks() must return a defensive copy")
+}

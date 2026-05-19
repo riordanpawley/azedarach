@@ -147,7 +147,28 @@ func (s issueDecisionService) ListDecisionLinks(ctx context.Context, req protoco
 	for _, link := range links {
 		out = append(out, mapDecisionLinkToProtocol(link))
 	}
-	return protocol.DecisionLinkListResponseBody{Links: out}, nil
+	resp := protocol.DecisionLinkListResponseBody{Links: out}
+	if req.IncludeDecisions && len(links) > 0 {
+		seen := make(map[string]struct{}, len(links))
+		ids := make([]string, 0, len(links))
+		for _, link := range links {
+			if _, ok := seen[link.DecisionID]; ok {
+				continue
+			}
+			seen[link.DecisionID] = struct{}{}
+			ids = append(ids, link.DecisionID)
+		}
+		decisions, err := c.ListDecisions(ctx, issues.DecisionFilter{LocalIDs: ids})
+		if err != nil {
+			return protocol.DecisionLinkListResponseBody{}, err
+		}
+		mapped := make([]protocol.Decision, 0, len(decisions))
+		for _, d := range decisions {
+			mapped = append(mapped, mapDecisionToProtocol(d))
+		}
+		resp.Decisions = mapped
+	}
+	return resp, nil
 }
 
 func (s issueDecisionService) AddDecisionLink(ctx context.Context, req protocol.DecisionLinkAddRequestBody) (protocol.DecisionLinkAddResponseBody, error) {

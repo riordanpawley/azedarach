@@ -225,6 +225,43 @@ func TestDecisionStore_AuditLogIsolatedFromSpecAudit(t *testing.T) {
 		"decision_audit_log should carry decision and decision_link rows")
 }
 
+func TestDecisionStore_ListLinksByTarget(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	seedIssue(t, client, "cgn", "issue")
+
+	for _, id := range []string{"alpha", "beta"} {
+		_, err := client.CreateDecision(ctx, CreateDecisionParams{
+			LocalID: id,
+			Title:   "Decision " + id,
+			Status:  DecisionStatusAccepted,
+		})
+		require.NoError(t, err)
+		_, err = client.AddDecisionLink(ctx, AddDecisionLinkParams{
+			DecisionID: id,
+			TargetKind: DecisionTargetIssue,
+			TargetID:   "cgn",
+			Relation:   DecisionRelationImplements,
+		})
+		require.NoError(t, err)
+	}
+
+	links, err := client.ListDecisionLinks(ctx, DecisionLinkFilter{
+		TargetKind: DecisionTargetIssue,
+		TargetID:   "cgn",
+	})
+	require.NoError(t, err)
+	require.Len(t, links, 2)
+	gotIDs := []string{links[0].DecisionID, links[1].DecisionID}
+	assert.ElementsMatch(t, []string{"alpha", "beta"}, gotIDs)
+
+	// The decisions referenced by these links should be fetchable via LocalIDs filter,
+	// which is what the daemon adapter uses to enrich the response.
+	decisions, err := client.ListDecisions(ctx, DecisionFilter{LocalIDs: gotIDs})
+	require.NoError(t, err)
+	require.Len(t, decisions, 2)
+}
+
 func TestDecisionStore_FilterByQuery(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)

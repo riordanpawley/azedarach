@@ -154,13 +154,15 @@ type DecisionDeleteResponseBody struct {
 }
 
 type DecisionLinkListRequestBody struct {
-	DecisionID string             `json:"decision_id,omitempty" msgpack:"decision_id,omitempty"`
-	TargetKind DecisionTargetKind `json:"target_kind,omitempty" msgpack:"target_kind,omitempty"`
-	TargetID   string             `json:"target_id,omitempty" msgpack:"target_id,omitempty"`
+	DecisionID       string             `json:"decision_id,omitempty" msgpack:"decision_id,omitempty"`
+	TargetKind       DecisionTargetKind `json:"target_kind,omitempty" msgpack:"target_kind,omitempty"`
+	TargetID         string             `json:"target_id,omitempty" msgpack:"target_id,omitempty"`
+	IncludeDecisions bool               `json:"include_decisions,omitempty" msgpack:"include_decisions,omitempty"`
 }
 
 type DecisionLinkListResponseBody struct {
-	Links []DecisionLink `json:"links" msgpack:"links"`
+	Links     []DecisionLink `json:"links" msgpack:"links"`
+	Decisions []Decision     `json:"decisions,omitempty" msgpack:"decisions,omitempty"`
 }
 
 type DecisionLinkAddRequestBody struct {
