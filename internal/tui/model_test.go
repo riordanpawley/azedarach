@@ -2659,6 +2659,24 @@ func TestModeTransitions(t *testing.T) {
 	})
 }
 
+func TestUIViewModePersistenceMapping(t *testing.T) {
+	if got, ok := persistedValueForViewMode(ViewModeBoard); !ok || got != "board" {
+		t.Fatalf("persistedValueForViewMode(board) = %q,%v", got, ok)
+	}
+	if got, ok := persistedValueForViewMode(ViewModeCompact); !ok || got != "compact" {
+		t.Fatalf("persistedValueForViewMode(compact) = %q,%v", got, ok)
+	}
+	if mode, ok := viewModeFromPersistedValue("compact"); !ok || mode != ViewModeCompact {
+		t.Fatalf("viewModeFromPersistedValue(compact) = %v,%v", mode, ok)
+	}
+	if mode, ok := viewModeFromPersistedValue("board"); !ok || mode != ViewModeBoard {
+		t.Fatalf("viewModeFromPersistedValue(board) = %v,%v", mode, ok)
+	}
+	if _, ok := viewModeFromPersistedValue("bogus"); ok {
+		t.Fatal("viewModeFromPersistedValue(bogus) should be invalid")
+	}
+}
+
 func TestActionModeUnavailablePRKeyFailsFastWithGuidance(t *testing.T) {
 	keys := []string{"P"}
 

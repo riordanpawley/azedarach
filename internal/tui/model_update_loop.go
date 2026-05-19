@@ -27,6 +27,7 @@ func (m Model) Init() tea.Cmd {
 		m.attachDaemonCmd(),
 		m.attachLogStreamCmd(),
 		m.gitSyncService.FetchAndCheck(),
+		m.loadUIViewModeCmd(),
 	)
 }
 
@@ -289,6 +290,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastLogStreamReattachAt = time.Time{}
 		m.logStreamReconnectQueued = false
 		return m, m.waitForLogStreamEventCmd()
+
+	case uiViewModeLoadedMsg:
+		if msg.err != nil {
+			if m.logger != nil {
+				m.logger.Debug("ui view-mode restore failed", "error", msg.err)
+			}
+			return m, nil
+		}
+		if msg.found {
+			m.viewMode = msg.viewMode
+		}
+		return m, nil
+
+	case uiViewModeSavedMsg:
+		if msg.err != nil && m.logger != nil {
+			m.logger.Debug("ui view-mode persist failed", "error", msg.err)
+		}
+		return m, nil
 
 	case issuesErrorMsg:
 		if msg.refreshSeq != 0 && msg.refreshSeq < m.issueRefreshSeq {

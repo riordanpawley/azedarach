@@ -512,6 +512,10 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleHookLogList(ctx, req)
 	case protocol.CommandUIOpenTaskWorkspace:
 		return d.handleUIOpenTaskWorkspace(ctx, req)
+	case protocol.CommandUIStateGet:
+		return d.handleUIStateGet(ctx, req)
+	case protocol.CommandUIStateSet:
+		return d.handleUIStateSet(ctx, req)
 	case "task.list":
 		return d.handleTaskList(ctx, req)
 	case "task.get":

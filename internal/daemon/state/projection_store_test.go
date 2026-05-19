@@ -360,3 +360,30 @@ func TestRuntimeStateStoreListProjectIDs(t *testing.T) {
 		t.Fatalf("ListProjectIDs() = %v, want %v", got, want)
 	}
 }
+
+func TestRuntimeStateStoreUIStateRoundTrip(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+	ctx := context.Background()
+	now := time.Date(2026, time.May, 19, 3, 0, 0, 0, time.UTC)
+	if err := store.UpsertUIState(ctx, UIState{
+		ProjectID: "proj-ui",
+		Key:       "tui.last_active_tab",
+		Value:     "compact",
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("UpsertUIState: %v", err)
+	}
+	got, found, err := store.GetUIState(ctx, "proj-ui", "tui.last_active_tab")
+	if err != nil {
+		t.Fatalf("GetUIState: %v", err)
+	}
+	if !found {
+		t.Fatal("expected ui state row")
+	}
+	if got.Value != "compact" || got.Key != "tui.last_active_tab" {
+		t.Fatalf("ui state = %+v", got)
+	}
+}

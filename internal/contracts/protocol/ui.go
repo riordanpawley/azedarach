@@ -8,10 +8,16 @@ import (
 
 const (
 	CommandUIOpenTaskWorkspace = "ui.open_task_workspace"
+	CommandUIStateGet          = "ui.state.get"
+	CommandUIStateSet          = "ui.state.set"
 
 	EventUICommandRequested = "ui.command.requested"
 
 	UICommandOpenTaskWorkspace = "ui.open_task_workspace"
+)
+
+const (
+	UIStateKeyLastActiveTab = "tui.last_active_tab"
 )
 
 type UICommandRequestBody struct {
@@ -31,3 +37,22 @@ type UICommandResponseBody struct {
 }
 
 type UICommandEventBody = UICommandResponseBody
+
+type UIStateGetRequestBody struct {
+	ProjectID naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	Key       string           `json:"key" msgpack:"key"`
+}
+
+type UIStateSetRequestBody struct {
+	ProjectID naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	Key       string           `json:"key" msgpack:"key"`
+	Value     string           `json:"value" msgpack:"value"`
+}
+
+type UIStateResponseBody struct {
+	ProjectID naming.ProjectID `json:"project_id" msgpack:"project_id"`
+	Key       string           `json:"key" msgpack:"key"`
+	Value     string           `json:"value,omitempty" msgpack:"value,omitempty"`
+	Found     bool             `json:"found" msgpack:"found"`
+	UpdatedAt time.Time        `json:"updated_at,omitempty" msgpack:"updated_at,omitempty"`
+}

@@ -81,3 +81,70 @@ func TestOpenTaskWorkspaceRoutesThroughDaemon(t *testing.T) {
 		t.Fatalf("created_at = %s, want %s", resp.CreatedAt, createdAt)
 	}
 }
+
+func TestUIStateGetSetRoutesThroughDaemon(t *testing.T) {
+	transport := &uiRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case protocol.CommandUIStateSet:
+				var body protocol.UIStateSetRequestBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal set request body: %v", err)
+				}
+				if body.Key != protocol.UIStateKeyLastActiveTab || body.Value != "compact" {
+					t.Fatalf("set body = %+v", body)
+				}
+				respBody, _ := json.Marshal(protocol.UIStateResponseBody{
+					ProjectID: "proj-ui",
+					Key:       body.Key,
+					Value:     body.Value,
+					Found:     true,
+					UpdatedAt: time.Now().UTC(),
+				})
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case protocol.CommandUIStateGet:
+				var body protocol.UIStateGetRequestBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal get request body: %v", err)
+				}
+				if body.Key != protocol.UIStateKeyLastActiveTab {
+					t.Fatalf("get body = %+v", body)
+				}
+				respBody, _ := json.Marshal(protocol.UIStateResponseBody{
+					ProjectID: "proj-ui",
+					Key:       body.Key,
+					Value:     "compact",
+					Found:     true,
+					UpdatedAt: time.Now().UTC(),
+				})
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command %q", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		},
+	}
+	client := New(transport).WithProjectID("proj-ui")
+	if _, err := client.SetUIState(context.Background(), protocol.UIStateKeyLastActiveTab, "compact"); err != nil {
+		t.Fatalf("SetUIState error: %v", err)
+	}
+	got, err := client.GetUIState(context.Background(), protocol.UIStateKeyLastActiveTab)
+	if err != nil {
+		t.Fatalf("GetUIState error: %v", err)
+	}
+	if !got.Found || got.Value != "compact" {
+		t.Fatalf("GetUIState response = %+v", got)
+	}
+}

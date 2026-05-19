@@ -653,7 +653,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				Expires: time.Now().Add(2 * time.Second),
 			})
 		}
-		return m, nil
+		return m, m.persistUIViewModeCmd(m.viewMode)
 	}
 
 	return m, nil
@@ -965,6 +965,17 @@ type logStreamClosedMsg struct {
 }
 
 type logStreamReconnectMsg struct{}
+
+type uiViewModeLoadedMsg struct {
+	viewMode ViewMode
+	found    bool
+	err      error
+}
+
+type uiViewModeSavedMsg struct {
+	viewMode ViewMode
+	err      error
+}
 
 type hookLogLoadedMsg struct {
 	events []protocol.HookLogEvent
@@ -1278,6 +1289,65 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 			lastCheckedAt: snapshot.LastCheckedAt,
 			freshness:     snapshot.Freshness,
 		}
+	}
+}
+
+func (m Model) loadUIViewModeCmd() tea.Cmd {
+	client := m.daemonClient
+	if client == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		resp, err := client.GetUIState(ctx, protocol.UIStateKeyLastActiveTab)
+		if err != nil {
+			return uiViewModeLoadedMsg{err: err}
+		}
+		mode, ok := viewModeFromPersistedValue(resp.Value)
+		if !resp.Found || !ok {
+			return uiViewModeLoadedMsg{found: false}
+		}
+		return uiViewModeLoadedMsg{viewMode: mode, found: true}
+	}
+}
+
+func (m Model) persistUIViewModeCmd(mode ViewMode) tea.Cmd {
+	client := m.daemonClient
+	if client == nil {
+		return nil
+	}
+	value, ok := persistedValueForViewMode(mode)
+	if !ok {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_, err := client.SetUIState(ctx, protocol.UIStateKeyLastActiveTab, value)
+		return uiViewModeSavedMsg{viewMode: mode, err: err}
+	}
+}
+
+func persistedValueForViewMode(mode ViewMode) (string, bool) {
+	switch mode {
+	case ViewModeBoard:
+		return "board", true
+	case ViewModeCompact:
+		return "compact", true
+	default:
+		return "", false
+	}
+}
+
+func viewModeFromPersistedValue(value string) (ViewMode, bool) {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "board":
+		return ViewModeBoard, true
+	case "compact":
+		return ViewModeCompact, true
+	default:
+		return ViewModeBoard, false
 	}
 }
 

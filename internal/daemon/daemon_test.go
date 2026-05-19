@@ -335,6 +335,66 @@ func TestUIOpenTaskWorkspacePublishesProjectEvent(t *testing.T) {
 	}
 }
 
+func TestUIStateSetAndGet(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	d := &Daemon{
+		cfg: Config{Logger: logger, RepoDir: t.TempDir()},
+	}
+	setBody, err := json.Marshal(protocol.UIStateSetRequestBody{
+		Key:   protocol.UIStateKeyLastActiveTab,
+		Value: "compact",
+	})
+	if err != nil {
+		t.Fatalf("marshal set request: %v", err)
+	}
+	setReq := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       naming.RequestID("ui-state-set"),
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: "proj-ui"},
+		Command:         protocol.CommandUIStateSet,
+		SentAt:          time.Now().UTC(),
+		Body:            setBody,
+	}
+	setResp, err := d.command(ctx, setReq)
+	if err != nil {
+		t.Fatalf("ui state set error: %v", err)
+	}
+	if !setResp.OK {
+		t.Fatalf("ui state set response = %+v", setResp.Error)
+	}
+	getBody, err := json.Marshal(protocol.UIStateGetRequestBody{
+		Key: protocol.UIStateKeyLastActiveTab,
+	})
+	if err != nil {
+		t.Fatalf("marshal get request: %v", err)
+	}
+	getReq := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       naming.RequestID("ui-state-get"),
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: "proj-ui"},
+		Command:         protocol.CommandUIStateGet,
+		SentAt:          time.Now().UTC(),
+		Body:            getBody,
+	}
+	getResp, err := d.command(ctx, getReq)
+	if err != nil {
+		t.Fatalf("ui state get error: %v", err)
+	}
+	if !getResp.OK {
+		t.Fatalf("ui state get response = %+v", getResp.Error)
+	}
+	var stateResp protocol.UIStateResponseBody
+	if err := json.Unmarshal(getResp.Body, &stateResp); err != nil {
+		t.Fatalf("unmarshal get response body: %v", err)
+	}
+	if !stateResp.Found || stateResp.Value != "compact" || stateResp.Key != protocol.UIStateKeyLastActiveTab {
+		t.Fatalf("ui state get body = %+v", stateResp)
+	}
+}
+
 func TestCommandDefaultsBlankProjectID(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
