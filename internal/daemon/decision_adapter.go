@@ -36,9 +36,6 @@ func (s issueDecisionService) ListDecisions(ctx context.Context, req protocol.De
 	if req.RequirementID != "" {
 		filter.RequirementID = req.RequirementID.String()
 	}
-	for _, status := range req.Statuses {
-		filter.Statuses = append(filter.Statuses, issues.DecisionStatus(status))
-	}
 	rows, err := c.ListDecisions(ctx, filter)
 	if err != nil {
 		return protocol.DecisionListResponseBody{}, err
@@ -74,24 +71,20 @@ func (s issueDecisionService) GetDecision(ctx context.Context, req protocol.Deci
 	return out, nil
 }
 
-func (s issueDecisionService) CreateDecision(ctx context.Context, req protocol.DecisionCreateRequestBody) (protocol.DecisionCreateResponseBody, error) {
+func (s issueDecisionService) RecordDecision(ctx context.Context, req protocol.DecisionRecordRequestBody) (protocol.DecisionRecordResponseBody, error) {
 	c, err := s.client(ctx)
 	if err != nil {
-		return protocol.DecisionCreateResponseBody{}, err
+		return protocol.DecisionRecordResponseBody{}, err
 	}
-	params := issues.CreateDecisionParams{
-		LocalID:      req.ID,
-		Title:        req.Title,
-		Context:      req.Context,
-		Decision:     req.Decision,
-		Consequences: req.Consequences,
-		Status:       issues.DecisionStatus(req.Status),
-	}
-	decision, err := c.CreateDecision(ctx, params)
+	decision, err := c.RecordDecision(ctx, issues.RecordDecisionParams{
+		Title:     req.Title,
+		Rationale: req.Rationale,
+		Context:   req.Context,
+	})
 	if err != nil {
-		return protocol.DecisionCreateResponseBody{}, err
+		return protocol.DecisionRecordResponseBody{}, err
 	}
-	return protocol.DecisionCreateResponseBody{Decision: mapDecisionToProtocol(decision)}, nil
+	return protocol.DecisionRecordResponseBody{Decision: mapDecisionToProtocol(decision)}, nil
 }
 
 func (s issueDecisionService) UpdateDecision(ctx context.Context, req protocol.DecisionUpdateRequestBody) (protocol.DecisionUpdateResponseBody, error) {
@@ -100,14 +93,9 @@ func (s issueDecisionService) UpdateDecision(ctx context.Context, req protocol.D
 		return protocol.DecisionUpdateResponseBody{}, err
 	}
 	params := issues.UpdateDecisionParams{
-		Title:        req.Title,
-		Context:      req.Context,
-		Decision:     req.Decision,
-		Consequences: req.Consequences,
-	}
-	if req.Status != nil {
-		status := issues.DecisionStatus(*req.Status)
-		params.Status = &status
+		Title:     req.Title,
+		Rationale: req.Rationale,
+		Context:   req.Context,
 	}
 	decision, err := c.UpdateDecision(ctx, req.ID, params)
 	if err != nil {
@@ -210,14 +198,12 @@ func (s issueDecisionService) RemoveDecisionLink(ctx context.Context, req protoc
 
 func mapDecisionToProtocol(d issues.Decision) protocol.Decision {
 	return protocol.Decision{
-		ID:           d.LocalID,
-		Title:        d.Title,
-		Context:      d.Context,
-		Decision:     d.Decision,
-		Consequences: d.Consequences,
-		Status:       protocol.DecisionStatus(d.Status),
-		CreatedAt:    d.CreatedAt,
-		UpdatedAt:    d.UpdatedAt,
+		ID:        d.LocalID,
+		Title:     d.Title,
+		Rationale: d.Rationale,
+		Context:   d.Context,
+		CreatedAt: d.CreatedAt,
+		UpdatedAt: d.UpdatedAt,
 	}
 }
 

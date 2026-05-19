@@ -4018,12 +4018,12 @@ func TestIssueGetCommandTextRendersDecisions(t *testing.T) {
 	}
 	decisions := daemonclient.DecisionLinkListResult{
 		Links: []daemonclient.DecisionLink{
-			{DecisionID: "use-sqlite-store", TargetKind: daemonclient.DecisionTargetIssue, TargetID: "az-5", Relation: "implements"},
-			{DecisionID: "polymorphic-link-table", TargetKind: daemonclient.DecisionTargetIssue, TargetID: "az-5", Relation: "relates", Note: "discussed at sync"},
+			{DecisionID: "dec-1", TargetKind: daemonclient.DecisionTargetIssue, TargetID: "az-5", Relation: "applies-to"},
+			{DecisionID: "dec-2", TargetKind: daemonclient.DecisionTargetIssue, TargetID: "az-5", Relation: "informs", Note: "discussed at sync"},
 		},
 		Decisions: []daemonclient.Decision{
-			{ID: "use-sqlite-store", Title: "Use SQLite for decision store", Status: "accepted"},
-			{ID: "polymorphic-link-table", Title: "Polymorphic decision_links table", Status: "proposed"},
+			{ID: "dec-1", Title: "Use SQLite for decision store"},
+			{ID: "dec-2", Title: "Polymorphic decision_links table"},
 		},
 	}
 
@@ -4040,12 +4040,11 @@ func TestIssueGetCommandTextRendersDecisions(t *testing.T) {
 
 	for _, want := range []string{
 		"Decisions: 2",
-		"implements",
-		"use-sqlite-store",
-		"[accepted]",
+		"applies-to",
+		"dec-1",
 		"Use SQLite for decision store",
-		"relates",
-		"polymorphic-link-table",
+		"informs",
+		"dec-2",
 		"Polymorphic decision_links table",
 		"discussed at sync",
 	} {
@@ -4070,10 +4069,10 @@ func TestIssueGetCommandJSONIncludesDecisions(t *testing.T) {
 	}
 	decisions := daemonclient.DecisionLinkListResult{
 		Links: []daemonclient.DecisionLink{
-			{DecisionID: "use-sqlite-store", TargetKind: daemonclient.DecisionTargetIssue, TargetID: "az-5", Relation: "implements"},
+			{DecisionID: "dec-1", TargetKind: daemonclient.DecisionTargetIssue, TargetID: "az-5", Relation: "applies-to"},
 		},
 		Decisions: []daemonclient.Decision{
-			{ID: "use-sqlite-store", Title: "Use SQLite for decision store", Status: "accepted"},
+			{ID: "dec-1", Title: "Use SQLite for decision store"},
 		},
 	}
 
@@ -4095,10 +4094,9 @@ func TestIssueGetCommandJSONIncludesDecisions(t *testing.T) {
 		t.Fatalf("output missing decisions key: %q", output)
 	}
 	for _, want := range []string{
-		"\"id\": \"use-sqlite-store\"",
+		"\"id\": \"dec-1\"",
 		"\"title\": \"Use SQLite for decision store\"",
-		"\"status\": \"accepted\"",
-		"\"relation\": \"implements\"",
+		"\"relation\": \"applies-to\"",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("decisions json missing %q\nfull output:\n%s", want, output)
@@ -4111,9 +4109,8 @@ func TestIssueGetCommandJSONIncludesDecisions(t *testing.T) {
 		ID        string `json:"id"`
 		Title     string `json:"title"`
 		Decisions []struct {
-			ID     string `json:"id"`
-			Title  string `json:"title"`
-			Status string `json:"status"`
+			ID    string `json:"id"`
+			Title string `json:"title"`
 		} `json:"decisions"`
 	}
 	if err := json.Unmarshal([]byte(output), &parsed); err != nil {
@@ -4122,7 +4119,7 @@ func TestIssueGetCommandJSONIncludesDecisions(t *testing.T) {
 	if parsed.ID != "az-5" || parsed.Title != "Lookup issue" {
 		t.Fatalf("envelope task fields = %+v", parsed)
 	}
-	if len(parsed.Decisions) != 1 || parsed.Decisions[0].ID != "use-sqlite-store" {
+	if len(parsed.Decisions) != 1 || parsed.Decisions[0].ID != "dec-1" {
 		t.Fatalf("envelope decisions = %+v", parsed.Decisions)
 	}
 }

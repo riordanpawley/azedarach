@@ -30,6 +30,7 @@ var orderedMigrations = []migration{
 	{id: "0007_external_issue_sync_payload", path: "migrations/0007_external_issue_sync_payload.sql"},
 	{id: "0008_decision_tables", path: "migrations/0008_decision_tables.sql"},
 	{id: "0009_decision_audit_log", path: "migrations/0009_decision_audit_log.sql"},
+	{id: "0010_decisions_refresh", path: "migrations/0010_decisions_refresh.sql"},
 }
 
 func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
@@ -603,10 +604,8 @@ func (c *Client) ensureDecisionSchema(db *sql.DB) error {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			local_id TEXT NOT NULL,
 			title TEXT NOT NULL,
+			rationale TEXT,
 			context TEXT,
-			decision TEXT,
-			consequences TEXT,
-			status TEXT NOT NULL,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
 			deleted_at TEXT
@@ -618,10 +617,8 @@ func (c *Client) ensureDecisionSchema(db *sql.DB) error {
 	if err := ensureTableColumns(db, "decisions", []sqliteColumnSpec{
 		{name: "local_id", ddl: "TEXT NOT NULL DEFAULT ''"},
 		{name: "title", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "rationale", ddl: "TEXT"},
 		{name: "context", ddl: "TEXT"},
-		{name: "decision", ddl: "TEXT"},
-		{name: "consequences", ddl: "TEXT"},
-		{name: "status", ddl: "TEXT NOT NULL DEFAULT 'proposed'"},
 		{name: "created_at", ddl: "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'"},
 		{name: "updated_at", ddl: "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'"},
 		{name: "deleted_at", ddl: "TEXT"},
@@ -661,7 +658,7 @@ func (c *Client) ensureDecisionSchema(db *sql.DB) error {
 
 	for _, stmt := range []string{
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_active_local_id ON decisions(local_id) WHERE deleted_at IS NULL`,
-		`CREATE INDEX IF NOT EXISTS idx_decisions_status_updated ON decisions(status, updated_at DESC) WHERE deleted_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_decisions_updated ON decisions(updated_at DESC, local_id) WHERE deleted_at IS NULL`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_links_active_unique ON decision_links(decision_id, target_kind, target_id) WHERE deleted_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_decision_links_target ON decision_links(target_kind, target_id, updated_at DESC) WHERE deleted_at IS NULL`,
 	} {

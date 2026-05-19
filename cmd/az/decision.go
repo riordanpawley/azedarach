@@ -16,50 +16,53 @@ import (
 )
 
 type decisionListOpts struct {
-	JSON     bool
-	IDs      []string
-	Statuses []string
-	Issue    string
-	Req      string
-	Query    string
+	JSON  bool
+	IDs   []string
+	Issue string
+	Req   string
+	Query string
 }
 
 type decisionGetOpts struct {
-	JSON        bool
-	ID          string
-	WithLinks   bool
+	JSON      bool
+	ID        string
+	WithLinks bool
 }
 
-type decisionCreateOpts struct {
-	JSON         bool
-	ID           string
-	Title        string
-	Context      string
-	Decision     string
-	Consequences string
-	Status       string
-	IssueLinks   []string
-	ReqLinks     []string
+type decisionRecordOpts struct {
+	JSON      bool
+	Title     string
+	Rationale string
+	Context   string
+	Issues    []string
+	Reqs      []string
 }
 
 type decisionUpdateOpts struct {
-	JSON         bool
-	ID           string
-	Title        string
-	Context      string
-	Decision     string
-	Consequences string
-	Status       string
-	titleSet     bool
-	ctxSet       bool
-	decisionSet  bool
-	consSet      bool
+	JSON      bool
+	ID        string
+	Title     string
+	Rationale string
+	Context   string
+	titleSet  bool
+	ratSet    bool
+	ctxSet    bool
 }
 
 type decisionDeleteOpts struct {
 	JSON    bool
 	ID      string
 	Confirm bool
+}
+
+type decisionRevisitOpts struct {
+	JSON      bool
+	Old       string
+	Title     string
+	Rationale string
+	Context   string
+	New       string
+	Note      string
 }
 
 type decisionLinkListOpts struct {
@@ -70,12 +73,13 @@ type decisionLinkListOpts struct {
 }
 
 type decisionLinkAddOpts struct {
-	JSON       bool
-	Decision   string
-	Issue      string
-	Req        string
-	Relation   string
-	Note       string
+	JSON     bool
+	Decision string
+	Issue    string
+	Req      string
+	OtherDec string
+	Relation string
+	Note     string
 }
 
 type decisionLinkRemoveOpts struct {
@@ -83,6 +87,7 @@ type decisionLinkRemoveOpts struct {
 	Decision string
 	Issue    string
 	Req      string
+	OtherDec string
 }
 
 func runDecisionCommand(cfg *config.Config, args []string) error {
@@ -105,13 +110,13 @@ func runDecisionCommand(cfg *config.Config, args []string) error {
 			return err
 		}
 		return runDecisionGetRPC(cfg, opts)
-	case "create":
-		opts, err := parseDecisionCreateArgs(args[1:])
+	case "record":
+		opts, err := parseDecisionRecordArgs(args[1:])
 		if err != nil {
 			printDecisionUsage()
 			return err
 		}
-		return runDecisionCreateRPC(cfg, opts)
+		return runDecisionRecordRPC(cfg, opts)
 	case "update":
 		opts, err := parseDecisionUpdateArgs(args[1:])
 		if err != nil {
@@ -126,6 +131,13 @@ func runDecisionCommand(cfg *config.Config, args []string) error {
 			return err
 		}
 		return runDecisionDeleteRPC(cfg, opts)
+	case "revisit":
+		opts, err := parseDecisionRevisitArgs(args[1:])
+		if err != nil {
+			printDecisionUsage()
+			return err
+		}
+		return runDecisionRevisitRPC(cfg, opts)
 	case "link":
 		return runDecisionLinkCommand(cfg, args[1:])
 	default:
@@ -172,9 +184,6 @@ func runDecisionListRPC(cfg *config.Config, opts decisionListOpts) error {
 		RequirementID: naming.RequirementID(opts.Req),
 		Query:         opts.Query,
 	}
-	for _, s := range opts.Statuses {
-		req.Statuses = append(req.Statuses, protocol.DecisionStatus(s))
-	}
 	var out protocol.DecisionListResponseBody
 	if err := runDecisionRPC(cfg, protocol.CommandDecisionList, req, &out); err != nil {
 		return err
@@ -183,7 +192,7 @@ func runDecisionListRPC(cfg *config.Config, opts decisionListOpts) error {
 		return printJSON(out)
 	}
 	for _, d := range out.Decisions {
-		fmt.Printf("%s\t%s\t%s\n", d.ID, d.Status, d.Title)
+		fmt.Printf("%s\t%s\n", d.ID, d.Title)
 	}
 	return nil
 }
@@ -197,15 +206,12 @@ func runDecisionGetRPC(cfg *config.Config, opts decisionGetOpts) error {
 	if opts.JSON {
 		return printJSON(out)
 	}
-	fmt.Printf("%s\t%s\t%s\n", out.Decision.ID, out.Decision.Status, out.Decision.Title)
+	fmt.Printf("%s\t%s\n", out.Decision.ID, out.Decision.Title)
+	if out.Decision.Rationale != "" {
+		fmt.Printf("\nRationale:\n%s\n", out.Decision.Rationale)
+	}
 	if out.Decision.Context != "" {
 		fmt.Printf("\nContext:\n%s\n", out.Decision.Context)
-	}
-	if out.Decision.Decision != "" {
-		fmt.Printf("\nDecision:\n%s\n", out.Decision.Decision)
-	}
-	if out.Decision.Consequences != "" {
-		fmt.Printf("\nConsequences:\n%s\n", out.Decision.Consequences)
 	}
 	if opts.WithLinks && len(out.Links) > 0 {
 		fmt.Println("\nLinks:")
@@ -220,20 +226,17 @@ func runDecisionGetRPC(cfg *config.Config, opts decisionGetOpts) error {
 	return nil
 }
 
-func runDecisionCreateRPC(cfg *config.Config, opts decisionCreateOpts) error {
-	req := protocol.DecisionCreateRequestBody{
-		ID:           opts.ID,
-		Title:        opts.Title,
-		Context:      opts.Context,
-		Decision:     opts.Decision,
-		Consequences: opts.Consequences,
-		Status:       protocol.DecisionStatus(opts.Status),
+func runDecisionRecordRPC(cfg *config.Config, opts decisionRecordOpts) error {
+	req := protocol.DecisionRecordRequestBody{
+		Title:     opts.Title,
+		Rationale: opts.Rationale,
+		Context:   opts.Context,
 	}
-	var out protocol.DecisionCreateResponseBody
-	if err := runDecisionRPC(cfg, protocol.CommandDecisionCreate, req, &out); err != nil {
+	var out protocol.DecisionRecordResponseBody
+	if err := runDecisionRPC(cfg, protocol.CommandDecisionRecord, req, &out); err != nil {
 		return err
 	}
-	for _, issueID := range opts.IssueLinks {
+	for _, issueID := range opts.Issues {
 		linkReq := protocol.DecisionLinkAddRequestBody{
 			DecisionID: out.Decision.ID,
 			TargetKind: protocol.DecisionTargetIssue,
@@ -241,10 +244,10 @@ func runDecisionCreateRPC(cfg *config.Config, opts decisionCreateOpts) error {
 		}
 		var linkOut protocol.DecisionLinkAddResponseBody
 		if err := runDecisionRPC(cfg, protocol.CommandDecisionLinkAdd, linkReq, &linkOut); err != nil {
-			return fmt.Errorf("create succeeded but linking issue %s failed: %w", issueID, err)
+			return fmt.Errorf("recorded %s but linking issue %s failed: %w", out.Decision.ID, issueID, err)
 		}
 	}
-	for _, reqID := range opts.ReqLinks {
+	for _, reqID := range opts.Reqs {
 		linkReq := protocol.DecisionLinkAddRequestBody{
 			DecisionID: out.Decision.ID,
 			TargetKind: protocol.DecisionTargetRequirement,
@@ -252,13 +255,13 @@ func runDecisionCreateRPC(cfg *config.Config, opts decisionCreateOpts) error {
 		}
 		var linkOut protocol.DecisionLinkAddResponseBody
 		if err := runDecisionRPC(cfg, protocol.CommandDecisionLinkAdd, linkReq, &linkOut); err != nil {
-			return fmt.Errorf("create succeeded but linking requirement %s failed: %w", reqID, err)
+			return fmt.Errorf("recorded %s but linking requirement %s failed: %w", out.Decision.ID, reqID, err)
 		}
 	}
 	if opts.JSON {
 		return printJSON(out)
 	}
-	fmt.Printf("Created decision: %s\n", out.Decision.ID)
+	fmt.Printf("Recorded decision: %s\n", out.Decision.ID)
 	return nil
 }
 
@@ -268,21 +271,13 @@ func runDecisionUpdateRPC(cfg *config.Config, opts decisionUpdateOpts) error {
 		v := opts.Title
 		req.Title = &v
 	}
+	if opts.ratSet {
+		v := opts.Rationale
+		req.Rationale = &v
+	}
 	if opts.ctxSet {
 		v := opts.Context
 		req.Context = &v
-	}
-	if opts.decisionSet {
-		v := opts.Decision
-		req.Decision = &v
-	}
-	if opts.consSet {
-		v := opts.Consequences
-		req.Consequences = &v
-	}
-	if opts.Status != "" {
-		v := protocol.DecisionStatus(opts.Status)
-		req.Status = &v
 	}
 	var out protocol.DecisionUpdateResponseBody
 	if err := runDecisionRPC(cfg, protocol.CommandDecisionUpdate, req, &out); err != nil {
@@ -305,6 +300,41 @@ func runDecisionDeleteRPC(cfg *config.Config, opts decisionDeleteOpts) error {
 		return printJSON(out)
 	}
 	fmt.Printf("Deleted decision: %s\n", out.ID)
+	return nil
+}
+
+// runDecisionRevisitRPC handles two flows:
+//   - --new <id>:  link an existing decision as the revision of the old one.
+//   - --title + --rationale: create a NEW decision in the same call and link it.
+func runDecisionRevisitRPC(cfg *config.Config, opts decisionRevisitOpts) error {
+	newID := strings.TrimSpace(opts.New)
+	if newID == "" {
+		req := protocol.DecisionRecordRequestBody{
+			Title:     opts.Title,
+			Rationale: opts.Rationale,
+			Context:   opts.Context,
+		}
+		var out protocol.DecisionRecordResponseBody
+		if err := runDecisionRPC(cfg, protocol.CommandDecisionRecord, req, &out); err != nil {
+			return err
+		}
+		newID = out.Decision.ID
+	}
+	linkReq := protocol.DecisionLinkAddRequestBody{
+		DecisionID: newID,
+		TargetKind: protocol.DecisionTargetDecision,
+		TargetID:   opts.Old,
+		Relation:   protocol.DecisionRelationRevises,
+		Note:       opts.Note,
+	}
+	var linkOut protocol.DecisionLinkAddResponseBody
+	if err := runDecisionRPC(cfg, protocol.CommandDecisionLinkAdd, linkReq, &linkOut); err != nil {
+		return fmt.Errorf("recorded %s but linking revises %s failed: %w", newID, opts.Old, err)
+	}
+	if opts.JSON {
+		return printJSON(linkOut)
+	}
+	fmt.Printf("%s revises %s\n", newID, opts.Old)
 	return nil
 }
 
@@ -332,7 +362,7 @@ func runDecisionLinkListRPC(cfg *config.Config, opts decisionLinkListOpts) error
 }
 
 func runDecisionLinkAddRPC(cfg *config.Config, opts decisionLinkAddOpts) error {
-	kind, target, err := resolveDecisionTarget(opts.Issue, opts.Req)
+	kind, target, err := resolveDecisionLinkTarget(opts.Issue, opts.Req, opts.OtherDec)
 	if err != nil {
 		return err
 	}
@@ -350,12 +380,12 @@ func runDecisionLinkAddRPC(cfg *config.Config, opts decisionLinkAddOpts) error {
 	if opts.JSON {
 		return printJSON(out)
 	}
-	fmt.Printf("Linked decision %s -> %s %s\n", out.Link.DecisionID, out.Link.TargetKind, out.Link.TargetID)
+	fmt.Printf("Linked %s -> %s %s\n", out.Link.DecisionID, out.Link.TargetKind, out.Link.TargetID)
 	return nil
 }
 
 func runDecisionLinkRemoveRPC(cfg *config.Config, opts decisionLinkRemoveOpts) error {
-	kind, target, err := resolveDecisionTarget(opts.Issue, opts.Req)
+	kind, target, err := resolveDecisionLinkTarget(opts.Issue, opts.Req, opts.OtherDec)
 	if err != nil {
 		return err
 	}
@@ -375,19 +405,30 @@ func runDecisionLinkRemoveRPC(cfg *config.Config, opts decisionLinkRemoveOpts) e
 	return nil
 }
 
-func resolveDecisionTarget(issue, req string) (protocol.DecisionTargetKind, string, error) {
+func resolveDecisionLinkTarget(issue, req, otherDec string) (protocol.DecisionTargetKind, string, error) {
 	issue = strings.TrimSpace(issue)
 	req = strings.TrimSpace(req)
-	if issue != "" && req != "" {
-		return "", "", fmt.Errorf("provide only one of --issue or --req")
+	otherDec = strings.TrimSpace(otherDec)
+	count := 0
+	for _, v := range []string{issue, req, otherDec} {
+		if v != "" {
+			count++
+		}
 	}
-	if issue != "" {
+	if count == 0 {
+		return "", "", fmt.Errorf("one of --issue, --req, or --decision is required")
+	}
+	if count > 1 {
+		return "", "", fmt.Errorf("only one of --issue, --req, or --decision may be set")
+	}
+	switch {
+	case issue != "":
 		return protocol.DecisionTargetIssue, issue, nil
-	}
-	if req != "" {
+	case req != "":
 		return protocol.DecisionTargetRequirement, req, nil
+	default:
+		return protocol.DecisionTargetDecision, otherDec, nil
 	}
-	return "", "", fmt.Errorf("either --issue or --req is required")
 }
 
 func runDecisionRPC(cfg *config.Config, command string, body any, out any) error {
@@ -434,7 +475,7 @@ func parseDecisionListArgs(args []string) (decisionListOpts, error) {
 	fs.BoolVar(&opts.JSON, "json", false, "json output")
 	fs.StringVar(&opts.Issue, "issue", "", "filter by linked issue id")
 	fs.StringVar(&opts.Req, "req", "", "filter by linked requirement id")
-	fs.StringVar(&opts.Query, "query", "", "free-text search across id/title/context/decision")
+	fs.StringVar(&opts.Query, "query", "", "free-text search across id/title/rationale/context")
 	fs.Func("id", "restrict to a specific decision id (repeatable)", func(v string) error {
 		trimmed := strings.TrimSpace(v)
 		if trimmed == "" {
@@ -443,19 +484,11 @@ func parseDecisionListArgs(args []string) (decisionListOpts, error) {
 		opts.IDs = appendUniqueOrdered(opts.IDs, trimmed)
 		return nil
 	})
-	fs.Func("status", "restrict to a specific status (repeatable)", func(v string) error {
-		status, err := parseDecisionStatusFlag(v)
-		if err != nil {
-			return err
-		}
-		opts.Statuses = appendUniqueOrdered(opts.Statuses, status)
-		return nil
-	})
 	if err := fs.Parse(args); err != nil {
 		return decisionListOpts{}, err
 	}
 	if fs.NArg() != 0 {
-		return decisionListOpts{}, fmt.Errorf("usage: az decision list [--json] [--issue <id>] [--req <id>] [--status <s> ...] [--id <id> ...] [--query <text>]")
+		return decisionListOpts{}, fmt.Errorf("usage: az decision list [--json] [--issue <id>] [--req <id>] [--id <id> ...] [--query <text>]")
 	}
 	return opts, nil
 }
@@ -465,7 +498,7 @@ func parseDecisionGetArgs(args []string) (decisionGetOpts, error) {
 	fs := flag.NewFlagSet("decision get", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.JSON, "json", false, "json output")
-	fs.StringVar(&opts.ID, "id", "", "decision id")
+	fs.StringVar(&opts.ID, "id", "", "decision id (e.g. dec-1)")
 	fs.BoolVar(&opts.WithLinks, "with-links", false, "include linked targets in output")
 	if err := fs.Parse(args); err != nil {
 		return decisionGetOpts{}, err
@@ -479,51 +512,41 @@ func parseDecisionGetArgs(args []string) (decisionGetOpts, error) {
 	return opts, nil
 }
 
-func parseDecisionCreateArgs(args []string) (decisionCreateOpts, error) {
-	opts := decisionCreateOpts{}
-	fs := flag.NewFlagSet("decision create", flag.ContinueOnError)
+func parseDecisionRecordArgs(args []string) (decisionRecordOpts, error) {
+	opts := decisionRecordOpts{}
+	fs := flag.NewFlagSet("decision record", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.JSON, "json", false, "json output")
-	fs.StringVar(&opts.ID, "id", "", "decision id (kebab-case slug)")
-	fs.StringVar(&opts.Title, "title", "", "decision title")
-	fs.StringVar(&opts.Context, "context", "", "context/forces narrative")
-	fs.StringVar(&opts.Decision, "decision", "", "the chosen option and rationale")
-	fs.StringVar(&opts.Consequences, "consequences", "", "consequences/trade-offs")
-	fs.StringVar(&opts.Status, "status", "", "status: proposed|accepted|rejected|deprecated|superseded")
-	fs.Func("issue", "link decision to issue (repeatable)", func(v string) error {
+	fs.StringVar(&opts.Title, "title", "", "one-line summary of what was decided")
+	fs.StringVar(&opts.Rationale, "rationale", "", "why this was chosen (required)")
+	fs.StringVar(&opts.Context, "context", "", "situational backdrop (optional)")
+	fs.Func("issue", "link to issue (repeatable)", func(v string) error {
 		trimmed := strings.TrimSpace(v)
 		if trimmed == "" {
 			return fmt.Errorf("empty issue id")
 		}
-		opts.IssueLinks = appendUniqueOrdered(opts.IssueLinks, trimmed)
+		opts.Issues = appendUniqueOrdered(opts.Issues, trimmed)
 		return nil
 	})
-	fs.Func("req", "link decision to requirement (repeatable)", func(v string) error {
+	fs.Func("req", "link to requirement (repeatable)", func(v string) error {
 		trimmed := strings.TrimSpace(v)
 		if trimmed == "" {
 			return fmt.Errorf("empty requirement id")
 		}
-		opts.ReqLinks = appendUniqueOrdered(opts.ReqLinks, trimmed)
+		opts.Reqs = appendUniqueOrdered(opts.Reqs, trimmed)
 		return nil
 	})
 	if err := fs.Parse(args); err != nil {
-		return decisionCreateOpts{}, err
+		return decisionRecordOpts{}, err
 	}
 	if fs.NArg() != 0 {
-		return decisionCreateOpts{}, fmt.Errorf("usage: az decision create --id <slug> --title <text> [--context ...] [--decision ...] [--consequences ...] [--status ...] [--issue <id> ...] [--req <id> ...] [--json]")
-	}
-	if strings.TrimSpace(opts.ID) == "" {
-		return decisionCreateOpts{}, fmt.Errorf("missing required flag: --id")
+		return decisionRecordOpts{}, fmt.Errorf("usage: az decision record --title <text> --rationale <text> [--context <text>] [--issue <id> ...] [--req <id> ...] [--json]")
 	}
 	if strings.TrimSpace(opts.Title) == "" {
-		return decisionCreateOpts{}, fmt.Errorf("missing required flag: --title")
+		return decisionRecordOpts{}, fmt.Errorf("missing required flag: --title")
 	}
-	if opts.Status != "" {
-		status, err := parseDecisionStatusFlag(opts.Status)
-		if err != nil {
-			return decisionCreateOpts{}, err
-		}
-		opts.Status = status
+	if strings.TrimSpace(opts.Rationale) == "" {
+		return decisionRecordOpts{}, fmt.Errorf("missing required flag: --rationale")
 	}
 	return opts, nil
 }
@@ -539,40 +562,27 @@ func parseDecisionUpdateArgs(args []string) (decisionUpdateOpts, error) {
 		opts.titleSet = true
 		return nil
 	})
+	fs.Func("rationale", "new rationale", func(v string) error {
+		opts.Rationale = v
+		opts.ratSet = true
+		return nil
+	})
 	fs.Func("context", "new context", func(v string) error {
 		opts.Context = v
 		opts.ctxSet = true
 		return nil
 	})
-	fs.Func("decision", "new decision text", func(v string) error {
-		opts.Decision = v
-		opts.decisionSet = true
-		return nil
-	})
-	fs.Func("consequences", "new consequences", func(v string) error {
-		opts.Consequences = v
-		opts.consSet = true
-		return nil
-	})
-	fs.StringVar(&opts.Status, "status", "", "new status")
 	if err := fs.Parse(args); err != nil {
 		return decisionUpdateOpts{}, err
 	}
 	if fs.NArg() != 0 {
-		return decisionUpdateOpts{}, fmt.Errorf("usage: az decision update --id <id> [--title ...] [--context ...] [--decision ...] [--consequences ...] [--status ...] [--json]")
+		return decisionUpdateOpts{}, fmt.Errorf("usage: az decision update --id <id> [--title ...] [--rationale ...] [--context ...] [--json]")
 	}
 	if strings.TrimSpace(opts.ID) == "" {
 		return decisionUpdateOpts{}, fmt.Errorf("missing required flag: --id")
 	}
-	if !opts.titleSet && !opts.ctxSet && !opts.decisionSet && !opts.consSet && opts.Status == "" {
+	if !opts.titleSet && !opts.ratSet && !opts.ctxSet {
 		return decisionUpdateOpts{}, fmt.Errorf("no update fields provided")
-	}
-	if opts.Status != "" {
-		status, err := parseDecisionStatusFlag(opts.Status)
-		if err != nil {
-			return decisionUpdateOpts{}, err
-		}
-		opts.Status = status
 	}
 	return opts, nil
 }
@@ -599,25 +609,53 @@ func parseDecisionDeleteArgs(args []string) (decisionDeleteOpts, error) {
 	return opts, nil
 }
 
+func parseDecisionRevisitArgs(args []string) (decisionRevisitOpts, error) {
+	opts := decisionRevisitOpts{}
+	fs := flag.NewFlagSet("decision revisit", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "json output")
+	fs.StringVar(&opts.Old, "id", "", "decision id being revised")
+	fs.StringVar(&opts.New, "new", "", "id of an already-recorded decision that revises the old one")
+	fs.StringVar(&opts.Title, "title", "", "title for a freshly recorded replacement (alternative to --new)")
+	fs.StringVar(&opts.Rationale, "rationale", "", "rationale for the replacement decision")
+	fs.StringVar(&opts.Context, "context", "", "context for the replacement decision")
+	fs.StringVar(&opts.Note, "note", "", "note attached to the revises link")
+	if err := fs.Parse(args); err != nil {
+		return decisionRevisitOpts{}, err
+	}
+	if fs.NArg() != 0 {
+		return decisionRevisitOpts{}, fmt.Errorf("usage: az decision revisit --id <old-id> (--new <existing-id> | --title <text> --rationale <text> [--context <text>]) [--note <text>] [--json]")
+	}
+	if strings.TrimSpace(opts.Old) == "" {
+		return decisionRevisitOpts{}, fmt.Errorf("missing required flag: --id")
+	}
+	if strings.TrimSpace(opts.New) == "" {
+		if strings.TrimSpace(opts.Title) == "" || strings.TrimSpace(opts.Rationale) == "" {
+			return decisionRevisitOpts{}, fmt.Errorf("either --new <id> or --title and --rationale must be provided")
+		}
+	}
+	return opts, nil
+}
+
 func parseDecisionLinkListArgs(args []string) (decisionLinkListOpts, error) {
 	opts := decisionLinkListOpts{}
 	fs := flag.NewFlagSet("decision link list", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.JSON, "json", false, "json output")
 	fs.StringVar(&opts.Decision, "id", "", "decision id filter")
-	fs.StringVar(&opts.TargetKind, "kind", "", "target kind filter (issue|requirement)")
+	fs.StringVar(&opts.TargetKind, "kind", "", "target kind filter (issue|requirement|decision)")
 	fs.StringVar(&opts.TargetID, "target", "", "target id filter")
 	if err := fs.Parse(args); err != nil {
 		return decisionLinkListOpts{}, err
 	}
 	if fs.NArg() != 0 {
-		return decisionLinkListOpts{}, fmt.Errorf("usage: az decision link list [--json] [--id <decision-id>] [--kind <issue|requirement>] [--target <id>]")
+		return decisionLinkListOpts{}, fmt.Errorf("usage: az decision link list [--json] [--id <decision-id>] [--kind <issue|requirement|decision>] [--target <id>]")
 	}
 	if opts.TargetKind != "" {
 		switch opts.TargetKind {
-		case "issue", "requirement":
+		case "issue", "requirement", "decision":
 		default:
-			return decisionLinkListOpts{}, fmt.Errorf("invalid kind %q; expected issue|requirement", opts.TargetKind)
+			return decisionLinkListOpts{}, fmt.Errorf("invalid kind %q; expected issue|requirement|decision", opts.TargetKind)
 		}
 	}
 	return opts, nil
@@ -629,15 +667,16 @@ func parseDecisionLinkAddArgs(args []string) (decisionLinkAddOpts, error) {
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.JSON, "json", false, "json output")
 	fs.StringVar(&opts.Decision, "id", "", "decision id")
-	fs.StringVar(&opts.Issue, "issue", "", "issue id (mutually exclusive with --req)")
-	fs.StringVar(&opts.Req, "req", "", "requirement id (mutually exclusive with --issue)")
-	fs.StringVar(&opts.Relation, "relation", "", "relation: relates|implements|supersedes|superseded-by")
+	fs.StringVar(&opts.Issue, "issue", "", "issue id (mutually exclusive with --req/--decision)")
+	fs.StringVar(&opts.Req, "req", "", "requirement id (mutually exclusive with --issue/--decision)")
+	fs.StringVar(&opts.OtherDec, "decision", "", "other decision id (mutually exclusive with --issue/--req)")
+	fs.StringVar(&opts.Relation, "relation", "", "relation: applies-to|revises|informs (default applies-to)")
 	fs.StringVar(&opts.Note, "note", "", "free-text note")
 	if err := fs.Parse(args); err != nil {
 		return decisionLinkAddOpts{}, err
 	}
 	if fs.NArg() != 0 {
-		return decisionLinkAddOpts{}, fmt.Errorf("usage: az decision link add --id <decision-id> (--issue <id> | --req <id>) [--relation ...] [--note ...] [--json]")
+		return decisionLinkAddOpts{}, fmt.Errorf("usage: az decision link add --id <decision-id> (--issue <id> | --req <id> | --decision <id>) [--relation ...] [--note ...] [--json]")
 	}
 	if strings.TrimSpace(opts.Decision) == "" {
 		return decisionLinkAddOpts{}, fmt.Errorf("missing required flag: --id")
@@ -658,13 +697,14 @@ func parseDecisionLinkRemoveArgs(args []string) (decisionLinkRemoveOpts, error) 
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.JSON, "json", false, "json output")
 	fs.StringVar(&opts.Decision, "id", "", "decision id")
-	fs.StringVar(&opts.Issue, "issue", "", "issue id (mutually exclusive with --req)")
-	fs.StringVar(&opts.Req, "req", "", "requirement id (mutually exclusive with --issue)")
+	fs.StringVar(&opts.Issue, "issue", "", "issue id (mutually exclusive with --req/--decision)")
+	fs.StringVar(&opts.Req, "req", "", "requirement id (mutually exclusive with --issue/--decision)")
+	fs.StringVar(&opts.OtherDec, "decision", "", "other decision id (mutually exclusive with --issue/--req)")
 	if err := fs.Parse(args); err != nil {
 		return decisionLinkRemoveOpts{}, err
 	}
 	if fs.NArg() != 0 {
-		return decisionLinkRemoveOpts{}, fmt.Errorf("usage: az decision link remove --id <decision-id> (--issue <id> | --req <id>) [--json]")
+		return decisionLinkRemoveOpts{}, fmt.Errorf("usage: az decision link remove --id <decision-id> (--issue <id> | --req <id> | --decision <id>) [--json]")
 	}
 	if strings.TrimSpace(opts.Decision) == "" {
 		return decisionLinkRemoveOpts{}, fmt.Errorf("missing required flag: --id")
@@ -672,53 +712,46 @@ func parseDecisionLinkRemoveArgs(args []string) (decisionLinkRemoveOpts, error) 
 	return opts, nil
 }
 
-func parseDecisionStatusFlag(value string) (string, error) {
-	switch strings.TrimSpace(value) {
-	case "proposed", "accepted", "rejected", "deprecated", "superseded":
-		return strings.TrimSpace(value), nil
-	default:
-		return "", fmt.Errorf("invalid status %q; expected proposed|accepted|rejected|deprecated|superseded", value)
-	}
-}
-
 func parseDecisionRelationFlag(value string) (string, error) {
 	switch strings.TrimSpace(value) {
-	case "relates", "implements", "supersedes", "superseded-by":
+	case "applies-to", "revises", "informs":
 		return strings.TrimSpace(value), nil
 	default:
-		return "", fmt.Errorf("invalid relation %q; expected relates|implements|supersedes|superseded-by", value)
+		return "", fmt.Errorf("invalid relation %q; expected applies-to|revises|informs", value)
 	}
 }
 
 func printDecisionUsage() {
-	fmt.Println("Usage: az decision <list|get|create|update|delete|link> [arguments]")
-	fmt.Println("  list    List decisions (optionally filtered by linked issue/requirement)")
-	fmt.Println("  get     Show a single decision (use --with-links to include linked targets)")
-	fmt.Println("  create  Create a decision record (optionally link to issues/requirements)")
-	fmt.Println("  update  Update fields on an existing decision")
-	fmt.Println("  delete  Soft-delete a decision (requires --confirm)")
-	fmt.Println("  link    Manage decision-to-issue/requirement links")
+	fmt.Println("Usage: az decision <list|get|record|update|delete|revisit|link> [arguments]")
+	fmt.Println("  list     List recorded decisions (optionally filtered by linked issue/requirement)")
+	fmt.Println("  get      Show a single decision (use --with-links for links)")
+	fmt.Println("  record   Record a new decision (id auto-allocated as dec-N)")
+	fmt.Println("  update   Update fields on an existing decision")
+	fmt.Println("  delete   Soft-delete a decision (requires --confirm)")
+	fmt.Println("  revisit  Replace an older decision with a new one (creates the revises link)")
+	fmt.Println("  link     Manage decision-to-issue/requirement/decision links")
 	fmt.Println("")
 	fmt.Println("Grammar:")
-	fmt.Println("  az decision list [--json] [--issue <id>] [--req <id>] [--status <s> ...] [--id <id> ...] [--query <text>]")
+	fmt.Println("  az decision list [--json] [--issue <id>] [--req <id>] [--id <id> ...] [--query <text>]")
 	fmt.Println("  az decision get --id <id> [--with-links] [--json]")
-	fmt.Println("  az decision create --id <slug> --title <text> [--context ...] [--decision ...] [--consequences ...] [--status ...] [--issue <id> ...] [--req <id> ...] [--json]")
-	fmt.Println("  az decision update --id <id> [--title ...] [--context ...] [--decision ...] [--consequences ...] [--status ...] [--json]")
+	fmt.Println("  az decision record --title <text> --rationale <text> [--context <text>] [--issue <id> ...] [--req <id> ...] [--json]")
+	fmt.Println("  az decision update --id <id> [--title ...] [--rationale ...] [--context ...] [--json]")
 	fmt.Println("  az decision delete --id <id> --confirm [--json]")
+	fmt.Println("  az decision revisit --id <old-id> (--new <existing-id> | --title <text> --rationale <text>) [--context ...] [--note ...] [--json]")
 	fmt.Println("  az decision link list|add|remove ...")
 	fmt.Println("")
 	fmt.Println("Examples:")
-	fmt.Println("  az decision create --id use-sqlite --title \"Use SQLite for store\" --context \"Need durable local store\" --decision \"SQLite\" --status accepted --issue cgn")
+	fmt.Println("  az decision record --title \"Use SQLite for the store\" --rationale \"Existing schema; new datastore not worth the operational cost\" --issue cgn")
 	fmt.Println("  az decision list --issue cgn")
-	fmt.Println("  az decision get --id use-sqlite --with-links")
-	fmt.Println("  az decision link add --id use-sqlite --req cgn-req-1 --relation implements")
+	fmt.Println("  az decision get --id dec-1 --with-links")
+	fmt.Println("  az decision revisit --id dec-1 --title \"Move to Postgres\" --rationale \"Multi-process write contention; sqlite no longer fits\"")
 }
 
 func printDecisionLinkUsage() {
 	fmt.Println("Usage: az decision link <list|add|remove> [arguments]")
 	fmt.Println("")
 	fmt.Println("Grammar:")
-	fmt.Println("  az decision link list [--json] [--id <decision-id>] [--kind <issue|requirement>] [--target <id>]")
-	fmt.Println("  az decision link add --id <decision-id> (--issue <id> | --req <id>) [--relation <relates|implements|supersedes|superseded-by>] [--note <text>] [--json]")
-	fmt.Println("  az decision link remove --id <decision-id> (--issue <id> | --req <id>) [--json]")
+	fmt.Println("  az decision link list [--json] [--id <decision-id>] [--kind <issue|requirement|decision>] [--target <id>]")
+	fmt.Println("  az decision link add --id <decision-id> (--issue <id> | --req <id> | --decision <id>) [--relation <applies-to|revises|informs>] [--note <text>] [--json]")
+	fmt.Println("  az decision link remove --id <decision-id> (--issue <id> | --req <id> | --decision <id>) [--json]")
 }

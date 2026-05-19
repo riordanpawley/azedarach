@@ -734,14 +734,13 @@ func TestDetailPanelRendersDecisionLinks(t *testing.T) {
 
 	panel := NewDetailPanel(task).WithDecisionLinks([]DecisionLinkSummary{
 		{
-			DecisionID:    "use-sqlite-store",
+			DecisionID:    "dec-1",
 			DecisionTitle: "Use SQLite for decision store",
-			Status:        "accepted",
-			Relation:      "implements",
+			Relation:      "applies-to",
 		},
 		{
-			DecisionID: "polymorphic-link-table",
-			Relation:   "relates",
+			DecisionID: "dec-2",
+			Relation:   "informs",
 			Note:       "discussed at sync",
 		},
 	})
@@ -749,13 +748,13 @@ func TestDetailPanelRendersDecisionLinks(t *testing.T) {
 	view := panel.View()
 
 	assert.Contains(t, view, "Decisions")
-	assert.Contains(t, view, "implements")
-	assert.Contains(t, view, "use-sqlite-store")
-	assert.Contains(t, view, "[accepted]")
+	assert.Contains(t, view, "applies-to")
+	assert.Contains(t, view, "dec-1")
 	assert.Contains(t, view, "Use SQLite for decision store")
-	assert.Contains(t, view, "relates")
-	assert.Contains(t, view, "polymorphic-link-table")
+	assert.Contains(t, view, "informs")
+	assert.Contains(t, view, "dec-2")
 	assert.Contains(t, view, "discussed at sync")
+	assert.NotContains(t, view, "[accepted]", "status should no longer appear in the Decisions row")
 }
 
 func TestDetailPanelOmitsDecisionsSectionWhenEmpty(t *testing.T) {

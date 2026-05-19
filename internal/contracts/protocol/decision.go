@@ -9,7 +9,7 @@ import (
 const (
 	CommandDecisionList       = "decision.list"
 	CommandDecisionGet        = "decision.get"
-	CommandDecisionCreate     = "decision.create"
+	CommandDecisionRecord     = "decision.record"
 	CommandDecisionUpdate     = "decision.update"
 	CommandDecisionDelete     = "decision.delete"
 	CommandDecisionLinkList   = "decision.link.list"
@@ -17,74 +17,53 @@ const (
 	CommandDecisionLinkRemove = "decision.link.remove"
 )
 
-type DecisionStatus string
-
-const (
-	DecisionStatusProposed   DecisionStatus = "proposed"
-	DecisionStatusAccepted   DecisionStatus = "accepted"
-	DecisionStatusRejected   DecisionStatus = "rejected"
-	DecisionStatusDeprecated DecisionStatus = "deprecated"
-	DecisionStatusSuperseded DecisionStatus = "superseded"
-)
-
-func (s DecisionStatus) Valid() bool {
-	switch s {
-	case DecisionStatusProposed,
-		DecisionStatusAccepted,
-		DecisionStatusRejected,
-		DecisionStatusDeprecated,
-		DecisionStatusSuperseded:
-		return true
-	}
-	return false
-}
-
+// DecisionTargetKind enumerates the things a decision link can point at.
 type DecisionTargetKind string
 
 const (
 	DecisionTargetIssue       DecisionTargetKind = "issue"
 	DecisionTargetRequirement DecisionTargetKind = "requirement"
+	DecisionTargetDecision    DecisionTargetKind = "decision"
 )
 
 func (k DecisionTargetKind) Valid() bool {
 	switch k {
-	case DecisionTargetIssue, DecisionTargetRequirement:
+	case DecisionTargetIssue, DecisionTargetRequirement, DecisionTargetDecision:
 		return true
 	}
 	return false
 }
 
+// DecisionRelation is the role a link plays. applies-to is the default. The
+// presence of a revises link is the single source of truth for "this decision
+// replaced an older one" — there is no status column on the decision itself.
 type DecisionRelation string
 
 const (
-	DecisionRelationRelates      DecisionRelation = "relates"
-	DecisionRelationImplements   DecisionRelation = "implements"
-	DecisionRelationSupersedes   DecisionRelation = "supersedes"
-	DecisionRelationSupersededBy DecisionRelation = "superseded-by"
+	DecisionRelationAppliesTo DecisionRelation = "applies-to"
+	DecisionRelationRevises   DecisionRelation = "revises"
+	DecisionRelationInforms   DecisionRelation = "informs"
 )
 
 func (r DecisionRelation) Valid() bool {
 	switch r {
-	case DecisionRelationRelates,
-		DecisionRelationImplements,
-		DecisionRelationSupersedes,
-		DecisionRelationSupersededBy:
+	case DecisionRelationAppliesTo, DecisionRelationRevises, DecisionRelationInforms:
 		return true
 	}
 	return false
 }
 
+// Decision is the recorded fact of a choice plus its rationale.
 type Decision struct {
-	ID           string         `json:"id" msgpack:"id"`
-	Title        string         `json:"title" msgpack:"title"`
-	Context      string         `json:"context,omitempty" msgpack:"context,omitempty"`
-	Decision     string         `json:"decision,omitempty" msgpack:"decision,omitempty"`
-	Consequences string         `json:"consequences,omitempty" msgpack:"consequences,omitempty"`
-	Status       DecisionStatus `json:"status" msgpack:"status"`
-	CreatedAt    time.Time      `json:"created_at" msgpack:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at" msgpack:"updated_at"`
+	ID        string    `json:"id" msgpack:"id"`
+	Title     string    `json:"title" msgpack:"title"`
+	Rationale string    `json:"rationale" msgpack:"rationale"`
+	Context   string    `json:"context,omitempty" msgpack:"context,omitempty"`
+	CreatedAt time.Time `json:"created_at" msgpack:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" msgpack:"updated_at"`
 }
 
+// DecisionLink connects a decision to an issue, requirement, or another decision.
 type DecisionLink struct {
 	ID         string             `json:"id" msgpack:"id"`
 	DecisionID string             `json:"decision_id" msgpack:"decision_id"`
@@ -96,7 +75,6 @@ type DecisionLink struct {
 
 type DecisionListRequestBody struct {
 	IDs           []string             `json:"ids,omitempty" msgpack:"ids,omitempty"`
-	Statuses      []DecisionStatus     `json:"statuses,omitempty" msgpack:"statuses,omitempty"`
 	IssueID       naming.IssueID       `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
 	RequirementID naming.RequirementID `json:"req_id,omitempty" msgpack:"req_id,omitempty"`
 	Query         string               `json:"query,omitempty" msgpack:"query,omitempty"`
@@ -108,8 +86,8 @@ type DecisionListResponseBody struct {
 }
 
 type DecisionGetRequestBody struct {
-	ID          string `json:"id" msgpack:"id"`
-	IncludeLinks bool  `json:"include_links,omitempty" msgpack:"include_links,omitempty"`
+	ID           string `json:"id" msgpack:"id"`
+	IncludeLinks bool   `json:"include_links,omitempty" msgpack:"include_links,omitempty"`
 }
 
 type DecisionGetResponseBody struct {
@@ -117,26 +95,24 @@ type DecisionGetResponseBody struct {
 	Links    []DecisionLink `json:"links,omitempty" msgpack:"links,omitempty"`
 }
 
-type DecisionCreateRequestBody struct {
-	ID           string         `json:"id" msgpack:"id"`
-	Title        string         `json:"title" msgpack:"title"`
-	Context      string         `json:"context,omitempty" msgpack:"context,omitempty"`
-	Decision     string         `json:"decision,omitempty" msgpack:"decision,omitempty"`
-	Consequences string         `json:"consequences,omitempty" msgpack:"consequences,omitempty"`
-	Status       DecisionStatus `json:"status,omitempty" msgpack:"status,omitempty"`
+// DecisionRecordRequestBody creates a new decision. ID is allocated by the
+// store (dec-N) so the caller doesn't have to pick a slug; title and rationale
+// are required.
+type DecisionRecordRequestBody struct {
+	Title     string `json:"title" msgpack:"title"`
+	Rationale string `json:"rationale" msgpack:"rationale"`
+	Context   string `json:"context,omitempty" msgpack:"context,omitempty"`
 }
 
-type DecisionCreateResponseBody struct {
+type DecisionRecordResponseBody struct {
 	Decision Decision `json:"decision" msgpack:"decision"`
 }
 
 type DecisionUpdateRequestBody struct {
-	ID           string          `json:"id" msgpack:"id"`
-	Title        *string         `json:"title,omitempty" msgpack:"title,omitempty"`
-	Context      *string         `json:"context,omitempty" msgpack:"context,omitempty"`
-	Decision     *string         `json:"decision,omitempty" msgpack:"decision,omitempty"`
-	Consequences *string         `json:"consequences,omitempty" msgpack:"consequences,omitempty"`
-	Status       *DecisionStatus `json:"status,omitempty" msgpack:"status,omitempty"`
+	ID        string  `json:"id" msgpack:"id"`
+	Title     *string `json:"title,omitempty" msgpack:"title,omitempty"`
+	Rationale *string `json:"rationale,omitempty" msgpack:"rationale,omitempty"`
+	Context   *string `json:"context,omitempty" msgpack:"context,omitempty"`
 }
 
 type DecisionUpdateResponseBody struct {

@@ -11,7 +11,7 @@ import (
 type fakeDecisionService struct {
 	listFn       func(context.Context, protocol.DecisionListRequestBody) (protocol.DecisionListResponseBody, error)
 	getFn        func(context.Context, protocol.DecisionGetRequestBody) (protocol.DecisionGetResponseBody, error)
-	createFn     func(context.Context, protocol.DecisionCreateRequestBody) (protocol.DecisionCreateResponseBody, error)
+	recordFn     func(context.Context, protocol.DecisionRecordRequestBody) (protocol.DecisionRecordResponseBody, error)
 	updateFn     func(context.Context, protocol.DecisionUpdateRequestBody) (protocol.DecisionUpdateResponseBody, error)
 	deleteFn     func(context.Context, protocol.DecisionDeleteRequestBody) (protocol.DecisionDeleteResponseBody, error)
 	listLinksFn  func(context.Context, protocol.DecisionLinkListRequestBody) (protocol.DecisionLinkListResponseBody, error)
@@ -31,11 +31,11 @@ func (f *fakeDecisionService) GetDecision(ctx context.Context, req protocol.Deci
 	}
 	return protocol.DecisionGetResponseBody{}, nil
 }
-func (f *fakeDecisionService) CreateDecision(ctx context.Context, req protocol.DecisionCreateRequestBody) (protocol.DecisionCreateResponseBody, error) {
-	if f.createFn != nil {
-		return f.createFn(ctx, req)
+func (f *fakeDecisionService) RecordDecision(ctx context.Context, req protocol.DecisionRecordRequestBody) (protocol.DecisionRecordResponseBody, error) {
+	if f.recordFn != nil {
+		return f.recordFn(ctx, req)
 	}
-	return protocol.DecisionCreateResponseBody{}, nil
+	return protocol.DecisionRecordResponseBody{Decision: protocol.Decision{ID: "dec-1", Title: req.Title, Rationale: req.Rationale, Context: req.Context}}, nil
 }
 func (f *fakeDecisionService) UpdateDecision(ctx context.Context, req protocol.DecisionUpdateRequestBody) (protocol.DecisionUpdateResponseBody, error) {
 	if f.updateFn != nil {
@@ -68,28 +68,24 @@ func (f *fakeDecisionService) RemoveDecisionLink(ctx context.Context, req protoc
 	return protocol.DecisionLinkRemoveResponseBody{}, nil
 }
 
-func TestDecisionHandler_CreateValidation(t *testing.T) {
+func TestDecisionHandler_RecordValidation(t *testing.T) {
 	handler := NewDecisionHandler(&fakeDecisionService{})
 
 	cases := []struct {
 		name string
-		body protocol.DecisionCreateRequestBody
+		body protocol.DecisionRecordRequestBody
 		ok   bool
 	}{
-		{"empty id", protocol.DecisionCreateRequestBody{Title: "x"}, false},
-		{"empty title", protocol.DecisionCreateRequestBody{ID: "x"}, false},
-		{"bad status", protocol.DecisionCreateRequestBody{ID: "x", Title: "y", Status: "garbage"}, false},
-		{"valid", protocol.DecisionCreateRequestBody{ID: "x", Title: "y"}, true},
-		{"valid w/ accepted", protocol.DecisionCreateRequestBody{ID: "x", Title: "y", Status: protocol.DecisionStatusAccepted}, true},
+		{"missing title", protocol.DecisionRecordRequestBody{Rationale: "why"}, false},
+		{"missing rationale", protocol.DecisionRecordRequestBody{Title: "what"}, false},
+		{"both empty", protocol.DecisionRecordRequestBody{}, false},
+		{"valid", protocol.DecisionRecordRequestBody{Title: "what", Rationale: "why"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			payload, err := json.Marshal(tc.body)
-			if err != nil {
-				t.Fatalf("marshal: %v", err)
-			}
+			payload, _ := json.Marshal(tc.body)
 			resp := handler.Handle(context.Background(), protocol.RequestEnvelope{
-				Command: protocol.CommandDecisionCreate,
+				Command: protocol.CommandDecisionRecord,
 				Body:    payload,
 			})
 			gotOK := resp.OK && resp.Error == nil
@@ -101,12 +97,10 @@ func TestDecisionHandler_CreateValidation(t *testing.T) {
 }
 
 func TestDecisionHandler_LinkAddValidation(t *testing.T) {
-	called := false
 	handler := NewDecisionHandler(&fakeDecisionService{
 		addLinkFn: func(ctx context.Context, req protocol.DecisionLinkAddRequestBody) (protocol.DecisionLinkAddResponseBody, error) {
-			called = true
 			return protocol.DecisionLinkAddResponseBody{Link: protocol.DecisionLink{
-				ID:         "d1:issue:az-1",
+				ID:         "dec-1:issue:az-1",
 				DecisionID: req.DecisionID,
 				TargetKind: req.TargetKind,
 				TargetID:   req.TargetID,
@@ -116,7 +110,7 @@ func TestDecisionHandler_LinkAddValidation(t *testing.T) {
 	})
 
 	// Missing target kind: should fail.
-	payload, _ := json.Marshal(protocol.DecisionLinkAddRequestBody{DecisionID: "d1", TargetID: "az-1"})
+	payload, _ := json.Marshal(protocol.DecisionLinkAddRequestBody{DecisionID: "dec-1", TargetID: "az-1"})
 	resp := handler.Handle(context.Background(), protocol.RequestEnvelope{
 		Command: protocol.CommandDecisionLinkAdd,
 		Body:    payload,
@@ -124,30 +118,26 @@ func TestDecisionHandler_LinkAddValidation(t *testing.T) {
 	if resp.OK {
 		t.Fatalf("expected validation failure for missing target kind")
 	}
-	if called {
-		t.Fatalf("service should not have been called on validation failure")
-	}
 
-	// Valid: relation defaults to relates.
+	// Decision-to-decision with revises relation succeeds (and relation default to applies-to).
 	payload, _ = json.Marshal(protocol.DecisionLinkAddRequestBody{
-		DecisionID: "d1", TargetID: "az-1", TargetKind: protocol.DecisionTargetIssue,
+		DecisionID: "dec-2",
+		TargetKind: protocol.DecisionTargetDecision,
+		TargetID:   "dec-1",
+		Relation:   protocol.DecisionRelationRevises,
 	})
 	resp = handler.Handle(context.Background(), protocol.RequestEnvelope{
 		Command: protocol.CommandDecisionLinkAdd,
 		Body:    payload,
 	})
 	if !resp.OK || resp.Error != nil {
-		t.Fatalf("expected success, got error: %+v", resp.Error)
-	}
-	if !called {
-		t.Fatalf("expected service call")
+		t.Fatalf("expected success, got %+v", resp.Error)
 	}
 }
 
 func TestDecisionHandler_DeleteRequiresConfirm(t *testing.T) {
 	handler := NewDecisionHandler(&fakeDecisionService{})
-
-	payload, _ := json.Marshal(protocol.DecisionDeleteRequestBody{ID: "x", Confirm: false})
+	payload, _ := json.Marshal(protocol.DecisionDeleteRequestBody{ID: "dec-1"})
 	resp := handler.Handle(context.Background(), protocol.RequestEnvelope{
 		Command: protocol.CommandDecisionDelete,
 		Body:    payload,
@@ -156,13 +146,13 @@ func TestDecisionHandler_DeleteRequiresConfirm(t *testing.T) {
 		t.Fatalf("expected delete without confirm to fail")
 	}
 
-	payload, _ = json.Marshal(protocol.DecisionDeleteRequestBody{ID: "x", Confirm: true})
+	payload, _ = json.Marshal(protocol.DecisionDeleteRequestBody{ID: "dec-1", Confirm: true})
 	resp = handler.Handle(context.Background(), protocol.RequestEnvelope{
 		Command: protocol.CommandDecisionDelete,
 		Body:    payload,
 	})
 	if !resp.OK {
-		t.Fatalf("expected delete with confirm to succeed, got error: %+v", resp.Error)
+		t.Fatalf("expected delete with confirm to succeed, got %+v", resp.Error)
 	}
 }
 

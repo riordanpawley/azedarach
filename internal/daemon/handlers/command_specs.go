@@ -93,7 +93,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandSpecSyncMD:            {Command: protocol.CommandSpecSyncMD, DispatchTarget: CommandDispatchSpec},
 	protocol.CommandDecisionList:          {Command: protocol.CommandDecisionList, DispatchTarget: CommandDispatchDecision},
 	protocol.CommandDecisionGet:           {Command: protocol.CommandDecisionGet, DispatchTarget: CommandDispatchDecision},
-	protocol.CommandDecisionCreate:        {Command: protocol.CommandDecisionCreate, DispatchTarget: CommandDispatchDecision},
+	protocol.CommandDecisionRecord:        {Command: protocol.CommandDecisionRecord, DispatchTarget: CommandDispatchDecision},
 	protocol.CommandDecisionUpdate:        {Command: protocol.CommandDecisionUpdate, DispatchTarget: CommandDispatchDecision},
 	protocol.CommandDecisionDelete:        {Command: protocol.CommandDecisionDelete, DispatchTarget: CommandDispatchDecision},
 	protocol.CommandDecisionLinkList:      {Command: protocol.CommandDecisionLinkList, DispatchTarget: CommandDispatchDecision},

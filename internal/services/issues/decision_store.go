@@ -20,93 +20,60 @@ const (
 	decisionOpDelete = "delete"
 )
 
-func (c *Client) insertDecisionAuditRow(ctx context.Context, execer sqlRequirementExecer, entityType, entityID, operation string, before, after any) error {
-	beforeJSON, err := marshalAuditSnapshot(before)
-	if err != nil {
-		return err
-	}
-	afterJSON, err := marshalAuditSnapshot(after)
-	if err != nil {
-		return err
-	}
-	_, err = execer.ExecContext(ctx, `
-		INSERT INTO decision_audit_log (
-			entity_type, entity_id, operation, actor_source,
-			before_json, after_json, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, entityType, entityID, operation, specAuditActorSource(ctx), string(beforeJSON), string(afterJSON), formatTimestamp(time.Now().UTC()))
-	return err
-}
-
-type DecisionStatus string
-
-const (
-	DecisionStatusProposed   DecisionStatus = "proposed"
-	DecisionStatusAccepted   DecisionStatus = "accepted"
-	DecisionStatusRejected   DecisionStatus = "rejected"
-	DecisionStatusDeprecated DecisionStatus = "deprecated"
-	DecisionStatusSuperseded DecisionStatus = "superseded"
-)
-
-func ValidDecisionStatus(s DecisionStatus) bool {
-	switch s {
-	case DecisionStatusProposed,
-		DecisionStatusAccepted,
-		DecisionStatusRejected,
-		DecisionStatusDeprecated,
-		DecisionStatusSuperseded:
-		return true
-	}
-	return false
-}
-
+// DecisionTargetKind enumerates what a decision link points at. Decisions can
+// link to issues, requirements, or other decisions (the latter is how revisions
+// are recorded).
 type DecisionTargetKind string
 
 const (
 	DecisionTargetIssue       DecisionTargetKind = "issue"
 	DecisionTargetRequirement DecisionTargetKind = "requirement"
+	DecisionTargetDecision    DecisionTargetKind = "decision"
 )
 
 func ValidDecisionTargetKind(k DecisionTargetKind) bool {
 	switch k {
-	case DecisionTargetIssue, DecisionTargetRequirement:
+	case DecisionTargetIssue, DecisionTargetRequirement, DecisionTargetDecision:
 		return true
 	}
 	return false
 }
 
+// DecisionRelation is the role a link plays. Defaults to applies-to. The
+// revises relation is what we use to express "decision X replaced decision Y";
+// the existence of such a link is the single source of truth for revisiting.
 type DecisionRelation string
 
 const (
-	DecisionRelationRelates       DecisionRelation = "relates"
-	DecisionRelationImplements    DecisionRelation = "implements"
-	DecisionRelationSupersedes    DecisionRelation = "supersedes"
-	DecisionRelationSupersededBy  DecisionRelation = "superseded-by"
+	DecisionRelationAppliesTo DecisionRelation = "applies-to"
+	DecisionRelationRevises   DecisionRelation = "revises"
+	DecisionRelationInforms   DecisionRelation = "informs"
 )
 
 func ValidDecisionRelation(r DecisionRelation) bool {
 	switch r {
-	case DecisionRelationRelates,
-		DecisionRelationImplements,
-		DecisionRelationSupersedes,
-		DecisionRelationSupersededBy:
+	case DecisionRelationAppliesTo, DecisionRelationRevises, DecisionRelationInforms:
 		return true
 	}
 	return false
 }
 
+// Decision is the recorded fact of a choice plus the reasoning behind it.
+// Status is intentionally absent — whether a decision was revisited is
+// inferred from the presence of an incoming revises link, not from a column.
 type Decision struct {
-	LocalID      string         `json:"id"`
-	Title        string         `json:"title"`
-	Context      string         `json:"context"`
-	Decision     string         `json:"decision"`
-	Consequences string         `json:"consequences"`
-	Status       DecisionStatus `json:"status"`
-	CreatedAt    time.Time      `json:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at"`
-	DeletedAt    *time.Time     `json:"deleted_at,omitempty"`
+	LocalID   string     `json:"id"`
+	Title     string     `json:"title"`
+	Rationale string     `json:"rationale"`
+	Context   string     `json:"context,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
 }
 
+// DecisionLink connects a decision to an issue, a requirement, or another
+// decision. The latter case (target_kind=decision, relation=revises) is how
+// supersession is expressed.
 type DecisionLink struct {
 	ID         string             `json:"id"`
 	DecisionID string             `json:"decision_id"`
@@ -119,25 +86,19 @@ type DecisionLink struct {
 	DeletedAt  *time.Time         `json:"deleted_at,omitempty"`
 }
 
-type CreateDecisionParams struct {
-	LocalID      string
-	Title        string
-	Context      string
-	Decision     string
-	Consequences string
-	Status       DecisionStatus
+type RecordDecisionParams struct {
+	Title     string
+	Rationale string
+	Context   string
 }
 
 type UpdateDecisionParams struct {
-	Title        *string
-	Context      *string
-	Decision     *string
-	Consequences *string
-	Status       *DecisionStatus
+	Title     *string
+	Rationale *string
+	Context   *string
 }
 
 type DecisionFilter struct {
-	Statuses       []DecisionStatus
 	LocalIDs       []string
 	IssueID        string
 	RequirementID  string
@@ -171,20 +132,22 @@ type decisionLinkRecord struct {
 	DecisionLink
 }
 
-func (c *Client) CreateDecision(ctx context.Context, params CreateDecisionParams) (Decision, error) {
+// RecordDecision creates a new decision with an auto-allocated dec-N id.
+// Title and rationale are required; context is optional.
+func (c *Client) RecordDecision(ctx context.Context, params RecordDecisionParams) (Decision, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return Decision{}, err
 	}
 
-	normalized, err := normalizeCreateDecisionParams(params)
+	normalized, err := normalizeRecordDecisionParams(params)
 	if err != nil {
-		return Decision{}, c.wrapError("create-decision", normalized.LocalID, err)
+		return Decision{}, c.wrapError("record-decision", "", err)
 	}
 
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return Decision{}, c.wrapError("create-decision", normalized.LocalID, err)
+		return Decision{}, c.wrapError("record-decision", "", err)
 	}
 	defer func() {
 		if tx != nil {
@@ -193,44 +156,45 @@ func (c *Client) CreateDecision(ctx context.Context, params CreateDecisionParams
 	}()
 
 	now := time.Now().UTC()
-	decision := Decision{
-		LocalID:      normalized.LocalID,
-		Title:        normalized.Title,
-		Context:      normalized.Context,
-		Decision:     normalized.Decision,
-		Consequences: normalized.Consequences,
-		Status:       normalized.Status,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}
-
-	if _, err := tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 		INSERT INTO decisions (
-			local_id, title, context, decision, consequences,
-			status, created_at, updated_at, deleted_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+			local_id, title, rationale, context, created_at, updated_at, deleted_at
+		) VALUES (?, ?, ?, ?, ?, ?, NULL)
 	`,
-		decision.LocalID,
-		decision.Title,
-		nullableString(decision.Context),
-		nullableString(decision.Decision),
-		nullableString(decision.Consequences),
-		string(decision.Status),
-		formatTimestamp(decision.CreatedAt),
-		formatTimestamp(decision.UpdatedAt),
-	); err != nil {
-		return Decision{}, c.wrapError("create-decision", decision.LocalID, classifySQLiteConstraint(err))
+		"", // placeholder; filled in via UPDATE below using the assigned rowid
+		normalized.Title,
+		nullableString(normalized.Rationale),
+		nullableString(normalized.Context),
+		formatTimestamp(now),
+		formatTimestamp(now),
+	)
+	if err != nil {
+		return Decision{}, c.wrapError("record-decision", "", classifySQLiteConstraint(err))
+	}
+	rowID, err := result.LastInsertId()
+	if err != nil {
+		return Decision{}, c.wrapError("record-decision", "", err)
+	}
+	localID := fmt.Sprintf("dec-%d", rowID)
+	if _, err := tx.ExecContext(ctx, `UPDATE decisions SET local_id = ? WHERE id = ?`, localID, rowID); err != nil {
+		return Decision{}, c.wrapError("record-decision", localID, classifySQLiteConstraint(err))
 	}
 
-	if err := c.insertDecisionAuditRow(ctx, tx, decisionEntityKind, decision.LocalID, decisionOpCreate, nil, decision); err != nil {
-		return Decision{}, c.wrapError("create-decision", decision.LocalID, err)
+	decision := Decision{
+		LocalID:   localID,
+		Title:     normalized.Title,
+		Rationale: normalized.Rationale,
+		Context:   normalized.Context,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
-
+	if err := c.insertDecisionAuditRow(ctx, tx, decisionEntityKind, localID, decisionOpCreate, nil, decision); err != nil {
+		return Decision{}, c.wrapError("record-decision", localID, err)
+	}
 	if err := tx.Commit(); err != nil {
-		return Decision{}, c.wrapError("create-decision", decision.LocalID, err)
+		return Decision{}, c.wrapError("record-decision", localID, err)
 	}
 	tx = nil
-
 	return decision, nil
 }
 
@@ -256,14 +220,12 @@ func (c *Client) ListDecisions(ctx context.Context, filter DecisionFilter) ([]De
 	query.WriteString(`
 		SELECT DISTINCT
 			d.id, d.local_id, d.title,
+			COALESCE(d.rationale, ''),
 			COALESCE(d.context, ''),
-			COALESCE(d.decision, ''),
-			COALESCE(d.consequences, ''),
-			d.status, d.created_at, d.updated_at, d.deleted_at
+			d.created_at, d.updated_at, d.deleted_at
 		FROM decisions d
 	`)
-
-	args := make([]any, 0, 8)
+	args := make([]any, 0, 6)
 	joinedLinks := false
 	joinLinks := func() {
 		if joinedLinks {
@@ -272,25 +234,13 @@ func (c *Client) ListDecisions(ctx context.Context, filter DecisionFilter) ([]De
 		query.WriteString(` JOIN decision_links l ON l.decision_id = d.id AND l.deleted_at IS NULL`)
 		joinedLinks = true
 	}
-
-	if trimmed := strings.TrimSpace(filter.IssueID); trimmed != "" {
-		joinLinks()
-	}
-	if trimmed := strings.TrimSpace(filter.RequirementID); trimmed != "" {
+	if strings.TrimSpace(filter.IssueID) != "" || strings.TrimSpace(filter.RequirementID) != "" {
 		joinLinks()
 	}
 
 	query.WriteString(` WHERE 1 = 1`)
 	if !filter.IncludeDeleted {
 		query.WriteString(` AND d.deleted_at IS NULL`)
-	}
-	if len(filter.Statuses) > 0 {
-		placeholders := make([]string, 0, len(filter.Statuses))
-		for _, status := range dedupeDecisionStatuses(filter.Statuses) {
-			placeholders = append(placeholders, "?")
-			args = append(args, string(status))
-		}
-		query.WriteString(` AND d.status IN (` + strings.Join(placeholders, ",") + `)`)
 	}
 	if trimmed := strings.TrimSpace(filter.IssueID); trimmed != "" {
 		query.WriteString(` AND l.target_kind = ? AND l.target_id = ?`)
@@ -302,10 +252,9 @@ func (c *Client) ListDecisions(ctx context.Context, filter DecisionFilter) ([]De
 	}
 	if trimmed := strings.TrimSpace(filter.Query); trimmed != "" {
 		like := "%" + trimmed + "%"
-		query.WriteString(` AND (d.local_id LIKE ? OR d.title LIKE ? OR COALESCE(d.context, '') LIKE ? OR COALESCE(d.decision, '') LIKE ?)`)
+		query.WriteString(` AND (d.local_id LIKE ? OR d.title LIKE ? OR COALESCE(d.rationale, '') LIKE ? OR COALESCE(d.context, '') LIKE ?)`)
 		args = append(args, like, like, like, like)
 	}
-
 	query.WriteString(` ORDER BY d.updated_at DESC, d.local_id ASC`)
 
 	rows, err := db.QueryContext(ctx, query.String(), args...)
@@ -341,7 +290,6 @@ func (c *Client) UpdateDecision(ctx context.Context, selector string, params Upd
 	if err != nil {
 		return Decision{}, err
 	}
-
 	selector = strings.TrimSpace(selector)
 	if selector == "" {
 		return Decision{}, c.wrapError("update-decision", selector, errors.New("decision id is required"))
@@ -361,7 +309,6 @@ func (c *Client) UpdateDecision(ctx context.Context, selector string, params Upd
 	if err != nil {
 		return Decision{}, c.wrapError("update-decision", selector, err)
 	}
-
 	after, err := applyDecisionUpdate(before.Decision, params)
 	if err != nil {
 		return Decision{}, c.wrapError("update-decision", before.LocalID, err)
@@ -370,24 +317,20 @@ func (c *Client) UpdateDecision(ctx context.Context, selector string, params Upd
 	after.UpdatedAt = time.Now().UTC()
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE decisions
-		SET title = ?, context = ?, decision = ?, consequences = ?, status = ?, updated_at = ?
+		SET title = ?, rationale = ?, context = ?, updated_at = ?
 		WHERE id = ?
 	`,
 		after.Title,
+		nullableString(after.Rationale),
 		nullableString(after.Context),
-		nullableString(after.Decision),
-		nullableString(after.Consequences),
-		string(after.Status),
 		formatTimestamp(after.UpdatedAt),
 		before.rowID,
 	); err != nil {
 		return Decision{}, c.wrapError("update-decision", before.LocalID, classifySQLiteConstraint(err))
 	}
-
 	if err := c.insertDecisionAuditRow(ctx, tx, decisionEntityKind, before.LocalID, decisionOpUpdate, before.Decision, after); err != nil {
 		return Decision{}, c.wrapError("update-decision", before.LocalID, err)
 	}
-
 	if err := tx.Commit(); err != nil {
 		return Decision{}, c.wrapError("update-decision", before.LocalID, err)
 	}
@@ -419,7 +362,6 @@ func (c *Client) DeleteDecision(ctx context.Context, selector string) error {
 	if err != nil {
 		return c.wrapError("delete-decision", selector, err)
 	}
-
 	links, err := c.listDecisionLinksForDecisionRow(ctx, tx, decision.rowID, false)
 	if err != nil {
 		return c.wrapError("delete-decision", decision.LocalID, err)
@@ -446,8 +388,7 @@ func (c *Client) DeleteDecision(ctx context.Context, selector string) error {
 	afterDecision.DeletedAt = timePointer(now)
 	afterDecision.UpdatedAt = now
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE decisions
-		SET deleted_at = ?, updated_at = ?
+		UPDATE decisions SET deleted_at = ?, updated_at = ?
 		WHERE id = ? AND deleted_at IS NULL
 	`, formatTimestamp(now), formatTimestamp(now), decision.rowID); err != nil {
 		return c.wrapError("delete-decision", decision.LocalID, err)
@@ -468,7 +409,6 @@ func (c *Client) AddDecisionLink(ctx context.Context, params AddDecisionLinkPara
 	if err != nil {
 		return DecisionLink{}, err
 	}
-
 	normalized, err := normalizeAddDecisionLinkParams(params)
 	if err != nil {
 		return DecisionLink{}, c.wrapError("add-decision-link", normalized.DecisionID, err)
@@ -546,7 +486,6 @@ func (c *Client) AddDecisionLink(ctx context.Context, params AddDecisionLinkPara
 	if err := c.insertDecisionAuditRow(ctx, tx, decisionLinkEntityKind, link.ID, operation, before, link); err != nil {
 		return DecisionLink{}, c.wrapError("add-decision-link", normalized.DecisionID, err)
 	}
-
 	if err := tx.Commit(); err != nil {
 		return DecisionLink{}, c.wrapError("add-decision-link", normalized.DecisionID, err)
 	}
@@ -592,8 +531,7 @@ func (c *Client) RemoveDecisionLink(ctx context.Context, decisionSelector string
 	after.DeletedAt = timePointer(now)
 	after.UpdatedAt = now
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE decision_links
-		SET deleted_at = ?, updated_at = ?
+		UPDATE decision_links SET deleted_at = ?, updated_at = ?
 		WHERE id = ? AND deleted_at IS NULL
 	`, formatTimestamp(now), formatTimestamp(now), link.rowID); err != nil {
 		return c.wrapError("remove-decision-link", decisionSelector, err)
@@ -601,7 +539,6 @@ func (c *Client) RemoveDecisionLink(ctx context.Context, decisionSelector string
 	if err := c.insertDecisionAuditRow(ctx, tx, decisionLinkEntityKind, link.DecisionLink.ID, decisionOpDelete, link.DecisionLink, after); err != nil {
 		return c.wrapError("remove-decision-link", decisionSelector, err)
 	}
-
 	if err := tx.Commit(); err != nil {
 		return c.wrapError("remove-decision-link", decisionSelector, err)
 	}
@@ -675,10 +612,9 @@ func (c *Client) lookupDecisionByLocalID(ctx context.Context, queryer sqlRequire
 	query := `
 		SELECT
 			id, local_id, title,
+			COALESCE(rationale, ''),
 			COALESCE(context, ''),
-			COALESCE(decision, ''),
-			COALESCE(consequences, ''),
-			status, created_at, updated_at, deleted_at
+			created_at, updated_at, deleted_at
 		FROM decisions
 		WHERE local_id = ?
 	`
@@ -738,7 +674,6 @@ func (c *Client) listDecisionLinksForDecisionRow(ctx context.Context, queryer sq
 		return nil, err
 	}
 	defer rows.Close()
-
 	records := make([]decisionLinkRecord, 0, 8)
 	for rows.Next() {
 		record, scanErr := scanDecisionLinkRecord(rows)
@@ -758,7 +693,6 @@ func scanDecisionRecord(scanner interface {
 }) (decisionRecord, error) {
 	var record decisionRecord
 	var rowID any
-	var statusRaw string
 	var createdRaw string
 	var updatedRaw string
 	var deletedRaw sql.NullString
@@ -766,10 +700,8 @@ func scanDecisionRecord(scanner interface {
 		&rowID,
 		&record.Decision.LocalID,
 		&record.Decision.Title,
+		&record.Decision.Rationale,
 		&record.Decision.Context,
-		&record.Decision.Decision,
-		&record.Decision.Consequences,
-		&statusRaw,
 		&createdRaw,
 		&updatedRaw,
 		&deletedRaw,
@@ -780,7 +712,6 @@ func scanDecisionRecord(scanner interface {
 		return decisionRecord{}, err
 	}
 	record.rowID = normalizeDBID(rowID)
-	record.Decision.Status = DecisionStatus(statusRaw)
 	record.Decision.CreatedAt = parseTimestamp(createdRaw)
 	record.Decision.UpdatedAt = parseTimestamp(updatedRaw)
 	record.Decision.DeletedAt = parseNullableTimestamp(deletedRaw)
@@ -800,7 +731,6 @@ func scanDecisionLinkRecord(scanner interface {
 	var createdRaw string
 	var updatedRaw string
 	var deletedRaw sql.NullString
-
 	if err := scanner.Scan(
 		&rowID,
 		&decisionPK,
@@ -831,6 +761,10 @@ func scanDecisionLinkRecord(scanner interface {
 	return record, nil
 }
 
+// ensureDecisionLinkTargetExists validates that the link target exists. For
+// decision-to-decision links the target must be an undeleted decision other
+// than the source (self-revising would be confusing); issues and requirements
+// use their existing tables.
 func ensureDecisionLinkTargetExists(ctx context.Context, queryer sqlRequirementQueryer, kind DecisionTargetKind, targetID string) error {
 	targetID = strings.TrimSpace(targetID)
 	if targetID == "" {
@@ -840,9 +774,7 @@ func ensureDecisionLinkTargetExists(ctx context.Context, queryer sqlRequirementQ
 	case DecisionTargetIssue:
 		var exists bool
 		if err := queryer.QueryRowContext(ctx, `
-			SELECT EXISTS(
-				SELECT 1 FROM issues WHERE id = ? AND deleted_at IS NULL
-			)
+			SELECT EXISTS(SELECT 1 FROM issues WHERE id = ? AND deleted_at IS NULL)
 		`, targetID).Scan(&exists); err != nil {
 			return err
 		}
@@ -853,9 +785,7 @@ func ensureDecisionLinkTargetExists(ctx context.Context, queryer sqlRequirementQ
 	case DecisionTargetRequirement:
 		var exists bool
 		if err := queryer.QueryRowContext(ctx, `
-			SELECT EXISTS(
-				SELECT 1 FROM spec_requirements WHERE local_id = ? AND deleted_at IS NULL
-			)
+			SELECT EXISTS(SELECT 1 FROM spec_requirements WHERE local_id = ? AND deleted_at IS NULL)
 		`, targetID).Scan(&exists); err != nil {
 			return err
 		}
@@ -863,28 +793,31 @@ func ensureDecisionLinkTargetExists(ctx context.Context, queryer sqlRequirementQ
 			return fmt.Errorf("%w: requirement %q", domain.ErrNotFound, targetID)
 		}
 		return nil
+	case DecisionTargetDecision:
+		var exists bool
+		if err := queryer.QueryRowContext(ctx, `
+			SELECT EXISTS(SELECT 1 FROM decisions WHERE local_id = ? AND deleted_at IS NULL)
+		`, targetID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("%w: decision %q", domain.ErrNotFound, targetID)
+		}
+		return nil
 	default:
 		return fmt.Errorf("invalid target kind %q", kind)
 	}
 }
 
-func normalizeCreateDecisionParams(params CreateDecisionParams) (CreateDecisionParams, error) {
-	params.LocalID = strings.TrimSpace(params.LocalID)
+func normalizeRecordDecisionParams(params RecordDecisionParams) (RecordDecisionParams, error) {
 	params.Title = strings.TrimSpace(params.Title)
+	params.Rationale = strings.TrimSpace(params.Rationale)
 	params.Context = strings.TrimSpace(params.Context)
-	params.Decision = strings.TrimSpace(params.Decision)
-	params.Consequences = strings.TrimSpace(params.Consequences)
-	if params.LocalID == "" {
-		return params, errors.New("decision id is required")
-	}
 	if params.Title == "" {
 		return params, errors.New("decision title is required")
 	}
-	if params.Status == "" {
-		params.Status = DecisionStatusProposed
-	}
-	if !ValidDecisionStatus(params.Status) {
-		return params, fmt.Errorf("invalid decision status %q", params.Status)
+	if params.Rationale == "" {
+		return params, errors.New("decision rationale is required")
 	}
 	return params, nil
 }
@@ -898,20 +831,15 @@ func applyDecisionUpdate(current Decision, params UpdateDecisionParams) (Decisio
 		}
 		after.Title = title
 	}
+	if params.Rationale != nil {
+		rationale := strings.TrimSpace(*params.Rationale)
+		if rationale == "" {
+			return Decision{}, errors.New("decision rationale cannot be empty")
+		}
+		after.Rationale = rationale
+	}
 	if params.Context != nil {
 		after.Context = strings.TrimSpace(*params.Context)
-	}
-	if params.Decision != nil {
-		after.Decision = strings.TrimSpace(*params.Decision)
-	}
-	if params.Consequences != nil {
-		after.Consequences = strings.TrimSpace(*params.Consequences)
-	}
-	if params.Status != nil {
-		if !ValidDecisionStatus(*params.Status) {
-			return Decision{}, fmt.Errorf("invalid decision status %q", *params.Status)
-		}
-		after.Status = *params.Status
 	}
 	return after, nil
 }
@@ -929,26 +857,16 @@ func normalizeAddDecisionLinkParams(params AddDecisionLinkParams) (AddDecisionLi
 	if !ValidDecisionTargetKind(params.TargetKind) {
 		return params, fmt.Errorf("invalid target kind %q", params.TargetKind)
 	}
+	if params.TargetKind == DecisionTargetDecision && params.TargetID == params.DecisionID {
+		return params, errors.New("a decision cannot link to itself")
+	}
 	if params.Relation == "" {
-		params.Relation = DecisionRelationRelates
+		params.Relation = DecisionRelationAppliesTo
 	}
 	if !ValidDecisionRelation(params.Relation) {
 		return params, fmt.Errorf("invalid relation %q", params.Relation)
 	}
 	return params, nil
-}
-
-func dedupeDecisionStatuses(values []DecisionStatus) []DecisionStatus {
-	seen := make(map[DecisionStatus]struct{}, len(values))
-	out := make([]DecisionStatus, 0, len(values))
-	for _, value := range values {
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
-	}
-	return out
 }
 
 func filterDecisionsByLocalID(decisions []Decision, ids []string) []Decision {
@@ -970,4 +888,22 @@ func filterDecisionsByLocalID(decisions []Decision, ids []string) []Decision {
 
 func decisionLinkID(decisionLocalID string, kind DecisionTargetKind, targetID string) string {
 	return decisionLocalID + ":" + string(kind) + ":" + targetID
+}
+
+func (c *Client) insertDecisionAuditRow(ctx context.Context, execer sqlRequirementExecer, entityType, entityID, operation string, before, after any) error {
+	beforeJSON, err := marshalAuditSnapshot(before)
+	if err != nil {
+		return err
+	}
+	afterJSON, err := marshalAuditSnapshot(after)
+	if err != nil {
+		return err
+	}
+	_, err = execer.ExecContext(ctx, `
+		INSERT INTO decision_audit_log (
+			entity_type, entity_id, operation, actor_source,
+			before_json, after_json, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, entityType, entityID, operation, specAuditActorSource(ctx), string(beforeJSON), string(afterJSON), formatTimestamp(time.Now().UTC()))
+	return err
 }

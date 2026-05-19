@@ -2786,12 +2786,10 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 
 // issueDecisionSummary is the per-decision payload embedded in `az issue get`
 // output (text + JSON). It merges link-level fields (relation, note) with the
-// linked decision's identity (slug, title, status) so a single row is
-// self-describing.
+// linked decision's identity (slug, title) so a single row is self-describing.
 type issueDecisionSummary struct {
 	ID       string `json:"id"`
 	Title    string `json:"title,omitempty"`
-	Status   string `json:"status,omitempty"`
 	Relation string `json:"relation"`
 	Note     string `json:"note,omitempty"`
 }
@@ -2842,7 +2840,6 @@ func fetchIssueDecisions(ctx context.Context, deps *Dependencies, issueID string
 		}
 		if d, ok := byID[link.DecisionID]; ok {
 			summary.Title = d.Title
-			summary.Status = string(d.Status)
 		}
 		out = append(out, summary)
 	}
@@ -2858,13 +2855,10 @@ func printIssueDecisions(decisions []issueDecisionSummary) {
 	for _, d := range decisions {
 		relation := strings.TrimSpace(d.Relation)
 		if relation == "" {
-			relation = "relates"
+			relation = "applies-to"
 		}
 		var b strings.Builder
-		fmt.Fprintf(&b, "  %-13s %s", relation, d.ID)
-		if status := strings.TrimSpace(d.Status); status != "" {
-			fmt.Fprintf(&b, " [%s]", status)
-		}
+		fmt.Fprintf(&b, "  %-12s %s", relation, d.ID)
 		if title := strings.TrimSpace(d.Title); title != "" {
 			b.WriteString("  ")
 			b.WriteString(title)

@@ -38,7 +38,6 @@ type DetailPanel struct {
 type DecisionLinkSummary struct {
 	DecisionID    string
 	DecisionTitle string
-	Status        string
 	Relation      string
 	Note          string
 }
@@ -723,23 +722,19 @@ func (d *DetailPanel) formatTime(t time.Time) string {
 
 // formatDecisionLink renders a single Decisions section row. Format:
 //
-//	relation  decision-slug [status]  Title (optional)  — note (optional)
+//	relation  decision-slug  Title (optional)  — note (optional)
 //
 // All fields except DecisionID are optional and skipped when empty.
 func (d *DetailPanel) formatDecisionLink(link DecisionLinkSummary) string {
 	relation := strings.TrimSpace(link.Relation)
 	if relation == "" {
-		relation = "relates"
+		relation = "applies-to"
 	}
-	status := strings.TrimSpace(link.Status)
 	title := strings.TrimSpace(link.DecisionTitle)
 	note := strings.TrimSpace(link.Note)
 
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("%-13s %s", relation, link.DecisionID))
-	if status != "" {
-		b.WriteString(fmt.Sprintf(" [%s]", status))
-	}
+	fmt.Fprintf(&b, "%-12s %s", relation, link.DecisionID)
 	if title != "" {
 		b.WriteString("  ")
 		b.WriteString(title)

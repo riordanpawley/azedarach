@@ -2787,7 +2787,6 @@ func decisionLinkSummariesFrom(result daemonclient.DecisionLinkListResult) []ove
 		}
 		if d, ok := decisionsByID[link.DecisionID]; ok {
 			summary.DecisionTitle = d.Title
-			summary.Status = string(d.Status)
 		}
 		out = append(out, summary)
 	}

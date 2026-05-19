@@ -14,7 +14,7 @@ var ErrDecisionUnavailable = errors.New("decision service unavailable")
 type DecisionService interface {
 	ListDecisions(context.Context, protocol.DecisionListRequestBody) (protocol.DecisionListResponseBody, error)
 	GetDecision(context.Context, protocol.DecisionGetRequestBody) (protocol.DecisionGetResponseBody, error)
-	CreateDecision(context.Context, protocol.DecisionCreateRequestBody) (protocol.DecisionCreateResponseBody, error)
+	RecordDecision(context.Context, protocol.DecisionRecordRequestBody) (protocol.DecisionRecordResponseBody, error)
 	UpdateDecision(context.Context, protocol.DecisionUpdateRequestBody) (protocol.DecisionUpdateResponseBody, error)
 	DeleteDecision(context.Context, protocol.DecisionDeleteRequestBody) (protocol.DecisionDeleteResponseBody, error)
 	ListDecisionLinks(context.Context, protocol.DecisionLinkListRequestBody) (protocol.DecisionLinkListResponseBody, error)
@@ -54,11 +54,6 @@ func (h *DecisionHandler) Handle(ctx context.Context, req protocol.RequestEnvelo
 			return resp
 		}
 		cmd.IDs = uniqueTrimmedStrings(cmd.IDs)
-		for _, status := range cmd.Statuses {
-			if status != "" && !status.Valid() {
-				return specInvalidRequest(resp, "invalid decision status")
-			}
-		}
 		return specJSONResponse(ctx, resp, h.service.ListDecisions, cmd)
 
 	case protocol.CommandDecisionGet:
@@ -72,20 +67,18 @@ func (h *DecisionHandler) Handle(ctx context.Context, req protocol.RequestEnvelo
 		}
 		return specJSONResponse(ctx, resp, h.service.GetDecision, cmd)
 
-	case protocol.CommandDecisionCreate:
-		var cmd protocol.DecisionCreateRequestBody
+	case protocol.CommandDecisionRecord:
+		var cmd protocol.DecisionRecordRequestBody
 		if !decodeSpecRequest(req.Body, &cmd, &resp) {
 			return resp
 		}
-		cmd.ID = strings.TrimSpace(cmd.ID)
 		cmd.Title = strings.TrimSpace(cmd.Title)
-		if cmd.ID == "" || cmd.Title == "" {
-			return specInvalidRequest(resp, "missing required fields: id/title")
+		cmd.Rationale = strings.TrimSpace(cmd.Rationale)
+		cmd.Context = strings.TrimSpace(cmd.Context)
+		if cmd.Title == "" || cmd.Rationale == "" {
+			return specInvalidRequest(resp, "missing required fields: title/rationale")
 		}
-		if cmd.Status != "" && !cmd.Status.Valid() {
-			return specInvalidRequest(resp, "invalid decision status")
-		}
-		return specJSONResponse(ctx, resp, h.service.CreateDecision, cmd)
+		return specJSONResponse(ctx, resp, h.service.RecordDecision, cmd)
 
 	case protocol.CommandDecisionUpdate:
 		var cmd protocol.DecisionUpdateRequestBody
@@ -97,17 +90,16 @@ func (h *DecisionHandler) Handle(ctx context.Context, req protocol.RequestEnvelo
 			return specInvalidRequest(resp, "missing required field: id")
 		}
 		cmd.Title = trimOptionalString(cmd.Title)
+		cmd.Rationale = trimOptionalString(cmd.Rationale)
 		cmd.Context = trimOptionalString(cmd.Context)
-		cmd.Decision = trimOptionalString(cmd.Decision)
-		cmd.Consequences = trimOptionalString(cmd.Consequences)
-		if cmd.Title == nil && cmd.Context == nil && cmd.Decision == nil && cmd.Consequences == nil && cmd.Status == nil {
+		if cmd.Title == nil && cmd.Rationale == nil && cmd.Context == nil {
 			return specInvalidRequest(resp, "no update fields provided")
 		}
 		if cmd.Title != nil && *cmd.Title == "" {
 			return specInvalidRequest(resp, "title must be non-empty when provided")
 		}
-		if cmd.Status != nil && !cmd.Status.Valid() {
-			return specInvalidRequest(resp, "invalid decision status")
+		if cmd.Rationale != nil && *cmd.Rationale == "" {
+			return specInvalidRequest(resp, "rationale must be non-empty when provided")
 		}
 		return specJSONResponse(ctx, resp, h.service.UpdateDecision, cmd)
 
@@ -133,7 +125,7 @@ func (h *DecisionHandler) Handle(ctx context.Context, req protocol.RequestEnvelo
 		cmd.DecisionID = strings.TrimSpace(cmd.DecisionID)
 		cmd.TargetID = strings.TrimSpace(cmd.TargetID)
 		if cmd.TargetKind != "" && !cmd.TargetKind.Valid() {
-			return specInvalidRequest(resp, "invalid target kind: expected issue|requirement")
+			return specInvalidRequest(resp, "invalid target kind: expected issue|requirement|decision")
 		}
 		return specJSONResponse(ctx, resp, h.service.ListDecisionLinks, cmd)
 
@@ -149,13 +141,13 @@ func (h *DecisionHandler) Handle(ctx context.Context, req protocol.RequestEnvelo
 			return specInvalidRequest(resp, "missing required fields: decision_id/target_id")
 		}
 		if !cmd.TargetKind.Valid() {
-			return specInvalidRequest(resp, "invalid target kind: expected issue|requirement")
+			return specInvalidRequest(resp, "invalid target kind: expected issue|requirement|decision")
 		}
 		if cmd.Relation == "" {
-			cmd.Relation = protocol.DecisionRelationRelates
+			cmd.Relation = protocol.DecisionRelationAppliesTo
 		}
 		if !cmd.Relation.Valid() {
-			return specInvalidRequest(resp, "invalid relation: expected relates|implements|supersedes|superseded-by")
+			return specInvalidRequest(resp, "invalid relation: expected applies-to|revises|informs")
 		}
 		return specJSONResponse(ctx, resp, h.service.AddDecisionLink, cmd)
 
@@ -170,7 +162,7 @@ func (h *DecisionHandler) Handle(ctx context.Context, req protocol.RequestEnvelo
 			return specInvalidRequest(resp, "missing required fields: decision_id/target_id")
 		}
 		if !cmd.TargetKind.Valid() {
-			return specInvalidRequest(resp, "invalid target kind: expected issue|requirement")
+			return specInvalidRequest(resp, "invalid target kind: expected issue|requirement|decision")
 		}
 		return specJSONResponse(ctx, resp, h.service.RemoveDecisionLink, cmd)
 
@@ -206,4 +198,3 @@ func uniqueTrimmedStrings(values []string) []string {
 	}
 	return out
 }
-

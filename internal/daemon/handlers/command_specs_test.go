@@ -160,7 +160,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		protocol.CommandSpecSyncMD,
 		protocol.CommandDecisionList,
 		protocol.CommandDecisionGet,
-		protocol.CommandDecisionCreate,
+		protocol.CommandDecisionRecord,
 		protocol.CommandDecisionUpdate,
 		protocol.CommandDecisionDelete,
 		protocol.CommandDecisionLinkList,
