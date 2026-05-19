@@ -4532,6 +4532,7 @@ type primeTemplateData struct {
 	ActiveIssueID            string
 	SpecEnabled              bool
 	PrimeEvidenceKey         string
+	FanoutViaNative          bool
 	IssueSection             string
 	ActiveIssueClosedWarning string
 	ContextGuardrail         string
@@ -4552,6 +4553,7 @@ func PrimeCommand(deps *Dependencies) error {
 	implementationSection := ""
 	implementationGuardrails := "- Implementation guardrails: in multi-implementation repos, include explicit `--impl <impl>` on new `az issue` writes and use repeated `--impl` only for intentional shared work. For `az issue update`, `--update-impl` is only for changing implementation assignments; status/title/notes updates do not require it."
 	specEnabled := deps != nil && deps.Config != nil && deps.Config.Spec.Enabled
+	fanoutViaNative := primeUsesNativeFanout(deps)
 
 	if primeMode == "question-first" {
 		questionFirstGuardrails = `- Question-first execution rules (Space+Q mode):
@@ -4598,6 +4600,7 @@ func PrimeCommand(deps *Dependencies) error {
 		ActiveIssueID:            issueID,
 		SpecEnabled:              specEnabled,
 		PrimeEvidenceKey:         primeEvidenceKey,
+		FanoutViaNative:          fanoutViaNative,
 		IssueSection:             issueSection,
 		ActiveIssueClosedWarning: activeIssueClosedWarning,
 		ContextGuardrail:         guardrail,
@@ -4611,6 +4614,13 @@ func PrimeCommand(deps *Dependencies) error {
 	}
 	fmt.Print(output)
 	return nil
+}
+
+func primeUsesNativeFanout(deps *Dependencies) bool {
+	if deps == nil || deps.Config == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(deps.Config.Fanout.Via), "native")
 }
 
 func renderPrimeImplementationSection(implementations []string) string {

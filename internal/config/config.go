@@ -24,6 +24,7 @@ type Config struct {
 	DevServer     DevServerConfig    `json:"devServer"`
 	Worktree      WorktreeConfig     `json:"worktree"`
 	Spec          SpecConfig         `json:"spec"`
+	Fanout        FanoutConfig       `json:"fanout"`
 }
 
 type IssueTrackerConfig struct {
@@ -165,6 +166,10 @@ type SpecConfig struct {
 	Enabled bool `json:"enabled"`
 }
 
+type FanoutConfig struct {
+	Via string `json:"via"`
+}
+
 // DefaultConfig returns a Config with sensible defaults
 func DefaultConfig() *Config {
 	homeDir, _ := os.UserHomeDir()
@@ -259,6 +264,9 @@ func DefaultConfig() *Config {
 		},
 		Spec: SpecConfig{
 			Enabled: true,
+		},
+		Fanout: FanoutConfig{
+			Via: "az",
 		},
 	}
 }

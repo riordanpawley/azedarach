@@ -6549,6 +6549,32 @@ func TestPrimeCommandSpecBlockDisabled(t *testing.T) {
 	}
 }
 
+func TestPrimeCommandNativeFanoutGuidance(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(&Dependencies{
+			Config: &config.Config{
+				Spec:   config.SpecConfig{Enabled: true},
+				Fanout: config.FanoutConfig{Via: "native"},
+			},
+		})
+	})
+
+	if !strings.Contains(output, "`fanout.via` is `native`: use your harness-native subagent delegation commands/keywords") {
+		t.Fatalf("prime output missing native fanout guidance: %q", output)
+	}
+	if !strings.Contains(output, "Shorthand: `single-window fanout (native)`") {
+		t.Fatalf("prime output missing native single-window shorthand: %q", output)
+	}
+	if strings.Contains(output, "`az issue fanout --input ./fanout.json`") {
+		t.Fatalf("prime output should avoid az issue fanout command map in native mode: %q", output)
+	}
+	if strings.Contains(output, "Shorthand: `single-window fanout` means split until each child is ready for one subagent, then fan out one subagent per child.") {
+		t.Fatalf("prime output should not include az fanout shorthand in native mode: %q", output)
+	}
+}
+
 type fakeLauncher struct {
 	startErr      error
 	stopErr       error
