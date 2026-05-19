@@ -29,8 +29,6 @@ var orderedMigrations = []migration{
 	{id: "0006_issue_external_refs", path: "migrations/0006_issue_external_refs.sql"},
 	{id: "0007_external_issue_sync_payload", path: "migrations/0007_external_issue_sync_payload.sql"},
 	{id: "0008_decision_tables", path: "migrations/0008_decision_tables.sql"},
-	{id: "0009_decision_audit_log", path: "migrations/0009_decision_audit_log.sql"},
-	{id: "0010_decisions_refresh", path: "migrations/0010_decisions_refresh.sql"},
 }
 
 func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
