@@ -6157,6 +6157,24 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az mail send --parent <parent-issue> --type dependency-ready --body \"...\"`") {
 		t.Fatalf("prime output missing mail send command example: %q", output)
 	}
+	if !strings.Contains(output, "Decision records:") {
+		t.Fatalf("prime output missing decision command map section: %q", output)
+	}
+	if !strings.Contains(output, "Use `az decision` to capture durable architecture/product choices and link them to issues, requirements, or prior decisions.") {
+		t.Fatalf("prime output missing decision use guidance: %q", output)
+	}
+	if !strings.Contains(output, "`az decision list [--json] [--issue <id>] [--req <id>] [--id <id> ...] [--query <text>]`") {
+		t.Fatalf("prime output missing decision list options: %q", output)
+	}
+	if !strings.Contains(output, "`az decision record --title <text> --rationale <text> [--context <text>] [--consequences <text>] [--issue <id> ...] [--req <id> ...] [--json]`") {
+		t.Fatalf("prime output missing decision record options: %q", output)
+	}
+	if !strings.Contains(output, "`az decision link add --id <decision-id> (--issue <id> | --req <id> | --decision <id>) [--relation <applies-to|revises|informs>] [--note <text>] [--json]`") {
+		t.Fatalf("prime output missing decision link options: %q", output)
+	}
+	if !strings.Contains(output, "`az decision sync [--check] [--json]` writes `docs/decisions/*.md` from the store; `az decision import [--check] [--force] [--json]` reads markdown back into the store.") {
+		t.Fatalf("prime output missing decision sync/import guidance: %q", output)
+	}
 	if !strings.Contains(output, "`az session status [issue-id]`, `az daemon start|stop|restart`, `az export --format json [--out <path>]`") {
 		t.Fatalf("prime output missing session/runtime command examples: %q", output)
 	}
