@@ -48,6 +48,7 @@ Commands:
   issue fanout ready [--project <project-id>] --root <issue-id> [--json]  List runnable leaf issues under a fanout root
   issue fanout drift [--project <project-id>] --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
   mail <send|list|watch>  Mailbox event operations for orchestrator/worker coordination
+  orchestrate <status>  Orchestration summary operations for parent issues
   config set spec.enabled <true|false> [--project-dir <dir>]  Update project config
   sync [conflicts] [--all] [<directory>] [--project-dir <dir>] [--json]  Refresh issue tracker state for the current project or all worktrees
   prime                Print AI session primer with current issue context
@@ -98,6 +99,7 @@ Examples:
   az mail send --parent az-123 --type dependency-ready --body "contract merged"
   az mail list --parent az-123 --since 40 --json
   az mail watch --parent az-123 --since 41 --jsonl
+  az orchestrate status --root az-123 --since 41 --json
   az config set spec.enabled false
   az config set spec.enabled true --project-dir .
   az sync

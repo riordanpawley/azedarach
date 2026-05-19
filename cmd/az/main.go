@@ -795,6 +795,30 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Usage: az mail <send|list|watch> [arguments]\n")
 			os.Exit(1)
 		}
+	case "orchestrate":
+		if len(commandArgs) == 0 {
+			fmt.Fprintf(os.Stderr, "Usage: az orchestrate <status> [arguments]\n")
+			os.Exit(1)
+		}
+		switch commandArgs[0] {
+		case "status":
+			opts, err := cli.ParseOrchestrateStatusArgs(commandArgs[1:])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az orchestrate status --root <issue-id> [--project <project-id>] [--since <seq>] [--limit <n>] [--json]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.OrchestrateStatusCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown orchestrate command: %s\n", commandArgs[0])
+			fmt.Fprintf(os.Stderr, "Usage: az orchestrate <status> [arguments]\n")
+			os.Exit(1)
+		}
 
 	case "daemon":
 		if len(commandArgs) != 1 {
