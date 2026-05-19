@@ -863,9 +863,10 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 	}
 	launchCommand := tmuxRunner.sendKeysPayloads[0]
 	if !strings.Contains(launchCommand, "Resolve merge conflicts for issue "+issueID) ||
+		!strings.Contains(launchCommand, `AZEDARACH_ISSUE_ID="`+issueID+`" codex`) ||
 		!strings.Contains(launchCommand, "README.md") ||
 		!strings.Contains(launchCommand, "main.go") ||
-		!strings.Contains(launchCommand, "--dangerously-skip-permissions") {
+		!strings.Contains(launchCommand, "--dangerously-bypass-approvals-and-sandbox") {
 		t.Fatalf("launch command missing conflict prompt or yolo flag: %s", launchCommand)
 	}
 

@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
@@ -129,20 +131,22 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		}
 		d.projectConfigMu.Unlock()
 
-		if loaded, err := appconfig.LoadConfig(repoDir); err == nil && loaded != nil {
-			if candidate := strings.TrimSpace(loaded.Git.BaseBranch); candidate != "" {
-				cfg.BaseBranch = candidate
+		if hasConfigLayers(repoDir) {
+			if loaded, err := appconfig.LoadConfig(repoDir); err == nil && loaded != nil {
+				if candidate := strings.TrimSpace(loaded.Git.BaseBranch); candidate != "" {
+					cfg.BaseBranch = candidate
+				}
+				if tool := strings.TrimSpace(loaded.CLITool); tool != "" {
+					cfg.CLITool = tool
+				}
+				cfg.IssueTracker = loaded.IssueTracker
+				cfg.DangerouslySkipPermissions = loaded.Session.DangerouslySkipPermissions
+				if shell := strings.TrimSpace(loaded.Session.Shell); shell != "" {
+					cfg.SessionShell = shell
+				}
+				cfg.SessionInitCommands = append([]string(nil), loaded.Session.InitCommands...)
+				cfg.WorktreeInitCommands = append([]string(nil), loaded.Worktree.InitCommands...)
 			}
-			if tool := strings.TrimSpace(loaded.CLITool); tool != "" {
-				cfg.CLITool = tool
-			}
-			cfg.IssueTracker = loaded.IssueTracker
-			cfg.DangerouslySkipPermissions = loaded.Session.DangerouslySkipPermissions
-			if shell := strings.TrimSpace(loaded.Session.Shell); shell != "" {
-				cfg.SessionShell = shell
-			}
-			cfg.SessionInitCommands = append([]string(nil), loaded.Session.InitCommands...)
-			cfg.WorktreeInitCommands = append([]string(nil), loaded.Worktree.InitCommands...)
 		}
 	}
 
@@ -168,4 +172,20 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	d.projectConfigMu.Unlock()
 
 	return cfg
+}
+
+func hasConfigLayers(projectPath string) bool {
+	baseDirs, err := appconfig.ResolveConfigLayerBases(projectPath)
+	if err != nil {
+		return false
+	}
+	for _, baseDir := range baseDirs {
+		for _, name := range []string{appconfig.ConfigFileName, appconfig.LocalConfigFileName} {
+			configPath := filepath.Join(baseDir, appconfig.ConfigDirName, name)
+			if _, err := os.Stat(configPath); err == nil {
+				return true
+			}
+		}
+	}
+	return false
 }
