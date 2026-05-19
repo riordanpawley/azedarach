@@ -73,6 +73,12 @@ type decisionSyncOpts struct {
 	Check bool
 }
 
+type decisionImportOpts struct {
+	JSON  bool
+	Check bool
+	Force bool
+}
+
 type decisionLinkListOpts struct {
 	JSON       bool
 	Decision   string
@@ -153,6 +159,13 @@ func runDecisionCommand(cfg *config.Config, args []string) error {
 			return err
 		}
 		return runDecisionSyncRPC(cfg, opts)
+	case "import":
+		opts, err := parseDecisionImportArgs(args[1:])
+		if err != nil {
+			printDecisionUsage()
+			return err
+		}
+		return runDecisionImportRPC(cfg, opts)
 	case "link":
 		return runDecisionLinkCommand(cfg, args[1:])
 	default:
@@ -400,6 +413,75 @@ func parseDecisionSyncArgs(args []string) (decisionSyncOpts, error) {
 	}
 	if fs.NArg() != 0 {
 		return decisionSyncOpts{}, fmt.Errorf("usage: az decision sync [--check] [--json]")
+	}
+	return opts, nil
+}
+
+func runDecisionImportRPC(cfg *config.Config, opts decisionImportOpts) error {
+	req := protocol.DecisionImportMDRequestBody{Check: opts.Check, Force: opts.Force}
+	var out protocol.DecisionImportMDResponseBody
+	if err := runDecisionRPC(cfg, protocol.CommandDecisionImportMD, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	if len(out.Files) == 0 {
+		fmt.Println("No decision markdown files found.")
+		return nil
+	}
+	for _, file := range out.Files {
+		header := file.Path
+		if file.DecisionID != "" {
+			header = fmt.Sprintf("%s [%s]", file.Path, file.DecisionID)
+		}
+		if file.ParseError != "" {
+			fmt.Printf("%s: parse error: %s\n", header, file.ParseError)
+			continue
+		}
+		if file.NewRecord {
+			fmt.Printf("%s: NEW\n", header)
+		}
+		for _, c := range file.Changes {
+			fmt.Printf("  + %s: %q -> %q\n", c.Field, c.OldValue, c.NewValue)
+		}
+		for _, c := range file.Conflicts {
+			fmt.Printf("  ! conflict on %s: sqlite=%q markdown=%q\n", c.Field, c.SQLiteValue, c.MarkdownValue)
+		}
+		switch {
+		case file.ApplyError != "":
+			fmt.Printf("  ✗ apply failed: %s\n", file.ApplyError)
+		case file.Skipped:
+			fmt.Printf("  skipped (use --force to override)\n")
+		case file.Imported:
+			fmt.Printf("  imported\n")
+		case len(file.Changes) == 0 && len(file.Conflicts) == 0:
+			fmt.Printf("  in sync\n")
+		}
+	}
+	switch {
+	case opts.Check && out.Conflicts > 0:
+		fmt.Printf("\n%d file(s) with conflicts. Run with --force to apply markdown values, or edit md/SQLite to align.\n", out.Conflicts)
+	case opts.Check:
+		fmt.Printf("\n%d file(s) would be imported.\n", out.Imported)
+	default:
+		fmt.Printf("\nImported %d file(s); %d had conflicts.\n", out.Imported, out.Conflicts)
+	}
+	return nil
+}
+
+func parseDecisionImportArgs(args []string) (decisionImportOpts, error) {
+	opts := decisionImportOpts{}
+	fs := flag.NewFlagSet("decision import", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "json output")
+	fs.BoolVar(&opts.Check, "check", false, "report plan without applying")
+	fs.BoolVar(&opts.Force, "force", false, "apply even when fields conflict (markdown wins)")
+	if err := fs.Parse(args); err != nil {
+		return decisionImportOpts{}, err
+	}
+	if fs.NArg() != 0 {
+		return decisionImportOpts{}, fmt.Errorf("usage: az decision import [--check] [--force] [--json]")
 	}
 	return opts, nil
 }
@@ -794,7 +876,7 @@ func parseDecisionRelationFlag(value string) (string, error) {
 }
 
 func printDecisionUsage() {
-	fmt.Println("Usage: az decision <list|get|record|update|delete|revisit|sync|link> [arguments]")
+	fmt.Println("Usage: az decision <list|get|record|update|delete|revisit|sync|import|link> [arguments]")
 	fmt.Println("  list     List recorded decisions (optionally filtered by linked issue/requirement)")
 	fmt.Println("  get      Show a single decision (use --with-links for links)")
 	fmt.Println("  record   Record a new decision (id auto-allocated as dec-N)")
@@ -802,6 +884,7 @@ func printDecisionUsage() {
 	fmt.Println("  delete   Soft-delete a decision (requires --confirm)")
 	fmt.Println("  revisit  Replace an older decision with a new one (creates the revises link)")
 	fmt.Println("  sync     Write docs/decisions/dec-NNN-<slug>.md from the store (use --check for drift)")
+	fmt.Println("  import   Read docs/decisions/*.md back into the store (use --check to inspect plan; --force to override conflicts)")
 	fmt.Println("  link     Manage decision-to-issue/requirement/decision links")
 	fmt.Println("")
 	fmt.Println("Grammar:")
@@ -812,6 +895,7 @@ func printDecisionUsage() {
 	fmt.Println("  az decision delete --id <id> --confirm [--json]")
 	fmt.Println("  az decision revisit --id <old-id> (--new <existing-id> | --title <text> --rationale <text>) [--context ...] [--note ...] [--json]")
 	fmt.Println("  az decision sync [--check] [--json]")
+	fmt.Println("  az decision import [--check] [--force] [--json]")
 	fmt.Println("  az decision link list|add|remove ...")
 	fmt.Println("")
 	fmt.Println("Examples:")

@@ -100,6 +100,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandDecisionLinkAdd:       {Command: protocol.CommandDecisionLinkAdd, DispatchTarget: CommandDispatchDecision},
 	protocol.CommandDecisionLinkRemove:    {Command: protocol.CommandDecisionLinkRemove, DispatchTarget: CommandDispatchDecision},
 	protocol.CommandDecisionSyncMD:        {Command: protocol.CommandDecisionSyncMD, DispatchTarget: CommandDispatchDecision},
+	protocol.CommandDecisionImportMD:      {Command: protocol.CommandDecisionImportMD, DispatchTarget: CommandDispatchDecision},
 	CommandGitFetch:                       {Command: CommandGitFetch, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
 	CommandGitMerge:                       {Command: CommandGitMerge, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
 	CommandGitCheckout:                    {Command: CommandGitCheckout, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},

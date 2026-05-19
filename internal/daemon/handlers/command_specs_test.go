@@ -167,6 +167,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		protocol.CommandDecisionLinkAdd,
 		protocol.CommandDecisionLinkRemove,
 		protocol.CommandDecisionSyncMD,
+		protocol.CommandDecisionImportMD,
 		CommandGitFetch,
 		CommandGitMerge,
 		CommandGitCheckout,

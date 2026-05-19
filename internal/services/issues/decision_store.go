@@ -94,6 +94,20 @@ type RecordDecisionParams struct {
 	Consequences string
 }
 
+// ImportDecisionParams creates a decision at an explicit local_id (and the
+// matching numeric rowid). Used by the markdown importer so a `dec-N` from
+// another machine keeps its identity locally; without explicit ids the
+// SQLite AUTOINCREMENT would assign a different rowid and the dec-N name
+// would drift relative to the rowid.
+type ImportDecisionParams struct {
+	LocalID      string
+	NumericID    int64
+	Title        string
+	Rationale    string
+	Context      string
+	Consequences string
+}
+
 type UpdateDecisionParams struct {
 	Title        *string
 	Rationale    *string
@@ -198,6 +212,82 @@ func (c *Client) RecordDecision(ctx context.Context, params RecordDecisionParams
 	}
 	if err := tx.Commit(); err != nil {
 		return Decision{}, c.wrapError("record-decision", localID, err)
+	}
+	tx = nil
+	return decision, nil
+}
+
+// ImportDecision inserts a decision with an explicit local_id and numeric
+// rowid. Errors with domain.ErrConflict if a row with that local_id already
+// exists; callers should check via GetDecision first and fall back to
+// UpdateDecision for existing rows.
+func (c *Client) ImportDecision(ctx context.Context, params ImportDecisionParams) (Decision, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return Decision{}, err
+	}
+
+	params.LocalID = strings.TrimSpace(params.LocalID)
+	params.Title = strings.TrimSpace(params.Title)
+	params.Rationale = strings.TrimSpace(params.Rationale)
+	params.Context = strings.TrimSpace(params.Context)
+	params.Consequences = strings.TrimSpace(params.Consequences)
+	if params.LocalID == "" {
+		return Decision{}, c.wrapError("import-decision", "", errors.New("local_id is required"))
+	}
+	if params.NumericID <= 0 {
+		return Decision{}, c.wrapError("import-decision", params.LocalID, errors.New("numeric id must be positive"))
+	}
+	if params.Title == "" {
+		return Decision{}, c.wrapError("import-decision", params.LocalID, errors.New("title is required"))
+	}
+	if params.Rationale == "" {
+		return Decision{}, c.wrapError("import-decision", params.LocalID, errors.New("rationale is required"))
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return Decision{}, c.wrapError("import-decision", params.LocalID, err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO decisions (
+			id, local_id, title, rationale, context, consequences,
+			created_at, updated_at, deleted_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+	`,
+		params.NumericID,
+		params.LocalID,
+		params.Title,
+		nullableString(params.Rationale),
+		nullableString(params.Context),
+		nullableString(params.Consequences),
+		formatTimestamp(now),
+		formatTimestamp(now),
+	); err != nil {
+		return Decision{}, c.wrapError("import-decision", params.LocalID, classifySQLiteConstraint(err))
+	}
+
+	decision := Decision{
+		LocalID:      params.LocalID,
+		Title:        params.Title,
+		Rationale:    params.Rationale,
+		Context:      params.Context,
+		Consequences: params.Consequences,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := c.insertDecisionAuditRow(ctx, tx, decisionEntityKind, decision.LocalID, decisionOpCreate, nil, decision); err != nil {
+		return Decision{}, c.wrapError("import-decision", decision.LocalID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Decision{}, c.wrapError("import-decision", decision.LocalID, err)
 	}
 	tx = nil
 	return decision, nil

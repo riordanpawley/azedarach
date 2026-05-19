@@ -21,6 +21,7 @@ type DecisionService interface {
 	AddDecisionLink(context.Context, protocol.DecisionLinkAddRequestBody) (protocol.DecisionLinkAddResponseBody, error)
 	RemoveDecisionLink(context.Context, protocol.DecisionLinkRemoveRequestBody) (protocol.DecisionLinkRemoveResponseBody, error)
 	SyncMD(context.Context, protocol.DecisionSyncMDRequestBody) (protocol.DecisionSyncMDResponseBody, error)
+	ImportMD(context.Context, protocol.DecisionImportMDRequestBody) (protocol.DecisionImportMDResponseBody, error)
 }
 
 type DecisionHandler struct {
@@ -160,6 +161,13 @@ func (h *DecisionHandler) Handle(ctx context.Context, req protocol.RequestEnvelo
 			return resp
 		}
 		return specJSONResponse(ctx, resp, h.service.SyncMD, cmd)
+
+	case protocol.CommandDecisionImportMD:
+		var cmd protocol.DecisionImportMDRequestBody
+		if !decodeSpecRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		return specJSONResponse(ctx, resp, h.service.ImportMD, cmd)
 
 	case protocol.CommandDecisionLinkRemove:
 		var cmd protocol.DecisionLinkRemoveRequestBody

@@ -183,6 +183,31 @@ func TestParseDecisionSyncArgs(t *testing.T) {
 	}
 }
 
+func TestParseDecisionImportArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		ok   bool
+	}{
+		{name: "no flags", args: nil, ok: true},
+		{name: "with --check", args: []string{"--check"}, ok: true},
+		{name: "with --force", args: []string{"--force"}, ok: true},
+		{name: "with all flags", args: []string{"--check", "--force", "--json"}, ok: true},
+		{name: "positional rejected", args: []string{"--check", "extra"}, ok: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseDecisionImportArgs(tc.args)
+			if tc.ok && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatalf("expected error")
+			}
+		})
+	}
+}
+
 func TestPrintDecisionUsageRunsCleanly(t *testing.T) {
 	defer func() {
 		if r := recover(); r != nil {

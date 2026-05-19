@@ -16,6 +16,7 @@ const (
 	CommandDecisionLinkAdd    = "decision.link.add"
 	CommandDecisionLinkRemove = "decision.link.remove"
 	CommandDecisionSyncMD     = "decision.sync_md"
+	CommandDecisionImportMD   = "decision.import_md"
 )
 
 // DecisionTargetKind enumerates the things a decision link can point at.
@@ -183,4 +184,50 @@ type DecisionSyncMDResponseBody struct {
 	Check   bool     `json:"check" msgpack:"check"`
 	Changed bool     `json:"changed" msgpack:"changed"`
 	Files   []string `json:"files,omitempty" msgpack:"files,omitempty"`
+}
+
+// DecisionImportMDRequestBody asks the daemon to read decision markdown files
+// from docs/decisions/ and merge them into the SQLite store. With Check=true,
+// no rows are mutated; the response describes the plan. Force=true overrides
+// per-field conflicts (markdown wins).
+type DecisionImportMDRequestBody struct {
+	Check bool `json:"check,omitempty" msgpack:"check,omitempty"`
+	Force bool `json:"force,omitempty" msgpack:"force,omitempty"`
+}
+
+// DecisionImportMDFieldChange describes one field that would change.
+type DecisionImportMDFieldChange struct {
+	Field    string `json:"field" msgpack:"field"`
+	OldValue string `json:"old_value,omitempty" msgpack:"old_value,omitempty"`
+	NewValue string `json:"new_value,omitempty" msgpack:"new_value,omitempty"`
+}
+
+// DecisionImportMDFieldConflict describes a field whose value differs in both
+// sides and which won't be applied unless Force=true.
+type DecisionImportMDFieldConflict struct {
+	Field         string `json:"field" msgpack:"field"`
+	SQLiteValue   string `json:"sqlite_value,omitempty" msgpack:"sqlite_value,omitempty"`
+	MarkdownValue string `json:"markdown_value,omitempty" msgpack:"markdown_value,omitempty"`
+}
+
+// DecisionImportMDFileResult is the per-file outcome of an import pass.
+type DecisionImportMDFileResult struct {
+	Path       string                          `json:"path" msgpack:"path"`
+	DecisionID string                          `json:"decision_id,omitempty" msgpack:"decision_id,omitempty"`
+	ParseError string                          `json:"parse_error,omitempty" msgpack:"parse_error,omitempty"`
+	NewRecord  bool                            `json:"new_record,omitempty" msgpack:"new_record,omitempty"`
+	Changes    []DecisionImportMDFieldChange   `json:"changes,omitempty" msgpack:"changes,omitempty"`
+	Conflicts  []DecisionImportMDFieldConflict `json:"conflicts,omitempty" msgpack:"conflicts,omitempty"`
+	Imported   bool                            `json:"imported,omitempty" msgpack:"imported,omitempty"`
+	Skipped    bool                            `json:"skipped,omitempty" msgpack:"skipped,omitempty"`
+	ApplyError string                          `json:"apply_error,omitempty" msgpack:"apply_error,omitempty"`
+}
+
+// DecisionImportMDResponseBody is the import plan + outcome.
+type DecisionImportMDResponseBody struct {
+	Check     bool                         `json:"check" msgpack:"check"`
+	Force     bool                         `json:"force" msgpack:"force"`
+	Imported  int                          `json:"imported" msgpack:"imported"`
+	Conflicts int                          `json:"conflicts" msgpack:"conflicts"`
+	Files     []DecisionImportMDFileResult `json:"files,omitempty" msgpack:"files,omitempty"`
 }
