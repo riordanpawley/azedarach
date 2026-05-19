@@ -24,6 +24,8 @@ type Config struct {
 	DevServer     DevServerConfig    `json:"devServer"`
 	Worktree      WorktreeConfig     `json:"worktree"`
 	Spec          SpecConfig         `json:"spec"`
+	Orchestration OrchestrationConfig `json:"orchestration"`
+	// Deprecated: use Orchestration.Via.
 	Fanout        FanoutConfig       `json:"fanout"`
 }
 
@@ -166,6 +168,10 @@ type SpecConfig struct {
 	Enabled bool `json:"enabled"`
 }
 
+type OrchestrationConfig struct {
+	Via string `json:"via"`
+}
+
 type FanoutConfig struct {
 	Via string `json:"via"`
 }
@@ -265,6 +271,9 @@ func DefaultConfig() *Config {
 		Spec: SpecConfig{
 			Enabled: true,
 		},
+		Orchestration: OrchestrationConfig{
+			Via: "az",
+		},
 		Fanout: FanoutConfig{
 			Via: "az",
 		},
@@ -331,11 +340,40 @@ func loadConfigLayer(cfg *Config, configPath string) error {
 	if meta.Version > CurrentConfigVersion {
 		return fmt.Errorf("unsupported config version %d in %s (max supported %d)", meta.Version, configPath, CurrentConfigVersion)
 	}
+	legacyFanoutVia, useLegacyFanoutVia, err := loadLegacyFanoutViaAlias(data)
+	if err != nil {
+		return fmt.Errorf("failed to parse %s for fanout compatibility: %w", configPath, err)
+	}
 
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return fmt.Errorf("failed to parse %s: %w", configPath, err)
 	}
+	if useLegacyFanoutVia {
+		cfg.Orchestration.Via = legacyFanoutVia
+	}
 	return nil
+}
+
+func loadLegacyFanoutViaAlias(data []byte) (via string, apply bool, err error) {
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return "", false, err
+	}
+	fanoutRaw, ok := raw["fanout"].(map[string]any)
+	if !ok {
+		return "", false, nil
+	}
+	fanoutVia, ok := fanoutRaw["via"].(string)
+	if !ok || strings.TrimSpace(fanoutVia) == "" {
+		return "", false, nil
+	}
+	orchestrationRaw, ok := raw["orchestration"].(map[string]any)
+	if ok {
+		if orchestrationVia, ok := orchestrationRaw["via"].(string); ok && strings.TrimSpace(orchestrationVia) != "" {
+			return "", false, nil
+		}
+	}
+	return fanoutVia, true, nil
 }
 
 // SaveConfig saves configuration to the specified path with version information
@@ -549,6 +587,16 @@ func MergeWithDefaults(cfg *Config) *Config {
 	}
 	if cfg.Worktree.InitCommands == nil {
 		cfg.Worktree.InitCommands = defaults.Worktree.InitCommands
+	}
+	if strings.TrimSpace(cfg.Orchestration.Via) == "" {
+		if strings.TrimSpace(cfg.Fanout.Via) != "" {
+			cfg.Orchestration.Via = cfg.Fanout.Via
+		} else {
+			cfg.Orchestration.Via = defaults.Orchestration.Via
+		}
+	}
+	if strings.TrimSpace(cfg.Fanout.Via) == "" {
+		cfg.Fanout.Via = cfg.Orchestration.Via
 	}
 
 	// Merge Notifications config

@@ -4620,7 +4620,11 @@ func primeUsesNativeFanout(deps *Dependencies) bool {
 	if deps == nil || deps.Config == nil {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(deps.Config.Fanout.Via), "native")
+	via := strings.TrimSpace(deps.Config.Orchestration.Via)
+	if via == "" {
+		via = strings.TrimSpace(deps.Config.Fanout.Via)
+	}
+	return strings.EqualFold(via, "native")
 }
 
 func renderPrimeImplementationSection(implementations []string) string {

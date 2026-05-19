@@ -72,6 +72,8 @@ func TestDefaultConfig(t *testing.T) {
 	assert.NotNil(t, cfg.Worktree.InitCommands)
 
 	assert.True(t, cfg.Spec.Enabled)
+	assert.Equal(t, "az", cfg.Orchestration.Via)
+	assert.Equal(t, "az", cfg.Fanout.Via)
 	assert.False(t, cfg.GitHooks.SpecSync.Enabled)
 	assert.Empty(t, cfg.GitHooks.SpecSync.Command)
 	assert.False(t, cfg.GitHooks.BoundaryCheck.Enabled)
@@ -454,6 +456,40 @@ func TestLoadConfigNoConfigReturnsDefaults(t *testing.T) {
 	assert.Equal(t, defaults.CLITool, cfg.CLITool)
 	assert.Equal(t, defaults.Git.BaseBranch, cfg.Git.BaseBranch)
 	assert.Equal(t, defaults.Spec.Enabled, cfg.Spec.Enabled)
+	assert.Equal(t, defaults.Orchestration.Via, cfg.Orchestration.Via)
+}
+
+func TestLoadConfigFanoutViaCompatibilityAlias(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFile(t, root, `{
+  "$schema": "./config.schema.json",
+  "$version": 7,
+  "fanout": {
+    "via": "native"
+  }
+}`)
+
+	cfg, err := LoadConfig(root)
+	require.NoError(t, err)
+	assert.Equal(t, "native", cfg.Orchestration.Via)
+}
+
+func TestLoadConfigOrchestrationViaTakesPrecedenceOverFanoutAlias(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFile(t, root, `{
+  "$schema": "./config.schema.json",
+  "$version": 7,
+  "orchestration": {
+    "via": "az"
+  },
+  "fanout": {
+    "via": "native"
+  }
+}`)
+
+	cfg, err := LoadConfig(root)
+	require.NoError(t, err)
+	assert.Equal(t, "az", cfg.Orchestration.Via)
 }
 
 func TestLoadConfigInvalidJSONReturnsError(t *testing.T) {

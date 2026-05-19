@@ -6555,13 +6555,13 @@ func TestPrimeCommandNativeFanoutGuidance(t *testing.T) {
 	output := captureStdout(t, func() error {
 		return PrimeCommand(&Dependencies{
 			Config: &config.Config{
-				Spec:   config.SpecConfig{Enabled: true},
-				Fanout: config.FanoutConfig{Via: "native"},
+				Spec:          config.SpecConfig{Enabled: true},
+				Orchestration: config.OrchestrationConfig{Via: "native"},
 			},
 		})
 	})
 
-	if !strings.Contains(output, "`fanout.via` is `native`: use your harness-native subagent delegation commands/keywords") {
+	if !strings.Contains(output, "`orchestration.via` is `native`: use your harness-native subagent delegation commands/keywords") {
 		t.Fatalf("prime output missing native fanout guidance: %q", output)
 	}
 	if !strings.Contains(output, "Shorthand: `single-window fanout (native)`") {

@@ -18,7 +18,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Issue dependency graph:
   - `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from] [--json]`, `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from] [--json]`
   - Fanout orchestration:
-  {{ if .FanoutViaNative }}- `fanout.via` is `native`: use your harness-native subagent delegation commands/keywords to split and run child issues (for example "delegate", "spawn", or "subagent"). Keep using `az issue` for tracking state and dependencies.
+  {{ if .FanoutViaNative }}- `orchestration.via` is `native`: use your harness-native subagent delegation commands/keywords to split and run child issues (for example "delegate", "spawn", or "subagent"). Keep using `az issue` for tracking state and dependencies.
   - `az issue fanout` commands are optional in this mode; prefer native delegation flow unless you explicitly need a pre-authored `fanout.json` plan.
   {{ else }}
   - `az issue fanout --input ./fanout.json`, `az issue fanout --input ./fanout.json --apply`, `az issue fanout ready --root <issue-id> --json`, `az issue fanout drift --issue <issue-id> --worktree <path> --fail-on-out`
@@ -57,7 +57,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Use `az issue create --deferred "Title"` only for standalone later/backlog work that should be tracked now but not executed before the active issue closes.
   - Do not use `--deferred` for child tasks, blockers, or work required before closing the active issue; create normal child issues instead.
   - When fanning out to subagents, split work until each child issue is independently actionable and fits within a single subagent context window.
-  {{ if .FanoutViaNative }}- `fanout.via` is `native`: orchestrate the split using native subagent/delegation commands in your AI harness, while keeping issue bookkeeping in `az issue`.
+  {{ if .FanoutViaNative }}- `orchestration.via` is `native`: orchestrate the split using native subagent/delegation commands in your AI harness, while keeping issue bookkeeping in `az issue`.
   - Shorthand: `single-window fanout (native)` means split until each child is ready for one subagent, then fan out with native delegation commands one child at a time.
   {{ else }}- Then assign one subagent per child issue, tell each subagent to use `az issue` and create/maintain its own child issue under the active parent, and reserve `az prime` for the orchestrator unless a subagent explicitly needs a fresh primer.
   - Shorthand: `single-window fanout` means split until each child is ready for one subagent, then fan out one subagent per child.
