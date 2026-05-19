@@ -17,7 +17,7 @@ const (
 )
 
 const (
-	UIStateKeyLastActiveTab = "tui.last_active_tab"
+	UIStateKeyTMUXSelectorLastActiveTab = "tmux.selector.last_active_tab"
 )
 
 type UICommandRequestBody struct {

@@ -101,6 +101,8 @@ type Daemon struct {
 	runtimeStoresByRoot           map[string]*daemonstate.RuntimeStateStore
 	hookLogMu                     sync.Mutex
 	hookLogByProject              map[string][]protocol.HookLogEvent
+	uiStateMu                     sync.RWMutex
+	uiState                       map[string]string
 	tmux                          *tmux.Client
 	git                           *git.Client
 	gitStatusAdapter              *gitServiceAdapter
@@ -223,6 +225,7 @@ func New(cfg Config) *Daemon {
 		runtimeStoresByProject:        map[string]*daemonstate.RuntimeStateStore{},
 		runtimeStoresByRoot:           map[string]*daemonstate.RuntimeStateStore{},
 		hookLogByProject:              map[string][]protocol.HookLogEvent{},
+		uiState:                       map[string]string{},
 		tmux:                          tmux.NewClient(tmuxRunner, cfg.Logger),
 		git:                           gitClient,
 		gitStatusAdapter:              gitService,

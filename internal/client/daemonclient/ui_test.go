@@ -91,7 +91,10 @@ func TestUIStateGetSetRoutesThroughDaemon(t *testing.T) {
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal set request body: %v", err)
 				}
-				if body.Key != protocol.UIStateKeyLastActiveTab || body.Value != "compact" {
+				if body.ProjectID.String() != "default" {
+					t.Fatalf("set project_id = %q, want default", body.ProjectID.String())
+				}
+				if body.Key != protocol.UIStateKeyTMUXSelectorLastActiveTab || body.Value != "compact" {
 					t.Fatalf("set body = %+v", body)
 				}
 				respBody, _ := json.Marshal(protocol.UIStateResponseBody{
@@ -113,7 +116,10 @@ func TestUIStateGetSetRoutesThroughDaemon(t *testing.T) {
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal get request body: %v", err)
 				}
-				if body.Key != protocol.UIStateKeyLastActiveTab {
+				if body.ProjectID.String() != "default" {
+					t.Fatalf("get project_id = %q, want default", body.ProjectID.String())
+				}
+				if body.Key != protocol.UIStateKeyTMUXSelectorLastActiveTab {
 					t.Fatalf("get body = %+v", body)
 				}
 				respBody, _ := json.Marshal(protocol.UIStateResponseBody{
@@ -137,10 +143,10 @@ func TestUIStateGetSetRoutesThroughDaemon(t *testing.T) {
 		},
 	}
 	client := New(transport).WithProjectID("proj-ui")
-	if _, err := client.SetUIState(context.Background(), protocol.UIStateKeyLastActiveTab, "compact"); err != nil {
+	if _, err := client.SetUIStateForProject(context.Background(), protocol.DefaultProjectID, protocol.UIStateKeyTMUXSelectorLastActiveTab, "compact"); err != nil {
 		t.Fatalf("SetUIState error: %v", err)
 	}
-	got, err := client.GetUIState(context.Background(), protocol.UIStateKeyLastActiveTab)
+	got, err := client.GetUIStateForProject(context.Background(), protocol.DefaultProjectID, protocol.UIStateKeyTMUXSelectorLastActiveTab)
 	if err != nil {
 		t.Fatalf("GetUIState error: %v", err)
 	}

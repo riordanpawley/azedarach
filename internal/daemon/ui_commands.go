@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
-	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
@@ -70,7 +69,7 @@ func (d *Daemon) handleUIOpenTaskWorkspace(_ context.Context, req protocol.Reque
 	return resp, nil
 }
 
-func (d *Daemon) handleUIStateGet(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+func (d *Daemon) handleUIStateGet(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
 	var cmd protocol.UIStateGetRequestBody
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
@@ -83,18 +82,17 @@ func (d *Daemon) handleUIStateGet(ctx context.Context, req protocol.RequestEnvel
 	if key == "" {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required field: key"), nil
 	}
-	state, found, err := d.sessionRuntimeStateStore(projectID).GetUIState(ctx, projectID, key)
-	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("get ui state: %v", err)), nil
-	}
+	d.uiStateMu.RLock()
+	value, found := d.uiState[key]
+	d.uiStateMu.RUnlock()
 	respBody := protocol.UIStateResponseBody{
 		ProjectID: naming.ProjectID(projectID),
 		Key:       key,
 		Found:     found,
 	}
 	if found {
-		respBody.Value = state.Value
-		respBody.UpdatedAt = state.UpdatedAt
+		respBody.Value = value
+		respBody.UpdatedAt = time.Now().UTC()
 	}
 	payload, err := json.Marshal(respBody)
 	if err != nil {
@@ -105,7 +103,7 @@ func (d *Daemon) handleUIStateGet(ctx context.Context, req protocol.RequestEnvel
 	return resp, nil
 }
 
-func (d *Daemon) handleUIStateSet(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+func (d *Daemon) handleUIStateSet(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
 	var cmd protocol.UIStateSetRequestBody
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
@@ -119,14 +117,12 @@ func (d *Daemon) handleUIStateSet(ctx context.Context, req protocol.RequestEnvel
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required field: key"), nil
 	}
 	updatedAt := time.Now().UTC()
-	if err := d.sessionRuntimeStateStore(projectID).UpsertUIState(ctx, daemonstate.UIState{
-		ProjectID: projectID,
-		Key:       key,
-		Value:     cmd.Value,
-		UpdatedAt: updatedAt,
-	}); err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("set ui state: %v", err)), nil
+	d.uiStateMu.Lock()
+	if d.uiState == nil {
+		d.uiState = map[string]string{}
 	}
+	d.uiState[key] = cmd.Value
+	d.uiStateMu.Unlock()
 	respBody := protocol.UIStateResponseBody{
 		ProjectID: naming.ProjectID(projectID),
 		Key:       key,

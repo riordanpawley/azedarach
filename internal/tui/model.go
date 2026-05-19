@@ -1300,7 +1300,7 @@ func (m Model) loadUIViewModeCmd() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		resp, err := client.GetUIState(ctx, protocol.UIStateKeyLastActiveTab)
+		resp, err := client.GetUIStateForProject(ctx, protocol.DefaultProjectID, protocol.UIStateKeyTMUXSelectorLastActiveTab)
 		if err != nil {
 			return uiViewModeLoadedMsg{err: err}
 		}
@@ -1324,7 +1324,7 @@ func (m Model) persistUIViewModeCmd(mode ViewMode) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		_, err := client.SetUIState(ctx, protocol.UIStateKeyLastActiveTab, value)
+		_, err := client.SetUIStateForProject(ctx, protocol.DefaultProjectID, protocol.UIStateKeyTMUXSelectorLastActiveTab, value)
 		return uiViewModeSavedMsg{viewMode: mode, err: err}
 	}
 }

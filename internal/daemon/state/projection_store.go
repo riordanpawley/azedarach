@@ -21,7 +21,6 @@ import (
 const (
 	sessionStateTable  = "daemon_session_projections"
 	worktreeStateTable = "daemon_worktree_projections"
-	uiStateTable       = "daemon_ui_state"
 )
 
 // WorktreeState captures durable daemon worktree state stored in sqlite.
@@ -33,14 +32,6 @@ type WorktreeState struct {
 	UpdatedAt        time.Time
 	GitStatusRaw     json.RawMessage
 	GitStatusUpdated *time.Time
-}
-
-// UIState captures daemon-owned persisted UI preferences per project.
-type UIState struct {
-	ProjectID string
-	Key       string
-	Value     string
-	UpdatedAt time.Time
 }
 
 // RuntimeStateStore persists daemon-owned session/worktree state in sqlite.
@@ -498,8 +489,6 @@ func (s *RuntimeStateStore) ListProjectIDs(ctx context.Context) ([]string, error
 		SELECT project_id FROM `+sessionStateTable+`
 		UNION
 		SELECT project_id FROM `+worktreeStateTable+`
-		UNION
-		SELECT project_id FROM `+uiStateTable+`
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("list runtime-state project ids: %w", err)
@@ -525,75 +514,6 @@ func (s *RuntimeStateStore) ListProjectIDs(ctx context.Context) ([]string, error
 	}
 	slices.Sort(projectIDs)
 	return projectIDs, nil
-}
-
-func (s *RuntimeStateStore) UpsertUIState(ctx context.Context, state UIState) error {
-	db, err := s.dbHandle()
-	if err != nil {
-		return err
-	}
-	state.ProjectID = normalizedProjectID(state.ProjectID)
-	state.Key = strings.TrimSpace(state.Key)
-	if state.Key == "" {
-		return fmt.Errorf("upsert ui state: missing key")
-	}
-	if state.UpdatedAt.IsZero() {
-		state.UpdatedAt = time.Now().UTC()
-	}
-	_, err = db.ExecContext(ctx, `
-		INSERT INTO `+uiStateTable+` (
-			project_id,
-			key,
-			value,
-			updated_at
-		) VALUES (?, ?, ?, ?)
-		ON CONFLICT(project_id, key) DO UPDATE SET
-			value = excluded.value,
-			updated_at = excluded.updated_at
-	`, state.ProjectID, state.Key, state.Value, state.UpdatedAt.UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return fmt.Errorf("upsert ui state %s/%s: %w", state.ProjectID, state.Key, err)
-	}
-	return nil
-}
-
-func (s *RuntimeStateStore) GetUIState(ctx context.Context, projectID, key string) (UIState, bool, error) {
-	db, err := s.dbHandle()
-	if err != nil {
-		return UIState{}, false, err
-	}
-	projectID = normalizedProjectID(projectID)
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return UIState{}, false, nil
-	}
-	row := db.QueryRowContext(ctx, `
-		SELECT project_id, key, value, updated_at
-		FROM `+uiStateTable+`
-		WHERE project_id = ? AND key = ?
-	`, projectID, key)
-	var (
-		stateProjectID string
-		stateKey       string
-		stateValue     string
-		updatedAt      string
-	)
-	if err := row.Scan(&stateProjectID, &stateKey, &stateValue, &updatedAt); err != nil {
-		if err == sql.ErrNoRows {
-			return UIState{}, false, nil
-		}
-		return UIState{}, false, fmt.Errorf("get ui state %s/%s: %w", projectID, key, err)
-	}
-	parsedUpdatedAt, err := parseRuntimeStateTime(updatedAt)
-	if err != nil {
-		return UIState{}, false, err
-	}
-	return UIState{
-		ProjectID: stateProjectID,
-		Key:       stateKey,
-		Value:     stateValue,
-		UpdatedAt: parsedUpdatedAt,
-	}, true, nil
 }
 
 func (s *RuntimeStateStore) UpsertWorktreeState(ctx context.Context, worktreeState WorktreeState) error {
@@ -1039,13 +959,6 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_worktree_projections_project_path
 			ON ` + worktreeStateTable + ` (project_id, path)`,
-		`CREATE TABLE IF NOT EXISTS ` + uiStateTable + ` (
-			project_id TEXT NOT NULL,
-			key TEXT NOT NULL,
-			value TEXT NOT NULL,
-			updated_at TEXT NOT NULL,
-			PRIMARY KEY (project_id, key)
-		)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.ExecContext(ctx, statement); err != nil {

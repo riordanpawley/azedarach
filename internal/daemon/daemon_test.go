@@ -342,7 +342,7 @@ func TestUIStateSetAndGet(t *testing.T) {
 		cfg: Config{Logger: logger, RepoDir: t.TempDir()},
 	}
 	setBody, err := json.Marshal(protocol.UIStateSetRequestBody{
-		Key:   protocol.UIStateKeyLastActiveTab,
+		Key:   protocol.UIStateKeyTMUXSelectorLastActiveTab,
 		Value: "compact",
 	})
 	if err != nil {
@@ -365,7 +365,7 @@ func TestUIStateSetAndGet(t *testing.T) {
 		t.Fatalf("ui state set response = %+v", setResp.Error)
 	}
 	getBody, err := json.Marshal(protocol.UIStateGetRequestBody{
-		Key: protocol.UIStateKeyLastActiveTab,
+		Key: protocol.UIStateKeyTMUXSelectorLastActiveTab,
 	})
 	if err != nil {
 		t.Fatalf("marshal get request: %v", err)
@@ -390,7 +390,7 @@ func TestUIStateSetAndGet(t *testing.T) {
 	if err := json.Unmarshal(getResp.Body, &stateResp); err != nil {
 		t.Fatalf("unmarshal get response body: %v", err)
 	}
-	if !stateResp.Found || stateResp.Value != "compact" || stateResp.Key != protocol.UIStateKeyLastActiveTab {
+	if !stateResp.Found || stateResp.Value != "compact" || stateResp.Key != protocol.UIStateKeyTMUXSelectorLastActiveTab {
 		t.Fatalf("ui state get body = %+v", stateResp)
 	}
 }
