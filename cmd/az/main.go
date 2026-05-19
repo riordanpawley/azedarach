@@ -797,7 +797,7 @@ func main() {
 		}
 	case "orchestrate":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az orchestrate <status> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az orchestrate <status|start|watch|complete-check> [arguments]\n")
 			os.Exit(1)
 		}
 		switch commandArgs[0] {
@@ -814,9 +814,48 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
+		case "start":
+			opts, err := cli.ParseOrchestrateStartArgs(commandArgs[1:])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az orchestrate start --root <issue-id> [--project <project-id>] [--limit <n>] [--issue <issue-id> ...] [--json]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.OrchestrateStartCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		case "watch":
+			opts, err := cli.ParseOrchestrateWatchArgs(commandArgs[1:])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az orchestrate watch --root <issue-id> [--project <project-id>] [--since <seq>] [--jsonl] [--once]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.OrchestrateWatchCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		case "complete-check":
+			opts, err := cli.ParseOrchestrateCompleteCheckArgs(commandArgs[1:])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az orchestrate complete-check --root <issue-id> [--project <project-id>] [--json]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.OrchestrateCompleteCheckCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown orchestrate command: %s\n", commandArgs[0])
-			fmt.Fprintf(os.Stderr, "Usage: az orchestrate <status> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az orchestrate <status|start|watch|complete-check> [arguments]\n")
 			os.Exit(1)
 		}
 

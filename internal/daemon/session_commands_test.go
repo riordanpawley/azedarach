@@ -2837,6 +2837,9 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormat(t *testing.T) {
 	if !strings.Contains(prompt, "Start by running `az prime`. Then continue the task using the context it prints without waiting for further instruction.") {
 		t.Fatalf("prompt = %q, want az prime boot instructions", prompt)
 	}
+	if !strings.Contains(prompt, "Role: worker") {
+		t.Fatalf("prompt = %q, want worker role primer", prompt)
+	}
 }
 
 func TestBuildStartWorkPromptSanitizesControlCharsAndAngleBrackets(t *testing.T) {
@@ -2849,6 +2852,19 @@ func TestBuildStartWorkPromptSanitizesControlCharsAndAngleBrackets(t *testing.T)
 	}
 	if strings.Contains(prompt, "\n\n\n") {
 		t.Fatalf("prompt = %q, want compact whitespace", prompt)
+	}
+}
+
+func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
+	prompt := buildStartWorkPrompt("az-99", "epic", "Coordinate big tree")
+	if !strings.Contains(prompt, "Role: orchestrator") {
+		t.Fatalf("prompt = %q, want orchestrator role primer", prompt)
+	}
+	if !strings.Contains(prompt, "az orchestrate status --root <issue-id>") {
+		t.Fatalf("prompt = %q, want orchestrate status instruction", prompt)
+	}
+	if !strings.Contains(prompt, "az orchestrate complete-check --root <issue-id>") {
+		t.Fatalf("prompt = %q, want complete-check instruction", prompt)
 	}
 }
 

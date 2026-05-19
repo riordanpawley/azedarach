@@ -62,4 +62,5 @@ Active issue ID: `{{ .ActiveIssueID }}`
 {{ end }}- When work is complete:
   - Commit your changes first (`git add -A && git commit -m "<issue-id>: ..."`).
   - Always include the issue ID in the commit message.
-  - Close the issue when implementation is ready for review (`az issue close <issue-id>`). Only run `az issue finalize <issue-id>` after the user has reviewed the work and explicitly asked to finalize/clean up the flow.
+  - Close the issue only when the issue scope and acceptance criteria are fully complete (`az issue close <issue-id>`). If work is partial, keep status `in_progress`, append notes with remaining scope, and create child issues for unfinished required work.
+  - Only run `az issue finalize <issue-id>` after the user has reviewed the work and explicitly asked to finalize/clean up the flow.

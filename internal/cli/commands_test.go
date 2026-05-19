@@ -6031,6 +6031,12 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Reserve `--deferred` for work that can land separately later.") {
 		t.Fatalf("prime output missing deferred-purpose clarification: %q", output)
 	}
+	if !strings.Contains(output, "Close the issue only when the issue scope and acceptance criteria are fully complete") {
+		t.Fatalf("prime output missing close-only-when-fully-complete guardrail: %q", output)
+	}
+	if !strings.Contains(output, "If work is partial, keep status `in_progress`, append notes with remaining scope, and create child issues for unfinished required work.") {
+		t.Fatalf("prime output missing partial-work guardrail: %q", output)
+	}
 	if strings.Contains(output, "same PR") || strings.Contains(output, "one PR") {
 		t.Fatalf("prime output should frame the heuristic around base-branch atomic merges, not PRs: %q", output)
 	}

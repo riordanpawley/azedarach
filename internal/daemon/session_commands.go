@@ -1910,12 +1910,16 @@ func buildStartWorkPrompt(issueID, issueType, title string) string {
 	if safeTitle == "" {
 		safeTitle = issueID
 	}
-	return fmt.Sprintf(
+	base := fmt.Sprintf(
 		"work on issue %s (%s): %s\n\nStart by running `az prime`. Then continue the task using the context it prints without waiting for further instruction.",
 		issueID,
 		safeIssueType,
 		safeTitle,
 	)
+	if strings.EqualFold(safeIssueType, string(domain.TypeEpic)) {
+		return base + "\n\nRole: orchestrator\n- Use `az orchestrate status --root <issue-id>` for readiness snapshots.\n- Use `az orchestrate watch --root <issue-id> --since <seq> --jsonl` for observe-only mailbox/runnable updates.\n- Start runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`.\n- Keep orchestration centralized in v1; do not auto-delegate sub-orchestrators.\n- Close only when `az orchestrate complete-check --root <issue-id>` passes."
+	}
+	return base + "\n\nRole: worker\n- Focus only on this issue scope unless the user explicitly expands it.\n- Report coordination state with mailbox events: `worker-progress`, `worker-blocked`, and `worker-complete`.\n- Keep issue status/notes current with evidence for the orchestrator."
 }
 
 func buildConflictResolutionPrompt(issueID string, conflictFiles []string) string {
