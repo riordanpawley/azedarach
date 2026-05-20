@@ -23,6 +23,7 @@ Commands:
   operation <subcommand>     Inspect/cancel background operations (get|list|logs|cancel)
   log [sources]              Tail/stream daemon, TUI, and CLI log files
   ai install [--target=auto|rulesync|claude|codex|opencode,...] [--issue <id>] [--generate=auto|never]  Unified hook install across AI agent harnesses
+  ai uninstall [--target=auto|rulesync|claude|codex|opencode,...] [--project-dir <dir>] [--verbose]  Remove az-managed hook entries from AI agent harnesses
   ai migrate [--project-dir <dir>] [--verbose]  Strip legacy az notify/hook commands from existing hook configs
   ai hook run --agent=<claude|codex> [--json] <event>  Run an agent hook through the shared internal port
   tmux <selector|install-selector|uninstall-selector>  Manage tmux selector integration
@@ -135,6 +136,8 @@ Examples:
   az ai install
   az ai install --target=rulesync --issue az-123
   az ai install --target=claude,codex --issue az-123
+  az ai uninstall
+  az ai uninstall --target=claude,codex
   az ai migrate
   az ai hook run --agent=codex --json permission-request
   az tmux install-selector
