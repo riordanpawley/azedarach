@@ -323,6 +323,17 @@
           "default": true
         }
       }
+    },
+    "orchestration": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "via": {
+          "type": "string",
+          "enum": ["az", "native"],
+          "default": "az"
+        }
+      }
     }
   }
 }
