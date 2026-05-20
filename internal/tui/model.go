@@ -628,7 +628,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.openOverlay(m.createTaskOverlay)
 
 	case keybinds.ActionOpenSettings: // Settings
-		return m, m.openOverlay(overlay.NewSettingsOverlayWithEditorAndConfig(m.editor, m.config, m.configSourcePath()))
+		return m, m.openOverlay(overlay.NewSettingsOverlayWithEditorAndConfigTarget(m.editor, m.config, m.configLocalSourcePath(), m.configSourcePath()))
 
 	case keybinds.ActionOpenDiagnostic: // Diagnostics (Shift+D)
 		diagPanel := overlay.NewDiagnosticsPanel(m.diagnosticsService, m.sessions)
@@ -2405,8 +2405,15 @@ func (m Model) configSourcePath() string {
 	return filepath.Join(base, config.ConfigDirName, config.ConfigFileName)
 }
 
-func (m Model) openSettingsEditorCmd() tea.Cmd {
+func (m Model) configLocalSourcePath() string {
+	return filepath.Join(filepath.Dir(m.configSourcePath()), config.LocalConfigFileName)
+}
+
+func (m Model) openSettingsEditorCmd(configPathOverride ...string) tea.Cmd {
 	configPath := m.configSourcePath()
+	if len(configPathOverride) > 0 && strings.TrimSpace(configPathOverride[0]) != "" {
+		configPath = configPathOverride[0]
+	}
 	projectPath := strings.TrimSpace(m.repoDir)
 	if projectPath == "" {
 		projectPath = "."

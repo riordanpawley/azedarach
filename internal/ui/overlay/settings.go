@@ -2,6 +2,7 @@ package overlay
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -41,12 +42,14 @@ type SettingItem struct {
 type SettingsOverlay struct {
 	twoPaneDialogChrome
 	dialogViewportState
-	items        []SettingItem
-	cursor       int
-	configSource string
-	config       *config.Config
-	configPath   string
-	styles       *Styles
+	items             []SettingItem
+	cursor            int
+	configSource      string
+	config            *config.Config
+	configPath        string
+	projectConfigPath string
+	localConfigPath   string
+	styles            *Styles
 }
 
 // NewSettingsOverlay creates a new settings overlay with the given items
@@ -72,6 +75,17 @@ func NewSettingsOverlayWithConfig(items []SettingItem, cfg *config.Config, confi
 	menu := NewSettingsOverlayWithSource(items, configSource)
 	menu.config = cfg
 	menu.configPath = configSource
+	menu.projectConfigPath = configSource
+	menu.localConfigPath = localConfigPathFor(configSource)
+	return menu
+}
+
+func NewSettingsOverlayWithConfigTargets(items []SettingItem, cfg *config.Config, selectedConfigPath, projectConfigPath string) *SettingsOverlay {
+	menu := NewSettingsOverlayWithConfig(items, cfg, selectedConfigPath)
+	menu.configPath = selectedConfigPath
+	menu.configSource = selectedConfigPath
+	menu.projectConfigPath = projectConfigPath
+	menu.localConfigPath = localConfigPathFor(projectConfigPath)
 	return menu
 }
 
@@ -373,6 +387,9 @@ func (m *SettingsOverlay) toggleOrActivate() tea.Cmd {
 
 	case SettingAction:
 		// Trigger action
+		if item.Key == "editor" && strings.TrimSpace(m.configPath) != "" {
+			return openConfigEditorMsg(m.configPath)
+		}
 		if item.OnAction != nil {
 			return item.OnAction()
 		}
@@ -396,6 +413,9 @@ func (m *SettingsOverlay) activateCurrent() tea.Cmd {
 		return m.toggleOrActivate()
 
 	case SettingAction:
+		if item.Key == "editor" && strings.TrimSpace(m.configPath) != "" {
+			return openConfigEditorMsg(m.configPath)
+		}
 		if item.OnAction != nil {
 			return item.OnAction()
 		}
@@ -413,6 +433,9 @@ func (m *SettingsOverlay) activateByKey(key string) tea.Cmd {
 		}
 		if m.items[i].Type != SettingAction || m.items[i].OnAction == nil {
 			return nil
+		}
+		if key == "editor" && strings.TrimSpace(m.configPath) != "" {
+			return openConfigEditorMsg(m.configPath)
 		}
 		return m.items[i].OnAction()
 	}
@@ -449,6 +472,9 @@ func (m *SettingsOverlay) incrementChoice() tea.Cmd {
 	// Move to next choice (wrap around)
 	nextIdx := (currentIdx + 1) % len(item.Choices)
 	item.Value = item.Choices[nextIdx]
+	if item.Key == "config-save-target" {
+		m.applyConfigTarget(item.Value)
+	}
 
 	if item.OnChange != nil {
 		item.OnChange(item.Value)
@@ -487,6 +513,9 @@ func (m *SettingsOverlay) decrementChoice() tea.Cmd {
 	// Move to previous choice (wrap around)
 	prevIdx := (currentIdx - 1 + len(item.Choices)) % len(item.Choices)
 	item.Value = item.Choices[prevIdx]
+	if item.Key == "config-save-target" {
+		m.applyConfigTarget(item.Value)
+	}
 
 	if item.OnChange != nil {
 		item.OnChange(item.Value)
@@ -513,11 +542,45 @@ func (m *SettingsOverlay) persistConfig() tea.Cmd {
 	}
 }
 
-func openConfigEditorMsg() tea.Cmd {
+func (m *SettingsOverlay) applyConfigTarget(value any) {
+	target, _ := value.(string)
+	switch target {
+	case "local":
+		if strings.TrimSpace(m.localConfigPath) != "" {
+			m.configPath = m.localConfigPath
+			m.configSource = m.localConfigPath
+		}
+	case "project":
+		if strings.TrimSpace(m.projectConfigPath) != "" {
+			m.configPath = m.projectConfigPath
+			m.configSource = m.projectConfigPath
+		}
+	}
+}
+
+func configTargetValue(selectedConfigPath string) string {
+	if filepath.Base(selectedConfigPath) == config.LocalConfigFileName {
+		return "local"
+	}
+	return "project"
+}
+
+func localConfigPathFor(projectConfigPath string) string {
+	if strings.TrimSpace(projectConfigPath) == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(projectConfigPath), config.LocalConfigFileName)
+}
+
+func openConfigEditorMsg(configPath ...string) tea.Cmd {
+	var path string
+	if len(configPath) > 0 {
+		path = configPath[0]
+	}
 	return func() tea.Msg {
 		return SelectionMsg{
 			Key:   "editor",
-			Value: nil,
+			Value: path,
 		}
 	}
 }
@@ -544,6 +607,13 @@ func NewSettingsOverlayWithEditorAndConfig(editor interface {
 	GetShowPhases() bool
 	ToggleShowPhases()
 }, cfg *config.Config, configSource string) *SettingsOverlay {
+	return NewSettingsOverlayWithEditorAndConfigTarget(editor, cfg, configSource, configSource)
+}
+
+func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
+	GetShowPhases() bool
+	ToggleShowPhases()
+}, cfg *config.Config, selectedConfigPath, projectConfigPath string) *SettingsOverlay {
 	cliTool := "claude"
 	if cfg != nil && strings.TrimSpace(cfg.CLITool) != "" {
 		cliTool = cfg.CLITool
@@ -574,6 +644,7 @@ func NewSettingsOverlayWithEditorAndConfig(editor interface {
 	worktreeAutoCleanup := true
 	worktreeKeepDays := 7
 	specEnabled := true
+	orchestrationVia := "az"
 	if cfg != nil {
 		gitPushEnabled = cfg.Git.PushEnabled
 		gitFetchEnabled = cfg.Git.FetchEnabled
@@ -597,8 +668,22 @@ func NewSettingsOverlayWithEditorAndConfig(editor interface {
 		worktreeAutoCleanup = cfg.Worktree.AutoCleanup
 		worktreeKeepDays = cfg.Worktree.KeepDays
 		specEnabled = cfg.Spec.Enabled
+		if strings.TrimSpace(cfg.Orchestration.Via) != "" {
+			orchestrationVia = cfg.Orchestration.Via
+		}
 	}
 	items := []SettingItem{
+		{
+			Key:   "config-save-target",
+			Group: "Settings",
+			Label: "Save target",
+			Type:  SettingChoice,
+			Value: configTargetValue(selectedConfigPath),
+			Choices: []string{
+				"local",
+				"project",
+			},
+		},
 		{
 			Key:   "cli-tool",
 			Group: "Session",
@@ -651,6 +736,25 @@ func NewSettingsOverlayWithEditorAndConfig(editor interface {
 					return
 				}
 				cfg.Session.TimeoutMs = parseIntChoice(value, cfg.Session.TimeoutMs)
+			},
+		},
+		{
+			Key:   "orchestration-via",
+			Group: "Orchestration",
+			Label: "Delegation mode",
+			Type:  SettingChoice,
+			Value: orchestrationVia,
+			Choices: []string{
+				"az",
+				"native",
+			},
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(string); ok {
+					cfg.Orchestration.Via = v
+				}
 			},
 		},
 		{
@@ -1069,7 +1173,7 @@ func NewSettingsOverlayWithEditorAndConfig(editor interface {
 		},
 	}
 
-	return NewSettingsOverlayWithConfig(items, cfg, configSource)
+	return NewSettingsOverlayWithConfigTargets(items, cfg, selectedConfigPath, projectConfigPath)
 }
 
 func parseIntChoice(value any, fallback int) int {

@@ -6148,11 +6148,41 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "How to use `az` command map:") {
 		t.Fatalf("prime output missing az command map section: %q", output)
 	}
-	if !strings.Contains(output, "`az issue fanout --input ./fanout.json`") {
-		t.Fatalf("prime output missing fanout plan command example: %q", output)
+	if !strings.Contains(output, "`az orchestrate status --root <issue-id> [--since <seq>] [--limit <n>] [--json]`") {
+		t.Fatalf("prime output missing orchestrate status command example: %q", output)
 	}
-	if !strings.Contains(output, "`az issue fanout drift --issue <issue-id> --worktree <path> --fail-on-out`") {
-		t.Fatalf("prime output missing fanout drift command example: %q", output)
+	if !strings.Contains(output, "`az orchestrate start --root <issue-id> [--limit <n>] [--issue <issue-id> ...] [--json]`") {
+		t.Fatalf("prime output missing orchestrate start command example: %q", output)
+	}
+	if !strings.Contains(output, "`az orchestrate complete-check --root <issue-id> [--json]`") {
+		t.Fatalf("prime output missing orchestrate complete-check command example: %q", output)
+	}
+	if !strings.Contains(output, "`orchestration.via` is `az`: use `az orchestrate` as the worker launch and coordination authority") {
+		t.Fatalf("prime output missing az orchestration authority guidance: %q", output)
+	}
+	if !strings.Contains(output, "Do not use harness-native subagent/delegation tooling for this graph unless the user explicitly overrides this or changes `orchestration.via` to `native`.") {
+		t.Fatalf("prime output missing native tooling prohibition in az mode: %q", output)
+	}
+	if !strings.Contains(output, "`orchestration.via=az` means do not spawn harness-native subagents yourself.") {
+		t.Fatalf("prime output missing follow-up native subagent prohibition: %q", output)
+	}
+	if !strings.Contains(output, "Then run the az orchestration loop: `status` to identify runnable leaves") {
+		t.Fatalf("prime output missing az orchestration workflow guidance: %q", output)
+	}
+	if !strings.Contains(output, "Az orchestration loop:") {
+		t.Fatalf("prime output missing az orchestration operating loop: %q", output)
+	}
+	if !strings.Contains(output, "Small graph: 1-3 leaves") {
+		t.Fatalf("prime output missing small graph orchestration guidance: %q", output)
+	}
+	if !strings.Contains(output, "Medium graph: 4-10 leaves") {
+		t.Fatalf("prime output missing medium graph orchestration guidance: %q", output)
+	}
+	if !strings.Contains(output, "Large graph: 10+ leaves or multiple dependency phases") {
+		t.Fatalf("prime output missing large graph orchestration guidance: %q", output)
+	}
+	if !strings.Contains(output, "Repeat status -> start -> watch until `az orchestrate complete-check --root <issue-id>` passes") {
+		t.Fatalf("prime output missing completion loop guidance: %q", output)
 	}
 	if !strings.Contains(output, "`az mail send --parent <parent-issue> --type dependency-ready --body \"...\"`") {
 		t.Fatalf("prime output missing mail send command example: %q", output)
@@ -6567,11 +6597,54 @@ func TestPrimeCommandNativeFanoutGuidance(t *testing.T) {
 	if !strings.Contains(output, "Shorthand: `single-window fanout (native)`") {
 		t.Fatalf("prime output missing native single-window shorthand: %q", output)
 	}
-	if strings.Contains(output, "`az issue fanout --input ./fanout.json`") {
-		t.Fatalf("prime output should avoid az issue fanout command map in native mode: %q", output)
+	if strings.Contains(output, "`az orchestrate status --root <issue-id> [--since <seq>] [--limit <n>] [--json]`") {
+		t.Fatalf("prime output should avoid az orchestrate command map in native mode: %q", output)
 	}
 	if strings.Contains(output, "Shorthand: `single-window fanout` means split until each child is ready for one subagent, then fan out one subagent per child.") {
 		t.Fatalf("prime output should not include az fanout shorthand in native mode: %q", output)
+	}
+}
+
+func TestPrimeCommandAzOrchestrationGuidanceRequiresAzVia(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(&Dependencies{
+			Config: &config.Config{
+				Spec:          config.SpecConfig{Enabled: true},
+				Orchestration: config.OrchestrationConfig{Via: "az"},
+			},
+		})
+	})
+
+	if !strings.Contains(output, "`orchestration.via` is `az`: use `az orchestrate` as the worker launch and coordination authority") {
+		t.Fatalf("prime output missing explicit az orchestration guidance: %q", output)
+	}
+	if strings.Contains(output, "Unsupported `orchestration.via` value") {
+		t.Fatalf("prime output should not report unsupported orchestration mode for az: %q", output)
+	}
+}
+
+func TestPrimeCommandUnsupportedOrchestrationViaDoesNotPrintAzWorkflow(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(&Dependencies{
+			Config: &config.Config{
+				Spec:          config.SpecConfig{Enabled: true},
+				Orchestration: config.OrchestrationConfig{Via: "banana"},
+			},
+		})
+	})
+
+	if !strings.Contains(output, "Unsupported `orchestration.via` value: `banana`") {
+		t.Fatalf("prime output missing unsupported orchestration warning: %q", output)
+	}
+	if strings.Contains(output, "`orchestration.via` is `az`: use `az orchestrate` as the worker launch and coordination authority") {
+		t.Fatalf("prime output should not print az guidance for unsupported orchestration mode: %q", output)
+	}
+	if strings.Contains(output, "`orchestration.via` is `native`: use your harness-native subagent") {
+		t.Fatalf("prime output should not print native guidance for unsupported orchestration mode: %q", output)
 	}
 }
 

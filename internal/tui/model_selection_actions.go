@@ -182,6 +182,9 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "editor":
+		if path, ok := msg.Value.(string); ok && strings.TrimSpace(path) != "" {
+			return m, m.openSettingsEditorCmd(path)
+		}
 		return m, m.openSettingsEditorCmd()
 	case "event-log-error":
 		if err, ok := msg.Value.(error); ok {

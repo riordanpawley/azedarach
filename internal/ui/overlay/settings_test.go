@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -480,14 +481,23 @@ func TestSettingsOverlay_ConfigBackedSessionSettingsPersist(t *testing.T) {
 
 	menu := NewSettingsOverlayWithEditorAndConfig(&mockSettingsEditor{showPhases: true}, cfg, filepath.Join(tmpDir, config.ConfigDirName, config.ConfigFileName))
 
-	if got := menu.items[0].Value; got != "claude" {
+	cliToolIdx := settingIndexByKey(menu, "cli-tool")
+	if cliToolIdx < 0 {
+		t.Fatal("setting \"cli-tool\" not found")
+	}
+	skipPermissionsIdx := settingIndexByKey(menu, "skip-permissions")
+	if skipPermissionsIdx < 0 {
+		t.Fatal("setting \"skip-permissions\" not found")
+	}
+
+	if got := menu.items[cliToolIdx].Value; got != "claude" {
 		t.Fatalf("cli tool value = %v, want claude", got)
 	}
-	if got := menu.items[1].Value; got != false {
+	if got := menu.items[skipPermissionsIdx].Value; got != false {
 		t.Fatalf("skip permissions value = %v, want false", got)
 	}
 
-	menu.cursor = 0
+	menu.cursor = cliToolIdx
 	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")}
 	_, cmd := menu.Update(msg)
 	if cmd == nil {
@@ -497,7 +507,7 @@ func TestSettingsOverlay_ConfigBackedSessionSettingsPersist(t *testing.T) {
 		t.Fatalf("expected nil result from successful config save, got %T", result)
 	}
 
-	menu.cursor = 1
+	menu.cursor = skipPermissionsIdx
 	msg = tea.KeyMsg{Type: tea.KeySpace}
 	_, cmd = menu.Update(msg)
 	if cmd == nil {
@@ -516,6 +526,51 @@ func TestSettingsOverlay_ConfigBackedSessionSettingsPersist(t *testing.T) {
 	}
 	if !loaded.Session.DangerouslySkipPermissions {
 		t.Fatal("expected loaded permissions setting to be true")
+	}
+}
+
+func TestSettingsOverlay_ConfigBackedLocalSaveTargetPersistsToLocalConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectPath := filepath.Join(tmpDir, config.ConfigDirName, config.ConfigFileName)
+	localPath := filepath.Join(tmpDir, config.ConfigDirName, config.LocalConfigFileName)
+	cfg := config.DefaultConfig()
+	cfg.Orchestration.Via = "az"
+
+	menu := NewSettingsOverlayWithEditorAndConfigTarget(&mockSettingsEditor{showPhases: true}, cfg, localPath, projectPath)
+
+	targetIdx := settingIndexByKey(menu, "config-save-target")
+	if targetIdx < 0 {
+		t.Fatal("setting \"config-save-target\" not found")
+	}
+	if got := menu.items[targetIdx].Value; got != "local" {
+		t.Fatalf("save target = %v, want local", got)
+	}
+
+	orchIdx := settingIndexByKey(menu, "orchestration-via")
+	if orchIdx < 0 {
+		t.Fatal("setting \"orchestration-via\" not found")
+	}
+	menu.cursor = orchIdx
+	_, cmd := menu.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	if cmd == nil {
+		t.Fatal("expected config save command after cycling orchestration-via")
+	}
+	if result := cmd(); result != nil {
+		t.Fatalf("expected nil result from successful config save, got %T", result)
+	}
+
+	if _, err := os.Stat(projectPath); !os.IsNotExist(err) {
+		t.Fatalf("project config should not be written, stat err = %v", err)
+	}
+	loaded, err := config.LoadConfig(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if loaded.Orchestration.Via != "native" {
+		t.Fatalf("orchestration via = %q, want native", loaded.Orchestration.Via)
+	}
+	if _, err := os.Stat(localPath); err != nil {
+		t.Fatalf("expected local config to be written: %v", err)
 	}
 }
 
@@ -603,6 +658,7 @@ func TestSettingsOverlay_ConfigBackedExpandedSettingsPersist(t *testing.T) {
 	cfg.Notifications.ErrorThreshold = 3
 	cfg.Worktree.KeepDays = 7
 	cfg.Spec.Enabled = true
+	cfg.Orchestration.Via = "az"
 
 	menu := NewSettingsOverlayWithEditorAndConfig(
 		&mockSettingsEditor{showPhases: true},
@@ -617,6 +673,7 @@ func TestSettingsOverlay_ConfigBackedExpandedSettingsPersist(t *testing.T) {
 		"merge-strategy",
 		"notifications-error-threshold",
 		"worktree-keep-days",
+		"orchestration-via",
 	} {
 		idx := settingIndexByKey(menu, key)
 		if idx < 0 {
@@ -670,6 +727,9 @@ func TestSettingsOverlay_ConfigBackedExpandedSettingsPersist(t *testing.T) {
 	}
 	if loaded.Spec.Enabled {
 		t.Fatal("expected spec-enabled to be toggled to false")
+	}
+	if loaded.Orchestration.Via != "native" {
+		t.Fatalf("orchestration via = %q, want native", loaded.Orchestration.Via)
 	}
 }
 

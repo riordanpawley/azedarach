@@ -1396,6 +1396,35 @@ func TestSettingsEditorOpensCurrentProjectConfigInTmuxPopup(t *testing.T) {
 	}
 }
 
+func TestSettingsEditorOpensRequestedConfigPath(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/tmux-123/default,1,0")
+	t.Setenv("EDITOR", "vim")
+
+	projectDir := t.TempDir()
+	wantConfigPath := filepath.Join(projectDir, config.ConfigDirName, config.LocalConfigFileName)
+
+	var gotCommand string
+	m := newTestModel()
+	m.repoDir = projectDir
+	m.tmuxClient = mockTmuxService{
+		popupFn: func(_ context.Context, title, width, height, command string) error {
+			gotCommand = command
+			return nil
+		},
+	}
+
+	_, cmd := m.handleSelection(overlay.SelectionMsg{Key: "editor", Value: wantConfigPath})
+	if cmd == nil {
+		t.Fatal("expected editor popup command")
+	}
+	if msg := cmd(); msg == nil {
+		t.Fatal("expected editor completion message")
+	}
+	if !strings.Contains(gotCommand, shellSingleQuote(wantConfigPath)) {
+		t.Fatalf("popup command = %q, want config path %q", gotCommand, wantConfigPath)
+	}
+}
+
 func TestSettingsEditorRequiresTmuxPopup(t *testing.T) {
 	t.Setenv("TMUX", "")
 
