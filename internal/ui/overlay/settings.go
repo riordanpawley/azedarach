@@ -1,7 +1,9 @@
 package overlay
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -37,6 +39,8 @@ type SettingItem struct {
 	ActionHint string         // Optional display hint for action rows
 	OnChange   func(any)      // Callback when value changes
 	OnAction   func() tea.Cmd // Callback for SettingAction type
+	ConfigPath []string       // JSON path for config-backed settings
+	SaveTarget string         // "local" or "project" for config-backed settings
 }
 
 // SettingsOverlay is a settings menu overlay
@@ -209,6 +213,10 @@ func (m *SettingsOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, cmd
 			}
 			return m, nil
+
+		case "t":
+			m.toggleSaveTarget()
+			return m, nil
 		}
 	case tea.WindowSizeMsg:
 		m.ApplyWindowSize(msg)
@@ -238,6 +246,7 @@ func (m *SettingsOverlay) View() string {
 			return renderDialogActions(m.styles, []keybinds.Binding{
 				{Key: "j/k", Description: "move"},
 				{Key: "h/l", Description: "cycle"},
+				{Key: "t", Description: "target"},
 				{Key: "Enter/Space", Description: "toggle/activate"},
 				{Key: "e", Description: "edit config"},
 				{Key: "Esc", Description: "close"},
@@ -326,6 +335,9 @@ func (m *SettingsOverlay) renderLines(width int) ([]string, int) {
 			m.styles.MenuKey.Render(value)
 		if item.Key != "" {
 			line += " " + m.styles.MenuItemDisabled.Render("["+item.Key+"]")
+		}
+		if item.configBacked() {
+			line += " " + m.styles.MenuItemDisabled.Render("@"+item.normalizedSaveTarget())
 		}
 
 		lines = append(lines, ansi.Truncate(line, max(8, width-4), "..."))
@@ -420,7 +432,7 @@ func (m *SettingsOverlay) toggleOrActivate() tea.Cmd {
 			if item.OnChange != nil {
 				item.OnChange(item.Value)
 			}
-			return m.persistConfig()
+			return m.persistConfigItem(*item)
 		}
 		return nil
 
@@ -511,15 +523,12 @@ func (m *SettingsOverlay) incrementChoice() tea.Cmd {
 	// Move to next choice (wrap around)
 	nextIdx := (currentIdx + 1) % len(item.Choices)
 	item.Value = item.Choices[nextIdx]
-	if item.Key == "config-save-target" {
-		m.applyConfigTarget(item.Value)
-	}
 
 	if item.OnChange != nil {
 		item.OnChange(item.Value)
 	}
 
-	return m.persistConfig()
+	return m.persistConfigItem(*item)
 }
 
 // decrementChoice decrements the choice value (wrapping around)
@@ -552,26 +561,44 @@ func (m *SettingsOverlay) decrementChoice() tea.Cmd {
 	// Move to previous choice (wrap around)
 	prevIdx := (currentIdx - 1 + len(item.Choices)) % len(item.Choices)
 	item.Value = item.Choices[prevIdx]
-	if item.Key == "config-save-target" {
-		m.applyConfigTarget(item.Value)
-	}
 
 	if item.OnChange != nil {
 		item.OnChange(item.Value)
 	}
 
-	return m.persistConfig()
+	return m.persistConfigItem(*item)
 }
 
-func (m *SettingsOverlay) persistConfig() tea.Cmd {
-	if m.config == nil || strings.TrimSpace(m.configPath) == "" {
+func (m *SettingsOverlay) toggleSaveTarget() {
+	if m.cursor < 0 || m.cursor >= len(m.items) {
+		return
+	}
+	item := &m.items[m.cursor]
+	if !item.configBacked() {
+		return
+	}
+	if item.normalizedSaveTarget() == "local" {
+		item.SaveTarget = "project"
+		return
+	}
+	item.SaveTarget = "local"
+}
+
+func (m *SettingsOverlay) persistConfigItem(item SettingItem) tea.Cmd {
+	if m.config == nil || !item.configBacked() {
 		return nil
 	}
 
 	cfg := m.config
-	path := m.configPath
+	configPath := append([]string(nil), item.ConfigPath...)
+	target := item.normalizedSaveTarget()
+	targetPath := m.configPathForTarget(target)
+	oppositePath := m.configPathForTarget(oppositeConfigTarget(target))
+	if strings.TrimSpace(targetPath) == "" {
+		return nil
+	}
 	return func() tea.Msg {
-		if err := config.SaveConfig(cfg, path); err != nil {
+		if err := persistConfigField(cfg, configPath, targetPath, oppositePath); err != nil {
 			return SelectionMsg{
 				Key:   "settings-save-error",
 				Value: err,
@@ -581,20 +608,14 @@ func (m *SettingsOverlay) persistConfig() tea.Cmd {
 	}
 }
 
-func (m *SettingsOverlay) applyConfigTarget(value any) {
-	target, _ := value.(string)
+func (m *SettingsOverlay) configPathForTarget(target string) string {
 	switch target {
 	case "local":
-		if strings.TrimSpace(m.localConfigPath) != "" {
-			m.configPath = m.localConfigPath
-			m.configSource = m.localConfigPath
-		}
+		return m.localConfigPath
 	case "project":
-		if strings.TrimSpace(m.projectConfigPath) != "" {
-			m.configPath = m.projectConfigPath
-			m.configSource = m.projectConfigPath
-		}
+		return m.projectConfigPath
 	}
+	return ""
 }
 
 func configTargetValue(selectedConfigPath string) string {
@@ -609,6 +630,183 @@ func localConfigPathFor(projectConfigPath string) string {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(projectConfigPath), config.LocalConfigFileName)
+}
+
+func (item SettingItem) configBacked() bool {
+	return len(item.ConfigPath) > 0
+}
+
+func (item SettingItem) normalizedSaveTarget() string {
+	if item.SaveTarget == "project" {
+		return "project"
+	}
+	return "local"
+}
+
+func oppositeConfigTarget(target string) string {
+	if target == "local" {
+		return "project"
+	}
+	return "local"
+}
+
+func configTargetForPath(defaultTarget, projectConfigPath, localConfigPath string, jsonPath []string) string {
+	if len(jsonPath) == 0 {
+		return defaultTarget
+	}
+	if configFileContainsPath(localConfigPath, jsonPath) {
+		return "local"
+	}
+	if configFileContainsPath(projectConfigPath, jsonPath) {
+		return "project"
+	}
+	return defaultTarget
+}
+
+func configFileContainsPath(path string, jsonPath []string) bool {
+	raw, err := readConfigJSON(path)
+	if err != nil {
+		return false
+	}
+	_, ok := valueAtJSONPath(raw, jsonPath)
+	return ok
+}
+
+func persistConfigField(cfg *config.Config, jsonPath []string, targetPath, oppositePath string) error {
+	value, ok, err := configValueAtPath(cfg, jsonPath)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("config value %s not found", strings.Join(jsonPath, "."))
+	}
+
+	targetRaw, err := readConfigJSON(targetPath)
+	if err != nil {
+		return fmt.Errorf("read target config: %w", err)
+	}
+	setJSONPath(targetRaw, jsonPath, value)
+	if err := writeConfigJSON(targetPath, targetRaw); err != nil {
+		return fmt.Errorf("write target config: %w", err)
+	}
+
+	if strings.TrimSpace(oppositePath) != "" && filepath.Clean(oppositePath) != filepath.Clean(targetPath) {
+		oppositeRaw, err := readConfigJSON(oppositePath)
+		if err != nil {
+			return fmt.Errorf("read opposite config: %w", err)
+		}
+		if removeJSONPath(oppositeRaw, jsonPath) {
+			if err := writeConfigJSON(oppositePath, oppositeRaw); err != nil {
+				return fmt.Errorf("write opposite config: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+func configValueAtPath(cfg *config.Config, jsonPath []string) (any, bool, error) {
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, false, fmt.Errorf("marshal config: %w", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, false, fmt.Errorf("unmarshal config: %w", err)
+	}
+	value, ok := valueAtJSONPath(raw, jsonPath)
+	return value, ok, nil
+}
+
+func readConfigJSON(path string) (map[string]any, error) {
+	raw := map[string]any{
+		"$schema":  config.ConfigSchemaURL,
+		"$version": float64(config.CurrentConfigVersion),
+	}
+	if strings.TrimSpace(path) == "" {
+		return raw, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return raw, nil
+		}
+		return nil, err
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return raw, nil
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	if version, ok := raw["$version"].(float64); ok && int(version) > config.CurrentConfigVersion {
+		return nil, fmt.Errorf("unsupported config version %d in %s (max supported %d)", int(version), path, config.CurrentConfigVersion)
+	}
+	raw["$schema"] = config.ConfigSchemaURL
+	raw["$version"] = float64(config.CurrentConfigVersion)
+	return raw, nil
+}
+
+func writeConfigJSON(path string, raw map[string]any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	raw["$schema"] = config.ConfigSchemaURL
+	raw["$version"] = config.CurrentConfigVersion
+	data, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+func valueAtJSONPath(raw map[string]any, jsonPath []string) (any, bool) {
+	var current any = raw
+	for _, segment := range jsonPath {
+		obj, ok := current.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		current, ok = obj[segment]
+		if !ok {
+			return nil, false
+		}
+	}
+	return current, true
+}
+
+func setJSONPath(raw map[string]any, jsonPath []string, value any) {
+	current := raw
+	for _, segment := range jsonPath[:len(jsonPath)-1] {
+		next, ok := current[segment].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			current[segment] = next
+		}
+		current = next
+	}
+	current[jsonPath[len(jsonPath)-1]] = value
+}
+
+func removeJSONPath(raw map[string]any, jsonPath []string) bool {
+	if len(jsonPath) == 0 {
+		return false
+	}
+	if len(jsonPath) == 1 {
+		if _, ok := raw[jsonPath[0]]; ok {
+			delete(raw, jsonPath[0])
+			return true
+		}
+		return false
+	}
+	next, ok := raw[jsonPath[0]].(map[string]any)
+	if !ok {
+		return false
+	}
+	removed := removeJSONPath(next, jsonPath[1:])
+	if removed && len(next) == 0 {
+		delete(raw, jsonPath[0])
+	}
+	return removed
 }
 
 func openConfigEditorMsg(configPath ...string) tea.Cmd {
@@ -711,24 +909,22 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			orchestrationVia = cfg.Orchestration.Via
 		}
 	}
+	defaultSaveTarget := configTargetValue(selectedConfigPath)
+	resolvedLocalConfigPath := localConfigPathFor(projectConfigPath)
+	saveTargetFor := func(jsonPath []string) string {
+		return configTargetForPath(defaultSaveTarget, projectConfigPath, resolvedLocalConfigPath, jsonPath)
+	}
 	items := []SettingItem{
-		{
-			Key:   "config-save-target",
-			Group: "Settings",
-			Label: "Save target",
-			Type:  SettingChoice,
-			Value: configTargetValue(selectedConfigPath),
-			Choices: []string{
-				"local",
-				"project",
-			},
-		},
 		{
 			Key:   "cli-tool",
 			Group: "Session",
 			Label: "CLI Tool",
 			Type:  SettingChoice,
 			Value: cliTool,
+			ConfigPath: []string{
+				"cliTool",
+			},
+			SaveTarget: saveTargetFor([]string{"cliTool"}),
 			Choices: []string{
 				"claude",
 				"opencode",
@@ -749,6 +945,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Skip permissions",
 			Type:  SettingToggle,
 			Value: skipPermissions,
+			ConfigPath: []string{
+				"session",
+				"dangerouslySkipPermissions",
+			},
+			SaveTarget: saveTargetFor([]string{"session", "dangerouslySkipPermissions"}),
 			OnChange: func(value any) {
 				if cfg == nil {
 					return
@@ -764,6 +965,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Session timeout (ms)",
 			Type:  SettingChoice,
 			Value: fmt.Sprintf("%d", sessionTimeout(cfg)),
+			ConfigPath: []string{
+				"session",
+				"timeoutMs",
+			},
+			SaveTarget: saveTargetFor([]string{"session", "timeoutMs"}),
 			Choices: []string{
 				"15000",
 				"30000",
@@ -783,6 +989,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Delegation mode",
 			Type:  SettingChoice,
 			Value: orchestrationVia,
+			ConfigPath: []string{
+				"orchestration",
+				"via",
+			},
+			SaveTarget: saveTargetFor([]string{"orchestration", "via"}),
 			Choices: []string{
 				"az",
 				"native",
@@ -812,6 +1023,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Workflow mode",
 			Type:  SettingChoice,
 			Value: gitWorkflowMode,
+			ConfigPath: []string{
+				"git",
+				"workflowMode",
+			},
+			SaveTarget: saveTargetFor([]string{"git", "workflowMode"}),
 			Choices: []string{
 				"worktree",
 				"branch",
@@ -831,6 +1047,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Default merge strategy",
 			Type:  SettingChoice,
 			Value: gitDefaultMergeStrategy,
+			ConfigPath: []string{
+				"git",
+				"defaultMergeStrategy",
+			},
+			SaveTarget: saveTargetFor([]string{"git", "defaultMergeStrategy"}),
 			Choices: []string{
 				"merge",
 				"squash",
@@ -851,6 +1072,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Show line changes",
 			Type:  SettingToggle,
 			Value: gitShowLineChanges,
+			ConfigPath: []string{
+				"git",
+				"showLineChanges",
+			},
+			SaveTarget: saveTargetFor([]string{"git", "showLineChanges"}),
 			OnChange: func(value any) {
 				if cfg == nil {
 					return
@@ -866,6 +1092,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Git Push",
 			Type:  SettingToggle,
 			Value: gitPushEnabled,
+			ConfigPath: []string{
+				"git",
+				"pushEnabled",
+			},
+			SaveTarget: saveTargetFor([]string{"git", "pushEnabled"}),
 			OnChange: func(value any) {
 				if cfg == nil {
 					return
@@ -881,6 +1112,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Git Fetch",
 			Type:  SettingToggle,
 			Value: gitFetchEnabled,
+			ConfigPath: []string{
+				"git",
+				"fetchEnabled",
+			},
+			SaveTarget: saveTargetFor([]string{"git", "fetchEnabled"}),
 			OnChange: func(value any) {
 				if cfg == nil {
 					return
@@ -896,6 +1132,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Draft by default",
 			Type:  SettingToggle,
 			Value: prDraftByDefault,
+			ConfigPath: []string{
+				"pr",
+				"draftByDefault",
+			},
+			SaveTarget: saveTargetFor([]string{"pr", "draftByDefault"}),
 			OnChange: func(value any) {
 				if cfg == nil {
 					return
@@ -911,6 +1152,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Auto-link PR",
 			Type:  SettingToggle,
 			Value: prAutoLink,
+			ConfigPath: []string{
+				"pr",
+				"autoLink",
+			},
+			SaveTarget: saveTargetFor([]string{"pr", "autoLink"}),
 			OnChange: func(value any) {
 				if cfg == nil {
 					return
@@ -926,6 +1172,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Notify after create",
 			Type:  SettingToggle,
 			Value: prNotifyAfterCreate,
+			ConfigPath: []string{
+				"pr",
+				"notifyAfterCreate",
+			},
+			SaveTarget: saveTargetFor([]string{"pr", "notifyAfterCreate"}),
 			OnChange: func(value any) {
 				if cfg == nil {
 					return
@@ -941,6 +1192,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Create without merge",
 			Type:  SettingToggle,
 			Value: prCreateWithoutMerge,
+			ConfigPath: []string{
+				"pr",
+				"createWithoutMerge",
+			},
+			SaveTarget: saveTargetFor([]string{"pr", "createWithoutMerge"}),
 			OnChange: func(value any) {
 				if cfg == nil {
 					return
@@ -956,6 +1212,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Auto-detect network",
 			Type:  SettingToggle,
 			Value: networkAutoDetect,
+			ConfigPath: []string{
+				"network",
+				"autoDetect",
+			},
+			SaveTarget: saveTargetFor([]string{"network", "autoDetect"}),
 			OnChange: func(value any) {
 				if cfg == nil {
 					return
@@ -971,6 +1232,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Check interval (sec)",
 			Type:  SettingChoice,
 			Value: fmt.Sprintf("%d", networkCheckInterval),
+			ConfigPath: []string{
+				"network",
+				"checkInterval",
+			},
+			SaveTarget: saveTargetFor([]string{"network", "checkInterval"}),
 			Choices: []string{
 				"15",
 				"30",
@@ -991,6 +1257,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Offline timeout (sec)",
 			Type:  SettingChoice,
 			Value: fmt.Sprintf("%d", networkOfflineTimeout),
+			ConfigPath: []string{
+				"network",
+				"offlineTimeout",
+			},
+			SaveTarget: saveTargetFor([]string{"network", "offlineTimeout"}),
 			Choices: []string{
 				"60",
 				"120",
@@ -1010,6 +1281,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Retry attempts",
 			Type:  SettingChoice,
 			Value: fmt.Sprintf("%d", networkRetryAttempts),
+			ConfigPath: []string{
+				"network",
+				"retryAttempts",
+			},
+			SaveTarget: saveTargetFor([]string{"network", "retryAttempts"}),
 			Choices: []string{
 				"1",
 				"2",
@@ -1030,6 +1306,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Merge strategy",
 			Type:  SettingChoice,
 			Value: mergeStrategy,
+			ConfigPath: []string{
+				"merge",
+				"strategy",
+			},
+			SaveTarget: saveTargetFor([]string{"merge", "strategy"}),
 			Choices: []string{
 				"merge",
 				"squash",
@@ -1050,6 +1331,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Auto-merge",
 			Type:  SettingToggle,
 			Value: mergeAutoMerge,
+			ConfigPath: []string{
+				"merge",
+				"autoMerge",
+			},
+			SaveTarget: saveTargetFor([]string{"merge", "autoMerge"}),
 			OnChange: func(value any) {
 				if cfg == nil {
 					return
@@ -1065,6 +1351,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Compare with origin",
 			Type:  SettingToggle,
 			Value: mergeCompareWithOrigin,
+			ConfigPath: []string{
+				"merge",
+				"compareWithOrigin",
+			},
+			SaveTarget: saveTargetFor([]string{"merge", "compareWithOrigin"}),
 			OnChange: func(value any) {
 				if cfg == nil {
 					return
@@ -1080,6 +1371,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Notify completed task",
 			Type:  SettingToggle,
 			Value: notificationsCompletedTask,
+			ConfigPath: []string{
+				"notifications",
+				"completedTask",
+			},
+			SaveTarget: saveTargetFor([]string{"notifications", "completedTask"}),
 			OnChange: func(value any) {
 				if cfg == nil {
 					return
@@ -1095,6 +1391,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Notify failed task",
 			Type:  SettingToggle,
 			Value: notificationsFailedTask,
+			ConfigPath: []string{
+				"notifications",
+				"failedTask",
+			},
+			SaveTarget: saveTargetFor([]string{"notifications", "failedTask"}),
 			OnChange: func(value any) {
 				if cfg == nil {
 					return
@@ -1110,6 +1411,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Error threshold",
 			Type:  SettingChoice,
 			Value: fmt.Sprintf("%d", notificationsErrorThreshold),
+			ConfigPath: []string{
+				"notifications",
+				"errorThreshold",
+			},
+			SaveTarget: saveTargetFor([]string{"notifications", "errorThreshold"}),
 			Choices: []string{
 				"1",
 				"2",
@@ -1130,6 +1436,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Auto-cleanup",
 			Type:  SettingToggle,
 			Value: worktreeAutoCleanup,
+			ConfigPath: []string{
+				"worktree",
+				"autoCleanup",
+			},
+			SaveTarget: saveTargetFor([]string{"worktree", "autoCleanup"}),
 			OnChange: func(value any) {
 				if cfg == nil {
 					return
@@ -1145,6 +1456,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Keep days",
 			Type:  SettingChoice,
 			Value: fmt.Sprintf("%d", worktreeKeepDays),
+			ConfigPath: []string{
+				"worktree",
+				"keepDays",
+			},
+			SaveTarget: saveTargetFor([]string{"worktree", "keepDays"}),
 			Choices: []string{
 				"1",
 				"3",
@@ -1165,6 +1481,11 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Label: "Spec workflow enabled",
 			Type:  SettingToggle,
 			Value: specEnabled,
+			ConfigPath: []string{
+				"spec",
+				"enabled",
+			},
+			SaveTarget: saveTargetFor([]string{"spec", "enabled"}),
 			OnChange: func(value any) {
 				if cfg == nil {
 					return

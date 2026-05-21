@@ -566,18 +566,18 @@ func TestSettingsOverlay_ConfigBackedLocalSaveTargetPersistsToLocalConfig(t *tes
 
 	menu := NewSettingsOverlayWithEditorAndConfigTarget(&mockSettingsEditor{showPhases: true}, cfg, localPath, projectPath)
 
-	targetIdx := settingIndexByKey(menu, "config-save-target")
-	if targetIdx < 0 {
-		t.Fatal("setting \"config-save-target\" not found")
-	}
-	if got := menu.items[targetIdx].Value; got != "local" {
-		t.Fatalf("save target = %v, want local", got)
-	}
-
 	orchIdx := settingIndexByKey(menu, "orchestration-via")
 	if orchIdx < 0 {
 		t.Fatal("setting \"orchestration-via\" not found")
 	}
+	if got := menu.items[orchIdx].SaveTarget; got != "local" {
+		t.Fatalf("orchestration save target = %q, want local", got)
+	}
+	_, _ = menu.Update(tea.WindowSizeMsg{Width: 150, Height: 60})
+	if view := menu.View(); !contains(view, "@local") {
+		t.Fatalf("expected settings view to show per-setting local target, view=%q", view)
+	}
+
 	menu.cursor = orchIdx
 	_, cmd := menu.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
 	if cmd == nil {
@@ -599,6 +599,33 @@ func TestSettingsOverlay_ConfigBackedLocalSaveTargetPersistsToLocalConfig(t *tes
 	}
 	if _, err := os.Stat(localPath); err != nil {
 		t.Fatalf("expected local config to be written: %v", err)
+	}
+
+	_, _ = menu.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	if got := menu.items[orchIdx].SaveTarget; got != "project" {
+		t.Fatalf("orchestration save target = %q, want project", got)
+	}
+	_, cmd = menu.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	if cmd == nil {
+		t.Fatal("expected config save command after cycling orchestration-via with project target")
+	}
+	if result := cmd(); result != nil {
+		t.Fatalf("expected nil result from successful project config save, got %T", result)
+	}
+
+	projectRaw, err := readConfigJSON(projectPath)
+	if err != nil {
+		t.Fatalf("read project config: %v", err)
+	}
+	if got, ok := valueAtJSONPath(projectRaw, []string{"orchestration", "via"}); !ok || got != "az" {
+		t.Fatalf("project orchestration via = %v (present=%v), want az", got, ok)
+	}
+	localRaw, err := readConfigJSON(localPath)
+	if err != nil {
+		t.Fatalf("read local config: %v", err)
+	}
+	if got, ok := valueAtJSONPath(localRaw, []string{"orchestration", "via"}); ok {
+		t.Fatalf("local orchestration via should be removed after project save, got %v", got)
 	}
 }
 

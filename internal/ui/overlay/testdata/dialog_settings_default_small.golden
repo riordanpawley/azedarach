@@ -5,11 +5,11 @@
 ││ ▶   Auto-refresh issues...............yes [...    ────────────────│
 ││     Compact card view.................no [c...     j/k move       │
 ││     Theme.............................macch...     h/l cycle      │
-││                                                    Enter/Space    │
-││ Actions                                           toggle/activate │
-││ ───────────────────                                e edit config  │
-││     Open config in $EDITOR............open ...     Esc close      │
-││     Manage projects...................open ...                    │
+││                                                    t target       │
+││ Actions                                            Enter/Space    │
+││ ───────────────────                               toggle/activate │
+││     Open config in $EDITOR............open ...     e edit config  │
+││     Manage projects...................open ...     Esc close      │
 ││                                                                   │
 ││                                                                   │
 ││                                                                   │
