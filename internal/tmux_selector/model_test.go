@@ -591,6 +591,47 @@ func TestModelViewUsesRemainingHeightOnNarrowViewport(t *testing.T) {
 	}
 }
 
+func TestModelViewUsesCompactCardsOnMobileViewport(t *testing.T) {
+	entries := []InventoryEntry{
+		{SessionID: "az-one", IssueID: "one", TaskTitle: "One", ProjectPath: "/tmp/project", HasTmuxSession: true},
+		{SessionID: "az-two", IssueID: "two", TaskTitle: "Two", ProjectPath: "/tmp/project", HasTmuxSession: true},
+		{SessionID: "az-three", IssueID: "three", TaskTitle: "Three", ProjectPath: "/tmp/project", HasTmuxSession: true},
+		{SessionID: "az-four", IssueID: "four", TaskTitle: "Four", ProjectPath: "/tmp/project", HasTmuxSession: true},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 14})
+	model = updated.(Model)
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	availableHeight := model.gridAvailableHeight()
+	columns := model.gridColumnCount(availableHeight)
+	if columns != 1 {
+		t.Fatalf("columns = %d, want mobile one-column layout", columns)
+	}
+	cardWidth := gridCardWidth(model.width, columns)
+	visible := VisibleGridIndices(model.snapshot.Entries, model.cursor, columns, cardWidth, availableHeight, model.styles)
+	if len(visible) < 2 {
+		t.Fatalf("visible sessions = %d, want compact cards to fit multiple sessions; indices=%v", len(visible), visible)
+	}
+
+	view := model.View()
+	if height := lipgloss.Height(view); height != 14 {
+		t.Fatalf("view height = %d, want exactly 14\n%s", height, view)
+	}
+	for _, line := range strings.Split(view, "\n") {
+		if width := ansi.StringWidth(line); width > 40 {
+			t.Fatalf("line width = %d, want <= 40:\n%q\n\n%s", width, line, view)
+		}
+	}
+	if !strings.Contains(view, "az-one") || !strings.Contains(view, "az-two") {
+		t.Fatalf("mobile view should show multiple compact session cards:\n%s", view)
+	}
+}
+
 func TestModelViewUsesGridOnWideViewport(t *testing.T) {
 	started := time.Unix(1775209200, 0).UTC()
 	entries := []InventoryEntry{
@@ -617,6 +658,47 @@ func TestModelViewUsesGridOnWideViewport(t *testing.T) {
 	}
 	if lineWithCards == "" {
 		t.Fatalf("wide view did not render issue cards in a horizontal grid:\n%s", view)
+	}
+}
+
+func TestModelViewUsesCompactCardsToFillTallViewport(t *testing.T) {
+	entries := make([]InventoryEntry, 21)
+	for i := range entries {
+		issueID := string(rune('a' + i))
+		entries[i] = InventoryEntry{
+			SessionID:      "az-" + issueID,
+			IssueID:        issueID,
+			TaskTitle:      "Dashboard: investigate a moderately long task title that wraps in narrow cards",
+			ProjectPath:    "/tmp/project",
+			HasTmuxSession: true,
+			GitAdditions:   100 + i,
+			GitDeletions:   i,
+		}
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 181, Height: 51})
+	model = updated.(Model)
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	model.cursor = 10
+
+	availableHeight := model.gridAvailableHeight()
+	if got := gridColumnCount(model.width); got != 3 {
+		t.Fatalf("baseline columns = %d, want width to allow 3 columns", got)
+	}
+	if got := model.gridColumnCount(availableHeight); got != 3 {
+		t.Fatalf("height-aware columns = %d, want 3 columns when compact cards fit", got)
+	}
+	cardWidth := gridCardWidth(model.width, model.gridColumnCount(availableHeight))
+	visible := VisibleGridIndices(model.snapshot.Entries, model.cursor, model.gridColumnCount(availableHeight), cardWidth, availableHeight, model.styles)
+	if len(visible) != len(entries) {
+		t.Fatalf("visible sessions = %d, want all %d to use tall viewport; indices=%v", len(visible), len(entries), visible)
+	}
+	if height := lipgloss.Height(model.View()); height != 51 {
+		t.Fatalf("view height = %d, want exactly 51", height)
 	}
 }
 

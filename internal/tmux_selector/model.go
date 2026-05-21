@@ -424,14 +424,15 @@ func (m Model) View() string {
 	if len(m.snapshot.Entries) == 0 {
 		b.WriteString("No tmux sessions found.\n")
 	} else {
-		columns := gridColumnCount(m.width)
+		availableHeight := m.gridAvailableHeight()
+		columns := m.gridColumnCount(availableHeight)
 		cardWidth := gridCardWidth(m.width, columns)
 		rows := RenderVisibleGridWithLabels(
 			m.snapshot.Entries,
 			m.cursor,
 			columns,
 			cardWidth,
-			m.gridAvailableHeight(),
+			availableHeight,
 			m.styles,
 			m.labelsByEntry(),
 		)
@@ -545,7 +546,7 @@ func (m *Model) moveCursor(dx int, dy int) {
 	if m.cursor >= count {
 		m.cursor = count - 1
 	}
-	columns := gridColumnCount(m.width)
+	columns := m.gridColumnCount(m.gridAvailableHeight())
 	if columns <= 1 {
 		next := m.cursor + dy
 		if dx < 0 {
@@ -623,10 +624,14 @@ func (m Model) visibleEntryIndices() []int {
 	if len(m.snapshot.Entries) == 0 {
 		return nil
 	}
-	columns := gridColumnCount(m.width)
-	cardWidth := gridCardWidth(m.width, columns)
 	availableHeight := m.gridAvailableHeight()
+	columns := m.gridColumnCount(availableHeight)
+	cardWidth := gridCardWidth(m.width, columns)
 	return VisibleGridIndices(m.snapshot.Entries, m.cursor, columns, cardWidth, availableHeight, m.styles)
+}
+
+func (m Model) gridColumnCount(availableHeight int) int {
+	return gridColumnCountForViewport(m.width, m.snapshot.Entries, m.cursor, availableHeight, m.styles)
 }
 
 func (m Model) gridAvailableHeight() int {
@@ -900,11 +905,41 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 		task.Origin = ""
 	}
 	card := board.RenderCardWithRuntimeSignals(task, signals, selected, false, width, s)
+	card = compactSelectorCard(card)
 	if len(metaParts) == 0 {
 		return card
 	}
 	meta := strings.Join(metaParts, "  ")
 	return insertCardMetaLine(card, meta, origin, s)
+}
+
+func compactSelectorCard(card string) string {
+	lines := strings.Split(card, "\n")
+	if len(lines) < 4 {
+		return card
+	}
+	out := make([]string, 0, len(lines))
+	out = append(out, lines[0])
+	for i := 1; i < len(lines)-1; i++ {
+		if isBlankCardInteriorLine(lines[i]) {
+			continue
+		}
+		out = append(out, lines[i])
+	}
+	out = append(out, lines[len(lines)-1])
+	if len(out) < 3 {
+		return card
+	}
+	return strings.Join(out, "\n")
+}
+
+func isBlankCardInteriorLine(line string) bool {
+	stripped := ansi.Strip(line)
+	if !strings.HasPrefix(stripped, "│") || !strings.HasSuffix(stripped, "│") {
+		return false
+	}
+	inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(stripped, "│"), "│"))
+	return inner == ""
 }
 
 func insertCardMetaLine(card string, meta string, origin string, s *styles.Styles) string {
@@ -1166,6 +1201,64 @@ func gridColumnCount(width int) int {
 	available := maxInt(1, width-4)
 	columns := (available + gapWidth) / (minCardWidth + gapWidth)
 	return clampInt(columns, 1, maxColumns)
+}
+
+func gridColumnCountForViewport(width int, rows []SessionRow, cursor int, availableHeight int, s *styles.Styles) int {
+	maxColumns := gridColumnCount(width)
+	if maxColumns <= 1 || len(rows) == 0 || availableHeight <= 0 {
+		return maxColumns
+	}
+	bestColumns := maxColumns
+	bestVisible := -1
+	bestUsedHeight := -1
+	for columns := 1; columns <= maxColumns; columns++ {
+		cardWidth := gridCardWidth(width, columns)
+		visible, usedHeight := visibleGridMetrics(rows, cursor, columns, cardWidth, availableHeight, s)
+		if visible == len(rows) {
+			bestColumns = columns
+			bestVisible = visible
+			bestUsedHeight = usedHeight
+			continue
+		}
+		if visible > bestVisible ||
+			(visible == bestVisible && usedHeight > bestUsedHeight) ||
+			(visible == bestVisible && usedHeight == bestUsedHeight && columns > bestColumns) {
+			bestColumns = columns
+			bestVisible = visible
+			bestUsedHeight = usedHeight
+		}
+	}
+	return bestColumns
+}
+
+func visibleGridMetrics(rows []SessionRow, cursor int, columns int, cardWidth int, availableHeight int, s *styles.Styles) (visible int, usedHeight int) {
+	if len(rows) == 0 || availableHeight <= 0 {
+		return 0, 0
+	}
+	if columns <= 0 {
+		columns = 1
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= len(rows) {
+		cursor = len(rows) - 1
+	}
+	rendered := make([]string, len(rows))
+	for i, row := range rows {
+		rendered[i] = RenderSessionRow(row, i == cursor, cardWidth, lipgloss.Style{}, lipgloss.Style{}, lipgloss.Style{}, s)
+	}
+	start, end := visibleGridRowRange(rendered, cursor, columns, availableHeight)
+	for gridRow := start; gridRow < end; gridRow++ {
+		rowStart := gridRow * columns
+		rowEnd := rowStart + columns
+		if rowEnd > len(rows) {
+			rowEnd = len(rows)
+		}
+		visible += rowEnd - rowStart
+		usedHeight += lipgloss.Height(renderGridRow(rendered, gridRow, columns)) + 1
+	}
+	return visible, usedHeight
 }
 
 func gridCardWidth(width int, columns int) int {
