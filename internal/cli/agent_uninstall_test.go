@@ -277,6 +277,7 @@ func TestAIUninstallCommandAutoNoOpWhenNothingInstalled(t *testing.T) {
 }
 
 func TestAIInstallThenUninstallRoundTripLeavesNoManagedEntries(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o755); err != nil {
 		t.Fatal(err)

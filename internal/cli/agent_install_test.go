@@ -249,6 +249,7 @@ func TestAIInstallCommandRoutesExplicitTargetRulesync(t *testing.T) {
 }
 
 func TestAIInstallCommandAutoFallsBackToDetectedAgentsWhenNoRulesync(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".codex"), 0o755); err != nil {
 		t.Fatalf("mkdir .codex: %v", err)
@@ -275,5 +276,51 @@ func TestClaudeInstallerRequiresIssueID(t *testing.T) {
 	err := (claudeInstaller{}).Install(context.Background(), deps, AIInstallOptions{ProjectDir: dir})
 	if err == nil || !strings.Contains(err.Error(), "requires --issue") {
 		t.Fatalf("expected missing-issue error, got %v", err)
+	}
+}
+
+func TestCodexCommandHookTrustHashMatchesCodexCurrentHash(t *testing.T) {
+	command := buildCodexHookJSONCommand("permission-request")
+	got := codexCommandHookTrustHash("permission_request", "", command)
+	want := "sha256:eca2ae32b5c7d4e1310b8a0793063b88729f66cf8fdaea203ea9c35db9b81256"
+	if got != want {
+		t.Fatalf("hash = %s, want %s", got, want)
+	}
+
+	command = buildCodexHookJSONCommand("session-start")
+	got = codexCommandHookTrustHash("session_start", "startup|resume", command)
+	want = "sha256:47109ae6e8cf62ecfdbde08f0a668e147a2421176ac6cd4b647b70b155115193"
+	if got != want {
+		t.Fatalf("session_start hash = %s, want %s", got, want)
+	}
+}
+
+func TestUpsertCodexHookTrustEntriesPreservesAndUpdates(t *testing.T) {
+	input := `model = "gpt-5"
+
+[hooks.state."/repo/.codex/hooks.json:pre_tool_use:0:0"]
+enabled = false
+trusted_hash = "sha256:old"
+
+[hooks.state."/other/.codex/hooks.json:stop:0:0"]
+trusted_hash = "sha256:keep"
+`
+	got := upsertCodexHookTrustEntries(input, map[string]string{
+		"/repo/.codex/hooks.json:pre_tool_use:0:0": "sha256:new",
+		"/repo/.codex/hooks.json:stop:0:0":         "sha256:added",
+	})
+	for _, want := range []string{
+		`enabled = false`,
+		`trusted_hash = "sha256:new"`,
+		`[hooks.state."/repo/.codex/hooks.json:stop:0:0"]`,
+		`trusted_hash = "sha256:added"`,
+		`trusted_hash = "sha256:keep"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "sha256:old") {
+		t.Fatalf("old hash should be replaced:\n%s", got)
 	}
 }
