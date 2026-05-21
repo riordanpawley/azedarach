@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
@@ -103,6 +104,34 @@ type fakeDetailOpener struct {
 func (f *fakeDetailOpener) OpenDetail(_ context.Context, entry InventoryEntry) error {
 	f.entries = append(f.entries, entry)
 	return f.err
+}
+
+type fakeUIStateStore struct {
+	values map[string]string
+	gets   []string
+	sets   []string
+	err    error
+}
+
+func (f *fakeUIStateStore) GetUIStateForProject(_ context.Context, _ string, key string) (protocol.UIStateResponseBody, error) {
+	f.gets = append(f.gets, key)
+	if f.err != nil {
+		return protocol.UIStateResponseBody{}, f.err
+	}
+	value, found := f.values[key]
+	return protocol.UIStateResponseBody{Key: key, Value: value, Found: found}, nil
+}
+
+func (f *fakeUIStateStore) SetUIStateForProject(_ context.Context, _ string, key string, value string) (protocol.UIStateResponseBody, error) {
+	f.sets = append(f.sets, key+"="+value)
+	if f.err != nil {
+		return protocol.UIStateResponseBody{}, f.err
+	}
+	if f.values == nil {
+		f.values = map[string]string{}
+	}
+	f.values[key] = value
+	return protocol.UIStateResponseBody{Key: key, Value: value, Found: true}, nil
 }
 
 func TestModelUsesFakeInventoryAndSwitchesSessionID(t *testing.T) {
@@ -295,6 +324,106 @@ func TestModelOpenDetailRequiresIssueID(t *testing.T) {
 	}
 	if len(switcher.commands) != 0 {
 		t.Fatalf("commands = %v, want none", switcher.commands)
+	}
+}
+
+func TestModelTabTogglesTreeViewAndPersistsGlobally(t *testing.T) {
+	parentID := naming.IssueID("az-parent")
+	entries := []InventoryEntry{
+		{
+			SessionID:      "az-proj-parent",
+			IssueID:        parentID.String(),
+			TaskTitle:      "Parent session",
+			State:          domain.SessionBusy,
+			HasTmuxSession: true,
+			Task: domain.Task{
+				ID:     parentID,
+				Title:  "Parent session",
+				Status: domain.StatusInProgress,
+			},
+		},
+		{
+			SessionID:      "az-proj-child",
+			IssueID:        "az-child",
+			TaskTitle:      "Child session",
+			State:          domain.SessionWaiting,
+			HasTmuxSession: true,
+			Task: domain.Task{
+				ID:       naming.IssueID("az-child"),
+				Title:    "Child session",
+				Status:   domain.StatusInProgress,
+				ParentID: &parentID,
+			},
+		},
+	}
+	store := &fakeUIStateStore{}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}}, WithUIStateStore(store))
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = updated.(Model)
+	if model.activeTab != selectorTabTree {
+		t.Fatalf("active tab = %v, want tree", model.activeTab)
+	}
+	if cmd == nil {
+		t.Fatal("tab did not persist active selector tab")
+	}
+	if msg := cmd(); msg.(selectorTabSavedMsg).err != nil {
+		t.Fatalf("persist tab msg = %+v", msg)
+	}
+	if got := strings.Join(store.sets, "\n"); got != protocol.UIStateKeyTMUXSelectorLastActiveTab+"=tree" {
+		t.Fatalf("persisted keys = %q", got)
+	}
+	view := ansi.Strip(model.View())
+	if !strings.Contains(view, "[ Tree ]") || !strings.Contains(view, "`- az-child") {
+		t.Fatalf("tree view missing tab or child hierarchy:\n%s", view)
+	}
+
+	model = updateKey(t, model, "down")
+	if model.cursor != 1 {
+		t.Fatalf("tree down cursor = %d, want child index 1", model.cursor)
+	}
+}
+
+func TestModelRestoresPersistedSelectorTab(t *testing.T) {
+	store := &fakeUIStateStore{values: map[string]string{
+		protocol.UIStateKeyTMUXSelectorLastActiveTab: "tree",
+	}}
+	model := New(fakeSnapshotLoader{}, WithUIStateStore(store))
+	msg := model.loadSelectorTabCmd()()
+	loaded, ok := msg.(selectorTabLoadedMsg)
+	if !ok {
+		t.Fatalf("load selector tab msg = %T", msg)
+	}
+	if loaded.err != nil || !loaded.found || loaded.tab != selectorTabTree {
+		t.Fatalf("loaded tab = %+v, want found tree", loaded)
+	}
+	updated, _ := model.Update(loaded)
+	model = updated.(Model)
+	if model.activeTab != selectorTabTree {
+		t.Fatalf("active tab = %v, want restored tree", model.activeTab)
+	}
+}
+
+func TestSelectorTabPersistenceMapping(t *testing.T) {
+	if got, ok := persistedValueForSelectorTab(selectorTabGrid); !ok || got != "cards" {
+		t.Fatalf("persistedValueForSelectorTab(cards) = %q,%v", got, ok)
+	}
+	if got, ok := persistedValueForSelectorTab(selectorTabTree); !ok || got != "tree" {
+		t.Fatalf("persistedValueForSelectorTab(tree) = %q,%v", got, ok)
+	}
+	if tab, ok := selectorTabFromPersistedValue("tree"); !ok || tab != selectorTabTree {
+		t.Fatalf("selectorTabFromPersistedValue(tree) = %v,%v", tab, ok)
+	}
+	if tab, ok := selectorTabFromPersistedValue("cards"); !ok || tab != selectorTabGrid {
+		t.Fatalf("selectorTabFromPersistedValue(cards) = %v,%v", tab, ok)
+	}
+	if _, ok := selectorTabFromPersistedValue("bogus"); ok {
+		t.Fatal("selectorTabFromPersistedValue(bogus) should be invalid")
 	}
 }
 
