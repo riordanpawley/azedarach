@@ -14,6 +14,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
+const settingsDefaultSaveTargetKey = "settings-default-save-target"
+
 // SettingType represents the type of a setting
 type SettingType int
 
@@ -55,6 +57,7 @@ type SettingsOverlay struct {
 	configPath        string
 	projectConfigPath string
 	localConfigPath   string
+	defaultSaveTarget string
 	styles            *Styles
 }
 
@@ -83,6 +86,7 @@ func NewSettingsOverlayWithConfig(items []SettingItem, cfg *config.Config, confi
 	menu.configPath = configSource
 	menu.projectConfigPath = configSource
 	menu.localConfigPath = localConfigPathFor(configSource)
+	menu.defaultSaveTarget = configTargetValue(configSource)
 	return menu
 }
 
@@ -92,6 +96,7 @@ func NewSettingsOverlayWithConfigTargets(items []SettingItem, cfg *config.Config
 	menu.configSource = selectedConfigPath
 	menu.projectConfigPath = projectConfigPath
 	menu.localConfigPath = localConfigPathFor(projectConfigPath)
+	menu.defaultSaveTarget = configTargetValue(selectedConfigPath)
 	return menu
 }
 
@@ -256,20 +261,28 @@ func (m *SettingsOverlay) View() string {
 }
 
 func (m *SettingsOverlay) renderScrollableItems(width, height int) string {
-	lines, selectedLine := m.renderLines(width)
+	lines, selectedLine, selectedHeaderLine := m.renderLines(width)
 	if len(lines) == 0 {
 		return ""
 	}
 	visibleRows := max(1, height)
 	m.ensureSelectionVisible(selectedLine, len(lines), visibleRows)
+	if visibleRows > 1 && selectedHeaderLine >= 0 && selectedHeaderLine < m.scroll && selectedLine <= m.scroll {
+		m.scroll = max(0, selectedLine-1)
+	}
 	start := m.scroll
 	end := min(len(lines), start+visibleRows)
-	return strings.Join(lines[start:end], "\n")
+	visible := append([]string(nil), lines[start:end]...)
+	if visibleRows > 1 && selectedHeaderLine >= 0 && selectedHeaderLine < start && selectedLine > start && len(visible) > 0 {
+		visible[0] = lines[selectedHeaderLine]
+	}
+	return strings.Join(visible, "\n")
 }
 
-func (m *SettingsOverlay) renderLines(width int) ([]string, int) {
+func (m *SettingsOverlay) renderLines(width int) ([]string, int, int) {
 	lines := make([]string, 0, len(m.items)+6)
 	selectedLine := 0
+	selectedHeaderLine := -1
 	currentLine := 0
 
 	if strings.TrimSpace(m.configSource) != "" {
@@ -279,6 +292,7 @@ func (m *SettingsOverlay) renderLines(width int) ([]string, int) {
 	}
 
 	lastGroup := ""
+	currentHeaderLine := -1
 	for i, item := range m.items {
 		if item.Group != "" && item.Group != lastGroup {
 			if len(lines) > 0 {
@@ -286,6 +300,7 @@ func (m *SettingsOverlay) renderLines(width int) ([]string, int) {
 				currentLine++
 			}
 			lines = append(lines, m.styles.MenuHeader.Render(item.Group))
+			currentHeaderLine = currentLine
 			currentLine++
 			lastGroup = item.Group
 		}
@@ -300,6 +315,7 @@ func (m *SettingsOverlay) renderLines(width int) ([]string, int) {
 		if i == m.cursor {
 			style = m.styles.MenuItemActive
 			selectedLine = currentLine
+			selectedHeaderLine = currentHeaderLine
 		}
 
 		prefix := "  "
@@ -344,7 +360,7 @@ func (m *SettingsOverlay) renderLines(width int) ([]string, int) {
 		currentLine++
 	}
 
-	return lines, selectedLine
+	return lines, selectedLine, selectedHeaderLine
 }
 
 func (m *SettingsOverlay) ensureSelectionVisible(selectedLine, totalLines, visibleRows int) {
@@ -523,6 +539,7 @@ func (m *SettingsOverlay) incrementChoice() tea.Cmd {
 	// Move to next choice (wrap around)
 	nextIdx := (currentIdx + 1) % len(item.Choices)
 	item.Value = item.Choices[nextIdx]
+	m.applySettingsInternalChoice(item)
 
 	if item.OnChange != nil {
 		item.OnChange(item.Value)
@@ -561,12 +578,24 @@ func (m *SettingsOverlay) decrementChoice() tea.Cmd {
 	// Move to previous choice (wrap around)
 	prevIdx := (currentIdx - 1 + len(item.Choices)) % len(item.Choices)
 	item.Value = item.Choices[prevIdx]
+	m.applySettingsInternalChoice(item)
 
 	if item.OnChange != nil {
 		item.OnChange(item.Value)
 	}
 
 	return m.persistConfigItem(*item)
+}
+
+func (m *SettingsOverlay) applySettingsInternalChoice(item *SettingItem) {
+	if item == nil || item.Key != settingsDefaultSaveTargetKey {
+		return
+	}
+	if value, ok := item.Value.(string); ok && value == "project" {
+		m.defaultSaveTarget = "project"
+		return
+	}
+	m.defaultSaveTarget = "local"
 }
 
 func (m *SettingsOverlay) toggleSaveTarget() {
@@ -577,11 +606,14 @@ func (m *SettingsOverlay) toggleSaveTarget() {
 	if !item.configBacked() {
 		return
 	}
-	if item.normalizedSaveTarget() == "local" {
+	switch item.normalizedSaveTarget() {
+	case "default":
+		item.SaveTarget = "local"
+	case "local":
 		item.SaveTarget = "project"
-		return
+	default:
+		item.SaveTarget = "default"
 	}
-	item.SaveTarget = "local"
 }
 
 func (m *SettingsOverlay) persistConfigItem(item SettingItem) tea.Cmd {
@@ -591,7 +623,7 @@ func (m *SettingsOverlay) persistConfigItem(item SettingItem) tea.Cmd {
 
 	cfg := m.config
 	configPath := append([]string(nil), item.ConfigPath...)
-	target := item.normalizedSaveTarget()
+	target := m.resolvedSaveTarget(item.normalizedSaveTarget())
 	targetPath := m.configPathForTarget(target)
 	oppositePath := m.configPathForTarget(oppositeConfigTarget(target))
 	if strings.TrimSpace(targetPath) == "" {
@@ -606,6 +638,16 @@ func (m *SettingsOverlay) persistConfigItem(item SettingItem) tea.Cmd {
 		}
 		return nil
 	}
+}
+
+func (m *SettingsOverlay) resolvedSaveTarget(target string) string {
+	if target == "default" {
+		if m.defaultSaveTarget == "project" {
+			return "project"
+		}
+		return "local"
+	}
+	return target
 }
 
 func (m *SettingsOverlay) configPathForTarget(target string) string {
@@ -637,6 +679,9 @@ func (item SettingItem) configBacked() bool {
 }
 
 func (item SettingItem) normalizedSaveTarget() string {
+	if item.SaveTarget == "default" {
+		return "default"
+	}
 	if item.SaveTarget == "project" {
 		return "project"
 	}
@@ -650,9 +695,9 @@ func oppositeConfigTarget(target string) string {
 	return "local"
 }
 
-func configTargetForPath(defaultTarget, projectConfigPath, localConfigPath string, jsonPath []string) string {
+func configTargetForPath(projectConfigPath, localConfigPath string, jsonPath []string) string {
 	if len(jsonPath) == 0 {
-		return defaultTarget
+		return "default"
 	}
 	if configFileContainsPath(localConfigPath, jsonPath) {
 		return "local"
@@ -660,7 +705,7 @@ func configTargetForPath(defaultTarget, projectConfigPath, localConfigPath strin
 	if configFileContainsPath(projectConfigPath, jsonPath) {
 		return "project"
 	}
-	return defaultTarget
+	return "default"
 }
 
 func configFileContainsPath(path string, jsonPath []string) bool {
@@ -912,9 +957,17 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 	defaultSaveTarget := configTargetValue(selectedConfigPath)
 	resolvedLocalConfigPath := localConfigPathFor(projectConfigPath)
 	saveTargetFor := func(jsonPath []string) string {
-		return configTargetForPath(defaultSaveTarget, projectConfigPath, resolvedLocalConfigPath, jsonPath)
+		return configTargetForPath(projectConfigPath, resolvedLocalConfigPath, jsonPath)
 	}
 	items := []SettingItem{
+		{
+			Key:     settingsDefaultSaveTargetKey,
+			Group:   "Config",
+			Label:   "Default save target",
+			Type:    SettingChoice,
+			Value:   defaultSaveTarget,
+			Choices: []string{"local", "project"},
+		},
 		{
 			Key:   "cli-tool",
 			Group: "Session",
@@ -1533,7 +1586,9 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 		},
 	}
 
-	return NewSettingsOverlayWithConfigTargets(items, cfg, selectedConfigPath, projectConfigPath)
+	menu := NewSettingsOverlayWithConfigTargets(items, cfg, selectedConfigPath, projectConfigPath)
+	menu.defaultSaveTarget = defaultSaveTarget
+	return menu
 }
 
 func parseIntChoice(value any, fallback int) int {

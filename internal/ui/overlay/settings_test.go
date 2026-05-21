@@ -496,6 +496,9 @@ func TestSettingsOverlay_View_ScrollsToKeepCursorVisible(t *testing.T) {
 	if !contains(view, "Setting 30") {
 		t.Fatalf("expected scrolled view to include selected bottom row, view=%q", view)
 	}
+	if !contains(view, "General") {
+		t.Fatalf("expected scrolled view to keep active group header visible, view=%q", view)
+	}
 	if menu.scroll <= 0 {
 		t.Fatalf("expected positive scroll offset for bottom selection, got %d", menu.scroll)
 	}
@@ -570,12 +573,19 @@ func TestSettingsOverlay_ConfigBackedLocalSaveTargetPersistsToLocalConfig(t *tes
 	if orchIdx < 0 {
 		t.Fatal("setting \"orchestration-via\" not found")
 	}
-	if got := menu.items[orchIdx].SaveTarget; got != "local" {
-		t.Fatalf("orchestration save target = %q, want local", got)
+	defaultTargetIdx := settingIndexByKey(menu, settingsDefaultSaveTargetKey)
+	if defaultTargetIdx < 0 {
+		t.Fatal("setting \"settings-default-save-target\" not found")
+	}
+	if got := menu.items[defaultTargetIdx].Value; got != "local" {
+		t.Fatalf("default save target = %q, want local", got)
+	}
+	if got := menu.items[orchIdx].SaveTarget; got != "default" {
+		t.Fatalf("orchestration save target = %q, want default", got)
 	}
 	_, _ = menu.Update(tea.WindowSizeMsg{Width: 150, Height: 60})
-	if view := menu.View(); !contains(view, "@local") {
-		t.Fatalf("expected settings view to show per-setting local target, view=%q", view)
+	if view := menu.View(); !contains(view, "@default") {
+		t.Fatalf("expected settings view to show per-setting default target, view=%q", view)
 	}
 
 	menu.cursor = orchIdx
@@ -601,6 +611,16 @@ func TestSettingsOverlay_ConfigBackedLocalSaveTargetPersistsToLocalConfig(t *tes
 		t.Fatalf("expected local config to be written: %v", err)
 	}
 
+	menu.cursor = defaultTargetIdx
+	_, _ = menu.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	if got := menu.defaultSaveTarget; got != "project" {
+		t.Fatalf("default save target = %q, want project", got)
+	}
+	menu.cursor = orchIdx
+	_, _ = menu.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	if got := menu.items[orchIdx].SaveTarget; got != "local" {
+		t.Fatalf("orchestration save target = %q, want local", got)
+	}
 	_, _ = menu.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
 	if got := menu.items[orchIdx].SaveTarget; got != "project" {
 		t.Fatalf("orchestration save target = %q, want project", got)
