@@ -6122,6 +6122,7 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 
 func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	setPrimeTmuxAvailable(t, true)
 
 	output := captureStdout(t, func() error {
 		return PrimeCommand(&Dependencies{})
@@ -6168,6 +6169,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "Do not use harness-native subagent/delegation tooling for this graph unless the user explicitly overrides this or changes `orchestration.via` to `native`.") {
 		t.Fatalf("prime output missing native tooling prohibition in az mode: %q", output)
+	}
+	if !strings.Contains(output, "Use `az orchestrate` for durable tracked task graphs that need issue dependencies, mailbox events, recoverable sessions, isolated worktrees, integration guidance, and `complete-check`.") {
+		t.Fatalf("prime output missing az/native tradeoff guidance: %q", output)
 	}
 	if !strings.Contains(output, "`orchestration.via=az` means do not spawn harness-native subagents yourself.") {
 		t.Fatalf("prime output missing follow-up native subagent prohibition: %q", output)
@@ -6590,6 +6594,7 @@ func TestPrimeCommandSpecBlockDisabled(t *testing.T) {
 
 func TestPrimeCommandNativeFanoutGuidance(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	setPrimeTmuxAvailable(t, true)
 
 	output := captureStdout(t, func() error {
 		return PrimeCommand(&Dependencies{
@@ -6612,10 +6617,14 @@ func TestPrimeCommandNativeFanoutGuidance(t *testing.T) {
 	if strings.Contains(output, "Shorthand: `single-window fanout` means split until each child is ready for one subagent, then fan out one subagent per child.") {
 		t.Fatalf("prime output should not include az fanout shorthand in native mode: %q", output)
 	}
+	if !strings.Contains(output, "Use native delegation for short-lived ad hoc exploration or review where the result can be summarized back into the current session.") {
+		t.Fatalf("prime output missing native/az tradeoff guidance: %q", output)
+	}
 }
 
 func TestPrimeCommandAzOrchestrationGuidanceRequiresAzVia(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	setPrimeTmuxAvailable(t, true)
 
 	output := captureStdout(t, func() error {
 		return PrimeCommand(&Dependencies{
@@ -6631,6 +6640,51 @@ func TestPrimeCommandAzOrchestrationGuidanceRequiresAzVia(t *testing.T) {
 	}
 	if strings.Contains(output, "Unsupported `orchestration.via` value") {
 		t.Fatalf("prime output should not report unsupported orchestration mode for az: %q", output)
+	}
+}
+
+func TestPrimeCommandAzOrchestrationGuidanceRequiresTmux(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	setPrimeTmuxAvailable(t, false)
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(&Dependencies{
+			Config: &config.Config{
+				Spec:          config.SpecConfig{Enabled: true},
+				Orchestration: config.OrchestrationConfig{Via: "az"},
+			},
+		})
+	})
+
+	if !strings.Contains(output, "`orchestration.via` is `az`, but CLI-managed worker fanout requires `tmux` on `PATH`; `tmux` is not available.") {
+		t.Fatalf("prime output missing tmux unavailable guidance: %q", output)
+	}
+	if strings.Contains(output, "`az orchestrate ") {
+		t.Fatalf("prime output should not print az orchestrate commands when tmux is unavailable: %q", output)
+	}
+	if strings.Contains(output, "az orchestration loop") {
+		t.Fatalf("prime output should not print az orchestration loop when tmux is unavailable: %q", output)
+	}
+}
+
+func TestPrimeCommandNativeGuidanceAvoidsAzOrchestrateWhenTmuxMissing(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	setPrimeTmuxAvailable(t, false)
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(&Dependencies{
+			Config: &config.Config{
+				Spec:          config.SpecConfig{Enabled: true},
+				Orchestration: config.OrchestrationConfig{Via: "native"},
+			},
+		})
+	})
+
+	if !strings.Contains(output, "CLI-managed worker fanout requires `tmux` on `PATH`; `tmux` is not available") {
+		t.Fatalf("prime output missing native-mode tmux unavailable guidance: %q", output)
+	}
+	if strings.Contains(output, "`az orchestrate ") {
+		t.Fatalf("prime output should not print az orchestrate commands in native mode when tmux is unavailable: %q", output)
 	}
 }
 
@@ -7103,6 +7157,23 @@ func captureStdout(t *testing.T, fn func() error) string {
 	}
 
 	return buf.String()
+}
+
+func setPrimeTmuxAvailable(t *testing.T, available bool) {
+	t.Helper()
+	previous := primeLookPath
+	primeLookPath = func(file string) (string, error) {
+		if file != "tmux" {
+			return "", errors.New("unexpected lookup: " + file)
+		}
+		if available {
+			return "/usr/bin/tmux", nil
+		}
+		return "", errors.New("tmux not found")
+	}
+	t.Cleanup(func() {
+		primeLookPath = previous
+	})
 }
 
 func captureStderr(t *testing.T, fn func() error) string {

@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -57,6 +58,8 @@ const (
 )
 
 var sessionStartProgressTick = 15 * time.Second
+
+var primeLookPath = exec.LookPath
 
 type Dependencies struct {
 	Config         *config.Config
@@ -4535,6 +4538,7 @@ type primeTemplateData struct {
 	OrchestrationVia         string
 	OrchestrationViaAz       bool
 	OrchestrationViaNative   bool
+	TmuxAvailable            bool
 	IssueSection             string
 	ActiveIssueClosedWarning string
 	ContextGuardrail         string
@@ -4558,6 +4562,7 @@ func PrimeCommand(deps *Dependencies) error {
 	orchestrationVia := primeOrchestrationVia(deps)
 	orchestrationViaAz := strings.EqualFold(orchestrationVia, "az")
 	orchestrationViaNative := strings.EqualFold(orchestrationVia, "native")
+	tmuxAvailable := primeTmuxAvailable()
 
 	if primeMode == "question-first" {
 		questionFirstGuardrails = `- Question-first execution rules (Space+Q mode):
@@ -4607,6 +4612,7 @@ func PrimeCommand(deps *Dependencies) error {
 		OrchestrationVia:         orchestrationVia,
 		OrchestrationViaAz:       orchestrationViaAz,
 		OrchestrationViaNative:   orchestrationViaNative,
+		TmuxAvailable:            tmuxAvailable,
 		IssueSection:             issueSection,
 		ActiveIssueClosedWarning: activeIssueClosedWarning,
 		ContextGuardrail:         guardrail,
@@ -4620,6 +4626,11 @@ func PrimeCommand(deps *Dependencies) error {
 	}
 	fmt.Print(output)
 	return nil
+}
+
+func primeTmuxAvailable() bool {
+	_, err := primeLookPath("tmux")
+	return err == nil
 }
 
 func primeOrchestrationVia(deps *Dependencies) string {

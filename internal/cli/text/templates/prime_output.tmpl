@@ -19,8 +19,13 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from] [--json]`, `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from] [--json]`
   - Orchestration:
   {{ if .OrchestrationViaNative }}- `orchestration.via` is `native`: use your harness-native subagent delegation commands/keywords to split and run child issues (for example "delegate", "spawn", or "subagent"). Keep using `az issue` for tracking state and dependencies.
+  {{ if .TmuxAvailable }}
   - `az orchestrate` and `az issue fanout` commands are optional in this mode; prefer native delegation flow unless you explicitly need CLI-managed readiness/session starts.
-  {{ else if .OrchestrationViaAz }}
+  - Use native delegation for short-lived ad hoc exploration or review where the result can be summarized back into the current session. Use `az orchestrate` for durable tracked task graphs that need issue dependencies, mailbox events, recoverable sessions, isolated worktrees, integration guidance, and `complete-check`.
+  {{ else }}
+  - CLI-managed worker fanout requires `tmux` on `PATH`; `tmux` is not available, so use native delegation for short-lived ad hoc exploration while keeping durable state in `az issue`. Install `tmux` and rerun `az prime` to see CLI-managed worker commands.
+  {{ end }}
+  {{ else if and .OrchestrationViaAz .TmuxAvailable }}
   - `az orchestrate status --root <issue-id> [--since <seq>] [--limit <n>] [--json]`
   - `az orchestrate watch --root <issue-id> --since <seq> [--jsonl] [--once]`
   - `az orchestrate start --root <issue-id> [--limit <n>] [--issue <issue-id> ...] [--json]`
@@ -28,6 +33,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - `az orchestrate close-session --issue <issue-id> [--json]`
   - `az orchestrate complete-check --root <issue-id> [--json]`
   - `orchestration.via` is `az`: use `az orchestrate` as the worker launch and coordination authority. Do not use harness-native subagent/delegation tooling for this graph unless the user explicitly overrides this or changes `orchestration.via` to `native`.
+  - Use `az orchestrate` for durable tracked task graphs that need issue dependencies, mailbox events, recoverable sessions, isolated worktrees, integration guidance, and `complete-check`. Native subagents are better for short-lived ad hoc exploration or review where the result can be summarized back into the current session; do not use them to execute this `az` graph unless the user explicitly overrides the mode.
   - Use `az orchestrate status` for readiness snapshots, `watch` for observe-only mailbox/runnable updates, `start` to launch runnable leaf workers, `integrate` for worker result guidance, `close-session` to clear active worker sessions after integration, and `complete-check` before closing the root issue.
   - Az orchestration loop:
     1. Shape the graph with child issues and dependency edges until each leaf is one-session-sized and independently mergeable.
@@ -39,6 +45,8 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Small graph: 1-3 leaves, usually run `status`, then `start --limit 3`, then `complete-check` after workers finish.
   - Medium graph: 4-10 leaves, run bounded waves (`--limit 2` to `--limit 4`), watch mailbox events between waves, and start newly unblocked leaves only after dependency-ready/complete signals.
   - Large graph: 10+ leaves or multiple dependency phases, keep orchestration centralized; start with a low limit, use `status --json` as the source of truth for readiness, avoid launching sub-orchestrators, and do not close until complete-check and root validation both pass.
+  {{ else if .OrchestrationViaAz }}
+  - `orchestration.via` is `az`, but CLI-managed worker fanout requires `tmux` on `PATH`; `tmux` is not available. Install `tmux` and rerun `az prime` to see CLI-managed worker commands. Until then, keep work in the current session or use native delegation only for short-lived ad hoc exploration while tracking durable state with `az issue`.
   {{ else }}
   - Unsupported `orchestration.via` value: `{{ .OrchestrationVia }}`. Set `orchestration.via` to `az` for CLI-managed orchestration or `native` for harness-native delegation before fanning out work.
   {{ end }}
@@ -77,8 +85,9 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - When fanning out to subagents, split work until each child issue is independently actionable and fits within a single subagent context window.
   {{ if .OrchestrationViaNative }}- `orchestration.via` is `native`: orchestrate the split using native subagent/delegation commands in your AI harness, while keeping issue bookkeeping in `az issue`.
   - Shorthand: `single-window fanout (native)` means split until each child is ready for one subagent, then fan out with native delegation commands one child at a time.
-  {{ else if .OrchestrationViaAz }}- `orchestration.via=az` means do not spawn harness-native subagents yourself. Then run the az orchestration loop: `status` to identify runnable leaves, `start --limit <n>` to launch a bounded wave, `watch --since <seq>` to observe worker/dependency events, and `complete-check` before closing. Tell each worker to use `az issue` and create/maintain its own child issue under the active parent.
+  {{ else if and .OrchestrationViaAz .TmuxAvailable }}- `orchestration.via=az` means do not spawn harness-native subagents yourself. Then run the az orchestration loop: `status` to identify runnable leaves, `start --limit <n>` to launch a bounded wave, `watch --since <seq>` to observe worker/dependency events, and `complete-check` before closing. Tell each worker to use `az issue` and create/maintain its own child issue under the active parent.
   - Shorthand: `single-window fanout` means split until each child is ready for one worker, then use `az orchestrate start` to launch runnable leaves in bounded batches.
+  {{ else if .OrchestrationViaAz }}- `orchestration.via=az` is configured, but `tmux` is not available. Do not start CLI-managed worker fanout in this environment; keep work in the current session or use native delegation for disposable side exploration while tracking durable state with `az issue`.
   {{ else }}- Resolve unsupported `orchestration.via={{ .OrchestrationVia }}` before fanning out. Use `az` for CLI-managed orchestration or `native` for harness-native delegation.
   {{ end }}
 - Issue-context guardrails:
