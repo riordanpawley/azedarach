@@ -3,6 +3,7 @@ package overlay
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -470,6 +471,33 @@ func TestSettingsOverlay_View(t *testing.T) {
 	// Should contain separator
 	if !contains(view, "---") {
 		t.Error("expected view to contain separator")
+	}
+}
+
+func TestSettingsOverlay_View_ScrollsToKeepCursorVisible(t *testing.T) {
+	items := make([]SettingItem, 0, 30)
+	for i := 1; i <= 30; i++ {
+		items = append(items, SettingItem{
+			Key:   "setting-" + strconv.Itoa(i),
+			Group: "General",
+			Label: "Setting " + strconv.Itoa(i),
+			Type:  SettingToggle,
+			Value: false,
+		})
+	}
+	menu := NewSettingsOverlay(items)
+	menu.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+
+	for i := 0; i < len(items)-1; i++ {
+		menu.moveCursorDown()
+	}
+
+	view := menu.View()
+	if !contains(view, "Setting 30") {
+		t.Fatalf("expected scrolled view to include selected bottom row, view=%q", view)
+	}
+	if menu.scroll <= 0 {
+		t.Fatalf("expected positive scroll offset for bottom selection, got %d", menu.scroll)
 	}
 }
 

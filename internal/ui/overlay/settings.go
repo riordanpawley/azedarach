@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
@@ -44,6 +45,7 @@ type SettingsOverlay struct {
 	dialogViewportState
 	items             []SettingItem
 	cursor            int
+	scroll            int
 	configSource      string
 	config            *config.Config
 	configPath        string
@@ -217,83 +219,6 @@ func (m *SettingsOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the settings menu
 func (m *SettingsOverlay) View() string {
-	var b strings.Builder
-
-	if strings.TrimSpace(m.configSource) != "" {
-		b.WriteString(m.styles.MenuItemDisabled.Render("Config source: " + m.configSource))
-		b.WriteString("\n\n")
-	}
-
-	lastGroup := ""
-	for i, item := range m.items {
-		if item.Group != "" && item.Group != lastGroup {
-			if b.Len() > 0 {
-				b.WriteString("\n")
-			}
-			b.WriteString(m.styles.MenuHeader.Render(item.Group))
-			b.WriteString("\n")
-			lastGroup = item.Group
-		}
-
-		// Separators
-		if item.Type == SettingSeparator {
-			b.WriteString(m.styles.Separator.Render(item.Label))
-			b.WriteString("\n")
-			continue
-		}
-
-		// Determine style based on cursor position
-		var style = m.styles.MenuItem
-		if i == m.cursor {
-			style = m.styles.MenuItemActive
-		}
-
-		// Format line based on type
-		prefix := "  "
-		if i == m.cursor {
-			prefix = "▶ "
-		}
-		label := item.Label
-		if item.Group != "" {
-			label = "  " + label
-		}
-		dots := strings.Repeat(".", max(1, 36-len([]rune(label))))
-
-		var line, value string
-		switch item.Type {
-		case SettingToggle:
-			valueStr := "no"
-			if v, ok := item.Value.(bool); ok && v {
-				valueStr = "yes"
-			}
-			value = valueStr
-
-		case SettingChoice:
-			valueStr := ""
-			if v, ok := item.Value.(string); ok {
-				valueStr = v
-			}
-			value = valueStr
-
-		case SettingAction:
-			value = item.ActionHint
-			if value == "" {
-				value = "run"
-			}
-		}
-
-		line = style.Render(prefix+label) +
-			m.styles.MenuItemDisabled.Render(dots) +
-			m.styles.MenuKey.Render(value)
-
-		if item.Key != "" {
-			line = line + " " + m.styles.MenuItemDisabled.Render("["+item.Key+"]")
-		}
-
-		b.WriteString(line)
-		b.WriteString("\n")
-	}
-
 	width, height := m.Size()
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            m.styles,
@@ -307,7 +232,7 @@ func (m *SettingsOverlay) View() string {
 		minRight:          15,
 		leftFocused:       true,
 		renderLeft: func(mode dialogLayoutMode, width, height int) string {
-			return b.String()
+			return m.renderScrollableItems(width, height)
 		},
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
 			return renderDialogActions(m.styles, []keybinds.Binding{
@@ -319,6 +244,120 @@ func (m *SettingsOverlay) View() string {
 			})
 		},
 	})
+}
+
+func (m *SettingsOverlay) renderScrollableItems(width, height int) string {
+	lines, selectedLine := m.renderLines(width)
+	if len(lines) == 0 {
+		return ""
+	}
+	visibleRows := max(1, height)
+	m.ensureSelectionVisible(selectedLine, len(lines), visibleRows)
+	start := m.scroll
+	end := min(len(lines), start+visibleRows)
+	return strings.Join(lines[start:end], "\n")
+}
+
+func (m *SettingsOverlay) renderLines(width int) ([]string, int) {
+	lines := make([]string, 0, len(m.items)+6)
+	selectedLine := 0
+	currentLine := 0
+
+	if strings.TrimSpace(m.configSource) != "" {
+		lines = append(lines, m.styles.MenuItemDisabled.Render("Config source: "+m.configSource))
+		lines = append(lines, "")
+		currentLine += 2
+	}
+
+	lastGroup := ""
+	for i, item := range m.items {
+		if item.Group != "" && item.Group != lastGroup {
+			if len(lines) > 0 {
+				lines = append(lines, "")
+				currentLine++
+			}
+			lines = append(lines, m.styles.MenuHeader.Render(item.Group))
+			currentLine++
+			lastGroup = item.Group
+		}
+
+		if item.Type == SettingSeparator {
+			lines = append(lines, m.styles.Separator.Render(item.Label))
+			currentLine++
+			continue
+		}
+
+		style := m.styles.MenuItem
+		if i == m.cursor {
+			style = m.styles.MenuItemActive
+			selectedLine = currentLine
+		}
+
+		prefix := "  "
+		if i == m.cursor {
+			prefix = "▶ "
+		}
+		label := item.Label
+		if item.Group != "" {
+			label = "  " + label
+		}
+		dots := strings.Repeat(".", max(1, 36-len([]rune(label))))
+
+		value := ""
+		switch item.Type {
+		case SettingToggle:
+			value = "no"
+			if v, ok := item.Value.(bool); ok && v {
+				value = "yes"
+			}
+		case SettingChoice:
+			if v, ok := item.Value.(string); ok {
+				value = v
+			}
+		case SettingAction:
+			value = item.ActionHint
+			if value == "" {
+				value = "run"
+			}
+		}
+
+		line := style.Render(prefix+label) +
+			m.styles.MenuItemDisabled.Render(dots) +
+			m.styles.MenuKey.Render(value)
+		if item.Key != "" {
+			line += " " + m.styles.MenuItemDisabled.Render("["+item.Key+"]")
+		}
+
+		lines = append(lines, ansi.Truncate(line, max(8, width-4), "..."))
+		currentLine++
+	}
+
+	return lines, selectedLine
+}
+
+func (m *SettingsOverlay) ensureSelectionVisible(selectedLine, totalLines, visibleRows int) {
+	if visibleRows < 1 {
+		visibleRows = 1
+	}
+	if m.scroll < 0 {
+		m.scroll = 0
+	}
+	maxScroll := max(0, totalLines-visibleRows)
+	if m.scroll > maxScroll {
+		m.scroll = maxScroll
+	}
+	if selectedLine < m.scroll {
+		m.scroll = selectedLine
+	}
+	if selectedLine >= m.scroll+visibleRows {
+		m.scroll = selectedLine - visibleRows + 1
+	}
+	if m.scroll < 0 {
+		m.scroll = 0
+	}
+	if m.scroll > maxScroll {
+		m.scroll = maxScroll
+	}
 }
 
 // Title returns the overlay title
