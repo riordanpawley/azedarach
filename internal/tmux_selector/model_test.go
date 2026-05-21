@@ -965,6 +965,114 @@ func TestModelDigitHotkeyOutOfRangeKeepsCurrentSelection(t *testing.T) {
 	}
 }
 
+func TestModelSlashSearchFiltersSessionsLive(t *testing.T) {
+	entries := []InventoryEntry{
+		{SessionID: "az-one", IssueID: "one", TaskTitle: "Alpha task", ProjectPath: "/tmp/alpha", HasTmuxSession: true},
+		{SessionID: "az-two", IssueID: "two", TaskTitle: "Beta task", ProjectPath: "/tmp/beta", HasTmuxSession: true},
+		{SessionID: "az-three", IssueID: "three", TaskTitle: "Gamma task", ProjectPath: "/tmp/gamma", HasTmuxSession: true},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	model = updateKey(t, model, "/")
+	if !model.searchMode {
+		t.Fatal("expected / to enter search mode")
+	}
+	for _, r := range "beta" {
+		updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		model = updated.(Model)
+		if cmd != nil {
+			t.Fatalf("search rune %q returned command", r)
+		}
+	}
+
+	if got := len(model.filteredEntries()); got != 1 {
+		t.Fatalf("filtered sessions = %d, want 1", got)
+	}
+	selected, ok := model.selectedEntry()
+	if !ok || selected.SessionID != "az-two" {
+		t.Fatalf("selected after search = %+v, want az-two", selected)
+	}
+	view := ansi.Strip(model.View())
+	if !strings.Contains(view, "1/3 sessions match /beta") {
+		t.Fatalf("view missing search status:\n%s", view)
+	}
+	if strings.Contains(view, "Alpha task") || strings.Contains(view, "Gamma task") {
+		t.Fatalf("view should only include matching session:\n%s", view)
+	}
+
+	model = updateKey(t, model, "enter")
+	if model.searchMode {
+		t.Fatal("expected Enter to leave search mode")
+	}
+	if got := model.searchQuery; got != "beta" {
+		t.Fatalf("search query after Enter = %q, want beta", got)
+	}
+	model = updateKey(t, model, "/")
+	model = updateKey(t, model, "esc")
+	if model.searchMode || model.searchQuery != "" {
+		t.Fatalf("Esc should clear search mode/query, mode=%v query=%q", model.searchMode, model.searchQuery)
+	}
+	if got := len(model.filteredEntries()); got != 3 {
+		t.Fatalf("filtered sessions after Esc = %d, want 3", got)
+	}
+}
+
+func TestModelSlashSearchFiltersTreeView(t *testing.T) {
+	parentID := naming.IssueID("az-parent")
+	entries := []InventoryEntry{
+		{
+			SessionID:      "az-parent",
+			IssueID:        parentID.String(),
+			TaskTitle:      "Parent session",
+			HasTmuxSession: true,
+			Task: domain.Task{
+				ID:     parentID,
+				Title:  "Parent session",
+				Status: domain.StatusInProgress,
+			},
+		},
+		{
+			SessionID:      "az-child",
+			IssueID:        "az-child",
+			TaskTitle:      "Needle child",
+			HasTmuxSession: true,
+			Task: domain.Task{
+				ID:       naming.IssueID("az-child"),
+				Title:    "Needle child",
+				Status:   domain.StatusInProgress,
+				ParentID: &parentID,
+			},
+		},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 18})
+	model = updated.(Model)
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	model = updateKey(t, model, "tab")
+	model = updateKey(t, model, "/")
+	for _, r := range "needle" {
+		updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		model = updated.(Model)
+		if cmd != nil {
+			t.Fatalf("search rune %q returned command", r)
+		}
+	}
+
+	view := ansi.Strip(model.View())
+	if !strings.Contains(view, "Needle child") || strings.Contains(view, "Parent session") {
+		t.Fatalf("tree search did not filter rows:\n%s", view)
+	}
+}
+
 func TestModelViewShowsNumericSelectionLabelsForFirstTenCards(t *testing.T) {
 	entries := make([]InventoryEntry, 10)
 	for i := range entries {

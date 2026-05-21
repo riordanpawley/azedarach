@@ -171,6 +171,8 @@ type Model struct {
 	status             string
 	defaultedToCurrent bool
 
+	searchMode  bool
+	searchQuery string
 	gotoArmed   bool
 	jumpMode    *overlay.JumpMode
 	jumpTargets []int
@@ -326,6 +328,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, cmd
 		}
+		if m.searchMode {
+			return m.handleSearchKey(msg)
+		}
 		if m.gotoArmed {
 			switch msg.String() {
 			case "esc", "ctrl+c", "q":
@@ -357,6 +362,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "g":
 			m.gotoArmed = true
 			m.status = "goto: press w for labels"
+			return m, nil
+		case "/":
+			m.searchMode = true
+			m.clearJumpMode()
+			m.status = ""
 			return m, nil
 		case "j", "down":
 			m.moveCursor(0, 1)
@@ -428,8 +438,13 @@ func (m *Model) normalizeSnapshot() {
 			}
 		}
 	}
-	if m.cursor >= len(m.snapshot.Entries) {
-		m.cursor = len(m.snapshot.Entries) - 1
+	m.clampCursor()
+}
+
+func (m *Model) clampCursor() {
+	entries := m.filteredEntries()
+	if m.cursor >= len(entries) {
+		m.cursor = len(entries) - 1
 	}
 	if m.cursor < 0 {
 		m.cursor = 0
@@ -441,7 +456,7 @@ func (m *Model) selectSessionID(sessionID string) bool {
 	if sessionID == "" {
 		return false
 	}
-	for i, entry := range m.snapshot.Entries {
+	for i, entry := range m.filteredEntries() {
 		if strings.TrimSpace(entry.SessionID) == sessionID {
 			m.cursor = i
 			return true
@@ -455,25 +470,30 @@ func (m Model) View() string {
 		return "Loading tmux sessions...\n"
 	}
 	var b strings.Builder
-	if strings.TrimSpace(m.status) != "" {
-		b.WriteString(m.styles.StatusInfo.Render(m.status))
+	if status := m.statusText(); status != "" {
+		b.WriteString(m.styles.StatusInfo.Render(status))
 		b.WriteString("\n")
 	}
 	if m.err != nil {
 		b.WriteString(m.styles.ToastError.Render("Error: " + m.err.Error()))
 		b.WriteString("\n\n")
 	}
-	if len(m.snapshot.Entries) == 0 {
-		b.WriteString("No tmux sessions found.\n")
+	entries := m.filteredEntries()
+	if len(entries) == 0 {
+		if strings.TrimSpace(m.searchQuery) != "" {
+			b.WriteString(fmt.Sprintf("No tmux sessions match %q.\n", m.searchQuery))
+		} else {
+			b.WriteString("No tmux sessions found.\n")
+		}
 	} else {
 		if m.activeTab == selectorTabTree {
-			b.WriteString(m.renderTree())
+			b.WriteString(m.renderTree(entries))
 		} else {
 			availableHeight := m.gridAvailableHeight()
 			columns := m.gridColumnCount(availableHeight)
 			cardWidth := gridCardWidth(m.width, columns)
 			rows := RenderVisibleGridWithLabels(
-				m.snapshot.Entries,
+				entries,
 				m.cursor,
 				columns,
 				cardWidth,
@@ -508,7 +528,7 @@ func (m Model) jumpLabelsByEntry() map[int]string {
 
 func (m Model) cardSelectionLabels() map[int]string {
 	labels := make(map[int]string)
-	limit := len(m.snapshot.Entries)
+	limit := len(m.filteredEntries())
 	if limit > 10 {
 		limit = 10
 	}
@@ -530,15 +550,20 @@ func (m Model) labelsByEntry() map[int]string {
 
 func (m Model) renderFooter() string {
 	left := m.renderTabs()
-	right := m.styles.StatusHint.Render(keybinds.RenderPlain([]keybinds.Binding{
+	bindings := []keybinds.Binding{
 		{Key: "Tab", Description: "tab"},
 		{Key: "h/j/k/l", Description: "move"},
+		{Key: "q/Esc", Description: "close"},
+		{Key: "/", Description: "search"},
 		{Key: "gw", Description: "labels"},
 		{Key: "Enter/a", Description: "switch"},
 		{Key: "o/Space", Description: "open"},
 		{Key: "x", Description: "kill"},
-		{Key: "q/Esc", Description: "close"},
-	}, "  "))
+	}
+	right := m.styles.StatusHint.Render(keybinds.RenderPlain(bindings, "  "))
+	if m.searchMode || strings.TrimSpace(m.searchQuery) != "" {
+		right += m.styles.StatusHint.Render("  /" + m.searchQuery)
+	}
 	leftWidth := ansi.StringWidth(left)
 	rightWidth := ansi.StringWidth(right)
 	if leftWidth+1+rightWidth <= m.width {
@@ -560,8 +585,8 @@ func (m Model) renderTabs() string {
 	return tab("Cards", m.activeTab == selectorTabGrid) + " " + tab("Tree", m.activeTab == selectorTabTree)
 }
 
-func (m Model) renderTree() string {
-	rows := activeSessionTreeRows(m.snapshot.Entries)
+func (m Model) renderTree(entries []InventoryEntry) string {
+	rows := activeSessionTreeRows(entries)
 	if len(rows) == 0 {
 		return ""
 	}
@@ -569,10 +594,10 @@ func (m Model) renderTree() string {
 	visible := visibleTreeRows(rows, m.cursor, availableHeight)
 	lines := make([]string, 0, len(visible))
 	for _, row := range visible {
-		if row.entryIndex < 0 || row.entryIndex >= len(m.snapshot.Entries) {
+		if row.entryIndex < 0 || row.entryIndex >= len(entries) {
 			continue
 		}
-		entry := m.snapshot.Entries[row.entryIndex]
+		entry := entries[row.entryIndex]
 		lines = append(lines, m.renderTreeRow(row, entry))
 	}
 	return strings.Join(lines, "\n") + "\n"
@@ -623,8 +648,8 @@ func (m Model) renderTreeRow(row sessionTreeRow, entry InventoryEntry) string {
 func (m Model) treeAvailableHeight() int {
 	contentHeight := maxInt(0, m.height-1)
 	used := 0
-	if strings.TrimSpace(m.status) != "" {
-		used += lipgloss.Height(m.styles.StatusInfo.Render(m.status))
+	if status := m.statusText(); status != "" {
+		used += lipgloss.Height(m.styles.StatusInfo.Render(status))
 	}
 	if m.err != nil {
 		used += lipgloss.Height(m.styles.ToastError.Render("Error: "+m.err.Error())) + 1
@@ -667,12 +692,94 @@ func (m *Model) clearJumpMode() {
 	m.status = formatSnapshotStatus(m.snapshot, len(m.snapshot.Entries))
 }
 
+func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.searchMode = false
+		m.searchQuery = ""
+		m.clampCursor()
+		return m, nil
+	case "enter":
+		m.searchMode = false
+		m.clampCursor()
+		return m, nil
+	case "backspace", "ctrl+h":
+		if len(m.searchQuery) > 0 {
+			m.searchQuery = m.searchQuery[:len(m.searchQuery)-1]
+			m.clampCursor()
+		}
+		return m, nil
+	case "j", "down":
+		m.moveCursor(0, 1)
+		return m, nil
+	case "k", "up":
+		m.moveCursor(0, -1)
+		return m, nil
+	case "ctrl+c", "q":
+		return m, tea.Quit
+	default:
+		if len(msg.Runes) > 0 && !msg.Alt {
+			m.searchQuery += string(msg.Runes)
+			m.clampCursor()
+		}
+		return m, nil
+	}
+}
+
+func (m Model) statusText() string {
+	query := strings.TrimSpace(m.searchQuery)
+	if m.searchMode && query == "" {
+		return "search: type to filter tmux sessions"
+	}
+	if query != "" {
+		return fmt.Sprintf("%d/%d sessions match /%s", len(m.filteredEntries()), len(m.snapshot.Entries), query)
+	}
+	return strings.TrimSpace(m.status)
+}
+
+func (m Model) filteredEntries() []InventoryEntry {
+	query := strings.TrimSpace(strings.ToLower(m.searchQuery))
+	if query == "" {
+		return m.snapshot.Entries
+	}
+	filtered := make([]InventoryEntry, 0, len(m.snapshot.Entries))
+	for _, entry := range m.snapshot.Entries {
+		if entryMatchesSearch(entry, query) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
+}
+
+func entryMatchesSearch(entry InventoryEntry, query string) bool {
+	haystack := strings.ToLower(strings.Join([]string{
+		entry.SessionID,
+		entry.IssueID,
+		entry.TaskTitle,
+		entry.State.String(),
+		entry.IssueStatus.String(),
+		entry.Priority.String(),
+		entry.Type.String(),
+		entry.ProjectID,
+		entry.ProjectPath,
+		entry.Worktree,
+		entry.Task.ID.String(),
+		entry.Task.Title,
+		entry.Task.Status.String(),
+		entry.Task.Priority.String(),
+		entry.Task.Type.String(),
+		entry.Task.Origin,
+	}, "\n"))
+	return strings.Contains(haystack, query)
+}
+
 func (m *Model) moveCursor(dx int, dy int) {
+	entries := m.filteredEntries()
 	if m.activeTab == selectorTabTree {
-		m.moveTreeCursor(dx, dy)
+		m.moveTreeCursor(entries, dx, dy)
 		return
 	}
-	count := len(m.snapshot.Entries)
+	count := len(entries)
 	if count == 0 {
 		m.cursor = 0
 		return
@@ -709,8 +816,8 @@ func (m *Model) moveCursor(dx int, dy int) {
 	}
 }
 
-func (m *Model) moveTreeCursor(dx int, dy int) {
-	rows := activeSessionTreeRows(m.snapshot.Entries)
+func (m *Model) moveTreeCursor(entries []InventoryEntry, dx int, dy int) {
+	rows := activeSessionTreeRows(entries)
 	if len(rows) == 0 {
 		m.cursor = 0
 		return
@@ -740,7 +847,7 @@ func (m *Model) selectCardHotkey(key string) {
 	case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		index = int(key[0] - '0')
 	}
-	if index >= 0 && index < len(m.snapshot.Entries) {
+	if index >= 0 && index < len(m.filteredEntries()) {
 		m.cursor = index
 	}
 }
@@ -783,24 +890,25 @@ func prioritizeAzSessionFirst(entries []InventoryEntry) []InventoryEntry {
 }
 
 func (m Model) visibleEntryIndices() []int {
-	if len(m.snapshot.Entries) == 0 {
+	entries := m.filteredEntries()
+	if len(entries) == 0 {
 		return nil
 	}
 	availableHeight := m.gridAvailableHeight()
 	columns := m.gridColumnCount(availableHeight)
 	cardWidth := gridCardWidth(m.width, columns)
-	return VisibleGridIndices(m.snapshot.Entries, m.cursor, columns, cardWidth, availableHeight, m.styles)
+	return VisibleGridIndices(entries, m.cursor, columns, cardWidth, availableHeight, m.styles)
 }
 
 func (m Model) gridColumnCount(availableHeight int) int {
-	return gridColumnCountForViewport(m.width, m.snapshot.Entries, m.cursor, availableHeight, m.styles)
+	return gridColumnCountForViewport(m.width, m.filteredEntries(), m.cursor, availableHeight, m.styles)
 }
 
 func (m Model) gridAvailableHeight() int {
 	contentHeight := maxInt(0, m.height-1)
 	used := 0
-	if strings.TrimSpace(m.status) != "" {
-		used += lipgloss.Height(m.styles.StatusInfo.Render(m.status))
+	if status := m.statusText(); status != "" {
+		used += lipgloss.Height(m.styles.StatusInfo.Render(status))
 	}
 	if m.err != nil {
 		used += lipgloss.Height(m.styles.ToastError.Render("Error: "+m.err.Error())) + 1
@@ -817,10 +925,11 @@ func (m *Model) toggleActiveTab() {
 }
 
 func (m Model) selectedEntry() (InventoryEntry, bool) {
-	if m.cursor < 0 || m.cursor >= len(m.snapshot.Entries) {
+	entries := m.filteredEntries()
+	if m.cursor < 0 || m.cursor >= len(entries) {
 		return InventoryEntry{}, false
 	}
-	return m.snapshot.Entries[m.cursor], true
+	return entries[m.cursor], true
 }
 
 func (m Model) loadCmd() tea.Cmd {
