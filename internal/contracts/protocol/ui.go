@@ -18,6 +18,7 @@ const (
 
 const (
 	UIStateKeyTMUXSelectorLastActiveTab = "tmux.selector.last_active_tab"
+	UIStateKeyUIViewMode                = "ui.view_mode"
 )
 
 type UICommandRequestBody struct {

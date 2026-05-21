@@ -4,7 +4,9 @@ import (
 	"log/slog"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
@@ -17,6 +19,7 @@ func Run(cfg *config.Config) error {
 		WithSwitcher(tmuxClient),
 		WithKiller(NewDaemonKiller(tmuxClient, logger)),
 		WithDetailOpener(NewDaemonDetailOpener(logger)),
+		WithUIStateStore(daemonclient.New(transport.NewClient(config.GlobalDaemonSocketPath()))),
 	)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	_, err := p.Run()
