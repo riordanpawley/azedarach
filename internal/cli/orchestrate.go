@@ -49,6 +49,7 @@ type OrchestrateCompleteCheckOptions struct {
 type orchestrateStatusResult struct {
 	RootIssueID   string                 `json:"root_issue_id"`
 	Runnable      []string               `json:"runnable"`
+	Active        []string               `json:"active,omitempty"`
 	Blocked       map[string]string      `json:"blocked"`
 	MailboxEvents []protocol.MailEvent   `json:"mailbox_events"`
 	Advice        map[string]interface{} `json:"advice,omitempty"`
@@ -68,6 +69,7 @@ type orchestrateWatchFrame struct {
 	SinceSeq    int64             `json:"since_seq"`
 	NextSince   int64             `json:"next_since"`
 	Runnable    []string          `json:"runnable"`
+	Active      []string          `json:"active,omitempty"`
 	Blocked     map[string]string `json:"blocked"`
 	Events      []mailEvent       `json:"events"`
 }
@@ -210,6 +212,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 	result := orchestrateStatusResult{
 		RootIssueID:   ready.RootIssueID,
 		Runnable:      ready.Runnable,
+		Active:        ready.Active,
 		Blocked:       ready.Blocked,
 		MailboxEvents: events,
 		Advice: map[string]interface{}{
@@ -239,6 +242,12 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		for _, id := range ids {
 			reason := result.Blocked[id]
 			fmt.Printf("- %s: %s\n", id, reason)
+		}
+	}
+	if len(result.Active) > 0 {
+		fmt.Println("Active leaves:")
+		for _, id := range result.Active {
+			fmt.Printf("- %s\n", id)
 		}
 	}
 	fmt.Printf("Mailbox events (latest %d, since seq>%d): %d\n", opts.Limit, opts.SinceSeq, len(result.MailboxEvents))
@@ -276,6 +285,10 @@ func OrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOptions) e
 	for _, id := range ready.Runnable {
 		runnableSet[id] = struct{}{}
 	}
+	activeSet := make(map[string]struct{}, len(ready.Active))
+	for _, id := range ready.Active {
+		activeSet[id] = struct{}{}
+	}
 
 	requested := make([]string, 0, len(ready.Runnable))
 	skipped := map[string]string{}
@@ -284,6 +297,10 @@ func OrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOptions) e
 	} else {
 		for _, id := range opts.IssueIDs {
 			if _, ok := runnableSet[id]; !ok {
+				if _, active := activeSet[id]; active {
+					skipped[id] = "session-already-running"
+					continue
+				}
 				skipped[id] = "not-runnable"
 				continue
 			}
@@ -413,6 +430,7 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 			SinceSeq:    lastSeq,
 			NextSince:   nextSince,
 			Runnable:    ready.Runnable,
+			Active:      ready.Active,
 			Blocked:     ready.Blocked,
 			Events:      watchEvents,
 		}
@@ -488,6 +506,7 @@ func buildOrchestrateWatchFrame(deps *Dependencies, rootIssueID string, since in
 		SinceSeq:    since,
 		NextSince:   nextMailboxSeq(events, since),
 		Runnable:    ready.Runnable,
+		Active:      ready.Active,
 		Blocked:     ready.Blocked,
 		Events:      watchEvents,
 	}, nil
@@ -515,6 +534,12 @@ func emitOrchestrateWatchFrame(frame orchestrateWatchFrame, jsonl bool) error {
 		fmt.Println("blocked:")
 		for _, id := range sortedKeys(frame.Blocked) {
 			fmt.Printf("- %s: %s\n", id, frame.Blocked[id])
+		}
+	}
+	if len(frame.Active) > 0 {
+		fmt.Println("active:")
+		for _, id := range frame.Active {
+			fmt.Printf("- %s\n", id)
 		}
 	}
 	fmt.Println("events:")

@@ -135,6 +135,7 @@ type fanoutRegistryEntry struct {
 type fanoutReadyResult struct {
 	RootIssueID string            `json:"root_issue_id"`
 	Runnable    []string          `json:"runnable"`
+	Active      []string          `json:"active,omitempty"`
 	Blocked     map[string]string `json:"blocked"`
 }
 
@@ -299,6 +300,12 @@ func IssueFanoutReadyCommand(deps *Dependencies, opts IssueFanoutReadyOptions) e
 		fmt.Println("- (none)")
 	} else {
 		for _, id := range result.Runnable {
+			fmt.Printf("- %s\n", id)
+		}
+	}
+	if len(result.Active) > 0 {
+		fmt.Println("Active leaves:")
+		for _, id := range result.Active {
 			fmt.Printf("- %s\n", id)
 		}
 	}
@@ -706,20 +713,20 @@ func applyFanoutPlan(ctx context.Context, deps *Dependencies, parentIssue string
 		if node.Kind == "group" {
 			tt = domain.TypeEpic
 		}
-			design := fanoutDesignMetadata(node)
-			typedParentID, parentIDErr := naming.ParseIssueID(parentID)
-			if parentIDErr != nil {
-				return fanoutApplyResult{}, fmt.Errorf("invalid parent id for key %s: %w", node.Key, parentIDErr)
-			}
-			id, err := deps.DaemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
-				Title:           node.Title,
-				Description:     node.Description,
-				Type:            tt,
-				Priority:        domain.P2,
-				Implementations: impl,
-				Design:          design,
-				ParentID:        &typedParentID,
-			})
+		design := fanoutDesignMetadata(node)
+		typedParentID, parentIDErr := naming.ParseIssueID(parentID)
+		if parentIDErr != nil {
+			return fanoutApplyResult{}, fmt.Errorf("invalid parent id for key %s: %w", node.Key, parentIDErr)
+		}
+		id, err := deps.DaemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
+			Title:           node.Title,
+			Description:     node.Description,
+			Type:            tt,
+			Priority:        domain.P2,
+			Implementations: impl,
+			Design:          design,
+			ParentID:        &typedParentID,
+		})
 		if err != nil {
 			return fanoutApplyResult{}, fmt.Errorf("create task for key %s: %w", node.Key, err)
 		}
@@ -878,6 +885,7 @@ func computeRunnableLeaves(rootIssueID string, tasks []domain.Task) (fanoutReady
 	result := fanoutReadyResult{
 		RootIssueID: rootIssueID,
 		Runnable:    make([]string, 0, len(leaves)),
+		Active:      make([]string, 0),
 		Blocked:     make(map[string]string),
 	}
 	for _, idRaw := range leaves {
@@ -887,6 +895,10 @@ func computeRunnableLeaves(rootIssueID string, tasks []domain.Task) (fanoutReady
 		}
 		task := byID[id]
 		if task.Status == domain.StatusDone {
+			continue
+		}
+		if task.HasTmuxSession {
+			result.Active = append(result.Active, idRaw)
 			continue
 		}
 		if task.Status == domain.StatusBlocked {

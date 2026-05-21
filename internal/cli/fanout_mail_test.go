@@ -324,6 +324,27 @@ func TestComputeRunnableLeaves_MissingDependencyReported(t *testing.T) {
 	}
 }
 
+func TestComputeRunnableLeaves_ActiveSessionIsNotRunnable(t *testing.T) {
+	root := naming.IssueID("az-root")
+	leaf := naming.IssueID("az-leaf")
+	parent := root
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
+		{ID: leaf, Type: domain.TypeTask, Status: domain.StatusInProgress, ParentID: &parent, HasTmuxSession: true},
+	}
+
+	result, err := computeRunnableLeaves(root.String(), tasks)
+	if err != nil {
+		t.Fatalf("computeRunnableLeaves error: %v", err)
+	}
+	if len(result.Runnable) != 0 {
+		t.Fatalf("runnable = %v, want empty for active leaf", result.Runnable)
+	}
+	if len(result.Active) != 1 || result.Active[0] != leaf.String() {
+		t.Fatalf("active = %v, want [%s]", result.Active, leaf.String())
+	}
+}
+
 func TestOutOfBudgetFiles_MixedPatterns(t *testing.T) {
 	changed := []string{
 		"go-bubbletea/internal/cli/fanout_mail.go",
