@@ -2841,6 +2841,14 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormat(t *testing.T) {
 	if !strings.Contains(prompt, "Role: worker") {
 		t.Fatalf("prompt = %q, want worker role primer", prompt)
 	}
+	for _, eventType := range []string{"worker-progress", "worker-blocked", "worker-complete"} {
+		if !strings.Contains(prompt, eventType) {
+			t.Fatalf("prompt = %q, want mailbox event type %s", prompt, eventType)
+		}
+	}
+	if strings.Contains(prompt, "events: , , and .") {
+		t.Fatalf("prompt = %q, contains blank mailbox event interpolation", prompt)
+	}
 }
 
 func TestBuildStartWorkPromptSanitizesControlCharsAndAngleBrackets(t *testing.T) {
@@ -2866,6 +2874,12 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "az orchestrate complete-check --root <issue-id>") {
 		t.Fatalf("prompt = %q, want complete-check instruction", prompt)
+	}
+	if !strings.Contains(prompt, "az orchestrate integrate --issue <issue-id>") {
+		t.Fatalf("prompt = %q, want integrate instruction", prompt)
+	}
+	if !strings.Contains(prompt, "az orchestrate close-session --issue <issue-id>") {
+		t.Fatalf("prompt = %q, want close-session instruction", prompt)
 	}
 }
 
