@@ -1,11 +1,16 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
+	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	gitservice "github.com/riordanpawley/azedarach/internal/services/git"
 )
 
 func TestParseOrchestrateStatusArgs(t *testing.T) {
@@ -69,6 +74,31 @@ func TestParseOrchestrateCompleteCheckArgs(t *testing.T) {
 	}
 }
 
+func TestParseOrchestrateIntegrateAndCloseSessionArgs(t *testing.T) {
+	integrate, err := ParseOrchestrateIntegrateArgs([]string{"--issue", "az-2", "--json"})
+	if err != nil {
+		t.Fatalf("ParseOrchestrateIntegrateArgs error = %v", err)
+	}
+	if integrate.IssueID != "az-2" || !integrate.JSON {
+		t.Fatalf("integrate opts = %+v", integrate)
+	}
+
+	closeSession, err := ParseOrchestrateCloseSessionArgs([]string{"--issue", "az-2", "--json"})
+	if err != nil {
+		t.Fatalf("ParseOrchestrateCloseSessionArgs error = %v", err)
+	}
+	if closeSession.IssueID != "az-2" || !closeSession.JSON {
+		t.Fatalf("close-session opts = %+v", closeSession)
+	}
+
+	if _, err := ParseOrchestrateIntegrateArgs([]string{"--json"}); err == nil {
+		t.Fatal("expected integrate error for missing --issue")
+	}
+	if _, err := ParseOrchestrateCloseSessionArgs([]string{"--json"}); err == nil {
+		t.Fatal("expected close-session error for missing --issue")
+	}
+}
+
 func TestEvaluateOrchestrateCompleteCheck_Pass(t *testing.T) {
 	root := naming.IssueID("az-1")
 	child := naming.IssueID("az-2")
@@ -104,6 +134,139 @@ func TestEvaluateOrchestrateCompleteCheck_Failures(t *testing.T) {
 	if len(result.Reasons) < 2 {
 		t.Fatalf("reasons = %+v, want multiple blockers", result.Reasons)
 	}
+	if len(result.Advice) == 0 {
+		t.Fatalf("advice = empty, want remediation commands")
+	}
+	if joined := strings.Join(result.Advice, "\n"); !strings.Contains(joined, "az orchestrate close-session --issue az-3") || !strings.Contains(joined, "az issue close az-2") {
+		t.Fatalf("advice = %+v, want close-session and issue-close guidance", result.Advice)
+	}
+}
+
+func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
+	root := naming.IssueID("az-1")
+	child := naming.IssueID("az-2")
+	tasks := []domain.Task{
+		{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+		{ID: child, Title: "Worker", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &root},
+	}
+	taskListBody, err := marshalTaskListBody(tasks)
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	commands := []string{}
+	var submitted protocol.OperationSubmitRequestBody
+	deps := &Dependencies{
+		ProjectID: protocol.DefaultProjectID,
+		RepoDir:   "/repo",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: taskListBody}, nil
+				case daemonclient.CommandGitStatus:
+					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{Modified: []string{"parent.go"}}}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees": []map[string]string{
+							{"issue_id": "az-2", "path": "/repo-az-2", "branch": "user/az-2/worker"},
+						},
+					}), nil
+				case protocol.CommandOperationSubmit:
+					if err := json.Unmarshal(req.Body, &submitted); err != nil {
+						t.Fatalf("decode submit body: %v", err)
+					}
+					return responseWithJSON(req, protocol.OperationSubmitResponseBody{
+						Created: true,
+						Operation: protocol.OperationRecord{
+							OperationID: "op-1",
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     child,
+							State:       protocol.OperationStateQueued,
+						},
+					}), nil
+				case protocol.CommandMailSend:
+					return responseWithJSON(req, protocol.MailEvent{Seq: 1, ParentIssue: "az-1", IssueID: child, Type: "session-started"}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestrateStartCommand(deps, OrchestrateStartOptions{RootIssueID: "az-1", IssueIDs: []string{"az-2"}, Limit: 4, JSON: true})
+	})
+
+	var result orchestrateStartResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if len(result.Launched) != 1 || result.Launched[0].OperationID != "op-1" || result.Launched[0].WorktreePath != "/repo-az-2" {
+		t.Fatalf("launched = %+v", result.Launched)
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "uncommitted tracked changes") {
+		t.Fatalf("warnings = %+v", result.Warnings)
+	}
+	if submitted.Kind != commandSessionStart || submitted.IssueID != child || len(submitted.Payload) == 0 {
+		t.Fatalf("submitted = %+v", submitted)
+	}
+	if strings.Join(commands, ",") == "" || !containsString(commands, protocol.CommandOperationSubmit) {
+		t.Fatalf("commands = %+v, want operation submit", commands)
+	}
+}
+
+func TestOrchestrateIntegrateCommandPrintsGuidance(t *testing.T) {
+	deps := &Dependencies{
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandWorktreeList {
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return responseWithJSON(req, map[string]any{
+					"project_id": protocol.DefaultProjectID,
+					"worktrees": []map[string]string{
+						{"issue_id": "az-2", "path": "/repo-az-2", "branch": "user/az-2/worker"},
+					},
+				}), nil
+			},
+		}),
+	}
+	output := captureStdout(t, func() error {
+		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2"})
+	})
+	for _, want := range []string{"Worktree: /repo-az-2", "az branch merge az-2", "az orchestrate close-session --issue az-2"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestOrchestrateCloseSessionCommandStopsSession(t *testing.T) {
+	var gotCommand string
+	deps := &Dependencies{
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				gotCommand = req.Command
+				return responseWithOutput(req, "stopped\n"), nil
+			},
+		}),
+	}
+	output := captureStdout(t, func() error {
+		return OrchestrateCloseSessionCommand(deps, OrchestrateCloseSessionOptions{IssueID: "az-2"})
+	})
+	if gotCommand != commandSessionStop {
+		t.Fatalf("command = %q, want %q", gotCommand, commandSessionStop)
+	}
+	if !strings.Contains(output, "az issue close az-2") {
+		t.Fatalf("output = %q, want issue close guidance", output)
+	}
 }
 
 func TestNextMailboxSeq(t *testing.T) {
@@ -118,4 +281,13 @@ func TestNextMailboxSeq(t *testing.T) {
 	if got := nextMailboxSeq(nil, 10); got != 10 {
 		t.Fatalf("nextMailboxSeq(nil) = %d, want 10", got)
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

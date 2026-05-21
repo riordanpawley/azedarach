@@ -6154,6 +6154,12 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az orchestrate start --root <issue-id> [--limit <n>] [--issue <issue-id> ...] [--json]`") {
 		t.Fatalf("prime output missing orchestrate start command example: %q", output)
 	}
+	if !strings.Contains(output, "`az orchestrate integrate --issue <issue-id> [--json]`") {
+		t.Fatalf("prime output missing orchestrate integrate command example: %q", output)
+	}
+	if !strings.Contains(output, "`az orchestrate close-session --issue <issue-id> [--json]`") {
+		t.Fatalf("prime output missing orchestrate close-session command example: %q", output)
+	}
 	if !strings.Contains(output, "`az orchestrate complete-check --root <issue-id> [--json]`") {
 		t.Fatalf("prime output missing orchestrate complete-check command example: %q", output)
 	}
@@ -6183,6 +6189,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "Repeat status -> start -> watch until `az orchestrate complete-check --root <issue-id>` passes") {
 		t.Fatalf("prime output missing completion loop guidance: %q", output)
+	}
+	if !strings.Contains(output, "Integrate completed workers with `az orchestrate integrate --issue <issue-id>`") {
+		t.Fatalf("prime output missing worker integration guidance: %q", output)
 	}
 	if !strings.Contains(output, "`az mail send --parent <parent-issue> --type dependency-ready --body \"...\"`") {
 		t.Fatalf("prime output missing mail send command example: %q", output)

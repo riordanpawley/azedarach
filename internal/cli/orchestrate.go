@@ -6,10 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -46,21 +48,52 @@ type OrchestrateCompleteCheckOptions struct {
 	JSON        bool
 }
 
+type OrchestrateIntegrateOptions struct {
+	Project string
+	IssueID string
+	JSON    bool
+}
+
+type OrchestrateCloseSessionOptions struct {
+	Project string
+	IssueID string
+	JSON    bool
+}
+
 type orchestrateStatusResult struct {
 	RootIssueID   string                 `json:"root_issue_id"`
 	Runnable      []string               `json:"runnable"`
+	Active        []string               `json:"active,omitempty"`
 	Blocked       map[string]string      `json:"blocked"`
 	MailboxEvents []protocol.MailEvent   `json:"mailbox_events"`
 	Advice        map[string]interface{} `json:"advice,omitempty"`
 }
 
 type orchestrateStartResult struct {
-	RootIssueID string            `json:"root_issue_id"`
-	Limit       int               `json:"limit"`
-	Requested   []string          `json:"requested"`
-	Started     []string          `json:"started"`
-	Skipped     map[string]string `json:"skipped"`
-	Failed      map[string]string `json:"failed"`
+	RootIssueID string                   `json:"root_issue_id"`
+	Limit       int                      `json:"limit"`
+	Requested   []string                 `json:"requested"`
+	Started     []string                 `json:"started"`
+	Launched    []orchestrateStartLaunch `json:"launched,omitempty"`
+	Skipped     map[string]string        `json:"skipped"`
+	Failed      map[string]string        `json:"failed"`
+	Warnings    []string                 `json:"warnings,omitempty"`
+	Advice      orchestrateStartAdvice   `json:"advice,omitempty"`
+}
+
+type orchestrateStartLaunch struct {
+	IssueID        string `json:"issue_id"`
+	SessionID      string `json:"session_id"`
+	WorktreePath   string `json:"worktree_path,omitempty"`
+	OperationID    string `json:"operation_id,omitempty"`
+	OperationState string `json:"operation_state,omitempty"`
+	WatchCommand   string `json:"watch_command"`
+	IntegrateHint  string `json:"integrate_hint"`
+	CloseHint      string `json:"close_hint"`
+}
+
+type orchestrateStartAdvice struct {
+	WatchCommand string `json:"watch_command,omitempty"`
 }
 
 type orchestrateWatchFrame struct {
@@ -68,6 +101,7 @@ type orchestrateWatchFrame struct {
 	SinceSeq    int64             `json:"since_seq"`
 	NextSince   int64             `json:"next_since"`
 	Runnable    []string          `json:"runnable"`
+	Active      []string          `json:"active,omitempty"`
 	Blocked     map[string]string `json:"blocked"`
 	Events      []mailEvent       `json:"events"`
 }
@@ -76,6 +110,19 @@ type orchestrateCompleteCheckResult struct {
 	RootIssueID string   `json:"root_issue_id"`
 	Pass        bool     `json:"pass"`
 	Reasons     []string `json:"reasons,omitempty"`
+	Advice      []string `json:"advice,omitempty"`
+}
+
+type orchestrateIntegrateResult struct {
+	IssueID      string   `json:"issue_id"`
+	WorktreePath string   `json:"worktree_path,omitempty"`
+	Branch       string   `json:"branch,omitempty"`
+	Commands     []string `json:"commands"`
+}
+
+type orchestrateCloseSessionResult struct {
+	IssueID string `json:"issue_id"`
+	Output  string `json:"output,omitempty"`
 }
 
 func ParseOrchestrateStatusArgs(args []string) (OrchestrateStatusOptions, error) {
@@ -178,6 +225,46 @@ func ParseOrchestrateCompleteCheckArgs(args []string) (OrchestrateCompleteCheckO
 	return opts, nil
 }
 
+func ParseOrchestrateIntegrateArgs(args []string) (OrchestrateIntegrateOptions, error) {
+	opts := OrchestrateIntegrateOptions{}
+	fs := flag.NewFlagSet("orchestrate integrate", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&opts.IssueID, "issue", "", "worker issue id to integrate")
+	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
+	if err := fs.Parse(args); err != nil {
+		return OrchestrateIntegrateOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return OrchestrateIntegrateOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	if strings.TrimSpace(opts.IssueID) == "" {
+		return OrchestrateIntegrateOptions{}, fmt.Errorf("missing required flag: --issue")
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
+func ParseOrchestrateCloseSessionArgs(args []string) (OrchestrateCloseSessionOptions, error) {
+	opts := OrchestrateCloseSessionOptions{}
+	fs := flag.NewFlagSet("orchestrate close-session", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&opts.IssueID, "issue", "", "worker issue id whose active session should be stopped")
+	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
+	if err := fs.Parse(args); err != nil {
+		return OrchestrateCloseSessionOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return OrchestrateCloseSessionOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	if strings.TrimSpace(opts.IssueID) == "" {
+		return OrchestrateCloseSessionOptions{}, fmt.Errorf("missing required flag: --issue")
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
 func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
@@ -210,6 +297,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 	result := orchestrateStatusResult{
 		RootIssueID:   ready.RootIssueID,
 		Runnable:      ready.Runnable,
+		Active:        ready.Active,
 		Blocked:       ready.Blocked,
 		MailboxEvents: events,
 		Advice: map[string]interface{}{
@@ -239,6 +327,12 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		for _, id := range ids {
 			reason := result.Blocked[id]
 			fmt.Printf("- %s: %s\n", id, reason)
+		}
+	}
+	if len(result.Active) > 0 {
+		fmt.Println("Active leaves:")
+		for _, id := range result.Active {
+			fmt.Printf("- %s\n", id)
 		}
 	}
 	fmt.Printf("Mailbox events (latest %d, since seq>%d): %d\n", opts.Limit, opts.SinceSeq, len(result.MailboxEvents))
@@ -276,6 +370,10 @@ func OrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOptions) e
 	for _, id := range ready.Runnable {
 		runnableSet[id] = struct{}{}
 	}
+	activeSet := make(map[string]struct{}, len(ready.Active))
+	for _, id := range ready.Active {
+		activeSet[id] = struct{}{}
+	}
 
 	requested := make([]string, 0, len(ready.Runnable))
 	skipped := map[string]string{}
@@ -284,6 +382,10 @@ func OrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOptions) e
 	} else {
 		for _, id := range opts.IssueIDs {
 			if _, ok := runnableSet[id]; !ok {
+				if _, active := activeSet[id]; active {
+					skipped[id] = "session-already-running"
+					continue
+				}
 				skipped[id] = "not-runnable"
 				continue
 			}
@@ -296,8 +398,13 @@ func OrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOptions) e
 		Limit:       opts.Limit,
 		Requested:   append([]string(nil), requested...),
 		Started:     make([]string, 0, len(requested)),
+		Launched:    make([]orchestrateStartLaunch, 0, len(requested)),
 		Skipped:     skipped,
 		Failed:      map[string]string{},
+		Warnings:    orchestrateStartWarnings(ctx, deps, len(requested) > 0),
+		Advice: orchestrateStartAdvice{
+			WatchCommand: fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", opts.RootIssueID),
+		},
 	}
 
 	count := 0
@@ -315,7 +422,8 @@ func OrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOptions) e
 			result.Skipped[issueID] = "session-already-running"
 			continue
 		}
-		if err := startSessionForIssue(deps, issueID); err != nil {
+		launch, err := submitSessionStartForIssue(deps, issueID)
+		if err != nil {
 			result.Failed[issueID] = err.Error()
 			continue
 		}
@@ -324,6 +432,10 @@ func OrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOptions) e
 			continue
 		}
 		result.Started = append(result.Started, issueID)
+		launch.WatchCommand = result.Advice.WatchCommand
+		launch.IntegrateHint = fmt.Sprintf("az orchestrate integrate --issue %s", issueID)
+		launch.CloseHint = fmt.Sprintf("az orchestrate close-session --issue %s", issueID)
+		result.Launched = append(result.Launched, launch)
 		count++
 	}
 
@@ -346,6 +458,27 @@ func OrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOptions) e
 		for _, id := range sortedKeys(result.Skipped) {
 			fmt.Printf("- %s: %s\n", id, result.Skipped[id])
 		}
+	}
+	if len(result.Launched) > 0 {
+		fmt.Println("Launch details:")
+		for _, launch := range result.Launched {
+			fmt.Printf("- %s: session=%s operation=%s state=%s\n", launch.IssueID, launch.SessionID, launch.OperationID, launch.OperationState)
+			if launch.WorktreePath != "" {
+				fmt.Printf("  worktree=%s\n", launch.WorktreePath)
+			}
+			fmt.Printf("  integrate: %s\n", launch.IntegrateHint)
+			fmt.Printf("  close session: %s\n", launch.CloseHint)
+		}
+	}
+	if len(result.Warnings) > 0 {
+		fmt.Println("Warnings:")
+		for _, warning := range result.Warnings {
+			fmt.Printf("- %s\n", warning)
+		}
+	}
+	if result.Advice.WatchCommand != "" {
+		fmt.Println("Next watch command:")
+		fmt.Printf("- %s\n", result.Advice.WatchCommand)
 	}
 	if len(result.Failed) > 0 {
 		fmt.Println("Failed:")
@@ -413,6 +546,7 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 			SinceSeq:    lastSeq,
 			NextSince:   nextSince,
 			Runnable:    ready.Runnable,
+			Active:      ready.Active,
 			Blocked:     ready.Blocked,
 			Events:      watchEvents,
 		}
@@ -458,7 +592,76 @@ func OrchestrateCompleteCheckCommand(deps *Dependencies, opts OrchestrateComplet
 	for _, reason := range result.Reasons {
 		fmt.Printf("- %s\n", reason)
 	}
+	if len(result.Advice) > 0 {
+		fmt.Println("Suggested next steps:")
+		for _, advice := range result.Advice {
+			fmt.Printf("- %s\n", advice)
+		}
+	}
 	return fmt.Errorf("orchestration completion gate failed")
+}
+
+func OrchestrateIntegrateCommand(deps *Dependencies, opts OrchestrateIntegrateOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+	wt, found, err := worktreeForIssue(ctx, deps, opts.IssueID)
+	if err != nil {
+		return err
+	}
+	commands := orchestrateIntegrationCommands(opts.IssueID, wt, found)
+	result := orchestrateIntegrateResult{
+		IssueID:  opts.IssueID,
+		Commands: commands,
+	}
+	if found {
+		result.WorktreePath = wt.Path
+		result.Branch = wt.Branch
+	}
+	if opts.JSON {
+		return printJSON(result)
+	}
+	fmt.Printf("Integration guidance for %s\n", opts.IssueID)
+	if found {
+		fmt.Printf("Worktree: %s\n", wt.Path)
+		fmt.Printf("Branch: %s\n", wt.Branch)
+	} else {
+		fmt.Println("Worktree: not found in daemon projection")
+	}
+	fmt.Println("Commands:")
+	for _, command := range commands {
+		fmt.Printf("- %s\n", command)
+	}
+	return nil
+}
+
+func OrchestrateCloseSessionCommand(deps *Dependencies, opts OrchestrateCloseSessionOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+	output, err := deps.DaemonClient.StopSession(ctx, opts.IssueID)
+	if err != nil {
+		return fmt.Errorf("close orchestrate session: %w", err)
+	}
+	result := orchestrateCloseSessionResult{IssueID: opts.IssueID, Output: output}
+	if opts.JSON {
+		return printJSON(result)
+	}
+	if strings.TrimSpace(output) != "" {
+		fmt.Print(output)
+	}
+	fmt.Printf("Session closed for %s. If work is integrated, close the issue with `az issue close %s`.\n", opts.IssueID, opts.IssueID)
+	return nil
 }
 
 func buildOrchestrateWatchFrame(deps *Dependencies, rootIssueID string, since int64) (orchestrateWatchFrame, error) {
@@ -488,6 +691,7 @@ func buildOrchestrateWatchFrame(deps *Dependencies, rootIssueID string, since in
 		SinceSeq:    since,
 		NextSince:   nextMailboxSeq(events, since),
 		Runnable:    ready.Runnable,
+		Active:      ready.Active,
 		Blocked:     ready.Blocked,
 		Events:      watchEvents,
 	}, nil
@@ -515,6 +719,12 @@ func emitOrchestrateWatchFrame(frame orchestrateWatchFrame, jsonl bool) error {
 		fmt.Println("blocked:")
 		for _, id := range sortedKeys(frame.Blocked) {
 			fmt.Printf("- %s: %s\n", id, frame.Blocked[id])
+		}
+	}
+	if len(frame.Active) > 0 {
+		fmt.Println("active:")
+		for _, id := range frame.Active {
+			fmt.Printf("- %s\n", id)
 		}
 	}
 	fmt.Println("events:")
@@ -578,6 +788,7 @@ func evaluateOrchestrateCompleteCheck(rootIssueID string, tasks []domain.Task) (
 		RootIssueID: rootIssueID,
 		Pass:        len(reasons) == 0,
 		Reasons:     reasons,
+		Advice:      orchestrateCompletionAdvice(ready.Runnable, openDescendants, activeSessions),
 	}, nil
 }
 
@@ -600,6 +811,132 @@ func startSessionForIssue(deps *Dependencies, issueID string) error {
 		return err
 	}
 	return nil
+}
+
+func submitSessionStartForIssue(deps *Dependencies, issueID string) (orchestrateStartLaunch, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	task, err := validateSessionIssueID(ctx, deps, issueID)
+	if err != nil {
+		return orchestrateStartLaunch{}, err
+	}
+	baseBranch, err := resolveSessionStartBaseBranch(ctx, deps, task)
+	if err != nil {
+		return orchestrateStartLaunch{}, err
+	}
+	parsedIssueID, err := naming.ParseIssueID(issueID)
+	if err != nil {
+		return orchestrateStartLaunch{}, fmt.Errorf("invalid issue id %q: %w", issueID, err)
+	}
+	sessionID := naming.CanonicalSessionIDForIssue(deps.RepoDir, parsedIssueID).String()
+	req := newSessionRequest(commandSessionStart, deps.ProjectID, issueID, baseBranch)
+	body, err := json.Marshal(protocol.OperationSubmitRequestBody{
+		ProjectID:    naming.ProjectID(deps.ProjectID),
+		Kind:         commandSessionStart,
+		IssueID:      parsedIssueID,
+		DedupeKey:    "session.start:" + issueID,
+		ResourceKeys: []string{"session:" + sessionID, "worktree:" + issueID},
+		Payload:      append(json.RawMessage(nil), req.Body...),
+	})
+	if err != nil {
+		return orchestrateStartLaunch{}, fmt.Errorf("marshal operation submit: %w", err)
+	}
+	resp, err := deps.DaemonClient.Command(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       makeRequestID(protocol.CommandOperationSubmit),
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         protocol.CommandOperationSubmit,
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(deps.ProjectID),
+		},
+		SentAt: time.Now().UTC(),
+		Body:   body,
+	})
+	if err != nil {
+		return orchestrateStartLaunch{}, fmt.Errorf("submit session start operation: %w", err)
+	}
+	if err := responseError(resp, "submit session start operation"); err != nil {
+		return orchestrateStartLaunch{}, err
+	}
+	var out protocol.OperationSubmitResponseBody
+	if err := json.Unmarshal(resp.Body, &out); err != nil {
+		return orchestrateStartLaunch{}, fmt.Errorf("decode session start operation: %w", err)
+	}
+	launch := orchestrateStartLaunch{
+		IssueID:        issueID,
+		SessionID:      sessionID,
+		OperationID:    out.Operation.OperationID.String(),
+		OperationState: string(out.Operation.State),
+	}
+	if wt, found, wtErr := worktreeForIssue(ctx, deps, issueID); wtErr == nil && found {
+		launch.WorktreePath = wt.Path
+	}
+	return launch, nil
+}
+
+func orchestrateStartWarnings(ctx context.Context, deps *Dependencies, willStart bool) []string {
+	if !willStart || deps == nil || deps.DaemonClient == nil {
+		return nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return []string{fmt.Sprintf("could not inspect parent worktree dirtiness: %v", err)}
+	}
+	status, err := deps.DaemonClient.GitStatus(ctx, cwd)
+	if err != nil {
+		return []string{fmt.Sprintf("could not inspect parent worktree dirtiness: %v", err)}
+	}
+	dirty := dirtyFilesFromGitStatus(status)
+	if len(dirty) == 0 {
+		return nil
+	}
+	return []string{
+		fmt.Sprintf("parent worktree has uncommitted tracked changes (%s); worker worktrees are created from committed branch state and will not see these files: %s", summarizeGitStatusCounts(status), strings.Join(dirty, ", ")),
+	}
+}
+
+func orchestrateCompletionAdvice(runnable, openDescendants, activeSessions []string) []string {
+	advice := make([]string, 0, len(runnable)+len(openDescendants)+len(activeSessions))
+	for _, id := range activeSessions {
+		advice = append(advice, fmt.Sprintf("stop active worker session: az orchestrate close-session --issue %s", id))
+	}
+	for _, id := range openDescendants {
+		advice = append(advice, fmt.Sprintf("after integration/evidence, close required child issue: az issue close %s", id))
+	}
+	for _, id := range runnable {
+		advice = append(advice, fmt.Sprintf("start or resolve runnable leaf: az orchestrate start --root <root> --issue %s --json", id))
+	}
+	return uniqueTrimmedStrings(advice)
+}
+
+func worktreeForIssue(ctx context.Context, deps *Dependencies, issueID string) (daemonclient.Worktree, bool, error) {
+	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
+	if err != nil {
+		return daemonclient.Worktree{}, false, fmt.Errorf("list worktrees: %w", err)
+	}
+	for _, wt := range worktrees {
+		if naming.IssueIDsEqual(wt.IssueID, issueID) {
+			return wt, true, nil
+		}
+	}
+	return daemonclient.Worktree{}, false, nil
+}
+
+func orchestrateIntegrationCommands(issueID string, wt daemonclient.Worktree, found bool) []string {
+	commands := make([]string, 0, 5)
+	if found && strings.TrimSpace(wt.Path) != "" {
+		commands = append(commands,
+			fmt.Sprintf("git -C %s status --short", shellSingleQuote(wt.Path)),
+			fmt.Sprintf("git -C %s log --oneline --max-count=10", shellSingleQuote(wt.Path)),
+		)
+	} else {
+		commands = append(commands, fmt.Sprintf("az issue get %s", issueID), fmt.Sprintf("az session status %s", issueID))
+	}
+	commands = append(commands,
+		fmt.Sprintf("az branch merge %s", issueID),
+		fmt.Sprintf("az orchestrate close-session --issue %s", issueID),
+	)
+	return commands
 }
 
 func sendOrchestrateMailEvent(deps *Dependencies, parentIssueID, issueID, eventType, body string) error {
