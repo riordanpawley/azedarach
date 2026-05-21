@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
@@ -109,6 +110,11 @@ func (f DetailOpenerFunc) OpenDetail(ctx context.Context, entry InventoryEntry) 
 	return f(ctx, entry)
 }
 
+type UIStateStore interface {
+	GetUIStateForProject(context.Context, string, string) (protocol.UIStateResponseBody, error)
+	SetUIStateForProject(context.Context, string, string, string) (protocol.UIStateResponseBody, error)
+}
+
 type fullAzSwitcher interface {
 	HasSession(context.Context, string) (bool, error)
 	SwitchClient(context.Context, string) error
@@ -134,15 +140,30 @@ func WithKiller(killer Killer) Option {
 	}
 }
 
+func WithUIStateStore(store UIStateStore) Option {
+	return func(m *Model) {
+		m.uiStateStore = store
+	}
+}
+
+type selectorTab int
+
+const (
+	selectorTabGrid selectorTab = iota
+	selectorTabTree
+)
+
 type Model struct {
 	loader       SnapshotLoader
 	switcher     Switcher
 	killer       Killer
 	detailOpener DetailOpener
+	uiStateStore UIStateStore
 	styles       *styles.Styles
 
 	snapshot           Snapshot
 	cursor             int
+	activeTab          selectorTab
 	width              int
 	height             int
 	loading            bool
@@ -186,6 +207,17 @@ type snapshotLoadedMsg struct {
 	err      error
 }
 
+type selectorTabLoadedMsg struct {
+	tab   selectorTab
+	found bool
+	err   error
+}
+
+type selectorTabSavedMsg struct {
+	tab selectorTab
+	err error
+}
+
 func New(loader SnapshotLoader, opts ...Option) Model {
 	m := Model{
 		loader:  loader,
@@ -203,7 +235,7 @@ func New(loader SnapshotLoader, opts ...Option) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return m.loadCmd()
+	return tea.Batch(m.loadSelectorTabCmd(), m.loadCmd())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -270,6 +302,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		m.err = nil
 		return m, m.loadCmd()
+	case selectorTabLoadedMsg:
+		if msg.err == nil && msg.found {
+			m.activeTab = msg.tab
+		}
+		return m, nil
+	case selectorTabSavedMsg:
+		return m, nil
 	case overlay.JumpSelectedMsg:
 		if msg.TaskIndex >= 0 && msg.TaskIndex < len(m.jumpTargets) {
 			m.cursor = m.jumpTargets[msg.TaskIndex]
@@ -309,6 +348,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q", "esc":
 			return m, tea.Quit
+		case "tab":
+			m.toggleActiveTab()
+			return m, m.persistSelectorTabCmd(m.activeTab)
 		case "1", "2", "3", "4", "5", "6", "7", "8", "9", "0":
 			m.selectCardHotkey(msg.String())
 			return m, nil
@@ -424,21 +466,25 @@ func (m Model) View() string {
 	if len(m.snapshot.Entries) == 0 {
 		b.WriteString("No tmux sessions found.\n")
 	} else {
-		availableHeight := m.gridAvailableHeight()
-		columns := m.gridColumnCount(availableHeight)
-		cardWidth := gridCardWidth(m.width, columns)
-		rows := RenderVisibleGridWithLabels(
-			m.snapshot.Entries,
-			m.cursor,
-			columns,
-			cardWidth,
-			availableHeight,
-			m.styles,
-			m.labelsByEntry(),
-		)
-		for _, row := range rows {
-			b.WriteString(row)
-			b.WriteString("\n")
+		if m.activeTab == selectorTabTree {
+			b.WriteString(m.renderTree())
+		} else {
+			availableHeight := m.gridAvailableHeight()
+			columns := m.gridColumnCount(availableHeight)
+			cardWidth := gridCardWidth(m.width, columns)
+			rows := RenderVisibleGridWithLabels(
+				m.snapshot.Entries,
+				m.cursor,
+				columns,
+				cardWidth,
+				availableHeight,
+				m.styles,
+				m.labelsByEntry(),
+			)
+			for _, row := range rows {
+				b.WriteString(row)
+				b.WriteString("\n")
+			}
 		}
 	}
 	contentLines := linesForHeight(b.String(), maxInt(0, m.height-1))
@@ -483,20 +529,107 @@ func (m Model) labelsByEntry() map[int]string {
 }
 
 func (m Model) renderFooter() string {
+	left := m.renderTabs()
 	right := m.styles.StatusHint.Render(keybinds.RenderPlain([]keybinds.Binding{
+		{Key: "Tab", Description: "tab"},
 		{Key: "h/j/k/l", Description: "move"},
 		{Key: "gw", Description: "labels"},
 		{Key: "Enter/a", Description: "switch"},
-		{Key: "o/Space", Description: "open in az"},
+		{Key: "o/Space", Description: "open"},
 		{Key: "x", Description: "kill"},
-		{Key: "r", Description: "refresh"},
 		{Key: "q/Esc", Description: "close"},
 	}, "  "))
-	gap := maxInt(0, m.width-ansi.StringWidth(right))
-	if gap > 0 {
-		return strings.Repeat(" ", gap) + right
+	leftWidth := ansi.StringWidth(left)
+	rightWidth := ansi.StringWidth(right)
+	if leftWidth+1+rightWidth <= m.width {
+		return left + strings.Repeat(" ", m.width-leftWidth-rightWidth) + right
 	}
-	return ansi.Truncate(right, maxInt(1, m.width), "…")
+	if leftWidth < m.width {
+		return left + " " + ansi.Truncate(right, maxInt(1, m.width-leftWidth-1), "…")
+	}
+	return ansi.Truncate(left, maxInt(1, m.width), "…")
+}
+
+func (m Model) renderTabs() string {
+	tab := func(label string, active bool) string {
+		if active {
+			return m.styles.StatusInfo.Render("[ " + label + " ]")
+		}
+		return m.styles.StatusHint.Render("  " + label + "  ")
+	}
+	return tab("Cards", m.activeTab == selectorTabGrid) + " " + tab("Tree", m.activeTab == selectorTabTree)
+}
+
+func (m Model) renderTree() string {
+	rows := activeSessionTreeRows(m.snapshot.Entries)
+	if len(rows) == 0 {
+		return ""
+	}
+	availableHeight := maxInt(1, m.treeAvailableHeight())
+	visible := visibleTreeRows(rows, m.cursor, availableHeight)
+	lines := make([]string, 0, len(visible))
+	for _, row := range visible {
+		if row.entryIndex < 0 || row.entryIndex >= len(m.snapshot.Entries) {
+			continue
+		}
+		entry := m.snapshot.Entries[row.entryIndex]
+		lines = append(lines, m.renderTreeRow(row, entry))
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func (m Model) renderTreeRow(row sessionTreeRow, entry InventoryEntry) string {
+	cursor := "  "
+	if row.entryIndex == m.cursor {
+		cursor = "> "
+	}
+	indent := treePrefix(row.ancestorLast, row.last)
+	issueID := entryIssueID(entry)
+	if issueID == "" {
+		issueID = strings.TrimSpace(entry.SessionID)
+	}
+	title := strings.TrimSpace(entry.TaskTitle)
+	if title == "" {
+		title = strings.TrimSpace(entry.Task.Title)
+	}
+	if title == "" {
+		title = strings.TrimSpace(entry.SessionID)
+	}
+	state := strings.TrimSpace(entry.State.String())
+	if state == "" {
+		state = string(domain.SessionIdle)
+	}
+	metaParts := []string{}
+	if entry.SessionID != "" {
+		metaParts = append(metaParts, "tmux "+entry.SessionID)
+	}
+	if entry.ProjectPath != "" {
+		metaParts = append(metaParts, entry.ProjectPath)
+	} else if entry.ProjectID != "" {
+		metaParts = append(metaParts, entry.ProjectID)
+	}
+	meta := ""
+	if len(metaParts) > 0 {
+		meta = "  " + strings.Join(metaParts, "  ")
+	}
+	line := fmt.Sprintf("%s%s%s [%s] %s%s", cursor, indent, issueID, state, title, meta)
+	line = ansi.Truncate(line, maxInt(1, m.width), "…")
+	if row.entryIndex == m.cursor {
+		return lipgloss.NewStyle().Foreground(styles.Blue).Bold(true).Render(line)
+	}
+	return line
+}
+
+func (m Model) treeAvailableHeight() int {
+	contentHeight := maxInt(0, m.height-1)
+	used := 0
+	if strings.TrimSpace(m.status) != "" {
+		used += lipgloss.Height(m.styles.StatusInfo.Render(m.status))
+	}
+	if m.err != nil {
+		used += lipgloss.Height(m.styles.ToastError.Render("Error: "+m.err.Error())) + 1
+	}
+	return maxInt(1, contentHeight-used)
 }
 
 func linesForHeight(view string, height int) []string {
@@ -535,6 +668,10 @@ func (m *Model) clearJumpMode() {
 }
 
 func (m *Model) moveCursor(dx int, dy int) {
+	if m.activeTab == selectorTabTree {
+		m.moveTreeCursor(dx, dy)
+		return
+	}
 	count := len(m.snapshot.Entries)
 	if count == 0 {
 		m.cursor = 0
@@ -570,6 +707,31 @@ func (m *Model) moveCursor(dx int, dy int) {
 	if next >= 0 && next < count {
 		m.cursor = next
 	}
+}
+
+func (m *Model) moveTreeCursor(dx int, dy int) {
+	rows := activeSessionTreeRows(m.snapshot.Entries)
+	if len(rows) == 0 {
+		m.cursor = 0
+		return
+	}
+	pos := 0
+	for i, row := range rows {
+		if row.entryIndex == m.cursor {
+			pos = i
+			break
+		}
+	}
+	next := pos + dy
+	if dx < 0 {
+		next = pos - 1
+	} else if dx > 0 {
+		next = pos + 1
+	}
+	if next < 0 || next >= len(rows) {
+		return
+	}
+	m.cursor = rows[next].entryIndex
 }
 
 func (m *Model) selectCardHotkey(key string) {
@@ -646,6 +808,14 @@ func (m Model) gridAvailableHeight() int {
 	return maxInt(1, contentHeight-used)
 }
 
+func (m *Model) toggleActiveTab() {
+	if m.activeTab == selectorTabTree {
+		m.activeTab = selectorTabGrid
+		return
+	}
+	m.activeTab = selectorTabTree
+}
+
 func (m Model) selectedEntry() (InventoryEntry, bool) {
 	if m.cursor < 0 || m.cursor >= len(m.snapshot.Entries) {
 		return InventoryEntry{}, false
@@ -672,6 +842,65 @@ func (m Model) loadCmd() tea.Cmd {
 			return LoadFailedMsg{Err: err}
 		}
 		return LoadedMsg{Snapshot: snapshot}
+	}
+}
+
+func (m Model) loadSelectorTabCmd() tea.Cmd {
+	store := m.uiStateStore
+	if store == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		resp, err := store.GetUIStateForProject(ctx, protocol.DefaultProjectID, protocol.UIStateKeyTMUXSelectorLastActiveTab)
+		if err != nil {
+			return selectorTabLoadedMsg{err: err}
+		}
+		tab, ok := selectorTabFromPersistedValue(resp.Value)
+		if !resp.Found || !ok {
+			return selectorTabLoadedMsg{}
+		}
+		return selectorTabLoadedMsg{tab: tab, found: true}
+	}
+}
+
+func (m Model) persistSelectorTabCmd(tab selectorTab) tea.Cmd {
+	store := m.uiStateStore
+	if store == nil {
+		return nil
+	}
+	value, ok := persistedValueForSelectorTab(tab)
+	if !ok {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, err := store.SetUIStateForProject(ctx, protocol.DefaultProjectID, protocol.UIStateKeyTMUXSelectorLastActiveTab, value)
+		return selectorTabSavedMsg{tab: tab, err: err}
+	}
+}
+
+func persistedValueForSelectorTab(tab selectorTab) (string, bool) {
+	switch tab {
+	case selectorTabGrid:
+		return "cards", true
+	case selectorTabTree:
+		return "tree", true
+	default:
+		return "", false
+	}
+}
+
+func selectorTabFromPersistedValue(value string) (selectorTab, bool) {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "cards", "grid":
+		return selectorTabGrid, true
+	case "tree":
+		return selectorTabTree, true
+	default:
+		return selectorTabGrid, false
 	}
 }
 
@@ -833,6 +1062,118 @@ func EntriesFromTasks(tasks []domain.Task) []InventoryEntry {
 		entries = append(entries, entry)
 	}
 	return entries
+}
+
+type sessionTreeRow struct {
+	entryIndex   int
+	last         bool
+	ancestorLast []bool
+}
+
+func activeSessionTreeRows(entries []InventoryEntry) []sessionTreeRow {
+	if len(entries) == 0 {
+		return nil
+	}
+	indexByIssue := make(map[string]int, len(entries))
+	for i, entry := range entries {
+		if issueID := entryIssueID(entry); issueID != "" {
+			indexByIssue[issueID] = i
+		}
+	}
+	children := make(map[int][]int, len(entries))
+	roots := make([]int, 0, len(entries))
+	for i, entry := range entries {
+		parentID := entryParentID(entry)
+		parentIndex, hasActiveParent := indexByIssue[parentID]
+		if parentID == "" || !hasActiveParent || parentIndex == i {
+			roots = append(roots, i)
+			continue
+		}
+		children[parentIndex] = append(children[parentIndex], i)
+	}
+	rows := make([]sessionTreeRow, 0, len(entries))
+	visited := make(map[int]bool, len(entries))
+	var walk func(indices []int, ancestors []bool)
+	walk = func(indices []int, ancestors []bool) {
+		for pos, entryIndex := range indices {
+			if entryIndex < 0 || entryIndex >= len(entries) || visited[entryIndex] {
+				continue
+			}
+			visited[entryIndex] = true
+			last := pos == len(indices)-1
+			rows = append(rows, sessionTreeRow{
+				entryIndex:   entryIndex,
+				last:         last,
+				ancestorLast: append([]bool(nil), ancestors...),
+			})
+			walk(children[entryIndex], append(append([]bool(nil), ancestors...), last))
+		}
+	}
+	walk(roots, nil)
+	for i := range entries {
+		if !visited[i] {
+			rows = append(rows, sessionTreeRow{entryIndex: i, last: i == len(entries)-1})
+		}
+	}
+	return rows
+}
+
+func entryParentID(entry InventoryEntry) string {
+	if entry.Task.ParentID != nil {
+		return strings.TrimSpace(entry.Task.ParentID.String())
+	}
+	for _, dep := range entry.Task.Dependencies {
+		if dep.Type == domain.DependencyParentChild || string(dep.Type) == "parent_child" {
+			if parentID := strings.TrimSpace(dep.ID.String()); parentID != "" {
+				return parentID
+			}
+		}
+	}
+	return ""
+}
+
+func treePrefix(ancestorLast []bool, last bool) string {
+	if len(ancestorLast) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, ancestorIsLast := range ancestorLast[:len(ancestorLast)-1] {
+		if ancestorIsLast {
+			b.WriteString("   ")
+		} else {
+			b.WriteString("|  ")
+		}
+	}
+	if last {
+		b.WriteString("`- ")
+	} else {
+		b.WriteString("|- ")
+	}
+	return b.String()
+}
+
+func visibleTreeRows(rows []sessionTreeRow, selectedEntryIndex int, height int) []sessionTreeRow {
+	if height <= 0 || len(rows) == 0 {
+		return nil
+	}
+	if len(rows) <= height {
+		return rows
+	}
+	selected := 0
+	for i, row := range rows {
+		if row.entryIndex == selectedEntryIndex {
+			selected = i
+			break
+		}
+	}
+	start := selected - height/2
+	if start < 0 {
+		start = 0
+	}
+	if start+height > len(rows) {
+		start = len(rows) - height
+	}
+	return rows[start : start+height]
 }
 
 func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style, _ lipgloss.Style, _ lipgloss.Style, s *styles.Styles) string {
