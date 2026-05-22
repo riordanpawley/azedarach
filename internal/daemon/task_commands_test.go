@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -887,6 +888,106 @@ func TestRefreshWorktreeRuntimeStatePersistsGitMetricsFromWorktreeList(t *testin
 	}
 	if status.GitAheadCount != 2 || status.GitBehindCount != 5 {
 		t.Fatalf("persisted git ahead/behind = %d/%d, want 2/5", status.GitAheadCount, status.GitBehindCount)
+	}
+}
+
+func TestRefreshWorktreeRuntimeStateUsesClosestNonDoneAncestorBranch(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-refresh-ancestor-base"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "root",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "parent",
+		Type:     domain.TypeTask,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusInProgress,
+		ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+
+	childWorktreePath := filepath.Join(repoDir, "wt-child")
+	var mergeBaseRef string
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain":
+			return strings.Join([]string{
+				"worktree " + repoDir,
+				"branch refs/heads/main",
+				"",
+				"worktree " + filepath.Join(repoDir, "wt-root"),
+				"branch refs/heads/az/" + rootID,
+				"",
+				"worktree " + filepath.Join(repoDir, "wt-parent"),
+				"branch refs/heads/az/" + parentID,
+				"",
+				"worktree " + childWorktreePath,
+				"branch refs/heads/az/" + childID,
+				"",
+			}, "\n"), nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == childWorktreePath && args[2] == "merge-base":
+			mergeBaseRef = args[3]
+			return "abc123\n", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == childWorktreePath && args[2] == "status" && args[3] == "--porcelain":
+			return " M changed.go\n", nil
+		case len(args) >= 8 && args[0] == "-C" && args[1] == childWorktreePath && args[2] == "diff" && args[3] == "--shortstat":
+			return " 1 file changed, 2 insertions(+), 1 deletion(-)\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == childWorktreePath && args[2] == "rev-list" && args[3] == "--count":
+			return "0\n", nil
+		default:
+			return "", nil
+		}
+	}}
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
+		git: git.NewClient(runner, slog.Default()),
+		issues: issuesClient,
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: store,
+		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(runner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(runner, repoDir, slog.Default()),
+		},
+	}
+
+	_, err = d.refreshWorktreeRuntimeState(ctx, projectID)
+	if err != nil {
+		t.Fatalf("refreshWorktreeRuntimeState error: %v", err)
+	}
+	if got, want := strings.TrimSpace(mergeBaseRef), "az/"+parentID; got != want {
+		t.Fatalf("merge-base base ref = %q, want %q", got, want)
 	}
 }
 

@@ -271,6 +271,24 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 	rows := make([]daemonstate.WorktreeState, 0, len(worktrees))
 	statusByIssue := make(map[string]*git.GitStatus, len(worktrees))
 	worktreePathByIssue := make(map[string]string, len(worktrees))
+	worktreeByIssue := make(map[string]git.Worktree, len(worktrees))
+	for _, wt := range worktrees {
+		issueID := strings.TrimSpace(wt.IssueID)
+		if issueID == "" {
+			continue
+		}
+		worktreeByIssue[issueID] = wt
+	}
+	issueClient := d.issueClientForProject(projectID)
+	taskByIssue := make(map[string]domain.Task)
+	if issueClient != nil {
+		if tasks, taskErr := issueClient.ListWithRuntime(ctx, projectID); taskErr == nil {
+			taskByIssue = make(map[string]domain.Task, len(tasks))
+			for _, task := range tasks {
+				taskByIssue[strings.TrimSpace(task.ID.String())] = task
+			}
+		}
+	}
 	throttle := d.ensureWorktreeGitProbeThrottle()
 	trigger := runtimeReconcileRequestFromContext(ctx)
 	forceProbe := trigger.Priority >= reconcilePriorityManual && strings.TrimSpace(trigger.Reason) == "manual"
@@ -308,7 +326,8 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 				if len(processedIssueIDs) < cap(processedIssueIDs) {
 					processedIssueIDs = append(processedIssueIDs, issueID)
 				}
-				status, err := d.git.RuntimeStatus(ctx, worktreePath, baseBranch)
+					issueBaseBranch := d.runtimeDiffBaseBranchForIssue(issueID, baseBranch, taskByIssue, worktreeByIssue)
+					status, err := d.git.RuntimeStatus(ctx, worktreePath, issueBaseBranch)
 				outcome := throttle.Record(probeKey, gitStatusSignature(status), err)
 				if err != nil {
 					failedProbes++
@@ -423,6 +442,16 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 		}
 		worktreeByIssue[issueID] = wt
 	}
+	issueClient := d.issueClientForProject(projectID)
+	taskByIssue := make(map[string]domain.Task)
+	if issueClient != nil {
+		if tasks, taskErr := issueClient.ListWithRuntime(ctx, projectID); taskErr == nil {
+			taskByIssue = make(map[string]domain.Task, len(tasks))
+			for _, task := range tasks {
+				taskByIssue[strings.TrimSpace(task.ID.String())] = task
+			}
+		}
+	}
 
 	refreshed := 0
 	var errs []error
@@ -442,7 +471,8 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 		if d.git == nil {
 			continue
 		}
-		status, statusErr := d.git.RuntimeStatus(ctx, worktreePath, baseBranch)
+		issueBaseBranch := d.runtimeDiffBaseBranchForIssue(issueID, baseBranch, taskByIssue, worktreeByIssue)
+		status, statusErr := d.git.RuntimeStatus(ctx, worktreePath, issueBaseBranch)
 		if statusErr != nil {
 			errs = append(errs, fmt.Errorf("%s: refresh git status: %w", issueID, statusErr))
 			continue
@@ -460,6 +490,56 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 		}
 	}
 	return refreshed, errors.Join(errs...)
+}
+
+func (d *Daemon) runtimeDiffBaseBranchForIssue(
+	issueID string,
+	defaultBaseBranch string,
+	taskByIssue map[string]domain.Task,
+	worktreeByIssue map[string]git.Worktree,
+) string {
+	baseBranch := strings.TrimSpace(defaultBaseBranch)
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+	if len(taskByIssue) == 0 {
+		return baseBranch
+	}
+
+	task, ok := taskByIssue[strings.TrimSpace(issueID)]
+	if !ok || task.ParentID == nil {
+		return baseBranch
+	}
+
+	nextParentID := strings.TrimSpace(task.ParentID.String())
+	visited := map[string]struct{}{}
+	for nextParentID != "" {
+		if _, seen := visited[nextParentID]; seen {
+			break
+		}
+		visited[nextParentID] = struct{}{}
+
+		parentTask, parentOK := taskByIssue[nextParentID]
+		if !parentOK {
+			break
+		}
+		if parentTask.Status != domain.StatusDone {
+			if parentWorktree, ok := worktreeByIssue[nextParentID]; ok {
+				candidate := strings.TrimSpace(parentWorktree.Branch)
+				if candidate != "" {
+					return candidate
+				}
+			}
+			return "az/" + nextParentID
+		}
+
+		nextParentID = ""
+		if parentTask.ParentID != nil {
+			nextParentID = strings.TrimSpace(parentTask.ParentID.String())
+		}
+	}
+
+	return baseBranch
 }
 
 func (d *Daemon) ensureWorktreeGitProbeThrottle() *reconcileThrottle {
