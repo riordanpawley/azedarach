@@ -19,6 +19,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
@@ -461,14 +462,11 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	baseBranch := cmd.BaseBranch
-	if baseBranch == "" {
-		baseBranch = d.baseBranchForProject(cmd.ProjectID)
-	}
 	worktreeManager := d.worktreeManagerForProject(cmd.ProjectID)
 	if worktreeManager == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "worktree manager unavailable"), nil
 	}
+	baseBranch, baseBranchAncestorIssueID := d.resolveSessionStartBaseBranch(ctx, cmd.ProjectID, cmd.BaseBranch, issueClient, worktreeManager, task)
 	worktree, err := worktreeManager.CreateWithTitle(ctx, cmd.IssueID, task.Title, baseBranch)
 	reusedWorktree := false
 	if err != nil {
@@ -497,6 +495,8 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			"session_id", cmd.SessionID,
 			"worktree", worktree.Path,
 			"branch", worktree.Branch,
+			"base_branch", baseBranch,
+			"base_branch_ancestor_issue_id", baseBranchAncestorIssueID,
 			"reused_worktree", reusedWorktree,
 		)
 	}
@@ -548,6 +548,12 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	output := strings.Join([]string{
 		fmt.Sprintf("Starting session for: %s - %s", task.ID, task.Title),
 		fmt.Sprintf("Creating worktree from branch: %s", baseBranch),
+		func() string {
+			if strings.TrimSpace(baseBranchAncestorIssueID) == "" {
+				return ""
+			}
+			return fmt.Sprintf("Base branch source ancestor: %s", baseBranchAncestorIssueID)
+		}(),
 		worktreeLine,
 		fmt.Sprintf("Creating tmux session: %s", cmd.SessionID),
 		func() string {
@@ -572,6 +578,53 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		)
 	}
 	return d.commandOutput(req, output), nil
+}
+
+func (d *Daemon) resolveSessionStartBaseBranch(
+	ctx context.Context,
+	projectID string,
+	requestedBaseBranch string,
+	issueClient *issues.Client,
+	worktreeManager *git.WorktreeManager,
+	task domain.Task,
+) (baseBranch string, ancestorIssueID string) {
+	baseBranch = strings.TrimSpace(requestedBaseBranch)
+	if baseBranch == "" {
+		baseBranch = strings.TrimSpace(d.baseBranchForProject(projectID))
+	}
+	if issueClient == nil || worktreeManager == nil || task.ParentID == nil {
+		return baseBranch, ""
+	}
+
+	nextParentID := strings.TrimSpace(task.ParentID.String())
+	visited := map[string]struct{}{}
+	for nextParentID != "" {
+		if _, seen := visited[nextParentID]; seen {
+			break
+		}
+		visited[nextParentID] = struct{}{}
+
+		parentTask, err := issueClient.GetWithRuntime(ctx, projectID, nextParentID)
+		if err != nil {
+			break
+		}
+
+		if parentTask.Status != domain.StatusDone {
+			if parentWorktree, err := worktreeManager.Get(ctx, nextParentID); err == nil {
+				candidate := strings.TrimSpace(parentWorktree.Branch)
+				if candidate != "" {
+					return candidate, nextParentID
+				}
+			}
+		}
+
+		nextParentID = ""
+		if parentTask.ParentID != nil {
+			nextParentID = strings.TrimSpace(parentTask.ParentID.String())
+		}
+	}
+
+	return baseBranch, ""
 }
 
 func resolveSessionIssue(tasks []domain.Task, requestedIssueID string) (domain.Task, bool) {
