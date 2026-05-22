@@ -4865,7 +4865,7 @@ func mergePreflightReconcileIssueIDs(sourceID, targetID string) []string {
 	return ids
 }
 
-func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sourceWorktree, targetWorktree, targetRef, sourceBranch string, refreshStatus bool) *mergePreflightFailureMsg {
+func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sourceWorktree, targetWorktree, targetRef, sourceBranch string, refreshStatus bool, ignoreSourceDirty bool) *mergePreflightFailureMsg {
 	if m.daemonClient == nil {
 		return nil
 	}
@@ -4894,7 +4894,7 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	sourceStatus, sourceErr := statusForWorktree(sourceWorktree)
 	if sourceErr != nil {
 		reasons = append(reasons, fmt.Sprintf("Could not read source status (%s): %v", sourceID, sourceErr))
-	} else if hasMergeBlockingStatusChanges(sourceStatus) {
+	} else if !ignoreSourceDirty && hasMergeBlockingStatusChanges(sourceStatus) {
 		reasons = append(reasons, fmt.Sprintf("Source %s is not clean: %s", sourceID, summarizeStatusChangeCounts(sourceStatus)))
 		sourceFiles = dirtyFilesFromStatus(sourceStatus)
 	}
@@ -4910,7 +4910,15 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	targetRef = strings.TrimSpace(targetRef)
 	sourceBranch = strings.TrimSpace(sourceBranch)
 	if len(reasons) == 0 && targetRef != "" && sourceBranch != "" {
-		resp, err := m.daemonClient.GitMergePreflight(ctx, sourceID, sourceWorktree, targetID, targetWorktree, targetRef, sourceBranch)
+		resp, err := m.daemonClient.GitMergePreflightWithOptions(ctx, daemonclient.GitMergePreflightRequest{
+			SourceID:          sourceID,
+			SourceWorktree:    sourceWorktree,
+			TargetID:          targetID,
+			TargetWorktree:    targetWorktree,
+			TargetRef:         targetRef,
+			SourceBranch:      sourceBranch,
+			IgnoreSourceDirty: ignoreSourceDirty,
+		})
 		if err != nil {
 			reasons = append(reasons, fmt.Sprintf("Could not predict merge conflicts (%s -> %s): %v", sourceID, targetID, err))
 		} else if !resp.Clean {
@@ -4966,6 +4974,7 @@ func (m Model) refreshMergePreflightCmd(selection overlay.MergePreflightRefreshS
 			strings.TrimSpace(selection.TargetRef),
 			strings.TrimSpace(selection.SourceBranch),
 			true,
+			selection.IgnoreSourceDirty,
 		)
 		if preflight != nil {
 			return *preflight

@@ -110,12 +110,13 @@ type GitRuntimeSignalsResult struct {
 }
 
 type GitMergePreflightRequest struct {
-	SourceID       string `json:"source_id,omitempty"`
-	SourceWorktree string `json:"source_worktree"`
-	TargetID       string `json:"target_id,omitempty"`
-	TargetWorktree string `json:"target_worktree"`
-	TargetRef      string `json:"target_ref,omitempty"`
-	SourceBranch   string `json:"source_branch,omitempty"`
+	SourceID          string `json:"source_id,omitempty"`
+	SourceWorktree    string `json:"source_worktree"`
+	TargetID          string `json:"target_id,omitempty"`
+	TargetWorktree    string `json:"target_worktree"`
+	TargetRef         string `json:"target_ref,omitempty"`
+	SourceBranch      string `json:"source_branch,omitempty"`
+	IgnoreSourceDirty bool   `json:"ignore_source_dirty,omitempty"`
 }
 
 type GitMergePreflightResult struct {

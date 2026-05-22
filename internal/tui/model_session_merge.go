@@ -441,11 +441,19 @@ type mergeTargetSelectionResolvedMsg struct {
 	err            error
 }
 
+type mergePreflightOptions struct {
+	ignoreSourceDirty bool
+}
+
 // mergeBaseTargetID is a UI-only merge target sentinel. It means "merge into
 // the configured git.baseBranch" and is not a literal branch name.
 const mergeBaseTargetID = "base"
 
 func (m Model) mergeToBaseCmd(sourceWorktree, sourceID string, refreshStatus bool) tea.Cmd {
+	return m.mergeToBaseCmdWithOptions(sourceWorktree, sourceID, refreshStatus, mergePreflightOptions{})
+}
+
+func (m Model) mergeToBaseCmdWithOptions(sourceWorktree, sourceID string, refreshStatus bool, opts mergePreflightOptions) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		baseBranch := m.resolveBaseBranch()
@@ -469,7 +477,7 @@ func (m Model) mergeToBaseCmd(sourceWorktree, sourceID string, refreshStatus boo
 			return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, err: fmt.Errorf("daemon client unavailable")}
 		}
 
-		if preflight := m.checkMergePreflight(ctx, sourceID, mergeBaseTargetID, sourceWorktree, baseWorktree, baseBranch, branch, refreshStatus); preflight != nil {
+		if preflight := m.checkMergePreflight(ctx, sourceID, mergeBaseTargetID, sourceWorktree, baseWorktree, baseBranch, branch, refreshStatus, opts.ignoreSourceDirty); preflight != nil {
 			return *preflight
 		}
 
@@ -517,6 +525,10 @@ func (m Model) mergeToBaseCmd(sourceWorktree, sourceID string, refreshStatus boo
 }
 
 func (m Model) mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, sourceID, targetID string, refreshStatus bool) tea.Cmd {
+	return m.mergeFeatureIntoFeatureCmdWithOptions(sourceWorktree, targetWorktree, sourceID, targetID, refreshStatus, mergePreflightOptions{})
+}
+
+func (m Model) mergeFeatureIntoFeatureCmdWithOptions(sourceWorktree, targetWorktree, sourceID, targetID string, refreshStatus bool, opts mergePreflightOptions) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 
@@ -536,7 +548,7 @@ func (m Model) mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, source
 			return mergeResultMsg{sourceID: sourceID, targetID: targetID, err: fmt.Errorf("daemon client unavailable")}
 		}
 
-		if preflight := m.checkMergePreflight(ctx, sourceID, targetID, sourceWorktree, targetWorktree, "HEAD", sourceBranch, refreshStatus); preflight != nil {
+		if preflight := m.checkMergePreflight(ctx, sourceID, targetID, sourceWorktree, targetWorktree, "HEAD", sourceBranch, refreshStatus, opts.ignoreSourceDirty); preflight != nil {
 			return *preflight
 		}
 

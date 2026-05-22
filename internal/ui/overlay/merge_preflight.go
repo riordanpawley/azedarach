@@ -29,12 +29,13 @@ type MergePreflightOverlay struct {
 // MergePreflightRefreshSelection carries context required to recompute
 // merge preconditions after an explicit refresh action.
 type MergePreflightRefreshSelection struct {
-	SourceID       string
-	TargetID       string
-	SourceWorktree string
-	TargetWorktree string
-	TargetRef      string
-	SourceBranch   string
+	SourceID          string
+	TargetID          string
+	SourceWorktree    string
+	TargetWorktree    string
+	TargetRef         string
+	SourceBranch      string
+	IgnoreSourceDirty bool
 }
 
 // MergePreflightAgentSelection carries context required to launch an agent
@@ -93,6 +94,24 @@ func (m *MergePreflightOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						TargetWorktree: m.targetWorktree,
 						TargetRef:      m.targetRef,
 						SourceBranch:   m.sourceBranch,
+					},
+				}
+			}
+		case "i", "I":
+			if strings.TrimSpace(m.sourceWorktree) == "" || strings.TrimSpace(m.targetWorktree) == "" {
+				return m, nil
+			}
+			return m, func() tea.Msg {
+				return SelectionMsg{
+					Key: "merge_preflight_ignore_source_dirty",
+					Value: MergePreflightRefreshSelection{
+						SourceID:          m.sourceID,
+						TargetID:          m.targetID,
+						SourceWorktree:    m.sourceWorktree,
+						TargetWorktree:    m.targetWorktree,
+						TargetRef:         m.targetRef,
+						SourceBranch:      m.sourceBranch,
+						IgnoreSourceDirty: true,
 					},
 				}
 			}
@@ -292,6 +311,7 @@ func (m *MergePreflightOverlay) sizeHeight() int {
 func (m *MergePreflightOverlay) actionBindings() []keybinds.Binding {
 	bindings := []keybinds.Binding{
 		{Key: "R", Description: "refresh"},
+		{Key: "I", Description: "ignore source dirty"},
 		{Key: "c/d", Description: "commit/discard source"},
 		{Key: "C/D", Description: "commit/discard target"},
 	}

@@ -123,7 +123,7 @@ func (a *gitServiceAdapter) MergePreflight(ctx context.Context, _ string, req da
 		ConflictFiles:  append([]string(nil), result.ConflictFiles...),
 	}
 
-	if hasMergeBlockingGitStatusChanges(result.SourceStatus) {
+	if !req.IgnoreSourceDirty && hasMergeBlockingGitStatusChanges(result.SourceStatus) {
 		resp.Clean = false
 		resp.SourceFiles = mergeBlockingGitStatusFiles(result.SourceStatus)
 		resp.Reasons = append(resp.Reasons, "Source worktree has uncommitted changes")

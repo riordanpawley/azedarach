@@ -151,6 +151,25 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 		m.beginMutationFeedback(fmt.Sprintf("Agent merge queued for %s -> %s", selection.SourceID, selection.TargetID))
 		return m, m.resolveMergePreflightWithAgentCmd(selection)
+	case "merge_preflight_ignore_source_dirty":
+		m.overlayStack.Pop()
+		selection, ok := msg.Value.(overlay.MergePreflightRefreshSelection)
+		if !ok {
+			return m, nil
+		}
+		opts := mergePreflightOptions{ignoreSourceDirty: true}
+		m.beginMutationFeedback(fmt.Sprintf("Merge queued for %s -> %s ignoring source dirty files", selection.SourceID, selection.TargetID))
+		if strings.TrimSpace(selection.TargetID) == mergeBaseTargetID {
+			return m, m.mergeToBaseCmdWithOptions(strings.TrimSpace(selection.SourceWorktree), strings.TrimSpace(selection.SourceID), true, opts)
+		}
+		return m, m.mergeFeatureIntoFeatureCmdWithOptions(
+			strings.TrimSpace(selection.SourceWorktree),
+			strings.TrimSpace(selection.TargetWorktree),
+			strings.TrimSpace(selection.SourceID),
+			strings.TrimSpace(selection.TargetID),
+			true,
+			opts,
+		)
 	case "merge_preflight_refresh":
 		m.overlayStack.Pop()
 		selection, ok := msg.Value.(overlay.MergePreflightRefreshSelection)

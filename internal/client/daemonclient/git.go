@@ -84,12 +84,13 @@ type gitRuntimeSignalsBody struct {
 
 // GitMergePreflightRequest captures the daemon request body for merge preflight prediction.
 type GitMergePreflightRequest struct {
-	SourceID       string `json:"source_id,omitempty"`
-	SourceWorktree string `json:"source_worktree"`
-	TargetID       string `json:"target_id,omitempty"`
-	TargetWorktree string `json:"target_worktree"`
-	TargetRef      string `json:"target_ref,omitempty"`
-	SourceBranch   string `json:"source_branch,omitempty"`
+	SourceID          string `json:"source_id,omitempty"`
+	SourceWorktree    string `json:"source_worktree"`
+	TargetID          string `json:"target_id,omitempty"`
+	TargetWorktree    string `json:"target_worktree"`
+	TargetRef         string `json:"target_ref,omitempty"`
+	SourceBranch      string `json:"source_branch,omitempty"`
+	IgnoreSourceDirty bool   `json:"ignore_source_dirty,omitempty"`
 }
 
 // GitMergePreflightResponse captures the daemon response body for merge preflight prediction.
@@ -240,13 +241,26 @@ func (c *Client) GitRuntimeSignals(ctx context.Context, targets []GitRuntimeSign
 
 // GitMergePreflight asks the daemon to predict whether the requested merge would conflict.
 func (c *Client) GitMergePreflight(ctx context.Context, sourceID, sourceWorktree, targetID, targetWorktree, targetRef, sourceBranch string) (GitMergePreflightResponse, error) {
-	raw, err := c.commandJSONResponse(ctx, CommandGitMergePreflight, GitMergePreflightRequest{
+	return c.GitMergePreflightWithOptions(ctx, GitMergePreflightRequest{
 		SourceID:       sourceID,
 		SourceWorktree: sourceWorktree,
 		TargetID:       targetID,
 		TargetWorktree: targetWorktree,
 		TargetRef:      targetRef,
 		SourceBranch:   sourceBranch,
+	})
+}
+
+// GitMergePreflightWithOptions asks the daemon to predict whether the requested merge would conflict.
+func (c *Client) GitMergePreflightWithOptions(ctx context.Context, request GitMergePreflightRequest) (GitMergePreflightResponse, error) {
+	raw, err := c.commandJSONResponse(ctx, CommandGitMergePreflight, GitMergePreflightRequest{
+		SourceID:          request.SourceID,
+		SourceWorktree:    request.SourceWorktree,
+		TargetID:          request.TargetID,
+		TargetWorktree:    request.TargetWorktree,
+		TargetRef:         request.TargetRef,
+		SourceBranch:      request.SourceBranch,
+		IgnoreSourceDirty: request.IgnoreSourceDirty,
 	})
 	if err != nil {
 		return GitMergePreflightResponse{}, err
