@@ -2126,6 +2126,42 @@ func (m Model) sessionOriginCandidates(task *domain.Task) ([]overlay.MergeTarget
 	return candidates, upstreamCount
 }
 
+func (m Model) diffBaseBranchForTask(task *domain.Task) string {
+	baseBranch := m.resolveBaseBranch()
+	if task == nil || task.ParentID == nil {
+		return baseBranch
+	}
+
+	tasksByID := make(map[string]domain.Task, len(m.tasks))
+	for _, candidate := range m.tasks {
+		tasksByID[candidate.ID.String()] = candidate
+	}
+
+	nextParentID := strings.TrimSpace(task.ParentID.String())
+	visited := map[string]struct{}{}
+	for nextParentID != "" {
+		if _, seen := visited[nextParentID]; seen {
+			break
+		}
+		visited[nextParentID] = struct{}{}
+
+		parentTask, ok := tasksByID[nextParentID]
+		if !ok {
+			break
+		}
+		if parentTask.Status != domain.StatusDone {
+			return m.originBranchForSelection(parentTask.ID.String())
+		}
+
+		nextParentID = ""
+		if parentTask.ParentID != nil {
+			nextParentID = strings.TrimSpace(parentTask.ParentID.String())
+		}
+	}
+
+	return baseBranch
+}
+
 func (m Model) daemonCommandTimeout() time.Duration {
 	if m.config != nil && m.config.Session.TimeoutMs > 0 {
 		return time.Duration(m.config.Session.TimeoutMs) * time.Millisecond
