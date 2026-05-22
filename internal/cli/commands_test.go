@@ -44,6 +44,18 @@ func marshalTaskListBody(tasks []domain.Task) ([]byte, error) {
 	})
 }
 
+func marshalTaskListBodyForProject(projectID string, tasks []domain.Task) ([]byte, error) {
+	return json.Marshal(protocol.TaskListSnapshotPayload{
+		SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+		ProtocolVersion:  protocol.CurrentVersion,
+		SnapshotRevision: 0,
+		ProjectID:        naming.ProjectID(projectID),
+		LastCheckedAt:    time.Date(2026, time.April, 2, 11, 2, 0, 0, time.UTC),
+		Freshness:        protocol.TaskListFreshnessFresh,
+		Tasks:            tasks,
+	})
+}
+
 func TestNewDependenciesAtNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
@@ -627,6 +639,8 @@ func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 }
 
 func TestSessionCommandsRejectInvalidOrUnknownIssueIDs(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
 	tests := []struct {
 		name       string
 		command    func(*Dependencies, string) error
@@ -712,6 +726,188 @@ func TestSessionCommandsRejectInvalidOrUnknownIssueIDs(t *testing.T) {
 				t.Fatalf("commands for unknown ID = %v, want [%s]", commands, daemonclient.CommandTaskList)
 			}
 		})
+	}
+}
+
+func TestSessionCommandsResolveProjectPrefixedIssueIDs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoA := filepath.Join(home, "project-a")
+	repoB := filepath.Join(home, "project-b")
+	if err := config.SaveProjectsRegistry(&config.ProjectsRegistry{
+		Projects: []config.Project{
+			{Name: "project-a", Path: repoA},
+			{Name: "project-b", Path: repoB},
+		},
+	}); err != nil {
+		t.Fatalf("save registry: %v", err)
+	}
+	projectA, err := config.ProjectIDForRoot(repoA)
+	if err != nil {
+		t.Fatalf("project A id: %v", err)
+	}
+	projectB, err := config.ProjectIDForRoot(repoB)
+	if err != nil {
+		t.Fatalf("project B id: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		command     func(*Dependencies, string) error
+		arg         string
+		wantCommand string
+	}{
+		{
+			name:        "stop explicit project issue",
+			command:     KillCommand,
+			arg:         "project-b:bxc",
+			wantCommand: commandSessionStop,
+		},
+		{
+			name:        "status explicit project issue",
+			command:     StatusCommand,
+			arg:         "project-b:bxc",
+			wantCommand: commandSessionStatus,
+		},
+		{
+			name:        "stop default tmux session form",
+			command:     KillCommand,
+			arg:         naming.CanonicalSessionID(repoB, "bxc"),
+			wantCommand: commandSessionStop,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotReq protocol.RequestEnvelope
+			commands := []string{}
+			deps := &Dependencies{
+				Config: config.DefaultConfig(),
+				DaemonClient: daemonclient.New(&fakeDaemonTransport{
+					commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+						commands = append(commands, req.Command+":"+req.Meta.ProjectID.String())
+						switch req.Command {
+						case daemonclient.CommandTaskList:
+							projectID := req.Meta.ProjectID.String()
+							tasks := []domain.Task{{ID: "local-only", Title: "Local", Status: domain.StatusOpen}}
+							if projectID == projectB {
+								tasks = []domain.Task{{ID: "bxc", Title: "Remote", Status: domain.StatusOpen}}
+							}
+							body, err := marshalTaskListBodyForProject(projectID, tasks)
+							if err != nil {
+								t.Fatalf("marshal task list: %v", err)
+							}
+							return protocol.ResponseEnvelope{
+								ProtocolVersion: req.ProtocolVersion,
+								RequestID:       req.RequestID,
+								Kind:            protocol.EnvelopeKindResponse,
+								Meta:            req.Meta,
+								CompletedAt:     req.SentAt,
+								OK:              true,
+								Body:            body,
+							}, nil
+						case tt.wantCommand:
+							gotReq = req
+							return responseWithOutput(req, "ok\n"), nil
+						default:
+							t.Fatalf("unexpected command: %s", req.Command)
+							return protocol.ResponseEnvelope{}, nil
+						}
+					},
+				}).WithProjectID(projectA),
+				Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+				ProjectID: projectA,
+				RepoDir:   repoA,
+			}
+
+			output := captureStdout(t, func() error {
+				return tt.command(deps, tt.arg)
+			})
+
+			if output != "ok\n" {
+				t.Fatalf("output = %q, want ok", output)
+			}
+			if gotReq.Command != tt.wantCommand {
+				t.Fatalf("command = %q, want %q", gotReq.Command, tt.wantCommand)
+			}
+			if gotReq.Meta.ProjectID.String() != projectB {
+				t.Fatalf("meta project_id = %q, want %q", gotReq.Meta.ProjectID, projectB)
+			}
+			var body sessionRequestBody
+			if err := json.Unmarshal(gotReq.Body, &body); err != nil {
+				t.Fatalf("unmarshal body: %v", err)
+			}
+			if body.ProjectID != projectB || body.SessionID != "bxc" {
+				t.Fatalf("session request body = %+v, want project %s issue bxc", body, projectB)
+			}
+			if len(commands) == 0 || !strings.Contains(commands[len(commands)-1], tt.wantCommand+":"+projectB) {
+				t.Fatalf("commands = %v, want final %s:%s", commands, tt.wantCommand, projectB)
+			}
+		})
+	}
+}
+
+func TestSessionCommandsKeepBareIssueIDsCurrentProjectScoped(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoA := filepath.Join(home, "project-a")
+	repoB := filepath.Join(home, "project-b")
+	if err := config.SaveProjectsRegistry(&config.ProjectsRegistry{
+		Projects: []config.Project{
+			{Name: "project-b", Path: repoB},
+		},
+	}); err != nil {
+		t.Fatalf("save registry: %v", err)
+	}
+	projectA, err := config.ProjectIDForRoot(repoA)
+	if err != nil {
+		t.Fatalf("project A id: %v", err)
+	}
+	projectB, err := config.ProjectIDForRoot(repoB)
+	if err != nil {
+		t.Fatalf("project B id: %v", err)
+	}
+
+	seenProjects := []string{}
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskList {
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				projectID := req.Meta.ProjectID.String()
+				seenProjects = append(seenProjects, projectID)
+				tasks := []domain.Task{}
+				if projectID == projectB {
+					tasks = []domain.Task{{ID: "bxc", Title: "Remote", Status: domain.StatusOpen}}
+				}
+				body, err := marshalTaskListBodyForProject(projectID, tasks)
+				if err != nil {
+					t.Fatalf("marshal task list: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					CompletedAt:     req.SentAt,
+					OK:              true,
+					Body:            body,
+				}, nil
+			},
+		}).WithProjectID(projectA),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: projectA,
+		RepoDir:   repoA,
+	}
+
+	err = KillCommand(deps, "bxc")
+	if err == nil || !strings.Contains(err.Error(), "issue not found: bxc") {
+		t.Fatalf("err = %v, want current-project issue not found", err)
+	}
+	if len(seenProjects) != 1 || seenProjects[0] != projectA {
+		t.Fatalf("task list projects = %v, want only current project %s", seenProjects, projectA)
 	}
 }
 
