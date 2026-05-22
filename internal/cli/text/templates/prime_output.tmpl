@@ -50,6 +50,8 @@ Active issue ID: `{{ .ActiveIssueID }}`
   {{ else }}
   - Unsupported `orchestration.via` value: `{{ .OrchestrationVia }}`. Set `orchestration.via` to `az` for CLI-managed orchestration or `native` for harness-native delegation before fanning out work.
   {{ end }}
+  - Branch merge targeting: `az branch merge <issue-id>` and `az branch agent-merge <issue-id> --target base` merge into the nearest non-closed ancestor branch; if no open ancestor exists they merge into configured repo base branch.
+  - If that nearest non-closed ancestor has no active worktree branch, base-target merge is blocked until that ancestor session/worktree is started or attached.
   - Mailbox coordination:
   - `az mail send --parent <parent-issue> --type dependency-ready --body "..."`, `az mail list --parent <parent-issue> --since <seq> --json`, `az mail watch --parent <parent-issue> --since <seq> --jsonl`
   - Spec traceability:
