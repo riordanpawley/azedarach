@@ -33,6 +33,7 @@ type Launcher struct {
 	openLogFile        func(path string) (io.WriteCloser, error)
 	waitForReady       func(ctx context.Context, socketPath string) error
 	shutdownViaSocket  func(ctx context.Context, socketPath string) error
+	shutdownWithReason func(ctx context.Context, socketPath string, reason string) error
 	sleepFn            func(time.Duration)
 	terminateLockOwner func(lockPath string) error
 }
@@ -59,7 +60,7 @@ func NewLauncher(repoDir, socketPath string) *Launcher {
 		Logger:             slog.Default(),
 		openLogFile:        openDaemonLog,
 		waitForReady:       waitForDaemonReady,
-		shutdownViaSocket:  gracefulShutdownViaSocket,
+		shutdownWithReason: gracefulShutdownViaSocketWithReason,
 		sleepFn:            time.Sleep,
 		terminateLockOwner: lifecycle.TerminateLockOwner,
 	}
@@ -208,11 +209,7 @@ func isRecoverableLockOwnerTerminationError(err error) bool {
 // Stop attempts to stop existing lock-owner process.
 func (l *Launcher) Stop(ctx context.Context) error {
 	if strings.TrimSpace(l.SocketPath) != "" {
-		shutdown := l.shutdownViaSocket
-		if shutdown == nil {
-			shutdown = gracefulShutdownViaSocket
-		}
-		if err := shutdown(ctx, l.SocketPath); err == nil {
+		if err := l.requestGracefulShutdown(ctx, "stop"); err == nil {
 			return nil
 		} else if l.Logger != nil {
 			l.Logger.Warn("graceful daemon socket shutdown failed; falling back to lock-owner termination",
@@ -236,11 +233,7 @@ func (l *Launcher) Stop(ctx context.Context) error {
 // Replace attempts to stop an existing daemon process, then starts daemon.
 func (l *Launcher) Replace(ctx context.Context) error {
 	if strings.TrimSpace(l.SocketPath) != "" {
-		shutdown := l.shutdownViaSocket
-		if shutdown == nil {
-			shutdown = gracefulShutdownViaSocket
-		}
-		if err := shutdown(ctx, l.SocketPath); err == nil {
+		if err := l.requestGracefulShutdown(ctx, "replace"); err == nil {
 			if err := l.waitForSocketUnavailable(ctx, 2*time.Second); err != nil {
 				return fmt.Errorf("wait for daemon socket shutdown before replace: %w", err)
 			}
@@ -262,6 +255,17 @@ func (l *Launcher) Replace(ctx context.Context) error {
 		return fmt.Errorf("terminate daemon lock owner before replace: %w", err)
 	}
 	return l.Start(ctx)
+}
+
+func (l *Launcher) requestGracefulShutdown(ctx context.Context, reason string) error {
+	if l.shutdownViaSocket != nil {
+		return l.shutdownViaSocket(ctx, l.SocketPath)
+	}
+	shutdown := l.shutdownWithReason
+	if shutdown == nil {
+		shutdown = gracefulShutdownViaSocketWithReason
+	}
+	return shutdown(ctx, l.SocketPath, reason)
 }
 
 func (l *Launcher) waitForSocketUnavailable(ctx context.Context, timeout time.Duration) error {
@@ -417,6 +421,10 @@ func processAlive(pid int) bool {
 }
 
 func gracefulShutdownViaSocket(ctx context.Context, socketPath string) error {
+	return gracefulShutdownViaSocketWithReason(ctx, socketPath, "unknown")
+}
+
+func gracefulShutdownViaSocketWithReason(ctx context.Context, socketPath string, reason string) error {
 	shutdownCtx := ctx
 	if shutdownCtx == nil {
 		shutdownCtx = context.Background()
@@ -428,12 +436,21 @@ func gracefulShutdownViaSocket(ctx context.Context, socketPath string) error {
 	}
 
 	client := transport.NewClient(socketPath).WithTimeout(1 * time.Second)
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "unknown"
+	}
+	body, err := json.Marshal(protocol.DaemonShutdownCommandBody{Reason: reason})
+	if err != nil {
+		return fmt.Errorf("encode daemon shutdown command: %w", err)
+	}
 	resp, err := client.Command(shutdownCtx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       naming.RequestID(fmt.Sprintf("daemon-stop-%d", time.Now().UnixNano())),
+		RequestID:       naming.RequestID(fmt.Sprintf("daemon-%s-%d", reason, time.Now().UnixNano())),
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         protocol.CommandDaemonShutdown,
 		SentAt:          time.Now().UTC(),
+		Body:            body,
 	})
 	if err != nil {
 		return fmt.Errorf("daemon shutdown command: %w", err)
