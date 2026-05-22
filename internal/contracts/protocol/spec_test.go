@@ -3,6 +3,8 @@ package protocol
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 func TestSpecRequirementStatusValid(t *testing.T) {
@@ -47,12 +49,35 @@ func TestSpecLinkRoleValid(t *testing.T) {
 	}
 }
 
+func TestSpecPackStageValid(t *testing.T) {
+	tests := []struct {
+		name  string
+		stage SpecPackStage
+		want  bool
+	}{
+		{name: "greenfield", stage: SpecPackStageGreenfield, want: true},
+		{name: "brownfield", stage: SpecPackStageBrownfield, want: true},
+		{name: "repair", stage: SpecPackStageRepair, want: true},
+		{name: "verify", stage: SpecPackStageVerify, want: true},
+		{name: "unknown", stage: SpecPackStage("audit"), want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.stage.Valid(); got != tc.want {
+				t.Fatalf("Valid() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSpecJSONRoundTrip(t *testing.T) {
 	title := "Refined title"
 	status := SpecRequirementStatusAccepted
 	want := struct {
 		Update SpecRequirementUpdateRequestBody `json:"update"`
 		Read   SpecReadResponseBody             `json:"read"`
+		Pack   SpecPackResponseBody             `json:"pack"`
 		Lint   SpecLintResponseBody             `json:"lint"`
 		Parity SpecParityResponseBody           `json:"parity"`
 		Sync   SpecSyncMDResponseBody           `json:"sync"`
@@ -77,6 +102,27 @@ func TestSpecJSONRoundTrip(t *testing.T) {
 				Role:    SpecLinkRoleImplements,
 				Note:    "covered by daemon handler",
 			}},
+		},
+		Pack: SpecPackResponseBody{
+			Stage:        SpecPackStageBrownfield,
+			IssueID:      "az-1",
+			Requirements: []SpecRequirement{{ID: "REQ-1", Title: "Requirement one", Status: SpecRequirementStatusOpen}},
+			Links:        []SpecLink{{IssueID: "az-1", ReqID: "REQ-1", Role: SpecLinkRoleImplements}},
+			Sharding: SpecPackSharding{
+				SourcePath: ".azedarach/spec-shards.json",
+				ByRequirement: map[naming.RequirementID]SpecShardEntry{
+					"REQ-1": {
+						Domain:    "spec",
+						Slice:     "slice-1",
+						Tier:      "1",
+						Priority:  "P1",
+						DependsOn: []string{"slice-0"},
+						TestPack:  "pack-a",
+					},
+				},
+			},
+			Guidance: []string{"inspect source"},
+			Gates:    []string{"az spec lint"},
 		},
 		Lint: SpecLintResponseBody{
 			OK: false,
@@ -112,6 +158,7 @@ func TestSpecJSONRoundTrip(t *testing.T) {
 	var got struct {
 		Update SpecRequirementUpdateRequestBody `json:"update"`
 		Read   SpecReadResponseBody             `json:"read"`
+		Pack   SpecPackResponseBody             `json:"pack"`
 		Lint   SpecLintResponseBody             `json:"lint"`
 		Parity SpecParityResponseBody           `json:"parity"`
 		Sync   SpecSyncMDResponseBody           `json:"sync"`
@@ -128,6 +175,12 @@ func TestSpecJSONRoundTrip(t *testing.T) {
 	}
 	if len(got.Read.Requirements) != 1 || got.Read.Requirements[0].ID != "REQ-1" {
 		t.Fatalf("Read.Requirements = %+v", got.Read.Requirements)
+	}
+	if got.Pack.Stage != SpecPackStageBrownfield || len(got.Pack.Guidance) != 1 {
+		t.Fatalf("Pack = %+v", got.Pack)
+	}
+	if got.Pack.Sharding.SourcePath != ".azedarach/spec-shards.json" {
+		t.Fatalf("Pack.Sharding.SourcePath = %q", got.Pack.Sharding.SourcePath)
 	}
 	if len(got.Lint.Diagnostics) != 1 || got.Lint.Diagnostics[0].Code != "missing-link" {
 		t.Fatalf("Lint.Diagnostics = %+v", got.Lint.Diagnostics)

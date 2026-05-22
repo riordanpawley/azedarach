@@ -153,6 +153,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		protocol.CommandSpecLinkAdd,
 		protocol.CommandSpecLinkRemove,
 		protocol.CommandSpecRead,
+		protocol.CommandSpecPack,
 		protocol.CommandSpecLint,
 		protocol.CommandSpecParity,
 		protocol.CommandSpecExport,

@@ -20,6 +20,7 @@ type fakeSpecService struct {
 	addLinkFn           func(context.Context, protocol.SpecLinkAddRequestBody) (protocol.SpecLinkAddResponseBody, error)
 	removeLinkFn        func(context.Context, protocol.SpecLinkRemoveRequestBody) (protocol.SpecLinkRemoveResponseBody, error)
 	readFn              func(context.Context, protocol.SpecReadRequestBody) (protocol.SpecReadResponseBody, error)
+	packFn              func(context.Context, protocol.SpecPackRequestBody) (protocol.SpecPackResponseBody, error)
 	lintFn              func(context.Context, protocol.SpecLintRequestBody) (protocol.SpecLintResponseBody, error)
 	parityFn            func(context.Context, protocol.SpecParityRequestBody) (protocol.SpecParityResponseBody, error)
 	syncMDFn            func(context.Context, protocol.SpecSyncMDRequestBody) (protocol.SpecSyncMDResponseBody, error)
@@ -86,6 +87,13 @@ func (f *fakeSpecService) Read(ctx context.Context, req protocol.SpecReadRequest
 		return f.readFn(ctx, req)
 	}
 	return protocol.SpecReadResponseBody{}, nil
+}
+
+func (f *fakeSpecService) Pack(ctx context.Context, req protocol.SpecPackRequestBody) (protocol.SpecPackResponseBody, error) {
+	if f.packFn != nil {
+		return f.packFn(ctx, req)
+	}
+	return protocol.SpecPackResponseBody{}, nil
 }
 
 func (f *fakeSpecService) Lint(ctx context.Context, req protocol.SpecLintRequestBody) (protocol.SpecLintResponseBody, error) {
@@ -238,6 +246,7 @@ func TestSpecHandlerRequirementCommands(t *testing.T) {
 func TestSpecHandlerLinkReadLintParityAndSyncCommands(t *testing.T) {
 	var gotAdd protocol.SpecLinkAddRequestBody
 	var gotRead protocol.SpecReadRequestBody
+	var gotPack protocol.SpecPackRequestBody
 	var gotLint protocol.SpecLintRequestBody
 	var gotParity protocol.SpecParityRequestBody
 	var gotSync protocol.SpecSyncMDRequestBody
@@ -265,6 +274,17 @@ func TestSpecHandlerLinkReadLintParityAndSyncCommands(t *testing.T) {
 			return protocol.SpecReadResponseBody{
 				Requirements: []protocol.SpecRequirement{{ID: "REQ-1", Status: protocol.SpecRequirementStatusOpen}},
 				Links:        []protocol.SpecLink{{IssueID: req.IssueID, ReqID: req.ReqID, Role: protocol.SpecLinkRoleImplements}},
+			}, nil
+		},
+		packFn: func(_ context.Context, req protocol.SpecPackRequestBody) (protocol.SpecPackResponseBody, error) {
+			gotPack = req
+			return protocol.SpecPackResponseBody{
+				Stage:        req.Stage,
+				IssueID:      req.IssueID,
+				Requirements: []protocol.SpecRequirement{{ID: "REQ-1", Status: protocol.SpecRequirementStatusOpen}},
+				Links:        []protocol.SpecLink{{IssueID: req.IssueID, ReqID: req.ReqID, Role: protocol.SpecLinkRoleImplements}},
+				Guidance:     []string{"inspect source"},
+				Gates:        []string{"az spec lint"},
 			}, nil
 		},
 		lintFn: func(_ context.Context, req protocol.SpecLintRequestBody) (protocol.SpecLintResponseBody, error) {
@@ -323,6 +343,18 @@ func TestSpecHandlerLinkReadLintParityAndSyncCommands(t *testing.T) {
 	}
 	if gotRead.IssueID != "az-1" || gotRead.ReqID != "REQ-1" {
 		t.Fatalf("read request = %+v", gotRead)
+	}
+
+	resp = handler.Handle(context.Background(), specRequest(t, protocol.CommandSpecPack, protocol.SpecPackRequestBody{
+		IssueID: "az-1",
+		ReqID:   "REQ-1",
+		Stage:   protocol.SpecPackStageRepair,
+	}))
+	if !resp.OK {
+		t.Fatalf("pack response error: %+v", resp.Error)
+	}
+	if gotPack.IssueID != "az-1" || gotPack.ReqID != "REQ-1" || gotPack.Stage != protocol.SpecPackStageRepair {
+		t.Fatalf("pack request = %+v", gotPack)
 	}
 
 	resp = handler.Handle(context.Background(), specRequest(t, protocol.CommandSpecLint, protocol.SpecLintRequestBody{Strict: true}))

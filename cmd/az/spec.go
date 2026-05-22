@@ -78,6 +78,13 @@ type specReadOptions struct {
 	Req   string
 }
 
+type specPackOptions struct {
+	JSON  bool
+	Issue string
+	Req   string
+	Stage string
+}
+
 type specLintOptions struct {
 	JSON   bool
 	Strict bool
@@ -104,6 +111,8 @@ func runSpecCommand(cfg *config.Config, args []string) error {
 		return runSpecLinkCommand(cfg, args[1:])
 	case "read":
 		return runSpecReadCommand(cfg, args[1:])
+	case "pack":
+		return runSpecPackCommand(cfg, args[1:])
 	case "lint":
 		return runSpecLintCommand(cfg, args[1:])
 	case "parity":
@@ -204,6 +213,19 @@ func runSpecReadCommand(cfg *config.Config, args []string) error {
 		return err
 	}
 	return runSpecReadRPC(cfg, opts)
+}
+
+func runSpecPackCommand(cfg *config.Config, args []string) error {
+	if len(args) > 0 && isHelpArg(args[0]) {
+		cli.PrintSpecPackUsage()
+		return nil
+	}
+	opts, err := parseSpecPackArgs(args)
+	if err != nil {
+		cli.PrintSpecPackUsage()
+		return err
+	}
+	return runSpecPackRPC(cfg, opts)
 }
 
 func runSpecLintCommand(cfg *config.Config, args []string) error {
@@ -386,6 +408,51 @@ func runSpecReadRPC(cfg *config.Config, opts specReadOptions) error {
 		return printJSON(out)
 	}
 	fmt.Printf("Requirements: %d\nLinks: %d\n", len(out.Requirements), len(out.Links))
+	return nil
+}
+
+func runSpecPackRPC(cfg *config.Config, opts specPackOptions) error {
+	req := protocol.SpecPackRequestBody{
+		IssueID: naming.IssueID(opts.Issue),
+		ReqID:   naming.RequirementID(opts.Req),
+		Stage:   protocol.SpecPackStage(opts.Stage),
+	}
+	var out protocol.SpecPackResponseBody
+	if err := runSpecRPC(cfg, protocol.CommandSpecPack, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Stage: %s\n", out.Stage)
+	if out.IssueID != "" {
+		fmt.Printf("Issue: %s\n", out.IssueID)
+	}
+	fmt.Printf("Requirements: %d\nLinks: %d\n", len(out.Requirements), len(out.Links))
+	if len(out.Requirements) > 0 {
+		fmt.Println("")
+		fmt.Println("Requirements:")
+		for _, r := range out.Requirements {
+			fmt.Printf("- %s [%s] %s\n", r.ID, r.Status, r.Title)
+			if strings.TrimSpace(r.Description) != "" {
+				fmt.Printf("  %s\n", strings.TrimSpace(r.Description))
+			}
+		}
+	}
+	if len(out.Guidance) > 0 {
+		fmt.Println("")
+		fmt.Println("Guidance:")
+		for _, item := range out.Guidance {
+			fmt.Printf("- %s\n", item)
+		}
+	}
+	if len(out.Gates) > 0 {
+		fmt.Println("")
+		fmt.Println("Gates:")
+		for _, gate := range out.Gates {
+			fmt.Printf("- %s\n", gate)
+		}
+	}
 	return nil
 }
 
@@ -674,6 +741,36 @@ func parseSpecReadArgs(args []string) (specReadOptions, error) {
 	return opts, nil
 }
 
+func parseSpecPackArgs(args []string) (specPackOptions, error) {
+	opts := specPackOptions{Stage: string(protocol.SpecPackStageBrownfield)}
+	fs := flag.NewFlagSet("spec pack", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "json output")
+	fs.StringVar(&opts.Issue, "issue", "", "issue id filter")
+	fs.StringVar(&opts.Req, "req", "", "requirement id filter")
+	fs.StringVar(&opts.Stage, "stage", opts.Stage, "source reconciliation stage")
+	if err := fs.Parse(args); err != nil {
+		return specPackOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return specPackOptions{}, fmt.Errorf("usage: az spec pack [--json] (--issue <issue-id> | --req <req-id>) [--stage <greenfield|brownfield|repair|verify>]")
+	}
+	var err error
+	if opts.Issue, err = normalizeOptionalIdentifier("issue-id", opts.Issue); err != nil {
+		return specPackOptions{}, err
+	}
+	if opts.Req, err = normalizeOptionalIdentifier("req-id", opts.Req); err != nil {
+		return specPackOptions{}, err
+	}
+	if opts.Issue == "" && opts.Req == "" {
+		return specPackOptions{}, fmt.Errorf("missing required flag: --issue or --req")
+	}
+	if opts.Stage, err = parseSpecPackStage(opts.Stage); err != nil {
+		return specPackOptions{}, err
+	}
+	return opts, nil
+}
+
 func parseSpecLintArgs(args []string) (specLintOptions, error) {
 	opts := specLintOptions{}
 	fs := flag.NewFlagSet("spec lint", flag.ContinueOnError)
@@ -757,6 +854,15 @@ func parseRequirementStatus(value string) (string, error) {
 		return strings.TrimSpace(value), nil
 	default:
 		return "", fmt.Errorf("invalid requirement status %q; expected open|accepted|superseded", value)
+	}
+}
+
+func parseSpecPackStage(value string) (string, error) {
+	switch strings.TrimSpace(value) {
+	case "greenfield", "brownfield", "repair", "verify":
+		return strings.TrimSpace(value), nil
+	default:
+		return "", fmt.Errorf("invalid stage %q; expected greenfield|brownfield|repair|verify", value)
 	}
 }
 

@@ -1253,10 +1253,11 @@ func PrintTmuxUsage() {
 }
 
 func PrintSpecUsage() {
-	fmt.Println("Usage: az spec <req|link|read|lint|parity> [arguments]")
+	fmt.Println("Usage: az spec <req|link|read|pack|lint|parity> [arguments]")
 	fmt.Println("  req      Manage spec requirements (list|get|create|update|delete)")
 	fmt.Println("  link     Manage issue/requirement traceability links (list|add|remove)")
 	fmt.Println("  read     Read consolidated spec view")
+	fmt.Println("  pack     Build a stage-aware source reconciliation pack")
 	fmt.Println("  lint     Validate spec consistency")
 	fmt.Println("  parity   Report issue/spec drift")
 	fmt.Println("")
@@ -1272,8 +1273,9 @@ func PrintSpecUsage() {
 	fmt.Println("  az spec link add --issue <issue-id> --req <req-id> [--role <implements|verifies|relates>] [--note <text>] [--json]")
 	fmt.Println("  az spec link remove --issue <issue-id> --req <req-id> [--json]")
 	fmt.Println("")
-	fmt.Println("Read/lint/parity:")
+	fmt.Println("Read/pack/lint/parity:")
 	fmt.Println("  az spec read [--json] [--issue <issue-id>] [--req <req-id>]")
+	fmt.Println("  az spec pack [--json] (--issue <issue-id> | --req <req-id>) [--stage <greenfield|brownfield|repair|verify>]")
 	fmt.Println("  az spec lint [--json] [--strict]")
 	fmt.Println("  az spec parity [--json] [--fail-on-out]")
 	fmt.Println("")
@@ -1284,6 +1286,7 @@ func PrintSpecUsage() {
 	fmt.Println("  az spec link list --issue az-123")
 	fmt.Println("  az spec link add --issue bgh --req bfs-req-1 --role implements")
 	fmt.Println("  az spec read --issue az-123")
+	fmt.Println("  az spec pack --issue az-123 --stage brownfield")
 	fmt.Println("  az spec lint --strict")
 	fmt.Println("  az spec parity --fail-on-out")
 }
@@ -1318,6 +1321,10 @@ func PrintSpecLinkUsage() {
 
 func PrintSpecReadUsage() {
 	fmt.Println("Usage: az spec read [--json] [--issue <issue-id>] [--req <req-id>]")
+}
+
+func PrintSpecPackUsage() {
+	fmt.Println("Usage: az spec pack [--json] (--issue <issue-id> | --req <req-id>) [--stage <greenfield|brownfield|repair|verify>]")
 }
 
 func PrintSpecLintUsage() {

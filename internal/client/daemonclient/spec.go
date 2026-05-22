@@ -15,6 +15,7 @@ const (
 	CommandSpecLinkAdd           = "spec.link.add"
 	CommandSpecLinkRemove        = "spec.link.remove"
 	CommandSpecRead              = "spec.read"
+	CommandSpecPack              = "spec.pack"
 	CommandSpecLint              = "spec.lint"
 	CommandSpecParity            = "spec.parity"
 	CommandSpecExport            = "spec.export"

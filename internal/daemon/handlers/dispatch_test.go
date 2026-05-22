@@ -190,6 +190,10 @@ func (s *routeSpecService) Read(_ context.Context, req protocol.SpecReadRequestB
 	}, nil
 }
 
+func (s *routeSpecService) Pack(context.Context, protocol.SpecPackRequestBody) (protocol.SpecPackResponseBody, error) {
+	return protocol.SpecPackResponseBody{}, nil
+}
+
 func (s *routeSpecService) Lint(context.Context, protocol.SpecLintRequestBody) (protocol.SpecLintResponseBody, error) {
 	return protocol.SpecLintResponseBody{}, nil
 }
@@ -221,7 +225,7 @@ func TestDispatcherMixedRouting(t *testing.T) {
 		b, _ := json.Marshal(body)
 		return protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
-				RequestID:       naming.RequestID("req-" + cmd),
+			RequestID:       naming.RequestID("req-" + cmd),
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         cmd,
 			Body:            b,

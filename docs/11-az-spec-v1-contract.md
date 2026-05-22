@@ -22,6 +22,7 @@ Scope: Go runtime restoration of `az spec` commands with daemon-authoritative ex
 - `req`
 - `link`
 - `read`
+- `pack`
 - `lint`
 - `parity`
 
@@ -52,11 +53,14 @@ Scope: Go runtime restoration of `az spec` commands with daemon-authoritative ex
 2. `az spec link add --issue <issue-id> --req <req-id> [--role <implements|verifies|relates>] [--note <text>] [--json]`
 3. `az spec link remove --issue <issue-id> --req <req-id> [--json]`
 
-### Read/lint/parity commands
+### Read/pack/lint/parity commands
 
 1. `az spec read [--json] [--issue <issue-id>] [--req <req-id>]`
-2. `az spec lint [--json] [--strict]`
-3. `az spec parity [--json] [--fail-on-out]`
+2. `az spec pack [--json] (--issue <issue-id> | --req <req-id>) [--stage <greenfield|brownfield|repair|verify>]`
+3. `az spec lint [--json] [--strict]`
+4. `az spec parity [--json] [--fail-on-out]`
+
+`pack` is a read-only delivery-layer command for implementation agents. It packages the selected requirements and links with stage-specific reconciliation guidance and standard gates so spec can drive source work from greenfield, brownfield, repair, or verification stages.
 
 ### Alias policy
 
