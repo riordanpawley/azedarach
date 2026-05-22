@@ -171,6 +171,67 @@ func TestIssueSpecServicePackBuildsStageAwareSourcePack(t *testing.T) {
 	if len(out.Gates) == 0 || out.Gates[0] != "az spec lint" {
 		t.Fatalf("gates = %+v", out.Gates)
 	}
+	if len(out.Sharding.Missing) != 1 || out.Sharding.Missing[0] != "REQ-PACK" {
+		t.Fatalf("sharding missing = %+v", out.Sharding.Missing)
+	}
+}
+
+func TestIssueSpecServicePackLoadsShardingSidecar(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{
+		Title:    "implementation issue",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	_, err = client.CreateRequirement(ctx, issues.CreateRequirementParams{
+		LocalID: "REQ-SHARDED",
+		Title:   "pack requirement",
+	})
+	if err != nil {
+		t.Fatalf("create requirement: %v", err)
+	}
+	_, err = client.AddSpecLink(ctx, issues.AddSpecLinkParams{
+		IssueID:       issueID,
+		RequirementID: "REQ-SHARDED",
+		Role:          issues.LinkRoleImplements,
+	})
+	if err != nil {
+		t.Fatalf("add spec link: %v", err)
+	}
+
+	sidecarDir := filepath.Join(repoDir, ".azedarach")
+	if err := os.MkdirAll(sidecarDir, 0o755); err != nil {
+		t.Fatalf("mkdir sidecar dir: %v", err)
+	}
+	content := `{"REQ-SHARDED":{"domain":"spec","slice":"slice-a","tier":"0","priority":"P1","depends_on":["slice-root"],"test_pack":"pack-core"}}`
+	if err := os.WriteFile(filepath.Join(sidecarDir, "spec-shards.json"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write sidecar: %v", err)
+	}
+
+	service := newTestIssueSpecService(client, repoDir)
+	out, err := service.Pack(ctx, protocol.SpecPackRequestBody{
+		IssueID: naming.IssueID(issueID),
+		Stage:   protocol.SpecPackStageBrownfield,
+	})
+	if err != nil {
+		t.Fatalf("pack: %v", err)
+	}
+	if out.Sharding.SourcePath != ".azedarach/spec-shards.json" {
+		t.Fatalf("sharding source path = %q", out.Sharding.SourcePath)
+	}
+	entry, ok := out.Sharding.ByRequirement["REQ-SHARDED"]
+	if !ok || entry.Slice != "slice-a" || entry.TestPack != "pack-core" {
+		t.Fatalf("sharding entry = %+v", out.Sharding.ByRequirement)
+	}
+	if len(out.Sharding.Missing) != 0 {
+		t.Fatalf("sharding missing = %+v, want none", out.Sharding.Missing)
+	}
 }
 
 func TestIssueSpecServiceLintDoesNotFailOnOverlappingLocalAndExternalCodes(t *testing.T) {

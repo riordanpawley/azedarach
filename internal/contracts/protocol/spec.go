@@ -164,8 +164,24 @@ type SpecPackResponseBody struct {
 	IssueID      naming.IssueID    `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
 	Requirements []SpecRequirement `json:"requirements" msgpack:"requirements"`
 	Links        []SpecLink        `json:"links" msgpack:"links"`
+	Sharding     SpecPackSharding  `json:"sharding,omitempty" msgpack:"sharding,omitempty"`
 	Guidance     []string          `json:"guidance" msgpack:"guidance"`
 	Gates        []string          `json:"gates" msgpack:"gates"`
+}
+
+type SpecPackSharding struct {
+	SourcePath    string                                  `json:"source_path,omitempty" msgpack:"source_path,omitempty"`
+	ByRequirement map[naming.RequirementID]SpecShardEntry `json:"by_requirement,omitempty" msgpack:"by_requirement,omitempty"`
+	Missing       []naming.RequirementID                  `json:"missing,omitempty" msgpack:"missing,omitempty"`
+}
+
+type SpecShardEntry struct {
+	Domain    string   `json:"domain,omitempty" msgpack:"domain,omitempty"`
+	Slice     string   `json:"slice,omitempty" msgpack:"slice,omitempty"`
+	Tier      string   `json:"tier,omitempty" msgpack:"tier,omitempty"`
+	Priority  string   `json:"priority,omitempty" msgpack:"priority,omitempty"`
+	DependsOn []string `json:"depends_on,omitempty" msgpack:"depends_on,omitempty"`
+	TestPack  string   `json:"test_pack,omitempty" msgpack:"test_pack,omitempty"`
 }
 
 type SpecDiagnostic struct {
