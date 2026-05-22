@@ -445,10 +445,85 @@ type mergeTargetSelectionResolvedMsg struct {
 // the configured git.baseBranch" and is not a literal branch name.
 const mergeBaseTargetID = "base"
 
+type mergeBaseTarget struct {
+	targetID    string
+	targetBranch string
+}
+
+func (m Model) resolveMergeBaseTarget(ctx context.Context, sourceID string) (mergeBaseTarget, error) {
+	defaultTarget := mergeBaseTarget{
+		targetID:    mergeBaseTargetID,
+		targetBranch: m.resolveBaseBranch(),
+	}
+	sourceID = strings.TrimSpace(sourceID)
+	if sourceID == "" {
+		return defaultTarget, nil
+	}
+
+	taskByID := make(map[string]domain.Task, len(m.tasks))
+	for _, task := range m.tasks {
+		id := strings.TrimSpace(task.ID.String())
+		if id == "" {
+			continue
+		}
+		taskByID[id] = task
+	}
+	sourceTask, ok := taskByID[sourceID]
+	if !ok {
+		return defaultTarget, nil
+	}
+
+	worktrees, err := m.listDaemonWorktrees(ctx)
+	if err != nil {
+		return mergeBaseTarget{}, fmt.Errorf("resolve merge base branch worktrees: %w", err)
+	}
+
+	seen := map[string]struct{}{}
+	for parentID := taskParentIssueID(sourceTask); parentID != ""; {
+		if _, ok := seen[parentID]; ok {
+			return defaultTarget, nil
+		}
+		seen[parentID] = struct{}{}
+
+		parentTask, ok := taskByID[parentID]
+		if !ok {
+			return defaultTarget, nil
+		}
+		if parentTask.Status != domain.StatusDone {
+			if wt, found := findDaemonWorktree(worktrees, "", parentID); found && strings.TrimSpace(wt.Branch) != "" {
+				return mergeBaseTarget{targetID: parentID, targetBranch: wt.Branch}, nil
+			}
+			return mergeBaseTarget{}, fmt.Errorf("nearest non-closed ancestor %s has no active worktree branch; attach/start that ancestor before merging %s", parentID, sourceID)
+		}
+		parentID = taskParentIssueID(parentTask)
+	}
+
+	return defaultTarget, nil
+}
+
+func taskParentIssueID(task domain.Task) string {
+	if task.ParentID != nil {
+		return strings.TrimSpace(task.ParentID.String())
+	}
+	for _, dep := range task.Dependencies {
+		if dep.Type == domain.DependencyParentChild || string(dep.Type) == "parent_child" {
+			if parentID := strings.TrimSpace(dep.ID.String()); parentID != "" {
+				return parentID
+			}
+		}
+	}
+	return ""
+}
+
 func (m Model) mergeToBaseCmd(sourceWorktree, sourceID string, refreshStatus bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		baseBranch := m.resolveBaseBranch()
+		target, err := m.resolveMergeBaseTarget(ctx, sourceID)
+		if err != nil {
+			return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, err: err}
+		}
+		baseBranch := target.targetBranch
+		targetID := target.targetID
 		baseWorktree := m.activeProjectPath()
 		if strings.TrimSpace(baseWorktree) == "" {
 			baseWorktree = "."
@@ -469,7 +544,7 @@ func (m Model) mergeToBaseCmd(sourceWorktree, sourceID string, refreshStatus boo
 			return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, err: fmt.Errorf("daemon client unavailable")}
 		}
 
-		if preflight := m.checkMergePreflight(ctx, sourceID, mergeBaseTargetID, sourceWorktree, baseWorktree, baseBranch, branch, refreshStatus); preflight != nil {
+		if preflight := m.checkMergePreflight(ctx, sourceID, targetID, sourceWorktree, baseWorktree, baseBranch, branch, refreshStatus); preflight != nil {
 			return *preflight
 		}
 
