@@ -572,33 +572,6 @@ type specSliceGraph struct {
 	CriticalPathDepth int             `json:"critical_path_depth"`
 }
 
-func runSpecGraphRPC(cfg *config.Config, opts specGraphOptions) error {
-	var reqs protocol.SpecRequirementListResponseBody
-	if err := runSpecRPC(cfg, protocol.CommandSpecRequirementList, protocol.SpecRequirementListRequestBody{
-		IssueID: naming.IssueID(opts.Issue),
-	}, &reqs); err != nil {
-		return err
-	}
-	metadata, err := loadSpecSliceMeta(opts.MetaPath)
-	if err != nil {
-		return err
-	}
-	graph, err := buildSpecSliceGraph(reqs.Requirements, metadata)
-	if err != nil {
-		return err
-	}
-	if opts.JSON {
-		return printJSON(graph)
-	}
-	switch opts.Format {
-	case "dot":
-		fmt.Print(renderSpecSliceGraphDOT(graph))
-	default:
-		fmt.Print(renderSpecSliceGraphText(graph))
-	}
-	return nil
-}
-
 func runSpecSliceGateRPC(cfg *config.Config, opts specSliceGateOptions) error {
 	readReq := protocol.SpecReadRequestBody{IssueID: naming.IssueID(opts.Issue)}
 	var read protocol.SpecReadResponseBody
@@ -684,6 +657,33 @@ func runSpecSliceGateRPC(cfg *config.Config, opts specSliceGateOptions) error {
 
 	if !result.OK {
 		return fmt.Errorf("spec slice gate failed")
+	}
+	return nil
+}
+
+func runSpecGraphRPC(cfg *config.Config, opts specGraphOptions) error {
+	var reqs protocol.SpecRequirementListResponseBody
+	if err := runSpecRPC(cfg, protocol.CommandSpecRequirementList, protocol.SpecRequirementListRequestBody{
+		IssueID: naming.IssueID(opts.Issue),
+	}, &reqs); err != nil {
+		return err
+	}
+	metadata, err := loadSpecSliceMeta(opts.MetaPath)
+	if err != nil {
+		return err
+	}
+	graph, err := buildSpecSliceGraph(reqs.Requirements, metadata)
+	if err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(graph)
+	}
+	switch opts.Format {
+	case "dot":
+		fmt.Print(renderSpecSliceGraphDOT(graph))
+	default:
+		fmt.Print(renderSpecSliceGraphText(graph))
 	}
 	return nil
 }
