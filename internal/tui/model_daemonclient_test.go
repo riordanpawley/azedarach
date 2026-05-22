@@ -4599,8 +4599,101 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 		if got := worktreeField.String(); got != "/tmp/az-1" {
 			t.Fatalf("diff worktree = %q, want %q", got, "/tmp/az-1")
 		}
+		baseBranchField := reflect.ValueOf(diffOverlay).Elem().FieldByName("baseBranch")
+		if got := baseBranchField.String(); got != "main" {
+			t.Fatalf("diff base branch = %q, want %q", got, "main")
+		}
 		if len(updatedModel.toasts) != 0 {
 			t.Fatalf("unexpected toasts: %+v", updatedModel.toasts)
+		}
+	})
+
+	t.Run("open diff targets closest non-done ancestor branch", func(t *testing.T) {
+		m := newDaemonTestModel(&recordingDaemonTransport{})
+		rootID := naming.IssueID("az-root")
+		parentID := naming.IssueID("az-parent")
+		childID := naming.IssueID("az-child")
+		m.tasks = []domain.Task{
+			{
+				ID:     rootID,
+				Title:  "Root task",
+				Status: domain.StatusInProgress,
+				Type:   domain.TypeTask,
+			},
+			{
+				ID:       parentID,
+				Title:    "Parent task",
+				Status:   domain.StatusDone,
+				Type:     domain.TypeTask,
+				ParentID: &rootID,
+			},
+			{
+				ID:       childID,
+				Title:    "Child task",
+				Status:   domain.StatusInProgress,
+				Type:     domain.TypeTask,
+				ParentID: &parentID,
+				Session: &domain.Session{
+					IssueID:  childID,
+					Worktree: "/tmp/az-child",
+				},
+			},
+		}
+		m.nav.SelectTask("az-child", 1)
+
+		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "f"})
+		if cmd == nil {
+			t.Fatal("expected diff overlay command")
+		}
+		updatedModel := updated.(Model)
+		diffOverlay, ok := updatedModel.overlayStack.Current().(*diff.DiffViewer)
+		if !ok {
+			t.Fatalf("overlay type = %T, want *diff.DiffViewer", updatedModel.overlayStack.Current())
+		}
+		baseBranchField := reflect.ValueOf(diffOverlay).Elem().FieldByName("baseBranch")
+		if got := baseBranchField.String(); got != "az/az-root" {
+			t.Fatalf("diff base branch = %q, want %q", got, "az/az-root")
+		}
+	})
+
+	t.Run("open diff falls back to configured base branch when ancestors are done", func(t *testing.T) {
+		m := newDaemonTestModel(&recordingDaemonTransport{})
+		parentID := naming.IssueID("az-parent")
+		childID := naming.IssueID("az-child")
+		m.config.Git.BaseBranch = "develop"
+		m.tasks = []domain.Task{
+			{
+				ID:     parentID,
+				Title:  "Parent task",
+				Status: domain.StatusDone,
+				Type:   domain.TypeTask,
+			},
+			{
+				ID:       childID,
+				Title:    "Child task",
+				Status:   domain.StatusInProgress,
+				Type:     domain.TypeTask,
+				ParentID: &parentID,
+				Session: &domain.Session{
+					IssueID:  childID,
+					Worktree: "/tmp/az-child",
+				},
+			},
+		}
+		m.nav.SelectTask("az-child", 1)
+
+		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "f"})
+		if cmd == nil {
+			t.Fatal("expected diff overlay command")
+		}
+		updatedModel := updated.(Model)
+		diffOverlay, ok := updatedModel.overlayStack.Current().(*diff.DiffViewer)
+		if !ok {
+			t.Fatalf("overlay type = %T, want *diff.DiffViewer", updatedModel.overlayStack.Current())
+		}
+		baseBranchField := reflect.ValueOf(diffOverlay).Elem().FieldByName("baseBranch")
+		if got := baseBranchField.String(); got != "develop" {
+			t.Fatalf("diff base branch = %q, want %q", got, "develop")
 		}
 	})
 
