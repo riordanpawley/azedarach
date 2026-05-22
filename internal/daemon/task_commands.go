@@ -506,6 +506,19 @@ func (d *Daemon) runtimeDiffBaseBranchForIssue(
 		return baseBranch
 	}
 
+	branchForIssue := func(id string) string {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return ""
+		}
+		if wt, ok := worktreeByIssue[id]; ok {
+			if candidate := strings.TrimSpace(wt.Branch); candidate != "" {
+				return candidate
+			}
+		}
+		return "az/" + id
+	}
+
 	task, ok := taskByIssue[strings.TrimSpace(issueID)]
 	if !ok || task.ParentID == nil {
 		return baseBranch
@@ -521,16 +534,13 @@ func (d *Daemon) runtimeDiffBaseBranchForIssue(
 
 		parentTask, parentOK := taskByIssue[nextParentID]
 		if !parentOK {
+			if candidate := branchForIssue(nextParentID); candidate != "" {
+				return candidate
+			}
 			break
 		}
 		if parentTask.Status != domain.StatusDone {
-			if parentWorktree, ok := worktreeByIssue[nextParentID]; ok {
-				candidate := strings.TrimSpace(parentWorktree.Branch)
-				if candidate != "" {
-					return candidate
-				}
-			}
-			return "az/" + nextParentID
+			return branchForIssue(nextParentID)
 		}
 
 		nextParentID = ""
