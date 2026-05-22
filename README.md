@@ -65,7 +65,7 @@ azd --help
 - CRUD and query: `az issue list|get|get-many|create|split|update|close|delete`
 - Dependency graph operations: `az issue dep add|remove|bulk apply`
 - Bulk planning flows: `az issue bulk-create`, `az issue bulk-update`
-- Fanout workflow support: `az issue split`, `az issue fanout`, `az issue fanout ready`, `az issue fanout drift`
+- Fanout workflow support: `az issue split` for isolated child worktrees with explicit parent-side merge, plus `az issue fanout`, `az issue fanout ready`, `az issue fanout drift`
 - Integrity checks: `az issue doctor`
 
 ### Spec + Policy Integration

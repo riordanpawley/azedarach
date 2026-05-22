@@ -5116,6 +5116,9 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	if !strings.Contains(result.Advice.IntegrateCommand, child.String()) {
 		t.Fatalf("advice = %+v, want child integration command", result.Advice)
 	}
+	if !strings.Contains(result.Advice.MergeCommand, child.String()) || !strings.Contains(result.Advice.Summary, "not auto-merged") {
+		t.Fatalf("advice = %+v, want explicit merge/no-auto-merge guidance", result.Advice)
+	}
 	commands := commandNames(requests)
 	if !containsString(commands, protocol.CommandOperationSubmit) || !containsString(commands, protocol.CommandMailSend) {
 		t.Fatalf("commands = %+v, want operation submit and mail send", commands)

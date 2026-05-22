@@ -35,7 +35,9 @@ type issueSplitAdvice struct {
 	StatusCommand    string `json:"status_command"`
 	WatchCommand     string `json:"watch_command"`
 	IntegrateCommand string `json:"integrate_command"`
+	MergeCommand     string `json:"merge_command"`
 	CloseCommand     string `json:"close_command"`
+	Summary          string `json:"summary"`
 }
 
 func ParseIssueSplitArgs(args []string) (IssueSplitOptions, error) {
@@ -126,7 +128,9 @@ func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
 			StatusCommand:    fmt.Sprintf("az orchestrate status --root %s", parentIssueID),
 			WatchCommand:     fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", parentIssueID),
 			IntegrateCommand: fmt.Sprintf("az orchestrate integrate --issue %s", createResult.IssueID),
+			MergeCommand:     fmt.Sprintf("az branch merge %s", createResult.IssueID),
 			CloseCommand:     fmt.Sprintf("az orchestrate close-session --issue %s", createResult.IssueID),
+			Summary:          "Child work runs in an isolated session/worktree. It is not auto-merged; the parent/orchestrator should review, integrate, merge, close the child session, then close the child issue.",
 		},
 	}
 	if opts.JSON {
@@ -140,7 +144,15 @@ func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
 	}
 
 	fmt.Printf("Created child issue: %s (parent: %s)\n", result.ChildIssueID, result.ParentIssueID)
+	fmt.Println("Integration model:")
+	fmt.Println("- Child work runs in its own az/tmux session/worktree.")
+	fmt.Println("- It is not auto-merged; review and integrate it from the parent/orchestrator session when ready.")
 	printOrchestrateStartResult(startResult)
+	fmt.Println("When the child is ready:")
+	fmt.Printf("- %s\n", result.Advice.IntegrateCommand)
+	fmt.Printf("- %s\n", result.Advice.MergeCommand)
+	fmt.Printf("- %s\n", result.Advice.CloseCommand)
+	fmt.Printf("- az issue close %s\n", result.ChildIssueID)
 	if len(startResult.Failed) > 0 {
 		return fmt.Errorf("issue split created %s but session launch failed", createResult.IssueID)
 	}
