@@ -1953,7 +1953,10 @@ func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo 
 
 func escapeForShellDoubleQuotes(value string) string {
 	escaped := strings.ReplaceAll(value, `\`, `\\`)
-	return strings.ReplaceAll(escaped, `"`, `\"`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	escaped = strings.ReplaceAll(escaped, "`", "\\`")
+	escaped = strings.ReplaceAll(escaped, "$", `\$`)
+	return strings.ReplaceAll(escaped, "!", `\!`)
 }
 
 func singleQuoteForShell(value string) string {

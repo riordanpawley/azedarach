@@ -2939,6 +2939,31 @@ func TestBuildSessionLaunchCommandDoesNotInjectCodexHookOverrides(t *testing.T) 
 	}
 }
 
+func TestBuildSessionLaunchCommandEscapesPromptCommandSubstitutionForCodex(t *testing.T) {
+	d := &Daemon{
+		cfg: Config{
+			CLITool:      "codex",
+			SessionShell: "zsh",
+		},
+	}
+
+	command := d.buildSessionLaunchCommand(
+		protocol.DefaultProjectID,
+		"az-42",
+		"codex-az-42",
+		false,
+		nil,
+		buildStartWorkPrompt("az-42", string(domain.TypeEpic), "Replace apps/server"),
+	)
+
+	if strings.Contains(command, "`az orchestrate status --root <issue-id>`") {
+		t.Fatalf("command = %q, want backticks escaped in prompt to avoid shell command substitution", command)
+	}
+	if !strings.Contains(command, "\\`az orchestrate status --root <issue-id>\\`") {
+		t.Fatalf("command = %q, want escaped backticks in prompt", command)
+	}
+}
+
 func TestBuildStartWorkPromptMatchesPrimeBootFormat(t *testing.T) {
 	prompt := buildStartWorkPrompt("az-42", "task", "Fix startup shell")
 	if !strings.Contains(prompt, "work on issue az-42 (task): Fix startup shell") {
