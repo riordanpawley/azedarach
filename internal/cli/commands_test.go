@@ -7102,7 +7102,7 @@ func TestEnsureDaemonDoesNotReplaceOnAcceptedHandshake(t *testing.T) {
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
 				handshakes++
-				return protocol.HelloAck{Accepted: true}, nil
+				return protocol.HelloAck{Accepted: true, DaemonVersion: "different-build"}, nil
 			},
 		}),
 		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
