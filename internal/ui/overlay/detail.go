@@ -260,21 +260,30 @@ func (d *DetailPanel) View() string {
 func (d *DetailPanel) buildLines() ([]string, int) {
 	graphCursorLine := -1
 
+	titleStyle := lipgloss.NewStyle().
+		Foreground(uistyles.Text).
+		Bold(true)
 	headerStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#89b4fa")).
+		Foreground(uistyles.Lavender).
+		Bold(true)
+	sectionLabelStyle := lipgloss.NewStyle().
+		Foreground(uistyles.Sapphire).
 		Bold(true)
 	labelStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#94e2d5")).
+		Foreground(uistyles.Teal).
 		Width(12).
 		Align(lipgloss.Right)
 	valueStyle := d.styles.MenuItem
+	graphRowStyle := lipgloss.NewStyle().Foreground(uistyles.Subtext1)
+	graphStatusStyle := lipgloss.NewStyle().Foreground(uistyles.Peach).Bold(true)
+	graphSelectedPrefixStyle := lipgloss.NewStyle().Foreground(uistyles.Sky).Bold(true)
 
 	var lines []string
 	addLine := func(line string) {
 		lines = append(lines, line)
 	}
 
-	addLine(headerStyle.Render(fmt.Sprintf("[%s] %s", d.task.ID, d.task.Title)))
+	addLine(titleStyle.Render(fmt.Sprintf("[%s] %s", d.task.ID, d.task.Title)))
 	addLine("")
 	addLine(labelStyle.Render("Issue:") + "  " + d.formatIssueCardSummary())
 	if metadata := d.renderIssueMetadataLines(labelStyle, valueStyle); metadata != "" {
@@ -338,8 +347,8 @@ func (d *DetailPanel) buildLines() ([]string, int) {
 			if !hasRelation(links, rel) {
 				continue
 			}
-			addLine(d.styles.MenuItem.Render(graphRelationLabels[rel]))
-			graphCursorLine = d.appendGraphRows(&lines, links, rel, graphCursorLine)
+			addLine(sectionLabelStyle.Render(graphRelationLabels[rel]))
+			graphCursorLine = d.appendGraphRows(&lines, links, rel, graphCursorLine, graphRowStyle, graphStatusStyle, graphSelectedPrefixStyle)
 		}
 	}
 
@@ -359,7 +368,15 @@ func (d *DetailPanel) buildLines() ([]string, int) {
 	return lines, graphCursorLine
 }
 
-func (d *DetailPanel) appendGraphRows(lines *[]string, links []taskGraphLink, relation string, cursorLine int) int {
+func (d *DetailPanel) appendGraphRows(
+	lines *[]string,
+	links []taskGraphLink,
+	relation string,
+	cursorLine int,
+	graphRowStyle lipgloss.Style,
+	graphStatusStyle lipgloss.Style,
+	graphSelectedPrefixStyle lipgloss.Style,
+) int {
 	for i, link := range links {
 		if link.Relation != relation {
 			continue
@@ -371,7 +388,13 @@ func (d *DetailPanel) appendGraphRows(lines *[]string, links []taskGraphLink, re
 			style = d.styles.MenuItemActive
 			cursorLine = len(*lines)
 		}
-		*lines = append(*lines, style.Render(fmt.Sprintf("%s %s [%s] %s", prefix, link.Task.ID, d.formatStatus(link.Task.Status), link.Task.Title)))
+		prefixRendered := graphRowStyle.Render(prefix)
+		if d.graphFocused && i == d.graphCursor {
+			prefixRendered = graphSelectedPrefixStyle.Render(prefix)
+		}
+		statusRendered := graphStatusStyle.Render(d.formatStatus(link.Task.Status))
+		line := fmt.Sprintf("%s %s [%s] %s", prefixRendered, link.Task.ID, statusRendered, link.Task.Title)
+		*lines = append(*lines, style.Render(line))
 	}
 	return cursorLine
 }

@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
+	uistyles "github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
 // Action represents a menu action
@@ -256,32 +257,35 @@ func (m *ActionMenu) renderActionList(includeTaskSummary bool) string {
 
 func (m *ActionMenu) renderActionListWithWidth(includeTaskSummary bool, maxWidth int) string {
 	var b strings.Builder
+	summaryTitleStyle := m.styles.MenuItemActive.Foreground(uistyles.Mauve).Bold(true)
+	summaryMetaStyle := m.styles.MenuItem.Foreground(uistyles.Subtext1)
+	sectionDividerStyle := m.styles.Separator.Foreground(uistyles.Surface2)
 
 	if includeTaskSummary {
-		b.WriteString(m.styles.MenuItemActive.Render(fmt.Sprintf("[%s] %s", m.task.ID, m.task.Title)))
+		b.WriteString(summaryTitleStyle.Render(fmt.Sprintf("[%s] %s", m.task.ID, m.task.Title)))
 		b.WriteString("\n")
 
-		b.WriteString(m.styles.MenuItem.Render(
+		b.WriteString(summaryMetaStyle.Render(
 			fmt.Sprintf("status: %s  priority: %s  type: %s", m.task.Status, m.task.Priority, m.task.Type),
 		))
 		b.WriteString("\n")
 		if m.task.ParentID != nil {
-			b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("parent: %s", *m.task.ParentID)))
+			b.WriteString(summaryMetaStyle.Render(fmt.Sprintf("parent: %s", *m.task.ParentID)))
 			b.WriteString("\n")
 		}
 		if total, done := m.childProgress(); total > 0 {
-			b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("children: %d total (%d done)", total, done)))
+			b.WriteString(summaryMetaStyle.Render(fmt.Sprintf("children: %d total (%d done)", total, done)))
 			b.WriteString("\n")
 		}
 		outgoing := len(m.task.Dependencies)
 		incoming := len(m.incomingDependencies())
-		b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("dependencies: out %d / in %d", outgoing, incoming)))
+		b.WriteString(summaryMetaStyle.Render(fmt.Sprintf("dependencies: out %d / in %d", outgoing, incoming)))
 		b.WriteString("\n")
 		if m.session != nil {
-			b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("session: %s %s", m.session.State.Icon(), m.session.State)))
+			b.WriteString(summaryMetaStyle.Render(fmt.Sprintf("session: %s %s", m.session.State.Icon(), m.session.State)))
 			b.WriteString("\n")
 		}
-		b.WriteString(m.styles.Separator.Render("───────────────────"))
+		b.WriteString(sectionDividerStyle.Render("───────────────────"))
 		b.WriteString("\n")
 	}
 
@@ -294,7 +298,7 @@ func (m *ActionMenu) renderActionListWithWidth(includeTaskSummary bool, maxWidth
 		action := m.actions[i]
 		// Skip rendering logic for separators
 		if action.Key == "" {
-			b.WriteString(m.styles.Separator.Render(action.Label))
+			b.WriteString(sectionDividerStyle.Render(action.Label))
 			b.WriteString("\n")
 			continue
 		}
