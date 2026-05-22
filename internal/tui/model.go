@@ -2147,10 +2147,10 @@ func (m Model) diffBaseBranchForTask(task *domain.Task) string {
 
 		parentTask, ok := tasksByID[nextParentID]
 		if !ok {
-			break
+			return m.originBranchForSelection(nextParentID)
 		}
 		if parentTask.Status != domain.StatusDone {
-			return m.originBranchForSelection(parentTask.ID.String())
+			return m.originBranchForSelection(nextParentID)
 		}
 
 		nextParentID = ""
