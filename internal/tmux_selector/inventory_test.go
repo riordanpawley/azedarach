@@ -147,11 +147,11 @@ func TestGlobalInventoryLoaderCarriesTreeTasksForAncestorRendering(t *testing.T)
 	if err != nil {
 		t.Fatalf("ListTasksSnapshot: %v", err)
 	}
-	if len(snapshot.TreeTasks) != 2 {
-		t.Fatalf("tree tasks = %#v, want root and child tasks", snapshot.TreeTasks)
+	if len(snapshot.TreeTasks) != 1 {
+		t.Fatalf("tree tasks = %#v, want root ancestor task only", snapshot.TreeTasks)
 	}
-	if snapshot.TreeTasks[0].ID != childID || snapshot.TreeTasks[1].ID != rootID {
-		t.Fatalf("tree tasks sorted by issue id = %#v", snapshot.TreeTasks)
+	if snapshot.TreeTasks[0].ID != rootID {
+		t.Fatalf("tree tasks = %#v, want root ancestor task", snapshot.TreeTasks)
 	}
 }
 

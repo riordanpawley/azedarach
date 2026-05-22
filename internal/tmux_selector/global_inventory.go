@@ -234,7 +234,7 @@ func (l *GlobalInventoryLoader) snapshotFromLive(ctx context.Context, live []tmu
 	return snapshot
 }
 
-func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map[string]projectedInventory, treeTasks []domain.Task) Snapshot {
+func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map[string]projectedInventory, tasksByIssue map[string]domain.Task) Snapshot {
 	entries := make([]InventoryEntry, 0, len(snapshot.Entries))
 	for _, entry := range snapshot.Entries {
 		if projection, ok := projections[entry.SessionID]; ok {
@@ -254,7 +254,7 @@ func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map
 	}
 	enriched := l.snapshotFromEntries(entries, false)
 	enriched.CurrentSessionID = snapshot.CurrentSessionID
-	enriched.TreeTasks = treeTasks
+	enriched.TreeTasks = ancestorTasksForEntries(entries, tasksByIssue)
 	return enriched
 }
 
@@ -427,7 +427,7 @@ func addProjectDir(dirs *[]string, seen map[string]struct{}, path string) {
 	*dirs = append(*dirs, abs)
 }
 
-func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs []string) (map[string]projectedInventory, []domain.Task) {
+func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs []string) (map[string]projectedInventory, map[string]domain.Task) {
 	out := map[string]projectedInventory{}
 	source := l.source
 	if source == nil {
@@ -472,14 +472,35 @@ func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs
 			addProjection(out, naming.CanonicalSessionID(projectPath, issueID), projection)
 		}
 	}
-	tasks := make([]domain.Task, 0, len(tasksByIssue))
-	for _, task := range tasksByIssue {
-		tasks = append(tasks, task)
+	return out, tasksByIssue
+}
+
+func ancestorTasksForEntries(entries []InventoryEntry, tasksByIssue map[string]domain.Task) []domain.Task {
+	if len(entries) == 0 || len(tasksByIssue) == 0 {
+		return nil
 	}
-	sort.SliceStable(tasks, func(i, j int) bool {
-		return tasks[i].ID.String() < tasks[j].ID.String()
+	outByIssue := map[string]domain.Task{}
+	for _, entry := range entries {
+		for parentID := entryParentID(entry); parentID != ""; {
+			task, ok := tasksByIssue[parentID]
+			if !ok {
+				break
+			}
+			outByIssue[parentID] = task
+			parentID = taskParentID(task)
+		}
+	}
+	if len(outByIssue) == 0 {
+		return nil
+	}
+	out := make([]domain.Task, 0, len(outByIssue))
+	for _, task := range outByIssue {
+		out = append(out, task)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].ID.String() < out[j].ID.String()
 	})
-	return out, tasks
+	return out
 }
 
 func addProjection(out map[string]projectedInventory, key string, projection projectedInventory) {
