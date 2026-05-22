@@ -152,7 +152,7 @@ func TestRunSpecCommandHelpAndValidation(t *testing.T) {
 	helpOut := captureMainStdout(t, func() error {
 		return runSpecCommand(config.DefaultConfig(), []string{"--help"})
 	})
-	if !strings.Contains(helpOut, "Usage: az spec <req|link|read|pack|lint|parity> [arguments]") {
+	if !strings.Contains(helpOut, "Usage: az spec <req|link|read|pack|graph|lint|parity> [arguments]") {
 		t.Fatalf("help output = %q", helpOut)
 	}
 	if !strings.Contains(helpOut, "az spec req create --id <req-id> --title <text>") {
@@ -163,6 +163,9 @@ func TestRunSpecCommandHelpAndValidation(t *testing.T) {
 	}
 	if !strings.Contains(helpOut, "az spec pack [--json] (--issue <issue-id> | --req <req-id>)") {
 		t.Fatalf("help output missing pack grammar = %q", helpOut)
+	}
+	if !strings.Contains(helpOut, "az spec graph [--json] --issue <issue-id> [--meta <path>] [--format <text|dot>]") {
+		t.Fatalf("help output missing graph grammar = %q", helpOut)
 	}
 	if strings.Contains(helpOut, "az spec sync") {
 		t.Fatalf("help output should not mention disabled sync command = %q", helpOut)

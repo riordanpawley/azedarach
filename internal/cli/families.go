@@ -1253,11 +1253,12 @@ func PrintTmuxUsage() {
 }
 
 func PrintSpecUsage() {
-	fmt.Println("Usage: az spec <req|link|read|pack|lint|parity> [arguments]")
+	fmt.Println("Usage: az spec <req|link|read|pack|graph|lint|parity> [arguments]")
 	fmt.Println("  req      Manage spec requirements (list|get|create|update|delete)")
 	fmt.Println("  link     Manage issue/requirement traceability links (list|add|remove)")
 	fmt.Println("  read     Read consolidated spec view")
 	fmt.Println("  pack     Build a stage-aware source reconciliation pack")
+	fmt.Println("  graph    Generate dependency graph for spec slices")
 	fmt.Println("  lint     Validate spec consistency")
 	fmt.Println("  parity   Report issue/spec drift")
 	fmt.Println("")
@@ -1276,6 +1277,7 @@ func PrintSpecUsage() {
 	fmt.Println("Read/pack/lint/parity:")
 	fmt.Println("  az spec read [--json] [--issue <issue-id>] [--req <req-id>]")
 	fmt.Println("  az spec pack [--json] (--issue <issue-id> | --req <req-id>) [--stage <greenfield|brownfield|repair|verify>]")
+	fmt.Println("  az spec graph [--json] --issue <issue-id> [--meta <path>] [--format <text|dot>]")
 	fmt.Println("  az spec lint [--json] [--strict]")
 	fmt.Println("  az spec parity [--json] [--fail-on-out]")
 	fmt.Println("")
@@ -1287,6 +1289,7 @@ func PrintSpecUsage() {
 	fmt.Println("  az spec link add --issue bgh --req bfs-req-1 --role implements")
 	fmt.Println("  az spec read --issue az-123")
 	fmt.Println("  az spec pack --issue az-123 --stage brownfield")
+	fmt.Println("  az spec graph --issue az-123 --meta .azedarach/spec/slices.json --format dot")
 	fmt.Println("  az spec lint --strict")
 	fmt.Println("  az spec parity --fail-on-out")
 }
@@ -1325,6 +1328,10 @@ func PrintSpecReadUsage() {
 
 func PrintSpecPackUsage() {
 	fmt.Println("Usage: az spec pack [--json] (--issue <issue-id> | --req <req-id>) [--stage <greenfield|brownfield|repair|verify>]")
+}
+
+func PrintSpecGraphUsage() {
+	fmt.Println("Usage: az spec graph [--json] --issue <issue-id> [--meta <path>] [--format <text|dot>]")
 }
 
 func PrintSpecLintUsage() {
