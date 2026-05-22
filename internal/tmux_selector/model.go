@@ -3,6 +3,7 @@ package tmuxselector
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -57,6 +58,7 @@ type switchCompleteMsg = SwitchResultMsg
 type Snapshot struct {
 	Entries          []InventoryEntry
 	Tasks            []domain.Task
+	TreeTasks        []domain.Task
 	Revision         uint64
 	LastCheckedAt    time.Time
 	Freshness        string
@@ -586,7 +588,7 @@ func (m Model) renderTabs() string {
 }
 
 func (m Model) renderTree(entries []InventoryEntry) string {
-	rows := activeSessionTreeRows(entries)
+	rows := m.activeSessionTreeRows(entries)
 	if len(rows) == 0 {
 		return ""
 	}
@@ -594,18 +596,17 @@ func (m Model) renderTree(entries []InventoryEntry) string {
 	visible := visibleTreeRows(rows, m.cursor, availableHeight)
 	lines := make([]string, 0, len(visible))
 	for _, row := range visible {
-		if row.entryIndex < 0 || row.entryIndex >= len(entries) {
+		if row.entryIndex >= len(entries) {
 			continue
 		}
-		entry := entries[row.entryIndex]
-		lines = append(lines, m.renderTreeRow(row, entry))
+		lines = append(lines, m.renderTreeRow(row, row.entry))
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
 
 func (m Model) renderTreeRow(row sessionTreeRow, entry InventoryEntry) string {
 	cursor := "  "
-	if row.entryIndex == m.cursor {
+	if row.entryIndex >= 0 && row.entryIndex == m.cursor {
 		cursor = "> "
 	}
 	indent := treePrefix(row.ancestorLast, row.last)
@@ -639,7 +640,7 @@ func (m Model) renderTreeRow(row sessionTreeRow, entry InventoryEntry) string {
 	}
 	line := fmt.Sprintf("%s%s%s [%s] %s%s", cursor, indent, issueID, state, title, meta)
 	line = ansi.Truncate(line, maxInt(1, m.width), "…")
-	if row.entryIndex == m.cursor {
+	if row.entryIndex >= 0 && row.entryIndex == m.cursor {
 		return lipgloss.NewStyle().Foreground(styles.Blue).Bold(true).Render(line)
 	}
 	return line
@@ -817,17 +818,28 @@ func (m *Model) moveCursor(dx int, dy int) {
 }
 
 func (m *Model) moveTreeCursor(entries []InventoryEntry, dx int, dy int) {
-	rows := activeSessionTreeRows(entries)
+	rows := m.activeSessionTreeRows(entries)
 	if len(rows) == 0 {
 		m.cursor = 0
 		return
 	}
-	pos := 0
+	selectable := make([]int, 0, len(rows))
+	pos := -1
 	for i, row := range rows {
-		if row.entryIndex == m.cursor {
-			pos = i
-			break
+		if row.entryIndex < 0 {
+			continue
 		}
+		if row.entryIndex == m.cursor {
+			pos = len(selectable)
+		}
+		selectable = append(selectable, i)
+	}
+	if len(selectable) == 0 {
+		m.cursor = 0
+		return
+	}
+	if pos < 0 {
+		pos = 0
 	}
 	next := pos + dy
 	if dx < 0 {
@@ -835,10 +847,10 @@ func (m *Model) moveTreeCursor(entries []InventoryEntry, dx int, dy int) {
 	} else if dx > 0 {
 		next = pos + 1
 	}
-	if next < 0 || next >= len(rows) {
+	if next < 0 || next >= len(selectable) {
 		return
 	}
-	m.cursor = rows[next].entryIndex
+	m.cursor = rows[selectable[next]].entryIndex
 }
 
 func (m *Model) selectCardHotkey(key string) {
@@ -1175,63 +1187,175 @@ func EntriesFromTasks(tasks []domain.Task) []InventoryEntry {
 
 type sessionTreeRow struct {
 	entryIndex   int
+	entry        InventoryEntry
 	last         bool
 	ancestorLast []bool
 }
 
 func activeSessionTreeRows(entries []InventoryEntry) []sessionTreeRow {
+	return activeSessionTreeRowsWithAncestors(entries, nil)
+}
+
+func (m Model) activeSessionTreeRows(entries []InventoryEntry) []sessionTreeRow {
+	return activeSessionTreeRowsWithAncestors(entries, m.treeAncestorTasks())
+}
+
+func (m Model) treeAncestorTasks() map[string]domain.Task {
+	if strings.TrimSpace(m.searchQuery) != "" {
+		return nil
+	}
+	tasks := append([]domain.Task(nil), m.snapshot.TreeTasks...)
+	tasks = append(tasks, m.snapshot.Tasks...)
+	if len(tasks) == 0 {
+		return nil
+	}
+	out := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		issueID := strings.TrimSpace(task.ID.String())
+		if issueID == "" {
+			continue
+		}
+		out[issueID] = task
+	}
+	return out
+}
+
+type treeNode struct {
+	key        string
+	entry      InventoryEntry
+	entryIndex int
+	order      int
+}
+
+func activeSessionTreeRowsWithAncestors(entries []InventoryEntry, ancestorTasks map[string]domain.Task) []sessionTreeRow {
 	if len(entries) == 0 {
 		return nil
 	}
-	indexByIssue := make(map[string]int, len(entries))
+	nodes := make(map[string]*treeNode, len(entries)+len(ancestorTasks))
+	activeKeys := make([]string, 0, len(entries))
 	for i, entry := range entries {
-		if issueID := entryIssueID(entry); issueID != "" {
-			indexByIssue[issueID] = i
-		}
-	}
-	children := make(map[int][]int, len(entries))
-	roots := make([]int, 0, len(entries))
-	for i, entry := range entries {
-		parentID := entryParentID(entry)
-		parentIndex, hasActiveParent := indexByIssue[parentID]
-		if parentID == "" || !hasActiveParent || parentIndex == i {
-			roots = append(roots, i)
+		key := entryTreeKey(entry)
+		if key == "" {
 			continue
 		}
-		children[parentIndex] = append(children[parentIndex], i)
+		nodes[key] = &treeNode{key: key, entry: entry, entryIndex: i, order: i}
+		activeKeys = append(activeKeys, key)
 	}
-	rows := make([]sessionTreeRow, 0, len(entries))
-	visited := make(map[int]bool, len(entries))
-	var walk func(indices []int, ancestors []bool)
-	walk = func(indices []int, ancestors []bool) {
-		for pos, entryIndex := range indices {
-			if entryIndex < 0 || entryIndex >= len(entries) || visited[entryIndex] {
+	for i, entry := range entries {
+		for parentID := entryParentID(entry); parentID != ""; {
+			if _, ok := nodes[parentID]; ok {
+				break
+			}
+			task, ok := ancestorTasks[parentID]
+			if !ok {
+				break
+			}
+			nodes[parentID] = &treeNode{
+				key:        parentID,
+				entry:      inventoryEntryFromAncestorTask(task),
+				entryIndex: -1,
+				order:      i,
+			}
+			parentID = taskParentID(task)
+		}
+	}
+	children := make(map[string][]string, len(nodes))
+	rootsByKey := make(map[string]struct{}, len(nodes))
+	for key, node := range nodes {
+		parentID := entryParentID(node.entry)
+		if parentID == "" || parentID == key {
+			rootsByKey[key] = struct{}{}
+			continue
+		}
+		if _, ok := nodes[parentID]; !ok {
+			rootsByKey[key] = struct{}{}
+			continue
+		}
+		children[parentID] = append(children[parentID], key)
+	}
+	sortTreeKeys := func(keys []string) {
+		sort.SliceStable(keys, func(i, j int) bool {
+			left, right := nodes[keys[i]], nodes[keys[j]]
+			if left.order != right.order {
+				return left.order < right.order
+			}
+			if left.entryIndex != right.entryIndex {
+				return left.entryIndex < right.entryIndex
+			}
+			return keys[i] < keys[j]
+		})
+	}
+	for parentID := range children {
+		sortTreeKeys(children[parentID])
+	}
+	rootFor := func(key string) string {
+		seen := map[string]struct{}{}
+		for {
+			if _, ok := seen[key]; ok {
+				return key
+			}
+			seen[key] = struct{}{}
+			parentID := entryParentID(nodes[key].entry)
+			if parentID == "" {
+				return key
+			}
+			if _, ok := nodes[parentID]; !ok {
+				return key
+			}
+			key = parentID
+		}
+	}
+	roots := make([]string, 0, len(nodes))
+	seenRoots := make(map[string]struct{}, len(nodes))
+	for _, key := range activeKeys {
+		root := rootFor(key)
+		if _, ok := seenRoots[root]; ok {
+			continue
+		}
+		seenRoots[root] = struct{}{}
+		roots = append(roots, root)
+		delete(rootsByKey, root)
+	}
+	for key := range rootsByKey {
+		if _, ok := seenRoots[key]; ok {
+			continue
+		}
+		roots = append(roots, key)
+	}
+	sortTreeKeys(roots)
+	rows := make([]sessionTreeRow, 0, len(nodes))
+	visited := make(map[string]bool, len(nodes))
+	var walk func(keys []string, ancestors []bool)
+	walk = func(keys []string, ancestors []bool) {
+		for pos, key := range keys {
+			node := nodes[key]
+			if node == nil || visited[key] {
 				continue
 			}
-			visited[entryIndex] = true
-			last := pos == len(indices)-1
+			visited[key] = true
+			last := pos == len(keys)-1
 			rows = append(rows, sessionTreeRow{
-				entryIndex:   entryIndex,
+				entryIndex:   node.entryIndex,
+				entry:        node.entry,
 				last:         last,
 				ancestorLast: append([]bool(nil), ancestors...),
 			})
-			walk(children[entryIndex], append(append([]bool(nil), ancestors...), last))
+			walk(children[key], append(append([]bool(nil), ancestors...), last))
 		}
 	}
 	walk(roots, nil)
-	for i := range entries {
-		if !visited[i] {
-			rows = append(rows, sessionTreeRow{entryIndex: i, last: i == len(entries)-1})
-		}
-	}
 	return rows
 }
 
 func entryParentID(entry InventoryEntry) string {
-	if entry.Task.ParentID != nil {
-		return strings.TrimSpace(entry.Task.ParentID.String())
+	return taskParentID(entry.Task)
+}
+
+func taskParentID(task domain.Task) string {
+	if task.ParentID != nil {
+		return strings.TrimSpace(task.ParentID.String())
 	}
-	for _, dep := range entry.Task.Dependencies {
+	for _, dep := range task.Dependencies {
 		if dep.Type == domain.DependencyParentChild || string(dep.Type) == "parent_child" {
 			if parentID := strings.TrimSpace(dep.ID.String()); parentID != "" {
 				return parentID
@@ -1239,6 +1363,38 @@ func entryParentID(entry InventoryEntry) string {
 		}
 	}
 	return ""
+}
+
+func entryTreeKey(entry InventoryEntry) string {
+	if issueID := entryIssueID(entry); issueID != "" {
+		return issueID
+	}
+	sessionID := strings.TrimSpace(entry.SessionID)
+	if sessionID == "" {
+		return ""
+	}
+	return "session:" + sessionID
+}
+
+func inventoryEntryFromAncestorTask(task domain.Task) InventoryEntry {
+	entry := InventoryEntry{
+		IssueID:     strings.TrimSpace(task.ID.String()),
+		TaskTitle:   strings.TrimSpace(task.Title),
+		IssueStatus: task.Status,
+		Priority:    task.Priority,
+		Type:        task.Type,
+		Task:        task,
+	}
+	if task.Session != nil {
+		entry.State = task.Session.State
+		entry.Worktree = task.Session.Worktree
+		entry.StartedAt = task.Session.StartedAt
+		entry.HasWorktree = strings.TrimSpace(task.Session.Worktree) != ""
+	}
+	if entry.State == "" {
+		entry.State = domain.SessionIdle
+	}
+	return entry
 }
 
 func treePrefix(ancestorLast []bool, last bool) string {

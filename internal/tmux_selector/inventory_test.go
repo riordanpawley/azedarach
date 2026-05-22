@@ -102,6 +102,59 @@ func TestGlobalInventoryLoaderUsesTmuxFirstAcrossProjects(t *testing.T) {
 	}
 }
 
+func TestGlobalInventoryLoaderCarriesTreeTasksForAncestorRendering(t *testing.T) {
+	started := time.Unix(1775209200, 0).UTC()
+	projectDir := t.TempDir()
+	projectID := projectIDForPath(projectDir)
+	rootID := naming.IssueID("az-root")
+	childID := naming.IssueID("az-child")
+	sessionID := naming.CanonicalSessionID(projectID, childID.String())
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{infos: []tmux.SessionInfo{
+			{Name: sessionID, CreatedAt: &started, Path: projectDir + "/worktrees/" + childID.String()},
+		}},
+		nil,
+		WithProjectDirs(projectDir),
+		WithProjectSnapshotSource(fakeProjectSnapshotSource{
+			snapshots: []ProjectInventorySnapshot{{
+				ProjectID:   projectID,
+				ProjectPath: projectDir,
+				Tasks: []domain.Task{
+					{
+						ID:     rootID,
+						Title:  "Root orchestration",
+						Status: domain.StatusInProgress,
+						Type:   domain.TypeEpic,
+					},
+					{
+						ID:       childID,
+						Title:    "Worker session",
+						Status:   domain.StatusInProgress,
+						ParentID: &rootID,
+						Session: &domain.Session{
+							IssueID:   childID,
+							State:     domain.SessionBusy,
+							StartedAt: &started,
+						},
+						HasTmuxSession: true,
+					},
+				},
+			}},
+		}),
+	)
+
+	snapshot, err := loader.ListTasksSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("ListTasksSnapshot: %v", err)
+	}
+	if len(snapshot.TreeTasks) != 2 {
+		t.Fatalf("tree tasks = %#v, want root and child tasks", snapshot.TreeTasks)
+	}
+	if snapshot.TreeTasks[0].ID != childID || snapshot.TreeTasks[1].ID != rootID {
+		t.Fatalf("tree tasks sorted by issue id = %#v", snapshot.TreeTasks)
+	}
+}
+
 func TestGlobalInventoryLoaderHonorsLimit(t *testing.T) {
 	loader := NewGlobalInventoryLoader(
 		fakeSessionInventory{infos: []tmux.SessionInfo{
