@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -530,10 +531,12 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 
 	for {
 		time.Sleep(opts.PollInterval)
-		events, err := deps.DaemonClient.MailWatch(context.Background(), protocol.MailWatchCommandBody{
-			RepoDir:     deps.RepoDir,
-			ParentIssue: opts.RootIssueID,
-			SinceSeq:    lastSeq + 1,
+		events, err := watchDaemonCommand(deps, func(ctx context.Context) ([]protocol.MailEvent, error) {
+			return deps.DaemonClient.MailWatch(ctx, protocol.MailWatchCommandBody{
+				RepoDir:     deps.RepoDir,
+				ParentIssue: opts.RootIssueID,
+				SinceSeq:    lastSeq + 1,
+			})
 		})
 		if err != nil {
 			return err
@@ -545,7 +548,9 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 		for _, event := range events {
 			watchEvents = append(watchEvents, protocolToLocalMailEvent(event))
 		}
-		tasks, err := deps.DaemonClient.ListTasks(context.Background())
+		tasks, err := watchDaemonCommand(deps, func(ctx context.Context) ([]domain.Task, error) {
+			return deps.DaemonClient.ListTasks(ctx)
+		})
 		if err != nil {
 			return fmt.Errorf("list tasks: %w", err)
 		}
@@ -568,6 +573,14 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 		}
 		lastSeq = nextSince
 	}
+}
+
+func watchDaemonCommand[T any](deps *Dependencies, call func(context.Context) (T, error)) (T, error) {
+	value, err := call(context.Background())
+	if err == nil || !reconnect.IsTransientTransportError(err) {
+		return value, err
+	}
+	return commandWithDaemonAutostartRetry(context.Background(), deps, call)
 }
 
 func OrchestrateCompleteCheckCommand(deps *Dependencies, opts OrchestrateCompleteCheckOptions) error {

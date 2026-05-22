@@ -576,6 +576,13 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 }
 
 func (d *Daemon) handleDaemonShutdown(req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+	var body protocol.DaemonShutdownCommandBody
+	if len(req.Body) > 0 {
+		_ = json.Unmarshal(req.Body, &body)
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon shutdown requested", "reason", strings.TrimSpace(body.Reason), "request_id", req.RequestID, "project_id", req.Meta.ProjectID)
+	}
 	d.requestShutdown()
 	return d.successResponse(req)
 }

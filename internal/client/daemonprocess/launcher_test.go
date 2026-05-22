@@ -361,6 +361,46 @@ func TestLauncherReplaceGracefullyStopsSocketBeforeStart(t *testing.T) {
 	}
 }
 
+func TestLauncherReplaceAttributesGracefulShutdownReason(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	tracker := &trackingWriteCloser{}
+
+	launcher := NewLauncher(repoDir, socketPath)
+	launcher.BinPath = "true"
+	launcher.sleepFn = func(time.Duration) {}
+
+	socketUp := true
+	spawned := false
+	var gotReason string
+	launcher.shutdownWithReason = func(_ context.Context, _ string, reason string) error {
+		gotReason = reason
+		socketUp = false
+		return nil
+	}
+	launcher.terminateLockOwner = func(string) error {
+		t.Fatal("Replace() should not terminate lock owner after graceful socket shutdown")
+		return nil
+	}
+	launcher.waitForReady = func(context.Context, string) error {
+		if socketUp || spawned {
+			return nil
+		}
+		return context.DeadlineExceeded
+	}
+	launcher.openLogFile = func(string) (io.WriteCloser, error) {
+		spawned = true
+		return tracker, nil
+	}
+
+	if err := launcher.Replace(context.Background()); err != nil {
+		t.Fatalf("Replace() error = %v", err)
+	}
+	if gotReason != "replace" {
+		t.Fatalf("shutdown reason = %q, want replace", gotReason)
+	}
+}
+
 func TestLauncherStart_ErrorsWhenLockRecoveryFails(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
@@ -782,6 +822,25 @@ func TestLauncherStopUsesGracefulSocketShutdownWhenAvailable(t *testing.T) {
 	}
 	if terminateCalled {
 		t.Fatal("terminateLockOwner should not be called when graceful socket shutdown succeeds")
+	}
+}
+
+func TestLauncherStopAttributesGracefulShutdownReason(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	launcher := NewLauncher(repoDir, socketPath)
+
+	var gotReason string
+	launcher.shutdownWithReason = func(_ context.Context, _ string, reason string) error {
+		gotReason = reason
+		return nil
+	}
+
+	if err := launcher.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if gotReason != "stop" {
+		t.Fatalf("shutdown reason = %q, want stop", gotReason)
 	}
 }
 

@@ -149,8 +149,8 @@ func (l *GlobalInventoryLoader) ListTasksSnapshot(ctx context.Context) (Snapshot
 	}
 	snapshot := l.snapshotFromLive(ctx, live, nil, true)
 	projectDirs := l.projectDirsForLiveSessions(live)
-	projections := l.loadProjections(ctx, projectDirs)
-	return l.enrichEntries(snapshot, projections), nil
+	projections, tasks := l.loadProjections(ctx, projectDirs)
+	return l.enrichEntries(snapshot, projections, tasks), nil
 }
 
 func (l *GlobalInventoryLoader) ListLiveSnapshot(ctx context.Context) (Snapshot, error) {
@@ -172,8 +172,8 @@ func (l *GlobalInventoryLoader) EnrichSnapshot(ctx context.Context, snapshot Sna
 		return snapshot, errInventoryUnavailable()
 	}
 	projectDirs := l.projectDirsForEntries(snapshot.Entries)
-	projections := l.loadProjections(ctx, projectDirs)
-	return l.enrichEntries(snapshot, projections), nil
+	projections, tasks := l.loadProjections(ctx, projectDirs)
+	return l.enrichEntries(snapshot, projections, tasks), nil
 }
 
 func (l *GlobalInventoryLoader) snapshotFromLive(ctx context.Context, live []tmux.SessionInfo, projections map[string]projectedInventory, enriching bool) Snapshot {
@@ -234,7 +234,7 @@ func (l *GlobalInventoryLoader) snapshotFromLive(ctx context.Context, live []tmu
 	return snapshot
 }
 
-func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map[string]projectedInventory) Snapshot {
+func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map[string]projectedInventory, treeTasks []domain.Task) Snapshot {
 	entries := make([]InventoryEntry, 0, len(snapshot.Entries))
 	for _, entry := range snapshot.Entries {
 		if projection, ok := projections[entry.SessionID]; ok {
@@ -254,6 +254,7 @@ func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map
 	}
 	enriched := l.snapshotFromEntries(entries, false)
 	enriched.CurrentSessionID = snapshot.CurrentSessionID
+	enriched.TreeTasks = treeTasks
 	return enriched
 }
 
@@ -426,11 +427,11 @@ func addProjectDir(dirs *[]string, seen map[string]struct{}, path string) {
 	*dirs = append(*dirs, abs)
 }
 
-func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs []string) map[string]projectedInventory {
+func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs []string) (map[string]projectedInventory, []domain.Task) {
 	out := map[string]projectedInventory{}
 	source := l.source
 	if source == nil {
-		return out
+		return out, nil
 	}
 	if _, ok := source.(*DaemonSnapshotSource); ok {
 		source = NewDaemonSnapshotSource(projectDirs, l.logger)
@@ -440,8 +441,9 @@ func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs
 		if l.logger != nil {
 			l.logger.Debug("global selector daemon snapshot enrichment failed", "error", err)
 		}
-		return out
+		return out, nil
 	}
+	tasksByIssue := map[string]domain.Task{}
 	for _, snapshot := range snapshots {
 		projectID := protocol.NormalizeProjectID(snapshot.ProjectID)
 		projectPath := strings.TrimSpace(snapshot.ProjectPath)
@@ -450,6 +452,7 @@ func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs
 			if issueID == "" {
 				continue
 			}
+			tasksByIssue[issueID] = task
 			projection := projectedInventory{
 				projectID:   projectID,
 				projectPath: projectPath,
@@ -469,7 +472,14 @@ func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs
 			addProjection(out, naming.CanonicalSessionID(projectPath, issueID), projection)
 		}
 	}
-	return out
+	tasks := make([]domain.Task, 0, len(tasksByIssue))
+	for _, task := range tasksByIssue {
+		tasks = append(tasks, task)
+	}
+	sort.SliceStable(tasks, func(i, j int) bool {
+		return tasks[i].ID.String() < tasks[j].ID.String()
+	})
+	return out, tasks
 }
 
 func addProjection(out map[string]projectedInventory, key string, projection projectedInventory) {

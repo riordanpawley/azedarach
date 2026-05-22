@@ -389,6 +389,76 @@ func TestModelTabTogglesTreeViewAndPersistsGlobally(t *testing.T) {
 	}
 }
 
+func TestModelTreeViewShowsNonSelectableAncestorsForActiveLeaves(t *testing.T) {
+	rootID := naming.IssueID("az-root")
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	entries := []InventoryEntry{
+		{
+			SessionID:      "az-child",
+			IssueID:        childID.String(),
+			TaskTitle:      "Worker session",
+			State:          domain.SessionBusy,
+			HasTmuxSession: true,
+			Task: domain.Task{
+				ID:       childID,
+				Title:    "Worker session",
+				Status:   domain.StatusInProgress,
+				ParentID: &parentID,
+			},
+		},
+	}
+	snapshot := Snapshot{
+		Entries: entries,
+		TreeTasks: []domain.Task{
+			{
+				ID:       rootID,
+				Title:    "Root orchestration",
+				Status:   domain.StatusInProgress,
+				Priority: domain.P2,
+				Type:     domain.TypeEpic,
+			},
+			{
+				ID:       parentID,
+				Title:    "Parent design",
+				Status:   domain.StatusInProgress,
+				Priority: domain.P1,
+				Type:     domain.TypeTask,
+				ParentID: &rootID,
+			},
+			{
+				ID:       childID,
+				Title:    "Worker session",
+				Status:   domain.StatusInProgress,
+				ParentID: &parentID,
+			},
+		},
+	}
+	model := New(fakeSnapshotLoader{snapshot: snapshot})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 18})
+	model = updated.(Model)
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: snapshot})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	model = updateKey(t, model, "tab")
+
+	view := ansi.Strip(model.View())
+	for _, want := range []string{"az-root", "`- az-parent", "`- az-child"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("tree view missing %q:\n%s", want, view)
+		}
+	}
+	if model.cursor != 0 {
+		t.Fatalf("initial cursor = %d, want active child entry index 0", model.cursor)
+	}
+	model = updateKey(t, model, "down")
+	if model.cursor != 0 {
+		t.Fatalf("tree cursor moved to ancestor/nonexistent row: %d", model.cursor)
+	}
+}
+
 func TestModelRestoresPersistedSelectorTab(t *testing.T) {
 	store := &fakeUIStateStore{values: map[string]string{
 		protocol.UIStateKeyTMUXSelectorLastActiveTab: "tree",

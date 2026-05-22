@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -61,6 +62,37 @@ func TestParseOrchestrateWatchArgs(t *testing.T) {
 	}
 	if !opts.JSONL {
 		t.Fatalf("JSONL = false, want true")
+	}
+}
+
+func TestWatchDaemonCommandRestartsAfterTransientSocketLoss(t *testing.T) {
+	oldLauncher := newLauncher
+	t.Cleanup(func() { newLauncher = oldLauncher })
+
+	launcher := &fakeLauncher{}
+	newLauncher = func(_, _ string) daemonStarter {
+		return launcher
+	}
+
+	calls := 0
+	got, err := watchDaemonCommand(&Dependencies{}, func(context.Context) (string, error) {
+		calls++
+		if !launcher.startCalled {
+			return "", errors.New("dial unix /tmp/azedarach.sock: connect: connection refused")
+		}
+		return "reattached", nil
+	})
+	if err != nil {
+		t.Fatalf("watchDaemonCommand error = %v", err)
+	}
+	if got != "reattached" {
+		t.Fatalf("result = %q, want reattached", got)
+	}
+	if !launcher.startCalled {
+		t.Fatal("launcher.Start was not called after transient transport loss")
+	}
+	if calls != 3 {
+		t.Fatalf("calls = %d, want initial call, retry probe, and post-start call", calls)
 	}
 }
 

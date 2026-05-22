@@ -536,29 +536,72 @@ func validateSessionIssueID(ctx context.Context, deps *Dependencies, issueID str
 
 func resolveSessionStartBaseBranch(ctx context.Context, deps *Dependencies, task domain.Task) (string, error) {
 	baseBranch := resolveCLIBaseBranch(deps.Config)
-	if task.ParentID == nil {
-		return baseBranch, nil
-	}
-	parentID := strings.TrimSpace(task.ParentID.String())
+	parentID := taskParentIssueID(task)
 	if parentID == "" {
 		return baseBranch, nil
 	}
-
 	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
 	if err != nil {
 		return "", fmt.Errorf("resolve parent worktree branch for %s: %w", task.ID, err)
 	}
+	if branch := branchForIssueWorktree(worktrees, parentID); branch != "" {
+		return branch, nil
+	}
+	tasks, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve ancestor task graph for %s: %w", task.ID, err)
+	}
+	tasksByID := make(map[string]domain.Task, len(tasks.Tasks))
+	for _, candidate := range tasks.Tasks {
+		issueID := strings.TrimSpace(candidate.ID.String())
+		if issueID != "" {
+			tasksByID[issueID] = candidate
+		}
+	}
+	seen := map[string]struct{}{}
+	for parentID != "" {
+		if _, ok := seen[parentID]; ok {
+			return baseBranch, nil
+		}
+		seen[parentID] = struct{}{}
+		if branch := branchForIssueWorktree(worktrees, parentID); branch != "" {
+			return branch, nil
+		}
+		parentTask, ok := tasksByID[parentID]
+		if !ok {
+			return baseBranch, nil
+		}
+		parentID = taskParentIssueID(parentTask)
+	}
+	return baseBranch, nil
+}
+
+func taskParentIssueID(task domain.Task) string {
+	if task.ParentID != nil {
+		return strings.TrimSpace(task.ParentID.String())
+	}
+	for _, dep := range task.Dependencies {
+		if dep.Type == domain.DependencyParentChild || string(dep.Type) == "parent_child" {
+			if parentID := strings.TrimSpace(dep.ID.String()); parentID != "" {
+				return parentID
+			}
+		}
+	}
+	return ""
+}
+
+func branchForIssueWorktree(worktrees []daemonclient.Worktree, issueID string) string {
 	for _, worktree := range worktrees {
-		if !naming.IssueIDsEqual(worktree.IssueID, parentID) {
+		if !naming.IssueIDsEqual(worktree.IssueID, issueID) {
 			continue
 		}
 		branch := strings.TrimSpace(worktree.Branch)
 		if branch != "" {
-			return branch, nil
+			return branch
 		}
 		break
 	}
-	return baseBranch, nil
+	return ""
 }
 
 // BranchMergeToBaseCommand merges one issue worktree branch into the base branch using daemon git commands.

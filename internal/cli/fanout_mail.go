@@ -513,10 +513,12 @@ func MailWatchCommand(deps *Dependencies, opts MailWatchOptions) error {
 		return nil
 	}
 
-	initial, err := deps.DaemonClient.MailWatch(ctx, protocol.MailWatchCommandBody{
-		RepoDir:     deps.RepoDir,
-		ParentIssue: opts.ParentIssueID,
-		SinceSeq:    opts.SinceSeq,
+	initial, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) ([]protocol.MailEvent, error) {
+		return deps.DaemonClient.MailWatch(callCtx, protocol.MailWatchCommandBody{
+			RepoDir:     deps.RepoDir,
+			ParentIssue: opts.ParentIssueID,
+			SinceSeq:    opts.SinceSeq,
+		})
 	})
 	if err != nil {
 		return err
@@ -533,10 +535,12 @@ func MailWatchCommand(deps *Dependencies, opts MailWatchOptions) error {
 	// Stream mode: no heartbeat frames; emit only when new events exist.
 	for {
 		time.Sleep(250 * time.Millisecond)
-		events, err := deps.DaemonClient.MailWatch(context.Background(), protocol.MailWatchCommandBody{
-			RepoDir:     deps.RepoDir,
-			ParentIssue: opts.ParentIssueID,
-			SinceSeq:    lastSeq + 1,
+		events, err := watchDaemonCommand(deps, func(ctx context.Context) ([]protocol.MailEvent, error) {
+			return deps.DaemonClient.MailWatch(ctx, protocol.MailWatchCommandBody{
+				RepoDir:     deps.RepoDir,
+				ParentIssue: opts.ParentIssueID,
+				SinceSeq:    lastSeq + 1,
+			})
 		})
 		if err != nil {
 			return err
