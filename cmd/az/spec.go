@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -104,6 +106,28 @@ type specGraphOptions struct {
 	Format   string
 }
 
+type specSliceGateOptions struct {
+	JSON        bool
+	Slice       string
+	Issue       string
+	Strict      bool
+	SkipTests   bool
+	TestCommand string
+}
+
+type specSliceGateResult struct {
+	Slice                string   `json:"slice"`
+	Issue                string   `json:"issue"`
+	Requirements         int      `json:"requirements"`
+	MissingImplementsReq []string `json:"missing_implements_req,omitempty"`
+	MissingVerifiesReq   []string `json:"missing_verifies_req,omitempty"`
+	LintOK               bool     `json:"lint_ok"`
+	ParityOK             bool     `json:"parity_ok"`
+	TestsOK              bool     `json:"tests_ok"`
+	TestCommand          string   `json:"test_command,omitempty"`
+	OK                   bool     `json:"ok"`
+}
+
 func runSpecCommand(cfg *config.Config, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
 		cli.PrintSpecUsage()
@@ -128,6 +152,8 @@ func runSpecCommand(cfg *config.Config, args []string) error {
 		return runSpecParityCommand(cfg, args[1:])
 	case "graph":
 		return runSpecGraphCommand(cfg, args[1:])
+	case "slice":
+		return runSpecSliceCommand(cfg, args[1:])
 	default:
 		return fmt.Errorf("unknown spec command: %s", args[0])
 	}
@@ -276,6 +302,24 @@ func runSpecGraphCommand(cfg *config.Config, args []string) error {
 		return err
 	}
 	return runSpecGraphRPC(cfg, opts)
+}
+
+func runSpecSliceCommand(cfg *config.Config, args []string) error {
+	if len(args) == 0 || isHelpArg(args[0]) {
+		cli.PrintSpecSliceUsage()
+		return nil
+	}
+	switch args[0] {
+	case "gate":
+		opts, err := parseSpecSliceGateArgs(args[1:])
+		if err != nil {
+			cli.PrintSpecSliceUsage()
+			return err
+		}
+		return runSpecSliceGateRPC(cfg, opts)
+	default:
+		return fmt.Errorf("unknown spec slice command: %s", args[0])
+	}
 }
 
 func runSpecReqListRPC(cfg *config.Config, opts specReqListOptions) error {
@@ -516,9 +560,9 @@ type specSliceRequirementMeta struct {
 }
 
 type specSliceNode struct {
-	ID          string   `json:"id"`
+	ID           string   `json:"id"`
 	Requirements []string `json:"requirements"`
-	DependsOn   []string `json:"depends_on"`
+	DependsOn    []string `json:"depends_on"`
 }
 
 type specSliceGraph struct {
@@ -551,6 +595,95 @@ func runSpecGraphRPC(cfg *config.Config, opts specGraphOptions) error {
 		fmt.Print(renderSpecSliceGraphDOT(graph))
 	default:
 		fmt.Print(renderSpecSliceGraphText(graph))
+	}
+	return nil
+}
+
+func runSpecSliceGateRPC(cfg *config.Config, opts specSliceGateOptions) error {
+	readReq := protocol.SpecReadRequestBody{IssueID: naming.IssueID(opts.Issue)}
+	var read protocol.SpecReadResponseBody
+	if err := runSpecRPC(cfg, protocol.CommandSpecRead, readReq, &read); err != nil {
+		return err
+	}
+
+	implementsByReq := map[naming.RequirementID]bool{}
+	verifiesByReq := map[naming.RequirementID]bool{}
+	for _, link := range read.Links {
+		switch link.Role {
+		case protocol.SpecLinkRoleImplements:
+			implementsByReq[link.ReqID] = true
+		case protocol.SpecLinkRoleVerifies:
+			verifiesByReq[link.ReqID] = true
+		}
+	}
+
+	missingImplements := make([]string, 0)
+	missingVerifies := make([]string, 0)
+	for _, req := range read.Requirements {
+		if !implementsByReq[req.ID] {
+			missingImplements = append(missingImplements, req.ID.String())
+		}
+		if !verifiesByReq[req.ID] {
+			missingVerifies = append(missingVerifies, req.ID.String())
+		}
+	}
+
+	var lint protocol.SpecLintResponseBody
+	if err := runSpecRPC(cfg, protocol.CommandSpecLint, protocol.SpecLintRequestBody{Strict: opts.Strict}, &lint); err != nil {
+		return err
+	}
+
+	var parity protocol.SpecParityResponseBody
+	if err := runSpecRPC(cfg, protocol.CommandSpecParity, protocol.SpecParityRequestBody{}, &parity); err != nil {
+		return err
+	}
+
+	testsOK := true
+	if !opts.SkipTests {
+		cmd := exec.Command("sh", "-lc", opts.TestCommand)
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			testsOK = false
+		}
+	}
+
+	result := specSliceGateResult{
+		Slice:                opts.Slice,
+		Issue:                opts.Issue,
+		Requirements:         len(read.Requirements),
+		MissingImplementsReq: missingImplements,
+		MissingVerifiesReq:   missingVerifies,
+		LintOK:               lint.OK,
+		ParityOK:             parity.OK,
+		TestsOK:              testsOK,
+		TestCommand:          opts.TestCommand,
+	}
+	result.OK = result.LintOK && result.ParityOK && result.TestsOK && len(result.MissingImplementsReq) == 0 && len(result.MissingVerifiesReq) == 0
+
+	if opts.JSON {
+		if err := printJSON(result); err != nil {
+			return err
+		}
+	} else {
+		fmt.Printf("Spec slice gate: %s (issue=%s)\n", result.Slice, result.Issue)
+		fmt.Printf("Requirements: %d\n", result.Requirements)
+		fmt.Printf("Missing implements links: %d\n", len(result.MissingImplementsReq))
+		fmt.Printf("Missing verifies links: %d\n", len(result.MissingVerifiesReq))
+		fmt.Printf("Lint OK: %t\n", result.LintOK)
+		fmt.Printf("Parity OK: %t\n", result.ParityOK)
+		if opts.SkipTests {
+			fmt.Println("Tests: skipped")
+		} else {
+			fmt.Printf("Tests OK: %t (%s)\n", result.TestsOK, opts.TestCommand)
+		}
+		fmt.Printf("Gate OK: %t\n", result.OK)
+	}
+
+	if !result.OK {
+		return fmt.Errorf("spec slice gate failed")
 	}
 	return nil
 }
@@ -870,6 +1003,39 @@ func parseSpecParityArgs(args []string) (specParityOptions, error) {
 	}
 	if fs.NArg() != 0 {
 		return specParityOptions{}, fmt.Errorf("usage: az spec parity [--json] [--fail-on-out]")
+	}
+	return opts, nil
+}
+
+func parseSpecSliceGateArgs(args []string) (specSliceGateOptions, error) {
+	opts := specSliceGateOptions{TestCommand: "go test ./..."}
+	fs := flag.NewFlagSet("spec slice gate", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "json output")
+	fs.StringVar(&opts.Slice, "slice", "", "slice id")
+	fs.StringVar(&opts.Issue, "issue", "", "issue id (defaults to --slice)")
+	fs.BoolVar(&opts.Strict, "strict", false, "strict lint mode")
+	fs.BoolVar(&opts.SkipTests, "skip-tests", false, "skip test command")
+	fs.StringVar(&opts.TestCommand, "test-command", opts.TestCommand, "shell command for test gate")
+	if err := fs.Parse(args); err != nil {
+		return specSliceGateOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return specSliceGateOptions{}, fmt.Errorf("usage: az spec slice gate --slice <slice-id> [--issue <issue-id>] [--strict] [--skip-tests] [--test-command <cmd>] [--json]")
+	}
+	if strings.TrimSpace(opts.Slice) == "" {
+		return specSliceGateOptions{}, fmt.Errorf("missing required flag: --slice")
+	}
+	var err error
+	if opts.Issue, err = normalizeOptionalIdentifier("issue-id", opts.Issue); err != nil {
+		return specSliceGateOptions{}, err
+	}
+	if opts.Issue == "" {
+		opts.Issue = strings.TrimSpace(opts.Slice)
+	}
+	opts.TestCommand = strings.TrimSpace(opts.TestCommand)
+	if !opts.SkipTests && opts.TestCommand == "" {
+		return specSliceGateOptions{}, fmt.Errorf("test command must be non-empty when tests are enabled")
 	}
 	return opts, nil
 }
