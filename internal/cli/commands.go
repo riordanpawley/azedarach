@@ -616,7 +616,10 @@ func BranchMergeToBaseCommand(deps *Dependencies, issueID string) error {
 	if err != nil {
 		return err
 	}
-	baseBranch := resolveCLIBaseBranch(deps.Config)
+	baseBranch, err := resolveMergeToBaseBranch(ctx, deps, source.IssueID)
+	if err != nil {
+		return err
+	}
 	baseWorktree := strings.TrimSpace(deps.RepoDir)
 	if baseWorktree == "" {
 		baseWorktree = "."
@@ -653,6 +656,58 @@ func BranchMergeToBaseCommand(deps *Dependencies, issueID string) error {
 	}
 	fmt.Printf("Merged %s into %s (%s)\n", source.Branch, baseBranch, source.IssueID)
 	return nil
+}
+
+func resolveMergeToBaseBranch(ctx context.Context, deps *Dependencies, issueID string) (string, error) {
+	defaultBase := resolveCLIBaseBranch(deps.Config)
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return defaultBase, nil
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve merge base branch task graph: %w", err)
+	}
+
+	tasksByID := make(map[string]domain.Task, len(snapshot.Tasks))
+	for _, task := range snapshot.Tasks {
+		id := strings.TrimSpace(task.ID.String())
+		if id == "" {
+			continue
+		}
+		tasksByID[id] = task
+	}
+	sourceTask, ok := tasksByID[issueID]
+	if !ok {
+		return defaultBase, nil
+	}
+
+	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve merge base branch worktrees: %w", err)
+	}
+
+	seen := map[string]struct{}{}
+	for parentID := taskParentIssueID(sourceTask); parentID != ""; {
+		if _, ok := seen[parentID]; ok {
+			return defaultBase, nil
+		}
+		seen[parentID] = struct{}{}
+
+		parentTask, ok := tasksByID[parentID]
+		if !ok {
+			return defaultBase, nil
+		}
+		if parentTask.Status != domain.StatusDone {
+			if branch := branchForIssueWorktree(worktrees, parentID); branch != "" {
+				return branch, nil
+			}
+			return "", fmt.Errorf("nearest non-closed ancestor %s has no active worktree branch; attach/start that ancestor before merging %s", parentID, issueID)
+		}
+		parentID = taskParentIssueID(parentTask)
+	}
+	return defaultBase, nil
 }
 
 func BranchAgentMergeCommand(deps *Dependencies, opts BranchAgentMergeOptions) error {
