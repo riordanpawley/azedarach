@@ -268,6 +268,20 @@ type SessionResolveConflictOptions struct {
 	Prompt        string
 }
 
+type sessionIssueTarget struct {
+	ProjectID string
+	IssueID   string
+	Task      domain.Task
+}
+
+type sessionProjectCandidate struct {
+	Route   string
+	Name    string
+	Path    string
+	Aliases []string
+	Scopes  []string
+}
+
 type BranchAgentMergeOptions struct {
 	IssueID string
 	Target  string
@@ -360,20 +374,23 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	task, err := validateSessionIssueID(ctx, deps, issueID)
+	target, err := resolveSessionIssueTarget(ctx, deps, issueID)
 	if err != nil {
 		return err
 	}
-	baseBranch, err := resolveSessionStartBaseBranch(ctx, deps, task)
+	restoreProject := applyIssueProjectOverride(deps, target.ProjectID)
+	defer restoreProject()
+
+	baseBranch, err := resolveSessionStartBaseBranch(ctx, deps, target.Task)
 	if err != nil {
 		return err
 	}
 
-	deps.Logger.Info("starting session", "issue_id", issueID)
-	stopProgress := startSessionProgressReporter(ctx, issueID)
+	deps.Logger.Info("starting session", "project_id", target.ProjectID, "issue_id", target.IssueID)
+	stopProgress := startSessionProgressReporter(ctx, target.IssueID)
 	defer stopProgress()
 
-	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStart, deps.ProjectID, issueID, baseBranch))
+	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStart, target.ProjectID, target.IssueID, baseBranch))
 	if err != nil {
 		return fmt.Errorf("failed to start session: %w", err)
 	}
@@ -418,13 +435,16 @@ func AttachCommand(deps *Dependencies, issueID string) error {
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	if _, err := validateSessionIssueID(ctx, deps, issueID); err != nil {
+	target, err := resolveSessionIssueTarget(ctx, deps, issueID)
+	if err != nil {
 		return err
 	}
+	restoreProject := applyIssueProjectOverride(deps, target.ProjectID)
+	defer restoreProject()
 
-	deps.Logger.Info("attaching to session", "issue_id", issueID)
+	deps.Logger.Info("attaching to session", "project_id", target.ProjectID, "issue_id", target.IssueID)
 
-	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionAttach, deps.ProjectID, issueID, ""))
+	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionAttach, target.ProjectID, target.IssueID, ""))
 	if err != nil {
 		return fmt.Errorf("failed to attach to session: %w", err)
 	}
@@ -444,13 +464,16 @@ func KillCommandWithOptions(deps *Dependencies, issueID string, opts SessionComm
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	if _, err := validateSessionIssueID(ctx, deps, issueID); err != nil {
+	target, err := resolveSessionIssueTarget(ctx, deps, issueID)
+	if err != nil {
 		return err
 	}
+	restoreProject := applyIssueProjectOverride(deps, target.ProjectID)
+	defer restoreProject()
 
-	deps.Logger.Info("killing session", "issue_id", issueID)
+	deps.Logger.Info("killing session", "project_id", target.ProjectID, "issue_id", target.IssueID)
 
-	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStop, deps.ProjectID, issueID, ""))
+	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStop, target.ProjectID, target.IssueID, ""))
 	if err != nil {
 		return fmt.Errorf("failed to kill session: %w", err)
 	}
@@ -468,9 +491,22 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 		return err
 	}
 
-	deps.Logger.Info("checking session status", "issue_id", issueID)
+	targetProjectID := deps.ProjectID
+	targetIssueID := strings.TrimSpace(issueID)
+	if targetIssueID != "" {
+		target, err := resolveSessionIssueTarget(ctx, deps, targetIssueID)
+		if err != nil {
+			return err
+		}
+		targetProjectID = target.ProjectID
+		targetIssueID = target.IssueID
+		restoreProject := applyIssueProjectOverride(deps, targetProjectID)
+		defer restoreProject()
+	}
 
-	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStatus, deps.ProjectID, issueID, ""))
+	deps.Logger.Info("checking session status", "project_id", targetProjectID, "issue_id", targetIssueID)
+
+	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStatus, targetProjectID, targetIssueID, ""))
 	if err != nil {
 		return fmt.Errorf("failed to list tmux sessions: %w", err)
 	}
@@ -479,6 +515,219 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 	}
 
 	return printCommandOutput(resp)
+}
+
+func resolveSessionIssueTarget(ctx context.Context, deps *Dependencies, issueID string) (sessionIssueTarget, error) {
+	trimmed := strings.TrimSpace(issueID)
+	if trimmed == "" {
+		return sessionIssueTarget{}, fmt.Errorf("issue id is required")
+	}
+	if projectPart, issuePart, ok := splitExplicitSessionIssueTarget(trimmed); ok {
+		return resolveExplicitSessionIssueTarget(ctx, deps, trimmed, projectPart, issuePart)
+	}
+	if _, err := naming.ParseIssueID(trimmed); err != nil {
+		return sessionIssueTarget{}, fmt.Errorf("invalid issue id %q: %w", issueID, err)
+	}
+
+	if task, ok, err := lookupSessionTaskInProject(ctx, deps, deps.ProjectID, trimmed); err != nil {
+		return sessionIssueTarget{}, err
+	} else if ok {
+		return sessionIssueTarget{ProjectID: deps.ProjectID, IssueID: trimmed, Task: task}, nil
+	}
+
+	matches, err := resolveCanonicalSessionIssueTargets(ctx, deps, trimmed)
+	if err != nil {
+		return sessionIssueTarget{}, err
+	}
+	switch len(matches) {
+	case 0:
+		return sessionIssueTarget{}, fmt.Errorf("issue not found: %s", trimmed)
+	case 1:
+		return matches[0], nil
+	default:
+		projects := make([]string, 0, len(matches))
+		for _, match := range matches {
+			projects = append(projects, match.ProjectID)
+		}
+		sort.Strings(projects)
+		return sessionIssueTarget{}, fmt.Errorf("ambiguous tmux session issue id %q; matched projects: %s", trimmed, strings.Join(projects, ", "))
+	}
+}
+
+func splitExplicitSessionIssueTarget(raw string) (projectID, issueID string, ok bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", "", false
+	}
+	for _, sep := range []string{":", "/"} {
+		if before, after, found := strings.Cut(trimmed, sep); found {
+			before = strings.TrimSpace(before)
+			after = strings.TrimSpace(after)
+			if before != "" && after != "" {
+				return before, after, true
+			}
+		}
+	}
+	return "", "", false
+}
+
+func resolveExplicitSessionIssueTarget(ctx context.Context, deps *Dependencies, raw, projectPart, issuePart string) (sessionIssueTarget, error) {
+	issueID, err := naming.ParseIssueID(issuePart)
+	if err != nil {
+		return sessionIssueTarget{}, fmt.Errorf("invalid project-prefixed issue id %q: %w", raw, err)
+	}
+	project, ok := findSessionProjectCandidate(deps, projectPart)
+	if !ok {
+		return sessionIssueTarget{}, fmt.Errorf("unknown project in project-prefixed issue id %q: %s", raw, projectPart)
+	}
+	task, found, err := lookupSessionTaskInProject(ctx, deps, project.Route, issueID.String())
+	if err != nil {
+		return sessionIssueTarget{}, err
+	}
+	if !found {
+		return sessionIssueTarget{}, fmt.Errorf("issue not found in project %s: %s", project.Route, issueID.String())
+	}
+	return sessionIssueTarget{ProjectID: project.Route, IssueID: issueID.String(), Task: task}, nil
+}
+
+func resolveCanonicalSessionIssueTargets(ctx context.Context, deps *Dependencies, raw string) ([]sessionIssueTarget, error) {
+	candidates := knownSessionProjectCandidates(deps)
+	matchesByKey := map[string]sessionIssueTarget{}
+	for _, candidate := range candidates {
+		for _, scope := range candidate.Scopes {
+			parsedIssueID, ok := naming.ParseIssueIDFromSessionName(raw, scope)
+			if !ok || strings.EqualFold(parsedIssueID, raw) {
+				continue
+			}
+			task, found, err := lookupSessionTaskInProject(ctx, deps, candidate.Route, parsedIssueID)
+			if err != nil {
+				return nil, err
+			}
+			if !found {
+				continue
+			}
+			key := candidate.Route + "\x00" + strings.ToLower(parsedIssueID)
+			matchesByKey[key] = sessionIssueTarget{ProjectID: candidate.Route, IssueID: parsedIssueID, Task: task}
+		}
+	}
+	matches := make([]sessionIssueTarget, 0, len(matchesByKey))
+	for _, match := range matchesByKey {
+		matches = append(matches, match)
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].ProjectID == matches[j].ProjectID {
+			return matches[i].IssueID < matches[j].IssueID
+		}
+		return matches[i].ProjectID < matches[j].ProjectID
+	})
+	return matches, nil
+}
+
+func lookupSessionTaskInProject(ctx context.Context, deps *Dependencies, projectID, issueID string) (domain.Task, bool, error) {
+	restoreProject := applyIssueProjectOverride(deps, projectID)
+	defer restoreProject()
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return domain.Task{}, false, fmt.Errorf("failed to validate issue %s in project %s: %w", issueID, projectID, err)
+	}
+	task, ok := findTaskByID(snapshot.Tasks, issueID)
+	return task, ok, nil
+}
+
+func findSessionProjectCandidate(deps *Dependencies, projectID string) (sessionProjectCandidate, bool) {
+	normalized := protocol.NormalizeProjectID(projectID)
+	for _, candidate := range knownSessionProjectCandidates(deps) {
+		for _, alias := range candidate.Aliases {
+			if protocol.NormalizeProjectID(alias) == normalized {
+				return candidate, true
+			}
+		}
+	}
+	return sessionProjectCandidate{}, false
+}
+
+func knownSessionProjectCandidates(deps *Dependencies) []sessionProjectCandidate {
+	candidates := make([]sessionProjectCandidate, 0, 4)
+	if deps != nil {
+		candidates = appendSessionProjectCandidate(candidates, "", deps.ProjectID, deps.RepoDir)
+	}
+	if registry, err := config.LoadProjectsRegistry(); err == nil && registry != nil {
+		for _, project := range registry.Projects {
+			candidates = appendSessionProjectCandidate(candidates, project.Name, "", project.Path)
+		}
+	}
+	return dedupeSessionProjectCandidates(candidates)
+}
+
+func appendSessionProjectCandidate(candidates []sessionProjectCandidate, name, route, path string) []sessionProjectCandidate {
+	name = strings.TrimSpace(name)
+	route = strings.TrimSpace(route)
+	path = strings.TrimSpace(path)
+	if path != "" {
+		if hashProjectID, err := config.ProjectIDForRoot(path); err == nil && strings.TrimSpace(hashProjectID) != "" {
+			route = hashProjectID
+		}
+	}
+	if route == "" {
+		route = firstNonEmptyString(name, filepath.Base(path))
+	}
+	route = protocol.NormalizeProjectID(route)
+	if route == "" {
+		return candidates
+	}
+
+	aliases := uniqueTrimmedStrings([]string{route, name, filepath.Base(path)})
+	scopes := uniqueTrimmedStrings([]string{route, path})
+	return append(candidates, sessionProjectCandidate{
+		Route:   route,
+		Name:    name,
+		Path:    path,
+		Aliases: aliases,
+		Scopes:  scopes,
+	})
+}
+
+func dedupeSessionProjectCandidates(candidates []sessionProjectCandidate) []sessionProjectCandidate {
+	byRoute := make(map[string]sessionProjectCandidate, len(candidates))
+	order := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		route := protocol.NormalizeProjectID(candidate.Route)
+		if route == "" {
+			continue
+		}
+		candidate.Route = route
+		existing, ok := byRoute[route]
+		if !ok {
+			byRoute[route] = candidate
+			order = append(order, route)
+			continue
+		}
+		existing.Aliases = uniqueTrimmedStrings(append(existing.Aliases, candidate.Aliases...))
+		existing.Scopes = uniqueTrimmedStrings(append(existing.Scopes, candidate.Scopes...))
+		if existing.Name == "" {
+			existing.Name = candidate.Name
+		}
+		if existing.Path == "" {
+			existing.Path = candidate.Path
+		}
+		byRoute[route] = existing
+	}
+	sort.Strings(order)
+	out := make([]sessionProjectCandidate, 0, len(order))
+	for _, route := range order {
+		out = append(out, byRoute[route])
+	}
+	return out
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func SessionResolveConflictCommand(deps *Dependencies, opts SessionResolveConflictOptions) error {

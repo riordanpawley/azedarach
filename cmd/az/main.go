@@ -1026,6 +1026,11 @@ func printSessionUsage() {
 	fmt.Println("  resolve-conflict <issue-id> [--worktree <path>] [--file <path> ...] [--prompt <text>]")
 	fmt.Println("                        Launch conflict-resolution agent")
 	fmt.Println()
+	fmt.Println("Issue IDs:")
+	fmt.Println("  Bare IDs are scoped to the current project. Use the tmux session form")
+	fmt.Println("  <project-short-slug>-<issue-id> (for example az-bxc), or <project>:<issue-id>,")
+	fmt.Println("  to target a registered project from another repo.")
+	fmt.Println()
 	fmt.Println("Deprecated aliases:")
 	fmt.Println("  kill <issue-id>       Deprecated alias for stop")
 }
