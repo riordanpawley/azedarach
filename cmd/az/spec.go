@@ -6,6 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -95,6 +97,13 @@ type specParityOptions struct {
 	FailOnOut bool
 }
 
+type specGraphOptions struct {
+	JSON     bool
+	Issue    string
+	MetaPath string
+	Format   string
+}
+
 func runSpecCommand(cfg *config.Config, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
 		cli.PrintSpecUsage()
@@ -117,6 +126,8 @@ func runSpecCommand(cfg *config.Config, args []string) error {
 		return runSpecLintCommand(cfg, args[1:])
 	case "parity":
 		return runSpecParityCommand(cfg, args[1:])
+	case "graph":
+		return runSpecGraphCommand(cfg, args[1:])
 	default:
 		return fmt.Errorf("unknown spec command: %s", args[0])
 	}
@@ -252,6 +263,19 @@ func runSpecParityCommand(cfg *config.Config, args []string) error {
 		return err
 	}
 	return runSpecParityRPC(cfg, opts)
+}
+
+func runSpecGraphCommand(cfg *config.Config, args []string) error {
+	if len(args) > 0 && isHelpArg(args[0]) {
+		cli.PrintSpecGraphUsage()
+		return nil
+	}
+	opts, err := parseSpecGraphArgs(args)
+	if err != nil {
+		cli.PrintSpecGraphUsage()
+		return err
+	}
+	return runSpecGraphRPC(cfg, opts)
 }
 
 func runSpecReqListRPC(cfg *config.Config, opts specReqListOptions) error {
@@ -479,6 +503,55 @@ func runSpecParityRPC(cfg *config.Config, opts specParityOptions) error {
 		return printJSON(out)
 	}
 	fmt.Printf("Parity OK: %t (findings=%d)\n", out.OK, len(out.Findings))
+	return nil
+}
+
+type specSliceMetaFile struct {
+	Requirements map[string]specSliceRequirementMeta `json:"requirements"`
+}
+
+type specSliceRequirementMeta struct {
+	Slice     string   `json:"slice"`
+	DependsOn []string `json:"depends_on"`
+}
+
+type specSliceNode struct {
+	ID          string   `json:"id"`
+	Requirements []string `json:"requirements"`
+	DependsOn   []string `json:"depends_on"`
+}
+
+type specSliceGraph struct {
+	Nodes             []specSliceNode `json:"nodes"`
+	TopologicalOrder  []string        `json:"topological_order"`
+	CriticalPath      []string        `json:"critical_path"`
+	CriticalPathDepth int             `json:"critical_path_depth"`
+}
+
+func runSpecGraphRPC(cfg *config.Config, opts specGraphOptions) error {
+	var reqs protocol.SpecRequirementListResponseBody
+	if err := runSpecRPC(cfg, protocol.CommandSpecRequirementList, protocol.SpecRequirementListRequestBody{
+		IssueID: naming.IssueID(opts.Issue),
+	}, &reqs); err != nil {
+		return err
+	}
+	metadata, err := loadSpecSliceMeta(opts.MetaPath)
+	if err != nil {
+		return err
+	}
+	graph, err := buildSpecSliceGraph(reqs.Requirements, metadata)
+	if err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(graph)
+	}
+	switch opts.Format {
+	case "dot":
+		fmt.Print(renderSpecSliceGraphDOT(graph))
+	default:
+		fmt.Print(renderSpecSliceGraphText(graph))
+	}
 	return nil
 }
 
@@ -801,6 +874,43 @@ func parseSpecParityArgs(args []string) (specParityOptions, error) {
 	return opts, nil
 }
 
+func parseSpecGraphArgs(args []string) (specGraphOptions, error) {
+	opts := specGraphOptions{
+		MetaPath: ".azedarach/spec/slices.json",
+		Format:   "text",
+	}
+	fs := flag.NewFlagSet("spec graph", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "json output")
+	fs.StringVar(&opts.Issue, "issue", "", "issue id filter")
+	fs.StringVar(&opts.MetaPath, "meta", opts.MetaPath, "slice metadata json path")
+	fs.StringVar(&opts.Format, "format", opts.Format, "output format: text|dot")
+	if err := fs.Parse(args); err != nil {
+		return specGraphOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return specGraphOptions{}, fmt.Errorf("usage: az spec graph [--json] --issue <issue-id> [--meta <path>] [--format <text|dot>]")
+	}
+	if strings.TrimSpace(opts.Issue) == "" {
+		return specGraphOptions{}, fmt.Errorf("missing required flag: --issue")
+	}
+	var err error
+	if opts.Issue, err = normalizeOptionalIdentifier("issue-id", opts.Issue); err != nil {
+		return specGraphOptions{}, err
+	}
+	opts.MetaPath = strings.TrimSpace(opts.MetaPath)
+	if opts.MetaPath == "" {
+		return specGraphOptions{}, fmt.Errorf("meta path must be non-empty")
+	}
+	switch strings.TrimSpace(opts.Format) {
+	case "text", "dot":
+		opts.Format = strings.TrimSpace(opts.Format)
+	default:
+		return specGraphOptions{}, fmt.Errorf("invalid format %q; expected text|dot", opts.Format)
+	}
+	return opts, nil
+}
+
 func addSelectorFlags(fs *flag.FlagSet, ids *[]string, kind string) {
 	fs.Func("id", fmt.Sprintf("restrict to a specific %s id (repeatable)", kind), func(v string) error {
 		trimmed := strings.TrimSpace(v)
@@ -909,4 +1019,192 @@ func linkIDsFromStrings(ids []string) []naming.SpecLinkID {
 		return nil
 	}
 	return out
+}
+
+func loadSpecSliceMeta(path string) (specSliceMetaFile, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return specSliceMetaFile{}, fmt.Errorf("read slice metadata %q: %w", path, err)
+	}
+	var out specSliceMetaFile
+	if err := json.Unmarshal(data, &out); err != nil {
+		return specSliceMetaFile{}, fmt.Errorf("decode slice metadata %q: %w", path, err)
+	}
+	if len(out.Requirements) == 0 {
+		return specSliceMetaFile{}, fmt.Errorf("slice metadata %q has no requirements", path)
+	}
+	return out, nil
+}
+
+func buildSpecSliceGraph(reqs []protocol.SpecRequirement, meta specSliceMetaFile) (specSliceGraph, error) {
+	sliceReqs := map[string][]string{}
+	deps := map[string]map[string]struct{}{}
+	for _, req := range reqs {
+		m, ok := meta.Requirements[req.ID.String()]
+		if !ok || strings.TrimSpace(m.Slice) == "" {
+			continue
+		}
+		sliceID := strings.TrimSpace(m.Slice)
+		sliceReqs[sliceID] = append(sliceReqs[sliceID], req.ID.String())
+		if _, ok := deps[sliceID]; !ok {
+			deps[sliceID] = map[string]struct{}{}
+		}
+		for _, dep := range m.DependsOn {
+			dep = strings.TrimSpace(dep)
+			if dep == "" || dep == sliceID {
+				continue
+			}
+			deps[sliceID][dep] = struct{}{}
+			if _, ok := deps[dep]; !ok {
+				deps[dep] = map[string]struct{}{}
+			}
+		}
+	}
+	if len(sliceReqs) == 0 {
+		return specSliceGraph{}, fmt.Errorf("no slice metadata matched requirements for selected issue")
+	}
+	order, err := topoSortSlices(deps)
+	if err != nil {
+		return specSliceGraph{}, err
+	}
+	nodes := make([]specSliceNode, 0, len(order))
+	for _, id := range order {
+		reqIDs := append([]string(nil), sliceReqs[id]...)
+		sort.Strings(reqIDs)
+		depIDs := setToSortedList(deps[id])
+		nodes = append(nodes, specSliceNode{ID: id, Requirements: reqIDs, DependsOn: depIDs})
+	}
+	path := criticalPath(order, deps)
+	return specSliceGraph{
+		Nodes:             nodes,
+		TopologicalOrder:  order,
+		CriticalPath:      path,
+		CriticalPathDepth: len(path),
+	}, nil
+}
+
+func topoSortSlices(deps map[string]map[string]struct{}) ([]string, error) {
+	incoming := map[string]int{}
+	reverse := map[string][]string{}
+	for node := range deps {
+		incoming[node] = 0
+	}
+	for node, nodeDeps := range deps {
+		for dep := range nodeDeps {
+			incoming[node]++
+			reverse[dep] = append(reverse[dep], node)
+		}
+	}
+	ready := make([]string, 0)
+	for node, count := range incoming {
+		if count == 0 {
+			ready = append(ready, node)
+		}
+	}
+	sort.Strings(ready)
+	order := make([]string, 0, len(incoming))
+	for len(ready) > 0 {
+		node := ready[0]
+		ready = ready[1:]
+		order = append(order, node)
+		downstream := reverse[node]
+		sort.Strings(downstream)
+		for _, child := range downstream {
+			incoming[child]--
+			if incoming[child] == 0 {
+				ready = append(ready, child)
+			}
+		}
+		sort.Strings(ready)
+	}
+	if len(order) != len(incoming) {
+		return nil, fmt.Errorf("slice dependency graph contains a cycle")
+	}
+	return order, nil
+}
+
+func criticalPath(order []string, deps map[string]map[string]struct{}) []string {
+	bestDepth := map[string]int{}
+	parent := map[string]string{}
+	maxNode := ""
+	for _, node := range order {
+		bestDepth[node] = 1
+		for dep := range deps[node] {
+			if bestDepth[dep]+1 > bestDepth[node] {
+				bestDepth[node] = bestDepth[dep] + 1
+				parent[node] = dep
+			}
+		}
+		if maxNode == "" || bestDepth[node] > bestDepth[maxNode] {
+			maxNode = node
+		}
+	}
+	if maxNode == "" {
+		return nil
+	}
+	reversed := []string{maxNode}
+	for parent[reversed[len(reversed)-1]] != "" {
+		reversed = append(reversed, parent[reversed[len(reversed)-1]])
+	}
+	path := make([]string, 0, len(reversed))
+	for i := len(reversed) - 1; i >= 0; i-- {
+		path = append(path, reversed[i])
+	}
+	return path
+}
+
+func setToSortedList(values map[string]struct{}) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for v := range values {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func renderSpecSliceGraphText(graph specSliceGraph) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Slices: %d\n", len(graph.Nodes)))
+	b.WriteString(fmt.Sprintf("Critical path depth: %d\n", graph.CriticalPathDepth))
+	if len(graph.CriticalPath) > 0 {
+		b.WriteString("Critical path: " + strings.Join(graph.CriticalPath, " -> ") + "\n")
+	}
+	b.WriteString("\nTopological order:\n")
+	for i, id := range graph.TopologicalOrder {
+		b.WriteString(fmt.Sprintf("%d. %s\n", i+1, id))
+	}
+	b.WriteString("\nSlices:\n")
+	for _, node := range graph.Nodes {
+		b.WriteString(fmt.Sprintf("- %s\n", node.ID))
+		if len(node.DependsOn) == 0 {
+			b.WriteString("  depends_on: (none)\n")
+		} else {
+			b.WriteString("  depends_on: " + strings.Join(node.DependsOn, ", ") + "\n")
+		}
+		if len(node.Requirements) == 0 {
+			b.WriteString("  requirements: (none)\n")
+		} else {
+			b.WriteString("  requirements: " + strings.Join(node.Requirements, ", ") + "\n")
+		}
+	}
+	return b.String()
+}
+
+func renderSpecSliceGraphDOT(graph specSliceGraph) string {
+	var b strings.Builder
+	b.WriteString("digraph spec_slices {\n")
+	b.WriteString("  rankdir=LR;\n")
+	for _, node := range graph.Nodes {
+		b.WriteString(fmt.Sprintf("  \"%s\";\n", node.ID))
+	}
+	for _, node := range graph.Nodes {
+		for _, dep := range node.DependsOn {
+			b.WriteString(fmt.Sprintf("  \"%s\" -> \"%s\";\n", dep, node.ID))
+		}
+	}
+	b.WriteString("}\n")
+	return b.String()
 }

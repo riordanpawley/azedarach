@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
 
 func TestParseSpecReqListArgsDedupesIDsInCallerOrder(t *testing.T) {
@@ -53,6 +54,8 @@ func TestRunSpecCommandValidationDeterminism(t *testing.T) {
 		{name: "read positional rejected", args: []string{"read", "bgh"}, errContains: "usage: az spec read [--json] [--issue <issue-id>] [--req <req-id>]"},
 		{name: "pack requires scope", args: []string{"pack", "--stage", "brownfield"}, errContains: "missing required flag: --issue or --req"},
 		{name: "pack invalid stage", args: []string{"pack", "--issue", "bgh", "--stage", "audit"}, errContains: "invalid stage \"audit\""},
+		{name: "graph missing issue", args: []string{"graph"}, errContains: "missing required flag: --issue"},
+		{name: "graph invalid format", args: []string{"graph", "--issue", "bgh", "--format", "json"}, errContains: "invalid format \"json\""},
 		{name: "sync disabled", args: []string{"sync", "--check"}, errContains: "unknown spec command: sync"},
 		{name: "unknown req command", args: []string{"req", "inspect"}, errContains: "unknown spec req command: inspect"},
 	}
@@ -76,6 +79,7 @@ func TestRunSpecCommandHelpIncludesRestoredGrammar(t *testing.T) {
 		"az spec req create --id <req-id> --title <text>",
 		"az spec link add --issue <issue-id> --req <req-id>",
 		"az spec pack [--json] (--issue <issue-id> | --req <req-id>)",
+		"az spec graph [--json] --issue <issue-id> [--meta <path>] [--format <text|dot>]",
 		"az spec parity [--json] [--fail-on-out]",
 	} {
 		if !strings.Contains(helpOut, want) {
@@ -84,6 +88,34 @@ func TestRunSpecCommandHelpIncludesRestoredGrammar(t *testing.T) {
 	}
 	if strings.Contains(helpOut, "az spec sync") {
 		t.Fatalf("help output should not mention disabled sync command: %q", helpOut)
+	}
+}
+
+func TestBuildSpecSliceGraphTopologicalAndCriticalPath(t *testing.T) {
+	reqs := []protocol.SpecRequirement{
+		{ID: "req-a"},
+		{ID: "req-b"},
+		{ID: "req-c"},
+	}
+	meta := specSliceMetaFile{
+		Requirements: map[string]specSliceRequirementMeta{
+			"req-a": {Slice: "s1"},
+			"req-b": {Slice: "s2", DependsOn: []string{"s1"}},
+			"req-c": {Slice: "s3", DependsOn: []string{"s2"}},
+		},
+	}
+	graph, err := buildSpecSliceGraph(reqs, meta)
+	if err != nil {
+		t.Fatalf("buildSpecSliceGraph error = %v", err)
+	}
+	if got := strings.Join(graph.TopologicalOrder, ","); got != "s1,s2,s3" {
+		t.Fatalf("topological order = %q, want s1,s2,s3", got)
+	}
+	if got := strings.Join(graph.CriticalPath, ","); got != "s1,s2,s3" {
+		t.Fatalf("critical path = %q, want s1,s2,s3", got)
+	}
+	if graph.CriticalPathDepth != 3 {
+		t.Fatalf("critical path depth = %d, want 3", graph.CriticalPathDepth)
 	}
 }
 
