@@ -42,6 +42,29 @@ func TestMergePreflightOverlayAbortSelection(t *testing.T) {
 	}
 }
 
+func TestMergePreflightOverlayIgnoreSourceDirtySelection(t *testing.T) {
+	o := NewMergePreflightOverlay("az-1", "base", "/tmp/az-1", ".", []string{"Source az-1 is not clean"}, []string{"foo.go"}, nil, nil, "main", "az/az-1", true)
+	_, cmd := o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if cmd == nil {
+		t.Fatal("expected ignore source dirty command")
+	}
+	msg := cmd()
+	selection, ok := msg.(SelectionMsg)
+	if !ok {
+		t.Fatalf("msg type = %T, want SelectionMsg", msg)
+	}
+	if selection.Key != "merge_preflight_ignore_source_dirty" {
+		t.Fatalf("selection key = %q, want merge_preflight_ignore_source_dirty", selection.Key)
+	}
+	value, ok := selection.Value.(MergePreflightRefreshSelection)
+	if !ok {
+		t.Fatalf("selection value = %T, want MergePreflightRefreshSelection", selection.Value)
+	}
+	if !value.IgnoreSourceDirty {
+		t.Fatalf("ignore source dirty = false, want true")
+	}
+}
+
 func TestMergePreflightOverlayClose(t *testing.T) {
 	o := NewMergePreflightOverlay("az-1", "main", "/tmp/az-1", ".", nil, nil, nil, nil, "", "", false)
 	_, cmd := o.Update(tea.KeyMsg{Type: tea.KeyEsc})
@@ -70,6 +93,20 @@ func TestMergePreflightOverlayViewContainsReasons(t *testing.T) {
 	}
 	if !strings.Contains(view, "Predicted conflict files:") || !strings.Contains(view, "conflict.go") {
 		t.Fatalf("view missing predicted conflict files: %q", view)
+	}
+}
+
+func TestMergePreflightOverlayResponsiveSize(t *testing.T) {
+	o := NewMergePreflightOverlay("az-1", "main", "/tmp/az-1", ".", []string{"Source az-1 is not clean: 1 modified"}, []string{"source.go"}, []string{"target.go"}, nil, "main", "az/az-1", true)
+	o.ApplyWindowSize(tea.WindowSizeMsg{Width: 120, Height: 40})
+	width, height := o.Size()
+	if width > 120 || height > 40 {
+		t.Fatalf("default size = %dx%d, want within 120x40", width, height)
+	}
+	o.ApplyWindowSize(tea.WindowSizeMsg{Width: 62, Height: 18})
+	width, height = o.Size()
+	if width > 62 || height > 18 {
+		t.Fatalf("small size = %dx%d, want within 62x18", width, height)
 	}
 }
 
