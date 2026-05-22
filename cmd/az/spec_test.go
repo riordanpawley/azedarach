@@ -53,6 +53,9 @@ func TestRunSpecCommandValidationDeterminism(t *testing.T) {
 		{name: "read positional rejected", args: []string{"read", "bgh"}, errContains: "usage: az spec read [--json] [--issue <issue-id>] [--req <req-id>]"},
 		{name: "pack requires scope", args: []string{"pack", "--stage", "brownfield"}, errContains: "missing required flag: --issue or --req"},
 		{name: "pack invalid stage", args: []string{"pack", "--issue", "bgh", "--stage", "audit"}, errContains: "invalid stage \"audit\""},
+		{name: "slice unknown command", args: []string{"slice", "inspect"}, errContains: "unknown spec slice command: inspect"},
+		{name: "slice gate requires slice", args: []string{"slice", "gate"}, errContains: "missing required flag: --slice"},
+		{name: "slice gate rejects positional", args: []string{"slice", "gate", "--slice", "bgh", "extra"}, errContains: "usage: az spec slice gate --slice <slice-id>"},
 		{name: "sync disabled", args: []string{"sync", "--check"}, errContains: "unknown spec command: sync"},
 		{name: "unknown req command", args: []string{"req", "inspect"}, errContains: "unknown spec req command: inspect"},
 	}
@@ -76,6 +79,7 @@ func TestRunSpecCommandHelpIncludesRestoredGrammar(t *testing.T) {
 		"az spec req create --id <req-id> --title <text>",
 		"az spec link add --issue <issue-id> --req <req-id>",
 		"az spec pack [--json] (--issue <issue-id> | --req <req-id>)",
+		"az spec slice gate --slice <slice-id>",
 		"az spec parity [--json] [--fail-on-out]",
 	} {
 		if !strings.Contains(helpOut, want) {
