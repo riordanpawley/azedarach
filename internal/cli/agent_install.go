@@ -1,7 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -377,6 +381,9 @@ func (codexInstaller) Install(_ context.Context, deps *Dependencies, opts AIInst
 	if err := writeJSONObject(hooksPath, hooksConfig); err != nil {
 		return fmt.Errorf("write codex hooks config: %w", err)
 	}
+	if err := trustCodexManagedProjectHooks(hooksPath, specs); err != nil {
+		return fmt.Errorf("trust codex hooks: %w", err)
+	}
 
 	fmt.Printf("Installed codex hooks in %s\n", hooksPath)
 	if opts.Verbose {
@@ -395,6 +402,193 @@ func buildCodexHookJSONCommand(event string) string {
 		`/bin/sh -c 'out="$(az ai hook run --agent=codex --json %s 2>/dev/null | tail -n 1)"; [ -n "$out" ] && printf "%%s\n" "$out" || printf "{}\n"'`,
 		event,
 	)
+}
+
+func trustCodexManagedProjectHooks(hooksPath string, specs []struct {
+	eventName  string
+	guardEvent string
+	matcher    string
+}) error {
+	absHooksPath, err := filepath.Abs(hooksPath)
+	if err != nil {
+		return fmt.Errorf("resolve hooks path: %w", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home directory: %w", err)
+	}
+	configPath := filepath.Join(home, ".codex", "config.toml")
+	entries := make(map[string]string, len(specs))
+	for _, spec := range specs {
+		eventKey := strings.ReplaceAll(camelHookEventNameToKey(spec.eventName), "-", "_")
+		key := fmt.Sprintf("%s:%s:0:0", absHooksPath, eventKey)
+		entries[key] = codexCommandHookTrustHash(eventKey, spec.matcher, buildCodexHookJSONCommand(spec.guardEvent))
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return fmt.Errorf("create codex config directory: %w", err)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read codex config: %w", err)
+	}
+	content := upsertCodexHookTrustEntries(string(raw), entries)
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		return fmt.Errorf("write codex config: %w", err)
+	}
+	return nil
+}
+
+func camelHookEventNameToKey(eventName string) string {
+	var out strings.Builder
+	for i, r := range eventName {
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			out.WriteByte('_')
+		}
+		out.WriteRune(r)
+	}
+	return strings.ToLower(out.String())
+}
+
+func codexCommandHookTrustHash(eventKey, matcher, command string) string {
+	handler := map[string]any{
+		"async":   false,
+		"command": command,
+		"timeout": 600,
+		"type":    "command",
+	}
+	identity := map[string]any{
+		"event_name": eventKey,
+		"hooks":      []any{handler},
+	}
+	if strings.TrimSpace(matcher) != "" {
+		identity["matcher"] = matcher
+	}
+	sum := sha256.Sum256(canonicalJSON(identity))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func canonicalJSON(value any) []byte {
+	var buf bytes.Buffer
+	writeCanonicalJSON(&buf, value)
+	return buf.Bytes()
+}
+
+func writeCanonicalJSON(buf *bytes.Buffer, value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		buf.WriteByte('{')
+		for i, key := range keys {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			writeJSONString(buf, key)
+			buf.WriteByte(':')
+			writeCanonicalJSON(buf, typed[key])
+		}
+		buf.WriteByte('}')
+	case []any:
+		buf.WriteByte('[')
+		for i, item := range typed {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			writeCanonicalJSON(buf, item)
+		}
+		buf.WriteByte(']')
+	case string:
+		writeJSONString(buf, typed)
+	case bool:
+		if typed {
+			buf.WriteString("true")
+		} else {
+			buf.WriteString("false")
+		}
+	case int:
+		fmt.Fprintf(buf, "%d", typed)
+	default:
+		data, _ := json.Marshal(typed)
+		buf.Write(data)
+	}
+}
+
+func writeJSONString(buf *bytes.Buffer, value string) {
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	_ = encoder.Encode(value)
+	buf.Write(bytes.TrimSpace(encoded.Bytes()))
+}
+
+func upsertCodexHookTrustEntries(content string, entries map[string]string) string {
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	out := make([]string, 0, len(lines)+len(entries)*4)
+	seen := map[string]bool{}
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		key, ok := parseCodexHookStateHeader(line)
+		if !ok {
+			out = append(out, line)
+			continue
+		}
+		hash, managed := entries[key]
+		if !managed {
+			out = append(out, line)
+			continue
+		}
+		seen[key] = true
+		out = append(out, line)
+		replaced := false
+		for i+1 < len(lines) && !strings.HasPrefix(strings.TrimSpace(lines[i+1]), "[") {
+			i++
+			if strings.HasPrefix(strings.TrimSpace(lines[i]), "trusted_hash") {
+				out = append(out, fmt.Sprintf("trusted_hash = %q", hash))
+				replaced = true
+				continue
+			}
+			out = append(out, lines[i])
+		}
+		if !replaced {
+			out = append(out, fmt.Sprintf("trusted_hash = %q", hash))
+		}
+	}
+	entryKeys := make([]string, 0, len(entries))
+	for key := range entries {
+		entryKeys = append(entryKeys, key)
+	}
+	sort.Strings(entryKeys)
+	for _, key := range entryKeys {
+		if seen[key] {
+			continue
+		}
+		hash := entries[key]
+		if len(out) > 0 && strings.TrimSpace(out[len(out)-1]) != "" {
+			out = append(out, "")
+		}
+		out = append(out, fmt.Sprintf("[hooks.state.%q]", key))
+		out = append(out, fmt.Sprintf("trusted_hash = %q", hash))
+	}
+	return strings.Join(out, "\n") + "\n"
+}
+
+func parseCodexHookStateHeader(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "[hooks.state.") || !strings.HasSuffix(trimmed, "]") {
+		return "", false
+	}
+	quoted := strings.TrimSuffix(strings.TrimPrefix(trimmed, "[hooks.state."), "]")
+	var key string
+	if err := json.Unmarshal([]byte(quoted), &key); err != nil {
+		return "", false
+	}
+	return key, true
 }
 
 // ----- opencode adapter ------------------------------------------------------
