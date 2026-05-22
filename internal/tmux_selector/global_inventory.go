@@ -234,7 +234,7 @@ func (l *GlobalInventoryLoader) snapshotFromLive(ctx context.Context, live []tmu
 	return snapshot
 }
 
-func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map[string]projectedInventory, tasksByIssue map[string]domain.Task) Snapshot {
+func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map[string]projectedInventory, tasks projectTaskIndex) Snapshot {
 	entries := make([]InventoryEntry, 0, len(snapshot.Entries))
 	for _, entry := range snapshot.Entries {
 		if projection, ok := projections[entry.SessionID]; ok {
@@ -254,7 +254,7 @@ func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map
 	}
 	enriched := l.snapshotFromEntries(entries, false)
 	enriched.CurrentSessionID = snapshot.CurrentSessionID
-	enriched.TreeTasks = ancestorTasksForEntries(entries, tasksByIssue)
+	enriched.TreeTasks = ancestorTasksForEntries(entries, tasks)
 	return enriched
 }
 
@@ -336,6 +336,11 @@ type projectedInventory struct {
 	startedAt   *time.Time
 	worktree    string
 	task        domain.Task
+}
+
+type projectTaskIndex struct {
+	byScope map[string]map[string]domain.Task
+	global  map[string]domain.Task
 }
 
 func (l *GlobalInventoryLoader) projectDirsForLiveSessions(live []tmux.SessionInfo) []string {
@@ -427,11 +432,15 @@ func addProjectDir(dirs *[]string, seen map[string]struct{}, path string) {
 	*dirs = append(*dirs, abs)
 }
 
-func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs []string) (map[string]projectedInventory, map[string]domain.Task) {
+func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs []string) (map[string]projectedInventory, projectTaskIndex) {
 	out := map[string]projectedInventory{}
+	tasks := projectTaskIndex{
+		byScope: map[string]map[string]domain.Task{},
+		global:  map[string]domain.Task{},
+	}
 	source := l.source
 	if source == nil {
-		return out, nil
+		return out, tasks
 	}
 	if _, ok := source.(*DaemonSnapshotSource); ok {
 		source = NewDaemonSnapshotSource(projectDirs, l.logger)
@@ -441,9 +450,8 @@ func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs
 		if l.logger != nil {
 			l.logger.Debug("global selector daemon snapshot enrichment failed", "error", err)
 		}
-		return out, nil
+		return out, tasks
 	}
-	tasksByIssue := map[string]domain.Task{}
 	for _, snapshot := range snapshots {
 		projectID := protocol.NormalizeProjectID(snapshot.ProjectID)
 		projectPath := strings.TrimSpace(snapshot.ProjectPath)
@@ -452,7 +460,7 @@ func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs
 			if issueID == "" {
 				continue
 			}
-			tasksByIssue[issueID] = task
+			tasks.add(projectID, projectPath, issueID, task)
 			projection := projectedInventory{
 				projectID:   projectID,
 				projectPath: projectPath,
@@ -472,17 +480,66 @@ func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs
 			addProjection(out, naming.CanonicalSessionID(projectPath, issueID), projection)
 		}
 	}
-	return out, tasksByIssue
+	return out, tasks
 }
 
-func ancestorTasksForEntries(entries []InventoryEntry, tasksByIssue map[string]domain.Task) []domain.Task {
-	if len(entries) == 0 || len(tasksByIssue) == 0 {
+func (i projectTaskIndex) add(projectID, projectPath, issueID string, task domain.Task) {
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return
+	}
+	for _, scope := range taskScopeKeys(projectID, projectPath) {
+		if i.byScope[scope] == nil {
+			i.byScope[scope] = map[string]domain.Task{}
+		}
+		i.byScope[scope][issueID] = task
+	}
+	if len(taskScopeKeys(projectID, projectPath)) == 0 {
+		i.global[issueID] = task
+	}
+}
+
+func (i projectTaskIndex) lookup(entry InventoryEntry, issueID string) (domain.Task, bool) {
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return domain.Task{}, false
+	}
+	for _, scope := range taskScopeKeys(entry.ProjectID, entry.ProjectPath) {
+		if tasksByIssue := i.byScope[scope]; tasksByIssue != nil {
+			if task, ok := tasksByIssue[issueID]; ok {
+				return task, true
+			}
+		}
+	}
+	if len(taskScopeKeys(entry.ProjectID, entry.ProjectPath)) > 0 {
+		return domain.Task{}, false
+	}
+	task, ok := i.global[issueID]
+	return task, ok
+}
+
+func taskScopeKeys(projectID, projectPath string) []string {
+	keys := make([]string, 0, 2)
+	if projectPath = strings.TrimSpace(projectPath); projectPath != "" {
+		if abs, err := filepath.Abs(projectPath); err == nil {
+			projectPath = abs
+		}
+		keys = append(keys, "path:"+filepath.Clean(projectPath))
+	}
+	if projectID = protocol.TrimProjectID(projectID); projectID != "" {
+		keys = append(keys, "id:"+projectID)
+	}
+	return keys
+}
+
+func ancestorTasksForEntries(entries []InventoryEntry, tasks projectTaskIndex) []domain.Task {
+	if len(entries) == 0 || (len(tasks.byScope) == 0 && len(tasks.global) == 0) {
 		return nil
 	}
 	outByIssue := map[string]domain.Task{}
 	for _, entry := range entries {
 		for parentID := entryParentID(entry); parentID != ""; {
-			task, ok := tasksByIssue[parentID]
+			task, ok := tasks.lookup(entry, parentID)
 			if !ok {
 				break
 			}

@@ -155,6 +155,75 @@ func TestGlobalInventoryLoaderCarriesTreeTasksForAncestorRendering(t *testing.T)
 	}
 }
 
+func TestGlobalInventoryLoaderScopesTreeAncestorsByProject(t *testing.T) {
+	started := time.Unix(1775209200, 0).UTC()
+	projectDir := t.TempDir()
+	otherProjectDir := t.TempDir()
+	projectID := projectIDForPath(projectDir)
+	otherProjectID := projectIDForPath(otherProjectDir)
+	rootID := naming.IssueID("az-root")
+	childID := naming.IssueID("az-child")
+	sessionID := naming.CanonicalSessionID(projectID, childID.String())
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{infos: []tmux.SessionInfo{
+			{Name: sessionID, CreatedAt: &started, Path: projectDir + "/worktrees/" + childID.String()},
+		}},
+		nil,
+		WithProjectDirs(projectDir, otherProjectDir),
+		WithProjectSnapshotSource(fakeProjectSnapshotSource{
+			snapshots: []ProjectInventorySnapshot{
+				{
+					ProjectID:   projectID,
+					ProjectPath: projectDir,
+					Tasks: []domain.Task{
+						{
+							ID:     rootID,
+							Title:  "Correct project root",
+							Status: domain.StatusInProgress,
+							Type:   domain.TypeEpic,
+						},
+						{
+							ID:       childID,
+							Title:    "Correct project worker",
+							Status:   domain.StatusInProgress,
+							ParentID: &rootID,
+							Session: &domain.Session{
+								IssueID:   childID,
+								State:     domain.SessionBusy,
+								StartedAt: &started,
+							},
+							HasTmuxSession: true,
+						},
+					},
+				},
+				{
+					ProjectID:   otherProjectID,
+					ProjectPath: otherProjectDir,
+					Tasks: []domain.Task{
+						{
+							ID:     rootID,
+							Title:  "Wrong project root",
+							Status: domain.StatusBlocked,
+							Type:   domain.TypeEpic,
+						},
+					},
+				},
+			},
+		}),
+	)
+
+	snapshot, err := loader.ListTasksSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("ListTasksSnapshot: %v", err)
+	}
+	if len(snapshot.TreeTasks) != 1 {
+		t.Fatalf("tree tasks = %#v, want one scoped root ancestor task", snapshot.TreeTasks)
+	}
+	if got := snapshot.TreeTasks[0]; got.ID != rootID || got.Title != "Correct project root" {
+		t.Fatalf("tree ancestor = %#v, want correct project root", got)
+	}
+}
+
 func TestGlobalInventoryLoaderHonorsLimit(t *testing.T) {
 	loader := NewGlobalInventoryLoader(
 		fakeSessionInventory{infos: []tmux.SessionInfo{
