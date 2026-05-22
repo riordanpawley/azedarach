@@ -212,14 +212,19 @@ func TestEnsureAttachedRetryAfterRestart(t *testing.T) {
 	}
 }
 
-func TestEnsureAttachedDoesNotReplaceAcceptedVersionMismatch(t *testing.T) {
+func TestEnsureAttachedReplacesAcceptedVersionMismatch(t *testing.T) {
+	var replaced atomic.Bool
 	h := &fakeHandshaker{
 		fn: func() (protocol.HelloAck, error) {
+			if replaced.Load() {
+				return protocol.HelloAck{Accepted: true, DaemonVersion: "dev-new"}, nil
+			}
 			return protocol.HelloAck{Accepted: true, DaemonVersion: "dev-old"}, nil
 		},
 	}
 	s := &fakeStarter{
 		replace: func(context.Context) error {
+			replaced.Store(true)
 			return nil
 		},
 	}
@@ -235,11 +240,11 @@ func TestEnsureAttachedDoesNotReplaceAcceptedVersionMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureAttached err: %v", err)
 	}
-	if !ack.Accepted || ack.DaemonVersion != "dev-old" {
-		t.Fatalf("ack = %+v, want accepted existing daemon", ack)
+	if !ack.Accepted || ack.DaemonVersion != "dev-new" {
+		t.Fatalf("ack = %+v, want accepted new daemon", ack)
 	}
-	if got := s.replaceCalls.Load(); got != 0 {
-		t.Fatalf("replace calls = %d, want 0", got)
+	if got := s.replaceCalls.Load(); got != 1 {
+		t.Fatalf("replace calls = %d, want 1", got)
 	}
 }
 
