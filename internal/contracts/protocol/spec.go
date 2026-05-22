@@ -12,6 +12,7 @@ const (
 	CommandSpecLinkAdd           = "spec.link.add"
 	CommandSpecLinkRemove        = "spec.link.remove"
 	CommandSpecRead              = "spec.read"
+	CommandSpecPack              = "spec.pack"
 	CommandSpecLint              = "spec.lint"
 	CommandSpecParity            = "spec.parity"
 	CommandSpecExport            = "spec.export"
@@ -143,6 +144,30 @@ type SpecReadResponseBody struct {
 	Links        []SpecLink        `json:"links" msgpack:"links"`
 }
 
+type SpecPackStage string
+
+const (
+	SpecPackStageGreenfield SpecPackStage = "greenfield"
+	SpecPackStageBrownfield SpecPackStage = "brownfield"
+	SpecPackStageRepair     SpecPackStage = "repair"
+	SpecPackStageVerify     SpecPackStage = "verify"
+)
+
+type SpecPackRequestBody struct {
+	IssueID naming.IssueID       `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
+	ReqID   naming.RequirementID `json:"req_id,omitempty" msgpack:"req_id,omitempty"`
+	Stage   SpecPackStage        `json:"stage,omitempty" msgpack:"stage,omitempty"`
+}
+
+type SpecPackResponseBody struct {
+	Stage        SpecPackStage     `json:"stage" msgpack:"stage"`
+	IssueID      naming.IssueID    `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
+	Requirements []SpecRequirement `json:"requirements" msgpack:"requirements"`
+	Links        []SpecLink        `json:"links" msgpack:"links"`
+	Guidance     []string          `json:"guidance" msgpack:"guidance"`
+	Gates        []string          `json:"gates" msgpack:"gates"`
+}
+
 type SpecDiagnostic struct {
 	Code     string               `json:"code" msgpack:"code"`
 	Message  string               `json:"message" msgpack:"message"`
@@ -194,6 +219,18 @@ func (s SpecRequirementStatus) Valid() bool {
 	case SpecRequirementStatusOpen,
 		SpecRequirementStatusAccepted,
 		SpecRequirementStatusSuperseded:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s SpecPackStage) Valid() bool {
+	switch s {
+	case SpecPackStageGreenfield,
+		SpecPackStageBrownfield,
+		SpecPackStageRepair,
+		SpecPackStageVerify:
 		return true
 	default:
 		return false

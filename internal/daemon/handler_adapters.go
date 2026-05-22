@@ -246,6 +246,28 @@ func (s issueSpecService) Read(ctx context.Context, req protocol.SpecReadRequest
 	}, nil
 }
 
+func (s issueSpecService) Pack(ctx context.Context, req protocol.SpecPackRequestBody) (protocol.SpecPackResponseBody, error) {
+	read, err := s.Read(ctx, protocol.SpecReadRequestBody{
+		IssueID: req.IssueID,
+		ReqID:   req.ReqID,
+	})
+	if err != nil {
+		return protocol.SpecPackResponseBody{}, err
+	}
+	stage := req.Stage
+	if stage == "" {
+		stage = protocol.SpecPackStageBrownfield
+	}
+	return protocol.SpecPackResponseBody{
+		Stage:        stage,
+		IssueID:      req.IssueID,
+		Requirements: read.Requirements,
+		Links:        read.Links,
+		Guidance:     specPackGuidance(stage),
+		Gates:        specPackGates(),
+	}, nil
+}
+
 func (s issueSpecService) Lint(ctx context.Context, _ protocol.SpecLintRequestBody) (protocol.SpecLintResponseBody, error) {
 	client, err := s.issueClient(ctx)
 	if err != nil {
@@ -298,6 +320,43 @@ func (s issueSpecService) Parity(ctx context.Context, req protocol.SpecParityReq
 
 func (s issueSpecService) SyncMD(context.Context, protocol.SpecSyncMDRequestBody) (protocol.SpecSyncMDResponseBody, error) {
 	return protocol.SpecSyncMDResponseBody{}, daemonhandlers.ErrSpecUnavailable
+}
+
+func specPackGuidance(stage protocol.SpecPackStage) []string {
+	switch stage {
+	case protocol.SpecPackStageGreenfield:
+		return []string{
+			"Create the smallest source slice that satisfies the listed requirements.",
+			"Add implementation and verification links before closing the issue.",
+			"Keep generated scaffolding behind tests that prove the requirement behavior.",
+		}
+	case protocol.SpecPackStageRepair:
+		return []string{
+			"Compare current source behavior against every listed requirement.",
+			"Patch only the divergent behavior and preserve compatible existing contracts.",
+			"Record evidence for the repaired requirement links before closing the issue.",
+		}
+	case protocol.SpecPackStageVerify:
+		return []string{
+			"Treat source as provisionally complete and focus on verification evidence.",
+			"Add or update tests for each listed requirement before marking links verified.",
+			"Report unresolved gaps instead of broadening implementation scope silently.",
+		}
+	default:
+		return []string{
+			"Inspect existing source first, then reconcile only the requirement gaps.",
+			"Preserve established architecture and route authority through existing boundaries.",
+			"Update requirement links and issue notes with concrete implementation evidence.",
+		}
+	}
+}
+
+func specPackGates() []string {
+	return []string{
+		"az spec lint",
+		"az spec parity --fail-on-out",
+		"go test ./...",
+	}
 }
 
 func mapRequirementToProtocol(req issues.Requirement) protocol.SpecRequirement {

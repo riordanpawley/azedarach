@@ -30,6 +30,7 @@ type SpecService interface {
 	AddLink(context.Context, protocol.SpecLinkAddRequestBody) (protocol.SpecLinkAddResponseBody, error)
 	RemoveLink(context.Context, protocol.SpecLinkRemoveRequestBody) (protocol.SpecLinkRemoveResponseBody, error)
 	Read(context.Context, protocol.SpecReadRequestBody) (protocol.SpecReadResponseBody, error)
+	Pack(context.Context, protocol.SpecPackRequestBody) (protocol.SpecPackResponseBody, error)
 	Lint(context.Context, protocol.SpecLintRequestBody) (protocol.SpecLintResponseBody, error)
 	Parity(context.Context, protocol.SpecParityRequestBody) (protocol.SpecParityResponseBody, error)
 	SyncMD(context.Context, protocol.SpecSyncMDRequestBody) (protocol.SpecSyncMDResponseBody, error)
@@ -175,6 +176,24 @@ func (h *SpecHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) 
 			return resp
 		}
 		return specJSONResponse(ctx, resp, h.service.Read, cmd)
+
+	case protocol.CommandSpecPack:
+		var cmd protocol.SpecPackRequestBody
+		if !decodeSpecRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		if cmd.Stage == "" {
+			cmd.Stage = protocol.SpecPackStageBrownfield
+		} else {
+			cmd.Stage = protocol.SpecPackStage(strings.TrimSpace(string(cmd.Stage)))
+		}
+		if !cmd.Stage.Valid() {
+			return specInvalidRequest(resp, "invalid stage: expected greenfield|brownfield|repair|verify")
+		}
+		if cmd.IssueID == "" && cmd.ReqID == "" {
+			return specInvalidRequest(resp, "missing required field: issue_id or req_id")
+		}
+		return specJSONResponse(ctx, resp, h.service.Pack, cmd)
 
 	case protocol.CommandSpecLint:
 		var cmd protocol.SpecLintRequestBody

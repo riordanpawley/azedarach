@@ -119,6 +119,60 @@ func TestIssueSpecServiceReadIssueScopeIncludesLinkedRequirementsWithoutIssueID(
 	}
 }
 
+func TestIssueSpecServicePackBuildsStageAwareSourcePack(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{
+		Title:    "implementation issue",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	_, err = client.CreateRequirement(ctx, issues.CreateRequirementParams{
+		LocalID: "REQ-PACK",
+		Title:   "pack requirement",
+	})
+	if err != nil {
+		t.Fatalf("create requirement: %v", err)
+	}
+	_, err = client.AddSpecLink(ctx, issues.AddSpecLinkParams{
+		IssueID:       issueID,
+		RequirementID: "REQ-PACK",
+		Role:          issues.LinkRoleImplements,
+	})
+	if err != nil {
+		t.Fatalf("add spec link: %v", err)
+	}
+
+	service := newTestIssueSpecService(client, repoDir)
+	out, err := service.Pack(ctx, protocol.SpecPackRequestBody{
+		IssueID: naming.IssueID(issueID),
+		Stage:   protocol.SpecPackStageRepair,
+	})
+	if err != nil {
+		t.Fatalf("pack: %v", err)
+	}
+	if out.Stage != protocol.SpecPackStageRepair {
+		t.Fatalf("stage = %q, want repair", out.Stage)
+	}
+	if len(out.Requirements) != 1 || out.Requirements[0].ID != "REQ-PACK" {
+		t.Fatalf("requirements = %+v", out.Requirements)
+	}
+	if len(out.Links) != 1 {
+		t.Fatalf("links = %+v", out.Links)
+	}
+	if len(out.Guidance) == 0 || !strings.Contains(out.Guidance[0], "Compare current source behavior") {
+		t.Fatalf("guidance = %+v", out.Guidance)
+	}
+	if len(out.Gates) == 0 || out.Gates[0] != "az spec lint" {
+		t.Fatalf("gates = %+v", out.Gates)
+	}
+}
+
 func TestIssueSpecServiceLintDoesNotFailOnOverlappingLocalAndExternalCodes(t *testing.T) {
 	ctx := context.Background()
 	client, repoDir := newTestIssueClient(t)
