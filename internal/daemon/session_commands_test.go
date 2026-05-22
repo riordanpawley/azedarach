@@ -168,6 +168,30 @@ func (r *recoveringWorktreeRunner) Run(_ context.Context, args ...string) (strin
 	return "", nil
 }
 
+type ancestorBaseWorktreeRunner struct {
+	repoDir           string
+	parentWorktree    string
+	parentBranch      string
+	childWorktreePath string
+	createBaseBranch  string
+}
+
+func (r *ancestorBaseWorktreeRunner) Run(_ context.Context, args ...string) (string, error) {
+	if len(args) >= 2 && args[0] == "config" && args[1] == "user.name" {
+		return "testuser\n", nil
+	}
+	if len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" {
+		return "worktree " + r.repoDir + "\nbranch refs/heads/main\n\n" +
+			"worktree " + r.parentWorktree + "\nbranch refs/heads/" + r.parentBranch + "\n\n", nil
+	}
+	if len(args) >= 6 && args[0] == "worktree" && args[1] == "add" && args[2] == "-b" {
+		r.childWorktreePath = args[4]
+		r.createBaseBranch = args[5]
+		return "", nil
+	}
+	return "", nil
+}
+
 func TestSessionProjectionIssueIDPrefersSessionNameParsing(t *testing.T) {
 	session := daemonstate.Session{
 		ID:      "az-bra",
@@ -690,6 +714,91 @@ func TestSessionStartWithStartWorkFalseSkipsLaunchCommand(t *testing.T) {
 	}
 	if !strings.Contains(payload.Output, "Skipping AI launch (tmux session only)") {
 		t.Fatalf("output = %q, want tmux-only launch line", payload.Output)
+	}
+}
+
+func TestSessionStartUsesClosestAncestorWorktreeBranchAsBase(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Parent issue",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create parent issue: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Child issue",
+		Type:     domain.TypeTask,
+		ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("create child issue: %v", err)
+	}
+
+	parentBranch := "testuser/" + parentID + "/parent-issue"
+	parentWorktree := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+parentID)
+	worktreeRunner := &ancestorBaseWorktreeRunner{
+		repoDir:        repoDir,
+		parentWorktree: parentWorktree,
+		parentBranch:   parentBranch,
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			Logger:       slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-ancestor-base",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.start",
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"session_id": childID,
+		}),
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, req)
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("session start response not OK: %+v", resp)
+	}
+	if got, want := worktreeRunner.createBaseBranch, parentBranch; got != want {
+		t.Fatalf("worktree create base branch = %q, want %q", got, want)
 	}
 }
 
