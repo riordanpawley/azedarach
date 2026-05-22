@@ -406,7 +406,7 @@ func main() {
 
 	case "issue":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|get-many|check|doctor|create|update|close|finalize|delete|image|dep|bulk-create|bulk-update|fanout> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|get-many|check|doctor|create|split|update|close|finalize|delete|image|dep|bulk-create|bulk-update|fanout> [arguments]\n")
 			os.Exit(1)
 		}
 		issueCommand := commandArgs[0]
@@ -500,6 +500,20 @@ func main() {
 			}
 			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
 				return cli.IssueCreateCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+		case "split":
+			opts, err := cli.ParseIssueSplitArgs(issueArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az issue split [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.IssueSplitCommand(deps, opts)
 			}); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -747,7 +761,7 @@ func main() {
 
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown issue command: %s\n", issueCommand)
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|get-many|check|doctor|create|update|close|finalize|delete|image|dep|bulk-create|bulk-update|fanout> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|get-many|check|doctor|create|split|update|close|finalize|delete|image|dep|bulk-create|bulk-update|fanout> [arguments]\n")
 			os.Exit(1)
 		}
 

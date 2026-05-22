@@ -2813,6 +2813,28 @@ func TestParseIssueCreateArgs(t *testing.T) {
 	}
 }
 
+func TestParseIssueSplitArgsDefaultsParentFromEnv(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-parent")
+	opts, err := ParseIssueSplitArgs([]string{"--description", "do this elsewhere", "--priority", "P1", "Child work"})
+	if err != nil {
+		t.Fatalf("ParseIssueSplitArgs error = %v", err)
+	}
+	if opts.ParentIssueID != "az-parent" || opts.Title != "Child work" || opts.Description != "do this elsewhere" {
+		t.Fatalf("opts = %+v", opts)
+	}
+	if opts.Priority != domain.P1 || !opts.PriorityExplicit {
+		t.Fatalf("priority = %s explicit=%v, want P1 explicit", opts.Priority, opts.PriorityExplicit)
+	}
+}
+
+func TestParseIssueSplitArgsRequiresParent(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	_, err := ParseIssueSplitArgs([]string{"Child work"})
+	if err == nil || !strings.Contains(err.Error(), "missing parent issue") {
+		t.Fatalf("error = %v, want missing parent issue", err)
+	}
+}
+
 func TestParseIssueCloseArgs(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -4986,6 +5008,120 @@ func TestIssueCreateCommandDeferredIgnoresAutoParentFromIssueID(t *testing.T) {
 	}
 }
 
+func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T) {
+	root := naming.IssueID("az-parent")
+	child := naming.IssueID("az-child")
+	var requests []protocol.RequestEnvelope
+	var createReq daemonclient.TaskCreateParams
+	var submitted protocol.OperationSubmitRequestBody
+	taskListCalls := 0
+	deps := &Dependencies{
+		Config:    config.DefaultConfig(),
+		RepoDir:   "/repo",
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				requests = append(requests, req)
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					taskListCalls++
+					tasks := []domain.Task{{
+						ID:              root,
+						Title:           "Parent",
+						Status:          domain.StatusInProgress,
+						Priority:        domain.P1,
+						Type:            domain.TypeTask,
+						Implementations: []string{"go-bubbletea"},
+					}}
+					if taskListCalls > 1 {
+						tasks = append(tasks, domain.Task{
+							ID:       child,
+							Title:    "Child work",
+							Status:   domain.StatusOpen,
+							Priority: domain.P2,
+							Type:     domain.TypeTask,
+							ParentID: &root,
+						})
+					}
+					body, err := marshalTaskListBody(tasks)
+					if err != nil {
+						t.Fatalf("marshal task list response: %v", err)
+					}
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
+				case daemonclient.CommandTaskCreate:
+					if err := json.Unmarshal(req.Body, &createReq); err != nil {
+						t.Fatalf("decode create request: %v", err)
+					}
+					return responseWithJSON(req, map[string]string{"task_id": child.String()}), nil
+				case daemonclient.CommandGitStatus:
+					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{}}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees": []map[string]string{
+							{"issue_id": child.String(), "path": "/repo-az-child", "branch": "user/az-child/child-work"},
+						},
+					}), nil
+				case protocol.CommandOperationSubmit:
+					if err := json.Unmarshal(req.Body, &submitted); err != nil {
+						t.Fatalf("decode operation submit: %v", err)
+					}
+					return responseWithJSON(req, protocol.OperationSubmitResponseBody{
+						Created: true,
+						Operation: protocol.OperationRecord{
+							OperationID: "op-split",
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     child,
+							State:       protocol.OperationStateQueued,
+						},
+					}), nil
+				case protocol.CommandMailSend:
+					return responseWithJSON(req, protocol.MailEvent{Seq: 1, ParentIssue: root.String(), IssueID: child, Type: "session-started"}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueSplitCommand(deps, IssueSplitOptions{
+			ParentIssueID: root.String(),
+			Title:         "Child work",
+			Type:          domain.TypeTask,
+			Priority:      domain.P2,
+			JSON:          true,
+		})
+	})
+
+	var result issueSplitResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if result.ChildIssueID != child.String() || len(result.Start.Started) != 1 || result.Start.Started[0] != child.String() {
+		t.Fatalf("result = %+v", result)
+	}
+	if createReq.ParentID == nil || *createReq.ParentID != root {
+		t.Fatalf("create parent = %+v, want %s", createReq.ParentID, root)
+	}
+	if !reflect.DeepEqual(createReq.Implementations, []string{"go-bubbletea"}) {
+		t.Fatalf("create implementations = %+v, want inherited parent impl", createReq.Implementations)
+	}
+	if submitted.Kind != commandSessionStart || submitted.IssueID != child {
+		t.Fatalf("submitted = %+v", submitted)
+	}
+	if !strings.Contains(result.Advice.IntegrateCommand, child.String()) {
+		t.Fatalf("advice = %+v, want child integration command", result.Advice)
+	}
+	commands := commandNames(requests)
+	if !containsString(commands, protocol.CommandOperationSubmit) || !containsString(commands, protocol.CommandMailSend) {
+		t.Fatalf("commands = %+v, want operation submit and mail send", commands)
+	}
+}
+
 func TestIssueCreateCommandAutoDefaultsImplWhenSingleConfigured(t *testing.T) {
 	var createReq daemonclient.TaskCreateParams
 	deps := &Dependencies{
@@ -6025,6 +6161,9 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue create [--project <project-id>] [--impl <implementation> ...] [--deferred]") {
 		t.Fatalf("usage missing issue create command: %q", output)
 	}
+	if !strings.Contains(output, "issue split [--project <project-id>] [--parent <id>]") {
+		t.Fatalf("usage missing issue split command: %q", output)
+	}
 	if strings.Contains(output, "issue child ") {
 		t.Fatalf("usage should not include issue child command: %q", output)
 	}
@@ -6224,7 +6363,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az session start <issue-id>` is for explicit/manual orchestration; agents should not run it unless the user asks.") {
 		t.Fatalf("prime output missing session start guardrail: %q", output)
 	}
-	if !strings.Contains(output, "Optional (only when splitting work): `az issue create \"Child task\"`") {
+	if !strings.Contains(output, "Optional (only when splitting work): `az issue split \"Child task\"`") {
 		t.Fatalf("prime output missing optional child-task split guidance: %q", output)
 	}
 	if strings.Contains(output, "`az spec` (inspect linked requirements before behavior changes)") {
@@ -6248,7 +6387,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Parent/epic issues describe the overarching goal, scope, and success criteria; keep their description high-level and stable.") {
 		t.Fatalf("prime output missing parent overarching-goal guidance: %q", output)
 	}
-	if !strings.Contains(output, "Track subtask goals, implementation steps, and nitty-gritty decisions in child issues created with `az issue create \"Child task\"`, not buried inside the parent's description or notes.") {
+	if !strings.Contains(output, "Track subtask goals, implementation steps, and nitty-gritty decisions in child issues created with `az issue create \"Child task\"` or `az issue split \"Child task\"`") {
 		t.Fatalf("prime output missing subtask-detail-into-child-issue guidance: %q", output)
 	}
 	if !strings.Contains(output, "When a new subtask surfaces mid-work, create a child issue immediately rather than expanding the parent's description") {
@@ -7073,6 +7212,14 @@ func responseWithJSON(req protocol.RequestEnvelope, body any) protocol.ResponseE
 		OK:              true,
 		Body:            payload,
 	}
+}
+
+func commandNames(requests []protocol.RequestEnvelope) []string {
+	out := make([]string, 0, len(requests))
+	for _, req := range requests {
+		out = append(out, req.Command)
+	}
+	return out
 }
 
 func mustJSON(t *testing.T, body any) json.RawMessage {

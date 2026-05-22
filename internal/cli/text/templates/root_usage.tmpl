@@ -35,6 +35,7 @@ Commands:
   issue check [--project <project-id>] [--id <id>] [--json] [<id>]  Alias for issue get
   issue doctor [--project <project-id>] [--id <id>] [--json] [<id>]  Run integrity checks for one issue
   issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create an issue (auto-parent when AZEDARACH_ISSUE_ID is set)
+  issue split [--project <project-id>] [--parent <id>] [--impl <implementation> ...] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create a child issue and launch it with az orchestrate start
   issue update [--project <project-id>] [--id <id>] [--json] [<id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields (`--update-impl` only changes implementation assignments)
   issue close [--project <project-id>] [--id <id>] [--json] [<id>]      Close an issue (sets status=closed)
   issue finalize [--project <project-id>] [--id <id>] [--json] [--remove-worktree] [<id>]  Stop session, close issue, and optionally remove worktree
@@ -79,6 +80,7 @@ Examples:
   az issue doctor --id az-123
   az issue create --impl go-bubbletea "New task"
   az issue create "Follow-up task"                # auto-parent under AZEDARACH_ISSUE_ID
+  az issue split "Implement child task"           # auto-parent and launch child session/worktree
   az issue create --deferred "Investigate later"  # deferred follow-up (defaults priority to P4)
   az issue update --id az-123 --status in_progress --title "Renamed task" --priority P1
   az issue update --id az-123 --update-impl go-bubbletea

@@ -348,18 +348,33 @@ func OrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOptions) e
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
+	result, err := orchestrateStart(deps, opts)
+	if err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(result)
+	}
+	printOrchestrateStartResult(result)
+	if len(result.Failed) > 0 {
+		return fmt.Errorf("orchestrate start completed with failures")
+	}
+	return nil
+}
+
+func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchestrateStartResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
-		return err
+		return orchestrateStartResult{}, err
 	}
 	tasks, err := deps.DaemonClient.ListTasks(ctx)
 	if err != nil {
-		return fmt.Errorf("list tasks: %w", err)
+		return orchestrateStartResult{}, fmt.Errorf("list tasks: %w", err)
 	}
 	ready, err := computeRunnableLeaves(opts.RootIssueID, tasks)
 	if err != nil {
-		return err
+		return orchestrateStartResult{}, err
 	}
 
 	byID := make(map[string]domain.Task, len(tasks))
@@ -439,10 +454,10 @@ func OrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOptions) e
 		count++
 	}
 
-	if opts.JSON {
-		return printJSON(result)
-	}
+	return result, nil
+}
 
+func printOrchestrateStartResult(result orchestrateStartResult) {
 	fmt.Printf("Root issue: %s\n", result.RootIssueID)
 	fmt.Printf("Start limit: %d\n", result.Limit)
 	fmt.Println("Started sessions:")
@@ -485,9 +500,7 @@ func OrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOptions) e
 		for _, id := range sortedKeys(result.Failed) {
 			fmt.Printf("- %s: %s\n", id, result.Failed[id])
 		}
-		return fmt.Errorf("orchestrate start completed with failures")
 	}
-	return nil
 }
 
 func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) error {

@@ -155,6 +155,13 @@ type IssueCreateOptions struct {
 	AutoParentFromIssueID *string
 }
 
+type issueCreateResult struct {
+	IssueID  string
+	ParentID string
+	Deferred bool
+	Message  string
+}
+
 type IssueCloseOptions struct {
 	Project string
 	IssueID string
@@ -2946,7 +2953,29 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), issueCreateCommandTimeout)
+	result, err := createIssue(context.Background(), deps, opts)
+	if err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id":   result.IssueID,
+			"parent_id":  result.ParentID,
+			"deferred":   result.Deferred,
+			"message":    result.Message,
+			"created":    true,
+			"project_id": strings.TrimSpace(deps.ProjectID),
+		})
+	}
+	fmt.Println(result.Message)
+	return nil
+}
+
+func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreateOptions) (issueCreateResult, error) {
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parentCtx, issueCreateCommandTimeout)
 	defer cancel()
 
 	var parentID *naming.IssueID
@@ -2957,11 +2986,11 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 			return deps.DaemonClient.ListTasksSnapshot(callCtx)
 		})
 		if err != nil {
-			return fmt.Errorf("failed to resolve active parent issue %s: %w", parentIssueID, err)
+			return issueCreateResult{}, fmt.Errorf("failed to resolve active parent issue %s: %w", parentIssueID, err)
 		}
 		parentTask, ok := findTaskByID(snapshot.Tasks, parentIssueID)
 		if !ok {
-			return fmt.Errorf("active issue not found for auto-parenting: %s", parentIssueID)
+			return issueCreateResult{}, fmt.Errorf("active issue not found for auto-parenting: %s", parentIssueID)
 		}
 		parentID = &parentTask.ID
 		if len(implementations) == 0 {
@@ -2971,13 +3000,13 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 	if len(implementations) == 0 {
 		resolvedImpl, err := resolveIssueWriteImplementation(ctx, deps, "")
 		if err != nil {
-			return err
+			return issueCreateResult{}, err
 		}
 		implementations = append(implementations, resolvedImpl)
 	} else if len(implementations) == 1 {
 		resolvedImpl, err := resolveIssueWriteImplementation(ctx, deps, implementations[0])
 		if err != nil {
-			return err
+			return issueCreateResult{}, err
 		}
 		implementations[0] = resolvedImpl
 	}
@@ -2993,32 +3022,24 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 		})
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create issue: %w", err)
+		return issueCreateResult{}, fmt.Errorf("failed to create issue: %w", err)
 	}
 
 	message := fmt.Sprintf("Created issue: %s", taskID)
+	parentIDValue := ""
 	if parentID != nil && strings.TrimSpace(parentID.String()) != "" {
-		message = fmt.Sprintf("%s (parent: %s, auto-parent from AZEDARACH_ISSUE_ID)", message, strings.TrimSpace(parentID.String()))
+		parentIDValue = strings.TrimSpace(parentID.String())
+		message = fmt.Sprintf("%s (parent: %s, auto-parent from AZEDARACH_ISSUE_ID)", message, parentIDValue)
 	}
 	if opts.Deferred {
 		message = fmt.Sprintf("%s [deferred: standalone later work, not auto-parented]", message)
 	}
-	if opts.JSON {
-		var parentIDValue string
-		if parentID != nil {
-			parentIDValue = strings.TrimSpace(parentID.String())
-		}
-		return printJSON(map[string]any{
-			"issue_id":   taskID,
-			"parent_id":  parentIDValue,
-			"deferred":   opts.Deferred,
-			"message":    message,
-			"created":    true,
-			"project_id": strings.TrimSpace(deps.ProjectID),
-		})
-	}
-	fmt.Println(message)
-	return nil
+	return issueCreateResult{
+		IssueID:  taskID,
+		ParentID: parentIDValue,
+		Deferred: opts.Deferred,
+		Message:  message,
+	}, nil
 }
 
 func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
