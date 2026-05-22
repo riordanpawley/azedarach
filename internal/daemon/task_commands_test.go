@@ -991,6 +991,105 @@ func TestRefreshWorktreeRuntimeStateUsesClosestNonDoneAncestorBranch(t *testing.
 	}
 }
 
+func TestRefreshWorktreeRuntimeStateFallsBackToAncestorWorktreeBranchWhenAncestorTaskMissing(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-refresh-ancestor-worktree-fallback"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "child",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+
+	ancestorID := "az-ancestor"
+	childWorktreePath := filepath.Join(repoDir, "wt-child")
+	var mergeBaseRef string
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain":
+			return strings.Join([]string{
+				"worktree " + repoDir,
+				"branch refs/heads/main",
+				"",
+				"worktree " + filepath.Join(repoDir, "wt-ancestor"),
+				"branch refs/heads/riordan/" + ancestorID + "/ancestor-branch",
+				"",
+				"worktree " + childWorktreePath,
+				"branch refs/heads/riordan/" + childID + "/child-branch",
+				"",
+			}, "\n"), nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == childWorktreePath && args[2] == "merge-base":
+			mergeBaseRef = args[3]
+			return "abc123\n", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == childWorktreePath && args[2] == "status" && args[3] == "--porcelain":
+			return " M changed.go\n", nil
+		case len(args) >= 8 && args[0] == "-C" && args[1] == childWorktreePath && args[2] == "diff" && args[3] == "--shortstat":
+			return " 1 file changed, 1 insertion(+), 1 deletion(-)\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == childWorktreePath && args[2] == "rev-list" && args[3] == "--count":
+			return "0\n", nil
+		default:
+			return "", nil
+		}
+	}}
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
+		git: git.NewClient(runner, slog.Default()),
+		issues: issuesClient,
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: store,
+		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(runner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(runner, repoDir, slog.Default()),
+		},
+	}
+
+	// Simulate sparse task projection where child references an ancestor not in taskByIssue.
+	taskByIssue := map[string]domain.Task{
+		childID: {
+			ID:       naming.IssueID(childID),
+			ParentID: func() *naming.IssueID { v := naming.IssueID(ancestorID); return &v }(),
+		},
+	}
+	branch := d.runtimeDiffBaseBranchForIssue(childID, "main", taskByIssue, map[string]git.Worktree{
+		ancestorID: {
+			IssueID: ancestorID,
+			Branch:  "riordan/" + ancestorID + "/ancestor-branch",
+		},
+	})
+	if branch != "riordan/"+ancestorID+"/ancestor-branch" {
+		t.Fatalf("runtimeDiffBaseBranchForIssue(...) = %q, want ancestor worktree branch", branch)
+	}
+
+	_, err = d.refreshWorktreeRuntimeState(ctx, projectID)
+	if err != nil {
+		t.Fatalf("refreshWorktreeRuntimeState error: %v", err)
+	}
+	if got, want := strings.TrimSpace(mergeBaseRef), "main"; got != want {
+		// Full reconcile has no persisted parent relation in this test DB shape,
+		// so it correctly falls back to configured base branch there.
+		t.Fatalf("merge-base base ref = %q, want %q", got, want)
+	}
+}
+
 func TestRefreshWorktreeRuntimeStateMutationDoesNotBypassGitProbeBudget(t *testing.T) {
 	ctx := context.WithValue(context.Background(), runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
 		Priority: reconcilePriorityManual,
