@@ -3,6 +3,8 @@ package protocol
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 func TestSpecRequirementStatusValid(t *testing.T) {
@@ -106,8 +108,21 @@ func TestSpecJSONRoundTrip(t *testing.T) {
 			IssueID:      "az-1",
 			Requirements: []SpecRequirement{{ID: "REQ-1", Title: "Requirement one", Status: SpecRequirementStatusOpen}},
 			Links:        []SpecLink{{IssueID: "az-1", ReqID: "REQ-1", Role: SpecLinkRoleImplements}},
-			Guidance:     []string{"inspect source"},
-			Gates:        []string{"az spec lint"},
+			Sharding: SpecPackSharding{
+				SourcePath: ".azedarach/spec-shards.json",
+				ByRequirement: map[naming.RequirementID]SpecShardEntry{
+					"REQ-1": {
+						Domain:    "spec",
+						Slice:     "slice-1",
+						Tier:      "1",
+						Priority:  "P1",
+						DependsOn: []string{"slice-0"},
+						TestPack:  "pack-a",
+					},
+				},
+			},
+			Guidance: []string{"inspect source"},
+			Gates:    []string{"az spec lint"},
 		},
 		Lint: SpecLintResponseBody{
 			OK: false,
@@ -163,6 +178,9 @@ func TestSpecJSONRoundTrip(t *testing.T) {
 	}
 	if got.Pack.Stage != SpecPackStageBrownfield || len(got.Pack.Guidance) != 1 {
 		t.Fatalf("Pack = %+v", got.Pack)
+	}
+	if got.Pack.Sharding.SourcePath != ".azedarach/spec-shards.json" {
+		t.Fatalf("Pack.Sharding.SourcePath = %q", got.Pack.Sharding.SourcePath)
 	}
 	if len(got.Lint.Diagnostics) != 1 || got.Lint.Diagnostics[0].Code != "missing-link" {
 		t.Fatalf("Lint.Diagnostics = %+v", got.Lint.Diagnostics)

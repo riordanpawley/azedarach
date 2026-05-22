@@ -2,9 +2,14 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -258,14 +263,78 @@ func (s issueSpecService) Pack(ctx context.Context, req protocol.SpecPackRequest
 	if stage == "" {
 		stage = protocol.SpecPackStageBrownfield
 	}
+	sharding, err := s.loadSpecPackSharding(read.Requirements)
+	if err != nil {
+		return protocol.SpecPackResponseBody{}, err
+	}
 	return protocol.SpecPackResponseBody{
 		Stage:        stage,
 		IssueID:      req.IssueID,
 		Requirements: read.Requirements,
 		Links:        read.Links,
+		Sharding:     sharding,
 		Guidance:     specPackGuidance(stage),
 		Gates:        specPackGates(),
 	}, nil
+}
+
+func (s issueSpecService) loadSpecPackSharding(requirements []protocol.SpecRequirement) (protocol.SpecPackSharding, error) {
+	sharding := protocol.SpecPackSharding{}
+	if s.daemon == nil {
+		return sharding, nil
+	}
+
+	sourcePath := filepath.Join(s.daemon.cfg.RepoDir, ".azedarach", "spec-shards.json")
+	content, err := os.ReadFile(sourcePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return specPackShardingMissing(requirements), nil
+		}
+		return protocol.SpecPackSharding{}, fmt.Errorf("read spec sharding sidecar: %w", err)
+	}
+
+	var byRequirement map[naming.RequirementID]protocol.SpecShardEntry
+	if err := json.Unmarshal(content, &byRequirement); err != nil {
+		return protocol.SpecPackSharding{}, fmt.Errorf("decode spec sharding sidecar: %w", err)
+	}
+
+	sharding.ByRequirement = make(map[naming.RequirementID]protocol.SpecShardEntry, len(requirements))
+	for _, req := range requirements {
+		entry, ok := byRequirement[req.ID]
+		if !ok {
+			continue
+		}
+		sharding.ByRequirement[req.ID] = entry
+	}
+	sharding.SourcePath = ".azedarach/spec-shards.json"
+	sharding.Missing = missingShardingRequirementIDs(requirements, sharding.ByRequirement)
+	if len(sharding.ByRequirement) == 0 {
+		sharding.ByRequirement = nil
+	}
+	if len(sharding.Missing) == 0 {
+		sharding.Missing = nil
+	}
+	return sharding, nil
+}
+
+func specPackShardingMissing(requirements []protocol.SpecRequirement) protocol.SpecPackSharding {
+	missing := make([]naming.RequirementID, 0, len(requirements))
+	for _, req := range requirements {
+		missing = append(missing, req.ID)
+	}
+	return protocol.SpecPackSharding{Missing: missing}
+}
+
+func missingShardingRequirementIDs(requirements []protocol.SpecRequirement, byRequirement map[naming.RequirementID]protocol.SpecShardEntry) []naming.RequirementID {
+	missing := make([]naming.RequirementID, 0, len(requirements))
+	for _, req := range requirements {
+		if _, ok := byRequirement[req.ID]; ok {
+			continue
+		}
+		missing = append(missing, req.ID)
+	}
+	sort.Slice(missing, func(i, j int) bool { return missing[i] < missing[j] })
+	return missing
 }
 
 func (s issueSpecService) Lint(ctx context.Context, _ protocol.SpecLintRequestBody) (protocol.SpecLintResponseBody, error) {
