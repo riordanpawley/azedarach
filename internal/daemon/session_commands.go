@@ -1894,11 +1894,34 @@ func (d *Daemon) runWorktreeInitCommands(ctx context.Context, projectID string, 
 		cmd.Dir = worktreePath
 		output, err := cmd.CombinedOutput()
 		if err != nil {
+			if worktreeInitCommandMissing(err, output) {
+				if d.cfg.Logger != nil {
+					d.cfg.Logger.Warn("worktree init command missing; skipping",
+						"project_id", projectID,
+						"worktree", worktreePath,
+						"command", trimmed,
+						"output", strings.TrimSpace(string(output)),
+					)
+				}
+				continue
+			}
 			return fmt.Errorf("%s: %w (%s)", trimmed, err, strings.TrimSpace(string(output)))
 		}
 	}
 
 	return nil
+}
+
+func worktreeInitCommandMissing(err error, output []byte) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	if exitErr.ExitCode() != 127 {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(string(output)))
+	return strings.Contains(lower, "command not found") || strings.Contains(lower, "not found")
 }
 
 func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {

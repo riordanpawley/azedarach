@@ -3129,6 +3129,32 @@ func TestRunWorktreeInitCommandsReturnsCommandFailure(t *testing.T) {
 	}
 }
 
+func TestRunWorktreeInitCommandsSkipsMissingCommand(t *testing.T) {
+	worktree := t.TempDir()
+	d := &Daemon{
+		cfg: Config{
+			SessionShell: "sh",
+			WorktreeInitCommands: []string{
+				"definitely-missing-command-xyz",
+				"printf seeded > .worktree-init-test",
+			},
+			Logger: slog.Default(),
+		},
+	}
+
+	if err := d.runWorktreeInitCommands(context.Background(), protocol.DefaultProjectID, worktree); err != nil {
+		t.Fatalf("runWorktreeInitCommands error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(worktree, ".worktree-init-test"))
+	if err != nil {
+		t.Fatalf("read init marker: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "seeded" {
+		t.Fatalf("init marker content = %q, want seeded", string(data))
+	}
+}
+
 func TestApplySessionLifecycleTransitionPublishesProjectionEvents(t *testing.T) {
 	const (
 		projectID = "proj"
