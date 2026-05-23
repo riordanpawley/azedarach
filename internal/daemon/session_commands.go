@@ -508,7 +508,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if cmd.StartWork {
 		initialPrompt := strings.TrimSpace(cmd.Prompt)
 		if initialPrompt == "" {
-			initialPrompt = buildStartWorkPrompt(cmd.IssueID, task.Type.String(), task.Title)
+			initialPrompt = buildStartWorkPrompt(cmd.IssueID, task.Type.String(), task.Title, task.ParentID != nil)
 		}
 		launchCommand := d.buildSessionLaunchCommand(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, initialPrompt)
 		if err := d.tmux.SendKeys(ctx, cmd.SessionID, launchCommand); err != nil {
@@ -1988,7 +1988,7 @@ func singleQuoteForShell(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
-func buildStartWorkPrompt(issueID, issueType, title string) string {
+func buildStartWorkPrompt(issueID, issueType, title string, orchestratedWorker bool) string {
 	safeIssueType := sanitizePromptInline(issueType, 0)
 	if safeIssueType == "" {
 		safeIssueType = "task"
@@ -2005,6 +2005,9 @@ func buildStartWorkPrompt(issueID, issueType, title string) string {
 	)
 	if strings.EqualFold(safeIssueType, string(domain.TypeEpic)) {
 		return base + "\n\nRole: orchestrator\n- Use `az orchestrate status --root <issue-id>` for readiness snapshots.\n- Use `az orchestrate watch --root <issue-id> --since <seq> --jsonl` for observe-only mailbox/runnable updates.\n- Start runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`.\n- Use `az orchestrate integrate --issue <issue-id>` for worker result guidance.\n- Use `az orchestrate close-session --issue <issue-id>` after worker results are integrated.\n- Keep orchestration centralized in v1; do not auto-delegate sub-orchestrators.\n- Close only when `az orchestrate complete-check --root <issue-id>` passes."
+	}
+	if !orchestratedWorker {
+		return base + "\n\nRole: contributor\n- Focus only on this issue scope unless the user explicitly expands it.\n- Keep issue status/notes current with evidence."
 	}
 	return base + "\n\nRole: worker\n- Focus only on this issue scope unless the user explicitly expands it.\n- Report coordination state with mailbox event types: worker-progress, worker-blocked, and worker-complete.\n- Keep issue status/notes current with evidence for the orchestrator."
 }

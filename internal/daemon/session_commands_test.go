@@ -2993,7 +2993,7 @@ func TestBuildSessionLaunchCommandEscapesPromptCommandSubstitutionForCodex(t *te
 		"codex-az-42",
 		false,
 		nil,
-		buildStartWorkPrompt("az-42", string(domain.TypeEpic), "Replace apps/server"),
+		buildStartWorkPrompt("az-42", string(domain.TypeEpic), "Replace apps/server", false),
 	)
 
 	if strings.Contains(command, "`az orchestrate status --root <issue-id>`") {
@@ -3004,8 +3004,8 @@ func TestBuildSessionLaunchCommandEscapesPromptCommandSubstitutionForCodex(t *te
 	}
 }
 
-func TestBuildStartWorkPromptMatchesPrimeBootFormat(t *testing.T) {
-	prompt := buildStartWorkPrompt("az-42", "task", "Fix startup shell")
+func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *testing.T) {
+	prompt := buildStartWorkPrompt("az-42", "task", "Fix startup shell", true)
 	if !strings.Contains(prompt, "work on issue az-42 (task): Fix startup shell") {
 		t.Fatalf("prompt = %q, want issue summary header", prompt)
 	}
@@ -3025,8 +3025,18 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormat(t *testing.T) {
 	}
 }
 
+func TestBuildStartWorkPromptOmitsMailboxGuidanceForStandaloneTask(t *testing.T) {
+	prompt := buildStartWorkPrompt("az-42", "task", "Fix startup shell", false)
+	if !strings.Contains(prompt, "Role: contributor") {
+		t.Fatalf("prompt = %q, want contributor role primer", prompt)
+	}
+	if strings.Contains(prompt, "worker-progress") || strings.Contains(prompt, "worker-blocked") || strings.Contains(prompt, "worker-complete") {
+		t.Fatalf("prompt = %q, want mailbox worker event types omitted", prompt)
+	}
+}
+
 func TestBuildStartWorkPromptSanitizesControlCharsAndAngleBrackets(t *testing.T) {
-	prompt := buildStartWorkPrompt("az-42", "task\n", "Fix <shell>\tselection")
+	prompt := buildStartWorkPrompt("az-42", "task\n", "Fix <shell>\tselection", false)
 	if strings.Contains(prompt, "<shell>") {
 		t.Fatalf("prompt = %q, want angle brackets sanitized", prompt)
 	}
@@ -3039,7 +3049,7 @@ func TestBuildStartWorkPromptSanitizesControlCharsAndAngleBrackets(t *testing.T)
 }
 
 func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
-	prompt := buildStartWorkPrompt("az-99", "epic", "Coordinate big tree")
+	prompt := buildStartWorkPrompt("az-99", "epic", "Coordinate big tree", false)
 	if !strings.Contains(prompt, "Role: orchestrator") {
 		t.Fatalf("prompt = %q, want orchestrator role primer", prompt)
 	}
