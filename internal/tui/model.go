@@ -596,7 +596,12 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				columns := m.buildColumns()
 				m.nav.JumpToTaskByID(columns, children[0].ID.String())
 				m.ensureCursorVisible(columns)
-				return m, nil
+				issueIDs := make([]string, 0, len(children)+1)
+				issueIDs = append(issueIDs, task.ID.String())
+				for _, child := range children {
+					issueIDs = append(issueIDs, child.ID.String())
+				}
+				return m, m.loadIssuesAfterIssueReconcileCmd(issueIDs)
 			}
 			m.addToast(Toast{
 				Level:   ToastInfo,
@@ -1363,6 +1368,65 @@ func (m Model) loadIssuesAfterRuntimeReconcileCmd() tea.Cmd {
 		reconcileWarn := error(nil)
 		if _, err := m.daemonClient.ReconcileRuntime(reconcileCtx); err != nil {
 			reconcileWarn = err
+		}
+		reconcileCancel()
+
+		snapshotCtx, snapshotCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer snapshotCancel()
+		snapshot, err := m.readTaskSnapshot(snapshotCtx, m.daemonClient)
+		if err != nil {
+			var timeoutErr *daemonclient.ReadWaitTimeoutError
+			if errors.As(err, &timeoutErr) {
+				return issuesLoadedMsg{
+					refreshSeq:    refreshSeq,
+					projectID:     projectID,
+					stale:         true,
+					freshnessHint: timeoutErr.Hint,
+					reconcileWarn: reconcileWarn,
+				}
+			}
+			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: err}
+		}
+
+		return issuesLoadedMsg{
+			refreshSeq:    refreshSeq,
+			projectID:     projectID,
+			tasks:         snapshot.Tasks,
+			revision:      snapshot.Revision,
+			lastCheckedAt: snapshot.LastCheckedAt,
+			freshness:     snapshot.Freshness,
+			reconcileWarn: reconcileWarn,
+		}
+	}
+}
+
+func (m Model) loadIssuesAfterIssueReconcileCmd(issueIDs []string) tea.Cmd {
+	projectID := m.daemonProjectID()
+	refreshSeq := m.issueRefreshSeq
+	selected := make([]string, 0, len(issueIDs))
+	seen := make(map[string]struct{}, len(issueIDs))
+	for _, issueID := range issueIDs {
+		normalized := strings.TrimSpace(issueID)
+		if normalized == "" || taskIDKey(normalized) == "main" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		selected = append(selected, normalized)
+	}
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 8*time.Second)
+		reconcileWarn := error(nil)
+		if len(selected) > 0 {
+			if _, err := m.daemonClient.ReconcileRuntimeIssues(reconcileCtx, selected); err != nil {
+				reconcileWarn = err
+			}
 		}
 		reconcileCancel()
 
