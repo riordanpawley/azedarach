@@ -96,3 +96,20 @@ go test ./internal/cli -run TestApplyPartialFailureIntegrationPreservesOutcomeOr
 - Do not retry a stale payload without refreshing the snapshot.
 - Do not reapply operations that already succeeded in a partial batch.
 - Keep recovery loops bounded: one refresh, one retry, then stop and inspect.
+
+## Orchestration Integrate Safety Gate
+
+When evaluating `az orchestrate integrate --issue <issue-id>`, treat merge
+guidance as unsafe unless completion evidence exists. The CLI now blocks
+`az branch merge <issue-id>` guidance unless one of these is true:
+
+- the worker issue is already `closed`
+- a `worker-complete` mailbox event exists for that worker under its parent
+  issue mailbox
+
+If merge guidance is blocked, recover with:
+
+1. `az issue get <issue-id>` to confirm worker status.
+2. `az mail list --parent <parent-issue> --json` to confirm event history.
+3. Ask the worker to publish `worker-complete` once evidence is ready.
+4. Re-run `az orchestrate integrate --issue <issue-id>`.

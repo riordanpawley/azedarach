@@ -253,19 +253,39 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 }
 
 func TestOrchestrateIntegrateCommandPrintsGuidance(t *testing.T) {
+	child := naming.IssueID("az-2")
+	parent := naming.IssueID("az-1")
 	deps := &Dependencies{
+		RepoDir:   "/repo",
 		ProjectID: protocol.DefaultProjectID,
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				if req.Command != daemonclient.CommandWorktreeList {
+				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees": []map[string]string{
+							{"issue_id": child.String(), "path": "/repo-az-2", "branch": "user/az-2/worker"},
+						},
+					}), nil
+				case daemonclient.CommandTaskList:
+					tasks := []domain.Task{
+						{ID: parent, Status: domain.StatusInProgress, Type: domain.TypeTask},
+						{ID: child, Status: domain.StatusInProgress, Type: domain.TypeTask, ParentID: &parent},
+					}
+					body, err := marshalTaskListBody(tasks)
+					if err != nil {
+						t.Fatalf("marshal task list response: %v", err)
+					}
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
+				case protocol.CommandMailList:
+					return responseWithJSON(req, []protocol.MailEvent{
+						{Seq: 3, ParentIssue: parent.String(), IssueID: child, Type: "worker-complete"},
+					}), nil
+				default:
 					t.Fatalf("unexpected command: %s", req.Command)
 				}
-				return responseWithJSON(req, map[string]any{
-					"project_id": protocol.DefaultProjectID,
-					"worktrees": []map[string]string{
-						{"issue_id": "az-2", "path": "/repo-az-2", "branch": "user/az-2/worker"},
-					},
-				}), nil
+				return protocol.ResponseEnvelope{}, nil
 			},
 		}),
 	}
@@ -276,6 +296,55 @@ func TestOrchestrateIntegrateCommandPrintsGuidance(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
 		}
+	}
+}
+
+func TestOrchestrateIntegrateCommandBlocksMergeWithoutCompletionEvidence(t *testing.T) {
+	child := naming.IssueID("az-2")
+	parent := naming.IssueID("az-1")
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees": []map[string]string{
+							{"issue_id": child.String(), "path": "/repo-az-2", "branch": "user/az-2/worker"},
+						},
+					}), nil
+				case daemonclient.CommandTaskList:
+					tasks := []domain.Task{
+						{ID: parent, Status: domain.StatusInProgress, Type: domain.TypeTask},
+						{ID: child, Status: domain.StatusInProgress, Type: domain.TypeTask, ParentID: &parent},
+					}
+					body, err := marshalTaskListBody(tasks)
+					if err != nil {
+						t.Fatalf("marshal task list response: %v", err)
+					}
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
+				case protocol.CommandMailList:
+					return responseWithJSON(req, []protocol.MailEvent{{Seq: 2, ParentIssue: parent.String(), IssueID: child, Type: "worker-progress"}}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+	output := captureStdout(t, func() error {
+		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: child.String()})
+	})
+	if !strings.Contains(output, "Merge guidance: BLOCKED") {
+		t.Fatalf("output missing blocked merge guidance:\n%s", output)
+	}
+	if strings.Contains(output, "az branch merge az-2") {
+		t.Fatalf("output unexpectedly suggests branch merge:\n%s", output)
+	}
+	if !strings.Contains(output, "az orchestrate close-session --issue az-2") {
+		t.Fatalf("output missing close-session command:\n%s", output)
 	}
 }
 
