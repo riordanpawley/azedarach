@@ -450,8 +450,9 @@ type mergePreflightOptions struct {
 const mergeBaseTargetID = "base"
 
 type mergeBaseTarget struct {
-	targetID    string
-	targetBranch string
+	targetID      string
+	targetBranch  string
+	targetWorktree string
 }
 
 func (m Model) resolveMergeBaseTarget(ctx context.Context, sourceID string) (mergeBaseTarget, error) {
@@ -495,7 +496,11 @@ func (m Model) resolveMergeBaseTarget(ctx context.Context, sourceID string) (mer
 		}
 		if parentTask.Status != domain.StatusDone {
 			if branch := branchForIssueDaemonWorktree(worktrees, parentID); branch != "" {
-				return mergeBaseTarget{targetID: parentID, targetBranch: branch}, nil
+				return mergeBaseTarget{
+					targetID:      parentID,
+					targetBranch:  branch,
+					targetWorktree: worktreePathForIssueDaemonWorktree(worktrees, parentID),
+				}, nil
 			}
 			return mergeBaseTarget{}, fmt.Errorf("nearest non-closed ancestor %s has no active worktree branch; attach/start that ancestor before merging %s", parentID, sourceID)
 		}
@@ -531,6 +536,18 @@ func branchForIssueDaemonWorktree(worktrees []daemonclient.Worktree, issueID str
 	return ""
 }
 
+func worktreePathForIssueDaemonWorktree(worktrees []daemonclient.Worktree, issueID string) string {
+	for _, wt := range worktrees {
+		if !strings.EqualFold(strings.TrimSpace(wt.IssueID), strings.TrimSpace(issueID)) {
+			continue
+		}
+		if path := strings.TrimSpace(wt.Path); path != "" {
+			return path
+		}
+	}
+	return ""
+}
+
 func (m Model) mergeToBaseCmd(sourceWorktree, sourceID string, refreshStatus bool) tea.Cmd {
 	return m.mergeToBaseCmdWithOptions(sourceWorktree, sourceID, refreshStatus, mergePreflightOptions{})
 }
@@ -544,9 +561,12 @@ func (m Model) mergeToBaseCmdWithOptions(sourceWorktree, sourceID string, refres
 		}
 		baseBranch := target.targetBranch
 		targetID := target.targetID
-		baseWorktree := m.activeProjectPath()
-		if strings.TrimSpace(baseWorktree) == "" {
-			baseWorktree = "."
+		baseWorktree := strings.TrimSpace(target.targetWorktree)
+		if baseWorktree == "" {
+			baseWorktree = m.activeProjectPath()
+			if strings.TrimSpace(baseWorktree) == "" {
+				baseWorktree = "."
+			}
 		}
 
 		branch, err := m.resolveWorktreeBranch(ctx, sourceWorktree, sourceID)

@@ -3427,7 +3427,7 @@ func TestMergeToBaseUsesNearestNonClosedAncestorBranch(t *testing.T) {
 		{ID: childIssueID, Status: domain.StatusInProgress, ParentID: &parentIssueID},
 		{ID: parentIssueID, Status: domain.StatusInProgress},
 	}
-	targetWorktree = m.activeProjectPath()
+	targetWorktree = "/tmp/az-parent"
 
 	msg := m.mergeToBaseCmd("/tmp/az-child", sourceID, true)()
 	mergeMsg, ok := msg.(mergeResultMsg)
