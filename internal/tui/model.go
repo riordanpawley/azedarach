@@ -1298,6 +1298,11 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 	}
 }
 
+func (m *Model) scheduleIssuesRefreshCmd() tea.Cmd {
+	m.issueRefreshSeq++
+	return m.loadIssuesCmd()
+}
+
 func (m Model) loadUIViewModeCmd() tea.Cmd {
 	client := m.daemonClient
 	if client == nil {
