@@ -862,6 +862,18 @@ func branchForIssueWorktree(worktrees []daemonclient.Worktree, issueID string) s
 	return ""
 }
 
+func worktreePathForIssue(worktrees []daemonclient.Worktree, issueID string) string {
+	for _, worktree := range worktrees {
+		if !naming.IssueIDsEqual(worktree.IssueID, issueID) {
+			continue
+		}
+		if path := strings.TrimSpace(worktree.Path); path != "" {
+			return path
+		}
+	}
+	return ""
+}
+
 // BranchMergeToBaseCommand merges one issue worktree branch into the base branch using daemon git commands.
 func BranchMergeToBaseCommand(deps *Dependencies, issueID string) error {
 	return BranchMergeToBaseCommandWithOptions(deps, BranchMergeToBaseOptions{
@@ -886,9 +898,12 @@ func BranchMergeToBaseCommandWithOptions(deps *Dependencies, opts BranchMergeToB
 		return err
 	}
 	baseBranch := target.Branch
-	baseWorktree := strings.TrimSpace(deps.RepoDir)
+	baseWorktree := strings.TrimSpace(target.WorktreePath)
 	if baseWorktree == "" {
-		baseWorktree = "."
+		baseWorktree = strings.TrimSpace(deps.RepoDir)
+		if baseWorktree == "" {
+			baseWorktree = "."
+		}
 	}
 	deps.Logger.Info("resolved branch merge target",
 		"issue_id", source.IssueID,
@@ -907,6 +922,7 @@ func BranchMergeToBaseCommandWithOptions(deps *Dependencies, opts BranchMergeToB
 		"issue_id", source.IssueID,
 		"source_worktree", source.Path,
 		"source_branch", source.Branch,
+		"target_worktree", baseWorktree,
 		"base_branch", baseBranch,
 	)
 
@@ -933,8 +949,9 @@ func BranchMergeToBaseCommandWithOptions(deps *Dependencies, opts BranchMergeToB
 }
 
 type mergeBaseTarget struct {
-	TargetID string
-	Branch   string
+	TargetID     string
+	Branch       string
+	WorktreePath string
 }
 
 type mergeTargetDecision struct {
@@ -992,7 +1009,11 @@ func resolveMergeToBaseTarget(ctx context.Context, deps *Dependencies, issueID s
 		if parentTask.Status != domain.StatusDone {
 			if branch := branchForIssueWorktree(worktrees, parentID); branch != "" {
 				decision.Reason = "selected nearest non-closed ancestor branch"
-				return mergeBaseTarget{TargetID: parentID, Branch: branch}, decision, nil
+				return mergeBaseTarget{
+					TargetID:     parentID,
+					Branch:       branch,
+					WorktreePath: worktreePathForIssue(worktrees, parentID),
+				}, decision, nil
 			}
 			return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("nearest non-closed ancestor %s has no active worktree branch; attach/start that ancestor before merging %s", parentID, issueID)
 		}
@@ -1039,6 +1060,9 @@ func BranchAgentMergeCommand(deps *Dependencies, opts BranchAgentMergeOptions) e
 		}
 		targetID = baseTarget.TargetID
 		targetRef = baseTarget.Branch
+		if strings.TrimSpace(baseTarget.WorktreePath) != "" {
+			targetWorktree = baseTarget.WorktreePath
+		}
 	} else {
 		target, err := resolveWorktreeForIssue(ctx, deps, targetID)
 		if err != nil {
