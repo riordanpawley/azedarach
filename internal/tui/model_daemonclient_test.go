@@ -7245,6 +7245,67 @@ func TestLoadIssuesAfterRuntimeReconcileCmd_ReconcilesBeforeSnapshot(t *testing.
 	}
 }
 
+func TestLoadIssuesAfterIssueReconcileCmd_ReconcilesSelectedIssuesBeforeSnapshot(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandRuntimeReconcileIssue:
+				body, err := json.Marshal(daemonclient.RuntimeReconcileResult{
+					ProjectID: "azedarach-bte",
+				})
+				if err != nil {
+					t.Fatalf("marshal runtime issue reconcile response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            body,
+				}, nil
+			case daemonclient.CommandTaskList:
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 18, "azedarach-bte", []domain.Task{
+						{ID: "az-parent", Title: "Parent", Status: domain.StatusOpen},
+						{ID: "az-child", Title: "Child", Status: domain.StatusOpen},
+					}),
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.issueRefreshSeq = 7
+	cmd := m.loadIssuesAfterIssueReconcileCmd([]string{"az-parent", "az-child", "az-child"})
+	if cmd == nil {
+		t.Fatal("expected command")
+	}
+	msg := cmd()
+	loaded, ok := msg.(issuesLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
+	}
+	if loaded.refreshSeq != 7 {
+		t.Fatalf("refresh seq = %d, want 7", loaded.refreshSeq)
+	}
+	if loaded.revision != 18 {
+		t.Fatalf("revision = %d, want 18", loaded.revision)
+	}
+	if len(transport.requests) < 2 {
+		t.Fatalf("requests = %v, want at least two commands", transport.requests)
+	}
+	if transport.requests[0] != daemonclient.CommandRuntimeReconcileIssue || transport.requests[1] != daemonclient.CommandTaskList {
+		t.Fatalf("command order = %v, want issue reconcile before task list", transport.requests[:2])
+	}
+}
+
 func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 	t.Run("bulk status delete archive", func(t *testing.T) {
 		transport := &recordingDaemonTransport{

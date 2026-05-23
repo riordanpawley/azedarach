@@ -337,7 +337,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.boardRefreshing = true
 		m.issueRefreshSeq++
 		return m, tea.Batch(
-			m.loadIssuesCmd(),
+					m.scheduleIssuesRefreshCmd(),
 			m.gitSyncService.FetchAndCheck(),
 		)
 
@@ -366,7 +366,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Message: formatPendingOperationMessage("Session start", msg.issueID, msg.operationID, msg.state),
 				Expires: time.Now().Add(5 * time.Second),
 			})
-			return m, m.loadIssuesCmd()
+			return m, m.scheduleIssuesRefreshCmd()
 		}
 		m.clearPendingTaskStatus(msg.issueID)
 		m.syncTaskWorkspaceOverlay()
@@ -386,7 +386,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Message: formatPendingOperationMessage("Session stop", msg.issueID, msg.operationID, msg.state),
 				Expires: time.Now().Add(5 * time.Second),
 			})
-			return m, m.loadIssuesCmd()
+			return m, m.scheduleIssuesRefreshCmd()
 		}
 		m.clearPendingTaskStatus(msg.issueID)
 		m.syncTaskWorkspaceOverlay()
@@ -395,7 +395,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("Session stopped: %s", msg.issueID),
 			Expires: time.Now().Add(3 * time.Second),
 		})
-		return m, m.loadIssuesCmd()
+		return m, m.scheduleIssuesRefreshCmd()
 
 	case sessionErrorMsg:
 		m.clearPendingTaskStatus(msg.issueID)
@@ -428,7 +428,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Message: formatPendingOperationMessage("Agent conflict resolution", msg.issueID, msg.operationID, msg.state),
 				Expires: time.Now().Add(5 * time.Second),
 			})
-			return m, m.loadIssuesCmd()
+			return m, m.scheduleIssuesRefreshCmd()
 		}
 		if msg.err != nil {
 			m.addToast(Toast{
@@ -447,7 +447,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("Agent conflict resolution launched for %s in %s", msg.issueID, target),
 			Expires: time.Now().Add(4 * time.Second),
 		})
-		return m, m.loadIssuesCmd()
+		return m, m.scheduleIssuesRefreshCmd()
 
 	case daemonStreamEventMsg:
 		if msg.stream != nil && msg.stream != m.daemonEvents {
@@ -537,7 +537,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case daemonEventRefreshSnapshot:
 			cursor := protocol.StreamCursor{Revision: m.daemonRevision}
 			m.daemonRevision = cursor.Advance(msg.event).Revision
-			return m, tea.Batch(m.loadIssuesCmd(), m.waitForDaemonEventCmd())
+			return m, tea.Batch(m.scheduleIssuesRefreshCmd(), m.waitForDaemonEventCmd())
 		case daemonEventRehydrate:
 			m.daemonEvents = nil
 			return m, m.attachDaemonCmd()
@@ -673,7 +673,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Message: formatPendingOperationMessage(action, msg.sourceID, msg.operationID, msg.state),
 				Expires: time.Now().Add(5 * time.Second),
 			})
-			return m, m.loadIssuesCmd()
+			return m, m.scheduleIssuesRefreshCmd()
 		}
 		if msg.err != nil {
 			m.enqueueAsyncRecoveryNotification(asyncRecoveryNotification{
@@ -709,7 +709,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("Successfully merged %s into %s", msg.sourceID, msg.targetID),
 			Expires: time.Now().Add(3 * time.Second),
 		})
-		return m, m.loadIssuesCmd()
+		return m, m.scheduleIssuesRefreshCmd()
 
 	case mergePreflightFailureMsg:
 		m.clearLocalMergeOperationPending(msg.sourceID, msg.targetID)
@@ -744,7 +744,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Message: fmt.Sprintf("Discarded %s changes", strings.ToLower(sideTitle)),
 				Expires: time.Now().Add(3 * time.Second),
 			})
-			return m, m.loadIssuesCmd()
+			return m, m.scheduleIssuesRefreshCmd()
 		case "commit":
 			if msg.err != nil {
 				m.addToast(Toast{
@@ -759,7 +759,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Message: fmt.Sprintf("Committed %s changes", strings.ToLower(sideTitle)),
 				Expires: time.Now().Add(3 * time.Second),
 			})
-			return m, m.loadIssuesCmd()
+			return m, m.scheduleIssuesRefreshCmd()
 		default:
 			return m, nil
 		}
@@ -780,7 +780,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Expires: time.Now().Add(3 * time.Second),
 			})
 		}
-		return m, m.loadIssuesCmd()
+		return m, m.scheduleIssuesRefreshCmd()
 
 	case mergeTargetSelectionResolvedMsg:
 		if msg.err != nil {
@@ -844,7 +844,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Message: formatPendingOperationMessage(action, msg.issueID, msg.operationID, msg.state),
 				Expires: time.Now().Add(5 * time.Second),
 			})
-			return m, m.loadIssuesCmd()
+			return m, m.scheduleIssuesRefreshCmd()
 		}
 		if msg.err != nil {
 			m.enqueueAsyncRecoveryNotification(asyncRecoveryNotification{
@@ -1084,7 +1084,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Reload issues to show new task
-		return m, m.loadIssuesCmd()
+		return m, m.scheduleIssuesRefreshCmd()
 
 	// PR creation overlay messages
 	case overlay.PRCreatedMsg:
@@ -1204,7 +1204,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 
 		// Reload issues to reflect changes
-		return m, m.loadIssuesCmd()
+		return m, m.scheduleIssuesRefreshCmd()
 
 	case branchBehindMsg:
 		if msg.err != nil {
@@ -1328,7 +1328,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("Task %s archived", msg.taskID),
 			Expires: time.Now().Add(2 * time.Second),
 		})
-		return m, m.loadIssuesCmd()
+		return m, m.scheduleIssuesRefreshCmd()
 
 	case worktreeCleanupConfirmPromptMsg:
 		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
@@ -1385,7 +1385,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Message: formatPendingOperationMessage("Worktree cleanup", msg.taskID, msg.operationID, msg.state),
 				Expires: time.Now().Add(5 * time.Second),
 			})
-			return m, m.loadIssuesCmd()
+			return m, m.scheduleIssuesRefreshCmd()
 		}
 		if msg.needsForce {
 			m.pendingCleanup = &pendingWorktreeCleanupConfirmation{
@@ -1422,7 +1422,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: message,
 			Expires: time.Now().Add(3 * time.Second),
 		})
-		return m, m.loadIssuesCmd()
+		return m, m.scheduleIssuesRefreshCmd()
 
 	case taskStatusResultMsg:
 		if msg.err != nil {
@@ -1434,7 +1434,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Message: formatPendingOperationMessage("Task move", msg.taskID, pending.OperationID, pending.State),
 					Expires: time.Now().Add(5 * time.Second),
 				})
-				return m, m.loadIssuesCmd()
+				return m, m.scheduleIssuesRefreshCmd()
 			}
 			m.rollbackTaskStatus(msg.taskID, msg.previousStatus)
 			m.syncTaskWorkspaceOverlay()
@@ -1456,13 +1456,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.newStatus == domain.StatusDone {
 			if session := m.sessionForIssue(msg.taskID); session != nil {
 				return m, tea.Batch(
-					m.loadIssuesCmd(),
+					m.scheduleIssuesRefreshCmd(),
 					m.openPROverlayCmd(session.Worktree, msg.taskID),
 				)
 			}
 		}
 
-		return m, m.loadIssuesCmd()
+		return m, m.scheduleIssuesRefreshCmd()
 
 	case bulkStatusResultMsg:
 		m.loading = false
@@ -1492,7 +1492,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		m.editor.ClearSelection()
 		m.editor.EnterNormal()
-		return m, m.loadIssuesCmd()
+		return m, m.scheduleIssuesRefreshCmd()
 	}
 
 	if !m.overlayStack.IsEmpty() {
