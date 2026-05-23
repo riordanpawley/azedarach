@@ -287,6 +287,11 @@ type BranchAgentMergeOptions struct {
 	Target  string
 }
 
+type BranchMergeToBaseOptions struct {
+	IssueID           string
+	AllowBaseForChild bool
+}
+
 type OperationGetOptions struct {
 	OperationID  string
 	JSON         bool
@@ -840,39 +845,59 @@ func taskParentIssueID(task domain.Task) string {
 }
 
 func branchForIssueWorktree(worktrees []daemonclient.Worktree, issueID string) string {
+	matched := false
 	for _, worktree := range worktrees {
 		if !naming.IssueIDsEqual(worktree.IssueID, issueID) {
 			continue
 		}
+		matched = true
 		branch := strings.TrimSpace(worktree.Branch)
 		if branch != "" {
 			return branch
 		}
-		break
+	}
+	if matched {
+		return ""
 	}
 	return ""
 }
 
 // BranchMergeToBaseCommand merges one issue worktree branch into the base branch using daemon git commands.
 func BranchMergeToBaseCommand(deps *Dependencies, issueID string) error {
+	return BranchMergeToBaseCommandWithOptions(deps, BranchMergeToBaseOptions{
+		IssueID:           issueID,
+		AllowBaseForChild: false,
+	})
+}
+
+func BranchMergeToBaseCommandWithOptions(deps *Dependencies, opts BranchMergeToBaseOptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), branchMergeToBaseTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
 
-	source, err := resolveMergeToBaseSourceWorktree(ctx, deps, issueID)
+	source, err := resolveMergeToBaseSourceWorktree(ctx, deps, opts.IssueID)
 	if err != nil {
 		return err
 	}
-	baseBranch, err := resolveMergeToBaseBranch(ctx, deps, source.IssueID)
+	target, decision, err := resolveMergeToBaseTarget(ctx, deps, source.IssueID, opts.AllowBaseForChild)
 	if err != nil {
 		return err
 	}
+	baseBranch := target.Branch
 	baseWorktree := strings.TrimSpace(deps.RepoDir)
 	if baseWorktree == "" {
 		baseWorktree = "."
 	}
+	deps.Logger.Info("resolved branch merge target",
+		"issue_id", source.IssueID,
+		"selected_target", target.TargetID,
+		"selected_branch", target.Branch,
+		"decision_reason", decision.Reason,
+		"ancestor_chain", strings.Join(decision.AncestorChain, " -> "),
+		"allow_base_for_child", opts.AllowBaseForChild,
+	)
 
 	if err := checkMergeToBasePreflight(ctx, deps, source, baseWorktree); err != nil {
 		return err
@@ -912,25 +937,22 @@ type mergeBaseTarget struct {
 	Branch   string
 }
 
-func resolveMergeToBaseBranch(ctx context.Context, deps *Dependencies, issueID string) (string, error) {
-	target, err := resolveMergeToBaseTarget(ctx, deps, issueID)
-	if err != nil {
-		return "", err
-	}
-	return target.Branch, nil
+type mergeTargetDecision struct {
+	Reason        string
+	AncestorChain []string
 }
 
-func resolveMergeToBaseTarget(ctx context.Context, deps *Dependencies, issueID string) (mergeBaseTarget, error) {
+func resolveMergeToBaseTarget(ctx context.Context, deps *Dependencies, issueID string, allowBaseForChild bool) (mergeBaseTarget, mergeTargetDecision, error) {
 	defaultBase := resolveCLIBaseBranch(deps.Config)
 	defaultTarget := mergeBaseTarget{TargetID: "base", Branch: defaultBase}
 	issueID = strings.TrimSpace(issueID)
 	if issueID == "" {
-		return defaultTarget, nil
+		return defaultTarget, mergeTargetDecision{Reason: "empty issue id: default base target"}, nil
 	}
 
 	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
 	if err != nil {
-		return mergeBaseTarget{}, fmt.Errorf("resolve merge base branch task graph: %w", err)
+		return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("resolve merge base branch task graph: %w", err)
 	}
 
 	tasksByID := make(map[string]domain.Task, len(snapshot.Tasks))
@@ -943,34 +965,48 @@ func resolveMergeToBaseTarget(ctx context.Context, deps *Dependencies, issueID s
 	}
 	sourceTask, ok := tasksByID[issueID]
 	if !ok {
-		return mergeBaseTarget{}, fmt.Errorf("cannot resolve merge target for %s: issue not found in task snapshot; refusing fallback to base", issueID)
+		return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("cannot resolve merge target for %s: issue not found in task snapshot; refusing fallback to base", issueID)
 	}
 
 	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
 	if err != nil {
-		return mergeBaseTarget{}, fmt.Errorf("resolve merge base branch worktrees: %w", err)
+		return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("resolve merge base branch worktrees: %w", err)
 	}
 
+	decision := mergeTargetDecision{
+		AncestorChain: make([]string, 0, 6),
+	}
 	seen := map[string]struct{}{}
 	for parentID := taskParentIssueID(sourceTask); parentID != ""; {
+		decision.AncestorChain = append(decision.AncestorChain, parentID)
 		if _, ok := seen[parentID]; ok {
-			return defaultTarget, nil
+			decision.Reason = "ancestor cycle detected: defaulting to base target"
+			return defaultTarget, decision, nil
 		}
 		seen[parentID] = struct{}{}
 
 		parentTask, ok := tasksByID[parentID]
 		if !ok {
-			return mergeBaseTarget{}, fmt.Errorf("cannot resolve merge target for %s: parent issue %s missing from task snapshot; refusing fallback to base", issueID, parentID)
+			return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("cannot resolve merge target for %s: parent issue %s missing from task snapshot; refusing fallback to base", issueID, parentID)
 		}
 		if parentTask.Status != domain.StatusDone {
 			if branch := branchForIssueWorktree(worktrees, parentID); branch != "" {
-				return mergeBaseTarget{TargetID: parentID, Branch: branch}, nil
+				decision.Reason = "selected nearest non-closed ancestor branch"
+				return mergeBaseTarget{TargetID: parentID, Branch: branch}, decision, nil
 			}
-			return mergeBaseTarget{}, fmt.Errorf("nearest non-closed ancestor %s has no active worktree branch; attach/start that ancestor before merging %s", parentID, issueID)
+			return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("nearest non-closed ancestor %s has no active worktree branch; attach/start that ancestor before merging %s", parentID, issueID)
 		}
 		parentID = taskParentIssueID(parentTask)
 	}
-	return defaultTarget, nil
+	if taskParentIssueID(sourceTask) != "" && !allowBaseForChild {
+		return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("refusing to merge child issue %s into base without explicit override; rerun with --allow-base-for-child", issueID)
+	}
+	if taskParentIssueID(sourceTask) != "" {
+		decision.Reason = "ancestor chain closed; explicit override allowed base target"
+	} else {
+		decision.Reason = "no ancestor chain; selected default base target"
+	}
+	return defaultTarget, decision, nil
 }
 
 func BranchAgentMergeCommand(deps *Dependencies, opts BranchAgentMergeOptions) error {
@@ -997,7 +1033,7 @@ func BranchAgentMergeCommand(deps *Dependencies, opts BranchAgentMergeOptions) e
 	agentIssueID := source.IssueID
 	agentWorktree := source.Path
 	if requestedBaseTarget {
-		baseTarget, err := resolveMergeToBaseTarget(ctx, deps, source.IssueID)
+		baseTarget, _, err := resolveMergeToBaseTarget(ctx, deps, source.IssueID, false)
 		if err != nil {
 			return err
 		}

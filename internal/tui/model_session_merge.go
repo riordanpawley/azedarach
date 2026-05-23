@@ -494,8 +494,8 @@ func (m Model) resolveMergeBaseTarget(ctx context.Context, sourceID string) (mer
 			return defaultTarget, nil
 		}
 		if parentTask.Status != domain.StatusDone {
-			if wt, found := findDaemonWorktree(worktrees, "", parentID); found && strings.TrimSpace(wt.Branch) != "" {
-				return mergeBaseTarget{targetID: parentID, targetBranch: wt.Branch}, nil
+			if branch := branchForIssueDaemonWorktree(worktrees, parentID); branch != "" {
+				return mergeBaseTarget{targetID: parentID, targetBranch: branch}, nil
 			}
 			return mergeBaseTarget{}, fmt.Errorf("nearest non-closed ancestor %s has no active worktree branch; attach/start that ancestor before merging %s", parentID, sourceID)
 		}
@@ -514,6 +514,18 @@ func taskParentIssueID(task domain.Task) string {
 			if parentID := strings.TrimSpace(dep.ID.String()); parentID != "" {
 				return parentID
 			}
+		}
+	}
+	return ""
+}
+
+func branchForIssueDaemonWorktree(worktrees []daemonclient.Worktree, issueID string) string {
+	for _, wt := range worktrees {
+		if !strings.EqualFold(strings.TrimSpace(wt.IssueID), strings.TrimSpace(issueID)) {
+			continue
+		}
+		if branch := strings.TrimSpace(wt.Branch); branch != "" {
+			return branch
 		}
 	}
 	return ""

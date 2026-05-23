@@ -36,3 +36,20 @@ func TestParseBranchAgentMergeArgs(t *testing.T) {
 		t.Fatalf("opts = %+v, want issue az-1 target az-2", opts)
 	}
 }
+
+func TestParseBranchMergeArgs(t *testing.T) {
+	opts, err := parseBranchMergeArgs([]string{"az-1", "--allow-base-for-child"})
+	if err != nil {
+		t.Fatalf("parseBranchMergeArgs error = %v", err)
+	}
+	if opts.IssueID != "az-1" || !opts.AllowBaseForChild {
+		t.Fatalf("opts = %+v, want issue az-1 with allow-base-for-child=true", opts)
+	}
+}
+
+func TestParseBranchMergeArgsRejectsUnknownFlag(t *testing.T) {
+	_, err := parseBranchMergeArgs([]string{"--wat"})
+	if err == nil || !strings.Contains(err.Error(), "usage: az branch merge [issue-id] [--allow-base-for-child]") {
+		t.Fatalf("err = %v, want merge usage error", err)
+	}
+}
