@@ -1231,15 +1231,12 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 func runBranchCommand(cfg *config.Config, command string, args []string) error {
 	switch command {
 	case "merge", "merge-to-base":
-		if len(args) > 1 {
-			return fmt.Errorf("usage: az branch merge [issue-id]")
-		}
-		issueID := ""
-		if len(args) == 1 {
-			issueID = args[0]
+		opts, err := parseBranchMergeArgs(args)
+		if err != nil {
+			return err
 		}
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
-			return cli.BranchMergeToBaseCommand(deps, issueID)
+			return cli.BranchMergeToBaseCommandWithOptions(deps, opts)
 		})
 	case "agent-merge":
 		if sessionHelpRequested(args...) {
@@ -1263,12 +1260,34 @@ func runBranchCommand(cfg *config.Config, command string, args []string) error {
 func branchCommandUsage(command string) (string, bool) {
 	switch command {
 	case "merge", "merge-to-base":
-		return "usage: az branch merge [issue-id]", true
+		return "usage: az branch merge [issue-id] [--allow-base-for-child]", true
 	case "agent-merge":
 		return "usage: az branch agent-merge <issue-id> [--target base|<issue-id>]", true
 	default:
 		return "", false
 	}
+}
+
+func parseBranchMergeArgs(args []string) (cli.BranchMergeToBaseOptions, error) {
+	opts := cli.BranchMergeToBaseOptions{}
+	for _, arg := range args {
+		trimmed := strings.TrimSpace(arg)
+		switch trimmed {
+		case "--allow-base-for-child":
+			opts.AllowBaseForChild = true
+		case "":
+			continue
+		default:
+			if strings.HasPrefix(trimmed, "--") {
+				return cli.BranchMergeToBaseOptions{}, fmt.Errorf("usage: az branch merge [issue-id] [--allow-base-for-child]")
+			}
+			if opts.IssueID != "" {
+				return cli.BranchMergeToBaseOptions{}, fmt.Errorf("usage: az branch merge [issue-id] [--allow-base-for-child]")
+			}
+			opts.IssueID = trimmed
+		}
+	}
+	return opts, nil
 }
 
 func parseSessionResolveConflictArgs(args []string) (cli.SessionResolveConflictOptions, error) {

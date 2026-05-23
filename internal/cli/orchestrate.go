@@ -118,6 +118,8 @@ type orchestrateIntegrateResult struct {
 	IssueID      string   `json:"issue_id"`
 	WorktreePath string   `json:"worktree_path,omitempty"`
 	Branch       string   `json:"branch,omitempty"`
+	MergeReady   bool     `json:"merge_ready"`
+	Reasons      []string `json:"reasons,omitempty"`
 	Commands     []string `json:"commands"`
 }
 
@@ -640,10 +642,16 @@ func OrchestrateIntegrateCommand(deps *Dependencies, opts OrchestrateIntegrateOp
 	if err != nil {
 		return err
 	}
-	commands := orchestrateIntegrationCommands(opts.IssueID, wt, found)
+	mergeReady, reasons, err := orchestrateIntegrationMergeReadiness(ctx, deps, opts.IssueID)
+	if err != nil {
+		return err
+	}
+	commands := orchestrateIntegrationCommands(opts.IssueID, wt, found, mergeReady)
 	result := orchestrateIntegrateResult{
-		IssueID:  opts.IssueID,
-		Commands: commands,
+		IssueID:    opts.IssueID,
+		MergeReady: mergeReady,
+		Reasons:    reasons,
+		Commands:   commands,
 	}
 	if found {
 		result.WorktreePath = wt.Path
@@ -653,6 +661,12 @@ func OrchestrateIntegrateCommand(deps *Dependencies, opts OrchestrateIntegrateOp
 		return printJSON(result)
 	}
 	fmt.Printf("Integration guidance for %s\n", opts.IssueID)
+	if !mergeReady {
+		fmt.Println("Merge guidance: BLOCKED (insufficient completion evidence)")
+		for _, reason := range reasons {
+			fmt.Printf("- %s\n", reason)
+		}
+	}
 	if found {
 		fmt.Printf("Worktree: %s\n", wt.Path)
 		fmt.Printf("Branch: %s\n", wt.Branch)
@@ -948,7 +962,7 @@ func worktreeForIssue(ctx context.Context, deps *Dependencies, issueID string) (
 	return daemonclient.Worktree{}, false, nil
 }
 
-func orchestrateIntegrationCommands(issueID string, wt daemonclient.Worktree, found bool) []string {
+func orchestrateIntegrationCommands(issueID string, wt daemonclient.Worktree, found, mergeReady bool) []string {
 	commands := make([]string, 0, 5)
 	if found && strings.TrimSpace(wt.Path) != "" {
 		commands = append(commands,
@@ -958,11 +972,48 @@ func orchestrateIntegrationCommands(issueID string, wt daemonclient.Worktree, fo
 	} else {
 		commands = append(commands, fmt.Sprintf("az issue get %s", issueID), fmt.Sprintf("az session status %s", issueID))
 	}
-	commands = append(commands,
-		fmt.Sprintf("az branch merge %s", issueID),
-		fmt.Sprintf("az orchestrate close-session --issue %s", issueID),
-	)
+	if mergeReady {
+		commands = append(commands, fmt.Sprintf("az branch merge %s", issueID))
+	}
+	commands = append(commands, fmt.Sprintf("az orchestrate close-session --issue %s", issueID))
 	return commands
+}
+
+func orchestrateIntegrationMergeReadiness(ctx context.Context, deps *Dependencies, issueID string) (bool, []string, error) {
+	tasks, err := deps.DaemonClient.ListTasks(ctx)
+	if err != nil {
+		return false, nil, fmt.Errorf("list tasks: %w", err)
+	}
+	task, ok := findTaskByID(tasks, issueID)
+	if !ok {
+		return false, []string{fmt.Sprintf("issue %s not found in daemon task projection", issueID)}, nil
+	}
+	if task.Status == domain.StatusDone {
+		return true, nil, nil
+	}
+	parentIssueID := issueID
+	if task.ParentID != nil && strings.TrimSpace(task.ParentID.String()) != "" {
+		parentIssueID = strings.TrimSpace(task.ParentID.String())
+	}
+	events, err := deps.DaemonClient.MailList(ctx, protocol.MailListCommandBody{
+		RepoDir:     deps.RepoDir,
+		ParentIssue: parentIssueID,
+		SinceSeq:    0,
+		Limit:       500,
+	})
+	if err != nil {
+		return false, nil, fmt.Errorf("list mailbox events for %s: %w", parentIssueID, err)
+	}
+	for _, evt := range events {
+		if naming.IssueIDsEqual(evt.IssueID.String(), issueID) && strings.EqualFold(strings.TrimSpace(evt.Type), "worker-complete") {
+			return true, nil, nil
+		}
+	}
+	reasons := []string{
+		fmt.Sprintf("issue %s is not closed", issueID),
+		fmt.Sprintf("no worker-complete mailbox event found under parent %s for %s", parentIssueID, issueID),
+	}
+	return false, reasons, nil
 }
 
 func sendOrchestrateMailEvent(deps *Dependencies, parentIssueID, issueID, eventType, body string) error {
