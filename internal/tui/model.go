@@ -596,6 +596,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				columns := m.buildColumns()
 				m.nav.JumpToTaskByID(columns, children[0].ID.String())
 				m.ensureCursorVisible(columns)
+				m.issueRefreshSeq++
 				issueIDs := make([]string, 0, len(children)+1)
 				issueIDs = append(issueIDs, task.ID.String())
 				for _, child := range children {
