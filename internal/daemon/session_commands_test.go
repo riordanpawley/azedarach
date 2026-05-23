@@ -192,6 +192,46 @@ func (r *ancestorBaseWorktreeRunner) Run(_ context.Context, args ...string) (str
 	return "", nil
 }
 
+type initFailureCleanupWorktreeRunner struct {
+	repoDir        string
+	worktreePath   string
+	branchName     string
+	worktreeExists bool
+	removeForced   bool
+}
+
+func (r *initFailureCleanupWorktreeRunner) Run(_ context.Context, args ...string) (string, error) {
+	if len(args) >= 2 && args[0] == "config" && args[1] == "user.name" {
+		return "testuser\n", nil
+	}
+	if len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" {
+		var b strings.Builder
+		b.WriteString("worktree " + r.repoDir + "\nbranch refs/heads/main\n\n")
+		if r.worktreeExists {
+			b.WriteString("worktree " + r.worktreePath + "\nbranch refs/heads/" + r.branchName + "\n\n")
+		}
+		return b.String(), nil
+	}
+	if len(args) >= 6 && args[0] == "worktree" && args[1] == "add" && args[2] == "-b" {
+		r.worktreeExists = true
+		return "", nil
+	}
+	if len(args) >= 3 && args[0] == "worktree" && args[1] == "remove" {
+		for _, arg := range args {
+			if arg == "--force" {
+				r.removeForced = true
+				break
+			}
+		}
+		r.worktreeExists = false
+		return "", nil
+	}
+	if len(args) >= 3 && args[0] == "branch" && args[1] == "-D" {
+		return "", nil
+	}
+	return "", nil
+}
+
 func TestSessionProjectionIssueIDPrefersSessionNameParsing(t *testing.T) {
 	session := daemonstate.Session{
 		ID:      "az-bra",
@@ -3129,29 +3169,120 @@ func TestRunWorktreeInitCommandsReturnsCommandFailure(t *testing.T) {
 	}
 }
 
-func TestRunWorktreeInitCommandsSkipsMissingCommand(t *testing.T) {
-	worktree := t.TempDir()
+func TestRunWorktreeInitCommandsMissingCommandReturnsFailure(t *testing.T) {
 	d := &Daemon{
 		cfg: Config{
 			SessionShell: "sh",
 			WorktreeInitCommands: []string{
 				"definitely-missing-command-xyz",
-				"printf seeded > .worktree-init-test",
 			},
-			Logger: slog.Default(),
 		},
 	}
 
-	if err := d.runWorktreeInitCommands(context.Background(), protocol.DefaultProjectID, worktree); err != nil {
-		t.Fatalf("runWorktreeInitCommands error: %v", err)
+	err := d.runWorktreeInitCommands(context.Background(), protocol.DefaultProjectID, t.TempDir())
+	if err == nil {
+		t.Fatal("runWorktreeInitCommands error = nil, want failure")
+	}
+	if !strings.Contains(err.Error(), "definitely-missing-command-xyz") {
+		t.Fatalf("error = %q, want missing command context", err.Error())
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error = %q, want shell not-found signal", err.Error())
+	}
+}
+
+func TestSessionStartInitFailureCleansUpNewWorktree(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(worktree, ".worktree-init-test"))
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Init failure should cleanup worktree",
+		Type:  domain.TypeTask,
+	})
 	if err != nil {
-		t.Fatalf("read init marker: %v", err)
+		t.Fatalf("create issue: %v", err)
 	}
-	if strings.TrimSpace(string(data)) != "seeded" {
-		t.Fatalf("init marker content = %q, want seeded", string(data))
+
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
+	branchName := "testuser/" + issueID + "/init-failure-cleanup"
+	worktreeRunner := &initFailureCleanupWorktreeRunner{
+		repoDir:      repoDir,
+		worktreePath: worktreePath,
+		branchName:   branchName,
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "sh",
+			WorktreeInitCommands: []string{
+				"definitely-missing-command-xyz",
+			},
+			Logger: slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-init-fail",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.start",
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"session_id": issueID,
+		}),
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, req)
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if resp.OK {
+		t.Fatalf("session start response OK = true, want failure: %+v", resp)
+	}
+	if !worktreeRunner.removeForced {
+		t.Fatal("expected cleanup to remove newly-created worktree with --force")
+	}
+	if worktreeRunner.worktreeExists {
+		t.Fatal("expected worktree to be removed after init failure")
+	}
+	if len(tmuxRunner.sessions) != 0 {
+		t.Fatalf("tmux sessions = %v, want none when init fails", tmuxRunner.sessions)
+	}
+
+	if resp.Error == nil {
+		t.Fatalf("expected error envelope, got nil: %+v", resp)
+	}
+	message := resp.Error.Message
+	if !strings.Contains(message, "worktree init failed") {
+		t.Fatalf("error message = %q, want init failure context", message)
+	}
+	if !strings.Contains(message, "cleaned up worktree") {
+		t.Fatalf("error message = %q, want cleanup context", message)
 	}
 }
 
