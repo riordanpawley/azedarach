@@ -485,7 +485,8 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	}
 	if !reusedWorktree {
 		if err := d.runWorktreeInitCommands(ctx, cmd.ProjectID, worktree.Path); err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree init failed: %v", err)), nil
+			cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree init failed for %s: %v%s", cmd.IssueID, err, cleanupNote)), nil
 		}
 	}
 	if d.cfg.Logger != nil {
@@ -987,9 +988,33 @@ func (d *Daemon) ensureConflictWorktree(ctx context.Context, projectID, issueID,
 		return "", "", false, createErr
 	}
 	if err := d.runWorktreeInitCommands(ctx, projectID, worktree.Path); err != nil {
-		return "", "", false, fmt.Errorf("worktree init failed: %w", err)
+		cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, issueID, worktree.Path, false)
+		return "", "", false, fmt.Errorf("worktree init failed for %s: %w%s", issueID, err, cleanupNote)
 	}
 	return worktree.Path, worktree.Branch, false, nil
+}
+
+func (d *Daemon) cleanupNewWorktreeAfterInitFailure(ctx context.Context, worktreeManager *git.WorktreeManager, issueID, worktreePath string, reusedWorktree bool) string {
+	if reusedWorktree || worktreeManager == nil {
+		return ""
+	}
+	if err := worktreeManager.DeleteWithOptions(ctx, issueID, true); err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("failed to cleanup worktree after init failure",
+				"issue_id", issueID,
+				"worktree", worktreePath,
+				"error", err,
+			)
+		}
+		return fmt.Sprintf(" (cleanup failed for worktree %s: %v)", worktreePath, err)
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("cleaned up worktree after init failure",
+			"issue_id", issueID,
+			"worktree", worktreePath,
+		)
+	}
+	return fmt.Sprintf(" (cleaned up worktree %s)", worktreePath)
 }
 
 func (d *Daemon) ensureConflictSession(ctx context.Context, projectID, issueID, canonicalSessionID, worktreePath string) (sessionName string, reused bool, err error) {
