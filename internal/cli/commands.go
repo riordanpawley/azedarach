@@ -943,7 +943,7 @@ func resolveMergeToBaseTarget(ctx context.Context, deps *Dependencies, issueID s
 	}
 	sourceTask, ok := tasksByID[issueID]
 	if !ok {
-		return defaultTarget, nil
+		return mergeBaseTarget{}, fmt.Errorf("cannot resolve merge target for %s: issue not found in task snapshot; refusing fallback to base", issueID)
 	}
 
 	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
@@ -960,7 +960,7 @@ func resolveMergeToBaseTarget(ctx context.Context, deps *Dependencies, issueID s
 
 		parentTask, ok := tasksByID[parentID]
 		if !ok {
-			return defaultTarget, nil
+			return mergeBaseTarget{}, fmt.Errorf("cannot resolve merge target for %s: parent issue %s missing from task snapshot; refusing fallback to base", issueID, parentID)
 		}
 		if parentTask.Status != domain.StatusDone {
 			if branch := branchForIssueWorktree(worktrees, parentID); branch != "" {

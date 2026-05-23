@@ -1401,6 +1401,89 @@ func TestBranchMergeToBaseCommandFailsWhenNearestNonClosedAncestorBranchMissing(
 	}
 }
 
+func TestBranchMergeToBaseCommandFailsWhenIssueMissingFromTaskSnapshot(t *testing.T) {
+	baseWorktree := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Git.BaseBranch = "trunk"
+	deps := &Dependencies{
+		Config: cfg,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return responseWithJSON(req, protocol.TaskListSnapshotPayload{
+						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+						ProtocolVersion:  protocol.CurrentVersion,
+						SnapshotRevision: 1,
+						ProjectID:        "proj",
+						LastCheckedAt:    time.Now().UTC(),
+						Freshness:        protocol.TaskListFreshnessFresh,
+						Tasks:            []domain.Task{{ID: "az-other", Status: domain.StatusOpen}},
+					}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"worktrees": []map[string]any{
+							{"path": "/tmp/az-child", "branch": "riordan/az-child/work", "issue_id": "az-child"},
+						},
+					}), nil
+				default:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   baseWorktree,
+	}
+
+	err := BranchMergeToBaseCommand(deps, "az-child")
+	if err == nil || !strings.Contains(err.Error(), "issue not found in task snapshot") {
+		t.Fatalf("err = %v, want missing issue snapshot error", err)
+	}
+}
+
+func TestBranchMergeToBaseCommandFailsWhenParentMissingFromTaskSnapshot(t *testing.T) {
+	baseWorktree := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Git.BaseBranch = "trunk"
+	deps := &Dependencies{
+		Config: cfg,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					parentID := naming.IssueID("az-parent")
+					return responseWithJSON(req, protocol.TaskListSnapshotPayload{
+						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+						ProtocolVersion:  protocol.CurrentVersion,
+						SnapshotRevision: 1,
+						ProjectID:        "proj",
+						LastCheckedAt:    time.Now().UTC(),
+						Freshness:        protocol.TaskListFreshnessFresh,
+						Tasks:            []domain.Task{{ID: "az-child", Status: domain.StatusOpen, ParentID: &parentID}},
+					}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"worktrees": []map[string]any{
+							{"path": "/tmp/az-child", "branch": "riordan/az-child/work", "issue_id": "az-child"},
+						},
+					}), nil
+				default:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   baseWorktree,
+	}
+
+	err := BranchMergeToBaseCommand(deps, "az-child")
+	if err == nil || !strings.Contains(err.Error(), "parent issue az-parent missing from task snapshot") {
+		t.Fatalf("err = %v, want missing parent snapshot error", err)
+	}
+}
+
 func TestBranchAgentMergeCommandLaunchesAgentWhenPreflightConflicts(t *testing.T) {
 	commands := make([]string, 0, 4)
 	var resolveBody protocol.SessionResolveConflictRequestBody
