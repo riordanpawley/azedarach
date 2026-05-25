@@ -463,6 +463,11 @@ func (d *DiagnosticsPanel) renderSessions(b *strings.Builder) {
 	// Table rows
 	for _, session := range diag.Sessions {
 		stateIcon := session.State.Icon()
+		stateLabel := session.State.String()
+		if session.ActiveCount > 0 && session.PausedCount > 0 {
+			stateIcon = "◒"
+			stateLabel = "partial"
+		}
 		uptimeStr := "-"
 		if session.Uptime > 0 {
 			uptimeStr = formatDuration(session.Uptime)
@@ -471,7 +476,7 @@ func (d *DiagnosticsPanel) renderSessions(b *strings.Builder) {
 		line := fmt.Sprintf("  %-16s %s %-7s  %s",
 			truncateDiagString(session.IssueID, 16),
 			stateIcon,
-			session.State,
+			stateLabel,
 			uptimeStr,
 		)
 		b.WriteString(d.styles.MenuItem.Render(line))

@@ -170,6 +170,32 @@ func TestRenderCard_WithSession(t *testing.T) {
 
 }
 
+func TestRenderCard_WithPartialAggregateSession(t *testing.T) {
+	s := styles.New()
+	startedAt := time.Now().Add(-15 * time.Minute)
+	task := domain.Task{
+		ID:       "az-partial",
+		Title:    "Mixed session",
+		Status:   domain.StatusInProgress,
+		Priority: domain.P1,
+		Type:     domain.TypeTask,
+		Session: &domain.Session{
+			IssueID:     "az-partial",
+			State:       domain.SessionBusy,
+			TotalCount:  2,
+			ActiveCount: 1,
+			PausedCount: 1,
+			StartedAt:   &startedAt,
+		},
+	}
+
+	result := RenderCard(task, false, false, 64, s)
+	stripped := stripANSI(result)
+	if !strings.Contains(stripped, "◒ M") {
+		t.Fatalf("partial aggregate session should render mixed signage, got: %s", stripped)
+	}
+}
+
 func TestRenderCard_FixedHeightAcrossTypes(t *testing.T) {
 	s := styles.New()
 	startedAt := time.Now().Add(-1 * time.Hour)

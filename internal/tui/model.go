@@ -5321,12 +5321,16 @@ func (m Model) openOrchestrationOverlay() tea.Cmd {
 			startedAt = task.Session.StartedAt
 			worktree = task.Session.Worktree
 		}
+		totalCount, activeCount, pausedCount := sessionAggregateCounts(task.Session)
 
 		sessions = append(sessions, overlay.SessionInfo{
 			IssueID:               task.ID.String(),
 			TaskTitle:             task.Title,
 			IssueStatus:           task.Status,
 			State:                 state,
+			TotalCount:            totalCount,
+			ActiveCount:           activeCount,
+			PausedCount:           pausedCount,
 			StartedAt:             startedAt,
 			Worktree:              worktree,
 			HasTmuxSession:        task.Session != nil || task.HasTmuxSession,
@@ -5351,6 +5355,9 @@ func (m Model) openOrchestrationOverlay() tea.Cmd {
 				TaskTitle:      session.IssueID.String(),
 				IssueStatus:    domain.StatusInProgress,
 				State:          session.State,
+				TotalCount:     session.TotalCount,
+				ActiveCount:    session.ActiveCount,
+				PausedCount:    session.PausedCount,
 				StartedAt:      session.StartedAt,
 				Worktree:       session.Worktree,
 				HasTmuxSession: true,
@@ -5377,6 +5384,13 @@ func (m Model) openOrchestrationOverlay() tea.Cmd {
 	)
 
 	return m.openOverlay(orchOverlay)
+}
+
+func sessionAggregateCounts(session *domain.Session) (total, active, paused int) {
+	if session == nil {
+		return 0, 0, 0
+	}
+	return session.TotalCount, session.ActiveCount, session.PausedCount
 }
 
 // performCleanup executes cleanup operations for selected categories

@@ -282,7 +282,7 @@ func (m *ActionMenu) renderActionListWithWidth(includeTaskSummary bool, maxWidth
 		b.WriteString(summaryMetaStyle.Render(fmt.Sprintf("dependencies: out %d / in %d", outgoing, incoming)))
 		b.WriteString("\n")
 		if m.session != nil {
-			b.WriteString(summaryMetaStyle.Render(fmt.Sprintf("session: %s %s", m.session.State.Icon(), m.session.State)))
+			b.WriteString(summaryMetaStyle.Render(fmt.Sprintf("session: %s %s", m.session.DisplayIcon(), m.session.DisplayLabel())))
 			b.WriteString("\n")
 		}
 		b.WriteString(sectionDividerStyle.Render("───────────────────"))

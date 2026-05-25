@@ -1145,6 +1145,7 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 		runtime.Session = sessionRuntime.Session
 		runtime.Agent = sessionRuntime.Agent
 	}
+	applyRuntimeSessionCounts(&runtime, d.sessionProjectionCountsForIssue(ctx, projectID, session.IssueID))
 	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
 	body, err := json.Marshal(protocol.SessionProjectionEventBody{
 		ProjectID: naming.ProjectID(projectID),
@@ -1287,6 +1288,9 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 	projection := buildRuntimeProjection(projectID, session, projectionWorktree)
 	if projection.IssueID == "" {
 		projection.IssueID = parseIssueIDOrZero(issueID)
+	}
+	if session != nil {
+		applyRuntimeSessionCounts(&projection, d.sessionProjectionCountsForIssue(ctx, projectID, issueID))
 	}
 	if session != nil && projection.Session.Worktree == "" && projection.Worktree.Path != "" {
 		projection.Session.Worktree = projection.Worktree.Path

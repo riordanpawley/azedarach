@@ -863,11 +863,17 @@ func (d *DetailPanel) formatSessionState() string {
 	if d.task.Session == nil {
 		return d.styles.MenuItem.Render("none")
 	}
-	stateLabel := fmt.Sprintf("%s %s", d.task.Session.State.Icon(), string(d.task.Session.State))
+	stateLabel := fmt.Sprintf("%s %s", d.task.Session.DisplayIcon(), d.task.Session.DisplayLabel())
+	if d.task.Session.TotalCount > 1 {
+		stateLabel = fmt.Sprintf("%s (%d active, %d paused)", stateLabel, d.task.Session.ActiveCount, d.task.Session.PausedCount)
+	}
 	return d.sessionStateStyle(d.task.Session.State).Render(stateLabel)
 }
 
 func (d *DetailPanel) sessionStateStyle(state domain.SessionState) lipgloss.Style {
+	if d.task.Session != nil && d.task.Session.IsPartial() {
+		return lipgloss.NewStyle().Foreground(uistyles.Peach).Bold(true)
+	}
 	switch state {
 	case domain.SessionBusy:
 		return lipgloss.NewStyle().Foreground(uistyles.Blue).Bold(true)

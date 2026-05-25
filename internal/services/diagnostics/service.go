@@ -34,12 +34,15 @@ type PortInfo struct {
 
 // SessionInfo represents information about a tmux session
 type SessionInfo struct {
-	Name      string
-	IssueID   string
-	State     domain.SessionState
-	StartedAt *time.Time
-	Worktree  string
-	Uptime    time.Duration
+	Name        string
+	IssueID     string
+	State       domain.SessionState
+	TotalCount  int
+	ActiveCount int
+	PausedCount int
+	StartedAt   *time.Time
+	Worktree    string
+	Uptime      time.Duration
 }
 
 // OperationInfo summarizes the background operation mix inferred from sessions.
@@ -204,11 +207,14 @@ func (s *Service) GetSessionHealth(ctx context.Context, sessions map[string]*dom
 
 	for issueID, session := range sessions {
 		info := SessionInfo{
-			Name:      issueID,
-			IssueID:   issueID,
-			State:     session.State,
-			StartedAt: session.StartedAt,
-			Worktree:  session.Worktree,
+			Name:        issueID,
+			IssueID:     issueID,
+			State:       session.State,
+			TotalCount:  session.TotalCount,
+			ActiveCount: session.ActiveCount,
+			PausedCount: session.PausedCount,
+			StartedAt:   session.StartedAt,
+			Worktree:    session.Worktree,
 		}
 
 		if session.StartedAt != nil {

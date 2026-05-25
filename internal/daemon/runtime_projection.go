@@ -76,6 +76,15 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 	return projection
 }
 
+func applyRuntimeSessionCounts(projection *protocol.RuntimeProjection, counts sessionProjectionCounts) {
+	if projection == nil || counts.Total == 0 {
+		return
+	}
+	projection.Session.TotalCount = counts.Total
+	projection.Session.ActiveCount = counts.Active
+	projection.Session.PausedCount = counts.Paused
+}
+
 func parseIssueIDOrZero(raw string) naming.IssueID {
 	parsed, err := naming.ParseIssueID(raw)
 	if err != nil {

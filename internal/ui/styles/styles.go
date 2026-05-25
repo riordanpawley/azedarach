@@ -51,6 +51,7 @@ type Styles struct {
 	SessionDone    lipgloss.Style
 	SessionError   lipgloss.Style
 	SessionPaused  lipgloss.Style
+	SessionPartial lipgloss.Style
 	SessionIdle    lipgloss.Style
 
 	// Epic progress
@@ -198,12 +199,26 @@ func New() *Styles {
 		SessionPaused: lipgloss.NewStyle().
 			Foreground(Overlay0),
 
+		SessionPartial: lipgloss.NewStyle().
+			Foreground(Peach).
+			Bold(true),
+
 		SessionIdle: lipgloss.NewStyle().
 			Foreground(Subtext0),
 
 		EpicProgress: lipgloss.NewStyle().
 			Foreground(Subtext0),
 	}
+}
+
+func (s *Styles) Session(session *domain.Session) lipgloss.Style {
+	if session != nil && session.IsPartial() {
+		return s.SessionPartial
+	}
+	if session == nil {
+		return s.SessionIdle
+	}
+	return s.SessionState(session.State)
 }
 
 // SessionState returns the appropriate style for a session state

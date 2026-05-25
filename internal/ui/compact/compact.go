@@ -330,8 +330,11 @@ func (cv *CompactView) renderSessionCell(session *domain.Session, width int) str
 	default:
 		style = cv.styles.Row
 	}
+	if session.IsPartial() {
+		style = cv.styles.PriorityP1
+	}
 
-	return style.Width(width).Align(lipgloss.Center).Render(session.State.Icon())
+	return style.Width(width).Align(lipgloss.Center).Render(session.DisplayIcon())
 }
 
 // columnWidths holds the calculated column widths

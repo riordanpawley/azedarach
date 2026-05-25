@@ -418,7 +418,7 @@ func renderTitleBodyLines(title string, maxLineLen int, maxLines int) []string {
 
 // renderSessionStatus renders the session status line with icon and elapsed time
 func renderSessionStatus(session *domain.Session, s *styles.Styles) string {
-	icon := session.State.Icon()
+	icon := session.DisplayIcon()
 
 	// Elapsed time if active/waiting and started.
 	var elapsed string
@@ -427,18 +427,8 @@ func renderSessionStatus(session *domain.Session, s *styles.Styles) string {
 		elapsed = formatDuration(d)
 	}
 
-	stateStyle := s.SessionState(session.State)
-	label := map[domain.SessionState]string{
-		domain.SessionBusy:    "B",
-		domain.SessionWaiting: "W",
-		domain.SessionDone:    "D",
-		domain.SessionError:   "E",
-		domain.SessionPaused:  "P",
-		domain.SessionIdle:    "I",
-	}[session.State]
-	if label == "" {
-		label = "?"
-	}
+	stateStyle := s.Session(session)
+	label := session.DisplayCode()
 	var value string
 	if elapsed != "" {
 		value = fmt.Sprintf("%s %s %s", icon, label, elapsed)
@@ -453,24 +443,12 @@ func renderSessionStatusCompact(session *domain.Session) string {
 		return ""
 	}
 
-	icon := session.State.Icon()
+	icon := session.DisplayIcon()
 	if session.StartedAt != nil && (session.State == domain.SessionBusy || session.State == domain.SessionWaiting) {
 		return fmt.Sprintf("%s%s", icon, formatCompactDuration(time.Since(*session.StartedAt)))
 	}
 
-	stateCode := map[domain.SessionState]string{
-		domain.SessionBusy:    "B",
-		domain.SessionWaiting: "W",
-		domain.SessionDone:    "D",
-		domain.SessionError:   "E",
-		domain.SessionPaused:  "P",
-		domain.SessionIdle:    "I",
-	}
-	code, ok := stateCode[session.State]
-	if !ok {
-		code = "?"
-	}
-	return icon + code
+	return icon + session.DisplayCode()
 }
 
 func renderRuntimeSignals(signals *RuntimeSignals, s *styles.Styles) string {

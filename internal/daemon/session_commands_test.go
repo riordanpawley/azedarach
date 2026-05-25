@@ -3849,6 +3849,9 @@ func TestEnrichTasksWithSessionStateAggregatesMultipleAgentSessions(t *testing.T
 	if enriched[0].Session.State != domain.SessionBusy {
 		t.Fatalf("session state with one attached agent = %v, want %v", enriched[0].Session.State, domain.SessionBusy)
 	}
+	if enriched[0].Session.TotalCount != 2 || enriched[0].Session.ActiveCount != 1 || enriched[0].Session.PausedCount != 1 {
+		t.Fatalf("session aggregate counts = total %d active %d paused %d, want 2/1/1", enriched[0].Session.TotalCount, enriched[0].Session.ActiveCount, enriched[0].Session.PausedCount)
+	}
 	if enriched[0].Session.StartedAt == nil || !enriched[0].Session.StartedAt.Equal(startedAt) {
 		t.Fatalf("started_at = %v, want earliest %v", enriched[0].Session.StartedAt, startedAt)
 	}
@@ -3870,5 +3873,8 @@ func TestEnrichTasksWithSessionStateAggregatesMultipleAgentSessions(t *testing.T
 	}
 	if enriched[0].Session.State != domain.SessionPaused {
 		t.Fatalf("session state with all agents paused = %v, want %v", enriched[0].Session.State, domain.SessionPaused)
+	}
+	if enriched[0].Session.TotalCount != 2 || enriched[0].Session.ActiveCount != 0 || enriched[0].Session.PausedCount != 2 {
+		t.Fatalf("paused session aggregate counts = total %d active %d paused %d, want 2/0/2", enriched[0].Session.TotalCount, enriched[0].Session.ActiveCount, enriched[0].Session.PausedCount)
 	}
 }

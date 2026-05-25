@@ -50,6 +50,12 @@ type sessionRecoveryResult struct {
 	AlignedDaemonSessions int `json:"aligned_daemon_sessions"`
 }
 
+type sessionProjectionCounts struct {
+	Total  int
+	Active int
+	Paused int
+}
+
 const (
 	sessionInvariantSessionStartConflict daemonInvariantID = daemonInvariantSessionStartConflict
 	sessionInvariantSessionAttachTarget  daemonInvariantID = daemonInvariantSessionAttachTarget
@@ -166,6 +172,34 @@ func sessionProjectionAggregateByIssueKey(sessions []daemonstate.Session, naming
 			}
 		}
 		byIssueKey[key] = merged
+	}
+	return byIssueKey
+}
+
+func sessionProjectionCountsByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]sessionProjectionCounts {
+	byIssueKey := make(map[string]sessionProjectionCounts, len(sessions))
+	for _, session := range sessions {
+		state := session.State
+		observed := session.ObservedState
+		if strings.TrimSpace(string(observed)) == "" {
+			observed = state
+		}
+		if state == daemonstate.SessionStateStopped || observed == daemonstate.SessionStateStopped {
+			continue
+		}
+		key := sessionKey(sessionProjectionIssueID(session, namingScope))
+		if key == "" {
+			continue
+		}
+		counts := byIssueKey[key]
+		counts.Total++
+		switch state {
+		case daemonstate.SessionStatePaused:
+			counts.Paused++
+		default:
+			counts.Active++
+		}
+		byIssueKey[key] = counts
 	}
 	return byIssueKey
 }
@@ -1694,8 +1728,10 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 	}
 	sessionByKey := sessionProjectionForTaskDisplayByIssueKey(snapshotByKey, projectionByKey)
 	activeIssueKeys := activeSessionIssueKeysFromProjection(projectionSessions, namingScope)
+	countsByKey := sessionProjectionCountsByIssueKey(projectionSessions, namingScope)
 	if len(activeIssueKeys) == 0 {
 		activeIssueKeys = activeSessionIssueKeysFromProjection(snapshotSessions, namingScope)
+		countsByKey = sessionProjectionCountsByIssueKey(snapshotSessions, namingScope)
 	}
 
 	for i := range tasks {
@@ -1722,9 +1758,12 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 			}
 		}
 		tasks[i].Session = &domain.Session{
-			IssueID:   naming.IssueID(taskID),
-			State:     state,
-			StartedAt: startedAt,
+			IssueID:     naming.IssueID(taskID),
+			State:       state,
+			TotalCount:  countsByKey[taskKey].Total,
+			ActiveCount: countsByKey[taskKey].Active,
+			PausedCount: countsByKey[taskKey].Paused,
+			StartedAt:   startedAt,
 		}
 	}
 
@@ -1748,6 +1787,32 @@ func activeSessionIssueKeysFromProjection(sessions []daemonstate.Session, naming
 		active[key] = struct{}{}
 	}
 	return active
+}
+
+func (d *Daemon) sessionProjectionCountsForIssue(ctx context.Context, projectID, issueID string) sessionProjectionCounts {
+	if d == nil || strings.TrimSpace(issueID) == "" {
+		return sessionProjectionCounts{}
+	}
+	projectID = d.canonicalProjectID(projectID)
+	namingScope := d.sessionNamingScope(projectID)
+	if store := d.sessionRuntimeStateStoreIfConfigured(projectID); store != nil {
+		sessions, err := store.ListSessionStates(ctx, projectID)
+		if err == nil {
+			return sessionProjectionCountsByIssueKey(sessions, namingScope)[sessionKey(issueID)]
+		}
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("load runtime session counts failed", "project_id", projectID, "issue_id", issueID, "error", err)
+		}
+	}
+	if d.sessionStore == nil {
+		return sessionProjectionCounts{}
+	}
+	snapshot := d.sessionStore.ReadSnapshot(projectID)
+	sessions := make([]daemonstate.Session, 0, len(snapshot.Sessions))
+	for _, session := range snapshot.Sessions {
+		sessions = append(sessions, session)
+	}
+	return sessionProjectionCountsByIssueKey(sessions, namingScope)[sessionKey(issueID)]
 }
 
 func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID string) ([]string, error) {

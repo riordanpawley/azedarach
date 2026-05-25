@@ -206,7 +206,10 @@ func (e *EpicDrillDown) renderChild(child domain.Task, active bool) string {
 	if child.Session != nil {
 		b.WriteString(" ")
 		sessionStyle := lipgloss.NewStyle().Foreground(styles.Blue)
-		b.WriteString(sessionStyle.Render(child.Session.State.Icon()))
+		if child.Session.IsPartial() {
+			sessionStyle = sessionStyle.Foreground(styles.Peach).Bold(true)
+		}
+		b.WriteString(sessionStyle.Render(child.Session.DisplayIcon()))
 	}
 
 	return b.String()

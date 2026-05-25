@@ -115,6 +115,9 @@ func (m *Model) applyRuntimeProjection(projection protocol.RuntimeProjection) bo
 			next.IssueID = task.ID
 			if state, ok := projectSessionLifecycleState(projection.Session.State); ok {
 				next.State = state
+				next.TotalCount = projection.Session.TotalCount
+				next.ActiveCount = projection.Session.ActiveCount
+				next.PausedCount = projection.Session.PausedCount
 			} else {
 				task.Session = nil
 				task.HasTmuxSession = false
@@ -184,6 +187,11 @@ func (m *Model) applyRuntimeProjectionFromSessionEvent(body protocol.SessionProj
 		}
 		next.IssueID = naming.IssueID(issueID)
 		next.State = nextState
+		if body.Runtime != nil {
+			next.TotalCount = body.Runtime.Projection.Session.TotalCount
+			next.ActiveCount = body.Runtime.Projection.Session.ActiveCount
+			next.PausedCount = body.Runtime.Projection.Session.PausedCount
+		}
 		if next.StartedAt == nil {
 			startedAt := body.Session.UpdatedAt
 			next.StartedAt = &startedAt

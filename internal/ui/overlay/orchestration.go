@@ -18,6 +18,9 @@ type SessionInfo struct {
 	TaskTitle             string
 	IssueStatus           domain.Status
 	State                 domain.SessionState
+	TotalCount            int
+	ActiveCount           int
+	PausedCount           int
 	StartedAt             *time.Time
 	Worktree              string
 	HasTmuxSession        bool
@@ -29,6 +32,24 @@ type SessionInfo struct {
 	GitAdditions          int
 	GitDeletions          int
 	RecentOutput          string // Last few lines of output
+}
+
+func (s SessionInfo) isPartial() bool {
+	return s.ActiveCount > 0 && s.PausedCount > 0
+}
+
+func (s SessionInfo) displayIcon() string {
+	if s.isPartial() {
+		return "◒"
+	}
+	return s.State.Icon()
+}
+
+func (s SessionInfo) displayLabel() string {
+	if s.isPartial() {
+		return "partial"
+	}
+	return s.State.String()
 }
 
 // OrchestrationOverlay displays all active Claude sessions in a monitoring view
@@ -206,9 +227,12 @@ func (o *OrchestrationOverlay) renderSession(index int, session SessionInfo, wid
 			Render("▶ ")
 	}
 
-	stateIcon := session.State.Icon()
+	stateIcon := session.displayIcon()
 	stateStyle := o.getStateStyle(session.State)
-	stateStr := stateStyle.Render(fmt.Sprintf(" %s %s ", stateIcon, session.State.String()))
+	if session.isPartial() {
+		stateStyle = lipgloss.NewStyle().Foreground(styles.Peach).Bold(true)
+	}
+	stateStr := stateStyle.Render(fmt.Sprintf(" %s %s ", stateIcon, session.displayLabel()))
 
 	idStyle := lipgloss.NewStyle().
 		Foreground(styles.Mauve).
