@@ -20,6 +20,7 @@ const expandedHeaderWorstCase = "P2 CHE-1234 T Φ9 ◐ W 12h 34m ✓ M:queued(10
 const tmuxSessionToken = "T"
 const descendantTmuxSessionToken = "Td"
 const worktreeToken = "✓"
+const nestedIssuePrefix = "↳"
 
 // RuntimeSignals represents runtime metadata rendered for a task card.
 // These values are computed independently from session state.
@@ -107,8 +108,11 @@ func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignal
 	}
 
 	issueToken := task.ID.String()
+	if taskIsNested(task) {
+		issueToken = nestedIssuePrefix + issueToken
+	}
 	if cursor != "" {
-		issueToken = cursor + task.ID.String()
+		issueToken = cursor + issueToken
 	}
 	headerParts := []string{
 		priorityBadge,
@@ -172,6 +176,19 @@ func renderCard(task domain.Task, state CardState, runtimeSignals *RuntimeSignal
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 
 	return cardStyle.Height(cardHeight).Render(content)
+}
+
+func taskIsNested(task domain.Task) bool {
+	if task.ParentID != nil && strings.TrimSpace(task.ParentID.String()) != "" {
+		return true
+	}
+	for _, dep := range task.Dependencies {
+		depType := strings.TrimSpace(string(dep.Type))
+		if (depType == string(domain.DependencyParentChild) || depType == "parent_child") && strings.TrimSpace(dep.ID.String()) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // overlayOriginBadge composes the last content line so that an origin badge

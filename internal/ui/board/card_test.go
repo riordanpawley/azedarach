@@ -533,6 +533,24 @@ func TestRenderSessionStatus(t *testing.T) {
 	})
 }
 
+func TestRenderCard_NestedIssueShowsTreeContext(t *testing.T) {
+	s := styles.New()
+	parentID := naming.IssueID("az-parent")
+	task := domain.Task{
+		ID:       "az-child",
+		Title:    "Nested task",
+		Status:   domain.StatusOpen,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+		ParentID: &parentID,
+	}
+
+	result := stripANSI(RenderCard(task, false, false, 56, s))
+	if !strings.Contains(result, nestedIssuePrefix+"az-child") {
+		t.Fatalf("nested task should show tree prefix before issue id, got: %s", result)
+	}
+}
+
 func TestRenderCard_WithRuntimeSignals(t *testing.T) {
 	s := styles.New()
 	task := domain.Task{

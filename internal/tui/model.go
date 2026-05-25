@@ -160,6 +160,7 @@ type Model struct {
 	pendingUIOpenTaskID           string
 	openCreatedTaskInWorkspace    bool
 	openSessionSelectorOnLoad     bool
+	sessionTreeFilterOnly         bool
 	runtimeSignalsByTask          map[string]board.RuntimeSignals
 	runtimeSignalWorktreeByTask   map[string]string
 
@@ -494,8 +495,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.editor.EnterNormal()
 			return m, nil
 		}
-		if m.editor.IsFilterActive() {
+		if m.editor.IsFilterActive() || m.sessionTreeFilterOnly {
 			m.editor.ClearFilters()
+			m.sessionTreeFilterOnly = false
 			columns := m.buildColumns()
 			m.ensureCursorVisible(columns)
 		}
@@ -576,6 +578,25 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keybinds.ActionOpenFilter: // Filter menu
 		return m, m.openOverlay(overlay.NewFilterMenu(m.editor.GetFilter()))
+
+	case keybinds.ActionToggleSessionTreeFilter:
+		m.sessionTreeFilterOnly = !m.sessionTreeFilterOnly
+		columns := m.buildColumns()
+		m.ensureCursorVisible(columns)
+		if m.sessionTreeFilterOnly {
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: "Showing issues with sessions in their tree",
+				Expires: time.Now().Add(2 * time.Second),
+			})
+		} else {
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: "Session tree filter cleared",
+				Expires: time.Now().Add(2 * time.Second),
+			})
+		}
+		return m, nil
 
 	case keybinds.ActionOpenSort: // Sort menu
 		return m, m.openOverlay(overlay.NewSortMenu(m.editor.GetSort()))
@@ -3374,31 +3395,36 @@ func (m Model) selectionSummary() string {
 
 func (m Model) filterSummary() string {
 	filter := m.editor.GetFilter()
-	if filter == nil || !filter.IsActive() {
+	if (filter == nil || !filter.IsActive()) && !m.sessionTreeFilterOnly {
 		return "F:none"
 	}
 
 	parts := make([]string, 0, 7)
-	if query := strings.TrimSpace(filter.SearchQuery); query != "" {
-		parts = append(parts, "q="+query)
+	if filter != nil {
+		if query := strings.TrimSpace(filter.SearchQuery); query != "" {
+			parts = append(parts, "q="+query)
+		}
+		if count := len(filter.Status); count > 0 {
+			parts = append(parts, fmt.Sprintf("st:%d", count))
+		}
+		if count := len(filter.Priority); count > 0 {
+			parts = append(parts, fmt.Sprintf("pr:%d", count))
+		}
+		if count := len(filter.Type); count > 0 {
+			parts = append(parts, fmt.Sprintf("ty:%d", count))
+		}
+		if count := len(filter.SessionState); count > 0 {
+			parts = append(parts, fmt.Sprintf("ss:%d", count))
+		}
+		if !filter.HideEpicChildren {
+			parts = append(parts, "children:show")
+		}
+		if filter.AgeMaxDays != nil {
+			parts = append(parts, fmt.Sprintf("age<=%dd", *filter.AgeMaxDays))
+		}
 	}
-	if count := len(filter.Status); count > 0 {
-		parts = append(parts, fmt.Sprintf("st:%d", count))
-	}
-	if count := len(filter.Priority); count > 0 {
-		parts = append(parts, fmt.Sprintf("pr:%d", count))
-	}
-	if count := len(filter.Type); count > 0 {
-		parts = append(parts, fmt.Sprintf("ty:%d", count))
-	}
-	if count := len(filter.SessionState); count > 0 {
-		parts = append(parts, fmt.Sprintf("ss:%d", count))
-	}
-	if !filter.HideEpicChildren {
-		parts = append(parts, "children:show")
-	}
-	if filter.AgeMaxDays != nil {
-		parts = append(parts, fmt.Sprintf("age<=%dd", *filter.AgeMaxDays))
+	if m.sessionTreeFilterOnly {
+		parts = append(parts, "tree:session")
 	}
 	if len(parts) == 0 {
 		return "F:active"
