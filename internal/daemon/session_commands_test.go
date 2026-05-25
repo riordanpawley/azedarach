@@ -2879,6 +2879,135 @@ func TestListTmuxSessionsCacheFirstUsesObservedStateForActiveSet(t *testing.T) {
 	}
 }
 
+func TestSessionStatusIgnoresStaleProjectionWhenTmuxHasNoSession(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Stale projected session",
+		Type:  domain.TypeBug,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	sessionID := naming.CanonicalSessionID(repoDir, issueID)
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            sessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateAttached,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed stale session projection: %v", err)
+	}
+
+	tmuxRunner := &testTmuxRunner{
+		sessions:    map[string]bool{},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	store := daemonstate.NewStore()
+	daemon := &Daemon{
+		cfg:          Config{RepoDir: repoDir, Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+		issueClientsByRoot: map[string]*issues.Client{
+			repoDir: issuesClient,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+	}
+
+	resp, err := daemon.handleSessionStatus(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-status-stale-projection",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.status",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            marshalJSON(map[string]string{"project_id": projectID}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStatus returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("session status response not OK: %+v", resp.Error)
+	}
+	var payload struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
+		t.Fatalf("unmarshal status response: %v", err)
+	}
+	if strings.Contains(payload.Output, "Active Sessions") {
+		t.Fatalf("status output reported stale projection: %q", payload.Output)
+	}
+	if !strings.Contains(payload.Output, "No active sessions") {
+		t.Fatalf("status output = %q, want no active sessions", payload.Output)
+	}
+}
+
+func TestRefreshSessionRuntimeStateIgnoresForeignProjectPrefixedTmuxSessions(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repoDir := filepath.Join(root, "Chefy")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	store := daemonstate.NewStore()
+	tmuxRunner := newTestTmuxRunner("az-ciw")
+	daemon := &Daemon{
+		cfg:          Config{RepoDir: repoDir, Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+	}
+
+	if err := daemon.refreshSessionRuntimeState(ctx, projectID); err != nil {
+		t.Fatalf("refreshSessionRuntimeState: %v", err)
+	}
+	rows, err := runtimeStateStore.ListSessionStates(ctx, projectID)
+	if err != nil {
+		t.Fatalf("list session states: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("projection rows = %+v, want none for foreign az-ciw session in Chefy project", rows)
+	}
+}
+
 func collectSessionProjectionEvents(t *testing.T, ch <-chan protocol.EventEnvelope, count int) []protocol.EventEnvelope {
 	t.Helper()
 	events := make([]protocol.EventEnvelope, 0, count)

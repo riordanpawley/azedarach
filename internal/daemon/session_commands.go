@@ -1227,7 +1227,7 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 	if !ok {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
 	}
-	tmuxSessions, err := d.listTmuxSessionsCacheFirst(ctx, cmd.ProjectID)
+	tmuxSessions, err := d.listTmuxSessionsLiveForProject(ctx, cmd.ProjectID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -1293,6 +1293,30 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 		d.cfg.Logger.Info("daemon session status snapshot", "project_id", cmd.ProjectID, "issue_id", cmd.IssueID, "active_sessions", len(tmuxSessions))
 	}
 	return d.commandOutput(req, b.String()), nil
+}
+
+func (d *Daemon) listTmuxSessionsLiveForProject(ctx context.Context, projectID string) ([]string, error) {
+	projectID = d.canonicalProjectID(projectID)
+	if d == nil || d.tmux == nil {
+		return []string{}, nil
+	}
+	allSessions, err := d.tmux.ListSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	namingScope := d.sessionNamingScope(projectID)
+	sessions := make([]string, 0, len(allSessions))
+	for _, name := range allSessions {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := naming.ParseIssueIDFromSessionName(name, namingScope); !ok {
+			continue
+		}
+		sessions = append(sessions, name)
+	}
+	return sessions, nil
 }
 
 func (d *Daemon) handleSessionRecover(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -1946,7 +1970,7 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 		liveSessionIDs[name] = struct{}{}
 		issueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope)
 		if !ok {
-			issueID = name
+			continue
 		}
 		issueKey := sessionKey(issueID)
 		row := daemonstate.Session{
