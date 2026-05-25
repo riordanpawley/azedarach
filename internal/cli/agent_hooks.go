@@ -107,7 +107,6 @@ func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookCont
 }
 
 func notifyDaemonAgentSessionStatus(ctx context.Context, deps *Dependencies, issueID, event string) error {
-	sessionID := agentHookSessionID(issueID)
 	command := ""
 	switch event {
 	case hookEventIdlePrompt, hookEventPermissionRequest, hookEventStop, hookEventSessionEnd:
@@ -118,15 +117,16 @@ func notifyDaemonAgentSessionStatus(ctx context.Context, deps *Dependencies, iss
 		return nil
 	}
 
-	return commandWithAgentSessionStatusAutostartRetry(ctx, deps, command, issueID, sessionID)
+	return commandWithAgentSessionStatusAutostartRetry(ctx, deps, command, issueID)
 }
 
-func commandWithAgentSessionStatusAutostartRetry(ctx context.Context, deps *Dependencies, command, issueID, sessionID string) error {
+func commandWithAgentSessionStatusAutostartRetry(ctx context.Context, deps *Dependencies, command, issueID string) error {
 	_, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (struct{}, error) {
 		projectID := strings.TrimSpace(deps.ProjectID)
 		if projectID == "" {
 			projectID = protocol.DefaultProjectID
 		}
+		sessionID := agentHookSessionID(projectID, issueID)
 		req := agentSessionStatusRequest(command, projectID, issueID, sessionID)
 		resp, err := deps.DaemonClient.Command(callCtx, req)
 		if err != nil {
@@ -161,34 +161,8 @@ func agentSessionStatusRequest(command, projectID, issueID, sessionID string) pr
 	}
 }
 
-func agentHookSessionID(issueID string) string {
-	issueID = strings.TrimSpace(issueID)
-	paneID := sanitizeAgentSessionIDPart(os.Getenv("TMUX_PANE"))
-	if paneID == "" {
-		return issueID
-	}
-	return issueID + ".pane-" + paneID
-}
-
-func sanitizeAgentSessionIDPart(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	var b strings.Builder
-	for _, r := range value {
-		switch {
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			b.WriteRune(r)
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == '-' || r == '_' || r == '.':
-			b.WriteRune(r)
-		}
-	}
-	return strings.Trim(b.String(), "-_.")
+func agentHookSessionID(projectID, issueID string) string {
+	return naming.CanonicalSessionID(projectID, strings.TrimSpace(issueID))
 }
 
 // codexGuardEventForNotifyEvent maps the canonical (underscore) event name back

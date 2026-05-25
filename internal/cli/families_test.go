@@ -838,6 +838,7 @@ func TestAIHookRunCommandRoutesCodexAgentThroughPort(t *testing.T) {
 	deps := &Dependencies{
 		RepoDir:      projectDir,
 		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
 	}
 
 	original := os.Stdin
@@ -869,8 +870,8 @@ func TestAIHookRunCommandRoutesCodexAgentThroughPort(t *testing.T) {
 	if !reflect.DeepEqual(sessionLifecycle, []string{daemonclient.CommandSessionPause}) {
 		t.Fatalf("session lifecycle = %v, want [session.pause]", sessionLifecycle)
 	}
-	if len(sessionBodies) != 1 || sessionBodies[0].IssueID != "az-port-1" || sessionBodies[0].SessionID != "az-port-1.pane-12" {
-		t.Fatalf("session lifecycle bodies = %+v, want issue az-port-1 and tmux pane session az-port-1.pane-12", sessionBodies)
+	if len(sessionBodies) != 1 || sessionBodies[0].IssueID != "az-port-1" || sessionBodies[0].SessionID != "pr-az-port-1" {
+		t.Fatalf("session lifecycle bodies = %+v, want issue az-port-1 and canonical tmux session pr-az-port-1", sessionBodies)
 	}
 	if len(hookLogSources) != 1 || hookLogSources[0] != "codex.hook" {
 		t.Fatalf("hook log sources = %v, want one codex.hook", hookLogSources)
