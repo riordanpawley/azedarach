@@ -2508,6 +2508,93 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 	}
 }
 
+func TestReconcileDoesNotRecreateObservedStoppedSession(t *testing.T) {
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	issueID, err := issuesClient.Create(context.Background(), issues.CreateTaskParams{
+		Title: "Manually stopped durable session issue",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create local issue: %v", err)
+	}
+	sessionID := naming.CanonicalSessionID(repoDir, issueID)
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            sessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateStopped,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed observed stopped session projection: %v", err)
+	}
+
+	tmuxRunner := &testTmuxRunner{
+		sessions:    map[string]bool{},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	store := daemonstate.NewStore()
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: repoDir,
+			CLITool: "claude",
+			Logger:  slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/test"}, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/test"}, repoDir, slog.Default()),
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+	}
+
+	result, err := daemon.reconcileTmuxAndDaemonSessions(context.Background(), projectID, issueID)
+	if err != nil {
+		t.Fatalf("reconcile observed stopped projection: %v", err)
+	}
+	if result.RecreatedTmuxSessions != 0 {
+		t.Fatalf("recreated tmux sessions = %d, want 0", result.RecreatedTmuxSessions)
+	}
+	tmuxRunner.mu.Lock()
+	created := tmuxRunner.newSessionCalls
+	sessionExists := tmuxRunner.sessions[sessionID]
+	tmuxRunner.mu.Unlock()
+	if created != 0 {
+		t.Fatalf("new-session calls = %d, want 0", created)
+	}
+	if sessionExists {
+		t.Fatalf("session %q was recreated", sessionID)
+	}
+	rows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("list runtime rows: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("runtime rows = %d, want 1", len(rows))
+	}
+	if rows[0].State != daemonstate.SessionStateStopped || rows[0].ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("runtime row = desired %s observed %s, want stopped/stopped", rows[0].State, rows[0].ObservedState)
+	}
+}
+
 func TestReconcilePrunesInvalidDesiredSessionAndDoesNotRecreate(t *testing.T) {
 	const invalidIssueID = "ch-it"
 
