@@ -132,7 +132,7 @@ fd "filename" -t f internal cmd
 5. Do not evaluate invariants from stale in-memory state or direct ad-hoc SQLite reads.
 6. Mutations remain write-through: update in-memory authority and durable projection, then publish events.
 7. Example matrix:
-   - `session.start`/`session.attach`/`session.stop` runtime-presence checks -> `tmux`
+   - `session.start`/`session.attach`/`session.pause`/`session.resume`/`session.stop` runtime-presence checks -> `tmux`
    - session recovery/reconcile -> `hybrid`
    - task-list freshness/session projection checks -> `projection` via refresh-then-cache
 

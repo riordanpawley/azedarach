@@ -311,6 +311,9 @@ func TestSourceForSessionInvariant(t *testing.T) {
 	if got := d.sourceForSessionInvariant(sessionInvariantSessionAttachTarget); got != daemonInvariantSourceTmux {
 		t.Fatalf("attach target source = %s, want %s", got, daemonInvariantSourceTmux)
 	}
+	if got := d.sourceForSessionInvariant(sessionInvariantSessionLifecycleTarget); got != daemonInvariantSourceTmux {
+		t.Fatalf("lifecycle target source = %s, want %s", got, daemonInvariantSourceTmux)
+	}
 	if got := d.sourceForSessionInvariant(sessionInvariantSessionStopTargets); got != daemonInvariantSourceTmux {
 		t.Fatalf("stop targets source = %s, want %s", got, daemonInvariantSourceTmux)
 	}
@@ -1826,6 +1829,94 @@ func TestSessionPauseResumeUseIssueScopedRuntimeReconcile(t *testing.T) {
 		if len(gotIssueIDs) != 1 || gotIssueIDs[0] != issueID {
 			t.Fatalf("runtime reconcile issue ids = %v, want only %s", issueCalls, issueID)
 		}
+	}
+}
+
+func TestSessionPauseResumeRejectMissingExplicitRuntimeTarget(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+	canonicalSessionID := naming.CanonicalSessionID(projectID, issueID)
+	staleSessionID := issueID + ".pane-190"
+	tests := []struct {
+		name      string
+		command   string
+		initial   daemonstate.SessionState
+		wantState daemonstate.SessionState
+		handle    func(*Daemon, context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	}{
+		{
+			name:      "pause",
+			command:   daemonhandlers.CommandSessionPause,
+			initial:   daemonstate.SessionStateAttached,
+			wantState: daemonstate.SessionStateAttached,
+			handle:    (*Daemon).handleSessionPause,
+		},
+		{
+			name:      "resume",
+			command:   daemonhandlers.CommandSessionResume,
+			initial:   daemonstate.SessionStatePaused,
+			wantState: daemonstate.SessionStatePaused,
+			handle:    (*Daemon).handleSessionResume,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmuxRunner := newTestTmuxRunner(canonicalSessionID)
+			close(tmuxRunner.killRelease)
+			store := daemonstate.NewStore()
+			if _, err := store.UpsertSession(projectID, staleSessionID, issueID, tt.initial); err != nil {
+				t.Fatalf("seed stale session: %v", err)
+			}
+			recorder := &runtimeReconcileRecorder{}
+			daemon := &Daemon{
+				cfg: Config{
+					RepoDir: ".",
+					Logger:  slog.Default(),
+				},
+				tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
+				session:           daemonhandlers.NewSessionHandler(store),
+				sessionStore:      store,
+				runtimeReconciler: recorder,
+			}
+
+			resp, err := tt.handle(daemon, context.Background(), protocol.RequestEnvelope{
+				ProtocolVersion: protocol.CurrentVersion,
+				RequestID:       "req-stale-lifecycle-target",
+				Kind:            protocol.EnvelopeKindCommand,
+				Command:         tt.command,
+				Meta: protocol.Metadata{
+					ProjectID: naming.ProjectID(projectID),
+				},
+				Body: marshalJSON(map[string]string{
+					"project_id": projectID,
+					"issue_id":   issueID,
+					"session_id": staleSessionID,
+				}),
+			})
+			if err != nil {
+				t.Fatalf("handler returned error: %v", err)
+			}
+			if resp.OK {
+				t.Fatalf("response ok, want missing target error")
+			}
+			if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
+				t.Fatalf("response error = %+v, want invalid request", resp.Error)
+			}
+			snapshot := store.ReadSnapshot(projectID)
+			got := snapshot.Sessions[staleSessionID]
+			if got.State != tt.wantState {
+				t.Fatalf("stale session state = %s, want %s", got.State, tt.wantState)
+			}
+			if got := store.CurrentRevision(projectID); got != 1 {
+				t.Fatalf("store revision = %d, want unchanged revision 1", got)
+			}
+			calls, _ := recorder.snapshot()
+			if calls != 0 {
+				t.Fatalf("runtime reconcile calls = %d, want 0", calls)
+			}
+		})
 	}
 }
 

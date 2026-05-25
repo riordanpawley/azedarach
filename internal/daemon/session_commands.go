@@ -57,10 +57,11 @@ type sessionProjectionCounts struct {
 }
 
 const (
-	sessionInvariantSessionStartConflict daemonInvariantID = daemonInvariantSessionStartConflict
-	sessionInvariantSessionAttachTarget  daemonInvariantID = daemonInvariantSessionAttachTarget
-	sessionInvariantSessionStopTargets   daemonInvariantID = daemonInvariantSessionStopTargets
-	sessionInvariantSessionReconcile     daemonInvariantID = daemonInvariantSessionReconcile
+	sessionInvariantSessionStartConflict   daemonInvariantID = daemonInvariantSessionStartConflict
+	sessionInvariantSessionAttachTarget    daemonInvariantID = daemonInvariantSessionAttachTarget
+	sessionInvariantSessionLifecycleTarget daemonInvariantID = daemonInvariantSessionLifecycleTarget
+	sessionInvariantSessionStopTargets     daemonInvariantID = daemonInvariantSessionStopTargets
+	sessionInvariantSessionReconcile       daemonInvariantID = daemonInvariantSessionReconcile
 
 	sessionConflictWindowName = "resolve-conflict"
 )
@@ -478,6 +479,14 @@ func (d *Daemon) sessionExistsForInvariant(ctx context.Context, projectID, issue
 	return false, nil
 }
 
+func (d *Daemon) sessionLifecycleTargetExists(ctx context.Context, projectID, issueID, sessionID string) (bool, error) {
+	source := d.sourceForSessionInvariant(sessionInvariantSessionLifecycleTarget)
+	if usesTmuxSource(source) && d.tmux == nil {
+		return true, nil
+	}
+	return d.sessionExistsForInvariant(ctx, projectID, issueID, sessionID, source)
+}
+
 func (d *Daemon) handleSessionStart(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	if d.sessionLongRunning != nil {
 		return d.sessionLongRunning.Execute(ctx, req, req.Command, func(execCtx context.Context) (protocol.ResponseEnvelope, error) {
@@ -782,6 +791,13 @@ func (d *Daemon) handleSessionPause(ctx context.Context, req protocol.RequestEnv
 			"session_id", cmd.SessionID,
 		)
 	}
+	exists, err := d.sessionLifecycleTargetExists(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if !exists {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found: %s (use 'az start %s' to create)", cmd.IssueID, cmd.IssueID)), nil
+	}
 	if !d.sessionLifecycleTransitionNeeded(cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonstate.SessionStatePaused) {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("daemon session pause unchanged",
@@ -826,6 +842,13 @@ func (d *Daemon) handleSessionResume(ctx context.Context, req protocol.RequestEn
 			"issue_id", cmd.IssueID,
 			"session_id", cmd.SessionID,
 		)
+	}
+	exists, err := d.sessionLifecycleTargetExists(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if !exists {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found: %s (use 'az start %s' to create)", cmd.IssueID, cmd.IssueID)), nil
 	}
 	if !d.sessionLifecycleTransitionNeeded(cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonstate.SessionStateAttached) {
 		if d.cfg.Logger != nil {

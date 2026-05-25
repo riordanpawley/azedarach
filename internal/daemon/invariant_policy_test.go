@@ -7,6 +7,7 @@ func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 	expected := map[daemonInvariantID]daemonInvariantSource{
 		daemonInvariantSessionStartConflict:   daemonInvariantSourceTmux,
 		daemonInvariantSessionAttachTarget:    daemonInvariantSourceTmux,
+		daemonInvariantSessionLifecycleTarget: daemonInvariantSourceTmux,
 		daemonInvariantSessionStopTargets:     daemonInvariantSourceTmux,
 		daemonInvariantSessionReconcile:       daemonInvariantSourceHybrid,
 		daemonInvariantTaskListFreshness:      daemonInvariantSourceProjection,

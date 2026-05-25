@@ -13,10 +13,11 @@ const (
 )
 
 const (
-	daemonInvariantSessionStartConflict daemonInvariantID = "session.start_conflict"
-	daemonInvariantSessionAttachTarget  daemonInvariantID = "session.attach_target"
-	daemonInvariantSessionStopTargets   daemonInvariantID = "session.stop_targets"
-	daemonInvariantSessionReconcile     daemonInvariantID = "session.reconcile"
+	daemonInvariantSessionStartConflict   daemonInvariantID = "session.start_conflict"
+	daemonInvariantSessionAttachTarget    daemonInvariantID = "session.attach_target"
+	daemonInvariantSessionLifecycleTarget daemonInvariantID = "session.lifecycle_target"
+	daemonInvariantSessionStopTargets     daemonInvariantID = "session.stop_targets"
+	daemonInvariantSessionReconcile       daemonInvariantID = "session.reconcile"
 
 	daemonInvariantTaskListFreshness daemonInvariantID = "task.list_freshness"
 
@@ -26,6 +27,7 @@ const (
 var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantSessionStartConflict:   daemonInvariantSourceTmux,
 	daemonInvariantSessionAttachTarget:    daemonInvariantSourceTmux,
+	daemonInvariantSessionLifecycleTarget: daemonInvariantSourceTmux,
 	daemonInvariantSessionStopTargets:     daemonInvariantSourceTmux,
 	daemonInvariantSessionReconcile:       daemonInvariantSourceHybrid,
 	daemonInvariantTaskListFreshness:      daemonInvariantSourceProjection,
