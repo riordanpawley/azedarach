@@ -106,6 +106,19 @@ func TestParseOrchestrateCompleteCheckArgs(t *testing.T) {
 	}
 }
 
+func TestParseOrchestratePromptArgs(t *testing.T) {
+	opts, err := ParseOrchestratePromptArgs([]string{"--root", "az-1", "--issue", "az-2", "--json"})
+	if err != nil {
+		t.Fatalf("ParseOrchestratePromptArgs error = %v", err)
+	}
+	if opts.RootIssueID != "az-1" || opts.IssueID != "az-2" || !opts.JSON {
+		t.Fatalf("opts = %+v", opts)
+	}
+	if _, err := ParseOrchestratePromptArgs([]string{"--root", "az-1"}); err == nil {
+		t.Fatal("expected prompt error for missing --issue")
+	}
+}
+
 func TestParseOrchestrateIntegrateAndCloseSessionArgs(t *testing.T) {
 	integrate, err := ParseOrchestrateIntegrateArgs([]string{"--issue", "az-2", "--json"})
 	if err != nil {
@@ -249,6 +262,57 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 	}
 	if strings.Join(commands, ",") == "" || !containsString(commands, protocol.CommandOperationSubmit) {
 		t.Fatalf("commands = %+v, want operation submit", commands)
+	}
+}
+
+func TestOrchestratePromptCommandPrintsNativeWorkerHandoff(t *testing.T) {
+	root := naming.IssueID("az-1")
+	child := naming.IssueID("az-2")
+	tasks := []domain.Task{
+		{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+		{
+			ID:              child,
+			Title:           "Worker task",
+			Description:     "Do a focused slice",
+			Design:          "Keep it small",
+			Acceptance:      "Tests pass",
+			Notes:           "Spec impact TBD",
+			Status:          domain.StatusOpen,
+			Priority:        domain.P2,
+			Type:            domain.TypeTask,
+			ParentID:        &root,
+			Implementations: []string{"go-bubbletea"},
+		},
+	}
+	body, err := marshalTaskListBody(tasks)
+	if err != nil {
+		t.Fatalf("marshal task list response: %v", err)
+	}
+	deps := &Dependencies{
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskList {
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestratePromptCommand(deps, OrchestratePromptOptions{RootIssueID: root.String(), IssueID: child.String()})
+	})
+	for _, want := range []string{
+		"Work on issue az-2: Worker task",
+		"Coordination mailbox parent: az-1",
+		"az spec read --issue az-2",
+		"az mail send --parent az-1 --issue az-2 --type worker-complete",
+		"Do not close root issue `az-1`",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
 	}
 }
 

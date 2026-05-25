@@ -7522,8 +7522,13 @@ func TestPrimeCommandNativeGuidanceAvoidsAzOrchestrateWhenTmuxMissing(t *testing
 	if !strings.Contains(output, "CLI-managed worker fanout requires `tmux` on `PATH`; `tmux` is not available") {
 		t.Fatalf("prime output missing native-mode tmux unavailable guidance: %q", output)
 	}
-	if strings.Contains(output, "`az orchestrate ") {
-		t.Fatalf("prime output should not print az orchestrate commands in native mode when tmux is unavailable: %q", output)
+	if !strings.Contains(output, "`az orchestrate prompt --issue <issue-id> [--root <issue-id>]`") {
+		t.Fatalf("prime output missing native prompt guidance when tmux is unavailable: %q", output)
+	}
+	for _, disallowed := range []string{"`az orchestrate start ", "`az orchestrate status ", "`az orchestrate watch ", "az orchestration loop"} {
+		if strings.Contains(output, disallowed) {
+			t.Fatalf("prime output should not print CLI-managed orchestrate flow %q in native mode when tmux is unavailable: %q", disallowed, output)
+		}
 	}
 }
 
