@@ -150,6 +150,8 @@ type Model struct {
 	jumpMode                      *overlay.JumpMode
 	jumpTargets                   []string
 	mergePickMode                 *mergePickState
+	mouseDrag                     mouseDragState
+	mouseTap                      mouseTapState
 	viewportStarts                [board.DefaultColumnCount]int
 	columnViewportStart           int
 	drillDownParentID             string

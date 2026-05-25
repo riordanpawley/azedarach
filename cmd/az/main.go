@@ -953,7 +953,7 @@ func runTUIWithOptions(cfg *config.Config, opts ...app.Option) {
 		os.Exit(1)
 	}
 	model := app.NewWithOptions(cfg, opts...)
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
