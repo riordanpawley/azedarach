@@ -2111,6 +2111,109 @@ func TestHandleSessionStopDirectPostKillRefreshIsIssueScoped(t *testing.T) {
 	}
 }
 
+func TestHandleSessionStopDirectKillsLiveProjectedIssueSessions(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "ciw"
+	)
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	paneSessionID := issueID + ".pane-190"
+	otherSessionID := naming.CanonicalSessionID(projectID, "cix")
+
+	tmuxRunner := &testTmuxRunner{
+		sessions: map[string]bool{
+			sessionID:      true,
+			paneSessionID:  true,
+			otherSessionID: true,
+		},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	close(tmuxRunner.killRelease)
+
+	store := daemonstate.NewStore()
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed session store: %v", err)
+	}
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	for _, seed := range []daemonstate.Session{
+		{ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateAttached, ObservedState: daemonstate.SessionStateAttached, UpdatedAt: time.Now().UTC()},
+		{ID: paneSessionID, IssueID: issueID, State: daemonstate.SessionStateAttached, ObservedState: daemonstate.SessionStateAttached, UpdatedAt: time.Now().UTC()},
+		{ID: otherSessionID, IssueID: "cix", State: daemonstate.SessionStateAttached, ObservedState: daemonstate.SessionStateAttached, UpdatedAt: time.Now().UTC()},
+	} {
+		if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, seed); err != nil {
+			t.Fatalf("seed runtime state %s: %v", seed.ID, err)
+		}
+	}
+
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	resp, err := daemon.handleSessionStopDirect(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-stop-live-projected-sessions",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         daemonhandlers.CommandSessionStop,
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"session_id": issueID,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStopDirect returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("response not ok: %+v", resp.Error)
+	}
+
+	for _, killed := range []string{sessionID, paneSessionID} {
+		if tmuxRunner.hasSession(killed) {
+			t.Fatalf("expected tmux session %q to be killed", killed)
+		}
+	}
+	if !tmuxRunner.hasSession(otherSessionID) {
+		t.Fatalf("expected unrelated tmux session %q to remain", otherSessionID)
+	}
+
+	rows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("list session states: %v", err)
+	}
+	stoppedByID := map[string]bool{}
+	for _, row := range rows {
+		if row.IssueID == issueID {
+			if row.State != daemonstate.SessionStateStopped || row.ObservedState != daemonstate.SessionStateStopped {
+				t.Fatalf("runtime row %s = desired %s observed %s, want stopped/stopped", row.ID, row.State, row.ObservedState)
+			}
+			stoppedByID[row.ID] = true
+		}
+		if row.ID == otherSessionID && (row.State != daemonstate.SessionStateAttached || row.ObservedState != daemonstate.SessionStateAttached) {
+			t.Fatalf("unrelated runtime row = desired %s observed %s, want attached/attached", row.State, row.ObservedState)
+		}
+	}
+	for _, want := range []string{sessionID, paneSessionID} {
+		if !stoppedByID[want] {
+			t.Fatalf("missing stopped runtime row for %s; rows=%+v", want, rows)
+		}
+	}
+}
+
 func TestHandleSessionStopDirectCanceledContextDoesNotContinueAfterFreshnessFailure(t *testing.T) {
 	const (
 		projectID = "proj"

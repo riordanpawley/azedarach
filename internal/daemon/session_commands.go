@@ -881,7 +881,6 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 			"session_id", cmd.SessionID,
 		)
 	}
-	stopTargetsSource := d.sourceForSessionInvariant(sessionInvariantSessionStopTargets)
 	// Write-through stopped projection immediately so cache-first task/session
 	// reads do not resurrect a just-stopped session while tmux/process stop
 	// work is still in flight.
@@ -903,7 +902,7 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 	if err := ctx.Err(); err != nil {
 		return d.mutationFreshnessErrorResponse(req, err), nil
 	}
-	sessionNamesToKill, err := d.tmuxSessionNamesForIssue(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, stopTargetsSource)
+	sessionNamesToKill, err := d.liveTmuxSessionNamesForIssue(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -944,6 +943,67 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 		)
 	}
 	return d.commandOutput(req, output), nil
+}
+
+func (d *Daemon) liveTmuxSessionNamesForIssue(ctx context.Context, projectID, issueID, canonicalSessionID string) ([]string, error) {
+	if d == nil || d.tmux == nil {
+		return []string{}, nil
+	}
+	typedIssueID, issueErr := naming.ParseIssueID(strings.TrimSpace(issueID))
+	if issueErr != nil {
+		return []string{}, nil
+	}
+	projectID = d.canonicalProjectID(projectID)
+	namingScope := d.sessionNamingScope(projectID)
+	canonicalSessionID = strings.TrimSpace(canonicalSessionID)
+
+	liveSessions, err := d.tmux.ListSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	liveSet := make(map[string]struct{}, len(liveSessions))
+	names := make(map[string]struct{}, len(liveSessions))
+	for _, sessionName := range liveSessions {
+		name := strings.TrimSpace(sessionName)
+		if name == "" {
+			continue
+		}
+		liveSet[name] = struct{}{}
+		if canonicalSessionID != "" && strings.EqualFold(name, canonicalSessionID) {
+			names[name] = struct{}{}
+			continue
+		}
+		projectedIssueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope)
+		if ok && naming.IssueIDsEqual(projectedIssueID, typedIssueID.String()) {
+			names[name] = struct{}{}
+		}
+	}
+
+	if store := d.sessionRuntimeStateStoreIfConfigured(projectID); store != nil {
+		snapshotSessions, err := store.ListSessionStates(ctx, projectID)
+		if err != nil {
+			return nil, err
+		}
+		for _, session := range snapshotSessions {
+			sessionID := strings.TrimSpace(session.ID)
+			if sessionID == "" {
+				continue
+			}
+			if _, live := liveSet[sessionID]; !live {
+				continue
+			}
+			projectedIssueID := sessionProjectionIssueID(session, namingScope)
+			if naming.IssueIDsEqual(projectedIssueID, typedIssueID.String()) {
+				names[sessionID] = struct{}{}
+			}
+		}
+	}
+
+	resolved := make([]string, 0, len(names))
+	for name := range names {
+		resolved = append(resolved, name)
+	}
+	return resolved, nil
 }
 
 func (d *Daemon) handleSessionResolveConflict(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -1921,9 +1981,32 @@ func (d *Daemon) refreshStoppedSessionRuntimeState(ctx context.Context, projectI
 		return nil
 	}
 
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	namingScope := d.sessionNamingScope(projectID)
+	rows, err := store.ListSessionStates(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	matched := false
+	for _, session := range rows {
+		if !naming.IssueIDsEqual(sessionProjectionIssueID(session, namingScope), issueID) {
+			continue
+		}
+		session.State = daemonstate.SessionStateStopped
+		session.ObservedState = daemonstate.SessionStateStopped
+		session.UpdatedAt = time.Now().UTC()
+		if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, session); err != nil {
+			return err
+		}
+		matched = true
+	}
+	if matched {
+		return nil
+	}
+
 	var session daemonstate.Session
 	if issueID != "" {
-		if existing, found, err := d.sessionRuntimeStateStoreIfConfigured(projectID).GetSessionStateByIssueID(ctx, projectID, issueID); err != nil {
+		if existing, found, err := store.GetSessionStateByIssueID(ctx, projectID, issueID); err != nil {
 			return err
 		} else if found {
 			session = existing
