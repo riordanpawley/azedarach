@@ -703,8 +703,8 @@ func (d *Daemon) applySessionLifecycleTransition(
 	if err != nil {
 		return err
 	}
-	if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil && strings.TrimSpace(issueID) != "" {
-		if observed, found, loadErr := runtimeStore.GetSessionStateByIssueID(ctx, projectID, issueID); loadErr == nil && found {
+	if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil && strings.TrimSpace(sessionID) != "" {
+		if observed, found, loadErr := runtimeStore.GetSessionState(ctx, projectID, sessionID); loadErr == nil && found {
 			if strings.TrimSpace(string(observed.ObservedState)) != "" {
 				session.ObservedState = observed.ObservedState
 			}
@@ -716,7 +716,7 @@ func (d *Daemon) applySessionLifecycleTransition(
 				session.UpdatedAt = observed.UpdatedAt
 			}
 		} else if loadErr != nil && d.cfg.Logger != nil {
-			d.cfg.Logger.Debug("load runtime session projection for transition failed", "project_id", projectID, "issue_id", issueID, "error", loadErr)
+			d.cfg.Logger.Debug("load runtime session projection for transition failed", "project_id", projectID, "session_id", sessionID, "error", loadErr)
 		}
 	}
 	d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, req.Meta, session)
@@ -1250,9 +1250,12 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 	var session *daemonstate.Session
 	if issueID != "" {
 		if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil {
-			if loaded, found, err := runtimeStore.GetSessionStateByIssueID(ctx, projectID, issueID); err == nil && found {
-				copy := loaded
-				session = &copy
+			if loaded, err := runtimeStore.ListSessionStates(ctx, projectID); err == nil {
+				aggregated := sessionProjectionAggregateByIssueKey(loaded, d.sessionNamingScope(projectID))
+				if merged, found := aggregated[sessionKey(issueID)]; found {
+					copy := merged
+					session = &copy
+				}
 			} else if err != nil && d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("load runtime session projection failed", "project_id", projectID, "issue_id", issueID, "error", err)
 			}

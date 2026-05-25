@@ -801,12 +801,13 @@ func runGitCommandIsolated(repoDir string, args ...string) error {
 	return cmd.Run()
 }
 
-
 func TestAIHookRunCommandRoutesCodexAgentThroughPort(t *testing.T) {
 	projectDir := t.TempDir()
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")
+	t.Setenv("TMUX_PANE", "%12")
 
 	var sessionLifecycle []string
+	var sessionBodies []sessionRequestBody
 	var hookLogSources []string
 	transport := &fakeDaemonTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -820,6 +821,11 @@ func TestAIHookRunCommandRoutesCodexAgentThroughPort(t *testing.T) {
 				return responseWithJSON(req, body.Event), nil
 			case daemonclient.CommandSessionPause, daemonclient.CommandSessionResume:
 				sessionLifecycle = append(sessionLifecycle, req.Command)
+				var body sessionRequestBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal session lifecycle body: %v", err)
+				}
+				sessionBodies = append(sessionBodies, body)
 				return responseWithOutput(req, "ok"), nil
 			case daemonclient.CommandRuntimeReconcileIssue:
 				t.Fatalf("unexpected client-side reconcile; daemon reconciles internally")
@@ -862,6 +868,9 @@ func TestAIHookRunCommandRoutesCodexAgentThroughPort(t *testing.T) {
 
 	if !reflect.DeepEqual(sessionLifecycle, []string{daemonclient.CommandSessionPause}) {
 		t.Fatalf("session lifecycle = %v, want [session.pause]", sessionLifecycle)
+	}
+	if len(sessionBodies) != 1 || sessionBodies[0].IssueID != "az-port-1" || sessionBodies[0].SessionID != "az-port-1.pane-12" {
+		t.Fatalf("session lifecycle bodies = %+v, want issue az-port-1 and tmux pane session az-port-1.pane-12", sessionBodies)
 	}
 	if len(hookLogSources) != 1 || hookLogSources[0] != "codex.hook" {
 		t.Fatalf("hook log sources = %v, want one codex.hook", hookLogSources)

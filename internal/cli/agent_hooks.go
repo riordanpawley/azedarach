@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 // AgentSource identifies which AI agent fired a hook. The port treats events
@@ -81,7 +82,7 @@ func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookCont
 
 	if issueID := strings.TrimSpace(hookCtx.IssueID); issueID != "" && deps != nil && deps.DaemonClient != nil {
 		notifyCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		_ = notifyDaemonSessionStatus(notifyCtx, deps, issueID, event)
+		_ = notifyDaemonAgentSessionStatus(notifyCtx, deps, issueID, event)
 		cancel()
 	}
 
@@ -103,6 +104,91 @@ func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookCont
 	}
 
 	return outcome, nil
+}
+
+func notifyDaemonAgentSessionStatus(ctx context.Context, deps *Dependencies, issueID, event string) error {
+	sessionID := agentHookSessionID(issueID)
+	command := ""
+	switch event {
+	case hookEventIdlePrompt, hookEventPermissionRequest, hookEventStop, hookEventSessionEnd:
+		command = commandSessionPause
+	case hookEventSessionStart, hookEventUserPromptSubmit, hookEventPreToolUse, hookEventPostToolUse:
+		command = commandSessionResume
+	default:
+		return nil
+	}
+
+	return commandWithAgentSessionStatusAutostartRetry(ctx, deps, command, issueID, sessionID)
+}
+
+func commandWithAgentSessionStatusAutostartRetry(ctx context.Context, deps *Dependencies, command, issueID, sessionID string) error {
+	_, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (struct{}, error) {
+		projectID := strings.TrimSpace(deps.ProjectID)
+		if projectID == "" {
+			projectID = protocol.DefaultProjectID
+		}
+		req := agentSessionStatusRequest(command, projectID, issueID, sessionID)
+		resp, err := deps.DaemonClient.Command(callCtx, req)
+		if err != nil {
+			return struct{}{}, err
+		}
+		if err := responseError(resp, "failed to notify session status"); err != nil {
+			return struct{}{}, err
+		}
+		return struct{}{}, nil
+	})
+	return err
+}
+
+func agentSessionStatusRequest(command, projectID, issueID, sessionID string) protocol.RequestEnvelope {
+	body, _ := json.Marshal(sessionRequestBody{
+		ProjectID: projectID,
+		SessionID: sessionID,
+		IssueID:   issueID,
+	})
+	parsedSessionID, _ := naming.ParseSessionIDLoose(sessionID)
+	return protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       makeRequestID(command),
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         command,
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+			SessionID: parsedSessionID,
+		},
+		SentAt: time.Now().UTC(),
+		Body:   body,
+	}
+}
+
+func agentHookSessionID(issueID string) string {
+	issueID = strings.TrimSpace(issueID)
+	paneID := sanitizeAgentSessionIDPart(os.Getenv("TMUX_PANE"))
+	if paneID == "" {
+		return issueID
+	}
+	return issueID + ".pane-" + paneID
+}
+
+func sanitizeAgentSessionIDPart(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+		}
+	}
+	return strings.Trim(b.String(), "-_.")
 }
 
 // codexGuardEventForNotifyEvent maps the canonical (underscore) event name back

@@ -26,6 +26,7 @@ import (
 type sessionCommandBody struct {
 	ProjectID  string   `json:"project_id"`
 	SessionID  string   `json:"session_id"`
+	IssueID    string   `json:"issue_id,omitempty"`
 	BaseBranch string   `json:"base_branch,omitempty"`
 	Yolo       bool     `json:"yolo,omitempty"`
 	StartWork  *bool    `json:"start_work,omitempty"`
@@ -130,6 +131,41 @@ func sessionProjectionLatestByIssueKey(sessions []daemonstate.Session, namingSco
 		if !exists || shouldReplaceSessionProjection(existing, session) {
 			byIssueKey[key] = session
 		}
+	}
+	return byIssueKey
+}
+
+func sessionProjectionAggregateByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]daemonstate.Session {
+	byIssueKey := make(map[string]daemonstate.Session, len(sessions))
+	for _, session := range sessions {
+		key := sessionKey(sessionProjectionIssueID(session, namingScope))
+		if key == "" {
+			continue
+		}
+		existing, exists := byIssueKey[key]
+		if !exists {
+			byIssueKey[key] = session
+			continue
+		}
+		merged := existing
+		if session.UpdatedAt.After(merged.UpdatedAt) {
+			merged.ID = session.ID
+			merged.IssueID = session.IssueID
+			merged.UpdatedAt = session.UpdatedAt
+		}
+		if sessionProjectionStateRank(session.State) > sessionProjectionStateRank(merged.State) {
+			merged.State = session.State
+		}
+		if sessionProjectionStateRank(session.ObservedState) > sessionProjectionStateRank(merged.ObservedState) {
+			merged.ObservedState = session.ObservedState
+		}
+		if session.StartedAt != nil && !session.StartedAt.IsZero() {
+			if merged.StartedAt == nil || merged.StartedAt.IsZero() || session.StartedAt.Before(*merged.StartedAt) {
+				started := session.StartedAt.UTC()
+				merged.StartedAt = &started
+			}
+		}
+		byIssueKey[key] = merged
 	}
 	return byIssueKey
 }
@@ -257,27 +293,42 @@ func (d *Daemon) decodeSessionRequest(req protocol.RequestEnvelope, requireSessi
 		cmd.ProjectID = req.Meta.ProjectID.String()
 	}
 	cmd.ProjectID = d.canonicalProjectID(cmd.ProjectID)
+	cmd.IssueID = strings.TrimSpace(cmd.IssueID)
 	if requireSession && cmd.SessionID == "" {
 		return resolvedSessionTarget{}, d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required fields: project_id/session_id"), false
 	}
 
 	issueID := ""
 	namingScope := d.sessionNamingScope(cmd.ProjectID)
-	sessionInput := strings.TrimSpace(cmd.SessionID)
-	if sessionInput != "" {
-		if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(sessionInput, namingScope); ok {
-			sessionInput = parsedIssueID
-		}
-		validIssueID, issueErr := naming.ParseIssueID(sessionInput)
+	if cmd.IssueID != "" {
+		validIssueID, issueErr := naming.ParseIssueID(cmd.IssueID)
 		if issueErr != nil {
-			return resolvedSessionTarget{}, d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid session/issue id: %v", issueErr)), false
+			return resolvedSessionTarget{}, d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid issue id: %v", issueErr)), false
 		}
 		issueID = validIssueID.String()
+	}
+	sessionInput := strings.TrimSpace(cmd.SessionID)
+	if sessionInput != "" {
+		if issueID == "" {
+			if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(sessionInput, namingScope); ok {
+				sessionInput = parsedIssueID
+			}
+			validIssueID, issueErr := naming.ParseIssueID(sessionInput)
+			if issueErr != nil {
+				return resolvedSessionTarget{}, d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid session/issue id: %v", issueErr)), false
+			}
+			issueID = validIssueID.String()
+		} else if _, sessionErr := naming.ParseSessionIDLoose(sessionInput); sessionErr != nil {
+			return resolvedSessionTarget{}, d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid session id: %v", sessionErr)), false
+		}
 	}
 	sessionID := ""
 	if issueID != "" {
 		typedIssueID, _ := naming.ParseIssueID(issueID)
 		sessionID = naming.CanonicalSessionIDForIssue(namingScope, typedIssueID).String()
+	}
+	if issueID != "" && sessionInput != "" && cmd.IssueID != "" {
+		sessionID = sessionInput
 	}
 	startWork := true
 	if cmd.StartWork != nil {
@@ -1621,33 +1672,13 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 		return tasks
 	}
 
-	tmuxSessions, err := d.listTmuxSessionsCacheFirst(ctx, projectID)
-	if err != nil {
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.Warn("failed to list tmux sessions while enriching task session state",
-				"project_id", projectID,
-				"error", err,
-			)
-		}
-		return tasks
-	}
-	tmuxSet := make(map[string]struct{}, len(tmuxSessions))
 	namingScope := d.sessionNamingScope(projectID)
-	for _, name := range tmuxSessions {
-		if issueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope); ok {
-			key := sessionKey(issueID)
-			if key == "" {
-				continue
-			}
-			tmuxSet[key] = struct{}{}
-		}
-	}
 	snapshot := d.sessionStore.ReadSnapshot(projectID)
 	snapshotSessions := make([]daemonstate.Session, 0, len(snapshot.Sessions))
 	for _, session := range snapshot.Sessions {
 		snapshotSessions = append(snapshotSessions, session)
 	}
-	snapshotByKey := sessionProjectionLatestByIssueKey(snapshotSessions, namingScope)
+	snapshotByKey := sessionProjectionAggregateByIssueKey(snapshotSessions, namingScope)
 	var projectionSessions []daemonstate.Session
 	projectionByKey := map[string]daemonstate.Session{}
 	if d.sessionRuntimeStateStoreIfConfigured(projectID) != nil {
@@ -1658,15 +1689,19 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 			}
 		} else {
 			projectionSessions = cachedSessions
-			projectionByKey = sessionProjectionLatestByIssueKey(projectionSessions, namingScope)
+			projectionByKey = sessionProjectionAggregateByIssueKey(projectionSessions, namingScope)
 		}
 	}
 	sessionByKey := sessionProjectionForTaskDisplayByIssueKey(snapshotByKey, projectionByKey)
+	activeIssueKeys := activeSessionIssueKeysFromProjection(projectionSessions, namingScope)
+	if len(activeIssueKeys) == 0 {
+		activeIssueKeys = activeSessionIssueKeysFromProjection(snapshotSessions, namingScope)
+	}
 
 	for i := range tasks {
 		taskID := tasks[i].ID
 		taskKey := sessionKey(taskID.String())
-		if _, ok := tmuxSet[taskKey]; !ok {
+		if _, ok := activeIssueKeys[taskKey]; !ok {
 			continue
 		}
 
@@ -1694,6 +1729,25 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 	}
 
 	return tasks
+}
+
+func activeSessionIssueKeysFromProjection(sessions []daemonstate.Session, namingScope string) map[string]struct{} {
+	active := make(map[string]struct{}, len(sessions))
+	for _, session := range sessions {
+		observed := session.ObservedState
+		if strings.TrimSpace(string(observed)) == "" {
+			observed = session.State
+		}
+		if observed == daemonstate.SessionStateStopped {
+			continue
+		}
+		key := sessionKey(sessionProjectionIssueID(session, namingScope))
+		if key == "" {
+			continue
+		}
+		active[key] = struct{}{}
+	}
+	return active
 }
 
 func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID string) ([]string, error) {

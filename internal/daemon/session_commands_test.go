@@ -3798,3 +3798,77 @@ func TestEnrichTasksWithSessionStateKeepsEarlierStartedAtAcrossSnapshotAndProjec
 		t.Fatalf("started_at = %v, want %v", enriched[0].Session.StartedAt, snapshotStartedAt)
 	}
 }
+
+func TestEnrichTasksWithSessionStateAggregatesMultipleAgentSessions(t *testing.T) {
+	const (
+		projectID = "proj-multi-agent"
+		issueID   = "ciw"
+	)
+
+	store := daemonstate.NewStore()
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	startedAt := time.Date(2026, time.May, 25, 8, 0, 0, 0, time.UTC)
+	secondStartedAt := startedAt.Add(time.Minute)
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            "ciw.pane-1",
+		IssueID:       issueID,
+		State:         daemonstate.SessionStatePaused,
+		ObservedState: daemonstate.SessionStatePaused,
+		StartedAt:     &startedAt,
+		UpdatedAt:     startedAt,
+	}); err != nil {
+		t.Fatalf("seed paused agent session: %v", err)
+	}
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            "ciw.pane-2",
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateAttached,
+		StartedAt:     &secondStartedAt,
+		UpdatedAt:     secondStartedAt,
+	}); err != nil {
+		t.Fatalf("seed attached agent session: %v", err)
+	}
+
+	tasks := []domain.Task{{ID: issueID, Title: "multiple codex sessions", Type: domain.TypeTask}}
+	enriched := d.enrichTasksWithSessionState(context.Background(), projectID, tasks)
+	if len(enriched) != 1 || enriched[0].Session == nil {
+		t.Fatalf("missing session in enriched task: %+v", enriched)
+	}
+	if enriched[0].Session.State != domain.SessionBusy {
+		t.Fatalf("session state with one attached agent = %v, want %v", enriched[0].Session.State, domain.SessionBusy)
+	}
+	if enriched[0].Session.StartedAt == nil || !enriched[0].Session.StartedAt.Equal(startedAt) {
+		t.Fatalf("started_at = %v, want earliest %v", enriched[0].Session.StartedAt, startedAt)
+	}
+
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            "ciw.pane-2",
+		IssueID:       issueID,
+		State:         daemonstate.SessionStatePaused,
+		ObservedState: daemonstate.SessionStatePaused,
+		StartedAt:     &secondStartedAt,
+		UpdatedAt:     startedAt.Add(2 * time.Minute),
+	}); err != nil {
+		t.Fatalf("pause second agent session: %v", err)
+	}
+
+	enriched = d.enrichTasksWithSessionState(context.Background(), projectID, tasks)
+	if len(enriched) != 1 || enriched[0].Session == nil {
+		t.Fatalf("missing paused session in enriched task: %+v", enriched)
+	}
+	if enriched[0].Session.State != domain.SessionPaused {
+		t.Fatalf("session state with all agents paused = %v, want %v", enriched[0].Session.State, domain.SessionPaused)
+	}
+}

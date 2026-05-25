@@ -42,6 +42,8 @@ var newLauncher = func(repoDir, socketPath string) daemonStarter {
 const (
 	commandSessionStart         = "session.start"
 	commandSessionAttach        = "session.attach"
+	commandSessionPause         = "session.pause"
+	commandSessionResume        = "session.resume"
 	commandSessionStop          = "session.stop"
 	commandSessionStatus        = "session.status"
 	commandTaskSnapshotExport   = "task.snapshot.export"
@@ -5235,6 +5237,7 @@ func PrintUsage() {
 type sessionRequestBody struct {
 	ProjectID  string `json:"project_id"`
 	SessionID  string `json:"session_id"`
+	IssueID    string `json:"issue_id,omitempty"`
 	BaseBranch string `json:"base_branch,omitempty"`
 }
 
