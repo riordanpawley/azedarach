@@ -352,6 +352,7 @@ func (m Model) boardVisibleTasks(tasks []domain.Task) []domain.Task {
 		filter := *m.editor.GetFilter()
 		filter.HideEpicChildren = false
 		filtered := filter.Apply(tasks)
+		filtered = m.applySessionTreeFilter(filtered)
 		parentID := strings.TrimSpace(m.drillDownParentID)
 		result := make([]domain.Task, 0, len(filtered))
 		for _, task := range filtered {
@@ -362,7 +363,18 @@ func (m Model) boardVisibleTasks(tasks []domain.Task) []domain.Task {
 		return result
 	}
 
-	filtered := m.editor.ApplyFilter(tasks)
+	var filtered []domain.Task
+	if m.sessionTreeFilterOnly {
+		filter := *m.editor.GetFilter()
+		filter.HideEpicChildren = false
+		filtered = filter.Apply(tasks)
+	} else {
+		filtered = m.editor.ApplyFilter(tasks)
+	}
+	filtered = m.applySessionTreeFilter(filtered)
+	if m.sessionTreeFilterOnly {
+		return filtered
+	}
 	result := make([]domain.Task, 0, len(filtered))
 	for _, task := range filtered {
 		if task.ParentID != nil && strings.TrimSpace(task.ParentID.String()) != "" {
@@ -380,6 +392,44 @@ func (m Model) boardVisibleTasks(tasks []domain.Task) []domain.Task {
 			continue
 		}
 		result = append(result, task)
+	}
+	return result
+}
+
+func (m Model) applySessionTreeFilter(tasks []domain.Task) []domain.Task {
+	if !m.sessionTreeFilterOnly {
+		return tasks
+	}
+	visibleByID := taskIDsWithSessionInTree(m.tasks)
+	if len(visibleByID) == 0 {
+		return nil
+	}
+	result := make([]domain.Task, 0, len(tasks))
+	for _, task := range tasks {
+		if visibleByID[strings.TrimSpace(task.ID.String())] {
+			result = append(result, task)
+		}
+	}
+	return result
+}
+
+func taskIDsWithSessionInTree(tasks []domain.Task) map[string]bool {
+	descendantSessionByTask := buildActiveDescendantSessionByTask(tasks)
+	result := make(map[string]bool, len(descendantSessionByTask))
+	for taskID := range descendantSessionByTask {
+		result[taskID] = true
+	}
+	for _, task := range tasks {
+		taskID := strings.TrimSpace(task.ID.String())
+		if taskID == "" {
+			continue
+		}
+		if task.Session != nil || task.HasTmuxSession {
+			result[taskID] = true
+		}
+	}
+	if len(result) == 0 {
+		return nil
 	}
 	return result
 }

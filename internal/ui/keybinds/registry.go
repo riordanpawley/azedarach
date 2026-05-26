@@ -34,21 +34,22 @@ const (
 	ActionHalfPageUp   ActionID = "half_page_up"
 	ActionHalfPageDown ActionID = "half_page_down"
 
-	ActionEnterGoto      ActionID = "enter_goto"
-	ActionEnterSearch    ActionID = "enter_search"
-	ActionOpenFilter     ActionID = "open_filter"
-	ActionOpenSort       ActionID = "open_sort"
-	ActionEnterSelect    ActionID = "enter_select"
-	ActionOpenHelp       ActionID = "open_help"
-	ActionOpenWorkspace  ActionID = "open_workspace"
-	ActionDrillDown      ActionID = "drill_down"
-	ActionCreateTask     ActionID = "create_task"
-	ActionOpenSettings   ActionID = "open_settings"
-	ActionOpenDiagnostic ActionID = "open_diagnostics"
-	ActionOpenRecovery   ActionID = "open_recovery"
-	ActionToggleView     ActionID = "toggle_view"
-	ActionRefresh        ActionID = "refresh"
-	ActionAttachSession  ActionID = "attach_session"
+	ActionEnterGoto               ActionID = "enter_goto"
+	ActionEnterSearch             ActionID = "enter_search"
+	ActionOpenFilter              ActionID = "open_filter"
+	ActionToggleSessionTreeFilter ActionID = "toggle_session_tree_filter"
+	ActionOpenSort                ActionID = "open_sort"
+	ActionEnterSelect             ActionID = "enter_select"
+	ActionOpenHelp                ActionID = "open_help"
+	ActionOpenWorkspace           ActionID = "open_workspace"
+	ActionDrillDown               ActionID = "drill_down"
+	ActionCreateTask              ActionID = "create_task"
+	ActionOpenSettings            ActionID = "open_settings"
+	ActionOpenDiagnostic          ActionID = "open_diagnostics"
+	ActionOpenRecovery            ActionID = "open_recovery"
+	ActionToggleView              ActionID = "toggle_view"
+	ActionRefresh                 ActionID = "refresh"
+	ActionAttachSession           ActionID = "attach_session"
 
 	ActionSelectToggle     ActionID = "select_toggle"
 	ActionSelectColumnAll  ActionID = "select_column_all"
@@ -79,6 +80,7 @@ var registry = []ActionSpec{
 	{ID: ActionEnterGoto, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "g", Display: "g"}}, Hint: "goto"},
 	{ID: ActionEnterSearch, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "/", Display: "/"}}, Hint: "search"},
 	{ID: ActionOpenFilter, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "f", Display: "f"}}, Hint: "filter"},
+	{ID: ActionToggleSessionTreeFilter, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "t", Display: "t"}}, Hint: "session tree"},
 	{ID: ActionOpenSort, Mode: types.ModeNormal, Keys: []KeySpec{{Input: ",", Display: ","}}, Hint: "sort"},
 	{ID: ActionEnterSelect, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "v", Display: "v"}}, Hint: "select"},
 	{ID: ActionDrillDown, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "enter", Display: "Enter"}}, Hint: "drill"},
@@ -159,6 +161,7 @@ var registry = []ActionSpec{
 	{Mode: types.ModeNormal, Category: "Modes", HelpKey: "g", Help: "Goto mode"},
 	{Mode: types.ModeNormal, Category: "Modes", HelpKey: "/", Help: "Search"},
 	{Mode: types.ModeNormal, Category: "Modes", HelpKey: "f", Help: "Filter menu"},
+	{Mode: types.ModeNormal, Category: "Modes", HelpKey: "t", Help: "Toggle issues with sessions in their tree"},
 	{Mode: types.ModeNormal, Category: "Modes", HelpKey: ",", Help: "Sort menu"},
 	{Mode: types.ModeNormal, Category: "Modes", HelpKey: "v", Help: "Select mode"},
 	{Mode: types.ModeNormal, Category: "Modes", HelpKey: "?", Help: "Help (this screen)"},

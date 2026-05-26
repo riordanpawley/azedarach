@@ -867,6 +867,7 @@ func TestEscClearsFiltersInNormalMode(t *testing.T) {
 	m.editor.EnterNormal()
 	m.editor.ToggleStatusFilter(domain.StatusDone)
 	m.editor.SetSearchQuery("az-2")
+	m.sessionTreeFilterOnly = true
 	m.editor.SetSortField(domain.SortByPriority)
 	m.editor.SetSortOrder(domain.SortDesc)
 
@@ -874,6 +875,9 @@ func TestEscClearsFiltersInNormalMode(t *testing.T) {
 	next := result.(Model)
 	if next.editor.IsFilterActive() {
 		t.Fatal("expected esc in normal mode to clear active filters")
+	}
+	if next.sessionTreeFilterOnly {
+		t.Fatal("expected esc in normal mode to clear session tree filter")
 	}
 	if got := next.editor.GetSort(); got.Field != domain.SortByPriority || got.Order != domain.SortDesc {
 		t.Fatalf("expected esc filter clear to preserve sort state, got field=%s order=%v", got.Field, got.Order)
@@ -3376,6 +3380,98 @@ func TestBuildColumns_HidesParentChildEvenWhenFilterToggleIsOff(t *testing.T) {
 	}
 	if _, ok := ids["az-child-dep"]; ok {
 		t.Fatalf("child by parent-child dependency should be hidden from board: %+v", openTasks)
+	}
+}
+
+func TestSessionTreeFilterShowsIssuesWithOwnOrDescendantSessionsDirectly(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+	m.sessionTreeFilterOnly = true
+
+	parentID := "az-parent"
+	parentIssueID := naming.IssueID(parentID)
+	childID := "az-child"
+	childIssueID := naming.IssueID(childID)
+	grandchildID := "az-grandchild"
+	ownSessionID := "az-own-session"
+	unrelatedID := "az-unrelated"
+	m.tasks = []domain.Task{
+		{ID: parentIssueID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: childIssueID, Title: "Child", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentIssueID},
+		{
+			ID:             naming.IssueID(grandchildID),
+			Title:          "Grandchild",
+			Status:         domain.StatusOpen,
+			Priority:       domain.P2,
+			Type:           domain.TypeTask,
+			ParentID:       &childIssueID,
+			HasTmuxSession: true,
+		},
+		{
+			ID:       naming.IssueID(ownSessionID),
+			Title:    "Own session",
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+			Session:  &domain.Session{IssueID: naming.IssueID(ownSessionID), State: domain.SessionBusy},
+		},
+		{ID: naming.IssueID(unrelatedID), Title: "Unrelated", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+
+	columns := m.buildColumns()
+	openTasks := columns[domain.StatusOpen.Column()].Tasks
+	ids := make(map[string]struct{}, len(openTasks))
+	for _, task := range openTasks {
+		ids[task.ID.String()] = struct{}{}
+	}
+
+	if _, ok := ids[parentID]; !ok {
+		t.Fatalf("expected parent with descendant session to be visible: %+v", openTasks)
+	}
+	if _, ok := ids[ownSessionID]; !ok {
+		t.Fatalf("expected task with own session to be visible: %+v", openTasks)
+	}
+	if _, ok := ids[childID]; !ok {
+		t.Fatalf("expected child ancestor of session to be directly visible: %+v", openTasks)
+	}
+	if _, ok := ids[grandchildID]; !ok {
+		t.Fatalf("expected grandchild with session to be directly visible: %+v", openTasks)
+	}
+	if _, ok := ids[unrelatedID]; ok {
+		t.Fatalf("unrelated issue should be filtered out: %+v", openTasks)
+	}
+}
+
+func TestSessionTreeFilterHotkeyTogglesSummaryAndVisibleTasks(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	activeID := "az-active"
+	inactiveID := "az-inactive"
+	m.tasks = []domain.Task{
+		{ID: naming.IssueID(activeID), Title: "Active", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, HasTmuxSession: true},
+		{ID: naming.IssueID(inactiveID), Title: "Inactive", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+
+	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	next := result.(Model)
+	if !next.sessionTreeFilterOnly {
+		t.Fatal("expected t to enable session tree filter")
+	}
+	if got := next.filterSummary(); got != "F:tree:session" {
+		t.Fatalf("filter summary = %q, want session tree token", got)
+	}
+	openTasks := next.buildColumns()[domain.StatusOpen.Column()].Tasks
+	if len(openTasks) != 1 || openTasks[0].ID.String() != activeID {
+		t.Fatalf("visible open tasks = %+v, want only %s", openTasks, activeID)
+	}
+
+	result, _ = next.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	next = result.(Model)
+	if next.sessionTreeFilterOnly {
+		t.Fatal("expected t to disable session tree filter")
+	}
+	if got := next.filterSummary(); got != "F:none" {
+		t.Fatalf("filter summary after disable = %q, want F:none", got)
 	}
 }
 
