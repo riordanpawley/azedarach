@@ -1369,8 +1369,8 @@ func TestHandleSessionStopDirectRecordsDesiredStateBeforeTmuxKillCompletes(t *te
 	if rows[0].State != daemonstate.SessionStateStopped {
 		t.Fatalf("desired session state = %s, want %s", rows[0].State, daemonstate.SessionStateStopped)
 	}
-	if rows[0].ObservedState != daemonstate.SessionStateAttached {
-		t.Fatalf("observed session state = %s, want %s", rows[0].ObservedState, daemonstate.SessionStateAttached)
+	if rows[0].ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("observed session state = %s, want %s", rows[0].ObservedState, daemonstate.SessionStateStopped)
 	}
 	close(tmuxRunner.killRelease)
 
@@ -2508,7 +2508,7 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 	}
 }
 
-func TestReconcileDoesNotRecreateObservedStoppedSession(t *testing.T) {
+func TestReconcileRecreatesObservedStoppedDesiredActiveSession(t *testing.T) {
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)
 	if err != nil {
@@ -2570,18 +2570,18 @@ func TestReconcileDoesNotRecreateObservedStoppedSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile observed stopped projection: %v", err)
 	}
-	if result.RecreatedTmuxSessions != 0 {
-		t.Fatalf("recreated tmux sessions = %d, want 0", result.RecreatedTmuxSessions)
+	if result.RecreatedTmuxSessions != 1 {
+		t.Fatalf("recreated tmux sessions = %d, want 1", result.RecreatedTmuxSessions)
 	}
 	tmuxRunner.mu.Lock()
 	created := tmuxRunner.newSessionCalls
 	sessionExists := tmuxRunner.sessions[sessionID]
 	tmuxRunner.mu.Unlock()
-	if created != 0 {
-		t.Fatalf("new-session calls = %d, want 0", created)
+	if created != 1 {
+		t.Fatalf("new-session calls = %d, want 1", created)
 	}
-	if sessionExists {
-		t.Fatalf("session %q was recreated", sessionID)
+	if !sessionExists {
+		t.Fatalf("session %q was not recreated", sessionID)
 	}
 	rows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
 	if err != nil {
@@ -2590,8 +2590,8 @@ func TestReconcileDoesNotRecreateObservedStoppedSession(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("runtime rows = %d, want 1", len(rows))
 	}
-	if rows[0].State != daemonstate.SessionStateStopped || rows[0].ObservedState != daemonstate.SessionStateStopped {
-		t.Fatalf("runtime row = desired %s observed %s, want stopped/stopped", rows[0].State, rows[0].ObservedState)
+	if rows[0].State != daemonstate.SessionStateAttached || rows[0].ObservedState != daemonstate.SessionStateAttached {
+		t.Fatalf("runtime row = desired %s observed %s, want attached/attached", rows[0].State, rows[0].ObservedState)
 	}
 }
 
