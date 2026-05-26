@@ -1286,10 +1286,11 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	session := daemonstate.Session{
-		ID:        sessionID,
-		IssueID:   issueID,
-		State:     daemonstate.SessionStateStopped,
-		UpdatedAt: time.Now().UTC(),
+		ID:            sessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateStopped,
+		ObservedState: daemonstate.SessionStateStopped,
+		UpdatedAt:     time.Now().UTC(),
 	}
 	if err := d.sessionRuntimeStateStoreIfConfigured(projectID).UpsertSessionState(ctx, projectID, session); err != nil {
 		if d.cfg.Logger != nil {
@@ -1603,6 +1604,19 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 				"issue_id", issueID,
 				"session_id", canonicalSessionID,
 				"error", sendErr,
+			)
+		}
+		reattached := session
+		reattached.ID = canonicalSessionID
+		reattached.IssueID = issueID
+		reattached.ObservedState = daemonstate.SessionStateAttached
+		reattached.UpdatedAt = time.Now().UTC()
+		if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, reattached); err != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("persist recreated session observation failed",
+				"project_id", projectID,
+				"issue_id", issueID,
+				"session_id", canonicalSessionID,
+				"error", err,
 			)
 		}
 		tmuxSet[issueKey] = struct{}{}

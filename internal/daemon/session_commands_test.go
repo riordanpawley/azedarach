@@ -1372,8 +1372,8 @@ func TestHandleSessionStopDirectRecordsDesiredStateBeforeTmuxKillCompletes(t *te
 	if rows[0].State != daemonstate.SessionStateStopped {
 		t.Fatalf("desired session state = %s, want %s", rows[0].State, daemonstate.SessionStateStopped)
 	}
-	if rows[0].ObservedState != daemonstate.SessionStateAttached {
-		t.Fatalf("observed session state = %s, want %s", rows[0].ObservedState, daemonstate.SessionStateAttached)
+	if rows[0].ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("observed session state = %s, want %s", rows[0].ObservedState, daemonstate.SessionStateStopped)
 	}
 	close(tmuxRunner.killRelease)
 
@@ -2699,6 +2699,93 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 	}
 	if !sessionExists {
 		t.Fatalf("expected tmux session %q to exist after reconcile", sessionID)
+	}
+}
+
+func TestReconcileRecreatesObservedStoppedDesiredActiveSession(t *testing.T) {
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	issueID, err := issuesClient.Create(context.Background(), issues.CreateTaskParams{
+		Title: "Manually stopped durable session issue",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create local issue: %v", err)
+	}
+	sessionID := naming.CanonicalSessionID(repoDir, issueID)
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            sessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateStopped,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed observed stopped session projection: %v", err)
+	}
+
+	tmuxRunner := &testTmuxRunner{
+		sessions:    map[string]bool{},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	store := daemonstate.NewStore()
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: repoDir,
+			CLITool: "claude",
+			Logger:  slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/test"}, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/test"}, repoDir, slog.Default()),
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+	}
+
+	result, err := daemon.reconcileTmuxAndDaemonSessions(context.Background(), projectID, issueID)
+	if err != nil {
+		t.Fatalf("reconcile observed stopped projection: %v", err)
+	}
+	if result.RecreatedTmuxSessions != 1 {
+		t.Fatalf("recreated tmux sessions = %d, want 1", result.RecreatedTmuxSessions)
+	}
+	tmuxRunner.mu.Lock()
+	created := tmuxRunner.newSessionCalls
+	sessionExists := tmuxRunner.sessions[sessionID]
+	tmuxRunner.mu.Unlock()
+	if created != 1 {
+		t.Fatalf("new-session calls = %d, want 1", created)
+	}
+	if !sessionExists {
+		t.Fatalf("session %q was not recreated", sessionID)
+	}
+	rows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("list runtime rows: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("runtime rows = %d, want 1", len(rows))
+	}
+	if rows[0].State != daemonstate.SessionStateAttached || rows[0].ObservedState != daemonstate.SessionStateAttached {
+		t.Fatalf("runtime row = desired %s observed %s, want attached/attached", rows[0].State, rows[0].ObservedState)
 	}
 }
 
