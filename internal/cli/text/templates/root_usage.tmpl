@@ -108,6 +108,7 @@ Examples:
   az orchestrate prompt --root az-123 --issue az-456 --coordination mailbox
   az orchestrate start --root az-123 --limit 4
   az orchestrate watch --root az-123 --since 41 --jsonl
+  # Leave orchestrate watch running in another pane/session while workers are active; use --once only for diagnostic single polls.
   az orchestrate integrate --issue az-456
   az orchestrate close-session --issue az-456
   az orchestrate complete-check --root az-123

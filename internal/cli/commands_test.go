@@ -7120,6 +7120,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az orchestrate status --root <issue-id> [--since <seq>] [--limit <n>] [--json]`") {
 		t.Fatalf("prime output missing orchestrate status command example: %q", output)
 	}
+	if !strings.Contains(output, "`az orchestrate watch --root <issue-id> --since <seq> [--jsonl]` (start in another pane/session and leave running while workers are active; reserve `--once` for diagnostic single polls only)") {
+		t.Fatalf("prime output missing continuous watch command guidance: %q", output)
+	}
 	if !strings.Contains(output, "`az orchestrate start --root <issue-id> [--limit <n>] [--issue <issue-id> ...] [--json]`") {
 		t.Fatalf("prime output missing orchestrate start command example: %q", output)
 	}
@@ -7140,6 +7143,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "Use `az orchestrate` for durable tracked task graphs that need issue dependencies, mailbox events, recoverable sessions, isolated worktrees, integration guidance, and `complete-check`.") {
 		t.Fatalf("prime output missing az/native tradeoff guidance: %q", output)
+	}
+	if !strings.Contains(output, "After every `az orchestrate start`, immediately start `az orchestrate watch --root <issue-id> --since <seq> --jsonl` in another pane/session and keep it running") {
+		t.Fatalf("prime output missing post-start continuous watch guidance: %q", output)
 	}
 	if !strings.Contains(output, "`orchestration.via=az` means do not spawn harness-native subagents yourself.") {
 		t.Fatalf("prime output missing follow-up native subagent prohibition: %q", output)

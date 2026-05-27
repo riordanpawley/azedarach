@@ -268,6 +268,9 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 	if len(result.Launched) != 1 || result.Launched[0].OperationID != "op-1" || result.Launched[0].WorktreePath != "/repo-az-2" {
 		t.Fatalf("launched = %+v", result.Launched)
 	}
+	if !strings.Contains(result.Advice.WatchInstruction, "leave it running") || strings.Contains(result.Advice.WatchCommand, "--once") {
+		t.Fatalf("watch advice = %+v, want continuous watch instruction without --once", result.Advice)
+	}
 	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "uncommitted tracked changes") {
 		t.Fatalf("warnings = %+v", result.Warnings)
 	}

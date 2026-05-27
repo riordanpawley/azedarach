@@ -3466,6 +3466,12 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "az orchestrate status --root <issue-id>") {
 		t.Fatalf("prompt = %q, want orchestrate status instruction", prompt)
 	}
+	if !strings.Contains(prompt, "leave it running while workers are active") {
+		t.Fatalf("prompt = %q, want continuous watch instruction", prompt)
+	}
+	if !strings.Contains(prompt, "Do not use `--once` for orchestration monitoring") {
+		t.Fatalf("prompt = %q, want --once diagnostic warning", prompt)
+	}
 	if !strings.Contains(prompt, "az orchestrate complete-check --root <issue-id>") {
 		t.Fatalf("prompt = %q, want complete-check instruction", prompt)
 	}

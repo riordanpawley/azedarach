@@ -103,7 +103,8 @@ type orchestrateStartLaunch struct {
 }
 
 type orchestrateStartAdvice struct {
-	WatchCommand string `json:"watch_command,omitempty"`
+	WatchCommand     string `json:"watch_command,omitempty"`
+	WatchInstruction string `json:"watch_instruction,omitempty"`
 }
 
 type orchestrateWatchFrame struct {
@@ -365,7 +366,8 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		Blocked:       ready.Blocked,
 		MailboxEvents: events,
 		Advice: map[string]interface{}{
-			"watch": fmt.Sprintf("az orchestrate watch --root %s --since %d --jsonl", ready.RootIssueID, nextMailboxSeq(events, opts.SinceSeq)),
+			"watch":             fmt.Sprintf("az orchestrate watch --root %s --since %d --jsonl", ready.RootIssueID, nextMailboxSeq(events, opts.SinceSeq)),
+			"watch_instruction": "Start this watch command in another pane/session and leave it running while workers are active; do not add --once for orchestration monitoring.",
 		},
 	}
 	if opts.JSON {
@@ -403,8 +405,9 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 	for _, evt := range result.MailboxEvents {
 		fmt.Printf("- seq=%d issue=%s type=%s from=%s to=%s\n", evt.Seq, strings.TrimSpace(evt.IssueID.String()), evt.Type, strings.TrimSpace(evt.From), strings.TrimSpace(evt.To))
 	}
-	fmt.Println("Next watch command:")
+	fmt.Println("Next watch command (leave running while workers are active; do not add --once):")
 	fmt.Printf("- %s\n", result.Advice["watch"])
+	fmt.Printf("- %s\n", result.Advice["watch_instruction"])
 	return nil
 }
 
@@ -482,7 +485,8 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		Failed:      map[string]string{},
 		Warnings:    orchestrateStartWarnings(ctx, deps, len(requested) > 0),
 		Advice: orchestrateStartAdvice{
-			WatchCommand: fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", opts.RootIssueID),
+			WatchCommand:     fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", opts.RootIssueID),
+			WatchInstruction: "Start this watch command in another pane/session and leave it running while workers are active; do not add --once for orchestration monitoring.",
 		},
 	}
 
@@ -556,8 +560,11 @@ func printOrchestrateStartResult(result orchestrateStartResult) {
 		}
 	}
 	if result.Advice.WatchCommand != "" {
-		fmt.Println("Next watch command:")
+		fmt.Println("Next watch command (leave running while workers are active; do not add --once):")
 		fmt.Printf("- %s\n", result.Advice.WatchCommand)
+		if result.Advice.WatchInstruction != "" {
+			fmt.Printf("- %s\n", result.Advice.WatchInstruction)
+		}
 	}
 	if len(result.Failed) > 0 {
 		fmt.Println("Failed:")
