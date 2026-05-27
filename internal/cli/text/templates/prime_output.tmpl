@@ -21,13 +21,16 @@ Active issue ID: `{{ .ActiveIssueID }}`
   {{ if .OrchestrationViaNative }}- `orchestration.via` is `native`: use your harness-native subagent delegation commands/keywords to split and run child issues (for example "delegate", "spawn", or "subagent"). Keep using `az issue` for tracking state and dependencies.
   {{ if .TmuxAvailable }}
   - `az orchestrate` and `az issue fanout` commands are optional in this mode; prefer native delegation flow unless you explicitly need CLI-managed readiness/session starts.
+  - Use `az orchestrate prompt --issue <issue-id> [--root <issue-id>]` to generate a self-contained worker handoff prompt for native subagents. Add `--coordination mailbox` only when you explicitly want hybrid az-mail coordination.
   - Use native delegation for short-lived ad hoc exploration or review where the result can be summarized back into the current session. Use `az orchestrate` for durable tracked task graphs that need issue dependencies, mailbox events, recoverable sessions, isolated worktrees, integration guidance, and `complete-check`.
   {{ else }}
   - CLI-managed worker fanout requires `tmux` on `PATH`; `tmux` is not available, so use native delegation for short-lived ad hoc exploration while keeping durable state in `az issue`. Install `tmux` and rerun `az prime` to see CLI-managed worker commands.
+  - Use `az orchestrate prompt --issue <issue-id> [--root <issue-id>]` to generate a self-contained worker handoff prompt for native subagents. Add `--coordination mailbox` only when you explicitly want hybrid az-mail coordination.
   {{ end }}
   {{ else if and .OrchestrationViaAz .TmuxAvailable }}
   - `az orchestrate status --root <issue-id> [--since <seq>] [--limit <n>] [--json]`
   - `az orchestrate watch --root <issue-id> --since <seq> [--jsonl] [--once]`
+  - `az orchestrate prompt --issue <issue-id> [--root <issue-id>] [--coordination native|mailbox] [--json]`
   - `az orchestrate start --root <issue-id> [--limit <n>] [--issue <issue-id> ...] [--json]`
   - `az orchestrate integrate --issue <issue-id> [--json]`
   - `az orchestrate close-session --issue <issue-id> [--json]`
@@ -86,7 +89,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Do not use `--deferred` for child tasks, blockers, or work required before closing the active issue; create normal child issues instead.
   - When fanning out to subagents, split work until each child issue is independently actionable and fits within a single subagent context window.
   {{ if .OrchestrationViaNative }}- `orchestration.via` is `native`: orchestrate the split using native subagent/delegation commands in your AI harness, while keeping issue bookkeeping in `az issue`.
-  - Shorthand: `single-window fanout (native)` means split until each child is ready for one subagent, then fan out with native delegation commands one child at a time.
+  - Shorthand: `single-window fanout (native)` means split until each child is ready for one subagent, then run `az orchestrate prompt --issue <child> --root <parent>` and pass that prompt to one native subagent at a time. Use `--coordination mailbox` only for explicit hybrid coordination.
   {{ else if and .OrchestrationViaAz .TmuxAvailable }}- `orchestration.via=az` means do not spawn harness-native subagents yourself. Then run the az orchestration loop: `status` to identify runnable leaves, `start --limit <n>` to launch a bounded wave, `watch --since <seq>` to observe worker/dependency events, and `complete-check` before closing. Tell each worker to use `az issue` and create/maintain its own child issue under the active parent.
   - Shorthand: `single-window fanout` means split until each child is ready for one worker, then use `az orchestrate start` to launch runnable leaves in bounded batches.
   {{ else if .OrchestrationViaAz }}- `orchestration.via=az` is configured, but `tmux` is not available. Do not start CLI-managed worker fanout in this environment; keep work in the current session or use native delegation for disposable side exploration while tracking durable state with `az issue`.
