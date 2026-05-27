@@ -15,8 +15,7 @@ import (
 
 type DiffClient interface {
 	Status(ctx context.Context, worktree string) (*gitservice.GitStatus, error)
-	ChangedFiles(ctx context.Context, worktree, baseBranch string) ([]gitservice.ChangedFile, error)
-	MergeBase(ctx context.Context, worktree, baseBranch string) (string, error)
+	ChangedFilesLocalBase(ctx context.Context, worktree, baseBranch string) ([]gitservice.ChangedFile, error)
 }
 
 type PopupOpener func(ctx context.Context, title, command string) error
@@ -94,7 +93,7 @@ func (d *DiffViewer) loadChangedFilesCmd() tea.Cmd {
 		if d.gitClient == nil {
 			return loadChangedFilesMsg{Err: fmt.Errorf("git client unavailable")}
 		}
-		files, err := d.gitClient.ChangedFiles(context.Background(), d.worktree, d.effectiveBaseBranch())
+		files, err := d.gitClient.ChangedFilesLocalBase(context.Background(), d.worktree, d.effectiveBaseBranch())
 		if err != nil {
 			return loadChangedFilesMsg{Err: err}
 		}
@@ -130,7 +129,7 @@ func (d *DiffViewer) openPopupCmd(filePath string, all bool) tea.Cmd {
 		}
 
 		baseBranch := shellSingleQuote(d.effectiveBaseBranch())
-		resolveBaseRef := fmt.Sprintf("BASE_BRANCH=%s; BASE_REF=\"$BASE_BRANCH\"; git rev-parse --verify \"$BASE_REF\" >/dev/null 2>&1 || BASE_REF=\"origin/$BASE_BRANCH\";", baseBranch)
+		resolveBaseRef := fmt.Sprintf("BASE_BRANCH=%s; BASE_REF=\"$BASE_BRANCH\"; git rev-parse --verify \"$BASE_REF\" >/dev/null 2>&1 || { printf 'Local base branch not found: %%s\\n' \"$BASE_BRANCH\"; exit 1; };", baseBranch)
 
 		var title string
 		var command string

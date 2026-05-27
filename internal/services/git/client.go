@@ -310,9 +310,41 @@ func (c *Client) MergeBase(ctx context.Context, worktree, baseBranch string) (st
 	return "", fmt.Errorf("failed to resolve merge-base for %s", baseBranch)
 }
 
+// MergeBaseLocal resolves the merge base between a local base branch and HEAD.
+func (c *Client) MergeBaseLocal(ctx context.Context, worktree, baseBranch string) (string, error) {
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch == "" {
+		return "", fmt.Errorf("base branch is empty")
+	}
+
+	mergeBaseOutput, err := c.runInWorktree(ctx, worktree, "merge-base", baseBranch, "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve merge-base for local branch %s: %w", baseBranch, err)
+	}
+	mergeBase := strings.TrimSpace(mergeBaseOutput)
+	if mergeBase == "" {
+		return baseBranch, nil
+	}
+	return mergeBase, nil
+}
+
 // ChangedFiles returns changed files from merge-base..HEAD.
 func (c *Client) ChangedFiles(ctx context.Context, worktree, baseBranch string) ([]ChangedFile, error) {
 	mergeBase, err := c.MergeBase(ctx, worktree, baseBranch)
+	if err != nil {
+		return nil, err
+	}
+
+	output, err := c.runInWorktree(ctx, worktree, "diff", "--name-status", mergeBase, "HEAD", "--")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get changed files: %w", err)
+	}
+	return parseChangedFilesOutput(output), nil
+}
+
+// ChangedFilesLocalBase returns changed files from the local base branch merge-base..HEAD.
+func (c *Client) ChangedFilesLocalBase(ctx context.Context, worktree, baseBranch string) ([]ChangedFile, error) {
+	mergeBase, err := c.MergeBaseLocal(ctx, worktree, baseBranch)
 	if err != nil {
 		return nil, err
 	}
