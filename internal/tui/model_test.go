@@ -2932,7 +2932,7 @@ func TestNestedDrillDownEscapePopsSingleLevel(t *testing.T) {
 	}
 }
 
-func TestTaskDetailPanelIncludesTypedDependencies(t *testing.T) {
+func TestTaskDetailPanelUsesGraphForTypedRelations(t *testing.T) {
 	m := newTestModel()
 	m.editor.EnterNormal()
 
@@ -2984,8 +2984,11 @@ func TestTaskDetailPanelIncludesTypedDependencies(t *testing.T) {
 		t.Fatalf("expected TaskWorkspaceOverlay on top, got %T", current)
 	}
 	view := taskWorkspace.View()
-	if !strings.Contains(view, "Outgoing") || !strings.Contains(view, "related <- az-upstream") {
-		t.Fatalf("expected typed dependency detail in task panel, got %q", view)
+	if strings.Contains(view, "Dependencies") || strings.Contains(view, "Outgoing") || strings.Contains(view, "Incoming") {
+		t.Fatalf("expected dependency summary to be omitted from task panel, got %q", view)
+	}
+	if !strings.Contains(view, "Graph") || !strings.Contains(view, "> az-downstream [Open] Downstream task") || !strings.Contains(view, "> az-upstream [Open] Upstream task") {
+		t.Fatalf("expected typed relations in task graph, got %q", view)
 	}
 	if !strings.Contains(view, "Current task") {
 		t.Fatalf("expected task title in task panel, got %q", view)

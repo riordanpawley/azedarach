@@ -300,13 +300,6 @@ func (d *DetailPanel) buildLines() ([]string, int) {
 	if total, done := d.childProgress(); total > 0 {
 		addLine(labelStyle.Render("Children:") + "  " + valueStyle.Render(fmt.Sprintf("%d total (%d done)", total, done)))
 	}
-	if deps := d.renderDependencies(); deps != "" {
-		addLine("")
-		addLine(headerStyle.Render("Dependencies"))
-		for _, line := range strings.Split(deps, "\n") {
-			addLine(line)
-		}
-	}
 	addLine("")
 	addLine(labelStyle.Render("Created:") + "  " + valueStyle.Render(d.formatTime(d.task.CreatedAt)))
 	addLine(labelStyle.Render("Updated:") + "  " + valueStyle.Render(d.formatTime(d.task.UpdatedAt)))
@@ -406,32 +399,6 @@ func hasRelation(links []taskGraphLink, relation string) bool {
 		}
 	}
 	return false
-}
-
-func (d *DetailPanel) renderDependencies() string {
-	outgoing := d.task.Dependencies
-	incoming := d.incomingDependencies()
-	if len(outgoing) == 0 && len(incoming) == 0 {
-		return ""
-	}
-
-	var b strings.Builder
-	if len(outgoing) > 0 {
-		b.WriteString(d.styles.MenuItem.Render("Outgoing"))
-		b.WriteString("\n")
-		for _, dep := range outgoing {
-			b.WriteString(fmt.Sprintf("- %s -> %s\n", dep.Type, dep.ID))
-		}
-	}
-	if len(incoming) > 0 {
-		b.WriteString(d.styles.MenuItem.Render("Incoming"))
-		b.WriteString("\n")
-		for _, dep := range incoming {
-			b.WriteString(fmt.Sprintf("- %s <- %s\n", dep.Type, dep.ID))
-		}
-	}
-
-	return strings.TrimSuffix(b.String(), "\n")
 }
 
 func (d *DetailPanel) renderIssueMetadataLines(labelStyle, valueStyle lipgloss.Style) string {

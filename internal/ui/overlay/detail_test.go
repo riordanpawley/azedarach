@@ -206,7 +206,7 @@ func TestDetailPanelViewWithParent(t *testing.T) {
 	assert.Contains(t, view, "az-parent")
 }
 
-func TestDetailPanelViewShowsTypedDependencies(t *testing.T) {
+func TestDetailPanelViewUsesGraphForDependencyRelations(t *testing.T) {
 	taskID := "az-current"
 	task := domain.Task{
 		ID:       naming.IssueID(taskID),
@@ -243,11 +243,14 @@ func TestDetailPanelViewShowsTypedDependencies(t *testing.T) {
 	panel := NewDetailPanel(task).WithRelatedTasks(related)
 	view := panel.View()
 
-	assert.Contains(t, view, "Dependencies")
-	assert.Contains(t, view, "Outgoing")
-	assert.Contains(t, view, "blocks -> az-downstream")
-	assert.Contains(t, view, "Incoming")
-	assert.Contains(t, view, "related <- az-upstream")
+	assert.NotContains(t, view, "Dependencies")
+	assert.NotContains(t, view, "Outgoing")
+	assert.NotContains(t, view, "Incoming")
+	assert.Contains(t, view, "Graph")
+	assert.Contains(t, view, "Blocks")
+	assert.Contains(t, view, "> az-downstream [Open] Downstream task")
+	assert.Contains(t, view, "Related")
+	assert.Contains(t, view, "> az-upstream [Open] Upstream task")
 }
 
 func TestDetailPanelViewShowsLoadedIssueMetadata(t *testing.T) {
@@ -428,11 +431,11 @@ func TestDetailPanelGraphHeaderHiddenWhenNoLinks(t *testing.T) {
 	assert.NotContains(t, view, "Related")
 }
 
-func TestDetailPanelDependenciesOmitsEmptySides(t *testing.T) {
+func TestDetailPanelOmitsDependencySummaryWhenOnlyOutgoingRelationExists(t *testing.T) {
 	taskID := naming.IssueID("az-outgoing-only")
 	task := domain.Task{
 		ID:    taskID,
-		Title: "Outgoing-only",
+		Title: "Relation-only",
 		Dependencies: []domain.Dependency{
 			{ID: "az-downstream", Type: domain.DependencyBlocks},
 		},
@@ -444,11 +447,13 @@ func TestDetailPanelDependenciesOmitsEmptySides(t *testing.T) {
 	panel := NewDetailPanel(task).WithRelatedTasks(related)
 	view := panel.View()
 
-	assert.Contains(t, view, "Outgoing")
-	assert.Contains(t, view, "blocks -> az-downstream")
-	// Incoming side has no rows, so the subheader is suppressed.
+	assert.NotContains(t, view, "Dependencies")
+	assert.NotContains(t, view, "Outgoing")
 	assert.NotContains(t, view, "Incoming")
 	assert.NotContains(t, view, "- none")
+	assert.Contains(t, view, "Graph")
+	assert.Contains(t, view, "Blocks")
+	assert.Contains(t, view, "> az-downstream [Open] Downstream")
 }
 
 func pointerToIssueID(id naming.IssueID) *naming.IssueID {
