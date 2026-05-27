@@ -50,10 +50,11 @@ type OrchestrateCompleteCheckOptions struct {
 }
 
 type OrchestratePromptOptions struct {
-	Project     string
-	RootIssueID string
-	IssueID     string
-	JSON        bool
+	Project      string
+	RootIssueID  string
+	IssueID      string
+	Coordination string
+	JSON         bool
 }
 
 type OrchestrateIntegrateOptions struct {
@@ -122,11 +123,12 @@ type orchestrateCompleteCheckResult struct {
 }
 
 type orchestratePromptResult struct {
-	RootIssueID string   `json:"root_issue_id"`
-	IssueID     string   `json:"issue_id"`
-	ParentIssue string   `json:"parent_issue"`
-	Prompt      string   `json:"prompt"`
-	Commands    []string `json:"commands"`
+	RootIssueID  string   `json:"root_issue_id"`
+	IssueID      string   `json:"issue_id"`
+	ParentIssue  string   `json:"parent_issue"`
+	Coordination string   `json:"coordination"`
+	Prompt       string   `json:"prompt"`
+	Commands     []string `json:"commands"`
 }
 
 type orchestrateIntegrateResult struct {
@@ -244,12 +246,13 @@ func ParseOrchestrateCompleteCheckArgs(args []string) (OrchestrateCompleteCheckO
 }
 
 func ParseOrchestratePromptArgs(args []string) (OrchestratePromptOptions, error) {
-	opts := OrchestratePromptOptions{}
+	opts := OrchestratePromptOptions{Coordination: "native"}
 	fs := flag.NewFlagSet("orchestrate prompt", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&opts.RootIssueID, "root", "", "root issue id")
 	fs.StringVar(&opts.IssueID, "issue", "", "worker issue id")
+	fs.StringVar(&opts.Coordination, "coordination", "native", "coordination mode: native or mailbox")
 	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
 	if err := fs.Parse(args); err != nil {
 		return OrchestratePromptOptions{}, err
@@ -259,6 +262,15 @@ func ParseOrchestratePromptArgs(args []string) (OrchestratePromptOptions, error)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
 		return OrchestratePromptOptions{}, fmt.Errorf("missing required flag: --issue")
+	}
+	opts.Coordination = strings.ToLower(strings.TrimSpace(opts.Coordination))
+	if opts.Coordination == "" {
+		opts.Coordination = "native"
+	}
+	switch opts.Coordination {
+	case "native", "mailbox":
+	default:
+		return OrchestratePromptOptions{}, fmt.Errorf("coordination must be native or mailbox")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -693,7 +705,11 @@ func OrchestratePromptCommand(deps *Dependencies, opts OrchestratePromptOptions)
 	if rootIssueID == "" {
 		rootIssueID = parentIssueID
 	}
-	result := buildOrchestratePromptResult(rootIssueID, parentIssueID, task)
+	coordination := strings.ToLower(strings.TrimSpace(opts.Coordination))
+	if coordination == "" {
+		coordination = "native"
+	}
+	result := buildOrchestratePromptResult(rootIssueID, parentIssueID, task, coordination)
 	if opts.JSON {
 		return printJSON(result)
 	}
@@ -853,21 +869,28 @@ func emitOrchestrateWatchFrame(frame orchestrateWatchFrame, jsonl bool) error {
 	return nil
 }
 
-func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain.Task) orchestratePromptResult {
+func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain.Task, coordination string) orchestratePromptResult {
 	issueID := task.ID.String()
 	commands := []string{
 		"az prime",
 		fmt.Sprintf("az issue get %s", issueID),
 		fmt.Sprintf("az spec read --issue %s", issueID),
 		fmt.Sprintf("az issue update %s --status in_progress", issueID),
-		fmt.Sprintf("az mail send --parent %s --issue %s --type worker-progress --body \"<progress>\"", parentIssueID, issueID),
-		fmt.Sprintf("az mail send --parent %s --issue %s --type worker-complete --body \"<evidence>\"", parentIssueID, issueID),
+	}
+	if coordination == "mailbox" {
+		commands = append(commands,
+			fmt.Sprintf("az mail send --parent %s --issue %s --type worker-progress --body \"<progress>\"", parentIssueID, issueID),
+			fmt.Sprintf("az mail send --parent %s --issue %s --type worker-complete --body \"<evidence>\"", parentIssueID, issueID),
+		)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Work on issue %s: %s\n\n", issueID, task.Title)
 	fmt.Fprintf(&b, "Start by running `az prime`, then continue this worker task using the issue context without waiting for further instruction.\n\n")
 	fmt.Fprintf(&b, "Root issue: %s\n", rootIssueID)
-	fmt.Fprintf(&b, "Coordination mailbox parent: %s\n", parentIssueID)
+	fmt.Fprintf(&b, "Coordination mode: %s\n", coordination)
+	if coordination == "mailbox" {
+		fmt.Fprintf(&b, "Coordination mailbox parent: %s\n", parentIssueID)
+	}
 	fmt.Fprintf(&b, "Worker issue: %s\n", issueID)
 	fmt.Fprintf(&b, "Status: %s\n", task.Status)
 	fmt.Fprintf(&b, "Priority: %s\n", task.Priority)
@@ -891,19 +914,25 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 	fmt.Fprintf(&b, "- Focus only on issue %s unless the orchestrator explicitly expands scope.\n", issueID)
 	fmt.Fprintf(&b, "- Before behavior changes, inspect linked requirements with `az spec read --issue %s`; if none are linked, record that in issue notes.\n", issueID)
 	fmt.Fprintf(&b, "- Keep `%s` status and notes current with commands run, key outputs/assertions, files changed, and AC pass/fail evidence.\n", issueID)
-	fmt.Fprintf(&b, "- Use mailbox events for coordination: `worker-progress`, `worker-blocked`, and `worker-complete`.\n")
-	fmt.Fprintf(&b, "- On completion, send `worker-complete` to parent `%s` with concise evidence and leave integration/merge to the orchestrator.\n", parentIssueID)
+	if coordination == "mailbox" {
+		fmt.Fprintf(&b, "- Use mailbox events for hybrid coordination: `worker-progress`, `worker-blocked`, and `worker-complete`.\n")
+		fmt.Fprintf(&b, "- On completion, send `worker-complete` to parent `%s` with concise evidence and leave integration/merge to the orchestrator.\n", parentIssueID)
+	} else {
+		fmt.Fprintf(&b, "- Return progress, blockers, and final results through the native subagent result channel.\n")
+		fmt.Fprintf(&b, "- Do not use `az mail` unless the orchestrator explicitly asks for mailbox coordination.\n")
+	}
 	fmt.Fprintf(&b, "- Do not close root issue `%s`; close only your worker issue when the orchestrator has integrated or explicitly instructs you.\n", rootIssueID)
 	fmt.Fprintf(&b, "\nUseful commands:\n")
 	for _, command := range commands {
 		fmt.Fprintf(&b, "- `%s`\n", command)
 	}
 	return orchestratePromptResult{
-		RootIssueID: rootIssueID,
-		IssueID:     issueID,
-		ParentIssue: parentIssueID,
-		Prompt:      b.String(),
-		Commands:    commands,
+		RootIssueID:  rootIssueID,
+		IssueID:      issueID,
+		ParentIssue:  parentIssueID,
+		Coordination: coordination,
+		Prompt:       b.String(),
+		Commands:     commands,
 	}
 }
 

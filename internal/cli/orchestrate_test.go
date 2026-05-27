@@ -107,15 +107,25 @@ func TestParseOrchestrateCompleteCheckArgs(t *testing.T) {
 }
 
 func TestParseOrchestratePromptArgs(t *testing.T) {
-	opts, err := ParseOrchestratePromptArgs([]string{"--root", "az-1", "--issue", "az-2", "--json"})
+	opts, err := ParseOrchestratePromptArgs([]string{"--root", "az-1", "--issue", "az-2", "--coordination", "mailbox", "--json"})
 	if err != nil {
 		t.Fatalf("ParseOrchestratePromptArgs error = %v", err)
 	}
-	if opts.RootIssueID != "az-1" || opts.IssueID != "az-2" || !opts.JSON {
+	if opts.RootIssueID != "az-1" || opts.IssueID != "az-2" || opts.Coordination != "mailbox" || !opts.JSON {
 		t.Fatalf("opts = %+v", opts)
+	}
+	defaults, err := ParseOrchestratePromptArgs([]string{"--issue", "az-2"})
+	if err != nil {
+		t.Fatalf("ParseOrchestratePromptArgs default error = %v", err)
+	}
+	if defaults.Coordination != "native" {
+		t.Fatalf("default Coordination = %q, want native", defaults.Coordination)
 	}
 	if _, err := ParseOrchestratePromptArgs([]string{"--root", "az-1"}); err == nil {
 		t.Fatal("expected prompt error for missing --issue")
+	}
+	if _, err := ParseOrchestratePromptArgs([]string{"--issue", "az-2", "--coordination", "banana"}); err == nil {
+		t.Fatal("expected prompt error for invalid coordination")
 	}
 }
 
@@ -266,6 +276,50 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 }
 
 func TestOrchestratePromptCommandPrintsNativeWorkerHandoff(t *testing.T) {
+	deps, root, child := orchestratePromptTestDeps(t)
+
+	output := captureStdout(t, func() error {
+		return OrchestratePromptCommand(deps, OrchestratePromptOptions{RootIssueID: root.String(), IssueID: child.String(), Coordination: "native"})
+	})
+	for _, want := range []string{
+		"Work on issue az-2: Worker task",
+		"Coordination mode: native",
+		"az spec read --issue az-2",
+		"Return progress, blockers, and final results through the native subagent result channel.",
+		"Do not use `az mail` unless the orchestrator explicitly asks for mailbox coordination.",
+		"Do not close root issue `az-1`",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+	for _, unexpected := range []string{"Coordination mailbox parent:", "az mail send", "worker-complete"} {
+		if strings.Contains(output, unexpected) {
+			t.Fatalf("output unexpectedly contains %q:\n%s", unexpected, output)
+		}
+	}
+}
+
+func TestOrchestratePromptCommandMailboxCoordinationOptIn(t *testing.T) {
+	deps, root, child := orchestratePromptTestDeps(t)
+
+	output := captureStdout(t, func() error {
+		return OrchestratePromptCommand(deps, OrchestratePromptOptions{RootIssueID: root.String(), IssueID: child.String(), Coordination: "mailbox"})
+	})
+	for _, want := range []string{
+		"Coordination mode: mailbox",
+		"Coordination mailbox parent: az-1",
+		"Use mailbox events for hybrid coordination",
+		"az mail send --parent az-1 --issue az-2 --type worker-complete",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func orchestratePromptTestDeps(t *testing.T) (*Dependencies, naming.IssueID, naming.IssueID) {
+	t.Helper()
 	root := naming.IssueID("az-1")
 	child := naming.IssueID("az-2")
 	tasks := []domain.Task{
@@ -299,21 +353,7 @@ func TestOrchestratePromptCommandPrintsNativeWorkerHandoff(t *testing.T) {
 			},
 		}),
 	}
-
-	output := captureStdout(t, func() error {
-		return OrchestratePromptCommand(deps, OrchestratePromptOptions{RootIssueID: root.String(), IssueID: child.String()})
-	})
-	for _, want := range []string{
-		"Work on issue az-2: Worker task",
-		"Coordination mailbox parent: az-1",
-		"az spec read --issue az-2",
-		"az mail send --parent az-1 --issue az-2 --type worker-complete",
-		"Do not close root issue `az-1`",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("output missing %q:\n%s", want, output)
-		}
-	}
+	return deps, root, child
 }
 
 func TestOrchestrateIntegrateCommandPrintsGuidance(t *testing.T) {

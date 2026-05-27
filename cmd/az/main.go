@@ -863,7 +863,7 @@ func main() {
 		case "prompt":
 			opts, err := cli.ParseOrchestratePromptArgs(commandArgs[1:])
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az orchestrate prompt --issue <issue-id> [--root <issue-id>] [--project <project-id>] [--json]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az orchestrate prompt --issue <issue-id> [--root <issue-id>] [--coordination native|mailbox] [--project <project-id>] [--json]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
