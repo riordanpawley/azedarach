@@ -800,6 +800,9 @@ func resolveSessionStartBaseBranch(ctx context.Context, deps *Dependencies, task
 	if err != nil {
 		return "", fmt.Errorf("resolve parent worktree branch for %s: %w", task.ID, err)
 	}
+	if branch := branchForIssueWorktree(worktrees, parentID); branch != "" {
+		return branch, nil
+	}
 	tasks, err := deps.DaemonClient.ListTasksSnapshot(ctx)
 	if err != nil {
 		return "", fmt.Errorf("resolve ancestor task graph for %s: %w", task.ID, err)
@@ -817,14 +820,12 @@ func resolveSessionStartBaseBranch(ctx context.Context, deps *Dependencies, task
 			return baseBranch, nil
 		}
 		seen[parentID] = struct{}{}
+		if branch := branchForIssueWorktree(worktrees, parentID); branch != "" {
+			return branch, nil
+		}
 		parentTask, ok := tasksByID[parentID]
 		if !ok {
 			return baseBranch, nil
-		}
-		if parentTask.Status != domain.StatusDone {
-			if branch := branchForIssueWorktree(worktrees, parentID); branch != "" {
-				return branch, nil
-			}
 		}
 		parentID = taskParentIssueID(parentTask)
 	}
