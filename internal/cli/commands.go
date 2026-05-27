@@ -885,19 +885,35 @@ func BranchMergeToBaseCommand(deps *Dependencies, issueID string) error {
 }
 
 func BranchMergeToBaseCommandWithOptions(deps *Dependencies, opts BranchMergeToBaseOptions) error {
+	result, err := runBranchMergeToBase(deps, opts)
+	if err != nil {
+		return err
+	}
+	printBranchMergeToBaseResult(result)
+	return nil
+}
+
+type branchMergeToBaseCommandResult struct {
+	IssueID      string
+	SourceBranch string
+	BaseBranch   string
+	Message      string
+}
+
+func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (branchMergeToBaseCommandResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), branchMergeToBaseTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
-		return err
+		return branchMergeToBaseCommandResult{}, err
 	}
 
 	source, err := resolveMergeToBaseSourceWorktree(ctx, deps, opts.IssueID)
 	if err != nil {
-		return err
+		return branchMergeToBaseCommandResult{}, err
 	}
 	target, decision, err := resolveMergeToBaseTarget(ctx, deps, source.IssueID, opts.AllowBaseForChild)
 	if err != nil {
-		return err
+		return branchMergeToBaseCommandResult{}, err
 	}
 	baseBranch := target.Branch
 	baseWorktree := strings.TrimSpace(target.WorktreePath)
@@ -925,7 +941,7 @@ func BranchMergeToBaseCommandWithOptions(deps *Dependencies, opts BranchMergeToB
 	)
 
 	if err := checkMergeToBasePreflight(ctx, deps, source, baseWorktree); err != nil {
-		return err
+		return branchMergeToBaseCommandResult{}, err
 	}
 
 	deps.Logger.Info("merging issue branch into target branch",
@@ -937,27 +953,45 @@ func BranchMergeToBaseCommandWithOptions(deps *Dependencies, opts BranchMergeToB
 	)
 
 	if _, err := deps.DaemonClient.GitFetch(ctx, baseWorktree, "origin"); err != nil {
-		return wrapPendingGitOperation("fetch", err)
+		return branchMergeToBaseCommandResult{}, wrapPendingGitOperation("fetch", err)
 	}
 	if !branchAttached {
-		if _, err := deps.DaemonClient.GitCheckout(ctx, baseWorktree, baseBranch); err != nil {
-			return wrapPendingGitOperation("checkout", err)
+		
+	if _, err := deps.DaemonClient.GitCheckout(ctx, baseWorktree, baseBranch); err != nil {
+			return branchMergeToBaseCommandResult{}, wrapPendingGitOperation("checkout", err)
 		}
 	}
 	result, err := deps.DaemonClient.GitMerge(ctx, baseWorktree, source.Branch)
 	if err != nil {
-		return wrapPendingGitOperation("merge", err)
+		return branchMergeToBaseCommandResult{}, wrapPendingGitOperation("merge", err)
 	}
+	if !result.Result.Success {
+		details := strings.TrimSpace(result.Result.Message)
+		if len(result.Result.ConflictFiles) > 0 {
+			details = strings.TrimSpace(details + "\nconflicts: " + strings.Join(result.Result.ConflictFiles, ", "))
+		}
+		if details == "" {
+			details = "merge did not complete successfully"
+		}
+		return branchMergeToBaseCommandResult{}, fmt.Errorf("merge %s into %s failed: %s", source.Branch, baseBranch, details)
+	}
+	return branchMergeToBaseCommandResult{
+		IssueID:      source.IssueID,
+		SourceBranch: source.Branch,
+		BaseBranch:   baseBranch,
+		Message:      result.Result.Message,
+	}, nil
+}
 
-	if strings.TrimSpace(result.Result.Message) != "" {
-		if strings.HasSuffix(result.Result.Message, "\n") {
-			fmt.Print(result.Result.Message)
+func printBranchMergeToBaseResult(result branchMergeToBaseCommandResult) {
+	if strings.TrimSpace(result.Message) != "" {
+		if strings.HasSuffix(result.Message, "\n") {
+			fmt.Print(result.Message)
 		} else {
-			fmt.Println(result.Result.Message)
+			fmt.Println(result.Message)
 		}
 	}
-	fmt.Printf("Merged %s into %s (%s)\n", source.Branch, baseBranch, source.IssueID)
-	return nil
+	fmt.Printf("Merged %s into %s (%s)\n", result.SourceBranch, result.BaseBranch, result.IssueID)
 }
 
 type mergeBaseTarget struct {

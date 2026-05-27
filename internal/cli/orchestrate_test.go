@@ -4,6 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
 	"strings"
 	"testing"
 
@@ -130,11 +134,11 @@ func TestParseOrchestratePromptArgs(t *testing.T) {
 }
 
 func TestParseOrchestrateIntegrateAndCloseSessionArgs(t *testing.T) {
-	integrate, err := ParseOrchestrateIntegrateArgs([]string{"--issue", "az-2", "--json"})
+	integrate, err := ParseOrchestrateIntegrateArgs([]string{"--issue", "az-2", "--apply", "--json"})
 	if err != nil {
 		t.Fatalf("ParseOrchestrateIntegrateArgs error = %v", err)
 	}
-	if integrate.IssueID != "az-2" || !integrate.JSON {
+	if integrate.IssueID != "az-2" || !integrate.Apply || !integrate.JSON {
 		t.Fatalf("integrate opts = %+v", integrate)
 	}
 
@@ -452,6 +456,171 @@ func TestOrchestrateIntegrateCommandBlocksMergeWithoutCompletionEvidence(t *test
 	}
 }
 
+func TestOrchestrateIntegrateApplySuccess(t *testing.T) {
+	deps, commands := orchestrateIntegrateApplyDeps(t, "")
+	output := captureStdout(t, func() error {
+		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2", Apply: true})
+	})
+	for _, want := range []string{"Merged user/az-2/worker into user/az-1/parent (az-2)", "merge: success", "stop_session: success", "close_issue: success", "append_evidence: success"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+	for _, want := range []string{daemonclient.CommandGitMerge, commandSessionStop, daemonclient.CommandTaskUpdateStatus, daemonclient.CommandTaskAppendNotes} {
+		if !containsString(*commands, want) {
+			t.Fatalf("commands = %+v, want %s", *commands, want)
+		}
+	}
+}
+
+func TestOrchestrateIntegrateApplyRequiresCompletionEvidence(t *testing.T) {
+	deps, commands := orchestrateIntegrateApplyDeps(t, "missing_evidence")
+	output, err := captureStdoutAllowError(t, func() error {
+		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2", Apply: true, JSON: true})
+	})
+	if err == nil {
+		t.Fatal("expected missing completion evidence error")
+	}
+	if !strings.Contains(output, `"apply": true`) || !strings.Contains(output, `"applied": false`) || !strings.Contains(output, `"name": "completion_evidence"`) || !strings.Contains(output, `"recovery"`) {
+		t.Fatalf("output missing structured failure:\n%s", output)
+	}
+	for _, unexpected := range []string{daemonclient.CommandGitMerge, commandSessionStop, daemonclient.CommandTaskUpdateStatus} {
+		if containsString(*commands, unexpected) {
+			t.Fatalf("commands = %+v, did not expect %s", *commands, unexpected)
+		}
+	}
+}
+
+func TestOrchestrateIntegrateApplyMergeFailureStopsBeforeCleanup(t *testing.T) {
+	deps, commands := orchestrateIntegrateApplyDeps(t, "merge")
+	output, err := captureStdoutAllowError(t, func() error {
+		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2", Apply: true})
+	})
+	if err == nil {
+		t.Fatal("expected merge failure")
+	}
+	if !strings.Contains(output, "merge: failed") || !strings.Contains(output, "az branch merge az-2") {
+		t.Fatalf("output missing merge failure recovery:\n%s", output)
+	}
+	if containsString(*commands, commandSessionStop) || containsString(*commands, daemonclient.CommandTaskUpdateStatus) {
+		t.Fatalf("commands = %+v, cleanup should not run after merge failure", *commands)
+	}
+}
+
+func TestOrchestrateIntegrateApplyTreatsNonSuccessfulMergeResultAsFailure(t *testing.T) {
+	deps, commands := orchestrateIntegrateApplyDeps(t, "merge_conflict")
+	output, err := captureStdoutAllowError(t, func() error {
+		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2", Apply: true, JSON: true})
+	})
+	if err == nil {
+		t.Fatal("expected merge result failure")
+	}
+	if !strings.Contains(output, `"applied": false`) || !strings.Contains(output, "README.md") || !strings.Contains(output, `"name": "merge"`) {
+		t.Fatalf("output missing merge result failure:\n%s", output)
+	}
+	if containsString(*commands, commandSessionStop) || containsString(*commands, daemonclient.CommandTaskUpdateStatus) {
+		t.Fatalf("commands = %+v, cleanup should not run after non-successful merge result", *commands)
+	}
+}
+
+func TestOrchestrateIntegrateApplyReportsPartialCloseFailures(t *testing.T) {
+	deps, commands := orchestrateIntegrateApplyDeps(t, "close_issue")
+	output, err := captureStdoutAllowError(t, func() error {
+		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2", Apply: true})
+	})
+	if err == nil {
+		t.Fatal("expected partial cleanup failure")
+	}
+	if !strings.Contains(output, "close_issue: failed") || !strings.Contains(output, "Recovery:") {
+		t.Fatalf("output missing partial close failure:\n%s", output)
+	}
+	if !containsString(*commands, commandSessionStop) || !containsString(*commands, daemonclient.CommandTaskAppendNotes) {
+		t.Fatalf("commands = %+v, want cleanup continuation after close failure", *commands)
+	}
+}
+
+func orchestrateIntegrateApplyDeps(t *testing.T, failStep string) (*Dependencies, *[]string) {
+	t.Helper()
+	child := naming.IssueID("az-2")
+	parent := naming.IssueID("az-1")
+	commands := make([]string, 0, 16)
+	deps := &Dependencies{
+		RepoDir:   "/repo-parent",
+		ProjectID: protocol.DefaultProjectID,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees": []map[string]string{
+							{"issue_id": parent.String(), "path": "/repo-parent", "branch": "user/az-1/parent"},
+							{"issue_id": child.String(), "path": "/repo-az-2", "branch": "user/az-2/worker"},
+						},
+					}), nil
+				case daemonclient.CommandTaskList:
+					childStatus := domain.StatusDone
+					if failStep == "missing_evidence" {
+						childStatus = domain.StatusInProgress
+					}
+					body, err := marshalTaskListBody([]domain.Task{
+						{ID: parent, Status: domain.StatusInProgress, Type: domain.TypeTask},
+						{ID: child, Status: childStatus, Type: domain.TypeTask, ParentID: &parent},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list response: %v", err)
+					}
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
+				case protocol.CommandMailList:
+					return responseWithJSON(req, []protocol.MailEvent{{Seq: 1, ParentIssue: parent.String(), IssueID: child, Type: "worker-progress"}}), nil
+				case daemonclient.CommandGitStatus:
+					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{HasChanges: false}}), nil
+				case daemonclient.CommandGitFetch:
+					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: "/repo-parent", Remote: "origin"}), nil
+				case daemonclient.CommandGitCheckout:
+					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: "/repo-parent", Branch: "user/az-1/parent"}), nil
+				case daemonclient.CommandGitMerge:
+					if failStep == "merge" {
+						return protocol.ResponseEnvelope{}, fmt.Errorf("merge failed")
+					}
+					if failStep == "merge_conflict" {
+						return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
+							Worktree: "/repo-parent",
+							Branch:   "user/az-2/worker",
+							Result: gitservice.MergeResult{
+								Success:       false,
+								HasConflicts:  true,
+								ConflictFiles: []string{"README.md"},
+								Message:       "CONFLICT (content): Merge conflict in README.md",
+							},
+						}), nil
+					}
+					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
+						Worktree: "/repo-parent",
+						Branch:   "user/az-2/worker",
+						Result:   gitservice.MergeResult{Success: true},
+					}), nil
+				case commandSessionStop:
+					return responseWithOutput(req, "stopped\n"), nil
+				case daemonclient.CommandTaskUpdateStatus:
+					if failStep == "close_issue" {
+						return protocol.ResponseEnvelope{}, fmt.Errorf("close failed")
+					}
+					return responseWithJSON(req, map[string]any{}), nil
+				case daemonclient.CommandTaskAppendNotes:
+					return responseWithJSON(req, map[string]any{}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+	return deps, &commands
+}
+
 func TestOrchestrateCloseSessionCommandStopsSession(t *testing.T) {
 	var gotCommand string
 	deps := &Dependencies{
@@ -495,4 +664,30 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func captureStdoutAllowError(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+
+	resultCh := make(chan error, 1)
+	go func() {
+		resultCh <- fn()
+		_ = w.Close()
+	}()
+
+	var buf strings.Builder
+	_, copyErr := io.Copy(&buf, r)
+	os.Stdout = oldStdout
+	runErr := <-resultCh
+	if copyErr != nil {
+		t.Fatalf("copy stdout: %v", copyErr)
+	}
+	return buf.String(), runErr
 }
