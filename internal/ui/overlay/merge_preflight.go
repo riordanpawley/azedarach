@@ -12,30 +12,32 @@ import (
 type MergePreflightOverlay struct {
 	twoPaneDialogChrome
 	dialogViewportState
-	sourceID       string
-	targetID       string
-	sourceWorktree string
-	targetWorktree string
-	reasons        []string
-	sourceFiles    []string
-	targetFiles    []string
-	conflictFiles  []string
-	targetRef      string
-	sourceBranch   string
-	canAbortTarget bool
-	styles         *Styles
+	sourceID        string
+	targetID        string
+	sourceWorktree  string
+	targetWorktree  string
+	reasons         []string
+	sourceFiles     []string
+	targetFiles     []string
+	conflictFiles   []string
+	targetRef       string
+	sourceBranch    string
+	stopBeforeMerge bool
+	canAbortTarget  bool
+	styles          *Styles
 }
 
 // MergePreflightRefreshSelection carries context required to recompute
 // merge preconditions after an explicit refresh action.
 type MergePreflightRefreshSelection struct {
-	SourceID          string
-	TargetID          string
-	SourceWorktree    string
-	TargetWorktree    string
-	TargetRef         string
-	SourceBranch      string
-	IgnoreSourceDirty bool
+	SourceID              string
+	TargetID              string
+	SourceWorktree        string
+	TargetWorktree        string
+	TargetRef             string
+	SourceBranch          string
+	IgnoreSourceDirty     bool
+	StopTargetBeforeMerge bool
 }
 
 // MergePreflightAgentSelection carries context required to launch an agent
@@ -54,21 +56,23 @@ func NewMergePreflightOverlay(
 	sourceID, targetID, sourceWorktree, targetWorktree string,
 	reasons, sourceFiles, targetFiles, conflictFiles []string,
 	targetRef, sourceBranch string,
+	stopTargetBeforeMerge bool,
 	canAbortTarget bool,
 ) *MergePreflightOverlay {
 	return &MergePreflightOverlay{
-		sourceID:       sourceID,
-		targetID:       targetID,
-		sourceWorktree: sourceWorktree,
-		targetWorktree: targetWorktree,
-		reasons:        append([]string(nil), reasons...),
-		sourceFiles:    append([]string(nil), sourceFiles...),
-		targetFiles:    append([]string(nil), targetFiles...),
-		conflictFiles:  append([]string(nil), conflictFiles...),
-		targetRef:      strings.TrimSpace(targetRef),
-		sourceBranch:   strings.TrimSpace(sourceBranch),
-		canAbortTarget: canAbortTarget,
-		styles:         New(),
+		sourceID:        sourceID,
+		targetID:        targetID,
+		sourceWorktree:  sourceWorktree,
+		targetWorktree:  targetWorktree,
+		reasons:         append([]string(nil), reasons...),
+		sourceFiles:     append([]string(nil), sourceFiles...),
+		targetFiles:     append([]string(nil), targetFiles...),
+		conflictFiles:   append([]string(nil), conflictFiles...),
+		targetRef:       strings.TrimSpace(targetRef),
+		sourceBranch:    strings.TrimSpace(sourceBranch),
+		stopBeforeMerge: stopTargetBeforeMerge,
+		canAbortTarget:  canAbortTarget,
+		styles:          New(),
 	}
 }
 
@@ -88,12 +92,13 @@ func (m *MergePreflightOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return SelectionMsg{
 					Key: "merge_preflight_refresh",
 					Value: MergePreflightRefreshSelection{
-						SourceID:       m.sourceID,
-						TargetID:       m.targetID,
-						SourceWorktree: m.sourceWorktree,
-						TargetWorktree: m.targetWorktree,
-						TargetRef:      m.targetRef,
-						SourceBranch:   m.sourceBranch,
+						SourceID:              m.sourceID,
+						TargetID:              m.targetID,
+						SourceWorktree:        m.sourceWorktree,
+						TargetWorktree:        m.targetWorktree,
+						TargetRef:             m.targetRef,
+						SourceBranch:          m.sourceBranch,
+						StopTargetBeforeMerge: m.stopBeforeMerge,
 					},
 				}
 			}
@@ -105,13 +110,14 @@ func (m *MergePreflightOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return SelectionMsg{
 					Key: "merge_preflight_ignore_source_dirty",
 					Value: MergePreflightRefreshSelection{
-						SourceID:          m.sourceID,
-						TargetID:          m.targetID,
-						SourceWorktree:    m.sourceWorktree,
-						TargetWorktree:    m.targetWorktree,
-						TargetRef:         m.targetRef,
-						SourceBranch:      m.sourceBranch,
-						IgnoreSourceDirty: true,
+						SourceID:              m.sourceID,
+						TargetID:              m.targetID,
+						SourceWorktree:        m.sourceWorktree,
+						TargetWorktree:        m.targetWorktree,
+						TargetRef:             m.targetRef,
+						SourceBranch:          m.sourceBranch,
+						IgnoreSourceDirty:     true,
+						StopTargetBeforeMerge: m.stopBeforeMerge,
 					},
 				}
 			}

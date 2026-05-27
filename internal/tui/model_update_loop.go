@@ -337,7 +337,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.boardRefreshing = true
 		m.issueRefreshSeq++
 		return m, tea.Batch(
-					m.scheduleIssuesRefreshCmd(),
+			m.scheduleIssuesRefreshCmd(),
 			m.gitSyncService.FetchAndCheck(),
 		)
 
@@ -724,6 +724,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.conflictFiles,
 			msg.targetRef,
 			msg.sourceBranch,
+			msg.stopTargetBeforeMerge,
 			strings.TrimSpace(msg.targetWorktree) != "",
 		))
 
