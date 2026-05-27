@@ -7141,6 +7141,12 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Use `az orchestrate` for durable tracked task graphs that need issue dependencies, mailbox events, recoverable sessions, isolated worktrees, integration guidance, and `complete-check`.") {
 		t.Fatalf("prime output missing az/native tradeoff guidance: %q", output)
 	}
+	if !strings.Contains(output, "Use direct tmux pane capture only when watch/status indicate a worker may be stuck or failed") {
+		t.Fatalf("prime output missing bounded tmux observation guidance: %q", output)
+	}
+	if !strings.Contains(output, "do not poll tmux panes on a fixed interval") {
+		t.Fatalf("prime output missing tmux polling guardrail: %q", output)
+	}
 	if !strings.Contains(output, "`orchestration.via=az` means do not spawn harness-native subagents yourself.") {
 		t.Fatalf("prime output missing follow-up native subagent prohibition: %q", output)
 	}
