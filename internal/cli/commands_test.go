@@ -449,7 +449,11 @@ func TestStartCommandUsesParentWorktreeBranchForChildIssue(t *testing.T) {
 	if err := StartCommand(deps, "az-child"); err != nil {
 		t.Fatalf("StartCommand error: %v", err)
 	}
-	if len(commands) != 3 || commands[0] != daemonclient.CommandTaskList || commands[1] != daemonclient.CommandWorktreeList || commands[2] != commandSessionStart {
+	if len(commands) != 4 ||
+		commands[0] != daemonclient.CommandTaskList ||
+		commands[1] != daemonclient.CommandWorktreeList ||
+		commands[2] != daemonclient.CommandTaskList ||
+		commands[3] != commandSessionStart {
 		t.Fatalf("commands = %v", commands)
 	}
 	var body sessionRequestBody
@@ -540,6 +544,80 @@ func TestStartCommandUsesNearestAncestorWorktreeBranchForNestedChildIssue(t *tes
 	}
 	if body.BaseBranch != "user/az-root/root-branch" {
 		t.Fatalf("base_branch = %q, want %q", body.BaseBranch, "user/az-root/root-branch")
+	}
+}
+
+func TestStartCommandSkipsClosedParentWorktreeBranchForAncestorBase(t *testing.T) {
+	var gotReq protocol.RequestEnvelope
+	rootID := naming.IssueID("az-root")
+	doneParentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: rootID, Title: "Root", Status: domain.StatusInProgress},
+		{ID: doneParentID, Title: "Done parent", Status: domain.StatusDone, ParentID: &rootID},
+		{ID: childID, Title: "Child", Status: domain.StatusOpen, ParentID: &doneParentID},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+	worktreeListBody, err := json.Marshal(map[string]any{
+		"project_id": "proj",
+		"worktrees": []map[string]any{
+			{"path": "/tmp/root", "branch": "user/az-root/root-branch", "issue_id": "az-root"},
+			{"path": "/tmp/done-parent", "branch": "user/az-parent/stale-branch", "issue_id": "az-parent"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal worktree list: %v", err)
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				case daemonclient.CommandWorktreeList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            worktreeListBody,
+					}, nil
+				case commandSessionStart:
+					gotReq = req
+					return responseWithOutput(req, "ok\n"), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	if err := StartCommand(deps, "az-child"); err != nil {
+		t.Fatalf("StartCommand error: %v", err)
+	}
+	var body sessionRequestBody
+	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if body.BaseBranch != "user/az-root/root-branch" {
+		t.Fatalf("base_branch = %q, want open ancestor branch", body.BaseBranch)
 	}
 }
 
