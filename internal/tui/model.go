@@ -2222,35 +2222,11 @@ func (m Model) diffBaseBranchForTask(task *domain.Task) string {
 	if task == nil || task.ParentID == nil {
 		return baseBranch
 	}
-
-	tasksByID := make(map[string]domain.Task, len(m.tasks))
-	for _, candidate := range m.tasks {
-		tasksByID[candidate.ID.String()] = candidate
+	parentID := strings.TrimSpace(task.ParentID.String())
+	if parentID == "" {
+		return baseBranch
 	}
-
-	nextParentID := strings.TrimSpace(task.ParentID.String())
-	visited := map[string]struct{}{}
-	for nextParentID != "" {
-		if _, seen := visited[nextParentID]; seen {
-			break
-		}
-		visited[nextParentID] = struct{}{}
-
-		parentTask, ok := tasksByID[nextParentID]
-		if !ok {
-			return m.originBranchForSelection(nextParentID)
-		}
-		if parentTask.Status != domain.StatusDone {
-			return m.originBranchForSelection(nextParentID)
-		}
-
-		nextParentID = ""
-		if parentTask.ParentID != nil {
-			nextParentID = strings.TrimSpace(parentTask.ParentID.String())
-		}
-	}
-
-	return baseBranch
+	return m.originBranchForSelection(parentID)
 }
 
 func (m Model) daemonCommandTimeout() time.Duration {

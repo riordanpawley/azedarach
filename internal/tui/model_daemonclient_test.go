@@ -66,6 +66,10 @@ func (r *refreshableDiffClient) ChangedFiles(context.Context, string, string) ([
 	return files, nil
 }
 
+func (r *refreshableDiffClient) ChangedFilesLocalBase(ctx context.Context, worktree, baseBranch string) ([]git.ChangedFile, error) {
+	return r.ChangedFiles(ctx, worktree, baseBranch)
+}
+
 func (*refreshableDiffClient) MergeBase(context.Context, string, string) (string, error) {
 	return "abc123", nil
 }
@@ -4773,7 +4777,7 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 		}
 	})
 
-	t.Run("open diff targets closest non-done ancestor branch", func(t *testing.T) {
+	t.Run("open diff targets direct parent branch", func(t *testing.T) {
 		m := newDaemonTestModel(&recordingDaemonTransport{})
 		rootID := naming.IssueID("az-root")
 		parentID := naming.IssueID("az-parent")
@@ -4816,16 +4820,15 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 			t.Fatalf("overlay type = %T, want *diff.DiffViewer", updatedModel.overlayStack.Current())
 		}
 		baseBranchField := reflect.ValueOf(diffOverlay).Elem().FieldByName("baseBranch")
-		if got := baseBranchField.String(); got != "az/az-root" {
-			t.Fatalf("diff base branch = %q, want %q", got, "az/az-root")
+		if got := baseBranchField.String(); got != "az/az-parent" {
+			t.Fatalf("diff base branch = %q, want %q", got, "az/az-parent")
 		}
 	})
 
-	t.Run("open diff falls back to configured base branch when ancestors are done", func(t *testing.T) {
+	t.Run("open diff uses done direct parent branch", func(t *testing.T) {
 		m := newDaemonTestModel(&recordingDaemonTransport{})
 		parentID := naming.IssueID("az-parent")
 		childID := naming.IssueID("az-child")
-		m.config.Git.BaseBranch = "develop"
 		m.tasks = []domain.Task{
 			{
 				ID:     parentID,
@@ -4857,8 +4860,8 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 			t.Fatalf("overlay type = %T, want *diff.DiffViewer", updatedModel.overlayStack.Current())
 		}
 		baseBranchField := reflect.ValueOf(diffOverlay).Elem().FieldByName("baseBranch")
-		if got := baseBranchField.String(); got != "develop" {
-			t.Fatalf("diff base branch = %q, want %q", got, "develop")
+		if got := baseBranchField.String(); got != "az/az-parent" {
+			t.Fatalf("diff base branch = %q, want %q", got, "az/az-parent")
 		}
 	})
 

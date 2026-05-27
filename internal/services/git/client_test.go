@@ -715,6 +715,29 @@ func TestChangedFiles(t *testing.T) {
 	}
 }
 
+func TestChangedFilesLocalBaseDoesNotFallBackToRemote(t *testing.T) {
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "HEAD" {
+				return "", fmt.Errorf("unknown revision")
+			}
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "origin/main" && args[2] == "HEAD" {
+				return "", fmt.Errorf("should not use remote base branch")
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	_, err := client.ChangedFilesLocalBase(context.Background(), "/fake/worktree", "main")
+	if err == nil {
+		t.Fatal("ChangedFilesLocalBase() expected error")
+	}
+	if strings.Contains(err.Error(), "should not use remote base branch") {
+		t.Fatalf("ChangedFilesLocalBase() attempted remote fallback: %v", err)
+	}
+}
+
 func TestParseConflicts(t *testing.T) {
 	tests := []struct {
 		name      string

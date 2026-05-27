@@ -37,6 +37,13 @@ func (f *fakeDiffClient) ChangedFiles(context.Context, string, string) ([]gitser
 	return append([]gitservice.ChangedFile(nil), f.changedFiles...), nil
 }
 
+func (f *fakeDiffClient) ChangedFilesLocalBase(context.Context, string, string) ([]gitservice.ChangedFile, error) {
+	if f.changedErr != nil {
+		return nil, f.changedErr
+	}
+	return append([]gitservice.ChangedFile(nil), f.changedFiles...), nil
+}
+
 func (f *fakeDiffClient) MergeBase(context.Context, string, string) (string, error) {
 	if f.mergeBaseErr != nil {
 		return "", f.mergeBaseErr
@@ -105,6 +112,9 @@ func TestDiffViewerEnterOpensSelectedFilePopup(t *testing.T) {
 	}
 	if !strings.Contains(gotCommand, "BASE_BRANCH='main'; BASE_REF=\"$BASE_BRANCH\";") {
 		t.Fatalf("popup command=%q", gotCommand)
+	}
+	if strings.Contains(gotCommand, "origin/$BASE_BRANCH") {
+		t.Fatalf("popup command should not fall back to a remote branch: %q", gotCommand)
 	}
 	if !strings.Contains(gotCommand, "git diff \"$BASE_REF\"...HEAD -- 'internal/tui/model.go'") {
 		t.Fatalf("popup command=%q", gotCommand)
