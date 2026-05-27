@@ -352,6 +352,58 @@ func (c *Client) CurrentBranch(ctx context.Context, worktree string) (string, er
 	return branch, nil
 }
 
+// WorktreePathForBranch returns the path of the git worktree currently attached to branch.
+func (c *Client) WorktreePathForBranch(ctx context.Context, branch string) (string, bool, error) {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return "", false, fmt.Errorf("branch is empty")
+	}
+
+	output, err := c.runner.Run(ctx, "worktree", "list", "--porcelain")
+	if err != nil {
+		return "", false, fmt.Errorf("failed to list worktrees: %w", err)
+	}
+
+	lines := strings.Split(output, "\n")
+	var currentPath string
+	var currentBranch string
+	flush := func() (string, bool) {
+		if currentPath == "" || currentBranch == "" {
+			return "", false
+		}
+		if currentBranch == branch {
+			return currentPath, true
+		}
+		return "", false
+	}
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			if path, ok := flush(); ok {
+				return path, true, nil
+			}
+			currentPath = strings.TrimPrefix(line, "worktree ")
+			currentBranch = ""
+		case strings.HasPrefix(line, "branch "):
+			branchRef := strings.TrimPrefix(line, "branch ")
+			currentBranch = strings.TrimPrefix(branchRef, "refs/heads/")
+		case line == "":
+			if path, ok := flush(); ok {
+				return path, true, nil
+			}
+			currentPath = ""
+			currentBranch = ""
+		}
+	}
+	if path, ok := flush(); ok {
+		return path, true, nil
+	}
+
+	return "", false, nil
+}
+
 // Checkout checks out the specified branch.
 func (c *Client) Checkout(ctx context.Context, worktree, branch string) error {
 	c.logger.Info("checking out branch", "worktree", worktree, "branch", branch)

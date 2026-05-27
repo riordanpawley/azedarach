@@ -113,3 +113,8 @@ If merge guidance is blocked, recover with:
 2. `az mail list --parent <parent-issue> --json` to confirm event history.
 3. Ask the worker to publish `worker-complete` once evidence is ready.
 4. Re-run `az orchestrate integrate --issue <issue-id>`.
+
+When `az branch merge <issue-id>` targets a branch that is already checked out
+in another Git worktree, the merge runs in that attached worktree. This avoids
+Git's single-checkout guard for branches while keeping the target branch as the
+merge authority.

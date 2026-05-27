@@ -12,17 +12,18 @@ import (
 )
 
 type fakeGitService struct {
-	fetchFn          func(context.Context, string, string, string) error
-	mergeFn          func(context.Context, string, string, string) (*git.MergeResult, error)
-	checkoutFn       func(context.Context, string, string, string) error
-	abortMergeFn     func(context.Context, string, string) error
-	diffStatFn       func(context.Context, string, string, string) (string, error)
-	statusFn         func(context.Context, string, string) (*git.GitStatus, error)
-	refreshStatusFn  func(context.Context, string, string) (*git.GitStatus, error)
-	runtimeSignalsFn func(context.Context, string, []GitRuntimeSignalsTarget, string, bool, string) ([]GitRuntimeSignalsResult, int, error)
-	preflightFn      func(context.Context, string, GitMergePreflightRequest) (*GitMergePreflightResult, error)
-	discardFn        func(context.Context, string, string) (*GitDiscardChangesResult, error)
-	checkpointFn     func(context.Context, string, GitCheckpointRequest) (*GitCheckpointResult, error)
+	fetchFn             func(context.Context, string, string, string) error
+	mergeFn             func(context.Context, string, string, string) (*git.MergeResult, error)
+	checkoutFn          func(context.Context, string, string, string) error
+	abortMergeFn        func(context.Context, string, string) error
+	diffStatFn          func(context.Context, string, string, string) (string, error)
+	statusFn            func(context.Context, string, string) (*git.GitStatus, error)
+	refreshStatusFn     func(context.Context, string, string) (*git.GitStatus, error)
+	runtimeSignalsFn    func(context.Context, string, []GitRuntimeSignalsTarget, string, bool, string) ([]GitRuntimeSignalsResult, int, error)
+	worktreeForBranchFn func(context.Context, string, string) (string, bool, error)
+	preflightFn         func(context.Context, string, GitMergePreflightRequest) (*GitMergePreflightResult, error)
+	discardFn           func(context.Context, string, string) (*GitDiscardChangesResult, error)
+	checkpointFn        func(context.Context, string, GitCheckpointRequest) (*GitCheckpointResult, error)
 }
 
 type recordingGitLongRunningExecutor struct {
@@ -88,6 +89,13 @@ func (f *fakeGitService) RuntimeSignals(ctx context.Context, projectID string, t
 		return f.runtimeSignalsFn(ctx, projectID, targets, baseBranch, compareRemote, remote)
 	}
 	return nil, 0, nil
+}
+
+func (f *fakeGitService) WorktreePathForBranch(ctx context.Context, projectID, branch string) (string, bool, error) {
+	if f.worktreeForBranchFn != nil {
+		return f.worktreeForBranchFn(ctx, projectID, branch)
+	}
+	return "", false, nil
 }
 
 func (f *fakeGitService) MergePreflight(ctx context.Context, projectID string, req GitMergePreflightRequest) (*GitMergePreflightResult, error) {
@@ -176,6 +184,12 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 			}
 			return &git.GitStatus{HasChanges: true, Modified: []string{"README.md"}}, nil
 		},
+		worktreeForBranchFn: func(_ context.Context, _ string, branch string) (string, bool, error) {
+			if branch != "main" {
+				t.Fatalf("worktree for branch args = %q", branch)
+			}
+			return "/tmp/main", true, nil
+		},
 		preflightFn: func(_ context.Context, _ string, req GitMergePreflightRequest) (*GitMergePreflightResult, error) {
 			if req.SourceWorktree != "/tmp/az-1" || req.TargetWorktree != "/tmp/main" {
 				t.Fatalf("preflight worktrees = %+v", req)
@@ -253,6 +267,11 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 			wantCmd: CommandGitMergePreflight,
 		},
 		{
+			name:    "worktree for branch",
+			req:     gitRequest(t, CommandGitWorktreeForBranch, gitCommandBody{Branch: "main"}),
+			wantCmd: CommandGitWorktreeForBranch,
+		},
+		{
 			name:    "discard changes",
 			req:     gitRequest(t, CommandGitDiscardChanges, GitDiscardChangesRequest{Worktree: "/tmp/az-1"}),
 			wantCmd: CommandGitDiscardChanges,
@@ -326,6 +345,14 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 					t.Fatalf("unmarshal response: %v", err)
 				}
 				if body.SourceWorktree != "/tmp/az-1" || body.TargetWorktree != "/tmp/main" || !body.Clean {
+					t.Fatalf("response body = %+v", body)
+				}
+			case CommandGitWorktreeForBranch:
+				var body gitWorktreeForBranchResultBody
+				if err := json.Unmarshal(resp.Body, &body); err != nil {
+					t.Fatalf("unmarshal response: %v", err)
+				}
+				if body.Branch != "main" || body.Worktree != "/tmp/main" || !body.Found {
 					t.Fatalf("response body = %+v", body)
 				}
 			case CommandGitDiscardChanges:

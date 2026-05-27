@@ -126,6 +126,50 @@ func TestGitFetchCheckoutAndMergeCommandsRouteThroughDaemon(t *testing.T) {
 		}
 	})
 
+	t.Run("worktree for branch", func(t *testing.T) {
+		transport := &gitRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != CommandGitWorktreeForBranch {
+					t.Fatalf("command = %q, want %q", req.Command, CommandGitWorktreeForBranch)
+				}
+				var body GitCommandRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal request: %v", err)
+				}
+				if body.Branch != "main" {
+					t.Fatalf("request body = %+v", body)
+				}
+				respBody, err := json.Marshal(GitWorktreeForBranchResponse{
+					Branch:   "main",
+					Worktree: "/tmp/main",
+					Found:    true,
+				})
+				if err != nil {
+					t.Fatalf("marshal response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		resp, err := client.GitWorktreeForBranch(context.Background(), "main")
+		if err != nil {
+			t.Fatalf("GitWorktreeForBranch error: %v", err)
+		}
+		if resp.Branch != "main" || resp.Worktree != "/tmp/main" || !resp.Found {
+			t.Fatalf("response = %+v", resp)
+		}
+		if transport.lastReq.Meta.ProjectID != wantProjectID {
+			t.Fatalf("project_id = %q, want %q", transport.lastReq.Meta.ProjectID, wantProjectID)
+		}
+	})
+
 	t.Run("merge", func(t *testing.T) {
 		transport := &gitRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
