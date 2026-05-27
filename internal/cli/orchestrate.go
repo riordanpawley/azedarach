@@ -60,6 +60,7 @@ type OrchestratePromptOptions struct {
 type OrchestrateIntegrateOptions struct {
 	Project string
 	IssueID string
+	Apply   bool
 	JSON    bool
 }
 
@@ -132,12 +133,23 @@ type orchestratePromptResult struct {
 }
 
 type orchestrateIntegrateResult struct {
-	IssueID      string   `json:"issue_id"`
-	WorktreePath string   `json:"worktree_path,omitempty"`
-	Branch       string   `json:"branch,omitempty"`
-	MergeReady   bool     `json:"merge_ready"`
-	Reasons      []string `json:"reasons,omitempty"`
-	Commands     []string `json:"commands"`
+	IssueID      string                     `json:"issue_id"`
+	WorktreePath string                     `json:"worktree_path,omitempty"`
+	Branch       string                     `json:"branch,omitempty"`
+	MergeReady   bool                       `json:"merge_ready"`
+	Apply        bool                       `json:"apply"`
+	Applied      bool                       `json:"applied"`
+	Reasons      []string                   `json:"reasons,omitempty"`
+	Commands     []string                   `json:"commands"`
+	Steps        []orchestrateIntegrateStep `json:"steps,omitempty"`
+	Recovery     []string                   `json:"recovery,omitempty"`
+}
+
+type orchestrateIntegrateStep struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Output string `json:"output,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 type orchestrateCloseSessionResult struct {
@@ -282,6 +294,7 @@ func ParseOrchestrateIntegrateArgs(args []string) (OrchestrateIntegrateOptions, 
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&opts.IssueID, "issue", "", "worker issue id to integrate")
+	fs.BoolVar(&opts.Apply, "apply", false, "apply integration instead of printing advisory guidance")
 	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
 	if err := fs.Parse(args); err != nil {
 		return OrchestrateIntegrateOptions{}, err
@@ -741,12 +754,30 @@ func OrchestrateIntegrateCommand(deps *Dependencies, opts OrchestrateIntegrateOp
 	result := orchestrateIntegrateResult{
 		IssueID:    opts.IssueID,
 		MergeReady: mergeReady,
+		Apply:      opts.Apply,
 		Reasons:    reasons,
 		Commands:   commands,
 	}
 	if found {
 		result.WorktreePath = wt.Path
 		result.Branch = wt.Branch
+	}
+	if opts.Apply {
+		applyErr := applyOrchestrateIntegration(deps, opts.IssueID, mergeReady, &result)
+		if opts.JSON {
+			if err := printJSON(result); err != nil {
+				return err
+			}
+			if applyErr != nil {
+				return applyErr
+			}
+			return nil
+		}
+		printOrchestrateIntegrateApplyResult(result)
+		if applyErr != nil {
+			return applyErr
+		}
+		return nil
 	}
 	if opts.JSON {
 		return printJSON(result)
@@ -769,6 +800,105 @@ func OrchestrateIntegrateCommand(deps *Dependencies, opts OrchestrateIntegrateOp
 		fmt.Printf("- %s\n", command)
 	}
 	return nil
+}
+
+func applyOrchestrateIntegration(deps *Dependencies, issueID string, mergeReady bool, result *orchestrateIntegrateResult) error {
+	if !mergeReady {
+		result.Steps = append(result.Steps, orchestrateIntegrateStep{
+			Name:   "completion_evidence",
+			Status: "failed",
+			Error:  "missing completion evidence",
+		})
+		result.Recovery = orchestrateIntegrationRecovery(issueID, "missing_completion_evidence")
+		return fmt.Errorf("cannot apply integration for %s: missing completion evidence", issueID)
+	}
+	result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "completion_evidence", Status: "success"})
+
+	mergeResult, err := runBranchMergeToBase(deps, BranchMergeToBaseOptions{IssueID: issueID})
+	if err != nil {
+		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "merge", Status: "failed", Error: err.Error()})
+		result.Recovery = orchestrateIntegrationRecovery(issueID, "merge_failed")
+		return fmt.Errorf("apply integration merge for %s: %w", issueID, err)
+	}
+	result.Steps = append(result.Steps, orchestrateIntegrateStep{
+		Name:   "merge",
+		Status: "success",
+		Output: fmt.Sprintf("Merged %s into %s (%s)", mergeResult.SourceBranch, mergeResult.BaseBranch, mergeResult.IssueID),
+	})
+	result.Applied = true
+
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	var failures []string
+	if _, err := deps.DaemonClient.StopSession(cleanupCtx, issueID); err != nil {
+		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "stop_session", Status: "failed", Error: err.Error()})
+		failures = append(failures, fmt.Sprintf("stop session: %v", err))
+	} else {
+		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "stop_session", Status: "success"})
+	}
+
+	if err := deps.DaemonClient.UpdateTaskStatus(cleanupCtx, issueID, domain.StatusDone); err != nil {
+		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "close_issue", Status: "failed", Error: err.Error()})
+		failures = append(failures, fmt.Sprintf("close issue: %v", err))
+	} else {
+		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "close_issue", Status: "success"})
+	}
+
+	note := fmt.Sprintf("Integrated by `az orchestrate integrate --issue %s --apply`: merge applied, session stop attempted, issue close attempted.", issueID)
+	if err := deps.DaemonClient.AppendTaskNotes(cleanupCtx, issueID, note); err != nil {
+		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "append_evidence", Status: "failed", Error: err.Error()})
+		failures = append(failures, fmt.Sprintf("append evidence: %v", err))
+	} else {
+		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "append_evidence", Status: "success"})
+	}
+
+	if len(failures) > 0 {
+		result.Recovery = orchestrateIntegrationRecovery(issueID, "post_merge_failed")
+		return fmt.Errorf("integration applied for %s but cleanup had failures: %s", issueID, strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+func printOrchestrateIntegrateApplyResult(result orchestrateIntegrateResult) {
+	fmt.Printf("Integration apply result for %s\n", result.IssueID)
+	for _, step := range result.Steps {
+		if step.Error != "" {
+			fmt.Printf("- %s: %s (%s)\n", step.Name, step.Status, step.Error)
+			continue
+		}
+		if step.Output != "" {
+			fmt.Printf("- %s: %s (%s)\n", step.Name, step.Status, step.Output)
+			continue
+		}
+		fmt.Printf("- %s: %s\n", step.Name, step.Status)
+	}
+	if len(result.Recovery) > 0 {
+		fmt.Println("Recovery:")
+		for _, item := range result.Recovery {
+			fmt.Printf("- %s\n", item)
+		}
+	}
+}
+
+func orchestrateIntegrationRecovery(issueID, reason string) []string {
+	switch reason {
+	case "missing_completion_evidence":
+		return []string{
+			fmt.Sprintf("review worker output and close the issue or send a worker-complete mailbox event for %s", issueID),
+			fmt.Sprintf("retry: az orchestrate integrate --issue %s --apply", issueID),
+		}
+	case "merge_failed":
+		return []string{
+			fmt.Sprintf("inspect merge failure and retry existing merge path: az branch merge %s", issueID),
+			fmt.Sprintf("after merge succeeds, retry cleanup: az orchestrate integrate --issue %s --apply", issueID),
+		}
+	default:
+		return []string{
+			fmt.Sprintf("run cleanup steps manually: az orchestrate close-session --issue %s", issueID),
+			fmt.Sprintf("close the worker issue if integrated: az issue close %s", issueID),
+			fmt.Sprintf("append evidence notes to %s with the merge and validation summary", issueID),
+		}
+	}
 }
 
 func OrchestrateCloseSessionCommand(deps *Dependencies, opts OrchestrateCloseSessionOptions) error {
