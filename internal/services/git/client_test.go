@@ -153,6 +153,42 @@ DU deleted-by-us.txt`,
 	}
 }
 
+func TestWorktreePathForBranch(t *testing.T) {
+	client := NewClient(&mockRunner{runFunc: func(_ context.Context, args ...string) (string, error) {
+		if strings.Join(args, " ") != "worktree list --porcelain" {
+			t.Fatalf("args = %q, want worktree list --porcelain", strings.Join(args, " "))
+		}
+		return `worktree /tmp/repo
+HEAD abc123
+branch refs/heads/main
+
+worktree /tmp/repo-parent
+HEAD def456
+branch refs/heads/riordan/parent/work
+
+worktree /tmp/repo-child
+HEAD fedcba
+branch refs/heads/riordan/child/work
+`, nil
+	}}, slog.Default())
+
+	path, found, err := client.WorktreePathForBranch(context.Background(), "riordan/parent/work")
+	if err != nil {
+		t.Fatalf("WorktreePathForBranch error: %v", err)
+	}
+	if !found || path != "/tmp/repo-parent" {
+		t.Fatalf("path=%q found=%v, want /tmp/repo-parent true", path, found)
+	}
+
+	path, found, err = client.WorktreePathForBranch(context.Background(), "missing")
+	if err != nil {
+		t.Fatalf("WorktreePathForBranch missing error: %v", err)
+	}
+	if found || path != "" {
+		t.Fatalf("path=%q found=%v, want empty false", path, found)
+	}
+}
+
 func TestMergeSuccess(t *testing.T) {
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {

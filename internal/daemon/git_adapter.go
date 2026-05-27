@@ -97,6 +97,10 @@ func (a *gitServiceAdapter) Checkout(ctx context.Context, projectID, worktree, b
 	return nil
 }
 
+func (a *gitServiceAdapter) WorktreePathForBranch(ctx context.Context, _ string, branch string) (string, bool, error) {
+	return a.client.WorktreePathForBranch(ctx, branch)
+}
+
 func (a *gitServiceAdapter) AbortMerge(ctx context.Context, projectID, worktree string) error {
 	if err := a.client.AbortMerge(ctx, worktree); err != nil {
 		return err

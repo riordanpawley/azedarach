@@ -110,6 +110,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	CommandGitStatus:                      {Command: CommandGitStatus, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
 	CommandGitRuntimeSignals:              {Command: CommandGitRuntimeSignals, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
 	CommandGitMergePreflight:              {Command: CommandGitMergePreflight, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
+	CommandGitWorktreeForBranch:           {Command: CommandGitWorktreeForBranch, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
 	CommandGitDiscardChanges:              {Command: CommandGitDiscardChanges, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
 	CommandGitCheckpoint:                  {Command: CommandGitCheckpoint, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
 	CommandWorktreeList:                   {Command: CommandWorktreeList, DispatchTarget: CommandDispatchWorktree, RequiresProjectID: true},

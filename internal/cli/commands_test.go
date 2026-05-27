@@ -1007,6 +1007,11 @@ func TestBranchMergeToBaseCommandUsesDaemonGitFlow(t *testing.T) {
 					return responseWithJSON(req, map[string]any{
 						"status": gitservice.GitStatus{HasChanges: false},
 					}), nil
+				case daemonclient.CommandGitWorktreeForBranch:
+					return responseWithJSON(req, daemonclient.GitWorktreeForBranchResponse{
+						Branch: "trunk",
+						Found:  false,
+					}), nil
 				case daemonclient.CommandGitFetch:
 					return responseWithJSON(req, daemonclient.GitCommandResponse{
 						Worktree: baseWorktree,
@@ -1050,6 +1055,7 @@ func TestBranchMergeToBaseCommandUsesDaemonGitFlow(t *testing.T) {
 		daemonclient.CommandWorktreeList,
 		daemonclient.CommandTaskList,
 		daemonclient.CommandWorktreeList,
+		daemonclient.CommandGitWorktreeForBranch,
 		daemonclient.CommandGitStatus,
 		daemonclient.CommandGitStatus,
 		daemonclient.CommandGitFetch,
@@ -1065,6 +1071,116 @@ func TestBranchMergeToBaseCommandUsesDaemonGitFlow(t *testing.T) {
 	}
 	if !reflect.DeepEqual(filtered, want) {
 		t.Fatalf("commands = %#v, want %#v", filtered, want)
+	}
+}
+
+func TestBranchMergeToBaseCommandUsesAttachedTargetBranchWorktree(t *testing.T) {
+	commands := make([]string, 0, 8)
+	baseWorktree := t.TempDir()
+	targetWorktree := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Git.BaseBranch = "trunk"
+	deps := &Dependencies{
+		Config: cfg,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return responseWithJSON(req, protocol.TaskListSnapshotPayload{
+						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+						ProtocolVersion:  protocol.CurrentVersion,
+						SnapshotRevision: 1,
+						ProjectID:        "proj",
+						LastCheckedAt:    time.Now().UTC(),
+						Freshness:        protocol.TaskListFreshnessFresh,
+						Tasks:            []domain.Task{{ID: "az-123", Status: domain.StatusOpen}},
+					}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"worktrees": []map[string]any{
+							{
+								"path":     "/tmp/azedarach-az-123",
+								"branch":   "riordan/az-123/some-change",
+								"issue_id": "az-123",
+							},
+						},
+					}), nil
+				case daemonclient.CommandGitWorktreeForBranch:
+					var body daemonclient.GitCommandRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal git worktree branch body: %v", err)
+					}
+					if body.Branch != "trunk" {
+						t.Fatalf("branch lookup = %q, want trunk", body.Branch)
+					}
+					return responseWithJSON(req, daemonclient.GitWorktreeForBranchResponse{
+						Branch:   "trunk",
+						Worktree: targetWorktree,
+						Found:    true,
+					}), nil
+				case daemonclient.CommandGitStatus:
+					var body daemonclient.GitCommandRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal git status body: %v", err)
+					}
+					if body.Worktree != "/tmp/azedarach-az-123" && body.Worktree != targetWorktree {
+						t.Fatalf("git status worktree = %q", body.Worktree)
+					}
+					return responseWithJSON(req, map[string]any{
+						"status": gitservice.GitStatus{HasChanges: false},
+					}), nil
+				case daemonclient.CommandGitFetch:
+					var body daemonclient.GitCommandRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal git fetch body: %v", err)
+					}
+					if body.Worktree != targetWorktree {
+						t.Fatalf("fetch worktree = %q, want %q", body.Worktree, targetWorktree)
+					}
+					return responseWithJSON(req, daemonclient.GitCommandResponse{
+						Worktree: targetWorktree,
+						Remote:   "origin",
+					}), nil
+				case daemonclient.CommandGitMerge:
+					var body daemonclient.GitCommandRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal git merge body: %v", err)
+					}
+					if body.Worktree != targetWorktree || body.Branch != "riordan/az-123/some-change" {
+						t.Fatalf("merge body = %+v", body)
+					}
+					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
+						Worktree: targetWorktree,
+						Branch:   "riordan/az-123/some-change",
+						Result: gitservice.MergeResult{
+							Success: true,
+							Message: "merge complete",
+						},
+					}), nil
+				case daemonclient.CommandGitCheckout:
+					t.Fatalf("checkout should not run when target branch is already attached to %s", targetWorktree)
+					return protocol.ResponseEnvelope{}, nil
+				default:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   baseWorktree,
+	}
+
+	output := captureStdout(t, func() error {
+		return BranchMergeToBaseCommand(deps, "az-123")
+	})
+	if !strings.Contains(output, "Merged riordan/az-123/some-change into trunk (az-123)") {
+		t.Fatalf("output = %q, want final summary", output)
+	}
+	for _, cmd := range commands {
+		if cmd == daemonclient.CommandGitCheckout {
+			t.Fatalf("checkout command should not be issued, commands=%v", commands)
+		}
 	}
 }
 
@@ -1292,7 +1408,7 @@ func TestBranchMergeToBaseCommandUsesNearestNonClosedAncestorBranch(t *testing.T
 	baseWorktree := t.TempDir()
 	cfg := config.DefaultConfig()
 	cfg.Git.BaseBranch = "trunk"
-	var checkedOut string
+	var mergedIn string
 	deps := &Dependencies{
 		Config: cfg,
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
@@ -1324,17 +1440,25 @@ func TestBranchMergeToBaseCommandUsesNearestNonClosedAncestorBranch(t *testing.T
 						"status": gitservice.GitStatus{HasChanges: false},
 					}), nil
 				case daemonclient.CommandGitFetch:
-					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: baseWorktree, Remote: "origin"}), nil
-				case daemonclient.CommandGitCheckout:
 					var body daemonclient.GitCommandRequest
 					if err := json.Unmarshal(req.Body, &body); err != nil {
-						t.Fatalf("unmarshal git checkout body: %v", err)
+						t.Fatalf("unmarshal git fetch body: %v", err)
 					}
-					checkedOut = body.Branch
-					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: baseWorktree, Branch: body.Branch}), nil
+					if body.Worktree != "/tmp/az-parent" {
+						t.Fatalf("fetch worktree = %q, want /tmp/az-parent", body.Worktree)
+					}
+					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: "/tmp/az-parent", Remote: "origin"}), nil
+				case daemonclient.CommandGitCheckout:
+					t.Fatalf("checkout should not run when parent branch is already attached")
+					return protocol.ResponseEnvelope{}, nil
 				case daemonclient.CommandGitMerge:
+					var body daemonclient.GitCommandRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal git merge body: %v", err)
+					}
+					mergedIn = body.Worktree
 					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
-						Worktree: baseWorktree,
+						Worktree: body.Worktree,
 						Branch:   "riordan/az-child/work",
 						Result:   gitservice.MergeResult{Success: true},
 					}), nil
@@ -1351,8 +1475,8 @@ func TestBranchMergeToBaseCommandUsesNearestNonClosedAncestorBranch(t *testing.T
 	if err := BranchMergeToBaseCommand(deps, "az-child"); err != nil {
 		t.Fatalf("BranchMergeToBaseCommand error = %v", err)
 	}
-	if checkedOut != "riordan/az-parent/work" {
-		t.Fatalf("checkout branch = %q, want parent branch", checkedOut)
+	if mergedIn != "/tmp/az-parent" {
+		t.Fatalf("merge worktree = %q, want /tmp/az-parent", mergedIn)
 	}
 }
 
@@ -1623,6 +1747,11 @@ func TestBranchAgentMergeCommandLaunchesAgentWhenPreflightConflicts(t *testing.T
 						Freshness:        protocol.TaskListFreshnessFresh,
 						Tasks:            []domain.Task{{ID: "az-123", Status: domain.StatusOpen}},
 					}), nil
+				case daemonclient.CommandGitWorktreeForBranch:
+					return responseWithJSON(req, daemonclient.GitWorktreeForBranchResponse{
+						Branch: "trunk",
+						Found:  false,
+					}), nil
 				case daemonclient.CommandGitMergePreflight:
 					var body daemonclient.GitMergePreflightRequest
 					if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -1676,7 +1805,7 @@ func TestBranchAgentMergeCommandLaunchesAgentWhenPreflightConflicts(t *testing.T
 	if !strings.Contains(resolveBody.Prompt, "merge trunk into riordan/az-123/some-change") {
 		t.Fatalf("prompt = %q, want base merge instruction", resolveBody.Prompt)
 	}
-	want := []string{daemonclient.CommandWorktreeList, daemonclient.CommandTaskList, daemonclient.CommandWorktreeList, daemonclient.CommandGitMergePreflight, daemonclient.CommandSessionResolveConflict}
+	want := []string{daemonclient.CommandWorktreeList, daemonclient.CommandTaskList, daemonclient.CommandWorktreeList, daemonclient.CommandGitWorktreeForBranch, daemonclient.CommandGitMergePreflight, daemonclient.CommandSessionResolveConflict}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
 	}

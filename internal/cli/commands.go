@@ -876,7 +876,7 @@ func worktreePathForIssue(worktrees []daemonclient.Worktree, issueID string) str
 	return ""
 }
 
-// BranchMergeToBaseCommand merges one issue worktree branch into the base branch using daemon git commands.
+// BranchMergeToBaseCommand merges one issue worktree branch into its resolved target branch using daemon git commands.
 func BranchMergeToBaseCommand(deps *Dependencies, issueID string) error {
 	return BranchMergeToBaseCommandWithOptions(deps, BranchMergeToBaseOptions{
 		IssueID:           issueID,
@@ -901,6 +901,13 @@ func BranchMergeToBaseCommandWithOptions(deps *Dependencies, opts BranchMergeToB
 	}
 	baseBranch := target.Branch
 	baseWorktree := strings.TrimSpace(target.WorktreePath)
+	branchAttached := target.BranchAttached
+	if baseWorktree == "" {
+		if attached, err := deps.DaemonClient.GitWorktreeForBranch(ctx, baseBranch); err == nil && attached.Found && strings.TrimSpace(attached.Worktree) != "" {
+			baseWorktree = strings.TrimSpace(attached.Worktree)
+			branchAttached = true
+		}
+	}
 	if baseWorktree == "" {
 		baseWorktree = strings.TrimSpace(deps.RepoDir)
 		if baseWorktree == "" {
@@ -911,6 +918,7 @@ func BranchMergeToBaseCommandWithOptions(deps *Dependencies, opts BranchMergeToB
 		"issue_id", source.IssueID,
 		"selected_target", target.TargetID,
 		"selected_branch", target.Branch,
+		"branch_attached", branchAttached,
 		"decision_reason", decision.Reason,
 		"ancestor_chain", strings.Join(decision.AncestorChain, " -> "),
 		"allow_base_for_child", opts.AllowBaseForChild,
@@ -920,7 +928,7 @@ func BranchMergeToBaseCommandWithOptions(deps *Dependencies, opts BranchMergeToB
 		return err
 	}
 
-	deps.Logger.Info("merging issue branch into base branch",
+	deps.Logger.Info("merging issue branch into target branch",
 		"issue_id", source.IssueID,
 		"source_worktree", source.Path,
 		"source_branch", source.Branch,
@@ -931,8 +939,10 @@ func BranchMergeToBaseCommandWithOptions(deps *Dependencies, opts BranchMergeToB
 	if _, err := deps.DaemonClient.GitFetch(ctx, baseWorktree, "origin"); err != nil {
 		return wrapPendingGitOperation("fetch", err)
 	}
-	if _, err := deps.DaemonClient.GitCheckout(ctx, baseWorktree, baseBranch); err != nil {
-		return wrapPendingGitOperation("checkout", err)
+	if !branchAttached {
+		if _, err := deps.DaemonClient.GitCheckout(ctx, baseWorktree, baseBranch); err != nil {
+			return wrapPendingGitOperation("checkout", err)
+		}
 	}
 	result, err := deps.DaemonClient.GitMerge(ctx, baseWorktree, source.Branch)
 	if err != nil {
@@ -951,9 +961,10 @@ func BranchMergeToBaseCommandWithOptions(deps *Dependencies, opts BranchMergeToB
 }
 
 type mergeBaseTarget struct {
-	TargetID     string
-	Branch       string
-	WorktreePath string
+	TargetID       string
+	Branch         string
+	WorktreePath   string
+	BranchAttached bool
 }
 
 type mergeTargetDecision struct {
@@ -1012,9 +1023,10 @@ func resolveMergeToBaseTarget(ctx context.Context, deps *Dependencies, issueID s
 			if branch := branchForIssueWorktree(worktrees, parentID); branch != "" {
 				decision.Reason = "selected nearest non-closed ancestor branch"
 				return mergeBaseTarget{
-					TargetID:     parentID,
-					Branch:       branch,
-					WorktreePath: worktreePathForIssue(worktrees, parentID),
+					TargetID:       parentID,
+					Branch:         branch,
+					WorktreePath:   worktreePathForIssue(worktrees, parentID),
+					BranchAttached: true,
 				}, decision, nil
 			}
 			return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("nearest non-closed ancestor %s has no active worktree branch; attach/start that ancestor before merging %s", parentID, issueID)
@@ -1064,6 +1076,8 @@ func BranchAgentMergeCommand(deps *Dependencies, opts BranchAgentMergeOptions) e
 		targetRef = baseTarget.Branch
 		if strings.TrimSpace(baseTarget.WorktreePath) != "" {
 			targetWorktree = baseTarget.WorktreePath
+		} else if attached, err := deps.DaemonClient.GitWorktreeForBranch(ctx, targetRef); err == nil && attached.Found && strings.TrimSpace(attached.Worktree) != "" {
+			targetWorktree = strings.TrimSpace(attached.Worktree)
 		}
 	} else {
 		target, err := resolveWorktreeForIssue(ctx, deps, targetID)
@@ -1229,7 +1243,7 @@ func checkMergeToBasePreflight(ctx context.Context, deps *Dependencies, source d
 	}
 	targetStatus, err := deps.DaemonClient.GitStatus(ctx, targetWorktree)
 	if err != nil {
-		return fmt.Errorf("read target status for base branch: %w", err)
+		return fmt.Errorf("read target branch status: %w", err)
 	}
 	sourceDirtyFiles := dirtyFilesFromGitStatus(sourceStatus)
 	targetDirtyFiles := dirtyFilesFromGitStatus(targetStatus)
@@ -1239,7 +1253,7 @@ func checkMergeToBasePreflight(ctx context.Context, deps *Dependencies, source d
 		reasons = append(reasons, fmt.Sprintf("source %s is not clean: %s", source.IssueID, summarizeGitStatusCounts(sourceStatus)))
 	}
 	if len(targetDirtyFiles) > 0 {
-		reasons = append(reasons, fmt.Sprintf("target base branch is not clean: %s", summarizeGitStatusCounts(targetStatus)))
+		reasons = append(reasons, fmt.Sprintf("target branch is not clean: %s", summarizeGitStatusCounts(targetStatus)))
 	}
 	if len(reasons) == 0 {
 		return nil

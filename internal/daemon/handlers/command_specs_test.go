@@ -177,6 +177,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		CommandGitStatus,
 		CommandGitRuntimeSignals,
 		CommandGitMergePreflight,
+		CommandGitWorktreeForBranch,
 		CommandGitDiscardChanges,
 		CommandGitCheckpoint,
 		CommandWorktreeList,

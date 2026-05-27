@@ -9,17 +9,18 @@ import (
 )
 
 const (
-	CommandGitFetch          = "git.fetch"
-	CommandGitMerge          = "git.merge"
-	CommandGitCheckout       = "git.checkout"
-	CommandGitAbortMerge     = "git.abort_merge"
-	CommandGitDiffStat       = "git.diff_stat"
-	CommandGitStatus         = "git.status"
-	CommandGitRuntimeSignals = "git.runtime_signals"
-	CommandGitMergePreflight = "git.merge_preflight"
-	CommandGitDiscard        = "git.discard_changes"
-	CommandGitCheckpoint     = "git.checkpoint"
-	DefaultCheckpointMessage = git.DefaultCheckpointMessage
+	CommandGitFetch             = "git.fetch"
+	CommandGitMerge             = "git.merge"
+	CommandGitCheckout          = "git.checkout"
+	CommandGitAbortMerge        = "git.abort_merge"
+	CommandGitDiffStat          = "git.diff_stat"
+	CommandGitStatus            = "git.status"
+	CommandGitRuntimeSignals    = "git.runtime_signals"
+	CommandGitMergePreflight    = "git.merge_preflight"
+	CommandGitWorktreeForBranch = "git.worktree_for_branch"
+	CommandGitDiscard           = "git.discard_changes"
+	CommandGitCheckpoint        = "git.checkpoint"
+	DefaultCheckpointMessage    = git.DefaultCheckpointMessage
 )
 
 type Worktree = git.Worktree
@@ -43,6 +44,13 @@ type GitCommandResponse struct {
 	Worktree string `json:"worktree"`
 	Remote   string `json:"remote,omitempty"`
 	Branch   string `json:"branch,omitempty"`
+}
+
+// GitWorktreeForBranchResponse captures the daemon response for branch attachment lookup.
+type GitWorktreeForBranchResponse struct {
+	Branch   string `json:"branch"`
+	Worktree string `json:"worktree,omitempty"`
+	Found    bool   `json:"found"`
 }
 
 // GitMergeCommandResponse captures the daemon response body for merge commands.
@@ -171,6 +179,17 @@ func (c *Client) GitCheckout(ctx context.Context, worktree, branch string) (GitC
 	var resp GitCommandResponse
 	if err := decodeLongRunningJSON(CommandGitCheckout, raw.Body, &resp); err != nil {
 		return GitCommandResponse{}, err
+	}
+	return resp, nil
+}
+
+// GitWorktreeForBranch asks the daemon whether a branch is already attached to a git worktree.
+func (c *Client) GitWorktreeForBranch(ctx context.Context, branch string) (GitWorktreeForBranchResponse, error) {
+	var resp GitWorktreeForBranchResponse
+	if err := c.commandJSON(ctx, CommandGitWorktreeForBranch, GitCommandRequest{
+		Branch: branch,
+	}, &resp); err != nil {
+		return GitWorktreeForBranchResponse{}, err
 	}
 	return resp, nil
 }

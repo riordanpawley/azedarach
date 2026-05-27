@@ -13,16 +13,17 @@ import (
 )
 
 const (
-	CommandGitFetch          = "git.fetch"
-	CommandGitMerge          = "git.merge"
-	CommandGitCheckout       = "git.checkout"
-	CommandGitAbortMerge     = "git.abort_merge"
-	CommandGitDiffStat       = "git.diff_stat"
-	CommandGitStatus         = "git.status"
-	CommandGitRuntimeSignals = "git.runtime_signals"
-	CommandGitMergePreflight = "git.merge_preflight"
-	CommandGitDiscardChanges = "git.discard_changes"
-	CommandGitCheckpoint     = "git.checkpoint"
+	CommandGitFetch             = "git.fetch"
+	CommandGitMerge             = "git.merge"
+	CommandGitCheckout          = "git.checkout"
+	CommandGitAbortMerge        = "git.abort_merge"
+	CommandGitDiffStat          = "git.diff_stat"
+	CommandGitStatus            = "git.status"
+	CommandGitRuntimeSignals    = "git.runtime_signals"
+	CommandGitMergePreflight    = "git.merge_preflight"
+	CommandGitWorktreeForBranch = "git.worktree_for_branch"
+	CommandGitDiscardChanges    = "git.discard_changes"
+	CommandGitCheckpoint        = "git.checkpoint"
 )
 
 // GitService captures the daemon-owned git operations needed by client workflows.
@@ -34,6 +35,7 @@ type GitService interface {
 	DiffStat(ctx context.Context, projectID, worktree, baseBranch string) (string, error)
 	Status(ctx context.Context, projectID, worktree string) (*git.GitStatus, error)
 	RuntimeSignals(ctx context.Context, projectID string, targets []GitRuntimeSignalsTarget, baseBranch string, compareRemote bool, remote string) ([]GitRuntimeSignalsResult, int, error)
+	WorktreePathForBranch(ctx context.Context, projectID, branch string) (string, bool, error)
 }
 
 type GitMergePreflightService interface {
@@ -155,6 +157,12 @@ type gitActionResultBody struct {
 	Branch   string `json:"branch,omitempty"`
 }
 
+type gitWorktreeForBranchResultBody struct {
+	Branch   string `json:"branch"`
+	Worktree string `json:"worktree,omitempty"`
+	Found    bool   `json:"found"`
+}
+
 type gitOutputResultBody struct {
 	Worktree string `json:"worktree"`
 	Output   string `json:"output"`
@@ -241,6 +249,12 @@ func (h *GitHandler) HandleDirect(ctx context.Context, req protocol.RequestEnvel
 		return h.handleRuntimeSignals(ctx, resp, cmd)
 	case CommandGitMergePreflight:
 		return h.handleMergePreflight(ctx, resp, req)
+	case CommandGitWorktreeForBranch:
+		cmd, ok := decodeGitCommandBody(&resp, req)
+		if !ok {
+			return resp
+		}
+		return h.handleWorktreeForBranch(ctx, resp, cmd)
 	case CommandGitDiscardChanges:
 		return h.handleDiscardChanges(ctx, resp, req)
 	case CommandGitCheckpoint:
@@ -262,6 +276,42 @@ func isGitLongRunningCommand(command string) bool {
 	default:
 		return false
 	}
+}
+
+func (h *GitHandler) handleWorktreeForBranch(ctx context.Context, resp protocol.ResponseEnvelope, cmd gitCommandBody) protocol.ResponseEnvelope {
+	cmd.Branch = strings.TrimSpace(cmd.Branch)
+	if cmd.Branch == "" {
+		resp.Error = &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeInvalidRequest,
+			Message:   "missing required fields: branch",
+			Retryable: false,
+		}
+		return resp
+	}
+
+	path, found, err := h.service.WorktreePathForBranch(ctx, cmd.ProjectID, cmd.Branch)
+	if err != nil {
+		resp.Error = mapGitError(err)
+		return resp
+	}
+
+	body, err := json.Marshal(gitWorktreeForBranchResultBody{
+		Branch:   cmd.Branch,
+		Worktree: path,
+		Found:    found,
+	})
+	if err != nil {
+		resp.Error = &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeInternal,
+			Message:   fmt.Sprintf("marshal response body: %v", err),
+			Retryable: false,
+		}
+		return resp
+	}
+
+	resp.OK = true
+	resp.Body = body
+	return resp
 }
 
 func decodeGitCommandBody(resp *protocol.ResponseEnvelope, req protocol.RequestEnvelope) (gitCommandBody, bool) {
