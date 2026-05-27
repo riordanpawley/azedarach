@@ -55,6 +55,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleKey(msg)
 
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
+
 	// Overlay messages
 	case overlay.CloseOverlayMsg:
 		isSearchOverlay := false
@@ -337,7 +340,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.boardRefreshing = true
 		m.issueRefreshSeq++
 		return m, tea.Batch(
-					m.scheduleIssuesRefreshCmd(),
+			m.scheduleIssuesRefreshCmd(),
 			m.gitSyncService.FetchAndCheck(),
 		)
 
