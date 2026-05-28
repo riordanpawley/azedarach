@@ -796,16 +796,24 @@ func resolveSessionStartBaseBranch(ctx context.Context, deps *Dependencies, task
 	if parentID == "" {
 		return baseBranch, nil
 	}
+	return resolveParentWorktreeBaseBranch(ctx, deps, baseBranch, parentID, task.ID.String())
+}
+
+func resolveParentWorktreeBaseBranch(ctx context.Context, deps *Dependencies, baseBranch, parentID, issueIDForError string) (string, error) {
+	parentID = strings.TrimSpace(parentID)
+	if parentID == "" {
+		return baseBranch, nil
+	}
 	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
 	if err != nil {
-		return "", fmt.Errorf("resolve parent worktree branch for %s: %w", task.ID, err)
+		return "", fmt.Errorf("resolve parent worktree branch for %s: %w", issueIDForError, err)
 	}
 	if branch := branchForIssueWorktree(worktrees, parentID); branch != "" {
 		return branch, nil
 	}
 	tasks, err := deps.DaemonClient.ListTasksSnapshot(ctx)
 	if err != nil {
-		return "", fmt.Errorf("resolve ancestor task graph for %s: %w", task.ID, err)
+		return "", fmt.Errorf("resolve ancestor task graph for %s: %w", issueIDForError, err)
 	}
 	tasksByID := make(map[string]domain.Task, len(tasks.Tasks))
 	for _, candidate := range tasks.Tasks {
@@ -956,8 +964,8 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 		return branchMergeToBaseCommandResult{}, wrapPendingGitOperation("fetch", err)
 	}
 	if !branchAttached {
-		
-	if _, err := deps.DaemonClient.GitCheckout(ctx, baseWorktree, baseBranch); err != nil {
+
+		if _, err := deps.DaemonClient.GitCheckout(ctx, baseWorktree, baseBranch); err != nil {
 			return branchMergeToBaseCommandResult{}, wrapPendingGitOperation("checkout", err)
 		}
 	}
