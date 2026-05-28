@@ -7361,7 +7361,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "immediate child work; auto-parents under `AZEDARACH_ISSUE_ID`") {
 		t.Fatalf("prime output missing auto-parent semantics: %q", output)
 	}
-	if !strings.Contains(output, "standalone later work; does not auto-parent") {
+	if !strings.Contains(output, "standalone backlog only; skips auto-parenting and is not a worktree/session control") {
 		t.Fatalf("prime output missing deferred standalone semantics: %q", output)
 	}
 	if !strings.Contains(output, "Do not use `--deferred` for child tasks, blockers, or work required before closing the active issue") {
@@ -7399,6 +7399,12 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "Reserve `--deferred` for work that can land separately later.") {
 		t.Fatalf("prime output missing deferred-purpose clarification: %q", output)
+	}
+	if !strings.Contains(output, "`--deferred` only changes issue bookkeeping: it skips active-issue auto-parenting and defaults priority lower; do not use it to avoid, force, or reason about worktree/session creation.") {
+		t.Fatalf("prime output missing deferred worktree/session clarification: %q", output)
+	}
+	if !strings.Contains(output, "It is not a child-task shortcut and not a way to control worktree/session creation.") {
+		t.Fatalf("prime output missing follow-up deferred worktree/session clarification: %q", output)
 	}
 	if !strings.Contains(output, "Close the issue only when the issue scope and acceptance criteria are fully complete") {
 		t.Fatalf("prime output missing close-only-when-fully-complete guardrail: %q", output)
