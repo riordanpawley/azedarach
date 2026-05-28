@@ -130,6 +130,8 @@ type Daemon struct {
 	worktreeStateRefreshMu        sync.Mutex
 	worktreeStateRefreshing       map[string]bool
 	worktreeStateLastRefresh      map[string]time.Time
+	taskListSnapshotCacheMu       sync.Mutex
+	taskListSnapshotCache         map[string]taskListSnapshotCacheEntry
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -240,6 +242,7 @@ func New(cfg Config) *Daemon {
 		sessionStateLastRefresh:       map[string]time.Time{},
 		worktreeStateRefreshing:       map[string]bool{},
 		worktreeStateLastRefresh:      map[string]time.Time{},
+		taskListSnapshotCache:         map[string]taskListSnapshotCacheEntry{},
 		revision:                      map[string]uint64{},
 		shutdownReqCh:                 make(chan struct{}),
 	}
@@ -1064,12 +1067,14 @@ func (d *Daemon) projectID(meta protocol.Metadata) string {
 
 func (d *Daemon) nextRevision(projectID string) uint64 {
 	d.revMu.Lock()
-	defer d.revMu.Unlock()
 	if d.revision == nil {
 		d.revision = map[string]uint64{}
 	}
 	d.revision[projectID]++
-	return d.revision[projectID]
+	rev := d.revision[projectID]
+	d.revMu.Unlock()
+	d.invalidateTaskListSnapshotCache(projectID)
+	return rev
 }
 
 func (d *Daemon) currentRevision(projectID string) uint64 {

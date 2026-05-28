@@ -49,6 +49,16 @@ const (
 	taskInvariantTaskListFreshness daemonInvariantID = daemonInvariantTaskListFreshness
 )
 
+const taskListSnapshotCacheTTL = time.Second
+
+type taskListSnapshotCacheEntry struct {
+	Revision      uint64
+	LastCheckedAt time.Time
+	Freshness     protocol.TaskListFreshness
+	Tasks         []domain.Task
+	CachedAt      time.Time
+}
+
 func (d *Daemon) sourceForTaskInvariant(invariant daemonInvariantID) daemonInvariantSource {
 	return sourceForInvariant(invariant)
 }
@@ -58,6 +68,19 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	projectID := d.projectID(req.Meta)
 	startedAt := time.Now()
 	d.triggerWorktreeStateRefresh(projectID)
+	if cached, ok := d.readFreshTaskListSnapshotCache(projectID); ok {
+		payload := buildTaskListSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks)
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		resp.Body = body
+		resp.Revision = payload.SnapshotRevision
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Info("daemon task list completed", "project_id", projectID, "task_count", len(cached.Tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "cache_hit", true)
+		}
+		return resp, nil
+	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task list requested", "project_id", projectID)
 	}
@@ -70,13 +93,15 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
-	payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), lastCheckedAt, freshness, tasks)
+	revision := d.currentRevision(projectID)
+	payload := buildTaskListSnapshotPayload(projectID, revision, lastCheckedAt, freshness, tasks)
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp.Body = body
 	resp.Revision = payload.SnapshotRevision
+	d.storeTaskListSnapshotCache(projectID, revision, lastCheckedAt, freshness, tasks)
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task list completed", "project_id", projectID, "task_count", len(tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds())
 	}
@@ -98,6 +123,22 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task get requested", "project_id", projectID, "task_id", taskID)
+	}
+	if cached, ok := d.readFreshTaskListSnapshotCache(projectID); ok {
+		if _, found := findCachedTaskByID(cached.Tasks, taskID); found {
+			payload := buildTaskListSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks)
+			body, err := json.Marshal(payload)
+			if err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+			}
+			resp := d.successResponse(req)
+			resp.Body = body
+			resp.Revision = payload.SnapshotRevision
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Info("daemon task get completed", "project_id", projectID, "task_id", taskID, "context_task_count", len(cached.Tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "cache_hit", true)
+			}
+			return resp, nil
+		}
 	}
 	d.refreshIssueWorktreeState(ctx, projectID, taskID)
 	issueClient := d.issueClientForProject(projectID)
@@ -130,6 +171,79 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 		d.cfg.Logger.Info("daemon task get completed", "project_id", projectID, "task_id", taskID, "context_task_count", len(tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds())
 	}
 	return resp, nil
+}
+
+func (d *Daemon) readFreshTaskListSnapshotCache(projectID string) (taskListSnapshotCacheEntry, bool) {
+	projectID = d.canonicalProjectID(projectID)
+	currentRevision := d.currentRevision(projectID)
+
+	d.taskListSnapshotCacheMu.Lock()
+	defer d.taskListSnapshotCacheMu.Unlock()
+	if d.taskListSnapshotCache == nil {
+		return taskListSnapshotCacheEntry{}, false
+	}
+	cached, ok := d.taskListSnapshotCache[projectID]
+	if !ok {
+		return taskListSnapshotCacheEntry{}, false
+	}
+	if cached.Revision != currentRevision {
+		return taskListSnapshotCacheEntry{}, false
+	}
+	if cached.Freshness != protocol.TaskListFreshnessFresh {
+		return taskListSnapshotCacheEntry{}, false
+	}
+	if timeNow().Sub(cached.CachedAt) > taskListSnapshotCacheTTL {
+		return taskListSnapshotCacheEntry{}, false
+	}
+	cached.Tasks = cloneTasks(cached.Tasks)
+	return cached, true
+}
+
+func (d *Daemon) storeTaskListSnapshotCache(projectID string, revision uint64, lastCheckedAt time.Time, freshness protocol.TaskListFreshness, tasks []domain.Task) {
+	if freshness != protocol.TaskListFreshnessFresh {
+		return
+	}
+	projectID = d.canonicalProjectID(projectID)
+	d.taskListSnapshotCacheMu.Lock()
+	defer d.taskListSnapshotCacheMu.Unlock()
+	if d.taskListSnapshotCache == nil {
+		d.taskListSnapshotCache = map[string]taskListSnapshotCacheEntry{}
+	}
+	d.taskListSnapshotCache[projectID] = taskListSnapshotCacheEntry{
+		Revision:      revision,
+		LastCheckedAt: lastCheckedAt.UTC(),
+		Freshness:     freshness,
+		Tasks:         cloneTasks(tasks),
+		CachedAt:      timeNow(),
+	}
+}
+
+func (d *Daemon) invalidateTaskListSnapshotCache(projectID string) {
+	projectID = d.canonicalProjectID(projectID)
+	d.taskListSnapshotCacheMu.Lock()
+	defer d.taskListSnapshotCacheMu.Unlock()
+	if d.taskListSnapshotCache == nil {
+		return
+	}
+	delete(d.taskListSnapshotCache, projectID)
+}
+
+func cloneTasks(tasks []domain.Task) []domain.Task {
+	if len(tasks) == 0 {
+		return nil
+	}
+	out := make([]domain.Task, len(tasks))
+	copy(out, tasks)
+	return out
+}
+
+func findCachedTaskByID(tasks []domain.Task, taskID string) (domain.Task, bool) {
+	for _, task := range tasks {
+		if task.ID.String() == taskID {
+			return task, true
+		}
+	}
+	return domain.Task{}, false
 }
 
 func buildTaskListSnapshotPayload(projectID string, revision uint64, lastCheckedAt time.Time, freshness protocol.TaskListFreshness, tasks []domain.Task) protocol.TaskListSnapshotPayload {
