@@ -558,7 +558,7 @@ func TestGitHooksNotifyCommandPrefersCurrentWorktreeWhenProjectDirUnset(t *testi
 	}
 	deps := &Dependencies{
 		Config:       config.DefaultConfig(),
-		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		DaemonClient: daemonclient.New(transport).WithReconnectPolicy(reconnect.Policy{MaxAttempts: 1}).WithProjectID("proj-1"),
 		ProjectID:    "proj-1",
 		RepoDir:      baseDir,
 	}
@@ -688,6 +688,12 @@ func TestGitHooksNotifyCommandAutostartsDaemonOnTransientGitStatusError(t *testi
 
 	attempts := 0
 	transport := &fakeDaemonTransport{
+		handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+			if !started {
+				return protocol.HelloAck{}, errors.New("dial unix /tmp/azedarach.sock: connect: connection refused")
+			}
+			return protocol.HelloAck{Accepted: true}, nil
+		},
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			if req.Command != daemonclient.CommandGitStatus {
 				return responseWithJSON(req, map[string]any{}), nil

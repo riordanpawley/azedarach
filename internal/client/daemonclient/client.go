@@ -3,11 +3,13 @@ package daemonclient
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/compatibility"
 	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
@@ -86,21 +88,82 @@ func (c *Client) Command(ctx context.Context, req protocol.RequestEnvelope) (pro
 
 	var lastErr error
 	for attempt := 0; c.policy.ShouldRetry(attempt); attempt++ {
+		attemptStartedAt := time.Now()
 		resp, err := c.transport.Command(ctx, req)
 		if err == nil {
+			latencytrace.LogPhase(slog.Default(), "cli", "daemonclient.command_attempt", attemptStartedAt, "command", req.Command, "request_id", req.RequestID, "attempt", attempt+1, "ok", resp.OK)
+			if shouldRetryReadCommandResponse(req.Command, resp) && c.policy.ShouldRetry(attempt+1) {
+				if err := sleepCommandRetry(ctx, c.policy.Delay(attempt)); err != nil {
+					return protocol.ResponseEnvelope{}, err
+				}
+				continue
+			}
 			return resp, nil
 		}
+		latencytrace.LogPhase(slog.Default(), "cli", "daemonclient.command_attempt", attemptStartedAt, "command", req.Command, "request_id", req.RequestID, "attempt", attempt+1, "error", err)
 		lastErr = err
 		if !reconnect.IsTransientTransportError(err) || !c.policy.ShouldRetry(attempt+1) {
 			break
 		}
-		select {
-		case <-ctx.Done():
-			return protocol.ResponseEnvelope{}, ctx.Err()
-		case <-time.After(c.policy.Delay(attempt)):
+		if err := sleepCommandRetry(ctx, c.policy.Delay(attempt)); err != nil {
+			return protocol.ResponseEnvelope{}, err
 		}
 	}
 	return protocol.ResponseEnvelope{}, fmt.Errorf("daemon command transport: %w", lastErr)
+}
+
+func sleepCommandRetry(ctx context.Context, delay time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(delay):
+		return nil
+	}
+}
+
+func shouldRetryReadCommandResponse(command string, resp protocol.ResponseEnvelope) bool {
+	if resp.OK || resp.Error == nil {
+		return false
+	}
+	if !isDaemonReadCommand(command) {
+		return false
+	}
+	return resp.Error.Code == protocol.ErrorCodeUnavailable && resp.Error.Retryable
+}
+
+func isDaemonReadCommand(command string) bool {
+	switch command {
+	case CommandTaskList,
+		CommandTaskGet,
+		CommandTaskGetMany,
+		CommandSyncConflicts,
+		CommandSessionStatus,
+		CommandDevServerStatus,
+		CommandDevServerList,
+		CommandWorktreeList,
+		CommandSpecRequirementList,
+		CommandSpecRequirementGet,
+		CommandSpecLinkList,
+		CommandSpecRead,
+		CommandSpecPack,
+		CommandSpecLint,
+		CommandSpecParity,
+		CommandSpecExport,
+		CommandDecisionList,
+		CommandDecisionGet,
+		CommandDecisionLinkList,
+		CommandGitBranchBehind,
+		CommandGitDiffStat,
+		CommandGitStatus,
+		CommandGitRuntimeSignals,
+		CommandGitMergePreflight,
+		CommandGitWorktreeForBranch,
+		protocol.CommandMailList,
+		protocol.CommandMailWatch:
+		return true
+	default:
+		return false
+	}
 }
 
 // Subscribe opens a daemon event stream with reconnect attempts.

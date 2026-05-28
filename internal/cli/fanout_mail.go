@@ -494,9 +494,6 @@ func MailListCommand(deps *Dependencies, opts MailListOptions) error {
 func MailWatchCommand(deps *Dependencies, opts MailWatchOptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
-		return err
-	}
 
 	lastSeq := opts.SinceSeq
 	emit := func(evt mailEvent) error {

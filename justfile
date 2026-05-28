@@ -27,6 +27,9 @@ run:
 bench-git-runtime *ARGS:
     go run ./cmd/bench-git-runtime {{ARGS}}
 
+bench-parallel-cli-latency:
+    ./scripts/bench-parallel-cli-latency.sh
+
 test:
     go test -v ./...
 

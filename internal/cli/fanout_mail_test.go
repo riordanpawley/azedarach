@@ -615,3 +615,57 @@ func TestMailListAndWatchUseCase_SinceAndOnce(t *testing.T) {
 		t.Fatalf("watched = %+v, want seq=2 type=handoff", watched)
 	}
 }
+
+func TestMailWatchCommandSkipsPreflightDaemonAttachWhenReadSucceeds(t *testing.T) {
+	repoDir := t.TempDir()
+	events := []protocol.MailEvent{
+		{
+			Seq:         1,
+			ParentIssue: "az-parent",
+			Type:        "handoff",
+			Body:        "ready",
+			CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+		},
+	}
+	handshakes := 0
+	deps := &Dependencies{
+		RepoDir: repoDir,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+				handshakes++
+				return protocol.HelloAck{Accepted: true}, nil
+			},
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != protocol.CommandMailWatch {
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				respBody, err := json.Marshal(events)
+				if err != nil {
+					t.Fatalf("encode mail.watch response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return MailWatchCommand(deps, MailWatchOptions{
+			ParentIssueID: "az-parent",
+			SinceSeq:      1,
+			JSONL:         true,
+			Once:          true,
+		})
+	})
+	if handshakes != 0 {
+		t.Fatalf("handshakes = %d, want 0", handshakes)
+	}
+	if !strings.Contains(output, `"seq":1`) {
+		t.Fatalf("output = %q, want watched event", output)
+	}
+}

@@ -7774,6 +7774,12 @@ func TestIssueCreateCommandUsesExtendedDaemonAttachTimeout(t *testing.T) {
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+				if !started {
+					return protocol.HelloAck{}, errors.New("daemon socket unavailable")
+				}
+				return protocol.HelloAck{Accepted: true}, nil
+			},
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				if !started {
 					return protocol.ResponseEnvelope{}, errors.New("daemon socket unavailable")

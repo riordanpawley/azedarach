@@ -1234,8 +1234,8 @@ func TestRefreshWorktreeRuntimeStateUsesClosestNonDoneAncestorBranch(t *testing.
 	t.Cleanup(func() { _ = store.Close() })
 
 	d := &Daemon{
-		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
-		git: git.NewClient(runner, slog.Default()),
+		cfg:    Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
+		git:    git.NewClient(runner, slog.Default()),
 		issues: issuesClient,
 		issueClientsByProject: map[string]*issues.Client{
 			projectID: issuesClient,
@@ -1314,8 +1314,8 @@ func TestRefreshWorktreeRuntimeStateFallsBackToAncestorWorktreeBranchWhenAncesto
 	t.Cleanup(func() { _ = store.Close() })
 
 	d := &Daemon{
-		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
-		git: git.NewClient(runner, slog.Default()),
+		cfg:    Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
+		git:    git.NewClient(runner, slog.Default()),
 		issues: issuesClient,
 		issueClientsByProject: map[string]*issues.Client{
 			projectID: issuesClient,

@@ -29,6 +29,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/logstream"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -956,8 +957,8 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 		return branchMergeToBaseCommandResult{}, wrapPendingGitOperation("fetch", err)
 	}
 	if !branchAttached {
-		
-	if _, err := deps.DaemonClient.GitCheckout(ctx, baseWorktree, baseBranch); err != nil {
+
+		if _, err := deps.DaemonClient.GitCheckout(ctx, baseWorktree, baseBranch); err != nil {
 			return branchMergeToBaseCommandResult{}, wrapPendingGitOperation("checkout", err)
 		}
 	}
@@ -5790,6 +5791,7 @@ func applyResponseExitCode(resp protocol.ResponseEnvelope) int {
 }
 
 func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) error {
+	startedAt := time.Now()
 	launcher := newLauncher(runtimeRepoDirForDeps(deps), deps.DaemonSocket)
 	if concreteLauncher, ok := launcher.(*daemonprocess.Launcher); ok {
 		concreteLauncher.WithLogger(deps.Logger)
@@ -5802,11 +5804,14 @@ func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) er
 		Capabilities:    []string{"snapshot", "subscribe"},
 	})
 	if err != nil {
+		latencytrace.LogPhase(deps.Logger, "cli", "daemon_attach", startedAt, "client_name", clientName, "error", err)
 		return fmt.Errorf("daemon attach failed: %w", err)
 	}
 	if !ack.Accepted {
+		latencytrace.LogPhase(deps.Logger, "cli", "daemon_attach", startedAt, "client_name", clientName, "accepted", false, "reason", ack.Reason)
 		return fmt.Errorf("daemon handshake rejected: %s", ack.Reason)
 	}
+	latencytrace.LogPhase(deps.Logger, "cli", "daemon_attach", startedAt, "client_name", clientName, "accepted", true, "daemon_version", ack.DaemonVersion)
 	return nil
 }
 
@@ -5815,19 +5820,44 @@ func commandWithDaemonAutostartRetry[T any](ctx context.Context, deps *Dependenc
 	if err == nil {
 		return value, nil
 	}
-	if !reconnect.IsTransientTransportError(err) {
+	if !shouldAutostartAfterDaemonReadError(err) {
 		return value, err
 	}
 	startCtx, cancel := context.WithTimeout(context.Background(), issueCreateAutostartTimeout)
 	defer cancel()
-	launcher := newLauncher(runtimeRepoDirForDeps(deps), deps.DaemonSocket)
-	if concreteLauncher, ok := launcher.(*daemonprocess.Launcher); ok {
-		concreteLauncher.WithLogger(deps.Logger)
+	var startErr error
+	if deps == nil || deps.DaemonClient == nil {
+		startErr = startDaemonLauncher(startCtx, deps)
+	} else {
+		startErr = ensureDaemon(startCtx, deps, "cli")
 	}
-	if startErr := launcher.Start(startCtx); startErr != nil {
+	if startErr != nil {
 		return value, fmt.Errorf("autostart daemon: %w", startErr)
 	}
 	return call(ctx)
+}
+
+func startDaemonLauncher(ctx context.Context, deps *Dependencies) error {
+	socketPath := ""
+	if deps != nil {
+		socketPath = deps.DaemonSocket
+	}
+	launcher := newLauncher(runtimeRepoDirForDeps(deps), socketPath)
+	if concreteLauncher, ok := launcher.(*daemonprocess.Launcher); ok && deps != nil {
+		concreteLauncher.WithLogger(deps.Logger)
+	}
+	return launcher.Start(ctx)
+}
+
+func shouldAutostartAfterDaemonReadError(err error) bool {
+	if reconnect.IsTransientTransportError(err) {
+		return true
+	}
+	var commandErr *daemonclient.CommandError
+	if errors.As(err, &commandErr) {
+		return commandErr.Code == protocol.ErrorCodeUnavailable && commandErr.Retryable
+	}
+	return false
 }
 
 func runtimeRepoDirForDeps(deps *Dependencies) string {
