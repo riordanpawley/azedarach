@@ -32,7 +32,6 @@ type gitServiceAdapter struct {
 	runtimeProjectionWriter     runtimeProjectionWriter
 	statusRefreshQueue          *reconcileQueue[*git.GitStatus]
 	statusRefreshThrottle       *reconcileThrottle
-	hookRefreshDebounce         time.Duration
 	logger                      *slog.Logger
 	pollInterval                time.Duration
 	onStatusUpdate              func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus)
@@ -393,13 +392,6 @@ func (a *gitServiceAdapter) runHookStatusRefresh(projectID, worktree, key string
 		}
 		return
 	}
-
-	debounce := a.hookRefreshDebounce
-	if debounce <= 0 {
-		debounce = defaultGitHookStatusRefreshDebounce
-	}
-	timer := time.NewTimer(debounce)
-	<-timer.C
 
 	refreshCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

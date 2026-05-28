@@ -92,7 +92,10 @@ func (c *Client) Command(ctx context.Context, req protocol.RequestEnvelope) (pro
 		resp, err := c.transport.Command(ctx, req)
 		if err == nil {
 			latencytrace.LogPhase(slog.Default(), "cli", "daemonclient.command_attempt", attemptStartedAt, "command", req.Command, "request_id", req.RequestID, "attempt", attempt+1, "ok", resp.OK)
-			if shouldRetryReadCommandResponse(req.Command, resp) && c.policy.ShouldRetry(attempt+1) {
+			if shouldRetryReadCommandResponse(req.Command, resp) {
+				if !c.policy.ShouldRetry(attempt + 1) {
+					return resp, nil
+				}
 				if err := sleepCommandRetry(ctx, c.policy.Delay(attempt)); err != nil {
 					return protocol.ResponseEnvelope{}, err
 				}

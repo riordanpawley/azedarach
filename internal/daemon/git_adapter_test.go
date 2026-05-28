@@ -873,9 +873,11 @@ func TestGitServiceAdapterHookRefreshCoalescesBurstForWorktree(t *testing.T) {
 	store := newGitAdapterStore(t, projectID, issueID, worktree, cleanGitStatus())
 
 	var statusCalls atomic.Int32
+	releaseStatus := make(chan struct{})
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		if len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "status" && args[3] == "--porcelain" {
 			statusCalls.Add(1)
+			<-releaseStatus
 			return "", nil
 		}
 		t.Fatalf("unexpected git args: %v", args)
@@ -892,11 +894,10 @@ func TestGitServiceAdapterHookRefreshCoalescesBurstForWorktree(t *testing.T) {
 	})
 
 	adapter := &gitServiceAdapter{
-		client:              git.NewClient(runner, slog.Default()),
-		runtimeStateStore:   store,
-		statusRefreshQueue:  queue,
-		hookRefreshDebounce: 20 * time.Millisecond,
-		logger:              slog.Default(),
+		client:             git.NewClient(runner, slog.Default()),
+		runtimeStateStore:  store,
+		statusRefreshQueue: queue,
+		logger:             slog.Default(),
 	}
 
 	start := make(chan struct{})
@@ -909,6 +910,11 @@ func TestGitServiceAdapterHookRefreshCoalescesBurstForWorktree(t *testing.T) {
 		}()
 	}
 	close(start)
+	for statusCalls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(releaseStatus)
 
 	for i := 0; i < 5; i++ {
 		select {

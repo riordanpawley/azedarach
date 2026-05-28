@@ -2607,7 +2607,7 @@ func TestParseConfigSetArgs(t *testing.T) {
 		{
 			name:        "rejects missing args",
 			args:        []string{"spec.enabled"},
-			errContains: "usage: az config set spec.enabled <true|false> [--project-dir <dir>]",
+			errContains: "usage: az config set <key> <value> [--project-dir <dir>]",
 		},
 	}
 
@@ -2968,6 +2968,50 @@ func TestConfigSetCommandWritesSpecEnabledConfig(t *testing.T) {
 	}
 	if cfg.Spec.Enabled {
 		t.Fatalf("Spec.Enabled = true, want false")
+	}
+}
+
+func TestConfigSetCommandWritesLatencyTraceConfig(t *testing.T) {
+	projectDir := t.TempDir()
+
+	deps := &Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{}),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:    "proj",
+		RepoDir:      projectDir,
+	}
+
+	output := captureStdout(t, func() error {
+		return ConfigSetCommand(deps, ConfigSetOptions{Key: "diagnostics.latencyTrace", Value: "on"})
+	})
+
+	if !strings.Contains(output, "diagnostics.latencyTrace=true") {
+		t.Fatalf("config output missing diagnostics update: %q", output)
+	}
+	cfg, err := config.LoadConfig(projectDir)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if !cfg.Diagnostics.LatencyTrace {
+		t.Fatalf("Diagnostics.LatencyTrace = false, want true")
+	}
+}
+
+func TestConfigSetCommandRejectsInvalidLatencyTraceBoolean(t *testing.T) {
+	projectDir := t.TempDir()
+
+	deps := &Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{}),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:    "proj",
+		RepoDir:      projectDir,
+	}
+
+	err := ConfigSetCommand(deps, ConfigSetOptions{Key: "diagnostics.latencyTrace", Value: "maybe"})
+	if err == nil || !strings.Contains(err.Error(), "Invalid boolean value 'maybe' for diagnostics.latencyTrace") {
+		t.Fatalf("error = %v, want invalid latency trace boolean failure", err)
 	}
 }
 
@@ -7046,7 +7090,7 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]") {
 		t.Fatalf("usage missing issue bulk-update command: %q", output)
 	}
-	if !strings.Contains(output, "config set spec.enabled <true|false> [--project-dir <dir>]") {
+	if !strings.Contains(output, "config set <key> <value> [--project-dir <dir>]") {
 		t.Fatalf("usage missing config command: %q", output)
 	}
 	if !strings.Contains(output, "az config set spec.enabled false") {

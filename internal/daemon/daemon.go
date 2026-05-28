@@ -48,7 +48,6 @@ const (
 	maxWorktreeGitProbeFailureBackoff       = 15 * time.Minute
 
 	defaultGitStatusRefreshCadence          = 5 * time.Second
-	defaultGitHookStatusRefreshDebounce     = 250 * time.Millisecond
 	defaultGitStatusRefreshUnchangedBackoff = 15 * time.Second
 	defaultGitStatusRefreshFailureBackoff   = 30 * time.Second
 	maxGitStatusRefreshUnchangedBackoff     = 2 * time.Minute

@@ -1489,7 +1489,7 @@ func ParseConfigSetArgs(args []string) (ConfigSetOptions, error) {
 		return ConfigSetOptions{}, err
 	}
 	if fs.NArg() != 2 {
-		return ConfigSetOptions{}, fmt.Errorf("usage: az config set spec.enabled <true|false> [--project-dir <dir>]")
+		return ConfigSetOptions{}, fmt.Errorf("usage: az config set <key> <value> [--project-dir <dir>]")
 	}
 	opts.Key = strings.TrimSpace(fs.Arg(0))
 	opts.Value = strings.TrimSpace(fs.Arg(1))
@@ -2647,11 +2647,20 @@ func ConfigSetCommand(deps *Dependencies, opts ConfigSetOptions) error {
 	}
 
 	fmt.Printf("Updated %s: %s=%s\n", configPath, opts.Key, renderedValue)
-	if opts.Key == "spec.enabled" {
+	switch opts.Key {
+	case "spec.enabled":
 		if renderedValue == "true" {
 			fmt.Println("Spec workflows are enabled.")
 		} else {
 			fmt.Println("Spec workflows are disabled. `az prime` will stop mentioning spec and `az spec` commands will fail until re-enabled.")
+		}
+	case "diagnostics.latencyTrace":
+		if renderedValue == "true" {
+			latencytrace.SetConfigEnabled(true)
+			fmt.Println("Latency trace logging is enabled. Restart the daemon for daemon-side trace logs to use the persisted setting.")
+		} else {
+			latencytrace.SetConfigEnabled(false)
+			fmt.Println("Latency trace logging is disabled.")
 		}
 	}
 
@@ -2784,8 +2793,15 @@ func setConfigValue(cfg *config.Config, key, value string) (string, error) {
 		}
 		cfg.Spec.Enabled = parsed
 		return fmt.Sprintf("%t", parsed), nil
+	case "diagnostics.latencyTrace":
+		parsed, ok := parseBooleanConfigValue(value)
+		if !ok {
+			return "", fmt.Errorf("Invalid boolean value '%s' for diagnostics.latencyTrace. Use true/false, on/off, yes/no, or 1/0.", value)
+		}
+		cfg.Diagnostics.LatencyTrace = parsed
+		return fmt.Sprintf("%t", parsed), nil
 	default:
-		return "", fmt.Errorf("Unsupported config key '%s'. Supported keys: spec.enabled", key)
+		return "", fmt.Errorf("Unsupported config key '%s'. Supported keys: spec.enabled, diagnostics.latencyTrace", key)
 	}
 }
 

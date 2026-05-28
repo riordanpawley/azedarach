@@ -334,6 +334,16 @@
           "default": "az"
         }
       }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "latencyTrace": {
+          "type": "boolean",
+          "default": false
+        }
+      }
     }
   }
 }

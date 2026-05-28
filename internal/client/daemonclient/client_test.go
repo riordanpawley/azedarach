@@ -166,6 +166,38 @@ func TestClientCommandRetriesUnavailableShuttingDownReadResponse(t *testing.T) {
 	}
 }
 
+func TestClientCommandReturnsFinalUnavailableReadResponseWhenRetriesExhaust(t *testing.T) {
+	attempts := 0
+	c := New(&fakeTransport{
+		commandFn: func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			attempts++
+			return protocol.ResponseEnvelope{
+				OK: false,
+				Error: &protocol.ErrorEnvelope{
+					Code:      protocol.ErrorCodeUnavailable,
+					Message:   "daemon shutting down",
+					Retryable: true,
+				},
+			}, nil
+		},
+	}).WithReconnectPolicy(reconnect.Policy{
+		MaxAttempts: 2,
+		BaseBackoff: 0,
+		MaxBackoff:  0,
+	})
+
+	resp, err := c.Command(context.Background(), protocol.RequestEnvelope{Command: CommandTaskGet})
+	if err != nil {
+		t.Fatalf("Command error = %v, want final daemon response", err)
+	}
+	if resp.OK || resp.Error == nil || resp.Error.Message != "daemon shutting down" {
+		t.Fatalf("response = %+v, want final unavailable response", resp)
+	}
+	if attempts != 2 {
+		t.Fatalf("command attempts = %d, want 2", attempts)
+	}
+}
+
 func TestClientCommandDoesNotRetryUnavailableWriteResponse(t *testing.T) {
 	attempts := 0
 	c := New(&fakeTransport{

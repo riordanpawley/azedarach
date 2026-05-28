@@ -14,6 +14,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/daemon"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/logging"
 )
 
@@ -49,6 +50,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
 		os.Exit(1)
 	}
+	latencytrace.SetConfigEnabled(cfg.Diagnostics.LatencyTrace)
 
 	if socketPath == "" {
 		socketPath = config.DaemonSocketPathFor(repoDir)

@@ -723,6 +723,42 @@ func TestSettingsOverlay_ConfigBackedGitPrAndNetworkSettingsPersist(t *testing.T
 	}
 }
 
+func TestSettingsOverlay_ConfigBackedLatencyTracePersists(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Diagnostics.LatencyTrace = false
+
+	menu := NewSettingsOverlayWithEditorAndConfig(
+		&mockSettingsEditor{showPhases: true},
+		cfg,
+		filepath.Join(tmpDir, config.ConfigDirName, config.ConfigFileName),
+	)
+	idx := settingIndexByKey(menu, "latency-trace")
+	if idx < 0 {
+		t.Fatal("setting \"latency-trace\" not found")
+	}
+	if got := menu.items[idx].Value; got != false {
+		t.Fatalf("latency trace setting = %v, want false", got)
+	}
+
+	menu.cursor = idx
+	_, cmd := menu.Update(tea.KeyMsg{Type: tea.KeySpace})
+	if cmd == nil {
+		t.Fatal("expected config save command after toggling latency-trace")
+	}
+	if result := cmd(); result != nil {
+		t.Fatalf("expected nil result from successful config save, got %T", result)
+	}
+
+	loaded, err := config.LoadConfig(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if !loaded.Diagnostics.LatencyTrace {
+		t.Fatal("expected latency trace to be enabled after toggle")
+	}
+}
+
 func TestSettingsOverlay_ConfigBackedExpandedSettingsPersist(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := config.DefaultConfig()

@@ -25,6 +25,7 @@ type Config struct {
 	Worktree      WorktreeConfig      `json:"worktree"`
 	Spec          SpecConfig          `json:"spec"`
 	Orchestration OrchestrationConfig `json:"orchestration"`
+	Diagnostics   DiagnosticsConfig   `json:"diagnostics"`
 }
 
 type IssueTrackerConfig struct {
@@ -170,6 +171,10 @@ type OrchestrationConfig struct {
 	Via string `json:"via"`
 }
 
+type DiagnosticsConfig struct {
+	LatencyTrace bool `json:"latencyTrace"`
+}
+
 // DefaultConfig returns a Config with sensible defaults
 func DefaultConfig() *Config {
 	homeDir, _ := os.UserHomeDir()
@@ -267,6 +272,9 @@ func DefaultConfig() *Config {
 		},
 		Orchestration: OrchestrationConfig{
 			Via: "az",
+		},
+		Diagnostics: DiagnosticsConfig{
+			LatencyTrace: false,
 		},
 	}
 }

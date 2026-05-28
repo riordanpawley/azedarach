@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
@@ -927,6 +928,7 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 	worktreeKeepDays := 7
 	specEnabled := true
 	orchestrationVia := "az"
+	latencyTrace := false
 	if cfg != nil {
 		gitPushEnabled = cfg.Git.PushEnabled
 		gitFetchEnabled = cfg.Git.FetchEnabled
@@ -950,6 +952,7 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 		worktreeAutoCleanup = cfg.Worktree.AutoCleanup
 		worktreeKeepDays = cfg.Worktree.KeepDays
 		specEnabled = cfg.Spec.Enabled
+		latencyTrace = cfg.Diagnostics.LatencyTrace
 		if strings.TrimSpace(cfg.Orchestration.Via) != "" {
 			orchestrationVia = cfg.Orchestration.Via
 		}
@@ -1068,6 +1071,27 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 			Value: editor.GetShowPhases(),
 			OnChange: func(value any) {
 				editor.ToggleShowPhases()
+			},
+		},
+		{
+			Key:   "latency-trace",
+			Group: "Diagnostics",
+			Label: "Latency trace logs",
+			Type:  SettingToggle,
+			Value: latencyTrace,
+			ConfigPath: []string{
+				"diagnostics",
+				"latencyTrace",
+			},
+			SaveTarget: saveTargetFor([]string{"diagnostics", "latencyTrace"}),
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(bool); ok {
+					cfg.Diagnostics.LatencyTrace = v
+					latencytrace.SetConfigEnabled(v)
+				}
 			},
 		},
 		{
