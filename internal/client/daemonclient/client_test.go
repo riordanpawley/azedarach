@@ -99,6 +99,137 @@ func TestClientCommandRetryOnTransientTransportError(t *testing.T) {
 	}
 }
 
+func TestClientCommandRetriesSocketUnavailableForReadCommand(t *testing.T) {
+	attempts := 0
+	c := New(&fakeTransport{
+		commandFn: func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			attempts++
+			if attempts == 1 {
+				return protocol.ResponseEnvelope{}, errors.New("daemon socket unavailable: stat /tmp/daemon.sock: no such file or directory")
+			}
+			return protocol.ResponseEnvelope{OK: true}, nil
+		},
+	}).WithReconnectPolicy(reconnect.Policy{
+		MaxAttempts: 2,
+		BaseBackoff: 0,
+		MaxBackoff:  0,
+	})
+
+	resp, err := c.Command(context.Background(), protocol.RequestEnvelope{Command: CommandTaskList})
+	if err != nil {
+		t.Fatalf("Command error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatal("expected OK response after socket unavailable retry")
+	}
+	if attempts != 2 {
+		t.Fatalf("command attempts = %d, want 2", attempts)
+	}
+}
+
+func TestClientCommandRetriesUnavailableShuttingDownReadResponse(t *testing.T) {
+	for _, command := range []string{CommandTaskGet, CommandTaskGetMany, protocol.CommandMailWatch} {
+		t.Run(command, func(t *testing.T) {
+			attempts := 0
+			c := New(&fakeTransport{
+				commandFn: func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+					attempts++
+					if attempts == 1 {
+						return protocol.ResponseEnvelope{
+							OK: false,
+							Error: &protocol.ErrorEnvelope{
+								Code:      protocol.ErrorCodeUnavailable,
+								Message:   "daemon shutting down",
+								Retryable: true,
+							},
+						}, nil
+					}
+					return protocol.ResponseEnvelope{OK: true}, nil
+				},
+			}).WithReconnectPolicy(reconnect.Policy{
+				MaxAttempts: 2,
+				BaseBackoff: 0,
+				MaxBackoff:  0,
+			})
+
+			resp, err := c.Command(context.Background(), protocol.RequestEnvelope{Command: command})
+			if err != nil {
+				t.Fatalf("Command error: %v", err)
+			}
+			if !resp.OK {
+				t.Fatal("expected OK response after unavailable retry")
+			}
+			if attempts != 2 {
+				t.Fatalf("command attempts = %d, want 2", attempts)
+			}
+		})
+	}
+}
+
+func TestClientCommandReturnsFinalUnavailableReadResponseWhenRetriesExhaust(t *testing.T) {
+	attempts := 0
+	c := New(&fakeTransport{
+		commandFn: func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			attempts++
+			return protocol.ResponseEnvelope{
+				OK: false,
+				Error: &protocol.ErrorEnvelope{
+					Code:      protocol.ErrorCodeUnavailable,
+					Message:   "daemon shutting down",
+					Retryable: true,
+				},
+			}, nil
+		},
+	}).WithReconnectPolicy(reconnect.Policy{
+		MaxAttempts: 2,
+		BaseBackoff: 0,
+		MaxBackoff:  0,
+	})
+
+	resp, err := c.Command(context.Background(), protocol.RequestEnvelope{Command: CommandTaskGet})
+	if err != nil {
+		t.Fatalf("Command error = %v, want final daemon response", err)
+	}
+	if resp.OK || resp.Error == nil || resp.Error.Message != "daemon shutting down" {
+		t.Fatalf("response = %+v, want final unavailable response", resp)
+	}
+	if attempts != 2 {
+		t.Fatalf("command attempts = %d, want 2", attempts)
+	}
+}
+
+func TestClientCommandDoesNotRetryUnavailableWriteResponse(t *testing.T) {
+	attempts := 0
+	c := New(&fakeTransport{
+		commandFn: func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			attempts++
+			return protocol.ResponseEnvelope{
+				OK: false,
+				Error: &protocol.ErrorEnvelope{
+					Code:      protocol.ErrorCodeUnavailable,
+					Message:   "daemon shutting down",
+					Retryable: true,
+				},
+			}, nil
+		},
+	}).WithReconnectPolicy(reconnect.Policy{
+		MaxAttempts: 3,
+		BaseBackoff: 0,
+		MaxBackoff:  0,
+	})
+
+	resp, err := c.Command(context.Background(), protocol.RequestEnvelope{Command: CommandTaskCreate})
+	if err != nil {
+		t.Fatalf("Command error: %v", err)
+	}
+	if resp.OK {
+		t.Fatal("expected unavailable response to pass through")
+	}
+	if attempts != 1 {
+		t.Fatalf("command attempts = %d, want 1", attempts)
+	}
+}
+
 func TestClientCommandDoesNotRetryNonTransientTransportError(t *testing.T) {
 	attempts := 0
 	c := New(&fakeTransport{

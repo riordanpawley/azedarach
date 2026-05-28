@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -859,6 +860,79 @@ func TestGitServiceAdapterQueueGitStatusRefreshBacksOffUnchangedTarget(t *testin
 	counters := throttle.snapshotCounters()
 	if counters.Processed != 1 || counters.Skipped != 1 || counters.Deferred != 0 {
 		t.Fatalf("throttle counters = %+v, want processed=1 skipped=1 deferred=0", counters)
+	}
+}
+
+func TestGitServiceAdapterHookRefreshCoalescesBurstForWorktree(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	projectID := "default"
+	issueID := "az-target"
+	worktree := "/tmp/az-target"
+	store := newGitAdapterStore(t, projectID, issueID, worktree, cleanGitStatus())
+
+	var statusCalls atomic.Int32
+	releaseStatus := make(chan struct{})
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		if len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "status" && args[3] == "--porcelain" {
+			statusCalls.Add(1)
+			<-releaseStatus
+			return "", nil
+		}
+		t.Fatalf("unexpected git args: %v", args)
+		return "", nil
+	}}
+
+	queue := newReconcileQueue[*git.GitStatus](reconcileQueueConfig{
+		Name:    "git_status_hook_refresh_test",
+		Workers: 1,
+		Logger:  slog.Default(),
+	})
+	t.Cleanup(func() {
+		_ = queue.Close()
+	})
+
+	adapter := &gitServiceAdapter{
+		client:             git.NewClient(runner, slog.Default()),
+		runtimeStateStore:  store,
+		statusRefreshQueue: queue,
+		logger:             slog.Default(),
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 5)
+	for i := 0; i < 5; i++ {
+		go func() {
+			<-start
+			_, err := adapter.RefreshStatusForHook(ctx, projectID, worktree)
+			errs <- err
+		}()
+	}
+	close(start)
+	for statusCalls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(releaseStatus)
+
+	for i := 0; i < 5; i++ {
+		select {
+		case err := <-errs:
+			if err != nil {
+				t.Fatalf("RefreshStatusForHook error: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for hook refresh burst")
+		}
+	}
+
+	if got := statusCalls.Load(); got != 1 {
+		t.Fatalf("status calls = %d, want 1 coalesced hook refresh", got)
+	}
+	counters := queue.snapshotCounters()
+	if counters.Enqueued != 1 || counters.Deduped != 0 {
+		t.Fatalf("queue counters = %+v, want one queued hook refresh", counters)
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 	"github.com/riordanpawley/azedarach/internal/services/git"
@@ -129,6 +130,8 @@ type Daemon struct {
 	worktreeStateRefreshMu        sync.Mutex
 	worktreeStateRefreshing       map[string]bool
 	worktreeStateLastRefresh      map[string]time.Time
+	taskListSnapshotCacheMu       sync.Mutex
+	taskListSnapshotCache         map[string]taskListSnapshotCacheEntry
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -239,6 +242,7 @@ func New(cfg Config) *Daemon {
 		sessionStateLastRefresh:       map[string]time.Time{},
 		worktreeStateRefreshing:       map[string]bool{},
 		worktreeStateLastRefresh:      map[string]time.Time{},
+		taskListSnapshotCache:         map[string]taskListSnapshotCacheEntry{},
 		revision:                      map[string]uint64{},
 		shutdownReqCh:                 make(chan struct{}),
 	}
@@ -485,18 +489,28 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		}
 	}()
 
+	guardStartedAt := time.Now()
 	if resp, handled := d.guardSyncDependentCommand(req); handled {
+		latencytrace.LogPhase(d.cfg.Logger, "daemon", "command.guard_sync_dependent", guardStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "handled", true)
 		return resp, nil
 	}
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "command.guard_sync_dependent", guardStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "handled", false)
+	beginStartedAt := time.Now()
 	if err := d.beginCommand(); err != nil {
+		latencytrace.LogPhase(d.cfg.Logger, "daemon", "command.begin", beginStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "error", err)
 		return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
 	}
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "command.begin", beginStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
 	defer d.endCommand()
 
 	if daemonhandlers.DaemonRoutesThroughDispatcher(req.Command) {
 		if d.router == nil {
 			return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported command"), nil
 		}
+		dispatchStartedAt := time.Now()
+		defer func() {
+			latencytrace.LogPhase(d.cfg.Logger, "daemon", "command.dispatcher_handle", dispatchStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
+		}()
 		return d.router.Handle(ctx, req), nil
 	}
 	switch req.Command {
@@ -526,6 +540,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleTaskList(ctx, req)
 	case "task.get":
 		return d.handleTaskGet(ctx, req)
+	case "task.get_many":
+		return d.handleTaskGetMany(ctx, req)
 	case "task.create":
 		return d.handleTaskCreate(ctx, req)
 	case "task.update_status":
@@ -1063,12 +1079,14 @@ func (d *Daemon) projectID(meta protocol.Metadata) string {
 
 func (d *Daemon) nextRevision(projectID string) uint64 {
 	d.revMu.Lock()
-	defer d.revMu.Unlock()
 	if d.revision == nil {
 		d.revision = map[string]uint64{}
 	}
 	d.revision[projectID]++
-	return d.revision[projectID]
+	rev := d.revision[projectID]
+	d.revMu.Unlock()
+	d.invalidateTaskListSnapshotCache(projectID)
+	return rev
 }
 
 func (d *Daemon) currentRevision(projectID string) uint64 {

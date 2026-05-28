@@ -107,6 +107,47 @@ func (r *sequentialRuntimeReconciler) ReconcileIssues(ctx context.Context, proje
 	return r.Reconcile(ctx, projectID)
 }
 
+type blockingIssueProjectionReconciler struct {
+	store     *daemonstate.RuntimeStateStore
+	started   chan struct{}
+	release   chan struct{}
+	issueID   string
+	sessionID string
+}
+
+func (r *blockingIssueProjectionReconciler) Reconcile(ctx context.Context, projectID string) (protocol.RuntimeReconcileResponseBody, error) {
+	return r.ReconcileIssues(ctx, projectID, []string{r.issueID})
+}
+
+func (r *blockingIssueProjectionReconciler) ReconcileIssues(ctx context.Context, projectID string, issueIDs []string) (protocol.RuntimeReconcileResponseBody, error) {
+	select {
+	case r.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+		return protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(projectID)}, ctx.Err()
+	}
+	if len(issueIDs) > 0 && r.store != nil {
+		issueID := issueIDs[0]
+		sessionID := r.sessionID
+		if sessionID == "" {
+			sessionID = naming.CanonicalSessionID(projectID, issueID)
+		}
+		if err := r.store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			ID:            sessionID,
+			IssueID:       issueID,
+			State:         daemonstate.SessionStateAttached,
+			ObservedState: daemonstate.SessionStateAttached,
+			UpdatedAt:     time.Now().UTC(),
+		}); err != nil {
+			return protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(projectID)}, err
+		}
+	}
+	return protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(projectID)}, nil
+}
+
 func (r *sequentialRuntimeReconciler) snapshot() (calls int, projectIDs []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -956,6 +997,102 @@ func TestEnsureFreshRuntimeForIssueMutationUsesIssueScopedReconcile(t *testing.T
 	issueCalls := recorder.issueSnapshot()
 	if len(issueCalls) != 1 || !reflect.DeepEqual(issueCalls[0], []string{"az-1"}) {
 		t.Fatalf("reconcile issue ids = %v, want [[az-1]]", issueCalls)
+	}
+}
+
+func TestRefreshRuntimeForIssueMutationAsyncReturnsBeforeReconcileCompletes(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	recorder := &blockingIssueProjectionReconciler{
+		started: started,
+		release: release,
+		issueID: "az-1",
+	}
+	d := &Daemon{
+		cfg: Config{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		runtimeReconciler: recorder,
+	}
+	t.Cleanup(func() {
+		close(release)
+		if d.runtimeReconcileQueue != nil {
+			_ = d.runtimeReconcileQueue.Close()
+		}
+	})
+
+	returned := make(chan struct{})
+	go func() {
+		d.refreshRuntimeForIssueMutationAsync("proj-fresh", " az-1 ", "session.pause")
+		close(returned)
+	}()
+
+	select {
+	case <-returned:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("async issue reconcile enqueue blocked on reconcile completion")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for async issue reconcile to start")
+	}
+}
+
+func TestRefreshRuntimeForIssueMutationAsyncEventuallyUpdatesProjection(t *testing.T) {
+	projectID := "proj-fresh"
+	issueID := "az-1"
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	recorder := &blockingIssueProjectionReconciler{
+		store:     store,
+		started:   started,
+		release:   release,
+		issueID:   issueID,
+		sessionID: sessionID,
+	}
+	d := &Daemon{
+		cfg: Config{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		runtimeReconciler: recorder,
+	}
+	t.Cleanup(func() {
+		if d.runtimeReconcileQueue != nil {
+			_ = d.runtimeReconcileQueue.Close()
+		}
+	})
+
+	d.refreshRuntimeForIssueMutationAsync(projectID, issueID, "session.resume")
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for async issue reconcile to start")
+	}
+	if _, found, err := store.GetSessionState(context.Background(), projectID, sessionID); err != nil {
+		t.Fatalf("get session projection before release: %v", err)
+	} else if found {
+		t.Fatal("session projection updated before async reconcile was released")
+	}
+
+	close(release)
+	deadline := time.After(time.Second)
+	for {
+		session, found, err := store.GetSessionState(context.Background(), projectID, sessionID)
+		if err != nil {
+			t.Fatalf("get session projection: %v", err)
+		}
+		if found && session.ObservedState == daemonstate.SessionStateAttached {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for async projection update; found=%v session=%+v", found, session)
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 

@@ -162,7 +162,33 @@ func agentSessionStatusRequest(command, projectID, issueID, sessionID string) pr
 }
 
 func agentHookSessionID(projectID, issueID string) string {
-	return naming.CanonicalSessionID(projectID, strings.TrimSpace(issueID))
+	sessionID := naming.CanonicalSessionID(projectID, strings.TrimSpace(issueID))
+	paneID := sanitizeAgentSessionIDPart(os.Getenv("TMUX_PANE"))
+	if paneID == "" {
+		return sessionID
+	}
+	return sessionID + ".pane-" + paneID
+}
+
+func sanitizeAgentSessionIDPart(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+		}
+	}
+	return strings.Trim(b.String(), "-_.")
 }
 
 // codexGuardEventForNotifyEvent maps the canonical (underscore) event name back

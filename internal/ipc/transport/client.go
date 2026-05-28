@@ -3,12 +3,14 @@ package transport
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/ipc/codec"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 )
 
 const defaultClientTimeout = 30 * time.Second
@@ -50,23 +52,32 @@ func (c *Client) dial(ctx context.Context) (net.Conn, error) {
 }
 
 func (c *Client) Handshake(ctx context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
+	dialStartedAt := time.Now()
 	conn, err := c.dial(ctx)
 	if err != nil {
+		latencytrace.LogPhase(slog.Default(), "cli", "transport.handshake.dial", dialStartedAt, "socket", c.socketPath, "error", err)
 		return protocol.HelloAck{}, err
 	}
+	latencytrace.LogPhase(slog.Default(), "cli", "transport.handshake.dial", dialStartedAt, "socket", c.socketPath)
 	defer conn.Close()
 	c.setDeadline(ctx, conn)
 
+	writeStartedAt := time.Now()
 	if err := writeFrame(conn, c.codec, rpcFrame{
 		Type:  frameTypeHello,
 		Hello: &hello,
 	}); err != nil {
+		latencytrace.LogPhase(slog.Default(), "cli", "transport.handshake.write", writeStartedAt, "socket", c.socketPath, "error", err)
 		return protocol.HelloAck{}, err
 	}
+	latencytrace.LogPhase(slog.Default(), "cli", "transport.handshake.write", writeStartedAt, "socket", c.socketPath)
+	readStartedAt := time.Now()
 	reply, err := readFrame(conn, c.codec)
 	if err != nil {
+		latencytrace.LogPhase(slog.Default(), "cli", "transport.handshake.read", readStartedAt, "socket", c.socketPath, "error", err)
 		return protocol.HelloAck{}, err
 	}
+	latencytrace.LogPhase(slog.Default(), "cli", "transport.handshake.read", readStartedAt, "socket", c.socketPath)
 	if reply.Type == frameTypeError && reply.Error != nil {
 		return protocol.HelloAck{}, fmt.Errorf("handshake error: %s", reply.Error.Message)
 	}
@@ -77,23 +88,32 @@ func (c *Client) Handshake(ctx context.Context, hello protocol.Hello) (protocol.
 }
 
 func (c *Client) Command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	dialStartedAt := time.Now()
 	conn, err := c.dial(ctx)
 	if err != nil {
+		latencytrace.LogPhase(slog.Default(), "cli", "transport.command.dial", dialStartedAt, "socket", c.socketPath, "command", req.Command, "request_id", req.RequestID, "error", err)
 		return protocol.ResponseEnvelope{}, err
 	}
+	latencytrace.LogPhase(slog.Default(), "cli", "transport.command.dial", dialStartedAt, "socket", c.socketPath, "command", req.Command, "request_id", req.RequestID)
 	defer conn.Close()
 	c.setDeadline(ctx, conn)
 
+	writeStartedAt := time.Now()
 	if err := writeFrame(conn, c.codec, rpcFrame{
 		Type:    frameTypeCommand,
 		Request: &req,
 	}); err != nil {
+		latencytrace.LogPhase(slog.Default(), "cli", "transport.command.write", writeStartedAt, "socket", c.socketPath, "command", req.Command, "request_id", req.RequestID, "error", err)
 		return protocol.ResponseEnvelope{}, err
 	}
+	latencytrace.LogPhase(slog.Default(), "cli", "transport.command.write", writeStartedAt, "socket", c.socketPath, "command", req.Command, "request_id", req.RequestID)
+	readStartedAt := time.Now()
 	reply, err := readFrame(conn, c.codec)
 	if err != nil {
+		latencytrace.LogPhase(slog.Default(), "cli", "transport.command.read", readStartedAt, "socket", c.socketPath, "command", req.Command, "request_id", req.RequestID, "error", err)
 		return protocol.ResponseEnvelope{}, err
 	}
+	latencytrace.LogPhase(slog.Default(), "cli", "transport.command.read", readStartedAt, "socket", c.socketPath, "command", req.Command, "request_id", req.RequestID)
 	if reply.Type == frameTypeError && reply.Error != nil {
 		return protocol.ResponseEnvelope{}, fmt.Errorf("command error: %s", reply.Error.Message)
 	}

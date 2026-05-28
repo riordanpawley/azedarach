@@ -12,6 +12,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
@@ -49,6 +50,16 @@ const (
 	taskInvariantTaskListFreshness daemonInvariantID = daemonInvariantTaskListFreshness
 )
 
+const taskListSnapshotCacheTTL = time.Second
+
+type taskListSnapshotCacheEntry struct {
+	Revision      uint64
+	LastCheckedAt time.Time
+	Freshness     protocol.TaskListFreshness
+	Tasks         []domain.Task
+	CachedAt      time.Time
+}
+
 func (d *Daemon) sourceForTaskInvariant(invariant daemonInvariantID) daemonInvariantSource {
 	return sourceForInvariant(invariant)
 }
@@ -57,7 +68,27 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	resp := d.successResponse(req)
 	projectID := d.projectID(req.Meta)
 	startedAt := time.Now()
+	refreshStartedAt := time.Now()
 	d.triggerWorktreeStateRefresh(projectID)
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.worktree_refresh_trigger", refreshStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
+	cacheStartedAt := time.Now()
+	if cached, ok := d.readFreshTaskListSnapshotCache(projectID); ok {
+		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", true)
+		payload := buildTaskListSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks)
+		marshalStartedAt := time.Now()
+		body, err := json.Marshal(payload)
+		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(cached.Tasks), "cache_hit", true)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		resp.Body = body
+		resp.Revision = payload.SnapshotRevision
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Info("daemon task list completed", "project_id", projectID, "task_count", len(cached.Tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "cache_hit", true)
+		}
+		return resp, nil
+	}
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", false)
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task list requested", "project_id", projectID)
 	}
@@ -65,18 +96,26 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	if issueClient == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
+	queryStartedAt := time.Now()
 	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.issue_store_list_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
+	freshnessStartedAt := time.Now()
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
-	payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), lastCheckedAt, freshness, tasks)
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.snapshot_freshness", freshnessStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "freshness", freshness)
+	revision := d.currentRevision(projectID)
+	payload := buildTaskListSnapshotPayload(projectID, revision, lastCheckedAt, freshness, tasks)
+	marshalStartedAt := time.Now()
 	body, err := json.Marshal(payload)
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(tasks), "cache_hit", false)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp.Body = body
 	resp.Revision = payload.SnapshotRevision
+	d.storeTaskListSnapshotCache(projectID, revision, lastCheckedAt, freshness, tasks)
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task list completed", "project_id", projectID, "task_count", len(tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds())
 	}
@@ -99,12 +138,37 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task get requested", "project_id", projectID, "task_id", taskID)
 	}
+	cacheStartedAt := time.Now()
+	if cached, ok := d.readFreshTaskListSnapshotCache(projectID); ok {
+		if _, found := findCachedTaskByID(cached.Tasks, taskID); found {
+			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "cache_hit", true)
+			payload := buildTaskListSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks)
+			marshalStartedAt := time.Now()
+			body, err := json.Marshal(payload)
+			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "context_task_count", len(cached.Tasks), "cache_hit", true)
+			if err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+			}
+			resp := d.successResponse(req)
+			resp.Body = body
+			resp.Revision = payload.SnapshotRevision
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Info("daemon task get completed", "project_id", projectID, "task_id", taskID, "context_task_count", len(cached.Tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "cache_hit", true)
+			}
+			return resp, nil
+		}
+	}
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "cache_hit", false)
+	refreshIssueStartedAt := time.Now()
 	d.refreshIssueWorktreeState(ctx, projectID, taskID)
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.issue_worktree_refresh", refreshIssueStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
+	queryStartedAt := time.Now()
 	tasks, err := issueClient.GetWithDependencyContextRuntime(ctx, projectID, taskID)
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.issue_store_get_dependency_context_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) || strings.Contains(err.Error(), domain.ErrNotFound.Error()) {
 			if d.cfg.Logger != nil {
@@ -114,6 +178,55 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 		}
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("daemon task get failed", "project_id", projectID, "task_id", taskID, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
+		}
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	freshnessStartedAt := time.Now()
+	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.snapshot_freshness", freshnessStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "freshness", freshness)
+	payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), lastCheckedAt, freshness, tasks)
+	marshalStartedAt := time.Now()
+	body, err := json.Marshal(payload)
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "context_task_count", len(tasks), "cache_hit", false)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	resp := d.successResponse(req)
+	resp.Body = body
+	resp.Revision = payload.SnapshotRevision
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task get completed", "project_id", projectID, "task_id", taskID, "context_task_count", len(tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds())
+	}
+	return resp, nil
+}
+
+func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
+	startedAt := time.Now()
+	var cmd struct {
+		TaskIDs []string `json:"task_ids"`
+	}
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	taskIDs := uniqueTrimmedTaskIDs(cmd.TaskIDs)
+	if len(taskIDs) == 0 {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "task_ids is required"), nil
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task get-many requested", "project_id", projectID, "task_count", len(taskIDs))
+	}
+	for _, taskID := range taskIDs {
+		d.refreshIssueWorktreeState(ctx, projectID, taskID)
+	}
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
+	tasks, err := issueClient.GetManyWithDependencyContextRuntime(ctx, projectID, taskIDs)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("daemon task get-many failed", "project_id", projectID, "task_count", len(taskIDs), "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
 		}
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -127,9 +240,99 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	resp.Body = body
 	resp.Revision = payload.SnapshotRevision
 	if d.cfg.Logger != nil {
-		d.cfg.Logger.Info("daemon task get completed", "project_id", projectID, "task_id", taskID, "context_task_count", len(tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds())
+		d.cfg.Logger.Info("daemon task get-many completed", "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds())
 	}
 	return resp, nil
+}
+
+func uniqueTrimmedTaskIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func (d *Daemon) readFreshTaskListSnapshotCache(projectID string) (taskListSnapshotCacheEntry, bool) {
+	projectID = d.canonicalProjectID(projectID)
+	currentRevision := d.currentRevision(projectID)
+
+	d.taskListSnapshotCacheMu.Lock()
+	defer d.taskListSnapshotCacheMu.Unlock()
+	if d.taskListSnapshotCache == nil {
+		return taskListSnapshotCacheEntry{}, false
+	}
+	cached, ok := d.taskListSnapshotCache[projectID]
+	if !ok {
+		return taskListSnapshotCacheEntry{}, false
+	}
+	if cached.Revision != currentRevision {
+		return taskListSnapshotCacheEntry{}, false
+	}
+	if cached.Freshness != protocol.TaskListFreshnessFresh {
+		return taskListSnapshotCacheEntry{}, false
+	}
+	if timeNow().Sub(cached.CachedAt) > taskListSnapshotCacheTTL {
+		return taskListSnapshotCacheEntry{}, false
+	}
+	cached.Tasks = cloneTasks(cached.Tasks)
+	return cached, true
+}
+
+func (d *Daemon) storeTaskListSnapshotCache(projectID string, revision uint64, lastCheckedAt time.Time, freshness protocol.TaskListFreshness, tasks []domain.Task) {
+	if freshness != protocol.TaskListFreshnessFresh {
+		return
+	}
+	projectID = d.canonicalProjectID(projectID)
+	d.taskListSnapshotCacheMu.Lock()
+	defer d.taskListSnapshotCacheMu.Unlock()
+	if d.taskListSnapshotCache == nil {
+		d.taskListSnapshotCache = map[string]taskListSnapshotCacheEntry{}
+	}
+	d.taskListSnapshotCache[projectID] = taskListSnapshotCacheEntry{
+		Revision:      revision,
+		LastCheckedAt: lastCheckedAt.UTC(),
+		Freshness:     freshness,
+		Tasks:         cloneTasks(tasks),
+		CachedAt:      timeNow(),
+	}
+}
+
+func (d *Daemon) invalidateTaskListSnapshotCache(projectID string) {
+	projectID = d.canonicalProjectID(projectID)
+	d.taskListSnapshotCacheMu.Lock()
+	defer d.taskListSnapshotCacheMu.Unlock()
+	if d.taskListSnapshotCache == nil {
+		return
+	}
+	delete(d.taskListSnapshotCache, projectID)
+}
+
+func cloneTasks(tasks []domain.Task) []domain.Task {
+	if len(tasks) == 0 {
+		return nil
+	}
+	out := make([]domain.Task, len(tasks))
+	copy(out, tasks)
+	return out
+}
+
+func findCachedTaskByID(tasks []domain.Task, taskID string) (domain.Task, bool) {
+	for _, task := range tasks {
+		if task.ID.String() == taskID {
+			return task, true
+		}
+	}
+	return domain.Task{}, false
 }
 
 func buildTaskListSnapshotPayload(projectID string, revision uint64, lastCheckedAt time.Time, freshness protocol.TaskListFreshness, tasks []domain.Task) protocol.TaskListSnapshotPayload {
@@ -326,8 +529,8 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 				if len(processedIssueIDs) < cap(processedIssueIDs) {
 					processedIssueIDs = append(processedIssueIDs, issueID)
 				}
-					issueBaseBranch := d.runtimeDiffBaseBranchForIssue(issueID, baseBranch, taskByIssue, worktreeByIssue)
-					status, err := d.git.RuntimeStatus(ctx, worktreePath, issueBaseBranch)
+				issueBaseBranch := d.runtimeDiffBaseBranchForIssue(issueID, baseBranch, taskByIssue, worktreeByIssue)
+				status, err := d.git.RuntimeStatus(ctx, worktreePath, issueBaseBranch)
 				outcome := throttle.Record(probeKey, gitStatusSignature(status), err)
 				if err != nil {
 					failedProbes++

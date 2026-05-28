@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -76,7 +78,13 @@ func NewAutostartOrchestrator(handshaker Handshaker, starter Starter) *Autostart
 
 // EnsureAttached performs handshake and autostarts daemon if needed.
 func (o *AutostartOrchestrator) EnsureAttached(ctx context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
+	startedAt := time.Now()
+	defer func() {
+		latencytrace.LogPhase(slog.Default(), "cli", "autostart.ensure_attached", startedAt, "client_name", hello.ClientName)
+	}()
+	handshakeStartedAt := time.Now()
 	ack, err := o.handshaker.Handshake(ctx, hello)
+	latencytrace.LogPhase(slog.Default(), "cli", "autostart.initial_handshake", handshakeStartedAt, "client_name", hello.ClientName, "accepted", err == nil && ack.Accepted, "error", err)
 	if err == nil && ack.Accepted {
 		if shouldReplaceAcceptedDaemon(hello, ack) {
 			if replaceErr := o.replaceDaemon(ctx); replaceErr != nil {
@@ -92,7 +100,9 @@ func (o *AutostartOrchestrator) EnsureAttached(ctx context.Context, hello protoc
 				break
 			}
 			o.sleepFn(o.preStartBackoff(attempt))
+			retryStartedAt := time.Now()
 			ack, err = o.handshaker.Handshake(ctx, hello)
+			latencytrace.LogPhase(slog.Default(), "cli", "autostart.pre_start_handshake", retryStartedAt, "client_name", hello.ClientName, "attempt", attempt+1, "accepted", err == nil && ack.Accepted, "error", err)
 			if err == nil && ack.Accepted {
 				if shouldReplaceAcceptedDaemon(hello, ack) {
 					if replaceErr := o.replaceDaemon(ctx); replaceErr != nil {
@@ -117,9 +127,12 @@ func (o *AutostartOrchestrator) EnsureAttached(ctx context.Context, hello protoc
 			return ack, fmt.Errorf("daemon handshake rejected: %s", ack.Reason)
 		}
 	} else {
+		startDaemonStartedAt := time.Now()
 		if startErr := o.startDaemon(ctx); startErr != nil {
+			latencytrace.LogPhase(slog.Default(), "cli", "autostart.start_daemon", startDaemonStartedAt, "client_name", hello.ClientName, "error", startErr)
 			return protocol.HelloAck{}, fmt.Errorf("autostart daemon: %w", startErr)
 		}
+		latencytrace.LogPhase(slog.Default(), "cli", "autostart.start_daemon", startDaemonStartedAt, "client_name", hello.ClientName)
 	}
 
 	return o.awaitAttached(ctx, hello)
@@ -131,7 +144,9 @@ func (o *AutostartOrchestrator) awaitAttached(ctx context.Context, hello protoco
 		err error
 	)
 	for attempt := 0; attempt <= o.maxRetries; attempt++ {
+		handshakeStartedAt := time.Now()
 		ack, err = o.handshaker.Handshake(ctx, hello)
+		latencytrace.LogPhase(slog.Default(), "cli", "autostart.await_handshake", handshakeStartedAt, "client_name", hello.ClientName, "attempt", attempt+1, "accepted", err == nil && ack.Accepted, "error", err)
 		if err == nil && ack.Accepted {
 			if shouldReplaceAcceptedDaemon(hello, ack) {
 				return ack, fmt.Errorf("daemon version mismatch persisted after replacement: client %s daemon %s", hello.ClientVersion, ack.DaemonVersion)

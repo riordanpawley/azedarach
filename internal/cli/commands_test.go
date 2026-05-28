@@ -2607,7 +2607,7 @@ func TestParseConfigSetArgs(t *testing.T) {
 		{
 			name:        "rejects missing args",
 			args:        []string{"spec.enabled"},
-			errContains: "usage: az config set spec.enabled <true|false> [--project-dir <dir>]",
+			errContains: "usage: az config set <key> <value> [--project-dir <dir>]",
 		},
 	}
 
@@ -2968,6 +2968,50 @@ func TestConfigSetCommandWritesSpecEnabledConfig(t *testing.T) {
 	}
 	if cfg.Spec.Enabled {
 		t.Fatalf("Spec.Enabled = true, want false")
+	}
+}
+
+func TestConfigSetCommandWritesLatencyTraceConfig(t *testing.T) {
+	projectDir := t.TempDir()
+
+	deps := &Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{}),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:    "proj",
+		RepoDir:      projectDir,
+	}
+
+	output := captureStdout(t, func() error {
+		return ConfigSetCommand(deps, ConfigSetOptions{Key: "diagnostics.latencyTrace", Value: "on"})
+	})
+
+	if !strings.Contains(output, "diagnostics.latencyTrace=true") {
+		t.Fatalf("config output missing diagnostics update: %q", output)
+	}
+	cfg, err := config.LoadConfig(projectDir)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if !cfg.Diagnostics.LatencyTrace {
+		t.Fatalf("Diagnostics.LatencyTrace = false, want true")
+	}
+}
+
+func TestConfigSetCommandRejectsInvalidLatencyTraceBoolean(t *testing.T) {
+	projectDir := t.TempDir()
+
+	deps := &Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{}),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:    "proj",
+		RepoDir:      projectDir,
+	}
+
+	err := ConfigSetCommand(deps, ConfigSetOptions{Key: "diagnostics.latencyTrace", Value: "maybe"})
+	if err == nil || !strings.Contains(err.Error(), "Invalid boolean value 'maybe' for diagnostics.latencyTrace") {
+		t.Fatalf("error = %v, want invalid latency trace boolean failure", err)
 	}
 }
 
@@ -5294,12 +5338,17 @@ func TestIssueGetManyCommand_JSONStableOrderWithPartialMisses(t *testing.T) {
 	now := time.Date(2026, 3, 26, 3, 15, 0, 0, time.UTC)
 	tasks := []domain.Task{
 		{ID: "az-1", Title: "First", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now},
-		{ID: "az-2", Title: "Second", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeFeature, CreatedAt: now, UpdatedAt: now},
+		{ID: "az-2", Title: "Second", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeFeature, Dependencies: []domain.Dependency{{ID: "az-1", Type: domain.DependencyBlocks}}, CreatedAt: now, UpdatedAt: now},
 	}
+	var commands []string
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				if req.Command != daemonclient.CommandTaskGetMany {
+					t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskGetMany)
+				}
 				body, err := marshalTaskListBody(tasks)
 				if err != nil {
 					t.Fatalf("marshal tasks: %v", err)
@@ -5333,17 +5382,26 @@ func TestIssueGetManyCommand_JSONStableOrderWithPartialMisses(t *testing.T) {
 	if got.Requested != 3 || got.Found != 2 || got.Missing != 1 {
 		t.Fatalf("unexpected summary: %+v", got)
 	}
+	if len(commands) != 1 {
+		t.Fatalf("commands = %v, want one batch read", commands)
+	}
 	if len(got.Results) != 3 {
 		t.Fatalf("results length = %d, want 3", len(got.Results))
 	}
 	if got.Results[0].ID != "az-2" || got.Results[0].Status != "found" {
 		t.Fatalf("result[0] = %+v", got.Results[0])
 	}
+	if len(got.Results[0].Dependencies) != 1 || got.Results[0].Dependencies[0].ID != "az-1" {
+		t.Fatalf("result[0] dependencies = %+v", got.Results[0].Dependencies)
+	}
 	if got.Results[1].ID != "az-missing" || got.Results[1].Status != "not_found" {
 		t.Fatalf("result[1] = %+v", got.Results[1])
 	}
 	if got.Results[2].ID != "az-1" || got.Results[2].Status != "found" {
 		t.Fatalf("result[2] = %+v", got.Results[2])
+	}
+	if len(got.Results[2].Dependents) != 1 || got.Results[2].Dependents[0].ID != "az-2" {
+		t.Fatalf("result[2] dependents = %+v", got.Results[2].Dependents)
 	}
 }
 
@@ -7185,7 +7243,7 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]") {
 		t.Fatalf("usage missing issue bulk-update command: %q", output)
 	}
-	if !strings.Contains(output, "config set spec.enabled <true|false> [--project-dir <dir>]") {
+	if !strings.Contains(output, "config set <key> <value> [--project-dir <dir>]") {
 		t.Fatalf("usage missing config command: %q", output)
 	}
 	if !strings.Contains(output, "az config set spec.enabled false") {
@@ -7919,6 +7977,12 @@ func TestIssueCreateCommandUsesExtendedDaemonAttachTimeout(t *testing.T) {
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+				if !started {
+					return protocol.HelloAck{}, errors.New("daemon socket unavailable")
+				}
+				return protocol.HelloAck{Accepted: true}, nil
+			},
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				if !started {
 					return protocol.ResponseEnvelope{}, errors.New("daemon socket unavailable")

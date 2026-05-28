@@ -5,14 +5,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	"github.com/riordanpawley/azedarach/internal/cli"
 	clitext "github.com/riordanpawley/azedarach/internal/cli/text"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	app "github.com/riordanpawley/azedarach/internal/tui"
 )
+
+var processStartedAt = time.Now()
 
 func main() {
 	args := os.Args[1:]
@@ -33,6 +37,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(1)
 	}
+	latencytrace.SetConfigEnabled(cfg.Diagnostics.LatencyTrace)
 
 	// If no arguments, run the TUI
 	if len(args) == 0 {
@@ -223,20 +228,20 @@ func main() {
 
 	case "config":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az config set spec.enabled <true|false> [--project-dir <dir>]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az config set <key> <value> [--project-dir <dir>]\n")
 			os.Exit(1)
 		}
 		configCommand := commandArgs[0]
 		configArgs := commandArgs[1:]
 		if configCommand == "help" || configCommand == "-h" || configCommand == "--help" {
-			fmt.Println("Usage: az config set spec.enabled <true|false> [--project-dir <dir>]")
+			fmt.Println("Usage: az config set <key> <value> [--project-dir <dir>]")
 			os.Exit(0)
 		}
 		switch configCommand {
 		case "set":
 			opts, err := cli.ParseConfigSetArgs(configArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az config set spec.enabled <true|false> [--project-dir <dir>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az config set <key> <value> [--project-dir <dir>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -254,7 +259,7 @@ func main() {
 			}
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown config command: %s\n", configCommand)
-			fmt.Fprintf(os.Stderr, "Usage: az config set spec.enabled <true|false> [--project-dir <dir>]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az config set <key> <value> [--project-dir <dir>]\n")
 			os.Exit(1)
 		}
 
@@ -1106,19 +1111,41 @@ func sessionHelpRequested(values ...string) bool {
 
 // runCommand executes a CLI command with dependency injection
 func runCommand(cfg *config.Config, fn func(*cli.Dependencies) error) error {
+	depsStartedAt := time.Now()
 	deps, err := cli.NewDependencies(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to initialize dependencies: %w", err)
 	}
-	return fn(deps)
+	commandShape := latencytrace.CommandShape(os.Args[1:])
+	latencytrace.LogPhase(deps.Logger, "cli", "dependencies_init", depsStartedAt, "command_shape", commandShape)
+	latencytrace.LogPhase(deps.Logger, "cli", "process_to_dependencies_ready", processStartedAt, "command_shape", commandShape)
+	commandStartedAt := time.Now()
+	err = fn(deps)
+	attrs := []any{"command_shape", commandShape}
+	if err != nil {
+		attrs = append(attrs, "error", err)
+	}
+	latencytrace.LogPhase(deps.Logger, "cli", "command_execute", commandStartedAt, attrs...)
+	return err
 }
 
 func runCommandAtRepoDir(cfg *config.Config, repoDir string, fn func(*cli.Dependencies) error) error {
+	depsStartedAt := time.Now()
 	deps, err := cli.NewDependenciesAt(cfg, repoDir)
 	if err != nil {
 		return fmt.Errorf("failed to initialize dependencies: %w", err)
 	}
-	return fn(deps)
+	commandShape := latencytrace.CommandShape(os.Args[1:])
+	latencytrace.LogPhase(deps.Logger, "cli", "dependencies_init", depsStartedAt, "command_shape", commandShape, "repo_dir", repoDir)
+	latencytrace.LogPhase(deps.Logger, "cli", "process_to_dependencies_ready", processStartedAt, "command_shape", commandShape, "repo_dir", repoDir)
+	commandStartedAt := time.Now()
+	err = fn(deps)
+	attrs := []any{"command_shape", commandShape, "repo_dir", repoDir}
+	if err != nil {
+		attrs = append(attrs, "error", err)
+	}
+	latencytrace.LogPhase(deps.Logger, "cli", "command_execute", commandStartedAt, attrs...)
+	return err
 }
 
 func runSessionCommand(cfg *config.Config, command string, args []string, namespaced bool) error {

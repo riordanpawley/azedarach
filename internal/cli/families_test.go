@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
@@ -481,8 +482,8 @@ func TestGitHooksNotifyCommandRefreshesDaemonGitStatus(t *testing.T) {
 	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
 		t.Fatalf("unmarshal request body: %v", err)
 	}
-	if !body.Refresh {
-		t.Fatal("expected hook daemon git status request to force a refresh")
+	if !body.Refresh || !body.HookTriggered {
+		t.Fatal("expected hook daemon git status request to use hook-triggered refresh")
 	}
 	gotWorktree, err := filepath.EvalSymlinks(body.Worktree)
 	if err != nil {
@@ -557,7 +558,7 @@ func TestGitHooksNotifyCommandPrefersCurrentWorktreeWhenProjectDirUnset(t *testi
 	}
 	deps := &Dependencies{
 		Config:       config.DefaultConfig(),
-		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		DaemonClient: daemonclient.New(transport).WithReconnectPolicy(reconnect.Policy{MaxAttempts: 1}).WithProjectID("proj-1"),
 		ProjectID:    "proj-1",
 		RepoDir:      baseDir,
 	}
@@ -580,8 +581,8 @@ func TestGitHooksNotifyCommandPrefersCurrentWorktreeWhenProjectDirUnset(t *testi
 	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
 		t.Fatalf("unmarshal request body: %v", err)
 	}
-	if !body.Refresh {
-		t.Fatal("expected hook daemon git status request to force a refresh")
+	if !body.Refresh || !body.HookTriggered {
+		t.Fatal("expected hook daemon git status request to use hook-triggered refresh")
 	}
 	gotWorktree, err := filepath.EvalSymlinks(body.Worktree)
 	if err != nil {
@@ -687,6 +688,12 @@ func TestGitHooksNotifyCommandAutostartsDaemonOnTransientGitStatusError(t *testi
 
 	attempts := 0
 	transport := &fakeDaemonTransport{
+		handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+			if !started {
+				return protocol.HelloAck{}, errors.New("dial unix /tmp/azedarach.sock: connect: connection refused")
+			}
+			return protocol.HelloAck{Accepted: true}, nil
+		},
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			if req.Command != daemonclient.CommandGitStatus {
 				return responseWithJSON(req, map[string]any{}), nil
@@ -700,7 +707,7 @@ func TestGitHooksNotifyCommandAutostartsDaemonOnTransientGitStatusError(t *testi
 	}
 	deps := &Dependencies{
 		Config:       config.DefaultConfig(),
-		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		DaemonClient: daemonclient.New(transport).WithReconnectPolicy(reconnect.Policy{MaxAttempts: 1}).WithProjectID("proj-1"),
 		ProjectID:    "proj-1",
 		RepoDir:      baseDir,
 	}
@@ -870,8 +877,8 @@ func TestAIHookRunCommandRoutesCodexAgentThroughPort(t *testing.T) {
 	if !reflect.DeepEqual(sessionLifecycle, []string{daemonclient.CommandSessionPause}) {
 		t.Fatalf("session lifecycle = %v, want [session.pause]", sessionLifecycle)
 	}
-	if len(sessionBodies) != 1 || sessionBodies[0].IssueID != "az-port-1" || sessionBodies[0].SessionID != "pr-az-port-1" {
-		t.Fatalf("session lifecycle bodies = %+v, want issue az-port-1 and canonical tmux session pr-az-port-1", sessionBodies)
+	if len(sessionBodies) != 1 || sessionBodies[0].IssueID != "az-port-1" || sessionBodies[0].SessionID != "pr-az-port-1.pane-12" {
+		t.Fatalf("session lifecycle bodies = %+v, want issue az-port-1 and pane-scoped canonical session pr-az-port-1.pane-12", sessionBodies)
 	}
 	if len(hookLogSources) != 1 || hookLogSources[0] != "codex.hook" {
 		t.Fatalf("hook log sources = %v, want one codex.hook", hookLogSources)

@@ -363,6 +363,49 @@ func TestClient_ListWithRuntimeReturnsJoinedProjectionFields(t *testing.T) {
 	assert.Equal(t, 7, one.GitAdditions)
 }
 
+func TestClient_GetManyWithDependencyContextRuntimeIncludesRequestedAndDirectContext(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-batch-context"
+
+	firstID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "First",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	require.NoError(t, err)
+	secondID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Second",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	require.NoError(t, err)
+	thirdID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Third",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+		Status:   domain.StatusBlocked,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.AddDependency(ctx, secondID, firstID, string(domain.DependencyBlocks)))
+	require.NoError(t, client.AddDependency(ctx, thirdID, secondID, string(domain.DependencyRelatedTo)))
+
+	tasks, err := client.GetManyWithDependencyContextRuntime(ctx, projectID, []string{secondID, "missing", secondID})
+	require.NoError(t, err)
+	taskByID := map[string]domain.Task{}
+	for _, task := range tasks {
+		taskByID[task.ID.String()] = task
+	}
+	require.Contains(t, taskByID, firstID)
+	require.Contains(t, taskByID, secondID)
+	require.Contains(t, taskByID, thirdID)
+	require.NotContains(t, taskByID, "missing")
+	assert.Len(t, taskByID[secondID].Dependencies, 1)
+	assert.Equal(t, firstID, taskByID[secondID].Dependencies[0].ID.String())
+}
+
 func TestClient_UpdateWithRuntimeReturnsChangedTask(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)

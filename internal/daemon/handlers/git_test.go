@@ -19,6 +19,7 @@ type fakeGitService struct {
 	diffStatFn          func(context.Context, string, string, string) (string, error)
 	statusFn            func(context.Context, string, string) (*git.GitStatus, error)
 	refreshStatusFn     func(context.Context, string, string) (*git.GitStatus, error)
+	hookRefreshStatusFn func(context.Context, string, string) (*git.GitStatus, error)
 	runtimeSignalsFn    func(context.Context, string, []GitRuntimeSignalsTarget, string, bool, string) ([]GitRuntimeSignalsResult, int, error)
 	worktreeForBranchFn func(context.Context, string, string) (string, bool, error)
 	preflightFn         func(context.Context, string, GitMergePreflightRequest) (*GitMergePreflightResult, error)
@@ -80,6 +81,13 @@ func (f *fakeGitService) Status(ctx context.Context, projectID, worktree string)
 func (f *fakeGitService) RefreshStatus(ctx context.Context, projectID, worktree string) (*git.GitStatus, error) {
 	if f.refreshStatusFn != nil {
 		return f.refreshStatusFn(ctx, projectID, worktree)
+	}
+	return &git.GitStatus{}, nil
+}
+
+func (f *fakeGitService) RefreshStatusForHook(ctx context.Context, projectID, worktree string) (*git.GitStatus, error) {
+	if f.hookRefreshStatusFn != nil {
+		return f.hookRefreshStatusFn(ctx, projectID, worktree)
 	}
 	return &git.GitStatus{}, nil
 }
@@ -412,6 +420,39 @@ func TestGitHandlerStatusRefreshUsesRefreshService(t *testing.T) {
 	}
 	if !body.Status.HasChanges {
 		t.Fatalf("status = %+v, want refreshed dirty status", body.Status)
+	}
+}
+
+func TestGitHandlerHookStatusRefreshUsesHookRefreshService(t *testing.T) {
+	var manualRefreshCalls int
+	var hookRefreshCalls int
+	handler := NewGitHandler(&fakeGitService{
+		refreshStatusFn: func(context.Context, string, string) (*git.GitStatus, error) {
+			manualRefreshCalls++
+			return &git.GitStatus{}, nil
+		},
+		hookRefreshStatusFn: func(_ context.Context, _ string, worktree string) (*git.GitStatus, error) {
+			hookRefreshCalls++
+			if worktree != "/tmp/az-1" {
+				t.Fatalf("hook refresh worktree = %q, want /tmp/az-1", worktree)
+			}
+			return &git.GitStatus{HasChanges: true, Modified: []string{"README.md"}}, nil
+		},
+	})
+
+	resp := handler.Handle(context.Background(), gitRequest(t, CommandGitStatus, gitCommandBody{
+		Worktree:      "/tmp/az-1",
+		Refresh:       true,
+		HookTriggered: true,
+	}))
+	if !resp.OK {
+		t.Fatalf("response = %+v", resp)
+	}
+	if manualRefreshCalls != 0 {
+		t.Fatalf("manual refresh calls = %d, want 0 for hook path", manualRefreshCalls)
+	}
+	if hookRefreshCalls != 1 {
+		t.Fatalf("hook refresh calls = %d, want 1", hookRefreshCalls)
 	}
 }
 

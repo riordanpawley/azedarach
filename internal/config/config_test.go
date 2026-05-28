@@ -73,6 +73,7 @@ func TestDefaultConfig(t *testing.T) {
 
 	assert.True(t, cfg.Spec.Enabled)
 	assert.Equal(t, "az", cfg.Orchestration.Via)
+	assert.False(t, cfg.Diagnostics.LatencyTrace)
 	assert.False(t, cfg.GitHooks.SpecSync.Enabled)
 	assert.Empty(t, cfg.GitHooks.SpecSync.Command)
 	assert.False(t, cfg.GitHooks.BoundaryCheck.Enabled)
@@ -510,6 +511,7 @@ func TestSaveConfigWritesSchemaAndVersion(t *testing.T) {
 	cfg.PR.CreateWithoutMerge = true
 	cfg.Network.AutoDetect = false
 	cfg.Spec.Enabled = false
+	cfg.Diagnostics.LatencyTrace = true
 	cfg.Session.InitCommands = []string{"direnv allow", "bun install"}
 
 	err := SaveConfig(cfg, path)
@@ -542,6 +544,10 @@ func TestSaveConfigWritesSchemaAndVersion(t *testing.T) {
 	networkRaw, ok := raw["network"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, false, networkRaw["autoDetect"])
+
+	diagnosticsRaw, ok := raw["diagnostics"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, true, diagnosticsRaw["latencyTrace"])
 
 	worktreeRaw, ok := raw["worktree"].(map[string]any)
 	require.True(t, ok)

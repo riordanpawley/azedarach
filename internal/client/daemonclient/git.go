@@ -37,6 +37,7 @@ type GitCommandRequest struct {
 	Targets       []GitRuntimeSignalsTarget `json:"targets,omitempty"`
 	CompareRemote bool                      `json:"compare_remote,omitempty"`
 	Refresh       bool                      `json:"refresh,omitempty"`
+	HookTriggered bool                      `json:"hook_triggered,omitempty"`
 }
 
 // GitCommandResponse captures the daemon response body for git workflow commands.
@@ -238,6 +239,20 @@ func (c *Client) GitStatusRefresh(ctx context.Context, worktree string) (git.Git
 	if err := c.commandJSON(ctx, CommandGitStatus, GitCommandRequest{
 		Worktree: worktree,
 		Refresh:  true,
+	}, &resp); err != nil {
+		return git.GitStatus{}, err
+	}
+	return resp.Status, nil
+}
+
+// GitStatusHookRefresh asks the daemon to refresh git status through the hook
+// coalescing path. Rapid hook calls for the same worktree share one refresh.
+func (c *Client) GitStatusHookRefresh(ctx context.Context, worktree string) (git.GitStatus, error) {
+	var resp gitStatusBody
+	if err := c.commandJSON(ctx, CommandGitStatus, GitCommandRequest{
+		Worktree:      worktree,
+		Refresh:       true,
+		HookTriggered: true,
 	}, &resp); err != nil {
 		return git.GitStatus{}, err
 	}

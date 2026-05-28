@@ -46,6 +46,10 @@ type GitStatusRefreshService interface {
 	RefreshStatus(ctx context.Context, projectID, worktree string) (*git.GitStatus, error)
 }
 
+type GitStatusHookRefreshService interface {
+	RefreshStatusForHook(ctx context.Context, projectID, worktree string) (*git.GitStatus, error)
+}
+
 type GitDiscardChangesService interface {
 	DiscardChanges(ctx context.Context, projectID, worktree string) (*GitDiscardChangesResult, error)
 }
@@ -92,6 +96,7 @@ type gitCommandBody struct {
 	Targets       []GitRuntimeSignalsTarget `json:"targets,omitempty"`
 	CompareRemote bool                      `json:"compare_remote,omitempty"`
 	Refresh       bool                      `json:"refresh,omitempty"`
+	HookTriggered bool                      `json:"hook_triggered,omitempty"`
 }
 
 type GitRuntimeSignalsTarget struct {
@@ -548,16 +553,29 @@ func (h *GitHandler) handleStatus(ctx context.Context, resp protocol.ResponseEnv
 		err    error
 	)
 	if cmd.Refresh {
-		refresher, ok := h.service.(GitStatusRefreshService)
-		if !ok {
-			resp.Error = &protocol.ErrorEnvelope{
-				Code:      protocol.ErrorCodeInternal,
-				Message:   "git status refresh unavailable",
-				Retryable: false,
+		if cmd.HookTriggered {
+			refresher, ok := h.service.(GitStatusHookRefreshService)
+			if !ok {
+				resp.Error = &protocol.ErrorEnvelope{
+					Code:      protocol.ErrorCodeInternal,
+					Message:   "git status hook refresh unavailable",
+					Retryable: false,
+				}
+				return resp
 			}
-			return resp
+			status, err = refresher.RefreshStatusForHook(ctx, cmd.ProjectID, cmd.Worktree)
+		} else {
+			refresher, ok := h.service.(GitStatusRefreshService)
+			if !ok {
+				resp.Error = &protocol.ErrorEnvelope{
+					Code:      protocol.ErrorCodeInternal,
+					Message:   "git status refresh unavailable",
+					Retryable: false,
+				}
+				return resp
+			}
+			status, err = refresher.RefreshStatus(ctx, cmd.ProjectID, cmd.Worktree)
 		}
-		status, err = refresher.RefreshStatus(ctx, cmd.ProjectID, cmd.Worktree)
 	} else {
 		status, err = h.service.Status(ctx, cmd.ProjectID, cmd.Worktree)
 	}

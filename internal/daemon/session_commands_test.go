@@ -1801,6 +1801,7 @@ func TestSessionPauseResumeUseIssueScopedRuntimeReconcile(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("pause response not ok: %+v", resp.Error)
 	}
+	waitForRuntimeReconcileCalls(t, recorder, 1)
 
 	req.RequestID = "req-resume"
 	req.Command = daemonhandlers.CommandSessionResume
@@ -1810,6 +1811,10 @@ func TestSessionPauseResumeUseIssueScopedRuntimeReconcile(t *testing.T) {
 	}
 	if !resp.OK {
 		t.Fatalf("resume response not ok: %+v", resp.Error)
+	}
+	waitForRuntimeReconcileCalls(t, recorder, 2)
+	if daemon.runtimeReconcileQueue != nil {
+		t.Cleanup(func() { _ = daemon.runtimeReconcileQueue.Close() })
 	}
 
 	calls, projectIDs := recorder.snapshot()
@@ -1828,6 +1833,22 @@ func TestSessionPauseResumeUseIssueScopedRuntimeReconcile(t *testing.T) {
 	for _, gotIssueIDs := range issueCalls {
 		if len(gotIssueIDs) != 1 || gotIssueIDs[0] != issueID {
 			t.Fatalf("runtime reconcile issue ids = %v, want only %s", issueCalls, issueID)
+		}
+	}
+}
+
+func waitForRuntimeReconcileCalls(t *testing.T, recorder *runtimeReconcileRecorder, want int) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		calls, _ := recorder.snapshot()
+		if calls >= want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for runtime reconcile calls >= %d; got %d", want, calls)
+		case <-time.After(10 * time.Millisecond):
 		}
 	}
 }

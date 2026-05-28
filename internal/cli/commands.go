@@ -29,6 +29,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/logstream"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -1501,7 +1502,7 @@ func ParseConfigSetArgs(args []string) (ConfigSetOptions, error) {
 		return ConfigSetOptions{}, err
 	}
 	if fs.NArg() != 2 {
-		return ConfigSetOptions{}, fmt.Errorf("usage: az config set spec.enabled <true|false> [--project-dir <dir>]")
+		return ConfigSetOptions{}, fmt.Errorf("usage: az config set <key> <value> [--project-dir <dir>]")
 	}
 	opts.Key = strings.TrimSpace(fs.Arg(0))
 	opts.Value = strings.TrimSpace(fs.Arg(1))
@@ -2674,11 +2675,20 @@ func ConfigSetCommand(deps *Dependencies, opts ConfigSetOptions) error {
 	}
 
 	fmt.Printf("Updated %s: %s=%s\n", configPath, opts.Key, renderedValue)
-	if opts.Key == "spec.enabled" {
+	switch opts.Key {
+	case "spec.enabled":
 		if renderedValue == "true" {
 			fmt.Println("Spec workflows are enabled.")
 		} else {
 			fmt.Println("Spec workflows are disabled. `az prime` will stop mentioning spec and `az spec` commands will fail until re-enabled.")
+		}
+	case "diagnostics.latencyTrace":
+		if renderedValue == "true" {
+			latencytrace.SetConfigEnabled(true)
+			fmt.Println("Latency trace logging is enabled. Restart the daemon for daemon-side trace logs to use the persisted setting.")
+		} else {
+			latencytrace.SetConfigEnabled(false)
+			fmt.Println("Latency trace logging is disabled.")
 		}
 	}
 
@@ -2811,8 +2821,15 @@ func setConfigValue(cfg *config.Config, key, value string) (string, error) {
 		}
 		cfg.Spec.Enabled = parsed
 		return fmt.Sprintf("%t", parsed), nil
+	case "diagnostics.latencyTrace":
+		parsed, ok := parseBooleanConfigValue(value)
+		if !ok {
+			return "", fmt.Errorf("Invalid boolean value '%s' for diagnostics.latencyTrace. Use true/false, on/off, yes/no, or 1/0.", value)
+		}
+		cfg.Diagnostics.LatencyTrace = parsed
+		return fmt.Sprintf("%t", parsed), nil
 	default:
-		return "", fmt.Errorf("Unsupported config key '%s'. Supported keys: spec.enabled", key)
+		return "", fmt.Errorf("Unsupported config key '%s'. Supported keys: spec.enabled, diagnostics.latencyTrace", key)
 	}
 }
 
@@ -3133,10 +3150,12 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 }
 
 type issueGetManyItem struct {
-	ID     string       `json:"id"`
-	Status string       `json:"status"`
-	Issue  *domain.Task `json:"issue,omitempty"`
-	Error  string       `json:"error,omitempty"`
+	ID           string              `json:"id"`
+	Status       string              `json:"status"`
+	Issue        *domain.Task        `json:"issue,omitempty"`
+	Dependencies []dependencyDetails `json:"dependencies,omitempty"`
+	Dependents   []dependencyDetails `json:"dependents,omitempty"`
+	Error        string              `json:"error,omitempty"`
 }
 
 type issueGetManyResult struct {
@@ -3156,7 +3175,7 @@ func IssueGetManyCommand(deps *Dependencies, opts IssueGetManyOptions) error {
 		return err
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := deps.DaemonClient.GetManyTaskSnapshot(ctx, opts.IssueIDs)
 	if err != nil {
 		return fmt.Errorf("failed to get issues: %w", err)
 	}
@@ -3186,10 +3205,13 @@ func IssueGetManyCommand(deps *Dependencies, opts IssueGetManyOptions) error {
 		}
 		result.Found++
 		taskCopy := task
+		dependencies, dependents := buildDependencyProjection(task, snapshot.Tasks)
 		result.Results = append(result.Results, issueGetManyItem{
-			ID:     issueID,
-			Status: "found",
-			Issue:  &taskCopy,
+			ID:           issueID,
+			Status:       "found",
+			Issue:        &taskCopy,
+			Dependencies: dependencies,
+			Dependents:   dependents,
 		})
 	}
 
@@ -4802,9 +4824,9 @@ func renderIssueGitSummary(task domain.Task) string {
 }
 
 type dependencyDetails struct {
-	ID     string
-	Type   domain.DependencyType
-	Status string
+	ID     string                `json:"id"`
+	Type   domain.DependencyType `json:"type"`
+	Status string                `json:"status"`
 }
 
 func printDependencies(deps []dependencyDetails) {
@@ -5888,6 +5910,7 @@ func applyResponseExitCode(resp protocol.ResponseEnvelope) int {
 }
 
 func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) error {
+	startedAt := time.Now()
 	launcher := newLauncher(runtimeRepoDirForDeps(deps), deps.DaemonSocket)
 	if concreteLauncher, ok := launcher.(*daemonprocess.Launcher); ok {
 		concreteLauncher.WithLogger(deps.Logger)
@@ -5900,11 +5923,14 @@ func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) er
 		Capabilities:    []string{"snapshot", "subscribe"},
 	})
 	if err != nil {
+		latencytrace.LogPhase(deps.Logger, "cli", "daemon_attach", startedAt, "client_name", clientName, "error", err)
 		return fmt.Errorf("daemon attach failed: %w", err)
 	}
 	if !ack.Accepted {
+		latencytrace.LogPhase(deps.Logger, "cli", "daemon_attach", startedAt, "client_name", clientName, "accepted", false, "reason", ack.Reason)
 		return fmt.Errorf("daemon handshake rejected: %s", ack.Reason)
 	}
+	latencytrace.LogPhase(deps.Logger, "cli", "daemon_attach", startedAt, "client_name", clientName, "accepted", true, "daemon_version", ack.DaemonVersion)
 	return nil
 }
 
@@ -5913,19 +5939,44 @@ func commandWithDaemonAutostartRetry[T any](ctx context.Context, deps *Dependenc
 	if err == nil {
 		return value, nil
 	}
-	if !reconnect.IsTransientTransportError(err) {
+	if !shouldAutostartAfterDaemonReadError(err) {
 		return value, err
 	}
 	startCtx, cancel := context.WithTimeout(context.Background(), issueCreateAutostartTimeout)
 	defer cancel()
-	launcher := newLauncher(runtimeRepoDirForDeps(deps), deps.DaemonSocket)
-	if concreteLauncher, ok := launcher.(*daemonprocess.Launcher); ok {
-		concreteLauncher.WithLogger(deps.Logger)
+	var startErr error
+	if deps == nil || deps.DaemonClient == nil {
+		startErr = startDaemonLauncher(startCtx, deps)
+	} else {
+		startErr = ensureDaemon(startCtx, deps, "cli")
 	}
-	if startErr := launcher.Start(startCtx); startErr != nil {
+	if startErr != nil {
 		return value, fmt.Errorf("autostart daemon: %w", startErr)
 	}
 	return call(ctx)
+}
+
+func startDaemonLauncher(ctx context.Context, deps *Dependencies) error {
+	socketPath := ""
+	if deps != nil {
+		socketPath = deps.DaemonSocket
+	}
+	launcher := newLauncher(runtimeRepoDirForDeps(deps), socketPath)
+	if concreteLauncher, ok := launcher.(*daemonprocess.Launcher); ok && deps != nil {
+		concreteLauncher.WithLogger(deps.Logger)
+	}
+	return launcher.Start(ctx)
+}
+
+func shouldAutostartAfterDaemonReadError(err error) bool {
+	if reconnect.IsTransientTransportError(err) {
+		return true
+	}
+	var commandErr *daemonclient.CommandError
+	if errors.As(err, &commandErr) {
+		return commandErr.Code == protocol.ErrorCodeUnavailable && commandErr.Retryable
+	}
+	return false
 }
 
 func runtimeRepoDirForDeps(deps *Dependencies) string {
