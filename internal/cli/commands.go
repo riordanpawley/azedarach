@@ -135,9 +135,10 @@ type IssueGetOptions struct {
 }
 
 type IssueGetManyOptions struct {
-	Project  string
-	IssueIDs []string
-	JSON     bool
+	Project      string
+	IssueIDs     []string
+	JSON         bool
+	IncludeNotes bool
 }
 
 type IssueCheckOptions struct {
@@ -2037,6 +2038,7 @@ func ParseIssueGetManyArgs(args []string) (IssueGetManyOptions, error) {
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.BoolVar(&opts.JSON, "json", false, "output issue lookup results as JSON")
+	fs.BoolVar(&opts.IncludeNotes, "with-notes", false, "include full notes in output")
 	fs.Func("id", "issue id to fetch (repeatable)", func(v string) error {
 		trimmed := strings.TrimSpace(v)
 		if trimmed == "" {
@@ -2063,7 +2065,7 @@ func ParseIssueGetManyArgs(args []string) (IssueGetManyOptions, error) {
 	}
 	ids = dedupeOrderedIDs(ids)
 	if len(ids) == 0 {
-		return IssueGetManyOptions{}, fmt.Errorf("usage: az issue get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json]")
+		return IssueGetManyOptions{}, fmt.Errorf("usage: az issue get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json] [--with-notes]")
 	}
 	opts.IssueIDs = ids
 	opts.Project = normalizeIssueProject(opts.Project)
@@ -3207,6 +3209,9 @@ func IssueGetManyCommand(deps *Dependencies, opts IssueGetManyOptions) error {
 		}
 		result.Found++
 		taskCopy := task
+		if !opts.IncludeNotes {
+			taskCopy.Notes = ""
+		}
 		dependencies, dependents := buildDependencyProjection(task, snapshot.Tasks)
 		result.Results = append(result.Results, issueGetManyItem{
 			ID:           issueID,
@@ -3227,6 +3232,9 @@ func IssueGetManyCommand(deps *Dependencies, opts IssueGetManyOptions) error {
 		switch item.Status {
 		case "found":
 			fmt.Printf("%s found: %s [%s]\n", item.ID, item.Issue.Title, item.Issue.Status)
+			if opts.IncludeNotes && strings.TrimSpace(item.Issue.Notes) != "" {
+				fmt.Printf("Notes:\n%s\n", item.Issue.Notes)
+			}
 		default:
 			fmt.Printf("%s not_found: %s\n", item.ID, item.Error)
 		}

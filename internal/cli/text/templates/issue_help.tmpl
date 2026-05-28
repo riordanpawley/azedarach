@@ -3,7 +3,7 @@ Usage: az issue <list|get|get-many|check|doctor|create|split|update|close|finali
 Commands:
   list [--project <project-id>] [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
   get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]  Show a single issue by ID
-  get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
+  get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json] [--with-notes]  Fetch many issues in requested order
   check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]  Alias for get
   doctor [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]  Run integrity checks for one issue
   create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create an issue; auto-parents to AZEDARACH_ISSUE_ID when set

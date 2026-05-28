@@ -3582,12 +3582,15 @@ func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
 }
 
 func TestParseIssueGetManyArgs(t *testing.T) {
-	got, err := ParseIssueGetManyArgs([]string{"--id", "az-1", "--id", "az-2", "--ids", "az-3,az-4", "--json"})
+	got, err := ParseIssueGetManyArgs([]string{"--id", "az-1", "--id", "az-2", "--ids", "az-3,az-4", "--json", "--with-notes"})
 	if err != nil {
 		t.Fatalf("ParseIssueGetManyArgs() error = %v", err)
 	}
 	if !got.JSON {
 		t.Fatalf("expected json output flag to be set")
+	}
+	if !got.IncludeNotes {
+		t.Fatalf("expected with-notes flag to be set")
 	}
 	if !reflect.DeepEqual(got.IssueIDs, []string{"az-1", "az-2", "az-3", "az-4"}) {
 		t.Fatalf("ParseIssueGetManyArgs() ids = %+v", got.IssueIDs)
@@ -5393,8 +5396,8 @@ func TestIssueGetCommandDepsProjectionIncludesDependentsAndParentEdge(t *testing
 func TestIssueGetManyCommand_JSONStableOrderWithPartialMisses(t *testing.T) {
 	now := time.Date(2026, 3, 26, 3, 15, 0, 0, time.UTC)
 	tasks := []domain.Task{
-		{ID: "az-1", Title: "First", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now},
-		{ID: "az-2", Title: "Second", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeFeature, Dependencies: []domain.Dependency{{ID: "az-1", Type: domain.DependencyBlocks}}, CreatedAt: now, UpdatedAt: now},
+		{ID: "az-1", Title: "First", Notes: "first notes", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now},
+		{ID: "az-2", Title: "Second", Notes: "second notes", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeFeature, Dependencies: []domain.Dependency{{ID: "az-1", Type: domain.DependencyBlocks}}, CreatedAt: now, UpdatedAt: now},
 	}
 	var commands []string
 	deps := &Dependencies{
@@ -5447,6 +5450,9 @@ func TestIssueGetManyCommand_JSONStableOrderWithPartialMisses(t *testing.T) {
 	if got.Results[0].ID != "az-2" || got.Results[0].Status != "found" {
 		t.Fatalf("result[0] = %+v", got.Results[0])
 	}
+	if got.Results[0].Issue == nil || got.Results[0].Issue.Notes != "" {
+		t.Fatalf("result[0] notes should be omitted by default: %+v", got.Results[0].Issue)
+	}
 	if len(got.Results[0].Dependencies) != 1 || got.Results[0].Dependencies[0].ID != "az-1" {
 		t.Fatalf("result[0] dependencies = %+v", got.Results[0].Dependencies)
 	}
@@ -5458,6 +5464,51 @@ func TestIssueGetManyCommand_JSONStableOrderWithPartialMisses(t *testing.T) {
 	}
 	if len(got.Results[2].Dependents) != 1 || got.Results[2].Dependents[0].ID != "az-2" {
 		t.Fatalf("result[2] dependents = %+v", got.Results[2].Dependents)
+	}
+}
+
+func TestIssueGetManyCommand_JSONIncludesNotesWhenRequested(t *testing.T) {
+	now := time.Date(2026, 3, 26, 3, 15, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{ID: "az-1", Title: "First", Notes: "first notes", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now},
+	}
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := marshalTaskListBody(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        3,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueGetManyCommand(deps, IssueGetManyOptions{
+			IssueIDs:     []string{"az-1"},
+			JSON:         true,
+			IncludeNotes: true,
+		})
+	})
+	var got issueGetManyResult
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatalf("unmarshal get-many output: %v", err)
+	}
+	if got.Results[0].Issue == nil || got.Results[0].Issue.Notes != "first notes" {
+		t.Fatalf("result notes = %+v, want included notes", got.Results[0].Issue)
 	}
 }
 
