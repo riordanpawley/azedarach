@@ -307,6 +307,74 @@ func (d *Daemon) ensureFreshRuntimeForIssueMutation(ctx context.Context, project
 	return nil
 }
 
+func (d *Daemon) refreshRuntimeForIssueMutationAsync(projectID string, issueID string, reason string) {
+	if d == nil {
+		return
+	}
+	projectID = d.canonicalProjectID(projectID)
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "mutation"
+	}
+	issueIDs := normalizeRuntimeReconcileIssueIDs([]string{issueID})
+	if len(issueIDs) == 0 {
+		return
+	}
+
+	key := runtimeReconcileIssueQueueKey(projectID, issueIDs)
+	submission, err := d.ensureRuntimeReconcileQueue().Enqueue(reconcileQueueRequest[protocol.RuntimeReconcileResponseBody]{
+		Key:         key,
+		Priority:    reconcilePriorityBackground,
+		Reason:      "mutation-issue:" + reason,
+		ExecContext: context.Background(),
+		Work: func(workCtx context.Context) (protocol.RuntimeReconcileResponseBody, error) {
+			workCtx = context.WithValue(workCtx, runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
+				Priority: reconcilePriorityBackground,
+				Reason:   "mutation-issue:" + reason,
+			})
+			result, reconcileErr := d.ensureRuntimeReconciler().ReconcileIssues(workCtx, projectID, issueIDs)
+			d.ensureRuntimeReconcileThrottle().Record(projectID, runtimeReconcileResultSignature(result), reconcileErr)
+			if reconcileErr != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Debug("async issue runtime reconcile after mutation failed",
+					"project_id", projectID,
+					"issue_ids", strings.Join(issueIDs, ","),
+					"reason", reason,
+					"error", reconcileErr,
+				)
+			}
+			return result, reconcileErr
+		},
+	})
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("async issue runtime reconcile enqueue failed",
+				"project_id", projectID,
+				"issue_ids", strings.Join(issueIDs, ","),
+				"reason", reason,
+				"error", err,
+			)
+		}
+		return
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("async issue runtime reconcile enqueued after mutation",
+			"project_id", projectID,
+			"issue_ids", strings.Join(issueIDs, ","),
+			"reason", reason,
+			"deduped", submission.Deduped,
+			"reprioritized", submission.Reprioritized,
+		)
+	}
+}
+
+func runtimeReconcileIssueQueueKey(projectID string, issueIDs []string) string {
+	normalized := normalizeRuntimeReconcileIssueIDs(issueIDs)
+	if len(normalized) == 0 {
+		return "runtime-reconcile-issue:" + strings.TrimSpace(projectID)
+	}
+	return "runtime-reconcile-issue:" + strings.TrimSpace(projectID) + ":" + strings.Join(normalized, ",")
+}
+
 func (d *Daemon) directRuntimeReconcileForMutation(ctx context.Context, projectID string, reason string, timeout time.Duration) error {
 	if timeout <= 0 {
 		timeout = defaultRuntimeReconcileTimeout

@@ -818,9 +818,7 @@ func (d *Daemon) handleSessionPause(ctx context.Context, req protocol.RequestEnv
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session pause transition: %v", err)), nil
 	}
-	if err := d.ensureFreshRuntimeForIssueMutation(ctx, cmd.ProjectID, cmd.IssueID, daemonhandlers.CommandSessionPause); err != nil {
-		return d.mutationFreshnessErrorResponse(req, err), nil
-	}
+	d.refreshRuntimeForIssueMutationAsync(cmd.ProjectID, cmd.IssueID, daemonhandlers.CommandSessionPause)
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session pause completed",
 			"project_id", cmd.ProjectID,
@@ -870,9 +868,7 @@ func (d *Daemon) handleSessionResume(ctx context.Context, req protocol.RequestEn
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session resume transition: %v", err)), nil
 	}
-	if err := d.ensureFreshRuntimeForIssueMutation(ctx, cmd.ProjectID, cmd.IssueID, daemonhandlers.CommandSessionResume); err != nil {
-		return d.mutationFreshnessErrorResponse(req, err), nil
-	}
+	d.refreshRuntimeForIssueMutationAsync(cmd.ProjectID, cmd.IssueID, daemonhandlers.CommandSessionResume)
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session resume completed",
 			"project_id", cmd.ProjectID,
