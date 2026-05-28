@@ -3475,6 +3475,12 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "az orchestrate complete-check --root <issue-id>") {
 		t.Fatalf("prompt = %q, want complete-check instruction", prompt)
 	}
+	if !strings.Contains(prompt, "Use direct tmux pane capture only when watch/status indicate a worker may be stuck or failed") {
+		t.Fatalf("prompt = %q, want bounded tmux observation guidance", prompt)
+	}
+	if !strings.Contains(prompt, "do not poll tmux panes on a fixed interval") {
+		t.Fatalf("prompt = %q, want tmux polling guardrail", prompt)
+	}
 	if !strings.Contains(prompt, "az orchestrate integrate --issue <issue-id>") {
 		t.Fatalf("prompt = %q, want integrate instruction", prompt)
 	}
