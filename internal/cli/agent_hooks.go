@@ -109,9 +109,9 @@ func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookCont
 func notifyDaemonAgentSessionStatus(ctx context.Context, deps *Dependencies, issueID, event string) error {
 	command := ""
 	switch event {
-	case hookEventIdlePrompt, hookEventPermissionRequest, hookEventStop, hookEventSessionEnd:
+	case hookEventIdlePrompt, hookEventPermissionRequest, hookEventStop, hookEventSubagentStop, hookEventSessionEnd:
 		command = commandSessionPause
-	case hookEventSessionStart, hookEventUserPromptSubmit, hookEventPreToolUse, hookEventPostToolUse:
+	case hookEventSessionStart, hookEventSubagentStart, hookEventUserPromptSubmit, hookEventPreToolUse, hookEventPostToolUse:
 		command = commandSessionResume
 	default:
 		return nil
@@ -208,6 +208,10 @@ func codexGuardEventForNotifyEvent(event string) (string, bool) {
 		return "permission-request", true
 	case hookEventStop:
 		return "stop", true
+	case hookEventSubagentStart:
+		return "subagent-start", true
+	case hookEventSubagentStop:
+		return "subagent-stop", true
 	default:
 		return "", false
 	}

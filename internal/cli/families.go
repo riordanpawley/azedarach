@@ -28,6 +28,8 @@ const (
 	hookEventPreToolUse        = "pre_tool_use"
 	hookEventPostToolUse       = "post_tool_use"
 	hookEventStop              = "stop"
+	hookEventSubagentStart     = "subagent_start"
+	hookEventSubagentStop      = "subagent_stop"
 	hookEventSessionEnd        = "session_end"
 	openCodePluginFilename     = "opencode-az.js"
 	commandDevServerList       = "devserver.list"
@@ -46,6 +48,8 @@ var hookEventStatuses = map[string]string{
 	hookEventPreToolUse:        "running_tool",
 	hookEventPostToolUse:       "active",
 	hookEventStop:              "stopped",
+	hookEventSubagentStart:     "started",
+	hookEventSubagentStop:      "stopped",
 	hookEventSessionEnd:        "ended",
 }
 
@@ -1070,6 +1074,10 @@ func codexNotifyEventForGuardEvent(event string) (string, error) {
 		return hookEventPermissionRequest, nil
 	case "stop":
 		return hookEventStop, nil
+	case "subagent-start":
+		return hookEventSubagentStart, nil
+	case "subagent-stop":
+		return hookEventSubagentStop, nil
 	default:
 		return "", fmt.Errorf("unsupported codex hook event: %s", event)
 	}
@@ -1089,7 +1097,7 @@ func codexGuardResponse(projectDir, event string, payloadMap map[string]any) (ma
 
 	response := map[string]any{}
 	switch event {
-	case "session-start":
+	case "session-start", "subagent-start":
 		threadState = codexGuardThreadState{}
 		state.Threads[threadID] = threadState
 		// bpn: Temporary workaround. Keep tracking state, but disable hard
@@ -1118,7 +1126,7 @@ func codexGuardResponse(projectDir, event string, payloadMap map[string]any) (ma
 		// PermissionRequest is purely observational from the guard's perspective:
 		// it surfaces "waiting for human" via the daemon-notify path but does not
 		// alter prime evidence state.
-	case "stop":
+	case "stop", "subagent-stop":
 		delete(state.Threads, threadID)
 	}
 
@@ -1549,7 +1557,7 @@ func writeCodexGuardState(path string, state codexGuardState) error {
 }
 
 func codexGuardThreadID(payload map[string]any) string {
-	for _, key := range []string{"thread_id", "thread-id", "threadId"} {
+	for _, key := range []string{"thread_id", "thread-id", "threadId", "agent_id", "agent-id", "agentId"} {
 		if value, ok := payload[key].(string); ok && strings.TrimSpace(value) != "" {
 			return strings.TrimSpace(value)
 		}
