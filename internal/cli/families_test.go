@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
@@ -481,8 +482,8 @@ func TestGitHooksNotifyCommandRefreshesDaemonGitStatus(t *testing.T) {
 	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
 		t.Fatalf("unmarshal request body: %v", err)
 	}
-	if !body.Refresh {
-		t.Fatal("expected hook daemon git status request to force a refresh")
+	if !body.Refresh || !body.HookTriggered {
+		t.Fatal("expected hook daemon git status request to use hook-triggered refresh")
 	}
 	gotWorktree, err := filepath.EvalSymlinks(body.Worktree)
 	if err != nil {
@@ -580,8 +581,8 @@ func TestGitHooksNotifyCommandPrefersCurrentWorktreeWhenProjectDirUnset(t *testi
 	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
 		t.Fatalf("unmarshal request body: %v", err)
 	}
-	if !body.Refresh {
-		t.Fatal("expected hook daemon git status request to force a refresh")
+	if !body.Refresh || !body.HookTriggered {
+		t.Fatal("expected hook daemon git status request to use hook-triggered refresh")
 	}
 	gotWorktree, err := filepath.EvalSymlinks(body.Worktree)
 	if err != nil {
@@ -700,7 +701,7 @@ func TestGitHooksNotifyCommandAutostartsDaemonOnTransientGitStatusError(t *testi
 	}
 	deps := &Dependencies{
 		Config:       config.DefaultConfig(),
-		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		DaemonClient: daemonclient.New(transport).WithReconnectPolicy(reconnect.Policy{MaxAttempts: 1}).WithProjectID("proj-1"),
 		ProjectID:    "proj-1",
 		RepoDir:      baseDir,
 	}

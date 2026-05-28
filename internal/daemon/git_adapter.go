@@ -32,6 +32,7 @@ type gitServiceAdapter struct {
 	runtimeProjectionWriter     runtimeProjectionWriter
 	statusRefreshQueue          *reconcileQueue[*git.GitStatus]
 	statusRefreshThrottle       *reconcileThrottle
+	hookRefreshDebounce         time.Duration
 	logger                      *slog.Logger
 	pollInterval                time.Duration
 	onStatusUpdate              func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus)
@@ -40,6 +41,7 @@ type gitServiceAdapter struct {
 
 	refreshMu      sync.Mutex
 	refreshRunning map[string]bool
+	hookRefreshes  map[string]*hookStatusRefresh
 	pollers        map[string]context.CancelFunc
 
 	runtimeSignalsMu    sync.Mutex
@@ -63,11 +65,18 @@ type runtimeSignalProjection struct {
 	refreshedAt time.Time
 }
 
+type hookStatusRefresh struct {
+	done   chan struct{}
+	status *git.GitStatus
+	err    error
+}
+
 var (
-	_ daemonhandlers.GitService               = (*gitServiceAdapter)(nil)
-	_ daemonhandlers.GitMergePreflightService = (*gitServiceAdapter)(nil)
-	_ daemonhandlers.GitDiscardChangesService = (*gitServiceAdapter)(nil)
-	_ daemonhandlers.GitCheckpointService     = (*gitServiceAdapter)(nil)
+	_ daemonhandlers.GitService                  = (*gitServiceAdapter)(nil)
+	_ daemonhandlers.GitMergePreflightService    = (*gitServiceAdapter)(nil)
+	_ daemonhandlers.GitStatusHookRefreshService = (*gitServiceAdapter)(nil)
+	_ daemonhandlers.GitDiscardChangesService    = (*gitServiceAdapter)(nil)
+	_ daemonhandlers.GitCheckpointService        = (*gitServiceAdapter)(nil)
 )
 
 func (a *gitServiceAdapter) Fetch(ctx context.Context, projectID, worktree, remote string) error {
@@ -322,6 +331,81 @@ func (a *gitServiceAdapter) RefreshStatus(ctx context.Context, projectID, worktr
 		return &git.GitStatus{}, nil
 	}
 	return status, nil
+}
+
+func (a *gitServiceAdapter) RefreshStatusForHook(ctx context.Context, projectID, worktree string) (*git.GitStatus, error) {
+	projectID = normalizeProjectID(projectID)
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return &git.GitStatus{}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	key := gitStatusRefreshQueueKey(projectID, worktree)
+	refresh, owner := a.hookStatusRefresh(key)
+	if owner {
+		go a.runHookStatusRefresh(projectID, worktree, key, refresh)
+	}
+
+	select {
+	case <-refresh.done:
+		if refresh.err != nil {
+			return nil, refresh.err
+		}
+		if refresh.status == nil {
+			return &git.GitStatus{}, nil
+		}
+		return refresh.status, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (a *gitServiceAdapter) hookStatusRefresh(key string) (*hookStatusRefresh, bool) {
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+	if a.hookRefreshes == nil {
+		a.hookRefreshes = map[string]*hookStatusRefresh{}
+	}
+	if refresh := a.hookRefreshes[key]; refresh != nil {
+		return refresh, false
+	}
+	refresh := &hookStatusRefresh{done: make(chan struct{})}
+	a.hookRefreshes[key] = refresh
+	return refresh, true
+}
+
+func (a *gitServiceAdapter) runHookStatusRefresh(projectID, worktree, key string, refresh *hookStatusRefresh) {
+	defer func() {
+		a.refreshMu.Lock()
+		if a.hookRefreshes[key] == refresh {
+			delete(a.hookRefreshes, key)
+		}
+		a.refreshMu.Unlock()
+		close(refresh.done)
+	}()
+	if r := recover(); r != nil {
+		refresh.err = fmt.Errorf("git status hook refresh panicked: %v", r)
+		if a.logger != nil {
+			a.logger.Error("git status hook refresh panicked", "project_id", projectID, "worktree", worktree, "panic", r, "stack", string(debug.Stack()))
+		}
+		return
+	}
+
+	debounce := a.hookRefreshDebounce
+	if debounce <= 0 {
+		debounce = defaultGitHookStatusRefreshDebounce
+	}
+	timer := time.NewTimer(debounce)
+	<-timer.C
+
+	refreshCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	status, err := a.refreshGitStatusManual(refreshCtx, projectID, worktree)
+	refresh.status = status
+	refresh.err = err
 }
 
 func (a *gitServiceAdapter) ensureStatusRefreshQueue() *reconcileQueue[*git.GitStatus] {
