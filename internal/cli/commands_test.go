@@ -5928,6 +5928,7 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 					return responseWithJSON(req, map[string]any{
 						"project_id": protocol.DefaultProjectID,
 						"worktrees": []map[string]string{
+							{"issue_id": root.String(), "path": "/repo-az-parent", "branch": "user/az-parent/parent-work"},
 							{"issue_id": child.String(), "path": "/repo-az-child", "branch": "user/az-child/child-work"},
 						},
 					}), nil
@@ -5980,6 +5981,13 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	}
 	if submitted.Kind != commandSessionStart || submitted.IssueID != child {
 		t.Fatalf("submitted = %+v", submitted)
+	}
+	var sessionReq sessionRequestBody
+	if err := json.Unmarshal(submitted.Payload, &sessionReq); err != nil {
+		t.Fatalf("decode submitted session payload: %v", err)
+	}
+	if sessionReq.BaseBranch != "user/az-parent/parent-work" {
+		t.Fatalf("submitted base_branch = %q, want parent worktree branch", sessionReq.BaseBranch)
 	}
 	if !strings.Contains(result.Advice.IntegrateCommand, child.String()) {
 		t.Fatalf("advice = %+v, want child integration command", result.Advice)

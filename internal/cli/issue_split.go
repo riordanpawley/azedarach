@@ -111,10 +111,18 @@ func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
 		return err
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	baseBranch, err := resolveParentWorktreeBaseBranch(ctx, deps, resolveCLIBaseBranch(deps.Config), parentIssueID, createResult.IssueID)
+	if err != nil {
+		return err
+	}
+
 	startResult, err := orchestrateStart(deps, OrchestrateStartOptions{
-		RootIssueID: parentIssueID,
-		Limit:       1,
-		IssueIDs:    []string{createResult.IssueID},
+		RootIssueID:        parentIssueID,
+		Limit:              1,
+		IssueIDs:           []string{createResult.IssueID},
+		BaseBranchOverride: baseBranch,
 	})
 	if err != nil {
 		return err

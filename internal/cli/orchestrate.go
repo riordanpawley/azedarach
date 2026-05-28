@@ -27,11 +27,12 @@ type OrchestrateStatusOptions struct {
 }
 
 type OrchestrateStartOptions struct {
-	Project     string
-	RootIssueID string
-	Limit       int
-	IssueIDs    []string
-	JSON        bool
+	Project            string
+	RootIssueID        string
+	Limit              int
+	IssueIDs           []string
+	JSON               bool
+	BaseBranchOverride string
 }
 
 type OrchestrateWatchOptions struct {
@@ -505,7 +506,7 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 			result.Skipped[issueID] = "session-already-running"
 			continue
 		}
-		launch, err := submitSessionStartForIssue(deps, issueID)
+		launch, err := submitSessionStartForIssueWithBaseBranch(deps, issueID, opts.BaseBranchOverride)
 		if err != nil {
 			result.Failed[issueID] = err.Error()
 			continue
@@ -1149,15 +1150,23 @@ func startSessionForIssue(deps *Dependencies, issueID string) error {
 }
 
 func submitSessionStartForIssue(deps *Dependencies, issueID string) (orchestrateStartLaunch, error) {
+	return submitSessionStartForIssueWithBaseBranch(deps, issueID, "")
+}
+
+func submitSessionStartForIssueWithBaseBranch(deps *Dependencies, issueID, baseBranchOverride string) (orchestrateStartLaunch, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	task, err := validateSessionIssueID(ctx, deps, issueID)
 	if err != nil {
 		return orchestrateStartLaunch{}, err
 	}
-	baseBranch, err := resolveSessionStartBaseBranch(ctx, deps, task)
-	if err != nil {
-		return orchestrateStartLaunch{}, err
+	baseBranch := strings.TrimSpace(baseBranchOverride)
+	if baseBranch == "" {
+		resolvedBaseBranch, err := resolveSessionStartBaseBranch(ctx, deps, task)
+		if err != nil {
+			return orchestrateStartLaunch{}, err
+		}
+		baseBranch = resolvedBaseBranch
 	}
 	parsedIssueID, err := naming.ParseIssueID(issueID)
 	if err != nil {
