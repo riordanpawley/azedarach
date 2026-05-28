@@ -1050,7 +1050,7 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 	}
 	fmt.Fprintf(&b, "\nRole: worker\n")
 	fmt.Fprintf(&b, "- Focus only on issue %s unless the orchestrator explicitly expands scope.\n", issueID)
-	fmt.Fprintf(&b, "- Before behavior changes, inspect linked requirements with `az spec read --issue %s`; if none are linked, record that in issue notes.\n", issueID)
+	fmt.Fprintf(&b, "- Before behavior changes, inspect linked requirements with `az spec read --issue %s`; if none are linked, find a nearby requirement with `az spec req list`/`az spec read --req <req-id>` or create/update one before implementation. For contract-preserving refactors, tests, tooling, docs, internal cleanup, or fixes that restore existing behavior, record explicit `Spec impact: none (...)` evidence instead of creating implementation-only requirements.\n", issueID)
 	fmt.Fprintf(&b, "- Keep `%s` status and notes current with commands run, key outputs/assertions, files changed, and AC pass/fail evidence.\n", issueID)
 	if coordination == "mailbox" {
 		fmt.Fprintf(&b, "- Use mailbox events for hybrid coordination: `worker-progress`, `worker-blocked`, and `worker-complete`.\n")

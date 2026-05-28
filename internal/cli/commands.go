@@ -5203,6 +5203,11 @@ func PrimeCommand(deps *Dependencies) error {
 	if specEnabled {
 		specGuardrails = `  - In this repo, when guidance says ` + "`spec`" + `, it means records managed by ` + "`az spec req ...`" + ` and ` + "`az spec link ...`" + `, not README.md, AGENTS.md, or other internal docs.
   - ALWAYS run ` + "`az spec read --issue <issue-id>`" + ` before starting behavior work; use ` + "`az spec link list --issue <issue-id>`" + ` when you need link-only detail.
+  - To choose spec traceability, first inspect linked requirements, then use ` + "`az spec req list`" + ` and ` + "`az spec read --req <req-id>`" + ` to find nearby requirements by feature area or acceptance intent.
+  - Link an existing requirement when it already defines the intended behavior; create or update a requirement before implementation when work adds behavior, changes user-visible behavior, changes a CLI/API/TUI contract, alters persistence/daemon semantics, or reveals an underspecified contract.
+  - Contract-preserving work usually does not need a new requirement: refactors, tests, formatting, tooling, observability, dependency/internal cleanup, docs/process-only edits, or fixes that restore already-specified behavior.
+  - For contract-preserving work, record explicit issue-note evidence such as ` + "`Spec impact: none (contract-preserving refactor)`" + `, ` + "`Spec impact: none (tests/tooling only)`" + `, or ` + "`Spec impact: none (fix restores existing behavior)`" + `.
+  - If behavior work has no linked requirements after that check, do not treat missing links as permission to skip spec alignment.
   - If implementation is not aligned with spec, update spec first, then implement.
   - Ensure implementation issue(s) are linked to relevant spec requirement(s) before execution.
   - Treat ` + "`az spec link`" + ` records as required traceability for behavior work.
