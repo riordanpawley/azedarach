@@ -268,6 +268,17 @@ func TestAIInstallCommandAutoFallsBackToDetectedAgentsWhenNoRulesync(t *testing.
 	if _, err := os.Stat(filepath.Join(dir, ".rulesync", "hooks.json")); err == nil {
 		t.Fatalf("did not expect .rulesync/hooks.json without .rulesync/ marker")
 	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, ".codex", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read codex hooks: %v", err)
+	}
+	content := string(raw)
+	for _, want := range []string{"SubagentStart", "subagent-start", "SubagentStop", "subagent-stop"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("codex hooks missing %q: %s", want, content)
+		}
+	}
 }
 
 func TestClaudeInstallerRequiresIssueID(t *testing.T) {

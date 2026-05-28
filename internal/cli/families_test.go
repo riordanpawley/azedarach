@@ -965,6 +965,54 @@ func TestParseAIHookRunArgsValidatesAgentAndEvent(t *testing.T) {
 	if opts.Event != hookEventSessionStart {
 		t.Fatalf("event = %q, want %q", opts.Event, hookEventSessionStart)
 	}
+
+	opts, err = ParseAIHookRunArgs([]string{"--agent=codex", "--json", "subagent-stop"})
+	if err != nil {
+		t.Fatalf("ParseAIHookRunArgs subagent error: %v", err)
+	}
+	if opts.Event != hookEventSubagentStop {
+		t.Fatalf("event = %q, want %q", opts.Event, hookEventSubagentStop)
+	}
+}
+
+func TestCodexGuardUsesSubagentIdentityAsThreadID(t *testing.T) {
+	projectDir := t.TempDir()
+	payload := map[string]any{
+		"agent_id":   "child-thread-1",
+		"agent_type": "worker",
+	}
+
+	if _, err := codexGuardResponse(projectDir, "subagent-start", payload); err != nil {
+		t.Fatalf("subagent start guard: %v", err)
+	}
+	if _, err := codexGuardResponse(projectDir, "pre-tool-use", map[string]any{
+		"agent_id": "child-thread-1",
+		"tool_input": map[string]any{
+			"command": "az prime",
+		},
+	}); err != nil {
+		t.Fatalf("pre tool guard: %v", err)
+	}
+
+	state := readCodexGuardState(filepath.Join(projectDir, ".azedarach", "codex-guard-state.json"))
+	threadState, ok := state.Threads["child-thread-1"]
+	if !ok {
+		t.Fatalf("missing subagent-specific thread state: %+v", state.Threads)
+	}
+	if !threadState.Primed {
+		t.Fatalf("subagent thread should be marked primed: %+v", threadState)
+	}
+	if _, ok := state.Threads["default"]; ok {
+		t.Fatalf("subagent state should not fall back to default thread: %+v", state.Threads)
+	}
+
+	if _, err := codexGuardResponse(projectDir, "subagent-stop", payload); err != nil {
+		t.Fatalf("subagent stop guard: %v", err)
+	}
+	state = readCodexGuardState(filepath.Join(projectDir, ".azedarach", "codex-guard-state.json"))
+	if _, ok := state.Threads["child-thread-1"]; ok {
+		t.Fatalf("subagent stop should clear child thread state: %+v", state.Threads)
+	}
 }
 
 func TestAppendHookLogEventBestEffortResolvesIssueIDFromWorktree(t *testing.T) {

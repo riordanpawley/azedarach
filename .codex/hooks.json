@@ -51,6 +51,26 @@
         ]
       }
     ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "command": "/bin/sh -c 'out=\"$(az ai hook run --agent=codex --json subagent-start 2\u003e/dev/null | tail -n 1)\"; [ -n \"$out\" ] \u0026\u0026 printf \"%s\\n\" \"$out\" || printf \"{}\\n\"'",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "command": "/bin/sh -c 'out=\"$(az ai hook run --agent=codex --json subagent-stop 2\u003e/dev/null | tail -n 1)\"; [ -n \"$out\" ] \u0026\u0026 printf \"%s\\n\" \"$out\" || printf \"{}\\n\"'",
+            "type": "command"
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [

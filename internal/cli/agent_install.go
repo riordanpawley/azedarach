@@ -353,6 +353,8 @@ func (codexInstaller) Install(_ context.Context, deps *Dependencies, opts AIInst
 		{"PostToolUse", "post-tool-use", ""},
 		{"PermissionRequest", "permission-request", ""},
 		{"Stop", "stop", ""},
+		{"SubagentStart", "subagent-start", ""},
+		{"SubagentStop", "subagent-stop", ""},
 	}
 
 	pruner := newLegacyPrefixPruner(legacyAzCommandPrefixes)
@@ -387,7 +389,7 @@ func (codexInstaller) Install(_ context.Context, deps *Dependencies, opts AIInst
 
 	fmt.Printf("Installed codex hooks in %s\n", hooksPath)
 	if opts.Verbose {
-		fmt.Println("  Events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest, Stop")
+		fmt.Println("  Events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest, Stop, SubagentStart, SubagentStop")
 	}
 	return nil
 }
@@ -731,6 +733,8 @@ func rulesyncCodexHookEntries(_ AIInstallOptions) map[string][]rulesyncHookEntry
 		"postToolUse":        {{Type: "command", Command: cmd("post_tool_use")}},
 		"permissionRequest":  {{Type: "command", Command: cmd("permission_request")}},
 		"stop":               {{Type: "command", Command: cmd("stop")}},
+		"subagentStart":      {{Type: "command", Command: cmd("subagent_start")}},
+		"subagentStop":       {{Type: "command", Command: cmd("subagent_stop")}},
 	}
 }
 
