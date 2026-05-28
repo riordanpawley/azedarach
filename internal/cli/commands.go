@@ -175,6 +175,7 @@ type IssueFinalizeOptions struct {
 	IssueID        string
 	JSON           bool
 	RemoveWorktree bool
+	ForceWorktree  bool
 }
 
 type IssueUpdateOptions struct {
@@ -198,10 +199,14 @@ type IssueDoctorOptions struct {
 }
 
 type IssueDeleteOptions struct {
-	Project string
-	IssueID string
-	Confirm bool
-	JSON    bool
+	Project        string
+	IssueID        string
+	Confirm        bool
+	JSON           bool
+	Cleanup        bool
+	StopSession    bool
+	RemoveWorktree bool
+	ForceWorktree  bool
 }
 
 type IssueDependencyAddOptions struct {
@@ -956,8 +961,8 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 		return branchMergeToBaseCommandResult{}, wrapPendingGitOperation("fetch", err)
 	}
 	if !branchAttached {
-		
-	if _, err := deps.DaemonClient.GitCheckout(ctx, baseWorktree, baseBranch); err != nil {
+
+		if _, err := deps.DaemonClient.GitCheckout(ctx, baseWorktree, baseBranch); err != nil {
 			return branchMergeToBaseCommandResult{}, wrapPendingGitOperation("checkout", err)
 		}
 	}
@@ -2194,14 +2199,18 @@ func ParseIssueFinalizeArgs(args []string) (IssueFinalizeOptions, error) {
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue finalize result as JSON")
 	fs.BoolVar(&opts.RemoveWorktree, "remove-worktree", false, "remove the issue worktree after stopping the session")
+	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal when --remove-worktree is set")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueFinalizeOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueFinalizeOptions{}, fmt.Errorf("usage: az issue finalize [--project <project-id>] [--id <issue-id>] [--json] [--remove-worktree] [<issue-id>]")
+		return IssueFinalizeOptions{}, fmt.Errorf("usage: az issue finalize [--project <project-id>] [--id <issue-id>] [--json] [--remove-worktree] [--force-worktree] [<issue-id>]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueFinalizeOptions{}, fmt.Errorf("--impl is not supported for issue finalize; issue implementations are already assigned")
+	}
+	if opts.ForceWorktree && !opts.RemoveWorktree {
+		return IssueFinalizeOptions{}, fmt.Errorf("--force-worktree requires --remove-worktree")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -2210,7 +2219,7 @@ func ParseIssueFinalizeArgs(args []string) (IssueFinalizeOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueFinalizeOptions{}, fmt.Errorf("usage: az issue finalize [--project <project-id>] [--id <issue-id>] [--json] [--remove-worktree] [<issue-id>]")
+		return IssueFinalizeOptions{}, fmt.Errorf("usage: az issue finalize [--project <project-id>] [--id <issue-id>] [--json] [--remove-worktree] [--force-worktree] [<issue-id>]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -2227,17 +2236,28 @@ func ParseIssueDeleteArgs(args []string) (IssueDeleteOptions, error) {
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.BoolVar(&opts.Confirm, "confirm", false, "confirm permanent issue deletion")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue delete result as JSON")
+	fs.BoolVar(&opts.Cleanup, "cleanup", false, "stop active session and remove worktree before deleting")
+	fs.BoolVar(&opts.StopSession, "stop-session", false, "stop active session before deleting")
+	fs.BoolVar(&opts.RemoveWorktree, "remove-worktree", false, "remove issue worktree before deleting")
+	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal when removing worktree")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDeleteOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete [--project <project-id>] --confirm [--id <issue-id>] [--json] [<issue-id>]")
+		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete [--project <project-id>] --confirm [--id <issue-id>] [--json] [--cleanup|--stop-session] [--remove-worktree] [--force-worktree] [<issue-id>]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDeleteOptions{}, fmt.Errorf("--impl is not supported for issue delete; issue implementations are already assigned")
 	}
 	if !opts.Confirm {
 		return IssueDeleteOptions{}, fmt.Errorf("missing required flag: --confirm")
+	}
+	if opts.Cleanup {
+		opts.StopSession = true
+		opts.RemoveWorktree = true
+	}
+	if opts.ForceWorktree && !opts.RemoveWorktree {
+		return IssueDeleteOptions{}, fmt.Errorf("--force-worktree requires --remove-worktree or --cleanup")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -2246,7 +2266,7 @@ func ParseIssueDeleteArgs(args []string) (IssueDeleteOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete [--project <project-id>] --confirm [--id <issue-id>] [--json] [<issue-id>]")
+		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete [--project <project-id>] --confirm [--id <issue-id>] [--json] [--cleanup|--stop-session] [--remove-worktree] [--force-worktree] [<issue-id>]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -3569,7 +3589,7 @@ func IssueFinalizeCommand(deps *Dependencies, opts IssueFinalizeOptions) error {
 		return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
 	}
 	if opts.RemoveWorktree {
-		if err := deps.DaemonClient.RemoveWorktree(ctx, opts.IssueID); err != nil {
+		if err := deps.DaemonClient.RemoveWorktreeWithOptions(ctx, opts.IssueID, opts.ForceWorktree); err != nil {
 			return fmt.Errorf("failed to remove worktree for issue %s: %w", opts.IssueID, err)
 		}
 	}
@@ -3580,6 +3600,7 @@ func IssueFinalizeCommand(deps *Dependencies, opts IssueFinalizeOptions) error {
 			"session_stopped":  true,
 			"status":           "closed",
 			"worktree_removed": opts.RemoveWorktree,
+			"worktree_forced":  opts.RemoveWorktree && opts.ForceWorktree,
 			"finalized":        true,
 		})
 	}
@@ -3588,6 +3609,9 @@ func IssueFinalizeCommand(deps *Dependencies, opts IssueFinalizeOptions) error {
 	fmt.Println("- Issue closed")
 	if opts.RemoveWorktree {
 		fmt.Println("- Worktree removed")
+		if opts.ForceWorktree {
+			fmt.Println("- Worktree removal forced")
+		}
 	}
 	return nil
 }
@@ -3611,23 +3635,94 @@ func IssueDeleteCommand(deps *Dependencies, opts IssueDeleteOptions) error {
 		return fmt.Errorf("issue not found: %s", opts.IssueID)
 	}
 	if blockers := issueDeleteRuntimeBlockers(task); len(blockers) > 0 {
+		missing := issueDeleteMissingCleanupOptions(blockers, opts)
+		if len(missing) == 0 {
+			cleanup, err := cleanupIssueRuntimeAttachments(ctx, deps, opts, blockers)
+			if err != nil {
+				return err
+			}
+			if err := deps.DaemonClient.DeleteTask(ctx, opts.IssueID); err != nil {
+				return fmt.Errorf("failed to delete issue %s after cleanup: %w", opts.IssueID, err)
+			}
+			return printIssueDeleteResult(opts, cleanup)
+		}
 		return fmt.Errorf(
-			"cannot delete issue %s: active runtime attachments detected (%s); stop active session and remove worktree first",
+			"cannot delete issue %s: active runtime attachments detected (%s); rerun with %s or use --cleanup",
 			opts.IssueID,
 			strings.Join(blockers, ", "),
+			strings.Join(missing, " "),
 		)
 	}
 
 	if err := deps.DaemonClient.DeleteTask(ctx, opts.IssueID); err != nil {
 		return fmt.Errorf("failed to delete issue %s: %w", opts.IssueID, err)
 	}
+	return printIssueDeleteResult(opts, issueDeleteCleanupResult{})
+}
+
+type issueDeleteCleanupResult struct {
+	SessionStopped  bool `json:"session_stopped"`
+	WorktreeRemoved bool `json:"worktree_removed"`
+	WorktreeForced  bool `json:"worktree_forced"`
+}
+
+func cleanupIssueRuntimeAttachments(ctx context.Context, deps *Dependencies, opts IssueDeleteOptions, blockers []string) (issueDeleteCleanupResult, error) {
+	result := issueDeleteCleanupResult{}
+	for _, blocker := range blockers {
+		switch blocker {
+		case "session":
+			if _, err := deps.DaemonClient.StopSession(ctx, opts.IssueID); err != nil {
+				return result, fmt.Errorf("failed to stop session for issue %s before delete: %w", opts.IssueID, err)
+			}
+			result.SessionStopped = true
+		case "worktree":
+			if err := deps.DaemonClient.RemoveWorktreeWithOptions(ctx, opts.IssueID, opts.ForceWorktree); err != nil {
+				return result, fmt.Errorf("failed to remove worktree for issue %s before delete: %w", opts.IssueID, err)
+			}
+			result.WorktreeRemoved = true
+			result.WorktreeForced = opts.ForceWorktree
+		}
+	}
+	return result, nil
+}
+
+func issueDeleteMissingCleanupOptions(blockers []string, opts IssueDeleteOptions) []string {
+	missing := make([]string, 0, len(blockers))
+	for _, blocker := range blockers {
+		switch blocker {
+		case "session":
+			if !opts.StopSession {
+				missing = append(missing, "--stop-session")
+			}
+		case "worktree":
+			if !opts.RemoveWorktree {
+				missing = append(missing, "--remove-worktree")
+			}
+		}
+	}
+	return missing
+}
+
+func printIssueDeleteResult(opts IssueDeleteOptions, cleanup issueDeleteCleanupResult) error {
 	if opts.JSON {
 		return printJSON(map[string]any{
-			"issue_id": opts.IssueID,
-			"deleted":  true,
+			"issue_id":         opts.IssueID,
+			"deleted":          true,
+			"session_stopped":  cleanup.SessionStopped,
+			"worktree_removed": cleanup.WorktreeRemoved,
+			"worktree_forced":  cleanup.WorktreeForced,
 		})
 	}
 	fmt.Printf("Deleted issue: %s\n", opts.IssueID)
+	if cleanup.SessionStopped {
+		fmt.Println("- Session stopped")
+	}
+	if cleanup.WorktreeRemoved {
+		fmt.Println("- Worktree removed")
+		if cleanup.WorktreeForced {
+			fmt.Println("- Worktree removal forced")
+		}
+	}
 	return nil
 }
 
