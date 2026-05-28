@@ -492,6 +492,7 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	}
 
 	count := 0
+	pendingLaunches := make([]orchestrateStartLaunch, 0, len(requested))
 	for _, issueID := range requested {
 		if count >= opts.Limit {
 			result.Skipped[issueID] = "limit-reached"
@@ -511,16 +512,26 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 			result.Failed[issueID] = err.Error()
 			continue
 		}
+		pendingLaunches = append(pendingLaunches, launch)
+		count++
+	}
+
+	for _, launch := range pendingLaunches {
+		issueID := launch.IssueID
+		completedLaunch, err := waitForSubmittedSessionStart(deps, launch)
+		if err != nil {
+			result.Failed[issueID] = err.Error()
+			continue
+		}
 		if sendErr := sendOrchestrateMailEvent(deps, opts.RootIssueID, issueID, "session-started", "session launched by az orchestrate start"); sendErr != nil {
 			result.Failed[issueID] = fmt.Sprintf("session started but failed to emit event: %v", sendErr)
 			continue
 		}
 		result.Started = append(result.Started, issueID)
-		launch.WatchCommand = result.Advice.WatchCommand
-		launch.IntegrateHint = fmt.Sprintf("az orchestrate integrate --issue %s", issueID)
-		launch.CloseHint = fmt.Sprintf("az orchestrate close-session --issue %s", issueID)
-		result.Launched = append(result.Launched, launch)
-		count++
+		completedLaunch.WatchCommand = result.Advice.WatchCommand
+		completedLaunch.IntegrateHint = fmt.Sprintf("az orchestrate integrate --issue %s", issueID)
+		completedLaunch.CloseHint = fmt.Sprintf("az orchestrate close-session --issue %s", issueID)
+		result.Launched = append(result.Launched, completedLaunch)
 	}
 
 	return result, nil
@@ -1154,6 +1165,33 @@ func submitSessionStartForIssue(deps *Dependencies, issueID string) (orchestrate
 	return submitSessionStartForIssueWithBaseBranch(deps, issueID, "")
 }
 
+func waitForSubmittedSessionStart(deps *Dependencies, launch orchestrateStartLaunch) (orchestrateStartLaunch, error) {
+	if launch.OperationID == "" {
+		return launch, fmt.Errorf("session start operation missing operation id")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sessionStartCommandTimeout)
+	defer cancel()
+	record, err := deps.DaemonClient.WaitForOperation(ctx, launch.OperationID, 0)
+	if err != nil {
+		return launch, fmt.Errorf("wait for session start operation %s: %w", launch.OperationID, err)
+	}
+	launch.OperationState = string(record.State)
+	if record.State != protocol.OperationStateDone {
+		var message string
+		if record.Error != nil {
+			message = strings.TrimSpace(record.Error.Message)
+		}
+		if message == "" {
+			message = fmt.Sprintf("session start operation ended in state %s", record.State)
+		}
+		return launch, fmt.Errorf("%s", message)
+	}
+	if wt, found, wtErr := worktreeForIssue(ctx, deps, launch.IssueID); wtErr == nil && found {
+		launch.WorktreePath = wt.Path
+	}
+	return launch, nil
+}
+
 func submitSessionStartForIssueWithBaseBranch(deps *Dependencies, issueID, baseBranchOverride string) (orchestrateStartLaunch, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
@@ -1212,9 +1250,6 @@ func submitSessionStartForIssueWithBaseBranch(deps *Dependencies, issueID, baseB
 		SessionID:      sessionID,
 		OperationID:    out.Operation.OperationID.String(),
 		OperationState: string(out.Operation.State),
-	}
-	if wt, found, wtErr := worktreeForIssue(ctx, deps, issueID); wtErr == nil && found {
-		launch.WorktreePath = wt.Path
 	}
 	return launch, nil
 }
