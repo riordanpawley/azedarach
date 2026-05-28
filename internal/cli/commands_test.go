@@ -3474,14 +3474,19 @@ func TestParseIssueGetArgs(t *testing.T) {
 			want: IssueGetOptions{IssueID: "az-2", JSON: true},
 		},
 		{
+			name: "include notes",
+			args: []string{"--with-notes", "az-2"},
+			want: IssueGetOptions{IssueID: "az-2", IncludeNotes: true},
+		},
+		{
 			name:        "missing issue id",
 			args:        []string{},
-			errContains: "usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]",
+			errContains: "usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]",
 		},
 		{
 			name:        "too many args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]",
+			errContains: "usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]",
 		},
 		{
 			name:        "deps flag rejected",
@@ -4823,7 +4828,7 @@ func TestIssueGetCommandUsesSingleIssueDaemonRead(t *testing.T) {
 	}
 }
 
-func TestIssueGetCommandTextIncludesNotes(t *testing.T) {
+func TestIssueGetCommandTextHidesNotesByDefault(t *testing.T) {
 	now := time.Date(2026, 3, 25, 11, 0, 0, 0, time.UTC)
 	tasks := []domain.Task{
 		{
@@ -4865,6 +4870,57 @@ func TestIssueGetCommandTextIncludesNotes(t *testing.T) {
 
 	output := captureStdout(t, func() error {
 		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-5"})
+	})
+	if !strings.Contains(output, "Notes: present (hidden in text output; use `az issue get az-5 --with-notes`") {
+		t.Fatalf("output missing hidden notes sentinel: %q", output)
+	}
+	if strings.Contains(output, "First note line") || strings.Contains(output, "Second note line") {
+		t.Fatalf("output should not include full notes by default: %q", output)
+	}
+}
+
+func TestIssueGetCommandTextIncludesNotesWhenRequested(t *testing.T) {
+	now := time.Date(2026, 3, 25, 11, 0, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{
+			ID:          "az-5",
+			Title:       "Lookup issue",
+			Description: "Detailed context",
+			Notes:       "First note line\nSecond note line",
+			Status:      domain.StatusBlocked,
+			Priority:    domain.P0,
+			Type:        domain.TypeBug,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		},
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := marshalTaskListBody(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        4,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-5", IncludeNotes: true})
 	})
 	if !strings.Contains(output, "Notes:\nFirst note line\nSecond note line\n") {
 		t.Fatalf("output missing notes section: %q", output)
@@ -7186,7 +7242,7 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue list [--project <project-id>] [--json] [--deps] [--status <status> ...]") {
 		t.Fatalf("usage missing issue list command: %q", output)
 	}
-	if !strings.Contains(output, "issue get [--project <project-id>] [--id <id>] [--json] [<id>]") {
+	if !strings.Contains(output, "issue get [--project <project-id>] [--id <id>] [--json] [--with-notes] [<id>]") {
 		t.Fatalf("usage missing issue get command: %q", output)
 	}
 	if !strings.Contains(output, "issue get-many [--project <project-id>] --id <id>") {
@@ -7447,6 +7503,15 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "capture subtask-level detail on the relevant child issue instead of bloating a parent/epic description") {
 		t.Fatalf("prime output missing keep-current parent/child notes guidance: %q", output)
+	}
+	if !strings.Contains(output, "Keep notes terse and evidence-oriented: final commands run, key outputs/assertions, files changed, AC pass/fail, blockers, and remaining scope only.") {
+		t.Fatalf("prime output missing terse notes guidance: %q", output)
+	}
+	if !strings.Contains(output, "Do not append raw logs, exploratory transcripts, routine progress narration, duplicate primer context, or speculative scratch work to notes.") {
+		t.Fatalf("prime output missing notes anti-bloat guidance: %q", output)
+	}
+	if !strings.Contains(output, "`az issue get` hides historical notes in text output by default; use `az issue get <issue-id> --with-notes` only when full note history is needed.") {
+		t.Fatalf("prime output missing tiered notes retrieval guidance: %q", output)
 	}
 	if !strings.Contains(output, "Atomic-merge test before using `--deferred`") {
 		t.Fatalf("prime output missing atomic-merge test heading in parent/child scope section: %q", output)

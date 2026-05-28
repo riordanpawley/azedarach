@@ -30,7 +30,7 @@ Commands:
   spec <subcommand>          Spec workflows (req|link|read|pack|lint|parity)
   decision <subcommand>      Decision records with rationale (list|get|create|update|delete|link)
   issue list [--project <project-id>] [--json] [--deps] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
-  issue get [--project <project-id>] [--id <id>] [--json] [<id>]  Show a single issue from daemon-backed store
+  issue get [--project <project-id>] [--id <id>] [--json] [--with-notes] [<id>]  Show a single issue from daemon-backed store
   issue get-many [--project <project-id>] --id <id> [--id <id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
   issue check [--project <project-id>] [--id <id>] [--json] [<id>]  Alias for issue get
   issue doctor [--project <project-id>] [--id <id>] [--json] [<id>]  Run integrity checks for one issue
@@ -76,6 +76,7 @@ Examples:
   az issue get --id az-123 --json
   az issue get-many --id az-123 --id az-456 --json
   az issue get --id az-123
+  az issue get --id az-123 --with-notes
   az issue check --id az-123
   az issue doctor --id az-123
   az issue create --impl go-bubbletea "New task"

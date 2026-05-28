@@ -443,7 +443,7 @@ func main() {
 		case "get":
 			opts, err := cli.ParseIssueGetArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

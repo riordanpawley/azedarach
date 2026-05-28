@@ -1046,12 +1046,13 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 		fmt.Fprintf(&b, "\nAcceptance:\n%s\n", strings.TrimSpace(task.Acceptance))
 	}
 	if strings.TrimSpace(task.Notes) != "" {
-		fmt.Fprintf(&b, "\nCurrent notes:\n%s\n", strings.TrimSpace(task.Notes))
+		fmt.Fprintf(&b, "\nCurrent notes: present but omitted from worker prompt. Run `az issue get %s --with-notes` only if full note history is necessary.\n", issueID)
 	}
 	fmt.Fprintf(&b, "\nRole: worker\n")
 	fmt.Fprintf(&b, "- Focus only on issue %s unless the orchestrator explicitly expands scope.\n", issueID)
 	fmt.Fprintf(&b, "- Before behavior changes, inspect linked requirements with `az spec read --issue %s`; if none are linked, record that in issue notes.\n", issueID)
-	fmt.Fprintf(&b, "- Keep `%s` status and notes current with commands run, key outputs/assertions, files changed, and AC pass/fail evidence.\n", issueID)
+	fmt.Fprintf(&b, "- Keep `%s` status and notes current with terse evidence: final commands run, key outputs/assertions, files changed, AC pass/fail, blockers, and remaining scope only.\n", issueID)
+	fmt.Fprintf(&b, "- Do not append raw logs, exploratory transcripts, routine progress narration, duplicate prompt context, or speculative scratch work to notes.\n")
 	if coordination == "mailbox" {
 		fmt.Fprintf(&b, "- Use mailbox events for hybrid coordination: `worker-progress`, `worker-blocked`, and `worker-complete`.\n")
 		fmt.Fprintf(&b, "- On completion, send `worker-complete` to parent `%s` with concise evidence and leave integration/merge to the orchestrator.\n", parentIssueID)

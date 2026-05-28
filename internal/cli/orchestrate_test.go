@@ -292,6 +292,8 @@ func TestOrchestratePromptCommandPrintsNativeWorkerHandoff(t *testing.T) {
 		"Work on issue az-2: Worker task",
 		"Coordination mode: native",
 		"az spec read --issue az-2",
+		"Current notes: present but omitted from worker prompt. Run `az issue get az-2 --with-notes` only if full note history is necessary.",
+		"Do not append raw logs, exploratory transcripts, routine progress narration, duplicate prompt context, or speculative scratch work to notes.",
 		"Return progress, blockers, and final results through the native subagent result channel.",
 		"Do not use `az mail` unless the orchestrator explicitly asks for mailbox coordination.",
 		"Do not close root issue `az-1`",
@@ -304,6 +306,9 @@ func TestOrchestratePromptCommandPrintsNativeWorkerHandoff(t *testing.T) {
 		if strings.Contains(output, unexpected) {
 			t.Fatalf("output unexpectedly contains %q:\n%s", unexpected, output)
 		}
+	}
+	if strings.Contains(output, "Spec impact TBD") {
+		t.Fatalf("output should not include full historical notes by default:\n%s", output)
 	}
 }
 

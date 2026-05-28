@@ -128,9 +128,10 @@ type IssueListOptions struct {
 }
 
 type IssueGetOptions struct {
-	Project string
-	IssueID string
-	JSON    bool
+	Project      string
+	IssueID      string
+	JSON         bool
+	IncludeNotes bool
 }
 
 type IssueGetManyOptions struct {
@@ -2007,12 +2008,13 @@ func ParseIssueGetArgs(args []string) (IssueGetOptions, error) {
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.BoolVar(&opts.JSON, "json", false, "output issue as JSON")
+	fs.BoolVar(&opts.IncludeNotes, "with-notes", false, "include full notes in text output")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueGetOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueGetOptions{}, fmt.Errorf("usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]")
+		return IssueGetOptions{}, fmt.Errorf("usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -2021,7 +2023,7 @@ func ParseIssueGetArgs(args []string) (IssueGetOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueGetOptions{}, fmt.Errorf("usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]")
+		return IssueGetOptions{}, fmt.Errorf("usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -3315,7 +3317,11 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 		fmt.Printf("Description: %s\n", task.Description)
 	}
 	if strings.TrimSpace(task.Notes) != "" {
-		fmt.Printf("Notes:\n%s\n", task.Notes)
+		if opts.IncludeNotes {
+			fmt.Printf("Notes:\n%s\n", task.Notes)
+		} else {
+			fmt.Printf("Notes: present (hidden in text output; use `az issue get %s --with-notes` for full notes or `--json` for structured context)\n", task.ID)
+		}
 	}
 	if strings.TrimSpace(task.Design) != "" {
 		fmt.Printf("Design:\n%s\n", task.Design)

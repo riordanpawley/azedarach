@@ -102,7 +102,10 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Missing fields (for example description/notes) are valid. Treat absent or empty fields as intentional and continue execution.
 {{ if .ImplementationGuardrails }}{{ .ImplementationGuardrails }}
 {{ end }}- Keep issue context current as you work:
+  - Keep notes terse and evidence-oriented: final commands run, key outputs/assertions, files changed, AC pass/fail, blockers, and remaining scope only.
+  - Do not append raw logs, exploratory transcripts, routine progress narration, duplicate primer context, or speculative scratch work to notes.
   - Update the active issue's design/notes as decisions change; capture subtask-level detail on the relevant child issue instead of bloating a parent/epic description.
+  - `az issue get` hides historical notes in text output by default; use `az issue get <issue-id> --with-notes` only when full note history is needed.
   - Use status/priority/labels flags when state changes materially.
 - Overlay edits: check `az spec read --issue <issue-id>` before behavior changes, keep `View()` and `Size()` aligned, validate default and narrow viewports, and update goldens when rendered output changes. If the work is docs/process-only, record `Spec impact: none (docs/process-only)` in issue notes.
 - `az issue --help`

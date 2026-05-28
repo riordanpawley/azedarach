@@ -12,7 +12,7 @@ func TestRenderIssueHelpPrefersNamedFlagForms(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"get [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]",
+		"get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]",
 		"check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]",
 		"doctor [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]",
 		"create [--project <project-id>] [--impl <implementation> ...] [--deferred]",
