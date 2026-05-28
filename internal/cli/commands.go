@@ -3105,10 +3105,12 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 }
 
 type issueGetManyItem struct {
-	ID     string       `json:"id"`
-	Status string       `json:"status"`
-	Issue  *domain.Task `json:"issue,omitempty"`
-	Error  string       `json:"error,omitempty"`
+	ID           string              `json:"id"`
+	Status       string              `json:"status"`
+	Issue        *domain.Task        `json:"issue,omitempty"`
+	Dependencies []dependencyDetails `json:"dependencies,omitempty"`
+	Dependents   []dependencyDetails `json:"dependents,omitempty"`
+	Error        string              `json:"error,omitempty"`
 }
 
 type issueGetManyResult struct {
@@ -3128,7 +3130,7 @@ func IssueGetManyCommand(deps *Dependencies, opts IssueGetManyOptions) error {
 		return err
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := deps.DaemonClient.GetManyTaskSnapshot(ctx, opts.IssueIDs)
 	if err != nil {
 		return fmt.Errorf("failed to get issues: %w", err)
 	}
@@ -3158,10 +3160,13 @@ func IssueGetManyCommand(deps *Dependencies, opts IssueGetManyOptions) error {
 		}
 		result.Found++
 		taskCopy := task
+		dependencies, dependents := buildDependencyProjection(task, snapshot.Tasks)
 		result.Results = append(result.Results, issueGetManyItem{
-			ID:     issueID,
-			Status: "found",
-			Issue:  &taskCopy,
+			ID:           issueID,
+			Status:       "found",
+			Issue:        &taskCopy,
+			Dependencies: dependencies,
+			Dependents:   dependents,
 		})
 	}
 
@@ -4699,9 +4704,9 @@ func renderIssueGitSummary(task domain.Task) string {
 }
 
 type dependencyDetails struct {
-	ID     string
-	Type   domain.DependencyType
-	Status string
+	ID     string                `json:"id"`
+	Type   domain.DependencyType `json:"type"`
+	Status string                `json:"status"`
 }
 
 func printDependencies(deps []dependencyDetails) {

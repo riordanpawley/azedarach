@@ -173,6 +173,68 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	return resp, nil
 }
 
+func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
+	startedAt := time.Now()
+	var cmd struct {
+		TaskIDs []string `json:"task_ids"`
+	}
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	taskIDs := uniqueTrimmedTaskIDs(cmd.TaskIDs)
+	if len(taskIDs) == 0 {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "task_ids is required"), nil
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task get-many requested", "project_id", projectID, "task_count", len(taskIDs))
+	}
+	for _, taskID := range taskIDs {
+		d.refreshIssueWorktreeState(ctx, projectID, taskID)
+	}
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
+	tasks, err := issueClient.GetManyWithDependencyContextRuntime(ctx, projectID, taskIDs)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("daemon task get-many failed", "project_id", projectID, "task_count", len(taskIDs), "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
+		}
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
+	payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), lastCheckedAt, freshness, tasks)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	resp := d.successResponse(req)
+	resp.Body = body
+	resp.Revision = payload.SnapshotRevision
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task get-many completed", "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds())
+	}
+	return resp, nil
+}
+
+func uniqueTrimmedTaskIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
 func (d *Daemon) readFreshTaskListSnapshotCache(projectID string) (taskListSnapshotCacheEntry, bool) {
 	projectID = d.canonicalProjectID(projectID)
 	currentRevision := d.currentRevision(projectID)

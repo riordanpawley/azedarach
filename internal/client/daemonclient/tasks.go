@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/buildinfo"
@@ -16,6 +17,7 @@ import (
 const (
 	CommandTaskList             = "task.list"
 	CommandTaskGet              = "task.get"
+	CommandTaskGetMany          = "task.get_many"
 	CommandTaskCreate           = "task.create"
 	CommandTaskUpdateStatus     = "task.update_status"
 	CommandTaskUpdate           = "task.update_details"
@@ -70,6 +72,11 @@ type TaskAppendNotesRequest struct {
 // TaskIDRequest contains the payload used for delete/archive task operations.
 type TaskIDRequest struct {
 	TaskID naming.IssueID `json:"task_id"`
+}
+
+// TaskIDsRequest contains the payload used for batch task reads.
+type TaskIDsRequest struct {
+	TaskIDs []naming.IssueID `json:"task_ids"`
 }
 
 // TaskDependencyParams contains the payload used for dependency operations.
@@ -275,6 +282,46 @@ func (c *Client) GetTaskSnapshotWithMode(ctx context.Context, taskID string, mod
 	snapshot, decodeErr := c.decodeTaskSnapshotResponse(resp)
 	if decodeErr != nil {
 		return TaskSnapshot{}, fmt.Errorf("decode %s response: %w (expected %s payload; daemon likely outdated)", CommandTaskGet, decodeErr, "TaskListSnapshotPayload")
+	}
+	return snapshot, nil
+}
+
+// GetManyTaskSnapshot fetches multiple tasks and their direct dependency context in one daemon command.
+func (c *Client) GetManyTaskSnapshot(ctx context.Context, taskIDs []string) (TaskSnapshot, error) {
+	return c.GetManyTaskSnapshotWithMode(ctx, taskIDs, ReadWaitModeDefault)
+}
+
+// GetManyTaskSnapshotWithMode fetches multiple tasks and their direct dependency context with the requested bounded read budget.
+func (c *Client) GetManyTaskSnapshotWithMode(ctx context.Context, taskIDs []string, mode ReadWaitMode) (TaskSnapshot, error) {
+	parsedTaskIDs := make([]naming.IssueID, 0, len(taskIDs))
+	for _, taskID := range taskIDs {
+		trimmed := strings.TrimSpace(taskID)
+		if trimmed == "" {
+			continue
+		}
+		parsedTaskID, err := naming.ParseIssueID(trimmed)
+		if err != nil {
+			return TaskSnapshot{}, fmt.Errorf("invalid task id %q: %w", taskID, err)
+		}
+		parsedTaskIDs = append(parsedTaskIDs, parsedTaskID)
+	}
+	if len(parsedTaskIDs) == 0 {
+		return TaskSnapshot{}, fmt.Errorf("task_ids is required")
+	}
+
+	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
+	defer cancel()
+
+	resp, err := c.commandJSONResponse(waitCtx, CommandTaskGetMany, TaskIDsRequest{TaskIDs: parsedTaskIDs})
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
+		}
+		return TaskSnapshot{}, err
+	}
+	snapshot, decodeErr := c.decodeTaskSnapshotResponse(resp)
+	if decodeErr != nil {
+		return TaskSnapshot{}, fmt.Errorf("decode %s response: %w (expected %s payload; daemon likely outdated)", CommandTaskGetMany, decodeErr, "TaskListSnapshotPayload")
 	}
 	return snapshot, nil
 }

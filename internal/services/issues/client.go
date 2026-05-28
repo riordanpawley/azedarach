@@ -631,6 +631,91 @@ func (c *Client) GetWithDependencyContextRuntime(ctx context.Context, projectID,
 	return nil, c.wrapError("get-with-dependency-context-runtime", id, domain.ErrNotFound)
 }
 
+// GetManyWithDependencyContextRuntime fetches issues plus direct dependencies and dependents.
+func (c *Client) GetManyWithDependencyContextRuntime(ctx context.Context, projectID string, ids []string) ([]domain.Task, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+
+	seen := map[string]struct{}{}
+	issueIDs := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		issueIDs = append(issueIDs, id)
+	}
+	if len(issueIDs) == 0 {
+		return nil, c.wrapError("get-many-with-dependency-context-runtime", "", domain.ErrNotFound)
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(issueIDs)), ",")
+	query := fmt.Sprintf(`
+		SELECT DISTINCT id
+		FROM (
+			SELECT id
+			FROM issues
+			WHERE deleted_at IS NULL AND id IN (%s)
+			UNION ALL
+			SELECT depends_on_id AS id
+			FROM issue_dependencies
+			WHERE issue_id IN (%s) AND tombstoned_at IS NULL
+			UNION ALL
+			SELECT issue_id AS id
+			FROM issue_dependencies
+			WHERE depends_on_id IN (%s) AND tombstoned_at IS NULL
+		)
+	`, placeholders, placeholders, placeholders)
+	args := make([]any, 0, len(issueIDs)*3)
+	for i := 0; i < 3; i++ {
+		for _, issueID := range issueIDs {
+			args = append(args, issueID)
+		}
+	}
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, c.wrapError("get-many-with-dependency-context-runtime", strings.Join(issueIDs, ","), err)
+	}
+
+	contextIDs := make([]string, 0, len(issueIDs)*2)
+	for rows.Next() {
+		var issueID string
+		if err := rows.Scan(&issueID); err != nil {
+			_ = rows.Close()
+			return nil, c.wrapError("get-many-with-dependency-context-runtime", strings.Join(issueIDs, ","), err)
+		}
+		if strings.TrimSpace(issueID) != "" {
+			contextIDs = append(contextIDs, issueID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, c.wrapError("get-many-with-dependency-context-runtime", strings.Join(issueIDs, ","), err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, c.wrapError("get-many-with-dependency-context-runtime", strings.Join(issueIDs, ","), err)
+	}
+	if len(contextIDs) == 0 {
+		return []domain.Task{}, nil
+	}
+
+	tasks, err := c.queryTasksWithRuntime(ctx, db, projectID, contextIDs...)
+	if err != nil {
+		return nil, c.wrapError("get-many-with-dependency-context-runtime", strings.Join(issueIDs, ","), err)
+	}
+	return tasks, nil
+}
+
 // Search queries issues by id/title/description.
 func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error) {
 	db, err := c.dbHandle()

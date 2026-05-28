@@ -200,6 +200,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		protocol.CommandUIStateSet,
 		commandTaskList,
 		commandTaskGet,
+		commandTaskGetMany,
 		commandTaskCreate,
 		commandTaskUpdateStatus,
 		commandTaskUpdateDetails,

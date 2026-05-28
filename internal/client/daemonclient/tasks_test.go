@@ -190,6 +190,47 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("get many snapshot", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				if req.Command != CommandTaskGetMany {
+					t.Fatalf("command = %q, want %q", req.Command, CommandTaskGetMany)
+				}
+				var body TaskIDsRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal request body: %v", err)
+				}
+				if got, want := len(body.TaskIDs), 2; got != want {
+					t.Fatalf("len(task_ids) = %d, want %d", got, want)
+				}
+				if body.TaskIDs[0] != "az-2" || body.TaskIDs[1] != "az-1" {
+					t.Fatalf("task_ids = %+v, want [az-2 az-1]", body.TaskIDs)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Revision:        18,
+					OK:              true,
+					Body:            mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 18, []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusBlocked}, {ID: "az-2", Title: "Task 2", Status: domain.StatusOpen}}),
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		snapshot, err := client.GetManyTaskSnapshot(context.Background(), []string{"az-2", "az-1"})
+		if err != nil {
+			t.Fatalf("GetManyTaskSnapshot error: %v", err)
+		}
+		if snapshot.Revision != 18 {
+			t.Fatalf("revision = %d, want 18", snapshot.Revision)
+		}
+		if len(snapshot.Tasks) != 2 {
+			t.Fatalf("snapshot tasks = %+v", snapshot.Tasks)
+		}
+	})
+
 	t.Run("list snapshot rejects legacy raw task array", func(t *testing.T) {
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

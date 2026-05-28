@@ -564,6 +564,102 @@ func TestTaskListSnapshotFreshnessMarksStaleProjection(t *testing.T) {
 	}
 }
 
+func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	originalNow := timeNow
+	t.Cleanup(func() {
+		timeNow = originalNow
+	})
+	timeNow = func() time.Time {
+		return time.Date(2026, time.April, 2, 12, 0, 0, 0, time.UTC)
+	}
+
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	projectID := "proj-get-many"
+	firstID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "First",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create first issue: %v", err)
+	}
+	secondID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Second",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create second issue: %v", err)
+	}
+	if err := issuesClient.AddDependency(ctx, secondID, firstID, string(domain.DependencyBlocks)); err != nil {
+		t.Fatalf("add dependency: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: ".", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		sessionStore:           daemonstate.NewStore(),
+		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{},
+		revision:               map[string]uint64{projectID: 9},
+	}
+
+	body, err := json.Marshal(map[string][]string{
+		"task_ids": []string{secondID, "az-missing", firstID},
+	})
+	if err != nil {
+		t.Fatalf("marshal get-many request: %v", err)
+	}
+	resp, err := d.handleTaskGetMany(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-get-many",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.get_many",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskGetMany error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.get_many response = %+v", resp.Error)
+	}
+
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("decode task.get_many body: %v", err)
+	}
+	if got, want := payload.SnapshotRevision, uint64(9); got != want {
+		t.Fatalf("snapshot revision = %d, want %d", got, want)
+	}
+	taskByID := map[string]domain.Task{}
+	for _, task := range payload.Tasks {
+		taskByID[task.ID.String()] = task
+	}
+	if _, ok := taskByID["az-missing"]; ok {
+		t.Fatalf("missing issue appeared in payload: %+v", payload.Tasks)
+	}
+	second := taskByID[secondID]
+	if got, want := len(second.Dependencies), 1; got != want {
+		t.Fatalf("second dependencies = %+v, want one", second.Dependencies)
+	}
+	if second.Dependencies[0].ID.String() != firstID {
+		t.Fatalf("second dependency id = %q, want %q", second.Dependencies[0].ID, firstID)
+	}
+	if _, ok := taskByID[firstID]; !ok {
+		t.Fatalf("dependency context missing first issue: %+v", payload.Tasks)
+	}
+}
+
 func TestRefreshWorktreeRuntimeStateForIssuesDoesNotPublishUnchangedGitStatus(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

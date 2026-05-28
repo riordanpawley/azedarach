@@ -5273,12 +5273,17 @@ func TestIssueGetManyCommand_JSONStableOrderWithPartialMisses(t *testing.T) {
 	now := time.Date(2026, 3, 26, 3, 15, 0, 0, time.UTC)
 	tasks := []domain.Task{
 		{ID: "az-1", Title: "First", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now},
-		{ID: "az-2", Title: "Second", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeFeature, CreatedAt: now, UpdatedAt: now},
+		{ID: "az-2", Title: "Second", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeFeature, Dependencies: []domain.Dependency{{ID: "az-1", Type: domain.DependencyBlocks}}, CreatedAt: now, UpdatedAt: now},
 	}
+	var commands []string
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				if req.Command != daemonclient.CommandTaskGetMany {
+					t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskGetMany)
+				}
 				body, err := marshalTaskListBody(tasks)
 				if err != nil {
 					t.Fatalf("marshal tasks: %v", err)
@@ -5312,17 +5317,26 @@ func TestIssueGetManyCommand_JSONStableOrderWithPartialMisses(t *testing.T) {
 	if got.Requested != 3 || got.Found != 2 || got.Missing != 1 {
 		t.Fatalf("unexpected summary: %+v", got)
 	}
+	if len(commands) != 1 {
+		t.Fatalf("commands = %v, want one batch read", commands)
+	}
 	if len(got.Results) != 3 {
 		t.Fatalf("results length = %d, want 3", len(got.Results))
 	}
 	if got.Results[0].ID != "az-2" || got.Results[0].Status != "found" {
 		t.Fatalf("result[0] = %+v", got.Results[0])
 	}
+	if len(got.Results[0].Dependencies) != 1 || got.Results[0].Dependencies[0].ID != "az-1" {
+		t.Fatalf("result[0] dependencies = %+v", got.Results[0].Dependencies)
+	}
 	if got.Results[1].ID != "az-missing" || got.Results[1].Status != "not_found" {
 		t.Fatalf("result[1] = %+v", got.Results[1])
 	}
 	if got.Results[2].ID != "az-1" || got.Results[2].Status != "found" {
 		t.Fatalf("result[2] = %+v", got.Results[2])
+	}
+	if len(got.Results[2].Dependents) != 1 || got.Results[2].Dependents[0].ID != "az-2" {
+		t.Fatalf("result[2] dependents = %+v", got.Results[2].Dependents)
 	}
 }
 
