@@ -157,7 +157,11 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if !ok {
 			return m, nil
 		}
-		opts := mergePreflightOptions{ignoreSourceDirty: true}
+		opts := mergePreflightOptions{
+			ignoreSourceDirty:     true,
+			stopTargetBeforeMerge: selection.StopTargetBeforeMerge,
+			targetState:           domain.SessionBusy,
+		}
 		m.beginMutationFeedback(fmt.Sprintf("Merge queued for %s -> %s ignoring source dirty files", selection.SourceID, selection.TargetID))
 		if strings.TrimSpace(selection.TargetID) == mergeBaseTargetID {
 			return m, m.mergeToBaseCmdWithOptions(strings.TrimSpace(selection.SourceWorktree), strings.TrimSpace(selection.SourceID), true, opts)

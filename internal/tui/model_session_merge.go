@@ -407,16 +407,17 @@ type mergeResultMsg struct {
 }
 
 type mergePreflightFailureMsg struct {
-	sourceID       string
-	sourceWorktree string
-	targetID       string
-	targetWorktree string
-	reasons        []string
-	sourceFiles    []string
-	targetFiles    []string
-	conflictFiles  []string
-	targetRef      string
-	sourceBranch   string
+	sourceID              string
+	sourceWorktree        string
+	targetID              string
+	targetWorktree        string
+	reasons               []string
+	sourceFiles           []string
+	targetFiles           []string
+	conflictFiles         []string
+	targetRef             string
+	sourceBranch          string
+	stopTargetBeforeMerge bool
 }
 
 type mergePreflightActionResultMsg struct {
@@ -442,7 +443,9 @@ type mergeTargetSelectionResolvedMsg struct {
 }
 
 type mergePreflightOptions struct {
-	ignoreSourceDirty bool
+	ignoreSourceDirty     bool
+	stopTargetBeforeMerge bool
+	targetState           domain.SessionState
 }
 
 // mergeBaseTargetID is a UI-only merge target sentinel. It means "merge into
@@ -450,14 +453,14 @@ type mergePreflightOptions struct {
 const mergeBaseTargetID = "base"
 
 type mergeBaseTarget struct {
-	targetID      string
-	targetBranch  string
+	targetID       string
+	targetBranch   string
 	targetWorktree string
 }
 
 func (m Model) resolveMergeBaseTarget(ctx context.Context, sourceID string) (mergeBaseTarget, error) {
 	defaultTarget := mergeBaseTarget{
-		targetID:    mergeBaseTargetID,
+		targetID:     mergeBaseTargetID,
 		targetBranch: m.resolveBaseBranch(),
 	}
 	sourceID = strings.TrimSpace(sourceID)
@@ -497,8 +500,8 @@ func (m Model) resolveMergeBaseTarget(ctx context.Context, sourceID string) (mer
 		if parentTask.Status != domain.StatusDone {
 			if branch := branchForIssueDaemonWorktree(worktrees, parentID); branch != "" {
 				return mergeBaseTarget{
-					targetID:      parentID,
-					targetBranch:  branch,
+					targetID:       parentID,
+					targetBranch:   branch,
 					targetWorktree: worktreePathForIssueDaemonWorktree(worktrees, parentID),
 				}, nil
 			}
@@ -656,7 +659,30 @@ func (m Model) mergeFeatureIntoFeatureCmdWithOptions(sourceWorktree, targetWorkt
 		}
 
 		if preflight := m.checkMergePreflight(ctx, sourceID, targetID, sourceWorktree, targetWorktree, "HEAD", sourceBranch, refreshStatus, opts.ignoreSourceDirty); preflight != nil {
+			preflight.stopTargetBeforeMerge = opts.stopTargetBeforeMerge && shouldStopBeforeFollowOnMerge(opts.targetState)
 			return *preflight
+		}
+
+		if opts.stopTargetBeforeMerge && shouldStopBeforeFollowOnMerge(opts.targetState) {
+			ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
+			defer cancel()
+			m.sessionMonitor.Stop(targetID)
+			if _, err := m.daemonClient.StopSession(ctx, targetID); err != nil {
+				if pending, ok := pendingOperationDetails(err); ok {
+					return mergeResultMsg{
+						sourceID:    sourceID,
+						targetID:    targetID,
+						stage:       "stop_session",
+						state:       pending.State,
+						operationID: pending.OperationID,
+					}
+				}
+				return mergeResultMsg{
+					sourceID: sourceID,
+					targetID: targetID,
+					err:      fmt.Errorf("stop target session %s before merge: %w", targetID, err),
+				}
+			}
 		}
 
 		result, err := m.daemonClient.GitMerge(ctx, targetWorktree, sourceBranch)
@@ -679,31 +705,10 @@ func shouldStopBeforeFollowOnMerge(state domain.SessionState) bool {
 
 func (m Model) followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, sourceID, targetID string, targetState domain.SessionState, refreshStatus bool) tea.Cmd {
 	return func() tea.Msg {
-		if shouldStopBeforeFollowOnMerge(targetState) {
-			ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
-			defer cancel()
-			if m.daemonClient == nil {
-				return mergeResultMsg{sourceID: sourceID, targetID: targetID, err: fmt.Errorf("daemon client unavailable")}
-			}
-			m.sessionMonitor.Stop(targetID)
-			if _, err := m.daemonClient.StopSession(ctx, targetID); err != nil {
-				if pending, ok := pendingOperationDetails(err); ok {
-					return mergeResultMsg{
-						sourceID:    sourceID,
-						targetID:    targetID,
-						stage:       "stop_session",
-						state:       pending.State,
-						operationID: pending.OperationID,
-					}
-				}
-				return mergeResultMsg{
-					sourceID: sourceID,
-					targetID: targetID,
-					err:      fmt.Errorf("stop target session %s before merge: %w", targetID, err),
-				}
-			}
-		}
-		return m.mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, sourceID, targetID, refreshStatus)()
+		return m.mergeFeatureIntoFeatureCmdWithOptions(sourceWorktree, targetWorktree, sourceID, targetID, refreshStatus, mergePreflightOptions{
+			stopTargetBeforeMerge: true,
+			targetState:           targetState,
+		})()
 	}
 }
 
