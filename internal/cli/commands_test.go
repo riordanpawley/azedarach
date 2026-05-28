@@ -7882,6 +7882,21 @@ func TestPrimeCommandQuestionFirstAndSpecBlock(t *testing.T) {
 	if !strings.Contains(output, "ALWAYS run `az spec read --issue <issue-id>` before starting behavior work; use `az spec link list --issue <issue-id>` when you need link-only detail.") {
 		t.Fatalf("prime output missing mandatory pre-work spec check guardrail: %q", output)
 	}
+	if !strings.Contains(output, "To choose spec traceability, first inspect linked requirements, then use `az spec req list` and `az spec read --req <req-id>` to find nearby requirements by feature area or acceptance intent.") {
+		t.Fatalf("prime output missing spec discovery guardrail: %q", output)
+	}
+	if !strings.Contains(output, "Link an existing requirement when it already defines the intended behavior; create or update a requirement before implementation when work adds behavior, changes user-visible behavior, changes a CLI/API/TUI contract, alters persistence/daemon semantics, or reveals an underspecified contract.") {
+		t.Fatalf("prime output missing spec link/create decision guardrail: %q", output)
+	}
+	if !strings.Contains(output, "Contract-preserving work usually does not need a new requirement: refactors, tests, formatting, tooling, observability, dependency/internal cleanup, docs/process-only edits, or fixes that restore already-specified behavior.") {
+		t.Fatalf("prime output missing contract-preserving spec exception guardrail: %q", output)
+	}
+	if !strings.Contains(output, "For contract-preserving work, record explicit issue-note evidence such as `Spec impact: none (contract-preserving refactor)`, `Spec impact: none (tests/tooling only)`, or `Spec impact: none (fix restores existing behavior)`.") {
+		t.Fatalf("prime output missing spec-impact note examples: %q", output)
+	}
+	if !strings.Contains(output, "If behavior work has no linked requirements after that check, do not treat missing links as permission to skip spec alignment.") {
+		t.Fatalf("prime output missing no-linked-requirements remediation guardrail: %q", output)
+	}
 	if !strings.Contains(output, "If implementation is not aligned with spec, update spec first, then implement.") {
 		t.Fatalf("prime output missing spec-first update guardrail: %q", output)
 	}
