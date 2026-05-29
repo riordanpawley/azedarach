@@ -165,6 +165,26 @@ func TestBuildRuntimeProjectionSnapshotAndEventBodyAreDeterministic(t *testing.T
 	}
 }
 
+func TestApplyRuntimeSessionCountsCarriesTmuxAttachmentMetadata(t *testing.T) {
+	projection := buildRuntimeProjection("proj-x", &daemonstate.Session{
+		ID:        "sess-x",
+		IssueID:   "az-x",
+		State:     daemonstate.SessionStateAttached,
+		UpdatedAt: time.Date(2026, time.April, 1, 12, 0, 0, 0, time.UTC),
+	}, nil)
+
+	applyRuntimeSessionCounts(&projection, sessionProjectionCounts{
+		Total:             2,
+		Active:            1,
+		Paused:            1,
+		TmuxAttachedCount: 1,
+	})
+
+	if !projection.Session.TmuxAttached || projection.Session.TmuxAttachedCount != 1 {
+		t.Fatalf("tmux attachment = %v/%d, want true/1", projection.Session.TmuxAttached, projection.Session.TmuxAttachedCount)
+	}
+}
+
 func TestPublishSessionProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	ctx := context.Background()
 	sessionStore := daemonstate.NewStore()

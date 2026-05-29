@@ -177,6 +177,7 @@ func sessionProjectionAggregateByIssueKey(sessions []daemonstate.Session, naming
 				merged.StartedAt = &started
 			}
 		}
+		merged.TmuxAttachedCount += session.TmuxAttachedCount
 		byIssueKey[key] = merged
 	}
 	return byIssueKey
@@ -198,12 +199,13 @@ func sessionProjectionCountsByIssueKey(sessions []daemonstate.Session, namingSco
 		if key == "" {
 			continue
 		}
+		counts := byIssueKey[key]
+		counts.TmuxAttachedCount += session.TmuxAttachedCount
 		if _, hasAgent := hasAgentRows[key]; hasAgent && !isAgentScopedSessionID(session.ID) {
+			byIssueKey[key] = counts
 			continue
 		}
-		counts := byIssueKey[key]
 		counts.Total++
-		counts.TmuxAttachedCount += session.TmuxAttachedCount
 		switch state {
 		case daemonstate.SessionStatePaused:
 			counts.Paused++
@@ -1920,6 +1922,10 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 
 		state := domain.SessionBusy
 		var startedAt *time.Time
+		worktree := ""
+		if tasks[i].Session != nil {
+			worktree = strings.TrimSpace(tasks[i].Session.Worktree)
+		}
 		snapshotSession, snapshotOK := snapshotByKey[taskKey]
 		projectionSession, projectionOK := projectionByKey[taskKey]
 		session, ok := sessionByKey[taskKey]
@@ -1943,6 +1949,7 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 			TmuxAttached:      countsByKey[taskKey].TmuxAttachedCount > 0,
 			TmuxAttachedCount: countsByKey[taskKey].TmuxAttachedCount,
 			StartedAt:         startedAt,
+			Worktree:          worktree,
 		}
 	}
 

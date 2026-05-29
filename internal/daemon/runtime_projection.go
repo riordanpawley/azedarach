@@ -102,6 +102,8 @@ func applyRuntimeSessionCounts(projection *protocol.RuntimeProjection, counts se
 	projection.Session.TotalCount = counts.Total
 	projection.Session.ActiveCount = counts.Active
 	projection.Session.PausedCount = counts.Paused
+	projection.Session.TmuxAttached = counts.TmuxAttachedCount > 0
+	projection.Session.TmuxAttachedCount = counts.TmuxAttachedCount
 }
 
 func parseIssueIDOrZero(raw string) naming.IssueID {
