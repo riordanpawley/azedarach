@@ -1119,8 +1119,10 @@ func runCommand(cfg *config.Config, fn func(*cli.Dependencies) error) error {
 	commandShape := latencytrace.CommandShape(os.Args[1:])
 	latencytrace.LogPhase(deps.Logger, "cli", "dependencies_init", depsStartedAt, "command_shape", commandShape)
 	latencytrace.LogPhase(deps.Logger, "cli", "process_to_dependencies_ready", processStartedAt, "command_shape", commandShape)
+	audit := beginCommandAudit(deps.Logger, deps, commandShape, os.Args[1:])
 	commandStartedAt := time.Now()
 	err = fn(deps)
+	finishCommandAudit(deps.Logger, audit, err)
 	attrs := []any{"command_shape", commandShape}
 	if err != nil {
 		attrs = append(attrs, "error", err)
@@ -1138,8 +1140,10 @@ func runCommandAtRepoDir(cfg *config.Config, repoDir string, fn func(*cli.Depend
 	commandShape := latencytrace.CommandShape(os.Args[1:])
 	latencytrace.LogPhase(deps.Logger, "cli", "dependencies_init", depsStartedAt, "command_shape", commandShape, "repo_dir", repoDir)
 	latencytrace.LogPhase(deps.Logger, "cli", "process_to_dependencies_ready", processStartedAt, "command_shape", commandShape, "repo_dir", repoDir)
+	audit := beginCommandAudit(deps.Logger, deps, commandShape, os.Args[1:])
 	commandStartedAt := time.Now()
 	err = fn(deps)
+	finishCommandAudit(deps.Logger, audit, err)
 	attrs := []any{"command_shape", commandShape, "repo_dir", repoDir}
 	if err != nil {
 		attrs = append(attrs, "error", err)

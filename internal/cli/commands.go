@@ -148,23 +148,25 @@ type IssueCheckOptions struct {
 }
 
 type IssueCreateOptions struct {
-	Project               string
-	JSON                  bool
-	Title                 string
-	Description           string
-	Type                  domain.TaskType
-	Priority              domain.Priority
-	PriorityExplicit      bool
-	Deferred              bool
-	Implementations       []string
-	AutoParentFromIssueID *string
+	Project                string
+	JSON                   bool
+	Title                  string
+	Description            string
+	Type                   domain.TaskType
+	Priority               domain.Priority
+	PriorityExplicit       bool
+	Deferred               bool
+	Implementations        []string
+	AutoParentFromIssueID  *string
+	AutoCreatedFromIssueID *string
 }
 
 type issueCreateResult struct {
-	IssueID  string
-	ParentID string
-	Deferred bool
-	Message  string
+	IssueID       string
+	ParentID      string
+	CreatedFromID string
+	Deferred      bool
+	Message       string
 }
 
 type IssueCloseOptions struct {
@@ -2119,8 +2121,9 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	}
 	opts.Type = taskType
 	opts.Implementations = dedupeOrderedIDs(impls)
-	if !opts.Deferred {
-		if issueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID")); issueID != "" {
+	if issueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID")); issueID != "" {
+		opts.AutoCreatedFromIssueID = &issueID
+		if !opts.Deferred {
 			opts.AutoParentFromIssueID = &issueID
 		}
 	}
@@ -3507,12 +3510,13 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 	}
 	if opts.JSON {
 		return printJSON(map[string]any{
-			"issue_id":   result.IssueID,
-			"parent_id":  result.ParentID,
-			"deferred":   result.Deferred,
-			"message":    result.Message,
-			"created":    true,
-			"project_id": strings.TrimSpace(deps.ProjectID),
+			"issue_id":        result.IssueID,
+			"parent_id":       result.ParentID,
+			"created_from_id": result.CreatedFromID,
+			"deferred":        result.Deferred,
+			"message":         result.Message,
+			"created":         true,
+			"project_id":      strings.TrimSpace(deps.ProjectID),
 		})
 	}
 	fmt.Println(result.Message)
@@ -3573,20 +3577,49 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 		return issueCreateResult{}, fmt.Errorf("failed to create issue: %w", err)
 	}
 
+	createdFromIDValue := ""
+	if opts.AutoCreatedFromIssueID != nil && strings.TrimSpace(*opts.AutoCreatedFromIssueID) != "" {
+		createdFromIDValue = strings.TrimSpace(*opts.AutoCreatedFromIssueID)
+		createdIssueID, parseErr := naming.ParseIssueID(taskID)
+		if parseErr != nil {
+			return issueCreateResult{}, fmt.Errorf("failed to parse created issue id %s: %w", taskID, parseErr)
+		}
+		createdFromID, parseErr := naming.ParseIssueID(createdFromIDValue)
+		if parseErr != nil {
+			return issueCreateResult{}, fmt.Errorf("failed to parse active issue id for created-from edge %s: %w", createdFromIDValue, parseErr)
+		}
+		if createdIssueID != createdFromID {
+			if _, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (struct{}, error) {
+				err := deps.DaemonClient.AddTaskDependency(callCtx, daemonclient.TaskDependencyParams{
+					TaskID:      createdIssueID,
+					DependsOnID: createdFromID,
+					Type:        string(domain.DependencyDiscovered),
+				})
+				return struct{}{}, err
+			}); err != nil {
+				return issueCreateResult{}, fmt.Errorf("failed to add created-from issue graph edge %s -> %s: %w", taskID, createdFromIDValue, err)
+			}
+		}
+	}
+
 	message := fmt.Sprintf("Created issue: %s", taskID)
 	parentIDValue := ""
 	if parentID != nil && strings.TrimSpace(parentID.String()) != "" {
 		parentIDValue = strings.TrimSpace(parentID.String())
 		message = fmt.Sprintf("%s (parent: %s, auto-parent from AZEDARACH_ISSUE_ID)", message, parentIDValue)
 	}
+	if createdFromIDValue != "" {
+		message = fmt.Sprintf("%s [created-from: %s]", message, createdFromIDValue)
+	}
 	if opts.Deferred {
 		message = fmt.Sprintf("%s [deferred: standalone later work, not auto-parented]", message)
 	}
 	return issueCreateResult{
-		IssueID:  taskID,
-		ParentID: parentIDValue,
-		Deferred: opts.Deferred,
-		Message:  message,
+		IssueID:       taskID,
+		ParentID:      parentIDValue,
+		CreatedFromID: createdFromIDValue,
+		Deferred:      opts.Deferred,
+		Message:       message,
 	}, nil
 }
 
