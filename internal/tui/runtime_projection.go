@@ -27,6 +27,10 @@ func (m *Model) syncProjectionIndexesFromTasks() {
 
 		signals := m.runtimeSignalsByTask[taskID]
 		signals.HasTmuxSession = signals.HasTmuxSession || task.Session != nil || task.HasTmuxSession
+		if task.Session != nil {
+			signals.TmuxAttached = task.Session.TmuxAttached
+			signals.TmuxAttachedCount = task.Session.TmuxAttachedCount
+		}
 		signals.HasWorktree = signals.HasWorktree || task.HasWorktree
 		signals.GitAheadCount = task.GitAheadCount
 		signals.GitBehindCount = task.GitBehindCount
@@ -80,6 +84,8 @@ func (m *Model) applyRuntimeProjection(projection protocol.RuntimeProjection) bo
 		taskID := task.ID.String()
 		signals := m.runtimeSignalsByTask[taskID]
 		signals.HasTmuxSession = projection.Session.HasSession
+		signals.TmuxAttached = projection.Session.TmuxAttached
+		signals.TmuxAttachedCount = projection.Session.TmuxAttachedCount
 		signals.HasWorktree = projection.Worktree.Exists
 		signals.GitAheadCount = projection.Git.GitAheadCount
 		signals.GitBehindCount = projection.Git.GitBehindCount
@@ -121,6 +127,8 @@ func (m *Model) applyRuntimeProjection(projection protocol.RuntimeProjection) bo
 				next.TotalCount = projection.Session.TotalCount
 				next.ActiveCount = projection.Session.ActiveCount
 				next.PausedCount = projection.Session.PausedCount
+				next.TmuxAttached = projection.Session.TmuxAttached
+				next.TmuxAttachedCount = projection.Session.TmuxAttachedCount
 			} else {
 				task.Session = nil
 				task.HasTmuxSession = false
@@ -196,6 +204,8 @@ func (m *Model) applyRuntimeProjectionFromSessionEvent(body protocol.SessionProj
 			next.TotalCount = body.Runtime.Projection.Session.TotalCount
 			next.ActiveCount = body.Runtime.Projection.Session.ActiveCount
 			next.PausedCount = body.Runtime.Projection.Session.PausedCount
+			next.TmuxAttached = body.Runtime.Projection.Session.TmuxAttached
+			next.TmuxAttachedCount = body.Runtime.Projection.Session.TmuxAttachedCount
 		}
 		next.State = nextState
 		if next.StartedAt == nil {

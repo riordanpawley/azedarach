@@ -4336,12 +4336,13 @@ func TestEnrichTasksWithSessionStateAggregatesMultipleAgentSessions(t *testing.T
 		t.Fatalf("seed paused agent session: %v", err)
 	}
 	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
-		ID:            "ciw.pane-2",
-		IssueID:       issueID,
-		State:         daemonstate.SessionStateAttached,
-		ObservedState: daemonstate.SessionStateAttached,
-		StartedAt:     &secondStartedAt,
-		UpdatedAt:     secondStartedAt,
+		ID:                "ciw.pane-2",
+		IssueID:           issueID,
+		State:             daemonstate.SessionStateAttached,
+		ObservedState:     daemonstate.SessionStateAttached,
+		TmuxAttachedCount: 1,
+		StartedAt:         &secondStartedAt,
+		UpdatedAt:         secondStartedAt,
 	}); err != nil {
 		t.Fatalf("seed attached agent session: %v", err)
 	}
@@ -4356,6 +4357,9 @@ func TestEnrichTasksWithSessionStateAggregatesMultipleAgentSessions(t *testing.T
 	}
 	if enriched[0].Session.TotalCount != 2 || enriched[0].Session.ActiveCount != 1 || enriched[0].Session.PausedCount != 1 {
 		t.Fatalf("session aggregate counts = total %d active %d paused %d, want 2/1/1", enriched[0].Session.TotalCount, enriched[0].Session.ActiveCount, enriched[0].Session.PausedCount)
+	}
+	if !enriched[0].Session.TmuxAttached || enriched[0].Session.TmuxAttachedCount != 1 {
+		t.Fatalf("tmux attachment = attached %v count %d, want true/1", enriched[0].Session.TmuxAttached, enriched[0].Session.TmuxAttachedCount)
 	}
 	if enriched[0].Session.StartedAt == nil || !enriched[0].Session.StartedAt.Equal(startedAt) {
 		t.Fatalf("started_at = %v, want earliest %v", enriched[0].Session.StartedAt, startedAt)

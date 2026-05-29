@@ -562,6 +562,7 @@ func TestRenderCard_WithRuntimeSignals(t *testing.T) {
 	}
 	signals := &RuntimeSignals{
 		HasTmuxSession:        true,
+		TmuxAttached:          true,
 		HasWorktree:           true,
 		GitAheadCount:         2,
 		GitBehindCount:        4,
@@ -583,7 +584,7 @@ func TestRenderCard_WithRuntimeSignals(t *testing.T) {
 		t.Fatalf("expected header line in card, got: %s", stripped)
 	}
 
-	for _, token := range []string{tmuxSessionToken, worktreeToken, "↑2", "↓4", "✎", "+8/-2"} {
+	for _, token := range []string{tmuxSessionToken, tmuxAttachedToken, worktreeToken, "↑2", "↓4", "✎", "+8/-2"} {
 		if !strings.Contains(headerLine, token) {
 			t.Fatalf("header should contain %q, got: %s", token, headerLine)
 		}
@@ -825,6 +826,7 @@ func TestRenderRuntimeSignals(t *testing.T) {
 		signals := &RuntimeSignals{
 			HasTmuxSession:           true,
 			HasDescendantTmuxSession: true,
+			TmuxAttachedCount:        2,
 			HasWorktree:              true,
 			GitAheadCount:            1,
 			GitBehindCount:           2,
@@ -838,6 +840,7 @@ func TestRenderRuntimeSignals(t *testing.T) {
 		got := stripANSI(renderRuntimeSignals(signals, styles.New()))
 		if !strings.Contains(got, tmuxSessionToken) ||
 			!strings.Contains(got, descendantTmuxSessionToken) ||
+			!strings.Contains(got, "A2") ||
 			!strings.Contains(got, worktreeToken) ||
 			!strings.Contains(got, "M:queued(25%)") ||
 			!strings.Contains(got, "↑1") ||
@@ -883,6 +886,7 @@ func TestRenderRuntimeSignalsCompact(t *testing.T) {
 		signals := &RuntimeSignals{
 			HasTmuxSession:           true,
 			HasDescendantTmuxSession: true,
+			TmuxAttached:             true,
 			HasWorktree:              true,
 			HasUncommittedChanges:    true,
 			HasConflicts:             true,
@@ -893,7 +897,7 @@ func TestRenderRuntimeSignalsCompact(t *testing.T) {
 			PendingOperationPercent:  50,
 		}
 		got := stripANSI(renderRuntimeSignalsCompact(signals, styles.New()))
-		if !strings.Contains(got, "T") || !strings.Contains(got, "Td") || !strings.Contains(got, worktreeToken) || !strings.Contains(got, "M:R50") || !strings.Contains(got, "C!") || !strings.Contains(got, "G*↓4") {
+		if !strings.Contains(got, "T") || !strings.Contains(got, "Td") || !strings.Contains(got, tmuxAttachedToken) || !strings.Contains(got, worktreeToken) || !strings.Contains(got, "M:R50") || !strings.Contains(got, "C!") || !strings.Contains(got, "G*↓4") {
 			t.Fatalf("renderRuntimeSignalsCompact(...) = %q, missing expected compact token(s)", got)
 		}
 		if strings.Contains(got, "+10/-3") {
@@ -924,6 +928,8 @@ func TestRuntimeSignalsForHeader_SuppressesTmuxMarkersWithSession(t *testing.T) 
 	signals := &RuntimeSignals{
 		HasTmuxSession:           true,
 		HasDescendantTmuxSession: true,
+		TmuxAttached:             true,
+		TmuxAttachedCount:        1,
 		HasWorktree:              true,
 		GitAheadCount:            1,
 	}
@@ -934,6 +940,9 @@ func TestRuntimeSignalsForHeader_SuppressesTmuxMarkersWithSession(t *testing.T) 
 	}
 	if got.HasTmuxSession || got.HasDescendantTmuxSession {
 		t.Fatalf("runtimeSignalsForHeader(...) should hide tmux markers when session exists: %+v", got)
+	}
+	if !got.TmuxAttached || got.TmuxAttachedCount != 1 {
+		t.Fatalf("runtimeSignalsForHeader(...) should preserve tmux attachment metadata: %+v", got)
 	}
 	if !got.HasWorktree || got.GitAheadCount != 1 {
 		t.Fatalf("runtimeSignalsForHeader(...) should preserve non-tmux runtime signals: %+v", got)

@@ -51,9 +51,10 @@ type sessionRecoveryResult struct {
 }
 
 type sessionProjectionCounts struct {
-	Total  int
-	Active int
-	Paused int
+	Total             int
+	Active            int
+	Paused            int
+	TmuxAttachedCount int
 }
 
 const (
@@ -202,6 +203,7 @@ func sessionProjectionCountsByIssueKey(sessions []daemonstate.Session, namingSco
 		}
 		counts := byIssueKey[key]
 		counts.Total++
+		counts.TmuxAttachedCount += session.TmuxAttachedCount
 		switch state {
 		case daemonstate.SessionStatePaused:
 			counts.Paused++
@@ -1933,12 +1935,14 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 			}
 		}
 		tasks[i].Session = &domain.Session{
-			IssueID:     naming.IssueID(taskID),
-			State:       state,
-			TotalCount:  countsByKey[taskKey].Total,
-			ActiveCount: countsByKey[taskKey].Active,
-			PausedCount: countsByKey[taskKey].Paused,
-			StartedAt:   startedAt,
+			IssueID:           naming.IssueID(taskID),
+			State:             state,
+			TotalCount:        countsByKey[taskKey].Total,
+			ActiveCount:       countsByKey[taskKey].Active,
+			PausedCount:       countsByKey[taskKey].Paused,
+			TmuxAttached:      countsByKey[taskKey].TmuxAttachedCount > 0,
+			TmuxAttachedCount: countsByKey[taskKey].TmuxAttachedCount,
+			StartedAt:         startedAt,
 		}
 	}
 
