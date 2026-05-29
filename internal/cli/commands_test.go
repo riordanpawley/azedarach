@@ -6111,6 +6111,16 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 							State:       protocol.OperationStateQueued,
 						},
 					}), nil
+				case protocol.CommandOperationGet:
+					return responseWithJSON(req, protocol.OperationGetResponseBody{
+						Operation: protocol.OperationRecord{
+							OperationID: "op-split",
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     child,
+							State:       protocol.OperationStateDone,
+						},
+					}), nil
 				case protocol.CommandMailSend:
 					return responseWithJSON(req, protocol.MailEvent{Seq: 1, ParentIssue: root.String(), IssueID: child, Type: "session-started"}), nil
 				default:

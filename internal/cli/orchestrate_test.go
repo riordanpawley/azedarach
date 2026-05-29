@@ -247,6 +247,16 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 							State:       protocol.OperationStateQueued,
 						},
 					}), nil
+				case protocol.CommandOperationGet:
+					return responseWithJSON(req, protocol.OperationGetResponseBody{
+						Operation: protocol.OperationRecord{
+							OperationID: "op-1",
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     child,
+							State:       protocol.OperationStateDone,
+						},
+					}), nil
 				case protocol.CommandMailSend:
 					return responseWithJSON(req, protocol.MailEvent{Seq: 1, ParentIssue: "az-1", IssueID: child, Type: "session-started"}), nil
 				default:
@@ -277,8 +287,97 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 	if submitted.Kind != commandSessionStart || submitted.IssueID != child || len(submitted.Payload) == 0 {
 		t.Fatalf("submitted = %+v", submitted)
 	}
-	if strings.Join(commands, ",") == "" || !containsString(commands, protocol.CommandOperationSubmit) {
-		t.Fatalf("commands = %+v, want operation submit", commands)
+	if strings.Join(commands, ",") == "" || !containsString(commands, protocol.CommandOperationSubmit) || !containsString(commands, protocol.CommandOperationGet) {
+		t.Fatalf("commands = %+v, want operation submit and wait", commands)
+	}
+}
+
+func TestOrchestrateStartWaitsForAllSubmittedOperationsBeforeMail(t *testing.T) {
+	root := naming.IssueID("az-1")
+	childA := naming.IssueID("az-2")
+	childB := naming.IssueID("az-3")
+	tasks := []domain.Task{
+		{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+		{ID: childA, Title: "Worker A", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &root},
+		{ID: childB, Title: "Worker B", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &root},
+	}
+	taskListBody, err := marshalTaskListBody(tasks)
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	submitted := map[string]bool{}
+	waited := map[string]bool{}
+	deps := &Dependencies{
+		ProjectID: protocol.DefaultProjectID,
+		RepoDir:   "/repo",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: taskListBody}, nil
+				case daemonclient.CommandGitStatus:
+					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{}}), nil
+				case protocol.CommandOperationSubmit:
+					var body protocol.OperationSubmitRequestBody
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode submit body: %v", err)
+					}
+					submitted[body.IssueID.String()] = true
+					return responseWithJSON(req, protocol.OperationSubmitResponseBody{
+						Created: true,
+						Operation: protocol.OperationRecord{
+							OperationID: naming.OperationID("op-" + body.IssueID.String()),
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     body.IssueID,
+							State:       protocol.OperationStateQueued,
+						},
+					}), nil
+				case protocol.CommandOperationGet:
+					var body protocol.OperationGetRequestBody
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode operation get body: %v", err)
+					}
+					if !submitted[childA.String()] || !submitted[childB.String()] {
+						t.Fatalf("waited for %s before all requested starts were submitted: submitted=%+v", body.OperationID, submitted)
+					}
+					issueID := strings.TrimPrefix(body.OperationID.String(), "op-")
+					waited[issueID] = true
+					return responseWithJSON(req, protocol.OperationGetResponseBody{
+						Operation: protocol.OperationRecord{
+							OperationID: body.OperationID,
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     naming.IssueID(issueID),
+							State:       protocol.OperationStateDone,
+						},
+					}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{"project_id": protocol.DefaultProjectID, "worktrees": []map[string]string{}}), nil
+				case protocol.CommandMailSend:
+					var body protocol.MailSendCommandBody
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode mail body: %v", err)
+					}
+					if !waited[body.IssueID.String()] {
+						t.Fatalf("sent session-started mail for %s before operation wait completed", body.IssueID)
+					}
+					return responseWithJSON(req, protocol.MailEvent{Seq: 1, ParentIssue: "az-1", IssueID: body.IssueID, Type: "session-started"}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	result, err := orchestrateStart(deps, OrchestrateStartOptions{RootIssueID: "az-1", IssueIDs: []string{"az-2", "az-3"}, Limit: 4})
+	if err != nil {
+		t.Fatalf("orchestrateStart error = %v", err)
+	}
+	if len(result.Started) != 2 || len(result.Failed) != 0 {
+		t.Fatalf("result started=%+v failed=%+v, want both started with no failures", result.Started, result.Failed)
 	}
 }
 
