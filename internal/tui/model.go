@@ -2333,12 +2333,35 @@ func cloneSession(session *domain.Session) *domain.Session {
 
 func projectSessionLifecycleState(state protocol.SessionLifecycleState) (domain.SessionState, bool) {
 	switch state {
-	case protocol.SessionLifecycleStateStarting, protocol.SessionLifecycleStateAttached:
+	case protocol.SessionLifecycleStateStarting, protocol.SessionLifecycleStateRunning:
 		return domain.SessionBusy, true
 	case protocol.SessionLifecycleStatePaused:
 		return domain.SessionPaused, true
+	case protocol.SessionLifecycleStateStopping:
+		return domain.SessionBusy, true
 	case protocol.SessionLifecycleStateStopped:
 		return "", false
+	default:
+		return domain.SessionBusy, true
+	}
+}
+
+func projectAgentStatus(status string) (domain.SessionState, bool) {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "":
+		return "", false
+	case "starting", "working", "running", "syncing", "active", "attached":
+		return domain.SessionBusy, true
+	case "waiting":
+		return domain.SessionWaiting, true
+	case "paused":
+		return domain.SessionPaused, true
+	case "ending":
+		return domain.SessionBusy, true
+	case "ended", "stopped":
+		return domain.SessionDone, true
+	case "error":
+		return domain.SessionError, true
 	default:
 		return domain.SessionBusy, true
 	}

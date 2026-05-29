@@ -289,7 +289,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				},
 				wantSubstrs: []string{
 					"decode task.list response",
-					"protocol_version mismatch: expected 3, actual 4",
+					"protocol_version mismatch: expected 4, actual 5",
 				},
 			},
 		}

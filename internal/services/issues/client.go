@@ -1681,6 +1681,7 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 					PARTITION BY issue_id
 					ORDER BY
 						CASE state
+							WHEN 'running' THEN 0
 							WHEN 'attached' THEN 0
 							WHEN 'paused' THEN 1
 							WHEN 'starting' THEN 2
@@ -1919,7 +1920,7 @@ func mapRuntimeSessionState(value string) domain.SessionState {
 	switch strings.TrimSpace(strings.ToLower(value)) {
 	case "paused":
 		return domain.SessionPaused
-	case "attached", "starting":
+	case "running", "attached", "starting":
 		return domain.SessionBusy
 	case "done":
 		return domain.SessionDone

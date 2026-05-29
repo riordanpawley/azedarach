@@ -747,7 +747,7 @@ func (d *Daemon) sessionLifecycleTransitionNeeded(projectID, sessionID, issueID 
 	if err != nil {
 		return true
 	}
-	if session.State != state {
+	if daemonstate.NormalizeSessionState(session.State) != daemonstate.NormalizeSessionState(state) {
 		return true
 	}
 	issueID = strings.TrimSpace(issueID)
@@ -759,11 +759,11 @@ func lifecycleCommandState(command string) (daemonstate.SessionState, bool) {
 	case daemonhandlers.CommandSessionStart:
 		return daemonstate.SessionStateStarting, true
 	case daemonhandlers.CommandSessionAttach:
-		return daemonstate.SessionStateAttached, true
+		return daemonstate.SessionStateRunning, true
 	case daemonhandlers.CommandSessionPause:
 		return daemonstate.SessionStatePaused, true
 	case daemonhandlers.CommandSessionResume:
-		return daemonstate.SessionStateAttached, true
+		return daemonstate.SessionStateRunning, true
 	case daemonhandlers.CommandSessionStop:
 		return daemonstate.SessionStateStopped, true
 	default:

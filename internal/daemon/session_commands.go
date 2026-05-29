@@ -98,8 +98,8 @@ func sessionProjectionIssueID(session daemonstate.Session, namingScope string) s
 }
 
 func sessionProjectionStateRank(state daemonstate.SessionState) int {
-	switch state {
-	case daemonstate.SessionStateAttached:
+	switch daemonstate.NormalizeSessionState(state) {
+	case daemonstate.SessionStateRunning:
 		return 4
 	case daemonstate.SessionStateStarting:
 		return 3
@@ -2148,16 +2148,17 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 		}
 		issueKey := sessionKey(issueID)
 		row := daemonstate.Session{
-			ID:            name,
-			IssueID:       issueID,
-			State:         daemonstate.SessionStateAttached,
-			ObservedState: daemonstate.SessionStateAttached,
-			StartedAt:     info.CreatedAt,
-			UpdatedAt:     time.Now().UTC(),
+			ID:                name,
+			IssueID:           issueID,
+			State:             daemonstate.SessionStateRunning,
+			ObservedState:     daemonstate.SessionStateRunning,
+			TmuxAttachedCount: info.AttachedCount,
+			StartedAt:         info.CreatedAt,
+			UpdatedAt:         time.Now().UTC(),
 		}
 		if existing, exists := existingByIssueKey[issueKey]; exists {
 			row.State = existing.State
-			row.ObservedState = daemonstate.SessionStateAttached
+			row.ObservedState = daemonstate.SessionStateRunning
 			if (row.StartedAt == nil || row.StartedAt.IsZero()) && existing.StartedAt != nil && !existing.StartedAt.IsZero() {
 				started := existing.StartedAt.UTC()
 				row.StartedAt = &started

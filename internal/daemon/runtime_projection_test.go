@@ -49,14 +49,14 @@ func TestBuildRuntimeProjectionPopulatesSessionAndWorktreeSignals(t *testing.T) 
 	if !projection.Session.HasSession || projection.Session.SessionID != "sess-7" {
 		t.Fatalf("session = %+v, want active sess-7", projection.Session)
 	}
-	if projection.Session.State != "attached" {
-		t.Fatalf("session state = %q, want attached", projection.Session.State)
+	if projection.Session.State != "running" {
+		t.Fatalf("session state = %q, want running", projection.Session.State)
 	}
 	if projection.Session.Worktree != "/tmp/repo-az-7" {
 		t.Fatalf("session worktree = %q, want /tmp/repo-az-7", projection.Session.Worktree)
 	}
-	if projection.Agent.Status != "attached" || projection.Agent.SessionID != "sess-7" {
-		t.Fatalf("agent = %+v, want attached sess-7", projection.Agent)
+	if projection.Agent.Status != "working" || projection.Agent.SessionID != "sess-7" {
+		t.Fatalf("agent = %+v, want working sess-7", projection.Agent)
 	}
 	if !projection.Worktree.Exists || !projection.Worktree.Healthy {
 		t.Fatalf("worktree = %+v, want exists+healthy", projection.Worktree)
@@ -85,11 +85,11 @@ func TestBuildRuntimeProjectionUsesObservedSessionStateWhenPresent(t *testing.T)
 		UpdatedAt:     updatedAt,
 	}, nil)
 
-	if projection.Session.State != "attached" {
-		t.Fatalf("session state = %q, want attached observed state", projection.Session.State)
+	if projection.Session.State != "running" {
+		t.Fatalf("session state = %q, want running observed state", projection.Session.State)
 	}
-	if projection.Agent.Status != "attached" {
-		t.Fatalf("agent status = %q, want attached observed state", projection.Agent.Status)
+	if projection.Agent.Status != "working" {
+		t.Fatalf("agent status = %q, want working observed state", projection.Agent.Status)
 	}
 }
 
@@ -109,8 +109,8 @@ func TestBuildRuntimeProjectionReportsStoppedSessionInactive(t *testing.T) {
 	if projection.Session.State != protocol.SessionLifecycleStateStopped {
 		t.Fatalf("session state = %q, want stopped", projection.Session.State)
 	}
-	if projection.Agent.Status != "stopped" {
-		t.Fatalf("agent status = %q, want stopped", projection.Agent.Status)
+	if projection.Agent.Status != "ended" {
+		t.Fatalf("agent status = %q, want ended", projection.Agent.Status)
 	}
 }
 

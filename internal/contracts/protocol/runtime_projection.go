@@ -59,15 +59,17 @@ type RuntimeOperationProjection struct {
 
 // RuntimeSessionProjection captures tmux/session lifecycle signals used by the workspace detail panel.
 type RuntimeSessionProjection struct {
-	HasSession  bool                  `json:"has_session" msgpack:"has_session"`
-	SessionID   naming.SessionID      `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
-	State       SessionLifecycleState `json:"state,omitempty" msgpack:"state,omitempty"`
-	TotalCount  int                   `json:"total_count,omitempty" msgpack:"total_count,omitempty"`
-	ActiveCount int                   `json:"active_count,omitempty" msgpack:"active_count,omitempty"`
-	PausedCount int                   `json:"paused_count,omitempty" msgpack:"paused_count,omitempty"`
-	StartedAt   *time.Time            `json:"started_at,omitempty" msgpack:"started_at,omitempty"`
-	UpdatedAt   *time.Time            `json:"updated_at,omitempty" msgpack:"updated_at,omitempty"`
-	Worktree    string                `json:"worktree,omitempty" msgpack:"worktree,omitempty"`
+	HasSession        bool                  `json:"has_session" msgpack:"has_session"`
+	SessionID         naming.SessionID      `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
+	State             SessionLifecycleState `json:"state,omitempty" msgpack:"state,omitempty"`
+	TmuxAttached      bool                  `json:"tmux_attached,omitempty" msgpack:"tmux_attached,omitempty"`
+	TmuxAttachedCount int                   `json:"tmux_attached_count,omitempty" msgpack:"tmux_attached_count,omitempty"`
+	TotalCount        int                   `json:"total_count,omitempty" msgpack:"total_count,omitempty"`
+	ActiveCount       int                   `json:"active_count,omitempty" msgpack:"active_count,omitempty"`
+	PausedCount       int                   `json:"paused_count,omitempty" msgpack:"paused_count,omitempty"`
+	StartedAt         *time.Time            `json:"started_at,omitempty" msgpack:"started_at,omitempty"`
+	UpdatedAt         *time.Time            `json:"updated_at,omitempty" msgpack:"updated_at,omitempty"`
+	Worktree          string                `json:"worktree,omitempty" msgpack:"worktree,omitempty"`
 }
 
 // RuntimeAgentProjection captures the current agent/runtime status surfaced alongside session state.
