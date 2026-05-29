@@ -592,12 +592,58 @@ func TestModelDefaultsCursorToCurrentTmuxSession(t *testing.T) {
 	}
 }
 
+func TestModelDefaultsCursorToAttachedTmuxSessionWhenCurrentUnknown(t *testing.T) {
+	entries := []InventoryEntry{
+		{SessionID: "az", IssueID: "", TaskTitle: "Full az", HasTmuxSession: true},
+		{SessionID: "az-two", IssueID: "two", TaskTitle: "Two", HasTmuxSession: true, TmuxAttached: true, TmuxAttachedCount: 1},
+		{SessionID: "az-three", IssueID: "three", TaskTitle: "Three", HasTmuxSession: true},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	if model.cursor != 1 {
+		t.Fatalf("cursor = %d, want attached session index 1 even with full az present", model.cursor)
+	}
+	selected, ok := model.selectedEntry()
+	if !ok || selected.SessionID != "az-two" {
+		t.Fatalf("selected = %#v, want az-two", selected)
+	}
+}
+
 func TestModelShowsLoaderError(t *testing.T) {
 	model := New(fakeSnapshotLoader{})
 	updated, _ := model.Update(snapshotLoadedMsg{err: errors.New("boom")})
 	model = updated.(Model)
 	if !strings.Contains(model.View(), "boom") {
 		t.Fatalf("view missing loader error: %q", model.View())
+	}
+}
+
+func TestModelViewMarksAttachedTmuxSession(t *testing.T) {
+	entries := []InventoryEntry{{
+		SessionID:         "az-one",
+		IssueID:           "one",
+		TaskTitle:         "One",
+		ProjectPath:       "/tmp/project",
+		TmuxAttached:      true,
+		TmuxAttachedCount: 2,
+		HasTmuxSession:    true,
+	}}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 112, Height: 18})
+	model = updated.(Model)
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	view := ansi.Strip(model.View())
+	if !strings.Contains(view, "tmux az-one  attached x2") {
+		t.Fatalf("view missing attached tmux metadata:\n%s", view)
 	}
 }
 

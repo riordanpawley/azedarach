@@ -39,6 +39,8 @@ type InventoryEntry struct {
 	Worktree              string
 	StartedAt             *time.Time
 	LastAttachedAt        *time.Time
+	TmuxAttached          bool
+	TmuxAttachedCount     int
 	HasTmuxSession        bool
 	HasWorktree           bool
 	GitAheadCount         int
@@ -431,13 +433,11 @@ func (m *Model) normalizeSnapshot() {
 	}
 	m.snapshot.Entries = keepTmuxEntries(m.snapshot.Entries)
 	m.snapshot.Entries = prioritizeAzSessionFirst(m.snapshot.Entries)
-	if current := strings.TrimSpace(m.snapshot.CurrentSessionID); current != "" && !m.defaultedToCurrent {
-		for i, entry := range m.snapshot.Entries {
-			if strings.TrimSpace(entry.SessionID) == current {
-				m.cursor = i
-				m.defaultedToCurrent = true
-				break
-			}
+	if !m.defaultedToCurrent {
+		if current := strings.TrimSpace(m.snapshot.CurrentSessionID); current != "" && m.selectSnapshotSessionID(current) {
+			m.defaultedToCurrent = true
+		} else if m.selectAttachedSnapshotSession() {
+			m.defaultedToCurrent = true
 		}
 	}
 	m.clampCursor()
@@ -460,6 +460,30 @@ func (m *Model) selectSessionID(sessionID string) bool {
 	}
 	for i, entry := range m.filteredEntries() {
 		if strings.TrimSpace(entry.SessionID) == sessionID {
+			m.cursor = i
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) selectSnapshotSessionID(sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false
+	}
+	for i, entry := range m.snapshot.Entries {
+		if strings.TrimSpace(entry.SessionID) == sessionID {
+			m.cursor = i
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) selectAttachedSnapshotSession() bool {
+	for i, entry := range m.snapshot.Entries {
+		if entry.TmuxAttached || entry.TmuxAttachedCount > 0 {
 			m.cursor = i
 			return true
 		}
@@ -627,7 +651,7 @@ func (m Model) renderTreeRow(row sessionTreeRow, entry InventoryEntry) string {
 	}
 	metaParts := []string{}
 	if entry.SessionID != "" {
-		metaParts = append(metaParts, "tmux "+entry.SessionID)
+		metaParts = append(metaParts, tmuxSessionMeta(entry))
 	}
 	if entry.ProjectPath != "" {
 		metaParts = append(metaParts, entry.ProjectPath)
@@ -884,8 +908,14 @@ func prioritizeAzSessionFirst(entries []InventoryEntry) []InventoryEntry {
 	if len(entries) == 0 {
 		return entries
 	}
+	if entries[0].TmuxAttached || entries[0].TmuxAttachedCount > 0 {
+		return entries
+	}
 	azIndex := -1
 	for i, entry := range entries {
+		if entry.TmuxAttached || entry.TmuxAttachedCount > 0 {
+			return entries
+		}
 		if strings.TrimSpace(entry.SessionID) == defaultFullAzSession {
 			azIndex = i
 			break
@@ -1499,7 +1529,7 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 	project := firstNonEmpty(row.ProjectPath, row.ProjectID)
 	metaParts := []string{}
 	if row.SessionID != "" {
-		metaParts = append(metaParts, "tmux "+row.SessionID)
+		metaParts = append(metaParts, tmuxSessionMeta(row))
 	}
 	if project != "" {
 		metaParts = append(metaParts, project)
@@ -1517,6 +1547,24 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 	}
 	meta := strings.Join(metaParts, "  ")
 	return insertCardMetaLine(card, meta, origin, s)
+}
+
+func tmuxSessionMeta(entry InventoryEntry) string {
+	sessionID := strings.TrimSpace(entry.SessionID)
+	if sessionID == "" {
+		return ""
+	}
+	count := entry.TmuxAttachedCount
+	if entry.TmuxAttached && count <= 0 {
+		count = 1
+	}
+	if count > 1 {
+		return fmt.Sprintf("tmux %s  attached x%d", sessionID, count)
+	}
+	if count == 1 {
+		return "tmux " + sessionID + "  attached"
+	}
+	return "tmux " + sessionID
 }
 
 func compactSelectorCard(card string) string {

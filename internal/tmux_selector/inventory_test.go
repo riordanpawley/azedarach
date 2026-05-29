@@ -320,6 +320,35 @@ func TestGlobalInventoryLoaderSortsByLastAttachedDescending(t *testing.T) {
 	}
 }
 
+func TestGlobalInventoryLoaderSortsCurrentlyAttachedBeforeLastAttached(t *testing.T) {
+	old := time.Unix(1775200000, 0).UTC()
+	recent := old.Add(4 * time.Hour)
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{infos: []tmux.SessionInfo{
+			{Name: "az-recent", LastAttachedAt: &recent},
+			{Name: "az-attached", LastAttachedAt: &old, AttachedCount: 1},
+			{Name: "az-multi", LastAttachedAt: &old, AttachedCount: 2},
+		}},
+		nil,
+	)
+
+	snapshot, err := loader.ListLiveSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("ListLiveSnapshot: %v", err)
+	}
+	got := make([]string, 0, len(snapshot.Entries))
+	for _, entry := range snapshot.Entries {
+		got = append(got, entry.SessionID)
+	}
+	want := []string{"az-multi", "az-attached", "az-recent"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("session order = %v, want %v", got, want)
+	}
+	if !snapshot.Entries[0].TmuxAttached || snapshot.Entries[0].TmuxAttachedCount != 2 {
+		t.Fatalf("attached metadata = %#v, want attached count 2", snapshot.Entries[0])
+	}
+}
+
 func TestGlobalInventoryLoaderUsesSessionPrefixBeforeGitRootResolution(t *testing.T) {
 	root := t.TempDir()
 	azRoot := root + "/azedarach"

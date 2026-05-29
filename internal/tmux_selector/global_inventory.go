@@ -197,18 +197,20 @@ func (l *GlobalInventoryLoader) snapshotFromLive(ctx context.Context, live []tmu
 			}
 		}
 		entry := InventoryEntry{
-			SessionID:      sessionName,
-			ProjectID:      parsed.Project,
-			Worktree:       strings.TrimSpace(info.Path),
-			StartedAt:      info.CreatedAt,
-			LastAttachedAt: info.LastAttachedAt,
-			HasTmuxSession: true,
-			HasWorktree:    strings.TrimSpace(info.Path) != "",
-			State:          domain.SessionWaiting,
-			IssueStatus:    domain.StatusInProgress,
-			Priority:       domain.P2,
-			Type:           domain.TypeTask,
-			TaskTitle:      sessionName,
+			SessionID:         sessionName,
+			ProjectID:         parsed.Project,
+			Worktree:          strings.TrimSpace(info.Path),
+			StartedAt:         info.CreatedAt,
+			LastAttachedAt:    info.LastAttachedAt,
+			TmuxAttached:      info.AttachedCount > 0,
+			TmuxAttachedCount: info.AttachedCount,
+			HasTmuxSession:    true,
+			HasWorktree:       strings.TrimSpace(info.Path) != "",
+			State:             domain.SessionWaiting,
+			IssueStatus:       domain.StatusInProgress,
+			Priority:          domain.P2,
+			Type:              domain.TypeTask,
+			TaskTitle:         sessionName,
 		}
 		if ok && !parsed.IssueID.IsZero() {
 			entry.IssueID = parsed.IssueID.String()
@@ -260,6 +262,14 @@ func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map
 
 func (l *GlobalInventoryLoader) snapshotFromEntries(entries []InventoryEntry, enriching bool) Snapshot {
 	sort.SliceStable(entries, func(i, j int) bool {
+		leftCurrent := entries[i].TmuxAttached || entries[i].TmuxAttachedCount > 0
+		rightCurrent := entries[j].TmuxAttached || entries[j].TmuxAttachedCount > 0
+		if leftCurrent != rightCurrent {
+			return leftCurrent
+		}
+		if entries[i].TmuxAttachedCount != entries[j].TmuxAttachedCount {
+			return entries[i].TmuxAttachedCount > entries[j].TmuxAttachedCount
+		}
 		leftAttached := entries[i].LastAttachedAt != nil
 		rightAttached := entries[j].LastAttachedAt != nil
 		if leftAttached != rightAttached {
@@ -406,7 +416,14 @@ func entriesFromLive(live []tmux.SessionInfo) []InventoryEntry {
 		if sessionName == "" {
 			continue
 		}
-		entry := InventoryEntry{SessionID: sessionName, Worktree: strings.TrimSpace(info.Path)}
+		entry := InventoryEntry{
+			SessionID:         sessionName,
+			Worktree:          strings.TrimSpace(info.Path),
+			TmuxAttached:      info.AttachedCount > 0,
+			TmuxAttachedCount: info.AttachedCount,
+			LastAttachedAt:    info.LastAttachedAt,
+			StartedAt:         info.CreatedAt,
+		}
 		if parsed, ok := ParseAzedarachSessionName(sessionName); ok {
 			entry.IssueID = parsed.IssueID.String()
 			entry.ProjectID = parsed.Project
