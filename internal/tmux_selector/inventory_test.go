@@ -102,6 +102,54 @@ func TestGlobalInventoryLoaderUsesTmuxFirstAcrossProjects(t *testing.T) {
 	}
 }
 
+func TestGlobalInventoryLoaderClosedProjectedTaskRendersDoneInsteadOfBusy(t *testing.T) {
+	started := time.Unix(1775209200, 0).UTC()
+	projectDir := t.TempDir()
+	projectID := projectIDForPath(projectDir)
+	sessionID := naming.CanonicalSessionID(projectID, "cjf")
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{infos: []tmux.SessionInfo{
+			{Name: sessionID, CreatedAt: &started, Path: projectDir + "/worktrees/cjf"},
+		}},
+		nil,
+		WithProjectDirs(projectDir),
+		WithProjectSnapshotSource(fakeProjectSnapshotSource{
+			snapshots: []ProjectInventorySnapshot{{
+				ProjectID:   projectID,
+				ProjectPath: projectDir,
+				Tasks: []domain.Task{{
+					ID:       "cjf",
+					Title:    "Completed issue with live shell",
+					Status:   domain.StatusDone,
+					Priority: domain.P1,
+					Type:     domain.TypeTask,
+					Session: &domain.Session{
+						IssueID:   "cjf",
+						State:     domain.SessionBusy,
+						StartedAt: &started,
+					},
+					HasTmuxSession: true,
+					HasWorktree:    true,
+				}},
+			}},
+		}),
+	)
+
+	snapshot, err := loader.ListTasksSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("ListTasksSnapshot: %v", err)
+	}
+	if len(snapshot.Entries) != 1 {
+		t.Fatalf("entries = %#v, want one", snapshot.Entries)
+	}
+	if got := snapshot.Entries[0].State; got != domain.SessionDone {
+		t.Fatalf("entry state = %s, want %s", got, domain.SessionDone)
+	}
+	if got := snapshot.Tasks[0].Session.State; got != domain.SessionDone {
+		t.Fatalf("task session state = %s, want %s", got, domain.SessionDone)
+	}
+}
+
 func TestGlobalInventoryLoaderCarriesTreeTasksForAncestorRendering(t *testing.T) {
 	started := time.Unix(1775209200, 0).UTC()
 	projectDir := t.TempDir()
@@ -269,6 +317,35 @@ func TestGlobalInventoryLoaderSortsByLastAttachedDescending(t *testing.T) {
 	want := []string{"az-middle", "az-youngest", "az-oldest", "plain-unknown"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("session order = %v, want %v", got, want)
+	}
+}
+
+func TestGlobalInventoryLoaderSortsCurrentlyAttachedBeforeLastAttached(t *testing.T) {
+	old := time.Unix(1775200000, 0).UTC()
+	recent := old.Add(4 * time.Hour)
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{infos: []tmux.SessionInfo{
+			{Name: "az-recent", LastAttachedAt: &recent},
+			{Name: "az-attached", LastAttachedAt: &old, AttachedCount: 1},
+			{Name: "az-multi", LastAttachedAt: &old, AttachedCount: 2},
+		}},
+		nil,
+	)
+
+	snapshot, err := loader.ListLiveSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("ListLiveSnapshot: %v", err)
+	}
+	got := make([]string, 0, len(snapshot.Entries))
+	for _, entry := range snapshot.Entries {
+		got = append(got, entry.SessionID)
+	}
+	want := []string{"az-multi", "az-attached", "az-recent"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("session order = %v, want %v", got, want)
+	}
+	if !snapshot.Entries[0].TmuxAttached || snapshot.Entries[0].TmuxAttachedCount != 2 {
+		t.Fatalf("attached metadata = %#v, want attached count 2", snapshot.Entries[0])
 	}
 }
 

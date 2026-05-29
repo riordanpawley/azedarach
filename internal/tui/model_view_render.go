@@ -664,8 +664,14 @@ func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {
 			GitAdditions:          task.GitAdditions,
 			GitDeletions:          task.GitDeletions,
 		}
+		if task.Session != nil {
+			signals.TmuxAttached = task.Session.TmuxAttached
+			signals.TmuxAttachedCount = task.Session.TmuxAttachedCount
+		}
 		taskID := task.ID.String()
 		if runtime, ok := m.runtimeSignalsByTask[taskID]; ok {
+			signals.TmuxAttached = runtime.TmuxAttached
+			signals.TmuxAttachedCount = runtime.TmuxAttachedCount
 			signals.PendingOperationState = runtime.PendingOperationState
 			signals.PendingOperationID = runtime.PendingOperationID
 			signals.PendingOperationPercent = runtime.PendingOperationPercent

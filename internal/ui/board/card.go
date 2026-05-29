@@ -19,6 +19,7 @@ const expandedHeaderWorstCase = "P2 CHE-1234 T Φ9 ◐ W 12h 34m ✓ M:queued(10
 
 const tmuxSessionToken = "T"
 const descendantTmuxSessionToken = "Td"
+const tmuxAttachedToken = "A"
 const worktreeToken = "✓"
 const nestedIssuePrefix = "↳"
 
@@ -27,6 +28,8 @@ const nestedIssuePrefix = "↳"
 type RuntimeSignals struct {
 	HasTmuxSession           bool
 	HasDescendantTmuxSession bool
+	TmuxAttached             bool
+	TmuxAttachedCount        int
 	HasWorktree              bool
 	GitAheadCount            int
 	GitBehindCount           int
@@ -481,6 +484,9 @@ func renderRuntimeSignals(signals *RuntimeSignals, s *styles.Styles) string {
 	if signals.HasDescendantTmuxSession {
 		parts = append(parts, renderRuntimeSignalToken(descendantTmuxSessionToken, styles.Sky, s))
 	}
+	if token := tmuxAttachedRuntimeToken(signals, false); token != "" {
+		parts = append(parts, renderRuntimeSignalToken(token, styles.Blue, s))
+	}
 	if signals.HasWorktree {
 		parts = append(parts, renderRuntimeSignalToken(worktreeToken, styles.Teal, s))
 	}
@@ -525,6 +531,9 @@ func renderRuntimeSignalsCompact(signals *RuntimeSignals, s *styles.Styles) stri
 	if signals.HasDescendantTmuxSession {
 		parts = append(parts, renderRuntimeSignalToken("Td", styles.Sky, s))
 	}
+	if token := tmuxAttachedRuntimeToken(signals, true); token != "" {
+		parts = append(parts, renderRuntimeSignalToken(token, styles.Blue, s))
+	}
 	if signals.HasWorktree {
 		parts = append(parts, renderRuntimeSignalToken(worktreeToken, styles.Teal, s))
 	}
@@ -547,6 +556,23 @@ func renderRuntimeSignalsCompact(signals *RuntimeSignals, s *styles.Styles) stri
 	}
 
 	return strings.Join(parts, "")
+}
+
+func tmuxAttachedRuntimeToken(signals *RuntimeSignals, compact bool) string {
+	if signals == nil {
+		return ""
+	}
+	count := signals.TmuxAttachedCount
+	if signals.TmuxAttached && count <= 0 {
+		count = 1
+	}
+	if count <= 0 {
+		return ""
+	}
+	if compact || count == 1 {
+		return tmuxAttachedToken
+	}
+	return fmt.Sprintf("%s%d", tmuxAttachedToken, count)
 }
 
 func formatAheadBehindToken(ahead, behind int) string {

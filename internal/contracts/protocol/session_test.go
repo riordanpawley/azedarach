@@ -15,8 +15,14 @@ func TestSessionProjectionContractConstants(t *testing.T) {
 	if got, want := SessionLifecycleStateStarting, SessionLifecycleState("starting"); got != want {
 		t.Fatalf("SessionLifecycleStateStarting = %q, want %q", got, want)
 	}
-	if got, want := SessionLifecycleStateAttached, SessionLifecycleState("attached"); got != want {
-		t.Fatalf("SessionLifecycleStateAttached = %q, want %q", got, want)
+	if got, want := SessionLifecycleStateRunning, SessionLifecycleState("running"); got != want {
+		t.Fatalf("SessionLifecycleStateRunning = %q, want %q", got, want)
+	}
+	if got, want := SessionLifecycleStateStopping, SessionLifecycleState("stopping"); got != want {
+		t.Fatalf("SessionLifecycleStateStopping = %q, want %q", got, want)
+	}
+	if got, want := SessionLifecycleStateAttached, SessionLifecycleStateRunning; got != want {
+		t.Fatalf("SessionLifecycleStateAttached alias = %q, want %q", got, want)
 	}
 	if got, want := SessionLifecycleStatePaused, SessionLifecycleState("paused"); got != want {
 		t.Fatalf("SessionLifecycleStatePaused = %q, want %q", got, want)
@@ -34,13 +40,13 @@ func TestSessionProjectionEventBodyJSONShapeIsDeterministic(t *testing.T) {
 		Session: SessionProjection{
 			SessionID: "proj-1-az-42",
 			IssueID:   "az-42",
-			State:     SessionLifecycleStateAttached,
+			State:     SessionLifecycleStateRunning,
 			UpdatedAt: updatedAt,
 		},
 	}
 
 	got := mustMarshalSessionJSON(t, payload)
-	want := `{"project_id":"proj-1","revision":7,"session":{"session_id":"proj-1-az-42","issue_id":"az-42","state":"attached","updated_at":"2026-03-31T01:02:03.456789Z"}}`
+	want := `{"project_id":"proj-1","revision":7,"session":{"session_id":"proj-1-az-42","issue_id":"az-42","state":"running","updated_at":"2026-03-31T01:02:03.456789Z"}}`
 	if got != want {
 		t.Fatalf("json = %s, want %s", got, want)
 	}

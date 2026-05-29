@@ -4810,6 +4810,11 @@ func renderIssueRuntimeSummary(task domain.Task) string {
 	parts := make([]string, 0, 3)
 	if task.Session != nil {
 		sessionSummary := fmt.Sprintf("session=%s", task.Session.State)
+		if task.Session.TmuxAttachedCount > 1 {
+			sessionSummary = fmt.Sprintf("%s tmux_attached=%d", sessionSummary, task.Session.TmuxAttachedCount)
+		} else if task.Session.TmuxAttached || task.Session.TmuxAttachedCount == 1 {
+			sessionSummary = fmt.Sprintf("%s tmux_attached=yes", sessionSummary)
+		}
 		if task.Session.StartedAt != nil {
 			sessionSummary = fmt.Sprintf("%s since %s", sessionSummary, task.Session.StartedAt.UTC().Format(time.RFC3339))
 		}

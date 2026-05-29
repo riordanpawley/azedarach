@@ -353,6 +353,98 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	}
 }
 
+func TestHandleTaskListPrefersAgentPaneStatusOverTmuxContainer(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	projectID := "proj-agent-task-list"
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "paused agent in live tmux",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	startedAt := time.Date(2026, time.May, 29, 8, 0, 0, 0, time.UTC)
+	containerID := naming.CanonicalSessionID(projectID, taskID)
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:                containerID,
+		IssueID:           taskID,
+		State:             daemonstate.SessionStateAttached,
+		ObservedState:     daemonstate.SessionStateAttached,
+		TmuxAttachedCount: 1,
+		StartedAt:         &startedAt,
+		UpdatedAt:         startedAt,
+	}); err != nil {
+		t.Fatalf("seed container session: %v", err)
+	}
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            containerID + ".pane-190",
+		IssueID:       taskID,
+		State:         daemonstate.SessionStatePaused,
+		ObservedState: daemonstate.SessionStatePaused,
+		StartedAt:     &startedAt,
+		UpdatedAt:     startedAt.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("seed paused pane session: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  logger,
+		},
+		issues: issuesClient,
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+		revision: map[string]uint64{projectID: 9},
+	}
+
+	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-list-agent-status",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.list",
+	})
+	if err != nil {
+		t.Fatalf("handleTaskList error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.list response = %+v", resp.Error)
+	}
+	var payload protocol.TaskListSnapshotPayload
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
+		t.Fatalf("unmarshal task list body: %v", err)
+	}
+	if len(payload.Tasks) != 1 || payload.Tasks[0].Session == nil {
+		t.Fatalf("tasks = %+v, want one task with session", payload.Tasks)
+	}
+	session := payload.Tasks[0].Session
+	if session.State != domain.SessionPaused {
+		t.Fatalf("session state = %s, want %s", session.State, domain.SessionPaused)
+	}
+	if session.TotalCount != 1 || session.ActiveCount != 0 || session.PausedCount != 1 {
+		t.Fatalf("session counts = %d/%d/%d, want 1/0/1", session.TotalCount, session.ActiveCount, session.PausedCount)
+	}
+	if !session.TmuxAttached || session.TmuxAttachedCount != 1 {
+		t.Fatalf("tmux attachment = %v/%d, want true/1", session.TmuxAttached, session.TmuxAttachedCount)
+	}
+}
+
 func TestHandleTaskGetUsesFreshTaskListSnapshotCache(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

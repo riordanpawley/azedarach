@@ -8,14 +8,16 @@ import (
 
 // Session represents an active Claude session
 type Session struct {
-	IssueID     naming.IssueID `json:"issue_id"`
-	State       SessionState   `json:"state"`
-	TotalCount  int            `json:"total_count,omitempty"`
-	ActiveCount int            `json:"active_count,omitempty"`
-	PausedCount int            `json:"paused_count,omitempty"`
-	StartedAt   *time.Time     `json:"started_at,omitempty"`
-	Worktree    string         `json:"worktree,omitempty"`
-	DevServer   *DevServer     `json:"dev_server,omitempty"`
+	IssueID           naming.IssueID `json:"issue_id"`
+	State             SessionState   `json:"state"`
+	TotalCount        int            `json:"total_count,omitempty"`
+	ActiveCount       int            `json:"active_count,omitempty"`
+	PausedCount       int            `json:"paused_count,omitempty"`
+	TmuxAttached      bool           `json:"tmux_attached,omitempty"`
+	TmuxAttachedCount int            `json:"tmux_attached_count,omitempty"`
+	StartedAt         *time.Time     `json:"started_at,omitempty"`
+	Worktree          string         `json:"worktree,omitempty"`
+	DevServer         *DevServer     `json:"dev_server,omitempty"`
 }
 
 // SessionState represents the current state of a session

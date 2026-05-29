@@ -210,7 +210,40 @@ func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
 			return fmt.Errorf("ensure runtime projection schema: %w", err)
 		}
 	}
+	if err := ensureSQLiteColumn(db, "daemon_session_projections", "tmux_attached_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("ensure runtime projection schema: %w", err)
+	}
 	return nil
+}
+
+func ensureSQLiteColumn(db *sql.DB, tableName, columnName, columnDDL string) error {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", tableName))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			columnType string
+			notNull    int
+			defaultVal sql.NullString
+			pk         int
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultVal, &pk); err != nil {
+			return err
+		}
+		if strings.EqualFold(name, columnName) {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", tableName, columnName, columnDDL))
+	return err
 }
 
 func (c *Client) CloseDB() error {
@@ -1677,10 +1710,12 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 				COALESCE(started_at, '') AS started_at,
 				updated_at,
 				session_id,
+				COALESCE(tmux_attached_count, 0) AS tmux_attached_count,
 				ROW_NUMBER() OVER (
 					PARTITION BY issue_id
 					ORDER BY
 						CASE state
+							WHEN 'running' THEN 0
 							WHEN 'attached' THEN 0
 							WHEN 'paused' THEN 1
 							WHEN 'starting' THEN 2
@@ -1694,7 +1729,7 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 			WHERE project_id = ?
 		),
 		session_pick AS (
-			SELECT issue_id, state, started_at, updated_at
+			SELECT issue_id, state, started_at, updated_at, tmux_attached_count
 			FROM ranked_session
 			WHERE rn = 1
 		),
@@ -1723,6 +1758,7 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 			COALESCE(sp.state, ''),
 			COALESCE(sp.started_at, ''),
 			COALESCE(sp.updated_at, ''),
+			COALESCE(sp.tmux_attached_count, 0),
 			COALESCE(w.path, ''),
 			COALESCE(w.git_status_json, ''),
 			COALESCE(o.provider, '')
@@ -1782,6 +1818,7 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 			sessionStateRaw    string
 			sessionStartedRaw  string
 			sessionUpdatedRaw  string
+			tmuxAttachedCount  int
 			worktreePath       string
 			gitStatusRaw       string
 			originProvider     string
@@ -1805,6 +1842,7 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 			&sessionStateRaw,
 			&sessionStartedRaw,
 			&sessionUpdatedRaw,
+			&tmuxAttachedCount,
 			&worktreePath,
 			&gitStatusRaw,
 			&originProvider,
@@ -1841,10 +1879,12 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 				startedAt = parseOptionalTimestamp(sessionUpdatedRaw)
 			}
 			task.Session = &domain.Session{
-				IssueID:   task.ID,
-				State:     mapRuntimeSessionState(sessionStateRaw),
-				StartedAt: startedAt,
-				Worktree:  worktreePath,
+				IssueID:           task.ID,
+				State:             mapRuntimeSessionState(sessionStateRaw),
+				TmuxAttached:      tmuxAttachedCount > 0,
+				TmuxAttachedCount: tmuxAttachedCount,
+				StartedAt:         startedAt,
+				Worktree:          worktreePath,
 			}
 			task.HasTmuxSession = true
 		}
@@ -1919,7 +1959,7 @@ func mapRuntimeSessionState(value string) domain.SessionState {
 	switch strings.TrimSpace(strings.ToLower(value)) {
 	case "paused":
 		return domain.SessionPaused
-	case "attached", "starting":
+	case "running", "attached", "starting":
 		return domain.SessionBusy
 	case "done":
 		return domain.SessionDone

@@ -121,11 +121,11 @@ func mapCommandToState(command string) (daemonstate.SessionState, bool) {
 	case CommandSessionStart:
 		return daemonstate.SessionStateStarting, true
 	case CommandSessionAttach:
-		return daemonstate.SessionStateAttached, true
+		return daemonstate.SessionStateRunning, true
 	case CommandSessionPause:
 		return daemonstate.SessionStatePaused, true
 	case CommandSessionResume:
-		return daemonstate.SessionStateAttached, true
+		return daemonstate.SessionStateRunning, true
 	case CommandSessionStop:
 		return daemonstate.SessionStateStopped, true
 	default:

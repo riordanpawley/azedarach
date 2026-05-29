@@ -1941,6 +1941,68 @@ func TestSessionPauseResumeRejectMissingExplicitRuntimeTarget(t *testing.T) {
 	}
 }
 
+func TestSessionPauseAcceptsAgentScopedTargetWhenParentTmuxSessionExists(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+	canonicalSessionID := naming.CanonicalSessionID(projectID, issueID)
+	agentSessionID := canonicalSessionID + ".pane-190"
+	tmuxRunner := newTestTmuxRunner(canonicalSessionID)
+	close(tmuxRunner.killRelease)
+	store := daemonstate.NewStore()
+	if _, err := store.UpsertSession(projectID, canonicalSessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed canonical session: %v", err)
+	}
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	resp, err := daemon.handleSessionPause(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-agent-pause",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         daemonhandlers.CommandSessionPause,
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"issue_id":   issueID,
+			"session_id": agentSessionID,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionPause returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("pause response not ok: %+v", resp.Error)
+	}
+	row, found, err := runtimeStateStore.GetSessionState(context.Background(), projectID, agentSessionID)
+	if err != nil {
+		t.Fatalf("get agent session runtime state: %v", err)
+	}
+	if !found {
+		t.Fatal("agent session runtime state not found")
+	}
+	if row.State != daemonstate.SessionStatePaused {
+		t.Fatalf("agent session state = %s, want %s", row.State, daemonstate.SessionStatePaused)
+	}
+}
+
 func TestSessionPauseResumeSkipRuntimeReconcileWhenLifecycleUnchanged(t *testing.T) {
 	const (
 		projectID = "proj"
@@ -4274,12 +4336,13 @@ func TestEnrichTasksWithSessionStateAggregatesMultipleAgentSessions(t *testing.T
 		t.Fatalf("seed paused agent session: %v", err)
 	}
 	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
-		ID:            "ciw.pane-2",
-		IssueID:       issueID,
-		State:         daemonstate.SessionStateAttached,
-		ObservedState: daemonstate.SessionStateAttached,
-		StartedAt:     &secondStartedAt,
-		UpdatedAt:     secondStartedAt,
+		ID:                "ciw.pane-2",
+		IssueID:           issueID,
+		State:             daemonstate.SessionStateAttached,
+		ObservedState:     daemonstate.SessionStateAttached,
+		TmuxAttachedCount: 1,
+		StartedAt:         &secondStartedAt,
+		UpdatedAt:         secondStartedAt,
 	}); err != nil {
 		t.Fatalf("seed attached agent session: %v", err)
 	}
@@ -4294,6 +4357,9 @@ func TestEnrichTasksWithSessionStateAggregatesMultipleAgentSessions(t *testing.T
 	}
 	if enriched[0].Session.TotalCount != 2 || enriched[0].Session.ActiveCount != 1 || enriched[0].Session.PausedCount != 1 {
 		t.Fatalf("session aggregate counts = total %d active %d paused %d, want 2/1/1", enriched[0].Session.TotalCount, enriched[0].Session.ActiveCount, enriched[0].Session.PausedCount)
+	}
+	if !enriched[0].Session.TmuxAttached || enriched[0].Session.TmuxAttachedCount != 1 {
+		t.Fatalf("tmux attachment = attached %v count %d, want true/1", enriched[0].Session.TmuxAttached, enriched[0].Session.TmuxAttachedCount)
 	}
 	if enriched[0].Session.StartedAt == nil || !enriched[0].Session.StartedAt.Equal(startedAt) {
 		t.Fatalf("started_at = %v, want earliest %v", enriched[0].Session.StartedAt, startedAt)
@@ -4319,5 +4385,59 @@ func TestEnrichTasksWithSessionStateAggregatesMultipleAgentSessions(t *testing.T
 	}
 	if enriched[0].Session.TotalCount != 2 || enriched[0].Session.ActiveCount != 0 || enriched[0].Session.PausedCount != 2 {
 		t.Fatalf("paused session aggregate counts = total %d active %d paused %d, want 2/0/2", enriched[0].Session.TotalCount, enriched[0].Session.ActiveCount, enriched[0].Session.PausedCount)
+	}
+}
+
+func TestEnrichTasksWithSessionStatePrefersAgentSessionRowsOverTmuxContainer(t *testing.T) {
+	const (
+		projectID = "proj-agent-container"
+		issueID   = "cjz"
+	)
+
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	startedAt := time.Date(2026, time.May, 28, 8, 0, 0, 0, time.UTC)
+	containerSessionID := naming.CanonicalSessionID(projectID, issueID)
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            containerSessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateAttached,
+		StartedAt:     &startedAt,
+		UpdatedAt:     startedAt,
+	}); err != nil {
+		t.Fatalf("seed tmux container session: %v", err)
+	}
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            containerSessionID + ".pane-190",
+		IssueID:       issueID,
+		State:         daemonstate.SessionStatePaused,
+		ObservedState: daemonstate.SessionStatePaused,
+		StartedAt:     &startedAt,
+		UpdatedAt:     startedAt.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("seed paused agent session: %v", err)
+	}
+
+	tasks := []domain.Task{{ID: issueID, Title: "codex hook paused", Type: domain.TypeTask}}
+	enriched := d.enrichTasksWithSessionState(context.Background(), projectID, tasks)
+	if len(enriched) != 1 || enriched[0].Session == nil {
+		t.Fatalf("missing session in enriched task: %+v", enriched)
+	}
+	if enriched[0].Session.State != domain.SessionPaused {
+		t.Fatalf("session state = %v, want %v", enriched[0].Session.State, domain.SessionPaused)
+	}
+	if enriched[0].Session.TotalCount != 1 || enriched[0].Session.ActiveCount != 0 || enriched[0].Session.PausedCount != 1 {
+		t.Fatalf("session aggregate counts = total %d active %d paused %d, want 1/0/1", enriched[0].Session.TotalCount, enriched[0].Session.ActiveCount, enriched[0].Session.PausedCount)
 	}
 }

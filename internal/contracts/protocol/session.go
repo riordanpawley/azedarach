@@ -18,7 +18,11 @@ type SessionLifecycleState string
 
 const (
 	SessionLifecycleStateStarting SessionLifecycleState = "starting"
-	SessionLifecycleStateAttached SessionLifecycleState = "attached"
+	SessionLifecycleStateRunning  SessionLifecycleState = "running"
+	SessionLifecycleStateStopping SessionLifecycleState = "stopping"
+	// SessionLifecycleStateAttached is a deprecated compatibility alias. Use
+	// SessionLifecycleStateRunning for emitted protocol payloads.
+	SessionLifecycleStateAttached SessionLifecycleState = SessionLifecycleStateRunning
 	SessionLifecycleStatePaused   SessionLifecycleState = "paused"
 	SessionLifecycleStateStopped  SessionLifecycleState = "stopped"
 )

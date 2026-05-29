@@ -21,19 +21,24 @@ type SessionState string
 
 const (
 	SessionStateStarting SessionState = "starting"
-	SessionStateAttached SessionState = "attached"
+	SessionStateRunning  SessionState = "running"
+	SessionStateStopping SessionState = "stopping"
+	// SessionStateAttached is a deprecated compatibility alias. Use
+	// SessionStateRunning for persisted/protocol state.
+	SessionStateAttached SessionState = SessionStateRunning
 	SessionStatePaused   SessionState = "paused"
 	SessionStateStopped  SessionState = "stopped"
 )
 
 // Session contains authoritative session state.
 type Session struct {
-	ID            string
-	IssueID       string
-	State         SessionState
-	ObservedState SessionState
-	StartedAt     *time.Time
-	UpdatedAt     time.Time
+	ID                string
+	IssueID           string
+	State             SessionState
+	ObservedState     SessionState
+	TmuxAttachedCount int
+	StartedAt         *time.Time
+	UpdatedAt         time.Time
 }
 
 // Snapshot is a read model for frontend/client attach flows.
@@ -82,6 +87,8 @@ func (s *Store) ReadSnapshot(projectID string) Snapshot {
 		Sessions:  make(map[string]Session, len(ps.sessions)),
 	}
 	for id, session := range ps.sessions {
+		session.State = NormalizeSessionState(session.State)
+		session.ObservedState = NormalizeSessionState(session.ObservedState)
 		out.Sessions[id] = session
 	}
 	return out
@@ -106,6 +113,7 @@ func (s *Store) ForceUpsertSession(projectID, sessionID, issueID string, state S
 }
 
 func (s *Store) upsertSession(projectID, sessionID, issueID string, state SessionState, validate bool) (SessionEvent, error) {
+	state = NormalizeSessionState(state)
 	if sessionID == "" {
 		return SessionEvent{}, fmt.Errorf("%w: missing session id", ErrInvalidTransition)
 	}
@@ -115,6 +123,8 @@ func (s *Store) upsertSession(projectID, sessionID, issueID string, state Sessio
 	ps := s.ensureProjectLocked(projectID)
 	existing, ok := ps.sessions[sessionID]
 	if validate && ok {
+		existing.State = NormalizeSessionState(existing.State)
+		existing.ObservedState = NormalizeSessionState(existing.ObservedState)
 		if !isValidTransition(existing.State, state) {
 			return SessionEvent{}, fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, existing.State, state)
 		}
@@ -135,7 +145,7 @@ func (s *Store) upsertSession(projectID, sessionID, issueID string, state Sessio
 		startedAt = &start
 	}
 	if ok && strings.TrimSpace(string(existing.ObservedState)) != "" {
-		observedState = existing.ObservedState
+		observedState = NormalizeSessionState(existing.ObservedState)
 	}
 	next := Session{
 		ID:            sessionID,
@@ -152,6 +162,25 @@ func (s *Store) upsertSession(projectID, sessionID, issueID string, state Sessio
 		Type:      "session.updated",
 		Session:   next,
 	}, nil
+}
+
+// NormalizeSessionState maps historical lifecycle literals onto the canonical
+// vocabulary used by current runtime projections.
+func NormalizeSessionState(state SessionState) SessionState {
+	switch strings.TrimSpace(string(state)) {
+	case "attached", string(SessionStateRunning):
+		return SessionStateRunning
+	case string(SessionStateStarting):
+		return SessionStateStarting
+	case string(SessionStatePaused):
+		return SessionStatePaused
+	case string(SessionStateStopping):
+		return SessionStateStopping
+	case string(SessionStateStopped):
+		return SessionStateStopped
+	default:
+		return state
+	}
 }
 
 // Session returns a single session state.
@@ -180,6 +209,8 @@ func (s *Store) SessionByIssueID(projectID, issueID string) (Session, bool) {
 	var newest Session
 	found := false
 	for _, session := range ps.sessions {
+		session.State = NormalizeSessionState(session.State)
+		session.ObservedState = NormalizeSessionState(session.ObservedState)
 		if strings.TrimSpace(session.IssueID) == issueID {
 			if !found || session.UpdatedAt.After(newest.UpdatedAt) {
 				newest = session
@@ -203,6 +234,8 @@ func (s *Store) ReplaceProjectSessions(projectID string, sessions []Session) {
 		if sessionID == "" {
 			continue
 		}
+		session.State = NormalizeSessionState(session.State)
+		session.ObservedState = NormalizeSessionState(session.ObservedState)
 		next[sessionID] = session
 	}
 	ps.sessions = next
@@ -242,16 +275,20 @@ func (s *Store) ensureProjectLocked(projectID string) *projectState {
 }
 
 func isValidTransition(from, to SessionState) bool {
+	from = NormalizeSessionState(from)
+	to = NormalizeSessionState(to)
 	if from == to {
 		return true
 	}
 	switch from {
 	case SessionStateStarting:
-		return slices.Contains([]SessionState{SessionStateAttached, SessionStateStopped}, to)
-	case SessionStateAttached:
+		return slices.Contains([]SessionState{SessionStateRunning, SessionStateStopped}, to)
+	case SessionStateRunning:
 		return slices.Contains([]SessionState{SessionStatePaused, SessionStateStopped}, to)
 	case SessionStatePaused:
-		return slices.Contains([]SessionState{SessionStateAttached, SessionStateStopped}, to)
+		return slices.Contains([]SessionState{SessionStateRunning, SessionStateStopping, SessionStateStopped}, to)
+	case SessionStateStopping:
+		return slices.Contains([]SessionState{SessionStateStopped}, to)
 	case SessionStateStopped:
 		return slices.Contains([]SessionState{SessionStateStarting}, to)
 	default:

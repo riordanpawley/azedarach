@@ -51,9 +51,10 @@ type sessionRecoveryResult struct {
 }
 
 type sessionProjectionCounts struct {
-	Total  int
-	Active int
-	Paused int
+	Total             int
+	Active            int
+	Paused            int
+	TmuxAttachedCount int
 }
 
 const (
@@ -98,8 +99,8 @@ func sessionProjectionIssueID(session daemonstate.Session, namingScope string) s
 }
 
 func sessionProjectionStateRank(state daemonstate.SessionState) int {
-	switch state {
-	case daemonstate.SessionStateAttached:
+	switch daemonstate.NormalizeSessionState(state) {
+	case daemonstate.SessionStateRunning:
 		return 4
 	case daemonstate.SessionStateStarting:
 		return 3
@@ -143,10 +144,14 @@ func sessionProjectionLatestByIssueKey(sessions []daemonstate.Session, namingSco
 }
 
 func sessionProjectionAggregateByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]daemonstate.Session {
+	hasAgentRows := activeAgentSessionIssueKeys(sessions, namingScope)
 	byIssueKey := make(map[string]daemonstate.Session, len(sessions))
 	for _, session := range sessions {
 		key := sessionKey(sessionProjectionIssueID(session, namingScope))
 		if key == "" {
+			continue
+		}
+		if _, hasAgent := hasAgentRows[key]; hasAgent && !isAgentScopedSessionID(session.ID) {
 			continue
 		}
 		existing, exists := byIssueKey[key]
@@ -172,12 +177,14 @@ func sessionProjectionAggregateByIssueKey(sessions []daemonstate.Session, naming
 				merged.StartedAt = &started
 			}
 		}
+		merged.TmuxAttachedCount += session.TmuxAttachedCount
 		byIssueKey[key] = merged
 	}
 	return byIssueKey
 }
 
 func sessionProjectionCountsByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]sessionProjectionCounts {
+	hasAgentRows := activeAgentSessionIssueKeys(sessions, namingScope)
 	byIssueKey := make(map[string]sessionProjectionCounts, len(sessions))
 	for _, session := range sessions {
 		state := session.State
@@ -193,6 +200,11 @@ func sessionProjectionCountsByIssueKey(sessions []daemonstate.Session, namingSco
 			continue
 		}
 		counts := byIssueKey[key]
+		counts.TmuxAttachedCount += session.TmuxAttachedCount
+		if _, hasAgent := hasAgentRows[key]; hasAgent && !isAgentScopedSessionID(session.ID) {
+			byIssueKey[key] = counts
+			continue
+		}
 		counts.Total++
 		switch state {
 		case daemonstate.SessionStatePaused:
@@ -203,6 +215,33 @@ func sessionProjectionCountsByIssueKey(sessions []daemonstate.Session, namingSco
 		byIssueKey[key] = counts
 	}
 	return byIssueKey
+}
+
+func activeAgentSessionIssueKeys(sessions []daemonstate.Session, namingScope string) map[string]struct{} {
+	out := make(map[string]struct{}, len(sessions))
+	for _, session := range sessions {
+		if !isAgentScopedSessionID(session.ID) {
+			continue
+		}
+		state := session.State
+		observed := session.ObservedState
+		if strings.TrimSpace(string(observed)) == "" {
+			observed = state
+		}
+		if state == daemonstate.SessionStateStopped || observed == daemonstate.SessionStateStopped {
+			continue
+		}
+		key := sessionKey(sessionProjectionIssueID(session, namingScope))
+		if key == "" {
+			continue
+		}
+		out[key] = struct{}{}
+	}
+	return out
+}
+
+func isAgentScopedSessionID(sessionID string) bool {
+	return strings.Contains(strings.TrimSpace(sessionID), ".pane-")
 }
 
 func sessionProjectionForReconcileByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]daemonstate.Session {
@@ -484,7 +523,30 @@ func (d *Daemon) sessionLifecycleTargetExists(ctx context.Context, projectID, is
 	if usesTmuxSource(source) && d.tmux == nil {
 		return true, nil
 	}
-	return d.sessionExistsForInvariant(ctx, projectID, issueID, sessionID, source)
+	exists, err := d.sessionExistsForInvariant(ctx, projectID, issueID, sessionID, source)
+	if exists || err != nil {
+		return exists, err
+	}
+	if parentSessionID, ok := d.parentSessionIDForAgentScopedSession(projectID, issueID, sessionID); ok {
+		return d.sessionExistsForInvariant(ctx, projectID, issueID, parentSessionID, source)
+	}
+	return false, nil
+}
+
+func (d *Daemon) parentSessionIDForAgentScopedSession(projectID, issueID, sessionID string) (string, bool) {
+	sessionID = strings.TrimSpace(sessionID)
+	if !isAgentScopedSessionID(sessionID) {
+		return "", false
+	}
+	issue, err := naming.ParseIssueID(strings.TrimSpace(issueID))
+	if err != nil {
+		return "", false
+	}
+	parent := naming.CanonicalSessionIDForIssue(d.sessionNamingScope(projectID), issue).String()
+	if !strings.HasPrefix(sessionID, parent+".pane-") {
+		return "", false
+	}
+	return parent, true
 }
 
 func (d *Daemon) handleSessionStart(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -1860,6 +1922,10 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 
 		state := domain.SessionBusy
 		var startedAt *time.Time
+		worktree := ""
+		if tasks[i].Session != nil {
+			worktree = strings.TrimSpace(tasks[i].Session.Worktree)
+		}
 		snapshotSession, snapshotOK := snapshotByKey[taskKey]
 		projectionSession, projectionOK := projectionByKey[taskKey]
 		session, ok := sessionByKey[taskKey]
@@ -1875,12 +1941,15 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 			}
 		}
 		tasks[i].Session = &domain.Session{
-			IssueID:     naming.IssueID(taskID),
-			State:       state,
-			TotalCount:  countsByKey[taskKey].Total,
-			ActiveCount: countsByKey[taskKey].Active,
-			PausedCount: countsByKey[taskKey].Paused,
-			StartedAt:   startedAt,
+			IssueID:           naming.IssueID(taskID),
+			State:             state,
+			TotalCount:        countsByKey[taskKey].Total,
+			ActiveCount:       countsByKey[taskKey].Active,
+			PausedCount:       countsByKey[taskKey].Paused,
+			TmuxAttached:      countsByKey[taskKey].TmuxAttachedCount > 0,
+			TmuxAttachedCount: countsByKey[taskKey].TmuxAttachedCount,
+			StartedAt:         startedAt,
+			Worktree:          worktree,
 		}
 	}
 
@@ -2090,16 +2159,17 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 		}
 		issueKey := sessionKey(issueID)
 		row := daemonstate.Session{
-			ID:            name,
-			IssueID:       issueID,
-			State:         daemonstate.SessionStateAttached,
-			ObservedState: daemonstate.SessionStateAttached,
-			StartedAt:     info.CreatedAt,
-			UpdatedAt:     time.Now().UTC(),
+			ID:                name,
+			IssueID:           issueID,
+			State:             daemonstate.SessionStateRunning,
+			ObservedState:     daemonstate.SessionStateRunning,
+			TmuxAttachedCount: info.AttachedCount,
+			StartedAt:         info.CreatedAt,
+			UpdatedAt:         time.Now().UTC(),
 		}
 		if existing, exists := existingByIssueKey[issueKey]; exists {
 			row.State = existing.State
-			row.ObservedState = daemonstate.SessionStateAttached
+			row.ObservedState = daemonstate.SessionStateRunning
 			if (row.StartedAt == nil || row.StartedAt.IsZero()) && existing.StartedAt != nil && !existing.StartedAt.IsZero() {
 				started := existing.StartedAt.UTC()
 				row.StartedAt = &started
