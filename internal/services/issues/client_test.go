@@ -833,6 +833,62 @@ func TestClient_AddParentChildDependencyKeepsClosedParentWhenChildClosed(t *test
 	assert.Equal(t, domain.StatusDone, parentTasks[0].Status)
 }
 
+func TestClient_AddParentChildDependencyGuardsParentMoves(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	firstParentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "First parent",
+		Type:     domain.TypeEpic,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+	secondParentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Second parent",
+		Type:     domain.TypeEpic,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Child",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, client.AddDependency(ctx, childID, firstParentID, "parent-child"))
+	require.NoError(t, client.AddDependency(ctx, childID, firstParentID, "parent-child"))
+
+	err = client.AddDependency(ctx, childID, secondParentID, "parent-child")
+	require.Error(t, err)
+	var parentErr ParentChangeRequiredError
+	require.ErrorAs(t, err, &parentErr)
+	assert.Equal(t, childID, parentErr.IssueID)
+	assert.Equal(t, firstParentID, parentErr.CurrentParent)
+	assert.Equal(t, secondParentID, parentErr.RequestedParent)
+
+	child, err := client.GetWithRuntime(ctx, "default", childID)
+	require.NoError(t, err)
+	require.NotNil(t, child.ParentID)
+	assert.Equal(t, firstParentID, child.ParentID.String())
+
+	require.NoError(t, client.AddDependencyWithParentChange(ctx, childID, secondParentID, "parent-child", true))
+	child, err = client.GetWithRuntime(ctx, "default", childID)
+	require.NoError(t, err)
+	require.NotNil(t, child.ParentID)
+	assert.Equal(t, secondParentID, child.ParentID.String())
+
+	var activeParentCount int
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM issue_dependencies
+		WHERE issue_id = ? AND dependency_type = 'parent-child' AND tombstoned_at IS NULL
+	`, childID).Scan(&activeParentCount))
+	assert.Equal(t, 1, activeParentCount)
+}
+
 func TestClient_ListHydratesParentChildAfterTaskSliceGrowth(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)

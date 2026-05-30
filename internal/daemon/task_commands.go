@@ -1019,9 +1019,10 @@ func (d *Daemon) handleTaskDependencyAdd(ctx context.Context, req protocol.Reque
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
 	var cmd struct {
-		TaskID         string `json:"task_id"`
-		DependsOnID    string `json:"depends_on_id"`
-		DependencyType string `json:"dependency_type"`
+		TaskID            string `json:"task_id"`
+		DependsOnID       string `json:"depends_on_id"`
+		DependencyType    string `json:"dependency_type"`
+		ForceParentChange bool   `json:"force_parent_change"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -1032,9 +1033,10 @@ func (d *Daemon) handleTaskDependencyAdd(ctx context.Context, req protocol.Reque
 			"task_id", cmd.TaskID,
 			"depends_on_id", cmd.DependsOnID,
 			"dependency_type", cmd.DependencyType,
+			"force_parent_change", cmd.ForceParentChange,
 		)
 	}
-	task, err := issueClient.AddDependencyWithRuntime(ctx, projectID, cmd.TaskID, cmd.DependsOnID, cmd.DependencyType)
+	task, err := issueClient.AddDependencyWithRuntimeAndParentChange(ctx, projectID, cmd.TaskID, cmd.DependsOnID, cmd.DependencyType, cmd.ForceParentChange)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -1047,6 +1049,7 @@ func (d *Daemon) handleTaskDependencyAdd(ctx context.Context, req protocol.Reque
 			"task_id", cmd.TaskID,
 			"depends_on_id", cmd.DependsOnID,
 			"dependency_type", cmd.DependencyType,
+			"force_parent_change", cmd.ForceParentChange,
 			"revision", resp.Revision,
 		)
 	}

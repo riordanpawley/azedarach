@@ -29,6 +29,16 @@ type dependencyRemovalConfirmationKey struct{}
 var ErrDependencyRemovalConfirmationRequired = errors.New("explicit confirmation required")
 var ErrDeleteBlockedByRuntimeAttachments = errors.New("delete blocked: task has worktree or active session")
 
+type ParentChangeRequiredError struct {
+	IssueID         string
+	CurrentParent   string
+	RequestedParent string
+}
+
+func (e ParentChangeRequiredError) Error() string {
+	return fmt.Sprintf("refusing to change parent for %s: current parent %s, requested parent %s", e.IssueID, e.CurrentParent, e.RequestedParent)
+}
+
 // WithDependencyRemovalConfirmation marks a context as explicitly confirming a
 // dependency removal that can unblock or retarget workflow.
 func WithDependencyRemovalConfirmation(ctx context.Context) context.Context {
@@ -1220,6 +1230,16 @@ func (c *Client) ListExternalIssueRefs(ctx context.Context, issueID string) ([]d
 
 // AddDependency creates or restores a dependency edge between two issues.
 func (c *Client) AddDependency(ctx context.Context, issueID, dependsOnID, dependencyType string) error {
+	return c.addDependency(ctx, issueID, dependsOnID, dependencyType, false)
+}
+
+// AddDependencyWithParentChange creates or restores a dependency edge, allowing
+// an existing parent-child edge to be replaced when forceParentChange is true.
+func (c *Client) AddDependencyWithParentChange(ctx context.Context, issueID, dependsOnID, dependencyType string, forceParentChange bool) error {
+	return c.addDependency(ctx, issueID, dependsOnID, dependencyType, forceParentChange)
+}
+
+func (c *Client) addDependency(ctx context.Context, issueID, dependsOnID, dependencyType string, forceParentChange bool) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err
@@ -1267,7 +1287,50 @@ func (c *Client) AddDependency(ctx context.Context, issueID, dependsOnID, depend
 		return c.wrapError("add-dependency", issueID, domain.ErrNotFound)
 	}
 
-	if _, err := db.ExecContext(ctx, `
+	tombstoneOldParent := ""
+	if canonicalType == string(domain.DependencyParentChild) {
+		currentParents, err := c.activeParents(ctx, db, issueID)
+		if err != nil {
+			return c.wrapError("add-dependency", issueID, err)
+		}
+		for _, currentParent := range currentParents {
+			if currentParent == dependsOnID {
+				continue
+			}
+			if !forceParentChange {
+				return c.wrapError("add-dependency", issueID, ParentChangeRequiredError{
+					IssueID:         issueID,
+					CurrentParent:   currentParent,
+					RequestedParent: dependsOnID,
+				})
+			}
+			tombstoneOldParent = currentParent
+			break
+		}
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return c.wrapError("add-dependency", issueID, err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if tombstoneOldParent != "" {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE issue_dependencies
+			SET tombstoned_at = ?
+			WHERE issue_id = ? AND depends_on_id != ? AND dependency_type IN (?, 'parent_child') AND tombstoned_at IS NULL
+		`, time.Now().UTC().Format(time.RFC3339Nano), issueID, dependsOnID, canonicalType); err != nil {
+			return c.wrapError("add-dependency", issueID, err)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at)
 		VALUES (?, ?, ?, NULL)
 		ON CONFLICT(issue_id, depends_on_id, dependency_type)
@@ -1276,20 +1339,56 @@ func (c *Client) AddDependency(ctx context.Context, issueID, dependsOnID, depend
 		return c.wrapError("add-dependency", issueID, err)
 	}
 	if canonicalType == string(domain.DependencyParentChild) {
-		if err := c.reopenClosedParentForActiveChild(ctx, db, issueID, dependsOnID); err != nil {
+		if err := c.reopenClosedParentForActiveChild(ctx, tx, issueID, dependsOnID); err != nil {
 			return c.wrapError("add-dependency", issueID, err)
 		}
 	}
 
+	if err := tx.Commit(); err != nil {
+		return c.wrapError("add-dependency", issueID, err)
+	}
+	committed = true
 	return nil
 }
 
 // AddDependencyWithRuntime creates or restores a dependency edge and returns the changed issue.
 func (c *Client) AddDependencyWithRuntime(ctx context.Context, projectID, issueID, dependsOnID, dependencyType string) (domain.Task, error) {
-	if err := c.AddDependency(ctx, issueID, dependsOnID, dependencyType); err != nil {
+	return c.AddDependencyWithRuntimeAndParentChange(ctx, projectID, issueID, dependsOnID, dependencyType, false)
+}
+
+// AddDependencyWithRuntimeAndParentChange creates or restores a dependency edge
+// and returns the changed issue.
+func (c *Client) AddDependencyWithRuntimeAndParentChange(ctx context.Context, projectID, issueID, dependsOnID, dependencyType string, forceParentChange bool) (domain.Task, error) {
+	if err := c.addDependency(ctx, issueID, dependsOnID, dependencyType, forceParentChange); err != nil {
 		return domain.Task{}, err
 	}
 	return c.GetWithRuntime(ctx, projectID, issueID)
+}
+
+func (c *Client) activeParents(ctx context.Context, db *sql.DB, issueID string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT depends_on_id
+		FROM issue_dependencies
+		WHERE issue_id = ? AND dependency_type IN (?, 'parent_child') AND tombstoned_at IS NULL
+		ORDER BY depends_on_id
+	`, issueID, string(domain.DependencyParentChild))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var parentIDs []string
+	for rows.Next() {
+		var parentID string
+		if err := rows.Scan(&parentID); err != nil {
+			return nil, err
+		}
+		parentIDs = append(parentIDs, parentID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return parentIDs, nil
 }
 
 func (c *Client) reopenClosedParentForActiveChild(ctx context.Context, execer sqlIssueExecer, childID, parentID string) error {

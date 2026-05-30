@@ -213,11 +213,12 @@ type IssueDeleteOptions struct {
 }
 
 type IssueDependencyAddOptions struct {
-	Project     string
-	IssueID     string
-	DependsOnID string
-	Type        string
-	JSON        bool
+	Project           string
+	IssueID           string
+	DependsOnID       string
+	Type              string
+	ForceParentChange bool
+	JSON              bool
 }
 
 type IssueDependencyRemoveOptions struct {
@@ -2379,12 +2380,13 @@ func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, erro
 	fs.StringVar(&issueIDFlag, "issue-id", "", "source issue id (named alternative to positional)")
 	fs.StringVar(&dependsOnIDFlag, "depends-on-id", "", "dependency target issue id (named alternative to positional)")
 	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from)")
+	fs.BoolVar(&opts.ForceParentChange, "force-parent-change", false, "replace an existing parent-child edge")
 	fs.BoolVar(&opts.JSON, "json", false, "output dependency add result as JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDependencyAddOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--json]")
+		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--force-parent-change] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDependencyAddOptions{}, fmt.Errorf("--impl is not supported for issue dep add; dependencies target existing issues")
@@ -2402,7 +2404,7 @@ func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, erro
 		opts.DependsOnID = strings.TrimSpace(dependsOnIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.DependsOnID) == "" {
-		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--json]")
+		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--force-parent-change] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -3869,23 +3871,35 @@ func IssueDependencyAddCommand(deps *Dependencies, opts IssueDependencyAddOption
 		return fmt.Errorf("invalid depends_on_id %q: %w", opts.DependsOnID, err)
 	}
 	if err := deps.DaemonClient.AddTaskDependency(ctx, daemonclient.TaskDependencyParams{
-		TaskID:      typedIssueID,
-		DependsOnID: typedDependsOnID,
-		Type:        opts.Type,
+		TaskID:            typedIssueID,
+		DependsOnID:       typedDependsOnID,
+		Type:              opts.Type,
+		ForceParentChange: opts.ForceParentChange,
 	}); err != nil {
-		return fmt.Errorf("failed to add dependency %s -> %s: %w", opts.IssueID, opts.DependsOnID, err)
+		return fmt.Errorf("%s: %w", parentChangeGuidance(opts), err)
 	}
 	if opts.JSON {
 		return printJSON(map[string]any{
-			"action":          "add",
-			"issue_id":        opts.IssueID,
-			"depends_on_id":   opts.DependsOnID,
-			"dependency_type": opts.Type,
-			"updated":         true,
+			"action":              "add",
+			"issue_id":            opts.IssueID,
+			"depends_on_id":       opts.DependsOnID,
+			"dependency_type":     opts.Type,
+			"force_parent_change": opts.ForceParentChange,
+			"updated":             true,
 		})
 	}
 	fmt.Printf("Added dependency: %s --(%s)--> %s\n", opts.IssueID, opts.Type, opts.DependsOnID)
+	if opts.Type == string(domain.DependencyParentChild) {
+		fmt.Printf("This makes %s a child of %s.\n", opts.IssueID, opts.DependsOnID)
+	}
 	return nil
+}
+
+func parentChangeGuidance(opts IssueDependencyAddOptions) string {
+	if opts.Type != string(domain.DependencyParentChild) {
+		return fmt.Sprintf("failed to add dependency %s -> %s", opts.IssueID, opts.DependsOnID)
+	}
+	return fmt.Sprintf("failed to add parent-child edge. This would make %s a child of %s. If you meant to make %s a child of %s, run: az issue dep add %s %s --type parent-child. Use --force-parent-change to intentionally move %s to %s", opts.IssueID, opts.DependsOnID, opts.DependsOnID, opts.IssueID, opts.DependsOnID, opts.IssueID, opts.IssueID, opts.DependsOnID)
 }
 
 func IssueDependencyRemoveCommand(deps *Dependencies, opts IssueDependencyRemoveOptions) error {

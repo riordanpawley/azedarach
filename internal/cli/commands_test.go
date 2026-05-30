@@ -4025,6 +4025,13 @@ func TestParseIssueDependencyArgs(t *testing.T) {
 	if add.IssueID != "az-1" || add.DependsOnID != "az-2" {
 		t.Fatalf("ParseIssueDependencyAddArgs() interspersed id+flag = %+v", add)
 	}
+	add, err = ParseIssueDependencyAddArgs([]string{"az-1", "az-2", "--type", "parent-child", "--force-parent-change"})
+	if err != nil {
+		t.Fatalf("ParseIssueDependencyAddArgs() force parent change error = %v", err)
+	}
+	if !add.ForceParentChange {
+		t.Fatalf("ParseIssueDependencyAddArgs() force parent change not set: %+v", add)
+	}
 
 	remove, err := ParseIssueDependencyRemoveArgs([]string{"--type", "blocks", "--confirm", "az-3", "az-4"})
 	if err != nil {
@@ -6893,9 +6900,10 @@ func TestIssueDependencyCommandsUseDaemonTaskCommands(t *testing.T) {
 
 	addOut := captureStdout(t, func() error {
 		return IssueDependencyAddCommand(deps, IssueDependencyAddOptions{
-			IssueID:     "az-5",
-			DependsOnID: "az-2",
-			Type:        "blocks",
+			IssueID:           "az-5",
+			DependsOnID:       "az-2",
+			Type:              "parent-child",
+			ForceParentChange: true,
 		})
 	})
 	if gotAddReq.Command != daemonclient.CommandTaskDependencyAdd {
@@ -6905,10 +6913,13 @@ func TestIssueDependencyCommandsUseDaemonTaskCommands(t *testing.T) {
 	if err := json.Unmarshal(gotAddReq.Body, &addBody); err != nil {
 		t.Fatalf("unmarshal add body: %v", err)
 	}
-	if addBody.TaskID != "az-5" || addBody.DependsOnID != "az-2" || addBody.Type != "blocks" {
+	if addBody.TaskID != "az-5" || addBody.DependsOnID != "az-2" || addBody.Type != "parent-child" || !addBody.ForceParentChange {
 		t.Fatalf("add body = %+v", addBody)
 	}
-	if !strings.Contains(addOut, "Added dependency: az-5 --(blocks)--> az-2") {
+	if !strings.Contains(addOut, "Added dependency: az-5 --(parent-child)--> az-2") {
+		t.Fatalf("add output = %q", addOut)
+	}
+	if !strings.Contains(addOut, "This makes az-5 a child of az-2.") {
 		t.Fatalf("add output = %q", addOut)
 	}
 
@@ -6932,6 +6943,50 @@ func TestIssueDependencyCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 	if !strings.Contains(removeOut, "Removed dependency: az-5 --(blocks)--> az-2") {
 		t.Fatalf("remove output = %q", removeOut)
+	}
+}
+
+func TestIssueDependencyAddParentChildErrorIncludesDirectionGuidance(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              false,
+					Error: &protocol.ErrorEnvelope{
+						Code:    protocol.ErrorCodeInternal,
+						Message: "refusing to change parent for az-5: current parent az-1, requested parent az-2",
+					},
+					CompletedAt: req.SentAt,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	err := IssueDependencyAddCommand(deps, IssueDependencyAddOptions{
+		IssueID:     "az-5",
+		DependsOnID: "az-2",
+		Type:        "parent-child",
+	})
+	if err == nil {
+		t.Fatal("IssueDependencyAddCommand() error = nil, want parent-change guidance")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"This would make az-5 a child of az-2",
+		"az issue dep add az-2 az-5 --type parent-child",
+		"--force-parent-change",
+		"current parent az-1, requested parent az-2",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error missing %q: %v", want, err)
+		}
 	}
 }
 
@@ -7345,7 +7400,7 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]") {
 		t.Fatalf("usage missing issue image remove command: %q", output)
 	}
-	if !strings.Contains(output, "issue dep add [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--json]") {
+	if !strings.Contains(output, "issue dep add [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--force-parent-change] [--json]") {
 		t.Fatalf("usage missing issue dep add command: %q", output)
 	}
 	if !strings.Contains(output, "issue dep remove [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--confirm] [--json]") {

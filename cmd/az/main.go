@@ -632,7 +632,7 @@ func main() {
 			case "add":
 				opts, err := cli.ParseIssueDependencyAddArgs(depArgs)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--force-parent-change] [--json]\n")
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
