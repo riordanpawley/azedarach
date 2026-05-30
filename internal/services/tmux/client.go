@@ -2,8 +2,10 @@ package tmux
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -211,10 +213,11 @@ func (c *Client) ListSessionInfos(ctx context.Context) ([]SessionInfo, error) {
 
 	out, err := c.runner.Run(ctx, "list-sessions", "-F", "#{session_name}\t#{session_created}\t#{session_last_attached}\t#{session_path}\t#{session_attached}")
 	if err != nil {
-		// If no sessions exist, tmux returns an error
-		// Return empty list instead
-		c.logger.Debug("no tmux sessions found")
-		return []SessionInfo{}, nil
+		if isNoTmuxSessionsError(err) {
+			c.logger.Debug("no tmux sessions found")
+			return []SessionInfo{}, nil
+		}
+		return nil, &domain.TmuxError{Op: "list-sessions", Err: err}
 	}
 
 	lines := strings.Split(strings.TrimSpace(out), "\n")
@@ -252,6 +255,21 @@ func (c *Client) ListSessionInfos(ctx context.Context) ([]SessionInfo, error) {
 
 	c.logger.Debug("tmux sessions listed", "count", len(sessions))
 	return sessions, nil
+}
+
+func isNoTmuxSessionsError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		stderr := strings.ToLower(strings.TrimSpace(string(exitErr.Stderr)))
+		if strings.Contains(stderr, "no server running") || strings.Contains(stderr, "no sessions") || strings.Contains(stderr, "no tmux sessions") {
+			return true
+		}
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "no server running") || strings.Contains(msg, "no sessions") || strings.Contains(msg, "no tmux sessions")
 }
 
 func parseTmuxInt(raw string) int {
