@@ -69,6 +69,9 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	projectID := d.projectID(req.Meta)
 	startedAt := time.Now()
 	refreshStartedAt := time.Now()
+	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("task list session runtime refresh failed", "project_id", projectID, "error", err)
+	}
 	d.triggerWorktreeStateRefresh(projectID)
 	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.worktree_refresh_trigger", refreshStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
 	cacheStartedAt := time.Now()
@@ -138,6 +141,9 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task get requested", "project_id", projectID, "task_id", taskID)
+	}
+	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("task get session runtime refresh failed", "project_id", projectID, "task_id", taskID, "error", err)
 	}
 	cacheStartedAt := time.Now()
 	if cached, ok := d.readFreshTaskListSnapshotCache(projectID); ok {

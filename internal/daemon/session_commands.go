@@ -625,6 +625,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	baseBranch, baseBranchAncestorIssueID := d.resolveSessionStartBaseBranch(ctx, cmd.ProjectID, cmd.BaseBranch, issueClient, worktreeManager, task)
 	worktree, err := worktreeManager.CreateWithTitle(ctx, cmd.IssueID, task.Title, baseBranch)
 	reusedWorktree := false
+	worktreeSetupWarning := ""
 	if err != nil {
 		// Recovery path: git worktree add can return non-zero after materializing
 		// a usable worktree (for example, hooks that fail post-checkout).
@@ -632,6 +633,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		if recoveredWorktree, recoverErr := worktreeManager.Get(ctx, cmd.IssueID); recoverErr == nil {
 			worktree = recoveredWorktree
 			reusedWorktree = true
+			worktreeSetupWarning = fmt.Sprintf("Worktree setup warning: git worktree create reported %v; recovered existing worktree at %s. Validate setup in the worktree before relying on later checks.", err, worktree.Path)
 		} else {
 			if !errors.Is(err, git.ErrWorktreeAlreadyExists) {
 				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -712,6 +714,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			return fmt.Sprintf("Base branch source ancestor: %s", baseBranchAncestorIssueID)
 		}(),
 		worktreeLine,
+		worktreeSetupWarning,
 		fmt.Sprintf("Creating tmux session: %s", cmd.SessionID),
 		func() string {
 			if cmd.StartWork {
@@ -1394,6 +1397,9 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 			}
 		}
 		if len(matching) == 0 {
+			if output, ok := d.staleSessionRuntimeStatusOutput(ctx, cmd.ProjectID, cmd.IssueID); ok {
+				return d.commandOutput(req, output), nil
+			}
 			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("no active session found for issue: %s", cmd.IssueID)), nil
 		}
 		tmuxSessions = matching
@@ -1435,6 +1441,33 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 		d.cfg.Logger.Info("daemon session status snapshot", "project_id", cmd.ProjectID, "issue_id", cmd.IssueID, "active_sessions", len(tmuxSessions))
 	}
 	return d.commandOutput(req, b.String()), nil
+}
+
+func (d *Daemon) staleSessionRuntimeStatusOutput(ctx context.Context, projectID, issueID string) (string, bool) {
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return "", false
+	}
+	projectID = d.canonicalProjectID(projectID)
+	session, found, err := store.GetSessionStateByIssueID(ctx, projectID, issueID)
+	if err != nil || !found {
+		return "", false
+	}
+	observed := session.ObservedState
+	if strings.TrimSpace(string(observed)) == "" {
+		observed = session.State
+	}
+	if observed != daemonstate.SessionStateStopped || strings.TrimSpace(session.ID) == "" {
+		return "", false
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Stale runtime session for %s\n\n", issueID)
+	fmt.Fprintf(&b, "Runtime metadata still has desired state %q for session %q, but no backing tmux session exists.\n", session.State, session.ID)
+	fmt.Fprintf(&b, "Observed state: %s\n", observed)
+	fmt.Fprintf(&b, "\nRepair:\n")
+	fmt.Fprintf(&b, "- clear stale runtime: az orchestrate close-session --issue %s\n", issueID)
+	fmt.Fprintf(&b, "- restart worker if needed: az orchestrate start --root <root> --issue %s --json\n", issueID)
+	return b.String(), true
 }
 
 func (d *Daemon) listTmuxSessionsLiveForProject(ctx context.Context, projectID string) ([]string, error) {
@@ -2070,6 +2103,61 @@ func (d *Daemon) refreshSessionRuntimeState(ctx context.Context, projectID strin
 		return err
 	}
 	return d.persistTmuxSessionRuntimeState(ctx, projectID, tmuxSessions)
+}
+
+func (d *Daemon) refreshExistingSessionRuntimeState(ctx context.Context, projectID string) error {
+	if d == nil || d.tmux == nil || d.sessionRuntimeStateStoreIfConfigured(projectID) == nil {
+		return nil
+	}
+	projectID = d.canonicalProjectID(projectID)
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	existingSessions, err := store.ListSessionStates(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if len(existingSessions) == 0 {
+		return nil
+	}
+	tmuxSessions, err := d.tmux.ListSessionInfos(ctx)
+	if err != nil {
+		return err
+	}
+	liveByID := make(map[string]tmux.SessionInfo, len(tmuxSessions))
+	for _, info := range tmuxSessions {
+		name := strings.TrimSpace(info.Name)
+		if name != "" {
+			liveByID[name] = info
+		}
+	}
+	writer := d.runtimeProjectionStateWriter()
+	for _, session := range existingSessions {
+		sessionID := strings.TrimSpace(session.ID)
+		if sessionID == "" {
+			continue
+		}
+		if info, live := liveByID[sessionID]; live {
+			session.ObservedState = daemonstate.SessionStateRunning
+			session.TmuxAttachedCount = info.AttachedCount
+			if (session.StartedAt == nil || session.StartedAt.IsZero()) && info.CreatedAt != nil && !info.CreatedAt.IsZero() {
+				started := info.CreatedAt.UTC()
+				session.StartedAt = &started
+			}
+		} else {
+			session.ObservedState = daemonstate.SessionStateStopped
+			session.TmuxAttachedCount = 0
+		}
+		session.UpdatedAt = time.Now().UTC()
+		if writer != nil {
+			if err := writer.PersistSessionProjection(ctx, projectID, session); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := store.UpsertSessionState(ctx, projectID, session); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (d *Daemon) refreshStoppedSessionRuntimeState(ctx context.Context, projectID, issueID, sessionID string) error {

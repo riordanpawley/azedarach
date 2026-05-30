@@ -213,6 +213,9 @@ func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
 	if err := ensureSQLiteColumn(db, "daemon_session_projections", "tmux_attached_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("ensure runtime projection schema: %w", err)
 	}
+	if err := ensureSQLiteColumn(db, "daemon_session_projections", "observed_state", "TEXT"); err != nil {
+		return fmt.Errorf("ensure runtime projection schema: %w", err)
+	}
 	return nil
 }
 
@@ -1706,7 +1709,7 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 		WITH ranked_session AS (
 			SELECT
 				issue_id,
-				state,
+				COALESCE(NULLIF(TRIM(observed_state), ''), state) AS state,
 				COALESCE(started_at, '') AS started_at,
 				updated_at,
 				session_id,
@@ -1714,7 +1717,7 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 				ROW_NUMBER() OVER (
 					PARTITION BY issue_id
 					ORDER BY
-						CASE state
+						CASE COALESCE(NULLIF(TRIM(observed_state), ''), state)
 							WHEN 'running' THEN 0
 							WHEN 'attached' THEN 0
 							WHEN 'paused' THEN 1
