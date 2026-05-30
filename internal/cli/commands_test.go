@@ -4011,6 +4011,13 @@ func TestParseIssueDependencyArgs(t *testing.T) {
 	if add.IssueID != "az-1" || add.DependsOnID != "az-2" || add.Type != "related" {
 		t.Fatalf("ParseIssueDependencyAddArgs() = %+v", add)
 	}
+	add, err = ParseIssueDependencyAddArgs([]string{"--type", "created-in", "az-1", "az-2"})
+	if err != nil {
+		t.Fatalf("ParseIssueDependencyAddArgs(created-in) error = %v", err)
+	}
+	if add.Type != "created-in" {
+		t.Fatalf("created-in dependency type = %q", add.Type)
+	}
 	_, err = ParseIssueDependencyAddArgs([]string{"--impl", "go-bubbletea", "az-1", "az-2"})
 	if err == nil || !strings.Contains(err.Error(), "--impl is not supported for issue dep add") {
 		t.Fatalf("expected impl forbidden error for add, got %v", err)
@@ -5987,8 +5994,8 @@ func TestIssueCreateCommandAutoParentsAndInheritsImplsFromActiveIssue(t *testing
 	if err := json.Unmarshal(requests[2].Body, &depReq); err != nil {
 		t.Fatalf("unmarshal dependency body: %v", err)
 	}
-	if depReq.TaskID != "az-child" || depReq.DependsOnID != "az-parent" || depReq.Type != string(domain.DependencyDiscovered) {
-		t.Fatalf("dependency body = %+v, want az-child discovered-from az-parent", depReq)
+	if depReq.TaskID != "az-child" || depReq.DependsOnID != "az-parent" || depReq.Type != string(domain.DependencyCreatedIn) {
+		t.Fatalf("dependency body = %+v, want az-child created-in az-parent", depReq)
 	}
 	if !strings.Contains(output, "Created issue: az-child (parent: az-parent, auto-parent from AZEDARACH_ISSUE_ID) [created-from: az-parent]") {
 		t.Fatalf("output missing auto-parent/provenance message: %q", output)
@@ -6072,8 +6079,8 @@ func TestIssueCreateCommandDeferredIgnoresAutoParentFromIssueID(t *testing.T) {
 	if err := json.Unmarshal(requests[1].Body, &depReq); err != nil {
 		t.Fatalf("unmarshal dependency body: %v", err)
 	}
-	if depReq.TaskID != "az-child" || depReq.DependsOnID != "az-parent" || depReq.Type != string(domain.DependencyDiscovered) {
-		t.Fatalf("dependency body = %+v, want az-child discovered-from az-parent", depReq)
+	if depReq.TaskID != "az-child" || depReq.DependsOnID != "az-parent" || depReq.Type != string(domain.DependencyCreatedIn) {
+		t.Fatalf("dependency body = %+v, want az-child created-in az-parent", depReq)
 	}
 	if !strings.Contains(output, "Created issue: az-child [created-from: az-parent] [deferred: standalone later work, not auto-parented]") {
 		t.Fatalf("output missing deferred/provenance message: %q", output)
@@ -6131,8 +6138,8 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 					if err := json.Unmarshal(req.Body, &depReq); err != nil {
 						t.Fatalf("decode dependency request: %v", err)
 					}
-					if depReq.TaskID != child || depReq.DependsOnID != root || depReq.Type != string(domain.DependencyDiscovered) {
-						t.Fatalf("dependency request = %+v, want child discovered-from root", depReq)
+					if depReq.TaskID != child || depReq.DependsOnID != root || depReq.Type != string(domain.DependencyCreatedIn) {
+						t.Fatalf("dependency request = %+v, want child created-in root", depReq)
 					}
 					return responseWithJSON(req, map[string]any{}), nil
 				case daemonclient.CommandGitStatus:

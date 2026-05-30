@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -17,15 +18,23 @@ type commandAuditContext struct {
 	InvocationID string
 	StartedAt    time.Time
 	Attrs        []any
+	restoreEnv   func()
 }
 
 func beginCommandAudit(logger *slog.Logger, deps *cli.Dependencies, commandShape string, args []string) commandAuditContext {
 	startedAt := time.Now()
+	redactedArgs := redactCommandArgs(args)
+	username, uid := currentAuditActor()
+	cwd, cwdErr := os.Getwd()
+	if cwdErr != nil {
+		cwd = ""
+	}
 	ctx := commandAuditContext{
 		InvocationID: fmt.Sprintf("%d-%d", os.Getpid(), startedAt.UnixNano()),
 		StartedAt:    startedAt,
-		Attrs:        commandAuditAttrs(deps, commandShape, args, startedAt),
 	}
+	ctx.Attrs = commandAuditAttrs(deps, commandShape, redactedArgs, startedAt, cwd, cwdErr, username, uid)
+	ctx.restoreEnv = setCommandAuditEnv(ctx.InvocationID, commandShape, redactedArgs, cwd, username, uid)
 	if logger != nil {
 		attrs := append([]any{"audit_event", "az.command.start", "invocation_id", ctx.InvocationID}, ctx.Attrs...)
 		logger.Info("az command audit start", attrs...)
@@ -34,6 +43,11 @@ func beginCommandAudit(logger *slog.Logger, deps *cli.Dependencies, commandShape
 }
 
 func finishCommandAudit(logger *slog.Logger, ctx commandAuditContext, err error) {
+	defer func() {
+		if ctx.restoreEnv != nil {
+			ctx.restoreEnv()
+		}
+	}()
 	if logger == nil {
 		return
 	}
@@ -52,14 +66,10 @@ func finishCommandAudit(logger *slog.Logger, ctx commandAuditContext, err error)
 	logger.Info("az command audit finish", attrs...)
 }
 
-func commandAuditAttrs(deps *cli.Dependencies, commandShape string, args []string, startedAt time.Time) []any {
-	cwd, cwdErr := os.Getwd()
-	if cwdErr != nil {
-		cwd = ""
-	}
+func commandAuditAttrs(deps *cli.Dependencies, commandShape string, args []string, startedAt time.Time, cwd string, cwdErr error, username string, uid string) []any {
 	attrs := []any{
 		"command_shape", commandShape,
-		"argv", redactCommandArgs(args),
+		"argv", args,
 		"executable", filepath.Base(os.Args[0]),
 		"pid", os.Getpid(),
 		"ppid", os.Getppid(),
@@ -71,7 +81,7 @@ func commandAuditAttrs(deps *cli.Dependencies, commandShape string, args []strin
 	if cwdErr != nil {
 		attrs = append(attrs, "cwd_error", cwdErr)
 	}
-	if username, uid := currentAuditActor(); username != "" || uid != "" {
+	if username != "" || uid != "" {
 		attrs = append(attrs, "actor", username, "uid", uid)
 	}
 	if deps != nil {
@@ -83,6 +93,42 @@ func commandAuditAttrs(deps *cli.Dependencies, commandShape string, args []strin
 		)
 	}
 	return attrs
+}
+
+func setCommandAuditEnv(invocationID string, commandShape string, args []string, cwd string, username string, uid string) func() {
+	argvJSON, _ := json.Marshal(args)
+	updates := map[string]string{
+		"AZEDARACH_AUDIT_INVOCATION_ID": invocationID,
+		"AZEDARACH_AUDIT_COMMAND_SHAPE": commandShape,
+		"AZEDARACH_AUDIT_ARGV_JSON":     string(argvJSON),
+		"AZEDARACH_AUDIT_EXECUTABLE":    filepath.Base(os.Args[0]),
+		"AZEDARACH_AUDIT_PID":           strconv.Itoa(os.Getpid()),
+		"AZEDARACH_AUDIT_PPID":          strconv.Itoa(os.Getppid()),
+		"AZEDARACH_AUDIT_CWD":           cwd,
+		"AZEDARACH_AUDIT_PWD":           os.Getenv("PWD"),
+		"AZEDARACH_AUDIT_ACTOR":         username,
+		"AZEDARACH_AUDIT_UID":           uid,
+		"AZEDARACH_AUDIT_ACTIVE_ISSUE":  os.Getenv("AZEDARACH_ISSUE_ID"),
+	}
+	previous := make(map[string]*string, len(updates))
+	for key, value := range updates {
+		if old, ok := os.LookupEnv(key); ok {
+			oldCopy := old
+			previous[key] = &oldCopy
+		} else {
+			previous[key] = nil
+		}
+		_ = os.Setenv(key, value)
+	}
+	return func() {
+		for key, value := range previous {
+			if value == nil {
+				_ = os.Unsetenv(key)
+				continue
+			}
+			_ = os.Setenv(key, *value)
+		}
+	}
 }
 
 func currentAuditActor() (string, string) {

@@ -85,6 +85,7 @@ func (c *Client) Command(ctx context.Context, req protocol.RequestEnvelope) (pro
 	} else {
 		req.Meta.ProjectID = naming.ProjectID(c.projectRoute())
 	}
+	populateClientAuditMetadata(&req.Meta)
 
 	var lastErr error
 	for attempt := 0; c.policy.ShouldRetry(attempt); attempt++ {

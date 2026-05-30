@@ -15,6 +15,7 @@ const (
 	DependencyRelatedTo   DependencyType = "related"
 	DependencyParentChild DependencyType = "parent-child"
 	DependencyDiscovered  DependencyType = "discovered-from"
+	DependencyCreatedIn   DependencyType = "created-in"
 )
 
 // Dependency represents a task dependency relationship

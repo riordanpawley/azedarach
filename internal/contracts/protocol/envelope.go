@@ -22,6 +22,17 @@ type Metadata struct {
 	SessionID           naming.SessionID     `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
 	CorrelationID       naming.CorrelationID `json:"correlation_id,omitempty" msgpack:"correlation_id,omitempty"`
 	LastAppliedRevision uint64               `json:"last_applied_revision,omitempty" msgpack:"last_applied_revision,omitempty"`
+	ClientInvocationID  string               `json:"client_invocation_id,omitempty" msgpack:"client_invocation_id,omitempty"`
+	ClientCommandShape  string               `json:"client_command_shape,omitempty" msgpack:"client_command_shape,omitempty"`
+	ClientArgv          []string             `json:"client_argv,omitempty" msgpack:"client_argv,omitempty"`
+	ClientExecutable    string               `json:"client_executable,omitempty" msgpack:"client_executable,omitempty"`
+	ClientPID           int                  `json:"client_pid,omitempty" msgpack:"client_pid,omitempty"`
+	ClientPPID          int                  `json:"client_ppid,omitempty" msgpack:"client_ppid,omitempty"`
+	ClientCWD           string               `json:"client_cwd,omitempty" msgpack:"client_cwd,omitempty"`
+	ClientPWD           string               `json:"client_pwd,omitempty" msgpack:"client_pwd,omitempty"`
+	ClientActor         string               `json:"client_actor,omitempty" msgpack:"client_actor,omitempty"`
+	ClientUID           string               `json:"client_uid,omitempty" msgpack:"client_uid,omitempty"`
+	ClientActiveIssue   string               `json:"client_active_issue,omitempty" msgpack:"client_active_issue,omitempty"`
 }
 
 // RequestEnvelope is the daemon command request shell.

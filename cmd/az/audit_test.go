@@ -69,12 +69,34 @@ func TestCommandAuditLogsStartAndFinishWithContext(t *testing.T) {
 }
 
 func TestCommandAuditAttrsIncludeWorkingDirectory(t *testing.T) {
-	attrs := commandAuditAttrs(nil, "issue list", []string{"issue", "list"}, time.Unix(0, 0))
+	attrs := commandAuditAttrs(nil, "issue list", []string{"issue", "list"}, time.Unix(0, 0), "/cwd", nil, "user", "501")
 	if !auditAttrsContainKey(attrs, "cwd") {
 		t.Fatalf("attrs missing cwd: %#v", attrs)
 	}
 	if !auditAttrsContainKey(attrs, "pwd_env") {
 		t.Fatalf("attrs missing pwd_env: %#v", attrs)
+	}
+}
+
+func TestCommandAuditSetsAndRestoresEnvForDaemonAttribution(t *testing.T) {
+	t.Setenv("AZEDARACH_AUDIT_INVOCATION_ID", "previous")
+	oldArgs := os.Args
+	os.Args = []string{"/tmp/az", "session", "stop", "ckf", "--token", "secret"}
+	t.Cleanup(func() { os.Args = oldArgs })
+
+	ctx := beginCommandAudit(nil, nil, "session stop", os.Args[1:])
+	if got := os.Getenv("AZEDARACH_AUDIT_INVOCATION_ID"); got != ctx.InvocationID {
+		t.Fatalf("invocation env = %q, want %q", got, ctx.InvocationID)
+	}
+	if got := os.Getenv("AZEDARACH_AUDIT_COMMAND_SHAPE"); got != "session stop" {
+		t.Fatalf("command shape env = %q", got)
+	}
+	if got := os.Getenv("AZEDARACH_AUDIT_ARGV_JSON"); !strings.Contains(got, "[REDACTED]") || strings.Contains(got, "secret") {
+		t.Fatalf("argv env = %q, want redacted", got)
+	}
+	finishCommandAudit(nil, ctx, nil)
+	if got := os.Getenv("AZEDARACH_AUDIT_INVOCATION_ID"); got != "previous" {
+		t.Fatalf("restored invocation env = %q, want previous", got)
 	}
 }
 
