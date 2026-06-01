@@ -124,6 +124,13 @@ type pendingOperationProgress struct {
 	updatedAt   time.Time
 }
 
+type daemonStreamMetrics struct {
+	EventsDrained      uint64
+	RefreshesCoalesced uint64
+	Rehydrates         uint64
+	MaxBatchSize       int
+}
+
 // Model is the main application state
 type Model struct {
 	// Core data
@@ -198,6 +205,8 @@ type Model struct {
 	loading               bool
 	boardRefreshing       bool
 	issueRefreshSeq       uint64
+	issueRefreshInFlight  bool
+	issueRefreshPending   bool
 	projectSwitchSeq      uint64
 	projectSwitchInFlight bool
 	spinner               spinner.Model
@@ -212,6 +221,7 @@ type Model struct {
 	daemonEvents              <-chan protocol.EventEnvelope
 	logStreamEvents           <-chan protocol.EventEnvelope
 	daemonRevision            uint64
+	daemonStreamMetrics       daemonStreamMetrics
 	lastDaemonReattachAttempt time.Time
 	lastLogStreamReattachAt   time.Time
 	logStreamReconnectQueued  bool
@@ -463,8 +473,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		if m.editor.GetMode() != ModeAction {
 			m.boardRefreshing = true
-			m.issueRefreshSeq++
-			return m, tea.Batch(m.loadIssuesAfterRuntimeReconcileCmd(), m.gitSyncService.FetchAndCheck())
+			return m, tea.Batch(m.scheduleIssuesRefreshAfterRuntimeReconcileCmd(), m.gitSyncService.FetchAndCheck())
 		}
 	}
 
@@ -619,13 +628,12 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				columns := m.buildColumns()
 				m.nav.JumpToTaskByID(columns, children[0].ID.String())
 				m.ensureCursorVisible(columns)
-				m.issueRefreshSeq++
 				issueIDs := make([]string, 0, len(children)+1)
 				issueIDs = append(issueIDs, task.ID.String())
 				for _, child := range children {
 					issueIDs = append(issueIDs, child.ID.String())
 				}
-				return m, m.loadIssuesAfterIssueReconcileCmd(issueIDs)
+				return m, m.scheduleIssuesRefreshAfterIssueReconcileCmd(issueIDs)
 			}
 			m.addToast(Toast{
 				Level:   ToastInfo,
@@ -1325,8 +1333,44 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 }
 
 func (m *Model) scheduleIssuesRefreshCmd() tea.Cmd {
+	return m.beginIssuesRefreshCmd(func() tea.Cmd {
+		return m.loadIssuesCmd()
+	})
+}
+
+func (m *Model) scheduleIssuesRefreshAfterRuntimeReconcileCmd() tea.Cmd {
+	return m.beginIssuesRefreshCmd(func() tea.Cmd {
+		return m.loadIssuesAfterRuntimeReconcileCmd()
+	})
+}
+
+func (m *Model) scheduleIssuesRefreshAfterIssueReconcileCmd(issueIDs []string) tea.Cmd {
+	return m.beginIssuesRefreshCmd(func() tea.Cmd {
+		return m.loadIssuesAfterIssueReconcileCmd(issueIDs)
+	})
+}
+
+func (m *Model) beginIssuesRefreshCmd(factory func() tea.Cmd) tea.Cmd {
+	if m.issueRefreshInFlight {
+		m.issueRefreshPending = true
+		m.daemonStreamMetrics.RefreshesCoalesced++
+		return nil
+	}
 	m.issueRefreshSeq++
-	return m.loadIssuesCmd()
+	m.issueRefreshInFlight = true
+	return factory()
+}
+
+func (m *Model) finishIssuesRefreshCmd(refreshSeq uint64) tea.Cmd {
+	if refreshSeq == 0 || refreshSeq != m.issueRefreshSeq {
+		return nil
+	}
+	m.issueRefreshInFlight = false
+	if !m.issueRefreshPending {
+		return nil
+	}
+	m.issueRefreshPending = false
+	return m.scheduleIssuesRefreshCmd()
 }
 
 func (m Model) loadUIViewModeCmd() tea.Cmd {

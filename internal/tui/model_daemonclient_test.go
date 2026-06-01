@@ -7311,6 +7311,91 @@ func TestDaemonStreamEventBatchCoalescesSnapshotRefreshCommands(t *testing.T) {
 	if updated.issueRefreshSeq != 1 {
 		t.Fatalf("issueRefreshSeq = %d, want one coalesced refresh", updated.issueRefreshSeq)
 	}
+	if updated.daemonStreamMetrics.EventsDrained != 2 {
+		t.Fatalf("events drained = %d, want 2", updated.daemonStreamMetrics.EventsDrained)
+	}
+	if updated.daemonStreamMetrics.RefreshesCoalesced != 1 {
+		t.Fatalf("refreshes coalesced = %d, want 1", updated.daemonStreamMetrics.RefreshesCoalesced)
+	}
+	if updated.daemonStreamMetrics.MaxBatchSize != 2 {
+		t.Fatalf("max batch size = %d, want 2", updated.daemonStreamMetrics.MaxBatchSize)
+	}
+}
+
+func TestScheduleIssuesRefreshDedupesInFlightAndReplaysPending(t *testing.T) {
+	snapshotReads := uint64(0)
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskList {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
+			}
+			snapshotReads++
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, snapshotReads, req.Meta.ProjectID.String(), []domain.Task{
+					{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen},
+				}),
+			}, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+	m.hasRefreshLoop = true
+
+	firstCmd := m.scheduleIssuesRefreshCmd()
+	if firstCmd == nil {
+		t.Fatal("expected first refresh command")
+	}
+	if !m.issueRefreshInFlight || m.issueRefreshSeq != 1 {
+		t.Fatalf("refresh state after first schedule: inFlight=%v seq=%d", m.issueRefreshInFlight, m.issueRefreshSeq)
+	}
+
+	secondCmd := m.scheduleIssuesRefreshCmd()
+	if secondCmd != nil {
+		t.Fatal("expected duplicate in-flight refresh to be coalesced")
+	}
+	if !m.issueRefreshPending {
+		t.Fatal("expected duplicate refresh to mark pending replay")
+	}
+	if m.issueRefreshSeq != 1 {
+		t.Fatalf("issueRefreshSeq after coalesced schedule = %d, want 1", m.issueRefreshSeq)
+	}
+	if m.daemonStreamMetrics.RefreshesCoalesced != 1 {
+		t.Fatalf("refreshes coalesced = %d, want 1", m.daemonStreamMetrics.RefreshesCoalesced)
+	}
+
+	firstMsg := firstCmd()
+	loaded, ok := firstMsg.(issuesLoadedMsg)
+	if !ok {
+		t.Fatalf("first command message type = %T, want issuesLoadedMsg", firstMsg)
+	}
+	updatedAny, replayCmd := m.Update(loaded)
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if replayCmd == nil {
+		t.Fatal("expected pending refresh replay command after first load completes")
+	}
+	if !updated.issueRefreshInFlight || updated.issueRefreshPending {
+		t.Fatalf("refresh state after replay schedule: inFlight=%v pending=%v", updated.issueRefreshInFlight, updated.issueRefreshPending)
+	}
+	if updated.issueRefreshSeq != 2 {
+		t.Fatalf("issueRefreshSeq after replay schedule = %d, want 2", updated.issueRefreshSeq)
+	}
+	if len(transport.requests) != 1 {
+		t.Fatalf("requests before replay command executes = %v, want one snapshot read", transport.requests)
+	}
+
+	replayMsg := replayCmd()
+	if _, ok := replayMsg.(issuesLoadedMsg); !ok {
+		t.Fatalf("replay command message type = %T, want issuesLoadedMsg", replayMsg)
+	}
+	if len(transport.requests) != 2 {
+		t.Fatalf("requests after replay command executes = %v, want two snapshot reads", transport.requests)
+	}
 }
 
 func TestProjectionEventRevisionGate(t *testing.T) {

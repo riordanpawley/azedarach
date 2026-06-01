@@ -169,7 +169,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
-			return m, nil
+			return m, m.finishIssuesRefreshCmd(msg.refreshSeq)
 		}
 		if msg.daemonClient != nil {
 			m.daemonClient = msg.daemonClient
@@ -199,6 +199,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.hasRefreshLoop {
 				m.hasRefreshLoop = true
 				cmds = append(cmds, tickEvery(2*time.Second))
+			}
+			if replayCmd := m.finishIssuesRefreshCmd(msg.refreshSeq); replayCmd != nil {
+				cmds = append(cmds, replayCmd)
 			}
 			if len(cmds) == 0 {
 				return m, nil
@@ -255,6 +258,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.openSessionSelectorOnLoad {
 			m.openSessionSelectorOnLoad = false
 			cmds = append(cmds, m.openOrchestrationOverlay())
+		}
+		if replayCmd := m.finishIssuesRefreshCmd(msg.refreshSeq); replayCmd != nil {
+			cmds = append(cmds, replayCmd)
 		}
 		if len(cmds) == 0 {
 			return m, nil
@@ -317,7 +323,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
-			return m, nil
+			return m, m.finishIssuesRefreshCmd(msg.refreshSeq)
 		}
 		now := time.Now()
 		m.addToast(Toast{
@@ -332,13 +338,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastDaemonReattachAttempt = now
 			cmds = append(cmds, m.attachDaemonCmd())
 		}
+		if replayCmd := m.finishIssuesRefreshCmd(msg.refreshSeq); replayCmd != nil {
+			cmds = append(cmds, replayCmd)
+		}
 		return m, tea.Batch(cmds...)
 
 	case tickMsg:
 		// Expire old toasts and refresh issues
 		m.expireToasts()
 		m.boardRefreshing = true
-		m.issueRefreshSeq++
 		return m, tea.Batch(
 			m.scheduleIssuesRefreshCmd(),
 			m.gitSyncService.FetchAndCheck(),
@@ -460,6 +468,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(events) == 0 {
 			events = []protocol.EventEnvelope{msg.event}
 		}
+		m.daemonStreamMetrics.EventsDrained += uint64(len(events))
+		if len(events) > m.daemonStreamMetrics.MaxBatchSize {
+			m.daemonStreamMetrics.MaxBatchSize = len(events)
+		}
 		cmds := make([]tea.Cmd, 0, 2)
 		queuedCmdKeys := map[string]struct{}{}
 		for _, evt := range events {
@@ -468,6 +480,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if _, exists := queuedCmdKeys[result.key]; !exists {
 					queuedCmdKeys[result.key] = struct{}{}
 					cmds = append(cmds, m.scheduleIssuesRefreshCmd())
+				} else {
+					m.daemonStreamMetrics.RefreshesCoalesced++
 				}
 			} else if result.cmd != nil {
 				if result.key == "" {
@@ -475,7 +489,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if _, exists := queuedCmdKeys[result.key]; !exists {
 					queuedCmdKeys[result.key] = struct{}{}
 					cmds = append(cmds, result.cmd)
+				} else {
+					m.daemonStreamMetrics.RefreshesCoalesced++
 				}
+			}
+			if result.rehydrate {
+				m.daemonStreamMetrics.Rehydrates++
 			}
 			if result.stop {
 				if len(cmds) == 0 {
@@ -1446,9 +1465,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 type daemonStreamEventResult struct {
-	cmd  tea.Cmd
-	key  string
-	stop bool
+	cmd       tea.Cmd
+	key       string
+	stop      bool
+	rehydrate bool
 }
 
 const daemonStreamCommandIssuesRefresh = "issues-refresh"
@@ -1476,7 +1496,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope) daemonStreamE
 			return daemonStreamEventResult{}
 		case protocol.StreamProjectionDecisionResync:
 			m.daemonEvents = nil
-			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true}
+			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 		}
 		if m.applyTaskEvent(evt) {
 			m.daemonRevision = cursor.Advance(evt).Revision
@@ -1489,7 +1509,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope) daemonStreamE
 			return daemonStreamEventResult{}
 		case protocol.StreamProjectionDecisionResync:
 			m.daemonEvents = nil
-			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true}
+			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 		}
 		m.applySessionProjectionEvent(evt)
 		m.daemonRevision = cursor.Advance(evt).Revision
@@ -1501,7 +1521,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope) daemonStreamE
 			return daemonStreamEventResult{}
 		case protocol.StreamProjectionDecisionResync:
 			m.daemonEvents = nil
-			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true}
+			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 		}
 
 		var body protocol.ProjectionUpdateEventBody
@@ -1518,7 +1538,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope) daemonStreamE
 			return daemonStreamEventResult{}
 		case protocol.StreamProjectionDecisionResync:
 			m.daemonEvents = nil
-			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true}
+			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 		}
 		cmd := m.applyUICommandEvent(evt)
 		m.daemonRevision = cursor.Advance(evt).Revision
@@ -1533,7 +1553,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope) daemonStreamE
 		return daemonStreamEventResult{key: daemonStreamCommandIssuesRefresh}
 	case daemonEventRehydrate:
 		m.daemonEvents = nil
-		return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true}
+		return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 	default:
 		return daemonStreamEventResult{}
 	}
