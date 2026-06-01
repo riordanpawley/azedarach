@@ -22,8 +22,9 @@ import (
 )
 
 const (
-	defaultOperationProjectID = "default"
-	defaultOperationPollDelay = 10 * time.Millisecond
+	defaultOperationProjectID   = "default"
+	defaultOperationPollDelay   = 10 * time.Millisecond
+	interruptedOperationMessage = "operation interrupted by daemon restart"
 )
 
 type operationRuntimeConfig struct {
@@ -125,6 +126,7 @@ func newOperationRuntime(cfg operationRuntimeConfig) *operationRuntime {
 		logger:                logger,
 		canonicalizeProjectID: canonicalizeProjectID,
 	}
+	reconcileInterruptedOperations(context.Background(), adapter, logger)
 	manager := opmanager.New(adapter, opmanager.Config{})
 	return &operationRuntime{
 		logger:                 logger,
@@ -140,6 +142,37 @@ func newOperationRuntime(cfg operationRuntimeConfig) *operationRuntime {
 		pollInterval:           defaultOperationPollDelay,
 		repoNameProject:        repoNameProjectID,
 		canonicalProject:       canonicalProjectID,
+	}
+}
+
+func reconcileInterruptedOperations(ctx context.Context, store daemonops.Store, logger *slog.Logger) {
+	if store == nil {
+		return
+	}
+	records, err := store.List(ctx, daemonops.Query{
+		States: []daemonops.State{daemonops.StateQueued, daemonops.StateRunning},
+	})
+	if err != nil {
+		if logger != nil {
+			logger.Warn("failed to list interrupted daemon operations", "error", err)
+		}
+		return
+	}
+	for _, record := range records {
+		finished := time.Now().UTC()
+		message := interruptedOperationMessage
+		if _, err := store.Update(ctx, daemonops.UpdateParams{
+			ID:           record.ID,
+			ToState:      daemonops.StateFailed,
+			FinishedAt:   &finished,
+			ErrorMessage: &message,
+		}); err != nil && logger != nil {
+			logger.Warn("failed to mark interrupted daemon operation failed",
+				"operation_id", record.ID,
+				"state", record.State,
+				"error", err,
+			)
+		}
 	}
 }
 
