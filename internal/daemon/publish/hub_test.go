@@ -103,6 +103,46 @@ func TestSubscribeCatchupOverflowTruncatesToLatestEvents(t *testing.T) {
 	}
 }
 
+func TestPriorityTaskMutationEvictsQueuedRuntimeTelemetry(t *testing.T) {
+	h := NewHub(32, 2, slog.Default())
+	ch, cancel := h.Subscribe("proj", 0)
+	defer cancel()
+
+	h.Publish(makeEvent("proj", 1, protocol.EventGitStatusUpdated))
+	h.Publish(makeEvent("proj", 2, protocol.EventWorktreeProjectionUpdated))
+	h.Publish(makeEvent("proj", 3, protocol.EventTaskCreated))
+
+	first := recv(t, ch)
+	second := recv(t, ch)
+	if first.Revision != 2 || first.Event != protocol.EventWorktreeProjectionUpdated {
+		t.Fatalf("first event = %s:%d, want worktree projection revision 2", first.Event, first.Revision)
+	}
+	if second.Revision != 3 || second.Event != protocol.EventTaskCreated {
+		t.Fatalf("second event = %s:%d, want task created revision 3", second.Event, second.Revision)
+	}
+}
+
+func TestPriorityTaskMutationDoesNotEvictQueuedTaskMutations(t *testing.T) {
+	h := NewHub(32, 1, slog.Default())
+	ch, _ := h.Subscribe("proj", 0)
+
+	h.Publish(makeEvent("proj", 1, protocol.EventTaskUpdated))
+	h.Publish(makeEvent("proj", 2, protocol.EventTaskCreated))
+
+	first := recv(t, ch)
+	if first.Revision != 1 || first.Event != protocol.EventTaskUpdated {
+		t.Fatalf("first event = %s:%d, want original queued task update", first.Event, first.Revision)
+	}
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("subscriber channel should close after priority overflow without low-priority telemetry")
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("timed out waiting for overflow close")
+	}
+}
+
 func recv(t *testing.T, ch <-chan protocol.EventEnvelope) protocol.EventEnvelope {
 	t.Helper()
 	select {

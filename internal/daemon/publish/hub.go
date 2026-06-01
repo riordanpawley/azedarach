@@ -180,8 +180,8 @@ func (h *Hub) unsubscribeByID(id int) {
 }
 
 func (s *subscriber) trySend(evt protocol.EventEnvelope) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.closed {
 		return false
 	}
@@ -189,7 +189,10 @@ func (s *subscriber) trySend(evt protocol.EventEnvelope) bool {
 	case s.ch <- evt:
 		return true
 	default:
-		return false
+		if !isPriorityEvent(evt) {
+			return false
+		}
+		return s.trySendPriorityLocked(evt)
 	}
 }
 
@@ -201,6 +204,67 @@ func (s *subscriber) close() {
 	}
 	s.closed = true
 	close(s.ch)
+}
+
+func (s *subscriber) trySendPriorityLocked(evt protocol.EventEnvelope) bool {
+	pending := len(s.ch)
+	if pending == 0 {
+		select {
+		case s.ch <- evt:
+			return true
+		default:
+			return false
+		}
+	}
+
+	retained := make([]protocol.EventEnvelope, 0, pending)
+	droppedLowPriority := false
+	for i := 0; i < pending; i++ {
+		select {
+		case queued := <-s.ch:
+			if !droppedLowPriority && isLowPriorityEvent(queued) {
+				droppedLowPriority = true
+				continue
+			}
+			retained = append(retained, queued)
+		default:
+			i = pending
+		}
+	}
+	for _, queued := range retained {
+		s.ch <- queued
+	}
+	if !droppedLowPriority {
+		return false
+	}
+	select {
+	case s.ch <- evt:
+		return true
+	default:
+		return false
+	}
+}
+
+func isPriorityEvent(evt protocol.EventEnvelope) bool {
+	switch evt.Event {
+	case protocol.EventTaskCreated,
+		protocol.EventTaskUpdated,
+		protocol.EventTaskDeleted,
+		protocol.EventTaskArchived:
+		return true
+	default:
+		return false
+	}
+}
+
+func isLowPriorityEvent(evt protocol.EventEnvelope) bool {
+	switch evt.Event {
+	case protocol.EventGitStatusUpdated,
+		protocol.EventWorktreeProjectionUpdated:
+		return true
+	default:
+		return false
+	}
 }
 
 func appendTrimmed(list []protocol.EventEnvelope, evt protocol.EventEnvelope, max int) []protocol.EventEnvelope {
