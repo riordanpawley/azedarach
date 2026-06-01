@@ -3675,6 +3675,11 @@ func IssueFinalizeCommand(deps *Dependencies, opts IssueFinalizeOptions) error {
 	}
 
 	if opts.RemoveWorktree {
+		if !opts.ForceWorktree {
+			if _, err := deps.DaemonClient.ValidateTaskClose(ctx, opts.IssueID); err != nil {
+				return fmt.Errorf("close preflight failed for issue %s: %w", opts.IssueID, err)
+			}
+		}
 		if _, err := deps.DaemonClient.StopSession(ctx, opts.IssueID); err != nil {
 			return fmt.Errorf("failed to stop session for issue %s: %w", opts.IssueID, err)
 		}

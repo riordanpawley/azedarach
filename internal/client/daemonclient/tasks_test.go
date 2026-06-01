@@ -29,6 +29,21 @@ func assertTaskProjectID(t *testing.T, req protocol.RequestEnvelope, want string
 	}
 }
 
+func responseWithJSON(t *testing.T, req protocol.RequestEnvelope, body any) protocol.ResponseEnvelope {
+	t.Helper()
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal response body: %v", err)
+	}
+	return protocol.ResponseEnvelope{
+		ProtocolVersion: req.ProtocolVersion,
+		RequestID:       req.RequestID,
+		Kind:            protocol.EnvelopeKindResponse,
+		OK:              true,
+		Body:            data,
+	}
+}
+
 func (t *taskRecordingTransport) Handshake(_ context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
 	t.handshakeCalls++
 	if t.handshakeFn != nil {
@@ -544,11 +559,14 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 								ID:             "az-3",
 								Title:          "Close me",
 								Status:         domain.StatusInReview,
+								Session:        &domain.Session{IssueID: "az-3", Worktree: "/tmp/az-3"},
 								HasTmuxSession: true,
 								HasWorktree:    true,
 							},
 						}),
 					}, nil
+				case CommandGitStatus:
+					return responseWithJSON(t, req, gitStatusBody{Status: GitStatus{HasChanges: false}}), nil
 				case CommandSessionStop, CommandWorktreeRemove, CommandTaskUpdateStatus:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -568,7 +586,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("UpdateTaskStatusWithOptions error: %v", err)
 		}
-		wantCommands := []string{CommandTaskList, CommandSessionStop, CommandWorktreeRemove, CommandTaskUpdateStatus}
+		wantCommands := []string{CommandTaskList, CommandGitStatus, CommandSessionStop, CommandWorktreeRemove, CommandTaskUpdateStatus}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
 		}
@@ -617,11 +635,14 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 								ID:             "az-3",
 								Title:          "Close me",
 								Status:         domain.StatusInReview,
+								Session:        &domain.Session{IssueID: "az-3", Worktree: "/tmp/az-3"},
 								HasTmuxSession: true,
 								HasWorktree:    true,
 							},
 						}),
 					}, nil
+				case CommandGitStatus:
+					return responseWithJSON(t, req, gitStatusBody{Status: GitStatus{HasChanges: false}}), nil
 				case CommandSessionStop:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -643,9 +664,74 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "remove worktree before closing az-3") {
 			t.Fatalf("UpdateTaskStatusWithOptions error = %v, want worktree cleanup failure", err)
 		}
-		wantCommands := []string{CommandTaskList, CommandSessionStop, CommandWorktreeRemove}
+		wantCommands := []string{CommandTaskList, CommandGitStatus, CommandSessionStop, CommandWorktreeRemove}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
+		}
+	})
+
+	t.Run("status update close guard blocks dirty or ahead worktree", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			status  GitStatus
+			wantErr string
+		}{
+			{
+				name:    "dirty",
+				status:  GitStatus{HasChanges: true, Modified: []string{"main.go"}},
+				wantErr: "worktree has tracked changes: main.go",
+			},
+			{
+				name:    "ahead",
+				status:  GitStatus{GitAheadCount: 2},
+				wantErr: "branch is ahead by 2 commit(s)",
+			},
+		}
+
+		for _, tt := range cases {
+			t.Run(tt.name, func(t *testing.T) {
+				commands := []string{}
+				transport := &taskRecordingTransport{
+					replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+						assertTaskProjectID(t, req, wantProjectID)
+						commands = append(commands, req.Command)
+						switch req.Command {
+						case CommandTaskList:
+							return protocol.ResponseEnvelope{
+								ProtocolVersion: req.ProtocolVersion,
+								RequestID:       req.RequestID,
+								Kind:            protocol.EnvelopeKindResponse,
+								OK:              true,
+								Body: mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 3, []domain.Task{
+									{
+										ID:             "az-3",
+										Title:          "Close me",
+										Status:         domain.StatusInReview,
+										Session:        &domain.Session{IssueID: "az-3", Worktree: "/tmp/az-3"},
+										HasTmuxSession: true,
+										HasWorktree:    true,
+									},
+								}),
+							}, nil
+						case CommandGitStatus:
+							return responseWithJSON(t, req, gitStatusBody{Status: tt.status}), nil
+						default:
+							t.Fatalf("unexpected command after close guard failure = %q", req.Command)
+							return protocol.ResponseEnvelope{}, nil
+						}
+					},
+				}
+
+				client := New(transport).WithProjectID(wantProjectID)
+				err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{AutoFinalizeOnClose: true})
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("UpdateTaskStatusWithOptions error = %v, want %q", err, tt.wantErr)
+				}
+				wantCommands := []string{CommandTaskList, CommandGitStatus}
+				if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
+					t.Fatalf("commands = %v, want %v", commands, wantCommands)
+				}
+			})
 		}
 	})
 

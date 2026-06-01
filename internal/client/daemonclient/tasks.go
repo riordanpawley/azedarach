@@ -68,6 +68,13 @@ type TaskStatusOptions struct {
 	AutoFinalizeOnClose bool
 }
 
+// CloseGuardResult records the preflight inputs used for a close transition.
+type CloseGuardResult struct {
+	Task     domain.Task
+	Worktree string
+	Status   GitStatus
+}
+
 // TaskAppendNotesRequest appends a single line to task notes.
 type TaskAppendNotesRequest struct {
 	TaskID naming.IssueID `json:"task_id"`
@@ -439,9 +446,31 @@ func (c *Client) UpdateTaskStatusWithOptions(ctx context.Context, taskID string,
 }
 
 func (c *Client) finalizeTaskRuntimeAttachments(ctx context.Context, taskID string) error {
+	guard, err := c.ValidateTaskClose(ctx, taskID)
+	if err != nil {
+		return err
+	}
+
+	task := guard.Task
+	if task.HasTmuxSession || task.Session != nil {
+		if _, err := c.StopSession(ctx, taskID); err != nil {
+			return fmt.Errorf("stop session before closing %s: %w", taskID, err)
+		}
+	}
+	if closeGuardTaskHasWorktree(task) {
+		if err := c.RemoveWorktreeWithOptions(ctx, taskID, false); err != nil {
+			return fmt.Errorf("remove worktree before closing %s: %w", taskID, err)
+		}
+	}
+	return nil
+}
+
+// ValidateTaskClose rejects close/done transitions for worktrees that still
+// have tracked changes, conflicts, or commits ahead of their integration base.
+func (c *Client) ValidateTaskClose(ctx context.Context, taskID string) (CloseGuardResult, error) {
 	snapshot, err := c.ListTasksSnapshot(ctx)
 	if err != nil {
-		return fmt.Errorf("inspect runtime attachments before closing %s: %w", taskID, err)
+		return CloseGuardResult{}, fmt.Errorf("inspect runtime attachments before closing %s: %w", taskID, err)
 	}
 	var task domain.Task
 	found := false
@@ -453,21 +482,104 @@ func (c *Client) finalizeTaskRuntimeAttachments(ctx context.Context, taskID stri
 		}
 	}
 	if !found {
-		return fmt.Errorf("issue not found: %s", taskID)
+		return CloseGuardResult{}, fmt.Errorf("issue not found: %s", taskID)
 	}
 
-	if task.HasTmuxSession || task.Session != nil {
-		if _, err := c.StopSession(ctx, taskID); err != nil {
-			return fmt.Errorf("stop session before closing %s: %w", taskID, err)
+	worktree := closeGuardTaskWorktree(task)
+	if worktree == "" && task.HasWorktree {
+		resolved, ok, err := c.worktreePathForIssue(ctx, taskID)
+		if err != nil {
+			return CloseGuardResult{}, fmt.Errorf("inspect worktree before closing %s: %w", taskID, err)
+		}
+		if !ok || strings.TrimSpace(resolved) == "" {
+			return CloseGuardResult{}, fmt.Errorf("cannot close issue %s: worktree is projected but path is unavailable", taskID)
+		}
+		worktree = resolved
+	}
+	if strings.TrimSpace(worktree) == "" {
+		return CloseGuardResult{Task: task}, nil
+	}
+
+	status, err := c.GitStatusRefresh(ctx, worktree)
+	if err != nil {
+		return CloseGuardResult{}, fmt.Errorf("inspect git status before closing %s: %w", taskID, err)
+	}
+	if reasons := closeGuardBlockers(status); len(reasons) > 0 {
+		return CloseGuardResult{}, fmt.Errorf("cannot close issue %s: %s", taskID, strings.Join(reasons, "; "))
+	}
+	return CloseGuardResult{
+		Task:     task,
+		Worktree: worktree,
+		Status:   status,
+	}, nil
+}
+
+func (c *Client) worktreePathForIssue(ctx context.Context, taskID string) (string, bool, error) {
+	worktrees, err := c.ListWorktrees(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	for _, worktree := range worktrees {
+		if strings.EqualFold(strings.TrimSpace(worktree.IssueID), taskID) {
+			return strings.TrimSpace(worktree.Path), true, nil
 		}
 	}
-	hasSessionWorktree := task.Session != nil && strings.TrimSpace(task.Session.Worktree) != ""
-	if task.HasWorktree || hasSessionWorktree {
-		if err := c.RemoveWorktreeWithOptions(ctx, taskID, false); err != nil {
-			return fmt.Errorf("remove worktree before closing %s: %w", taskID, err)
+	return "", false, nil
+}
+
+func closeGuardTaskHasWorktree(task domain.Task) bool {
+	return task.HasWorktree || closeGuardTaskWorktree(task) != ""
+}
+
+func closeGuardTaskWorktree(task domain.Task) string {
+	if task.Session == nil {
+		return ""
+	}
+	return strings.TrimSpace(task.Session.Worktree)
+}
+
+func closeGuardBlockers(status GitStatus) []string {
+	dirty := closeGuardDirtyFiles(status)
+	reasons := make([]string, 0, 3)
+	if len(dirty) > 0 {
+		reasons = append(reasons, "worktree has tracked changes: "+strings.Join(dirty, ", "))
+	}
+	if status.HasConflicts || len(status.Conflicted) > 0 {
+		conflicts := append([]string(nil), status.Conflicted...)
+		if len(conflicts) == 0 {
+			reasons = append(reasons, "worktree has conflicts")
+		} else {
+			reasons = append(reasons, "worktree has conflicts: "+strings.Join(conflicts, ", "))
 		}
 	}
-	return nil
+	if status.GitAheadCount > 0 {
+		reasons = append(reasons, fmt.Sprintf("branch is ahead by %d commit(s)", status.GitAheadCount))
+	}
+	return reasons
+}
+
+func closeGuardDirtyFiles(status GitStatus) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Conflicted))
+	appendUnique := func(files []string) {
+		for _, file := range files {
+			file = strings.TrimSpace(file)
+			if file == "" {
+				continue
+			}
+			if _, ok := seen[file]; ok {
+				continue
+			}
+			seen[file] = struct{}{}
+			out = append(out, file)
+		}
+	}
+	appendUnique(status.Staged)
+	appendUnique(status.Modified)
+	appendUnique(status.Added)
+	appendUnique(status.Deleted)
+	appendUnique(status.Conflicted)
+	return out
 }
 
 // UpdateTaskDetails updates a task's details through the daemon client boundary.
