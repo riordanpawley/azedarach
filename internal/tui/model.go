@@ -970,9 +970,12 @@ type projectSwitchResultMsg struct {
 	err           error
 }
 
+const daemonStreamEventBatchLimit = 256
+
 type daemonStreamEventMsg struct {
 	stream <-chan protocol.EventEnvelope
 	event  protocol.EventEnvelope
+	events []protocol.EventEnvelope
 }
 
 type daemonStreamClosedMsg struct {
@@ -1819,7 +1822,19 @@ func (m Model) waitForDaemonEventCmd() tea.Cmd {
 			return daemonStreamClosedMsg{stream: stream}
 		}
 
-		return daemonStreamEventMsg{stream: stream, event: evt}
+		events := []protocol.EventEnvelope{evt}
+		for len(events) < daemonStreamEventBatchLimit {
+			select {
+			case next, ok := <-stream:
+				if !ok {
+					return daemonStreamEventMsg{stream: stream, event: evt, events: events}
+				}
+				events = append(events, next)
+			default:
+				return daemonStreamEventMsg{stream: stream, event: evt, events: events}
+			}
+		}
+		return daemonStreamEventMsg{stream: stream, event: evt, events: events}
 	}
 }
 

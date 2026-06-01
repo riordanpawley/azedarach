@@ -1062,14 +1062,17 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 		},
 	}
 
-	nextMsg := model.waitForDaemonEventCmd()()
+	batchMsg := model.waitForDaemonEventCmd()()
+	batch, ok := batchMsg.(daemonStreamEventMsg)
+	if !ok {
+		t.Fatalf("stream message type = %T, want daemonStreamEventMsg", batchMsg)
+	}
+	if len(batch.events) != len(eventChecks) {
+		t.Fatalf("batched event count = %d, want %d", len(batch.events), len(eventChecks))
+	}
 	for i, tt := range eventChecks {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := nextMsg
-			evt, ok := msg.(daemonStreamEventMsg)
-			if !ok {
-				t.Fatalf("stream message type = %T, want daemonStreamEventMsg", msg)
-			}
+			evt := daemonStreamEventMsg{stream: batch.stream, event: batch.events[i]}
 			if evt.event.Event != tt.event {
 				t.Fatalf("event name = %q, want %q", evt.event.Event, tt.event)
 			}
@@ -1080,11 +1083,8 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 			}
 			tt.assertFn(t, nextModel, evt.event)
 			model = nextModel
-			if i < len(eventChecks)-1 {
-				nextMsg = model.waitForDaemonEventCmd()()
-				if nextCmd == nil {
-					t.Fatal("expected next wait command")
-				}
+			if nextCmd == nil {
+				t.Fatal("expected next wait command")
 			}
 		})
 	}
@@ -7233,6 +7233,83 @@ func TestTaskEventBodyAppliesWithoutSnapshotRefresh(t *testing.T) {
 	}
 	if len(deleted.tasks) != 0 {
 		t.Fatalf("tasks after delete event = %+v, want empty", deleted.tasks)
+	}
+}
+
+func TestDaemonStreamEventBatchAppliesTaskEventBehindProjectionBacklog(t *testing.T) {
+	m := newTestModel()
+	m.daemonRevision = 4
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+	m.tasks = []domain.Task{{ID: "az-1", Title: "Existing", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask}}
+
+	createdTask := domain.Task{ID: "az-2", Title: "Created behind backlog", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask}
+	body, err := json.Marshal(protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		TaskID:    "az-2",
+		Task:      &createdTask,
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal task event body: %v", err)
+	}
+
+	updatedAny, cmd := m.Update(daemonStreamEventMsg{events: []protocol.EventEnvelope{
+		{
+			ProjectID: naming.ProjectID(m.daemonProjectID()),
+			Revision:  5,
+			Event:     protocol.EventGitStatusUpdated,
+		},
+		{
+			ProjectID: naming.ProjectID(m.daemonProjectID()),
+			Revision:  6,
+			Event:     protocol.EventTaskCreated,
+			Body:      body,
+		},
+	}})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if cmd == nil {
+		t.Fatal("expected next stream wait command")
+	}
+	if updated.daemonRevision != 6 {
+		t.Fatalf("daemonRevision = %d, want 6", updated.daemonRevision)
+	}
+	if len(updated.tasks) != 2 || updated.tasks[1].ID.String() != "az-2" {
+		t.Fatalf("tasks after batch = %+v, want created task appended", updated.tasks)
+	}
+}
+
+func TestDaemonStreamEventBatchCoalescesSnapshotRefreshCommands(t *testing.T) {
+	m := newTestModel()
+	m.daemonRevision = 4
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+
+	updatedAny, cmd := m.Update(daemonStreamEventMsg{events: []protocol.EventEnvelope{
+		{
+			ProjectID: naming.ProjectID(m.daemonProjectID()),
+			Revision:  5,
+			Event:     "task.external.changed",
+		},
+		{
+			ProjectID: naming.ProjectID(m.daemonProjectID()),
+			Revision:  6,
+			Event:     "task.external.changed",
+		},
+	}})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if cmd == nil {
+		t.Fatal("expected batched command")
+	}
+	if updated.daemonRevision != 6 {
+		t.Fatalf("daemonRevision = %d, want 6", updated.daemonRevision)
+	}
+	if updated.issueRefreshSeq != 1 {
+		t.Fatalf("issueRefreshSeq = %d, want one coalesced refresh", updated.issueRefreshSeq)
 	}
 }
 

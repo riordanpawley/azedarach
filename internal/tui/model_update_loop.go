@@ -456,97 +456,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.stream != nil && msg.stream != m.daemonEvents {
 			return m, nil
 		}
-		if projectID := strings.TrimSpace(msg.event.ProjectID.String()); projectID != "" && projectID != m.daemonProjectID() {
-			return m, m.waitForDaemonEventCmd()
+		events := msg.events
+		if len(events) == 0 {
+			events = []protocol.EventEnvelope{msg.event}
 		}
-		cursor := protocol.StreamCursor{Revision: m.daemonRevision}
-		m.recordRuntimeEvent(msg.event)
-		if current := m.overlayStack.Current(); current != nil {
-			if logOverlay, ok := current.(*overlay.EventLogOverlay); ok {
-				logOverlay.AddEvent(msg.event)
+		cmds := make([]tea.Cmd, 0, 2)
+		queuedCmdKeys := map[string]struct{}{}
+		for _, evt := range events {
+			result := m.applyDaemonStreamEvent(evt)
+			if result.key == daemonStreamCommandIssuesRefresh {
+				if _, exists := queuedCmdKeys[result.key]; !exists {
+					queuedCmdKeys[result.key] = struct{}{}
+					cmds = append(cmds, m.scheduleIssuesRefreshCmd())
+				}
+			} else if result.cmd != nil {
+				if result.key == "" {
+					cmds = append(cmds, result.cmd)
+				} else if _, exists := queuedCmdKeys[result.key]; !exists {
+					queuedCmdKeys[result.key] = struct{}{}
+					cmds = append(cmds, result.cmd)
+				}
 			}
-		}
-		if cmd, handled := m.handlePendingWorktreeCleanupOperationEvent(msg.event); handled {
-			m.daemonRevision = cursor.Advance(msg.event).Revision
-			if cmd != nil {
-				return m, tea.Batch(cmd, m.waitForDaemonEventCmd())
-			}
-			return m, m.waitForDaemonEventCmd()
-		}
-		m.applyOperationProgressEvent(msg.event)
-		if isTaskMutationEvent(msg.event.Event) && len(msg.event.Body) > 0 {
-			switch cursor.Decide(msg.event) {
-			case protocol.StreamProjectionDecisionIgnore:
-				return m, m.waitForDaemonEventCmd()
-			case protocol.StreamProjectionDecisionResync:
-				m.daemonEvents = nil
-				return m, m.attachDaemonCmd()
-			}
-			if m.applyTaskEvent(msg.event) {
-				m.daemonRevision = cursor.Advance(msg.event).Revision
-				return m, m.waitForDaemonEventCmd()
+			if result.stop {
+				if len(cmds) == 0 {
+					return m, nil
+				}
+				return m, tea.Batch(cmds...)
 			}
 		}
-		if msg.event.Event == protocol.EventSessionUpdated {
-			switch cursor.Decide(msg.event) {
-			case protocol.StreamProjectionDecisionIgnore:
-				return m, m.waitForDaemonEventCmd()
-			case protocol.StreamProjectionDecisionResync:
-				m.daemonEvents = nil
-				return m, m.attachDaemonCmd()
-			}
-			m.applySessionProjectionEvent(msg.event)
-			m.daemonRevision = cursor.Advance(msg.event).Revision
-			return m, m.waitForDaemonEventCmd()
-		}
-		if msg.event.Event == protocol.EventWorktreeProjectionUpdated || msg.event.Event == protocol.EventGitStatusUpdated {
-			switch cursor.Decide(msg.event) {
-			case protocol.StreamProjectionDecisionIgnore:
-				return m, m.waitForDaemonEventCmd()
-			case protocol.StreamProjectionDecisionResync:
-				m.daemonEvents = nil
-				return m, m.attachDaemonCmd()
-			}
-
-			var body protocol.ProjectionUpdateEventBody
-			if err := json.Unmarshal(msg.event.Body, &body); err == nil && body.Runtime != nil {
-				m.applyRuntimeProjection(body.Runtime.Projection)
-			}
-			diffRefreshCmd := m.refreshOpenDiffOverlayFromProjectionBody(body)
-			m.daemonRevision = cursor.Advance(msg.event).Revision
-			if diffRefreshCmd != nil {
-				return m, tea.Batch(diffRefreshCmd, m.waitForDaemonEventCmd())
-			}
-			return m, m.waitForDaemonEventCmd()
-		}
-		if msg.event.Event == protocol.EventUICommandRequested {
-			switch cursor.Decide(msg.event) {
-			case protocol.StreamProjectionDecisionIgnore:
-				return m, m.waitForDaemonEventCmd()
-			case protocol.StreamProjectionDecisionResync:
-				m.daemonEvents = nil
-				return m, m.attachDaemonCmd()
-			}
-			cmd := m.applyUICommandEvent(msg.event)
-			m.daemonRevision = cursor.Advance(msg.event).Revision
-			if cmd != nil {
-				return m, tea.Batch(cmd, m.waitForDaemonEventCmd())
-			}
-			return m, m.waitForDaemonEventCmd()
-		}
-		switch m.reduceDaemonEvent(msg.event) {
-		case daemonEventIgnore:
-			return m, m.waitForDaemonEventCmd()
-		case daemonEventRefreshSnapshot:
-			cursor := protocol.StreamCursor{Revision: m.daemonRevision}
-			m.daemonRevision = cursor.Advance(msg.event).Revision
-			return m, tea.Batch(m.scheduleIssuesRefreshCmd(), m.waitForDaemonEventCmd())
-		case daemonEventRehydrate:
-			m.daemonEvents = nil
-			return m, m.attachDaemonCmd()
-		default:
-			return m, m.waitForDaemonEventCmd()
-		}
+		cmds = append(cmds, m.waitForDaemonEventCmd())
+		return m, tea.Batch(cmds...)
 
 	case daemonStreamClosedMsg:
 		if msg.stream != nil && msg.stream != m.daemonEvents {
@@ -1504,6 +1443,100 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+type daemonStreamEventResult struct {
+	cmd  tea.Cmd
+	key  string
+	stop bool
+}
+
+const daemonStreamCommandIssuesRefresh = "issues-refresh"
+
+func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope) daemonStreamEventResult {
+	if projectID := strings.TrimSpace(evt.ProjectID.String()); projectID != "" && projectID != m.daemonProjectID() {
+		return daemonStreamEventResult{}
+	}
+
+	cursor := protocol.StreamCursor{Revision: m.daemonRevision}
+	m.recordRuntimeEvent(evt)
+	if current := m.overlayStack.Current(); current != nil {
+		if logOverlay, ok := current.(*overlay.EventLogOverlay); ok {
+			logOverlay.AddEvent(evt)
+		}
+	}
+	if cmd, handled := m.handlePendingWorktreeCleanupOperationEvent(evt); handled {
+		m.daemonRevision = cursor.Advance(evt).Revision
+		return daemonStreamEventResult{cmd: cmd}
+	}
+	m.applyOperationProgressEvent(evt)
+	if isTaskMutationEvent(evt.Event) && len(evt.Body) > 0 {
+		switch cursor.Decide(evt) {
+		case protocol.StreamProjectionDecisionIgnore:
+			return daemonStreamEventResult{}
+		case protocol.StreamProjectionDecisionResync:
+			m.daemonEvents = nil
+			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true}
+		}
+		if m.applyTaskEvent(evt) {
+			m.daemonRevision = cursor.Advance(evt).Revision
+		}
+		return daemonStreamEventResult{}
+	}
+	if evt.Event == protocol.EventSessionUpdated {
+		switch cursor.Decide(evt) {
+		case protocol.StreamProjectionDecisionIgnore:
+			return daemonStreamEventResult{}
+		case protocol.StreamProjectionDecisionResync:
+			m.daemonEvents = nil
+			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true}
+		}
+		m.applySessionProjectionEvent(evt)
+		m.daemonRevision = cursor.Advance(evt).Revision
+		return daemonStreamEventResult{}
+	}
+	if evt.Event == protocol.EventWorktreeProjectionUpdated || evt.Event == protocol.EventGitStatusUpdated {
+		switch cursor.Decide(evt) {
+		case protocol.StreamProjectionDecisionIgnore:
+			return daemonStreamEventResult{}
+		case protocol.StreamProjectionDecisionResync:
+			m.daemonEvents = nil
+			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true}
+		}
+
+		var body protocol.ProjectionUpdateEventBody
+		if err := json.Unmarshal(evt.Body, &body); err == nil && body.Runtime != nil {
+			m.applyRuntimeProjection(body.Runtime.Projection)
+		}
+		diffRefreshCmd := m.refreshOpenDiffOverlayFromProjectionBody(body)
+		m.daemonRevision = cursor.Advance(evt).Revision
+		return daemonStreamEventResult{cmd: diffRefreshCmd}
+	}
+	if evt.Event == protocol.EventUICommandRequested {
+		switch cursor.Decide(evt) {
+		case protocol.StreamProjectionDecisionIgnore:
+			return daemonStreamEventResult{}
+		case protocol.StreamProjectionDecisionResync:
+			m.daemonEvents = nil
+			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true}
+		}
+		cmd := m.applyUICommandEvent(evt)
+		m.daemonRevision = cursor.Advance(evt).Revision
+		return daemonStreamEventResult{cmd: cmd}
+	}
+	switch m.reduceDaemonEvent(evt) {
+	case daemonEventIgnore:
+		return daemonStreamEventResult{}
+	case daemonEventRefreshSnapshot:
+		cursor := protocol.StreamCursor{Revision: m.daemonRevision}
+		m.daemonRevision = cursor.Advance(evt).Revision
+		return daemonStreamEventResult{key: daemonStreamCommandIssuesRefresh}
+	case daemonEventRehydrate:
+		m.daemonEvents = nil
+		return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true}
+	default:
+		return daemonStreamEventResult{}
+	}
 }
 
 func (m *Model) applyUICommandEvent(event protocol.EventEnvelope) tea.Cmd {
