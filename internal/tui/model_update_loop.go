@@ -169,7 +169,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
-			return m, nil
+			return m, m.finishIssuesRefreshCmd(msg.refreshSeq)
 		}
 		if msg.daemonClient != nil {
 			m.daemonClient = msg.daemonClient
@@ -199,6 +199,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.hasRefreshLoop {
 				m.hasRefreshLoop = true
 				cmds = append(cmds, tickEvery(2*time.Second))
+			}
+			if replayCmd := m.finishIssuesRefreshCmd(msg.refreshSeq); replayCmd != nil {
+				cmds = append(cmds, replayCmd)
 			}
 			if len(cmds) == 0 {
 				return m, nil
@@ -255,6 +258,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.openSessionSelectorOnLoad {
 			m.openSessionSelectorOnLoad = false
 			cmds = append(cmds, m.openOrchestrationOverlay())
+		}
+		if replayCmd := m.finishIssuesRefreshCmd(msg.refreshSeq); replayCmd != nil {
+			cmds = append(cmds, replayCmd)
 		}
 		if len(cmds) == 0 {
 			return m, nil
@@ -317,7 +323,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
-			return m, nil
+			return m, m.finishIssuesRefreshCmd(msg.refreshSeq)
 		}
 		now := time.Now()
 		m.addToast(Toast{
@@ -332,13 +338,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastDaemonReattachAttempt = now
 			cmds = append(cmds, m.attachDaemonCmd())
 		}
+		if replayCmd := m.finishIssuesRefreshCmd(msg.refreshSeq); replayCmd != nil {
+			cmds = append(cmds, replayCmd)
+		}
 		return m, tea.Batch(cmds...)
 
 	case tickMsg:
 		// Expire old toasts and refresh issues
 		m.expireToasts()
 		m.boardRefreshing = true
-		m.issueRefreshSeq++
 		return m, tea.Batch(
 			m.scheduleIssuesRefreshCmd(),
 			m.gitSyncService.FetchAndCheck(),
@@ -456,97 +464,50 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.stream != nil && msg.stream != m.daemonEvents {
 			return m, nil
 		}
-		if projectID := strings.TrimSpace(msg.event.ProjectID.String()); projectID != "" && projectID != m.daemonProjectID() {
-			return m, m.waitForDaemonEventCmd()
+		events := msg.events
+		if len(events) == 0 {
+			events = []protocol.EventEnvelope{msg.event}
 		}
-		cursor := protocol.StreamCursor{Revision: m.daemonRevision}
-		m.recordRuntimeEvent(msg.event)
-		if current := m.overlayStack.Current(); current != nil {
-			if logOverlay, ok := current.(*overlay.EventLogOverlay); ok {
-				logOverlay.AddEvent(msg.event)
+		m.daemonStreamMetrics.EventsDrained += uint64(len(events))
+		if len(events) > m.daemonStreamMetrics.MaxBatchSize {
+			m.daemonStreamMetrics.MaxBatchSize = len(events)
+		}
+		cmds := make([]tea.Cmd, 0, 2)
+		queuedCmdKeys := map[string]struct{}{}
+		coalescedProjectionIndexes := coalescedRuntimeProjectionIndexes(events)
+		m.daemonStreamMetrics.RuntimeProjectionsCoalesced += uint64(len(coalescedProjectionIndexes))
+		for i, evt := range events {
+			_, skipProjectionApply := coalescedProjectionIndexes[i]
+			result := m.applyDaemonStreamEvent(evt, skipProjectionApply)
+			if result.key == daemonStreamCommandIssuesRefresh {
+				if _, exists := queuedCmdKeys[result.key]; !exists {
+					queuedCmdKeys[result.key] = struct{}{}
+					cmds = append(cmds, m.scheduleIssuesRefreshCmd())
+				} else {
+					m.daemonStreamMetrics.RefreshesCoalesced++
+				}
+			} else if result.cmd != nil {
+				if result.key == "" {
+					cmds = append(cmds, result.cmd)
+				} else if _, exists := queuedCmdKeys[result.key]; !exists {
+					queuedCmdKeys[result.key] = struct{}{}
+					cmds = append(cmds, result.cmd)
+				} else {
+					m.daemonStreamMetrics.RefreshesCoalesced++
+				}
+			}
+			if result.rehydrate {
+				m.daemonStreamMetrics.Rehydrates++
+			}
+			if result.stop {
+				if len(cmds) == 0 {
+					return m, nil
+				}
+				return m, tea.Batch(cmds...)
 			}
 		}
-		if cmd, handled := m.handlePendingWorktreeCleanupOperationEvent(msg.event); handled {
-			m.daemonRevision = cursor.Advance(msg.event).Revision
-			if cmd != nil {
-				return m, tea.Batch(cmd, m.waitForDaemonEventCmd())
-			}
-			return m, m.waitForDaemonEventCmd()
-		}
-		m.applyOperationProgressEvent(msg.event)
-		if isTaskMutationEvent(msg.event.Event) && len(msg.event.Body) > 0 {
-			switch cursor.Decide(msg.event) {
-			case protocol.StreamProjectionDecisionIgnore:
-				return m, m.waitForDaemonEventCmd()
-			case protocol.StreamProjectionDecisionResync:
-				m.daemonEvents = nil
-				return m, m.attachDaemonCmd()
-			}
-			if m.applyTaskEvent(msg.event) {
-				m.daemonRevision = cursor.Advance(msg.event).Revision
-				return m, m.waitForDaemonEventCmd()
-			}
-		}
-		if msg.event.Event == protocol.EventSessionUpdated {
-			switch cursor.Decide(msg.event) {
-			case protocol.StreamProjectionDecisionIgnore:
-				return m, m.waitForDaemonEventCmd()
-			case protocol.StreamProjectionDecisionResync:
-				m.daemonEvents = nil
-				return m, m.attachDaemonCmd()
-			}
-			m.applySessionProjectionEvent(msg.event)
-			m.daemonRevision = cursor.Advance(msg.event).Revision
-			return m, m.waitForDaemonEventCmd()
-		}
-		if msg.event.Event == protocol.EventWorktreeProjectionUpdated || msg.event.Event == protocol.EventGitStatusUpdated {
-			switch cursor.Decide(msg.event) {
-			case protocol.StreamProjectionDecisionIgnore:
-				return m, m.waitForDaemonEventCmd()
-			case protocol.StreamProjectionDecisionResync:
-				m.daemonEvents = nil
-				return m, m.attachDaemonCmd()
-			}
-
-			var body protocol.ProjectionUpdateEventBody
-			if err := json.Unmarshal(msg.event.Body, &body); err == nil && body.Runtime != nil {
-				m.applyRuntimeProjection(body.Runtime.Projection)
-			}
-			diffRefreshCmd := m.refreshOpenDiffOverlayFromProjectionBody(body)
-			m.daemonRevision = cursor.Advance(msg.event).Revision
-			if diffRefreshCmd != nil {
-				return m, tea.Batch(diffRefreshCmd, m.waitForDaemonEventCmd())
-			}
-			return m, m.waitForDaemonEventCmd()
-		}
-		if msg.event.Event == protocol.EventUICommandRequested {
-			switch cursor.Decide(msg.event) {
-			case protocol.StreamProjectionDecisionIgnore:
-				return m, m.waitForDaemonEventCmd()
-			case protocol.StreamProjectionDecisionResync:
-				m.daemonEvents = nil
-				return m, m.attachDaemonCmd()
-			}
-			cmd := m.applyUICommandEvent(msg.event)
-			m.daemonRevision = cursor.Advance(msg.event).Revision
-			if cmd != nil {
-				return m, tea.Batch(cmd, m.waitForDaemonEventCmd())
-			}
-			return m, m.waitForDaemonEventCmd()
-		}
-		switch m.reduceDaemonEvent(msg.event) {
-		case daemonEventIgnore:
-			return m, m.waitForDaemonEventCmd()
-		case daemonEventRefreshSnapshot:
-			cursor := protocol.StreamCursor{Revision: m.daemonRevision}
-			m.daemonRevision = cursor.Advance(msg.event).Revision
-			return m, tea.Batch(m.scheduleIssuesRefreshCmd(), m.waitForDaemonEventCmd())
-		case daemonEventRehydrate:
-			m.daemonEvents = nil
-			return m, m.attachDaemonCmd()
-		default:
-			return m, m.waitForDaemonEventCmd()
-		}
+		cmds = append(cmds, m.waitForDaemonEventCmd())
+		return m, tea.Batch(cmds...)
 
 	case daemonStreamClosedMsg:
 		if msg.stream != nil && msg.stream != m.daemonEvents {
@@ -1504,6 +1465,146 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+type daemonStreamEventResult struct {
+	cmd       tea.Cmd
+	key       string
+	stop      bool
+	rehydrate bool
+}
+
+const daemonStreamCommandIssuesRefresh = "issues-refresh"
+
+func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectionApply bool) daemonStreamEventResult {
+	if projectID := strings.TrimSpace(evt.ProjectID.String()); projectID != "" && projectID != m.daemonProjectID() {
+		return daemonStreamEventResult{}
+	}
+
+	cursor := protocol.StreamCursor{Revision: m.daemonRevision}
+	m.recordRuntimeEvent(evt)
+	if current := m.overlayStack.Current(); current != nil {
+		if logOverlay, ok := current.(*overlay.EventLogOverlay); ok {
+			logOverlay.AddEvent(evt)
+		}
+	}
+	if cmd, handled := m.handlePendingWorktreeCleanupOperationEvent(evt); handled {
+		m.daemonRevision = cursor.Advance(evt).Revision
+		return daemonStreamEventResult{cmd: cmd}
+	}
+	m.applyOperationProgressEvent(evt)
+	if isTaskMutationEvent(evt.Event) && len(evt.Body) > 0 {
+		switch cursor.Decide(evt) {
+		case protocol.StreamProjectionDecisionIgnore:
+			return daemonStreamEventResult{}
+		case protocol.StreamProjectionDecisionResync:
+			m.daemonEvents = nil
+			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
+		}
+		if m.applyTaskEvent(evt) {
+			m.daemonRevision = cursor.Advance(evt).Revision
+		}
+		return daemonStreamEventResult{}
+	}
+	if evt.Event == protocol.EventSessionUpdated {
+		switch cursor.Decide(evt) {
+		case protocol.StreamProjectionDecisionIgnore:
+			return daemonStreamEventResult{}
+		case protocol.StreamProjectionDecisionResync:
+			m.daemonEvents = nil
+			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
+		}
+		m.applySessionProjectionEvent(evt)
+		m.daemonRevision = cursor.Advance(evt).Revision
+		return daemonStreamEventResult{}
+	}
+	if evt.Event == protocol.EventWorktreeProjectionUpdated || evt.Event == protocol.EventGitStatusUpdated {
+		switch cursor.Decide(evt) {
+		case protocol.StreamProjectionDecisionIgnore:
+			return daemonStreamEventResult{}
+		case protocol.StreamProjectionDecisionResync:
+			m.daemonEvents = nil
+			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
+		}
+		if skipProjectionApply {
+			m.daemonRevision = cursor.Advance(evt).Revision
+			return daemonStreamEventResult{}
+		}
+
+		var body protocol.ProjectionUpdateEventBody
+		if err := json.Unmarshal(evt.Body, &body); err == nil && body.Runtime != nil {
+			m.applyRuntimeProjection(body.Runtime.Projection)
+		}
+		diffRefreshCmd := m.refreshOpenDiffOverlayFromProjectionBody(body)
+		m.daemonRevision = cursor.Advance(evt).Revision
+		return daemonStreamEventResult{cmd: diffRefreshCmd}
+	}
+	if evt.Event == protocol.EventUICommandRequested {
+		switch cursor.Decide(evt) {
+		case protocol.StreamProjectionDecisionIgnore:
+			return daemonStreamEventResult{}
+		case protocol.StreamProjectionDecisionResync:
+			m.daemonEvents = nil
+			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
+		}
+		cmd := m.applyUICommandEvent(evt)
+		m.daemonRevision = cursor.Advance(evt).Revision
+		return daemonStreamEventResult{cmd: cmd}
+	}
+	switch m.reduceDaemonEvent(evt) {
+	case daemonEventIgnore:
+		return daemonStreamEventResult{}
+	case daemonEventRefreshSnapshot:
+		cursor := protocol.StreamCursor{Revision: m.daemonRevision}
+		m.daemonRevision = cursor.Advance(evt).Revision
+		return daemonStreamEventResult{key: daemonStreamCommandIssuesRefresh}
+	case daemonEventRehydrate:
+		m.daemonEvents = nil
+		return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
+	default:
+		return daemonStreamEventResult{}
+	}
+}
+
+func coalescedRuntimeProjectionIndexes(events []protocol.EventEnvelope) map[int]struct{} {
+	latestByIssue := make(map[string]int)
+	coalesced := make(map[int]struct{})
+	for i, evt := range events {
+		issueID, ok := coalescibleRuntimeProjectionIssueID(evt)
+		if !ok {
+			continue
+		}
+		if previous, exists := latestByIssue[issueID]; exists {
+			coalesced[previous] = struct{}{}
+		}
+		latestByIssue[issueID] = i
+	}
+	return coalesced
+}
+
+func coalescibleRuntimeProjectionIssueID(evt protocol.EventEnvelope) (string, bool) {
+	if evt.Event != protocol.EventWorktreeProjectionUpdated && evt.Event != protocol.EventGitStatusUpdated {
+		return "", false
+	}
+	if len(evt.Body) == 0 {
+		return "", false
+	}
+	var body protocol.ProjectionUpdateEventBody
+	if err := json.Unmarshal(evt.Body, &body); err != nil || body.Runtime == nil {
+		return "", false
+	}
+	projection := body.Runtime.Projection
+	if projection.Git.ActiveOperation != nil {
+		return "", false
+	}
+	issueID := strings.TrimSpace(projection.IssueID.String())
+	if issueID == "" {
+		issueID = strings.TrimSpace(body.IssueID.String())
+	}
+	if issueID == "" {
+		return "", false
+	}
+	return issueID, true
 }
 
 func (m *Model) applyUICommandEvent(event protocol.EventEnvelope) tea.Cmd {

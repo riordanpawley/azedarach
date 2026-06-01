@@ -179,7 +179,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		selection, ok := msg.Value.(overlay.MergePreflightRefreshSelection)
 		if !ok {
 			m.beginMutationFeedback("Refreshing merge preflight")
-			return m, m.loadIssuesAfterRuntimeReconcileCmd()
+			return m, m.scheduleIssuesRefreshAfterRuntimeReconcileCmd()
 		}
 		m.beginMutationFeedback("Refreshing merge preflight")
 		return m, m.refreshMergePreflightCmd(selection)

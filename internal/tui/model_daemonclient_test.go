@@ -1062,14 +1062,17 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 		},
 	}
 
-	nextMsg := model.waitForDaemonEventCmd()()
+	batchMsg := model.waitForDaemonEventCmd()()
+	batch, ok := batchMsg.(daemonStreamEventMsg)
+	if !ok {
+		t.Fatalf("stream message type = %T, want daemonStreamEventMsg", batchMsg)
+	}
+	if len(batch.events) != len(eventChecks) {
+		t.Fatalf("batched event count = %d, want %d", len(batch.events), len(eventChecks))
+	}
 	for i, tt := range eventChecks {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := nextMsg
-			evt, ok := msg.(daemonStreamEventMsg)
-			if !ok {
-				t.Fatalf("stream message type = %T, want daemonStreamEventMsg", msg)
-			}
+			evt := daemonStreamEventMsg{stream: batch.stream, event: batch.events[i]}
 			if evt.event.Event != tt.event {
 				t.Fatalf("event name = %q, want %q", evt.event.Event, tt.event)
 			}
@@ -1080,11 +1083,8 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 			}
 			tt.assertFn(t, nextModel, evt.event)
 			model = nextModel
-			if i < len(eventChecks)-1 {
-				nextMsg = model.waitForDaemonEventCmd()()
-				if nextCmd == nil {
-					t.Fatal("expected next wait command")
-				}
+			if nextCmd == nil {
+				t.Fatal("expected next wait command")
 			}
 		})
 	}
@@ -7233,6 +7233,406 @@ func TestTaskEventBodyAppliesWithoutSnapshotRefresh(t *testing.T) {
 	}
 	if len(deleted.tasks) != 0 {
 		t.Fatalf("tasks after delete event = %+v, want empty", deleted.tasks)
+	}
+}
+
+func TestDaemonStreamEventBatchAppliesTaskEventBehindProjectionBacklog(t *testing.T) {
+	m := newTestModel()
+	m.daemonRevision = 4
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+	m.tasks = []domain.Task{{ID: "az-1", Title: "Existing", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask}}
+
+	createdTask := domain.Task{ID: "az-2", Title: "Created behind backlog", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask}
+	body, err := json.Marshal(protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		TaskID:    "az-2",
+		Task:      &createdTask,
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal task event body: %v", err)
+	}
+
+	updatedAny, cmd := m.Update(daemonStreamEventMsg{events: []protocol.EventEnvelope{
+		{
+			ProjectID: naming.ProjectID(m.daemonProjectID()),
+			Revision:  5,
+			Event:     protocol.EventGitStatusUpdated,
+		},
+		{
+			ProjectID: naming.ProjectID(m.daemonProjectID()),
+			Revision:  6,
+			Event:     protocol.EventTaskCreated,
+			Body:      body,
+		},
+	}})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if cmd == nil {
+		t.Fatal("expected next stream wait command")
+	}
+	if updated.daemonRevision != 6 {
+		t.Fatalf("daemonRevision = %d, want 6", updated.daemonRevision)
+	}
+	if len(updated.tasks) != 2 || updated.tasks[1].ID.String() != "az-2" {
+		t.Fatalf("tasks after batch = %+v, want created task appended", updated.tasks)
+	}
+}
+
+func TestDaemonStreamPriorityTaskEventAppliesAcrossAnnotatedTelemetryGap(t *testing.T) {
+	m := newTestModel()
+	m.daemonRevision = 0
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+	m.tasks = []domain.Task{{ID: "az-1", Title: "Existing", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask}}
+
+	createdTask := domain.Task{ID: "az-2", Title: "Priority created", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask}
+	body, err := json.Marshal(protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		TaskID:    "az-2",
+		Task:      &createdTask,
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal task event body: %v", err)
+	}
+
+	updatedAny, cmd := m.Update(daemonStreamEventMsg{event: protocol.EventEnvelope{
+		ProjectID:        naming.ProjectID(m.daemonProjectID()),
+		Revision:         3,
+		SkippedRevisions: []uint64{1, 2},
+		Event:            protocol.EventTaskCreated,
+		Body:             body,
+	}})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if cmd == nil {
+		t.Fatal("expected next stream wait command")
+	}
+	if updated.daemonRevision != 3 {
+		t.Fatalf("daemonRevision = %d, want 3", updated.daemonRevision)
+	}
+	if len(updated.tasks) != 2 || updated.tasks[1].ID.String() != "az-2" {
+		t.Fatalf("tasks after priority event = %+v, want created task appended without rehydrate", updated.tasks)
+	}
+	if updated.daemonEvents == nil {
+		t.Fatal("priority annotated telemetry gap should not clear stream for rehydrate")
+	}
+}
+
+func TestDaemonStreamRetainedCommandAndPriorityTaskApplyAcrossAnnotatedTelemetryGaps(t *testing.T) {
+	m := newTestModel()
+	m.daemonRevision = 0
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+	m.tasks = []domain.Task{{ID: "az-1", Title: "Existing", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask}}
+
+	createdTask := domain.Task{ID: "az-2", Title: "Priority created", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask}
+	taskBody, err := json.Marshal(protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		TaskID:    "az-2",
+		Task:      &createdTask,
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal task event body: %v", err)
+	}
+	uiBody, err := json.Marshal(protocol.UICommandEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		Command:   protocol.UICommandOpenTaskWorkspace,
+		IssueID:   "az-1",
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal ui event body: %v", err)
+	}
+
+	updatedAny, cmd := m.Update(daemonStreamEventMsg{events: []protocol.EventEnvelope{
+		{
+			ProjectID:        naming.ProjectID(m.daemonProjectID()),
+			Revision:         2,
+			SkippedRevisions: []uint64{1},
+			Event:            protocol.EventUICommandRequested,
+			Body:             uiBody,
+		},
+		{
+			ProjectID:        naming.ProjectID(m.daemonProjectID()),
+			Revision:         4,
+			SkippedRevisions: []uint64{1, 3},
+			Event:            protocol.EventTaskCreated,
+			Body:             taskBody,
+		},
+	}})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if cmd == nil {
+		t.Fatal("expected batched command")
+	}
+	if updated.daemonRevision != 4 {
+		t.Fatalf("daemonRevision = %d, want 4", updated.daemonRevision)
+	}
+	if len(updated.tasks) != 2 || updated.tasks[1].ID.String() != "az-2" {
+		t.Fatalf("tasks after mixed priority batch = %+v, want created task appended without rehydrate", updated.tasks)
+	}
+	if updated.daemonEvents == nil {
+		t.Fatal("annotated retained event gap should not clear stream for rehydrate")
+	}
+}
+
+func TestDaemonStreamEventBatchCoalescesSnapshotRefreshCommands(t *testing.T) {
+	m := newTestModel()
+	m.daemonRevision = 4
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+
+	updatedAny, cmd := m.Update(daemonStreamEventMsg{events: []protocol.EventEnvelope{
+		{
+			ProjectID: naming.ProjectID(m.daemonProjectID()),
+			Revision:  5,
+			Event:     "task.external.changed",
+		},
+		{
+			ProjectID: naming.ProjectID(m.daemonProjectID()),
+			Revision:  6,
+			Event:     "task.external.changed",
+		},
+	}})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if cmd == nil {
+		t.Fatal("expected batched command")
+	}
+	if updated.daemonRevision != 6 {
+		t.Fatalf("daemonRevision = %d, want 6", updated.daemonRevision)
+	}
+	if updated.issueRefreshSeq != 1 {
+		t.Fatalf("issueRefreshSeq = %d, want one coalesced refresh", updated.issueRefreshSeq)
+	}
+	if updated.daemonStreamMetrics.EventsDrained != 2 {
+		t.Fatalf("events drained = %d, want 2", updated.daemonStreamMetrics.EventsDrained)
+	}
+	if updated.daemonStreamMetrics.RefreshesCoalesced != 1 {
+		t.Fatalf("refreshes coalesced = %d, want 1", updated.daemonStreamMetrics.RefreshesCoalesced)
+	}
+	if updated.daemonStreamMetrics.MaxBatchSize != 2 {
+		t.Fatalf("max batch size = %d, want 2", updated.daemonStreamMetrics.MaxBatchSize)
+	}
+}
+
+func TestDaemonStreamEventBatchCoalescesPureRuntimeProjectionByIssue(t *testing.T) {
+	makeProjectionEvent := func(revision uint64, issueID string, dirty bool, additions, deletions int) protocol.EventEnvelope {
+		body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
+			ProjectID: naming.ProjectID(newTestModel().daemonProjectID()),
+			IssueID:   naming.IssueID(issueID),
+			UpdatedAt: time.Date(2026, time.May, 25, 12, 0, 0, 0, time.UTC),
+			Runtime: &protocol.RuntimeProjectionEventBody{
+				ProjectID: naming.ProjectID(newTestModel().daemonProjectID()),
+				Revision:  revision,
+				Projection: protocol.RuntimeProjection{
+					ProjectID: naming.ProjectID(newTestModel().daemonProjectID()),
+					IssueID:   naming.IssueID(issueID),
+					Worktree: protocol.RuntimeWorktreeProjection{
+						Exists:  true,
+						Path:    "/tmp/repo-" + issueID,
+						Healthy: true,
+					},
+					Git: protocol.RuntimeGitProjection{
+						HasUncommittedChanges: dirty,
+						GitAdditions:          additions,
+						GitDeletions:          deletions,
+					},
+					Session: protocol.RuntimeSessionProjection{
+						HasSession: true,
+						State:      protocol.SessionLifecycleStateAttached,
+						Worktree:   "/tmp/repo-" + issueID,
+					},
+					Agent: protocol.RuntimeAgentProjection{Status: "attached"},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal projection body: %v", err)
+		}
+		return protocol.EventEnvelope{
+			ProjectID: naming.ProjectID(newTestModel().daemonProjectID()),
+			Revision:  revision,
+			Event:     protocol.EventGitStatusUpdated,
+			Body:      body,
+		}
+	}
+
+	m := newTestModel()
+	m.daemonRevision = 4
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+	m.tasks = []domain.Task{{ID: "az-1", Title: "Existing", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask}}
+
+	updatedAny, cmd := m.Update(daemonStreamEventMsg{events: []protocol.EventEnvelope{
+		makeProjectionEvent(5, "az-1", true, 9, 3),
+		makeProjectionEvent(6, "az-1", false, 0, 0),
+	}})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if cmd == nil {
+		t.Fatal("expected next stream wait command")
+	}
+	if updated.daemonRevision != 6 {
+		t.Fatalf("daemonRevision = %d, want 6", updated.daemonRevision)
+	}
+	if updated.daemonStreamMetrics.RuntimeProjectionsCoalesced != 1 {
+		t.Fatalf("runtime projections coalesced = %d, want 1", updated.daemonStreamMetrics.RuntimeProjectionsCoalesced)
+	}
+	if updated.tasks[0].HasUncommittedChanges || updated.tasks[0].GitAdditions != 0 || updated.tasks[0].GitDeletions != 0 {
+		t.Fatalf("task projection = %+v, want latest clean projection only", updated.tasks[0])
+	}
+}
+
+func TestDaemonStreamEventBatchRehydratesOnGapAfterCoalescedProjection(t *testing.T) {
+	projectID := newTestModel().daemonProjectID()
+	makeProjectionEvent := func(revision uint64, dirty bool) protocol.EventEnvelope {
+		body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
+			ProjectID: naming.ProjectID(projectID),
+			IssueID:   "az-1",
+			UpdatedAt: time.Date(2026, time.May, 25, 12, 0, 0, 0, time.UTC),
+			Runtime: &protocol.RuntimeProjectionEventBody{
+				ProjectID: naming.ProjectID(projectID),
+				Revision:  revision,
+				Projection: protocol.RuntimeProjection{
+					ProjectID: naming.ProjectID(projectID),
+					IssueID:   "az-1",
+					Worktree: protocol.RuntimeWorktreeProjection{
+						Exists:  true,
+						Path:    "/tmp/repo-az-1",
+						Healthy: true,
+					},
+					Git: protocol.RuntimeGitProjection{
+						HasUncommittedChanges: dirty,
+						GitAdditions:          3,
+						GitDeletions:          1,
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal projection body: %v", err)
+		}
+		return protocol.EventEnvelope{
+			ProjectID: naming.ProjectID(projectID),
+			Revision:  revision,
+			Event:     protocol.EventGitStatusUpdated,
+			Body:      body,
+		}
+	}
+
+	m := newTestModel()
+	m.daemonRevision = 4
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+	m.tasks[0].HasUncommittedChanges = false
+
+	updatedAny, cmd := m.Update(daemonStreamEventMsg{events: []protocol.EventEnvelope{
+		makeProjectionEvent(5, true),
+		makeProjectionEvent(7, true),
+	}})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if cmd == nil {
+		t.Fatal("expected rehydrate command")
+	}
+	if updated.daemonEvents != nil {
+		t.Fatal("expected daemon stream to be cleared for rehydrate")
+	}
+	if updated.daemonRevision != 5 {
+		t.Fatalf("daemonRevision = %d, want 5", updated.daemonRevision)
+	}
+	if updated.tasks[0].HasUncommittedChanges {
+		t.Fatalf("gap event should not apply latest projection before rehydrate: %+v", updated.tasks[0])
+	}
+	if updated.daemonStreamMetrics.Rehydrates != 1 {
+		t.Fatalf("rehydrates = %d, want 1", updated.daemonStreamMetrics.Rehydrates)
+	}
+}
+
+func TestScheduleIssuesRefreshDedupesInFlightAndReplaysPending(t *testing.T) {
+	snapshotReads := uint64(0)
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskList {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
+			}
+			snapshotReads++
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, snapshotReads, req.Meta.ProjectID.String(), []domain.Task{
+					{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen},
+				}),
+			}, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+	m.hasRefreshLoop = true
+
+	firstCmd := m.scheduleIssuesRefreshCmd()
+	if firstCmd == nil {
+		t.Fatal("expected first refresh command")
+	}
+	if !m.issueRefreshInFlight || m.issueRefreshSeq != 1 {
+		t.Fatalf("refresh state after first schedule: inFlight=%v seq=%d", m.issueRefreshInFlight, m.issueRefreshSeq)
+	}
+
+	secondCmd := m.scheduleIssuesRefreshCmd()
+	if secondCmd != nil {
+		t.Fatal("expected duplicate in-flight refresh to be coalesced")
+	}
+	if !m.issueRefreshPending {
+		t.Fatal("expected duplicate refresh to mark pending replay")
+	}
+	if m.issueRefreshSeq != 1 {
+		t.Fatalf("issueRefreshSeq after coalesced schedule = %d, want 1", m.issueRefreshSeq)
+	}
+	if m.daemonStreamMetrics.RefreshesCoalesced != 1 {
+		t.Fatalf("refreshes coalesced = %d, want 1", m.daemonStreamMetrics.RefreshesCoalesced)
+	}
+
+	firstMsg := firstCmd()
+	loaded, ok := firstMsg.(issuesLoadedMsg)
+	if !ok {
+		t.Fatalf("first command message type = %T, want issuesLoadedMsg", firstMsg)
+	}
+	updatedAny, replayCmd := m.Update(loaded)
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if replayCmd == nil {
+		t.Fatal("expected pending refresh replay command after first load completes")
+	}
+	if !updated.issueRefreshInFlight || updated.issueRefreshPending {
+		t.Fatalf("refresh state after replay schedule: inFlight=%v pending=%v", updated.issueRefreshInFlight, updated.issueRefreshPending)
+	}
+	if updated.issueRefreshSeq != 2 {
+		t.Fatalf("issueRefreshSeq after replay schedule = %d, want 2", updated.issueRefreshSeq)
+	}
+	if len(transport.requests) != 1 {
+		t.Fatalf("requests before replay command executes = %v, want one snapshot read", transport.requests)
+	}
+
+	replayMsg := replayCmd()
+	if _, ok := replayMsg.(issuesLoadedMsg); !ok {
+		t.Fatalf("replay command message type = %T, want issuesLoadedMsg", replayMsg)
+	}
+	if len(transport.requests) != 2 {
+		t.Fatalf("requests after replay command executes = %v, want two snapshot reads", transport.requests)
 	}
 }
 

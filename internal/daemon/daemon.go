@@ -52,6 +52,8 @@ const (
 	defaultGitStatusRefreshFailureBackoff   = 30 * time.Second
 	maxGitStatusRefreshUnchangedBackoff     = 2 * time.Minute
 	maxGitStatusRefreshFailureBackoff       = 5 * time.Minute
+
+	defaultRuntimeProjectionCoalesceWindow = 25 * time.Millisecond
 )
 
 // Config configures daemon runtime wiring.
@@ -122,6 +124,7 @@ type Daemon struct {
 	worktreeGitProbeThrottle      *reconcileThrottle
 	queueMu                       sync.Mutex
 	operationRuntime              *operationRuntime
+	runtimeProjectionCoalescer    *runtimeProjectionEventCoalescer
 	sessionStopMu                 sync.Mutex
 	sessionStopPending            map[string]int
 	sessionStateRefreshMu         sync.Mutex
@@ -264,6 +267,7 @@ func New(cfg Config) *Daemon {
 	decisionHandler := daemonhandlers.NewDecisionHandler(issueDecisionService{daemon: d})
 	d.syncBootstrapFn = d.defaultSyncBootstrap
 	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
+	d.runtimeProjectionCoalescer = newRuntimeProjectionEventCoalescer(d, defaultRuntimeProjectionCoalesceWindow)
 	gitService.runtimeProjectionWriter = d.runtimeProjectionStateWriter()
 	gitService.runtimeStateStoreForProject = func(projectID string) *daemonstate.RuntimeStateStore {
 		return d.worktreeRuntimeStateStore(projectID)
@@ -380,6 +384,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 			if closeErr := d.operationRuntime.Close(); closeErr != nil {
 				d.cfg.Logger.Warn("failed to close operation runtime", "error", closeErr)
 			}
+		}
+		if d.runtimeProjectionCoalescer != nil {
+			d.runtimeProjectionCoalescer.Close()
 		}
 		d.closeIssueClients()
 		if d.runtimeReconcileQueue != nil {

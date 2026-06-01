@@ -14,6 +14,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
@@ -240,5 +241,141 @@ func TestRuntimeProjectionWriterPersistsBeforePublishingSessionEvents(t *testing
 	}
 	if sessions[0].ID != sessionID || sessions[0].IssueID != issueID {
 		t.Fatalf("session row = %+v", sessions[0])
+	}
+}
+
+func TestRuntimeProjectionWriterCoalescesProjectionBurstsByIssue(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	sessionStore := daemonstate.NewStore()
+	runtimeStateStore := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	const (
+		projectID = "proj-coalesce"
+		issueID   = "az-3"
+		sessionID = "sess-3"
+		worktree  = "/tmp/repo-az-3"
+		branch    = "riordan/az-3/task"
+	)
+	if _, err := sessionStore.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed session store: %v", err)
+	}
+
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: logger},
+		hub:          publish.NewHub(16, 8, logger),
+		sessionStore: sessionStore,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+	d.runtimeProjectionCoalescer = newRuntimeProjectionEventCoalescer(d, 100*time.Millisecond)
+	defer d.runtimeProjectionCoalescer.Close()
+	writer := newRuntimeProjectionWriter(d)
+
+	ch, cancel := d.hub.Subscribe(projectID, 0)
+	defer cancel()
+
+	if rev := writer.PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktree, branch); rev != 0 {
+		t.Fatalf("scheduled worktree revision = %d, want 0 before delayed publish", rev)
+	}
+	for i := 1; i <= 8; i++ {
+		status := &git.GitStatus{
+			Modified:       []string{"changed.go"},
+			HasChanges:     true,
+			GitAdditions:   i,
+			GitDeletions:   i + 1,
+			GitAheadCount:  i + 2,
+			GitBehindCount: i + 3,
+		}
+		if rev := writer.PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktree, status, true, true); rev != 0 {
+			t.Fatalf("scheduled git revision %d = %d, want 0 before delayed publish", i, rev)
+		}
+	}
+
+	evt := waitForRuntimeProjectionEvent(t, ch)
+	if evt.Revision != 1 {
+		t.Fatalf("event revision = %d, want 1", evt.Revision)
+	}
+	if evt.Event != protocol.EventGitStatusUpdated {
+		t.Fatalf("event = %s, want %s", evt.Event, protocol.EventGitStatusUpdated)
+	}
+	var body protocol.ProjectionUpdateEventBody
+	if err := json.Unmarshal(evt.Body, &body); err != nil {
+		t.Fatalf("unmarshal projection event: %v", err)
+	}
+	if body.Runtime == nil {
+		t.Fatal("expected runtime projection body")
+	}
+	if body.Runtime.Projection.IssueID != issueID {
+		t.Fatalf("runtime issue = %s, want %s", body.Runtime.Projection.IssueID, issueID)
+	}
+	if body.Runtime.Projection.Worktree.Path != worktree || body.Runtime.Projection.Session.SessionID != sessionID {
+		t.Fatalf("runtime projection = %+v, want worktree/session %s/%s", body.Runtime.Projection, worktree, sessionID)
+	}
+	if body.Runtime.Projection.Git.GitAdditions != 8 || body.Runtime.Projection.Git.GitDeletions != 9 {
+		t.Fatalf("runtime git stats = %+v, want final additions/deletions 8/9", body.Runtime.Projection.Git)
+	}
+	if body.Runtime.Projection.Git.GitAheadCount != 10 || body.Runtime.Projection.Git.GitBehindCount != 11 {
+		t.Fatalf("runtime git ahead/behind = %+v, want final 10/11", body.Runtime.Projection.Git)
+	}
+
+	assertNoRuntimeProjectionEvent(t, ch, 50*time.Millisecond)
+}
+
+func TestRuntimeProjectionCoalescingDoesNotDelayNonProjectionEvents(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	runtimeStateStore := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	const (
+		projectID = "proj-coalesce-immediate"
+		issueID   = "az-4"
+		worktree  = "/tmp/repo-az-4"
+	)
+	d := &Daemon{
+		cfg: Config{RepoDir: ".", Logger: logger},
+		hub: publish.NewHub(16, 8, logger),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+	d.runtimeProjectionCoalescer = newRuntimeProjectionEventCoalescer(d, 50*time.Millisecond)
+	defer d.runtimeProjectionCoalescer.Close()
+	writer := newRuntimeProjectionWriter(d)
+
+	ch, cancel := d.hub.Subscribe(projectID, 0)
+	defer cancel()
+
+	writer.PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktree, "branch")
+	uiRev := d.nextRevision(projectID)
+	d.hub.Publish(protocol.EventEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		ProjectID:       naming.ProjectID(protocol.NormalizeProjectID(projectID)),
+		Revision:        uiRev,
+		Event:           protocol.EventUICommandRequested,
+		Kind:            protocol.EnvelopeKindEvent,
+		EmittedAt:       time.Now().UTC(),
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(protocol.NormalizeProjectID(projectID))},
+	})
+
+	first := waitForRuntimeProjectionEvent(t, ch)
+	if first.Event != protocol.EventUICommandRequested || first.Revision != 1 {
+		t.Fatalf("first event = %s/%d, want immediate ui command revision 1", first.Event, first.Revision)
+	}
+	second := waitForRuntimeProjectionEvent(t, ch)
+	if second.Event != protocol.EventWorktreeProjectionUpdated || second.Revision != 2 {
+		t.Fatalf("second event = %s/%d, want coalesced projection revision 2", second.Event, second.Revision)
+	}
+}
+
+func assertNoRuntimeProjectionEvent(t *testing.T, ch <-chan protocol.EventEnvelope, timeout time.Duration) {
+	t.Helper()
+	select {
+	case evt := <-ch:
+		t.Fatalf("unexpected extra projection event: %s revision %d", evt.Event, evt.Revision)
+	case <-time.After(timeout):
 	}
 }

@@ -180,8 +180,8 @@ func (h *Hub) unsubscribeByID(id int) {
 }
 
 func (s *subscriber) trySend(evt protocol.EventEnvelope) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.closed {
 		return false
 	}
@@ -189,7 +189,10 @@ func (s *subscriber) trySend(evt protocol.EventEnvelope) bool {
 	case s.ch <- evt:
 		return true
 	default:
-		return false
+		if !isPriorityEvent(evt) {
+			return false
+		}
+		return s.trySendPriorityLocked(evt)
 	}
 }
 
@@ -201,6 +204,101 @@ func (s *subscriber) close() {
 	}
 	s.closed = true
 	close(s.ch)
+}
+
+func (s *subscriber) trySendPriorityLocked(evt protocol.EventEnvelope) bool {
+	pending := len(s.ch)
+	if pending == 0 {
+		select {
+		case s.ch <- evt:
+			return true
+		default:
+			return false
+		}
+	}
+
+	retained := make([]protocol.EventEnvelope, 0, pending)
+	skippedRevisions := make([]uint64, 0, pending)
+	droppedLowPriority := false
+	for i := 0; i < pending; i++ {
+		select {
+		case queued := <-s.ch:
+			if isLowPriorityEvent(queued) {
+				droppedLowPriority = true
+				if queued.Revision > 0 {
+					skippedRevisions = append(skippedRevisions, queued.Revision)
+				}
+				continue
+			}
+			retained = append(retained, queued)
+		default:
+			i = pending
+		}
+	}
+	if !droppedLowPriority {
+		for _, queued := range retained {
+			s.ch <- queued
+		}
+		return false
+	}
+	annotateSkippedRevisions(retained, skippedRevisions)
+	evt.SkippedRevisions = appendSkippedRevisions(evt.SkippedRevisions, skippedRevisions)
+	for _, queued := range retained {
+		s.ch <- queued
+	}
+	select {
+	case s.ch <- evt:
+		return true
+	default:
+		return false
+	}
+}
+
+func annotateSkippedRevisions(events []protocol.EventEnvelope, skipped []uint64) {
+	if len(skipped) == 0 {
+		return
+	}
+	for i := range events {
+		var before []uint64
+		for _, revision := range skipped {
+			if revision > 0 && revision < events[i].Revision {
+				before = append(before, revision)
+			}
+		}
+		events[i].SkippedRevisions = appendSkippedRevisions(events[i].SkippedRevisions, before)
+	}
+}
+
+func appendSkippedRevisions(existing, skipped []uint64) []uint64 {
+	if len(skipped) == 0 {
+		return existing
+	}
+	out := append([]uint64(nil), existing...)
+	out = append(out, skipped...)
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+func isPriorityEvent(evt protocol.EventEnvelope) bool {
+	switch evt.Event {
+	case protocol.EventTaskCreated,
+		protocol.EventTaskUpdated,
+		protocol.EventTaskDeleted,
+		protocol.EventTaskArchived:
+		return true
+	default:
+		return false
+	}
+}
+
+func isLowPriorityEvent(evt protocol.EventEnvelope) bool {
+	switch evt.Event {
+	case protocol.EventGitStatusUpdated,
+		protocol.EventWorktreeProjectionUpdated:
+		return true
+	default:
+		return false
+	}
 }
 
 func appendTrimmed(list []protocol.EventEnvelope, evt protocol.EventEnvelope, max int) []protocol.EventEnvelope {
