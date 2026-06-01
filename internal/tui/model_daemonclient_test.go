@@ -7322,6 +7322,142 @@ func TestDaemonStreamEventBatchCoalescesSnapshotRefreshCommands(t *testing.T) {
 	}
 }
 
+func TestDaemonStreamEventBatchCoalescesPureRuntimeProjectionByIssue(t *testing.T) {
+	makeProjectionEvent := func(revision uint64, issueID string, dirty bool, additions, deletions int) protocol.EventEnvelope {
+		body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
+			ProjectID: naming.ProjectID(newTestModel().daemonProjectID()),
+			IssueID:   naming.IssueID(issueID),
+			UpdatedAt: time.Date(2026, time.May, 25, 12, 0, 0, 0, time.UTC),
+			Runtime: &protocol.RuntimeProjectionEventBody{
+				ProjectID: naming.ProjectID(newTestModel().daemonProjectID()),
+				Revision:  revision,
+				Projection: protocol.RuntimeProjection{
+					ProjectID: naming.ProjectID(newTestModel().daemonProjectID()),
+					IssueID:   naming.IssueID(issueID),
+					Worktree: protocol.RuntimeWorktreeProjection{
+						Exists:  true,
+						Path:    "/tmp/repo-" + issueID,
+						Healthy: true,
+					},
+					Git: protocol.RuntimeGitProjection{
+						HasUncommittedChanges: dirty,
+						GitAdditions:          additions,
+						GitDeletions:          deletions,
+					},
+					Session: protocol.RuntimeSessionProjection{
+						HasSession: true,
+						State:      protocol.SessionLifecycleStateAttached,
+						Worktree:   "/tmp/repo-" + issueID,
+					},
+					Agent: protocol.RuntimeAgentProjection{Status: "attached"},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal projection body: %v", err)
+		}
+		return protocol.EventEnvelope{
+			ProjectID: naming.ProjectID(newTestModel().daemonProjectID()),
+			Revision:  revision,
+			Event:     protocol.EventGitStatusUpdated,
+			Body:      body,
+		}
+	}
+
+	m := newTestModel()
+	m.daemonRevision = 4
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+	m.tasks = []domain.Task{{ID: "az-1", Title: "Existing", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask}}
+
+	updatedAny, cmd := m.Update(daemonStreamEventMsg{events: []protocol.EventEnvelope{
+		makeProjectionEvent(5, "az-1", true, 9, 3),
+		makeProjectionEvent(6, "az-1", false, 0, 0),
+	}})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if cmd == nil {
+		t.Fatal("expected next stream wait command")
+	}
+	if updated.daemonRevision != 6 {
+		t.Fatalf("daemonRevision = %d, want 6", updated.daemonRevision)
+	}
+	if updated.daemonStreamMetrics.RuntimeProjectionsCoalesced != 1 {
+		t.Fatalf("runtime projections coalesced = %d, want 1", updated.daemonStreamMetrics.RuntimeProjectionsCoalesced)
+	}
+	if updated.tasks[0].HasUncommittedChanges || updated.tasks[0].GitAdditions != 0 || updated.tasks[0].GitDeletions != 0 {
+		t.Fatalf("task projection = %+v, want latest clean projection only", updated.tasks[0])
+	}
+}
+
+func TestDaemonStreamEventBatchRehydratesOnGapAfterCoalescedProjection(t *testing.T) {
+	projectID := newTestModel().daemonProjectID()
+	makeProjectionEvent := func(revision uint64, dirty bool) protocol.EventEnvelope {
+		body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
+			ProjectID: naming.ProjectID(projectID),
+			IssueID:   "az-1",
+			UpdatedAt: time.Date(2026, time.May, 25, 12, 0, 0, 0, time.UTC),
+			Runtime: &protocol.RuntimeProjectionEventBody{
+				ProjectID: naming.ProjectID(projectID),
+				Revision:  revision,
+				Projection: protocol.RuntimeProjection{
+					ProjectID: naming.ProjectID(projectID),
+					IssueID:   "az-1",
+					Worktree: protocol.RuntimeWorktreeProjection{
+						Exists:  true,
+						Path:    "/tmp/repo-az-1",
+						Healthy: true,
+					},
+					Git: protocol.RuntimeGitProjection{
+						HasUncommittedChanges: dirty,
+						GitAdditions:          3,
+						GitDeletions:          1,
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal projection body: %v", err)
+		}
+		return protocol.EventEnvelope{
+			ProjectID: naming.ProjectID(projectID),
+			Revision:  revision,
+			Event:     protocol.EventGitStatusUpdated,
+			Body:      body,
+		}
+	}
+
+	m := newTestModel()
+	m.daemonRevision = 4
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+	m.tasks[0].HasUncommittedChanges = false
+
+	updatedAny, cmd := m.Update(daemonStreamEventMsg{events: []protocol.EventEnvelope{
+		makeProjectionEvent(5, true),
+		makeProjectionEvent(7, true),
+	}})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if cmd == nil {
+		t.Fatal("expected rehydrate command")
+	}
+	if updated.daemonEvents != nil {
+		t.Fatal("expected daemon stream to be cleared for rehydrate")
+	}
+	if updated.daemonRevision != 5 {
+		t.Fatalf("daemonRevision = %d, want 5", updated.daemonRevision)
+	}
+	if updated.tasks[0].HasUncommittedChanges {
+		t.Fatalf("gap event should not apply latest projection before rehydrate: %+v", updated.tasks[0])
+	}
+	if updated.daemonStreamMetrics.Rehydrates != 1 {
+		t.Fatalf("rehydrates = %d, want 1", updated.daemonStreamMetrics.Rehydrates)
+	}
+}
+
 func TestScheduleIssuesRefreshDedupesInFlightAndReplaysPending(t *testing.T) {
 	snapshotReads := uint64(0)
 	transport := &recordingDaemonTransport{

@@ -125,10 +125,11 @@ type pendingOperationProgress struct {
 }
 
 type daemonStreamMetrics struct {
-	EventsDrained      uint64
-	RefreshesCoalesced uint64
-	Rehydrates         uint64
-	MaxBatchSize       int
+	EventsDrained               uint64
+	RefreshesCoalesced          uint64
+	RuntimeProjectionsCoalesced uint64
+	Rehydrates                  uint64
+	MaxBatchSize                int
 }
 
 // Model is the main application state
@@ -978,7 +979,11 @@ type projectSwitchResultMsg struct {
 	err           error
 }
 
-const daemonStreamEventBatchLimit = 256
+const (
+	daemonStreamEventBatchLimit      = 256
+	daemonStreamEventBatchMinDrain   = 16
+	daemonStreamEventBatchTimeBudget = 2 * time.Millisecond
+)
 
 type daemonStreamEventMsg struct {
 	stream <-chan protocol.EventEnvelope
@@ -1867,6 +1872,7 @@ func (m Model) waitForDaemonEventCmd() tea.Cmd {
 		}
 
 		events := []protocol.EventEnvelope{evt}
+		deadline := time.Now().Add(daemonStreamEventBatchTimeBudget)
 		for len(events) < daemonStreamEventBatchLimit {
 			select {
 			case next, ok := <-stream:
@@ -1874,6 +1880,9 @@ func (m Model) waitForDaemonEventCmd() tea.Cmd {
 					return daemonStreamEventMsg{stream: stream, event: evt, events: events}
 				}
 				events = append(events, next)
+				if len(events) >= daemonStreamEventBatchMinDrain && time.Now().After(deadline) {
+					return daemonStreamEventMsg{stream: stream, event: evt, events: events}
+				}
 			default:
 				return daemonStreamEventMsg{stream: stream, event: evt, events: events}
 			}

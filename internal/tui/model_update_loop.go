@@ -474,8 +474,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds := make([]tea.Cmd, 0, 2)
 		queuedCmdKeys := map[string]struct{}{}
-		for _, evt := range events {
-			result := m.applyDaemonStreamEvent(evt)
+		coalescedProjectionIndexes := coalescedRuntimeProjectionIndexes(events)
+		m.daemonStreamMetrics.RuntimeProjectionsCoalesced += uint64(len(coalescedProjectionIndexes))
+		for i, evt := range events {
+			_, skipProjectionApply := coalescedProjectionIndexes[i]
+			result := m.applyDaemonStreamEvent(evt, skipProjectionApply)
 			if result.key == daemonStreamCommandIssuesRefresh {
 				if _, exists := queuedCmdKeys[result.key]; !exists {
 					queuedCmdKeys[result.key] = struct{}{}
@@ -1473,7 +1476,7 @@ type daemonStreamEventResult struct {
 
 const daemonStreamCommandIssuesRefresh = "issues-refresh"
 
-func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope) daemonStreamEventResult {
+func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectionApply bool) daemonStreamEventResult {
 	if projectID := strings.TrimSpace(evt.ProjectID.String()); projectID != "" && projectID != m.daemonProjectID() {
 		return daemonStreamEventResult{}
 	}
@@ -1523,6 +1526,10 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope) daemonStreamE
 			m.daemonEvents = nil
 			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 		}
+		if skipProjectionApply {
+			m.daemonRevision = cursor.Advance(evt).Revision
+			return daemonStreamEventResult{}
+		}
 
 		var body protocol.ProjectionUpdateEventBody
 		if err := json.Unmarshal(evt.Body, &body); err == nil && body.Runtime != nil {
@@ -1557,6 +1564,47 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope) daemonStreamE
 	default:
 		return daemonStreamEventResult{}
 	}
+}
+
+func coalescedRuntimeProjectionIndexes(events []protocol.EventEnvelope) map[int]struct{} {
+	latestByIssue := make(map[string]int)
+	coalesced := make(map[int]struct{})
+	for i, evt := range events {
+		issueID, ok := coalescibleRuntimeProjectionIssueID(evt)
+		if !ok {
+			continue
+		}
+		if previous, exists := latestByIssue[issueID]; exists {
+			coalesced[previous] = struct{}{}
+		}
+		latestByIssue[issueID] = i
+	}
+	return coalesced
+}
+
+func coalescibleRuntimeProjectionIssueID(evt protocol.EventEnvelope) (string, bool) {
+	if evt.Event != protocol.EventWorktreeProjectionUpdated && evt.Event != protocol.EventGitStatusUpdated {
+		return "", false
+	}
+	if len(evt.Body) == 0 {
+		return "", false
+	}
+	var body protocol.ProjectionUpdateEventBody
+	if err := json.Unmarshal(evt.Body, &body); err != nil || body.Runtime == nil {
+		return "", false
+	}
+	projection := body.Runtime.Projection
+	if projection.Git.ActiveOperation != nil {
+		return "", false
+	}
+	issueID := strings.TrimSpace(projection.IssueID.String())
+	if issueID == "" {
+		issueID = strings.TrimSpace(body.IssueID.String())
+	}
+	if issueID == "" {
+		return "", false
+	}
+	return issueID, true
 }
 
 func (m *Model) applyUICommandEvent(event protocol.EventEnvelope) tea.Cmd {
