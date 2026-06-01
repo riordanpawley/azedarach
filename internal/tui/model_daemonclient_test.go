@@ -7323,6 +7323,66 @@ func TestDaemonStreamPriorityTaskEventAppliesAcrossAnnotatedTelemetryGap(t *test
 	}
 }
 
+func TestDaemonStreamRetainedCommandAndPriorityTaskApplyAcrossAnnotatedTelemetryGaps(t *testing.T) {
+	m := newTestModel()
+	m.daemonRevision = 0
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+	m.tasks = []domain.Task{{ID: "az-1", Title: "Existing", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask}}
+
+	createdTask := domain.Task{ID: "az-2", Title: "Priority created", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask}
+	taskBody, err := json.Marshal(protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		TaskID:    "az-2",
+		Task:      &createdTask,
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal task event body: %v", err)
+	}
+	uiBody, err := json.Marshal(protocol.UICommandEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		Command:   protocol.UICommandOpenTaskWorkspace,
+		IssueID:   "az-1",
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal ui event body: %v", err)
+	}
+
+	updatedAny, cmd := m.Update(daemonStreamEventMsg{events: []protocol.EventEnvelope{
+		{
+			ProjectID:        naming.ProjectID(m.daemonProjectID()),
+			Revision:         2,
+			SkippedRevisions: []uint64{1},
+			Event:            protocol.EventUICommandRequested,
+			Body:             uiBody,
+		},
+		{
+			ProjectID:        naming.ProjectID(m.daemonProjectID()),
+			Revision:         4,
+			SkippedRevisions: []uint64{1, 3},
+			Event:            protocol.EventTaskCreated,
+			Body:             taskBody,
+		},
+	}})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if cmd == nil {
+		t.Fatal("expected batched command")
+	}
+	if updated.daemonRevision != 4 {
+		t.Fatalf("daemonRevision = %d, want 4", updated.daemonRevision)
+	}
+	if len(updated.tasks) != 2 || updated.tasks[1].ID.String() != "az-2" {
+		t.Fatalf("tasks after mixed priority batch = %+v, want created task appended without rehydrate", updated.tasks)
+	}
+	if updated.daemonEvents == nil {
+		t.Fatal("annotated retained event gap should not clear stream for rehydrate")
+	}
+}
+
 func TestDaemonStreamEventBatchCoalescesSnapshotRefreshCommands(t *testing.T) {
 	m := newTestModel()
 	m.daemonRevision = 4

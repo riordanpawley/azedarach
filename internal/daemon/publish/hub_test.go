@@ -127,6 +127,32 @@ func TestPriorityTaskMutationEvictsQueuedRuntimeTelemetry(t *testing.T) {
 	}
 }
 
+func TestPriorityTaskMutationAnnotatesRetainedEventsAfterTelemetryEviction(t *testing.T) {
+	h := NewHub(32, 3, slog.Default())
+	ch, cancel := h.Subscribe("proj", 0)
+	defer cancel()
+
+	h.Publish(makeEvent("proj", 1, protocol.EventGitStatusUpdated))
+	h.Publish(makeEvent("proj", 2, protocol.EventUICommandRequested))
+	h.Publish(makeEvent("proj", 3, protocol.EventWorktreeProjectionUpdated))
+	h.Publish(makeEvent("proj", 4, protocol.EventTaskCreated))
+
+	first := recv(t, ch)
+	second := recv(t, ch)
+	if first.Revision != 2 || first.Event != protocol.EventUICommandRequested {
+		t.Fatalf("first event = %s:%d, want retained UI command revision 2", first.Event, first.Revision)
+	}
+	if !slices.Equal(first.SkippedRevisions, []uint64{1}) {
+		t.Fatalf("first skipped revisions = %v, want [1]", first.SkippedRevisions)
+	}
+	if second.Revision != 4 || second.Event != protocol.EventTaskCreated {
+		t.Fatalf("second event = %s:%d, want task created revision 4", second.Event, second.Revision)
+	}
+	if !slices.Equal(second.SkippedRevisions, []uint64{1, 3}) {
+		t.Fatalf("second skipped revisions = %v, want [1 3]", second.SkippedRevisions)
+	}
+}
+
 func TestPriorityTaskMutationDoesNotEvictQueuedTaskMutations(t *testing.T) {
 	h := NewHub(32, 1, slog.Default())
 	ch, _ := h.Subscribe("proj", 0)

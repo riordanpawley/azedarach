@@ -241,6 +241,7 @@ func (s *subscriber) trySendPriorityLocked(evt protocol.EventEnvelope) bool {
 		}
 		return false
 	}
+	annotateSkippedRevisions(retained, skippedRevisions)
 	evt.SkippedRevisions = appendSkippedRevisions(evt.SkippedRevisions, skippedRevisions)
 	for _, queued := range retained {
 		s.ch <- queued
@@ -250,6 +251,21 @@ func (s *subscriber) trySendPriorityLocked(evt protocol.EventEnvelope) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func annotateSkippedRevisions(events []protocol.EventEnvelope, skipped []uint64) {
+	if len(skipped) == 0 {
+		return
+	}
+	for i := range events {
+		var before []uint64
+		for _, revision := range skipped {
+			if revision > 0 && revision < events[i].Revision {
+				before = append(before, revision)
+			}
+		}
+		events[i].SkippedRevisions = appendSkippedRevisions(events[i].SkippedRevisions, before)
 	}
 }
 
