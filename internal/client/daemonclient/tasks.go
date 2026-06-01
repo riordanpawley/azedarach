@@ -66,6 +66,15 @@ type TaskStatusRequest struct {
 // TaskStatusOptions controls client-side status transition behavior.
 type TaskStatusOptions struct {
 	AutoFinalizeOnClose bool
+	SkipClosePreflight  bool
+}
+
+// CloseGuardOptions controls which target runtime assets may remain because
+// the caller is about to clean them before writing the closed status.
+type CloseGuardOptions struct {
+	AllowTargetSession  bool
+	AllowTargetWorktree bool
+	ForceWorktree       bool
 }
 
 // CloseGuardResult records the preflight inputs used for a close transition.
@@ -434,8 +443,12 @@ func (c *Client) UpdateTaskStatusWithOptions(ctx context.Context, taskID string,
 	if err != nil {
 		return fmt.Errorf("invalid task id: %w", err)
 	}
-	if opts.AutoFinalizeOnClose && status == domain.StatusDone {
-		if err := c.finalizeTaskRuntimeAttachments(ctx, parsedTaskID.String()); err != nil {
+	if status == domain.StatusDone && !opts.SkipClosePreflight {
+		if opts.AutoFinalizeOnClose {
+			if err := c.finalizeTaskRuntimeAttachments(ctx, parsedTaskID.String()); err != nil {
+				return err
+			}
+		} else if _, err := c.ValidateTaskClose(ctx, parsedTaskID.String()); err != nil {
 			return err
 		}
 	}
@@ -446,7 +459,10 @@ func (c *Client) UpdateTaskStatusWithOptions(ctx context.Context, taskID string,
 }
 
 func (c *Client) finalizeTaskRuntimeAttachments(ctx context.Context, taskID string) error {
-	guard, err := c.ValidateTaskClose(ctx, taskID)
+	guard, err := c.ValidateTaskCloseWithOptions(ctx, taskID, CloseGuardOptions{
+		AllowTargetSession:  true,
+		AllowTargetWorktree: true,
+	})
 	if err != nil {
 		return err
 	}
@@ -468,6 +484,12 @@ func (c *Client) finalizeTaskRuntimeAttachments(ctx context.Context, taskID stri
 // ValidateTaskClose rejects close/done transitions for worktrees that still
 // have tracked changes, conflicts, or commits ahead of their integration base.
 func (c *Client) ValidateTaskClose(ctx context.Context, taskID string) (CloseGuardResult, error) {
+	return c.ValidateTaskCloseWithOptions(ctx, taskID, CloseGuardOptions{})
+}
+
+// ValidateTaskCloseWithOptions rejects close/done transitions unless the target
+// issue and its children are in a closeable state.
+func (c *Client) ValidateTaskCloseWithOptions(ctx context.Context, taskID string, opts CloseGuardOptions) (CloseGuardResult, error) {
 	snapshot, err := c.ListTasksSnapshot(ctx)
 	if err != nil {
 		return CloseGuardResult{}, fmt.Errorf("inspect runtime attachments before closing %s: %w", taskID, err)
@@ -485,6 +507,13 @@ func (c *Client) ValidateTaskClose(ctx context.Context, taskID string) (CloseGua
 		return CloseGuardResult{}, fmt.Errorf("issue not found: %s", taskID)
 	}
 
+	if reasons := closeGuardRuntimeBlockers(task, opts); len(reasons) > 0 {
+		return CloseGuardResult{}, fmt.Errorf("cannot close issue %s: %s", taskID, strings.Join(reasons, "; "))
+	}
+	if reasons := closeGuardChildBlockers(task.ID, snapshot.Tasks); len(reasons) > 0 {
+		return CloseGuardResult{}, fmt.Errorf("cannot close issue %s: %s", taskID, strings.Join(reasons, "; "))
+	}
+
 	worktree := closeGuardTaskWorktree(task)
 	if worktree == "" && task.HasWorktree {
 		resolved, ok, err := c.worktreePathForIssue(ctx, taskID)
@@ -492,12 +521,21 @@ func (c *Client) ValidateTaskClose(ctx context.Context, taskID string) (CloseGua
 			return CloseGuardResult{}, fmt.Errorf("inspect worktree before closing %s: %w", taskID, err)
 		}
 		if !ok || strings.TrimSpace(resolved) == "" {
+			if opts.ForceWorktree {
+				return CloseGuardResult{Task: task}, nil
+			}
 			return CloseGuardResult{}, fmt.Errorf("cannot close issue %s: worktree is projected but path is unavailable", taskID)
 		}
 		worktree = resolved
 	}
 	if strings.TrimSpace(worktree) == "" {
 		return CloseGuardResult{Task: task}, nil
+	}
+	if opts.ForceWorktree {
+		return CloseGuardResult{
+			Task:     task,
+			Worktree: worktree,
+		}, nil
 	}
 
 	status, err := c.GitStatusRefresh(ctx, worktree)
@@ -527,6 +565,109 @@ func (c *Client) worktreePathForIssue(ctx context.Context, taskID string) (strin
 	return "", false, nil
 }
 
+func closeGuardRuntimeBlockers(task domain.Task, opts CloseGuardOptions) []string {
+	reasons := make([]string, 0, 2)
+	if !opts.AllowTargetSession && closeGuardTaskHasSession(task) {
+		reasons = append(reasons, "issue still has a session")
+	}
+	if !opts.AllowTargetWorktree && closeGuardTaskHasWorktree(task) {
+		reasons = append(reasons, "issue still has a worktree")
+	}
+	return reasons
+}
+
+func closeGuardChildBlockers(parentID naming.IssueID, tasks []domain.Task) []string {
+	childrenByParent := closeGuardChildrenByParent(tasks)
+	descendants := closeGuardDescendants(parentID, childrenByParent)
+	if len(descendants) == 0 {
+		return nil
+	}
+	byID := make(map[naming.IssueID]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID] = task
+	}
+	blocked := make([]string, 0, len(descendants))
+	for _, childID := range descendants {
+		child, ok := byID[childID]
+		if !ok {
+			continue
+		}
+		reasons := closeGuardChildReasons(child)
+		if len(reasons) == 0 {
+			continue
+		}
+		blocked = append(blocked, fmt.Sprintf("%s (%s)", child.ID.String(), strings.Join(reasons, ", ")))
+	}
+	if len(blocked) == 0 {
+		return nil
+	}
+	return []string{"unresolved child issues remain: " + strings.Join(blocked, "; ")}
+}
+
+func closeGuardChildrenByParent(tasks []domain.Task) map[naming.IssueID][]naming.IssueID {
+	children := make(map[naming.IssueID][]naming.IssueID)
+	seen := make(map[naming.IssueID]map[naming.IssueID]struct{})
+	add := func(parentID, childID naming.IssueID) {
+		if parentID.IsZero() || childID.IsZero() {
+			return
+		}
+		if seen[parentID] == nil {
+			seen[parentID] = make(map[naming.IssueID]struct{})
+		}
+		if _, ok := seen[parentID][childID]; ok {
+			return
+		}
+		seen[parentID][childID] = struct{}{}
+		children[parentID] = append(children[parentID], childID)
+	}
+	for _, task := range tasks {
+		if task.ParentID != nil {
+			add(*task.ParentID, task.ID)
+		}
+		for _, dep := range task.Dependencies {
+			if dep.Type == domain.DependencyParentChild || string(dep.Type) == "parent_child" {
+				add(dep.ID, task.ID)
+			}
+		}
+	}
+	return children
+}
+
+func closeGuardDescendants(rootID naming.IssueID, children map[naming.IssueID][]naming.IssueID) []naming.IssueID {
+	out := make([]naming.IssueID, 0)
+	seen := make(map[naming.IssueID]struct{})
+	queue := append([]naming.IssueID(nil), children[rootID]...)
+	for len(queue) > 0 {
+		childID := queue[0]
+		queue = queue[1:]
+		if _, ok := seen[childID]; ok {
+			continue
+		}
+		seen[childID] = struct{}{}
+		out = append(out, childID)
+		queue = append(queue, children[childID]...)
+	}
+	return out
+}
+
+func closeGuardChildReasons(task domain.Task) []string {
+	reasons := make([]string, 0, 3)
+	if task.Status != domain.StatusDone {
+		reasons = append(reasons, string(task.Status))
+	}
+	if closeGuardTaskHasSession(task) {
+		reasons = append(reasons, "session")
+	}
+	if closeGuardTaskHasWorktree(task) {
+		reasons = append(reasons, "worktree")
+	}
+	return reasons
+}
+
+func closeGuardTaskHasSession(task domain.Task) bool {
+	return task.HasTmuxSession || task.Session != nil
+}
+
 func closeGuardTaskHasWorktree(task domain.Task) bool {
 	return task.HasWorktree || closeGuardTaskWorktree(task) != ""
 }
@@ -542,7 +683,7 @@ func closeGuardBlockers(status GitStatus) []string {
 	dirty := closeGuardDirtyFiles(status)
 	reasons := make([]string, 0, 3)
 	if len(dirty) > 0 {
-		reasons = append(reasons, "worktree has tracked changes: "+strings.Join(dirty, ", "))
+		reasons = append(reasons, "worktree has local changes: "+strings.Join(dirty, ", "))
 	}
 	if status.HasConflicts || len(status.Conflicted) > 0 {
 		conflicts := append([]string(nil), status.Conflicted...)
@@ -560,7 +701,7 @@ func closeGuardBlockers(status GitStatus) []string {
 
 func closeGuardDirtyFiles(status GitStatus) []string {
 	seen := map[string]struct{}{}
-	out := make([]string, 0, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Conflicted))
+	out := make([]string, 0, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Untracked)+len(status.Conflicted))
 	appendUnique := func(files []string) {
 		for _, file := range files {
 			file = strings.TrimSpace(file)
@@ -578,6 +719,7 @@ func closeGuardDirtyFiles(status GitStatus) []string {
 	appendUnique(status.Modified)
 	appendUnique(status.Added)
 	appendUnique(status.Deleted)
+	appendUnique(status.Untracked)
 	appendUnique(status.Conflicted)
 	return out
 }

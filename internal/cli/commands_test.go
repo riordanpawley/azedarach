@@ -5799,6 +5799,14 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 								t.Fatalf("marshal task create response: %v", err)
 							}
 							body = payload
+						} else if req.Command == daemonclient.CommandTaskList {
+							payload, err := marshalTaskListBody([]domain.Task{
+								{ID: "az-9", Title: "Close me", Status: domain.StatusInReview},
+							})
+							if err != nil {
+								t.Fatalf("marshal task list response: %v", err)
+							}
+							body = payload
 						}
 						return protocol.ResponseEnvelope{
 							ProtocolVersion: req.ProtocolVersion,
@@ -5920,6 +5928,7 @@ func TestIssueFinalizeCommandStopsClosesAndOptionallyRemovesWorktree(t *testing.
 	})
 
 	wantCommands := []string{
+		daemonclient.CommandTaskList,
 		daemonclient.CommandTaskList,
 		commandSessionStop,
 		daemonclient.CommandWorktreeRemove,

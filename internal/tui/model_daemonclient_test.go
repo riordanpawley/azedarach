@@ -8083,6 +8083,17 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal status request: %v", err)
 					}
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, protocol.DefaultProjectID, []domain.Task{
+							{ID: "az-1", Status: domain.StatusOpen},
+							{ID: "az-2", Status: domain.StatusOpen},
+						}),
+					}, nil
 				case daemonclient.CommandTaskDelete, daemonclient.CommandTaskArchive:
 					var body daemonclient.TaskIDRequest
 					if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -8123,14 +8134,16 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 			t.Fatalf("bulk archive result = %#v", archiveMsg)
 		}
 
-		if got := transport.requests; len(got) != 5 {
+		if got := transport.requests; len(got) != 7 {
 			t.Fatalf("requests = %v", got)
 		}
-		if transport.requests[0] != daemonclient.CommandTaskUpdateStatus ||
+		if transport.requests[0] != daemonclient.CommandTaskList ||
 			transport.requests[1] != daemonclient.CommandTaskUpdateStatus ||
-			transport.requests[2] != daemonclient.CommandTaskDelete ||
-			transport.requests[3] != daemonclient.CommandTaskDelete ||
-			transport.requests[4] != daemonclient.CommandTaskArchive {
+			transport.requests[2] != daemonclient.CommandTaskList ||
+			transport.requests[3] != daemonclient.CommandTaskUpdateStatus ||
+			transport.requests[4] != daemonclient.CommandTaskDelete ||
+			transport.requests[5] != daemonclient.CommandTaskDelete ||
+			transport.requests[6] != daemonclient.CommandTaskArchive {
 			t.Fatalf("requests = %v", transport.requests)
 		}
 	})

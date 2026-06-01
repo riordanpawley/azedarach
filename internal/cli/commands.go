@@ -3675,10 +3675,12 @@ func IssueFinalizeCommand(deps *Dependencies, opts IssueFinalizeOptions) error {
 	}
 
 	if opts.RemoveWorktree {
-		if !opts.ForceWorktree {
-			if _, err := deps.DaemonClient.ValidateTaskClose(ctx, opts.IssueID); err != nil {
-				return fmt.Errorf("close preflight failed for issue %s: %w", opts.IssueID, err)
-			}
+		if _, err := deps.DaemonClient.ValidateTaskCloseWithOptions(ctx, opts.IssueID, daemonclient.CloseGuardOptions{
+			AllowTargetSession:  true,
+			AllowTargetWorktree: true,
+			ForceWorktree:       opts.ForceWorktree,
+		}); err != nil {
+			return fmt.Errorf("close preflight failed for issue %s: %w", opts.IssueID, err)
 		}
 		if _, err := deps.DaemonClient.StopSession(ctx, opts.IssueID); err != nil {
 			return fmt.Errorf("failed to stop session for issue %s: %w", opts.IssueID, err)
@@ -3686,14 +3688,19 @@ func IssueFinalizeCommand(deps *Dependencies, opts IssueFinalizeOptions) error {
 		if err := deps.DaemonClient.RemoveWorktreeWithOptions(ctx, opts.IssueID, opts.ForceWorktree); err != nil {
 			return fmt.Errorf("failed to remove worktree for issue %s: %w", opts.IssueID, err)
 		}
-		if err := deps.DaemonClient.UpdateTaskStatus(ctx, opts.IssueID, domain.StatusDone); err != nil {
+		if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, domain.StatusDone, daemonclient.TaskStatusOptions{SkipClosePreflight: true}); err != nil {
 			return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
 		}
 	} else {
+		if _, err := deps.DaemonClient.ValidateTaskCloseWithOptions(ctx, opts.IssueID, daemonclient.CloseGuardOptions{
+			AllowTargetSession: true,
+		}); err != nil {
+			return fmt.Errorf("close preflight failed for issue %s: %w", opts.IssueID, err)
+		}
 		if _, err := deps.DaemonClient.StopSession(ctx, opts.IssueID); err != nil {
 			return fmt.Errorf("failed to stop session for issue %s: %w", opts.IssueID, err)
 		}
-		if err := deps.DaemonClient.UpdateTaskStatus(ctx, opts.IssueID, domain.StatusDone); err != nil {
+		if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, domain.StatusDone, daemonclient.TaskStatusOptions{SkipClosePreflight: true}); err != nil {
 			return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
 		}
 	}
