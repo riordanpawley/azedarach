@@ -270,7 +270,7 @@ func TestRuntimeProjectionWriterCoalescesProjectionBurstsByIssue(t *testing.T) {
 			".": runtimeStateStore,
 		},
 	}
-	d.runtimeProjectionCoalescer = newRuntimeProjectionEventCoalescer(d, 10*time.Millisecond)
+	d.runtimeProjectionCoalescer = newRuntimeProjectionEventCoalescer(d, 100*time.Millisecond)
 	defer d.runtimeProjectionCoalescer.Close()
 	writer := newRuntimeProjectionWriter(d)
 
