@@ -111,13 +111,13 @@ func (c *runtimeProjectionEventCoalescer) schedule(ctx context.Context, next *pe
 		existing.session = next.session
 		existing.worktree = next.worktree
 		existing.status = next.status
-		return c.predictedRevisionLocked(next.key.projectID)
+		return 0
 	}
 	next.timer = time.AfterFunc(c.window, func() {
 		c.flush(next.key)
 	})
 	c.pending[next.key] = next
-	return c.predictedRevisionLocked(next.key.projectID)
+	return 0
 }
 
 func (c *runtimeProjectionEventCoalescer) flush(key runtimeProjectionEventKey) {
@@ -180,13 +180,6 @@ func (c *runtimeProjectionEventCoalescer) publishLocked(ctx context.Context, eve
 	rev := c.publish(ctx, event)
 	c.mu.Lock()
 	return rev
-}
-
-func (c *runtimeProjectionEventCoalescer) predictedRevisionLocked(projectID string) uint64 {
-	if c == nil || c.d == nil {
-		return 0
-	}
-	return c.d.currentRevision(projectID) + 1
 }
 
 func runtimeProjectionCoalesceKey(projectID, issueID, fallback string) runtimeProjectionEventKey {

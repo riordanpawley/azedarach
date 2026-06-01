@@ -277,8 +277,8 @@ func TestRuntimeProjectionWriterCoalescesProjectionBurstsByIssue(t *testing.T) {
 	ch, cancel := d.hub.Subscribe(projectID, 0)
 	defer cancel()
 
-	if rev := writer.PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktree, branch); rev != 1 {
-		t.Fatalf("predicted worktree revision = %d, want 1", rev)
+	if rev := writer.PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktree, branch); rev != 0 {
+		t.Fatalf("scheduled worktree revision = %d, want 0 before delayed publish", rev)
 	}
 	for i := 1; i <= 8; i++ {
 		status := &git.GitStatus{
@@ -289,8 +289,8 @@ func TestRuntimeProjectionWriterCoalescesProjectionBurstsByIssue(t *testing.T) {
 			GitAheadCount:  i + 2,
 			GitBehindCount: i + 3,
 		}
-		if rev := writer.PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktree, status, true, true); rev != 1 {
-			t.Fatalf("predicted git revision %d = %d, want 1", i, rev)
+		if rev := writer.PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktree, status, true, true); rev != 0 {
+			t.Fatalf("scheduled git revision %d = %d, want 0 before delayed publish", i, rev)
 		}
 	}
 

@@ -2,6 +2,7 @@ package publish
 
 import (
 	"log/slog"
+	"slices"
 	"testing"
 	"time"
 
@@ -113,12 +114,16 @@ func TestPriorityTaskMutationEvictsQueuedRuntimeTelemetry(t *testing.T) {
 	h.Publish(makeEvent("proj", 3, protocol.EventTaskCreated))
 
 	first := recv(t, ch)
-	second := recv(t, ch)
-	if first.Revision != 2 || first.Event != protocol.EventWorktreeProjectionUpdated {
-		t.Fatalf("first event = %s:%d, want worktree projection revision 2", first.Event, first.Revision)
+	if first.Revision != 3 || first.Event != protocol.EventTaskCreated {
+		t.Fatalf("first event = %s:%d, want task created revision 3", first.Event, first.Revision)
 	}
-	if second.Revision != 3 || second.Event != protocol.EventTaskCreated {
-		t.Fatalf("second event = %s:%d, want task created revision 3", second.Event, second.Revision)
+	if !slices.Equal(first.SkippedRevisions, []uint64{1, 2}) {
+		t.Fatalf("skipped revisions = %v, want [1 2]", first.SkippedRevisions)
+	}
+	select {
+	case evt := <-ch:
+		t.Fatalf("unexpected retained telemetry event: %s:%d", evt.Event, evt.Revision)
+	default:
 	}
 }
 

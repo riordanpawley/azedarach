@@ -7281,6 +7281,48 @@ func TestDaemonStreamEventBatchAppliesTaskEventBehindProjectionBacklog(t *testin
 	}
 }
 
+func TestDaemonStreamPriorityTaskEventAppliesAcrossAnnotatedTelemetryGap(t *testing.T) {
+	m := newTestModel()
+	m.daemonRevision = 0
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+	m.tasks = []domain.Task{{ID: "az-1", Title: "Existing", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask}}
+
+	createdTask := domain.Task{ID: "az-2", Title: "Priority created", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask}
+	body, err := json.Marshal(protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		TaskID:    "az-2",
+		Task:      &createdTask,
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal task event body: %v", err)
+	}
+
+	updatedAny, cmd := m.Update(daemonStreamEventMsg{event: protocol.EventEnvelope{
+		ProjectID:        naming.ProjectID(m.daemonProjectID()),
+		Revision:         3,
+		SkippedRevisions: []uint64{1, 2},
+		Event:            protocol.EventTaskCreated,
+		Body:             body,
+	}})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if cmd == nil {
+		t.Fatal("expected next stream wait command")
+	}
+	if updated.daemonRevision != 3 {
+		t.Fatalf("daemonRevision = %d, want 3", updated.daemonRevision)
+	}
+	if len(updated.tasks) != 2 || updated.tasks[1].ID.String() != "az-2" {
+		t.Fatalf("tasks after priority event = %+v, want created task appended without rehydrate", updated.tasks)
+	}
+	if updated.daemonEvents == nil {
+		t.Fatal("priority annotated telemetry gap should not clear stream for rehydrate")
+	}
+}
+
 func TestDaemonStreamEventBatchCoalescesSnapshotRefreshCommands(t *testing.T) {
 	m := newTestModel()
 	m.daemonRevision = 4

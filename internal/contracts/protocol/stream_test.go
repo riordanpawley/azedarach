@@ -56,6 +56,18 @@ func TestStreamCursorDecideAndAdvance(t *testing.T) {
 			want:    StreamProjectionDecisionResync,
 			wantRev: 4,
 		},
+		{
+			name:    "annotated skippable gap",
+			evt:     EventEnvelope{Revision: 7, SkippedRevisions: []uint64{5, 6}},
+			want:    StreamProjectionDecisionApply,
+			wantRev: 7,
+		},
+		{
+			name:    "partial annotated gap",
+			evt:     EventEnvelope{Revision: 7, SkippedRevisions: []uint64{5}},
+			want:    StreamProjectionDecisionResync,
+			wantRev: 4,
+		},
 	}
 
 	for _, tc := range tests {

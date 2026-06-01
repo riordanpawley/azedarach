@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -289,7 +290,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				},
 				wantSubstrs: []string{
 					"decode task.list response",
-					"protocol_version mismatch: expected 4, actual 5",
+					fmt.Sprintf("protocol_version mismatch: expected %d, actual %d", protocol.CurrentVersion, protocol.CurrentVersion+1),
 				},
 			},
 		}

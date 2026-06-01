@@ -218,12 +218,16 @@ func (s *subscriber) trySendPriorityLocked(evt protocol.EventEnvelope) bool {
 	}
 
 	retained := make([]protocol.EventEnvelope, 0, pending)
+	skippedRevisions := make([]uint64, 0, pending)
 	droppedLowPriority := false
 	for i := 0; i < pending; i++ {
 		select {
 		case queued := <-s.ch:
-			if !droppedLowPriority && isLowPriorityEvent(queued) {
+			if isLowPriorityEvent(queued) {
 				droppedLowPriority = true
+				if queued.Revision > 0 {
+					skippedRevisions = append(skippedRevisions, queued.Revision)
+				}
 				continue
 			}
 			retained = append(retained, queued)
@@ -231,11 +235,15 @@ func (s *subscriber) trySendPriorityLocked(evt protocol.EventEnvelope) bool {
 			i = pending
 		}
 	}
+	if !droppedLowPriority {
+		for _, queued := range retained {
+			s.ch <- queued
+		}
+		return false
+	}
+	evt.SkippedRevisions = appendSkippedRevisions(evt.SkippedRevisions, skippedRevisions)
 	for _, queued := range retained {
 		s.ch <- queued
-	}
-	if !droppedLowPriority {
-		return false
 	}
 	select {
 	case s.ch <- evt:
@@ -243,6 +251,16 @@ func (s *subscriber) trySendPriorityLocked(evt protocol.EventEnvelope) bool {
 	default:
 		return false
 	}
+}
+
+func appendSkippedRevisions(existing, skipped []uint64) []uint64 {
+	if len(skipped) == 0 {
+		return existing
+	}
+	out := append([]uint64(nil), existing...)
+	out = append(out, skipped...)
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 func isPriorityEvent(evt protocol.EventEnvelope) bool {

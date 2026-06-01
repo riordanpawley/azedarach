@@ -61,14 +61,15 @@ type ResponseEnvelope struct {
 
 // EventEnvelope is the daemon stream event shell.
 type EventEnvelope struct {
-	ProtocolVersion Version          `json:"protocol_version" msgpack:"protocol_version"`
-	ProjectID       naming.ProjectID `json:"project_id" msgpack:"project_id"`
-	Meta            Metadata         `json:"meta,omitempty" msgpack:"meta,omitempty"`
-	Revision        uint64           `json:"revision" msgpack:"revision"`
-	Event           string           `json:"event" msgpack:"event"`
-	Kind            EnvelopeKind     `json:"kind" msgpack:"kind"`
-	EmittedAt       time.Time        `json:"emitted_at" msgpack:"emitted_at"`
-	Body            []byte           `json:"body,omitempty" msgpack:"body,omitempty"`
+	ProtocolVersion  Version          `json:"protocol_version" msgpack:"protocol_version"`
+	ProjectID        naming.ProjectID `json:"project_id" msgpack:"project_id"`
+	Meta             Metadata         `json:"meta,omitempty" msgpack:"meta,omitempty"`
+	Revision         uint64           `json:"revision" msgpack:"revision"`
+	SkippedRevisions []uint64         `json:"skipped_revisions,omitempty" msgpack:"skipped_revisions,omitempty"`
+	Event            string           `json:"event" msgpack:"event"`
+	Kind             EnvelopeKind     `json:"kind" msgpack:"kind"`
+	EmittedAt        time.Time        `json:"emitted_at" msgpack:"emitted_at"`
+	Body             []byte           `json:"body,omitempty" msgpack:"body,omitempty"`
 }
 
 // ErrorCode identifies typed daemon/client protocol error conditions.
