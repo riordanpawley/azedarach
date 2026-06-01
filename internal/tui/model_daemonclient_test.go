@@ -8134,16 +8134,14 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 			t.Fatalf("bulk archive result = %#v", archiveMsg)
 		}
 
-		if got := transport.requests; len(got) != 7 {
+		if got := transport.requests; len(got) != 5 {
 			t.Fatalf("requests = %v", got)
 		}
-		if transport.requests[0] != daemonclient.CommandTaskList ||
+		if transport.requests[0] != daemonclient.CommandTaskUpdateStatus ||
 			transport.requests[1] != daemonclient.CommandTaskUpdateStatus ||
-			transport.requests[2] != daemonclient.CommandTaskList ||
-			transport.requests[3] != daemonclient.CommandTaskUpdateStatus ||
-			transport.requests[4] != daemonclient.CommandTaskDelete ||
-			transport.requests[5] != daemonclient.CommandTaskDelete ||
-			transport.requests[6] != daemonclient.CommandTaskArchive {
+			transport.requests[2] != daemonclient.CommandTaskDelete ||
+			transport.requests[3] != daemonclient.CommandTaskDelete ||
+			transport.requests[4] != daemonclient.CommandTaskArchive {
 			t.Fatalf("requests = %v", transport.requests)
 		}
 	})

@@ -206,11 +206,11 @@ func (d *Daemon) Create(ctx context.Context, params issues.CreateTaskParams) (do
 }
 
 func (d *Daemon) Update(ctx context.Context, issueID string, status domain.Status) (domain.Task, error) {
-	client, projectID, err := d.issueClientFromContext(ctx)
+	_, projectID, err := d.issueClientFromContext(ctx)
 	if err != nil {
 		return domain.Task{}, err
 	}
-	return client.UpdateWithRuntime(ctx, projectID, issueID, status)
+	return d.updateTaskStatusWithClosePreflight(ctx, projectID, issueID, status, false)
 }
 
 func (d *Daemon) UpdateDetails(ctx context.Context, issueID string, params issues.UpdateTaskParams) (domain.Task, error) {

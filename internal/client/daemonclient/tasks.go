@@ -59,8 +59,9 @@ type TaskUpdateParams struct {
 
 // TaskStatusRequest contains the payload used to update a task status.
 type TaskStatusRequest struct {
-	TaskID naming.IssueID `json:"task_id"`
-	Status domain.Status  `json:"status"`
+	TaskID             naming.IssueID `json:"task_id"`
+	Status             domain.Status  `json:"status"`
+	SkipClosePreflight bool           `json:"skip_close_preflight,omitempty"`
 }
 
 // TaskStatusOptions controls client-side status transition behavior.
@@ -443,18 +444,17 @@ func (c *Client) UpdateTaskStatusWithOptions(ctx context.Context, taskID string,
 	if err != nil {
 		return fmt.Errorf("invalid task id: %w", err)
 	}
-	if status == domain.StatusDone && !opts.SkipClosePreflight {
-		if opts.AutoFinalizeOnClose {
-			if err := c.finalizeTaskRuntimeAttachments(ctx, parsedTaskID.String()); err != nil {
-				return err
-			}
-		} else if _, err := c.ValidateTaskClose(ctx, parsedTaskID.String()); err != nil {
+	skipClosePreflight := opts.SkipClosePreflight
+	if status == domain.StatusDone && opts.AutoFinalizeOnClose && !opts.SkipClosePreflight {
+		if err := c.finalizeTaskRuntimeAttachments(ctx, parsedTaskID.String()); err != nil {
 			return err
 		}
+		skipClosePreflight = true
 	}
 	return c.commandJSON(ctx, CommandTaskUpdateStatus, TaskStatusRequest{
-		TaskID: parsedTaskID,
-		Status: status,
+		TaskID:             parsedTaskID,
+		Status:             status,
+		SkipClosePreflight: skipClosePreflight,
 	}, nil)
 }
 

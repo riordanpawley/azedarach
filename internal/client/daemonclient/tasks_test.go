@@ -515,7 +515,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if err := client.UpdateTaskStatus(context.Background(), "az-3", domain.StatusDone); err != nil {
 			t.Fatalf("UpdateTaskStatus error: %v", err)
 		}
-		wantCommands := []string{CommandTaskList, CommandTaskUpdateStatus}
+		wantCommands := []string{CommandTaskUpdateStatus}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
 		}
@@ -570,7 +570,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if pending.State != protocol.OperationStateQueued {
 			t.Fatalf("state = %q, want queued", pending.State)
 		}
-		wantCommands := []string{CommandTaskList, CommandTaskUpdateStatus}
+		wantCommands := []string{CommandTaskUpdateStatus}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
 		}
@@ -772,48 +772,6 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 					t.Fatalf("commands = %v, want %v", commands, wantCommands)
 				}
 			})
-		}
-	})
-
-	t.Run("status update close guard blocks unresolved target runtime without auto-finalize", func(t *testing.T) {
-		commands := []string{}
-		transport := &taskRecordingTransport{
-			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				assertTaskProjectID(t, req, wantProjectID)
-				commands = append(commands, req.Command)
-				switch req.Command {
-				case CommandTaskList:
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						OK:              true,
-						Body: mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 3, []domain.Task{
-							{
-								ID:             "az-3",
-								Title:          "Close me",
-								Status:         domain.StatusInReview,
-								Session:        &domain.Session{IssueID: "az-3", Worktree: "/tmp/az-3"},
-								HasTmuxSession: true,
-								HasWorktree:    true,
-							},
-						}),
-					}, nil
-				default:
-					t.Fatalf("unexpected command after close guard failure = %q", req.Command)
-					return protocol.ResponseEnvelope{}, nil
-				}
-			},
-		}
-
-		client := New(transport).WithProjectID(wantProjectID)
-		err := client.UpdateTaskStatus(context.Background(), "az-3", domain.StatusDone)
-		if err == nil || !strings.Contains(err.Error(), "issue still has a session") || !strings.Contains(err.Error(), "issue still has a worktree") {
-			t.Fatalf("UpdateTaskStatus error = %v, want session/worktree close guard", err)
-		}
-		wantCommands := []string{CommandTaskList}
-		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
-			t.Fatalf("commands = %v, want %v", commands, wantCommands)
 		}
 	})
 
