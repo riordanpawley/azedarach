@@ -55,6 +55,9 @@ func (w *daemonRuntimeProjectionWriter) PersistSessionProjectionAndPublish(ctx c
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.d.persistSessionState(projectID, session)
+	if w.d.runtimeProjectionCoalescer != nil {
+		return w.d.runtimeProjectionCoalescer.ScheduleSession(ctx, projectID, meta, session)
+	}
 	rev := w.d.nextRevision(projectID)
 	w.d.publishSessionProjectionEventAtRevision(ctx, projectID, meta, session, rev)
 	return rev
@@ -67,6 +70,9 @@ func (w *daemonRuntimeProjectionWriter) PublishSessionProjectionEvent(ctx contex
 	projectID = w.d.canonicalProjectID(projectID)
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.d.runtimeProjectionCoalescer != nil {
+		return w.d.runtimeProjectionCoalescer.ScheduleSession(ctx, projectID, meta, session)
+	}
 	rev := w.d.nextRevision(projectID)
 	w.d.publishSessionProjectionEventAtRevision(ctx, projectID, meta, session, rev)
 	return rev
@@ -99,6 +105,9 @@ func (w *daemonRuntimeProjectionWriter) PersistWorktreeProjectionAndPublish(ctx 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	_ = w.d.persistWorktreeState(ctx, projectID, issueID, path, branch)
+	if w.d.runtimeProjectionCoalescer != nil {
+		return w.d.runtimeProjectionCoalescer.ScheduleWorktree(ctx, projectID, issueID, path)
+	}
 	rev := w.d.nextRevision(projectID)
 	w.d.publishWorktreeProjectionEventAtRevision(ctx, projectID, issueID, path, rev)
 	return rev
@@ -116,6 +125,9 @@ func (w *daemonRuntimeProjectionWriter) DeleteWorktreeProjectionAndPublish(ctx c
 			w.d.cfg.Logger.Warn("delete worktree runtime state failed", "project_id", projectID, "issue_id", issueID, "error", err)
 		}
 	}
+	if w.d.runtimeProjectionCoalescer != nil {
+		return w.d.runtimeProjectionCoalescer.ScheduleWorktree(ctx, projectID, issueID, "")
+	}
 	rev := w.d.nextRevision(projectID)
 	w.d.publishWorktreeProjectionEventAtRevision(ctx, projectID, issueID, "", rev)
 	return rev
@@ -128,6 +140,9 @@ func (w *daemonRuntimeProjectionWriter) PublishWorktreeProjectionEvent(ctx conte
 	projectID = w.d.canonicalProjectID(projectID)
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.d.runtimeProjectionCoalescer != nil {
+		return w.d.runtimeProjectionCoalescer.ScheduleWorktree(ctx, projectID, issueID, path)
+	}
 	rev := w.d.nextRevision(projectID)
 	w.d.publishWorktreeProjectionEventAtRevision(ctx, projectID, issueID, path, rev)
 	return rev
@@ -191,6 +206,9 @@ func (w *daemonRuntimeProjectionWriter) PersistGitStatusProjectionAndPublish(
 	if !(forcePublish || (publishOnChange && changed)) {
 		return 0
 	}
+	if w.d.runtimeProjectionCoalescer != nil {
+		return w.d.runtimeProjectionCoalescer.ScheduleGitStatus(ctx, projectID, projection.IssueID, worktree, status)
+	}
 	rev := w.d.nextRevision(projectID)
 	w.d.publishGitStatusProjectionEventAtRevision(ctx, projectID, projection.IssueID, worktree, status, rev)
 	return rev
@@ -203,6 +221,9 @@ func (w *daemonRuntimeProjectionWriter) PublishGitStatusProjectionEvent(ctx cont
 	projectID = w.d.canonicalProjectID(projectID)
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.d.runtimeProjectionCoalescer != nil {
+		return w.d.runtimeProjectionCoalescer.ScheduleGitStatus(ctx, projectID, issueID, worktree, status)
+	}
 	rev := w.d.nextRevision(projectID)
 	w.d.publishGitStatusProjectionEventAtRevision(ctx, projectID, issueID, worktree, status, rev)
 	return rev
