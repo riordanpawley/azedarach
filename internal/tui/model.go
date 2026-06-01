@@ -2348,9 +2348,9 @@ func projectSessionLifecycleState(state protocol.SessionLifecycleState) (domain.
 
 func projectAgentStatus(status string) (domain.SessionState, bool) {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "":
+	case "", "attached":
 		return "", false
-	case "starting", "working", "running", "syncing", "active", "attached":
+	case "starting", "working", "running", "syncing", "active":
 		return domain.SessionBusy, true
 	case "waiting":
 		return domain.SessionWaiting, true
