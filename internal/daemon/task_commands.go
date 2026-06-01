@@ -864,9 +864,8 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
 	var cmd struct {
-		TaskID             string        `json:"task_id"`
-		Status             domain.Status `json:"status"`
-		SkipClosePreflight bool          `json:"skip_close_preflight,omitempty"`
+		TaskID string        `json:"task_id"`
+		Status domain.Status `json:"status"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -874,7 +873,7 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task status update requested", "project_id", projectID, "task_id", cmd.TaskID, "status", cmd.Status)
 	}
-	task, err := d.updateTaskStatusWithClosePreflight(ctx, projectID, cmd.TaskID, cmd.Status, cmd.SkipClosePreflight)
+	task, err := d.updateTaskStatusWithClosePreflight(ctx, projectID, cmd.TaskID, cmd.Status)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -887,13 +886,13 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 	return resp, nil
 }
 
-func (d *Daemon) updateTaskStatusWithClosePreflight(ctx context.Context, projectID, taskID string, status domain.Status, skipClosePreflight bool) (domain.Task, error) {
+func (d *Daemon) updateTaskStatusWithClosePreflight(ctx context.Context, projectID, taskID string, status domain.Status) (domain.Task, error) {
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return domain.Task{}, fmt.Errorf("issue store unavailable")
 	}
 	taskID = strings.TrimSpace(taskID)
-	if status == domain.StatusDone && !skipClosePreflight {
+	if status == domain.StatusDone {
 		if err := d.validateTaskClosePreflight(ctx, projectID, taskID); err != nil {
 			return domain.Task{}, err
 		}

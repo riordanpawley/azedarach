@@ -210,7 +210,7 @@ func (d *Daemon) Update(ctx context.Context, issueID string, status domain.Statu
 	if err != nil {
 		return domain.Task{}, err
 	}
-	return d.updateTaskStatusWithClosePreflight(ctx, projectID, issueID, status, false)
+	return d.updateTaskStatusWithClosePreflight(ctx, projectID, issueID, status)
 }
 
 func (d *Daemon) UpdateDetails(ctx context.Context, issueID string, params issues.UpdateTaskParams) (domain.Task, error) {

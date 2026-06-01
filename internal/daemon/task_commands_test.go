@@ -770,6 +770,9 @@ func TestTaskUpdateStatusClosePreflightBlocksRawRuntimeAttachments(t *testing.T)
 		t.Fatalf("task.update_status response = %+v, want worktree close guard", resp)
 	}
 
+	if err := runtimeStore.DeleteWorktreeState(ctx, projectID, taskID); err != nil {
+		t.Fatalf("clear worktree projection before skip close: %v", err)
+	}
 	body, err = json.Marshal(map[string]any{
 		"task_id":              taskID,
 		"status":               domain.StatusDone,
@@ -851,6 +854,29 @@ func TestTaskUpdateStatusClosePreflightBlocksRawUnresolvedChildrenAndApplyPath(t
 	}
 	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") {
 		t.Fatalf("task.update_status response = %+v, want child close guard", resp)
+	}
+
+	body, err = json.Marshal(map[string]any{
+		"task_id":              parentID,
+		"status":               domain.StatusDone,
+		"skip_close_preflight": true,
+	})
+	if err != nil {
+		t.Fatalf("marshal skip task update request: %v", err)
+	}
+	resp, err = d.handleTaskUpdateStatus(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-guard-children-skip",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.update_status",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskUpdateStatus skip error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") {
+		t.Fatalf("task.update_status skip response = %+v, want child close guard", resp)
 	}
 
 	_, err = d.Update(withDaemonProjectIDContext(ctx, projectID), parentID, domain.StatusDone)
