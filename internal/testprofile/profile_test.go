@@ -42,7 +42,7 @@ func TestCanonicalFixtureProfilesIncludeDependencyVariants(t *testing.T) {
 		require.Len(t, Integration.Tasks, 4)
 		assert.Len(t, Integration.Tasks[2].Dependencies, 2)
 		assert.ElementsMatch(t, []string{"az-int-root-a", "az-int-root-b"}, []string{Integration.Tasks[2].Dependencies[0].ID.String(), Integration.Tasks[2].Dependencies[1].ID.String()})
-		assert.Equal(t, domain.StatusBlocked, Integration.Tasks[3].Status)
+		assert.Equal(t, domain.StatusInReview, Integration.Tasks[3].Status)
 	})
 
 	t.Run("scale", func(t *testing.T) {

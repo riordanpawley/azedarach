@@ -62,7 +62,7 @@ var Integration = Profile{
 		task("az-int-root-a", "Integration root A", domain.StatusOpen, domain.P2, domain.TypeTask),
 		task("az-int-root-b", "Integration root B", domain.StatusOpen, domain.P2, domain.TypeTask),
 		task("az-int-child", "Integration child", domain.StatusOpen, domain.P1, domain.TypeFeature, dep("az-int-root-a"), dep("az-int-root-b")),
-		task("az-int-independent", "Integration independent", domain.StatusBlocked, domain.P3, domain.TypeBug),
+		task("az-int-independent", "Integration independent", domain.StatusInReview, domain.P3, domain.TypeBug),
 	},
 }
 

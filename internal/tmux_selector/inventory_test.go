@@ -251,7 +251,7 @@ func TestGlobalInventoryLoaderScopesTreeAncestorsByProject(t *testing.T) {
 						{
 							ID:     rootID,
 							Title:  "Wrong project root",
-							Status: domain.StatusBlocked,
+							Status: domain.StatusInReview,
 							Type:   domain.TypeEpic,
 						},
 					},

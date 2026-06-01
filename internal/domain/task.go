@@ -62,7 +62,7 @@ type Status string
 const (
 	StatusOpen       Status = "open"
 	StatusInProgress Status = "in_progress"
-	StatusBlocked    Status = "blocked"
+	StatusInReview   Status = "in_review"
 	StatusDone       Status = "closed"
 )
 
@@ -73,7 +73,7 @@ func (s Status) Column() int {
 		return 0
 	case StatusInProgress:
 		return 1
-	case StatusBlocked:
+	case StatusInReview:
 		return 2
 	case StatusDone:
 		return 3

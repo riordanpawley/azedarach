@@ -72,7 +72,7 @@ func TestTaskListSnapshotPayloadMessagePackRoundTrip(t *testing.T) {
 		Tasks: []domain.Task{{
 			ID:       "az-7",
 			Title:    "Roundtrip",
-			Status:   domain.StatusBlocked,
+			Status:   domain.StatusInReview,
 			Priority: domain.P2,
 			Type:     domain.TypeBug,
 		}},

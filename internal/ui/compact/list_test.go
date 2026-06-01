@@ -253,7 +253,7 @@ func TestRenderStatusAbbreviations(t *testing.T) {
 	}{
 		{domain.StatusOpen, "open"},
 		{domain.StatusInProgress, "prog"},
-		{domain.StatusBlocked, "bloc"},
+		{domain.StatusInReview, "revi"},
 		{domain.StatusDone, "done"},
 	}
 

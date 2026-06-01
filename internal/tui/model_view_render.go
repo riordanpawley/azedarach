@@ -342,7 +342,7 @@ func (m Model) buildColumns() []board.Column {
 	return []board.Column{
 		{Title: "Open", Tasks: m.sortTasksInColumn(filteredTasks, domain.StatusOpen)},
 		{Title: "In Progress", Tasks: m.sortTasksInColumn(filteredTasks, domain.StatusInProgress)},
-		{Title: "Blocked", Tasks: m.sortTasksInColumn(filteredTasks, domain.StatusBlocked)},
+		{Title: "In Review", Tasks: m.sortTasksInColumn(filteredTasks, domain.StatusInReview)},
 		{Title: "Done", Tasks: m.sortTasksInColumn(filteredTasks, domain.StatusDone)},
 	}
 }

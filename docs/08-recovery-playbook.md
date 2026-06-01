@@ -104,14 +104,15 @@ guidance as unsafe unless completion evidence exists. The CLI now blocks
 `az branch merge <issue-id>` guidance unless one of these is true:
 
 - the worker issue is already `closed`
-- a `worker-complete` mailbox event exists for that worker under its parent
-  issue mailbox
+- a `worker-integration-ready` mailbox event exists for that worker under its
+  parent issue mailbox (`worker-ready` and `worker-complete` are accepted as
+  legacy aliases)
 
 If merge guidance is blocked, recover with:
 
 1. `az issue get <issue-id>` to confirm worker status.
 2. `az mail list --parent <parent-issue> --json` to confirm event history.
-3. Ask the worker to publish `worker-complete` once evidence is ready.
+3. Ask the worker to publish `worker-integration-ready` once evidence is ready.
 4. Re-run `az orchestrate integrate --issue <issue-id>`.
 
 When `az branch merge <issue-id>` targets a branch that is already checked out

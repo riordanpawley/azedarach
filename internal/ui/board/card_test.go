@@ -397,7 +397,7 @@ func TestRenderCard_Selected(t *testing.T) {
 	task := domain.Task{
 		ID:       "az-222",
 		Title:    "Selected task",
-		Status:   domain.StatusBlocked,
+		Status:   domain.StatusInReview,
 		Priority: domain.P2,
 		Type:     domain.TypeTask,
 	}

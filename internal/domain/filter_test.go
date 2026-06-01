@@ -159,7 +159,7 @@ func TestFilter_Matches_Status(t *testing.T) {
 	}{
 		{StatusOpen, true},
 		{StatusInProgress, true},
-		{StatusBlocked, false},
+		{StatusInReview, false},
 		{StatusDone, false},
 	}
 

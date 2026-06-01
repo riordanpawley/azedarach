@@ -68,14 +68,14 @@ func CreatePlaceholderData() []Column {
 			},
 		},
 		{
-			Title: "Blocked",
+			Title: "In Review",
 			Tasks: []domain.Task{
 				{
 					ID:       "az-6",
 					Title:    "Deploy to production",
 					Priority: domain.P0,
 					Type:     domain.TypeTask,
-					Status:   domain.StatusBlocked,
+					Status:   domain.StatusInReview,
 					Origin:   "local",
 				},
 			},

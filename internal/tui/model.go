@@ -3641,7 +3641,7 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 		statusOrder := []domain.Status{
 			domain.StatusOpen,
 			domain.StatusInProgress,
-			domain.StatusBlocked,
+			domain.StatusInReview,
 			domain.StatusDone,
 		}
 
@@ -4111,7 +4111,7 @@ func shiftedTaskStatus(current domain.Status, delta int) (domain.Status, bool) {
 	statusOrder := []domain.Status{
 		domain.StatusOpen,
 		domain.StatusInProgress,
-		domain.StatusBlocked,
+		domain.StatusInReview,
 		domain.StatusDone,
 	}
 	currentIdx := -1
@@ -4138,7 +4138,7 @@ func exactTaskStatusForKey(key string) (domain.Status, bool) {
 	case "2":
 		return domain.StatusInProgress, true
 	case "3":
-		return domain.StatusBlocked, true
+		return domain.StatusInReview, true
 	case "4":
 		return domain.StatusDone, true
 	default:
@@ -4152,8 +4152,8 @@ func statusDisplayName(status domain.Status) string {
 		return "Open"
 	case domain.StatusInProgress:
 		return "In Progress"
-	case domain.StatusBlocked:
-		return "Blocked"
+	case domain.StatusInReview:
+		return "In Review"
 	case domain.StatusDone:
 		return "Done"
 	default:

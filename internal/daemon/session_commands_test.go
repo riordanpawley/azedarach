@@ -3588,10 +3588,19 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *test
 	if !strings.Contains(prompt, "Role: worker") {
 		t.Fatalf("prompt = %q, want worker role primer", prompt)
 	}
-	for _, eventType := range []string{"worker-progress", "worker-blocked", "worker-complete"} {
+	for _, eventType := range []string{"worker-progress", "worker-blocked", "worker-integration-ready"} {
 		if !strings.Contains(prompt, eventType) {
 			t.Fatalf("prompt = %q, want mailbox event type %s", prompt, eventType)
 		}
+	}
+	if !strings.Contains(prompt, "worker-ready and worker-complete are accepted only as legacy aliases for worker-integration-ready") {
+		t.Fatalf("prompt = %q, want legacy worker-ready/worker-complete alias guidance", prompt)
+	}
+	if !strings.Contains(prompt, "Use `in_progress` while actively working and `in_review` when complete and ready for orchestrator integration") {
+		t.Fatalf("prompt = %q, want worker status semantics", prompt)
+	}
+	if !strings.Contains(prompt, "Report blockers via dependency edges or worker-blocked mailbox events, not by setting `in_review`") {
+		t.Fatalf("prompt = %q, want blocked-as-graph guidance", prompt)
 	}
 	if strings.Contains(prompt, "events: , , and .") {
 		t.Fatalf("prompt = %q, contains blank mailbox event interpolation", prompt)
@@ -3603,8 +3612,14 @@ func TestBuildStartWorkPromptOmitsMailboxGuidanceForStandaloneTask(t *testing.T)
 	if !strings.Contains(prompt, "Role: contributor") {
 		t.Fatalf("prompt = %q, want contributor role primer", prompt)
 	}
-	if strings.Contains(prompt, "worker-progress") || strings.Contains(prompt, "worker-blocked") || strings.Contains(prompt, "worker-complete") {
+	if strings.Contains(prompt, "worker-progress") || strings.Contains(prompt, "worker-blocked") || strings.Contains(prompt, "worker-integration-ready") || strings.Contains(prompt, "worker-ready") || strings.Contains(prompt, "worker-complete") {
 		t.Fatalf("prompt = %q, want mailbox worker event types omitted", prompt)
+	}
+	if !strings.Contains(prompt, "Use `in_progress` while actively working, `in_review` when complete and awaiting review/integration") {
+		t.Fatalf("prompt = %q, want contributor status semantics", prompt)
+	}
+	if !strings.Contains(prompt, "Represent blocked work with dependency edges and notes, not by using `in_review`") {
+		t.Fatalf("prompt = %q, want contributor blocked-as-graph guidance", prompt)
 	}
 }
 
@@ -3649,6 +3664,12 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "az orchestrate close-session --issue <issue-id>") {
 		t.Fatalf("prompt = %q, want close-session instruction", prompt)
+	}
+	if !strings.Contains(prompt, "Treat blocked work as graph state from unresolved `blocks` dependencies") {
+		t.Fatalf("prompt = %q, want graph-derived blocked guidance", prompt)
+	}
+	if !strings.Contains(prompt, "Treat `in_review` workers as ready for orchestrator integration") {
+		t.Fatalf("prompt = %q, want in-review integration guidance", prompt)
 	}
 }
 

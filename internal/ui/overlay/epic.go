@@ -227,7 +227,7 @@ func (e *EpicDrillDown) renderStatusBadge(status domain.Status) string {
 	case domain.StatusInProgress:
 		icon = "◐"
 		color = styles.Yellow
-	case domain.StatusBlocked:
+	case domain.StatusInReview:
 		icon = "◯"
 		color = styles.Red
 	case domain.StatusDone:

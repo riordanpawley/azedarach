@@ -2310,7 +2310,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	fs.StringVar(&opts.AppendNotes, "append-notes", "", "append a note line to issue notes")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue update result as JSON")
-	fs.StringVar(&statusRaw, "status", "", "updated status (open|in_progress|blocked|closed)")
+	fs.StringVar(&statusRaw, "status", "", "updated status (open|in_progress|in_review|closed)")
 	fs.Func("update-impl", "set implementation assignment (repeatable)", func(v string) error {
 		trimmed := strings.TrimSpace(v)
 		if trimmed == "" {
@@ -2325,7 +2325,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		return IssueUpdateOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|in_review|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueUpdateOptions{}, fmt.Errorf("--impl is not supported for issue update (it is create-only); normal field updates do not need --update-impl, and --update-impl is only for changing issue implementations")
@@ -2337,7 +2337,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|in_review|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if typeRaw != "" {
 		tt, err := parseTaskType(typeRaw)
@@ -5171,8 +5171,8 @@ func parseStatus(raw string) (domain.Status, error) {
 		return domain.StatusOpen, nil
 	case "in_progress":
 		return domain.StatusInProgress, nil
-	case "blocked":
-		return domain.StatusBlocked, nil
+	case "in_review":
+		return domain.StatusInReview, nil
 	case "closed":
 		return domain.StatusDone, nil
 	default:

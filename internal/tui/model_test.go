@@ -107,13 +107,13 @@ func newTestModel() Model {
 	// Add some test tasks
 	// Open column: az-1 (index 0), az-2 (index 1)
 	// InProgress column: az-3 (index 0)
-	// Blocked column: az-4 (index 0)
+	// In Review column: az-4 (index 0)
 	// Done column: az-5 (index 0)
 	m.tasks = []domain.Task{
 		{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
 		{ID: "az-2", Title: "Task 2", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeBug},
 		{ID: "az-3", Title: "Task 3", Status: domain.StatusInProgress, Priority: domain.P0, Type: domain.TypeFeature},
-		{ID: "az-4", Title: "Task 4", Status: domain.StatusBlocked, Priority: domain.P1, Type: domain.TypeTask},
+		{ID: "az-4", Title: "Task 4", Status: domain.StatusInReview, Priority: domain.P1, Type: domain.TypeTask},
 		{ID: "az-5", Title: "Task 5", Status: domain.StatusDone, Priority: domain.P3, Type: domain.TypeTask},
 	}
 
@@ -2017,15 +2017,15 @@ func TestRenderBoardView_NarrowWidthShowsVisibleColumnWindow(t *testing.T) {
 	if !strings.Contains(view, "In Progress (1)") {
 		t.Fatalf("expected in progress column header in narrow view")
 	}
-	if strings.Contains(view, "Blocked (1)") {
-		t.Fatalf("expected blocked column to be out of view when window is on first two columns")
+	if strings.Contains(view, "In Review (1)") {
+		t.Fatalf("expected in-review column to be out of view when window is on first two columns")
 	}
 
 	m.nav.SelectTask("az-4", 2)
 	m.ensureCursorVisible(m.buildColumns())
 	view = m.renderBoardView()
-	if !strings.Contains(view, "In Progress (1)") || !strings.Contains(view, "Blocked (1)") {
-		t.Fatalf("expected in progress and blocked columns in shifted narrow view")
+	if !strings.Contains(view, "In Progress (1)") || !strings.Contains(view, "In Review (1)") {
+		t.Fatalf("expected in progress and in-review columns in shifted narrow view")
 	}
 	if strings.Contains(view, "Open (2)") {
 		t.Fatalf("expected open column to be out of view after horizontal shift")
@@ -2114,7 +2114,7 @@ func TestGotoMode(t *testing.T) {
 	})
 
 	t.Run("gh goes to first column", func(t *testing.T) {
-		// Start at task in Blocked column
+		// Start at task in In Review column
 		m.nav.SelectTask("az-4", 2)
 		m.editor.EnterGoto()
 		result, _ := m.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
@@ -3710,7 +3710,7 @@ func TestIssuesLoadedUsesHydratedRuntimeOverlays(t *testing.T) {
 
 	result, _ := m.Update(issuesLoadedMsg{
 		tasks: []domain.Task{
-			{ID: "az-1", Title: "Task 1 refreshed", Status: domain.StatusBlocked, Priority: domain.P2, Type: domain.TypeTask},
+			{ID: "az-1", Title: "Task 1 refreshed", Status: domain.StatusInReview, Priority: domain.P2, Type: domain.TypeTask},
 			{ID: "az-6", Title: "Task 6", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeBug},
 		},
 		revision: 13,
@@ -3718,7 +3718,7 @@ func TestIssuesLoadedUsesHydratedRuntimeOverlays(t *testing.T) {
 	newModel := result.(Model)
 
 	task := newModel.tasks[0]
-	if task.ID != "az-1" || task.Title != "Task 1 refreshed" || task.Status != domain.StatusBlocked {
+	if task.ID != "az-1" || task.Title != "Task 1 refreshed" || task.Status != domain.StatusInReview {
 		t.Fatalf("refreshed task = %+v", task)
 	}
 	if task.HasTmuxSession || task.HasWorktree || task.GitAheadCount != 0 || task.GitBehindCount != 0 || task.HasUncommittedChanges || task.GitAdditions != 0 || task.GitDeletions != 0 {
@@ -3756,7 +3756,7 @@ func TestTaskDeletionSuppressesHydratedResurrection(t *testing.T) {
 
 	result, _ := deletedModel.Update(issuesLoadedMsg{
 		tasks: []domain.Task{
-			{ID: "az-1", Title: "Task 1 resurrected", Status: domain.StatusBlocked, Priority: domain.P0, Type: domain.TypeTask},
+			{ID: "az-1", Title: "Task 1 resurrected", Status: domain.StatusInReview, Priority: domain.P0, Type: domain.TypeTask},
 			{ID: "az-2", Title: "Task 2 refreshed", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeBug},
 			{ID: "az-3", Title: "Task 3", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeFeature},
 		},
@@ -5307,7 +5307,7 @@ func TestHandleBulkActionShowsImmediateFeedback(t *testing.T) {
 		{name: "move right", action: "l", wantToast: "Bulk move queued for 2 task(s)"},
 		{name: "open", action: "o", wantToast: "Bulk status update queued for 2 task(s)"},
 		{name: "in progress", action: "i", wantToast: "Bulk status update queued for 2 task(s)"},
-		{name: "blocked", action: "b", wantToast: "Bulk status update queued for 2 task(s)"},
+		{name: "in review", action: "b", wantToast: "Bulk status update queued for 2 task(s)"},
 		{name: "done", action: "D", wantToast: "Bulk status update queued for 2 task(s)"},
 		{name: "delete", action: "d", wantToast: "Bulk delete queued for 2 task(s)"},
 		{name: "archive", action: "a", wantToast: "Bulk archive queued for 2 task(s)"},

@@ -23,9 +23,9 @@ func makeTestColumns() []board.Column {
 			},
 		},
 		{
-			Title: "Blocked",
+			Title: "In Review",
 			Tasks: []domain.Task{
-				{ID: "az-4", Title: "Task 4", Status: domain.StatusBlocked},
+				{ID: "az-4", Title: "Task 4", Status: domain.StatusInReview},
 			},
 		},
 		{
@@ -51,9 +51,9 @@ func makeColumnsWithEmptyMiddle() []board.Column {
 			Tasks: []domain.Task{},
 		},
 		{
-			Title: "Blocked",
+			Title: "In Review",
 			Tasks: []domain.Task{
-				{ID: "az-blocked-1", Title: "Blocked 1", Status: domain.StatusBlocked},
+				{ID: "az-blocked-1", Title: "Blocked 1", Status: domain.StatusInReview},
 			},
 		},
 		{
@@ -245,7 +245,7 @@ func TestService_JumpToTaskByIndex(t *testing.T) {
 	svc := NewService()
 	columns := makeTestColumns()
 
-	// Jump to flat index 3 (az-4 in Blocked column)
+	// Jump to flat index 3 (az-4 in In Review column)
 	// Flat: az-1(0), az-2(1), az-3(2), az-4(3), az-5(4)
 	found := svc.JumpToTaskByIndex(columns, 3)
 	if !found {
@@ -318,7 +318,7 @@ func TestService_GetCurrentStatus(t *testing.T) {
 	}{
 		{"az-1", 0, domain.StatusOpen},
 		{"az-3", 1, domain.StatusInProgress},
-		{"az-4", 2, domain.StatusBlocked},
+		{"az-4", 2, domain.StatusInReview},
 		{"az-5", 3, domain.StatusDone},
 	}
 

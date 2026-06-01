@@ -704,8 +704,8 @@ func (d *DetailPanel) formatStatus(status domain.Status) string {
 		return "Open"
 	case domain.StatusInProgress:
 		return "In Progress"
-	case domain.StatusBlocked:
-		return "Blocked"
+	case domain.StatusInReview:
+		return "In Review"
 	case domain.StatusDone:
 		return "Done"
 	default:

@@ -203,7 +203,7 @@ func TestRenderCard_ShowsBlockedPhaseChip(t *testing.T) {
 	blocked := domain.Task{
 		ID:       "az-blocked",
 		Title:    "Blocked",
-		Status:   domain.StatusBlocked,
+		Status:   domain.StatusInReview,
 		Priority: domain.P1,
 		Type:     domain.TypeTask,
 		Dependencies: []domain.Dependency{

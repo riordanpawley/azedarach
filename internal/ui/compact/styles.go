@@ -27,7 +27,7 @@ type Styles struct {
 	// Status abbreviations
 	StatusOpen       lipgloss.Style
 	StatusInProgress lipgloss.Style
-	StatusBlocked    lipgloss.Style
+	StatusInReview   lipgloss.Style
 	StatusDone       lipgloss.Style
 
 	// Priority colors
@@ -107,7 +107,7 @@ func NewStyles() *Styles {
 		StatusInProgress: lipgloss.NewStyle().
 			Foreground(styles.Yellow),
 
-		StatusBlocked: lipgloss.NewStyle().
+		StatusInReview: lipgloss.NewStyle().
 			Foreground(styles.Red),
 
 		StatusDone: lipgloss.NewStyle().

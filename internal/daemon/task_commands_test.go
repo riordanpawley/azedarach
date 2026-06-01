@@ -39,7 +39,7 @@ func TestBuildTaskSnapshotExportBodyIsDeterministic(t *testing.T) {
 			{
 				ID:           "b-task",
 				Title:        "Bravo",
-				Status:       domain.StatusBlocked,
+				Status:       domain.StatusOpen,
 				Priority:     domain.P2,
 				Type:         domain.TypeTask,
 				UpdatedAt:    time.Now(),
@@ -99,7 +99,7 @@ func TestBuildTaskSnapshotExportBodyIsDeterministic(t *testing.T) {
 	if got, want := body.Tasks[1].ID, "b-task"; got != want {
 		t.Fatalf("Tasks[1].ID = %q, want %q", got, want)
 	}
-	if got, want := body.Tasks[1].Critical, true; got != want {
+	if got, want := body.Tasks[1].Critical, false; got != want {
 		t.Fatalf("Tasks[1].Critical = %v, want %v", got, want)
 	}
 
@@ -574,7 +574,7 @@ func TestHandleTaskGetUsesFreshTaskListSnapshotCache(t *testing.T) {
 		t.Fatalf("task.list response = %+v", listResp.Error)
 	}
 
-	if err := issuesClient.Update(ctx, taskID, domain.StatusBlocked); err != nil {
+	if err := issuesClient.Update(ctx, taskID, domain.StatusInReview); err != nil {
 		t.Fatalf("update issue behind cache: %v", err)
 	}
 
@@ -654,7 +654,7 @@ func TestHandleTaskGetInvalidatesTaskListSnapshotCacheAfterIssueUpdate(t *testin
 
 	updateBody, err := json.Marshal(map[string]any{
 		"task_id": taskID,
-		"status":  domain.StatusBlocked,
+		"status":  domain.StatusInReview,
 	})
 	if err != nil {
 		t.Fatalf("marshal task update request: %v", err)
@@ -702,7 +702,7 @@ func TestHandleTaskGetInvalidatesTaskListSnapshotCacheAfterIssueUpdate(t *testin
 	if got, want := len(payload.Tasks), 1; got != want {
 		t.Fatalf("payload.Tasks len = %d, want %d", got, want)
 	}
-	if got, want := payload.Tasks[0].Status, domain.StatusBlocked; got != want {
+	if got, want := payload.Tasks[0].Status, domain.StatusInReview; got != want {
 		t.Fatalf("payload task status = %q, want %q", got, want)
 	}
 }

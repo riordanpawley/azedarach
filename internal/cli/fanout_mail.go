@@ -902,10 +902,6 @@ func computeRunnableLeaves(rootIssueID string, tasks []domain.Task) (fanoutReady
 			result.Active = append(result.Active, idRaw)
 			continue
 		}
-		if task.Status == domain.StatusBlocked {
-			result.Blocked[idRaw] = "status=blocked"
-			continue
-		}
 		blockers := unresolvedBlockers(task, byID)
 		if len(blockers) > 0 {
 			result.Blocked[idRaw] = "waiting on " + strings.Join(blockers, ",")

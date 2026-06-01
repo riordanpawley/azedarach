@@ -435,8 +435,8 @@ func parseApplyStatus(value string) (domain.Status, error) {
 		return domain.StatusOpen, nil
 	case "in_progress", "in progress", "progress":
 		return domain.StatusInProgress, nil
-	case "blocked":
-		return domain.StatusBlocked, nil
+	case "in_review":
+		return domain.StatusInReview, nil
 	case "done", "closed", "complete", "completed":
 		return domain.StatusDone, nil
 	default:

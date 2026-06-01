@@ -1195,7 +1195,7 @@ func buildTaskSnapshotExportBody(projectID string, revision uint64, tasks []doma
 			}(),
 			DependencyCount: len(task.Dependencies),
 			SessionAttached: hasSession,
-			Critical:        task.Status == domain.StatusBlocked,
+			Critical:        false,
 		})
 	}
 

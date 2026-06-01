@@ -138,7 +138,7 @@ func (m *FilterMenu) handleStatusMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "b":
-		m.filter.ToggleStatus(domain.StatusBlocked)
+		m.filter.ToggleStatus(domain.StatusInReview)
 		m.mode = filterModeNormal
 		return m, nil
 
@@ -294,7 +294,7 @@ func (m *FilterMenu) renderContent() string {
 	b.WriteString(m.renderFilterLine("Status", "s", []filterOption{
 		{key: "o", label: "Open", active: m.filter.Status[domain.StatusOpen]},
 		{key: "i", label: "In Progress", active: m.filter.Status[domain.StatusInProgress]},
-		{key: "b", label: "Blocked", active: m.filter.Status[domain.StatusBlocked]},
+		{key: "b", label: "In Review", active: m.filter.Status[domain.StatusInReview]},
 		{key: "d", label: "Done", active: m.filter.Status[domain.StatusDone]},
 	}, m.mode == filterModeStatus))
 

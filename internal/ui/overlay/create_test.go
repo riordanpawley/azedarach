@@ -876,7 +876,7 @@ func TestParseTaskTemplate_IgnoresTemplateDividerInsideSections(t *testing.T) {
 		"",
 		"Type:     task        (task | bug | feature | epic | chore)",
 		"Priority: P2          (P0 = highest, P4 = lowest)",
-		"Status:   open        (open | in_progress | blocked | closed)",
+		"Status:   open        (open | in_progress | in_review | closed)",
 		"Assignee:",
 		"Labels:",
 		"Impl:     default",
@@ -921,7 +921,7 @@ func TestCreateTaskOverlayCtrlEAppliesEditedTemplate(t *testing.T) {
 			"",
 			"Type:     feature        (task | bug | feature | epic | chore)",
 			"Priority: P0          (P0 = highest, P4 = lowest)",
-			"Status:   blocked        (open | in_progress | blocked | closed)",
+			"Status:   in_review        (open | in_progress | in_review | closed)",
 			"Assignee: jane",
 			"Labels:   ui, editor",
 			"Impl:     go-bubbletea",
@@ -961,7 +961,7 @@ func TestCreateTaskOverlayCtrlEAppliesEditedTemplate(t *testing.T) {
 	assert.Equal(t, "Edited from editor", created.Description)
 	assert.Equal(t, domain.TypeFeature, created.Type)
 	assert.Equal(t, domain.P0, created.Priority)
-	assert.Equal(t, domain.StatusBlocked, created.Status)
+	assert.Equal(t, domain.StatusInReview, created.Status)
 	assert.Equal(t, "jane", created.Assignee)
 	assert.Equal(t, []string{"ui", "editor"}, created.Labels)
 	assert.Equal(t, []string{"go-bubbletea"}, created.Implementations)
@@ -991,7 +991,7 @@ func TestCreateTaskOverlayCtrlEUsesExecProcessByDefault(t *testing.T) {
 				"",
 				"Type:     task        (task | bug | feature | epic | chore)",
 				"Priority: P2          (P0 = highest, P4 = lowest)",
-				"Status:   open        (open | in_progress | blocked | closed)",
+				"Status:   open        (open | in_progress | in_review | closed)",
 				"Assignee:",
 				"Labels:",
 				"Impl:     default",
@@ -1048,7 +1048,7 @@ func TestParseTaskTemplateFullMetadata(t *testing.T) {
 		"",
 		"Type:     chore        (task | bug | feature | epic | chore)",
 		"Priority: P4          (P0 = highest, P4 = lowest)",
-		"Status:   in_progress        (open | in_progress | blocked | closed)",
+		"Status:   in_progress        (open | in_progress | in_review | closed)",
 		"Assignee: sam",
 		"Labels:   alpha, beta",
 		"Impl:     go-bubbletea",

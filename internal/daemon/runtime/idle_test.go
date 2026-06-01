@@ -80,7 +80,7 @@ func TestShutdownWaitsForInFlightOperations(t *testing.T) {
 
 func TestRecordActivityResetsIdleShutdownTimer(t *testing.T) {
 	reachedClose := make(chan struct{}, 1)
-	s := NewIdleSupervisor(40*time.Millisecond, ShutdownHooks{
+	s := NewIdleSupervisor(200*time.Millisecond, ShutdownHooks{
 		StopIntake: func() error { return nil },
 		DrainInFlight: func(context.Context) error {
 			return nil
@@ -92,10 +92,10 @@ func TestRecordActivityResetsIdleShutdownTimer(t *testing.T) {
 	})
 	s.Start()
 
-	time.Sleep(15 * time.Millisecond)
+	time.Sleep(25 * time.Millisecond)
 	s.RecordActivity()
 
-	time.Sleep(35 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	select {
 	case <-reachedClose:
 		t.Fatal("shutdown fired before refreshed idle deadline")

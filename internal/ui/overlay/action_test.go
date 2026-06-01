@@ -544,7 +544,7 @@ func TestActionMenu_StatusKeyActions(t *testing.T) {
 	}{
 		"1": {label: "Set status: Open", enabled: true},
 		"2": {label: "Set status: In Progress", enabled: false},
-		"3": {label: "Set status: Blocked", enabled: true},
+		"3": {label: "Set status: In Review", enabled: true},
 		"4": {label: "Set status: Done", enabled: true},
 	}
 	for key, want := range statusActions {

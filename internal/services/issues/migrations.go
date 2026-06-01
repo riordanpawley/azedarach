@@ -32,6 +32,7 @@ var orderedMigrations = []migration{
 	{id: "0009_decision_audit_log", path: "migrations/0009_decision_audit_log.sql"},
 	{id: "0010_decisions_refresh", path: "migrations/0010_decisions_refresh.sql"},
 	{id: "0011_decisions_consequences", path: "migrations/0011_decisions_consequences.sql"},
+	{id: "0012_blocked_status_to_open", path: "migrations/0012_blocked_status_to_open.sql"},
 }
 
 func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {

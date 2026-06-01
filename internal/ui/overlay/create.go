@@ -1227,7 +1227,7 @@ func serializeTaskTemplate(
 		"",
 		fmt.Sprintf("Type:     %s        (task | bug | feature | epic | chore)", string(taskType)),
 		fmt.Sprintf("Priority: P%d          (P0 = highest, P4 = lowest)", int(priority)),
-		fmt.Sprintf("Status:   %s        (open | in_progress | blocked | closed)", string(status)),
+		fmt.Sprintf("Status:   %s        (open | in_progress | in_review | closed)", string(status)),
 		"Assignee: " + strings.TrimSpace(assignee),
 		"Labels:   " + labelsValue,
 		"Impl:     " + implValue,
@@ -1322,8 +1322,8 @@ func parseTaskTemplate(markdown, id string, parentID *string) (TaskCreatedMsg, e
 				status = domain.StatusOpen
 			case string(domain.StatusInProgress):
 				status = domain.StatusInProgress
-			case string(domain.StatusBlocked):
-				status = domain.StatusBlocked
+			case string(domain.StatusInReview):
+				status = domain.StatusInReview
 			case string(domain.StatusDone):
 				status = domain.StatusDone
 			default:

@@ -36,9 +36,9 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 		m.beginMutationFeedback(fmt.Sprintf("Bulk status update queued for %d task(s)", count))
 		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusInProgress)
 
-	case "b": // Set to Blocked
+	case "b": // Set to In Review
 		m.beginMutationFeedback(fmt.Sprintf("Bulk status update queued for %d task(s)", count))
-		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusBlocked)
+		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusInReview)
 
 	case "D": // Set to Done
 		m.beginMutationFeedback(fmt.Sprintf("Bulk status update queued for %d task(s)", count))

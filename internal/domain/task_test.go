@@ -11,7 +11,7 @@ func TestStatus_Column(t *testing.T) {
 	}{
 		{StatusOpen, 0},
 		{StatusInProgress, 1},
-		{StatusBlocked, 2},
+		{StatusInReview, 2},
 		{StatusDone, 3},
 		{Status("unknown"), 0},
 	}

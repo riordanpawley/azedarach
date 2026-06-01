@@ -9,7 +9,7 @@
 ││    tmux yes  worktree yes  git dirty (+8/-2; ↑2)                 r refresh                      │
 ││    💬 renderDialogTwoPane ok                                     Esc close                      │
 ││ ───────────────────────────────────────────────────────────                                     │
-││    az-456  blocked    ◐ waiting                                                                 │
+││    az-456  in_review    ◐ waiting                                                               │
 ││    Fix selector overflow on mobile                                                              │
 ││    ⏱ not started  📁 /Users/riordan/prog/Chefy                                                  │
 ││    tmux yes  worktree yes  git clean                                                            │

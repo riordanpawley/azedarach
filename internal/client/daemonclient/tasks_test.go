@@ -128,7 +128,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 					Kind:            protocol.EnvelopeKindResponse,
 					Revision:        17,
 					OK:              true,
-					Body:            mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 17, []domain.Task{{ID: "az-9", Title: "Task 9", Status: domain.StatusBlocked}}),
+					Body:            mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 17, []domain.Task{{ID: "az-9", Title: "Task 9", Status: domain.StatusInReview}}),
 				}, nil
 			},
 		}
@@ -172,7 +172,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 					Kind:            protocol.EnvelopeKindResponse,
 					Revision:        17,
 					OK:              true,
-					Body:            mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 17, []domain.Task{{ID: "az-9", Title: "Task 9", Status: domain.StatusBlocked}}),
+					Body:            mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 17, []domain.Task{{ID: "az-9", Title: "Task 9", Status: domain.StatusInReview}}),
 				}, nil
 			},
 		}
@@ -213,7 +213,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 					Kind:            protocol.EnvelopeKindResponse,
 					Revision:        18,
 					OK:              true,
-					Body:            mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 18, []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusBlocked}, {ID: "az-2", Title: "Task 2", Status: domain.StatusOpen}}),
+					Body:            mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 18, []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusInReview}, {ID: "az-2", Title: "Task 2", Status: domain.StatusOpen}}),
 				}, nil
 			},
 		}

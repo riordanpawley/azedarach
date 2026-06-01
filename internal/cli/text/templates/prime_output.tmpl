@@ -12,8 +12,10 @@ Active issue ID: `{{ .ActiveIssueID }}`
 {{ if .ImplementationSection }}{{ .ImplementationSection }}{{ end }}
 - How to use `az` command map:
   - Issue lifecycle:
-  - `az issue list --limit 20`, `az issue list --status in_progress --limit 20`, `az issue get <issue-id>`, `az issue create "Child task" [--json]` (immediate child work; auto-parents under `AZEDARACH_ISSUE_ID`){{ if .TmuxAvailable }}, `az issue split "Child task" [--json]` (create isolated child session){{ end }}, `az issue create --deferred "Later backlog task" [--json]` (standalone backlog only; skips auto-parenting and is not a worktree/session control), `az issue update <issue-id> --status in_progress|blocked|open [--json]`, `az issue close <issue-id> [--json]`, `az issue finalize <issue-id> [--remove-worktree] [--json]`
+  - `az issue list --limit 20`, `az issue list --status in_progress --limit 20`, `az issue get <issue-id>`, `az issue create "Child task" [--json]` (immediate child work; auto-parents under `AZEDARACH_ISSUE_ID`){{ if .TmuxAvailable }}, `az issue split "Child task" [--json]` (create isolated child session){{ end }}, `az issue create --deferred "Later backlog task" [--json]` (standalone backlog only; skips auto-parenting and is not a worktree/session control), `az issue update <issue-id> --status in_review|in_progress|open [--json]`, `az issue close <issue-id> [--json]`, `az issue finalize <issue-id> [--remove-worktree] [--json]`
   - `az issue update`: use `--update-impl` only when changing implementation assignments; status/title/notes updates do not need it.
+  - Status semantics: use `open` for not-yet-active work, `in_progress` while actively working, `in_review` when implementation is complete and waiting for human/orchestrator review or integration, and `closed` only after acceptance/integration is complete.
+  - Blocked is not an issue status. Represent blocked work with dependency edges (`az issue dep add <blocked-issue> <blocker-issue> --type blocks`) and record blocker evidence in issue notes or mailbox events.
   - `az issue bulk-create --input issues.json --json`, `az issue bulk-update --input updates.json --json`, `az issue update <issue-id> --design "..."`, `az issue update <issue-id> --notes "..."`, `az issue update <issue-id> --append-notes "..."`
   - Issue dependency graph:
   - `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from|created-in] [--json]`, `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from|created-in] [--json]`
@@ -38,6 +40,8 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - `orchestration.via` is `az`: use `az orchestrate` as the worker launch and coordination authority. Do not use harness-native subagent/delegation tooling for this graph unless the user explicitly overrides this or changes `orchestration.via` to `native`.
   - Use `az orchestrate` for durable tracked task graphs that need issue dependencies, mailbox events, recoverable sessions, isolated worktrees, integration guidance, and `complete-check`. Native subagents are better for short-lived ad hoc exploration or review where the result can be summarized back into the current session; do not use them to execute this `az` graph unless the user explicitly overrides the mode.
   - Use `az orchestrate status` for readiness snapshots, `watch` for continuous observe-only mailbox/runnable updates, `start` to launch runnable leaf workers, `integrate` for worker result guidance, `close-session` to clear active worker sessions after integration, and `complete-check` before closing the root issue.
+  - Orchestration readiness is graph-derived: open/in-progress/in-review leaves can be blocked by unresolved `blocks` dependencies; closing the blocker issue unblocks downstream work. Do not set `in_review` to mean blocked.
+  - Worker completion flow: workers should leave their issue `in_review` with notes and evidence when work is ready for integration; the orchestrator integrates/validates, then closes the worker issue.
   - After every `az orchestrate start`, immediately start `az orchestrate watch --root <issue-id> --since <seq> --jsonl` in another pane/session and keep it running until all active workers are integrated or intentionally stopped; do not add `--once` for orchestration monitoring.
   - Prefer `az orchestrate watch` and `status` for worker observation. Use direct tmux pane capture only when watch/status indicate a worker may be stuck or failed, or when you need a sparse progress spot-check; do not poll tmux panes on a fixed interval.
   - Az orchestration loop:
@@ -45,7 +49,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
     2. Run `az orchestrate status --root <issue-id> --json` to inspect runnable leaves, blocked leaves, active sessions, and the next mailbox sequence.
     3. Start only runnable leaves with `az orchestrate start --root <issue-id> --limit <n>`; use `--issue <issue-id>` for hand-picked starts when ordering matters.
     4. Watch progress continuously with `az orchestrate watch --root <issue-id> --since <seq> --jsonl` left running in another pane/session; handle `worker-blocked`, dependency-ready, failed sessions, and newly runnable leaves before starting the next wave.
-    5. Integrate completed workers with `az orchestrate integrate --issue <issue-id>`, close worker sessions with `az orchestrate close-session --issue <issue-id>`, and close child issues when evidence is recorded.
+    5. Integrate workers that are `in_review` or otherwise report completion with `az orchestrate integrate --issue <issue-id>`, close worker sessions with `az orchestrate close-session --issue <issue-id>`, and close child issues only after evidence is integrated.
     6. Repeat status -> start -> watch until `az orchestrate complete-check --root <issue-id>` passes, then run final validation and close the root.
   - Small graph: 1-3 leaves, usually run `status`, then `start --limit 3`, then `complete-check` after workers finish.
   - Medium graph: 4-10 leaves, run bounded waves (`--limit 2` to `--limit 4`), keep `az orchestrate watch` running between waves, and start newly unblocked leaves only after dependency-ready/complete signals.
@@ -58,7 +62,8 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Branch merge targeting: `az branch merge <issue-id>` and `az branch agent-merge <issue-id> --target base` merge into the nearest non-closed ancestor branch; if no open ancestor exists they merge into configured repo base branch.
   - If that nearest non-closed ancestor has no active worktree branch, base-target merge is blocked until that ancestor session/worktree is started or attached.
   - Mailbox coordination:
-  - `az mail send --parent <parent-issue> --type dependency-ready --body "..."`, `az mail list --parent <parent-issue> --since <seq> --json`, `az mail watch --parent <parent-issue> --since <seq> --jsonl`
+  - Preferred event types: `worker-progress`, `worker-blocked`, `worker-integration-ready`, and `dependency-ready`; `worker-ready` and `worker-complete` are legacy aliases for `worker-integration-ready`.
+  - `az mail send --parent <parent-issue> --type dependency-ready --body "..."`, `az mail send --parent <parent-issue> --issue <worker-issue> --type worker-integration-ready --body "evidence..."`, `az mail list --parent <parent-issue> --since <seq> --json`, `az mail watch --parent <parent-issue> --since <seq> --jsonl`
   - Spec traceability:
   - {{ if .SpecEnabled }}`az spec req list/get/create/update/delete`, `az spec link list/add/remove`, `az spec read`, `az spec lint`, and `az spec parity` before behavior changes and after behavior edits to keep requirements/links aligned.{{ else }}Spec workflows disabled for this project (`az config set spec.enabled false`).{{ end }}
   - Decision records:
@@ -107,6 +112,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Update the active issue's design/notes as decisions change; capture subtask-level detail on the relevant child issue instead of bloating a parent/epic description.
   - `az issue get` hides historical notes in text output by default; use `az issue get <issue-id> --with-notes` only when full note history is needed.
   - Use status/priority/labels flags when state changes materially.
+  - Status update rule: move your active issue to `in_progress` when starting; use `in_review` only when the requested work is complete but awaiting review/integration; use `closed` only when acceptance criteria are met and required integration/validation is done.
 - Overlay edits: check `az spec read --issue <issue-id>` before behavior changes, keep `View()` and `Size()` aligned, validate default and narrow viewports, and update goldens when rendered output changes. If the work is docs/process-only, record `Spec impact: none (docs/process-only)` in issue notes.
 - `az issue --help`
 {{ if .SpecGuardrails }}- Spec workflow:

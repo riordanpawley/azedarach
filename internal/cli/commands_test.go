@@ -3396,13 +3396,13 @@ func TestParseIssueListArgs(t *testing.T) {
 		},
 		{
 			name: "status filters",
-			args: []string{"--status", "open", "--status", "blocked", "--statuses", "in_progress,open"},
-			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, States: []domain.Status{domain.StatusOpen, domain.StatusBlocked, domain.StatusInProgress}},
+			args: []string{"--status", "open", "--status", "in_review", "--statuses", "in_progress,open"},
+			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, States: []domain.Status{domain.StatusOpen, domain.StatusInReview, domain.StatusInProgress}},
 		},
 		{
 			name: "state aliases",
-			args: []string{"--state", "open", "--states", "blocked"},
-			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, States: []domain.Status{domain.StatusOpen, domain.StatusBlocked}},
+			args: []string{"--state", "open", "--states", "in_review"},
+			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, States: []domain.Status{domain.StatusOpen, domain.StatusInReview}},
 		},
 		{
 			name: "id filters",
@@ -3962,9 +3962,9 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 		},
 		{
 			name: "interspersed positional then status flag",
-			args: []string{"az-1", "--status", "blocked"},
+			args: []string{"az-1", "--status", "in_review"},
 			want: func() IssueUpdateOptions {
-				status := domain.StatusBlocked
+				status := domain.StatusInReview
 				return IssueUpdateOptions{
 					IssueID: "az-1",
 					Status:  &status,
@@ -4517,7 +4517,7 @@ func TestIssueListCommand_StatusFilter(t *testing.T) {
 	now := time.Date(2026, 3, 26, 2, 0, 0, 0, time.UTC)
 	tasks := []domain.Task{
 		{ID: "az-1", Title: "Open", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(3 * time.Hour)},
-		{ID: "az-2", Title: "Blocked", Status: domain.StatusBlocked, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(2 * time.Hour)},
+		{ID: "az-2", Title: "Blocked", Status: domain.StatusInReview, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(2 * time.Hour)},
 		{ID: "az-3", Title: "Closed", Status: domain.StatusDone, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(1 * time.Hour)},
 	}
 
@@ -4546,7 +4546,7 @@ func TestIssueListCommand_StatusFilter(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() error {
-		return IssueListCommand(deps, IssueListOptions{States: []domain.Status{domain.StatusOpen, domain.StatusBlocked}})
+		return IssueListCommand(deps, IssueListOptions{States: []domain.Status{domain.StatusOpen, domain.StatusInReview}})
 	})
 	if strings.Contains(output, "az-3") {
 		t.Fatalf("status filter should exclude az-3: %q", output)
@@ -4741,7 +4741,7 @@ func TestIssueGetCommandJSON(t *testing.T) {
 			ID:          "az-5",
 			Title:       "Lookup issue",
 			Description: "Detailed context",
-			Status:      domain.StatusBlocked,
+			Status:      domain.StatusInReview,
 			Priority:    domain.P0,
 			Type:        domain.TypeBug,
 			CreatedAt:   now,
@@ -4857,7 +4857,7 @@ func TestIssueGetCommandTextHidesNotesByDefault(t *testing.T) {
 			Title:       "Lookup issue",
 			Description: "Detailed context",
 			Notes:       "First note line\nSecond note line",
-			Status:      domain.StatusBlocked,
+			Status:      domain.StatusInReview,
 			Priority:    domain.P0,
 			Type:        domain.TypeBug,
 			CreatedAt:   now,
@@ -4908,7 +4908,7 @@ func TestIssueGetCommandTextIncludesNotesWhenRequested(t *testing.T) {
 			Title:       "Lookup issue",
 			Description: "Detailed context",
 			Notes:       "First note line\nSecond note line",
-			Status:      domain.StatusBlocked,
+			Status:      domain.StatusInReview,
 			Priority:    domain.P0,
 			Type:        domain.TypeBug,
 			CreatedAt:   now,
@@ -5127,7 +5127,7 @@ func TestIssueGetCommandTextIncludesRuntimeGitAndImplementations(t *testing.T) {
 			Assignee:              "sam",
 			Labels:                []string{"cli", "notes"},
 			Estimate:              &estimate,
-			Status:                domain.StatusBlocked,
+			Status:                domain.StatusInReview,
 			Priority:              domain.P0,
 			Type:                  domain.TypeBug,
 			Implementations:       []string{"default", "go-bubbletea"},
@@ -7612,8 +7612,17 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Repeat status -> start -> watch until `az orchestrate complete-check --root <issue-id>` passes") {
 		t.Fatalf("prime output missing completion loop guidance: %q", output)
 	}
-	if !strings.Contains(output, "Integrate completed workers with `az orchestrate integrate --issue <issue-id>`") {
+	if !strings.Contains(output, "Integrate workers that are `in_review` or otherwise report completion with `az orchestrate integrate --issue <issue-id>`") {
 		t.Fatalf("prime output missing worker integration guidance: %q", output)
+	}
+	if !strings.Contains(output, "Status semantics: use `open` for not-yet-active work, `in_progress` while actively working, `in_review` when implementation is complete") {
+		t.Fatalf("prime output missing status semantics guidance: %q", output)
+	}
+	if !strings.Contains(output, "Blocked is not an issue status. Represent blocked work with dependency edges") {
+		t.Fatalf("prime output missing blocked-as-graph guidance: %q", output)
+	}
+	if !strings.Contains(output, "Worker completion flow: workers should leave their issue `in_review`") {
+		t.Fatalf("prime output missing in-review worker completion guidance: %q", output)
 	}
 	if !strings.Contains(output, "`az mail send --parent <parent-issue> --type dependency-ready --body \"...\"`") {
 		t.Fatalf("prime output missing mail send command example: %q", output)

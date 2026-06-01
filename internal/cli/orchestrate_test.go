@@ -405,6 +405,8 @@ func TestOrchestratePromptCommandPrintsNativeWorkerHandoff(t *testing.T) {
 		"Coordination mode: native",
 		"az spec read --issue az-2",
 		"Current notes: present but omitted from worker prompt. Run `az issue get az-2 --with-notes` only if full note history is necessary.",
+		"Status semantics: use `in_progress` while actively working, `in_review` when your implementation is complete and ready for orchestrator review/integration",
+		"Blocked work is represented by dependency edges or `worker-blocked` mailbox events, not by setting issue status to `in_review`.",
 		"Do not append raw logs, exploratory transcripts, routine progress narration, duplicate prompt context, or speculative scratch work to notes.",
 		"Return progress, blockers, and final results through the native subagent result channel.",
 		"Do not use `az mail` unless the orchestrator explicitly asks for mailbox coordination.",
@@ -434,7 +436,8 @@ func TestOrchestratePromptCommandMailboxCoordinationOptIn(t *testing.T) {
 		"Coordination mode: mailbox",
 		"Coordination mailbox parent: az-1",
 		"Use mailbox events for hybrid coordination",
-		"az mail send --parent az-1 --issue az-2 --type worker-complete",
+		"`worker-ready` and `worker-complete` are accepted only as legacy aliases for `worker-integration-ready`",
+		"az mail send --parent az-1 --issue az-2 --type worker-integration-ready",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
@@ -508,7 +511,7 @@ func TestOrchestrateIntegrateCommandPrintsGuidance(t *testing.T) {
 					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
 				case protocol.CommandMailList:
 					return responseWithJSON(req, []protocol.MailEvent{
-						{Seq: 3, ParentIssue: parent.String(), IssueID: child, Type: "worker-complete"},
+						{Seq: 3, ParentIssue: parent.String(), IssueID: child, Type: "worker-integration-ready"},
 					}), nil
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
@@ -524,6 +527,31 @@ func TestOrchestrateIntegrateCommandPrintsGuidance(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
 		}
+	}
+}
+
+func TestIsWorkerIntegrationReadyMailTypeAcceptsLegacyAliases(t *testing.T) {
+	tests := map[string]bool{
+		"worker-integration-ready":       true,
+		" worker-integration-ready ":     true,
+		"WORKER-INTEGRATION-READY":       true,
+		"worker-ready":                   true,
+		" worker-ready ":                 true,
+		"worker-complete":                true,
+		" worker-complete ":              true,
+		"worker-progress":                false,
+		"worker-blocked":                 false,
+		"dependency-ready":               false,
+		"worker-integration-ready-later": false,
+		"worker-ready-later":             false,
+		"worker-completed":               false,
+	}
+	for eventType, want := range tests {
+		t.Run(eventType, func(t *testing.T) {
+			if got := isWorkerIntegrationReadyMailType(eventType); got != want {
+				t.Fatalf("isWorkerIntegrationReadyMailType(%q) = %v, want %v", eventType, got, want)
+			}
+		})
 	}
 }
 

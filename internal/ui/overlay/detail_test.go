@@ -310,7 +310,7 @@ func TestDetailPanelViewGroupsGraphRelationsByType(t *testing.T) {
 		{ID: "az-parent", Title: "Parent task", Status: domain.StatusOpen, ParentID: &rootID},
 		{ID: rootID, Title: "Root task", Status: domain.StatusOpen},
 		{ID: "az-direct-child", Title: "Direct child", Status: domain.StatusOpen, ParentID: pointerToIssueID("az-current")},
-		{ID: "az-blocked-target", Title: "Downstream blockee", Status: domain.StatusBlocked},
+		{ID: "az-blocked-target", Title: "Downstream blockee", Status: domain.StatusInReview},
 		{
 			ID:           "az-blocker",
 			Title:        "Upstream blocker",
@@ -348,7 +348,7 @@ func TestDetailPanelViewGroupsGraphRelationsByType(t *testing.T) {
 	assert.Contains(t, view, "> az-direct-child [Open] Direct child")
 
 	assert.Contains(t, view, "Blocks")
-	assert.Contains(t, view, "> az-blocked-target [Blocked] Downstream blockee")
+	assert.Contains(t, view, "> az-blocked-target [In Review] Downstream blockee")
 
 	assert.Contains(t, view, "Blocked by")
 	assert.Contains(t, view, "< az-blocker [Open] Upstream blocker")
@@ -377,7 +377,7 @@ func TestDetailPanelGraphCursorWalksAllSections(t *testing.T) {
 	related := []domain.Task{
 		task,
 		{ID: "az-parent", Title: "Parent task", Status: domain.StatusOpen},
-		{ID: "az-blocked-target", Title: "Downstream blockee", Status: domain.StatusBlocked},
+		{ID: "az-blocked-target", Title: "Downstream blockee", Status: domain.StatusInReview},
 	}
 
 	panel := NewDetailPanel(task).WithRelatedTasks(related)
@@ -692,7 +692,7 @@ func TestDetailPanelFormatStatus(t *testing.T) {
 	}{
 		{domain.StatusOpen, "Open"},
 		{domain.StatusInProgress, "In Progress"},
-		{domain.StatusBlocked, "Blocked"},
+		{domain.StatusInReview, "In Review"},
 		{domain.StatusDone, "Done"},
 	}
 

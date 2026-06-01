@@ -918,7 +918,7 @@ func orchestrateIntegrationRecovery(issueID, reason string) []string {
 	switch reason {
 	case "missing_completion_evidence":
 		return []string{
-			fmt.Sprintf("review worker output and close the issue or send a worker-complete mailbox event for %s", issueID),
+			fmt.Sprintf("review worker output and close the issue or send a worker-integration-ready mailbox event for %s", issueID),
 			fmt.Sprintf("retry: az orchestrate integrate --issue %s --apply", issueID),
 		}
 	case "merge_failed":
@@ -1044,7 +1044,7 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 	if coordination == "mailbox" {
 		commands = append(commands,
 			fmt.Sprintf("az mail send --parent %s --issue %s --type worker-progress --body \"<progress>\"", parentIssueID, issueID),
-			fmt.Sprintf("az mail send --parent %s --issue %s --type worker-complete --body \"<evidence>\"", parentIssueID, issueID),
+			fmt.Sprintf("az mail send --parent %s --issue %s --type worker-integration-ready --body \"<evidence>\"", parentIssueID, issueID),
 		)
 	}
 	var b strings.Builder
@@ -1078,10 +1078,12 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 	fmt.Fprintf(&b, "- Focus only on issue %s unless the orchestrator explicitly expands scope.\n", issueID)
 	fmt.Fprintf(&b, "- Before behavior changes, inspect linked requirements with `az spec read --issue %s`; if none are linked, find a nearby requirement with `az spec req list`/`az spec read --req <req-id>` or create/update one before implementation. For contract-preserving refactors, tests, tooling, docs, internal cleanup, or fixes that restore existing behavior, record explicit `Spec impact: none (...)` evidence instead of creating implementation-only requirements.\n", issueID)
 	fmt.Fprintf(&b, "- Keep `%s` status and notes current with terse evidence: final commands run, key outputs/assertions, files changed, AC pass/fail, blockers, and remaining scope only.\n", issueID)
+	fmt.Fprintf(&b, "- Status semantics: use `in_progress` while actively working, `in_review` when your implementation is complete and ready for orchestrator review/integration, and `closed` only after the orchestrator has integrated/accepted the work.\n")
+	fmt.Fprintf(&b, "- Blocked work is represented by dependency edges or `worker-blocked` mailbox events, not by setting issue status to `in_review`.\n")
 	fmt.Fprintf(&b, "- Do not append raw logs, exploratory transcripts, routine progress narration, duplicate prompt context, or speculative scratch work to notes.\n")
 	if coordination == "mailbox" {
-		fmt.Fprintf(&b, "- Use mailbox events for hybrid coordination: `worker-progress`, `worker-blocked`, and `worker-complete`.\n")
-		fmt.Fprintf(&b, "- On completion, send `worker-complete` to parent `%s` with concise evidence and leave integration/merge to the orchestrator.\n", parentIssueID)
+		fmt.Fprintf(&b, "- Use mailbox events for hybrid coordination: `worker-progress`, `worker-blocked`, and `worker-integration-ready`; `worker-ready` and `worker-complete` are accepted only as legacy aliases for `worker-integration-ready`.\n")
+		fmt.Fprintf(&b, "- When ready for integration, set/leave the issue `in_review` and send `worker-integration-ready` to parent `%s` with concise evidence; leave integration/merge/close to the orchestrator.\n", parentIssueID)
 	} else {
 		fmt.Fprintf(&b, "- Return progress, blockers, and final results through the native subagent result channel.\n")
 		fmt.Fprintf(&b, "- Do not use `az mail` unless the orchestrator explicitly asks for mailbox coordination.\n")
@@ -1380,15 +1382,24 @@ func orchestrateIntegrationMergeReadiness(ctx context.Context, deps *Dependencie
 		return false, nil, fmt.Errorf("list mailbox events for %s: %w", parentIssueID, err)
 	}
 	for _, evt := range events {
-		if naming.IssueIDsEqual(evt.IssueID.String(), issueID) && strings.EqualFold(strings.TrimSpace(evt.Type), "worker-complete") {
+		if naming.IssueIDsEqual(evt.IssueID.String(), issueID) && isWorkerIntegrationReadyMailType(evt.Type) {
 			return true, nil, nil
 		}
 	}
 	reasons := []string{
 		fmt.Sprintf("issue %s is not closed", issueID),
-		fmt.Sprintf("no worker-complete mailbox event found under parent %s for %s", parentIssueID, issueID),
+		fmt.Sprintf("no worker-integration-ready mailbox event found under parent %s for %s", parentIssueID, issueID),
 	}
 	return false, reasons, nil
+}
+
+func isWorkerIntegrationReadyMailType(eventType string) bool {
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "worker-integration-ready", "worker-ready", "worker-complete":
+		return true
+	default:
+		return false
+	}
 }
 
 func sendOrchestrateMailEvent(deps *Dependencies, parentIssueID, issueID, eventType, body string) error {

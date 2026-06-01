@@ -167,7 +167,7 @@ For architecture or boundary work, only close when notes include:
 3. Files changed
 4. Explicit AC pass/fail checklist
 
-If any are missing, keep issue state `in_progress` or `blocked`.
+If any are missing, keep issue state `in_progress` or `open`.
 
 ## CLI/Binary Rules
 

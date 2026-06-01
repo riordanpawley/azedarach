@@ -23,4 +23,11 @@ Commands:
   fanout ready [--project <project-id>] --root <issue-id> [--json]  List runnable leaf issues under a fanout root
   fanout drift [--project <project-id>] --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
 
+Status semantics:
+  open         Not yet active
+  in_progress Active work
+  in_review   Complete and waiting for review/integration
+  closed      Accepted/integrated and complete
+  Blocked work is represented with `dep add --type blocks`, not a status.
+
 Argument ordering: place flags/options before positional arguments for deterministic parsing.

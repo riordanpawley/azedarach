@@ -85,7 +85,7 @@ func TestMergeSourceSelectOverlay_Navigation(t *testing.T) {
 	candidates := []MergeTarget{
 		{ID: "az-456", Label: "Source 1", Status: domain.StatusOpen, HasWorktree: true},
 		{ID: "az-789", Label: "Source 2", Status: domain.StatusDone, HasWorktree: true},
-		{ID: "az-101", Label: "Source 3", Status: domain.StatusBlocked, HasWorktree: true},
+		{ID: "az-101", Label: "Source 3", Status: domain.StatusInReview, HasWorktree: true},
 	}
 
 	overlay := NewMergeSourceSelectOverlay(&target, candidates, nil, nil)

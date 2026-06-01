@@ -671,8 +671,10 @@ func mapLinearStatus(state linearapi.State) domain.Status {
 		return domain.StatusDone
 	case strings.Contains(raw, "started"), strings.Contains(raw, "progress"):
 		return domain.StatusInProgress
+	case strings.Contains(raw, "review"):
+		return domain.StatusInReview
 	case strings.Contains(raw, "blocked"):
-		return domain.StatusBlocked
+		return domain.StatusOpen
 	default:
 		return domain.StatusOpen
 	}

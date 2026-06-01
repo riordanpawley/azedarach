@@ -417,7 +417,7 @@ func TestClient_GetManyWithDependencyContextRuntimeIncludesRequestedAndDirectCon
 		Title:    "Third",
 		Type:     domain.TypeTask,
 		Priority: domain.P3,
-		Status:   domain.StatusBlocked,
+		Status:   domain.StatusInReview,
 	})
 	require.NoError(t, err)
 	require.NoError(t, client.AddDependency(ctx, secondID, firstID, string(domain.DependencyBlocks)))
@@ -1404,7 +1404,160 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0009_decision_audit_log",
 		"0010_decisions_refresh",
 		"0011_decisions_consequences",
+		"0012_blocked_status_to_open",
 	}, got)
+}
+
+func TestClient_MigratesLegacyBlockedStatusToOpen(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = db.ExecContext(ctx, `
+		CREATE TABLE issues (
+			id TEXT PRIMARY KEY,
+			title TEXT NOT NULL,
+			description TEXT,
+			status TEXT NOT NULL,
+			priority INTEGER NOT NULL,
+			issue_type TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			closed_at TEXT,
+			assignee TEXT,
+			labels_json TEXT,
+			implementations_json TEXT,
+			design TEXT,
+			notes TEXT,
+			acceptance TEXT,
+			estimate INTEGER,
+			deleted_at TEXT
+		);
+		CREATE TABLE issue_dependencies (
+			issue_id TEXT NOT NULL,
+			depends_on_id TEXT NOT NULL,
+			dependency_type TEXT NOT NULL,
+			tombstoned_at TEXT,
+			PRIMARY KEY (issue_id, depends_on_id, dependency_type)
+		);
+		CREATE TABLE meta (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+		INSERT INTO issues (id, title, description, status, priority, issue_type, created_at, updated_at)
+		VALUES ('az-legacy', 'Legacy blocked issue', '', 'blocked', 2, 'task', ?, ?);
+	`, now, now)
+	require.NoError(t, err)
+
+	client := NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		require.NoError(t, client.CloseDB())
+	})
+
+	tasks, err := client.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	tasksByID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		tasksByID[task.ID.String()] = task
+	}
+
+	legacy := tasksByID["az-legacy"]
+	assert.Equal(t, domain.StatusOpen, legacy.Status)
+	require.Len(t, legacy.Dependencies, 1)
+	assert.Equal(t, "az-legacy-legacy-blocker", legacy.Dependencies[0].ID.String())
+	assert.Equal(t, domain.DependencyBlocks, legacy.Dependencies[0].Type)
+
+	blocker := tasksByID["az-legacy-legacy-blocker"]
+	assert.Equal(t, "Resolve blocker for az-legacy", blocker.Title)
+	assert.Equal(t, domain.StatusOpen, blocker.Status)
+
+	ready, err := client.Ready(ctx)
+	require.NoError(t, err)
+	require.Len(t, ready, 1)
+	assert.Equal(t, "az-legacy-legacy-blocker", ready[0].ID.String())
+}
+
+func TestClient_MigratesLegacyBlockedStatusAllocatesUniqueBlockerID(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = db.ExecContext(ctx, `
+		CREATE TABLE issues (
+			id TEXT PRIMARY KEY,
+			title TEXT NOT NULL,
+			description TEXT,
+			status TEXT NOT NULL,
+			priority INTEGER NOT NULL,
+			issue_type TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			closed_at TEXT,
+			assignee TEXT,
+			labels_json TEXT,
+			implementations_json TEXT,
+			design TEXT,
+			notes TEXT,
+			acceptance TEXT,
+			estimate INTEGER,
+			deleted_at TEXT
+		);
+		CREATE TABLE issue_dependencies (
+			issue_id TEXT NOT NULL,
+			depends_on_id TEXT NOT NULL,
+			dependency_type TEXT NOT NULL,
+			tombstoned_at TEXT,
+			PRIMARY KEY (issue_id, depends_on_id, dependency_type)
+		);
+		CREATE TABLE meta (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+		INSERT INTO issues (id, title, description, status, priority, issue_type, created_at, updated_at, closed_at)
+		VALUES ('az-legacy-legacy-blocker', 'Existing unrelated issue', '', 'closed', 2, 'task', ?, ?, ?);
+		INSERT INTO issues (id, title, description, status, priority, issue_type, created_at, updated_at)
+		VALUES ('az-legacy', 'Legacy blocked issue', '', 'blocked', 2, 'task', ?, ?);
+	`, now, now, now, now, now)
+	require.NoError(t, err)
+
+	client := NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		require.NoError(t, client.CloseDB())
+	})
+
+	tasks, err := client.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 3)
+	tasksByID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		tasksByID[task.ID.String()] = task
+	}
+
+	legacy := tasksByID["az-legacy"]
+	assert.Equal(t, domain.StatusOpen, legacy.Status)
+	require.Len(t, legacy.Dependencies, 1)
+	assert.Equal(t, "az-legacy-legacy-blocker-1", legacy.Dependencies[0].ID.String())
+	assert.Equal(t, domain.DependencyBlocks, legacy.Dependencies[0].Type)
+
+	collision := tasksByID["az-legacy-legacy-blocker"]
+	assert.Equal(t, "Existing unrelated issue", collision.Title)
+	assert.Equal(t, domain.StatusDone, collision.Status)
+
+	blocker := tasksByID["az-legacy-legacy-blocker-1"]
+	assert.Equal(t, "Resolve blocker for az-legacy", blocker.Title)
+	assert.Equal(t, domain.StatusOpen, blocker.Status)
+
+	ready, err := client.Ready(ctx)
+	require.NoError(t, err)
+	require.Len(t, ready, 1)
+	assert.Equal(t, "az-legacy-legacy-blocker-1", ready[0].ID.String())
 }
 
 func TestClient_CreateWaitsForWriteLockAndSucceedsWithinBusyTimeout(t *testing.T) {

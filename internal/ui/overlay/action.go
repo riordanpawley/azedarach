@@ -142,7 +142,7 @@ func (m *ActionMenu) buildActions() []Action {
 	actions = append(actions,
 		Action{Key: "1", Label: "Set status: Open", Enabled: m.task.Status != domain.StatusOpen},
 		Action{Key: "2", Label: "Set status: In Progress", Enabled: m.task.Status != domain.StatusInProgress},
-		Action{Key: "3", Label: "Set status: Blocked", Enabled: m.task.Status != domain.StatusBlocked},
+		Action{Key: "3", Label: "Set status: In Review", Enabled: m.task.Status != domain.StatusInReview},
 		Action{Key: "4", Label: "Set status: Done", Enabled: m.task.Status != domain.StatusDone},
 	)
 	if !m.hideStatusMoveActions {
@@ -513,7 +513,7 @@ func (m *BulkActionMenu) buildActions() []Action {
 		// Specific status
 		{Key: "o", Label: "Set to Open", Enabled: true},
 		{Key: "i", Label: "Set to In Progress", Enabled: true},
-		{Key: "b", Label: "Set to Blocked", Enabled: true},
+		{Key: "b", Label: "Set to In Review", Enabled: true},
 		{Key: "D", Label: "Set to Done", Enabled: true},
 		{Key: "", Label: "───────────────────", Enabled: false},
 		// Other actions

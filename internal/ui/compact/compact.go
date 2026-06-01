@@ -251,9 +251,9 @@ func (cv *CompactView) renderStatusCell(status domain.Status, width int) string 
 	case domain.StatusInProgress:
 		abbrev = "prog"
 		style = cv.styles.StatusInProgress
-	case domain.StatusBlocked:
-		abbrev = "bloc"
-		style = cv.styles.StatusBlocked
+	case domain.StatusInReview:
+		abbrev = "revi"
+		style = cv.styles.StatusInReview
 	case domain.StatusDone:
 		abbrev = "done"
 		style = cv.styles.StatusDone
@@ -324,7 +324,7 @@ func (cv *CompactView) renderSessionCell(session *domain.Session, width int) str
 	case domain.SessionDone:
 		style = cv.styles.StatusDone // Green
 	case domain.SessionError:
-		style = cv.styles.StatusBlocked // Red
+		style = cv.styles.StatusInReview // Red
 	case domain.SessionPaused:
 		style = cv.styles.PriorityP4 // Gray
 	default:

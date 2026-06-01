@@ -512,7 +512,7 @@ func goldenOrchestrationView(t *testing.T) string {
 			{
 				IssueID:        "az-456",
 				TaskTitle:      "Fix selector overflow on mobile",
-				IssueStatus:    domain.StatusBlocked,
+				IssueStatus:    domain.StatusInReview,
 				State:          domain.SessionWaiting,
 				Worktree:       "/Users/riordan/prog/Chefy",
 				HasTmuxSession: true,

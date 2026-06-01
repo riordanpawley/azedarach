@@ -8,7 +8,7 @@ import (
 
 // Position represents a computed position in the board
 type Position struct {
-	Column int  // 0=Open, 1=InProgress, 2=Blocked, 3=Done
+	Column int  // 0=Open, 1=InProgress, 2=InReview, 3=Done
 	Task   int  // Index within the column
 	Valid  bool // Whether the position is valid
 }
@@ -242,7 +242,7 @@ func (s *Service) GetCurrentStatus(columns []board.Column) domain.Status {
 	statuses := []domain.Status{
 		domain.StatusOpen,
 		domain.StatusInProgress,
-		domain.StatusBlocked,
+		domain.StatusInReview,
 		domain.StatusDone,
 	}
 	pos := s.cursor.FindPosition(columns)
