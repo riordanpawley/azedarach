@@ -148,23 +148,25 @@ type IssueCheckOptions struct {
 }
 
 type IssueCreateOptions struct {
-	Project               string
-	JSON                  bool
-	Title                 string
-	Description           string
-	Type                  domain.TaskType
-	Priority              domain.Priority
-	PriorityExplicit      bool
-	Deferred              bool
-	Implementations       []string
-	AutoParentFromIssueID *string
+	Project                string
+	JSON                   bool
+	Title                  string
+	Description            string
+	Type                   domain.TaskType
+	Priority               domain.Priority
+	PriorityExplicit       bool
+	Deferred               bool
+	Implementations        []string
+	AutoParentFromIssueID  *string
+	AutoCreatedFromIssueID *string
 }
 
 type issueCreateResult struct {
-	IssueID  string
-	ParentID string
-	Deferred bool
-	Message  string
+	IssueID       string
+	ParentID      string
+	CreatedFromID string
+	Deferred      bool
+	Message       string
 }
 
 type IssueCloseOptions struct {
@@ -2120,8 +2122,9 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	}
 	opts.Type = taskType
 	opts.Implementations = dedupeOrderedIDs(impls)
-	if !opts.Deferred {
-		if issueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID")); issueID != "" {
+	if issueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID")); issueID != "" {
+		opts.AutoCreatedFromIssueID = &issueID
+		if !opts.Deferred {
 			opts.AutoParentFromIssueID = &issueID
 		}
 	}
@@ -2379,14 +2382,14 @@ func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, erro
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
 	fs.StringVar(&issueIDFlag, "issue-id", "", "source issue id (named alternative to positional)")
 	fs.StringVar(&dependsOnIDFlag, "depends-on-id", "", "dependency target issue id (named alternative to positional)")
-	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from)")
+	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from|created-in)")
 	fs.BoolVar(&opts.ForceParentChange, "force-parent-change", false, "replace an existing parent-child edge")
 	fs.BoolVar(&opts.JSON, "json", false, "output dependency add result as JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDependencyAddOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--force-parent-change] [--json]")
+		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDependencyAddOptions{}, fmt.Errorf("--impl is not supported for issue dep add; dependencies target existing issues")
@@ -2404,7 +2407,7 @@ func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, erro
 		opts.DependsOnID = strings.TrimSpace(dependsOnIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.DependsOnID) == "" {
-		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--force-parent-change] [--json]")
+		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -2421,14 +2424,14 @@ func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
 	fs.StringVar(&issueIDFlag, "issue-id", "", "source issue id (named alternative to positional)")
 	fs.StringVar(&dependsOnIDFlag, "depends-on-id", "", "dependency target issue id (named alternative to positional)")
-	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from)")
+	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from|created-in)")
 	fs.BoolVar(&opts.Confirm, "confirm", false, "confirm removal for guarded dependency types")
 	fs.BoolVar(&opts.JSON, "json", false, "output dependency remove result as JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDependencyRemoveOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--confirm] [--json]")
+		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDependencyRemoveOptions{}, fmt.Errorf("--impl is not supported for issue dep remove; dependencies target existing issues")
@@ -2446,7 +2449,7 @@ func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions
 		opts.DependsOnID = strings.TrimSpace(dependsOnIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.DependsOnID) == "" {
-		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--confirm] [--json]")
+		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -3509,12 +3512,13 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 	}
 	if opts.JSON {
 		return printJSON(map[string]any{
-			"issue_id":   result.IssueID,
-			"parent_id":  result.ParentID,
-			"deferred":   result.Deferred,
-			"message":    result.Message,
-			"created":    true,
-			"project_id": strings.TrimSpace(deps.ProjectID),
+			"issue_id":        result.IssueID,
+			"parent_id":       result.ParentID,
+			"created_from_id": result.CreatedFromID,
+			"deferred":        result.Deferred,
+			"message":         result.Message,
+			"created":         true,
+			"project_id":      strings.TrimSpace(deps.ProjectID),
 		})
 	}
 	fmt.Println(result.Message)
@@ -3575,20 +3579,49 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 		return issueCreateResult{}, fmt.Errorf("failed to create issue: %w", err)
 	}
 
+	createdFromIDValue := ""
+	if opts.AutoCreatedFromIssueID != nil && strings.TrimSpace(*opts.AutoCreatedFromIssueID) != "" {
+		createdFromIDValue = strings.TrimSpace(*opts.AutoCreatedFromIssueID)
+		createdIssueID, parseErr := naming.ParseIssueID(taskID)
+		if parseErr != nil {
+			return issueCreateResult{}, fmt.Errorf("failed to parse created issue id %s: %w", taskID, parseErr)
+		}
+		createdFromID, parseErr := naming.ParseIssueID(createdFromIDValue)
+		if parseErr != nil {
+			return issueCreateResult{}, fmt.Errorf("failed to parse active issue id for created-from edge %s: %w", createdFromIDValue, parseErr)
+		}
+		if createdIssueID != createdFromID {
+			if _, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (struct{}, error) {
+				err := deps.DaemonClient.AddTaskDependency(callCtx, daemonclient.TaskDependencyParams{
+					TaskID:      createdIssueID,
+					DependsOnID: createdFromID,
+					Type:        string(domain.DependencyCreatedIn),
+				})
+				return struct{}{}, err
+			}); err != nil {
+				return issueCreateResult{}, fmt.Errorf("failed to add created-from issue graph edge %s -> %s: %w", taskID, createdFromIDValue, err)
+			}
+		}
+	}
+
 	message := fmt.Sprintf("Created issue: %s", taskID)
 	parentIDValue := ""
 	if parentID != nil && strings.TrimSpace(parentID.String()) != "" {
 		parentIDValue = strings.TrimSpace(parentID.String())
 		message = fmt.Sprintf("%s (parent: %s, auto-parent from AZEDARACH_ISSUE_ID)", message, parentIDValue)
 	}
+	if createdFromIDValue != "" {
+		message = fmt.Sprintf("%s [created-from: %s]", message, createdFromIDValue)
+	}
 	if opts.Deferred {
 		message = fmt.Sprintf("%s [deferred: standalone later work, not auto-parented]", message)
 	}
 	return issueCreateResult{
-		IssueID:  taskID,
-		ParentID: parentIDValue,
-		Deferred: opts.Deferred,
-		Message:  message,
+		IssueID:       taskID,
+		ParentID:      parentIDValue,
+		CreatedFromID: createdFromIDValue,
+		Deferred:      opts.Deferred,
+		Message:       message,
 	}, nil
 }
 
@@ -4596,7 +4629,7 @@ func dependencyTypeOrDefault(raw string) (domain.DependencyType, error) {
 		return domain.DependencyBlocks, nil
 	}
 	switch domain.DependencyType(trimmed) {
-	case domain.DependencyBlocks, domain.DependencyRelatedTo, domain.DependencyParentChild, domain.DependencyDiscovered:
+	case domain.DependencyBlocks, domain.DependencyRelatedTo, domain.DependencyParentChild, domain.DependencyDiscovered, domain.DependencyCreatedIn:
 		return domain.DependencyType(trimmed), nil
 	default:
 		return "", fmt.Errorf("invalid dependency type: %s", raw)
@@ -4790,6 +4823,7 @@ func formatDependencySummary(deps []domain.Dependency) string {
 		domain.DependencyBlockedBy,
 		domain.DependencyRelatedTo,
 		domain.DependencyDiscovered,
+		domain.DependencyCreatedIn,
 		domain.DependencyParentChild,
 	}
 	parts := make([]string, 0, len(ordered))
@@ -5419,6 +5453,7 @@ func formatPrimeDependencyLines(deps []domain.Dependency) string {
 		domain.DependencyParentChild,
 		domain.DependencyRelatedTo,
 		domain.DependencyDiscovered,
+		domain.DependencyCreatedIn,
 		domain.DependencyBlockedBy,
 	}
 	for _, typ := range order {

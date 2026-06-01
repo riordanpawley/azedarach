@@ -16,7 +16,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - `az issue update`: use `--update-impl` only when changing implementation assignments; status/title/notes updates do not need it.
   - `az issue bulk-create --input issues.json --json`, `az issue bulk-update --input updates.json --json`, `az issue update <issue-id> --design "..."`, `az issue update <issue-id> --notes "..."`, `az issue update <issue-id> --append-notes "..."`
   - Issue dependency graph:
-  - `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from] [--json]`, `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from] [--json]`
+  - `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from|created-in] [--json]`, `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from|created-in] [--json]`
   - Orchestration:
   {{ if .OrchestrationViaNative }}- `orchestration.via` is `native`: use your harness-native subagent delegation commands/keywords to split and run child issues (for example "delegate", "spawn", or "subagent"). Keep using `az issue` for tracking state and dependencies.
   {{ if .TmuxAvailable }}

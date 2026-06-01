@@ -632,7 +632,7 @@ func main() {
 			case "add":
 				opts, err := cli.ParseIssueDependencyAddArgs(depArgs)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--force-parent-change] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]\n")
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
@@ -645,7 +645,7 @@ func main() {
 			case "remove":
 				opts, err := cli.ParseIssueDependencyRemoveArgs(depArgs)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--confirm] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--json]\n")
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
@@ -970,10 +970,16 @@ func runTUIWithOptions(cfg *config.Config, opts ...app.Option) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+	audit := beginCommandAudit(nil, nil, "tui", os.Args[1:])
+	var runErr error
+	defer func() {
+		finishCommandAudit(nil, audit, runErr)
+	}()
 	model := app.NewWithOptions(cfg, opts...)
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	if _, err := p.Run(); err != nil {
+		runErr = err
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -1119,8 +1125,10 @@ func runCommand(cfg *config.Config, fn func(*cli.Dependencies) error) error {
 	commandShape := latencytrace.CommandShape(os.Args[1:])
 	latencytrace.LogPhase(deps.Logger, "cli", "dependencies_init", depsStartedAt, "command_shape", commandShape)
 	latencytrace.LogPhase(deps.Logger, "cli", "process_to_dependencies_ready", processStartedAt, "command_shape", commandShape)
+	audit := beginCommandAudit(deps.Logger, deps, commandShape, os.Args[1:])
 	commandStartedAt := time.Now()
 	err = fn(deps)
+	finishCommandAudit(deps.Logger, audit, err)
 	attrs := []any{"command_shape", commandShape}
 	if err != nil {
 		attrs = append(attrs, "error", err)
@@ -1138,8 +1146,10 @@ func runCommandAtRepoDir(cfg *config.Config, repoDir string, fn func(*cli.Depend
 	commandShape := latencytrace.CommandShape(os.Args[1:])
 	latencytrace.LogPhase(deps.Logger, "cli", "dependencies_init", depsStartedAt, "command_shape", commandShape, "repo_dir", repoDir)
 	latencytrace.LogPhase(deps.Logger, "cli", "process_to_dependencies_ready", processStartedAt, "command_shape", commandShape, "repo_dir", repoDir)
+	audit := beginCommandAudit(deps.Logger, deps, commandShape, os.Args[1:])
 	commandStartedAt := time.Now()
 	err = fn(deps)
+	finishCommandAudit(deps.Logger, audit, err)
 	attrs := []any{"command_shape", commandShape, "repo_dir", repoDir}
 	if err != nil {
 		attrs = append(attrs, "error", err)

@@ -706,19 +706,29 @@ func TestClient_AddDependencyCanonicalizesLegacyAliasesOnNonEpicTasks(t *testing
 	})
 	require.NoError(t, err)
 
+	createdID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Created",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
 	require.NoError(t, client.AddDependency(ctx, blockedID, sourceID, "blocked-by"))
 	require.NoError(t, client.AddDependency(ctx, relatedID, sourceID, "related"))
+	require.NoError(t, client.AddDependency(ctx, createdID, sourceID, "created-by"))
 
 	tasks, err := client.List(ctx)
 	require.NoError(t, err)
 
-	var blockedTask, relatedTask *domain.Task
+	var blockedTask, relatedTask, createdTask *domain.Task
 	for i := range tasks {
 		switch tasks[i].ID.String() {
 		case blockedID:
 			blockedTask = &tasks[i]
 		case relatedID:
 			relatedTask = &tasks[i]
+		case createdID:
+			createdTask = &tasks[i]
 		}
 	}
 
@@ -736,6 +746,11 @@ func TestClient_AddDependencyCanonicalizesLegacyAliasesOnNonEpicTasks(t *testing
 	require.Len(t, relatedTask.Dependencies, 1)
 	assert.Equal(t, sourceID, relatedTask.Dependencies[0].ID.String())
 	assert.Equal(t, domain.DependencyRelatedTo, relatedTask.Dependencies[0].Type)
+
+	require.NotNil(t, createdTask)
+	require.Len(t, createdTask.Dependencies, 1)
+	assert.Equal(t, sourceID, createdTask.Dependencies[0].ID.String())
+	assert.Equal(t, domain.DependencyCreatedIn, createdTask.Dependencies[0].Type)
 }
 
 func TestClient_AddDependencyPreventsDuplicateEdges(t *testing.T) {

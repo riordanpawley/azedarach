@@ -99,13 +99,14 @@ func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
 
 	parentIssueID := strings.TrimSpace(opts.ParentIssueID)
 	createResult, err := createIssue(context.Background(), deps, IssueCreateOptions{
-		Title:                 opts.Title,
-		Description:           opts.Description,
-		Type:                  opts.Type,
-		Priority:              opts.Priority,
-		PriorityExplicit:      opts.PriorityExplicit,
-		Implementations:       opts.Implementations,
-		AutoParentFromIssueID: &parentIssueID,
+		Title:                  opts.Title,
+		Description:            opts.Description,
+		Type:                   opts.Type,
+		Priority:               opts.Priority,
+		PriorityExplicit:       opts.PriorityExplicit,
+		Implementations:        opts.Implementations,
+		AutoParentFromIssueID:  &parentIssueID,
+		AutoCreatedFromIssueID: &parentIssueID,
 	})
 	if err != nil {
 		return err

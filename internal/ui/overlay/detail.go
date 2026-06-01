@@ -66,6 +66,8 @@ const (
 	graphRelRelated        = "related"
 	graphRelDiscoveredFrom = "discovered-from"
 	graphRelDiscovered     = "discovered"
+	graphRelCreatedIn      = "created-in"
+	graphRelCreated        = "created"
 )
 
 var graphRelationOrder = []string{
@@ -76,6 +78,8 @@ var graphRelationOrder = []string{
 	graphRelRelated,
 	graphRelDiscoveredFrom,
 	graphRelDiscovered,
+	graphRelCreatedIn,
+	graphRelCreated,
 }
 
 var graphRelationLabels = map[string]string{
@@ -499,6 +503,8 @@ func (d *DetailPanel) graphLinks() []taskGraphLink {
 			add(graphRelRelated, target)
 		case domain.DependencyDiscovered:
 			add(graphRelDiscoveredFrom, target)
+		case domain.DependencyCreatedIn:
+			add(graphRelCreatedIn, target)
 		}
 	}
 
@@ -519,6 +525,8 @@ func (d *DetailPanel) graphLinks() []taskGraphLink {
 				add(graphRelRelated, other)
 			case domain.DependencyDiscovered:
 				add(graphRelDiscovered, other)
+			case domain.DependencyCreatedIn:
+				add(graphRelCreated, other)
 			}
 		}
 	}

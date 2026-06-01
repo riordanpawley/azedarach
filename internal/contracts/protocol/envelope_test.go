@@ -1,6 +1,9 @@
 package protocol
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestErrorCodeTaxonomy(t *testing.T) {
 	cases := []struct {
@@ -29,5 +32,43 @@ func TestErrorCodeTaxonomy(t *testing.T) {
 				t.Fatalf("IsCompatibilityFailure() = %v, want %v", got, tc.compatibility)
 			}
 		})
+	}
+}
+
+func TestMetadataClientAuditFieldsRoundTripJSON(t *testing.T) {
+	meta := Metadata{
+		ClientInvocationID: "inv-1",
+		ClientCommandShape: "session stop",
+		ClientArgv:         []string{"session", "stop", "ckf"},
+		ClientExecutable:   "az",
+		ClientPID:          123,
+		ClientPPID:         45,
+		ClientCWD:          "/repo/wt",
+		ClientPWD:          "/logical/wt",
+		ClientActor:        "riordan",
+		ClientUID:          "501",
+		ClientActiveIssue:  "ckf",
+	}
+	payload, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var got Metadata
+	if err := json.Unmarshal(payload, &got); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if got.ClientInvocationID != meta.ClientInvocationID ||
+		got.ClientCommandShape != meta.ClientCommandShape ||
+		got.ClientExecutable != meta.ClientExecutable ||
+		got.ClientPID != meta.ClientPID ||
+		got.ClientPPID != meta.ClientPPID ||
+		got.ClientCWD != meta.ClientCWD ||
+		got.ClientPWD != meta.ClientPWD ||
+		got.ClientActor != meta.ClientActor ||
+		got.ClientUID != meta.ClientUID ||
+		got.ClientActiveIssue != meta.ClientActiveIssue ||
+		len(got.ClientArgv) != 3 ||
+		got.ClientArgv[2] != "ckf" {
+		t.Fatalf("metadata round trip = %+v, want %+v", got, meta)
 	}
 }

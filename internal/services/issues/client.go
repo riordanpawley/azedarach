@@ -2158,6 +2158,8 @@ func normalizeDependencyType(value string) string {
 		return string(domain.DependencyParentChild)
 	case "discovered_from", "discovered-from":
 		return string(domain.DependencyDiscovered)
+	case "created_by", "created-by", "created_from", "created-from", "created_in", "created-in":
+		return string(domain.DependencyCreatedIn)
 	default:
 		return value
 	}
@@ -2173,6 +2175,8 @@ func canonicalDependencyType(value string) (string, error) {
 		return string(domain.DependencyRelatedTo), nil
 	case string(domain.DependencyDiscovered):
 		return string(domain.DependencyDiscovered), nil
+	case string(domain.DependencyCreatedIn):
+		return string(domain.DependencyCreatedIn), nil
 	default:
 		return "", fmt.Errorf("unsupported dependency type %q", strings.TrimSpace(value))
 	}

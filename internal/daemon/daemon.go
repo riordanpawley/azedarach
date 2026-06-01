@@ -461,9 +461,11 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info(
 			"daemon command received",
-			"command", req.Command,
-			"request_id", req.RequestID,
-			"project_id", projectID,
+			append([]any{
+				"command", req.Command,
+				"request_id", req.RequestID,
+				"project_id", projectID,
+			}, daemonClientAuditAttrs(req.Meta)...)...,
 		)
 	}
 	defer func() {
@@ -476,6 +478,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 			"project_id", projectID,
 			"duration_ms", time.Since(startedAt).Milliseconds(),
 		}
+		attrs = append(attrs, daemonClientAuditAttrs(req.Meta)...)
 		switch {
 		case err != nil:
 			d.cfg.Logger.Error("daemon command transport failed", append(attrs, "error", err)...)
