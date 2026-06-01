@@ -98,6 +98,7 @@ type orchestrateStartLaunch struct {
 	WorktreePath   string `json:"worktree_path,omitempty"`
 	OperationID    string `json:"operation_id,omitempty"`
 	OperationState string `json:"operation_state,omitempty"`
+	Warning        string `json:"warning,omitempty"`
 	WatchCommand   string `json:"watch_command"`
 	IntegrateHint  string `json:"integrate_hint"`
 	CloseHint      string `json:"close_hint"`
@@ -507,17 +508,20 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 			result.Skipped[issueID] = "session-already-running"
 			continue
 		}
+		emitOrchestrateStartProgress(opts, "preparing", issueID)
 		launch, err := submitSessionStartForIssueWithBaseBranch(deps, issueID, opts.BaseBranchOverride)
 		if err != nil {
 			result.Failed[issueID] = err.Error()
 			continue
 		}
+		emitOrchestrateStartProgress(opts, "submitted", issueID)
 		pendingLaunches = append(pendingLaunches, launch)
 		count++
 	}
 
 	for _, launch := range pendingLaunches {
 		issueID := launch.IssueID
+		emitOrchestrateStartProgress(opts, "waiting", issueID)
 		completedLaunch, err := waitForSubmittedSessionStart(deps, launch)
 		if err != nil {
 			result.Failed[issueID] = err.Error()
@@ -528,13 +532,24 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 			continue
 		}
 		result.Started = append(result.Started, issueID)
+		if strings.TrimSpace(completedLaunch.Warning) != "" {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("%s: %s", issueID, completedLaunch.Warning))
+		}
 		completedLaunch.WatchCommand = result.Advice.WatchCommand
 		completedLaunch.IntegrateHint = fmt.Sprintf("az orchestrate integrate --issue %s", issueID)
 		completedLaunch.CloseHint = fmt.Sprintf("az orchestrate close-session --issue %s", issueID)
 		result.Launched = append(result.Launched, completedLaunch)
+		emitOrchestrateStartProgress(opts, "started", issueID)
 	}
 
 	return result, nil
+}
+
+func emitOrchestrateStartProgress(opts OrchestrateStartOptions, stage, issueID string) {
+	if !opts.JSON {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "orchestrate start: %s %s\n", stage, issueID)
 }
 
 func printOrchestrateStartResult(result orchestrateStartResult) {
@@ -1189,7 +1204,27 @@ func waitForSubmittedSessionStart(deps *Dependencies, launch orchestrateStartLau
 	if wt, found, wtErr := worktreeForIssue(ctx, deps, launch.IssueID); wtErr == nil && found {
 		launch.WorktreePath = wt.Path
 	}
+	launch.Warning = sessionStartWarningFromOperationResult(record.Result)
 	return launch, nil
+}
+
+func sessionStartWarningFromOperationResult(result json.RawMessage) string {
+	if len(result) == 0 {
+		return ""
+	}
+	var payload struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(result, &payload); err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(payload.Output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToLower(line), "worktree setup warning:") {
+			return line
+		}
+	}
+	return ""
 }
 
 func submitSessionStartForIssueWithBaseBranch(deps *Dependencies, issueID, baseBranchOverride string) (orchestrateStartLaunch, error) {

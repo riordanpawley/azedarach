@@ -487,6 +487,9 @@ func TestSessionStartRecoversFromPartialWorktreeCreate(t *testing.T) {
 	if !strings.Contains(payload.Output, "Worktree reused: "+worktreePath) {
 		t.Fatalf("output = %q, want reused worktree path", payload.Output)
 	}
+	if !strings.Contains(payload.Output, "Worktree setup warning:") {
+		t.Fatalf("output = %q, want recovered worktree warning", payload.Output)
+	}
 	if tmuxRunner.sendKeysCalls != 1 {
 		t.Fatalf("send-keys calls = %d, want 1", tmuxRunner.sendKeysCalls)
 	}
@@ -3329,6 +3332,83 @@ func TestSessionStatusIgnoresStaleProjectionWhenTmuxHasNoSession(t *testing.T) {
 	}
 	if !strings.Contains(payload.Output, "No active sessions") {
 		t.Fatalf("status output = %q, want no active sessions", payload.Output)
+	}
+}
+
+func TestSessionStatusReportsStaleRuntimeForTargetIssue(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Target stale projected session",
+		Type:   domain.TypeBug,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	sessionID := naming.CanonicalSessionID(repoDir, issueID)
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            sessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateStopped,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed stale session projection: %v", err)
+	}
+
+	daemon := &Daemon{
+		cfg:          Config{RepoDir: repoDir, Logger: slog.Default()},
+		tmux:         tmux.NewClient(&testTmuxRunner{sessions: map[string]bool{}}, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(daemonstate.NewStore()),
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+	}
+
+	resp, err := daemon.handleSessionStatus(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-status-target-stale-projection",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.status",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            marshalJSON(map[string]string{"project_id": projectID, "session_id": issueID}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStatus returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("session status response not OK: %+v", resp.Error)
+	}
+	var payload struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
+		t.Fatalf("unmarshal status response: %v", err)
+	}
+	if !strings.Contains(payload.Output, "Stale runtime session for "+issueID) {
+		t.Fatalf("status output = %q, want stale runtime diagnostic", payload.Output)
+	}
+	if !strings.Contains(payload.Output, "az orchestrate close-session --issue "+issueID) {
+		t.Fatalf("status output = %q, want repair command", payload.Output)
 	}
 }
 

@@ -451,6 +451,11 @@ func TestClient_ListSessionInfos(t *testing.T) {
 			runErr: errors.New("no sessions"),
 			want:   []SessionInfo{},
 		},
+		{
+			name:    "list failure",
+			runErr:  errors.New("tmux socket permission denied"),
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

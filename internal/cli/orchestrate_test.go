@@ -56,6 +56,19 @@ func TestParseOrchestrateStartArgs_DefaultLimitAndIssues(t *testing.T) {
 	}
 }
 
+func TestSessionStartWarningFromOperationResult(t *testing.T) {
+	raw, err := json.Marshal(map[string]string{
+		"output": "Starting session\nWorktree setup warning: git hook failed; recovered existing worktree\nSession started",
+	})
+	if err != nil {
+		t.Fatalf("marshal output: %v", err)
+	}
+	warning := sessionStartWarningFromOperationResult(raw)
+	if warning != "Worktree setup warning: git hook failed; recovered existing worktree" {
+		t.Fatalf("warning = %q", warning)
+	}
+}
+
 func TestParseOrchestrateWatchArgs(t *testing.T) {
 	opts, err := ParseOrchestrateWatchArgs([]string{"--root", "az-1", "--since", "12", "--once"})
 	if err != nil {

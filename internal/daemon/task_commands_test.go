@@ -353,6 +353,95 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	}
 }
 
+func TestHandleTaskListRefreshesMissingTmuxSessionBeforeReportingActive(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	projectID := "proj-task-stale-session"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Task list stale session",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	sessionID := naming.CanonicalSessionID(projectID, taskID)
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            sessionID,
+		IssueID:       taskID,
+		State:         daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateAttached,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed projected session: %v", err)
+	}
+
+	d := &Daemon{
+		cfg:          Config{RepoDir: repoDir, Logger: logger},
+		issues:       issuesClient,
+		sessionStore: daemonstate.NewStore(),
+		tmux:         tmux.NewClient(&testTmuxRunner{sessions: map[string]bool{}}, logger),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 1},
+	}
+	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
+
+	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-list-stale-session",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.list",
+	})
+	if err != nil {
+		t.Fatalf("handleTaskList error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.list response = %+v", resp.Error)
+	}
+
+	var payload protocol.TaskListSnapshotPayload
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
+		t.Fatalf("unmarshal task list body: %v", err)
+	}
+	if len(payload.Tasks) != 1 {
+		t.Fatalf("task count = %d, want 1", len(payload.Tasks))
+	}
+	if payload.Tasks[0].HasTmuxSession || payload.Tasks[0].Session != nil {
+		t.Fatalf("task runtime session = %+v has_tmux=%v, want inactive after live tmux refresh", payload.Tasks[0].Session, payload.Tasks[0].HasTmuxSession)
+	}
+
+	row, found, err := runtimeStateStore.GetSessionState(ctx, projectID, sessionID)
+	if err != nil {
+		t.Fatalf("get projected session: %v", err)
+	}
+	if !found {
+		t.Fatal("expected projected session row")
+	}
+	if row.ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("observed state = %s, want stopped", row.ObservedState)
+	}
+}
+
 func TestHandleTaskListPrefersAgentPaneStatusOverTmuxContainer(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

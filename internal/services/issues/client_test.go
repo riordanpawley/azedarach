@@ -363,6 +363,37 @@ func TestClient_ListWithRuntimeReturnsJoinedProjectionFields(t *testing.T) {
 	assert.Equal(t, 7, one.GitAdditions)
 }
 
+func TestClient_ListWithRuntimeUsesObservedSessionState(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-runtime-observed"
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Observed stopped session",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	require.NoError(t, err)
+
+	db, err := sql.Open("sqlite", client.dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, observed_state, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-runtime-stale", taskID, "running", "stopped", now, now)
+	require.NoError(t, err)
+
+	tasks, err := client.ListWithRuntime(ctx, projectID)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.False(t, tasks[0].HasTmuxSession)
+	assert.Nil(t, tasks[0].Session)
+}
+
 func TestClient_GetManyWithDependencyContextRuntimeIncludesRequestedAndDirectContext(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
