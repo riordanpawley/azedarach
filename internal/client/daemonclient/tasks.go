@@ -63,6 +63,11 @@ type TaskStatusRequest struct {
 	Status domain.Status  `json:"status"`
 }
 
+// TaskStatusOptions controls client-side status transition behavior.
+type TaskStatusOptions struct {
+	AutoFinalizeOnClose bool
+}
+
 // TaskAppendNotesRequest appends a single line to task notes.
 type TaskAppendNotesRequest struct {
 	TaskID naming.IssueID `json:"task_id"`
@@ -412,14 +417,57 @@ func (c *Client) CreateTask(ctx context.Context, params TaskCreateParams) (strin
 
 // UpdateTaskStatus updates a task's status through the daemon client boundary.
 func (c *Client) UpdateTaskStatus(ctx context.Context, taskID string, status domain.Status) error {
+	return c.UpdateTaskStatusWithOptions(ctx, taskID, status, TaskStatusOptions{})
+}
+
+// UpdateTaskStatusWithOptions updates a task's status and can finalize runtime
+// attachments before committing a closed/done transition.
+func (c *Client) UpdateTaskStatusWithOptions(ctx context.Context, taskID string, status domain.Status, opts TaskStatusOptions) error {
 	parsedTaskID, err := naming.ParseIssueID(taskID)
 	if err != nil {
 		return fmt.Errorf("invalid task id: %w", err)
+	}
+	if opts.AutoFinalizeOnClose && status == domain.StatusDone {
+		if err := c.finalizeTaskRuntimeAttachments(ctx, parsedTaskID.String()); err != nil {
+			return err
+		}
 	}
 	return c.commandJSON(ctx, CommandTaskUpdateStatus, TaskStatusRequest{
 		TaskID: parsedTaskID,
 		Status: status,
 	}, nil)
+}
+
+func (c *Client) finalizeTaskRuntimeAttachments(ctx context.Context, taskID string) error {
+	snapshot, err := c.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("inspect runtime attachments before closing %s: %w", taskID, err)
+	}
+	var task domain.Task
+	found := false
+	for _, candidate := range snapshot.Tasks {
+		if strings.EqualFold(strings.TrimSpace(candidate.ID.String()), taskID) {
+			task = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("issue not found: %s", taskID)
+	}
+
+	if task.HasTmuxSession || task.Session != nil {
+		if _, err := c.StopSession(ctx, taskID); err != nil {
+			return fmt.Errorf("stop session before closing %s: %w", taskID, err)
+		}
+	}
+	hasSessionWorktree := task.Session != nil && strings.TrimSpace(task.Session.Worktree) != ""
+	if task.HasWorktree || hasSessionWorktree {
+		if err := c.RemoveWorktreeWithOptions(ctx, taskID, false); err != nil {
+			return fmt.Errorf("remove worktree before closing %s: %w", taskID, err)
+		}
+	}
+	return nil
 }
 
 // UpdateTaskDetails updates a task's details through the daemon client boundary.

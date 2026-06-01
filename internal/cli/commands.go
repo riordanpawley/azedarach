@@ -2699,6 +2699,12 @@ func ConfigSetCommand(deps *Dependencies, opts ConfigSetOptions) error {
 			latencytrace.SetConfigEnabled(false)
 			fmt.Println("Latency trace logging is disabled.")
 		}
+	case "issues.autoFinalizeOnClose":
+		if renderedValue == "true" {
+			fmt.Println("Closing an issue will stop its session and remove its worktree before status changes to closed.")
+		} else {
+			fmt.Println("Closing an issue will only update status unless finalize/cleanup is requested explicitly.")
+		}
 	}
 
 	return nil
@@ -2837,8 +2843,15 @@ func setConfigValue(cfg *config.Config, key, value string) (string, error) {
 		}
 		cfg.Diagnostics.LatencyTrace = parsed
 		return fmt.Sprintf("%t", parsed), nil
+	case "issues.autoFinalizeOnClose":
+		parsed, ok := parseBooleanConfigValue(value)
+		if !ok {
+			return "", fmt.Errorf("Invalid boolean value '%s' for issues.autoFinalizeOnClose. Use true/false, on/off, yes/no, or 1/0.", value)
+		}
+		cfg.Issues.AutoFinalizeOnClose = parsed
+		return fmt.Sprintf("%t", parsed), nil
 	default:
-		return "", fmt.Errorf("Unsupported config key '%s'. Supported keys: spec.enabled, diagnostics.latencyTrace", key)
+		return "", fmt.Errorf("Unsupported config key '%s'. Supported keys: spec.enabled, diagnostics.latencyTrace, issues.autoFinalizeOnClose", key)
 	}
 }
 
@@ -3635,7 +3648,7 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 		return err
 	}
 
-	if err := deps.DaemonClient.UpdateTaskStatus(ctx, opts.IssueID, domain.StatusDone); err != nil {
+	if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, domain.StatusDone, taskStatusOptionsForConfig(deps.Config)); err != nil {
 		return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
 	}
 	if opts.JSON {
@@ -3661,15 +3674,22 @@ func IssueFinalizeCommand(deps *Dependencies, opts IssueFinalizeOptions) error {
 		return err
 	}
 
-	if _, err := deps.DaemonClient.StopSession(ctx, opts.IssueID); err != nil {
-		return fmt.Errorf("failed to stop session for issue %s: %w", opts.IssueID, err)
-	}
-	if err := deps.DaemonClient.UpdateTaskStatus(ctx, opts.IssueID, domain.StatusDone); err != nil {
-		return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
-	}
 	if opts.RemoveWorktree {
+		if _, err := deps.DaemonClient.StopSession(ctx, opts.IssueID); err != nil {
+			return fmt.Errorf("failed to stop session for issue %s: %w", opts.IssueID, err)
+		}
 		if err := deps.DaemonClient.RemoveWorktreeWithOptions(ctx, opts.IssueID, opts.ForceWorktree); err != nil {
 			return fmt.Errorf("failed to remove worktree for issue %s: %w", opts.IssueID, err)
+		}
+		if err := deps.DaemonClient.UpdateTaskStatus(ctx, opts.IssueID, domain.StatusDone); err != nil {
+			return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
+		}
+	} else {
+		if _, err := deps.DaemonClient.StopSession(ctx, opts.IssueID); err != nil {
+			return fmt.Errorf("failed to stop session for issue %s: %w", opts.IssueID, err)
+		}
+		if err := deps.DaemonClient.UpdateTaskStatus(ctx, opts.IssueID, domain.StatusDone); err != nil {
+			return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
 		}
 	}
 
@@ -3863,7 +3883,7 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 		return fmt.Errorf("failed to update issue %s: %w", opts.IssueID, err)
 	}
 	if opts.Status != nil {
-		if err := deps.DaemonClient.UpdateTaskStatus(ctx, opts.IssueID, *opts.Status); err != nil {
+		if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, *opts.Status, taskStatusOptionsForConfig(deps.Config)); err != nil {
 			return fmt.Errorf("failed to set status for issue %s: %w", opts.IssueID, err)
 		}
 	}
@@ -3883,6 +3903,15 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 	}
 	fmt.Printf("Updated issue: %s\n", opts.IssueID)
 	return nil
+}
+
+func taskStatusOptionsForConfig(cfg *config.Config) daemonclient.TaskStatusOptions {
+	if cfg == nil {
+		return daemonclient.TaskStatusOptions{}
+	}
+	return daemonclient.TaskStatusOptions{
+		AutoFinalizeOnClose: cfg.Issues.AutoFinalizeOnClose,
+	}
 }
 
 func IssueDependencyAddCommand(deps *Dependencies, opts IssueDependencyAddOptions) error {

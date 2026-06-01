@@ -2306,6 +2306,15 @@ func (m Model) daemonCommandTimeout() time.Duration {
 	return 30 * time.Second
 }
 
+func (m Model) taskStatusOptions() daemonclient.TaskStatusOptions {
+	if m.config == nil {
+		return daemonclient.TaskStatusOptions{}
+	}
+	return daemonclient.TaskStatusOptions{
+		AutoFinalizeOnClose: m.config.Issues.AutoFinalizeOnClose,
+	}
+}
+
 // startSessionCmd requests daemon-owned lifecycle start and lets daemon snapshots rebuild the local projection.
 func (m Model) startSessionCmd(issueID string, baseBranch string, yolo bool, startWork bool) tea.Cmd {
 	return func() tea.Msg {
@@ -3761,7 +3770,7 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "daemon client unavailable"})
 				continue
 			}
-			err := m.daemonClient.UpdateTaskStatus(ctx, taskID, newStatus)
+			err := m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, newStatus, m.taskStatusOptions())
 			if err != nil {
 				failed++
 				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: err.Error()})
@@ -3978,7 +3987,7 @@ func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd 
 				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "daemon client unavailable"})
 				continue
 			}
-			err := m.daemonClient.UpdateTaskStatus(ctx, taskID, status)
+			err := m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, status, m.taskStatusOptions())
 			if err != nil {
 				failed++
 				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: err.Error()})
@@ -4157,7 +4166,7 @@ func (m Model) moveTaskStatusCmd(taskID string, previousStatus, newStatus domain
 				err:            fmt.Errorf("daemon client unavailable"),
 			}
 		}
-		err := m.daemonClient.UpdateTaskStatus(ctx, taskID, newStatus)
+		err := m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, newStatus, m.taskStatusOptions())
 		if err != nil {
 			return taskStatusResultMsg{
 				taskID:         taskID,

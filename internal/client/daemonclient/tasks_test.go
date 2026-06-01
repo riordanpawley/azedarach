@@ -526,6 +526,129 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("status update auto-finalizes before closing", func(t *testing.T) {
+		commands := []string{}
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body: mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 3, []domain.Task{
+							{
+								ID:             "az-3",
+								Title:          "Close me",
+								Status:         domain.StatusInReview,
+								HasTmuxSession: true,
+								HasWorktree:    true,
+							},
+						}),
+					}, nil
+				case CommandSessionStop, CommandWorktreeRemove, CommandTaskUpdateStatus:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+					}, nil
+				default:
+					t.Fatalf("unexpected command = %q", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{AutoFinalizeOnClose: true})
+		if err != nil {
+			t.Fatalf("UpdateTaskStatusWithOptions error: %v", err)
+		}
+		wantCommands := []string{CommandTaskList, CommandSessionStop, CommandWorktreeRemove, CommandTaskUpdateStatus}
+		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
+			t.Fatalf("commands = %v, want %v", commands, wantCommands)
+		}
+	})
+
+	t.Run("status update does not auto-finalize non-closed status", func(t *testing.T) {
+		commands := []string{}
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				commands = append(commands, req.Command)
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusInProgress, TaskStatusOptions{AutoFinalizeOnClose: true})
+		if err != nil {
+			t.Fatalf("UpdateTaskStatusWithOptions error: %v", err)
+		}
+		if strings.Join(commands, ",") != CommandTaskUpdateStatus {
+			t.Fatalf("commands = %v, want only %s", commands, CommandTaskUpdateStatus)
+		}
+	})
+
+	t.Run("status update leaves issue unclosed when auto-finalize cleanup fails", func(t *testing.T) {
+		commands := []string{}
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body: mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 3, []domain.Task{
+							{
+								ID:             "az-3",
+								Title:          "Close me",
+								Status:         domain.StatusInReview,
+								HasTmuxSession: true,
+								HasWorktree:    true,
+							},
+						}),
+					}, nil
+				case CommandSessionStop:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+					}, nil
+				case CommandWorktreeRemove:
+					return protocol.ResponseEnvelope{}, errors.New("dirty worktree")
+				default:
+					t.Fatalf("unexpected command after cleanup failure = %q", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{AutoFinalizeOnClose: true})
+		if err == nil || !strings.Contains(err.Error(), "remove worktree before closing az-3") {
+			t.Fatalf("UpdateTaskStatusWithOptions error = %v, want worktree cleanup failure", err)
+		}
+		wantCommands := []string{CommandTaskList, CommandSessionStop, CommandWorktreeRemove}
+		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
+			t.Fatalf("commands = %v, want %v", commands, wantCommands)
+		}
+	})
+
 	t.Run("details update", func(t *testing.T) {
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

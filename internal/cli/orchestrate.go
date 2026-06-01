@@ -871,7 +871,18 @@ func applyOrchestrateIntegration(deps *Dependencies, issueID string, mergeReady 
 		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "stop_session", Status: "success"})
 	}
 
-	if err := deps.DaemonClient.UpdateTaskStatus(cleanupCtx, issueID, domain.StatusDone); err != nil {
+	if deps.Config != nil && deps.Config.Issues.AutoFinalizeOnClose {
+		if err := deps.DaemonClient.RemoveWorktreeWithOptions(cleanupCtx, issueID, false); err != nil {
+			result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "remove_worktree", Status: "failed", Error: err.Error()})
+			failures = append(failures, fmt.Sprintf("remove worktree: %v", err))
+		} else {
+			result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "remove_worktree", Status: "success"})
+		}
+	}
+
+	if deps.Config != nil && deps.Config.Issues.AutoFinalizeOnClose && len(failures) > 0 {
+		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "close_issue", Status: "skipped", Error: "auto-finalize cleanup failed"})
+	} else if err := deps.DaemonClient.UpdateTaskStatus(cleanupCtx, issueID, domain.StatusDone); err != nil {
 		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "close_issue", Status: "failed", Error: err.Error()})
 		failures = append(failures, fmt.Sprintf("close issue: %v", err))
 	} else {

@@ -231,6 +231,11 @@
           "type": "integer",
           "minimum": 1,
           "default": 300
+        },
+        "autoFinalizeOnClose": {
+          "type": "boolean",
+          "description": "When true, close/done status transitions stop the issue session and remove the issue worktree before committing the closed status.",
+          "default": false
         }
       }
     },

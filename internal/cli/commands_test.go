@@ -2998,6 +2998,33 @@ func TestConfigSetCommandWritesLatencyTraceConfig(t *testing.T) {
 	}
 }
 
+func TestConfigSetCommandWritesAutoFinalizeOnCloseConfig(t *testing.T) {
+	projectDir := t.TempDir()
+
+	deps := &Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{}),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:    "proj",
+		RepoDir:      projectDir,
+	}
+
+	output := captureStdout(t, func() error {
+		return ConfigSetCommand(deps, ConfigSetOptions{Key: "issues.autoFinalizeOnClose", Value: "yes"})
+	})
+
+	if !strings.Contains(output, "issues.autoFinalizeOnClose=true") {
+		t.Fatalf("config output missing issues update: %q", output)
+	}
+	cfg, err := config.LoadConfig(projectDir)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if !cfg.Issues.AutoFinalizeOnClose {
+		t.Fatalf("Issues.AutoFinalizeOnClose = false, want true")
+	}
+}
+
 func TestConfigSetCommandRejectsInvalidLatencyTraceBoolean(t *testing.T) {
 	projectDir := t.TempDir()
 
@@ -5895,8 +5922,8 @@ func TestIssueFinalizeCommandStopsClosesAndOptionallyRemovesWorktree(t *testing.
 	wantCommands := []string{
 		daemonclient.CommandTaskList,
 		commandSessionStop,
-		daemonclient.CommandTaskUpdateStatus,
 		daemonclient.CommandWorktreeRemove,
+		daemonclient.CommandTaskUpdateStatus,
 	}
 	if !reflect.DeepEqual(commands, wantCommands) {
 		t.Fatalf("commands = %v, want %v", commands, wantCommands)
