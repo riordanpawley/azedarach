@@ -23,10 +23,12 @@ import (
 )
 
 type dependencyRemovalConfirmationKey struct{}
+type parentChildOrphanConfirmationKey struct{}
 
 // ErrDependencyRemovalConfirmationRequired is returned when a removal that can
 // unblock or retarget workflow is attempted without explicit confirmation.
 var ErrDependencyRemovalConfirmationRequired = errors.New("explicit confirmation required")
+var ErrParentChildOrphanConfirmationRequired = errors.New("parent-child removal would orphan active child; keep the parent-child hierarchy and use blocks/open status to pause or supersede child work, or pass explicit parent-orphan confirmation")
 var ErrDeleteBlockedByRuntimeAttachments = errors.New("delete blocked: task has worktree or active session")
 
 type ParentChangeRequiredError struct {
@@ -45,8 +47,19 @@ func WithDependencyRemovalConfirmation(ctx context.Context) context.Context {
 	return context.WithValue(ctx, dependencyRemovalConfirmationKey{}, true)
 }
 
+// WithParentChildOrphanConfirmation marks a context as explicitly confirming a
+// parent-child removal that can move active child work to the root board.
+func WithParentChildOrphanConfirmation(ctx context.Context) context.Context {
+	return context.WithValue(ctx, parentChildOrphanConfirmationKey{}, true)
+}
+
 func hasDependencyRemovalConfirmation(ctx context.Context) bool {
 	confirmed, _ := ctx.Value(dependencyRemovalConfirmationKey{}).(bool)
+	return confirmed
+}
+
+func hasParentChildOrphanConfirmation(ctx context.Context) bool {
+	confirmed, _ := ctx.Value(parentChildOrphanConfirmationKey{}).(bool)
 	return confirmed
 }
 
@@ -1456,6 +1469,15 @@ func (c *Client) RemoveDependency(ctx context.Context, issueID, dependsOnID, dep
 	if dependencyTypeRequiresConfirmation(canonicalType) && !hasDependencyRemovalConfirmation(ctx) {
 		return c.wrapError("remove-dependency", issueID, ErrDependencyRemovalConfirmationRequired)
 	}
+	if canonicalType == string(domain.DependencyParentChild) && !hasParentChildOrphanConfirmation(ctx) {
+		active, err := c.parentChildRemovalWouldOrphanActiveChild(ctx, db, issueID, dependsOnID)
+		if err != nil {
+			return c.wrapError("remove-dependency", issueID, err)
+		}
+		if active {
+			return c.wrapError("remove-dependency", issueID, ErrParentChildOrphanConfirmationRequired)
+		}
+	}
 
 	res, err := db.ExecContext(ctx, `
 		UPDATE issue_dependencies
@@ -1476,10 +1498,81 @@ func (c *Client) RemoveDependency(ctx context.Context, issueID, dependsOnID, dep
 
 // RemoveDependencyWithRuntime tombstones a dependency edge and returns the changed issue.
 func (c *Client) RemoveDependencyWithRuntime(ctx context.Context, projectID, issueID, dependsOnID, dependencyType string) (domain.Task, error) {
+	canonicalType, canonicalErr := canonicalDependencyType(dependencyType)
+	if canonicalErr == nil && canonicalType == string(domain.DependencyParentChild) && !hasParentChildOrphanConfirmation(ctx) {
+		exists, err := c.dependencyEdgeExists(ctx, issueID, dependsOnID, canonicalType)
+		if err != nil {
+			return domain.Task{}, c.wrapError("remove-dependency", issueID, err)
+		}
+		if !exists {
+			if err := c.RemoveDependency(ctx, issueID, dependsOnID, dependencyType); err != nil {
+				return domain.Task{}, err
+			}
+			return c.GetWithRuntime(ctx, projectID, issueID)
+		}
+		task, err := c.GetWithRuntime(ctx, projectID, issueID)
+		if err != nil {
+			return domain.Task{}, err
+		}
+		if parentChildRemovalWouldOrphanRuntimeChild(task) {
+			return domain.Task{}, c.wrapError("remove-dependency", issueID, ErrParentChildOrphanConfirmationRequired)
+		}
+	}
 	if err := c.RemoveDependency(ctx, issueID, dependsOnID, dependencyType); err != nil {
 		return domain.Task{}, err
 	}
 	return c.GetWithRuntime(ctx, projectID, issueID)
+}
+
+func (c *Client) dependencyEdgeExists(ctx context.Context, issueID, dependsOnID, dependencyType string) (bool, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return false, err
+	}
+	var exists bool
+	if err := db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM issue_dependencies
+			WHERE issue_id = ? AND depends_on_id = ? AND dependency_type = ? AND tombstoned_at IS NULL
+		)
+	`, issueID, dependsOnID, dependencyType).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+func (c *Client) parentChildRemovalWouldOrphanActiveChild(ctx context.Context, db *sql.DB, issueID, dependsOnID string) (bool, error) {
+	var status string
+	if err := db.QueryRowContext(ctx, `
+		SELECT i.status
+		FROM issues i
+		INNER JOIN issue_dependencies d
+			ON d.issue_id = i.id
+			AND d.depends_on_id = ?
+			AND d.dependency_type = ?
+			AND d.tombstoned_at IS NULL
+		WHERE i.id = ? AND i.deleted_at IS NULL
+	`, dependsOnID, string(domain.DependencyParentChild), issueID).Scan(&status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return isActiveParentChildRemovalStatus(domain.Status(strings.TrimSpace(status))), nil
+}
+
+func parentChildRemovalWouldOrphanRuntimeChild(task domain.Task) bool {
+	return isActiveParentChildRemovalStatus(task.Status) || task.HasWorktree || task.HasTmuxSession || task.Session != nil
+}
+
+func isActiveParentChildRemovalStatus(status domain.Status) bool {
+	switch status {
+	case domain.StatusOpen, domain.StatusInProgress, domain.StatusInReview:
+		return true
+	default:
+		return false
+	}
 }
 
 func dependencyTypeRequiresConfirmation(dependencyType string) bool {

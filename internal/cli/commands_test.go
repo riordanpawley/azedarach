@@ -4045,11 +4045,11 @@ func TestParseIssueDependencyArgs(t *testing.T) {
 		t.Fatalf("ParseIssueDependencyAddArgs() force parent change not set: %+v", add)
 	}
 
-	remove, err := ParseIssueDependencyRemoveArgs([]string{"--type", "blocks", "--confirm", "az-3", "az-4"})
+	remove, err := ParseIssueDependencyRemoveArgs([]string{"--type", "blocks", "--confirm", "--confirm-parent-orphan", "az-3", "az-4"})
 	if err != nil {
 		t.Fatalf("ParseIssueDependencyRemoveArgs() error = %v", err)
 	}
-	if remove.IssueID != "az-3" || remove.DependsOnID != "az-4" || remove.Type != "blocks" || !remove.Confirm {
+	if remove.IssueID != "az-3" || remove.DependsOnID != "az-4" || remove.Type != "blocks" || !remove.Confirm || !remove.ConfirmParentOrphan {
 		t.Fatalf("ParseIssueDependencyRemoveArgs() = %+v", remove)
 	}
 	_, err = ParseIssueDependencyRemoveArgs([]string{"--impl", "go-bubbletea", "az-3"})
@@ -6981,10 +6981,11 @@ func TestIssueDependencyCommandsUseDaemonTaskCommands(t *testing.T) {
 
 	removeOut := captureStdout(t, func() error {
 		return IssueDependencyRemoveCommand(deps, IssueDependencyRemoveOptions{
-			IssueID:     "az-5",
-			DependsOnID: "az-2",
-			Type:        "blocks",
-			Confirm:     true,
+			IssueID:             "az-5",
+			DependsOnID:         "az-2",
+			Type:                "parent-child",
+			Confirm:             true,
+			ConfirmParentOrphan: true,
 		})
 	})
 	if gotRemoveReq.Command != daemonclient.CommandTaskDependencyRemove {
@@ -6994,10 +6995,10 @@ func TestIssueDependencyCommandsUseDaemonTaskCommands(t *testing.T) {
 	if err := json.Unmarshal(gotRemoveReq.Body, &removeBody); err != nil {
 		t.Fatalf("unmarshal remove body: %v", err)
 	}
-	if removeBody.TaskID != "az-5" || removeBody.DependsOnID != "az-2" || removeBody.Type != "blocks" || !removeBody.Confirm {
+	if removeBody.TaskID != "az-5" || removeBody.DependsOnID != "az-2" || removeBody.Type != "parent-child" || !removeBody.Confirm || !removeBody.ConfirmParentOrphan {
 		t.Fatalf("remove body = %+v", removeBody)
 	}
-	if !strings.Contains(removeOut, "Removed dependency: az-5 --(blocks)--> az-2") {
+	if !strings.Contains(removeOut, "Removed dependency: az-5 --(parent-child)--> az-2") {
 		t.Fatalf("remove output = %q", removeOut)
 	}
 }
@@ -7459,7 +7460,7 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue dep add [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--force-parent-change] [--json]") {
 		t.Fatalf("usage missing issue dep add command: %q", output)
 	}
-	if !strings.Contains(output, "issue dep remove [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--confirm] [--json]") {
+	if !strings.Contains(output, "issue dep remove [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--confirm] [--confirm-parent-orphan] [--json]") {
 		t.Fatalf("usage missing issue dep remove command: %q", output)
 	}
 	if !strings.Contains(output, "issue dep bulk apply [--project <project-id>] --input <path>") {
@@ -7624,6 +7625,12 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "Blocked is not an issue status. Represent blocked work with dependency edges") {
 		t.Fatalf("prime output missing blocked-as-graph guidance: %q", output)
+	}
+	if !strings.Contains(output, "Parent-child edges are hierarchy/board-nesting edges, not readiness controls.") {
+		t.Fatalf("prime output missing parent-child hierarchy guidance: %q", output)
+	}
+	if !strings.Contains(output, "To pause or supersede child work inside an orchestration graph, keep the parent-child edge") {
+		t.Fatalf("prime output missing safe pause/supersede guidance: %q", output)
 	}
 	if !strings.Contains(output, "Worker completion flow: workers should leave their issue `in_review`") {
 		t.Fatalf("prime output missing in-review worker completion guidance: %q", output)

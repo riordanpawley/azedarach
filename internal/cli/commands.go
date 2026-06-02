@@ -224,12 +224,13 @@ type IssueDependencyAddOptions struct {
 }
 
 type IssueDependencyRemoveOptions struct {
-	Project     string
-	IssueID     string
-	DependsOnID string
-	Type        string
-	Confirm     bool
-	JSON        bool
+	Project             string
+	IssueID             string
+	DependsOnID         string
+	Type                string
+	Confirm             bool
+	ConfirmParentOrphan bool
+	JSON                bool
 }
 
 type IssueDependencyBulkApplyOptions struct {
@@ -2426,12 +2427,13 @@ func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions
 	fs.StringVar(&dependsOnIDFlag, "depends-on-id", "", "dependency target issue id (named alternative to positional)")
 	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from|created-in)")
 	fs.BoolVar(&opts.Confirm, "confirm", false, "confirm removal for guarded dependency types")
+	fs.BoolVar(&opts.ConfirmParentOrphan, "confirm-parent-orphan", false, "confirm parent-child removal that can orphan active child work onto the root board")
 	fs.BoolVar(&opts.JSON, "json", false, "output dependency remove result as JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDependencyRemoveOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--json]")
+		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDependencyRemoveOptions{}, fmt.Errorf("--impl is not supported for issue dep remove; dependencies target existing issues")
@@ -2449,7 +2451,7 @@ func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions
 		opts.DependsOnID = strings.TrimSpace(dependsOnIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.DependsOnID) == "" {
-		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--json]")
+		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -3954,10 +3956,11 @@ func IssueDependencyRemoveCommand(deps *Dependencies, opts IssueDependencyRemove
 		return fmt.Errorf("invalid depends_on_id %q: %w", opts.DependsOnID, err)
 	}
 	if err := deps.DaemonClient.RemoveTaskDependency(ctx, daemonclient.TaskDependencyRemoveParams{
-		TaskID:      typedIssueID,
-		DependsOnID: typedDependsOnID,
-		Type:        opts.Type,
-		Confirm:     opts.Confirm,
+		TaskID:              typedIssueID,
+		DependsOnID:         typedDependsOnID,
+		Type:                opts.Type,
+		Confirm:             opts.Confirm,
+		ConfirmParentOrphan: opts.ConfirmParentOrphan,
 	}); err != nil {
 		return fmt.Errorf("failed to remove dependency %s -> %s: %w", opts.IssueID, opts.DependsOnID, err)
 	}

@@ -89,10 +89,11 @@ type TaskDependencyParams struct {
 
 // TaskDependencyRemoveParams extends dependency params with explicit confirmation.
 type TaskDependencyRemoveParams struct {
-	TaskID      naming.IssueID `json:"task_id"`
-	DependsOnID naming.IssueID `json:"depends_on_id"`
-	Type        string         `json:"dependency_type"`
-	Confirm     bool           `json:"confirm"`
+	TaskID              naming.IssueID `json:"task_id"`
+	DependsOnID         naming.IssueID `json:"depends_on_id"`
+	Type                string         `json:"dependency_type"`
+	Confirm             bool           `json:"confirm"`
+	ConfirmParentOrphan bool           `json:"confirm_parent_orphan,omitempty"`
 }
 
 // TaskIDResponse is returned by commands that allocate a new task identifier.
