@@ -716,61 +716,29 @@ func (d *Daemon) runtimeDiffBaseBranchForIssue(
 		return baseBranch
 	}
 
-	worktreeBranchForIssue := func(id string) string {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			return ""
-		}
-		if wt, ok := worktreeByIssue[id]; ok {
-			if candidate := strings.TrimSpace(wt.Branch); candidate != "" {
-				return candidate
-			}
-		}
-		return ""
-	}
-	branchForIssue := func(id string) string {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			return ""
-		}
-		if candidate := worktreeBranchForIssue(id); candidate != "" {
-			return candidate
-		}
-		return "az/" + id
-	}
-
-	task, ok := taskByIssue[strings.TrimSpace(issueID)]
-	if !ok || task.ParentID == nil {
-		return baseBranch
-	}
-
-	nextParentID := strings.TrimSpace(task.ParentID.String())
-	visited := map[string]struct{}{}
-	for nextParentID != "" {
-		if _, seen := visited[nextParentID]; seen {
-			break
-		}
-		visited[nextParentID] = struct{}{}
-
-		if candidate := worktreeBranchForIssue(nextParentID); candidate != "" {
-			return candidate
-		}
-
-		parentTask, parentOK := taskByIssue[nextParentID]
-		if !parentOK {
-			return branchForIssue(nextParentID)
-		}
-		if parentTask.Status != domain.StatusDone {
-			return branchForIssue(nextParentID)
-		}
-
-		nextParentID = ""
-		if parentTask.ParentID != nil {
-			nextParentID = strings.TrimSpace(parentTask.ParentID.String())
-		}
+	if target, ok := domain.ClosestAncestorWithWorktree(issueID, taskByIssue, issueWorktreeRefsFromGitWorktrees(worktreeByIssue)); ok {
+		return target.Branch
 	}
 
 	return baseBranch
+}
+
+func issueWorktreeRefsFromGitWorktrees(worktreesByIssue map[string]git.Worktree) map[string]domain.IssueWorktreeRef {
+	if len(worktreesByIssue) == 0 {
+		return nil
+	}
+	refs := make(map[string]domain.IssueWorktreeRef, len(worktreesByIssue))
+	for issueID, wt := range worktreesByIssue {
+		issueID = strings.TrimSpace(issueID)
+		if issueID == "" {
+			continue
+		}
+		refs[issueID] = domain.IssueWorktreeRef{
+			Branch: strings.TrimSpace(wt.Branch),
+			Path:   strings.TrimSpace(wt.Path),
+		}
+	}
+	return refs
 }
 
 func (d *Daemon) ensureWorktreeGitProbeThrottle() *reconcileThrottle {

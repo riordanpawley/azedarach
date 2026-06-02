@@ -2292,7 +2292,7 @@ func (m Model) sessionOriginCandidates(task *domain.Task) ([]overlay.MergeTarget
 
 func (m Model) diffBaseBranchForTask(task *domain.Task) string {
 	baseBranch := m.resolveBaseBranch()
-	if task == nil || task.ParentID == nil {
+	if task == nil {
 		return baseBranch
 	}
 	taskByID := make(map[string]domain.Task, len(m.tasks))
@@ -2301,29 +2301,45 @@ func (m Model) diffBaseBranchForTask(task *domain.Task) string {
 			taskByID[id] = candidate
 		}
 	}
-	nextParentID := strings.TrimSpace(task.ParentID.String())
-	visited := map[string]struct{}{}
-	for nextParentID != "" {
-		if _, seen := visited[nextParentID]; seen {
-			break
-		}
-		visited[nextParentID] = struct{}{}
-		if branch := strings.TrimSpace(m.runtimeSignalBranchByTask[nextParentID]); branch != "" {
-			return branch
-		}
-		parentTask, ok := taskByID[nextParentID]
-		if !ok {
-			return m.originBranchForSelection(nextParentID)
-		}
-		if parentTask.HasWorktree || parentTask.Session != nil {
-			return m.originBranchForSelection(nextParentID)
-		}
-		nextParentID = ""
-		if parentTask.ParentID != nil {
-			nextParentID = strings.TrimSpace(parentTask.ParentID.String())
-		}
+	if target, ok := domain.ClosestAncestorWithWorktree(task.ID.String(), taskByID, m.issueWorktreeRefsForDiffBase()); ok {
+		return target.Branch
 	}
 	return baseBranch
+}
+
+func (m Model) issueWorktreeRefsForDiffBase() map[string]domain.IssueWorktreeRef {
+	refs := make(map[string]domain.IssueWorktreeRef, len(m.tasks)+len(m.runtimeSignalBranchByTask))
+	for issueID, branch := range m.runtimeSignalBranchByTask {
+		issueID = strings.TrimSpace(issueID)
+		branch = strings.TrimSpace(branch)
+		if issueID == "" || branch == "" {
+			continue
+		}
+		refs[issueID] = domain.IssueWorktreeRef{
+			Branch: branch,
+			Path:   strings.TrimSpace(m.runtimeSignalWorktreeByTask[issueID]),
+		}
+	}
+	for _, task := range m.tasks {
+		issueID := strings.TrimSpace(task.ID.String())
+		if issueID == "" {
+			continue
+		}
+		if existing, ok := refs[issueID]; ok && strings.TrimSpace(existing.Branch) != "" {
+			continue
+		}
+		if task.HasWorktree || task.Session != nil {
+			path := strings.TrimSpace(m.runtimeSignalWorktreeByTask[issueID])
+			if path == "" && task.Session != nil {
+				path = strings.TrimSpace(task.Session.Worktree)
+			}
+			refs[issueID] = domain.IssueWorktreeRef{
+				Branch: m.originBranchForSelection(issueID),
+				Path:   path,
+			}
+		}
+	}
+	return refs
 }
 
 func (m Model) daemonCommandTimeout() time.Duration {
@@ -4390,7 +4406,7 @@ func formatCloseCleanupConfirmPrompt(pending pendingCloseCleanupConfirmation) st
 		fmt.Sprintf("Target: %s", target),
 		statusLine,
 		"",
-		"This may merge into the nearest non-closed ancestor branch, stop active sessions, and remove issue worktrees before closing.",
+		"This may merge into the closest ancestor worktree branch, stop active sessions, and remove issue worktrees before closing.",
 		"Close guards still block dirty, ahead, conflicted, unmerged, or unresolved child work.",
 		"",
 		"Proceed?",

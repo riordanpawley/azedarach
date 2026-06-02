@@ -742,6 +742,10 @@ func (d *Daemon) resolveSessionStartBaseBranch(
 		return baseBranch, ""
 	}
 
+	taskByIssue := map[string]domain.Task{
+		strings.TrimSpace(task.ID.String()): task,
+	}
+	worktreesByIssue := map[string]domain.IssueWorktreeRef{}
 	nextParentID := strings.TrimSpace(task.ParentID.String())
 	visited := map[string]struct{}{}
 	for nextParentID != "" {
@@ -751,9 +755,9 @@ func (d *Daemon) resolveSessionStartBaseBranch(
 		visited[nextParentID] = struct{}{}
 
 		if parentWorktree, err := worktreeManager.Get(ctx, nextParentID); err == nil {
-			candidate := strings.TrimSpace(parentWorktree.Branch)
-			if candidate != "" {
-				return candidate, nextParentID
+			worktreesByIssue[nextParentID] = domain.IssueWorktreeRef{
+				Branch: strings.TrimSpace(parentWorktree.Branch),
+				Path:   strings.TrimSpace(parentWorktree.Path),
 			}
 		}
 
@@ -761,11 +765,16 @@ func (d *Daemon) resolveSessionStartBaseBranch(
 		if err != nil {
 			break
 		}
+		taskByIssue[nextParentID] = parentTask
 
 		nextParentID = ""
 		if parentTask.ParentID != nil {
 			nextParentID = strings.TrimSpace(parentTask.ParentID.String())
 		}
+	}
+
+	if target, ok := domain.ClosestAncestorWithWorktree(task.ID.String(), taskByIssue, worktreesByIssue); ok {
+		return target.Branch, target.IssueID
 	}
 
 	return baseBranch, ""

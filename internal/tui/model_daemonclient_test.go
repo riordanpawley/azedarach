@@ -3935,7 +3935,7 @@ func TestMergeToBaseUsesNearestNonClosedAncestorBranch(t *testing.T) {
 	}
 }
 
-func TestMergeToBaseFailsWhenNearestNonClosedAncestorBranchMissing(t *testing.T) {
+func TestResolveMergeBaseTargetFallsBackWhenNoAncestorWorktreeExists(t *testing.T) {
 	sourceID := "az-child"
 	parentID := "az-parent"
 	parentIssueID := naming.IssueID(parentID)
@@ -3980,13 +3980,12 @@ func TestMergeToBaseFailsWhenNearestNonClosedAncestorBranchMissing(t *testing.T)
 		{ID: parentIssueID, Status: domain.StatusInProgress},
 	}
 
-	msg := m.mergeToBaseCmd("/tmp/az-child", sourceID, true)()
-	mergeMsg, ok := msg.(mergeResultMsg)
-	if !ok {
-		t.Fatalf("msg type = %T, want mergeResultMsg", msg)
+	target, err := m.resolveMergeBaseTarget(context.Background(), sourceID)
+	if err != nil {
+		t.Fatalf("resolveMergeBaseTarget error = %v", err)
 	}
-	if mergeMsg.err == nil || !strings.Contains(mergeMsg.err.Error(), "nearest non-closed ancestor az-parent has no active worktree branch") {
-		t.Fatalf("merge err = %v, want missing ancestor branch error", mergeMsg.err)
+	if target.targetID != mergeBaseTargetID || target.targetBranch != "main" || target.targetWorktree != "" {
+		t.Fatalf("target = %+v, want default base target", target)
 	}
 }
 
@@ -5315,6 +5314,58 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 		baseBranchField := reflect.ValueOf(diffOverlay).Elem().FieldByName("baseBranch")
 		if got := baseBranchField.String(); got != "az/az-parent" {
 			t.Fatalf("diff base branch = %q, want %q", got, "az/az-parent")
+		}
+	})
+
+	t.Run("open diff skips parent without worktree and targets closest ancestor worktree branch", func(t *testing.T) {
+		m := newDaemonTestModel(&recordingDaemonTransport{})
+		rootID := naming.IssueID("az-root")
+		parentID := naming.IssueID("az-parent")
+		childID := naming.IssueID("az-child")
+		m.tasks = []domain.Task{
+			{
+				ID:          rootID,
+				Title:       "Root task",
+				Status:      domain.StatusInProgress,
+				Type:        domain.TypeTask,
+				HasWorktree: true,
+			},
+			{
+				ID:       parentID,
+				Title:    "Parent task",
+				Status:   domain.StatusInProgress,
+				Type:     domain.TypeTask,
+				ParentID: &rootID,
+			},
+			{
+				ID:       childID,
+				Title:    "Child task",
+				Status:   domain.StatusInProgress,
+				Type:     domain.TypeTask,
+				ParentID: &parentID,
+				Session: &domain.Session{
+					IssueID:  childID,
+					Worktree: "/tmp/az-child",
+				},
+			},
+		}
+		m.runtimeSignalBranchByTask = map[string]string{
+			"az-root": "riordan/az-root/root-branch",
+		}
+		m.nav.SelectTask("az-child", 1)
+
+		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "f"})
+		if cmd == nil {
+			t.Fatal("expected diff overlay command")
+		}
+		updatedModel := updated.(Model)
+		diffOverlay, ok := updatedModel.overlayStack.Current().(*diff.DiffViewer)
+		if !ok {
+			t.Fatalf("overlay type = %T, want *diff.DiffViewer", updatedModel.overlayStack.Current())
+		}
+		baseBranchField := reflect.ValueOf(diffOverlay).Elem().FieldByName("baseBranch")
+		if got := baseBranchField.String(); got != "riordan/az-root/root-branch" {
+			t.Fatalf("diff base branch = %q, want closest ancestor worktree branch", got)
 		}
 	})
 

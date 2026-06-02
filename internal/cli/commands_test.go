@@ -553,11 +553,10 @@ func TestStartCommandUsesNearestAncestorWorktreeBranchForNestedChildIssue(t *tes
 	if err := StartCommand(deps, "az-child"); err != nil {
 		t.Fatalf("StartCommand error: %v", err)
 	}
-	if len(commands) != 4 ||
+	if len(commands) != 3 ||
 		commands[0] != daemonclient.CommandTaskList ||
 		commands[1] != daemonclient.CommandWorktreeList ||
-		commands[2] != daemonclient.CommandTaskList ||
-		commands[3] != commandSessionStart {
+		commands[2] != commandSessionStart {
 		t.Fatalf("commands = %v", commands)
 	}
 	var body sessionRequestBody
@@ -1506,7 +1505,7 @@ func TestBranchMergeToBaseCommandUsesNearestNonClosedAncestorBranch(t *testing.T
 	}
 }
 
-func TestBranchMergeToBaseCommandFailsWhenNearestNonClosedAncestorBranchMissing(t *testing.T) {
+func TestBranchMergeToBaseCommandBlocksChildWithoutAncestorWorktreeUnlessOverride(t *testing.T) {
 	baseWorktree := t.TempDir()
 	cfg := config.DefaultConfig()
 	cfg.Git.BaseBranch = "trunk"
@@ -1546,8 +1545,8 @@ func TestBranchMergeToBaseCommandFailsWhenNearestNonClosedAncestorBranchMissing(
 	}
 
 	err := BranchMergeToBaseCommand(deps, "az-child")
-	if err == nil || !strings.Contains(err.Error(), "nearest non-closed ancestor az-parent has no active worktree branch") {
-		t.Fatalf("err = %v, want missing ancestor branch error", err)
+	if err == nil || !strings.Contains(err.Error(), "refusing to merge child issue az-child into base without explicit override") {
+		t.Fatalf("err = %v, want explicit child base merge refusal", err)
 	}
 }
 
