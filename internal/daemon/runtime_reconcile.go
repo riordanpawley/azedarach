@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime/debug"
 	"slices"
@@ -141,7 +140,7 @@ func (d *Daemon) runtimeReconcileTimeout() time.Duration {
 	if d.cfg.RuntimeReconcileTimeout > 0 {
 		return d.cfg.RuntimeReconcileTimeout
 	}
-	if isScopedDaemonModeEnv(os.Getenv("AZEDARACH_DAEMON_SCOPE"), os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")) {
+	if appconfig.UseScopedDaemonRuntimeFor(d.cfg.RepoDir) {
 		return scopedRuntimeReconcileTimeout
 	}
 	return defaultRuntimeReconcileTimeout
@@ -668,7 +667,7 @@ func (d *Daemon) runtimeReconcileKnownProjectIDs(ctx context.Context) ([]string,
 		return []string{protocol.DefaultProjectID}, nil
 	}
 	repoDir := strings.TrimSpace(d.cfg.RepoDir)
-	scopedMode := isScopedDaemonModeEnv(os.Getenv("AZEDARACH_DAEMON_SCOPE"), os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE"))
+	scopedMode := appconfig.UseScopedDaemonRuntimeFor(repoDir)
 	repoProjectID := ""
 	repoNameProjectID := ""
 	if repoDir != "" {
@@ -730,17 +729,6 @@ func (d *Daemon) runtimeReconcileKnownProjectIDs(ctx context.Context) ([]string,
 		slices.Sort(projectIDs)
 	}
 	return projectIDs, nil
-}
-
-func isScopedDaemonModeEnv(mode, source string) bool {
-	mode = strings.TrimSpace(strings.ToLower(mode))
-	source = strings.TrimSpace(strings.ToLower(source))
-	switch mode {
-	case "worktree", "scoped", "local":
-		return source == "just-run"
-	default:
-		return false
-	}
 }
 
 func prioritizeProjectIDs(projectIDs []string, preferred []string) []string {

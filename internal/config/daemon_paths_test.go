@@ -107,6 +107,33 @@ func TestDaemonPathsDefaultToGlobal(t *testing.T) {
 	}
 }
 
+func TestDaemonPathsUseScopedForLinkedWorktreeWithoutEnv(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
+	t.Setenv("PATH", "")
+
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "wt")
+	nested := filepath.Join(worktree, "cmd")
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo worktrees): %v", err)
+	}
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("MkdirAll(nested): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree .git): %v", err)
+	}
+
+	if got := DaemonSocketPathFor(nested); got != ScopedDaemonSocketPath(nested) {
+		t.Fatalf("DaemonSocketPathFor() = %q, want %q", got, ScopedDaemonSocketPath(nested))
+	}
+	if got := DaemonLockPathFor(nested); got != ScopedDaemonLockPath(nested) {
+		t.Fatalf("DaemonLockPathFor() = %q, want %q", got, ScopedDaemonLockPath(nested))
+	}
+}
+
 func TestDaemonPathsUseScopedWhenEnabled(t *testing.T) {
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")

@@ -57,7 +57,7 @@ func marshalTaskListBodyForProject(projectID string, tasks []domain.Task) ([]byt
 	})
 }
 
-func TestNewDependenciesAtNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
+func TestNewDependenciesAtKeepsProjectStateAtBaseRepoRoot(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
 	worktree := filepath.Join(base, "wt")
@@ -81,9 +81,6 @@ func TestNewDependenciesAtNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 	if deps.RepoDir != repo {
 		t.Fatalf("RepoDir = %q, want %q", deps.RepoDir, repo)
 	}
-	if deps.RuntimeRepoDir != repo {
-		t.Fatalf("RuntimeRepoDir = %q, want %q", deps.RuntimeRepoDir, repo)
-	}
 	wantProjectID, err := config.ProjectIDForRoot(repo)
 	if err != nil {
 		t.Fatalf("ProjectIDForRoot() error = %v", err)
@@ -91,8 +88,36 @@ func TestNewDependenciesAtNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 	if deps.ProjectID != wantProjectID {
 		t.Fatalf("ProjectID = %q, want %q", deps.ProjectID, wantProjectID)
 	}
-	if deps.DaemonSocket != config.GlobalDaemonSocketPath() {
-		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.GlobalDaemonSocketPath())
+}
+
+func TestNewDependenciesAtUsesScopedRuntimeForLinkedWorktreeWithoutEnv(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "wt")
+	start := filepath.Join(worktree, "go-bubbletea")
+
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo worktrees): %v", err)
+	}
+	if err := os.MkdirAll(start, 0o755); err != nil {
+		t.Fatalf("MkdirAll(start): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree .git): %v", err)
+	}
+
+	t.Setenv("PATH", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
+	deps, err := NewDependenciesAt(config.DefaultConfig(), start)
+	if err != nil {
+		t.Fatalf("NewDependenciesAt() error = %v", err)
+	}
+	if deps.DaemonSocket != config.ScopedDaemonSocketPath(start) {
+		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.ScopedDaemonSocketPath(start))
+	}
+	if deps.RuntimeRepoDir != worktree {
+		t.Fatalf("RuntimeRepoDir = %q, want %q", deps.RuntimeRepoDir, worktree)
 	}
 }
 

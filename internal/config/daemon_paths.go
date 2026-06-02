@@ -52,7 +52,7 @@ func GlobalDaemonLockPath() string {
 // DaemonSocketPathFor returns either the global or worktree-scoped daemon socket
 // path depending on runtime mode.
 func DaemonSocketPathFor(startPath string) string {
-	if useScopedDaemonRuntime() {
+	if UseScopedDaemonRuntimeFor(startPath) {
 		return ScopedDaemonSocketPath(startPath)
 	}
 	return GlobalDaemonSocketPath()
@@ -61,7 +61,7 @@ func DaemonSocketPathFor(startPath string) string {
 // DaemonLockPathFor returns either the global or worktree-scoped daemon lock path
 // depending on runtime mode.
 func DaemonLockPathFor(startPath string) string {
-	if useScopedDaemonRuntime() {
+	if UseScopedDaemonRuntimeFor(startPath) {
 		return ScopedDaemonLockPath(startPath)
 	}
 	return GlobalDaemonLockPath()
@@ -92,7 +92,23 @@ func daemonScopeID(path string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-func useScopedDaemonRuntime() bool {
+// UseScopedDaemonRuntimeFor reports whether daemon runtime assets should be
+// scoped to the current worktree instead of the user-global daemon.
+func UseScopedDaemonRuntimeFor(startPath string) bool {
+	if useExplicitScopedDaemonRuntime() {
+		return true
+	}
+	worktreeRoot, wtErr := ResolveWorktreeRoot(startPath)
+	projectRoot, projErr := ResolveProjectRoot(startPath)
+	if wtErr != nil || projErr != nil {
+		return false
+	}
+	return strings.TrimSpace(worktreeRoot) != "" &&
+		strings.TrimSpace(projectRoot) != "" &&
+		filepath.Clean(worktreeRoot) != filepath.Clean(projectRoot)
+}
+
+func useExplicitScopedDaemonRuntime() bool {
 	mode := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
 	source := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")))
 	modeEnabled := mode == "worktree" || mode == "scoped" || mode == "local"
