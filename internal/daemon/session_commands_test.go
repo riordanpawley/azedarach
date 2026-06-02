@@ -303,6 +303,37 @@ func TestSessionProjectionByIssueKeyPrefersMostRecentState(t *testing.T) {
 	})
 }
 
+func TestLifecycleSessionProjectionByIssueKeyIgnoresAgentScopedRows(t *testing.T) {
+	now := time.Now().UTC()
+	sessions := []daemonstate.Session{
+		{
+			ID:        "az-bra",
+			IssueID:   "bra",
+			State:     daemonstate.SessionStateAttached,
+			UpdatedAt: now,
+		},
+		{
+			ID:        "az-bra.pane-190",
+			IssueID:   "bra",
+			State:     daemonstate.SessionStatePaused,
+			UpdatedAt: now.Add(time.Minute),
+		},
+	}
+
+	for name, byIssue := range map[string]map[string]daemonstate.Session{
+		"reconcile":      sessionProjectionForReconcileByIssueKey(sessions, "azedarach"),
+		"tmux hydration": sessionProjectionForTmuxHydrationByIssueKey(sessions, "azedarach"),
+	} {
+		entry, ok := byIssue["bra"]
+		if !ok {
+			t.Fatalf("%s projection missing issue key bra: %+v", name, byIssue)
+		}
+		if entry.ID != "az-bra" || entry.State != daemonstate.SessionStateAttached {
+			t.Fatalf("%s projection = %+v, want parent attached row", name, entry)
+		}
+	}
+}
+
 func TestSourceForSessionInvariant(t *testing.T) {
 	d := &Daemon{}
 	if got := d.sourceForSessionInvariant(sessionInvariantSessionStartConflict); got != daemonInvariantSourceTmux {
@@ -3534,14 +3565,25 @@ func TestSessionStatusReportsStaleRuntimeForTargetIssue(t *testing.T) {
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 	sessionID := naming.CanonicalSessionID(repoDir, issueID)
+	paneSessionID := sessionID + ".pane-190"
+	now := time.Now().UTC()
 	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       issueID,
 		State:         daemonstate.SessionStateAttached,
 		ObservedState: daemonstate.SessionStateStopped,
-		UpdatedAt:     time.Now().UTC(),
+		UpdatedAt:     now,
 	}); err != nil {
 		t.Fatalf("seed stale session projection: %v", err)
+	}
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            paneSessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStatePaused,
+		ObservedState: daemonstate.SessionStateStopped,
+		UpdatedAt:     now.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("seed newer stale pane projection: %v", err)
 	}
 
 	daemon := &Daemon{
@@ -3580,6 +3622,12 @@ func TestSessionStatusReportsStaleRuntimeForTargetIssue(t *testing.T) {
 	}
 	if !strings.Contains(payload.Output, "Stale runtime session for "+issueID) {
 		t.Fatalf("status output = %q, want stale runtime diagnostic", payload.Output)
+	}
+	if !strings.Contains(payload.Output, fmt.Sprintf("session %q", sessionID)) {
+		t.Fatalf("status output = %q, want parent session %q", payload.Output, sessionID)
+	}
+	if strings.Contains(payload.Output, paneSessionID) {
+		t.Fatalf("status output = %q, should not report helper pane session %q", payload.Output, paneSessionID)
 	}
 	if !strings.Contains(payload.Output, "az orchestrate close-session --issue "+issueID) {
 		t.Fatalf("status output = %q, want repair command", payload.Output)
@@ -4339,6 +4387,24 @@ func TestEnrichTasksWithSessionStateReportsHookBackedActivity(t *testing.T) {
 	idleSessionID := naming.CanonicalSessionID(projectID, idleID) + ".pane-%2"
 	now := time.Now().UTC()
 	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            naming.CanonicalSessionID(projectID, busyID),
+		IssueID:       busyID,
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning,
+		UpdatedAt:     now,
+	}); err != nil {
+		t.Fatalf("seed busy session: %v", err)
+	}
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            naming.CanonicalSessionID(projectID, idleID),
+		IssueID:       idleID,
+		State:         daemonstate.SessionStatePaused,
+		ObservedState: daemonstate.SessionStatePaused,
+		UpdatedAt:     now,
+	}); err != nil {
+		t.Fatalf("seed idle session: %v", err)
+	}
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
 		ID:            busySessionID,
 		IssueID:       busyID,
 		State:         daemonstate.SessionStateRunning,
@@ -4648,7 +4714,7 @@ func TestEnrichTasksWithSessionStateKeepsEarlierStartedAtAcrossSnapshotAndProjec
 	}
 }
 
-func TestEnrichTasksWithSessionStateAggregatesMultipleAgentSessions(t *testing.T) {
+func TestEnrichTasksWithSessionStateIgnoresAgentScopedRowsWithoutParentSession(t *testing.T) {
 	const (
 		projectID = "proj-multi-agent"
 		issueID   = "ciw"
@@ -4693,46 +4759,15 @@ func TestEnrichTasksWithSessionStateAggregatesMultipleAgentSessions(t *testing.T
 
 	tasks := []domain.Task{{ID: issueID, Title: "multiple codex sessions", Type: domain.TypeTask}}
 	enriched := d.enrichTasksWithSessionState(context.Background(), projectID, tasks)
-	if len(enriched) != 1 || enriched[0].Session == nil {
-		t.Fatalf("missing session in enriched task: %+v", enriched)
+	if len(enriched) != 1 {
+		t.Fatalf("enriched task count = %d, want 1", len(enriched))
 	}
-	if enriched[0].Session.State != domain.SessionBusy {
-		t.Fatalf("session state with one attached agent = %v, want %v", enriched[0].Session.State, domain.SessionBusy)
-	}
-	if enriched[0].Session.TotalCount != 2 || enriched[0].Session.ActiveCount != 1 || enriched[0].Session.PausedCount != 1 {
-		t.Fatalf("session aggregate counts = total %d active %d paused %d, want 2/1/1", enriched[0].Session.TotalCount, enriched[0].Session.ActiveCount, enriched[0].Session.PausedCount)
-	}
-	if !enriched[0].Session.TmuxAttached || enriched[0].Session.TmuxAttachedCount != 1 {
-		t.Fatalf("tmux attachment = attached %v count %d, want true/1", enriched[0].Session.TmuxAttached, enriched[0].Session.TmuxAttachedCount)
-	}
-	if enriched[0].Session.StartedAt == nil || !enriched[0].Session.StartedAt.Equal(startedAt) {
-		t.Fatalf("started_at = %v, want earliest %v", enriched[0].Session.StartedAt, startedAt)
-	}
-
-	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
-		ID:            "ciw.pane-2",
-		IssueID:       issueID,
-		State:         daemonstate.SessionStatePaused,
-		ObservedState: daemonstate.SessionStatePaused,
-		StartedAt:     &secondStartedAt,
-		UpdatedAt:     startedAt.Add(2 * time.Minute),
-	}); err != nil {
-		t.Fatalf("pause second agent session: %v", err)
-	}
-
-	enriched = d.enrichTasksWithSessionState(context.Background(), projectID, tasks)
-	if len(enriched) != 1 || enriched[0].Session == nil {
-		t.Fatalf("missing paused session in enriched task: %+v", enriched)
-	}
-	if enriched[0].Session.State != domain.SessionPaused {
-		t.Fatalf("session state with all agents paused = %v, want %v", enriched[0].Session.State, domain.SessionPaused)
-	}
-	if enriched[0].Session.TotalCount != 2 || enriched[0].Session.ActiveCount != 0 || enriched[0].Session.PausedCount != 2 {
-		t.Fatalf("paused session aggregate counts = total %d active %d paused %d, want 2/0/2", enriched[0].Session.TotalCount, enriched[0].Session.ActiveCount, enriched[0].Session.PausedCount)
+	if enriched[0].Session != nil {
+		t.Fatalf("session = %+v, want nil because agent-scoped rows are not task lifecycle sessions", enriched[0].Session)
 	}
 }
 
-func TestEnrichTasksWithSessionStatePrefersAgentSessionRowsOverTmuxContainer(t *testing.T) {
+func TestEnrichTasksWithSessionStateIgnoresAgentScopedRowsInFavorOfParentContainer(t *testing.T) {
 	const (
 		projectID = "proj-agent-container"
 		issueID   = "cjz"
@@ -4778,10 +4813,10 @@ func TestEnrichTasksWithSessionStatePrefersAgentSessionRowsOverTmuxContainer(t *
 	if len(enriched) != 1 || enriched[0].Session == nil {
 		t.Fatalf("missing session in enriched task: %+v", enriched)
 	}
-	if enriched[0].Session.State != domain.SessionPaused {
-		t.Fatalf("session state = %v, want %v", enriched[0].Session.State, domain.SessionPaused)
+	if enriched[0].Session.State != domain.SessionBusy {
+		t.Fatalf("session state = %v, want %v", enriched[0].Session.State, domain.SessionBusy)
 	}
-	if enriched[0].Session.TotalCount != 1 || enriched[0].Session.ActiveCount != 0 || enriched[0].Session.PausedCount != 1 {
-		t.Fatalf("session aggregate counts = total %d active %d paused %d, want 1/0/1", enriched[0].Session.TotalCount, enriched[0].Session.ActiveCount, enriched[0].Session.PausedCount)
+	if enriched[0].Session.TotalCount != 1 || enriched[0].Session.ActiveCount != 1 || enriched[0].Session.PausedCount != 0 {
+		t.Fatalf("session aggregate counts = total %d active %d paused %d, want 1/1/0", enriched[0].Session.TotalCount, enriched[0].Session.ActiveCount, enriched[0].Session.PausedCount)
 	}
 }

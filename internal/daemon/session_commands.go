@@ -150,14 +150,13 @@ func sessionProjectionLatestByIssueKey(sessions []daemonstate.Session, namingSco
 }
 
 func sessionProjectionAggregateByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]daemonstate.Session {
-	hasAgentRows := activeAgentSessionIssueKeys(sessions, namingScope)
 	byIssueKey := make(map[string]daemonstate.Session, len(sessions))
 	for _, session := range sessions {
-		key := sessionKey(sessionProjectionIssueID(session, namingScope))
-		if key == "" {
+		if isAgentScopedSessionID(session.ID) {
 			continue
 		}
-		if _, hasAgent := hasAgentRows[key]; hasAgent && !isAgentScopedSessionID(session.ID) {
+		key := sessionKey(sessionProjectionIssueID(session, namingScope))
+		if key == "" {
 			continue
 		}
 		existing, exists := byIssueKey[key]
@@ -189,10 +188,18 @@ func sessionProjectionAggregateByIssueKey(sessions []daemonstate.Session, naming
 	return byIssueKey
 }
 
+func nonAgentSessionProjectionByIssue(sessions []daemonstate.Session, namingScope, issueID string) (daemonstate.Session, bool) {
+	byIssueKey := sessionProjectionAggregateByIssueKey(sessions, namingScope)
+	session, found := byIssueKey[sessionKey(issueID)]
+	return session, found
+}
+
 func sessionProjectionCountsByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]sessionProjectionCounts {
-	hasAgentRows := activeAgentSessionIssueKeys(sessions, namingScope)
 	byIssueKey := make(map[string]sessionProjectionCounts, len(sessions))
 	for _, session := range sessions {
+		if isAgentScopedSessionID(session.ID) {
+			continue
+		}
 		state := session.State
 		observed := session.ObservedState
 		if strings.TrimSpace(string(observed)) == "" {
@@ -207,10 +214,6 @@ func sessionProjectionCountsByIssueKey(sessions []daemonstate.Session, namingSco
 		}
 		counts := byIssueKey[key]
 		counts.TmuxAttachedCount += session.TmuxAttachedCount
-		if _, hasAgent := hasAgentRows[key]; hasAgent && !isAgentScopedSessionID(session.ID) {
-			byIssueKey[key] = counts
-			continue
-		}
 		counts.Total++
 		switch state {
 		case daemonstate.SessionStatePaused:
@@ -223,39 +226,16 @@ func sessionProjectionCountsByIssueKey(sessions []daemonstate.Session, namingSco
 	return byIssueKey
 }
 
-func activeAgentSessionIssueKeys(sessions []daemonstate.Session, namingScope string) map[string]struct{} {
-	out := make(map[string]struct{}, len(sessions))
-	for _, session := range sessions {
-		if !isAgentScopedSessionID(session.ID) {
-			continue
-		}
-		state := session.State
-		observed := session.ObservedState
-		if strings.TrimSpace(string(observed)) == "" {
-			observed = state
-		}
-		if state == daemonstate.SessionStateStopped || observed == daemonstate.SessionStateStopped {
-			continue
-		}
-		key := sessionKey(sessionProjectionIssueID(session, namingScope))
-		if key == "" {
-			continue
-		}
-		out[key] = struct{}{}
-	}
-	return out
-}
-
 func isAgentScopedSessionID(sessionID string) bool {
 	return strings.Contains(strings.TrimSpace(sessionID), ".pane-")
 }
 
 func sessionProjectionForReconcileByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]daemonstate.Session {
-	return sessionProjectionLatestByIssueKey(sessions, namingScope)
+	return sessionProjectionAggregateByIssueKey(sessions, namingScope)
 }
 
 func sessionProjectionForTmuxHydrationByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]daemonstate.Session {
-	return sessionProjectionLatestByIssueKey(sessions, namingScope)
+	return sessionProjectionAggregateByIssueKey(sessions, namingScope)
 }
 
 func sessionProjectionForTaskDisplayByIssueKey(snapshotByIssueKey, projectionByIssueKey map[string]daemonstate.Session) map[string]daemonstate.Session {
@@ -1519,8 +1499,12 @@ func (d *Daemon) staleSessionRuntimeStatusOutput(ctx context.Context, projectID,
 		return "", false
 	}
 	projectID = d.canonicalProjectID(projectID)
-	session, found, err := store.GetSessionStateByIssueID(ctx, projectID, issueID)
-	if err != nil || !found {
+	rows, err := store.ListSessionStates(ctx, projectID)
+	if err != nil {
+		return "", false
+	}
+	session, found := nonAgentSessionProjectionByIssue(rows, d.sessionNamingScope(projectID), issueID)
+	if !found {
 		return "", false
 	}
 	observed := session.ObservedState
@@ -2067,6 +2051,9 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 func activeSessionIssueKeysFromProjection(sessions []daemonstate.Session, namingScope string) map[string]struct{} {
 	active := make(map[string]struct{}, len(sessions))
 	for _, session := range sessions {
+		if isAgentScopedSessionID(session.ID) {
+			continue
+		}
 		observed := session.ObservedState
 		if strings.TrimSpace(string(observed)) == "" {
 			observed = session.State
@@ -2271,9 +2258,11 @@ func (d *Daemon) refreshStoppedSessionRuntimeState(ctx context.Context, projectI
 
 	var session daemonstate.Session
 	if issueID != "" {
-		if existing, found, err := store.GetSessionStateByIssueID(ctx, projectID, issueID); err != nil {
+		rows, err := store.ListSessionStates(ctx, projectID)
+		if err != nil {
 			return err
-		} else if found {
+		}
+		if existing, found := nonAgentSessionProjectionByIssue(rows, namingScope, issueID); found {
 			session = existing
 		}
 	}

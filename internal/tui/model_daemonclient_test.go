@@ -750,7 +750,7 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 	worktreeUpdatedAt := time.Date(2026, time.April, 1, 10, 10, 0, 0, time.UTC)
 	sessionUpdatedAt := time.Date(2026, time.April, 1, 10, 15, 0, 0, time.UTC)
 
-	makeProjectionBody := func(revision uint64, issueID, worktreePath string, gitAdditions, gitDeletions, gitAhead, gitBehind int, sessionState protocol.SessionLifecycleState, agentStatus string, updatedAt time.Time, activeOperation *protocol.RuntimeOperationProjection) []byte {
+	makeProjectionBody := func(revision uint64, issueID, worktreePath string, gitAdditions, gitDeletions, gitAhead, gitBehind int, sessionState protocol.SessionLifecycleState, updatedAt time.Time, activeOperation *protocol.RuntimeOperationProjection) []byte {
 		body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
 			ProjectID: naming.ProjectID(projectID),
 			IssueID:   naming.IssueID(issueID),
@@ -784,11 +784,6 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 						StartedAt:  &initialStartedAt,
 						UpdatedAt:  &updatedAt,
 						Worktree:   worktreePath,
-					},
-					Agent: protocol.RuntimeAgentProjection{
-						Status:    agentStatus,
-						SessionID: "sess-1",
-						UpdatedAt: &updatedAt,
 					},
 				},
 			},
@@ -827,7 +822,7 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 			ch <- protocol.EventEnvelope{
 				Revision: 8,
 				Event:    protocol.EventGitStatusUpdated,
-				Body: makeProjectionBody(8, "az-1", "/tmp/repo-az-1", 3, 1, 2, 1, protocol.SessionLifecycleStateAttached, "attached", gitUpdatedAt, &protocol.RuntimeOperationProjection{
+				Body: makeProjectionBody(8, "az-1", "/tmp/repo-az-1", 3, 1, 2, 1, protocol.SessionLifecycleStateAttached, gitUpdatedAt, &protocol.RuntimeOperationProjection{
 					OperationID:     "op-git",
 					State:           protocol.OperationStateRunning,
 					ProgressPercent: 40,
@@ -837,7 +832,7 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 			ch <- protocol.EventEnvelope{
 				Revision: 9,
 				Event:    protocol.EventWorktreeProjectionUpdated,
-				Body: makeProjectionBody(9, "az-1", "/tmp/repo-az-1-alt", 5, 2, 2, 1, protocol.SessionLifecycleStateAttached, "syncing", worktreeUpdatedAt, &protocol.RuntimeOperationProjection{
+				Body: makeProjectionBody(9, "az-1", "/tmp/repo-az-1-alt", 5, 2, 2, 1, protocol.SessionLifecycleStateAttached, worktreeUpdatedAt, &protocol.RuntimeOperationProjection{
 					OperationID:     "op-worktree",
 					State:           protocol.OperationStateRunning,
 					ProgressPercent: 75,
@@ -878,11 +873,6 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 							StartedAt:  &initialStartedAt,
 							UpdatedAt:  &sessionUpdatedAt,
 							Worktree:   "/tmp/repo-az-1-alt",
-						},
-						Agent: protocol.RuntimeAgentProjection{
-							Status:    "paused",
-							SessionID: "sess-1",
-							UpdatedAt: &sessionUpdatedAt,
 						},
 					},
 				},
@@ -971,8 +961,8 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 				if err := json.Unmarshal(evt.Body, &body); err != nil {
 					t.Fatalf("unmarshal git projection body: %v", err)
 				}
-				if body.Runtime == nil || body.Runtime.Projection.Agent.Status != "attached" {
-					t.Fatalf("git runtime agent = %+v, want attached", body.Runtime)
+				if body.Runtime == nil || body.Runtime.Projection.Session.State != protocol.SessionLifecycleStateAttached {
+					t.Fatalf("git runtime session = %+v, want attached", body.Runtime)
 				}
 				if model.daemonRevision != 8 {
 					t.Fatalf("daemon revision after git event = %d, want 8", model.daemonRevision)
@@ -1002,8 +992,8 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 				if err := json.Unmarshal(evt.Body, &body); err != nil {
 					t.Fatalf("unmarshal worktree projection body: %v", err)
 				}
-				if body.Runtime == nil || body.Runtime.Projection.Agent.Status != "syncing" {
-					t.Fatalf("worktree runtime agent = %+v, want syncing", body.Runtime)
+				if body.Runtime == nil || body.Runtime.Projection.Session.State != protocol.SessionLifecycleStateAttached {
+					t.Fatalf("worktree runtime session = %+v, want attached", body.Runtime)
 				}
 				if model.daemonRevision != 9 {
 					t.Fatalf("daemon revision after worktree event = %d, want 9", model.daemonRevision)
@@ -1036,8 +1026,8 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 				if err := json.Unmarshal(evt.Body, &body); err != nil {
 					t.Fatalf("unmarshal session projection body: %v", err)
 				}
-				if body.Runtime == nil || body.Runtime.Projection.Agent.Status != "paused" {
-					t.Fatalf("session runtime agent = %+v, want paused", body.Runtime)
+				if body.Runtime == nil || body.Runtime.Projection.Session.State != protocol.SessionLifecycleStatePaused {
+					t.Fatalf("session runtime session = %+v, want paused", body.Runtime)
 				}
 				if model.daemonRevision != 10 {
 					t.Fatalf("daemon revision after session event = %d, want 10", model.daemonRevision)
@@ -7497,7 +7487,6 @@ func TestDaemonStreamEventBatchCoalescesPureRuntimeProjectionByIssue(t *testing.
 						State:      protocol.SessionLifecycleStateAttached,
 						Worktree:   "/tmp/repo-" + issueID,
 					},
-					Agent: protocol.RuntimeAgentProjection{Status: "attached"},
 				},
 			},
 		})
@@ -7709,7 +7698,6 @@ func TestProjectionEventRevisionGate(t *testing.T) {
 						State:      protocol.SessionLifecycleStateAttached,
 						Worktree:   "/tmp/repo-az-1",
 					},
-					Agent: protocol.RuntimeAgentProjection{Status: "attached"},
 				},
 			},
 		})

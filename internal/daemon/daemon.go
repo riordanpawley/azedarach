@@ -1171,7 +1171,6 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 		sessionRuntime := buildRuntimeProjection(projectID, &session, nil)
 		runtime.IssueID = sessionRuntime.IssueID
 		runtime.Session = sessionRuntime.Session
-		runtime.Agent = sessionRuntime.Agent
 	}
 	applyRuntimeSessionCounts(&runtime, d.sessionProjectionCountsForIssue(ctx, projectID, session.IssueID))
 	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
@@ -1290,9 +1289,13 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 			}
 		}
 		if session == nil && d.sessionStore != nil {
-			if loaded, ok := d.sessionStore.SessionByIssueID(projectID, issueID); ok {
-				copy := loaded
-				session = &copy
+			snapshot := d.sessionStore.ReadSnapshot(projectID)
+			sessions := make([]daemonstate.Session, 0, len(snapshot.Sessions))
+			for _, loaded := range snapshot.Sessions {
+				sessions = append(sessions, loaded)
+			}
+			if loaded, ok := nonAgentSessionProjectionByIssue(sessions, d.sessionNamingScope(projectID), issueID); ok {
+				session = &loaded
 			}
 		}
 	}

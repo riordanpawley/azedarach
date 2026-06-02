@@ -104,17 +104,6 @@ func resolveScopedWorktreeWatchPath(repoDir string) string {
 	return strings.TrimSpace(root)
 }
 
-func isScopedDaemonMode(mode, source string) bool {
-	mode = strings.TrimSpace(strings.ToLower(mode))
-	source = strings.TrimSpace(strings.ToLower(source))
-	switch mode {
-	case "worktree", "scoped", "local":
-		return source == "" || source == "just-run" || source == "auto"
-	default:
-		return false
-	}
-}
-
 func startWorktreeExistenceWatch(ctx context.Context, stop context.CancelFunc, watchPath string, interval time.Duration) {
 	if strings.TrimSpace(watchPath) == "" || interval <= 0 {
 		return

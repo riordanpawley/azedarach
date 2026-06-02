@@ -123,6 +123,24 @@ func TestNewLauncherKeepsLinkedWorktreeRootByDefault(t *testing.T) {
 	}
 }
 
+func TestNewLauncherKeepsMainWorktreeAtBaseRepoRoot(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo .git): %v", err)
+	}
+
+	t.Setenv("PATH", "")
+	launcher := NewLauncher(filepath.Join(repo, "go-bubbletea"), filepath.Join(base, "daemon.sock"))
+	if launcher.RepoDir != repo {
+		t.Fatalf("launcher.RepoDir = %q, want %q", launcher.RepoDir, repo)
+	}
+	if launcher.LockPath != filepath.Join(base, "daemon.lock") {
+		t.Fatalf("launcher.LockPath = %q, want %q", launcher.LockPath, filepath.Join(base, "daemon.lock"))
+	}
+}
+
 func TestLauncherResolveBinary_UsesMonorepoGoBubbleteaBin(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")

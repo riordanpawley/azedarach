@@ -327,6 +327,7 @@ func TestRunInvokesStartupRuntimeReconcileWithBoundedTimeout(t *testing.T) {
 		started:       make(chan struct{}, 1),
 		waitForCancel: true,
 	}
+	t.Chdir(t.TempDir())
 	runDone := make(chan error, 1)
 	serveDone := make(chan struct{}, 1)
 	d := &Daemon{
@@ -778,9 +779,14 @@ func TestRuntimeReconcileCycleUsesRepoScopedProjectID(t *testing.T) {
 }
 
 func TestRuntimeReconcileTimeoutDefaultsByScopeMode(t *testing.T) {
-	d := &Daemon{}
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo .git): %v", err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir}}
 
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
 	if got, want := d.runtimeReconcileTimeout(), defaultRuntimeReconcileTimeout; got != want {
 		t.Fatalf("runtimeReconcileTimeout() non-scoped = %s, want %s", got, want)
 	}
@@ -788,6 +794,25 @@ func TestRuntimeReconcileTimeoutDefaultsByScopeMode(t *testing.T) {
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	if got, want := d.runtimeReconcileTimeout(), scopedRuntimeReconcileTimeout; got != want {
 		t.Fatalf("runtimeReconcileTimeout() scoped = %s, want %s", got, want)
+	}
+
+	base := t.TempDir()
+	baseRepo := filepath.Join(base, "base")
+	worktree := filepath.Join(base, "wt")
+	if err := os.MkdirAll(filepath.Join(baseRepo, ".git", "worktrees", "wt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(base repo worktrees): %v", err)
+	}
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(baseRepo, ".git", "worktrees", "wt")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree .git): %v", err)
+	}
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
+	d = &Daemon{cfg: Config{RepoDir: worktree}}
+	if got, want := d.runtimeReconcileTimeout(), scopedRuntimeReconcileTimeout; got != want {
+		t.Fatalf("runtimeReconcileTimeout() linked worktree = %s, want %s", got, want)
 	}
 }
 

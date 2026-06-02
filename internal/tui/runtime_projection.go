@@ -137,9 +137,6 @@ func (m *Model) applyRuntimeProjection(projection protocol.RuntimeProjection) bo
 			}
 			next.IssueID = task.ID
 			if state, ok := projectSessionLifecycleState(projection.Session.State); ok {
-				if agentState, agentOK := projectAgentStatus(projection.Agent.Status); agentOK {
-					state = agentState
-				}
 				next.State = state
 				next.TotalCount = projection.Session.TotalCount
 				next.ActiveCount = projection.Session.ActiveCount
@@ -215,8 +212,8 @@ func (m *Model) applyRuntimeProjectionFromSessionEvent(body protocol.SessionProj
 		}
 		next.IssueID = naming.IssueID(issueID)
 		if body.Runtime != nil {
-			if agentState, agentOK := projectAgentStatus(body.Runtime.Projection.Agent.Status); agentOK {
-				nextState = agentState
+			if state, ok := projectSessionLifecycleState(body.Session.State); ok {
+				nextState = state
 			}
 			next.TotalCount = body.Runtime.Projection.Session.TotalCount
 			next.ActiveCount = body.Runtime.Projection.Session.ActiveCount

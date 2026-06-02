@@ -93,6 +93,8 @@ func daemonScopeID(path string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
+// UseScopedDaemonRuntimeFor reports whether daemon runtime assets should be
+// scoped to the current worktree instead of the user-global daemon.
 func UseScopedDaemonRuntimeFor(startPath string) bool {
 	mode := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
 	switch mode {

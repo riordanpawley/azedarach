@@ -1750,8 +1750,8 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 func (m Model) attachDaemonCmd() tea.Cmd {
 	projectID := m.daemonProjectID()
 	targetRepoDir := m.activeProjectPath()
-	if config.UseScopedDaemonRuntimeFor(m.runtimeRepoDir) && strings.TrimSpace(m.runtimeRepoDir) != "" {
-		targetRepoDir = m.runtimeRepoDir
+	if runtimeRepoDir := strings.TrimSpace(m.runtimeRepoDir); runtimeRepoDir != "" && config.UseScopedDaemonRuntimeFor(runtimeRepoDir) {
+		targetRepoDir = runtimeRepoDir
 	}
 	return func() tea.Msg {
 		if m.daemonClient == nil {
@@ -2440,27 +2440,6 @@ func projectSessionLifecycleState(state protocol.SessionLifecycleState) (domain.
 	}
 }
 
-func projectAgentStatus(status string) (domain.SessionState, bool) {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "", "attached":
-		return "", false
-	case "starting", "working", "running", "syncing", "active":
-		return domain.SessionBusy, true
-	case "waiting":
-		return domain.SessionWaiting, true
-	case "paused":
-		return domain.SessionPaused, true
-	case "ending":
-		return domain.SessionBusy, true
-	case "ended", "stopped":
-		return domain.SessionDone, true
-	case "error":
-		return domain.SessionError, true
-	default:
-		return domain.SessionBusy, true
-	}
-}
-
 // Helper methods
 
 // currentColumn returns the tasks in the current column
@@ -2565,10 +2544,10 @@ func (m Model) eventLogFilePath() string {
 }
 
 func (m Model) daemonLogFilePath() string {
-	if config.UseScopedDaemonRuntimeFor(m.runtimeRepoDir) && strings.TrimSpace(m.runtimeRepoDir) != "" {
-		return filepath.Join(m.runtimeRepoDir, ".azedarach", logging.DaemonLogFileName)
+	if runtimeRepoDir := strings.TrimSpace(m.runtimeRepoDir); runtimeRepoDir != "" && config.UseScopedDaemonRuntimeFor(runtimeRepoDir) {
+		return filepath.Join(runtimeRepoDir, ".azedarach", logging.DaemonLogFileName)
 	}
-	if config.UseScopedDaemonRuntimeFor("") {
+	if strings.TrimSpace(m.repoDir) == "" && config.UseScopedDaemonRuntimeFor("") {
 		if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
 			if worktreeRoot, rootErr := config.ResolveWorktreeRoot(cwd); rootErr == nil && strings.TrimSpace(worktreeRoot) != "" {
 				return filepath.Join(worktreeRoot, ".azedarach", logging.DaemonLogFileName)
