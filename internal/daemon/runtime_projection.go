@@ -18,10 +18,7 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 
 	if session != nil {
 		updatedAt := session.UpdatedAt.UTC()
-		observedState := session.ObservedState
-		if strings.TrimSpace(string(observedState)) == "" {
-			observedState = session.State
-		}
+		observedState := projectionSessionState(session.State, session.ObservedState)
 		hasSession := observedState != daemonstate.SessionStateStopped
 		projection.IssueID = parseIssueIDOrZero(session.IssueID)
 		projection.Session = protocol.RuntimeSessionProjection{
@@ -34,15 +31,9 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 			UpdatedAt:         timePtr(updatedAt),
 			Worktree:          strings.TrimSpace(projection.Worktree.Path),
 		}
-		projection.Agent = protocol.RuntimeAgentProjection{
-			Status:    agentStatusForSessionState(observedState),
-			SessionID: parseSessionIDOrZero(session.ID),
-			UpdatedAt: timePtr(updatedAt),
-		}
 	}
 
 	if worktree != nil {
-		updatedAt := worktree.UpdatedAt.UTC()
 		path := strings.TrimSpace(worktree.Path)
 		branch := strings.TrimSpace(worktree.Branch)
 		if projection.IssueID == "" {
@@ -70,29 +61,21 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 				projection.Git.GitBehindCount = status.GitBehindCount
 			}
 		}
-		if projection.Agent.UpdatedAt == nil {
-			projection.Agent.UpdatedAt = timePtr(updatedAt)
-		}
 	}
 
 	return projection
 }
 
-func agentStatusForSessionState(state daemonstate.SessionState) string {
-	switch daemonstate.NormalizeSessionState(state) {
-	case daemonstate.SessionStateStarting:
-		return "starting"
-	case daemonstate.SessionStateRunning:
-		return "working"
-	case daemonstate.SessionStatePaused:
-		return "paused"
-	case daemonstate.SessionStateStopping:
-		return "ending"
-	case daemonstate.SessionStateStopped:
-		return "ended"
-	default:
-		return "unknown"
+func projectionSessionState(desired, observed daemonstate.SessionState) daemonstate.SessionState {
+	desired = daemonstate.NormalizeSessionState(desired)
+	observed = daemonstate.NormalizeSessionState(observed)
+	if desired == daemonstate.SessionStatePaused {
+		return daemonstate.SessionStatePaused
 	}
+	if strings.TrimSpace(string(observed)) != "" {
+		return observed
+	}
+	return desired
 }
 
 func applyRuntimeSessionCounts(projection *protocol.RuntimeProjection, counts sessionProjectionCounts) {

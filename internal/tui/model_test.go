@@ -4742,12 +4742,71 @@ func TestDaemonStreamEventMsg_GitStatusEventAppliesRuntimeProjectionDirectly(t *
 	}
 }
 
-func TestProjectAgentStatusIgnoresLegacyAttached(t *testing.T) {
-	if got, ok := projectAgentStatus("attached"); ok || got != "" {
-		t.Fatalf("legacy attached agent status = %q, %v; want ignored", got, ok)
+func TestDaemonStreamEventMsg_PausedLifecycleIgnoresWorkingAgentProjection(t *testing.T) {
+	m := newTestModel()
+	task := m.tasks[0]
+	startedAt := time.Date(2026, time.April, 1, 13, 0, 0, 0, time.UTC)
+	updatedAt := startedAt.Add(5 * time.Minute)
+	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		IssueID:   naming.IssueID(task.ID),
+		Worktree:  "/tmp/az-1",
+		UpdatedAt: updatedAt,
+		Runtime: &protocol.RuntimeProjectionEventBody{
+			ProjectID: naming.ProjectID(m.daemonProjectID()),
+			Revision:  1,
+			Projection: protocol.RuntimeProjection{
+				ProjectID: naming.ProjectID(m.daemonProjectID()),
+				IssueID:   naming.IssueID(task.ID),
+				Worktree: protocol.RuntimeWorktreeProjection{
+					Exists:  true,
+					Path:    "/tmp/az-1",
+					Branch:  "riordan/az-1/task",
+					Healthy: true,
+				},
+				Git: protocol.RuntimeGitProjection{
+					ActiveOperation: &protocol.RuntimeOperationProjection{
+						OperationID: "op-merge",
+						State:       protocol.OperationStateRunning,
+					},
+				},
+				Session: protocol.RuntimeSessionProjection{
+					HasSession: true,
+					SessionID:  "sess-az-1",
+					State:      protocol.SessionLifecycleStatePaused,
+					StartedAt:  &startedAt,
+					UpdatedAt:  &updatedAt,
+					Worktree:   "/tmp/az-1",
+				},
+				Agent: protocol.RuntimeAgentProjection{
+					Status:    "working",
+					SessionID: "sess-az-1",
+					UpdatedAt: &updatedAt,
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal runtime projection event: %v", err)
 	}
-	if got, ok := projectAgentStatus("working"); !ok || got != domain.SessionBusy {
-		t.Fatalf("working agent status = %q, %v; want busy", got, ok)
+
+	next, _ := m.Update(daemonStreamEventMsg{
+		event: protocol.EventEnvelope{
+			ProjectID: naming.ProjectID(m.daemonProjectID()),
+			Revision:  1,
+			Event:     protocol.EventGitStatusUpdated,
+			Body:      body,
+		},
+	})
+	updated := next.(Model)
+
+	got := updated.tasks[0]
+	if got.Session == nil || got.Session.State != domain.SessionPaused {
+		t.Fatalf("task session = %+v, want paused despite working agent projection", got.Session)
+	}
+	runtime := updated.runtimeSignalsForBoard()[got.ID.String()]
+	if runtime.PendingOperationID != "op-merge" || runtime.PendingOperationState != string(protocol.OperationStateRunning) {
+		t.Fatalf("runtime operation = %+v, want running op-merge", runtime)
 	}
 }
 
