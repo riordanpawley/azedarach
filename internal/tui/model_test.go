@@ -4727,6 +4727,15 @@ func TestDaemonStreamEventMsg_GitStatusEventAppliesRuntimeProjectionDirectly(t *
 	}
 }
 
+func TestProjectAgentStatusIgnoresLegacyAttached(t *testing.T) {
+	if got, ok := projectAgentStatus("attached"); ok || got != "" {
+		t.Fatalf("legacy attached agent status = %q, %v; want ignored", got, ok)
+	}
+	if got, ok := projectAgentStatus("working"); !ok || got != domain.SessionBusy {
+		t.Fatalf("working agent status = %q, %v; want busy", got, ok)
+	}
+}
+
 func TestDaemonStreamUICommandOpensTaskWorkspace(t *testing.T) {
 	m := newTestModel()
 	m.daemonRevision = 1
