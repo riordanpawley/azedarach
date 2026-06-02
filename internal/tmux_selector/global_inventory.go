@@ -47,11 +47,14 @@ type ProjectInventorySnapshot struct {
 
 // GlobalInventoryLoader builds inventory from live tmux first, then projection metadata.
 type GlobalInventoryLoader struct {
-	tmux        SessionInventory
-	source      ProjectSnapshotSource
-	projectDirs []string
-	logger      *slog.Logger
-	limit       int
+	tmux                SessionInventory
+	source              ProjectSnapshotSource
+	projectDirs         []string
+	projectDirsProvider func() []string
+	projectDirsOnce     sync.Once
+	loadedProjectDirs   []string
+	logger              *slog.Logger
+	limit               int
 }
 
 type GlobalInventoryOption func(*GlobalInventoryLoader)
@@ -65,6 +68,12 @@ func WithProjectSnapshotSource(source ProjectSnapshotSource) GlobalInventoryOpti
 func WithProjectDirs(projectDirs ...string) GlobalInventoryOption {
 	return func(l *GlobalInventoryLoader) {
 		l.projectDirs = append([]string(nil), projectDirs...)
+	}
+}
+
+func WithProjectDirsProvider(provider func() []string) GlobalInventoryOption {
+	return func(l *GlobalInventoryLoader) {
+		l.projectDirsProvider = provider
 	}
 }
 
@@ -95,12 +104,11 @@ func NewGlobalInventoryLoader(tmuxInventory SessionInventory, logger *slog.Logge
 }
 
 func NewDefaultGlobalInventoryLoader(tmuxInventory SessionInventory, logger *slog.Logger) *GlobalInventoryLoader {
-	projectDirs := KnownProjectDirs()
 	return NewGlobalInventoryLoader(
 		tmuxInventory,
 		logger,
-		WithProjectDirs(projectDirs...),
-		WithProjectSnapshotSource(NewDaemonSnapshotSource(projectDirs, logger)),
+		WithProjectDirsProvider(KnownProjectDirs),
+		WithProjectSnapshotSource(NewDaemonSnapshotSource(nil, logger)),
 	)
 }
 
@@ -209,6 +217,21 @@ func (l *GlobalInventoryLoader) EnrichSnapshot(ctx context.Context, snapshot Sna
 	return enriched, nil
 }
 
+func (l *GlobalInventoryLoader) configuredProjectDirs() []string {
+	if l == nil {
+		return nil
+	}
+	if len(l.projectDirs) > 0 {
+		return append([]string(nil), l.projectDirs...)
+	}
+	l.projectDirsOnce.Do(func() {
+		if l.projectDirsProvider != nil {
+			l.loadedProjectDirs = append([]string(nil), l.projectDirsProvider()...)
+		}
+	})
+	return append([]string(nil), l.loadedProjectDirs...)
+}
+
 func (l *GlobalInventoryLoader) snapshotFromLive(ctx context.Context, live []tmux.SessionInfo, projections map[string]projectedInventory, enriching bool) Snapshot {
 	entries := make([]InventoryEntry, 0, len(live))
 	seen := make(map[string]struct{}, len(live))
@@ -271,6 +294,7 @@ func (l *GlobalInventoryLoader) snapshotFromLive(ctx context.Context, live []tmu
 
 func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map[string]projectedInventory, tasks projectTaskIndex) Snapshot {
 	entries := make([]InventoryEntry, 0, len(snapshot.Entries))
+	projectDirs := l.configuredProjectDirs()
 	for _, entry := range snapshot.Entries {
 		if projection, ok := projections[entry.SessionID]; ok {
 			entry = mergeProjectedInventory(entry, projection)
@@ -280,10 +304,10 @@ func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map
 			}
 		}
 		if entry.ProjectPath == "" {
-			entry.ProjectPath = projectPathForSessionPrefix(entry, l.projectDirs)
+			entry.ProjectPath = projectPathForSessionPrefix(entry, projectDirs)
 		}
 		if entry.ProjectPath == "" && entry.Worktree != "" {
-			entry.ProjectPath = inferProjectPath(entry.Worktree, l.projectDirs)
+			entry.ProjectPath = inferProjectPath(entry.Worktree, projectDirs)
 		}
 		entries = append(entries, entry)
 	}
@@ -411,7 +435,8 @@ func limitSortedProjectDirs(dirs []string) []string {
 
 func (l *GlobalInventoryLoader) addMatchingConfiguredProjectDirs(dirs *[]string, seen map[string]struct{}, entries []InventoryEntry) map[string]struct{} {
 	matched := map[string]struct{}{}
-	if len(l.projectDirs) == 0 || len(entries) == 0 {
+	projectDirs := l.configuredProjectDirs()
+	if len(projectDirs) == 0 || len(entries) == 0 {
 		return matched
 	}
 	entriesByPrefix := map[string][]InventoryEntry{}
@@ -422,7 +447,7 @@ func (l *GlobalInventoryLoader) addMatchingConfiguredProjectDirs(dirs *[]string,
 		}
 		entriesByPrefix[prefix] = append(entriesByPrefix[prefix], entry)
 	}
-	for _, projectDir := range l.projectDirs {
+	for _, projectDir := range projectDirs {
 		root := strings.TrimSpace(projectDir)
 		if root == "" {
 			continue

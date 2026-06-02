@@ -1805,13 +1805,50 @@ func visibleGridRowRange(rendered []string, cursor int, columns int, availableHe
 	if cursor >= len(rendered) {
 		cursor = len(rendered) - 1
 	}
+	heights := gridRowHeights(rendered, columns)
+	return visibleGridRowRangeForHeights(heights, cursor, columns, availableHeight)
+}
+
+func gridRowHeights(rendered []string, columns int) []int {
+	if len(rendered) == 0 {
+		return nil
+	}
+	if columns <= 0 {
+		columns = 1
+	}
 	gridRows := (len(rendered) + columns - 1) / columns
 	heights := make([]int, gridRows)
 	for gridRow := 0; gridRow < gridRows; gridRow++ {
-		heights[gridRow] = lipgloss.Height(renderGridRow(rendered, gridRow, columns)) + 1
+		start := gridRow * columns
+		end := start + columns
+		if end > len(rendered) {
+			end = len(rendered)
+		}
+		maxHeight := 0
+		for i := start; i < end; i++ {
+			maxHeight = maxInt(maxHeight, lipgloss.Height(rendered[i]))
+		}
+		heights[gridRow] = maxHeight + 1
 	}
+	return heights
+}
+
+func visibleGridRowRangeForHeights(heights []int, cursor int, columns int, availableHeight int) (int, int) {
+	if len(heights) == 0 {
+		return 0, 0
+	}
+	if columns <= 0 {
+		columns = 1
+	}
+	gridRows := len(heights)
 
 	cursorGridRow := cursor / columns
+	if cursorGridRow < 0 {
+		cursorGridRow = 0
+	}
+	if cursorGridRow >= gridRows {
+		cursorGridRow = gridRows - 1
+	}
 	start, end := cursorGridRow, cursorGridRow+1
 	used := heights[cursorGridRow]
 	for {
@@ -1962,7 +1999,8 @@ func visibleGridMetrics(rows []SessionRow, cursor int, columns int, cardWidth in
 	for i, row := range rows {
 		rendered[i] = RenderSessionRow(row, i == cursor, cardWidth, lipgloss.Style{}, lipgloss.Style{}, lipgloss.Style{}, s)
 	}
-	start, end := visibleGridRowRange(rendered, cursor, columns, availableHeight)
+	heights := gridRowHeights(rendered, columns)
+	start, end := visibleGridRowRangeForHeights(heights, cursor, columns, availableHeight)
 	for gridRow := start; gridRow < end; gridRow++ {
 		rowStart := gridRow * columns
 		rowEnd := rowStart + columns
@@ -1970,7 +2008,7 @@ func visibleGridMetrics(rows []SessionRow, cursor int, columns int, cardWidth in
 			rowEnd = len(rows)
 		}
 		visible += rowEnd - rowStart
-		usedHeight += lipgloss.Height(renderGridRow(rendered, gridRow, columns)) + 1
+		usedHeight += heights[gridRow]
 	}
 	return visible, usedHeight
 }
