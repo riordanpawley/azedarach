@@ -7586,16 +7586,19 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "After every `az orchestrate start`, immediately start `az orchestrate watch --root <issue-id> --since <seq> --jsonl` in another pane/session and keep it running") {
 		t.Fatalf("prime output missing post-start continuous watch guidance: %q", output)
 	}
-	if !strings.Contains(output, "Use direct tmux pane capture only when watch/status indicate a worker may be stuck or failed") {
+	if !strings.Contains(output, "Trust hook-backed `activity=busy|idle` for idleness checks") {
 		t.Fatalf("prime output missing bounded tmux observation guidance: %q", output)
 	}
-	if !strings.Contains(output, "do not poll tmux panes on a fixed interval") {
+	if !strings.Contains(output, "when activity is `unknown`, install/update AI hooks if possible") {
+		t.Fatalf("prime output missing hook install/update fallback guidance: %q", output)
+	}
+	if !strings.Contains(output, "Do not poll tmux panes on a fixed interval") {
 		t.Fatalf("prime output missing tmux polling guardrail: %q", output)
 	}
 	if !strings.Contains(output, "`orchestration.via=az` means do not spawn harness-native subagents yourself.") {
 		t.Fatalf("prime output missing follow-up native subagent prohibition: %q", output)
 	}
-	if !strings.Contains(output, "Then run the az orchestration loop: `status` to identify runnable leaves") {
+	if !strings.Contains(output, "Then run the az orchestration loop: `status` to identify runnable leaves and active worker activity") {
 		t.Fatalf("prime output missing az orchestration workflow guidance: %q", output)
 	}
 	if !strings.Contains(output, "Az orchestration loop:") {

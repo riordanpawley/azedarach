@@ -72,12 +72,13 @@ type OrchestrateCloseSessionOptions struct {
 }
 
 type orchestrateStatusResult struct {
-	RootIssueID   string                 `json:"root_issue_id"`
-	Runnable      []string               `json:"runnable"`
-	Active        []string               `json:"active,omitempty"`
-	Blocked       map[string]string      `json:"blocked"`
-	MailboxEvents []protocol.MailEvent   `json:"mailbox_events"`
-	Advice        map[string]interface{} `json:"advice,omitempty"`
+	RootIssueID    string                     `json:"root_issue_id"`
+	Runnable       []string                   `json:"runnable"`
+	Active         []string                   `json:"active,omitempty"`
+	ActiveSessions []orchestrateActiveSession `json:"active_sessions,omitempty"`
+	Blocked        map[string]string          `json:"blocked"`
+	MailboxEvents  []protocol.MailEvent       `json:"mailbox_events"`
+	Advice         map[string]interface{}     `json:"advice,omitempty"`
 }
 
 type orchestrateStartResult struct {
@@ -110,13 +111,23 @@ type orchestrateStartAdvice struct {
 }
 
 type orchestrateWatchFrame struct {
-	RootIssueID string            `json:"root_issue_id"`
-	SinceSeq    int64             `json:"since_seq"`
-	NextSince   int64             `json:"next_since"`
-	Runnable    []string          `json:"runnable"`
-	Active      []string          `json:"active,omitempty"`
-	Blocked     map[string]string `json:"blocked"`
-	Events      []mailEvent       `json:"events"`
+	RootIssueID    string                     `json:"root_issue_id"`
+	SinceSeq       int64                      `json:"since_seq"`
+	NextSince      int64                      `json:"next_since"`
+	Runnable       []string                   `json:"runnable"`
+	Active         []string                   `json:"active,omitempty"`
+	ActiveSessions []orchestrateActiveSession `json:"active_sessions,omitempty"`
+	Blocked        map[string]string          `json:"blocked"`
+	Events         []mailEvent                `json:"events"`
+}
+
+type orchestrateActiveSession struct {
+	IssueID           string `json:"issue_id"`
+	Activity          string `json:"activity"`
+	ActivitySource    string `json:"activity_source"`
+	State             string `json:"state,omitempty"`
+	TmuxAttachedCount int    `json:"tmux_attached_count,omitempty"`
+	Advice            string `json:"advice,omitempty"`
 }
 
 type orchestrateCompleteCheckResult struct {
@@ -362,14 +373,15 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 	}
 
 	result := orchestrateStatusResult{
-		RootIssueID:   ready.RootIssueID,
-		Runnable:      ready.Runnable,
-		Active:        ready.Active,
-		Blocked:       ready.Blocked,
-		MailboxEvents: events,
+		RootIssueID:    ready.RootIssueID,
+		Runnable:       ready.Runnable,
+		Active:         ready.Active,
+		ActiveSessions: orchestrateActiveSessions(ready.Active, tasks),
+		Blocked:        ready.Blocked,
+		MailboxEvents:  events,
 		Advice: map[string]interface{}{
 			"watch":             fmt.Sprintf("az orchestrate watch --root %s --since %d --jsonl", ready.RootIssueID, nextMailboxSeq(events, opts.SinceSeq)),
-			"watch_instruction": "Start this watch command in another pane/session and leave it running while workers are active; do not add --once for orchestration monitoring.",
+			"watch_instruction": "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
 		},
 	}
 	if opts.JSON {
@@ -399,8 +411,11 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 	}
 	if len(result.Active) > 0 {
 		fmt.Println("Active leaves:")
-		for _, id := range result.Active {
-			fmt.Printf("- %s\n", id)
+		for _, active := range result.ActiveSessions {
+			fmt.Printf("- %s activity=%s source=%s\n", active.IssueID, active.Activity, active.ActivitySource)
+			if active.Advice != "" {
+				fmt.Printf("  %s\n", active.Advice)
+			}
 		}
 	}
 	fmt.Printf("Mailbox events (latest %d, since seq>%d): %d\n", opts.Limit, opts.SinceSeq, len(result.MailboxEvents))
@@ -488,7 +503,7 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		Warnings:    orchestrateStartWarnings(ctx, deps, len(requested) > 0),
 		Advice: orchestrateStartAdvice{
 			WatchCommand:     fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", opts.RootIssueID),
-			WatchInstruction: "Start this watch command in another pane/session and leave it running while workers are active; do not add --once for orchestration monitoring.",
+			WatchInstruction: "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
 		},
 	}
 
@@ -550,6 +565,41 @@ func emitOrchestrateStartProgress(opts OrchestrateStartOptions, stage, issueID s
 		return
 	}
 	fmt.Fprintf(os.Stderr, "orchestrate start: %s %s\n", stage, issueID)
+}
+
+func orchestrateActiveSessions(activeIDs []string, tasks []domain.Task) []orchestrateActiveSession {
+	if len(activeIDs) == 0 {
+		return nil
+	}
+	byID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID.String()] = task
+	}
+	out := make([]orchestrateActiveSession, 0, len(activeIDs))
+	for _, issueID := range activeIDs {
+		task, ok := byID[issueID]
+		active := orchestrateActiveSession{
+			IssueID:        issueID,
+			Activity:       "unknown",
+			ActivitySource: "none",
+			Advice:         fmt.Sprintf("activity unknown: install or update AI hooks for %s; use sparse pane capture only if status/watch looks stale, failed, or contradictory", issueID),
+		}
+		if ok && task.Session != nil {
+			active.State = string(task.Session.State)
+			active.TmuxAttachedCount = task.Session.TmuxAttachedCount
+			if activity := strings.TrimSpace(task.Session.Activity); activity != "" {
+				active.Activity = activity
+			}
+			if source := strings.TrimSpace(task.Session.ActivitySource); source != "" {
+				active.ActivitySource = source
+			}
+			if active.Activity != "unknown" {
+				active.Advice = ""
+			}
+		}
+		out = append(out, active)
+	}
+	return out
 }
 
 func printOrchestrateStartResult(result orchestrateStartResult) {
@@ -657,13 +707,14 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 		}
 		nextSince := nextMailboxSeq(events, lastSeq)
 		frame := orchestrateWatchFrame{
-			RootIssueID: ready.RootIssueID,
-			SinceSeq:    lastSeq,
-			NextSince:   nextSince,
-			Runnable:    ready.Runnable,
-			Active:      ready.Active,
-			Blocked:     ready.Blocked,
-			Events:      watchEvents,
+			RootIssueID:    ready.RootIssueID,
+			SinceSeq:       lastSeq,
+			NextSince:      nextSince,
+			Runnable:       ready.Runnable,
+			Active:         ready.Active,
+			ActiveSessions: orchestrateActiveSessions(ready.Active, tasks),
+			Blocked:        ready.Blocked,
+			Events:         watchEvents,
 		}
 		if err := emitOrchestrateWatchFrame(frame, opts.JSONL); err != nil {
 			return err
@@ -982,13 +1033,14 @@ func buildOrchestrateWatchFrame(deps *Dependencies, rootIssueID string, since in
 		watchEvents = append(watchEvents, protocolToLocalMailEvent(event))
 	}
 	return orchestrateWatchFrame{
-		RootIssueID: ready.RootIssueID,
-		SinceSeq:    since,
-		NextSince:   nextMailboxSeq(events, since),
-		Runnable:    ready.Runnable,
-		Active:      ready.Active,
-		Blocked:     ready.Blocked,
-		Events:      watchEvents,
+		RootIssueID:    ready.RootIssueID,
+		SinceSeq:       since,
+		NextSince:      nextMailboxSeq(events, since),
+		Runnable:       ready.Runnable,
+		Active:         ready.Active,
+		ActiveSessions: orchestrateActiveSessions(ready.Active, tasks),
+		Blocked:        ready.Blocked,
+		Events:         watchEvents,
 	}, nil
 }
 
@@ -1018,8 +1070,11 @@ func emitOrchestrateWatchFrame(frame orchestrateWatchFrame, jsonl bool) error {
 	}
 	if len(frame.Active) > 0 {
 		fmt.Println("active:")
-		for _, id := range frame.Active {
-			fmt.Printf("- %s\n", id)
+		for _, active := range frame.ActiveSessions {
+			fmt.Printf("- %s activity=%s source=%s\n", active.IssueID, active.Activity, active.ActivitySource)
+			if active.Advice != "" {
+				fmt.Printf("  %s\n", active.Advice)
+			}
 		}
 	}
 	fmt.Println("events:")

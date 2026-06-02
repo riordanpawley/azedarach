@@ -3826,10 +3826,13 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "az orchestrate complete-check --root <issue-id>") {
 		t.Fatalf("prompt = %q, want complete-check instruction", prompt)
 	}
-	if !strings.Contains(prompt, "Use direct tmux pane capture only when watch/status indicate a worker may be stuck or failed") {
+	if !strings.Contains(prompt, "Trust hook-backed `activity=busy|idle` for worker idleness checks") {
 		t.Fatalf("prompt = %q, want bounded tmux observation guidance", prompt)
 	}
-	if !strings.Contains(prompt, "do not poll tmux panes on a fixed interval") {
+	if !strings.Contains(prompt, "If activity is `unknown`, install/update AI hooks if possible") {
+		t.Fatalf("prompt = %q, want hook install/update fallback guidance", prompt)
+	}
+	if !strings.Contains(prompt, "Do not poll tmux panes on a fixed interval") {
 		t.Fatalf("prompt = %q, want tmux polling guardrail", prompt)
 	}
 	if !strings.Contains(prompt, "az orchestrate integrate --issue <issue-id>") {
@@ -4312,6 +4315,72 @@ func TestEnrichTasksWithSessionStateFallsBackToProjectionCache(t *testing.T) {
 	}
 	if !enriched[0].Session.StartedAt.Equal(cachedStartedAt) {
 		t.Fatalf("started_at = %v, want %v", enriched[0].Session.StartedAt, cachedStartedAt)
+	}
+	if enriched[0].Session.Activity != "unknown" || enriched[0].Session.ActivitySource != "none" {
+		t.Fatalf("activity = %s/%s, want unknown/none", enriched[0].Session.Activity, enriched[0].Session.ActivitySource)
+	}
+}
+
+func TestEnrichTasksWithSessionStateReportsHookBackedActivity(t *testing.T) {
+	const (
+		projectID = "proj-hook-activity"
+		busyID    = "bja"
+		idleID    = "bjb"
+	)
+
+	store := daemonstate.NewStore()
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+
+	busySessionID := naming.CanonicalSessionID(projectID, busyID) + ".pane-%1"
+	idleSessionID := naming.CanonicalSessionID(projectID, idleID) + ".pane-%2"
+	now := time.Now().UTC()
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            busySessionID,
+		IssueID:       busyID,
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning,
+		UpdatedAt:     now,
+	}); err != nil {
+		t.Fatalf("seed busy hook session: %v", err)
+	}
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            idleSessionID,
+		IssueID:       idleID,
+		State:         daemonstate.SessionStatePaused,
+		ObservedState: daemonstate.SessionStatePaused,
+		UpdatedAt:     now,
+	}); err != nil {
+		t.Fatalf("seed idle hook session: %v", err)
+	}
+
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	tasks := []domain.Task{
+		{ID: busyID, Title: "busy", Type: domain.TypeTask},
+		{ID: idleID, Title: "idle", Type: domain.TypeTask},
+	}
+	enriched := d.enrichTasksWithSessionState(context.Background(), projectID, tasks)
+	if len(enriched) != 2 {
+		t.Fatalf("len(enriched) = %d, want 2", len(enriched))
+	}
+	byID := map[naming.IssueID]domain.Task{}
+	for _, task := range enriched {
+		byID[task.ID] = task
+	}
+	if byID[busyID].Session == nil || byID[busyID].Session.Activity != "busy" || byID[busyID].Session.ActivitySource != "hooks" {
+		t.Fatalf("busy session = %+v", byID[busyID].Session)
+	}
+	if byID[idleID].Session == nil || byID[idleID].Session.Activity != "idle" || byID[idleID].Session.ActivitySource != "hooks" {
+		t.Fatalf("idle session = %+v", byID[idleID].Session)
 	}
 }
 

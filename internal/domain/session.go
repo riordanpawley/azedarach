@@ -10,6 +10,8 @@ import (
 type Session struct {
 	IssueID           naming.IssueID `json:"issue_id"`
 	State             SessionState   `json:"state"`
+	Activity          string         `json:"activity,omitempty"`
+	ActivitySource    string         `json:"activity_source,omitempty"`
 	TotalCount        int            `json:"total_count,omitempty"`
 	ActiveCount       int            `json:"active_count,omitempty"`
 	PausedCount       int            `json:"paused_count,omitempty"`
