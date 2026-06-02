@@ -4440,6 +4440,12 @@ func (m *Model) markTaskStatusPending(taskID string, previousStatus, targetStatu
 	}
 }
 
+func (m *Model) beginTaskStatusMoveFeedback(taskID string, previousStatus, targetStatus domain.Status) {
+	m.markTaskStatusPending(taskID, previousStatus, targetStatus, "", protocol.OperationStateQueued)
+	m.applyOptimisticTaskStatus(taskID, targetStatus)
+	m.syncTaskWorkspaceOverlay()
+}
+
 func (m *Model) markTaskOperationPending(taskID, action, operationID string, state protocol.OperationState) {
 	if m.pendingStatuses == nil {
 		m.pendingStatuses = make(map[string]pendingTaskStatus)

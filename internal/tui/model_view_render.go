@@ -29,19 +29,25 @@ func (m Model) View() string {
 		return m.renderLoading()
 	}
 
-	var mainView string
-	if m.viewMode == ViewModeCompact {
-		mainView = m.renderCompactView()
+	currentOverlay := m.overlayStack.Current()
+	contentHeight := board.BoardContentHeight(m.height)
+	mainView := ""
+	if currentOverlay == nil || overlayUsesFullScreen(currentOverlay) {
+		if m.viewMode == ViewModeCompact {
+			mainView = m.renderCompactView()
+		} else {
+			mainView = m.renderBoardView()
+		}
 	} else {
-		mainView = m.renderBoardView()
+		mainView = m.renderModalBackdrop(contentHeight)
 	}
 
 	// Clamp board/compact content to the space above the footer to keep
 	// column headers and card rows stable even when internal render paths
 	// overproduce lines (for example via wrapped content or spacing styles).
 	mainView = lipgloss.NewStyle().
-		Height(board.BoardContentHeight(m.height)).
-		MaxHeight(board.BoardContentHeight(m.height)).
+		Height(contentHeight).
+		MaxHeight(contentHeight).
 		Render(mainView)
 
 	sb := statusbar.New(m.statusBarMode(), m.width, m.styles)
@@ -54,7 +60,7 @@ func (m Model) View() string {
 	if m.boardRefreshing {
 		sb.SetModeSuffix(m.spinner.View())
 	}
-	if current := m.overlayStack.Current(); current != nil {
+	if current := currentOverlay; current != nil {
 		bindings := []keybinds.Binding(nil)
 		if hintOverlay, ok := current.(interface {
 			StatusBindings() []keybinds.Binding
@@ -68,15 +74,14 @@ func (m Model) View() string {
 	}
 	statusBarView := sb.Render()
 
-	contentHeight := board.BoardContentHeight(m.height)
 	contentView := lipgloss.NewStyle().
 		MaxWidth(m.width).
 		Height(contentHeight).
 		MaxHeight(contentHeight).
 		Render(mainView)
 
-	if !m.overlayStack.IsEmpty() {
-		current := m.overlayStack.Current()
+	if currentOverlay != nil {
+		current := currentOverlay
 		overlayView := current.View()
 		if overlayUsesFullScreen(current) {
 			contentView = lipgloss.NewStyle().
@@ -124,6 +129,25 @@ func (m Model) View() string {
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, contentView, statusBarView)
+}
+
+func (m Model) renderModalBackdrop(contentHeight int) string {
+	if m.width < 1 || contentHeight < 1 {
+		return ""
+	}
+	header := m.styles.StatusInfo.Render(fmt.Sprintf(
+		" %s  %d issues ",
+		strings.TrimSpace(m.currentProject),
+		len(m.tasks),
+	))
+	if strings.TrimSpace(m.currentProject) == "" {
+		header = m.styles.StatusInfo.Render(fmt.Sprintf(" %d issues ", len(m.tasks)))
+	}
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(contentHeight).
+		MaxHeight(contentHeight).
+		Render(header)
 }
 
 func (m Model) statusBarMode() types.Mode {
@@ -338,13 +362,36 @@ func (m Model) buildColumns() []board.Column {
 	// Apply filter to tasks and enforce board-level child hiding semantics.
 	filteredTasks := m.boardVisibleTasks(m.tasks)
 
-	// Build columns from filtered tasks
-	return []board.Column{
-		{Title: "Open", Tasks: m.sortTasksInColumn(filteredTasks, domain.StatusOpen)},
-		{Title: "In Progress", Tasks: m.sortTasksInColumn(filteredTasks, domain.StatusInProgress)},
-		{Title: "In Review", Tasks: m.sortTasksInColumn(filteredTasks, domain.StatusInReview)},
-		{Title: "Done", Tasks: m.sortTasksInColumn(filteredTasks, domain.StatusDone)},
+	columns := []board.Column{
+		{Title: "Open"},
+		{Title: "In Progress"},
+		{Title: "In Review"},
+		{Title: "Done"},
 	}
+	for _, task := range filteredTasks {
+		column := task.Status.Column()
+		if column < 0 || column >= len(columns) {
+			continue
+		}
+		columns[column].Tasks = append(columns[column].Tasks, task)
+	}
+
+	var activeDescendantSessionByTask map[string]bool
+	sortState := m.editor.GetSort()
+	if sortState != nil && sortState.Field == domain.SortBySession {
+		activeDescendantSessionByTask = buildActiveDescendantSessionByTask(m.tasks)
+	}
+	for i := range columns {
+		if len(activeDescendantSessionByTask) > 0 {
+			for j := range columns[i].Tasks {
+				if activeDescendantSessionByTask[columns[i].Tasks[j].ID.String()] {
+					columns[i].Tasks[j].HasTmuxSession = true
+				}
+			}
+		}
+		columns[i].Tasks = m.editor.ApplySort(columns[i].Tasks)
+	}
+	return columns
 }
 
 func (m Model) boardVisibleTasks(tasks []domain.Task) []domain.Task {
@@ -790,18 +837,51 @@ func (m Model) renderCompactView() string {
 	// Create compact view
 	compactView := compact.NewCompactView(sortedTasks, m.width, board.BoardContentHeight(m.height))
 
-	// Set cursor position based on current navigation
-	// In compact mode, we use the flat task index
-	columns := m.buildColumns()
-	pos := m.nav.GetPosition(columns)
-	flatIndex := m.getFlatIndexFromPosition(pos, columns)
-	compactView.SetCursor(flatIndex)
+	compactView.SetCursor(m.compactCursorIndex(sortedTasks))
 
 	// Set selected tasks
 	compactView.SetSelected(m.editor.GetSelectedTasks())
 
 	rendered := compactView.Render()
 	return m.overlayFreshnessIndicator(rendered, board.BoardContentHeight(m.height))
+}
+
+func (m Model) compactCursorIndex(tasks []domain.Task) int {
+	if len(tasks) == 0 || m.nav == nil || m.nav.GetCursor() == nil {
+		return 0
+	}
+	cursor := m.nav.GetCursor()
+	taskID := strings.TrimSpace(cursor.TaskID)
+	if taskID != "" {
+		for i := range tasks {
+			if tasks[i].ID.String() == taskID {
+				return i
+			}
+		}
+	}
+	index := cursor.FallbackTask
+	if cursor.FallbackColumn > 0 {
+		statuses := []domain.Status{
+			domain.StatusOpen,
+			domain.StatusInProgress,
+			domain.StatusInReview,
+			domain.StatusDone,
+		}
+		if cursor.FallbackColumn < len(statuses) {
+			targetStatus := statuses[cursor.FallbackColumn]
+			seenInColumn := 0
+			for i := range tasks {
+				if tasks[i].Status != targetStatus {
+					continue
+				}
+				if seenInColumn >= cursor.FallbackTask {
+					return i
+				}
+				seenInColumn++
+			}
+		}
+	}
+	return clampInt(index, 0, len(tasks)-1)
 }
 
 func (m Model) overlayFreshnessIndicator(content string, height int) string {

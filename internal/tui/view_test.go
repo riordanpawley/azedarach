@@ -104,6 +104,26 @@ func TestViewWithOverlayKeepsStatusBarVisible(t *testing.T) {
 	}
 }
 
+func TestViewWithModalOverlaySkipsBoardBackdropRender(t *testing.T) {
+	m := newTestModel()
+	m.width = 100
+	m.height = 24
+	m.loading = false
+	m.overlayStack.Push(&testOverlay{})
+
+	view := m.View()
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	if len(lines) == 0 {
+		t.Fatalf("expected non-empty rendered view")
+	}
+	if strings.Contains(lines[0], "Open (") {
+		t.Fatalf("expected modal overlay backdrop to avoid full board render; first line=%q", lines[0])
+	}
+	if !strings.Contains(view, "test overlay") {
+		t.Fatalf("expected modal overlay content to remain visible")
+	}
+}
+
 func TestRenderedBlockSize_WithFramedOverlayExpandsDimensions(t *testing.T) {
 	m := newTestModel()
 
