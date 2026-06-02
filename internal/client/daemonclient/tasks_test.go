@@ -797,6 +797,15 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 							{ID: grandchildID, Title: "Open grandchild", Status: domain.StatusOpen, ParentID: &childID},
 						}),
 					}, nil
+				case CommandTaskUpdateStatus:
+					var body TaskStatusRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal status repair request: %v", err)
+					}
+					if body.TaskID != childID || body.Status != domain.StatusInReview {
+						t.Fatalf("status repair = %+v, want %s -> %s", body, childID, domain.StatusInReview)
+					}
+					return responseWithJSON(t, req, map[string]any{}), nil
 				default:
 					t.Fatalf("unexpected command after child close guard failure = %q", req.Command)
 					return protocol.ResponseEnvelope{}, nil
@@ -806,10 +815,62 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 
 		client := New(transport).WithProjectID(wantProjectID)
 		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{AutoFinalizeOnClose: true})
-		if err == nil || !strings.Contains(err.Error(), "unresolved child issues remain") || !strings.Contains(err.Error(), "az-4 (worktree)") || !strings.Contains(err.Error(), "az-5 (open)") || !strings.Contains(err.Error(), "close or clean up the listed child issues first") || strings.Contains(err.Error(), "az issue finalize --id az-3") {
+		if err == nil || !strings.Contains(err.Error(), "unresolved child issues remain") || !strings.Contains(err.Error(), "az-4 (worktree)") || !strings.Contains(err.Error(), "az-5 (open)") || !strings.Contains(err.Error(), "close or clean up the listed child issues first") || !strings.Contains(err.Error(), "Moved closed blockers back for cleanup: az-4 -> in_review") || strings.Contains(err.Error(), "az issue finalize --id az-3") {
 			t.Fatalf("UpdateTaskStatusWithOptions error = %v, want child close guard", err)
 		}
-		wantCommands := []string{CommandTaskList}
+		wantCommands := []string{CommandTaskList, CommandTaskUpdateStatus}
+		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
+			t.Fatalf("commands = %v, want %v", commands, wantCommands)
+		}
+	})
+
+	t.Run("status update close guard reopens closed dirty worktree", func(t *testing.T) {
+		commands := []string{}
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body: mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 3, []domain.Task{
+							{
+								ID:          "az-3",
+								Title:       "Closed dirty issue",
+								Status:      domain.StatusDone,
+								Session:     &domain.Session{IssueID: "az-3", Worktree: "/tmp/az-3"},
+								HasWorktree: true,
+							},
+						}),
+					}, nil
+				case CommandGitStatus:
+					return responseWithJSON(t, req, gitStatusBody{Status: GitStatus{HasChanges: true, Modified: []string{"main.go"}}}), nil
+				case CommandTaskUpdateStatus:
+					var body TaskStatusRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal status repair request: %v", err)
+					}
+					if body.TaskID != "az-3" || body.Status != domain.StatusInProgress {
+						t.Fatalf("status repair = %+v, want az-3 -> %s", body, domain.StatusInProgress)
+					}
+					return responseWithJSON(t, req, map[string]any{}), nil
+				default:
+					t.Fatalf("unexpected command after close guard failure = %q", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{AutoFinalizeOnClose: true})
+		if err == nil || !strings.Contains(err.Error(), "worktree has local changes: main.go") || !strings.Contains(err.Error(), "Moved closed blockers back for cleanup: az-3 -> in_progress") {
+			t.Fatalf("UpdateTaskStatusWithOptions error = %v, want dirty guard and status repair", err)
+		}
+		wantCommands := []string{CommandTaskList, CommandGitStatus, CommandTaskUpdateStatus}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
 		}

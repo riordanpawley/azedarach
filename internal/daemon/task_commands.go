@@ -928,18 +928,92 @@ func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, task
 	reasons = append(reasons, daemonCloseGuardRuntimeBlockers(task)...)
 	reasons = append(reasons, daemonCloseGuardChildBlockers(task.ID, tasks)...)
 	if len(reasons) > 0 {
-		return fmt.Errorf("%s", daemonCloseGuardFailureMessage(taskID, reasons))
+		repairs, repairErr := d.reopenClosedCloseGuardBlockers(ctx, issueClient, task, tasks, reasons)
+		if repairErr != nil {
+			return fmt.Errorf("%s. Failed to move closed blockers back for cleanup: %w", daemonCloseGuardFailureMessage(taskID, reasons, repairs), repairErr)
+		}
+		return fmt.Errorf("%s", daemonCloseGuardFailureMessage(taskID, reasons, repairs))
 	}
 	return nil
 }
 
-func daemonCloseGuardFailureMessage(taskID string, reasons []string) string {
+type daemonCloseGuardStatusRepair struct {
+	IssueID string
+	Status  domain.Status
+}
+
+func (d *Daemon) reopenClosedCloseGuardBlockers(ctx context.Context, issueClient *issues.Client, target domain.Task, tasks []domain.Task, reasons []string) ([]daemonCloseGuardStatusRepair, error) {
+	repairs := daemonCloseGuardStatusRepairs(target, tasks, reasons)
+	for _, repair := range repairs {
+		if err := issueClient.Update(ctx, repair.IssueID, repair.Status); err != nil {
+			return repairs, fmt.Errorf("move %s to %s: %w", repair.IssueID, repair.Status, err)
+		}
+	}
+	return repairs, nil
+}
+
+func daemonCloseGuardStatusRepairs(target domain.Task, tasks []domain.Task, reasons []string) []daemonCloseGuardStatusRepair {
+	if len(reasons) == 0 {
+		return nil
+	}
+	repairs := make([]daemonCloseGuardStatusRepair, 0, 2)
+	seen := make(map[naming.IssueID]struct{})
+	add := func(task domain.Task) {
+		if task.Status != domain.StatusDone {
+			return
+		}
+		if _, ok := seen[task.ID]; ok {
+			return
+		}
+		seen[task.ID] = struct{}{}
+		repairs = append(repairs, daemonCloseGuardStatusRepair{
+			IssueID: task.ID.String(),
+			Status:  daemonCloseGuardReopenStatus(task),
+		})
+	}
+
+	add(target)
+	childrenByParent := daemonCloseGuardChildrenByParent(tasks)
+	descendants := daemonCloseGuardDescendants(target.ID, childrenByParent)
+	byID := make(map[naming.IssueID]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID] = task
+	}
+	for _, childID := range descendants {
+		child, ok := byID[childID]
+		if !ok || len(daemonCloseGuardChildReasons(child)) == 0 {
+			continue
+		}
+		add(child)
+	}
+	return repairs
+}
+
+func daemonCloseGuardReopenStatus(task domain.Task) domain.Status {
+	if daemonCloseGuardTaskHasSession(task) {
+		return domain.StatusInProgress
+	}
+	return domain.StatusInReview
+}
+
+func daemonCloseGuardFailureMessage(taskID string, reasons []string, repairs []daemonCloseGuardStatusRepair) string {
 	message := fmt.Sprintf("cannot close issue %s: %s", taskID, strings.Join(reasons, "; "))
 	hint := daemonCloseGuardRecoveryHint(taskID, reasons)
 	if hint == "" {
+		return daemonCloseGuardAppendRepairSummary(message, repairs)
+	}
+	return daemonCloseGuardAppendRepairSummary(message+". Next: "+hint, repairs)
+}
+
+func daemonCloseGuardAppendRepairSummary(message string, repairs []daemonCloseGuardStatusRepair) string {
+	if len(repairs) == 0 {
 		return message
 	}
-	return message + ". Next: " + hint
+	parts := make([]string, 0, len(repairs))
+	for _, repair := range repairs {
+		parts = append(parts, fmt.Sprintf("%s -> %s", repair.IssueID, repair.Status))
+	}
+	return message + ". Moved closed blockers back for cleanup: " + strings.Join(parts, ", ")
 }
 
 func daemonCloseGuardRecoveryHint(taskID string, reasons []string) string {

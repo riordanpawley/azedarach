@@ -769,6 +769,13 @@ func TestTaskUpdateStatusClosePreflightBlocksRawRuntimeAttachments(t *testing.T)
 	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "issue still has a worktree") || !strings.Contains(resp.Error.Message, "Next:") || !strings.Contains(resp.Error.Message, "az issue finalize --id "+taskID+" --remove-worktree") {
 		t.Fatalf("task.update_status response = %+v, want worktree close guard", resp)
 	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get guarded issue after failed close: %v", err)
+	}
+	if task.Status != domain.StatusInReview {
+		t.Fatalf("guarded issue status = %s, want %s", task.Status, domain.StatusInReview)
+	}
 
 	if err := runtimeStore.DeleteWorktreeState(ctx, projectID, taskID); err != nil {
 		t.Fatalf("clear worktree projection before skip close: %v", err)
@@ -794,6 +801,80 @@ func TestTaskUpdateStatusClosePreflightBlocksRawRuntimeAttachments(t *testing.T)
 	}
 	if !resp.OK {
 		t.Fatalf("task.update_status skip response = %+v", resp.Error)
+	}
+}
+
+func TestTaskUpdateStatusClosePreflightReopensClosedRuntimeBlocker(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-guard-reopen-target"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Closed with live session",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusDone,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            "sess-" + taskID,
+		IssueID:       taskID,
+		State:         daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateAttached,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed session projection: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: ".", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"task_id": taskID,
+		"status":  domain.StatusDone,
+	})
+	if err != nil {
+		t.Fatalf("marshal task update request: %v", err)
+	}
+	resp, err := d.handleTaskUpdateStatus(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-guard-reopen-target",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.update_status",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskUpdateStatus error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "issue still has a session") {
+		t.Fatalf("task.update_status response = %+v, want session close guard", resp)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get guarded issue after failed close: %v", err)
+	}
+	if task.Status != domain.StatusInProgress {
+		t.Fatalf("guarded issue status = %s, want %s", task.Status, domain.StatusInProgress)
+	}
+	if !strings.Contains(resp.Error.Message, "Moved closed blockers back for cleanup: "+taskID+" -> in_progress") {
+		t.Fatalf("task.update_status response = %q, want status repair explanation", resp.Error.Message)
 	}
 }
 
@@ -882,6 +963,90 @@ func TestTaskUpdateStatusClosePreflightBlocksRawUnresolvedChildrenAndApplyPath(t
 	_, err = d.Update(withDaemonProjectIDContext(ctx, projectID), parentID, domain.StatusDone)
 	if err == nil || !strings.Contains(err.Error(), "unresolved child issues remain") {
 		t.Fatalf("apply Update error = %v, want child close guard", err)
+	}
+}
+
+func TestTaskUpdateStatusClosePreflightReopensClosedChildRuntimeBlocker(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-guard-reopen-child"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Parent",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Closed child with runtime",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusDone,
+		ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   childID,
+		Path:      "/tmp/" + childID,
+		Branch:    "riordan/" + childID,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed child worktree projection: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: ".", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"task_id": parentID,
+		"status":  domain.StatusDone,
+	})
+	if err != nil {
+		t.Fatalf("marshal task update request: %v", err)
+	}
+	resp, err := d.handleTaskUpdateStatus(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-guard-reopen-child",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.update_status",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskUpdateStatus error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") || !strings.Contains(resp.Error.Message, childID+" (worktree)") {
+		t.Fatalf("task.update_status response = %+v, want child runtime close guard", resp)
+	}
+	child, err := issuesClient.GetWithRuntime(ctx, projectID, childID)
+	if err != nil {
+		t.Fatalf("get child after failed close: %v", err)
+	}
+	if child.Status != domain.StatusInReview {
+		t.Fatalf("child status = %s, want %s", child.Status, domain.StatusInReview)
+	}
+	if !strings.Contains(resp.Error.Message, "Moved closed blockers back for cleanup: "+childID+" -> in_review") {
+		t.Fatalf("task.update_status response = %q, want child status repair explanation", resp.Error.Message)
 	}
 }
 
