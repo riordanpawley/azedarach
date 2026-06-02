@@ -89,6 +89,7 @@ func TestNewLauncherNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 	}
 
 	t.Setenv("PATH", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
 	launcher := NewLauncher(filepath.Join(worktree, "go-bubbletea"), filepath.Join(base, "daemon.sock"))
 	if launcher.RepoDir != repo {
 		t.Fatalf("launcher.RepoDir = %q, want %q", launcher.RepoDir, repo)
@@ -98,7 +99,7 @@ func TestNewLauncherNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 	}
 }
 
-func TestNewLauncherScopedModeKeepsWorktreeRoot(t *testing.T) {
+func TestNewLauncherKeepsLinkedWorktreeRootByDefault(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
 	worktree := filepath.Join(base, "wt")
@@ -114,8 +115,8 @@ func TestNewLauncherScopedModeKeepsWorktreeRoot(t *testing.T) {
 	}
 
 	t.Setenv("PATH", "")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
 	launcher := NewLauncher(filepath.Join(worktree, "go-bubbletea"), filepath.Join(base, "daemon.sock"))
 	if launcher.RepoDir != worktree {
 		t.Fatalf("launcher.RepoDir = %q, want %q", launcher.RepoDir, worktree)

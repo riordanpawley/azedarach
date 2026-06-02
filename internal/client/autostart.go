@@ -46,7 +46,6 @@ type AutostartOrchestrator struct {
 	sleepFn         func(time.Duration)
 	onceMu          sync.Mutex
 	spawned         bool
-	replaced        bool
 	startKey        string
 	replaceKey      string
 }
@@ -86,12 +85,6 @@ func (o *AutostartOrchestrator) EnsureAttached(ctx context.Context, hello protoc
 	ack, err := o.handshaker.Handshake(ctx, hello)
 	latencytrace.LogPhase(slog.Default(), "cli", "autostart.initial_handshake", handshakeStartedAt, "client_name", hello.ClientName, "accepted", err == nil && ack.Accepted, "error", err)
 	if err == nil && ack.Accepted {
-		if shouldReplaceAcceptedDaemon(hello, ack) {
-			if replaceErr := o.replaceDaemon(ctx); replaceErr != nil {
-				return protocol.HelloAck{}, fmt.Errorf("replace daemon after version mismatch: %w", replaceErr)
-			}
-			return o.awaitAttached(ctx, hello)
-		}
 		return ack, nil
 	}
 	if err != nil {
@@ -104,12 +97,6 @@ func (o *AutostartOrchestrator) EnsureAttached(ctx context.Context, hello protoc
 			ack, err = o.handshaker.Handshake(ctx, hello)
 			latencytrace.LogPhase(slog.Default(), "cli", "autostart.pre_start_handshake", retryStartedAt, "client_name", hello.ClientName, "attempt", attempt+1, "accepted", err == nil && ack.Accepted, "error", err)
 			if err == nil && ack.Accepted {
-				if shouldReplaceAcceptedDaemon(hello, ack) {
-					if replaceErr := o.replaceDaemon(ctx); replaceErr != nil {
-						return protocol.HelloAck{}, fmt.Errorf("replace daemon after version mismatch: %w", replaceErr)
-					}
-					return o.awaitAttached(ctx, hello)
-				}
 				return ack, nil
 			}
 		}
@@ -119,7 +106,7 @@ func (o *AutostartOrchestrator) EnsureAttached(ctx context.Context, hello protoc
 			return ack, ErrUpgradeRequired
 		}
 		if ack.ErrorCode.IsCompatibilityFailure() && ack.RetryAfterRestart {
-			if replaceErr := o.replaceDaemon(ctx); replaceErr != nil {
+			if replaceErr := o.replaceDaemonAfterCompatibilityFailure(ctx, hello); replaceErr != nil {
 				return protocol.HelloAck{}, fmt.Errorf("%w: replace daemon: %v", ErrUpgradeRequired, replaceErr)
 			}
 		} else {
@@ -148,9 +135,6 @@ func (o *AutostartOrchestrator) awaitAttached(ctx context.Context, hello protoco
 		ack, err = o.handshaker.Handshake(ctx, hello)
 		latencytrace.LogPhase(slog.Default(), "cli", "autostart.await_handshake", handshakeStartedAt, "client_name", hello.ClientName, "attempt", attempt+1, "accepted", err == nil && ack.Accepted, "error", err)
 		if err == nil && ack.Accepted {
-			if shouldReplaceAcceptedDaemon(hello, ack) {
-				return ack, fmt.Errorf("daemon version mismatch persisted after replacement: client %s daemon %s", hello.ClientVersion, ack.DaemonVersion)
-			}
 			return ack, nil
 		}
 		if err == nil && ack.ErrorCode.IsCompatibilityFailure() {
@@ -173,16 +157,6 @@ func (o *AutostartOrchestrator) awaitAttached(ctx context.Context, hello protoco
 	return ack, fmt.Errorf("attach rejected after autostart: %s", ack.ErrorCode)
 }
 
-func shouldReplaceAcceptedDaemon(hello protocol.Hello, ack protocol.HelloAck) bool {
-	if !ack.Accepted {
-		return false
-	}
-	if hello.ClientVersion == "" || ack.DaemonVersion == "" {
-		return false
-	}
-	return hello.ClientVersion != ack.DaemonVersion
-}
-
 func (o *AutostartOrchestrator) startDaemon(ctx context.Context) error {
 	_, startErr, _ := o.group.Do(o.startKey, func() (any, error) {
 		if o.isSpawned() {
@@ -197,9 +171,13 @@ func (o *AutostartOrchestrator) startDaemon(ctx context.Context) error {
 	return startErr
 }
 
-func (o *AutostartOrchestrator) replaceDaemon(ctx context.Context) error {
+func (o *AutostartOrchestrator) replaceDaemonAfterCompatibilityFailure(ctx context.Context, hello protocol.Hello) error {
 	_, replaceErr, _ := o.group.Do(o.replaceKey, func() (any, error) {
-		if o.isReplaced() {
+		// Singleflight only collapses replacement work that is already in flight.
+		// Re-check inside the group so late callers with a stale incompatibility
+		// result do not perform another daemon replacement.
+		ack, err := o.handshaker.Handshake(ctx, hello)
+		if err == nil && ack.Accepted {
 			return nil, nil
 		}
 		if o.replacer != nil {
@@ -211,7 +189,6 @@ func (o *AutostartOrchestrator) replaceDaemon(ctx context.Context) error {
 				return nil, err
 			}
 		}
-		o.markReplaced()
 		o.markSpawned()
 		return nil, nil
 	})
@@ -228,16 +205,4 @@ func (o *AutostartOrchestrator) markSpawned() {
 	o.onceMu.Lock()
 	defer o.onceMu.Unlock()
 	o.spawned = true
-}
-
-func (o *AutostartOrchestrator) isReplaced() bool {
-	o.onceMu.Lock()
-	defer o.onceMu.Unlock()
-	return o.replaced
-}
-
-func (o *AutostartOrchestrator) markReplaced() {
-	o.onceMu.Lock()
-	defer o.onceMu.Unlock()
-	o.replaced = true
 }

@@ -140,8 +140,12 @@ func (l *GlobalInventoryLoader) ListTasksSnapshot(ctx context.Context) (Snapshot
 	if l == nil || l.tmux == nil {
 		return Snapshot{}, errInventoryUnavailable()
 	}
+	start := time.Now()
 	live, err := l.tmux.ListSessionInfos(ctx)
 	if err != nil {
+		if l.logger != nil {
+			l.logger.Warn("global selector full snapshot tmux load failed", "elapsed_ms", time.Since(start).Milliseconds(), "error", err)
+		}
 		return Snapshot{}, err
 	}
 	if len(live) > l.limit {
@@ -150,30 +154,59 @@ func (l *GlobalInventoryLoader) ListTasksSnapshot(ctx context.Context) (Snapshot
 	snapshot := l.snapshotFromLive(ctx, live, nil, true)
 	projectDirs := l.projectDirsForLiveSessions(live)
 	projections, tasks := l.loadProjections(ctx, projectDirs)
-	return l.enrichEntries(snapshot, projections, tasks), nil
+	enriched := l.enrichEntries(snapshot, projections, tasks)
+	if l.logger != nil {
+		l.logger.Info("global selector full snapshot loaded",
+			"elapsed_ms", time.Since(start).Milliseconds(),
+			"session_count", len(enriched.Entries),
+			"project_count", len(projectDirs),
+		)
+	}
+	return enriched, nil
 }
 
 func (l *GlobalInventoryLoader) ListLiveSnapshot(ctx context.Context) (Snapshot, error) {
 	if l == nil || l.tmux == nil {
 		return Snapshot{}, errInventoryUnavailable()
 	}
+	start := time.Now()
 	live, err := l.tmux.ListSessionInfos(ctx)
 	if err != nil {
+		if l.logger != nil {
+			l.logger.Warn("global selector live snapshot tmux load failed", "elapsed_ms", time.Since(start).Milliseconds(), "error", err)
+		}
 		return Snapshot{}, err
 	}
 	if len(live) > l.limit {
 		live = live[:l.limit]
 	}
-	return l.snapshotFromLive(ctx, live, nil, true), nil
+	snapshot := l.snapshotFromLive(ctx, live, nil, true)
+	if l.logger != nil {
+		l.logger.Info("global selector live snapshot loaded",
+			"elapsed_ms", time.Since(start).Milliseconds(),
+			"session_count", len(snapshot.Entries),
+		)
+	}
+	return snapshot, nil
 }
 
 func (l *GlobalInventoryLoader) EnrichSnapshot(ctx context.Context, snapshot Snapshot) (Snapshot, error) {
 	if l == nil {
 		return snapshot, errInventoryUnavailable()
 	}
+	start := time.Now()
 	projectDirs := l.projectDirsForEntries(snapshot.Entries)
 	projections, tasks := l.loadProjections(ctx, projectDirs)
-	return l.enrichEntries(snapshot, projections, tasks), nil
+	enriched := l.enrichEntries(snapshot, projections, tasks)
+	if l.logger != nil {
+		l.logger.Info("global selector snapshot enriched",
+			"elapsed_ms", time.Since(start).Milliseconds(),
+			"session_count", len(enriched.Entries),
+			"project_count", len(projectDirs),
+			"ancestor_count", len(enriched.TreeTasks),
+		)
+	}
+	return enriched, nil
 }
 
 func (l *GlobalInventoryLoader) snapshotFromLive(ctx context.Context, live []tmux.SessionInfo, projections map[string]projectedInventory, enriching bool) Snapshot {
@@ -462,10 +495,15 @@ func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs
 	if _, ok := source.(*DaemonSnapshotSource); ok {
 		source = NewDaemonSnapshotSource(projectDirs, l.logger)
 	}
+	start := time.Now()
 	snapshots, err := source.ListProjectSnapshots(ctx)
 	if err != nil {
 		if l.logger != nil {
-			l.logger.Debug("global selector daemon snapshot enrichment failed", "error", err)
+			l.logger.Debug("global selector daemon snapshot enrichment failed",
+				"elapsed_ms", time.Since(start).Milliseconds(),
+				"project_count", len(projectDirs),
+				"error", err,
+			)
 		}
 		return out, tasks
 	}
@@ -496,6 +534,14 @@ func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs
 			addProjection(out, naming.CanonicalSessionID(projectID, issueID), projection)
 			addProjection(out, naming.CanonicalSessionID(projectPath, issueID), projection)
 		}
+	}
+	if l.logger != nil {
+		l.logger.Info("global selector daemon snapshots loaded",
+			"elapsed_ms", time.Since(start).Milliseconds(),
+			"project_count", len(projectDirs),
+			"snapshot_count", len(snapshots),
+			"projection_count", len(out),
+		)
 	}
 	return out, tasks
 }
@@ -733,6 +779,7 @@ func (s *DaemonSnapshotSource) ListProjectSnapshots(ctx context.Context) ([]Proj
 	if s == nil {
 		return nil, nil
 	}
+	start := time.Now()
 	type projectResult struct {
 		snapshot ProjectInventorySnapshot
 		ok       bool
@@ -744,6 +791,7 @@ func (s *DaemonSnapshotSource) ListProjectSnapshots(ctx context.Context) ([]Proj
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			projectStart := time.Now()
 			projectID := projectIDForPath(projectDir)
 			if projectID == "" {
 				return
@@ -753,9 +801,22 @@ func (s *DaemonSnapshotSource) ListProjectSnapshots(ctx context.Context) ([]Proj
 			snapshot, err := client.ListTasksSnapshot(ctx)
 			if err != nil {
 				if s.logger != nil {
-					s.logger.Debug("global selector project snapshot failed", "project_dir", projectDir, "project_id", projectID, "error", err)
+					s.logger.Debug("global selector project snapshot failed",
+						"elapsed_ms", time.Since(projectStart).Milliseconds(),
+						"project_dir", projectDir,
+						"project_id", projectID,
+						"error", err,
+					)
 				}
 				return
+			}
+			if s.logger != nil {
+				s.logger.Info("global selector project snapshot loaded",
+					"elapsed_ms", time.Since(projectStart).Milliseconds(),
+					"project_dir", projectDir,
+					"project_id", projectID,
+					"task_count", len(snapshot.Tasks),
+				)
 			}
 			results[i] = projectResult{
 				snapshot: ProjectInventorySnapshot{
@@ -773,6 +834,13 @@ func (s *DaemonSnapshotSource) ListProjectSnapshots(ctx context.Context) ([]Proj
 		if result.ok {
 			out = append(out, result.snapshot)
 		}
+	}
+	if s.logger != nil {
+		s.logger.Info("global selector project snapshots complete",
+			"elapsed_ms", time.Since(start).Milliseconds(),
+			"project_count", len(s.projectDirs),
+			"snapshot_count", len(out),
+		)
 	}
 	return out, nil
 }

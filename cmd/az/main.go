@@ -990,17 +990,10 @@ func validateTUILaunchContext() error {
 	if err != nil {
 		return nil
 	}
-	if !isLinkedGitWorktree(cwd) || tuiScopedDaemonRuntimeEnabled() {
+	if !isLinkedGitWorktree(cwd) || config.UseScopedDaemonRuntimeFor(cwd) {
 		return nil
 	}
-	return fmt.Errorf("refusing to start the TUI from a linked worktree without the scoped just-run environment; run `just run` from this worktree so ./bin/az and ./bin/azd are paired and AZEDARACH_DAEMON_SCOPE=worktree is set")
-}
-
-func tuiScopedDaemonRuntimeEnabled() bool {
-	mode := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
-	source := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")))
-	modeEnabled := mode == "worktree" || mode == "scoped" || mode == "local"
-	return modeEnabled && source == "just-run"
+	return fmt.Errorf("refusing to start the TUI from a linked worktree while AZEDARACH_DAEMON_SCOPE=%q forces the shared daemon; unset it or use AZEDARACH_DAEMON_SCOPE=worktree so this worktree gets its own daemon", os.Getenv("AZEDARACH_DAEMON_SCOPE"))
 }
 
 func isLinkedGitWorktree(startDir string) bool {

@@ -889,6 +889,144 @@ func TestAIHookRunCommandRoutesCodexAgentThroughPort(t *testing.T) {
 	}
 }
 
+func TestAIHookRunCommandDoesNotAutostartRetryBestEffortLifecycleNotify(t *testing.T) {
+	projectDir := t.TempDir()
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")
+
+	var sessionLifecycleCalls int
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case protocol.CommandHookLogAppend:
+				return responseWithJSON(req, protocol.HookLogEvent{}), nil
+			case daemonclient.CommandSessionPause, daemonclient.CommandSessionResume:
+				sessionLifecycleCalls++
+				return protocol.ResponseEnvelope{}, errors.New("daemon command transport: dial unavailable")
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		},
+	}
+	deps := &Dependencies{
+		RepoDir:      projectDir,
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
+	}
+
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
+
+	opts, err := ParseAIHookRunArgs([]string{"--agent=codex", "--json", "permission-request"})
+	if err != nil {
+		t.Fatalf("ParseAIHookRunArgs error: %v", err)
+	}
+	output := captureStdout(t, func() error {
+		return AIHookRunCommand(deps, opts)
+	})
+	if strings.TrimSpace(output) != "{}" {
+		t.Fatalf("ai hook run json output = %q, want {}", output)
+	}
+	if sessionLifecycleCalls != 1 {
+		t.Fatalf("session lifecycle calls = %d, want exactly one best-effort attempt", sessionLifecycleCalls)
+	}
+}
+
+func TestAIHookRunCommandSkipsPreToolUseDaemonCalls(t *testing.T) {
+	projectDir := t.TempDir()
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")
+
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			t.Fatalf("unexpected daemon command for pre_tool_use: %s", req.Command)
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+	deps := &Dependencies{
+		RepoDir:      projectDir,
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
+	}
+
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.WriteString(`{"thread_id":"t-port-1"}`); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
+
+	opts, err := ParseAIHookRunArgs([]string{"--agent=codex", "--json", "pre-tool-use"})
+	if err != nil {
+		t.Fatalf("ParseAIHookRunArgs error: %v", err)
+	}
+	output := captureStdout(t, func() error {
+		return AIHookRunCommand(deps, opts)
+	})
+	if strings.TrimSpace(output) != "{}" {
+		t.Fatalf("ai hook run json output = %q, want {}", output)
+	}
+}
+
+func TestAIHookRunCommandSkipsPostToolUseDaemonCalls(t *testing.T) {
+	projectDir := t.TempDir()
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")
+
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			t.Fatalf("unexpected daemon command for post_tool_use: %s", req.Command)
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+	deps := &Dependencies{
+		RepoDir:      projectDir,
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
+	}
+
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.WriteString(`{"thread_id":"t-port-1"}`); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
+
+	opts, err := ParseAIHookRunArgs([]string{"--agent=codex", "--json", "post-tool-use"})
+	if err != nil {
+		t.Fatalf("ParseAIHookRunArgs error: %v", err)
+	}
+	output := captureStdout(t, func() error {
+		return AIHookRunCommand(deps, opts)
+	})
+	if strings.TrimSpace(output) != "{}" {
+		t.Fatalf("ai hook run json output = %q, want {}", output)
+	}
+}
+
 func TestAIHookRunCommandRoutesClaudeAgentThroughPort(t *testing.T) {
 	projectDir := t.TempDir()
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-2")

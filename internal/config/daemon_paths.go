@@ -50,9 +50,10 @@ func GlobalDaemonLockPath() string {
 }
 
 // DaemonSocketPathFor returns either the global or worktree-scoped daemon socket
-// path depending on runtime mode.
+// path depending on runtime mode. Linked git worktrees default to a scoped
+// daemon so development/test worktrees do not fight over the user-global daemon.
 func DaemonSocketPathFor(startPath string) string {
-	if useScopedDaemonRuntime() {
+	if UseScopedDaemonRuntimeFor(startPath) {
 		return ScopedDaemonSocketPath(startPath)
 	}
 	return GlobalDaemonSocketPath()
@@ -61,7 +62,7 @@ func DaemonSocketPathFor(startPath string) string {
 // DaemonLockPathFor returns either the global or worktree-scoped daemon lock path
 // depending on runtime mode.
 func DaemonLockPathFor(startPath string) string {
-	if useScopedDaemonRuntime() {
+	if UseScopedDaemonRuntimeFor(startPath) {
 		return ScopedDaemonLockPath(startPath)
 	}
 	return GlobalDaemonLockPath()
@@ -92,11 +93,30 @@ func daemonScopeID(path string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-func useScopedDaemonRuntime() bool {
+func UseScopedDaemonRuntimeFor(startPath string) bool {
 	mode := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
-	source := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")))
-	modeEnabled := mode == "worktree" || mode == "scoped" || mode == "local"
-	return modeEnabled && source == "just-run"
+	switch mode {
+	case "worktree", "scoped", "local":
+		return true
+	case "global", "shared", "user", "off", "none":
+		return false
+	}
+	return IsLinkedGitWorktree(startPath)
+}
+
+func IsLinkedGitWorktree(startPath string) bool {
+	worktreeRoot, err := ResolveWorktreeRoot(startPath)
+	if err != nil {
+		return false
+	}
+	projectRoot, err := ResolveProjectRoot(startPath)
+	if err != nil {
+		return false
+	}
+	if strings.TrimSpace(worktreeRoot) == "" || strings.TrimSpace(projectRoot) == "" {
+		return false
+	}
+	return filepath.Clean(worktreeRoot) != filepath.Clean(projectRoot)
 }
 
 func daemonRuntimeDirWritable(dir string) bool {

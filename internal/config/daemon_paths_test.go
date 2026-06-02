@@ -2,7 +2,9 @@ package config
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -107,9 +109,35 @@ func TestDaemonPathsDefaultToGlobal(t *testing.T) {
 	}
 }
 
+func TestDaemonPathsDefaultToScopedForLinkedWorktree(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
+	_, worktree := makeLinkedDaemonPathWorktree(t)
+
+	if got := DaemonSocketPathFor(worktree); got != ScopedDaemonSocketPath(worktree) {
+		t.Fatalf("DaemonSocketPathFor() = %q, want %q", got, ScopedDaemonSocketPath(worktree))
+	}
+	if got := DaemonLockPathFor(worktree); got != ScopedDaemonLockPath(worktree) {
+		t.Fatalf("DaemonLockPathFor() = %q, want %q", got, ScopedDaemonLockPath(worktree))
+	}
+}
+
+func TestDaemonPathsGlobalScopeOverridesLinkedWorktreeDefault(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
+	_, worktree := makeLinkedDaemonPathWorktree(t)
+
+	if got := DaemonSocketPathFor(worktree); got != GlobalDaemonSocketPath() {
+		t.Fatalf("DaemonSocketPathFor() = %q, want %q", got, GlobalDaemonSocketPath())
+	}
+	if got := DaemonLockPathFor(worktree); got != GlobalDaemonLockPath() {
+		t.Fatalf("DaemonLockPathFor() = %q, want %q", got, GlobalDaemonLockPath())
+	}
+}
+
 func TestDaemonPathsUseScopedWhenEnabled(t *testing.T) {
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
 	start := filepath.Join(t.TempDir(), "repo")
 	if got := DaemonSocketPathFor(start); got != ScopedDaemonSocketPath(start) {
 		t.Fatalf("DaemonSocketPathFor() = %q, want %q", got, ScopedDaemonSocketPath(start))
@@ -117,4 +145,48 @@ func TestDaemonPathsUseScopedWhenEnabled(t *testing.T) {
 	if got := DaemonLockPathFor(start); got != ScopedDaemonLockPath(start) {
 		t.Fatalf("DaemonLockPathFor() = %q, want %q", got, ScopedDaemonLockPath(start))
 	}
+}
+
+func makeLinkedDaemonPathWorktree(t *testing.T) (string, string) {
+	t.Helper()
+	parent := t.TempDir()
+	repo := filepath.Join(parent, "repo")
+	worktree := filepath.Join(parent, "repo-wt")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	runDaemonPathGit(t, repo, "init")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("test\n"), 0o644); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	runDaemonPathGit(t, repo, "add", "README.md")
+	runDaemonPathGit(t, repo, "-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+	runDaemonPathGit(t, repo, "worktree", "add", "-b", "wt", worktree)
+	return repo, worktree
+}
+
+func runDaemonPathGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = daemonPathGitTestEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, string(out))
+	}
+}
+
+func daemonPathGitTestEnv() []string {
+	out := make([]string, 0, len(os.Environ()))
+	for _, kv := range os.Environ() {
+		switch {
+		case strings.HasPrefix(kv, "GIT_DIR="),
+			strings.HasPrefix(kv, "GIT_WORK_TREE="),
+			strings.HasPrefix(kv, "GIT_COMMON_DIR="),
+			strings.HasPrefix(kv, "GIT_INDEX_FILE="):
+			continue
+		default:
+			out = append(out, kv)
+		}
+	}
+	return out
 }

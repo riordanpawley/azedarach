@@ -8,16 +8,17 @@ import (
 
 func TestIsScopedDaemonMode(t *testing.T) {
 	tests := []struct {
-		name string
-		in   string
+		name   string
+		in     string
 		source string
-		want bool
+		want   bool
 	}{
 		{name: "worktree", in: "worktree", source: "just-run", want: true},
 		{name: "scoped", in: "scoped", source: "just-run", want: true},
 		{name: "local", in: "local", source: "just-run", want: true},
 		{name: "whitespace and case", in: "  WorkTree  ", source: "  JUST-RUN  ", want: true},
-		{name: "mode without source", in: "worktree", source: "", want: false},
+		{name: "mode without source", in: "worktree", source: "", want: true},
+		{name: "auto source", in: "worktree", source: "auto", want: true},
 		{name: "empty", in: "", want: false},
 		{name: "global", in: "global", want: false},
 	}

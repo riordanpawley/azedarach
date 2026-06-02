@@ -477,7 +477,7 @@ func TestRuntimeReconcileWorkerInvokesUntilCanceled(t *testing.T) {
 	d := &Daemon{
 		cfg: Config{
 			Logger:                   slog.New(slog.NewTextHandler(io.Discard, nil)),
-			RuntimeReconcileInterval: 10 * time.Millisecond,
+			RuntimeReconcileInterval: 100 * time.Millisecond,
 			RuntimeReconcileTimeout:  25 * time.Millisecond,
 		},
 		runtimeReconciler: recorder,
@@ -494,7 +494,11 @@ func TestRuntimeReconcileWorkerInvokesUntilCanceled(t *testing.T) {
 	}
 
 	cancel()
-	time.Sleep(30 * time.Millisecond)
+	select {
+	case <-recorder.started:
+		t.Fatal("periodic reconcile ran after cancellation")
+	case <-time.After(50 * time.Millisecond):
+	}
 
 	calls, _ := recorder.snapshot()
 	if calls != 1 {
@@ -776,13 +780,12 @@ func TestRuntimeReconcileCycleUsesRepoScopedProjectID(t *testing.T) {
 func TestRuntimeReconcileTimeoutDefaultsByScopeMode(t *testing.T) {
 	d := &Daemon{}
 
-	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
 	if got, want := d.runtimeReconcileTimeout(), defaultRuntimeReconcileTimeout; got != want {
 		t.Fatalf("runtimeReconcileTimeout() non-scoped = %s, want %s", got, want)
 	}
 
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
 	if got, want := d.runtimeReconcileTimeout(), scopedRuntimeReconcileTimeout; got != want {
 		t.Fatalf("runtimeReconcileTimeout() scoped = %s, want %s", got, want)
 	}

@@ -91,7 +91,7 @@ func newDaemonLogger() *slog.Logger {
 }
 
 func resolveScopedWorktreeWatchPath(repoDir string) string {
-	if !isScopedDaemonMode(os.Getenv("AZEDARACH_DAEMON_SCOPE"), os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")) {
+	if !config.UseScopedDaemonRuntimeFor(repoDir) {
 		return ""
 	}
 	if strings.TrimSpace(repoDir) == "" {
@@ -109,7 +109,7 @@ func isScopedDaemonMode(mode, source string) bool {
 	source = strings.TrimSpace(strings.ToLower(source))
 	switch mode {
 	case "worktree", "scoped", "local":
-		return source == "just-run"
+		return source == "" || source == "just-run" || source == "auto"
 	default:
 		return false
 	}

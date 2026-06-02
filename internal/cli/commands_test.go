@@ -57,7 +57,7 @@ func marshalTaskListBodyForProject(projectID string, tasks []domain.Task) ([]byt
 	})
 }
 
-func TestNewDependenciesAtNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
+func TestNewDependenciesAtUsesBaseProjectAndWorktreeRuntimeForLinkedWorktree(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
 	worktree := filepath.Join(base, "wt")
@@ -81,8 +81,8 @@ func TestNewDependenciesAtNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 	if deps.RepoDir != repo {
 		t.Fatalf("RepoDir = %q, want %q", deps.RepoDir, repo)
 	}
-	if deps.RuntimeRepoDir != repo {
-		t.Fatalf("RuntimeRepoDir = %q, want %q", deps.RuntimeRepoDir, repo)
+	if deps.RuntimeRepoDir != worktree {
+		t.Fatalf("RuntimeRepoDir = %q, want %q", deps.RuntimeRepoDir, worktree)
 	}
 	wantProjectID, err := config.ProjectIDForRoot(repo)
 	if err != nil {
@@ -91,12 +91,12 @@ func TestNewDependenciesAtNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 	if deps.ProjectID != wantProjectID {
 		t.Fatalf("ProjectID = %q, want %q", deps.ProjectID, wantProjectID)
 	}
-	if deps.DaemonSocket != config.GlobalDaemonSocketPath() {
-		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.GlobalDaemonSocketPath())
+	if deps.DaemonSocket != config.ScopedDaemonSocketPath(start) {
+		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.ScopedDaemonSocketPath(start))
 	}
 }
 
-func TestNewDependenciesAtUsesScopedSocketWhenEnabled(t *testing.T) {
+func TestNewDependenciesAtUsesScopedSocketForLinkedWorktreeByDefault(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
 	worktree := filepath.Join(base, "wt")
@@ -113,8 +113,8 @@ func TestNewDependenciesAtUsesScopedSocketWhenEnabled(t *testing.T) {
 	}
 
 	t.Setenv("PATH", "")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
 	deps, err := NewDependenciesAt(config.DefaultConfig(), start)
 	if err != nil {
 		t.Fatalf("NewDependenciesAt() error = %v", err)

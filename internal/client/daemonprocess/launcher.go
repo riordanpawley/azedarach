@@ -41,7 +41,7 @@ type Launcher struct {
 
 // NewLauncher returns a daemon process launcher for repoDir.
 func NewLauncher(repoDir, socketPath string) *Launcher {
-	if scopedDaemonRuntimeEnabled() {
+	if config.UseScopedDaemonRuntimeFor(repoDir) || socketPath == config.ScopedDaemonSocketPath(repoDir) {
 		if normalizedRepoDir, err := config.ResolveWorktreeRoot(repoDir); err == nil {
 			repoDir = normalizedRepoDir
 		}
@@ -65,13 +65,6 @@ func NewLauncher(repoDir, socketPath string) *Launcher {
 		sleepFn:            time.Sleep,
 		terminateLockOwner: lifecycle.TerminateLockOwner,
 	}
-}
-
-func scopedDaemonRuntimeEnabled() bool {
-	mode := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
-	source := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")))
-	modeEnabled := mode == "worktree" || mode == "scoped" || mode == "local"
-	return modeEnabled && source == "just-run"
 }
 
 // WithLogger overrides launcher logging sink for lifecycle warnings.
