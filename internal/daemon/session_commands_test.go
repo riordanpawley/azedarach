@@ -776,8 +776,9 @@ func TestSessionStartUsesClosestAncestorWorktreeBranchAsBase(t *testing.T) {
 		_ = issuesClient.CloseDB()
 	})
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
-		Title: "Parent issue",
-		Type:  domain.TypeTask,
+		Title:  "Parent issue",
+		Type:   domain.TypeTask,
+		Status: domain.StatusDone,
 	})
 	if err != nil {
 		t.Fatalf("create parent issue: %v", err)

@@ -173,6 +173,7 @@ type Model struct {
 	sessionTreeFilterOnly         bool
 	runtimeSignalsByTask          map[string]board.RuntimeSignals
 	runtimeSignalWorktreeByTask   map[string]string
+	runtimeSignalBranchByTask     map[string]string
 
 	// Project
 	currentProject       string
@@ -309,6 +310,7 @@ func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 		viewMode:                    ViewModeBoard, // Start with board view
 		runtimeSignalsByTask:        make(map[string]board.RuntimeSignals),
 		runtimeSignalWorktreeByTask: make(map[string]string),
+		runtimeSignalBranchByTask:   make(map[string]string),
 		toasts:                      []Toast{},
 		recoveryNotifications:       []asyncRecoveryNotification{},
 		eventTicker:                 eventticker.NewRing(eventTickerCapacity),
@@ -2292,11 +2294,35 @@ func (m Model) diffBaseBranchForTask(task *domain.Task) string {
 	if task == nil || task.ParentID == nil {
 		return baseBranch
 	}
-	parentID := strings.TrimSpace(task.ParentID.String())
-	if parentID == "" {
-		return baseBranch
+	taskByID := make(map[string]domain.Task, len(m.tasks))
+	for _, candidate := range m.tasks {
+		if id := strings.TrimSpace(candidate.ID.String()); id != "" {
+			taskByID[id] = candidate
+		}
 	}
-	return m.originBranchForSelection(parentID)
+	nextParentID := strings.TrimSpace(task.ParentID.String())
+	visited := map[string]struct{}{}
+	for nextParentID != "" {
+		if _, seen := visited[nextParentID]; seen {
+			break
+		}
+		visited[nextParentID] = struct{}{}
+		if branch := strings.TrimSpace(m.runtimeSignalBranchByTask[nextParentID]); branch != "" {
+			return branch
+		}
+		parentTask, ok := taskByID[nextParentID]
+		if !ok {
+			return m.originBranchForSelection(nextParentID)
+		}
+		if parentTask.HasWorktree || parentTask.Session != nil {
+			return m.originBranchForSelection(nextParentID)
+		}
+		nextParentID = ""
+		if parentTask.ParentID != nil {
+			nextParentID = strings.TrimSpace(parentTask.ParentID.String())
+		}
+	}
+	return baseBranch
 }
 
 func (m Model) daemonCommandTimeout() time.Duration {

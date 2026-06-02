@@ -764,18 +764,16 @@ func (d *Daemon) resolveSessionStartBaseBranch(
 		}
 		visited[nextParentID] = struct{}{}
 
+		if parentWorktree, err := worktreeManager.Get(ctx, nextParentID); err == nil {
+			candidate := strings.TrimSpace(parentWorktree.Branch)
+			if candidate != "" {
+				return candidate, nextParentID
+			}
+		}
+
 		parentTask, err := issueClient.GetWithRuntime(ctx, projectID, nextParentID)
 		if err != nil {
 			break
-		}
-
-		if parentTask.Status != domain.StatusDone {
-			if parentWorktree, err := worktreeManager.Get(ctx, nextParentID); err == nil {
-				candidate := strings.TrimSpace(parentWorktree.Branch)
-				if candidate != "" {
-					return candidate, nextParentID
-				}
-			}
 		}
 
 		nextParentID = ""

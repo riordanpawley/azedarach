@@ -5154,11 +5154,12 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 				Type:   domain.TypeTask,
 			},
 			{
-				ID:       parentID,
-				Title:    "Parent task",
-				Status:   domain.StatusDone,
-				Type:     domain.TypeTask,
-				ParentID: &rootID,
+				ID:          parentID,
+				Title:       "Parent task",
+				Status:      domain.StatusDone,
+				Type:        domain.TypeTask,
+				HasWorktree: true,
+				ParentID:    &rootID,
 			},
 			{
 				ID:       childID,
@@ -5189,16 +5190,61 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 		}
 	})
 
+	t.Run("open diff targets actual parent worktree branch", func(t *testing.T) {
+		m := newDaemonTestModel(&recordingDaemonTransport{})
+		parentID := naming.IssueID("az-parent")
+		childID := naming.IssueID("az-child")
+		m.tasks = []domain.Task{
+			{
+				ID:          parentID,
+				Title:       "Parent task",
+				Status:      domain.StatusDone,
+				Type:        domain.TypeTask,
+				HasWorktree: true,
+			},
+			{
+				ID:       childID,
+				Title:    "Child task",
+				Status:   domain.StatusInProgress,
+				Type:     domain.TypeTask,
+				ParentID: &parentID,
+				Session: &domain.Session{
+					IssueID:  childID,
+					Worktree: "/tmp/az-child",
+				},
+			},
+		}
+		m.runtimeSignalBranchByTask = map[string]string{
+			"az-parent": "riordan/az-parent/real-parent-branch",
+		}
+		m.nav.SelectTask("az-child", 1)
+
+		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "f"})
+		if cmd == nil {
+			t.Fatal("expected diff overlay command")
+		}
+		updatedModel := updated.(Model)
+		diffOverlay, ok := updatedModel.overlayStack.Current().(*diff.DiffViewer)
+		if !ok {
+			t.Fatalf("overlay type = %T, want *diff.DiffViewer", updatedModel.overlayStack.Current())
+		}
+		baseBranchField := reflect.ValueOf(diffOverlay).Elem().FieldByName("baseBranch")
+		if got := baseBranchField.String(); got != "riordan/az-parent/real-parent-branch" {
+			t.Fatalf("diff base branch = %q, want actual parent worktree branch", got)
+		}
+	})
+
 	t.Run("open diff uses done direct parent branch", func(t *testing.T) {
 		m := newDaemonTestModel(&recordingDaemonTransport{})
 		parentID := naming.IssueID("az-parent")
 		childID := naming.IssueID("az-child")
 		m.tasks = []domain.Task{
 			{
-				ID:     parentID,
-				Title:  "Parent task",
-				Status: domain.StatusDone,
-				Type:   domain.TypeTask,
+				ID:          parentID,
+				Title:       "Parent task",
+				Status:      domain.StatusDone,
+				Type:        domain.TypeTask,
+				HasWorktree: true,
 			},
 			{
 				ID:       childID,

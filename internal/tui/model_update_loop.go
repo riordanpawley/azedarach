@@ -142,7 +142,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if session == nil {
 				return m, nil
 			}
-			return m, m.fetchAndMergeCmd(session.Worktree, m.config.Git.BaseBranch, issueID, true)
+			return m, m.fetchAndMergeCmd(session.Worktree, m.resolveBaseBranch(), issueID, true)
 		}
 		if msg.Key == "skip_attach" {
 			m.overlayStack.Pop()
@@ -1180,7 +1180,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if msg.commitsBehind > 0 {
 			// Show merge choice overlay
-			m.openOverlay(overlay.NewMergeChoiceOverlay(msg.issueID, msg.commitsBehind, m.config.Git.BaseBranch))
+			m.openOverlay(overlay.NewMergeChoiceOverlay(msg.issueID, msg.commitsBehind, m.resolveBaseBranch()))
 			return m, nil
 		}
 

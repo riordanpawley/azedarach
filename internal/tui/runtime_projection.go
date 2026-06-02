@@ -14,6 +14,7 @@ func (m *Model) syncProjectionIndexesFromTasks() {
 	nextSessions := make(map[string]*domain.Session, len(m.tasks))
 	nextSignals := make(map[string]board.RuntimeSignals, len(m.tasks))
 	nextWorktrees := make(map[string]string, len(m.tasks))
+	nextBranches := make(map[string]string, len(m.tasks))
 
 	for i := range m.tasks {
 		task := &m.tasks[i]
@@ -53,17 +54,24 @@ func (m *Model) syncProjectionIndexesFromTasks() {
 		} else if cached := strings.TrimSpace(m.runtimeSignalWorktreeByTask[taskID]); cached != "" {
 			nextWorktrees[taskID] = cached
 		}
+		if cached := strings.TrimSpace(m.runtimeSignalBranchByTask[taskID]); cached != "" {
+			nextBranches[taskID] = cached
+		}
 	}
 
 	m.sessions = nextSessions
 	m.runtimeSignalsByTask = nextSignals
 	m.runtimeSignalWorktreeByTask = nextWorktrees
+	m.runtimeSignalBranchByTask = nextBranches
 }
 
 func (m *Model) applyRuntimeProjection(projection protocol.RuntimeProjection) bool {
 	issueID := strings.TrimSpace(projection.IssueID.String())
 	if issueID == "" {
 		return false
+	}
+	if m.runtimeSignalBranchByTask == nil {
+		m.runtimeSignalBranchByTask = make(map[string]string)
 	}
 
 	for i := range m.tasks {
@@ -111,6 +119,15 @@ func (m *Model) applyRuntimeProjection(projection protocol.RuntimeProjection) bo
 			m.runtimeSignalWorktreeByTask[taskID] = strings.TrimSpace(projection.Worktree.Path)
 		} else {
 			delete(m.runtimeSignalWorktreeByTask, taskID)
+		}
+		if projection.Worktree.Exists {
+			if branch := strings.TrimSpace(projection.Worktree.Branch); branch != "" {
+				m.runtimeSignalBranchByTask[taskID] = branch
+			} else {
+				delete(m.runtimeSignalBranchByTask, taskID)
+			}
+		} else {
+			delete(m.runtimeSignalBranchByTask, taskID)
 		}
 
 		if projection.Session.HasSession {
