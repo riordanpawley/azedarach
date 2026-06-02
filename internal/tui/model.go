@@ -2440,27 +2440,6 @@ func projectSessionLifecycleState(state protocol.SessionLifecycleState) (domain.
 	}
 }
 
-func projectAgentStatus(status string) (domain.SessionState, bool) {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "", "attached":
-		return "", false
-	case "starting", "working", "running", "syncing", "active":
-		return domain.SessionBusy, true
-	case "waiting":
-		return domain.SessionWaiting, true
-	case "paused":
-		return domain.SessionPaused, true
-	case "ending":
-		return domain.SessionBusy, true
-	case "ended", "stopped":
-		return domain.SessionDone, true
-	case "error":
-		return domain.SessionError, true
-	default:
-		return domain.SessionBusy, true
-	}
-}
-
 // Helper methods
 
 // currentColumn returns the tasks in the current column

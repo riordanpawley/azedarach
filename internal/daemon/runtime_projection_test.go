@@ -55,8 +55,8 @@ func TestBuildRuntimeProjectionPopulatesSessionAndWorktreeSignals(t *testing.T) 
 	if projection.Session.Worktree != "/tmp/repo-az-7" {
 		t.Fatalf("session worktree = %q, want /tmp/repo-az-7", projection.Session.Worktree)
 	}
-	if projection.Agent.Status != "working" || projection.Agent.SessionID != "sess-7" {
-		t.Fatalf("agent = %+v, want working sess-7", projection.Agent)
+	if projection.Agent.Status != "" || projection.Agent.SessionID != "" || projection.Agent.UpdatedAt != nil {
+		t.Fatalf("agent = %+v, want empty without separate agent signal", projection.Agent)
 	}
 	if !projection.Worktree.Exists || !projection.Worktree.Healthy {
 		t.Fatalf("worktree = %+v, want exists+healthy", projection.Worktree)
@@ -88,8 +88,29 @@ func TestBuildRuntimeProjectionUsesObservedSessionStateWhenPresent(t *testing.T)
 	if projection.Session.State != "running" {
 		t.Fatalf("session state = %q, want running observed state", projection.Session.State)
 	}
-	if projection.Agent.Status != "working" {
-		t.Fatalf("agent status = %q, want working observed state", projection.Agent.Status)
+	if projection.Agent.Status != "" {
+		t.Fatalf("agent status = %q, want empty without separate agent signal", projection.Agent.Status)
+	}
+}
+
+func TestBuildRuntimeProjectionKeepsPausedDesiredStateOverObservedRunning(t *testing.T) {
+	updatedAt := time.Date(2026, time.April, 1, 11, 0, 0, 0, time.UTC)
+	projection := buildRuntimeProjection("proj-runtime", &daemonstate.Session{
+		ID:            "sess-7",
+		IssueID:       "az-7",
+		State:         daemonstate.SessionStatePaused,
+		ObservedState: daemonstate.SessionStateRunning,
+		UpdatedAt:     updatedAt,
+	}, nil)
+
+	if !projection.Session.HasSession {
+		t.Fatalf("session = %+v, want active paused session", projection.Session)
+	}
+	if projection.Session.State != protocol.SessionLifecycleStatePaused {
+		t.Fatalf("session state = %q, want paused desired state", projection.Session.State)
+	}
+	if projection.Agent.Status != "" {
+		t.Fatalf("agent status = %q, want empty without separate agent signal", projection.Agent.Status)
 	}
 }
 
@@ -109,8 +130,8 @@ func TestBuildRuntimeProjectionReportsStoppedSessionInactive(t *testing.T) {
 	if projection.Session.State != protocol.SessionLifecycleStateStopped {
 		t.Fatalf("session state = %q, want stopped", projection.Session.State)
 	}
-	if projection.Agent.Status != "ended" {
-		t.Fatalf("agent status = %q, want ended", projection.Agent.Status)
+	if projection.Agent.Status != "" {
+		t.Fatalf("agent status = %q, want empty without separate agent signal", projection.Agent.Status)
 	}
 }
 
@@ -134,6 +155,37 @@ func TestBuildRuntimeProjectionZeroValueBehavior(t *testing.T) {
 	}
 	if projection.Git.HasUncommittedChanges || projection.Git.GitAheadCount != 0 || projection.Git.GitBehindCount != 0 {
 		t.Fatalf("git = %+v, want zero value", projection.Git)
+	}
+}
+
+func TestRuntimeProjectionForEventFallbackIgnoresAgentScopedSessionRows(t *testing.T) {
+	now := time.Date(2026, time.April, 1, 11, 30, 0, 0, time.UTC)
+	store := daemonstate.NewStore()
+	store.ReplaceProjectSessions("proj-runtime", []daemonstate.Session{
+		{
+			ID:        "proj-runtime-az-7",
+			IssueID:   "az-7",
+			State:     daemonstate.SessionStateRunning,
+			UpdatedAt: now,
+		},
+		{
+			ID:        "proj-runtime-az-7.pane-190",
+			IssueID:   "az-7",
+			State:     daemonstate.SessionStatePaused,
+			UpdatedAt: now.Add(time.Minute),
+		},
+	})
+	daemon := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		sessionStore: store,
+	}
+
+	projection := daemon.runtimeProjectionForEvent(context.Background(), "proj-runtime", "az-7", "", nil)
+	if projection.Session.SessionID != "proj-runtime-az-7" {
+		t.Fatalf("session id = %q, want parent session", projection.Session.SessionID)
+	}
+	if projection.Session.State != protocol.SessionLifecycleStateRunning {
+		t.Fatalf("session state = %q, want running parent state", projection.Session.State)
 	}
 }
 

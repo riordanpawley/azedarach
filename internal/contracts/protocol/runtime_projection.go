@@ -72,7 +72,7 @@ type RuntimeSessionProjection struct {
 	Worktree          string                `json:"worktree,omitempty" msgpack:"worktree,omitempty"`
 }
 
-// RuntimeAgentProjection captures the current agent/runtime status surfaced alongside session state.
+// RuntimeAgentProjection captures actual agent activity when a separate agent signal is available.
 type RuntimeAgentProjection struct {
 	Status    string           `json:"status,omitempty" msgpack:"status,omitempty"`
 	SessionID naming.SessionID `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
