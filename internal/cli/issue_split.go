@@ -138,8 +138,8 @@ func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
 			WatchCommand:     fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", parentIssueID),
 			IntegrateCommand: fmt.Sprintf("az orchestrate integrate --issue %s", createResult.IssueID),
 			MergeCommand:     fmt.Sprintf("az branch merge %s", createResult.IssueID),
-			CloseCommand:     fmt.Sprintf("az orchestrate close-session --issue %s", createResult.IssueID),
-			Summary:          "Child work runs in an isolated session/worktree. Keep the parent/orchestrator watching with az orchestrate watch in another pane/session while workers are active; do not use --once for orchestration monitoring. It is not auto-merged; the parent/orchestrator should review, integrate, merge, close the child session, then close the child issue.",
+			CloseCommand:     issueFinalizeRemoveWorktreeCommand(createResult.IssueID),
+			Summary:          "Child work runs in an isolated session/worktree. Keep the parent/orchestrator watching with az orchestrate watch in another pane/session while workers are active; do not use --once for orchestration monitoring. It is not auto-merged; the parent/orchestrator should review, integrate, merge, then finalize the child issue.",
 		},
 	}
 	if opts.JSON {
@@ -161,7 +161,6 @@ func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
 	fmt.Printf("- %s\n", result.Advice.IntegrateCommand)
 	fmt.Printf("- %s\n", result.Advice.MergeCommand)
 	fmt.Printf("- %s\n", result.Advice.CloseCommand)
-	fmt.Printf("- az issue close %s\n", result.ChildIssueID)
 	if len(startResult.Failed) > 0 {
 		return fmt.Errorf("issue split created %s but session launch failed", createResult.IssueID)
 	}

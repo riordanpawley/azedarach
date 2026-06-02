@@ -2978,6 +2978,7 @@ type pendingBulkCleanupConfirmation struct {
 type pendingAutoFinalizeCloseConfirmation struct {
 	taskID         string
 	taskIDs        []string
+	closeTaskIDs   []string
 	previousStatus domain.Status
 	targetStatus   domain.Status
 	bulkMode       string
@@ -4269,9 +4270,14 @@ func (m Model) statusMoveUsesAutoFinalize(status domain.Status) bool {
 }
 
 func (m Model) bulkMoveNeedsAutoFinalizeCloseConfirmation(taskIDs []string, delta int) bool {
+	return len(m.bulkMoveAutoFinalizeCloseTaskIDs(taskIDs, delta)) > 0
+}
+
+func (m Model) bulkMoveAutoFinalizeCloseTaskIDs(taskIDs []string, delta int) []string {
 	if !m.statusMoveUsesAutoFinalize(domain.StatusDone) {
-		return false
+		return nil
 	}
+	closeTaskIDs := make([]string, 0, len(taskIDs))
 	for _, taskID := range taskIDs {
 		status, ok := m.taskStatusByID(taskID)
 		if !ok {
@@ -4279,27 +4285,41 @@ func (m Model) bulkMoveNeedsAutoFinalizeCloseConfirmation(taskIDs []string, delt
 		}
 		next, ok := shiftedTaskStatus(status, delta)
 		if ok && next == domain.StatusDone {
-			return true
+			closeTaskIDs = append(closeTaskIDs, taskID)
 		}
 	}
-	return false
+	return closeTaskIDs
 }
 
 func (m Model) confirmAutoFinalizeCloseCmd(pending pendingAutoFinalizeCloseConfirmation) tea.Cmd {
 	title := "Confirm close cleanup?"
-	if len(pending.taskIDs) > 1 {
+	if pendingAutoFinalizeCloseCount(pending) > 1 {
 		title = "Confirm bulk close cleanup?"
 	}
 	return m.openOverlay(overlay.NewConfirmDialogExplicitYN(title, formatAutoFinalizeCloseConfirmPrompt(pending)))
 }
 
 func formatAutoFinalizeCloseConfirmPrompt(pending pendingAutoFinalizeCloseConfirmation) string {
-	count := len(pending.taskIDs)
+	closeCount := pendingAutoFinalizeCloseCount(pending)
+	selectedCount := len(pending.taskIDs)
+	count := closeCount
 	if count == 0 && strings.TrimSpace(pending.taskID) != "" {
 		count = 1
 	}
 	target := strings.TrimSpace(pending.taskID)
-	if count > 1 {
+	statusLine := "Status: closed"
+	if pending.bulkMode == "move" && selectedCount > 0 {
+		switch {
+		case closeCount == selectedCount:
+			target = fmt.Sprintf("%d selected tasks", selectedCount)
+		case closeCount > 0:
+			target = fmt.Sprintf("%d of %d selected tasks", closeCount, selectedCount)
+			statusLine = "Status: moving right; closing subset will close"
+		default:
+			target = fmt.Sprintf("%d selected tasks", selectedCount)
+			statusLine = "Status: moving right"
+		}
+	} else if count > 1 {
 		target = fmt.Sprintf("%d selected tasks", count)
 	}
 	if target == "" {
@@ -4309,7 +4329,7 @@ func formatAutoFinalizeCloseConfirmPrompt(pending pendingAutoFinalizeCloseConfir
 		"Auto cleanup on close is enabled.",
 		"",
 		fmt.Sprintf("Target: %s", target),
-		"Status: closed",
+		statusLine,
 		"",
 		"This may stop active sessions and remove issue worktrees before closing.",
 		"Close guards still block dirty, ahead, conflicted, or unresolved child work.",
@@ -4317,6 +4337,19 @@ func formatAutoFinalizeCloseConfirmPrompt(pending pendingAutoFinalizeCloseConfir
 		"Proceed?",
 	}
 	return strings.Join(lines, "\n")
+}
+
+func pendingAutoFinalizeCloseCount(pending pendingAutoFinalizeCloseConfirmation) int {
+	if len(pending.closeTaskIDs) > 0 {
+		return len(pending.closeTaskIDs)
+	}
+	if len(pending.taskIDs) > 0 {
+		return len(pending.taskIDs)
+	}
+	if strings.TrimSpace(pending.taskID) != "" {
+		return 1
+	}
+	return 0
 }
 
 func (m *Model) applyOptimisticTaskStatus(taskID string, status domain.Status) {

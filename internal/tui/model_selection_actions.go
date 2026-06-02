@@ -25,11 +25,13 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 		return m, m.bulkMoveStatusCmd(msg.SelectedIDs, -1)
 
 	case "l": // Move right (next status)
-		if m.bulkMoveNeedsAutoFinalizeCloseConfirmation(msg.SelectedIDs, 1) {
+		closeTaskIDs := m.bulkMoveAutoFinalizeCloseTaskIDs(msg.SelectedIDs, 1)
+		if len(closeTaskIDs) > 0 {
 			pending := pendingAutoFinalizeCloseConfirmation{
-				taskIDs:  append([]string(nil), msg.SelectedIDs...),
-				bulkMode: "move",
-				delta:    1,
+				taskIDs:      append([]string(nil), msg.SelectedIDs...),
+				closeTaskIDs: append([]string(nil), closeTaskIDs...),
+				bulkMode:     "move",
+				delta:        1,
 			}
 			m.pendingClose = &pending
 			return m, m.confirmAutoFinalizeCloseCmd(pending)
@@ -53,6 +55,7 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 		if m.statusMoveUsesAutoFinalize(domain.StatusDone) {
 			pending := pendingAutoFinalizeCloseConfirmation{
 				taskIDs:      append([]string(nil), msg.SelectedIDs...),
+				closeTaskIDs: append([]string(nil), msg.SelectedIDs...),
 				bulkMode:     "set",
 				targetStatus: domain.StatusDone,
 			}

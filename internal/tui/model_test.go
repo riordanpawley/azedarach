@@ -5216,6 +5216,22 @@ func TestBulkStatusSummaryDetectsCloseGuardGuidance(t *testing.T) {
 	}
 }
 
+func TestAutoFinalizeBulkMovePromptDescribesClosingSubset(t *testing.T) {
+	prompt := formatAutoFinalizeCloseConfirmPrompt(pendingAutoFinalizeCloseConfirmation{
+		taskIDs:      []string{"az-1", "az-2", "az-3"},
+		closeTaskIDs: []string{"az-3"},
+		bulkMode:     "move",
+		delta:        1,
+	})
+
+	if !strings.Contains(prompt, "Target: 1 of 3 selected tasks") {
+		t.Fatalf("prompt = %q, want closing subset count", prompt)
+	}
+	if !strings.Contains(prompt, "Status: moving right; closing subset will close") {
+		t.Fatalf("prompt = %q, want mixed move-right status", prompt)
+	}
+}
+
 func TestHandleSelectionSessionMutationsShowImmediatePendingFeedback(t *testing.T) {
 	tests := []struct {
 		name       string
