@@ -209,8 +209,8 @@ func TestEvaluateOrchestrateCompleteCheck_Failures(t *testing.T) {
 	if len(result.Advice) == 0 {
 		t.Fatalf("advice = empty, want remediation commands")
 	}
-	if joined := strings.Join(result.Advice, "\n"); !strings.Contains(joined, "az orchestrate close-session --issue az-3") || !strings.Contains(joined, "az issue finalize --id az-2 --remove-worktree") {
-		t.Fatalf("advice = %+v, want close-session and finalize guidance", result.Advice)
+	if joined := strings.Join(result.Advice, "\n"); !strings.Contains(joined, "az orchestrate close-session --issue az-3") || !strings.Contains(joined, "az issue close --id az-2 --yes") {
+		t.Fatalf("advice = %+v, want close-session and cleanup-close guidance", result.Advice)
 	}
 }
 
@@ -523,7 +523,7 @@ func TestOrchestrateIntegrateCommandPrintsGuidance(t *testing.T) {
 	output := captureStdout(t, func() error {
 		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2"})
 	})
-	for _, want := range []string{"Worktree: /repo-az-2", "az branch merge az-2", "az orchestrate close-session --issue az-2"} {
+	for _, want := range []string{"Worktree: /repo-az-2", "az branch merge az-2", "az issue close --id az-2 --yes"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
 		}
@@ -599,8 +599,8 @@ func TestOrchestrateIntegrateCommandBlocksMergeWithoutCompletionEvidence(t *test
 	if strings.Contains(output, "az branch merge az-2") {
 		t.Fatalf("output unexpectedly suggests branch merge:\n%s", output)
 	}
-	if !strings.Contains(output, "az orchestrate close-session --issue az-2") {
-		t.Fatalf("output missing close-session command:\n%s", output)
+	if strings.Contains(output, "az issue close --id az-2 --yes") || strings.Contains(output, "az orchestrate close-session --issue az-2") {
+		t.Fatalf("output unexpectedly suggests close/cleanup while blocked:\n%s", output)
 	}
 }
 
@@ -609,7 +609,7 @@ func TestOrchestrateIntegrateApplySuccess(t *testing.T) {
 	output := captureStdout(t, func() error {
 		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2", Apply: true})
 	})
-	for _, want := range []string{"Merged user/az-2/worker into user/az-1/parent (az-2)", "merge: success", "stop_session: success", "remove_worktree: success", "close_issue: success", "append_evidence: success"} {
+	for _, want := range []string{"Merged user/az-2/worker into user/az-1/parent (az-2)", "merge: success", "close_preflight: success", "stop_session: success", "remove_worktree: success", "close_issue: success", "append_evidence: success"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
 		}
@@ -715,7 +715,7 @@ func orchestrateIntegrateApplyDeps(t *testing.T, failStep string) (*Dependencies
 					}
 					body, err := marshalTaskListBody([]domain.Task{
 						{ID: parent, Status: domain.StatusInProgress, Type: domain.TypeTask},
-						{ID: child, Status: childStatus, Type: domain.TypeTask, ParentID: &parent},
+						{ID: child, Status: childStatus, Type: domain.TypeTask, ParentID: &parent, HasTmuxSession: true, HasWorktree: true},
 					})
 					if err != nil {
 						t.Fatalf("marshal task list response: %v", err)
@@ -791,8 +791,8 @@ func TestOrchestrateCloseSessionCommandStopsSession(t *testing.T) {
 	if gotCommand != commandSessionStop {
 		t.Fatalf("command = %q, want %q", gotCommand, commandSessionStop)
 	}
-	if !strings.Contains(output, "az issue finalize --id az-2 --remove-worktree") {
-		t.Fatalf("output = %q, want issue finalize guidance", output)
+	if !strings.Contains(output, "az issue close --id az-2 --yes") {
+		t.Fatalf("output = %q, want cleanup-close guidance", output)
 	}
 }
 

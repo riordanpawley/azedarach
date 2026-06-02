@@ -815,7 +815,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 
 		client := New(transport).WithProjectID(wantProjectID)
 		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{AutoFinalizeOnClose: true})
-		if err == nil || !strings.Contains(err.Error(), "unresolved child issues remain") || !strings.Contains(err.Error(), "az-4 (worktree)") || !strings.Contains(err.Error(), "az-5 (open)") || !strings.Contains(err.Error(), "close or clean up the listed child issues first") || !strings.Contains(err.Error(), "Moved closed blockers back for cleanup: az-4 -> in_review") || strings.Contains(err.Error(), "az issue finalize --id az-3") {
+		if err == nil || !strings.Contains(err.Error(), "unresolved child issues remain") || !strings.Contains(err.Error(), "az-4 (worktree)") || !strings.Contains(err.Error(), "az-5 (open)") || !strings.Contains(err.Error(), "close or clean up the listed child issues first") || !strings.Contains(err.Error(), "Moved closed blockers back for cleanup: az-4 -> in_review") || strings.Contains(err.Error(), "az issue close --id az-3 --yes") {
 			t.Fatalf("UpdateTaskStatusWithOptions error = %v, want child close guard", err)
 		}
 		wantCommands := []string{CommandTaskList, CommandTaskUpdateStatus}

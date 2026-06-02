@@ -437,7 +437,7 @@ func (c *Client) UpdateTaskStatus(ctx context.Context, taskID string, status dom
 	return c.UpdateTaskStatusWithOptions(ctx, taskID, status, TaskStatusOptions{})
 }
 
-// UpdateTaskStatusWithOptions updates a task's status and can finalize runtime
+// UpdateTaskStatusWithOptions updates a task's status and can clean runtime
 // attachments before committing a closed/done transition.
 func (c *Client) UpdateTaskStatusWithOptions(ctx context.Context, taskID string, status domain.Status, opts TaskStatusOptions) error {
 	parsedTaskID, err := naming.ParseIssueID(taskID)
@@ -446,7 +446,7 @@ func (c *Client) UpdateTaskStatusWithOptions(ctx context.Context, taskID string,
 	}
 	skipClosePreflight := opts.SkipClosePreflight
 	if status == domain.StatusDone && opts.AutoFinalizeOnClose && !opts.SkipClosePreflight {
-		if err := c.finalizeTaskRuntimeAttachments(ctx, parsedTaskID.String()); err != nil {
+		if err := c.cleanTaskRuntimeAttachmentsForClose(ctx, parsedTaskID.String()); err != nil {
 			return err
 		}
 		skipClosePreflight = true
@@ -458,7 +458,7 @@ func (c *Client) UpdateTaskStatusWithOptions(ctx context.Context, taskID string,
 	}, nil)
 }
 
-func (c *Client) finalizeTaskRuntimeAttachments(ctx context.Context, taskID string) error {
+func (c *Client) cleanTaskRuntimeAttachmentsForClose(ctx context.Context, taskID string) error {
 	guard, err := c.ValidateTaskCloseWithOptions(ctx, taskID, CloseGuardOptions{
 		AllowTargetSession:  true,
 		AllowTargetWorktree: true,
@@ -692,7 +692,7 @@ func closeGuardRecoveryHint(taskID string, reasons []string) string {
 		steps = append(steps, "close or clean up the listed child issues first")
 	}
 	if hasRuntime {
-		steps = append(steps, fmt.Sprintf("run `az issue finalize --id %s --remove-worktree` or stop sessions/remove worktrees manually", taskID))
+		steps = append(steps, fmt.Sprintf("run `az issue close --id %s --yes` or stop sessions/remove worktrees manually", taskID))
 	}
 	if len(steps) == 0 {
 		return "fix the listed blockers, refresh, then retry"

@@ -12,7 +12,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
 {{ if .ImplementationSection }}{{ .ImplementationSection }}{{ end }}
 - How to use `az` command map:
   - Issue lifecycle:
-  - `az issue list --limit 20`, `az issue list --status in_progress --limit 20`, `az issue get <issue-id>`, `az issue create "Child task" [--json]` (immediate child work; auto-parents under `AZEDARACH_ISSUE_ID`){{ if .TmuxAvailable }}, `az issue split "Child task" [--json]` (create isolated child session){{ end }}, `az issue create --deferred "Later backlog task" [--json]` (standalone backlog only; skips auto-parenting and is not a worktree/session control), `az issue update <issue-id> --status in_review|in_progress|open [--json]`, `az issue close <issue-id> [--json]`, `az issue finalize <issue-id> [--remove-worktree] [--json]`
+  - `az issue list --limit 20`, `az issue list --status in_progress --limit 20`, `az issue get <issue-id>`, `az issue create "Child task" [--json]` (immediate child work; auto-parents under `AZEDARACH_ISSUE_ID`){{ if .TmuxAvailable }}, `az issue split "Child task" [--json]` (create isolated child session){{ end }}, `az issue create --deferred "Later backlog task" [--json]` (standalone backlog only; skips auto-parenting and is not a worktree/session control), `az issue update <issue-id> --status in_review|in_progress|open [--json]`, `az issue close <issue-id> [--json]`, `az issue close <issue-id> --yes [--json]` (confirm session/worktree cleanup before close)
   - `az issue update`: use `--update-impl` only when changing implementation assignments; status/title/notes updates do not need it.
   - Status semantics: use `open` for not-yet-active work, `in_progress` while actively working, `in_review` when implementation is complete and waiting for human/orchestrator review or integration, and `closed` only after acceptance/integration is complete.
   - Blocked is not an issue status. Represent blocked work with dependency edges (`az issue dep add <blocked-issue> <blocker-issue> --type blocks`) and record blocker evidence in issue notes or mailbox events.
@@ -41,7 +41,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Use `az orchestrate` for durable tracked task graphs that need issue dependencies, mailbox events, recoverable sessions, isolated worktrees, integration guidance, and `complete-check`. Native subagents are better for short-lived ad hoc exploration or review where the result can be summarized back into the current session; do not use them to execute this `az` graph unless the user explicitly overrides the mode.
   - Use `az orchestrate status` for readiness snapshots, `watch` for continuous observe-only mailbox/runnable updates, `start` to launch runnable leaf workers, `integrate` for worker result guidance, `close-session` to clear active worker sessions after integration, and `complete-check` before closing the root issue.
   - Orchestration readiness is graph-derived: open/in-progress/in-review leaves can be blocked by unresolved `blocks` dependencies; closing the blocker issue unblocks downstream work. Do not set `in_review` to mean blocked.
-  - Worker completion flow: workers should leave their issue `in_review` with notes and evidence when work is ready for integration; the orchestrator integrates/validates, then closes the worker issue.
+  - Worker completion flow: workers should leave their issue `in_review` with notes and evidence when work is ready for integration; the orchestrator integrates/validates, then closes the worker issue with `az issue close --id <issue-id> --yes` when cleanup is needed.
   - After every `az orchestrate start`, immediately start `az orchestrate watch --root <issue-id> --since <seq> --jsonl` in another pane/session and keep it running until all active workers are integrated or intentionally stopped; do not add `--once` for orchestration monitoring.
   - Prefer `az orchestrate watch` and `status` for worker observation. Use direct tmux pane capture only when watch/status indicate a worker may be stuck or failed, or when you need a sparse progress spot-check; do not poll tmux panes on a fixed interval.
   - Az orchestration loop:
@@ -49,7 +49,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
     2. Run `az orchestrate status --root <issue-id> --json` to inspect runnable leaves, blocked leaves, active sessions, and the next mailbox sequence.
     3. Start only runnable leaves with `az orchestrate start --root <issue-id> --limit <n>`; use `--issue <issue-id>` for hand-picked starts when ordering matters.
     4. Watch progress continuously with `az orchestrate watch --root <issue-id> --since <seq> --jsonl` left running in another pane/session; handle `worker-blocked`, dependency-ready, failed sessions, and newly runnable leaves before starting the next wave.
-    5. Integrate workers that are `in_review` or otherwise report completion with `az orchestrate integrate --issue <issue-id>`, close worker sessions with `az orchestrate close-session --issue <issue-id>`, and close child issues only after evidence is integrated.
+    5. Integrate workers that are `in_review` or otherwise report completion with `az orchestrate integrate --issue <issue-id>`, then close child issues with `az issue close --id <issue-id> --yes` only after evidence is integrated.
     6. Repeat status -> start -> watch until `az orchestrate complete-check --root <issue-id>` passes, then run final validation and close the root.
   - Small graph: 1-3 leaves, usually run `status`, then `start --limit 3`, then `complete-check` after workers finish.
   - Medium graph: 4-10 leaves, run bounded waves (`--limit 2` to `--limit 4`), keep `az orchestrate watch` running between waves, and start newly unblocked leaves only after dependency-ready/complete signals.
@@ -121,5 +121,5 @@ Active issue ID: `{{ .ActiveIssueID }}`
 {{ end }}- When work is complete:
   - Commit your changes first (`git add -A && git commit -m "<issue-id>: ..."`).
   - Always include the issue ID in the commit message.
-  - Close the issue only when the issue scope and acceptance criteria are fully complete (`az issue close <issue-id>`). If work is partial, keep status `in_progress`, append notes with remaining scope, and create child issues for unfinished required work.
-  - Only run `az issue finalize <issue-id>` after the user has reviewed the work and explicitly asked to finalize/clean up the flow.
+  - Close the issue only when the issue scope and acceptance criteria are fully complete (`az issue close <issue-id>` for already-clean issues, or `az issue close --id <issue-id> --yes` to confirm session/worktree cleanup first). If work is partial, keep status `in_progress`, append notes with remaining scope, and create child issues for unfinished required work.
+  - Do not use `--yes` until the user has reviewed the work and explicitly asked to close/clean up the flow.

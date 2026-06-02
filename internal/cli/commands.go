@@ -170,17 +170,11 @@ type issueCreateResult struct {
 }
 
 type IssueCloseOptions struct {
-	Project string
-	IssueID string
-	JSON    bool
-}
-
-type IssueFinalizeOptions struct {
-	Project        string
-	IssueID        string
-	JSON           bool
-	RemoveWorktree bool
-	ForceWorktree  bool
+	Project       string
+	IssueID       string
+	JSON          bool
+	Confirm       bool
+	ForceWorktree bool
 }
 
 type IssueUpdateOptions struct {
@@ -2182,52 +2176,21 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&issueIDFlag, "i", "", "issue id (short alternative to --id)")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue close result as JSON")
+	fs.BoolVar(&opts.Confirm, "yes", false, "confirm stopping sessions and removing worktrees before closing")
+	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal when --yes is set")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueCloseOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]")
+		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--yes] [--force-worktree] [<issue-id>]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueCloseOptions{}, fmt.Errorf("--impl is not supported for issue close; issue implementations are already assigned")
 	}
-	if fs.NArg() == 1 {
-		opts.IssueID = fs.Arg(0)
-	}
-	if strings.TrimSpace(issueIDFlag) != "" {
-		opts.IssueID = strings.TrimSpace(issueIDFlag)
-	}
-	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]")
-	}
-	opts.Project = normalizeIssueProject(opts.Project)
-	return opts, nil
-}
-
-func ParseIssueFinalizeArgs(args []string) (IssueFinalizeOptions, error) {
-	opts := IssueFinalizeOptions{}
-	issueIDFlag := ""
-	implFlag := ""
-	fs := flag.NewFlagSet("issue finalize", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	addIssueProjectFlag(fs, &opts.Project)
-	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
-	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
-	fs.BoolVar(&opts.JSON, "json", false, "output issue finalize result as JSON")
-	fs.BoolVar(&opts.RemoveWorktree, "remove-worktree", false, "remove the issue worktree after stopping the session")
-	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal when --remove-worktree is set")
-	if err := parseWithInterspersedFlags(fs, args); err != nil {
-		return IssueFinalizeOptions{}, err
-	}
-	if fs.NArg() > 1 {
-		return IssueFinalizeOptions{}, fmt.Errorf("usage: az issue finalize [--project <project-id>] [--id <issue-id>] [--json] [--remove-worktree] [--force-worktree] [<issue-id>]")
-	}
-	if strings.TrimSpace(implFlag) != "" {
-		return IssueFinalizeOptions{}, fmt.Errorf("--impl is not supported for issue finalize; issue implementations are already assigned")
-	}
-	if opts.ForceWorktree && !opts.RemoveWorktree {
-		return IssueFinalizeOptions{}, fmt.Errorf("--force-worktree requires --remove-worktree")
+	if opts.ForceWorktree && !opts.Confirm {
+		return IssueCloseOptions{}, fmt.Errorf("--force-worktree requires --yes")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -2236,7 +2199,7 @@ func ParseIssueFinalizeArgs(args []string) (IssueFinalizeOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueFinalizeOptions{}, fmt.Errorf("usage: az issue finalize [--project <project-id>] [--id <issue-id>] [--json] [--remove-worktree] [--force-worktree] [<issue-id>]")
+		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--yes] [--force-worktree] [<issue-id>]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -2703,7 +2666,7 @@ func ConfigSetCommand(deps *Dependencies, opts ConfigSetOptions) error {
 		if renderedValue == "true" {
 			fmt.Println("Closing an issue will stop its session and remove its worktree before status changes to closed when close guards pass.")
 		} else {
-			fmt.Println("Closing an issue will only update status after close guards pass. Use issue finalize or cleanup commands to remove sessions/worktrees first.")
+			fmt.Println("Closing an issue will only update status after close guards pass. Use `az issue close --id <issue> --yes` to confirm session/worktree cleanup first.")
 		}
 	}
 
@@ -3648,77 +3611,51 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 		return err
 	}
 
-	if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, domain.StatusDone, taskStatusOptionsForConfig(deps.Config)); err != nil {
-		return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
-	}
-	if opts.JSON {
-		return printJSON(map[string]any{
-			"issue_id": opts.IssueID,
-			"status":   "closed",
-			"updated":  true,
-		})
-	}
-	fmt.Printf("Closed issue: %s\n", opts.IssueID)
-	return nil
-}
-
-func IssueFinalizeCommand(deps *Dependencies, opts IssueFinalizeOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
-	defer restoreProject()
-
-	ctx := context.Background()
-	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
-		return err
-	}
-	if _, err := validateSessionIssueID(ctx, deps, opts.IssueID); err != nil {
-		return err
-	}
-
-	if opts.RemoveWorktree {
-		if _, err := deps.DaemonClient.ValidateTaskCloseWithOptions(ctx, opts.IssueID, daemonclient.CloseGuardOptions{
+	sessionStopped := false
+	worktreeRemoved := false
+	if opts.Confirm {
+		guard, err := deps.DaemonClient.ValidateTaskCloseWithOptions(ctx, opts.IssueID, daemonclient.CloseGuardOptions{
 			AllowTargetSession:  true,
 			AllowTargetWorktree: true,
 			ForceWorktree:       opts.ForceWorktree,
-		}); err != nil {
+		})
+		if err != nil {
 			return fmt.Errorf("close preflight failed for issue %s: %w", opts.IssueID, err)
 		}
-		if _, err := deps.DaemonClient.StopSession(ctx, opts.IssueID); err != nil {
-			return fmt.Errorf("failed to stop session for issue %s: %w", opts.IssueID, err)
+		if closeGuardTaskHasSession(guard.Task) {
+			if _, err := deps.DaemonClient.StopSession(ctx, opts.IssueID); err != nil {
+				return fmt.Errorf("failed to stop session for issue %s: %w", opts.IssueID, err)
+			}
+			sessionStopped = true
 		}
-		if err := deps.DaemonClient.RemoveWorktreeWithOptions(ctx, opts.IssueID, opts.ForceWorktree); err != nil {
-			return fmt.Errorf("failed to remove worktree for issue %s: %w", opts.IssueID, err)
+		if closeGuardTaskHasWorktree(guard.Task) {
+			if err := deps.DaemonClient.RemoveWorktreeWithOptions(ctx, opts.IssueID, opts.ForceWorktree); err != nil {
+				return fmt.Errorf("failed to remove worktree for issue %s: %w", opts.IssueID, err)
+			}
+			worktreeRemoved = true
 		}
 		if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, domain.StatusDone, daemonclient.TaskStatusOptions{SkipClosePreflight: true}); err != nil {
 			return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
 		}
-	} else {
-		if _, err := deps.DaemonClient.ValidateTaskCloseWithOptions(ctx, opts.IssueID, daemonclient.CloseGuardOptions{
-			AllowTargetSession: true,
-		}); err != nil {
-			return fmt.Errorf("close preflight failed for issue %s: %w", opts.IssueID, err)
-		}
-		if _, err := deps.DaemonClient.StopSession(ctx, opts.IssueID); err != nil {
-			return fmt.Errorf("failed to stop session for issue %s: %w", opts.IssueID, err)
-		}
-		if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, domain.StatusDone, daemonclient.TaskStatusOptions{SkipClosePreflight: true}); err != nil {
-			return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
-		}
+	} else if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, domain.StatusDone, taskStatusOptionsForConfig(deps.Config)); err != nil {
+		return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
 	}
 
 	if opts.JSON {
 		return printJSON(map[string]any{
 			"issue_id":         opts.IssueID,
-			"session_stopped":  true,
 			"status":           "closed",
-			"worktree_removed": opts.RemoveWorktree,
-			"worktree_forced":  opts.RemoveWorktree && opts.ForceWorktree,
-			"finalized":        true,
+			"updated":          true,
+			"session_stopped":  sessionStopped,
+			"worktree_removed": worktreeRemoved,
+			"worktree_forced":  worktreeRemoved && opts.ForceWorktree,
 		})
 	}
-	fmt.Printf("Finalized issue: %s\n", opts.IssueID)
-	fmt.Println("- Session stopped")
-	fmt.Println("- Issue closed")
-	if opts.RemoveWorktree {
+	fmt.Printf("Closed issue: %s\n", opts.IssueID)
+	if sessionStopped {
+		fmt.Println("- Session stopped")
+	}
+	if worktreeRemoved {
 		fmt.Println("- Worktree removed")
 		if opts.ForceWorktree {
 			fmt.Println("- Worktree removal forced")
@@ -3924,6 +3861,14 @@ func taskStatusOptionsForConfig(cfg *config.Config) daemonclient.TaskStatusOptio
 	return daemonclient.TaskStatusOptions{
 		AutoFinalizeOnClose: cfg.Issues.AutoFinalizeOnClose,
 	}
+}
+
+func closeGuardTaskHasSession(task domain.Task) bool {
+	return task.HasTmuxSession || task.Session != nil
+}
+
+func closeGuardTaskHasWorktree(task domain.Task) bool {
+	return task.HasWorktree || (task.Session != nil && strings.TrimSpace(task.Session.Worktree) != "")
 }
 
 func IssueDependencyAddCommand(deps *Dependencies, opts IssueDependencyAddOptions) error {

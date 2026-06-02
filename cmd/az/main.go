@@ -411,7 +411,7 @@ func main() {
 
 	case "issue":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|get-many|check|doctor|create|split|update|close|finalize|delete|image|dep|bulk-create|bulk-update|fanout> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|get-many|check|doctor|create|split|update|close|delete|image|dep|bulk-create|bulk-update|fanout> [arguments]\n")
 			os.Exit(1)
 		}
 		issueCommand := commandArgs[0]
@@ -542,26 +542,12 @@ func main() {
 		case "close":
 			opts, err := cli.ParseIssueCloseArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue close [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--yes] [--force-worktree] [<issue-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
 			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
 				return cli.IssueCloseCommand(deps, opts)
-			}); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-
-		case "finalize":
-			opts, err := cli.ParseIssueFinalizeArgs(issueArgs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue finalize [--project <project-id>] [--id <issue-id>] [--json] [--remove-worktree] [<issue-id>]\n")
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
-				return cli.IssueFinalizeCommand(deps, opts)
 			}); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -766,7 +752,7 @@ func main() {
 
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown issue command: %s\n", issueCommand)
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|get-many|check|doctor|create|split|update|close|finalize|delete|image|dep|bulk-create|bulk-update|fanout> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|get-many|check|doctor|create|split|update|close|delete|image|dep|bulk-create|bulk-update|fanout> [arguments]\n")
 			os.Exit(1)
 		}
 

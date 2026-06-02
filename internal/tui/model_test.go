@@ -5184,7 +5184,7 @@ func TestBulkStatusSummaryDetectsCloseGuardGuidance(t *testing.T) {
 			name: "close guard failure",
 			issues: []bulkTaskIssue{{
 				taskID: "az-1",
-				reason: "cannot close issue: issue still has a worktree. Next: run az issue finalize --id az-1, " +
+				reason: "cannot close issue: issue still has a worktree. Next: run az issue close --id az-1 --yes, " +
 					"or clean up the worktree/session before closing.",
 			}},
 			want: true,

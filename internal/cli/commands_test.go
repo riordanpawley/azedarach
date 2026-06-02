@@ -3764,17 +3764,37 @@ func TestParseIssueCloseArgs(t *testing.T) {
 		{
 			name:        "missing id",
 			args:        []string{},
-			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]",
+			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--yes] [--force-worktree] [<issue-id>]",
 		},
 		{
 			name:        "extra args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]",
+			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--yes] [--force-worktree] [<issue-id>]",
 		},
 		{
 			name: "named id",
 			args: []string{"--id", "az-2"},
 			want: IssueCloseOptions{IssueID: "az-2"},
+		},
+		{
+			name: "short id",
+			args: []string{"-i", "az-2"},
+			want: IssueCloseOptions{IssueID: "az-2"},
+		},
+		{
+			name: "confirmed cleanup",
+			args: []string{"--id", "az-2", "--yes", "--json"},
+			want: IssueCloseOptions{IssueID: "az-2", Confirm: true, JSON: true},
+		},
+		{
+			name: "force cleanup",
+			args: []string{"--id", "az-2", "--yes", "--force-worktree", "--json"},
+			want: IssueCloseOptions{IssueID: "az-2", Confirm: true, ForceWorktree: true, JSON: true},
+		},
+		{
+			name:        "force requires yes",
+			args:        []string{"--id", "az-2", "--force-worktree"},
+			errContains: "--force-worktree requires --yes",
 		},
 		{
 			name: "interspersed named id overrides positional",
@@ -3835,74 +3855,6 @@ func TestParseIssueDeleteArgs(t *testing.T) {
 	_, err = ParseIssueDeleteArgs([]string{"az-1", "--confirm", "--force-worktree"})
 	if err == nil || !strings.Contains(err.Error(), "--force-worktree requires --remove-worktree or --cleanup") {
 		t.Fatalf("expected force-worktree dependency error, got %v", err)
-	}
-}
-
-func TestParseIssueFinalizeArgs(t *testing.T) {
-	tests := []struct {
-		name        string
-		args        []string
-		want        IssueFinalizeOptions
-		errContains string
-	}{
-		{
-			name: "valid",
-			args: []string{"az-1"},
-			want: IssueFinalizeOptions{IssueID: "az-1"},
-		},
-		{
-			name: "named id with worktree removal",
-			args: []string{"--id", "az-2", "--remove-worktree", "--json"},
-			want: IssueFinalizeOptions{IssueID: "az-2", RemoveWorktree: true, JSON: true},
-		},
-		{
-			name: "force worktree removal",
-			args: []string{"--id", "az-2", "--remove-worktree", "--force-worktree", "--json"},
-			want: IssueFinalizeOptions{IssueID: "az-2", RemoveWorktree: true, ForceWorktree: true, JSON: true},
-		},
-		{
-			name:        "force requires remove worktree",
-			args:        []string{"--id", "az-2", "--force-worktree"},
-			errContains: "--force-worktree requires --remove-worktree",
-		},
-		{
-			name:        "forbid impl",
-			args:        []string{"--impl", "go-bubbletea", "az-1"},
-			errContains: "--impl is not supported for issue finalize",
-		},
-		{
-			name:        "missing id",
-			args:        []string{},
-			errContains: "usage: az issue finalize [--project <project-id>] [--id <issue-id>] [--json] [--remove-worktree] [--force-worktree] [<issue-id>]",
-		},
-		{
-			name:        "extra args",
-			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue finalize [--project <project-id>] [--id <issue-id>] [--json] [--remove-worktree] [--force-worktree] [<issue-id>]",
-		},
-		{
-			name: "interspersed named id overrides positional",
-			args: []string{"az-1", "--id", "az-2"},
-			want: IssueFinalizeOptions{IssueID: "az-2"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := ParseIssueFinalizeArgs(tt.args)
-			if tt.errContains != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
-					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("ParseIssueFinalizeArgs() error = %v", err)
-			}
-			if got != tt.want {
-				t.Fatalf("ParseIssueFinalizeArgs() = %+v, want %+v", got, tt.want)
-			}
-		})
 	}
 }
 
@@ -5857,11 +5809,18 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 }
 
-func TestIssueFinalizeCommandStopsClosesAndOptionallyRemovesWorktree(t *testing.T) {
+func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testing.T) {
 	var commands []string
 	var removeWorktreeForce bool
 	taskListBody, err := marshalTaskListBody([]domain.Task{
-		{ID: "az-9", Title: "Finish flow", Status: domain.StatusInProgress},
+		{
+			ID:             "az-9",
+			Title:          "Finish flow",
+			Status:         domain.StatusInProgress,
+			HasTmuxSession: true,
+			HasWorktree:    true,
+			Session:        &domain.Session{IssueID: naming.IssueID("az-9"), Worktree: "/tmp/az-9"},
+		},
 	})
 	if err != nil {
 		t.Fatalf("marshal task list: %v", err)
@@ -5920,15 +5879,14 @@ func TestIssueFinalizeCommandStopsClosesAndOptionallyRemovesWorktree(t *testing.
 	}
 
 	output := captureStdout(t, func() error {
-		return IssueFinalizeCommand(deps, IssueFinalizeOptions{
-			IssueID:        "az-9",
-			RemoveWorktree: true,
-			ForceWorktree:  true,
+		return IssueCloseCommand(deps, IssueCloseOptions{
+			IssueID:       "az-9",
+			Confirm:       true,
+			ForceWorktree: true,
 		})
 	})
 
 	wantCommands := []string{
-		daemonclient.CommandTaskList,
 		daemonclient.CommandTaskList,
 		commandSessionStop,
 		daemonclient.CommandWorktreeRemove,
@@ -5940,7 +5898,7 @@ func TestIssueFinalizeCommandStopsClosesAndOptionallyRemovesWorktree(t *testing.
 	if !removeWorktreeForce {
 		t.Fatal("worktree remove force = false, want true")
 	}
-	if !strings.Contains(output, "Finalized issue: az-9") || !strings.Contains(output, "- Worktree removed") {
+	if !strings.Contains(output, "Closed issue: az-9") || !strings.Contains(output, "- Worktree removed") {
 		t.Fatalf("output = %q", output)
 	}
 }
@@ -7476,11 +7434,11 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if strings.Contains(output, "issue status --impl <implementation>") {
 		t.Fatalf("usage should not include issue status command: %q", output)
 	}
-	if !strings.Contains(output, "issue close [--project <project-id>] [--id <id>] [--json] [<id>]") {
+	if !strings.Contains(output, "issue close [--project <project-id>] [--id <id>|-i <id>] [--json] [--yes] [--force-worktree] [<id>]") {
 		t.Fatalf("usage missing issue close command: %q", output)
 	}
-	if !strings.Contains(output, "issue finalize [--project <project-id>] [--id <id>] [--json] [--remove-worktree] [--force-worktree] [<id>]") {
-		t.Fatalf("usage missing issue finalize command: %q", output)
+	if strings.Contains(output, "finalize") {
+		t.Fatalf("usage should not include removed close alias: %q", output)
 	}
 	if !strings.Contains(output, "issue delete [--project <project-id>] [--id <id>] [--json] [<id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]") {
 		t.Fatalf("usage missing issue delete command: %q", output)
