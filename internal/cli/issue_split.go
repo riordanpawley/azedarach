@@ -138,7 +138,7 @@ func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
 			WatchCommand:     fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", parentIssueID),
 			IntegrateCommand: fmt.Sprintf("az orchestrate integrate --issue %s", createResult.IssueID),
 			MergeCommand:     fmt.Sprintf("az branch merge %s", createResult.IssueID),
-			CloseCommand:     issueCloseYesCommand(createResult.IssueID),
+			CloseCommand:     issueCloseCleanupCommand(createResult.IssueID),
 			Summary:          "Child work runs in an isolated session/worktree. Keep the parent/orchestrator watching with az orchestrate watch in another pane/session while workers are active; do not use --once for orchestration monitoring. It is not auto-merged; the parent/orchestrator should review, integrate, merge, then close the child issue with cleanup.",
 		},
 	}

@@ -71,7 +71,7 @@ type OrchestrateCloseSessionOptions struct {
 	JSON    bool
 }
 
-func issueCloseYesCommand(issueID string) string {
+func issueCloseCleanupCommand(issueID string) string {
 	return fmt.Sprintf("az issue close --id %s --cleanup", issueID)
 }
 
@@ -939,7 +939,7 @@ func orchestrateIntegrationRecovery(issueID, reason string) []string {
 	switch reason {
 	case "missing_completion_evidence":
 		return []string{
-			fmt.Sprintf("review worker output and send a worker-integration-ready mailbox event for %s, or close with cleanup if already integrated: %s", issueID, issueCloseYesCommand(issueID)),
+			fmt.Sprintf("review worker output and send a worker-integration-ready mailbox event for %s, or close with cleanup if already integrated: %s", issueID, issueCloseCleanupCommand(issueID)),
 			fmt.Sprintf("retry: az orchestrate integrate --issue %s --apply", issueID),
 		}
 	case "merge_failed":
@@ -950,7 +950,7 @@ func orchestrateIntegrationRecovery(issueID, reason string) []string {
 	default:
 		return []string{
 			fmt.Sprintf("run cleanup steps manually: az orchestrate close-session --issue %s", issueID),
-			fmt.Sprintf("close the worker issue with cleanup if integrated: %s", issueCloseYesCommand(issueID)),
+			fmt.Sprintf("close the worker issue with cleanup if integrated: %s", issueCloseCleanupCommand(issueID)),
 			fmt.Sprintf("append evidence notes to %s with the merge and validation summary", issueID),
 		}
 	}
@@ -976,7 +976,7 @@ func OrchestrateCloseSessionCommand(deps *Dependencies, opts OrchestrateCloseSes
 	if strings.TrimSpace(output) != "" {
 		fmt.Print(output)
 	}
-	fmt.Printf("Session closed for %s. If work is integrated, close the issue with `%s`.\n", opts.IssueID, issueCloseYesCommand(opts.IssueID))
+	fmt.Printf("Session closed for %s. If work is integrated, close the issue with `%s`.\n", opts.IssueID, issueCloseCleanupCommand(opts.IssueID))
 	return nil
 }
 
@@ -1339,7 +1339,7 @@ func orchestrateCompletionAdvice(runnable, openDescendants, activeSessions []str
 		advice = append(advice, fmt.Sprintf("stop active worker session: az orchestrate close-session --issue %s", id))
 	}
 	for _, id := range openDescendants {
-		advice = append(advice, fmt.Sprintf("after integration/evidence, close required child issue with cleanup: %s", issueCloseYesCommand(id)))
+		advice = append(advice, fmt.Sprintf("after integration/evidence, close required child issue with cleanup: %s", issueCloseCleanupCommand(id)))
 	}
 	for _, id := range runnable {
 		advice = append(advice, fmt.Sprintf("start or resolve runnable leaf: az orchestrate start --root <root> --issue %s --json", id))
@@ -1372,7 +1372,7 @@ func orchestrateIntegrationCommands(issueID string, wt daemonclient.Worktree, fo
 	}
 	if mergeReady {
 		commands = append(commands, fmt.Sprintf("az branch merge %s", issueID))
-		commands = append(commands, issueCloseYesCommand(issueID))
+		commands = append(commands, issueCloseCleanupCommand(issueID))
 	}
 	return commands
 }
