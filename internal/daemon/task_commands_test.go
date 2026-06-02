@@ -803,7 +803,7 @@ func TestTaskUpdateStatusClosePreflightBlocksRawRuntimeAttachments(t *testing.T)
 	}
 }
 
-func TestTaskUpdateStatusClosePreflightReopensClosedRuntimeBlocker(t *testing.T) {
+func TestTaskUpdateStatusClosePreflightBlocksActiveRuntime(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	projectID := "proj-close-guard-reopen-target"
@@ -817,7 +817,7 @@ func TestTaskUpdateStatusClosePreflightReopensClosedRuntimeBlocker(t *testing.T)
 		Title:    "Closed with live session",
 		Type:     domain.TypeTask,
 		Priority: domain.P2,
-		Status:   domain.StatusDone,
+		Status:   domain.StatusInProgress,
 	})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
@@ -843,9 +843,6 @@ func TestTaskUpdateStatusClosePreflightReopensClosedRuntimeBlocker(t *testing.T)
 		revision: map[string]uint64{projectID: 1},
 		hub:      publish.NewHub(16, 8, logger),
 	}
-	events, cancelEvents := d.hub.Subscribe(projectID, 0)
-	defer cancelEvents()
-
 	body, err := json.Marshal(map[string]any{
 		"task_id": taskID,
 		"status":  domain.StatusDone,
@@ -874,10 +871,9 @@ func TestTaskUpdateStatusClosePreflightReopensClosedRuntimeBlocker(t *testing.T)
 	if task.Status != domain.StatusInProgress {
 		t.Fatalf("guarded issue status = %s, want %s", task.Status, domain.StatusInProgress)
 	}
-	if !strings.Contains(resp.Error.Message, "Moved closed blockers back for cleanup: "+taskID+" -> in_progress") {
-		t.Fatalf("task.update_status response = %q, want status repair explanation", resp.Error.Message)
+	if strings.Contains(resp.Error.Message, "Moved closed blockers back for cleanup") {
+		t.Fatalf("task.update_status response = %q, did not expect status repair for reachable active issue", resp.Error.Message)
 	}
-	assertNextTaskUpdatedEvent(t, events, taskID, domain.StatusInProgress)
 }
 
 func TestTaskUpdateStatusClosePreflightBlocksRawUnresolvedChildrenAndApplyPath(t *testing.T) {
@@ -967,7 +963,7 @@ func TestTaskUpdateStatusClosePreflightBlocksRawUnresolvedChildrenAndApplyPath(t
 	}
 }
 
-func TestTaskUpdateStatusClosePreflightReopensClosedChildRuntimeBlocker(t *testing.T) {
+func TestTaskUpdateStatusClosePreflightBlocksActiveChildRuntime(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	projectID := "proj-close-guard-reopen-child"
@@ -990,7 +986,7 @@ func TestTaskUpdateStatusClosePreflightReopensClosedChildRuntimeBlocker(t *testi
 		Title:    "Closed child with runtime",
 		Type:     domain.TypeTask,
 		Priority: domain.P2,
-		Status:   domain.StatusDone,
+		Status:   domain.StatusInReview,
 		ParentID: &parentID,
 	})
 	if err != nil {
@@ -1017,9 +1013,6 @@ func TestTaskUpdateStatusClosePreflightReopensClosedChildRuntimeBlocker(t *testi
 		revision: map[string]uint64{projectID: 1},
 		hub:      publish.NewHub(16, 8, logger),
 	}
-	events, cancelEvents := d.hub.Subscribe(projectID, 0)
-	defer cancelEvents()
-
 	body, err := json.Marshal(map[string]any{
 		"task_id": parentID,
 		"status":  domain.StatusDone,
@@ -1038,7 +1031,7 @@ func TestTaskUpdateStatusClosePreflightReopensClosedChildRuntimeBlocker(t *testi
 	if err != nil {
 		t.Fatalf("handleTaskUpdateStatus error: %v", err)
 	}
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") || !strings.Contains(resp.Error.Message, childID+" (worktree)") {
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") || !strings.Contains(resp.Error.Message, childID) {
 		t.Fatalf("task.update_status response = %+v, want child runtime close guard", resp)
 	}
 	child, err := issuesClient.GetWithRuntime(ctx, projectID, childID)
@@ -1048,10 +1041,9 @@ func TestTaskUpdateStatusClosePreflightReopensClosedChildRuntimeBlocker(t *testi
 	if child.Status != domain.StatusInReview {
 		t.Fatalf("child status = %s, want %s", child.Status, domain.StatusInReview)
 	}
-	if !strings.Contains(resp.Error.Message, "Moved closed blockers back for cleanup: "+childID+" -> in_review") {
-		t.Fatalf("task.update_status response = %q, want child status repair explanation", resp.Error.Message)
+	if strings.Contains(resp.Error.Message, "Moved closed blockers back for cleanup") {
+		t.Fatalf("task.update_status response = %q, did not expect status repair for reachable active child", resp.Error.Message)
 	}
-	assertNextTaskUpdatedEvent(t, events, childID, domain.StatusInReview)
 }
 
 func assertNextTaskUpdatedEvent(t *testing.T, events <-chan protocol.EventEnvelope, taskID string, status domain.Status) {

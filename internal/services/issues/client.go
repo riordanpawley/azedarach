@@ -1040,15 +1040,15 @@ func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, e
 
 	if params.ParentID != nil && strings.TrimSpace(*params.ParentID) != "" {
 		parentID := strings.TrimSpace(*params.ParentID)
+		if err := c.reopenClosedParentForActiveChild(ctx, tx, issueID, parentID); err != nil {
+			return "", c.wrapError("create", issueID, err)
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at)
 			VALUES (?, ?, ?, NULL)
 			ON CONFLICT(issue_id, depends_on_id, dependency_type)
 			DO UPDATE SET tombstoned_at = NULL
 		`, issueID, parentID, string(domain.DependencyParentChild)); err != nil {
-			return "", c.wrapError("create", issueID, err)
-		}
-		if err := c.reopenClosedParentForActiveChild(ctx, tx, issueID, parentID); err != nil {
 			return "", c.wrapError("create", issueID, err)
 		}
 	}
@@ -1333,6 +1333,11 @@ func (c *Client) addDependency(ctx context.Context, issueID, dependsOnID, depend
 		}
 	}
 
+	if canonicalType == string(domain.DependencyParentChild) {
+		if err := c.reopenClosedParentForActiveChild(ctx, tx, issueID, dependsOnID); err != nil {
+			return c.wrapError("add-dependency", issueID, err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at)
 		VALUES (?, ?, ?, NULL)
@@ -1340,11 +1345,6 @@ func (c *Client) addDependency(ctx context.Context, issueID, dependsOnID, depend
 		DO UPDATE SET tombstoned_at = NULL
 	`, issueID, dependsOnID, canonicalType); err != nil {
 		return c.wrapError("add-dependency", issueID, err)
-	}
-	if canonicalType == string(domain.DependencyParentChild) {
-		if err := c.reopenClosedParentForActiveChild(ctx, tx, issueID, dependsOnID); err != nil {
-			return c.wrapError("add-dependency", issueID, err)
-		}
 	}
 
 	if err := tx.Commit(); err != nil {
