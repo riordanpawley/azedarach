@@ -135,6 +135,8 @@ type Daemon struct {
 	worktreeStateLastRefresh      map[string]time.Time
 	taskListSnapshotCacheMu       sync.Mutex
 	taskListSnapshotCache         map[string]taskListSnapshotCacheEntry
+	taskListSnapshotLoadMu        sync.Mutex
+	taskListSnapshotLoads         map[string]*taskListSnapshotLoad
 
 	revMu    sync.Mutex
 	revision map[string]uint64
