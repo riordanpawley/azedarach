@@ -18,7 +18,8 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Blocked is not an issue status. Represent blocked work with dependency edges (`az issue dep add <blocked-issue> <blocker-issue> --type blocks`) and record blocker evidence in issue notes or mailbox events.
   - `az issue bulk-create --input issues.json --json`, `az issue bulk-update --input updates.json --json`, `az issue update <issue-id> --design "..."`, `az issue update <issue-id> --notes "..."`, `az issue update <issue-id> --append-notes "..."`
   - Issue dependency graph:
-  - `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from|created-in] [--json]`, `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from|created-in] [--json]`
+  - `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from|created-in] [--json]`, `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--json]`
+  - Parent-child edges are hierarchy/board-nesting edges, not readiness controls. Do not remove a parent-child edge to pause, derank, or supersede orchestration child work; keep the child under its parent, set it `open` when appropriate, and add a `blocks` edge to the blocker/design issue instead. Removing a parent-child edge from active child work requires explicit parent-orphan confirmation.
   - Orchestration:
   {{ if .OrchestrationViaNative }}- `orchestration.via` is `native`: use your harness-native subagent delegation commands/keywords to split and run child issues (for example "delegate", "spawn", or "subagent"). Keep using `az issue` for tracking state and dependencies.
   {{ if .TmuxAvailable }}
@@ -92,6 +93,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
 {{ end }}- Follow-up and dependency rules:
   - Atomic-merge test before reaching for `--deferred`: if the parent would land incorrect or incomplete in the base branch without this new piece, the new piece is part of the parent's merge unit. Track it as a normal child issue (child issues land in the same base-branch commit as the parent) or include it in the parent's commit — never `--deferred`. Reserve `--deferred` for work that can land separately later.
   - Create immediate child/blocking scope with `az issue create "Title"`; when `AZEDARACH_ISSUE_ID` is set this auto-creates a child issue under that parent.{{ if .TmuxAvailable }} Use `az issue split "Title"` when the child should also launch in its own az/tmux session/worktree.{{ end }}
+  - To pause or supersede child work inside an orchestration graph, keep the parent-child edge, move the child to `open` if it should stop being active, and add `az issue dep add <child> <blocker> --type blocks`; do not detach it from the parent.
   - Use `az issue create --deferred "Title"` only for standalone later/backlog work that should be tracked now but not executed before the active issue closes. It is not a child-task shortcut and not a way to control worktree/session creation.
   - Do not use `--deferred` for child tasks, blockers, or work required before closing the active issue; create normal child issues instead.
   - When fanning out to subagents, split work until each child issue is independently actionable and fits within a single subagent context window.

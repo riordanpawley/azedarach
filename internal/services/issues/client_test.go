@@ -712,6 +712,75 @@ func TestClient_RemoveDependencyConfirmationIsNotRequiredForRelatedEdges(t *test
 	assert.Empty(t, relatedTask.Dependencies)
 }
 
+func TestClient_RemoveParentChildActiveChildRequiresParentOrphanConfirmation(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Parent",
+		Type:     domain.TypeEpic,
+		Priority: domain.P1,
+	})
+	require.NoError(t, err)
+
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Active child",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, client.AddDependency(ctx, childID, parentID, "parent-child"))
+
+	err = client.RemoveDependency(WithDependencyRemovalConfirmation(ctx), childID, parentID, "parent-child")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrParentChildOrphanConfirmationRequired)
+
+	confirmedCtx := WithParentChildOrphanConfirmation(WithDependencyRemovalConfirmation(ctx))
+	require.NoError(t, client.RemoveDependency(confirmedCtx, childID, parentID, "parent-child"))
+}
+
+func TestClient_RemoveParentChildClosedChildWithRuntimeRequiresParentOrphanConfirmation(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-parent-orphan"
+
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Parent",
+		Type:     domain.TypeEpic,
+		Priority: domain.P1,
+	})
+	require.NoError(t, err)
+
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Closed child with runtime",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusDone,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, client.AddDependency(ctx, childID, parentID, "parent-child"))
+
+	db, err := sql.Open("sqlite", "file:"+client.dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, projectID, childID, "/tmp/"+childID, "riordan/"+childID, time.Now().UTC().Format(time.RFC3339Nano))
+	require.NoError(t, err)
+
+	_, err = client.RemoveDependencyWithRuntime(WithDependencyRemovalConfirmation(ctx), projectID, childID, parentID, "parent-child")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrParentChildOrphanConfirmationRequired)
+
+	confirmedCtx := WithParentChildOrphanConfirmation(WithDependencyRemovalConfirmation(ctx))
+	_, err = client.RemoveDependencyWithRuntime(confirmedCtx, projectID, childID, parentID, "parent-child")
+	require.NoError(t, err)
+}
+
 func TestClient_AddDependencyCanonicalizesLegacyAliasesOnNonEpicTasks(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)

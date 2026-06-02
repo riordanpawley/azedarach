@@ -1080,10 +1080,11 @@ func (d *Daemon) handleTaskDependencyRemove(ctx context.Context, req protocol.Re
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
 	var cmd struct {
-		TaskID         string `json:"task_id"`
-		DependsOnID    string `json:"depends_on_id"`
-		DependencyType string `json:"dependency_type"`
-		Confirm        bool   `json:"confirm"`
+		TaskID              string `json:"task_id"`
+		DependsOnID         string `json:"depends_on_id"`
+		DependencyType      string `json:"dependency_type"`
+		Confirm             bool   `json:"confirm"`
+		ConfirmParentOrphan bool   `json:"confirm_parent_orphan"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -1095,11 +1096,15 @@ func (d *Daemon) handleTaskDependencyRemove(ctx context.Context, req protocol.Re
 			"depends_on_id", cmd.DependsOnID,
 			"dependency_type", cmd.DependencyType,
 			"confirm", cmd.Confirm,
+			"confirm_parent_orphan", cmd.ConfirmParentOrphan,
 		)
 	}
 	callCtx := ctx
 	if cmd.Confirm {
 		callCtx = issues.WithDependencyRemovalConfirmation(callCtx)
+	}
+	if cmd.ConfirmParentOrphan {
+		callCtx = issues.WithParentChildOrphanConfirmation(callCtx)
 	}
 	task, err := issueClient.RemoveDependencyWithRuntime(callCtx, projectID, cmd.TaskID, cmd.DependsOnID, cmd.DependencyType)
 	if err != nil {

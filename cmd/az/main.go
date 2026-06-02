@@ -645,7 +645,7 @@ func main() {
 			case "remove":
 				opts, err := cli.ParseIssueDependencyRemoveArgs(depArgs)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]\n")
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
