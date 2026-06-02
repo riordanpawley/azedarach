@@ -165,10 +165,14 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 
 	projectID := "proj-read-only"
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
-		Title:    "Read-only task list",
-		Type:     domain.TypeTask,
-		Priority: domain.P1,
-		Status:   domain.StatusInProgress,
+		Title:       "Read-only task list",
+		Description: "Long description should stay out of task.list summaries",
+		Design:      "Long design should stay out of task.list summaries",
+		Notes:       "Long notes should stay out of task.list summaries",
+		Acceptance:  "Long acceptance should stay out of task.list summaries",
+		Type:        domain.TypeTask,
+		Priority:    domain.P1,
+		Status:      domain.StatusInProgress,
 	})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
@@ -294,6 +298,9 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	if task.Title != "Read-only task list" {
 		t.Fatalf("task.Title = %q, want %q", task.Title, "Read-only task list")
 	}
+	if task.Description != "" || task.Design != "" || task.Notes != "" || task.Acceptance != "" {
+		t.Fatalf("task.list returned full detail fields: description=%q design=%q notes=%q acceptance=%q", task.Description, task.Design, task.Notes, task.Acceptance)
+	}
 	if task.Session == nil {
 		t.Fatal("expected task session projection")
 	}
@@ -351,6 +358,38 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	}
 	if !bytes.Equal(worktrees[0].GitStatusRaw, rawStatus) {
 		t.Fatalf("projected worktree git status was mutated")
+	}
+
+	body, err := json.Marshal(map[string]string{"task_id": taskID})
+	if err != nil {
+		t.Fatalf("marshal task get request: %v", err)
+	}
+	getResp, err := d.handleTaskGet(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-get-after-summary-list",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.get",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskGet error: %v", err)
+	}
+	if !getResp.OK {
+		t.Fatalf("task.get response = %+v", getResp.Error)
+	}
+	getPayload, err := protocol.DecodeTaskListSnapshotPayload(getResp.Body)
+	if err != nil {
+		t.Fatalf("decode task.get body: %v", err)
+	}
+	if len(getPayload.Tasks) == 0 {
+		t.Fatal("task.get returned no tasks")
+	}
+	if got, want := getPayload.Tasks[0].Description, "Long description should stay out of task.list summaries"; got != want {
+		t.Fatalf("task.get description = %q, want %q", got, want)
+	}
+	if got, want := getPayload.Tasks[0].Design, "Long design should stay out of task.list summaries"; got != want {
+		t.Fatalf("task.get design = %q, want %q", got, want)
 	}
 }
 
@@ -561,19 +600,13 @@ func TestHandleTaskGetUsesFreshTaskListSnapshotCache(t *testing.T) {
 		hub:      publish.NewHub(16, 8, logger),
 	}
 
-	listResp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
-		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-task-list-cache-prime",
-		Kind:            protocol.EnvelopeKindCommand,
-		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-		Command:         "task.list",
-	})
-	if err != nil {
-		t.Fatalf("handleTaskList error: %v", err)
-	}
-	if !listResp.OK {
-		t.Fatalf("task.list response = %+v", listResp.Error)
-	}
+	d.storeTaskListSnapshotCache(projectID, 3, time.Now().UTC(), protocol.TaskListFreshnessFresh, []domain.Task{{
+		ID:       naming.IssueID(taskID),
+		Title:    "cached issue",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	}}, false)
 
 	if err := issuesClient.Update(ctx, taskID, domain.StatusInReview); err != nil {
 		t.Fatalf("update issue behind cache: %v", err)
@@ -652,7 +685,7 @@ func TestHandleTaskListCacheHitSkipsRuntimeRefreshTriggers(t *testing.T) {
 		Priority: domain.P2,
 		Status:   domain.StatusOpen,
 	}
-	d.storeTaskListSnapshotCache(projectID, 11, time.Now().UTC(), protocol.TaskListFreshnessFresh, []domain.Task{cachedTask})
+	d.storeTaskListSnapshotCache(projectID, 11, time.Now().UTC(), protocol.TaskListFreshnessFresh, []domain.Task{cachedTask}, false)
 
 	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,

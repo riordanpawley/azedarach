@@ -389,7 +389,9 @@ func (m Model) buildColumns() []board.Column {
 				}
 			}
 		}
-		columns[i].Tasks = m.editor.ApplySort(columns[i].Tasks)
+		if sortState != nil {
+			columns[i].Tasks = sortState.ApplyInPlace(columns[i].Tasks)
+		}
 	}
 	return columns
 }
@@ -410,20 +412,19 @@ func (m Model) boardVisibleTasks(tasks []domain.Task) []domain.Task {
 		return result
 	}
 
-	var filtered []domain.Task
 	if m.sessionTreeFilterOnly {
 		filter := *m.editor.GetFilter()
 		filter.HideEpicChildren = false
-		filtered = filter.Apply(tasks)
-	} else {
-		filtered = m.editor.ApplyFilter(tasks)
+		filtered := filter.Apply(tasks)
+		return m.applySessionTreeFilter(filtered)
 	}
-	filtered = m.applySessionTreeFilter(filtered)
-	if m.sessionTreeFilterOnly {
-		return filtered
-	}
-	result := make([]domain.Task, 0, len(filtered))
-	for _, task := range filtered {
+
+	filter := m.editor.GetFilter()
+	result := make([]domain.Task, 0, len(tasks))
+	for _, task := range tasks {
+		if filter != nil && !filter.Matches(task) {
+			continue
+		}
 		if task.ParentID != nil && strings.TrimSpace(task.ParentID.String()) != "" {
 			continue
 		}
@@ -555,7 +556,10 @@ func (m Model) jumpLabelsByTask() map[string]string {
 }
 
 func (m Model) compactRenderedTasks() []domain.Task {
-	filtered := m.editor.ApplySort(m.boardVisibleTasks(m.tasks))
+	filtered := m.boardVisibleTasks(m.tasks)
+	if sortState := m.editor.GetSort(); sortState != nil {
+		filtered = sortState.ApplyInPlace(filtered)
+	}
 	if len(filtered) == 0 {
 		return nil
 	}
@@ -832,7 +836,10 @@ func buildActiveDescendantSessionByTask(tasks []domain.Task) map[string]bool {
 func (m Model) renderCompactView() string {
 	// Get all filtered and sorted tasks
 	filteredTasks := m.boardVisibleTasks(m.tasks)
-	sortedTasks := m.editor.ApplySort(filteredTasks)
+	sortedTasks := filteredTasks
+	if sortState := m.editor.GetSort(); sortState != nil {
+		sortedTasks = sortState.ApplyInPlace(sortedTasks)
+	}
 
 	// Create compact view
 	compactView := compact.NewCompactView(sortedTasks, m.width, board.BoardContentHeight(m.height))

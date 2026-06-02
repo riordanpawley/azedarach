@@ -602,6 +602,25 @@ func (c *Client) ListWithRuntime(ctx context.Context, projectID string) ([]domai
 	return tasks, nil
 }
 
+// ListSummariesWithRuntime fetches active issues with runtime projection fields
+// but without long-form detail text. It is intended for board/list snapshots
+// where fetching full issue bodies for every task dominates load time.
+func (c *Client) ListSummariesWithRuntime(ctx context.Context, projectID string) ([]domain.Task, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	tasks, err := c.queryTaskSummariesWithRuntime(ctx, db, projectID)
+	if err != nil {
+		return nil, c.wrapError("list-summaries-with-runtime", projectID, err)
+	}
+	return tasks, nil
+}
+
 // GetWithRuntime fetches one active issue with runtime projection fields.
 func (c *Client) GetWithRuntime(ctx context.Context, projectID, id string) (domain.Task, error) {
 	db, err := c.dbHandle()
@@ -1896,7 +1915,28 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 	return tasks, nil
 }
 
+func (c *Client) queryTaskSummariesWithRuntime(ctx context.Context, db *sql.DB, projectID string) ([]domain.Task, error) {
+	return c.queryTasksWithRuntimeProjection(ctx, db, projectID, false)
+}
+
 func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectID string, issueIDs ...string) ([]domain.Task, error) {
+	return c.queryTasksWithRuntimeProjection(ctx, db, projectID, true, issueIDs...)
+}
+
+func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB, projectID string, includeDetails bool, issueIDs ...string) ([]domain.Task, error) {
+	detailSelect := `
+			COALESCE(i.description, ''),
+			COALESCE(i.notes, ''),
+			COALESCE(i.design, ''),
+			COALESCE(i.acceptance, ''),`
+	if !includeDetails {
+		detailSelect = `
+			'',
+			'',
+			'',
+			'',`
+	}
+
 	query := `
 		WITH ranked_session AS (
 			SELECT
@@ -1937,10 +1977,7 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 		SELECT
 			i.id,
 			i.title,
-			COALESCE(i.description, ''),
-			COALESCE(i.notes, ''),
-			COALESCE(i.design, ''),
-			COALESCE(i.acceptance, ''),
+` + detailSelect + `
 			COALESCE(i.assignee, ''),
 			COALESCE(i.labels_json, '[]'),
 			i.estimate,

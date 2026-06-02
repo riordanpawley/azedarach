@@ -53,29 +53,36 @@ func (s *Sort) Apply(tasks []Task) []Task {
 	// Make a copy to avoid modifying the input slice
 	result := make([]Task, len(tasks))
 	copy(result, tasks)
+	return s.ApplyInPlace(result)
+}
 
+// ApplyInPlace sorts tasks without copying them.
+func (s *Sort) ApplyInPlace(tasks []Task) []Task {
+	if len(tasks) == 0 {
+		return tasks
+	}
 	// Sort based on field
 	switch s.Field {
 	case SortByPriority:
-		sort.SliceStable(result, func(i, j int) bool {
+		sort.SliceStable(tasks, func(i, j int) bool {
 			if s.Order == SortAsc {
-				return result[i].Priority < result[j].Priority
+				return tasks[i].Priority < tasks[j].Priority
 			}
-			return result[i].Priority > result[j].Priority
+			return tasks[i].Priority > tasks[j].Priority
 		})
 
 	case SortByUpdated:
-		sort.SliceStable(result, func(i, j int) bool {
+		sort.SliceStable(tasks, func(i, j int) bool {
 			if s.Order == SortAsc {
-				return result[i].UpdatedAt.Before(result[j].UpdatedAt)
+				return tasks[i].UpdatedAt.Before(tasks[j].UpdatedAt)
 			}
-			return result[i].UpdatedAt.After(result[j].UpdatedAt)
+			return tasks[i].UpdatedAt.After(tasks[j].UpdatedAt)
 		})
 
 	case SortBySession:
-		sort.SliceStable(result, func(i, j int) bool {
-			pi := sessionPriority(result[i])
-			pj := sessionPriority(result[j])
+		sort.SliceStable(tasks, func(i, j int) bool {
+			pi := sessionPriority(tasks[i])
+			pj := sessionPriority(tasks[j])
 
 			if s.Order == SortAsc {
 				return pi > pj // Higher priority first in ascending
@@ -84,9 +91,9 @@ func (s *Sort) Apply(tasks []Task) []Task {
 		})
 
 	case SortByGitDiff:
-		sort.SliceStable(result, func(i, j int) bool {
-			di := gitDiffTotal(result[i])
-			dj := gitDiffTotal(result[j])
+		sort.SliceStable(tasks, func(i, j int) bool {
+			di := gitDiffTotal(tasks[i])
+			dj := gitDiffTotal(tasks[j])
 			if di != dj {
 				if s.Order == SortAsc {
 					return di > dj // Higher diff first in ascending
@@ -94,8 +101,8 @@ func (s *Sort) Apply(tasks []Task) []Task {
 				return di < dj // Lower diff first in descending
 			}
 
-			ai := gitDiffSessionActivityPriority(result[i])
-			aj := gitDiffSessionActivityPriority(result[j])
+			ai := gitDiffSessionActivityPriority(tasks[i])
+			aj := gitDiffSessionActivityPriority(tasks[j])
 			if ai != aj {
 				if s.Order == SortAsc {
 					return ai > aj // Active sessions first
@@ -103,8 +110,8 @@ func (s *Sort) Apply(tasks []Task) []Task {
 				return ai < aj
 			}
 
-			wi := gitDiffWorktreePriority(result[i])
-			wj := gitDiffWorktreePriority(result[j])
+			wi := gitDiffWorktreePriority(tasks[i])
+			wj := gitDiffWorktreePriority(tasks[j])
 			if wi != wj {
 				if s.Order == SortAsc {
 					return wi > wj // Worktree-backed tasks next
@@ -113,13 +120,13 @@ func (s *Sort) Apply(tasks []Task) []Task {
 			}
 
 			if s.Order == SortAsc {
-				return result[i].UpdatedAt.After(result[j].UpdatedAt) // Newer first
+				return tasks[i].UpdatedAt.After(tasks[j].UpdatedAt) // Newer first
 			}
-			return result[i].UpdatedAt.Before(result[j].UpdatedAt) // Older first
+			return tasks[i].UpdatedAt.Before(tasks[j].UpdatedAt) // Older first
 		})
 	}
 
-	return result
+	return tasks
 }
 
 // getSessionState returns the session state for a task, handling nil sessions

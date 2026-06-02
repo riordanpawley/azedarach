@@ -58,6 +58,7 @@ type taskListSnapshotCacheEntry struct {
 	Freshness     protocol.TaskListFreshness
 	Tasks         []domain.Task
 	CachedAt      time.Time
+	SummariesOnly bool
 }
 
 type taskListSnapshotLoad struct {
@@ -170,8 +171,8 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 		return taskListSnapshotLoadResult{}, errors.New("issue store unavailable")
 	}
 	queryStartedAt := time.Now()
-	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.issue_store_list_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
+	tasks, err := issueClient.ListSummariesWithRuntime(ctx, projectID)
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.issue_store_list_summaries_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
 	if err != nil {
 		return taskListSnapshotLoadResult{}, err
 	}
@@ -180,7 +181,7 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
 	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.snapshot_freshness", freshnessStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "freshness", freshness)
 	revision := d.currentRevision(projectID)
-	d.storeTaskListSnapshotCache(projectID, revision, lastCheckedAt, freshness, tasks)
+	d.storeTaskListSnapshotCache(projectID, revision, lastCheckedAt, freshness, tasks, true)
 	return taskListSnapshotLoadResult{
 		Revision:      revision,
 		LastCheckedAt: lastCheckedAt,
@@ -203,7 +204,7 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "task_id is required"), nil
 	}
 	cacheStartedAt := time.Now()
-	if cached, ok := d.readFreshTaskListSnapshotCache(projectID); ok {
+	if cached, ok := d.readFreshTaskListSnapshotCache(projectID); ok && !cached.SummariesOnly {
 		if _, found := findCachedTaskByID(cached.Tasks, taskID); found {
 			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "cache_hit", true)
 			payload := buildTaskListSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks)
@@ -358,7 +359,7 @@ func (d *Daemon) readFreshTaskListSnapshotCache(projectID string) (taskListSnaps
 	return cached, true
 }
 
-func (d *Daemon) storeTaskListSnapshotCache(projectID string, revision uint64, lastCheckedAt time.Time, freshness protocol.TaskListFreshness, tasks []domain.Task) {
+func (d *Daemon) storeTaskListSnapshotCache(projectID string, revision uint64, lastCheckedAt time.Time, freshness protocol.TaskListFreshness, tasks []domain.Task, summariesOnly bool) {
 	if freshness != protocol.TaskListFreshnessFresh {
 		return
 	}
@@ -374,6 +375,7 @@ func (d *Daemon) storeTaskListSnapshotCache(projectID string, revision uint64, l
 		Freshness:     freshness,
 		Tasks:         cloneTasks(tasks),
 		CachedAt:      timeNow(),
+		SummariesOnly: summariesOnly,
 	}
 }
 
