@@ -57,6 +57,12 @@ type sessionProjectionCounts struct {
 	TmuxAttachedCount int
 }
 
+type sessionHookActivity struct {
+	Total  int
+	Active int
+	Paused int
+}
+
 const (
 	sessionInvariantSessionStartConflict   daemonInvariantID = daemonInvariantSessionStartConflict
 	sessionInvariantSessionAttachTarget    daemonInvariantID = daemonInvariantSessionAttachTarget
@@ -1413,8 +1419,9 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Active Sessions (%d):\n\n", len(tmuxSessions))
-	b.WriteString("ISSUE ID\tSTATUS\tTITLE\n")
-	b.WriteString("-------\t------\t-----\n")
+	activityByIssueKey := d.sessionHookActivityByIssueKey(ctx, cmd.ProjectID)
+	b.WriteString("ISSUE ID\tSTATUS\tACTIVITY\tTITLE\n")
+	b.WriteString("-------\t------\t--------\t-----\n")
 	for _, name := range tmuxSessions {
 		issueIDRaw := name
 		if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(name, d.sessionNamingScope(cmd.ProjectID)); ok {
@@ -1434,13 +1441,69 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 				title = title[:57] + "..."
 			}
 		}
-		fmt.Fprintf(&b, "%s\t%s\t%s\n", issueIDRaw, status, title)
+		activity := "unknown"
+		if hookActivity, ok := activityByIssueKey[sessionKey(issueIDRaw)]; ok && hookActivity.Total > 0 {
+			if hookActivity.Active > 0 {
+				activity = "busy"
+			} else {
+				activity = "idle"
+			}
+		}
+		fmt.Fprintf(&b, "%s\t%s\t%s\t%s\n", issueIDRaw, status, activity, title)
 	}
 	b.WriteString("\nUse 'az attach <issue-id>' to attach to a session\n")
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session status snapshot", "project_id", cmd.ProjectID, "issue_id", cmd.IssueID, "active_sessions", len(tmuxSessions))
 	}
 	return d.commandOutput(req, b.String()), nil
+}
+
+func (d *Daemon) sessionHookActivityByIssueKey(ctx context.Context, projectID string) map[string]sessionHookActivity {
+	projectID = d.canonicalProjectID(projectID)
+	namingScope := d.sessionNamingScope(projectID)
+	sessions := []daemonstate.Session{}
+	if store := d.sessionRuntimeStateStoreIfConfigured(projectID); store != nil {
+		cachedSessions, err := store.ListSessionStates(ctx, projectID)
+		if err == nil {
+			sessions = cachedSessions
+		} else if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("load runtime session activity failed", "project_id", projectID, "error", err)
+		}
+	}
+	if len(sessions) == 0 && d.sessionStore != nil {
+		snapshot := d.sessionStore.ReadSnapshot(projectID)
+		sessions = make([]daemonstate.Session, 0, len(snapshot.Sessions))
+		for _, session := range snapshot.Sessions {
+			sessions = append(sessions, session)
+		}
+	}
+
+	activityByKey := make(map[string]sessionHookActivity)
+	for _, session := range sessions {
+		if !isAgentScopedSessionID(session.ID) {
+			continue
+		}
+		observed := daemonstate.NormalizeSessionState(session.ObservedState)
+		if strings.TrimSpace(string(observed)) == "" {
+			observed = daemonstate.NormalizeSessionState(session.State)
+		}
+		if observed == daemonstate.SessionStateStopped {
+			continue
+		}
+		key := sessionKey(sessionProjectionIssueID(session, namingScope))
+		if key == "" {
+			continue
+		}
+		activity := activityByKey[key]
+		activity.Total++
+		if daemonstate.NormalizeSessionState(session.State) == daemonstate.SessionStatePaused {
+			activity.Paused++
+		} else {
+			activity.Active++
+		}
+		activityByKey[key] = activity
+	}
+	return activityByKey
 }
 
 func (d *Daemon) staleSessionRuntimeStatusOutput(ctx context.Context, projectID, issueID string) (string, bool) {
