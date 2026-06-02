@@ -174,6 +174,7 @@ type Model struct {
 	sessionTreeFilterOnly         bool
 	runtimeSignalsByTask          map[string]board.RuntimeSignals
 	runtimeSignalWorktreeByTask   map[string]string
+	runtimeSignalBranchByTask     map[string]string
 
 	// Project
 	currentProject       string
@@ -310,6 +311,7 @@ func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 		viewMode:                    ViewModeBoard, // Start with board view
 		runtimeSignalsByTask:        make(map[string]board.RuntimeSignals),
 		runtimeSignalWorktreeByTask: make(map[string]string),
+		runtimeSignalBranchByTask:   make(map[string]string),
 		toasts:                      []Toast{},
 		recoveryNotifications:       []asyncRecoveryNotification{},
 		eventTicker:                 eventticker.NewRing(eventTickerCapacity),
@@ -335,7 +337,7 @@ func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 		logFilePath:                 logFilePath,
 		currentProject:              resolveInitialProjectName(deps.ProjectRegistry, repoDir),
 	}
-	logger.Info("tui runtime initialized", "repo_dir", repoDir, "runtime_repo_dir", runtimeRepoDir, "daemon_socket", daemonSocketPath, "project", m.currentProject)
+	logger.Debug("tui runtime initialized", "repo_dir", repoDir, "runtime_repo_dir", runtimeRepoDir, "daemon_socket", daemonSocketPath, "project", m.currentProject)
 	m.refreshDaemonProjectRouteID()
 	m.daemonClient.WithProjectRouteID(m.daemonProjectRouteIDValue())
 	for _, opt := range opts {
@@ -2293,11 +2295,35 @@ func (m Model) diffBaseBranchForTask(task *domain.Task) string {
 	if task == nil || task.ParentID == nil {
 		return baseBranch
 	}
-	parentID := strings.TrimSpace(task.ParentID.String())
-	if parentID == "" {
-		return baseBranch
+	taskByID := make(map[string]domain.Task, len(m.tasks))
+	for _, candidate := range m.tasks {
+		if id := strings.TrimSpace(candidate.ID.String()); id != "" {
+			taskByID[id] = candidate
+		}
 	}
-	return m.originBranchForSelection(parentID)
+	nextParentID := strings.TrimSpace(task.ParentID.String())
+	visited := map[string]struct{}{}
+	for nextParentID != "" {
+		if _, seen := visited[nextParentID]; seen {
+			break
+		}
+		visited[nextParentID] = struct{}{}
+		if branch := strings.TrimSpace(m.runtimeSignalBranchByTask[nextParentID]); branch != "" {
+			return branch
+		}
+		parentTask, ok := taskByID[nextParentID]
+		if !ok {
+			return m.originBranchForSelection(nextParentID)
+		}
+		if parentTask.HasWorktree || parentTask.Session != nil {
+			return m.originBranchForSelection(nextParentID)
+		}
+		nextParentID = ""
+		if parentTask.ParentID != nil {
+			nextParentID = strings.TrimSpace(parentTask.ParentID.String())
+		}
+	}
+	return baseBranch
 }
 
 func (m Model) daemonCommandTimeout() time.Duration {
@@ -2417,9 +2443,9 @@ func projectSessionLifecycleState(state protocol.SessionLifecycleState) (domain.
 
 func projectAgentStatus(status string) (domain.SessionState, bool) {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "":
+	case "", "attached":
 		return "", false
-	case "starting", "working", "running", "syncing", "active", "attached":
+	case "starting", "working", "running", "syncing", "active":
 		return domain.SessionBusy, true
 	case "waiting":
 		return domain.SessionWaiting, true
@@ -2541,12 +2567,12 @@ func (m Model) eventLogFilePath() string {
 
 func (m Model) daemonLogFilePath() string {
 	if scopedDaemonRuntimeEnabledForJustRun() && strings.TrimSpace(m.runtimeRepoDir) != "" {
-		return filepath.Join(m.runtimeRepoDir, ".azedarach", "daemon.log")
+		return filepath.Join(m.runtimeRepoDir, ".azedarach", logging.DaemonLogFileName)
 	}
 	if scopedDaemonRuntimeEnabledForJustRun() {
 		if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
 			if worktreeRoot, rootErr := config.ResolveWorktreeRoot(cwd); rootErr == nil && strings.TrimSpace(worktreeRoot) != "" {
-				return filepath.Join(worktreeRoot, ".azedarach", "daemon.log")
+				return filepath.Join(worktreeRoot, ".azedarach", logging.DaemonLogFileName)
 			}
 		}
 	}
@@ -2554,14 +2580,14 @@ func (m Model) daemonLogFilePath() string {
 	if repoDir == "" {
 		repoDir = "."
 	}
-	return filepath.Join(repoDir, ".azedarach", "daemon.log")
+	return filepath.Join(repoDir, ".azedarach", logging.DaemonLogFileName)
 }
 
 func resolveTUILogFilePath(cfg *config.Config) string {
 	if scopedDaemonRuntimeEnabledForJustRun() {
 		if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
 			if worktreeRoot, rootErr := config.ResolveWorktreeRoot(cwd); rootErr == nil && strings.TrimSpace(worktreeRoot) != "" {
-				return filepath.Join(worktreeRoot, ".azedarach", "az.log")
+				return filepath.Join(worktreeRoot, ".azedarach", logging.TUILogFileName)
 			}
 		}
 	}
@@ -2577,7 +2603,7 @@ func resolveTUILogFilePath(cfg *config.Config) string {
 			baseDir = filepath.Join(".", ".azedarach", "logs")
 		}
 	}
-	return filepath.Join(baseDir, "az.log")
+	return filepath.Join(baseDir, logging.TUILogFileName)
 }
 
 func scopedDaemonRuntimeEnabledForJustRun() bool {
@@ -2588,7 +2614,14 @@ func scopedDaemonRuntimeEnabledForJustRun() bool {
 }
 
 func newTUILogger(logPath string) *slog.Logger {
+	if runningUnderGoTest() {
+		return logging.NewDiscardLogger(slog.LevelInfo)
+	}
 	return logging.NewTextFileLogger(logPath, slog.LevelInfo)
+}
+
+func runningUnderGoTest() bool {
+	return strings.HasSuffix(filepath.Base(os.Args[0]), ".test")
 }
 
 func (m Model) configSourcePath() string {
@@ -2778,11 +2811,11 @@ func inferLogSourceSpecsFromPaths(paths []string) []logstream.SourceSpec {
 		base := strings.ToLower(strings.TrimSpace(filepath.Base(path)))
 		source := ""
 		switch base {
-		case "daemon.log":
+		case logging.DaemonLogFileName:
 			source = "daemon"
-		case "az.log":
+		case logging.TUILogFileName:
 			source = "tui"
-		case "az-cli.log":
+		case logging.CLILogFileName:
 			source = "cli"
 		}
 		if source == "" {

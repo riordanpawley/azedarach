@@ -1807,6 +1807,47 @@ func TestRefreshWorktreeRuntimeStateUsesClosestNonDoneAncestorBranch(t *testing.
 	}
 }
 
+func TestRuntimeDiffBaseBranchForIssueUsesNearestAncestorWorktreeEvenWhenClosed(t *testing.T) {
+	childID := "az-child"
+	parentID := "az-parent"
+	rootID := "az-root"
+	parentIssueID := naming.IssueID(parentID)
+	rootIssueID := naming.IssueID(rootID)
+
+	taskByIssue := map[string]domain.Task{
+		childID: {
+			ID:       naming.IssueID(childID),
+			Status:   domain.StatusInProgress,
+			ParentID: &parentIssueID,
+		},
+		parentID: {
+			ID:       parentIssueID,
+			Status:   domain.StatusDone,
+			ParentID: &rootIssueID,
+		},
+		rootID: {
+			ID:     rootIssueID,
+			Status: domain.StatusInProgress,
+		},
+	}
+	worktreeByIssue := map[string]git.Worktree{
+		parentID: {
+			IssueID: parentID,
+			Branch:  "riordan/" + parentID + "/parent-branch",
+		},
+		rootID: {
+			IssueID: rootID,
+			Branch:  "riordan/" + rootID + "/root-branch",
+		},
+	}
+
+	d := &Daemon{}
+	branch := d.runtimeDiffBaseBranchForIssue(childID, "preview", taskByIssue, worktreeByIssue)
+	if branch != "riordan/"+parentID+"/parent-branch" {
+		t.Fatalf("runtimeDiffBaseBranchForIssue(...) = %q, want nearest ancestor worktree branch", branch)
+	}
+}
+
 func TestRefreshWorktreeRuntimeStateFallsBackToAncestorWorktreeBranchWhenAncestorTaskMissing(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-refresh-ancestor-worktree-fallback"

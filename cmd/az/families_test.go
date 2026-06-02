@@ -64,6 +64,20 @@ func TestRunAICommandHelpAndDispatch(t *testing.T) {
 	if !strings.Contains(output, "az ai hook run --agent=<claude|codex>") {
 		t.Fatalf("help output = %q", output)
 	}
+	if !strings.Contains(output, "Usage: az ai status") {
+		t.Fatalf("help output missing status usage = %q", output)
+	}
+
+	projectDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(projectDir, ".codex"), 0o755); err != nil {
+		t.Fatalf("mkdir codex marker: %v", err)
+	}
+	output = captureMainStdout(t, func() error {
+		return runAICommand(config.DefaultConfig(), []string{"status", "--target=codex", "--project-dir", projectDir})
+	})
+	if !strings.Contains(output, "codex: missing (detected)") {
+		t.Fatalf("status dispatch output = %q", output)
+	}
 
 	err := runAICommand(config.DefaultConfig(), []string{"hook", "run", "--agent=banana", "--json", "stop"})
 	if err == nil || !strings.Contains(err.Error(), "unsupported agent") {

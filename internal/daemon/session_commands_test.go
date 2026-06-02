@@ -776,8 +776,9 @@ func TestSessionStartUsesClosestAncestorWorktreeBranchAsBase(t *testing.T) {
 		_ = issuesClient.CloseDB()
 	})
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
-		Title: "Parent issue",
-		Type:  domain.TypeTask,
+		Title:  "Parent issue",
+		Type:   domain.TypeTask,
+		Status: domain.StatusDone,
 	})
 	if err != nil {
 		t.Fatalf("create parent issue: %v", err)
@@ -3335,6 +3336,179 @@ func TestSessionStatusIgnoresStaleProjectionWhenTmuxHasNoSession(t *testing.T) {
 	}
 }
 
+func TestSessionStatusReportsHookBackedActivity(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	busyIssueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Busy worker",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create busy issue: %v", err)
+	}
+	idleIssueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Idle worker",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create idle issue: %v", err)
+	}
+
+	busySessionID := naming.CanonicalSessionID(repoDir, busyIssueID)
+	idleSessionID := naming.CanonicalSessionID(repoDir, idleIssueID)
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	now := time.Now().UTC()
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            busySessionID + ".pane-%1",
+		IssueID:       busyIssueID,
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning,
+		UpdatedAt:     now,
+	}); err != nil {
+		t.Fatalf("seed busy hook activity: %v", err)
+	}
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            idleSessionID + ".pane-%2",
+		IssueID:       idleIssueID,
+		State:         daemonstate.SessionStatePaused,
+		ObservedState: daemonstate.SessionStatePaused,
+		UpdatedAt:     now,
+	}); err != nil {
+		t.Fatalf("seed idle hook activity: %v", err)
+	}
+
+	daemon := &Daemon{
+		cfg:          Config{RepoDir: repoDir, Logger: slog.Default()},
+		tmux:         tmux.NewClient(&testTmuxRunner{sessions: map[string]bool{busySessionID: true, idleSessionID: true}}, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(daemonstate.NewStore()),
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+	}
+
+	resp, err := daemon.handleSessionStatus(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-status-hook-activity",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.status",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            marshalJSON(map[string]string{"project_id": projectID}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStatus returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("session status response not OK: %+v", resp.Error)
+	}
+	var payload struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
+		t.Fatalf("unmarshal status response: %v", err)
+	}
+	if !strings.Contains(payload.Output, "ISSUE ID\tSTATUS\tACTIVITY\tTITLE") {
+		t.Fatalf("status output = %q, want activity header", payload.Output)
+	}
+	if !strings.Contains(payload.Output, busyIssueID+"\tin_progress\tbusy\tBusy worker") {
+		t.Fatalf("status output = %q, want busy hook-backed activity", payload.Output)
+	}
+	if !strings.Contains(payload.Output, idleIssueID+"\tin_progress\tidle\tIdle worker") {
+		t.Fatalf("status output = %q, want idle hook-backed activity", payload.Output)
+	}
+}
+
+func TestSessionStatusReportsUnknownActivityWithoutHookRows(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Worker without hooks",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	sessionID := naming.CanonicalSessionID(repoDir, issueID)
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            sessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed non-hook session projection: %v", err)
+	}
+
+	daemon := &Daemon{
+		cfg:          Config{RepoDir: repoDir, Logger: slog.Default()},
+		tmux:         tmux.NewClient(&testTmuxRunner{sessions: map[string]bool{sessionID: true}}, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(daemonstate.NewStore()),
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+	}
+
+	resp, err := daemon.handleSessionStatus(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-status-unknown-activity",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.status",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            marshalJSON(map[string]string{"project_id": projectID}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStatus returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("session status response not OK: %+v", resp.Error)
+	}
+	var payload struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
+		t.Fatalf("unmarshal status response: %v", err)
+	}
+	if !strings.Contains(payload.Output, issueID+"\tin_progress\tunknown\tWorker without hooks") {
+		t.Fatalf("status output = %q, want unknown activity without hook-scoped rows", payload.Output)
+	}
+}
+
 func TestSessionStatusReportsStaleRuntimeForTargetIssue(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -3653,10 +3827,13 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "az orchestrate complete-check --root <issue-id>") {
 		t.Fatalf("prompt = %q, want complete-check instruction", prompt)
 	}
-	if !strings.Contains(prompt, "Use direct tmux pane capture only when watch/status indicate a worker may be stuck or failed") {
+	if !strings.Contains(prompt, "Trust hook-backed `activity=busy|idle` for worker idleness checks") {
 		t.Fatalf("prompt = %q, want bounded tmux observation guidance", prompt)
 	}
-	if !strings.Contains(prompt, "do not poll tmux panes on a fixed interval") {
+	if !strings.Contains(prompt, "If activity is `unknown`, check hooks with `az ai status --target=auto` and install/update with `az ai install --target=auto`") {
+		t.Fatalf("prompt = %q, want hook status/install fallback guidance", prompt)
+	}
+	if !strings.Contains(prompt, "Do not poll tmux panes on a fixed interval") {
 		t.Fatalf("prompt = %q, want tmux polling guardrail", prompt)
 	}
 	if !strings.Contains(prompt, "az orchestrate integrate --issue <issue-id>") {
@@ -4139,6 +4316,72 @@ func TestEnrichTasksWithSessionStateFallsBackToProjectionCache(t *testing.T) {
 	}
 	if !enriched[0].Session.StartedAt.Equal(cachedStartedAt) {
 		t.Fatalf("started_at = %v, want %v", enriched[0].Session.StartedAt, cachedStartedAt)
+	}
+	if enriched[0].Session.Activity != "unknown" || enriched[0].Session.ActivitySource != "none" {
+		t.Fatalf("activity = %s/%s, want unknown/none", enriched[0].Session.Activity, enriched[0].Session.ActivitySource)
+	}
+}
+
+func TestEnrichTasksWithSessionStateReportsHookBackedActivity(t *testing.T) {
+	const (
+		projectID = "proj-hook-activity"
+		busyID    = "bja"
+		idleID    = "bjb"
+	)
+
+	store := daemonstate.NewStore()
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+
+	busySessionID := naming.CanonicalSessionID(projectID, busyID) + ".pane-%1"
+	idleSessionID := naming.CanonicalSessionID(projectID, idleID) + ".pane-%2"
+	now := time.Now().UTC()
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            busySessionID,
+		IssueID:       busyID,
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning,
+		UpdatedAt:     now,
+	}); err != nil {
+		t.Fatalf("seed busy hook session: %v", err)
+	}
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            idleSessionID,
+		IssueID:       idleID,
+		State:         daemonstate.SessionStatePaused,
+		ObservedState: daemonstate.SessionStatePaused,
+		UpdatedAt:     now,
+	}); err != nil {
+		t.Fatalf("seed idle hook session: %v", err)
+	}
+
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	tasks := []domain.Task{
+		{ID: busyID, Title: "busy", Type: domain.TypeTask},
+		{ID: idleID, Title: "idle", Type: domain.TypeTask},
+	}
+	enriched := d.enrichTasksWithSessionState(context.Background(), projectID, tasks)
+	if len(enriched) != 2 {
+		t.Fatalf("len(enriched) = %d, want 2", len(enriched))
+	}
+	byID := map[naming.IssueID]domain.Task{}
+	for _, task := range enriched {
+		byID[task.ID] = task
+	}
+	if byID[busyID].Session == nil || byID[busyID].Session.Activity != "busy" || byID[busyID].Session.ActivitySource != "hooks" {
+		t.Fatalf("busy session = %+v", byID[busyID].Session)
+	}
+	if byID[idleID].Session == nil || byID[idleID].Session.Activity != "idle" || byID[idleID].Session.ActivitySource != "hooks" {
+		t.Fatalf("idle session = %+v", byID[idleID].Session)
 	}
 }
 

@@ -30,6 +30,7 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"gate <issue-id>",
 		"dev gate <issue-id>",
 		"ai install [--target=",
+		"ai status [--target=",
 		"ai migrate",
 		"ai hook run --agent=<claude|codex>",
 		"tmux <selector|install-selector|uninstall-selector>",
@@ -42,6 +43,8 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"az gate az-123",
 		"az dev gate az-123",
 		"az ai install",
+		"az ai status",
+		"az ai status --target=codex --json",
 		"az ai install --target=rulesync --issue az-123",
 		"az ai migrate",
 		"az ai hook run --agent=codex --json permission-request",
@@ -95,7 +98,7 @@ func TestTmuxInstallSelectorCommandWritesManagedBinding(t *testing.T) {
 		"-T",
 		"tmux sessions",
 		"az-dev tmux selector",
-		"tmux-selector.log",
+		"az-tmux-selector.log",
 		"Azedarach tmux selector failed",
 		projectDir,
 	} {
@@ -140,6 +143,7 @@ func TestTmuxInstallSelectorCommandLogsPopupFailureDiagnostics(t *testing.T) {
 	command := buildTmuxSelectorPopupCommand("/missing/worktree/bin/az", projectDir)
 	for _, want := range []string{
 		"az tmux selector popup start",
+		"level=info",
 		"command=%s",
 		"'/missing/worktree/bin/az tmux selector'",
 		"PATH=%s",
@@ -155,7 +159,7 @@ func TestTmuxInstallSelectorCommandLogsPopupFailureDiagnostics(t *testing.T) {
 		"bind-key s run-shell",
 		"tmux display-popup -E",
 		"AZEDARACH_TMUX_CURRENT_SESSION=#{session_name}",
-		"tmux-selector.log",
+		"az-tmux-selector.log",
 		"/missing/worktree/bin/az tmux selector",
 	} {
 		if !strings.Contains(content, want) {

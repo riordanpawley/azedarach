@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
+	"github.com/riordanpawley/azedarach/internal/logging"
 )
 
 type trackingWriteCloser struct {
@@ -54,7 +55,7 @@ func TestLauncherStartClosesDaemonLog(t *testing.T) {
 		return nil
 	}
 	launcher.openLogFile = func(path string) (io.WriteCloser, error) {
-		want := filepath.Join(repoDir, ".azedarach", "daemon.log")
+		want := filepath.Join(repoDir, ".azedarach", logging.DaemonLogFileName)
 		if path != want {
 			t.Fatalf("daemon log path = %q, want %q", path, want)
 		}

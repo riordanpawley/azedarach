@@ -102,7 +102,7 @@ func TestGlobalInventoryLoaderUsesTmuxFirstAcrossProjects(t *testing.T) {
 	}
 }
 
-func TestGlobalInventoryLoaderClosedProjectedTaskRendersDoneInsteadOfBusy(t *testing.T) {
+func TestGlobalInventoryLoaderClosedProjectedTaskKeepsLiveSessionState(t *testing.T) {
 	started := time.Unix(1775209200, 0).UTC()
 	projectDir := t.TempDir()
 	projectID := projectIDForPath(projectDir)
@@ -142,11 +142,11 @@ func TestGlobalInventoryLoaderClosedProjectedTaskRendersDoneInsteadOfBusy(t *tes
 	if len(snapshot.Entries) != 1 {
 		t.Fatalf("entries = %#v, want one", snapshot.Entries)
 	}
-	if got := snapshot.Entries[0].State; got != domain.SessionDone {
-		t.Fatalf("entry state = %s, want %s", got, domain.SessionDone)
+	if got := snapshot.Entries[0].State; got != domain.SessionBusy {
+		t.Fatalf("entry state = %s, want %s", got, domain.SessionBusy)
 	}
-	if got := snapshot.Tasks[0].Session.State; got != domain.SessionDone {
-		t.Fatalf("task session state = %s, want %s", got, domain.SessionDone)
+	if got := snapshot.Tasks[0].Session.State; got != domain.SessionBusy {
+		t.Fatalf("task session state = %s, want %s", got, domain.SessionBusy)
 	}
 }
 

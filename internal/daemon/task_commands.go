@@ -716,7 +716,7 @@ func (d *Daemon) runtimeDiffBaseBranchForIssue(
 		return baseBranch
 	}
 
-	branchForIssue := func(id string) string {
+	worktreeBranchForIssue := func(id string) string {
 		id = strings.TrimSpace(id)
 		if id == "" {
 			return ""
@@ -725,6 +725,16 @@ func (d *Daemon) runtimeDiffBaseBranchForIssue(
 			if candidate := strings.TrimSpace(wt.Branch); candidate != "" {
 				return candidate
 			}
+		}
+		return ""
+	}
+	branchForIssue := func(id string) string {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return ""
+		}
+		if candidate := worktreeBranchForIssue(id); candidate != "" {
+			return candidate
 		}
 		return "az/" + id
 	}
@@ -742,12 +752,13 @@ func (d *Daemon) runtimeDiffBaseBranchForIssue(
 		}
 		visited[nextParentID] = struct{}{}
 
+		if candidate := worktreeBranchForIssue(nextParentID); candidate != "" {
+			return candidate
+		}
+
 		parentTask, parentOK := taskByIssue[nextParentID]
 		if !parentOK {
-			if candidate := branchForIssue(nextParentID); candidate != "" {
-				return candidate
-			}
-			break
+			return branchForIssue(nextParentID)
 		}
 		if parentTask.Status != domain.StatusDone {
 			return branchForIssue(nextParentID)

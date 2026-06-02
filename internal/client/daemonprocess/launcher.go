@@ -20,6 +20,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
+	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
@@ -154,7 +155,7 @@ func (l *Launcher) Start(ctx context.Context) error {
 	if openLogFile == nil {
 		openLogFile = openDaemonLog
 	}
-	logFile, err := openLogFile(filepath.Join(l.RepoDir, ".azedarach", "daemon.log"))
+	logFile, err := openLogFile(filepath.Join(l.RepoDir, ".azedarach", logging.DaemonLogFileName))
 	if err != nil {
 		return fmt.Errorf("open daemon log: %w", err)
 	}

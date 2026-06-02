@@ -317,7 +317,7 @@ func goldenEventLogView(t *testing.T) string {
 			},
 			Body: []byte("new payload line"),
 		},
-	}, "/tmp/az.log")
+	}, "/tmp/az-tui.log")
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
 	return model.(*EventLogOverlay).View()
 }

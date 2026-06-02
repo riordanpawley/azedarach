@@ -19,6 +19,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	gitservice "github.com/riordanpawley/azedarach/internal/services/git"
 )
@@ -2193,8 +2194,8 @@ func TestLogCommandPrintsSourcePrefixedPrettyLines(t *testing.T) {
 		Config:  cfg,
 		RepoDir: repoDir,
 	}
-	daemonLogPath := filepath.Join(repoDir, ".azedarach", "daemon.log")
-	tuiLogPath := filepath.Join(cfg.Session.LogDir, "az.log")
+	daemonLogPath := filepath.Join(repoDir, ".azedarach", logging.DaemonLogFileName)
+	tuiLogPath := filepath.Join(cfg.Session.LogDir, logging.TUILogFileName)
 	if err := os.MkdirAll(filepath.Dir(daemonLogPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll(daemon log dir): %v", err)
 	}
@@ -2289,8 +2290,8 @@ func TestLogCommandReadsScopedWorktreeDaemonAndTUILogs(t *testing.T) {
 		RepoDir: repo,
 	}
 
-	daemonLogPath := filepath.Join(worktree, ".azedarach", "daemon.log")
-	tuiLogPath := filepath.Join(worktree, ".azedarach", "az.log")
+	daemonLogPath := filepath.Join(worktree, ".azedarach", logging.DaemonLogFileName)
+	tuiLogPath := filepath.Join(worktree, ".azedarach", logging.TUILogFileName)
 	if err := os.MkdirAll(filepath.Dir(daemonLogPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll(log dir): %v", err)
 	}
@@ -7809,16 +7810,19 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "After every `az orchestrate start`, immediately start `az orchestrate watch --root <issue-id> --since <seq> --jsonl` in another pane/session and keep it running") {
 		t.Fatalf("prime output missing post-start continuous watch guidance: %q", output)
 	}
-	if !strings.Contains(output, "Use direct tmux pane capture only when watch/status indicate a worker may be stuck or failed") {
+	if !strings.Contains(output, "Trust hook-backed `activity=busy|idle` for idleness checks") {
 		t.Fatalf("prime output missing bounded tmux observation guidance: %q", output)
 	}
-	if !strings.Contains(output, "do not poll tmux panes on a fixed interval") {
+	if !strings.Contains(output, "when activity is `unknown`, check hooks with `az ai status --target=auto` and install/update with `az ai install --target=auto`") {
+		t.Fatalf("prime output missing hook status/install fallback guidance: %q", output)
+	}
+	if !strings.Contains(output, "Do not poll tmux panes on a fixed interval") {
 		t.Fatalf("prime output missing tmux polling guardrail: %q", output)
 	}
 	if !strings.Contains(output, "`orchestration.via=az` means do not spawn harness-native subagents yourself.") {
 		t.Fatalf("prime output missing follow-up native subagent prohibition: %q", output)
 	}
-	if !strings.Contains(output, "Then run the az orchestration loop: `status` to identify runnable leaves") {
+	if !strings.Contains(output, "Then run the az orchestration loop: `status` to identify runnable leaves and active worker activity") {
 		t.Fatalf("prime output missing az orchestration workflow guidance: %q", output)
 	}
 	if !strings.Contains(output, "Az orchestration loop:") {

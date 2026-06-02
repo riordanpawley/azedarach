@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/git"
@@ -246,7 +248,7 @@ func TestResolveTUILogFilePath_UsesSessionLogDir(t *testing.T) {
 	}
 
 	got := resolveTUILogFilePath(cfg)
-	want := filepath.Join("/tmp/azedarach-user-logs", "az.log")
+	want := filepath.Join("/tmp/azedarach-user-logs", logging.TUILogFileName)
 	if got != want {
 		t.Fatalf("resolveTUILogFilePath() = %q, want %q", got, want)
 	}
@@ -279,9 +281,22 @@ func TestResolveTUILogFilePath_UsesScopedWorktreeDirInJustRunMode(t *testing.T) 
 		},
 	}
 	got := resolveTUILogFilePath(cfg)
-	want := filepath.Join(worktree, ".azedarach", "az.log")
+	want := filepath.Join(worktree, ".azedarach", logging.TUILogFileName)
 	if got != want {
 		t.Fatalf("resolveTUILogFilePath() = %q, want %q", got, want)
+	}
+}
+
+func TestNewWithOptions_DoesNotWriteTUILogsDuringTests(t *testing.T) {
+	logDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Session.LogDir = logDir
+
+	_ = NewWithOptions(cfg)
+
+	logPath := filepath.Join(logDir, logging.TUILogFileName)
+	if _, err := os.Stat(logPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("test TUI construction wrote diagnostic log file %s: %v", logPath, err)
 	}
 }
 
@@ -290,7 +305,7 @@ func TestDaemonLogFilePath_UsesRepoDir(t *testing.T) {
 	m.repoDir = "/tmp/worktree"
 
 	got := m.daemonLogFilePath()
-	want := filepath.Join("/tmp/worktree", ".azedarach", "daemon.log")
+	want := filepath.Join("/tmp/worktree", ".azedarach", logging.DaemonLogFileName)
 	if got != want {
 		t.Fatalf("daemonLogFilePath() = %q, want %q", got, want)
 	}
@@ -321,7 +336,7 @@ func TestDaemonLogFilePath_UsesScopedWorktreeDirInJustRunMode(t *testing.T) {
 	m.repoDir = repo
 
 	got := m.daemonLogFilePath()
-	want := filepath.Join(worktree, ".azedarach", "daemon.log")
+	want := filepath.Join(worktree, ".azedarach", logging.DaemonLogFileName)
 	if got != want {
 		t.Fatalf("daemonLogFilePath() = %q, want %q", got, want)
 	}
@@ -332,11 +347,11 @@ func TestOpenLogStreamCmd_SkipsMissingPathsWhenAnotherLogExists(t *testing.T) {
 	m := newTestModel()
 
 	tmpDir := t.TempDir()
-	tuiLog := filepath.Join(tmpDir, "az.log")
+	tuiLog := filepath.Join(tmpDir, logging.TUILogFileName)
 	if err := os.WriteFile(tuiLog, []byte("hello\n"), 0o644); err != nil {
 		t.Fatalf("write tui log: %v", err)
 	}
-	missingDaemonLog := filepath.Join(tmpDir, "daemon.log")
+	missingDaemonLog := filepath.Join(tmpDir, logging.DaemonLogFileName)
 
 	var popupCommand string
 	m.tmuxClient = mockTmuxService{
@@ -367,10 +382,10 @@ func TestOpenLogStreamCmd_SkipsMissingPathsWhenAnotherLogExists(t *testing.T) {
 
 func TestInferLogSourcesFromPaths(t *testing.T) {
 	paths := []string{
-		"/tmp/project/.azedarach/daemon.log",
-		"/tmp/user/.azedarach/logs/az.log",
+		"/tmp/project/.azedarach/azd.log",
+		"/tmp/user/.azedarach/logs/az-tui.log",
 		"/tmp/user/.azedarach/logs/az-cli.log",
-		"/tmp/user/.azedarach/logs/az.log",
+		"/tmp/user/.azedarach/logs/az-tui.log",
 		"/tmp/custom/debug.log",
 	}
 
@@ -4724,6 +4739,15 @@ func TestDaemonStreamEventMsg_GitStatusEventAppliesRuntimeProjectionDirectly(t *
 	}
 	if updated.daemonRevision != 1 {
 		t.Fatalf("daemonRevision = %d, want 1", updated.daemonRevision)
+	}
+}
+
+func TestProjectAgentStatusIgnoresLegacyAttached(t *testing.T) {
+	if got, ok := projectAgentStatus("attached"); ok || got != "" {
+		t.Fatalf("legacy attached agent status = %q, %v; want ignored", got, ok)
+	}
+	if got, ok := projectAgentStatus("working"); !ok || got != domain.SessionBusy {
+		t.Fatalf("working agent status = %q, %v; want busy", got, ok)
 	}
 }
 

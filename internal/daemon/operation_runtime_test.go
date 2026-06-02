@@ -9,6 +9,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
+	opstore "github.com/riordanpawley/azedarach/internal/daemon/operations/store"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
@@ -309,6 +310,59 @@ func TestOperationRuntimeCancelMarksRunningOperationCancelled(t *testing.T) {
 	record := waitForRuntimeState(t, runtime, submitBody.Operation.OperationID.String(), daemonops.StateCancelled)
 	if record.ErrorMessage != "user requested cancel" {
 		t.Fatalf("cancel error message = %q, want user requested cancel", record.ErrorMessage)
+	}
+}
+
+func TestOperationRuntimeStartupFailsInterruptedOperations(t *testing.T) {
+	repoDir := t.TempDir()
+	first := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir, nextRevision: sequentialRevision()})
+
+	if _, err := first.store.Create(context.Background(), opstore.CreateParams{
+		OperationID:  "op-running",
+		ProjectID:    "proj-1",
+		IssueID:      "AZ-2",
+		Kind:         "session.start",
+		DedupeKey:    "session.start:AZ-2",
+		ResourceKeys: []string{"issue:proj-1:AZ-2"},
+	}); err != nil {
+		t.Fatalf("create running operation: %v", err)
+	}
+	if _, err := first.store.Transition(context.Background(), opstore.TransitionParams{
+		OperationID: "op-running",
+		ToState:     opstore.StateRunning,
+	}); err != nil {
+		t.Fatalf("transition running operation: %v", err)
+	}
+	if _, err := first.store.Create(context.Background(), opstore.CreateParams{
+		OperationID:  "op-queued",
+		ProjectID:    "proj-1",
+		IssueID:      "AZ-2",
+		Kind:         "session.stop",
+		DedupeKey:    "session.stop:AZ-2",
+		ResourceKeys: []string{"issue:proj-1:AZ-2"},
+	}); err != nil {
+		t.Fatalf("create queued operation: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first runtime: %v", err)
+	}
+
+	restarted := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir, nextRevision: sequentialRevision()})
+	t.Cleanup(func() { _ = restarted.Close() })
+
+	runningRecord := waitForRuntimeState(t, restarted, "op-running", daemonops.StateFailed)
+	if runningRecord.FinishedAt == nil {
+		t.Fatal("running operation finished_at was not set after restart reconciliation")
+	}
+	if runningRecord.ErrorMessage != interruptedOperationMessage {
+		t.Fatalf("running operation error = %q, want %q", runningRecord.ErrorMessage, interruptedOperationMessage)
+	}
+	queuedRecord := waitForRuntimeState(t, restarted, "op-queued", daemonops.StateFailed)
+	if queuedRecord.FinishedAt == nil {
+		t.Fatal("queued operation finished_at was not set after restart reconciliation")
+	}
+	if queuedRecord.ErrorMessage != interruptedOperationMessage {
+		t.Fatalf("queued operation error = %q, want %q", queuedRecord.ErrorMessage, interruptedOperationMessage)
 	}
 }
 
