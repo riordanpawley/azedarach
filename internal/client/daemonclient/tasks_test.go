@@ -764,8 +764,8 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 
 				client := New(transport).WithProjectID(wantProjectID)
 				err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{AutoFinalizeOnClose: true})
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("UpdateTaskStatusWithOptions error = %v, want %q", err, tt.wantErr)
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) || !strings.Contains(err.Error(), "Next:") || !strings.Contains(err.Error(), "commit, discard, or merge the worktree changes first") {
+					t.Fatalf("UpdateTaskStatusWithOptions error = %v, want %q and recovery hint", err, tt.wantErr)
 				}
 				wantCommands := []string{CommandTaskList, CommandGitStatus}
 				if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
@@ -806,7 +806,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 
 		client := New(transport).WithProjectID(wantProjectID)
 		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{AutoFinalizeOnClose: true})
-		if err == nil || !strings.Contains(err.Error(), "unresolved child issues remain") || !strings.Contains(err.Error(), "az-4 (worktree)") || !strings.Contains(err.Error(), "az-5 (open)") {
+		if err == nil || !strings.Contains(err.Error(), "unresolved child issues remain") || !strings.Contains(err.Error(), "az-4 (worktree)") || !strings.Contains(err.Error(), "az-5 (open)") || !strings.Contains(err.Error(), "close or clean up the listed child issues first") || strings.Contains(err.Error(), "az issue finalize --id az-3") {
 			t.Fatalf("UpdateTaskStatusWithOptions error = %v, want child close guard", err)
 		}
 		wantCommands := []string{CommandTaskList}

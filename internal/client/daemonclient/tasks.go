@@ -508,10 +508,10 @@ func (c *Client) ValidateTaskCloseWithOptions(ctx context.Context, taskID string
 	}
 
 	if reasons := closeGuardRuntimeBlockers(task, opts); len(reasons) > 0 {
-		return CloseGuardResult{}, fmt.Errorf("cannot close issue %s: %s", taskID, strings.Join(reasons, "; "))
+		return CloseGuardResult{}, closeGuardFailureError(taskID, reasons)
 	}
 	if reasons := closeGuardChildBlockers(task.ID, snapshot.Tasks); len(reasons) > 0 {
-		return CloseGuardResult{}, fmt.Errorf("cannot close issue %s: %s", taskID, strings.Join(reasons, "; "))
+		return CloseGuardResult{}, closeGuardFailureError(taskID, reasons)
 	}
 
 	worktree := closeGuardTaskWorktree(task)
@@ -524,7 +524,7 @@ func (c *Client) ValidateTaskCloseWithOptions(ctx context.Context, taskID string
 			if opts.ForceWorktree {
 				return CloseGuardResult{Task: task}, nil
 			}
-			return CloseGuardResult{}, fmt.Errorf("cannot close issue %s: worktree is projected but path is unavailable", taskID)
+			return CloseGuardResult{}, closeGuardFailureError(taskID, []string{"worktree is projected but path is unavailable"})
 		}
 		worktree = resolved
 	}
@@ -543,7 +543,7 @@ func (c *Client) ValidateTaskCloseWithOptions(ctx context.Context, taskID string
 		return CloseGuardResult{}, fmt.Errorf("inspect git status before closing %s: %w", taskID, err)
 	}
 	if reasons := closeGuardBlockers(status); len(reasons) > 0 {
-		return CloseGuardResult{}, fmt.Errorf("cannot close issue %s: %s", taskID, strings.Join(reasons, "; "))
+		return CloseGuardResult{}, closeGuardFailureError(taskID, reasons)
 	}
 	return CloseGuardResult{
 		Task:     task,
@@ -563,6 +563,47 @@ func (c *Client) worktreePathForIssue(ctx context.Context, taskID string) (strin
 		}
 	}
 	return "", false, nil
+}
+
+func closeGuardFailureError(taskID string, reasons []string) error {
+	message := fmt.Sprintf("cannot close issue %s: %s", taskID, strings.Join(reasons, "; "))
+	hint := closeGuardRecoveryHint(taskID, reasons)
+	if hint == "" {
+		return fmt.Errorf("%s", message)
+	}
+	return fmt.Errorf("%s. Next: %s", message, hint)
+}
+
+func closeGuardRecoveryHint(taskID string, reasons []string) string {
+	hasGitState := false
+	hasRuntime := false
+	hasChildren := false
+	for _, reason := range reasons {
+		if strings.Contains(reason, "local changes") || strings.Contains(reason, "conflicts") || strings.Contains(reason, "ahead") {
+			hasGitState = true
+		}
+		if strings.HasPrefix(reason, "issue still has a ") || strings.HasPrefix(reason, "worktree is projected") {
+			hasRuntime = true
+		}
+		if strings.Contains(reason, "child issues") {
+			hasChildren = true
+		}
+	}
+
+	steps := make([]string, 0, 3)
+	if hasGitState {
+		steps = append(steps, "commit, discard, or merge the worktree changes first")
+	}
+	if hasChildren {
+		steps = append(steps, "close or clean up the listed child issues first")
+	}
+	if hasRuntime {
+		steps = append(steps, fmt.Sprintf("run `az issue finalize --id %s --remove-worktree` or stop sessions/remove worktrees manually", taskID))
+	}
+	if len(steps) == 0 {
+		return "fix the listed blockers, refresh, then retry"
+	}
+	return strings.Join(steps, "; ") + ", then retry"
 }
 
 func closeGuardRuntimeBlockers(task domain.Task, opts CloseGuardOptions) []string {

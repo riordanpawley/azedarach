@@ -766,7 +766,7 @@ func TestTaskUpdateStatusClosePreflightBlocksRawRuntimeAttachments(t *testing.T)
 	if err != nil {
 		t.Fatalf("handleTaskUpdateStatus error: %v", err)
 	}
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "issue still has a worktree") {
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "issue still has a worktree") || !strings.Contains(resp.Error.Message, "Next:") || !strings.Contains(resp.Error.Message, "az issue finalize --id "+taskID+" --remove-worktree") {
 		t.Fatalf("task.update_status response = %+v, want worktree close guard", resp)
 	}
 
@@ -852,7 +852,7 @@ func TestTaskUpdateStatusClosePreflightBlocksRawUnresolvedChildrenAndApplyPath(t
 	if err != nil {
 		t.Fatalf("handleTaskUpdateStatus error: %v", err)
 	}
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") {
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") || !strings.Contains(resp.Error.Message, "close or clean up the listed child issues first") || strings.Contains(resp.Error.Message, "az issue finalize --id "+parentID) {
 		t.Fatalf("task.update_status response = %+v, want child close guard", resp)
 	}
 
@@ -875,7 +875,7 @@ func TestTaskUpdateStatusClosePreflightBlocksRawUnresolvedChildrenAndApplyPath(t
 	if err != nil {
 		t.Fatalf("handleTaskUpdateStatus skip error: %v", err)
 	}
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") {
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") || !strings.Contains(resp.Error.Message, "close or clean up the listed child issues first") || strings.Contains(resp.Error.Message, "az issue finalize --id "+parentID) {
 		t.Fatalf("task.update_status skip response = %+v, want child close guard", resp)
 	}
 

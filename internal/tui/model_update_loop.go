@@ -1403,10 +1403,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.rollbackTaskStatus(msg.taskID, msg.previousStatus)
 			m.syncTaskWorkspaceOverlay()
+			expires := time.Now().Add(3 * time.Second)
+			if msg.newStatus == domain.StatusDone {
+				expires = time.Now().Add(8 * time.Second)
+			}
 			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Failed to update task: %v", msg.err),
-				Expires: time.Now().Add(3 * time.Second),
+				Expires: expires,
 			})
 			return m, nil
 		}

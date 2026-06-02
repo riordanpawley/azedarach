@@ -928,9 +928,43 @@ func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, task
 	reasons = append(reasons, daemonCloseGuardRuntimeBlockers(task)...)
 	reasons = append(reasons, daemonCloseGuardChildBlockers(task.ID, tasks)...)
 	if len(reasons) > 0 {
-		return fmt.Errorf("cannot close issue %s: %s", taskID, strings.Join(reasons, "; "))
+		return fmt.Errorf("%s", daemonCloseGuardFailureMessage(taskID, reasons))
 	}
 	return nil
+}
+
+func daemonCloseGuardFailureMessage(taskID string, reasons []string) string {
+	message := fmt.Sprintf("cannot close issue %s: %s", taskID, strings.Join(reasons, "; "))
+	hint := daemonCloseGuardRecoveryHint(taskID, reasons)
+	if hint == "" {
+		return message
+	}
+	return message + ". Next: " + hint
+}
+
+func daemonCloseGuardRecoveryHint(taskID string, reasons []string) string {
+	hasRuntime := false
+	hasChildren := false
+	for _, reason := range reasons {
+		if strings.HasPrefix(reason, "issue still has a ") {
+			hasRuntime = true
+		}
+		if strings.Contains(reason, "child issues") {
+			hasChildren = true
+		}
+	}
+
+	steps := make([]string, 0, 2)
+	if hasChildren {
+		steps = append(steps, "close or clean up the listed child issues first")
+	}
+	if hasRuntime {
+		steps = append(steps, fmt.Sprintf("run `az issue finalize --id %s --remove-worktree` or stop sessions/remove worktrees manually", taskID))
+	}
+	if len(steps) == 0 {
+		return "fix the listed blockers, refresh, then retry"
+	}
+	return strings.Join(steps, "; ") + ", then retry"
 }
 
 func daemonCloseGuardRuntimeBlockers(task domain.Task) []string {
