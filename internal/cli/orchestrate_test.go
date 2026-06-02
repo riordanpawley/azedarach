@@ -113,6 +113,125 @@ func TestWatchDaemonCommandRestartsAfterTransientSocketLoss(t *testing.T) {
 	}
 }
 
+func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
+	root := naming.IssueID("az-1")
+	busy := naming.IssueID("az-2")
+	unknown := naming.IssueID("az-3")
+	tasks := []domain.Task{
+		{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+		{
+			ID:             busy,
+			Title:          "Busy worker",
+			Status:         domain.StatusInProgress,
+			Type:           domain.TypeTask,
+			ParentID:       &root,
+			HasTmuxSession: true,
+			Session:        &domain.Session{IssueID: busy, State: domain.SessionBusy, Activity: "busy", ActivitySource: "hooks", TmuxAttachedCount: 1},
+		},
+		{
+			ID:             unknown,
+			Title:          "Unknown worker",
+			Status:         domain.StatusInProgress,
+			Type:           domain.TypeTask,
+			ParentID:       &root,
+			HasTmuxSession: true,
+			Session:        &domain.Session{IssueID: unknown, State: domain.SessionBusy, Activity: "unknown", ActivitySource: "none", TmuxAttachedCount: 1},
+		},
+	}
+	body, err := marshalTaskListBody(tasks)
+	if err != nil {
+		t.Fatalf("marshal task list response: %v", err)
+	}
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
+				case protocol.CommandMailList:
+					return responseWithJSON(req, []protocol.MailEvent{}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestrateStatusCommand(deps, OrchestrateStatusOptions{RootIssueID: root.String(), JSON: true})
+	})
+	var result orchestrateStatusResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if len(result.ActiveSessions) != 2 {
+		t.Fatalf("active_sessions = %+v, want two entries", result.ActiveSessions)
+	}
+	byID := map[string]orchestrateActiveSession{}
+	for _, active := range result.ActiveSessions {
+		byID[active.IssueID] = active
+	}
+	if byID[busy.String()].Activity != "busy" || byID[busy.String()].ActivitySource != "hooks" || byID[busy.String()].Advice != "" {
+		t.Fatalf("busy active session = %+v", byID[busy.String()])
+	}
+	if byID[unknown.String()].Activity != "unknown" || !strings.Contains(byID[unknown.String()].Advice, "az ai status --target=auto") || !strings.Contains(byID[unknown.String()].Advice, "az ai install --target=auto") {
+		t.Fatalf("unknown active session = %+v", byID[unknown.String()])
+	}
+}
+
+func TestBuildOrchestrateWatchFrameIncludesActiveSessionActivity(t *testing.T) {
+	root := naming.IssueID("az-1")
+	idle := naming.IssueID("az-2")
+	tasks := []domain.Task{
+		{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+		{
+			ID:             idle,
+			Title:          "Idle worker",
+			Status:         domain.StatusInProgress,
+			Type:           domain.TypeTask,
+			ParentID:       &root,
+			HasTmuxSession: true,
+			Session:        &domain.Session{IssueID: idle, State: domain.SessionPaused, Activity: "idle", ActivitySource: "hooks", TmuxAttachedCount: 1},
+		},
+	}
+	body, err := marshalTaskListBody(tasks)
+	if err != nil {
+		t.Fatalf("marshal task list response: %v", err)
+	}
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
+				case protocol.CommandMailList:
+					return responseWithJSON(req, []protocol.MailEvent{{Seq: 7, ParentIssue: root.String(), IssueID: idle, Type: "worker-progress"}}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	frame, err := buildOrchestrateWatchFrame(deps, root.String(), 3)
+	if err != nil {
+		t.Fatalf("buildOrchestrateWatchFrame error = %v", err)
+	}
+	if len(frame.ActiveSessions) != 1 {
+		t.Fatalf("active_sessions = %+v, want one entry", frame.ActiveSessions)
+	}
+	active := frame.ActiveSessions[0]
+	if active.IssueID != idle.String() || active.Activity != "idle" || active.ActivitySource != "hooks" || active.Advice != "" {
+		t.Fatalf("active session = %+v", active)
+	}
+}
+
 func TestParseOrchestrateCompleteCheckArgs(t *testing.T) {
 	opts, err := ParseOrchestrateCompleteCheckArgs([]string{"--root", "az-1", "--json"})
 	if err != nil {

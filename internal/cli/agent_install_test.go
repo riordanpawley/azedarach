@@ -56,6 +56,88 @@ func TestParseAIInstallArgsRejectsUnknownGenerate(t *testing.T) {
 	}
 }
 
+func TestParseAIStatusArgsDefaultsToAuto(t *testing.T) {
+	opts, err := ParseAIStatusArgs([]string{})
+	if err != nil {
+		t.Fatalf("ParseAIStatusArgs: %v", err)
+	}
+	if len(opts.Targets) != 1 || opts.Targets[0] != AgentInstallTargetAuto {
+		t.Fatalf("targets = %v, want [auto]", opts.Targets)
+	}
+}
+
+func TestParseAIStatusArgsAcceptsCSVTargetsAndJSON(t *testing.T) {
+	opts, err := ParseAIStatusArgs([]string{"--target=codex,claude", "--json"})
+	if err != nil {
+		t.Fatalf("ParseAIStatusArgs: %v", err)
+	}
+	if !opts.JSON {
+		t.Fatalf("JSON = false, want true")
+	}
+	if len(opts.Targets) != 2 || !containsTarget(opts.Targets, AgentInstallTargetCodex) || !containsTarget(opts.Targets, AgentInstallTargetClaude) {
+		t.Fatalf("targets = %v, want codex+claude", opts.Targets)
+	}
+}
+
+func TestAIStatusReportsInstalledAndMissingHooks(t *testing.T) {
+	dir := t.TempDir()
+	codexHooksPath := filepath.Join(dir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(codexHooksPath), 0o755); err != nil {
+		t.Fatalf("mkdir codex hooks dir: %v", err)
+	}
+	if err := os.WriteFile(codexHooksPath, []byte(`{"hooks":{"Stop":[{"command":"az ai hook run --agent=codex --json stop"}]}}`), 0o644); err != nil {
+		t.Fatalf("write codex hooks: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o755); err != nil {
+		t.Fatalf("mkdir claude marker: %v", err)
+	}
+
+	result, err := AIStatus(&Dependencies{RepoDir: dir}, AIStatusOptions{
+		Targets:    []AgentInstallTarget{AgentInstallTargetCodex, AgentInstallTargetClaude},
+		ProjectDir: dir,
+	})
+	if err != nil {
+		t.Fatalf("AIStatus: %v", err)
+	}
+	byTarget := make(map[AgentInstallTarget]AIStatusTargetResult)
+	for _, target := range result.Targets {
+		byTarget[target.Target] = target
+	}
+	if !byTarget[AgentInstallTargetCodex].Detected || !byTarget[AgentInstallTargetCodex].Installed {
+		t.Fatalf("codex status = %+v, want detected installed", byTarget[AgentInstallTargetCodex])
+	}
+	if !byTarget[AgentInstallTargetClaude].Detected || byTarget[AgentInstallTargetClaude].Installed {
+		t.Fatalf("claude status = %+v, want detected missing", byTarget[AgentInstallTargetClaude])
+	}
+	if !strings.Contains(byTarget[AgentInstallTargetClaude].Reason, "managed Azedarach hook command not found") {
+		t.Fatalf("claude reason = %q", byTarget[AgentInstallTargetClaude].Reason)
+	}
+}
+
+func TestAIStatusCommandPrintsJSON(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".codex"), 0o755); err != nil {
+		t.Fatalf("mkdir codex marker: %v", err)
+	}
+	output := captureStdout(t, func() error {
+		return AIStatusCommand(&Dependencies{RepoDir: dir}, AIStatusOptions{
+			Targets:    []AgentInstallTarget{AgentInstallTargetCodex},
+			ProjectDir: dir,
+			JSON:       true,
+		})
+	})
+	var result AIStatusResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode status JSON: %v\n%s", err, output)
+	}
+	if len(result.Targets) != 1 || result.Targets[0].Target != AgentInstallTargetCodex {
+		t.Fatalf("targets = %+v, want codex", result.Targets)
+	}
+	if result.Targets[0].Installed {
+		t.Fatalf("codex status = %+v, want missing hook", result.Targets[0])
+	}
+}
+
 func TestResolveInstallTargetsAutoDetectsRulesync(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".rulesync"), 0o755); err != nil {
