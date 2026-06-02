@@ -582,7 +582,7 @@ func orchestrateActiveSessions(activeIDs []string, tasks []domain.Task) []orches
 			IssueID:        issueID,
 			Activity:       "unknown",
 			ActivitySource: "none",
-			Advice:         fmt.Sprintf("activity unknown: install or update AI hooks for %s; use sparse pane capture only if status/watch looks stale, failed, or contradictory", issueID),
+			Advice:         fmt.Sprintf("activity unknown: check hooks with az ai status --target=auto; install/update with az ai install --target=auto; use sparse pane capture only if status/watch looks stale, failed, or contradictory for %s", issueID),
 		}
 		if ok && task.Session != nil {
 			active.State = string(task.Session.State)

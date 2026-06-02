@@ -7589,8 +7589,8 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Trust hook-backed `activity=busy|idle` for idleness checks") {
 		t.Fatalf("prime output missing bounded tmux observation guidance: %q", output)
 	}
-	if !strings.Contains(output, "when activity is `unknown`, install/update AI hooks if possible") {
-		t.Fatalf("prime output missing hook install/update fallback guidance: %q", output)
+	if !strings.Contains(output, "when activity is `unknown`, check hooks with `az ai status --target=auto` and install/update with `az ai install --target=auto`") {
+		t.Fatalf("prime output missing hook status/install fallback guidance: %q", output)
 	}
 	if !strings.Contains(output, "Do not poll tmux panes on a fixed interval") {
 		t.Fatalf("prime output missing tmux polling guardrail: %q", output)

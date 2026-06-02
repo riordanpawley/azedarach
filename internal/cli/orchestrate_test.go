@@ -177,7 +177,7 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 	if byID[busy.String()].Activity != "busy" || byID[busy.String()].ActivitySource != "hooks" || byID[busy.String()].Advice != "" {
 		t.Fatalf("busy active session = %+v", byID[busy.String()])
 	}
-	if byID[unknown.String()].Activity != "unknown" || !strings.Contains(byID[unknown.String()].Advice, "install or update AI hooks") {
+	if byID[unknown.String()].Activity != "unknown" || !strings.Contains(byID[unknown.String()].Advice, "az ai status --target=auto") || !strings.Contains(byID[unknown.String()].Advice, "az ai install --target=auto") {
 		t.Fatalf("unknown active session = %+v", byID[unknown.String()])
 	}
 }

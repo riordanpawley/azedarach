@@ -3829,8 +3829,8 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "Trust hook-backed `activity=busy|idle` for worker idleness checks") {
 		t.Fatalf("prompt = %q, want bounded tmux observation guidance", prompt)
 	}
-	if !strings.Contains(prompt, "If activity is `unknown`, install/update AI hooks if possible") {
-		t.Fatalf("prompt = %q, want hook install/update fallback guidance", prompt)
+	if !strings.Contains(prompt, "If activity is `unknown`, check hooks with `az ai status --target=auto` and install/update with `az ai install --target=auto`") {
+		t.Fatalf("prompt = %q, want hook status/install fallback guidance", prompt)
 	}
 	if !strings.Contains(prompt, "Do not poll tmux panes on a fixed interval") {
 		t.Fatalf("prompt = %q, want tmux polling guardrail", prompt)
