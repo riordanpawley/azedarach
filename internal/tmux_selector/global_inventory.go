@@ -619,20 +619,11 @@ func mergeProjectedInventory(entry InventoryEntry, projection projectedInventory
 		entry.GitAdditions = projection.task.GitAdditions
 		entry.GitDeletions = projection.task.GitDeletions
 	}
-	entry.State = stateForInventoryIssueStatus(entry.IssueStatus, entry.State)
 	return entry
-}
-
-func stateForInventoryIssueStatus(status domain.Status, state domain.SessionState) domain.SessionState {
-	if status == domain.StatusDone {
-		return domain.SessionDone
-	}
-	return state
 }
 
 func taskFromInventoryEntry(entry InventoryEntry) domain.Task {
 	issueID := naming.IssueID(entry.IssueID)
-	state := stateForInventoryIssueStatus(entry.IssueStatus, entry.State)
 	return domain.Task{
 		ID:             issueID,
 		Title:          entry.TaskTitle,
@@ -643,7 +634,7 @@ func taskFromInventoryEntry(entry InventoryEntry) domain.Task {
 		HasWorktree:    entry.HasWorktree,
 		Session: &domain.Session{
 			IssueID:   issueID,
-			State:     state,
+			State:     entry.State,
 			StartedAt: entry.StartedAt,
 			Worktree:  entry.Worktree,
 		},
