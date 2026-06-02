@@ -3754,12 +3754,12 @@ func TestParseIssueCloseArgs(t *testing.T) {
 		{
 			name:        "missing id",
 			args:        []string{},
-			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--cleanup] [--force-worktree] [<issue-id>]",
+			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [<issue-id>]",
 		},
 		{
 			name:        "extra args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--cleanup] [--force-worktree] [<issue-id>]",
+			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [<issue-id>]",
 		},
 		{
 			name: "named id",
@@ -3772,14 +3772,9 @@ func TestParseIssueCloseArgs(t *testing.T) {
 			want: IssueCloseOptions{IssueID: "az-2"},
 		},
 		{
-			name: "confirmed cleanup",
-			args: []string{"--id", "az-2", "--cleanup", "--json"},
-			want: IssueCloseOptions{IssueID: "az-2", Cleanup: true, JSON: true},
-		},
-		{
-			name: "force cleanup",
-			args: []string{"--id", "az-2", "--cleanup", "--force-worktree", "--json"},
-			want: IssueCloseOptions{IssueID: "az-2", Cleanup: true, ForceWorktree: true, JSON: true},
+			name:        "cleanup flag removed",
+			args:        []string{"--id", "az-2", "--cleanup"},
+			errContains: "flag provided but not defined: -cleanup",
 		},
 		{
 			name: "force worktree",
@@ -3941,24 +3936,6 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 			}(),
 		},
 		{
-			name: "closed status with deprecated cleanup flag",
-			args: []string{"az-1", "--status", "closed", "--cleanup", "--force-worktree"},
-			want: func() IssueUpdateOptions {
-				status := domain.StatusDone
-				return IssueUpdateOptions{
-					IssueID:       "az-1",
-					Status:        &status,
-					Cleanup:       true,
-					ForceWorktree: true,
-				}
-			}(),
-		},
-		{
-			name:        "confirm only applies to closed status",
-			args:        []string{"az-1", "--status", "in_review", "--cleanup"},
-			errContains: "--cleanup is only supported with --status closed",
-		},
-		{
 			name: "force worktree on closed status",
 			args: []string{"az-1", "--status", "closed", "--force-worktree"},
 			want: func() IssueUpdateOptions {
@@ -3969,6 +3946,11 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 					ForceWorktree: true,
 				}
 			}(),
+		},
+		{
+			name:        "cleanup flag removed",
+			args:        []string{"az-1", "--status", "closed", "--cleanup"},
+			errContains: "flag provided but not defined: -cleanup",
 		},
 	}
 	for _, tt := range tests {
@@ -5957,7 +5939,6 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 	output := captureStdout(t, func() error {
 		return IssueCloseCommand(deps, IssueCloseOptions{
 			IssueID:       "az-9",
-			Cleanup:       true,
 			ForceWorktree: true,
 		})
 	})
@@ -5984,7 +5965,7 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 	if !removeWorktreeForce {
 		t.Fatal("worktree remove force = false, want true")
 	}
-	if !strings.Contains(output, "Closed issue: az-9") || !strings.Contains(output, "- Integration requested") || !strings.Contains(output, "- Cleanup requested") {
+	if !strings.Contains(output, "Closed issue: az-9") || !strings.Contains(output, "- Integration requested") || !strings.Contains(output, "- Cleanup performed") {
 		t.Fatalf("output = %q", output)
 	}
 }
@@ -6984,7 +6965,6 @@ func TestIssueUpdateCommandConfirmedClosedCleansBeforeStatus(t *testing.T) {
 		return IssueUpdateCommand(deps, IssueUpdateOptions{
 			IssueID:       "az-1",
 			Status:        &status,
-			Cleanup:       true,
 			ForceWorktree: true,
 		})
 	})
@@ -7684,7 +7664,7 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if strings.Contains(output, "issue status --impl <implementation>") {
 		t.Fatalf("usage should not include issue status command: %q", output)
 	}
-	if !strings.Contains(output, "issue close [--project <project-id>] [--id <id>|-i <id>] [--json] [--cleanup] [--force-worktree] [<id>]") {
+	if !strings.Contains(output, "issue close [--project <project-id>] [--id <id>|-i <id>] [--json] [--force-worktree] [<id>]") {
 		t.Fatalf("usage missing issue close command: %q", output)
 	}
 	if strings.Contains(output, "finalize") {
