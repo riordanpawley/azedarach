@@ -280,7 +280,7 @@ func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 	}
 	daemonSocketPath := config.DaemonSocketPathFor(repoDir)
 	runtimeRepoDir := repoDir
-	if scopedDaemonRuntimeEnabledForJustRun() {
+	if config.UseScopedDaemonRuntimeFor(repoDir) {
 		if normalizedRuntimeRepoDir, normalizeErr := config.ResolveWorktreeRoot(repoDir); normalizeErr == nil {
 			runtimeRepoDir = normalizedRuntimeRepoDir
 		}
@@ -1750,7 +1750,7 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 func (m Model) attachDaemonCmd() tea.Cmd {
 	projectID := m.daemonProjectID()
 	targetRepoDir := m.activeProjectPath()
-	if scopedDaemonRuntimeEnabledForJustRun() && strings.TrimSpace(m.runtimeRepoDir) != "" {
+	if runtimeRepoDir := strings.TrimSpace(m.runtimeRepoDir); runtimeRepoDir != "" && config.UseScopedDaemonRuntimeFor(runtimeRepoDir) {
 		targetRepoDir = m.runtimeRepoDir
 	}
 	return func() tea.Msg {
@@ -2544,10 +2544,10 @@ func (m Model) eventLogFilePath() string {
 }
 
 func (m Model) daemonLogFilePath() string {
-	if scopedDaemonRuntimeEnabledForJustRun() && strings.TrimSpace(m.runtimeRepoDir) != "" {
+	if runtimeRepoDir := strings.TrimSpace(m.runtimeRepoDir); runtimeRepoDir != "" && config.UseScopedDaemonRuntimeFor(runtimeRepoDir) {
 		return filepath.Join(m.runtimeRepoDir, ".azedarach", logging.DaemonLogFileName)
 	}
-	if scopedDaemonRuntimeEnabledForJustRun() {
+	if strings.TrimSpace(m.repoDir) == "" && config.UseScopedDaemonRuntimeFor("") {
 		if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
 			if worktreeRoot, rootErr := config.ResolveWorktreeRoot(cwd); rootErr == nil && strings.TrimSpace(worktreeRoot) != "" {
 				return filepath.Join(worktreeRoot, ".azedarach", logging.DaemonLogFileName)
@@ -2562,7 +2562,7 @@ func (m Model) daemonLogFilePath() string {
 }
 
 func resolveTUILogFilePath(cfg *config.Config) string {
-	if scopedDaemonRuntimeEnabledForJustRun() {
+	if config.UseScopedDaemonRuntimeFor("") {
 		if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
 			if worktreeRoot, rootErr := config.ResolveWorktreeRoot(cwd); rootErr == nil && strings.TrimSpace(worktreeRoot) != "" {
 				return filepath.Join(worktreeRoot, ".azedarach", logging.TUILogFileName)
@@ -2582,13 +2582,6 @@ func resolveTUILogFilePath(cfg *config.Config) string {
 		}
 	}
 	return filepath.Join(baseDir, logging.TUILogFileName)
-}
-
-func scopedDaemonRuntimeEnabledForJustRun() bool {
-	mode := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
-	source := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")))
-	modeEnabled := mode == "worktree" || mode == "scoped" || mode == "local"
-	return modeEnabled && source == "just-run"
 }
 
 func newTUILogger(logPath string) *slog.Logger {

@@ -359,7 +359,7 @@ func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error
 		return nil, fmt.Errorf("failed to resolve project root from %q: %w", absRepoDir, err)
 	}
 	runtimeRepoDir := rootRepoDir
-	if scopedDaemonRuntimeEnabledForJustRun() {
+	if config.UseScopedDaemonRuntimeFor(absRepoDir) {
 		if worktreeRoot, err := config.ResolveWorktreeRoot(absRepoDir); err == nil && strings.TrimSpace(worktreeRoot) != "" {
 			runtimeRepoDir = worktreeRoot
 		}
@@ -5605,7 +5605,7 @@ func resolveSessionLogDir(cfg *config.Config) string {
 }
 
 func resolveSessionLogDirFor(cfg *config.Config, startPath string) string {
-	if scopedDaemonRuntimeEnabledForJustRun() {
+	if config.UseScopedDaemonRuntimeFor(startPath) {
 		if worktreeRoot, ok := resolveScopedWorktreeRoot(startPath); ok {
 			return filepath.Join(worktreeRoot, ".azedarach")
 		}
@@ -5625,7 +5625,7 @@ func resolveSessionLogDirFor(cfg *config.Config, startPath string) string {
 }
 
 func resolveRuntimeRepoDir(repoDir string) string {
-	if !scopedDaemonRuntimeEnabledForJustRun() {
+	if !config.UseScopedDaemonRuntimeFor(repoDir) {
 		return repoDir
 	}
 	if worktreeRoot, ok := resolveScopedWorktreeRoot(repoDir); ok {
@@ -5650,13 +5650,6 @@ func resolveScopedWorktreeRoot(startPath string) (string, bool) {
 		return worktreeRoot, true
 	}
 	return "", false
-}
-
-func scopedDaemonRuntimeEnabledForJustRun() bool {
-	mode := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
-	source := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")))
-	modeEnabled := mode == "worktree" || mode == "scoped" || mode == "local"
-	return modeEnabled && source == "just-run"
 }
 
 func makeRequestID(prefix string) naming.RequestID {

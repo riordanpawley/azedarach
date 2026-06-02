@@ -241,6 +241,7 @@ func TestRuntimeEventSummary_CompactsAndTruncates(t *testing.T) {
 }
 
 func TestResolveTUILogFilePath_UsesSessionLogDir(t *testing.T) {
+	t.Chdir(t.TempDir())
 	cfg := &config.Config{
 		Session: config.SessionConfig{
 			LogDir: "/tmp/azedarach-user-logs",
@@ -303,6 +304,7 @@ func TestNewWithOptions_DoesNotWriteTUILogsDuringTests(t *testing.T) {
 func TestDaemonLogFilePath_UsesRepoDir(t *testing.T) {
 	m := newTestModel()
 	m.repoDir = "/tmp/worktree"
+	m.runtimeRepoDir = ""
 
 	got := m.daemonLogFilePath()
 	want := filepath.Join("/tmp/worktree", ".azedarach", logging.DaemonLogFileName)
