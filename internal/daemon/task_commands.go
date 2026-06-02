@@ -1036,7 +1036,7 @@ func daemonCloseGuardRecoveryHint(taskID string, reasons []string) string {
 		steps = append(steps, "close or clean up the listed child issues first")
 	}
 	if hasRuntime {
-		steps = append(steps, fmt.Sprintf("run `az issue close --id %s --cleanup` or stop sessions/remove worktrees manually", taskID))
+		steps = append(steps, fmt.Sprintf("run `az issue close --id %s` or stop sessions/remove worktrees manually", taskID))
 	}
 	if len(steps) == 0 {
 		return "fix the listed blockers, refresh, then retry"

@@ -388,7 +388,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 		m.addToast(Toast{
 			Level:   ToastInfo,
-			Message: fmt.Sprintf("Cancelled close cleanup for %s", target),
+			Message: fmt.Sprintf("Cancelled integrate and close for %s", target),
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		return m, nil

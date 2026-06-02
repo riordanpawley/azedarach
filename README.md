@@ -160,7 +160,7 @@ flowchart TD
   J -->|No| K[AI Agent: Address review feedback]
   K --> H
   J -->|Yes| L[User/Reviewer: Merge PR]
-  L --> M[User or Azedarach: az issue close --id ISSUE --cleanup]
+  L --> M[User or Azedarach: az issue close --id ISSUE]
   G -->|Local only| N[User: Keep changes local]
   N --> O[User: az issue update --status in_review]
 ```
@@ -178,12 +178,13 @@ flowchart TD
   E -->|Yes| H[AI Agent or User: Commit locally]
   H --> I{User: Task complete?}
   I -->|No| D
-  I -->|Yes| J[User: az issue close --id ISSUE --cleanup]
+  I -->|Yes| J[User: az issue close --id ISSUE]
 ```
 
-Plain `az issue close --id ISSUE` is still useful as a guarded close for issues
-that are already clean. When sessions or worktrees may exist, pass `--cleanup` to
-run the required cleanup before the daemon writes the closed status.
+`az issue close --id ISSUE` finalizes the issue lifecycle: it integrates the issue
+branch into the resolved target branch, cleans session/worktree attachments, then
+asks the daemon to write the closed status. Close guards block dirty, conflicted,
+unmerged, or unresolved child work before cleanup removes the worktree.
 
 ### Agent Flow: TUI-Managed Session
 

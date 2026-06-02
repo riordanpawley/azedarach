@@ -138,8 +138,8 @@ func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
 			WatchCommand:     fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", parentIssueID),
 			IntegrateCommand: fmt.Sprintf("az orchestrate integrate --issue %s", createResult.IssueID),
 			MergeCommand:     fmt.Sprintf("az branch merge %s", createResult.IssueID),
-			CloseCommand:     issueCloseCleanupCommand(createResult.IssueID),
-			Summary:          "Child work runs in an isolated session/worktree. Keep the parent/orchestrator watching with az orchestrate watch in another pane/session while workers are active; do not use --once for orchestration monitoring. It is not auto-merged; the parent/orchestrator should review, integrate, merge, then close the child issue with cleanup.",
+			CloseCommand:     issueCloseCommand(createResult.IssueID),
+			Summary:          "Child work runs in an isolated session/worktree. Keep the parent/orchestrator watching with az orchestrate watch in another pane/session while workers are active; do not use --once for orchestration monitoring. It is not merged at creation; the parent/orchestrator should review, then close the child issue to integrate, clean up, and mark it closed.",
 		},
 	}
 	if opts.JSON {
@@ -155,7 +155,7 @@ func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
 	fmt.Printf("Created child issue: %s (parent: %s)\n", result.ChildIssueID, result.ParentIssueID)
 	fmt.Println("Integration model:")
 	fmt.Println("- Child work runs in its own az/tmux session/worktree.")
-	fmt.Println("- It is not auto-merged; review and integrate it from the parent/orchestrator session when ready.")
+	fmt.Println("- It is not merged at creation; review it from the parent/orchestrator session, then close it to integrate and clean up.")
 	printOrchestrateStartResult(startResult)
 	fmt.Println("When the child is ready:")
 	fmt.Printf("- %s\n", result.Advice.IntegrateCommand)

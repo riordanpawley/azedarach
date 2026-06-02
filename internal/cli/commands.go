@@ -2180,8 +2180,8 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.StringVar(&issueIDFlag, "i", "", "issue id (short alternative to --id)")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue close result as JSON")
-	fs.BoolVar(&opts.Cleanup, "cleanup", false, "stop sessions and remove worktrees before closing")
-	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal when --cleanup is set")
+	fs.BoolVar(&opts.Cleanup, "cleanup", false, "deprecated; close always integrates and cleans runtime attachments")
+	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal after integration")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueCloseOptions{}, err
 	}
@@ -2190,9 +2190,6 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueCloseOptions{}, fmt.Errorf("--impl is not supported for issue close; issue implementations are already assigned")
-	}
-	if opts.ForceWorktree && !opts.Cleanup {
-		return IssueCloseOptions{}, fmt.Errorf("--force-worktree requires --cleanup")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -2275,8 +2272,8 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	fs.StringVar(&opts.AppendNotes, "append-notes", "", "append a note line to issue notes")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue update result as JSON")
-	fs.BoolVar(&opts.Cleanup, "cleanup", false, "stop sessions and remove worktrees before setting closed")
-	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal when --cleanup is set")
+	fs.BoolVar(&opts.Cleanup, "cleanup", false, "deprecated; closed status always integrates and cleans runtime attachments")
+	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal when setting closed")
 	fs.StringVar(&statusRaw, "status", "", "updated status (open|in_progress|in_review|closed)")
 	fs.Func("update-impl", "set implementation assignment (repeatable)", func(v string) error {
 		trimmed := strings.TrimSpace(v)
@@ -2296,9 +2293,6 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueUpdateOptions{}, fmt.Errorf("--impl is not supported for issue update (it is create-only); normal field updates do not need --update-impl, and --update-impl is only for changing issue implementations")
-	}
-	if opts.ForceWorktree && !opts.Cleanup {
-		return IssueUpdateOptions{}, fmt.Errorf("--force-worktree requires --cleanup")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -2332,6 +2326,9 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	}
 	if opts.Cleanup && (opts.Status == nil || *opts.Status != domain.StatusDone) {
 		return IssueUpdateOptions{}, fmt.Errorf("--cleanup is only supported with --status closed")
+	}
+	if opts.ForceWorktree && (opts.Status == nil || *opts.Status != domain.StatusDone) {
+		return IssueUpdateOptions{}, fmt.Errorf("--force-worktree is only supported with --status closed")
 	}
 	if strings.TrimSpace(opts.AppendNotes) == "" {
 		opts.AppendNotes = ""
@@ -3608,26 +3605,29 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 		return err
 	}
 
-	cleanupRequested := false
-	if opts.Cleanup {
-		cleanupRequested = true
-		if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, domain.StatusDone, cleanupCloseTaskStatusOptions(opts.ForceWorktree)); err != nil {
-			return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
-		}
-	} else if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, domain.StatusDone, daemonclient.TaskStatusOptions{}); err != nil {
+	integrationRequested, err := integrateIssueBeforeCloseIfAttached(ctx, deps, opts.IssueID)
+	if err != nil {
+		return fmt.Errorf("failed to integrate issue %s before close: %w", opts.IssueID, err)
+	}
+	cleanupRequested := true
+	if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, domain.StatusDone, cleanupCloseTaskStatusOptions(opts.ForceWorktree)); err != nil {
 		return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
 	}
 
 	if opts.JSON {
 		return printJSON(map[string]any{
-			"issue_id":          opts.IssueID,
-			"status":            "closed",
-			"updated":           true,
-			"cleanup_requested": cleanupRequested,
-			"worktree_forced":   cleanupRequested && opts.ForceWorktree,
+			"issue_id":              opts.IssueID,
+			"status":                "closed",
+			"updated":               true,
+			"integration_requested": integrationRequested,
+			"cleanup_requested":     cleanupRequested,
+			"worktree_forced":       opts.ForceWorktree,
 		})
 	}
 	fmt.Printf("Closed issue: %s\n", opts.IssueID)
+	if integrationRequested {
+		fmt.Println("- Integration requested")
+	}
 	if cleanupRequested {
 		fmt.Println("- Cleanup requested")
 		if opts.ForceWorktree {
@@ -3635,6 +3635,25 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 		}
 	}
 	return nil
+}
+
+func integrateIssueBeforeCloseIfAttached(ctx context.Context, deps *Dependencies, issueID string) (bool, error) {
+	if deps == nil || deps.DaemonClient == nil {
+		return false, fmt.Errorf("daemon client unavailable")
+	}
+	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
+	if err != nil {
+		return false, fmt.Errorf("list worktrees before close: %w", err)
+	}
+	for _, wt := range worktrees {
+		if naming.IssueIDsEqual(wt.IssueID, issueID) && strings.TrimSpace(wt.Path) != "" {
+			if _, err := runBranchMergeToBase(deps, BranchMergeToBaseOptions{IssueID: issueID}); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func IssueDeleteCommand(deps *Dependencies, opts IssueDeleteOptions) error {
@@ -3806,7 +3825,10 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 	}
 	if opts.Status != nil {
 		statusOptions := daemonclient.TaskStatusOptions{}
-		if *opts.Status == domain.StatusDone && opts.Cleanup {
+		if *opts.Status == domain.StatusDone {
+			if _, err := integrateIssueBeforeCloseIfAttached(ctx, deps, opts.IssueID); err != nil {
+				return fmt.Errorf("failed to integrate issue %s before close: %w", opts.IssueID, err)
+			}
 			statusOptions = cleanupCloseTaskStatusOptions(opts.ForceWorktree)
 		}
 		if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, *opts.Status, statusOptions); err != nil {

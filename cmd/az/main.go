@@ -528,7 +528,7 @@ func main() {
 			opts, err := cli.ParseIssueUpdateArgs(issueArgs)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|in_review|closed] [--cleanup] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]\n")
-				fmt.Fprintf(os.Stderr, "Note: --cleanup runs required session/worktree cleanup when setting --status closed; --force-worktree requires --cleanup.\n")
+				fmt.Fprintf(os.Stderr, "Note: setting --status closed integrates the issue branch, cleans session/worktree attachments, then closes; --force-worktree only applies to closed status.\n")
 				fmt.Fprintf(os.Stderr, "Note: --update-impl is only for changing implementation assignments; normal field updates do not require it.\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -544,8 +544,8 @@ func main() {
 			opts, err := cli.ParseIssueCloseArgs(issueArgs)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--cleanup] [--force-worktree] [<issue-id>]\n")
-				fmt.Fprintf(os.Stderr, "Note: without --cleanup, close only succeeds when the issue, children, session, and worktree are already clean.\n")
-				fmt.Fprintf(os.Stderr, "Note: --cleanup runs required session/worktree cleanup before closing; --force-worktree requires --cleanup.\n")
+				fmt.Fprintf(os.Stderr, "Note: close integrates the issue branch, cleans session/worktree attachments, then writes closed status.\n")
+				fmt.Fprintf(os.Stderr, "Note: --force-worktree forces worktree removal after integration; --cleanup is accepted for compatibility.\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

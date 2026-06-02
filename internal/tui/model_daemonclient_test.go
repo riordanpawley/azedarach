@@ -92,6 +92,35 @@ func (r *recordingCommandRunner) Run(_ context.Context, args ...string) (string,
 	return r.output, r.err
 }
 
+func emptyWorktreeListResponse(t *testing.T, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+	t.Helper()
+	respBody, err := json.Marshal(struct {
+		ProjectID string `json:"project_id"`
+		Worktrees []struct {
+			Path    string `json:"path"`
+			Branch  string `json:"branch"`
+			IssueID string `json:"issue_id"`
+		} `json:"worktrees"`
+	}{
+		ProjectID: req.Meta.ProjectID.String(),
+		Worktrees: []struct {
+			Path    string `json:"path"`
+			Branch  string `json:"branch"`
+			IssueID string `json:"issue_id"`
+		}{},
+	})
+	if err != nil {
+		t.Fatalf("marshal worktree response: %v", err)
+	}
+	return protocol.ResponseEnvelope{
+		ProtocolVersion: req.ProtocolVersion,
+		RequestID:       req.RequestID,
+		Kind:            protocol.EnvelopeKindResponse,
+		OK:              true,
+		Body:            respBody,
+	}
+}
+
 func (r *recordingDaemonTransport) Handshake(_ context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
 	r.calls = append(r.calls, "handshake")
 	r.lastHello = hello
@@ -278,6 +307,8 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 		transport := &recordingDaemonTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					return emptyWorktreeListResponse(t, req), nil
 				case daemonclient.CommandTaskUpdateStatus:
 					var body daemonclient.TaskStatusRequest
 					if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -460,6 +491,33 @@ func TestTaskStatusDoneRequiresCloseCleanupConfirmation(t *testing.T) {
 					}),
 				}, nil
 			}
+			if req.Command == daemonclient.CommandWorktreeList {
+				respBody, err := json.Marshal(struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{
+					ProjectID: "default",
+					Worktrees: []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					}{},
+				})
+				if err != nil {
+					t.Fatalf("marshal worktree response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			}
 			if req.Command != daemonclient.CommandTaskUpdateStatus {
 				t.Fatalf("unexpected command: %s", req.Command)
 			}
@@ -517,9 +575,10 @@ func TestTaskStatusDoneRequiresCloseCleanupConfirmation(t *testing.T) {
 	if statusBody.TaskID != "az-4" || statusBody.Status != domain.StatusDone {
 		t.Fatalf("status body = %+v, want az-4 -> done", statusBody)
 	}
-	if got := transport.requests; len(got) != 2 ||
-		got[0] != daemonclient.CommandTaskList ||
-		got[1] != daemonclient.CommandTaskUpdateStatus {
+	if got := transport.requests; len(got) != 3 ||
+		got[0] != daemonclient.CommandWorktreeList ||
+		got[1] != daemonclient.CommandTaskList ||
+		got[2] != daemonclient.CommandTaskUpdateStatus {
 		t.Fatalf("daemon requests after confirmation = %v", got)
 	}
 }
@@ -8157,6 +8216,8 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		transport := &recordingDaemonTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					return emptyWorktreeListResponse(t, req), nil
 				case daemonclient.CommandTaskUpdateStatus:
 					var body daemonclient.TaskStatusRequest
 					if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -8213,16 +8274,18 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 			t.Fatalf("bulk archive result = %#v", archiveMsg)
 		}
 
-		if got := transport.requests; len(got) != 7 {
+		if got := transport.requests; len(got) != 9 {
 			t.Fatalf("requests = %v", got)
 		}
-		if transport.requests[0] != daemonclient.CommandTaskList ||
-			transport.requests[1] != daemonclient.CommandTaskUpdateStatus ||
-			transport.requests[2] != daemonclient.CommandTaskList ||
-			transport.requests[3] != daemonclient.CommandTaskUpdateStatus ||
-			transport.requests[4] != daemonclient.CommandTaskDelete ||
-			transport.requests[5] != daemonclient.CommandTaskDelete ||
-			transport.requests[6] != daemonclient.CommandTaskArchive {
+		if transport.requests[0] != daemonclient.CommandWorktreeList ||
+			transport.requests[1] != daemonclient.CommandTaskList ||
+			transport.requests[2] != daemonclient.CommandTaskUpdateStatus ||
+			transport.requests[3] != daemonclient.CommandWorktreeList ||
+			transport.requests[4] != daemonclient.CommandTaskList ||
+			transport.requests[5] != daemonclient.CommandTaskUpdateStatus ||
+			transport.requests[6] != daemonclient.CommandTaskDelete ||
+			transport.requests[7] != daemonclient.CommandTaskDelete ||
+			transport.requests[8] != daemonclient.CommandTaskArchive {
 			t.Fatalf("requests = %v", transport.requests)
 		}
 	})
@@ -8347,10 +8410,13 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		}
 	})
 
-	t.Run("bulk done requires close cleanup confirmation", func(t *testing.T) {
+	t.Run("bulk done requires integrate and close confirmation", func(t *testing.T) {
 		statusBodies := make([]daemonclient.TaskStatusRequest, 0, 2)
 		transport := &recordingDaemonTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command == daemonclient.CommandWorktreeList {
+					return emptyWorktreeListResponse(t, req), nil
+				}
 				if req.Command == daemonclient.CommandTaskList {
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -8429,11 +8495,13 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 				t.Fatalf("status body = %+v, want done", body)
 			}
 		}
-		if got := transport.requests; len(got) != 4 ||
-			got[0] != daemonclient.CommandTaskList ||
-			got[1] != daemonclient.CommandTaskUpdateStatus ||
-			got[2] != daemonclient.CommandTaskList ||
-			got[3] != daemonclient.CommandTaskUpdateStatus {
+		if got := transport.requests; len(got) != 6 ||
+			got[0] != daemonclient.CommandWorktreeList ||
+			got[1] != daemonclient.CommandTaskList ||
+			got[2] != daemonclient.CommandTaskUpdateStatus ||
+			got[3] != daemonclient.CommandWorktreeList ||
+			got[4] != daemonclient.CommandTaskList ||
+			got[5] != daemonclient.CommandTaskUpdateStatus {
 			t.Fatalf("requests = %v", got)
 		}
 	})

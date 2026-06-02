@@ -766,7 +766,7 @@ func TestTaskUpdateStatusClosePreflightBlocksRawRuntimeAttachments(t *testing.T)
 	if err != nil {
 		t.Fatalf("handleTaskUpdateStatus error: %v", err)
 	}
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "issue still has a worktree") || !strings.Contains(resp.Error.Message, "Next:") || !strings.Contains(resp.Error.Message, "az issue close --id "+taskID+" --cleanup") {
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "issue still has a worktree") || !strings.Contains(resp.Error.Message, "Next:") || !strings.Contains(resp.Error.Message, "az issue close --id "+taskID) || strings.Contains(resp.Error.Message, "--cleanup") {
 		t.Fatalf("task.update_status response = %+v, want worktree close guard", resp)
 	}
 	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
