@@ -144,6 +144,7 @@ type Model struct {
 	pendingCleanupOps  map[string]pendingWorktreeCleanupConfirmation
 	pendingCleanup     *pendingWorktreeCleanupConfirmation
 	pendingBulkCleanup *pendingBulkCleanupConfirmation
+	pendingClose       *pendingAutoFinalizeCloseConfirmation
 
 	// Navigation (using NavigationService)
 	nav *navigation.Service
@@ -2974,6 +2975,15 @@ type pendingBulkCleanupConfirmation struct {
 	deletedTasks bool
 }
 
+type pendingAutoFinalizeCloseConfirmation struct {
+	taskID         string
+	taskIDs        []string
+	previousStatus domain.Status
+	targetStatus   domain.Status
+	bulkMode       string
+	delta          int
+}
+
 type refreshTaskWorkspaceResultMsg struct {
 	projectID     string
 	revision      uint64
@@ -4044,6 +4054,19 @@ func summarizeBulkIssues(issues []bulkTaskIssue) string {
 	return strings.Join(parts, "; ")
 }
 
+func bulkStatusSummaryHasCloseGuardGuidance(issues []bulkTaskIssue) bool {
+	for _, item := range issues {
+		reason := strings.ToLower(item.reason)
+		if strings.Contains(reason, "cannot close issue") ||
+			strings.Contains(reason, "next:") ||
+			strings.Contains(reason, "close guard") ||
+			strings.Contains(reason, "moved closed blockers back for cleanup") {
+			return true
+		}
+	}
+	return false
+}
+
 func formatBulkCleanupPreflightPrompt(msg bulkCleanupPreflightMsg) string {
 	action := "cleanup worktrees"
 	if msg.deletedTasks {
@@ -4148,6 +4171,7 @@ type taskStatusResultMsg struct {
 	taskID         string
 	previousStatus domain.Status
 	newStatus      domain.Status
+	autoFinalized  bool
 	err            error
 }
 
@@ -4172,6 +4196,7 @@ func (m Model) moveTaskStatusCmd(taskID string, previousStatus, newStatus domain
 				taskID:         taskID,
 				previousStatus: previousStatus,
 				newStatus:      newStatus,
+				autoFinalized:  m.statusMoveUsesAutoFinalize(newStatus),
 				err:            err,
 			}
 		}
@@ -4180,6 +4205,7 @@ func (m Model) moveTaskStatusCmd(taskID string, previousStatus, newStatus domain
 			taskID:         taskID,
 			previousStatus: previousStatus,
 			newStatus:      newStatus,
+			autoFinalized:  m.statusMoveUsesAutoFinalize(newStatus),
 		}
 	}
 }
@@ -4236,6 +4262,61 @@ func statusDisplayName(status domain.Status) string {
 	default:
 		return status.String()
 	}
+}
+
+func (m Model) statusMoveUsesAutoFinalize(status domain.Status) bool {
+	return status == domain.StatusDone && m.config != nil && m.config.Issues.AutoFinalizeOnClose
+}
+
+func (m Model) bulkMoveNeedsAutoFinalizeCloseConfirmation(taskIDs []string, delta int) bool {
+	if !m.statusMoveUsesAutoFinalize(domain.StatusDone) {
+		return false
+	}
+	for _, taskID := range taskIDs {
+		status, ok := m.taskStatusByID(taskID)
+		if !ok {
+			continue
+		}
+		next, ok := shiftedTaskStatus(status, delta)
+		if ok && next == domain.StatusDone {
+			return true
+		}
+	}
+	return false
+}
+
+func (m Model) confirmAutoFinalizeCloseCmd(pending pendingAutoFinalizeCloseConfirmation) tea.Cmd {
+	title := "Confirm close cleanup?"
+	if len(pending.taskIDs) > 1 {
+		title = "Confirm bulk close cleanup?"
+	}
+	return m.openOverlay(overlay.NewConfirmDialogExplicitYN(title, formatAutoFinalizeCloseConfirmPrompt(pending)))
+}
+
+func formatAutoFinalizeCloseConfirmPrompt(pending pendingAutoFinalizeCloseConfirmation) string {
+	count := len(pending.taskIDs)
+	if count == 0 && strings.TrimSpace(pending.taskID) != "" {
+		count = 1
+	}
+	target := strings.TrimSpace(pending.taskID)
+	if count > 1 {
+		target = fmt.Sprintf("%d selected tasks", count)
+	}
+	if target == "" {
+		target = "selected task"
+	}
+	lines := []string{
+		"Auto cleanup on close is enabled.",
+		"",
+		fmt.Sprintf("Target: %s", target),
+		"Status: closed",
+		"",
+		"This may stop active sessions and remove issue worktrees before closing.",
+		"Close guards still block dirty, ahead, conflicted, or unresolved child work.",
+		"",
+		"Proceed?",
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *Model) applyOptimisticTaskStatus(taskID string, status domain.Status) {

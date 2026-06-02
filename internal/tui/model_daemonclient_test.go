@@ -445,6 +445,86 @@ func TestTaskStatusExactKeyUsesDaemonClient(t *testing.T) {
 	}
 }
 
+func TestTaskStatusDoneWithAutoFinalizeRequiresConfirmation(t *testing.T) {
+	var statusBody daemonclient.TaskStatusRequest
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command == daemonclient.CommandTaskList {
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+						{ID: "az-4", Status: domain.StatusInReview},
+					}),
+				}, nil
+			}
+			if req.Command != daemonclient.CommandTaskUpdateStatus {
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			if err := json.Unmarshal(req.Body, &statusBody); err != nil {
+				t.Fatalf("unmarshal status request: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.config.Issues.AutoFinalizeOnClose = true
+	m.tasks = []domain.Task{{ID: "az-4", Status: domain.StatusInReview}}
+	m.nav.SelectTask("az-4", domain.StatusInReview.Column())
+
+	updatedAny, promptCmd := m.handleSelection(overlay.SelectionMsg{Key: "l"})
+	if promptCmd == nil {
+		t.Fatal("expected confirmation overlay command")
+	}
+	prompted := updatedAny.(Model)
+	if prompted.pendingClose == nil {
+		t.Fatal("expected pending close confirmation")
+	}
+	if prompted.tasks[0].Status != domain.StatusInReview {
+		t.Fatalf("status before confirmation = %s, want %s", prompted.tasks[0].Status, domain.StatusInReview)
+	}
+	if len(transport.requests) != 0 {
+		t.Fatalf("daemon requests before confirmation = %v, want none", transport.requests)
+	}
+
+	confirmedAny, statusCmd := prompted.handleSelection(overlay.SelectionMsg{Key: "yes"})
+	if statusCmd == nil {
+		t.Fatal("expected status update command after confirmation")
+	}
+	confirmed := confirmedAny.(Model)
+	if confirmed.pendingClose != nil {
+		t.Fatal("pending close confirmation was not cleared")
+	}
+	if confirmed.tasks[0].Status != domain.StatusDone {
+		t.Fatalf("optimistic status after confirmation = %s, want %s", confirmed.tasks[0].Status, domain.StatusDone)
+	}
+
+	msg := statusCmd()
+	status, ok := msg.(taskStatusResultMsg)
+	if !ok {
+		t.Fatalf("result = %T, want taskStatusResultMsg", msg)
+	}
+	if status.previousStatus != domain.StatusInReview || status.newStatus != domain.StatusDone || !status.autoFinalized || status.err != nil {
+		t.Fatalf("status result = %#v", status)
+	}
+	if statusBody.TaskID != "az-4" || statusBody.Status != domain.StatusDone {
+		t.Fatalf("status body = %+v, want az-4 -> done", statusBody)
+	}
+	if got := transport.requests; len(got) != 2 ||
+		got[0] != daemonclient.CommandTaskList ||
+		got[1] != daemonclient.CommandTaskUpdateStatus {
+		t.Fatalf("daemon requests after confirmation = %v", got)
+	}
+}
+
 func TestTaskStatusMoveFailureRollsBackOptimisticState(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -8262,6 +8342,98 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		if got := transport.requests; len(got) != 2 ||
 			got[0] != daemonclient.CommandTaskUpdateStatus ||
 			got[1] != daemonclient.CommandTaskUpdateStatus {
+			t.Fatalf("requests = %v", got)
+		}
+	})
+
+	t.Run("bulk done with auto finalize requires confirmation", func(t *testing.T) {
+		statusBodies := make([]daemonclient.TaskStatusRequest, 0, 2)
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command == daemonclient.CommandTaskList {
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+							{ID: "az-1", Status: domain.StatusOpen},
+							{ID: "az-2", Status: domain.StatusInReview},
+						}),
+					}, nil
+				}
+				if req.Command != daemonclient.CommandTaskUpdateStatus {
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				var body daemonclient.TaskStatusRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal status request: %v", err)
+				}
+				statusBodies = append(statusBodies, body)
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+				}, nil
+			},
+		}
+
+		m := newDaemonTestModel(transport)
+		m.config.Issues.AutoFinalizeOnClose = true
+		m.tasks = []domain.Task{
+			{ID: "az-1", Status: domain.StatusOpen},
+			{ID: "az-2", Status: domain.StatusInReview},
+		}
+
+		updatedAny, promptCmd := m.handleBulkAction(overlay.BulkActionMsg{
+			Action:      "D",
+			SelectedIDs: []string{"az-1", "az-2"},
+		})
+		if promptCmd == nil {
+			t.Fatal("expected bulk close confirmation command")
+		}
+		prompted := updatedAny.(Model)
+		if prompted.pendingClose == nil {
+			t.Fatal("expected pending bulk close confirmation")
+		}
+		if len(transport.requests) != 0 {
+			t.Fatalf("daemon requests before confirmation = %v, want none", transport.requests)
+		}
+
+		confirmedAny, bulkCmd := prompted.handleSelection(overlay.SelectionMsg{Key: "yes"})
+		if bulkCmd == nil {
+			t.Fatal("expected bulk status command after confirmation")
+		}
+		confirmed := confirmedAny.(Model)
+		if confirmed.pendingClose != nil {
+			t.Fatal("pending bulk close confirmation was not cleared")
+		}
+		if len(confirmed.toasts) == 0 || !strings.Contains(confirmed.toasts[len(confirmed.toasts)-1].Message, "Bulk close queued for 2 task(s)") {
+			t.Fatalf("toasts after confirmation = %+v, want bulk close queued toast", confirmed.toasts)
+		}
+
+		msg := bulkCmd()
+		result, ok := msg.(bulkStatusResultMsg)
+		if !ok {
+			t.Fatalf("bulk result = %T, want bulkStatusResultMsg", msg)
+		}
+		if result.updated != 2 || result.failed != 0 {
+			t.Fatalf("bulk result = %+v, want 2 updated", result)
+		}
+		if len(statusBodies) != 2 {
+			t.Fatalf("status bodies = %+v, want 2 updates", statusBodies)
+		}
+		for _, body := range statusBodies {
+			if body.Status != domain.StatusDone {
+				t.Fatalf("status body = %+v, want done", body)
+			}
+		}
+		if got := transport.requests; len(got) != 4 ||
+			got[0] != daemonclient.CommandTaskList ||
+			got[1] != daemonclient.CommandTaskUpdateStatus ||
+			got[2] != daemonclient.CommandTaskList ||
+			got[3] != daemonclient.CommandTaskUpdateStatus {
 			t.Fatalf("requests = %v", got)
 		}
 	})

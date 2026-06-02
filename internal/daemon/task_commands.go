@@ -873,7 +873,7 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task status update requested", "project_id", projectID, "task_id", cmd.TaskID, "status", cmd.Status)
 	}
-	task, err := d.updateTaskStatusWithClosePreflight(ctx, projectID, cmd.TaskID, cmd.Status)
+	task, err := d.updateTaskStatusWithClosePreflight(ctx, projectID, cmd.TaskID, cmd.Status, req)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -886,21 +886,21 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 	return resp, nil
 }
 
-func (d *Daemon) updateTaskStatusWithClosePreflight(ctx context.Context, projectID, taskID string, status domain.Status) (domain.Task, error) {
+func (d *Daemon) updateTaskStatusWithClosePreflight(ctx context.Context, projectID, taskID string, status domain.Status, req protocol.RequestEnvelope) (domain.Task, error) {
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return domain.Task{}, fmt.Errorf("issue store unavailable")
 	}
 	taskID = strings.TrimSpace(taskID)
 	if status == domain.StatusDone {
-		if err := d.validateTaskClosePreflight(ctx, projectID, taskID); err != nil {
+		if err := d.validateTaskClosePreflight(ctx, projectID, taskID, req); err != nil {
 			return domain.Task{}, err
 		}
 	}
 	return issueClient.UpdateWithRuntime(ctx, projectID, taskID, status)
 }
 
-func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, taskID string) error {
+func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, taskID string, req protocol.RequestEnvelope) error {
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return fmt.Errorf("issue store unavailable")
@@ -928,7 +928,7 @@ func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, task
 	reasons = append(reasons, daemonCloseGuardRuntimeBlockers(task)...)
 	reasons = append(reasons, daemonCloseGuardChildBlockers(task.ID, tasks)...)
 	if len(reasons) > 0 {
-		repairs, repairErr := d.reopenClosedCloseGuardBlockers(ctx, issueClient, task, tasks, reasons)
+		repairs, repairErr := d.reopenClosedCloseGuardBlockers(ctx, issueClient, projectID, req, task, tasks, reasons)
 		if repairErr != nil {
 			return fmt.Errorf("%s. Failed to move closed blockers back for cleanup: %w", daemonCloseGuardFailureMessage(taskID, reasons, repairs), repairErr)
 		}
@@ -942,12 +942,15 @@ type daemonCloseGuardStatusRepair struct {
 	Status  domain.Status
 }
 
-func (d *Daemon) reopenClosedCloseGuardBlockers(ctx context.Context, issueClient *issues.Client, target domain.Task, tasks []domain.Task, reasons []string) ([]daemonCloseGuardStatusRepair, error) {
+func (d *Daemon) reopenClosedCloseGuardBlockers(ctx context.Context, issueClient *issues.Client, projectID string, req protocol.RequestEnvelope, target domain.Task, tasks []domain.Task, reasons []string) ([]daemonCloseGuardStatusRepair, error) {
 	repairs := daemonCloseGuardStatusRepairs(target, tasks, reasons)
 	for _, repair := range repairs {
-		if err := issueClient.Update(ctx, repair.IssueID, repair.Status); err != nil {
+		task, err := issueClient.UpdateWithRuntime(ctx, projectID, repair.IssueID, repair.Status)
+		if err != nil {
 			return repairs, fmt.Errorf("move %s to %s: %w", repair.IssueID, repair.Status, err)
 		}
+		rev := d.nextRevision(projectID)
+		d.publishTaskEvent(req, protocol.EventTaskUpdated, rev, taskEventBodyFromTask(projectID, task))
 	}
 	return repairs, nil
 }

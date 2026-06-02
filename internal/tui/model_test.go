@@ -5174,6 +5174,48 @@ func TestLocalGitActivityMarkerBuildsBoardAndDetailProgress(t *testing.T) {
 	}
 }
 
+func TestBulkStatusSummaryDetectsCloseGuardGuidance(t *testing.T) {
+	tests := []struct {
+		name   string
+		issues []bulkTaskIssue
+		want   bool
+	}{
+		{
+			name: "close guard failure",
+			issues: []bulkTaskIssue{{
+				taskID: "az-1",
+				reason: "cannot close issue: issue still has a worktree. Next: run az issue finalize --id az-1, " +
+					"or clean up the worktree/session before closing.",
+			}},
+			want: true,
+		},
+		{
+			name: "status repair guidance",
+			issues: []bulkTaskIssue{{
+				taskID: "az-2",
+				reason: "Moved closed blockers back for cleanup: az-2 -> in_review.",
+			}},
+			want: true,
+		},
+		{
+			name: "ordinary issue",
+			issues: []bulkTaskIssue{{
+				taskID: "az-3",
+				reason: "permission denied",
+			}},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := bulkStatusSummaryHasCloseGuardGuidance(tt.issues); got != tt.want {
+				t.Fatalf("bulkStatusSummaryHasCloseGuardGuidance() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHandleSelectionSessionMutationsShowImmediatePendingFeedback(t *testing.T) {
 	tests := []struct {
 		name       string

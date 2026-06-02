@@ -844,6 +844,8 @@ func TestTaskUpdateStatusClosePreflightReopensClosedRuntimeBlocker(t *testing.T)
 		revision: map[string]uint64{projectID: 1},
 		hub:      publish.NewHub(16, 8, logger),
 	}
+	events, cancelEvents := d.hub.Subscribe(projectID, 0)
+	defer cancelEvents()
 
 	body, err := json.Marshal(map[string]any{
 		"task_id": taskID,
@@ -876,6 +878,7 @@ func TestTaskUpdateStatusClosePreflightReopensClosedRuntimeBlocker(t *testing.T)
 	if !strings.Contains(resp.Error.Message, "Moved closed blockers back for cleanup: "+taskID+" -> in_progress") {
 		t.Fatalf("task.update_status response = %q, want status repair explanation", resp.Error.Message)
 	}
+	assertNextTaskUpdatedEvent(t, events, taskID, domain.StatusInProgress)
 }
 
 func TestTaskUpdateStatusClosePreflightBlocksRawUnresolvedChildrenAndApplyPath(t *testing.T) {
@@ -1016,6 +1019,8 @@ func TestTaskUpdateStatusClosePreflightReopensClosedChildRuntimeBlocker(t *testi
 		revision: map[string]uint64{projectID: 1},
 		hub:      publish.NewHub(16, 8, logger),
 	}
+	events, cancelEvents := d.hub.Subscribe(projectID, 0)
+	defer cancelEvents()
 
 	body, err := json.Marshal(map[string]any{
 		"task_id": parentID,
@@ -1047,6 +1052,26 @@ func TestTaskUpdateStatusClosePreflightReopensClosedChildRuntimeBlocker(t *testi
 	}
 	if !strings.Contains(resp.Error.Message, "Moved closed blockers back for cleanup: "+childID+" -> in_review") {
 		t.Fatalf("task.update_status response = %q, want child status repair explanation", resp.Error.Message)
+	}
+	assertNextTaskUpdatedEvent(t, events, childID, domain.StatusInReview)
+}
+
+func assertNextTaskUpdatedEvent(t *testing.T, events <-chan protocol.EventEnvelope, taskID string, status domain.Status) {
+	t.Helper()
+	select {
+	case evt := <-events:
+		if evt.Event != protocol.EventTaskUpdated {
+			t.Fatalf("event = %s, want %s", evt.Event, protocol.EventTaskUpdated)
+		}
+		var body protocol.TaskEventBody
+		if err := json.Unmarshal(evt.Body, &body); err != nil {
+			t.Fatalf("unmarshal task event body: %v", err)
+		}
+		if body.TaskID.String() != taskID || body.Task == nil || body.Task.Status != status {
+			t.Fatalf("task event body = %+v, want %s -> %s", body, taskID, status)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s event", protocol.EventTaskUpdated)
 	}
 }
 

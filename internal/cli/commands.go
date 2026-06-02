@@ -2701,9 +2701,9 @@ func ConfigSetCommand(deps *Dependencies, opts ConfigSetOptions) error {
 		}
 	case "issues.autoFinalizeOnClose":
 		if renderedValue == "true" {
-			fmt.Println("Closing an issue will stop its session and remove its worktree before status changes to closed.")
+			fmt.Println("Closing an issue will stop its session and remove its worktree before status changes to closed when close guards pass.")
 		} else {
-			fmt.Println("Closing an issue will only update status unless finalize/cleanup is requested explicitly.")
+			fmt.Println("Closing an issue will only update status after close guards pass. Use issue finalize or cleanup commands to remove sessions/worktrees first.")
 		}
 	}
 
