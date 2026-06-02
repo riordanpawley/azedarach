@@ -445,7 +445,7 @@ func TestTaskStatusExactKeyUsesDaemonClient(t *testing.T) {
 	}
 }
 
-func TestTaskStatusDoneWithAutoFinalizeRequiresConfirmation(t *testing.T) {
+func TestTaskStatusDoneRequiresCloseCleanupConfirmation(t *testing.T) {
 	var statusBody daemonclient.TaskStatusRequest
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -476,7 +476,6 @@ func TestTaskStatusDoneWithAutoFinalizeRequiresConfirmation(t *testing.T) {
 	}
 
 	m := newDaemonTestModel(transport)
-	m.config.Issues.AutoFinalizeOnClose = true
 	m.tasks = []domain.Task{{ID: "az-4", Status: domain.StatusInReview}}
 	m.nav.SelectTask("az-4", domain.StatusInReview.Column())
 
@@ -512,7 +511,7 @@ func TestTaskStatusDoneWithAutoFinalizeRequiresConfirmation(t *testing.T) {
 	if !ok {
 		t.Fatalf("result = %T, want taskStatusResultMsg", msg)
 	}
-	if status.previousStatus != domain.StatusInReview || status.newStatus != domain.StatusDone || !status.autoFinalized || status.err != nil {
+	if status.previousStatus != domain.StatusInReview || status.newStatus != domain.StatusDone || status.err != nil {
 		t.Fatalf("status result = %#v", status)
 	}
 	if statusBody.TaskID != "az-4" || statusBody.Status != domain.StatusDone {
@@ -8214,14 +8213,16 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 			t.Fatalf("bulk archive result = %#v", archiveMsg)
 		}
 
-		if got := transport.requests; len(got) != 5 {
+		if got := transport.requests; len(got) != 7 {
 			t.Fatalf("requests = %v", got)
 		}
-		if transport.requests[0] != daemonclient.CommandTaskUpdateStatus ||
+		if transport.requests[0] != daemonclient.CommandTaskList ||
 			transport.requests[1] != daemonclient.CommandTaskUpdateStatus ||
-			transport.requests[2] != daemonclient.CommandTaskDelete ||
-			transport.requests[3] != daemonclient.CommandTaskDelete ||
-			transport.requests[4] != daemonclient.CommandTaskArchive {
+			transport.requests[2] != daemonclient.CommandTaskList ||
+			transport.requests[3] != daemonclient.CommandTaskUpdateStatus ||
+			transport.requests[4] != daemonclient.CommandTaskDelete ||
+			transport.requests[5] != daemonclient.CommandTaskDelete ||
+			transport.requests[6] != daemonclient.CommandTaskArchive {
 			t.Fatalf("requests = %v", transport.requests)
 		}
 	})
@@ -8346,7 +8347,7 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		}
 	})
 
-	t.Run("bulk done with auto finalize requires confirmation", func(t *testing.T) {
+	t.Run("bulk done requires close cleanup confirmation", func(t *testing.T) {
 		statusBodies := make([]daemonclient.TaskStatusRequest, 0, 2)
 		transport := &recordingDaemonTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -8380,7 +8381,6 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		}
 
 		m := newDaemonTestModel(transport)
-		m.config.Issues.AutoFinalizeOnClose = true
 		m.tasks = []domain.Task{
 			{ID: "az-1", Status: domain.StatusOpen},
 			{ID: "az-2", Status: domain.StatusInReview},

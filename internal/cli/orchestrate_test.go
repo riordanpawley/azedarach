@@ -209,7 +209,7 @@ func TestEvaluateOrchestrateCompleteCheck_Failures(t *testing.T) {
 	if len(result.Advice) == 0 {
 		t.Fatalf("advice = empty, want remediation commands")
 	}
-	if joined := strings.Join(result.Advice, "\n"); !strings.Contains(joined, "az orchestrate close-session --issue az-3") || !strings.Contains(joined, "az issue close --id az-2 --yes") {
+	if joined := strings.Join(result.Advice, "\n"); !strings.Contains(joined, "az orchestrate close-session --issue az-3") || !strings.Contains(joined, "az issue close --id az-2 --cleanup") {
 		t.Fatalf("advice = %+v, want close-session and cleanup-close guidance", result.Advice)
 	}
 }
@@ -523,7 +523,7 @@ func TestOrchestrateIntegrateCommandPrintsGuidance(t *testing.T) {
 	output := captureStdout(t, func() error {
 		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2"})
 	})
-	for _, want := range []string{"Worktree: /repo-az-2", "az branch merge az-2", "az issue close --id az-2 --yes"} {
+	for _, want := range []string{"Worktree: /repo-az-2", "az branch merge az-2", "az issue close --id az-2 --cleanup"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
 		}
@@ -599,7 +599,7 @@ func TestOrchestrateIntegrateCommandBlocksMergeWithoutCompletionEvidence(t *test
 	if strings.Contains(output, "az branch merge az-2") {
 		t.Fatalf("output unexpectedly suggests branch merge:\n%s", output)
 	}
-	if strings.Contains(output, "az issue close --id az-2 --yes") || strings.Contains(output, "az orchestrate close-session --issue az-2") {
+	if strings.Contains(output, "az issue close --id az-2 --cleanup") || strings.Contains(output, "az orchestrate close-session --issue az-2") {
 		t.Fatalf("output unexpectedly suggests close/cleanup while blocked:\n%s", output)
 	}
 }
@@ -791,7 +791,7 @@ func TestOrchestrateCloseSessionCommandStopsSession(t *testing.T) {
 	if gotCommand != commandSessionStop {
 		t.Fatalf("command = %q, want %q", gotCommand, commandSessionStop)
 	}
-	if !strings.Contains(output, "az issue close --id az-2 --yes") {
+	if !strings.Contains(output, "az issue close --id az-2 --cleanup") {
 		t.Fatalf("output = %q, want cleanup-close guidance", output)
 	}
 }

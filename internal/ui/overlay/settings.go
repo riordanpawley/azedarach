@@ -924,7 +924,6 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 	notificationsCompletedTask := true
 	notificationsFailedTask := true
 	notificationsErrorThreshold := 3
-	issuesAutoFinalizeOnClose := false
 	worktreeAutoCleanup := true
 	worktreeKeepDays := 7
 	specEnabled := true
@@ -950,7 +949,6 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 		notificationsCompletedTask = cfg.Notifications.CompletedTask
 		notificationsFailedTask = cfg.Notifications.FailedTask
 		notificationsErrorThreshold = cfg.Notifications.ErrorThreshold
-		issuesAutoFinalizeOnClose = cfg.Issues.AutoFinalizeOnClose
 		worktreeAutoCleanup = cfg.Worktree.AutoCleanup
 		worktreeKeepDays = cfg.Worktree.KeepDays
 		specEnabled = cfg.Spec.Enabled
@@ -1507,26 +1505,6 @@ func NewSettingsOverlayWithEditorAndConfigTarget(editor interface {
 					return
 				}
 				cfg.Notifications.ErrorThreshold = parseIntChoice(value, cfg.Notifications.ErrorThreshold)
-			},
-		},
-		{
-			Key:   "issues-auto-finalize-on-close",
-			Group: "Issues",
-			Label: "Finalize on close",
-			Type:  SettingToggle,
-			Value: issuesAutoFinalizeOnClose,
-			ConfigPath: []string{
-				"issues",
-				"autoFinalizeOnClose",
-			},
-			SaveTarget: saveTargetFor([]string{"issues", "autoFinalizeOnClose"}),
-			OnChange: func(value any) {
-				if cfg == nil {
-					return
-				}
-				if v, ok := value.(bool); ok {
-					cfg.Issues.AutoFinalizeOnClose = v
-				}
 			},
 		},
 		{

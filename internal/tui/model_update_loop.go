@@ -1422,15 +1422,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(2 * time.Second),
 		})
 
-		if msg.newStatus == domain.StatusDone && !msg.autoFinalized {
-			if session := m.sessionForIssue(msg.taskID); session != nil {
-				return m, tea.Batch(
-					m.scheduleIssuesRefreshCmd(),
-					m.openPROverlayCmd(session.Worktree, msg.taskID),
-				)
-			}
-		}
-
 		return m, m.scheduleIssuesRefreshCmd()
 
 	case bulkStatusResultMsg:

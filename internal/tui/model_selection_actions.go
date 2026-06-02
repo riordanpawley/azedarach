@@ -25,16 +25,16 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 		return m, m.bulkMoveStatusCmd(msg.SelectedIDs, -1)
 
 	case "l": // Move right (next status)
-		closeTaskIDs := m.bulkMoveAutoFinalizeCloseTaskIDs(msg.SelectedIDs, 1)
+		closeTaskIDs := m.bulkMoveCloseCleanupTaskIDs(msg.SelectedIDs, 1)
 		if len(closeTaskIDs) > 0 {
-			pending := pendingAutoFinalizeCloseConfirmation{
+			pending := pendingCloseCleanupConfirmation{
 				taskIDs:      append([]string(nil), msg.SelectedIDs...),
 				closeTaskIDs: append([]string(nil), closeTaskIDs...),
 				bulkMode:     "move",
 				delta:        1,
 			}
 			m.pendingClose = &pending
-			return m, m.confirmAutoFinalizeCloseCmd(pending)
+			return m, m.confirmCloseCleanupCmd(pending)
 		}
 		m.beginMutationFeedback(fmt.Sprintf("Bulk move queued for %d task(s)", count))
 		return m, m.bulkMoveStatusCmd(msg.SelectedIDs, 1)
@@ -52,18 +52,14 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusInReview)
 
 	case "D": // Set to Done
-		if m.statusMoveUsesAutoFinalize(domain.StatusDone) {
-			pending := pendingAutoFinalizeCloseConfirmation{
-				taskIDs:      append([]string(nil), msg.SelectedIDs...),
-				closeTaskIDs: append([]string(nil), msg.SelectedIDs...),
-				bulkMode:     "set",
-				targetStatus: domain.StatusDone,
-			}
-			m.pendingClose = &pending
-			return m, m.confirmAutoFinalizeCloseCmd(pending)
+		pending := pendingCloseCleanupConfirmation{
+			taskIDs:      append([]string(nil), msg.SelectedIDs...),
+			closeTaskIDs: append([]string(nil), msg.SelectedIDs...),
+			bulkMode:     "set",
+			targetStatus: domain.StatusDone,
 		}
-		m.beginMutationFeedback(fmt.Sprintf("Bulk status update queued for %d task(s)", count))
-		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusDone)
+		m.pendingClose = &pending
+		return m, m.confirmCloseCleanupCmd(pending)
 
 	case "d": // Delete selected
 		m.beginMutationFeedback(fmt.Sprintf("Bulk delete queued for %d task(s)", count))
@@ -589,14 +585,14 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		previousStatus := task.Status
-		if m.statusMoveUsesAutoFinalize(newStatus) {
-			pending := pendingAutoFinalizeCloseConfirmation{
+		if newStatus == domain.StatusDone {
+			pending := pendingCloseCleanupConfirmation{
 				taskID:         task.ID.String(),
 				previousStatus: previousStatus,
 				targetStatus:   newStatus,
 			}
 			m.pendingClose = &pending
-			return m, m.confirmAutoFinalizeCloseCmd(pending)
+			return m, m.confirmCloseCleanupCmd(pending)
 		}
 		m.applyOptimisticTaskStatus(task.ID.String(), newStatus)
 		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
@@ -621,14 +617,14 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		previousStatus := task.Status
-		if m.statusMoveUsesAutoFinalize(newStatus) {
-			pending := pendingAutoFinalizeCloseConfirmation{
+		if newStatus == domain.StatusDone {
+			pending := pendingCloseCleanupConfirmation{
 				taskID:         task.ID.String(),
 				previousStatus: previousStatus,
 				targetStatus:   newStatus,
 			}
 			m.pendingClose = &pending
-			return m, m.confirmAutoFinalizeCloseCmd(pending)
+			return m, m.confirmCloseCleanupCmd(pending)
 		}
 		m.applyOptimisticTaskStatus(task.ID.String(), newStatus)
 		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
@@ -646,14 +642,14 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		previousStatus := task.Status
-		if m.statusMoveUsesAutoFinalize(newStatus) {
-			pending := pendingAutoFinalizeCloseConfirmation{
+		if newStatus == domain.StatusDone {
+			pending := pendingCloseCleanupConfirmation{
 				taskID:         task.ID.String(),
 				previousStatus: previousStatus,
 				targetStatus:   newStatus,
 			}
 			m.pendingClose = &pending
-			return m, m.confirmAutoFinalizeCloseCmd(pending)
+			return m, m.confirmCloseCleanupCmd(pending)
 		}
 		m.applyOptimisticTaskStatus(task.ID.String(), newStatus)
 		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)

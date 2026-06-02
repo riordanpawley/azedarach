@@ -576,7 +576,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
-	t.Run("status update auto-finalizes before closing", func(t *testing.T) {
+	t.Run("status update cleans runtime before closing", func(t *testing.T) {
 		commands := []string{}
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -617,7 +617,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
-		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{AutoFinalizeOnClose: true})
+		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{CleanupBeforeClose: true})
 		if err != nil {
 			t.Fatalf("UpdateTaskStatusWithOptions error: %v", err)
 		}
@@ -627,7 +627,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
-	t.Run("status update does not auto-finalize non-closed status", func(t *testing.T) {
+	t.Run("status update does not cleanup non-closed status", func(t *testing.T) {
 		commands := []string{}
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -643,7 +643,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
-		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusInProgress, TaskStatusOptions{AutoFinalizeOnClose: true})
+		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusInProgress, TaskStatusOptions{CleanupBeforeClose: true})
 		if err != nil {
 			t.Fatalf("UpdateTaskStatusWithOptions error: %v", err)
 		}
@@ -652,7 +652,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
-	t.Run("status update leaves issue unclosed when auto-finalize cleanup fails", func(t *testing.T) {
+	t.Run("status update leaves issue unclosed when cleanup cleanup fails", func(t *testing.T) {
 		commands := []string{}
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -695,7 +695,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
-		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{AutoFinalizeOnClose: true})
+		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{CleanupBeforeClose: true})
 		if err == nil || !strings.Contains(err.Error(), "remove worktree before closing az-3") {
 			t.Fatalf("UpdateTaskStatusWithOptions error = %v, want worktree cleanup failure", err)
 		}
@@ -763,7 +763,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				}
 
 				client := New(transport).WithProjectID(wantProjectID)
-				err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{AutoFinalizeOnClose: true})
+				err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{CleanupBeforeClose: true})
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) || !strings.Contains(err.Error(), "Next:") || !strings.Contains(err.Error(), "commit, discard, or merge the worktree changes first") {
 					t.Fatalf("UpdateTaskStatusWithOptions error = %v, want %q and recovery hint", err, tt.wantErr)
 				}
@@ -814,8 +814,8 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
-		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{AutoFinalizeOnClose: true})
-		if err == nil || !strings.Contains(err.Error(), "unresolved child issues remain") || !strings.Contains(err.Error(), "az-4 (worktree)") || !strings.Contains(err.Error(), "az-5 (open)") || !strings.Contains(err.Error(), "close or clean up the listed child issues first") || !strings.Contains(err.Error(), "Moved closed blockers back for cleanup: az-4 -> in_review") || strings.Contains(err.Error(), "az issue close --id az-3 --yes") {
+		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{CleanupBeforeClose: true})
+		if err == nil || !strings.Contains(err.Error(), "unresolved child issues remain") || !strings.Contains(err.Error(), "az-4 (worktree)") || !strings.Contains(err.Error(), "az-5 (open)") || !strings.Contains(err.Error(), "close or clean up the listed child issues first") || !strings.Contains(err.Error(), "Moved closed blockers back for cleanup: az-4 -> in_review") || strings.Contains(err.Error(), "az issue close --id az-3 --cleanup") {
 			t.Fatalf("UpdateTaskStatusWithOptions error = %v, want child close guard", err)
 		}
 		wantCommands := []string{CommandTaskList, CommandTaskUpdateStatus}
@@ -866,7 +866,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
-		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{AutoFinalizeOnClose: true})
+		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{CleanupBeforeClose: true})
 		if err == nil || !strings.Contains(err.Error(), "worktree has local changes: main.go") || !strings.Contains(err.Error(), "Moved closed blockers back for cleanup: az-3 -> in_progress") {
 			t.Fatalf("UpdateTaskStatusWithOptions error = %v, want dirty guard and status repair", err)
 		}

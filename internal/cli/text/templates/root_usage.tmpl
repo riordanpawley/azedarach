@@ -36,8 +36,8 @@ Commands:
   issue doctor [--project <project-id>] [--id <id>] [--json] [<id>]  Run integrity checks for one issue
   issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create an issue (auto-parent when AZEDARACH_ISSUE_ID is set)
   issue split [--project <project-id>] [--parent <id>] [--impl <implementation> ...] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create an isolated child issue/session for later parent-side merge
-  issue update [--project <project-id>] [--id <id>] [--json] [<id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields (`--update-impl` only changes implementation assignments)
-  issue close [--project <project-id>] [--id <id>|-i <id>] [--json] [--yes] [--force-worktree] [<id>]  Close an issue; --yes confirms session/worktree cleanup first
+  issue update [--project <project-id>] [--id <id>] [--json] [<id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--cleanup] [--force-worktree] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields (`--cleanup` runs cleanup when setting closed)
+  issue close [--project <project-id>] [--id <id>|-i <id>] [--json] [--cleanup] [--force-worktree] [<id>]  Close an issue; --cleanup runs required session/worktree cleanup
   issue delete [--project <project-id>] [--id <id>] [--json] [<id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]  Permanently delete an issue
   issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]  Attach an image to an issue
   issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]  Remove an image attachment from an issue
@@ -85,11 +85,12 @@ Examples:
   az issue create --deferred "Investigate later"  # deferred follow-up (defaults priority to P4)
   az issue update --id az-123 --status in_progress --title "Renamed task" --priority P1
   az issue update --id az-123 --status in_review  # ready for review/integration, not blocked
+  az issue update --id az-123 --status closed --cleanup
   az issue update --id az-123 --update-impl go-bubbletea
   az issue update --id az-123 --append-notes "Follow-up detail"
   az issue update --id az-123 --notes "Replacement notes"
-  az issue close --id az-123
-  az issue close --id az-123 --yes
+  az issue close --id az-123        # closes only when already clean
+  az issue close --id az-123 --cleanup  # runs required cleanup first
   az issue delete az-123 --confirm --cleanup
   az issue delete --id az-123 --confirm
   az issue image add --issue-id az-123 --path ./screenshot.png

@@ -160,9 +160,9 @@ flowchart TD
   J -->|No| K[AI Agent: Address review feedback]
   K --> H
   J -->|Yes| L[User/Reviewer: Merge PR]
-  L --> M[User or Azedarach: az issue close ISSUE]
+  L --> M[User or Azedarach: az issue close --id ISSUE --cleanup]
   G -->|Local only| N[User: Keep changes local]
-  N --> O[User: az issue update status]
+  N --> O[User: az issue update --status in_review]
 ```
 
 ### User Flow: Local-Only Delivery
@@ -178,8 +178,12 @@ flowchart TD
   E -->|Yes| H[AI Agent or User: Commit locally]
   H --> I{User: Task complete?}
   I -->|No| D
-  I -->|Yes| J[User: az issue close ISSUE]
+  I -->|Yes| J[User: az issue close --id ISSUE --cleanup]
 ```
+
+Plain `az issue close --id ISSUE` is still useful as a guarded close for issues
+that are already clean. When sessions or worktrees may exist, pass `--cleanup` to
+run the required cleanup before the daemon writes the closed status.
 
 ### Agent Flow: TUI-Managed Session
 

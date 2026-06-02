@@ -766,7 +766,7 @@ func TestTaskUpdateStatusClosePreflightBlocksRawRuntimeAttachments(t *testing.T)
 	if err != nil {
 		t.Fatalf("handleTaskUpdateStatus error: %v", err)
 	}
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "issue still has a worktree") || !strings.Contains(resp.Error.Message, "Next:") || !strings.Contains(resp.Error.Message, "az issue close --id "+taskID+" --yes") {
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "issue still has a worktree") || !strings.Contains(resp.Error.Message, "Next:") || !strings.Contains(resp.Error.Message, "az issue close --id "+taskID+" --cleanup") {
 		t.Fatalf("task.update_status response = %+v, want worktree close guard", resp)
 	}
 	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
@@ -781,9 +781,8 @@ func TestTaskUpdateStatusClosePreflightBlocksRawRuntimeAttachments(t *testing.T)
 		t.Fatalf("clear worktree projection before skip close: %v", err)
 	}
 	body, err = json.Marshal(map[string]any{
-		"task_id":              taskID,
-		"status":               domain.StatusDone,
-		"skip_close_preflight": true,
+		"task_id": taskID,
+		"status":  domain.StatusDone,
 	})
 	if err != nil {
 		t.Fatalf("marshal skip task update request: %v", err)
@@ -936,14 +935,13 @@ func TestTaskUpdateStatusClosePreflightBlocksRawUnresolvedChildrenAndApplyPath(t
 	if err != nil {
 		t.Fatalf("handleTaskUpdateStatus error: %v", err)
 	}
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") || !strings.Contains(resp.Error.Message, "close or clean up the listed child issues first") || strings.Contains(resp.Error.Message, "az issue close --id "+parentID+" --yes") {
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") || !strings.Contains(resp.Error.Message, "close or clean up the listed child issues first") || strings.Contains(resp.Error.Message, "az issue close --id "+parentID+" --cleanup") {
 		t.Fatalf("task.update_status response = %+v, want child close guard", resp)
 	}
 
 	body, err = json.Marshal(map[string]any{
-		"task_id":              parentID,
-		"status":               domain.StatusDone,
-		"skip_close_preflight": true,
+		"task_id": parentID,
+		"status":  domain.StatusDone,
 	})
 	if err != nil {
 		t.Fatalf("marshal skip task update request: %v", err)
@@ -959,7 +957,7 @@ func TestTaskUpdateStatusClosePreflightBlocksRawUnresolvedChildrenAndApplyPath(t
 	if err != nil {
 		t.Fatalf("handleTaskUpdateStatus skip error: %v", err)
 	}
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") || !strings.Contains(resp.Error.Message, "close or clean up the listed child issues first") || strings.Contains(resp.Error.Message, "az issue close --id "+parentID+" --yes") {
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") || !strings.Contains(resp.Error.Message, "close or clean up the listed child issues first") || strings.Contains(resp.Error.Message, "az issue close --id "+parentID+" --cleanup") {
 		t.Fatalf("task.update_status skip response = %+v, want child close guard", resp)
 	}
 

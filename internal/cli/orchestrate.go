@@ -72,7 +72,7 @@ type OrchestrateCloseSessionOptions struct {
 }
 
 func issueCloseYesCommand(issueID string) string {
-	return fmt.Sprintf("az issue close --id %s --yes", issueID)
+	return fmt.Sprintf("az issue close --id %s --cleanup", issueID)
 }
 
 type orchestrateStatusResult struct {
@@ -892,7 +892,7 @@ func applyOrchestrateIntegration(deps *Dependencies, issueID string, mergeReady 
 		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "remove_worktree", Status: "success"})
 	}
 
-	if err := deps.DaemonClient.UpdateTaskStatusWithOptions(cleanupCtx, issueID, domain.StatusDone, daemonclient.TaskStatusOptions{SkipClosePreflight: true}); err != nil {
+	if err := deps.DaemonClient.UpdateTaskStatus(cleanupCtx, issueID, domain.StatusDone); err != nil {
 		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "close_issue", Status: "failed", Error: err.Error()})
 		failures = append(failures, fmt.Sprintf("close issue: %v", err))
 	} else {

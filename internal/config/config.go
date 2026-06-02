@@ -135,9 +135,8 @@ type NotifyConfig struct {
 
 // IssuesConfig contains issue store settings (legacy key name retained for compatibility)
 type IssuesConfig struct {
-	Path                string `json:"path"`
-	SyncInterval        int    `json:"syncInterval"`
-	AutoFinalizeOnClose bool   `json:"autoFinalizeOnClose"`
+	Path         string `json:"path"`
+	SyncInterval int    `json:"syncInterval"`
 }
 
 // NetworkConfig contains network-related settings

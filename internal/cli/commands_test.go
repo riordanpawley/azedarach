@@ -2998,7 +2998,7 @@ func TestConfigSetCommandWritesLatencyTraceConfig(t *testing.T) {
 	}
 }
 
-func TestConfigSetCommandWritesAutoFinalizeOnCloseConfig(t *testing.T) {
+func TestConfigSetCommandRejectsRemovedCloseCleanupConfig(t *testing.T) {
 	projectDir := t.TempDir()
 
 	deps := &Dependencies{
@@ -3009,19 +3009,9 @@ func TestConfigSetCommandWritesAutoFinalizeOnCloseConfig(t *testing.T) {
 		RepoDir:      projectDir,
 	}
 
-	output := captureStdout(t, func() error {
-		return ConfigSetCommand(deps, ConfigSetOptions{Key: "issues.autoFinalizeOnClose", Value: "yes"})
-	})
-
-	if !strings.Contains(output, "issues.autoFinalizeOnClose=true") {
-		t.Fatalf("config output missing issues update: %q", output)
-	}
-	cfg, err := config.LoadConfig(projectDir)
-	if err != nil {
-		t.Fatalf("LoadConfig() error = %v", err)
-	}
-	if !cfg.Issues.AutoFinalizeOnClose {
-		t.Fatalf("Issues.AutoFinalizeOnClose = false, want true")
+	err := ConfigSetCommand(deps, ConfigSetOptions{Key: "issues.autoFinalizeOnClose", Value: "yes"})
+	if err == nil || !strings.Contains(err.Error(), "Unsupported config key") || strings.Contains(err.Error(), "Supported keys: spec.enabled, diagnostics.latencyTrace, issues.autoFinalizeOnClose") {
+		t.Fatalf("ConfigSetCommand error = %v, want removed setting rejected", err)
 	}
 }
 
@@ -3764,12 +3754,12 @@ func TestParseIssueCloseArgs(t *testing.T) {
 		{
 			name:        "missing id",
 			args:        []string{},
-			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--yes] [--force-worktree] [<issue-id>]",
+			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--cleanup] [--force-worktree] [<issue-id>]",
 		},
 		{
 			name:        "extra args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--yes] [--force-worktree] [<issue-id>]",
+			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--cleanup] [--force-worktree] [<issue-id>]",
 		},
 		{
 			name: "named id",
@@ -3783,18 +3773,18 @@ func TestParseIssueCloseArgs(t *testing.T) {
 		},
 		{
 			name: "confirmed cleanup",
-			args: []string{"--id", "az-2", "--yes", "--json"},
-			want: IssueCloseOptions{IssueID: "az-2", Confirm: true, JSON: true},
+			args: []string{"--id", "az-2", "--cleanup", "--json"},
+			want: IssueCloseOptions{IssueID: "az-2", Cleanup: true, JSON: true},
 		},
 		{
 			name: "force cleanup",
-			args: []string{"--id", "az-2", "--yes", "--force-worktree", "--json"},
-			want: IssueCloseOptions{IssueID: "az-2", Confirm: true, ForceWorktree: true, JSON: true},
+			args: []string{"--id", "az-2", "--cleanup", "--force-worktree", "--json"},
+			want: IssueCloseOptions{IssueID: "az-2", Cleanup: true, ForceWorktree: true, JSON: true},
 		},
 		{
-			name:        "force requires yes",
+			name:        "force requires cleanup",
 			args:        []string{"--id", "az-2", "--force-worktree"},
-			errContains: "--force-worktree requires --yes",
+			errContains: "--force-worktree requires --cleanup",
 		},
 		{
 			name: "interspersed named id overrides positional",
@@ -3949,6 +3939,29 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 					Status:  &status,
 				}
 			}(),
+		},
+		{
+			name: "confirmed close cleanup",
+			args: []string{"az-1", "--status", "closed", "--cleanup", "--force-worktree"},
+			want: func() IssueUpdateOptions {
+				status := domain.StatusDone
+				return IssueUpdateOptions{
+					IssueID:       "az-1",
+					Status:        &status,
+					Cleanup:       true,
+					ForceWorktree: true,
+				}
+			}(),
+		},
+		{
+			name:        "confirm only applies to closed status",
+			args:        []string{"az-1", "--status", "in_review", "--cleanup"},
+			errContains: "--cleanup is only supported with --status closed",
+		},
+		{
+			name:        "force worktree requires confirmation",
+			args:        []string{"az-1", "--status", "closed", "--force-worktree"},
+			errContains: "--force-worktree requires --cleanup",
 		},
 	}
 	for _, tt := range tests {
@@ -5841,6 +5854,8 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 						CompletedAt:     req.SentAt,
 						Body:            taskListBody,
 					}, nil
+				case daemonclient.CommandGitStatus:
+					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{HasChanges: false}}), nil
 				case commandSessionStop:
 					return responseWithOutput(req, "Session not found in tmux: az-9\n✓ Session marked stopped: az-9\n"), nil
 				case daemonclient.CommandWorktreeRemove:
@@ -5881,7 +5896,7 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 	output := captureStdout(t, func() error {
 		return IssueCloseCommand(deps, IssueCloseOptions{
 			IssueID:       "az-9",
-			Confirm:       true,
+			Cleanup:       true,
 			ForceWorktree: true,
 		})
 	})
@@ -5898,7 +5913,7 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 	if !removeWorktreeForce {
 		t.Fatal("worktree remove force = false, want true")
 	}
-	if !strings.Contains(output, "Closed issue: az-9") || !strings.Contains(output, "- Worktree removed") {
+	if !strings.Contains(output, "Closed issue: az-9") || !strings.Contains(output, "- Cleanup requested") {
 		t.Fatalf("output = %q", output)
 	}
 }
@@ -6771,6 +6786,106 @@ func TestIssueUpdateCommandUsesDaemonTaskUpdateCommand(t *testing.T) {
 	}
 }
 
+func TestIssueUpdateCommandConfirmedClosedCleansBeforeStatus(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	status := domain.StatusDone
+	commands := make([]string, 0, 5)
+	var statusReq daemonclient.TaskStatusRequest
+	var removeForce bool
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{
+			ID:             "az-1",
+			Title:          "Ready",
+			Type:           domain.TypeTask,
+			Priority:       domain.P2,
+			Status:         domain.StatusInReview,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+			HasTmuxSession: true,
+			HasWorktree:    true,
+			Session:        &domain.Session{IssueID: naming.IssueID("az-1"), Worktree: "/tmp/az-1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskUpdate:
+					return responseWithJSON(req, map[string]any{}), nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            taskListBody,
+					}, nil
+				case daemonclient.CommandGitStatus:
+					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{HasChanges: false}}), nil
+				case commandSessionStop:
+					return responseWithOutput(req, "stopped\n"), nil
+				case daemonclient.CommandWorktreeRemove:
+					var body struct {
+						Force bool `json:"force"`
+					}
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal worktree remove body: %v", err)
+					}
+					removeForce = body.Force
+					return responseWithJSON(req, map[string]any{}), nil
+				case daemonclient.CommandTaskUpdateStatus:
+					if err := json.Unmarshal(req.Body, &statusReq); err != nil {
+						t.Fatalf("unmarshal status body: %v", err)
+					}
+					return responseWithJSON(req, map[string]any{}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueUpdateCommand(deps, IssueUpdateOptions{
+			IssueID:       "az-1",
+			Status:        &status,
+			Cleanup:       true,
+			ForceWorktree: true,
+		})
+	})
+
+	wantCommands := []string{
+		daemonclient.CommandTaskList,
+		daemonclient.CommandTaskUpdate,
+		daemonclient.CommandTaskList,
+		commandSessionStop,
+		daemonclient.CommandWorktreeRemove,
+		daemonclient.CommandTaskUpdateStatus,
+	}
+	if !reflect.DeepEqual(commands, wantCommands) {
+		t.Fatalf("commands = %v, want %v", commands, wantCommands)
+	}
+	if statusReq.TaskID != "az-1" || statusReq.Status != domain.StatusDone {
+		t.Fatalf("status request = %+v, want confirmed closed status", statusReq)
+	}
+	if !removeForce {
+		t.Fatal("worktree remove force = false, want true")
+	}
+	if !strings.Contains(output, "Updated issue: az-1") {
+		t.Fatalf("output = %q", output)
+	}
+}
+
 func TestIssueUpdateCommandReplacesNotesWhenRequested(t *testing.T) {
 	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	var gotUpdateReq protocol.RequestEnvelope
@@ -7434,7 +7549,7 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if strings.Contains(output, "issue status --impl <implementation>") {
 		t.Fatalf("usage should not include issue status command: %q", output)
 	}
-	if !strings.Contains(output, "issue close [--project <project-id>] [--id <id>|-i <id>] [--json] [--yes] [--force-worktree] [<id>]") {
+	if !strings.Contains(output, "issue close [--project <project-id>] [--id <id>|-i <id>] [--json] [--cleanup] [--force-worktree] [<id>]") {
 		t.Fatalf("usage missing issue close command: %q", output)
 	}
 	if strings.Contains(output, "finalize") {

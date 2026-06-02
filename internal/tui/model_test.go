@@ -5184,7 +5184,7 @@ func TestBulkStatusSummaryDetectsCloseGuardGuidance(t *testing.T) {
 			name: "close guard failure",
 			issues: []bulkTaskIssue{{
 				taskID: "az-1",
-				reason: "cannot close issue: issue still has a worktree. Next: run az issue close --id az-1 --yes, " +
+				reason: "cannot close issue: issue still has a worktree. Next: run az issue close --id az-1 --cleanup, " +
 					"or clean up the worktree/session before closing.",
 			}},
 			want: true,
@@ -5216,8 +5216,8 @@ func TestBulkStatusSummaryDetectsCloseGuardGuidance(t *testing.T) {
 	}
 }
 
-func TestAutoFinalizeBulkMovePromptDescribesClosingSubset(t *testing.T) {
-	prompt := formatAutoFinalizeCloseConfirmPrompt(pendingAutoFinalizeCloseConfirmation{
+func TestCloseCleanupBulkMovePromptDescribesClosingSubset(t *testing.T) {
+	prompt := formatCloseCleanupConfirmPrompt(pendingCloseCleanupConfirmation{
 		taskIDs:      []string{"az-1", "az-2", "az-3"},
 		closeTaskIDs: []string{"az-3"},
 		bulkMode:     "move",
@@ -5366,7 +5366,6 @@ func TestHandleBulkActionShowsImmediateFeedback(t *testing.T) {
 		{name: "open", action: "o", wantToast: "Bulk status update queued for 2 task(s)"},
 		{name: "in progress", action: "i", wantToast: "Bulk status update queued for 2 task(s)"},
 		{name: "in review", action: "b", wantToast: "Bulk status update queued for 2 task(s)"},
-		{name: "done", action: "D", wantToast: "Bulk status update queued for 2 task(s)"},
 		{name: "delete", action: "d", wantToast: "Bulk delete queued for 2 task(s)"},
 		{name: "archive", action: "a", wantToast: "Bulk archive queued for 2 task(s)"},
 		{name: "cleanup", action: "w", wantToast: "Bulk cleanup preflight queued for 2 task(s)"},
@@ -5391,6 +5390,24 @@ func TestHandleBulkActionShowsImmediateFeedback(t *testing.T) {
 				t.Fatalf("toast = %q, want %q", got, tt.wantToast)
 			}
 		})
+	}
+}
+
+func TestHandleBulkDoneActionShowsCloseCleanupConfirmation(t *testing.T) {
+	m := newTestModel()
+	updatedAny, cmd := m.handleBulkAction(overlay.BulkActionMsg{
+		Action:      "D",
+		SelectedIDs: []string{"az-1", "az-2"},
+	})
+	if cmd == nil {
+		t.Fatal("expected confirmation command")
+	}
+	updated := updatedAny.(Model)
+	if updated.pendingClose == nil || updated.pendingClose.bulkMode != "set" || updated.pendingClose.targetStatus != domain.StatusDone {
+		t.Fatalf("pending close = %+v, want bulk done cleanup confirmation", updated.pendingClose)
+	}
+	if len(updated.toasts) != 0 {
+		t.Fatalf("toasts = %+v, want confirmation before queued feedback", updated.toasts)
 	}
 }
 

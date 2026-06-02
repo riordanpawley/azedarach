@@ -59,15 +59,14 @@ type TaskUpdateParams struct {
 
 // TaskStatusRequest contains the payload used to update a task status.
 type TaskStatusRequest struct {
-	TaskID             naming.IssueID `json:"task_id"`
-	Status             domain.Status  `json:"status"`
-	SkipClosePreflight bool           `json:"skip_close_preflight,omitempty"`
+	TaskID naming.IssueID `json:"task_id"`
+	Status domain.Status  `json:"status"`
 }
 
 // TaskStatusOptions controls client-side status transition behavior.
 type TaskStatusOptions struct {
-	AutoFinalizeOnClose bool
-	SkipClosePreflight  bool
+	CleanupBeforeClose bool
+	ForceWorktree      bool
 }
 
 // CloseGuardOptions controls which target runtime assets may remain because
@@ -444,24 +443,22 @@ func (c *Client) UpdateTaskStatusWithOptions(ctx context.Context, taskID string,
 	if err != nil {
 		return fmt.Errorf("invalid task id: %w", err)
 	}
-	skipClosePreflight := opts.SkipClosePreflight
-	if status == domain.StatusDone && opts.AutoFinalizeOnClose && !opts.SkipClosePreflight {
-		if err := c.cleanTaskRuntimeAttachmentsForClose(ctx, parsedTaskID.String()); err != nil {
+	if status == domain.StatusDone && opts.CleanupBeforeClose {
+		if err := c.cleanTaskRuntimeAttachmentsForClose(ctx, parsedTaskID.String(), opts.ForceWorktree); err != nil {
 			return err
 		}
-		skipClosePreflight = true
 	}
 	return c.commandJSON(ctx, CommandTaskUpdateStatus, TaskStatusRequest{
-		TaskID:             parsedTaskID,
-		Status:             status,
-		SkipClosePreflight: skipClosePreflight,
+		TaskID: parsedTaskID,
+		Status: status,
 	}, nil)
 }
 
-func (c *Client) cleanTaskRuntimeAttachmentsForClose(ctx context.Context, taskID string) error {
+func (c *Client) cleanTaskRuntimeAttachmentsForClose(ctx context.Context, taskID string, forceWorktree bool) error {
 	guard, err := c.ValidateTaskCloseWithOptions(ctx, taskID, CloseGuardOptions{
 		AllowTargetSession:  true,
 		AllowTargetWorktree: true,
+		ForceWorktree:       forceWorktree,
 	})
 	if err != nil {
 		return err
@@ -474,7 +471,7 @@ func (c *Client) cleanTaskRuntimeAttachmentsForClose(ctx context.Context, taskID
 		}
 	}
 	if closeGuardTaskHasWorktree(task) {
-		if err := c.RemoveWorktreeWithOptions(ctx, taskID, false); err != nil {
+		if err := c.RemoveWorktreeWithOptions(ctx, taskID, forceWorktree); err != nil {
 			return fmt.Errorf("remove worktree before closing %s: %w", taskID, err)
 		}
 	}
@@ -692,7 +689,7 @@ func closeGuardRecoveryHint(taskID string, reasons []string) string {
 		steps = append(steps, "close or clean up the listed child issues first")
 	}
 	if hasRuntime {
-		steps = append(steps, fmt.Sprintf("run `az issue close --id %s --yes` or stop sessions/remove worktrees manually", taskID))
+		steps = append(steps, fmt.Sprintf("run `az issue close --id %s --cleanup` or stop sessions/remove worktrees manually", taskID))
 	}
 	if len(steps) == 0 {
 		return "fix the listed blockers, refresh, then retry"
