@@ -292,7 +292,7 @@ const (
 	LocalConfigFileName  = "config.local.json"
 	ConfigSchemaFileName = "config.schema.json"
 	ConfigSchemaURL      = "https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json"
-	CurrentConfigVersion = 7
+	CurrentConfigVersion = 8
 )
 
 type configFileMetadata struct {
@@ -339,6 +339,11 @@ func loadConfigLayer(cfg *Config, configPath string) error {
 	if meta.Version > CurrentConfigVersion {
 		return fmt.Errorf("unsupported config version %d in %s (max supported %d)", meta.Version, configPath, CurrentConfigVersion)
 	}
+
+	data, err = NormalizeConfigFileJSON(data)
+	if err != nil {
+		return fmt.Errorf("failed to migrate %s: %w", configPath, err)
+	}
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return fmt.Errorf("failed to parse %s: %w", configPath, err)
 	}
@@ -373,9 +378,34 @@ func marshalConfigFile(cfg *Config) ([]byte, error) {
 	if err := json.Unmarshal(cfgJSON, &raw); err != nil {
 		return nil, err
 	}
+	NormalizeConfigFileRaw(raw)
+	return json.MarshalIndent(raw, "", "  ")
+}
+
+// NormalizeConfigFileJSON applies forward-compatible config file migrations to
+// a raw JSON object. It is intentionally tolerant of removed fields so old
+// project configs continue to load after schema cleanup.
+func NormalizeConfigFileJSON(data []byte) ([]byte, error) {
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	NormalizeConfigFileRaw(raw)
+	return json.Marshal(raw)
+}
+
+// NormalizeConfigFileRaw mutates a raw config JSON object to the current
+// schema version while removing retired keys that should not be preserved by
+// raw JSON writers.
+func NormalizeConfigFileRaw(raw map[string]any) {
+	if raw == nil {
+		return
+	}
+	if issues, ok := raw["issues"].(map[string]any); ok {
+		delete(issues, "autoFinalizeOnClose")
+	}
 	raw["$schema"] = ConfigSchemaURL
 	raw["$version"] = CurrentConfigVersion
-	return json.MarshalIndent(raw, "", "  ")
 }
 
 func ResolveConfigBase(startPath string) (string, error) {

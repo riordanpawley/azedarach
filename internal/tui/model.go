@@ -144,6 +144,7 @@ type Model struct {
 	pendingCleanupOps  map[string]pendingWorktreeCleanupConfirmation
 	pendingCleanup     *pendingWorktreeCleanupConfirmation
 	pendingBulkCleanup *pendingBulkCleanupConfirmation
+	pendingClose       *pendingCloseCleanupConfirmation
 
 	// Navigation (using NavigationService)
 	nav *navigation.Service
@@ -2970,6 +2971,16 @@ type pendingBulkCleanupConfirmation struct {
 	deletedTasks bool
 }
 
+type pendingCloseCleanupConfirmation struct {
+	taskID         string
+	taskIDs        []string
+	closeTaskIDs   []string
+	previousStatus domain.Status
+	targetStatus   domain.Status
+	bulkMode       string
+	delta          int
+}
+
 type refreshTaskWorkspaceResultMsg struct {
 	projectID     string
 	revision      uint64
@@ -3766,7 +3777,12 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "daemon client unavailable"})
 				continue
 			}
-			err := m.daemonClient.UpdateTaskStatus(ctx, taskID, newStatus)
+			var err error
+			if newStatus == domain.StatusDone {
+				err = m.closeTaskWithIntegrationAndCleanup(ctx, taskID)
+			} else {
+				err = m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, newStatus, taskStatusOptionsForStatus(newStatus))
+			}
 			if err != nil {
 				failed++
 				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: err.Error()})
@@ -3983,7 +3999,12 @@ func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd 
 				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "daemon client unavailable"})
 				continue
 			}
-			err := m.daemonClient.UpdateTaskStatus(ctx, taskID, status)
+			var err error
+			if status == domain.StatusDone {
+				err = m.closeTaskWithIntegrationAndCleanup(ctx, taskID)
+			} else {
+				err = m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, status, taskStatusOptionsForStatus(status))
+			}
 			if err != nil {
 				failed++
 				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: err.Error()})
@@ -4038,6 +4059,19 @@ func summarizeBulkIssues(issues []bulkTaskIssue) string {
 		parts = append(parts, fmt.Sprintf("%s: %s", item.taskID, item.reason))
 	}
 	return strings.Join(parts, "; ")
+}
+
+func bulkStatusSummaryHasCloseGuardGuidance(issues []bulkTaskIssue) bool {
+	for _, item := range issues {
+		reason := strings.ToLower(item.reason)
+		if strings.Contains(reason, "cannot close issue") ||
+			strings.Contains(reason, "next:") ||
+			strings.Contains(reason, "close guard") ||
+			strings.Contains(reason, "moved closed blockers back for cleanup") {
+			return true
+		}
+	}
+	return false
 }
 
 func formatBulkCleanupPreflightPrompt(msg bulkCleanupPreflightMsg) string {
@@ -4162,7 +4196,12 @@ func (m Model) moveTaskStatusCmd(taskID string, previousStatus, newStatus domain
 				err:            fmt.Errorf("daemon client unavailable"),
 			}
 		}
-		err := m.daemonClient.UpdateTaskStatus(ctx, taskID, newStatus)
+		var err error
+		if newStatus == domain.StatusDone {
+			err = m.closeTaskWithIntegrationAndCleanup(ctx, taskID)
+		} else {
+			err = m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, newStatus, taskStatusOptionsForStatus(newStatus))
+		}
 		if err != nil {
 			return taskStatusResultMsg{
 				taskID:         taskID,
@@ -4219,6 +4258,57 @@ func exactTaskStatusForKey(key string) (domain.Status, bool) {
 	}
 }
 
+func (m Model) closeTaskWithIntegrationAndCleanup(ctx context.Context, taskID string) error {
+	if m.daemonClient == nil {
+		return fmt.Errorf("daemon client unavailable")
+	}
+	sourceWorktree, err := m.resolveIssueWorktreePath(ctx, taskID)
+	if err != nil {
+		if !strings.Contains(err.Error(), "worktree not found") {
+			return fmt.Errorf("resolve worktree before close: %w", err)
+		}
+	} else if strings.TrimSpace(sourceWorktree) != "" {
+		if err := closeIntegrationResultError(m.mergeToBaseCmd(sourceWorktree, taskID, false)()); err != nil {
+			return fmt.Errorf("integrate before close: %w", err)
+		}
+	}
+	return m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, domain.StatusDone, taskStatusOptionsForStatus(domain.StatusDone))
+}
+
+func closeIntegrationResultError(msg tea.Msg) error {
+	switch result := msg.(type) {
+	case mergeResultMsg:
+		if result.operationID != "" && !operationStateTerminal(result.state) {
+			return fmt.Errorf("merge queued as operation %s (%s); retry close after it completes", result.operationID, result.state)
+		}
+		if result.err != nil {
+			return result.err
+		}
+		if result.result == nil {
+			return fmt.Errorf("merge returned no result")
+		}
+		if result.result.HasConflicts {
+			return fmt.Errorf("merge conflicts: %s", strings.Join(result.result.ConflictFiles, ", "))
+		}
+		if !result.result.Success {
+			message := strings.TrimSpace(result.result.Message)
+			if message == "" {
+				message = "merge did not complete successfully"
+			}
+			return fmt.Errorf("%s", message)
+		}
+		return nil
+	case mergePreflightFailureMsg:
+		reasons := strings.Join(result.reasons, "; ")
+		if reasons == "" {
+			reasons = "merge preflight failed"
+		}
+		return fmt.Errorf("%s", reasons)
+	default:
+		return fmt.Errorf("unexpected merge result %T", msg)
+	}
+}
+
 func statusDisplayName(status domain.Status) string {
 	switch status {
 	case domain.StatusOpen:
@@ -4232,6 +4322,93 @@ func statusDisplayName(status domain.Status) string {
 	default:
 		return status.String()
 	}
+}
+
+func taskStatusOptionsForStatus(status domain.Status) daemonclient.TaskStatusOptions {
+	if status != domain.StatusDone {
+		return daemonclient.TaskStatusOptions{}
+	}
+	return daemonclient.TaskStatusOptions{CleanupBeforeClose: true}
+}
+
+func (m Model) bulkMoveNeedsCloseCleanupConfirmation(taskIDs []string, delta int) bool {
+	return len(m.bulkMoveCloseCleanupTaskIDs(taskIDs, delta)) > 0
+}
+
+func (m Model) bulkMoveCloseCleanupTaskIDs(taskIDs []string, delta int) []string {
+	closeTaskIDs := make([]string, 0, len(taskIDs))
+	for _, taskID := range taskIDs {
+		status, ok := m.taskStatusByID(taskID)
+		if !ok {
+			continue
+		}
+		next, ok := shiftedTaskStatus(status, delta)
+		if ok && next == domain.StatusDone {
+			closeTaskIDs = append(closeTaskIDs, taskID)
+		}
+	}
+	return closeTaskIDs
+}
+
+func (m Model) confirmCloseCleanupCmd(pending pendingCloseCleanupConfirmation) tea.Cmd {
+	title := "Confirm integrate and close?"
+	if pendingCloseCleanupCount(pending) > 1 {
+		title = "Confirm bulk integrate and close?"
+	}
+	return m.openOverlay(overlay.NewConfirmDialogExplicitYN(title, formatCloseCleanupConfirmPrompt(pending)))
+}
+
+func formatCloseCleanupConfirmPrompt(pending pendingCloseCleanupConfirmation) string {
+	closeCount := pendingCloseCleanupCount(pending)
+	selectedCount := len(pending.taskIDs)
+	count := closeCount
+	if count == 0 && strings.TrimSpace(pending.taskID) != "" {
+		count = 1
+	}
+	target := strings.TrimSpace(pending.taskID)
+	statusLine := "Status: closed"
+	if pending.bulkMode == "move" && selectedCount > 0 {
+		switch {
+		case closeCount == selectedCount:
+			target = fmt.Sprintf("%d selected tasks", selectedCount)
+		case closeCount > 0:
+			target = fmt.Sprintf("%d of %d selected tasks", closeCount, selectedCount)
+			statusLine = "Status: moving right; closing subset will close"
+		default:
+			target = fmt.Sprintf("%d selected tasks", selectedCount)
+			statusLine = "Status: moving right"
+		}
+	} else if count > 1 {
+		target = fmt.Sprintf("%d selected tasks", count)
+	}
+	if target == "" {
+		target = "selected task"
+	}
+	lines := []string{
+		"Closing issues integrates their branch, then cleans up sessions and worktrees.",
+		"",
+		fmt.Sprintf("Target: %s", target),
+		statusLine,
+		"",
+		"This may merge into the nearest non-closed ancestor branch, stop active sessions, and remove issue worktrees before closing.",
+		"Close guards still block dirty, ahead, conflicted, unmerged, or unresolved child work.",
+		"",
+		"Proceed?",
+	}
+	return strings.Join(lines, "\n")
+}
+
+func pendingCloseCleanupCount(pending pendingCloseCleanupConfirmation) int {
+	if len(pending.closeTaskIDs) > 0 {
+		return len(pending.closeTaskIDs)
+	}
+	if len(pending.taskIDs) > 0 {
+		return len(pending.taskIDs)
+	}
+	if strings.TrimSpace(pending.taskID) != "" {
+		return 1
+	}
+	return 0
 }
 
 func (m *Model) applyOptimisticTaskStatus(taskID string, status domain.Status) {

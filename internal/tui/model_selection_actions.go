@@ -25,6 +25,17 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 		return m, m.bulkMoveStatusCmd(msg.SelectedIDs, -1)
 
 	case "l": // Move right (next status)
+		closeTaskIDs := m.bulkMoveCloseCleanupTaskIDs(msg.SelectedIDs, 1)
+		if len(closeTaskIDs) > 0 {
+			pending := pendingCloseCleanupConfirmation{
+				taskIDs:      append([]string(nil), msg.SelectedIDs...),
+				closeTaskIDs: append([]string(nil), closeTaskIDs...),
+				bulkMode:     "move",
+				delta:        1,
+			}
+			m.pendingClose = &pending
+			return m, m.confirmCloseCleanupCmd(pending)
+		}
 		m.beginMutationFeedback(fmt.Sprintf("Bulk move queued for %d task(s)", count))
 		return m, m.bulkMoveStatusCmd(msg.SelectedIDs, 1)
 
@@ -41,8 +52,14 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusInReview)
 
 	case "D": // Set to Done
-		m.beginMutationFeedback(fmt.Sprintf("Bulk status update queued for %d task(s)", count))
-		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusDone)
+		pending := pendingCloseCleanupConfirmation{
+			taskIDs:      append([]string(nil), msg.SelectedIDs...),
+			closeTaskIDs: append([]string(nil), msg.SelectedIDs...),
+			bulkMode:     "set",
+			targetStatus: domain.StatusDone,
+		}
+		m.pendingClose = &pending
+		return m, m.confirmCloseCleanupCmd(pending)
 
 	case "d": // Delete selected
 		m.beginMutationFeedback(fmt.Sprintf("Bulk delete queued for %d task(s)", count))
@@ -347,6 +364,36 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if msg.Key == "yes" && m.pendingClose != nil {
+		pending := *m.pendingClose
+		m.pendingClose = nil
+		if len(pending.taskIDs) > 0 {
+			m.beginMutationFeedback(fmt.Sprintf("Bulk close queued for %d task(s)", len(pending.taskIDs)))
+			if pending.bulkMode == "move" {
+				return m, m.bulkMoveStatusCmd(pending.taskIDs, pending.delta)
+			}
+			return m, m.bulkSetStatusCmd(pending.taskIDs, pending.targetStatus)
+		}
+		m.applyOptimisticTaskStatus(pending.taskID, pending.targetStatus)
+		return m, m.moveTaskStatusCmd(pending.taskID, pending.previousStatus, pending.targetStatus)
+	}
+	if msg.Key == "no" && m.pendingClose != nil {
+		pending := *m.pendingClose
+		m.pendingClose = nil
+		target := pending.taskID
+		if len(pending.taskIDs) > 1 {
+			target = fmt.Sprintf("%d tasks", len(pending.taskIDs))
+		} else if len(pending.taskIDs) == 1 {
+			target = pending.taskIDs[0]
+		}
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: fmt.Sprintf("Cancelled integrate and close for %s", target),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+	}
+
 	task, session := m.getCurrentTaskAndSession()
 	if selectionTaskID != "" {
 		if selectedTask, selectedSession, ok := m.taskAndSessionByID(selectionTaskID); ok {
@@ -538,6 +585,15 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		previousStatus := task.Status
+		if newStatus == domain.StatusDone {
+			pending := pendingCloseCleanupConfirmation{
+				taskID:         task.ID.String(),
+				previousStatus: previousStatus,
+				targetStatus:   newStatus,
+			}
+			m.pendingClose = &pending
+			return m, m.confirmCloseCleanupCmd(pending)
+		}
 		m.applyOptimisticTaskStatus(task.ID.String(), newStatus)
 		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
 
@@ -561,6 +617,15 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		previousStatus := task.Status
+		if newStatus == domain.StatusDone {
+			pending := pendingCloseCleanupConfirmation{
+				taskID:         task.ID.String(),
+				previousStatus: previousStatus,
+				targetStatus:   newStatus,
+			}
+			m.pendingClose = &pending
+			return m, m.confirmCloseCleanupCmd(pending)
+		}
 		m.applyOptimisticTaskStatus(task.ID.String(), newStatus)
 		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
 	case "1", "2", "3", "4":
@@ -577,6 +642,15 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		previousStatus := task.Status
+		if newStatus == domain.StatusDone {
+			pending := pendingCloseCleanupConfirmation{
+				taskID:         task.ID.String(),
+				previousStatus: previousStatus,
+				targetStatus:   newStatus,
+			}
+			m.pendingClose = &pending
+			return m, m.confirmCloseCleanupCmd(pending)
+		}
 		m.applyOptimisticTaskStatus(task.ID.String(), newStatus)
 		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
 	case "e":

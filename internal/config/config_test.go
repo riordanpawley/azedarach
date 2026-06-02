@@ -556,6 +556,38 @@ func TestSaveConfigWritesSchemaAndVersion(t *testing.T) {
 	require.Len(t, initRaw, 0)
 }
 
+func TestSaveConfigMigratesRetiredIssueAutoFinalizeSetting(t *testing.T) {
+	root := t.TempDir()
+	cfgPath := writeConfigFile(t, root, `{
+  "$schema": "./config.schema.json",
+  "$version": 7,
+  "issues": {
+    "path": ".azedarach",
+    "syncInterval": 120,
+    "autoFinalizeOnClose": true
+  }
+}`)
+
+	cfg, err := LoadConfig(root)
+	require.NoError(t, err)
+	assert.Equal(t, ".azedarach", cfg.Issues.Path)
+	assert.Equal(t, 120, cfg.Issues.SyncInterval)
+
+	require.NoError(t, SaveConfig(cfg, cfgPath))
+
+	data, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+	assert.Equal(t, float64(CurrentConfigVersion), raw["$version"])
+
+	issuesRaw, ok := raw["issues"].(map[string]any)
+	require.True(t, ok)
+	assert.NotContains(t, issuesRaw, "autoFinalizeOnClose")
+	assert.Equal(t, ".azedarach", issuesRaw["path"])
+	assert.Equal(t, float64(120), issuesRaw["syncInterval"])
+}
+
 func TestMergeWithDefaultsPreservesExplicitValues(t *testing.T) {
 	partial := &Config{
 		CLITool: "opencode",

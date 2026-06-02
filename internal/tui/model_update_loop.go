@@ -1403,10 +1403,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.rollbackTaskStatus(msg.taskID, msg.previousStatus)
 			m.syncTaskWorkspaceOverlay()
+			expires := time.Now().Add(3 * time.Second)
+			if msg.newStatus == domain.StatusDone {
+				expires = time.Now().Add(8 * time.Second)
+			}
 			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Failed to update task: %v", msg.err),
-				Expires: time.Now().Add(3 * time.Second),
+				Expires: expires,
 			})
 			return m, nil
 		}
@@ -1417,15 +1421,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("Task moved to %s", msg.newStatus),
 			Expires: time.Now().Add(2 * time.Second),
 		})
-
-		if msg.newStatus == domain.StatusDone {
-			if session := m.sessionForIssue(msg.taskID); session != nil {
-				return m, tea.Batch(
-					m.scheduleIssuesRefreshCmd(),
-					m.openPROverlayCmd(session.Worktree, msg.taskID),
-				)
-			}
-		}
 
 		return m, m.scheduleIssuesRefreshCmd()
 
@@ -1450,10 +1445,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			level = ToastWarning
 			summary = fmt.Sprintf("%s, %d failed", summary, msg.failed)
 		}
+		expires := time.Now().Add(3 * time.Second)
+		if bulkStatusSummaryHasCloseGuardGuidance(msg.issues) {
+			expires = time.Now().Add(8 * time.Second)
+		}
 		m.addToast(Toast{
 			Level:   level,
 			Message: summary,
-			Expires: time.Now().Add(3 * time.Second),
+			Expires: expires,
 		})
 		m.editor.ClearSelection()
 		m.editor.EnterNormal()
