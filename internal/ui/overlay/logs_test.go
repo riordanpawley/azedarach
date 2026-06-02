@@ -188,7 +188,7 @@ func TestEventLogOverlay_Update_NavigationAndClose(t *testing.T) {
 }
 
 func TestEventLogOverlay_Update_LogActionKeys(t *testing.T) {
-	overlay := NewEventLogOverlayWithLogFiles(nil, "/tmp/az.log", "/tmp/daemon.log")
+	overlay := NewEventLogOverlayWithLogFiles(nil, "/tmp/az-tui.log", "/tmp/azd.log")
 
 	_, streamCmd := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
 	if streamCmd == nil {
@@ -205,7 +205,7 @@ func TestEventLogOverlay_Update_LogActionKeys(t *testing.T) {
 	if !ok {
 		t.Fatalf("stream value type = %T, want []string", streamMsg.Value)
 	}
-	if len(paths) != 2 || paths[0] != "/tmp/daemon.log" || paths[1] != "/tmp/az.log" {
+	if len(paths) != 2 || paths[0] != "/tmp/azd.log" || paths[1] != "/tmp/az-tui.log" {
 		t.Fatalf("stream paths = %#v, want daemon+tui paths", paths)
 	}
 
@@ -217,8 +217,8 @@ func TestEventLogOverlay_Update_LogActionKeys(t *testing.T) {
 	if !ok {
 		t.Fatalf("tui msg type = %T, want SelectionMsg", tuiCmd())
 	}
-	if tuiMsg.Key != "event-log-editor" || tuiMsg.Value != "/tmp/az.log" {
-		t.Fatalf("tui editor msg = %#v, want event-log-editor /tmp/az.log", tuiMsg)
+	if tuiMsg.Key != "event-log-editor" || tuiMsg.Value != "/tmp/az-tui.log" {
+		t.Fatalf("tui editor msg = %#v, want event-log-editor /tmp/az-tui.log", tuiMsg)
 	}
 
 	_, daemonCmd := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
@@ -229,8 +229,8 @@ func TestEventLogOverlay_Update_LogActionKeys(t *testing.T) {
 	if !ok {
 		t.Fatalf("daemon msg type = %T, want SelectionMsg", daemonCmd())
 	}
-	if daemonMsg.Key != "event-log-editor" || daemonMsg.Value != "/tmp/daemon.log" {
-		t.Fatalf("daemon editor msg = %#v, want event-log-editor /tmp/daemon.log", daemonMsg)
+	if daemonMsg.Key != "event-log-editor" || daemonMsg.Value != "/tmp/azd.log" {
+		t.Fatalf("daemon editor msg = %#v, want event-log-editor /tmp/azd.log", daemonMsg)
 	}
 }
 

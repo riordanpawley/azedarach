@@ -10,8 +10,8 @@ import (
 
 func TestReadLastMerged_SortsByTimestampAcrossSources(t *testing.T) {
 	tmp := t.TempDir()
-	daemonPath := filepath.Join(tmp, "daemon.log")
-	tuiPath := filepath.Join(tmp, "az.log")
+	daemonPath := filepath.Join(tmp, "azd.log")
+	tuiPath := filepath.Join(tmp, "az-tui.log")
 
 	if err := os.WriteFile(daemonPath, []byte("2026/04/01 16:50:04 INFO daemon started\n"), 0o644); err != nil {
 		t.Fatalf("write daemon log: %v", err)

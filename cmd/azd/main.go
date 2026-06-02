@@ -86,7 +86,7 @@ func main() {
 }
 
 func newDaemonLogger() *slog.Logger {
-	// Daemon stderr is redirected to daemon.log by the launcher.
+	// Daemon stderr is redirected to azd.log by the launcher.
 	return logging.NewTextStreamLogger(os.Stderr, slog.LevelInfo)
 }
 

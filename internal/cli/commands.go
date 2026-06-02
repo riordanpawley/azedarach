@@ -349,7 +349,7 @@ func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve repo directory %q: %w", repoDir, err)
 	}
-	logPath := filepath.Join(resolveSessionLogDirFor(cfg, absRepoDir), "az-cli.log")
+	logPath := filepath.Join(resolveSessionLogDirFor(cfg, absRepoDir), logging.CLILogFileName)
 	logger := logging.NewTextFileLogger(logPath, slog.LevelInfo)
 	slog.SetDefault(logger)
 
@@ -5541,11 +5541,11 @@ func LogCommand(deps *Dependencies, opts LogOptions) error {
 		normalizedSource := strings.ToLower(strings.TrimSpace(source))
 		switch strings.ToLower(strings.TrimSpace(source)) {
 		case "daemon":
-			logPath = filepath.Join(runtimeRepoDir, ".azedarach", "daemon.log")
+			logPath = filepath.Join(runtimeRepoDir, ".azedarach", logging.DaemonLogFileName)
 		case "tui":
-			logPath = filepath.Join(sessionLogDir, "az.log")
+			logPath = filepath.Join(sessionLogDir, logging.TUILogFileName)
 		case "cli":
-			logPath = filepath.Join(sessionLogDir, "az-cli.log")
+			logPath = filepath.Join(sessionLogDir, logging.CLILogFileName)
 		default:
 			return fmt.Errorf("unknown log source %q", source)
 		}

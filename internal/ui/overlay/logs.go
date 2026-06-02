@@ -59,7 +59,7 @@ func NewEventLogOverlay(events []protocol.EventEnvelope) *EventLogOverlay {
 	return NewEventLogOverlayWithLogFiles(events, "", "")
 }
 
-// NewEventLogOverlayWithLogFile creates an event log overlay with optional az.log path.
+// NewEventLogOverlayWithLogFile creates an event log overlay with an optional TUI log path.
 func NewEventLogOverlayWithLogFile(events []protocol.EventEnvelope, logFilePath string) *EventLogOverlay {
 	return NewEventLogOverlayWithLogFiles(events, logFilePath, "")
 }

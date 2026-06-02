@@ -334,7 +334,7 @@ func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 		logFilePath:                 logFilePath,
 		currentProject:              resolveInitialProjectName(deps.ProjectRegistry, repoDir),
 	}
-	logger.Info("tui runtime initialized", "repo_dir", repoDir, "runtime_repo_dir", runtimeRepoDir, "daemon_socket", daemonSocketPath, "project", m.currentProject)
+	logger.Debug("tui runtime initialized", "repo_dir", repoDir, "runtime_repo_dir", runtimeRepoDir, "daemon_socket", daemonSocketPath, "project", m.currentProject)
 	m.refreshDaemonProjectRouteID()
 	m.daemonClient.WithProjectRouteID(m.daemonProjectRouteIDValue())
 	for _, opt := range opts {
@@ -2540,12 +2540,12 @@ func (m Model) eventLogFilePath() string {
 
 func (m Model) daemonLogFilePath() string {
 	if scopedDaemonRuntimeEnabledForJustRun() && strings.TrimSpace(m.runtimeRepoDir) != "" {
-		return filepath.Join(m.runtimeRepoDir, ".azedarach", "daemon.log")
+		return filepath.Join(m.runtimeRepoDir, ".azedarach", logging.DaemonLogFileName)
 	}
 	if scopedDaemonRuntimeEnabledForJustRun() {
 		if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
 			if worktreeRoot, rootErr := config.ResolveWorktreeRoot(cwd); rootErr == nil && strings.TrimSpace(worktreeRoot) != "" {
-				return filepath.Join(worktreeRoot, ".azedarach", "daemon.log")
+				return filepath.Join(worktreeRoot, ".azedarach", logging.DaemonLogFileName)
 			}
 		}
 	}
@@ -2553,14 +2553,14 @@ func (m Model) daemonLogFilePath() string {
 	if repoDir == "" {
 		repoDir = "."
 	}
-	return filepath.Join(repoDir, ".azedarach", "daemon.log")
+	return filepath.Join(repoDir, ".azedarach", logging.DaemonLogFileName)
 }
 
 func resolveTUILogFilePath(cfg *config.Config) string {
 	if scopedDaemonRuntimeEnabledForJustRun() {
 		if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
 			if worktreeRoot, rootErr := config.ResolveWorktreeRoot(cwd); rootErr == nil && strings.TrimSpace(worktreeRoot) != "" {
-				return filepath.Join(worktreeRoot, ".azedarach", "az.log")
+				return filepath.Join(worktreeRoot, ".azedarach", logging.TUILogFileName)
 			}
 		}
 	}
@@ -2576,7 +2576,7 @@ func resolveTUILogFilePath(cfg *config.Config) string {
 			baseDir = filepath.Join(".", ".azedarach", "logs")
 		}
 	}
-	return filepath.Join(baseDir, "az.log")
+	return filepath.Join(baseDir, logging.TUILogFileName)
 }
 
 func scopedDaemonRuntimeEnabledForJustRun() bool {
@@ -2587,7 +2587,14 @@ func scopedDaemonRuntimeEnabledForJustRun() bool {
 }
 
 func newTUILogger(logPath string) *slog.Logger {
+	if runningUnderGoTest() {
+		return logging.NewDiscardLogger(slog.LevelInfo)
+	}
 	return logging.NewTextFileLogger(logPath, slog.LevelInfo)
+}
+
+func runningUnderGoTest() bool {
+	return strings.HasSuffix(filepath.Base(os.Args[0]), ".test")
 }
 
 func (m Model) configSourcePath() string {
@@ -2777,11 +2784,11 @@ func inferLogSourceSpecsFromPaths(paths []string) []logstream.SourceSpec {
 		base := strings.ToLower(strings.TrimSpace(filepath.Base(path)))
 		source := ""
 		switch base {
-		case "daemon.log":
+		case logging.DaemonLogFileName:
 			source = "daemon"
-		case "az.log":
+		case logging.TUILogFileName:
 			source = "tui"
-		case "az-cli.log":
+		case logging.CLILogFileName:
 			source = "cli"
 		}
 		if source == "" {

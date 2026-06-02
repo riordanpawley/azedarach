@@ -13,7 +13,7 @@ import (
 
 func TestOpenLogEditorCmd_UsesExecProcessAndReturnsOpened(t *testing.T) {
 	t.Setenv("EDITOR", "hx")
-	logPath := filepath.Join(t.TempDir(), "az.log")
+	logPath := filepath.Join(t.TempDir(), "az-tui.log")
 	if err := os.WriteFile(logPath, []byte("hello"), 0600); err != nil {
 		t.Fatalf("write log file: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestOpenLogEditorCmd_UsesExecProcessAndReturnsOpened(t *testing.T) {
 }
 
 func TestOpenLogEditorCmd_ExecProcessErrorReturnsEventLogError(t *testing.T) {
-	logPath := filepath.Join(t.TempDir(), "az.log")
+	logPath := filepath.Join(t.TempDir(), "az-tui.log")
 	if err := os.WriteFile(logPath, []byte("hello"), 0600); err != nil {
 		t.Fatalf("write log file: %v", err)
 	}

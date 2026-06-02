@@ -19,6 +19,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	gitservice "github.com/riordanpawley/azedarach/internal/services/git"
 )
@@ -2193,8 +2194,8 @@ func TestLogCommandPrintsSourcePrefixedPrettyLines(t *testing.T) {
 		Config:  cfg,
 		RepoDir: repoDir,
 	}
-	daemonLogPath := filepath.Join(repoDir, ".azedarach", "daemon.log")
-	tuiLogPath := filepath.Join(cfg.Session.LogDir, "az.log")
+	daemonLogPath := filepath.Join(repoDir, ".azedarach", logging.DaemonLogFileName)
+	tuiLogPath := filepath.Join(cfg.Session.LogDir, logging.TUILogFileName)
 	if err := os.MkdirAll(filepath.Dir(daemonLogPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll(daemon log dir): %v", err)
 	}
@@ -2289,8 +2290,8 @@ func TestLogCommandReadsScopedWorktreeDaemonAndTUILogs(t *testing.T) {
 		RepoDir: repo,
 	}
 
-	daemonLogPath := filepath.Join(worktree, ".azedarach", "daemon.log")
-	tuiLogPath := filepath.Join(worktree, ".azedarach", "az.log")
+	daemonLogPath := filepath.Join(worktree, ".azedarach", logging.DaemonLogFileName)
+	tuiLogPath := filepath.Join(worktree, ".azedarach", logging.TUILogFileName)
 	if err := os.MkdirAll(filepath.Dir(daemonLogPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll(log dir): %v", err)
 	}
