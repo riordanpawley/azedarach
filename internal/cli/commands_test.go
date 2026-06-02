@@ -3024,6 +3024,23 @@ func TestConfigSetCommandWritesLatencyTraceConfig(t *testing.T) {
 	}
 }
 
+func TestConfigSetCommandRejectsRemovedCloseCleanupConfig(t *testing.T) {
+	projectDir := t.TempDir()
+
+	deps := &Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{}),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:    "proj",
+		RepoDir:      projectDir,
+	}
+
+	err := ConfigSetCommand(deps, ConfigSetOptions{Key: "issues.autoFinalizeOnClose", Value: "yes"})
+	if err == nil || !strings.Contains(err.Error(), "Unsupported config key") || strings.Contains(err.Error(), "Supported keys: spec.enabled, diagnostics.latencyTrace, issues.autoFinalizeOnClose") {
+		t.Fatalf("ConfigSetCommand error = %v, want removed setting rejected", err)
+	}
+}
+
 func TestConfigSetCommandRejectsInvalidLatencyTraceBoolean(t *testing.T) {
 	projectDir := t.TempDir()
 
@@ -3763,17 +3780,32 @@ func TestParseIssueCloseArgs(t *testing.T) {
 		{
 			name:        "missing id",
 			args:        []string{},
-			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]",
+			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [<issue-id>]",
 		},
 		{
 			name:        "extra args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]",
+			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [<issue-id>]",
 		},
 		{
 			name: "named id",
 			args: []string{"--id", "az-2"},
 			want: IssueCloseOptions{IssueID: "az-2"},
+		},
+		{
+			name: "short id",
+			args: []string{"-i", "az-2"},
+			want: IssueCloseOptions{IssueID: "az-2"},
+		},
+		{
+			name:        "cleanup flag removed",
+			args:        []string{"--id", "az-2", "--cleanup"},
+			errContains: "flag provided but not defined: -cleanup",
+		},
+		{
+			name: "force worktree",
+			args: []string{"--id", "az-2", "--force-worktree"},
+			want: IssueCloseOptions{IssueID: "az-2", ForceWorktree: true},
 		},
 		{
 			name: "interspersed named id overrides positional",
@@ -3834,74 +3866,6 @@ func TestParseIssueDeleteArgs(t *testing.T) {
 	_, err = ParseIssueDeleteArgs([]string{"az-1", "--confirm", "--force-worktree"})
 	if err == nil || !strings.Contains(err.Error(), "--force-worktree requires --remove-worktree or --cleanup") {
 		t.Fatalf("expected force-worktree dependency error, got %v", err)
-	}
-}
-
-func TestParseIssueFinalizeArgs(t *testing.T) {
-	tests := []struct {
-		name        string
-		args        []string
-		want        IssueFinalizeOptions
-		errContains string
-	}{
-		{
-			name: "valid",
-			args: []string{"az-1"},
-			want: IssueFinalizeOptions{IssueID: "az-1"},
-		},
-		{
-			name: "named id with worktree removal",
-			args: []string{"--id", "az-2", "--remove-worktree", "--json"},
-			want: IssueFinalizeOptions{IssueID: "az-2", RemoveWorktree: true, JSON: true},
-		},
-		{
-			name: "force worktree removal",
-			args: []string{"--id", "az-2", "--remove-worktree", "--force-worktree", "--json"},
-			want: IssueFinalizeOptions{IssueID: "az-2", RemoveWorktree: true, ForceWorktree: true, JSON: true},
-		},
-		{
-			name:        "force requires remove worktree",
-			args:        []string{"--id", "az-2", "--force-worktree"},
-			errContains: "--force-worktree requires --remove-worktree",
-		},
-		{
-			name:        "forbid impl",
-			args:        []string{"--impl", "go-bubbletea", "az-1"},
-			errContains: "--impl is not supported for issue finalize",
-		},
-		{
-			name:        "missing id",
-			args:        []string{},
-			errContains: "usage: az issue finalize [--project <project-id>] [--id <issue-id>] [--json] [--remove-worktree] [--force-worktree] [<issue-id>]",
-		},
-		{
-			name:        "extra args",
-			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue finalize [--project <project-id>] [--id <issue-id>] [--json] [--remove-worktree] [--force-worktree] [<issue-id>]",
-		},
-		{
-			name: "interspersed named id overrides positional",
-			args: []string{"az-1", "--id", "az-2"},
-			want: IssueFinalizeOptions{IssueID: "az-2"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := ParseIssueFinalizeArgs(tt.args)
-			if tt.errContains != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
-					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("ParseIssueFinalizeArgs() error = %v", err)
-			}
-			if got != tt.want {
-				t.Fatalf("ParseIssueFinalizeArgs() = %+v, want %+v", got, tt.want)
-			}
-		})
 	}
 }
 
@@ -3996,6 +3960,23 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 					Status:  &status,
 				}
 			}(),
+		},
+		{
+			name: "force worktree on closed status",
+			args: []string{"az-1", "--status", "closed", "--force-worktree"},
+			want: func() IssueUpdateOptions {
+				status := domain.StatusDone
+				return IssueUpdateOptions{
+					IssueID:       "az-1",
+					Status:        &status,
+					ForceWorktree: true,
+				}
+			}(),
+		},
+		{
+			name:        "cleanup flag removed",
+			args:        []string{"az-1", "--status", "closed", "--cleanup"},
+			errContains: "flag provided but not defined: -cleanup",
 		},
 	}
 	for _, tt := range tests {
@@ -5798,6 +5779,14 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 								t.Fatalf("marshal task create response: %v", err)
 							}
 							body = payload
+						} else if req.Command == daemonclient.CommandTaskList {
+							payload, err := marshalTaskListBody([]domain.Task{
+								{ID: "az-9", Title: "Close me", Status: domain.StatusInReview},
+							})
+							if err != nil {
+								t.Fatalf("marshal task list response: %v", err)
+							}
+							body = payload
 						}
 						return protocol.ResponseEnvelope{
 							ProtocolVersion: req.ProtocolVersion,
@@ -5848,11 +5837,38 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 }
 
-func TestIssueFinalizeCommandStopsClosesAndOptionallyRemovesWorktree(t *testing.T) {
+func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testing.T) {
 	var commands []string
 	var removeWorktreeForce bool
+	worktreeListBody, err := json.Marshal(struct {
+		ProjectID string `json:"project_id"`
+		Worktrees []struct {
+			Path    string `json:"path"`
+			Branch  string `json:"branch"`
+			IssueID string `json:"issue_id"`
+		} `json:"worktrees"`
+	}{
+		ProjectID: "proj",
+		Worktrees: []struct {
+			Path    string `json:"path"`
+			Branch  string `json:"branch"`
+			IssueID string `json:"issue_id"`
+		}{
+			{Path: "/tmp/az-9", Branch: "riordan/az-9/finish-flow", IssueID: "az-9"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal worktree list: %v", err)
+	}
 	taskListBody, err := marshalTaskListBody([]domain.Task{
-		{ID: "az-9", Title: "Finish flow", Status: domain.StatusInProgress},
+		{
+			ID:             "az-9",
+			Title:          "Finish flow",
+			Status:         domain.StatusInProgress,
+			HasTmuxSession: true,
+			HasWorktree:    true,
+			Session:        &domain.Session{IssueID: naming.IssueID("az-9"), Worktree: "/tmp/az-9"},
+		},
 	})
 	if err != nil {
 		t.Fatalf("marshal task list: %v", err)
@@ -5863,6 +5879,16 @@ func TestIssueFinalizeCommandStopsClosesAndOptionallyRemovesWorktree(t *testing.
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
 				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            worktreeListBody,
+					}, nil
 				case daemonclient.CommandTaskList:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -5873,6 +5899,32 @@ func TestIssueFinalizeCommandStopsClosesAndOptionallyRemovesWorktree(t *testing.
 						CompletedAt:     req.SentAt,
 						Body:            taskListBody,
 					}, nil
+				case daemonclient.CommandGitStatus:
+					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{HasChanges: false}}), nil
+				case daemonclient.CommandGitWorktreeForBranch:
+					return responseWithJSON(req, daemonclient.GitWorktreeForBranchResponse{
+						Branch: "main",
+						Found:  false,
+					}), nil
+				case daemonclient.CommandGitFetch:
+					return responseWithJSON(req, daemonclient.GitCommandResponse{
+						Worktree: ".",
+						Remote:   "origin",
+					}), nil
+				case daemonclient.CommandGitCheckout:
+					return responseWithJSON(req, daemonclient.GitCommandResponse{
+						Worktree: ".",
+						Branch:   "main",
+					}), nil
+				case daemonclient.CommandGitMerge:
+					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
+						Worktree: ".",
+						Branch:   "riordan/az-9/finish-flow",
+						Result: gitservice.MergeResult{
+							Success: true,
+							Message: "merge complete",
+						},
+					}), nil
 				case commandSessionStop:
 					return responseWithOutput(req, "Session not found in tmux: az-9\n✓ Session marked stopped: az-9\n"), nil
 				case daemonclient.CommandWorktreeRemove:
@@ -5911,18 +5963,27 @@ func TestIssueFinalizeCommandStopsClosesAndOptionallyRemovesWorktree(t *testing.
 	}
 
 	output := captureStdout(t, func() error {
-		return IssueFinalizeCommand(deps, IssueFinalizeOptions{
-			IssueID:        "az-9",
-			RemoveWorktree: true,
-			ForceWorktree:  true,
+		return IssueCloseCommand(deps, IssueCloseOptions{
+			IssueID:       "az-9",
+			ForceWorktree: true,
 		})
 	})
 
 	wantCommands := []string{
+		daemonclient.CommandWorktreeList,
+		daemonclient.CommandWorktreeList,
+		daemonclient.CommandTaskList,
+		daemonclient.CommandWorktreeList,
+		daemonclient.CommandGitWorktreeForBranch,
+		daemonclient.CommandGitStatus,
+		daemonclient.CommandGitStatus,
+		daemonclient.CommandGitFetch,
+		daemonclient.CommandGitCheckout,
+		daemonclient.CommandGitMerge,
 		daemonclient.CommandTaskList,
 		commandSessionStop,
-		daemonclient.CommandTaskUpdateStatus,
 		daemonclient.CommandWorktreeRemove,
+		daemonclient.CommandTaskUpdateStatus,
 	}
 	if !reflect.DeepEqual(commands, wantCommands) {
 		t.Fatalf("commands = %v, want %v", commands, wantCommands)
@@ -5930,7 +5991,7 @@ func TestIssueFinalizeCommandStopsClosesAndOptionallyRemovesWorktree(t *testing.
 	if !removeWorktreeForce {
 		t.Fatal("worktree remove force = false, want true")
 	}
-	if !strings.Contains(output, "Finalized issue: az-9") || !strings.Contains(output, "- Worktree removed") {
+	if !strings.Contains(output, "Closed issue: az-9") || !strings.Contains(output, "- Integration requested") || !strings.Contains(output, "- Cleanup performed") {
 		t.Fatalf("output = %q", output)
 	}
 }
@@ -6255,8 +6316,8 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	if !strings.Contains(result.Advice.IntegrateCommand, child.String()) {
 		t.Fatalf("advice = %+v, want child integration command", result.Advice)
 	}
-	if !strings.Contains(result.Advice.MergeCommand, child.String()) || !strings.Contains(result.Advice.Summary, "not auto-merged") {
-		t.Fatalf("advice = %+v, want explicit merge/no-auto-merge guidance", result.Advice)
+	if !strings.Contains(result.Advice.MergeCommand, child.String()) || !strings.Contains(result.Advice.Summary, "not merged at creation") {
+		t.Fatalf("advice = %+v, want explicit review/close guidance", result.Advice)
 	}
 	commands := commandNames(requests)
 	if !containsString(commands, protocol.CommandOperationSubmit) || !containsString(commands, protocol.CommandMailSend) {
@@ -6800,6 +6861,169 @@ func TestIssueUpdateCommandUsesDaemonTaskUpdateCommand(t *testing.T) {
 	}
 	if !strings.Contains(updateOut, "Updated issue: az-1") {
 		t.Fatalf("update output = %q", updateOut)
+	}
+}
+
+func TestIssueUpdateCommandConfirmedClosedCleansBeforeStatus(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	status := domain.StatusDone
+	commands := make([]string, 0, 5)
+	var statusReq daemonclient.TaskStatusRequest
+	var removeForce bool
+	worktreeListBody, err := json.Marshal(struct {
+		ProjectID string `json:"project_id"`
+		Worktrees []struct {
+			Path    string `json:"path"`
+			Branch  string `json:"branch"`
+			IssueID string `json:"issue_id"`
+		} `json:"worktrees"`
+	}{
+		ProjectID: "proj",
+		Worktrees: []struct {
+			Path    string `json:"path"`
+			Branch  string `json:"branch"`
+			IssueID string `json:"issue_id"`
+		}{
+			{Path: "/tmp/az-1", Branch: "riordan/az-1/ready", IssueID: "az-1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal worktree list: %v", err)
+	}
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{
+			ID:             "az-1",
+			Title:          "Ready",
+			Type:           domain.TypeTask,
+			Priority:       domain.P2,
+			Status:         domain.StatusInReview,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+			HasTmuxSession: true,
+			HasWorktree:    true,
+			Session:        &domain.Session{IssueID: naming.IssueID("az-1"), Worktree: "/tmp/az-1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskUpdate:
+					return responseWithJSON(req, map[string]any{}), nil
+				case daemonclient.CommandWorktreeList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            worktreeListBody,
+					}, nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            taskListBody,
+					}, nil
+				case daemonclient.CommandGitStatus:
+					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{HasChanges: false}}), nil
+				case daemonclient.CommandGitWorktreeForBranch:
+					return responseWithJSON(req, daemonclient.GitWorktreeForBranchResponse{
+						Branch: "main",
+						Found:  false,
+					}), nil
+				case daemonclient.CommandGitFetch:
+					return responseWithJSON(req, daemonclient.GitCommandResponse{
+						Worktree: ".",
+						Remote:   "origin",
+					}), nil
+				case daemonclient.CommandGitCheckout:
+					return responseWithJSON(req, daemonclient.GitCommandResponse{
+						Worktree: ".",
+						Branch:   "main",
+					}), nil
+				case daemonclient.CommandGitMerge:
+					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
+						Worktree: ".",
+						Branch:   "riordan/az-1/ready",
+						Result: gitservice.MergeResult{
+							Success: true,
+							Message: "merge complete",
+						},
+					}), nil
+				case commandSessionStop:
+					return responseWithOutput(req, "stopped\n"), nil
+				case daemonclient.CommandWorktreeRemove:
+					var body struct {
+						Force bool `json:"force"`
+					}
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal worktree remove body: %v", err)
+					}
+					removeForce = body.Force
+					return responseWithJSON(req, map[string]any{}), nil
+				case daemonclient.CommandTaskUpdateStatus:
+					if err := json.Unmarshal(req.Body, &statusReq); err != nil {
+						t.Fatalf("unmarshal status body: %v", err)
+					}
+					return responseWithJSON(req, map[string]any{}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueUpdateCommand(deps, IssueUpdateOptions{
+			IssueID:       "az-1",
+			Status:        &status,
+			ForceWorktree: true,
+		})
+	})
+
+	wantCommands := []string{
+		daemonclient.CommandTaskList,
+		daemonclient.CommandTaskUpdate,
+		daemonclient.CommandWorktreeList,
+		daemonclient.CommandWorktreeList,
+		daemonclient.CommandTaskList,
+		daemonclient.CommandWorktreeList,
+		daemonclient.CommandGitWorktreeForBranch,
+		daemonclient.CommandGitStatus,
+		daemonclient.CommandGitStatus,
+		daemonclient.CommandGitFetch,
+		daemonclient.CommandGitCheckout,
+		daemonclient.CommandGitMerge,
+		daemonclient.CommandTaskList,
+		commandSessionStop,
+		daemonclient.CommandWorktreeRemove,
+		daemonclient.CommandTaskUpdateStatus,
+	}
+	if !reflect.DeepEqual(commands, wantCommands) {
+		t.Fatalf("commands = %v, want %v", commands, wantCommands)
+	}
+	if statusReq.TaskID != "az-1" || statusReq.Status != domain.StatusDone {
+		t.Fatalf("status request = %+v, want confirmed closed status", statusReq)
+	}
+	if !removeForce {
+		t.Fatal("worktree remove force = false, want true")
+	}
+	if !strings.Contains(output, "Updated issue: az-1") {
+		t.Fatalf("output = %q", output)
 	}
 }
 
@@ -7467,11 +7691,11 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if strings.Contains(output, "issue status --impl <implementation>") {
 		t.Fatalf("usage should not include issue status command: %q", output)
 	}
-	if !strings.Contains(output, "issue close [--project <project-id>] [--id <id>] [--json] [<id>]") {
+	if !strings.Contains(output, "issue close [--project <project-id>] [--id <id>|-i <id>] [--json] [--force-worktree] [<id>]") {
 		t.Fatalf("usage missing issue close command: %q", output)
 	}
-	if !strings.Contains(output, "issue finalize [--project <project-id>] [--id <id>] [--json] [--remove-worktree] [--force-worktree] [<id>]") {
-		t.Fatalf("usage missing issue finalize command: %q", output)
+	if strings.Contains(output, "finalize") {
+		t.Fatalf("usage should not include removed close alias: %q", output)
 	}
 	if !strings.Contains(output, "issue delete [--project <project-id>] [--id <id>] [--json] [<id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]") {
 		t.Fatalf("usage missing issue delete command: %q", output)

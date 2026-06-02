@@ -10,7 +10,7 @@
     },
     "$version": {
       "type": "integer",
-      "const": 7
+      "const": 8
     },
     "cliTool": {
       "type": "string",

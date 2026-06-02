@@ -884,7 +884,7 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task status update requested", "project_id", projectID, "task_id", cmd.TaskID, "status", cmd.Status)
 	}
-	task, err := issueClient.UpdateWithRuntime(ctx, projectID, cmd.TaskID, cmd.Status)
+	task, err := d.updateTaskStatusWithClosePreflight(ctx, projectID, cmd.TaskID, cmd.Status, req)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -895,6 +895,274 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 		d.cfg.Logger.Info("daemon task status update completed", "project_id", projectID, "task_id", cmd.TaskID, "status", cmd.Status, "revision", resp.Revision)
 	}
 	return resp, nil
+}
+
+func (d *Daemon) updateTaskStatusWithClosePreflight(ctx context.Context, projectID, taskID string, status domain.Status, req protocol.RequestEnvelope) (domain.Task, error) {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return domain.Task{}, fmt.Errorf("issue store unavailable")
+	}
+	taskID = strings.TrimSpace(taskID)
+	if status == domain.StatusDone {
+		if err := d.validateTaskClosePreflight(ctx, projectID, taskID, req); err != nil {
+			return domain.Task{}, err
+		}
+	}
+	return issueClient.UpdateWithRuntime(ctx, projectID, taskID, status)
+}
+
+func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, taskID string, req protocol.RequestEnvelope) error {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return fmt.Errorf("issue store unavailable")
+	}
+	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("inspect runtime attachments before closing %s: %w", taskID, err)
+	}
+	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
+
+	var task domain.Task
+	found := false
+	for _, candidate := range tasks {
+		if strings.EqualFold(strings.TrimSpace(candidate.ID.String()), taskID) {
+			task = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("issue not found: %s", taskID)
+	}
+
+	reasons := make([]string, 0, 3)
+	reasons = append(reasons, daemonCloseGuardRuntimeBlockers(task)...)
+	reasons = append(reasons, daemonCloseGuardChildBlockers(task.ID, tasks)...)
+	if len(reasons) > 0 {
+		repairs, repairErr := d.reopenClosedCloseGuardBlockers(ctx, issueClient, projectID, req, task, tasks, reasons)
+		if repairErr != nil {
+			return fmt.Errorf("%s. Failed to move closed blockers back for cleanup: %w", daemonCloseGuardFailureMessage(taskID, reasons, repairs), repairErr)
+		}
+		return fmt.Errorf("%s", daemonCloseGuardFailureMessage(taskID, reasons, repairs))
+	}
+	return nil
+}
+
+type daemonCloseGuardStatusRepair struct {
+	IssueID string
+	Status  domain.Status
+}
+
+func (d *Daemon) reopenClosedCloseGuardBlockers(ctx context.Context, issueClient *issues.Client, projectID string, req protocol.RequestEnvelope, target domain.Task, tasks []domain.Task, reasons []string) ([]daemonCloseGuardStatusRepair, error) {
+	repairs := daemonCloseGuardStatusRepairs(target, tasks, reasons)
+	for _, repair := range repairs {
+		task, err := issueClient.UpdateWithRuntime(ctx, projectID, repair.IssueID, repair.Status)
+		if err != nil {
+			return repairs, fmt.Errorf("move %s to %s: %w", repair.IssueID, repair.Status, err)
+		}
+		rev := d.nextRevision(projectID)
+		d.publishTaskEvent(req, protocol.EventTaskUpdated, rev, taskEventBodyFromTask(projectID, task))
+	}
+	return repairs, nil
+}
+
+func daemonCloseGuardStatusRepairs(target domain.Task, tasks []domain.Task, reasons []string) []daemonCloseGuardStatusRepair {
+	if len(reasons) == 0 {
+		return nil
+	}
+	repairs := make([]daemonCloseGuardStatusRepair, 0, 2)
+	seen := make(map[naming.IssueID]struct{})
+	add := func(task domain.Task) {
+		if task.Status != domain.StatusDone {
+			return
+		}
+		if _, ok := seen[task.ID]; ok {
+			return
+		}
+		seen[task.ID] = struct{}{}
+		repairs = append(repairs, daemonCloseGuardStatusRepair{
+			IssueID: task.ID.String(),
+			Status:  daemonCloseGuardReopenStatus(task),
+		})
+	}
+
+	add(target)
+	childrenByParent := daemonCloseGuardChildrenByParent(tasks)
+	descendants := daemonCloseGuardDescendants(target.ID, childrenByParent)
+	byID := make(map[naming.IssueID]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID] = task
+	}
+	for _, childID := range descendants {
+		child, ok := byID[childID]
+		if !ok || len(daemonCloseGuardChildReasons(child)) == 0 {
+			continue
+		}
+		add(child)
+	}
+	return repairs
+}
+
+func daemonCloseGuardReopenStatus(task domain.Task) domain.Status {
+	if daemonCloseGuardTaskHasSession(task) {
+		return domain.StatusInProgress
+	}
+	return domain.StatusInReview
+}
+
+func daemonCloseGuardFailureMessage(taskID string, reasons []string, repairs []daemonCloseGuardStatusRepair) string {
+	message := fmt.Sprintf("cannot close issue %s: %s", taskID, strings.Join(reasons, "; "))
+	hint := daemonCloseGuardRecoveryHint(taskID, reasons)
+	if hint == "" {
+		return daemonCloseGuardAppendRepairSummary(message, repairs)
+	}
+	return daemonCloseGuardAppendRepairSummary(message+". Next: "+hint, repairs)
+}
+
+func daemonCloseGuardAppendRepairSummary(message string, repairs []daemonCloseGuardStatusRepair) string {
+	if len(repairs) == 0 {
+		return message
+	}
+	parts := make([]string, 0, len(repairs))
+	for _, repair := range repairs {
+		parts = append(parts, fmt.Sprintf("%s -> %s", repair.IssueID, repair.Status))
+	}
+	return message + ". Moved closed blockers back for cleanup: " + strings.Join(parts, ", ")
+}
+
+func daemonCloseGuardRecoveryHint(taskID string, reasons []string) string {
+	hasRuntime := false
+	hasChildren := false
+	for _, reason := range reasons {
+		if strings.HasPrefix(reason, "issue still has a ") {
+			hasRuntime = true
+		}
+		if strings.Contains(reason, "child issues") {
+			hasChildren = true
+		}
+	}
+
+	steps := make([]string, 0, 2)
+	if hasChildren {
+		steps = append(steps, "close or clean up the listed child issues first")
+	}
+	if hasRuntime {
+		steps = append(steps, fmt.Sprintf("run `az issue close --id %s` or stop sessions/remove worktrees manually", taskID))
+	}
+	if len(steps) == 0 {
+		return "fix the listed blockers, refresh, then retry"
+	}
+	return strings.Join(steps, "; ") + ", then retry"
+}
+
+func daemonCloseGuardRuntimeBlockers(task domain.Task) []string {
+	reasons := make([]string, 0, 2)
+	if daemonCloseGuardTaskHasSession(task) {
+		reasons = append(reasons, "issue still has a session")
+	}
+	if daemonCloseGuardTaskHasWorktree(task) {
+		reasons = append(reasons, "issue still has a worktree")
+	}
+	return reasons
+}
+
+func daemonCloseGuardChildBlockers(parentID naming.IssueID, tasks []domain.Task) []string {
+	childrenByParent := daemonCloseGuardChildrenByParent(tasks)
+	descendants := daemonCloseGuardDescendants(parentID, childrenByParent)
+	if len(descendants) == 0 {
+		return nil
+	}
+	byID := make(map[naming.IssueID]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID] = task
+	}
+	blocked := make([]string, 0, len(descendants))
+	for _, childID := range descendants {
+		child, ok := byID[childID]
+		if !ok {
+			continue
+		}
+		reasons := daemonCloseGuardChildReasons(child)
+		if len(reasons) == 0 {
+			continue
+		}
+		blocked = append(blocked, fmt.Sprintf("%s (%s)", child.ID.String(), strings.Join(reasons, ", ")))
+	}
+	if len(blocked) == 0 {
+		return nil
+	}
+	return []string{"unresolved child issues remain: " + strings.Join(blocked, "; ")}
+}
+
+func daemonCloseGuardChildrenByParent(tasks []domain.Task) map[naming.IssueID][]naming.IssueID {
+	children := make(map[naming.IssueID][]naming.IssueID)
+	seen := make(map[naming.IssueID]map[naming.IssueID]struct{})
+	add := func(parentID, childID naming.IssueID) {
+		if parentID.IsZero() || childID.IsZero() {
+			return
+		}
+		if seen[parentID] == nil {
+			seen[parentID] = make(map[naming.IssueID]struct{})
+		}
+		if _, ok := seen[parentID][childID]; ok {
+			return
+		}
+		seen[parentID][childID] = struct{}{}
+		children[parentID] = append(children[parentID], childID)
+	}
+	for _, task := range tasks {
+		if task.ParentID != nil {
+			add(*task.ParentID, task.ID)
+		}
+		for _, dep := range task.Dependencies {
+			if dep.Type == domain.DependencyParentChild || string(dep.Type) == "parent_child" {
+				add(dep.ID, task.ID)
+			}
+		}
+	}
+	return children
+}
+
+func daemonCloseGuardDescendants(rootID naming.IssueID, children map[naming.IssueID][]naming.IssueID) []naming.IssueID {
+	out := make([]naming.IssueID, 0)
+	seen := make(map[naming.IssueID]struct{})
+	queue := append([]naming.IssueID(nil), children[rootID]...)
+	for len(queue) > 0 {
+		childID := queue[0]
+		queue = queue[1:]
+		if _, ok := seen[childID]; ok {
+			continue
+		}
+		seen[childID] = struct{}{}
+		out = append(out, childID)
+		queue = append(queue, children[childID]...)
+	}
+	return out
+}
+
+func daemonCloseGuardChildReasons(task domain.Task) []string {
+	reasons := make([]string, 0, 3)
+	if task.Status != domain.StatusDone {
+		reasons = append(reasons, string(task.Status))
+	}
+	if daemonCloseGuardTaskHasSession(task) {
+		reasons = append(reasons, "session")
+	}
+	if daemonCloseGuardTaskHasWorktree(task) {
+		reasons = append(reasons, "worktree")
+	}
+	return reasons
+}
+
+func daemonCloseGuardTaskHasSession(task domain.Task) bool {
+	return task.HasTmuxSession || task.Session != nil
+}
+
+func daemonCloseGuardTaskHasWorktree(task domain.Task) bool {
+	if task.HasWorktree {
+		return true
+	}
+	return task.Session != nil && strings.TrimSpace(task.Session.Worktree) != ""
 }
 
 func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

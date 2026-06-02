@@ -759,6 +759,63 @@ func TestSettingsOverlay_ConfigBackedLatencyTracePersists(t *testing.T) {
 	}
 }
 
+func TestSettingsOverlay_ConfigBackedSaveMigratesRetiredIssueAutoFinalizeSetting(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, config.ConfigDirName, config.ConfigFileName)
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("create config dir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{
+  "$schema": "./config.schema.json",
+  "$version": 7,
+  "issues": {
+    "path": ".azedarach",
+    "syncInterval": 120,
+    "autoFinalizeOnClose": true
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := config.LoadConfig(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	menu := NewSettingsOverlayWithEditorAndConfig(
+		&mockSettingsEditor{showPhases: true},
+		cfg,
+		configPath,
+	)
+	idx := settingIndexByKey(menu, "latency-trace")
+	if idx < 0 {
+		t.Fatal("setting \"latency-trace\" not found")
+	}
+
+	menu.cursor = idx
+	_, cmd := menu.Update(tea.KeyMsg{Type: tea.KeySpace})
+	if cmd == nil {
+		t.Fatal("expected config save command after toggling latency-trace")
+	}
+	if result := cmd(); result != nil {
+		t.Fatalf("expected nil result from successful config save, got %T", result)
+	}
+
+	raw, err := readConfigJSON(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if got := raw["$version"]; got != float64(config.CurrentConfigVersion) && got != config.CurrentConfigVersion {
+		t.Fatalf("config version = %v, want %d", got, config.CurrentConfigVersion)
+	}
+	issuesRaw, ok := raw["issues"].(map[string]any)
+	if !ok {
+		t.Fatalf("issues config missing or invalid: %v", raw["issues"])
+	}
+	if _, ok := issuesRaw["autoFinalizeOnClose"]; ok {
+		t.Fatal("retired issues.autoFinalizeOnClose should be removed after settings save")
+	}
+}
+
 func TestSettingsOverlay_ConfigBackedExpandedSettingsPersist(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := config.DefaultConfig()

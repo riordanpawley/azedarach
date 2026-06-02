@@ -160,9 +160,9 @@ flowchart TD
   J -->|No| K[AI Agent: Address review feedback]
   K --> H
   J -->|Yes| L[User/Reviewer: Merge PR]
-  L --> M[User or Azedarach: az issue close ISSUE]
+  L --> M[User or Azedarach: az issue close --id ISSUE]
   G -->|Local only| N[User: Keep changes local]
-  N --> O[User: az issue update status]
+  N --> O[User: az issue update --status in_review]
 ```
 
 ### User Flow: Local-Only Delivery
@@ -178,8 +178,13 @@ flowchart TD
   E -->|Yes| H[AI Agent or User: Commit locally]
   H --> I{User: Task complete?}
   I -->|No| D
-  I -->|Yes| J[User: az issue close ISSUE]
+  I -->|Yes| J[User: az issue close --id ISSUE]
 ```
+
+`az issue close --id ISSUE` finalizes the issue lifecycle: it integrates the issue
+branch into the resolved target branch, cleans session/worktree attachments, then
+asks the daemon to write the closed status. Close guards block dirty, conflicted,
+unmerged, or unresolved child work before cleanup removes the worktree.
 
 ### Agent Flow: TUI-Managed Session
 

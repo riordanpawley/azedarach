@@ -741,7 +741,7 @@ func TestClient_RemoveParentChildActiveChildRequiresParentOrphanConfirmation(t *
 	require.NoError(t, client.RemoveDependency(confirmedCtx, childID, parentID, "parent-child"))
 }
 
-func TestClient_RemoveParentChildClosedChildWithRuntimeRequiresParentOrphanConfirmation(t *testing.T) {
+func TestClient_RemoveParentChildRuntimeChildRequiresParentOrphanConfirmation(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-parent-orphan"
@@ -754,10 +754,10 @@ func TestClient_RemoveParentChildClosedChildWithRuntimeRequiresParentOrphanConfi
 	require.NoError(t, err)
 
 	childID, err := client.Create(ctx, CreateTaskParams{
-		Title:    "Closed child with runtime",
+		Title:    "Runtime child",
 		Type:     domain.TypeTask,
 		Priority: domain.P1,
-		Status:   domain.StatusDone,
+		Status:   domain.StatusInProgress,
 	})
 	require.NoError(t, err)
 
@@ -1474,7 +1474,204 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0010_decisions_refresh",
 		"0011_decisions_consequences",
 		"0012_blocked_status_to_open",
+		"0013_closed_runtime_invariants",
 	}, got)
+}
+
+func TestClient_MigratesClosedRuntimeInvariantViolationsToInReview(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = db.ExecContext(ctx, `
+		CREATE TABLE issues (
+			id TEXT PRIMARY KEY,
+			title TEXT NOT NULL,
+			description TEXT,
+			status TEXT NOT NULL,
+			priority INTEGER NOT NULL,
+			issue_type TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			closed_at TEXT,
+			assignee TEXT,
+			labels_json TEXT,
+			implementations_json TEXT,
+			design TEXT,
+			notes TEXT,
+			acceptance TEXT,
+			estimate INTEGER,
+			deleted_at TEXT
+		);
+		CREATE TABLE issue_dependencies (
+			issue_id TEXT NOT NULL,
+			depends_on_id TEXT NOT NULL,
+			dependency_type TEXT NOT NULL,
+			tombstoned_at TEXT,
+			PRIMARY KEY (issue_id, depends_on_id, dependency_type)
+		);
+		CREATE TABLE meta (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+		CREATE TABLE daemon_session_projections (
+			project_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			issue_id TEXT NOT NULL,
+			state TEXT NOT NULL,
+			started_at TEXT,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, session_id)
+		);
+		CREATE TABLE daemon_worktree_projections (
+			project_id TEXT NOT NULL,
+			issue_id TEXT NOT NULL,
+			path TEXT NOT NULL,
+			branch TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			git_status_json TEXT,
+			git_status_updated_at TEXT,
+			PRIMARY KEY (project_id, issue_id)
+		);
+		INSERT INTO issues (id, title, status, priority, issue_type, created_at, updated_at, closed_at)
+		VALUES
+			('az-direct', 'Direct dirty closed issue', 'closed', 2, 'task', ?, ?, ?),
+			('az-parent', 'Closed parent with dirty child', 'closed', 2, 'task', ?, ?, ?),
+			('az-child', 'Dirty closed child', 'closed', 2, 'task', ?, ?, ?),
+			('az-open-parent', 'Closed parent with open child', 'closed', 2, 'task', ?, ?, ?),
+			('az-open-child', 'Open child', 'open', 2, 'task', ?, ?, NULL),
+			('az-clean', 'Clean closed issue', 'closed', 2, 'task', ?, ?, ?),
+			('az-stopped', 'Stopped session closed issue', 'closed', 2, 'task', ?, ?, ?),
+			('az-open', 'Open dirty issue', 'open', 2, 'task', ?, ?, NULL);
+		INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at)
+		VALUES
+			('az-child', 'az-parent', 'parent-child', NULL),
+			('az-open-child', 'az-open-parent', 'parent-child', NULL);
+		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at)
+		VALUES
+			('proj', 'az-direct', '/repo/az-direct', 'az-direct', ?),
+			('proj', 'az-open', '/repo/az-open', 'az-open', ?);
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, started_at, updated_at)
+		VALUES
+			('proj', 'sess-child', 'az-child', 'running', ?, ?),
+			('proj', 'sess-stopped', 'az-stopped', 'stopped', ?, ?);
+	`, now, now, now, now, now, now, now, now, now, now, now, now, now, now, now, now, now, now, now, now, now, now, now, now)
+	require.NoError(t, err)
+
+	client := NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		require.NoError(t, client.CloseDB())
+	})
+	_, err = client.dbHandle()
+	require.NoError(t, err)
+
+	for _, id := range []string{"az-direct", "az-parent", "az-child", "az-open-parent"} {
+		var status string
+		var closedAt any
+		require.NoError(t, db.QueryRowContext(ctx, `SELECT status, closed_at FROM issues WHERE id = ?`, id).Scan(&status, &closedAt))
+		assert.Equal(t, "in_review", status, id)
+		assert.Nil(t, closedAt, id)
+	}
+	for _, id := range []string{"az-clean", "az-stopped"} {
+		var status string
+		var closedAt string
+		require.NoError(t, db.QueryRowContext(ctx, `SELECT status, closed_at FROM issues WHERE id = ?`, id).Scan(&status, &closedAt))
+		assert.Equal(t, "closed", status, id)
+		assert.NotEmpty(t, closedAt, id)
+	}
+	var openStatus string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT status FROM issues WHERE id = 'az-open'`).Scan(&openStatus))
+	assert.Equal(t, "open", openStatus)
+}
+
+func TestClient_ClosedRuntimeInvariantTriggers(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+
+	openID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Open issue with worktree",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at)
+		VALUES ('proj', ?, '/repo/open', 'open', ?)
+	`, openID, time.Now().UTC().Format(time.RFC3339Nano))
+	require.NoError(t, err)
+	err = client.Update(ctx, openID, domain.StatusDone)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "closed issue cannot have active runtime attachments")
+
+	closedID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Closed issue",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.Update(ctx, closedID, domain.StatusDone))
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at)
+		VALUES ('proj', ?, '/repo/closed', 'closed', ?)
+	`, closedID, time.Now().UTC().Format(time.RFC3339Nano))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot attach worktree to closed issue or closed ancestor")
+
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Closed parent",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Child issue",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at)
+		VALUES (?, ?, 'parent-child', NULL)
+	`, childID, parentID)
+	require.NoError(t, err)
+	require.NoError(t, client.Update(ctx, childID, domain.StatusDone))
+	require.NoError(t, client.Update(ctx, parentID, domain.StatusDone))
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, started_at, updated_at)
+		VALUES ('proj', 'sess-child', ?, 'running', ?, ?)
+	`, childID, time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot attach active session to closed issue or closed ancestor")
+
+	newParentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Another closed parent",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+	dirtyChildID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Dirty child",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.Update(ctx, newParentID, domain.StatusDone))
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, started_at, updated_at)
+		VALUES ('proj', 'sess-dirty-child', ?, 'running', ?, ?)
+	`, dirtyChildID, time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano))
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at)
+		VALUES (?, ?, 'parent-child', NULL)
+	`, dirtyChildID, newParentID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot place unresolved descendant under closed issue")
 }
 
 func TestClient_MigratesLegacyBlockedStatusToOpen(t *testing.T) {

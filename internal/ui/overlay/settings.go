@@ -787,8 +787,7 @@ func readConfigJSON(path string) (map[string]any, error) {
 	if version, ok := raw["$version"].(float64); ok && int(version) > config.CurrentConfigVersion {
 		return nil, fmt.Errorf("unsupported config version %d in %s (max supported %d)", int(version), path, config.CurrentConfigVersion)
 	}
-	raw["$schema"] = config.ConfigSchemaURL
-	raw["$version"] = float64(config.CurrentConfigVersion)
+	config.NormalizeConfigFileRaw(raw)
 	return raw, nil
 }
 
@@ -796,8 +795,7 @@ func writeConfigJSON(path string, raw map[string]any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	raw["$schema"] = config.ConfigSchemaURL
-	raw["$version"] = config.CurrentConfigVersion
+	config.NormalizeConfigFileRaw(raw)
 	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		return err

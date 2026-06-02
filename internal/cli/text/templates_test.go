@@ -18,7 +18,7 @@ func TestRenderIssueHelpPrefersNamedFlagForms(t *testing.T) {
 		"doctor [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]",
 		"create [--project <project-id>] [--impl <implementation> ...] [--deferred]",
 		"split [--project <project-id>] [--parent <issue-id>]",
-		"finalize [--project <project-id>] [--id <issue-id>] [--json] [--remove-worktree] [--force-worktree] [<issue-id>]",
+		"close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [<issue-id>]",
 		"delete [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]",
 		"Argument ordering: place flags/options before positional arguments for deterministic parsing.",
 	} {

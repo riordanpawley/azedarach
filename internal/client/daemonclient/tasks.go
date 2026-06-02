@@ -63,6 +63,27 @@ type TaskStatusRequest struct {
 	Status domain.Status  `json:"status"`
 }
 
+// TaskStatusOptions controls client-side status transition behavior.
+type TaskStatusOptions struct {
+	CleanupBeforeClose bool
+	ForceWorktree      bool
+}
+
+// CloseGuardOptions controls which target runtime assets may remain because
+// the caller is about to clean them before writing the closed status.
+type CloseGuardOptions struct {
+	AllowTargetSession  bool
+	AllowTargetWorktree bool
+	ForceWorktree       bool
+}
+
+// CloseGuardResult records the preflight inputs used for a close transition.
+type CloseGuardResult struct {
+	Task     domain.Task
+	Worktree string
+	Status   GitStatus
+}
+
 // TaskAppendNotesRequest appends a single line to task notes.
 type TaskAppendNotesRequest struct {
 	TaskID naming.IssueID `json:"task_id"`
@@ -413,14 +434,427 @@ func (c *Client) CreateTask(ctx context.Context, params TaskCreateParams) (strin
 
 // UpdateTaskStatus updates a task's status through the daemon client boundary.
 func (c *Client) UpdateTaskStatus(ctx context.Context, taskID string, status domain.Status) error {
+	return c.UpdateTaskStatusWithOptions(ctx, taskID, status, TaskStatusOptions{})
+}
+
+// UpdateTaskStatusWithOptions updates a task's status and can clean runtime
+// attachments before committing a closed/done transition.
+func (c *Client) UpdateTaskStatusWithOptions(ctx context.Context, taskID string, status domain.Status, opts TaskStatusOptions) error {
 	parsedTaskID, err := naming.ParseIssueID(taskID)
 	if err != nil {
 		return fmt.Errorf("invalid task id: %w", err)
+	}
+	if status == domain.StatusDone && opts.CleanupBeforeClose {
+		if err := c.cleanTaskRuntimeAttachmentsForClose(ctx, parsedTaskID.String(), opts.ForceWorktree); err != nil {
+			return err
+		}
 	}
 	return c.commandJSON(ctx, CommandTaskUpdateStatus, TaskStatusRequest{
 		TaskID: parsedTaskID,
 		Status: status,
 	}, nil)
+}
+
+func (c *Client) cleanTaskRuntimeAttachmentsForClose(ctx context.Context, taskID string, forceWorktree bool) error {
+	guard, err := c.ValidateTaskCloseWithOptions(ctx, taskID, CloseGuardOptions{
+		AllowTargetSession:  true,
+		AllowTargetWorktree: true,
+		ForceWorktree:       forceWorktree,
+	})
+	if err != nil {
+		return err
+	}
+
+	task := guard.Task
+	if task.HasTmuxSession || task.Session != nil {
+		if _, err := c.StopSession(ctx, taskID); err != nil {
+			return fmt.Errorf("stop session before closing %s: %w", taskID, err)
+		}
+	}
+	if closeGuardTaskHasWorktree(task) {
+		if err := c.RemoveWorktreeWithOptions(ctx, taskID, forceWorktree); err != nil {
+			return fmt.Errorf("remove worktree before closing %s: %w", taskID, err)
+		}
+	}
+	return nil
+}
+
+// ValidateTaskClose rejects close/done transitions for worktrees that still
+// have tracked changes, conflicts, or commits ahead of their integration base.
+func (c *Client) ValidateTaskClose(ctx context.Context, taskID string) (CloseGuardResult, error) {
+	return c.ValidateTaskCloseWithOptions(ctx, taskID, CloseGuardOptions{})
+}
+
+// ValidateTaskCloseWithOptions rejects close/done transitions unless the target
+// issue and its children are in a closeable state.
+func (c *Client) ValidateTaskCloseWithOptions(ctx context.Context, taskID string, opts CloseGuardOptions) (CloseGuardResult, error) {
+	snapshot, err := c.ListTasksSnapshot(ctx)
+	if err != nil {
+		return CloseGuardResult{}, fmt.Errorf("inspect runtime attachments before closing %s: %w", taskID, err)
+	}
+	var task domain.Task
+	found := false
+	for _, candidate := range snapshot.Tasks {
+		if strings.EqualFold(strings.TrimSpace(candidate.ID.String()), taskID) {
+			task = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		return CloseGuardResult{}, fmt.Errorf("issue not found: %s", taskID)
+	}
+
+	if reasons := closeGuardRuntimeBlockers(task, opts); len(reasons) > 0 {
+		repairs, repairErr := c.reopenClosedCloseGuardBlockers(ctx, task, snapshot.Tasks, reasons)
+		if repairErr != nil {
+			return CloseGuardResult{}, fmt.Errorf("%s. Failed to move closed blockers back for cleanup: %w", closeGuardFailureError(taskID, reasons, repairs), repairErr)
+		}
+		return CloseGuardResult{}, closeGuardFailureError(taskID, reasons, repairs)
+	}
+	if reasons := closeGuardChildBlockers(task.ID, snapshot.Tasks); len(reasons) > 0 {
+		repairs, repairErr := c.reopenClosedCloseGuardBlockers(ctx, task, snapshot.Tasks, reasons)
+		if repairErr != nil {
+			return CloseGuardResult{}, fmt.Errorf("%s. Failed to move closed blockers back for cleanup: %w", closeGuardFailureError(taskID, reasons, repairs), repairErr)
+		}
+		return CloseGuardResult{}, closeGuardFailureError(taskID, reasons, repairs)
+	}
+
+	worktree := closeGuardTaskWorktree(task)
+	if worktree == "" && task.HasWorktree {
+		resolved, ok, err := c.worktreePathForIssue(ctx, taskID)
+		if err != nil {
+			return CloseGuardResult{}, fmt.Errorf("inspect worktree before closing %s: %w", taskID, err)
+		}
+		if !ok || strings.TrimSpace(resolved) == "" {
+			if opts.ForceWorktree {
+				return CloseGuardResult{Task: task}, nil
+			}
+			reasons := []string{"worktree is projected but path is unavailable"}
+			repairs, repairErr := c.reopenClosedCloseGuardBlockers(ctx, task, snapshot.Tasks, reasons)
+			if repairErr != nil {
+				return CloseGuardResult{}, fmt.Errorf("%s. Failed to move closed blockers back for cleanup: %w", closeGuardFailureError(taskID, reasons, repairs), repairErr)
+			}
+			return CloseGuardResult{}, closeGuardFailureError(taskID, reasons, repairs)
+		}
+		worktree = resolved
+	}
+	if strings.TrimSpace(worktree) == "" {
+		return CloseGuardResult{Task: task}, nil
+	}
+	if opts.ForceWorktree {
+		return CloseGuardResult{
+			Task:     task,
+			Worktree: worktree,
+		}, nil
+	}
+
+	status, err := c.GitStatusRefresh(ctx, worktree)
+	if err != nil {
+		return CloseGuardResult{}, fmt.Errorf("inspect git status before closing %s: %w", taskID, err)
+	}
+	if reasons := closeGuardBlockers(status); len(reasons) > 0 {
+		repairs, repairErr := c.reopenClosedCloseGuardBlockers(ctx, task, snapshot.Tasks, reasons)
+		if repairErr != nil {
+			return CloseGuardResult{}, fmt.Errorf("%s. Failed to move closed blockers back for cleanup: %w", closeGuardFailureError(taskID, reasons, repairs), repairErr)
+		}
+		return CloseGuardResult{}, closeGuardFailureError(taskID, reasons, repairs)
+	}
+	return CloseGuardResult{
+		Task:     task,
+		Worktree: worktree,
+		Status:   status,
+	}, nil
+}
+
+func (c *Client) worktreePathForIssue(ctx context.Context, taskID string) (string, bool, error) {
+	worktrees, err := c.ListWorktrees(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	for _, worktree := range worktrees {
+		if strings.EqualFold(strings.TrimSpace(worktree.IssueID), taskID) {
+			return strings.TrimSpace(worktree.Path), true, nil
+		}
+	}
+	return "", false, nil
+}
+
+type closeGuardStatusRepair struct {
+	IssueID string
+	Status  domain.Status
+}
+
+func (c *Client) reopenClosedCloseGuardBlockers(ctx context.Context, target domain.Task, tasks []domain.Task, reasons []string) ([]closeGuardStatusRepair, error) {
+	repairs := closeGuardStatusRepairs(target, tasks, reasons)
+	for _, repair := range repairs {
+		parsedTaskID, err := naming.ParseIssueID(repair.IssueID)
+		if err != nil {
+			return repairs, fmt.Errorf("move %s to %s: %w", repair.IssueID, repair.Status, err)
+		}
+		if err := c.commandJSON(ctx, CommandTaskUpdateStatus, TaskStatusRequest{
+			TaskID: parsedTaskID,
+			Status: repair.Status,
+		}, nil); err != nil {
+			return repairs, fmt.Errorf("move %s to %s: %w", repair.IssueID, repair.Status, err)
+		}
+	}
+	return repairs, nil
+}
+
+func closeGuardStatusRepairs(target domain.Task, tasks []domain.Task, reasons []string) []closeGuardStatusRepair {
+	if len(reasons) == 0 {
+		return nil
+	}
+	repairs := make([]closeGuardStatusRepair, 0, 2)
+	seen := make(map[naming.IssueID]struct{})
+	add := func(task domain.Task) {
+		if task.Status != domain.StatusDone {
+			return
+		}
+		if _, ok := seen[task.ID]; ok {
+			return
+		}
+		seen[task.ID] = struct{}{}
+		repairs = append(repairs, closeGuardStatusRepair{
+			IssueID: task.ID.String(),
+			Status:  closeGuardReopenStatus(task),
+		})
+	}
+
+	add(target)
+	childrenByParent := closeGuardChildrenByParent(tasks)
+	descendants := closeGuardDescendants(target.ID, childrenByParent)
+	byID := make(map[naming.IssueID]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID] = task
+	}
+	for _, childID := range descendants {
+		child, ok := byID[childID]
+		if !ok || len(closeGuardChildReasons(child)) == 0 {
+			continue
+		}
+		add(child)
+	}
+	return repairs
+}
+
+func closeGuardReopenStatus(task domain.Task) domain.Status {
+	if closeGuardTaskHasSession(task) {
+		return domain.StatusInProgress
+	}
+	return domain.StatusInReview
+}
+
+func closeGuardFailureError(taskID string, reasons []string, repairs []closeGuardStatusRepair) error {
+	message := fmt.Sprintf("cannot close issue %s: %s", taskID, strings.Join(reasons, "; "))
+	hint := closeGuardRecoveryHint(taskID, reasons)
+	if hint == "" {
+		return fmt.Errorf("%s", closeGuardAppendRepairSummary(message, repairs))
+	}
+	return fmt.Errorf("%s", closeGuardAppendRepairSummary(message+". Next: "+hint, repairs))
+}
+
+func closeGuardAppendRepairSummary(message string, repairs []closeGuardStatusRepair) string {
+	if len(repairs) == 0 {
+		return message
+	}
+	parts := make([]string, 0, len(repairs))
+	for _, repair := range repairs {
+		parts = append(parts, fmt.Sprintf("%s -> %s", repair.IssueID, repair.Status))
+	}
+	return message + ". Moved closed blockers back for cleanup: " + strings.Join(parts, ", ")
+}
+
+func closeGuardRecoveryHint(taskID string, reasons []string) string {
+	hasGitState := false
+	hasRuntime := false
+	hasChildren := false
+	for _, reason := range reasons {
+		if strings.Contains(reason, "local changes") || strings.Contains(reason, "conflicts") || strings.Contains(reason, "ahead") {
+			hasGitState = true
+		}
+		if strings.HasPrefix(reason, "issue still has a ") || strings.HasPrefix(reason, "worktree is projected") {
+			hasRuntime = true
+		}
+		if strings.Contains(reason, "child issues") {
+			hasChildren = true
+		}
+	}
+
+	steps := make([]string, 0, 3)
+	if hasGitState {
+		steps = append(steps, "commit, discard, or merge the worktree changes first")
+	}
+	if hasChildren {
+		steps = append(steps, "close or clean up the listed child issues first")
+	}
+	if hasRuntime {
+		steps = append(steps, fmt.Sprintf("run `az issue close --id %s` or stop sessions/remove worktrees manually", taskID))
+	}
+	if len(steps) == 0 {
+		return "fix the listed blockers, refresh, then retry"
+	}
+	return strings.Join(steps, "; ") + ", then retry"
+}
+
+func closeGuardRuntimeBlockers(task domain.Task, opts CloseGuardOptions) []string {
+	reasons := make([]string, 0, 2)
+	if !opts.AllowTargetSession && closeGuardTaskHasSession(task) {
+		reasons = append(reasons, "issue still has a session")
+	}
+	if !opts.AllowTargetWorktree && closeGuardTaskHasWorktree(task) {
+		reasons = append(reasons, "issue still has a worktree")
+	}
+	return reasons
+}
+
+func closeGuardChildBlockers(parentID naming.IssueID, tasks []domain.Task) []string {
+	childrenByParent := closeGuardChildrenByParent(tasks)
+	descendants := closeGuardDescendants(parentID, childrenByParent)
+	if len(descendants) == 0 {
+		return nil
+	}
+	byID := make(map[naming.IssueID]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID] = task
+	}
+	blocked := make([]string, 0, len(descendants))
+	for _, childID := range descendants {
+		child, ok := byID[childID]
+		if !ok {
+			continue
+		}
+		reasons := closeGuardChildReasons(child)
+		if len(reasons) == 0 {
+			continue
+		}
+		blocked = append(blocked, fmt.Sprintf("%s (%s)", child.ID.String(), strings.Join(reasons, ", ")))
+	}
+	if len(blocked) == 0 {
+		return nil
+	}
+	return []string{"unresolved child issues remain: " + strings.Join(blocked, "; ")}
+}
+
+func closeGuardChildrenByParent(tasks []domain.Task) map[naming.IssueID][]naming.IssueID {
+	children := make(map[naming.IssueID][]naming.IssueID)
+	seen := make(map[naming.IssueID]map[naming.IssueID]struct{})
+	add := func(parentID, childID naming.IssueID) {
+		if parentID.IsZero() || childID.IsZero() {
+			return
+		}
+		if seen[parentID] == nil {
+			seen[parentID] = make(map[naming.IssueID]struct{})
+		}
+		if _, ok := seen[parentID][childID]; ok {
+			return
+		}
+		seen[parentID][childID] = struct{}{}
+		children[parentID] = append(children[parentID], childID)
+	}
+	for _, task := range tasks {
+		if task.ParentID != nil {
+			add(*task.ParentID, task.ID)
+		}
+		for _, dep := range task.Dependencies {
+			if dep.Type == domain.DependencyParentChild || string(dep.Type) == "parent_child" {
+				add(dep.ID, task.ID)
+			}
+		}
+	}
+	return children
+}
+
+func closeGuardDescendants(rootID naming.IssueID, children map[naming.IssueID][]naming.IssueID) []naming.IssueID {
+	out := make([]naming.IssueID, 0)
+	seen := make(map[naming.IssueID]struct{})
+	queue := append([]naming.IssueID(nil), children[rootID]...)
+	for len(queue) > 0 {
+		childID := queue[0]
+		queue = queue[1:]
+		if _, ok := seen[childID]; ok {
+			continue
+		}
+		seen[childID] = struct{}{}
+		out = append(out, childID)
+		queue = append(queue, children[childID]...)
+	}
+	return out
+}
+
+func closeGuardChildReasons(task domain.Task) []string {
+	reasons := make([]string, 0, 3)
+	if task.Status != domain.StatusDone {
+		reasons = append(reasons, string(task.Status))
+	}
+	if closeGuardTaskHasSession(task) {
+		reasons = append(reasons, "session")
+	}
+	if closeGuardTaskHasWorktree(task) {
+		reasons = append(reasons, "worktree")
+	}
+	return reasons
+}
+
+func closeGuardTaskHasSession(task domain.Task) bool {
+	return task.HasTmuxSession || task.Session != nil
+}
+
+func closeGuardTaskHasWorktree(task domain.Task) bool {
+	return task.HasWorktree || closeGuardTaskWorktree(task) != ""
+}
+
+func closeGuardTaskWorktree(task domain.Task) string {
+	if task.Session == nil {
+		return ""
+	}
+	return strings.TrimSpace(task.Session.Worktree)
+}
+
+func closeGuardBlockers(status GitStatus) []string {
+	dirty := closeGuardDirtyFiles(status)
+	reasons := make([]string, 0, 3)
+	if len(dirty) > 0 {
+		reasons = append(reasons, "worktree has local changes: "+strings.Join(dirty, ", "))
+	}
+	if status.HasConflicts || len(status.Conflicted) > 0 {
+		conflicts := append([]string(nil), status.Conflicted...)
+		if len(conflicts) == 0 {
+			reasons = append(reasons, "worktree has conflicts")
+		} else {
+			reasons = append(reasons, "worktree has conflicts: "+strings.Join(conflicts, ", "))
+		}
+	}
+	if status.GitAheadCount > 0 {
+		reasons = append(reasons, fmt.Sprintf("branch is ahead by %d commit(s)", status.GitAheadCount))
+	}
+	return reasons
+}
+
+func closeGuardDirtyFiles(status GitStatus) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Untracked)+len(status.Conflicted))
+	appendUnique := func(files []string) {
+		for _, file := range files {
+			file = strings.TrimSpace(file)
+			if file == "" {
+				continue
+			}
+			if _, ok := seen[file]; ok {
+				continue
+			}
+			seen[file] = struct{}{}
+			out = append(out, file)
+		}
+	}
+	appendUnique(status.Staged)
+	appendUnique(status.Modified)
+	appendUnique(status.Added)
+	appendUnique(status.Deleted)
+	appendUnique(status.Untracked)
+	appendUnique(status.Conflicted)
+	return out
 }
 
 // UpdateTaskDetails updates a task's details through the daemon client boundary.
