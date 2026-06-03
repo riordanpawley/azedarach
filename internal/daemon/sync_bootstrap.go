@@ -96,6 +96,12 @@ func (d *Daemon) defaultSyncBootstrap(ctx context.Context) error {
 	if err := d.bootstrapProjectStores(ctx, protocol.DefaultProjectID); err != nil {
 		return err
 	}
+	if d.cfg.ScopedRuntime || appconfig.UseScopedDaemonRuntimeFor(d.cfg.RepoDir) {
+		if err := d.migrateLegacyRuntimeState(ctx); err != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("migrate runtime state store failed during bootstrap", "error", err)
+		}
+		return nil
+	}
 	for _, project := range d.bootstrapProjectSelection().Projects {
 		if err := d.bootstrapProjectStores(ctx, project.Name); err != nil {
 			return err

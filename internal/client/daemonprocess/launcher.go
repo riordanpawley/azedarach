@@ -35,6 +35,7 @@ type Launcher struct {
 	waitForReady       func(ctx context.Context, socketPath string) error
 	shutdownViaSocket  func(ctx context.Context, socketPath string) error
 	shutdownWithReason func(ctx context.Context, socketPath string, reason string) error
+	replaceReason      string
 	sleepFn            func(time.Duration)
 	terminateLockOwner func(lockPath string) error
 }
@@ -62,6 +63,7 @@ func NewLauncher(repoDir, socketPath string) *Launcher {
 		openLogFile:        openDaemonLog,
 		waitForReady:       waitForDaemonReady,
 		shutdownWithReason: gracefulShutdownViaSocketWithReason,
+		replaceReason:      "compatibility-replace",
 		sleepFn:            time.Sleep,
 		terminateLockOwner: lifecycle.TerminateLockOwner,
 	}
@@ -73,6 +75,15 @@ func (l *Launcher) WithLogger(logger *slog.Logger) *Launcher {
 		return l
 	}
 	l.Logger = logger
+	return l
+}
+
+// WithReplaceReason overrides the graceful shutdown reason used by Replace.
+func (l *Launcher) WithReplaceReason(reason string) *Launcher {
+	if l == nil || strings.TrimSpace(reason) == "" {
+		return l
+	}
+	l.replaceReason = strings.TrimSpace(reason)
 	return l
 }
 
@@ -227,7 +238,11 @@ func (l *Launcher) Stop(ctx context.Context) error {
 // Replace attempts to stop an existing daemon process, then starts daemon.
 func (l *Launcher) Replace(ctx context.Context) error {
 	if strings.TrimSpace(l.SocketPath) != "" {
-		if err := l.requestGracefulShutdown(ctx, "replace"); err == nil {
+		reason := strings.TrimSpace(l.replaceReason)
+		if reason == "" {
+			reason = "compatibility-replace"
+		}
+		if err := l.requestGracefulShutdown(ctx, reason); err == nil {
 			if err := l.waitForSocketUnavailable(ctx, 2*time.Second); err != nil {
 				return fmt.Errorf("wait for daemon socket shutdown before replace: %w", err)
 			}

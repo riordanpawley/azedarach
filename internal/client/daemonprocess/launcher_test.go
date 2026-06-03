@@ -416,8 +416,48 @@ func TestLauncherReplaceAttributesGracefulShutdownReason(t *testing.T) {
 	if err := launcher.Replace(context.Background()); err != nil {
 		t.Fatalf("Replace() error = %v", err)
 	}
-	if gotReason != "replace" {
-		t.Fatalf("shutdown reason = %q, want replace", gotReason)
+	if gotReason != "compatibility-replace" {
+		t.Fatalf("shutdown reason = %q, want compatibility-replace", gotReason)
+	}
+}
+
+func TestLauncherReplaceReasonOverride(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	tracker := &trackingWriteCloser{}
+
+	launcher := NewLauncher(repoDir, socketPath).WithReplaceReason("manual-restart")
+	launcher.BinPath = "true"
+	launcher.sleepFn = func(time.Duration) {}
+
+	socketUp := true
+	spawned := false
+	var gotReason string
+	launcher.shutdownWithReason = func(_ context.Context, _ string, reason string) error {
+		gotReason = reason
+		socketUp = false
+		return nil
+	}
+	launcher.terminateLockOwner = func(string) error {
+		t.Fatal("Replace() should not terminate lock owner after graceful socket shutdown")
+		return nil
+	}
+	launcher.waitForReady = func(context.Context, string) error {
+		if socketUp || spawned {
+			return nil
+		}
+		return context.DeadlineExceeded
+	}
+	launcher.openLogFile = func(string) (io.WriteCloser, error) {
+		spawned = true
+		return tracker, nil
+	}
+
+	if err := launcher.Replace(context.Background()); err != nil {
+		t.Fatalf("Replace() error = %v", err)
+	}
+	if gotReason != "manual-restart" {
+		t.Fatalf("shutdown reason = %q, want manual-restart", gotReason)
 	}
 }
 
