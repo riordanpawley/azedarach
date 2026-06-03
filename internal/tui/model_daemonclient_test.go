@@ -8538,7 +8538,7 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		}
 
 		updatedAny, promptCmd := m.handleBulkAction(overlay.BulkActionMsg{
-			Action:      "D",
+			Action:      "4",
 			SelectedIDs: []string{"az-1", "az-2"},
 		})
 		if promptCmd == nil {

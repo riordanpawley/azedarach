@@ -39,19 +39,19 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 		m.beginMutationFeedback(fmt.Sprintf("Bulk move queued for %d task(s)", count))
 		return m, m.bulkMoveStatusCmd(msg.SelectedIDs, 1)
 
-	case "o": // Set to Open
+	case "1": // Set to Open
 		m.beginMutationFeedback(fmt.Sprintf("Bulk status update queued for %d task(s)", count))
 		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusOpen)
 
-	case "i": // Set to In Progress
+	case "2": // Set to In Progress
 		m.beginMutationFeedback(fmt.Sprintf("Bulk status update queued for %d task(s)", count))
 		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusInProgress)
 
-	case "b": // Set to In Review
+	case "3": // Set to In Review
 		m.beginMutationFeedback(fmt.Sprintf("Bulk status update queued for %d task(s)", count))
 		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusInReview)
 
-	case "D": // Set to Done
+	case "4": // Set to Done
 		pending := pendingCloseCleanupConfirmation{
 			taskIDs:      append([]string(nil), msg.SelectedIDs...),
 			closeTaskIDs: append([]string(nil), msg.SelectedIDs...),
