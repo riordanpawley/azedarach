@@ -206,6 +206,48 @@ func TestOperationRuntimeGitMergePublishesLifecycleEvents(t *testing.T) {
 	}
 }
 
+func TestOperationRuntimeDirectGitMergeWaitTimeoutReturnsPendingEnvelope(t *testing.T) {
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), nextRevision: sequentialRevision()})
+	runtime.gitHandler = daemonhandlers.NewGitHandler(runtimeGitService{})
+	runtime.pollInterval = time.Millisecond
+	executor := operationCommandExecutor{runtime: runtime}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+
+	req := testRequest(daemonhandlers.CommandGitMerge, map[string]string{"worktree": "/tmp/wt", "branch": "main"})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-started
+		cancel()
+	}()
+	defer cancel()
+	resp := executor.Execute(ctx, req, daemonhandlers.CommandGitMerge, func(_ context.Context) protocol.ResponseEnvelope {
+		close(started)
+		<-release
+		return testResponse(req, map[string]string{"worktree": "/tmp/wt", "branch": "main"})
+	})
+	if !resp.OK {
+		if resp.Error != nil {
+			t.Fatalf("response error = %+v", *resp.Error)
+		}
+		t.Fatalf("response = %+v", resp)
+	}
+	var body operationResultEnvelope
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if body.OperationID == "" {
+		t.Fatal("expected pending operation id")
+	}
+	if body.State != string(daemonops.StateRunning) && body.State != string(daemonops.StateQueued) {
+		t.Fatalf("state = %q, want running or queued", body.State)
+	}
+	if len(body.Result) != 0 {
+		t.Fatalf("result = %s, want empty pending result", string(body.Result))
+	}
+}
+
 func TestOperationRuntimeWorktreeCleanupPublishesProgressEvents(t *testing.T) {
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), hub: publish.NewHub(32, 16, nil), nextRevision: sequentialRevision()})
 	runtime.worktreeHandler = daemonhandlers.NewWorktreeHandler(runtimeWorktreeService{})

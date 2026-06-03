@@ -135,12 +135,12 @@ func (c *Client) Fetch(ctx context.Context, worktree, remote string) error {
 func (c *Client) Merge(ctx context.Context, worktree, branch string) (*MergeResult, error) {
 	c.logger.Info("merging branch", "worktree", worktree, "branch", branch)
 
-	output, err := c.runInWorktree(ctx, worktree, "merge", branch)
+	output, err := c.runInWorktree(ctx, worktree, "merge", "--no-edit", branch)
 
 	result := &MergeResult{
 		Success:      err == nil,
 		HasConflicts: false,
-		Message:      output,
+		Message:      mergeResultMessage(output, err),
 	}
 
 	if err != nil {
@@ -152,6 +152,17 @@ func (c *Client) Merge(ctx context.Context, worktree, branch string) (*MergeResu
 				"branch", branch,
 				"conflicts", result.ConflictFiles,
 			)
+			if abortErr := c.AbortMerge(ctx, worktree); abortErr != nil {
+				return nil, fmt.Errorf("failed to abort conflicted merge: %w", abortErr)
+			}
+		} else if c.mergeInProgress(ctx, worktree) {
+			c.logger.Warn("merge commit failed; aborting incomplete merge",
+				"branch", branch,
+				"error", err,
+			)
+			if abortErr := c.AbortMerge(ctx, worktree); abortErr != nil {
+				return nil, fmt.Errorf("failed to abort incomplete merge: %w", abortErr)
+			}
 		} else {
 			c.logger.Error("merge failed", "branch", branch, "error", err)
 			return nil, fmt.Errorf("failed to merge branch: %w", err)
@@ -161,6 +172,22 @@ func (c *Client) Merge(ctx context.Context, worktree, branch string) (*MergeResu
 	}
 
 	return result, nil
+}
+
+func mergeResultMessage(output string, err error) string {
+	output = strings.TrimSpace(output)
+	if err == nil {
+		return output
+	}
+	if output == "" {
+		return err.Error()
+	}
+	return output + "\n" + err.Error()
+}
+
+func (c *Client) mergeInProgress(ctx context.Context, worktree string) bool {
+	output, err := c.runInWorktree(ctx, worktree, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+	return err == nil && strings.TrimSpace(output) != ""
 }
 
 // AbortMerge aborts an ongoing merge operation.

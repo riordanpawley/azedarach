@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -21,6 +24,46 @@ func (m *mockRunner) Run(ctx context.Context, args ...string) (string, error) {
 		return m.runFunc(ctx, args...)
 	}
 	return "", nil
+}
+
+func initDivergedRepo(t *testing.T) string {
+	t.Helper()
+
+	repo := t.TempDir()
+	runClientTestGit(t, repo, "init", "-q", "-b", "main")
+	runClientTestGit(t, repo, "config", "user.email", "test@example.com")
+	runClientTestGit(t, repo, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base file: %v", err)
+	}
+	runClientTestGit(t, repo, "add", "base.txt")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "base")
+
+	runClientTestGit(t, repo, "checkout", "-q", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(repo, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatalf("write feature file: %v", err)
+	}
+	runClientTestGit(t, repo, "add", "feature.txt")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "feature")
+
+	runClientTestGit(t, repo, "checkout", "-q", "main")
+	if err := os.WriteFile(filepath.Join(repo, "main.txt"), []byte("main\n"), 0o644); err != nil {
+		t.Fatalf("write main file: %v", err)
+	}
+	runClientTestGit(t, repo, "add", "main.txt")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "main")
+	return repo
+}
+
+func runClientTestGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
 }
 
 func TestStatus(t *testing.T) {
@@ -192,7 +235,7 @@ branch refs/heads/riordan/child/work
 func TestMergeSuccess(t *testing.T) {
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {
-			if len(args) >= 2 && args[0] == "merge" {
+			if len(args) >= 3 && args[0] == "merge" && args[1] == "--no-edit" && args[2] == "feature-branch" {
 				return "Merge made by the 'recursive' strategy.", nil
 			}
 			return "", fmt.Errorf("unexpected command: %v", args)
@@ -226,10 +269,15 @@ Auto-merging file2.txt
 CONFLICT (content): Merge conflict in file2.txt
 Automatic merge failed; fix conflicts and then commit the result.`
 
+	var calls []string
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {
-			if len(args) >= 2 && args[0] == "merge" {
+			calls = append(calls, strings.Join(args, " "))
+			if len(args) >= 3 && args[0] == "merge" && args[1] == "--no-edit" && args[2] == "feature-branch" {
 				return conflictOutput, fmt.Errorf("merge conflict")
+			}
+			if len(args) >= 2 && args[0] == "merge" && args[1] == "--abort" {
+				return "", nil
 			}
 			return "", fmt.Errorf("unexpected command: %v", args)
 		},
@@ -252,6 +300,111 @@ Automatic merge failed; fix conflicts and then commit the result.`
 
 	expectedConflicts := []string{"file1.txt", "file2.txt"}
 	compareStringSlices(t, "ConflictFiles", result.ConflictFiles, expectedConflicts)
+	compareStringSlices(t, "calls", calls, []string{"merge --no-edit feature-branch", "merge --abort"})
+}
+
+func TestMergeWithConflictsReturnsAbortError(t *testing.T) {
+	conflictOutput := `CONFLICT (content): Merge conflict in file1.txt
+Automatic merge failed; fix conflicts and then commit the result.`
+
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 3 && args[0] == "merge" && args[1] == "--no-edit" && args[2] == "feature-branch" {
+				return conflictOutput, fmt.Errorf("merge conflict")
+			}
+			if len(args) >= 2 && args[0] == "merge" && args[1] == "--abort" {
+				return "", fmt.Errorf("abort failed")
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	result, err := client.Merge(context.Background(), "/fake/worktree", "feature-branch")
+
+	if err == nil {
+		t.Fatal("Merge() error = nil, want abort error")
+	}
+	if result != nil {
+		t.Fatalf("Merge() result = %+v, want nil on abort error", result)
+	}
+	if !strings.Contains(err.Error(), "failed to abort conflicted merge") {
+		t.Fatalf("Merge() error = %v, want abort context", err)
+	}
+}
+
+func TestMergeAbortsIncompleteNonConflictMerge(t *testing.T) {
+	var calls []string
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			calls = append(calls, strings.Join(args, " "))
+			switch {
+			case len(args) >= 3 && args[0] == "merge" && args[1] == "--no-edit" && args[2] == "feature-branch":
+				return "", fmt.Errorf("commit-msg hook failed")
+			case len(args) >= 4 && args[0] == "rev-parse" && args[1] == "-q" && args[2] == "--verify" && args[3] == "MERGE_HEAD":
+				return "abc123", nil
+			case len(args) >= 2 && args[0] == "merge" && args[1] == "--abort":
+				return "", nil
+			default:
+				return "", fmt.Errorf("unexpected command: %v", args)
+			}
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	result, err := client.Merge(context.Background(), "/fake/worktree", "feature-branch")
+
+	if err != nil {
+		t.Fatalf("Merge() error = %v", err)
+	}
+	if result == nil || result.Success || result.HasConflicts {
+		t.Fatalf("Merge() result = %+v, want non-conflict failure result", result)
+	}
+	if !strings.Contains(result.Message, "commit-msg hook failed") {
+		t.Fatalf("Merge() message = %q, want hook failure", result.Message)
+	}
+	compareStringSlices(t, "calls", calls, []string{
+		"merge --no-edit feature-branch",
+		"rev-parse -q --verify MERGE_HEAD",
+		"merge --abort",
+	})
+}
+
+func TestMergePreservesCommitHooksAndAbortsIncompleteMerge(t *testing.T) {
+	repo := initDivergedRepo(t)
+	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\necho hook failed >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	result, err := client.Merge(context.Background(), repo, "feature")
+	if err != nil {
+		t.Fatalf("Merge() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("Merge() result = nil")
+	}
+	if result.Success {
+		t.Fatalf("Merge() result = %+v, want failed merge result", result)
+	}
+	if result.HasConflicts {
+		t.Fatalf("Merge() result = %+v, want non-conflict hook failure", result)
+	}
+	if !strings.Contains(result.Message, "hook failed") {
+		t.Fatalf("Merge() message = %q, want hook output", result.Message)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".git", "MERGE_HEAD")); !os.IsNotExist(err) {
+		t.Fatalf("MERGE_HEAD stat err = %v, want absent", err)
+	}
+
+	status, err := client.Status(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if status.HasChanges {
+		t.Fatalf("status = %+v, want clean after aborted incomplete merge", status)
+	}
 }
 
 func TestAbortMerge(t *testing.T) {
