@@ -941,6 +941,68 @@ func TestAIHookRunCommandDoesNotAutostartRetryBestEffortLifecycleNotify(t *testi
 	}
 }
 
+func TestAIHookRunCommandPrioritizesLifecycleNotifyBeforeHookLog(t *testing.T) {
+	projectDir := t.TempDir()
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")
+
+	calls := make(chan string, 2)
+	transport := &fakeDaemonTransport{
+		commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandSessionPause:
+				calls <- req.Command
+				return responseWithJSON(req, struct{}{}), nil
+			case protocol.CommandHookLogAppend:
+				calls <- req.Command
+				<-ctx.Done()
+				return protocol.ResponseEnvelope{}, ctx.Err()
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		},
+	}
+	deps := &Dependencies{
+		RepoDir:      projectDir,
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
+	}
+
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.WriteString(`{"thread_id":"t-port-1"}`); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err = RunAgentHook(ctx, deps, AgentHookContext{
+		Agent:      AgentCodex,
+		Event:      hookEventPermissionRequest,
+		IssueID:    "az-port-1",
+		ProjectDir: projectDir,
+		Payload:    map[string]any{"thread_id": "t-port-1"},
+	})
+	if err != nil {
+		t.Fatalf("RunAgentHook error: %v", err)
+	}
+
+	first := <-calls
+	second := <-calls
+	if first != daemonclient.CommandSessionPause || second != protocol.CommandHookLogAppend {
+		t.Fatalf("call order = [%s %s], want [%s %s]", first, second, daemonclient.CommandSessionPause, protocol.CommandHookLogAppend)
+	}
+}
+
 func TestAIHookRunCommandSkipsPreToolUseDaemonCalls(t *testing.T) {
 	projectDir := t.TempDir()
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")

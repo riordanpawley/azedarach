@@ -64,8 +64,8 @@ const (
 var commandSpecRegistry = map[string]CommandSpec{
 	CommandSessionStart:                   {Command: CommandSessionStart, DispatchTarget: CommandDispatchSession, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	CommandSessionAttach:                  {Command: CommandSessionAttach, DispatchTarget: CommandDispatchSession, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	CommandSessionPause:                   {Command: CommandSessionPause, DispatchTarget: CommandDispatchSession, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	CommandSessionResume:                  {Command: CommandSessionResume, DispatchTarget: CommandDispatchSession, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
+	CommandSessionPause:                   {Command: CommandSessionPause, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},
+	CommandSessionResume:                  {Command: CommandSessionResume, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},
 	CommandSessionStop:                    {Command: CommandSessionStop, DispatchTarget: CommandDispatchSession, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	CommandSessionMessage:                 {Command: CommandSessionMessage, DispatchTarget: CommandDispatchSession, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	CommandSessionResolveConflict:         {Command: CommandSessionResolveConflict, DispatchTarget: CommandDispatchSession, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
