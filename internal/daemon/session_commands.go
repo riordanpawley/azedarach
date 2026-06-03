@@ -1421,7 +1421,7 @@ func (d *Daemon) handleSessionMessage(ctx context.Context, req protocol.RequestE
 	if !exists {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found in tmux: %s", cmd.IssueID)), nil
 	}
-	if err := d.tmux.SendKeys(ctx, cmd.SessionID, cmd.Message); err != nil {
+	if err := d.tmux.PasteTextAndSubmit(ctx, cmd.SessionID, cmd.Message); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("send session message: %v", err)), nil
 	}
 	if d.cfg.Logger != nil {

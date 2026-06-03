@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -357,6 +358,7 @@ func TestSourceForSessionInvariant(t *testing.T) {
 type sessionStartTmuxRunner struct {
 	sessions         map[string]bool
 	windows          map[string]map[string]bool
+	commands         [][]string
 	sendKeysCalls    int
 	sendKeysTargets  []string
 	sendKeysPayloads []string
@@ -375,6 +377,7 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 	if len(args) == 0 {
 		return "", errors.New("missing tmux args")
 	}
+	r.commands = append(r.commands, append([]string(nil), args...))
 	switch args[0] {
 	case "has-session":
 		if len(args) < 3 {
@@ -419,7 +422,7 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 		return "", nil
 	case "send-keys":
 		r.sendKeysCalls++
-		if len(args) >= 3 {
+		if len(args) >= 4 {
 			r.sendKeysTargets = append(r.sendKeysTargets, args[2])
 			r.sendKeysPayloads = append(r.sendKeysPayloads, args[3])
 		}
@@ -4084,7 +4087,7 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	}
 }
 
-func TestSessionMessageSendsKeysToActiveIssueSession(t *testing.T) {
+func TestSessionMessagePastesTextAndSubmitsActiveIssueSession(t *testing.T) {
 	projectID := protocol.DefaultProjectID
 	issueID := naming.IssueID("az-42")
 	repoDir := "/repo"
@@ -4098,7 +4101,7 @@ func TestSessionMessageSendsKeysToActiveIssueSession(t *testing.T) {
 	body, err := json.Marshal(sessionCommandBody{
 		ProjectID: projectID,
 		SessionID: issueID.String(),
-		Message:   "Orchestrator says proceed now.",
+		Message:   "Orchestrator says proceed now.\n\nKeep notes current.",
 	})
 	if err != nil {
 		t.Fatalf("marshal body: %v", err)
@@ -4118,14 +4121,14 @@ func TestSessionMessageSendsKeysToActiveIssueSession(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("response not OK: %+v", resp)
 	}
-	if tmuxRunner.sendKeysCalls != 1 {
-		t.Fatalf("sendKeysCalls = %d, want 1", tmuxRunner.sendKeysCalls)
+	wantCommands := [][]string{
+		{"has-session", "-t", sessionID},
+		{"set-buffer", "-b", "azedarach-message-" + sessionID, "Orchestrator says proceed now.\n\nKeep notes current."},
+		{"paste-buffer", "-d", "-b", "azedarach-message-" + sessionID, "-t", sessionID},
+		{"send-keys", "-t", sessionID, "C-j"},
 	}
-	if got := tmuxRunner.sendKeysTargets[0]; got != sessionID {
-		t.Fatalf("send target = %q, want %q", got, sessionID)
-	}
-	if got := tmuxRunner.sendKeysPayloads[0]; got != "Orchestrator says proceed now." {
-		t.Fatalf("send payload = %q", got)
+	if !reflect.DeepEqual(tmuxRunner.commands, wantCommands) {
+		t.Fatalf("tmux commands = %#v, want %#v", tmuxRunner.commands, wantCommands)
 	}
 }
 
