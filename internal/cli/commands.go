@@ -2042,6 +2042,7 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	opts := IssueCreateOptions{Type: domain.TypeTask}
 	var priorityRaw string
 	var typeRaw string
+	var titleFlag string
 	impls := make([]string, 0, 2)
 	fs := flag.NewFlagSet("issue create", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -2054,6 +2055,7 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 		impls = append(impls, trimmed)
 		return nil
 	})
+	fs.StringVar(&titleFlag, "title", "", "issue title")
 	fs.StringVar(&opts.Description, "description", "", "issue description")
 	fs.StringVar(&priorityRaw, "priority", "", "issue priority (P0-P4)")
 	fs.BoolVar(&opts.Deferred, "deferred", false, "create standalone later/backlog work; skips AZEDARACH_ISSUE_ID auto-parenting and defaults priority to P4 unless --priority is provided")
@@ -2062,10 +2064,17 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueCreateOptions{}, err
 	}
-	if fs.NArg() != 1 {
-		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
+	titleFlag = strings.TrimSpace(titleFlag)
+	switch {
+	case fs.NArg() == 0 && titleFlag != "":
+		opts.Title = titleFlag
+	case fs.NArg() == 1 && titleFlag == "":
+		opts.Title = fs.Arg(0)
+	case fs.NArg() == 1 && titleFlag != "":
+		return IssueCreateOptions{}, fmt.Errorf("provide title either as --title or as a positional argument, not both")
+	default:
+		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
 	}
-	opts.Title = fs.Arg(0)
 
 	taskType, err := parseTaskType(typeRaw)
 	if err != nil {

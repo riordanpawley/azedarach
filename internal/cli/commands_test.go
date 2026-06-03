@@ -3717,6 +3717,18 @@ func TestParseIssueCreateArgs(t *testing.T) {
 			},
 		},
 		{
+			name: "title flag",
+			args: []string{"--title", "Title", "--impl", "go-bubbletea"},
+			want: IssueCreateOptions{
+				Title:                  "Title",
+				Type:                   domain.TypeTask,
+				Priority:               domain.P2,
+				Implementations:        []string{"go-bubbletea"},
+				AutoParentFromIssueID:  ptrToString("az-parent"),
+				AutoCreatedFromIssueID: ptrToString("az-parent"),
+			},
+		},
+		{
 			name: "interspersed flags after title",
 			args: []string{"Title", "--impl", "go-bubbletea", "--priority", "P1"},
 			want: IssueCreateOptions{
@@ -3749,6 +3761,11 @@ func TestParseIssueCreateArgs(t *testing.T) {
 			name:        "missing title",
 			args:        []string{},
 			errContains: "usage: az issue create [--project <project-id>] [--impl <implementation> ...] [--deferred]",
+		},
+		{
+			name:        "title flag and positional are ambiguous",
+			args:        []string{"--title", "Flag title", "Positional title"},
+			errContains: "provide title either as --title or as a positional argument, not both",
 		},
 	}
 
