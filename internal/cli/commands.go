@@ -5305,11 +5305,14 @@ func renderPrimeIssueSection(issueID string, task domain.Task) string {
 	}
 	implementations := formatPrimeImplementations(task.Implementations)
 	parent := ""
+	mailbox := ""
 	if task.ParentID != nil && strings.TrimSpace(task.ParentID.String()) != "" {
-		parent = fmt.Sprintf("\nParent: %s", strings.TrimSpace(task.ParentID.String()))
+		parentID := strings.TrimSpace(task.ParentID.String())
+		parent = fmt.Sprintf("\nParent: %s", parentID)
+		mailbox = fmt.Sprintf("- Worker mailbox: receive orchestrator messages with `az mail list --parent %s --since 0 --json`; use `az mail watch --parent %s --since <seq> --jsonl` only when explicitly asked to monitor continuously.\n", parentID, parentID)
 	}
 	return fmt.Sprintf(
-		"Active issue context (AZEDARACH_ISSUE_ID=%s):\nRefresh with `az issue get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s impl=%s]%s%s\nDependencies:\n%s\n```\n",
+		"Active issue context (AZEDARACH_ISSUE_ID=%s):\nRefresh with `az issue get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s impl=%s]%s%s\nDependencies:\n%s\n```\n%s",
 		issueID,
 		issueID,
 		task.ID,
@@ -5321,6 +5324,7 @@ func renderPrimeIssueSection(issueID string, task domain.Task) string {
 		parent,
 		description,
 		formatPrimeDependencyLines(task.Dependencies),
+		mailbox,
 	)
 }
 

@@ -32,6 +32,7 @@ type sessionCommandBody struct {
 	StartWork  *bool    `json:"start_work,omitempty"`
 	ImagePaths []string `json:"image_paths,omitempty"`
 	Prompt     string   `json:"initial_prompt,omitempty"`
+	Message    string   `json:"message,omitempty"`
 }
 
 type resolvedSessionTarget struct {
@@ -43,6 +44,7 @@ type resolvedSessionTarget struct {
 	StartWork  bool
 	ImagePaths []string
 	Prompt     string
+	Message    string
 }
 
 type sessionRecoveryResult struct {
@@ -403,6 +405,7 @@ func (d *Daemon) decodeSessionRequest(req protocol.RequestEnvelope, requireSessi
 		StartWork:  startWork,
 		ImagePaths: cmd.ImagePaths,
 		Prompt:     cmd.Prompt,
+		Message:    strings.TrimSpace(cmd.Message),
 	}, protocol.ResponseEnvelope{}, true
 }
 
@@ -652,7 +655,11 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if cmd.StartWork {
 		initialPrompt := strings.TrimSpace(cmd.Prompt)
 		if initialPrompt == "" {
-			initialPrompt = buildStartWorkPrompt(cmd.IssueID, task.Type.String(), task.Title, task.ParentID != nil)
+			parentIssueID := ""
+			if task.ParentID != nil {
+				parentIssueID = strings.TrimSpace(task.ParentID.String())
+			}
+			initialPrompt = buildStartWorkPrompt(cmd.IssueID, task.Type.String(), task.Title, parentIssueID != "", parentIssueID)
 		}
 		launchCommand := d.buildSessionLaunchCommand(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, initialPrompt)
 		if err := d.tmux.SendKeys(ctx, cmd.SessionID, launchCommand); err != nil {
@@ -1358,6 +1365,41 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 		return err
 	}
 	return nil
+}
+
+func (d *Daemon) handleSessionMessage(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	cmd, _, ok := d.decodeSessionRequest(req, true)
+	if !ok {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session message request"), nil
+	}
+	if strings.TrimSpace(cmd.Message) == "" {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required field: message"), nil
+	}
+	if len([]rune(cmd.Message)) > 4000 {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "message must be 4000 characters or fewer"), nil
+	}
+	if d.tmux == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "tmux client unavailable"), nil
+	}
+	exists, err := d.tmux.HasSession(ctx, cmd.SessionID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("check session exists: %v", err)), nil
+	}
+	if !exists {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found in tmux: %s", cmd.IssueID)), nil
+	}
+	if err := d.tmux.SendKeys(ctx, cmd.SessionID, cmd.Message); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("send session message: %v", err)), nil
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon session message sent",
+			"project_id", cmd.ProjectID,
+			"issue_id", cmd.IssueID,
+			"session_id", cmd.SessionID,
+			"message_bytes", len(cmd.Message),
+		)
+	}
+	return d.commandOutput(req, fmt.Sprintf("Sent message to session: %s\n", cmd.IssueID)), nil
 }
 
 func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -2478,7 +2520,7 @@ func singleQuoteForShell(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
-func buildStartWorkPrompt(issueID, issueType, title string, orchestratedWorker bool) string {
+func buildStartWorkPrompt(issueID, issueType, title string, orchestratedWorker bool, parentIssueID string) string {
 	safeIssueType := sanitizePromptInline(issueType, 0)
 	if safeIssueType == "" {
 		safeIssueType = "task"
@@ -2494,12 +2536,16 @@ func buildStartWorkPrompt(issueID, issueType, title string, orchestratedWorker b
 		safeTitle,
 	)
 	if strings.EqualFold(safeIssueType, string(domain.TypeEpic)) {
-		return base + "\n\nRole: orchestrator\n- Use `az orchestrate status --root <issue-id>` for readiness snapshots including active worker activity (`busy|idle|unknown`).\n- Use `az orchestrate watch --root <issue-id> --since <seq> --jsonl` for continuous observe-only mailbox/runnable/activity updates; start it in another pane/session and leave it running while workers are active.\n- Do not use `--once` for orchestration monitoring; reserve it for diagnostic single polls.\n- Trust hook-backed `activity=busy|idle` for worker idleness checks. If activity is `unknown`, check hooks with `az ai status --target=auto` and install/update with `az ai install --target=auto`; use direct tmux pane capture only when watch/status look stale, failed, or contradictory, or when you need a sparse progress spot-check. Do not poll tmux panes on a fixed interval.\n- Start runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`, then immediately ensure the continuous watch is running.\n- Treat blocked work as graph state from unresolved `blocks` dependencies or worker-blocked mailbox evidence, not as an issue status.\n- Treat `in_review` workers as ready for orchestrator integration; integrate/validate them, then close accepted worker issues.\n- Use `az orchestrate integrate --issue <issue-id>` for worker result guidance.\n- Use `az orchestrate close-session --issue <issue-id>` after worker results are integrated.\n- Keep orchestration centralized in v1; do not auto-delegate sub-orchestrators.\n- Close only when `az orchestrate complete-check --root <issue-id>` passes."
+		return base + "\n\nRole: orchestrator\n- Use `az orchestrate status --root <issue-id>` for readiness snapshots including active worker activity (`busy|idle|unknown`).\n- Use `az orchestrate watch --root <issue-id> --since <seq> --jsonl` for continuous observe-only mailbox/runnable/activity updates; start it in another pane/session and leave it running while workers are active.\n- Do not use `--once` for orchestration monitoring; reserve it for diagnostic single polls.\n- Trust hook-backed `activity=busy|idle` for worker idleness checks. If activity is `unknown`, check hooks with `az ai status --target=auto` and install/update with `az ai install --target=auto`; use direct tmux pane capture only when watch/status look stale, failed, or contradictory, or when you need a sparse progress spot-check. Do not poll tmux panes on a fixed interval.\n- Start runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`, then immediately ensure the continuous watch is running.\n- Send running-worker nudges with `az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\"`; bare `az mail send` is durable mailbox-only.\n- Treat blocked work as graph state from unresolved `blocks` dependencies or worker-blocked mailbox evidence, not as an issue status.\n- Treat `in_review` workers as ready for orchestrator integration; integrate/validate them, then close accepted worker issues.\n- Use `az orchestrate integrate --issue <issue-id>` for worker result guidance.\n- Use `az orchestrate close-session --issue <issue-id>` after worker results are integrated.\n- Keep orchestration centralized in v1; do not auto-delegate sub-orchestrators.\n- Close only when `az orchestrate complete-check --root <issue-id>` passes."
 	}
 	if !orchestratedWorker {
 		return base + "\n\nRole: contributor\n- Focus only on this issue scope unless the user explicitly expands it.\n- Keep issue status/notes current with evidence.\n- Use `in_progress` while actively working, `in_review` when complete and awaiting review/integration, and `closed` only after acceptance criteria and validation are done.\n- Represent blocked work with dependency edges and notes, not by using `in_review`."
 	}
-	return base + "\n\nRole: worker\n- Focus only on this issue scope unless the user explicitly expands it.\n- Report coordination state with mailbox event types: worker-progress, worker-blocked, and worker-integration-ready; worker-ready and worker-complete are accepted only as legacy aliases for worker-integration-ready.\n- Keep issue status/notes current with evidence for the orchestrator.\n- Use `in_progress` while actively working and `in_review` when complete and ready for orchestrator integration; the orchestrator closes accepted work.\n- Report blockers via dependency edges or worker-blocked mailbox events, not by setting `in_review`."
+	mailboxGuidance := "- Check inbound orchestrator messages with `az mail list --parent <parent-issue> --since 0 --json` before declaring yourself blocked or idle; apply events for this issue and continue without waiting for a separate user prompt."
+	if strings.TrimSpace(parentIssueID) != "" {
+		mailboxGuidance = fmt.Sprintf("- Coordination mailbox parent: `%s`; check inbound orchestrator messages with `az mail list --parent %s --since 0 --json` before declaring yourself blocked or idle; apply events for this issue and continue without waiting for a separate user prompt.", parentIssueID, parentIssueID)
+	}
+	return base + "\n\nRole: worker\n- Focus only on this issue scope unless the user explicitly expands it.\n" + mailboxGuidance + "\n- Report coordination state with mailbox event types: worker-progress, worker-blocked, and worker-integration-ready; worker-ready and worker-complete are accepted only as legacy aliases for worker-integration-ready.\n- Keep issue status/notes current with evidence for the orchestrator.\n- Use `in_progress` while actively working and `in_review` when complete and ready for orchestrator integration; the orchestrator closes accepted work.\n- Report blockers via dependency edges or worker-blocked mailbox events, not by setting `in_review`."
 }
 
 func buildConflictResolutionPrompt(issueID string, conflictFiles []string) string {

@@ -7814,6 +7814,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az orchestrate start --root <issue-id> [--limit <n>] [--issue <issue-id> ...] [--json]`") {
 		t.Fatalf("prime output missing orchestrate start command example: %q", output)
 	}
+	if !strings.Contains(output, "`az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\" [--json]`") {
+		t.Fatalf("prime output missing orchestrate message command example: %q", output)
+	}
 	if !strings.Contains(output, "`az orchestrate integrate --issue <issue-id> [--json]`") {
 		t.Fatalf("prime output missing orchestrate integrate command example: %q", output)
 	}
@@ -7850,8 +7853,14 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Then run the az orchestration loop: `status` to identify runnable leaves and active worker activity") {
 		t.Fatalf("prime output missing az orchestration workflow guidance: %q", output)
 	}
+	if !strings.Contains(output, "use `az orchestrate message --root <parent> --issue <worker> --body \"...\"` for active worker nudges") {
+		t.Fatalf("prime output missing active nudge loop guidance: %q", output)
+	}
 	if !strings.Contains(output, "Az orchestration loop:") {
 		t.Fatalf("prime output missing az orchestration operating loop: %q", output)
+	}
+	if !strings.Contains(output, "use `az orchestrate message` for active worker nudges") {
+		t.Fatalf("prime output missing active nudge step guidance: %q", output)
 	}
 	if !strings.Contains(output, "Small graph: 1-3 leaves") {
 		t.Fatalf("prime output missing small graph orchestration guidance: %q", output)
@@ -7885,6 +7894,12 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "`az mail send --parent <parent-issue> --type dependency-ready --body \"...\"`") {
 		t.Fatalf("prime output missing mail send command example: %q", output)
+	}
+	if !strings.Contains(output, "Use `az orchestrate message --root <parent-issue> --issue <worker-issue> --body \"...\"` for orchestrator-to-running-worker nudges") {
+		t.Fatalf("prime output missing active worker nudge guidance: %q", output)
+	}
+	if !strings.Contains(output, "bare `az mail send` is durable mailbox-only and may not be seen until the worker next checks mail") {
+		t.Fatalf("prime output missing passive mailbox warning: %q", output)
 	}
 	if !strings.Contains(output, "Decision records:") {
 		t.Fatalf("prime output missing decision command map section: %q", output)
@@ -7990,6 +8005,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
 	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+	parentID := naming.IssueID("az-parent")
 
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
@@ -8010,6 +8026,7 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 					Status:          domain.StatusOpen,
 					Priority:        domain.P2,
 					Type:            domain.TypeTask,
+					ParentID:        &parentID,
 					Implementations: []string{"go-bubbletea"},
 					CreatedAt:       now,
 					UpdatedAt:       now,
@@ -8053,6 +8070,15 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "Dependencies:\n- blocks: az-2") {
 		t.Fatalf("prime output missing dependency summary: %q", output)
+	}
+	if !strings.Contains(output, "Parent: az-parent") {
+		t.Fatalf("prime output missing active issue parent: %q", output)
+	}
+	if !strings.Contains(output, "Worker mailbox: receive orchestrator messages with `az mail list --parent az-parent --since 0 --json`") {
+		t.Fatalf("prime output missing worker mailbox receive guidance: %q", output)
+	}
+	if !strings.Contains(output, "`az mail watch --parent az-parent --since <seq> --jsonl` only when explicitly asked") {
+		t.Fatalf("prime output missing bounded mailbox watch guidance: %q", output)
 	}
 }
 
