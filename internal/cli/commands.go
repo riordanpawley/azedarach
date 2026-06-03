@@ -3604,7 +3604,7 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 	if err != nil {
 		return fmt.Errorf("failed to integrate issue %s before close: %w", opts.IssueID, err)
 	}
-	if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, domain.StatusDone, cleanupCloseTaskStatusOptions(opts.ForceWorktree)); err != nil {
+	if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, domain.StatusDone, cleanupCloseTaskStatusOptionsAfterIntegration(opts.ForceWorktree, integrationRequested)); err != nil {
 		return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
 	}
 
@@ -3850,6 +3850,12 @@ func cleanupCloseTaskStatusOptions(forceWorktree bool) daemonclient.TaskStatusOp
 		CleanupBeforeClose: true,
 		ForceWorktree:      forceWorktree,
 	}
+}
+
+func cleanupCloseTaskStatusOptionsAfterIntegration(forceWorktree bool, integrationRequested bool) daemonclient.TaskStatusOptions {
+	opts := cleanupCloseTaskStatusOptions(forceWorktree)
+	opts.IgnoreAhead = integrationRequested
+	return opts
 }
 
 func IssueDependencyAddCommand(deps *Dependencies, opts IssueDependencyAddOptions) error {

@@ -974,6 +974,14 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
+	for _, sessionName := range sessionNamesToKill {
+		if strings.EqualFold(strings.TrimSpace(sessionName), strings.TrimSpace(cmd.SessionID)) {
+			continue
+		}
+		if err := d.writeSessionStopProjection(cmd.ProjectID, sessionName, cmd.IssueID); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record live session stop intent: %v", err)), nil
+		}
+	}
 	exists := len(sessionNamesToKill) > 0
 	if exists {
 		for _, sessionName := range sessionNamesToKill {
@@ -982,7 +990,7 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 			}
 		}
 	}
-	if err := d.refreshStoppedSessionRuntimeState(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil && d.cfg.Logger != nil {
+	if err := d.refreshStoppedSessionRuntimeState(ctx, cmd.ProjectID, cmd.IssueID, append([]string{cmd.SessionID}, sessionNamesToKill...)); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Debug("daemon session stop post-kill issue refresh failed",
 			"project_id", cmd.ProjectID,
 			"issue_id", cmd.IssueID,
@@ -991,8 +999,8 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 		)
 	}
 	outputLines := []string{
-		fmt.Sprintf("Killing session: %s", cmd.IssueID),
-		fmt.Sprintf("✓ Session killed: %s", cmd.IssueID),
+		fmt.Sprintf("Killing session: %s", strings.Join(sessionNamesToKill, ", ")),
+		fmt.Sprintf("✓ Session killed: %s", strings.Join(sessionNamesToKill, ", ")),
 	}
 	if !exists {
 		outputLines[0] = fmt.Sprintf("Session not found in tmux: %s", cmd.IssueID)
@@ -1044,6 +1052,10 @@ func (d *Daemon) liveTmuxSessionNamesForIssue(ctx context.Context, projectID, is
 		projectedIssueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope)
 		if ok && naming.IssueIDsEqual(projectedIssueID, typedIssueID.String()) {
 			names[name] = struct{}{}
+			continue
+		}
+		if sessionNameHasIssueSuffix(name, typedIssueID.String()) {
+			names[name] = struct{}{}
 		}
 	}
 
@@ -1072,6 +1084,27 @@ func (d *Daemon) liveTmuxSessionNamesForIssue(ctx context.Context, projectID, is
 		resolved = append(resolved, name)
 	}
 	return resolved, nil
+}
+
+func sessionNameHasIssueSuffix(sessionName, issueID string) bool {
+	sessionName = strings.TrimSpace(sessionName)
+	issueID = strings.TrimSpace(issueID)
+	if sessionName == "" || issueID == "" {
+		return false
+	}
+	if naming.IssueIDsEqual(sessionName, issueID) {
+		return true
+	}
+	parts := strings.SplitN(sessionName, "-", 2)
+	if len(parts) != 2 || len(parts[0]) != 2 {
+		return false
+	}
+	for _, r := range parts[0] {
+		if r < 'a' || r > 'z' {
+			return false
+		}
+	}
+	return naming.IssueIDsEqual(parts[1], issueID)
 }
 
 func (d *Daemon) handleSessionResolveConflict(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -1507,11 +1540,12 @@ func (d *Daemon) staleSessionRuntimeStatusOutput(ctx context.Context, projectID,
 	if !found {
 		return "", false
 	}
-	observed := session.ObservedState
+	observed := daemonstate.NormalizeSessionState(session.ObservedState)
 	if strings.TrimSpace(string(observed)) == "" {
-		observed = session.State
+		observed = daemonstate.NormalizeSessionState(session.State)
 	}
-	if observed != daemonstate.SessionStateStopped || strings.TrimSpace(session.ID) == "" {
+	desired := daemonstate.NormalizeSessionState(session.State)
+	if observed != daemonstate.SessionStateStopped || desired == daemonstate.SessionStateStopped || strings.TrimSpace(session.ID) == "" {
 		return "", false
 	}
 	var b strings.Builder
@@ -2222,14 +2256,19 @@ func (d *Daemon) refreshExistingSessionRuntimeState(ctx context.Context, project
 	return nil
 }
 
-func (d *Daemon) refreshStoppedSessionRuntimeState(ctx context.Context, projectID, issueID, sessionID string) error {
+func (d *Daemon) refreshStoppedSessionRuntimeState(ctx context.Context, projectID, issueID string, sessionIDs []string) error {
 	if d == nil || d.sessionRuntimeStateStoreIfConfigured(projectID) == nil || d.sessionStore == nil {
 		return nil
 	}
 	projectID = d.canonicalProjectID(projectID)
 	issueID = strings.TrimSpace(issueID)
-	sessionID = strings.TrimSpace(sessionID)
-	if issueID == "" && sessionID == "" {
+	sessionIDSet := make(map[string]struct{}, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
+			sessionIDSet[sessionID] = struct{}{}
+		}
+	}
+	if issueID == "" && len(sessionIDSet) == 0 {
 		return nil
 	}
 
@@ -2241,7 +2280,11 @@ func (d *Daemon) refreshStoppedSessionRuntimeState(ctx context.Context, projectI
 	}
 	matched := false
 	for _, session := range rows {
-		if !naming.IssueIDsEqual(sessionProjectionIssueID(session, namingScope), issueID) {
+		sessionID := strings.TrimSpace(session.ID)
+		_, exactSessionMatch := sessionIDSet[sessionID]
+		issueMatch := naming.IssueIDsEqual(sessionProjectionIssueID(session, namingScope), issueID)
+		suffixMatch := sessionNameHasIssueSuffix(sessionID, issueID)
+		if !exactSessionMatch && !issueMatch && !suffixMatch {
 			continue
 		}
 		session.State = daemonstate.SessionStateStopped
@@ -2256,6 +2299,15 @@ func (d *Daemon) refreshStoppedSessionRuntimeState(ctx context.Context, projectI
 		return nil
 	}
 
+	fallbackSessionID := ""
+	for sessionID := range sessionIDSet {
+		fallbackSessionID = sessionID
+		break
+	}
+	if fallbackSessionID == "" && issueID != "" {
+		fallbackSessionID = naming.CanonicalSessionID(namingScope, issueID)
+	}
+
 	var session daemonstate.Session
 	if issueID != "" {
 		rows, err := store.ListSessionStates(ctx, projectID)
@@ -2268,12 +2320,12 @@ func (d *Daemon) refreshStoppedSessionRuntimeState(ctx context.Context, projectI
 	}
 	if strings.TrimSpace(session.ID) == "" {
 		session = daemonstate.Session{
-			ID:      sessionID,
+			ID:      fallbackSessionID,
 			IssueID: issueID,
 		}
 	}
 	if strings.TrimSpace(session.ID) == "" {
-		session.ID = sessionID
+		session.ID = fallbackSessionID
 	}
 	if strings.TrimSpace(session.IssueID) == "" {
 		session.IssueID = issueID

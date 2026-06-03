@@ -67,6 +67,7 @@ type TaskStatusRequest struct {
 type TaskStatusOptions struct {
 	CleanupBeforeClose bool
 	ForceWorktree      bool
+	IgnoreAhead        bool
 }
 
 // CloseGuardOptions controls which target runtime assets may remain because
@@ -75,6 +76,7 @@ type CloseGuardOptions struct {
 	AllowTargetSession  bool
 	AllowTargetWorktree bool
 	ForceWorktree       bool
+	IgnoreAhead         bool
 }
 
 // CloseGuardResult records the preflight inputs used for a close transition.
@@ -445,7 +447,7 @@ func (c *Client) UpdateTaskStatusWithOptions(ctx context.Context, taskID string,
 		return fmt.Errorf("invalid task id: %w", err)
 	}
 	if status == domain.StatusDone && opts.CleanupBeforeClose {
-		if err := c.cleanTaskRuntimeAttachmentsForClose(ctx, parsedTaskID.String(), opts.ForceWorktree); err != nil {
+		if err := c.cleanTaskRuntimeAttachmentsForClose(ctx, parsedTaskID.String(), opts); err != nil {
 			return err
 		}
 	}
@@ -455,11 +457,12 @@ func (c *Client) UpdateTaskStatusWithOptions(ctx context.Context, taskID string,
 	}, nil)
 }
 
-func (c *Client) cleanTaskRuntimeAttachmentsForClose(ctx context.Context, taskID string, forceWorktree bool) error {
+func (c *Client) cleanTaskRuntimeAttachmentsForClose(ctx context.Context, taskID string, opts TaskStatusOptions) error {
 	guard, err := c.ValidateTaskCloseWithOptions(ctx, taskID, CloseGuardOptions{
 		AllowTargetSession:  true,
 		AllowTargetWorktree: true,
-		ForceWorktree:       forceWorktree,
+		ForceWorktree:       opts.ForceWorktree,
+		IgnoreAhead:         opts.IgnoreAhead,
 	})
 	if err != nil {
 		return err
@@ -472,7 +475,7 @@ func (c *Client) cleanTaskRuntimeAttachmentsForClose(ctx context.Context, taskID
 		}
 	}
 	if closeGuardTaskHasWorktree(task) {
-		if err := c.RemoveWorktreeWithOptions(ctx, taskID, forceWorktree); err != nil {
+		if err := c.RemoveWorktreeWithOptions(ctx, taskID, opts.ForceWorktree); err != nil {
 			return fmt.Errorf("remove worktree before closing %s: %w", taskID, err)
 		}
 	}
@@ -553,7 +556,7 @@ func (c *Client) ValidateTaskCloseWithOptions(ctx context.Context, taskID string
 	if err != nil {
 		return CloseGuardResult{}, fmt.Errorf("inspect git status before closing %s: %w", taskID, err)
 	}
-	if reasons := closeGuardBlockers(status); len(reasons) > 0 {
+	if reasons := closeGuardBlockers(status, opts); len(reasons) > 0 {
 		repairs, repairErr := c.reopenClosedCloseGuardBlockers(ctx, task, snapshot.Tasks, reasons)
 		if repairErr != nil {
 			return CloseGuardResult{}, fmt.Errorf("%s. Failed to move closed blockers back for cleanup: %w", closeGuardFailureError(taskID, reasons, repairs), repairErr)
@@ -812,7 +815,7 @@ func closeGuardTaskWorktree(task domain.Task) string {
 	return strings.TrimSpace(task.Session.Worktree)
 }
 
-func closeGuardBlockers(status GitStatus) []string {
+func closeGuardBlockers(status GitStatus, opts CloseGuardOptions) []string {
 	dirty := closeGuardDirtyFiles(status)
 	reasons := make([]string, 0, 3)
 	if len(dirty) > 0 {
@@ -826,7 +829,7 @@ func closeGuardBlockers(status GitStatus) []string {
 			reasons = append(reasons, "worktree has conflicts: "+strings.Join(conflicts, ", "))
 		}
 	}
-	if status.GitAheadCount > 0 {
+	if status.GitAheadCount > 0 && !opts.IgnoreAhead {
 		reasons = append(reasons, fmt.Sprintf("branch is ahead by %d commit(s)", status.GitAheadCount))
 	}
 	return reasons
