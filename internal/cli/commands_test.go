@@ -57,7 +57,7 @@ func marshalTaskListBodyForProject(projectID string, tasks []domain.Task) ([]byt
 	})
 }
 
-func TestNewDependenciesAtKeepsProjectStateAtBaseRepoRoot(t *testing.T) {
+func TestNewDependenciesAtUsesBaseProjectAndWorktreeRuntimeForLinkedWorktree(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
 	worktree := filepath.Join(base, "wt")
@@ -81,12 +81,18 @@ func TestNewDependenciesAtKeepsProjectStateAtBaseRepoRoot(t *testing.T) {
 	if deps.RepoDir != repo {
 		t.Fatalf("RepoDir = %q, want %q", deps.RepoDir, repo)
 	}
+	if deps.RuntimeRepoDir != worktree {
+		t.Fatalf("RuntimeRepoDir = %q, want %q", deps.RuntimeRepoDir, worktree)
+	}
 	wantProjectID, err := config.ProjectIDForRoot(repo)
 	if err != nil {
 		t.Fatalf("ProjectIDForRoot() error = %v", err)
 	}
 	if deps.ProjectID != wantProjectID {
 		t.Fatalf("ProjectID = %q, want %q", deps.ProjectID, wantProjectID)
+	}
+	if deps.DaemonSocket != config.ScopedDaemonSocketPath(start) {
+		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.ScopedDaemonSocketPath(start))
 	}
 }
 
@@ -121,7 +127,7 @@ func TestNewDependenciesAtUsesScopedRuntimeForLinkedWorktreeWithoutEnv(t *testin
 	}
 }
 
-func TestNewDependenciesAtUsesScopedSocketWhenEnabled(t *testing.T) {
+func TestNewDependenciesAtUsesScopedSocketForLinkedWorktreeByDefault(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
 	worktree := filepath.Join(base, "wt")
@@ -138,8 +144,8 @@ func TestNewDependenciesAtUsesScopedSocketWhenEnabled(t *testing.T) {
 	}
 
 	t.Setenv("PATH", "")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
 	deps, err := NewDependenciesAt(config.DefaultConfig(), start)
 	if err != nil {
 		t.Fatalf("NewDependenciesAt() error = %v", err)
@@ -3231,6 +3237,16 @@ func TestImplDeleteCommandRemovesAssignmentsAcrossIssues(t *testing.T) {
 						CompletedAt:     req.SentAt,
 						Body:            payload,
 					}, nil
+				case daemonclient.CommandTaskGet:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            payload,
+					}, nil
 				case daemonclient.CommandTaskUpdate:
 					var body updateReq
 					if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -3274,6 +3290,11 @@ func TestImplDeleteCommandRemovesAssignmentsAcrossIssues(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got["az-1"], []string{"go-bubbletea"}) {
 		t.Fatalf("az-1 implementations = %+v, want [go-bubbletea]", got["az-1"])
+	}
+	for _, update := range updates {
+		if update.Description != "desc" {
+			t.Fatalf("update %s description = %q, want preserved desc", update.TaskID, update.Description)
+		}
 	}
 	if len(got["az-2"]) != 0 {
 		t.Fatalf("az-2 implementations = %+v, want empty", got["az-2"])
@@ -3358,6 +3379,16 @@ func TestImplMigrateCommandMigratesAssignmentsAcrossIssues(t *testing.T) {
 						CompletedAt:     req.SentAt,
 						Body:            payload,
 					}, nil
+				case daemonclient.CommandTaskGet:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            payload,
+					}, nil
 				case daemonclient.CommandTaskUpdate:
 					var body updateReq
 					if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -3398,6 +3429,9 @@ func TestImplMigrateCommandMigratesAssignmentsAcrossIssues(t *testing.T) {
 	got := map[string][]string{}
 	for _, update := range updates {
 		got[update.TaskID] = update.Implementations
+		if update.Description != "desc" {
+			t.Fatalf("update %s description = %q, want preserved desc", update.TaskID, update.Description)
+		}
 	}
 	if !reflect.DeepEqual(got["az-1"], []string{"default"}) {
 		t.Fatalf("az-1 implementations = %+v, want [default]", got["az-1"])
@@ -6545,14 +6579,13 @@ func TestIssueCheckDoctorAndDeleteCommandsUseDaemonTaskCommands(t *testing.T) {
 				case daemonclient.CommandTaskList:
 					body, err := marshalTaskListBody([]domain.Task{
 						{
-							ID:          "az-1",
-							Title:       "Check target",
-							Description: "Desc",
-							Type:        domain.TypeTask,
-							Priority:    domain.P2,
-							Status:      domain.StatusOpen,
-							CreatedAt:   now,
-							UpdatedAt:   now,
+							ID:        "az-1",
+							Title:     "Check target",
+							Type:      domain.TypeTask,
+							Priority:  domain.P2,
+							Status:    domain.StatusOpen,
+							CreatedAt: now,
+							UpdatedAt: now,
 						},
 					})
 					if err != nil {
@@ -6806,7 +6839,7 @@ func TestIssueUpdateCommandUsesDaemonTaskUpdateCommand(t *testing.T) {
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandTaskGet:
 					body, err := marshalTaskListBody([]domain.Task{
 						{
 							ID:          "az-1",
@@ -6867,6 +6900,16 @@ func TestIssueUpdateCommandUsesDaemonTaskUpdateCommand(t *testing.T) {
 	if gotUpdateReq.Command != daemonclient.CommandTaskUpdate {
 		t.Fatalf("update command = %q, want %q", gotUpdateReq.Command, daemonclient.CommandTaskUpdate)
 	}
+	var updateBody struct {
+		TaskID string `json:"task_id"`
+		daemonclient.TaskUpdateParams
+	}
+	if err := json.Unmarshal(gotUpdateReq.Body, &updateBody); err != nil {
+		t.Fatalf("unmarshal update body: %v", err)
+	}
+	if updateBody.Title != "New" || updateBody.Description != "OldDesc" {
+		t.Fatalf("update body = %+v, want new title with preserved description", updateBody)
+	}
 	if !strings.Contains(updateOut, "Updated issue: az-1") {
 		t.Fatalf("update output = %q", updateOut)
 	}
@@ -6921,6 +6964,16 @@ func TestIssueUpdateCommandConfirmedClosedCleansBeforeStatus(t *testing.T) {
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
 				switch req.Command {
+				case daemonclient.CommandTaskGet:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            taskListBody,
+					}, nil
 				case daemonclient.CommandTaskUpdate:
 					return responseWithJSON(req, map[string]any{}), nil
 				case daemonclient.CommandWorktreeList:
@@ -7004,7 +7057,7 @@ func TestIssueUpdateCommandConfirmedClosedCleansBeforeStatus(t *testing.T) {
 	})
 
 	wantCommands := []string{
-		daemonclient.CommandTaskList,
+		daemonclient.CommandTaskGet,
 		daemonclient.CommandTaskUpdate,
 		daemonclient.CommandWorktreeList,
 		daemonclient.CommandWorktreeList,
@@ -7043,7 +7096,7 @@ func TestIssueUpdateCommandReplacesNotesWhenRequested(t *testing.T) {
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandTaskGet:
 					body, err := marshalTaskListBody([]domain.Task{
 						{
 							ID:          "az-1",
@@ -7120,7 +7173,7 @@ func TestIssueUpdateCommandAppendsNotesWhenRequested(t *testing.T) {
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandTaskGet:
 					body, err := marshalTaskListBody([]domain.Task{
 						{
 							ID:          "az-1",
@@ -7429,6 +7482,27 @@ func TestIssueBulkCommandsUseApplyCommand(t *testing.T) {
 				switch req.Command {
 				case daemonclient.CommandTaskList:
 					body, err := marshalTaskListBody([]domain.Task{{
+						ID:       "az-1",
+						Title:    "Old",
+						Type:     domain.TypeTask,
+						Priority: domain.P2,
+						Status:   domain.StatusOpen,
+					}})
+					if err != nil {
+						t.Fatalf("marshal list response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskGet:
+					body, err := marshalTaskListBody([]domain.Task{{
 						ID:          "az-1",
 						Title:       "Old",
 						Description: "Desc",
@@ -7437,7 +7511,7 @@ func TestIssueBulkCommandsUseApplyCommand(t *testing.T) {
 						Status:      domain.StatusOpen,
 					}})
 					if err != nil {
-						t.Fatalf("marshal list response: %v", err)
+						t.Fatalf("marshal get response: %v", err)
 					}
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -7524,6 +7598,16 @@ func TestIssueBulkCommandsUseApplyCommand(t *testing.T) {
 	}
 	if len(updateBody.Operations) != 1 || updateBody.Operations[0].Command != daemonclient.CommandTaskUpdate {
 		t.Fatalf("update operations = %+v", updateBody.Operations)
+	}
+	var updateParams struct {
+		TaskID string `json:"task_id"`
+		daemonclient.TaskUpdateParams
+	}
+	if err := json.Unmarshal(updateBody.Operations[0].Body, &updateParams); err != nil {
+		t.Fatalf("unmarshal update operation body: %v", err)
+	}
+	if updateParams.Title != "Renamed" || updateParams.Description != "Desc" {
+		t.Fatalf("update params = %+v, want renamed title with preserved description", updateParams)
 	}
 }
 

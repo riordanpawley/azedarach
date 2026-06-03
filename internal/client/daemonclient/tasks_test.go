@@ -102,6 +102,20 @@ func mustMarshalRawTaskListSnapshotBody(t *testing.T, body any) []byte {
 	return data
 }
 
+func TestTaskSnapshotRequireFullDetails(t *testing.T) {
+	if err := (TaskSnapshot{}).RequireFullDetails("issue update"); err != nil {
+		t.Fatalf("full snapshot guard error = %v, want nil", err)
+	}
+
+	err := (TaskSnapshot{SummariesOnly: true}).RequireFullDetails("issue update")
+	if err == nil {
+		t.Fatal("summary snapshot guard error = nil, want error")
+	}
+	if got := err.Error(); !strings.Contains(got, "issue update requires full task details") {
+		t.Fatalf("summary snapshot guard error = %q", got)
+	}
+}
+
 func TestTaskListCreateAndMutationCommands(t *testing.T) {
 	const wantProjectID = "proj-task"
 
@@ -145,7 +159,16 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 					Kind:            protocol.EnvelopeKindResponse,
 					Revision:        17,
 					OK:              true,
-					Body:            mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 17, []domain.Task{{ID: "az-9", Title: "Task 9", Status: domain.StatusInReview}}),
+					Body: mustMarshalRawTaskListSnapshotBody(t, protocol.TaskListSnapshotPayload{
+						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+						ProtocolVersion:  req.ProtocolVersion,
+						SnapshotRevision: 17,
+						ProjectID:        naming.ProjectID(wantProjectID),
+						LastCheckedAt:    mustTaskSnapshotCheckedAt(),
+						Freshness:        protocol.TaskListFreshnessFresh,
+						SummariesOnly:    true,
+						Tasks:            []domain.Task{{ID: "az-9", Title: "Task 9", Status: domain.StatusInReview}},
+					}),
 				}, nil
 			},
 		}
@@ -163,6 +186,9 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 		if snapshot.Freshness != protocol.TaskListFreshnessFresh {
 			t.Fatalf("freshness = %q, want %q", snapshot.Freshness, protocol.TaskListFreshnessFresh)
+		}
+		if !snapshot.SummariesOnly {
+			t.Fatal("summaries_only = false, want true")
 		}
 		if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].ID != "az-9" {
 			t.Fatalf("snapshot tasks = %+v", snapshot.Tasks)

@@ -602,7 +602,7 @@ func appendHookLogEventBestEffort(deps *Dependencies, evt protocol.HookLogEvent)
 	if deps == nil || deps.DaemonClient == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), hookBestEffortDaemonTimeout)
 	defer cancel()
 	evt = enrichHookLogEventIssueID(ctx, deps, evt)
 	if _, err := deps.DaemonClient.AppendHookLogEvent(ctx, evt); err != nil && deps.Logger != nil {

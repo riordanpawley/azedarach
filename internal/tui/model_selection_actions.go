@@ -374,7 +374,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.bulkSetStatusCmd(pending.taskIDs, pending.targetStatus)
 		}
-		m.applyOptimisticTaskStatus(pending.taskID, pending.targetStatus)
+		m.beginTaskStatusMoveFeedback(pending.taskID, pending.previousStatus, pending.targetStatus)
 		return m, m.moveTaskStatusCmd(pending.taskID, pending.previousStatus, pending.targetStatus)
 	}
 	if msg.Key == "no" && m.pendingClose != nil {
@@ -594,7 +594,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			m.pendingClose = &pending
 			return m, m.confirmCloseCleanupCmd(pending)
 		}
-		m.applyOptimisticTaskStatus(task.ID.String(), newStatus)
+		m.beginTaskStatusMoveFeedback(task.ID.String(), previousStatus, newStatus)
 		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
 
 	case "l":
@@ -626,7 +626,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			m.pendingClose = &pending
 			return m, m.confirmCloseCleanupCmd(pending)
 		}
-		m.applyOptimisticTaskStatus(task.ID.String(), newStatus)
+		m.beginTaskStatusMoveFeedback(task.ID.String(), previousStatus, newStatus)
 		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
 	case "1", "2", "3", "4":
 		newStatus, ok := exactTaskStatusForKey(msg.Key)
@@ -651,7 +651,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			m.pendingClose = &pending
 			return m, m.confirmCloseCleanupCmd(pending)
 		}
-		m.applyOptimisticTaskStatus(task.ID.String(), newStatus)
+		m.beginTaskStatusMoveFeedback(task.ID.String(), previousStatus, newStatus)
 		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
 	case "e":
 		return m, m.openOverlay(overlay.NewEditTaskOverlayWithImplOptionsAndAttachmentService(*task, m.availableTaskImplementations(), m.attachmentService))

@@ -50,7 +50,8 @@ func GlobalDaemonLockPath() string {
 }
 
 // DaemonSocketPathFor returns either the global or worktree-scoped daemon socket
-// path depending on runtime mode.
+// path depending on runtime mode. Linked git worktrees default to a scoped
+// daemon so development/test worktrees do not fight over the user-global daemon.
 func DaemonSocketPathFor(startPath string) string {
 	if UseScopedDaemonRuntimeFor(startPath) {
 		return ScopedDaemonSocketPath(startPath)
@@ -95,24 +96,29 @@ func daemonScopeID(path string) string {
 // UseScopedDaemonRuntimeFor reports whether daemon runtime assets should be
 // scoped to the current worktree instead of the user-global daemon.
 func UseScopedDaemonRuntimeFor(startPath string) bool {
-	if useExplicitScopedDaemonRuntime() {
+	mode := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
+	switch mode {
+	case "worktree", "scoped", "local":
 		return true
-	}
-	worktreeRoot, wtErr := ResolveWorktreeRoot(startPath)
-	projectRoot, projErr := ResolveProjectRoot(startPath)
-	if wtErr != nil || projErr != nil {
+	case "global", "shared", "user", "off", "none":
 		return false
 	}
-	return strings.TrimSpace(worktreeRoot) != "" &&
-		strings.TrimSpace(projectRoot) != "" &&
-		filepath.Clean(worktreeRoot) != filepath.Clean(projectRoot)
+	return IsLinkedGitWorktree(startPath)
 }
 
-func useExplicitScopedDaemonRuntime() bool {
-	mode := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
-	source := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")))
-	modeEnabled := mode == "worktree" || mode == "scoped" || mode == "local"
-	return modeEnabled && source == "just-run"
+func IsLinkedGitWorktree(startPath string) bool {
+	worktreeRoot, err := ResolveWorktreeRoot(startPath)
+	if err != nil {
+		return false
+	}
+	projectRoot, err := ResolveProjectRoot(startPath)
+	if err != nil {
+		return false
+	}
+	if strings.TrimSpace(worktreeRoot) == "" || strings.TrimSpace(projectRoot) == "" {
+		return false
+	}
+	return filepath.Clean(worktreeRoot) != filepath.Clean(projectRoot)
 }
 
 func daemonRuntimeDirWritable(dir string) bool {

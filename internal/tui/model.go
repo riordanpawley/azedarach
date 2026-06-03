@@ -1752,7 +1752,7 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 	projectID := m.daemonProjectID()
 	targetRepoDir := m.activeProjectPath()
 	if runtimeRepoDir := strings.TrimSpace(m.runtimeRepoDir); runtimeRepoDir != "" && config.UseScopedDaemonRuntimeFor(runtimeRepoDir) {
-		targetRepoDir = m.runtimeRepoDir
+		targetRepoDir = runtimeRepoDir
 	}
 	return func() tea.Msg {
 		if m.daemonClient == nil {
@@ -2562,7 +2562,7 @@ func (m Model) eventLogFilePath() string {
 
 func (m Model) daemonLogFilePath() string {
 	if runtimeRepoDir := strings.TrimSpace(m.runtimeRepoDir); runtimeRepoDir != "" && config.UseScopedDaemonRuntimeFor(runtimeRepoDir) {
-		return filepath.Join(m.runtimeRepoDir, ".azedarach", logging.DaemonLogFileName)
+		return filepath.Join(runtimeRepoDir, ".azedarach", logging.DaemonLogFileName)
 	}
 	if strings.TrimSpace(m.repoDir) == "" && config.UseScopedDaemonRuntimeFor("") {
 		if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
@@ -4456,6 +4456,12 @@ func (m *Model) markTaskStatusPending(taskID string, previousStatus, targetStatu
 	}
 }
 
+func (m *Model) beginTaskStatusMoveFeedback(taskID string, previousStatus, targetStatus domain.Status) {
+	m.markTaskStatusPending(taskID, previousStatus, targetStatus, "", protocol.OperationStateQueued)
+	m.applyOptimisticTaskStatus(taskID, targetStatus)
+	m.syncTaskWorkspaceOverlay()
+}
+
 func (m *Model) markTaskOperationPending(taskID, action, operationID string, state protocol.OperationState) {
 	if m.pendingStatuses == nil {
 		m.pendingStatuses = make(map[string]pendingTaskStatus)
@@ -4937,7 +4943,22 @@ func (m Model) createPRWithAICmd(msg openPROverlayResultMsg) tea.Cmd {
 		for i := range m.tasks {
 			if m.tasks[i].ID.String() == msg.issueID {
 				issueTitle = strings.TrimSpace(m.tasks[i].Title)
-				issueDescription = strings.TrimSpace(m.tasks[i].Description)
+				break
+			}
+		}
+		detailSnapshot, err := m.daemonClient.GetTaskSnapshotWithMode(ctx, msg.issueID, daemonclient.ReadWaitModeExplicit)
+		if err != nil {
+			return prCreatedResultMsg{err: fmt.Errorf("load issue detail for PR generation: %w", err)}
+		}
+		if err := detailSnapshot.RequireFullDetails("PR generation issue detail read"); err != nil {
+			return prCreatedResultMsg{err: fmt.Errorf("load issue detail for PR generation: %w", err)}
+		}
+		for i := range detailSnapshot.Tasks {
+			if detailSnapshot.Tasks[i].ID.String() == msg.issueID {
+				if title := strings.TrimSpace(detailSnapshot.Tasks[i].Title); title != "" {
+					issueTitle = title
+				}
+				issueDescription = strings.TrimSpace(detailSnapshot.Tasks[i].Description)
 				break
 			}
 		}

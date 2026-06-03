@@ -69,6 +69,7 @@ func TestTaskListSnapshotPayloadMessagePackRoundTrip(t *testing.T) {
 		ProjectID:        "proj-roundtrip",
 		LastCheckedAt:    checkedAt,
 		Freshness:        TaskListFreshnessStale,
+		SummariesOnly:    true,
 		Tasks: []domain.Task{{
 			ID:       "az-7",
 			Title:    "Roundtrip",
@@ -87,7 +88,7 @@ func TestTaskListSnapshotPayloadMessagePackRoundTrip(t *testing.T) {
 	if err := msgpack.Unmarshal(data, &got); err != nil {
 		t.Fatalf("unmarshal task list snapshot: %v", err)
 	}
-	if got.SchemaVersion != payload.SchemaVersion || got.ProtocolVersion != payload.ProtocolVersion || got.SnapshotRevision != payload.SnapshotRevision || got.ProjectID != payload.ProjectID || !got.LastCheckedAt.Equal(payload.LastCheckedAt) || got.Freshness != payload.Freshness {
+	if got.SchemaVersion != payload.SchemaVersion || got.ProtocolVersion != payload.ProtocolVersion || got.SnapshotRevision != payload.SnapshotRevision || got.ProjectID != payload.ProjectID || !got.LastCheckedAt.Equal(payload.LastCheckedAt) || got.Freshness != payload.Freshness || got.SummariesOnly != payload.SummariesOnly {
 		t.Fatalf("roundtrip header = %+v, want %+v", got, payload)
 	}
 	if len(got.Tasks) != 1 || got.Tasks[0].ID != "az-7" || got.Tasks[0].Type != domain.TypeBug {

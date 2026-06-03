@@ -251,7 +251,7 @@ function isImageLikeType(t) {
 		const data = pb.dataForType(t);
 		if (!data) continue;
 		const filePath = tmpDir + "azedarach-clipboard-" + pid + "." + extForType(t);
-		const ok = data.writeToFileAtomically($(filePath), true);
+		const ok = data.writeToFile_atomically($(filePath), true);
 		if (ok) return filePath;
 	}
 
@@ -308,7 +308,7 @@ func readClipboardMacOSTextPath(ctx context.Context) ([]byte, error) {
 	}
 	path = filepath.Clean(path)
 	if !isLikelyImagePath(path) {
-		return nil, fmt.Errorf("clipboard text is not image path: %q", raw)
+		return nil, fmt.Errorf("clipboard text is not image path: %s", summarizeClipboardText(raw))
 	}
 	data, readErr := os.ReadFile(path)
 	if readErr != nil {
@@ -438,6 +438,19 @@ func findPNGPastePath() (string, bool) {
 
 func compactWhitespace(value string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+}
+
+func summarizeClipboardText(value string) string {
+	const maxRunes = 120
+	compact := compactWhitespace(value)
+	if compact == "" {
+		return "<empty>"
+	}
+	runes := []rune(compact)
+	if len(runes) > maxRunes {
+		return fmt.Sprintf("%q (%d chars, truncated)", string(runes[:maxRunes]), len(runes))
+	}
+	return fmt.Sprintf("%q", compact)
 }
 
 func readClipboardMacOSInfo(ctx context.Context) string {

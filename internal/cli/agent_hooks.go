@@ -22,6 +22,8 @@ type AgentSource string
 const (
 	AgentClaude AgentSource = "claude"
 	AgentCodex  AgentSource = "codex"
+
+	hookBestEffortDaemonTimeout = 2 * time.Second
 )
 
 // IsKnown reports whether the agent source is one the port understands.
@@ -70,7 +72,7 @@ func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookCont
 		return outcome, fmt.Errorf("invalid hook event: %q", event)
 	}
 
-	if strings.TrimSpace(hookCtx.ProjectDir) != "" {
+	if strings.TrimSpace(hookCtx.ProjectDir) != "" && shouldAppendHookLogEvent(event) {
 		appendHookLogEventBestEffort(deps, protocol.HookLogEvent{
 			Hook:     event,
 			Worktree: strings.TrimSpace(hookCtx.ProjectDir),
@@ -81,7 +83,7 @@ func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookCont
 	}
 
 	if issueID := strings.TrimSpace(hookCtx.IssueID); issueID != "" && deps != nil && deps.DaemonClient != nil {
-		notifyCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		notifyCtx, cancel := context.WithTimeout(ctx, hookBestEffortDaemonTimeout)
 		_ = notifyDaemonAgentSessionStatus(notifyCtx, deps, issueID, event)
 		cancel()
 	}
@@ -106,38 +108,44 @@ func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookCont
 	return outcome, nil
 }
 
+func shouldAppendHookLogEvent(event string) bool {
+	switch event {
+	case hookEventPreToolUse, hookEventPostToolUse:
+		return false
+	default:
+		return true
+	}
+}
+
 func notifyDaemonAgentSessionStatus(ctx context.Context, deps *Dependencies, issueID, event string) error {
 	command := ""
 	switch event {
 	case hookEventIdlePrompt, hookEventPermissionRequest, hookEventStop, hookEventSubagentStop, hookEventSessionEnd:
 		command = commandSessionPause
-	case hookEventSessionStart, hookEventSubagentStart, hookEventUserPromptSubmit, hookEventPreToolUse, hookEventPostToolUse:
+	case hookEventSessionStart, hookEventSubagentStart, hookEventUserPromptSubmit:
 		command = commandSessionResume
 	default:
 		return nil
 	}
 
-	return commandWithAgentSessionStatusAutostartRetry(ctx, deps, command, issueID)
+	return commandWithAgentSessionStatusBestEffort(ctx, deps, command, issueID)
 }
 
-func commandWithAgentSessionStatusAutostartRetry(ctx context.Context, deps *Dependencies, command, issueID string) error {
-	_, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (struct{}, error) {
-		projectID := strings.TrimSpace(deps.ProjectID)
-		if projectID == "" {
-			projectID = protocol.DefaultProjectID
-		}
-		sessionID := agentHookSessionID(projectID, issueID)
-		req := agentSessionStatusRequest(command, projectID, issueID, sessionID)
-		resp, err := deps.DaemonClient.Command(callCtx, req)
-		if err != nil {
-			return struct{}{}, err
-		}
-		if err := responseError(resp, "failed to notify session status"); err != nil {
-			return struct{}{}, err
-		}
-		return struct{}{}, nil
-	})
-	return err
+func commandWithAgentSessionStatusBestEffort(ctx context.Context, deps *Dependencies, command, issueID string) error {
+	projectID := strings.TrimSpace(deps.ProjectID)
+	if projectID == "" {
+		projectID = protocol.DefaultProjectID
+	}
+	sessionID := agentHookSessionID(projectID, issueID)
+	req := agentSessionStatusRequest(command, projectID, issueID, sessionID)
+	resp, err := deps.DaemonClient.Command(ctx, req)
+	if err != nil {
+		return err
+	}
+	if err := responseError(resp, "failed to notify session status"); err != nil {
+		return err
+	}
+	return nil
 }
 
 func agentSessionStatusRequest(command, projectID, issueID, sessionID string) protocol.RequestEnvelope {

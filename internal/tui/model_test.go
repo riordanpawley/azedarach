@@ -241,6 +241,7 @@ func TestRuntimeEventSummary_CompactsAndTruncates(t *testing.T) {
 }
 
 func TestResolveTUILogFilePath_UsesSessionLogDir(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
 	t.Chdir(t.TempDir())
 	cfg := &config.Config{
 		Session: config.SessionConfig{
@@ -302,6 +303,7 @@ func TestNewWithOptions_DoesNotWriteTUILogsDuringTests(t *testing.T) {
 }
 
 func TestDaemonLogFilePath_UsesRepoDir(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
 	m := newTestModel()
 	m.repoDir = "/tmp/worktree"
 	m.runtimeRepoDir = ""

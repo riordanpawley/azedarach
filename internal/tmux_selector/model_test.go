@@ -360,8 +360,11 @@ func TestModelTabTogglesTreeViewAndPersistsGlobally(t *testing.T) {
 	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}}, WithUIStateStore(store))
 	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
 	model = updated.(Model)
-	if cmd != nil {
-		t.Fatalf("snapshot update returned command")
+	if cmd == nil {
+		t.Fatal("snapshot update did not defer selector tab load")
+	}
+	if msg := cmd(); msg.(selectorTabLoadedMsg).err != nil {
+		t.Fatalf("selector tab load msg = %+v", msg)
 	}
 
 	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyTab})
@@ -545,6 +548,26 @@ func TestModelInitialLoadUsesLiveSnapshotBeforeEnrichment(t *testing.T) {
 	}
 	if enrichedMsg.Snapshot.Entries[0].TaskTitle != "Standalone selector performance" {
 		t.Fatalf("enriched title = %q", enrichedMsg.Snapshot.Entries[0].TaskTitle)
+	}
+}
+
+func TestModelInitialLoadDoesNotWaitForPersistedSelectorTab(t *testing.T) {
+	store := &fakeUIStateStore{values: map[string]string{
+		protocol.UIStateKeyTMUXSelectorLastActiveTab: "tree",
+	}}
+	loader := fakeSnapshotLoader{snapshot: Snapshot{Entries: []InventoryEntry{{
+		SessionID: "az-ckx",
+		IssueID:   "ckx",
+		TaskTitle: "ckx",
+	}}}}
+	model := New(loader, WithUIStateStore(store))
+
+	msg := model.Init()()
+	if _, ok := msg.(LoadedMsg); !ok {
+		t.Fatalf("init msg = %T, want LoadedMsg", msg)
+	}
+	if len(store.gets) != 0 {
+		t.Fatalf("selector tab store gets during init = %v, want none before live snapshot", store.gets)
 	}
 }
 

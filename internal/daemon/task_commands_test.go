@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -164,10 +165,14 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 
 	projectID := "proj-read-only"
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
-		Title:    "Read-only task list",
-		Type:     domain.TypeTask,
-		Priority: domain.P1,
-		Status:   domain.StatusInProgress,
+		Title:       "Read-only task list",
+		Description: "Long description should stay out of task.list summaries",
+		Design:      "Long design should stay out of task.list summaries",
+		Notes:       "Long notes should stay out of task.list summaries",
+		Acceptance:  "Long acceptance should stay out of task.list summaries",
+		Type:        domain.TypeTask,
+		Priority:    domain.P1,
+		Status:      domain.StatusInProgress,
 	})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
@@ -281,6 +286,9 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	if got, want := payload.Freshness, protocol.TaskListFreshnessFresh; got != want {
 		t.Fatalf("payload.Freshness = %q, want %q", got, want)
 	}
+	if !payload.SummariesOnly {
+		t.Fatal("payload.SummariesOnly = false, want true")
+	}
 	tasks := payload.Tasks
 	if got, want := len(tasks), 1; got != want {
 		t.Fatalf("task count = %d, want %d", got, want)
@@ -292,6 +300,9 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	}
 	if task.Title != "Read-only task list" {
 		t.Fatalf("task.Title = %q, want %q", task.Title, "Read-only task list")
+	}
+	if task.Description != "" || task.Design != "" || task.Notes != "" || task.Acceptance != "" {
+		t.Fatalf("task.list returned full detail fields: description=%q design=%q notes=%q acceptance=%q", task.Description, task.Design, task.Notes, task.Acceptance)
 	}
 	if task.Session == nil {
 		t.Fatal("expected task session projection")
@@ -350,6 +361,41 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	}
 	if !bytes.Equal(worktrees[0].GitStatusRaw, rawStatus) {
 		t.Fatalf("projected worktree git status was mutated")
+	}
+
+	body, err := json.Marshal(map[string]string{"task_id": taskID})
+	if err != nil {
+		t.Fatalf("marshal task get request: %v", err)
+	}
+	getResp, err := d.handleTaskGet(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-get-after-summary-list",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.get",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskGet error: %v", err)
+	}
+	if !getResp.OK {
+		t.Fatalf("task.get response = %+v", getResp.Error)
+	}
+	getPayload, err := protocol.DecodeTaskListSnapshotPayload(getResp.Body)
+	if err != nil {
+		t.Fatalf("decode task.get body: %v", err)
+	}
+	if len(getPayload.Tasks) == 0 {
+		t.Fatal("task.get returned no tasks")
+	}
+	if getPayload.SummariesOnly {
+		t.Fatal("task.get summaries_only = true, want false")
+	}
+	if got, want := getPayload.Tasks[0].Description, "Long description should stay out of task.list summaries"; got != want {
+		t.Fatalf("task.get description = %q, want %q", got, want)
+	}
+	if got, want := getPayload.Tasks[0].Design, "Long design should stay out of task.list summaries"; got != want {
+		t.Fatalf("task.get design = %q, want %q", got, want)
 	}
 }
 
@@ -560,19 +606,13 @@ func TestHandleTaskGetUsesFreshTaskListSnapshotCache(t *testing.T) {
 		hub:      publish.NewHub(16, 8, logger),
 	}
 
-	listResp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
-		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-task-list-cache-prime",
-		Kind:            protocol.EnvelopeKindCommand,
-		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-		Command:         "task.list",
-	})
-	if err != nil {
-		t.Fatalf("handleTaskList error: %v", err)
-	}
-	if !listResp.OK {
-		t.Fatalf("task.list response = %+v", listResp.Error)
-	}
+	d.storeTaskListSnapshotCache(projectID, 3, time.Now().UTC(), protocol.TaskListFreshnessFresh, []domain.Task{{
+		ID:       naming.IssueID(taskID),
+		Title:    "cached issue",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	}}, false)
 
 	if err := issuesClient.Update(ctx, taskID, domain.StatusInReview); err != nil {
 		t.Fatalf("update issue behind cache: %v", err)
@@ -609,6 +649,282 @@ func TestHandleTaskGetUsesFreshTaskListSnapshotCache(t *testing.T) {
 	}
 	if got, want := payload.Tasks[0].Status, domain.StatusOpen; got != want {
 		t.Fatalf("payload task status = %q, want cached %q", got, want)
+	}
+}
+
+func TestHandleTaskListFreshRuntimeCacheHitSkipsRuntimeRefreshTriggers(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-cache-list"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "cached list",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeAdapter: &worktreeServiceAdapter{},
+		revision:        map[string]uint64{projectID: 11},
+		hub:             publish.NewHub(16, 8, logger),
+	}
+	cachedTask := domain.Task{
+		ID:       naming.IssueID(taskID),
+		Title:    "cached list",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	}
+	d.storeTaskListSnapshotCache(projectID, 11, time.Now().UTC(), protocol.TaskListFreshnessFresh, []domain.Task{cachedTask}, false)
+
+	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-list-cache-hit",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.list",
+	})
+	if err != nil {
+		t.Fatalf("handleTaskList error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.list response = %+v", resp.Error)
+	}
+
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("decode task.list body: %v", err)
+	}
+	if got, want := payload.SnapshotRevision, uint64(11); got != want {
+		t.Fatalf("payload.SnapshotRevision = %d, want %d", got, want)
+	}
+	if got, want := len(payload.Tasks), 1; got != want {
+		t.Fatalf("payload.Tasks len = %d, want %d", got, want)
+	}
+
+	d.worktreeStateRefreshMu.Lock()
+	defer d.worktreeStateRefreshMu.Unlock()
+	if got := d.worktreeStateLastRefresh[projectID]; !got.IsZero() {
+		t.Fatalf("worktree refresh was triggered at %v on cache hit", got)
+	}
+	if d.worktreeStateRefreshing[projectID] {
+		t.Fatal("worktree refresh marked in-flight on cache hit")
+	}
+}
+
+func TestHandleTaskListStaleRuntimeCacheRebuildsAndRefreshes(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-cache-list-runtime-stale"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "runtime stale cache",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	now := time.Date(2026, time.April, 2, 12, 0, 0, 0, time.UTC)
+	originalNow := timeNow
+	t.Cleanup(func() { timeNow = originalNow })
+	timeNow = func() time.Time { return now }
+
+	cachedTask := domain.Task{
+		ID:       naming.IssueID(taskID),
+		Title:    "stale cached title",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	}
+	d := &Daemon{
+		cfg: Config{Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeAdapter: &worktreeServiceAdapter{},
+		revision:        map[string]uint64{projectID: 11},
+		hub:             publish.NewHub(16, 8, logger),
+		taskListSnapshotCache: map[string]taskListSnapshotCacheEntry{
+			projectID: {
+				Revision:      11,
+				LastCheckedAt: now,
+				Freshness:     protocol.TaskListFreshnessFresh,
+				Tasks:         []domain.Task{cachedTask},
+				CachedAt:      now,
+				RuntimeAt:     now.Add(-taskListSnapshotRuntimeCacheTTL - time.Millisecond),
+				SummariesOnly: true,
+			},
+		},
+	}
+
+	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-list-runtime-cache-stale",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.list",
+	})
+	if err != nil {
+		t.Fatalf("handleTaskList error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.list response = %+v", resp.Error)
+	}
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("decode task.list body: %v", err)
+	}
+	if got, want := payload.Tasks[0].Title, "runtime stale cache"; got != want {
+		t.Fatalf("payload task title = %q, want refreshed %q", got, want)
+	}
+
+	d.worktreeStateRefreshMu.Lock()
+	gotRefresh := d.worktreeStateLastRefresh[projectID]
+	d.worktreeStateRefreshMu.Unlock()
+	if gotRefresh.IsZero() {
+		t.Fatal("worktree refresh was not triggered after runtime cache staled")
+	}
+}
+
+func TestLoadTaskListSnapshotSharesInFlightProjectLoad(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	projectID := "proj-shared-list"
+	done := make(chan struct{})
+	d := &Daemon{
+		taskListSnapshotLoads: map[string]*taskListSnapshotLoad{
+			projectID: {done: done},
+		},
+	}
+
+	resultCh := make(chan taskListSnapshotLoadResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		result, shared, err := d.loadTaskListSnapshot(ctx, protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-shared-list",
+			Kind:            protocol.EnvelopeKindCommand,
+			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+			Command:         "task.list",
+		}, projectID)
+		if !shared {
+			errCh <- errors.New("load was not shared")
+			return
+		}
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resultCh <- result
+	}()
+
+	d.taskListSnapshotLoadMu.Lock()
+	inflight := d.taskListSnapshotLoads[projectID]
+	inflight.result = taskListSnapshotLoadResult{
+		Revision:      17,
+		LastCheckedAt: time.Now().UTC(),
+		Freshness:     protocol.TaskListFreshnessFresh,
+		Tasks: []domain.Task{{
+			ID:     "az-shared",
+			Title:  "shared result",
+			Status: domain.StatusOpen,
+		}},
+	}
+	close(done)
+	d.taskListSnapshotLoadMu.Unlock()
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("shared load error: %v", err)
+	case result := <-resultCh:
+		if got, want := result.Revision, uint64(17); got != want {
+			t.Fatalf("result.Revision = %d, want %d", got, want)
+		}
+		if got, want := len(result.Tasks), 1; got != want {
+			t.Fatalf("result.Tasks len = %d, want %d", got, want)
+		}
+		result.Tasks[0].Title = "mutated"
+		if got := d.taskListSnapshotLoads[projectID].result.Tasks[0].Title; got != "shared result" {
+			t.Fatalf("shared result was not cloned; title = %q", got)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for shared task-list load")
+	}
+}
+
+func TestLoadTaskListSnapshotUsesDetachedBuildContext(t *testing.T) {
+	logger := slog.Default()
+	projectID := "proj-canceled-owner-list"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	taskID, err := issuesClient.Create(context.Background(), issues.CreateTaskParams{
+		Title:    "canceled owner should not poison load",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 23},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, shared, err := d.loadTaskListSnapshot(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-canceled-owner-list",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.list",
+	}, projectID)
+	if err != nil {
+		t.Fatalf("loadTaskListSnapshot error = %v, want detached load to succeed", err)
+	}
+	if shared {
+		t.Fatal("shared = true, want owner load")
+	}
+	if got, want := result.Revision, uint64(23); got != want {
+		t.Fatalf("result.Revision = %d, want %d", got, want)
+	}
+	if len(result.Tasks) != 1 || result.Tasks[0].ID.String() != taskID {
+		t.Fatalf("result.Tasks = %+v, want task %s", result.Tasks, taskID)
 	}
 }
 

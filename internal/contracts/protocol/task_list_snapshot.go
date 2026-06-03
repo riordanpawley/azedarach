@@ -33,7 +33,7 @@ func (f TaskListFreshness) Valid() bool {
 // TaskListSnapshotPayload is the deterministic daemon/client contract for joined issue/session/worktree task snapshots.
 //
 // The field order is part of the contract:
-// schema_version -> protocol_version -> snapshot_revision -> project_id -> last_checked_at -> freshness -> tasks.
+// schema_version -> protocol_version -> snapshot_revision -> project_id -> last_checked_at -> freshness -> summaries_only -> tasks.
 // Tasks already carry daemon-authored joined runtime state via domain.Task fields.
 type TaskListSnapshotPayload struct {
 	SchemaVersion    uint16            `json:"schema_version" msgpack:"schema_version"`
@@ -42,6 +42,7 @@ type TaskListSnapshotPayload struct {
 	ProjectID        naming.ProjectID  `json:"project_id" msgpack:"project_id"`
 	LastCheckedAt    time.Time         `json:"last_checked_at" msgpack:"last_checked_at"`
 	Freshness        TaskListFreshness `json:"freshness" msgpack:"freshness"`
+	SummariesOnly    bool              `json:"summaries_only,omitempty" msgpack:"summaries_only,omitempty"`
 	Tasks            []domain.Task     `json:"tasks" msgpack:"tasks"`
 }
 

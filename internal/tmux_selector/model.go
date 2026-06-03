@@ -3,6 +3,7 @@ package tmuxselector
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -241,7 +242,7 @@ func New(loader SnapshotLoader, opts ...Option) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.loadSelectorTabCmd(), m.loadCmd())
+	return m.loadCmd()
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -256,10 +257,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.snapshot = msg.Snapshot
 		m.normalizeSnapshot()
 		m.status = formatSnapshotStatus(m.snapshot, len(m.snapshot.Entries))
+		cmds := []tea.Cmd{m.loadSelectorTabCmd()}
 		if liveLoader, ok := m.loader.(LiveSnapshotLoader); ok && m.snapshot.Enriching {
-			return m, m.enrichCmd(liveLoader, m.snapshot)
+			cmds = append(cmds, m.enrichCmd(liveLoader, m.snapshot))
 		}
-		return m, nil
+		return m, tea.Batch(cmds...)
 	case snapshotLoadedMsg:
 		if msg.err != nil {
 			return m, nilFromLoadFailed(&m, msg.err)
@@ -979,19 +981,38 @@ func (m Model) loadCmd() tea.Cmd {
 		if m.loader == nil {
 			return LoadFailedMsg{Err: fmt.Errorf("snapshot loader unavailable")}
 		}
+		start := time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		if liveLoader, ok := m.loader.(LiveSnapshotLoader); ok {
 			snapshot, err := liveLoader.ListLiveSnapshot(ctx)
 			if err != nil {
+				slog.Default().Warn("tmux selector live load command failed",
+					"elapsed_ms", time.Since(start).Milliseconds(),
+					"error", err,
+				)
 				return LoadFailedMsg{Err: err}
 			}
+			slog.Default().Info("tmux selector live load command completed",
+				"elapsed_ms", time.Since(start).Milliseconds(),
+				"session_count", len(snapshot.Entries),
+				"enriching", snapshot.Enriching,
+			)
 			return LoadedMsg{Snapshot: snapshot}
 		}
 		snapshot, err := m.loader.ListTasksSnapshot(ctx)
 		if err != nil {
+			slog.Default().Warn("tmux selector snapshot load command failed",
+				"elapsed_ms", time.Since(start).Milliseconds(),
+				"error", err,
+			)
 			return LoadFailedMsg{Err: err}
 		}
+		slog.Default().Info("tmux selector snapshot load command completed",
+			"elapsed_ms", time.Since(start).Milliseconds(),
+			"session_count", len(snapshot.Entries),
+			"enriching", snapshot.Enriching,
+		)
 		return LoadedMsg{Snapshot: snapshot}
 	}
 }
@@ -1002,16 +1023,30 @@ func (m Model) loadSelectorTabCmd() tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
+		start := time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		resp, err := store.GetUIStateForProject(ctx, protocol.DefaultProjectID, protocol.UIStateKeyTMUXSelectorLastActiveTab)
 		if err != nil {
+			slog.Default().Debug("tmux selector tab state load failed",
+				"elapsed_ms", time.Since(start).Milliseconds(),
+				"error", err,
+			)
 			return selectorTabLoadedMsg{err: err}
 		}
 		tab, ok := selectorTabFromPersistedValue(resp.Value)
 		if !resp.Found || !ok {
+			slog.Default().Info("tmux selector tab state loaded",
+				"elapsed_ms", time.Since(start).Milliseconds(),
+				"found", resp.Found,
+			)
 			return selectorTabLoadedMsg{}
 		}
+		slog.Default().Info("tmux selector tab state loaded",
+			"elapsed_ms", time.Since(start).Milliseconds(),
+			"found", true,
+			"tab", resp.Value,
+		)
 		return selectorTabLoadedMsg{tab: tab, found: true}
 	}
 }
@@ -1026,9 +1061,22 @@ func (m Model) persistSelectorTabCmd(tab selectorTab) tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
+		start := time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_, err := store.SetUIStateForProject(ctx, protocol.DefaultProjectID, protocol.UIStateKeyTMUXSelectorLastActiveTab, value)
+		if err != nil {
+			slog.Default().Debug("tmux selector tab state save failed",
+				"elapsed_ms", time.Since(start).Milliseconds(),
+				"tab", value,
+				"error", err,
+			)
+		} else {
+			slog.Default().Info("tmux selector tab state saved",
+				"elapsed_ms", time.Since(start).Milliseconds(),
+				"tab", value,
+			)
+		}
 		return selectorTabSavedMsg{tab: tab, err: err}
 	}
 }
@@ -1057,9 +1105,21 @@ func selectorTabFromPersistedValue(value string) (selectorTab, bool) {
 
 func (m Model) enrichCmd(loader LiveSnapshotLoader, snapshot Snapshot) tea.Cmd {
 	return func() tea.Msg {
+		start := time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		enriched, err := loader.EnrichSnapshot(ctx, snapshot)
+		if err != nil {
+			slog.Default().Debug("tmux selector enrichment command failed",
+				"elapsed_ms", time.Since(start).Milliseconds(),
+				"error", err,
+			)
+		} else {
+			slog.Default().Info("tmux selector enrichment command completed",
+				"elapsed_ms", time.Since(start).Milliseconds(),
+				"session_count", len(enriched.Entries),
+			)
+		}
 		return EnrichedMsg{Snapshot: enriched, Err: err}
 	}
 }
@@ -1745,13 +1805,50 @@ func visibleGridRowRange(rendered []string, cursor int, columns int, availableHe
 	if cursor >= len(rendered) {
 		cursor = len(rendered) - 1
 	}
+	heights := gridRowHeights(rendered, columns)
+	return visibleGridRowRangeForHeights(heights, cursor, columns, availableHeight)
+}
+
+func gridRowHeights(rendered []string, columns int) []int {
+	if len(rendered) == 0 {
+		return nil
+	}
+	if columns <= 0 {
+		columns = 1
+	}
 	gridRows := (len(rendered) + columns - 1) / columns
 	heights := make([]int, gridRows)
 	for gridRow := 0; gridRow < gridRows; gridRow++ {
-		heights[gridRow] = lipgloss.Height(renderGridRow(rendered, gridRow, columns)) + 1
+		start := gridRow * columns
+		end := start + columns
+		if end > len(rendered) {
+			end = len(rendered)
+		}
+		maxHeight := 0
+		for i := start; i < end; i++ {
+			maxHeight = maxInt(maxHeight, lipgloss.Height(rendered[i]))
+		}
+		heights[gridRow] = maxHeight + 1
 	}
+	return heights
+}
+
+func visibleGridRowRangeForHeights(heights []int, cursor int, columns int, availableHeight int) (int, int) {
+	if len(heights) == 0 {
+		return 0, 0
+	}
+	if columns <= 0 {
+		columns = 1
+	}
+	gridRows := len(heights)
 
 	cursorGridRow := cursor / columns
+	if cursorGridRow < 0 {
+		cursorGridRow = 0
+	}
+	if cursorGridRow >= gridRows {
+		cursorGridRow = gridRows - 1
+	}
 	start, end := cursorGridRow, cursorGridRow+1
 	used := heights[cursorGridRow]
 	for {
@@ -1902,7 +1999,8 @@ func visibleGridMetrics(rows []SessionRow, cursor int, columns int, cardWidth in
 	for i, row := range rows {
 		rendered[i] = RenderSessionRow(row, i == cursor, cardWidth, lipgloss.Style{}, lipgloss.Style{}, lipgloss.Style{}, s)
 	}
-	start, end := visibleGridRowRange(rendered, cursor, columns, availableHeight)
+	heights := gridRowHeights(rendered, columns)
+	start, end := visibleGridRowRangeForHeights(heights, cursor, columns, availableHeight)
 	for gridRow := start; gridRow < end; gridRow++ {
 		rowStart := gridRow * columns
 		rowEnd := rowStart + columns
@@ -1910,7 +2008,7 @@ func visibleGridMetrics(rows []SessionRow, cursor int, columns int, cardWidth in
 			rowEnd = len(rows)
 		}
 		visible += rowEnd - rowStart
-		usedHeight += lipgloss.Height(renderGridRow(rendered, gridRow, columns)) + 1
+		usedHeight += heights[gridRow]
 	}
 	return visible, usedHeight
 }

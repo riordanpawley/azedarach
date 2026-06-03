@@ -2,6 +2,8 @@ package tmuxselector
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -399,6 +401,109 @@ func TestGlobalInventoryLoaderBindsLiveEntryToConfiguredProjectRootByPrefix(t *t
 	}
 	if got := bySession["ch-we"].ProjectPath; got != chRoot {
 		t.Fatalf("ch-we project path = %q, want %q", got, chRoot)
+	}
+}
+
+func TestGlobalInventoryLoaderDefersProjectDirProviderUntilEnrichment(t *testing.T) {
+	root := t.TempDir()
+	projectID := projectIDForPath(root)
+	sessionID := naming.CanonicalSessionID(projectID, "lazy")
+	providerCalls := 0
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{infos: []tmux.SessionInfo{
+			{Name: sessionID, Path: root + "/worktrees/lazy"},
+		}},
+		nil,
+		WithProjectDirsProvider(func() []string {
+			providerCalls++
+			return []string{root}
+		}),
+	)
+
+	live, err := loader.ListLiveSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("ListLiveSnapshot: %v", err)
+	}
+	if providerCalls != 0 {
+		t.Fatalf("project dir provider calls after live snapshot = %d, want 0", providerCalls)
+	}
+	if got := live.Entries[0].ProjectPath; got != "" {
+		t.Fatalf("live project path = %q, want empty before enrichment", got)
+	}
+
+	enriched, err := loader.EnrichSnapshot(context.Background(), live)
+	if err != nil {
+		t.Fatalf("EnrichSnapshot: %v", err)
+	}
+	if providerCalls != 1 {
+		t.Fatalf("project dir provider calls after enrichment = %d, want 1", providerCalls)
+	}
+	if got := enriched.Entries[0].ProjectPath; got != root {
+		t.Fatalf("enriched project path = %q, want %q", got, root)
+	}
+	if enriched.Enriching {
+		t.Fatalf("enriched snapshot still marked enriching")
+	}
+}
+
+func TestGlobalInventoryLoaderRefreshesProjectDirProviderOnEachEnrichment(t *testing.T) {
+	base := t.TempDir()
+	firstRoot := filepath.Join(base, "azedarach")
+	secondRoot := filepath.Join(base, "chefy")
+	if err := os.MkdirAll(firstRoot, 0o755); err != nil {
+		t.Fatalf("mkdir first root: %v", err)
+	}
+	if err := os.MkdirAll(secondRoot, 0o755); err != nil {
+		t.Fatalf("mkdir second root: %v", err)
+	}
+	firstProjectID := naming.ProjectSessionPrefix(firstRoot)
+	secondProjectID := naming.ProjectSessionPrefix(secondRoot)
+	firstSessionID := naming.CanonicalSessionID(firstProjectID, "first")
+	secondSessionID := naming.CanonicalSessionID(secondProjectID, "second")
+	roots := []string{firstRoot}
+	providerCalls := 0
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{},
+		nil,
+		WithProjectDirsProvider(func() []string {
+			providerCalls++
+			return append([]string(nil), roots...)
+		}),
+	)
+
+	first := Snapshot{Entries: []InventoryEntry{{
+		SessionID: firstSessionID,
+		ProjectID: firstProjectID,
+		IssueID:   "first",
+		Worktree:  firstRoot + "/worktrees/first",
+	}}}
+	enriched, err := loader.EnrichSnapshot(context.Background(), first)
+	if err != nil {
+		t.Fatalf("first EnrichSnapshot: %v", err)
+	}
+	if providerCalls != 1 {
+		t.Fatalf("provider calls after first enrichment = %d, want 1", providerCalls)
+	}
+	if got := enriched.Entries[0].ProjectPath; got != firstRoot {
+		t.Fatalf("first enriched project path = %q, want %q", got, firstRoot)
+	}
+
+	roots = append(roots, secondRoot)
+	second := Snapshot{Entries: []InventoryEntry{{
+		SessionID: secondSessionID,
+		ProjectID: secondProjectID,
+		IssueID:   "second",
+		Worktree:  secondRoot + "/worktrees/second",
+	}}}
+	enriched, err = loader.EnrichSnapshot(context.Background(), second)
+	if err != nil {
+		t.Fatalf("second EnrichSnapshot: %v", err)
+	}
+	if providerCalls != 2 {
+		t.Fatalf("provider calls after second enrichment = %d, want 2", providerCalls)
+	}
+	if got := enriched.Entries[0].ProjectPath; got != secondRoot {
+		t.Fatalf("second enriched project path = %q, want newly added %q", got, secondRoot)
 	}
 }
 

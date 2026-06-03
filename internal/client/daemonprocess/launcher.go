@@ -41,7 +41,7 @@ type Launcher struct {
 
 // NewLauncher returns a daemon process launcher for repoDir.
 func NewLauncher(repoDir, socketPath string) *Launcher {
-	if config.UseScopedDaemonRuntimeFor(repoDir) {
+	if config.UseScopedDaemonRuntimeFor(repoDir) || socketPath == config.ScopedDaemonSocketPath(repoDir) {
 		if normalizedRepoDir, err := config.ResolveWorktreeRoot(repoDir); err == nil {
 			repoDir = normalizedRepoDir
 		}

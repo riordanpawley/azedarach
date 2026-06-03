@@ -2857,11 +2857,15 @@ func ImplDeleteCommand(deps *Dependencies, opts ImplDeleteOptions) error {
 			continue
 		}
 
+		fullTask, err := loadIssueDetailTask(ctx, deps, task.ID.String())
+		if err != nil {
+			return fmt.Errorf("failed to load issue %s for implementation delete: %w", task.ID, err)
+		}
 		update := daemonclient.TaskUpdateParams{
-			Title:           task.Title,
-			Description:     task.Description,
-			Type:            task.Type,
-			Priority:        task.Priority,
+			Title:           fullTask.Title,
+			Description:     fullTask.Description,
+			Type:            fullTask.Type,
+			Priority:        fullTask.Priority,
 			Implementations: nextImpls,
 		}
 		if err := deps.DaemonClient.UpdateTaskDetails(ctx, task.ID.String(), update); err != nil {
@@ -2944,11 +2948,15 @@ func ImplMigrateCommand(deps *Dependencies, opts ImplMigrateOptions) error {
 		}
 
 		nextImpls = dedupeTrimmed(nextImpls)
+		fullTask, err := loadIssueDetailTask(ctx, deps, task.ID.String())
+		if err != nil {
+			return fmt.Errorf("failed to load issue %s for implementation migrate: %w", task.ID, err)
+		}
 		update := daemonclient.TaskUpdateParams{
-			Title:           task.Title,
-			Description:     task.Description,
-			Type:            task.Type,
-			Priority:        task.Priority,
+			Title:           fullTask.Title,
+			Description:     fullTask.Description,
+			Type:            fullTask.Type,
+			Priority:        fullTask.Priority,
 			Implementations: nextImpls,
 		}
 		if err := deps.DaemonClient.UpdateTaskDetails(ctx, task.ID.String(), update); err != nil {
@@ -3203,6 +3211,9 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 		if strings.Contains(err.Error(), fmt.Sprintf("issue not found: %s", opts.IssueID)) {
 			return fmt.Errorf("issue not found: %s", opts.IssueID)
 		}
+		return fmt.Errorf("failed to get issue %s: %w", opts.IssueID, err)
+	}
+	if err := snapshot.RequireFullDetails("issue get"); err != nil {
 		return fmt.Errorf("failed to get issue %s: %w", opts.IssueID, err)
 	}
 
@@ -3748,13 +3759,9 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 		return err
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	task, err := loadIssueDetailTask(ctx, deps, opts.IssueID)
 	if err != nil {
 		return fmt.Errorf("failed to load issue %s for update: %w", opts.IssueID, err)
-	}
-	task, ok := findTaskByID(snapshot.Tasks, opts.IssueID)
-	if !ok {
-		return fmt.Errorf("issue not found: %s", opts.IssueID)
 	}
 
 	update := daemonclient.TaskUpdateParams{
@@ -4276,43 +4283,61 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 		if parseErr != nil {
 			return fmt.Errorf("bulk-update item %d: invalid task_id %q: %w", i, taskID, parseErr)
 		}
-		current, ok := tasksByID[typedTaskID]
-		if !ok {
+		if _, ok := tasksByID[typedTaskID]; !ok {
 			return fmt.Errorf("bulk-update item %d: issue not found: %s", i, taskID)
 		}
 
-		update := daemonclient.TaskUpdateParams{
-			Title:       current.Title,
-			Description: current.Description,
-			Type:        current.Type,
-			Priority:    current.Priority,
-		}
+		var update daemonclient.TaskUpdateParams
 		needsUpdate := false
 		if item.Title != "" {
-			update.Title = item.Title
 			needsUpdate = true
 		}
 		if item.Description != "" {
-			update.Description = item.Description
 			needsUpdate = true
 		}
 		if item.Type != "" {
-			taskType, err := parseTaskType(item.Type)
-			if err != nil {
+			if _, err := parseTaskType(item.Type); err != nil {
 				return fmt.Errorf("bulk-update item %d: %w", i, err)
 			}
-			update.Type = taskType
 			needsUpdate = true
 		}
 		if item.Priority != "" {
-			priority, err := parsePriority(item.Priority)
-			if err != nil {
+			if _, err := parsePriority(item.Priority); err != nil {
 				return fmt.Errorf("bulk-update item %d: %w", i, err)
 			}
-			update.Priority = priority
 			needsUpdate = true
 		}
 		if needsUpdate {
+			fullTask, err := loadIssueDetailTask(ctx, deps, typedTaskID.String())
+			if err != nil {
+				return fmt.Errorf("bulk-update item %d: load full issue detail: %w", i, err)
+			}
+			update = daemonclient.TaskUpdateParams{
+				Title:       fullTask.Title,
+				Description: fullTask.Description,
+				Type:        fullTask.Type,
+				Priority:    fullTask.Priority,
+			}
+			if item.Title != "" {
+				update.Title = item.Title
+			}
+			if item.Description != "" {
+				update.Description = item.Description
+			}
+			if item.Type != "" {
+				taskType, err := parseTaskType(item.Type)
+				if err != nil {
+					return fmt.Errorf("bulk-update item %d: %w", i, err)
+				}
+				update.Type = taskType
+			}
+			if item.Priority != "" {
+				priority, err := parsePriority(item.Priority)
+				if err != nil {
+					return fmt.Errorf("bulk-update item %d: %w", i, err)
+				}
+				update.Priority = priority
+			}
 			body, err := json.Marshal(struct {
 				TaskID naming.IssueID `json:"task_id"`
 				daemonclient.TaskUpdateParams
@@ -5240,6 +5265,9 @@ func PrimeCommand(deps *Dependencies) error {
 		if !snapshotLoaded {
 			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nCould not load issue details automatically; run `az issue get %s`.\n", issueID, issueID)
 		} else if task, ok := findTaskByID(snapshot.Tasks, issueID); ok {
+			if detailTask, err := loadIssueDetailTask(context.Background(), deps, issueID); err == nil {
+				task = detailTask
+			}
 			issueSection = renderPrimeIssueSection(issueID, task)
 			if task.Status == domain.StatusDone {
 				activeIssueClosedWarning = fmt.Sprintf("- Active issue `%s` is currently `closed`; start by picking/opening actionable work (for example `az issue list --limit 20` or `az issue create \"Next task\"`). Use `--deferred` only for standalone backlog work.", task.ID)
@@ -5270,6 +5298,24 @@ func PrimeCommand(deps *Dependencies) error {
 	}
 	fmt.Print(output)
 	return nil
+}
+
+func loadIssueDetailTask(ctx context.Context, deps *Dependencies, issueID string) (domain.Task, error) {
+	if deps == nil || deps.DaemonClient == nil {
+		return domain.Task{}, fmt.Errorf("daemon client is required")
+	}
+	snapshot, err := deps.DaemonClient.GetTaskSnapshot(ctx, issueID)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	if err := snapshot.RequireFullDetails("issue detail read"); err != nil {
+		return domain.Task{}, err
+	}
+	task, ok := findTaskByID(snapshot.Tasks, issueID)
+	if !ok {
+		return domain.Task{}, fmt.Errorf("issue not found: %s", issueID)
+	}
+	return task, nil
 }
 
 func primeTmuxAvailable() bool {

@@ -8,26 +8,35 @@ import (
 	"testing"
 )
 
-func TestValidateTUILaunchContextRejectsLinkedWorktreeWithoutJustRunScope(t *testing.T) {
+func TestValidateTUILaunchContextAllowsLinkedWorktreeWithDefaultScopedDaemon(t *testing.T) {
 	_, worktree := makeLinkedWorktree(t)
 	t.Chdir(worktree)
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
 	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
 
-	err := validateTUILaunchContext()
-	if err == nil {
-		t.Fatal("validateTUILaunchContext() error = nil, want linked-worktree guard")
-	}
-	if !strings.Contains(err.Error(), "run `just run`") {
-		t.Fatalf("error = %q, want just run guidance", err)
+	if err := validateTUILaunchContext(); err != nil {
+		t.Fatalf("validateTUILaunchContext() error = %v, want nil", err)
 	}
 }
 
-func TestValidateTUILaunchContextAllowsLinkedWorktreeWithJustRunScope(t *testing.T) {
+func TestValidateTUILaunchContextRejectsLinkedWorktreeWithForcedGlobalScope(t *testing.T) {
+	_, worktree := makeLinkedWorktree(t)
+	t.Chdir(worktree)
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
+
+	err := validateTUILaunchContext()
+	if err == nil {
+		t.Fatal("validateTUILaunchContext() error = nil, want forced-global linked-worktree guard")
+	}
+	if !strings.Contains(err.Error(), "forces the shared daemon") {
+		t.Fatalf("error = %q, want shared daemon guidance", err)
+	}
+}
+
+func TestValidateTUILaunchContextAllowsLinkedWorktreeWithExplicitWorktreeScope(t *testing.T) {
 	_, worktree := makeLinkedWorktree(t)
 	t.Chdir(worktree)
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
 
 	if err := validateTUILaunchContext(); err != nil {
 		t.Fatalf("validateTUILaunchContext() error = %v, want nil", err)
