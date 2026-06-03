@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"runtime/debug"
 	"sort"
 	"sync"
@@ -16,6 +17,7 @@ type Config struct {
 	Now         func() time.Time
 	NewID       func() string
 	BaseContext context.Context
+	Logger      *slog.Logger
 }
 
 type Manager struct {
@@ -23,6 +25,7 @@ type Manager struct {
 	now   func() time.Time
 	newID func() string
 	base  context.Context
+	log   *slog.Logger
 
 	mu           sync.Mutex
 	intakeClosed bool
@@ -63,6 +66,7 @@ func New(store daemonops.Store, cfg Config) *Manager {
 		now:          cfg.Now,
 		newID:        cfg.NewID,
 		base:         cfg.BaseContext,
+		log:          cfg.Logger,
 		running:      make(map[string]*managedOp),
 		resourceBusy: make(map[string]string),
 		activeDedupe: make(map[string]string),
@@ -89,6 +93,7 @@ func (m *Manager) Submit(ctx context.Context, req daemonops.SubmitRequest, runne
 	if existing, ok, err := m.lookupDedupeLocked(ctx, normalized); err != nil {
 		return daemonops.SubmitResult{}, err
 	} else if ok {
+		m.logOperationDedupedLocked(existing)
 		return daemonops.SubmitResult{Record: existing, Deduped: true}, nil
 	}
 
@@ -118,6 +123,7 @@ func (m *Manager) Submit(ctx context.Context, req daemonops.SubmitRequest, runne
 	if created.DedupeKey != "" {
 		m.activeDedupe[dedupeMapKey(created.ProjectID, created.DedupeKey)] = created.ID
 	}
+	m.logOperationQueuedLocked(op)
 	m.startReadyLocked()
 	return daemonops.SubmitResult{Record: created}, nil
 }
@@ -276,7 +282,8 @@ func (m *Manager) lookupDedupeLocked(ctx context.Context, req daemonops.SubmitRe
 func (m *Manager) startReadyLocked() {
 	for i := 0; i < len(m.pending); {
 		op := m.pending[i]
-		if !m.canRunLocked(op.record.ResourceKeys) {
+		if blocked := m.blockedResourcesLocked(op.record.ResourceKeys); len(blocked) > 0 {
+			m.logOperationBlockedLocked(op, blocked)
 			i++
 			continue
 		}
@@ -286,12 +293,17 @@ func (m *Manager) startReadyLocked() {
 }
 
 func (m *Manager) canRunLocked(resourceKeys []string) bool {
+	return len(m.blockedResourcesLocked(resourceKeys)) == 0
+}
+
+func (m *Manager) blockedResourcesLocked(resourceKeys []string) map[string]string {
+	blocked := make(map[string]string)
 	for _, key := range resourceKeys {
-		if _, busy := m.resourceBusy[key]; busy {
-			return false
+		if owner, busy := m.resourceBusy[key]; busy {
+			blocked[key] = owner
 		}
 	}
-	return true
+	return blocked
 }
 
 func (m *Manager) startLocked(op *managedOp) {
@@ -301,6 +313,7 @@ func (m *Manager) startLocked(op *managedOp) {
 	for _, key := range op.record.ResourceKeys {
 		m.resourceBusy[key] = op.record.ID
 	}
+	m.logOperationStartLocked(op)
 	m.wg.Add(1)
 	go m.execute(ctx, op)
 }
@@ -370,6 +383,7 @@ func (m *Manager) execute(ctx context.Context, op *managedOp) {
 	if err == nil {
 		op.record = updated
 	}
+	m.logOperationFinished(op, finished.Sub(started))
 	m.finish(op)
 }
 
@@ -391,6 +405,118 @@ func (m *Manager) finish(op *managedOp) {
 		}
 	}
 	m.startReadyLocked()
+}
+
+func (m *Manager) logOperationQueuedLocked(op *managedOp) {
+	if m.log == nil {
+		return
+	}
+	blocked := m.blockedResourcesLocked(op.record.ResourceKeys)
+	attrs := m.operationAttrsLocked(op,
+		"pending_count", len(m.pending),
+		"running_count", len(m.running),
+		"blocked", len(blocked) > 0,
+	)
+	if len(blocked) > 0 {
+		attrs = append(attrs, "blocked_resources", sortedMapKeys(blocked), "blocking_operations", sortedMapValues(blocked))
+	}
+	m.log.Info("daemon operation queued", attrs...)
+}
+
+func (m *Manager) logOperationDedupedLocked(record daemonops.Record) {
+	if m.log == nil {
+		return
+	}
+	m.log.Info("daemon operation deduped",
+		"operation_id", record.ID,
+		"project_id", record.ProjectID,
+		"issue_id", record.IssueID,
+		"kind", record.Kind,
+		"state", record.State,
+		"dedupe_key", record.DedupeKey,
+		"resource_keys", append([]string(nil), record.ResourceKeys...),
+		"pending_count", len(m.pending),
+		"running_count", len(m.running),
+	)
+}
+
+func (m *Manager) logOperationBlockedLocked(op *managedOp, blocked map[string]string) {
+	if m.log == nil || len(blocked) == 0 {
+		return
+	}
+	m.log.Info("daemon operation waiting for busy resources",
+		append(m.operationAttrsLocked(op,
+			"pending_count", len(m.pending),
+			"running_count", len(m.running),
+			"queue_wait_ms", durationMillis(m.now().UTC().Sub(op.record.CreatedAt)),
+		), "blocked_resources", sortedMapKeys(blocked), "blocking_operations", sortedMapValues(blocked))...,
+	)
+}
+
+func (m *Manager) logOperationStartLocked(op *managedOp) {
+	if m.log == nil {
+		return
+	}
+	m.log.Info("daemon operation started",
+		m.operationAttrsLocked(op,
+			"pending_count", len(m.pending),
+			"running_count", len(m.running),
+			"queue_wait_ms", durationMillis(m.now().UTC().Sub(op.record.CreatedAt)),
+		)...,
+	)
+}
+
+func (m *Manager) logOperationFinished(op *managedOp, runDuration time.Duration) {
+	if m.log == nil {
+		return
+	}
+	m.log.Info("daemon operation finished",
+		"operation_id", op.record.ID,
+		"project_id", op.record.ProjectID,
+		"issue_id", op.record.IssueID,
+		"kind", op.record.Kind,
+		"state", op.record.State,
+		"resource_keys", append([]string(nil), op.record.ResourceKeys...),
+		"run_ms", durationMillis(runDuration),
+		"total_ms", durationMillis(m.now().UTC().Sub(op.record.CreatedAt)),
+	)
+}
+
+func (m *Manager) operationAttrsLocked(op *managedOp, attrs ...any) []any {
+	base := []any{
+		"operation_id", op.record.ID,
+		"project_id", op.record.ProjectID,
+		"issue_id", op.record.IssueID,
+		"kind", op.record.Kind,
+		"state", op.record.State,
+		"resource_keys", append([]string(nil), op.record.ResourceKeys...),
+	}
+	return append(base, attrs...)
+}
+
+func durationMillis(d time.Duration) int64 {
+	if d < 0 {
+		return 0
+	}
+	return d.Milliseconds()
+}
+
+func sortedMapKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedMapValues(values map[string]string) []string {
+	keys := sortedMapKeys(values)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, values[key])
+	}
+	return out
 }
 
 func (m *Manager) clearDedupeLocked(op *managedOp) {

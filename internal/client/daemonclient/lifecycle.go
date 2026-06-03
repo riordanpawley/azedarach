@@ -93,6 +93,11 @@ type worktreeCommandBody struct {
 	Force     bool             `json:"force,omitempty"`
 }
 
+type worktreeRemoveResponseBody struct {
+	ProjectID naming.ProjectID `json:"project_id"`
+	IssueID   naming.IssueID   `json:"issue_id"`
+}
+
 // RuntimeReconcileResult captures the runtime repair summary returned by the daemon.
 type RuntimeReconcileResult struct {
 	ProjectID             naming.ProjectID `json:"project_id"`
@@ -387,11 +392,12 @@ func (c *Client) RemoveWorktreeWithOptions(ctx context.Context, issueID string, 
 	if err != nil {
 		return err
 	}
+	var out worktreeRemoveResponseBody
 	return c.commandJSON(ctx, CommandWorktreeRemove, worktreeCommandBody{
 		ProjectID: c.projectID,
 		IssueID:   parsedIssueID,
 		Force:     force,
-	}, nil)
+	}, &out)
 }
 
 // CleanupOrphanedWorktrees asks the daemon to remove orphaned worktrees for the current project route.

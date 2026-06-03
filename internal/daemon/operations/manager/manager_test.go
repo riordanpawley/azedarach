@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -104,6 +105,44 @@ func containsState(states []daemonops.State, state daemonops.State) bool {
 	return false
 }
 
+type capturedLog struct {
+	message string
+	attrs   map[string]any
+}
+
+type captureHandler struct {
+	mu      sync.Mutex
+	records []capturedLog
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *captureHandler) Handle(_ context.Context, record slog.Record) error {
+	attrs := make(map[string]any)
+	record.Attrs(func(attr slog.Attr) bool {
+		attrs[attr.Key] = attr.Value.Any()
+		return true
+	})
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, capturedLog{message: record.Message, attrs: attrs})
+	return nil
+}
+
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *captureHandler) find(message string) (capturedLog, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, record := range h.records {
+		if record.message == message {
+			return record, true
+		}
+	}
+	return capturedLog{}, false
+}
+
 func TestSubmitDedupesActiveOperation(t *testing.T) {
 	store := newMemoryStore()
 	mgr := New(store, Config{NewID: func() string { return "op-1" }})
@@ -156,6 +195,84 @@ func TestSubmitDedupesActiveOperation(t *testing.T) {
 	if err := mgr.Drain(context.Background()); err != nil {
 		t.Fatalf("drain error: %v", err)
 	}
+}
+
+func TestManagerLogsBacklogDiagnosticsForBlockedOperation(t *testing.T) {
+	store := newMemoryStore()
+	logs := &captureHandler{}
+	mgr := New(store, Config{
+		NewID:  func() string { return time.Now().UTC().Format("150405.000000000") },
+		Logger: slog.New(logs),
+	})
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	if _, err := mgr.Submit(context.Background(), daemonops.SubmitRequest{
+		ID:           "op-running",
+		ProjectID:    "p1",
+		IssueID:      "az-1",
+		Kind:         "worktree.remove",
+		ResourceKeys: []string{"issue:p1:az-1"},
+	}, func(context.Context) ([]byte, error) {
+		close(started)
+		<-release
+		return nil, nil
+	}); err != nil {
+		t.Fatalf("submit running operation: %v", err)
+	}
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first operation did not start")
+	}
+
+	if _, err := mgr.Submit(context.Background(), daemonops.SubmitRequest{
+		ID:           "op-blocked",
+		ProjectID:    "p1",
+		IssueID:      "az-1",
+		Kind:         "worktree.remove",
+		ResourceKeys: []string{"issue:p1:az-1"},
+	}, func(context.Context) ([]byte, error) {
+		return nil, nil
+	}); err != nil {
+		t.Fatalf("submit blocked operation: %v", err)
+	}
+
+	record, ok := logs.find("daemon operation waiting for busy resources")
+	if !ok {
+		t.Fatal("expected busy-resource diagnostic log")
+	}
+	if record.attrs["operation_id"] != "op-blocked" {
+		t.Fatalf("operation_id = %v, want op-blocked", record.attrs["operation_id"])
+	}
+	if got := record.attrs["blocked_resources"]; !containsStringAttr(got, "issue:p1:az-1") {
+		t.Fatalf("blocked_resources = %v, want issue:p1:az-1", got)
+	}
+	if got := record.attrs["blocking_operations"]; !containsStringAttr(got, "op-running") {
+		t.Fatalf("blocking_operations = %v, want op-running", got)
+	}
+	if _, ok := record.attrs["queue_wait_ms"]; !ok {
+		t.Fatalf("queue_wait_ms missing from attrs: %+v", record.attrs)
+	}
+
+	close(release)
+	if err := mgr.Drain(context.Background()); err != nil {
+		t.Fatalf("drain error: %v", err)
+	}
+}
+
+func containsStringAttr(value any, want string) bool {
+	values, ok := value.([]string)
+	if !ok {
+		return false
+	}
+	for _, got := range values {
+		if got == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestSubmitDoesNotDedupeAcrossProjects(t *testing.T) {
