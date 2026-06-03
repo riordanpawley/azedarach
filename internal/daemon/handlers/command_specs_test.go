@@ -16,6 +16,7 @@ func TestCommandSpecRegistryProjectIDPolicy(t *testing.T) {
 		{command: CommandGitFetch, want: true},
 		{command: protocol.CommandOperationList, want: true},
 		{command: CommandSessionStart, want: true},
+		{command: CommandSessionMessage, want: true},
 		{command: protocol.CommandRuntimeReconcile, want: true},
 		{command: protocol.CommandRuntimeReconcileIssue, want: true},
 		{command: protocol.CommandIssueFanout, want: true},
@@ -86,6 +87,7 @@ func TestCommandSpecRegistryDispatcherTargets(t *testing.T) {
 		ok      bool
 	}{
 		{command: CommandSessionStart, want: CommandDispatchSession, ok: true},
+		{command: CommandSessionMessage, want: CommandDispatchSession, ok: true},
 		{command: protocol.CommandOperationGet, want: CommandDispatchOperation, ok: true},
 		{command: CommandPRCreate, want: CommandDispatchPR, ok: true},
 		{command: CommandGitBranchBehind, want: CommandDispatchPR, ok: true},
@@ -133,6 +135,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		CommandSessionPause,
 		CommandSessionResume,
 		CommandSessionStop,
+		CommandSessionMessage,
 		CommandSessionResolveConflict,
 		commandSessionStatus,
 		commandSessionRecover,

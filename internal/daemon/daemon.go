@@ -586,6 +586,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleSessionResume(ctx, req)
 	case "session.stop":
 		return d.handleSessionStop(ctx, req)
+	case daemonhandlers.CommandSessionMessage:
+		return d.handleSessionMessage(ctx, req)
 	case protocol.CommandSessionResolveConflict:
 		return d.handleSessionResolveConflict(ctx, req)
 	case "session.status":

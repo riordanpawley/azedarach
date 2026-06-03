@@ -71,6 +71,15 @@ type OrchestrateCloseSessionOptions struct {
 	JSON    bool
 }
 
+type OrchestrateMessageOptions struct {
+	Project     string
+	RootIssueID string
+	IssueID     string
+	Type        string
+	Body        string
+	JSON        bool
+}
+
 func issueCloseCommand(issueID string) string {
 	return fmt.Sprintf("az issue close --id %s", issueID)
 }
@@ -173,6 +182,15 @@ type orchestrateIntegrateStep struct {
 type orchestrateCloseSessionResult struct {
 	IssueID string `json:"issue_id"`
 	Output  string `json:"output,omitempty"`
+}
+
+type orchestrateMessageResult struct {
+	RootIssueID string             `json:"root_issue_id"`
+	IssueID     string             `json:"issue_id"`
+	Type        string             `json:"type"`
+	Mailbox     protocol.MailEvent `json:"mailbox"`
+	Delivered   bool               `json:"delivered"`
+	Output      string             `json:"output,omitempty"`
 }
 
 func ParseOrchestrateStatusArgs(args []string) (OrchestrateStatusOptions, error) {
@@ -344,6 +362,40 @@ func ParseOrchestrateCloseSessionArgs(args []string) (OrchestrateCloseSessionOpt
 		return OrchestrateCloseSessionOptions{}, fmt.Errorf("missing required flag: --issue")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
+func ParseOrchestrateMessageArgs(args []string) (OrchestrateMessageOptions, error) {
+	opts := OrchestrateMessageOptions{Type: "orchestrator-message"}
+	fs := flag.NewFlagSet("orchestrate message", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&opts.RootIssueID, "root", "", "root/parent issue id for mailbox persistence")
+	fs.StringVar(&opts.IssueID, "issue", "", "worker issue id to message")
+	fs.StringVar(&opts.Type, "type", "orchestrator-message", "mailbox event type")
+	fs.StringVar(&opts.Body, "body", "", "message body")
+	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
+	if err := fs.Parse(args); err != nil {
+		return OrchestrateMessageOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return OrchestrateMessageOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	if strings.TrimSpace(opts.RootIssueID) == "" {
+		return OrchestrateMessageOptions{}, fmt.Errorf("missing required flag: --root")
+	}
+	if strings.TrimSpace(opts.IssueID) == "" {
+		return OrchestrateMessageOptions{}, fmt.Errorf("missing required flag: --issue")
+	}
+	if strings.TrimSpace(opts.Type) == "" {
+		return OrchestrateMessageOptions{}, fmt.Errorf("missing required flag: --type")
+	}
+	if strings.TrimSpace(opts.Body) == "" {
+		return OrchestrateMessageOptions{}, fmt.Errorf("missing required flag: --body")
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	opts.Type = strings.TrimSpace(opts.Type)
+	opts.Body = strings.TrimSpace(opts.Body)
 	return opts, nil
 }
 
@@ -1029,6 +1081,54 @@ func OrchestrateCloseSessionCommand(deps *Dependencies, opts OrchestrateCloseSes
 	}
 	fmt.Printf("Session closed for %s. If work is ready to integrate and clean up, close the issue with `%s`.\n", opts.IssueID, issueCloseCommand(opts.IssueID))
 	return nil
+}
+
+func OrchestrateMessageCommand(deps *Dependencies, opts OrchestrateMessageOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+	event, err := deps.DaemonClient.MailSend(ctx, protocol.MailSendCommandBody{
+		RepoDir:     deps.RepoDir,
+		ParentIssue: opts.RootIssueID,
+		IssueID:     naming.IssueID(strings.TrimSpace(opts.IssueID)),
+		Type:        strings.TrimSpace(opts.Type),
+		From:        "orchestrator",
+		To:          strings.TrimSpace(opts.IssueID),
+		Body:        opts.Body,
+	})
+	if err != nil {
+		return fmt.Errorf("record orchestrator message: %w", err)
+	}
+	output, err := deps.DaemonClient.SendSessionMessage(ctx, opts.IssueID, formatOrchestratorSessionMessage(opts))
+	if err != nil {
+		return fmt.Errorf("mail event seq=%d recorded but active delivery failed: %w", event.Seq, err)
+	}
+	result := orchestrateMessageResult{
+		RootIssueID: opts.RootIssueID,
+		IssueID:     opts.IssueID,
+		Type:        opts.Type,
+		Mailbox:     event,
+		Delivered:   true,
+		Output:      output,
+	}
+	if opts.JSON {
+		return printJSON(result)
+	}
+	fmt.Printf("message delivered to %s; mailbox seq=%d parent=%s type=%s\n", opts.IssueID, event.Seq, event.ParentIssue, event.Type)
+	return nil
+}
+
+func formatOrchestratorSessionMessage(opts OrchestrateMessageOptions) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Orchestrator message for issue %s under root %s:\n\n", strings.TrimSpace(opts.IssueID), strings.TrimSpace(opts.RootIssueID))
+	b.WriteString(strings.TrimSpace(opts.Body))
+	b.WriteString("\n\nContinue from the current state. If this changes your status, update the issue notes/status and send worker-progress, worker-blocked, or worker-integration-ready evidence as appropriate.")
+	return b.String()
 }
 
 func buildOrchestrateWatchFrame(deps *Dependencies, rootIssueID string, since int64) (orchestrateWatchFrame, error) {

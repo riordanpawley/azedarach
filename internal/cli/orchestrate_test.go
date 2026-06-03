@@ -82,6 +82,16 @@ func TestParseOrchestrateWatchArgs(t *testing.T) {
 	}
 }
 
+func TestParseOrchestrateMessageArgs(t *testing.T) {
+	opts, err := ParseOrchestrateMessageArgs([]string{"--root", "az-1", "--issue", "az-2", "--body", "Proceed now", "--json"})
+	if err != nil {
+		t.Fatalf("ParseOrchestrateMessageArgs error = %v", err)
+	}
+	if opts.RootIssueID != "az-1" || opts.IssueID != "az-2" || opts.Body != "Proceed now" || opts.Type != "orchestrator-message" || !opts.JSON {
+		t.Fatalf("opts = %+v", opts)
+	}
+}
+
 func TestWatchDaemonCommandRestartsAfterTransientSocketLoss(t *testing.T) {
 	oldLauncher := newLauncher
 	t.Cleanup(func() { newLauncher = oldLauncher })
@@ -563,6 +573,74 @@ func TestOrchestratePromptCommandMailboxCoordinationOptIn(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
 		}
+	}
+}
+
+func TestOrchestrateMessageCommandRecordsMailboxThenDeliversToSession(t *testing.T) {
+	commands := []string{}
+	var mailBody protocol.MailSendCommandBody
+	var sessionBody struct {
+		SessionID naming.SessionID `json:"session_id"`
+		Message   string           `json:"message"`
+	}
+	deps := &Dependencies{
+		ProjectID: protocol.DefaultProjectID,
+		RepoDir:   "/repo",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case protocol.CommandMailSend:
+					if err := json.Unmarshal(req.Body, &mailBody); err != nil {
+						t.Fatalf("decode mail body: %v", err)
+					}
+					return responseWithJSON(req, protocol.MailEvent{
+						Seq:         7,
+						ParentIssue: "az-1",
+						IssueID:     naming.IssueID("az-2"),
+						Type:        "orchestrator-message",
+						From:        "orchestrator",
+						To:          "az-2",
+						Body:        "Proceed now",
+					}), nil
+				case daemonclient.CommandSessionMessage:
+					if err := json.Unmarshal(req.Body, &sessionBody); err != nil {
+						t.Fatalf("decode session message body: %v", err)
+					}
+					return responseWithJSON(req, map[string]string{"output": "Sent message to session: az-2\n"}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestrateMessageCommand(deps, OrchestrateMessageOptions{
+			RootIssueID: "az-1",
+			IssueID:     "az-2",
+			Type:        "orchestrator-message",
+			Body:        "Proceed now",
+			JSON:        true,
+		})
+	})
+
+	if len(commands) != 2 || commands[0] != protocol.CommandMailSend || commands[1] != daemonclient.CommandSessionMessage {
+		t.Fatalf("commands = %+v, want mail send then session message", commands)
+	}
+	if mailBody.ParentIssue != "az-1" || mailBody.IssueID != "az-2" || mailBody.Type != "orchestrator-message" || mailBody.From != "orchestrator" || mailBody.To != "az-2" || mailBody.Body != "Proceed now" {
+		t.Fatalf("mail body = %+v", mailBody)
+	}
+	if sessionBody.SessionID != "az-2" || !strings.Contains(sessionBody.Message, "Orchestrator message for issue az-2 under root az-1") || !strings.Contains(sessionBody.Message, "Proceed now") {
+		t.Fatalf("session body = %+v", sessionBody)
+	}
+	var result orchestrateMessageResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode result: %v\n%s", err, output)
+	}
+	if !result.Delivered || result.Mailbox.Seq != 7 {
+		t.Fatalf("result = %+v", result)
 	}
 }
 

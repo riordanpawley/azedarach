@@ -18,6 +18,7 @@ const (
 	CommandSessionPause           = "session.pause"
 	CommandSessionResume          = "session.resume"
 	CommandSessionStop            = "session.stop"
+	CommandSessionMessage         = "session.message"
 	CommandSessionResolveConflict = protocol.CommandSessionResolveConflict
 )
 
