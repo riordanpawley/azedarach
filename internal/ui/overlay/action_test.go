@@ -808,3 +808,33 @@ func TestBulkActionMenu_ExposeCleanupCommands(t *testing.T) {
 		t.Fatalf("view = %q, want delete+cleanup worktrees command", view)
 	}
 }
+
+func TestBulkActionMenu_UsesNumericStatusKeys(t *testing.T) {
+	menu := NewBulkActionMenu([]string{"az-1", "az-2"}, 2)
+
+	for _, key := range []string{"1", "2", "3", "4"} {
+		cmd := menu.selectByKey(key)
+		if cmd == nil {
+			t.Fatalf("expected status command for key %s", key)
+		}
+		msg, ok := cmd().(BulkActionMsg)
+		if !ok {
+			t.Fatalf("command for key %s returned %T, want BulkActionMsg", key, cmd())
+		}
+		if msg.Action != key {
+			t.Fatalf("action = %q, want %q", msg.Action, key)
+		}
+	}
+
+	view := menu.View()
+	for _, want := range []string{
+		"[1] Set status: Open",
+		"[2] Set status: In Progress",
+		"[3] Set status: In Review",
+		"[4] Set status: Done",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view = %q, want %q", view, want)
+		}
+	}
+}
