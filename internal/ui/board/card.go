@@ -442,7 +442,11 @@ func renderSessionStatus(session *domain.Session, s *styles.Styles) string {
 
 	// Elapsed time if active/waiting and started.
 	var elapsed string
-	if session.StartedAt != nil && (session.State == domain.SessionBusy || session.State == domain.SessionWaiting) {
+	displayState, hasDisplayState := session.DisplayState()
+	if !hasDisplayState {
+		displayState = session.State
+	}
+	if session.StartedAt != nil && (displayState == domain.SessionBusy || displayState == domain.SessionWaiting) {
 		d := time.Since(*session.StartedAt)
 		elapsed = formatDuration(d)
 	}
@@ -464,7 +468,11 @@ func renderSessionStatusCompact(session *domain.Session) string {
 	}
 
 	icon := session.DisplayIcon()
-	if session.StartedAt != nil && (session.State == domain.SessionBusy || session.State == domain.SessionWaiting) {
+	displayState, hasDisplayState := session.DisplayState()
+	if !hasDisplayState {
+		displayState = session.State
+	}
+	if session.StartedAt != nil && (displayState == domain.SessionBusy || displayState == domain.SessionWaiting) {
 		return fmt.Sprintf("%s%s", icon, formatCompactDuration(time.Since(*session.StartedAt)))
 	}
 

@@ -24,3 +24,56 @@ func TestSessionState_Icon(t *testing.T) {
 		})
 	}
 }
+
+func TestSessionDisplayPrefersAgentActivity(t *testing.T) {
+	session := &Session{
+		State:          SessionBusy,
+		Activity:       "idle",
+		ActivitySource: "hooks",
+	}
+
+	if got := session.DisplayIcon(); got != SessionIdle.Icon() {
+		t.Fatalf("DisplayIcon() = %q, want idle icon", got)
+	}
+	if got := session.DisplayLabel(); got != "idle" {
+		t.Fatalf("DisplayLabel() = %q, want idle", got)
+	}
+	if got := session.DisplayCode(); got != "I" {
+		t.Fatalf("DisplayCode() = %q, want I", got)
+	}
+	if got, ok := session.DisplayState(); !ok || got != SessionIdle {
+		t.Fatalf("DisplayState() = %q/%v, want idle/true", got, ok)
+	}
+}
+
+func TestSessionDisplayFallsBackToLifecycleWithoutAgentActivity(t *testing.T) {
+	session := &Session{State: SessionBusy}
+
+	if got := session.DisplayIcon(); got != SessionBusy.Icon() {
+		t.Fatalf("DisplayIcon() = %q, want busy icon", got)
+	}
+	if got := session.DisplayLabel(); got != "busy" {
+		t.Fatalf("DisplayLabel() = %q, want busy", got)
+	}
+	if got := session.DisplayCode(); got != "B" {
+		t.Fatalf("DisplayCode() = %q, want B", got)
+	}
+}
+
+func TestSessionDisplayUnknownAgentActivity(t *testing.T) {
+	session := &Session{
+		State:          SessionBusy,
+		Activity:       "unknown",
+		ActivitySource: "none",
+	}
+
+	if got := session.DisplayIcon(); got != "?" {
+		t.Fatalf("DisplayIcon() = %q, want ?", got)
+	}
+	if got := session.DisplayLabel(); got != "unknown" {
+		t.Fatalf("DisplayLabel() = %q, want unknown", got)
+	}
+	if got := session.DisplayCode(); got != "?" {
+		t.Fatalf("DisplayCode() = %q, want ?", got)
+	}
+}

@@ -218,6 +218,9 @@ func (s *Styles) Session(session *domain.Session) lipgloss.Style {
 	if session == nil {
 		return s.SessionIdle
 	}
+	if displayState, ok := session.DisplayState(); ok {
+		return s.SessionState(displayState)
+	}
 	return s.SessionState(session.State)
 }
 

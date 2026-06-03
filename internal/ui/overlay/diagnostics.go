@@ -455,28 +455,39 @@ func (d *DiagnosticsPanel) renderSessions(b *strings.Builder) {
 		Foreground(lipgloss.Color("#94e2d5")).
 		Bold(true)
 
-	b.WriteString(tableHeaderStyle.Render("  ISSUE ID          STATE        UPTIME"))
+	b.WriteString(tableHeaderStyle.Render("  ISSUE ID          AGENT        SESSION      UPTIME"))
 	b.WriteString("\n")
-	b.WriteString(d.styles.MenuItem.Render("  ─────────────────────────────────────────"))
+	b.WriteString(d.styles.MenuItem.Render("  ──────────────────────────────────────────────────────"))
 	b.WriteString("\n")
 
 	// Table rows
 	for _, session := range diag.Sessions {
-		stateIcon := session.State.Icon()
-		stateLabel := session.State.String()
-		if session.ActiveCount > 0 && session.PausedCount > 0 {
-			stateIcon = "◒"
-			stateLabel = "partial"
+		displaySession := &domain.Session{
+			State:          session.State,
+			Activity:       session.Activity,
+			ActivitySource: session.ActivitySource,
+			TotalCount:     session.TotalCount,
+			ActiveCount:    session.ActiveCount,
+			PausedCount:    session.PausedCount,
+			StartedAt:      session.StartedAt,
+			Worktree:       session.Worktree,
+		}
+		stateIcon := displaySession.DisplayIcon()
+		stateLabel := displaySession.DisplayLabel()
+		lifecycleLabel := session.State.String()
+		if lifecycleLabel == "" {
+			lifecycleLabel = "-"
 		}
 		uptimeStr := "-"
 		if session.Uptime > 0 {
 			uptimeStr = formatDuration(session.Uptime)
 		}
 
-		line := fmt.Sprintf("  %-16s %s %-7s  %s",
+		line := fmt.Sprintf("  %-16s %s %-7s  %-10s  %s",
 			truncateDiagString(session.IssueID, 16),
 			stateIcon,
 			stateLabel,
+			lifecycleLabel,
 			uptimeStr,
 		)
 		b.WriteString(d.styles.MenuItem.Render(line))
