@@ -140,7 +140,7 @@ func (d *Daemon) runtimeReconcileTimeout() time.Duration {
 	if d.cfg.RuntimeReconcileTimeout > 0 {
 		return d.cfg.RuntimeReconcileTimeout
 	}
-	if appconfig.UseScopedDaemonRuntimeFor(d.cfg.RepoDir) {
+	if d.cfg.ScopedRuntime || appconfig.UseScopedDaemonRuntimeFor(d.cfg.RepoDir) {
 		return scopedRuntimeReconcileTimeout
 	}
 	return defaultRuntimeReconcileTimeout
@@ -667,7 +667,7 @@ func (d *Daemon) runtimeReconcileKnownProjectIDs(ctx context.Context) ([]string,
 		return []string{protocol.DefaultProjectID}, nil
 	}
 	repoDir := strings.TrimSpace(d.cfg.RepoDir)
-	scopedMode := appconfig.UseScopedDaemonRuntimeFor(repoDir)
+	scopedMode := d.cfg.ScopedRuntime || appconfig.UseScopedDaemonRuntimeFor(repoDir)
 	repoProjectID := ""
 	repoNameProjectID := ""
 	if repoDir != "" {

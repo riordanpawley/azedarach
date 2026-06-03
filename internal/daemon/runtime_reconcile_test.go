@@ -816,6 +816,31 @@ func TestRuntimeReconcileTimeoutDefaultsByScopeMode(t *testing.T) {
 	}
 }
 
+func TestRuntimeReconcileTimeoutHonorsExplicitScopedRuntime(t *testing.T) {
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo .git): %v", err)
+	}
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
+
+	d := New(Config{
+		RepoDir:       repoDir,
+		ScopedRuntime: true,
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	t.Cleanup(func() {
+		d.closeIssueClients()
+		d.closeRuntimeStateStores()
+		_ = d.runtimeReconcileQueue.Close()
+		_ = d.gitStatusRefreshQueue.Close()
+	})
+
+	if got, want := d.runtimeReconcileTimeout(), scopedRuntimeReconcileTimeout; got != want {
+		t.Fatalf("runtimeReconcileTimeout() explicit scoped = %s, want %s", got, want)
+	}
+}
+
 func TestRuntimeReconcileKnownProjectIDsIncludesAllKnownSources(t *testing.T) {
 	repoDir := t.TempDir()
 	repoProjectID, err := appconfig.ProjectIDForRoot(repoDir)

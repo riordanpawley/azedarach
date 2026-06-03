@@ -61,6 +61,7 @@ type Config struct {
 	RepoDir                    string
 	SocketPath                 string
 	LockPath                   string
+	ScopedRuntime              bool
 	BaseBranch                 string
 	CLITool                    string
 	DangerouslySkipPermissions bool
@@ -163,6 +164,7 @@ func New(cfg Config) *Daemon {
 			cfg.RepoDir = "."
 		}
 	}
+	cfg.ScopedRuntime = cfg.ScopedRuntime || appconfig.UseScopedDaemonRuntimeFor(cfg.RepoDir)
 	if normalizedRepoDir, err := appconfig.ResolveProjectRoot(cfg.RepoDir); err == nil {
 		cfg.RepoDir = normalizedRepoDir
 	}

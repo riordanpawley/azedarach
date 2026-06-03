@@ -58,6 +58,7 @@ func main() {
 	if lockPath == "" {
 		lockPath = config.DaemonLockPathFor(repoDir)
 	}
+	scopedRuntime := config.UseScopedDaemonRuntimeFor(repoDir)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -71,6 +72,7 @@ func main() {
 		RepoDir:                    repoDir,
 		SocketPath:                 socketPath,
 		LockPath:                   lockPath,
+		ScopedRuntime:              scopedRuntime,
 		BaseBranch:                 cfg.Git.BaseBranch,
 		CLITool:                    cfg.CLITool,
 		DangerouslySkipPermissions: cfg.Session.DangerouslySkipPermissions,

@@ -234,6 +234,40 @@ func TestDefaultSyncBootstrapOpensRegisteredProjectStores(t *testing.T) {
 	}
 }
 
+func TestDefaultSyncBootstrapScopedRuntimeSkipsRegisteredProjectStores(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	baseRepo := newBootstrapTestRepo(t, "azedarach")
+	chefyRepo := newBootstrapTestRepo(t, "Chefy")
+	registry := &appconfig.ProjectsRegistry{
+		Projects: []appconfig.Project{
+			{Name: "Chefy", Path: chefyRepo},
+		},
+		DefaultProject: "azedarach",
+	}
+	if err := appconfig.SaveProjectsRegistry(registry); err != nil {
+		t.Fatalf("save projects registry: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:       baseRepo,
+			ScopedRuntime: true,
+			Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	t.Cleanup(d.closeIssueClients)
+
+	if err := d.defaultSyncBootstrap(context.Background()); err != nil {
+		t.Fatalf("default sync bootstrap: %v", err)
+	}
+
+	assertBootstrapDBExists(t, baseRepo)
+	if _, err := os.Stat(filepath.Join(chefyRepo, ".azedarach", "azedarach.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("registered project db stat error = %v, want not exist", err)
+	}
+}
+
 func newBootstrapTestRepo(t *testing.T, name string) string {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), name)
