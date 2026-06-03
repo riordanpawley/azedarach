@@ -128,6 +128,7 @@ type TaskSnapshot struct {
 	Revision      uint64
 	LastCheckedAt time.Time
 	Freshness     protocol.TaskListFreshness
+	SummariesOnly bool
 }
 
 type IssueSyncSummary struct {
@@ -417,6 +418,7 @@ func (c *Client) decodeTaskSnapshotResponse(resp protocol.ResponseEnvelope) (Tas
 		Revision:      revision,
 		LastCheckedAt: payload.LastCheckedAt,
 		Freshness:     payload.Freshness,
+		SummariesOnly: payload.SummariesOnly,
 	}, nil
 }
 

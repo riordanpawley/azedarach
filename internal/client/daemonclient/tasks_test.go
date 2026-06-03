@@ -144,7 +144,16 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 					Kind:            protocol.EnvelopeKindResponse,
 					Revision:        17,
 					OK:              true,
-					Body:            mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 17, []domain.Task{{ID: "az-9", Title: "Task 9", Status: domain.StatusInReview}}),
+					Body: mustMarshalRawTaskListSnapshotBody(t, protocol.TaskListSnapshotPayload{
+						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+						ProtocolVersion:  req.ProtocolVersion,
+						SnapshotRevision: 17,
+						ProjectID:        naming.ProjectID(wantProjectID),
+						LastCheckedAt:    mustTaskSnapshotCheckedAt(),
+						Freshness:        protocol.TaskListFreshnessFresh,
+						SummariesOnly:    true,
+						Tasks:            []domain.Task{{ID: "az-9", Title: "Task 9", Status: domain.StatusInReview}},
+					}),
 				}, nil
 			},
 		}
@@ -162,6 +171,9 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 		if snapshot.Freshness != protocol.TaskListFreshnessFresh {
 			t.Fatalf("freshness = %q, want %q", snapshot.Freshness, protocol.TaskListFreshnessFresh)
+		}
+		if !snapshot.SummariesOnly {
+			t.Fatal("summaries_only = false, want true")
 		}
 		if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].ID != "az-9" {
 			t.Fatalf("snapshot tasks = %+v", snapshot.Tasks)

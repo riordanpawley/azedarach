@@ -4927,7 +4927,19 @@ func (m Model) createPRWithAICmd(msg openPROverlayResultMsg) tea.Cmd {
 		for i := range m.tasks {
 			if m.tasks[i].ID.String() == msg.issueID {
 				issueTitle = strings.TrimSpace(m.tasks[i].Title)
-				issueDescription = strings.TrimSpace(m.tasks[i].Description)
+				break
+			}
+		}
+		detailSnapshot, err := m.daemonClient.GetTaskSnapshotWithMode(ctx, msg.issueID, daemonclient.ReadWaitModeExplicit)
+		if err != nil {
+			return prCreatedResultMsg{err: fmt.Errorf("load issue detail for PR generation: %w", err)}
+		}
+		for i := range detailSnapshot.Tasks {
+			if detailSnapshot.Tasks[i].ID.String() == msg.issueID {
+				if title := strings.TrimSpace(detailSnapshot.Tasks[i].Title); title != "" {
+					issueTitle = title
+				}
+				issueDescription = strings.TrimSpace(detailSnapshot.Tasks[i].Description)
 				break
 			}
 		}

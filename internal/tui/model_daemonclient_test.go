@@ -5974,6 +5974,26 @@ func TestOpenPROverlayUsesDaemonWorktreeBranch(t *testing.T) {
 					OK:              true,
 					Body:            respBody,
 				}, nil
+			case daemonclient.CommandTaskGet:
+				body, err := json.Marshal(protocol.TaskListSnapshotPayload{
+					SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+					ProtocolVersion:  req.ProtocolVersion,
+					SnapshotRevision: 2,
+					ProjectID:        "default",
+					LastCheckedAt:    time.Date(2026, time.April, 2, 11, 2, 0, 0, time.UTC),
+					Freshness:        protocol.TaskListFreshnessFresh,
+					Tasks:            []domain.Task{{ID: "az-1", Title: "Task 1", Description: "Desc 1"}},
+				})
+				if err != nil {
+					t.Fatalf("marshal task.get response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            body,
+				}, nil
 			case daemonclient.CommandPRCreate:
 				var body daemonclient.CreatePullRequestParams
 				if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -6019,7 +6039,7 @@ func TestOpenPROverlayUsesDaemonWorktreeBranch(t *testing.T) {
 
 	m := newDaemonTestModel(transport)
 	expectedDraft = m.config.PR.DraftByDefault
-	m.tasks = []domain.Task{{ID: "az-1", Title: "Task 1", Description: "Desc 1"}}
+	m.tasks = []domain.Task{{ID: "az-1", Title: "Task 1"}}
 	msg := m.openPROverlayCmd("/tmp/az-1", "az-1")()
 	result, ok := msg.(openPROverlayResultMsg)
 	if !ok {
@@ -6053,7 +6073,7 @@ func TestOpenPROverlayUsesDaemonWorktreeBranch(t *testing.T) {
 	if len(afterModel.toasts) == 0 {
 		t.Fatal("expected success toast after PR creation")
 	}
-	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandPRCreate {
+	if got := transport.requests; len(got) != 3 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandTaskGet || got[2] != daemonclient.CommandPRCreate {
 		t.Fatalf("requests = %v", got)
 	}
 }

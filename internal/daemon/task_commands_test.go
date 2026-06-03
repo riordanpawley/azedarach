@@ -286,6 +286,9 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	if got, want := payload.Freshness, protocol.TaskListFreshnessFresh; got != want {
 		t.Fatalf("payload.Freshness = %q, want %q", got, want)
 	}
+	if !payload.SummariesOnly {
+		t.Fatal("payload.SummariesOnly = false, want true")
+	}
 	tasks := payload.Tasks
 	if got, want := len(tasks), 1; got != want {
 		t.Fatalf("task count = %d, want %d", got, want)
@@ -384,6 +387,9 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	}
 	if len(getPayload.Tasks) == 0 {
 		t.Fatal("task.get returned no tasks")
+	}
+	if getPayload.SummariesOnly {
+		t.Fatal("task.get summaries_only = true, want false")
 	}
 	if got, want := getPayload.Tasks[0].Description, "Long description should stay out of task.list summaries"; got != want {
 		t.Fatalf("task.get description = %q, want %q", got, want)
