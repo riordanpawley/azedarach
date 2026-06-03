@@ -652,7 +652,7 @@ func TestHandleTaskGetUsesFreshTaskListSnapshotCache(t *testing.T) {
 	}
 }
 
-func TestHandleTaskListCacheHitSkipsRuntimeRefreshTriggers(t *testing.T) {
+func TestHandleTaskListFreshRuntimeCacheHitSkipsRuntimeRefreshTriggers(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	projectID := "proj-cache-list"
@@ -728,6 +728,91 @@ func TestHandleTaskListCacheHitSkipsRuntimeRefreshTriggers(t *testing.T) {
 	}
 }
 
+func TestHandleTaskListStaleRuntimeCacheRebuildsAndRefreshes(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-cache-list-runtime-stale"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "runtime stale cache",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	now := time.Date(2026, time.April, 2, 12, 0, 0, 0, time.UTC)
+	originalNow := timeNow
+	t.Cleanup(func() { timeNow = originalNow })
+	timeNow = func() time.Time { return now }
+
+	cachedTask := domain.Task{
+		ID:       naming.IssueID(taskID),
+		Title:    "stale cached title",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	}
+	d := &Daemon{
+		cfg: Config{Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeAdapter: &worktreeServiceAdapter{},
+		revision:        map[string]uint64{projectID: 11},
+		hub:             publish.NewHub(16, 8, logger),
+		taskListSnapshotCache: map[string]taskListSnapshotCacheEntry{
+			projectID: {
+				Revision:      11,
+				LastCheckedAt: now,
+				Freshness:     protocol.TaskListFreshnessFresh,
+				Tasks:         []domain.Task{cachedTask},
+				CachedAt:      now,
+				RuntimeAt:     now.Add(-taskListSnapshotRuntimeCacheTTL - time.Millisecond),
+				SummariesOnly: true,
+			},
+		},
+	}
+
+	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-list-runtime-cache-stale",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.list",
+	})
+	if err != nil {
+		t.Fatalf("handleTaskList error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.list response = %+v", resp.Error)
+	}
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("decode task.list body: %v", err)
+	}
+	if got, want := payload.Tasks[0].Title, "runtime stale cache"; got != want {
+		t.Fatalf("payload task title = %q, want refreshed %q", got, want)
+	}
+
+	d.worktreeStateRefreshMu.Lock()
+	gotRefresh := d.worktreeStateLastRefresh[projectID]
+	d.worktreeStateRefreshMu.Unlock()
+	if gotRefresh.IsZero() {
+		t.Fatal("worktree refresh was not triggered after runtime cache staled")
+	}
+}
+
 func TestLoadTaskListSnapshotSharesInFlightProjectLoad(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -792,6 +877,54 @@ func TestLoadTaskListSnapshotSharesInFlightProjectLoad(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for shared task-list load")
+	}
+}
+
+func TestLoadTaskListSnapshotUsesDetachedBuildContext(t *testing.T) {
+	logger := slog.Default()
+	projectID := "proj-canceled-owner-list"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	taskID, err := issuesClient.Create(context.Background(), issues.CreateTaskParams{
+		Title:    "canceled owner should not poison load",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 23},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, shared, err := d.loadTaskListSnapshot(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-canceled-owner-list",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.list",
+	}, projectID)
+	if err != nil {
+		t.Fatalf("loadTaskListSnapshot error = %v, want detached load to succeed", err)
+	}
+	if shared {
+		t.Fatal("shared = true, want owner load")
+	}
+	if got, want := result.Revision, uint64(23); got != want {
+		t.Fatalf("result.Revision = %d, want %d", got, want)
+	}
+	if len(result.Tasks) != 1 || result.Tasks[0].ID.String() != taskID {
+		t.Fatalf("result.Tasks = %+v, want task %s", result.Tasks, taskID)
 	}
 }
 

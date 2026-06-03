@@ -101,6 +101,20 @@ func mustMarshalRawTaskListSnapshotBody(t *testing.T, body any) []byte {
 	return data
 }
 
+func TestTaskSnapshotRequireFullDetails(t *testing.T) {
+	if err := (TaskSnapshot{}).RequireFullDetails("issue update"); err != nil {
+		t.Fatalf("full snapshot guard error = %v, want nil", err)
+	}
+
+	err := (TaskSnapshot{SummariesOnly: true}).RequireFullDetails("issue update")
+	if err == nil {
+		t.Fatal("summary snapshot guard error = nil, want error")
+	}
+	if got := err.Error(); !strings.Contains(got, "issue update requires full task details") {
+		t.Fatalf("summary snapshot guard error = %q", got)
+	}
+}
+
 func TestTaskListCreateAndMutationCommands(t *testing.T) {
 	const wantProjectID = "proj-task"
 

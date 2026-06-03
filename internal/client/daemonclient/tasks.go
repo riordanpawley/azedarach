@@ -131,6 +131,19 @@ type TaskSnapshot struct {
 	SummariesOnly bool
 }
 
+// RequireFullDetails fails when a caller that needs mutation-safe task fields
+// was accidentally given a list snapshot optimized for summaries.
+func (s TaskSnapshot) RequireFullDetails(caller string) error {
+	if !s.SummariesOnly {
+		return nil
+	}
+	caller = strings.TrimSpace(caller)
+	if caller == "" {
+		caller = "task snapshot"
+	}
+	return fmt.Errorf("%s requires full task details but received a summary-only snapshot", caller)
+}
+
 type IssueSyncSummary struct {
 	Provider              string `json:"provider"`
 	Enabled               bool   `json:"enabled"`

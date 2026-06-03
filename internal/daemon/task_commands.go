@@ -50,7 +50,11 @@ const (
 	taskInvariantTaskListFreshness daemonInvariantID = daemonInvariantTaskListFreshness
 )
 
-const taskListSnapshotCacheTTL = 5 * time.Second
+const (
+	taskListSnapshotCacheTTL        = 5 * time.Second
+	taskListSnapshotRuntimeCacheTTL = 750 * time.Millisecond
+	taskListSnapshotLoadTimeout     = 10 * time.Second
+)
 
 type taskListSnapshotCacheEntry struct {
 	Revision      uint64
@@ -58,6 +62,7 @@ type taskListSnapshotCacheEntry struct {
 	Freshness     protocol.TaskListFreshness
 	Tasks         []domain.Task
 	CachedAt      time.Time
+	RuntimeAt     time.Time
 	SummariesOnly bool
 }
 
@@ -140,7 +145,9 @@ func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestE
 	d.taskListSnapshotLoads[projectID] = load
 	d.taskListSnapshotLoadMu.Unlock()
 
-	result, err := d.buildTaskListSnapshot(ctx, req, projectID)
+	buildCtx, cancel := context.WithTimeout(context.Background(), taskListSnapshotLoadTimeout)
+	defer cancel()
+	result, err := d.buildTaskListSnapshot(buildCtx, req, projectID)
 	load.result = cloneTaskListSnapshotLoadResult(result)
 	load.err = err
 
@@ -357,6 +364,13 @@ func (d *Daemon) readFreshTaskListSnapshotCache(projectID string) (taskListSnaps
 	if timeNow().Sub(cached.CachedAt) > taskListSnapshotCacheTTL {
 		return taskListSnapshotCacheEntry{}, false
 	}
+	runtimeAt := cached.RuntimeAt
+	if runtimeAt.IsZero() {
+		runtimeAt = cached.CachedAt
+	}
+	if timeNow().Sub(runtimeAt) > taskListSnapshotRuntimeCacheTTL {
+		return taskListSnapshotCacheEntry{}, false
+	}
 	cached.Tasks = cloneTasks(cached.Tasks)
 	return cached, true
 }
@@ -371,12 +385,14 @@ func (d *Daemon) storeTaskListSnapshotCache(projectID string, revision uint64, l
 	if d.taskListSnapshotCache == nil {
 		d.taskListSnapshotCache = map[string]taskListSnapshotCacheEntry{}
 	}
+	now := timeNow()
 	d.taskListSnapshotCache[projectID] = taskListSnapshotCacheEntry{
 		Revision:      revision,
 		LastCheckedAt: lastCheckedAt.UTC(),
 		Freshness:     freshness,
 		Tasks:         cloneTasks(tasks),
-		CachedAt:      timeNow(),
+		CachedAt:      now,
+		RuntimeAt:     now,
 		SummariesOnly: summariesOnly,
 	}
 }

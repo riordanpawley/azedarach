@@ -23,7 +23,7 @@ const (
 	AgentClaude AgentSource = "claude"
 	AgentCodex  AgentSource = "codex"
 
-	hookBestEffortDaemonTimeout = time.Second
+	hookBestEffortDaemonTimeout = 2 * time.Second
 )
 
 // IsKnown reports whether the agent source is one the port understands.

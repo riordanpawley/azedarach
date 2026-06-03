@@ -3245,6 +3245,9 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 		}
 		return fmt.Errorf("failed to get issue %s: %w", opts.IssueID, err)
 	}
+	if err := snapshot.RequireFullDetails("issue get"); err != nil {
+		return fmt.Errorf("failed to get issue %s: %w", opts.IssueID, err)
+	}
 
 	task, ok := findTaskByID(snapshot.Tasks, opts.IssueID)
 	if !ok {
@@ -4306,40 +4309,28 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 		if parseErr != nil {
 			return fmt.Errorf("bulk-update item %d: invalid task_id %q: %w", i, taskID, parseErr)
 		}
-		current, ok := tasksByID[typedTaskID]
-		if !ok {
+		if _, ok := tasksByID[typedTaskID]; !ok {
 			return fmt.Errorf("bulk-update item %d: issue not found: %s", i, taskID)
 		}
 
-		update := daemonclient.TaskUpdateParams{
-			Title:       current.Title,
-			Description: current.Description,
-			Type:        current.Type,
-			Priority:    current.Priority,
-		}
+		var update daemonclient.TaskUpdateParams
 		needsUpdate := false
 		if item.Title != "" {
-			update.Title = item.Title
 			needsUpdate = true
 		}
 		if item.Description != "" {
-			update.Description = item.Description
 			needsUpdate = true
 		}
 		if item.Type != "" {
-			taskType, err := parseTaskType(item.Type)
-			if err != nil {
+			if _, err := parseTaskType(item.Type); err != nil {
 				return fmt.Errorf("bulk-update item %d: %w", i, err)
 			}
-			update.Type = taskType
 			needsUpdate = true
 		}
 		if item.Priority != "" {
-			priority, err := parsePriority(item.Priority)
-			if err != nil {
+			if _, err := parsePriority(item.Priority); err != nil {
 				return fmt.Errorf("bulk-update item %d: %w", i, err)
 			}
-			update.Priority = priority
 			needsUpdate = true
 		}
 		if needsUpdate {
@@ -5341,6 +5332,9 @@ func loadIssueDetailTask(ctx context.Context, deps *Dependencies, issueID string
 	}
 	snapshot, err := deps.DaemonClient.GetTaskSnapshot(ctx, issueID)
 	if err != nil {
+		return domain.Task{}, err
+	}
+	if err := snapshot.RequireFullDetails("issue detail read"); err != nil {
 		return domain.Task{}, err
 	}
 	task, ok := findTaskByID(snapshot.Tasks, issueID)

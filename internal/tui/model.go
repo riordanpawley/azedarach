@@ -4934,6 +4934,9 @@ func (m Model) createPRWithAICmd(msg openPROverlayResultMsg) tea.Cmd {
 		if err != nil {
 			return prCreatedResultMsg{err: fmt.Errorf("load issue detail for PR generation: %w", err)}
 		}
+		if err := detailSnapshot.RequireFullDetails("PR generation issue detail read"); err != nil {
+			return prCreatedResultMsg{err: fmt.Errorf("load issue detail for PR generation: %w", err)}
+		}
 		for i := range detailSnapshot.Tasks {
 			if detailSnapshot.Tasks[i].ID.String() == msg.issueID {
 				if title := strings.TrimSpace(detailSnapshot.Tasks[i].Title); title != "" {
