@@ -3078,6 +3078,20 @@ type pendingCloseCleanupConfirmation struct {
 	targetStatus   domain.Status
 	bulkMode       string
 	delta          int
+	summaries      []closeCleanupTaskSummary
+}
+
+type closeCleanupTaskSummary struct {
+	taskID      string
+	hasWorktree bool
+	hasSession  bool
+	dirty       bool
+	conflicted  bool
+	conflicts   []string
+	ahead       int
+	behind      int
+	additions   int
+	deletions   int
 }
 
 type refreshTaskWorkspaceResultMsg struct {
@@ -4457,6 +4471,41 @@ func (m Model) confirmCloseCleanupCmd(pending pendingCloseCleanupConfirmation) t
 	return m.openOverlay(overlay.NewConfirmDialogExplicitYN(title, formatCloseCleanupConfirmPrompt(pending)))
 }
 
+func (m Model) closeCleanupSummaries(taskIDs []string) []closeCleanupTaskSummary {
+	if len(taskIDs) == 0 {
+		return nil
+	}
+	byID := make(map[string]domain.Task, len(m.tasks))
+	for _, task := range m.tasks {
+		byID[taskIDKey(task.ID.String())] = task
+	}
+	summaries := make([]closeCleanupTaskSummary, 0, len(taskIDs))
+	for _, taskID := range taskIDs {
+		task, ok := byID[taskIDKey(taskID)]
+		if !ok {
+			continue
+		}
+		summaries = append(summaries, closeCleanupSummary(task))
+	}
+	return summaries
+}
+
+func closeCleanupSummary(task domain.Task) closeCleanupTaskSummary {
+	summary := closeCleanupTaskSummary{
+		taskID:      task.ID.String(),
+		hasWorktree: task.HasWorktree,
+		hasSession:  task.HasTmuxSession || task.Session != nil,
+		dirty:       task.HasUncommittedChanges,
+		conflicted:  task.HasConflicts,
+		conflicts:   append([]string(nil), task.ConflictFiles...),
+		ahead:       task.GitAheadCount,
+		behind:      task.GitBehindCount,
+		additions:   task.GitAdditions,
+		deletions:   task.GitDeletions,
+	}
+	return summary
+}
+
 func formatCloseCleanupConfirmPrompt(pending pendingCloseCleanupConfirmation) string {
 	closeCount := pendingCloseCleanupCount(pending)
 	selectedCount := len(pending.taskIDs)
@@ -4489,12 +4538,101 @@ func formatCloseCleanupConfirmPrompt(pending pendingCloseCleanupConfirmation) st
 		fmt.Sprintf("Target: %s", target),
 		statusLine,
 		"",
+	}
+	lines = append(lines, formatCloseCleanupGitStateLines(pending.summaries, count, len(pending.taskIDs) > 0)...)
+	lines = append(lines,
+		"",
 		"This may merge into the closest ancestor worktree branch, stop active sessions, and remove issue worktrees before closing.",
 		"Close guards still block dirty, ahead, conflicted, unmerged, or unresolved child work.",
 		"",
 		"Proceed?",
-	}
+	)
 	return strings.Join(lines, "\n")
+}
+
+func formatCloseCleanupGitStateLines(summaries []closeCleanupTaskSummary, targetCount int, bulk bool) []string {
+	if len(summaries) == 0 {
+		return []string{
+			"Git state (current board projection):",
+			"- no projected worktree/git state for close target",
+		}
+	}
+	if !bulk && targetCount <= 1 && len(summaries) == 1 {
+		return []string{
+			"Git state (current board projection):",
+			fmt.Sprintf("- Worktree: %s", presentAbsent(summaries[0].hasWorktree)),
+			fmt.Sprintf("- Session: %s", presentAbsent(summaries[0].hasSession)),
+			fmt.Sprintf("- Changes: %s", closeChangeState(summaries[0])),
+			fmt.Sprintf("- Base diff (+/-): +%d/-%d", summaries[0].additions, summaries[0].deletions),
+			fmt.Sprintf("- Ahead/Behind: ↑%d/↓%d", summaries[0].ahead, summaries[0].behind),
+			fmt.Sprintf("- Conflicts: %s", closeConflictState(summaries[0])),
+		}
+	}
+
+	lines := []string{"Git state for closing targets (current board projection):"}
+	limit := min(len(summaries), 5)
+	for _, summary := range summaries[:limit] {
+		lines = append(lines, fmt.Sprintf("- %s: %s", summary.taskID, closeCleanupCompactState(summary)))
+	}
+	if len(summaries) > limit {
+		lines = append(lines, fmt.Sprintf("- ... %d more", len(summaries)-limit))
+	}
+	if targetCount > len(summaries) {
+		lines = append(lines, fmt.Sprintf("- %d target(s) without projected git state", targetCount-len(summaries)))
+	}
+	return lines
+}
+
+func closeCleanupCompactState(summary closeCleanupTaskSummary) string {
+	parts := make([]string, 0, 5)
+	if summary.hasWorktree {
+		parts = append(parts, "worktree")
+	} else {
+		parts = append(parts, "no worktree")
+	}
+	if summary.hasSession {
+		parts = append(parts, "session")
+	}
+	parts = append(parts, closeChangeState(summary))
+	if summary.ahead > 0 || summary.behind > 0 {
+		parts = append(parts, fmt.Sprintf("↑%d/↓%d", summary.ahead, summary.behind))
+	}
+	if summary.conflicted {
+		parts = append(parts, closeConflictState(summary))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func closeChangeState(summary closeCleanupTaskSummary) string {
+	if summary.dirty {
+		return fmt.Sprintf("dirty (+%d/-%d)", summary.additions, summary.deletions)
+	}
+	if summary.additions > 0 || summary.deletions > 0 {
+		return fmt.Sprintf("base diff (+%d/-%d)", summary.additions, summary.deletions)
+	}
+	return "clean"
+}
+
+func closeConflictState(summary closeCleanupTaskSummary) string {
+	if !summary.conflicted {
+		return "none"
+	}
+	if len(summary.conflicts) == 0 {
+		return "present"
+	}
+	limit := min(len(summary.conflicts), 3)
+	value := strings.Join(summary.conflicts[:limit], ", ")
+	if len(summary.conflicts) > limit {
+		value = fmt.Sprintf("%s, ... %d more", value, len(summary.conflicts)-limit)
+	}
+	return value
+}
+
+func presentAbsent(present bool) string {
+	if present {
+		return "present"
+	}
+	return "not detected"
 }
 
 func pendingCloseCleanupCount(pending pendingCloseCleanupConfirmation) int {

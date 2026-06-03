@@ -32,6 +32,7 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 				closeTaskIDs: append([]string(nil), closeTaskIDs...),
 				bulkMode:     "move",
 				delta:        1,
+				summaries:    m.closeCleanupSummaries(closeTaskIDs),
 			}
 			m.pendingClose = &pending
 			return m, m.confirmCloseCleanupCmd(pending)
@@ -57,6 +58,7 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 			closeTaskIDs: append([]string(nil), msg.SelectedIDs...),
 			bulkMode:     "set",
 			targetStatus: domain.StatusDone,
+			summaries:    m.closeCleanupSummaries(msg.SelectedIDs),
 		}
 		m.pendingClose = &pending
 		return m, m.confirmCloseCleanupCmd(pending)
@@ -590,6 +592,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 				taskID:         task.ID.String(),
 				previousStatus: previousStatus,
 				targetStatus:   newStatus,
+				summaries:      []closeCleanupTaskSummary{closeCleanupSummary(*task)},
 			}
 			m.pendingClose = &pending
 			return m, m.confirmCloseCleanupCmd(pending)
@@ -622,6 +625,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 				taskID:         task.ID.String(),
 				previousStatus: previousStatus,
 				targetStatus:   newStatus,
+				summaries:      []closeCleanupTaskSummary{closeCleanupSummary(*task)},
 			}
 			m.pendingClose = &pending
 			return m, m.confirmCloseCleanupCmd(pending)
@@ -647,6 +651,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 				taskID:         task.ID.String(),
 				previousStatus: previousStatus,
 				targetStatus:   newStatus,
+				summaries:      []closeCleanupTaskSummary{closeCleanupSummary(*task)},
 			}
 			m.pendingClose = &pending
 			return m, m.confirmCloseCleanupCmd(pending)

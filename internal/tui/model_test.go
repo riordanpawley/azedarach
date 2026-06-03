@@ -5309,6 +5309,14 @@ func TestCloseCleanupBulkMovePromptDescribesClosingSubset(t *testing.T) {
 		closeTaskIDs: []string{"az-3"},
 		bulkMode:     "move",
 		delta:        1,
+		summaries: []closeCleanupTaskSummary{{
+			taskID:      "az-3",
+			hasWorktree: true,
+			dirty:       true,
+			ahead:       2,
+			additions:   12,
+			deletions:   4,
+		}},
 	})
 
 	if !strings.Contains(prompt, "Target: 1 of 3 selected tasks") {
@@ -5316,6 +5324,71 @@ func TestCloseCleanupBulkMovePromptDescribesClosingSubset(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "Status: moving right; closing subset will close") {
 		t.Fatalf("prompt = %q, want mixed move-right status", prompt)
+	}
+	if !strings.Contains(prompt, "az-3: worktree, dirty (+12/-4), ↑2/↓0") {
+		t.Fatalf("prompt = %q, want projected git state for closing subset", prompt)
+	}
+}
+
+func TestCloseCleanupPromptShowsSingleTaskGitState(t *testing.T) {
+	prompt := formatCloseCleanupConfirmPrompt(pendingCloseCleanupConfirmation{
+		taskID:       "az-4",
+		targetStatus: domain.StatusDone,
+		summaries: []closeCleanupTaskSummary{{
+			taskID:      "az-4",
+			hasWorktree: true,
+			hasSession:  true,
+			dirty:       true,
+			conflicted:  true,
+			conflicts:   []string{"internal/tui/model.go", "README.md", "go.mod", "go.sum"},
+			ahead:       1,
+			behind:      2,
+			additions:   9,
+			deletions:   3,
+		}},
+	})
+
+	checks := []string{
+		"Git state (current board projection):",
+		"- Worktree: present",
+		"- Session: present",
+		"- Changes: dirty (+9/-3)",
+		"- Base diff (+/-): +9/-3",
+		"- Ahead/Behind: ↑1/↓2",
+		"- Conflicts: internal/tui/model.go, README.md, go.mod, ... 1 more",
+	}
+	for _, want := range checks {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt = %q, want %q", prompt, want)
+		}
+	}
+}
+
+func TestCloseCleanupSummariesUseProjectedTaskState(t *testing.T) {
+	m := Model{
+		tasks: []domain.Task{
+			{
+				ID:                    "az-1",
+				HasWorktree:           true,
+				HasTmuxSession:        true,
+				HasUncommittedChanges: true,
+				GitAheadCount:         3,
+				GitBehindCount:        1,
+				GitAdditions:          7,
+				GitDeletions:          2,
+			},
+			{ID: "az-2"},
+		},
+	}
+
+	summaries := m.closeCleanupSummaries([]string{"az-1", "missing"})
+	if len(summaries) != 1 {
+		t.Fatalf("summaries = %+v, want one projected task summary", summaries)
+	}
+	got := summaries[0]
+	if got.taskID != "az-1" || !got.hasWorktree || !got.hasSession || !got.dirty ||
+		got.ahead != 3 || got.behind != 1 || got.additions != 7 || got.deletions != 2 {
+		t.Fatalf("summary = %+v, want projected git/session state", got)
 	}
 }
 
