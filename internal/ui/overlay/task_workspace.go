@@ -37,7 +37,7 @@ func NewTaskWorkspaceOverlay(
 	viewportHeight int,
 ) *TaskWorkspaceOverlay {
 	detail := NewDetailPanel(task).WithRelatedTasks(relatedTasks).WithMutationProgress(mutation)
-	actions := NewActionMenu(task, task.Session).WithRelatedTasks(relatedTasks).WithoutStatusMoveActions()
+	actions := NewActionMenu(task, task.Session).WithRelatedTasks(relatedTasks).WithMutationProgress(mutation).WithoutStatusMoveActions()
 
 	overlayWidth := viewportWidth
 	overlayHeight := viewportHeight - 1
@@ -351,6 +351,7 @@ func (w *TaskWorkspaceOverlay) SyncTask(task domain.Task, relatedTasks []domain.
 	w.actions.task = task
 	w.actions.session = task.Session
 	w.actions.relatedTasks = append([]domain.Task(nil), relatedTasks...)
+	w.actions.mutation = cloneTaskMutationProgress(mutation)
 	w.actions.hideStatusMoveActions = true
 	w.actions.actions = w.actions.buildActions()
 	if len(w.actions.actions) == 0 {

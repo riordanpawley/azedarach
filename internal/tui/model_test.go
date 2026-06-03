@@ -5901,6 +5901,86 @@ func TestDaemonOperationProgressEventUpdatesRuntimeSignalsAndClearsOnDone(t *tes
 	}
 }
 
+func TestDaemonOperationFailureEventRemainsVisibleWithReason(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task", Status: domain.StatusInProgress, Priority: domain.P2, Type: domain.TypeTask},
+	}
+	body, err := json.Marshal(protocol.OperationEventBody{
+		Operation: protocol.OperationRecord{
+			OperationID: "op-close",
+			IssueID:     naming.IssueID("az-1"),
+			Kind:        "git.merge",
+			State:       protocol.OperationStateFailed,
+			Error: &protocol.OperationError{
+				Code:      protocol.ErrorCodeInternal,
+				Message:   "merge failed: dirty worktree",
+				Retryable: false,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal failure body: %v", err)
+	}
+
+	m.applyOperationProgressEvent(protocol.EventEnvelope{
+		Event: protocol.EventOperationFailed,
+		Body:  body,
+	})
+
+	signals := m.runtimeSignalsForBoard()
+	got := signals["az-1"]
+	if got.PendingOperationID != "op-close" || got.PendingOperationState != string(protocol.OperationStateFailed) {
+		t.Fatalf("pending signal = %+v, want failed op-close", got)
+	}
+	progress := m.pendingMutationForTask("az-1")
+	if progress == nil {
+		t.Fatal("expected failed operation in workspace mutation progress")
+	}
+	if progress.ProgressMessage != "merge failed: dirty worktree" {
+		t.Fatalf("progress message = %q, want failure reason", progress.ProgressMessage)
+	}
+}
+
+func TestApplyOperationRecordsLoadsQueuedAndRecentFailedOperations(t *testing.T) {
+	now := time.Now().UTC()
+	finished := now.Add(-time.Minute)
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-2", Title: "Task 2", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+
+	m.applyOperationRecords([]protocol.OperationRecord{
+		{
+			OperationID: "op-start",
+			IssueID:     naming.IssueID("az-1"),
+			Kind:        "session.start",
+			State:       protocol.OperationStateQueued,
+		},
+		{
+			OperationID: "op-failed",
+			IssueID:     naming.IssueID("az-2"),
+			Kind:        "git.merge",
+			State:       protocol.OperationStateFailed,
+			Error:       &protocol.OperationError{Code: protocol.ErrorCodeInternal, Message: "conflict while merging"},
+			FinishedAt:  &finished,
+		},
+	})
+
+	signals := m.runtimeSignalsForBoard()
+	if got := signals["az-1"]; got.PendingOperationID != "op-start" || got.PendingOperationState != string(protocol.OperationStateQueued) {
+		t.Fatalf("az-1 pending = %+v, want queued op-start", got)
+	}
+	if got := signals["az-2"]; got.PendingOperationID != "op-failed" || got.PendingOperationState != string(protocol.OperationStateFailed) {
+		t.Fatalf("az-2 pending = %+v, want failed op-failed", got)
+	}
+	progress := m.pendingMutationForTask("az-2")
+	if progress == nil || progress.ProgressMessage != "conflict while merging" {
+		t.Fatalf("az-2 progress = %+v, want failure message", progress)
+	}
+}
+
 func TestResolveOperationTaskIDCoversSessionGitAndWorktreeMutations(t *testing.T) {
 	m := newTestModel()
 	m.tasks = []domain.Task{

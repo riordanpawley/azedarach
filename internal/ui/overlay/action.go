@@ -23,6 +23,7 @@ type ActionMenu struct {
 	task                  domain.Task
 	relatedTasks          []domain.Task
 	session               *domain.Session
+	mutation              *TaskMutationProgress
 	actions               []Action
 	cursor                int
 	scrollOffset          int
@@ -51,6 +52,14 @@ func (m *ActionMenu) WithRelatedTasks(tasks []domain.Task) *ActionMenu {
 	return m
 }
 
+// WithMutationProgress attaches operation state so duplicate daemon-backed
+// mutations can be disabled while the current one is active.
+func (m *ActionMenu) WithMutationProgress(progress *TaskMutationProgress) *ActionMenu {
+	m.mutation = cloneTaskMutationProgress(progress)
+	m.actions = m.buildActions()
+	return m
+}
+
 // WithoutStatusMoveActions hides h/l status movement rows for surfaces where
 // those keys are reserved for local navigation.
 func (m *ActionMenu) WithoutStatusMoveActions() *ActionMenu {
@@ -62,6 +71,10 @@ func (m *ActionMenu) WithoutStatusMoveActions() *ActionMenu {
 // buildActions creates the action list based on task and session state
 func (m *ActionMenu) buildActions() []Action {
 	actions := []Action{}
+	activeMutation := m.hasActiveMutation()
+	if activeMutation {
+		actions = append(actions, Action{Key: "", Label: m.mutationActionLabel(), Enabled: false})
+	}
 
 	// Session actions
 	hasProjectedSession := m.session != nil && strings.TrimSpace(string(m.session.State)) != ""
@@ -73,9 +86,9 @@ func (m *ActionMenu) buildActions() []Action {
 		if hasTmuxSession {
 			actions = append(actions, Action{Key: "a", Label: "Attach to session", Enabled: true})
 		}
-		actions = append(actions, Action{Key: "s", Label: "Start session", Enabled: true})
-		actions = append(actions, Action{Key: "S", Label: "Start session + work", Enabled: true})
-		actions = append(actions, Action{Key: "!", Label: "Start session (yolo)", Enabled: true})
+		actions = append(actions, Action{Key: "s", Label: "Start session", Enabled: !activeMutation})
+		actions = append(actions, Action{Key: "S", Label: "Start session + work", Enabled: !activeMutation})
+		actions = append(actions, Action{Key: "!", Label: "Start session (yolo)", Enabled: !activeMutation})
 	} else {
 		// Attach action when a tmux session is known to exist.
 		actions = append(actions, Action{Key: "a", Label: "Attach to session", Enabled: true})
@@ -83,15 +96,15 @@ func (m *ActionMenu) buildActions() []Action {
 		// State-specific actions
 		switch m.session.State {
 		case domain.SessionIdle:
-			actions = append(actions, Action{Key: "s", Label: "Start session", Enabled: true})
+			actions = append(actions, Action{Key: "s", Label: "Start session", Enabled: !activeMutation})
 		case domain.SessionBusy, domain.SessionWaiting:
-			actions = append(actions, Action{Key: "p", Label: "Pause session", Enabled: true})
-			actions = append(actions, Action{Key: "x", Label: "Stop session", Enabled: true})
+			actions = append(actions, Action{Key: "p", Label: "Pause session", Enabled: !activeMutation})
+			actions = append(actions, Action{Key: "x", Label: "Stop session", Enabled: !activeMutation})
 		case domain.SessionPaused:
-			actions = append(actions, Action{Key: "R", Label: "Resume session", Enabled: true})
-			actions = append(actions, Action{Key: "x", Label: "Stop session", Enabled: true})
+			actions = append(actions, Action{Key: "R", Label: "Resume session", Enabled: !activeMutation})
+			actions = append(actions, Action{Key: "x", Label: "Stop session", Enabled: !activeMutation})
 		case domain.SessionDone, domain.SessionError:
-			actions = append(actions, Action{Key: "x", Label: "Stop session", Enabled: true})
+			actions = append(actions, Action{Key: "x", Label: "Stop session", Enabled: !activeMutation})
 		}
 	}
 
@@ -118,19 +131,19 @@ func (m *ActionMenu) buildActions() []Action {
 	hasIssueScopedGitTarget := hasWorktree || hasTmuxSession
 	hasIssueScopedCleanupTarget := strings.TrimSpace(m.task.ID.String()) != ""
 	actions = append(actions,
-		Action{Key: "u", Label: "Update from base branch", Enabled: hasIssueScopedGitTarget},
-		Action{Key: "m", Label: mergeLabel, Enabled: hasWorktree},
-		Action{Key: "b", Label: "Merge into...", Enabled: true},
+		Action{Key: "u", Label: "Update from base branch", Enabled: hasIssueScopedGitTarget && !activeMutation},
+		Action{Key: "m", Label: mergeLabel, Enabled: hasWorktree && !activeMutation},
+		Action{Key: "b", Label: "Merge into...", Enabled: !activeMutation},
 		Action{Key: "P", Label: "Create PR", Enabled: hasWorktree},
 		Action{Key: "O", Label: "Open PR", Enabled: hasWorktree},
-		Action{Key: "M", Label: "Abort merge", Enabled: hasWorktree},
+		Action{Key: "M", Label: "Abort merge", Enabled: hasWorktree && !activeMutation},
 		Action{Key: "H", Label: "Open Helix", Enabled: hasWorktree},
 		Action{Key: "i", Label: "Attachments", Enabled: true},
 		Action{Key: "r", Label: "Refresh issue", Enabled: true},
 		Action{Key: "V", Label: "Dev servers", Enabled: true},
 		Action{Key: "f", Label: "Show diff", Enabled: hasWorktree},
-		Action{Key: "w", Label: "Cleanup worktree", Enabled: hasIssueScopedCleanupTarget},
-		Action{Key: "W", Label: "Delete task + cleanup worktree", Enabled: hasIssueScopedCleanupTarget},
+		Action{Key: "w", Label: "Cleanup worktree", Enabled: hasIssueScopedCleanupTarget && !activeMutation},
+		Action{Key: "W", Label: "Delete task + cleanup worktree", Enabled: hasIssueScopedCleanupTarget && !activeMutation},
 	)
 
 	actions = append(actions, Action{Key: "i", Label: "Image attachments", Enabled: true})
@@ -140,25 +153,48 @@ func (m *ActionMenu) buildActions() []Action {
 
 	// Task actions (always available)
 	actions = append(actions,
-		Action{Key: "1", Label: "Set status: Open", Enabled: m.task.Status != domain.StatusOpen},
-		Action{Key: "2", Label: "Set status: In Progress", Enabled: m.task.Status != domain.StatusInProgress},
-		Action{Key: "3", Label: "Set status: In Review", Enabled: m.task.Status != domain.StatusInReview},
-		Action{Key: "4", Label: "Set status: Done", Enabled: m.task.Status != domain.StatusDone},
+		Action{Key: "1", Label: "Set status: Open", Enabled: m.task.Status != domain.StatusOpen && !activeMutation},
+		Action{Key: "2", Label: "Set status: In Progress", Enabled: m.task.Status != domain.StatusInProgress && !activeMutation},
+		Action{Key: "3", Label: "Set status: In Review", Enabled: m.task.Status != domain.StatusInReview && !activeMutation},
+		Action{Key: "4", Label: "Set status: Done", Enabled: m.task.Status != domain.StatusDone && !activeMutation},
 	)
 	if !m.hideStatusMoveActions {
 		actions = append(actions,
-			Action{Key: "h", Label: "Move left", Enabled: m.task.Status != domain.StatusOpen},
-			Action{Key: "l", Label: "Move right", Enabled: m.task.Status != domain.StatusDone},
+			Action{Key: "h", Label: "Move left", Enabled: m.task.Status != domain.StatusOpen && !activeMutation},
+			Action{Key: "l", Label: "Move right", Enabled: m.task.Status != domain.StatusDone && !activeMutation},
 		)
 	}
 	actions = append(actions,
 		Action{Key: "c", Label: "Create child task", Enabled: true},
-		Action{Key: "e", Label: "Edit task", Enabled: true},
-		Action{Key: "T", Label: "Tombstone task", Enabled: true},
-		Action{Key: "d", Label: "Delete task", Enabled: true},
+		Action{Key: "e", Label: "Edit task", Enabled: !activeMutation},
+		Action{Key: "T", Label: "Tombstone task", Enabled: !activeMutation},
+		Action{Key: "d", Label: "Delete task", Enabled: !activeMutation},
 	)
 
 	return actions
+}
+
+func (m *ActionMenu) hasActiveMutation() bool {
+	if m == nil || m.mutation == nil {
+		return false
+	}
+	switch strings.TrimSpace(strings.ToLower(m.mutation.State)) {
+	case "queued", "running", "preparing":
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *ActionMenu) mutationActionLabel() string {
+	state := "pending"
+	if m != nil && m.mutation != nil && strings.TrimSpace(m.mutation.State) != "" {
+		state = strings.TrimSpace(strings.ToLower(m.mutation.State))
+	}
+	if m == nil || m.mutation == nil || strings.TrimSpace(m.mutation.OperationID) == "" {
+		return fmt.Sprintf("Operation already %s", state)
+	}
+	return fmt.Sprintf("Operation already %s: %s", state, strings.TrimSpace(m.mutation.OperationID))
 }
 
 func (m *ActionMenu) hasEligibleUpstreamSource() bool {
