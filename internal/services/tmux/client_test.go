@@ -307,6 +307,20 @@ func TestClient_SendKeys(t *testing.T) {
 	}
 }
 
+func TestClient_PasteTextAndSubmit(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(runner, slog.Default())
+
+	err := client.PasteTextAndSubmit(context.Background(), "az-42", "line one\nline two")
+
+	require.NoError(t, err)
+	assert.Equal(t, [][]string{
+		{"set-buffer", "-b", "azedarach-message-az-42", "line one\nline two"},
+		{"paste-buffer", "-d", "-b", "azedarach-message-az-42", "-t", "az-42"},
+		{"send-keys", "-t", "az-42", "C-j"},
+	}, runner.commands)
+}
+
 func TestClient_CapturePane(t *testing.T) {
 	tests := []struct {
 		name       string

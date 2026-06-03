@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
@@ -162,6 +163,44 @@ func (c *Client) SendKeys(ctx context.Context, name string, keys string) error {
 
 	c.logger.Debug("keys sent to tmux session", "name", name)
 	return nil
+}
+
+// PasteTextAndSubmit pastes literal text into a pane, then submits it.
+//
+// This is intentionally separate from SendKeys. Session messages are often
+// multiline prompts for AI TUIs, and sending them as key arguments can let the
+// text payload consume or reinterpret the trailing submit key.
+func (c *Client) PasteTextAndSubmit(ctx context.Context, name string, text string) error {
+	c.logger.Debug("pasting text to tmux session", "name", name, "bytes", len(text))
+
+	bufferName := "azedarach-message-" + safeTmuxBufferSuffix(name)
+	if _, err := c.runner.Run(ctx, "set-buffer", "-b", bufferName, text); err != nil {
+		return &domain.TmuxError{Op: "set-buffer", Session: name, Err: err}
+	}
+	if _, err := c.runner.Run(ctx, "paste-buffer", "-d", "-b", bufferName, "-t", name); err != nil {
+		return &domain.TmuxError{Op: "paste-buffer", Session: name, Err: err}
+	}
+	if _, err := c.runner.Run(ctx, "send-keys", "-t", name, "C-j"); err != nil {
+		return &domain.TmuxError{Op: "send-keys", Session: name, Err: err}
+	}
+
+	c.logger.Debug("text pasted and submitted to tmux session", "name", name)
+	return nil
+}
+
+func safeTmuxBufferSuffix(value string) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(value) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte('_')
+	}
+	if b.Len() == 0 {
+		return "session"
+	}
+	return b.String()
 }
 
 // SendKey sends a single tmux key token without appending Enter.
