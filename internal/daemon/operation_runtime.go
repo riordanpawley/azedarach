@@ -263,6 +263,11 @@ func (r *operationRuntime) executeLegacy(ctx context.Context, req protocol.Reque
 
 	terminal, waitErr := r.waitForTerminal(ctx, submitResult.Record.ID)
 	if waitErr != nil {
+		if errors.Is(waitErr, context.DeadlineExceeded) || errors.Is(waitErr, context.Canceled) {
+			if record, getErr := r.manager.Get(context.Background(), submitResult.Record.ID); getErr == nil {
+				return r.wrapLegacyPending(req, record), nil
+			}
+		}
 		return r.errorResponse(req, mapOperationSubmitErrorCode(waitErr), waitErr.Error()), nil
 	}
 
@@ -719,6 +724,25 @@ func (r *operationRuntime) wrapLegacySuccess(req protocol.RequestEnvelope, recor
 	})
 	if err != nil {
 		return r.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal operation envelope: %v", err))
+	}
+	resp.Body = body
+	return resp
+}
+
+func (r *operationRuntime) wrapLegacyPending(req protocol.RequestEnvelope, record daemonops.Record) protocol.ResponseEnvelope {
+	resp := r.successResponse(req)
+	body, err := json.Marshal(operationResultEnvelope{
+		OperationID: record.ID,
+		State:       string(record.State),
+	})
+	if err != nil {
+		resp.Error = &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeInternal,
+			Message:   fmt.Sprintf("marshal pending operation response: %v", err),
+			Retryable: false,
+		}
+		resp.OK = false
+		return resp
 	}
 	resp.Body = body
 	return resp
