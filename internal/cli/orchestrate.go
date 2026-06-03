@@ -690,6 +690,9 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 			})
 		})
 		if err != nil {
+			if shouldContinueOrchestrateWatchAfterError(err) {
+				continue
+			}
 			return err
 		}
 		if len(events) == 0 {
@@ -703,6 +706,9 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 			return deps.DaemonClient.ListTasks(ctx)
 		})
 		if err != nil {
+			if shouldContinueOrchestrateWatchAfterError(err) {
+				continue
+			}
 			return fmt.Errorf("list tasks: %w", err)
 		}
 		ready, err := computeRunnableLeaves(opts.RootIssueID, tasks)
@@ -733,6 +739,17 @@ func watchDaemonCommand[T any](deps *Dependencies, call func(context.Context) (T
 		return value, err
 	}
 	return commandWithDaemonAutostartRetry(context.Background(), deps, call)
+}
+
+func shouldContinueOrchestrateWatchAfterError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "short_frame") && strings.Contains(message, "i/o timeout") {
+		return true
+	}
+	return strings.Contains(message, "context deadline exceeded")
 }
 
 func OrchestrateCompleteCheckCommand(deps *Dependencies, opts OrchestrateCompleteCheckOptions) error {

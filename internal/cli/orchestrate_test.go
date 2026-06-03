@@ -113,6 +113,37 @@ func TestWatchDaemonCommandRestartsAfterTransientSocketLoss(t *testing.T) {
 	}
 }
 
+func TestShouldContinueOrchestrateWatchAfterTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "short frame socket timeout",
+			err:  errors.New("daemon command transport: short_frame: read unix ->/tmp/daemon.sock: i/o timeout"),
+			want: true,
+		},
+		{
+			name: "context deadline",
+			err:  context.DeadlineExceeded,
+			want: true,
+		},
+		{
+			name: "ordinary failure",
+			err:  errors.New("list tasks: invalid response"),
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldContinueOrchestrateWatchAfterError(tt.err); got != tt.want {
+				t.Fatalf("shouldContinueOrchestrateWatchAfterError() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 	root := naming.IssueID("az-1")
 	busy := naming.IssueID("az-2")

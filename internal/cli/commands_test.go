@@ -267,7 +267,7 @@ func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
-			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
 				switch req.Command {
 				case daemonclient.CommandTaskList:
@@ -380,7 +380,7 @@ func TestStartCommandPrintsProgressStatus(t *testing.T) {
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
-			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
 				case daemonclient.CommandTaskList:
 					return protocol.ResponseEnvelope{
@@ -5840,6 +5840,7 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testing.T) {
 	var commands []string
 	var removeWorktreeForce bool
+	var removeWorktreeDeadline time.Time
 	worktreeListBody, err := json.Marshal(struct {
 		ProjectID string `json:"project_id"`
 		Worktrees []struct {
@@ -5876,7 +5877,7 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
-			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
 				switch req.Command {
 				case daemonclient.CommandWorktreeList:
@@ -5928,6 +5929,11 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 				case commandSessionStop:
 					return responseWithOutput(req, "Session not found in tmux: az-9\n✓ Session marked stopped: az-9\n"), nil
 				case daemonclient.CommandWorktreeRemove:
+					deadline, ok := ctx.Deadline()
+					if !ok {
+						t.Fatal("worktree remove context has no deadline")
+					}
+					removeWorktreeDeadline = deadline
 					var body struct {
 						Force bool `json:"force"`
 					}
@@ -5990,6 +5996,9 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 	}
 	if !removeWorktreeForce {
 		t.Fatal("worktree remove force = false, want true")
+	}
+	if remaining := time.Until(removeWorktreeDeadline); remaining < issueCloseCleanupTimeout-10*time.Second {
+		t.Fatalf("worktree remove timeout budget = %s, want near %s", remaining, issueCloseCleanupTimeout)
 	}
 	if !strings.Contains(output, "Closed issue: az-9") || !strings.Contains(output, "- Integration requested") || !strings.Contains(output, "- Cleanup performed") {
 		t.Fatalf("output = %q", output)

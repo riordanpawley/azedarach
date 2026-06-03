@@ -54,6 +54,7 @@ const (
 	sessionStartCommandTimeout  = 5 * time.Minute
 	branchMergeToBaseTimeout    = 2 * time.Minute
 	daemonCommandTimeout        = 15 * time.Second
+	issueCloseCleanupTimeout    = 2 * time.Minute
 	issueCreateCommandTimeout   = 10 * time.Second
 	issueCreateAutostartTimeout = 12 * time.Second
 	exitCodeHardFailure         = 1
@@ -3594,7 +3595,7 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), issueCloseCleanupTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
