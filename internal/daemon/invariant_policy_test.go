@@ -11,6 +11,7 @@ func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 		daemonInvariantSessionStopTargets:     daemonInvariantSourceTmux,
 		daemonInvariantSessionReconcile:       daemonInvariantSourceHybrid,
 		daemonInvariantTaskListFreshness:      daemonInvariantSourceProjection,
+		daemonInvariantTaskClosePreflight:     daemonInvariantSourceHybrid,
 		daemonInvariantRuntimeKnownProjectIDs: daemonInvariantSourceProjection,
 	}
 	for id, want := range expected {

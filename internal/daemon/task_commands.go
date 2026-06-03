@@ -80,6 +80,24 @@ type taskListSnapshotLoadResult struct {
 	Tasks         []domain.Task
 }
 
+type taskClosePreflightOptions struct {
+	AllowTargetSession  bool `json:"allow_target_session,omitempty"`
+	AllowTargetWorktree bool `json:"allow_target_worktree,omitempty"`
+	ForceWorktree       bool `json:"force_worktree,omitempty"`
+	IgnoreAhead         bool `json:"ignore_ahead,omitempty"`
+}
+
+type taskClosePreflightRequest struct {
+	TaskID string `json:"task_id"`
+	taskClosePreflightOptions
+}
+
+type taskClosePreflightResult struct {
+	Task     domain.Task   `json:"task"`
+	Worktree string        `json:"worktree,omitempty"`
+	Status   git.GitStatus `json:"status,omitempty"`
+}
+
 func (d *Daemon) sourceForTaskInvariant(invariant daemonInvariantID) daemonInvariantSource {
 	return sourceForInvariant(invariant)
 }
@@ -1020,21 +1038,41 @@ func (d *Daemon) updateTaskStatusWithClosePreflight(ctx context.Context, project
 	}
 	taskID = strings.TrimSpace(taskID)
 	if status == domain.StatusDone {
-		if err := d.validateTaskClosePreflight(ctx, projectID, taskID, req); err != nil {
+		if _, err := d.validateTaskClosePreflight(ctx, projectID, taskID, taskClosePreflightOptions{}, req); err != nil {
 			return domain.Task{}, err
 		}
 	}
 	return issueClient.UpdateWithRuntime(ctx, projectID, taskID, status)
 }
 
-func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, taskID string, req protocol.RequestEnvelope) error {
+func (d *Daemon) handleTaskClosePreflight(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
+	var cmd taskClosePreflightRequest
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	result, err := d.validateTaskClosePreflight(ctx, projectID, cmd.TaskID, cmd.taskClosePreflightOptions, req)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	body, err := json.Marshal(result)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	resp := d.successResponse(req)
+	resp.Body = body
+	resp.Revision = d.currentRevision(projectID)
+	return resp, nil
+}
+
+func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, taskID string, opts taskClosePreflightOptions, req protocol.RequestEnvelope) (taskClosePreflightResult, error) {
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
-		return fmt.Errorf("issue store unavailable")
+		return taskClosePreflightResult{}, fmt.Errorf("issue store unavailable")
 	}
 	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
 	if err != nil {
-		return fmt.Errorf("inspect runtime attachments before closing %s: %w", taskID, err)
+		return taskClosePreflightResult{}, fmt.Errorf("inspect runtime attachments before closing %s: %w", taskID, err)
 	}
 	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
 
@@ -1048,20 +1086,42 @@ func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, task
 		}
 	}
 	if !found {
-		return fmt.Errorf("issue not found: %s", taskID)
+		return taskClosePreflightResult{}, fmt.Errorf("issue not found: %s", taskID)
 	}
 
 	reasons := make([]string, 0, 3)
-	reasons = append(reasons, daemonCloseGuardRuntimeBlockers(task)...)
+	reasons = append(reasons, daemonCloseGuardRuntimeBlockers(task, opts)...)
 	reasons = append(reasons, daemonCloseGuardChildBlockers(task.ID, tasks)...)
 	if len(reasons) > 0 {
 		repairs, repairErr := d.reopenClosedCloseGuardBlockers(ctx, issueClient, projectID, req, task, tasks, reasons)
 		if repairErr != nil {
-			return fmt.Errorf("%s. Failed to move closed blockers back for cleanup: %w", daemonCloseGuardFailureMessage(taskID, reasons, repairs), repairErr)
+			return taskClosePreflightResult{}, fmt.Errorf("%s. Failed to move closed blockers back for cleanup: %w", daemonCloseGuardFailureMessage(taskID, reasons, repairs), repairErr)
 		}
-		return fmt.Errorf("%s", daemonCloseGuardFailureMessage(taskID, reasons, repairs))
+		return taskClosePreflightResult{}, fmt.Errorf("%s", daemonCloseGuardFailureMessage(taskID, reasons, repairs))
 	}
-	return nil
+
+	worktreePath, err := d.resolveTaskCloseWorktreePath(ctx, projectID, taskID, task, opts)
+	if err != nil {
+		return taskClosePreflightResult{}, err
+	}
+	if strings.TrimSpace(worktreePath) == "" {
+		return taskClosePreflightResult{Task: task}, nil
+	}
+	if opts.ForceWorktree {
+		return taskClosePreflightResult{Task: task, Worktree: worktreePath}, nil
+	}
+	status, err := d.refreshTaskCloseGitStatus(ctx, projectID, worktreePath)
+	if err != nil {
+		return taskClosePreflightResult{}, fmt.Errorf("inspect git status before closing %s: %w", taskID, err)
+	}
+	if reasons := daemonCloseGuardGitBlockers(*status, opts); len(reasons) > 0 {
+		repairs, repairErr := d.reopenClosedCloseGuardBlockers(ctx, issueClient, projectID, req, task, tasks, reasons)
+		if repairErr != nil {
+			return taskClosePreflightResult{}, fmt.Errorf("%s. Failed to move closed blockers back for cleanup: %w", daemonCloseGuardFailureMessage(taskID, reasons, repairs), repairErr)
+		}
+		return taskClosePreflightResult{}, fmt.Errorf("%s", daemonCloseGuardFailureMessage(taskID, reasons, repairs))
+	}
+	return taskClosePreflightResult{Task: task, Worktree: worktreePath, Status: *status}, nil
 }
 
 type daemonCloseGuardStatusRepair struct {
@@ -1147,10 +1207,14 @@ func daemonCloseGuardAppendRepairSummary(message string, repairs []daemonCloseGu
 }
 
 func daemonCloseGuardRecoveryHint(taskID string, reasons []string) string {
+	hasGitState := false
 	hasRuntime := false
 	hasChildren := false
 	for _, reason := range reasons {
-		if strings.HasPrefix(reason, "issue still has a ") {
+		if strings.Contains(reason, "local changes") || strings.Contains(reason, "conflicts") || strings.Contains(reason, "ahead") {
+			hasGitState = true
+		}
+		if strings.HasPrefix(reason, "issue still has a ") || strings.HasPrefix(reason, "worktree is projected") {
 			hasRuntime = true
 		}
 		if strings.Contains(reason, "child issues") {
@@ -1158,7 +1222,10 @@ func daemonCloseGuardRecoveryHint(taskID string, reasons []string) string {
 		}
 	}
 
-	steps := make([]string, 0, 2)
+	steps := make([]string, 0, 3)
+	if hasGitState {
+		steps = append(steps, "commit, discard, or merge the worktree changes first")
+	}
 	if hasChildren {
 		steps = append(steps, "close or clean up the listed child issues first")
 	}
@@ -1171,15 +1238,100 @@ func daemonCloseGuardRecoveryHint(taskID string, reasons []string) string {
 	return strings.Join(steps, "; ") + ", then retry"
 }
 
-func daemonCloseGuardRuntimeBlockers(task domain.Task) []string {
+func daemonCloseGuardRuntimeBlockers(task domain.Task, opts taskClosePreflightOptions) []string {
 	reasons := make([]string, 0, 2)
-	if daemonCloseGuardTaskHasSession(task) {
+	if !opts.AllowTargetSession && daemonCloseGuardTaskHasSession(task) {
 		reasons = append(reasons, "issue still has a session")
 	}
-	if daemonCloseGuardTaskHasWorktree(task) {
+	if !opts.AllowTargetWorktree && daemonCloseGuardTaskHasWorktree(task) {
 		reasons = append(reasons, "issue still has a worktree")
 	}
 	return reasons
+}
+
+func (d *Daemon) resolveTaskCloseWorktreePath(ctx context.Context, projectID, taskID string, task domain.Task, opts taskClosePreflightOptions) (string, error) {
+	worktreePath := daemonCloseGuardTaskWorktree(task)
+	if worktreePath != "" {
+		return worktreePath, nil
+	}
+	if !task.HasWorktree {
+		return "", nil
+	}
+	if opts.ForceWorktree {
+		return "", nil
+	}
+	manager := d.worktreeManagerForProject(projectID)
+	if manager == nil {
+		return "", fmt.Errorf("inspect worktree before closing %s: worktree manager unavailable", taskID)
+	}
+	worktree, err := manager.Get(ctx, taskID)
+	if err != nil {
+		if errors.Is(err, git.ErrWorktreeNotFound) {
+			return "", fmt.Errorf("cannot close issue %s: worktree is projected but path is unavailable. Next: run `az issue close --id %s --force-worktree` after confirming the worktree is gone, then retry", taskID, taskID)
+		}
+		return "", fmt.Errorf("inspect worktree before closing %s: %w", taskID, err)
+	}
+	return strings.TrimSpace(worktree.Path), nil
+}
+
+func (d *Daemon) refreshTaskCloseGitStatus(ctx context.Context, projectID, worktree string) (*git.GitStatus, error) {
+	if d.gitStatusAdapter == nil {
+		return nil, fmt.Errorf("git status service unavailable")
+	}
+	status, err := d.gitStatusAdapter.RefreshStatus(ctx, projectID, worktree)
+	if err != nil {
+		return nil, err
+	}
+	if status == nil {
+		return &git.GitStatus{}, nil
+	}
+	return status, nil
+}
+
+func daemonCloseGuardGitBlockers(status git.GitStatus, opts taskClosePreflightOptions) []string {
+	dirty := daemonCloseGuardDirtyFiles(status)
+	reasons := make([]string, 0, 3)
+	if len(dirty) > 0 {
+		reasons = append(reasons, "worktree has local changes: "+strings.Join(dirty, ", "))
+	}
+	if status.HasConflicts || len(status.Conflicted) > 0 {
+		conflicts := append([]string(nil), status.Conflicted...)
+		if len(conflicts) == 0 {
+			reasons = append(reasons, "worktree has conflicts")
+		} else {
+			reasons = append(reasons, "worktree has conflicts: "+strings.Join(conflicts, ", "))
+		}
+	}
+	if status.GitAheadCount > 0 && !opts.IgnoreAhead {
+		reasons = append(reasons, fmt.Sprintf("branch is ahead by %d commit(s)", status.GitAheadCount))
+	}
+	return reasons
+}
+
+func daemonCloseGuardDirtyFiles(status git.GitStatus) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Untracked)+len(status.Conflicted))
+	appendUnique := func(files []string) {
+		for _, file := range files {
+			file = strings.TrimSpace(file)
+			if file == "" {
+				continue
+			}
+			if _, ok := seen[file]; ok {
+				continue
+			}
+			seen[file] = struct{}{}
+			out = append(out, file)
+		}
+	}
+	appendUnique(status.Staged)
+	appendUnique(status.Modified)
+	appendUnique(status.Added)
+	appendUnique(status.Deleted)
+	appendUnique(status.Untracked)
+	appendUnique(status.Conflicted)
+	sort.Strings(out)
+	return out
 }
 
 func daemonCloseGuardChildBlockers(parentID naming.IssueID, tasks []domain.Task) []string {
@@ -1278,7 +1430,14 @@ func daemonCloseGuardTaskHasWorktree(task domain.Task) bool {
 	if task.HasWorktree {
 		return true
 	}
-	return task.Session != nil && strings.TrimSpace(task.Session.Worktree) != ""
+	return daemonCloseGuardTaskWorktree(task) != ""
+}
+
+func daemonCloseGuardTaskWorktree(task domain.Task) string {
+	if task.Session == nil {
+		return ""
+	}
+	return strings.TrimSpace(task.Session.Worktree)
 }
 
 func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

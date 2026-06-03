@@ -5976,6 +5976,22 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 							Message: "merge complete",
 						},
 					}), nil
+				case daemonclient.CommandTaskClosePreflight:
+					return responseWithJSON(req, map[string]any{
+						"task": map[string]any{
+							"id":               "az-9",
+							"title":            "Finish flow",
+							"status":           "in_review",
+							"has_tmux_session": true,
+							"has_worktree":     true,
+							"session": map[string]any{
+								"issue_id": "az-9",
+								"worktree": "/tmp/az-9",
+							},
+						},
+						"worktree": "/tmp/az-9",
+						"status":   map[string]any{},
+					}), nil
 				case commandSessionStop:
 					return responseWithOutput(req, "Session not found in tmux: az-9\n✓ Session marked stopped: az-9\n"), nil
 				case daemonclient.CommandWorktreeRemove:
@@ -6036,7 +6052,7 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 		daemonclient.CommandGitFetch,
 		daemonclient.CommandGitCheckout,
 		daemonclient.CommandGitMerge,
-		daemonclient.CommandTaskList,
+		daemonclient.CommandTaskClosePreflight,
 		commandSessionStop,
 		daemonclient.CommandWorktreeRemove,
 		daemonclient.CommandTaskUpdateStatus,
@@ -7039,6 +7055,22 @@ func TestIssueUpdateCommandConfirmedClosedCleansBeforeStatus(t *testing.T) {
 							Message: "merge complete",
 						},
 					}), nil
+				case daemonclient.CommandTaskClosePreflight:
+					return responseWithJSON(req, map[string]any{
+						"task": map[string]any{
+							"id":               "az-1",
+							"title":            "Ready",
+							"status":           "in_review",
+							"has_tmux_session": true,
+							"has_worktree":     true,
+							"session": map[string]any{
+								"issue_id": "az-1",
+								"worktree": "/tmp/az-1",
+							},
+						},
+						"worktree": "/tmp/az-1",
+						"status":   map[string]any{},
+					}), nil
 				case commandSessionStop:
 					return responseWithOutput(req, "stopped\n"), nil
 				case daemonclient.CommandWorktreeRemove:
@@ -7086,7 +7118,7 @@ func TestIssueUpdateCommandConfirmedClosedCleansBeforeStatus(t *testing.T) {
 		daemonclient.CommandGitFetch,
 		daemonclient.CommandGitCheckout,
 		daemonclient.CommandGitMerge,
-		daemonclient.CommandTaskList,
+		daemonclient.CommandTaskClosePreflight,
 		commandSessionStop,
 		daemonclient.CommandWorktreeRemove,
 		daemonclient.CommandTaskUpdateStatus,

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -1116,6 +1117,100 @@ func TestTaskUpdateStatusClosePreflightBlocksRawRuntimeAttachments(t *testing.T)
 	}
 	if !resp.OK {
 		t.Fatalf("task.update_status skip response = %+v", resp.Error)
+	}
+}
+
+func TestTaskClosePreflightBlocksDirtyWorktreeInDaemonPolicy(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-guard-dirty"
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Dirty preflight",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	worktreePath := filepath.Join(t.TempDir(), "repo-"+taskID)
+	branchName := "riordan/" + taskID + "/work"
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      worktreePath,
+		Branch:    branchName,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "worktree list --porcelain"):
+			return fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", worktreePath, branchName), nil
+		case strings.Contains(joined, "status --porcelain"):
+			return " M main.go\n", nil
+		default:
+			return "", nil
+		}
+	}}
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: logger, BaseBranch: "main"},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(runner, repoDir, logger),
+		},
+		gitStatusAdapter: &gitServiceAdapter{
+			client:            git.NewClient(runner, logger),
+			runtimeStateStore: runtimeStore,
+			logger:            logger,
+			baseBranch:        "main",
+		},
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"task_id":               taskID,
+		"allow_target_worktree": true,
+	})
+	if err != nil {
+		t.Fatalf("marshal close preflight request: %v", err)
+	}
+	resp, err := d.handleTaskClosePreflight(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-guard-dirty",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.close_preflight",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClosePreflight error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "worktree has local changes: main.go") || !strings.Contains(resp.Error.Message, "commit, discard, or merge the worktree changes first") {
+		t.Fatalf("task.close_preflight response = %+v, want dirty worktree guard", resp)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get guarded issue after failed preflight: %v", err)
+	}
+	if task.Status != domain.StatusInReview {
+		t.Fatalf("guarded issue status = %s, want %s", task.Status, domain.StatusInReview)
 	}
 }
 

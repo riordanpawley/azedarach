@@ -980,6 +980,22 @@ func orchestrateIntegrateApplyDeps(t *testing.T, failStep string) (*Dependencies
 						Branch:   "user/az-2/worker",
 						Result:   gitservice.MergeResult{Success: true},
 					}), nil
+				case daemonclient.CommandTaskClosePreflight:
+					return responseWithJSON(req, map[string]any{
+						"task": map[string]any{
+							"id":               child.String(),
+							"title":            "Worker",
+							"status":           "closed",
+							"has_tmux_session": true,
+							"has_worktree":     true,
+							"session": map[string]any{
+								"issue_id": child.String(),
+								"worktree": "/repo-az-2",
+							},
+						},
+						"worktree": "/repo-az-2",
+						"status":   map[string]any{},
+					}), nil
 				case commandSessionStop:
 					return responseWithOutput(req, "stopped\n"), nil
 				case daemonclient.CommandWorktreeRemove:

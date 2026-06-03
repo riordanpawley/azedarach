@@ -45,6 +45,32 @@ func responseWithJSON(t *testing.T, req protocol.RequestEnvelope, body any) prot
 	}
 }
 
+func responseWithCommandError(req protocol.RequestEnvelope, message string) protocol.ResponseEnvelope {
+	return protocol.ResponseEnvelope{
+		ProtocolVersion: req.ProtocolVersion,
+		RequestID:       req.RequestID,
+		Kind:            protocol.EnvelopeKindResponse,
+		OK:              false,
+		Error: &protocol.ErrorEnvelope{
+			Code:    protocol.ErrorCodeInternal,
+			Message: message,
+		},
+	}
+}
+
+func closePreflightResponse(t *testing.T, req protocol.RequestEnvelope, task domain.Task, status GitStatus) protocol.ResponseEnvelope {
+	t.Helper()
+	worktree := ""
+	if task.Session != nil {
+		worktree = strings.TrimSpace(task.Session.Worktree)
+	}
+	return responseWithJSON(t, req, taskClosePreflightResponse{
+		Task:     task,
+		Worktree: worktree,
+		Status:   status,
+	})
+}
+
 func (t *taskRecordingTransport) Handshake(_ context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
 	t.handshakeCalls++
 	if t.handshakeFn != nil {
@@ -610,25 +636,15 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				assertTaskProjectID(t, req, wantProjectID)
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case CommandTaskList:
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						OK:              true,
-						Body: mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 3, []domain.Task{
-							{
-								ID:             "az-3",
-								Title:          "Close me",
-								Status:         domain.StatusInReview,
-								Session:        &domain.Session{IssueID: "az-3", Worktree: "/tmp/az-3"},
-								HasTmuxSession: true,
-								HasWorktree:    true,
-							},
-						}),
-					}, nil
-				case CommandGitStatus:
-					return responseWithJSON(t, req, gitStatusBody{Status: GitStatus{HasChanges: false}}), nil
+				case CommandTaskClosePreflight:
+					return closePreflightResponse(t, req, domain.Task{
+						ID:             "az-3",
+						Title:          "Close me",
+						Status:         domain.StatusInReview,
+						Session:        &domain.Session{IssueID: "az-3", Worktree: "/tmp/az-3"},
+						HasTmuxSession: true,
+						HasWorktree:    true,
+					}, GitStatus{HasChanges: false}), nil
 				case CommandSessionStop, CommandWorktreeRemove, CommandTaskUpdateStatus:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -648,7 +664,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("UpdateTaskStatusWithOptions error: %v", err)
 		}
-		wantCommands := []string{CommandTaskList, CommandGitStatus, CommandSessionStop, CommandWorktreeRemove, CommandTaskUpdateStatus}
+		wantCommands := []string{CommandTaskClosePreflight, CommandSessionStop, CommandWorktreeRemove, CommandTaskUpdateStatus}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
 		}
@@ -686,25 +702,15 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				assertTaskProjectID(t, req, wantProjectID)
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case CommandTaskList:
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						OK:              true,
-						Body: mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 3, []domain.Task{
-							{
-								ID:             "az-3",
-								Title:          "Close me",
-								Status:         domain.StatusInReview,
-								Session:        &domain.Session{IssueID: "az-3", Worktree: "/tmp/az-3"},
-								HasTmuxSession: true,
-								HasWorktree:    true,
-							},
-						}),
-					}, nil
-				case CommandGitStatus:
-					return responseWithJSON(t, req, gitStatusBody{Status: GitStatus{HasChanges: false}}), nil
+				case CommandTaskClosePreflight:
+					return closePreflightResponse(t, req, domain.Task{
+						ID:             "az-3",
+						Title:          "Close me",
+						Status:         domain.StatusInReview,
+						Session:        &domain.Session{IssueID: "az-3", Worktree: "/tmp/az-3"},
+						HasTmuxSession: true,
+						HasWorktree:    true,
+					}, GitStatus{HasChanges: false}), nil
 				case CommandSessionStop:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -726,7 +732,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "remove worktree before closing az-3") {
 			t.Fatalf("UpdateTaskStatusWithOptions error = %v, want worktree cleanup failure", err)
 		}
-		wantCommands := []string{CommandTaskList, CommandGitStatus, CommandSessionStop, CommandWorktreeRemove}
+		wantCommands := []string{CommandTaskClosePreflight, CommandSessionStop, CommandWorktreeRemove}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
 		}
@@ -734,39 +740,24 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 
 	t.Run("status update recovers when worktree remove ack times out after operation completes", func(t *testing.T) {
 		commands := []string{}
-		taskListCalls := 0
+		preflightCalls := 0
 		operationID := naming.OperationID("op-remove")
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				assertTaskProjectID(t, req, wantProjectID)
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case CommandTaskList:
-					taskListCalls++
+				case CommandTaskClosePreflight:
+					preflightCalls++
 					task := domain.Task{
 						ID:     "az-3",
 						Title:  "Close me",
 						Status: domain.StatusInReview,
 					}
-					if taskListCalls == 1 {
+					if preflightCalls == 1 {
 						task.HasWorktree = true
 					}
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						OK:              true,
-						Body:            mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, uint64(taskListCalls), []domain.Task{task}),
-					}, nil
-				case CommandWorktreeList:
-					return responseWithJSON(t, req, worktreeListBody{
-						ProjectID: naming.ProjectID(wantProjectID),
-						Worktrees: []worktreePayload{{
-							Path:    "/tmp/az-3",
-							Branch:  "riordan/az-3/close-timeout",
-							IssueID: "az-3",
-						}},
-					}), nil
+					return closePreflightResponse(t, req, task, GitStatus{}), nil
 				case CommandWorktreeRemove:
 					return protocol.ResponseEnvelope{}, errors.New("short_frame: read unix ->/tmp/daemon.sock: i/o timeout")
 				case protocol.CommandOperationList:
@@ -802,7 +793,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("UpdateTaskStatusWithOptions error: %v", err)
 		}
-		wantCommands := []string{CommandTaskList, CommandWorktreeList, CommandWorktreeRemove, protocol.CommandOperationList, CommandTaskList, CommandTaskUpdateStatus}
+		wantCommands := []string{CommandTaskClosePreflight, CommandWorktreeRemove, protocol.CommandOperationList, CommandTaskClosePreflight, CommandTaskUpdateStatus}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
 		}
@@ -839,25 +830,8 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 						assertTaskProjectID(t, req, wantProjectID)
 						commands = append(commands, req.Command)
 						switch req.Command {
-						case CommandTaskList:
-							return protocol.ResponseEnvelope{
-								ProtocolVersion: req.ProtocolVersion,
-								RequestID:       req.RequestID,
-								Kind:            protocol.EnvelopeKindResponse,
-								OK:              true,
-								Body: mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 3, []domain.Task{
-									{
-										ID:             "az-3",
-										Title:          "Close me",
-										Status:         domain.StatusInReview,
-										Session:        &domain.Session{IssueID: "az-3", Worktree: "/tmp/az-3"},
-										HasTmuxSession: true,
-										HasWorktree:    true,
-									},
-								}),
-							}, nil
-						case CommandGitStatus:
-							return responseWithJSON(t, req, gitStatusBody{Status: tt.status}), nil
+						case CommandTaskClosePreflight:
+							return responseWithCommandError(req, fmt.Sprintf("cannot close issue az-3: %s. Next: commit, discard, or merge the worktree changes first, then retry", tt.wantErr)), nil
 						default:
 							t.Fatalf("unexpected command after close guard failure = %q", req.Command)
 							return protocol.ResponseEnvelope{}, nil
@@ -870,7 +844,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) || !strings.Contains(err.Error(), "Next:") || !strings.Contains(err.Error(), "commit, discard, or merge the worktree changes first") {
 					t.Fatalf("UpdateTaskStatusWithOptions error = %v, want %q and recovery hint", err, tt.wantErr)
 				}
-				wantCommands := []string{CommandTaskList, CommandGitStatus}
+				wantCommands := []string{CommandTaskClosePreflight}
 				if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 					t.Fatalf("commands = %v, want %v", commands, wantCommands)
 				}
@@ -885,25 +859,15 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				assertTaskProjectID(t, req, wantProjectID)
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case CommandTaskList:
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						OK:              true,
-						Body: mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 3, []domain.Task{
-							{
-								ID:             "az-3",
-								Title:          "Close me",
-								Status:         domain.StatusInReview,
-								Session:        &domain.Session{IssueID: "az-3", Worktree: "/tmp/az-3"},
-								HasTmuxSession: true,
-								HasWorktree:    true,
-							},
-						}),
-					}, nil
-				case CommandGitStatus:
-					return responseWithJSON(t, req, gitStatusBody{Status: GitStatus{GitAheadCount: 935}}), nil
+				case CommandTaskClosePreflight:
+					return closePreflightResponse(t, req, domain.Task{
+						ID:             "az-3",
+						Title:          "Close me",
+						Status:         domain.StatusInReview,
+						Session:        &domain.Session{IssueID: "az-3", Worktree: "/tmp/az-3"},
+						HasTmuxSession: true,
+						HasWorktree:    true,
+					}, GitStatus{GitAheadCount: 935}), nil
 				case CommandSessionStop, CommandWorktreeRemove, CommandTaskUpdateStatus:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -926,14 +890,13 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("UpdateTaskStatusWithOptions error: %v", err)
 		}
-		wantCommands := []string{CommandTaskList, CommandGitStatus, CommandSessionStop, CommandWorktreeRemove, CommandTaskUpdateStatus}
+		wantCommands := []string{CommandTaskClosePreflight, CommandSessionStop, CommandWorktreeRemove, CommandTaskUpdateStatus}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
 		}
 	})
 
 	t.Run("status update close guard blocks unresolved children", func(t *testing.T) {
-		parentID := naming.IssueID("az-3")
 		childID := naming.IssueID("az-4")
 		grandchildID := naming.IssueID("az-5")
 		commands := []string{}
@@ -942,27 +905,9 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				assertTaskProjectID(t, req, wantProjectID)
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case CommandTaskList:
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						OK:              true,
-						Body: mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 3, []domain.Task{
-							{ID: parentID, Title: "Parent", Status: domain.StatusInReview},
-							{ID: childID, Title: "Closed child with runtime", Status: domain.StatusDone, ParentID: &parentID, HasWorktree: true},
-							{ID: grandchildID, Title: "Open grandchild", Status: domain.StatusOpen, ParentID: &childID},
-						}),
-					}, nil
-				case CommandTaskUpdateStatus:
-					var body TaskStatusRequest
-					if err := json.Unmarshal(req.Body, &body); err != nil {
-						t.Fatalf("unmarshal status repair request: %v", err)
-					}
-					if body.TaskID != childID || body.Status != domain.StatusInReview {
-						t.Fatalf("status repair = %+v, want %s -> %s", body, childID, domain.StatusInReview)
-					}
-					return responseWithJSON(t, req, map[string]any{}), nil
+				case CommandTaskClosePreflight:
+					message := fmt.Sprintf("cannot close issue az-3: unresolved child issues remain: %s (worktree); %s (open). Next: close or clean up the listed child issues first, then retry. Moved closed blockers back for cleanup: %s -> in_review", childID, grandchildID, childID)
+					return responseWithCommandError(req, message), nil
 				default:
 					t.Fatalf("unexpected command after child close guard failure = %q", req.Command)
 					return protocol.ResponseEnvelope{}, nil
@@ -975,7 +920,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "unresolved child issues remain") || !strings.Contains(err.Error(), "az-4 (worktree)") || !strings.Contains(err.Error(), "az-5 (open)") || !strings.Contains(err.Error(), "close or clean up the listed child issues first") || !strings.Contains(err.Error(), "Moved closed blockers back for cleanup: az-4 -> in_review") || strings.Contains(err.Error(), "az issue close --id az-3 --cleanup") {
 			t.Fatalf("UpdateTaskStatusWithOptions error = %v, want child close guard", err)
 		}
-		wantCommands := []string{CommandTaskList, CommandTaskUpdateStatus}
+		wantCommands := []string{CommandTaskClosePreflight}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
 		}
@@ -988,33 +933,8 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				assertTaskProjectID(t, req, wantProjectID)
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case CommandTaskList:
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						OK:              true,
-						Body: mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 3, []domain.Task{
-							{
-								ID:          "az-3",
-								Title:       "Closed dirty issue",
-								Status:      domain.StatusDone,
-								Session:     &domain.Session{IssueID: "az-3", Worktree: "/tmp/az-3"},
-								HasWorktree: true,
-							},
-						}),
-					}, nil
-				case CommandGitStatus:
-					return responseWithJSON(t, req, gitStatusBody{Status: GitStatus{HasChanges: true, Modified: []string{"main.go"}}}), nil
-				case CommandTaskUpdateStatus:
-					var body TaskStatusRequest
-					if err := json.Unmarshal(req.Body, &body); err != nil {
-						t.Fatalf("unmarshal status repair request: %v", err)
-					}
-					if body.TaskID != "az-3" || body.Status != domain.StatusInProgress {
-						t.Fatalf("status repair = %+v, want az-3 -> %s", body, domain.StatusInProgress)
-					}
-					return responseWithJSON(t, req, map[string]any{}), nil
+				case CommandTaskClosePreflight:
+					return responseWithCommandError(req, "cannot close issue az-3: worktree has local changes: main.go. Next: commit, discard, or merge the worktree changes first, then retry. Moved closed blockers back for cleanup: az-3 -> in_progress"), nil
 				default:
 					t.Fatalf("unexpected command after close guard failure = %q", req.Command)
 					return protocol.ResponseEnvelope{}, nil
@@ -1027,7 +947,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "worktree has local changes: main.go") || !strings.Contains(err.Error(), "Moved closed blockers back for cleanup: az-3 -> in_progress") {
 			t.Fatalf("UpdateTaskStatusWithOptions error = %v, want dirty guard and status repair", err)
 		}
-		wantCommands := []string{CommandTaskList, CommandGitStatus, CommandTaskUpdateStatus}
+		wantCommands := []string{CommandTaskClosePreflight}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
 		}
