@@ -555,7 +555,7 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 			result.Warnings = append(result.Warnings, fmt.Sprintf("%s: %s", issueID, completedLaunch.Warning))
 		}
 		completedLaunch.WatchCommand = result.Advice.WatchCommand
-		completedLaunch.IntegrateHint = fmt.Sprintf("az orchestrate integrate --issue %s", issueID)
+		completedLaunch.IntegrateHint = issueCloseCommand(issueID)
 		completedLaunch.CloseHint = fmt.Sprintf("az orchestrate close-session --issue %s", issueID)
 		result.Launched = append(result.Launched, completedLaunch)
 		emitOrchestrateStartProgress(opts, "started", issueID)
@@ -630,8 +630,8 @@ func printOrchestrateStartResult(result orchestrateStartResult) {
 			if launch.WorktreePath != "" {
 				fmt.Printf("  worktree=%s\n", launch.WorktreePath)
 			}
-			fmt.Printf("  integrate: %s\n", launch.IntegrateHint)
-			fmt.Printf("  close session: %s\n", launch.CloseHint)
+			fmt.Printf("  complete accepted worker: %s\n", launch.IntegrateHint)
+			fmt.Printf("  repair stop only: %s\n", launch.CloseHint)
 		}
 	}
 	if len(result.Warnings) > 0 {
@@ -1408,7 +1408,7 @@ func orchestrateStartWarnings(ctx context.Context, deps *Dependencies, willStart
 func orchestrateCompletionAdvice(runnable, openDescendants, activeSessions []string) []string {
 	advice := make([]string, 0, len(runnable)+len(openDescendants)+len(activeSessions))
 	for _, id := range activeSessions {
-		advice = append(advice, fmt.Sprintf("stop active worker session: az orchestrate close-session --issue %s", id))
+		advice = append(advice, fmt.Sprintf("if intentionally abandoning active worker session, repair-stop it: az orchestrate close-session --issue %s", id))
 	}
 	for _, id := range openDescendants {
 		advice = append(advice, fmt.Sprintf("after integration/evidence, close required child issue: %s", issueCloseCommand(id)))
@@ -1443,8 +1443,8 @@ func orchestrateIntegrationCommands(issueID string, wt daemonclient.Worktree, fo
 		commands = append(commands, fmt.Sprintf("az issue get %s", issueID), fmt.Sprintf("az session status %s", issueID))
 	}
 	if mergeReady {
-		commands = append(commands, fmt.Sprintf("az branch merge %s", issueID))
 		commands = append(commands, issueCloseCommand(issueID))
+		commands = append(commands, fmt.Sprintf("repair merge only if close reports conflicts: az branch merge %s", issueID))
 	}
 	return commands
 }

@@ -1014,12 +1014,10 @@ func printRootUsage() {
 		return
 	}
 	replacements := map[string]string{
-		"session <subcommand>  Session commands (start|attach|kill|status)":             "session <subcommand>  Session commands (start|attach|stop|status|resolve-conflict)",
-		"branch <subcommand>   Branch commands (merge)":                                 "branch <subcommand>   Branch commands (merge|agent-merge)",
-		"kill <issue-id>       Alias for 'az session kill <issue-id>'":                  "stop <issue-id>       Alias for 'az session stop <issue-id>'",
-		"az session kill az-123    # Kill issue az-123's session":                       "az session stop az-123    # Stop issue az-123's session",
-		"az session status az-123  # Show status for az-123":                            "az session status az-123  # Show status for az-123\n  az session resolve-conflict az-123 --file README.md",
-		"az branch merge az-123    # Merge issue branch into base branch (daemon path)": "az branch merge az-123    # Merge issue branch into base branch (daemon path)\n  az branch agent-merge az-123 --target base",
+		"session <subcommand>  Session commands (start|attach|stop|status)":                                              "session <subcommand>  Session commands (start|attach|stop|status|resolve-conflict)",
+		"branch <subcommand>   Branch commands (merge)":                                                                  "branch <subcommand>   Branch commands (merge|agent-merge)",
+		"az session status az-123  # Show status for az-123":                                                             "az session status az-123  # Show status for az-123\n  az session resolve-conflict az-123 --file README.md",
+		"az branch merge az-123    # Repair/manual merge into resolved target branch (normal close uses az issue close)": "az branch merge az-123    # Repair/manual merge into resolved target branch (normal close uses az issue close)\n  az branch agent-merge az-123 --target base",
 	}
 	for old, new := range replacements {
 		usage = strings.ReplaceAll(usage, old, new)

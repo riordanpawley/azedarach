@@ -7875,7 +7875,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Repeat status -> start -> watch until `az orchestrate complete-check --root <issue-id>` passes") {
 		t.Fatalf("prime output missing completion loop guidance: %q", output)
 	}
-	if !strings.Contains(output, "Integrate workers that are `in_review` or otherwise report completion with `az orchestrate integrate --issue <issue-id>`") {
+	if !strings.Contains(output, "close accepted child issues with `az issue close --id <issue-id>`; that command owns merge, session stop, worktree cleanup, and issue closure") {
 		t.Fatalf("prime output missing worker integration guidance: %q", output)
 	}
 	if !strings.Contains(output, "Status semantics: use `open` for not-yet-active work, `in_progress` while actively working, `in_review` when implementation is complete") {

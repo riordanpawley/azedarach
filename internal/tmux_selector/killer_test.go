@@ -97,6 +97,22 @@ func TestDaemonKillerFallsBackToTmuxWhenProjectMissing(t *testing.T) {
 	}
 }
 
+func TestDaemonKillerFallsBackToTmuxForUntrackedSession(t *testing.T) {
+	killer, tmux, calls, _ := newTestDaemonKiller(t)
+	entry := InventoryEntry{
+		SessionID: "plain-tmux",
+	}
+	if err := killer.KillSession(context.Background(), entry); err != nil {
+		t.Fatalf("kill returned error: %v", err)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("daemon stop calls = %d, want 0 for untracked session", len(*calls))
+	}
+	if len(tmux.killed) != 1 || tmux.killed[0] != "plain-tmux" {
+		t.Fatalf("tmux killed = %v, want [plain-tmux]", tmux.killed)
+	}
+}
+
 func TestDaemonKillerSurfacesDaemonError(t *testing.T) {
 	killer, _, _, stopErr := newTestDaemonKiller(t)
 	*stopErr = errors.New("daemon boom")

@@ -2,11 +2,11 @@ Usage: az [command] [arguments]
 
 Commands:
   (no command)         Start the Azedarach TUI
-  session <subcommand>  Session commands (start|attach|kill|status)
+  session <subcommand>  Session commands (start|attach|stop|status)
   branch <subcommand>   Branch commands (merge)
   start <issue-id>      Alias for 'az session start <issue-id>'
   attach <issue-id>     Alias for 'az session attach <issue-id>'
-  kill <issue-id>       Alias for 'az session kill <issue-id>'
+  stop <issue-id>       Alias for 'az session stop <issue-id>'
   status [issue-id]     Alias for 'az session status [issue-id]'
   githooks <install|update|run|notify|hook>      Manage repo git hooks and run configured hook tasks
   gate <issue-id>            Run quality gates for an issue
@@ -65,10 +65,10 @@ Examples:
   az                   # Start TUI
   az session start az-123   # Start session for issue az-123
   az session attach az-123  # Attach to issue az-123's session
-  az session kill az-123    # Kill issue az-123's session
+  az session stop az-123    # Stop issue az-123's session
   az session status         # Show all active sessions
   az session status az-123  # Show status for az-123
-  az branch merge az-123    # Merge issue branch into resolved target branch (daemon path)
+  az branch merge az-123    # Repair/manual merge into resolved target branch (normal close uses az issue close)
   az issue list
   az issue list --status in_progress
   az issue list --id az-1 --id az-2
@@ -115,8 +115,8 @@ Examples:
   az orchestrate start --root az-123 --limit 4
   az orchestrate watch --root az-123 --since 41 --jsonl
   # Leave orchestrate watch running in another pane/session while workers are active; use --once only for diagnostic single polls.
-  az orchestrate integrate --issue az-456
-  az orchestrate close-session --issue az-456
+  az orchestrate integrate --issue az-456      # Inspect worker evidence / repair guidance
+  az orchestrate close-session --issue az-456  # Repair-only daemon stop; normal accepted-worker cleanup uses az issue close
   az orchestrate complete-check --root az-123
   az config set spec.enabled false
   az config set spec.enabled true --project-dir .

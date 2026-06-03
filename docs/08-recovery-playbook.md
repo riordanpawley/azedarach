@@ -99,9 +99,14 @@ go test ./internal/cli -run TestApplyPartialFailureIntegrationPreservesOutcomeOr
 
 ## Orchestration Integrate Safety Gate
 
-When evaluating `az orchestrate integrate --issue <issue-id>`, treat merge
-guidance as unsafe unless completion evidence exists. The CLI now blocks
-`az branch merge <issue-id>` guidance unless one of these is true:
+Accepted worker completion should normally use `az issue close --id <issue-id>`.
+That command owns the merge, records stopped session state before tmux cleanup,
+removes the worktree, and closes the issue as one authoritative flow.
+
+When evaluating `az orchestrate integrate --issue <issue-id>`, treat it as an
+inspection and repair command, not the normal merge authority. Merge/close
+guidance is unsafe unless completion evidence exists. The CLI now blocks
+completion guidance unless one of these is true:
 
 - the worker issue is already `closed`
 - a `worker-integration-ready` mailbox event exists for that worker under its
@@ -115,7 +120,8 @@ If merge guidance is blocked, recover with:
 3. Ask the worker to publish `worker-integration-ready` once evidence is ready.
 4. Re-run `az orchestrate integrate --issue <issue-id>`.
 
-When `az branch merge <issue-id>` targets a branch that is already checked out
-in another Git worktree, the merge runs in that attached worktree. This avoids
-Git's single-checkout guard for branches while keeping the target branch as the
-merge authority.
+Use `az branch merge <issue-id>` only for manual conflict or close-repair
+recovery. When it targets a branch that is already checked out in another Git
+worktree, the merge runs in that attached worktree. This avoids Git's
+single-checkout guard for branches while keeping the target branch as the merge
+authority.

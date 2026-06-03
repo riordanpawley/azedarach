@@ -1,7 +1,10 @@
-Usage: az session <start|attach|kill|status> [arguments]
+Usage: az session <start|attach|stop|status> [arguments]
 
 Commands:
   start <issue-id>      Start a session for an issue
   attach <issue-id>     Attach to an existing issue session
-  kill <issue-id>       Kill an issue session
+  stop <issue-id>       Stop an issue session via daemon-authoritative stopped state
   status [issue-id]     Show all sessions or one issue session status
+
+Deprecated aliases:
+  kill <issue-id>       Alias for stop

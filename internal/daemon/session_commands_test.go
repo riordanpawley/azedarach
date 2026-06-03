@@ -4060,8 +4060,11 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "Treat blocked work as graph state from unresolved `blocks` dependencies") {
 		t.Fatalf("prompt = %q, want graph-derived blocked guidance", prompt)
 	}
-	if !strings.Contains(prompt, "Treat `in_review` workers as ready for orchestrator integration") {
+	if !strings.Contains(prompt, "Treat `in_review` workers as ready for orchestrator validation") {
 		t.Fatalf("prompt = %q, want in-review integration guidance", prompt)
+	}
+	if !strings.Contains(prompt, "close accepted worker issues with `az issue close --id <issue-id>`") {
+		t.Fatalf("prompt = %q, want issue close completion guidance", prompt)
 	}
 }
 
