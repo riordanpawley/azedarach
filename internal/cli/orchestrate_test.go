@@ -555,6 +555,8 @@ func TestOrchestratePromptCommandMailboxCoordinationOptIn(t *testing.T) {
 		"Coordination mode: mailbox",
 		"Coordination mailbox parent: az-1",
 		"Use mailbox events for hybrid coordination",
+		"Check inbound orchestrator messages with `az mail list --parent az-1 --since 0 --json` before declaring yourself blocked or idle",
+		"az mail list --parent az-1 --since 0 --json",
 		"`worker-ready` and `worker-complete` are accepted only as legacy aliases for `worker-integration-ready`",
 		"az mail send --parent az-1 --issue az-2 --type worker-integration-ready",
 	} {

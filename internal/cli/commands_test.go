@@ -7991,6 +7991,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
 	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+	parentID := naming.IssueID("az-parent")
 
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
@@ -8011,6 +8012,7 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 					Status:          domain.StatusOpen,
 					Priority:        domain.P2,
 					Type:            domain.TypeTask,
+					ParentID:        &parentID,
 					Implementations: []string{"go-bubbletea"},
 					CreatedAt:       now,
 					UpdatedAt:       now,
@@ -8054,6 +8056,15 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "Dependencies:\n- blocks: az-2") {
 		t.Fatalf("prime output missing dependency summary: %q", output)
+	}
+	if !strings.Contains(output, "Parent: az-parent") {
+		t.Fatalf("prime output missing active issue parent: %q", output)
+	}
+	if !strings.Contains(output, "Worker mailbox: receive orchestrator messages with `az mail list --parent az-parent --since 0 --json`") {
+		t.Fatalf("prime output missing worker mailbox receive guidance: %q", output)
+	}
+	if !strings.Contains(output, "`az mail watch --parent az-parent --since <seq> --jsonl` only when explicitly asked") {
+		t.Fatalf("prime output missing bounded mailbox watch guidance: %q", output)
 	}
 }
 

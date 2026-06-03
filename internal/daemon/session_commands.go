@@ -652,7 +652,11 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if cmd.StartWork {
 		initialPrompt := strings.TrimSpace(cmd.Prompt)
 		if initialPrompt == "" {
-			initialPrompt = buildStartWorkPrompt(cmd.IssueID, task.Type.String(), task.Title, task.ParentID != nil)
+			parentIssueID := ""
+			if task.ParentID != nil {
+				parentIssueID = strings.TrimSpace(task.ParentID.String())
+			}
+			initialPrompt = buildStartWorkPrompt(cmd.IssueID, task.Type.String(), task.Title, parentIssueID != "", parentIssueID)
 		}
 		launchCommand := d.buildSessionLaunchCommand(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, initialPrompt)
 		if err := d.tmux.SendKeys(ctx, cmd.SessionID, launchCommand); err != nil {
@@ -2469,7 +2473,7 @@ func singleQuoteForShell(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
-func buildStartWorkPrompt(issueID, issueType, title string, orchestratedWorker bool) string {
+func buildStartWorkPrompt(issueID, issueType, title string, orchestratedWorker bool, parentIssueID string) string {
 	safeIssueType := sanitizePromptInline(issueType, 0)
 	if safeIssueType == "" {
 		safeIssueType = "task"
@@ -2490,7 +2494,11 @@ func buildStartWorkPrompt(issueID, issueType, title string, orchestratedWorker b
 	if !orchestratedWorker {
 		return base + "\n\nRole: contributor\n- Focus only on this issue scope unless the user explicitly expands it.\n- Keep issue status/notes current with evidence.\n- Use `in_progress` while actively working, `in_review` when complete and awaiting review/integration, and `closed` only after acceptance criteria and validation are done.\n- Represent blocked work with dependency edges and notes, not by using `in_review`."
 	}
-	return base + "\n\nRole: worker\n- Focus only on this issue scope unless the user explicitly expands it.\n- Report coordination state with mailbox event types: worker-progress, worker-blocked, and worker-integration-ready; worker-ready and worker-complete are accepted only as legacy aliases for worker-integration-ready.\n- Keep issue status/notes current with evidence for the orchestrator.\n- Use `in_progress` while actively working and `in_review` when complete and ready for orchestrator integration; the orchestrator closes accepted work.\n- Report blockers via dependency edges or worker-blocked mailbox events, not by setting `in_review`."
+	mailboxGuidance := "- Check inbound orchestrator messages with `az mail list --parent <parent-issue> --since 0 --json` before declaring yourself blocked or idle; apply events for this issue and continue without waiting for a separate user prompt."
+	if strings.TrimSpace(parentIssueID) != "" {
+		mailboxGuidance = fmt.Sprintf("- Coordination mailbox parent: `%s`; check inbound orchestrator messages with `az mail list --parent %s --since 0 --json` before declaring yourself blocked or idle; apply events for this issue and continue without waiting for a separate user prompt.", parentIssueID, parentIssueID)
+	}
+	return base + "\n\nRole: worker\n- Focus only on this issue scope unless the user explicitly expands it.\n" + mailboxGuidance + "\n- Report coordination state with mailbox event types: worker-progress, worker-blocked, and worker-integration-ready; worker-ready and worker-complete are accepted only as legacy aliases for worker-integration-ready.\n- Keep issue status/notes current with evidence for the orchestrator.\n- Use `in_progress` while actively working and `in_review` when complete and ready for orchestrator integration; the orchestrator closes accepted work.\n- Report blockers via dependency edges or worker-blocked mailbox events, not by setting `in_review`."
 }
 
 func buildConflictResolutionPrompt(issueID string, conflictFiles []string) string {

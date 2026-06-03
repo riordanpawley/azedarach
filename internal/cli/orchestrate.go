@@ -1119,6 +1119,7 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 	}
 	if coordination == "mailbox" {
 		commands = append(commands,
+			fmt.Sprintf("az mail list --parent %s --since 0 --json", parentIssueID),
 			fmt.Sprintf("az mail send --parent %s --issue %s --type worker-progress --body \"<progress>\"", parentIssueID, issueID),
 			fmt.Sprintf("az mail send --parent %s --issue %s --type worker-integration-ready --body \"<evidence>\"", parentIssueID, issueID),
 		)
@@ -1159,6 +1160,7 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 	fmt.Fprintf(&b, "- Do not append raw logs, exploratory transcripts, routine progress narration, duplicate prompt context, or speculative scratch work to notes.\n")
 	if coordination == "mailbox" {
 		fmt.Fprintf(&b, "- Use mailbox events for hybrid coordination: `worker-progress`, `worker-blocked`, and `worker-integration-ready`; `worker-ready` and `worker-complete` are accepted only as legacy aliases for `worker-integration-ready`.\n")
+		fmt.Fprintf(&b, "- Check inbound orchestrator messages with `az mail list --parent %s --since 0 --json` before declaring yourself blocked or idle; apply events for `%s` and continue without waiting for a separate user prompt.\n", parentIssueID, issueID)
 		fmt.Fprintf(&b, "- When ready for integration, set/leave the issue `in_review` and send `worker-integration-ready` to parent `%s` with concise evidence; leave integration/merge/close to the orchestrator.\n", parentIssueID)
 	} else {
 		fmt.Fprintf(&b, "- Return progress, blockers, and final results through the native subagent result channel.\n")

@@ -3788,7 +3788,7 @@ func TestBuildSessionLaunchCommandEscapesPromptCommandSubstitutionForCodex(t *te
 		"codex-az-42",
 		false,
 		nil,
-		buildStartWorkPrompt("az-42", string(domain.TypeEpic), "Replace apps/server", false),
+		buildStartWorkPrompt("az-42", string(domain.TypeEpic), "Replace apps/server", false, ""),
 	)
 
 	if strings.Contains(command, "`az orchestrate status --root <issue-id>`") {
@@ -3800,7 +3800,7 @@ func TestBuildSessionLaunchCommandEscapesPromptCommandSubstitutionForCodex(t *te
 }
 
 func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *testing.T) {
-	prompt := buildStartWorkPrompt("az-42", "task", "Fix startup shell", true)
+	prompt := buildStartWorkPrompt("az-42", "task", "Fix startup shell", true, "az-1")
 	if !strings.Contains(prompt, "work on issue az-42 (task): Fix startup shell") {
 		t.Fatalf("prompt = %q, want issue summary header", prompt)
 	}
@@ -3809,6 +3809,15 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *test
 	}
 	if !strings.Contains(prompt, "Role: worker") {
 		t.Fatalf("prompt = %q, want worker role primer", prompt)
+	}
+	if !strings.Contains(prompt, "Coordination mailbox parent: `az-1`") {
+		t.Fatalf("prompt = %q, want concrete parent mailbox", prompt)
+	}
+	if !strings.Contains(prompt, "az mail list --parent az-1 --since 0 --json") {
+		t.Fatalf("prompt = %q, want inbound mailbox read command", prompt)
+	}
+	if !strings.Contains(prompt, "before declaring yourself blocked or idle") {
+		t.Fatalf("prompt = %q, want receive-before-idle guidance", prompt)
 	}
 	for _, eventType := range []string{"worker-progress", "worker-blocked", "worker-integration-ready"} {
 		if !strings.Contains(prompt, eventType) {
@@ -3830,7 +3839,7 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *test
 }
 
 func TestBuildStartWorkPromptOmitsMailboxGuidanceForStandaloneTask(t *testing.T) {
-	prompt := buildStartWorkPrompt("az-42", "task", "Fix startup shell", false)
+	prompt := buildStartWorkPrompt("az-42", "task", "Fix startup shell", false, "")
 	if !strings.Contains(prompt, "Role: contributor") {
 		t.Fatalf("prompt = %q, want contributor role primer", prompt)
 	}
@@ -3846,7 +3855,7 @@ func TestBuildStartWorkPromptOmitsMailboxGuidanceForStandaloneTask(t *testing.T)
 }
 
 func TestBuildStartWorkPromptSanitizesControlCharsAndAngleBrackets(t *testing.T) {
-	prompt := buildStartWorkPrompt("az-42", "task\n", "Fix <shell>\tselection", false)
+	prompt := buildStartWorkPrompt("az-42", "task\n", "Fix <shell>\tselection", false, "")
 	if strings.Contains(prompt, "<shell>") {
 		t.Fatalf("prompt = %q, want angle brackets sanitized", prompt)
 	}
@@ -3859,7 +3868,7 @@ func TestBuildStartWorkPromptSanitizesControlCharsAndAngleBrackets(t *testing.T)
 }
 
 func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
-	prompt := buildStartWorkPrompt("az-99", "epic", "Coordinate big tree", false)
+	prompt := buildStartWorkPrompt("az-99", "epic", "Coordinate big tree", false, "")
 	if !strings.Contains(prompt, "Role: orchestrator") {
 		t.Fatalf("prompt = %q, want orchestrator role primer", prompt)
 	}
