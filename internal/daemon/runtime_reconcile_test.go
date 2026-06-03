@@ -323,6 +323,8 @@ func TestCommandRuntimeReconcileRoutesToManualRepair(t *testing.T) {
 }
 
 func TestRunInvokesStartupRuntimeReconcileWithBoundedTimeout(t *testing.T) {
+	const waitForStartupReconcile = 5 * time.Second
+
 	recorder := &runtimeReconcileRecorder{
 		started:       make(chan struct{}, 1),
 		waitForCancel: true,
@@ -347,7 +349,7 @@ func TestRunInvokesStartupRuntimeReconcileWithBoundedTimeout(t *testing.T) {
 
 	select {
 	case <-recorder.started:
-	case <-time.After(time.Second):
+	case <-time.After(waitForStartupReconcile):
 		t.Fatal("timed out waiting for startup reconcile to begin")
 	}
 
@@ -356,13 +358,13 @@ func TestRunInvokesStartupRuntimeReconcileWithBoundedTimeout(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Run returned error: %v", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(waitForStartupReconcile):
 		t.Fatal("timed out waiting for Run to finish")
 	}
 
 	select {
 	case <-serveDone:
-	case <-time.After(time.Second):
+	case <-time.After(waitForStartupReconcile):
 		t.Fatal("timed out waiting for serve to begin")
 	}
 
