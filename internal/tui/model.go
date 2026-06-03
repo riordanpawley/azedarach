@@ -116,12 +116,13 @@ type pendingTaskStatus struct {
 }
 
 type pendingOperationProgress struct {
-	operationID string
-	kind        string
-	state       protocol.OperationState
-	percent     int
-	message     string
-	updatedAt   time.Time
+	operationID  string
+	kind         string
+	state        protocol.OperationState
+	percent      int
+	message      string
+	errorMessage string
+	updatedAt    time.Time
 }
 
 type daemonStreamMetrics struct {
@@ -1014,6 +1015,12 @@ type logStreamClosedMsg struct {
 
 type logStreamReconnectMsg struct{}
 
+type operationRecordsLoadedMsg struct {
+	projectID string
+	records   []protocol.OperationRecord
+	err       error
+}
+
 type uiViewModeLoadedMsg struct {
 	viewMode ViewMode
 	found    bool
@@ -1097,6 +1104,86 @@ func formatPendingOperationMessage(action, issueID, operationID string, state pr
 	return fmt.Sprintf("%s %s (operation %s)", action, state, operationID)
 }
 
+const visibleTerminalOperationTTL = 15 * time.Minute
+
+func (m *Model) applyOperationRecords(records []protocol.OperationRecord) {
+	if len(records) == 0 {
+		return
+	}
+	for _, record := range records {
+		m.applyOperationRecord(record, time.Now())
+	}
+	m.syncTaskWorkspaceOverlay()
+}
+
+func (m *Model) applyOperationRecord(record protocol.OperationRecord, now time.Time) {
+	operationID := strings.TrimSpace(record.OperationID.String())
+	if operationID == "" {
+		return
+	}
+	if m.operationTaskID == nil {
+		m.operationTaskID = make(map[string]string)
+	}
+	if m.pendingOpsByTask == nil {
+		m.pendingOpsByTask = make(map[string]pendingOperationProgress)
+	}
+	taskID := m.resolveOperationTaskID(record.IssueID, record.ResourceKeys)
+	if taskID == "" {
+		taskID = m.operationTaskID[operationID]
+	}
+	if taskID == "" {
+		return
+	}
+	m.operationTaskID[operationID] = taskID
+	state := protocol.OperationState(record.State)
+	if state == protocol.OperationStateDone {
+		delete(m.pendingOpsByTask, taskIDKey(taskID))
+		delete(m.operationTaskID, operationID)
+		return
+	}
+	if operationStateTerminal(state) && !operationRecordRecentlyTerminal(record, now) {
+		delete(m.pendingOpsByTask, taskIDKey(taskID))
+		delete(m.operationTaskID, operationID)
+		return
+	}
+	percent := 0
+	message := ""
+	if record.Progress != nil {
+		percent = clampOperationPercent(record.Progress.Percent)
+		message = strings.TrimSpace(record.Progress.Message)
+	}
+	if state == protocol.OperationStateRunning && percent == 0 {
+		percent = 50
+	}
+	errorMessage := ""
+	if record.Error != nil {
+		errorMessage = strings.TrimSpace(record.Error.Message)
+	}
+	if errorMessage != "" {
+		message = errorMessage
+	}
+	m.pendingOpsByTask[taskIDKey(taskID)] = pendingOperationProgress{
+		operationID:  operationID,
+		kind:         strings.TrimSpace(record.Kind),
+		state:        state,
+		percent:      percent,
+		message:      message,
+		errorMessage: errorMessage,
+		updatedAt:    now,
+	}
+}
+
+func operationRecordRecentlyTerminal(record protocol.OperationRecord, now time.Time) bool {
+	finishedAt := record.FinishedAt
+	if finishedAt == nil || finishedAt.IsZero() {
+		return true
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	return now.Sub((*finishedAt).UTC()) <= visibleTerminalOperationTTL
+}
+
 func (m *Model) applyOperationProgressEvent(evt protocol.EventEnvelope) {
 	switch evt.Event {
 	case protocol.EventOperationQueued, protocol.EventOperationRunning, protocol.EventOperationDone, protocol.EventOperationFailed, protocol.EventOperationCancelled:
@@ -1107,33 +1194,7 @@ func (m *Model) applyOperationProgressEvent(evt protocol.EventEnvelope) {
 		if strings.TrimSpace(body.Operation.OperationID.String()) == "" {
 			return
 		}
-		taskID := m.resolveOperationTaskID(body.Operation.IssueID, body.Operation.ResourceKeys)
-		if taskID == "" {
-			taskID = m.operationTaskID[body.Operation.OperationID.String()]
-		}
-		if taskID == "" {
-			return
-		}
-		m.operationTaskID[body.Operation.OperationID.String()] = taskID
-		state := protocol.OperationState(body.Operation.State)
-		if operationStateTerminal(state) {
-			delete(m.pendingOpsByTask, taskIDKey(taskID))
-			delete(m.operationTaskID, body.Operation.OperationID.String())
-			m.syncTaskWorkspaceOverlay()
-			return
-		}
-		percent := 0
-		switch state {
-		case protocol.OperationStateRunning:
-			percent = 50
-		}
-		m.pendingOpsByTask[taskIDKey(taskID)] = pendingOperationProgress{
-			operationID: body.Operation.OperationID.String(),
-			kind:        strings.TrimSpace(body.Operation.Kind),
-			state:       state,
-			percent:     percent,
-			updatedAt:   time.Now(),
-		}
+		m.applyOperationRecord(body.Operation, time.Now())
 		m.syncTaskWorkspaceOverlay()
 	case protocol.EventOperationProgress:
 		var body protocol.OperationProgressEventBody
@@ -1155,12 +1216,13 @@ func (m *Model) applyOperationProgressEvent(evt protocol.EventEnvelope) {
 		}
 		current := m.pendingOpsByTask[taskIDKey(taskID)]
 		m.pendingOpsByTask[taskIDKey(taskID)] = pendingOperationProgress{
-			operationID: body.OperationID.String(),
-			kind:        current.kind,
-			state:       body.State,
-			percent:     clampOperationPercent(body.Progress.Percent),
-			message:     strings.TrimSpace(body.Progress.Message),
-			updatedAt:   time.Now(),
+			operationID:  body.OperationID.String(),
+			kind:         current.kind,
+			state:        body.State,
+			percent:      clampOperationPercent(body.Progress.Percent),
+			message:      strings.TrimSpace(body.Progress.Message),
+			errorMessage: current.errorMessage,
+			updatedAt:    time.Now(),
 		}
 		m.syncTaskWorkspaceOverlay()
 	}
@@ -1667,6 +1729,28 @@ func (m Model) readTaskSnapshot(ctx context.Context, client *daemonclient.Client
 	return client.ListTasksSnapshotWithMode(ctx, daemonclient.ReadWaitModeExplicit)
 }
 
+func (m Model) loadOperationsCmd() tea.Cmd {
+	client := m.daemonClient
+	projectID := m.daemonProjectID()
+	if client == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		records, err := client.ListOperations(ctx, daemonclient.OperationListOptions{
+			States: []protocol.OperationState{
+				protocol.OperationStateQueued,
+				protocol.OperationStateRunning,
+				protocol.OperationStateFailed,
+				protocol.OperationStateCancelled,
+			},
+			Limit: 100,
+		})
+		return operationRecordsLoadedMsg{projectID: projectID, records: records, err: err}
+	}
+}
+
 func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 	switchSeq := m.projectSwitchSeq
 	return func() tea.Msg {
@@ -1797,7 +1881,6 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 			}
 			return issuesErrorMsg{projectID: projectID, err: err}
 		}
-
 		events, err := daemonClient.Subscribe(context.Background(), projectID, snapshot.Revision)
 		if err != nil {
 			if m.logger != nil {
@@ -4633,6 +4716,9 @@ func (m Model) pendingMutationForTask(taskID string) *overlay.TaskMutationProgre
 		progress.State = string(op.state)
 		progress.ProgressPercent = op.percent
 		progress.ProgressMessage = op.message
+		if strings.TrimSpace(op.errorMessage) != "" {
+			progress.ProgressMessage = op.errorMessage
+		}
 	}
 	if runtime, ok := m.runtimeSignalsByTask[key]; ok {
 		if progress.OperationID == "" {
@@ -4806,9 +4892,15 @@ func (m *Model) reconcilePendingOperations() {
 			continue
 		}
 
-		if !pending.updatedAt.IsZero() && now.Sub(pending.updatedAt) > stalePendingTTL {
-			delete(m.pendingOpsByTask, key)
-			continue
+		if !pending.updatedAt.IsZero() {
+			ttl := stalePendingTTL
+			if pending.state == protocol.OperationStateFailed || pending.state == protocol.OperationStateCancelled {
+				ttl = visibleTerminalOperationTTL
+			}
+			if now.Sub(pending.updatedAt) > ttl {
+				delete(m.pendingOpsByTask, key)
+				continue
+			}
 		}
 
 		switch strings.TrimSpace(pending.kind) {

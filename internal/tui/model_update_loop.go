@@ -261,6 +261,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if replayCmd := m.finishIssuesRefreshCmd(msg.refreshSeq); replayCmd != nil {
 			cmds = append(cmds, replayCmd)
+		} else if opCmd := m.loadOperationsCmd(); opCmd != nil {
+			cmds = append(cmds, opCmd)
 		}
 		if len(cmds) == 0 {
 			return m, nil
@@ -969,6 +971,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		cmds := []tea.Cmd{m.waitForDaemonEventCmd()}
+		if opCmd := m.loadOperationsCmd(); opCmd != nil {
+			cmds = append(cmds, opCmd)
+		}
 		if taskID := strings.TrimSpace(m.pendingUIOpenTaskID); taskID != "" {
 			m.pendingUIOpenTaskID = ""
 			opened, openCmd := m.openTaskWorkspaceByID(taskID)
@@ -987,6 +992,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, tea.Batch(cmds...)
+
+	case operationRecordsLoadedMsg:
+		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
+			return m, nil
+		}
+		if msg.err != nil {
+			if m.logger != nil {
+				m.logger.Debug("daemon operation list failed", "error", msg.err)
+			}
+			return m, nil
+		}
+		m.applyOperationRecords(msg.records)
+		return m, nil
 
 	case overlay.TaskCreatedMsg:
 		m.overlayStack.Pop()

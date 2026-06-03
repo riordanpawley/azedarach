@@ -762,6 +762,31 @@ func TestActionMenu_SelectByKey_Disabled(t *testing.T) {
 	}
 }
 
+func TestActionMenu_DisablesMutatingActionsForActiveOperation(t *testing.T) {
+	task := domain.Task{ID: "az-123", Status: domain.StatusOpen, HasWorktree: true}
+	menu := NewActionMenu(task, nil).WithMutationProgress(&TaskMutationProgress{
+		OperationID: "op-queued",
+		State:       "queued",
+	})
+
+	view := menu.View()
+	if !strings.Contains(view, "Operation already queued: op-queued") {
+		t.Fatalf("expected active operation marker in menu, got: %s", view)
+	}
+
+	for _, key := range []string{"s", "S", "!", "u", "m", "b", "w", "W", "1", "2", "3", "4", "d", "e", "T"} {
+		if cmd := menu.selectByKey(key); cmd != nil {
+			t.Fatalf("expected key %q to be disabled while operation is queued", key)
+		}
+	}
+	if cmd := menu.selectByKey("r"); cmd == nil {
+		t.Fatal("expected refresh to remain available while operation is queued")
+	}
+	if cmd := menu.selectByKey("c"); cmd == nil {
+		t.Fatal("expected child creation to remain available while operation is queued")
+	}
+}
+
 func TestBulkActionMenu_Update_ArrowSelection(t *testing.T) {
 	menu := NewBulkActionMenu([]string{"az-1", "az-2"}, 2)
 
