@@ -51,8 +51,6 @@ type GlobalInventoryLoader struct {
 	source              ProjectSnapshotSource
 	projectDirs         []string
 	projectDirsProvider func() []string
-	projectDirsOnce     sync.Once
-	loadedProjectDirs   []string
 	logger              *slog.Logger
 	limit               int
 }
@@ -162,7 +160,7 @@ func (l *GlobalInventoryLoader) ListTasksSnapshot(ctx context.Context) (Snapshot
 	snapshot := l.snapshotFromLive(ctx, live, nil, true)
 	projectDirs := l.projectDirsForLiveSessions(live)
 	projections, tasks := l.loadProjections(ctx, projectDirs)
-	enriched := l.enrichEntries(snapshot, projections, tasks)
+	enriched := l.enrichEntries(snapshot, projections, tasks, projectDirs)
 	if l.logger != nil {
 		l.logger.Info("global selector full snapshot loaded",
 			"elapsed_ms", time.Since(start).Milliseconds(),
@@ -205,7 +203,7 @@ func (l *GlobalInventoryLoader) EnrichSnapshot(ctx context.Context, snapshot Sna
 	start := time.Now()
 	projectDirs := l.projectDirsForEntries(snapshot.Entries)
 	projections, tasks := l.loadProjections(ctx, projectDirs)
-	enriched := l.enrichEntries(snapshot, projections, tasks)
+	enriched := l.enrichEntries(snapshot, projections, tasks, projectDirs)
 	if l.logger != nil {
 		l.logger.Info("global selector snapshot enriched",
 			"elapsed_ms", time.Since(start).Milliseconds(),
@@ -224,12 +222,10 @@ func (l *GlobalInventoryLoader) configuredProjectDirs() []string {
 	if len(l.projectDirs) > 0 {
 		return append([]string(nil), l.projectDirs...)
 	}
-	l.projectDirsOnce.Do(func() {
-		if l.projectDirsProvider != nil {
-			l.loadedProjectDirs = append([]string(nil), l.projectDirsProvider()...)
-		}
-	})
-	return append([]string(nil), l.loadedProjectDirs...)
+	if l.projectDirsProvider == nil {
+		return nil
+	}
+	return append([]string(nil), l.projectDirsProvider()...)
 }
 
 func (l *GlobalInventoryLoader) snapshotFromLive(ctx context.Context, live []tmux.SessionInfo, projections map[string]projectedInventory, enriching bool) Snapshot {
@@ -292,9 +288,8 @@ func (l *GlobalInventoryLoader) snapshotFromLive(ctx context.Context, live []tmu
 	return snapshot
 }
 
-func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map[string]projectedInventory, tasks projectTaskIndex) Snapshot {
+func (l *GlobalInventoryLoader) enrichEntries(snapshot Snapshot, projections map[string]projectedInventory, tasks projectTaskIndex, projectDirs []string) Snapshot {
 	entries := make([]InventoryEntry, 0, len(snapshot.Entries))
-	projectDirs := l.configuredProjectDirs()
 	for _, entry := range snapshot.Entries {
 		if projection, ok := projections[entry.SessionID]; ok {
 			entry = mergeProjectedInventory(entry, projection)
