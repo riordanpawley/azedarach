@@ -127,7 +127,7 @@ func newOperationRuntime(cfg operationRuntimeConfig) *operationRuntime {
 		canonicalizeProjectID: canonicalizeProjectID,
 	}
 	reconcileInterruptedOperations(context.Background(), adapter, logger)
-	manager := opmanager.New(adapter, opmanager.Config{})
+	manager := opmanager.New(adapter, opmanager.Config{Logger: logger})
 	return &operationRuntime{
 		logger:                 logger,
 		hub:                    cfg.hub,

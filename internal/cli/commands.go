@@ -278,9 +278,10 @@ type SessionResolveConflictOptions struct {
 }
 
 type sessionIssueTarget struct {
-	ProjectID string
-	IssueID   string
-	Task      domain.Task
+	ProjectID   string
+	IssueID     string
+	Task        domain.Task
+	TaskContext []domain.Task
 }
 
 type sessionProjectCandidate struct {
@@ -395,7 +396,7 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 	restoreProject := applyIssueProjectOverride(deps, target.ProjectID)
 	defer restoreProject()
 
-	baseBranch, err := resolveSessionStartBaseBranch(ctx, deps, target.Task)
+	baseBranch, err := resolveSessionStartBaseBranchWithTasks(ctx, deps, target.Task, target.TaskContext)
 	if err != nil {
 		return err
 	}
@@ -543,10 +544,10 @@ func resolveSessionIssueTarget(ctx context.Context, deps *Dependencies, issueID 
 		return sessionIssueTarget{}, fmt.Errorf("invalid issue id %q: %w", issueID, err)
 	}
 
-	if task, ok, err := lookupSessionTaskInProject(ctx, deps, deps.ProjectID, trimmed); err != nil {
+	if task, taskContext, ok, err := lookupSessionTaskInProject(ctx, deps, deps.ProjectID, trimmed); err != nil {
 		return sessionIssueTarget{}, err
 	} else if ok {
-		return sessionIssueTarget{ProjectID: deps.ProjectID, IssueID: trimmed, Task: task}, nil
+		return sessionIssueTarget{ProjectID: deps.ProjectID, IssueID: trimmed, Task: task, TaskContext: taskContext}, nil
 	}
 
 	matches, err := resolveCanonicalSessionIssueTargets(ctx, deps, trimmed)
@@ -594,14 +595,14 @@ func resolveExplicitSessionIssueTarget(ctx context.Context, deps *Dependencies, 
 	if !ok {
 		return sessionIssueTarget{}, fmt.Errorf("unknown project in project-prefixed issue id %q: %s", raw, projectPart)
 	}
-	task, found, err := lookupSessionTaskInProject(ctx, deps, project.Route, issueID.String())
+	task, taskContext, found, err := lookupSessionTaskInProject(ctx, deps, project.Route, issueID.String())
 	if err != nil {
 		return sessionIssueTarget{}, err
 	}
 	if !found {
 		return sessionIssueTarget{}, fmt.Errorf("issue not found in project %s: %s", project.Route, issueID.String())
 	}
-	return sessionIssueTarget{ProjectID: project.Route, IssueID: issueID.String(), Task: task}, nil
+	return sessionIssueTarget{ProjectID: project.Route, IssueID: issueID.String(), Task: task, TaskContext: taskContext}, nil
 }
 
 func resolveCanonicalSessionIssueTargets(ctx context.Context, deps *Dependencies, raw string) ([]sessionIssueTarget, error) {
@@ -613,7 +614,7 @@ func resolveCanonicalSessionIssueTargets(ctx context.Context, deps *Dependencies
 			if !ok || strings.EqualFold(parsedIssueID, raw) {
 				continue
 			}
-			task, found, err := lookupSessionTaskInProject(ctx, deps, candidate.Route, parsedIssueID)
+			task, taskContext, found, err := lookupSessionTaskInProject(ctx, deps, candidate.Route, parsedIssueID)
 			if err != nil {
 				return nil, err
 			}
@@ -621,7 +622,7 @@ func resolveCanonicalSessionIssueTargets(ctx context.Context, deps *Dependencies
 				continue
 			}
 			key := candidate.Route + "\x00" + strings.ToLower(parsedIssueID)
-			matchesByKey[key] = sessionIssueTarget{ProjectID: candidate.Route, IssueID: parsedIssueID, Task: task}
+			matchesByKey[key] = sessionIssueTarget{ProjectID: candidate.Route, IssueID: parsedIssueID, Task: task, TaskContext: taskContext}
 		}
 	}
 	matches := make([]sessionIssueTarget, 0, len(matchesByKey))
@@ -637,16 +638,16 @@ func resolveCanonicalSessionIssueTargets(ctx context.Context, deps *Dependencies
 	return matches, nil
 }
 
-func lookupSessionTaskInProject(ctx context.Context, deps *Dependencies, projectID, issueID string) (domain.Task, bool, error) {
+func lookupSessionTaskInProject(ctx context.Context, deps *Dependencies, projectID, issueID string) (domain.Task, []domain.Task, bool, error) {
 	restoreProject := applyIssueProjectOverride(deps, projectID)
 	defer restoreProject()
 
 	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
 	if err != nil {
-		return domain.Task{}, false, fmt.Errorf("failed to validate issue %s in project %s: %w", issueID, projectID, err)
+		return domain.Task{}, nil, false, fmt.Errorf("failed to validate issue %s in project %s: %w", issueID, projectID, err)
 	}
 	task, ok := findTaskByID(snapshot.Tasks, issueID)
-	return task, ok, nil
+	return task, snapshot.Tasks, ok, nil
 }
 
 func findSessionProjectCandidate(deps *Dependencies, projectID string) (sessionProjectCandidate, bool) {
@@ -798,97 +799,80 @@ func validateSessionIssueID(ctx context.Context, deps *Dependencies, issueID str
 }
 
 func resolveSessionStartBaseBranch(ctx context.Context, deps *Dependencies, task domain.Task) (string, error) {
+	return resolveSessionStartBaseBranchWithTasks(ctx, deps, task, nil)
+}
+
+func resolveSessionStartBaseBranchWithTasks(ctx context.Context, deps *Dependencies, task domain.Task, taskContext []domain.Task) (string, error) {
 	baseBranch := resolveCLIBaseBranch(deps.Config)
 	parentID := taskParentIssueID(task)
 	if parentID == "" {
 		return baseBranch, nil
 	}
-	return resolveParentWorktreeBaseBranch(ctx, deps, baseBranch, parentID, task.ID.String())
+	return resolveParentWorktreeBaseBranchWithTasks(ctx, deps, baseBranch, parentID, task.ID.String(), taskContext)
 }
 
 func resolveParentWorktreeBaseBranch(ctx context.Context, deps *Dependencies, baseBranch, parentID, issueIDForError string) (string, error) {
+	return resolveParentWorktreeBaseBranchWithTasks(ctx, deps, baseBranch, parentID, issueIDForError, nil)
+}
+
+func resolveParentWorktreeBaseBranchWithTasks(ctx context.Context, deps *Dependencies, baseBranch, parentID, issueIDForError string, taskContext []domain.Task) (string, error) {
 	parentID = strings.TrimSpace(parentID)
 	if parentID == "" {
 		return baseBranch, nil
+	}
+	tasksByID := tasksByIssueID(taskContext)
+	if len(tasksByID) == 0 {
+		tasks, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+		if err != nil {
+			return "", fmt.Errorf("resolve ancestor task graph for %s: %w", issueIDForError, err)
+		}
+		tasksByID = tasksByIssueID(tasks.Tasks)
+	}
+	if _, ok := tasksByID[strings.TrimSpace(issueIDForError)]; !ok {
+		if parsed, parseErr := naming.ParseIssueID(strings.TrimSpace(issueIDForError)); parseErr == nil {
+			parent := naming.IssueID(parentID)
+			tasksByID[parsed.String()] = domain.Task{ID: parsed, ParentID: &parent}
+		}
 	}
 	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
 	if err != nil {
 		return "", fmt.Errorf("resolve parent worktree branch for %s: %w", issueIDForError, err)
 	}
-	if branch := branchForIssueWorktree(worktrees, parentID); branch != "" {
-		return branch, nil
-	}
-	tasks, err := deps.DaemonClient.ListTasksSnapshot(ctx)
-	if err != nil {
-		return "", fmt.Errorf("resolve ancestor task graph for %s: %w", issueIDForError, err)
-	}
-	tasksByID := make(map[string]domain.Task, len(tasks.Tasks))
-	for _, candidate := range tasks.Tasks {
-		issueID := strings.TrimSpace(candidate.ID.String())
-		if issueID != "" {
-			tasksByID[issueID] = candidate
-		}
-	}
-	seen := map[string]struct{}{}
-	for parentID != "" {
-		if _, ok := seen[parentID]; ok {
-			return baseBranch, nil
-		}
-		seen[parentID] = struct{}{}
-		if branch := branchForIssueWorktree(worktrees, parentID); branch != "" {
-			return branch, nil
-		}
-		parentTask, ok := tasksByID[parentID]
-		if !ok {
-			return baseBranch, nil
-		}
-		parentID = taskParentIssueID(parentTask)
+	if target, ok := domain.ClosestAncestorWithWorktree(issueIDForError, tasksByID, issueWorktreeRefsFromDaemonWorktrees(worktrees)); ok {
+		return target.Branch, nil
 	}
 	return baseBranch, nil
 }
 
 func taskParentIssueID(task domain.Task) string {
-	if task.ParentID != nil {
-		return strings.TrimSpace(task.ParentID.String())
-	}
-	for _, dep := range task.Dependencies {
-		if dep.Type == domain.DependencyParentChild || string(dep.Type) == "parent_child" {
-			if parentID := strings.TrimSpace(dep.ID.String()); parentID != "" {
-				return parentID
-			}
-		}
-	}
-	return ""
+	return domain.TaskParentIssueID(task)
 }
 
-func branchForIssueWorktree(worktrees []daemonclient.Worktree, issueID string) string {
-	matched := false
-	for _, worktree := range worktrees {
-		if !naming.IssueIDsEqual(worktree.IssueID, issueID) {
+func tasksByIssueID(tasks []domain.Task) map[string]domain.Task {
+	tasksByID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		id := strings.TrimSpace(task.ID.String())
+		if id == "" {
 			continue
 		}
-		matched = true
-		branch := strings.TrimSpace(worktree.Branch)
-		if branch != "" {
-			return branch
-		}
+		tasksByID[id] = task
 	}
-	if matched {
-		return ""
-	}
-	return ""
+	return tasksByID
 }
 
-func worktreePathForIssue(worktrees []daemonclient.Worktree, issueID string) string {
+func issueWorktreeRefsFromDaemonWorktrees(worktrees []daemonclient.Worktree) map[string]domain.IssueWorktreeRef {
+	refs := make(map[string]domain.IssueWorktreeRef, len(worktrees))
 	for _, worktree := range worktrees {
-		if !naming.IssueIDsEqual(worktree.IssueID, issueID) {
+		issueID := strings.TrimSpace(worktree.IssueID)
+		if issueID == "" {
 			continue
 		}
-		if path := strings.TrimSpace(worktree.Path); path != "" {
-			return path
+		refs[issueID] = domain.IssueWorktreeRef{
+			Branch: strings.TrimSpace(worktree.Branch),
+			Path:   strings.TrimSpace(worktree.Path),
 		}
 	}
-	return ""
+	return refs
 }
 
 // BranchMergeToBaseCommand merges one issue worktree branch into its resolved target branch using daemon git commands.
@@ -1034,14 +1018,7 @@ func resolveMergeToBaseTarget(ctx context.Context, deps *Dependencies, issueID s
 		return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("resolve merge base branch task graph: %w", err)
 	}
 
-	tasksByID := make(map[string]domain.Task, len(snapshot.Tasks))
-	for _, task := range snapshot.Tasks {
-		id := strings.TrimSpace(task.ID.String())
-		if id == "" {
-			continue
-		}
-		tasksByID[id] = task
-	}
+	tasksByID := tasksByIssueID(snapshot.Tasks)
 	sourceTask, ok := tasksByID[issueID]
 	if !ok {
 		return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("cannot resolve merge target for %s: issue not found in task snapshot; refusing fallback to base", issueID)
@@ -1055,38 +1032,28 @@ func resolveMergeToBaseTarget(ctx context.Context, deps *Dependencies, issueID s
 	decision := mergeTargetDecision{
 		AncestorChain: make([]string, 0, 6),
 	}
-	seen := map[string]struct{}{}
-	for parentID := taskParentIssueID(sourceTask); parentID != ""; {
-		decision.AncestorChain = append(decision.AncestorChain, parentID)
-		if _, ok := seen[parentID]; ok {
-			decision.Reason = "ancestor cycle detected: defaulting to base target"
-			return defaultTarget, decision, nil
+	if target, ok := domain.ClosestAncestorWithWorktree(issueID, tasksByID, issueWorktreeRefsFromDaemonWorktrees(worktrees)); ok {
+		decision.AncestorChain = target.AncestorChain
+		decision.Reason = "selected closest ancestor worktree branch"
+		return mergeBaseTarget{
+			TargetID:       target.IssueID,
+			Branch:         target.Branch,
+			WorktreePath:   target.WorktreePath,
+			BranchAttached: true,
+		}, decision, nil
+	} else {
+		decision.AncestorChain = target.AncestorChain
+	}
+	for _, parentID := range decision.AncestorChain {
+		if _, ok := tasksByID[parentID]; !ok {
+			return mergeBaseTarget{}, decision, fmt.Errorf("cannot resolve merge target for %s: parent issue %s missing from task snapshot; refusing fallback to base", issueID, parentID)
 		}
-		seen[parentID] = struct{}{}
-
-		parentTask, ok := tasksByID[parentID]
-		if !ok {
-			return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("cannot resolve merge target for %s: parent issue %s missing from task snapshot; refusing fallback to base", issueID, parentID)
-		}
-		if parentTask.Status != domain.StatusDone {
-			if branch := branchForIssueWorktree(worktrees, parentID); branch != "" {
-				decision.Reason = "selected nearest non-closed ancestor branch"
-				return mergeBaseTarget{
-					TargetID:       parentID,
-					Branch:         branch,
-					WorktreePath:   worktreePathForIssue(worktrees, parentID),
-					BranchAttached: true,
-				}, decision, nil
-			}
-			return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("nearest non-closed ancestor %s has no active worktree branch; attach/start that ancestor before merging %s", parentID, issueID)
-		}
-		parentID = taskParentIssueID(parentTask)
 	}
 	if taskParentIssueID(sourceTask) != "" && !allowBaseForChild {
-		return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("refusing to merge child issue %s into base without explicit override; rerun with --allow-base-for-child", issueID)
+		return mergeBaseTarget{}, decision, fmt.Errorf("refusing to merge child issue %s into base without explicit override; rerun with --allow-base-for-child", issueID)
 	}
 	if taskParentIssueID(sourceTask) != "" {
-		decision.Reason = "ancestor chain closed; explicit override allowed base target"
+		decision.Reason = "no ancestor worktree branch found; explicit override allowed base target"
 	} else {
 		decision.Reason = "no ancestor chain; selected default base target"
 	}
@@ -5345,11 +5312,14 @@ func renderPrimeIssueSection(issueID string, task domain.Task) string {
 	}
 	implementations := formatPrimeImplementations(task.Implementations)
 	parent := ""
+	mailbox := ""
 	if task.ParentID != nil && strings.TrimSpace(task.ParentID.String()) != "" {
-		parent = fmt.Sprintf("\nParent: %s", strings.TrimSpace(task.ParentID.String()))
+		parentID := strings.TrimSpace(task.ParentID.String())
+		parent = fmt.Sprintf("\nParent: %s", parentID)
+		mailbox = fmt.Sprintf("- Worker mailbox: receive orchestrator messages with `az mail list --parent %s --since 0 --json`; use `az mail watch --parent %s --since <seq> --jsonl` only when explicitly asked to monitor continuously.\n", parentID, parentID)
 	}
 	return fmt.Sprintf(
-		"Active issue context (AZEDARACH_ISSUE_ID=%s):\nRefresh with `az issue get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s impl=%s]%s%s\nDependencies:\n%s\n```\n",
+		"Active issue context (AZEDARACH_ISSUE_ID=%s):\nRefresh with `az issue get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s impl=%s]%s%s\nDependencies:\n%s\n```\n%s",
 		issueID,
 		issueID,
 		task.ID,
@@ -5361,6 +5331,7 @@ func renderPrimeIssueSection(issueID string, task domain.Task) string {
 		parent,
 		description,
 		formatPrimeDependencyLines(task.Dependencies),
+		mailbox,
 	)
 }
 

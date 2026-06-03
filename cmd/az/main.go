@@ -811,7 +811,7 @@ func main() {
 		}
 	case "orchestrate":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az orchestrate <status|start|watch|prompt|complete-check|integrate|close-session> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az orchestrate <status|start|watch|prompt|message|complete-check|integrate|close-session> [arguments]\n")
 			os.Exit(1)
 		}
 		switch commandArgs[0] {
@@ -867,6 +867,19 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
+		case "message":
+			opts, err := cli.ParseOrchestrateMessageArgs(commandArgs[1:])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az orchestrate message --root <issue-id> --issue <issue-id> --body <text> [--type <event-type>] [--project <project-id>] [--json]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.OrchestrateMessageCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
 		case "complete-check":
 			opts, err := cli.ParseOrchestrateCompleteCheckArgs(commandArgs[1:])
 			if err != nil {
@@ -908,7 +921,7 @@ func main() {
 			}
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown orchestrate command: %s\n", commandArgs[0])
-			fmt.Fprintf(os.Stderr, "Usage: az orchestrate <status|start|watch|prompt|complete-check|integrate|close-session> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az orchestrate <status|start|watch|prompt|message|complete-check|integrate|close-session> [arguments]\n")
 			os.Exit(1)
 		}
 

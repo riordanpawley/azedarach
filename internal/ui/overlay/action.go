@@ -511,10 +511,10 @@ func (m *BulkActionMenu) buildActions() []Action {
 		{Key: "l", Label: "Move right (next status)", Enabled: true},
 		{Key: "", Label: "───────────────────", Enabled: false},
 		// Specific status
-		{Key: "o", Label: "Set to Open", Enabled: true},
-		{Key: "i", Label: "Set to In Progress", Enabled: true},
-		{Key: "b", Label: "Set to In Review", Enabled: true},
-		{Key: "D", Label: "Set to Done", Enabled: true},
+		{Key: "1", Label: "Set status: Open", Enabled: true},
+		{Key: "2", Label: "Set status: In Progress", Enabled: true},
+		{Key: "3", Label: "Set status: In Review", Enabled: true},
+		{Key: "4", Label: "Set status: Done", Enabled: true},
 		{Key: "", Label: "───────────────────", Enabled: false},
 		// Other actions
 		{Key: "w", Label: "Cleanup worktrees", Enabled: true},

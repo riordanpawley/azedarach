@@ -476,8 +476,7 @@ func (m Model) resolveMergeBaseTarget(ctx context.Context, sourceID string) (mer
 		}
 		taskByID[id] = task
 	}
-	sourceTask, ok := taskByID[sourceID]
-	if !ok {
+	if _, ok := taskByID[sourceID]; !ok {
 		return defaultTarget, nil
 	}
 
@@ -486,69 +485,34 @@ func (m Model) resolveMergeBaseTarget(ctx context.Context, sourceID string) (mer
 		return mergeBaseTarget{}, fmt.Errorf("resolve merge base branch worktrees: %w", err)
 	}
 
-	seen := map[string]struct{}{}
-	for parentID := taskParentIssueID(sourceTask); parentID != ""; {
-		if _, ok := seen[parentID]; ok {
-			return defaultTarget, nil
-		}
-		seen[parentID] = struct{}{}
-
-		parentTask, ok := taskByID[parentID]
-		if !ok {
-			return defaultTarget, nil
-		}
-		if parentTask.Status != domain.StatusDone {
-			if branch := branchForIssueDaemonWorktree(worktrees, parentID); branch != "" {
-				return mergeBaseTarget{
-					targetID:       parentID,
-					targetBranch:   branch,
-					targetWorktree: worktreePathForIssueDaemonWorktree(worktrees, parentID),
-				}, nil
-			}
-			return mergeBaseTarget{}, fmt.Errorf("nearest non-closed ancestor %s has no active worktree branch; attach/start that ancestor before merging %s", parentID, sourceID)
-		}
-		parentID = taskParentIssueID(parentTask)
+	if target, ok := domain.ClosestAncestorWithWorktree(sourceID, taskByID, issueWorktreeRefsFromDaemonWorktrees(worktrees)); ok {
+		return mergeBaseTarget{
+			targetID:       target.IssueID,
+			targetBranch:   target.Branch,
+			targetWorktree: target.WorktreePath,
+		}, nil
 	}
 
 	return defaultTarget, nil
 }
 
 func taskParentIssueID(task domain.Task) string {
-	if task.ParentID != nil {
-		return strings.TrimSpace(task.ParentID.String())
-	}
-	for _, dep := range task.Dependencies {
-		if dep.Type == domain.DependencyParentChild || string(dep.Type) == "parent_child" {
-			if parentID := strings.TrimSpace(dep.ID.String()); parentID != "" {
-				return parentID
-			}
-		}
-	}
-	return ""
+	return domain.TaskParentIssueID(task)
 }
 
-func branchForIssueDaemonWorktree(worktrees []daemonclient.Worktree, issueID string) string {
+func issueWorktreeRefsFromDaemonWorktrees(worktrees []daemonclient.Worktree) map[string]domain.IssueWorktreeRef {
+	refs := make(map[string]domain.IssueWorktreeRef, len(worktrees))
 	for _, wt := range worktrees {
-		if !strings.EqualFold(strings.TrimSpace(wt.IssueID), strings.TrimSpace(issueID)) {
+		issueID := strings.TrimSpace(wt.IssueID)
+		if issueID == "" {
 			continue
 		}
-		if branch := strings.TrimSpace(wt.Branch); branch != "" {
-			return branch
+		refs[issueID] = domain.IssueWorktreeRef{
+			Branch: strings.TrimSpace(wt.Branch),
+			Path:   strings.TrimSpace(wt.Path),
 		}
 	}
-	return ""
-}
-
-func worktreePathForIssueDaemonWorktree(worktrees []daemonclient.Worktree, issueID string) string {
-	for _, wt := range worktrees {
-		if !strings.EqualFold(strings.TrimSpace(wt.IssueID), strings.TrimSpace(issueID)) {
-			continue
-		}
-		if path := strings.TrimSpace(wt.Path); path != "" {
-			return path
-		}
-	}
-	return ""
+	return refs
 }
 
 func (m Model) mergeToBaseCmd(sourceWorktree, sourceID string, refreshStatus bool) tea.Cmd {

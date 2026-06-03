@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -3955,7 +3956,7 @@ func TestBuildSessionLaunchCommandEscapesPromptCommandSubstitutionForCodex(t *te
 		"codex-az-42",
 		false,
 		nil,
-		buildStartWorkPrompt("az-42", string(domain.TypeEpic), "Replace apps/server", false),
+		buildStartWorkPrompt("az-42", string(domain.TypeEpic), "Replace apps/server", false, ""),
 	)
 
 	if strings.Contains(command, "`az orchestrate status --root <issue-id>`") {
@@ -3967,7 +3968,7 @@ func TestBuildSessionLaunchCommandEscapesPromptCommandSubstitutionForCodex(t *te
 }
 
 func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *testing.T) {
-	prompt := buildStartWorkPrompt("az-42", "task", "Fix startup shell", true)
+	prompt := buildStartWorkPrompt("az-42", "task", "Fix startup shell", true, "az-1")
 	if !strings.Contains(prompt, "work on issue az-42 (task): Fix startup shell") {
 		t.Fatalf("prompt = %q, want issue summary header", prompt)
 	}
@@ -3976,6 +3977,15 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *test
 	}
 	if !strings.Contains(prompt, "Role: worker") {
 		t.Fatalf("prompt = %q, want worker role primer", prompt)
+	}
+	if !strings.Contains(prompt, "Coordination mailbox parent: `az-1`") {
+		t.Fatalf("prompt = %q, want concrete parent mailbox", prompt)
+	}
+	if !strings.Contains(prompt, "az mail list --parent az-1 --since 0 --json") {
+		t.Fatalf("prompt = %q, want inbound mailbox read command", prompt)
+	}
+	if !strings.Contains(prompt, "before declaring yourself blocked or idle") {
+		t.Fatalf("prompt = %q, want receive-before-idle guidance", prompt)
 	}
 	for _, eventType := range []string{"worker-progress", "worker-blocked", "worker-integration-ready"} {
 		if !strings.Contains(prompt, eventType) {
@@ -3997,7 +4007,7 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *test
 }
 
 func TestBuildStartWorkPromptOmitsMailboxGuidanceForStandaloneTask(t *testing.T) {
-	prompt := buildStartWorkPrompt("az-42", "task", "Fix startup shell", false)
+	prompt := buildStartWorkPrompt("az-42", "task", "Fix startup shell", false, "")
 	if !strings.Contains(prompt, "Role: contributor") {
 		t.Fatalf("prompt = %q, want contributor role primer", prompt)
 	}
@@ -4013,7 +4023,7 @@ func TestBuildStartWorkPromptOmitsMailboxGuidanceForStandaloneTask(t *testing.T)
 }
 
 func TestBuildStartWorkPromptSanitizesControlCharsAndAngleBrackets(t *testing.T) {
-	prompt := buildStartWorkPrompt("az-42", "task\n", "Fix <shell>\tselection", false)
+	prompt := buildStartWorkPrompt("az-42", "task\n", "Fix <shell>\tselection", false, "")
 	if strings.Contains(prompt, "<shell>") {
 		t.Fatalf("prompt = %q, want angle brackets sanitized", prompt)
 	}
@@ -4026,7 +4036,7 @@ func TestBuildStartWorkPromptSanitizesControlCharsAndAngleBrackets(t *testing.T)
 }
 
 func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
-	prompt := buildStartWorkPrompt("az-99", "epic", "Coordinate big tree", false)
+	prompt := buildStartWorkPrompt("az-99", "epic", "Coordinate big tree", false, "")
 	if !strings.Contains(prompt, "Role: orchestrator") {
 		t.Fatalf("prompt = %q, want orchestrator role primer", prompt)
 	}
@@ -4041,6 +4051,12 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "az orchestrate complete-check --root <issue-id>") {
 		t.Fatalf("prompt = %q, want complete-check instruction", prompt)
+	}
+	if !strings.Contains(prompt, "az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\"") {
+		t.Fatalf("prompt = %q, want active worker message instruction", prompt)
+	}
+	if !strings.Contains(prompt, "bare `az mail send` is durable mailbox-only") {
+		t.Fatalf("prompt = %q, want passive mailbox warning", prompt)
 	}
 	if !strings.Contains(prompt, "Trust hook-backed `activity=busy|idle` for worker idleness checks") {
 		t.Fatalf("prompt = %q, want bounded tmux observation guidance", prompt)
@@ -4065,6 +4081,51 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "close accepted worker issues with `az issue close --id <issue-id>`") {
 		t.Fatalf("prompt = %q, want issue close completion guidance", prompt)
+	}
+}
+
+func TestSessionMessageSendsKeysToActiveIssueSession(t *testing.T) {
+	projectID := protocol.DefaultProjectID
+	issueID := naming.IssueID("az-42")
+	repoDir := "/repo"
+	sessionID := naming.CanonicalSessionIDForIssue(repoDir, issueID).String()
+	tmuxRunner := newSessionStartTmuxRunner()
+	tmuxRunner.sessions[sessionID] = true
+	daemon := &Daemon{
+		cfg:  Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		tmux: tmux.NewClient(tmuxRunner, slog.New(slog.NewTextHandler(io.Discard, nil))),
+	}
+	body, err := json.Marshal(sessionCommandBody{
+		ProjectID: projectID,
+		SessionID: issueID.String(),
+		Message:   "Orchestrator says proceed now.",
+	})
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+
+	resp, err := daemon.handleSessionMessage(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-session-message",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         daemonhandlers.CommandSessionMessage,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleSessionMessage error = %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("response not OK: %+v", resp)
+	}
+	if tmuxRunner.sendKeysCalls != 1 {
+		t.Fatalf("sendKeysCalls = %d, want 1", tmuxRunner.sendKeysCalls)
+	}
+	if got := tmuxRunner.sendKeysTargets[0]; got != sessionID {
+		t.Fatalf("send target = %q, want %q", got, sessionID)
+	}
+	if got := tmuxRunner.sendKeysPayloads[0]; got != "Orchestrator says proceed now." {
+		t.Fatalf("send payload = %q", got)
 	}
 }
 

@@ -19,6 +19,7 @@ const (
 	CommandSessionPause           = "session.pause"
 	CommandSessionResume          = "session.resume"
 	CommandSessionStop            = "session.stop"
+	CommandSessionMessage         = "session.message"
 	CommandSessionStatus          = "session.status"
 	CommandSessionResolveConflict = protocol.CommandSessionResolveConflict
 	CommandRuntimeReconcile       = "runtime.reconcile"
@@ -38,6 +39,7 @@ type sessionCommandBody struct {
 	Yolo       bool             `json:"yolo,omitempty"`
 	StartWork  *bool            `json:"start_work,omitempty"`
 	ImagePaths []string         `json:"image_paths,omitempty"`
+	Message    string           `json:"message,omitempty"`
 }
 
 // StartSessionParams captures lifecycle start options in a single payload
@@ -91,6 +93,11 @@ type worktreeCommandBody struct {
 	ProjectID naming.ProjectID `json:"project_id"`
 	IssueID   naming.IssueID   `json:"issue_id,omitempty"`
 	Force     bool             `json:"force,omitempty"`
+}
+
+type worktreeRemoveResponseBody struct {
+	ProjectID naming.ProjectID `json:"project_id"`
+	IssueID   naming.IssueID   `json:"issue_id"`
 }
 
 // RuntimeReconcileResult captures the runtime repair summary returned by the daemon.
@@ -197,6 +204,23 @@ func (c *Client) ResumeSession(ctx context.Context, issueID string) (string, err
 	return c.commandOutput(ctx, CommandSessionResume, sessionCommandBody{
 		ProjectID: c.projectID,
 		SessionID: naming.SessionID(parsedIssueID),
+	})
+}
+
+// SendSessionMessage injects one prompt/message into an active issue session.
+func (c *Client) SendSessionMessage(ctx context.Context, issueID, message string) (string, error) {
+	parsedIssueID, err := parseIssueID(issueID)
+	if err != nil {
+		return "", err
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return "", errors.New("message cannot be empty")
+	}
+	return c.commandOutput(ctx, CommandSessionMessage, sessionCommandBody{
+		ProjectID: c.projectID,
+		SessionID: naming.SessionID(parsedIssueID),
+		Message:   message,
 	})
 }
 
@@ -387,11 +411,12 @@ func (c *Client) RemoveWorktreeWithOptions(ctx context.Context, issueID string, 
 	if err != nil {
 		return err
 	}
+	var out worktreeRemoveResponseBody
 	return c.commandJSON(ctx, CommandWorktreeRemove, worktreeCommandBody{
 		ProjectID: c.projectID,
 		IssueID:   parsedIssueID,
 		Force:     force,
-	}, nil)
+	}, &out)
 }
 
 // CleanupOrphanedWorktrees asks the daemon to remove orphaned worktrees for the current project route.
