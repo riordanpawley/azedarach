@@ -612,8 +612,15 @@ func (d *Daemon) handleDaemonShutdown(req protocol.RequestEnvelope) protocol.Res
 	if len(req.Body) > 0 {
 		_ = json.Unmarshal(req.Body, &body)
 	}
+	reason := strings.TrimSpace(body.Reason)
 	if d.cfg.Logger != nil {
-		d.cfg.Logger.Info("daemon shutdown requested", "reason", strings.TrimSpace(body.Reason), "request_id", req.RequestID, "project_id", req.Meta.ProjectID)
+		d.cfg.Logger.Info("daemon shutdown requested", "reason", reason, "request_id", req.RequestID, "project_id", req.Meta.ProjectID)
+	}
+	if reason == "replace" {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("ignoring legacy daemon replace shutdown request", "reason", reason, "request_id", req.RequestID, "project_id", req.Meta.ProjectID)
+		}
+		return d.successResponse(req)
 	}
 	d.requestShutdown()
 	return d.successResponse(req)

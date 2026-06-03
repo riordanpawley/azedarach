@@ -5179,6 +5179,9 @@ func RestartDaemonCommand(deps *Dependencies) error {
 	defer cancel()
 
 	launcher := newLauncher(runtimeRepoDirForDeps(deps), deps.DaemonSocket)
+	if concreteLauncher, ok := launcher.(*daemonprocess.Launcher); ok {
+		concreteLauncher.WithReplaceReason("manual-restart")
+	}
 	if err := launcher.Replace(ctx); err != nil {
 		return fmt.Errorf("restart daemon: %w", err)
 	}
