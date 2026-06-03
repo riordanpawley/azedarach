@@ -275,6 +275,7 @@ func New(cfg Config) *Daemon {
 		return d.worktreeRuntimeStateStore(projectID)
 	}
 	gitService.baseBranchForProject = d.baseBranchForProject
+	gitService.baseBranchForWorktree = d.runtimeDiffBaseBranchForWorktree
 	gitService.onStatusUpdate = func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) {
 		d.runtimeProjectionStateWriter().PublishGitStatusProjectionEvent(ctx, projectID, issueID, worktree, status)
 	}

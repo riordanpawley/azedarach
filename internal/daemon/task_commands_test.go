@@ -2193,6 +2193,82 @@ func TestRuntimeDiffBaseBranchForIssueSkipsAncestorWithoutWorktree(t *testing.T)
 	}
 }
 
+func TestRuntimeDiffBaseBranchForWorktreeUsesClosestAncestorWorktree(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-worktree-base"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "parent",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "child",
+		Type:     domain.TypeTask,
+		ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+
+	parentWorktree := filepath.Join(repoDir, "wt-parent")
+	childWorktree := filepath.Join(repoDir, "wt-child")
+	parentBranch := "riordan/" + parentID + "/parent-branch"
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	for _, row := range []daemonstate.WorktreeState{
+		{ProjectID: projectID, IssueID: parentID, Path: parentWorktree, Branch: parentBranch, UpdatedAt: time.Now().UTC()},
+		{ProjectID: projectID, IssueID: childID, Path: childWorktree, Branch: "riordan/" + childID + "/child-branch", UpdatedAt: time.Now().UTC()},
+	} {
+		if err := store.UpsertWorktreeState(ctx, row); err != nil {
+			t.Fatalf("seed worktree state: %v", err)
+		}
+	}
+
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		if len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" {
+			return strings.Join([]string{
+				"worktree " + repoDir,
+				"branch refs/heads/preview",
+				"",
+				"worktree " + parentWorktree,
+				"branch refs/heads/" + parentBranch,
+				"",
+				"worktree " + childWorktree,
+				"branch refs/heads/riordan/" + childID + "/child-branch",
+				"",
+			}, "\n"), nil
+		}
+		t.Fatalf("unexpected git args: %v", args)
+		return "", nil
+	}}
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "preview", Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(runner, repoDir, slog.Default()),
+		},
+	}
+
+	branch := d.runtimeDiffBaseBranchForWorktree(ctx, projectID, childWorktree)
+	if branch != parentBranch {
+		t.Fatalf("runtimeDiffBaseBranchForWorktree(...) = %q, want closest ancestor worktree branch %q", branch, parentBranch)
+	}
+}
+
 func TestRefreshWorktreeRuntimeStateFallsBackToAncestorWorktreeBranchWhenAncestorTaskMissing(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-refresh-ancestor-worktree-fallback"

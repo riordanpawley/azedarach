@@ -807,6 +807,61 @@ func (d *Daemon) runtimeDiffBaseBranchForIssue(
 	return baseBranch
 }
 
+func (d *Daemon) runtimeDiffBaseBranchForWorktree(ctx context.Context, projectID, worktree string) string {
+	if d == nil || strings.TrimSpace(worktree) == "" {
+		return "main"
+	}
+	baseBranch := d.baseBranchForProject(projectID)
+	if strings.TrimSpace(baseBranch) == "" {
+		baseBranch = "main"
+	}
+	projectID = d.canonicalProjectID(projectID)
+	store := d.worktreeRuntimeStateStore(projectID)
+	if store == nil {
+		return baseBranch
+	}
+	projection, found, err := store.GetWorktreeStateByPath(ctx, projectID, worktree)
+	if err != nil || !found || strings.TrimSpace(projection.IssueID) == "" {
+		return baseBranch
+	}
+
+	manager := d.worktreeManagerForProject(projectID)
+	if manager == nil {
+		return baseBranch
+	}
+	worktrees, err := manager.List(ctx)
+	if err != nil {
+		return baseBranch
+	}
+	worktreeByIssue := make(map[string]git.Worktree, len(worktrees))
+	for _, wt := range worktrees {
+		issueID := strings.TrimSpace(wt.IssueID)
+		if issueID == "" {
+			continue
+		}
+		worktreeByIssue[issueID] = wt
+	}
+
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return baseBranch
+	}
+	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+	if err != nil {
+		return baseBranch
+	}
+	taskByIssue := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		issueID := strings.TrimSpace(task.ID.String())
+		if issueID == "" {
+			continue
+		}
+		taskByIssue[issueID] = task
+	}
+
+	return d.runtimeDiffBaseBranchForIssue(projection.IssueID, baseBranch, taskByIssue, worktreeByIssue)
+}
+
 func issueWorktreeRefsFromGitWorktrees(worktreesByIssue map[string]git.Worktree) map[string]domain.IssueWorktreeRef {
 	if len(worktreesByIssue) == 0 {
 		return nil
