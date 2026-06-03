@@ -37,6 +37,7 @@ type gitServiceAdapter struct {
 	onStatusUpdate              func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus)
 	baseBranch                  string
 	baseBranchForProject        func(string) string
+	baseBranchForWorktree       func(context.Context, string, string) string
 
 	refreshMu      sync.Mutex
 	refreshRunning map[string]bool
@@ -514,7 +515,7 @@ func (a *gitServiceAdapter) refreshGitStatusWriteThrough(ctx context.Context, pr
 
 func (a *gitServiceAdapter) refreshGitStatusWriteThroughResult(ctx context.Context, projectID, worktree string, publishOnChange, forcePublish bool) (*git.GitStatus, error) {
 	projectID = normalizeProjectID(projectID)
-	baseBranch := a.resolvedBaseBranch(projectID)
+	baseBranch := a.resolvedBaseBranchForWorktree(ctx, projectID, worktree)
 
 	var (
 		status *git.GitStatus
@@ -551,6 +552,15 @@ func (a *gitServiceAdapter) refreshGitStatusWriteThroughResult(ctx context.Conte
 		a.onStatusUpdate(ctx, projectID, issueID, worktree, status)
 	}
 	return status, nil
+}
+
+func (a *gitServiceAdapter) resolvedBaseBranchForWorktree(ctx context.Context, projectID, worktree string) string {
+	if a != nil && a.baseBranchForWorktree != nil {
+		if baseBranch := strings.TrimSpace(a.baseBranchForWorktree(ctx, projectID, worktree)); baseBranch != "" {
+			return baseBranch
+		}
+	}
+	return a.resolvedBaseBranch(projectID)
 }
 
 func (a *gitServiceAdapter) refreshGitStatusAsync(projectID, worktree string) {

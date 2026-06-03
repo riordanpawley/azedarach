@@ -936,6 +936,51 @@ func TestGitServiceAdapterHookRefreshCoalescesBurstForWorktree(t *testing.T) {
 	}
 }
 
+func TestGitServiceAdapterStatusRefreshUsesWorktreeSpecificBaseBranch(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	projectID := "default"
+	worktree := "/tmp/az-child"
+	var mergeBaseRef string
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "status" && args[3] == "--porcelain":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktree && args[2] == "merge-base":
+			mergeBaseRef = args[3]
+			return "abc123\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktree && args[2] == "symbolic-ref":
+			return "", errors.New("no remote head")
+		case len(args) >= 8 && args[0] == "-C" && args[1] == worktree && args[2] == "diff" && args[3] == "--shortstat":
+			return " 2 files changed, 5 insertions(+), 1 deletion(-)\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktree && args[2] == "rev-list" && args[3] == "--count":
+			return "0\n", nil
+		default:
+			t.Fatalf("unexpected git args: %v", args)
+			return "", nil
+		}
+	}}
+	adapter := &gitServiceAdapter{
+		client:     git.NewClient(runner, slog.Default()),
+		baseBranch: "preview",
+		baseBranchForWorktree: func(context.Context, string, string) string {
+			return "az/parent"
+		},
+	}
+
+	status, err := adapter.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, false, false)
+	if err != nil {
+		t.Fatalf("refreshGitStatusWriteThroughResult: %v", err)
+	}
+	if status == nil || status.GitAdditions != 5 || status.GitDeletions != 1 {
+		t.Fatalf("status = %+v, want runtime diff totals", status)
+	}
+	if mergeBaseRef != "az/parent" {
+		t.Fatalf("merge-base ref = %q, want worktree-specific ancestor base", mergeBaseRef)
+	}
+}
+
 func TestGitServiceAdapterRuntimeSignalsUsesProjectionOnly(t *testing.T) {
 	t.Parallel()
 
