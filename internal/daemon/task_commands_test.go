@@ -2287,7 +2287,7 @@ func TestRefreshWorktreeRuntimeStateFallsBackToAncestorWorktreeBranchWhenAncesto
 	}
 	if got, want := strings.TrimSpace(mergeBaseRef), "main"; got != want {
 		// Full reconcile has no persisted parent relation in this test DB shape,
-		// so it correctly falls back to configured base branch there.
+		// so Az ancestry correctly falls back to configured base branch there.
 		t.Fatalf("merge-base base ref = %q, want %q", got, want)
 	}
 }
@@ -2350,5 +2350,32 @@ func TestRefreshWorktreeRuntimeStateMutationDoesNotBypassGitProbeBudget(t *testi
 	}
 	if statusCalls != 1 {
 		t.Fatalf("status calls = %d, want 1", statusCalls)
+	}
+}
+
+func TestWorktreeGitProbeThrottleKeyIncludesResolvedBaseBranch(t *testing.T) {
+	now := time.Date(2026, time.May, 6, 12, 0, 0, 0, time.UTC)
+	throttle := newReconcileThrottle(reconcileThrottleConfig{
+		Name:                 "worktree_git_probe_test",
+		Cadence:              time.Hour,
+		UnchangedBackoffBase: time.Hour,
+		UnchangedBackoffMax:  time.Hour,
+		FailureBackoffBase:   time.Hour,
+		FailureBackoffMax:    time.Hour,
+		Now:                  func() time.Time { return now },
+	})
+
+	oldBaseKey := worktreeGitProbeThrottleKey("proj", "/repo-dox", "preview")
+	if !throttle.Admit(oldBaseKey, false).Allowed() {
+		t.Fatal("initial preview-base probe was not admitted")
+	}
+	throttle.Record(oldBaseKey, "preview-large-diff", nil)
+	if throttle.Admit(oldBaseKey, false).Allowed() {
+		t.Fatal("same preview-base probe should be throttled after unchanged record")
+	}
+
+	parentBaseKey := worktreeGitProbeThrottleKey("proj", "/repo-dox", "riordan/cif/parent")
+	if !throttle.Admit(parentBaseKey, false).Allowed() {
+		t.Fatal("parent-base probe should not be suppressed by previous preview-base record")
 	}
 }

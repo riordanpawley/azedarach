@@ -602,7 +602,8 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 		}
 		worktreePath := strings.TrimSpace(wt.Path)
 		if d.git != nil && worktreePath != "" {
-			probeKey := gitStatusRefreshQueueKey(projectID, worktreePath)
+			issueBaseBranch := d.runtimeDiffBaseBranchForIssue(issueID, baseBranch, taskByIssue, worktreeByIssue)
+			probeKey := worktreeGitProbeThrottleKey(projectID, worktreePath, issueBaseBranch)
 			decision := throttle.Admit(probeKey, forceProbe)
 			switch decision.Action {
 			case reconcileThrottleSkip:
@@ -620,7 +621,6 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 				if len(processedIssueIDs) < cap(processedIssueIDs) {
 					processedIssueIDs = append(processedIssueIDs, issueID)
 				}
-				issueBaseBranch := d.runtimeDiffBaseBranchForIssue(issueID, baseBranch, taskByIssue, worktreeByIssue)
 				status, err := d.git.RuntimeStatus(ctx, worktreePath, issueBaseBranch)
 				outcome := throttle.Record(probeKey, gitStatusSignature(status), err)
 				if err != nil {
@@ -853,6 +853,15 @@ func (d *Daemon) ensureWorktreeGitProbeThrottle() *reconcileThrottle {
 		})
 	}
 	return d.worktreeGitProbeThrottle
+}
+
+func worktreeGitProbeThrottleKey(projectID, worktree, baseBranch string) string {
+	key := gitStatusRefreshQueueKey(projectID, worktree)
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+	return key + "|base=" + baseBranch
 }
 
 func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
