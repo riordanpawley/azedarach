@@ -1414,7 +1414,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		m.clearPendingTaskStatus(msg.taskID)
+		if msg.newStatus != domain.StatusDone {
+			m.clearPendingTaskStatus(msg.taskID)
+		}
 		m.syncTaskWorkspaceOverlay()
 		m.addToast(Toast{
 			Level:   ToastSuccess,
