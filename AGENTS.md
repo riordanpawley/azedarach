@@ -172,10 +172,13 @@ If any are missing, keep issue state `in_progress` or `open`.
 ## CLI/Binary Rules
 
 1. In this repo, PATH `az` is the Go implementation.
-2. For validation, use `go run ./cmd/az ...`, `go run ./cmd/azd ...`, or `./bin/az ...` from repo root.
-3. For daemon restarts, use `az daemon restart` from repo root (`just run` does this automatically).
-4. Do not bump protocol/version only to force restarts; bump versions only for contract changes.
-5. Keep CLI docs/help/examples with flags before positional arguments.
+2. Treat the installed/root `az` and `azd` binaries as production runtime assets. Worktree validation must not replace, overwrite, restart, or intentionally version-mismatch the production daemon.
+3. For validation in a worktree, prefer `go run ./cmd/az ...` and `go run ./cmd/azd ...` from that worktree. When `go run ./cmd/az ...` autostarts a linked-worktree daemon, it must use the worktree-scoped socket/lock and the same worktree's `go run ./cmd/azd` source fallback when no worktree-local `bin/azd` exists. If a compiled binary is needed, build to a worktree-local scratch path such as `.tmp/az-test/az` or `./bin/az`, and run that exact path.
+4. Do not copy worktree-built `az`/`azd` into `/Users/riordan/prog/azedarach/bin`, `/usr/local/bin`, Homebrew paths, or any shared PATH location unless the user explicitly asks for a production install/deploy.
+5. Do not run `az daemon restart`, `az daemon stop`, or `az daemon start` from a linked worktree as a validation shortcut. Use a worktree-scoped daemon path (`AZEDARACH_DAEMON_SCOPE=worktree go run ./cmd/az daemon restart`) only when the test specifically requires a live daemon restart. From the main repo, `az daemon restart` is allowed only when validating the production/root daemon path.
+6. If logs show `daemon version mismatch persisted after replacement`, assume a worktree binary has interacted with the shared production daemon. Stop and fix the isolation path or guidance; do not keep retrying replacement/restart commands.
+7. Do not bump protocol/version only to force restarts; bump versions only for contract changes.
+8. Keep CLI docs/help/examples with flags before positional arguments.
 
 ## Environment Rules
 
