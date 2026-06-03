@@ -597,6 +597,103 @@ func TestTaskStatusDoneRequiresCloseCleanupConfirmation(t *testing.T) {
 	}
 }
 
+func TestTaskStatusDoneSuccessKeepsOptimisticOverlayAcrossStaleHydration(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandTaskList:
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+						{ID: "az-4", Status: domain.StatusInReview},
+					}),
+				}, nil
+			case daemonclient.CommandWorktreeList:
+				respBody, err := json.Marshal(struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{ProjectID: "default"})
+				if err != nil {
+					t.Fatalf("marshal worktree response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandTaskUpdateStatus:
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{ID: "az-4", Status: domain.StatusInReview}}
+	m.nav.SelectTask("az-4", domain.StatusInReview.Column())
+
+	promptedAny, promptCmd := m.handleSelection(overlay.SelectionMsg{Key: "4"})
+	if promptCmd == nil {
+		t.Fatal("expected close confirmation command")
+	}
+	prompted := promptedAny.(Model)
+	confirmedAny, statusCmd := prompted.handleSelection(overlay.SelectionMsg{Key: "yes"})
+	if statusCmd == nil {
+		t.Fatal("expected status command after confirmation")
+	}
+	confirmed := confirmedAny.(Model)
+	statusMsg := statusCmd()
+	afterStatusAny, refreshCmd := confirmed.Update(statusMsg)
+	if refreshCmd == nil {
+		t.Fatal("expected refresh after successful close")
+	}
+	afterStatus := afterStatusAny.(Model)
+	if afterStatus.tasks[0].Status != domain.StatusDone {
+		t.Fatalf("status after close success = %s, want %s", afterStatus.tasks[0].Status, domain.StatusDone)
+	}
+	if _, ok := afterStatus.pendingStatuses[taskIDKey("az-4")]; !ok {
+		t.Fatal("pending done overlay should remain until hydration confirms done")
+	}
+
+	staleAny, _ := afterStatus.Update(issuesLoadedMsg{
+		tasks: []domain.Task{{ID: "az-4", Status: domain.StatusInReview}},
+	})
+	stale := staleAny.(Model)
+	if stale.tasks[0].Status != domain.StatusDone {
+		t.Fatalf("stale hydration status = %s, want optimistic %s", stale.tasks[0].Status, domain.StatusDone)
+	}
+	if _, ok := stale.pendingStatuses[taskIDKey("az-4")]; !ok {
+		t.Fatal("pending done overlay should survive stale hydration")
+	}
+
+	confirmedHydrationAny, _ := stale.Update(issuesLoadedMsg{
+		tasks: []domain.Task{{ID: "az-4", Status: domain.StatusDone}},
+	})
+	confirmedHydration := confirmedHydrationAny.(Model)
+	if confirmedHydration.tasks[0].Status != domain.StatusDone {
+		t.Fatalf("confirmed hydration status = %s, want %s", confirmedHydration.tasks[0].Status, domain.StatusDone)
+	}
+	if _, ok := confirmedHydration.pendingStatuses[taskIDKey("az-4")]; ok {
+		t.Fatal("pending done overlay should clear after hydration confirms done")
+	}
+}
+
 func TestTaskStatusMoveFailureRollsBackOptimisticState(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
