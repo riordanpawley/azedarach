@@ -11,16 +11,16 @@ if git rev-parse -q --verify REBASE_HEAD >/dev/null 2>&1 || git rev-parse -q --v
 fi
 
 if [ "${AZEDARACH_SKIP_BOUNDARY_CHECK:-0}" = "1" ]; then
-  echo "pre-commit: boundary checks skipped (AZEDARACH_SKIP_BOUNDARY_CHECK=1)"
+  echo "pre-commit: boundary validation advice skipped (AZEDARACH_SKIP_BOUNDARY_CHECK=1)"
   exit 0
 fi
 
-run_boundary_check=0
+advise_boundary_check=0
 
 while IFS= read -r path; do
   case "$path" in
-    internal/*|cmd/*|docs/*|justfile|AGENTS.md|.golangci-boundary.yml|scripts/check-boundaries.sh|scripts/afv-drift-sentinel.sh)
-      run_boundary_check=1
+    internal/*|cmd/*|docs/*|justfile|AGENTS.md|.githooks/*|.golangci-boundary.yml|scripts/check-boundaries.sh|scripts/afv-drift-sentinel.sh)
+      advise_boundary_check=1
       break
       ;;
   esac
@@ -28,9 +28,8 @@ done <<EOF
 $(git diff --cached --name-only --diff-filter=ACMR)
 EOF
 
-if [ "$run_boundary_check" = "1" ]; then
-  echo "pre-commit: running boundary validation checks"
-  timeout 1m just check-boundaries
+if [ "$advise_boundary_check" = "1" ]; then
+  echo "pre-commit: boundary-sensitive files staged; run 'just check-boundaries' before review"
 fi
 
 exit 0
