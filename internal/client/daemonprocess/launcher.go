@@ -39,6 +39,19 @@ type Launcher struct {
 	terminateLockOwner func(lockPath string) error
 }
 
+type daemonCommand struct {
+	executable string
+	args       []string
+	dir        string
+}
+
+func (c daemonCommand) displayName() string {
+	if len(c.args) == 0 {
+		return c.executable
+	}
+	return c.executable + " " + strings.Join(c.args, " ")
+}
+
 // NewLauncher returns a daemon process launcher for repoDir.
 func NewLauncher(repoDir, socketPath string) *Launcher {
 	if config.UseScopedDaemonRuntimeFor(repoDir) || socketPath == config.ScopedDaemonSocketPath(repoDir) {
@@ -84,7 +97,7 @@ func (l *Launcher) Start(ctx context.Context) error {
 		return nil
 	}
 
-	bin := l.resolveBinary()
+	daemonCmd := l.resolveCommand()
 	releaseStartLock, lockAcquired, err := l.acquireStartLock(ctx)
 	if err != nil {
 		if (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) && l.waitForSocketReadyWithin(300*time.Millisecond) == nil {
@@ -156,12 +169,17 @@ func (l *Launcher) Start(ctx context.Context) error {
 		_ = logFile.Close()
 	}()
 	// Do not bind daemon lifetime to the caller context. Attach contexts are short-lived.
-	cmd := exec.Command(bin, "--repo", l.RepoDir, "--socket", l.SocketPath, "--lock", l.LockPath)
+	args := append([]string{}, daemonCmd.args...)
+	args = append(args, "--repo", l.RepoDir, "--socket", l.SocketPath, "--lock", l.LockPath)
+	cmd := exec.Command(daemonCmd.executable, args...)
+	if strings.TrimSpace(daemonCmd.dir) != "" {
+		cmd.Dir = daemonCmd.dir
+	}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start daemon %s: %w", bin, err)
+		return fmt.Errorf("start daemon %s: %w", daemonCmd.displayName(), err)
 	}
 	if l.waitForReady != nil {
 		readyCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -287,12 +305,12 @@ func (l *Launcher) waitForSocketUnavailable(ctx context.Context, timeout time.Du
 	}
 }
 
-func (l *Launcher) resolveBinary() string {
+func (l *Launcher) resolveCommand() daemonCommand {
 	if l.BinPath != "" {
-		return l.BinPath
+		return daemonCommand{executable: l.BinPath}
 	}
 	if env := os.Getenv("AZEDARACH_DAEMON_BIN"); env != "" {
-		return env
+		return daemonCommand{executable: env}
 	}
 	candidates := []string{}
 	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
@@ -307,10 +325,34 @@ func (l *Launcher) resolveBinary() string {
 	)
 	for _, candidate := range candidates {
 		if _, err := os.Stat(candidate); err == nil {
-			return candidate
+			return daemonCommand{executable: candidate}
 		}
 	}
-	return "azd"
+	if sourceDir := l.localScopedDaemonSourceDir(); sourceDir != "" {
+		return daemonCommand{executable: "go", args: []string{"run", "./cmd/azd"}, dir: sourceDir}
+	}
+	return daemonCommand{executable: "azd"}
+}
+
+func (l *Launcher) resolveBinary() string {
+	return l.resolveCommand().executable
+}
+
+func (l *Launcher) localScopedDaemonSourceDir() string {
+	if !config.UseScopedDaemonRuntimeFor(l.RepoDir) {
+		return ""
+	}
+	sourceDirs := []string{
+		l.RepoDir,
+		filepath.Join(l.RepoDir, "go-bubbletea"),
+	}
+	for _, sourceDir := range sourceDirs {
+		cmdDir := filepath.Join(sourceDir, "cmd", "azd")
+		if stat, err := os.Stat(cmdDir); err == nil && stat.IsDir() {
+			return sourceDir
+		}
+	}
+	return ""
 }
 
 func (l *Launcher) readLockedPID() (int, bool) {

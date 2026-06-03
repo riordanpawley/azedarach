@@ -210,6 +210,93 @@ func TestLauncherResolveBinary_PrefersWorkingDirBinOverRepoBin(t *testing.T) {
 	}
 }
 
+func TestLauncherResolveCommand_UsesLocalGoRunForScopedWorktreeWithoutBinary(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "wt")
+
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo worktrees): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktree, "cmd", "azd"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree cmd/azd): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree .git): %v", err)
+	}
+
+	t.Setenv("PATH", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_BIN", "")
+	launcher := NewLauncher(filepath.Join(worktree, "nested"), filepath.Join(base, "daemon.sock"))
+
+	got := launcher.resolveCommand()
+	if got.executable != "go" {
+		t.Fatalf("resolveCommand().executable = %q, want go", got.executable)
+	}
+	if strings.Join(got.args, " ") != "run ./cmd/azd" {
+		t.Fatalf("resolveCommand().args = %q, want %q", strings.Join(got.args, " "), "run ./cmd/azd")
+	}
+	if got.dir != worktree {
+		t.Fatalf("resolveCommand().dir = %q, want %q", got.dir, worktree)
+	}
+}
+
+func TestLauncherResolveCommand_DaemonBinOverrideWinsOverScopedGoRun(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "wt")
+
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo worktrees): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktree, "cmd", "azd"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree cmd/azd): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree .git): %v", err)
+	}
+
+	override := filepath.Join(base, "override-azd")
+	t.Setenv("PATH", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_BIN", override)
+	launcher := NewLauncher(worktree, filepath.Join(base, "daemon.sock"))
+
+	got := launcher.resolveCommand()
+	if got.executable != override {
+		t.Fatalf("resolveCommand().executable = %q, want %q", got.executable, override)
+	}
+	if len(got.args) != 0 || got.dir != "" {
+		t.Fatalf("resolveCommand() args=%v dir=%q, want empty override command", got.args, got.dir)
+	}
+}
+
+func TestLauncherResolveCommand_MainRepoStillFallsBackToPathAzd(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo .git): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoDir, "cmd", "azd"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo cmd/azd): %v", err)
+	}
+	t.Chdir(t.TempDir())
+
+	t.Setenv("PATH", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_BIN", "")
+	launcher := NewLauncher(repoDir, socketPath)
+
+	got := launcher.resolveCommand()
+	if got.executable != "azd" {
+		t.Fatalf("resolveCommand().executable = %q, want azd", got.executable)
+	}
+	if len(got.args) != 0 || got.dir != "" {
+		t.Fatalf("resolveCommand() args=%v dir=%q, want PATH azd fallback", got.args, got.dir)
+	}
+}
+
 func TestLauncherStart_SkipsSpawnWhenLockOwnerAlive(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
