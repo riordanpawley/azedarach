@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -700,6 +701,82 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 			t.Fatalf("UpdateTaskStatusWithOptions error = %v, want worktree cleanup failure", err)
 		}
 		wantCommands := []string{CommandTaskList, CommandGitStatus, CommandSessionStop, CommandWorktreeRemove}
+		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
+			t.Fatalf("commands = %v, want %v", commands, wantCommands)
+		}
+	})
+
+	t.Run("status update recovers when worktree remove ack times out after operation completes", func(t *testing.T) {
+		commands := []string{}
+		taskListCalls := 0
+		operationID := naming.OperationID("op-remove")
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case CommandTaskList:
+					taskListCalls++
+					task := domain.Task{
+						ID:     "az-3",
+						Title:  "Close me",
+						Status: domain.StatusInReview,
+					}
+					if taskListCalls == 1 {
+						task.HasWorktree = true
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, uint64(taskListCalls), []domain.Task{task}),
+					}, nil
+				case CommandWorktreeList:
+					return responseWithJSON(t, req, worktreeListBody{
+						ProjectID: naming.ProjectID(wantProjectID),
+						Worktrees: []worktreePayload{{
+							Path:    "/tmp/az-3",
+							Branch:  "riordan/az-3/close-timeout",
+							IssueID: "az-3",
+						}},
+					}), nil
+				case CommandWorktreeRemove:
+					return protocol.ResponseEnvelope{}, errors.New("short_frame: read unix ->/tmp/daemon.sock: i/o timeout")
+				case protocol.CommandOperationList:
+					return responseWithJSON(t, req, protocol.OperationListResponseBody{
+						ProjectID: naming.ProjectID(wantProjectID),
+						Operations: []protocol.OperationRecord{{
+							OperationID: operationID,
+							ProjectID:   naming.ProjectID(wantProjectID),
+							Kind:        CommandWorktreeRemove,
+							IssueID:     naming.IssueID("az-3"),
+							State:       protocol.OperationStateDone,
+							EnqueuedAt:  time.Now(),
+						}},
+					}), nil
+				case CommandTaskUpdateStatus:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+					}, nil
+				default:
+					t.Fatalf("unexpected command = %q", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}
+
+		client := New(transport).
+			WithProjectID(wantProjectID).
+			WithReconnectPolicy(reconnect.Policy{MaxAttempts: 1, BaseBackoff: time.Millisecond, MaxBackoff: time.Millisecond})
+		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{CleanupBeforeClose: true, ForceWorktree: true})
+		if err != nil {
+			t.Fatalf("UpdateTaskStatusWithOptions error: %v", err)
+		}
+		wantCommands := []string{CommandTaskList, CommandWorktreeList, CommandWorktreeRemove, protocol.CommandOperationList, CommandTaskList, CommandTaskUpdateStatus}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
 		}

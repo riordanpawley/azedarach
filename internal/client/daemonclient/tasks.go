@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/buildinfo"
+	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -473,10 +474,114 @@ func (c *Client) cleanTaskRuntimeAttachmentsForClose(ctx context.Context, taskID
 	}
 	if closeGuardTaskHasWorktree(task) {
 		if err := c.RemoveWorktreeWithOptions(ctx, taskID, forceWorktree); err != nil {
+			if recoverErr := c.recoverWorktreeRemovalForClose(ctx, taskID, err); recoverErr == nil {
+				return nil
+			} else if !errors.Is(recoverErr, err) {
+				return recoverErr
+			}
 			return fmt.Errorf("remove worktree before closing %s: %w", taskID, err)
 		}
 	}
 	return nil
+}
+
+func (c *Client) recoverWorktreeRemovalForClose(ctx context.Context, taskID string, removeErr error) error {
+	var pending *OperationPendingError
+	switch {
+	case errors.As(removeErr, &pending):
+		if strings.TrimSpace(pending.OperationID) == "" {
+			return removeErr
+		}
+		record, err := c.WaitForOperation(ctx, pending.OperationID, defaultOperationPollInterval)
+		if err != nil {
+			return fmt.Errorf("worktree removal for %s is still pending as operation %s (%s); waiting failed: %w. Retry with `az issue close --id %s --force-worktree` after `az operation get --id %s --wait` completes", taskID, pending.OperationID, pending.State, err, taskID, pending.OperationID)
+		}
+		if err := worktreeRemovalRecordError(taskID, record); err != nil {
+			return err
+		}
+	case isWorktreeRemovalAckError(removeErr):
+		record, ok, err := c.latestWorktreeRemoveOperation(ctx, taskID)
+		if err != nil {
+			return fmt.Errorf("daemon transport failed while waiting for worktree removal acknowledgement for %s: %w. Also failed to inspect retry state: %v. Retry with `az issue close --id %s --force-worktree`", taskID, removeErr, err, taskID)
+		}
+		if !ok {
+			return fmt.Errorf("daemon transport failed while waiting for worktree removal acknowledgement for %s: %w. The worktree removal result is unknown; retry with `az issue close --id %s --force-worktree`", taskID, removeErr, taskID)
+		}
+		if !isTerminalOperationState(record.State) {
+			waited, err := c.WaitForOperation(ctx, record.OperationID.String(), defaultOperationPollInterval)
+			if err != nil {
+				return fmt.Errorf("daemon transport failed while waiting for worktree removal acknowledgement for %s: %w. Operation %s is %s; retry after `az operation get --id %s --wait` completes", taskID, removeErr, record.OperationID, record.State, record.OperationID)
+			}
+			record = waited
+		}
+		if err := worktreeRemovalRecordError(taskID, record); err != nil {
+			return fmt.Errorf("daemon transport failed while waiting for worktree removal acknowledgement for %s, and the matching cleanup operation failed: %w", taskID, err)
+		}
+	default:
+		return removeErr
+	}
+
+	guard, err := c.ValidateTaskCloseWithOptions(ctx, taskID, CloseGuardOptions{
+		AllowTargetSession:  true,
+		AllowTargetWorktree: false,
+		ForceWorktree:       true,
+	})
+	if err != nil {
+		return fmt.Errorf("worktree removal for %s completed, but close preflight still failed: %w. Retry with `az issue close --id %s --force-worktree`", taskID, err, taskID)
+	}
+	if closeGuardTaskHasWorktree(guard.Task) {
+		return fmt.Errorf("worktree removal for %s completed, but daemon snapshot still reports a worktree. Retry with `az issue close --id %s --force-worktree`", taskID, taskID)
+	}
+	return nil
+}
+
+func isWorktreeRemovalAckError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if reconnect.IsTransientTransportError(err) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "daemon command transport") &&
+		(strings.Contains(message, "timeout") || strings.Contains(message, "short_frame"))
+}
+
+func (c *Client) latestWorktreeRemoveOperation(ctx context.Context, taskID string) (protocol.OperationRecord, bool, error) {
+	records, err := c.ListOperations(ctx, OperationListOptions{
+		IssueID: taskID,
+		Kind:    CommandWorktreeRemove,
+		Limit:   10,
+	})
+	if err != nil {
+		return protocol.OperationRecord{}, false, err
+	}
+	var latest protocol.OperationRecord
+	found := false
+	for _, record := range records {
+		if !naming.IssueIDsEqual(record.IssueID.String(), taskID) || strings.TrimSpace(record.Kind) != CommandWorktreeRemove {
+			continue
+		}
+		if !found || record.EnqueuedAt.After(latest.EnqueuedAt) {
+			latest = record
+			found = true
+		}
+	}
+	return latest, found, nil
+}
+
+func worktreeRemovalRecordError(taskID string, record protocol.OperationRecord) error {
+	switch record.State {
+	case protocol.OperationStateDone:
+		return nil
+	case protocol.OperationStateFailed, protocol.OperationStateCancelled:
+		if record.Error != nil && strings.TrimSpace(record.Error.Message) != "" {
+			return fmt.Errorf("worktree removal operation %s for %s ended %s: %s", record.OperationID, taskID, record.State, record.Error.Message)
+		}
+		return fmt.Errorf("worktree removal operation %s for %s ended %s", record.OperationID, taskID, record.State)
+	default:
+		return fmt.Errorf("worktree removal operation %s for %s is still %s", record.OperationID, taskID, record.State)
+	}
 }
 
 // ValidateTaskClose rejects close/done transitions for worktrees that still

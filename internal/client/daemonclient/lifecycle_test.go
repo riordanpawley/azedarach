@@ -691,6 +691,40 @@ func TestRemoveWorktreeWithOptionsPassesForceFlag(t *testing.T) {
 	}
 }
 
+func TestRemoveWorktreeReturnsPendingOperationError(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			body, err := json.Marshal(map[string]any{
+				"operation_id": "op-remove",
+				"state":        string(protocol.OperationStateRunning),
+			})
+			if err != nil {
+				t.Fatalf("marshal wrapped response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-a")
+	err := client.RemoveWorktreeWithOptions(context.Background(), "az-1", true)
+	var pending *OperationPendingError
+	if !errors.As(err, &pending) {
+		t.Fatalf("RemoveWorktreeWithOptions error = %v, want OperationPendingError", err)
+	}
+	if pending.OperationID != "op-remove" {
+		t.Fatalf("operation id = %q, want op-remove", pending.OperationID)
+	}
+	if pending.State != protocol.OperationStateRunning {
+		t.Fatalf("state = %q, want running", pending.State)
+	}
+}
+
 func TestCleanupOrphanedWorktreesRoutesAndDecodesResponse(t *testing.T) {
 	transport := &lifecycleRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
