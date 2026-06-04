@@ -24,6 +24,8 @@ const (
 	daemonInvariantTaskDeletePreflight daemonInvariantID = "task.delete_preflight"
 	daemonInvariantTaskGraphReadiness  daemonInvariantID = "task.graph_readiness"
 	daemonInvariantTaskCompleteCheck   daemonInvariantID = "task.complete_check"
+	daemonInvariantTaskIntegration     daemonInvariantID = "task.integration_readiness"
+	daemonInvariantTaskMergeBaseTarget daemonInvariantID = "task.merge_base_target"
 
 	daemonInvariantRuntimeKnownProjectIDs daemonInvariantID = "runtime.known_project_ids"
 )
@@ -39,6 +41,8 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantTaskDeletePreflight:    daemonInvariantSourceHybrid,
 	daemonInvariantTaskGraphReadiness:     daemonInvariantSourceHybrid,
 	daemonInvariantTaskCompleteCheck:      daemonInvariantSourceHybrid,
+	daemonInvariantTaskIntegration:        daemonInvariantSourceProjection,
+	daemonInvariantTaskMergeBaseTarget:    daemonInvariantSourceProjection,
 	daemonInvariantRuntimeKnownProjectIDs: daemonInvariantSourceProjection,
 }
 

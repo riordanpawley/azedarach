@@ -848,16 +848,17 @@ func OrchestrateIntegrateCommand(deps *Dependencies, opts OrchestrateIntegrateOp
 	if err != nil {
 		return err
 	}
-	mergeReady, reasons, err := orchestrateIntegrationMergeReadiness(ctx, deps, opts.IssueID)
+	readiness, err := deps.DaemonClient.TaskIntegrationReadiness(ctx, opts.IssueID, deps.RepoDir)
 	if err != nil {
 		return err
 	}
+	mergeReady := readiness.Ready
 	commands := orchestrateIntegrationCommands(opts.IssueID, wt, found, mergeReady)
 	result := orchestrateIntegrateResult{
 		IssueID:    opts.IssueID,
 		MergeReady: mergeReady,
 		Apply:      opts.Apply,
-		Reasons:    reasons,
+		Reasons:    readiness.Reasons,
 		Commands:   commands,
 	}
 	if found {
@@ -887,7 +888,7 @@ func OrchestrateIntegrateCommand(deps *Dependencies, opts OrchestrateIntegrateOp
 	fmt.Printf("Integration guidance for %s\n", opts.IssueID)
 	if !mergeReady {
 		fmt.Println("Merge guidance: BLOCKED (insufficient completion evidence)")
-		for _, reason := range reasons {
+		for _, reason := range result.Reasons {
 			fmt.Printf("- %s\n", reason)
 		}
 	}
@@ -1421,52 +1422,6 @@ func orchestrateIntegrationCommands(issueID string, wt daemonclient.Worktree, fo
 		commands = append(commands, fmt.Sprintf("repair merge only if close reports conflicts: az branch merge %s", issueID))
 	}
 	return commands
-}
-
-func orchestrateIntegrationMergeReadiness(ctx context.Context, deps *Dependencies, issueID string) (bool, []string, error) {
-	tasks, err := deps.DaemonClient.ListTasks(ctx)
-	if err != nil {
-		return false, nil, fmt.Errorf("list tasks: %w", err)
-	}
-	task, ok := findTaskByID(tasks, issueID)
-	if !ok {
-		return false, []string{fmt.Sprintf("issue %s not found in daemon task projection", issueID)}, nil
-	}
-	if task.Status == domain.StatusDone {
-		return true, nil, nil
-	}
-	parentIssueID := issueID
-	if task.ParentID != nil && strings.TrimSpace(task.ParentID.String()) != "" {
-		parentIssueID = strings.TrimSpace(task.ParentID.String())
-	}
-	events, err := deps.DaemonClient.MailList(ctx, protocol.MailListCommandBody{
-		RepoDir:     deps.RepoDir,
-		ParentIssue: parentIssueID,
-		SinceSeq:    0,
-		Limit:       500,
-	})
-	if err != nil {
-		return false, nil, fmt.Errorf("list mailbox events for %s: %w", parentIssueID, err)
-	}
-	for _, evt := range events {
-		if naming.IssueIDsEqual(evt.IssueID.String(), issueID) && isWorkerIntegrationReadyMailType(evt.Type) {
-			return true, nil, nil
-		}
-	}
-	reasons := []string{
-		fmt.Sprintf("issue %s is not closed", issueID),
-		fmt.Sprintf("no worker-integration-ready mailbox event found under parent %s for %s", parentIssueID, issueID),
-	}
-	return false, reasons, nil
-}
-
-func isWorkerIntegrationReadyMailType(eventType string) bool {
-	switch strings.ToLower(strings.TrimSpace(eventType)) {
-	case "worker-integration-ready", "worker-ready", "worker-complete":
-		return true
-	default:
-		return false
-	}
 }
 
 func sendOrchestrateMailEvent(deps *Dependencies, parentIssueID, issueID, eventType, body string) error {

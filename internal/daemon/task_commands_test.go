@@ -1561,6 +1561,116 @@ func TestTaskCompletionAdviceIncludesDomainNextSteps(t *testing.T) {
 	}
 }
 
+func TestTaskIntegrationReadinessAcceptsLegacyMailboxAliases(t *testing.T) {
+	tests := map[string]bool{
+		"worker-integration-ready":       true,
+		" worker-integration-ready ":     true,
+		"WORKER-INTEGRATION-READY":       true,
+		"worker-ready":                   true,
+		" worker-ready ":                 true,
+		"worker-complete":                true,
+		" worker-complete ":              true,
+		"worker-progress":                false,
+		"worker-blocked":                 false,
+		"dependency-ready":               false,
+		"worker-integration-ready-later": false,
+		"worker-ready-later":             false,
+		"worker-completed":               false,
+	}
+	for eventType, want := range tests {
+		t.Run(eventType, func(t *testing.T) {
+			if got := daemonWorkerIntegrationReadyMailType(eventType); got != want {
+				t.Fatalf("daemonWorkerIntegrationReadyMailType(%q) = %v, want %v", eventType, got, want)
+			}
+		})
+	}
+}
+
+func TestTaskMergeBaseTargetSelectsNearestAncestorWorktree(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-merge-base-target"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "parent",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "child",
+		Type:     domain.TypeTask,
+		ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	parentWorktree := filepath.Join(repoDir, "wt-parent")
+	childWorktree := filepath.Join(repoDir, "wt-child")
+	parentBranch := "riordan/" + parentID + "/parent"
+	childBranch := "riordan/" + childID + "/child"
+	for _, row := range []daemonstate.WorktreeState{
+		{ProjectID: projectID, IssueID: parentID, Path: parentWorktree, Branch: parentBranch, UpdatedAt: time.Now().UTC()},
+		{ProjectID: projectID, IssueID: childID, Path: childWorktree, Branch: childBranch, UpdatedAt: time.Now().UTC()},
+	} {
+		if err := store.UpsertWorktreeState(ctx, row); err != nil {
+			t.Fatalf("seed worktree state: %v", err)
+		}
+	}
+
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		if len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" {
+			return strings.Join([]string{
+				"worktree " + repoDir,
+				"branch refs/heads/main",
+				"",
+				"worktree " + parentWorktree,
+				"branch refs/heads/" + parentBranch,
+				"",
+				"worktree " + childWorktree,
+				"branch refs/heads/" + childBranch,
+				"",
+			}, "\n"), nil
+		}
+		t.Fatalf("unexpected git args: %v", args)
+		return "", nil
+	}}
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(runner, repoDir, slog.Default()),
+		},
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(projectID string) *git.WorktreeManager { return d.worktreeManagerForProject(projectID) },
+		runtimeStateStore: store,
+		logger:            slog.Default(),
+	}
+
+	got, err := d.taskMergeBaseTarget(ctx, projectID, childID, "main", false)
+	if err != nil {
+		t.Fatalf("taskMergeBaseTarget error: %v", err)
+	}
+	if got.TargetID != parentID || got.Branch != parentBranch || got.WorktreePath != parentWorktree || !got.BranchAttached {
+		t.Fatalf("merge target = %+v, want parent %s branch %s worktree %s", got, parentID, parentBranch, parentWorktree)
+	}
+}
+
 func TestTaskDeleteRuntimeBlockersAreDaemonOwned(t *testing.T) {
 	task := domain.Task{
 		ID:             naming.IssueID("az-1"),

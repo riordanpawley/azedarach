@@ -127,6 +127,23 @@ type taskCompleteCheckResult struct {
 	Advice      []string `json:"advice,omitempty"`
 }
 
+type taskIntegrationReadinessResult struct {
+	IssueID       string   `json:"issue_id"`
+	ParentIssueID string   `json:"parent_issue_id,omitempty"`
+	Ready         bool     `json:"ready"`
+	Reasons       []string `json:"reasons,omitempty"`
+}
+
+type taskMergeBaseTargetResult struct {
+	IssueID        string   `json:"issue_id"`
+	TargetID       string   `json:"target_id"`
+	Branch         string   `json:"branch"`
+	WorktreePath   string   `json:"worktree_path,omitempty"`
+	BranchAttached bool     `json:"branch_attached,omitempty"`
+	Reason         string   `json:"reason,omitempty"`
+	AncestorChain  []string `json:"ancestor_chain,omitempty"`
+}
+
 func (d *Daemon) sourceForTaskInvariant(invariant daemonInvariantID) daemonInvariantSource {
 	return sourceForInvariant(invariant)
 }
@@ -1556,6 +1573,217 @@ func (d *Daemon) handleTaskCompleteCheck(ctx context.Context, req protocol.Reque
 	resp.Body = body
 	resp.Revision = d.currentRevision(projectID)
 	return resp, nil
+}
+
+func (d *Daemon) handleTaskIntegrationReadiness(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
+	var cmd struct {
+		TaskID  string `json:"task_id"`
+		RepoDir string `json:"repo_dir,omitempty"`
+	}
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	result, err := d.taskIntegrationReadiness(ctx, projectID, cmd.TaskID, cmd.RepoDir)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	body, err := json.Marshal(result)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	resp := d.successResponse(req)
+	resp.Body = body
+	resp.Revision = d.currentRevision(projectID)
+	return resp, nil
+}
+
+func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueID, repoDir string) (taskIntegrationReadinessResult, error) {
+	tasks, err := d.loadTaskGraphDomainTasks(ctx, projectID)
+	if err != nil {
+		return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue integration readiness: %w", err)
+	}
+	task, ok := findDaemonTaskByID(tasks, issueID)
+	if !ok {
+		return taskIntegrationReadinessResult{
+			IssueID: strings.TrimSpace(issueID),
+			Ready:   false,
+			Reasons: []string{fmt.Sprintf("issue %s not found in daemon task projection", strings.TrimSpace(issueID))},
+		}, nil
+	}
+	parentIssueID := task.ID.String()
+	if task.ParentID != nil && strings.TrimSpace(task.ParentID.String()) != "" {
+		parentIssueID = strings.TrimSpace(task.ParentID.String())
+	}
+	if task.Status == domain.StatusDone {
+		return taskIntegrationReadinessResult{
+			IssueID:       task.ID.String(),
+			ParentIssueID: parentIssueID,
+			Ready:         true,
+		}, nil
+	}
+
+	repoDir = strings.TrimSpace(repoDir)
+	if repoDir == "" {
+		return taskIntegrationReadinessResult{
+			IssueID:       task.ID.String(),
+			ParentIssueID: parentIssueID,
+			Ready:         false,
+			Reasons: []string{
+				fmt.Sprintf("issue %s is not closed", task.ID.String()),
+				"repo_dir is required to inspect worker-integration-ready mailbox evidence",
+			},
+		}, nil
+	}
+	events, err := readMailboxEvents(repoDir, parentIssueID)
+	if err != nil {
+		return taskIntegrationReadinessResult{}, fmt.Errorf("list mailbox events for %s: %w", parentIssueID, err)
+	}
+	for _, evt := range events {
+		if naming.IssueIDsEqual(evt.IssueID, task.ID.String()) && daemonWorkerIntegrationReadyMailType(evt.Type) {
+			return taskIntegrationReadinessResult{
+				IssueID:       task.ID.String(),
+				ParentIssueID: parentIssueID,
+				Ready:         true,
+			}, nil
+		}
+	}
+	return taskIntegrationReadinessResult{
+		IssueID:       task.ID.String(),
+		ParentIssueID: parentIssueID,
+		Ready:         false,
+		Reasons: []string{
+			fmt.Sprintf("issue %s is not closed", task.ID.String()),
+			fmt.Sprintf("no worker-integration-ready mailbox event found under parent %s for %s", parentIssueID, task.ID.String()),
+		},
+	}, nil
+}
+
+func daemonWorkerIntegrationReadyMailType(eventType string) bool {
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "worker-integration-ready", "worker-ready", "worker-complete":
+		return true
+	default:
+		return false
+	}
+}
+
+func (d *Daemon) handleTaskMergeBaseTarget(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
+	var cmd struct {
+		TaskID            string `json:"task_id"`
+		BaseBranch        string `json:"base_branch,omitempty"`
+		AllowBaseForChild bool   `json:"allow_base_for_child,omitempty"`
+	}
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	result, err := d.taskMergeBaseTarget(ctx, projectID, cmd.TaskID, cmd.BaseBranch, cmd.AllowBaseForChild)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	body, err := json.Marshal(result)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	resp := d.successResponse(req)
+	resp.Body = body
+	resp.Revision = d.currentRevision(projectID)
+	return resp, nil
+}
+
+func (d *Daemon) taskMergeBaseTarget(ctx context.Context, projectID, issueID, baseBranch string, allowBaseForChild bool) (taskMergeBaseTargetResult, error) {
+	issueID = strings.TrimSpace(issueID)
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch == "" {
+		baseBranch = d.cfg.BaseBranch
+	}
+	if strings.TrimSpace(baseBranch) == "" {
+		baseBranch = "main"
+	}
+
+	defaultTarget := taskMergeBaseTargetResult{
+		IssueID:  issueID,
+		TargetID: "base",
+		Branch:   baseBranch,
+	}
+	if issueID == "" {
+		defaultTarget.Reason = "empty issue id: default base target"
+		return defaultTarget, nil
+	}
+
+	tasks, err := d.loadTaskGraphDomainTasks(ctx, projectID)
+	if err != nil {
+		return taskMergeBaseTargetResult{}, fmt.Errorf("resolve merge base branch task graph: %w", err)
+	}
+	tasksByID := tasksByDaemonIssueID(tasks)
+	sourceTask, ok := tasksByID[issueID]
+	if !ok {
+		return taskMergeBaseTargetResult{}, fmt.Errorf("cannot resolve merge target for %s: issue not found in task projection; refusing fallback to base", issueID)
+	}
+
+	if d.worktreeAdapter == nil {
+		return taskMergeBaseTargetResult{}, fmt.Errorf("resolve merge base branch worktrees: worktree adapter unavailable")
+	}
+	worktrees, err := d.worktreeAdapter.List(ctx, projectID)
+	if err != nil {
+		return taskMergeBaseTargetResult{}, fmt.Errorf("resolve merge base branch worktrees: %w", err)
+	}
+
+	if target, ok := domain.ClosestAncestorWithWorktree(issueID, tasksByID, daemonIssueWorktreeRefs(worktrees)); ok {
+		return taskMergeBaseTargetResult{
+			IssueID:        issueID,
+			TargetID:       target.IssueID,
+			Branch:         target.Branch,
+			WorktreePath:   target.WorktreePath,
+			BranchAttached: true,
+			Reason:         "selected closest ancestor worktree branch",
+			AncestorChain:  target.AncestorChain,
+		}, nil
+	} else {
+		defaultTarget.AncestorChain = target.AncestorChain
+	}
+	for _, parentID := range defaultTarget.AncestorChain {
+		if _, ok := tasksByID[parentID]; !ok {
+			return taskMergeBaseTargetResult{}, fmt.Errorf("cannot resolve merge target for %s: parent issue %s missing from task projection; refusing fallback to base", issueID, parentID)
+		}
+	}
+	if domain.TaskParentIssueID(sourceTask) != "" && !allowBaseForChild {
+		return taskMergeBaseTargetResult{}, fmt.Errorf("refusing to merge child issue %s into base without explicit override; rerun with --allow-base-for-child", issueID)
+	}
+	if domain.TaskParentIssueID(sourceTask) != "" {
+		defaultTarget.Reason = "no ancestor worktree branch found; explicit override allowed base target"
+	} else {
+		defaultTarget.Reason = "no ancestor chain; selected default base target"
+	}
+	return defaultTarget, nil
+}
+
+func tasksByDaemonIssueID(tasks []domain.Task) map[string]domain.Task {
+	tasksByID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		id := strings.TrimSpace(task.ID.String())
+		if id == "" {
+			continue
+		}
+		tasksByID[id] = task
+	}
+	return tasksByID
+}
+
+func daemonIssueWorktreeRefs(worktrees []git.Worktree) map[string]domain.IssueWorktreeRef {
+	refs := make(map[string]domain.IssueWorktreeRef, len(worktrees))
+	for _, worktree := range worktrees {
+		issueID := strings.TrimSpace(worktree.IssueID)
+		if issueID == "" {
+			continue
+		}
+		refs[issueID] = domain.IssueWorktreeRef{
+			Branch: strings.TrimSpace(worktree.Branch),
+			Path:   strings.TrimSpace(worktree.Path),
+		}
+	}
+	return refs
 }
 
 func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID string) (taskCompleteCheckResult, error) {

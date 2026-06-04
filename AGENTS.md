@@ -135,6 +135,8 @@ fd "filename" -t f internal cmd
    - `session.start`/`session.attach`/`session.pause`/`session.resume`/`session.stop` runtime-presence checks -> `tmux`
    - session recovery/reconcile -> `hybrid`
    - `task.close_preflight`/`task.delete_preflight`/`task.graph_readiness`/`task.complete_check` durable lifecycle and orchestration checks -> `hybrid`
+   - `task.integration_readiness` worker evidence gate -> `projection` (durable issue projection + mailbox evidence)
+   - `task.merge_base_target` branch integration target gate -> `projection` (durable issue graph + worktree projection)
    - task-list freshness/session projection checks -> `projection` via refresh-then-cache
 
 ### Adding New Invariants (Required Checklist)

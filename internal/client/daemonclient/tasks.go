@@ -24,6 +24,8 @@ const (
 	CommandTaskDeletePreflight  = "task.delete_preflight"
 	CommandTaskGraphReadiness   = "task.graph_readiness"
 	CommandTaskCompleteCheck    = "task.complete_check"
+	CommandTaskIntegrationReady = "task.integration_readiness"
+	CommandTaskMergeBaseTarget  = "task.merge_base_target"
 	CommandTaskUpdateStatus     = "task.update_status"
 	CommandTaskUpdate           = "task.update_details"
 	CommandTaskAppendNotes      = "task.append_notes"
@@ -135,6 +137,36 @@ type TaskCompleteCheckResult struct {
 	Pass        bool     `json:"pass"`
 	Reasons     []string `json:"reasons,omitempty"`
 	Advice      []string `json:"advice,omitempty"`
+}
+
+// TaskIntegrationReadiness is the daemon-owned worker integration evidence gate.
+type TaskIntegrationReadiness struct {
+	IssueID       string   `json:"issue_id"`
+	ParentIssueID string   `json:"parent_issue_id,omitempty"`
+	Ready         bool     `json:"ready"`
+	Reasons       []string `json:"reasons,omitempty"`
+}
+
+type taskIntegrationReadinessRequest struct {
+	TaskID  naming.IssueID `json:"task_id"`
+	RepoDir string         `json:"repo_dir,omitempty"`
+}
+
+// TaskMergeBaseTarget is the daemon-owned task graph/worktree merge target decision.
+type TaskMergeBaseTarget struct {
+	IssueID        string   `json:"issue_id"`
+	TargetID       string   `json:"target_id"`
+	Branch         string   `json:"branch"`
+	WorktreePath   string   `json:"worktree_path,omitempty"`
+	BranchAttached bool     `json:"branch_attached,omitempty"`
+	Reason         string   `json:"reason,omitempty"`
+	AncestorChain  []string `json:"ancestor_chain,omitempty"`
+}
+
+type taskMergeBaseTargetRequest struct {
+	TaskID            naming.IssueID `json:"task_id"`
+	BaseBranch        string         `json:"base_branch,omitempty"`
+	AllowBaseForChild bool           `json:"allow_base_for_child,omitempty"`
 }
 
 // TaskAppendNotesRequest appends a single line to task notes.
@@ -770,6 +802,39 @@ func (c *Client) TaskCompleteCheck(ctx context.Context, rootIssueID string) (Tas
 	var out TaskCompleteCheckResult
 	if err := c.commandJSON(ctx, CommandTaskCompleteCheck, TaskIDRequest{TaskID: parsedRootID}, &out); err != nil {
 		return TaskCompleteCheckResult{}, err
+	}
+	return out, nil
+}
+
+// TaskIntegrationReadiness returns the daemon-owned worker integration evidence gate.
+func (c *Client) TaskIntegrationReadiness(ctx context.Context, issueID, repoDir string) (TaskIntegrationReadiness, error) {
+	parsedIssueID, err := naming.ParseIssueID(issueID)
+	if err != nil {
+		return TaskIntegrationReadiness{}, fmt.Errorf("invalid issue id: %w", err)
+	}
+	var out TaskIntegrationReadiness
+	if err := c.commandJSON(ctx, CommandTaskIntegrationReady, taskIntegrationReadinessRequest{
+		TaskID:  parsedIssueID,
+		RepoDir: strings.TrimSpace(repoDir),
+	}, &out); err != nil {
+		return TaskIntegrationReadiness{}, err
+	}
+	return out, nil
+}
+
+// TaskMergeBaseTarget resolves the daemon-owned merge target for an issue branch.
+func (c *Client) TaskMergeBaseTarget(ctx context.Context, issueID, baseBranch string, allowBaseForChild bool) (TaskMergeBaseTarget, error) {
+	parsedIssueID, err := naming.ParseIssueID(issueID)
+	if err != nil {
+		return TaskMergeBaseTarget{}, fmt.Errorf("invalid issue id: %w", err)
+	}
+	var out TaskMergeBaseTarget
+	if err := c.commandJSON(ctx, CommandTaskMergeBaseTarget, taskMergeBaseTargetRequest{
+		TaskID:            parsedIssueID,
+		BaseBranch:        strings.TrimSpace(baseBranch),
+		AllowBaseForChild: allowBaseForChild,
+	}, &out); err != nil {
+		return TaskMergeBaseTarget{}, err
 	}
 	return out, nil
 }

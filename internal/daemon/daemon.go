@@ -567,6 +567,10 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleTaskGraphReadiness(ctx, req)
 	case "task.complete_check":
 		return d.handleTaskCompleteCheck(ctx, req)
+	case "task.integration_readiness":
+		return d.handleTaskIntegrationReadiness(ctx, req)
+	case "task.merge_base_target":
+		return d.handleTaskMergeBaseTarget(ctx, req)
 	case "task.update_status":
 		return d.handleTaskUpdateStatus(ctx, req)
 	case "task.update_details":

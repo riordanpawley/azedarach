@@ -429,16 +429,6 @@ func TestStartCommandUsesParentWorktreeBranchForChildIssue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal task list: %v", err)
 	}
-	worktreeListBody, err := json.Marshal(map[string]any{
-		"project_id": "proj",
-		"worktrees": []map[string]any{
-			{"path": "/tmp/parent", "branch": "az/az-parent", "issue_id": "az-parent"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("marshal worktree list: %v", err)
-	}
-
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
@@ -455,16 +445,16 @@ func TestStartCommandUsesParentWorktreeBranchForChildIssue(t *testing.T) {
 						OK:              true,
 						Body:            taskListBody,
 					}, nil
-				case daemonclient.CommandWorktreeList:
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						Meta:            req.Meta,
-						CompletedAt:     req.SentAt,
-						OK:              true,
-						Body:            worktreeListBody,
-					}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:        "az-child",
+						TargetID:       "az-parent",
+						Branch:         "az/az-parent",
+						WorktreePath:   "/tmp/parent",
+						BranchAttached: true,
+						Reason:         "selected closest ancestor worktree branch",
+						AncestorChain:  []string{"az-parent"},
+					}), nil
 				case commandSessionStart:
 					gotReq = req
 					return responseWithOutput(req, "ok\n"), nil
@@ -481,7 +471,7 @@ func TestStartCommandUsesParentWorktreeBranchForChildIssue(t *testing.T) {
 	if err := StartCommand(deps, "az-child"); err != nil {
 		t.Fatalf("StartCommand error: %v", err)
 	}
-	if len(commands) != 3 || commands[0] != daemonclient.CommandTaskList || commands[1] != daemonclient.CommandWorktreeList || commands[2] != commandSessionStart {
+	if len(commands) != 3 || commands[0] != daemonclient.CommandTaskList || commands[1] != daemonclient.CommandTaskMergeBaseTarget || commands[2] != commandSessionStart {
 		t.Fatalf("commands = %v", commands)
 	}
 	var body sessionRequestBody
@@ -507,16 +497,6 @@ func TestStartCommandUsesNearestAncestorWorktreeBranchForNestedChildIssue(t *tes
 	if err != nil {
 		t.Fatalf("marshal task list: %v", err)
 	}
-	worktreeListBody, err := json.Marshal(map[string]any{
-		"project_id": "proj",
-		"worktrees": []map[string]any{
-			{"path": "/tmp/root", "branch": "user/az-root/root-branch", "issue_id": "az-root"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("marshal worktree list: %v", err)
-	}
-
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
@@ -533,16 +513,16 @@ func TestStartCommandUsesNearestAncestorWorktreeBranchForNestedChildIssue(t *tes
 						OK:              true,
 						Body:            taskListBody,
 					}, nil
-				case daemonclient.CommandWorktreeList:
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						Meta:            req.Meta,
-						CompletedAt:     req.SentAt,
-						OK:              true,
-						Body:            worktreeListBody,
-					}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:        "az-child",
+						TargetID:       "az-root",
+						Branch:         "user/az-root/root-branch",
+						WorktreePath:   "/tmp/root",
+						BranchAttached: true,
+						Reason:         "selected closest ancestor worktree branch",
+						AncestorChain:  []string{"az-plan", "az-root"},
+					}), nil
 				case commandSessionStart:
 					gotReq = req
 					return responseWithOutput(req, "ok\n"), nil
@@ -561,7 +541,7 @@ func TestStartCommandUsesNearestAncestorWorktreeBranchForNestedChildIssue(t *tes
 	}
 	if len(commands) != 3 ||
 		commands[0] != daemonclient.CommandTaskList ||
-		commands[1] != daemonclient.CommandWorktreeList ||
+		commands[1] != daemonclient.CommandTaskMergeBaseTarget ||
 		commands[2] != commandSessionStart {
 		t.Fatalf("commands = %v", commands)
 	}
@@ -1007,16 +987,6 @@ func TestBranchMergeToBaseCommandUsesDaemonGitFlow(t *testing.T) {
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case daemonclient.CommandTaskList:
-					return responseWithJSON(req, protocol.TaskListSnapshotPayload{
-						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
-						ProtocolVersion:  protocol.CurrentVersion,
-						SnapshotRevision: 1,
-						ProjectID:        "proj",
-						LastCheckedAt:    time.Now().UTC(),
-						Freshness:        protocol.TaskListFreshnessFresh,
-						Tasks:            []domain.Task{{ID: "az-123", Status: domain.StatusOpen}},
-					}), nil
 				case daemonclient.CommandWorktreeList:
 					return responseWithJSON(req, map[string]any{
 						"worktrees": []map[string]any{
@@ -1026,6 +996,13 @@ func TestBranchMergeToBaseCommandUsesDaemonGitFlow(t *testing.T) {
 								"issue_id": "az-123",
 							},
 						},
+					}), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:  "az-123",
+						TargetID: "base",
+						Branch:   "trunk",
+						Reason:   "no ancestor chain; selected default base target",
 					}), nil
 				case daemonclient.CommandGitStatus:
 					var body daemonclient.GitCommandRequest
@@ -1084,8 +1061,7 @@ func TestBranchMergeToBaseCommandUsesDaemonGitFlow(t *testing.T) {
 
 	want := []string{
 		daemonclient.CommandWorktreeList,
-		daemonclient.CommandTaskList,
-		daemonclient.CommandWorktreeList,
+		daemonclient.CommandTaskMergeBaseTarget,
 		daemonclient.CommandGitWorktreeForBranch,
 		daemonclient.CommandGitStatus,
 		daemonclient.CommandGitStatus,
@@ -1117,16 +1093,6 @@ func TestBranchMergeToBaseCommandUsesAttachedTargetBranchWorktree(t *testing.T) 
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case daemonclient.CommandTaskList:
-					return responseWithJSON(req, protocol.TaskListSnapshotPayload{
-						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
-						ProtocolVersion:  protocol.CurrentVersion,
-						SnapshotRevision: 1,
-						ProjectID:        "proj",
-						LastCheckedAt:    time.Now().UTC(),
-						Freshness:        protocol.TaskListFreshnessFresh,
-						Tasks:            []domain.Task{{ID: "az-123", Status: domain.StatusOpen}},
-					}), nil
 				case daemonclient.CommandWorktreeList:
 					return responseWithJSON(req, map[string]any{
 						"worktrees": []map[string]any{
@@ -1136,6 +1102,13 @@ func TestBranchMergeToBaseCommandUsesAttachedTargetBranchWorktree(t *testing.T) 
 								"issue_id": "az-123",
 							},
 						},
+					}), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:  "az-123",
+						TargetID: "base",
+						Branch:   "trunk",
+						Reason:   "no ancestor chain; selected default base target",
 					}), nil
 				case daemonclient.CommandGitWorktreeForBranch:
 					var body daemonclient.GitCommandRequest
@@ -1223,16 +1196,6 @@ func TestBranchMergeToBaseCommandFailsOnDirtyPreflight(t *testing.T) {
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case daemonclient.CommandTaskList:
-					return responseWithJSON(req, protocol.TaskListSnapshotPayload{
-						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
-						ProtocolVersion:  protocol.CurrentVersion,
-						SnapshotRevision: 1,
-						ProjectID:        "proj",
-						LastCheckedAt:    time.Now().UTC(),
-						Freshness:        protocol.TaskListFreshnessFresh,
-						Tasks:            []domain.Task{{ID: "az-123", Status: domain.StatusOpen}},
-					}), nil
 				case daemonclient.CommandWorktreeList:
 					return responseWithJSON(req, map[string]any{
 						"worktrees": []map[string]any{
@@ -1242,6 +1205,13 @@ func TestBranchMergeToBaseCommandFailsOnDirtyPreflight(t *testing.T) {
 								"issue_id": "az-123",
 							},
 						},
+					}), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:  "az-123",
+						TargetID: "base",
+						Branch:   "main",
+						Reason:   "no ancestor chain; selected default base target",
 					}), nil
 				case daemonclient.CommandGitStatus:
 					var body daemonclient.GitCommandRequest
@@ -1312,6 +1282,8 @@ func TestBranchMergeToBaseCommandUsesEnvIssueIDWhenArgumentMissing(t *testing.T)
 							},
 						},
 					}), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{IssueID: "az-999", TargetID: "base", Branch: "trunk"}), nil
 				case daemonclient.CommandGitStatus:
 					return responseWithJSON(req, map[string]any{
 						"status": gitservice.GitStatus{HasChanges: false},
@@ -1385,6 +1357,8 @@ func TestBranchMergeToBaseCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(
 							},
 						},
 					}), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{IssueID: "bhv", TargetID: "base", Branch: "trunk"}), nil
 				case daemonclient.CommandGitStatus:
 					var body daemonclient.GitCommandRequest
 					if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -1466,6 +1440,15 @@ func TestBranchMergeToBaseCommandUsesNearestNonClosedAncestorBranch(t *testing.T
 							{"path": "/tmp/az-parent", "branch": "riordan/az-parent/work", "issue_id": "az-parent"},
 						},
 					}), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:        "az-child",
+						TargetID:       "az-parent",
+						Branch:         "riordan/az-parent/work",
+						WorktreePath:   "/tmp/az-parent",
+						BranchAttached: true,
+						AncestorChain:  []string{"az-parent"},
+					}), nil
 				case daemonclient.CommandGitStatus:
 					return responseWithJSON(req, map[string]any{
 						"status": gitservice.GitStatus{HasChanges: false},
@@ -1540,6 +1523,8 @@ func TestBranchMergeToBaseCommandBlocksChildWithoutAncestorWorktreeUnlessOverrid
 							{"path": "/tmp/az-child", "branch": "riordan/az-child/work", "issue_id": "az-child"},
 						},
 					}), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("refusing to merge child issue az-child into base without explicit override; rerun with --allow-base-for-child")
 				default:
 					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
 				}
@@ -1581,6 +1566,8 @@ func TestBranchMergeToBaseCommandFailsWhenIssueMissingFromTaskSnapshot(t *testin
 							{"path": "/tmp/az-child", "branch": "riordan/az-child/work", "issue_id": "az-child"},
 						},
 					}), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("cannot resolve merge target for az-child: issue not found in task projection; refusing fallback to base")
 				default:
 					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
 				}
@@ -1592,8 +1579,8 @@ func TestBranchMergeToBaseCommandFailsWhenIssueMissingFromTaskSnapshot(t *testin
 	}
 
 	err := BranchMergeToBaseCommand(deps, "az-child")
-	if err == nil || !strings.Contains(err.Error(), "issue not found in task snapshot") {
-		t.Fatalf("err = %v, want missing issue snapshot error", err)
+	if err == nil || !strings.Contains(err.Error(), "issue not found in task projection") {
+		t.Fatalf("err = %v, want missing issue projection error", err)
 	}
 }
 
@@ -1623,6 +1610,8 @@ func TestBranchMergeToBaseCommandFailsWhenParentMissingFromTaskSnapshot(t *testi
 							{"path": "/tmp/az-child", "branch": "riordan/az-child/work", "issue_id": "az-child"},
 						},
 					}), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("cannot resolve merge target for az-child: parent issue az-parent missing from task projection; refusing fallback to base")
 				default:
 					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
 				}
@@ -1634,8 +1623,8 @@ func TestBranchMergeToBaseCommandFailsWhenParentMissingFromTaskSnapshot(t *testi
 	}
 
 	err := BranchMergeToBaseCommand(deps, "az-child")
-	if err == nil || !strings.Contains(err.Error(), "parent issue az-parent missing from task snapshot") {
-		t.Fatalf("err = %v, want missing parent snapshot error", err)
+	if err == nil || !strings.Contains(err.Error(), "parent issue az-parent missing from task projection") {
+		t.Fatalf("err = %v, want missing parent projection error", err)
 	}
 }
 
@@ -1668,6 +1657,8 @@ func TestBranchMergeToBaseCommandBlocksChildBaseMergeWithoutOverride(t *testing.
 							{"path": "/tmp/az-child", "branch": "riordan/az-child/work", "issue_id": "az-child"},
 						},
 					}), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("refusing to merge child issue az-child into base without explicit override; rerun with --allow-base-for-child")
 				default:
 					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
 				}
@@ -1712,6 +1703,13 @@ func TestBranchMergeToBaseCommandAllowsChildBaseMergeWithOverride(t *testing.T) 
 						"worktrees": []map[string]any{
 							{"path": "/tmp/az-child", "branch": "riordan/az-child/work", "issue_id": "az-child"},
 						},
+					}), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:       "az-child",
+						TargetID:      "base",
+						Branch:        "trunk",
+						AncestorChain: []string{"az-parent"},
 					}), nil
 				case daemonclient.CommandGitStatus:
 					return responseWithJSON(req, map[string]any{
@@ -1768,16 +1766,8 @@ func TestBranchAgentMergeCommandLaunchesAgentWhenPreflightConflicts(t *testing.T
 							},
 						},
 					}), nil
-				case daemonclient.CommandTaskList:
-					return responseWithJSON(req, protocol.TaskListSnapshotPayload{
-						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
-						ProtocolVersion:  protocol.CurrentVersion,
-						SnapshotRevision: 1,
-						ProjectID:        "proj",
-						LastCheckedAt:    time.Now().UTC(),
-						Freshness:        protocol.TaskListFreshnessFresh,
-						Tasks:            []domain.Task{{ID: "az-123", Status: domain.StatusOpen}},
-					}), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{IssueID: "az-123", TargetID: "base", Branch: "trunk"}), nil
 				case daemonclient.CommandGitWorktreeForBranch:
 					return responseWithJSON(req, daemonclient.GitWorktreeForBranchResponse{
 						Branch: "trunk",
@@ -1836,7 +1826,7 @@ func TestBranchAgentMergeCommandLaunchesAgentWhenPreflightConflicts(t *testing.T
 	if !strings.Contains(resolveBody.Prompt, "merge trunk into riordan/az-123/some-change") {
 		t.Fatalf("prompt = %q, want base merge instruction", resolveBody.Prompt)
 	}
-	want := []string{daemonclient.CommandWorktreeList, daemonclient.CommandTaskList, daemonclient.CommandWorktreeList, daemonclient.CommandGitWorktreeForBranch, daemonclient.CommandGitMergePreflight, daemonclient.CommandSessionResolveConflict}
+	want := []string{daemonclient.CommandWorktreeList, daemonclient.CommandTaskMergeBaseTarget, daemonclient.CommandGitWorktreeForBranch, daemonclient.CommandGitMergePreflight, daemonclient.CommandSessionResolveConflict}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
 	}
@@ -1856,16 +1846,8 @@ func TestBranchAgentMergeCommandCleanPreflightDoesNotLaunchAgent(t *testing.T) {
 							{"path": "/tmp/azedarach-az-123", "branch": "az/az-123", "issue_id": "az-123"},
 						},
 					}), nil
-				case daemonclient.CommandTaskList:
-					return responseWithJSON(req, protocol.TaskListSnapshotPayload{
-						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
-						ProtocolVersion:  protocol.CurrentVersion,
-						SnapshotRevision: 1,
-						ProjectID:        "proj",
-						LastCheckedAt:    time.Now().UTC(),
-						Freshness:        protocol.TaskListFreshnessFresh,
-						Tasks:            []domain.Task{{ID: "az-123", Status: domain.StatusOpen}},
-					}), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{IssueID: "az-123", TargetID: "base", Branch: "main"}), nil
 				case daemonclient.CommandGitMergePreflight:
 					return responseWithJSON(req, daemonclient.GitMergePreflightResponse{Clean: true}), nil
 				default:
@@ -1905,19 +1887,14 @@ func TestBranchAgentMergeCommandBaseTargetUsesNearestNonClosedAncestorBranch(t *
 							{"path": "/tmp/az-parent", "branch": "riordan/az-parent/work", "issue_id": "az-parent"},
 						},
 					}), nil
-				case daemonclient.CommandTaskList:
-					parentID := naming.IssueID("az-parent")
-					return responseWithJSON(req, protocol.TaskListSnapshotPayload{
-						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
-						ProtocolVersion:  protocol.CurrentVersion,
-						SnapshotRevision: 1,
-						ProjectID:        "proj",
-						LastCheckedAt:    time.Now().UTC(),
-						Freshness:        protocol.TaskListFreshnessFresh,
-						Tasks: []domain.Task{
-							{ID: "az-child", Status: domain.StatusOpen, ParentID: &parentID},
-							{ID: "az-parent", Status: domain.StatusInProgress},
-						},
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:        "az-child",
+						TargetID:       "az-parent",
+						Branch:         "riordan/az-parent/work",
+						WorktreePath:   "/tmp/az-parent",
+						BranchAttached: true,
+						AncestorChain:  []string{"az-parent"},
 					}), nil
 				case daemonclient.CommandGitMergePreflight:
 					if err := json.Unmarshal(req.Body, &preflightBody); err != nil {
@@ -5950,6 +5927,8 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 						CompletedAt:     req.SentAt,
 						Body:            taskListBody,
 					}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{IssueID: "az-9", TargetID: "base", Branch: "main"}), nil
 				case daemonclient.CommandGitStatus:
 					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{HasChanges: false}}), nil
 				case daemonclient.CommandGitWorktreeForBranch:
@@ -6044,8 +6023,7 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 	wantCommands := []string{
 		daemonclient.CommandWorktreeList,
 		daemonclient.CommandWorktreeList,
-		daemonclient.CommandTaskList,
-		daemonclient.CommandWorktreeList,
+		daemonclient.CommandTaskMergeBaseTarget,
 		daemonclient.CommandGitWorktreeForBranch,
 		daemonclient.CommandGitStatus,
 		daemonclient.CommandGitStatus,
@@ -6326,6 +6304,15 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 							{"issue_id": root.String(), "path": "/repo-az-parent", "branch": "user/az-parent/parent-work"},
 							{"issue_id": child.String(), "path": "/repo-az-child", "branch": "user/az-child/child-work"},
 						},
+					}), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:        child.String(),
+						TargetID:       root.String(),
+						Branch:         "user/az-parent/parent-work",
+						WorktreePath:   "/repo-az-parent",
+						BranchAttached: true,
+						AncestorChain:  []string{root.String()},
 					}), nil
 				case protocol.CommandOperationSubmit:
 					if err := json.Unmarshal(req.Body, &submitted); err != nil {
@@ -7037,6 +7024,8 @@ func TestIssueUpdateCommandConfirmedClosedCleansBeforeStatus(t *testing.T) {
 						CompletedAt:     req.SentAt,
 						Body:            taskListBody,
 					}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{IssueID: "az-1", TargetID: "base", Branch: "main"}), nil
 				case daemonclient.CommandGitStatus:
 					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{HasChanges: false}}), nil
 				case daemonclient.CommandGitWorktreeForBranch:
@@ -7118,8 +7107,7 @@ func TestIssueUpdateCommandConfirmedClosedCleansBeforeStatus(t *testing.T) {
 		daemonclient.CommandTaskUpdate,
 		daemonclient.CommandWorktreeList,
 		daemonclient.CommandWorktreeList,
-		daemonclient.CommandTaskList,
-		daemonclient.CommandWorktreeList,
+		daemonclient.CommandTaskMergeBaseTarget,
 		daemonclient.CommandGitWorktreeForBranch,
 		daemonclient.CommandGitStatus,
 		daemonclient.CommandGitStatus,

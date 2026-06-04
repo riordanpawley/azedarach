@@ -1054,6 +1054,73 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("integration readiness", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				if req.Command != CommandTaskIntegrationReady {
+					t.Fatalf("command = %q, want %q", req.Command, CommandTaskIntegrationReady)
+				}
+				var body taskIntegrationReadinessRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal request: %v", err)
+				}
+				if body.TaskID != "az-7" || body.RepoDir != "/repo" {
+					t.Fatalf("request body = %+v", body)
+				}
+				return responseWithJSON(t, req, TaskIntegrationReadiness{
+					IssueID:       "az-7",
+					ParentIssueID: "az-1",
+					Ready:         true,
+				}), nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		got, err := client.TaskIntegrationReadiness(context.Background(), "az-7", " /repo ")
+		if err != nil {
+			t.Fatalf("TaskIntegrationReadiness error: %v", err)
+		}
+		if !got.Ready || got.ParentIssueID != "az-1" {
+			t.Fatalf("readiness = %+v", got)
+		}
+	})
+
+	t.Run("merge base target", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				if req.Command != CommandTaskMergeBaseTarget {
+					t.Fatalf("command = %q, want %q", req.Command, CommandTaskMergeBaseTarget)
+				}
+				var body taskMergeBaseTargetRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal request: %v", err)
+				}
+				if body.TaskID != "az-8" || body.BaseBranch != "trunk" || !body.AllowBaseForChild {
+					t.Fatalf("request body = %+v", body)
+				}
+				return responseWithJSON(t, req, TaskMergeBaseTarget{
+					IssueID:        "az-8",
+					TargetID:       "az-1",
+					Branch:         "riordan/az-1/parent",
+					WorktreePath:   "/repo-parent",
+					BranchAttached: true,
+					AncestorChain:  []string{"az-1"},
+				}), nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		got, err := client.TaskMergeBaseTarget(context.Background(), "az-8", " trunk ", true)
+		if err != nil {
+			t.Fatalf("TaskMergeBaseTarget error: %v", err)
+		}
+		if got.TargetID != "az-1" || got.Branch != "riordan/az-1/parent" || !got.BranchAttached {
+			t.Fatalf("merge target = %+v", got)
+		}
+	})
+
 	t.Run("dependency add and remove", func(t *testing.T) {
 		commands := make([]string, 0, 2)
 		transport := &taskRecordingTransport{

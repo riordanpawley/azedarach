@@ -15,6 +15,8 @@ func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 		daemonInvariantTaskDeletePreflight:    daemonInvariantSourceHybrid,
 		daemonInvariantTaskGraphReadiness:     daemonInvariantSourceHybrid,
 		daemonInvariantTaskCompleteCheck:      daemonInvariantSourceHybrid,
+		daemonInvariantTaskIntegration:        daemonInvariantSourceProjection,
+		daemonInvariantTaskMergeBaseTarget:    daemonInvariantSourceProjection,
 		daemonInvariantRuntimeKnownProjectIDs: daemonInvariantSourceProjection,
 	}
 	for id, want := range expected {

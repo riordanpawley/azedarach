@@ -820,59 +820,19 @@ func resolveParentWorktreeBaseBranchWithTasks(ctx context.Context, deps *Depende
 	if parentID == "" {
 		return baseBranch, nil
 	}
-	tasksByID := tasksByIssueID(taskContext)
-	if len(tasksByID) == 0 {
-		tasks, err := deps.DaemonClient.ListTasksSnapshot(ctx)
-		if err != nil {
-			return "", fmt.Errorf("resolve ancestor task graph for %s: %w", issueIDForError, err)
-		}
-		tasksByID = tasksByIssueID(tasks.Tasks)
-	}
-	if _, ok := tasksByID[strings.TrimSpace(issueIDForError)]; !ok {
-		if parsed, parseErr := naming.ParseIssueID(strings.TrimSpace(issueIDForError)); parseErr == nil {
-			parent := naming.IssueID(parentID)
-			tasksByID[parsed.String()] = domain.Task{ID: parsed, ParentID: &parent}
-		}
-	}
-	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
+	_ = taskContext
+	target, err := deps.DaemonClient.TaskMergeBaseTarget(ctx, issueIDForError, baseBranch, true)
 	if err != nil {
 		return "", fmt.Errorf("resolve parent worktree branch for %s: %w", issueIDForError, err)
 	}
-	if target, ok := domain.ClosestAncestorWithWorktree(issueIDForError, tasksByID, issueWorktreeRefsFromDaemonWorktrees(worktrees)); ok {
-		return target.Branch, nil
+	if branch := strings.TrimSpace(target.Branch); branch != "" {
+		return branch, nil
 	}
 	return baseBranch, nil
 }
 
 func taskParentIssueID(task domain.Task) string {
 	return domain.TaskParentIssueID(task)
-}
-
-func tasksByIssueID(tasks []domain.Task) map[string]domain.Task {
-	tasksByID := make(map[string]domain.Task, len(tasks))
-	for _, task := range tasks {
-		id := strings.TrimSpace(task.ID.String())
-		if id == "" {
-			continue
-		}
-		tasksByID[id] = task
-	}
-	return tasksByID
-}
-
-func issueWorktreeRefsFromDaemonWorktrees(worktrees []daemonclient.Worktree) map[string]domain.IssueWorktreeRef {
-	refs := make(map[string]domain.IssueWorktreeRef, len(worktrees))
-	for _, worktree := range worktrees {
-		issueID := strings.TrimSpace(worktree.IssueID)
-		if issueID == "" {
-			continue
-		}
-		refs[issueID] = domain.IssueWorktreeRef{
-			Branch: strings.TrimSpace(worktree.Branch),
-			Path:   strings.TrimSpace(worktree.Path),
-		}
-	}
-	return refs
 }
 
 // BranchMergeToBaseCommand merges one issue worktree branch into its resolved target branch using daemon git commands.
@@ -1007,57 +967,19 @@ type mergeTargetDecision struct {
 
 func resolveMergeToBaseTarget(ctx context.Context, deps *Dependencies, issueID string, allowBaseForChild bool) (mergeBaseTarget, mergeTargetDecision, error) {
 	defaultBase := resolveCLIBaseBranch(deps.Config)
-	defaultTarget := mergeBaseTarget{TargetID: "base", Branch: defaultBase}
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return defaultTarget, mergeTargetDecision{Reason: "empty issue id: default base target"}, nil
-	}
-
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	target, err := deps.DaemonClient.TaskMergeBaseTarget(ctx, issueID, defaultBase, allowBaseForChild)
 	if err != nil {
-		return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("resolve merge base branch task graph: %w", err)
+		return mergeBaseTarget{}, mergeTargetDecision{}, err
 	}
-
-	tasksByID := tasksByIssueID(snapshot.Tasks)
-	sourceTask, ok := tasksByID[issueID]
-	if !ok {
-		return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("cannot resolve merge target for %s: issue not found in task snapshot; refusing fallback to base", issueID)
-	}
-
-	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
-	if err != nil {
-		return mergeBaseTarget{}, mergeTargetDecision{}, fmt.Errorf("resolve merge base branch worktrees: %w", err)
-	}
-
-	decision := mergeTargetDecision{
-		AncestorChain: make([]string, 0, 6),
-	}
-	if target, ok := domain.ClosestAncestorWithWorktree(issueID, tasksByID, issueWorktreeRefsFromDaemonWorktrees(worktrees)); ok {
-		decision.AncestorChain = target.AncestorChain
-		decision.Reason = "selected closest ancestor worktree branch"
-		return mergeBaseTarget{
-			TargetID:       target.IssueID,
+	return mergeBaseTarget{
+			TargetID:       target.TargetID,
 			Branch:         target.Branch,
 			WorktreePath:   target.WorktreePath,
-			BranchAttached: true,
-		}, decision, nil
-	} else {
-		decision.AncestorChain = target.AncestorChain
-	}
-	for _, parentID := range decision.AncestorChain {
-		if _, ok := tasksByID[parentID]; !ok {
-			return mergeBaseTarget{}, decision, fmt.Errorf("cannot resolve merge target for %s: parent issue %s missing from task snapshot; refusing fallback to base", issueID, parentID)
-		}
-	}
-	if taskParentIssueID(sourceTask) != "" && !allowBaseForChild {
-		return mergeBaseTarget{}, decision, fmt.Errorf("refusing to merge child issue %s into base without explicit override; rerun with --allow-base-for-child", issueID)
-	}
-	if taskParentIssueID(sourceTask) != "" {
-		decision.Reason = "no ancestor worktree branch found; explicit override allowed base target"
-	} else {
-		decision.Reason = "no ancestor chain; selected default base target"
-	}
-	return defaultTarget, decision, nil
+			BranchAttached: target.BranchAttached,
+		}, mergeTargetDecision{
+			Reason:        target.Reason,
+			AncestorChain: append([]string(nil), target.AncestorChain...),
+		}, nil
 }
 
 func BranchAgentMergeCommand(deps *Dependencies, opts BranchAgentMergeOptions) error {

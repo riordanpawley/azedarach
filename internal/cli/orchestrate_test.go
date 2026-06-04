@@ -334,6 +334,8 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 					}), nil
 				case daemonclient.CommandTaskList:
 					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: taskListBody}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{IssueID: child.String(), TargetID: "base", Branch: "main"}), nil
 				case daemonclient.CommandGitStatus:
 					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{Modified: []string{"parent.go"}}}), nil
 				case daemonclient.CommandWorktreeList:
@@ -432,6 +434,14 @@ func TestOrchestrateStartWaitsForAllSubmittedOperationsBeforeMail(t *testing.T) 
 					}), nil
 				case daemonclient.CommandTaskList:
 					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: taskListBody}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					var body struct {
+						TaskID string `json:"task_id"`
+					}
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode merge base target body: %v", err)
+					}
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{IssueID: body.TaskID, TargetID: "base", Branch: "main"}), nil
 				case daemonclient.CommandGitStatus:
 					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{}}), nil
 				case protocol.CommandOperationSubmit:
@@ -672,19 +682,11 @@ func TestOrchestrateIntegrateCommandPrintsGuidance(t *testing.T) {
 							{"issue_id": child.String(), "path": "/repo-az-2", "branch": "user/az-2/worker"},
 						},
 					}), nil
-				case daemonclient.CommandTaskList:
-					tasks := []domain.Task{
-						{ID: parent, Status: domain.StatusInProgress, Type: domain.TypeTask},
-						{ID: child, Status: domain.StatusInProgress, Type: domain.TypeTask, ParentID: &parent},
-					}
-					body, err := marshalTaskListBody(tasks)
-					if err != nil {
-						t.Fatalf("marshal task list response: %v", err)
-					}
-					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
-				case protocol.CommandMailList:
-					return responseWithJSON(req, []protocol.MailEvent{
-						{Seq: 3, ParentIssue: parent.String(), IssueID: child, Type: "worker-integration-ready"},
+				case daemonclient.CommandTaskIntegrationReady:
+					return responseWithJSON(req, daemonclient.TaskIntegrationReadiness{
+						IssueID:       child.String(),
+						ParentIssueID: parent.String(),
+						Ready:         true,
 					}), nil
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
@@ -700,31 +702,6 @@ func TestOrchestrateIntegrateCommandPrintsGuidance(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
 		}
-	}
-}
-
-func TestIsWorkerIntegrationReadyMailTypeAcceptsLegacyAliases(t *testing.T) {
-	tests := map[string]bool{
-		"worker-integration-ready":       true,
-		" worker-integration-ready ":     true,
-		"WORKER-INTEGRATION-READY":       true,
-		"worker-ready":                   true,
-		" worker-ready ":                 true,
-		"worker-complete":                true,
-		" worker-complete ":              true,
-		"worker-progress":                false,
-		"worker-blocked":                 false,
-		"dependency-ready":               false,
-		"worker-integration-ready-later": false,
-		"worker-ready-later":             false,
-		"worker-completed":               false,
-	}
-	for eventType, want := range tests {
-		t.Run(eventType, func(t *testing.T) {
-			if got := isWorkerIntegrationReadyMailType(eventType); got != want {
-				t.Fatalf("isWorkerIntegrationReadyMailType(%q) = %v, want %v", eventType, got, want)
-			}
-		})
 	}
 }
 
@@ -744,18 +721,16 @@ func TestOrchestrateIntegrateCommandBlocksMergeWithoutCompletionEvidence(t *test
 							{"issue_id": child.String(), "path": "/repo-az-2", "branch": "user/az-2/worker"},
 						},
 					}), nil
-				case daemonclient.CommandTaskList:
-					tasks := []domain.Task{
-						{ID: parent, Status: domain.StatusInProgress, Type: domain.TypeTask},
-						{ID: child, Status: domain.StatusInProgress, Type: domain.TypeTask, ParentID: &parent},
-					}
-					body, err := marshalTaskListBody(tasks)
-					if err != nil {
-						t.Fatalf("marshal task list response: %v", err)
-					}
-					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
-				case protocol.CommandMailList:
-					return responseWithJSON(req, []protocol.MailEvent{{Seq: 2, ParentIssue: parent.String(), IssueID: child, Type: "worker-progress"}}), nil
+				case daemonclient.CommandTaskIntegrationReady:
+					return responseWithJSON(req, daemonclient.TaskIntegrationReadiness{
+						IssueID:       child.String(),
+						ParentIssueID: parent.String(),
+						Ready:         false,
+						Reasons: []string{
+							"issue az-2 is not closed",
+							"no worker-integration-ready mailbox event found under parent az-1 for az-2",
+						},
+					}), nil
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
 				}
@@ -881,21 +856,41 @@ func orchestrateIntegrateApplyDeps(t *testing.T, failStep string) (*Dependencies
 							{"issue_id": child.String(), "path": "/repo-az-2", "branch": "user/az-2/worker"},
 						},
 					}), nil
-				case daemonclient.CommandTaskList:
-					childStatus := domain.StatusDone
+				case daemonclient.CommandTaskIntegrationReady:
 					if failStep == "missing_evidence" {
-						childStatus = domain.StatusInProgress
+						return responseWithJSON(req, daemonclient.TaskIntegrationReadiness{
+							IssueID:       child.String(),
+							ParentIssueID: parent.String(),
+							Ready:         false,
+							Reasons: []string{
+								"issue az-2 is not closed",
+								"no worker-integration-ready mailbox event found under parent az-1 for az-2",
+							},
+						}), nil
 					}
+					return responseWithJSON(req, daemonclient.TaskIntegrationReadiness{
+						IssueID:       child.String(),
+						ParentIssueID: parent.String(),
+						Ready:         true,
+					}), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:        child.String(),
+						TargetID:       parent.String(),
+						Branch:         "user/az-1/parent",
+						WorktreePath:   "/repo-parent",
+						BranchAttached: true,
+						AncestorChain:  []string{parent.String()},
+					}), nil
+				case daemonclient.CommandTaskList:
 					body, err := marshalTaskListBody([]domain.Task{
 						{ID: parent, Status: domain.StatusInProgress, Type: domain.TypeTask},
-						{ID: child, Status: childStatus, Type: domain.TypeTask, ParentID: &parent, HasTmuxSession: true, HasWorktree: true},
+						{ID: child, Status: domain.StatusDone, Type: domain.TypeTask, ParentID: &parent, HasTmuxSession: true, HasWorktree: true},
 					})
 					if err != nil {
 						t.Fatalf("marshal task list response: %v", err)
 					}
 					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
-				case protocol.CommandMailList:
-					return responseWithJSON(req, []protocol.MailEvent{{Seq: 1, ParentIssue: parent.String(), IssueID: child, Type: "worker-progress"}}), nil
 				case daemonclient.CommandGitStatus:
 					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{HasChanges: false}}), nil
 				case daemonclient.CommandGitFetch:
