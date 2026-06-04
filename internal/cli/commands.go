@@ -899,6 +899,10 @@ type branchMergeToBaseCommandResult struct {
 	Message      string
 }
 
+type mergeHookFailureFixer struct {
+	ID string
+}
+
 func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (branchMergeToBaseCommandResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), branchMergeToBaseTimeout)
 	defer cancel()
@@ -972,7 +976,26 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 		if details == "" {
 			details = "merge did not complete successfully"
 		}
-		return branchMergeToBaseCommandResult{}, fmt.Errorf("merge %s into %s failed: %s", source.Branch, baseBranch, details)
+		if result.Result.HasConflicts || len(result.Result.ConflictFiles) > 0 {
+			return branchMergeToBaseCommandResult{}, fmt.Errorf("merge %s into %s failed: %s", source.Branch, baseBranch, details)
+		}
+		fixer, fixerErr := createMergeHookFailureFixer(ctx, deps, mergeHookFailureFixerParams{
+			SourceIssueID:  source.IssueID,
+			SourceBranch:   source.Branch,
+			SourceWorktree: source.Path,
+			TargetID:       target.TargetID,
+			TargetBranch:   baseBranch,
+			TargetWorktree: baseWorktree,
+			MergeOutput:    details,
+		})
+		message := fmt.Sprintf("merge %s into %s failed: %s", source.Branch, baseBranch, details)
+		if fixerErr != nil {
+			return branchMergeToBaseCommandResult{}, fmt.Errorf("%s\nfixer issue creation failed: %w", message, fixerErr)
+		}
+		if fixer.ID != "" {
+			message = fmt.Sprintf("%s\ncreated fixer issue %s", message, fixer.ID)
+		}
+		return branchMergeToBaseCommandResult{}, fmt.Errorf("%s", message)
 	}
 	return branchMergeToBaseCommandResult{
 		IssueID:      source.IssueID,
@@ -991,6 +1014,76 @@ func printBranchMergeToBaseResult(result branchMergeToBaseCommandResult) {
 		}
 	}
 	fmt.Printf("Merged %s into %s (%s)\n", result.SourceBranch, result.BaseBranch, result.IssueID)
+}
+
+type mergeHookFailureFixerParams struct {
+	SourceIssueID  string
+	SourceBranch   string
+	SourceWorktree string
+	TargetID       string
+	TargetBranch   string
+	TargetWorktree string
+	MergeOutput    string
+}
+
+func createMergeHookFailureFixer(ctx context.Context, deps *Dependencies, params mergeHookFailureFixerParams) (mergeHookFailureFixer, error) {
+	if deps == nil || deps.DaemonClient == nil {
+		return mergeHookFailureFixer{}, fmt.Errorf("daemon client unavailable")
+	}
+	if strings.TrimSpace(params.SourceIssueID) == "" {
+		return mergeHookFailureFixer{}, fmt.Errorf("source issue id required")
+	}
+	notes := buildMergeHookFailureFixerNotes(params)
+	fixerID, err := deps.DaemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
+		Title:       fmt.Sprintf("Fix merge hook/check failure for %s", params.SourceIssueID),
+		Description: "Repair the hook/check failure that prevented issue integration, then retry the recorded merge command.",
+		Type:        domain.TypeTask,
+		Priority:    domain.P4,
+		Status:      domain.StatusOpen,
+		Notes:       notes,
+	})
+	if err != nil {
+		return mergeHookFailureFixer{}, fmt.Errorf("create fixer issue: %w", err)
+	}
+	if strings.TrimSpace(fixerID) == "" {
+		return mergeHookFailureFixer{}, fmt.Errorf("create fixer issue returned empty id")
+	}
+	sourceID, err := naming.ParseIssueID(params.SourceIssueID)
+	if err != nil {
+		return mergeHookFailureFixer{}, fmt.Errorf("parse source issue id: %w", err)
+	}
+	parsedFixerID, err := naming.ParseIssueID(fixerID)
+	if err != nil {
+		return mergeHookFailureFixer{}, fmt.Errorf("parse fixer issue id: %w", err)
+	}
+	if err := deps.DaemonClient.AddTaskDependency(ctx, daemonclient.TaskDependencyParams{
+		TaskID:      sourceID,
+		DependsOnID: parsedFixerID,
+		Type:        string(domain.DependencyBlocks),
+	}); err != nil {
+		return mergeHookFailureFixer{}, fmt.Errorf("add fixer blocker dependency: %w", err)
+	}
+	return mergeHookFailureFixer{ID: fixerID}, nil
+}
+
+func buildMergeHookFailureFixerNotes(params mergeHookFailureFixerParams) string {
+	lines := []string{
+		"Auto-created after daemon-backed merge failed because hooks/checks rejected the merge commit.",
+		fmt.Sprintf("Source issue: %s", strings.TrimSpace(params.SourceIssueID)),
+		fmt.Sprintf("Source branch: %s", strings.TrimSpace(params.SourceBranch)),
+		fmt.Sprintf("Source worktree: %s", strings.TrimSpace(params.SourceWorktree)),
+		fmt.Sprintf("Target: %s", strings.TrimSpace(params.TargetID)),
+		fmt.Sprintf("Target branch: %s", strings.TrimSpace(params.TargetBranch)),
+		fmt.Sprintf("Target worktree: %s", strings.TrimSpace(params.TargetWorktree)),
+		fmt.Sprintf("Retry: az issue close --id %s", strings.TrimSpace(params.SourceIssueID)),
+		"Hook/check output:",
+	}
+	output := strings.TrimSpace(params.MergeOutput)
+	if output == "" {
+		output = "merge did not complete successfully"
+	}
+	lines = append(lines, output)
+	return strings.Join(lines, "\n")
 }
 
 type mergeBaseTarget struct {

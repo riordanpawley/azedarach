@@ -1105,6 +1105,120 @@ func TestBranchMergeToBaseCommandUsesDaemonGitFlow(t *testing.T) {
 	}
 }
 
+func TestBranchMergeToBaseCommandCreatesFixerIssueForHookFailure(t *testing.T) {
+	commands := make([]string, 0, 12)
+	baseWorktree := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Git.BaseBranch = "trunk"
+	var createBody daemonclient.TaskCreateParams
+	var depBody daemonclient.TaskDependencyParams
+	deps := &Dependencies{
+		Config: cfg,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return responseWithJSON(req, protocol.TaskListSnapshotPayload{
+						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+						ProtocolVersion:  protocol.CurrentVersion,
+						SnapshotRevision: 1,
+						ProjectID:        "proj",
+						LastCheckedAt:    time.Now().UTC(),
+						Freshness:        protocol.TaskListFreshnessFresh,
+						Tasks:            []domain.Task{{ID: "az-123", Status: domain.StatusInReview}},
+					}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"worktrees": []map[string]any{
+							{
+								"path":     "/tmp/azedarach-az-123",
+								"branch":   "riordan/az-123/some-change",
+								"issue_id": "az-123",
+							},
+						},
+					}), nil
+				case daemonclient.CommandGitStatus:
+					return responseWithJSON(req, map[string]any{
+						"status": gitservice.GitStatus{HasChanges: false},
+					}), nil
+				case daemonclient.CommandGitWorktreeForBranch:
+					return responseWithJSON(req, daemonclient.GitWorktreeForBranchResponse{
+						Branch: "trunk",
+						Found:  false,
+					}), nil
+				case daemonclient.CommandGitFetch:
+					return responseWithJSON(req, daemonclient.GitCommandResponse{
+						Worktree: baseWorktree,
+						Remote:   "origin",
+					}), nil
+				case daemonclient.CommandGitCheckout:
+					return responseWithJSON(req, daemonclient.GitCommandResponse{
+						Worktree: baseWorktree,
+						Branch:   "trunk",
+					}), nil
+				case daemonclient.CommandGitMerge:
+					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
+						Worktree: baseWorktree,
+						Branch:   "riordan/az-123/some-change",
+						Result: gitservice.MergeResult{
+							Success: false,
+							Message: "commit-msg hook failed\nmissing trailer",
+						},
+					}), nil
+				case daemonclient.CommandTaskCreate:
+					if err := json.Unmarshal(req.Body, &createBody); err != nil {
+						t.Fatalf("unmarshal task create body: %v", err)
+					}
+					return responseWithJSON(req, daemonclient.TaskIDResponse{TaskID: "az-fix"}), nil
+				case daemonclient.CommandTaskDependencyAdd:
+					if err := json.Unmarshal(req.Body, &depBody); err != nil {
+						t.Fatalf("unmarshal dependency body: %v", err)
+					}
+					return responseWithJSON(req, map[string]any{}), nil
+				default:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   baseWorktree,
+	}
+
+	err := BranchMergeToBaseCommand(deps, "az-123")
+	if err == nil {
+		t.Fatal("BranchMergeToBaseCommand error = nil, want hook failure")
+	}
+	errText := err.Error()
+	for _, want := range []string{"commit-msg hook failed", "created fixer issue az-fix"} {
+		if !strings.Contains(errText, want) {
+			t.Fatalf("error = %q, want %q", errText, want)
+		}
+	}
+	if createBody.Title != "Fix merge hook/check failure for az-123" {
+		t.Fatalf("fixer title = %q", createBody.Title)
+	}
+	for _, want := range []string{
+		"Source issue: az-123",
+		"Source branch: riordan/az-123/some-change",
+		"Target branch: trunk",
+		"Target worktree: " + baseWorktree,
+		"Retry: az issue close --id az-123",
+		"missing trailer",
+	} {
+		if !strings.Contains(createBody.Notes, want) {
+			t.Fatalf("fixer notes missing %q:\n%s", want, createBody.Notes)
+		}
+	}
+	if depBody.TaskID.String() != "az-123" || depBody.DependsOnID.String() != "az-fix" || depBody.Type != string(domain.DependencyBlocks) {
+		t.Fatalf("dependency body = %+v, want source blocked by fixer", depBody)
+	}
+	if !containsString(commands, daemonclient.CommandTaskCreate) || !containsString(commands, daemonclient.CommandTaskDependencyAdd) {
+		t.Fatalf("commands = %v, want fixer create and dependency add", commands)
+	}
+}
+
 func TestBranchMergeToBaseCommandUsesAttachedTargetBranchWorktree(t *testing.T) {
 	commands := make([]string, 0, 8)
 	baseWorktree := t.TempDir()
