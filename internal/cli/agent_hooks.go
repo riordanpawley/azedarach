@@ -72,6 +72,12 @@ func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookCont
 		return outcome, fmt.Errorf("invalid hook event: %q", event)
 	}
 
+	if issueID := strings.TrimSpace(hookCtx.IssueID); issueID != "" && deps != nil && deps.DaemonClient != nil {
+		notifyCtx, cancel := context.WithTimeout(ctx, hookBestEffortDaemonTimeout)
+		_ = notifyDaemonAgentSessionStatus(notifyCtx, deps, issueID, event)
+		cancel()
+	}
+
 	if strings.TrimSpace(hookCtx.ProjectDir) != "" && shouldAppendHookLogEvent(event) {
 		appendHookLogEventBestEffort(deps, protocol.HookLogEvent{
 			Hook:     event,
@@ -80,12 +86,6 @@ func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookCont
 			Level:    "info",
 			Message:  fmt.Sprintf("%s hook: %s", agent, event),
 		})
-	}
-
-	if issueID := strings.TrimSpace(hookCtx.IssueID); issueID != "" && deps != nil && deps.DaemonClient != nil {
-		notifyCtx, cancel := context.WithTimeout(ctx, hookBestEffortDaemonTimeout)
-		_ = notifyDaemonAgentSessionStatus(notifyCtx, deps, issueID, event)
-		cancel()
 	}
 
 	switch agent {

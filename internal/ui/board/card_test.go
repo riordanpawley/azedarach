@@ -496,6 +496,33 @@ func TestRenderSessionStatus(t *testing.T) {
 		}
 	})
 
+	t.Run("hook idle live session does not render busy or elapsed time", func(t *testing.T) {
+		startedAt := time.Now().Add(-1*time.Hour - 30*time.Minute)
+		session := &domain.Session{
+			IssueID:        "test",
+			State:          domain.SessionBusy,
+			Activity:       "idle",
+			ActivitySource: "hooks",
+			StartedAt:      &startedAt,
+		}
+
+		result := renderSessionStatus(session, s)
+		stripped := stripANSI(result)
+
+		if !strings.Contains(stripped, "○") {
+			t.Errorf("Hook-idle session should contain idle icon, got: %s", stripped)
+		}
+		if !strings.Contains(stripped, " I") {
+			t.Errorf("Hook-idle session should contain compact I label, got: %s", stripped)
+		}
+		if strings.Contains(stripped, " B") {
+			t.Errorf("Hook-idle session should not render busy label, got: %s", stripped)
+		}
+		if strings.Contains(stripped, "h") || strings.Contains(stripped, "m") {
+			t.Errorf("Hook-idle session should not show elapsed active time, got: %s", stripped)
+		}
+	})
+
 	t.Run("done without elapsed time", func(t *testing.T) {
 		session := &domain.Session{
 			IssueID: "test",

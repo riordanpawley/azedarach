@@ -316,7 +316,11 @@ func (cv *CompactView) renderSessionCell(session *domain.Session, width int) str
 	}
 
 	var style lipgloss.Style
-	switch session.State {
+	displayState, hasDisplayState := session.DisplayState()
+	if !hasDisplayState {
+		displayState = session.State
+	}
+	switch displayState {
 	case domain.SessionBusy:
 		style = cv.styles.StatusInProgress // Yellow
 	case domain.SessionWaiting:

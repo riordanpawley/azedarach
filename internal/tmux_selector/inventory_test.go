@@ -152,6 +152,54 @@ func TestGlobalInventoryLoaderClosedProjectedTaskKeepsLiveSessionState(t *testin
 	}
 }
 
+func TestGlobalInventoryLoaderCarriesHookActivityFromProjection(t *testing.T) {
+	started := time.Unix(1775209200, 0).UTC()
+	projectDir := t.TempDir()
+	projectID := projectIDForPath(projectDir)
+	sessionID := naming.CanonicalSessionID(projectID, "cmd")
+	loader := NewGlobalInventoryLoader(
+		fakeSessionInventory{infos: []tmux.SessionInfo{
+			{Name: sessionID, CreatedAt: &started, Path: projectDir + "/worktrees/cmd"},
+		}},
+		nil,
+		WithProjectDirs(projectDir),
+		WithProjectSnapshotSource(fakeProjectSnapshotSource{
+			snapshots: []ProjectInventorySnapshot{{
+				ProjectID:   projectID,
+				ProjectPath: projectDir,
+				Tasks: []domain.Task{{
+					ID:     "cmd",
+					Title:  "Idle hook activity",
+					Status: domain.StatusInProgress,
+					Session: &domain.Session{
+						IssueID:        "cmd",
+						State:          domain.SessionBusy,
+						Activity:       "idle",
+						ActivitySource: "hooks",
+						StartedAt:      &started,
+					},
+					HasTmuxSession: true,
+				}},
+			}},
+		}),
+	)
+
+	snapshot, err := loader.ListTasksSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("ListTasksSnapshot: %v", err)
+	}
+	if len(snapshot.Entries) != 1 {
+		t.Fatalf("entries = %#v, want one", snapshot.Entries)
+	}
+	entry := snapshot.Entries[0]
+	if entry.State != domain.SessionBusy || entry.Activity != "idle" || entry.ActivitySource != "hooks" {
+		t.Fatalf("entry activity = state:%s activity:%s source:%s, want busy/idle/hooks", entry.State, entry.Activity, entry.ActivitySource)
+	}
+	if got := snapshot.Tasks[0].Session.Activity; got != "idle" {
+		t.Fatalf("task session activity = %q, want idle", got)
+	}
+}
+
 func TestGlobalInventoryLoaderCarriesTreeTasksForAncestorRendering(t *testing.T) {
 	started := time.Unix(1775209200, 0).UTC()
 	projectDir := t.TempDir()
