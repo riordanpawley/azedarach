@@ -90,15 +90,19 @@ var graphRelationLabels = map[string]string{
 	graphRelRelated:        "Related",
 	graphRelDiscoveredFrom: "Discovered from",
 	graphRelDiscovered:     "Discovered",
+	graphRelCreatedIn:      "Created in",
+	graphRelCreated:        "Created",
 }
 
 var graphRelationDirection = map[string]string{
 	graphRelParent:         "ascendant",
 	graphRelBlockedBy:      "ascendant",
 	graphRelDiscoveredFrom: "ascendant",
+	graphRelCreatedIn:      "ascendant",
 	graphRelChild:          "descendant",
 	graphRelBlocks:         "descendant",
 	graphRelDiscovered:     "descendant",
+	graphRelCreated:        "descendant",
 	graphRelRelated:        "descendant",
 }
 
