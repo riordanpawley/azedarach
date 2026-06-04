@@ -6272,6 +6272,12 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				requests = append(requests, req)
 				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{child.String()},
+						Blocked:     map[string]string{},
+					}), nil
 				case daemonclient.CommandTaskList:
 					taskListCalls++
 					tasks := []domain.Task{{
@@ -6696,9 +6702,9 @@ func TestIssueDeleteCommandBlocksWhenRuntimeAttachmentsPresent(t *testing.T) {
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
-				case daemonclient.CommandTaskList:
-					body, err := marshalTaskListBody([]domain.Task{
-						{
+				case daemonclient.CommandTaskDeletePreflight:
+					body, err := json.Marshal(map[string]any{
+						"task": domain.Task{
 							ID:             "az-1",
 							Title:          "Delete target",
 							Type:           domain.TypeTask,
@@ -6709,9 +6715,10 @@ func TestIssueDeleteCommandBlocksWhenRuntimeAttachmentsPresent(t *testing.T) {
 							CreatedAt:      now,
 							UpdatedAt:      now,
 						},
+						"blockers": []string{"session", "worktree"},
 					})
 					if err != nil {
-						t.Fatalf("marshal task list: %v", err)
+						t.Fatalf("marshal delete preflight: %v", err)
 					}
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -6771,9 +6778,9 @@ func TestIssueDeleteCommandCleansRuntimeAttachmentsBeforeDelete(t *testing.T) {
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case daemonclient.CommandTaskList:
-					body, err := marshalTaskListBody([]domain.Task{
-						{
+				case daemonclient.CommandTaskDeletePreflight:
+					body, err := json.Marshal(map[string]any{
+						"task": domain.Task{
 							ID:             "az-1",
 							Title:          "Delete target",
 							Type:           domain.TypeTask,
@@ -6784,9 +6791,10 @@ func TestIssueDeleteCommandCleansRuntimeAttachmentsBeforeDelete(t *testing.T) {
 							CreatedAt:      now,
 							UpdatedAt:      now,
 						},
+						"blockers": []string{"session", "worktree"},
 					})
 					if err != nil {
-						t.Fatalf("marshal task list: %v", err)
+						t.Fatalf("marshal delete preflight: %v", err)
 					}
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -6846,7 +6854,7 @@ func TestIssueDeleteCommandCleansRuntimeAttachmentsBeforeDelete(t *testing.T) {
 	})
 
 	wantCommands := []string{
-		daemonclient.CommandTaskList,
+		daemonclient.CommandTaskDeletePreflight,
 		commandSessionStop,
 		daemonclient.CommandWorktreeRemove,
 		daemonclient.CommandTaskDelete,

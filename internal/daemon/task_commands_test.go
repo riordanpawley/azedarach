@@ -1457,6 +1457,122 @@ func TestTaskUpdateStatusClosePreflightBlocksActiveChildRuntime(t *testing.T) {
 	}
 }
 
+func TestTaskGraphReadinessDependencyGating(t *testing.T) {
+	root := naming.IssueID("az-root")
+	a := naming.IssueID("az-a")
+	b := naming.IssueID("az-b")
+	aParent := root
+	bParent := root
+
+	base := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
+		{ID: a, Type: domain.TypeTask, Status: domain.StatusInProgress, ParentID: &aParent},
+		{
+			ID:       b,
+			Type:     domain.TypeTask,
+			Status:   domain.StatusOpen,
+			ParentID: &bParent,
+			Dependencies: []domain.Dependency{
+				{ID: a, Type: domain.DependencyBlocks},
+			},
+		},
+	}
+
+	rootID, byID, children, err := daemonTaskGraphIndexes(root.String(), base)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphIndexes error: %v", err)
+	}
+	before, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphReadinessFromIndexes before error: %v", err)
+	}
+	if len(before.Runnable) != 1 || before.Runnable[0] != a.String() {
+		t.Fatalf("before runnable = %v, want [%s]", before.Runnable, a.String())
+	}
+	if got := before.Blocked[b.String()]; !strings.Contains(got, a.String()) {
+		t.Fatalf("before blocked[%s] = %q, want blocker %s", b.String(), got, a.String())
+	}
+
+	after := append([]domain.Task(nil), base...)
+	after[1].Status = domain.StatusDone
+	rootID, byID, children, err = daemonTaskGraphIndexes(root.String(), after)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphIndexes after error: %v", err)
+	}
+	gotAfter, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphReadinessFromIndexes after error: %v", err)
+	}
+	if len(gotAfter.Runnable) != 1 || gotAfter.Runnable[0] != b.String() {
+		t.Fatalf("after runnable = %v, want [%s]", gotAfter.Runnable, b.String())
+	}
+}
+
+func TestTaskGraphReadinessReportsMissingDependencyAndActiveSession(t *testing.T) {
+	root := naming.IssueID("az-root")
+	missingLeaf := naming.IssueID("az-leaf")
+	activeLeaf := naming.IssueID("az-active")
+	missingParent := root
+	activeParent := root
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
+		{
+			ID:       missingLeaf,
+			Type:     domain.TypeTask,
+			Status:   domain.StatusOpen,
+			ParentID: &missingParent,
+			Dependencies: []domain.Dependency{
+				{ID: naming.IssueID("az-missing"), Type: domain.DependencyBlocks},
+			},
+		},
+		{ID: activeLeaf, Type: domain.TypeTask, Status: domain.StatusInProgress, ParentID: &activeParent, HasTmuxSession: true},
+	}
+
+	rootID, byID, children, err := daemonTaskGraphIndexes(root.String(), tasks)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphIndexes error: %v", err)
+	}
+	result, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphReadinessFromIndexes error: %v", err)
+	}
+	if len(result.Runnable) != 0 {
+		t.Fatalf("runnable = %v, want empty", result.Runnable)
+	}
+	if got := result.Blocked[missingLeaf.String()]; !strings.Contains(got, "missing") {
+		t.Fatalf("blocked[%s] = %q, want missing marker", missingLeaf.String(), got)
+	}
+	if len(result.Active) != 1 || result.Active[0] != activeLeaf.String() {
+		t.Fatalf("active = %v, want [%s]", result.Active, activeLeaf.String())
+	}
+}
+
+func TestTaskCompletionAdviceIncludesDomainNextSteps(t *testing.T) {
+	advice := daemonTaskCompletionAdvice("az-1", []string{"az-2"}, []string{"az-3"}, []string{"az-4"})
+	joined := strings.Join(advice, "\n")
+	for _, want := range []string{
+		"az orchestrate close-session --issue az-4",
+		"az issue close --id az-3",
+		"az orchestrate start --root az-1 --issue az-2 --json",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("advice = %+v, missing %q", advice, want)
+		}
+	}
+}
+
+func TestTaskDeleteRuntimeBlockersAreDaemonOwned(t *testing.T) {
+	task := domain.Task{
+		ID:             naming.IssueID("az-1"),
+		HasTmuxSession: true,
+		HasWorktree:    true,
+	}
+	blockers := daemonTaskDeleteRuntimeBlockers(task)
+	if strings.Join(blockers, ",") != "session,worktree" {
+		t.Fatalf("blockers = %v, want session/worktree", blockers)
+	}
+}
+
 func assertNextTaskUpdatedEvent(t *testing.T, events <-chan protocol.EventEnvelope, taskID string, status domain.Status) {
 	t.Helper()
 	select {

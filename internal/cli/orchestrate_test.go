@@ -158,39 +158,22 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 	root := naming.IssueID("az-1")
 	busy := naming.IssueID("az-2")
 	unknown := naming.IssueID("az-3")
-	tasks := []domain.Task{
-		{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
-		{
-			ID:             busy,
-			Title:          "Busy worker",
-			Status:         domain.StatusInProgress,
-			Type:           domain.TypeTask,
-			ParentID:       &root,
-			HasTmuxSession: true,
-			Session:        &domain.Session{IssueID: busy, State: domain.SessionBusy, Activity: "busy", ActivitySource: "hooks", TmuxAttachedCount: 1},
-		},
-		{
-			ID:             unknown,
-			Title:          "Unknown worker",
-			Status:         domain.StatusInProgress,
-			Type:           domain.TypeTask,
-			ParentID:       &root,
-			HasTmuxSession: true,
-			Session:        &domain.Session{IssueID: unknown, State: domain.SessionBusy, Activity: "unknown", ActivitySource: "none", TmuxAttachedCount: 1},
-		},
-	}
-	body, err := marshalTaskListBody(tasks)
-	if err != nil {
-		t.Fatalf("marshal task list response: %v", err)
-	}
 	deps := &Dependencies{
 		RepoDir:   "/repo",
 		ProjectID: protocol.DefaultProjectID,
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
-				case daemonclient.CommandTaskList:
-					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Blocked:     map[string]string{},
+						Active:      []string{busy.String(), unknown.String()},
+						ActiveSessions: []daemonclient.TaskActiveSession{
+							{IssueID: busy.String(), Activity: "busy", ActivitySource: "hooks", State: string(domain.SessionBusy), TmuxAttachedCount: 1},
+							{IssueID: unknown.String(), Activity: "unknown", ActivitySource: "none", State: string(domain.SessionBusy), TmuxAttachedCount: 1, Advice: "activity unknown: check hooks with az ai status --target=auto; install/update with az ai install --target=auto; use sparse pane capture only if status/watch looks stale, failed, or contradictory for az-3"},
+						},
+					}), nil
 				case protocol.CommandMailList:
 					return responseWithJSON(req, []protocol.MailEvent{}), nil
 				default:
@@ -226,30 +209,21 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 func TestBuildOrchestrateWatchFrameIncludesActiveSessionActivity(t *testing.T) {
 	root := naming.IssueID("az-1")
 	idle := naming.IssueID("az-2")
-	tasks := []domain.Task{
-		{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
-		{
-			ID:             idle,
-			Title:          "Idle worker",
-			Status:         domain.StatusInProgress,
-			Type:           domain.TypeTask,
-			ParentID:       &root,
-			HasTmuxSession: true,
-			Session:        &domain.Session{IssueID: idle, State: domain.SessionPaused, Activity: "idle", ActivitySource: "hooks", TmuxAttachedCount: 1},
-		},
-	}
-	body, err := marshalTaskListBody(tasks)
-	if err != nil {
-		t.Fatalf("marshal task list response: %v", err)
-	}
 	deps := &Dependencies{
 		RepoDir:   "/repo",
 		ProjectID: protocol.DefaultProjectID,
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
-				case daemonclient.CommandTaskList:
-					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Blocked:     map[string]string{},
+						Active:      []string{idle.String()},
+						ActiveSessions: []daemonclient.TaskActiveSession{
+							{IssueID: idle.String(), Activity: "idle", ActivitySource: "hooks", State: string(domain.SessionPaused), TmuxAttachedCount: 1},
+						},
+					}), nil
 				case protocol.CommandMailList:
 					return responseWithJSON(req, []protocol.MailEvent{{Seq: 7, ParentIssue: root.String(), IssueID: idle, Type: "worker-progress"}}), nil
 				default:
@@ -331,49 +305,6 @@ func TestParseOrchestrateIntegrateAndCloseSessionArgs(t *testing.T) {
 	}
 }
 
-func TestEvaluateOrchestrateCompleteCheck_Pass(t *testing.T) {
-	root := naming.IssueID("az-1")
-	child := naming.IssueID("az-2")
-	tasks := []domain.Task{
-		{ID: root, Status: domain.StatusInProgress, Type: domain.TypeEpic},
-		{ID: child, ParentID: &root, Status: domain.StatusDone, Type: domain.TypeTask},
-	}
-	result, err := evaluateOrchestrateCompleteCheck("az-1", tasks)
-	if err != nil {
-		t.Fatalf("evaluateOrchestrateCompleteCheck error = %v", err)
-	}
-	if !result.Pass {
-		t.Fatalf("Pass = false, reasons = %+v", result.Reasons)
-	}
-}
-
-func TestEvaluateOrchestrateCompleteCheck_Failures(t *testing.T) {
-	root := naming.IssueID("az-1")
-	leaf1 := naming.IssueID("az-2")
-	leaf2 := naming.IssueID("az-3")
-	tasks := []domain.Task{
-		{ID: root, Status: domain.StatusInProgress, Type: domain.TypeEpic},
-		{ID: leaf1, ParentID: &root, Status: domain.StatusOpen, Type: domain.TypeTask},
-		{ID: leaf2, ParentID: &root, Status: domain.StatusDone, Type: domain.TypeTask, HasTmuxSession: true},
-	}
-	result, err := evaluateOrchestrateCompleteCheck("az-1", tasks)
-	if err != nil {
-		t.Fatalf("evaluateOrchestrateCompleteCheck error = %v", err)
-	}
-	if result.Pass {
-		t.Fatalf("Pass = true, want false")
-	}
-	if len(result.Reasons) < 2 {
-		t.Fatalf("reasons = %+v, want multiple blockers", result.Reasons)
-	}
-	if len(result.Advice) == 0 {
-		t.Fatalf("advice = empty, want remediation commands")
-	}
-	if joined := strings.Join(result.Advice, "\n"); !strings.Contains(joined, "az orchestrate close-session --issue az-3") || !strings.Contains(joined, "az issue close --id az-2") || strings.Contains(joined, "--cleanup") {
-		t.Fatalf("advice = %+v, want close-session and cleanup-close guidance", result.Advice)
-	}
-}
-
 func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 	root := naming.IssueID("az-1")
 	child := naming.IssueID("az-2")
@@ -395,6 +326,12 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
 				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{child.String()},
+						Blocked:     map[string]string{},
+					}), nil
 				case daemonclient.CommandTaskList:
 					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: taskListBody}, nil
 				case daemonclient.CommandGitStatus:
@@ -487,6 +424,12 @@ func TestOrchestrateStartWaitsForAllSubmittedOperationsBeforeMail(t *testing.T) 
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{childA.String(), childB.String()},
+						Blocked:     map[string]string{},
+					}), nil
 				case daemonclient.CommandTaskList:
 					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: taskListBody}, nil
 				case daemonclient.CommandGitStatus:

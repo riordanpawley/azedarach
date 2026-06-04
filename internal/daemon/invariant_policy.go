@@ -19,8 +19,11 @@ const (
 	daemonInvariantSessionStopTargets     daemonInvariantID = "session.stop_targets"
 	daemonInvariantSessionReconcile       daemonInvariantID = "session.reconcile"
 
-	daemonInvariantTaskListFreshness  daemonInvariantID = "task.list_freshness"
-	daemonInvariantTaskClosePreflight daemonInvariantID = "task.close_preflight"
+	daemonInvariantTaskListFreshness   daemonInvariantID = "task.list_freshness"
+	daemonInvariantTaskClosePreflight  daemonInvariantID = "task.close_preflight"
+	daemonInvariantTaskDeletePreflight daemonInvariantID = "task.delete_preflight"
+	daemonInvariantTaskGraphReadiness  daemonInvariantID = "task.graph_readiness"
+	daemonInvariantTaskCompleteCheck   daemonInvariantID = "task.complete_check"
 
 	daemonInvariantRuntimeKnownProjectIDs daemonInvariantID = "runtime.known_project_ids"
 )
@@ -33,6 +36,9 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantSessionReconcile:       daemonInvariantSourceHybrid,
 	daemonInvariantTaskListFreshness:      daemonInvariantSourceProjection,
 	daemonInvariantTaskClosePreflight:     daemonInvariantSourceHybrid,
+	daemonInvariantTaskDeletePreflight:    daemonInvariantSourceHybrid,
+	daemonInvariantTaskGraphReadiness:     daemonInvariantSourceHybrid,
+	daemonInvariantTaskCompleteCheck:      daemonInvariantSourceHybrid,
 	daemonInvariantRuntimeKnownProjectIDs: daemonInvariantSourceProjection,
 }
 

@@ -32,6 +32,7 @@ This directory primarily contains **developer/internal documentation**.
 - Current source-policy examples:
 - `session.start` conflict / `session.attach` target / `session.pause` and `session.resume` lifecycle targets / `session.stop` targets: `tmux`.
 - `session.recover` reconciliation: `hybrid` (projection intent + tmux runtime).
+- `task.close_preflight`, `task.delete_preflight`, `task.graph_readiness`, and `task.complete_check`: `hybrid` (durable issue graph/projection + live runtime attachment state).
 - `task.list` freshness/session timestamps: `projection` (refresh-then-cache).
 - `runtime.reconcile` includes `invariant_sources` debug output reflecting the active source-policy matrix.
 - Treat this as the required cross-daemon safety contract for session/worktree/runtime invariants.

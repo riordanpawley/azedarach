@@ -98,6 +98,35 @@ type taskClosePreflightResult struct {
 	Status   git.GitStatus `json:"status,omitempty"`
 }
 
+type taskDeletePreflightResult struct {
+	Task     domain.Task `json:"task"`
+	Blockers []string    `json:"blockers,omitempty"`
+}
+
+type taskGraphReadinessResult struct {
+	RootIssueID    string                   `json:"root_issue_id"`
+	Runnable       []string                 `json:"runnable"`
+	Active         []string                 `json:"active,omitempty"`
+	ActiveSessions []taskGraphActiveSession `json:"active_sessions,omitempty"`
+	Blocked        map[string]string        `json:"blocked"`
+}
+
+type taskGraphActiveSession struct {
+	IssueID           string `json:"issue_id"`
+	Activity          string `json:"activity"`
+	ActivitySource    string `json:"activity_source"`
+	State             string `json:"state,omitempty"`
+	TmuxAttachedCount int    `json:"tmux_attached_count,omitempty"`
+	Advice            string `json:"advice,omitempty"`
+}
+
+type taskCompleteCheckResult struct {
+	RootIssueID string   `json:"root_issue_id"`
+	Pass        bool     `json:"pass"`
+	Reasons     []string `json:"reasons,omitempty"`
+	Advice      []string `json:"advice,omitempty"`
+}
+
 func (d *Daemon) sourceForTaskInvariant(invariant daemonInvariantID) daemonInvariantSource {
 	return sourceForInvariant(invariant)
 }
@@ -1440,6 +1469,344 @@ func daemonCloseGuardTaskWorktree(task domain.Task) string {
 	return strings.TrimSpace(task.Session.Worktree)
 }
 
+func (d *Daemon) handleTaskDeletePreflight(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
+	var cmd struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	result, err := d.validateTaskDeletePreflight(ctx, projectID, cmd.TaskID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	body, err := json.Marshal(result)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	resp := d.successResponse(req)
+	resp.Body = body
+	resp.Revision = d.currentRevision(projectID)
+	return resp, nil
+}
+
+func (d *Daemon) validateTaskDeletePreflight(ctx context.Context, projectID, taskID string) (taskDeletePreflightResult, error) {
+	tasks, err := d.loadTaskGraphDomainTasks(ctx, projectID)
+	if err != nil {
+		return taskDeletePreflightResult{}, fmt.Errorf("inspect runtime attachments before deleting %s: %w", taskID, err)
+	}
+	task, ok := findDaemonTaskByID(tasks, taskID)
+	if !ok {
+		return taskDeletePreflightResult{}, fmt.Errorf("issue not found: %s", taskID)
+	}
+	return taskDeletePreflightResult{Task: task, Blockers: daemonTaskDeleteRuntimeBlockers(task)}, nil
+}
+
+func daemonTaskDeleteRuntimeBlockers(task domain.Task) []string {
+	blockers := make([]string, 0, 2)
+	if daemonCloseGuardTaskHasSession(task) {
+		blockers = append(blockers, "session")
+	}
+	if daemonCloseGuardTaskHasWorktree(task) {
+		blockers = append(blockers, "worktree")
+	}
+	return blockers
+}
+
+func (d *Daemon) handleTaskGraphReadiness(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
+	var cmd struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	result, err := d.taskGraphReadiness(ctx, projectID, cmd.TaskID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	body, err := json.Marshal(result)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	resp := d.successResponse(req)
+	resp.Body = body
+	resp.Revision = d.currentRevision(projectID)
+	return resp, nil
+}
+
+func (d *Daemon) handleTaskCompleteCheck(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
+	var cmd struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	result, err := d.taskCompleteCheck(ctx, projectID, cmd.TaskID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	body, err := json.Marshal(result)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	resp := d.successResponse(req)
+	resp.Body = body
+	resp.Revision = d.currentRevision(projectID)
+	return resp, nil
+}
+
+func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID string) (taskCompleteCheckResult, error) {
+	tasks, err := d.loadTaskGraphDomainTasks(ctx, projectID)
+	if err != nil {
+		return taskCompleteCheckResult{}, fmt.Errorf("inspect issue graph before completion check: %w", err)
+	}
+	rootID, byID, children, err := daemonTaskGraphIndexes(rootIssueID, tasks)
+	if err != nil {
+		return taskCompleteCheckResult{}, err
+	}
+	ready, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		return taskCompleteCheckResult{}, err
+	}
+
+	desc := daemonTaskGraphDescendants(rootID, children)
+	openDescendants := make([]string, 0, len(desc))
+	activeSessions := make([]string, 0, len(desc))
+	for _, id := range desc {
+		task := byID[id]
+		if task.Status != domain.StatusDone {
+			openDescendants = append(openDescendants, id.String())
+		}
+		if daemonCloseGuardTaskHasSession(task) {
+			activeSessions = append(activeSessions, id.String())
+		}
+	}
+	sort.Strings(openDescendants)
+	sort.Strings(activeSessions)
+
+	reasons := make([]string, 0, 3)
+	if len(ready.Runnable) > 0 {
+		reasons = append(reasons, fmt.Sprintf("runnable leaves remain: %s", strings.Join(ready.Runnable, ",")))
+	}
+	if len(openDescendants) > 0 {
+		reasons = append(reasons, fmt.Sprintf("required descendants not closed: %s", strings.Join(openDescendants, ",")))
+	}
+	if len(activeSessions) > 0 {
+		reasons = append(reasons, fmt.Sprintf("active child sessions remain: %s", strings.Join(activeSessions, ",")))
+	}
+	return taskCompleteCheckResult{
+		RootIssueID: rootID.String(),
+		Pass:        len(reasons) == 0,
+		Reasons:     reasons,
+		Advice:      daemonTaskCompletionAdvice(rootID.String(), ready.Runnable, openDescendants, activeSessions),
+	}, nil
+}
+
+func (d *Daemon) taskGraphReadiness(ctx context.Context, projectID, rootIssueID string) (taskGraphReadinessResult, error) {
+	tasks, err := d.loadTaskGraphDomainTasks(ctx, projectID)
+	if err != nil {
+		return taskGraphReadinessResult{}, fmt.Errorf("inspect issue graph readiness: %w", err)
+	}
+	rootID, byID, children, err := daemonTaskGraphIndexes(rootIssueID, tasks)
+	if err != nil {
+		return taskGraphReadinessResult{}, err
+	}
+	ready, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		return taskGraphReadinessResult{}, err
+	}
+	ready.ActiveSessions = daemonTaskGraphActiveSessions(ready.Active, byID)
+	return ready, nil
+}
+
+func (d *Daemon) loadTaskGraphDomainTasks(ctx context.Context, projectID string) ([]domain.Task, error) {
+	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("task graph session runtime refresh failed", "project_id", projectID, "error", err)
+	}
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil, fmt.Errorf("issue store unavailable")
+	}
+	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return d.enrichTasksWithSessionState(ctx, projectID, tasks), nil
+}
+
+func daemonTaskGraphIndexes(rootIssueID string, tasks []domain.Task) (naming.IssueID, map[naming.IssueID]domain.Task, map[naming.IssueID][]naming.IssueID, error) {
+	rootID, err := naming.ParseIssueID(strings.TrimSpace(rootIssueID))
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("invalid root issue id %q: %w", rootIssueID, err)
+	}
+	byID := make(map[naming.IssueID]domain.Task, len(tasks))
+	children := make(map[naming.IssueID][]naming.IssueID, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID] = task
+		if task.ParentID != nil && !task.ParentID.IsZero() {
+			children[*task.ParentID] = append(children[*task.ParentID], task.ID)
+		}
+	}
+	if _, ok := byID[rootID]; !ok {
+		return "", nil, nil, fmt.Errorf("root issue not found: %s", rootIssueID)
+	}
+	return rootID, byID, children, nil
+}
+
+func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) (taskGraphReadinessResult, error) {
+	desc := daemonTaskGraphDescendants(rootID, children)
+	leaves := make([]string, 0, len(desc))
+	for _, id := range desc {
+		task := byID[id]
+		if task.Type == domain.TypeEpic {
+			continue
+		}
+		if len(children[id]) == 0 {
+			leaves = append(leaves, id.String())
+		}
+	}
+	sort.Strings(leaves)
+	result := taskGraphReadinessResult{
+		RootIssueID: rootID.String(),
+		Runnable:    make([]string, 0, len(leaves)),
+		Active:      make([]string, 0),
+		Blocked:     make(map[string]string),
+	}
+	for _, idRaw := range leaves {
+		id, parseErr := naming.ParseIssueID(idRaw)
+		if parseErr != nil {
+			continue
+		}
+		task := byID[id]
+		if task.Status == domain.StatusDone {
+			continue
+		}
+		if daemonCloseGuardTaskHasSession(task) {
+			result.Active = append(result.Active, idRaw)
+			continue
+		}
+		blockers := daemonTaskGraphUnresolvedBlockers(task, byID)
+		if len(blockers) > 0 {
+			result.Blocked[idRaw] = "waiting on " + strings.Join(blockers, ",")
+			continue
+		}
+		result.Runnable = append(result.Runnable, idRaw)
+	}
+	return result, nil
+}
+
+func daemonTaskGraphDescendants(root naming.IssueID, children map[naming.IssueID][]naming.IssueID) []naming.IssueID {
+	out := make([]naming.IssueID, 0, 16)
+	stack := append([]naming.IssueID(nil), children[root]...)
+	seen := map[naming.IssueID]struct{}{}
+	for len(stack) > 0 {
+		cur := stack[0]
+		stack = stack[1:]
+		if _, ok := seen[cur]; ok {
+			continue
+		}
+		seen[cur] = struct{}{}
+		out = append(out, cur)
+		stack = append(stack, children[cur]...)
+	}
+	return out
+}
+
+func daemonTaskGraphUnresolvedBlockers(task domain.Task, byID map[naming.IssueID]domain.Task) []string {
+	out := make([]string, 0, 4)
+	for _, dep := range task.Dependencies {
+		if dep.Type != domain.DependencyBlocks {
+			continue
+		}
+		depTask, ok := byID[dep.ID]
+		if !ok {
+			out = append(out, dep.ID.String()+"(missing)")
+			continue
+		}
+		if depTask.Status != domain.StatusDone {
+			out = append(out, dep.ID.String())
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func daemonTaskGraphActiveSessions(activeIDs []string, byID map[naming.IssueID]domain.Task) []taskGraphActiveSession {
+	if len(activeIDs) == 0 {
+		return nil
+	}
+	out := make([]taskGraphActiveSession, 0, len(activeIDs))
+	for _, issueID := range activeIDs {
+		taskID, _ := naming.ParseIssueID(issueID)
+		task, ok := byID[taskID]
+		active := taskGraphActiveSession{
+			IssueID:        issueID,
+			Activity:       "unknown",
+			ActivitySource: "none",
+			Advice:         fmt.Sprintf("activity unknown: check hooks with az ai status --target=auto; install/update with az ai install --target=auto; use sparse pane capture only if status/watch looks stale, failed, or contradictory for %s", issueID),
+		}
+		if ok && task.Session != nil {
+			active.State = string(task.Session.State)
+			active.TmuxAttachedCount = task.Session.TmuxAttachedCount
+			if activity := strings.TrimSpace(task.Session.Activity); activity != "" {
+				active.Activity = activity
+			}
+			if source := strings.TrimSpace(task.Session.ActivitySource); source != "" {
+				active.ActivitySource = source
+			}
+			if active.Activity != "unknown" {
+				active.Advice = ""
+			}
+		}
+		out = append(out, active)
+	}
+	return out
+}
+
+func daemonTaskCompletionAdvice(rootIssueID string, runnable, openDescendants, activeSessions []string) []string {
+	advice := make([]string, 0, len(runnable)+len(openDescendants)+len(activeSessions))
+	for _, id := range activeSessions {
+		advice = append(advice, fmt.Sprintf("if intentionally abandoning active worker session, repair-stop it: az orchestrate close-session --issue %s", id))
+	}
+	for _, id := range openDescendants {
+		advice = append(advice, fmt.Sprintf("after integration/evidence, close required child issue: az issue close --id %s", id))
+	}
+	for _, id := range runnable {
+		advice = append(advice, fmt.Sprintf("start or resolve runnable leaf: az orchestrate start --root %s --issue %s --json", rootIssueID, id))
+	}
+	return uniqueDaemonTaskAdvice(advice)
+}
+
+func uniqueDaemonTaskAdvice(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func findDaemonTaskByID(tasks []domain.Task, taskID string) (domain.Task, bool) {
+	taskID = strings.TrimSpace(taskID)
+	for _, candidate := range tasks {
+		if strings.EqualFold(strings.TrimSpace(candidate.ID.String()), taskID) {
+			return candidate, true
+		}
+	}
+	return domain.Task{}, false
+}
+
 func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
 	issueClient := d.issueClientForProject(projectID)
@@ -1524,6 +1891,13 @@ func (d *Daemon) handleTaskDelete(ctx context.Context, req protocol.RequestEnvel
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task delete requested", "project_id", projectID, "task_id", cmd.TaskID)
+	}
+	preflight, err := d.validateTaskDeletePreflight(ctx, projectID, cmd.TaskID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if len(preflight.Blockers) > 0 {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("cannot delete issue %s: active runtime attachments detected (%s)", cmd.TaskID, strings.Join(preflight.Blockers, ", "))), nil
 	}
 	if err := issueClient.Delete(ctx, cmd.TaskID); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil

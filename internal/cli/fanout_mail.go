@@ -132,13 +132,6 @@ type fanoutRegistryEntry struct {
 	CreatedAtUTC string   `json:"created_at_utc"`
 }
 
-type fanoutReadyResult struct {
-	RootIssueID string            `json:"root_issue_id"`
-	Runnable    []string          `json:"runnable"`
-	Active      []string          `json:"active,omitempty"`
-	Blocked     map[string]string `json:"blocked"`
-}
-
 type driftResult struct {
 	IssueID      string   `json:"issue_id"`
 	Worktree     string   `json:"worktree"`
@@ -283,11 +276,7 @@ func IssueFanoutReadyCommand(deps *Dependencies, opts IssueFanoutReadyOptions) e
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	tasks, err := deps.DaemonClient.ListTasks(ctx)
-	if err != nil {
-		return fmt.Errorf("list tasks: %w", err)
-	}
-	result, err := computeRunnableLeaves(opts.RootIssueID, tasks)
+	result, err := deps.DaemonClient.TaskGraphReadiness(ctx, opts.RootIssueID)
 	if err != nil {
 		return err
 	}
@@ -851,101 +840,6 @@ func fanoutPlanFromProtocol(plan protocol.FanoutPlan) fanoutPlan {
 		Blocks:      blocks,
 		Warnings:    plan.Warnings,
 	}
-}
-
-func computeRunnableLeaves(rootIssueID string, tasks []domain.Task) (fanoutReadyResult, error) {
-	rootID, err := naming.ParseIssueID(strings.TrimSpace(rootIssueID))
-	if err != nil {
-		return fanoutReadyResult{}, fmt.Errorf("invalid root issue id %q: %w", rootIssueID, err)
-	}
-	byID := make(map[naming.IssueID]domain.Task, len(tasks))
-	children := make(map[naming.IssueID][]naming.IssueID, len(tasks))
-	for _, t := range tasks {
-		taskID := t.ID
-		byID[taskID] = t
-		if t.ParentID != nil && !t.ParentID.IsZero() {
-			p := *t.ParentID
-			children[p] = append(children[p], taskID)
-		}
-	}
-	if _, ok := byID[rootID]; !ok {
-		return fanoutReadyResult{}, fmt.Errorf("root issue not found: %s", rootIssueID)
-	}
-	desc := collectDescendants(rootID, children)
-	leaves := make([]string, 0, len(desc))
-	for _, id := range desc {
-		task := byID[id]
-		if task.Type == domain.TypeEpic {
-			continue
-		}
-		if len(children[id]) == 0 {
-			leaves = append(leaves, id.String())
-		}
-	}
-	sort.Strings(leaves)
-	result := fanoutReadyResult{
-		RootIssueID: rootIssueID,
-		Runnable:    make([]string, 0, len(leaves)),
-		Active:      make([]string, 0),
-		Blocked:     make(map[string]string),
-	}
-	for _, idRaw := range leaves {
-		id, parseErr := naming.ParseIssueID(idRaw)
-		if parseErr != nil {
-			continue
-		}
-		task := byID[id]
-		if task.Status == domain.StatusDone {
-			continue
-		}
-		if task.HasTmuxSession {
-			result.Active = append(result.Active, idRaw)
-			continue
-		}
-		blockers := unresolvedBlockers(task, byID)
-		if len(blockers) > 0 {
-			result.Blocked[idRaw] = "waiting on " + strings.Join(blockers, ",")
-			continue
-		}
-		result.Runnable = append(result.Runnable, idRaw)
-	}
-	return result, nil
-}
-
-func collectDescendants(root naming.IssueID, children map[naming.IssueID][]naming.IssueID) []naming.IssueID {
-	out := make([]naming.IssueID, 0, 16)
-	stackTyped := append([]naming.IssueID(nil), children[root]...)
-	seen := map[naming.IssueID]struct{}{}
-	for len(stackTyped) > 0 {
-		cur := stackTyped[0]
-		stackTyped = stackTyped[1:]
-		if _, ok := seen[cur]; ok {
-			continue
-		}
-		seen[cur] = struct{}{}
-		out = append(out, cur)
-		stackTyped = append(stackTyped, children[cur]...)
-	}
-	return out
-}
-
-func unresolvedBlockers(task domain.Task, byID map[naming.IssueID]domain.Task) []string {
-	out := make([]string, 0, 4)
-	for _, dep := range task.Dependencies {
-		if dep.Type != domain.DependencyBlocks {
-			continue
-		}
-		depTask, ok := byID[dep.ID]
-		if !ok {
-			out = append(out, dep.ID.String()+"(missing)")
-			continue
-		}
-		if depTask.Status != domain.StatusDone {
-			out = append(out, dep.ID.String())
-		}
-	}
-	sort.Strings(out)
-	return out
 }
 
 func fanoutDesignMetadata(node fanoutFlatNode) string {

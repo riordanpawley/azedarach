@@ -143,13 +143,6 @@ type orchestrateActiveSession struct {
 	Advice            string `json:"advice,omitempty"`
 }
 
-type orchestrateCompleteCheckResult struct {
-	RootIssueID string   `json:"root_issue_id"`
-	Pass        bool     `json:"pass"`
-	Reasons     []string `json:"reasons,omitempty"`
-	Advice      []string `json:"advice,omitempty"`
-}
-
 type orchestratePromptResult struct {
 	RootIssueID  string   `json:"root_issue_id"`
 	IssueID      string   `json:"issue_id"`
@@ -409,11 +402,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		return err
 	}
 
-	tasks, err := deps.DaemonClient.ListTasks(ctx)
-	if err != nil {
-		return fmt.Errorf("list tasks: %w", err)
-	}
-	ready, err := computeRunnableLeaves(opts.RootIssueID, tasks)
+	ready, err := deps.DaemonClient.TaskGraphReadiness(ctx, opts.RootIssueID)
 	if err != nil {
 		return err
 	}
@@ -432,7 +421,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		RootIssueID:    ready.RootIssueID,
 		Runnable:       ready.Runnable,
 		Active:         ready.Active,
-		ActiveSessions: orchestrateActiveSessions(ready.Active, tasks),
+		ActiveSessions: orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
 		Blocked:        ready.Blocked,
 		MailboxEvents:  events,
 		Advice: map[string]interface{}{
@@ -508,19 +497,11 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return orchestrateStartResult{}, err
 	}
-	tasks, err := deps.DaemonClient.ListTasks(ctx)
-	if err != nil {
-		return orchestrateStartResult{}, fmt.Errorf("list tasks: %w", err)
-	}
-	ready, err := computeRunnableLeaves(opts.RootIssueID, tasks)
+	ready, err := deps.DaemonClient.TaskGraphReadiness(ctx, opts.RootIssueID)
 	if err != nil {
 		return orchestrateStartResult{}, err
 	}
 
-	byID := make(map[string]domain.Task, len(tasks))
-	for _, task := range tasks {
-		byID[task.ID.String()] = task
-	}
 	runnableSet := make(map[string]struct{}, len(ready.Runnable))
 	for _, id := range ready.Runnable {
 		runnableSet[id] = struct{}{}
@@ -570,15 +551,6 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 			result.Skipped[issueID] = "limit-reached"
 			continue
 		}
-		task, ok := byID[issueID]
-		if !ok {
-			result.Failed[issueID] = "task-not-found"
-			continue
-		}
-		if task.HasTmuxSession {
-			result.Skipped[issueID] = "session-already-running"
-			continue
-		}
 		emitOrchestrateStartProgress(opts, "preparing", issueID)
 		launch, err := submitSessionStartForIssueWithBaseBranch(deps, issueID, opts.BaseBranchOverride)
 		if err != nil {
@@ -623,37 +595,20 @@ func emitOrchestrateStartProgress(opts OrchestrateStartOptions, stage, issueID s
 	fmt.Fprintf(os.Stderr, "orchestrate start: %s %s\n", stage, issueID)
 }
 
-func orchestrateActiveSessions(activeIDs []string, tasks []domain.Task) []orchestrateActiveSession {
-	if len(activeIDs) == 0 {
+func orchestrateActiveSessionsFromDaemon(active []daemonclient.TaskActiveSession) []orchestrateActiveSession {
+	if len(active) == 0 {
 		return nil
 	}
-	byID := make(map[string]domain.Task, len(tasks))
-	for _, task := range tasks {
-		byID[task.ID.String()] = task
-	}
-	out := make([]orchestrateActiveSession, 0, len(activeIDs))
-	for _, issueID := range activeIDs {
-		task, ok := byID[issueID]
-		active := orchestrateActiveSession{
-			IssueID:        issueID,
-			Activity:       "unknown",
-			ActivitySource: "none",
-			Advice:         fmt.Sprintf("activity unknown: check hooks with az ai status --target=auto; install/update with az ai install --target=auto; use sparse pane capture only if status/watch looks stale, failed, or contradictory for %s", issueID),
-		}
-		if ok && task.Session != nil {
-			active.State = string(task.Session.State)
-			active.TmuxAttachedCount = task.Session.TmuxAttachedCount
-			if activity := strings.TrimSpace(task.Session.Activity); activity != "" {
-				active.Activity = activity
-			}
-			if source := strings.TrimSpace(task.Session.ActivitySource); source != "" {
-				active.ActivitySource = source
-			}
-			if active.Activity != "unknown" {
-				active.Advice = ""
-			}
-		}
-		out = append(out, active)
+	out := make([]orchestrateActiveSession, 0, len(active))
+	for _, session := range active {
+		out = append(out, orchestrateActiveSession{
+			IssueID:           session.IssueID,
+			Activity:          session.Activity,
+			ActivitySource:    session.ActivitySource,
+			State:             session.State,
+			TmuxAttachedCount: session.TmuxAttachedCount,
+			Advice:            session.Advice,
+		})
 	}
 	return out
 }
@@ -754,16 +709,9 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 		for _, event := range events {
 			watchEvents = append(watchEvents, protocolToLocalMailEvent(event))
 		}
-		tasks, err := watchDaemonCommand(deps, func(ctx context.Context) ([]domain.Task, error) {
-			return deps.DaemonClient.ListTasks(ctx)
+		ready, err := watchDaemonCommand(deps, func(ctx context.Context) (daemonclient.TaskGraphReadiness, error) {
+			return deps.DaemonClient.TaskGraphReadiness(ctx, opts.RootIssueID)
 		})
-		if err != nil {
-			if shouldContinueOrchestrateWatchAfterError(err) {
-				continue
-			}
-			return fmt.Errorf("list tasks: %w", err)
-		}
-		ready, err := computeRunnableLeaves(opts.RootIssueID, tasks)
 		if err != nil {
 			return err
 		}
@@ -774,7 +722,7 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 			NextSince:      nextSince,
 			Runnable:       ready.Runnable,
 			Active:         ready.Active,
-			ActiveSessions: orchestrateActiveSessions(ready.Active, tasks),
+			ActiveSessions: orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
 			Blocked:        ready.Blocked,
 			Events:         watchEvents,
 		}
@@ -813,11 +761,7 @@ func OrchestrateCompleteCheckCommand(deps *Dependencies, opts OrchestrateComplet
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	tasks, err := deps.DaemonClient.ListTasks(ctx)
-	if err != nil {
-		return fmt.Errorf("list tasks: %w", err)
-	}
-	result, err := evaluateOrchestrateCompleteCheck(opts.RootIssueID, tasks)
+	result, err := deps.DaemonClient.TaskCompleteCheck(ctx, opts.RootIssueID)
 	if err != nil {
 		return err
 	}
@@ -1149,11 +1093,7 @@ func formatOrchestratorSessionMessage(opts OrchestrateMessageOptions) string {
 }
 
 func buildOrchestrateWatchFrame(deps *Dependencies, rootIssueID string, since int64) (orchestrateWatchFrame, error) {
-	tasks, err := deps.DaemonClient.ListTasks(context.Background())
-	if err != nil {
-		return orchestrateWatchFrame{}, fmt.Errorf("list tasks: %w", err)
-	}
-	ready, err := computeRunnableLeaves(rootIssueID, tasks)
+	ready, err := deps.DaemonClient.TaskGraphReadiness(context.Background(), rootIssueID)
 	if err != nil {
 		return orchestrateWatchFrame{}, err
 	}
@@ -1176,7 +1116,7 @@ func buildOrchestrateWatchFrame(deps *Dependencies, rootIssueID string, since in
 		NextSince:      nextMailboxSeq(events, since),
 		Runnable:       ready.Runnable,
 		Active:         ready.Active,
-		ActiveSessions: orchestrateActiveSessions(ready.Active, tasks),
+		ActiveSessions: orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
 		Blocked:        ready.Blocked,
 		Events:         watchEvents,
 	}, nil
@@ -1296,60 +1236,6 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 		Prompt:       b.String(),
 		Commands:     commands,
 	}
-}
-
-func evaluateOrchestrateCompleteCheck(rootIssueID string, tasks []domain.Task) (orchestrateCompleteCheckResult, error) {
-	rootID, err := naming.ParseIssueID(strings.TrimSpace(rootIssueID))
-	if err != nil {
-		return orchestrateCompleteCheckResult{}, fmt.Errorf("invalid root issue id %q: %w", rootIssueID, err)
-	}
-	byID := make(map[naming.IssueID]domain.Task, len(tasks))
-	children := make(map[naming.IssueID][]naming.IssueID, len(tasks))
-	for _, t := range tasks {
-		byID[t.ID] = t
-		if t.ParentID != nil && !t.ParentID.IsZero() {
-			children[*t.ParentID] = append(children[*t.ParentID], t.ID)
-		}
-	}
-	if _, ok := byID[rootID]; !ok {
-		return orchestrateCompleteCheckResult{}, fmt.Errorf("root issue not found: %s", rootIssueID)
-	}
-	ready, err := computeRunnableLeaves(rootIssueID, tasks)
-	if err != nil {
-		return orchestrateCompleteCheckResult{}, err
-	}
-
-	reasons := make([]string, 0, 8)
-	if len(ready.Runnable) > 0 {
-		reasons = append(reasons, fmt.Sprintf("runnable leaves remain: %s", strings.Join(ready.Runnable, ",")))
-	}
-	desc := collectDescendants(rootID, children)
-	openDescendants := make([]string, 0, len(desc))
-	activeSessions := make([]string, 0, len(desc))
-	for _, id := range desc {
-		task := byID[id]
-		if task.Status != domain.StatusDone {
-			openDescendants = append(openDescendants, id.String())
-		}
-		if task.HasTmuxSession {
-			activeSessions = append(activeSessions, id.String())
-		}
-	}
-	sort.Strings(openDescendants)
-	sort.Strings(activeSessions)
-	if len(openDescendants) > 0 {
-		reasons = append(reasons, fmt.Sprintf("required descendants not closed: %s", strings.Join(openDescendants, ",")))
-	}
-	if len(activeSessions) > 0 {
-		reasons = append(reasons, fmt.Sprintf("active child sessions remain: %s", strings.Join(activeSessions, ",")))
-	}
-
-	return orchestrateCompleteCheckResult{
-		RootIssueID: rootIssueID,
-		Pass:        len(reasons) == 0,
-		Reasons:     reasons,
-		Advice:      orchestrateCompletionAdvice(ready.Runnable, openDescendants, activeSessions),
-	}, nil
 }
 
 func startSessionForIssue(deps *Dependencies, issueID string) error {
@@ -1505,20 +1391,6 @@ func orchestrateStartWarnings(ctx context.Context, deps *Dependencies, willStart
 	return []string{
 		fmt.Sprintf("parent worktree has uncommitted tracked changes (%s); worker worktrees are created from committed branch state and will not see these files: %s", summarizeGitStatusCounts(status), strings.Join(dirty, ", ")),
 	}
-}
-
-func orchestrateCompletionAdvice(runnable, openDescendants, activeSessions []string) []string {
-	advice := make([]string, 0, len(runnable)+len(openDescendants)+len(activeSessions))
-	for _, id := range activeSessions {
-		advice = append(advice, fmt.Sprintf("if intentionally abandoning active worker session, repair-stop it: az orchestrate close-session --issue %s", id))
-	}
-	for _, id := range openDescendants {
-		advice = append(advice, fmt.Sprintf("after integration/evidence, close required child issue: %s", issueCloseCommand(id)))
-	}
-	for _, id := range runnable {
-		advice = append(advice, fmt.Sprintf("start or resolve runnable leaf: az orchestrate start --root <root> --issue %s --json", id))
-	}
-	return uniqueTrimmedStrings(advice)
 }
 
 func worktreeForIssue(ctx context.Context, deps *Dependencies, issueID string) (daemonclient.Worktree, bool, error) {

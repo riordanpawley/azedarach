@@ -134,6 +134,7 @@ fd "filename" -t f internal cmd
 7. Example matrix:
    - `session.start`/`session.attach`/`session.pause`/`session.resume`/`session.stop` runtime-presence checks -> `tmux`
    - session recovery/reconcile -> `hybrid`
+   - `task.close_preflight`/`task.delete_preflight`/`task.graph_readiness`/`task.complete_check` durable lifecycle and orchestration checks -> `hybrid`
    - task-list freshness/session projection checks -> `projection` via refresh-then-cache
 
 ### Adding New Invariants (Required Checklist)

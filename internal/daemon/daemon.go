@@ -561,6 +561,12 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleTaskCreate(ctx, req)
 	case "task.close_preflight":
 		return d.handleTaskClosePreflight(ctx, req)
+	case "task.delete_preflight":
+		return d.handleTaskDeletePreflight(ctx, req)
+	case "task.graph_readiness":
+		return d.handleTaskGraphReadiness(ctx, req)
+	case "task.complete_check":
+		return d.handleTaskCompleteCheck(ctx, req)
 	case "task.update_status":
 		return d.handleTaskUpdateStatus(ctx, req)
 	case "task.update_details":

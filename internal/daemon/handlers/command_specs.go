@@ -46,6 +46,9 @@ const (
 	commandTaskGetMany           = "task.get_many"
 	commandTaskCreate            = "task.create"
 	commandTaskClosePreflight    = "task.close_preflight"
+	commandTaskDeletePreflight   = "task.delete_preflight"
+	commandTaskGraphReadiness    = "task.graph_readiness"
+	commandTaskCompleteCheck     = "task.complete_check"
 	commandTaskUpdateStatus      = "task.update_status"
 	commandTaskUpdateDetails     = "task.update_details"
 	commandTaskAppendNotes       = "task.append_notes"
@@ -139,6 +142,9 @@ var commandSpecRegistry = map[string]CommandSpec{
 	commandTaskGetMany:                    {Command: commandTaskGetMany, RequiresProjectID: true},
 	commandTaskCreate:                     {Command: commandTaskCreate, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskClosePreflight:             {Command: commandTaskClosePreflight, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
+	commandTaskDeletePreflight:            {Command: commandTaskDeletePreflight, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
+	commandTaskGraphReadiness:             {Command: commandTaskGraphReadiness, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
+	commandTaskCompleteCheck:              {Command: commandTaskCompleteCheck, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskUpdateStatus:               {Command: commandTaskUpdateStatus, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskUpdateDetails:              {Command: commandTaskUpdateDetails, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskAppendNotes:                {Command: commandTaskAppendNotes, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},

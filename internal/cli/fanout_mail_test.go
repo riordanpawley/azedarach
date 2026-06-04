@@ -11,8 +11,6 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
-	"github.com/riordanpawley/azedarach/internal/domain"
-	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 func TestFlattenFanoutAndPlan(t *testing.T) {
@@ -60,39 +58,6 @@ func TestFlattenFanoutAndPlan(t *testing.T) {
 	}
 	if plan.Blocks[0].IssueKey != "leaf-a1" || plan.Blocks[0].DependsOnKey != "leaf-a2" {
 		t.Fatalf("blocks[0] = %+v", plan.Blocks[0])
-	}
-}
-
-func TestComputeRunnableLeaves(t *testing.T) {
-	root := naming.IssueID("az-root")
-	group := naming.IssueID("az-group")
-	leafA := naming.IssueID("az-a")
-	leafB := naming.IssueID("az-b")
-	groupParent := root
-	leafAParent := group
-	leafBParent := group
-
-	tasks := []domain.Task{
-		{ID: root, Type: domain.TypeFeature, Status: domain.StatusInProgress},
-		{ID: group, Type: domain.TypeEpic, Status: domain.StatusOpen, ParentID: &groupParent},
-		{ID: leafA, Type: domain.TypeTask, Status: domain.StatusDone, ParentID: &leafAParent},
-		{
-			ID:       leafB,
-			Type:     domain.TypeTask,
-			Status:   domain.StatusOpen,
-			ParentID: &leafBParent,
-			Dependencies: []domain.Dependency{
-				{ID: leafA, Type: domain.DependencyBlocks},
-			},
-		},
-	}
-
-	result, err := computeRunnableLeaves(root.String(), tasks)
-	if err != nil {
-		t.Fatalf("computeRunnableLeaves error: %v", err)
-	}
-	if len(result.Runnable) != 1 || result.Runnable[0] != leafB.String() {
-		t.Fatalf("runnable = %v, want [%s]", result.Runnable, leafB.String())
 	}
 }
 
@@ -248,100 +213,6 @@ func TestFlattenFanout_UnknownDependencyFails(t *testing.T) {
 	_, _, err := flattenFanout(spec)
 	if err == nil || !strings.Contains(err.Error(), "depends_on unknown key") {
 		t.Fatalf("error = %v, want unknown dependency error", err)
-	}
-}
-
-func TestComputeRunnableLeaves_DependencyGatingTimeline(t *testing.T) {
-	root := naming.IssueID("az-root")
-	a := naming.IssueID("az-a")
-	b := naming.IssueID("az-b")
-	aParent := root
-	bParent := root
-	done := domain.StatusDone
-
-	base := []domain.Task{
-		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
-		{ID: a, Type: domain.TypeTask, Status: domain.StatusInProgress, ParentID: &aParent},
-		{
-			ID:       b,
-			Type:     domain.TypeTask,
-			Status:   domain.StatusOpen,
-			ParentID: &bParent,
-			Dependencies: []domain.Dependency{
-				{ID: a, Type: domain.DependencyBlocks},
-			},
-		},
-	}
-
-	before, err := computeRunnableLeaves(root.String(), base)
-	if err != nil {
-		t.Fatalf("computeRunnableLeaves before error: %v", err)
-	}
-	if len(before.Runnable) != 1 || before.Runnable[0] != a.String() {
-		t.Fatalf("before runnable = %v, want [%s]", before.Runnable, a.String())
-	}
-	if got := before.Blocked[b.String()]; !strings.Contains(got, a.String()) {
-		t.Fatalf("before blocked[%s] = %q, want blocker %s", b.String(), got, a.String())
-	}
-
-	after := append([]domain.Task(nil), base...)
-	after[1].Status = done
-	gotAfter, err := computeRunnableLeaves(root.String(), after)
-	if err != nil {
-		t.Fatalf("computeRunnableLeaves after error: %v", err)
-	}
-	if len(gotAfter.Runnable) != 1 || gotAfter.Runnable[0] != b.String() {
-		t.Fatalf("after runnable = %v, want [%s]", gotAfter.Runnable, b.String())
-	}
-}
-
-func TestComputeRunnableLeaves_MissingDependencyReported(t *testing.T) {
-	root := naming.IssueID("az-root")
-	leaf := naming.IssueID("az-leaf")
-	parent := root
-	tasks := []domain.Task{
-		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
-		{
-			ID:       leaf,
-			Type:     domain.TypeTask,
-			Status:   domain.StatusOpen,
-			ParentID: &parent,
-			Dependencies: []domain.Dependency{
-				{ID: naming.IssueID("az-missing"), Type: domain.DependencyBlocks},
-			},
-		},
-	}
-
-	result, err := computeRunnableLeaves(root.String(), tasks)
-	if err != nil {
-		t.Fatalf("computeRunnableLeaves error: %v", err)
-	}
-	if len(result.Runnable) != 0 {
-		t.Fatalf("runnable = %v, want empty", result.Runnable)
-	}
-	if got := result.Blocked[leaf.String()]; !strings.Contains(got, "missing") {
-		t.Fatalf("blocked[%s] = %q, want missing marker", leaf.String(), got)
-	}
-}
-
-func TestComputeRunnableLeaves_ActiveSessionIsNotRunnable(t *testing.T) {
-	root := naming.IssueID("az-root")
-	leaf := naming.IssueID("az-leaf")
-	parent := root
-	tasks := []domain.Task{
-		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
-		{ID: leaf, Type: domain.TypeTask, Status: domain.StatusInProgress, ParentID: &parent, HasTmuxSession: true},
-	}
-
-	result, err := computeRunnableLeaves(root.String(), tasks)
-	if err != nil {
-		t.Fatalf("computeRunnableLeaves error: %v", err)
-	}
-	if len(result.Runnable) != 0 {
-		t.Fatalf("runnable = %v, want empty for active leaf", result.Runnable)
-	}
-	if len(result.Active) != 1 || result.Active[0] != leaf.String() {
-		t.Fatalf("active = %v, want [%s]", result.Active, leaf.String())
 	}
 }
 

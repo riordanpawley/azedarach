@@ -21,6 +21,9 @@ const (
 	CommandTaskGetMany          = "task.get_many"
 	CommandTaskCreate           = "task.create"
 	CommandTaskClosePreflight   = "task.close_preflight"
+	CommandTaskDeletePreflight  = "task.delete_preflight"
+	CommandTaskGraphReadiness   = "task.graph_readiness"
+	CommandTaskCompleteCheck    = "task.complete_check"
 	CommandTaskUpdateStatus     = "task.update_status"
 	CommandTaskUpdate           = "task.update_details"
 	CommandTaskAppendNotes      = "task.append_notes"
@@ -100,6 +103,38 @@ type taskClosePreflightResponse struct {
 	Task     domain.Task `json:"task"`
 	Worktree string      `json:"worktree,omitempty"`
 	Status   GitStatus   `json:"status,omitempty"`
+}
+
+type taskDeletePreflightResponse struct {
+	Task     domain.Task `json:"task"`
+	Blockers []string    `json:"blockers,omitempty"`
+}
+
+// TaskGraphReadiness describes daemon-owned runnable-leaf policy for a root issue graph.
+type TaskGraphReadiness struct {
+	RootIssueID    string              `json:"root_issue_id"`
+	Runnable       []string            `json:"runnable"`
+	Active         []string            `json:"active,omitempty"`
+	ActiveSessions []TaskActiveSession `json:"active_sessions,omitempty"`
+	Blocked        map[string]string   `json:"blocked"`
+}
+
+// TaskActiveSession contains runtime activity details for active graph leaves.
+type TaskActiveSession struct {
+	IssueID           string `json:"issue_id"`
+	Activity          string `json:"activity"`
+	ActivitySource    string `json:"activity_source"`
+	State             string `json:"state,omitempty"`
+	TmuxAttachedCount int    `json:"tmux_attached_count,omitempty"`
+	Advice            string `json:"advice,omitempty"`
+}
+
+// TaskCompleteCheckResult is the daemon-owned root close readiness gate.
+type TaskCompleteCheckResult struct {
+	RootIssueID string   `json:"root_issue_id"`
+	Pass        bool     `json:"pass"`
+	Reasons     []string `json:"reasons,omitempty"`
+	Advice      []string `json:"advice,omitempty"`
 }
 
 // TaskAppendNotesRequest appends a single line to task notes.
@@ -682,6 +717,19 @@ func (c *Client) AppendTaskNotes(ctx context.Context, taskID, line string) error
 	}, nil)
 }
 
+// ValidateTaskDelete returns daemon-owned delete blockers for a task.
+func (c *Client) ValidateTaskDelete(ctx context.Context, taskID string) (domain.Task, []string, error) {
+	parsedTaskID, err := naming.ParseIssueID(taskID)
+	if err != nil {
+		return domain.Task{}, nil, fmt.Errorf("invalid task id: %w", err)
+	}
+	var out taskDeletePreflightResponse
+	if err := c.commandJSON(ctx, CommandTaskDeletePreflight, TaskIDRequest{TaskID: parsedTaskID}, &out); err != nil {
+		return domain.Task{}, nil, err
+	}
+	return out.Task, append([]string(nil), out.Blockers...), nil
+}
+
 // DeleteTask deletes a task through the daemon client boundary.
 func (c *Client) DeleteTask(ctx context.Context, taskID string) error {
 	parsedTaskID, err := naming.ParseIssueID(taskID)
@@ -698,6 +746,32 @@ func (c *Client) ArchiveTask(ctx context.Context, taskID string) error {
 		return fmt.Errorf("invalid task id: %w", err)
 	}
 	return c.commandJSON(ctx, CommandTaskArchive, TaskIDRequest{TaskID: parsedTaskID}, nil)
+}
+
+// TaskGraphReadiness returns daemon-owned runnable-leaf policy for a root issue.
+func (c *Client) TaskGraphReadiness(ctx context.Context, rootIssueID string) (TaskGraphReadiness, error) {
+	parsedRootID, err := naming.ParseIssueID(rootIssueID)
+	if err != nil {
+		return TaskGraphReadiness{}, fmt.Errorf("invalid root issue id: %w", err)
+	}
+	var out TaskGraphReadiness
+	if err := c.commandJSON(ctx, CommandTaskGraphReadiness, TaskIDRequest{TaskID: parsedRootID}, &out); err != nil {
+		return TaskGraphReadiness{}, err
+	}
+	return out, nil
+}
+
+// TaskCompleteCheck returns the daemon-owned completion gate for a root issue.
+func (c *Client) TaskCompleteCheck(ctx context.Context, rootIssueID string) (TaskCompleteCheckResult, error) {
+	parsedRootID, err := naming.ParseIssueID(rootIssueID)
+	if err != nil {
+		return TaskCompleteCheckResult{}, fmt.Errorf("invalid root issue id: %w", err)
+	}
+	var out TaskCompleteCheckResult
+	if err := c.commandJSON(ctx, CommandTaskCompleteCheck, TaskIDRequest{TaskID: parsedRootID}, &out); err != nil {
+		return TaskCompleteCheckResult{}, err
+	}
+	return out, nil
 }
 
 // AddTaskDependency creates or restores a dependency between two tasks.

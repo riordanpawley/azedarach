@@ -3646,15 +3646,11 @@ func IssueDeleteCommand(deps *Dependencies, opts IssueDeleteOptions) error {
 		return err
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	_, blockers, err := deps.DaemonClient.ValidateTaskDelete(ctx, opts.IssueID)
 	if err != nil {
 		return fmt.Errorf("failed to inspect issue %s for delete guard: %w", opts.IssueID, err)
 	}
-	task, ok := findTaskByID(snapshot.Tasks, opts.IssueID)
-	if !ok {
-		return fmt.Errorf("issue not found: %s", opts.IssueID)
-	}
-	if blockers := issueDeleteRuntimeBlockers(task); len(blockers) > 0 {
+	if len(blockers) > 0 {
 		missing := issueDeleteMissingCleanupOptions(blockers, opts)
 		if len(missing) == 0 {
 			cleanup, err := cleanupIssueRuntimeAttachments(ctx, deps, opts, blockers)
@@ -3744,18 +3740,6 @@ func printIssueDeleteResult(opts IssueDeleteOptions, cleanup issueDeleteCleanupR
 		}
 	}
 	return nil
-}
-
-func issueDeleteRuntimeBlockers(task domain.Task) []string {
-	blockers := make([]string, 0, 2)
-	if task.HasTmuxSession || task.Session != nil {
-		blockers = append(blockers, "session")
-	}
-	hasSessionWorktree := task.Session != nil && strings.TrimSpace(task.Session.Worktree) != ""
-	if task.HasWorktree || hasSessionWorktree {
-		blockers = append(blockers, "worktree")
-	}
-	return blockers
 }
 
 func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
