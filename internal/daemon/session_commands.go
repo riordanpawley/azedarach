@@ -2270,10 +2270,15 @@ func (d *Daemon) refreshExistingSessionRuntimeState(ctx context.Context, project
 		return err
 	}
 	liveByID := make(map[string]tmux.SessionInfo, len(tmuxSessions))
+	liveIssueKeys := make(map[string]struct{}, len(tmuxSessions))
+	namingScope := d.sessionNamingScope(projectID)
 	for _, info := range tmuxSessions {
 		name := strings.TrimSpace(info.Name)
 		if name != "" {
 			liveByID[name] = info
+		}
+		if issueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope); ok {
+			liveIssueKeys[sessionKey(issueID)] = struct{}{}
 		}
 	}
 	writer := d.runtimeProjectionStateWriter()
@@ -2289,6 +2294,14 @@ func (d *Daemon) refreshExistingSessionRuntimeState(ctx context.Context, project
 				started := info.CreatedAt.UTC()
 				session.StartedAt = &started
 			}
+		} else if isAgentScopedSessionID(sessionID) {
+			issueKey := sessionKey(sessionProjectionIssueID(session, namingScope))
+			if _, parentLive := liveIssueKeys[issueKey]; parentLive {
+				session.ObservedState = daemonstate.NormalizeSessionState(session.State)
+			} else {
+				session.ObservedState = daemonstate.SessionStateStopped
+			}
+			session.TmuxAttachedCount = 0
 		} else {
 			session.ObservedState = daemonstate.SessionStateStopped
 			session.TmuxAttachedCount = 0
@@ -2402,6 +2415,7 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 	}
 	existingByIssueKey := sessionProjectionForTmuxHydrationByIssueKey(existingSessions, namingScope)
 	liveSessionIDs := make(map[string]struct{}, len(tmuxSessions))
+	liveIssueKeys := make(map[string]struct{}, len(tmuxSessions))
 	for _, info := range tmuxSessions {
 		name := strings.TrimSpace(info.Name)
 		if name == "" {
@@ -2413,6 +2427,7 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 			continue
 		}
 		issueKey := sessionKey(issueID)
+		liveIssueKeys[issueKey] = struct{}{}
 		row := daemonstate.Session{
 			ID:                name,
 			IssueID:           issueID,
@@ -2448,7 +2463,16 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 			continue
 		}
 		stopped := session
-		stopped.ObservedState = daemonstate.SessionStateStopped
+		if isAgentScopedSessionID(session.ID) {
+			issueKey := sessionKey(sessionProjectionIssueID(session, namingScope))
+			if _, parentLive := liveIssueKeys[issueKey]; parentLive {
+				stopped.ObservedState = daemonstate.NormalizeSessionState(stopped.State)
+			} else {
+				stopped.ObservedState = daemonstate.SessionStateStopped
+			}
+		} else {
+			stopped.ObservedState = daemonstate.SessionStateStopped
+		}
 		stopped.UpdatedAt = time.Now().UTC()
 		if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, stopped); err != nil && d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("persist missing tmux session as stopped failed",
