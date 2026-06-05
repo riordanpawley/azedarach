@@ -1,10 +1,13 @@
 package reconnect
 
 import (
+	"io"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/ipc/codec"
 )
 
 func TestPolicyDelayCappedExponential(t *testing.T) {
@@ -63,6 +66,9 @@ func TestIsTransientTransportError(t *testing.T) {
 	}{
 		{name: "dial unix", err: errString("dial unix /tmp/daemon.sock: connect: connection refused"), want: true},
 		{name: "daemon socket unavailable", err: errString("daemon socket unavailable: stat /tmp/daemon.sock: no such file or directory"), want: true},
+		{name: "short frame timeout", err: &codec.Error{Kind: codec.ErrorKindShortFrame, Err: os.ErrDeadlineExceeded}, want: true},
+		{name: "short frame eof", err: &codec.Error{Kind: codec.ErrorKindShortFrame, Err: io.ErrUnexpectedEOF}, want: true},
+		{name: "string short frame timeout", err: errString("daemon command transport: short_frame: read unix ->/tmp/daemon.sock: i/o timeout"), want: true},
 		{name: "permission denied", err: errString("permission denied"), want: false},
 	}
 

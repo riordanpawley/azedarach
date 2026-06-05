@@ -228,6 +228,65 @@ func TestCommandTimesOutWhenContextDeadlineIsShorterThanClientTimeout(t *testing
 	}
 }
 
+func TestCommandContextCancelsWhenClientDisconnects(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	socket := tempSocketPath(t)
+	defer os.Remove(socket)
+	handlerCanceled := make(chan struct{})
+	srv := NewServer(socket, Handlers{
+		Handshake: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+			return protocol.HelloAck{Accepted: true}, nil
+		},
+		Command: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			select {
+			case <-ctx.Done():
+				close(handlerCanceled)
+				return protocol.ResponseEnvelope{}, ctx.Err()
+			case <-time.After(2 * time.Second):
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					CompletedAt:     time.Now().UTC(),
+					OK:              true,
+				}, nil
+			}
+		},
+		Subscribe: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, func(), error) {
+			ch := make(chan protocol.EventEnvelope)
+			close(ch)
+			return ch, func() {}, nil
+		},
+	})
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ctx) }()
+	waitForSocket(t, socket, errCh)
+
+	client := NewClient(socket).WithTimeout(10 * time.Second)
+	cmdCtx, cmdCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cmdCancel()
+
+	_, err := client.Command(cmdCtx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-client-disconnect",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.list",
+		SentAt:          time.Now().UTC(),
+	})
+	if err == nil {
+		t.Fatal("expected client command timeout")
+	}
+
+	select {
+	case <-handlerCanceled:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("server command context was not canceled after client disconnected")
+	}
+}
+
 func TestServerRecoversFromCommandHandlerPanic(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
