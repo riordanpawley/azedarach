@@ -357,6 +357,29 @@ func TestApplyHandlerAggregatesPartialFailuresInOrder(t *testing.T) {
 	}
 }
 
+func TestApplyExecutorRejectsTerminalStatusUpdate(t *testing.T) {
+	service := &recordingApplyService{}
+	h := NewApplyHandler(service, nil)
+
+	_, err := h.executeOperation(context.Background(), 0, protocol.ApplyOperationBody{
+		Command: applyCommandTaskUpdateStatus,
+		Body: mustApplyJSON(t, map[string]any{
+			"task_id": "az-1",
+			"status":  "closed",
+		}),
+	})
+
+	if err == nil {
+		t.Fatal("expected terminal status update to fail")
+	}
+	if err.Error() != "closed status must be applied with task.close" {
+		t.Fatalf("error = %q, want task.close invariant", err.Error())
+	}
+	if len(service.calls) != 0 {
+		t.Fatalf("service calls = %v, want none", service.calls)
+	}
+}
+
 func TestApplyHandlerRevisionMismatchStopsBeforeExecution(t *testing.T) {
 	service := &recordingApplyService{}
 	revisions := &recordingApplyRevisions{current: 9}

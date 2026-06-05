@@ -26,8 +26,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
-const commandTaskClosePreflight = "task.close_preflight"
-
 type recordingDaemonTransport struct {
 	calls            []string
 	requests         []string
@@ -386,30 +384,6 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 				switch req.Command {
 				case daemonclient.CommandWorktreeList:
 					return emptyWorktreeListResponse(t, req), nil
-				case commandTaskClosePreflight:
-					var body struct {
-						TaskID               string `json:"task_id"`
-						IntegrateBeforeClose bool   `json:"integrate_before_close"`
-					}
-					if err := json.Unmarshal(req.Body, &body); err != nil {
-						t.Fatalf("unmarshal close preflight request: %v", err)
-					}
-					respBody, err := json.Marshal(map[string]any{
-						"task": map[string]any{
-							"id":     body.TaskID,
-							"status": "in_review",
-						},
-					})
-					if err != nil {
-						t.Fatalf("marshal close preflight response: %v", err)
-					}
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						OK:              true,
-						Body:            respBody,
-					}, nil
 				case daemonclient.CommandTaskUpdateStatus:
 					var body daemonclient.TaskStatusRequest
 					if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -629,24 +603,6 @@ func TestTaskStatusDoneRequiresCloseCleanupConfirmation(t *testing.T) {
 					Body:            respBody,
 				}, nil
 			}
-			if req.Command == commandTaskClosePreflight {
-				respBody, err := json.Marshal(map[string]any{
-					"task": map[string]any{
-						"id":     "az-4",
-						"status": "in_review",
-					},
-				})
-				if err != nil {
-					t.Fatalf("marshal close preflight response: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
-			}
 			if req.Command != daemonclient.CommandTaskClose {
 				t.Fatalf("unexpected command: %s", req.Command)
 			}
@@ -753,23 +709,6 @@ func TestTaskStatusDoneSuccessKeepsOptimisticOverlayAcrossStaleHydration(t *test
 				}{ProjectID: "default"})
 				if err != nil {
 					t.Fatalf("marshal worktree response: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
-			case commandTaskClosePreflight:
-				respBody, err := json.Marshal(map[string]any{
-					"task": map[string]any{
-						"id":     "az-4",
-						"status": "in_review",
-					},
-				})
-				if err != nil {
-					t.Fatalf("marshal close preflight response: %v", err)
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -8597,30 +8536,6 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 				switch req.Command {
 				case daemonclient.CommandWorktreeList:
 					return emptyWorktreeListResponse(t, req), nil
-				case commandTaskClosePreflight:
-					var body struct {
-						TaskID               string `json:"task_id"`
-						IntegrateBeforeClose bool   `json:"integrate_before_close"`
-					}
-					if err := json.Unmarshal(req.Body, &body); err != nil {
-						t.Fatalf("unmarshal close preflight request: %v", err)
-					}
-					respBody, err := json.Marshal(map[string]any{
-						"task": map[string]any{
-							"id":     body.TaskID,
-							"status": "in_review",
-						},
-					})
-					if err != nil {
-						t.Fatalf("marshal close preflight response: %v", err)
-					}
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						OK:              true,
-						Body:            respBody,
-					}, nil
 				case daemonclient.CommandTaskClose:
 					var body struct {
 						TaskID               string `json:"task_id"`
@@ -8838,31 +8753,6 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				if req.Command == daemonclient.CommandWorktreeList {
 					return emptyWorktreeListResponse(t, req), nil
-				}
-				if req.Command == commandTaskClosePreflight {
-					var body struct {
-						TaskID               string `json:"task_id"`
-						IntegrateBeforeClose bool   `json:"integrate_before_close"`
-					}
-					if err := json.Unmarshal(req.Body, &body); err != nil {
-						t.Fatalf("unmarshal close preflight request: %v", err)
-					}
-					respBody, err := json.Marshal(map[string]any{
-						"task": map[string]any{
-							"id":     body.TaskID,
-							"status": "in_review",
-						},
-					})
-					if err != nil {
-						t.Fatalf("marshal close preflight response: %v", err)
-					}
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						OK:              true,
-						Body:            respBody,
-					}, nil
 				}
 				if req.Command == daemonclient.CommandTaskList {
 					return protocol.ResponseEnvelope{
