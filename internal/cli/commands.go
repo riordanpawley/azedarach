@@ -267,6 +267,7 @@ type IssueBulkUpdateOptions struct {
 
 type SessionCommandOptions struct {
 	Wait         bool
+	Project      string
 	PollInterval time.Duration
 }
 
@@ -389,7 +390,7 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	target, err := resolveSessionIssueTarget(ctx, deps, issueID)
+	target, err := resolveSessionStartIssueTarget(ctx, deps, issueID, opts.Project)
 	if err != nil {
 		return err
 	}
@@ -414,6 +415,18 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 	}
 
 	return printCommandOutputWithWait(ctx, deps, resp, opts)
+}
+
+func resolveSessionStartIssueTarget(ctx context.Context, deps *Dependencies, issueID, project string) (sessionIssueTarget, error) {
+	trimmedProject := strings.TrimSpace(project)
+	if trimmedProject == "" {
+		return resolveSessionIssueTarget(ctx, deps, issueID)
+	}
+	trimmedIssueID := strings.TrimSpace(issueID)
+	if trimmedIssueID == "" {
+		return sessionIssueTarget{}, fmt.Errorf("issue id is required")
+	}
+	return resolveExplicitSessionIssueTarget(ctx, deps, trimmedIssueID, trimmedProject, trimmedIssueID)
 }
 
 func startSessionProgressReporter(ctx context.Context, issueID string) func() {
