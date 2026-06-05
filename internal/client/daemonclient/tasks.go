@@ -20,7 +20,6 @@ const (
 	CommandTaskGetMany          = "task.get_many"
 	CommandTaskCreate           = "task.create"
 	CommandTaskClose            = "task.close"
-	CommandTaskClosePreflight   = "task.close_preflight"
 	CommandTaskGraphReadiness   = "task.graph_readiness"
 	CommandTaskCompleteCheck    = "task.complete_check"
 	CommandTaskIntegrationReady = "task.integration_readiness"
@@ -85,30 +84,6 @@ type TaskDeleteOptions struct {
 	ForceWorktree  bool
 }
 
-// CloseGuardOptions controls which target runtime assets may remain because
-// the caller is about to clean them before writing the closed status.
-type CloseGuardOptions struct {
-	AllowTargetSession  bool
-	AllowTargetWorktree bool
-	ForceWorktree       bool
-	IgnoreAhead         bool
-}
-
-// CloseGuardResult records the preflight inputs used for a close transition.
-type CloseGuardResult struct {
-	Task     domain.Task
-	Worktree string
-	Status   GitStatus
-}
-
-type taskClosePreflightRequest struct {
-	TaskID              naming.IssueID `json:"task_id"`
-	AllowTargetSession  bool           `json:"allow_target_session,omitempty"`
-	AllowTargetWorktree bool           `json:"allow_target_worktree,omitempty"`
-	ForceWorktree       bool           `json:"force_worktree,omitempty"`
-	IgnoreAhead         bool           `json:"ignore_ahead,omitempty"`
-}
-
 type taskCloseRequest struct {
 	TaskID               naming.IssueID `json:"task_id"`
 	ForceWorktree        bool           `json:"force_worktree,omitempty"`
@@ -144,12 +119,6 @@ type TaskDeleteResult struct {
 	WorktreeRemoved bool   `json:"worktree_removed,omitempty"`
 	WorktreeForced  bool   `json:"worktree_forced,omitempty"`
 	Revision        uint64 `json:"revision,omitempty"`
-}
-
-type taskClosePreflightResponse struct {
-	Task     domain.Task `json:"task"`
-	Worktree string      `json:"worktree,omitempty"`
-	Status   GitStatus   `json:"status,omitempty"`
 }
 
 // TaskGraphReadiness describes daemon-owned runnable-leaf policy for a root issue graph.
@@ -629,43 +598,6 @@ func (c *Client) CloseTask(ctx context.Context, taskID string, opts TaskStatusOp
 		return TaskCloseResult{}, err
 	}
 	return out, nil
-}
-
-// ValidateTaskClose rejects close/done transitions for worktrees that still
-// have tracked changes, conflicts, or commits ahead of their integration base.
-func (c *Client) ValidateTaskClose(ctx context.Context, taskID string) (CloseGuardResult, error) {
-	return c.ValidateTaskCloseWithOptions(ctx, taskID, CloseGuardOptions{})
-}
-
-// ValidateTaskCloseWithOptions rejects close/done transitions unless the target
-// issue and its children are in a closeable state.
-func (c *Client) ValidateTaskCloseWithOptions(ctx context.Context, taskID string, opts CloseGuardOptions) (CloseGuardResult, error) {
-	parsedTaskID, err := naming.ParseIssueID(taskID)
-	if err != nil {
-		return CloseGuardResult{}, fmt.Errorf("invalid task id: %w", err)
-	}
-	var out taskClosePreflightResponse
-	if err := c.commandJSON(ctx, CommandTaskClosePreflight, taskClosePreflightRequest{
-		TaskID:              parsedTaskID,
-		AllowTargetSession:  opts.AllowTargetSession,
-		AllowTargetWorktree: opts.AllowTargetWorktree,
-		ForceWorktree:       opts.ForceWorktree,
-		IgnoreAhead:         opts.IgnoreAhead,
-	}, &out); err != nil {
-		return CloseGuardResult{}, err
-	}
-	return CloseGuardResult{
-		Task:     out.Task,
-		Worktree: out.Worktree,
-		Status:   out.Status,
-	}, nil
-}
-
-func closeGuardTaskHasWorktree(task domain.Task) bool {
-	if task.HasWorktree {
-		return true
-	}
-	return task.Session != nil && strings.TrimSpace(task.Session.Worktree) != ""
 }
 
 // UpdateTaskDetails updates a task's details through the daemon client boundary.

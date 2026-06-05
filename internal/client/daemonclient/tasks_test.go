@@ -57,19 +57,6 @@ func responseWithCommandError(req protocol.RequestEnvelope, message string) prot
 	}
 }
 
-func closePreflightResponse(t *testing.T, req protocol.RequestEnvelope, task domain.Task, status GitStatus) protocol.ResponseEnvelope {
-	t.Helper()
-	worktree := ""
-	if task.Session != nil {
-		worktree = strings.TrimSpace(task.Session.Worktree)
-	}
-	return responseWithJSON(t, req, taskClosePreflightResponse{
-		Task:     task,
-		Worktree: worktree,
-		Status:   status,
-	})
-}
-
 func (t *taskRecordingTransport) Handshake(_ context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
 	t.handshakeCalls++
 	if t.handshakeFn != nil {

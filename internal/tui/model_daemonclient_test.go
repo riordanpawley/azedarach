@@ -26,6 +26,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
+const commandTaskClosePreflight = "task.close_preflight"
+
 type recordingDaemonTransport struct {
 	calls            []string
 	requests         []string
@@ -384,7 +386,7 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 				switch req.Command {
 				case daemonclient.CommandWorktreeList:
 					return emptyWorktreeListResponse(t, req), nil
-				case daemonclient.CommandTaskClosePreflight:
+				case commandTaskClosePreflight:
 					var body struct {
 						TaskID               string `json:"task_id"`
 						IntegrateBeforeClose bool   `json:"integrate_before_close"`
@@ -627,7 +629,7 @@ func TestTaskStatusDoneRequiresCloseCleanupConfirmation(t *testing.T) {
 					Body:            respBody,
 				}, nil
 			}
-			if req.Command == daemonclient.CommandTaskClosePreflight {
+			if req.Command == commandTaskClosePreflight {
 				respBody, err := json.Marshal(map[string]any{
 					"task": map[string]any{
 						"id":     "az-4",
@@ -759,7 +761,7 @@ func TestTaskStatusDoneSuccessKeepsOptimisticOverlayAcrossStaleHydration(t *test
 					OK:              true,
 					Body:            respBody,
 				}, nil
-			case daemonclient.CommandTaskClosePreflight:
+			case commandTaskClosePreflight:
 				respBody, err := json.Marshal(map[string]any{
 					"task": map[string]any{
 						"id":     "az-4",
@@ -8595,7 +8597,7 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 				switch req.Command {
 				case daemonclient.CommandWorktreeList:
 					return emptyWorktreeListResponse(t, req), nil
-				case daemonclient.CommandTaskClosePreflight:
+				case commandTaskClosePreflight:
 					var body struct {
 						TaskID               string `json:"task_id"`
 						IntegrateBeforeClose bool   `json:"integrate_before_close"`
@@ -8837,7 +8839,7 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 				if req.Command == daemonclient.CommandWorktreeList {
 					return emptyWorktreeListResponse(t, req), nil
 				}
-				if req.Command == daemonclient.CommandTaskClosePreflight {
+				if req.Command == commandTaskClosePreflight {
 					var body struct {
 						TaskID               string `json:"task_id"`
 						IntegrateBeforeClose bool   `json:"integrate_before_close"`

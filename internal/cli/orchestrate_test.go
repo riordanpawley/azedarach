@@ -18,6 +18,8 @@ import (
 	gitservice "github.com/riordanpawley/azedarach/internal/services/git"
 )
 
+const commandTaskClosePreflight = "task.close_preflight"
+
 func TestParseOrchestrateStatusArgs(t *testing.T) {
 	opts, err := ParseOrchestrateStatusArgs([]string{"--root", "az-123", "--since", "10", "--limit", "25", "--json"})
 	if err != nil {
@@ -767,7 +769,7 @@ func TestOrchestrateIntegrateApplySuccess(t *testing.T) {
 			t.Fatalf("commands = %+v, want %s", *commands, want)
 		}
 	}
-	for _, unexpected := range []string{daemonclient.CommandGitMerge, daemonclient.CommandTaskClosePreflight, commandSessionStop, daemonclient.CommandWorktreeRemove, daemonclient.CommandTaskUpdateStatus} {
+	for _, unexpected := range []string{daemonclient.CommandGitMerge, commandTaskClosePreflight, commandSessionStop, daemonclient.CommandWorktreeRemove, daemonclient.CommandTaskUpdateStatus} {
 		if containsString(*commands, unexpected) {
 			t.Fatalf("commands = %+v, did not expect client-side integration/cleanup command %s", *commands, unexpected)
 		}
@@ -785,7 +787,7 @@ func TestOrchestrateIntegrateApplyRequiresCompletionEvidence(t *testing.T) {
 	if !strings.Contains(output, `"apply": true`) || !strings.Contains(output, `"applied": false`) || !strings.Contains(output, `"name": "completion_evidence"`) || !strings.Contains(output, `"recovery"`) {
 		t.Fatalf("output missing structured failure:\n%s", output)
 	}
-	for _, unexpected := range []string{daemonclient.CommandGitMerge, daemonclient.CommandTaskClose, daemonclient.CommandTaskClosePreflight, commandSessionStop, daemonclient.CommandWorktreeRemove, daemonclient.CommandTaskUpdateStatus} {
+	for _, unexpected := range []string{daemonclient.CommandGitMerge, daemonclient.CommandTaskClose, commandTaskClosePreflight, commandSessionStop, daemonclient.CommandWorktreeRemove, daemonclient.CommandTaskUpdateStatus} {
 		if containsString(*commands, unexpected) {
 			t.Fatalf("commands = %+v, did not expect %s", *commands, unexpected)
 		}
@@ -803,7 +805,7 @@ func TestOrchestrateIntegrateApplyDaemonIntegrationFailureStopsBeforeAppend(t *t
 	if !strings.Contains(output, "integrate_and_close: failed") || !strings.Contains(output, "az branch merge az-2") {
 		t.Fatalf("output missing daemon integration failure recovery:\n%s", output)
 	}
-	if containsString(*commands, daemonclient.CommandTaskAppendNotes) || containsString(*commands, daemonclient.CommandGitMerge) || containsString(*commands, daemonclient.CommandTaskClosePreflight) || containsString(*commands, commandSessionStop) || containsString(*commands, daemonclient.CommandWorktreeRemove) || containsString(*commands, daemonclient.CommandTaskUpdateStatus) {
+	if containsString(*commands, daemonclient.CommandTaskAppendNotes) || containsString(*commands, daemonclient.CommandGitMerge) || containsString(*commands, commandTaskClosePreflight) || containsString(*commands, commandSessionStop) || containsString(*commands, daemonclient.CommandWorktreeRemove) || containsString(*commands, daemonclient.CommandTaskUpdateStatus) {
 		t.Fatalf("commands = %+v, append/client integration cleanup should not run after daemon integration failure", *commands)
 	}
 }
@@ -819,7 +821,7 @@ func TestOrchestrateIntegrateApplySurfacesDaemonIntegrationConflict(t *testing.T
 	if !strings.Contains(output, `"applied": false`) || !strings.Contains(output, "README.md") || !strings.Contains(output, `"name": "integrate_and_close"`) {
 		t.Fatalf("output missing daemon integration conflict:\n%s", output)
 	}
-	if containsString(*commands, daemonclient.CommandTaskAppendNotes) || containsString(*commands, daemonclient.CommandGitMerge) || containsString(*commands, daemonclient.CommandTaskClosePreflight) || containsString(*commands, commandSessionStop) || containsString(*commands, daemonclient.CommandWorktreeRemove) || containsString(*commands, daemonclient.CommandTaskUpdateStatus) {
+	if containsString(*commands, daemonclient.CommandTaskAppendNotes) || containsString(*commands, daemonclient.CommandGitMerge) || containsString(*commands, commandTaskClosePreflight) || containsString(*commands, commandSessionStop) || containsString(*commands, daemonclient.CommandWorktreeRemove) || containsString(*commands, daemonclient.CommandTaskUpdateStatus) {
 		t.Fatalf("commands = %+v, append/client integration cleanup should not run after daemon integration conflict", *commands)
 	}
 }
@@ -838,7 +840,7 @@ func TestOrchestrateIntegrateApplyReportsDaemonCloseFailure(t *testing.T) {
 	if !containsString(*commands, daemonclient.CommandTaskClose) || containsString(*commands, daemonclient.CommandTaskAppendNotes) {
 		t.Fatalf("commands = %+v, want daemon close without append after close failure", *commands)
 	}
-	for _, unexpected := range []string{daemonclient.CommandGitMerge, daemonclient.CommandTaskClosePreflight, commandSessionStop, daemonclient.CommandWorktreeRemove, daemonclient.CommandTaskUpdateStatus} {
+	for _, unexpected := range []string{daemonclient.CommandGitMerge, commandTaskClosePreflight, commandSessionStop, daemonclient.CommandWorktreeRemove, daemonclient.CommandTaskUpdateStatus} {
 		if containsString(*commands, unexpected) {
 			t.Fatalf("commands = %+v, did not expect client-side integration/cleanup command %s", *commands, unexpected)
 		}
