@@ -137,6 +137,7 @@ fd "filename" -t f internal cmd
    - `task.close_preflight`/`task.delete_preflight`/`task.graph_readiness`/`task.complete_check` durable lifecycle and orchestration checks -> `hybrid`
    - `task.integration_readiness` worker evidence gate -> `projection` (durable issue projection + mailbox evidence)
    - `task.merge_base_target` branch integration target gate -> `projection` (durable issue graph + worktree projection)
+   - `task.follow_on_merge_candidates` follow-on merge source gate -> `projection` (durable issue graph + worktree projection)
    - task-list freshness/session projection checks -> `projection` via refresh-then-cache
 
 ### Adding New Invariants (Required Checklist)

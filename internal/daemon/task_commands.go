@@ -144,6 +144,21 @@ type taskMergeBaseTargetResult struct {
 	AncestorChain  []string `json:"ancestor_chain,omitempty"`
 }
 
+type taskFollowOnMergeCandidatesResult struct {
+	TaskID            string                           `json:"task_id"`
+	MergeTargetToBase bool                             `json:"merge_target_to_base,omitempty"`
+	Candidates        []taskFollowOnMergeCandidateItem `json:"candidates"`
+}
+
+type taskFollowOnMergeCandidateItem struct {
+	IssueID     string        `json:"issue_id"`
+	Title       string        `json:"title"`
+	Status      domain.Status `json:"status"`
+	Relation    string        `json:"relation"`
+	Order       int           `json:"order"`
+	HasWorktree bool          `json:"has_worktree"`
+}
+
 func (d *Daemon) sourceForTaskInvariant(invariant daemonInvariantID) daemonInvariantSource {
 	return sourceForInvariant(invariant)
 }
@@ -1692,6 +1707,28 @@ func (d *Daemon) handleTaskMergeBaseTarget(ctx context.Context, req protocol.Req
 	return resp, nil
 }
 
+func (d *Daemon) handleTaskFollowOnMergeCandidates(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
+	var cmd struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	result, err := d.taskFollowOnMergeCandidates(ctx, projectID, cmd.TaskID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	body, err := json.Marshal(result)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	resp := d.successResponse(req)
+	resp.Body = body
+	resp.Revision = d.currentRevision(projectID)
+	return resp, nil
+}
+
 func (d *Daemon) taskMergeBaseTarget(ctx context.Context, projectID, issueID, baseBranch string, allowBaseForChild bool) (taskMergeBaseTargetResult, error) {
 	issueID = strings.TrimSpace(issueID)
 	baseBranch = strings.TrimSpace(baseBranch)
@@ -1757,6 +1794,107 @@ func (d *Daemon) taskMergeBaseTarget(ctx context.Context, projectID, issueID, ba
 		defaultTarget.Reason = "no ancestor chain; selected default base target"
 	}
 	return defaultTarget, nil
+}
+
+func (d *Daemon) taskFollowOnMergeCandidates(ctx context.Context, projectID, targetIssueID string) (taskFollowOnMergeCandidatesResult, error) {
+	targetIssueID = strings.TrimSpace(targetIssueID)
+	if targetIssueID == "" {
+		return taskFollowOnMergeCandidatesResult{}, fmt.Errorf("target issue id is required")
+	}
+	tasks, err := d.loadTaskGraphDomainTasks(ctx, projectID)
+	if err != nil {
+		return taskFollowOnMergeCandidatesResult{}, fmt.Errorf("resolve follow-on merge candidates task graph: %w", err)
+	}
+	tasksByID := tasksByDaemonIssueID(tasks)
+	target, ok := tasksByID[targetIssueID]
+	if !ok {
+		return taskFollowOnMergeCandidatesResult{}, fmt.Errorf("cannot resolve follow-on merge candidates for %s: issue not found in task projection", targetIssueID)
+	}
+
+	candidates := make([]taskFollowOnMergeCandidateItem, 0, 4)
+	seen := make(map[string]struct{}, 4)
+	addCandidate := func(taskID, relation string, order int) {
+		taskID = strings.TrimSpace(taskID)
+		if taskID == "" {
+			return
+		}
+		if _, ok := seen[taskID]; ok {
+			return
+		}
+		task, ok := tasksByID[taskID]
+		if !ok {
+			return
+		}
+		hasWorktree := daemonTaskHasWorktree(task)
+		if !daemonEligibleFollowOnMergeSource(task, relation, hasWorktree) {
+			return
+		}
+		candidates = append(candidates, taskFollowOnMergeCandidateItem{
+			IssueID:     task.ID.String(),
+			Title:       task.Title,
+			Status:      task.Status,
+			Relation:    relation,
+			Order:       order,
+			HasWorktree: hasWorktree,
+		})
+		seen[taskID] = struct{}{}
+	}
+
+	if target.ParentID != nil {
+		addCandidate(target.ParentID.String(), string(domain.DependencyParentChild), 0)
+	}
+	for _, dep := range target.Dependencies {
+		switch dep.Type {
+		case domain.DependencyBlocks, domain.DependencyBlockedBy:
+			addCandidate(dep.ID.String(), string(domain.DependencyBlocks), 1)
+		}
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Order != candidates[j].Order {
+			return candidates[i].Order < candidates[j].Order
+		}
+		if daemonFollowOnMergeStatusPriority(candidates[i].Status) != daemonFollowOnMergeStatusPriority(candidates[j].Status) {
+			return daemonFollowOnMergeStatusPriority(candidates[i].Status) < daemonFollowOnMergeStatusPriority(candidates[j].Status)
+		}
+		if candidates[i].Title != candidates[j].Title {
+			return candidates[i].Title < candidates[j].Title
+		}
+		return candidates[i].IssueID < candidates[j].IssueID
+	})
+
+	return taskFollowOnMergeCandidatesResult{
+		TaskID:            target.ID.String(),
+		MergeTargetToBase: target.ParentID == nil || target.ParentID.IsZero(),
+		Candidates:        candidates,
+	}, nil
+}
+
+func daemonTaskHasWorktree(task domain.Task) bool {
+	if task.Session != nil && strings.TrimSpace(task.Session.Worktree) != "" {
+		return true
+	}
+	return task.HasWorktree
+}
+
+func daemonEligibleFollowOnMergeSource(task domain.Task, relation string, hasWorktree bool) bool {
+	switch relation {
+	case string(domain.DependencyParentChild), string(domain.DependencyBlocks):
+		return hasWorktree && (task.Status == domain.StatusInProgress || task.Status == domain.StatusDone)
+	default:
+		return false
+	}
+}
+
+func daemonFollowOnMergeStatusPriority(status domain.Status) int {
+	switch status {
+	case domain.StatusInProgress:
+		return 0
+	case domain.StatusDone:
+		return 1
+	default:
+		return 2
+	}
 }
 
 func tasksByDaemonIssueID(tasks []domain.Task) map[string]domain.Task {

@@ -26,6 +26,7 @@ const (
 	CommandTaskCompleteCheck    = "task.complete_check"
 	CommandTaskIntegrationReady = "task.integration_readiness"
 	CommandTaskMergeBaseTarget  = "task.merge_base_target"
+	CommandTaskFollowOnMerge    = "task.follow_on_merge_candidates"
 	CommandTaskUpdateStatus     = "task.update_status"
 	CommandTaskUpdate           = "task.update_details"
 	CommandTaskAppendNotes      = "task.append_notes"
@@ -167,6 +168,26 @@ type taskMergeBaseTargetRequest struct {
 	TaskID            naming.IssueID `json:"task_id"`
 	BaseBranch        string         `json:"base_branch,omitempty"`
 	AllowBaseForChild bool           `json:"allow_base_for_child,omitempty"`
+}
+
+// TaskFollowOnMergeCandidate is a daemon-owned follow-on merge source decision.
+type TaskFollowOnMergeCandidate struct {
+	IssueID     string        `json:"issue_id"`
+	Title       string        `json:"title"`
+	Status      domain.Status `json:"status"`
+	Relation    string        `json:"relation"`
+	Order       int           `json:"order"`
+	HasWorktree bool          `json:"has_worktree"`
+}
+
+type taskFollowOnMergeCandidatesRequest struct {
+	TaskID naming.IssueID `json:"task_id"`
+}
+
+type taskFollowOnMergeCandidatesResponse struct {
+	TaskID            string                       `json:"task_id"`
+	MergeTargetToBase bool                         `json:"merge_target_to_base,omitempty"`
+	Candidates        []TaskFollowOnMergeCandidate `json:"candidates"`
 }
 
 // TaskAppendNotesRequest appends a single line to task notes.
@@ -837,6 +858,21 @@ func (c *Client) TaskMergeBaseTarget(ctx context.Context, issueID, baseBranch st
 		return TaskMergeBaseTarget{}, err
 	}
 	return out, nil
+}
+
+// TaskFollowOnMergeCandidates returns daemon-owned follow-on merge source candidates.
+func (c *Client) TaskFollowOnMergeCandidates(ctx context.Context, issueID string) (bool, []TaskFollowOnMergeCandidate, error) {
+	parsedIssueID, err := naming.ParseIssueID(issueID)
+	if err != nil {
+		return false, nil, fmt.Errorf("invalid issue id: %w", err)
+	}
+	var out taskFollowOnMergeCandidatesResponse
+	if err := c.commandJSON(ctx, CommandTaskFollowOnMerge, taskFollowOnMergeCandidatesRequest{
+		TaskID: parsedIssueID,
+	}, &out); err != nil {
+		return false, nil, err
+	}
+	return out.MergeTargetToBase, append([]TaskFollowOnMergeCandidate(nil), out.Candidates...), nil
 }
 
 // AddTaskDependency creates or restores a dependency between two tasks.

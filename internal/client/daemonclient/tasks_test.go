@@ -1121,6 +1121,50 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("follow-on merge candidates", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				if req.Command != CommandTaskFollowOnMerge {
+					t.Fatalf("command = %q, want %q", req.Command, CommandTaskFollowOnMerge)
+				}
+				var body taskFollowOnMergeCandidatesRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal request: %v", err)
+				}
+				if body.TaskID != "az-9" {
+					t.Fatalf("task id = %q, want az-9", body.TaskID)
+				}
+				return responseWithJSON(t, req, taskFollowOnMergeCandidatesResponse{
+					TaskID:            "az-9",
+					MergeTargetToBase: false,
+					Candidates: []TaskFollowOnMergeCandidate{
+						{
+							IssueID:     "az-parent",
+							Title:       "Parent",
+							Status:      domain.StatusInProgress,
+							Relation:    string(domain.DependencyParentChild),
+							Order:       0,
+							HasWorktree: true,
+						},
+					},
+				}), nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		mergeTargetToBase, candidates, err := client.TaskFollowOnMergeCandidates(context.Background(), "az-9")
+		if err != nil {
+			t.Fatalf("TaskFollowOnMergeCandidates error: %v", err)
+		}
+		if mergeTargetToBase {
+			t.Fatal("mergeTargetToBase = true, want false")
+		}
+		if len(candidates) != 1 || candidates[0].IssueID != "az-parent" || !candidates[0].HasWorktree {
+			t.Fatalf("candidates = %+v", candidates)
+		}
+	})
+
 	t.Run("dependency add and remove", func(t *testing.T) {
 		commands := make([]string, 0, 2)
 		transport := &taskRecordingTransport{

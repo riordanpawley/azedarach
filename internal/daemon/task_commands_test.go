@@ -1671,6 +1671,133 @@ func TestTaskMergeBaseTargetSelectsNearestAncestorWorktree(t *testing.T) {
 	}
 }
 
+func TestTaskFollowOnMergeCandidatesAreDaemonOwned(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-follow-on-candidates"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent epic", Type: domain.TypeEpic})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	if err := issuesClient.Update(ctx, parentID, domain.StatusInProgress); err != nil {
+		t.Fatalf("update parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Child task", Type: domain.TypeTask, ParentID: &parentID})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := issuesClient.Update(ctx, childID, domain.StatusInProgress); err != nil {
+		t.Fatalf("update child: %v", err)
+	}
+	blockerID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Ready blocker", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	if err := issuesClient.Update(ctx, blockerID, domain.StatusInProgress); err != nil {
+		t.Fatalf("update blocker: %v", err)
+	}
+	openID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Open blocker", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatalf("create open blocker: %v", err)
+	}
+	if err := issuesClient.AddDependency(ctx, childID, blockerID, string(domain.DependencyBlocks)); err != nil {
+		t.Fatalf("add ready blocker dependency: %v", err)
+	}
+	if err := issuesClient.AddDependency(ctx, childID, openID, string(domain.DependencyBlocks)); err != nil {
+		t.Fatalf("add open blocker dependency: %v", err)
+	}
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	for _, row := range []daemonstate.WorktreeState{
+		{ProjectID: projectID, IssueID: parentID, Path: filepath.Join(repoDir, "wt-parent"), Branch: "az/" + parentID, UpdatedAt: time.Now().UTC()},
+		{ProjectID: projectID, IssueID: blockerID, Path: filepath.Join(repoDir, "wt-blocker"), Branch: "az/" + blockerID, UpdatedAt: time.Now().UTC()},
+		{ProjectID: projectID, IssueID: openID, Path: filepath.Join(repoDir, "wt-open"), Branch: "az/" + openID, UpdatedAt: time.Now().UTC()},
+	} {
+		if err := store.UpsertWorktreeState(ctx, row); err != nil {
+			t.Fatalf("seed worktree state: %v", err)
+		}
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+	}
+
+	got, err := d.taskFollowOnMergeCandidates(ctx, projectID, childID)
+	if err != nil {
+		t.Fatalf("taskFollowOnMergeCandidates error: %v", err)
+	}
+	if got.MergeTargetToBase {
+		t.Fatal("MergeTargetToBase = true, want false for child")
+	}
+	if len(got.Candidates) != 2 {
+		t.Fatalf("candidate count = %d, want 2: %+v", len(got.Candidates), got.Candidates)
+	}
+	if got.Candidates[0].IssueID != parentID || got.Candidates[0].Relation != string(domain.DependencyParentChild) {
+		t.Fatalf("first candidate = %+v, want parent", got.Candidates[0])
+	}
+	if got.Candidates[1].IssueID != blockerID || got.Candidates[1].Relation != string(domain.DependencyBlocks) {
+		t.Fatalf("second candidate = %+v, want ready blocker", got.Candidates[1])
+	}
+	for _, candidate := range got.Candidates {
+		if candidate.IssueID == openID {
+			t.Fatalf("open blocker should not be eligible: %+v", got.Candidates)
+		}
+		if !candidate.HasWorktree {
+			t.Fatalf("candidate missing worktree signal: %+v", candidate)
+		}
+	}
+}
+
+func TestTaskFollowOnMergeCandidatesAllowsTopLevelBaseFallback(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-follow-on-top"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	topID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Top task", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatalf("create top task: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+	}
+
+	got, err := d.taskFollowOnMergeCandidates(ctx, projectID, topID)
+	if err != nil {
+		t.Fatalf("taskFollowOnMergeCandidates error: %v", err)
+	}
+	if !got.MergeTargetToBase {
+		t.Fatal("MergeTargetToBase = false, want true for top-level task")
+	}
+	if len(got.Candidates) != 0 {
+		t.Fatalf("candidates = %+v, want none", got.Candidates)
+	}
+}
+
 func TestTaskDeleteRuntimeBlockersAreDaemonOwned(t *testing.T) {
 	task := domain.Task{
 		ID:             naming.IssueID("az-1"),

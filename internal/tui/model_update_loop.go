@@ -749,6 +749,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.scheduleIssuesRefreshCmd()
 
+	case followOnMergeCandidatesMsg:
+		return m.handleFollowOnMergeCandidates(msg)
+
 	case mergeTargetSelectionResolvedMsg:
 		if msg.err != nil {
 			m.clearLocalMergeOperationPending(msg.sourceID, msg.targetID)

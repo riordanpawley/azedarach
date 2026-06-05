@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"sort"
 	"strings"
 	"time"
 
@@ -442,6 +441,15 @@ type mergeTargetSelectionResolvedMsg struct {
 	err            error
 }
 
+type followOnMergeCandidatesMsg struct {
+	target            domain.Task
+	targetState       domain.SessionState
+	targetStateKnown  bool
+	mergeTargetToBase bool
+	candidates        []daemonclient.TaskFollowOnMergeCandidate
+	err               error
+}
+
 type mergePreflightOptions struct {
 	ignoreSourceDirty     bool
 	stopTargetBeforeMerge bool
@@ -659,37 +667,90 @@ func (m *Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Ses
 		return nil
 	}
 	targetState, targetStateKnown := projectedSessionState(session, m.sessionForIssue(task.ID.String()))
+	target := *task
+	m.markMergeOperationPreparing(target.ID.String(), mergeBaseTargetID, "preparing merge")
 
-	candidates := m.getFollowOnMergeCandidates(task)
-	if len(candidates) == 0 {
-		if task.ParentID == nil {
-			m.markMergeOperationPreparing(task.ID.String(), mergeBaseTargetID, "preparing merge")
-			return m.resolveMergeToBaseCmd(task.ID.String(), true)
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
+		defer cancel()
+		if m.daemonClient == nil {
+			return followOnMergeCandidatesMsg{
+				target:           target,
+				targetState:      targetState,
+				targetStateKnown: targetStateKnown,
+				err:              fmt.Errorf("daemon client unavailable"),
+			}
+		}
+		mergeTargetToBase, candidates, err := m.daemonClient.TaskFollowOnMergeCandidates(ctx, target.ID.String())
+		if err == nil && len(candidates) == 0 && mergeTargetToBase {
+			return m.resolveMergeToBaseCmd(target.ID.String(), true)()
+		}
+		if err == nil && len(candidates) == 1 {
+			sourceID := strings.TrimSpace(candidates[0].IssueID)
+			m.logger.Info("follow-on merge selected",
+				"sourceID", sourceID,
+				"targetID", target.ID,
+				"relation", candidates[0].Relation,
+			)
+			return m.resolveFollowOnMergeCmd(sourceID, target.ID.String(), targetState, targetStateKnown, true)()
+		}
+		return followOnMergeCandidatesMsg{
+			target:            target,
+			targetState:       targetState,
+			targetStateKnown:  targetStateKnown,
+			mergeTargetToBase: mergeTargetToBase,
+			candidates:        candidates,
+			err:               err,
+		}
+	}
+}
+
+func (m Model) handleFollowOnMergeCandidates(msg followOnMergeCandidatesMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.addToast(Toast{
+			Level:   ToastError,
+			Message: fmt.Sprintf("Merge source lookup failed: %v", msg.err),
+			Expires: time.Now().Add(5 * time.Second),
+		})
+		return m, nil
+	}
+	targetID := msg.target.ID.String()
+	if len(msg.candidates) == 0 {
+		if msg.mergeTargetToBase {
+			m.markMergeOperationPreparing(targetID, mergeBaseTargetID, "preparing merge")
+			return m, m.resolveMergeToBaseCmd(targetID, true)
 		}
 		m.addToast(Toast{
 			Level:   ToastWarning,
 			Message: "No eligible upstream sources for follow-on merge; upstream sources must have an active session and be in progress or done",
 			Expires: time.Now().Add(5 * time.Second),
 		})
-		return nil
+		return m, nil
 	}
 
-	if len(candidates) == 1 {
+	if len(msg.candidates) == 1 {
+		sourceID := strings.TrimSpace(msg.candidates[0].IssueID)
 		m.logger.Info("follow-on merge selected",
-			"sourceID", candidates[0].target.ID,
-			"targetID", task.ID,
-			"relation", candidates[0].relation,
+			"sourceID", sourceID,
+			"targetID", targetID,
+			"relation", msg.candidates[0].Relation,
 		)
-		m.markMergeOperationPreparing(candidates[0].target.ID, task.ID.String(), "preparing merge")
-		return m.resolveFollowOnMergeCmd(candidates[0].target.ID, task.ID.String(), targetState, targetStateKnown, true)
+		m.markMergeOperationPreparing(sourceID, targetID, "preparing merge")
+		return m, m.resolveFollowOnMergeCmd(sourceID, targetID, msg.targetState, msg.targetStateKnown, true)
 	}
 
-	upstreamTargets := make([]overlay.MergeTarget, 0, len(candidates))
-	for _, candidate := range candidates {
-		upstreamTargets = append(upstreamTargets, candidate.target)
+	upstreamTargets := make([]overlay.MergeTarget, 0, len(msg.candidates))
+	for _, candidate := range msg.candidates {
+		upstreamTargets = append(upstreamTargets, overlay.MergeTarget{
+			ID:          candidate.IssueID,
+			Label:       candidate.Title,
+			IsMain:      false,
+			Status:      candidate.Status,
+			HasWorktree: candidate.HasWorktree,
+		})
 	}
-	m.logger.Info("follow-on merge source picker opened", "targetID", task.ID, "candidateCount", len(upstreamTargets))
-	return m.openOverlay(overlay.NewMergeSourceSelectOverlay(task, upstreamTargets, nil, nil))
+	m.logger.Info("follow-on merge source picker opened", "targetID", targetID, "candidateCount", len(upstreamTargets))
+	return m, m.openOverlay(overlay.NewMergeSourceSelectOverlay(&msg.target, upstreamTargets, nil, nil))
 }
 
 func projectedSessionState(primary, fallback *domain.Session) (domain.SessionState, bool) {
@@ -837,102 +898,6 @@ func (m Model) sessionForIssue(issueID string) *domain.Session {
 		}
 	}
 	return nil
-}
-
-type followOnMergeCandidate struct {
-	target   overlay.MergeTarget
-	relation string
-	order    int
-}
-
-func (m Model) getFollowOnMergeCandidates(target *domain.Task) []followOnMergeCandidate {
-	if target == nil {
-		return nil
-	}
-
-	candidates := make([]followOnMergeCandidate, 0, 4)
-	seen := make(map[string]struct{}, 4)
-
-	addCandidate := func(taskID, relation string, order int) {
-		if taskID == "" {
-			return
-		}
-		if _, ok := seen[taskID]; ok {
-			return
-		}
-		for _, task := range m.tasks {
-			if task.ID.String() != taskID {
-				continue
-			}
-			hasWorktree := false
-			if task.Session != nil && task.Session.Worktree != "" {
-				hasWorktree = true
-			} else if task.HasWorktree {
-				hasWorktree = true
-			}
-			if !isEligibleUpstreamSource(task, relation, hasWorktree) {
-				return
-			}
-			candidates = append(candidates, followOnMergeCandidate{
-				target: overlay.MergeTarget{
-					ID:          task.ID.String(),
-					Label:       task.Title,
-					IsMain:      false,
-					Status:      task.Status,
-					HasWorktree: hasWorktree,
-				},
-				relation: relation,
-				order:    order,
-			})
-			seen[taskID] = struct{}{}
-			return
-		}
-	}
-
-	if target.ParentID != nil {
-		addCandidate(target.ParentID.String(), string(domain.DependencyParentChild), 0)
-	}
-	for _, dep := range target.Dependencies {
-		switch dep.Type {
-		case domain.DependencyBlocks, domain.DependencyBlockedBy:
-			addCandidate(dep.ID.String(), string(domain.DependencyBlocks), 1)
-		}
-	}
-
-	sort.SliceStable(candidates, func(i, j int) bool {
-		if candidates[i].order != candidates[j].order {
-			return candidates[i].order < candidates[j].order
-		}
-		if statusPriority(candidates[i].target.Status) != statusPriority(candidates[j].target.Status) {
-			return statusPriority(candidates[i].target.Status) < statusPriority(candidates[j].target.Status)
-		}
-		if candidates[i].target.Label != candidates[j].target.Label {
-			return candidates[i].target.Label < candidates[j].target.Label
-		}
-		return candidates[i].target.ID < candidates[j].target.ID
-	})
-
-	return candidates
-}
-
-func isEligibleUpstreamSource(task domain.Task, relation string, hasWorktree bool) bool {
-	switch relation {
-	case string(domain.DependencyParentChild), string(domain.DependencyBlocks):
-		return hasWorktree && (task.Status == domain.StatusInProgress || task.Status == domain.StatusDone)
-	default:
-		return false
-	}
-}
-
-func statusPriority(status domain.Status) int {
-	switch status {
-	case domain.StatusInProgress:
-		return 0
-	case domain.StatusDone:
-		return 1
-	default:
-		return 2
-	}
 }
 
 type abortMergeResultMsg struct {

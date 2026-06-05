@@ -2349,22 +2349,7 @@ func (m Model) sessionOriginCandidates(task *domain.Task) ([]overlay.MergeTarget
 			HasWorktree: false,
 		},
 	}
-
-	upstreamCount := 0
-	for _, candidate := range m.getFollowOnMergeCandidates(task) {
-		if !candidate.target.HasWorktree {
-			continue
-		}
-		upstreamCount++
-		candidates = append(candidates, overlay.MergeTarget{
-			ID:          candidate.target.ID,
-			Label:       candidate.target.Label,
-			Status:      candidate.target.Status,
-			HasWorktree: true,
-		})
-	}
-
-	return candidates, upstreamCount
+	return candidates, 0
 }
 
 func (m Model) daemonCommandTimeout() time.Duration {

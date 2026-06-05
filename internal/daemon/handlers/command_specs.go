@@ -51,6 +51,7 @@ const (
 	commandTaskCompleteCheck     = "task.complete_check"
 	commandTaskIntegrationReady  = "task.integration_readiness"
 	commandTaskMergeBaseTarget   = "task.merge_base_target"
+	commandTaskFollowOnMerge     = "task.follow_on_merge_candidates"
 	commandTaskUpdateStatus      = "task.update_status"
 	commandTaskUpdateDetails     = "task.update_details"
 	commandTaskAppendNotes       = "task.append_notes"
@@ -150,6 +151,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	commandTaskCompleteCheck:              {Command: commandTaskCompleteCheck, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskIntegrationReady:           {Command: commandTaskIntegrationReady, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskMergeBaseTarget:            {Command: commandTaskMergeBaseTarget, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
+	commandTaskFollowOnMerge:              {Command: commandTaskFollowOnMerge, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskUpdateStatus:               {Command: commandTaskUpdateStatus, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskUpdateDetails:              {Command: commandTaskUpdateDetails, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskAppendNotes:                {Command: commandTaskAppendNotes, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},

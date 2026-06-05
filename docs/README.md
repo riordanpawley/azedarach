@@ -35,6 +35,7 @@ This directory primarily contains **developer/internal documentation**.
 - `task.close_preflight`, `task.delete_preflight`, `task.graph_readiness`, and `task.complete_check`: `hybrid` (durable issue graph/projection + live runtime attachment state).
 - `task.integration_readiness`: `projection` (durable issue projection + mailbox evidence).
 - `task.merge_base_target`: `projection` (durable issue graph + worktree projection).
+- `task.follow_on_merge_candidates`: `projection` (durable issue graph + worktree projection).
 - `task.list` freshness/session timestamps: `projection` (refresh-then-cache).
 - `runtime.reconcile` includes `invariant_sources` debug output reflecting the active source-policy matrix.
 - Treat this as the required cross-daemon safety contract for session/worktree/runtime invariants.

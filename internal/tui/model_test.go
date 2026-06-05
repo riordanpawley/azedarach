@@ -1242,7 +1242,11 @@ func TestFollowOnMergeSelectionNoEligibleUpstreamShowsToast(t *testing.T) {
 	}
 	m.nav.SelectTask(childID, 1)
 
-	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
+	updated, cmd := m.handleFollowOnMergeCandidates(followOnMergeCandidatesMsg{
+		target:            m.tasks[1],
+		mergeTargetToBase: false,
+		candidates:        nil,
+	})
 	if cmd != nil {
 		t.Fatalf("expected no merge command when no eligible upstream exists, got %T", cmd)
 	}
@@ -1296,57 +1300,6 @@ func TestTaskWorkspaceMergeUsesWorkspaceTask(t *testing.T) {
 	if _, ok := newModel.pendingOpsByTask[taskIDKey(boardTask.ID.String())]; ok {
 		t.Fatalf("merge preparation used board-selected task %s, got %+v", boardTask.ID, newModel.pendingOpsByTask)
 	}
-}
-
-func TestGetFollowOnMergeCandidatesRequiresUpstreamWorktree(t *testing.T) {
-	m := newTestModel()
-	parentID := "az-parent"
-	childID := "az-child"
-	parentIssueID := naming.IssueID(parentID)
-	childIssueID := naming.IssueID(childID)
-
-	makeTasks := func(parentHasWorktree bool) []domain.Task {
-		return []domain.Task{
-			{
-				ID:          parentIssueID,
-				Title:       "Parent",
-				Status:      domain.StatusDone,
-				Priority:    domain.P1,
-				Type:        domain.TypeTask,
-				HasWorktree: parentHasWorktree,
-			},
-			{
-				ID:          childIssueID,
-				Title:       "Child",
-				Status:      domain.StatusInProgress,
-				Priority:    domain.P1,
-				Type:        domain.TypeTask,
-				ParentID:    &parentIssueID,
-				HasWorktree: true,
-			},
-		}
-	}
-
-	t.Run("excludes parent without worktree", func(t *testing.T) {
-		m.tasks = makeTasks(false)
-		target := m.tasks[1]
-		candidates := m.getFollowOnMergeCandidates(&target)
-		if len(candidates) != 0 {
-			t.Fatalf("expected no candidates without upstream worktree, got %+v", candidates)
-		}
-	})
-
-	t.Run("includes parent with worktree", func(t *testing.T) {
-		m.tasks = makeTasks(true)
-		target := m.tasks[1]
-		candidates := m.getFollowOnMergeCandidates(&target)
-		if len(candidates) != 1 {
-			t.Fatalf("expected one candidate with upstream worktree, got %+v", candidates)
-		}
-		if candidates[0].target.ID != parentID {
-			t.Fatalf("candidate source id = %q, want %q", candidates[0].target.ID, parentID)
-		}
-	})
 }
 
 func TestSettingsSaveErrorKeepsOverlayOpen(t *testing.T) {

@@ -573,6 +573,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleTaskIntegrationReadiness(ctx, req)
 	case "task.merge_base_target":
 		return d.handleTaskMergeBaseTarget(ctx, req)
+	case "task.follow_on_merge_candidates":
+		return d.handleTaskFollowOnMergeCandidates(ctx, req)
 	case "task.update_status":
 		return d.handleTaskUpdateStatus(ctx, req)
 	case "task.update_details":

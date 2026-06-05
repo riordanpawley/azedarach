@@ -121,6 +121,29 @@ func emptyWorktreeListResponse(t *testing.T, req protocol.RequestEnvelope) proto
 	}
 }
 
+func followOnMergeCandidatesResponse(t *testing.T, req protocol.RequestEnvelope, taskID string, mergeTargetToBase bool, candidates []daemonclient.TaskFollowOnMergeCandidate) protocol.ResponseEnvelope {
+	t.Helper()
+	respBody, err := json.Marshal(struct {
+		TaskID            string                                    `json:"task_id"`
+		MergeTargetToBase bool                                      `json:"merge_target_to_base,omitempty"`
+		Candidates        []daemonclient.TaskFollowOnMergeCandidate `json:"candidates"`
+	}{
+		TaskID:            taskID,
+		MergeTargetToBase: mergeTargetToBase,
+		Candidates:        candidates,
+	})
+	if err != nil {
+		t.Fatalf("marshal follow-on merge candidates response: %v", err)
+	}
+	return protocol.ResponseEnvelope{
+		ProtocolVersion: req.ProtocolVersion,
+		RequestID:       req.RequestID,
+		Kind:            protocol.EnvelopeKindResponse,
+		OK:              true,
+		Body:            respBody,
+	}
+}
+
 func (r *recordingDaemonTransport) Handshake(_ context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
 	r.calls = append(r.calls, "handshake")
 	r.lastHello = hello
@@ -133,6 +156,42 @@ func (r *recordingDaemonTransport) Command(ctx context.Context, req protocol.Req
 	}
 	r.calls = append(r.calls, req.Command)
 	r.requests = append(r.requests, req.Command)
+	if req.Command == daemonclient.CommandTaskFollowOnMerge {
+		var body struct {
+			TaskID string `json:"task_id"`
+		}
+		_ = json.Unmarshal(req.Body, &body)
+		taskID := strings.TrimSpace(body.TaskID)
+		mergeTargetToBase := false
+		candidates := []daemonclient.TaskFollowOnMergeCandidate{}
+		switch taskID {
+		case "az-child":
+			candidates = []daemonclient.TaskFollowOnMergeCandidate{
+				{IssueID: "az-parent", Title: "Parent epic", Status: domain.StatusInProgress, Relation: string(domain.DependencyParentChild), Order: 0, HasWorktree: true},
+			}
+		case "az-top":
+			mergeTargetToBase = true
+		}
+		respBody, err := json.Marshal(struct {
+			TaskID            string                                    `json:"task_id"`
+			MergeTargetToBase bool                                      `json:"merge_target_to_base,omitempty"`
+			Candidates        []daemonclient.TaskFollowOnMergeCandidate `json:"candidates"`
+		}{
+			TaskID:            taskID,
+			MergeTargetToBase: mergeTargetToBase,
+			Candidates:        candidates,
+		})
+		if err != nil {
+			return protocol.ResponseEnvelope{}, err
+		}
+		return protocol.ResponseEnvelope{
+			ProtocolVersion: req.ProtocolVersion,
+			RequestID:       req.RequestID,
+			Kind:            protocol.EnvelopeKindResponse,
+			OK:              true,
+			Body:            respBody,
+		}, nil
+	}
 	if r.replyFn != nil {
 		return r.replyFn(req)
 	}
@@ -1864,52 +1923,6 @@ func TestMergeAttachSelectionAttachesAfterMerge(t *testing.T) {
 	}
 }
 
-func TestFollowOnMergeCandidateOrderingAndEligibility(t *testing.T) {
-	parentID := "az-parent"
-	blockerID := "az-blocker"
-	nonReadyID := "az-open"
-	parentIssueID := naming.IssueID(parentID)
-	blockerIssueID := naming.IssueID(blockerID)
-	nonReadyIssueID := naming.IssueID(nonReadyID)
-
-	m := newTestModel()
-	m.tasks = []domain.Task{
-		{
-			ID:       naming.IssueID("az-child"),
-			Title:    "Child task",
-			Status:   domain.StatusInProgress,
-			Type:     domain.TypeTask,
-			ParentID: &parentIssueID,
-			Dependencies: []domain.Dependency{
-				{ID: blockerIssueID, Type: domain.DependencyBlocks},
-				{ID: nonReadyIssueID, Type: domain.DependencyBlocks},
-			},
-		},
-		{ID: parentIssueID, Title: "Parent epic", Status: domain.StatusInProgress, Type: domain.TypeEpic, HasWorktree: true},
-		{ID: blockerIssueID, Title: "Ready blocker", Status: domain.StatusDone, Type: domain.TypeTask, HasWorktree: true},
-		{ID: nonReadyIssueID, Title: "Non-ready blocker", Status: domain.StatusOpen, Type: domain.TypeTask},
-	}
-	m.sessions[parentID] = &domain.Session{IssueID: naming.IssueID(parentID), State: domain.SessionBusy, Worktree: "/tmp/parent"}
-	m.sessions[blockerID] = &domain.Session{IssueID: naming.IssueID(blockerID), State: domain.SessionBusy, Worktree: "/tmp/blocker"}
-	m.sessions[nonReadyID] = &domain.Session{IssueID: naming.IssueID(nonReadyID), State: domain.SessionBusy, Worktree: "/tmp/open"}
-
-	candidates := m.getFollowOnMergeCandidates(&m.tasks[0])
-	if len(candidates) != 2 {
-		t.Fatalf("candidate count = %d, want 2", len(candidates))
-	}
-	if candidates[0].target.ID != parentID {
-		t.Fatalf("first candidate = %s, want %s", candidates[0].target.ID, parentID)
-	}
-	if candidates[1].target.ID != blockerID {
-		t.Fatalf("second candidate = %s, want %s", candidates[1].target.ID, blockerID)
-	}
-	for _, candidate := range candidates {
-		if candidate.target.ID == nonReadyID {
-			t.Fatalf("non-ready candidate %s should have been excluded", nonReadyID)
-		}
-	}
-}
-
 func TestFollowOnMergeSelectionDirectMergeFromPausedTarget(t *testing.T) {
 	parentID := "az-parent"
 	childID := "az-child"
@@ -2063,7 +2076,7 @@ func TestFollowOnMergeSelectionDirectMergeFromPausedTarget(t *testing.T) {
 	if mergeMsg.err != nil {
 		t.Fatalf("merge err = %v", mergeMsg.err)
 	}
-	if got := transport.requests; len(got) != 6 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandRuntimeReconcileIssue || got[2] != daemonclient.CommandGitStatus || got[3] != daemonclient.CommandGitStatus || got[4] != daemonclient.CommandGitMergePreflight || got[5] != daemonclient.CommandGitMerge {
+	if got := transport.requests; len(got) != 7 || got[0] != daemonclient.CommandTaskFollowOnMerge || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandRuntimeReconcileIssue || got[3] != daemonclient.CommandGitStatus || got[4] != daemonclient.CommandGitStatus || got[5] != daemonclient.CommandGitMergePreflight || got[6] != daemonclient.CommandGitMerge {
 		t.Fatalf("requests = %v", got)
 	}
 }
@@ -2253,7 +2266,7 @@ func TestFollowOnMergeSelectionBusyOrWaitingStopsBeforeMerge(t *testing.T) {
 			if mergeMsg.err != nil {
 				t.Fatalf("merge err = %v", mergeMsg.err)
 			}
-			if got := transport.requests; len(got) != 7 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandRuntimeReconcileIssue || got[2] != daemonclient.CommandGitStatus || got[3] != daemonclient.CommandGitStatus || got[4] != daemonclient.CommandGitMergePreflight || got[5] != daemonclient.CommandSessionStop || got[6] != daemonclient.CommandGitMerge {
+			if got := transport.requests; len(got) != 8 || got[0] != daemonclient.CommandTaskFollowOnMerge || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandRuntimeReconcileIssue || got[3] != daemonclient.CommandGitStatus || got[4] != daemonclient.CommandGitStatus || got[5] != daemonclient.CommandGitMergePreflight || got[6] != daemonclient.CommandSessionStop || got[7] != daemonclient.CommandGitMerge {
 				t.Fatalf("requests = %v", got)
 			}
 		})
@@ -2462,7 +2475,7 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 	if mergeMsg.err != nil {
 		t.Fatalf("merge err = %v", mergeMsg.err)
 	}
-	if got := transport.requests; len(got) != 10 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandTaskList || got[3] != daemonclient.CommandWorktreeList || got[4] != daemonclient.CommandRuntimeReconcileIssue || got[5] != daemonclient.CommandGitStatus || got[6] != daemonclient.CommandGitStatus || got[7] != daemonclient.CommandGitMergePreflight || got[8] != daemonclient.CommandSessionStop || got[9] != daemonclient.CommandGitMerge {
+	if got := transport.requests; len(got) != 11 || got[0] != daemonclient.CommandTaskFollowOnMerge || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandWorktreeList || got[3] != daemonclient.CommandTaskList || got[4] != daemonclient.CommandWorktreeList || got[5] != daemonclient.CommandRuntimeReconcileIssue || got[6] != daemonclient.CommandGitStatus || got[7] != daemonclient.CommandGitStatus || got[8] != daemonclient.CommandGitMergePreflight || got[9] != daemonclient.CommandSessionStop || got[10] != daemonclient.CommandGitMerge {
 		t.Fatalf("requests = %v", got)
 	}
 }
@@ -6882,17 +6895,14 @@ func TestSessionOriginCandidatesIncludeBaseBranchAndUpstreamSource(t *testing.T)
 	})
 
 	candidates, upstreamCount := m.sessionOriginCandidates(&m.tasks[0])
-	if upstreamCount != 1 {
-		t.Fatalf("upstreamCount = %d, want 1", upstreamCount)
+	if upstreamCount != 0 {
+		t.Fatalf("upstreamCount = %d, want 0", upstreamCount)
 	}
-	if len(candidates) != 2 {
-		t.Fatalf("candidates = %+v, want base branch plus one upstream source", candidates)
+	if len(candidates) != 1 {
+		t.Fatalf("candidates = %+v, want base branch only", candidates)
 	}
 	if candidates[0].ID != baseBranch || candidates[0].Label != baseBranch || !candidates[0].IsMain {
 		t.Fatalf("base candidate = %+v, want base branch %q", candidates[0], baseBranch)
-	}
-	if candidates[1].ID != parentID || candidates[1].Status != domain.StatusDone || !candidates[1].HasWorktree {
-		t.Fatalf("upstream candidate = %+v, want upstream issue %q with worktree", candidates[1], parentID)
 	}
 	if got := m.originBranchForSelection(""); got != baseBranch {
 		t.Fatalf("originBranchForSelection(\"\") = %q, want %q", got, baseBranch)
@@ -6994,11 +7004,11 @@ func TestStartSessionShiftSIgnoresUpstreamChoices(t *testing.T) {
 	m.nav.SelectTask(childID, 0)
 
 	candidates, upstreamCount := m.sessionOriginCandidates(&m.tasks[0])
-	if upstreamCount != 2 {
-		t.Fatalf("upstreamCount = %d, want 2", upstreamCount)
+	if upstreamCount != 0 {
+		t.Fatalf("upstreamCount = %d, want 0", upstreamCount)
 	}
-	if len(candidates) != 3 {
-		t.Fatalf("candidates = %+v, want base branch plus two upstream sources", candidates)
+	if len(candidates) != 1 || candidates[0].ID != baseBranch {
+		t.Fatalf("candidates = %+v, want base branch only", candidates)
 	}
 
 	_, startCmd := m.handleSelection(overlay.SelectionMsg{Key: "S"})

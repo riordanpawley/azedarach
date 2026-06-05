@@ -26,6 +26,7 @@ const (
 	daemonInvariantTaskCompleteCheck   daemonInvariantID = "task.complete_check"
 	daemonInvariantTaskIntegration     daemonInvariantID = "task.integration_readiness"
 	daemonInvariantTaskMergeBaseTarget daemonInvariantID = "task.merge_base_target"
+	daemonInvariantTaskFollowOnMerge   daemonInvariantID = "task.follow_on_merge_candidates"
 
 	daemonInvariantRuntimeKnownProjectIDs daemonInvariantID = "runtime.known_project_ids"
 )
@@ -43,6 +44,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantTaskCompleteCheck:      daemonInvariantSourceHybrid,
 	daemonInvariantTaskIntegration:        daemonInvariantSourceProjection,
 	daemonInvariantTaskMergeBaseTarget:    daemonInvariantSourceProjection,
+	daemonInvariantTaskFollowOnMerge:      daemonInvariantSourceProjection,
 	daemonInvariantRuntimeKnownProjectIDs: daemonInvariantSourceProjection,
 }
 
