@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -106,7 +107,7 @@ func TestValidateApplyRequest_PerItemDiagnostics(t *testing.T) {
 		Operations: []protocol.ApplyOperationBody{
 			{
 				Command: applyCommandTaskUpdateStatus,
-				Body:    mustApplyJSON(t, map[string]string{"status": "done"}),
+				Body:    mustApplyJSON(t, map[string]string{"status": "in_review"}),
 			},
 			{
 				Command: applyCommandTaskDelete,
@@ -155,6 +156,33 @@ func TestValidateApplyRequest_PerItemDiagnostics(t *testing.T) {
 	}
 	if vErr.Diagnostics[2].Code != protocol.ApplyValidationCodeInvalidOperationCommand {
 		t.Fatalf("diag[2].Code = %q, want %q", vErr.Diagnostics[2].Code, protocol.ApplyValidationCodeInvalidOperationCommand)
+	}
+}
+
+func TestValidateApplyRequestRejectsStatusCloseMutation(t *testing.T) {
+	req := protocol.ApplyRequestBody{
+		SchemaVersion:    protocol.ApplySchemaVersion,
+		SnapshotRevision: 99,
+		Operations: []protocol.ApplyOperationBody{{
+			Command: applyCommandTaskUpdateStatus,
+			Body:    mustApplyJSON(t, map[string]string{"task_id": "az-1", "status": "closed"}),
+		}},
+	}
+
+	err := ValidateApplyRequest(req)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	vErr, ok := err.(*protocol.ApplyValidationError)
+	if !ok {
+		t.Fatalf("error type = %T, want *protocol.ApplyValidationError", err)
+	}
+	if got, want := len(vErr.Diagnostics), 1; got != want {
+		t.Fatalf("Diagnostics len = %d, want %d", got, want)
+	}
+	diag := vErr.Diagnostics[0]
+	if diag.Index != 0 || diag.Field != "status" || diag.Code != protocol.ApplyValidationCodeInvalidOperationBody || !strings.Contains(diag.Message, "task.close") {
+		t.Fatalf("diagnostic = %+v, want status task.close rejection", diag)
 	}
 }
 

@@ -4352,7 +4352,7 @@ func taskStatusOptionsForStatus(status domain.Status) daemonclient.TaskStatusOpt
 	if status != domain.StatusDone {
 		return daemonclient.TaskStatusOptions{}
 	}
-	return daemonclient.TaskStatusOptions{CleanupBeforeClose: true, IntegrateBeforeClose: true}
+	return daemonclient.TaskStatusOptions{IntegrateBeforeClose: true}
 }
 
 func (m Model) bulkMoveNeedsCloseCleanupConfirmation(taskIDs []string, delta int) bool {

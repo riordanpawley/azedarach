@@ -225,7 +225,7 @@ func TestApplyStatusMutationIntegrationPropagatesStatusAndWorkflowEvents(t *test
 				Command: "task.update_status",
 				Body: mustApplyJSON(t, map[string]any{
 					"task_id": "az-11",
-					"status":  "closed",
+					"status":  "in_review",
 				}),
 			},
 			{
@@ -287,7 +287,7 @@ func TestApplyStatusMutationIntegrationPropagatesStatusAndWorkflowEvents(t *test
 	}
 
 	if got, want := service.calls, []string{
-		"status:az-11:closed",
+		"status:az-11:in_review",
 		"archive:az-12",
 	}; !equalStrings(got, want) {
 		t.Fatalf("service calls = %v, want %v", got, want)

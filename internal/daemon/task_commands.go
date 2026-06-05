@@ -1116,7 +1116,7 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task status update requested", "project_id", projectID, "task_id", cmd.TaskID, "status", cmd.Status)
 	}
-	task, err := d.updateTaskStatusWithClosePreflight(ctx, projectID, cmd.TaskID, cmd.Status, req)
+	task, err := d.updateTaskStatusExcludingClose(ctx, projectID, cmd.TaskID, cmd.Status)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -1411,16 +1411,14 @@ func (d *Daemon) stopTaskSessionForClose(ctx context.Context, req protocol.Reque
 	return cleanupCommandError(resp, err)
 }
 
-func (d *Daemon) updateTaskStatusWithClosePreflight(ctx context.Context, projectID, taskID string, status domain.Status, req protocol.RequestEnvelope) (domain.Task, error) {
+func (d *Daemon) updateTaskStatusExcludingClose(ctx context.Context, projectID, taskID string, status domain.Status) (domain.Task, error) {
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return domain.Task{}, fmt.Errorf("issue store unavailable")
 	}
 	taskID = strings.TrimSpace(taskID)
 	if status == domain.StatusDone {
-		if _, err := d.validateTaskClosePreflight(ctx, projectID, taskID, taskClosePreflightOptions{}, req); err != nil {
-			return domain.Task{}, err
-		}
+		return domain.Task{}, fmt.Errorf("status %s must be applied with task.close", status)
 	}
 	return issueClient.UpdateWithRuntime(ctx, projectID, taskID, status)
 }

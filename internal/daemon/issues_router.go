@@ -9,7 +9,6 @@ import (
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
-	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
@@ -211,9 +210,7 @@ func (d *Daemon) Update(ctx context.Context, issueID string, status domain.Statu
 	if err != nil {
 		return domain.Task{}, err
 	}
-	return d.updateTaskStatusWithClosePreflight(ctx, projectID, issueID, status, protocol.RequestEnvelope{
-		Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-	})
+	return d.updateTaskStatusExcludingClose(ctx, projectID, issueID, status)
 }
 
 func (d *Daemon) UpdateDetails(ctx context.Context, issueID string, params issues.UpdateTaskParams) (domain.Task, error) {

@@ -138,7 +138,7 @@ func TestApplyHandlerExecutesOperationsInOrder(t *testing.T) {
 				Command: applyCommandTaskUpdateStatus,
 				Body: mustApplyJSON(t, map[string]any{
 					"task_id": "az-2",
-					"status":  "done",
+					"status":  "in_review",
 				}),
 			},
 			{
@@ -230,7 +230,7 @@ func TestApplyHandlerExecutesOperationsInOrder(t *testing.T) {
 
 	if got, want := service.calls, []string{
 		"create:First:P1:task:",
-		"status:az-2:closed",
+		"status:az-2:in_review",
 		"update:az-3:Updated:P2:bug",
 		"delete:az-4",
 		"archive:az-5",

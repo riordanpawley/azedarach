@@ -3745,7 +3745,6 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 
 func cleanupCloseTaskStatusOptions(forceWorktree bool) daemonclient.TaskStatusOptions {
 	return daemonclient.TaskStatusOptions{
-		CleanupBeforeClose:   true,
 		ForceWorktree:        forceWorktree,
 		IntegrateBeforeClose: true,
 	}

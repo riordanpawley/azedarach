@@ -1024,7 +1024,7 @@ func TestHandleTaskGetInvalidatesTaskListSnapshotCacheAfterIssueUpdate(t *testin
 	}
 }
 
-func TestTaskUpdateStatusClosePreflightBlocksRawRuntimeAttachments(t *testing.T) {
+func TestTaskUpdateStatusRejectsRawCloseRuntimeAttachments(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	projectID := "proj-close-guard-runtime"
@@ -1083,8 +1083,8 @@ func TestTaskUpdateStatusClosePreflightBlocksRawRuntimeAttachments(t *testing.T)
 	if err != nil {
 		t.Fatalf("handleTaskUpdateStatus error: %v", err)
 	}
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "issue still has a worktree") || !strings.Contains(resp.Error.Message, "Next:") || !strings.Contains(resp.Error.Message, "az issue close --id "+taskID) || strings.Contains(resp.Error.Message, "--cleanup") {
-		t.Fatalf("task.update_status response = %+v, want worktree close guard", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "status closed must be applied with task.close") {
+		t.Fatalf("task.update_status response = %+v, want raw close rejection", resp)
 	}
 	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
 	if err != nil {
@@ -1094,30 +1094,6 @@ func TestTaskUpdateStatusClosePreflightBlocksRawRuntimeAttachments(t *testing.T)
 		t.Fatalf("guarded issue status = %s, want %s", task.Status, domain.StatusInReview)
 	}
 
-	if err := runtimeStore.DeleteWorktreeState(ctx, projectID, taskID); err != nil {
-		t.Fatalf("clear worktree projection before skip close: %v", err)
-	}
-	body, err = json.Marshal(map[string]any{
-		"task_id": taskID,
-		"status":  domain.StatusDone,
-	})
-	if err != nil {
-		t.Fatalf("marshal skip task update request: %v", err)
-	}
-	resp, err = d.handleTaskUpdateStatus(ctx, protocol.RequestEnvelope{
-		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-close-guard-runtime-skip",
-		Kind:            protocol.EnvelopeKindCommand,
-		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-		Command:         "task.update_status",
-		Body:            body,
-	})
-	if err != nil {
-		t.Fatalf("handleTaskUpdateStatus skip error: %v", err)
-	}
-	if !resp.OK {
-		t.Fatalf("task.update_status skip response = %+v", resp.Error)
-	}
 }
 
 func TestTaskClosePreflightBlocksDirtyWorktreeInDaemonPolicy(t *testing.T) {
@@ -1292,7 +1268,7 @@ func TestTaskCloseCommandUpdatesStatusThroughDaemon(t *testing.T) {
 	}
 }
 
-func TestTaskUpdateStatusClosePreflightBlocksActiveRuntime(t *testing.T) {
+func TestTaskUpdateStatusRejectsRawCloseActiveRuntime(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	projectID := "proj-close-guard-reopen-target"
@@ -1350,8 +1326,8 @@ func TestTaskUpdateStatusClosePreflightBlocksActiveRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleTaskUpdateStatus error: %v", err)
 	}
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "issue still has a session") {
-		t.Fatalf("task.update_status response = %+v, want session close guard", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "status closed must be applied with task.close") {
+		t.Fatalf("task.update_status response = %+v, want raw close rejection", resp)
 	}
 	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
 	if err != nil {
@@ -1365,7 +1341,7 @@ func TestTaskUpdateStatusClosePreflightBlocksActiveRuntime(t *testing.T) {
 	}
 }
 
-func TestTaskUpdateStatusClosePreflightBlocksRawUnresolvedChildrenAndApplyPath(t *testing.T) {
+func TestTaskUpdateStatusRejectsRawCloseUnresolvedChildrenAndApplyPath(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	projectID := "proj-close-guard-children"
@@ -1382,14 +1358,13 @@ func TestTaskUpdateStatusClosePreflightBlocksRawUnresolvedChildrenAndApplyPath(t
 	if err != nil {
 		t.Fatalf("create parent: %v", err)
 	}
-	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+	if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:    "Child",
 		Type:     domain.TypeTask,
 		Priority: domain.P2,
 		Status:   domain.StatusInProgress,
 		ParentID: &parentID,
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("create child: %v", err)
 	}
 
@@ -1420,8 +1395,8 @@ func TestTaskUpdateStatusClosePreflightBlocksRawUnresolvedChildrenAndApplyPath(t
 	if err != nil {
 		t.Fatalf("handleTaskUpdateStatus error: %v", err)
 	}
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") || !strings.Contains(resp.Error.Message, "close or clean up the listed child issues first") || strings.Contains(resp.Error.Message, "az issue close --id "+parentID+" --cleanup") {
-		t.Fatalf("task.update_status response = %+v, want child close guard", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "status closed must be applied with task.close") {
+		t.Fatalf("task.update_status response = %+v, want raw close rejection", resp)
 	}
 
 	body, err = json.Marshal(map[string]any{
@@ -1442,13 +1417,13 @@ func TestTaskUpdateStatusClosePreflightBlocksRawUnresolvedChildrenAndApplyPath(t
 	if err != nil {
 		t.Fatalf("handleTaskUpdateStatus skip error: %v", err)
 	}
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") || !strings.Contains(resp.Error.Message, "close or clean up the listed child issues first") || strings.Contains(resp.Error.Message, "az issue close --id "+parentID+" --cleanup") {
-		t.Fatalf("task.update_status skip response = %+v, want child close guard", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "status closed must be applied with task.close") {
+		t.Fatalf("task.update_status skip response = %+v, want raw close rejection", resp)
 	}
 
 	_, err = d.Update(withDaemonProjectIDContext(ctx, projectID), parentID, domain.StatusDone)
-	if err == nil || !strings.Contains(err.Error(), "unresolved child issues remain") {
-		t.Fatalf("apply Update error = %v, want child close guard", err)
+	if err == nil || !strings.Contains(err.Error(), "status closed must be applied with task.close") {
+		t.Fatalf("apply Update error = %v, want raw close rejection", err)
 	}
 }
 
@@ -1594,7 +1569,7 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	}
 }
 
-func TestTaskUpdateStatusClosePreflightBlocksActiveChildRuntime(t *testing.T) {
+func TestTaskUpdateStatusRejectsRawCloseActiveChildRuntime(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	projectID := "proj-close-guard-reopen-child"
@@ -1662,8 +1637,8 @@ func TestTaskUpdateStatusClosePreflightBlocksActiveChildRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleTaskUpdateStatus error: %v", err)
 	}
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") || !strings.Contains(resp.Error.Message, childID) {
-		t.Fatalf("task.update_status response = %+v, want child runtime close guard", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "status closed must be applied with task.close") {
+		t.Fatalf("task.update_status response = %+v, want raw close rejection", resp)
 	}
 	child, err := issuesClient.GetWithRuntime(ctx, projectID, childID)
 	if err != nil {

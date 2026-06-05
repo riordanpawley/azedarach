@@ -513,40 +513,29 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
-	t.Run("status update", func(t *testing.T) {
+	t.Run("status update to done uses close command", func(t *testing.T) {
 		commands := []string{}
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				assertTaskProjectID(t, req, wantProjectID)
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case CommandTaskList:
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						OK:              true,
-						Body: mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 3, []domain.Task{
-							{ID: "az-3", Title: "Close me", Status: domain.StatusInReview},
-						}),
-					}, nil
-				case CommandTaskUpdateStatus:
-					var body TaskStatusRequest
+				case CommandTaskClose:
+					var body taskCloseRequest
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal request: %v", err)
 					}
-					if body.TaskID != "az-3" || body.Status != domain.StatusDone {
+					if body.TaskID != "az-3" {
 						t.Fatalf("request body = %+v", body)
 					}
+					return responseWithJSON(t, req, TaskCloseResult{
+						TaskID: "az-3",
+						Status: string(domain.StatusDone),
+					}), nil
 				default:
-					t.Fatalf("command = %q, want close preflight or %q", req.Command, CommandTaskUpdateStatus)
+					t.Fatalf("command = %q, want %q", req.Command, CommandTaskClose)
+					return protocol.ResponseEnvelope{}, nil
 				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-				}, nil
 			},
 		}
 
@@ -554,34 +543,23 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if err := client.UpdateTaskStatus(context.Background(), "az-3", domain.StatusDone); err != nil {
 			t.Fatalf("UpdateTaskStatus error: %v", err)
 		}
-		wantCommands := []string{CommandTaskUpdateStatus}
+		wantCommands := []string{CommandTaskClose}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
 		}
 	})
 
-	t.Run("status update pending operation", func(t *testing.T) {
+	t.Run("status update to done propagates close pending operation", func(t *testing.T) {
 		commands := []string{}
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				assertTaskProjectID(t, req, wantProjectID)
 				commands = append(commands, req.Command)
-				if req.Command == CommandTaskList {
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						OK:              true,
-						Body: mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 3, []domain.Task{
-							{ID: "az-3", Title: "Close me", Status: domain.StatusInReview},
-						}),
-					}, nil
-				}
-				if req.Command != CommandTaskUpdateStatus {
-					t.Fatalf("command = %q, want close preflight or %q", req.Command, CommandTaskUpdateStatus)
+				if req.Command != CommandTaskClose {
+					t.Fatalf("command = %q, want %q", req.Command, CommandTaskClose)
 				}
 				respBody, err := json.Marshal(map[string]any{
-					"operation_id": "op-status",
+					"operation_id": "op-close",
 					"state":        string(protocol.OperationStateQueued),
 				})
 				if err != nil {
@@ -603,13 +581,13 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if !errors.As(err, &pending) {
 			t.Fatalf("UpdateTaskStatus error = %v, want OperationPendingError", err)
 		}
-		if pending.OperationID != "op-status" {
-			t.Fatalf("operation id = %q, want op-status", pending.OperationID)
+		if pending.OperationID != "op-close" {
+			t.Fatalf("operation id = %q, want op-close", pending.OperationID)
 		}
 		if pending.State != protocol.OperationStateQueued {
 			t.Fatalf("state = %q, want queued", pending.State)
 		}
-		wantCommands := []string{CommandTaskUpdateStatus}
+		wantCommands := []string{CommandTaskClose}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
 		}
@@ -644,7 +622,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
-		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{CleanupBeforeClose: true})
+		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{})
 		if err != nil {
 			t.Fatalf("UpdateTaskStatusWithOptions error: %v", err)
 		}
@@ -692,7 +670,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
-	t.Run("status update does not cleanup non-closed status", func(t *testing.T) {
+	t.Run("status update uses lightweight command for non-closed status", func(t *testing.T) {
 		commands := []string{}
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -708,7 +686,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
-		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusInProgress, TaskStatusOptions{CleanupBeforeClose: true})
+		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusInProgress, TaskStatusOptions{})
 		if err != nil {
 			t.Fatalf("UpdateTaskStatusWithOptions error: %v", err)
 		}
@@ -717,7 +695,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
-	t.Run("status update leaves issue unclosed when cleanup cleanup fails", func(t *testing.T) {
+	t.Run("status update leaves issue unclosed when daemon close fails", func(t *testing.T) {
 		commands := []string{}
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -734,7 +712,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
-		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{CleanupBeforeClose: true})
+		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{})
 		if err == nil || !strings.Contains(err.Error(), "remove worktree before closing az-3") {
 			t.Fatalf("UpdateTaskStatusWithOptions error = %v, want worktree cleanup failure", err)
 		}
@@ -768,7 +746,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
-		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{CleanupBeforeClose: true, ForceWorktree: true})
+		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{ForceWorktree: true})
 		if err != nil {
 			t.Fatalf("UpdateTaskStatusWithOptions error: %v", err)
 		}
@@ -819,7 +797,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				}
 
 				client := New(transport).WithProjectID(wantProjectID)
-				err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{CleanupBeforeClose: true})
+				err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{})
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) || !strings.Contains(err.Error(), "Next:") || !strings.Contains(err.Error(), "commit, discard, or merge the worktree changes first") {
 					t.Fatalf("UpdateTaskStatusWithOptions error = %v, want %q and recovery hint", err, tt.wantErr)
 				}
@@ -831,7 +809,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
-	t.Run("status update cleanup can ignore ahead after integration", func(t *testing.T) {
+	t.Run("status update close can ignore ahead after integration", func(t *testing.T) {
 		commands := []string{}
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -856,8 +834,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 
 		client := New(transport).WithProjectID(wantProjectID)
 		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{
-			CleanupBeforeClose: true,
-			IgnoreAhead:        true,
+			IgnoreAhead: true,
 		})
 		if err != nil {
 			t.Fatalf("UpdateTaskStatusWithOptions error: %v", err)
@@ -888,7 +865,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
-		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{CleanupBeforeClose: true})
+		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{})
 		if err == nil || !strings.Contains(err.Error(), "unresolved child issues remain") || !strings.Contains(err.Error(), "az-4 (worktree)") || !strings.Contains(err.Error(), "az-5 (open)") || !strings.Contains(err.Error(), "close or clean up the listed child issues first") || !strings.Contains(err.Error(), "Moved closed blockers back for cleanup: az-4 -> in_review") || strings.Contains(err.Error(), "az issue close --id az-3 --cleanup") {
 			t.Fatalf("UpdateTaskStatusWithOptions error = %v, want child close guard", err)
 		}
@@ -915,7 +892,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
-		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{CleanupBeforeClose: true})
+		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{})
 		if err == nil || !strings.Contains(err.Error(), "worktree has local changes: main.go") || !strings.Contains(err.Error(), "Moved closed blockers back for cleanup: az-3 -> in_progress") {
 			t.Fatalf("UpdateTaskStatusWithOptions error = %v, want dirty guard and status repair", err)
 		}

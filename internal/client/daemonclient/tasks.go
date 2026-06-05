@@ -71,7 +71,6 @@ type TaskStatusRequest struct {
 
 // TaskStatusOptions controls client-side status transition behavior.
 type TaskStatusOptions struct {
-	CleanupBeforeClose   bool
 	ForceWorktree        bool
 	IgnoreAhead          bool
 	IntegrateBeforeClose bool
@@ -562,18 +561,21 @@ func (c *Client) CreateTask(ctx context.Context, params TaskCreateParams) (strin
 }
 
 // UpdateTaskStatus updates a task's status through the daemon client boundary.
+// Done transitions are always routed through task.close so durable close
+// invariants stay daemon-owned even when callers omit close options.
 func (c *Client) UpdateTaskStatus(ctx context.Context, taskID string, status domain.Status) error {
 	return c.UpdateTaskStatusWithOptions(ctx, taskID, status, TaskStatusOptions{})
 }
 
-// UpdateTaskStatusWithOptions updates a task's status and can clean runtime
-// attachments before committing a closed/done transition.
+// UpdateTaskStatusWithOptions updates a task's status. Done transitions are
+// represented by the daemon-owned close command; other status moves use the
+// lightweight status mutation command.
 func (c *Client) UpdateTaskStatusWithOptions(ctx context.Context, taskID string, status domain.Status, opts TaskStatusOptions) error {
 	parsedTaskID, err := naming.ParseIssueID(taskID)
 	if err != nil {
 		return fmt.Errorf("invalid task id: %w", err)
 	}
-	if status == domain.StatusDone && opts.CleanupBeforeClose {
+	if status == domain.StatusDone {
 		_, err := c.CloseTask(ctx, parsedTaskID.String(), opts)
 		return err
 	}

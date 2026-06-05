@@ -920,7 +920,6 @@ func applyOrchestrateIntegration(deps *Dependencies, issueID string, mergeReady 
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	closeResult, err := deps.DaemonClient.CloseTask(cleanupCtx, issueID, daemonclient.TaskStatusOptions{
-		CleanupBeforeClose:   true,
 		IntegrateBeforeClose: true,
 	})
 	if err != nil {

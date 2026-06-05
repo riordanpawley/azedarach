@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
@@ -173,7 +174,7 @@ func validateApplyOperation(index int, op protocol.ApplyOperationBody) []protoco
 				Message: fmt.Sprintf("invalid task status body: %v", err),
 			}}
 		}
-		return missingStatusDiagnostics(index, payload)
+		return statusDiagnostics(index, payload)
 	case applyCommandTaskDelete, applyCommandTaskArchive:
 		var payload applyTaskIDBody
 		if err := json.Unmarshal(op.Body, &payload); err != nil {
@@ -295,15 +296,31 @@ func missingUpdateDiagnostics(index int, payload applyTaskUpdateBody) []protocol
 	return diagnostics
 }
 
-func missingStatusDiagnostics(index int, payload applyTaskStatusBody) []protocol.ApplyValidationDiagnostic {
+func statusDiagnostics(index int, payload applyTaskStatusBody) []protocol.ApplyValidationDiagnostic {
 	diagnostics := make([]protocol.ApplyValidationDiagnostic, 0, 2)
 	if payload.TaskID == "" {
 		diagnostics = append(diagnostics, missingFieldDiagnostic(index, "task_id"))
 	}
 	if payload.Status == "" {
 		diagnostics = append(diagnostics, missingFieldDiagnostic(index, "status"))
+	} else if isApplyCloseStatus(payload.Status) {
+		diagnostics = append(diagnostics, protocol.ApplyValidationDiagnostic{
+			Index:   index,
+			Code:    protocol.ApplyValidationCodeInvalidOperationBody,
+			Field:   "status",
+			Message: "closed status must be applied with task.close",
+		})
 	}
 	return diagnostics
+}
+
+func isApplyCloseStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "done", "closed", "complete", "completed":
+		return true
+	default:
+		return false
+	}
 }
 
 func missingTaskIDDiagnostics(index int, payload applyTaskIDBody) []protocol.ApplyValidationDiagnostic {
