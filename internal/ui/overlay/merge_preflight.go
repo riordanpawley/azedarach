@@ -221,15 +221,15 @@ func (m *MergePreflightOverlay) View() string {
 func (m *MergePreflightOverlay) renderDetails(width int) string {
 	var b strings.Builder
 
-	b.WriteString(m.styles.MenuItem.Render("Merge preflight requires clean git status on source and target."))
+	b.WriteString(m.styles.MenuItem.Render("Merge preflight requires clean git status before applying a merge."))
 	b.WriteString("\n\n")
 
-	title := fmt.Sprintf("Merge blocked: %s -> %s", m.sourceID, m.targetID)
+	title := fmt.Sprintf("Merge blocked: into %s from %s", m.targetID, m.sourceID)
 	b.WriteString(m.styles.MenuKey.Render(title))
 	b.WriteString("\n")
-	b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("Source worktree: %s", safeWorktreeLabel(m.sourceWorktree))))
+	b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("From worktree: %s", safeWorktreeLabel(m.sourceWorktree))))
 	b.WriteString("\n")
-	b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("Target worktree: %s", safeWorktreeLabel(m.targetWorktree))))
+	b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("Into worktree: %s", safeWorktreeLabel(m.targetWorktree))))
 	b.WriteString("\n")
 	if len(m.reasons) > 0 {
 		b.WriteString("\n")

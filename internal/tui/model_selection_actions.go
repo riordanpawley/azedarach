@@ -112,16 +112,16 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			return m.handleMergeTargetSelection(mergeMsg)
 		}
 	case "m":
-		task, session := m.getCurrentTaskAndSession()
+		task, _ := m.getCurrentTaskAndSession()
 		if selectionTaskID != "" {
-			if selectedTask, selectedSession, ok := m.taskAndSessionByID(selectionTaskID); ok {
-				task, session = selectedTask, selectedSession
+			if selectedTask, _, ok := m.taskAndSessionByID(selectionTaskID); ok {
+				task = selectedTask
 			}
 		}
 		if task != nil {
 			m.beginMutationFeedback(fmt.Sprintf("Preparing merge for %s", task.ID))
 		}
-		return m, m.followOnMergeSelectionCmd(task, session)
+		return m.mergeCurrentIssueIntoDefaultTarget(task)
 	case "merge_preflight_abort":
 		m.overlayStack.Pop()
 		worktree, ok := msg.Value.(string)
@@ -461,9 +461,9 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, m.updateFromBaseCmd(task.ID.String(), worktreeHint, false)
 
 	case "m":
-		// Follow-on merge from dependency-aware context.
+		// Merge focused issue into its default target.
 		m.beginMutationFeedback(fmt.Sprintf("Preparing merge for %s", task.ID))
-		return m, m.followOnMergeSelectionCmd(task, session)
+		return m.mergeCurrentIssueIntoDefaultTarget(task)
 
 	case "P":
 		// Resolve branch/worktree via daemon when local projection is stale.

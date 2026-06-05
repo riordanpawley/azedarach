@@ -1967,13 +1967,11 @@ func TestFollowOnMergeSelectionDirectMergeFromPausedTarget(t *testing.T) {
 		},
 	}
 	setTaskSession(t, &m, childID, &domain.Session{IssueID: naming.IssueID(childID), State: domain.SessionPaused, Worktree: "/tmp/child"})
-	setTaskSession(t, &m, parentID, &domain.Session{IssueID: naming.IssueID(parentID), State: domain.SessionBusy, Worktree: "/tmp/parent"})
+	setTaskSession(t, &m, parentID, &domain.Session{IssueID: naming.IssueID(parentID), State: domain.SessionPaused, Worktree: "/tmp/parent"})
 	m.nav.SelectTask(childID, 1)
 
-	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
-	if _, ok := updated.(Model); !ok {
-		t.Fatalf("updated model type = %T, want Model", updated)
-	}
+	task, session := m.getCurrentTaskAndSession()
+	cmd := m.followOnMergeSelectionCmd(task, session)
 	if cmd == nil {
 		t.Fatal("expected direct follow-on merge command")
 	}
@@ -2160,10 +2158,8 @@ func TestFollowOnMergeSelectionBusyOrWaitingStopsBeforeMerge(t *testing.T) {
 			setTaskSession(t, &m, parentID, &domain.Session{IssueID: naming.IssueID(parentID), State: domain.SessionBusy, Worktree: "/tmp/parent"})
 			m.nav.SelectTask(childID, 1)
 
-			updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
-			if _, ok := updated.(Model); !ok {
-				t.Fatalf("updated model type = %T, want Model", updated)
-			}
+			task, session := m.getCurrentTaskAndSession()
+			cmd := m.followOnMergeSelectionCmd(task, session)
 			if cmd == nil {
 				t.Fatal("expected follow-on merge command")
 			}
@@ -2369,10 +2365,8 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 	// Simulate stale projection by leaving task sessions nil and forcing daemon snapshot fallback.
 	m.nav.SelectTask(childID, 1)
 
-	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
-	if _, ok := updated.(Model); !ok {
-		t.Fatalf("updated model type = %T, want Model", updated)
-	}
+	task, session := m.getCurrentTaskAndSession()
+	cmd := m.followOnMergeSelectionCmd(task, session)
 	if cmd == nil {
 		t.Fatal("expected follow-on merge command")
 	}
@@ -2776,8 +2770,8 @@ func TestActionModeMergeKeyTriggersFollowOnMergeFlow(t *testing.T) {
 				}, nil
 			case daemonclient.CommandGitMerge:
 				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
-					Worktree: "/tmp/child",
-					Branch:   "az/az-parent",
+					Worktree: "/tmp/parent",
+					Branch:   "az/az-child",
 					Result:   git.MergeResult{Success: true},
 				})
 				if err != nil {
@@ -2807,7 +2801,7 @@ func TestActionModeMergeKeyTriggersFollowOnMergeFlow(t *testing.T) {
 		{ID: parentIssueID, Title: "Parent task", Status: domain.StatusDone, Type: domain.TypeTask},
 	}
 	setTaskSession(t, &m, childID, &domain.Session{IssueID: naming.IssueID(childID), State: domain.SessionPaused, Worktree: "/tmp/child"})
-	setTaskSession(t, &m, parentID, &domain.Session{IssueID: naming.IssueID(parentID), State: domain.SessionBusy, Worktree: "/tmp/parent"})
+	setTaskSession(t, &m, parentID, &domain.Session{IssueID: naming.IssueID(parentID), State: domain.SessionPaused, Worktree: "/tmp/parent"})
 	m.nav.SelectTask(childID, 1)
 
 	updated, cmd := m.handleActionMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
@@ -2815,15 +2809,26 @@ func TestActionModeMergeKeyTriggersFollowOnMergeFlow(t *testing.T) {
 		t.Fatalf("updated model type = %T, want Model", updated)
 	}
 	if cmd == nil {
-		t.Fatal("expected follow-on merge command from action-mode m")
+		t.Fatal("expected child-to-parent merge command from action-mode m")
 	}
 	msg := cmd()
-	if _, ok := msg.(mergeResultMsg); !ok {
-		t.Fatalf("msg type = %T, want mergeResultMsg", msg)
+	resolved, ok := msg.(mergeTargetSelectionResolvedMsg)
+	if !ok {
+		t.Fatalf("msg type = %T, want mergeTargetSelectionResolvedMsg", msg)
+	}
+	next, nextCmd := updated.(Model).Update(resolved)
+	if _, ok := next.(Model); !ok {
+		t.Fatalf("next model type = %T, want Model", next)
+	}
+	if nextCmd == nil {
+		t.Fatal("expected merge command after target resolution")
+	}
+	if _, ok := nextCmd().(mergeResultMsg); !ok {
+		t.Fatalf("next msg type = %T, want mergeResultMsg", nextCmd())
 	}
 }
 
-func TestActionModeMergeKeyBlocksPredictedFollowOnConflictsBeforeMerge(t *testing.T) {
+func TestActionModeMergeKeyBlocksPredictedChildIntoParentConflictsBeforeMerge(t *testing.T) {
 	parentID := "az-parent"
 	childID := "az-child"
 
@@ -2889,14 +2894,14 @@ func TestActionModeMergeKeyBlocksPredictedFollowOnConflictsBeforeMerge(t *testin
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal preflight request: %v", err)
 				}
-				if body.SourceID != parentID || body.TargetID != childID || body.SourceWorktree != "/tmp/parent" || body.TargetWorktree != "/tmp/child" {
+				if body.SourceID != childID || body.TargetID != parentID || body.SourceWorktree != "/tmp/child" || body.TargetWorktree != "/tmp/parent" {
 					t.Fatalf("preflight body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitMergePreflightResponse{
-					SourceID:       parentID,
-					SourceWorktree: "/tmp/parent",
-					TargetID:       childID,
-					TargetWorktree: "/tmp/child",
+					SourceID:       childID,
+					SourceWorktree: "/tmp/child",
+					TargetID:       parentID,
+					TargetWorktree: "/tmp/parent",
 					Clean:          false,
 					ConflictFiles:  []string{"internal/tui/model.go"},
 				})
@@ -2937,16 +2942,28 @@ func TestActionModeMergeKeyBlocksPredictedFollowOnConflictsBeforeMerge(t *testin
 		t.Fatalf("updated model type = %T, want Model", updated)
 	}
 	if cmd == nil {
-		t.Fatal("expected follow-on merge preflight command from action-mode m")
+		t.Fatal("expected child-to-parent merge preflight command from action-mode m")
 	}
 
 	msg := cmd()
+	resolved, ok := msg.(mergeTargetSelectionResolvedMsg)
+	if !ok {
+		t.Fatalf("msg type = %T, want mergeTargetSelectionResolvedMsg", msg)
+	}
+	next, nextCmd := updated.(Model).Update(resolved)
+	if _, ok := next.(Model); !ok {
+		t.Fatalf("next model type = %T, want Model", next)
+	}
+	if nextCmd == nil {
+		t.Fatal("expected merge command after target resolution")
+	}
+	msg = nextCmd()
 	preflight, ok := msg.(mergePreflightFailureMsg)
 	if !ok {
 		t.Fatalf("msg type = %T, want mergePreflightFailureMsg", msg)
 	}
-	if preflight.sourceID != parentID || preflight.targetID != childID {
-		t.Fatalf("preflight = %+v, want source=%s target=%s", preflight, parentID, childID)
+	if preflight.sourceID != childID || preflight.targetID != parentID {
+		t.Fatalf("preflight = %+v, want source=%s target=%s", preflight, childID, parentID)
 	}
 	if len(preflight.conflictFiles) != 1 || preflight.conflictFiles[0] != "internal/tui/model.go" {
 		t.Fatalf("conflict files = %+v", preflight.conflictFiles)
@@ -2958,7 +2975,7 @@ func TestActionModeMergeKeyBlocksPredictedFollowOnConflictsBeforeMerge(t *testin
 	}
 }
 
-func TestActionModeMergeKeyIgnoreSourceDirtyStopsBusyTargetBeforeMerge(t *testing.T) {
+func TestActionModeMergeKeyIgnoreSourceDirtyMergesChildIntoBusyParent(t *testing.T) {
 	parentID := "az-parent"
 	childID := "az-child"
 
@@ -3011,7 +3028,7 @@ func TestActionModeMergeKeyIgnoreSourceDirtyStopsBusyTargetBeforeMerge(t *testin
 					t.Fatalf("unmarshal status request: %v", err)
 				}
 				status := git.GitStatus{HasChanges: false}
-				if body.Worktree == "/tmp/parent" {
+				if body.Worktree == "/tmp/child" {
 					status = git.GitStatus{HasChanges: true, Modified: []string{"source.go"}}
 				}
 				respBody, err := json.Marshal(struct {
@@ -3032,14 +3049,14 @@ func TestActionModeMergeKeyIgnoreSourceDirtyStopsBusyTargetBeforeMerge(t *testin
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal preflight request: %v", err)
 				}
-				if body.SourceID != parentID || body.TargetID != childID || !body.IgnoreSourceDirty {
-					t.Fatalf("preflight body = %+v, want ignored source dirty follow-on preflight", body)
+				if body.SourceID != childID || body.TargetID != parentID || !body.IgnoreSourceDirty {
+					t.Fatalf("preflight body = %+v, want ignored source dirty child-to-parent preflight", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitMergePreflightResponse{
-					SourceID:       parentID,
-					SourceWorktree: "/tmp/parent",
-					TargetID:       childID,
-					TargetWorktree: "/tmp/child",
+					SourceID:       childID,
+					SourceWorktree: "/tmp/child",
+					TargetID:       parentID,
+					TargetWorktree: "/tmp/parent",
 					Clean:          true,
 				})
 				if err != nil {
@@ -3060,8 +3077,8 @@ func TestActionModeMergeKeyIgnoreSourceDirtyStopsBusyTargetBeforeMerge(t *testin
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal session stop request: %v", err)
 				}
-				if body.SessionID != childID {
-					t.Fatalf("session stop body = %+v, want session_id=%s", body, childID)
+				if body.SessionID != parentID {
+					t.Fatalf("session stop body = %+v, want session_id=%s", body, parentID)
 				}
 				respBody, err := json.Marshal(struct {
 					Output string `json:"output"`
@@ -3081,7 +3098,7 @@ func TestActionModeMergeKeyIgnoreSourceDirtyStopsBusyTargetBeforeMerge(t *testin
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal merge request: %v", err)
 				}
-				if body.Worktree != "/tmp/child" || body.Branch != "az/az-parent" {
+				if body.Worktree != "/tmp/parent" || body.Branch != "az/az-child" {
 					t.Fatalf("merge body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
@@ -3121,9 +3138,21 @@ func TestActionModeMergeKeyIgnoreSourceDirtyStopsBusyTargetBeforeMerge(t *testin
 
 	updated, cmd := m.handleActionMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
 	if cmd == nil {
-		t.Fatal("expected follow-on merge preflight command from action-mode m")
+		t.Fatal("expected child-to-parent merge preflight command from action-mode m")
 	}
 	msg := cmd()
+	resolved, ok := msg.(mergeTargetSelectionResolvedMsg)
+	if !ok {
+		t.Fatalf("msg type = %T, want mergeTargetSelectionResolvedMsg", msg)
+	}
+	next, nextCmd := updated.(Model).Update(resolved)
+	if _, ok := next.(Model); !ok {
+		t.Fatalf("next model type = %T, want Model", next)
+	}
+	if nextCmd == nil {
+		t.Fatal("expected merge command after target resolution")
+	}
+	msg = nextCmd()
 	preflight, ok := msg.(mergePreflightFailureMsg)
 	if !ok {
 		t.Fatalf("msg type = %T, want mergePreflightFailureMsg", msg)
@@ -3150,7 +3179,7 @@ func TestActionModeMergeKeyIgnoreSourceDirtyStopsBusyTargetBeforeMerge(t *testin
 			StopTargetBeforeMerge: preflight.stopTargetBeforeMerge,
 		},
 	}
-	retryModel, retryCmd := updated.(Model).Update(retrySelection)
+	retryModel, retryCmd := next.(Model).Update(retrySelection)
 	if _, ok := retryModel.(Model); !ok {
 		t.Fatalf("retry model type = %T, want Model", retryModel)
 	}
