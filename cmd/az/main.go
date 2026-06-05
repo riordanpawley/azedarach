@@ -1065,7 +1065,7 @@ func sessionCommandUsage(command string, namespaced bool) (string, bool) {
 	switch command {
 	case "start":
 		if namespaced {
-			return "usage: az session start <issue-id> [--wait]", true
+			return "usage: az session start [--project <project-id>] <issue-id> [--wait]", true
 		}
 		return "usage: az start <issue-id> [--wait]", true
 	case "attach":
@@ -1106,6 +1106,13 @@ func sessionHelpRequested(values ...string) bool {
 		}
 	}
 	return false
+}
+
+func sessionStartUsage(namespaced bool) string {
+	if namespaced {
+		return "usage: az session start [--project <project-id>] <issue-id> [--wait]"
+	}
+	return "usage: az start <issue-id> [--wait]"
 }
 
 // runCommand executes a CLI command with dependency injection
@@ -1156,28 +1163,16 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 	case "start":
 		if sessionHelpRequested(args...) {
 			if namespaced {
-				return fmt.Errorf("usage: az session start <issue-id> [--wait]")
+				return fmt.Errorf("%s", sessionStartUsage(namespaced))
 			}
-			return fmt.Errorf("usage: az start <issue-id> [--wait]")
+			return fmt.Errorf("%s", sessionStartUsage(namespaced))
 		}
-		if len(args) < 1 || len(args) > 2 {
-			if namespaced {
-				return fmt.Errorf("usage: az session start <issue-id> [--wait]")
-			}
-			return fmt.Errorf("usage: az start <issue-id> [--wait]")
-		}
-		opts := cli.SessionCommandOptions{}
-		if len(args) == 2 {
-			if args[1] != "--wait" {
-				if namespaced {
-					return fmt.Errorf("usage: az session start <issue-id> [--wait]")
-				}
-				return fmt.Errorf("usage: az start <issue-id> [--wait]")
-			}
-			opts.Wait = true
+		issueID, opts, err := cli.ParseSessionStartArgs(args, namespaced, sessionStartUsage(namespaced))
+		if err != nil {
+			return err
 		}
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
-			return cli.StartCommandWithOptions(deps, args[0], opts)
+			return cli.StartCommandWithOptions(deps, issueID, opts)
 		})
 	case "attach":
 		if sessionHelpRequested(args...) {

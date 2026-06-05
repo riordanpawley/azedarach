@@ -15,8 +15,8 @@ func TestRunSessionCommand_HelpArgsReturnUsage(t *testing.T) {
 		namespaced bool
 		want       string
 	}{
-		{name: "session start --help", command: "start", args: []string{"--help"}, namespaced: true, want: "usage: az session start <issue-id> [--wait]"},
-		{name: "session start -h", command: "start", args: []string{"-h"}, namespaced: true, want: "usage: az session start <issue-id> [--wait]"},
+		{name: "session start --help", command: "start", args: []string{"--help"}, namespaced: true, want: "usage: az session start [--project <project-id>] <issue-id> [--wait]"},
+		{name: "session start -h", command: "start", args: []string{"-h"}, namespaced: true, want: "usage: az session start [--project <project-id>] <issue-id> [--wait]"},
 		{name: "session attach --help", command: "attach", args: []string{"--help"}, namespaced: true, want: "usage: az session attach <issue-id>"},
 		{name: "session stop --help", command: "stop", args: []string{"--help"}, namespaced: true, want: "usage: az session stop <issue-id> [--wait]"},
 		{name: "session kill --help deprecated alias", command: "kill", args: []string{"--help"}, namespaced: true, want: "usage: az session kill <issue-id> [--wait] (deprecated alias for az session stop)"},
