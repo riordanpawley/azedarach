@@ -8007,6 +8007,12 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "prime") {
 		t.Fatalf("usage missing prime command: %q", output)
 	}
+	if !strings.Contains(output, "az issue create \"New task\"") {
+		t.Fatalf("usage missing plain issue create example: %q", output)
+	}
+	if !strings.Contains(output, "assigns implementation metadata, not graph parentage") {
+		t.Fatalf("usage missing impl-not-graph example clarification: %q", output)
+	}
 	if strings.Contains(output, "issue close --impl") || strings.Contains(output, "issue delete --impl") || strings.Contains(output, "issue dep add --impl") {
 		t.Fatalf("usage should not include --impl for existing-issue commands: %q", output)
 	}
@@ -8125,8 +8131,23 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Parent-child edges are hierarchy/board-nesting edges, not readiness controls.") {
 		t.Fatalf("prime output missing parent-child hierarchy guidance: %q", output)
 	}
+	if !strings.Contains(output, "Issue graph/root membership comes only from auto-parenting with `AZEDARACH_ISSUE_ID` or explicit `parent-child` dependency edges.") {
+		t.Fatalf("prime output missing graph membership source guidance: %q", output)
+	}
+	if !strings.Contains(output, "`--impl` is implementation metadata only; it never attaches an issue to a graph/root.") {
+		t.Fatalf("prime output missing impl-not-graph guidance: %q", output)
+	}
+	if !strings.Contains(output, "If a child issue was requested and `az issue create --json` returns `parent_id: \"\"`, stop before launching work") {
+		t.Fatalf("prime output missing missing-parent stop guidance: %q", output)
+	}
 	if !strings.Contains(output, "To pause or supersede child work inside an orchestration graph, keep the parent-child edge") {
 		t.Fatalf("prime output missing safe pause/supersede guidance: %q", output)
+	}
+	if !strings.Contains(output, "When the user names a graph/root, verify it before starting workers: run `az issue get <intended-root>` and `az orchestrate status --root <intended-root> --json`") {
+		t.Fatalf("prime output missing pre-start root verification guidance: %q", output)
+	}
+	if !strings.Contains(output, "If work was launched under the wrong parent, do not treat it as a simple move") {
+		t.Fatalf("prime output missing wrong-parent correction guidance: %q", output)
 	}
 	if !strings.Contains(output, "Worker completion flow: workers should leave their issue `in_review`") {
 		t.Fatalf("prime output missing in-review worker completion guidance: %q", output)
@@ -8390,7 +8411,10 @@ func TestPrimeCommandShowsImplementationOptionsWhenMultipleConfigured(t *testing
 	if !strings.Contains(output, "Use `az impl list` to refresh the available options.") {
 		t.Fatalf("prime output missing impl list guidance: %q", output)
 	}
-	if !strings.Contains(output, "`az issue create --impl default \"Child task\"`") {
+	if !strings.Contains(output, "`--impl` selects implementation/spec variant assignment only; it does not attach an issue to a parent/root graph.") {
+		t.Fatalf("prime output missing multi-impl graph distinction: %q", output)
+	}
+	if !strings.Contains(output, "`az issue create --impl default \"Implementation-specific task\"`") {
 		t.Fatalf("prime output missing create-with-impl example: %q", output)
 	}
 	if !strings.Contains(output, "Existing issue updates do not use `--impl`; use `--update-impl` only when changing assignments.") {
