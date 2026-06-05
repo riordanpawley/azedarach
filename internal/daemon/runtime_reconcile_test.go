@@ -813,8 +813,14 @@ func TestRuntimeReconcileTimeoutDefaultsByScopeMode(t *testing.T) {
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
 	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
 	d = &Daemon{cfg: Config{RepoDir: worktree}}
+	if got, want := d.runtimeReconcileTimeout(), defaultRuntimeReconcileTimeout; got != want {
+		t.Fatalf("runtimeReconcileTimeout() non-azedarach linked worktree = %s, want %s", got, want)
+	}
+	if err := os.WriteFile(filepath.Join(baseRepo, "go.mod"), []byte("module github.com/riordanpawley/azedarach\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(go.mod): %v", err)
+	}
 	if got, want := d.runtimeReconcileTimeout(), scopedRuntimeReconcileTimeout; got != want {
-		t.Fatalf("runtimeReconcileTimeout() linked worktree = %s, want %s", got, want)
+		t.Fatalf("runtimeReconcileTimeout() azedarach linked worktree = %s, want %s", got, want)
 	}
 }
 

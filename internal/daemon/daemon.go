@@ -164,7 +164,13 @@ func New(cfg Config) *Daemon {
 			cfg.RepoDir = "."
 		}
 	}
+	runtimeRepoDir := cfg.RepoDir
 	cfg.ScopedRuntime = cfg.ScopedRuntime || appconfig.UseScopedDaemonRuntimeFor(cfg.RepoDir)
+	if cfg.ScopedRuntime {
+		if worktreeRoot, err := appconfig.ResolveWorktreeRoot(cfg.RepoDir); err == nil && strings.TrimSpace(worktreeRoot) != "" {
+			runtimeRepoDir = worktreeRoot
+		}
+	}
 	if normalizedRepoDir, err := appconfig.ResolveProjectRoot(cfg.RepoDir); err == nil {
 		cfg.RepoDir = normalizedRepoDir
 	}
@@ -187,7 +193,10 @@ func New(cfg Config) *Daemon {
 	tmuxRunner := &tmux.ExecRunner{}
 	gitRunner := git.NewExecRunner(cfg.RepoDir)
 	gitClient := git.NewClient(gitRunner, cfg.Logger)
-	runtimeStateStore := daemonstate.NewRuntimeStateStore(cfg.RepoDir, cfg.Logger)
+	runtimeStateStore := daemonstate.NewRuntimeStateStore(runtimeRepoDir, cfg.Logger)
+	if cfg.ScopedRuntime {
+		runtimeStateStore = daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(runtimeRepoDir, ".azedarach", "azedarach.db"), cfg.Logger)
+	}
 	runtimeReconcileQueue := newReconcileQueue[protocol.RuntimeReconcileResponseBody](reconcileQueueConfig{
 		Name:    "runtime_reconcile",
 		Workers: defaultRuntimeReconcileQueueWorkers,
@@ -264,7 +273,7 @@ func New(cfg Config) *Daemon {
 	baseWorktreeManager := git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger)
 	d.worktreeManagersByRoot[strings.TrimSpace(cfg.RepoDir)] = baseWorktreeManager
 	d.worktreeManagersByProject[canonicalProjectID] = baseWorktreeManager
-	d.runtimeStoresByRoot[strings.TrimSpace(cfg.RepoDir)] = runtimeStateStore
+	d.runtimeStoresByRoot[strings.TrimSpace(runtimeRepoDir)] = runtimeStateStore
 	d.runtimeStoresByProject[canonicalProjectID] = runtimeStateStore
 	specService.daemon = d
 	specHandler := daemonhandlers.NewSpecHandler(specService)

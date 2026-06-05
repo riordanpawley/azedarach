@@ -50,8 +50,8 @@ func GlobalDaemonLockPath() string {
 }
 
 // DaemonSocketPathFor returns either the global or worktree-scoped daemon socket
-// path depending on runtime mode. Linked git worktrees default to a scoped
-// daemon so development/test worktrees do not fight over the user-global daemon.
+// path depending on runtime mode. Azedarach development worktrees default to a
+// scoped daemon so repo validation does not fight over the user-global daemon.
 func DaemonSocketPathFor(startPath string) string {
 	if UseScopedDaemonRuntimeFor(startPath) {
 		return ScopedDaemonSocketPath(startPath)
@@ -103,7 +103,29 @@ func UseScopedDaemonRuntimeFor(startPath string) bool {
 	case "global", "shared", "user", "off", "none":
 		return false
 	}
-	return IsLinkedGitWorktree(startPath)
+	return IsAzedarachDevelopmentWorktree(startPath)
+}
+
+func IsAzedarachDevelopmentWorktree(startPath string) bool {
+	if !IsLinkedGitWorktree(startPath) {
+		return false
+	}
+	projectRoot, err := ResolveProjectRoot(startPath)
+	if err != nil || strings.TrimSpace(projectRoot) == "" {
+		return false
+	}
+	modulePath := filepath.Join(projectRoot, "go.mod")
+	data, err := os.ReadFile(modulePath)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "module" {
+			return fields[1] == "github.com/riordanpawley/azedarach"
+		}
+	}
+	return false
 }
 
 func IsLinkedGitWorktree(startPath string) bool {

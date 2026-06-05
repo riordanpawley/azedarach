@@ -113,7 +113,7 @@ func TestDaemonPathsDefaultToScopedForLinkedWorktree(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
 	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
-	_, worktree := makeLinkedDaemonPathWorktree(t)
+	_, worktree := makeLinkedDaemonPathWorktreeWithModule(t, "github.com/riordanpawley/azedarach")
 
 	if got := DaemonSocketPathFor(worktree); got != ScopedDaemonSocketPath(worktree) {
 		t.Fatalf("DaemonSocketPathFor() = %q, want %q", got, ScopedDaemonSocketPath(worktree))
@@ -123,10 +123,24 @@ func TestDaemonPathsDefaultToScopedForLinkedWorktree(t *testing.T) {
 	}
 }
 
+func TestDaemonPathsDefaultToGlobalForNonAzedarachLinkedWorktree(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
+	_, worktree := makeLinkedDaemonPathWorktreeWithModule(t, "github.com/acme/chefy")
+
+	if got := DaemonSocketPathFor(worktree); got != GlobalDaemonSocketPath() {
+		t.Fatalf("DaemonSocketPathFor() = %q, want %q", got, GlobalDaemonSocketPath())
+	}
+	if got := DaemonLockPathFor(worktree); got != GlobalDaemonLockPath() {
+		t.Fatalf("DaemonLockPathFor() = %q, want %q", got, GlobalDaemonLockPath())
+	}
+}
+
 func TestDaemonPathsGlobalScopeOverridesLinkedWorktreeDefault(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
-	_, worktree := makeLinkedDaemonPathWorktree(t)
+	_, worktree := makeLinkedDaemonPathWorktreeWithModule(t, "github.com/riordanpawley/azedarach")
 
 	if got := DaemonSocketPathFor(worktree); got != GlobalDaemonSocketPath() {
 		t.Fatalf("DaemonSocketPathFor() = %q, want %q", got, GlobalDaemonSocketPath())
@@ -154,6 +168,9 @@ func TestDaemonPathsUseScopedForLinkedWorktreeWithoutEnv(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(worktree .git): %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module github.com/riordanpawley/azedarach\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(go.mod): %v", err)
+	}
 
 	if got := DaemonSocketPathFor(nested); got != ScopedDaemonSocketPath(nested) {
 		t.Fatalf("DaemonSocketPathFor() = %q, want %q", got, ScopedDaemonSocketPath(nested))
@@ -175,6 +192,10 @@ func TestDaemonPathsUseScopedWhenEnabled(t *testing.T) {
 }
 
 func makeLinkedDaemonPathWorktree(t *testing.T) (string, string) {
+	return makeLinkedDaemonPathWorktreeWithModule(t, "github.com/riordanpawley/azedarach")
+}
+
+func makeLinkedDaemonPathWorktreeWithModule(t *testing.T, module string) (string, string) {
 	t.Helper()
 	parent := t.TempDir()
 	repo := filepath.Join(parent, "repo")
@@ -186,7 +207,11 @@ func makeLinkedDaemonPathWorktree(t *testing.T) (string, string) {
 	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("test\n"), 0o644); err != nil {
 		t.Fatalf("write readme: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module "+module+"\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
 	runDaemonPathGit(t, repo, "add", "README.md")
+	runDaemonPathGit(t, repo, "add", "go.mod")
 	runDaemonPathGit(t, repo, "-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", "initial")
 	runDaemonPathGit(t, repo, "worktree", "add", "-b", "wt", worktree)
 	return repo, worktree

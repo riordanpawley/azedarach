@@ -15,6 +15,9 @@ func TestResolveScopedWorktreeWatchPathUsesRepoDir(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(repo worktrees): %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module github.com/riordanpawley/azedarach\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(go.mod): %v", err)
+	}
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatalf("MkdirAll(nested): %v", err)
 	}

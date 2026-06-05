@@ -81,6 +81,9 @@ func TestNewLauncherNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(repo worktrees): %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module github.com/riordanpawley/azedarach\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(go.mod): %v", err)
+	}
 	if err := os.MkdirAll(worktree, 0o755); err != nil {
 		t.Fatalf("MkdirAll(worktree): %v", err)
 	}
@@ -106,6 +109,9 @@ func TestNewLauncherKeepsLinkedWorktreeRootByDefault(t *testing.T) {
 
 	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(repo worktrees): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module github.com/riordanpawley/azedarach\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(go.mod): %v", err)
 	}
 	if err := os.MkdirAll(worktree, 0o755); err != nil {
 		t.Fatalf("MkdirAll(worktree): %v", err)
@@ -217,6 +223,9 @@ func TestLauncherResolveCommand_UsesLocalGoRunForScopedWorktreeWithoutBinary(t *
 
 	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(repo worktrees): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module github.com/riordanpawley/azedarach\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(go.mod): %v", err)
 	}
 	if err := os.MkdirAll(filepath.Join(worktree, "cmd", "azd"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(worktree cmd/azd): %v", err)
