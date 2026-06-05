@@ -180,7 +180,7 @@ func (c *Client) PasteTextAndSubmit(ctx context.Context, name string, text strin
 	if _, err := c.runner.Run(ctx, "paste-buffer", "-d", "-b", bufferName, "-t", name); err != nil {
 		return &domain.TmuxError{Op: "paste-buffer", Session: name, Err: err}
 	}
-	if _, err := c.runner.Run(ctx, "send-keys", "-t", name, "C-m"); err != nil {
+	if _, err := c.runner.Run(ctx, "send-keys", "-t", name, "Enter"); err != nil {
 		return &domain.TmuxError{Op: "send-keys", Session: name, Err: err}
 	}
 
