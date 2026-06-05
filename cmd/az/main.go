@@ -1065,7 +1065,7 @@ func sessionCommandUsage(command string, namespaced bool) (string, bool) {
 	switch command {
 	case "start":
 		if namespaced {
-			return "usage: az session start <issue-id> [--wait]", true
+			return "usage: az session start [--project <project-id>] <issue-id> [--wait]", true
 		}
 		return "usage: az start <issue-id> [--wait]", true
 	case "attach":
@@ -1106,6 +1106,48 @@ func sessionHelpRequested(values ...string) bool {
 		}
 	}
 	return false
+}
+
+func sessionStartUsage(namespaced bool) string {
+	if namespaced {
+		return "usage: az session start [--project <project-id>] <issue-id> [--wait]"
+	}
+	return "usage: az start <issue-id> [--wait]"
+}
+
+func parseSessionStartArgs(args []string, namespaced bool) (string, cli.SessionCommandOptions, error) {
+	opts := cli.SessionCommandOptions{}
+	usage := sessionStartUsage(namespaced)
+	issueID := ""
+
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		switch arg {
+		case "--wait":
+			opts.Wait = true
+		case "--project":
+			if !namespaced {
+				return "", opts, fmt.Errorf("%s", usage)
+			}
+			i++
+			if i >= len(args) || strings.TrimSpace(args[i]) == "" || strings.HasPrefix(strings.TrimSpace(args[i]), "-") {
+				return "", opts, fmt.Errorf("%s", usage)
+			}
+			opts.Project = args[i]
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return "", opts, fmt.Errorf("%s", usage)
+			}
+			if strings.TrimSpace(issueID) != "" || arg == "" {
+				return "", opts, fmt.Errorf("%s", usage)
+			}
+			issueID = arg
+		}
+	}
+	if strings.TrimSpace(issueID) == "" {
+		return "", opts, fmt.Errorf("%s", usage)
+	}
+	return issueID, opts, nil
 }
 
 // runCommand executes a CLI command with dependency injection
@@ -1156,28 +1198,16 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 	case "start":
 		if sessionHelpRequested(args...) {
 			if namespaced {
-				return fmt.Errorf("usage: az session start <issue-id> [--wait]")
+				return fmt.Errorf("%s", sessionStartUsage(namespaced))
 			}
-			return fmt.Errorf("usage: az start <issue-id> [--wait]")
+			return fmt.Errorf("%s", sessionStartUsage(namespaced))
 		}
-		if len(args) < 1 || len(args) > 2 {
-			if namespaced {
-				return fmt.Errorf("usage: az session start <issue-id> [--wait]")
-			}
-			return fmt.Errorf("usage: az start <issue-id> [--wait]")
-		}
-		opts := cli.SessionCommandOptions{}
-		if len(args) == 2 {
-			if args[1] != "--wait" {
-				if namespaced {
-					return fmt.Errorf("usage: az session start <issue-id> [--wait]")
-				}
-				return fmt.Errorf("usage: az start <issue-id> [--wait]")
-			}
-			opts.Wait = true
+		issueID, opts, err := parseSessionStartArgs(args, namespaced)
+		if err != nil {
+			return err
 		}
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
-			return cli.StartCommandWithOptions(deps, args[0], opts)
+			return cli.StartCommandWithOptions(deps, issueID, opts)
 		})
 	case "attach":
 		if sessionHelpRequested(args...) {

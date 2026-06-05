@@ -887,6 +887,96 @@ func TestSessionCommandsResolveProjectPrefixedIssueIDs(t *testing.T) {
 	}
 }
 
+func TestStartCommandWithProjectOptionTargetsRegisteredProject(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoA := filepath.Join(home, "project-a")
+	repoB := filepath.Join(home, "project-b")
+	if err := config.SaveProjectsRegistry(&config.ProjectsRegistry{
+		Projects: []config.Project{
+			{Name: "azedarach", Path: repoB},
+		},
+	}); err != nil {
+		t.Fatalf("save registry: %v", err)
+	}
+	projectA, err := config.ProjectIDForRoot(repoA)
+	if err != nil {
+		t.Fatalf("project A id: %v", err)
+	}
+	projectB, err := config.ProjectIDForRoot(repoB)
+	if err != nil {
+		t.Fatalf("project B id: %v", err)
+	}
+
+	var gotReq protocol.RequestEnvelope
+	commands := []string{}
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command+":"+req.Meta.ProjectID.String())
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					projectID := req.Meta.ProjectID.String()
+					tasks := []domain.Task{{ID: "local-only", Title: "Local", Status: domain.StatusOpen}}
+					if projectID == projectB {
+						tasks = []domain.Task{{ID: "cif", Title: "Remote", Status: domain.StatusOpen}}
+					}
+					body, err := marshalTaskListBodyForProject(projectID, tasks)
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            body,
+					}, nil
+				case commandSessionStart:
+					gotReq = req
+					return responseWithOutput(req, "started\n"), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID(projectA),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: projectA,
+		RepoDir:   repoA,
+	}
+
+	output := captureStdout(t, func() error {
+		return StartCommandWithOptions(deps, "cif", SessionCommandOptions{Project: "azedarach"})
+	})
+
+	if output != "started\n" {
+		t.Fatalf("output = %q, want started", output)
+	}
+	if gotReq.Command != commandSessionStart {
+		t.Fatalf("command = %q, want %q", gotReq.Command, commandSessionStart)
+	}
+	if gotReq.Meta.ProjectID.String() != projectB {
+		t.Fatalf("meta project_id = %q, want %q", gotReq.Meta.ProjectID, projectB)
+	}
+	var body sessionRequestBody
+	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if body.ProjectID != projectB || body.SessionID != "cif" || body.BaseBranch != "main" {
+		t.Fatalf("session request body = %+v, want project %s issue cif base main", body, projectB)
+	}
+	if !reflect.DeepEqual(commands, []string{
+		daemonclient.CommandTaskList + ":" + projectB,
+		commandSessionStart + ":" + projectB,
+	}) {
+		t.Fatalf("commands = %v, want task list and start scoped to %s", commands, projectB)
+	}
+}
+
 func TestSessionCommandsKeepBareIssueIDsCurrentProjectScoped(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
