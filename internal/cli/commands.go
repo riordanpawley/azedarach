@@ -396,7 +396,7 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 	restoreProject := applyIssueProjectOverride(deps, target.ProjectID)
 	defer restoreProject()
 
-	baseBranch, err := resolveSessionStartBaseBranchWithTasks(ctx, deps, target.Task, target.TaskContext)
+	baseBranch, err := resolveSessionStartBaseBranch(ctx, deps, target.Task)
 	if err != nil {
 		return err
 	}
@@ -799,28 +799,11 @@ func validateSessionIssueID(ctx context.Context, deps *Dependencies, issueID str
 }
 
 func resolveSessionStartBaseBranch(ctx context.Context, deps *Dependencies, task domain.Task) (string, error) {
-	return resolveSessionStartBaseBranchWithTasks(ctx, deps, task, nil)
-}
-
-func resolveSessionStartBaseBranchWithTasks(ctx context.Context, deps *Dependencies, task domain.Task, taskContext []domain.Task) (string, error) {
 	baseBranch := resolveCLIBaseBranch(deps.Config)
-	parentID := taskParentIssueID(task)
-	if parentID == "" {
-		return baseBranch, nil
-	}
-	return resolveParentWorktreeBaseBranchWithTasks(ctx, deps, baseBranch, parentID, task.ID.String(), taskContext)
+	return resolveParentWorktreeBaseBranch(ctx, deps, baseBranch, task.ID.String())
 }
 
-func resolveParentWorktreeBaseBranch(ctx context.Context, deps *Dependencies, baseBranch, parentID, issueIDForError string) (string, error) {
-	return resolveParentWorktreeBaseBranchWithTasks(ctx, deps, baseBranch, parentID, issueIDForError, nil)
-}
-
-func resolveParentWorktreeBaseBranchWithTasks(ctx context.Context, deps *Dependencies, baseBranch, parentID, issueIDForError string, taskContext []domain.Task) (string, error) {
-	parentID = strings.TrimSpace(parentID)
-	if parentID == "" {
-		return baseBranch, nil
-	}
-	_ = taskContext
+func resolveParentWorktreeBaseBranch(ctx context.Context, deps *Dependencies, baseBranch, issueIDForError string) (string, error) {
 	target, err := deps.DaemonClient.TaskMergeBaseTarget(ctx, issueIDForError, baseBranch, true)
 	if err != nil {
 		return "", fmt.Errorf("resolve parent worktree branch for %s: %w", issueIDForError, err)
@@ -829,10 +812,6 @@ func resolveParentWorktreeBaseBranchWithTasks(ctx context.Context, deps *Depende
 		return branch, nil
 	}
 	return baseBranch, nil
-}
-
-func taskParentIssueID(task domain.Task) string {
-	return domain.TaskParentIssueID(task)
 }
 
 // BranchMergeToBaseCommand merges one issue worktree branch into its resolved target branch using daemon git commands.

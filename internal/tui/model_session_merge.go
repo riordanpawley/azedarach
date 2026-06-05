@@ -467,52 +467,25 @@ func (m Model) resolveMergeBaseTarget(ctx context.Context, sourceID string) (mer
 	if sourceID == "" {
 		return defaultTarget, nil
 	}
-
-	taskByID := make(map[string]domain.Task, len(m.tasks))
-	for _, task := range m.tasks {
-		id := strings.TrimSpace(task.ID.String())
-		if id == "" {
-			continue
-		}
-		taskByID[id] = task
+	if m.daemonClient == nil {
+		return mergeBaseTarget{}, fmt.Errorf("daemon client unavailable")
 	}
-	if _, ok := taskByID[sourceID]; !ok {
+	target, err := m.daemonClient.TaskMergeBaseTarget(ctx, sourceID, defaultTarget.targetBranch, true)
+	if err != nil {
+		return mergeBaseTarget{}, err
+	}
+	if strings.TrimSpace(target.Branch) == "" {
 		return defaultTarget, nil
 	}
-
-	worktrees, err := m.listDaemonWorktrees(ctx)
-	if err != nil {
-		return mergeBaseTarget{}, fmt.Errorf("resolve merge base branch worktrees: %w", err)
+	targetID := strings.TrimSpace(target.TargetID)
+	if targetID == "" {
+		targetID = mergeBaseTargetID
 	}
-
-	if target, ok := domain.ClosestAncestorWithWorktree(sourceID, taskByID, issueWorktreeRefsFromDaemonWorktrees(worktrees)); ok {
-		return mergeBaseTarget{
-			targetID:       target.IssueID,
-			targetBranch:   target.Branch,
-			targetWorktree: target.WorktreePath,
-		}, nil
-	}
-
-	return defaultTarget, nil
-}
-
-func taskParentIssueID(task domain.Task) string {
-	return domain.TaskParentIssueID(task)
-}
-
-func issueWorktreeRefsFromDaemonWorktrees(worktrees []daemonclient.Worktree) map[string]domain.IssueWorktreeRef {
-	refs := make(map[string]domain.IssueWorktreeRef, len(worktrees))
-	for _, wt := range worktrees {
-		issueID := strings.TrimSpace(wt.IssueID)
-		if issueID == "" {
-			continue
-		}
-		refs[issueID] = domain.IssueWorktreeRef{
-			Branch: strings.TrimSpace(wt.Branch),
-			Path:   strings.TrimSpace(wt.Path),
-		}
-	}
-	return refs
+	return mergeBaseTarget{
+		targetID:       targetID,
+		targetBranch:   strings.TrimSpace(target.Branch),
+		targetWorktree: strings.TrimSpace(target.WorktreePath),
+	}, nil
 }
 
 func (m Model) mergeToBaseCmd(sourceWorktree, sourceID string, refreshStatus bool) tea.Cmd {

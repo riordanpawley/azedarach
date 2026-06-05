@@ -519,17 +519,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		// Open diff viewer overlay
-		openPopup := func(ctx context.Context, title, command string) error {
-			if strings.TrimSpace(os.Getenv("TMUX")) == "" || m.tmuxClient == nil {
-				return fmt.Errorf("diff popup unavailable outside tmux; run inside tmux and retry")
-			}
-			popupCommand := fmt.Sprintf("cd %s && %s", shellSingleQuote(diffWorktree), command)
-			return m.tmuxClient.DisplayPopup(ctx, title, "95%", "95%", popupCommand)
-		}
-		viewer := diff.NewDiffViewer(diffWorktree, m.diffBaseBranchForTask(task), m.gitClient, openPopup).WithIssueID(task.ID.String())
-		cmd := m.openOverlay(viewer)
-		return m, cmd
+		return m, m.resolveDiffViewerCmd(diffWorktree, task.ID.String())
 	case "w":
 		// Cleanup worktree and keep task.
 		m.selectTaskByID(task.ID.String())
@@ -672,4 +662,71 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+type diffViewerResolvedMsg struct {
+	issueID    string
+	worktree   string
+	baseBranch string
+	err        error
+}
+
+func (m Model) resolveDiffViewerCmd(worktree, issueID string) tea.Cmd {
+	defaultBase := m.resolveBaseBranch()
+	client := m.daemonClient
+	return func() tea.Msg {
+		if client == nil {
+			return diffViewerResolvedMsg{
+				issueID:  issueID,
+				worktree: worktree,
+				err:      fmt.Errorf("daemon client unavailable"),
+			}
+		}
+		target, err := client.TaskMergeBaseTarget(context.Background(), issueID, defaultBase, true)
+		if err != nil {
+			return diffViewerResolvedMsg{
+				issueID:  issueID,
+				worktree: worktree,
+				err:      err,
+			}
+		}
+		baseBranch := strings.TrimSpace(target.Branch)
+		if baseBranch == "" {
+			baseBranch = defaultBase
+		}
+		return diffViewerResolvedMsg{
+			issueID:    issueID,
+			worktree:   worktree,
+			baseBranch: baseBranch,
+		}
+	}
+}
+
+func (m Model) openDiffViewerFromResolved(msg diffViewerResolvedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.addToast(Toast{
+			Level:   ToastError,
+			Message: fmt.Sprintf("Resolve diff base failed: %v", msg.err),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+	}
+	diffWorktree := strings.TrimSpace(msg.worktree)
+	if diffWorktree == "" {
+		m.addToast(Toast{
+			Level:   ToastWarning,
+			Message: "No task worktree available for diff",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+	}
+	openPopup := func(ctx context.Context, title, command string) error {
+		if strings.TrimSpace(os.Getenv("TMUX")) == "" || m.tmuxClient == nil {
+			return fmt.Errorf("diff popup unavailable outside tmux; run inside tmux and retry")
+		}
+		popupCommand := fmt.Sprintf("cd %s && %s", shellSingleQuote(diffWorktree), command)
+		return m.tmuxClient.DisplayPopup(ctx, title, "95%", "95%", popupCommand)
+	}
+	viewer := diff.NewDiffViewer(diffWorktree, msg.baseBranch, m.gitClient, openPopup).WithIssueID(msg.issueID)
+	return m, m.openOverlay(viewer)
 }

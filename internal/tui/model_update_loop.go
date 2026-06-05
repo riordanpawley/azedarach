@@ -764,6 +764,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.followOnMergeIntoTargetCmd(msg.sourceWorktree, msg.targetWorktree, msg.sourceID, msg.targetID, msg.targetState, msg.refreshStatus)
 
+	case diffViewerResolvedMsg:
+		return m.openDiffViewerFromResolved(msg)
+
 	case refreshTaskWorkspaceResultMsg:
 		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
 			return m, nil

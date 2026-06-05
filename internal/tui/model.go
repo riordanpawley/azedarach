@@ -2373,58 +2373,6 @@ func (m Model) sessionOriginCandidates(task *domain.Task) ([]overlay.MergeTarget
 	return candidates, upstreamCount
 }
 
-func (m Model) diffBaseBranchForTask(task *domain.Task) string {
-	baseBranch := m.resolveBaseBranch()
-	if task == nil {
-		return baseBranch
-	}
-	taskByID := make(map[string]domain.Task, len(m.tasks))
-	for _, candidate := range m.tasks {
-		if id := strings.TrimSpace(candidate.ID.String()); id != "" {
-			taskByID[id] = candidate
-		}
-	}
-	if target, ok := domain.ClosestAncestorWithWorktree(task.ID.String(), taskByID, m.issueWorktreeRefsForDiffBase()); ok {
-		return target.Branch
-	}
-	return baseBranch
-}
-
-func (m Model) issueWorktreeRefsForDiffBase() map[string]domain.IssueWorktreeRef {
-	refs := make(map[string]domain.IssueWorktreeRef, len(m.tasks)+len(m.runtimeSignalBranchByTask))
-	for issueID, branch := range m.runtimeSignalBranchByTask {
-		issueID = strings.TrimSpace(issueID)
-		branch = strings.TrimSpace(branch)
-		if issueID == "" || branch == "" {
-			continue
-		}
-		refs[issueID] = domain.IssueWorktreeRef{
-			Branch: branch,
-			Path:   strings.TrimSpace(m.runtimeSignalWorktreeByTask[issueID]),
-		}
-	}
-	for _, task := range m.tasks {
-		issueID := strings.TrimSpace(task.ID.String())
-		if issueID == "" {
-			continue
-		}
-		if existing, ok := refs[issueID]; ok && strings.TrimSpace(existing.Branch) != "" {
-			continue
-		}
-		if task.HasWorktree || task.Session != nil {
-			path := strings.TrimSpace(m.runtimeSignalWorktreeByTask[issueID])
-			if path == "" && task.Session != nil {
-				path = strings.TrimSpace(task.Session.Worktree)
-			}
-			refs[issueID] = domain.IssueWorktreeRef{
-				Branch: m.originBranchForSelection(issueID),
-				Path:   path,
-			}
-		}
-	}
-	return refs
-}
-
 func (m Model) daemonCommandTimeout() time.Duration {
 	if m.config != nil && m.config.Session.TimeoutMs > 0 {
 		return time.Duration(m.config.Session.TimeoutMs) * time.Millisecond

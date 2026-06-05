@@ -286,6 +286,12 @@ func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 						OK:              true,
 						Body:            taskListBody,
 					}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:  "issue-1",
+						TargetID: "base",
+						Branch:   "main",
+					}), nil
 				case commandSessionStart:
 					gotReq = req
 					return responseWithOutput(req, "Starting session for: issue-1 - Example\nCreating worktree from branch: main\nWorktree created: /tmp/repo-issue-1\nCreating tmux session: issue-1\n\n✓ Session started successfully\n  To attach: az attach issue-1\n  Or run:    tmux attach-session -t issue-1\n"), nil
@@ -306,7 +312,7 @@ func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 	if gotReq.Command != commandSessionStart {
 		t.Fatalf("command = %q, want %q", gotReq.Command, commandSessionStart)
 	}
-	if len(commands) != 2 || commands[0] != daemonclient.CommandTaskList || commands[1] != commandSessionStart {
+	if len(commands) != 3 || commands[0] != daemonclient.CommandTaskList || commands[1] != daemonclient.CommandTaskMergeBaseTarget || commands[2] != commandSessionStart {
 		t.Fatalf("commands = %v", commands)
 	}
 	var body sessionRequestBody
@@ -345,6 +351,12 @@ func TestStartCommandUsesExtendedTimeout(t *testing.T) {
 						OK:              true,
 						Body:            taskListBody,
 					}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:  "issue-1",
+						TargetID: "base",
+						Branch:   "main",
+					}), nil
 				case commandSessionStart:
 					var ok bool
 					startDeadline, ok = ctx.Deadline()
@@ -398,6 +410,12 @@ func TestStartCommandPrintsProgressStatus(t *testing.T) {
 						OK:              true,
 						Body:            taskListBody,
 					}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:  "issue-1",
+						TargetID: "base",
+						Branch:   "main",
+					}), nil
 				case commandSessionStart:
 					return responseWithOutput(req, "started\n"), nil
 				default:
@@ -1942,6 +1960,13 @@ func TestStartCommandPrintsPendingOperationState(t *testing.T) {
 						Body:            taskListBody,
 					}, nil
 				}
+				if req.Command == daemonclient.CommandTaskMergeBaseTarget {
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:  "issue-1",
+						TargetID: "base",
+						Branch:   "main",
+					}), nil
+				}
 				body, err := json.Marshal(map[string]any{
 					"operation_id": "op-start",
 					"state":        string(protocol.OperationStateQueued),
@@ -1993,6 +2018,12 @@ func TestStartCommandWithWaitPrintsTerminalOperationOutput(t *testing.T) {
 						OK:              true,
 						Body:            taskListBody,
 					}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:  "issue-1",
+						TargetID: "base",
+						Branch:   "main",
+					}), nil
 				case commandSessionStart:
 					body, err := json.Marshal(map[string]any{
 						"operation_id": "op-start",
@@ -2048,8 +2079,8 @@ func TestStartCommandWithWaitPrintsTerminalOperationOutput(t *testing.T) {
 	if output != "started\n" {
 		t.Fatalf("output = %q, want terminal operation output", output)
 	}
-	if calls != 3 {
-		t.Fatalf("calls = %d, want 3", calls)
+	if calls != 4 {
+		t.Fatalf("calls = %d, want 4", calls)
 	}
 }
 
@@ -2361,6 +2392,13 @@ func TestCommandErrorUsesTransportMessage(t *testing.T) {
 						OK:              true,
 						Body:            taskListBody,
 					}, nil
+				}
+				if req.Command == daemonclient.CommandTaskMergeBaseTarget {
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:  "issue-1",
+						TargetID: "base",
+						Branch:   "main",
+					}), nil
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: protocol.CurrentVersion,

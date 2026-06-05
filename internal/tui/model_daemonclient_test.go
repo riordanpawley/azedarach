@@ -136,6 +136,22 @@ func (r *recordingDaemonTransport) Command(ctx context.Context, req protocol.Req
 	if r.replyFn != nil {
 		return r.replyFn(req)
 	}
+	if req.Command == daemonclient.CommandTaskMergeBaseTarget {
+		respBody, err := json.Marshal(daemonclient.TaskMergeBaseTarget{
+			TargetID: mergeBaseTargetID,
+			Branch:   "main",
+		})
+		if err != nil {
+			return protocol.ResponseEnvelope{}, err
+		}
+		return protocol.ResponseEnvelope{
+			ProtocolVersion: req.ProtocolVersion,
+			RequestID:       req.RequestID,
+			Kind:            protocol.EnvelopeKindResponse,
+			OK:              true,
+			Body:            respBody,
+		}, nil
+	}
 	return protocol.ResponseEnvelope{
 		ProtocolVersion: req.ProtocolVersion,
 		RequestID:       req.RequestID,
@@ -2626,6 +2642,22 @@ func TestHandleMergeTargetSelectionToBaseUsesWorktreeLookupFallback(t *testing.T
 					OK:              true,
 					Body:            respBody,
 				}, nil
+			case daemonclient.CommandTaskMergeBaseTarget:
+				respBody, err := json.Marshal(daemonclient.TaskMergeBaseTarget{
+					IssueID:  sourceID,
+					TargetID: mergeBaseTargetID,
+					Branch:   "main",
+				})
+				if err != nil {
+					t.Fatalf("marshal merge base target response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
 			case daemonclient.CommandGitFetch:
 				var body daemonclient.GitCommandRequest
 				if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -2650,7 +2682,7 @@ func TestHandleMergeTargetSelectionToBaseUsesWorktreeLookupFallback(t *testing.T
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal checkout request: %v", err)
 				}
-				if body.Worktree != baseWorktree || body.Branch != "trunk" {
+				if body.Worktree != baseWorktree || body.Branch != "main" {
 					t.Fatalf("checkout body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitCommandResponse{Worktree: body.Worktree, Branch: body.Branch})
@@ -2747,7 +2779,7 @@ func TestHandleMergeTargetSelectionToBaseUsesWorktreeLookupFallback(t *testing.T
 	if mergeMsg.err != nil {
 		t.Fatalf("merge err = %v", mergeMsg.err)
 	}
-	if got := transport.requests; len(got) != 10 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandRuntimeReconcileIssue || got[3] != daemonclient.CommandGitStatus || got[4] != daemonclient.CommandGitStatus || got[5] != daemonclient.CommandGitMergePreflight || got[6] != daemonclient.CommandGitFetch || got[7] != daemonclient.CommandGitCheckout || got[8] != daemonclient.CommandGitMerge || got[9] != daemonclient.CommandGitStatus {
+	if got := transport.requests; len(got) != 11 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandTaskMergeBaseTarget || got[2] != daemonclient.CommandWorktreeList || got[3] != daemonclient.CommandRuntimeReconcileIssue || got[4] != daemonclient.CommandGitStatus || got[5] != daemonclient.CommandGitStatus || got[6] != daemonclient.CommandGitMergePreflight || got[7] != daemonclient.CommandGitFetch || got[8] != daemonclient.CommandGitCheckout || got[9] != daemonclient.CommandGitMerge || got[10] != daemonclient.CommandGitStatus {
 		t.Fatalf("requests = %v", got)
 	}
 }
@@ -3305,6 +3337,22 @@ func TestFollowOnMergeSelectionTopLevelFallsBackToMergeMain(t *testing.T) {
 					OK:              true,
 					Body:            respBody,
 				}, nil
+			case daemonclient.CommandTaskMergeBaseTarget:
+				respBody, err := json.Marshal(daemonclient.TaskMergeBaseTarget{
+					IssueID:  issueID,
+					TargetID: mergeBaseTargetID,
+					Branch:   "trunk",
+				})
+				if err != nil {
+					t.Fatalf("marshal merge base target response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
 			case daemonclient.CommandGitFetch:
 				respBody, err := json.Marshal(daemonclient.GitCommandResponse{Worktree: ".", Remote: "origin"})
 				if err != nil {
@@ -3446,6 +3494,22 @@ func TestMergeToBasePreflightBlocksDirtySourceOrTarget(t *testing.T) {
 					OK:              true,
 					Body:            respBody,
 				}, nil
+			case daemonclient.CommandTaskMergeBaseTarget:
+				respBody, err := json.Marshal(daemonclient.TaskMergeBaseTarget{
+					IssueID:  sourceID,
+					TargetID: mergeBaseTargetID,
+					Branch:   "main",
+				})
+				if err != nil {
+					t.Fatalf("marshal merge base target response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
 			case daemonclient.CommandGitStatus:
 				var body daemonclient.GitCommandRequest
 				if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -3560,6 +3624,22 @@ func TestMergeToBasePreflightCanIgnoreDirtySource(t *testing.T) {
 				}{Status: status})
 				if err != nil {
 					t.Fatalf("marshal status response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandTaskMergeBaseTarget:
+				respBody, err := json.Marshal(daemonclient.TaskMergeBaseTarget{
+					IssueID:  sourceID,
+					TargetID: mergeBaseTargetID,
+					Branch:   "trunk",
+				})
+				if err != nil {
+					t.Fatalf("marshal merge base target response: %v", err)
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -3931,6 +4011,22 @@ func TestMergeToBasePreflightBlocksPredictedConflicts(t *testing.T) {
 					OK:              true,
 					Body:            respBody,
 				}, nil
+			case daemonclient.CommandTaskMergeBaseTarget:
+				respBody, err := json.Marshal(daemonclient.TaskMergeBaseTarget{
+					IssueID:  sourceID,
+					TargetID: mergeBaseTargetID,
+					Branch:   "trunk",
+				})
+				if err != nil {
+					t.Fatalf("marshal merge base target response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
 			case daemonclient.CommandGitMergePreflight:
 				var body daemonclient.GitMergePreflightRequest
 				if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -4039,6 +4135,19 @@ func TestMergeToBaseUsesNearestNonClosedAncestorBranch(t *testing.T) {
 					t.Fatalf("marshal reconcile response: %v", err)
 				}
 				return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, OK: true, Body: respBody}, nil
+			case daemonclient.CommandTaskMergeBaseTarget:
+				respBody, err := json.Marshal(daemonclient.TaskMergeBaseTarget{
+					IssueID:        sourceID,
+					TargetID:       parentID,
+					Branch:         "az/az-parent",
+					WorktreePath:   "/tmp/az-parent",
+					BranchAttached: true,
+					AncestorChain:  []string{parentID},
+				})
+				if err != nil {
+					t.Fatalf("marshal merge base target response: %v", err)
+				}
+				return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, OK: true, Body: respBody}, nil
 			case daemonclient.CommandGitStatus:
 				respBody, err := json.Marshal(struct {
 					Status git.GitStatus `json:"status"`
@@ -4119,26 +4228,15 @@ func TestResolveMergeBaseTargetFallsBackWhenNoAncestorWorktreeExists(t *testing.
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
-			case daemonclient.CommandWorktreeList:
-				respBody, err := json.Marshal(struct {
-					ProjectID string `json:"project_id"`
-					Worktrees []struct {
-						Path    string `json:"path"`
-						Branch  string `json:"branch"`
-						IssueID string `json:"issue_id"`
-					} `json:"worktrees"`
-				}{
-					ProjectID: "default",
-					Worktrees: []struct {
-						Path    string `json:"path"`
-						Branch  string `json:"branch"`
-						IssueID string `json:"issue_id"`
-					}{
-						{Path: "/tmp/az-child", Branch: "az/az-child", IssueID: sourceID},
-					},
+			case daemonclient.CommandTaskMergeBaseTarget:
+				respBody, err := json.Marshal(daemonclient.TaskMergeBaseTarget{
+					IssueID:       sourceID,
+					TargetID:      mergeBaseTargetID,
+					Branch:        "main",
+					AncestorChain: []string{parentID},
 				})
 				if err != nil {
-					t.Fatalf("marshal worktree response: %v", err)
+					t.Fatalf("marshal merge base target response: %v", err)
 				}
 				return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, OK: true, Body: respBody}, nil
 			default:
@@ -5372,20 +5470,64 @@ func TestRefreshOpenDiffOverlayFromProjectionBody(t *testing.T) {
 }
 
 func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
+	openDiffFromSelection := func(t *testing.T, m Model) Model {
+		t.Helper()
+		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "f"})
+		if cmd == nil {
+			t.Fatal("expected diff base resolution command")
+		}
+		updatedModel, ok := updated.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updated)
+		}
+		msg := cmd()
+		resolved, ok := msg.(diffViewerResolvedMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want diffViewerResolvedMsg", msg)
+		}
+		next, _ := updatedModel.Update(resolved)
+		nextModel, ok := next.(Model)
+		if !ok {
+			t.Fatalf("next model type = %T, want Model", next)
+		}
+		return nextModel
+	}
+	diffBaseTransport := func(branch string) *recordingDaemonTransport {
+		return &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskMergeBaseTarget {
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+					}, nil
+				}
+				respBody, err := json.Marshal(daemonclient.TaskMergeBaseTarget{
+					TargetID: mergeBaseTargetID,
+					Branch:   branch,
+				})
+				if err != nil {
+					return protocol.ResponseEnvelope{}, err
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			},
+		}
+	}
+
 	t.Run("open diff without session uses repo root", func(t *testing.T) {
 		m := newDaemonTestModel(&recordingDaemonTransport{})
 		m.tasks = []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, Type: domain.TypeTask}}
 		m.repoDir = "/tmp/repo-root"
 		m.nav.SelectTask("az-1", 1)
 
-		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "f"})
-		if cmd == nil {
-			t.Fatal("expected diff overlay command")
-		}
-		updatedModel, ok := updated.(Model)
-		if !ok {
-			t.Fatalf("updated model type = %T, want Model", updated)
-		}
+		updatedModel := openDiffFromSelection(t, m)
 		current := updatedModel.overlayStack.Current()
 		diffOverlay, ok := current.(*diff.DiffViewer)
 		if !ok {
@@ -5421,11 +5563,7 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 		m.repoDir = "/tmp/repo-root"
 		m.nav.SelectTask("az-1", 1)
 
-		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "f"})
-		if cmd == nil {
-			t.Fatal("expected diff overlay command")
-		}
-		updatedModel := updated.(Model)
+		updatedModel := openDiffFromSelection(t, m)
 		diffOverlay, ok := updatedModel.overlayStack.Current().(*diff.DiffViewer)
 		if !ok {
 			t.Fatalf("overlay type = %T, want *diff.DiffViewer", updatedModel.overlayStack.Current())
@@ -5444,7 +5582,7 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 	})
 
 	t.Run("open diff targets direct parent branch", func(t *testing.T) {
-		m := newDaemonTestModel(&recordingDaemonTransport{})
+		m := newDaemonTestModel(diffBaseTransport("az/az-parent"))
 		rootID := naming.IssueID("az-root")
 		parentID := naming.IssueID("az-parent")
 		childID := naming.IssueID("az-child")
@@ -5477,11 +5615,7 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 		}
 		m.nav.SelectTask("az-child", 1)
 
-		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "f"})
-		if cmd == nil {
-			t.Fatal("expected diff overlay command")
-		}
-		updatedModel := updated.(Model)
+		updatedModel := openDiffFromSelection(t, m)
 		diffOverlay, ok := updatedModel.overlayStack.Current().(*diff.DiffViewer)
 		if !ok {
 			t.Fatalf("overlay type = %T, want *diff.DiffViewer", updatedModel.overlayStack.Current())
@@ -5493,7 +5627,7 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 	})
 
 	t.Run("open diff skips parent without worktree and targets closest ancestor worktree branch", func(t *testing.T) {
-		m := newDaemonTestModel(&recordingDaemonTransport{})
+		m := newDaemonTestModel(diffBaseTransport("riordan/az-root/root-branch"))
 		rootID := naming.IssueID("az-root")
 		parentID := naming.IssueID("az-parent")
 		childID := naming.IssueID("az-child")
@@ -5529,11 +5663,7 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 		}
 		m.nav.SelectTask("az-child", 1)
 
-		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "f"})
-		if cmd == nil {
-			t.Fatal("expected diff overlay command")
-		}
-		updatedModel := updated.(Model)
+		updatedModel := openDiffFromSelection(t, m)
 		diffOverlay, ok := updatedModel.overlayStack.Current().(*diff.DiffViewer)
 		if !ok {
 			t.Fatalf("overlay type = %T, want *diff.DiffViewer", updatedModel.overlayStack.Current())
@@ -5545,7 +5675,7 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 	})
 
 	t.Run("open diff targets actual parent worktree branch", func(t *testing.T) {
-		m := newDaemonTestModel(&recordingDaemonTransport{})
+		m := newDaemonTestModel(diffBaseTransport("riordan/az-parent/real-parent-branch"))
 		parentID := naming.IssueID("az-parent")
 		childID := naming.IssueID("az-child")
 		m.tasks = []domain.Task{
@@ -5573,11 +5703,7 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 		}
 		m.nav.SelectTask("az-child", 1)
 
-		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "f"})
-		if cmd == nil {
-			t.Fatal("expected diff overlay command")
-		}
-		updatedModel := updated.(Model)
+		updatedModel := openDiffFromSelection(t, m)
 		diffOverlay, ok := updatedModel.overlayStack.Current().(*diff.DiffViewer)
 		if !ok {
 			t.Fatalf("overlay type = %T, want *diff.DiffViewer", updatedModel.overlayStack.Current())
@@ -5589,7 +5715,7 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 	})
 
 	t.Run("open diff uses done direct parent branch", func(t *testing.T) {
-		m := newDaemonTestModel(&recordingDaemonTransport{})
+		m := newDaemonTestModel(diffBaseTransport("az/az-parent"))
 		parentID := naming.IssueID("az-parent")
 		childID := naming.IssueID("az-child")
 		m.tasks = []domain.Task{
@@ -5614,11 +5740,7 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 		}
 		m.nav.SelectTask("az-child", 1)
 
-		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "f"})
-		if cmd == nil {
-			t.Fatal("expected diff overlay command")
-		}
-		updatedModel := updated.(Model)
+		updatedModel := openDiffFromSelection(t, m)
 		diffOverlay, ok := updatedModel.overlayStack.Current().(*diff.DiffViewer)
 		if !ok {
 			t.Fatalf("overlay type = %T, want *diff.DiffViewer", updatedModel.overlayStack.Current())
@@ -5642,11 +5764,7 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 		m.repoDir = "/tmp/repo-root"
 		m.nav.SelectTask("az-1", 1)
 
-		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "f"})
-		if cmd == nil {
-			t.Fatal("expected diff overlay command")
-		}
-		updatedModel := updated.(Model)
+		updatedModel := openDiffFromSelection(t, m)
 		diffOverlay, ok := updatedModel.overlayStack.Current().(*diff.DiffViewer)
 		if !ok {
 			t.Fatalf("overlay type = %T, want *diff.DiffViewer", updatedModel.overlayStack.Current())

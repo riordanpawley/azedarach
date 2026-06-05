@@ -114,7 +114,7 @@ func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
-	baseBranch, err := resolveParentWorktreeBaseBranch(ctx, deps, resolveCLIBaseBranch(deps.Config), parentIssueID, createResult.IssueID)
+	baseBranch, err := resolveParentWorktreeBaseBranch(ctx, deps, resolveCLIBaseBranch(deps.Config), createResult.IssueID)
 	if err != nil {
 		return err
 	}
