@@ -73,9 +73,10 @@ type TaskStatusRequest struct {
 
 // TaskStatusOptions controls client-side status transition behavior.
 type TaskStatusOptions struct {
-	CleanupBeforeClose bool
-	ForceWorktree      bool
-	IgnoreAhead        bool
+	CleanupBeforeClose   bool
+	ForceWorktree        bool
+	IgnoreAhead          bool
+	IntegrateBeforeClose bool
 }
 
 type TaskDeleteOptions struct {
@@ -110,9 +111,10 @@ type taskClosePreflightRequest struct {
 }
 
 type taskCloseRequest struct {
-	TaskID        naming.IssueID `json:"task_id"`
-	ForceWorktree bool           `json:"force_worktree,omitempty"`
-	IgnoreAhead   bool           `json:"ignore_ahead,omitempty"`
+	TaskID               naming.IssueID `json:"task_id"`
+	ForceWorktree        bool           `json:"force_worktree,omitempty"`
+	IgnoreAhead          bool           `json:"ignore_ahead,omitempty"`
+	IntegrateBeforeClose bool           `json:"integrate_before_close,omitempty"`
 }
 
 type taskDeleteRequest struct {
@@ -124,12 +126,16 @@ type taskDeleteRequest struct {
 }
 
 type TaskCloseResult struct {
-	TaskID          string `json:"task_id"`
-	Status          string `json:"status"`
-	SessionStopped  bool   `json:"session_stopped,omitempty"`
-	WorktreeRemoved bool   `json:"worktree_removed,omitempty"`
-	WorktreeForced  bool   `json:"worktree_forced,omitempty"`
-	Revision        uint64 `json:"revision,omitempty"`
+	TaskID                 string `json:"task_id"`
+	Status                 string `json:"status"`
+	IntegrationRequested   bool   `json:"integration_requested,omitempty"`
+	Integrated             bool   `json:"integrated,omitempty"`
+	IntegratedSourceBranch string `json:"integrated_source_branch,omitempty"`
+	IntegratedTargetBranch string `json:"integrated_target_branch,omitempty"`
+	SessionStopped         bool   `json:"session_stopped,omitempty"`
+	WorktreeRemoved        bool   `json:"worktree_removed,omitempty"`
+	WorktreeForced         bool   `json:"worktree_forced,omitempty"`
+	Revision               uint64 `json:"revision,omitempty"`
 }
 
 type TaskDeleteResult struct {
@@ -621,9 +627,10 @@ func (c *Client) CloseTask(ctx context.Context, taskID string, opts TaskStatusOp
 	}
 	var out TaskCloseResult
 	if err := c.commandJSON(ctx, CommandTaskClose, taskCloseRequest{
-		TaskID:        parsedTaskID,
-		ForceWorktree: opts.ForceWorktree,
-		IgnoreAhead:   opts.IgnoreAhead,
+		TaskID:               parsedTaskID,
+		ForceWorktree:        opts.ForceWorktree,
+		IgnoreAhead:          opts.IgnoreAhead,
+		IntegrateBeforeClose: opts.IntegrateBeforeClose,
 	}, &out); err != nil {
 		return TaskCloseResult{}, err
 	}

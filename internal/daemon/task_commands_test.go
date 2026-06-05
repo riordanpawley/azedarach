@@ -1452,6 +1452,148 @@ func TestTaskUpdateStatusClosePreflightBlocksRawUnresolvedChildrenAndApplyPath(t
 	}
 }
 
+func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-integrate"
+	repoDir := t.TempDir()
+	sourceWorktree := filepath.Join(repoDir, "wt-az-1")
+	sourceBranch := "riordan/az-1/integrate"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Integrate me",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      sourceWorktree,
+		Branch:    sourceBranch,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+
+	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
+	commands := make([]string, 0, 12)
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		commands = append(commands, strings.Join(args, " "))
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+			return worktreeListOutput, nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "merge-base":
+			return "base-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "rev-list":
+			return "0", nil
+		case len(args) >= 6 && args[0] == "-C" && args[2] == "merge-tree":
+			return "tree-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "fetch":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "checkout":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "merge":
+			return "merge complete", nil
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "remove":
+			return "", nil
+		default:
+			return "", nil
+		}
+	}}
+
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		git:      git.NewClient(runner, logger),
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		logger: logger,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	body, err := json.Marshal(taskCloseRequest{
+		TaskID:               taskID,
+		IntegrateBeforeClose: true,
+	})
+	if err != nil {
+		t.Fatalf("marshal task close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-integrate",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.close",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("handleTaskClose response = %+v", resp)
+	}
+	var result taskCloseResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal close result: %v", err)
+	}
+	if !result.IntegrationRequested || !result.Integrated || result.IntegratedSourceBranch != sourceBranch || result.IntegratedTargetBranch != "main" {
+		t.Fatalf("close integration result = %+v", result)
+	}
+	closed, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get task after close: %v", err)
+	}
+	if closed.Status != domain.StatusDone {
+		t.Fatalf("task status = %s, want %s", closed.Status, domain.StatusDone)
+	}
+	joined := strings.Join(commands, "\n")
+	for _, want := range []string{
+		"-C " + sourceWorktree + " status --porcelain",
+		"-C " + repoDir + " merge-tree --write-tree main " + sourceBranch,
+		"-C " + repoDir + " fetch origin",
+		"-C " + repoDir + " checkout main",
+		"-C " + repoDir + " merge --no-edit " + sourceBranch,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("git commands missing %q:\n%s", want, joined)
+		}
+	}
+}
+
 func TestTaskUpdateStatusClosePreflightBlocksActiveChildRuntime(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -1739,6 +1881,13 @@ func TestTaskMergeBaseTargetSelectsNearestAncestorWorktree(t *testing.T) {
 		runtimeStateStore: store,
 		logger:            slog.Default(),
 	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
 
 	got, err := d.taskMergeBaseTarget(ctx, projectID, childID, "main", false)
 	if err != nil {

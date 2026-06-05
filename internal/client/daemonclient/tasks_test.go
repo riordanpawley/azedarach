@@ -678,25 +678,29 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal close request: %v", err)
 				}
-				if body.TaskID != "az-3" || !body.ForceWorktree || !body.IgnoreAhead {
+				if body.TaskID != "az-3" || !body.ForceWorktree || !body.IgnoreAhead || !body.IntegrateBeforeClose {
 					t.Fatalf("close body = %+v", body)
 				}
 				return responseWithJSON(t, req, TaskCloseResult{
-					TaskID:          "az-3",
-					Status:          string(domain.StatusDone),
-					SessionStopped:  true,
-					WorktreeRemoved: true,
-					WorktreeForced:  true,
+					TaskID:                 "az-3",
+					Status:                 string(domain.StatusDone),
+					IntegrationRequested:   true,
+					Integrated:             true,
+					IntegratedSourceBranch: "feature/az-3",
+					IntegratedTargetBranch: "main",
+					SessionStopped:         true,
+					WorktreeRemoved:        true,
+					WorktreeForced:         true,
 				}), nil
 			},
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
-		got, err := client.CloseTask(context.Background(), "az-3", TaskStatusOptions{ForceWorktree: true, IgnoreAhead: true})
+		got, err := client.CloseTask(context.Background(), "az-3", TaskStatusOptions{ForceWorktree: true, IgnoreAhead: true, IntegrateBeforeClose: true})
 		if err != nil {
 			t.Fatalf("CloseTask error: %v", err)
 		}
-		if got.TaskID != "az-3" || got.Status != string(domain.StatusDone) || !got.WorktreeForced {
+		if got.TaskID != "az-3" || got.Status != string(domain.StatusDone) || !got.WorktreeForced || !got.IntegrationRequested || !got.Integrated {
 			t.Fatalf("close result = %+v", got)
 		}
 	})

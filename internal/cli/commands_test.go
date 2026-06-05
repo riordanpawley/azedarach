@@ -6012,18 +6012,26 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 						t.Fatalf("task close timeout budget = %s, want near %s", remaining, issueCloseCleanupTimeout)
 					}
 					var body struct {
-						ForceWorktree bool `json:"force_worktree"`
+						ForceWorktree        bool `json:"force_worktree"`
+						IntegrateBeforeClose bool `json:"integrate_before_close"`
 					}
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal task close body: %v", err)
 					}
 					closeForce = body.ForceWorktree
+					if !body.IntegrateBeforeClose {
+						t.Fatalf("task close integrate_before_close = false, want true")
+					}
 					return responseWithJSON(req, daemonclient.TaskCloseResult{
-						TaskID:          "az-9",
-						Status:          string(domain.StatusDone),
-						SessionStopped:  true,
-						WorktreeRemoved: true,
-						WorktreeForced:  body.ForceWorktree,
+						TaskID:                 "az-9",
+						Status:                 string(domain.StatusDone),
+						IntegrationRequested:   true,
+						Integrated:             true,
+						IntegratedSourceBranch: "riordan/az-9/finish-flow",
+						IntegratedTargetBranch: "main",
+						SessionStopped:         true,
+						WorktreeRemoved:        true,
+						WorktreeForced:         body.ForceWorktree,
 					}), nil
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
@@ -6043,15 +6051,6 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 	})
 
 	wantCommands := []string{
-		daemonclient.CommandWorktreeList,
-		daemonclient.CommandWorktreeList,
-		daemonclient.CommandTaskMergeBaseTarget,
-		daemonclient.CommandGitWorktreeForBranch,
-		daemonclient.CommandGitStatus,
-		daemonclient.CommandGitStatus,
-		daemonclient.CommandGitFetch,
-		daemonclient.CommandGitCheckout,
-		daemonclient.CommandGitMerge,
 		daemonclient.CommandTaskClose,
 	}
 	if !reflect.DeepEqual(commands, wantCommands) {
@@ -7077,18 +7076,26 @@ func TestIssueUpdateCommandConfirmedClosedCleansBeforeStatus(t *testing.T) {
 					}), nil
 				case daemonclient.CommandTaskClose:
 					var body struct {
-						ForceWorktree bool `json:"force_worktree"`
+						ForceWorktree        bool `json:"force_worktree"`
+						IntegrateBeforeClose bool `json:"integrate_before_close"`
 					}
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal task close body: %v", err)
 					}
 					closeForce = body.ForceWorktree
+					if !body.IntegrateBeforeClose {
+						t.Fatalf("task close integrate_before_close = false, want true")
+					}
 					return responseWithJSON(req, daemonclient.TaskCloseResult{
-						TaskID:          "az-1",
-						Status:          string(domain.StatusDone),
-						SessionStopped:  true,
-						WorktreeRemoved: true,
-						WorktreeForced:  body.ForceWorktree,
+						TaskID:                 "az-1",
+						Status:                 string(domain.StatusDone),
+						IntegrationRequested:   true,
+						Integrated:             true,
+						IntegratedSourceBranch: "riordan/az-1/ready",
+						IntegratedTargetBranch: "main",
+						SessionStopped:         true,
+						WorktreeRemoved:        true,
+						WorktreeForced:         body.ForceWorktree,
 					}), nil
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
@@ -7111,15 +7118,6 @@ func TestIssueUpdateCommandConfirmedClosedCleansBeforeStatus(t *testing.T) {
 	wantCommands := []string{
 		daemonclient.CommandTaskGet,
 		daemonclient.CommandTaskUpdate,
-		daemonclient.CommandWorktreeList,
-		daemonclient.CommandWorktreeList,
-		daemonclient.CommandTaskMergeBaseTarget,
-		daemonclient.CommandGitWorktreeForBranch,
-		daemonclient.CommandGitStatus,
-		daemonclient.CommandGitStatus,
-		daemonclient.CommandGitFetch,
-		daemonclient.CommandGitCheckout,
-		daemonclient.CommandGitMerge,
 		daemonclient.CommandTaskClose,
 	}
 	if !reflect.DeepEqual(commands, wantCommands) {

@@ -3489,11 +3489,8 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 		return err
 	}
 
-	integrationRequested, err := integrateIssueBeforeCloseIfAttached(ctx, deps, opts.IssueID)
+	result, err := deps.DaemonClient.CloseTask(ctx, opts.IssueID, cleanupCloseTaskStatusOptions(opts.ForceWorktree))
 	if err != nil {
-		return fmt.Errorf("failed to integrate issue %s before close: %w", opts.IssueID, err)
-	}
-	if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, domain.StatusDone, cleanupCloseTaskStatusOptionsAfterIntegration(opts.ForceWorktree, integrationRequested)); err != nil {
 		return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
 	}
 
@@ -3502,39 +3499,24 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 			"issue_id":              opts.IssueID,
 			"status":                "closed",
 			"updated":               true,
-			"integration_requested": integrationRequested,
+			"integration_requested": result.IntegrationRequested,
+			"integrated":            result.Integrated,
 			"cleanup_performed":     true,
 			"worktree_forced":       opts.ForceWorktree,
 		})
 	}
 	fmt.Printf("Closed issue: %s\n", opts.IssueID)
-	if integrationRequested {
+	if result.IntegrationRequested {
 		fmt.Println("- Integration requested")
+	}
+	if result.Integrated {
+		fmt.Printf("- Integrated %s into %s\n", result.IntegratedSourceBranch, result.IntegratedTargetBranch)
 	}
 	fmt.Println("- Cleanup performed")
 	if opts.ForceWorktree {
 		fmt.Println("- Worktree removal forced")
 	}
 	return nil
-}
-
-func integrateIssueBeforeCloseIfAttached(ctx context.Context, deps *Dependencies, issueID string) (bool, error) {
-	if deps == nil || deps.DaemonClient == nil {
-		return false, fmt.Errorf("daemon client unavailable")
-	}
-	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
-	if err != nil {
-		return false, fmt.Errorf("list worktrees before close: %w", err)
-	}
-	for _, wt := range worktrees {
-		if naming.IssueIDsEqual(wt.IssueID, issueID) && strings.TrimSpace(wt.Path) != "" {
-			if _, err := runBranchMergeToBase(deps, BranchMergeToBaseOptions{IssueID: issueID}); err != nil {
-				return true, err
-			}
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 func IssueDeleteCommand(deps *Dependencies, opts IssueDeleteOptions) error {
@@ -3681,9 +3663,6 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 	if opts.Status != nil {
 		statusOptions := daemonclient.TaskStatusOptions{}
 		if *opts.Status == domain.StatusDone {
-			if _, err := integrateIssueBeforeCloseIfAttached(ctx, deps, opts.IssueID); err != nil {
-				return fmt.Errorf("failed to integrate issue %s before close: %w", opts.IssueID, err)
-			}
 			statusOptions = cleanupCloseTaskStatusOptions(opts.ForceWorktree)
 		}
 		if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, *opts.Status, statusOptions); err != nil {
@@ -3710,15 +3689,10 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 
 func cleanupCloseTaskStatusOptions(forceWorktree bool) daemonclient.TaskStatusOptions {
 	return daemonclient.TaskStatusOptions{
-		CleanupBeforeClose: true,
-		ForceWorktree:      forceWorktree,
+		CleanupBeforeClose:   true,
+		ForceWorktree:        forceWorktree,
+		IntegrateBeforeClose: true,
 	}
-}
-
-func cleanupCloseTaskStatusOptionsAfterIntegration(forceWorktree bool, integrationRequested bool) daemonclient.TaskStatusOptions {
-	opts := cleanupCloseTaskStatusOptions(forceWorktree)
-	opts.IgnoreAhead = integrationRequested
-	return opts
 }
 
 func IssueDependencyAddCommand(deps *Dependencies, opts IssueDependencyAddOptions) error {

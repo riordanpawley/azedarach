@@ -4330,51 +4330,7 @@ func (m Model) closeTaskWithIntegrationAndCleanup(ctx context.Context, taskID st
 	if m.daemonClient == nil {
 		return fmt.Errorf("daemon client unavailable")
 	}
-	sourceWorktree, err := m.resolveIssueWorktreePath(ctx, taskID)
-	if err != nil {
-		if !strings.Contains(err.Error(), "worktree not found") {
-			return fmt.Errorf("resolve worktree before close: %w", err)
-		}
-	} else if strings.TrimSpace(sourceWorktree) != "" {
-		if err := closeIntegrationResultError(m.mergeToBaseCmd(sourceWorktree, taskID, false)()); err != nil {
-			return fmt.Errorf("integrate before close: %w", err)
-		}
-	}
 	return m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, domain.StatusDone, taskStatusOptionsForStatus(domain.StatusDone))
-}
-
-func closeIntegrationResultError(msg tea.Msg) error {
-	switch result := msg.(type) {
-	case mergeResultMsg:
-		if result.operationID != "" && !operationStateTerminal(result.state) {
-			return fmt.Errorf("merge queued as operation %s (%s); retry close after it completes", result.operationID, result.state)
-		}
-		if result.err != nil {
-			return result.err
-		}
-		if result.result == nil {
-			return fmt.Errorf("merge returned no result")
-		}
-		if result.result.HasConflicts {
-			return fmt.Errorf("merge conflicts: %s", strings.Join(result.result.ConflictFiles, ", "))
-		}
-		if !result.result.Success {
-			message := strings.TrimSpace(result.result.Message)
-			if message == "" {
-				message = "merge did not complete successfully"
-			}
-			return fmt.Errorf("%s", message)
-		}
-		return nil
-	case mergePreflightFailureMsg:
-		reasons := strings.Join(result.reasons, "; ")
-		if reasons == "" {
-			reasons = "merge preflight failed"
-		}
-		return fmt.Errorf("%s", reasons)
-	default:
-		return fmt.Errorf("unexpected merge result %T", msg)
-	}
 }
 
 func statusDisplayName(status domain.Status) string {
@@ -4396,7 +4352,7 @@ func taskStatusOptionsForStatus(status domain.Status) daemonclient.TaskStatusOpt
 	if status != domain.StatusDone {
 		return daemonclient.TaskStatusOptions{}
 	}
-	return daemonclient.TaskStatusOptions{CleanupBeforeClose: true}
+	return daemonclient.TaskStatusOptions{CleanupBeforeClose: true, IntegrateBeforeClose: true}
 }
 
 func (m Model) bulkMoveNeedsCloseCleanupConfirmation(taskIDs []string, delta int) bool {

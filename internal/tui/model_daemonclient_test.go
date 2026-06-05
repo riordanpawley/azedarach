@@ -386,7 +386,8 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 					return emptyWorktreeListResponse(t, req), nil
 				case daemonclient.CommandTaskClosePreflight:
 					var body struct {
-						TaskID string `json:"task_id"`
+						TaskID               string `json:"task_id"`
+						IntegrateBeforeClose bool   `json:"integrate_before_close"`
 					}
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal close preflight request: %v", err)
@@ -583,7 +584,8 @@ func TestTaskStatusExactKeyUsesDaemonClient(t *testing.T) {
 
 func TestTaskStatusDoneRequiresCloseCleanupConfirmation(t *testing.T) {
 	var closeBody struct {
-		TaskID string `json:"task_id"`
+		TaskID               string `json:"task_id"`
+		IntegrateBeforeClose bool   `json:"integrate_before_close"`
 	}
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -715,9 +717,11 @@ func TestTaskStatusDoneRequiresCloseCleanupConfirmation(t *testing.T) {
 	if closeBody.TaskID != "az-4" {
 		t.Fatalf("close body = %+v, want az-4", closeBody)
 	}
-	if got := transport.requests; len(got) != 2 ||
-		got[0] != daemonclient.CommandWorktreeList ||
-		got[1] != daemonclient.CommandTaskClose {
+	if !closeBody.IntegrateBeforeClose {
+		t.Fatalf("close body = %+v, want integrate_before_close", closeBody)
+	}
+	if got := transport.requests; len(got) != 1 ||
+		got[0] != daemonclient.CommandTaskClose {
 		t.Fatalf("daemon requests after confirmation = %v", got)
 	}
 }
@@ -8593,7 +8597,8 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 					return emptyWorktreeListResponse(t, req), nil
 				case daemonclient.CommandTaskClosePreflight:
 					var body struct {
-						TaskID string `json:"task_id"`
+						TaskID               string `json:"task_id"`
+						IntegrateBeforeClose bool   `json:"integrate_before_close"`
 					}
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal close preflight request: %v", err)
@@ -8616,10 +8621,14 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 					}, nil
 				case daemonclient.CommandTaskClose:
 					var body struct {
-						TaskID string `json:"task_id"`
+						TaskID               string `json:"task_id"`
+						IntegrateBeforeClose bool   `json:"integrate_before_close"`
 					}
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal close request: %v", err)
+					}
+					if !body.IntegrateBeforeClose {
+						t.Fatalf("close body = %+v, want integrate_before_close", body)
 					}
 					respBody, err := json.Marshal(daemonclient.TaskCloseResult{
 						TaskID: body.TaskID,
@@ -8686,16 +8695,14 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 			t.Fatalf("bulk archive result = %#v", archiveMsg)
 		}
 
-		if got := transport.requests; len(got) != 7 {
+		if got := transport.requests; len(got) != 5 {
 			t.Fatalf("requests = %v", got)
 		}
-		if transport.requests[0] != daemonclient.CommandWorktreeList ||
+		if transport.requests[0] != daemonclient.CommandTaskClose ||
 			transport.requests[1] != daemonclient.CommandTaskClose ||
-			transport.requests[2] != daemonclient.CommandWorktreeList ||
-			transport.requests[3] != daemonclient.CommandTaskClose ||
-			transport.requests[4] != daemonclient.CommandTaskDelete ||
-			transport.requests[5] != daemonclient.CommandTaskDelete ||
-			transport.requests[6] != daemonclient.CommandTaskArchive {
+			transport.requests[2] != daemonclient.CommandTaskDelete ||
+			transport.requests[3] != daemonclient.CommandTaskDelete ||
+			transport.requests[4] != daemonclient.CommandTaskArchive {
 			t.Fatalf("requests = %v", transport.requests)
 		}
 	})
@@ -8822,7 +8829,8 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 
 	t.Run("bulk done requires integrate and close confirmation", func(t *testing.T) {
 		closeBodies := make([]struct {
-			TaskID string `json:"task_id"`
+			TaskID               string `json:"task_id"`
+			IntegrateBeforeClose bool   `json:"integrate_before_close"`
 		}, 0, 2)
 		transport := &recordingDaemonTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -8831,7 +8839,8 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 				}
 				if req.Command == daemonclient.CommandTaskClosePreflight {
 					var body struct {
-						TaskID string `json:"task_id"`
+						TaskID               string `json:"task_id"`
+						IntegrateBeforeClose bool   `json:"integrate_before_close"`
 					}
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal close preflight request: %v", err)
@@ -8869,7 +8878,8 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 					t.Fatalf("unexpected command: %s", req.Command)
 				}
 				var body struct {
-					TaskID string `json:"task_id"`
+					TaskID               string `json:"task_id"`
+					IntegrateBeforeClose bool   `json:"integrate_before_close"`
 				}
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal close request: %v", err)
@@ -8940,12 +8950,13 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 			if body.TaskID == "" {
 				t.Fatalf("close body = %+v, want task id", body)
 			}
+			if !body.IntegrateBeforeClose {
+				t.Fatalf("close body = %+v, want integrate_before_close", body)
+			}
 		}
-		if got := transport.requests; len(got) != 4 ||
-			got[0] != daemonclient.CommandWorktreeList ||
-			got[1] != daemonclient.CommandTaskClose ||
-			got[2] != daemonclient.CommandWorktreeList ||
-			got[3] != daemonclient.CommandTaskClose {
+		if got := transport.requests; len(got) != 2 ||
+			got[0] != daemonclient.CommandTaskClose ||
+			got[1] != daemonclient.CommandTaskClose {
 			t.Fatalf("requests = %v", got)
 		}
 	})

@@ -93,9 +93,10 @@ type taskClosePreflightRequest struct {
 }
 
 type taskCloseRequest struct {
-	TaskID        string `json:"task_id"`
-	ForceWorktree bool   `json:"force_worktree,omitempty"`
-	IgnoreAhead   bool   `json:"ignore_ahead,omitempty"`
+	TaskID               string `json:"task_id"`
+	ForceWorktree        bool   `json:"force_worktree,omitempty"`
+	IgnoreAhead          bool   `json:"ignore_ahead,omitempty"`
+	IntegrateBeforeClose bool   `json:"integrate_before_close,omitempty"`
 }
 
 type taskDeleteRequest struct {
@@ -107,12 +108,16 @@ type taskDeleteRequest struct {
 }
 
 type taskCloseResult struct {
-	TaskID          string `json:"task_id"`
-	Status          string `json:"status"`
-	SessionStopped  bool   `json:"session_stopped,omitempty"`
-	WorktreeRemoved bool   `json:"worktree_removed,omitempty"`
-	WorktreeForced  bool   `json:"worktree_forced,omitempty"`
-	Revision        uint64 `json:"revision,omitempty"`
+	TaskID                 string `json:"task_id"`
+	Status                 string `json:"status"`
+	IntegrationRequested   bool   `json:"integration_requested,omitempty"`
+	Integrated             bool   `json:"integrated,omitempty"`
+	IntegratedSourceBranch string `json:"integrated_source_branch,omitempty"`
+	IntegratedTargetBranch string `json:"integrated_target_branch,omitempty"`
+	SessionStopped         bool   `json:"session_stopped,omitempty"`
+	WorktreeRemoved        bool   `json:"worktree_removed,omitempty"`
+	WorktreeForced         bool   `json:"worktree_forced,omitempty"`
+	Revision               uint64 `json:"revision,omitempty"`
 }
 
 type taskDeleteResult struct {
@@ -1153,20 +1158,28 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	if taskID == "" {
 		return taskCloseResult{}, fmt.Errorf("task id is required")
 	}
-	guard, err := d.validateTaskClosePreflight(ctx, projectID, taskID, taskClosePreflightOptions{
-		AllowTargetSession:  true,
-		AllowTargetWorktree: true,
-		ForceWorktree:       cmd.ForceWorktree,
-		IgnoreAhead:         cmd.IgnoreAhead,
-	}, req)
-	if err != nil {
-		return taskCloseResult{}, err
-	}
-
 	result := taskCloseResult{
 		TaskID:         taskID,
 		Status:         string(domain.StatusDone),
 		WorktreeForced: cmd.ForceWorktree,
+	}
+	integration, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, cmd.IntegrateBeforeClose)
+	if err != nil {
+		return result, fmt.Errorf("integrate before closing %s: %w", taskID, err)
+	}
+	result.IntegrationRequested = integration.Requested
+	result.Integrated = integration.Integrated
+	result.IntegratedSourceBranch = integration.SourceBranch
+	result.IntegratedTargetBranch = integration.TargetBranch
+
+	guard, err := d.validateTaskClosePreflight(ctx, projectID, taskID, taskClosePreflightOptions{
+		AllowTargetSession:  true,
+		AllowTargetWorktree: true,
+		ForceWorktree:       cmd.ForceWorktree,
+		IgnoreAhead:         cmd.IgnoreAhead || integration.Integrated,
+	}, req)
+	if err != nil {
+		return result, err
 	}
 	if daemonCloseGuardTaskHasSession(guard.Task) {
 		if err := d.stopTaskSessionForClose(ctx, req, projectID, taskID); err != nil {
@@ -1192,6 +1205,194 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	result.Revision = rev
 	d.publishTaskEvent(req, protocol.EventTaskUpdated, rev, taskEventBodyFromTask(projectID, task))
 	return result, nil
+}
+
+type taskCloseIntegrationResult struct {
+	Requested    bool
+	Integrated   bool
+	SourceBranch string
+	TargetBranch string
+}
+
+func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID string, requested bool) (taskCloseIntegrationResult, error) {
+	if !requested {
+		return taskCloseIntegrationResult{}, nil
+	}
+	if d.worktreeAdapter == nil {
+		return taskCloseIntegrationResult{}, fmt.Errorf("worktree adapter unavailable")
+	}
+	if d.git == nil {
+		return taskCloseIntegrationResult{}, fmt.Errorf("git adapter unavailable")
+	}
+	worktrees, err := d.worktreeAdapter.List(ctx, projectID)
+	if err != nil {
+		return taskCloseIntegrationResult{}, fmt.Errorf("list worktrees before close integration: %w", err)
+	}
+	source, ok := daemonWorktreeForIssue(worktrees, taskID)
+	if !ok || strings.TrimSpace(source.Path) == "" {
+		return taskCloseIntegrationResult{}, nil
+	}
+	if strings.TrimSpace(source.Branch) == "" {
+		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("source branch unavailable for %s", taskID)
+	}
+
+	target, err := d.taskMergeBaseTarget(ctx, projectID, source.IssueID, d.baseBranchForProject(projectID), false)
+	if err != nil {
+		return taskCloseIntegrationResult{Requested: true}, err
+	}
+	targetBranch := strings.TrimSpace(target.Branch)
+	targetWorktree := strings.TrimSpace(target.WorktreePath)
+	branchAttached := target.BranchAttached
+	if targetWorktree == "" {
+		if attached, found, err := d.git.WorktreePathForBranch(ctx, targetBranch); err == nil && found && strings.TrimSpace(attached) != "" {
+			targetWorktree = strings.TrimSpace(attached)
+			branchAttached = true
+		}
+	}
+	if targetWorktree == "" {
+		targetWorktree = strings.TrimSpace(d.cfg.RepoDir)
+		if targetWorktree == "" {
+			targetWorktree = "."
+		}
+	}
+
+	if err := d.ensureMergeToBaseClean(ctx, source, targetWorktree); err != nil {
+		return taskCloseIntegrationResult{Requested: true}, err
+	}
+	preflight, err := d.git.MergePreflight(ctx, source.Path, targetWorktree, targetBranch, source.Branch)
+	if err != nil {
+		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge preflight failed: %w", err)
+	}
+	if preflight != nil && preflight.HasConflicts {
+		reasons := uniqueNonEmpty(preflight.ConflictFiles)
+		if len(reasons) == 0 {
+			reasons = append(reasons, "unknown")
+		}
+		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge preflight failed: predicted conflicts %s", strings.Join(reasons, ", "))
+	}
+	if err := d.git.Fetch(ctx, targetWorktree, "origin"); err != nil {
+		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("fetch target branch before close integration: %w", err)
+	}
+	if !branchAttached {
+		if err := d.git.Checkout(ctx, targetWorktree, targetBranch); err != nil {
+			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("checkout target branch before close integration: %w", err)
+		}
+	}
+	merge, err := d.git.Merge(ctx, targetWorktree, source.Branch)
+	if err != nil {
+		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge %s into %s: %w", source.Branch, targetBranch, err)
+	}
+	if merge == nil {
+		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge %s into %s returned no result", source.Branch, targetBranch)
+	}
+	if !merge.Success {
+		details := strings.TrimSpace(merge.Message)
+		if len(merge.ConflictFiles) > 0 {
+			details = strings.TrimSpace(details + "\nconflicts: " + strings.Join(merge.ConflictFiles, ", "))
+		}
+		if details == "" {
+			details = "merge did not complete successfully"
+		}
+		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge %s into %s failed: %s", source.Branch, targetBranch, details)
+	}
+	return taskCloseIntegrationResult{
+		Requested:    true,
+		Integrated:   true,
+		SourceBranch: source.Branch,
+		TargetBranch: targetBranch,
+	}, nil
+}
+
+func daemonWorktreeForIssue(worktrees []git.Worktree, issueID string) (git.Worktree, bool) {
+	for _, wt := range worktrees {
+		if naming.IssueIDsEqual(wt.IssueID, issueID) {
+			return wt, true
+		}
+	}
+	return git.Worktree{}, false
+}
+
+func (d *Daemon) ensureMergeToBaseClean(ctx context.Context, source git.Worktree, targetWorktree string) error {
+	sourceStatus, err := d.git.Status(ctx, source.Path)
+	if err != nil {
+		return fmt.Errorf("read source status for %s: %w", source.IssueID, err)
+	}
+	targetStatus, err := d.git.Status(ctx, targetWorktree)
+	if err != nil {
+		return fmt.Errorf("read target branch status: %w", err)
+	}
+	reasons := make([]string, 0, 2)
+	if gitStatusHasDirtyFiles(sourceStatus) {
+		reasons = append(reasons, fmt.Sprintf("source %s is not clean: %s", source.IssueID, gitStatusSummary(sourceStatus)))
+	}
+	if gitStatusHasDirtyFiles(targetStatus) {
+		reasons = append(reasons, fmt.Sprintf("target branch is not clean: %s", gitStatusSummary(targetStatus)))
+	}
+	if len(reasons) > 0 {
+		return errors.New(strings.Join(reasons, "; "))
+	}
+	return nil
+}
+
+func gitStatusHasDirtyFiles(status *git.GitStatus) bool {
+	if status == nil {
+		return false
+	}
+	return status.HasChanges ||
+		status.HasConflicts ||
+		len(status.Modified) > 0 ||
+		len(status.Added) > 0 ||
+		len(status.Deleted) > 0 ||
+		len(status.Untracked) > 0 ||
+		len(status.Staged) > 0 ||
+		len(status.Conflicted) > 0
+}
+
+func gitStatusSummary(status *git.GitStatus) string {
+	if status == nil {
+		return "unknown"
+	}
+	parts := make([]string, 0, 6)
+	if len(status.Modified) > 0 {
+		parts = append(parts, fmt.Sprintf("%d modified", len(status.Modified)))
+	}
+	if len(status.Added) > 0 {
+		parts = append(parts, fmt.Sprintf("%d added", len(status.Added)))
+	}
+	if len(status.Deleted) > 0 {
+		parts = append(parts, fmt.Sprintf("%d deleted", len(status.Deleted)))
+	}
+	if len(status.Untracked) > 0 {
+		parts = append(parts, fmt.Sprintf("%d untracked", len(status.Untracked)))
+	}
+	if len(status.Staged) > 0 {
+		parts = append(parts, fmt.Sprintf("%d staged", len(status.Staged)))
+	}
+	if len(status.Conflicted) > 0 {
+		parts = append(parts, fmt.Sprintf("%d conflicted", len(status.Conflicted)))
+	}
+	if len(parts) == 0 {
+		return "dirty"
+	}
+	return strings.Join(parts, ", ")
+}
+
+func uniqueNonEmpty(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (d *Daemon) stopTaskSessionForClose(ctx context.Context, req protocol.RequestEnvelope, projectID, taskID string) error {
