@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/diagnostics"
 	"github.com/riordanpawley/azedarach/internal/services/linearsync"
@@ -371,6 +372,43 @@ func TestDiagnosticsPanel_View(t *testing.T) {
 				t.Error("View() returned empty string")
 			}
 		})
+	}
+}
+
+func TestDiagnosticsPanel_SessionsRendersAgentActivitySeparately(t *testing.T) {
+	now := time.Now()
+	mockService := &mockDiagnosticsService{
+		diagnostics: &diagnostics.SystemDiagnostics{
+			Timestamp:    now,
+			OverallState: diagnostics.HealthHealthy,
+			Sessions: []diagnostics.SessionInfo{
+				{
+					IssueID:        "az-idle",
+					State:          domain.SessionBusy,
+					Activity:       "idle",
+					ActivitySource: "hooks",
+					Uptime:         5 * time.Minute,
+				},
+			},
+		},
+	}
+
+	panel := NewDiagnosticsPanel(mockService, map[string]*domain.Session{})
+	panel.currentDiagnostics = mockService.diagnostics
+	panel.activeSection = SectionSessions
+
+	view := ansi.Strip(panel.View())
+	if !strings.Contains(view, "AGENT") || !strings.Contains(view, "SESSION") {
+		t.Fatalf("View() missing split status headers: %s", view)
+	}
+	if !strings.Contains(view, "az-idle") || !strings.Contains(view, "○ idle") {
+		t.Fatalf("View() missing hook-backed idle activity: %s", view)
+	}
+	if !strings.Contains(view, "busy") {
+		t.Fatalf("View() missing lifecycle metadata: %s", view)
+	}
+	if strings.Contains(view, "● busy") {
+		t.Fatalf("View() rendered lifecycle busy as primary agent status: %s", view)
 	}
 }
 

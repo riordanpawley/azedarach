@@ -185,7 +185,11 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			})
 			return
 		}
-		resp, err := s.handlers.Command(ctx, *first.Request)
+		commandCtx, cancelCommand := context.WithCancel(ctx)
+		doneWatchingCommandConn, stopWatchingCommandConn := watchCommandConnClose(commandCtx, conn, cancelCommand)
+		resp, err := s.handlers.Command(commandCtx, *first.Request)
+		stopWatchingCommandConn()
+		<-doneWatchingCommandConn
 		if err != nil {
 			resp = protocol.ResponseEnvelope{
 				ProtocolVersion: first.Request.ProtocolVersion,
@@ -255,4 +259,31 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			},
 		})
 	}
+}
+
+func watchCommandConnClose(ctx context.Context, conn net.Conn, cancel context.CancelFunc) (<-chan struct{}, func()) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 1)
+		for {
+			_ = conn.SetReadDeadline(time.Now().Add(serverFrameTimeout))
+			_, err := conn.Read(buf)
+			if err != nil {
+				var netErr net.Error
+				if errors.As(err, &netErr) && netErr.Timeout() && ctx.Err() == nil {
+					continue
+				}
+				if ctx.Err() == nil {
+					cancel()
+				}
+				return
+			}
+		}
+	}()
+	stop := func() {
+		cancel()
+		_ = conn.SetReadDeadline(time.Now())
+	}
+	return done, stop
 }

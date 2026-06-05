@@ -90,15 +90,19 @@ var graphRelationLabels = map[string]string{
 	graphRelRelated:        "Related",
 	graphRelDiscoveredFrom: "Discovered from",
 	graphRelDiscovered:     "Discovered",
+	graphRelCreatedIn:      "Created in",
+	graphRelCreated:        "Created",
 }
 
 var graphRelationDirection = map[string]string{
 	graphRelParent:         "ascendant",
 	graphRelBlockedBy:      "ascendant",
 	graphRelDiscoveredFrom: "ascendant",
+	graphRelCreatedIn:      "ascendant",
 	graphRelChild:          "descendant",
 	graphRelBlocks:         "descendant",
 	graphRelDiscovered:     "descendant",
+	graphRelCreated:        "descendant",
 	graphRelRelated:        "descendant",
 }
 
@@ -842,7 +846,11 @@ func (d *DetailPanel) formatSessionState() string {
 	if d.task.Session.TotalCount > 1 {
 		stateLabel = fmt.Sprintf("%s (%d active, %d paused)", stateLabel, d.task.Session.ActiveCount, d.task.Session.PausedCount)
 	}
-	return d.sessionStateStyle(d.task.Session.State).Render(stateLabel)
+	displayState, ok := d.task.Session.DisplayState()
+	if !ok {
+		displayState = d.task.Session.State
+	}
+	return d.sessionStateStyle(displayState).Render(stateLabel)
 }
 
 func (d *DetailPanel) sessionStateStyle(state domain.SessionState) lipgloss.Style {

@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -62,11 +63,17 @@ func (s *Session) IsPartial() bool {
 }
 
 func (s *Session) DisplayIcon() string {
-	if s != nil && s.IsPartial() {
-		return "◒"
-	}
 	if s == nil {
 		return SessionIdle.Icon()
+	}
+	if displayState, ok := s.DisplayState(); ok {
+		return displayState.Icon()
+	}
+	if activity := s.DisplayActivity(); activity != "" {
+		return SessionState(activity).Icon()
+	}
+	if s.IsPartial() {
+		return "◒"
 	}
 	return s.State.Icon()
 }
@@ -75,6 +82,9 @@ func (s *Session) DisplayLabel() string {
 	if s == nil {
 		return string(SessionIdle)
 	}
+	if activity := s.DisplayActivity(); activity != "" {
+		return activity
+	}
 	if s.IsPartial() {
 		return "partial"
 	}
@@ -82,13 +92,47 @@ func (s *Session) DisplayLabel() string {
 }
 
 func (s *Session) DisplayCode() string {
-	if s != nil && s.IsPartial() {
-		return "M"
-	}
 	if s == nil {
 		return "I"
 	}
-	switch s.State {
+	if displayState, ok := s.DisplayState(); ok {
+		return sessionStateDisplayCode(displayState)
+	}
+	if activity := s.DisplayActivity(); activity != "" {
+		return "?"
+	}
+	if s.IsPartial() {
+		return "M"
+	}
+	return sessionStateDisplayCode(s.State)
+}
+
+func (s *Session) DisplayActivity() string {
+	if s == nil {
+		return ""
+	}
+	activity := strings.ToLower(strings.TrimSpace(s.Activity))
+	switch activity {
+	case string(SessionBusy), string(SessionIdle), "unknown":
+		return activity
+	default:
+		return ""
+	}
+}
+
+func (s *Session) DisplayState() (SessionState, bool) {
+	switch s.DisplayActivity() {
+	case string(SessionBusy):
+		return SessionBusy, true
+	case string(SessionIdle):
+		return SessionIdle, true
+	default:
+		return "", false
+	}
+}
+
+func sessionStateDisplayCode(state SessionState) string {
+	switch state {
 	case SessionBusy:
 		return "B"
 	case SessionWaiting:

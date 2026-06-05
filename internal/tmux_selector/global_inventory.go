@@ -395,6 +395,8 @@ type projectedInventory struct {
 	projectPath string
 	issueID     string
 	state       domain.SessionState
+	activity    string
+	activitySrc string
 	startedAt   *time.Time
 	worktree    string
 	task        domain.Task
@@ -544,6 +546,8 @@ func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs
 			}
 			if task.Session != nil {
 				projection.state = task.Session.State
+				projection.activity = task.Session.Activity
+				projection.activitySrc = task.Session.ActivitySource
 				projection.startedAt = task.Session.StartedAt
 				projection.worktree = task.Session.Worktree
 			}
@@ -671,6 +675,12 @@ func mergeProjectedInventory(entry InventoryEntry, projection projectedInventory
 	if projection.state != "" {
 		entry.State = projection.state
 	}
+	if projection.activity != "" {
+		entry.Activity = projection.activity
+	}
+	if projection.activitySrc != "" {
+		entry.ActivitySource = projection.activitySrc
+	}
 	if projection.task.ID.String() != "" {
 		entry.Task = projection.task
 		entry.TaskTitle = projection.task.Title
@@ -699,10 +709,12 @@ func taskFromInventoryEntry(entry InventoryEntry) domain.Task {
 		HasTmuxSession: entry.HasTmuxSession,
 		HasWorktree:    entry.HasWorktree,
 		Session: &domain.Session{
-			IssueID:   issueID,
-			State:     entry.State,
-			StartedAt: entry.StartedAt,
-			Worktree:  entry.Worktree,
+			IssueID:        issueID,
+			State:          entry.State,
+			Activity:       entry.Activity,
+			ActivitySource: entry.ActivitySource,
+			StartedAt:      entry.StartedAt,
+			Worktree:       entry.Worktree,
 		},
 	}
 }

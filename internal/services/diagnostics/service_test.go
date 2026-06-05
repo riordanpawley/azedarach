@@ -233,10 +233,12 @@ func TestGetSessionHealth(t *testing.T) {
 			name: "one session",
 			sessions: map[string]*domain.Session{
 				"test-1": {
-					IssueID:   "test-1",
-					State:     domain.SessionBusy,
-					StartedAt: &now,
-					Worktree:  "/path/to/worktree",
+					IssueID:        "test-1",
+					State:          domain.SessionBusy,
+					Activity:       "idle",
+					ActivitySource: "hooks",
+					StartedAt:      &now,
+					Worktree:       "/path/to/worktree",
 				},
 			},
 			wantCount: 1,
@@ -279,6 +281,12 @@ func TestGetSessionHealth(t *testing.T) {
 				}
 				if info.State != session.State {
 					t.Errorf("Session %s state = %v, want %v", info.IssueID, info.State, session.State)
+				}
+				if info.Activity != session.Activity {
+					t.Errorf("Session %s activity = %v, want %v", info.IssueID, info.Activity, session.Activity)
+				}
+				if info.ActivitySource != session.ActivitySource {
+					t.Errorf("Session %s activity source = %v, want %v", info.IssueID, info.ActivitySource, session.ActivitySource)
 				}
 				if info.Worktree != session.Worktree {
 					t.Errorf("Session %s worktree = %v, want %v", info.IssueID, info.Worktree, session.Worktree)

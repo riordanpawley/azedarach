@@ -43,9 +43,14 @@ func TestCommandSpecRegistrySyncBootstrapPolicy(t *testing.T) {
 		t.Fatal("expected task.get not to require sync bootstrap")
 	}
 
-	sessionResp := CommandRequiresSyncBootstrap(protocol.RequestEnvelope{Command: CommandSessionPause})
-	if !sessionResp {
-		t.Fatal("expected session.pause to require sync bootstrap")
+	sessionPauseResp := CommandRequiresSyncBootstrap(protocol.RequestEnvelope{Command: CommandSessionPause})
+	if sessionPauseResp {
+		t.Fatal("expected session.pause not to require sync bootstrap")
+	}
+
+	sessionResumeResp := CommandRequiresSyncBootstrap(protocol.RequestEnvelope{Command: CommandSessionResume})
+	if sessionResumeResp {
+		t.Fatal("expected session.resume not to require sync bootstrap")
 	}
 
 	nonSyncResp := CommandRequiresSyncBootstrap(protocol.RequestEnvelope{Command: CommandGitStatus})

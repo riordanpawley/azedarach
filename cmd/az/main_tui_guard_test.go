@@ -28,8 +28,19 @@ func TestValidateTUILaunchContextRejectsLinkedWorktreeWithForcedGlobalScope(t *t
 	if err == nil {
 		t.Fatal("validateTUILaunchContext() error = nil, want forced-global linked-worktree guard")
 	}
-	if !strings.Contains(err.Error(), "forces the shared daemon") {
-		t.Fatalf("error = %q, want shared daemon guidance", err)
+	if !strings.Contains(err.Error(), "forces the shared production daemon") {
+		t.Fatalf("error = %q, want shared production daemon guidance", err)
+	}
+}
+
+func TestValidateTUILaunchContextAllowsNonAzedarachLinkedWorktreeWithGlobalScope(t *testing.T) {
+	_, worktree := makeLinkedWorktreeWithModule(t, "github.com/acme/chefy")
+	t.Chdir(worktree)
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
+
+	if err := validateTUILaunchContext(); err != nil {
+		t.Fatalf("validateTUILaunchContext() error = %v, want nil", err)
 	}
 }
 
@@ -55,6 +66,10 @@ func TestValidateTUILaunchContextAllowsMainWorktreeWithoutScope(t *testing.T) {
 }
 
 func makeLinkedWorktree(t *testing.T) (string, string) {
+	return makeLinkedWorktreeWithModule(t, "github.com/riordanpawley/azedarach")
+}
+
+func makeLinkedWorktreeWithModule(t *testing.T, module string) (string, string) {
 	t.Helper()
 	parent := t.TempDir()
 	repo := filepath.Join(parent, "repo")
@@ -66,7 +81,11 @@ func makeLinkedWorktree(t *testing.T) (string, string) {
 	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("test\n"), 0o644); err != nil {
 		t.Fatalf("write readme: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module "+module+"\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
 	runGit(t, repo, "add", "README.md")
+	runGit(t, repo, "add", "go.mod")
 	runGit(t, repo, "-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", "initial")
 	runGit(t, repo, "worktree", "add", "-b", "wt", worktree)
 	return repo, worktree

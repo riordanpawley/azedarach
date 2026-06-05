@@ -4833,6 +4833,73 @@ func TestPersistTmuxSessionRuntimeStateSeedsStartedAtFromTmuxCreatedAt(t *testin
 	}
 }
 
+func TestPersistTmuxSessionRuntimeStateKeepsAgentHookActivityWhenParentTmuxSessionLives(t *testing.T) {
+	const (
+		projectID = "proj-hook-parent-live"
+		issueID   = "bih"
+	)
+
+	store := daemonstate.NewStore()
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	agentSessionID := sessionID + ".pane-2021"
+	now := time.Date(2026, time.April, 3, 20, 0, 0, 0, time.UTC)
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            sessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning,
+		UpdatedAt:     now,
+	}); err != nil {
+		t.Fatalf("seed parent session: %v", err)
+	}
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            agentSessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning,
+		UpdatedAt:     now,
+	}); err != nil {
+		t.Fatalf("seed agent session: %v", err)
+	}
+
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	if err := d.persistTmuxSessionRuntimeState(context.Background(), projectID, []tmux.SessionInfo{{Name: sessionID}}); err != nil {
+		t.Fatalf("persist tmux session runtime state: %v", err)
+	}
+
+	sessions, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("list projection sessions: %v", err)
+	}
+	byID := make(map[string]daemonstate.Session, len(sessions))
+	for _, session := range sessions {
+		byID[session.ID] = session
+	}
+	agentSession, ok := byID[agentSessionID]
+	if !ok {
+		t.Fatalf("missing agent session %q", agentSessionID)
+	}
+	if agentSession.ObservedState != daemonstate.SessionStateRunning {
+		t.Fatalf("agent observed state = %s, want %s", agentSession.ObservedState, daemonstate.SessionStateRunning)
+	}
+	activity := sessionHookActivityByIssueKeyFromSessions(sessions, d.sessionNamingScope(projectID))[sessionKey(issueID)]
+	if got, _ := sessionActivityLabel(activity); got != "busy" {
+		t.Fatalf("activity = %s from %+v, want busy", got, activity)
+	}
+}
+
 func TestPersistTmuxSessionRuntimeStatePrefersTmuxCreatedAtOverSnapshotStartedAt(t *testing.T) {
 	const (
 		projectID = "proj-created-at-priority"

@@ -38,6 +38,8 @@ type InventoryEntry struct {
 	ProjectID             string
 	ProjectPath           string
 	Worktree              string
+	Activity              string
+	ActivitySource        string
 	StartedAt             *time.Time
 	LastAttachedAt        *time.Time
 	TmuxAttached          bool
@@ -647,7 +649,7 @@ func (m Model) renderTreeRow(row sessionTreeRow, entry InventoryEntry) string {
 	if title == "" {
 		title = strings.TrimSpace(entry.SessionID)
 	}
-	state := strings.TrimSpace(entry.State.String())
+	state := entryDisplayLabel(entry)
 	if state == "" {
 		state = string(domain.SessionIdle)
 	}
@@ -784,6 +786,8 @@ func entryMatchesSearch(entry InventoryEntry, query string) bool {
 		entry.IssueID,
 		entry.TaskTitle,
 		entry.State.String(),
+		entry.Activity,
+		entry.ActivitySource,
 		entry.IssueStatus.String(),
 		entry.Priority.String(),
 		entry.Type.String(),
@@ -1263,6 +1267,8 @@ func EntriesFromTasks(tasks []domain.Task) []InventoryEntry {
 		}
 		if task.Session != nil {
 			entry.State = task.Session.State
+			entry.Activity = task.Session.Activity
+			entry.ActivitySource = task.Session.ActivitySource
 			entry.Worktree = task.Session.Worktree
 			entry.StartedAt = task.Session.StartedAt
 			entry.HasWorktree = entry.HasWorktree || strings.TrimSpace(task.Session.Worktree) != ""
@@ -1477,6 +1483,8 @@ func inventoryEntryFromAncestorTask(task domain.Task) InventoryEntry {
 	}
 	if task.Session != nil {
 		entry.State = task.Session.State
+		entry.Activity = task.Session.Activity
+		entry.ActivitySource = task.Session.ActivitySource
 		entry.Worktree = task.Session.Worktree
 		entry.StartedAt = task.Session.StartedAt
 		entry.HasWorktree = strings.TrimSpace(task.Session.Worktree) != ""
@@ -1567,10 +1575,12 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 	task.GitDeletions = row.GitDeletions
 	if row.HasTmuxSession || row.State != "" {
 		task.Session = &domain.Session{
-			IssueID:   naming.IssueID(row.IssueID),
-			State:     row.State,
-			StartedAt: row.StartedAt,
-			Worktree:  row.Worktree,
+			IssueID:        naming.IssueID(row.IssueID),
+			State:          rowCardDisplayState(row),
+			Activity:       row.Activity,
+			ActivitySource: row.ActivitySource,
+			StartedAt:      row.StartedAt,
+			Worktree:       row.Worktree,
 		}
 		if task.Session.State == "" {
 			task.Session.State = domain.SessionIdle
@@ -1607,6 +1617,26 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 	}
 	meta := strings.Join(metaParts, "  ")
 	return insertCardMetaLine(card, meta, origin, s)
+}
+
+func entryDisplayLabel(entry InventoryEntry) string {
+	switch strings.TrimSpace(strings.ToLower(entry.Activity)) {
+	case string(domain.SessionBusy), string(domain.SessionIdle):
+		return strings.ToLower(strings.TrimSpace(entry.Activity))
+	case "unknown":
+		return "unknown"
+	}
+	return strings.TrimSpace(entry.State.String())
+}
+
+func rowCardDisplayState(row InventoryEntry) domain.SessionState {
+	switch strings.TrimSpace(strings.ToLower(row.Activity)) {
+	case string(domain.SessionBusy):
+		return domain.SessionBusy
+	case string(domain.SessionIdle), "unknown":
+		return domain.SessionIdle
+	}
+	return row.State
 }
 
 func tmuxSessionMeta(entry InventoryEntry) string {

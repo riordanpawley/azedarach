@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -111,6 +112,23 @@ func TestOrchestrationOverlay_RowRenderingIsStandalone(t *testing.T) {
 	assert.Contains(t, row, "worktree yes")
 	assert.Contains(t, row, "git dirty")
 	assert.NotContains(t, row, "No tmux sessions")
+}
+
+func TestOrchestrationOverlay_RowRendersAgentActivity(t *testing.T) {
+	overlay := NewOrchestrationOverlay([]SessionInfo{{
+		IssueID:        "cmd",
+		TaskTitle:      "False busy flag",
+		IssueStatus:    domain.StatusInProgress,
+		State:          domain.SessionBusy,
+		Activity:       "idle",
+		ActivitySource: "hooks",
+		HasTmuxSession: true,
+	}}, nil, nil, nil)
+
+	row := ansi.Strip(overlay.renderSession(0, overlay.sessions[0], 64))
+
+	assert.Contains(t, row, "○ idle")
+	assert.NotContains(t, row, "● busy")
 }
 
 func TestOrchestrationOverlay_EnterAAndRefreshCallbacks(t *testing.T) {

@@ -18,6 +18,8 @@ type SessionInfo struct {
 	TaskTitle             string
 	IssueStatus           domain.Status
 	State                 domain.SessionState
+	Activity              string
+	ActivitySource        string
 	TotalCount            int
 	ActiveCount           int
 	PausedCount           int
@@ -39,17 +41,32 @@ func (s SessionInfo) isPartial() bool {
 }
 
 func (s SessionInfo) displayIcon() string {
-	if s.isPartial() {
-		return "◒"
-	}
-	return s.State.Icon()
+	return s.asSession().DisplayIcon()
 }
 
 func (s SessionInfo) displayLabel() string {
-	if s.isPartial() {
-		return "partial"
+	return s.asSession().DisplayLabel()
+}
+
+func (s SessionInfo) displayState() domain.SessionState {
+	session := s.asSession()
+	if displayState, ok := session.DisplayState(); ok {
+		return displayState
 	}
-	return s.State.String()
+	return s.State
+}
+
+func (s SessionInfo) asSession() *domain.Session {
+	return &domain.Session{
+		State:          s.State,
+		Activity:       s.Activity,
+		ActivitySource: s.ActivitySource,
+		TotalCount:     s.TotalCount,
+		ActiveCount:    s.ActiveCount,
+		PausedCount:    s.PausedCount,
+		StartedAt:      s.StartedAt,
+		Worktree:       s.Worktree,
+	}
 }
 
 // OrchestrationOverlay displays all active Claude sessions in a monitoring view
@@ -228,7 +245,7 @@ func (o *OrchestrationOverlay) renderSession(index int, session SessionInfo, wid
 	}
 
 	stateIcon := session.displayIcon()
-	stateStyle := o.getStateStyle(session.State)
+	stateStyle := o.getStateStyle(session.displayState())
 	if session.isPartial() {
 		stateStyle = lipgloss.NewStyle().Foreground(styles.Peach).Bold(true)
 	}

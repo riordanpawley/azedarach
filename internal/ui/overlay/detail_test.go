@@ -419,6 +419,37 @@ func TestDetailPanelGraphOmitsEmptySections(t *testing.T) {
 	assert.NotContains(t, view, "- none")
 }
 
+func TestDetailPanelGraphLabelsCreatedProvenanceRelations(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-current",
+		Title:  "Current task",
+		Status: domain.StatusInProgress,
+		Dependencies: []domain.Dependency{
+			{ID: "az-source", Type: domain.DependencyCreatedIn},
+		},
+	}
+	related := []domain.Task{
+		task,
+		{ID: "az-source", Title: "Source task", Status: domain.StatusOpen},
+		{
+			ID:           "az-created",
+			Title:        "Created task",
+			Status:       domain.StatusDone,
+			Dependencies: []domain.Dependency{{ID: "az-current", Type: domain.DependencyCreatedIn}},
+		},
+	}
+
+	panel := NewDetailPanel(task).WithRelatedTasks(related)
+	view := panel.View()
+
+	assert.Contains(t, view, "Created in")
+	assert.Contains(t, view, "< az-source [Open] Source task")
+	assert.Contains(t, view, "Created")
+	assert.Contains(t, view, "> az-created [Done] Created task")
+	assert.NotContains(t, view, "\n- az-source")
+	assert.NotContains(t, view, "\n- az-created")
+}
+
 func TestDetailPanelGraphHeaderHiddenWhenNoLinks(t *testing.T) {
 	task := domain.Task{ID: "az-solo", Title: "Truly alone"}
 	panel := NewDetailPanel(task).WithRelatedTasks([]domain.Task{task})

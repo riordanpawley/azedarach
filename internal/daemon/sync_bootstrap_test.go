@@ -8,9 +8,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -37,10 +37,15 @@ func (r *bootstrapRecorder) snapshot() []string {
 
 type bootstrapRecordingServer struct {
 	recorder *bootstrapRecorder
+	started  chan struct{}
 }
 
-func (s *bootstrapRecordingServer) Serve(context.Context) error {
+func (s *bootstrapRecordingServer) Serve(ctx context.Context) error {
 	s.recorder.add("serve")
+	if s.started != nil {
+		close(s.started)
+	}
+	<-ctx.Done()
 	return nil
 }
 
@@ -54,30 +59,81 @@ func (bootstrapRecordingLock) Release() error {
 	return nil
 }
 
-func TestRunInitializesSyncBootstrapBeforeServing(t *testing.T) {
+func TestRunStartsServingBeforeSyncBootstrapCompletes(t *testing.T) {
 	recorder := &bootstrapRecorder{}
+	serveStarted := make(chan struct{})
+	bootstrapStarted := make(chan struct{})
+	releaseBootstrap := make(chan struct{})
 	d := &Daemon{
 		cfg: Config{
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 		lock:  bootstrapRecordingLock{},
-		serve: &bootstrapRecordingServer{recorder: recorder},
+		serve: &bootstrapRecordingServer{recorder: recorder, started: serveStarted},
 	}
 	d.syncBootstrapFn = func(context.Context) error {
-		recorder.add("bootstrap")
+		recorder.add("bootstrap-start")
+		close(bootstrapStarted)
+		<-releaseBootstrap
+		recorder.add("bootstrap-finish")
 		return nil
 	}
 
-	if err := d.Run(context.Background()); err != nil {
-		t.Fatalf("Run() error = %v", err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- d.Run(ctx)
+	}()
+
+	select {
+	case <-serveStarted:
+	case <-time.After(time.Second):
+		t.Fatal("daemon server did not start before bootstrap completed")
+	}
+	select {
+	case <-bootstrapStarted:
+	case <-time.After(time.Second):
+		t.Fatal("sync bootstrap did not start")
 	}
 
-	if got, want := recorder.snapshot(), []string{"bootstrap", "serve"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("event order = %v, want %v", got, want)
+	close(releaseBootstrap)
+	deadline := time.Now().Add(time.Second)
+	for {
+		events := recorder.snapshot()
+		if len(events) >= 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("event order = %v, want serve before completed bootstrap", events)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("daemon did not stop after context cancellation")
+	}
+
+	if got := recorder.snapshot(); len(got) < 3 || indexOfBootstrapEvent(got, "serve") > indexOfBootstrapEvent(got, "bootstrap-finish") {
+		t.Fatalf("event order = %v, want serve before completed bootstrap", got)
 	}
 	if diag := d.syncBootstrapDiagnostic(); !diag.Ready || diag.State != "ready" {
 		t.Fatalf("sync bootstrap diagnostic = %+v, want ready state", diag)
 	}
+}
+
+func indexOfBootstrapEvent(events []string, want string) int {
+	for i, event := range events {
+		if event == want {
+			return i
+		}
+	}
+	return len(events)
 }
 
 func TestSyncBootstrapGuardBlocksDependentCommands(t *testing.T) {
@@ -200,7 +256,7 @@ func TestSyncBootstrapFailureDiagnosticContract(t *testing.T) {
 	}
 }
 
-func TestDefaultSyncBootstrapOpensRegisteredProjectStores(t *testing.T) {
+func TestDefaultSyncBootstrapSkipsRegisteredProjectStoresAtStartup(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	baseRepo := newBootstrapTestRepo(t, "azedarach")
@@ -228,9 +284,11 @@ func TestDefaultSyncBootstrapOpensRegisteredProjectStores(t *testing.T) {
 	}
 
 	assertBootstrapDBExists(t, baseRepo)
-	assertBootstrapDBExists(t, chefyRepo)
 	if got := d.resolveRepoDirForProject("Chefy"); got != chefyRepo {
 		t.Fatalf("Chefy project repo = %q, want %q", got, chefyRepo)
+	}
+	if _, err := os.Stat(filepath.Join(chefyRepo, ".azedarach", "azedarach.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("registered project db stat error = %v, want not exist", err)
 	}
 }
 
@@ -266,6 +324,39 @@ func TestDefaultSyncBootstrapScopedRuntimeSkipsRegisteredProjectStores(t *testin
 	if _, err := os.Stat(filepath.Join(chefyRepo, ".azedarach", "azedarach.db")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("registered project db stat error = %v, want not exist", err)
 	}
+}
+
+func TestDefaultSyncBootstrapIgnoresBrokenRegisteredProjectStoresAtStartup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	baseRepo := newBootstrapTestRepo(t, "azedarach")
+	brokenProjectPath := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(brokenProjectPath, []byte("file, not repo dir"), 0o644); err != nil {
+		t.Fatalf("write broken project path: %v", err)
+	}
+	registry := &appconfig.ProjectsRegistry{
+		Projects: []appconfig.Project{
+			{Name: "Broken", Path: brokenProjectPath},
+		},
+		DefaultProject: "azedarach",
+	}
+	if err := appconfig.SaveProjectsRegistry(registry); err != nil {
+		t.Fatalf("save projects registry: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir: baseRepo,
+			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	t.Cleanup(d.closeIssueClients)
+
+	if err := d.defaultSyncBootstrap(context.Background()); err != nil {
+		t.Fatalf("default sync bootstrap: %v", err)
+	}
+
+	assertBootstrapDBExists(t, baseRepo)
 }
 
 func newBootstrapTestRepo(t *testing.T, name string) string {

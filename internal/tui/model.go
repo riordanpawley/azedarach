@@ -5769,10 +5769,14 @@ func (m Model) openOrchestrationOverlay() tea.Cmd {
 		}
 
 		state := domain.SessionIdle
+		activity := ""
+		activitySource := ""
 		var startedAt *time.Time
 		worktree := ""
 		if task.Session != nil {
 			state = task.Session.State
+			activity = task.Session.Activity
+			activitySource = task.Session.ActivitySource
 			startedAt = task.Session.StartedAt
 			worktree = task.Session.Worktree
 		}
@@ -5783,6 +5787,8 @@ func (m Model) openOrchestrationOverlay() tea.Cmd {
 			TaskTitle:             task.Title,
 			IssueStatus:           task.Status,
 			State:                 state,
+			Activity:              activity,
+			ActivitySource:        activitySource,
 			TotalCount:            totalCount,
 			ActiveCount:           activeCount,
 			PausedCount:           pausedCount,
@@ -5810,6 +5816,8 @@ func (m Model) openOrchestrationOverlay() tea.Cmd {
 				TaskTitle:      session.IssueID.String(),
 				IssueStatus:    domain.StatusInProgress,
 				State:          session.State,
+				Activity:       session.Activity,
+				ActivitySource: session.ActivitySource,
 				TotalCount:     session.TotalCount,
 				ActiveCount:    session.ActiveCount,
 				PausedCount:    session.PausedCount,

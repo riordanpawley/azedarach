@@ -165,6 +165,33 @@ func TestModelUsesFakeInventoryAndSwitchesSessionID(t *testing.T) {
 	}
 }
 
+func TestModelTreeRendersHookActivityInsteadOfLifecycleBusy(t *testing.T) {
+	entries := []InventoryEntry{{
+		SessionID:      "az-cmd",
+		IssueID:        "cmd",
+		TaskTitle:      "False busy flag",
+		State:          domain.SessionBusy,
+		Activity:       "idle",
+		ActivitySource: "hooks",
+		HasTmuxSession: true,
+	}}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	model.activeTab = selectorTabTree
+
+	view := ansi.Strip(model.View())
+	if !strings.Contains(view, "cmd [idle] False busy flag") {
+		t.Fatalf("view missing hook-backed idle label:\n%s", view)
+	}
+	if strings.Contains(view, "cmd [busy] False busy flag") {
+		t.Fatalf("view rendered lifecycle busy instead of hook activity:\n%s", view)
+	}
+}
+
 func TestParseAzedarachSessionNameDecodesEscapedIssueID(t *testing.T) {
 	parsed, ok := ParseAzedarachSessionName("az-native_x2e_id_x5f_1")
 	if !ok {

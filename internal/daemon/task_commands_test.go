@@ -1880,6 +1880,7 @@ func TestTaskMergeBaseTargetSelectsNearestAncestorWorktree(t *testing.T) {
 		managerForProject: func(projectID string) *git.WorktreeManager { return d.worktreeManagerForProject(projectID) },
 		runtimeStateStore: store,
 		logger:            slog.Default(),
+		pollers:           map[string]context.CancelFunc{normalizedProjectID(projectID): func() {}},
 	}
 	t.Cleanup(func() {
 		d.worktreeAdapter.mu.Lock()

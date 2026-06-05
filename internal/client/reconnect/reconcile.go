@@ -1,10 +1,13 @@
 package reconnect
 
 import (
+	"errors"
+	"net"
 	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/ipc/codec"
 )
 
 const DefaultReattachRetryInterval = 5 * time.Second
@@ -73,8 +76,20 @@ func IsTransientTransportError(err error) bool {
 	if err == nil {
 		return false
 	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	var codecErr *codec.Error
+	if errors.As(err, &codecErr) && codecErr.Kind == codec.ErrorKindShortFrame {
+		return true
+	}
 	message := strings.ToLower(err.Error())
 	if strings.Contains(message, "daemon socket unavailable") {
+		return true
+	}
+	if strings.Contains(message, "short_frame") &&
+		(strings.Contains(message, "i/o timeout") || strings.Contains(message, "timeout")) {
 		return true
 	}
 	return strings.Contains(message, "dial unix") ||

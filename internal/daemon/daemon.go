@@ -164,7 +164,13 @@ func New(cfg Config) *Daemon {
 			cfg.RepoDir = "."
 		}
 	}
+	runtimeRepoDir := cfg.RepoDir
 	cfg.ScopedRuntime = cfg.ScopedRuntime || appconfig.UseScopedDaemonRuntimeFor(cfg.RepoDir)
+	if cfg.ScopedRuntime {
+		if worktreeRoot, err := appconfig.ResolveWorktreeRoot(cfg.RepoDir); err == nil && strings.TrimSpace(worktreeRoot) != "" {
+			runtimeRepoDir = worktreeRoot
+		}
+	}
 	if normalizedRepoDir, err := appconfig.ResolveProjectRoot(cfg.RepoDir); err == nil {
 		cfg.RepoDir = normalizedRepoDir
 	}
@@ -187,7 +193,10 @@ func New(cfg Config) *Daemon {
 	tmuxRunner := &tmux.ExecRunner{}
 	gitRunner := git.NewExecRunner(cfg.RepoDir)
 	gitClient := git.NewClient(gitRunner, cfg.Logger)
-	runtimeStateStore := daemonstate.NewRuntimeStateStore(cfg.RepoDir, cfg.Logger)
+	runtimeStateStore := daemonstate.NewRuntimeStateStore(runtimeRepoDir, cfg.Logger)
+	if cfg.ScopedRuntime {
+		runtimeStateStore = daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(runtimeRepoDir, ".azedarach", "azedarach.db"), cfg.Logger)
+	}
 	runtimeReconcileQueue := newReconcileQueue[protocol.RuntimeReconcileResponseBody](reconcileQueueConfig{
 		Name:    "runtime_reconcile",
 		Workers: defaultRuntimeReconcileQueueWorkers,
@@ -264,7 +273,7 @@ func New(cfg Config) *Daemon {
 	baseWorktreeManager := git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger)
 	d.worktreeManagersByRoot[strings.TrimSpace(cfg.RepoDir)] = baseWorktreeManager
 	d.worktreeManagersByProject[canonicalProjectID] = baseWorktreeManager
-	d.runtimeStoresByRoot[strings.TrimSpace(cfg.RepoDir)] = runtimeStateStore
+	d.runtimeStoresByRoot[strings.TrimSpace(runtimeRepoDir)] = runtimeStateStore
 	d.runtimeStoresByProject[canonicalProjectID] = runtimeStateStore
 	specService.daemon = d
 	specHandler := daemonhandlers.NewSpecHandler(specService)
@@ -408,12 +417,33 @@ func (d *Daemon) Run(ctx context.Context) error {
 		_ = lease.Release()
 		_ = d.lock.Release()
 	}()
+
+	serveErrCh := make(chan error, 1)
+	go func() {
+		serveErrCh <- d.serve.Serve(serveCtx)
+	}()
+	d.cfg.Logger.Info("daemon startup phase", "phase", "ipc_serve_start", "duration_ms", time.Since(startedAt).Milliseconds())
+	checkServeErr := func(phase string) error {
+		select {
+		case err := <-serveErrCh:
+			if err != nil {
+				return fmt.Errorf("daemon server exited during %s: %w", phase, err)
+			}
+			return fmt.Errorf("daemon server exited during %s", phase)
+		default:
+			return nil
+		}
+	}
+
 	bootstrapStartedAt := time.Now()
 	if err := d.bootstrapSyncOrchestrator(ctx); err != nil {
 		d.cfg.Logger.Error("daemon startup phase failed", "phase", "sync_bootstrap", "duration_ms", time.Since(bootstrapStartedAt).Milliseconds(), "error", err)
 		return err
 	}
 	d.cfg.Logger.Info("daemon startup phase", "phase", "sync_bootstrap", "duration_ms", time.Since(bootstrapStartedAt).Milliseconds())
+	if err := checkServeErr("sync bootstrap"); err != nil {
+		return err
+	}
 	reconcileStartedAt := time.Now()
 	if result, err := d.runStartupRuntimeReconcile(ctx); err != nil {
 		d.cfg.Logger.Warn("daemon startup reconcile failed",
@@ -428,7 +458,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.startRuntimeReconcileWorker(serveCtx)
 	d.startLinearSyncWorker(serveCtx)
 	d.cfg.Logger.Info("daemon startup phase", "phase", "startup_ready", "duration_ms", time.Since(startedAt).Milliseconds())
-	err = d.serve.Serve(serveCtx)
+	err = <-serveErrCh
 	if ctx.Err() != nil {
 		<-shutdownDone
 	}

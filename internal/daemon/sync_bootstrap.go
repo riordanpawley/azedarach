@@ -102,11 +102,6 @@ func (d *Daemon) defaultSyncBootstrap(ctx context.Context) error {
 		}
 		return nil
 	}
-	for _, project := range d.bootstrapProjectSelection().Projects {
-		if err := d.bootstrapProjectStores(ctx, project.Name); err != nil {
-			return err
-		}
-	}
 	if err := d.migrateLegacyRuntimeState(ctx); err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("migrate runtime state store failed during bootstrap", "error", err)

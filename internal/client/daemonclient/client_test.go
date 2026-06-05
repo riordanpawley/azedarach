@@ -99,6 +99,34 @@ func TestClientCommandRetryOnTransientTransportError(t *testing.T) {
 	}
 }
 
+func TestClientCommandRetriesShortFrameTimeout(t *testing.T) {
+	attempts := 0
+	c := New(&fakeTransport{
+		commandFn: func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			attempts++
+			if attempts == 1 {
+				return protocol.ResponseEnvelope{}, errors.New("short_frame: read unix ->/tmp/daemon.sock: i/o timeout")
+			}
+			return protocol.ResponseEnvelope{OK: true}, nil
+		},
+	}).WithReconnectPolicy(reconnect.Policy{
+		MaxAttempts: 2,
+		BaseBackoff: 0,
+		MaxBackoff:  0,
+	})
+
+	resp, err := c.Command(context.Background(), protocol.RequestEnvelope{Command: CommandTaskList})
+	if err != nil {
+		t.Fatalf("Command error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatal("expected OK response after retry")
+	}
+	if attempts != 2 {
+		t.Fatalf("command attempts = %d, want 2", attempts)
+	}
+}
+
 func TestClientCommandRetriesSocketUnavailableForReadCommand(t *testing.T) {
 	attempts := 0
 	c := New(&fakeTransport{
