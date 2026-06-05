@@ -744,7 +744,7 @@ func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "k", "up":
 		m.moveCursor(0, -1)
 		return m, nil
-	case "ctrl+c", "q":
+	case "ctrl+c":
 		return m, tea.Quit
 	default:
 		if len(msg.Runes) > 0 && !msg.Alt {
