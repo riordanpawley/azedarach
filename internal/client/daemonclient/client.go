@@ -141,7 +141,6 @@ func isDaemonReadCommand(command string) bool {
 		CommandTaskGet,
 		CommandTaskGetMany,
 		CommandTaskClosePreflight,
-		CommandTaskDeletePreflight,
 		CommandTaskGraphReadiness,
 		CommandTaskCompleteCheck,
 		CommandTaskIntegrationReady,

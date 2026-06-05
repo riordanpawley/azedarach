@@ -21,7 +21,6 @@ const (
 	CommandTaskCreate           = "task.create"
 	CommandTaskClose            = "task.close"
 	CommandTaskClosePreflight   = "task.close_preflight"
-	CommandTaskDeletePreflight  = "task.delete_preflight"
 	CommandTaskGraphReadiness   = "task.graph_readiness"
 	CommandTaskCompleteCheck    = "task.complete_check"
 	CommandTaskIntegrationReady = "task.integration_readiness"
@@ -151,11 +150,6 @@ type taskClosePreflightResponse struct {
 	Task     domain.Task `json:"task"`
 	Worktree string      `json:"worktree,omitempty"`
 	Status   GitStatus   `json:"status,omitempty"`
-}
-
-type taskDeletePreflightResponse struct {
-	Task     domain.Task `json:"task"`
-	Blockers []string    `json:"blockers,omitempty"`
 }
 
 // TaskGraphReadiness describes daemon-owned runnable-leaf policy for a root issue graph.
@@ -700,19 +694,6 @@ func (c *Client) AppendTaskNotes(ctx context.Context, taskID, line string) error
 		TaskID: parsedTaskID,
 		Line:   line,
 	}, nil)
-}
-
-// ValidateTaskDelete returns daemon-owned delete blockers for a task.
-func (c *Client) ValidateTaskDelete(ctx context.Context, taskID string) (domain.Task, []string, error) {
-	parsedTaskID, err := naming.ParseIssueID(taskID)
-	if err != nil {
-		return domain.Task{}, nil, fmt.Errorf("invalid task id: %w", err)
-	}
-	var out taskDeletePreflightResponse
-	if err := c.commandJSON(ctx, CommandTaskDeletePreflight, TaskIDRequest{TaskID: parsedTaskID}, &out); err != nil {
-		return domain.Task{}, nil, err
-	}
-	return out.Task, append([]string(nil), out.Blockers...), nil
 }
 
 // DeleteTask deletes a task through the daemon client boundary.

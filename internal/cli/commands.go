@@ -3529,31 +3529,11 @@ func IssueDeleteCommand(deps *Dependencies, opts IssueDeleteOptions) error {
 		return err
 	}
 
-	_, blockers, err := deps.DaemonClient.ValidateTaskDelete(ctx, opts.IssueID)
+	cleanup, err := deleteIssueWithRuntimeCleanup(ctx, deps, opts)
 	if err != nil {
-		return fmt.Errorf("failed to inspect issue %s for delete guard: %w", opts.IssueID, err)
+		return err
 	}
-	if len(blockers) > 0 {
-		missing := issueDeleteMissingCleanupOptions(blockers, opts)
-		if len(missing) == 0 {
-			cleanup, err := deleteIssueWithRuntimeCleanup(ctx, deps, opts)
-			if err != nil {
-				return err
-			}
-			return printIssueDeleteResult(opts, cleanup)
-		}
-		return fmt.Errorf(
-			"cannot delete issue %s: active runtime attachments detected (%s); rerun with %s or use --cleanup",
-			opts.IssueID,
-			strings.Join(blockers, ", "),
-			strings.Join(missing, " "),
-		)
-	}
-
-	if err := deps.DaemonClient.DeleteTask(ctx, opts.IssueID); err != nil {
-		return fmt.Errorf("failed to delete issue %s: %w", opts.IssueID, err)
-	}
-	return printIssueDeleteResult(opts, issueDeleteCleanupResult{})
+	return printIssueDeleteResult(opts, cleanup)
 }
 
 type issueDeleteCleanupResult struct {
@@ -3577,23 +3557,6 @@ func deleteIssueWithRuntimeCleanup(ctx context.Context, deps *Dependencies, opts
 		WorktreeRemoved: result.WorktreeRemoved,
 		WorktreeForced:  result.WorktreeForced,
 	}, nil
-}
-
-func issueDeleteMissingCleanupOptions(blockers []string, opts IssueDeleteOptions) []string {
-	missing := make([]string, 0, len(blockers))
-	for _, blocker := range blockers {
-		switch blocker {
-		case "session":
-			if !opts.StopSession {
-				missing = append(missing, "--stop-session")
-			}
-		case "worktree":
-			if !opts.RemoveWorktree {
-				missing = append(missing, "--remove-worktree")
-			}
-		}
-	}
-	return missing
 }
 
 func printIssueDeleteResult(opts IssueDeleteOptions, cleanup issueDeleteCleanupResult) error {

@@ -917,37 +917,34 @@ func applyOrchestrateIntegration(deps *Dependencies, issueID string, mergeReady 
 	}
 	result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "completion_evidence", Status: "success"})
 
-	mergeResult, err := runBranchMergeToBase(deps, BranchMergeToBaseOptions{IssueID: issueID})
-	if err != nil {
-		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "merge", Status: "failed", Error: err.Error()})
-		result.Recovery = orchestrateIntegrationRecovery(issueID, "merge_failed")
-		return fmt.Errorf("apply integration merge for %s: %w", issueID, err)
-	}
-	result.Steps = append(result.Steps, orchestrateIntegrateStep{
-		Name:   "merge",
-		Status: "success",
-		Output: fmt.Sprintf("Merged %s into %s (%s)", mergeResult.SourceBranch, mergeResult.BaseBranch, mergeResult.IssueID),
-	})
-	result.Applied = true
-
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
-	closeResult, err := deps.DaemonClient.CloseTask(cleanupCtx, issueID, daemonclient.TaskStatusOptions{})
+	closeResult, err := deps.DaemonClient.CloseTask(cleanupCtx, issueID, daemonclient.TaskStatusOptions{
+		CleanupBeforeClose:   true,
+		IntegrateBeforeClose: true,
+	})
 	if err != nil {
-		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "close_task", Status: "failed", Error: err.Error()})
-		result.Recovery = orchestrateIntegrationRecovery(issueID, "post_merge_failed")
-		return fmt.Errorf("integration applied for %s but daemon close failed: %w", issueID, err)
+		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "integrate_and_close", Status: "failed", Error: err.Error()})
+		result.Recovery = orchestrateIntegrationRecovery(issueID, "integration_failed")
+		return fmt.Errorf("apply integration for %s: %w", issueID, err)
+	}
+	result.Applied = true
+	closeOutput := fmt.Sprintf("Closed %s (session_stopped=%t, worktree_removed=%t)", closeResult.TaskID, closeResult.SessionStopped, closeResult.WorktreeRemoved)
+	if closeResult.Integrated {
+		closeOutput = fmt.Sprintf("Merged %s into %s; %s", closeResult.IntegratedSourceBranch, closeResult.IntegratedTargetBranch, closeOutput)
+	} else if closeResult.IntegrationRequested {
+		closeOutput = fmt.Sprintf("Integration requested; %s", closeOutput)
 	}
 	result.Steps = append(result.Steps, orchestrateIntegrateStep{
-		Name:   "close_task",
+		Name:   "integrate_and_close",
 		Status: "success",
-		Output: fmt.Sprintf("Closed %s (session_stopped=%t, worktree_removed=%t)", closeResult.TaskID, closeResult.SessionStopped, closeResult.WorktreeRemoved),
+		Output: closeOutput,
 	})
 
-	note := fmt.Sprintf("Integrated by `az orchestrate integrate --issue %s --apply`: merge applied, session stop attempted, worktree removal attempted, issue close attempted.", issueID)
+	note := fmt.Sprintf("Integrated by `az orchestrate integrate --issue %s --apply`: daemon task.close integrated the branch, stopped session/worktree runtime if present, and closed the issue.", issueID)
 	if err := deps.DaemonClient.AppendTaskNotes(cleanupCtx, issueID, note); err != nil {
 		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "append_evidence", Status: "failed", Error: err.Error()})
-		result.Recovery = orchestrateIntegrationRecovery(issueID, "post_merge_failed")
+		result.Recovery = orchestrateIntegrationRecovery(issueID, "post_close_failed")
 		return fmt.Errorf("integration applied for %s but append evidence failed: %w", issueID, err)
 	} else {
 		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "append_evidence", Status: "success"})
@@ -983,10 +980,15 @@ func orchestrateIntegrationRecovery(issueID, reason string) []string {
 			fmt.Sprintf("review worker output and send a worker-integration-ready mailbox event for %s, or close if ready to integrate and clean up: %s", issueID, issueCloseCommand(issueID)),
 			fmt.Sprintf("retry: az orchestrate integrate --issue %s --apply", issueID),
 		}
-	case "merge_failed":
+	case "merge_failed", "integration_failed":
 		return []string{
 			fmt.Sprintf("inspect merge failure and retry existing merge path: az branch merge %s", issueID),
-			fmt.Sprintf("after merge succeeds, retry cleanup: az orchestrate integrate --issue %s --apply", issueID),
+			fmt.Sprintf("after repair, retry daemon-owned integration/cleanup: az orchestrate integrate --issue %s --apply", issueID),
+		}
+	case "post_close_failed":
+		return []string{
+			fmt.Sprintf("integration/close already completed; inspect issue state: az issue get %s", issueID),
+			fmt.Sprintf("append evidence notes to %s with the merge and validation summary", issueID),
 		}
 	default:
 		return []string{

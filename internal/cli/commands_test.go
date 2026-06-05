@@ -6644,14 +6644,11 @@ func TestIssueCheckDoctorAndDeleteCommandsUseDaemonTaskCommands(t *testing.T) {
 					}, nil
 				case daemonclient.CommandTaskDelete:
 					gotDeleteReq = req
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						Meta:            req.Meta,
-						OK:              true,
-						CompletedAt:     req.SentAt,
-					}, nil
+					return responseWithJSON(req, daemonclient.TaskDeleteResult{
+						TaskID:   "az-1",
+						Deleted:  true,
+						Revision: 3,
+					}), nil
 				default:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -6697,41 +6694,12 @@ func TestIssueCheckDoctorAndDeleteCommandsUseDaemonTaskCommands(t *testing.T) {
 }
 
 func TestIssueDeleteCommandBlocksWhenRuntimeAttachmentsPresent(t *testing.T) {
-	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	deleteCalled := false
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
-				case daemonclient.CommandTaskDeletePreflight:
-					body, err := json.Marshal(map[string]any{
-						"task": domain.Task{
-							ID:             "az-1",
-							Title:          "Delete target",
-							Type:           domain.TypeTask,
-							Priority:       domain.P2,
-							Status:         domain.StatusOpen,
-							HasTmuxSession: true,
-							HasWorktree:    true,
-							CreatedAt:      now,
-							UpdatedAt:      now,
-						},
-						"blockers": []string{"session", "worktree"},
-					})
-					if err != nil {
-						t.Fatalf("marshal delete preflight: %v", err)
-					}
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						Meta:            req.Meta,
-						OK:              true,
-						CompletedAt:     req.SentAt,
-						Revision:        2,
-						Body:            body,
-					}, nil
 				case daemonclient.CommandTaskDelete:
 					deleteCalled = true
 					return protocol.ResponseEnvelope{
@@ -6739,8 +6707,12 @@ func TestIssueDeleteCommandBlocksWhenRuntimeAttachmentsPresent(t *testing.T) {
 						RequestID:       req.RequestID,
 						Kind:            protocol.EnvelopeKindResponse,
 						Meta:            req.Meta,
-						OK:              true,
+						OK:              false,
 						CompletedAt:     req.SentAt,
+						Error: &protocol.ErrorEnvelope{
+							Code:    protocol.ErrorCodeInternal,
+							Message: "cannot delete issue az-1: active runtime attachments detected (session, worktree); rerun with stop_session remove_worktree or use cleanup",
+						},
 					}, nil
 				default:
 					return protocol.ResponseEnvelope{
@@ -6765,13 +6737,12 @@ func TestIssueDeleteCommandBlocksWhenRuntimeAttachmentsPresent(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "cannot delete issue az-1: active runtime attachments detected (session, worktree)") {
 		t.Fatalf("IssueDeleteCommand() error = %v", err)
 	}
-	if deleteCalled {
-		t.Fatal("IssueDeleteCommand() called task.delete despite runtime attachments")
+	if !deleteCalled {
+		t.Fatal("IssueDeleteCommand() did not call daemon task.delete")
 	}
 }
 
 func TestIssueDeleteCommandCleansRuntimeAttachmentsBeforeDelete(t *testing.T) {
-	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	commands := []string{}
 	var deleteCleanup bool
 	var deleteStopSession bool
@@ -6783,34 +6754,6 @@ func TestIssueDeleteCommandCleansRuntimeAttachmentsBeforeDelete(t *testing.T) {
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case daemonclient.CommandTaskDeletePreflight:
-					body, err := json.Marshal(map[string]any{
-						"task": domain.Task{
-							ID:             "az-1",
-							Title:          "Delete target",
-							Type:           domain.TypeTask,
-							Priority:       domain.P2,
-							Status:         domain.StatusOpen,
-							HasTmuxSession: true,
-							HasWorktree:    true,
-							CreatedAt:      now,
-							UpdatedAt:      now,
-						},
-						"blockers": []string{"session", "worktree"},
-					})
-					if err != nil {
-						t.Fatalf("marshal delete preflight: %v", err)
-					}
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						Meta:            req.Meta,
-						OK:              true,
-						CompletedAt:     req.SentAt,
-						Revision:        2,
-						Body:            body,
-					}, nil
 				case daemonclient.CommandTaskDelete:
 					var body struct {
 						Cleanup        bool `json:"cleanup"`
@@ -6866,7 +6809,6 @@ func TestIssueDeleteCommandCleansRuntimeAttachmentsBeforeDelete(t *testing.T) {
 	})
 
 	wantCommands := []string{
-		daemonclient.CommandTaskDeletePreflight,
 		daemonclient.CommandTaskDelete,
 	}
 	if !reflect.DeepEqual(commands, wantCommands) {
