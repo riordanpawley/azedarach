@@ -551,6 +551,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleUIStateGet(ctx, req)
 	case protocol.CommandUIStateSet:
 		return d.handleUIStateSet(ctx, req)
+	case protocol.CommandProjectCleanup:
+		return d.handleProjectCleanup(ctx, req)
 	case "task.list":
 		return d.handleTaskList(ctx, req)
 	case "task.get":

@@ -139,6 +139,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandUIOpenTaskWorkspace:   {Command: protocol.CommandUIOpenTaskWorkspace, RequiresProjectID: true},
 	protocol.CommandUIStateGet:            {Command: protocol.CommandUIStateGet, RequiresProjectID: true},
 	protocol.CommandUIStateSet:            {Command: protocol.CommandUIStateSet, RequiresProjectID: true},
+	protocol.CommandProjectCleanup:        {Command: protocol.CommandProjectCleanup, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskList:                       {Command: commandTaskList, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskGet:                        {Command: commandTaskGet, RequiresProjectID: true},
 	commandTaskGetMany:                    {Command: commandTaskGetMany, RequiresProjectID: true},

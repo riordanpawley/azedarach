@@ -434,6 +434,18 @@ func (c *Client) CleanupOrphanedWorktrees(ctx context.Context) (int, error) {
 	return out.WorktreesRemoved, nil
 }
 
+// CleanupProject asks the daemon to execute project-scoped cleanup categories.
+func (c *Client) CleanupProject(ctx context.Context, categories []string) (protocol.ProjectCleanupResponseBody, error) {
+	var out protocol.ProjectCleanupResponseBody
+	if err := c.commandJSON(ctx, protocol.CommandProjectCleanup, protocol.ProjectCleanupRequestBody{
+		ProjectID:  c.projectID,
+		Categories: append([]string(nil), categories...),
+	}, &out); err != nil {
+		return protocol.ProjectCleanupResponseBody{}, err
+	}
+	return out, nil
+}
+
 func decodeCommandOutput(body []byte) (string, error) {
 	if len(body) == 0 {
 		return "", nil

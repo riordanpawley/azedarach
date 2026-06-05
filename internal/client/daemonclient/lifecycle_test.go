@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -116,6 +117,56 @@ func TestSessionLifecycleCommandsRouteThroughDaemon(t *testing.T) {
 	}
 	if transport.lastReq.Command != CommandSessionStop {
 		t.Fatalf("command = %q, want %q", transport.lastReq.Command, CommandSessionStop)
+	}
+}
+
+func TestCleanupProjectRoutesThroughDaemon(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != protocol.CommandProjectCleanup {
+				t.Fatalf("command = %q, want %q", req.Command, protocol.CommandProjectCleanup)
+			}
+			if req.Meta.ProjectID != "proj-a" {
+				t.Fatalf("project id = %q, want proj-a", req.Meta.ProjectID)
+			}
+			var body protocol.ProjectCleanupRequestBody
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal cleanup request: %v", err)
+			}
+			if body.ProjectID != "proj-a" {
+				t.Fatalf("body project id = %q, want proj-a", body.ProjectID)
+			}
+			want := []string{"delete_old_done", "clean_stale_sessions"}
+			if !reflect.DeepEqual(body.Categories, want) {
+				t.Fatalf("categories = %+v, want %+v", body.Categories, want)
+			}
+			respBody, err := json.Marshal(protocol.ProjectCleanupResponseBody{
+				ProjectID:        body.ProjectID,
+				Deleted:          1,
+				Archived:         2,
+				WorktreesRemoved: 3,
+				SessionsCleaned:  4,
+			})
+			if err != nil {
+				t.Fatalf("marshal cleanup response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-a")
+	got, err := client.CleanupProject(context.Background(), []string{"delete_old_done", "clean_stale_sessions"})
+	if err != nil {
+		t.Fatalf("CleanupProject error: %v", err)
+	}
+	if got.Deleted != 1 || got.Archived != 2 || got.WorktreesRemoved != 3 || got.SessionsCleaned != 4 {
+		t.Fatalf("cleanup result = %+v", got)
 	}
 }
 

@@ -552,15 +552,9 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "O": // Orchestration overlay
 		return m, m.openOrchestrationOverlay()
 	case "X": // Bulk cleanup (Shift+X)
-		// Count tasks, worktrees, and sessions for estimates
 		taskCount := len(m.tasks)
-		worktreeCount := len(m.sessions) // Estimate: active sessions have worktrees
-		sessionCount := 0
-		for _, session := range m.sessions {
-			if session.State == domain.SessionIdle || session.State == domain.SessionPaused {
-				sessionCount++
-			}
-		}
+		worktreeCount := len(m.sessions)
+		sessionCount := len(m.sessions)
 		cleanupOverlay := overlay.NewBulkCleanupOverlay(m.performCleanup, taskCount, worktreeCount, sessionCount)
 		return m, m.openOverlay(cleanupOverlay)
 	}
@@ -5887,80 +5881,19 @@ func sessionAggregateCounts(session *domain.Session) (total, active, paused int)
 
 // performCleanup executes cleanup operations for selected categories
 func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overlay.CleanupResult, error) {
-	result := overlay.CleanupResult{}
-
-	for _, id := range categoryIDs {
-		switch id {
-		case "delete_old_done":
-			cutoff := time.Now().AddDate(0, 0, -30)
-			deleted := 0
-			for _, task := range m.tasks {
-				if task.Status == domain.StatusDone && task.UpdatedAt.Before(cutoff) {
-					if m.daemonClient == nil {
-						m.logger.Warn("daemon client unavailable for delete", "id", task.ID)
-						continue
-					}
-					err := m.daemonClient.DeleteTask(ctx, task.ID.String())
-					if err != nil {
-						m.logger.Warn("failed to delete task", "id", task.ID, "error", err)
-						continue
-					}
-					deleted++
-				}
-			}
-			result.Deleted = deleted
-
-		case "archive_done":
-			archived := 0
-			for _, task := range m.tasks {
-				if task.Status == domain.StatusDone {
-					if m.daemonClient == nil {
-						m.logger.Warn("daemon client unavailable for archive", "id", task.ID)
-						continue
-					}
-					err := m.daemonClient.ArchiveTask(ctx, task.ID.String())
-					if err != nil {
-						m.logger.Warn("failed to archive task", "id", task.ID, "error", err)
-						continue
-					}
-					archived++
-				}
-			}
-			result.Archived = archived
-
-		case "remove_orphaned_worktrees":
-			if m.daemonClient == nil {
-				m.logger.Warn("daemon client unavailable for orphaned worktree cleanup")
-				continue
-			}
-			cleanupCtx, cleanupCancel := context.WithTimeout(ctx, orphanedWorktreeCleanupTimeout)
-			removed, err := m.daemonClient.CleanupOrphanedWorktrees(cleanupCtx)
-			cleanupCancel()
-			if err != nil {
-				m.logger.Warn("failed to clean orphaned worktrees", "error", err)
-				continue
-			}
-			result.WorktreesRemoved = removed
-
-		case "clean_stale_sessions":
-			// Clean sessions inactive for >24 hours
-			cleaned := 0
-			cutoff := time.Now().Add(-24 * time.Hour)
-			for issueID, session := range m.sessions {
-				if session.StartedAt != nil && session.StartedAt.Before(cutoff) {
-					if session.State == domain.SessionIdle || session.State == domain.SessionPaused {
-						// Stop and clean up stale session
-						m.sessionMonitor.Stop(issueID)
-						if m.daemonClient != nil {
-							_, _ = m.daemonClient.StopSession(ctx, issueID)
-						}
-						cleaned++
-					}
-				}
-			}
-			result.SessionsCleaned = cleaned
-		}
+	if m.daemonClient == nil {
+		return overlay.CleanupResult{}, fmt.Errorf("daemon client unavailable")
 	}
-
-	return result, nil
+	cleanupCtx, cancel := context.WithTimeout(ctx, worktreeCleanupMutationTimeout)
+	defer cancel()
+	result, err := m.daemonClient.CleanupProject(cleanupCtx, categoryIDs)
+	if err != nil {
+		return overlay.CleanupResult{}, err
+	}
+	return overlay.CleanupResult{
+		Deleted:          result.Deleted,
+		Archived:         result.Archived,
+		WorktreesRemoved: result.WorktreesRemoved,
+		SessionsCleaned:  result.SessionsCleaned,
+	}, nil
 }

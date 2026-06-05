@@ -7357,70 +7357,43 @@ func TestTaskWorkspaceCleanupSelectsTargetAndKeepsWorkspaceUnderConfirm(t *testi
 }
 
 func TestPerformCleanupRoutesDaemonCleanupAndPreservesCounts(t *testing.T) {
-	base := time.Now().UTC()
-	oldSessionStart := base.Add(-48 * time.Hour)
-
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			switch req.Command {
-			case daemonclient.CommandTaskDelete:
-				var body daemonclient.TaskIDRequest
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal delete request: %v", err)
-				}
-				if body.TaskID != "az-old" {
-					t.Fatalf("delete body = %+v", body)
-				}
-			case daemonclient.CommandTaskArchive:
-				var body daemonclient.TaskIDRequest
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal archive request: %v", err)
-				}
-				if body.TaskID != "az-old" && body.TaskID != "az-recent" {
-					t.Fatalf("archive body = %+v", body)
-				}
-			case protocol.CommandWorktreeCleanupOrphaned:
-				var body protocol.CleanupOrphanedRequestBody
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal cleanup request: %v", err)
-				}
-				if body.ProjectID != "proj-1" {
-					t.Fatalf("cleanup body = %+v", body)
-				}
-				respBody, err := json.Marshal(protocol.CleanupOrphanedResponseBody{
-					ProjectID:        body.ProjectID,
-					WorktreesRemoved: 2,
-				})
-				if err != nil {
-					t.Fatalf("marshal cleanup response: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
-			case daemonclient.CommandSessionStop:
-				var body struct {
-					ProjectID string `json:"project_id"`
-					SessionID string `json:"session_id"`
-				}
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal session stop request: %v", err)
-				}
-				if body.SessionID != "issue-1" {
-					t.Fatalf("session stop body = %+v", body)
-				}
-			default:
+			if req.Command != protocol.CommandProjectCleanup {
 				t.Fatalf("unexpected command: %s", req.Command)
 			}
-
+			var body protocol.ProjectCleanupRequestBody
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal project cleanup request: %v", err)
+			}
+			if body.ProjectID != "proj-1" {
+				t.Fatalf("project cleanup body = %+v", body)
+			}
+			wantCategories := []string{
+				"delete_old_done",
+				"archive_done",
+				"remove_orphaned_worktrees",
+				"clean_stale_sessions",
+			}
+			if !reflect.DeepEqual(body.Categories, wantCategories) {
+				t.Fatalf("cleanup categories = %+v, want %+v", body.Categories, wantCategories)
+			}
+			respBody, err := json.Marshal(protocol.ProjectCleanupResponseBody{
+				ProjectID:        body.ProjectID,
+				Deleted:          1,
+				Archived:         2,
+				WorktreesRemoved: 2,
+				SessionsCleaned:  1,
+			})
+			if err != nil {
+				t.Fatalf("marshal project cleanup response: %v", err)
+			}
 			return protocol.ResponseEnvelope{
 				ProtocolVersion: req.ProtocolVersion,
 				RequestID:       req.RequestID,
 				Kind:            protocol.EnvelopeKindResponse,
 				OK:              true,
+				Body:            respBody,
 			}, nil
 		},
 	}
@@ -7428,15 +7401,6 @@ func TestPerformCleanupRoutesDaemonCleanupAndPreservesCounts(t *testing.T) {
 	m := newDaemonTestModel(transport)
 	m.currentProject = "proj-1"
 	m.daemonClient.WithProjectID(m.daemonProjectID())
-	m.tasks = []domain.Task{
-		{ID: "az-old", Status: domain.StatusDone, UpdatedAt: base.AddDate(0, 0, -31)},
-		{ID: "az-recent", Status: domain.StatusDone, UpdatedAt: base.Add(-1 * time.Hour)},
-		{ID: "az-open", Status: domain.StatusOpen, UpdatedAt: base},
-	}
-	m.sessions = map[string]*domain.Session{
-		"issue-1": {IssueID: naming.IssueID("issue-1"), State: domain.SessionPaused, StartedAt: &oldSessionStart},
-		"issue-2": {IssueID: naming.IssueID("issue-2"), State: domain.SessionBusy, StartedAt: &oldSessionStart},
-	}
 
 	result, err := m.performCleanup(context.Background(), []string{
 		"delete_old_done",
@@ -7460,32 +7424,18 @@ func TestPerformCleanupRoutesDaemonCleanupAndPreservesCounts(t *testing.T) {
 	if result.SessionsCleaned != 1 {
 		t.Fatalf("sessions cleaned = %d, want 1", result.SessionsCleaned)
 	}
-	if _, ok := m.sessions["issue-1"]; !ok {
-		t.Fatal("expected stale session issue-1 to remain in projection until daemon refresh")
-	}
-	if _, ok := m.sessions["issue-2"]; !ok {
-		t.Fatal("expected stale session issue-2 to remain in projection until daemon refresh")
-	}
-
-	if got := transport.requests; len(got) != 5 {
+	if got := transport.requests; len(got) != 1 || got[0] != protocol.CommandProjectCleanup {
 		t.Fatalf("requests = %v", got)
-	}
-	if transport.requests[0] != daemonclient.CommandTaskDelete ||
-		transport.requests[1] != daemonclient.CommandTaskArchive ||
-		transport.requests[2] != daemonclient.CommandTaskArchive ||
-		transport.requests[3] != protocol.CommandWorktreeCleanupOrphaned ||
-		transport.requests[4] != daemonclient.CommandSessionStop {
-		t.Fatalf("requests = %v", transport.requests)
 	}
 }
 
 func TestPerformCleanupOrphanedWorktreesUsesExtendedDeadline(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != protocol.CommandWorktreeCleanupOrphaned {
+			if req.Command != protocol.CommandProjectCleanup {
 				t.Fatalf("unexpected command: %s", req.Command)
 			}
-			respBody, err := json.Marshal(protocol.CleanupOrphanedResponseBody{
+			respBody, err := json.Marshal(protocol.ProjectCleanupResponseBody{
 				ProjectID:        naming.ProjectID("proj-1"),
 				WorktreesRemoved: 1,
 			})
@@ -7516,14 +7466,14 @@ func TestPerformCleanupOrphanedWorktreesUsesExtendedDeadline(t *testing.T) {
 	if got := len(transport.requests); got != 1 {
 		t.Fatalf("request count = %d, want 1", got)
 	}
-	if transport.requests[0] != protocol.CommandWorktreeCleanupOrphaned {
-		t.Fatalf("command = %s, want %s", transport.requests[0], protocol.CommandWorktreeCleanupOrphaned)
+	if transport.requests[0] != protocol.CommandProjectCleanup {
+		t.Fatalf("command = %s, want %s", transport.requests[0], protocol.CommandProjectCleanup)
 	}
 	if got := len(transport.commandBudgets); got != 1 {
 		t.Fatalf("command deadline count = %d, want 1", got)
 	}
-	if transport.commandBudgets[0] < (orphanedWorktreeCleanupTimeout - 10*time.Second) {
-		t.Fatalf("cleanup timeout budget = %s, want near %s", transport.commandBudgets[0], orphanedWorktreeCleanupTimeout)
+	if transport.commandBudgets[0] < (worktreeCleanupMutationTimeout - 10*time.Second) {
+		t.Fatalf("cleanup timeout budget = %s, want near %s", transport.commandBudgets[0], worktreeCleanupMutationTimeout)
 	}
 }
 
