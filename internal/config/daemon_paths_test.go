@@ -180,14 +180,29 @@ func TestDaemonPathsUseScopedForLinkedWorktreeWithoutEnv(t *testing.T) {
 	}
 }
 
-func TestDaemonPathsUseScopedWhenEnabled(t *testing.T) {
+func TestDaemonPathsUseScopedWhenEnabledInAzedarachDevelopmentWorktree(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-	start := filepath.Join(t.TempDir(), "repo")
-	if got := DaemonSocketPathFor(start); got != ScopedDaemonSocketPath(start) {
-		t.Fatalf("DaemonSocketPathFor() = %q, want %q", got, ScopedDaemonSocketPath(start))
+	_, worktree := makeLinkedDaemonPathWorktreeWithModule(t, "github.com/riordanpawley/azedarach")
+
+	if got := DaemonSocketPathFor(worktree); got != ScopedDaemonSocketPath(worktree) {
+		t.Fatalf("DaemonSocketPathFor() = %q, want %q", got, ScopedDaemonSocketPath(worktree))
 	}
-	if got := DaemonLockPathFor(start); got != ScopedDaemonLockPath(start) {
-		t.Fatalf("DaemonLockPathFor() = %q, want %q", got, ScopedDaemonLockPath(start))
+	if got := DaemonLockPathFor(worktree); got != ScopedDaemonLockPath(worktree) {
+		t.Fatalf("DaemonLockPathFor() = %q, want %q", got, ScopedDaemonLockPath(worktree))
+	}
+}
+
+func TestDaemonPathsIgnoreScopedEnvOutsideAzedarachDevelopmentWorktree(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	_, worktree := makeLinkedDaemonPathWorktreeWithModule(t, "github.com/acme/chefy")
+
+	if got := DaemonSocketPathFor(worktree); got != GlobalDaemonSocketPath() {
+		t.Fatalf("DaemonSocketPathFor() = %q, want %q", got, GlobalDaemonSocketPath())
+	}
+	if got := DaemonLockPathFor(worktree); got != GlobalDaemonLockPath() {
+		t.Fatalf("DaemonLockPathFor() = %q, want %q", got, GlobalDaemonLockPath())
 	}
 }
 

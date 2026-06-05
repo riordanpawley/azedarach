@@ -794,8 +794,8 @@ func TestRuntimeReconcileTimeoutDefaultsByScopeMode(t *testing.T) {
 	}
 
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-	if got, want := d.runtimeReconcileTimeout(), scopedRuntimeReconcileTimeout; got != want {
-		t.Fatalf("runtimeReconcileTimeout() scoped = %s, want %s", got, want)
+	if got, want := d.runtimeReconcileTimeout(), defaultRuntimeReconcileTimeout; got != want {
+		t.Fatalf("runtimeReconcileTimeout() forced scoped outside azedarach worktree = %s, want %s", got, want)
 	}
 
 	base := t.TempDir()

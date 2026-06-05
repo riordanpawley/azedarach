@@ -28,8 +28,8 @@ func TestValidateTUILaunchContextRejectsLinkedWorktreeWithForcedGlobalScope(t *t
 	if err == nil {
 		t.Fatal("validateTUILaunchContext() error = nil, want forced-global linked-worktree guard")
 	}
-	if !strings.Contains(err.Error(), "forces the shared daemon") {
-		t.Fatalf("error = %q, want shared daemon guidance", err)
+	if !strings.Contains(err.Error(), "forces the shared production daemon") {
+		t.Fatalf("error = %q, want shared production daemon guidance", err)
 	}
 }
 

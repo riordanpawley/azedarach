@@ -94,12 +94,14 @@ func daemonScopeID(path string) string {
 }
 
 // UseScopedDaemonRuntimeFor reports whether daemon runtime assets should be
-// scoped to the current worktree instead of the user-global daemon.
+// scoped away from the user-global daemon while developing Azedarach itself.
+// Scoped daemons are only for Azedarach linked worktrees, where a worktree can
+// run a changed azd without replacing or protocol-conflicting with production.
 func UseScopedDaemonRuntimeFor(startPath string) bool {
 	mode := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
 	switch mode {
 	case "worktree", "scoped", "local":
-		return true
+		return IsAzedarachDevelopmentWorktree(startPath)
 	case "global", "shared", "user", "off", "none":
 		return false
 	}
