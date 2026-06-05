@@ -932,49 +932,25 @@ func applyOrchestrateIntegration(deps *Dependencies, issueID string, mergeReady 
 
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
-	var failures []string
-	if _, err := deps.DaemonClient.ValidateTaskCloseWithOptions(cleanupCtx, issueID, daemonclient.CloseGuardOptions{
-		AllowTargetSession:  true,
-		AllowTargetWorktree: true,
-	}); err != nil {
-		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "close_preflight", Status: "failed", Error: err.Error()})
+	closeResult, err := deps.DaemonClient.CloseTask(cleanupCtx, issueID, daemonclient.TaskStatusOptions{})
+	if err != nil {
+		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "close_task", Status: "failed", Error: err.Error()})
 		result.Recovery = orchestrateIntegrationRecovery(issueID, "post_merge_failed")
-		return fmt.Errorf("integration applied for %s but close preflight failed: %w", issueID, err)
+		return fmt.Errorf("integration applied for %s but daemon close failed: %w", issueID, err)
 	}
-	result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "close_preflight", Status: "success"})
-
-	if _, err := deps.DaemonClient.StopSession(cleanupCtx, issueID); err != nil {
-		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "stop_session", Status: "failed", Error: err.Error()})
-		failures = append(failures, fmt.Sprintf("stop session: %v", err))
-	} else {
-		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "stop_session", Status: "success"})
-	}
-
-	if err := deps.DaemonClient.RemoveWorktreeWithOptions(cleanupCtx, issueID, false); err != nil {
-		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "remove_worktree", Status: "failed", Error: err.Error()})
-		failures = append(failures, fmt.Sprintf("remove worktree: %v", err))
-	} else {
-		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "remove_worktree", Status: "success"})
-	}
-
-	if err := deps.DaemonClient.UpdateTaskStatus(cleanupCtx, issueID, domain.StatusDone); err != nil {
-		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "close_issue", Status: "failed", Error: err.Error()})
-		failures = append(failures, fmt.Sprintf("close issue: %v", err))
-	} else {
-		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "close_issue", Status: "success"})
-	}
+	result.Steps = append(result.Steps, orchestrateIntegrateStep{
+		Name:   "close_task",
+		Status: "success",
+		Output: fmt.Sprintf("Closed %s (session_stopped=%t, worktree_removed=%t)", closeResult.TaskID, closeResult.SessionStopped, closeResult.WorktreeRemoved),
+	})
 
 	note := fmt.Sprintf("Integrated by `az orchestrate integrate --issue %s --apply`: merge applied, session stop attempted, worktree removal attempted, issue close attempted.", issueID)
 	if err := deps.DaemonClient.AppendTaskNotes(cleanupCtx, issueID, note); err != nil {
 		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "append_evidence", Status: "failed", Error: err.Error()})
-		failures = append(failures, fmt.Sprintf("append evidence: %v", err))
+		result.Recovery = orchestrateIntegrationRecovery(issueID, "post_merge_failed")
+		return fmt.Errorf("integration applied for %s but append evidence failed: %w", issueID, err)
 	} else {
 		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "append_evidence", Status: "success"})
-	}
-
-	if len(failures) > 0 {
-		result.Recovery = orchestrateIntegrationRecovery(issueID, "post_merge_failed")
-		return fmt.Errorf("integration applied for %s but cleanup had failures: %s", issueID, strings.Join(failures, "; "))
 	}
 	return nil
 }

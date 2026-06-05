@@ -5824,7 +5824,7 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 					IssueID: "az-9",
 				})
 			},
-			wantCommand: daemonclient.CommandTaskUpdateStatus,
+			wantCommand: daemonclient.CommandTaskClose,
 			wantText:    "Closed issue: az-9",
 		},
 	}
@@ -5850,6 +5850,15 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 							})
 							if err != nil {
 								t.Fatalf("marshal task list response: %v", err)
+							}
+							body = payload
+						} else if req.Command == daemonclient.CommandTaskClose {
+							payload, err := json.Marshal(daemonclient.TaskCloseResult{
+								TaskID: "az-9",
+								Status: string(domain.StatusDone),
+							})
+							if err != nil {
+								t.Fatalf("marshal task close response: %v", err)
 							}
 							body = payload
 						}
@@ -5887,12 +5896,14 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 					t.Fatalf("create implementations = %+v, want [go-bubbletea]", createReq.Implementations)
 				}
 			case "close":
-				var statusReq daemonclient.TaskStatusRequest
-				if err := json.Unmarshal(gotReq.Body, &statusReq); err != nil {
+				var closeReq struct {
+					TaskID naming.IssueID `json:"task_id"`
+				}
+				if err := json.Unmarshal(gotReq.Body, &closeReq); err != nil {
 					t.Fatalf("unmarshal request body: %v", err)
 				}
-				if statusReq.TaskID != "az-9" || statusReq.Status != domain.StatusDone {
-					t.Fatalf("close body = %+v, want task_id=az-9 status=closed", statusReq)
+				if closeReq.TaskID != "az-9" {
+					t.Fatalf("close body = %+v, want task_id=az-9", closeReq)
 				}
 			}
 			if !strings.Contains(output, tt.wantText) {
@@ -5904,8 +5915,7 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 
 func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testing.T) {
 	var commands []string
-	var removeWorktreeForce bool
-	var removeWorktreeDeadline time.Time
+	var closeForce bool
 	worktreeListBody, err := json.Marshal(struct {
 		ProjectID string `json:"project_id"`
 		Worktrees []struct {
@@ -5993,54 +6003,28 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 							Message: "merge complete",
 						},
 					}), nil
-				case daemonclient.CommandTaskClosePreflight:
-					return responseWithJSON(req, map[string]any{
-						"task": map[string]any{
-							"id":               "az-9",
-							"title":            "Finish flow",
-							"status":           "in_review",
-							"has_tmux_session": true,
-							"has_worktree":     true,
-							"session": map[string]any{
-								"issue_id": "az-9",
-								"worktree": "/tmp/az-9",
-							},
-						},
-						"worktree": "/tmp/az-9",
-						"status":   map[string]any{},
-					}), nil
-				case commandSessionStop:
-					return responseWithOutput(req, "Session not found in tmux: az-9\n✓ Session marked stopped: az-9\n"), nil
-				case daemonclient.CommandWorktreeRemove:
+				case daemonclient.CommandTaskClose:
 					deadline, ok := ctx.Deadline()
 					if !ok {
-						t.Fatal("worktree remove context has no deadline")
+						t.Fatal("task close context has no deadline")
 					}
-					removeWorktreeDeadline = deadline
+					if remaining := time.Until(deadline); remaining < issueCloseCleanupTimeout-10*time.Second {
+						t.Fatalf("task close timeout budget = %s, want near %s", remaining, issueCloseCleanupTimeout)
+					}
 					var body struct {
-						Force bool `json:"force"`
+						ForceWorktree bool `json:"force_worktree"`
 					}
 					if err := json.Unmarshal(req.Body, &body); err != nil {
-						t.Fatalf("unmarshal worktree remove body: %v", err)
+						t.Fatalf("unmarshal task close body: %v", err)
 					}
-					removeWorktreeForce = body.Force
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						Meta:            req.Meta,
-						OK:              true,
-						CompletedAt:     req.SentAt,
-					}, nil
-				case daemonclient.CommandTaskUpdateStatus:
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						Meta:            req.Meta,
-						OK:              true,
-						CompletedAt:     req.SentAt,
-					}, nil
+					closeForce = body.ForceWorktree
+					return responseWithJSON(req, daemonclient.TaskCloseResult{
+						TaskID:          "az-9",
+						Status:          string(domain.StatusDone),
+						SessionStopped:  true,
+						WorktreeRemoved: true,
+						WorktreeForced:  body.ForceWorktree,
+					}), nil
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
 					return protocol.ResponseEnvelope{}, nil
@@ -6068,19 +6052,13 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 		daemonclient.CommandGitFetch,
 		daemonclient.CommandGitCheckout,
 		daemonclient.CommandGitMerge,
-		daemonclient.CommandTaskClosePreflight,
-		commandSessionStop,
-		daemonclient.CommandWorktreeRemove,
-		daemonclient.CommandTaskUpdateStatus,
+		daemonclient.CommandTaskClose,
 	}
 	if !reflect.DeepEqual(commands, wantCommands) {
 		t.Fatalf("commands = %v, want %v", commands, wantCommands)
 	}
-	if !removeWorktreeForce {
-		t.Fatal("worktree remove force = false, want true")
-	}
-	if remaining := time.Until(removeWorktreeDeadline); remaining < issueCloseCleanupTimeout-10*time.Second {
-		t.Fatalf("worktree remove timeout budget = %s, want near %s", remaining, issueCloseCleanupTimeout)
+	if !closeForce {
+		t.Fatal("task close force_worktree = false, want true")
 	}
 	if !strings.Contains(output, "Closed issue: az-9") || !strings.Contains(output, "- Integration requested") || !strings.Contains(output, "- Cleanup performed") {
 		t.Fatalf("output = %q", output)
@@ -6985,8 +6963,7 @@ func TestIssueUpdateCommandConfirmedClosedCleansBeforeStatus(t *testing.T) {
 	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	status := domain.StatusDone
 	commands := make([]string, 0, 5)
-	var statusReq daemonclient.TaskStatusRequest
-	var removeForce bool
+	var closeForce bool
 	worktreeListBody, err := json.Marshal(struct {
 		ProjectID string `json:"project_id"`
 		Worktrees []struct {
@@ -7090,38 +7067,21 @@ func TestIssueUpdateCommandConfirmedClosedCleansBeforeStatus(t *testing.T) {
 							Message: "merge complete",
 						},
 					}), nil
-				case daemonclient.CommandTaskClosePreflight:
-					return responseWithJSON(req, map[string]any{
-						"task": map[string]any{
-							"id":               "az-1",
-							"title":            "Ready",
-							"status":           "in_review",
-							"has_tmux_session": true,
-							"has_worktree":     true,
-							"session": map[string]any{
-								"issue_id": "az-1",
-								"worktree": "/tmp/az-1",
-							},
-						},
-						"worktree": "/tmp/az-1",
-						"status":   map[string]any{},
-					}), nil
-				case commandSessionStop:
-					return responseWithOutput(req, "stopped\n"), nil
-				case daemonclient.CommandWorktreeRemove:
+				case daemonclient.CommandTaskClose:
 					var body struct {
-						Force bool `json:"force"`
+						ForceWorktree bool `json:"force_worktree"`
 					}
 					if err := json.Unmarshal(req.Body, &body); err != nil {
-						t.Fatalf("unmarshal worktree remove body: %v", err)
+						t.Fatalf("unmarshal task close body: %v", err)
 					}
-					removeForce = body.Force
-					return responseWithJSON(req, map[string]any{}), nil
-				case daemonclient.CommandTaskUpdateStatus:
-					if err := json.Unmarshal(req.Body, &statusReq); err != nil {
-						t.Fatalf("unmarshal status body: %v", err)
-					}
-					return responseWithJSON(req, map[string]any{}), nil
+					closeForce = body.ForceWorktree
+					return responseWithJSON(req, daemonclient.TaskCloseResult{
+						TaskID:          "az-1",
+						Status:          string(domain.StatusDone),
+						SessionStopped:  true,
+						WorktreeRemoved: true,
+						WorktreeForced:  body.ForceWorktree,
+					}), nil
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
 					return protocol.ResponseEnvelope{}, nil
@@ -7152,19 +7112,13 @@ func TestIssueUpdateCommandConfirmedClosedCleansBeforeStatus(t *testing.T) {
 		daemonclient.CommandGitFetch,
 		daemonclient.CommandGitCheckout,
 		daemonclient.CommandGitMerge,
-		daemonclient.CommandTaskClosePreflight,
-		commandSessionStop,
-		daemonclient.CommandWorktreeRemove,
-		daemonclient.CommandTaskUpdateStatus,
+		daemonclient.CommandTaskClose,
 	}
 	if !reflect.DeepEqual(commands, wantCommands) {
 		t.Fatalf("commands = %v, want %v", commands, wantCommands)
 	}
-	if statusReq.TaskID != "az-1" || statusReq.Status != domain.StatusDone {
-		t.Fatalf("status request = %+v, want confirmed closed status", statusReq)
-	}
-	if !removeForce {
-		t.Fatal("worktree remove force = false, want true")
+	if !closeForce {
+		t.Fatal("task close force_worktree = false, want true")
 	}
 	if !strings.Contains(output, "Updated issue: az-1") {
 		t.Fatalf("output = %q", output)

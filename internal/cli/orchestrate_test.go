@@ -757,14 +757,19 @@ func TestOrchestrateIntegrateApplySuccess(t *testing.T) {
 	output := captureStdout(t, func() error {
 		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2", Apply: true})
 	})
-	for _, want := range []string{"Merged user/az-2/worker into user/az-1/parent (az-2)", "merge: success", "close_preflight: success", "stop_session: success", "remove_worktree: success", "close_issue: success", "append_evidence: success"} {
+	for _, want := range []string{"Merged user/az-2/worker into user/az-1/parent (az-2)", "merge: success", "close_task: success", "append_evidence: success"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
 		}
 	}
-	for _, want := range []string{daemonclient.CommandGitMerge, commandSessionStop, daemonclient.CommandWorktreeRemove, daemonclient.CommandTaskUpdateStatus, daemonclient.CommandTaskAppendNotes} {
+	for _, want := range []string{daemonclient.CommandGitMerge, daemonclient.CommandTaskClose, daemonclient.CommandTaskAppendNotes} {
 		if !containsString(*commands, want) {
 			t.Fatalf("commands = %+v, want %s", *commands, want)
+		}
+	}
+	for _, unexpected := range []string{daemonclient.CommandTaskClosePreflight, commandSessionStop, daemonclient.CommandWorktreeRemove, daemonclient.CommandTaskUpdateStatus} {
+		if containsString(*commands, unexpected) {
+			t.Fatalf("commands = %+v, did not expect client-side cleanup command %s", *commands, unexpected)
 		}
 	}
 }
@@ -780,7 +785,7 @@ func TestOrchestrateIntegrateApplyRequiresCompletionEvidence(t *testing.T) {
 	if !strings.Contains(output, `"apply": true`) || !strings.Contains(output, `"applied": false`) || !strings.Contains(output, `"name": "completion_evidence"`) || !strings.Contains(output, `"recovery"`) {
 		t.Fatalf("output missing structured failure:\n%s", output)
 	}
-	for _, unexpected := range []string{daemonclient.CommandGitMerge, commandSessionStop, daemonclient.CommandWorktreeRemove, daemonclient.CommandTaskUpdateStatus} {
+	for _, unexpected := range []string{daemonclient.CommandGitMerge, daemonclient.CommandTaskClose, daemonclient.CommandTaskClosePreflight, commandSessionStop, daemonclient.CommandWorktreeRemove, daemonclient.CommandTaskUpdateStatus} {
 		if containsString(*commands, unexpected) {
 			t.Fatalf("commands = %+v, did not expect %s", *commands, unexpected)
 		}
@@ -798,7 +803,7 @@ func TestOrchestrateIntegrateApplyMergeFailureStopsBeforeCleanup(t *testing.T) {
 	if !strings.Contains(output, "merge: failed") || !strings.Contains(output, "az branch merge az-2") {
 		t.Fatalf("output missing merge failure recovery:\n%s", output)
 	}
-	if containsString(*commands, commandSessionStop) || containsString(*commands, daemonclient.CommandWorktreeRemove) || containsString(*commands, daemonclient.CommandTaskUpdateStatus) {
+	if containsString(*commands, daemonclient.CommandTaskClose) || containsString(*commands, daemonclient.CommandTaskClosePreflight) || containsString(*commands, commandSessionStop) || containsString(*commands, daemonclient.CommandWorktreeRemove) || containsString(*commands, daemonclient.CommandTaskUpdateStatus) {
 		t.Fatalf("commands = %+v, cleanup should not run after merge failure", *commands)
 	}
 }
@@ -814,24 +819,29 @@ func TestOrchestrateIntegrateApplyTreatsNonSuccessfulMergeResultAsFailure(t *tes
 	if !strings.Contains(output, `"applied": false`) || !strings.Contains(output, "README.md") || !strings.Contains(output, `"name": "merge"`) {
 		t.Fatalf("output missing merge result failure:\n%s", output)
 	}
-	if containsString(*commands, commandSessionStop) || containsString(*commands, daemonclient.CommandWorktreeRemove) || containsString(*commands, daemonclient.CommandTaskUpdateStatus) {
+	if containsString(*commands, daemonclient.CommandTaskClose) || containsString(*commands, daemonclient.CommandTaskClosePreflight) || containsString(*commands, commandSessionStop) || containsString(*commands, daemonclient.CommandWorktreeRemove) || containsString(*commands, daemonclient.CommandTaskUpdateStatus) {
 		t.Fatalf("commands = %+v, cleanup should not run after non-successful merge result", *commands)
 	}
 }
 
-func TestOrchestrateIntegrateApplyReportsPartialCloseFailures(t *testing.T) {
+func TestOrchestrateIntegrateApplyReportsDaemonCloseFailure(t *testing.T) {
 	deps, commands := orchestrateIntegrateApplyDeps(t, "close_issue")
 	output, err := captureStdoutAllowError(t, func() error {
 		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2", Apply: true})
 	})
 	if err == nil {
-		t.Fatal("expected partial cleanup failure")
+		t.Fatal("expected daemon close failure")
 	}
-	if !strings.Contains(output, "close_issue: failed") || !strings.Contains(output, "Recovery:") {
-		t.Fatalf("output missing partial close failure:\n%s", output)
+	if !strings.Contains(output, "close_task: failed") || !strings.Contains(output, "Recovery:") {
+		t.Fatalf("output missing daemon close failure:\n%s", output)
 	}
-	if !containsString(*commands, commandSessionStop) || !containsString(*commands, daemonclient.CommandWorktreeRemove) || !containsString(*commands, daemonclient.CommandTaskAppendNotes) {
-		t.Fatalf("commands = %+v, want cleanup continuation after close failure", *commands)
+	if !containsString(*commands, daemonclient.CommandTaskClose) || containsString(*commands, daemonclient.CommandTaskAppendNotes) {
+		t.Fatalf("commands = %+v, want daemon close without append after close failure", *commands)
+	}
+	for _, unexpected := range []string{daemonclient.CommandTaskClosePreflight, commandSessionStop, daemonclient.CommandWorktreeRemove, daemonclient.CommandTaskUpdateStatus} {
+		if containsString(*commands, unexpected) {
+			t.Fatalf("commands = %+v, did not expect client-side cleanup command %s", *commands, unexpected)
+		}
 	}
 }
 
@@ -918,34 +928,17 @@ func orchestrateIntegrateApplyDeps(t *testing.T, failStep string) (*Dependencies
 						Branch:   "user/az-2/worker",
 						Result:   gitservice.MergeResult{Success: true},
 					}), nil
-				case daemonclient.CommandTaskClosePreflight:
-					return responseWithJSON(req, map[string]any{
-						"task": map[string]any{
-							"id":               child.String(),
-							"title":            "Worker",
-							"status":           "closed",
-							"has_tmux_session": true,
-							"has_worktree":     true,
-							"session": map[string]any{
-								"issue_id": child.String(),
-								"worktree": "/repo-az-2",
-							},
-						},
-						"worktree": "/repo-az-2",
-						"status":   map[string]any{},
-					}), nil
-				case commandSessionStop:
-					return responseWithOutput(req, "stopped\n"), nil
-				case daemonclient.CommandWorktreeRemove:
-					if failStep == "remove_worktree" {
-						return protocol.ResponseEnvelope{}, fmt.Errorf("remove worktree failed")
-					}
-					return responseWithJSON(req, map[string]any{}), nil
-				case daemonclient.CommandTaskUpdateStatus:
+				case daemonclient.CommandTaskClose:
 					if failStep == "close_issue" {
 						return protocol.ResponseEnvelope{}, fmt.Errorf("close failed")
 					}
-					return responseWithJSON(req, map[string]any{}), nil
+					return responseWithJSON(req, daemonclient.TaskCloseResult{
+						TaskID:          child.String(),
+						Status:          string(domain.StatusDone),
+						SessionStopped:  true,
+						WorktreeRemoved: true,
+						Revision:        3,
+					}), nil
 				case daemonclient.CommandTaskAppendNotes:
 					return responseWithJSON(req, map[string]any{}), nil
 				default:

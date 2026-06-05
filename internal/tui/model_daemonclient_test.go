@@ -582,7 +582,9 @@ func TestTaskStatusExactKeyUsesDaemonClient(t *testing.T) {
 }
 
 func TestTaskStatusDoneRequiresCloseCleanupConfirmation(t *testing.T) {
-	var statusBody daemonclient.TaskStatusRequest
+	var closeBody struct {
+		TaskID string `json:"task_id"`
+	}
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			if req.Command == daemonclient.CommandTaskList {
@@ -641,17 +643,25 @@ func TestTaskStatusDoneRequiresCloseCleanupConfirmation(t *testing.T) {
 					Body:            respBody,
 				}, nil
 			}
-			if req.Command != daemonclient.CommandTaskUpdateStatus {
+			if req.Command != daemonclient.CommandTaskClose {
 				t.Fatalf("unexpected command: %s", req.Command)
 			}
-			if err := json.Unmarshal(req.Body, &statusBody); err != nil {
-				t.Fatalf("unmarshal status request: %v", err)
+			if err := json.Unmarshal(req.Body, &closeBody); err != nil {
+				t.Fatalf("unmarshal close request: %v", err)
+			}
+			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
+				TaskID: "az-4",
+				Status: string(domain.StatusDone),
+			})
+			if err != nil {
+				t.Fatalf("marshal close response: %v", err)
 			}
 			return protocol.ResponseEnvelope{
 				ProtocolVersion: req.ProtocolVersion,
 				RequestID:       req.RequestID,
 				Kind:            protocol.EnvelopeKindResponse,
 				OK:              true,
+				Body:            respBody,
 			}, nil
 		},
 	}
@@ -702,13 +712,12 @@ func TestTaskStatusDoneRequiresCloseCleanupConfirmation(t *testing.T) {
 	if status.previousStatus != domain.StatusInReview || status.newStatus != domain.StatusDone || status.err != nil {
 		t.Fatalf("status result = %#v", status)
 	}
-	if statusBody.TaskID != "az-4" || statusBody.Status != domain.StatusDone {
-		t.Fatalf("status body = %+v, want az-4 -> done", statusBody)
+	if closeBody.TaskID != "az-4" {
+		t.Fatalf("close body = %+v, want az-4", closeBody)
 	}
-	if got := transport.requests; len(got) != 3 ||
+	if got := transport.requests; len(got) != 2 ||
 		got[0] != daemonclient.CommandWorktreeList ||
-		got[1] != daemonclient.CommandTaskClosePreflight ||
-		got[2] != daemonclient.CommandTaskUpdateStatus {
+		got[1] != daemonclient.CommandTaskClose {
 		t.Fatalf("daemon requests after confirmation = %v", got)
 	}
 }
@@ -763,12 +772,20 @@ func TestTaskStatusDoneSuccessKeepsOptimisticOverlayAcrossStaleHydration(t *test
 					OK:              true,
 					Body:            respBody,
 				}, nil
-			case daemonclient.CommandTaskUpdateStatus:
+			case daemonclient.CommandTaskClose:
+				respBody, err := json.Marshal(daemonclient.TaskCloseResult{
+					TaskID: "az-4",
+					Status: string(domain.StatusDone),
+				})
+				if err != nil {
+					t.Fatalf("marshal close response: %v", err)
+				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
+					Body:            respBody,
 				}, nil
 			default:
 				t.Fatalf("unexpected command: %s", req.Command)
@@ -8599,11 +8616,27 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 						OK:              true,
 						Body:            respBody,
 					}, nil
-				case daemonclient.CommandTaskUpdateStatus:
-					var body daemonclient.TaskStatusRequest
-					if err := json.Unmarshal(req.Body, &body); err != nil {
-						t.Fatalf("unmarshal status request: %v", err)
+				case daemonclient.CommandTaskClose:
+					var body struct {
+						TaskID string `json:"task_id"`
 					}
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal close request: %v", err)
+					}
+					respBody, err := json.Marshal(daemonclient.TaskCloseResult{
+						TaskID: body.TaskID,
+						Status: string(domain.StatusDone),
+					})
+					if err != nil {
+						t.Fatalf("marshal close response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            respBody,
+					}, nil
 				case daemonclient.CommandTaskList:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -8655,18 +8688,16 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 			t.Fatalf("bulk archive result = %#v", archiveMsg)
 		}
 
-		if got := transport.requests; len(got) != 9 {
+		if got := transport.requests; len(got) != 7 {
 			t.Fatalf("requests = %v", got)
 		}
 		if transport.requests[0] != daemonclient.CommandWorktreeList ||
-			transport.requests[1] != daemonclient.CommandTaskClosePreflight ||
-			transport.requests[2] != daemonclient.CommandTaskUpdateStatus ||
-			transport.requests[3] != daemonclient.CommandWorktreeList ||
-			transport.requests[4] != daemonclient.CommandTaskClosePreflight ||
-			transport.requests[5] != daemonclient.CommandTaskUpdateStatus ||
-			transport.requests[6] != daemonclient.CommandTaskDelete ||
-			transport.requests[7] != daemonclient.CommandTaskDelete ||
-			transport.requests[8] != daemonclient.CommandTaskArchive {
+			transport.requests[1] != daemonclient.CommandTaskClose ||
+			transport.requests[2] != daemonclient.CommandWorktreeList ||
+			transport.requests[3] != daemonclient.CommandTaskClose ||
+			transport.requests[4] != daemonclient.CommandTaskDelete ||
+			transport.requests[5] != daemonclient.CommandTaskDelete ||
+			transport.requests[6] != daemonclient.CommandTaskArchive {
 			t.Fatalf("requests = %v", transport.requests)
 		}
 	})
@@ -8792,7 +8823,9 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 	})
 
 	t.Run("bulk done requires integrate and close confirmation", func(t *testing.T) {
-		statusBodies := make([]daemonclient.TaskStatusRequest, 0, 2)
+		closeBodies := make([]struct {
+			TaskID string `json:"task_id"`
+		}, 0, 2)
 		transport := &recordingDaemonTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				if req.Command == daemonclient.CommandWorktreeList {
@@ -8834,19 +8867,29 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 						}),
 					}, nil
 				}
-				if req.Command != daemonclient.CommandTaskUpdateStatus {
+				if req.Command != daemonclient.CommandTaskClose {
 					t.Fatalf("unexpected command: %s", req.Command)
 				}
-				var body daemonclient.TaskStatusRequest
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal status request: %v", err)
+				var body struct {
+					TaskID string `json:"task_id"`
 				}
-				statusBodies = append(statusBodies, body)
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal close request: %v", err)
+				}
+				closeBodies = append(closeBodies, body)
+				respBody, err := json.Marshal(daemonclient.TaskCloseResult{
+					TaskID: body.TaskID,
+					Status: string(domain.StatusDone),
+				})
+				if err != nil {
+					t.Fatalf("marshal close response: %v", err)
+				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
+					Body:            respBody,
 				}, nil
 			},
 		}
@@ -8892,21 +8935,19 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		if result.updated != 2 || result.failed != 0 {
 			t.Fatalf("bulk result = %+v, want 2 updated", result)
 		}
-		if len(statusBodies) != 2 {
-			t.Fatalf("status bodies = %+v, want 2 updates", statusBodies)
+		if len(closeBodies) != 2 {
+			t.Fatalf("close bodies = %+v, want 2 closes", closeBodies)
 		}
-		for _, body := range statusBodies {
-			if body.Status != domain.StatusDone {
-				t.Fatalf("status body = %+v, want done", body)
+		for _, body := range closeBodies {
+			if body.TaskID == "" {
+				t.Fatalf("close body = %+v, want task id", body)
 			}
 		}
-		if got := transport.requests; len(got) != 6 ||
+		if got := transport.requests; len(got) != 4 ||
 			got[0] != daemonclient.CommandWorktreeList ||
-			got[1] != daemonclient.CommandTaskClosePreflight ||
-			got[2] != daemonclient.CommandTaskUpdateStatus ||
-			got[3] != daemonclient.CommandWorktreeList ||
-			got[4] != daemonclient.CommandTaskClosePreflight ||
-			got[5] != daemonclient.CommandTaskUpdateStatus {
+			got[1] != daemonclient.CommandTaskClose ||
+			got[2] != daemonclient.CommandWorktreeList ||
+			got[3] != daemonclient.CommandTaskClose {
 			t.Fatalf("requests = %v", got)
 		}
 	})

@@ -1214,6 +1214,84 @@ func TestTaskClosePreflightBlocksDirtyWorktreeInDaemonPolicy(t *testing.T) {
 	}
 }
 
+func TestTaskCloseCommandUpdatesStatusThroughDaemon(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-close"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Close me",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if err := issuesClient.Update(ctx, taskID, domain.StatusInReview); err != nil {
+		t.Fatalf("update task: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
+		hub: publish.NewHub(16, 8, slog.Default()),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+		revision: map[string]uint64{},
+	}
+	body, err := json.Marshal(taskCloseRequest{TaskID: taskID})
+	if err != nil {
+		t.Fatalf("marshal close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.close",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("handleTaskClose response = %+v", resp)
+	}
+	var result taskCloseResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal close response: %v", err)
+	}
+	if result.TaskID != taskID || result.Status != string(domain.StatusDone) || result.Revision == 0 {
+		t.Fatalf("close result = %+v", result)
+	}
+	tasks, err := issuesClient.List(ctx)
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	var task domain.Task
+	found := false
+	for _, candidate := range tasks {
+		if candidate.ID.String() == taskID {
+			task = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("task not found after close: %s", taskID)
+	}
+	if task.Status != domain.StatusDone {
+		t.Fatalf("task status = %s, want done", task.Status)
+	}
+}
+
 func TestTaskUpdateStatusClosePreflightBlocksActiveRuntime(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

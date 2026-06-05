@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -636,22 +635,20 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				assertTaskProjectID(t, req, wantProjectID)
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case CommandTaskClosePreflight:
-					return closePreflightResponse(t, req, domain.Task{
-						ID:             "az-3",
-						Title:          "Close me",
-						Status:         domain.StatusInReview,
-						Session:        &domain.Session{IssueID: "az-3", Worktree: "/tmp/az-3"},
-						HasTmuxSession: true,
-						HasWorktree:    true,
-					}, GitStatus{HasChanges: false}), nil
-				case CommandSessionStop, CommandWorktreeRemove, CommandTaskUpdateStatus:
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						OK:              true,
-					}, nil
+				case CommandTaskClose:
+					var body taskCloseRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal close request: %v", err)
+					}
+					if body.TaskID != "az-3" {
+						t.Fatalf("close body = %+v", body)
+					}
+					return responseWithJSON(t, req, TaskCloseResult{
+						TaskID:          "az-3",
+						Status:          string(domain.StatusDone),
+						SessionStopped:  true,
+						WorktreeRemoved: true,
+					}), nil
 				default:
 					t.Fatalf("unexpected command = %q", req.Command)
 					return protocol.ResponseEnvelope{}, nil
@@ -664,9 +661,43 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("UpdateTaskStatusWithOptions error: %v", err)
 		}
-		wantCommands := []string{CommandTaskClosePreflight, CommandSessionStop, CommandWorktreeRemove, CommandTaskUpdateStatus}
+		wantCommands := []string{CommandTaskClose}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
+		}
+	})
+
+	t.Run("close task command", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				if req.Command != CommandTaskClose {
+					t.Fatalf("command = %q, want %q", req.Command, CommandTaskClose)
+				}
+				var body taskCloseRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal close request: %v", err)
+				}
+				if body.TaskID != "az-3" || !body.ForceWorktree || !body.IgnoreAhead {
+					t.Fatalf("close body = %+v", body)
+				}
+				return responseWithJSON(t, req, TaskCloseResult{
+					TaskID:          "az-3",
+					Status:          string(domain.StatusDone),
+					SessionStopped:  true,
+					WorktreeRemoved: true,
+					WorktreeForced:  true,
+				}), nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		got, err := client.CloseTask(context.Background(), "az-3", TaskStatusOptions{ForceWorktree: true, IgnoreAhead: true})
+		if err != nil {
+			t.Fatalf("CloseTask error: %v", err)
+		}
+		if got.TaskID != "az-3" || got.Status != string(domain.StatusDone) || !got.WorktreeForced {
+			t.Fatalf("close result = %+v", got)
 		}
 	})
 
@@ -702,24 +733,8 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				assertTaskProjectID(t, req, wantProjectID)
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case CommandTaskClosePreflight:
-					return closePreflightResponse(t, req, domain.Task{
-						ID:             "az-3",
-						Title:          "Close me",
-						Status:         domain.StatusInReview,
-						Session:        &domain.Session{IssueID: "az-3", Worktree: "/tmp/az-3"},
-						HasTmuxSession: true,
-						HasWorktree:    true,
-					}, GitStatus{HasChanges: false}), nil
-				case CommandSessionStop:
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						OK:              true,
-					}, nil
-				case CommandWorktreeRemove:
-					return protocol.ResponseEnvelope{}, errors.New("dirty worktree")
+				case CommandTaskClose:
+					return responseWithCommandError(req, "remove worktree before closing az-3: dirty worktree"), nil
 				default:
 					t.Fatalf("unexpected command after cleanup failure = %q", req.Command)
 					return protocol.ResponseEnvelope{}, nil
@@ -732,53 +747,28 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "remove worktree before closing az-3") {
 			t.Fatalf("UpdateTaskStatusWithOptions error = %v, want worktree cleanup failure", err)
 		}
-		wantCommands := []string{CommandTaskClosePreflight, CommandSessionStop, CommandWorktreeRemove}
+		wantCommands := []string{CommandTaskClose}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
 		}
 	})
 
-	t.Run("status update recovers when worktree remove ack times out after operation completes", func(t *testing.T) {
+	t.Run("status update passes force flag to daemon close", func(t *testing.T) {
 		commands := []string{}
-		preflightCalls := 0
-		operationID := naming.OperationID("op-remove")
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				assertTaskProjectID(t, req, wantProjectID)
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case CommandTaskClosePreflight:
-					preflightCalls++
-					task := domain.Task{
-						ID:     "az-3",
-						Title:  "Close me",
-						Status: domain.StatusInReview,
+				case CommandTaskClose:
+					var body taskCloseRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal close request: %v", err)
 					}
-					if preflightCalls == 1 {
-						task.HasWorktree = true
+					if body.TaskID != "az-3" || !body.ForceWorktree {
+						t.Fatalf("close body = %+v, want force close for az-3", body)
 					}
-					return closePreflightResponse(t, req, task, GitStatus{}), nil
-				case CommandWorktreeRemove:
-					return protocol.ResponseEnvelope{}, errors.New("short_frame: read unix ->/tmp/daemon.sock: i/o timeout")
-				case protocol.CommandOperationList:
-					return responseWithJSON(t, req, protocol.OperationListResponseBody{
-						ProjectID: naming.ProjectID(wantProjectID),
-						Operations: []protocol.OperationRecord{{
-							OperationID: operationID,
-							ProjectID:   naming.ProjectID(wantProjectID),
-							Kind:        CommandWorktreeRemove,
-							IssueID:     naming.IssueID("az-3"),
-							State:       protocol.OperationStateDone,
-							EnqueuedAt:  time.Now(),
-						}},
-					}), nil
-				case CommandTaskUpdateStatus:
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						OK:              true,
-					}, nil
+					return responseWithJSON(t, req, TaskCloseResult{TaskID: "az-3", Status: string(domain.StatusDone), WorktreeForced: true}), nil
 				default:
 					t.Fatalf("unexpected command = %q", req.Command)
 					return protocol.ResponseEnvelope{}, nil
@@ -786,14 +776,12 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 			},
 		}
 
-		client := New(transport).
-			WithProjectID(wantProjectID).
-			WithReconnectPolicy(reconnect.Policy{MaxAttempts: 1, BaseBackoff: time.Millisecond, MaxBackoff: time.Millisecond})
+		client := New(transport).WithProjectID(wantProjectID)
 		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusDone, TaskStatusOptions{CleanupBeforeClose: true, ForceWorktree: true})
 		if err != nil {
 			t.Fatalf("UpdateTaskStatusWithOptions error: %v", err)
 		}
-		wantCommands := []string{CommandTaskClosePreflight, CommandWorktreeRemove, protocol.CommandOperationList, CommandTaskClosePreflight, CommandTaskUpdateStatus}
+		wantCommands := []string{CommandTaskClose}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
 		}
@@ -830,7 +818,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 						assertTaskProjectID(t, req, wantProjectID)
 						commands = append(commands, req.Command)
 						switch req.Command {
-						case CommandTaskClosePreflight:
+						case CommandTaskClose:
 							return responseWithCommandError(req, fmt.Sprintf("cannot close issue az-3: %s. Next: commit, discard, or merge the worktree changes first, then retry", tt.wantErr)), nil
 						default:
 							t.Fatalf("unexpected command after close guard failure = %q", req.Command)
@@ -844,7 +832,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) || !strings.Contains(err.Error(), "Next:") || !strings.Contains(err.Error(), "commit, discard, or merge the worktree changes first") {
 					t.Fatalf("UpdateTaskStatusWithOptions error = %v, want %q and recovery hint", err, tt.wantErr)
 				}
-				wantCommands := []string{CommandTaskClosePreflight}
+				wantCommands := []string{CommandTaskClose}
 				if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 					t.Fatalf("commands = %v, want %v", commands, wantCommands)
 				}
@@ -859,22 +847,15 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				assertTaskProjectID(t, req, wantProjectID)
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case CommandTaskClosePreflight:
-					return closePreflightResponse(t, req, domain.Task{
-						ID:             "az-3",
-						Title:          "Close me",
-						Status:         domain.StatusInReview,
-						Session:        &domain.Session{IssueID: "az-3", Worktree: "/tmp/az-3"},
-						HasTmuxSession: true,
-						HasWorktree:    true,
-					}, GitStatus{GitAheadCount: 935}), nil
-				case CommandSessionStop, CommandWorktreeRemove, CommandTaskUpdateStatus:
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						OK:              true,
-					}, nil
+				case CommandTaskClose:
+					var body taskCloseRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal close request: %v", err)
+					}
+					if !body.IgnoreAhead {
+						t.Fatalf("close body = %+v, want ignore_ahead", body)
+					}
+					return responseWithJSON(t, req, TaskCloseResult{TaskID: "az-3", Status: string(domain.StatusDone)}), nil
 				default:
 					t.Fatalf("unexpected command = %q", req.Command)
 					return protocol.ResponseEnvelope{}, nil
@@ -890,7 +871,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("UpdateTaskStatusWithOptions error: %v", err)
 		}
-		wantCommands := []string{CommandTaskClosePreflight, CommandSessionStop, CommandWorktreeRemove, CommandTaskUpdateStatus}
+		wantCommands := []string{CommandTaskClose}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
 		}
@@ -905,7 +886,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				assertTaskProjectID(t, req, wantProjectID)
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case CommandTaskClosePreflight:
+				case CommandTaskClose:
 					message := fmt.Sprintf("cannot close issue az-3: unresolved child issues remain: %s (worktree); %s (open). Next: close or clean up the listed child issues first, then retry. Moved closed blockers back for cleanup: %s -> in_review", childID, grandchildID, childID)
 					return responseWithCommandError(req, message), nil
 				default:
@@ -920,7 +901,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "unresolved child issues remain") || !strings.Contains(err.Error(), "az-4 (worktree)") || !strings.Contains(err.Error(), "az-5 (open)") || !strings.Contains(err.Error(), "close or clean up the listed child issues first") || !strings.Contains(err.Error(), "Moved closed blockers back for cleanup: az-4 -> in_review") || strings.Contains(err.Error(), "az issue close --id az-3 --cleanup") {
 			t.Fatalf("UpdateTaskStatusWithOptions error = %v, want child close guard", err)
 		}
-		wantCommands := []string{CommandTaskClosePreflight}
+		wantCommands := []string{CommandTaskClose}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
 		}
@@ -933,7 +914,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				assertTaskProjectID(t, req, wantProjectID)
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case CommandTaskClosePreflight:
+				case CommandTaskClose:
 					return responseWithCommandError(req, "cannot close issue az-3: worktree has local changes: main.go. Next: commit, discard, or merge the worktree changes first, then retry. Moved closed blockers back for cleanup: az-3 -> in_progress"), nil
 				default:
 					t.Fatalf("unexpected command after close guard failure = %q", req.Command)
@@ -947,7 +928,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "worktree has local changes: main.go") || !strings.Contains(err.Error(), "Moved closed blockers back for cleanup: az-3 -> in_progress") {
 			t.Fatalf("UpdateTaskStatusWithOptions error = %v, want dirty guard and status repair", err)
 		}
-		wantCommands := []string{CommandTaskClosePreflight}
+		wantCommands := []string{CommandTaskClose}
 		if strings.Join(commands, ",") != strings.Join(wantCommands, ",") {
 			t.Fatalf("commands = %v, want %v", commands, wantCommands)
 		}

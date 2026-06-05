@@ -206,6 +206,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		commandTaskGet,
 		commandTaskGetMany,
 		commandTaskCreate,
+		commandTaskClose,
 		commandTaskClosePreflight,
 		commandTaskDeletePreflight,
 		commandTaskGraphReadiness,

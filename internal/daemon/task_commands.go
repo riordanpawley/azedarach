@@ -92,6 +92,21 @@ type taskClosePreflightRequest struct {
 	taskClosePreflightOptions
 }
 
+type taskCloseRequest struct {
+	TaskID        string `json:"task_id"`
+	ForceWorktree bool   `json:"force_worktree,omitempty"`
+	IgnoreAhead   bool   `json:"ignore_ahead,omitempty"`
+}
+
+type taskCloseResult struct {
+	TaskID          string `json:"task_id"`
+	Status          string `json:"status"`
+	SessionStopped  bool   `json:"session_stopped,omitempty"`
+	WorktreeRemoved bool   `json:"worktree_removed,omitempty"`
+	WorktreeForced  bool   `json:"worktree_forced,omitempty"`
+	Revision        uint64 `json:"revision,omitempty"`
+}
+
 type taskClosePreflightResult struct {
 	Task     domain.Task   `json:"task"`
 	Worktree string        `json:"worktree,omitempty"`
@@ -1090,6 +1105,92 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 		d.cfg.Logger.Info("daemon task status update completed", "project_id", projectID, "task_id", cmd.TaskID, "status", cmd.Status, "revision", resp.Revision)
 	}
 	return resp, nil
+}
+
+func (d *Daemon) handleTaskClose(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
+	var cmd taskCloseRequest
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	result, err := d.closeTask(ctx, projectID, cmd, req)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	body, err := json.Marshal(result)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	resp := d.successResponse(req)
+	resp.Body = body
+	resp.Revision = result.Revision
+	return resp, nil
+}
+
+func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseRequest, req protocol.RequestEnvelope) (taskCloseResult, error) {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return taskCloseResult{}, fmt.Errorf("issue store unavailable")
+	}
+	taskID := strings.TrimSpace(cmd.TaskID)
+	if taskID == "" {
+		return taskCloseResult{}, fmt.Errorf("task id is required")
+	}
+	guard, err := d.validateTaskClosePreflight(ctx, projectID, taskID, taskClosePreflightOptions{
+		AllowTargetSession:  true,
+		AllowTargetWorktree: true,
+		ForceWorktree:       cmd.ForceWorktree,
+		IgnoreAhead:         cmd.IgnoreAhead,
+	}, req)
+	if err != nil {
+		return taskCloseResult{}, err
+	}
+
+	result := taskCloseResult{
+		TaskID:         taskID,
+		Status:         string(domain.StatusDone),
+		WorktreeForced: cmd.ForceWorktree,
+	}
+	if daemonCloseGuardTaskHasSession(guard.Task) {
+		if err := d.stopTaskSessionForClose(ctx, req, projectID, taskID); err != nil {
+			return result, fmt.Errorf("stop session before closing %s: %w", taskID, err)
+		}
+		result.SessionStopped = true
+	}
+	if daemonCloseGuardTaskHasWorktree(guard.Task) {
+		if d.worktreeAdapter == nil {
+			return result, fmt.Errorf("remove worktree before closing %s: worktree cleanup unavailable", taskID)
+		}
+		if err := d.worktreeAdapter.Delete(ctx, projectID, taskID, cmd.ForceWorktree); err != nil {
+			return result, fmt.Errorf("remove worktree before closing %s: %w", taskID, err)
+		}
+		result.WorktreeRemoved = true
+	}
+
+	task, err := issueClient.UpdateWithRuntime(ctx, projectID, taskID, domain.StatusDone)
+	if err != nil {
+		return result, err
+	}
+	rev := d.nextRevision(projectID)
+	result.Revision = rev
+	d.publishTaskEvent(req, protocol.EventTaskUpdated, rev, taskEventBodyFromTask(projectID, task))
+	return result, nil
+}
+
+func (d *Daemon) stopTaskSessionForClose(ctx context.Context, req protocol.RequestEnvelope, projectID, taskID string) error {
+	body, err := json.Marshal(sessionCommandBody{
+		ProjectID: projectID,
+		SessionID: taskID,
+	})
+	if err != nil {
+		return err
+	}
+	stopReq := req
+	stopReq.Command = "session.stop"
+	stopReq.Body = body
+	stopReq.Meta.ProjectID = naming.ProjectID(projectID)
+	resp, err := d.handleSessionStopDirect(ctx, stopReq)
+	return cleanupCommandError(resp, err)
 }
 
 func (d *Daemon) updateTaskStatusWithClosePreflight(ctx context.Context, projectID, taskID string, status domain.Status, req protocol.RequestEnvelope) (domain.Task, error) {
