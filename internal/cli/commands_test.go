@@ -6774,7 +6774,10 @@ func TestIssueDeleteCommandBlocksWhenRuntimeAttachmentsPresent(t *testing.T) {
 func TestIssueDeleteCommandCleansRuntimeAttachmentsBeforeDelete(t *testing.T) {
 	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	commands := []string{}
-	var removeWorktreeForce bool
+	var deleteCleanup bool
+	var deleteStopSession bool
+	var deleteRemoveWorktree bool
+	var deleteForceWorktree bool
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
@@ -6809,16 +6812,31 @@ func TestIssueDeleteCommandCleansRuntimeAttachmentsBeforeDelete(t *testing.T) {
 						Revision:        2,
 						Body:            body,
 					}, nil
-				case commandSessionStop:
-					return responseWithOutput(req, "✓ Session marked stopped: az-1\n"), nil
-				case daemonclient.CommandWorktreeRemove:
+				case daemonclient.CommandTaskDelete:
 					var body struct {
-						Force bool `json:"force"`
+						Cleanup        bool `json:"cleanup"`
+						StopSession    bool `json:"stop_session"`
+						RemoveWorktree bool `json:"remove_worktree"`
+						ForceWorktree  bool `json:"force_worktree"`
 					}
 					if err := json.Unmarshal(req.Body, &body); err != nil {
-						t.Fatalf("unmarshal worktree remove body: %v", err)
+						t.Fatalf("unmarshal task delete body: %v", err)
 					}
-					removeWorktreeForce = body.Force
+					deleteCleanup = body.Cleanup
+					deleteStopSession = body.StopSession
+					deleteRemoveWorktree = body.RemoveWorktree
+					deleteForceWorktree = body.ForceWorktree
+					respBody, err := json.Marshal(daemonclient.TaskDeleteResult{
+						TaskID:          "az-1",
+						Deleted:         true,
+						SessionStopped:  true,
+						WorktreeRemoved: true,
+						WorktreeForced:  true,
+						Revision:        3,
+					})
+					if err != nil {
+						t.Fatalf("marshal task delete response: %v", err)
+					}
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
@@ -6826,15 +6844,7 @@ func TestIssueDeleteCommandCleansRuntimeAttachmentsBeforeDelete(t *testing.T) {
 						Meta:            req.Meta,
 						OK:              true,
 						CompletedAt:     req.SentAt,
-					}, nil
-				case daemonclient.CommandTaskDelete:
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						Meta:            req.Meta,
-						OK:              true,
-						CompletedAt:     req.SentAt,
+						Body:            respBody,
 					}, nil
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
@@ -6858,15 +6868,13 @@ func TestIssueDeleteCommandCleansRuntimeAttachmentsBeforeDelete(t *testing.T) {
 
 	wantCommands := []string{
 		daemonclient.CommandTaskDeletePreflight,
-		commandSessionStop,
-		daemonclient.CommandWorktreeRemove,
 		daemonclient.CommandTaskDelete,
 	}
 	if !reflect.DeepEqual(commands, wantCommands) {
 		t.Fatalf("commands = %v, want %v", commands, wantCommands)
 	}
-	if !removeWorktreeForce {
-		t.Fatal("worktree remove force = false, want true")
+	if deleteCleanup || !deleteStopSession || !deleteRemoveWorktree || !deleteForceWorktree {
+		t.Fatalf("task delete cleanup flags cleanup=%v stop=%v remove=%v force=%v, want stop/remove/force only", deleteCleanup, deleteStopSession, deleteRemoveWorktree, deleteForceWorktree)
 	}
 	for _, want := range []string{"Deleted issue: az-1", "- Session stopped", "- Worktree removed", "- Worktree removal forced"} {
 		if !strings.Contains(output, want) {

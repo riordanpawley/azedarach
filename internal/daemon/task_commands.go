@@ -98,9 +98,26 @@ type taskCloseRequest struct {
 	IgnoreAhead   bool   `json:"ignore_ahead,omitempty"`
 }
 
+type taskDeleteRequest struct {
+	TaskID         string `json:"task_id"`
+	Cleanup        bool   `json:"cleanup,omitempty"`
+	StopSession    bool   `json:"stop_session,omitempty"`
+	RemoveWorktree bool   `json:"remove_worktree,omitempty"`
+	ForceWorktree  bool   `json:"force_worktree,omitempty"`
+}
+
 type taskCloseResult struct {
 	TaskID          string `json:"task_id"`
 	Status          string `json:"status"`
+	SessionStopped  bool   `json:"session_stopped,omitempty"`
+	WorktreeRemoved bool   `json:"worktree_removed,omitempty"`
+	WorktreeForced  bool   `json:"worktree_forced,omitempty"`
+	Revision        uint64 `json:"revision,omitempty"`
+}
+
+type taskDeleteResult struct {
+	TaskID          string `json:"task_id"`
+	Deleted         bool   `json:"deleted"`
 	SessionStopped  bool   `json:"session_stopped,omitempty"`
 	WorktreeRemoved bool   `json:"worktree_removed,omitempty"`
 	WorktreeForced  bool   `json:"worktree_forced,omitempty"`
@@ -2350,36 +2367,98 @@ func (d *Daemon) handleTaskDelete(ctx context.Context, req protocol.RequestEnvel
 	if issueClient == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
-	var cmd struct {
-		TaskID string `json:"task_id"`
-	}
+	var cmd taskDeleteRequest
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task delete requested", "project_id", projectID, "task_id", cmd.TaskID)
 	}
-	preflight, err := d.validateTaskDeletePreflight(ctx, projectID, cmd.TaskID)
+	result, err := d.deleteTask(ctx, issueClient, projectID, cmd, req)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	if len(preflight.Blockers) > 0 {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("cannot delete issue %s: active runtime attachments detected (%s)", cmd.TaskID, strings.Join(preflight.Blockers, ", "))), nil
-	}
-	if err := issueClient.Delete(ctx, cmd.TaskID); err != nil {
+	body, err := json.Marshal(result)
+	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp := d.successResponse(req)
-	resp.Revision = d.nextRevision(projectID)
-	d.publishTaskEvent(req, protocol.EventTaskDeleted, resp.Revision, protocol.TaskEventBody{
-		ProjectID: naming.ProjectID(projectID),
-		TaskID:    naming.IssueID(cmd.TaskID),
-		UpdatedAt: timeNow().UTC(),
-	})
+	resp.Body = body
+	resp.Revision = result.Revision
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task delete completed", "project_id", projectID, "task_id", cmd.TaskID, "revision", resp.Revision)
 	}
 	return resp, nil
+}
+
+func (d *Daemon) deleteTask(ctx context.Context, issueClient *issues.Client, projectID string, cmd taskDeleteRequest, req protocol.RequestEnvelope) (taskDeleteResult, error) {
+	taskID := strings.TrimSpace(cmd.TaskID)
+	if taskID == "" {
+		return taskDeleteResult{}, fmt.Errorf("task id is required")
+	}
+	preflight, err := d.validateTaskDeletePreflight(ctx, projectID, taskID)
+	if err != nil {
+		return taskDeleteResult{}, err
+	}
+	result := taskDeleteResult{
+		TaskID:         taskID,
+		Deleted:        true,
+		WorktreeForced: cmd.ForceWorktree,
+	}
+	if len(preflight.Blockers) > 0 {
+		missing := daemonTaskDeleteMissingCleanupOptions(preflight.Blockers, cmd)
+		if len(missing) > 0 {
+			return result, fmt.Errorf(
+				"cannot delete issue %s: active runtime attachments detected (%s); rerun with %s or use cleanup",
+				taskID,
+				strings.Join(preflight.Blockers, ", "),
+				strings.Join(missing, " "),
+			)
+		}
+		if daemonCloseGuardTaskHasSession(preflight.Task) {
+			if err := d.stopTaskSessionForClose(ctx, req, projectID, taskID); err != nil {
+				return result, fmt.Errorf("stop session before deleting %s: %w", taskID, err)
+			}
+			result.SessionStopped = true
+		}
+		if daemonCloseGuardTaskHasWorktree(preflight.Task) {
+			if d.worktreeAdapter == nil {
+				return result, fmt.Errorf("remove worktree before deleting %s: worktree cleanup unavailable", taskID)
+			}
+			if err := d.worktreeAdapter.Delete(ctx, projectID, taskID, cmd.ForceWorktree); err != nil {
+				return result, fmt.Errorf("remove worktree before deleting %s: %w", taskID, err)
+			}
+			result.WorktreeRemoved = true
+		}
+	}
+	if err := issueClient.Delete(ctx, taskID); err != nil {
+		return result, err
+	}
+	result.Revision = d.nextRevision(projectID)
+	d.publishTaskEvent(req, protocol.EventTaskDeleted, result.Revision, protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(projectID),
+		TaskID:    naming.IssueID(taskID),
+		UpdatedAt: timeNow().UTC(),
+	})
+	return result, nil
+}
+
+func daemonTaskDeleteMissingCleanupOptions(blockers []string, cmd taskDeleteRequest) []string {
+	cleanupAll := cmd.Cleanup
+	missing := make([]string, 0, len(blockers))
+	for _, blocker := range blockers {
+		switch blocker {
+		case "session":
+			if !cleanupAll && !cmd.StopSession {
+				missing = append(missing, "stop_session")
+			}
+		case "worktree":
+			if !cleanupAll && !cmd.RemoveWorktree {
+				missing = append(missing, "remove_worktree")
+			}
+		}
+	}
+	return missing
 }
 
 func (d *Daemon) handleTaskArchive(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

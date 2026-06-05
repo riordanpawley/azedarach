@@ -3142,6 +3142,37 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: fmt.Errorf("daemon client unavailable")}
 		}
 
+		if deleteTask {
+			deleteCtx, deleteCancel := context.WithTimeout(context.Background(), worktreeCleanupMutationTimeout)
+			_, err := m.daemonClient.DeleteTaskWithOptions(deleteCtx, taskID, daemonclient.TaskDeleteOptions{
+				Cleanup:       true,
+				ForceWorktree: force,
+			})
+			deleteCancel()
+			if err != nil {
+				if pending, ok := pendingOperationDetails(err); ok {
+					return worktreeCleanupResultMsg{
+						taskID:      taskID,
+						deletedTask: true,
+						force:       force,
+						operationID: pending.OperationID,
+						state:       pending.State,
+					}
+				}
+				if !force && isDirtyWorktreeRemovalError(err) {
+					return worktreeCleanupResultMsg{
+						taskID:      taskID,
+						deletedTask: true,
+						force:       force,
+						needsForce:  true,
+						reason:      strings.TrimSpace(err.Error()),
+					}
+				}
+				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: true, force: force, err: err}
+			}
+			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: true, force: force}
+		}
+
 		// Always ask daemon to stop first; local projection may be stale.
 		m.sessionMonitor.Stop(taskID)
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), worktreeCleanupMutationTimeout)
@@ -3176,15 +3207,6 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 				}
 			}
 			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: err}
-		}
-
-		if deleteTask {
-			deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			err := m.daemonClient.DeleteTask(deleteCtx, taskID)
-			deleteCancel()
-			if err != nil {
-				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: true, force: force, err: err}
-			}
 		}
 
 		return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force}
@@ -3917,6 +3939,23 @@ func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd
 				continue
 			}
 
+			if deleteTask {
+				deleteCtx, deleteCancel := context.WithTimeout(context.Background(), worktreeCleanupMutationTimeout)
+				_, err := m.daemonClient.DeleteTaskWithOptions(deleteCtx, taskID, daemonclient.TaskDeleteOptions{Cleanup: true})
+				deleteCancel()
+				if err != nil {
+					failed++
+					reason := err.Error()
+					if isDirtyWorktreeRemovalError(err) {
+						reason = fmt.Sprintf("%s (single-task cleanup supports force)", strings.TrimSpace(err.Error()))
+					}
+					issues = append(issues, bulkTaskIssue{taskID: taskID, reason: reason})
+					continue
+				}
+				updated++
+				continue
+			}
+
 			// Always ask daemon to stop first; local projection may be stale.
 			m.sessionMonitor.Stop(taskID)
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), worktreeCleanupMutationTimeout)
@@ -3939,17 +3978,6 @@ func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd
 				}
 				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: reason})
 				continue
-			}
-
-			if deleteTask {
-				deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 15*time.Second)
-				err := m.daemonClient.DeleteTask(deleteCtx, taskID)
-				deleteCancel()
-				if err != nil {
-					failed++
-					issues = append(issues, bulkTaskIssue{taskID: taskID, reason: err.Error()})
-					continue
-				}
 			}
 
 			updated++

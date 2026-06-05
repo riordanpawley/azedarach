@@ -4688,6 +4688,10 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 	})
 
 	t.Run("delete task and cleanup worktree", func(t *testing.T) {
+		var deleteBody struct {
+			TaskID  string `json:"task_id"`
+			Cleanup bool   `json:"cleanup"`
+		}
 		transport := &recordingDaemonTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
@@ -4713,8 +4717,10 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true},
 						}),
 					}, nil
-				case daemonclient.CommandSessionStop, daemonclient.CommandWorktreeRemove, daemonclient.CommandTaskDelete:
-					// expected commands
+				case daemonclient.CommandTaskDelete:
+					if err := json.Unmarshal(req.Body, &deleteBody); err != nil {
+						t.Fatalf("unmarshal task delete request: %v", err)
+					}
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
 				}
@@ -4788,12 +4794,13 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		if !result.deletedTask {
 			t.Fatalf("deletedTask = false, want true")
 		}
-		if got := transport.requests; len(got) != 5 ||
+		if deleteBody.TaskID != "az-1" || !deleteBody.Cleanup {
+			t.Fatalf("delete body = %+v, want az-1 cleanup", deleteBody)
+		}
+		if got := transport.requests; len(got) != 3 ||
 			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
 			got[1] != daemonclient.CommandTaskList ||
-			got[2] != daemonclient.CommandSessionStop ||
-			got[3] != daemonclient.CommandWorktreeRemove ||
-			got[4] != daemonclient.CommandTaskDelete {
+			got[2] != daemonclient.CommandTaskDelete {
 			t.Fatalf("requests = %v", got)
 		}
 	})
@@ -7542,23 +7549,14 @@ func TestBulkCleanupWorktreeUsesPerStepExtendedDaemonDeadlines(t *testing.T) {
 	if result.failed != 0 || result.updated != 1 {
 		t.Fatalf("bulk result = %+v, want one success", result)
 	}
-	if got := transport.requests; len(got) != 3 ||
-		got[0] != daemonclient.CommandSessionStop ||
-		got[1] != daemonclient.CommandWorktreeRemove ||
-		got[2] != daemonclient.CommandTaskDelete {
-		t.Fatalf("requests = %v, want stop/remove/delete", got)
+	if got := transport.requests; len(got) != 1 || got[0] != daemonclient.CommandTaskDelete {
+		t.Fatalf("requests = %v, want daemon task.delete cleanup", got)
 	}
-	if got := len(transport.commandBudgets); got != 3 {
-		t.Fatalf("command deadline count = %d, want 3", got)
+	if got := len(transport.commandBudgets); got != 1 {
+		t.Fatalf("command deadline count = %d, want 1", got)
 	}
 	if transport.commandBudgets[0] < worktreeCleanupMutationTimeout-10*time.Second {
-		t.Fatalf("stop budget = %s, want near %s", transport.commandBudgets[0], worktreeCleanupMutationTimeout)
-	}
-	if transport.commandBudgets[1] < worktreeCleanupMutationTimeout-10*time.Second {
-		t.Fatalf("remove budget = %s, want near %s", transport.commandBudgets[1], worktreeCleanupMutationTimeout)
-	}
-	if transport.commandBudgets[2] < 5*time.Second {
-		t.Fatalf("delete budget = %s, want explicit delete budget", transport.commandBudgets[2])
+		t.Fatalf("delete cleanup budget = %s, want near %s", transport.commandBudgets[0], worktreeCleanupMutationTimeout)
 	}
 }
 
@@ -8957,7 +8955,10 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 			IssueID string `json:"issue_id"`
 			Force   bool   `json:"force,omitempty"`
 		}, 0, 2)
-		deleteBodies := make([]daemonclient.TaskIDRequest, 0, 1)
+		deleteBodies := make([]struct {
+			TaskID  string `json:"task_id"`
+			Cleanup bool   `json:"cleanup"`
+		}, 0, 1)
 
 		transport := &recordingDaemonTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -8974,7 +8975,10 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 					}
 					removeBodies = append(removeBodies, body)
 				case daemonclient.CommandTaskDelete:
-					var body daemonclient.TaskIDRequest
+					var body struct {
+						TaskID  string `json:"task_id"`
+						Cleanup bool   `json:"cleanup"`
+					}
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal task delete request: %v", err)
 					}
@@ -9015,22 +9019,20 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 			t.Fatalf("delete+cleanup result = %+v", deleteAndCleanupResult)
 		}
 
-		if len(removeBodies) != 2 || removeBodies[0].IssueID != "az-1" || removeBodies[1].IssueID != "az-2" {
-			t.Fatalf("worktree remove bodies = %+v, want az-1 and az-2", removeBodies)
+		if len(removeBodies) != 1 || removeBodies[0].IssueID != "az-1" {
+			t.Fatalf("worktree remove bodies = %+v, want cleanup-only az-1", removeBodies)
 		}
-		if removeBodies[0].Force || removeBodies[1].Force {
+		if removeBodies[0].Force {
 			t.Fatalf("worktree remove force flag = %+v, want false", removeBodies)
 		}
-		if len(deleteBodies) != 1 || deleteBodies[0].TaskID != "az-2" {
-			t.Fatalf("delete bodies = %+v, want one delete for az-2", deleteBodies)
+		if len(deleteBodies) != 1 || deleteBodies[0].TaskID != "az-2" || !deleteBodies[0].Cleanup {
+			t.Fatalf("delete bodies = %+v, want one cleanup delete for az-2", deleteBodies)
 		}
 
-		if got := transport.requests; len(got) != 5 ||
+		if got := transport.requests; len(got) != 3 ||
 			got[0] != daemonclient.CommandSessionStop ||
 			got[1] != daemonclient.CommandWorktreeRemove ||
-			got[2] != daemonclient.CommandSessionStop ||
-			got[3] != daemonclient.CommandWorktreeRemove ||
-			got[4] != daemonclient.CommandTaskDelete {
+			got[2] != daemonclient.CommandTaskDelete {
 			t.Fatalf("requests = %v", got)
 		}
 	})

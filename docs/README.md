@@ -32,7 +32,7 @@ This directory primarily contains **developer/internal documentation**.
 - Current source-policy examples:
 - `session.start` conflict / `session.attach` target / `session.pause` and `session.resume` lifecycle targets / `session.stop` targets: `tmux`.
 - `session.recover` reconciliation: `hybrid` (projection intent + tmux runtime).
-- `task.close`, `task.close_preflight`, `task.delete_preflight`, `task.graph_readiness`, and `task.complete_check`: `hybrid` (durable issue graph/projection + live runtime attachment state).
+- `task.close`, `task.close_preflight`, `task.delete`, `task.delete_preflight`, `task.graph_readiness`, and `task.complete_check`: `hybrid` (durable issue graph/projection + live runtime attachment state).
 - `task.integration_readiness`: `projection` (durable issue projection + mailbox evidence).
 - `task.merge_base_target`: `projection` (durable issue graph + worktree projection).
 - `task.follow_on_merge_candidates`: `projection` (durable issue graph + worktree projection).

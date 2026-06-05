@@ -3554,12 +3554,9 @@ func IssueDeleteCommand(deps *Dependencies, opts IssueDeleteOptions) error {
 	if len(blockers) > 0 {
 		missing := issueDeleteMissingCleanupOptions(blockers, opts)
 		if len(missing) == 0 {
-			cleanup, err := cleanupIssueRuntimeAttachments(ctx, deps, opts, blockers)
+			cleanup, err := deleteIssueWithRuntimeCleanup(ctx, deps, opts)
 			if err != nil {
 				return err
-			}
-			if err := deps.DaemonClient.DeleteTask(ctx, opts.IssueID); err != nil {
-				return fmt.Errorf("failed to delete issue %s after cleanup: %w", opts.IssueID, err)
 			}
 			return printIssueDeleteResult(opts, cleanup)
 		}
@@ -3583,24 +3580,21 @@ type issueDeleteCleanupResult struct {
 	WorktreeForced  bool `json:"worktree_forced"`
 }
 
-func cleanupIssueRuntimeAttachments(ctx context.Context, deps *Dependencies, opts IssueDeleteOptions, blockers []string) (issueDeleteCleanupResult, error) {
-	result := issueDeleteCleanupResult{}
-	for _, blocker := range blockers {
-		switch blocker {
-		case "session":
-			if _, err := deps.DaemonClient.StopSession(ctx, opts.IssueID); err != nil {
-				return result, fmt.Errorf("failed to stop session for issue %s before delete: %w", opts.IssueID, err)
-			}
-			result.SessionStopped = true
-		case "worktree":
-			if err := deps.DaemonClient.RemoveWorktreeWithOptions(ctx, opts.IssueID, opts.ForceWorktree); err != nil {
-				return result, fmt.Errorf("failed to remove worktree for issue %s before delete: %w", opts.IssueID, err)
-			}
-			result.WorktreeRemoved = true
-			result.WorktreeForced = opts.ForceWorktree
-		}
+func deleteIssueWithRuntimeCleanup(ctx context.Context, deps *Dependencies, opts IssueDeleteOptions) (issueDeleteCleanupResult, error) {
+	result, err := deps.DaemonClient.DeleteTaskWithOptions(ctx, opts.IssueID, daemonclient.TaskDeleteOptions{
+		Cleanup:        opts.Cleanup,
+		StopSession:    opts.StopSession,
+		RemoveWorktree: opts.RemoveWorktree,
+		ForceWorktree:  opts.ForceWorktree,
+	})
+	if err != nil {
+		return issueDeleteCleanupResult{}, fmt.Errorf("failed to delete issue %s after cleanup: %w", opts.IssueID, err)
 	}
-	return result, nil
+	return issueDeleteCleanupResult{
+		SessionStopped:  result.SessionStopped,
+		WorktreeRemoved: result.WorktreeRemoved,
+		WorktreeForced:  result.WorktreeForced,
+	}, nil
 }
 
 func issueDeleteMissingCleanupOptions(blockers []string, opts IssueDeleteOptions) []string {

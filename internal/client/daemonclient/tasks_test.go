@@ -1035,6 +1035,46 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("delete with cleanup options", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				if req.Command != CommandTaskDelete {
+					t.Fatalf("command = %q, want %q", req.Command, CommandTaskDelete)
+				}
+				var body taskDeleteRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal delete request: %v", err)
+				}
+				if body.TaskID != "az-5" || !body.Cleanup || !body.StopSession || !body.RemoveWorktree || !body.ForceWorktree {
+					t.Fatalf("delete request = %+v, want cleanup/stop/remove/force", body)
+				}
+				return responseWithJSON(t, req, TaskDeleteResult{
+					TaskID:          "az-5",
+					Deleted:         true,
+					SessionStopped:  true,
+					WorktreeRemoved: true,
+					WorktreeForced:  true,
+					Revision:        12,
+				}), nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		got, err := client.DeleteTaskWithOptions(context.Background(), "az-5", TaskDeleteOptions{
+			Cleanup:        true,
+			StopSession:    true,
+			RemoveWorktree: true,
+			ForceWorktree:  true,
+		})
+		if err != nil {
+			t.Fatalf("DeleteTaskWithOptions error: %v", err)
+		}
+		if !got.Deleted || !got.SessionStopped || !got.WorktreeRemoved || !got.WorktreeForced || got.Revision != 12 {
+			t.Fatalf("delete result = %+v", got)
+		}
+	})
+
 	t.Run("integration readiness", func(t *testing.T) {
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

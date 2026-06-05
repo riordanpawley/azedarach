@@ -1888,6 +1888,71 @@ func TestTaskDeleteRuntimeBlockersAreDaemonOwned(t *testing.T) {
 	}
 }
 
+func TestTaskDeleteCommandDeletesThroughDaemon(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-delete"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Delete me",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
+		hub: publish.NewHub(16, 8, slog.Default()),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+		revision: map[string]uint64{},
+	}
+	body, err := json.Marshal(taskDeleteRequest{TaskID: taskID})
+	if err != nil {
+		t.Fatalf("marshal delete request: %v", err)
+	}
+	resp, err := d.handleTaskDelete(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-delete",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.delete",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskDelete error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("handleTaskDelete response = %+v", resp)
+	}
+	var result taskDeleteResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal delete response: %v", err)
+	}
+	if result.TaskID != taskID || !result.Deleted || result.Revision == 0 {
+		t.Fatalf("delete result = %+v", result)
+	}
+	tasks, err := issuesClient.List(ctx)
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	for _, task := range tasks {
+		if task.ID.String() == taskID {
+			t.Fatalf("task %s still present after delete", taskID)
+		}
+	}
+}
+
 func assertNextTaskUpdatedEvent(t *testing.T, events <-chan protocol.EventEnvelope, taskID string, status domain.Status) {
 	t.Helper()
 	select {

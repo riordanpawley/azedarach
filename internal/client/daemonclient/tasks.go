@@ -78,6 +78,13 @@ type TaskStatusOptions struct {
 	IgnoreAhead        bool
 }
 
+type TaskDeleteOptions struct {
+	Cleanup        bool
+	StopSession    bool
+	RemoveWorktree bool
+	ForceWorktree  bool
+}
+
 // CloseGuardOptions controls which target runtime assets may remain because
 // the caller is about to clean them before writing the closed status.
 type CloseGuardOptions struct {
@@ -108,9 +115,26 @@ type taskCloseRequest struct {
 	IgnoreAhead   bool           `json:"ignore_ahead,omitempty"`
 }
 
+type taskDeleteRequest struct {
+	TaskID         naming.IssueID `json:"task_id"`
+	Cleanup        bool           `json:"cleanup,omitempty"`
+	StopSession    bool           `json:"stop_session,omitempty"`
+	RemoveWorktree bool           `json:"remove_worktree,omitempty"`
+	ForceWorktree  bool           `json:"force_worktree,omitempty"`
+}
+
 type TaskCloseResult struct {
 	TaskID          string `json:"task_id"`
 	Status          string `json:"status"`
+	SessionStopped  bool   `json:"session_stopped,omitempty"`
+	WorktreeRemoved bool   `json:"worktree_removed,omitempty"`
+	WorktreeForced  bool   `json:"worktree_forced,omitempty"`
+	Revision        uint64 `json:"revision,omitempty"`
+}
+
+type TaskDeleteResult struct {
+	TaskID          string `json:"task_id"`
+	Deleted         bool   `json:"deleted"`
 	SessionStopped  bool   `json:"session_stopped,omitempty"`
 	WorktreeRemoved bool   `json:"worktree_removed,omitempty"`
 	WorktreeForced  bool   `json:"worktree_forced,omitempty"`
@@ -686,11 +710,26 @@ func (c *Client) ValidateTaskDelete(ctx context.Context, taskID string) (domain.
 
 // DeleteTask deletes a task through the daemon client boundary.
 func (c *Client) DeleteTask(ctx context.Context, taskID string) error {
+	_, err := c.DeleteTaskWithOptions(ctx, taskID, TaskDeleteOptions{})
+	return err
+}
+
+func (c *Client) DeleteTaskWithOptions(ctx context.Context, taskID string, opts TaskDeleteOptions) (TaskDeleteResult, error) {
 	parsedTaskID, err := naming.ParseIssueID(taskID)
 	if err != nil {
-		return fmt.Errorf("invalid task id: %w", err)
+		return TaskDeleteResult{}, fmt.Errorf("invalid task id: %w", err)
 	}
-	return c.commandJSON(ctx, CommandTaskDelete, TaskIDRequest{TaskID: parsedTaskID}, nil)
+	var out TaskDeleteResult
+	if err := c.commandJSON(ctx, CommandTaskDelete, taskDeleteRequest{
+		TaskID:         parsedTaskID,
+		Cleanup:        opts.Cleanup,
+		StopSession:    opts.StopSession,
+		RemoveWorktree: opts.RemoveWorktree,
+		ForceWorktree:  opts.ForceWorktree,
+	}, &out); err != nil {
+		return TaskDeleteResult{}, err
+	}
+	return out, nil
 }
 
 // ArchiveTask archives a task through the daemon client boundary.

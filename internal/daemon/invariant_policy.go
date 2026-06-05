@@ -22,6 +22,7 @@ const (
 	daemonInvariantTaskListFreshness   daemonInvariantID = "task.list_freshness"
 	daemonInvariantTaskClose           daemonInvariantID = "task.close"
 	daemonInvariantTaskClosePreflight  daemonInvariantID = "task.close_preflight"
+	daemonInvariantTaskDelete          daemonInvariantID = "task.delete"
 	daemonInvariantTaskDeletePreflight daemonInvariantID = "task.delete_preflight"
 	daemonInvariantTaskGraphReadiness  daemonInvariantID = "task.graph_readiness"
 	daemonInvariantTaskCompleteCheck   daemonInvariantID = "task.complete_check"
@@ -41,6 +42,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantTaskListFreshness:      daemonInvariantSourceProjection,
 	daemonInvariantTaskClose:              daemonInvariantSourceHybrid,
 	daemonInvariantTaskClosePreflight:     daemonInvariantSourceHybrid,
+	daemonInvariantTaskDelete:             daemonInvariantSourceHybrid,
 	daemonInvariantTaskDeletePreflight:    daemonInvariantSourceHybrid,
 	daemonInvariantTaskGraphReadiness:     daemonInvariantSourceHybrid,
 	daemonInvariantTaskCompleteCheck:      daemonInvariantSourceHybrid,
