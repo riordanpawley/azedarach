@@ -317,7 +317,7 @@ func TestClient_PasteTextAndSubmit(t *testing.T) {
 	assert.Equal(t, [][]string{
 		{"set-buffer", "-b", "azedarach-message-az-42", "line one\nline two"},
 		{"paste-buffer", "-d", "-b", "azedarach-message-az-42", "-t", "az-42"},
-		{"send-keys", "-t", "az-42", "C-j"},
+		{"send-keys", "-t", "az-42", "C-m"},
 	}, runner.commands)
 }
 
