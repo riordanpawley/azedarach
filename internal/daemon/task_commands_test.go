@@ -2346,6 +2346,93 @@ func TestTaskDeleteRunsIssueResourceCleanupWithoutSessionBeforeWorktreeRemoval(t
 	}
 }
 
+func TestTaskDeleteRunsIssueResourceCleanupWithoutRuntimeAttachments(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-task-delete-resource-cleanup-root"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Delete root cleanup",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	cleanupMarker := filepath.Join(repoDir, "delete-root-cleanup-marker")
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			SessionShell: "sh",
+			BaseBranch:   "main",
+			IssueResources: appconfig.IssueResourcesConfig{
+				CleanupCommands: []string{
+					fmt.Sprintf("printf '%%s|%%s|%%s|%%s' \"$AZEDARACH_ISSUE_ID\" \"$AZEDARACH_WORKTREE_PATH\" \"$AZEDARACH_BRANCH\" \"$(pwd)\" > %q", cleanupMarker),
+				},
+			},
+			Logger: logger,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+
+	body, err := json.Marshal(taskDeleteRequest{TaskID: taskID})
+	if err != nil {
+		t.Fatalf("marshal delete request: %v", err)
+	}
+	resp, err := d.handleTaskDelete(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-delete-root-resource-cleanup",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.delete",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskDelete error: %v", err)
+	}
+	if !resp.OK {
+		if resp.Error != nil {
+			t.Fatalf("handleTaskDelete error = %s", resp.Error.Message)
+		}
+		t.Fatalf("handleTaskDelete response = %+v", resp)
+	}
+	data, err := os.ReadFile(cleanupMarker)
+	if err != nil {
+		t.Fatalf("read cleanup marker: %v", err)
+	}
+	wantRoot, err := filepath.EvalSymlinks(repoDir)
+	if err != nil {
+		t.Fatalf("eval root symlink: %v", err)
+	}
+	want := taskID + "|||" + wantRoot
+	if strings.TrimSpace(string(data)) != want {
+		t.Fatalf("cleanup marker = %q, want %q", strings.TrimSpace(string(data)), want)
+	}
+	tasks, err := issuesClient.List(ctx)
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	for _, task := range tasks {
+		if task.ID.String() == taskID {
+			t.Fatalf("task %s still present after delete", taskID)
+		}
+	}
+}
+
 func assertNextTaskUpdatedEvent(t *testing.T, events <-chan protocol.EventEnvelope, taskID string, status domain.Status) {
 	t.Helper()
 	select {

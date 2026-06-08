@@ -2622,6 +2622,7 @@ func (d *Daemon) deleteTask(ctx context.Context, issueClient *issues.Client, pro
 		Deleted:        true,
 		WorktreeForced: cmd.ForceWorktree,
 	}
+	resourceCleanupRan := false
 	if len(preflight.Blockers) > 0 {
 		missing := daemonTaskDeleteMissingCleanupOptions(preflight.Blockers, cmd)
 		if len(missing) > 0 {
@@ -2639,11 +2640,10 @@ func (d *Daemon) deleteTask(ctx context.Context, issueClient *issues.Client, pro
 			result.SessionStopped = true
 		}
 		if daemonCloseGuardTaskHasWorktree(preflight.Task) {
-			if !result.SessionStopped {
-				if err := d.cleanupTaskIssueResourcesForClose(ctx, projectID, taskID, daemonCloseGuardTaskWorktree(preflight.Task)); err != nil {
-					return result, fmt.Errorf("cleanup issue resources before deleting %s: %w", taskID, err)
-				}
+			if err := d.cleanupTaskIssueResourcesBeforeDelete(ctx, projectID, taskID, preflight.Task, result.SessionStopped); err != nil {
+				return result, err
 			}
+			resourceCleanupRan = !result.SessionStopped
 			if d.worktreeAdapter == nil {
 				return result, fmt.Errorf("remove worktree before deleting %s: worktree cleanup unavailable", taskID)
 			}
@@ -2651,6 +2651,11 @@ func (d *Daemon) deleteTask(ctx context.Context, issueClient *issues.Client, pro
 				return result, fmt.Errorf("remove worktree before deleting %s: %w", taskID, err)
 			}
 			result.WorktreeRemoved = true
+		}
+	}
+	if !resourceCleanupRan {
+		if err := d.cleanupTaskIssueResourcesBeforeDelete(ctx, projectID, taskID, preflight.Task, result.SessionStopped); err != nil {
+			return result, err
 		}
 	}
 	if err := issueClient.Delete(ctx, taskID); err != nil {
@@ -2663,6 +2668,16 @@ func (d *Daemon) deleteTask(ctx context.Context, issueClient *issues.Client, pro
 		UpdatedAt: timeNow().UTC(),
 	})
 	return result, nil
+}
+
+func (d *Daemon) cleanupTaskIssueResourcesBeforeDelete(ctx context.Context, projectID, taskID string, task domain.Task, sessionStopped bool) error {
+	if sessionStopped {
+		return nil
+	}
+	if err := d.cleanupTaskIssueResourcesForClose(ctx, projectID, taskID, daemonCloseGuardTaskWorktree(task)); err != nil {
+		return fmt.Errorf("cleanup issue resources before deleting %s: %w", taskID, err)
+	}
+	return nil
 }
 
 func daemonTaskDeleteMissingCleanupOptions(blockers []string, cmd taskDeleteRequest) []string {
