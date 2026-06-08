@@ -400,6 +400,13 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 			r.windows[args[3]] = map[string]bool{"shell": true}
 		}
 		return "", nil
+	case "kill-session":
+		if len(args) < 3 {
+			return "", errors.New("missing session name")
+		}
+		delete(r.sessions, args[2])
+		delete(r.windows, args[2])
+		return "", nil
 	case "list-windows":
 		if len(args) < 3 {
 			return "", errors.New("missing session name")
@@ -720,6 +727,9 @@ func TestSessionStartReportsFailedStartCleanupFailures(t *testing.T) {
 				if !strings.Contains(resp.Error.Message, want) {
 					t.Fatalf("error message = %q, want %q", resp.Error.Message, want)
 				}
+			}
+			if tmuxRunner.sessions[naming.CanonicalSessionID(projectID, issueID)] {
+				t.Fatalf("tmux session %q left running after failed start", naming.CanonicalSessionID(projectID, issueID))
 			}
 		})
 	}

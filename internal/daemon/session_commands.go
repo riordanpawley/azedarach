@@ -674,7 +674,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
 	}
 	if err := d.exportIssueResourceSessionEnv(ctx, cmd.ProjectID, resourceCtx); err != nil {
-		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+		cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("export issue resource env: %v%s", err, cleanupNote)), nil
 	}
 	if cmd.StartWork {
@@ -688,7 +688,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		}
 		launchCommand := d.buildSessionLaunchCommand(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, initialPrompt)
 		if err := d.tmux.SendKeys(ctx, cmd.SessionID, launchCommand); err != nil {
-			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
 		}
 		if d.cfg.Logger != nil {
@@ -2598,6 +2598,17 @@ func (d *Daemon) issueResourceFailedStartCleanupNote(ctx context.Context, projec
 		return fmt.Sprintf("; failed-start cleanup also failed: %v", err)
 	}
 	return ""
+}
+
+func (d *Daemon) issueResourceFailedStartRollbackNote(ctx context.Context, projectID, sessionID string, resourceCtx issueResourceLifecycleContext) string {
+	note := d.issueResourceFailedStartCleanupNote(ctx, projectID, resourceCtx)
+	if d == nil || d.tmux == nil {
+		return note
+	}
+	if err := d.tmux.KillSession(ctx, sessionID); err != nil {
+		return note + fmt.Sprintf("; failed-start tmux cleanup also failed: %v", err)
+	}
+	return note
 }
 
 func (d *Daemon) runIssueResourceCleanupCommands(ctx context.Context, projectID string, resourceCtx issueResourceLifecycleContext) (issueResourceLifecycleResult, error) {
