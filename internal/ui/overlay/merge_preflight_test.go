@@ -82,13 +82,13 @@ func TestMergePreflightOverlayClose(t *testing.T) {
 func TestMergePreflightOverlayViewContainsReasons(t *testing.T) {
 	o := NewMergePreflightOverlay("az-1", "main", "/tmp/az-1", ".", []string{"Source az-1 is not clean: 1 modified"}, []string{"source.go"}, []string{"target.go"}, []string{"conflict.go"}, "main", "az/az-1", false, true)
 	view := o.View()
-	if !strings.Contains(view, "Merge blocked: az-1 -> main") {
+	if !strings.Contains(view, "Merge blocked: into main from az-1") {
 		t.Fatalf("view missing title: %q", view)
 	}
 	if !strings.Contains(view, "Source az-1 is not clean") {
 		t.Fatalf("view missing reason: %q", view)
 	}
-	if !strings.Contains(view, "Source worktree: /tmp/az-1") || !strings.Contains(view, "Target worktree: .") {
+	if !strings.Contains(view, "From worktree: /tmp/az-1") || !strings.Contains(view, "Into worktree: .") {
 		t.Fatalf("view missing worktree paths: %q", view)
 	}
 	if !strings.Contains(view, "source.go") || !strings.Contains(view, "target.go") {

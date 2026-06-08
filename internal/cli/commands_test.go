@@ -885,6 +885,158 @@ func TestSessionCommandsResolveProjectPrefixedIssueIDs(t *testing.T) {
 	}
 }
 
+func TestParseSessionStartArgsSupportsProjectFlag(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantIssueID string
+		wantProject string
+		wantWait    bool
+	}{
+		{
+			name:        "project before issue",
+			args:        []string{"--project", "azedarach", "cif"},
+			wantIssueID: "cif",
+			wantProject: "azedarach",
+		},
+		{
+			name:        "project after issue with wait",
+			args:        []string{"cif", "--project", "azedarach", "--wait"},
+			wantIssueID: "cif",
+			wantProject: "azedarach",
+			wantWait:    true,
+		},
+		{
+			name:        "project equals form",
+			args:        []string{"--project=azedarach", "cif"},
+			wantIssueID: "cif",
+			wantProject: "azedarach",
+		},
+		{
+			name:        "wait before issue",
+			args:        []string{"--wait", "cif"},
+			wantIssueID: "cif",
+			wantWait:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotIssueID, gotOpts, err := ParseSessionStartArgs(tt.args, true, "usage")
+			if err != nil {
+				t.Fatalf("ParseSessionStartArgs error = %v", err)
+			}
+			if gotIssueID != tt.wantIssueID || gotOpts.Project != tt.wantProject || gotOpts.Wait != tt.wantWait {
+				t.Fatalf("issueID=%q opts=%+v, want issueID=%q project=%q wait=%v", gotIssueID, gotOpts, tt.wantIssueID, tt.wantProject, tt.wantWait)
+			}
+		})
+	}
+}
+
+func TestParseSessionStartArgsRejectsProjectFlagOnAlias(t *testing.T) {
+	_, _, err := ParseSessionStartArgs([]string{"--project", "azedarach", "cif"}, false, "usage: az start <issue-id> [--wait]")
+	if err == nil || !strings.Contains(err.Error(), "usage: az start <issue-id> [--wait]") {
+		t.Fatalf("err = %v, want alias usage", err)
+	}
+}
+
+func TestStartCommandWithProjectOptionTargetsRegisteredProject(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoA := filepath.Join(home, "project-a")
+	repoB := filepath.Join(home, "project-b")
+	if err := config.SaveProjectsRegistry(&config.ProjectsRegistry{
+		Projects: []config.Project{
+			{Name: "azedarach", Path: repoB},
+		},
+	}); err != nil {
+		t.Fatalf("save registry: %v", err)
+	}
+	projectA, err := config.ProjectIDForRoot(repoA)
+	if err != nil {
+		t.Fatalf("project A id: %v", err)
+	}
+	projectB, err := config.ProjectIDForRoot(repoB)
+	if err != nil {
+		t.Fatalf("project B id: %v", err)
+	}
+
+	var gotReq protocol.RequestEnvelope
+	commands := []string{}
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command+":"+req.Meta.ProjectID.String())
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					projectID := req.Meta.ProjectID.String()
+					tasks := []domain.Task{{ID: "local-only", Title: "Local", Status: domain.StatusOpen}}
+					if projectID == projectB {
+						tasks = []domain.Task{{ID: "cif", Title: "Remote", Status: domain.StatusOpen}}
+					}
+					body, err := marshalTaskListBodyForProject(projectID, tasks)
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            body,
+					}, nil
+				case commandSessionStart:
+					gotReq = req
+					return responseWithOutput(req, "started\n"), nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:  "cif",
+						TargetID: "base",
+						Branch:   "main",
+					}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID(projectA),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: projectA,
+		RepoDir:   repoA,
+	}
+
+	output := captureStdout(t, func() error {
+		return StartCommandWithOptions(deps, "cif", SessionCommandOptions{Project: "azedarach"})
+	})
+
+	if output != "started\n" {
+		t.Fatalf("output = %q, want started", output)
+	}
+	if gotReq.Command != commandSessionStart {
+		t.Fatalf("command = %q, want %q", gotReq.Command, commandSessionStart)
+	}
+	if gotReq.Meta.ProjectID.String() != projectB {
+		t.Fatalf("meta project_id = %q, want %q", gotReq.Meta.ProjectID, projectB)
+	}
+	var body sessionRequestBody
+	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if body.ProjectID != projectB || body.SessionID != "cif" || body.BaseBranch != "main" {
+		t.Fatalf("session request body = %+v, want project %s issue cif base main", body, projectB)
+	}
+	if !reflect.DeepEqual(commands, []string{
+		daemonclient.CommandTaskList + ":" + projectB,
+		daemonclient.CommandTaskMergeBaseTarget + ":" + projectB,
+		commandSessionStart + ":" + projectB,
+	}) {
+		t.Fatalf("commands = %v, want task list and start scoped to %s", commands, projectB)
+	}
+}
+
 func TestSessionCommandsKeepBareIssueIDsCurrentProjectScoped(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -7982,6 +8134,12 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "prime") {
 		t.Fatalf("usage missing prime command: %q", output)
 	}
+	if !strings.Contains(output, "az issue create \"New task\"") {
+		t.Fatalf("usage missing plain issue create example: %q", output)
+	}
+	if !strings.Contains(output, "assigns implementation metadata, not graph parentage") {
+		t.Fatalf("usage missing impl-not-graph example clarification: %q", output)
+	}
 	if strings.Contains(output, "issue close --impl") || strings.Contains(output, "issue delete --impl") || strings.Contains(output, "issue dep add --impl") {
 		t.Fatalf("usage should not include --impl for existing-issue commands: %q", output)
 	}
@@ -8100,8 +8258,23 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Parent-child edges are hierarchy/board-nesting edges, not readiness controls.") {
 		t.Fatalf("prime output missing parent-child hierarchy guidance: %q", output)
 	}
+	if !strings.Contains(output, "Issue graph/root membership comes only from auto-parenting with `AZEDARACH_ISSUE_ID` or explicit `parent-child` dependency edges.") {
+		t.Fatalf("prime output missing graph membership source guidance: %q", output)
+	}
+	if !strings.Contains(output, "`--impl` is implementation metadata only; it never attaches an issue to a graph/root.") {
+		t.Fatalf("prime output missing impl-not-graph guidance: %q", output)
+	}
+	if !strings.Contains(output, "If a child issue was requested and `az issue create --json` returns `parent_id: \"\"`, stop before launching work") {
+		t.Fatalf("prime output missing missing-parent stop guidance: %q", output)
+	}
 	if !strings.Contains(output, "To pause or supersede child work inside an orchestration graph, keep the parent-child edge") {
 		t.Fatalf("prime output missing safe pause/supersede guidance: %q", output)
+	}
+	if !strings.Contains(output, "When the user names a graph/root, verify it before starting workers: run `az issue get <intended-root>` and `az orchestrate status --root <intended-root> --json`") {
+		t.Fatalf("prime output missing pre-start root verification guidance: %q", output)
+	}
+	if !strings.Contains(output, "If work was launched under the wrong parent, do not treat it as a simple move") {
+		t.Fatalf("prime output missing wrong-parent correction guidance: %q", output)
 	}
 	if !strings.Contains(output, "Worker completion flow: workers should leave their issue `in_review`") {
 		t.Fatalf("prime output missing in-review worker completion guidance: %q", output)
@@ -8365,7 +8538,10 @@ func TestPrimeCommandShowsImplementationOptionsWhenMultipleConfigured(t *testing
 	if !strings.Contains(output, "Use `az impl list` to refresh the available options.") {
 		t.Fatalf("prime output missing impl list guidance: %q", output)
 	}
-	if !strings.Contains(output, "`az issue create --impl default \"Child task\"`") {
+	if !strings.Contains(output, "`--impl` selects implementation/spec variant assignment only; it does not attach an issue to a parent/root graph.") {
+		t.Fatalf("prime output missing multi-impl graph distinction: %q", output)
+	}
+	if !strings.Contains(output, "`az issue create --impl default \"Implementation-specific task\"`") {
 		t.Fatalf("prime output missing create-with-impl example: %q", output)
 	}
 	if !strings.Contains(output, "Existing issue updates do not use `--impl`; use `--update-impl` only when changing assignments.") {

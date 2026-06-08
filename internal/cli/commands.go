@@ -267,7 +267,30 @@ type IssueBulkUpdateOptions struct {
 
 type SessionCommandOptions struct {
 	Wait         bool
+	Project      string
 	PollInterval time.Duration
+}
+
+func ParseSessionStartArgs(args []string, allowProject bool, usage string) (string, SessionCommandOptions, error) {
+	opts := SessionCommandOptions{}
+	if strings.TrimSpace(usage) == "" {
+		usage = "usage: az session start [--project <project-id>] <issue-id> [--wait]"
+	}
+
+	fs := flag.NewFlagSet("session start", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.Wait, "wait", false, "wait for any queued operation to complete")
+	if allowProject {
+		fs.StringVar(&opts.Project, "project", "", "target project id or registered alias")
+	}
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return "", SessionCommandOptions{}, fmt.Errorf("%s", usage)
+	}
+	if fs.NArg() != 1 {
+		return "", SessionCommandOptions{}, fmt.Errorf("%s", usage)
+	}
+	opts.Project = strings.TrimSpace(opts.Project)
+	return fs.Arg(0), opts, nil
 }
 
 type SessionResolveConflictOptions struct {
@@ -389,7 +412,7 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	target, err := resolveSessionIssueTarget(ctx, deps, issueID)
+	target, err := resolveSessionStartIssueTarget(ctx, deps, issueID, opts.Project)
 	if err != nil {
 		return err
 	}
@@ -414,6 +437,18 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 	}
 
 	return printCommandOutputWithWait(ctx, deps, resp, opts)
+}
+
+func resolveSessionStartIssueTarget(ctx context.Context, deps *Dependencies, issueID, project string) (sessionIssueTarget, error) {
+	trimmedProject := strings.TrimSpace(project)
+	if trimmedProject == "" {
+		return resolveSessionIssueTarget(ctx, deps, issueID)
+	}
+	trimmedIssueID := strings.TrimSpace(issueID)
+	if trimmedIssueID == "" {
+		return sessionIssueTarget{}, fmt.Errorf("issue id is required")
+	}
+	return resolveExplicitSessionIssueTarget(ctx, deps, trimmedIssueID, trimmedProject, trimmedIssueID)
 }
 
 func startSessionProgressReporter(ctx context.Context, issueID string) func() {
@@ -5141,7 +5176,7 @@ func PrimeCommand(deps *Dependencies) error {
 	specGuardrails := ""
 	questionFirstGuardrails := ""
 	implementationSection := ""
-	implementationGuardrails := "- Implementation guardrails: in multi-implementation repos, include explicit `--impl <impl>` on new `az issue` writes and use repeated `--impl` only for intentional shared work. For `az issue update`, `--update-impl` is only for changing implementation assignments; status/title/notes updates do not require it."
+	implementationGuardrails := "- Implementation guardrails: `--impl` assigns implementation/spec variants only; it is not graph/root membership. In multi-implementation repos, include explicit `--impl <impl>` on implementation-specific new issue writes and use repeated `--impl` only for intentional shared work. For `az issue update`, `--update-impl` is only for changing implementation assignments; status/title/notes updates do not require it."
 	specEnabled := deps != nil && deps.Config != nil && deps.Config.Spec.Enabled
 	orchestrationVia := primeOrchestrationVia(deps)
 	orchestrationViaAz := strings.EqualFold(orchestrationVia, "az")
@@ -5266,8 +5301,9 @@ func renderPrimeImplementationSection(implementations []string) string {
 	return fmt.Sprintf("- Implementation selection (multi-implementation project):\n"+
 		"  - Available implementations: %s\n"+
 		"  - Use `az impl list` to refresh the available options.\n"+
-		"  - New issue writes must choose an implementation: `az issue create --impl %s \"Child task\"`\n"+
-		"  - Repeat `--impl` only for intentionally shared work. Existing issue updates do not use `--impl`; use `--update-impl` only when changing assignments.\n",
+		"  - `--impl` selects implementation/spec variant assignment only; it does not attach an issue to a parent/root graph.\n"+
+		"  - New issue writes for a specific implementation must choose one, for example `az issue create --impl %s \"Implementation-specific task\"`.\n"+
+		"  - Repeat `--impl` only for intentionally shared implementation work. Existing issue updates do not use `--impl`; use `--update-impl` only when changing assignments.\n",
 		strings.Join(quoted, ", "), exampleImpl)
 }
 

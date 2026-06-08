@@ -648,6 +648,31 @@ func shouldStopBeforeFollowOnMerge(state domain.SessionState) bool {
 	return state == domain.SessionBusy || state == domain.SessionWaiting
 }
 
+func (m Model) mergeCurrentIssueIntoDefaultTarget(task *domain.Task) (tea.Model, tea.Cmd) {
+	if task == nil {
+		m.addToast(Toast{
+			Level:   ToastWarning,
+			Message: "No focused issue to merge",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+	}
+
+	sourceID := task.ID.String()
+	if task.ParentID == nil {
+		m.markMergeOperationPreparing(sourceID, mergeBaseTargetID, "preparing merge")
+		return m, m.resolveMergeToBaseCmd(sourceID, true)
+	}
+
+	targetID := task.ParentID.String()
+	targetState := domain.SessionIdle
+	if targetSession := m.sessionForIssue(targetID); targetSession != nil {
+		targetState = targetSession.State
+	}
+	m.markMergeOperationPreparing(sourceID, targetID, "preparing merge")
+	return m, m.resolveMergeTargetSelectionCmd(sourceID, targetID, targetState, true)
+}
+
 func (m Model) followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, sourceID, targetID string, targetState domain.SessionState, refreshStatus bool) tea.Cmd {
 	return func() tea.Msg {
 		return m.mergeFeatureIntoFeatureCmdWithOptions(sourceWorktree, targetWorktree, sourceID, targetID, refreshStatus, mergePreflightOptions{

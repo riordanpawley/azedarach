@@ -1188,6 +1188,38 @@ func TestModelSlashSearchFiltersSessionsLive(t *testing.T) {
 	}
 }
 
+func TestModelSlashSearchTreatsQAsQueryRune(t *testing.T) {
+	entries := []InventoryEntry{
+		{SessionID: "az-ecq", IssueID: "ecq", TaskTitle: "ECQ task", HasTmuxSession: true},
+		{SessionID: "az-else", IssueID: "else", TaskTitle: "Else task", HasTmuxSession: true},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	model = updateKey(t, model, "/")
+	for _, r := range "ecq" {
+		updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		model = updated.(Model)
+		if cmd != nil {
+			t.Fatalf("search rune %q returned command", r)
+		}
+	}
+
+	if !model.searchMode {
+		t.Fatal("expected q to keep search mode active")
+	}
+	if model.searchQuery != "ecq" {
+		t.Fatalf("search query = %q, want ecq", model.searchQuery)
+	}
+	if got := len(model.filteredEntries()); got != 1 {
+		t.Fatalf("filtered sessions = %d, want 1", got)
+	}
+}
+
 func TestModelSlashSearchFiltersTreeView(t *testing.T) {
 	parentID := naming.IssueID("az-parent")
 	entries := []InventoryEntry{
