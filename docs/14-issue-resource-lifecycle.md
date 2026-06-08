@@ -48,5 +48,6 @@ Resource commands and launched sessions receive these stable variables:
 - `AZEDARACH_BRANCH`
 
 Values in `issueResources.env` may reference these variables with shell-style
-`$NAME` expansion before they are exported. Keep resource names issue-scoped and
-make cleanup commands target only those names.
+`$NAME` expansion before they are exported. `AZEDARACH_*` names are reserved for
+Azedarach lifecycle context and cannot be overridden from project config. Keep
+resource names issue-scoped and make cleanup commands target only those names.

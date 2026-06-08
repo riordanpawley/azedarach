@@ -1017,6 +1017,16 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 			"session_id", cmd.SessionID,
 		)
 	}
+	resourceCleanup := issueResourceLifecycleResult{}
+	worktreePath, branch := d.issueWorktreeContext(ctx, cmd.ProjectID, cmd.IssueID)
+	if len(d.runtimeConfigForProject(cmd.ProjectID).IssueResources.CleanupCommands) > 0 {
+		resourceCtx := d.issueResourceLifecycleContext(cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktreePath, branch)
+		var cleanupErr error
+		resourceCleanup, cleanupErr = d.runIssueResourceCleanupCommands(ctx, cmd.ProjectID, resourceCtx)
+		if cleanupErr != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue resource cleanup failed for %s: %v", cmd.IssueID, cleanupErr)), nil
+		}
+	}
 	// Write-through stopped projection immediately so cache-first task/session
 	// reads do not resurrect a just-stopped session while tmux/process stop
 	// work is still in flight.
@@ -1041,16 +1051,6 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 	sessionNamesToKill, err := d.liveTmuxSessionNamesForIssue(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-	}
-	resourceCleanup := issueResourceLifecycleResult{}
-	worktreePath, branch := d.issueWorktreeContext(ctx, cmd.ProjectID, cmd.IssueID)
-	if worktreePath != "" {
-		resourceCtx := d.issueResourceLifecycleContext(cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktreePath, branch)
-		var cleanupErr error
-		resourceCleanup, cleanupErr = d.runIssueResourceCleanupCommands(ctx, cmd.ProjectID, resourceCtx)
-		if cleanupErr != nil {
-			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue resource cleanup failed for %s: %v", cmd.IssueID, cleanupErr)), nil
-		}
 	}
 	for _, sessionName := range sessionNamesToKill {
 		if strings.EqualFold(strings.TrimSpace(sessionName), strings.TrimSpace(cmd.SessionID)) {
@@ -2639,7 +2639,7 @@ func (d *Daemon) runIssueResourceCommands(ctx context.Context, projectID string,
 			continue
 		}
 		cmd := exec.CommandContext(ctx, shell, "-lc", trimmed)
-		cmd.Dir = resourceCtx.WorktreePath
+		cmd.Dir = issueResourceCommandDir(resourceCtx)
 		cmd.Env = append(os.Environ(), env...)
 		output, err := cmd.CombinedOutput()
 		result.Ran = append(result.Ran, trimmed)
@@ -2673,7 +2673,7 @@ func (d *Daemon) issueResourceEnv(cfg appconfig.IssueResourcesConfig, resourceCt
 	values := issueResourceContextValues(resourceCtx)
 	for key, value := range cfg.Env {
 		key = strings.TrimSpace(key)
-		if !validShellEnvName(key) {
+		if !validShellEnvName(key) || strings.HasPrefix(key, "AZEDARACH_") {
 			continue
 		}
 		values[key] = strings.TrimSpace(value)
@@ -2684,6 +2684,9 @@ func (d *Daemon) issueResourceEnv(cfg appconfig.IssueResourcesConfig, resourceCt
 				return values[name]
 			})
 		}
+	}
+	for key, value := range issueResourceContextValues(resourceCtx) {
+		values[key] = value
 	}
 	env := make([]string, 0, len(values))
 	for key, value := range values {
@@ -2705,6 +2708,16 @@ func (d *Daemon) issueResourceShellExports(cfg appconfig.IssueResourcesConfig, r
 		assignments = append(assignments, key+"="+singleQuoteForShell(value))
 	}
 	return assignments
+}
+
+func issueResourceCommandDir(resourceCtx issueResourceLifecycleContext) string {
+	if dir := strings.TrimSpace(resourceCtx.WorktreePath); dir != "" {
+		return dir
+	}
+	if dir := strings.TrimSpace(resourceCtx.RootPath); dir != "" {
+		return dir
+	}
+	return "."
 }
 
 func issueResourceContextValues(resourceCtx issueResourceLifecycleContext) map[string]string {

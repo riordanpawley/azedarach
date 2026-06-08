@@ -1245,6 +1245,68 @@ func TestHandleSessionStopDirectMarksStoppedWhenTmuxSessionMissing(t *testing.T)
 	}
 }
 
+func TestHandleSessionStopDirectCleanupFailureDoesNotMarkStoppedOrKillTmux(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+
+	root := t.TempDir()
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	store := daemonstate.NewStore()
+	if _, err := store.ForceUpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed attached session: %v", err)
+	}
+	tmuxRunner := newTestTmuxRunner(sessionID)
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir:      root,
+			SessionShell: "sh",
+			IssueResources: appconfig.IssueResourcesConfig{
+				CleanupCommands: []string{"exit 9"},
+			},
+			Logger: slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+	}
+
+	body, err := json.Marshal(map[string]string{
+		"project_id": projectID,
+		"session_id": issueID,
+	})
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+	resp, err := daemon.handleSessionStopDirect(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-stop-cleanup-fail",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.stop",
+		Body:            body,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStopDirect returned error: %v", err)
+	}
+	if resp.OK || resp.Error == nil {
+		t.Fatalf("stop response = %+v, want cleanup failure", resp)
+	}
+	if !strings.Contains(resp.Error.Message, "issue resource cleanup failed") {
+		t.Fatalf("stop error = %q, want cleanup failure context", resp.Error.Message)
+	}
+
+	snapshot := store.ReadSnapshot(projectID)
+	got := snapshot.Sessions[sessionID]
+	if got.State != daemonstate.SessionStateAttached {
+		t.Fatalf("session state = %s, want still attached after cleanup failure", got.State)
+	}
+	if !tmuxRunner.hasSession(sessionID) {
+		t.Fatalf("expected tmux session %q to remain running after cleanup failure", sessionID)
+	}
+}
+
 func TestHandleSessionStopDirectKillsLegacyIssueNamedSession(t *testing.T) {
 	const (
 		projectID = "proj"
@@ -4274,8 +4336,9 @@ func TestIssueResourceCommandsReceiveContextAndConfiguredEnv(t *testing.T) {
 			SessionShell: "sh",
 			IssueResources: appconfig.IssueResourcesConfig{
 				Env: map[string]string{
-					"RESOURCE_DB":  "db_$AZEDARACH_ISSUE_ID",
-					"RESOURCE_URL": "postgres://localhost/$RESOURCE_DB",
+					"RESOURCE_DB":        "db_$AZEDARACH_ISSUE_ID",
+					"RESOURCE_URL":       "postgres://localhost/$RESOURCE_DB",
+					"AZEDARACH_ISSUE_ID": "wrong",
 				},
 				PrepareCommands: []string{
 					"printf '%s|%s|%s|%s|%s|%s|%s' \"$AZEDARACH_PROJECT_ID\" \"$AZEDARACH_ISSUE_ID\" \"$AZEDARACH_SESSION_ID\" \"$AZEDARACH_WORKTREE_PATH\" \"$AZEDARACH_BRANCH\" \"$RESOURCE_DB\" \"$RESOURCE_URL\" > resource-env",
@@ -4306,6 +4369,47 @@ func TestIssueResourceCommandsReceiveContextAndConfiguredEnv(t *testing.T) {
 	want := "proj|az-123|proj-az-123|" + worktree + "|user/az-123/demo|db_az-123|postgres://localhost/db_az-123"
 	if strings.TrimSpace(string(data)) != want {
 		t.Fatalf("resource env marker = %q, want %q", strings.TrimSpace(string(data)), want)
+	}
+}
+
+func TestIssueResourceCommandsUseRootPathWhenWorktreeMissing(t *testing.T) {
+	root := t.TempDir()
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      root,
+			SessionShell: "sh",
+			IssueResources: appconfig.IssueResourcesConfig{
+				CleanupCommands: []string{
+					"printf '%s|%s' \"$AZEDARACH_WORKTREE_PATH\" \"$(pwd)\" > cleanup-env",
+				},
+			},
+		},
+	}
+	resourceCtx := issueResourceLifecycleContext{
+		ProjectID: "proj",
+		IssueID:   "az-123",
+		SessionID: "proj-az-123",
+		RootPath:  root,
+	}
+
+	result, err := d.runIssueResourceCleanupCommands(context.Background(), protocol.DefaultProjectID, resourceCtx)
+	if err != nil {
+		t.Fatalf("runIssueResourceCleanupCommands error: %v", err)
+	}
+	if len(result.Ran) != 1 {
+		t.Fatalf("commands ran = %+v, want one cleanup command", result.Ran)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "cleanup-env"))
+	if err != nil {
+		t.Fatalf("read cleanup env marker: %v", err)
+	}
+	wantRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("eval root symlink: %v", err)
+	}
+	want := "|" + wantRoot
+	if strings.TrimSpace(string(data)) != want {
+		t.Fatalf("cleanup env marker = %q, want %q", strings.TrimSpace(string(data)), want)
 	}
 }
 
