@@ -356,14 +356,15 @@ func TestSourceForSessionInvariant(t *testing.T) {
 }
 
 type sessionStartTmuxRunner struct {
-	sessions         map[string]bool
-	windows          map[string]map[string]bool
-	commands         [][]string
-	sendKeysCalls    int
-	sendKeysTargets  []string
-	sendKeysPayloads []string
-	newSessionErr    error
-	sendKeysErr      error
+	sessions          map[string]bool
+	windows           map[string]map[string]bool
+	commands          [][]string
+	sendKeysCalls     int
+	sendKeysTargets   []string
+	sendKeysPayloads  []string
+	newSessionErr     error
+	sendKeysErr       error
+	sendKeysErrOnCall int
 }
 
 func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
@@ -426,7 +427,7 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 			r.sendKeysTargets = append(r.sendKeysTargets, args[2])
 			r.sendKeysPayloads = append(r.sendKeysPayloads, args[3])
 		}
-		if r.sendKeysErr != nil {
+		if r.sendKeysErr != nil && (r.sendKeysErrOnCall == 0 || r.sendKeysCalls == r.sendKeysErrOnCall) {
 			return "", r.sendKeysErr
 		}
 		return "", nil
@@ -610,6 +611,117 @@ func TestSessionStartIgnoresStaleProjectionWhenTmuxHasNoSession(t *testing.T) {
 	}
 	if !tmuxRunner.sessions[sessionID] {
 		t.Fatalf("expected tmux session %q to be created", sessionID)
+	}
+}
+
+func TestSessionStartReportsFailedStartCleanupFailures(t *testing.T) {
+	tests := []struct {
+		name              string
+		startWork         bool
+		newSessionErr     error
+		sendKeysErr       error
+		sendKeysErrOnCall int
+		wantPrimary       string
+	}{
+		{
+			name:          "tmux create failure",
+			startWork:     false,
+			newSessionErr: errors.New("tmux create failed"),
+			wantPrimary:   "tmux create failed",
+		},
+		{
+			name:              "env export failure",
+			startWork:         false,
+			sendKeysErr:       errors.New("env export failed"),
+			sendKeysErrOnCall: 1,
+			wantPrimary:       "export issue resource env",
+		},
+		{
+			name:              "launch failure",
+			startWork:         true,
+			sendKeysErr:       errors.New("launch failed"),
+			sendKeysErrOnCall: 2,
+			wantPrimary:       "launch failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			repoDir := t.TempDir()
+			projectID := "proj"
+			if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+				t.Fatalf("mkdir .azedarach: %v", err)
+			}
+			issuesClient := issues.NewClient(repoDir, slog.Default())
+			t.Cleanup(func() {
+				_ = issuesClient.CloseDB()
+			})
+			issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+				Title: "Report cleanup failure",
+				Type:  domain.TypeTask,
+			})
+			if err != nil {
+				t.Fatalf("create issue: %v", err)
+			}
+
+			worktreeRunner := &recoveringWorktreeRunner{
+				worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID),
+				branchName:   "testuser/" + issueID + "/cleanup-report",
+			}
+			tmuxRunner := newSessionStartTmuxRunner()
+			tmuxRunner.newSessionErr = tt.newSessionErr
+			tmuxRunner.sendKeysErr = tt.sendKeysErr
+			tmuxRunner.sendKeysErrOnCall = tt.sendKeysErrOnCall
+			store := daemonstate.NewStore()
+			d := &Daemon{
+				cfg: Config{
+					RepoDir:      repoDir,
+					BaseBranch:   "main",
+					CLITool:      "codex",
+					SessionShell: "sh",
+					IssueResources: appconfig.IssueResourcesConfig{
+						FailedStartCleanupCommands: []string{"printf cleanup; exit 7"},
+					},
+					Logger: slog.Default(),
+				},
+				tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+				issues:       issuesClient,
+				session:      daemonhandlers.NewSessionHandler(store),
+				sessionStore: store,
+				revision:     map[string]uint64{},
+				worktreeManagersByRoot: map[string]*git.WorktreeManager{
+					repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+				},
+				worktreeManagersByProject: map[string]*git.WorktreeManager{
+					projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+				},
+			}
+
+			resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
+				ProtocolVersion: protocol.CurrentVersion,
+				RequestID:       "req-start-cleanup-report",
+				Kind:            protocol.EnvelopeKindCommand,
+				Command:         "session.start",
+				Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+				Body: marshalJSON(map[string]any{
+					"project_id": projectID,
+					"session_id": issueID,
+					"start_work": tt.startWork,
+				}),
+			})
+			if err != nil {
+				t.Fatalf("handleSessionStartDirect returned error: %v", err)
+			}
+			if resp.OK || resp.Error == nil {
+				t.Fatalf("session start response = %+v, want error", resp)
+			}
+			for _, want := range []string{tt.wantPrimary, "failed-start cleanup also failed", "printf cleanup; exit 7", "cleanup"} {
+				if !strings.Contains(resp.Error.Message, want) {
+					t.Fatalf("error message = %q, want %q", resp.Error.Message, want)
+				}
+			}
+		})
 	}
 }
 

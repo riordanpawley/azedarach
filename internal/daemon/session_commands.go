@@ -652,11 +652,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	resourceCtx := d.issueResourceLifecycleContext(cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktree.Path, worktree.Branch)
 	resourcePrep, err := d.runIssueResourcePrepareCommands(ctx, cmd.ProjectID, resourceCtx)
 	if err != nil {
-		cleanupErr := d.runIssueResourceFailedStartCleanupCommands(ctx, cmd.ProjectID, resourceCtx)
-		cleanupNote := ""
-		if cleanupErr != nil {
-			cleanupNote = fmt.Sprintf("; failed-start cleanup also failed: %v", cleanupErr)
-		}
+		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
 		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue resource prepare failed for %s: %v%s%s", cmd.IssueID, err, cleanupNote, worktreeCleanupNote)), nil
 	}
@@ -674,26 +670,12 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	}
 	d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch)
 	if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
-		if cleanupErr := d.runIssueResourceFailedStartCleanupCommands(ctx, cmd.ProjectID, resourceCtx); cleanupErr != nil && d.cfg.Logger != nil {
-			d.cfg.Logger.Warn("issue resource failed-start cleanup failed after tmux create failure",
-				"project_id", cmd.ProjectID,
-				"issue_id", cmd.IssueID,
-				"session_id", cmd.SessionID,
-				"error", cleanupErr,
-			)
-		}
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
 	}
 	if err := d.exportIssueResourceSessionEnv(ctx, cmd.ProjectID, resourceCtx); err != nil {
-		if cleanupErr := d.runIssueResourceFailedStartCleanupCommands(ctx, cmd.ProjectID, resourceCtx); cleanupErr != nil && d.cfg.Logger != nil {
-			d.cfg.Logger.Warn("issue resource failed-start cleanup failed after env export failure",
-				"project_id", cmd.ProjectID,
-				"issue_id", cmd.IssueID,
-				"session_id", cmd.SessionID,
-				"error", cleanupErr,
-			)
-		}
-		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("export issue resource env: %v", err)), nil
+		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("export issue resource env: %v%s", err, cleanupNote)), nil
 	}
 	if cmd.StartWork {
 		initialPrompt := strings.TrimSpace(cmd.Prompt)
@@ -706,15 +688,8 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		}
 		launchCommand := d.buildSessionLaunchCommand(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, initialPrompt)
 		if err := d.tmux.SendKeys(ctx, cmd.SessionID, launchCommand); err != nil {
-			if cleanupErr := d.runIssueResourceFailedStartCleanupCommands(ctx, cmd.ProjectID, resourceCtx); cleanupErr != nil && d.cfg.Logger != nil {
-				d.cfg.Logger.Warn("issue resource failed-start cleanup failed after launch failure",
-					"project_id", cmd.ProjectID,
-					"issue_id", cmd.IssueID,
-					"session_id", cmd.SessionID,
-					"error", cleanupErr,
-				)
-			}
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
 		}
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Info("daemon session start launch command sent",
@@ -2616,6 +2591,13 @@ func (d *Daemon) runIssueResourcePrepareCommands(ctx context.Context, projectID 
 func (d *Daemon) runIssueResourceFailedStartCleanupCommands(ctx context.Context, projectID string, resourceCtx issueResourceLifecycleContext) error {
 	_, err := d.runIssueResourceCommands(ctx, projectID, resourceCtx, d.runtimeConfigForProject(projectID).IssueResources.FailedStartCleanupCommands)
 	return err
+}
+
+func (d *Daemon) issueResourceFailedStartCleanupNote(ctx context.Context, projectID string, resourceCtx issueResourceLifecycleContext) string {
+	if err := d.runIssueResourceFailedStartCleanupCommands(ctx, projectID, resourceCtx); err != nil {
+		return fmt.Sprintf("; failed-start cleanup also failed: %v", err)
+	}
+	return ""
 }
 
 func (d *Daemon) runIssueResourceCleanupCommands(ctx context.Context, projectID string, resourceCtx issueResourceLifecycleContext) (issueResourceLifecycleResult, error) {

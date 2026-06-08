@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
@@ -1265,6 +1266,142 @@ func TestTaskCloseCommandUpdatesStatusThroughDaemon(t *testing.T) {
 	}
 	if task.Status != domain.StatusDone {
 		t.Fatalf("task status = %s, want done", task.Status)
+	}
+}
+
+func TestTaskCloseRunsIssueResourceCleanupWithoutSessionBeforeWorktreeRemoval(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-task-close-resource-cleanup"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Close with resource cleanup",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	worktreePath := filepath.Join(repoDir, "wt-"+taskID)
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	branchName := "riordan/" + taskID + "/resource-cleanup"
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      worktreePath,
+		Branch:    branchName,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+
+	cleanupMarker := filepath.Join(repoDir, "cleanup-marker")
+	commands := make([]string, 0, 8)
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		commands = append(commands, joined)
+		switch {
+		case joined == "worktree list --porcelain":
+			return fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", worktreePath, branchName), nil
+		case strings.Contains(joined, "status --porcelain"):
+			return "", nil
+		case strings.HasPrefix(joined, "worktree remove "):
+			if _, err := os.Stat(cleanupMarker); err != nil {
+				return "", fmt.Errorf("cleanup marker missing before remove: %w", err)
+			}
+			return "", nil
+		default:
+			return "", nil
+		}
+	}}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			SessionShell: "sh",
+			BaseBranch:   "main",
+			IssueResources: appconfig.IssueResourcesConfig{
+				CleanupCommands: []string{
+					fmt.Sprintf("printf '%%s|%%s|%%s' \"$AZEDARACH_ISSUE_ID\" \"$AZEDARACH_WORKTREE_PATH\" \"$AZEDARACH_BRANCH\" > %q", cleanupMarker),
+				},
+			},
+			Logger: logger,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		gitStatusAdapter: &gitServiceAdapter{
+			client:            git.NewClient(runner, logger),
+			runtimeStateStore: runtimeStore,
+			logger:            logger,
+			baseBranch:        "main",
+		},
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
+		logger:                  logger,
+	}
+
+	body, err := json.Marshal(taskCloseRequest{TaskID: taskID})
+	if err != nil {
+		t.Fatalf("marshal close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-resource-cleanup",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.close",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if !resp.OK {
+		if resp.Error != nil {
+			t.Fatalf("handleTaskClose error = %s", resp.Error.Message)
+		}
+		t.Fatalf("handleTaskClose response = %+v", resp)
+	}
+	data, err := os.ReadFile(cleanupMarker)
+	if err != nil {
+		t.Fatalf("read cleanup marker: %v", err)
+	}
+	want := taskID + "|" + worktreePath + "|" + branchName
+	if strings.TrimSpace(string(data)) != want {
+		t.Fatalf("cleanup marker = %q, want %q", strings.TrimSpace(string(data)), want)
+	}
+	closed, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get task after close: %v", err)
+	}
+	if closed.Status != domain.StatusDone {
+		t.Fatalf("task status = %s, want %s", closed.Status, domain.StatusDone)
+	}
+	if !strings.Contains(strings.Join(commands, "\n"), "worktree remove "+worktreePath) {
+		t.Fatalf("commands = %v, want worktree remove", commands)
 	}
 }
 

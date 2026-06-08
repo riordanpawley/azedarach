@@ -1187,6 +1187,11 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		}
 		result.SessionStopped = true
 	}
+	if !result.SessionStopped {
+		if err := d.cleanupTaskIssueResourcesForClose(ctx, projectID, taskID, guard.Worktree); err != nil {
+			return result, fmt.Errorf("cleanup issue resources before closing %s: %w", taskID, err)
+		}
+	}
 	if daemonCloseGuardTaskHasWorktree(guard.Task) {
 		if d.worktreeAdapter == nil {
 			return result, fmt.Errorf("remove worktree before closing %s: worktree cleanup unavailable", taskID)
@@ -1409,6 +1414,19 @@ func (d *Daemon) stopTaskSessionForClose(ctx context.Context, req protocol.Reque
 	stopReq.Meta.ProjectID = naming.ProjectID(projectID)
 	resp, err := d.handleSessionStopDirect(ctx, stopReq)
 	return cleanupCommandError(resp, err)
+}
+
+func (d *Daemon) cleanupTaskIssueResourcesForClose(ctx context.Context, projectID, taskID, worktreePath string) error {
+	if len(d.runtimeConfigForProject(projectID).IssueResources.CleanupCommands) == 0 {
+		return nil
+	}
+	lookupPath, branch := d.issueWorktreeContext(ctx, projectID, taskID)
+	if strings.TrimSpace(worktreePath) == "" {
+		worktreePath = lookupPath
+	}
+	resourceCtx := d.issueResourceLifecycleContext(projectID, taskID, naming.CanonicalSessionID(projectID, taskID), worktreePath, branch)
+	_, err := d.runIssueResourceCleanupCommands(ctx, projectID, resourceCtx)
+	return err
 }
 
 func (d *Daemon) updateTaskStatusExcludingClose(ctx context.Context, projectID, taskID string, status domain.Status) (domain.Task, error) {
