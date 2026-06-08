@@ -4125,7 +4125,7 @@ func TestSessionMessagePastesTextAndSubmitsActiveIssueSession(t *testing.T) {
 		{"has-session", "-t", sessionID},
 		{"set-buffer", "-b", "azedarach-message-" + sessionID, "Orchestrator says proceed now.\n\nKeep notes current."},
 		{"paste-buffer", "-d", "-b", "azedarach-message-" + sessionID, "-t", sessionID},
-		{"send-keys", "-t", sessionID, "C-m"},
+		{"send-keys", "-t", sessionID, "Enter"},
 	}
 	if !reflect.DeepEqual(tmuxRunner.commands, wantCommands) {
 		t.Fatalf("tmux commands = %#v, want %#v", tmuxRunner.commands, wantCommands)
