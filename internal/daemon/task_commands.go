@@ -2639,6 +2639,11 @@ func (d *Daemon) deleteTask(ctx context.Context, issueClient *issues.Client, pro
 			result.SessionStopped = true
 		}
 		if daemonCloseGuardTaskHasWorktree(preflight.Task) {
+			if !result.SessionStopped {
+				if err := d.cleanupTaskIssueResourcesForClose(ctx, projectID, taskID, daemonCloseGuardTaskWorktree(preflight.Task)); err != nil {
+					return result, fmt.Errorf("cleanup issue resources before deleting %s: %w", taskID, err)
+				}
+			}
 			if d.worktreeAdapter == nil {
 				return result, fmt.Errorf("remove worktree before deleting %s: worktree cleanup unavailable", taskID)
 			}

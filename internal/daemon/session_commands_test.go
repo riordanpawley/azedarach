@@ -4460,10 +4460,11 @@ func TestIssueResourceCommandsReceiveContextAndConfiguredEnv(t *testing.T) {
 				Env: map[string]string{
 					"RESOURCE_DB":        "db_$AZEDARACH_ISSUE_ID",
 					"RESOURCE_URL":       "postgres://localhost/$RESOURCE_DB",
+					"PADDED":             "  keep me  ",
 					"AZEDARACH_ISSUE_ID": "wrong",
 				},
 				PrepareCommands: []string{
-					"printf '%s|%s|%s|%s|%s|%s|%s' \"$AZEDARACH_PROJECT_ID\" \"$AZEDARACH_ISSUE_ID\" \"$AZEDARACH_SESSION_ID\" \"$AZEDARACH_WORKTREE_PATH\" \"$AZEDARACH_BRANCH\" \"$RESOURCE_DB\" \"$RESOURCE_URL\" > resource-env",
+					"printf '%s|%s|%s|%s|%s|%s|%s|<%s>' \"$AZEDARACH_PROJECT_ID\" \"$AZEDARACH_ISSUE_ID\" \"$AZEDARACH_SESSION_ID\" \"$AZEDARACH_WORKTREE_PATH\" \"$AZEDARACH_BRANCH\" \"$RESOURCE_DB\" \"$RESOURCE_URL\" \"$PADDED\" > resource-env",
 				},
 			},
 		},
@@ -4488,7 +4489,7 @@ func TestIssueResourceCommandsReceiveContextAndConfiguredEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read resource env marker: %v", err)
 	}
-	want := "proj|az-123|proj-az-123|" + worktree + "|user/az-123/demo|db_az-123|postgres://localhost/db_az-123"
+	want := "proj|az-123|proj-az-123|" + worktree + "|user/az-123/demo|db_az-123|postgres://localhost/db_az-123|<  keep me  >"
 	if strings.TrimSpace(string(data)) != want {
 		t.Fatalf("resource env marker = %q, want %q", strings.TrimSpace(string(data)), want)
 	}
@@ -4544,6 +4545,7 @@ func TestIssueResourceSessionEnvExportUsesStableContext(t *testing.T) {
 			IssueResources: appconfig.IssueResourcesConfig{
 				Env: map[string]string{
 					"DATABASE_URL": "postgres://localhost/db_$AZEDARACH_ISSUE_ID",
+					"PADDED":       "  keep me  ",
 					"bad-name":     "ignored",
 				},
 			},
@@ -4575,6 +4577,7 @@ func TestIssueResourceSessionEnvExportUsesStableContext(t *testing.T) {
 		"AZEDARACH_ROOT_PATH='/repo'",
 		"AZEDARACH_BRANCH='user/az-123/demo'",
 		"DATABASE_URL='postgres://localhost/db_az-123'",
+		"PADDED='  keep me  '",
 	} {
 		if !strings.Contains(payload, want) {
 			t.Fatalf("export payload = %q, want %q", payload, want)

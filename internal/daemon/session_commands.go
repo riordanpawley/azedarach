@@ -2669,7 +2669,7 @@ func (d *Daemon) issueResourceEnv(cfg appconfig.IssueResourcesConfig, resourceCt
 		if !validShellEnvName(key) || strings.HasPrefix(key, "AZEDARACH_") {
 			continue
 		}
-		values[key] = strings.TrimSpace(value)
+		values[key] = value
 	}
 	for range 2 {
 		for key, value := range values {
