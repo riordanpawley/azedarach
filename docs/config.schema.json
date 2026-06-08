@@ -314,6 +314,45 @@
         }
       }
     },
+    "issueResources": {
+      "type": "object",
+      "description": "Opt-in issue-scoped local resource lifecycle hooks. Commands run with stable AZEDARACH_* context variables and configured env values.",
+      "additionalProperties": false,
+      "properties": {
+        "env": {
+          "type": "object",
+          "description": "Environment variables exported for resource hooks and the launched session. Values may reference AZEDARACH_* context variables.",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "prepareCommands": {
+          "type": "array",
+          "description": "Commands run after worktree preparation and before tmux/AI launch. Failure stops session startup.",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "failedStartCleanupCommands": {
+          "type": "array",
+          "description": "Commands run when resource preparation succeeded partially or later session startup fails.",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "cleanupCommands": {
+          "type": "array",
+          "description": "Commands run on explicit session/issue lifecycle cleanup. No cleanup is inferred when this is empty.",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      }
+    },
     "spec": {
       "type": "object",
       "additionalProperties": false,

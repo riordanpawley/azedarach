@@ -80,6 +80,7 @@ func main() {
 		SessionInitCommands:        cfg.Session.InitCommands,
 		Logger:                     logger,
 		WorktreeInitCommands:       cfg.Worktree.InitCommands,
+		IssueResources:             cfg.IssueResources,
 	})
 	if err := d.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon failed: %v\n", err)

@@ -22,6 +22,7 @@ This directory primarily contains **developer/internal documentation**.
 - [11-az-spec-v1-contract.md](11-az-spec-v1-contract.md)
 - [12-overlay-sizing.md](12-overlay-sizing.md)
 - [13-backlog-resilience-acceptance.md](13-backlog-resilience-acceptance.md)
+- [14-issue-resource-lifecycle.md](14-issue-resource-lifecycle.md)
 - [adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
 
 ## Daemon Invariant Rule

@@ -10,22 +10,23 @@ import (
 
 // Config represents the full Azedarach configuration
 type Config struct {
-	CLITool       string              `json:"cliTool"`
-	IssueTracker  IssueTrackerConfig  `json:"issueTracker"`
-	Git           GitConfig           `json:"git"`
-	GitHooks      GitHooksConfig      `json:"githooks"`
-	Keyboard      KeyboardConfig      `json:"keyboard"`
-	Session       SessionConfig       `json:"session"`
-	PR            PRConfig            `json:"pr"`
-	Merge         MergeConfig         `json:"merge"`
-	Notifications NotifyConfig        `json:"notifications"`
-	Issues        IssuesConfig        `json:"issues"`
-	Network       NetworkConfig       `json:"network"`
-	DevServer     DevServerConfig     `json:"devServer"`
-	Worktree      WorktreeConfig      `json:"worktree"`
-	Spec          SpecConfig          `json:"spec"`
-	Orchestration OrchestrationConfig `json:"orchestration"`
-	Diagnostics   DiagnosticsConfig   `json:"diagnostics"`
+	CLITool        string               `json:"cliTool"`
+	IssueTracker   IssueTrackerConfig   `json:"issueTracker"`
+	Git            GitConfig            `json:"git"`
+	GitHooks       GitHooksConfig       `json:"githooks"`
+	Keyboard       KeyboardConfig       `json:"keyboard"`
+	Session        SessionConfig        `json:"session"`
+	PR             PRConfig             `json:"pr"`
+	Merge          MergeConfig          `json:"merge"`
+	Notifications  NotifyConfig         `json:"notifications"`
+	Issues         IssuesConfig         `json:"issues"`
+	Network        NetworkConfig        `json:"network"`
+	DevServer      DevServerConfig      `json:"devServer"`
+	Worktree       WorktreeConfig       `json:"worktree"`
+	IssueResources IssueResourcesConfig `json:"issueResources"`
+	Spec           SpecConfig           `json:"spec"`
+	Orchestration  OrchestrationConfig  `json:"orchestration"`
+	Diagnostics    DiagnosticsConfig    `json:"diagnostics"`
 }
 
 type IssueTrackerConfig struct {
@@ -163,6 +164,14 @@ type WorktreeConfig struct {
 	InitCommands []string `json:"initCommands"`
 }
 
+// IssueResourcesConfig contains opt-in issue-scoped lifecycle hooks.
+type IssueResourcesConfig struct {
+	Env                        map[string]string `json:"env"`
+	PrepareCommands            []string          `json:"prepareCommands"`
+	FailedStartCleanupCommands []string          `json:"failedStartCleanupCommands"`
+	CleanupCommands            []string          `json:"cleanupCommands"`
+}
+
 type SpecConfig struct {
 	Enabled bool `json:"enabled"`
 }
@@ -266,6 +275,12 @@ func DefaultConfig() *Config {
 			AutoCleanup:  true,
 			KeepDays:     7,
 			InitCommands: []string{},
+		},
+		IssueResources: IssueResourcesConfig{
+			Env:                        map[string]string{},
+			PrepareCommands:            []string{},
+			FailedStartCleanupCommands: []string{},
+			CleanupCommands:            []string{},
 		},
 		Spec: SpecConfig{
 			Enabled: true,
@@ -586,6 +601,18 @@ func MergeWithDefaults(cfg *Config) *Config {
 	}
 	if cfg.Worktree.InitCommands == nil {
 		cfg.Worktree.InitCommands = defaults.Worktree.InitCommands
+	}
+	if cfg.IssueResources.Env == nil {
+		cfg.IssueResources.Env = defaults.IssueResources.Env
+	}
+	if cfg.IssueResources.PrepareCommands == nil {
+		cfg.IssueResources.PrepareCommands = defaults.IssueResources.PrepareCommands
+	}
+	if cfg.IssueResources.FailedStartCleanupCommands == nil {
+		cfg.IssueResources.FailedStartCleanupCommands = defaults.IssueResources.FailedStartCleanupCommands
+	}
+	if cfg.IssueResources.CleanupCommands == nil {
+		cfg.IssueResources.CleanupCommands = defaults.IssueResources.CleanupCommands
 	}
 	if strings.TrimSpace(cfg.Orchestration.Via) == "" {
 		cfg.Orchestration.Via = defaults.Orchestration.Via

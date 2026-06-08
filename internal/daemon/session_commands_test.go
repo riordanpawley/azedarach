@@ -4266,6 +4266,99 @@ func TestRunWorktreeInitCommandsMissingCommandReturnsFailure(t *testing.T) {
 	}
 }
 
+func TestIssueResourceCommandsReceiveContextAndConfiguredEnv(t *testing.T) {
+	worktree := t.TempDir()
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      "/repo/root",
+			SessionShell: "sh",
+			IssueResources: appconfig.IssueResourcesConfig{
+				Env: map[string]string{
+					"RESOURCE_DB":  "db_$AZEDARACH_ISSUE_ID",
+					"RESOURCE_URL": "postgres://localhost/$RESOURCE_DB",
+				},
+				PrepareCommands: []string{
+					"printf '%s|%s|%s|%s|%s|%s|%s' \"$AZEDARACH_PROJECT_ID\" \"$AZEDARACH_ISSUE_ID\" \"$AZEDARACH_SESSION_ID\" \"$AZEDARACH_WORKTREE_PATH\" \"$AZEDARACH_BRANCH\" \"$RESOURCE_DB\" \"$RESOURCE_URL\" > resource-env",
+				},
+			},
+		},
+	}
+	resourceCtx := issueResourceLifecycleContext{
+		ProjectID:    "proj",
+		IssueID:      "az-123",
+		SessionID:    "proj-az-123",
+		WorktreePath: worktree,
+		RootPath:     "/repo/root",
+		Branch:       "user/az-123/demo",
+	}
+
+	result, err := d.runIssueResourcePrepareCommands(context.Background(), protocol.DefaultProjectID, resourceCtx)
+	if err != nil {
+		t.Fatalf("runIssueResourcePrepareCommands error: %v", err)
+	}
+	if len(result.Ran) != 1 {
+		t.Fatalf("commands ran = %+v, want one prepare command", result.Ran)
+	}
+	data, err := os.ReadFile(filepath.Join(worktree, "resource-env"))
+	if err != nil {
+		t.Fatalf("read resource env marker: %v", err)
+	}
+	want := "proj|az-123|proj-az-123|" + worktree + "|user/az-123/demo|db_az-123|postgres://localhost/db_az-123"
+	if strings.TrimSpace(string(data)) != want {
+		t.Fatalf("resource env marker = %q, want %q", strings.TrimSpace(string(data)), want)
+	}
+}
+
+func TestIssueResourceSessionEnvExportUsesStableContext(t *testing.T) {
+	tmuxRunner := newSessionStartTmuxRunner()
+	tmuxRunner.sessions["proj-az-123"] = true
+	d := &Daemon{
+		cfg: Config{
+			SessionShell: "sh",
+			IssueResources: appconfig.IssueResourcesConfig{
+				Env: map[string]string{
+					"DATABASE_URL": "postgres://localhost/db_$AZEDARACH_ISSUE_ID",
+					"bad-name":     "ignored",
+				},
+			},
+		},
+		tmux: tmux.NewClient(tmuxRunner, slog.Default()),
+	}
+	resourceCtx := issueResourceLifecycleContext{
+		ProjectID:    "proj",
+		IssueID:      "az-123",
+		SessionID:    "proj-az-123",
+		WorktreePath: "/repo/worktree",
+		RootPath:     "/repo",
+		Branch:       "user/az-123/demo",
+	}
+
+	if err := d.exportIssueResourceSessionEnv(context.Background(), protocol.DefaultProjectID, resourceCtx); err != nil {
+		t.Fatalf("exportIssueResourceSessionEnv error: %v", err)
+	}
+	if tmuxRunner.sendKeysCalls != 1 {
+		t.Fatalf("send-keys calls = %d, want one env export", tmuxRunner.sendKeysCalls)
+	}
+	payload := tmuxRunner.sendKeysPayloads[0]
+	for _, want := range []string{
+		"export ",
+		"AZEDARACH_PROJECT_ID='proj'",
+		"AZEDARACH_ISSUE_ID='az-123'",
+		"AZEDARACH_SESSION_ID='proj-az-123'",
+		"AZEDARACH_WORKTREE_PATH='/repo/worktree'",
+		"AZEDARACH_ROOT_PATH='/repo'",
+		"AZEDARACH_BRANCH='user/az-123/demo'",
+		"DATABASE_URL='postgres://localhost/db_az-123'",
+	} {
+		if !strings.Contains(payload, want) {
+			t.Fatalf("export payload = %q, want %q", payload, want)
+		}
+	}
+	if strings.Contains(payload, "bad-name") {
+		t.Fatalf("export payload = %q, want invalid env name ignored", payload)
+	}
+}
+
 func TestSessionStartInitFailureCleansUpNewWorktree(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()

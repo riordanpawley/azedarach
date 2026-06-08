@@ -70,6 +70,10 @@ func TestDefaultConfig(t *testing.T) {
 	assert.True(t, cfg.Worktree.AutoCleanup)
 	assert.Equal(t, 7, cfg.Worktree.KeepDays)
 	assert.NotNil(t, cfg.Worktree.InitCommands)
+	assert.NotNil(t, cfg.IssueResources.Env)
+	assert.NotNil(t, cfg.IssueResources.PrepareCommands)
+	assert.NotNil(t, cfg.IssueResources.FailedStartCleanupCommands)
+	assert.NotNil(t, cfg.IssueResources.CleanupCommands)
 
 	assert.True(t, cfg.Spec.Enabled)
 	assert.Equal(t, "az", cfg.Orchestration.Via)
@@ -126,6 +130,12 @@ func TestLoadConfigFromDotAzedarachConfigJSON(t *testing.T) {
   "worktree": {
     "initCommands": ["direnv allow", "bun install"]
   },
+  "issueResources": {
+    "env": {"DATABASE_URL": "postgres://localhost/az_$AZEDARACH_ISSUE_ID"},
+    "prepareCommands": ["just db-prepare"],
+    "failedStartCleanupCommands": ["just db-cleanup-failed"],
+    "cleanupCommands": ["just db-cleanup"]
+  },
   "spec": {
     "enabled": false
   },
@@ -151,6 +161,10 @@ func TestLoadConfigFromDotAzedarachConfigJSON(t *testing.T) {
 	assert.Equal(t, 60000, cfg.Session.TimeoutMs)
 	assert.Empty(t, cfg.Session.InitCommands)
 	assert.Equal(t, []string{"direnv allow", "bun install"}, cfg.Worktree.InitCommands)
+	assert.Equal(t, "postgres://localhost/az_$AZEDARACH_ISSUE_ID", cfg.IssueResources.Env["DATABASE_URL"])
+	assert.Equal(t, []string{"just db-prepare"}, cfg.IssueResources.PrepareCommands)
+	assert.Equal(t, []string{"just db-cleanup-failed"}, cfg.IssueResources.FailedStartCleanupCommands)
+	assert.Equal(t, []string{"just db-cleanup"}, cfg.IssueResources.CleanupCommands)
 	assert.False(t, cfg.Spec.Enabled)
 	assert.False(t, cfg.PR.DraftByDefault)
 	assert.False(t, cfg.PR.AutoLink)

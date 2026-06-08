@@ -16,6 +16,7 @@ type daemonProjectRuntimeConfig struct {
 	SessionShell               string
 	SessionInitCommands        []string
 	WorktreeInitCommands       []string
+	IssueResources             appconfig.IssueResourcesConfig
 }
 
 func (d *Daemon) baseBranchForProject(projectID string) string {
@@ -40,6 +41,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		SessionShell:               strings.TrimSpace(d.cfg.SessionShell),
 		SessionInitCommands:        append([]string(nil), d.cfg.SessionInitCommands...),
 		WorktreeInitCommands:       append([]string(nil), d.cfg.WorktreeInitCommands...),
+		IssueResources:             cloneIssueResourcesConfig(d.cfg.IssueResources),
 	}
 	if defaultConfig.BaseBranch == "" {
 		defaultConfig.BaseBranch = "main"
@@ -82,6 +84,12 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	if d.worktreeInitCommandsByRoot == nil {
 		d.worktreeInitCommandsByRoot = map[string][]string{}
 	}
+	if d.issueResourcesByProject == nil {
+		d.issueResourcesByProject = map[string]appconfig.IssueResourcesConfig{}
+	}
+	if d.issueResourcesByRoot == nil {
+		d.issueResourcesByRoot = map[string]appconfig.IssueResourcesConfig{}
+	}
 	if cached, ok := d.baseBranchByProject[projectID]; ok && strings.TrimSpace(cached) != "" {
 		cfg := defaultConfig
 		cfg.BaseBranch = cached
@@ -96,6 +104,9 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		}
 		if cmds, ok := d.worktreeInitCommandsByProject[projectID]; ok {
 			cfg.WorktreeInitCommands = append([]string(nil), cmds...)
+		}
+		if resources, ok := d.issueResourcesByProject[projectID]; ok {
+			cfg.IssueResources = cloneIssueResourcesConfig(resources)
 		}
 		d.projectConfigMu.Unlock()
 		return cfg
@@ -121,11 +132,15 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 			if cmds, ok := d.worktreeInitCommandsByRoot[repoDir]; ok {
 				cfg.WorktreeInitCommands = append([]string(nil), cmds...)
 			}
+			if resources, ok := d.issueResourcesByRoot[repoDir]; ok {
+				cfg.IssueResources = cloneIssueResourcesConfig(resources)
+			}
 			d.baseBranchByProject[projectID] = cfg.BaseBranch
 			d.cliToolByProject[projectID] = cfg.CLITool
 			d.sessionShellByProject[projectID] = cfg.SessionShell
 			d.sessionInitCommandsByProject[projectID] = append([]string(nil), cfg.SessionInitCommands...)
 			d.worktreeInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeInitCommands...)
+			d.issueResourcesByProject[projectID] = cloneIssueResourcesConfig(cfg.IssueResources)
 			d.projectConfigMu.Unlock()
 			return cfg
 		}
@@ -146,6 +161,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 				}
 				cfg.SessionInitCommands = append([]string(nil), loaded.Session.InitCommands...)
 				cfg.WorktreeInitCommands = append([]string(nil), loaded.Worktree.InitCommands...)
+				cfg.IssueResources = cloneIssueResourcesConfig(loaded.IssueResources)
 			}
 		}
 	}
@@ -159,6 +175,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	d.sessionShellByProject[projectID] = cfg.SessionShell
 	d.sessionInitCommandsByProject[projectID] = append([]string(nil), cfg.SessionInitCommands...)
 	d.worktreeInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeInitCommands...)
+	d.issueResourcesByProject[projectID] = cloneIssueResourcesConfig(cfg.IssueResources)
 	if repoDir != "" {
 		if d.baseBranchByRoot == nil {
 			d.baseBranchByRoot = map[string]string{}
@@ -168,10 +185,24 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		d.sessionShellByRoot[repoDir] = cfg.SessionShell
 		d.sessionInitCommandsByRoot[repoDir] = append([]string(nil), cfg.SessionInitCommands...)
 		d.worktreeInitCommandsByRoot[repoDir] = append([]string(nil), cfg.WorktreeInitCommands...)
+		d.issueResourcesByRoot[repoDir] = cloneIssueResourcesConfig(cfg.IssueResources)
 	}
 	d.projectConfigMu.Unlock()
 
 	return cfg
+}
+
+func cloneIssueResourcesConfig(cfg appconfig.IssueResourcesConfig) appconfig.IssueResourcesConfig {
+	clone := appconfig.IssueResourcesConfig{
+		Env:                        map[string]string{},
+		PrepareCommands:            append([]string(nil), cfg.PrepareCommands...),
+		FailedStartCleanupCommands: append([]string(nil), cfg.FailedStartCleanupCommands...),
+		CleanupCommands:            append([]string(nil), cfg.CleanupCommands...),
+	}
+	for key, value := range cfg.Env {
+		clone.Env[key] = value
+	}
+	return clone
 }
 
 func hasConfigLayers(projectPath string) bool {

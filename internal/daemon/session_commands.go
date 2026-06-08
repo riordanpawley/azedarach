@@ -52,6 +52,19 @@ type sessionRecoveryResult struct {
 	AlignedDaemonSessions int `json:"aligned_daemon_sessions"`
 }
 
+type issueResourceLifecycleContext struct {
+	ProjectID    string
+	IssueID      string
+	SessionID    string
+	WorktreePath string
+	RootPath     string
+	Branch       string
+}
+
+type issueResourceLifecycleResult struct {
+	Ran []string
+}
+
 type sessionProjectionCounts struct {
 	Total             int
 	Active            int
@@ -636,6 +649,17 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree init failed for %s: %v%s", cmd.IssueID, err, cleanupNote)), nil
 		}
 	}
+	resourceCtx := d.issueResourceLifecycleContext(cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktree.Path, worktree.Branch)
+	resourcePrep, err := d.runIssueResourcePrepareCommands(ctx, cmd.ProjectID, resourceCtx)
+	if err != nil {
+		cleanupErr := d.runIssueResourceFailedStartCleanupCommands(ctx, cmd.ProjectID, resourceCtx)
+		cleanupNote := ""
+		if cleanupErr != nil {
+			cleanupNote = fmt.Sprintf("; failed-start cleanup also failed: %v", cleanupErr)
+		}
+		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue resource prepare failed for %s: %v%s%s", cmd.IssueID, err, cleanupNote, worktreeCleanupNote)), nil
+	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session start worktree prepared",
 			"project_id", cmd.ProjectID,
@@ -650,7 +674,26 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	}
 	d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch)
 	if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
+		if cleanupErr := d.runIssueResourceFailedStartCleanupCommands(ctx, cmd.ProjectID, resourceCtx); cleanupErr != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("issue resource failed-start cleanup failed after tmux create failure",
+				"project_id", cmd.ProjectID,
+				"issue_id", cmd.IssueID,
+				"session_id", cmd.SessionID,
+				"error", cleanupErr,
+			)
+		}
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if err := d.exportIssueResourceSessionEnv(ctx, cmd.ProjectID, resourceCtx); err != nil {
+		if cleanupErr := d.runIssueResourceFailedStartCleanupCommands(ctx, cmd.ProjectID, resourceCtx); cleanupErr != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("issue resource failed-start cleanup failed after env export failure",
+				"project_id", cmd.ProjectID,
+				"issue_id", cmd.IssueID,
+				"session_id", cmd.SessionID,
+				"error", cleanupErr,
+			)
+		}
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("export issue resource env: %v", err)), nil
 	}
 	if cmd.StartWork {
 		initialPrompt := strings.TrimSpace(cmd.Prompt)
@@ -663,6 +706,14 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		}
 		launchCommand := d.buildSessionLaunchCommand(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, initialPrompt)
 		if err := d.tmux.SendKeys(ctx, cmd.SessionID, launchCommand); err != nil {
+			if cleanupErr := d.runIssueResourceFailedStartCleanupCommands(ctx, cmd.ProjectID, resourceCtx); cleanupErr != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("issue resource failed-start cleanup failed after launch failure",
+					"project_id", cmd.ProjectID,
+					"issue_id", cmd.IssueID,
+					"session_id", cmd.SessionID,
+					"error", cleanupErr,
+				)
+			}
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 		}
 		if d.cfg.Logger != nil {
@@ -708,6 +759,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		}(),
 		worktreeLine,
 		worktreeSetupWarning,
+		issueResourceStartOutput(resourcePrep),
 		fmt.Sprintf("Creating tmux session: %s", cmd.SessionID),
 		func() string {
 			if cmd.StartWork {
@@ -990,6 +1042,16 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
+	resourceCleanup := issueResourceLifecycleResult{}
+	worktreePath, branch := d.issueWorktreeContext(ctx, cmd.ProjectID, cmd.IssueID)
+	if worktreePath != "" {
+		resourceCtx := d.issueResourceLifecycleContext(cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktreePath, branch)
+		var cleanupErr error
+		resourceCleanup, cleanupErr = d.runIssueResourceCleanupCommands(ctx, cmd.ProjectID, resourceCtx)
+		if cleanupErr != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue resource cleanup failed for %s: %v", cmd.IssueID, cleanupErr)), nil
+		}
+	}
 	for _, sessionName := range sessionNamesToKill {
 		if strings.EqualFold(strings.TrimSpace(sessionName), strings.TrimSpace(cmd.SessionID)) {
 			continue
@@ -1021,6 +1083,9 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 	if !exists {
 		outputLines[0] = fmt.Sprintf("Session not found in tmux: %s", cmd.IssueID)
 		outputLines[1] = fmt.Sprintf("✓ Session marked stopped: %s", cmd.IssueID)
+	}
+	if line := issueResourceCleanupOutput(resourceCleanup); line != "" {
+		outputLines = append([]string{line}, outputLines...)
 	}
 	output := strings.Join(append(outputLines,
 		"  Note: Worktree is preserved. Use 'git worktree remove' to clean up.",
@@ -2505,6 +2570,184 @@ func (d *Daemon) buildSessionLaunchCommand(projectID, issueID, sessionID string,
 	inner := strings.Join(commands, "; ")
 	inner = inner + "; exec " + shell
 	return fmt.Sprintf("%s -i -c %s", shell, singleQuoteForShell(inner))
+}
+
+func (d *Daemon) issueResourceLifecycleContext(projectID, issueID, sessionID, worktreePath, branch string) issueResourceLifecycleContext {
+	rootPath := strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
+	if rootPath == "" {
+		rootPath = strings.TrimSpace(d.resolveRepoDirForProject(projectID))
+	}
+	if rootPath == "" {
+		rootPath = strings.TrimSpace(d.cfg.RepoDir)
+	}
+	return issueResourceLifecycleContext{
+		ProjectID:    d.canonicalProjectID(projectID),
+		IssueID:      strings.TrimSpace(issueID),
+		SessionID:    strings.TrimSpace(sessionID),
+		WorktreePath: strings.TrimSpace(worktreePath),
+		RootPath:     rootPath,
+		Branch:       strings.TrimSpace(branch),
+	}
+}
+
+func (d *Daemon) issueWorktreeContext(ctx context.Context, projectID, issueID string) (path, branch string) {
+	if manager := d.worktreeManagerForProject(projectID); manager != nil {
+		if worktree, err := manager.Get(ctx, issueID); err == nil {
+			return strings.TrimSpace(worktree.Path), strings.TrimSpace(worktree.Branch)
+		}
+	}
+	if store := d.worktreeRuntimeStateStore(projectID); store != nil {
+		rows, err := store.ListWorktreeStates(ctx, d.canonicalProjectID(projectID))
+		if err == nil {
+			for _, row := range rows {
+				if naming.IssueIDsEqual(row.IssueID, issueID) {
+					return strings.TrimSpace(row.Path), strings.TrimSpace(row.Branch)
+				}
+			}
+		}
+	}
+	return "", ""
+}
+
+func (d *Daemon) runIssueResourcePrepareCommands(ctx context.Context, projectID string, resourceCtx issueResourceLifecycleContext) (issueResourceLifecycleResult, error) {
+	return d.runIssueResourceCommands(ctx, projectID, resourceCtx, d.runtimeConfigForProject(projectID).IssueResources.PrepareCommands)
+}
+
+func (d *Daemon) runIssueResourceFailedStartCleanupCommands(ctx context.Context, projectID string, resourceCtx issueResourceLifecycleContext) error {
+	_, err := d.runIssueResourceCommands(ctx, projectID, resourceCtx, d.runtimeConfigForProject(projectID).IssueResources.FailedStartCleanupCommands)
+	return err
+}
+
+func (d *Daemon) runIssueResourceCleanupCommands(ctx context.Context, projectID string, resourceCtx issueResourceLifecycleContext) (issueResourceLifecycleResult, error) {
+	return d.runIssueResourceCommands(ctx, projectID, resourceCtx, d.runtimeConfigForProject(projectID).IssueResources.CleanupCommands)
+}
+
+func (d *Daemon) runIssueResourceCommands(ctx context.Context, projectID string, resourceCtx issueResourceLifecycleContext, commands []string) (issueResourceLifecycleResult, error) {
+	result := issueResourceLifecycleResult{}
+	if len(commands) == 0 {
+		return result, nil
+	}
+	projectCfg := d.runtimeConfigForProject(projectID)
+	shell := strings.TrimSpace(projectCfg.SessionShell)
+	if shell == "" {
+		shell = appconfig.DefaultSessionShell()
+	}
+	env := d.issueResourceEnv(projectCfg.IssueResources, resourceCtx)
+	for _, lifecycleCmd := range commands {
+		trimmed := strings.TrimSpace(lifecycleCmd)
+		if trimmed == "" {
+			continue
+		}
+		cmd := exec.CommandContext(ctx, shell, "-lc", trimmed)
+		cmd.Dir = resourceCtx.WorktreePath
+		cmd.Env = append(os.Environ(), env...)
+		output, err := cmd.CombinedOutput()
+		result.Ran = append(result.Ran, trimmed)
+		if err != nil {
+			return result, fmt.Errorf("%s: %w (%s)", trimmed, err, strings.TrimSpace(string(output)))
+		}
+	}
+	return result, nil
+}
+
+func (d *Daemon) exportIssueResourceSessionEnv(ctx context.Context, projectID string, resourceCtx issueResourceLifecycleContext) error {
+	projectCfg := d.runtimeConfigForProject(projectID)
+	if !issueResourcesConfigured(projectCfg.IssueResources) {
+		return nil
+	}
+	assignments := d.issueResourceShellExports(projectCfg.IssueResources, resourceCtx)
+	if len(assignments) == 0 {
+		return nil
+	}
+	return d.tmux.SendKeys(ctx, resourceCtx.SessionID, "export "+strings.Join(assignments, " "))
+}
+
+func issueResourcesConfigured(cfg appconfig.IssueResourcesConfig) bool {
+	return len(cfg.Env) > 0 ||
+		len(cfg.PrepareCommands) > 0 ||
+		len(cfg.FailedStartCleanupCommands) > 0 ||
+		len(cfg.CleanupCommands) > 0
+}
+
+func (d *Daemon) issueResourceEnv(cfg appconfig.IssueResourcesConfig, resourceCtx issueResourceLifecycleContext) []string {
+	values := issueResourceContextValues(resourceCtx)
+	for key, value := range cfg.Env {
+		key = strings.TrimSpace(key)
+		if !validShellEnvName(key) {
+			continue
+		}
+		values[key] = strings.TrimSpace(value)
+	}
+	for range 2 {
+		for key, value := range values {
+			values[key] = os.Expand(value, func(name string) string {
+				return values[name]
+			})
+		}
+	}
+	env := make([]string, 0, len(values))
+	for key, value := range values {
+		if validShellEnvName(key) {
+			env = append(env, key+"="+value)
+		}
+	}
+	return env
+}
+
+func (d *Daemon) issueResourceShellExports(cfg appconfig.IssueResourcesConfig, resourceCtx issueResourceLifecycleContext) []string {
+	env := d.issueResourceEnv(cfg, resourceCtx)
+	assignments := make([]string, 0, len(env))
+	for _, pair := range env {
+		key, value, ok := strings.Cut(pair, "=")
+		if !ok || !validShellEnvName(key) {
+			continue
+		}
+		assignments = append(assignments, key+"="+singleQuoteForShell(value))
+	}
+	return assignments
+}
+
+func issueResourceContextValues(resourceCtx issueResourceLifecycleContext) map[string]string {
+	return map[string]string{
+		"AZEDARACH_PROJECT_ID":    resourceCtx.ProjectID,
+		"AZEDARACH_ISSUE_ID":      resourceCtx.IssueID,
+		"AZEDARACH_SESSION_ID":    resourceCtx.SessionID,
+		"AZEDARACH_WORKTREE_PATH": resourceCtx.WorktreePath,
+		"AZEDARACH_ROOT_PATH":     resourceCtx.RootPath,
+		"AZEDARACH_BRANCH":        resourceCtx.Branch,
+	}
+}
+
+func validShellEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		if i == 0 {
+			if r != '_' && !unicode.IsLetter(r) {
+				return false
+			}
+			continue
+		}
+		if r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func issueResourceStartOutput(result issueResourceLifecycleResult) string {
+	if len(result.Ran) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Issue resources prepared: %d command(s)", len(result.Ran))
+}
+
+func issueResourceCleanupOutput(result issueResourceLifecycleResult) string {
+	if len(result.Ran) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Issue resources cleaned: %d command(s)", len(result.Ran))
 }
 
 func (d *Daemon) runWorktreeInitCommands(ctx context.Context, projectID string, worktreePath string) error {

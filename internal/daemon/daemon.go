@@ -68,6 +68,7 @@ type Config struct {
 	SessionShell               string
 	SessionInitCommands        []string
 	WorktreeInitCommands       []string
+	IssueResources             appconfig.IssueResourcesConfig
 	Logger                     *slog.Logger
 	IdleTimeout                time.Duration
 	RuntimeReconcileInterval   time.Duration
@@ -98,6 +99,8 @@ type Daemon struct {
 	sessionInitCommandsByRoot     map[string][]string
 	worktreeInitCommandsByProject map[string][]string
 	worktreeInitCommandsByRoot    map[string][]string
+	issueResourcesByProject       map[string]appconfig.IssueResourcesConfig
+	issueResourcesByRoot          map[string]appconfig.IssueResourcesConfig
 	worktreeManagersMu            sync.Mutex
 	worktreeManagersByProject     map[string]*git.WorktreeManager
 	worktreeManagersByRoot        map[string]*git.WorktreeManager
@@ -240,6 +243,8 @@ func New(cfg Config) *Daemon {
 		sessionInitCommandsByRoot:     map[string][]string{},
 		worktreeInitCommandsByProject: map[string][]string{},
 		worktreeInitCommandsByRoot:    map[string][]string{},
+		issueResourcesByProject:       map[string]appconfig.IssueResourcesConfig{},
+		issueResourcesByRoot:          map[string]appconfig.IssueResourcesConfig{},
 		worktreeManagersByProject:     map[string]*git.WorktreeManager{},
 		worktreeManagersByRoot:        map[string]*git.WorktreeManager{},
 		runtimeStoresByProject:        map[string]*daemonstate.RuntimeStateStore{},
