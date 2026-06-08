@@ -1115,6 +1115,10 @@ func sessionStartUsage(namespaced bool) string {
 	return "usage: az start <issue-id> [--wait]"
 }
 
+func parseSessionStartArgs(args []string, namespaced bool) (string, cli.SessionCommandOptions, error) {
+	return cli.ParseSessionStartArgs(args, namespaced, sessionStartUsage(namespaced))
+}
+
 // runCommand executes a CLI command with dependency injection
 func runCommand(cfg *config.Config, fn func(*cli.Dependencies) error) error {
 	depsStartedAt := time.Now()
@@ -1167,7 +1171,7 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 			}
 			return fmt.Errorf("%s", sessionStartUsage(namespaced))
 		}
-		issueID, opts, err := cli.ParseSessionStartArgs(args, namespaced, sessionStartUsage(namespaced))
+		issueID, opts, err := parseSessionStartArgs(args, namespaced)
 		if err != nil {
 			return err
 		}

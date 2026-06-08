@@ -29,4 +29,8 @@ Status semantics:
   closed      Accepted/integrated and complete
   Blocked work is represented with `dep add --type blocks`, not a status.
 
+Graph/root membership:
+  Child/root membership comes from AZEDARACH_ISSUE_ID auto-parenting or `dep add --type parent-child`.
+  `--impl` assigns implementation/spec variant metadata only; it never attaches an issue to a graph/root.
+
 Argument ordering: place flags/options before positional arguments for deterministic parsing.

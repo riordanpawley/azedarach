@@ -5361,7 +5361,7 @@ func PrimeCommand(deps *Dependencies) error {
 	specGuardrails := ""
 	questionFirstGuardrails := ""
 	implementationSection := ""
-	implementationGuardrails := "- Implementation guardrails: in multi-implementation repos, include explicit `--impl <impl>` on new `az issue` writes and use repeated `--impl` only for intentional shared work. For `az issue update`, `--update-impl` is only for changing implementation assignments; status/title/notes updates do not require it."
+	implementationGuardrails := "- Implementation guardrails: `--impl` assigns implementation/spec variants only; it is not graph/root membership. In multi-implementation repos, include explicit `--impl <impl>` on implementation-specific new issue writes and use repeated `--impl` only for intentional shared work. For `az issue update`, `--update-impl` is only for changing implementation assignments; status/title/notes updates do not require it."
 	specEnabled := deps != nil && deps.Config != nil && deps.Config.Spec.Enabled
 	orchestrationVia := primeOrchestrationVia(deps)
 	orchestrationViaAz := strings.EqualFold(orchestrationVia, "az")
@@ -5486,8 +5486,9 @@ func renderPrimeImplementationSection(implementations []string) string {
 	return fmt.Sprintf("- Implementation selection (multi-implementation project):\n"+
 		"  - Available implementations: %s\n"+
 		"  - Use `az impl list` to refresh the available options.\n"+
-		"  - New issue writes must choose an implementation: `az issue create --impl %s \"Child task\"`\n"+
-		"  - Repeat `--impl` only for intentionally shared work. Existing issue updates do not use `--impl`; use `--update-impl` only when changing assignments.\n",
+		"  - `--impl` selects implementation/spec variant assignment only; it does not attach an issue to a parent/root graph.\n"+
+		"  - New issue writes for a specific implementation must choose one, for example `az issue create --impl %s \"Implementation-specific task\"`.\n"+
+		"  - Repeat `--impl` only for intentionally shared implementation work. Existing issue updates do not use `--impl`; use `--update-impl` only when changing assignments.\n",
 		strings.Join(quoted, ", "), exampleImpl)
 }
 

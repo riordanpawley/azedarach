@@ -809,7 +809,7 @@ func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.openMergeTargetSelection(task)
 	case "m":
 		m.beginMutationFeedback("Preparing merge")
-		return m, m.followOnMergeSelectionCmd(task, session)
+		return m.mergeCurrentIssueIntoDefaultTarget(task)
 	case "u":
 		if task == nil {
 			m.addToast(Toast{

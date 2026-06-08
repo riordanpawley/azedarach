@@ -1248,12 +1248,13 @@ func TestFollowOnMergeSelectionNoEligibleUpstreamShowsToast(t *testing.T) {
 	}
 	m.nav.SelectTask(childID, 1)
 
-	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
+	task, session := m.getCurrentTaskAndSession()
+	cmd := m.followOnMergeSelectionCmd(task, session)
 	if cmd != nil {
 		t.Fatalf("expected no merge command when no eligible upstream exists, got %T", cmd)
 	}
 
-	newModel := updated.(Model)
+	newModel := m
 	if len(newModel.toasts) == 0 {
 		t.Fatalf("expected warning toast when follow-on merge has no eligible upstream")
 	}

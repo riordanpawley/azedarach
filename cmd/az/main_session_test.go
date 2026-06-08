@@ -42,6 +42,55 @@ func TestRunSessionCommand_HelpArgsReturnUsage(t *testing.T) {
 	}
 }
 
+func TestParseSessionStartArgsSupportsProjectFlag(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantIssueID string
+		wantProject string
+		wantWait    bool
+	}{
+		{
+			name:        "project before issue",
+			args:        []string{"--project", "azedarach", "cif"},
+			wantIssueID: "cif",
+			wantProject: "azedarach",
+		},
+		{
+			name:        "project after issue with wait",
+			args:        []string{"cif", "--project", "azedarach", "--wait"},
+			wantIssueID: "cif",
+			wantProject: "azedarach",
+			wantWait:    true,
+		},
+		{
+			name:        "wait before issue",
+			args:        []string{"--wait", "cif"},
+			wantIssueID: "cif",
+			wantWait:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotIssueID, gotOpts, err := parseSessionStartArgs(tt.args, true)
+			if err != nil {
+				t.Fatalf("parseSessionStartArgs error = %v", err)
+			}
+			if gotIssueID != tt.wantIssueID || gotOpts.Project != tt.wantProject || gotOpts.Wait != tt.wantWait {
+				t.Fatalf("issueID=%q opts=%+v, want issueID=%q project=%q wait=%v", gotIssueID, gotOpts, tt.wantIssueID, tt.wantProject, tt.wantWait)
+			}
+		})
+	}
+}
+
+func TestParseSessionStartArgsRejectsProjectFlagOnAlias(t *testing.T) {
+	_, _, err := parseSessionStartArgs([]string{"--project", "azedarach", "cif"}, false)
+	if err == nil || !strings.Contains(err.Error(), "usage: az start <issue-id> [--wait]") {
+		t.Fatalf("err = %v, want alias usage", err)
+	}
+}
+
 func TestParseSessionResolveConflictArgs(t *testing.T) {
 	opts, err := parseSessionResolveConflictArgs([]string{"az-1", "--worktree", "/tmp/az-1", "--file", "a.go", "--file", "b.go", "--prompt", "fix it"})
 	if err != nil {

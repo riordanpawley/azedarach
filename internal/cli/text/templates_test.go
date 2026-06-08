@@ -20,6 +20,8 @@ func TestRenderIssueHelpPrefersNamedFlagForms(t *testing.T) {
 		"split [--project <project-id>] [--parent <issue-id>]",
 		"close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [<issue-id>]",
 		"delete [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]",
+		"Child/root membership comes from AZEDARACH_ISSUE_ID auto-parenting or `dep add --type parent-child`.",
+		"`--impl` assigns implementation/spec variant metadata only; it never attaches an issue to a graph/root.",
 		"Argument ordering: place flags/options before positional arguments for deterministic parsing.",
 	} {
 		if !strings.Contains(output, want) {

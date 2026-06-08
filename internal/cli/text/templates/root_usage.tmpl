@@ -80,8 +80,9 @@ Examples:
   az issue get --id az-123 --with-notes
   az issue check --id az-123
   az issue doctor --id az-123
-  az issue create --impl go-bubbletea "New task"
+  az issue create "New task"
   az issue create "Follow-up task"                # auto-parent under AZEDARACH_ISSUE_ID
+  az issue create --impl go-bubbletea "Implementation-specific task"  # assigns implementation metadata, not graph parentage
   az issue split "Implement child task"           # auto-parent and launch isolated child worktree; merge explicitly later
   az issue create --deferred "Investigate later"  # deferred follow-up (defaults priority to P4)
   az issue update --id az-123 --status in_progress --title "Renamed task" --priority P1
