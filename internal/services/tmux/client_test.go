@@ -308,6 +308,10 @@ func TestClient_SendKeys(t *testing.T) {
 }
 
 func TestClient_PasteTextAndSubmit(t *testing.T) {
+	oldDelay := pasteSubmitDelay
+	pasteSubmitDelay = 0
+	t.Cleanup(func() { pasteSubmitDelay = oldDelay })
+
 	runner := &recordingRunner{}
 	client := NewClient(runner, slog.Default())
 
@@ -316,8 +320,30 @@ func TestClient_PasteTextAndSubmit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, [][]string{
 		{"set-buffer", "-b", "azedarach-message-az-42", "line one\nline two"},
-		{"paste-buffer", "-d", "-b", "azedarach-message-az-42", "-t", "az-42"},
+		{"paste-buffer", "-dp", "-b", "azedarach-message-az-42", "-t", "az-42"},
 		{"send-keys", "-t", "az-42", "Enter"},
+	}, runner.commands)
+}
+
+func TestClient_PasteTextAndSubmitDelayRespectsContext(t *testing.T) {
+	oldDelay := pasteSubmitDelay
+	pasteSubmitDelay = time.Minute
+	t.Cleanup(func() { pasteSubmitDelay = oldDelay })
+
+	runner := &recordingRunner{}
+	client := NewClient(runner, slog.Default())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := client.PasteTextAndSubmit(ctx, "az-42", "message")
+
+	require.Error(t, err)
+	var tmuxErr *domain.TmuxError
+	assert.ErrorAs(t, err, &tmuxErr)
+	assert.Equal(t, "send-keys", tmuxErr.Op)
+	assert.Equal(t, [][]string{
+		{"set-buffer", "-b", "azedarach-message-az-42", "message"},
+		{"paste-buffer", "-dp", "-b", "azedarach-message-az-42", "-t", "az-42"},
 	}, runner.commands)
 }
 

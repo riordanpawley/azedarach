@@ -20,6 +20,8 @@ type Client struct {
 	logger *slog.Logger
 }
 
+var pasteSubmitDelay = 150 * time.Millisecond
+
 // SessionInfo captures tmux session identity plus tmux timestamps.
 type SessionInfo struct {
 	Name           string
@@ -177,8 +179,11 @@ func (c *Client) PasteTextAndSubmit(ctx context.Context, name string, text strin
 	if _, err := c.runner.Run(ctx, "set-buffer", "-b", bufferName, text); err != nil {
 		return &domain.TmuxError{Op: "set-buffer", Session: name, Err: err}
 	}
-	if _, err := c.runner.Run(ctx, "paste-buffer", "-d", "-b", bufferName, "-t", name); err != nil {
+	if _, err := c.runner.Run(ctx, "paste-buffer", "-dp", "-b", bufferName, "-t", name); err != nil {
 		return &domain.TmuxError{Op: "paste-buffer", Session: name, Err: err}
+	}
+	if err := sleepWithContext(ctx, pasteSubmitDelay); err != nil {
+		return &domain.TmuxError{Op: "send-keys", Session: name, Err: err}
 	}
 	if _, err := c.runner.Run(ctx, "send-keys", "-t", name, "Enter"); err != nil {
 		return &domain.TmuxError{Op: "send-keys", Session: name, Err: err}
@@ -201,6 +206,20 @@ func safeTmuxBufferSuffix(value string) string {
 		return "session"
 	}
 	return b.String()
+}
+
+func sleepWithContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // SendKey sends a single tmux key token without appending Enter.
