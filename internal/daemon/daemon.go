@@ -18,6 +18,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
+	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
@@ -303,6 +304,7 @@ func New(cfg Config) *Daemon {
 		sessionStart:           d.handleSessionStartDirect,
 		sessionStop:            d.handleSessionStopDirect,
 		sessionResolveConflict: d.handleSessionResolveConflictDirect,
+		recoverInterrupted:     d.recoverInterruptedOperation,
 	})
 	commandExecutor := operationCommandExecutor{runtime: runtime}
 	sessionExecutor := sessionOperationExecutor{runtime: runtime}
@@ -892,6 +894,74 @@ func (d *Daemon) sessionRuntimeStateStoreIfConfigured(projectID string) *daemons
 		return nil
 	}
 	return d.sessionRuntimeStateStore(projectID)
+}
+
+func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemonops.Record) (interruptedOperationRecovery, bool) {
+	if d == nil || record.Kind != daemonhandlers.CommandSessionStart {
+		return interruptedOperationRecovery{}, false
+	}
+	projectID := protocol.NormalizeProjectID(record.ProjectID)
+	if projectID == "" {
+		projectID = protocol.DefaultProjectID
+	}
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return interruptedOperationRecovery{}, false
+	}
+	session, found, err := store.GetSessionState(ctx, projectID, record.IssueID)
+	if err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn("failed to inspect interrupted session.start projection",
+			"operation_id", record.ID,
+			"project_id", projectID,
+			"issue_id", record.IssueID,
+			"error", err,
+		)
+	}
+	if err != nil || !found {
+		session, found, err = store.GetSessionStateByIssueID(ctx, projectID, record.IssueID)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("failed to inspect interrupted session.start projection by issue",
+					"operation_id", record.ID,
+					"project_id", projectID,
+					"issue_id", record.IssueID,
+					"error", err,
+				)
+			}
+			return interruptedOperationRecovery{}, false
+		}
+	}
+	if !found || strings.TrimSpace(session.IssueID) != strings.TrimSpace(record.IssueID) {
+		return interruptedOperationRecovery{}, false
+	}
+	if !interruptedSessionStartCompleted(session) {
+		return interruptedOperationRecovery{}, false
+	}
+	result, err := json.Marshal(map[string]string{
+		"output":     "session start recovered after daemon restart",
+		"session_id": session.ID,
+		"issue_id":   session.IssueID,
+	})
+	if err != nil {
+		result = nil
+	}
+	return interruptedOperationRecovery{
+		State:         daemonops.StateDone,
+		ResultPayload: result,
+	}, true
+}
+
+func interruptedSessionStartCompleted(session daemonstate.Session) bool {
+	switch daemonstate.NormalizeSessionState(session.ObservedState) {
+	case daemonstate.SessionStateRunning, daemonstate.SessionStatePaused:
+		return true
+	}
+	switch daemonstate.NormalizeSessionState(session.State) {
+	case daemonstate.SessionStateRunning, daemonstate.SessionStatePaused:
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *Daemon) refreshSessionInvariantCache(ctx context.Context, projectID string) error {
