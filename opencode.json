@@ -1,68 +1,14 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "disabled_providers": [
+    "anthropic"
+  ],
   "instructions": [
     "AGENTS.md",
     "~/.config/opencode/plugin/shell-strategy/shell_strategy.md"
   ],
-  "plugin": [
-    "@nick-vi/opencode-type-inject",
-    "opencode-pty"
-  ],
-  "model": "openai/gpt-5.3-codex",
-  "disabled_providers": [
-    "anthropic"
-  ],
-  "permission": {
-    "bash": {
-      "rg * | head *": "allow",
-      "rg * | tail *": "allow",
-      "rg * | *": "allow",
-      "rg *": "allow",
-      "fd * | head *": "allow",
-      "fd * | tail *": "allow",
-      "fd * | *": "allow",
-      "fd *": "allow",
-      "ls * | head *": "allow",
-      "ls * | tail *": "allow",
-      "ls * | *": "allow",
-      "ls *": "allow",
-      "git log * | head *": "allow",
-      "git log * | tail *": "allow",
-      "git log * | *": "allow",
-      "git log": "allow",
-      "git status | *": "allow",
-      "git status": "allow",
-      "git diff | *": "allow",
-      "git diff *": "allow",
-      "git diff": "allow",
-      "git branch | *": "allow",
-      "git branch *": "allow",
-      "git branch": "allow",
-      "git add *": "allow",
-      "git commit *": "allow",
-      "bun run type-check *": "allow",
-      "bun run type-check": "allow",
-      "bun run dev *": "allow",
-      "bun run build *": "allow",
-      "bun run build": "allow",
-      "bun *": "allow",
-      "az": "allow",
-      "az *": "allow",
-      "tmux *": "allow"
-    }
-  },
   "mcp": {
-    "effect-docs": {
-      "type": "local",
-      "command": [
-        "npx",
-        "-y",
-        "effect-mcp@latest"
-      ],
-      "enabled": true
-    },
     "codanna": {
-      "type": "local",
       "command": [
         "codanna",
         "--config",
@@ -70,7 +16,65 @@
         "serve",
         "--watch"
       ],
-      "enabled": true
+      "enabled": true,
+      "type": "local"
+    },
+    "effect-docs": {
+      "command": [
+        "npx",
+        "-y",
+        "effect-mcp@latest"
+      ],
+      "enabled": true,
+      "type": "local"
     }
-  }
+  },
+  "model": "openai/gpt-5.3-codex",
+  "permission": {
+    "bash": {
+      "az": "allow",
+      "az *": "allow",
+      "bun *": "allow",
+      "bun run build": "allow",
+      "bun run build *": "allow",
+      "bun run dev *": "allow",
+      "bun run type-check": "allow",
+      "bun run type-check *": "allow",
+      "fd *": "allow",
+      "fd * | *": "allow",
+      "fd * | head *": "allow",
+      "fd * | tail *": "allow",
+      "git add *": "allow",
+      "git branch": "allow",
+      "git branch *": "allow",
+      "git branch | *": "allow",
+      "git commit *": "allow",
+      "git diff": "allow",
+      "git diff *": "allow",
+      "git diff | *": "allow",
+      "git log": "allow",
+      "git log * | *": "allow",
+      "git log * | head *": "allow",
+      "git log * | tail *": "allow",
+      "git status": "allow",
+      "git status | *": "allow",
+      "ls *": "allow",
+      "ls * | *": "allow",
+      "ls * | head *": "allow",
+      "ls * | tail *": "allow",
+      "rg *": "allow",
+      "rg * | *": "allow",
+      "rg * | head *": "allow",
+      "rg * | tail *": "allow",
+      "tmux *": "allow"
+    }
+  },
+  "plugin": [
+    "@nick-vi/opencode-type-inject",
+    "opencode-pty"
+  ],
+  "plugins": [
+    "opencode-tracker"
+  ],
+  "theme": "tokyonight"
 }
