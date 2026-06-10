@@ -37,7 +37,7 @@ func TestLoadIssuesCmd_UsesDaemonSQLiteSnapshot(t *testing.T) {
 
 	model := newTestModel()
 	model.repoDir = repoDir
-	model.daemonClient = daemonclient.New(transport.NewClient(socketPath)).WithProjectID("proj-model")
+	model.daemonClient = newModelTestDaemonClient(socketPath)
 	msg := model.loadIssuesCmd()()
 
 	loaded, ok := msg.(issuesLoadedMsg)
@@ -100,7 +100,7 @@ func TestLoadIssuesCmd_HidesParentChildTasksFromBoardByDefault(t *testing.T) {
 
 	model := newTestModel()
 	model.repoDir = repoDir
-	model.daemonClient = daemonclient.New(transport.NewClient(socketPath)).WithProjectID("proj-model")
+	model.daemonClient = newModelTestDaemonClient(socketPath)
 	msg := model.loadIssuesCmd()()
 	loaded, ok := msg.(issuesLoadedMsg)
 	if !ok {
@@ -140,7 +140,7 @@ func TestIssueSnapshotParityAcrossCLIAndTUIBoard(t *testing.T) {
 	stop := startModelTestDaemon(t, repoDir, socketPath, lockPath)
 	defer stop()
 
-	client := daemonclient.New(transport.NewClient(socketPath)).WithProjectID("proj-model")
+	client := newModelTestDaemonClient(socketPath)
 	cliDeps := &cli.Dependencies{
 		Config:       config.DefaultConfig(),
 		DaemonClient: client,
@@ -220,7 +220,7 @@ func TestIssueSnapshotParityAcrossCLIAndTUIJSONListFields(t *testing.T) {
 	seedModelIssueStore(t, repoDir, parentID, "Parent JSON", "open", 2, "epic")
 	seedModelIssueStore(t, repoDir, childID, "Child JSON", "in_progress", 1, "task")
 	seedModelIssueStore(t, repoDir, doneID, "Done JSON", "closed", 3, "feature")
-	seedModelIssueStore(t, repoDir, blockedID, "Blocked JSON", "blocked", 0, "bug")
+	seedModelIssueStore(t, repoDir, blockedID, "Blocked JSON", "open", 0, "bug")
 	seedModelIssueDependency(t, repoDir, childID, parentID, "parent-child")
 	seedModelIssueDependency(t, repoDir, blockedID, parentID, "blocks")
 
@@ -228,7 +228,7 @@ func TestIssueSnapshotParityAcrossCLIAndTUIJSONListFields(t *testing.T) {
 	stop := startModelTestDaemon(t, repoDir, socketPath, lockPath)
 	defer stop()
 
-	client := daemonclient.New(transport.NewClient(socketPath)).WithProjectID("proj-model")
+	client := newModelTestDaemonClient(socketPath)
 	cliDeps := &cli.Dependencies{
 		Config:       config.DefaultConfig(),
 		DaemonClient: client,
@@ -458,6 +458,15 @@ func newModelTestRuntimePaths(t *testing.T) (string, string) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
 	return filepath.Join(runtimeDir, "s.sock"), filepath.Join(runtimeDir, "l.lock")
+}
+
+func newModelTestDaemonClient(socketPath string) *daemonclient.Client {
+	return daemonclient.New(transport.NewClient(socketPath)).
+		WithProjectID("proj-model").
+		WithReadWaitPolicy(daemonclient.ReadWaitPolicy{
+			Default:  15 * time.Second,
+			Explicit: 15 * time.Second,
+		})
 }
 
 func isSocketPermissionError(err error) bool {

@@ -54,6 +54,12 @@ var hookEventStatuses = map[string]string{
 	hookEventSessionEnd:        "ended",
 }
 
+var (
+	gitHookDaemonRefreshTimeout        = 10 * time.Second
+	gitHookDaemonRefreshAttemptTimeout = 3 * time.Second
+	gitHookDaemonRefreshInitialBackoff = 150 * time.Millisecond
+)
+
 type GitHooksInstallOptions struct {
 	ProjectDir string
 	Verbose    bool
@@ -530,7 +536,7 @@ func reconcileDaemonGitState(projectDir string, deps *Dependencies, hookName str
 		}
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), gitHookDaemonRefreshTimeout)
 	defer cancel()
 	err = refreshDaemonGitStatusWithRetry(ctx, deps, worktreeRoot)
 	if err != nil {
@@ -567,13 +573,15 @@ func reconcileDaemonGitState(projectDir string, deps *Dependencies, hookName str
 
 func refreshDaemonGitStatusWithRetry(ctx context.Context, deps *Dependencies, worktreeRoot string) error {
 	const maxAttempts = 3
-	backoff := 150 * time.Millisecond
+	backoff := gitHookDaemonRefreshInitialBackoff
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		_, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (struct{}, error) {
+		attemptCtx, cancel := context.WithTimeout(ctx, gitHookDaemonRefreshAttemptTimeout)
+		_, err := commandWithDaemonAutostartRetryWithinContext(attemptCtx, deps, func(callCtx context.Context) (struct{}, error) {
 			_, callErr := deps.DaemonClient.GitStatusHookRefresh(callCtx, worktreeRoot)
 			return struct{}{}, callErr
 		})
+		cancel()
 		if err == nil {
 			return nil
 		}

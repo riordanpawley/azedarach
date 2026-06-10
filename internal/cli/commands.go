@@ -5970,6 +5970,24 @@ func commandWithDaemonAutostartRetry[T any](ctx context.Context, deps *Dependenc
 	return call(ctx)
 }
 
+func commandWithDaemonAutostartRetryWithinContext[T any](ctx context.Context, deps *Dependencies, call func(context.Context) (T, error)) (T, error) {
+	value, err := call(ctx)
+	if err == nil {
+		return value, nil
+	}
+	if !shouldAutostartAfterDaemonReadError(err) {
+		return value, err
+	}
+	if deps == nil || deps.DaemonClient == nil {
+		if startErr := startDaemonLauncher(ctx, deps); startErr != nil {
+			return value, fmt.Errorf("autostart daemon: %w", startErr)
+		}
+	} else if startErr := ensureDaemon(ctx, deps, "cli"); startErr != nil {
+		return value, fmt.Errorf("autostart daemon: %w", startErr)
+	}
+	return call(ctx)
+}
+
 func startDaemonLauncher(ctx context.Context, deps *Dependencies) error {
 	socketPath := ""
 	if deps != nil {
