@@ -437,6 +437,28 @@ func TestClient_GetManyWithDependencyContextRuntimeIncludesRequestedAndDirectCon
 	assert.Equal(t, firstID, taskByID[secondID].Dependencies[0].ID.String())
 }
 
+func TestTaskRuntimeProjectionQueryFiltersRuntimeCTEsForRequestedIDs(t *testing.T) {
+	query, args := taskRuntimeProjectionQuery("proj-batch-context", true, " second ", "", "second", "third")
+
+	assert.Equal(t, []any{
+		"proj-batch-context",
+		"second",
+		"third",
+		"second",
+		"third",
+		"proj-batch-context",
+		"second",
+		"third",
+	}, args)
+	assert.Equal(t, 2, strings.Count(query, "issue_id IN (?,?)"), query)
+	assert.Contains(t, query, "i.id IN (?,?)")
+
+	unfilteredQuery, unfilteredArgs := taskRuntimeProjectionQuery("proj-batch-context", false)
+	assert.Equal(t, []any{"proj-batch-context", "proj-batch-context"}, unfilteredArgs)
+	assert.NotContains(t, unfilteredQuery, "issue_id IN")
+	assert.NotContains(t, unfilteredQuery, "i.id IN")
+}
+
 func TestClient_UpdateWithRuntimeReturnsChangedTask(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -1956,4 +1978,71 @@ func TestResolveDBPathFallsBackToGitMarkerWhenGitUnavailable(t *testing.T) {
 	got, err := resolveDBPath(start)
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(repo, ".azedarach", "azedarach.db"), got)
+}
+
+func BenchmarkClient_GetManyWithDependencyContextRuntimeLargeProject(b *testing.B) {
+	ctx := context.Background()
+	dbPath := filepath.Join(b.TempDir(), "issues.db")
+	client := NewClientAtPath(dbPath, slog.Default())
+	b.Cleanup(func() {
+		require.NoError(b, client.CloseDB())
+	})
+	db, err := client.dbHandle()
+	require.NoError(b, err)
+
+	const (
+		projectID = "proj-large"
+		taskCount = 3500
+	)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(b, err)
+	issueStmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO issues (id, title, description, status, priority, issue_type, created_at, updated_at, labels_json, implementations_json)
+		VALUES (?, ?, '', ?, ?, ?, ?, ?, '[]', '[]')
+	`)
+	require.NoError(b, err)
+	sessionStmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`)
+	require.NoError(b, err)
+	externalRefStmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO issue_external_refs (issue_id, provider, provider_scope, remote_key, display_key, created_at, updated_at)
+		VALUES (?, 'linear', 'team:CKU', ?, ?, ?, ?)
+	`)
+	require.NoError(b, err)
+	depStmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type)
+		VALUES (?, ?, ?)
+	`)
+	require.NoError(b, err)
+	for i := 0; i < taskCount; i++ {
+		id := "bench-" + strconv.Itoa(i)
+		_, err = issueStmt.ExecContext(ctx, id, "Benchmark issue "+strconv.Itoa(i), string(domain.StatusOpen), int(domain.P2), string(domain.TypeTask), now, now)
+		require.NoError(b, err)
+		_, err = sessionStmt.ExecContext(ctx, projectID, "sess-"+strconv.Itoa(i), id, "stopped", now, now)
+		require.NoError(b, err)
+		_, err = externalRefStmt.ExecContext(ctx, id, "CKU-"+strconv.Itoa(i), "CKU-"+strconv.Itoa(i), now, now)
+		require.NoError(b, err)
+		if i > 0 {
+			_, err = depStmt.ExecContext(ctx, id, "bench-"+strconv.Itoa(i-1), string(domain.DependencyRelatedTo))
+			require.NoError(b, err)
+		}
+	}
+	require.NoError(b, issueStmt.Close())
+	require.NoError(b, sessionStmt.Close())
+	require.NoError(b, externalRefStmt.Close())
+	require.NoError(b, depStmt.Close())
+	require.NoError(b, tx.Commit())
+
+	ids := []string{"bench-100", "bench-500", "bench-1000", "bench-1500", "bench-2000", "bench-2500", "bench-3000", "bench-3200", "bench-3400"}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tasks, err := client.GetManyWithDependencyContextRuntime(ctx, projectID, ids)
+		require.NoError(b, err)
+		if len(tasks) == 0 {
+			b.Fatal("expected context tasks")
+		}
+	}
 }

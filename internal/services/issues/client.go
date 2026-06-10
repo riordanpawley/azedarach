@@ -1924,107 +1924,7 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 }
 
 func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB, projectID string, includeDetails bool, issueIDs ...string) ([]domain.Task, error) {
-	detailSelect := `
-			COALESCE(i.description, ''),
-			COALESCE(i.notes, ''),
-			COALESCE(i.design, ''),
-			COALESCE(i.acceptance, ''),`
-	if !includeDetails {
-		detailSelect = `
-			'',
-			'',
-			'',
-			'',`
-	}
-
-	query := `
-		WITH ranked_session AS (
-			SELECT
-				issue_id,
-				COALESCE(NULLIF(TRIM(observed_state), ''), state) AS state,
-				COALESCE(started_at, '') AS started_at,
-				updated_at,
-				session_id,
-				COALESCE(tmux_attached_count, 0) AS tmux_attached_count,
-				ROW_NUMBER() OVER (
-					PARTITION BY issue_id
-					ORDER BY
-						CASE COALESCE(NULLIF(TRIM(observed_state), ''), state)
-							WHEN 'running' THEN 0
-							WHEN 'attached' THEN 0
-							WHEN 'paused' THEN 1
-							WHEN 'starting' THEN 2
-							WHEN 'stopped' THEN 3
-							ELSE 4
-						END,
-						updated_at DESC,
-						session_id DESC
-				) AS rn
-			FROM daemon_session_projections
-			WHERE project_id = ?
-		),
-		session_pick AS (
-			SELECT issue_id, state, started_at, updated_at, tmux_attached_count
-			FROM ranked_session
-			WHERE rn = 1
-		),
-		origin_pick AS (
-			SELECT issue_id, MIN(provider) AS provider
-			FROM issue_external_refs
-			WHERE deleted_at IS NULL
-			GROUP BY issue_id
-		)
-		SELECT
-			i.id,
-			i.title,
-` + detailSelect + `
-			COALESCE(i.assignee, ''),
-			COALESCE(i.labels_json, '[]'),
-			i.estimate,
-			i.status,
-			i.priority,
-			i.issue_type,
-			COALESCE(i.implementations_json, '[]'),
-			i.created_at,
-			i.updated_at,
-			COALESCE(sp.state, ''),
-			COALESCE(sp.started_at, ''),
-			COALESCE(sp.updated_at, ''),
-			COALESCE(sp.tmux_attached_count, 0),
-			COALESCE(w.path, ''),
-			COALESCE(w.git_status_json, ''),
-			COALESCE(o.provider, '')
-		FROM issues i
-		LEFT JOIN session_pick sp ON sp.issue_id = i.id
-		LEFT JOIN daemon_worktree_projections w
-			ON w.project_id = ? AND w.issue_id = i.id
-		LEFT JOIN origin_pick o ON o.issue_id = i.id
-		WHERE i.deleted_at IS NULL
-	`
-	args := []any{projectID, projectID}
-	if len(issueIDs) > 0 {
-		seen := map[string]struct{}{}
-		trimmedIDs := make([]string, 0, len(issueIDs))
-		for _, issueID := range issueIDs {
-			issueID = strings.TrimSpace(issueID)
-			if issueID == "" {
-				continue
-			}
-			if _, ok := seen[issueID]; ok {
-				continue
-			}
-			seen[issueID] = struct{}{}
-			trimmedIDs = append(trimmedIDs, issueID)
-		}
-		if len(trimmedIDs) > 0 {
-			placeholders := strings.TrimSuffix(strings.Repeat("?,", len(trimmedIDs)), ",")
-			query += fmt.Sprintf(" AND i.id IN (%s)\n", placeholders)
-			for _, issueID := range trimmedIDs {
-				args = append(args, issueID)
-			}
-		}
-	}
-	query += " ORDER BY i.updated_at DESC"
+	query, args := taskRuntimeProjectionQuery(projectID, includeDetails, issueIDs...)
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -2154,6 +2054,131 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 		return nil, err
 	}
 	return tasks, nil
+}
+
+func taskRuntimeProjectionQuery(projectID string, includeDetails bool, issueIDs ...string) (string, []any) {
+	detailSelect := `
+			COALESCE(i.description, ''),
+			COALESCE(i.notes, ''),
+			COALESCE(i.design, ''),
+			COALESCE(i.acceptance, ''),`
+	if !includeDetails {
+		detailSelect = `
+			'',
+			'',
+			'',
+			'',`
+	}
+
+	seen := map[string]struct{}{}
+	trimmedIDs := make([]string, 0, len(issueIDs))
+	for _, issueID := range issueIDs {
+		issueID = strings.TrimSpace(issueID)
+		if issueID == "" {
+			continue
+		}
+		if _, ok := seen[issueID]; ok {
+			continue
+		}
+		seen[issueID] = struct{}{}
+		trimmedIDs = append(trimmedIDs, issueID)
+	}
+	filtered := len(trimmedIDs) > 0
+	idPlaceholders := ""
+	if filtered {
+		idPlaceholders = strings.TrimSuffix(strings.Repeat("?,", len(trimmedIDs)), ",")
+	}
+	sessionFilter := ""
+	originFilter := ""
+	whereFilter := ""
+	if filtered {
+		sessionFilter = fmt.Sprintf(" AND issue_id IN (%s)", idPlaceholders)
+		originFilter = fmt.Sprintf(" AND issue_id IN (%s)", idPlaceholders)
+		whereFilter = fmt.Sprintf(" AND i.id IN (%s)\n", idPlaceholders)
+	}
+
+	query := `
+		WITH ranked_session AS (
+			SELECT
+				issue_id,
+				COALESCE(NULLIF(TRIM(observed_state), ''), state) AS state,
+				COALESCE(started_at, '') AS started_at,
+				updated_at,
+				session_id,
+				COALESCE(tmux_attached_count, 0) AS tmux_attached_count,
+				ROW_NUMBER() OVER (
+					PARTITION BY issue_id
+					ORDER BY
+						CASE COALESCE(NULLIF(TRIM(observed_state), ''), state)
+							WHEN 'running' THEN 0
+							WHEN 'attached' THEN 0
+							WHEN 'paused' THEN 1
+							WHEN 'starting' THEN 2
+							WHEN 'stopped' THEN 3
+							ELSE 4
+						END,
+						updated_at DESC,
+						session_id DESC
+				) AS rn
+			FROM daemon_session_projections
+			WHERE project_id = ?` + sessionFilter + `
+		),
+		session_pick AS (
+			SELECT issue_id, state, started_at, updated_at, tmux_attached_count
+			FROM ranked_session
+			WHERE rn = 1
+		),
+		origin_pick AS (
+			SELECT issue_id, MIN(provider) AS provider
+			FROM issue_external_refs
+			WHERE deleted_at IS NULL` + originFilter + `
+			GROUP BY issue_id
+		)
+		SELECT
+			i.id,
+			i.title,
+` + detailSelect + `
+			COALESCE(i.assignee, ''),
+			COALESCE(i.labels_json, '[]'),
+			i.estimate,
+			i.status,
+			i.priority,
+			i.issue_type,
+			COALESCE(i.implementations_json, '[]'),
+			i.created_at,
+			i.updated_at,
+			COALESCE(sp.state, ''),
+			COALESCE(sp.started_at, ''),
+			COALESCE(sp.updated_at, ''),
+			COALESCE(sp.tmux_attached_count, 0),
+			COALESCE(w.path, ''),
+			COALESCE(w.git_status_json, ''),
+			COALESCE(o.provider, '')
+		FROM issues i
+		LEFT JOIN session_pick sp ON sp.issue_id = i.id
+		LEFT JOIN daemon_worktree_projections w
+			ON w.project_id = ? AND w.issue_id = i.id
+		LEFT JOIN origin_pick o ON o.issue_id = i.id
+		WHERE i.deleted_at IS NULL
+	` + whereFilter
+	query += " ORDER BY i.updated_at DESC"
+
+	args := []any{projectID}
+	if filtered {
+		for _, issueID := range trimmedIDs {
+			args = append(args, issueID)
+		}
+		for _, issueID := range trimmedIDs {
+			args = append(args, issueID)
+		}
+	}
+	args = append(args, projectID)
+	if filtered {
+		for _, issueID := range trimmedIDs {
+			args = append(args, issueID)
+		}
+	}
+	return query, args
 }
 
 func decodeImplementationsJSON(raw string) []string {
