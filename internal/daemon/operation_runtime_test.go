@@ -11,6 +11,7 @@ import (
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	opstore "github.com/riordanpawley/azedarach/internal/daemon/operations/store"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
@@ -405,6 +406,107 @@ func TestOperationRuntimeStartupFailsInterruptedOperations(t *testing.T) {
 	}
 	if queuedRecord.ErrorMessage != interruptedOperationMessage {
 		t.Fatalf("queued operation error = %q, want %q", queuedRecord.ErrorMessage, interruptedOperationMessage)
+	}
+}
+
+func TestOperationRuntimeStartupRecoversInterruptedSessionStartWhenCompleted(t *testing.T) {
+	repoDir := t.TempDir()
+	first := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir, nextRevision: sequentialRevision()})
+
+	if _, err := first.store.Create(context.Background(), opstore.CreateParams{
+		OperationID:  "op-start",
+		ProjectID:    "proj-1",
+		IssueID:      "AZ-2",
+		Kind:         "session.start",
+		DedupeKey:    "session.start:AZ-2",
+		ResourceKeys: []string{"issue:proj-1:AZ-2"},
+	}); err != nil {
+		t.Fatalf("create session.start operation: %v", err)
+	}
+	if _, err := first.store.Transition(context.Background(), opstore.TransitionParams{
+		OperationID: "op-start",
+		ToState:     opstore.StateRunning,
+	}); err != nil {
+		t.Fatalf("transition session.start operation: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first runtime: %v", err)
+	}
+
+	restarted := newOperationRuntime(operationRuntimeConfig{
+		repoDir:      repoDir,
+		nextRevision: sequentialRevision(),
+		recoverInterrupted: func(_ context.Context, record daemonops.Record) (interruptedOperationRecovery, bool) {
+			if record.Kind != "session.start" || record.IssueID != "AZ-2" {
+				return interruptedOperationRecovery{}, false
+			}
+			return interruptedOperationRecovery{
+				State:         daemonops.StateDone,
+				ResultPayload: mustJSON(t, map[string]string{"output": "session recovered"}),
+			}, true
+		},
+	})
+	t.Cleanup(func() { _ = restarted.Close() })
+
+	record := waitForRuntimeState(t, restarted, "op-start", daemonops.StateDone)
+	if record.FinishedAt == nil {
+		t.Fatal("recovered operation finished_at was not set")
+	}
+	if record.ErrorMessage != "" {
+		t.Fatalf("recovered operation error = %q, want empty", record.ErrorMessage)
+	}
+	if string(record.ResultPayload) == "" {
+		t.Fatal("recovered operation result payload was not preserved")
+	}
+}
+
+func TestDaemonRecoverInterruptedSessionStartUsesActiveProjection(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-1"
+	store := daemonstate.NewRuntimeStateStore(t.TempDir(), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            "AZ-2",
+		IssueID:       "AZ-2",
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("upsert active session projection: %v", err)
+	}
+	if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            "AZ-3",
+		IssueID:       "AZ-3",
+		State:         daemonstate.SessionStateStarting,
+		ObservedState: daemonstate.SessionStateStarting,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("upsert starting session projection: %v", err)
+	}
+
+	daemon := &Daemon{
+		cfg:                    Config{RepoDir: t.TempDir()},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{},
+	}
+
+	recovery, ok := daemon.recoverInterruptedOperation(ctx, daemonops.Record{
+		ID:        "op-start",
+		ProjectID: projectID,
+		IssueID:   "AZ-2",
+		Kind:      "session.start",
+	})
+	if !ok || recovery.State != daemonops.StateDone {
+		t.Fatalf("active session recovery = %+v, ok=%t; want done", recovery, ok)
+	}
+
+	if _, ok := daemon.recoverInterruptedOperation(ctx, daemonops.Record{
+		ID:        "op-starting",
+		ProjectID: projectID,
+		IssueID:   "AZ-3",
+		Kind:      "session.start",
+	}); ok {
+		t.Fatal("starting-only session projection should not prove completed session.start")
 	}
 }
 

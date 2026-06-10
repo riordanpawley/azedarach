@@ -35,6 +35,7 @@ type operationRuntimeConfig struct {
 	sessionStart           func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	sessionStop            func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	sessionResolveConflict func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	recoverInterrupted     func(context.Context, daemonops.Record) (interruptedOperationRecovery, bool)
 	gitHandler             *daemonhandlers.GitHandler
 	worktreeHandler        *daemonhandlers.WorktreeHandler
 }
@@ -79,6 +80,12 @@ type operationResultEnvelope struct {
 
 type operationErrorPayload struct {
 	Message string `json:"message"`
+}
+
+type interruptedOperationRecovery struct {
+	State         daemonops.State
+	ResultPayload []byte
+	ErrorMessage  string
 }
 
 type operationDirectRunner func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
@@ -126,7 +133,7 @@ func newOperationRuntime(cfg operationRuntimeConfig) *operationRuntime {
 		logger:                logger,
 		canonicalizeProjectID: canonicalizeProjectID,
 	}
-	reconcileInterruptedOperations(context.Background(), adapter, logger)
+	reconcileInterruptedOperations(context.Background(), adapter, logger, cfg.recoverInterrupted)
 	manager := opmanager.New(adapter, opmanager.Config{Logger: logger})
 	return &operationRuntime{
 		logger:                 logger,
@@ -145,7 +152,7 @@ func newOperationRuntime(cfg operationRuntimeConfig) *operationRuntime {
 	}
 }
 
-func reconcileInterruptedOperations(ctx context.Context, store daemonops.Store, logger *slog.Logger) {
+func reconcileInterruptedOperations(ctx context.Context, store daemonops.Store, logger *slog.Logger, recover func(context.Context, daemonops.Record) (interruptedOperationRecovery, bool)) {
 	if store == nil {
 		return
 	}
@@ -160,6 +167,13 @@ func reconcileInterruptedOperations(ctx context.Context, store daemonops.Store, 
 	}
 	for _, record := range records {
 		finished := time.Now().UTC()
+		if recover != nil {
+			if recovery, ok := recover(ctx, record); ok {
+				if updateInterruptedOperation(ctx, store, record, recovery, finished, logger) {
+					continue
+				}
+			}
+		}
 		message := interruptedOperationMessage
 		if _, err := store.Update(ctx, daemonops.UpdateParams{
 			ID:           record.ID,
@@ -173,6 +187,73 @@ func reconcileInterruptedOperations(ctx context.Context, store daemonops.Store, 
 				"error", err,
 			)
 		}
+	}
+}
+
+func updateInterruptedOperation(ctx context.Context, store daemonops.Store, record daemonops.Record, recovery interruptedOperationRecovery, finished time.Time, logger *slog.Logger) bool {
+	switch recovery.State {
+	case daemonops.StateDone:
+		if record.State == daemonops.StateQueued {
+			started := finished
+			updated, err := store.Update(ctx, daemonops.UpdateParams{
+				ID:        record.ID,
+				ToState:   daemonops.StateRunning,
+				StartedAt: &started,
+			})
+			if err != nil {
+				if logger != nil {
+					logger.Warn("failed to advance interrupted daemon operation before recovery",
+						"operation_id", record.ID,
+						"state", record.State,
+						"recovery_state", recovery.State,
+						"error", err,
+					)
+				}
+				return false
+			}
+			record = updated
+		}
+		if _, err := store.Update(ctx, daemonops.UpdateParams{
+			ID:            record.ID,
+			ToState:       daemonops.StateDone,
+			FinishedAt:    &finished,
+			ResultPayload: recovery.ResultPayload,
+		}); err != nil {
+			if logger != nil {
+				logger.Warn("failed to recover interrupted daemon operation",
+					"operation_id", record.ID,
+					"state", record.State,
+					"recovery_state", recovery.State,
+					"error", err,
+				)
+			}
+			return false
+		}
+		return true
+	case daemonops.StateFailed:
+		message := strings.TrimSpace(recovery.ErrorMessage)
+		if message == "" {
+			message = interruptedOperationMessage
+		}
+		if _, err := store.Update(ctx, daemonops.UpdateParams{
+			ID:           record.ID,
+			ToState:      daemonops.StateFailed,
+			FinishedAt:   &finished,
+			ErrorMessage: &message,
+		}); err != nil {
+			if logger != nil {
+				logger.Warn("failed to recover interrupted daemon operation",
+					"operation_id", record.ID,
+					"state", record.State,
+					"recovery_state", recovery.State,
+					"error", err,
+				)
+			}
+			return false
+		}
+		return true
+	default:
+		return false
 	}
 }
 
