@@ -66,7 +66,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Unsupported `orchestration.via` value: `{{ .OrchestrationVia }}`. Set `orchestration.via` to `az` for CLI-managed orchestration or `native` for harness-native delegation before fanning out work.
   {{ end }}
   - Branch merge repair targeting: `az branch merge <issue-id>` and `az branch agent-merge <issue-id> --target base` are low-level repair tools for manual merge/conflict recovery. Normal accepted-worker completion should go through `az issue close --id <issue-id>` so merge, stopped session cleanup, worktree cleanup, and issue closure stay one authoritative operation.
-  - Target the closest ancestor that has an active worktree branch; if no ancestor worktree exists, base-target merge is allowed only when child-to-base override is allowed.
+  - Child work should target the closest ancestor with an active worktree branch. If no ancestor worktree exists, restore or start the parent/ancestor integration target before closing the child; do not route child work directly to base as a normal completion path.
   - Mailbox coordination:
   - Preferred event types: `worker-progress`, `worker-blocked`, `worker-integration-ready`, and `dependency-ready`; `worker-ready` and `worker-complete` are legacy aliases for `worker-integration-ready`.
   {{ if and .OrchestrationViaAz .TmuxAvailable }}

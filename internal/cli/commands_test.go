@@ -1824,7 +1824,7 @@ func TestBranchMergeToBaseCommandBlocksChildWithoutAncestorWorktreeUnlessOverrid
 						},
 					}), nil
 				case daemonclient.CommandTaskMergeBaseTarget:
-					return protocol.ResponseEnvelope{}, fmt.Errorf("refusing to merge child issue az-child into base without explicit override; rerun with --allow-base-for-child")
+					return protocol.ResponseEnvelope{}, fmt.Errorf("refusing to merge child issue az-child directly into base: no active ancestor worktree branch was found; start or recover the parent/ancestor worktree and close the child into that target")
 				default:
 					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
 				}
@@ -1836,8 +1836,8 @@ func TestBranchMergeToBaseCommandBlocksChildWithoutAncestorWorktreeUnlessOverrid
 	}
 
 	err := BranchMergeToBaseCommand(deps, "az-child")
-	if err == nil || !strings.Contains(err.Error(), "refusing to merge child issue az-child into base without explicit override") {
-		t.Fatalf("err = %v, want explicit child base merge refusal", err)
+	if err == nil || !strings.Contains(err.Error(), "no active ancestor worktree branch was found") || strings.Contains(err.Error(), "--allow-base-for-child") {
+		t.Fatalf("err = %v, want child base merge refusal without override suggestion", err)
 	}
 }
 
@@ -1958,7 +1958,7 @@ func TestBranchMergeToBaseCommandBlocksChildBaseMergeWithoutOverride(t *testing.
 						},
 					}), nil
 				case daemonclient.CommandTaskMergeBaseTarget:
-					return protocol.ResponseEnvelope{}, fmt.Errorf("refusing to merge child issue az-child into base without explicit override; rerun with --allow-base-for-child")
+					return protocol.ResponseEnvelope{}, fmt.Errorf("refusing to merge child issue az-child directly into base: no active ancestor worktree branch was found; start or recover the parent/ancestor worktree and close the child into that target")
 				default:
 					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
 				}
@@ -1970,8 +1970,8 @@ func TestBranchMergeToBaseCommandBlocksChildBaseMergeWithoutOverride(t *testing.
 	}
 
 	err := BranchMergeToBaseCommand(deps, "az-child")
-	if err == nil || !strings.Contains(err.Error(), "refusing to merge child issue az-child into base without explicit override") {
-		t.Fatalf("err = %v, want explicit child base merge refusal", err)
+	if err == nil || !strings.Contains(err.Error(), "start or recover the parent/ancestor worktree") || strings.Contains(err.Error(), "--allow-base-for-child") {
+		t.Fatalf("err = %v, want child base merge refusal without override suggestion", err)
 	}
 }
 
@@ -4159,6 +4159,11 @@ func TestParseIssueCloseArgs(t *testing.T) {
 			name: "force worktree",
 			args: []string{"--id", "az-2", "--force-worktree"},
 			want: IssueCloseOptions{IssueID: "az-2", ForceWorktree: true},
+		},
+		{
+			name:        "allow base for child unsupported on close",
+			args:        []string{"--id", "az-2", "--allow-base-for-child"},
+			errContains: "flag provided but not defined: -allow-base-for-child",
 		},
 		{
 			name: "interspersed named id overrides positional",
@@ -8383,6 +8388,18 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "If work is partial, keep status `in_progress`, append notes with remaining scope, and create child issues for unfinished required work.") {
 		t.Fatalf("prime output missing partial-work guardrail: %q", output)
+	}
+	if !strings.Contains(output, "Child work should target the closest ancestor with an active worktree branch.") {
+		t.Fatalf("prime output missing child ancestor target guidance: %q", output)
+	}
+	if !strings.Contains(output, "restore or start the parent/ancestor integration target before closing the child") {
+		t.Fatalf("prime output missing parent/ancestor restore guidance: %q", output)
+	}
+	if strings.Contains(output, "--allow-base-for-child") || strings.Contains(output, "child-to-base override") {
+		t.Fatalf("prime output should not mention child-to-base override guidance: %q", output)
+	}
+	if strings.Contains(output, "base-target merge is allowed") {
+		t.Fatalf("prime output should not suggest base-target child merge completion: %q", output)
 	}
 	if strings.Contains(output, "same PR") || strings.Contains(output, "one PR") {
 		t.Fatalf("prime output should frame the heuristic around base-branch atomic merges, not PRs: %q", output)
