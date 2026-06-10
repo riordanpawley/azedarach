@@ -2627,9 +2627,10 @@ func (d *Daemon) deleteTask(ctx context.Context, issueClient *issues.Client, pro
 		missing := daemonTaskDeleteMissingCleanupOptions(preflight.Blockers, cmd)
 		if len(missing) > 0 {
 			return result, fmt.Errorf(
-				"cannot delete issue %s: active runtime attachments detected (%s); rerun with %s or use cleanup",
+				"cannot delete issue %s: runtime metadata fields still present (%s); repair with az issue delete %s --confirm --cleanup --remove-worktree --force-worktree, or rerun with %s",
 				taskID,
 				strings.Join(preflight.Blockers, ", "),
+				taskID,
 				strings.Join(missing, " "),
 			)
 		}

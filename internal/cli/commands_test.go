@@ -6999,7 +6999,7 @@ func TestIssueDeleteCommandBlocksWhenRuntimeAttachmentsPresent(t *testing.T) {
 						CompletedAt:     req.SentAt,
 						Error: &protocol.ErrorEnvelope{
 							Code:    protocol.ErrorCodeInternal,
-							Message: "cannot delete issue az-1: active runtime attachments detected (session, worktree); rerun with stop_session remove_worktree or use cleanup",
+							Message: "cannot delete issue az-1: runtime metadata fields still present (session, worktree); repair with az issue delete az-1 --confirm --cleanup --remove-worktree --force-worktree, or rerun with stop_session remove_worktree",
 						},
 					}, nil
 				default:
@@ -7022,7 +7022,8 @@ func TestIssueDeleteCommandBlocksWhenRuntimeAttachmentsPresent(t *testing.T) {
 		IssueID: "az-1",
 		Confirm: true,
 	})
-	if err == nil || !strings.Contains(err.Error(), "cannot delete issue az-1: active runtime attachments detected (session, worktree)") {
+	if err == nil || !strings.Contains(err.Error(), "cannot delete issue az-1: runtime metadata fields still present (session, worktree)") ||
+		!strings.Contains(err.Error(), "az issue delete az-1 --confirm --cleanup --remove-worktree --force-worktree") {
 		t.Fatalf("IssueDeleteCommand() error = %v", err)
 	}
 	if !deleteCalled {
