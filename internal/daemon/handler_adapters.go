@@ -606,9 +606,21 @@ func (a *worktreeServiceAdapter) Delete(ctx context.Context, projectID string, i
 	}
 	worktree, err := manager.Get(ctx, issueID)
 	if err != nil {
+		if errors.Is(err, git.ErrWorktreeNotFound) {
+			if a.runtimeProjectionWriter != nil {
+				a.runtimeProjectionWriter.DeleteWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), issueID)
+			}
+			return nil
+		}
 		return err
 	}
 	if err := manager.DeleteWithOptions(ctx, issueID, force); err != nil {
+		if errors.Is(err, git.ErrWorktreeNotFound) {
+			if a.runtimeProjectionWriter != nil {
+				a.runtimeProjectionWriter.DeleteWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), issueID)
+			}
+			return nil
+		}
 		return err
 	}
 	if worktree != nil {

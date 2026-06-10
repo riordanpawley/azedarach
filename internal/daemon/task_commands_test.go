@@ -2346,6 +2346,138 @@ func TestTaskDeleteRunsIssueResourceCleanupWithoutSessionBeforeWorktreeRemoval(t
 	}
 }
 
+func TestTaskDeleteCleanupRepairsStaleMissingWorktreeProjection(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-task-delete-stale-runtime"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Delete stale runtime",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := issuesClient.UpdateWithRuntime(ctx, projectID, taskID, domain.StatusInProgress); err != nil {
+		t.Fatalf("mark task in progress: %v", err)
+	}
+	sessionID := naming.CanonicalSessionID(projectID, taskID)
+	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   taskID,
+		State:     daemonstate.SessionStateAttached,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed session projection: %v", err)
+	}
+	staleWorktreePath := filepath.Join(repoDir, "missing-"+taskID)
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      staleWorktreePath,
+		Branch:    "riordan/" + taskID + "/stale-runtime",
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if joined == "worktree list --porcelain" {
+			return fmt.Sprintf("worktree %s\nbranch refs/heads/main\n\n", repoDir), nil
+		}
+		return "", nil
+	}}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			SessionShell: "sh",
+			BaseBranch:   "main",
+			Logger:       logger,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		sessionStore: daemonstate.NewStore(),
+		revision:     map[string]uint64{projectID: 1},
+		hub:          publish.NewHub(16, 8, logger),
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
+		logger:                  logger,
+	}
+
+	body, err := json.Marshal(taskDeleteRequest{
+		TaskID:         taskID,
+		Cleanup:        true,
+		StopSession:    true,
+		RemoveWorktree: true,
+		ForceWorktree:  true,
+	})
+	if err != nil {
+		t.Fatalf("marshal delete request: %v", err)
+	}
+	resp, err := d.handleTaskDelete(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-delete-stale-runtime",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.delete",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskDelete error: %v", err)
+	}
+	if !resp.OK {
+		if resp.Error != nil {
+			t.Fatalf("handleTaskDelete error = %s", resp.Error.Message)
+		}
+		t.Fatalf("handleTaskDelete response = %+v", resp)
+	}
+
+	tasks, err := issuesClient.Search(ctx, taskID)
+	if err != nil {
+		t.Fatalf("search task: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("task %s still present after cleanup delete", taskID)
+	}
+	if _, ok, err := runtimeStore.GetWorktreeStateByIssueID(ctx, projectID, taskID); err != nil {
+		t.Fatalf("get worktree projection: %v", err)
+	} else if ok {
+		t.Fatalf("stale worktree projection still present for %s", taskID)
+	}
+	session, ok, err := runtimeStore.GetSessionStateByIssueID(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get session projection: %v", err)
+	}
+	if !ok {
+		t.Fatalf("session projection missing for %s, want stopped repair marker", taskID)
+	}
+	if session.State != daemonstate.SessionStateStopped || session.ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("session projection = %+v, want desired/observed stopped", session)
+	}
+}
+
 func TestTaskDeleteRunsIssueResourceCleanupWithoutRuntimeAttachments(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
