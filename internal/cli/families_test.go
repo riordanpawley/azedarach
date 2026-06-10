@@ -796,6 +796,45 @@ func TestGitHooksNotifyCommandRetriesTransientGitStatusErrorsAcrossAttempts(t *t
 	}
 }
 
+func TestGitHooksNotifyCommandRetriesAfterStalledGitStatusAttempt(t *testing.T) {
+	oldAttemptTimeout := gitHookDaemonRefreshAttemptTimeout
+	oldInitialBackoff := gitHookDaemonRefreshInitialBackoff
+	t.Cleanup(func() {
+		gitHookDaemonRefreshAttemptTimeout = oldAttemptTimeout
+		gitHookDaemonRefreshInitialBackoff = oldInitialBackoff
+	})
+	gitHookDaemonRefreshAttemptTimeout = 20 * time.Millisecond
+	gitHookDaemonRefreshInitialBackoff = time.Millisecond
+
+	attempts := 0
+	transport := &fakeDaemonTransport{
+		commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandGitStatus {
+				return responseWithJSON(req, map[string]any{}), nil
+			}
+			attempts++
+			if attempts <= 2 {
+				<-ctx.Done()
+				return protocol.ResponseEnvelope{}, ctx.Err()
+			}
+			return responseWithJSON(req, map[string]any{"status": map[string]any{}}), nil
+		},
+	}
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	if err := refreshDaemonGitStatusWithRetry(ctx, deps, t.TempDir()); err != nil {
+		t.Fatalf("refreshDaemonGitStatusWithRetry error: %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("git status attempts = %d, want 3", attempts)
+	}
+}
+
 func runGitCommandIsolated(repoDir string, args ...string) error {
 	cmd := exec.Command("git", append([]string{"-C", repoDir}, args...)...)
 	env := os.Environ()
