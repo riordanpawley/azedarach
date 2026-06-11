@@ -271,6 +271,31 @@ type SessionCommandOptions struct {
 	PollInterval time.Duration
 }
 
+type WorktreeCreateOptions struct {
+	Project    string
+	IssueID    string
+	BaseBranch string
+	JSON       bool
+}
+
+func ParseWorktreeCreateArgs(args []string) (WorktreeCreateOptions, error) {
+	opts := WorktreeCreateOptions{}
+	fs := flag.NewFlagSet("worktree create", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&opts.BaseBranch, "base", "", "base branch/ref override")
+	fs.StringVar(&opts.BaseBranch, "base-branch", "", "base branch/ref override")
+	fs.BoolVar(&opts.JSON, "json", false, "print JSON output")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return WorktreeCreateOptions{}, err
+	}
+	if fs.NArg() != 1 {
+		return WorktreeCreateOptions{}, fmt.Errorf("issue id is required")
+	}
+	opts.IssueID = strings.TrimSpace(fs.Arg(0))
+	return opts, nil
+}
+
 func ParseSessionStartArgs(args []string, allowProject bool, usage string) (string, SessionCommandOptions, error) {
 	opts := SessionCommandOptions{}
 	if strings.TrimSpace(usage) == "" {
@@ -437,6 +462,53 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 	}
 
 	return printCommandOutputWithWait(ctx, deps, resp, opts)
+}
+
+func WorktreeCreateCommand(deps *Dependencies, opts WorktreeCreateOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), sessionStartCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	target, err := resolveSessionStartIssueTarget(ctx, deps, opts.IssueID, opts.Project)
+	if err != nil {
+		return err
+	}
+	restoreProject := applyIssueProjectOverride(deps, target.ProjectID)
+	defer restoreProject()
+
+	baseBranch := strings.TrimSpace(opts.BaseBranch)
+	if baseBranch == "" {
+		baseBranch, err = resolveSessionStartBaseBranch(ctx, deps, target.Task)
+		if err != nil {
+			return err
+		}
+	}
+
+	deps.Logger.Info("creating worktree", "project_id", target.ProjectID, "issue_id", target.IssueID, "base_branch", baseBranch)
+	worktree, err := deps.DaemonClient.CreateWorktree(ctx, target.IssueID, baseBranch)
+	if err != nil {
+		return fmt.Errorf("failed to create worktree for %s: %w", target.IssueID, err)
+	}
+
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"project_id":  target.ProjectID,
+			"issue_id":    target.IssueID,
+			"base_branch": baseBranch,
+			"worktree": map[string]any{
+				"path":     worktree.Path,
+				"branch":   worktree.Branch,
+				"issue_id": worktree.IssueID,
+			},
+		})
+	}
+
+	fmt.Printf("Worktree created: %s\n", worktree.Path)
+	fmt.Printf("Branch: %s\n", worktree.Branch)
+	fmt.Printf("Base: %s\n", baseBranch)
+	return nil
 }
 
 func resolveSessionStartIssueTarget(ctx context.Context, deps *Dependencies, issueID, project string) (sessionIssueTarget, error) {

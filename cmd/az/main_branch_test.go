@@ -49,7 +49,7 @@ func TestParseBranchMergeArgs(t *testing.T) {
 
 func TestParseBranchMergeArgsRejectsUnknownFlag(t *testing.T) {
 	_, err := parseBranchMergeArgs([]string{"--wat"})
-	if err == nil || !strings.Contains(err.Error(), "usage: az branch merge [issue-id] [--allow-base-for-child]") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az branch merge [issue-id]") || strings.Contains(err.Error(), "--allow-base-for-child") {
 		t.Fatalf("err = %v, want merge usage error", err)
 	}
 }

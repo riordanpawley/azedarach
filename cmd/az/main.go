@@ -87,6 +87,43 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "worktree":
+		if len(commandArgs) == 0 {
+			fmt.Fprintf(os.Stderr, "Usage: az worktree create [--project <project-id>] [--base <branch>] [--json] <issue-id>\n")
+			os.Exit(1)
+		}
+		worktreeCommand := commandArgs[0]
+		worktreeArgs := commandArgs[1:]
+		if worktreeCommand == "help" || worktreeCommand == "-h" || worktreeCommand == "--help" {
+			printWorktreeUsage()
+			os.Exit(0)
+		}
+		if sessionHelpRequested(worktreeArgs...) {
+			if worktreeCommand == "create" {
+				fmt.Println("Usage: az worktree create [--project <project-id>] [--base <branch>] [--json] <issue-id>")
+				os.Exit(0)
+			}
+		}
+		switch worktreeCommand {
+		case "create":
+			opts, err := cli.ParseWorktreeCreateArgs(worktreeArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az worktree create [--project <project-id>] [--base <branch>] [--json] <issue-id>\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.WorktreeCreateCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown worktree command: %s\n", worktreeCommand)
+			fmt.Fprintf(os.Stderr, "Usage: az worktree create [--project <project-id>] [--base <branch>] [--json] <issue-id>\n")
+			os.Exit(1)
+		}
+
 	case "start":
 		if sessionHelpRequested(commandArgs...) && printSessionCommandUsage(command, false) {
 			os.Exit(0)
@@ -1052,6 +1089,13 @@ func printSessionUsage() {
 	fmt.Println("  kill <issue-id>       Deprecated alias for stop")
 }
 
+func printWorktreeUsage() {
+	fmt.Println("Usage: az worktree create [--project <project-id>] [--base <branch>] [--json] <issue-id>")
+	fmt.Println()
+	fmt.Println("Commands:")
+	fmt.Println("  create <issue-id>     Create an issue worktree without starting a session")
+}
+
 func printSessionCommandUsage(command string, namespaced bool) bool {
 	usage, ok := sessionCommandUsage(command, namespaced)
 	if !ok {
@@ -1302,7 +1346,7 @@ func runBranchCommand(cfg *config.Config, command string, args []string) error {
 func branchCommandUsage(command string) (string, bool) {
 	switch command {
 	case "merge", "merge-to-base":
-		return "usage: az branch merge [issue-id] [--allow-base-for-child]", true
+		return "usage: az branch merge [issue-id]", true
 	case "agent-merge":
 		return "usage: az branch agent-merge <issue-id> [--target base|<issue-id>]", true
 	default:
@@ -1321,10 +1365,10 @@ func parseBranchMergeArgs(args []string) (cli.BranchMergeToBaseOptions, error) {
 			continue
 		default:
 			if strings.HasPrefix(trimmed, "--") {
-				return cli.BranchMergeToBaseOptions{}, fmt.Errorf("usage: az branch merge [issue-id] [--allow-base-for-child]")
+				return cli.BranchMergeToBaseOptions{}, fmt.Errorf("usage: az branch merge [issue-id]")
 			}
 			if opts.IssueID != "" {
-				return cli.BranchMergeToBaseOptions{}, fmt.Errorf("usage: az branch merge [issue-id] [--allow-base-for-child]")
+				return cli.BranchMergeToBaseOptions{}, fmt.Errorf("usage: az branch merge [issue-id]")
 			}
 			opts.IssueID = trimmed
 		}
