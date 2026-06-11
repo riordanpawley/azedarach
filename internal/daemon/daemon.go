@@ -68,6 +68,7 @@ type Config struct {
 	DangerouslySkipPermissions bool
 	SessionShell               string
 	SessionInitCommands        []string
+	SessionSideEffectCommands  []string
 	WorktreeInitCommands       []string
 	IssueResources             appconfig.IssueResourcesConfig
 	Logger                     *slog.Logger
@@ -85,63 +86,65 @@ type Daemon struct {
 	router *daemonhandlers.Dispatcher
 	apply  *daemonhandlers.ApplyHandler
 
-	issues                        *issues.Client
-	issueClientsMu                sync.Mutex
-	issueClientsByProject         map[string]*issues.Client
-	issueClientsByRoot            map[string]*issues.Client
-	projectConfigMu               sync.Mutex
-	baseBranchByProject           map[string]string
-	baseBranchByRoot              map[string]string
-	cliToolByProject              map[string]string
-	cliToolByRoot                 map[string]string
-	sessionShellByProject         map[string]string
-	sessionShellByRoot            map[string]string
-	sessionInitCommandsByProject  map[string][]string
-	sessionInitCommandsByRoot     map[string][]string
-	worktreeInitCommandsByProject map[string][]string
-	worktreeInitCommandsByRoot    map[string][]string
-	issueResourcesByProject       map[string]appconfig.IssueResourcesConfig
-	issueResourcesByRoot          map[string]appconfig.IssueResourcesConfig
-	worktreeManagersMu            sync.Mutex
-	worktreeManagersByProject     map[string]*git.WorktreeManager
-	worktreeManagersByRoot        map[string]*git.WorktreeManager
-	runtimeStoresMu               sync.Mutex
-	runtimeStoresByProject        map[string]*daemonstate.RuntimeStateStore
-	runtimeStoresByRoot           map[string]*daemonstate.RuntimeStateStore
-	hookLogMu                     sync.Mutex
-	hookLogByProject              map[string][]protocol.HookLogEvent
-	uiStateMu                     sync.RWMutex
-	uiState                       map[string]string
-	tmux                          *tmux.Client
-	git                           *git.Client
-	gitStatusAdapter              *gitServiceAdapter
-	gitHandler                    *daemonhandlers.GitHandler
-	worktreeHandler               *daemonhandlers.WorktreeHandler
-	worktreeAdapter               *worktreeServiceAdapter
-	session                       *daemonhandlers.SessionHandler
-	sessionStore                  *daemonstate.Store
-	runtimeProjectionWriter       runtimeProjectionWriter
-	sessionLongRunning            SessionLongRunningExecutor
-	runtimeReconciler             runtimeReconciler
-	runtimeReconcileQueue         *reconcileQueue[protocol.RuntimeReconcileResponseBody]
-	gitStatusRefreshQueue         *reconcileQueue[*git.GitStatus]
-	runtimeReconcileThrottle      *reconcileThrottle
-	worktreeGitProbeThrottle      *reconcileThrottle
-	queueMu                       sync.Mutex
-	operationRuntime              *operationRuntime
-	runtimeProjectionCoalescer    *runtimeProjectionEventCoalescer
-	sessionStopMu                 sync.Mutex
-	sessionStopPending            map[string]int
-	sessionStateRefreshMu         sync.Mutex
-	sessionStateRefreshing        map[string]bool
-	sessionStateLastRefresh       map[string]time.Time
-	worktreeStateRefreshMu        sync.Mutex
-	worktreeStateRefreshing       map[string]bool
-	worktreeStateLastRefresh      map[string]time.Time
-	taskListSnapshotCacheMu       sync.Mutex
-	taskListSnapshotCache         map[string]taskListSnapshotCacheEntry
-	taskListSnapshotLoadMu        sync.Mutex
-	taskListSnapshotLoads         map[string]*taskListSnapshotLoad
+	issues                             *issues.Client
+	issueClientsMu                     sync.Mutex
+	issueClientsByProject              map[string]*issues.Client
+	issueClientsByRoot                 map[string]*issues.Client
+	projectConfigMu                    sync.Mutex
+	baseBranchByProject                map[string]string
+	baseBranchByRoot                   map[string]string
+	cliToolByProject                   map[string]string
+	cliToolByRoot                      map[string]string
+	sessionShellByProject              map[string]string
+	sessionShellByRoot                 map[string]string
+	sessionInitCommandsByProject       map[string][]string
+	sessionInitCommandsByRoot          map[string][]string
+	sessionSideEffectCommandsByProject map[string][]string
+	sessionSideEffectCommandsByRoot    map[string][]string
+	worktreeInitCommandsByProject      map[string][]string
+	worktreeInitCommandsByRoot         map[string][]string
+	issueResourcesByProject            map[string]appconfig.IssueResourcesConfig
+	issueResourcesByRoot               map[string]appconfig.IssueResourcesConfig
+	worktreeManagersMu                 sync.Mutex
+	worktreeManagersByProject          map[string]*git.WorktreeManager
+	worktreeManagersByRoot             map[string]*git.WorktreeManager
+	runtimeStoresMu                    sync.Mutex
+	runtimeStoresByProject             map[string]*daemonstate.RuntimeStateStore
+	runtimeStoresByRoot                map[string]*daemonstate.RuntimeStateStore
+	hookLogMu                          sync.Mutex
+	hookLogByProject                   map[string][]protocol.HookLogEvent
+	uiStateMu                          sync.RWMutex
+	uiState                            map[string]string
+	tmux                               *tmux.Client
+	git                                *git.Client
+	gitStatusAdapter                   *gitServiceAdapter
+	gitHandler                         *daemonhandlers.GitHandler
+	worktreeHandler                    *daemonhandlers.WorktreeHandler
+	worktreeAdapter                    *worktreeServiceAdapter
+	session                            *daemonhandlers.SessionHandler
+	sessionStore                       *daemonstate.Store
+	runtimeProjectionWriter            runtimeProjectionWriter
+	sessionLongRunning                 SessionLongRunningExecutor
+	runtimeReconciler                  runtimeReconciler
+	runtimeReconcileQueue              *reconcileQueue[protocol.RuntimeReconcileResponseBody]
+	gitStatusRefreshQueue              *reconcileQueue[*git.GitStatus]
+	runtimeReconcileThrottle           *reconcileThrottle
+	worktreeGitProbeThrottle           *reconcileThrottle
+	queueMu                            sync.Mutex
+	operationRuntime                   *operationRuntime
+	runtimeProjectionCoalescer         *runtimeProjectionEventCoalescer
+	sessionStopMu                      sync.Mutex
+	sessionStopPending                 map[string]int
+	sessionStateRefreshMu              sync.Mutex
+	sessionStateRefreshing             map[string]bool
+	sessionStateLastRefresh            map[string]time.Time
+	worktreeStateRefreshMu             sync.Mutex
+	worktreeStateRefreshing            map[string]bool
+	worktreeStateLastRefresh           map[string]time.Time
+	taskListSnapshotCacheMu            sync.Mutex
+	taskListSnapshotCache              map[string]taskListSnapshotCacheEntry
+	taskListSnapshotLoadMu             sync.Mutex
+	taskListSnapshotLoads              map[string]*taskListSnapshotLoad
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -228,45 +231,47 @@ func New(cfg Config) *Daemon {
 	specService := issueSpecService{daemon: nil}
 
 	d := &Daemon{
-		cfg:                           cfg,
-		lock:                          lifecycle.NewLockManager(cfg.LockPath),
-		hub:                           publish.NewHub(512, 64, cfg.Logger),
-		issues:                        issuesClient,
-		issueClientsByProject:         map[string]*issues.Client{},
-		issueClientsByRoot:            map[string]*issues.Client{},
-		baseBranchByProject:           map[string]string{},
-		baseBranchByRoot:              map[string]string{},
-		cliToolByProject:              map[string]string{},
-		cliToolByRoot:                 map[string]string{},
-		sessionShellByProject:         map[string]string{},
-		sessionShellByRoot:            map[string]string{},
-		sessionInitCommandsByProject:  map[string][]string{},
-		sessionInitCommandsByRoot:     map[string][]string{},
-		worktreeInitCommandsByProject: map[string][]string{},
-		worktreeInitCommandsByRoot:    map[string][]string{},
-		issueResourcesByProject:       map[string]appconfig.IssueResourcesConfig{},
-		issueResourcesByRoot:          map[string]appconfig.IssueResourcesConfig{},
-		worktreeManagersByProject:     map[string]*git.WorktreeManager{},
-		worktreeManagersByRoot:        map[string]*git.WorktreeManager{},
-		runtimeStoresByProject:        map[string]*daemonstate.RuntimeStateStore{},
-		runtimeStoresByRoot:           map[string]*daemonstate.RuntimeStateStore{},
-		hookLogByProject:              map[string][]protocol.HookLogEvent{},
-		uiState:                       map[string]string{},
-		tmux:                          tmux.NewClient(tmuxRunner, cfg.Logger),
-		git:                           gitClient,
-		gitStatusAdapter:              gitService,
-		session:                       sessionHandler,
-		sessionStore:                  sessionStore,
-		runtimeReconcileQueue:         runtimeReconcileQueue,
-		gitStatusRefreshQueue:         gitStatusRefreshQueue,
-		sessionStopPending:            map[string]int{},
-		sessionStateRefreshing:        map[string]bool{},
-		sessionStateLastRefresh:       map[string]time.Time{},
-		worktreeStateRefreshing:       map[string]bool{},
-		worktreeStateLastRefresh:      map[string]time.Time{},
-		taskListSnapshotCache:         map[string]taskListSnapshotCacheEntry{},
-		revision:                      map[string]uint64{},
-		shutdownReqCh:                 make(chan struct{}),
+		cfg:                                cfg,
+		lock:                               lifecycle.NewLockManager(cfg.LockPath),
+		hub:                                publish.NewHub(512, 64, cfg.Logger),
+		issues:                             issuesClient,
+		issueClientsByProject:              map[string]*issues.Client{},
+		issueClientsByRoot:                 map[string]*issues.Client{},
+		baseBranchByProject:                map[string]string{},
+		baseBranchByRoot:                   map[string]string{},
+		cliToolByProject:                   map[string]string{},
+		cliToolByRoot:                      map[string]string{},
+		sessionShellByProject:              map[string]string{},
+		sessionShellByRoot:                 map[string]string{},
+		sessionInitCommandsByProject:       map[string][]string{},
+		sessionInitCommandsByRoot:          map[string][]string{},
+		sessionSideEffectCommandsByProject: map[string][]string{},
+		sessionSideEffectCommandsByRoot:    map[string][]string{},
+		worktreeInitCommandsByProject:      map[string][]string{},
+		worktreeInitCommandsByRoot:         map[string][]string{},
+		issueResourcesByProject:            map[string]appconfig.IssueResourcesConfig{},
+		issueResourcesByRoot:               map[string]appconfig.IssueResourcesConfig{},
+		worktreeManagersByProject:          map[string]*git.WorktreeManager{},
+		worktreeManagersByRoot:             map[string]*git.WorktreeManager{},
+		runtimeStoresByProject:             map[string]*daemonstate.RuntimeStateStore{},
+		runtimeStoresByRoot:                map[string]*daemonstate.RuntimeStateStore{},
+		hookLogByProject:                   map[string][]protocol.HookLogEvent{},
+		uiState:                            map[string]string{},
+		tmux:                               tmux.NewClient(tmuxRunner, cfg.Logger),
+		git:                                gitClient,
+		gitStatusAdapter:                   gitService,
+		session:                            sessionHandler,
+		sessionStore:                       sessionStore,
+		runtimeReconcileQueue:              runtimeReconcileQueue,
+		gitStatusRefreshQueue:              gitStatusRefreshQueue,
+		sessionStopPending:                 map[string]int{},
+		sessionStateRefreshing:             map[string]bool{},
+		sessionStateLastRefresh:            map[string]time.Time{},
+		worktreeStateRefreshing:            map[string]bool{},
+		worktreeStateLastRefresh:           map[string]time.Time{},
+		taskListSnapshotCache:              map[string]taskListSnapshotCacheEntry{},
+		revision:                           map[string]uint64{},
+		shutdownReqCh:                      make(chan struct{}),
 	}
 	canonicalProjectID := protocol.DefaultProjectID
 	if hashProjectID, err := appconfig.ProjectIDForRoot(strings.TrimSpace(cfg.RepoDir)); err == nil {

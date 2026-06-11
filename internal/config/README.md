@@ -125,7 +125,8 @@ type SessionConfig struct {
     Shell        string    // default: "zsh"
     TimeoutMs    int       // default: 30000
     LogDir       string    // default: "~/.azedarach/logs"
-    InitCommands []string  // commands to run on session start
+    InitCommands []string  // blocking commands to run before AI tool launch
+    SideEffectCommands []string // non-blocking commands run in a tmux side-effects window
 }
 ```
 

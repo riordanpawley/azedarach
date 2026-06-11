@@ -15,6 +15,7 @@ type daemonProjectRuntimeConfig struct {
 	DangerouslySkipPermissions bool
 	SessionShell               string
 	SessionInitCommands        []string
+	SessionSideEffectCommands  []string
 	WorktreeInitCommands       []string
 	IssueResources             appconfig.IssueResourcesConfig
 }
@@ -40,6 +41,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		DangerouslySkipPermissions: d.cfg.DangerouslySkipPermissions,
 		SessionShell:               strings.TrimSpace(d.cfg.SessionShell),
 		SessionInitCommands:        append([]string(nil), d.cfg.SessionInitCommands...),
+		SessionSideEffectCommands:  append([]string(nil), d.cfg.SessionSideEffectCommands...),
 		WorktreeInitCommands:       append([]string(nil), d.cfg.WorktreeInitCommands...),
 		IssueResources:             cloneIssueResourcesConfig(d.cfg.IssueResources),
 	}
@@ -78,6 +80,12 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	if d.sessionInitCommandsByRoot == nil {
 		d.sessionInitCommandsByRoot = map[string][]string{}
 	}
+	if d.sessionSideEffectCommandsByProject == nil {
+		d.sessionSideEffectCommandsByProject = map[string][]string{}
+	}
+	if d.sessionSideEffectCommandsByRoot == nil {
+		d.sessionSideEffectCommandsByRoot = map[string][]string{}
+	}
 	if d.worktreeInitCommandsByProject == nil {
 		d.worktreeInitCommandsByProject = map[string][]string{}
 	}
@@ -101,6 +109,9 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		}
 		if cmds, ok := d.sessionInitCommandsByProject[projectID]; ok {
 			cfg.SessionInitCommands = append([]string(nil), cmds...)
+		}
+		if cmds, ok := d.sessionSideEffectCommandsByProject[projectID]; ok {
+			cfg.SessionSideEffectCommands = append([]string(nil), cmds...)
 		}
 		if cmds, ok := d.worktreeInitCommandsByProject[projectID]; ok {
 			cfg.WorktreeInitCommands = append([]string(nil), cmds...)
@@ -129,6 +140,9 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 			if cmds, ok := d.sessionInitCommandsByRoot[repoDir]; ok {
 				cfg.SessionInitCommands = append([]string(nil), cmds...)
 			}
+			if cmds, ok := d.sessionSideEffectCommandsByRoot[repoDir]; ok {
+				cfg.SessionSideEffectCommands = append([]string(nil), cmds...)
+			}
 			if cmds, ok := d.worktreeInitCommandsByRoot[repoDir]; ok {
 				cfg.WorktreeInitCommands = append([]string(nil), cmds...)
 			}
@@ -139,6 +153,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 			d.cliToolByProject[projectID] = cfg.CLITool
 			d.sessionShellByProject[projectID] = cfg.SessionShell
 			d.sessionInitCommandsByProject[projectID] = append([]string(nil), cfg.SessionInitCommands...)
+			d.sessionSideEffectCommandsByProject[projectID] = append([]string(nil), cfg.SessionSideEffectCommands...)
 			d.worktreeInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeInitCommands...)
 			d.issueResourcesByProject[projectID] = cloneIssueResourcesConfig(cfg.IssueResources)
 			d.projectConfigMu.Unlock()
@@ -160,6 +175,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 					cfg.SessionShell = shell
 				}
 				cfg.SessionInitCommands = append([]string(nil), loaded.Session.InitCommands...)
+				cfg.SessionSideEffectCommands = append([]string(nil), loaded.Session.SideEffectCommands...)
 				cfg.WorktreeInitCommands = append([]string(nil), loaded.Worktree.InitCommands...)
 				cfg.IssueResources = cloneIssueResourcesConfig(loaded.IssueResources)
 			}
@@ -174,6 +190,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	d.cliToolByProject[projectID] = cfg.CLITool
 	d.sessionShellByProject[projectID] = cfg.SessionShell
 	d.sessionInitCommandsByProject[projectID] = append([]string(nil), cfg.SessionInitCommands...)
+	d.sessionSideEffectCommandsByProject[projectID] = append([]string(nil), cfg.SessionSideEffectCommands...)
 	d.worktreeInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeInitCommands...)
 	d.issueResourcesByProject[projectID] = cloneIssueResourcesConfig(cfg.IssueResources)
 	if repoDir != "" {
@@ -184,6 +201,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		d.cliToolByRoot[repoDir] = cfg.CLITool
 		d.sessionShellByRoot[repoDir] = cfg.SessionShell
 		d.sessionInitCommandsByRoot[repoDir] = append([]string(nil), cfg.SessionInitCommands...)
+		d.sessionSideEffectCommandsByRoot[repoDir] = append([]string(nil), cfg.SessionSideEffectCommands...)
 		d.worktreeInitCommandsByRoot[repoDir] = append([]string(nil), cfg.WorktreeInitCommands...)
 		d.issueResourcesByRoot[repoDir] = cloneIssueResourcesConfig(cfg.IssueResources)
 	}
