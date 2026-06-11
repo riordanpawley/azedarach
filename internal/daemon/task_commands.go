@@ -1261,8 +1261,16 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		}
 	}
 
-	if err := d.ensureMergeToBaseClean(ctx, source, targetWorktree); err != nil {
+	hasChangesToIntegrate, err := d.ensureMergeToBaseClean(ctx, source, targetWorktree, targetBranch)
+	if err != nil {
 		return taskCloseIntegrationResult{Requested: true}, err
+	}
+	if !hasChangesToIntegrate {
+		return taskCloseIntegrationResult{
+			Requested:    true,
+			SourceBranch: source.Branch,
+			TargetBranch: targetBranch,
+		}, nil
 	}
 	preflight, err := d.git.MergePreflight(ctx, source.Path, targetWorktree, targetBranch, source.Branch)
 	if err != nil {
@@ -1317,26 +1325,32 @@ func daemonWorktreeForIssue(worktrees []git.Worktree, issueID string) (git.Workt
 	return git.Worktree{}, false
 }
 
-func (d *Daemon) ensureMergeToBaseClean(ctx context.Context, source git.Worktree, targetWorktree string) error {
+func (d *Daemon) ensureMergeToBaseClean(ctx context.Context, source git.Worktree, targetWorktree, targetBranch string) (bool, error) {
 	sourceStatus, err := d.git.Status(ctx, source.Path)
 	if err != nil {
-		return fmt.Errorf("read source status for %s: %w", source.IssueID, err)
+		return false, fmt.Errorf("read source status for %s: %w", source.IssueID, err)
 	}
 	targetStatus, err := d.git.Status(ctx, targetWorktree)
 	if err != nil {
-		return fmt.Errorf("read target branch status: %w", err)
+		return false, fmt.Errorf("read target branch status: %w", err)
 	}
+	changedFiles, err := d.git.ChangedFilesLocalBase(ctx, source.Path, targetBranch)
+	if err != nil {
+		return false, fmt.Errorf("inspect source branch changes for %s against %s: %w", source.IssueID, targetBranch, err)
+	}
+	hasChangesToIntegrate := len(changedFiles) > 0
+
 	reasons := make([]string, 0, 2)
 	if gitStatusHasDirtyFiles(sourceStatus) {
 		reasons = append(reasons, fmt.Sprintf("source %s is not clean: %s", source.IssueID, gitStatusSummary(sourceStatus)))
 	}
-	if gitStatusHasDirtyFiles(targetStatus) {
+	if gitStatusHasDirtyFiles(targetStatus) && hasChangesToIntegrate {
 		reasons = append(reasons, fmt.Sprintf("target branch is not clean: %s", gitStatusSummary(targetStatus)))
 	}
 	if len(reasons) > 0 {
-		return errors.New(strings.Join(reasons, "; "))
+		return false, errors.New(strings.Join(reasons, "; "))
 	}
-	return nil
+	return hasChangesToIntegrate, nil
 }
 
 func gitStatusHasDirtyFiles(status *git.GitStatus) bool {
