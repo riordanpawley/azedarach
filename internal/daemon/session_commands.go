@@ -678,6 +678,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("export issue resource env: %v%s", err, cleanupNote)), nil
 	}
 	if cmd.StartWork {
+		d.startSessionSideEffectCommands(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktree.Path)
 		initialPrompt := strings.TrimSpace(cmd.Prompt)
 		if initialPrompt == "" {
 			parentIssueID := ""
@@ -2529,7 +2530,7 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 func (d *Daemon) buildSessionLaunchCommand(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {
 	projectCfg := d.runtimeConfigForProject(projectID)
 	toolCommand := d.buildCLIToolCommand(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt)
-	commands := make([]string, 0, len(projectCfg.SessionInitCommands)+2)
+	commands := make([]string, 0, len(projectCfg.SessionInitCommands)+1)
 	for _, initCmd := range projectCfg.SessionInitCommands {
 		trimmed := strings.TrimSpace(initCmd)
 		if trimmed != "" {
@@ -2545,6 +2546,130 @@ func (d *Daemon) buildSessionLaunchCommand(projectID, issueID, sessionID string,
 	inner := strings.Join(commands, "; ")
 	inner = inner + "; exec " + shell
 	return fmt.Sprintf("%s -i -c %s", shell, singleQuoteForShell(inner))
+}
+
+const sessionSideEffectWindowName = "side-effects"
+
+func (d *Daemon) startSessionSideEffectCommands(ctx context.Context, projectID, issueID, sessionID, worktreePath string) {
+	projectCfg := d.runtimeConfigForProject(projectID)
+	sideEffectCommand := buildSessionSideEffectWindowCommand(projectCfg, projectID, issueID, sessionID)
+	if strings.TrimSpace(sideEffectCommand) == "" {
+		return
+	}
+	if d.tmux == nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("session side-effect commands skipped; tmux client unavailable",
+				"project_id", projectID,
+				"issue_id", issueID,
+				"session_id", sessionID,
+			)
+		}
+		return
+	}
+	if _, err := d.tmux.EnsureWindow(ctx, sessionID, sessionSideEffectWindowName, worktreePath); err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("session side-effect window setup failed",
+				"project_id", projectID,
+				"issue_id", issueID,
+				"session_id", sessionID,
+				"error", err,
+			)
+		}
+		return
+	}
+	target := sessionID + ":" + sessionSideEffectWindowName
+	if err := d.tmux.SendKeys(ctx, target, sideEffectCommand); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn("session side-effect command dispatch failed",
+			"project_id", projectID,
+			"issue_id", issueID,
+			"session_id", sessionID,
+			"target", target,
+			"error", err,
+		)
+	}
+}
+
+func buildSessionSideEffectWindowCommand(projectCfg daemonProjectRuntimeConfig, projectID, issueID, sessionID string) string {
+	sideEffectCommands := buildSessionSideEffectCommands(projectCfg.SessionSideEffectCommands, issueID, sessionID)
+	if len(sideEffectCommands) == 0 {
+		return ""
+	}
+	commands := make([]string, 0, len(sideEffectCommands)+2)
+	commands = append(commands, sessionLaunchContextExportCommand(projectID, issueID, sessionID))
+	commands = append(commands, sideEffectCommands...)
+	return strings.Join(commands, "; ")
+}
+
+func sessionLaunchContextExportCommand(projectID, issueID, sessionID string) string {
+	assignments := []string{
+		"AZEDARACH_PROJECT_ID=" + singleQuoteForShell(strings.TrimSpace(projectID)),
+		"AZEDARACH_ISSUE_ID=" + singleQuoteForShell(strings.TrimSpace(issueID)),
+		"AZEDARACH_SESSION_ID=" + singleQuoteForShell(strings.TrimSpace(sessionID)),
+	}
+	return "export " + strings.Join(assignments, " ")
+}
+
+func buildSessionSideEffectCommands(sideEffectCommands []string, issueID, sessionID string) []string {
+	if len(sideEffectCommands) == 0 {
+		return nil
+	}
+	logDir := sessionSideEffectLogDir(issueID, sessionID)
+	commands := make([]string, 0, len(sideEffectCommands))
+	index := 0
+	for _, sideEffectCmd := range sideEffectCommands {
+		trimmed := strings.TrimSpace(sideEffectCmd)
+		if trimmed == "" {
+			continue
+		}
+		index++
+		logPath := filepath.ToSlash(filepath.Join(logDir, fmt.Sprintf("%03d.log", index)))
+		commands = append(commands, buildSessionSideEffectCommand(index, trimmed, logDir, logPath))
+	}
+	return commands
+}
+
+func buildSessionSideEffectCommand(index int, command, logDir, logPath string) string {
+	quotedLogDir := singleQuoteForShell(filepath.ToSlash(logDir))
+	quotedLogPath := singleQuoteForShell(filepath.ToSlash(logPath))
+	quotedCommand := singleQuoteForShell(command)
+	return fmt.Sprintf(
+		"mkdir -p %s && echo %s && { printf 'command: %%s\\n' %s; (%s); status=$?; printf 'exit status: %%s\\n' \"$status\"; } 2>&1 | tee -a %s",
+		quotedLogDir,
+		singleQuoteForShell(fmt.Sprintf("session side-effect[%d] log: %s", index, filepath.ToSlash(logPath))),
+		quotedCommand,
+		command,
+		quotedLogPath,
+	)
+}
+
+func sessionSideEffectLogDir(issueID, sessionID string) string {
+	return filepath.Join(".azedarach", "session-side-effects", safeSessionSideEffectPathSegment(issueID), safeSessionSideEffectPathSegment(sessionID))
+}
+
+func safeSessionSideEffectPathSegment(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "unknown"
+	}
+	return b.String()
 }
 
 func (d *Daemon) issueResourceLifecycleContext(projectID, issueID, sessionID, worktreePath, branch string) issueResourceLifecycleContext {

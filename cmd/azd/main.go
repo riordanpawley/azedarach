@@ -78,6 +78,7 @@ func main() {
 		DangerouslySkipPermissions: cfg.Session.DangerouslySkipPermissions,
 		SessionShell:               cfg.Session.Shell,
 		SessionInitCommands:        cfg.Session.InitCommands,
+		SessionSideEffectCommands:  cfg.Session.SideEffectCommands,
 		Logger:                     logger,
 		WorktreeInitCommands:       cfg.Worktree.InitCommands,
 		IssueResources:             cfg.IssueResources,

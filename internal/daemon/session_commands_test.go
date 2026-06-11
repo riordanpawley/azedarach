@@ -4077,6 +4077,80 @@ func TestBuildSessionLaunchCommandIncludesInitCommandsAndIssueEnv(t *testing.T) 
 	}
 }
 
+func TestBuildSessionLaunchCommandDoesNotSerializeSideEffectCommandsBeforeToolLaunch(t *testing.T) {
+	d := &Daemon{
+		cfg: Config{
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			SessionInitCommands: []string{
+				"direnv allow",
+			},
+			SessionSideEffectCommands: []string{
+				"pnpm type-check",
+				"echo $AZEDARACH_ISSUE_ID",
+			},
+		},
+	}
+
+	command := d.buildSessionLaunchCommand(
+		protocol.DefaultProjectID,
+		"cnb",
+		"cnb", false,
+		nil,
+		`work on issue cnb (feature): Add non-blocking session side-effect commands`,
+	)
+	if !strings.Contains(command, "direnv allow;") {
+		t.Fatalf("command = %q, want blocking init command before launch", command)
+	}
+	if strings.Contains(command, "pnpm type-check") {
+		// Side-effect commands must not be serialized into the AI pane launch command.
+		t.Fatalf("command = %q, want side-effect command excluded from AI launch shell", command)
+	}
+	if !strings.Contains(command, `AZEDARACH_ISSUE_ID="cnb" codex`) {
+		t.Fatalf("command = %q, want foreground AI tool launch", command)
+	}
+}
+
+func TestStartSessionSideEffectCommandsUsesSeparateTmuxWindow(t *testing.T) {
+	tmuxRunner := newSessionStartTmuxRunner()
+	tmuxRunner.sessions["cnb"] = true
+	tmuxRunner.windows["cnb"] = map[string]bool{"shell": true}
+	d := &Daemon{
+		cfg: Config{
+			Logger: slog.Default(),
+			SessionSideEffectCommands: []string{
+				"pnpm type-check",
+				"echo $AZEDARACH_ISSUE_ID",
+			},
+		},
+		tmux: tmux.NewClient(tmuxRunner, slog.Default()),
+	}
+
+	d.startSessionSideEffectCommands(context.Background(), protocol.DefaultProjectID, "cnb", "cnb", "/tmp/worktree")
+
+	if !tmuxRunner.windows["cnb"][sessionSideEffectWindowName] {
+		t.Fatalf("windows = %+v, want %q window", tmuxRunner.windows["cnb"], sessionSideEffectWindowName)
+	}
+	if len(tmuxRunner.sendKeysTargets) != 1 || tmuxRunner.sendKeysTargets[0] != "cnb:"+sessionSideEffectWindowName {
+		t.Fatalf("sendKeysTargets = %+v, want cnb:%s", tmuxRunner.sendKeysTargets, sessionSideEffectWindowName)
+	}
+	payload := tmuxRunner.sendKeysPayloads[0]
+	if !strings.Contains(payload, "export AZEDARACH_PROJECT_ID=") ||
+		!strings.Contains(payload, "AZEDARACH_ISSUE_ID=") ||
+		!strings.Contains(payload, "AZEDARACH_SESSION_ID=") {
+		t.Fatalf("payload = %q, want exported AZEDARACH context before side effects", payload)
+	}
+	if !strings.Contains(payload, "session side-effect[1] log: .azedarach/session-side-effects/cnb/cnb/001.log") {
+		t.Fatalf("payload = %q, want discoverable side-effect log path", payload)
+	}
+	if !strings.Contains(payload, "pnpm type-check") {
+		t.Fatalf("payload = %q, want side-effect command", payload)
+	}
+	if !strings.Contains(payload, "tee -a '.azedarach/session-side-effects/cnb/cnb/001.log'") {
+		t.Fatalf("payload = %q, want log tee for side-effect output", payload)
+	}
+}
+
 func TestBuildSessionLaunchCommandDoesNotInjectCodexHookOverrides(t *testing.T) {
 	d := &Daemon{
 		cfg: Config{

@@ -50,6 +50,7 @@ func TestDefaultConfig(t *testing.T) {
 	assert.Equal(t, 30000, cfg.Session.TimeoutMs)
 	assert.NotEmpty(t, cfg.Session.LogDir)
 	assert.NotNil(t, cfg.Session.InitCommands)
+	assert.NotNil(t, cfg.Session.SideEffectCommands)
 
 	assert.Equal(t, 3000, cfg.DevServer.BasePort)
 	assert.Equal(t, 3100, cfg.DevServer.MaxPort)
@@ -125,7 +126,8 @@ func TestLoadConfigFromDotAzedarachConfigJSON(t *testing.T) {
   "session": {
     "dangerouslySkipPermissions": true,
     "shell": "bash",
-    "timeoutMs": 60000
+    "timeoutMs": 60000,
+    "sideEffectCommands": ["pnpm type-check"]
   },
   "worktree": {
     "initCommands": ["direnv allow", "bun install"]
@@ -160,6 +162,7 @@ func TestLoadConfigFromDotAzedarachConfigJSON(t *testing.T) {
 	assert.Equal(t, "bash", cfg.Session.Shell)
 	assert.Equal(t, 60000, cfg.Session.TimeoutMs)
 	assert.Empty(t, cfg.Session.InitCommands)
+	assert.Equal(t, []string{"pnpm type-check"}, cfg.Session.SideEffectCommands)
 	assert.Equal(t, []string{"direnv allow", "bun install"}, cfg.Worktree.InitCommands)
 	assert.Equal(t, "postgres://localhost/az_$AZEDARACH_ISSUE_ID", cfg.IssueResources.Env["DATABASE_URL"])
 	assert.Equal(t, []string{"just db-prepare"}, cfg.IssueResources.PrepareCommands)
@@ -187,7 +190,8 @@ func TestLoadConfigKeepsSessionAndWorktreeInitCommandsDistinct(t *testing.T) {
   "$schema": "./config.schema.json",
   "$version": 7,
   "session": {
-    "initCommands": ["session one", "session two"]
+    "initCommands": ["session one", "session two"],
+    "sideEffectCommands": ["session side effect"]
   },
   "worktree": {
     "initCommands": ["worktree one"]
@@ -197,6 +201,7 @@ func TestLoadConfigKeepsSessionAndWorktreeInitCommandsDistinct(t *testing.T) {
 	cfg, err := LoadConfig(root)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"session one", "session two"}, cfg.Session.InitCommands)
+	assert.Equal(t, []string{"session side effect"}, cfg.Session.SideEffectCommands)
 	assert.Equal(t, []string{"worktree one"}, cfg.Worktree.InitCommands)
 }
 
@@ -401,7 +406,8 @@ func TestLoadConfigLocalArraysReplaceWorkspaceArrays(t *testing.T) {
   "$schema": "./config.schema.json",
   "$version": 7,
   "session": {
-    "initCommands": ["workspace one", "workspace two"]
+    "initCommands": ["workspace one", "workspace two"],
+    "sideEffectCommands": ["workspace side one", "workspace side two"]
   },
   "issueTracker": {
     "linear": {
@@ -415,7 +421,8 @@ func TestLoadConfigLocalArraysReplaceWorkspaceArrays(t *testing.T) {
   "$schema": "./config.schema.json",
   "$version": 7,
   "session": {
-    "initCommands": ["local one"]
+    "initCommands": ["local one"],
+    "sideEffectCommands": ["local side one"]
   },
   "issueTracker": {
     "linear": {
@@ -428,8 +435,8 @@ func TestLoadConfigLocalArraysReplaceWorkspaceArrays(t *testing.T) {
 
 	cfg, err := LoadConfig(root)
 	require.NoError(t, err)
-
 	assert.Equal(t, []string{"local one"}, cfg.Session.InitCommands)
+	assert.Equal(t, []string{"local side one"}, cfg.Session.SideEffectCommands)
 	assert.Equal(t, []string{"Issue"}, cfg.IssueTracker.Linear.Webhooks.Events)
 }
 

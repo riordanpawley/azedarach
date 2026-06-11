@@ -110,6 +110,7 @@ type SessionConfig struct {
 	TimeoutMs                  int      `json:"timeoutMs"`
 	LogDir                     string   `json:"logDir"`
 	InitCommands               []string `json:"initCommands"`
+	SideEffectCommands         []string `json:"sideEffectCommands"`
 }
 
 // PRConfig contains pull request settings
@@ -233,10 +234,11 @@ func DefaultConfig() *Config {
 			JumpLabelChars: "abcdefghijklmnopqrstuvwxyz",
 		},
 		Session: SessionConfig{
-			Shell:        DefaultSessionShell(),
-			TimeoutMs:    30000,
-			LogDir:       filepath.Join(homeDir, ".azedarach", "logs"),
-			InitCommands: []string{},
+			Shell:              DefaultSessionShell(),
+			TimeoutMs:          30000,
+			LogDir:             filepath.Join(homeDir, ".azedarach", "logs"),
+			InitCommands:       []string{},
+			SideEffectCommands: []string{},
 		},
 		PR: PRConfig{
 			DraftByDefault:     true,

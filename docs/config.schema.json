@@ -153,6 +153,15 @@
         },
         "initCommands": {
           "type": "array",
+          "description": "Commands run before the launched AI tool. These commands block session startup and failures prevent the tool launch.",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "sideEffectCommands": {
+          "type": "array",
+          "description": "Commands started in a detached tmux side-effects window during session startup without blocking the AI tool launch. Output is visible in that window and written under .azedarach/session-side-effects/<issue>/<session>/ in the session worktree.",
           "items": {
             "type": "string"
           },
