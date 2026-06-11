@@ -6629,6 +6629,143 @@ func TestIssueCreateCommandDeferredIgnoresAutoParentFromIssueID(t *testing.T) {
 	}
 }
 
+func TestIssueCreateCommandCrossProjectSkipsImplicitAutoParentAndCreatedFrom(t *testing.T) {
+	var requests []protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				requests = append(requests, req)
+				if req.Command == daemonclient.CommandTaskList {
+					t.Fatalf("unexpected %s request for cross-project create", daemonclient.CommandTaskList)
+				}
+				if req.Command == daemonclient.CommandTaskDependencyAdd {
+					t.Fatalf("unexpected %s request for cross-project create", daemonclient.CommandTaskDependencyAdd)
+				}
+				payload, err := json.Marshal(map[string]string{"task_id": "cnd"})
+				if err != nil {
+					t.Fatalf("marshal task create response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            payload,
+				}, nil
+			},
+		}).WithProjectID("chefy"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "chefy",
+	}
+
+	output := captureStdout(t, func() error {
+		activeID := "eik"
+		return IssueCreateCommand(deps, IssueCreateOptions{
+			Project:                "azedarach",
+			Title:                  "Prevent worker self-delivery",
+			Type:                   domain.TypeBug,
+			Priority:               domain.P2,
+			AutoParentFromIssueID:  &activeID,
+			AutoCreatedFromIssueID: &activeID,
+			Implementations:        []string{"default"},
+		})
+	})
+
+	if len(requests) != 1 {
+		t.Fatalf("request count = %d, want 1", len(requests))
+	}
+	if requests[0].Command != daemonclient.CommandTaskCreate {
+		t.Fatalf("request command = %q, want %q", requests[0].Command, daemonclient.CommandTaskCreate)
+	}
+	if requests[0].Meta.ProjectID.String() != "azedarach" {
+		t.Fatalf("request project = %q, want azedarach", requests[0].Meta.ProjectID)
+	}
+	var createReq daemonclient.TaskCreateParams
+	if err := json.Unmarshal(requests[0].Body, &createReq); err != nil {
+		t.Fatalf("unmarshal create body: %v", err)
+	}
+	if createReq.ParentID != nil {
+		t.Fatalf("create parent = %+v, want nil", createReq.ParentID)
+	}
+	if !strings.Contains(output, "Created issue: azedarach:cnd") {
+		t.Fatalf("output missing project-qualified created issue: %q", output)
+	}
+	if strings.Contains(output, "created-from") || strings.Contains(output, "parent:") {
+		t.Fatalf("output should not mention implicit parent/provenance for cross-project create: %q", output)
+	}
+}
+
+func TestIssueCreateCommandReportsPartialSuccessWhenCreatedFromEdgeFails(t *testing.T) {
+	var requests []protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				requests = append(requests, req)
+				body := []byte{}
+				switch req.Command {
+				case daemonclient.CommandTaskCreate:
+					payload, err := json.Marshal(map[string]string{"task_id": "az-child"})
+					if err != nil {
+						t.Fatalf("marshal task create response: %v", err)
+					}
+					body = payload
+				case daemonclient.CommandTaskDependencyAdd:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("not found")
+				default:
+					t.Fatalf("unexpected command %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            body,
+				}, nil
+			},
+		}).WithProjectID("azedarach"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "azedarach",
+	}
+
+	output, err := captureStdoutAllowError(t, func() error {
+		activeID := "az-parent"
+		return IssueCreateCommand(deps, IssueCreateOptions{
+			Title:                  "Child issue",
+			Type:                   domain.TypeTask,
+			Priority:               domain.P2,
+			Deferred:               true,
+			AutoCreatedFromIssueID: &activeID,
+			Implementations:        []string{"default"},
+		})
+	})
+
+	if output != "" {
+		t.Fatalf("stdout = %q, want empty on text partial error", output)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d, want 2", len(requests))
+	}
+	var partial issueCreatePartialError
+	if !errors.As(err, &partial) {
+		t.Fatalf("error = %T %v, want issueCreatePartialError", err, err)
+	}
+	if partial.Result.IssueID != "az-child" || partial.Result.ProjectID != "azedarach" || partial.Result.CreatedFromID != "az-parent" {
+		t.Fatalf("partial result = %+v", partial.Result)
+	}
+	if !strings.Contains(err.Error(), "issue creation partially succeeded: created azedarach:az-child") {
+		t.Fatalf("error missing created issue: %v", err)
+	}
+	if !strings.Contains(err.Error(), "azedarach:az-child -> azedarach:az-parent") {
+		t.Fatalf("error missing qualified edge ids: %v", err)
+	}
+}
+
 func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T) {
 	root := naming.IssueID("az-parent")
 	child := naming.IssueID("az-child")
