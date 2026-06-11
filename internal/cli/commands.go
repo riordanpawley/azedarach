@@ -160,14 +160,29 @@ type IssueCreateOptions struct {
 	Implementations        []string
 	AutoParentFromIssueID  *string
 	AutoCreatedFromIssueID *string
+	ProjectQualifiedOutput bool
 }
 
 type issueCreateResult struct {
 	IssueID       string
+	ProjectID     string
 	ParentID      string
 	CreatedFromID string
 	Deferred      bool
 	Message       string
+}
+
+type issueCreatePartialError struct {
+	Result issueCreateResult
+	Err    error
+}
+
+func (e issueCreatePartialError) Error() string {
+	return fmt.Sprintf("issue creation partially succeeded: created %s, but post-create graph update failed: %v", formatProjectIssueRef(e.Result.ProjectID, e.Result.IssueID), e.Err)
+}
+
+func (e issueCreatePartialError) Unwrap() error {
+	return e.Err
 }
 
 type IssueCloseOptions struct {
@@ -1895,6 +1910,23 @@ func applyIssueProjectOverride(deps *Dependencies, project string) func() {
 	}
 }
 
+func isDifferentExplicitIssueProject(currentProject, explicitProject string) bool {
+	explicitProject = normalizeIssueProject(explicitProject)
+	if explicitProject == "" {
+		return false
+	}
+	return protocol.NormalizeProjectID(currentProject) != protocol.NormalizeProjectID(explicitProject)
+}
+
+func formatProjectIssueRef(projectID, issueID string) string {
+	projectID = strings.TrimSpace(projectID)
+	issueID = strings.TrimSpace(issueID)
+	if projectID == "" {
+		return issueID
+	}
+	return projectID + ":" + issueID
+}
+
 func ParseIssueListArgs(args []string) (IssueListOptions, error) {
 	opts := IssueListOptions{Limit: defaultIssueListLimit}
 	ids := make([]string, 0, 4)
@@ -3485,11 +3517,34 @@ func IssueDoctorCommand(deps *Dependencies, opts IssueDoctorOptions) error {
 }
 
 func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
+	if isDifferentExplicitIssueProject(deps.ProjectID, opts.Project) {
+		opts.AutoParentFromIssueID = nil
+		opts.AutoCreatedFromIssueID = nil
+	}
+	if normalizeIssueProject(opts.Project) != "" {
+		opts.ProjectQualifiedOutput = true
+	}
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
 	result, err := createIssue(context.Background(), deps, opts)
 	if err != nil {
+		var partial issueCreatePartialError
+		if errors.As(err, &partial) && opts.JSON {
+			if printErr := printJSON(map[string]any{
+				"issue_id":        partial.Result.IssueID,
+				"project_id":      partial.Result.ProjectID,
+				"parent_id":       partial.Result.ParentID,
+				"created_from_id": partial.Result.CreatedFromID,
+				"deferred":        partial.Result.Deferred,
+				"created":         true,
+				"partial_success": true,
+				"error":           partial.Err.Error(),
+				"message":         partial.Error(),
+			}); printErr != nil {
+				return printErr
+			}
+		}
 		return err
 	}
 	if opts.JSON {
@@ -3562,15 +3617,16 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 	}
 
 	createdFromIDValue := ""
+	projectIDValue := strings.TrimSpace(deps.ProjectID)
 	if opts.AutoCreatedFromIssueID != nil && strings.TrimSpace(*opts.AutoCreatedFromIssueID) != "" {
 		createdFromIDValue = strings.TrimSpace(*opts.AutoCreatedFromIssueID)
 		createdIssueID, parseErr := naming.ParseIssueID(taskID)
 		if parseErr != nil {
-			return issueCreateResult{}, fmt.Errorf("failed to parse created issue id %s: %w", taskID, parseErr)
+			return issueCreateResult{}, fmt.Errorf("failed to parse created issue id %s: %w", formatProjectIssueRef(projectIDValue, taskID), parseErr)
 		}
 		createdFromID, parseErr := naming.ParseIssueID(createdFromIDValue)
 		if parseErr != nil {
-			return issueCreateResult{}, fmt.Errorf("failed to parse active issue id for created-from edge %s: %w", createdFromIDValue, parseErr)
+			return issueCreateResult{}, fmt.Errorf("failed to parse active issue id for created-from edge %s: %w", formatProjectIssueRef(projectIDValue, createdFromIDValue), parseErr)
 		}
 		if createdIssueID != createdFromID {
 			if _, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (struct{}, error) {
@@ -3581,12 +3637,32 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 				})
 				return struct{}{}, err
 			}); err != nil {
-				return issueCreateResult{}, fmt.Errorf("failed to add created-from issue graph edge %s -> %s: %w", taskID, createdFromIDValue, err)
+				partial := issueCreateResult{
+					IssueID:       taskID,
+					ProjectID:     projectIDValue,
+					CreatedFromID: createdFromIDValue,
+					Deferred:      opts.Deferred,
+				}
+				if parentID != nil && strings.TrimSpace(parentID.String()) != "" {
+					partial.ParentID = strings.TrimSpace(parentID.String())
+				}
+				return issueCreateResult{}, issueCreatePartialError{
+					Result: partial,
+					Err: fmt.Errorf("failed to add created-from issue graph edge %s -> %s: %w",
+						formatProjectIssueRef(projectIDValue, taskID),
+						formatProjectIssueRef(projectIDValue, createdFromIDValue),
+						err,
+					),
+				}
 			}
 		}
 	}
 
-	message := fmt.Sprintf("Created issue: %s", taskID)
+	displayIssueID := taskID
+	if opts.ProjectQualifiedOutput {
+		displayIssueID = formatProjectIssueRef(projectIDValue, taskID)
+	}
+	message := fmt.Sprintf("Created issue: %s", displayIssueID)
 	parentIDValue := ""
 	if parentID != nil && strings.TrimSpace(parentID.String()) != "" {
 		parentIDValue = strings.TrimSpace(parentID.String())
@@ -3600,6 +3676,7 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 	}
 	return issueCreateResult{
 		IssueID:       taskID,
+		ProjectID:     projectIDValue,
 		ParentID:      parentIDValue,
 		CreatedFromID: createdFromIDValue,
 		Deferred:      opts.Deferred,
