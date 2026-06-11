@@ -700,6 +700,54 @@ func TestListWorktreesUsesProjectRoute(t *testing.T) {
 	}
 }
 
+func TestCreateWorktreeUsesProjectRouteAndBaseBranch(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			body, err := json.Marshal(worktreeResultBody{
+				ProjectID: naming.ProjectID("proj-a"),
+				Worktree: worktreePayload{
+					Path:    "/tmp/az-1",
+					Branch:  "az/az-1",
+					IssueID: naming.IssueID("az-1"),
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-a")
+	worktree, err := client.CreateWorktree(context.Background(), "az-1", "main")
+	if err != nil {
+		t.Fatalf("CreateWorktree error: %v", err)
+	}
+	if transport.lastReq.Command != CommandWorktreeCreate {
+		t.Fatalf("command = %q, want %q", transport.lastReq.Command, CommandWorktreeCreate)
+	}
+	if transport.lastReq.Meta.ProjectID != "proj-a" {
+		t.Fatalf("project_id = %q, want proj-a", transport.lastReq.Meta.ProjectID)
+	}
+
+	var body worktreeCommandBody
+	if err := json.Unmarshal(transport.lastReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	if body.ProjectID != "proj-a" || body.IssueID != "az-1" || body.BaseBranch != "main" {
+		t.Fatalf("request body = %+v, want project_id=proj-a issue_id=az-1 base_branch=main", body)
+	}
+	if worktree.Path != "/tmp/az-1" || worktree.Branch != "az/az-1" || worktree.IssueID != "az-1" {
+		t.Fatalf("worktree = %+v", worktree)
+	}
+}
+
 func TestRemoveWorktreeUsesProjectRoute(t *testing.T) {
 	transport := &lifecycleRecordingTransport{}
 	client := New(transport).WithProjectID("proj-a")

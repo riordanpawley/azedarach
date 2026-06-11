@@ -28,6 +28,7 @@ const (
 	CommandDevServerStop          = "devserver.stop"
 	CommandDevServerStatus        = "devserver.status"
 	CommandDevServerList          = "devserver.list"
+	CommandWorktreeCreate         = "worktree.create"
 	CommandWorktreeList           = "worktree.list"
 	CommandWorktreeRemove         = "worktree.remove"
 )
@@ -90,9 +91,15 @@ type worktreePayload struct {
 }
 
 type worktreeCommandBody struct {
+	ProjectID  naming.ProjectID `json:"project_id"`
+	IssueID    naming.IssueID   `json:"issue_id,omitempty"`
+	BaseBranch string           `json:"base_branch,omitempty"`
+	Force      bool             `json:"force,omitempty"`
+}
+
+type worktreeResultBody struct {
 	ProjectID naming.ProjectID `json:"project_id"`
-	IssueID   naming.IssueID   `json:"issue_id,omitempty"`
-	Force     bool             `json:"force,omitempty"`
+	Worktree  worktreePayload  `json:"worktree"`
 }
 
 type worktreeRemoveResponseBody struct {
@@ -398,6 +405,32 @@ func (c *Client) ListWorktrees(ctx context.Context) ([]git.Worktree, error) {
 		})
 	}
 	return worktrees, nil
+}
+
+// CreateWorktree asks the daemon to create one worktree for an issue in the current project route.
+func (c *Client) CreateWorktree(ctx context.Context, issueID, baseBranch string) (git.Worktree, error) {
+	parsedIssueID, err := parseIssueID(issueID)
+	if err != nil {
+		return git.Worktree{}, err
+	}
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch == "" {
+		return git.Worktree{}, fmt.Errorf("base branch is required")
+	}
+
+	var out worktreeResultBody
+	if err := c.commandJSON(ctx, CommandWorktreeCreate, worktreeCommandBody{
+		ProjectID:  c.projectID,
+		IssueID:    parsedIssueID,
+		BaseBranch: baseBranch,
+	}, &out); err != nil {
+		return git.Worktree{}, err
+	}
+	return git.Worktree{
+		Path:    out.Worktree.Path,
+		Branch:  out.Worktree.Branch,
+		IssueID: out.Worktree.IssueID.String(),
+	}, nil
 }
 
 // RemoveWorktree asks the daemon to remove one worktree for an issue in the current project route.

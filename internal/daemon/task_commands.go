@@ -2135,7 +2135,7 @@ func (d *Daemon) taskMergeBaseTarget(ctx context.Context, projectID, issueID, ba
 		}
 	}
 	if domain.TaskParentIssueID(sourceTask) != "" && !allowBaseForChild {
-		return taskMergeBaseTargetResult{}, fmt.Errorf("refusing to merge child issue %s into base without explicit override; rerun with --allow-base-for-child", issueID)
+		return taskMergeBaseTargetResult{}, fmt.Errorf("refusing to merge child issue %s directly into base: no active ancestor worktree branch was found; start or recover the parent/ancestor worktree and close the child into that target", issueID)
 	}
 	if domain.TaskParentIssueID(sourceTask) != "" {
 		defaultTarget.Reason = "no ancestor worktree branch found; explicit override allowed base target"
