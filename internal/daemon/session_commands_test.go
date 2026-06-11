@@ -4174,6 +4174,9 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *test
 	if !strings.Contains(prompt, "before declaring yourself blocked or idle") {
 		t.Fatalf("prompt = %q, want receive-before-idle guidance", prompt)
 	}
+	if !strings.Contains(prompt, "Report coordination state with `az mail send --parent <parent-issue> --issue az-42 --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; do not use `az orchestrate message` for your own status") {
+		t.Fatalf("prompt = %q, want safe worker reporting guidance", prompt)
+	}
 	for _, eventType := range []string{"worker-progress", "worker-blocked", "worker-integration-ready"} {
 		if !strings.Contains(prompt, eventType) {
 			t.Fatalf("prompt = %q, want mailbox event type %s", prompt, eventType)
@@ -4244,6 +4247,9 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "bare `az mail send` is durable mailbox-only") {
 		t.Fatalf("prompt = %q, want passive mailbox warning", prompt)
+	}
+	if !strings.Contains(prompt, "workers reporting their own status should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`") {
+		t.Fatalf("prompt = %q, want safe worker reporting guidance", prompt)
 	}
 	if !strings.Contains(prompt, "Trust hook-backed `activity=busy|idle` for worker idleness checks") {
 		t.Fatalf("prompt = %q, want bounded tmux observation guidance", prompt)

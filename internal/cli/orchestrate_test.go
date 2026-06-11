@@ -85,11 +85,11 @@ func TestParseOrchestrateWatchArgs(t *testing.T) {
 }
 
 func TestParseOrchestrateMessageArgs(t *testing.T) {
-	opts, err := ParseOrchestrateMessageArgs([]string{"--root", "az-1", "--issue", "az-2", "--body", "Proceed now", "--json"})
+	opts, err := ParseOrchestrateMessageArgs([]string{"--root", "az-1", "--issue", "az-2", "--body", "Proceed now", "--force-self-delivery", "--json"})
 	if err != nil {
 		t.Fatalf("ParseOrchestrateMessageArgs error = %v", err)
 	}
-	if opts.RootIssueID != "az-1" || opts.IssueID != "az-2" || opts.Body != "Proceed now" || opts.Type != "orchestrator-message" || !opts.JSON {
+	if opts.RootIssueID != "az-1" || opts.IssueID != "az-2" || opts.Body != "Proceed now" || opts.Type != "orchestrator-message" || !opts.ForceSelfDelivery || !opts.JSON {
 		t.Fatalf("opts = %+v", opts)
 	}
 }
@@ -552,6 +552,7 @@ func TestOrchestratePromptCommandMailboxCoordinationOptIn(t *testing.T) {
 		"Coordination mailbox parent: az-1",
 		"Use mailbox events for hybrid coordination",
 		"Check inbound orchestrator messages with `az mail list --parent az-1 --since 0 --json` before declaring yourself blocked or idle",
+		"Report to parent `az-1` with `az mail send --parent az-1 --issue az-2 --type <worker-progress|worker-blocked|worker-integration-ready> --body \"<evidence>\"`; do not use `az orchestrate message` for your own status",
 		"az mail list --parent az-1 --since 0 --json",
 		"`worker-ready` and `worker-complete` are accepted only as legacy aliases for `worker-integration-ready`",
 		"az mail send --parent az-1 --issue az-2 --type worker-integration-ready",
@@ -563,6 +564,7 @@ func TestOrchestratePromptCommandMailboxCoordinationOptIn(t *testing.T) {
 }
 
 func TestOrchestrateMessageCommandRecordsMailboxThenDeliversToSession(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-9")
 	commands := []string{}
 	var mailBody protocol.MailSendCommandBody
 	var sessionBody struct {
@@ -626,6 +628,84 @@ func TestOrchestrateMessageCommandRecordsMailboxThenDeliversToSession(t *testing
 		t.Fatalf("decode result: %v\n%s", err, output)
 	}
 	if !result.Delivered || result.Mailbox.Seq != 7 {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestOrchestrateMessageCommandRejectsActiveWorkerSelfDelivery(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-2")
+	commands := []string{}
+	deps := &Dependencies{
+		ProjectID: protocol.DefaultProjectID,
+		RepoDir:   "/repo",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				t.Fatalf("unexpected command after self-delivery guard: %s", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	err := OrchestrateMessageCommand(deps, OrchestrateMessageOptions{
+		RootIssueID: "az-1",
+		IssueID:     "az-2",
+		Type:        "worker-integration-ready",
+		Body:        "ready",
+	})
+	if err == nil {
+		t.Fatal("expected self-delivery guard error")
+	}
+	if !strings.Contains(err.Error(), "refusing to deliver orchestrate message to the active issue az-2") ||
+		!strings.Contains(err.Error(), "az mail send --parent az-1 --issue az-2 --type worker-integration-ready") {
+		t.Fatalf("error = %v, want self-delivery guidance", err)
+	}
+	if len(commands) != 0 {
+		t.Fatalf("commands = %+v, want no mailbox or session commands", commands)
+	}
+}
+
+func TestOrchestrateMessageCommandForceSelfDelivery(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-2")
+	commands := []string{}
+	deps := &Dependencies{
+		ProjectID: protocol.DefaultProjectID,
+		RepoDir:   "/repo",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case protocol.CommandMailSend:
+					return responseWithJSON(req, protocol.MailEvent{Seq: 8, ParentIssue: "az-1", IssueID: naming.IssueID("az-2"), Type: "orchestrator-message"}), nil
+				case daemonclient.CommandSessionMessage:
+					return responseWithJSON(req, map[string]string{"output": "Sent message to session: az-2\n"}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestrateMessageCommand(deps, OrchestrateMessageOptions{
+			RootIssueID:       "az-1",
+			IssueID:           "az-2",
+			Type:              "orchestrator-message",
+			Body:              "intentional self message",
+			ForceSelfDelivery: true,
+			JSON:              true,
+		})
+	})
+
+	if len(commands) != 2 || commands[0] != protocol.CommandMailSend || commands[1] != daemonclient.CommandSessionMessage {
+		t.Fatalf("commands = %+v, want mail send then session message", commands)
+	}
+	var result orchestrateMessageResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode result: %v\n%s", err, output)
+	}
+	if !result.Delivered || result.Mailbox.Seq != 8 {
 		t.Fatalf("result = %+v", result)
 	}
 }

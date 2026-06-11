@@ -39,7 +39,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - `az orchestrate start --root <issue-id> [--limit <n>] [--issue <issue-id> ...] [--json]`
   - `az orchestrate integrate --issue <issue-id> [--json]` (inspect worker evidence and repair guidance; normal accepted-worker integration uses `az issue close`)
   - `az orchestrate close-session --issue <issue-id> [--json]` (repair-only session cleanup; daemon stop records stopped state before killing tmux)
-  - `az orchestrate message --root <issue-id> --issue <worker-issue> --body "..." [--json]` (persist a mailbox event and actively inject the message into the running worker session)
+  - `az orchestrate message --root <issue-id> --issue <worker-issue> --body "..." [--json]` (orchestrator-to-worker only: persist a mailbox event and actively inject the message into the running worker session; rejects accidental self-delivery when the target matches `AZEDARACH_ISSUE_ID`)
   - `az orchestrate complete-check --root <issue-id> [--json]`
   - `orchestration.via` is `az`: use `az orchestrate` as the worker launch and coordination authority. Do not use harness-native subagent/delegation tooling for this graph unless the user explicitly overrides this or changes `orchestration.via` to `native`.
   - Use `az orchestrate` for durable tracked task graphs that need issue dependencies, mailbox events, recoverable sessions, isolated worktrees, integration guidance, and `complete-check`. Native subagents are better for short-lived ad hoc exploration or review where the result can be summarized back into the current session; do not use them to execute this `az` graph unless the user explicitly overrides the mode.
@@ -70,7 +70,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Mailbox coordination:
   - Preferred event types: `worker-progress`, `worker-blocked`, `worker-integration-ready`, and `dependency-ready`; `worker-ready` and `worker-complete` are legacy aliases for `worker-integration-ready`.
   {{ if and .OrchestrationViaAz .TmuxAvailable }}
-  - Use `az orchestrate message --root <parent-issue> --issue <worker-issue> --body "..."` for orchestrator-to-running-worker nudges; bare `az mail send` is durable mailbox-only and may not be seen until the worker next checks mail.
+  - Use `az orchestrate message --root <parent-issue> --issue <worker-issue> --body "..."` for orchestrator-to-running-worker nudges; workers reporting their own progress/status must use `az mail send --parent <parent-issue> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body "..."` so they do not inject the event into their own session; bare `az mail send` is durable mailbox-only and may not be seen until the worker next checks mail.
   {{ end }}
   - `az mail send --parent <parent-issue> --type dependency-ready --body "..."`, `az mail send --parent <parent-issue> --issue <worker-issue> --type worker-integration-ready --body "evidence..."`, `az mail list --parent <parent-issue> --since <seq> --json`, `az mail watch --parent <parent-issue> --since <seq> --jsonl`
   - Spec traceability:

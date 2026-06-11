@@ -72,12 +72,13 @@ type OrchestrateCloseSessionOptions struct {
 }
 
 type OrchestrateMessageOptions struct {
-	Project     string
-	RootIssueID string
-	IssueID     string
-	Type        string
-	Body        string
-	JSON        bool
+	Project           string
+	RootIssueID       string
+	IssueID           string
+	Type              string
+	Body              string
+	ForceSelfDelivery bool
+	JSON              bool
 }
 
 func issueCloseCommand(issueID string) string {
@@ -367,6 +368,7 @@ func ParseOrchestrateMessageArgs(args []string) (OrchestrateMessageOptions, erro
 	fs.StringVar(&opts.IssueID, "issue", "", "worker issue id to message")
 	fs.StringVar(&opts.Type, "type", "orchestrator-message", "mailbox event type")
 	fs.StringVar(&opts.Body, "body", "", "message body")
+	fs.BoolVar(&opts.ForceSelfDelivery, "force-self-delivery", false, "allow delivery when --issue matches AZEDARACH_ISSUE_ID")
 	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
 	if err := fs.Parse(args); err != nil {
 		return OrchestrateMessageOptions{}, err
@@ -1031,6 +1033,9 @@ func OrchestrateMessageCommand(deps *Dependencies, opts OrchestrateMessageOption
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
+	if err := rejectAccidentalSelfDelivery(opts); err != nil {
+		return err
+	}
 	event, err := deps.DaemonClient.MailSend(ctx, protocol.MailSendCommandBody{
 		RepoDir:     deps.RepoDir,
 		ParentIssue: opts.RootIssueID,
@@ -1060,6 +1065,18 @@ func OrchestrateMessageCommand(deps *Dependencies, opts OrchestrateMessageOption
 	}
 	fmt.Printf("message delivered to %s; mailbox seq=%d parent=%s type=%s\n", opts.IssueID, event.Seq, event.ParentIssue, event.Type)
 	return nil
+}
+
+func rejectAccidentalSelfDelivery(opts OrchestrateMessageOptions) error {
+	if opts.ForceSelfDelivery {
+		return nil
+	}
+	activeIssueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID"))
+	targetIssueID := strings.TrimSpace(opts.IssueID)
+	if activeIssueID == "" || targetIssueID == "" || !naming.IssueIDsEqual(activeIssueID, targetIssueID) {
+		return nil
+	}
+	return fmt.Errorf("refusing to deliver orchestrate message to the active issue %s; worker-to-parent reporting should use `az mail send --parent %s --issue %s --type %s --body ...` so the event is recorded without injecting it back into this session (use --force-self-delivery only for intentional self-delivery)", targetIssueID, strings.TrimSpace(opts.RootIssueID), targetIssueID, strings.TrimSpace(opts.Type))
 }
 
 func formatOrchestratorSessionMessage(opts OrchestrateMessageOptions) string {
@@ -1196,6 +1213,7 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 	if coordination == "mailbox" {
 		fmt.Fprintf(&b, "- Use mailbox events for hybrid coordination: `worker-progress`, `worker-blocked`, and `worker-integration-ready`; `worker-ready` and `worker-complete` are accepted only as legacy aliases for `worker-integration-ready`.\n")
 		fmt.Fprintf(&b, "- Check inbound orchestrator messages with `az mail list --parent %s --since 0 --json` before declaring yourself blocked or idle; apply events for `%s` and continue without waiting for a separate user prompt.\n", parentIssueID, issueID)
+		fmt.Fprintf(&b, "- Report to parent `%s` with `az mail send --parent %s --issue %s --type <worker-progress|worker-blocked|worker-integration-ready> --body \"<evidence>\"`; do not use `az orchestrate message` for your own status because it is an orchestrator-to-worker live delivery command.\n", parentIssueID, parentIssueID, issueID)
 		fmt.Fprintf(&b, "- When ready for integration, set/leave the issue `in_review` and send `worker-integration-ready` to parent `%s` with concise evidence; leave integration/merge/close to the orchestrator.\n", parentIssueID)
 	} else {
 		fmt.Fprintf(&b, "- Return progress, blockers, and final results through the native subagent result channel.\n")
