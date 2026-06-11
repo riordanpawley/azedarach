@@ -1181,16 +1181,14 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	if err != nil {
 		return result, err
 	}
+	if err := d.cleanupTaskIssueResourcesForClose(ctx, projectID, taskID, guard.Worktree); err != nil {
+		return result, fmt.Errorf("cleanup issue resources before closing %s: %w", taskID, err)
+	}
 	if daemonCloseGuardTaskHasSession(guard.Task) {
 		if err := d.stopTaskSessionForClose(ctx, req, projectID, taskID); err != nil {
 			return result, fmt.Errorf("stop session before closing %s: %w", taskID, err)
 		}
 		result.SessionStopped = true
-	}
-	if !result.SessionStopped {
-		if err := d.cleanupTaskIssueResourcesForClose(ctx, projectID, taskID, guard.Worktree); err != nil {
-			return result, fmt.Errorf("cleanup issue resources before closing %s: %w", taskID, err)
-		}
 	}
 	if daemonCloseGuardTaskHasWorktree(guard.Task) {
 		if d.worktreeAdapter == nil {
@@ -1426,7 +1424,9 @@ func (d *Daemon) stopTaskSessionForClose(ctx context.Context, req protocol.Reque
 	stopReq.Command = "session.stop"
 	stopReq.Body = body
 	stopReq.Meta.ProjectID = naming.ProjectID(projectID)
-	resp, err := d.handleSessionStopDirect(ctx, stopReq)
+	resp, err := d.handleSessionStopDirectWithOptions(ctx, stopReq, sessionStopOptions{
+		skipIssueResourceCleanup: true,
+	})
 	return cleanupCommandError(resp, err)
 }
 

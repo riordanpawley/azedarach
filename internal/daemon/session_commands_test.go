@@ -1429,6 +1429,63 @@ func TestHandleSessionStopDirectCleanupFailureDoesNotMarkStoppedOrKillTmux(t *te
 	}
 }
 
+func TestHandleSessionStopDirectIgnoresCleanupSkipRequestField(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+
+	root := t.TempDir()
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	store := daemonstate.NewStore()
+	if _, err := store.ForceUpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed attached session: %v", err)
+	}
+	tmuxRunner := newTestTmuxRunner(sessionID)
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir:      root,
+			SessionShell: "sh",
+			IssueResources: appconfig.IssueResourcesConfig{
+				CleanupCommands: []string{"exit 9"},
+			},
+			Logger: slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"project_id":                  projectID,
+		"session_id":                  issueID,
+		"skip_issue_resource_cleanup": true,
+	})
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+	resp, err := daemon.handleSessionStopDirect(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-stop-cleanup-skip-ignored",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.stop",
+		Body:            body,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStopDirect returned error: %v", err)
+	}
+	if resp.OK || resp.Error == nil {
+		t.Fatalf("stop response = %+v, want cleanup failure", resp)
+	}
+	if !strings.Contains(resp.Error.Message, "issue resource cleanup failed") {
+		t.Fatalf("stop error = %q, want cleanup failure context", resp.Error.Message)
+	}
+	if !tmuxRunner.hasSession(sessionID) {
+		t.Fatalf("expected tmux session %q to remain running after cleanup failure", sessionID)
+	}
+}
+
 func TestHandleSessionStopDirectKillsLegacyIssueNamedSession(t *testing.T) {
 	const (
 		projectID = "proj"
