@@ -8190,6 +8190,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\" [--json]`") {
 		t.Fatalf("prime output missing orchestrate message command example: %q", output)
 	}
+	if !strings.Contains(output, "rejects accidental self-delivery when the target matches `AZEDARACH_ISSUE_ID`") {
+		t.Fatalf("prime output missing orchestrate message self-delivery guard: %q", output)
+	}
 	if !strings.Contains(output, "`az orchestrate integrate --issue <issue-id> [--json]`") {
 		t.Fatalf("prime output missing orchestrate integrate command example: %q", output)
 	}
@@ -8285,6 +8288,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "Use `az orchestrate message --root <parent-issue> --issue <worker-issue> --body \"...\"` for orchestrator-to-running-worker nudges") {
 		t.Fatalf("prime output missing active worker nudge guidance: %q", output)
+	}
+	if !strings.Contains(output, "workers reporting their own progress/status must use `az mail send --parent <parent-issue> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`") {
+		t.Fatalf("prime output missing worker safe reporting guidance: %q", output)
 	}
 	if !strings.Contains(output, "bare `az mail send` is durable mailbox-only and may not be seen until the worker next checks mail") {
 		t.Fatalf("prime output missing passive mailbox warning: %q", output)
