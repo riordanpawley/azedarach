@@ -236,6 +236,61 @@ func newDaemonTestModel(transport *recordingDaemonTransport) Model {
 	return m
 }
 
+func TestSaveTaskCmdUpdatesEditedDescriptionThroughDaemon(t *testing.T) {
+	var updateBody struct {
+		TaskID string `json:"task_id"`
+		daemonclient.TaskUpdateParams
+	}
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskUpdate {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskUpdate)
+			}
+			if err := json.Unmarshal(req.Body, &updateBody); err != nil {
+				t.Fatalf("unmarshal update body: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				Meta:            req.Meta,
+				OK:              true,
+				CompletedAt:     req.SentAt,
+			}, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+
+	cmd := m.saveTaskCmd(overlay.TaskCreatedMsg{
+		ID:          "az-1",
+		Title:       "Edited title",
+		Description: "Edited description from TUI",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+	})
+	if cmd == nil {
+		t.Fatal("saveTaskCmd returned nil")
+	}
+	msg := cmd()
+	result, ok := msg.(taskCreatedResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want taskCreatedResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("saveTaskCmd error = %v", result.err)
+	}
+	if !result.isUpdate || result.taskID != "az-1" {
+		t.Fatalf("result = %+v, want update for az-1", result)
+	}
+	if updateBody.TaskID != "az-1" ||
+		updateBody.Title != "Edited title" ||
+		updateBody.Description != "Edited description from TUI" ||
+		updateBody.Type != domain.TypeTask ||
+		updateBody.Priority != domain.P2 {
+		t.Fatalf("update body = %+v, want edited TUI fields", updateBody)
+	}
+}
+
 func mustMarshalTaskListSnapshot(t *testing.T, protocolVersion protocol.Version, revision uint64, projectID string, tasks []domain.Task) []byte {
 	t.Helper()
 	body, err := json.Marshal(protocol.TaskListSnapshotPayload{
