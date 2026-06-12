@@ -14,6 +14,8 @@ import (
 
 type recordingApplyService struct {
 	calls            []string
+	createParams     []issues.CreateTaskParams
+	createIDs        []naming.IssueID
 	createErr        error
 	updateErr        error
 	updateDetailsErr error
@@ -28,11 +30,17 @@ func (r *recordingApplyService) Create(_ context.Context, params issues.CreateTa
 	if params.ParentID != nil {
 		parentID = *params.ParentID
 	}
+	r.createParams = append(r.createParams, params)
 	r.calls = append(r.calls, fmt.Sprintf("create:%s:%s:%s:%s", params.Title, params.Priority.String(), params.Type, parentID))
 	if r.createErr != nil {
 		return domain.Task{}, r.createErr
 	}
-	return domain.Task{ID: "az-new", Title: params.Title, Status: params.Status, Priority: params.Priority, Type: params.Type}, nil
+	id := naming.IssueID("az-new")
+	if len(r.createIDs) > 0 {
+		id = r.createIDs[0]
+		r.createIDs = r.createIDs[1:]
+	}
+	return domain.Task{ID: id, Title: params.Title, Status: params.Status, Priority: params.Priority, Type: params.Type}, nil
 }
 
 func (r *recordingApplyService) Update(_ context.Context, id string, status domain.Status) (domain.Task, error) {
@@ -367,7 +375,7 @@ func TestApplyExecutorRejectsTerminalStatusUpdate(t *testing.T) {
 			"task_id": "az-1",
 			"status":  "closed",
 		}),
-	})
+	}, map[string]string{})
 
 	if err == nil {
 		t.Fatal("expected terminal status update to fail")
@@ -507,6 +515,233 @@ func TestApplyHandlerDryRunReturnsPreviewWithoutExecuting(t *testing.T) {
 	}
 	if len(revisions.next) != 0 {
 		t.Fatalf("NextRevision calls = %v, want none", revisions.next)
+	}
+	if len(revisions.published) != 0 {
+		t.Fatalf("published events = %v, want none", revisions.published)
+	}
+}
+
+func TestApplyHandlerResolvesCreateParentRef(t *testing.T) {
+	service := &recordingApplyService{
+		createIDs: []naming.IssueID{"az-parent", "az-child"},
+	}
+	revisions := &recordingApplyRevisions{current: 3}
+	h := NewApplyHandler(service, revisions)
+
+	reqBody := protocol.ApplyRequestBody{
+		SchemaVersion:    protocol.ApplySchemaVersion,
+		SnapshotRevision: 3,
+		Operations: []protocol.ApplyOperationBody{
+			{
+				Command: applyCommandTaskCreate,
+				Body: mustApplyJSON(t, map[string]any{
+					"title":           "Epic",
+					"description":     "Parent",
+					"type":            "epic",
+					"priority":        "P2",
+					"implementations": []string{"go-bubbletea"},
+					"ref":             "epic",
+				}),
+			},
+			{
+				Command: applyCommandTaskCreate,
+				Body: mustApplyJSON(t, map[string]any{
+					"title":           "Child",
+					"description":     "Nested",
+					"type":            "task",
+					"priority":        "P2",
+					"implementations": []string{"go-bubbletea"},
+					"parent_ref":      "epic",
+				}),
+			},
+		},
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	resp := h.Handle(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-parent-ref",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         protocol.CommandTaskBulkApply,
+		Meta:            protocol.Metadata{ProjectID: "proj"},
+		Body:            body,
+	})
+	if !resp.OK {
+		t.Fatalf("Handle() error = %+v", resp.Error)
+	}
+	wantCalls := []string{
+		"create:Epic:P2:epic:",
+		"create:Child:P2:task:az-parent",
+	}
+	if !equalStrings(service.calls, wantCalls) {
+		t.Fatalf("calls = %v, want %v", service.calls, wantCalls)
+	}
+	if len(service.createParams) != 2 || !equalStrings(service.createParams[0].Implementations, []string{"go-bubbletea"}) || !equalStrings(service.createParams[1].Implementations, []string{"go-bubbletea"}) {
+		t.Fatalf("create implementations = %+v, want go-bubbletea on parent and child", service.createParams)
+	}
+	var result ApplyExecutionResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if got := result.Operations[0].Ref; got != "epic" {
+		t.Fatalf("Operations[0].Ref = %q, want epic", got)
+	}
+	if result.Summary.Succeeded != 2 || result.Summary.Failed != 0 {
+		t.Fatalf("Summary = %+v, want 2 succeeded", result.Summary)
+	}
+}
+
+func TestApplyHandlerReportsUnresolvedCreateParentRef(t *testing.T) {
+	service := &recordingApplyService{}
+	revisions := &recordingApplyRevisions{current: 4}
+	h := NewApplyHandler(service, revisions)
+
+	reqBody := protocol.ApplyRequestBody{
+		SchemaVersion:    protocol.ApplySchemaVersion,
+		SnapshotRevision: 4,
+		Operations: []protocol.ApplyOperationBody{{
+			Command: applyCommandTaskCreate,
+			Body: mustApplyJSON(t, map[string]any{
+				"title":       "Child",
+				"description": "Nested",
+				"type":        "task",
+				"priority":    "P2",
+				"parent_ref":  "missing",
+			}),
+		}},
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	resp := h.Handle(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-missing-parent-ref",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         protocol.CommandTaskBulkApply,
+		Meta:            protocol.Metadata{ProjectID: "proj"},
+		Body:            body,
+	})
+	if resp.OK {
+		t.Fatal("Handle() succeeded, want validation error")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest || resp.Error.Message != "apply request failed validation" {
+		t.Fatalf("error = %+v, want validation error", resp.Error)
+	}
+	if len(service.calls) != 0 {
+		t.Fatalf("service calls = %v, want none", service.calls)
+	}
+	if len(revisions.published) != 0 {
+		t.Fatalf("published events = %v, want none", revisions.published)
+	}
+}
+
+func TestApplyHandlerRejectsCreateParentIDAndParentRefTogether(t *testing.T) {
+	service := &recordingApplyService{}
+	revisions := &recordingApplyRevisions{current: 5}
+	h := NewApplyHandler(service, revisions)
+
+	reqBody := protocol.ApplyRequestBody{
+		SchemaVersion:    protocol.ApplySchemaVersion,
+		SnapshotRevision: 5,
+		Operations: []protocol.ApplyOperationBody{{
+			Command: applyCommandTaskCreate,
+			Body: mustApplyJSON(t, map[string]any{
+				"title":       "Ambiguous child",
+				"description": "Nested",
+				"type":        "task",
+				"priority":    "P2",
+				"parent_id":   "az-explicit",
+				"parent_ref":  "generated-parent",
+			}),
+		}},
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	resp := h.Handle(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-ambiguous-parent",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         protocol.CommandTaskBulkApply,
+		Meta:            protocol.Metadata{ProjectID: "proj"},
+		Body:            body,
+	})
+	if resp.OK {
+		t.Fatal("Handle() succeeded, want validation error")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest || resp.Error.Message != "apply request failed validation" {
+		t.Fatalf("error = %+v, want validation error", resp.Error)
+	}
+	if len(service.calls) != 0 {
+		t.Fatalf("service calls = %v, want none", service.calls)
+	}
+	if len(revisions.published) != 0 {
+		t.Fatalf("published events = %v, want none", revisions.published)
+	}
+}
+
+func TestApplyHandlerRejectsDuplicateCreateRefs(t *testing.T) {
+	service := &recordingApplyService{}
+	revisions := &recordingApplyRevisions{current: 6}
+	h := NewApplyHandler(service, revisions)
+
+	reqBody := protocol.ApplyRequestBody{
+		SchemaVersion:    protocol.ApplySchemaVersion,
+		SnapshotRevision: 6,
+		Operations: []protocol.ApplyOperationBody{
+			{
+				Command: applyCommandTaskCreate,
+				Body: mustApplyJSON(t, map[string]any{
+					"title":       "First",
+					"description": "One",
+					"type":        "task",
+					"priority":    "P2",
+					"ref":         "same",
+				}),
+			},
+			{
+				Command: applyCommandTaskCreate,
+				Body: mustApplyJSON(t, map[string]any{
+					"title":       "Second",
+					"description": "Two",
+					"type":        "task",
+					"priority":    "P2",
+					"ref":         "same",
+				}),
+			},
+		},
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	resp := h.Handle(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-duplicate-ref",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         protocol.CommandTaskBulkApply,
+		Meta:            protocol.Metadata{ProjectID: "proj"},
+		Body:            body,
+	})
+	if resp.OK {
+		t.Fatal("Handle() succeeded, want validation error")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("error = %+v, want invalid request", resp.Error)
+	}
+	if resp.Error.Message != "apply request failed validation" {
+		t.Fatalf("error message = %q, want validation failure", resp.Error.Message)
+	}
+	if len(service.calls) != 0 {
+		t.Fatalf("service calls = %v, want none", service.calls)
 	}
 	if len(revisions.published) != 0 {
 		t.Fatalf("published events = %v, want none", revisions.published)

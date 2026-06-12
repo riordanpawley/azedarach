@@ -7966,10 +7966,10 @@ func TestIssueBulkCommandsUseApplyCommand(t *testing.T) {
 	tempDir := t.TempDir()
 	bulkCreatePath := filepath.Join(tempDir, "bulk-create.json")
 	bulkUpdatePath := filepath.Join(tempDir, "bulk-update.json")
-	if err := os.WriteFile(bulkCreatePath, []byte(`[{"title":"Bulk one","description":"Desc","type":"task","priority":"P2"}]`), 0o644); err != nil {
+	if err := os.WriteFile(bulkCreatePath, []byte(`[{"title":"Bulk epic","description":"Parent","type":"epic","priority":"P2","children":[{"title":"Bulk child","description":"Child","type":"task","priority":"P3"}]}]`), 0o644); err != nil {
 		t.Fatalf("write bulk-create file: %v", err)
 	}
-	if err := os.WriteFile(bulkUpdatePath, []byte(`[{"task_id":"az-1","title":"Renamed"}]`), 0o644); err != nil {
+	if err := os.WriteFile(bulkUpdatePath, []byte(`[{"task_id":"az-1","title":"Renamed","priority":"P1"}]`), 0o644); err != nil {
 		t.Fatalf("write bulk-update file: %v", err)
 	}
 
@@ -8089,8 +8089,33 @@ func TestIssueBulkCommandsUseApplyCommand(t *testing.T) {
 	if createBody.DryRun {
 		t.Fatalf("create body dry_run = true, want false")
 	}
-	if len(createBody.Operations) != 1 || createBody.Operations[0].Command != daemonclient.CommandTaskCreate {
+	if len(createBody.Operations) != 2 || createBody.Operations[0].Command != daemonclient.CommandTaskCreate || createBody.Operations[1].Command != daemonclient.CommandTaskCreate {
 		t.Fatalf("create operations = %+v", createBody.Operations)
+	}
+	var parentCreate struct {
+		Title           string   `json:"title"`
+		Description     string   `json:"description"`
+		Type            string   `json:"type"`
+		Priority        string   `json:"priority"`
+		Implementations []string `json:"implementations,omitempty"`
+		Ref             string   `json:"ref,omitempty"`
+	}
+	if err := json.Unmarshal(createBody.Operations[0].Body, &parentCreate); err != nil {
+		t.Fatalf("unmarshal parent create: %v", err)
+	}
+	if parentCreate.Type != string(domain.TypeEpic) || parentCreate.Priority != "P2" || parentCreate.Ref == "" || !equalStrings(parentCreate.Implementations, []string{"go-bubbletea"}) {
+		t.Fatalf("parent create = %+v, want epic P2 with generated ref and implementation", parentCreate)
+	}
+	var childCreate struct {
+		Title     string `json:"title"`
+		Priority  string `json:"priority"`
+		ParentRef string `json:"parent_ref,omitempty"`
+	}
+	if err := json.Unmarshal(createBody.Operations[1].Body, &childCreate); err != nil {
+		t.Fatalf("unmarshal child create: %v", err)
+	}
+	if childCreate.Title != "Bulk child" || childCreate.ParentRef != parentCreate.Ref || childCreate.Priority != "P3" {
+		t.Fatalf("child create = %+v, want parent_ref %q and P3", childCreate, parentCreate.Ref)
 	}
 	var updateBody protocol.ApplyRequestBody
 	if err := json.Unmarshal(applyReqs[1].Body, &updateBody); err != nil {
@@ -8103,14 +8128,67 @@ func TestIssueBulkCommandsUseApplyCommand(t *testing.T) {
 		t.Fatalf("update operations = %+v", updateBody.Operations)
 	}
 	var updateParams struct {
-		TaskID string `json:"task_id"`
-		daemonclient.TaskUpdateParams
+		TaskID      string `json:"task_id"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Priority    string `json:"priority"`
 	}
 	if err := json.Unmarshal(updateBody.Operations[0].Body, &updateParams); err != nil {
 		t.Fatalf("unmarshal update operation body: %v", err)
 	}
-	if updateParams.Title != "Renamed" || updateParams.Description != "Desc" {
-		t.Fatalf("update params = %+v, want renamed title with preserved description", updateParams)
+	if updateParams.Title != "Renamed" || updateParams.Description != "Desc" || updateParams.Priority != "P1" {
+		t.Fatalf("update params = %+v, want renamed title with preserved description and P1", updateParams)
+	}
+}
+
+func TestCompileBulkCreateItemRejectsDuplicateRefs(t *testing.T) {
+	input := issueBulkCreateInputItem{
+		Title:       "Epic",
+		Description: "Parent",
+		Type:        "epic",
+		Priority:    "P2",
+		Ref:         "same",
+		Children: []issueBulkCreateInputItem{{
+			Title:       "Child",
+			Description: "Nested",
+			Type:        "task",
+			Priority:    "P2",
+			Ref:         "same",
+		}},
+	}
+	_, err := compileBulkCreateItem(input, "bulk-create item 0", "go-bubbletea", "", map[string]string{})
+	if err == nil || !strings.Contains(err.Error(), `duplicate ref "same"`) {
+		t.Fatalf("compileBulkCreateItem() error = %v, want duplicate ref", err)
+	}
+}
+
+func TestCompileBulkCreateItemRejectsInvalidParentID(t *testing.T) {
+	parentID := "not/an/issue"
+	input := issueBulkCreateInputItem{
+		Title:       "Child",
+		Description: "Bad parent",
+		Type:        "task",
+		Priority:    "P2",
+		ParentID:    &parentID,
+	}
+	_, err := compileBulkCreateItem(input, "bulk-create item 0", "go-bubbletea", "", map[string]string{})
+	if err == nil || !strings.Contains(err.Error(), `bulk-create item 0: invalid parent_id "not/an/issue"`) {
+		t.Fatalf("compileBulkCreateItem() error = %v, want invalid parent_id", err)
+	}
+}
+
+func TestCompileBulkCreateItemRejectsEmptyParentID(t *testing.T) {
+	parentID := "  "
+	input := issueBulkCreateInputItem{
+		Title:       "Child",
+		Description: "Blank parent",
+		Type:        "task",
+		Priority:    "P2",
+		ParentID:    &parentID,
+	}
+	_, err := compileBulkCreateItem(input, "bulk-create item 0.children[0]", "go-bubbletea", "parent-ref", map[string]string{})
+	if err == nil || !strings.Contains(err.Error(), `bulk-create item 0.children[0]: parent_id cannot be empty`) {
+		t.Fatalf("compileBulkCreateItem() error = %v, want empty parent_id", err)
 	}
 }
 
@@ -8310,7 +8388,7 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue dep bulk apply [--project <project-id>] --input <path>") {
 		t.Fatalf("usage missing issue dep bulk apply command: %q", output)
 	}
-	if !strings.Contains(output, "issue bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]") {
+	if !strings.Contains(output, "issue bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Create issues, epics, or nested children trees from JSON") {
 		t.Fatalf("usage missing issue bulk-create command: %q", output)
 	}
 	if !strings.Contains(output, "issue bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]") {
@@ -8406,6 +8484,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "How to use `az` command map:") {
 		t.Fatalf("prime output missing az command map section: %q", output)
+	}
+	if !strings.Contains(output, "create many issues, epics, or nested `children` trees from JSON when shaping a graph up front") {
+		t.Fatalf("prime output missing bulk-create nested tree guidance: %q", output)
 	}
 	if !strings.Contains(output, "`az orchestrate status --root <issue-id> [--since <seq>] [--limit <n>] [--json]`") {
 		t.Fatalf("prime output missing orchestrate status command example: %q", output)

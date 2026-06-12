@@ -16,7 +16,7 @@ Commands:
   dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]  Add a dependency edge
   dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--confirm-parent-orphan] [--json]  Remove a dependency edge
   dep bulk apply [--project <project-id>] --input <path> [--dry-run] [--json]  Apply dependency edge mutations
-  bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Execute bulk create operations
+  bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Create issues, epics, or nested children trees from JSON
   bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Execute bulk update operations
   fanout [--project <project-id>] --input <path> [--apply] [--json]  Plan/apply a pre-authored nested issue tree from JSON
   fanout ready [--project <project-id>] --root <issue-id> [--json]  List runnable leaf issues under a fanout root

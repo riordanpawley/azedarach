@@ -43,6 +43,7 @@ type ApplyExecutionOperation struct {
 	Index    int          `json:"index"`
 	Command  string       `json:"command"`
 	TaskID   string       `json:"task_id,omitempty"`
+	Ref      string       `json:"ref,omitempty"`
 	Revision uint64       `json:"revision,omitempty"`
 	Task     *domain.Task `json:"-"`
 }
@@ -166,9 +167,10 @@ func (h *ApplyHandler) execute(ctx context.Context, req protocol.RequestEnvelope
 		Operations:       make([]ApplyExecutionOperation, 0, len(applyReq.Operations)),
 		Outcomes:         make([]ApplyExecutionOutcome, 0, len(applyReq.Operations)),
 	}
+	createdRefs := map[string]string{}
 
 	for i, op := range applyReq.Operations {
-		executed, err := h.executeOperation(ctx, i, op)
+		executed, err := h.executeOperation(ctx, i, op, createdRefs)
 		outcome := ApplyExecutionOutcome{
 			Index:   i,
 			Command: op.Command,
@@ -191,6 +193,9 @@ func (h *ApplyHandler) execute(ctx context.Context, req protocol.RequestEnvelope
 		result.Operations = append(result.Operations, executed)
 		outcome.Status = applyExecutionOutcomeStatusSuccess
 		outcome.TaskID = executed.TaskID
+		if ref := executed.Ref; ref != "" && executed.TaskID != "" {
+			createdRefs[ref] = executed.TaskID
+		}
 		result.Outcomes = append(result.Outcomes, outcome)
 	}
 
@@ -251,7 +256,7 @@ func taskEventBodyFromTask(projectID string, task domain.Task) protocol.TaskEven
 	}
 }
 
-func (h *ApplyHandler) executeOperation(ctx context.Context, index int, op protocol.ApplyOperationBody) (ApplyExecutionOperation, error) {
+func (h *ApplyHandler) executeOperation(ctx context.Context, index int, op protocol.ApplyOperationBody, createdRefs map[string]string) (ApplyExecutionOperation, error) {
 	operation := ApplyExecutionOperation{
 		Index:   index,
 		Command: op.Command,
@@ -272,19 +277,38 @@ func (h *ApplyHandler) executeOperation(ctx context.Context, index int, op proto
 		if err != nil {
 			return ApplyExecutionOperation{}, err
 		}
+		ref := strings.TrimSpace(payload.Ref)
+		if ref != "" {
+			if _, ok := createdRefs[ref]; ok {
+				return ApplyExecutionOperation{}, fmt.Errorf("duplicate ref %q", ref)
+			}
+		}
+		parentID := payload.ParentID
+		if strings.TrimSpace(payload.ParentRef) != "" {
+			if payload.ParentID != nil && strings.TrimSpace(*payload.ParentID) != "" {
+				return ApplyExecutionOperation{}, fmt.Errorf("parent_id and parent_ref are mutually exclusive")
+			}
+			resolvedParentID, ok := createdRefs[strings.TrimSpace(payload.ParentRef)]
+			if !ok {
+				return ApplyExecutionOperation{}, fmt.Errorf("unresolved parent_ref %q", payload.ParentRef)
+			}
+			parentID = &resolvedParentID
+		}
 
 		task, err := h.service.Create(ctx, issues.CreateTaskParams{
-			Title:       payload.Title,
-			Description: payload.Description,
-			Type:        taskType,
-			Priority:    priority,
-			ParentID:    payload.ParentID,
+			Title:           payload.Title,
+			Description:     payload.Description,
+			Type:            taskType,
+			Priority:        priority,
+			Implementations: payload.Implementations,
+			ParentID:        parentID,
 		})
 		if err != nil {
 			return ApplyExecutionOperation{}, err
 		}
 
 		operation.TaskID = task.ID.String()
+		operation.Ref = ref
 		operation.Task = &task
 		return operation, nil
 

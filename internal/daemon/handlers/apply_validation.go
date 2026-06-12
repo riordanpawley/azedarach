@@ -19,11 +19,14 @@ const (
 )
 
 type applyTaskCreateBody struct {
-	Title       string  `json:"title"`
-	Description string  `json:"description"`
-	Type        string  `json:"type"`
-	Priority    string  `json:"priority"`
-	ParentID    *string `json:"parent_id,omitempty"`
+	Title           string   `json:"title"`
+	Description     string   `json:"description"`
+	Type            string   `json:"type"`
+	Priority        string   `json:"priority"`
+	Implementations []string `json:"implementations,omitempty"`
+	ParentID        *string  `json:"parent_id,omitempty"`
+	Ref             string   `json:"ref,omitempty"`
+	ParentRef       string   `json:"parent_ref,omitempty"`
 }
 
 type applyTaskUpdateBody struct {
@@ -101,6 +104,7 @@ func ValidateApplyRequest(req protocol.ApplyRequestBody) error {
 	for i, op := range req.Operations {
 		diagnostics = append(diagnostics, validateApplyOperation(i, op)...)
 	}
+	diagnostics = append(diagnostics, createRefDiagnostics(req.Operations)...)
 
 	if len(diagnostics) > 0 {
 		return &protocol.ApplyValidationError{
@@ -111,6 +115,54 @@ func ValidateApplyRequest(req protocol.ApplyRequestBody) error {
 	}
 
 	return nil
+}
+
+func createRefDiagnostics(ops []protocol.ApplyOperationBody) []protocol.ApplyValidationDiagnostic {
+	seen := make(map[string]int)
+	diagnostics := make([]protocol.ApplyValidationDiagnostic, 0)
+	for i, op := range ops {
+		if op.Command != applyCommandTaskCreate || len(op.Body) == 0 || string(op.Body) == "null" {
+			continue
+		}
+		var payload applyTaskCreateBody
+		if err := json.Unmarshal(op.Body, &payload); err != nil {
+			continue
+		}
+		parentRef := strings.TrimSpace(payload.ParentRef)
+		if parentRef != "" {
+			if payload.ParentID != nil && strings.TrimSpace(*payload.ParentID) != "" {
+				diagnostics = append(diagnostics, protocol.ApplyValidationDiagnostic{
+					Index:   i,
+					Code:    protocol.ApplyValidationCodeInvalidOperationBody,
+					Field:   "parent_ref",
+					Message: "parent_id and parent_ref are mutually exclusive",
+				})
+			}
+			if _, ok := seen[parentRef]; !ok {
+				diagnostics = append(diagnostics, protocol.ApplyValidationDiagnostic{
+					Index:   i,
+					Code:    protocol.ApplyValidationCodeInvalidOperationBody,
+					Field:   "parent_ref",
+					Message: fmt.Sprintf("unresolved parent_ref %q", parentRef),
+				})
+			}
+		}
+		ref := strings.TrimSpace(payload.Ref)
+		if ref == "" {
+			continue
+		}
+		if previousIndex, ok := seen[ref]; ok {
+			diagnostics = append(diagnostics, protocol.ApplyValidationDiagnostic{
+				Index:   i,
+				Code:    protocol.ApplyValidationCodeInvalidOperationBody,
+				Field:   "ref",
+				Message: fmt.Sprintf("duplicate ref %q already used by operation %d", ref, previousIndex),
+			})
+			continue
+		}
+		seen[ref] = i
+	}
+	return diagnostics
 }
 
 func validateApplyOperation(index int, op protocol.ApplyOperationBody) []protocol.ApplyValidationDiagnostic {

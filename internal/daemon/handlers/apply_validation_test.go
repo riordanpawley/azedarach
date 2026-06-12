@@ -51,11 +51,11 @@ func TestValidateApplyRequest_InvalidTopLevel(t *testing.T) {
 		{
 			name: "schema version",
 			req: protocol.ApplyRequestBody{
-				SchemaVersion:    2,
+				SchemaVersion:    protocol.ApplySchemaVersion + 1,
 				SnapshotRevision: 1,
 				Operations:       []protocol.ApplyOperationBody{{Command: applyCommandTaskDelete, Body: mustApplyJSON(t, map[string]string{"task_id": "T-1"})}},
 			},
-			want: "unsupported apply schema version: 2",
+			want: "unsupported apply schema version: 3",
 		},
 		{
 			name: "snapshot revision",
@@ -183,6 +183,132 @@ func TestValidateApplyRequestRejectsStatusCloseMutation(t *testing.T) {
 	diag := vErr.Diagnostics[0]
 	if diag.Index != 0 || diag.Field != "status" || diag.Code != protocol.ApplyValidationCodeInvalidOperationBody || !strings.Contains(diag.Message, "task.close") {
 		t.Fatalf("diagnostic = %+v, want status task.close rejection", diag)
+	}
+}
+
+func TestValidateApplyRequestRejectsDuplicateCreateRefs(t *testing.T) {
+	req := protocol.ApplyRequestBody{
+		SchemaVersion:    protocol.ApplySchemaVersion,
+		SnapshotRevision: 99,
+		Operations: []protocol.ApplyOperationBody{
+			{
+				Command: applyCommandTaskCreate,
+				Body: mustApplyJSON(t, map[string]string{
+					"title":       "First",
+					"description": "One",
+					"type":        "task",
+					"priority":    "P2",
+					"ref":         "same",
+				}),
+			},
+			{
+				Command: applyCommandTaskCreate,
+				Body: mustApplyJSON(t, map[string]string{
+					"title":       "Second",
+					"description": "Two",
+					"type":        "task",
+					"priority":    "P2",
+					"ref":         " same ",
+				}),
+			},
+		},
+	}
+
+	err := ValidateApplyRequest(req)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	vErr, ok := err.(*protocol.ApplyValidationError)
+	if !ok {
+		t.Fatalf("error type = %T, want *protocol.ApplyValidationError", err)
+	}
+	if got, want := len(vErr.Diagnostics), 1; got != want {
+		t.Fatalf("Diagnostics len = %d, want %d", got, want)
+	}
+	diag := vErr.Diagnostics[0]
+	if diag.Index != 1 || diag.Field != "ref" || diag.Code != protocol.ApplyValidationCodeInvalidOperationBody || !strings.Contains(diag.Message, `duplicate ref "same" already used by operation 0`) {
+		t.Fatalf("diagnostic = %+v, want duplicate ref rejection", diag)
+	}
+}
+
+func TestValidateApplyRequestRejectsUnresolvedParentRef(t *testing.T) {
+	req := protocol.ApplyRequestBody{
+		SchemaVersion:    protocol.ApplySchemaVersion,
+		SnapshotRevision: 99,
+		DryRun:           true,
+		Operations: []protocol.ApplyOperationBody{{
+			Command: applyCommandTaskCreate,
+			Body: mustApplyJSON(t, map[string]string{
+				"title":       "Child",
+				"description": "Nested",
+				"type":        "task",
+				"priority":    "P2",
+				"parent_ref":  "missing",
+			}),
+		}},
+	}
+
+	err := ValidateApplyRequest(req)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	vErr, ok := err.(*protocol.ApplyValidationError)
+	if !ok {
+		t.Fatalf("error type = %T, want *protocol.ApplyValidationError", err)
+	}
+	if got, want := len(vErr.Diagnostics), 1; got != want {
+		t.Fatalf("Diagnostics len = %d, want %d", got, want)
+	}
+	diag := vErr.Diagnostics[0]
+	if diag.Index != 0 || diag.Field != "parent_ref" || diag.Code != protocol.ApplyValidationCodeInvalidOperationBody || !strings.Contains(diag.Message, `unresolved parent_ref "missing"`) {
+		t.Fatalf("diagnostic = %+v, want unresolved parent_ref rejection", diag)
+	}
+}
+
+func TestValidateApplyRequestRejectsParentIDAndParentRefTogether(t *testing.T) {
+	req := protocol.ApplyRequestBody{
+		SchemaVersion:    protocol.ApplySchemaVersion,
+		SnapshotRevision: 99,
+		DryRun:           true,
+		Operations: []protocol.ApplyOperationBody{
+			{
+				Command: applyCommandTaskCreate,
+				Body: mustApplyJSON(t, map[string]string{
+					"title":       "Parent",
+					"description": "Root",
+					"type":        "epic",
+					"priority":    "P2",
+					"ref":         "parent",
+				}),
+			},
+			{
+				Command: applyCommandTaskCreate,
+				Body: mustApplyJSON(t, map[string]string{
+					"title":       "Child",
+					"description": "Nested",
+					"type":        "task",
+					"priority":    "P2",
+					"parent_id":   "az-explicit",
+					"parent_ref":  "parent",
+				}),
+			},
+		},
+	}
+
+	err := ValidateApplyRequest(req)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	vErr, ok := err.(*protocol.ApplyValidationError)
+	if !ok {
+		t.Fatalf("error type = %T, want *protocol.ApplyValidationError", err)
+	}
+	if got, want := len(vErr.Diagnostics), 1; got != want {
+		t.Fatalf("Diagnostics len = %d, want %d", got, want)
+	}
+	diag := vErr.Diagnostics[0]
+	if diag.Index != 1 || diag.Field != "parent_ref" || diag.Code != protocol.ApplyValidationCodeInvalidOperationBody || !strings.Contains(diag.Message, "parent_id and parent_ref are mutually exclusive") {
+		t.Fatalf("diagnostic = %+v, want parent_id/parent_ref rejection", diag)
 	}
 }
 
