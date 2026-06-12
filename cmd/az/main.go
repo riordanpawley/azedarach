@@ -1032,7 +1032,7 @@ func validateTUILaunchContext() error {
 	if !config.IsAzedarachDevelopmentWorktree(cwd) || config.UseScopedDaemonRuntimeFor(cwd) {
 		return nil
 	}
-	return fmt.Errorf("refusing to start the TUI from an Azedarach development worktree while AZEDARACH_DAEMON_SCOPE=%q forces the shared production daemon; unset it or use AZEDARACH_DAEMON_SCOPE=worktree so this worktree can run its own azd", os.Getenv("AZEDARACH_DAEMON_SCOPE"))
+	return fmt.Errorf("refusing to start the TUI from an Azedarach development worktree while AZEDARACH_DAEMON_SCOPE=%q uses the shared production daemon; set AZEDARACH_DAEMON_SCOPE=worktree when intentionally testing this worktree's azd", os.Getenv("AZEDARACH_DAEMON_SCOPE"))
 }
 
 func isLinkedGitWorktree(startDir string) bool {
