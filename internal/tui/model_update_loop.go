@@ -1450,6 +1450,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, m.scheduleIssuesRefreshCmd()
 
+	case closeCleanupConfirmPreflightMsg:
+		pending := msg.pending
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Close preflight refresh failed: %v", msg.err),
+				Expires: time.Now().Add(6 * time.Second),
+			})
+			return m, nil
+		}
+		pending.summaries = msg.summaries
+		if reason := pendingCloseCleanupBlockedReason(pending); reason != "" {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: reason,
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		if len(pending.taskIDs) > 0 {
+			m.beginMutationFeedback(fmt.Sprintf("Bulk close queued for %d task(s)", len(pending.taskIDs)))
+			if pending.bulkMode == "move" {
+				return m, m.bulkMoveStatusCmd(pending.taskIDs, pending.delta)
+			}
+			return m, m.bulkSetStatusCmd(pending.taskIDs, pending.targetStatus)
+		}
+		m.beginTaskStatusMoveFeedback(pending.taskID, pending.previousStatus, pending.targetStatus)
+		return m, m.moveTaskStatusCmd(pending.taskID, pending.previousStatus, pending.targetStatus)
+
 	case bulkStatusResultMsg:
 		m.loading = false
 		if msg.err != nil {

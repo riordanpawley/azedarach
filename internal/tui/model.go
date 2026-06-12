@@ -3008,6 +3008,12 @@ type pendingCloseCleanupConfirmation struct {
 	summaries      []closeCleanupTaskSummary
 }
 
+type closeCleanupConfirmPreflightMsg struct {
+	pending   pendingCloseCleanupConfirmation
+	summaries []closeCleanupTaskSummary
+	err       error
+}
+
 type closeCleanupTaskSummary struct {
 	taskID      string
 	hasWorktree bool
@@ -4382,12 +4388,43 @@ func (m Model) confirmCloseCleanupCmd(pending pendingCloseCleanupConfirmation) t
 	return m.openOverlay(overlay.NewConfirmDialogExplicitYN(title, formatCloseCleanupConfirmPrompt(pending)))
 }
 
+func (m Model) confirmCloseCleanupPreflightCmd(pending pendingCloseCleanupConfirmation) tea.Cmd {
+	return func() tea.Msg {
+		msg := closeCleanupConfirmPreflightMsg{pending: pending}
+		if m.daemonClient == nil {
+			msg.err = fmt.Errorf("daemon client unavailable")
+			return msg
+		}
+
+		taskIDs := pendingCloseCleanupTargetIDs(pending)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if len(taskIDs) > 0 {
+			if _, err := m.daemonClient.ReconcileRuntimeIssues(ctx, taskIDs); err != nil {
+				msg.err = err
+				return msg
+			}
+		}
+		snapshot, err := m.readTaskSnapshot(ctx, m.daemonClient)
+		if err != nil {
+			msg.err = err
+			return msg
+		}
+		msg.summaries = closeCleanupSummariesFromTasks(snapshot.Tasks, taskIDs)
+		return msg
+	}
+}
+
 func (m Model) closeCleanupSummaries(taskIDs []string) []closeCleanupTaskSummary {
+	return closeCleanupSummariesFromTasks(m.tasks, taskIDs)
+}
+
+func closeCleanupSummariesFromTasks(tasks []domain.Task, taskIDs []string) []closeCleanupTaskSummary {
 	if len(taskIDs) == 0 {
 		return nil
 	}
-	byID := make(map[string]domain.Task, len(m.tasks))
-	for _, task := range m.tasks {
+	byID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
 		byID[taskIDKey(task.ID.String())] = task
 	}
 	summaries := make([]closeCleanupTaskSummary, 0, len(taskIDs))
@@ -4454,11 +4491,56 @@ func formatCloseCleanupConfirmPrompt(pending pendingCloseCleanupConfirmation) st
 	lines = append(lines,
 		"",
 		"This may merge into the closest ancestor worktree branch, stop active sessions, and remove issue worktrees before closing.",
-		"Close guards still block dirty, ahead, conflicted, unmerged, or unresolved child work.",
+		"Dirty or conflicted worktrees must be cleaned before close; daemon guards still block unmerged or unresolved child work.",
 		"",
 		"Proceed?",
 	)
 	return strings.Join(lines, "\n")
+}
+
+func pendingCloseCleanupBlockedReason(pending pendingCloseCleanupConfirmation) string {
+	summaries := pending.summaries
+	if len(summaries) == 0 {
+		return ""
+	}
+	blocked := make([]string, 0, len(summaries))
+	for _, summary := range summaries {
+		if !summary.dirty && !summary.conflicted {
+			continue
+		}
+		state := "dirty"
+		if summary.conflicted {
+			state = "conflicted"
+		}
+		if summary.dirty && summary.conflicted {
+			state = "dirty/conflicted"
+		}
+		if summary.taskID == "" {
+			blocked = append(blocked, state)
+			continue
+		}
+		blocked = append(blocked, fmt.Sprintf("%s %s", summary.taskID, state))
+	}
+	if len(blocked) == 0 {
+		return ""
+	}
+	if len(blocked) > 3 {
+		blocked = append(blocked[:3], fmt.Sprintf("%d more", len(blocked)-3))
+	}
+	return "Close blocked: clean up dirty/conflicted worktree state first (" + strings.Join(blocked, ", ") + ")"
+}
+
+func pendingCloseCleanupTargetIDs(pending pendingCloseCleanupConfirmation) []string {
+	switch {
+	case len(pending.closeTaskIDs) > 0:
+		return append([]string(nil), pending.closeTaskIDs...)
+	case len(pending.taskIDs) > 0:
+		return append([]string(nil), pending.taskIDs...)
+	case strings.TrimSpace(pending.taskID) != "":
+		return []string{strings.TrimSpace(pending.taskID)}
+	default:
+		return nil
+	}
 }
 
 func formatCloseCleanupGitStateLines(summaries []closeCleanupTaskSummary, targetCount int, bulk bool) []string {
