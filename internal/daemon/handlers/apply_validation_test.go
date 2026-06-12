@@ -51,11 +51,11 @@ func TestValidateApplyRequest_InvalidTopLevel(t *testing.T) {
 		{
 			name: "schema version",
 			req: protocol.ApplyRequestBody{
-				SchemaVersion:    2,
+				SchemaVersion:    protocol.ApplySchemaVersion + 1,
 				SnapshotRevision: 1,
 				Operations:       []protocol.ApplyOperationBody{{Command: applyCommandTaskDelete, Body: mustApplyJSON(t, map[string]string{"task_id": "T-1"})}},
 			},
-			want: "unsupported apply schema version: 2",
+			want: "unsupported apply schema version: 3",
 		},
 		{
 			name: "snapshot revision",

@@ -9,7 +9,7 @@ import (
 const CommandTaskBulkApply = "task.bulk.apply"
 
 // ApplySchemaVersion identifies the apply payload schema contract.
-const ApplySchemaVersion uint16 = 1
+const ApplySchemaVersion uint16 = 2
 
 // ApplyRequestBody is the JSON request payload for bulk apply operations.
 type ApplyRequestBody struct {

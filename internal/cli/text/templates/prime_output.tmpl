@@ -16,7 +16,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - `az issue update`: use `--update-impl` only when changing implementation assignments; status/title/notes updates do not need it.
   - Status semantics: use `open` for not-yet-active work, `in_progress` while actively working, `in_review` when implementation is complete and waiting for human/orchestrator review or integration, and `closed` only after acceptance/integration is complete.
   - Blocked is not an issue status. Represent blocked work with dependency edges (`az issue dep add <blocked-issue> <blocker-issue> --type blocks`) and record blocker evidence in issue notes or mailbox events.
-  - `az issue bulk-create --input issues.json --json`, `az issue bulk-update --input updates.json --json`, `az issue update <issue-id> --design "..."`, `az issue update <issue-id> --notes "..."`, `az issue update <issue-id> --append-notes "..."`
+  - `az issue bulk-create --input issues.json --json` (create many issues, epics, or nested `children` trees from JSON when shaping a graph up front), `az issue bulk-update --input updates.json --json`, `az issue update <issue-id> --design "..."`, `az issue update <issue-id> --notes "..."`, `az issue update <issue-id> --append-notes "..."`
   - Issue dependency graph:
   - `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from|created-in] [--json]`, `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--json]`
   - Issue graph/root membership comes only from auto-parenting with `AZEDARACH_ISSUE_ID` or explicit `parent-child` dependency edges. `--impl` is implementation metadata only; it never attaches an issue to a graph/root.
