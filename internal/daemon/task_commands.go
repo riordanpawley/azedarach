@@ -352,9 +352,11 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task get requested", "project_id", projectID, "task_id", taskID)
 	}
-	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil && d.cfg.Logger != nil {
+	refreshSessionStartedAt := time.Now()
+	if err := d.refreshIssueSessionRuntimeState(ctx, projectID, []string{taskID}); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Debug("task get session runtime refresh failed", "project_id", projectID, "task_id", taskID, "error", err)
 	}
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.issue_session_refresh", refreshSessionStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
 	refreshIssueStartedAt := time.Now()
 	d.refreshIssueWorktreeState(ctx, projectID, taskID)
 	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.issue_worktree_refresh", refreshIssueStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
@@ -412,6 +414,11 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task get-many requested", "project_id", projectID, "task_count", len(taskIDs))
 	}
+	refreshSessionStartedAt := time.Now()
+	if err := d.refreshIssueSessionRuntimeState(ctx, projectID, taskIDs); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("task get-many session runtime refresh failed", "project_id", projectID, "task_count", len(taskIDs), "error", err)
+	}
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get_many.issue_session_refresh", refreshSessionStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(taskIDs))
 	for _, taskID := range taskIDs {
 		d.refreshIssueWorktreeState(ctx, projectID, taskID)
 	}

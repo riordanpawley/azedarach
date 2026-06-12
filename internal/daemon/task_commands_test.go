@@ -3427,7 +3427,7 @@ func TestHandleTaskSnapshotExportUsesProjectionSessions(t *testing.T) {
 	}
 }
 
-func TestHandleTaskGetRefreshesOnlyRequestedIssueWorktree(t *testing.T) {
+func TestHandleTaskGetTriggersOnlyRequestedIssueWorktreeRefreshAsync(t *testing.T) {
 	ctx := context.Background()
 	projectID := protocol.DefaultProjectID
 	repoDir := t.TempDir()
@@ -3533,18 +3533,11 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueWorktree(t *testing.T) {
 		t.Fatal("timed out waiting for target issue worktree refresh")
 	}
 
-	select {
-	case result := <-resultCh:
-		t.Fatalf("task.get returned before git status refresh completed: %+v", result.resp)
-	case <-time.After(100 * time.Millisecond):
-	}
-	close(statusRelease)
-
 	var result taskGetResult
 	select {
 	case result = <-resultCh:
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for task.get result after git status refresh")
+		t.Fatal("task.get did not return while git status refresh was still running")
 	}
 	if result.err != nil {
 		t.Fatalf("handleTaskGet returned error: %v", result.err)
@@ -3560,17 +3553,119 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueWorktree(t *testing.T) {
 	if len(payload.Tasks) != 1 {
 		t.Fatalf("response task count = %d, want 1", len(payload.Tasks))
 	}
-	if !payload.Tasks[0].HasUncommittedChanges {
-		t.Fatalf("response task git state was not refreshed: %+v", payload.Tasks[0])
-	}
-	if payload.Tasks[0].GitAdditions != 1 {
-		t.Fatalf("response git additions = %d, want 1", payload.Tasks[0].GitAdditions)
-	}
+	close(statusRelease)
 
 	select {
 	case got := <-statusPaths:
 		t.Fatalf("unexpected extra worktree refresh for %q", got)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
+	ctx := context.Background()
+	projectID := protocol.DefaultProjectID
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	targetID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "target issue",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create target issue: %v", err)
+	}
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+
+	targetSessionID := naming.CanonicalSessionID(projectID, targetID)
+	targetUpdatedAt := time.Date(2026, time.April, 2, 10, 0, 0, 0, time.UTC)
+	if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            targetSessionID,
+		IssueID:       targetID,
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateStopped,
+		UpdatedAt:     targetUpdatedAt,
+	}); err != nil {
+		t.Fatalf("seed target session state: %v", err)
+	}
+
+	otherUpdatedAt := time.Date(2026, time.April, 2, 9, 0, 0, 0, time.UTC)
+	for i := 0; i < 25; i++ {
+		issueID := fmt.Sprintf("other-%02d", i)
+		if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			ID:            naming.CanonicalSessionID(projectID, issueID),
+			IssueID:       issueID,
+			State:         daemonstate.SessionStateStopped,
+			ObservedState: daemonstate.SessionStateStopped,
+			UpdatedAt:     otherUpdatedAt,
+		}); err != nil {
+			t.Fatalf("seed other session state %d: %v", i, err)
+		}
+	}
+
+	tmuxRunner := newTestTmuxRunner(targetSessionID)
+	d := &Daemon{
+		cfg:    Config{Logger: slog.Default()},
+		issues: issuesClient,
+		tmux:   tmux.NewClient(tmuxRunner, slog.Default()),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+	}
+
+	reqBody, err := json.Marshal(map[string]string{"task_id": targetID})
+	if err != nil {
+		t.Fatalf("marshal task get request: %v", err)
+	}
+	resp, err := d.handleTaskGet(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-get-session-refresh",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.get",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            reqBody,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskGet returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.get response not OK: %+v", resp.Error)
+	}
+
+	targetSession, found, err := store.GetSessionState(ctx, projectID, targetSessionID)
+	if err != nil {
+		t.Fatalf("load target session state: %v", err)
+	}
+	if !found {
+		t.Fatal("target session state missing")
+	}
+	if targetSession.ObservedState != daemonstate.SessionStateRunning {
+		t.Fatalf("target observed state = %s, want running", targetSession.ObservedState)
+	}
+	if !targetSession.UpdatedAt.After(targetUpdatedAt) {
+		t.Fatalf("target updated_at = %s, want after %s", targetSession.UpdatedAt, targetUpdatedAt)
+	}
+
+	sessions, err := store.ListSessionStates(ctx, projectID)
+	if err != nil {
+		t.Fatalf("list session states: %v", err)
+	}
+	for _, session := range sessions {
+		if session.ID == targetSessionID {
+			continue
+		}
+		if !session.UpdatedAt.Equal(otherUpdatedAt) {
+			t.Fatalf("unrelated session %s updated_at = %s, want unchanged %s", session.ID, session.UpdatedAt, otherUpdatedAt)
+		}
 	}
 }
 

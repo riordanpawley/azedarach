@@ -1170,9 +1170,7 @@ func (d *Daemon) refreshIssueWorktreeState(ctx context.Context, projectID, issue
 	if !found || strings.TrimSpace(projection.Path) == "" {
 		return
 	}
-	refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if _, err := d.gitStatusAdapter.refreshGitStatusManual(refreshCtx, projectID, projection.Path); err != nil && d.cfg.Logger != nil {
+	if _, err := d.gitStatusAdapter.queueGitStatusRefresh(projectID, projection.Path, reconcilePriorityVisible, "issue-read"); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Debug("issue worktree refresh failed", "project_id", projectID, "issue_id", issueID, "worktree", projection.Path, "error", err)
 	}
 }
