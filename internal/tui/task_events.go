@@ -59,6 +59,8 @@ func (m *Model) applyTaskEvent(evt protocol.EventEnvelope) bool {
 	m.syncProjectionIndexesFromTasks()
 	m.applyPendingStatusOverlays()
 	m.reconcilePendingStatuses()
+	m.reconcilePendingTaskDetails()
+	m.applyPendingTaskDetailOverlays()
 	m.reconcilePendingOperations()
 	m.editor.ReconcileSelection(m.tasks)
 	m.applyPendingCreatedTaskSelection()

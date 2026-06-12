@@ -1,5 +1,5 @@
 ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│Create New Task                                                                                                     │
+│Edit Task                                                                                                           │
 │────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
 ││ Title: > Replace top level functions                                        Actions                               │
 ││ Description:                                                                ──────────────────────────────────────│
@@ -10,7 +10,7 @@
 ││ ┃                                                                            h/l or ←/→ Cycle impl combinations   │
 ││ ┃                                                                            Ctrl+P Paste image                   │
 ││ ┃                                                                            j/k + d Manage attachments           │
-││ ┃                                                                            Enter Create task                    │
+││ ┃                                                                            Enter Save Task                      │
 ││ ┃                                                                            Ctrl+E Edit in $EDITOR               │
 ││ ┃                                                                            Ctrl+K Clear form                    │
 ││ ┃                                                                            Esc Cancel                           │

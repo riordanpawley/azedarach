@@ -291,6 +291,85 @@ func TestSaveTaskCmdUpdatesEditedDescriptionThroughDaemon(t *testing.T) {
 	}
 }
 
+func TestEditedTaskDetailsStayVisibleAcrossStaleHydration(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskUpdate {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskUpdate)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				Meta:            req.Meta,
+				OK:              true,
+				CompletedAt:     req.SentAt,
+			}, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{
+		ID:          "az-1",
+		Title:       "Original title",
+		Description: "Original description",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+		Status:      domain.StatusOpen,
+	}}
+
+	submitted, saveCmd := m.Update(overlay.TaskCreatedMsg{
+		ID:          "az-1",
+		Title:       "Original title",
+		Description: "Edited description from workspace form",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+	})
+	if saveCmd == nil {
+		t.Fatal("expected save command")
+	}
+	result := saveCmd()
+	updatedAny, _ := submitted.Update(result)
+	updated := updatedAny.(Model)
+	if got := updated.tasks[0].Description; got != "Edited description from workspace form" {
+		t.Fatalf("description after save result = %q, want edited description", got)
+	}
+
+	staleAny, _ := updated.Update(issuesLoadedMsg{
+		tasks: []domain.Task{{
+			ID:          "az-1",
+			Title:       "Original title",
+			Description: "Original description",
+			Type:        domain.TypeTask,
+			Priority:    domain.P2,
+			Status:      domain.StatusOpen,
+		}},
+		revision: 42,
+	})
+	stale := staleAny.(Model)
+	if got := stale.tasks[0].Description; got != "Edited description from workspace form" {
+		t.Fatalf("description after stale hydration = %q, want edited description", got)
+	}
+
+	confirmedAny, _ := stale.Update(issuesLoadedMsg{
+		tasks: []domain.Task{{
+			ID:          "az-1",
+			Title:       "Original title",
+			Description: "Edited description from workspace form",
+			Type:        domain.TypeTask,
+			Priority:    domain.P2,
+			Status:      domain.StatusOpen,
+		}},
+		revision: 43,
+	})
+	confirmed := confirmedAny.(Model)
+	if got := confirmed.tasks[0].Description; got != "Edited description from workspace form" {
+		t.Fatalf("description after confirmed hydration = %q, want edited description", got)
+	}
+	if _, ok := confirmed.pendingDetails[taskIDKey("az-1")]; ok {
+		t.Fatal("expected pending detail overlay to clear after confirmed hydration")
+	}
+}
+
 func mustMarshalTaskListSnapshot(t *testing.T, protocolVersion protocol.Version, revision uint64, projectID string, tasks []domain.Task) []byte {
 	t.Helper()
 	body, err := json.Marshal(protocol.TaskListSnapshotPayload{

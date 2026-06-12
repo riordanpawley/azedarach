@@ -1200,6 +1200,24 @@ func TestActionSelectionCOpensCreateOverlay(t *testing.T) {
 	}
 }
 
+func TestActionModeEOpensEditOverlay(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterAction()
+	m.nav.SelectTask("az-1", 0)
+
+	result, _ := m.handleActionMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	newModel := result.(Model)
+
+	current := newModel.overlayStack.Current()
+	editOverlay, ok := current.(*overlay.CreateTaskOverlay)
+	if !ok {
+		t.Fatalf("expected edit CreateTaskOverlay from action-mode e, got %T", current)
+	}
+	if got := editOverlay.Title(); got != "Edit Task" {
+		t.Fatalf("overlay title = %q, want Edit Task", got)
+	}
+}
+
 func TestTaskWorkspaceCreateChildKeepsWorkspaceBehindForm(t *testing.T) {
 	m := newTestModel()
 	m.editor.EnterNormal()

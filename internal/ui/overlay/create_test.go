@@ -45,6 +45,21 @@ func TestCreateTaskOverlayTitle(t *testing.T) {
 	assert.Equal(t, "Create New Task", overlay.Title())
 }
 
+func TestEditTaskOverlayTitleAndSubmitLabel(t *testing.T) {
+	overlay := NewEditTaskOverlay(domain.Task{
+		ID:          "az-1",
+		Title:       "Existing task",
+		Description: "Existing description",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+	})
+
+	assert.Equal(t, "Edit Task", overlay.Title())
+	assert.Equal(t, "Save Task", overlay.submitLabel())
+	assert.Contains(t, overlay.View(), "Save Task")
+	assert.NotContains(t, overlay.View(), "Create Task")
+}
+
 func TestCreateTaskOverlaySize(t *testing.T) {
 	overlay := NewCreateTaskOverlay()
 	width, height := overlay.Size()
@@ -313,6 +328,34 @@ func TestCreateTaskOverlaySubmitWithDescription(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "Test Task", taskMsg.Title)
 	assert.Equal(t, "This is a test description", taskMsg.Description)
+}
+
+func TestEditTaskOverlayTabEnterSubmitsEditedDescription(t *testing.T) {
+	overlay := NewEditTaskOverlay(domain.Task{
+		ID:          "az-1",
+		Title:       "Existing task",
+		Description: "Original description",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+		Status:      domain.StatusOpen,
+	})
+	overlay.focusIndex = focusDescription
+	overlay.description.Focus()
+	overlay.description.SetValue("Edited description")
+
+	_, tabCmd := overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
+	require.Nil(t, tabCmd)
+	assert.Equal(t, focusType, overlay.focusIndex)
+
+	_, submitCmd := overlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	require.NotNil(t, submitCmd)
+
+	msgs := batchToSlice(submitCmd())
+	require.Len(t, msgs, 2)
+	taskMsg, ok := msgs[0].(TaskCreatedMsg)
+	require.True(t, ok)
+	assert.Equal(t, "az-1", taskMsg.ID)
+	assert.Equal(t, "Edited description", taskMsg.Description)
 }
 
 func TestCreateTaskOverlayDescriptionAcceptsInputAfterLargePaste(t *testing.T) {

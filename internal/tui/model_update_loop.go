@@ -216,6 +216,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncProjectionIndexesFromTasks()
 		m.applyPendingStatusOverlays()
 		m.reconcilePendingStatuses()
+		m.reconcilePendingTaskDetails()
+		m.applyPendingTaskDetailOverlays()
 		m.reconcilePendingOperations()
 		m.editor.ReconcileSelection(m.tasks)
 		m.applyPendingCreatedTaskSelection()
@@ -958,6 +960,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tasks[i].Session = cloneSession(m.tasks[i].Session)
 		}
 		m.syncProjectionIndexesFromTasks()
+		m.reconcilePendingTaskDetails()
+		m.applyPendingTaskDetailOverlays()
 		m.editor.ReconcileSelection(tasks)
 		m.applyPendingCreatedTaskSelection()
 		m.taskSnapshotCheckedAt = msg.lastCheckedAt
@@ -1044,7 +1048,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Clear persisted create-draft state only after successful new-task creation.
 		// Updates from edit overlays must not clear the "new task" draft cache.
-		if !msg.isUpdate {
+		if msg.isUpdate {
+			if msg.updateDetails != nil {
+				m.markPendingTaskDetails(msg.taskID, *msg.updateDetails)
+				m.applyPendingTaskDetailOverlays()
+				m.syncProjectionIndexesFromTasks()
+				m.reconcileCursorAfterIssuesRefresh()
+				m.syncTaskWorkspaceOverlay()
+			}
+		} else {
 			m.createTaskOverlay = nil
 			if taskID := strings.TrimSpace(msg.taskID); taskID != "" {
 				m.pendingCreatedTaskID = taskID
@@ -1059,9 +1071,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		message := fmt.Sprintf("Task created: %s", msg.taskID)
+		if msg.isUpdate {
+			message = fmt.Sprintf("Task saved: %s", msg.taskID)
+		}
 		m.addToast(Toast{
 			Level:   ToastSuccess,
-			Message: fmt.Sprintf("Task created: %s", msg.taskID),
+			Message: message,
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		if strings.TrimSpace(msg.attachmentWarning) != "" {
