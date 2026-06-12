@@ -11,6 +11,7 @@ import (
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
 func TestMigrateLegacyRuntimeStateCopiesRowsToProjectScopedStore(t *testing.T) {
@@ -97,6 +98,57 @@ func TestMigrateLegacyRuntimeStateCopiesRowsToProjectScopedStore(t *testing.T) {
 	}
 }
 
+func TestStoreRoutersReuseBaseRepoHandlesForLinkedWorktreeRoutes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", "")
+
+	baseRepo := newRuntimeRouterTestRepo(t, "base")
+	worktree := newRuntimeRouterLinkedWorktree(t, baseRepo, "wt")
+	registry := &appconfig.ProjectsRegistry{
+		Projects: []appconfig.Project{
+			{Name: "linked-worktree", Path: worktree},
+		},
+	}
+	if err := appconfig.SaveProjectsRegistry(registry); err != nil {
+		t.Fatalf("save projects registry: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	issueClient := issues.NewClient(baseRepo, logger)
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStore(baseRepo, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir: baseRepo,
+			Logger:  logger,
+		},
+		issues: issueClient,
+		issueClientsByRoot: map[string]*issues.Client{
+			daemonStoreRootKey(baseRepo): issueClient,
+		},
+		issueClientsByProject: map[string]*issues.Client{},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			daemonStoreRootKey(baseRepo): runtimeStore,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{},
+	}
+
+	if got := d.issueClientForProject("linked-worktree"); got != issueClient {
+		t.Fatalf("issue client = %p, want base client %p", got, issueClient)
+	}
+	if got := d.runtimeStateStoreForProject("linked-worktree"); got != runtimeStore {
+		t.Fatalf("runtime store = %p, want base store %p", got, runtimeStore)
+	}
+	if len(d.issueClientsByRoot) != 1 {
+		t.Fatalf("issueClientsByRoot len = %d, want 1", len(d.issueClientsByRoot))
+	}
+	if len(d.runtimeStoresByRoot) != 1 {
+		t.Fatalf("runtimeStoresByRoot len = %d, want 1", len(d.runtimeStoresByRoot))
+	}
+}
+
 func newRuntimeRouterTestRepo(t *testing.T, name string) string {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), name)
@@ -104,4 +156,20 @@ func newRuntimeRouterTestRepo(t *testing.T, name string) string {
 		t.Fatalf("mkdir .git: %v", err)
 	}
 	return root
+}
+
+func newRuntimeRouterLinkedWorktree(t *testing.T, baseRepo, name string) string {
+	t.Helper()
+	worktree := filepath.Join(filepath.Dir(baseRepo), name)
+	if err := os.MkdirAll(filepath.Join(baseRepo, ".git", "worktrees", name), 0o755); err != nil {
+		t.Fatalf("mkdir worktree git dir: %v", err)
+	}
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	gitDir := filepath.Join(baseRepo, ".git", "worktrees", name)
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o644); err != nil {
+		t.Fatalf("write worktree git pointer: %v", err)
+	}
+	return worktree
 }

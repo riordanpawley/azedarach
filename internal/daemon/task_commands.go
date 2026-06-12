@@ -1085,6 +1085,9 @@ func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvel
 		ParentID:        cmd.ParentID,
 	})
 	if err != nil {
+		if issues.IsSQLiteBusy(err) {
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
+		}
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	taskID := task.ID.String()

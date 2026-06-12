@@ -279,12 +279,12 @@ func New(cfg Config) *Daemon {
 	} else if repoName := protocol.NormalizeProjectID(filepath.Base(strings.TrimSpace(cfg.RepoDir))); repoName != "" {
 		canonicalProjectID = repoName
 	}
-	d.issueClientsByRoot[strings.TrimSpace(cfg.RepoDir)] = issuesClient
+	d.issueClientsByRoot[daemonStoreRootKey(cfg.RepoDir)] = issuesClient
 	d.issueClientsByProject[canonicalProjectID] = issuesClient
 	baseWorktreeManager := git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger)
 	d.worktreeManagersByRoot[strings.TrimSpace(cfg.RepoDir)] = baseWorktreeManager
 	d.worktreeManagersByProject[canonicalProjectID] = baseWorktreeManager
-	d.runtimeStoresByRoot[strings.TrimSpace(runtimeRepoDir)] = runtimeStateStore
+	d.runtimeStoresByRoot[daemonStoreRootKey(runtimeRepoDir)] = runtimeStateStore
 	d.runtimeStoresByProject[canonicalProjectID] = runtimeStateStore
 	specService.daemon = d
 	specHandler := daemonhandlers.NewSpecHandler(specService)

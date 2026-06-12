@@ -57,7 +57,7 @@ func marshalTaskListBodyForProject(projectID string, tasks []domain.Task) ([]byt
 	})
 }
 
-func TestNewDependenciesAtUsesBaseProjectAndWorktreeRuntimeForLinkedWorktree(t *testing.T) {
+func TestNewDependenciesAtUsesBaseProjectAndGlobalRuntimeForLinkedWorktree(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
 	worktree := filepath.Join(base, "wt")
@@ -84,8 +84,8 @@ func TestNewDependenciesAtUsesBaseProjectAndWorktreeRuntimeForLinkedWorktree(t *
 	if deps.RepoDir != repo {
 		t.Fatalf("RepoDir = %q, want %q", deps.RepoDir, repo)
 	}
-	if deps.RuntimeRepoDir != worktree {
-		t.Fatalf("RuntimeRepoDir = %q, want %q", deps.RuntimeRepoDir, worktree)
+	if deps.RuntimeRepoDir != repo {
+		t.Fatalf("RuntimeRepoDir = %q, want %q", deps.RuntimeRepoDir, repo)
 	}
 	wantProjectID, err := config.ProjectIDForRoot(repo)
 	if err != nil {
@@ -94,12 +94,12 @@ func TestNewDependenciesAtUsesBaseProjectAndWorktreeRuntimeForLinkedWorktree(t *
 	if deps.ProjectID != wantProjectID {
 		t.Fatalf("ProjectID = %q, want %q", deps.ProjectID, wantProjectID)
 	}
-	if deps.DaemonSocket != config.ScopedDaemonSocketPath(start) {
-		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.ScopedDaemonSocketPath(start))
+	if deps.DaemonSocket != config.GlobalDaemonSocketPath() {
+		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.GlobalDaemonSocketPath())
 	}
 }
 
-func TestNewDependenciesAtUsesScopedRuntimeForLinkedWorktreeWithoutEnv(t *testing.T) {
+func TestNewDependenciesAtUsesGlobalRuntimeForLinkedWorktreeWithoutEnv(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
 	worktree := filepath.Join(base, "wt")
@@ -125,15 +125,15 @@ func TestNewDependenciesAtUsesScopedRuntimeForLinkedWorktreeWithoutEnv(t *testin
 	if err != nil {
 		t.Fatalf("NewDependenciesAt() error = %v", err)
 	}
-	if deps.DaemonSocket != config.ScopedDaemonSocketPath(start) {
-		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.ScopedDaemonSocketPath(start))
+	if deps.DaemonSocket != config.GlobalDaemonSocketPath() {
+		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.GlobalDaemonSocketPath())
 	}
-	if deps.RuntimeRepoDir != worktree {
-		t.Fatalf("RuntimeRepoDir = %q, want %q", deps.RuntimeRepoDir, worktree)
+	if deps.RuntimeRepoDir != repo {
+		t.Fatalf("RuntimeRepoDir = %q, want %q", deps.RuntimeRepoDir, repo)
 	}
 }
 
-func TestNewDependenciesAtUsesScopedSocketForLinkedWorktreeByDefault(t *testing.T) {
+func TestNewDependenciesAtUsesScopedSocketForLinkedWorktreeWhenExplicit(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
 	worktree := filepath.Join(base, "wt")
@@ -153,7 +153,7 @@ func TestNewDependenciesAtUsesScopedSocketForLinkedWorktreeByDefault(t *testing.
 	}
 
 	t.Setenv("PATH", "")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
 	deps, err := NewDependenciesAt(config.DefaultConfig(), start)
 	if err != nil {

@@ -1890,6 +1890,50 @@ func TestClient_CreateWaitsForWriteLockAndSucceedsWithinBusyTimeout(t *testing.T
 	assert.GreaterOrEqual(t, time.Since(start), 200*time.Millisecond)
 }
 
+func TestClient_CreateRetriesAfterSQLiteBusyTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	client := newTestClient(t)
+	_, err := client.Create(ctx, CreateTaskParams{
+		Title:    "warmup",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+
+	lockDB, err := sql.Open("sqlite", "file:"+client.dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lockDB.Close() })
+
+	_, err = lockDB.Exec(`BEGIN IMMEDIATE`)
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		_, createErr := client.Create(ctx, CreateTaskParams{
+			Title:    "retry-after-busy",
+			Type:     domain.TypeTask,
+			Priority: domain.P3,
+		})
+		done <- createErr
+	}()
+
+	time.Sleep(5500 * time.Millisecond)
+	_, err = lockDB.Exec(`COMMIT`)
+	require.NoError(t, err)
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("create did not complete after retrying past busy timeout")
+	}
+
+	assert.GreaterOrEqual(t, time.Since(start), 5*time.Second)
+}
+
 func newTestClient(t *testing.T) *Client {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "issues.db")

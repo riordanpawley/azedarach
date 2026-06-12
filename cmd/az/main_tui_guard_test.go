@@ -8,14 +8,18 @@ import (
 	"testing"
 )
 
-func TestValidateTUILaunchContextAllowsLinkedWorktreeWithDefaultScopedDaemon(t *testing.T) {
+func TestValidateTUILaunchContextRejectsLinkedWorktreeWithDefaultGlobalDaemon(t *testing.T) {
 	_, worktree := makeLinkedWorktree(t)
 	t.Chdir(worktree)
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
 	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
 
-	if err := validateTUILaunchContext(); err != nil {
-		t.Fatalf("validateTUILaunchContext() error = %v, want nil", err)
+	err := validateTUILaunchContext()
+	if err == nil {
+		t.Fatal("validateTUILaunchContext() error = nil, want default-global linked-worktree guard")
+	}
+	if !strings.Contains(err.Error(), "uses the shared production daemon") {
+		t.Fatalf("error = %q, want shared production daemon guidance", err)
 	}
 }
 
@@ -28,7 +32,7 @@ func TestValidateTUILaunchContextRejectsLinkedWorktreeWithForcedGlobalScope(t *t
 	if err == nil {
 		t.Fatal("validateTUILaunchContext() error = nil, want forced-global linked-worktree guard")
 	}
-	if !strings.Contains(err.Error(), "forces the shared production daemon") {
+	if !strings.Contains(err.Error(), "uses the shared production daemon") {
 		t.Fatalf("error = %q, want shared production daemon guidance", err)
 	}
 }

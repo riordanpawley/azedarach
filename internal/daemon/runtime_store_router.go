@@ -33,13 +33,21 @@ func (d *Daemon) runtimeStateStoreForProject(projectID string) *daemonstate.Runt
 	if strings.TrimSpace(repoDir) == "" {
 		return nil
 	}
+	repoKey := daemonStoreRootKey(repoDir)
 	if store, ok := d.runtimeStoresByRoot[repoDir]; ok && store != nil {
+		d.runtimeStoresByProject[projectID] = store
+		if repoKey != repoDir {
+			d.runtimeStoresByRoot[repoKey] = store
+		}
+		return store
+	}
+	if store, ok := d.runtimeStoresByRoot[repoKey]; ok && store != nil {
 		d.runtimeStoresByProject[projectID] = store
 		return store
 	}
 
 	store := daemonstate.NewRuntimeStateStore(repoDir, d.cfg.Logger)
-	d.runtimeStoresByRoot[repoDir] = store
+	d.runtimeStoresByRoot[repoKey] = store
 	d.runtimeStoresByProject[projectID] = store
 	return store
 }

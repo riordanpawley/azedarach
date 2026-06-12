@@ -102,7 +102,34 @@ func TestNewLauncherNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 	}
 }
 
-func TestNewLauncherKeepsLinkedWorktreeRootByDefault(t *testing.T) {
+func TestNewLauncherKeepsLinkedWorktreeRootForExplicitScopedRuntime(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "wt")
+
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo worktrees): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module github.com/riordanpawley/azedarach\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(go.mod): %v", err)
+	}
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree .git): %v", err)
+	}
+
+	t.Setenv("PATH", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
+	launcher := NewLauncher(filepath.Join(worktree, "go-bubbletea"), filepath.Join(base, "daemon.sock"))
+	if launcher.RepoDir != worktree {
+		t.Fatalf("launcher.RepoDir = %q, want %q", launcher.RepoDir, worktree)
+	}
+}
+
+func TestNewLauncherUsesBaseRepoRootForLinkedWorktreeByDefault(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
 	worktree := filepath.Join(base, "wt")
@@ -124,8 +151,8 @@ func TestNewLauncherKeepsLinkedWorktreeRootByDefault(t *testing.T) {
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
 	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
 	launcher := NewLauncher(filepath.Join(worktree, "go-bubbletea"), filepath.Join(base, "daemon.sock"))
-	if launcher.RepoDir != worktree {
-		t.Fatalf("launcher.RepoDir = %q, want %q", launcher.RepoDir, worktree)
+	if launcher.RepoDir != repo {
+		t.Fatalf("launcher.RepoDir = %q, want %q", launcher.RepoDir, repo)
 	}
 }
 
@@ -235,7 +262,7 @@ func TestLauncherResolveCommand_UsesLocalGoRunForScopedWorktreeWithoutBinary(t *
 	}
 
 	t.Setenv("PATH", "")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	t.Setenv("AZEDARACH_DAEMON_BIN", "")
 	launcher := NewLauncher(filepath.Join(worktree, "nested"), filepath.Join(base, "daemon.sock"))
 

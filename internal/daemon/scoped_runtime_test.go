@@ -16,7 +16,7 @@ import (
 
 func TestNewScopedRuntimeUsesWorktreeRuntimeStore(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	t.Setenv("PATH", "")
 
 	base := t.TempDir()

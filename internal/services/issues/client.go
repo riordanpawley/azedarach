@@ -14,12 +14,13 @@ import (
 	"sync"
 	"time"
 
-	_ "modernc.org/sqlite"
+	sqlite "modernc.org/sqlite"
 
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 type dependencyRemovalConfirmationKey struct{}
@@ -65,6 +66,8 @@ func hasParentChildOrphanConfirmation(ctx context.Context) bool {
 
 const (
 	nextAlphaIssueIndexMetaKey = "issue:id_next_alpha_index"
+	sqliteBusyPrimaryCode      = 5
+	sqliteBusyRetryDelay       = 100 * time.Millisecond
 )
 
 // Client wraps local SQLite task store operations.
@@ -976,6 +979,29 @@ type UpsertExternalIssueRefParams struct {
 
 // Create inserts a new issue and returns its generated id.
 func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, error) {
+	var issueID string
+	err := retrySQLiteBusy(ctx, func() error {
+		var err error
+		issueID, err = c.createOnce(ctx, params)
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
+	return issueID, nil
+}
+
+func (c *Client) createOnce(ctx context.Context, params CreateTaskParams) (string, error) {
+	var issueID string
+	err := sqliteutil.WithWriteLock(c.dbPath, func() error {
+		var err error
+		issueID, err = c.createOnceLocked(ctx, params)
+		return err
+	})
+	return issueID, err
+}
+
+func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) (string, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return "", err
@@ -1105,7 +1131,50 @@ func (c *Client) CreateWithRuntime(ctx context.Context, projectID string, params
 	if err != nil {
 		return domain.Task{}, err
 	}
-	return c.GetWithRuntime(ctx, projectID, id)
+	var task domain.Task
+	err = retrySQLiteBusy(ctx, func() error {
+		var err error
+		task, err = c.GetWithRuntime(ctx, projectID, id)
+		return err
+	})
+	if err != nil {
+		return domain.Task{}, err
+	}
+	return task, nil
+}
+
+func retrySQLiteBusy(ctx context.Context, fn func() error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var lastErr error
+	for {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		if !IsSQLiteBusy(err) {
+			return err
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return lastErr
+		case <-time.After(sqliteBusyRetryDelay):
+		}
+	}
+}
+
+// IsSQLiteBusy reports whether err wraps a temporary SQLite busy/locked result.
+func IsSQLiteBusy(err error) bool {
+	for err != nil {
+		var sqliteErr *sqlite.Error
+		if errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == sqliteBusyPrimaryCode {
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
 }
 
 func (c *Client) UpsertExternalIssueRef(ctx context.Context, params UpsertExternalIssueRefParams) (domain.ExternalIssueRef, error) {
