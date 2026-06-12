@@ -193,18 +193,19 @@ type IssueCloseOptions struct {
 }
 
 type IssueUpdateOptions struct {
-	Project       string
-	IssueID       string
-	JSON          bool
-	Title         string
-	Description   string
-	Notes         *string
-	AppendNotes   string
-	Type          *domain.TaskType
-	Priority      *domain.Priority
-	Status        *domain.Status
-	ForceWorktree bool
-	UpdateImpls   []string
+	Project        string
+	IssueID        string
+	JSON           bool
+	Title          string
+	Description    string
+	DescriptionSet bool
+	Notes          *string
+	AppendNotes    string
+	Type           *domain.TaskType
+	Priority       *domain.Priority
+	Status         *domain.Status
+	ForceWorktree  bool
+	UpdateImpls    []string
 }
 
 type IssueDoctorOptions struct {
@@ -2437,8 +2438,13 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	if strings.TrimSpace(opts.AppendNotes) == "" {
 		opts.AppendNotes = ""
 	}
+	fs.Visit(func(flag *flag.Flag) {
+		if flag.Name == "description" {
+			opts.DescriptionSet = true
+		}
+	})
 	opts.UpdateImpls = dedupeOrderedIDs(updateImpls)
-	if opts.Title == "" && opts.Description == "" && opts.Notes == nil && opts.AppendNotes == "" && opts.Type == nil && opts.Priority == nil && opts.Status == nil && len(opts.UpdateImpls) == 0 {
+	if opts.Title == "" && !opts.DescriptionSet && opts.Notes == nil && opts.AppendNotes == "" && opts.Type == nil && opts.Priority == nil && opts.Status == nil && len(opts.UpdateImpls) == 0 {
 		return IssueUpdateOptions{}, fmt.Errorf("no update fields provided")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
@@ -3884,7 +3890,7 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 	if opts.Title != "" {
 		update.Title = opts.Title
 	}
-	if opts.Description != "" {
+	if opts.DescriptionSet {
 		update.Description = opts.Description
 	}
 	if opts.Type != nil {
