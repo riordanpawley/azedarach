@@ -982,6 +982,14 @@ func (d *Daemon) handleSessionStop(ctx context.Context, req protocol.RequestEnve
 }
 
 func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	return d.handleSessionStopDirectWithOptions(ctx, req, sessionStopOptions{})
+}
+
+type sessionStopOptions struct {
+	skipIssueResourceCleanup bool
+}
+
+func (d *Daemon) handleSessionStopDirectWithOptions(ctx context.Context, req protocol.RequestEnvelope, opts sessionStopOptions) (protocol.ResponseEnvelope, error) {
 	cmd, _, ok := d.decodeSessionRequest(req, true)
 	if !ok {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
@@ -995,7 +1003,7 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 	}
 	resourceCleanup := issueResourceLifecycleResult{}
 	worktreePath, branch := d.issueWorktreeContext(ctx, cmd.ProjectID, cmd.IssueID)
-	if len(d.runtimeConfigForProject(cmd.ProjectID).IssueResources.CleanupCommands) > 0 {
+	if !opts.skipIssueResourceCleanup && len(d.runtimeConfigForProject(cmd.ProjectID).IssueResources.CleanupCommands) > 0 {
 		resourceCtx := d.issueResourceLifecycleContext(cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktreePath, branch)
 		var cleanupErr error
 		resourceCleanup, cleanupErr = d.runIssueResourceCleanupCommands(ctx, cmd.ProjectID, resourceCtx)
