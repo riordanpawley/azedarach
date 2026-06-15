@@ -1157,6 +1157,46 @@ func TestClient_DeleteRemovesIssue(t *testing.T) {
 	assert.Empty(t, tasks)
 }
 
+func TestClient_DeleteParentWithUndeletedDescendantsIsBlocked(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Parent",
+		Type:     domain.TypeEpic,
+		Priority: domain.P1,
+	})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Child",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+	})
+	require.NoError(t, err)
+	grandchildID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Grandchild",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.AddDependency(ctx, childID, parentID, "parent-child"))
+	require.NoError(t, client.AddDependency(ctx, grandchildID, childID, "parent-child"))
+
+	err = client.Delete(ctx, parentID)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIssueHasLiveChildren)
+	assert.Contains(t, err.Error(), "cannot delete issue "+parentID)
+	assert.Contains(t, err.Error(), "2 undeleted descendants")
+	assert.Contains(t, err.Error(), "explicit recursive cleanup or supersede workflow")
+
+	parent, findErr := client.Search(ctx, parentID)
+	require.NoError(t, findErr)
+	assertTaskPresent(t, parent, parentID)
+	child, findErr := client.Search(ctx, childID)
+	require.NoError(t, findErr)
+	assertTaskPresent(t, child, childID)
+}
+
 func TestClient_DeleteBlockedWhenTaskHasWorktreeProjection(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -1246,6 +1286,49 @@ func TestClient_DeleteAllowsStoppedSessionWithoutWorktreeProjection(t *testing.T
 	tasks, findErr := client.Search(ctx, taskID)
 	require.NoError(t, findErr)
 	assert.Empty(t, tasks)
+}
+
+func TestClient_ArchiveParentWithUndeletedDescendantsIsBlocked(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Parent",
+		Type:     domain.TypeEpic,
+		Priority: domain.P1,
+	})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Child",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.AddDependency(ctx, childID, parentID, "parent-child"))
+
+	err = client.Archive(ctx, parentID)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrIssueHasLiveChildren)
+	assert.Contains(t, err.Error(), "cannot archive issue "+parentID)
+	assert.Contains(t, err.Error(), "1 undeleted descendant")
+	assert.Contains(t, err.Error(), "explicit recursive cleanup or supersede workflow")
+
+	parent, findErr := client.Search(ctx, parentID)
+	require.NoError(t, findErr)
+	assertTaskPresent(t, parent, parentID)
+	child, findErr := client.Search(ctx, childID)
+	require.NoError(t, findErr)
+	assertTaskPresent(t, child, childID)
+}
+
+func assertTaskPresent(t *testing.T, tasks []domain.Task, taskID string) {
+	t.Helper()
+	for _, task := range tasks {
+		if task.ID.String() == taskID {
+			return
+		}
+	}
+	t.Fatalf("task %s not found in search results: %+v", taskID, tasks)
 }
 
 func TestClient_CreateDoesNotReuseDeletedLocalIssueIDs(t *testing.T) {
@@ -1888,6 +1971,87 @@ func TestClient_CreateWaitsForWriteLockAndSucceedsWithinBusyTimeout(t *testing.T
 	}
 
 	assert.GreaterOrEqual(t, time.Since(start), 200*time.Millisecond)
+}
+
+func TestClient_AddDependencyWaitsForIssueMutationLock(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Parent",
+		Type:     domain.TypeEpic,
+		Priority: domain.P1,
+	})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Child",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+	})
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	err = client.WithMutationLock(ctx, func(context.Context) error {
+		go func() {
+			done <- client.AddDependency(ctx, childID, parentID, "parent-child")
+		}()
+
+		select {
+		case addErr := <-done:
+			t.Fatalf("AddDependency completed before mutation lock released: %v", addErr)
+		case <-time.After(200 * time.Millisecond):
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	select {
+	case addErr := <-done:
+		require.NoError(t, addErr)
+	case <-time.After(3 * time.Second):
+		t.Fatal("AddDependency did not complete after releasing mutation lock")
+	}
+}
+
+func TestClient_AddDependencyWithRuntimeWaitsForIssueMutationLock(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Runtime Parent",
+		Type:     domain.TypeEpic,
+		Priority: domain.P1,
+	})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Runtime Child",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+	})
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	err = client.WithMutationLock(ctx, func(context.Context) error {
+		go func() {
+			_, addErr := client.AddDependencyWithRuntime(ctx, "project-1", childID, parentID, "parent-child")
+			done <- addErr
+		}()
+
+		select {
+		case addErr := <-done:
+			t.Fatalf("AddDependencyWithRuntime completed before mutation lock released: %v", addErr)
+		case <-time.After(200 * time.Millisecond):
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	select {
+	case addErr := <-done:
+		require.NoError(t, addErr)
+	case <-time.After(3 * time.Second):
+		t.Fatal("AddDependencyWithRuntime did not complete after releasing mutation lock")
+	}
 }
 
 func TestClient_CreateRetriesAfterSQLiteBusyTimeout(t *testing.T) {

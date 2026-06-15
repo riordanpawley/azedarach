@@ -2936,6 +2936,273 @@ func TestTaskDeleteCommandDeletesThroughDaemon(t *testing.T) {
 	}
 }
 
+func TestTaskDeleteCommandRejectsParentWithUndeletedChildren(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-delete-parent-children"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Parent",
+		Type:  domain.TypeEpic,
+	})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Child",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := issuesClient.AddDependency(ctx, childID, parentID, "parent-child"); err != nil {
+		t.Fatalf("add parent-child: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
+		hub: publish.NewHub(16, 8, slog.Default()),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+		revision: map[string]uint64{},
+	}
+	body, err := json.Marshal(taskDeleteRequest{TaskID: parentID})
+	if err != nil {
+		t.Fatalf("marshal delete request: %v", err)
+	}
+	resp, err := d.handleTaskDelete(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-delete-parent-children",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.delete",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskDelete error: %v", err)
+	}
+	if resp.OK || resp.Error == nil {
+		t.Fatalf("handleTaskDelete response = %+v, want guard error", resp)
+	}
+	if resp.Error.Code != protocol.ErrorCodeConflict {
+		t.Fatalf("error code = %s, want %s", resp.Error.Code, protocol.ErrorCodeConflict)
+	}
+	if !strings.Contains(resp.Error.Message, "cannot delete issue "+parentID) || !strings.Contains(resp.Error.Message, "1 undeleted descendant") {
+		t.Fatalf("error message = %q", resp.Error.Message)
+	}
+	tasks, err := issuesClient.Search(ctx, parentID)
+	if err != nil {
+		t.Fatalf("search parent: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("parent search len = %d, want 1", len(tasks))
+	}
+}
+
+func TestTaskArchiveCommandRejectsParentWithUndeletedChildren(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-archive-parent-children"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Parent",
+		Type:  domain.TypeEpic,
+	})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Child",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := issuesClient.AddDependency(ctx, childID, parentID, "parent-child"); err != nil {
+		t.Fatalf("add parent-child: %v", err)
+	}
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
+		hub: publish.NewHub(16, 8, slog.Default()),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{},
+	}
+	body, err := json.Marshal(struct {
+		TaskID string `json:"task_id"`
+	}{TaskID: parentID})
+	if err != nil {
+		t.Fatalf("marshal archive request: %v", err)
+	}
+	resp, err := d.handleTaskArchive(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-archive-parent-children",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.archive",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskArchive error: %v", err)
+	}
+	if resp.OK || resp.Error == nil {
+		t.Fatalf("handleTaskArchive response = %+v, want guard error", resp)
+	}
+	if resp.Error.Code != protocol.ErrorCodeConflict {
+		t.Fatalf("error code = %s, want %s", resp.Error.Code, protocol.ErrorCodeConflict)
+	}
+	if !strings.Contains(resp.Error.Message, "cannot archive issue "+parentID) || !strings.Contains(resp.Error.Message, "1 undeleted descendant") {
+		t.Fatalf("error message = %q", resp.Error.Message)
+	}
+	tasks, err := issuesClient.Search(ctx, parentID)
+	if err != nil {
+		t.Fatalf("search parent: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("parent search len = %d, want 1", len(tasks))
+	}
+}
+
+func TestTaskDeleteCommandRejectsParentWithChildrenBeforeRuntimeCleanup(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-task-delete-parent-children-runtime"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Parent with runtime",
+		Type:  domain.TypeEpic,
+	})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Child",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := issuesClient.AddDependency(ctx, childID, parentID, "parent-child"); err != nil {
+		t.Fatalf("add parent-child: %v", err)
+	}
+	worktreePath := filepath.Join(repoDir, "wt-"+parentID)
+	branchName := "riordan/" + parentID + "/parent-runtime"
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   parentID,
+		Path:      worktreePath,
+		Branch:    branchName,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+
+	cleanupMarker := filepath.Join(repoDir, "delete-parent-cleanup-marker")
+	worktreeDeleteCalled := false
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case joined == "worktree list --porcelain":
+			return fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", worktreePath, branchName), nil
+		case strings.Contains(joined, "status --porcelain"):
+			return "", nil
+		case strings.HasPrefix(joined, "worktree remove "):
+			worktreeDeleteCalled = true
+			return "", nil
+		default:
+			return "", nil
+		}
+	}}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			SessionShell: "sh",
+			BaseBranch:   "main",
+			IssueResources: appconfig.IssueResourcesConfig{
+				CleanupCommands: []string{
+					fmt.Sprintf("touch %q", cleanupMarker),
+				},
+			},
+			Logger: logger,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
+		logger:                  logger,
+	}
+
+	body, err := json.Marshal(taskDeleteRequest{
+		TaskID:         parentID,
+		Cleanup:        true,
+		RemoveWorktree: true,
+		ForceWorktree:  true,
+	})
+	if err != nil {
+		t.Fatalf("marshal delete request: %v", err)
+	}
+	resp, err := d.handleTaskDelete(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-delete-parent-runtime-children",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.delete",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskDelete error: %v", err)
+	}
+	if resp.OK || resp.Error == nil {
+		t.Fatalf("handleTaskDelete response = %+v, want guard error", resp)
+	}
+	if resp.Error.Code != protocol.ErrorCodeConflict {
+		t.Fatalf("error code = %s, want %s", resp.Error.Code, protocol.ErrorCodeConflict)
+	}
+	if _, err := os.Stat(cleanupMarker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cleanup marker stat err = %v, want not exist", err)
+	}
+	if worktreeDeleteCalled {
+		t.Fatal("worktree delete called before live-child guard")
+	}
+}
+
 func TestTaskDeleteRunsIssueResourceCleanupWithoutSessionBeforeWorktreeRemoval(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

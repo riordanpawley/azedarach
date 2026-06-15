@@ -2752,9 +2752,13 @@ func (d *Daemon) handleTaskDelete(ctx context.Context, req protocol.RequestEnvel
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task delete requested", "project_id", projectID, "task_id", cmd.TaskID)
 	}
-	result, err := d.deleteTask(ctx, issueClient, projectID, cmd, req)
-	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	var result taskDeleteResult
+	if err := issueClient.WithMutationLock(ctx, func(ctx context.Context) error {
+		var err error
+		result, err = d.deleteTask(ctx, issueClient, projectID, cmd, req)
+		return err
+	}); err != nil {
+		return d.errorResponse(req, daemonTaskMutationErrorCode(err), err.Error()), nil
 	}
 	body, err := json.Marshal(result)
 	if err != nil {
@@ -2776,6 +2780,9 @@ func (d *Daemon) deleteTask(ctx context.Context, issueClient *issues.Client, pro
 	}
 	preflight, err := d.validateTaskDeletePreflight(ctx, projectID, taskID)
 	if err != nil {
+		return taskDeleteResult{}, err
+	}
+	if err := issueClient.EnsureNoUndeletedParentChildDescendants(ctx, "delete", taskID); err != nil {
 		return taskDeleteResult{}, err
 	}
 	result := taskDeleteResult{
@@ -2876,7 +2883,7 @@ func (d *Daemon) handleTaskArchive(ctx context.Context, req protocol.RequestEnve
 		d.cfg.Logger.Info("daemon task archive requested", "project_id", projectID, "task_id", cmd.TaskID)
 	}
 	if err := issueClient.Archive(ctx, cmd.TaskID); err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		return d.errorResponse(req, daemonTaskMutationErrorCode(err), err.Error()), nil
 	}
 	resp := d.successResponse(req)
 	resp.Revision = d.nextRevision(projectID)
@@ -2889,6 +2896,13 @@ func (d *Daemon) handleTaskArchive(ctx context.Context, req protocol.RequestEnve
 		d.cfg.Logger.Info("daemon task archive completed", "project_id", projectID, "task_id", cmd.TaskID, "revision", resp.Revision)
 	}
 	return resp, nil
+}
+
+func daemonTaskMutationErrorCode(err error) protocol.ErrorCode {
+	if errors.Is(err, issues.ErrIssueHasLiveChildren) {
+		return protocol.ErrorCodeConflict
+	}
+	return protocol.ErrorCodeInternal
 }
 
 func (d *Daemon) handleTaskDependencyAdd(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
