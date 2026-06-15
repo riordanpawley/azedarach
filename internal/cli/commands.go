@@ -40,6 +40,8 @@ var newLauncher = func(repoDir, socketPath string) daemonStarter {
 	return daemonprocess.NewLauncher(repoDir, socketPath)
 }
 
+var tmuxPaneSessionName = defaultTmuxPaneSessionName
+
 const (
 	commandSessionStart         = "session.start"
 	commandSessionAttach        = "session.attach"
@@ -3609,6 +3611,19 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 		opts.AutoParentFromIssueID = nil
 		opts.AutoCreatedFromIssueID = nil
 	}
+	if !isDifferentExplicitIssueProject(deps.ProjectID, opts.Project) {
+		if !opts.Deferred && opts.AutoParentFromIssueID == nil {
+			if issueID, ok := activeIssueIDFromTmuxPaneIfKnown(context.Background(), deps); ok {
+				opts.AutoParentFromIssueID = &issueID
+				opts.AutoCreatedFromIssueID = &issueID
+			}
+		}
+		if opts.Deferred && opts.AutoCreatedFromIssueID == nil {
+			if issueID, ok := activeIssueIDFromTmuxPaneIfKnown(context.Background(), deps); ok {
+				opts.AutoCreatedFromIssueID = &issueID
+			}
+		}
+	}
 	if normalizeIssueProject(opts.Project) != "" {
 		opts.ProjectQualifiedOutput = true
 	}
@@ -5413,6 +5428,10 @@ type primeTemplateData struct {
 
 func PrimeCommand(deps *Dependencies) error {
 	issueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID"))
+	issueIDSource := ""
+	if issueID != "" {
+		issueIDSource = "env"
+	}
 	primeMode := strings.TrimSpace(os.Getenv("AZEDARACH_PRIME_MODE"))
 	guardrail := "- No active issue is preselected. When work starts, set `AZEDARACH_ISSUE_ID` or run `az issue get <issue-id>`."
 	issueSection := ""
@@ -5458,9 +5477,19 @@ func PrimeCommand(deps *Dependencies) error {
 			implementationSection = renderPrimeImplementationSection(configuredIssueImplementations(snapshot.Tasks))
 		}
 	}
+	if issueID == "" && snapshotLoaded {
+		if tmuxIssueID, ok := activeIssueIDFromTmuxPaneInSnapshot(context.Background(), deps, snapshot); ok {
+			issueID = tmuxIssueID
+			issueIDSource = "tmux"
+		}
+	}
 
 	if issueID != "" {
-		guardrail = fmt.Sprintf("- `AZEDARACH_ISSUE_ID` is set to `%s`; use it as the default issue scope and refresh stale context with `az issue get %s`.", issueID, issueID)
+		if issueIDSource == "tmux" {
+			guardrail = fmt.Sprintf("- `AZEDARACH_ISSUE_ID` is absent, but the current tmux session resolves to issue `%s`; use it as the default issue scope and refresh stale context with `az issue get %s`.", issueID, issueID)
+		} else {
+			guardrail = fmt.Sprintf("- `AZEDARACH_ISSUE_ID` is set to `%s`; use it as the default issue scope and refresh stale context with `az issue get %s`.", issueID, issueID)
+		}
 		if !snapshotLoaded {
 			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nCould not load issue details automatically; run `az issue get %s`.\n", issueID, issueID)
 		} else if task, ok := findTaskByID(snapshot.Tasks, issueID); ok {
@@ -5497,6 +5526,66 @@ func PrimeCommand(deps *Dependencies) error {
 	}
 	fmt.Print(output)
 	return nil
+}
+
+func activeIssueIDFromTmuxPane(ctx context.Context, deps *Dependencies) (string, bool) {
+	if deps == nil || deps.DaemonClient == nil {
+		return "", false
+	}
+	sessionName, err := tmuxPaneSessionName(ctx)
+	if err != nil || strings.TrimSpace(sessionName) == "" {
+		return "", false
+	}
+	for _, candidate := range knownSessionProjectCandidates(deps) {
+		for _, scope := range candidate.Scopes {
+			issueID, ok := naming.ParseIssueIDFromSessionName(sessionName, scope)
+			if !ok || strings.TrimSpace(issueID) == "" {
+				continue
+			}
+			if _, err := naming.ParseIssueID(issueID); err != nil {
+				continue
+			}
+			return issueID, true
+		}
+	}
+	return "", false
+}
+
+func activeIssueIDFromTmuxPaneIfKnown(ctx context.Context, deps *Dependencies) (string, bool) {
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return "", false
+	}
+	return activeIssueIDFromTmuxPaneInSnapshot(ctx, deps, snapshot)
+}
+
+func activeIssueIDFromTmuxPaneInSnapshot(ctx context.Context, deps *Dependencies, snapshot daemonclient.TaskSnapshot) (string, bool) {
+	issueID, ok := activeIssueIDFromTmuxPane(ctx, deps)
+	if !ok {
+		return "", false
+	}
+	if _, found := findTaskByID(snapshot.Tasks, issueID); !found {
+		return "", false
+	}
+	return issueID, true
+}
+
+func defaultTmuxPaneSessionName(ctx context.Context) (string, error) {
+	paneID := strings.TrimSpace(os.Getenv("TMUX_PANE"))
+	if paneID == "" {
+		return "", nil
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", paneID, "#{session_name}")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func loadIssueDetailTask(ctx context.Context, deps *Dependencies, issueID string) (domain.Task, error) {

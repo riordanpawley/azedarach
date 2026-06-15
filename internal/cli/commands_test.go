@@ -6561,6 +6561,88 @@ func TestIssueCreateCommandAutoParentsAndInheritsImplsFromActiveIssue(t *testing
 	}
 }
 
+func TestIssueCreateCommandAutoParentsFromTmuxSessionWhenEnvMissing(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	previousTmuxPaneSessionName := tmuxPaneSessionName
+	tmuxPaneSessionName = func(context.Context) (string, error) {
+		return "pr-az-parent", nil
+	}
+	t.Cleanup(func() {
+		tmuxPaneSessionName = previousTmuxPaneSessionName
+	})
+
+	var requests []protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				requests = append(requests, req)
+				body := []byte{}
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					tasks, err := marshalTaskListBody([]domain.Task{{
+						ID:              "az-parent",
+						Title:           "Parent",
+						Status:          domain.StatusInProgress,
+						Priority:        domain.P1,
+						Type:            domain.TypeTask,
+						Implementations: []string{"go-bubbletea"},
+					}})
+					if err != nil {
+						t.Fatalf("marshal task list response: %v", err)
+					}
+					body = tasks
+				case daemonclient.CommandTaskCreate:
+					payload, err := json.Marshal(map[string]string{"task_id": "az-child"})
+					if err != nil {
+						t.Fatalf("marshal task create response: %v", err)
+					}
+					body = payload
+				case daemonclient.CommandTaskDependencyAdd:
+					body = []byte(`{}`)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   "/tmp/proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueCreateCommand(deps, IssueCreateOptions{
+			Title:    "Child issue",
+			Type:     domain.TypeTask,
+			Priority: domain.P2,
+		})
+	})
+
+	if len(requests) != 4 {
+		t.Fatalf("request count = %d, want 4", len(requests))
+	}
+	if requests[0].Command != daemonclient.CommandTaskList || requests[1].Command != daemonclient.CommandTaskList {
+		t.Fatalf("first requests = %s, %s; want task-list confirmation then parent resolution", requests[0].Command, requests[1].Command)
+	}
+	var createReq daemonclient.TaskCreateParams
+	if err := json.Unmarshal(requests[2].Body, &createReq); err != nil {
+		t.Fatalf("unmarshal create body: %v", err)
+	}
+	if createReq.ParentID == nil || *createReq.ParentID != "az-parent" {
+		t.Fatalf("create parent = %+v, want az-parent", createReq.ParentID)
+	}
+	if !strings.Contains(output, "Created issue: az-child (parent: az-parent, auto-parent from AZEDARACH_ISSUE_ID) [created-from: az-parent]") {
+		t.Fatalf("output missing tmux auto-parent/provenance message: %q", output)
+	}
+}
+
 func TestIssueCreateCommandDeferredIgnoresAutoParentFromIssueID(t *testing.T) {
 	var requests []protocol.RequestEnvelope
 	deps := &Dependencies{
@@ -8890,6 +8972,74 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "`az mail watch --parent az-parent --since <seq> --jsonl` only when explicitly asked") {
 		t.Fatalf("prime output missing bounded mailbox watch guidance: %q", output)
+	}
+}
+
+func TestPrimeCommandUsesTmuxSessionContextWhenEnvMissing(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	previousTmuxPaneSessionName := tmuxPaneSessionName
+	tmuxPaneSessionName = func(context.Context) (string, error) {
+		return "pr-az-1", nil
+	}
+	t.Cleanup(func() {
+		tmuxPaneSessionName = previousTmuxPaneSessionName
+	})
+	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskList {
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+				body, err := marshalTaskListBody([]domain.Task{{
+					ID:              "az-1",
+					Title:           "Prime issue",
+					Status:          domain.StatusOpen,
+					Priority:        domain.P2,
+					Type:            domain.TypeTask,
+					Implementations: []string{"default"},
+					CreatedAt:       now,
+					UpdatedAt:       now,
+				}})
+				if err != nil {
+					t.Fatalf("marshal task list: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            body,
+				}, nil
+			},
+		}),
+		ProjectID: "proj",
+		RepoDir:   "/tmp/proj",
+		Config:    &config.Config{Spec: config.SpecConfig{Enabled: true}},
+	}
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(deps)
+	})
+
+	if !strings.Contains(output, "Active issue ID: `az-1`") {
+		t.Fatalf("prime output missing tmux-derived active issue id: %q", output)
+	}
+	if !strings.Contains(output, "`AZEDARACH_ISSUE_ID` is absent, but the current tmux session resolves to issue `az-1`") {
+		t.Fatalf("prime output missing missing-env tmux warning: %q", output)
+	}
+	if !strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=az-1)") {
+		t.Fatalf("prime output missing tmux-derived active issue section: %q", output)
 	}
 }
 

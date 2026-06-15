@@ -359,6 +359,7 @@ type sessionStartTmuxRunner struct {
 	sessions          map[string]bool
 	windows           map[string]map[string]bool
 	commands          [][]string
+	env               map[string]map[string]string
 	sendKeysCalls     int
 	sendKeysTargets   []string
 	sendKeysPayloads  []string
@@ -371,6 +372,7 @@ func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
 	return &sessionStartTmuxRunner{
 		sessions: map[string]bool{},
 		windows:  map[string]map[string]bool{},
+		env:      map[string]map[string]string{},
 	}
 }
 
@@ -437,6 +439,18 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 		if r.sendKeysErr != nil && (r.sendKeysErrOnCall == 0 || r.sendKeysCalls == r.sendKeysErrOnCall) {
 			return "", r.sendKeysErr
 		}
+		return "", nil
+	case "set-environment":
+		if len(args) < 5 {
+			return "", errors.New("missing set-environment args")
+		}
+		session := args[2]
+		key := args[3]
+		value := args[4]
+		if r.env[session] == nil {
+			r.env[session] = map[string]string{}
+		}
+		r.env[session][key] = value
 		return "", nil
 	case "list-sessions":
 		names := make([]string, 0, len(r.sessions))
@@ -535,6 +549,16 @@ func TestSessionStartRecoversFromPartialWorktreeCreate(t *testing.T) {
 	}
 	if tmuxRunner.sendKeysCalls != 1 {
 		t.Fatalf("send-keys calls = %d, want 1", tmuxRunner.sendKeysCalls)
+	}
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	if got := tmuxRunner.env[sessionID]["AZEDARACH_PROJECT_ID"]; got != projectID {
+		t.Fatalf("tmux AZEDARACH_PROJECT_ID = %q, want %q", got, projectID)
+	}
+	if got := tmuxRunner.env[sessionID]["AZEDARACH_ISSUE_ID"]; got != issueID {
+		t.Fatalf("tmux AZEDARACH_ISSUE_ID = %q, want %q", got, issueID)
+	}
+	if got := tmuxRunner.env[sessionID]["AZEDARACH_SESSION_ID"]; got != sessionID {
+		t.Fatalf("tmux AZEDARACH_SESSION_ID = %q, want %q", got, sessionID)
 	}
 }
 

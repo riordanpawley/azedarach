@@ -673,6 +673,10 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
 	}
+	if err := d.exportSessionContextEnv(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil {
+		cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("export session context env: %v%s", err, cleanupNote)), nil
+	}
 	if err := d.exportIssueResourceSessionEnv(ctx, cmd.ProjectID, resourceCtx); err != nil {
 		cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("export issue resource env: %v%s", err, cleanupNote)), nil
@@ -2870,6 +2874,23 @@ func (d *Daemon) exportIssueResourceSessionEnv(ctx context.Context, projectID st
 		return nil
 	}
 	return d.tmux.SendKeys(ctx, resourceCtx.SessionID, "export "+strings.Join(assignments, " "))
+}
+
+func (d *Daemon) exportSessionContextEnv(ctx context.Context, projectID, issueID, sessionID string) error {
+	assignments := map[string]string{
+		"AZEDARACH_PROJECT_ID": strings.TrimSpace(projectID),
+		"AZEDARACH_ISSUE_ID":   strings.TrimSpace(issueID),
+		"AZEDARACH_SESSION_ID": strings.TrimSpace(sessionID),
+	}
+	for key, value := range assignments {
+		if value == "" {
+			continue
+		}
+		if err := d.tmux.SetEnvironment(ctx, sessionID, key, value); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func issueResourcesConfigured(cfg appconfig.IssueResourcesConfig) bool {
