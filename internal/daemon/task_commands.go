@@ -426,11 +426,6 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task get-many requested", "project_id", projectID, "task_count", len(taskIDs))
 	}
-	refreshSessionStartedAt := time.Now()
-	if err := d.refreshIssueSessionRuntimeState(ctx, projectID, taskIDs); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("task get-many session runtime refresh failed", "project_id", projectID, "task_count", len(taskIDs), "error", err)
-	}
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get_many.issue_session_refresh", refreshSessionStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(taskIDs))
 	for _, taskID := range taskIDs {
 		d.refreshIssueWorktreeState(ctx, projectID, taskID)
 	}
@@ -444,6 +439,21 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 			d.cfg.Logger.Warn("daemon task get-many failed", "project_id", projectID, "task_count", len(taskIDs), "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
 		}
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	contextTaskIDs := taskIDsFromTasks(tasks)
+	refreshSessionStartedAt := time.Now()
+	if err := d.refreshIssueSessionRuntimeState(ctx, projectID, contextTaskIDs); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("task get-many session runtime refresh failed", "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(contextTaskIDs), "error", err)
+	}
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get_many.issue_session_refresh", refreshSessionStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(contextTaskIDs))
+	if len(contextTaskIDs) > 0 {
+		tasks, err = issueClient.GetManyWithDependencyContextRuntime(ctx, projectID, taskIDs)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("daemon task get-many reload after session refresh failed", "project_id", projectID, "task_count", len(taskIDs), "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
+			}
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
 	}
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
 	payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), lastCheckedAt, freshness, tasks, false)

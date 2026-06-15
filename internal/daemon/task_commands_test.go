@@ -3088,14 +3088,47 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 		t.Fatalf("add dependency: %v", err)
 	}
 
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	firstSessionID := naming.CanonicalSessionID(projectID, firstID)
+	secondSessionID := naming.CanonicalSessionID(projectID, secondID)
+	staleUpdatedAt := time.Date(2026, time.April, 2, 10, 0, 0, 0, time.UTC)
+	for _, row := range []struct {
+		name      string
+		sessionID string
+		issueID   string
+	}{
+		{name: "requested", sessionID: secondSessionID, issueID: secondID},
+		{name: "context", sessionID: firstSessionID, issueID: firstID},
+	} {
+		if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			ID:            row.sessionID,
+			IssueID:       row.issueID,
+			State:         daemonstate.SessionStateRunning,
+			ObservedState: daemonstate.SessionStateStopped,
+			UpdatedAt:     staleUpdatedAt,
+		}); err != nil {
+			t.Fatalf("seed %s session state: %v", row.name, err)
+		}
+	}
+	tmuxRunner := &testTmuxRunner{
+		sessions: map[string]bool{
+			firstSessionID:  true,
+			secondSessionID: true,
+		},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+
 	d := &Daemon{
-		cfg: Config{RepoDir: ".", Logger: logger},
+		cfg:  Config{RepoDir: ".", Logger: logger},
+		tmux: tmux.NewClient(tmuxRunner, logger),
 		issueClientsByProject: map[string]*issues.Client{
 			projectID: issuesClient,
 		},
 		sessionStore:           daemonstate.NewStore(),
 		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{},
-		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
 		revision:               map[string]uint64{projectID: 9},
 	}
 
@@ -3143,6 +3176,27 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 	}
 	if _, ok := taskByID[firstID]; !ok {
 		t.Fatalf("dependency context missing first issue: %+v", payload.Tasks)
+	}
+	for _, row := range []struct {
+		name      string
+		sessionID string
+	}{
+		{name: "requested", sessionID: secondSessionID},
+		{name: "context", sessionID: firstSessionID},
+	} {
+		session, found, err := runtimeStore.GetSessionState(ctx, projectID, row.sessionID)
+		if err != nil {
+			t.Fatalf("load %s session state: %v", row.name, err)
+		}
+		if !found {
+			t.Fatalf("%s session state missing", row.name)
+		}
+		if session.ObservedState != daemonstate.SessionStateRunning {
+			t.Fatalf("%s observed state = %s, want running", row.name, session.ObservedState)
+		}
+		if !session.UpdatedAt.After(staleUpdatedAt) {
+			t.Fatalf("%s updated_at = %s, want after %s", row.name, session.UpdatedAt, staleUpdatedAt)
+		}
 	}
 }
 
