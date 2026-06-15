@@ -176,6 +176,14 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 							{IssueID: unknown.String(), Activity: "unknown", ActivitySource: "none", State: string(domain.SessionBusy), TmuxAttachedCount: 1, Advice: "activity unknown: check hooks with az ai status --target=auto; install/update with az ai install --target=auto; use sparse pane capture only if status/watch looks stale, failed, or contradictory for az-3"},
 						},
 					}), nil
+				case daemonclient.CommandTaskList:
+					body, err := marshalTaskListBody([]domain.Task{
+						{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
 				case protocol.CommandMailList:
 					return responseWithJSON(req, []protocol.MailEvent{}), nil
 				default:
@@ -205,6 +213,63 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 	}
 	if byID[unknown.String()].Activity != "unknown" || !strings.Contains(byID[unknown.String()].Advice, "az ai status --target=auto") || !strings.Contains(byID[unknown.String()].Advice, "az ai install --target=auto") {
 		t.Fatalf("unknown active session = %+v", byID[unknown.String()])
+	}
+}
+
+func TestOrchestrateStatusCommandWarnsWhenRootEpicLacksWorktree(t *testing.T) {
+	root := naming.IssueID("az-1")
+	child := naming.IssueID("az-2")
+	body, err := marshalTaskListBody([]domain.Task{
+		{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+		{ID: child, Title: "Worker", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &root},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+	deps := &Dependencies{
+		RepoDir:        "/repo",
+		RuntimeRepoDir: "/repo-cif",
+		ProjectID:      protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{child.String()},
+						Blocked:     map[string]string{},
+					}), nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees": []map[string]string{
+							{"issue_id": child.String(), "path": "/repo-az-2", "branch": "user/az-2/worker"},
+						},
+					}), nil
+				case protocol.CommandMailList:
+					return responseWithJSON(req, []protocol.MailEvent{}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestrateStatusCommand(deps, OrchestrateStatusOptions{RootIssueID: root.String(), JSON: true})
+	})
+	var result orchestrateStatusResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if len(result.Warnings) != 1 ||
+		!strings.Contains(result.Warnings[0], "root epic az-1 has child orchestration but no dedicated worktree") ||
+		!strings.Contains(result.Warnings[0], "current worktree/path is /repo-cif") ||
+		!strings.Contains(result.Warnings[0], "az worktree create az-1") {
+		t.Fatalf("warnings = %+v", result.Warnings)
 	}
 }
 
@@ -395,7 +460,7 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 	if !strings.Contains(result.Advice.WatchInstruction, "leave it running") || strings.Contains(result.Advice.WatchCommand, "--once") {
 		t.Fatalf("watch advice = %+v, want continuous watch instruction without --once", result.Advice)
 	}
-	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "uncommitted tracked changes") {
+	if len(result.Warnings) != 2 || !strings.Contains(strings.Join(result.Warnings, "\n"), "az worktree create az-1") || !strings.Contains(strings.Join(result.Warnings, "\n"), "uncommitted tracked changes") {
 		t.Fatalf("warnings = %+v", result.Warnings)
 	}
 	if submitted.Kind != commandSessionStart || submitted.IssueID != child || len(submitted.Payload) == 0 {
@@ -506,6 +571,56 @@ func TestOrchestrateStartWaitsForAllSubmittedOperationsBeforeMail(t *testing.T) 
 	}
 	if len(result.Started) != 2 || len(result.Failed) != 0 {
 		t.Fatalf("result started=%+v failed=%+v, want both started with no failures", result.Started, result.Failed)
+	}
+}
+
+func TestOrchestrateStartWarnsWhenRootWorktreeMissingWithoutRunnableLaunches(t *testing.T) {
+	root := naming.IssueID("az-1")
+	child := naming.IssueID("az-2")
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+		{ID: child, Title: "Blocked worker", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &root},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+	deps := &Dependencies{
+		RepoDir:        "/repo",
+		RuntimeRepoDir: "/repo-cif",
+		ProjectID:      protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{},
+						Blocked:     map[string]string{child.String(): "blocked by az-3"},
+					}), nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: taskListBody}, nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{"project_id": protocol.DefaultProjectID, "worktrees": []map[string]string{}}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	result, err := orchestrateStart(deps, OrchestrateStartOptions{RootIssueID: root.String(), Limit: 4})
+	if err != nil {
+		t.Fatalf("orchestrateStart error = %v", err)
+	}
+	if len(result.Requested) != 0 || len(result.Started) != 0 {
+		t.Fatalf("requested=%+v started=%+v, want no launches", result.Requested, result.Started)
+	}
+	if len(result.Warnings) != 1 ||
+		!strings.Contains(result.Warnings[0], "root epic az-1 has child orchestration but no dedicated worktree") ||
+		!strings.Contains(result.Warnings[0], "current worktree/path is /repo-cif") ||
+		!strings.Contains(result.Warnings[0], "az worktree create az-1") {
+		t.Fatalf("warnings = %+v", result.Warnings)
 	}
 }
 
