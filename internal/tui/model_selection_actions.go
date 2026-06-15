@@ -369,6 +369,15 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	if msg.Key == "yes" && m.pendingClose != nil {
 		pending := *m.pendingClose
 		m.pendingClose = nil
+		if reason := pendingCloseCleanupBlockedReason(pending); reason != "" {
+			m.overlayStack.Pop()
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: "Refreshing close preflight before blocking dirty worktree state",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, m.confirmCloseCleanupPreflightCmd(pending)
+		}
 		if len(pending.taskIDs) > 0 {
 			m.beginMutationFeedback(fmt.Sprintf("Bulk close queued for %d task(s)", len(pending.taskIDs)))
 			if pending.bulkMode == "move" {

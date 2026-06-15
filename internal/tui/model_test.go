@@ -5307,6 +5307,134 @@ func TestCloseCleanupBulkMovePromptDescribesClosingSubset(t *testing.T) {
 	}
 }
 
+func TestPendingCloseCleanupBlockedReasonBlocksDirtyAndConflictedTargets(t *testing.T) {
+	tests := []struct {
+		name      string
+		summaries []closeCleanupTaskSummary
+		want      string
+	}{
+		{
+			name:      "clean",
+			summaries: []closeCleanupTaskSummary{{taskID: "az-1", ahead: 1}},
+			want:      "",
+		},
+		{
+			name:      "dirty",
+			summaries: []closeCleanupTaskSummary{{taskID: "az-2", dirty: true}},
+			want:      "Close blocked: clean up dirty/conflicted worktree state first (az-2 dirty)",
+		},
+		{
+			name:      "conflicted",
+			summaries: []closeCleanupTaskSummary{{taskID: "az-3", conflicted: true}},
+			want:      "Close blocked: clean up dirty/conflicted worktree state first (az-3 conflicted)",
+		},
+		{
+			name:      "dirty and conflicted",
+			summaries: []closeCleanupTaskSummary{{taskID: "az-4", dirty: true, conflicted: true}},
+			want:      "Close blocked: clean up dirty/conflicted worktree state first (az-4 dirty/conflicted)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := pendingCloseCleanupBlockedReason(pendingCloseCleanupConfirmation{summaries: tt.summaries})
+			if got != tt.want {
+				t.Fatalf("pendingCloseCleanupBlockedReason() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPendingCloseCleanupTargetIDs(t *testing.T) {
+	tests := []struct {
+		name    string
+		pending pendingCloseCleanupConfirmation
+		want    []string
+	}{
+		{
+			name:    "close task ids win",
+			pending: pendingCloseCleanupConfirmation{taskIDs: []string{"az-1", "az-2"}, closeTaskIDs: []string{"az-2"}},
+			want:    []string{"az-2"},
+		},
+		{
+			name:    "bulk task ids",
+			pending: pendingCloseCleanupConfirmation{taskIDs: []string{"az-1", "az-2"}},
+			want:    []string{"az-1", "az-2"},
+		},
+		{
+			name:    "single task id",
+			pending: pendingCloseCleanupConfirmation{taskID: " az-3 "},
+			want:    []string{"az-3"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := pendingCloseCleanupTargetIDs(tt.pending)
+			if strings.Join(got, ",") != strings.Join(tt.want, ",") {
+				t.Fatalf("pendingCloseCleanupTargetIDs() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDirtyCloseConfirmationRefreshesAndClosesDialogBeforeBlocking(t *testing.T) {
+	m := newTestModel()
+	pending := pendingCloseCleanupConfirmation{
+		taskID:         "az-4",
+		previousStatus: domain.StatusInReview,
+		targetStatus:   domain.StatusDone,
+		summaries: []closeCleanupTaskSummary{{
+			taskID: "az-4",
+			dirty:  true,
+		}},
+	}
+	m.pendingClose = &pending
+	_ = m.overlayStack.Push(overlay.NewConfirmDialogExplicitYN("Confirm integrate and close?", "Proceed?"))
+
+	updatedAny, cmd := m.handleSelection(overlay.SelectionMsg{Key: "yes"})
+	if cmd == nil {
+		t.Fatal("expected close preflight refresh command")
+	}
+	updated := updatedAny.(Model)
+	if updated.pendingClose != nil {
+		t.Fatal("pending close confirmation should be cleared while refresh runs")
+	}
+	if !updated.overlayStack.IsEmpty() {
+		t.Fatal("dirty close preflight should close stale confirmation dialog")
+	}
+	if len(updated.toasts) == 0 || !strings.Contains(updated.toasts[len(updated.toasts)-1].Message, "Refreshing close preflight") {
+		t.Fatalf("toasts = %+v, want refresh notice", updated.toasts)
+	}
+}
+
+func TestClosePreflightRefreshCleanTargetContinuesClose(t *testing.T) {
+	m := newTestModel()
+	pending := pendingCloseCleanupConfirmation{
+		taskID:         "az-4",
+		previousStatus: domain.StatusInReview,
+		targetStatus:   domain.StatusDone,
+		summaries: []closeCleanupTaskSummary{{
+			taskID: "az-4",
+			dirty:  true,
+		}},
+	}
+
+	updatedAny, cmd := m.Update(closeCleanupConfirmPreflightMsg{
+		pending: pending,
+		summaries: []closeCleanupTaskSummary{{
+			taskID: "az-4",
+		}},
+	})
+	if cmd == nil {
+		t.Fatal("expected refreshed clean close to continue to status command")
+	}
+	updated := updatedAny.(Model)
+	if pending, ok := updated.pendingStatuses[taskIDKey("az-4")]; !ok || pending.targetStatus != domain.StatusDone {
+		t.Fatalf("pending status = %+v ok=%t, want close queued", pending, ok)
+	}
+}
+
 func TestCloseCleanupPromptShowsSingleTaskGitState(t *testing.T) {
 	prompt := formatCloseCleanupConfirmPrompt(pendingCloseCleanupConfirmation{
 		taskID:       "az-4",
