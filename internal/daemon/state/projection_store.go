@@ -16,6 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 const (
@@ -136,6 +137,12 @@ func (s *RuntimeStateStore) Close() error {
 }
 
 func (s *RuntimeStateStore) UpsertSessionState(ctx context.Context, projectID string, session Session) error {
+	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+		return s.upsertSessionStateLocked(ctx, projectID, session)
+	})
+}
+
+func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projectID string, session Session) error {
 	db, err := s.dbHandle()
 	if err != nil {
 		return err
@@ -209,6 +216,12 @@ func (s *RuntimeStateStore) UpsertSessionState(ctx context.Context, projectID st
 }
 
 func (s *RuntimeStateStore) DeleteSessionState(ctx context.Context, projectID, sessionID string) error {
+	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+		return s.deleteSessionStateLocked(ctx, projectID, sessionID)
+	})
+}
+
+func (s *RuntimeStateStore) deleteSessionStateLocked(ctx context.Context, projectID, sessionID string) error {
 	db, err := s.dbHandle()
 	if err != nil {
 		return err
@@ -228,6 +241,12 @@ func (s *RuntimeStateStore) DeleteSessionState(ctx context.Context, projectID, s
 }
 
 func (s *RuntimeStateStore) ReplaceSessionStates(ctx context.Context, projectID string, sessions []Session) error {
+	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+		return s.replaceSessionStatesLocked(ctx, projectID, sessions)
+	})
+}
+
+func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, projectID string, sessions []Session) error {
 	db, err := s.dbHandle()
 	if err != nil {
 		return err
@@ -536,6 +555,12 @@ func (s *RuntimeStateStore) ListProjectIDs(ctx context.Context) ([]string, error
 }
 
 func (s *RuntimeStateStore) UpsertWorktreeState(ctx context.Context, worktreeState WorktreeState) error {
+	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+		return s.upsertWorktreeStateLocked(ctx, worktreeState)
+	})
+}
+
+func (s *RuntimeStateStore) upsertWorktreeStateLocked(ctx context.Context, worktreeState WorktreeState) error {
 	db, err := s.dbHandle()
 	if err != nil {
 		return err
@@ -573,6 +598,12 @@ func (s *RuntimeStateStore) UpsertWorktreeState(ctx context.Context, worktreeSta
 }
 
 func (s *RuntimeStateStore) DeleteWorktreeState(ctx context.Context, projectID, issueID string) error {
+	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+		return s.deleteWorktreeStateLocked(ctx, projectID, issueID)
+	})
+}
+
+func (s *RuntimeStateStore) deleteWorktreeStateLocked(ctx context.Context, projectID, issueID string) error {
 	db, err := s.dbHandle()
 	if err != nil {
 		return err
@@ -592,6 +623,12 @@ func (s *RuntimeStateStore) DeleteWorktreeState(ctx context.Context, projectID, 
 }
 
 func (s *RuntimeStateStore) ReplaceWorktreeStates(ctx context.Context, projectID string, worktreeStates []WorktreeState) error {
+	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+		return s.replaceWorktreeStatesLocked(ctx, projectID, worktreeStates)
+	})
+}
+
+func (s *RuntimeStateStore) replaceWorktreeStatesLocked(ctx context.Context, projectID string, worktreeStates []WorktreeState) error {
 	db, err := s.dbHandle()
 	if err != nil {
 		return err
@@ -851,6 +888,12 @@ func (s *RuntimeStateStore) GetWorktreeStateByIssueID(ctx context.Context, proje
 }
 
 func (s *RuntimeStateStore) UpsertWorktreeStateGitStatus(ctx context.Context, projectID, issueID string, statusRaw json.RawMessage, updatedAt time.Time) error {
+	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+		return s.upsertWorktreeStateGitStatusLocked(ctx, projectID, issueID, statusRaw, updatedAt)
+	})
+}
+
+func (s *RuntimeStateStore) upsertWorktreeStateGitStatusLocked(ctx context.Context, projectID, issueID string, statusRaw json.RawMessage, updatedAt time.Time) error {
 	db, err := s.dbHandle()
 	if err != nil {
 		return err

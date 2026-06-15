@@ -2369,6 +2369,90 @@ func (d *Daemon) refreshExistingSessionRuntimeState(ctx context.Context, project
 	return nil
 }
 
+func (d *Daemon) refreshIssueSessionRuntimeState(ctx context.Context, projectID string, issueIDs []string) error {
+	if d == nil || d.tmux == nil || d.sessionRuntimeStateStoreIfConfigured(projectID) == nil {
+		return nil
+	}
+	projectID = d.canonicalProjectID(projectID)
+	issueSet := make(map[string]struct{}, len(issueIDs))
+	for _, issueID := range issueIDs {
+		issueID = strings.TrimSpace(issueID)
+		if issueID != "" {
+			issueSet[sessionKey(issueID)] = struct{}{}
+		}
+	}
+	if len(issueSet) == 0 {
+		return nil
+	}
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	existingSessions, err := store.ListSessionStates(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	targetSessions := make([]daemonstate.Session, 0, len(issueSet))
+	namingScope := d.sessionNamingScope(projectID)
+	for _, session := range existingSessions {
+		if _, ok := issueSet[sessionKey(sessionProjectionIssueID(session, namingScope))]; ok {
+			targetSessions = append(targetSessions, session)
+		}
+	}
+	if len(targetSessions) == 0 {
+		return nil
+	}
+	tmuxSessions, err := d.tmux.ListSessionInfos(ctx)
+	if err != nil {
+		return err
+	}
+	liveByID := make(map[string]tmux.SessionInfo, len(tmuxSessions))
+	liveIssueKeys := make(map[string]struct{}, len(tmuxSessions))
+	for _, info := range tmuxSessions {
+		name := strings.TrimSpace(info.Name)
+		if name != "" {
+			liveByID[name] = info
+		}
+		if issueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope); ok {
+			liveIssueKeys[sessionKey(issueID)] = struct{}{}
+		}
+	}
+	writer := d.runtimeProjectionStateWriter()
+	for _, session := range targetSessions {
+		sessionID := strings.TrimSpace(session.ID)
+		if sessionID == "" {
+			continue
+		}
+		if info, live := liveByID[sessionID]; live {
+			session.ObservedState = daemonstate.SessionStateRunning
+			session.TmuxAttachedCount = info.AttachedCount
+			if (session.StartedAt == nil || session.StartedAt.IsZero()) && info.CreatedAt != nil && !info.CreatedAt.IsZero() {
+				started := info.CreatedAt.UTC()
+				session.StartedAt = &started
+			}
+		} else if isAgentScopedSessionID(sessionID) {
+			issueKey := sessionKey(sessionProjectionIssueID(session, namingScope))
+			if _, parentLive := liveIssueKeys[issueKey]; parentLive {
+				session.ObservedState = daemonstate.NormalizeSessionState(session.State)
+			} else {
+				session.ObservedState = daemonstate.SessionStateStopped
+			}
+			session.TmuxAttachedCount = 0
+		} else {
+			session.ObservedState = daemonstate.SessionStateStopped
+			session.TmuxAttachedCount = 0
+		}
+		session.UpdatedAt = time.Now().UTC()
+		if writer != nil {
+			if err := writer.PersistSessionProjection(ctx, projectID, session); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := store.UpsertSessionState(ctx, projectID, session); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (d *Daemon) refreshStoppedSessionRuntimeState(ctx context.Context, projectID, issueID string, sessionIDs []string) error {
 	if d == nil || d.sessionRuntimeStateStoreIfConfigured(projectID) == nil || d.sessionStore == nil {
 		return nil

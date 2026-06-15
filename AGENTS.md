@@ -177,12 +177,14 @@ If any are missing, keep issue state `in_progress` or `open`.
 
 1. In this repo, PATH `az` is the Go implementation.
 2. Treat the installed/root `az` and `azd` binaries as production runtime assets. Worktree validation must not replace, overwrite, restart, or intentionally version-mismatch the production daemon.
-3. For validation in a worktree, prefer `go run ./cmd/az ...` and `go run ./cmd/azd ...` from that worktree. When `go run ./cmd/az ...` autostarts a linked-worktree daemon, it must use the worktree-scoped socket/lock and the same worktree's `go run ./cmd/azd` source fallback when no worktree-local `bin/azd` exists. If a compiled binary is needed, build to a worktree-local scratch path such as `.tmp/az-test/az` or `./bin/az`, and run that exact path.
-4. Do not copy worktree-built `az`/`azd` into `/Users/riordan/prog/azedarach/bin`, `/usr/local/bin`, Homebrew paths, or any shared PATH location unless the user explicitly asks for a production install/deploy.
-5. Do not run `az daemon restart`, `az daemon stop`, or `az daemon start` from a linked worktree as a validation shortcut. Use a worktree-scoped daemon path (`AZEDARACH_DAEMON_SCOPE=worktree go run ./cmd/az daemon restart`) only when the test specifically requires a live daemon restart. From the main repo, `az daemon restart` is allowed only when validating the production/root daemon path.
-6. If logs show `daemon version mismatch persisted after replacement`, assume a worktree binary has interacted with the shared production daemon. Stop and fix the isolation path or guidance; do not keep retrying replacement/restart commands.
-7. Do not bump protocol/version only to force restarts; bump versions only for contract changes.
-8. Keep CLI docs/help/examples with flags before positional arguments.
+3. Normal issue work must use one global daemon and one authority path. Linked worktree CLI commands must use the user-global daemon socket/lock by default; they must not autostart a worktree-scoped daemon for ordinary `az issue`, `az session`, `az branch`, or similar workflow commands.
+4. Use `AZEDARACH_DAEMON_SCOPE=worktree` only when intentionally testing daemon/runtime behavior from an Azedarach development worktree. In that explicit mode, `go run ./cmd/az ...` may autostart a worktree-scoped daemon using the worktree-scoped socket/lock and the same worktree's `go run ./cmd/azd` source fallback when no worktree-local `bin/azd` exists.
+5. For validation in a worktree, prefer `go run ./cmd/az ...` from that worktree. If a compiled binary is needed, build to a worktree-local scratch path such as `.tmp/az-test/az` or `./bin/az`, and run that exact path.
+6. Do not copy worktree-built `az`/`azd` into `/Users/riordan/prog/azedarach/bin`, `/usr/local/bin`, Homebrew paths, or any shared PATH location unless the user explicitly asks for a production install/deploy.
+7. Do not run `az daemon restart`, `az daemon stop`, or `az daemon start` from a linked worktree as a validation shortcut. Use a worktree-scoped daemon path (`AZEDARACH_DAEMON_SCOPE=worktree go run ./cmd/az daemon restart`) only when the test specifically requires a live daemon restart. From the main repo, `az daemon restart` is allowed only when validating the production/root daemon path.
+8. If logs show `daemon version mismatch persisted after replacement`, assume a worktree binary has interacted with the shared production daemon. Stop and fix the isolation path or guidance; do not keep retrying replacement/restart commands.
+9. Do not bump protocol/version only to force restarts; bump versions only for contract changes.
+10. Keep CLI docs/help/examples with flags before positional arguments.
 
 ## Environment Rules
 
@@ -195,6 +197,14 @@ If any are missing, keep issue state `in_progress` or `open`.
 2. Use local-only git flow by default; do not run remote sync/cleanup commands unless explicitly requested.
 3. Never delete untracked files or run `git restore` without explicit permission.
 4. Never finalize merges into `main` with `--no-verify`; resolve failing hooks/checks first (or stop and ask the user).
+
+## Pre-Completion Review Gate
+
+Before declaring implementation work done, moving an issue to `in_review`, or handing off code changes, run `$code-review-loop`.
+
+The review loop must review the actual change set, fix actionable findings, validate, and repeat until it reaches its clean-pass target. Do not wait for the user to request a separate code review/fix/re-review cycle.
+
+Skip this gate only for work that did not change code or executable behavior, such as pure explanation, read-only investigation, or issue-tracker updates. If docs, tests, config, scripts, or tooling changed in a way that can affect users or developers, run the gate.
 
 ## Session Completion Checklist
 

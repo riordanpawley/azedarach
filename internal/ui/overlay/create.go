@@ -641,7 +641,7 @@ func (c *CreateTaskOverlay) View() string {
 				{Key: "h/l or ←/→", Description: "Cycle impl combinations"},
 				{Key: "Ctrl+P", Description: "Paste image"},
 				{Key: "j/k + d", Description: "Manage attachments"},
-				{Key: "Enter", Description: "Create task"},
+				{Key: "Enter", Description: c.submitLabel()},
 				{Key: "Ctrl+E", Description: "Edit in $EDITOR"},
 				{Key: "Ctrl+K", Description: "Clear form"},
 				{Key: "Esc", Description: "Cancel"},
@@ -863,7 +863,7 @@ func (c *CreateTaskOverlay) renderFormContent(width, height int) string {
 	if c.focusIndex == focusSubmit {
 		submitStyle = c.styles.MenuItemActive
 	}
-	b.WriteString(submitStyle.Render("[ Create Task ]"))
+	b.WriteString(submitStyle.Render("[ " + c.submitLabel() + " ]"))
 	b.WriteString("\n")
 	if c.editorError != "" {
 		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f38ba8"))
@@ -872,6 +872,17 @@ func (c *CreateTaskOverlay) renderFormContent(width, height int) string {
 	}
 
 	return b.String()
+}
+
+func (c *CreateTaskOverlay) isEditMode() bool {
+	return strings.TrimSpace(c.id) != ""
+}
+
+func (c *CreateTaskOverlay) submitLabel() string {
+	if c.isEditMode() {
+		return "Save Task"
+	}
+	return "Create Task"
 }
 
 // renderTypeSelector renders the type selector with current selection
@@ -1431,6 +1442,9 @@ func parseSection(markdown, sectionName string) string {
 
 // Title returns the overlay title
 func (c *CreateTaskOverlay) Title() string {
+	if c.isEditMode() {
+		return "Edit Task"
+	}
 	return "Create New Task"
 }
 

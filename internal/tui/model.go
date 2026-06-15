@@ -115,6 +115,15 @@ type pendingTaskStatus struct {
 	updatedAt      time.Time
 }
 
+type pendingTaskDetails struct {
+	title           string
+	description     string
+	taskType        domain.TaskType
+	priority        domain.Priority
+	implementations []string
+	updatedAt       time.Time
+}
+
 type pendingOperationProgress struct {
 	operationID  string
 	kind         string
@@ -140,6 +149,7 @@ type Model struct {
 	sessions           map[string]*domain.Session
 	suppressedTasks    map[string]struct{}
 	pendingStatuses    map[string]pendingTaskStatus
+	pendingDetails     map[string]pendingTaskDetails
 	operationTaskID    map[string]string
 	pendingOpsByTask   map[string]pendingOperationProgress
 	pendingCleanupOps  map[string]pendingWorktreeCleanupConfirmation
@@ -303,6 +313,7 @@ func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 		tasks:                       []domain.Task{},
 		sessions:                    make(map[string]*domain.Session),
 		pendingStatuses:             make(map[string]pendingTaskStatus),
+		pendingDetails:              make(map[string]pendingTaskDetails),
 		operationTaskID:             make(map[string]string),
 		pendingOpsByTask:            make(map[string]pendingOperationProgress),
 		pendingCleanupOps:           make(map[string]pendingWorktreeCleanupConfirmation),
@@ -799,6 +810,11 @@ func (m Model) handleSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	task, session := m.getCurrentTaskAndSession()
 	switch msg.String() {
+	case "e":
+		if task == nil {
+			return m, nil
+		}
+		return m, m.openOverlay(overlay.NewEditTaskOverlayWithImplOptionsAndAttachmentService(*task, m.availableTaskImplementations(), m.attachmentService))
 	case "b":
 		return m, m.openMergeTargetSelection(task)
 	case "m":
@@ -3008,6 +3024,12 @@ type pendingCloseCleanupConfirmation struct {
 	summaries      []closeCleanupTaskSummary
 }
 
+type closeCleanupConfirmPreflightMsg struct {
+	pending   pendingCloseCleanupConfirmation
+	summaries []closeCleanupTaskSummary
+	err       error
+}
+
 type closeCleanupTaskSummary struct {
 	taskID      string
 	hasWorktree bool
@@ -4187,6 +4209,14 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 		defer cancel()
 
 		if msg.ID != "" {
+			details := pendingTaskDetails{
+				title:           msg.Title,
+				description:     msg.Description,
+				taskType:        msg.Type,
+				priority:        msg.Priority,
+				implementations: append([]string(nil), msg.Implementations...),
+				updatedAt:       time.Now(),
+			}
 			if m.daemonClient == nil {
 				return taskCreatedResultMsg{taskID: msg.ID, err: fmt.Errorf("daemon client unavailable"), isUpdate: true}
 			}
@@ -4197,7 +4227,10 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 				Priority:        msg.Priority,
 				Implementations: msg.Implementations,
 			})
-			return taskCreatedResultMsg{taskID: msg.ID, err: err, isUpdate: true}
+			if err != nil {
+				return taskCreatedResultMsg{taskID: msg.ID, err: err, isUpdate: true}
+			}
+			return taskCreatedResultMsg{taskID: msg.ID, isUpdate: true, updateDetails: &details}
 		}
 
 		if m.daemonClient == nil {
@@ -4382,12 +4415,43 @@ func (m Model) confirmCloseCleanupCmd(pending pendingCloseCleanupConfirmation) t
 	return m.openOverlay(overlay.NewConfirmDialogExplicitYN(title, formatCloseCleanupConfirmPrompt(pending)))
 }
 
+func (m Model) confirmCloseCleanupPreflightCmd(pending pendingCloseCleanupConfirmation) tea.Cmd {
+	return func() tea.Msg {
+		msg := closeCleanupConfirmPreflightMsg{pending: pending}
+		if m.daemonClient == nil {
+			msg.err = fmt.Errorf("daemon client unavailable")
+			return msg
+		}
+
+		taskIDs := pendingCloseCleanupTargetIDs(pending)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if len(taskIDs) > 0 {
+			if _, err := m.daemonClient.ReconcileRuntimeIssues(ctx, taskIDs); err != nil {
+				msg.err = err
+				return msg
+			}
+		}
+		snapshot, err := m.readTaskSnapshot(ctx, m.daemonClient)
+		if err != nil {
+			msg.err = err
+			return msg
+		}
+		msg.summaries = closeCleanupSummariesFromTasks(snapshot.Tasks, taskIDs)
+		return msg
+	}
+}
+
 func (m Model) closeCleanupSummaries(taskIDs []string) []closeCleanupTaskSummary {
+	return closeCleanupSummariesFromTasks(m.tasks, taskIDs)
+}
+
+func closeCleanupSummariesFromTasks(tasks []domain.Task, taskIDs []string) []closeCleanupTaskSummary {
 	if len(taskIDs) == 0 {
 		return nil
 	}
-	byID := make(map[string]domain.Task, len(m.tasks))
-	for _, task := range m.tasks {
+	byID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
 		byID[taskIDKey(task.ID.String())] = task
 	}
 	summaries := make([]closeCleanupTaskSummary, 0, len(taskIDs))
@@ -4454,11 +4518,56 @@ func formatCloseCleanupConfirmPrompt(pending pendingCloseCleanupConfirmation) st
 	lines = append(lines,
 		"",
 		"This may merge into the closest ancestor worktree branch, stop active sessions, and remove issue worktrees before closing.",
-		"Close guards still block dirty, ahead, conflicted, unmerged, or unresolved child work.",
+		"Dirty or conflicted worktrees must be cleaned before close; daemon guards still block unmerged or unresolved child work.",
 		"",
 		"Proceed?",
 	)
 	return strings.Join(lines, "\n")
+}
+
+func pendingCloseCleanupBlockedReason(pending pendingCloseCleanupConfirmation) string {
+	summaries := pending.summaries
+	if len(summaries) == 0 {
+		return ""
+	}
+	blocked := make([]string, 0, len(summaries))
+	for _, summary := range summaries {
+		if !summary.dirty && !summary.conflicted {
+			continue
+		}
+		state := "dirty"
+		if summary.conflicted {
+			state = "conflicted"
+		}
+		if summary.dirty && summary.conflicted {
+			state = "dirty/conflicted"
+		}
+		if summary.taskID == "" {
+			blocked = append(blocked, state)
+			continue
+		}
+		blocked = append(blocked, fmt.Sprintf("%s %s", summary.taskID, state))
+	}
+	if len(blocked) == 0 {
+		return ""
+	}
+	if len(blocked) > 3 {
+		blocked = append(blocked[:3], fmt.Sprintf("%d more", len(blocked)-3))
+	}
+	return "Close blocked: clean up dirty/conflicted worktree state first (" + strings.Join(blocked, ", ") + ")"
+}
+
+func pendingCloseCleanupTargetIDs(pending pendingCloseCleanupConfirmation) []string {
+	switch {
+	case len(pending.closeTaskIDs) > 0:
+		return append([]string(nil), pending.closeTaskIDs...)
+	case len(pending.taskIDs) > 0:
+		return append([]string(nil), pending.taskIDs...)
+	case strings.TrimSpace(pending.taskID) != "":
+		return []string{strings.TrimSpace(pending.taskID)}
+	default:
+		return nil
+	}
 }
 
 func formatCloseCleanupGitStateLines(summaries []closeCleanupTaskSummary, targetCount int, bulk bool) []string {
@@ -4882,6 +4991,90 @@ func (m *Model) applyPendingStatusOverlays() {
 	}
 }
 
+func (m *Model) markPendingTaskDetails(taskID string, details pendingTaskDetails) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return
+	}
+	if m.pendingDetails == nil {
+		m.pendingDetails = make(map[string]pendingTaskDetails)
+	}
+	if details.updatedAt.IsZero() {
+		details.updatedAt = time.Now()
+	}
+	details.implementations = append([]string(nil), details.implementations...)
+	m.pendingDetails[taskIDKey(taskID)] = details
+}
+
+func (m *Model) applyPendingTaskDetailOverlays() {
+	if len(m.pendingDetails) == 0 {
+		return
+	}
+	for i := range m.tasks {
+		key := taskIDKey(m.tasks[i].ID.String())
+		pending, ok := m.pendingDetails[key]
+		if !ok {
+			continue
+		}
+		if taskDetailsMatchPending(m.tasks[i], pending) {
+			delete(m.pendingDetails, key)
+			continue
+		}
+		m.tasks[i].Title = pending.title
+		m.tasks[i].Description = pending.description
+		m.tasks[i].Type = pending.taskType
+		m.tasks[i].Priority = pending.priority
+		m.tasks[i].Implementations = append([]string(nil), pending.implementations...)
+	}
+}
+
+func (m *Model) reconcilePendingTaskDetails() {
+	if len(m.pendingDetails) == 0 {
+		return
+	}
+	taskByID := make(map[string]domain.Task, len(m.tasks))
+	for _, task := range m.tasks {
+		taskByID[task.ID.String()] = task
+	}
+
+	const stalePendingTTL = 2 * time.Minute
+	now := time.Now()
+	for key, pending := range m.pendingDetails {
+		task, ok := taskByID[string(key)]
+		if !ok {
+			delete(m.pendingDetails, key)
+			continue
+		}
+		if taskDetailsMatchPending(task, pending) {
+			delete(m.pendingDetails, key)
+			continue
+		}
+		if !pending.updatedAt.IsZero() && now.Sub(pending.updatedAt) > stalePendingTTL {
+			delete(m.pendingDetails, key)
+		}
+	}
+}
+
+func taskDetailsMatchPending(task domain.Task, pending pendingTaskDetails) bool {
+	return task.Title == pending.title &&
+		task.Description == pending.description &&
+		task.Type == pending.taskType &&
+		task.Priority == pending.priority &&
+		stringSlicesEqual(task.Implementations, pending.implementations)
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (m *Model) reconcilePendingStatuses() {
 	if len(m.pendingStatuses) == 0 {
 		return
@@ -4992,6 +5185,7 @@ type taskCreatedResultMsg struct {
 	taskID            string
 	err               error
 	isUpdate          bool
+	updateDetails     *pendingTaskDetails
 	attachmentWarning string
 }
 

@@ -57,7 +57,7 @@ func marshalTaskListBodyForProject(projectID string, tasks []domain.Task) ([]byt
 	})
 }
 
-func TestNewDependenciesAtUsesBaseProjectAndWorktreeRuntimeForLinkedWorktree(t *testing.T) {
+func TestNewDependenciesAtUsesBaseProjectAndGlobalRuntimeForLinkedWorktree(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
 	worktree := filepath.Join(base, "wt")
@@ -84,8 +84,8 @@ func TestNewDependenciesAtUsesBaseProjectAndWorktreeRuntimeForLinkedWorktree(t *
 	if deps.RepoDir != repo {
 		t.Fatalf("RepoDir = %q, want %q", deps.RepoDir, repo)
 	}
-	if deps.RuntimeRepoDir != worktree {
-		t.Fatalf("RuntimeRepoDir = %q, want %q", deps.RuntimeRepoDir, worktree)
+	if deps.RuntimeRepoDir != repo {
+		t.Fatalf("RuntimeRepoDir = %q, want %q", deps.RuntimeRepoDir, repo)
 	}
 	wantProjectID, err := config.ProjectIDForRoot(repo)
 	if err != nil {
@@ -94,12 +94,12 @@ func TestNewDependenciesAtUsesBaseProjectAndWorktreeRuntimeForLinkedWorktree(t *
 	if deps.ProjectID != wantProjectID {
 		t.Fatalf("ProjectID = %q, want %q", deps.ProjectID, wantProjectID)
 	}
-	if deps.DaemonSocket != config.ScopedDaemonSocketPath(start) {
-		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.ScopedDaemonSocketPath(start))
+	if deps.DaemonSocket != config.GlobalDaemonSocketPath() {
+		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.GlobalDaemonSocketPath())
 	}
 }
 
-func TestNewDependenciesAtUsesScopedRuntimeForLinkedWorktreeWithoutEnv(t *testing.T) {
+func TestNewDependenciesAtUsesGlobalRuntimeForLinkedWorktreeWithoutEnv(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
 	worktree := filepath.Join(base, "wt")
@@ -125,15 +125,15 @@ func TestNewDependenciesAtUsesScopedRuntimeForLinkedWorktreeWithoutEnv(t *testin
 	if err != nil {
 		t.Fatalf("NewDependenciesAt() error = %v", err)
 	}
-	if deps.DaemonSocket != config.ScopedDaemonSocketPath(start) {
-		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.ScopedDaemonSocketPath(start))
+	if deps.DaemonSocket != config.GlobalDaemonSocketPath() {
+		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.GlobalDaemonSocketPath())
 	}
-	if deps.RuntimeRepoDir != worktree {
-		t.Fatalf("RuntimeRepoDir = %q, want %q", deps.RuntimeRepoDir, worktree)
+	if deps.RuntimeRepoDir != repo {
+		t.Fatalf("RuntimeRepoDir = %q, want %q", deps.RuntimeRepoDir, repo)
 	}
 }
 
-func TestNewDependenciesAtUsesScopedSocketForLinkedWorktreeByDefault(t *testing.T) {
+func TestNewDependenciesAtUsesScopedSocketForLinkedWorktreeWhenExplicit(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
 	worktree := filepath.Join(base, "wt")
@@ -153,7 +153,7 @@ func TestNewDependenciesAtUsesScopedSocketForLinkedWorktreeByDefault(t *testing.
 	}
 
 	t.Setenv("PATH", "")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
 	deps, err := NewDependenciesAt(config.DefaultConfig(), start)
 	if err != nil {
@@ -4330,6 +4330,23 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 			},
 		},
 		{
+			name: "update description",
+			args: []string{"--description", "New details", "az-1"},
+			want: IssueUpdateOptions{
+				IssueID:        "az-1",
+				Description:    "New details",
+				DescriptionSet: true,
+			},
+		},
+		{
+			name: "clear description",
+			args: []string{"--description", "", "az-1"},
+			want: IssueUpdateOptions{
+				IssueID:        "az-1",
+				DescriptionSet: true,
+			},
+		},
+		{
 			name: "update type and priority",
 			args: []string{"--type", "epic", "--priority", "P0", "az-1"},
 			want: func() IssueUpdateOptions {
@@ -4436,7 +4453,7 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseIssueUpdateArgs() error = %v", err)
 			}
-			if got.IssueID != tt.want.IssueID || got.Title != tt.want.Title || got.Description != tt.want.Description || got.AppendNotes != tt.want.AppendNotes {
+			if got.IssueID != tt.want.IssueID || got.Title != tt.want.Title || got.Description != tt.want.Description || got.DescriptionSet != tt.want.DescriptionSet || got.AppendNotes != tt.want.AppendNotes {
 				t.Fatalf("ParseIssueUpdateArgs() = %+v, want %+v", got, tt.want)
 			}
 			if (got.Type == nil) != (tt.want.Type == nil) {
@@ -7420,6 +7437,81 @@ func TestIssueUpdateCommandUsesDaemonTaskUpdateCommand(t *testing.T) {
 	}
 	if updateBody.Title != "New" || updateBody.Description != "OldDesc" {
 		t.Fatalf("update body = %+v, want new title with preserved description", updateBody)
+	}
+	if !strings.Contains(updateOut, "Updated issue: az-1") {
+		t.Fatalf("update output = %q", updateOut)
+	}
+}
+
+func TestIssueUpdateCommandCanClearDescription(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	var gotUpdateReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGet:
+					body, err := marshalTaskListBody([]domain.Task{
+						{
+							ID:          "az-1",
+							Title:       "Old",
+							Description: "OldDesc",
+							Type:        domain.TypeTask,
+							Priority:    domain.P2,
+							Status:      domain.StatusOpen,
+							CreatedAt:   now,
+							UpdatedAt:   now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskUpdate:
+					gotUpdateReq = req
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	updateOut := captureStdout(t, func() error {
+		return IssueUpdateCommand(deps, IssueUpdateOptions{
+			IssueID:        "az-1",
+			DescriptionSet: true,
+		})
+	})
+	if gotUpdateReq.Command != daemonclient.CommandTaskUpdate {
+		t.Fatalf("update command = %q, want %q", gotUpdateReq.Command, daemonclient.CommandTaskUpdate)
+	}
+	var updateBody struct {
+		TaskID string `json:"task_id"`
+		daemonclient.TaskUpdateParams
+	}
+	if err := json.Unmarshal(gotUpdateReq.Body, &updateBody); err != nil {
+		t.Fatalf("unmarshal update body: %v", err)
+	}
+	if updateBody.TaskID != "az-1" || updateBody.Title != "Old" || updateBody.Description != "" {
+		t.Fatalf("update body = %+v, want preserved title and cleared description", updateBody)
 	}
 	if !strings.Contains(updateOut, "Updated issue: az-1") {
 		t.Fatalf("update output = %q", updateOut)

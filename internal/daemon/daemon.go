@@ -279,12 +279,12 @@ func New(cfg Config) *Daemon {
 	} else if repoName := protocol.NormalizeProjectID(filepath.Base(strings.TrimSpace(cfg.RepoDir))); repoName != "" {
 		canonicalProjectID = repoName
 	}
-	d.issueClientsByRoot[strings.TrimSpace(cfg.RepoDir)] = issuesClient
+	d.issueClientsByRoot[daemonStoreRootKey(cfg.RepoDir)] = issuesClient
 	d.issueClientsByProject[canonicalProjectID] = issuesClient
 	baseWorktreeManager := git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger)
 	d.worktreeManagersByRoot[strings.TrimSpace(cfg.RepoDir)] = baseWorktreeManager
 	d.worktreeManagersByProject[canonicalProjectID] = baseWorktreeManager
-	d.runtimeStoresByRoot[strings.TrimSpace(runtimeRepoDir)] = runtimeStateStore
+	d.runtimeStoresByRoot[daemonStoreRootKey(runtimeRepoDir)] = runtimeStateStore
 	d.runtimeStoresByProject[canonicalProjectID] = runtimeStateStore
 	specService.daemon = d
 	specHandler := daemonhandlers.NewSpecHandler(specService)
@@ -1170,9 +1170,7 @@ func (d *Daemon) refreshIssueWorktreeState(ctx context.Context, projectID, issue
 	if !found || strings.TrimSpace(projection.Path) == "" {
 		return
 	}
-	refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if _, err := d.gitStatusAdapter.refreshGitStatusManual(refreshCtx, projectID, projection.Path); err != nil && d.cfg.Logger != nil {
+	if _, err := d.gitStatusAdapter.queueGitStatusRefresh(projectID, projection.Path, reconcilePriorityVisible, "issue-read"); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Debug("issue worktree refresh failed", "project_id", projectID, "issue_id", issueID, "worktree", projection.Path, "error", err)
 	}
 }

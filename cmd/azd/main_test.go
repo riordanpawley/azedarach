@@ -25,7 +25,7 @@ func TestResolveScopedWorktreeWatchPathUsesRepoDir(t *testing.T) {
 		t.Fatalf("WriteFile(worktree .git): %v", err)
 	}
 
-	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
 	t.Setenv("PATH", "")
 	if got := resolveScopedWorktreeWatchPath(nested); got != worktree {

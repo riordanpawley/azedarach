@@ -95,3 +95,4 @@ coverage/
 /.runtime
 **/daemon.lock
 /docs/spec
+/.tmp/az-test

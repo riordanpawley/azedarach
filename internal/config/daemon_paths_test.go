@@ -109,17 +109,17 @@ func TestDaemonPathsDefaultToGlobal(t *testing.T) {
 	}
 }
 
-func TestDaemonPathsDefaultToScopedForLinkedWorktree(t *testing.T) {
+func TestDaemonPathsDefaultToGlobalForLinkedWorktree(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
 	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
 	_, worktree := makeLinkedDaemonPathWorktreeWithModule(t, "github.com/riordanpawley/azedarach")
 
-	if got := DaemonSocketPathFor(worktree); got != ScopedDaemonSocketPath(worktree) {
-		t.Fatalf("DaemonSocketPathFor() = %q, want %q", got, ScopedDaemonSocketPath(worktree))
+	if got := DaemonSocketPathFor(worktree); got != GlobalDaemonSocketPath() {
+		t.Fatalf("DaemonSocketPathFor() = %q, want %q", got, GlobalDaemonSocketPath())
 	}
-	if got := DaemonLockPathFor(worktree); got != ScopedDaemonLockPath(worktree) {
-		t.Fatalf("DaemonLockPathFor() = %q, want %q", got, ScopedDaemonLockPath(worktree))
+	if got := DaemonLockPathFor(worktree); got != GlobalDaemonLockPath() {
+		t.Fatalf("DaemonLockPathFor() = %q, want %q", got, GlobalDaemonLockPath())
 	}
 }
 
@@ -150,7 +150,7 @@ func TestDaemonPathsGlobalScopeOverridesLinkedWorktreeDefault(t *testing.T) {
 	}
 }
 
-func TestDaemonPathsUseScopedForLinkedWorktreeWithoutEnv(t *testing.T) {
+func TestDaemonPathsUseGlobalForLinkedWorktreeWithoutEnv(t *testing.T) {
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
 	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
 	t.Setenv("PATH", "")
@@ -172,11 +172,11 @@ func TestDaemonPathsUseScopedForLinkedWorktreeWithoutEnv(t *testing.T) {
 		t.Fatalf("WriteFile(go.mod): %v", err)
 	}
 
-	if got := DaemonSocketPathFor(nested); got != ScopedDaemonSocketPath(nested) {
-		t.Fatalf("DaemonSocketPathFor() = %q, want %q", got, ScopedDaemonSocketPath(nested))
+	if got := DaemonSocketPathFor(nested); got != GlobalDaemonSocketPath() {
+		t.Fatalf("DaemonSocketPathFor() = %q, want %q", got, GlobalDaemonSocketPath())
 	}
-	if got := DaemonLockPathFor(nested); got != ScopedDaemonLockPath(nested) {
-		t.Fatalf("DaemonLockPathFor() = %q, want %q", got, ScopedDaemonLockPath(nested))
+	if got := DaemonLockPathFor(nested); got != GlobalDaemonLockPath() {
+		t.Fatalf("DaemonLockPathFor() = %q, want %q", got, GlobalDaemonLockPath())
 	}
 }
 

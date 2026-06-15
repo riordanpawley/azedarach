@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -352,9 +353,6 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task get requested", "project_id", projectID, "task_id", taskID)
 	}
-	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("task get session runtime refresh failed", "project_id", projectID, "task_id", taskID, "error", err)
-	}
 	refreshIssueStartedAt := time.Now()
 	d.refreshIssueWorktreeState(ctx, projectID, taskID)
 	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.issue_worktree_refresh", refreshIssueStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
@@ -376,6 +374,23 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 			d.cfg.Logger.Warn("daemon task get failed", "project_id", projectID, "task_id", taskID, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
 		}
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	contextTaskIDs := taskIDsFromTasks(tasks)
+	refreshSessionStartedAt := time.Now()
+	if err := d.refreshIssueSessionRuntimeState(ctx, projectID, contextTaskIDs); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("task get session runtime refresh failed", "project_id", projectID, "task_id", taskID, "context_task_count", len(contextTaskIDs), "error", err)
+	}
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.issue_session_refresh", refreshSessionStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "context_task_count", len(contextTaskIDs))
+	if len(contextTaskIDs) > 0 {
+		queryStartedAt = time.Now()
+		tasks, err = issueClient.GetWithDependencyContextRuntime(ctx, projectID, taskID)
+		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.issue_store_get_dependency_context_runtime_after_session_refresh", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("daemon task get reload after session refresh failed", "project_id", projectID, "task_id", taskID, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
+			}
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
 	}
 	freshnessStartedAt := time.Now()
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
@@ -426,6 +441,21 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 		}
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
+	contextTaskIDs := taskIDsFromTasks(tasks)
+	refreshSessionStartedAt := time.Now()
+	if err := d.refreshIssueSessionRuntimeState(ctx, projectID, contextTaskIDs); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("task get-many session runtime refresh failed", "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(contextTaskIDs), "error", err)
+	}
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get_many.issue_session_refresh", refreshSessionStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(contextTaskIDs))
+	if len(contextTaskIDs) > 0 {
+		tasks, err = issueClient.GetManyWithDependencyContextRuntime(ctx, projectID, taskIDs)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("daemon task get-many reload after session refresh failed", "project_id", projectID, "task_count", len(taskIDs), "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
+			}
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+	}
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
 	payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), lastCheckedAt, freshness, tasks, false)
 	body, err := json.Marshal(payload)
@@ -456,6 +486,14 @@ func uniqueTrimmedTaskIDs(ids []string) []string {
 		out = append(out, id)
 	}
 	return out
+}
+
+func taskIDsFromTasks(tasks []domain.Task) []string {
+	ids := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		ids = append(ids, task.ID.String())
+	}
+	return uniqueTrimmedTaskIDs(ids)
 }
 
 func (d *Daemon) readFreshTaskListSnapshotCache(projectID string) (taskListSnapshotCacheEntry, bool) {
@@ -1085,6 +1123,9 @@ func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvel
 		ParentID:        cmd.ParentID,
 	})
 	if err != nil {
+		if issues.IsSQLiteBusy(err) {
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
+		}
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	taskID := task.ID.String()
@@ -1200,6 +1241,9 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		result.WorktreeRemoved = true
 	}
 
+	if err := d.repairStaleCloseRuntimeProjections(ctx, projectID, taskID); err != nil {
+		return result, fmt.Errorf("repair runtime projections before closing %s: %w", taskID, err)
+	}
 	task, err := issueClient.UpdateWithRuntime(ctx, projectID, taskID, domain.StatusDone)
 	if err != nil {
 		return result, err
@@ -1208,6 +1252,109 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	result.Revision = rev
 	d.publishTaskEvent(req, protocol.EventTaskUpdated, rev, taskEventBodyFromTask(projectID, task))
 	return result, nil
+}
+
+func (d *Daemon) repairStaleCloseRuntimeProjections(ctx context.Context, projectID, taskID string) error {
+	store := d.runtimeStateStoreForProject(projectID)
+	if store == nil {
+		return nil
+	}
+	projectIDs, err := store.ListProjectIDs(ctx)
+	if err != nil {
+		return err
+	}
+	liveSessions, sessionsLoaded, err := d.liveTmuxSessionSet(ctx)
+	if err != nil {
+		return err
+	}
+	blocked := make([]string, 0)
+	for _, projectionProjectID := range projectIDs {
+		worktrees, err := store.ListWorktreeStates(ctx, projectionProjectID)
+		if err != nil {
+			return err
+		}
+		for _, worktree := range worktrees {
+			if !naming.IssueIDsEqual(worktree.IssueID, taskID) || strings.TrimSpace(worktree.Path) == "" {
+				continue
+			}
+			stale, err := closeWorktreeProjectionIsStale(worktree)
+			if err != nil {
+				return err
+			}
+			if stale {
+				if err := store.DeleteWorktreeState(ctx, projectionProjectID, taskID); err != nil {
+					return err
+				}
+				continue
+			}
+			blocked = append(blocked, fmt.Sprintf("worktree %s:%s", projectionProjectID, worktree.Path))
+		}
+
+		sessions, err := store.ListSessionStates(ctx, projectionProjectID)
+		if err != nil {
+			return err
+		}
+		for _, session := range sessions {
+			if !naming.IssueIDsEqual(session.IssueID, taskID) || closeSessionProjectionStopped(session) {
+				continue
+			}
+			if sessionsLoaded {
+				if _, live := liveSessions[session.ID]; !live {
+					session.State = daemonstate.SessionStateStopped
+					session.ObservedState = daemonstate.SessionStateStopped
+					session.TmuxAttachedCount = 0
+					session.UpdatedAt = time.Now().UTC()
+					if err := store.UpsertSessionState(ctx, projectionProjectID, session); err != nil {
+						return err
+					}
+					continue
+				}
+			}
+			blocked = append(blocked, fmt.Sprintf("session %s:%s", projectionProjectID, session.ID))
+		}
+	}
+	if len(blocked) > 0 {
+		return fmt.Errorf("active runtime projection aliases remain: %s", strings.Join(blocked, ", "))
+	}
+	return nil
+}
+
+func closeWorktreeProjectionIsStale(worktree daemonstate.WorktreeState) (bool, error) {
+	path := strings.TrimSpace(worktree.Path)
+	if path == "" {
+		return true, nil
+	}
+	if _, err := os.Stat(path); err == nil {
+		return false, nil
+	} else if os.IsNotExist(err) {
+		return true, nil
+	} else {
+		return false, fmt.Errorf("inspect worktree projection %s/%s: %w", worktree.ProjectID, path, err)
+	}
+}
+
+func closeSessionProjectionStopped(session daemonstate.Session) bool {
+	state := daemonstate.NormalizeSessionState(session.State)
+	observed := daemonstate.NormalizeSessionState(session.ObservedState)
+	return state == daemonstate.SessionStateStopped && (observed == "" || observed == daemonstate.SessionStateStopped)
+}
+
+func (d *Daemon) liveTmuxSessionSet(ctx context.Context) (map[string]struct{}, bool, error) {
+	if d.tmux == nil {
+		return nil, false, nil
+	}
+	sessions, err := d.tmux.ListSessions(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	out := make(map[string]struct{}, len(sessions))
+	for _, session := range sessions {
+		session = strings.TrimSpace(session)
+		if session != "" {
+			out[session] = struct{}{}
+		}
+	}
+	return out, true, nil
 }
 
 type taskCloseIntegrationResult struct {

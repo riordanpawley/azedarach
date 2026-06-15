@@ -50,8 +50,8 @@ func GlobalDaemonLockPath() string {
 }
 
 // DaemonSocketPathFor returns either the global or worktree-scoped daemon socket
-// path depending on runtime mode. Azedarach development worktrees default to a
-// scoped daemon so repo validation does not fight over the user-global daemon.
+// path depending on runtime mode. Scoped daemons are opt-in for daemon/runtime
+// development; normal CLI use goes through the user-global singleton daemon.
 func DaemonSocketPathFor(startPath string) string {
 	if UseScopedDaemonRuntimeFor(startPath) {
 		return ScopedDaemonSocketPath(startPath)
@@ -95,8 +95,9 @@ func daemonScopeID(path string) string {
 
 // UseScopedDaemonRuntimeFor reports whether daemon runtime assets should be
 // scoped away from the user-global daemon while developing Azedarach itself.
-// Scoped daemons are only for Azedarach linked worktrees, where a worktree can
-// run a changed azd without replacing or protocol-conflicting with production.
+// Scoped daemons are only for explicitly requested Azedarach linked worktree
+// validation, where a worktree can run a changed azd without replacing or
+// protocol-conflicting with production.
 func UseScopedDaemonRuntimeFor(startPath string) bool {
 	mode := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
 	switch mode {
@@ -105,7 +106,7 @@ func UseScopedDaemonRuntimeFor(startPath string) bool {
 	case "global", "shared", "user", "off", "none":
 		return false
 	}
-	return IsAzedarachDevelopmentWorktree(startPath)
+	return false
 }
 
 func IsAzedarachDevelopmentWorktree(startPath string) bool {

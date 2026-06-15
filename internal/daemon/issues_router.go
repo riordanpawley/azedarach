@@ -53,14 +53,22 @@ func (d *Daemon) issueClientForProject(projectID string) *issues.Client {
 		}
 		return nil
 	}
+	repoKey := daemonStoreRootKey(repoDir)
 
 	if client, ok := d.issueClientsByRoot[repoDir]; ok && client != nil {
+		d.issueClientsByProject[projectID] = client
+		if repoKey != repoDir {
+			d.issueClientsByRoot[repoKey] = client
+		}
+		return client
+	}
+	if client, ok := d.issueClientsByRoot[repoKey]; ok && client != nil {
 		d.issueClientsByProject[projectID] = client
 		return client
 	}
 
 	client := issues.NewClient(repoDir, d.cfg.Logger)
-	d.issueClientsByRoot[repoDir] = client
+	d.issueClientsByRoot[repoKey] = client
 	d.issueClientsByProject[projectID] = client
 	if d.issues == nil {
 		d.issues = client
@@ -185,6 +193,14 @@ func (d *Daemon) closeIssueClients() {
 			d.cfg.Logger.Warn("failed to close issue store", "repo_dir", repoDir, "error", err)
 		}
 	}
+}
+
+func daemonStoreRootKey(repoDir string) string {
+	repoDir = strings.TrimSpace(repoDir)
+	if resolved, err := appconfig.ResolveProjectRoot(repoDir); err == nil && strings.TrimSpace(resolved) != "" {
+		return strings.TrimSpace(resolved)
+	}
+	return repoDir
 }
 
 func (d *Daemon) issueClientFromContext(ctx context.Context) (*issues.Client, string, error) {

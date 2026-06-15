@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1268,6 +1269,299 @@ func TestTaskCloseCommandUpdatesStatusThroughDaemon(t *testing.T) {
 	}
 	if task.Status != domain.StatusDone {
 		t.Fatalf("task status = %s, want done", task.Status)
+	}
+}
+
+func TestTaskCloseRepairsLegacyProjectRuntimeProjectionBeforeFinalStatusUpdate(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-current"
+	legacyProjectID := "proj-close-legacy"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Close with legacy projection alias",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: legacyProjectID,
+		IssueID:   taskID,
+		Path:      filepath.Join(t.TempDir(), "missing", taskID),
+		Branch:    "riordan/" + taskID + "/legacy",
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed legacy worktree projection: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: ".", Logger: logger, BaseBranch: "main"},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+
+	body, err := json.Marshal(taskCloseRequest{TaskID: taskID})
+	if err != nil {
+		t.Fatalf("marshal close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-legacy-projection",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.close",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.close response = %+v, want success", resp)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get closed issue: %v", err)
+	}
+	if task.Status != domain.StatusDone {
+		t.Fatalf("task status = %s, want %s", task.Status, domain.StatusDone)
+	}
+	if _, found, err := runtimeStore.GetWorktreeStateByIssueID(ctx, legacyProjectID, taskID); err != nil {
+		t.Fatalf("get legacy worktree projection: %v", err)
+	} else if found {
+		t.Fatalf("legacy worktree projection still present for %s", taskID)
+	}
+}
+
+func TestTaskCloseRepairsVerifiedStaleLegacyProjectSessionProjection(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-current"
+	legacyProjectID := "proj-close-legacy-session-stale"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Close with stale legacy session alias",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	sessionID := "legacy-" + taskID
+	if err := runtimeStore.UpsertSessionState(ctx, legacyProjectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   taskID,
+		State:     daemonstate.SessionStateRunning,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed stale legacy session projection: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: ".", Logger: logger, BaseBranch: "main"},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		tmux:     tmux.NewClient(&recordingGitRunner{runFn: func(args ...string) (string, error) { return "", nil }}, logger),
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+
+	body, err := json.Marshal(taskCloseRequest{TaskID: taskID})
+	if err != nil {
+		t.Fatalf("marshal close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-stale-legacy-session",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.close",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.close response = %+v, want success", resp)
+	}
+	session, found, err := runtimeStore.GetSessionState(ctx, legacyProjectID, sessionID)
+	if err != nil {
+		t.Fatalf("get stale legacy session projection: %v", err)
+	}
+	if !found {
+		t.Fatalf("stale legacy session projection missing for %s", sessionID)
+	}
+	if session.State != daemonstate.SessionStateStopped || session.ObservedState != daemonstate.SessionStateStopped || session.TmuxAttachedCount != 0 {
+		t.Fatalf("legacy session projection = %+v, want stopped repair marker", session)
+	}
+}
+
+func TestTaskCloseBlocksLiveLegacyProjectRuntimeProjection(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-current"
+	legacyProjectID := "proj-close-legacy-live"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Close with live legacy projection alias",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	worktreePath := filepath.Join(t.TempDir(), "legacy-live-"+taskID)
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatalf("mkdir legacy worktree: %v", err)
+	}
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: legacyProjectID,
+		IssueID:   taskID,
+		Path:      worktreePath,
+		Branch:    "riordan/" + taskID + "/legacy-live",
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed live legacy worktree projection: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: ".", Logger: logger, BaseBranch: "main"},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+
+	body, err := json.Marshal(taskCloseRequest{TaskID: taskID})
+	if err != nil {
+		t.Fatalf("marshal close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-live-legacy-projection",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.close",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "active runtime projection aliases remain") {
+		t.Fatalf("task.close response = %+v, want live alias blocker", resp)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get issue after blocked close: %v", err)
+	}
+	if task.Status != domain.StatusInReview {
+		t.Fatalf("task status = %s, want %s", task.Status, domain.StatusInReview)
+	}
+	if _, found, err := runtimeStore.GetWorktreeStateByIssueID(ctx, legacyProjectID, taskID); err != nil {
+		t.Fatalf("get live legacy worktree projection: %v", err)
+	} else if !found {
+		t.Fatalf("live legacy worktree projection was removed for %s", taskID)
+	}
+}
+
+func TestTaskCloseBlocksUnverifiedLegacyProjectSessionProjection(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-current"
+	legacyProjectID := "proj-close-legacy-session"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Close with unverified legacy session alias",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if err := runtimeStore.UpsertSessionState(ctx, legacyProjectID, daemonstate.Session{
+		ID:        "legacy-" + taskID,
+		IssueID:   taskID,
+		State:     daemonstate.SessionStateRunning,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed legacy session projection: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: ".", Logger: logger, BaseBranch: "main"},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+
+	body, err := json.Marshal(taskCloseRequest{TaskID: taskID})
+	if err != nil {
+		t.Fatalf("marshal close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-unverified-legacy-session",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.close",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "active runtime projection aliases remain") {
+		t.Fatalf("task.close response = %+v, want unverified session alias blocker", resp)
+	}
+	session, found, err := runtimeStore.GetSessionState(ctx, legacyProjectID, "legacy-"+taskID)
+	if err != nil {
+		t.Fatalf("get legacy session projection: %v", err)
+	}
+	if !found || session.State != daemonstate.SessionStateRunning {
+		t.Fatalf("legacy session projection = %+v found=%t, want running row preserved", session, found)
 	}
 }
 
@@ -3087,14 +3381,47 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 		t.Fatalf("add dependency: %v", err)
 	}
 
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	firstSessionID := naming.CanonicalSessionID(projectID, firstID)
+	secondSessionID := naming.CanonicalSessionID(projectID, secondID)
+	staleUpdatedAt := time.Date(2026, time.April, 2, 10, 0, 0, 0, time.UTC)
+	for _, row := range []struct {
+		name      string
+		sessionID string
+		issueID   string
+	}{
+		{name: "requested", sessionID: secondSessionID, issueID: secondID},
+		{name: "context", sessionID: firstSessionID, issueID: firstID},
+	} {
+		if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			ID:            row.sessionID,
+			IssueID:       row.issueID,
+			State:         daemonstate.SessionStateRunning,
+			ObservedState: daemonstate.SessionStateStopped,
+			UpdatedAt:     staleUpdatedAt,
+		}); err != nil {
+			t.Fatalf("seed %s session state: %v", row.name, err)
+		}
+	}
+	tmuxRunner := &testTmuxRunner{
+		sessions: map[string]bool{
+			firstSessionID:  true,
+			secondSessionID: true,
+		},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+
 	d := &Daemon{
-		cfg: Config{RepoDir: ".", Logger: logger},
+		cfg:  Config{RepoDir: ".", Logger: logger},
+		tmux: tmux.NewClient(tmuxRunner, logger),
 		issueClientsByProject: map[string]*issues.Client{
 			projectID: issuesClient,
 		},
 		sessionStore:           daemonstate.NewStore(),
 		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{},
-		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
 		revision:               map[string]uint64{projectID: 9},
 	}
 
@@ -3142,6 +3469,27 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 	}
 	if _, ok := taskByID[firstID]; !ok {
 		t.Fatalf("dependency context missing first issue: %+v", payload.Tasks)
+	}
+	for _, row := range []struct {
+		name      string
+		sessionID string
+	}{
+		{name: "requested", sessionID: secondSessionID},
+		{name: "context", sessionID: firstSessionID},
+	} {
+		session, found, err := runtimeStore.GetSessionState(ctx, projectID, row.sessionID)
+		if err != nil {
+			t.Fatalf("load %s session state: %v", row.name, err)
+		}
+		if !found {
+			t.Fatalf("%s session state missing", row.name)
+		}
+		if session.ObservedState != daemonstate.SessionStateRunning {
+			t.Fatalf("%s observed state = %s, want running", row.name, session.ObservedState)
+		}
+		if !session.UpdatedAt.After(staleUpdatedAt) {
+			t.Fatalf("%s updated_at = %s, want after %s", row.name, session.UpdatedAt, staleUpdatedAt)
+		}
 	}
 }
 
@@ -3427,7 +3775,7 @@ func TestHandleTaskSnapshotExportUsesProjectionSessions(t *testing.T) {
 	}
 }
 
-func TestHandleTaskGetRefreshesOnlyRequestedIssueWorktree(t *testing.T) {
+func TestHandleTaskGetTriggersOnlyRequestedIssueWorktreeRefreshAsync(t *testing.T) {
 	ctx := context.Background()
 	projectID := protocol.DefaultProjectID
 	repoDir := t.TempDir()
@@ -3533,18 +3881,11 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueWorktree(t *testing.T) {
 		t.Fatal("timed out waiting for target issue worktree refresh")
 	}
 
-	select {
-	case result := <-resultCh:
-		t.Fatalf("task.get returned before git status refresh completed: %+v", result.resp)
-	case <-time.After(100 * time.Millisecond):
-	}
-	close(statusRelease)
-
 	var result taskGetResult
 	select {
 	case result = <-resultCh:
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for task.get result after git status refresh")
+		t.Fatal("task.get did not return while git status refresh was still running")
 	}
 	if result.err != nil {
 		t.Fatalf("handleTaskGet returned error: %v", result.err)
@@ -3560,17 +3901,178 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueWorktree(t *testing.T) {
 	if len(payload.Tasks) != 1 {
 		t.Fatalf("response task count = %d, want 1", len(payload.Tasks))
 	}
-	if !payload.Tasks[0].HasUncommittedChanges {
-		t.Fatalf("response task git state was not refreshed: %+v", payload.Tasks[0])
-	}
-	if payload.Tasks[0].GitAdditions != 1 {
-		t.Fatalf("response git additions = %d, want 1", payload.Tasks[0].GitAdditions)
-	}
+	close(statusRelease)
 
 	select {
 	case got := <-statusPaths:
 		t.Fatalf("unexpected extra worktree refresh for %q", got)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
+	ctx := context.Background()
+	projectID := "azedarach"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	_, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "schema seed",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create schema seed issue: %v", err)
+	}
+
+	targetID := "bra"
+	contextID := "brb"
+	dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(5000)&_txlock=immediate")
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, row := range []struct {
+		id    string
+		title string
+	}{
+		{id: targetID, title: "target issue"},
+		{id: contextID, title: "context issue"},
+	} {
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO issues (
+				id, title, description, status, priority, issue_type,
+				created_at, updated_at, closed_at, assignee, labels_json,
+				implementations_json, design, notes, acceptance, estimate, deleted_at
+			)
+			VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+		`, row.id, row.title, string(domain.StatusOpen), int(domain.P3), string(domain.TypeTask), now, now); err != nil {
+			t.Fatalf("insert issue %s: %v", row.id, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at)
+		VALUES (?, ?, ?, NULL)
+	`, contextID, targetID, string(domain.DependencyBlocks)); err != nil {
+		t.Fatalf("insert context dependency: %v", err)
+	}
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+
+	targetSessionID := naming.CanonicalSessionID(projectID, targetID)
+	contextSessionID := naming.CanonicalSessionID(projectID, contextID)
+	targetUpdatedAt := time.Date(2026, time.April, 2, 10, 0, 0, 0, time.UTC)
+	for _, row := range []struct {
+		name      string
+		sessionID string
+		issueID   string
+	}{
+		{name: "target", sessionID: targetSessionID, issueID: targetSessionID},
+		{name: "context", sessionID: contextSessionID, issueID: contextID},
+	} {
+		if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			ID:            row.sessionID,
+			IssueID:       row.issueID,
+			State:         daemonstate.SessionStateRunning,
+			ObservedState: daemonstate.SessionStateStopped,
+			UpdatedAt:     targetUpdatedAt,
+		}); err != nil {
+			t.Fatalf("seed %s session state: %v", row.name, err)
+		}
+	}
+
+	otherUpdatedAt := time.Date(2026, time.April, 2, 9, 0, 0, 0, time.UTC)
+	for i := 0; i < 25; i++ {
+		issueID := fmt.Sprintf("other-%02d", i)
+		if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			ID:            naming.CanonicalSessionID(projectID, issueID),
+			IssueID:       issueID,
+			State:         daemonstate.SessionStateStopped,
+			ObservedState: daemonstate.SessionStateStopped,
+			UpdatedAt:     otherUpdatedAt,
+		}); err != nil {
+			t.Fatalf("seed other session state %d: %v", i, err)
+		}
+	}
+
+	tmuxRunner := &testTmuxRunner{
+		sessions: map[string]bool{
+			targetSessionID:  true,
+			contextSessionID: true,
+		},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	d := &Daemon{
+		cfg:    Config{Logger: slog.Default()},
+		issues: issuesClient,
+		tmux:   tmux.NewClient(tmuxRunner, slog.Default()),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+	}
+
+	reqBody, err := json.Marshal(map[string]string{"task_id": targetID})
+	if err != nil {
+		t.Fatalf("marshal task get request: %v", err)
+	}
+	resp, err := d.handleTaskGet(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-get-session-refresh",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.get",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            reqBody,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskGet returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.get response not OK: %+v", resp.Error)
+	}
+
+	for _, row := range []struct {
+		name      string
+		sessionID string
+	}{
+		{name: "target", sessionID: targetSessionID},
+		{name: "context", sessionID: contextSessionID},
+	} {
+		session, found, err := store.GetSessionState(ctx, projectID, row.sessionID)
+		if err != nil {
+			t.Fatalf("load %s session state: %v", row.name, err)
+		}
+		if !found {
+			t.Fatalf("%s session state missing", row.name)
+		}
+		if session.ObservedState != daemonstate.SessionStateRunning {
+			t.Fatalf("%s observed state = %s, want running", row.name, session.ObservedState)
+		}
+		if !session.UpdatedAt.After(targetUpdatedAt) {
+			t.Fatalf("%s updated_at = %s, want after %s", row.name, session.UpdatedAt, targetUpdatedAt)
+		}
+	}
+
+	sessions, err := store.ListSessionStates(ctx, projectID)
+	if err != nil {
+		t.Fatalf("list session states: %v", err)
+	}
+	for _, session := range sessions {
+		if session.ID == targetSessionID || session.ID == contextSessionID {
+			continue
+		}
+		if !session.UpdatedAt.Equal(otherUpdatedAt) {
+			t.Fatalf("unrelated session %s updated_at = %s, want unchanged %s", session.ID, session.UpdatedAt, otherUpdatedAt)
+		}
 	}
 }
 
