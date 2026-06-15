@@ -19,11 +19,14 @@ const (
 )
 
 type applyTaskCreateBody struct {
-	Title       string  `json:"title"`
-	Description string  `json:"description"`
-	Type        string  `json:"type"`
-	Priority    string  `json:"priority"`
-	ParentID    *string `json:"parent_id,omitempty"`
+	Title           string   `json:"title"`
+	Description     string   `json:"description"`
+	Type            string   `json:"type"`
+	Priority        string   `json:"priority"`
+	Implementations []string `json:"implementations,omitempty"`
+	ParentID        *string  `json:"parent_id,omitempty"`
+	Ref             string   `json:"ref,omitempty"`
+	ParentRef       string   `json:"parent_ref,omitempty"`
 }
 
 type applyTaskUpdateBody struct {

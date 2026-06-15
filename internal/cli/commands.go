@@ -273,6 +273,16 @@ type IssueBulkCreateOptions struct {
 	JSON           bool
 }
 
+type issueBulkCreateInputItem struct {
+	Title       string                     `json:"title"`
+	Description string                     `json:"description"`
+	Type        string                     `json:"type"`
+	Priority    string                     `json:"priority"`
+	ParentID    *string                    `json:"parent_id,omitempty"`
+	Ref         string                     `json:"ref,omitempty"`
+	Children    []issueBulkCreateInputItem `json:"children,omitempty"`
+}
+
 type IssueBulkUpdateOptions struct {
 	Project        string
 	Implementation string
@@ -4287,13 +4297,7 @@ func IssueBulkCreateCommand(deps *Dependencies, opts IssueBulkCreateOptions) err
 	if err != nil {
 		return fmt.Errorf("read bulk-create input %s: %w", opts.InputPath, err)
 	}
-	var input []struct {
-		Title       string  `json:"title"`
-		Description string  `json:"description"`
-		Type        string  `json:"type"`
-		Priority    string  `json:"priority"`
-		ParentID    *string `json:"parent_id,omitempty"`
-	}
+	var input []issueBulkCreateInputItem
 	if err := json.Unmarshal(inputBytes, &input); err != nil {
 		return fmt.Errorf("parse bulk-create input %s: %w", opts.InputPath, err)
 	}
@@ -4301,34 +4305,111 @@ func IssueBulkCreateCommand(deps *Dependencies, opts IssueBulkCreateOptions) err
 		return fmt.Errorf("bulk-create input must contain at least one item")
 	}
 
-	ops := make([]protocol.ApplyOperationBody, 0, len(input))
+	ops := make([]protocol.ApplyOperationBody, 0, countBulkCreateItems(input))
+	seenRefs := map[string]string{}
 	for i, item := range input {
-		taskType, err := parseTaskType(item.Type)
+		compiled, err := compileBulkCreateItem(item, fmt.Sprintf("bulk-create item %d", i), impl, "", seenRefs)
 		if err != nil {
-			return fmt.Errorf("bulk-create item %d: %w", i, err)
+			return err
 		}
-		priority, err := parsePriority(item.Priority)
-		if err != nil {
-			return fmt.Errorf("bulk-create item %d: %w", i, err)
-		}
-		body, err := json.Marshal(daemonclient.TaskCreateParams{
-			Title:           item.Title,
-			Description:     item.Description,
-			Type:            taskType,
-			Priority:        priority,
-			Implementations: []string{impl},
-			ParentID:        parseOptionalIssueID(item.ParentID),
-		})
-		if err != nil {
-			return fmt.Errorf("marshal bulk-create item %d: %w", i, err)
-		}
-		ops = append(ops, protocol.ApplyOperationBody{
-			Command: daemonclient.CommandTaskCreate,
-			Body:    body,
-		})
+		ops = append(ops, compiled...)
 	}
 
 	return executeBulkApply(deps, opts.DryRun, opts.JSON, ops)
+}
+
+func countBulkCreateItems(items []issueBulkCreateInputItem) int {
+	count := 0
+	for _, item := range items {
+		count++
+		count += countBulkCreateItems(item.Children)
+	}
+	return count
+}
+
+func compileBulkCreateItem(item issueBulkCreateInputItem, path, impl, parentRef string, seenRefs map[string]string) ([]protocol.ApplyOperationBody, error) {
+	taskType, err := parseTaskType(item.Type)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	priority, err := parsePriority(item.Priority)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	ref := strings.TrimSpace(item.Ref)
+	if len(item.Children) > 0 && ref == "" {
+		ref = strings.ReplaceAll(path, ".", "_")
+		ref = strings.ReplaceAll(ref, "[", "_")
+		ref = strings.ReplaceAll(ref, "]", "")
+		ref = strings.ReplaceAll(ref, " ", "_")
+	}
+	if ref != "" {
+		if previousPath, ok := seenRefs[ref]; ok {
+			return nil, fmt.Errorf("%s: duplicate ref %q already used by %s", path, ref, previousPath)
+		}
+		seenRefs[ref] = path
+	}
+	effectiveParentRef := strings.TrimSpace(parentRef)
+	parsedParentID, err := parseBulkCreateParentID(item.ParentID)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if item.ParentID != nil {
+		effectiveParentRef = ""
+	}
+	body, err := json.Marshal(struct {
+		Title           string          `json:"title"`
+		Description     string          `json:"description"`
+		Type            domain.TaskType `json:"type"`
+		Priority        string          `json:"priority"`
+		Implementations []string        `json:"implementations,omitempty"`
+		ParentID        *naming.IssueID `json:"parent_id,omitempty"`
+		Ref             string          `json:"ref,omitempty"`
+		ParentRef       string          `json:"parent_ref,omitempty"`
+	}{
+		Title:           item.Title,
+		Description:     item.Description,
+		Type:            taskType,
+		Priority:        priority.String(),
+		Implementations: []string{impl},
+		ParentID:        parsedParentID,
+		Ref:             ref,
+		ParentRef:       effectiveParentRef,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal %s: %w", path, err)
+	}
+	ops := []protocol.ApplyOperationBody{{
+		Command: daemonclient.CommandTaskCreate,
+		Body:    body,
+	}}
+	childParentRef := ref
+	if childParentRef == "" && effectiveParentRef != "" {
+		childParentRef = effectiveParentRef
+	}
+	for i, child := range item.Children {
+		childOps, err := compileBulkCreateItem(child, fmt.Sprintf("%s.children[%d]", path, i), impl, childParentRef, seenRefs)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, childOps...)
+	}
+	return ops, nil
+}
+
+func parseBulkCreateParentID(value *string) (*naming.IssueID, error) {
+	if value == nil {
+		return nil, nil
+	}
+	trimmed := strings.TrimSpace(*value)
+	if trimmed == "" {
+		return nil, fmt.Errorf("parent_id cannot be empty")
+	}
+	typed, err := naming.ParseIssueID(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("invalid parent_id %q: %w", trimmed, err)
+	}
+	return &typed, nil
 }
 
 func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) error {
