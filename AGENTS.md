@@ -198,6 +198,14 @@ If any are missing, keep issue state `in_progress` or `open`.
 3. Never delete untracked files or run `git restore` without explicit permission.
 4. Never finalize merges into `main` with `--no-verify`; resolve failing hooks/checks first (or stop and ask the user).
 
+## Pre-Completion Review Gate
+
+Before declaring implementation work done, moving an issue to `in_review`, or handing off code changes, run `$code-review-loop`.
+
+The review loop must review the actual change set, fix actionable findings, validate, and repeat until it reaches its clean-pass target. Do not wait for the user to request a separate code review/fix/re-review cycle.
+
+Skip this gate only for work that did not change code or executable behavior, such as pure explanation, read-only investigation, or issue-tracker updates. If docs, tests, config, scripts, or tooling changed in a way that can affect users or developers, run the gate.
+
 ## Session Completion Checklist
 
 1. File follow-up issues.
