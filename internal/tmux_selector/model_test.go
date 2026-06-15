@@ -166,29 +166,44 @@ func TestModelUsesFakeInventoryAndSwitchesSessionID(t *testing.T) {
 }
 
 func TestModelTreeRendersHookActivityInsteadOfLifecycleBusy(t *testing.T) {
-	entries := []InventoryEntry{{
-		SessionID:      "az-cmd",
-		IssueID:        "cmd",
-		TaskTitle:      "False busy flag",
-		State:          domain.SessionBusy,
-		Activity:       "idle",
-		ActivitySource: "hooks",
-		HasTmuxSession: true,
-	}}
-	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
-	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
-	model = updated.(Model)
-	if cmd != nil {
-		t.Fatalf("snapshot update returned command")
+	tests := []struct {
+		name     string
+		activity string
+		want     string
+		reject   string
+	}{
+		{name: "hook idle", activity: "idle", want: "cmd [idle] False busy flag", reject: "cmd [busy] False busy flag"},
+		{name: "agent working", activity: "working", want: "cmd [working] False busy flag", reject: "cmd [waiting] False busy flag"},
+		{name: "agent waiting", activity: "waiting", want: "cmd [waiting] False busy flag", reject: "cmd [busy] False busy flag"},
 	}
-	model.activeTab = selectorTabTree
 
-	view := ansi.Strip(model.View())
-	if !strings.Contains(view, "cmd [idle] False busy flag") {
-		t.Fatalf("view missing hook-backed idle label:\n%s", view)
-	}
-	if strings.Contains(view, "cmd [busy] False busy flag") {
-		t.Fatalf("view rendered lifecycle busy instead of hook activity:\n%s", view)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entries := []InventoryEntry{{
+				SessionID:      "az-cmd",
+				IssueID:        "cmd",
+				TaskTitle:      "False busy flag",
+				State:          domain.SessionBusy,
+				Activity:       tt.activity,
+				ActivitySource: "hooks",
+				HasTmuxSession: true,
+			}}
+			model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+			updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+			model = updated.(Model)
+			if cmd != nil {
+				t.Fatalf("snapshot update returned command")
+			}
+			model.activeTab = selectorTabTree
+
+			view := ansi.Strip(model.View())
+			if !strings.Contains(view, tt.want) {
+				t.Fatalf("view missing activity label %q:\n%s", tt.want, view)
+			}
+			if strings.Contains(view, tt.reject) {
+				t.Fatalf("view rendered wrong activity label %q:\n%s", tt.reject, view)
+			}
+		})
 	}
 }
 

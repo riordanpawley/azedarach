@@ -5238,6 +5238,187 @@ func TestLocalGitActivityMarkerBuildsBoardAndDetailProgress(t *testing.T) {
 	}
 }
 
+func TestRuntimeProjectionAppliesAgentActivityToSessionDisplay(t *testing.T) {
+	m := newTestModel()
+	startedAt := time.Date(2026, time.June, 15, 10, 0, 0, 0, time.UTC)
+	updatedAt := time.Date(2026, time.June, 15, 10, 5, 0, 0, time.UTC)
+
+	ok := m.applyRuntimeProjection(protocol.RuntimeProjection{
+		ProjectID: "proj",
+		IssueID:   "az-1",
+		Worktree: protocol.RuntimeWorktreeProjection{
+			Exists:  true,
+			Path:    "/tmp/repo-az-1",
+			Branch:  "riordan/az-1/task",
+			Healthy: true,
+		},
+		Session: protocol.RuntimeSessionProjection{
+			HasSession: true,
+			SessionID:  "sess-1",
+			State:      protocol.SessionLifecycleStateRunning,
+			StartedAt:  &startedAt,
+			UpdatedAt:  &updatedAt,
+			Worktree:   "/tmp/repo-az-1",
+		},
+		Agent: protocol.RuntimeAgentProjection{
+			Status:    "working",
+			SessionID: "sess-1",
+			UpdatedAt: &updatedAt,
+		},
+	})
+	if !ok {
+		t.Fatal("applyRuntimeProjection returned false")
+	}
+
+	session := m.tasks[0].Session
+	if session == nil {
+		t.Fatal("task session is nil")
+	}
+	if session.State != domain.SessionBusy {
+		t.Fatalf("session lifecycle state = %s, want %s", session.State, domain.SessionBusy)
+	}
+	if session.Activity != "working" || session.ActivitySource != "agent" {
+		t.Fatalf("session activity = %q/%q, want working/agent", session.Activity, session.ActivitySource)
+	}
+	if display, ok := session.DisplayState(); !ok || display != domain.SessionBusy {
+		t.Fatalf("display state = %s/%v, want busy/true", display, ok)
+	}
+	if session.DisplayCode() != "B" {
+		t.Fatalf("display code = %q, want B", session.DisplayCode())
+	}
+
+}
+
+func TestSessionProjectionEventAppliesAgentActivityToSessionDisplay(t *testing.T) {
+	m := newTestModel()
+	startedAt := time.Date(2026, time.June, 15, 10, 0, 0, 0, time.UTC)
+	updatedAt := time.Date(2026, time.June, 15, 10, 5, 0, 0, time.UTC)
+
+	ok := m.applyRuntimeProjectionFromSessionEvent(protocol.SessionProjectionEventBody{
+		ProjectID: "proj",
+		Revision:  2,
+		Session: protocol.SessionProjection{
+			SessionID: "sess-1",
+			IssueID:   "az-1",
+			State:     protocol.SessionLifecycleStateRunning,
+			UpdatedAt: updatedAt,
+		},
+		Runtime: &protocol.RuntimeProjectionEventBody{
+			ProjectID: "proj",
+			Revision:  2,
+			Projection: protocol.RuntimeProjection{
+				ProjectID: "proj",
+				IssueID:   "az-1",
+				Session: protocol.RuntimeSessionProjection{
+					HasSession: true,
+					SessionID:  "sess-1",
+					State:      protocol.SessionLifecycleStateRunning,
+					StartedAt:  &startedAt,
+					UpdatedAt:  &updatedAt,
+				},
+				Agent: protocol.RuntimeAgentProjection{
+					Status:    "waiting",
+					SessionID: "sess-1",
+					UpdatedAt: &updatedAt,
+				},
+			},
+		},
+	})
+	if !ok {
+		t.Fatal("applyRuntimeProjectionFromSessionEvent returned false")
+	}
+
+	session := m.tasks[0].Session
+	if session == nil {
+		t.Fatal("task session is nil")
+	}
+	if session.State != domain.SessionBusy {
+		t.Fatalf("session lifecycle state = %s, want %s", session.State, domain.SessionBusy)
+	}
+	if session.Activity != "waiting" || session.ActivitySource != "agent" {
+		t.Fatalf("session activity = %q/%q, want waiting/agent", session.Activity, session.ActivitySource)
+	}
+	if display, ok := session.DisplayState(); !ok || display != domain.SessionWaiting {
+		t.Fatalf("display state = %s/%v, want waiting/true", display, ok)
+	}
+	if session.DisplayCode() != "W" {
+		t.Fatalf("display code = %q, want W", session.DisplayCode())
+	}
+
+}
+
+func TestRuntimeProjectionWithoutAgentPreservesHookActivity(t *testing.T) {
+	m := newTestModel()
+	startedAt := time.Date(2026, time.June, 15, 10, 0, 0, 0, time.UTC)
+	updatedAt := time.Date(2026, time.June, 15, 10, 5, 0, 0, time.UTC)
+	m.tasks[0].Session = &domain.Session{
+		IssueID:        m.tasks[0].ID,
+		State:          domain.SessionBusy,
+		Activity:       "idle",
+		ActivitySource: "hooks",
+		StartedAt:      &startedAt,
+	}
+	m.tasks[0].HasTmuxSession = true
+
+	ok := m.applyRuntimeProjection(protocol.RuntimeProjection{
+		ProjectID: "proj",
+		IssueID:   "az-1",
+		Session: protocol.RuntimeSessionProjection{
+			HasSession: true,
+			SessionID:  "sess-1",
+			State:      protocol.SessionLifecycleStateRunning,
+			StartedAt:  &startedAt,
+			UpdatedAt:  &updatedAt,
+		},
+	})
+	if !ok {
+		t.Fatal("applyRuntimeProjection returned false")
+	}
+	session := m.tasks[0].Session
+	if session == nil {
+		t.Fatal("task session is nil after missing-agent projection")
+	}
+	if session.Activity != "idle" || session.ActivitySource != "hooks" {
+		t.Fatalf("session activity after missing-agent projection = %q/%q, want idle/hooks", session.Activity, session.ActivitySource)
+	}
+
+	ok = m.applyRuntimeProjectionFromSessionEvent(protocol.SessionProjectionEventBody{
+		ProjectID: "proj",
+		Revision:  3,
+		Session: protocol.SessionProjection{
+			SessionID: "sess-1",
+			IssueID:   "az-1",
+			State:     protocol.SessionLifecycleStateRunning,
+			UpdatedAt: updatedAt.Add(time.Minute),
+		},
+		Runtime: &protocol.RuntimeProjectionEventBody{
+			ProjectID: "proj",
+			Revision:  3,
+			Projection: protocol.RuntimeProjection{
+				ProjectID: "proj",
+				IssueID:   "az-1",
+				Session: protocol.RuntimeSessionProjection{
+					HasSession: true,
+					SessionID:  "sess-1",
+					State:      protocol.SessionLifecycleStateRunning,
+					StartedAt:  &startedAt,
+					UpdatedAt:  &updatedAt,
+				},
+			},
+		},
+	})
+	if !ok {
+		t.Fatal("applyRuntimeProjectionFromSessionEvent returned false")
+	}
+	session = m.tasks[0].Session
+	if session == nil {
+		t.Fatal("task session is nil after missing-agent session event")
+	}
+	if session.Activity != "idle" || session.ActivitySource != "hooks" {
+		t.Fatalf("session activity after missing-agent session event = %q/%q, want idle/hooks", session.Activity, session.ActivitySource)
+	}
+}
+
 func TestBulkStatusSummaryDetectsCloseGuardGuidance(t *testing.T) {
 	tests := []struct {
 		name   string
