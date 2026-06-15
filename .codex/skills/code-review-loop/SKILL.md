@@ -1,6 +1,6 @@
 ---
 name: code-review-loop
-description: Run an iterative code review and fix cycle until findings stabilize. Use when the user asks Codex to review code, review and fix, loop review/fix, address review findings, harden a change before handoff, or keep reviewing until repeated passes find no new actionable issues.
+description: Run an iterative code review and fix cycle until findings stabilize. Use when the user asks Codex to review code, review and fix, loop review/fix, address review findings, harden a change before handoff, or keep reviewing until repeated passes find no new actionable issues. Also use proactively before Codex declares coding work done, marks an issue in_review, says a change is ready, or hands off implementation that modified code, tests, build scripts, migrations, config, or developer tooling.
 ---
 
 # Code Review Loop
@@ -8,6 +8,14 @@ description: Run an iterative code review and fix cycle until findings stabilize
 ## Overview
 
 Drive code review as a closed loop: inspect the change, fix actionable findings, validate, then review again. Continue until the configured clean-pass target is reached or a genuine blocker prevents progress.
+
+## Pre-Completion Gate
+
+Use this skill automatically when implementation appears complete. Do not wait for the user to say "code review" or "fix em" after an implementation pass.
+
+Before saying the task is done, ready for review, ready to merge, or moving a tracked issue to `in_review`, run the review loop against the actual change set. If the review finds actionable issues, fix them, validate, and restart the clean-pass count. Only hand off after the clean-pass target is met or after preserving an explicit blocker with evidence.
+
+Skip this gate only for tasks that did not change code or executable behavior, such as pure explanation, read-only investigation, or issue-tracker updates. If docs, tests, config, or scripts changed in a way that can affect users or developers, run the gate.
 
 ## Completion Target
 

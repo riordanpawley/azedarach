@@ -1,4 +1,7 @@
 interface:
   display_name: "Code Review Loop"
-  short_description: "Iterative review/fix loop until findings stabilize"
-  default_prompt: "Use $code-review-loop to review this change, fix actionable findings, and repeat until repeated passes find no new issues."
+  short_description: "Pre-handoff review/fix loop until stable"
+  default_prompt: "Use $code-review-loop before declaring implementation done: review the change, fix actionable findings, validate, and repeat until repeated passes find no new issues."
+
+policy:
+  allow_implicit_invocation: true
