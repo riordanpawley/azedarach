@@ -352,11 +352,6 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task get requested", "project_id", projectID, "task_id", taskID)
 	}
-	refreshSessionStartedAt := time.Now()
-	if err := d.refreshIssueSessionRuntimeState(ctx, projectID, []string{taskID}); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("task get session runtime refresh failed", "project_id", projectID, "task_id", taskID, "error", err)
-	}
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.issue_session_refresh", refreshSessionStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
 	refreshIssueStartedAt := time.Now()
 	d.refreshIssueWorktreeState(ctx, projectID, taskID)
 	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.issue_worktree_refresh", refreshIssueStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
@@ -378,6 +373,23 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 			d.cfg.Logger.Warn("daemon task get failed", "project_id", projectID, "task_id", taskID, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
 		}
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	contextTaskIDs := taskIDsFromTasks(tasks)
+	refreshSessionStartedAt := time.Now()
+	if err := d.refreshIssueSessionRuntimeState(ctx, projectID, contextTaskIDs); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("task get session runtime refresh failed", "project_id", projectID, "task_id", taskID, "context_task_count", len(contextTaskIDs), "error", err)
+	}
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.issue_session_refresh", refreshSessionStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "context_task_count", len(contextTaskIDs))
+	if len(contextTaskIDs) > 0 {
+		queryStartedAt = time.Now()
+		tasks, err = issueClient.GetWithDependencyContextRuntime(ctx, projectID, taskID)
+		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get.issue_store_get_dependency_context_runtime_after_session_refresh", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("daemon task get reload after session refresh failed", "project_id", projectID, "task_id", taskID, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
+			}
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
 	}
 	freshnessStartedAt := time.Now()
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
@@ -463,6 +475,14 @@ func uniqueTrimmedTaskIDs(ids []string) []string {
 		out = append(out, id)
 	}
 	return out
+}
+
+func taskIDsFromTasks(tasks []domain.Task) []string {
+	ids := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		ids = append(ids, task.ID.String())
+	}
+	return uniqueTrimmedTaskIDs(ids)
 }
 
 func (d *Daemon) readFreshTaskListSnapshotCache(projectID string) (taskListSnapshotCacheEntry, bool) {
