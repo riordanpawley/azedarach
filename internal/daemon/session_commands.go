@@ -2390,8 +2390,9 @@ func (d *Daemon) refreshIssueSessionRuntimeState(ctx context.Context, projectID 
 		return err
 	}
 	targetSessions := make([]daemonstate.Session, 0, len(issueSet))
+	namingScope := d.sessionNamingScope(projectID)
 	for _, session := range existingSessions {
-		if _, ok := issueSet[sessionKey(session.IssueID)]; ok {
+		if _, ok := issueSet[sessionKey(sessionProjectionIssueID(session, namingScope))]; ok {
 			targetSessions = append(targetSessions, session)
 		}
 	}
@@ -2404,7 +2405,6 @@ func (d *Daemon) refreshIssueSessionRuntimeState(ctx context.Context, projectID 
 	}
 	liveByID := make(map[string]tmux.SessionInfo, len(tmuxSessions))
 	liveIssueKeys := make(map[string]struct{}, len(tmuxSessions))
-	namingScope := d.sessionNamingScope(projectID)
 	for _, info := range tmuxSessions {
 		name := strings.TrimSpace(info.Name)
 		if name != "" {

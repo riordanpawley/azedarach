@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3564,7 +3565,7 @@ func TestHandleTaskGetTriggersOnlyRequestedIssueWorktreeRefreshAsync(t *testing.
 
 func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
 	ctx := context.Background()
-	projectID := protocol.DefaultProjectID
+	projectID := "azedarach"
 	repoDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
@@ -3572,22 +3573,41 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
 
 	issuesClient := issues.NewClient(repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
-	targetID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
-		Title: "target issue",
+	_, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "schema seed",
 		Type:  domain.TypeTask,
 	})
 	if err != nil {
-		t.Fatalf("create target issue: %v", err)
+		t.Fatalf("create schema seed issue: %v", err)
 	}
 
-	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	targetID := "bra"
+	dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(5000)&_txlock=immediate")
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO issues (
+			id, title, description, status, priority, issue_type,
+			created_at, updated_at, closed_at, assignee, labels_json,
+			implementations_json, design, notes, acceptance, estimate, deleted_at
+		)
+		VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+	`, targetID, "target issue", string(domain.StatusOpen), int(domain.P3), string(domain.TypeTask), now, now); err != nil {
+		t.Fatalf("insert target issue: %v", err)
+	}
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
 
 	targetSessionID := naming.CanonicalSessionID(projectID, targetID)
 	targetUpdatedAt := time.Date(2026, time.April, 2, 10, 0, 0, 0, time.UTC)
 	if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
 		ID:            targetSessionID,
-		IssueID:       targetID,
+		IssueID:       targetSessionID,
 		State:         daemonstate.SessionStateRunning,
 		ObservedState: daemonstate.SessionStateStopped,
 		UpdatedAt:     targetUpdatedAt,
