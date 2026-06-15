@@ -25,12 +25,14 @@ import (
 
 type dependencyRemovalConfirmationKey struct{}
 type parentChildOrphanConfirmationKey struct{}
+type issueMutationLockKey struct{}
 
 // ErrDependencyRemovalConfirmationRequired is returned when a removal that can
 // unblock or retarget workflow is attempted without explicit confirmation.
 var ErrDependencyRemovalConfirmationRequired = errors.New("explicit confirmation required")
 var ErrParentChildOrphanConfirmationRequired = errors.New("parent-child removal would orphan active child; keep the parent-child hierarchy and use blocks/open status to pause or supersede child work, or pass explicit parent-orphan confirmation")
 var ErrDeleteBlockedByRuntimeAttachments = errors.New("delete blocked: task has worktree or active session")
+var ErrIssueHasLiveChildren = errors.New("issue has undeleted descendants")
 
 type ParentChangeRequiredError struct {
 	IssueID         string
@@ -40,6 +42,30 @@ type ParentChangeRequiredError struct {
 
 func (e ParentChangeRequiredError) Error() string {
 	return fmt.Sprintf("refusing to change parent for %s: current parent %s, requested parent %s", e.IssueID, e.CurrentParent, e.RequestedParent)
+}
+
+type LiveChildrenMutationError struct {
+	Operation       string
+	IssueID         string
+	DescendantCount int
+}
+
+func (e LiveChildrenMutationError) Error() string {
+	descendantLabel := "descendants"
+	if e.DescendantCount == 1 {
+		descendantLabel = "descendant"
+	}
+	return fmt.Sprintf(
+		"cannot %s issue %s: %d undeleted %s remain through active parent-child edges; use an explicit recursive cleanup or supersede workflow that handles every child edge and descendant issue",
+		e.Operation,
+		e.IssueID,
+		e.DescendantCount,
+		descendantLabel,
+	)
+}
+
+func (e LiveChildrenMutationError) Is(target error) bool {
+	return target == ErrIssueHasLiveChildren
 }
 
 // WithDependencyRemovalConfirmation marks a context as explicitly confirming a
@@ -81,6 +107,43 @@ type Client struct {
 
 type sqlIssueExecer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+type sqlIssueQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+var issueMutationLocks sync.Map
+
+// WithMutationLock serializes issue-store writes that must not interleave with
+// multi-step daemon side effects for the same SQLite database.
+func (c *Client) WithMutationLock(ctx context.Context, fn func(context.Context) error) error {
+	return c.withMutationLock(ctx, fn)
+}
+
+func (c *Client) withMutationLock(ctx context.Context, fn func(context.Context) error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if locked, _ := ctx.Value(issueMutationLockKey{}).(bool); locked {
+		return fn(ctx)
+	}
+	lock := issueMutationLockForPath(c.dbPath)
+	lock.Lock()
+	defer lock.Unlock()
+	return fn(context.WithValue(ctx, issueMutationLockKey{}, true))
+}
+
+func issueMutationLockForPath(dbPath string) *sync.Mutex {
+	key := strings.TrimSpace(dbPath)
+	if abs, err := filepath.Abs(key); err == nil {
+		key = filepath.Clean(abs)
+	}
+	if key == "" {
+		key = "."
+	}
+	value, _ := issueMutationLocks.LoadOrStore(key, &sync.Mutex{})
+	return value.(*sync.Mutex)
 }
 
 // NewClient creates a SQLite-backed issue store client rooted at the repository.
@@ -993,10 +1056,12 @@ func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, e
 
 func (c *Client) createOnce(ctx context.Context, params CreateTaskParams) (string, error) {
 	var issueID string
-	err := sqliteutil.WithWriteLock(c.dbPath, func() error {
-		var err error
-		issueID, err = c.createOnceLocked(ctx, params)
-		return err
+	err := c.withMutationLock(ctx, func(ctx context.Context) error {
+		return sqliteutil.WithWriteLock(c.dbPath, func() error {
+			var err error
+			issueID, err = c.createOnceLocked(ctx, params)
+			return err
+		})
 	})
 	return issueID, err
 }
@@ -1098,6 +1163,13 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 
 	if params.ParentID != nil && strings.TrimSpace(*params.ParentID) != "" {
 		parentID := strings.TrimSpace(*params.ParentID)
+		parentExists, err := c.issueExists(ctx, tx, parentID)
+		if err != nil {
+			return "", c.wrapError("create", issueID, err)
+		}
+		if !parentExists {
+			return "", c.wrapError("create", issueID, domain.ErrNotFound)
+		}
 		if err := c.reopenClosedParentForActiveChild(ctx, tx, issueID, parentID); err != nil {
 			return "", c.wrapError("create", issueID, err)
 		}
@@ -1334,13 +1406,17 @@ func (c *Client) ListExternalIssueRefs(ctx context.Context, issueID string) ([]d
 
 // AddDependency creates or restores a dependency edge between two issues.
 func (c *Client) AddDependency(ctx context.Context, issueID, dependsOnID, dependencyType string) error {
-	return c.addDependency(ctx, issueID, dependsOnID, dependencyType, false)
+	return c.withMutationLock(ctx, func(ctx context.Context) error {
+		return c.addDependency(ctx, issueID, dependsOnID, dependencyType, false)
+	})
 }
 
 // AddDependencyWithParentChange creates or restores a dependency edge, allowing
 // an existing parent-child edge to be replaced when forceParentChange is true.
 func (c *Client) AddDependencyWithParentChange(ctx context.Context, issueID, dependsOnID, dependencyType string, forceParentChange bool) error {
-	return c.addDependency(ctx, issueID, dependsOnID, dependencyType, forceParentChange)
+	return c.withMutationLock(ctx, func(ctx context.Context) error {
+		return c.addDependency(ctx, issueID, dependsOnID, dependencyType, forceParentChange)
+	})
 }
 
 func (c *Client) addDependency(ctx context.Context, issueID, dependsOnID, dependencyType string, forceParentChange bool) error {
@@ -1435,6 +1511,20 @@ func (c *Client) addDependency(ctx context.Context, issueID, dependsOnID, depend
 	}
 
 	if canonicalType == string(domain.DependencyParentChild) {
+		sourceExists, err := c.issueExists(ctx, tx, issueID)
+		if err != nil {
+			return c.wrapError("add-dependency", issueID, err)
+		}
+		if !sourceExists {
+			return c.wrapError("add-dependency", issueID, domain.ErrNotFound)
+		}
+		targetExists, err := c.issueExists(ctx, tx, dependsOnID)
+		if err != nil {
+			return c.wrapError("add-dependency", issueID, err)
+		}
+		if !targetExists {
+			return c.wrapError("add-dependency", issueID, domain.ErrNotFound)
+		}
 		if err := c.reopenClosedParentForActiveChild(ctx, tx, issueID, dependsOnID); err != nil {
 			return c.wrapError("add-dependency", issueID, err)
 		}
@@ -1463,7 +1553,7 @@ func (c *Client) AddDependencyWithRuntime(ctx context.Context, projectID, issueI
 // AddDependencyWithRuntimeAndParentChange creates or restores a dependency edge
 // and returns the changed issue.
 func (c *Client) AddDependencyWithRuntimeAndParentChange(ctx context.Context, projectID, issueID, dependsOnID, dependencyType string, forceParentChange bool) (domain.Task, error) {
-	if err := c.addDependency(ctx, issueID, dependsOnID, dependencyType, forceParentChange); err != nil {
+	if err := c.AddDependencyWithParentChange(ctx, issueID, dependsOnID, dependencyType, forceParentChange); err != nil {
 		return domain.Task{}, err
 	}
 	return c.GetWithRuntime(ctx, projectID, issueID)
@@ -1521,9 +1611,9 @@ func (c *Client) reopenClosedParentForActiveChild(ctx context.Context, execer sq
 	return nil
 }
 
-func (c *Client) issueExists(ctx context.Context, db *sql.DB, id string) (bool, error) {
+func (c *Client) issueExists(ctx context.Context, queryer sqlIssueQueryer, id string) (bool, error) {
 	var exists bool
-	if err := db.QueryRowContext(ctx, `
+	if err := queryer.QueryRowContext(ctx, `
 		SELECT EXISTS(
 			SELECT 1
 			FROM issues
@@ -1679,10 +1769,17 @@ func (c *Client) Close(ctx context.Context, id string, _ string) error {
 
 // Delete permanently removes an issue and its dependency rows.
 func (c *Client) Delete(ctx context.Context, id string) error {
+	return c.withMutationLock(ctx, func(ctx context.Context) error {
+		return c.deleteLocked(ctx, id)
+	})
+}
+
+func (c *Client) deleteLocked(ctx context.Context, id string) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err
 	}
+	id = strings.TrimSpace(id)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return c.wrapError("delete", id, err)
@@ -1719,6 +1816,9 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 	if runtimeAttachmentCount > 0 {
 		return c.wrapError("delete", id, ErrDeleteBlockedByRuntimeAttachments)
 	}
+	if err := c.guardNoUndeletedParentChildDescendants(ctx, tx, "delete", id); err != nil {
+		return c.wrapError("delete", id, err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM issue_dependencies WHERE issue_id = ? OR depends_on_id = ?`, id, id); err != nil {
 		return c.wrapError("delete", id, err)
 	}
@@ -1739,12 +1839,31 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 
 // Archive soft-deletes an issue.
 func (c *Client) Archive(ctx context.Context, id string) error {
+	return c.withMutationLock(ctx, func(ctx context.Context) error {
+		return c.archiveLocked(ctx, id)
+	})
+}
+
+func (c *Client) archiveLocked(ctx context.Context, id string) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err
 	}
+	id = strings.TrimSpace(id)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return c.wrapError("archive", id, err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if err := c.guardNoUndeletedParentChildDescendants(ctx, tx, "archive", id); err != nil {
+		return c.wrapError("archive", id, err)
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	res, err := db.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE issues
 		SET
 			deleted_at = ?,
@@ -1758,7 +1877,71 @@ func (c *Client) Archive(ctx context.Context, id string) error {
 	if affected == 0 {
 		return c.wrapError("archive", id, domain.ErrNotFound)
 	}
+	if err := tx.Commit(); err != nil {
+		return c.wrapError("archive", id, err)
+	}
+	tx = nil
 	return nil
+}
+
+func (c *Client) EnsureNoUndeletedParentChildDescendants(ctx context.Context, operation, issueID string) error {
+	db, err := c.dbHandle()
+	if err != nil {
+		return err
+	}
+	issueID = strings.TrimSpace(issueID)
+	if err := c.guardNoUndeletedParentChildDescendants(ctx, db, operation, issueID); err != nil {
+		return c.wrapError(operation, issueID, err)
+	}
+	return nil
+}
+
+func (c *Client) guardNoUndeletedParentChildDescendants(ctx context.Context, queryer sqlIssueQueryer, operation, issueID string) error {
+	count, err := c.countUndeletedParentChildDescendants(ctx, queryer, issueID)
+	if err != nil {
+		return err
+	}
+	if count > 0 {
+		return LiveChildrenMutationError{
+			Operation:       operation,
+			IssueID:         issueID,
+			DescendantCount: count,
+		}
+	}
+	return nil
+}
+
+func (c *Client) countUndeletedParentChildDescendants(ctx context.Context, queryer sqlIssueQueryer, issueID string) (int, error) {
+	var count int
+	if err := queryer.QueryRowContext(ctx, `
+		WITH RECURSIVE descendants(id) AS (
+			SELECT child.id
+			FROM issue_dependencies d
+			INNER JOIN issues child
+				ON child.id = d.issue_id
+				AND child.deleted_at IS NULL
+			WHERE
+				d.depends_on_id = ?
+				AND d.dependency_type IN (?, 'parent_child')
+				AND d.tombstoned_at IS NULL
+			UNION
+			SELECT child.id
+			FROM issue_dependencies d
+			INNER JOIN issues child
+				ON child.id = d.issue_id
+				AND child.deleted_at IS NULL
+			INNER JOIN descendants parent
+				ON parent.id = d.depends_on_id
+			WHERE
+				d.dependency_type IN (?, 'parent_child')
+				AND d.tombstoned_at IS NULL
+		)
+		SELECT COUNT(DISTINCT id)
+		FROM descendants
+	`, issueID, string(domain.DependencyParentChild), string(domain.DependencyParentChild)).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 type UpdateTaskParams struct {
