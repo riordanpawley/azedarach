@@ -92,6 +92,7 @@ type orchestrateStatusResult struct {
 	ActiveSessions []orchestrateActiveSession `json:"active_sessions,omitempty"`
 	Blocked        map[string]string          `json:"blocked"`
 	MailboxEvents  []protocol.MailEvent       `json:"mailbox_events"`
+	Warnings       []string                   `json:"warnings,omitempty"`
 	Advice         map[string]interface{}     `json:"advice,omitempty"`
 }
 
@@ -426,6 +427,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		ActiveSessions: orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
 		Blocked:        ready.Blocked,
 		MailboxEvents:  events,
+		Warnings:       orchestrateRootWorktreeWarnings(ctx, deps, ready.RootIssueID),
 		Advice: map[string]interface{}{
 			"watch":             fmt.Sprintf("az orchestrate watch --root %s --since %d --jsonl", ready.RootIssueID, nextMailboxSeq(events, opts.SinceSeq)),
 			"watch_instruction": "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
@@ -468,6 +470,12 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 	fmt.Printf("Mailbox events (latest %d, since seq>%d): %d\n", opts.Limit, opts.SinceSeq, len(result.MailboxEvents))
 	for _, evt := range result.MailboxEvents {
 		fmt.Printf("- seq=%d issue=%s type=%s from=%s to=%s\n", evt.Seq, strings.TrimSpace(evt.IssueID.String()), evt.Type, strings.TrimSpace(evt.From), strings.TrimSpace(evt.To))
+	}
+	if len(result.Warnings) > 0 {
+		fmt.Println("Warnings:")
+		for _, warning := range result.Warnings {
+			fmt.Printf("- %s\n", warning)
+		}
 	}
 	fmt.Println("Next watch command (leave running while workers are active; do not add --once):")
 	fmt.Printf("- %s\n", result.Advice["watch"])
@@ -539,7 +547,7 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		Launched:    make([]orchestrateStartLaunch, 0, len(requested)),
 		Skipped:     skipped,
 		Failed:      map[string]string{},
-		Warnings:    orchestrateStartWarnings(ctx, deps, len(requested) > 0),
+		Warnings:    orchestrateStartWarnings(ctx, deps, opts.RootIssueID, len(requested) > 0),
 		Advice: orchestrateStartAdvice{
 			WatchCommand:     fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", opts.RootIssueID),
 			WatchInstruction: "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
@@ -1368,24 +1376,80 @@ func submitSessionStartForIssueWithBaseBranch(deps *Dependencies, issueID, baseB
 	return launch, nil
 }
 
-func orchestrateStartWarnings(ctx context.Context, deps *Dependencies, willStart bool) []string {
-	if !willStart || deps == nil || deps.DaemonClient == nil {
+func orchestrateStartWarnings(ctx context.Context, deps *Dependencies, rootIssueID string, willStart bool) []string {
+	if deps == nil || deps.DaemonClient == nil {
 		return nil
+	}
+	warnings := orchestrateRootWorktreeWarnings(ctx, deps, rootIssueID)
+	if !willStart {
+		return warnings
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return []string{fmt.Sprintf("could not inspect parent worktree dirtiness: %v", err)}
+		return append(warnings, fmt.Sprintf("could not inspect parent worktree dirtiness: %v", err))
 	}
 	status, err := deps.DaemonClient.GitStatus(ctx, cwd)
 	if err != nil {
-		return []string{fmt.Sprintf("could not inspect parent worktree dirtiness: %v", err)}
+		return append(warnings, fmt.Sprintf("could not inspect parent worktree dirtiness: %v", err))
 	}
 	dirty := dirtyFilesFromGitStatus(status)
 	if len(dirty) == 0 {
+		return warnings
+	}
+	return append(warnings,
+		fmt.Sprintf("parent worktree has uncommitted tracked changes (%s); worker worktrees are created from committed branch state and will not see these files: %s", summarizeGitStatusCounts(status), strings.Join(dirty, ", ")),
+	)
+}
+
+func orchestrateRootWorktreeWarnings(ctx context.Context, deps *Dependencies, rootIssueID string) []string {
+	rootIssueID = strings.TrimSpace(rootIssueID)
+	if rootIssueID == "" || deps == nil || deps.DaemonClient == nil {
 		return nil
 	}
+	tasks, err := deps.DaemonClient.ListTasks(ctx)
+	if err != nil {
+		return []string{fmt.Sprintf("could not inspect root worktree ownership for %s: list tasks: %v", rootIssueID, err)}
+	}
+	root, ok := findTaskByID(tasks, rootIssueID)
+	if !ok {
+		return nil
+	}
+	hasChild := false
+	for _, task := range tasks {
+		if task.ParentID != nil && naming.IssueIDsEqual(task.ParentID.String(), rootIssueID) {
+			hasChild = true
+			break
+		}
+	}
+	if !hasChild {
+		return nil
+	}
+	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
+	if err != nil {
+		return []string{fmt.Sprintf("could not inspect root worktree ownership for %s: list worktrees: %v", rootIssueID, err)}
+	}
+	for _, wt := range worktrees {
+		if naming.IssueIDsEqual(wt.IssueID, rootIssueID) && strings.TrimSpace(wt.Path) != "" {
+			return nil
+		}
+	}
+	currentPath := strings.TrimSpace(deps.RuntimeRepoDir)
+	if currentPath == "" {
+		currentPath = strings.TrimSpace(deps.RepoDir)
+	}
+	if currentPath == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			cwd = ""
+		}
+		currentPath = strings.TrimSpace(cwd)
+	}
+	rootKind := "root issue"
+	if root.Type == domain.TypeEpic {
+		rootKind = "root epic"
+	}
 	return []string{
-		fmt.Sprintf("parent worktree has uncommitted tracked changes (%s); worker worktrees are created from committed branch state and will not see these files: %s", summarizeGitStatusCounts(status), strings.Join(dirty, ", ")),
+		fmt.Sprintf("%s %s has child orchestration but no dedicated worktree; current worktree/path is %s. Recommended: az worktree create %s, then run orchestration from the issue worktree.", rootKind, rootIssueID, currentPath, rootIssueID),
 	}
 }
 
