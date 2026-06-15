@@ -113,7 +113,7 @@ func (s *Session) DisplayActivity() string {
 	}
 	activity := strings.ToLower(strings.TrimSpace(s.Activity))
 	switch activity {
-	case string(SessionBusy), string(SessionIdle), "unknown":
+	case string(SessionBusy), string(SessionIdle), string(SessionWaiting), string(SessionPaused), string(SessionDone), string(SessionError), "unknown", "starting", "working", "ended":
 		return activity
 	default:
 		return ""
@@ -122,10 +122,18 @@ func (s *Session) DisplayActivity() string {
 
 func (s *Session) DisplayState() (SessionState, bool) {
 	switch s.DisplayActivity() {
-	case string(SessionBusy):
+	case string(SessionBusy), "starting", "working":
 		return SessionBusy, true
 	case string(SessionIdle):
 		return SessionIdle, true
+	case string(SessionWaiting):
+		return SessionWaiting, true
+	case string(SessionPaused):
+		return SessionPaused, true
+	case string(SessionDone), "ended":
+		return SessionDone, true
+	case string(SessionError):
+		return SessionError, true
 	default:
 		return "", false
 	}

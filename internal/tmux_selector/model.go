@@ -1620,20 +1620,25 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 }
 
 func entryDisplayLabel(entry InventoryEntry) string {
-	switch strings.TrimSpace(strings.ToLower(entry.Activity)) {
-	case string(domain.SessionBusy), string(domain.SessionIdle):
-		return strings.ToLower(strings.TrimSpace(entry.Activity))
-	case "unknown":
-		return "unknown"
+	session := domain.Session{
+		State:    entry.State,
+		Activity: entry.Activity,
+	}
+	if label := session.DisplayLabel(); strings.TrimSpace(label) != "" {
+		return label
 	}
 	return strings.TrimSpace(entry.State.String())
 }
 
 func rowCardDisplayState(row InventoryEntry) domain.SessionState {
-	switch strings.TrimSpace(strings.ToLower(row.Activity)) {
-	case string(domain.SessionBusy):
-		return domain.SessionBusy
-	case string(domain.SessionIdle), "unknown":
+	session := domain.Session{
+		State:    row.State,
+		Activity: row.Activity,
+	}
+	if displayState, ok := session.DisplayState(); ok {
+		return displayState
+	}
+	if session.DisplayActivity() == "unknown" {
 		return domain.SessionIdle
 	}
 	return row.State

@@ -150,6 +150,7 @@ func (m *Model) applyRuntimeProjection(projection protocol.RuntimeProjection) bo
 				m.syncTaskWorkspaceOverlay()
 				return true
 			}
+			applyProjectionAgentActivity(next, projection.Agent)
 			if worktreePath := strings.TrimSpace(projection.Session.Worktree); worktreePath != "" {
 				next.Worktree = worktreePath
 			} else if projection.Worktree.Exists {
@@ -220,6 +221,7 @@ func (m *Model) applyRuntimeProjectionFromSessionEvent(body protocol.SessionProj
 			next.PausedCount = body.Runtime.Projection.Session.PausedCount
 			next.TmuxAttached = body.Runtime.Projection.Session.TmuxAttached
 			next.TmuxAttachedCount = body.Runtime.Projection.Session.TmuxAttachedCount
+			applyProjectionAgentActivity(next, body.Runtime.Projection.Agent)
 		}
 		next.State = nextState
 		if next.StartedAt == nil {
@@ -239,6 +241,18 @@ func (m *Model) applyRuntimeProjectionFromSessionEvent(body protocol.SessionProj
 	}
 
 	return updated
+}
+
+func applyProjectionAgentActivity(session *domain.Session, agent protocol.RuntimeAgentProjection) {
+	if session == nil {
+		return
+	}
+	status := strings.ToLower(strings.TrimSpace(agent.Status))
+	if status == "" {
+		return
+	}
+	session.Activity = status
+	session.ActivitySource = "agent"
 }
 
 func (m *Model) applyRuntimeProjectionFromUpdateEvent(body protocol.ProjectionUpdateEventBody) bool {
