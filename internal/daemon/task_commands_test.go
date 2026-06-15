@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3380,14 +3381,47 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 		t.Fatalf("add dependency: %v", err)
 	}
 
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	firstSessionID := naming.CanonicalSessionID(projectID, firstID)
+	secondSessionID := naming.CanonicalSessionID(projectID, secondID)
+	staleUpdatedAt := time.Date(2026, time.April, 2, 10, 0, 0, 0, time.UTC)
+	for _, row := range []struct {
+		name      string
+		sessionID string
+		issueID   string
+	}{
+		{name: "requested", sessionID: secondSessionID, issueID: secondID},
+		{name: "context", sessionID: firstSessionID, issueID: firstID},
+	} {
+		if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			ID:            row.sessionID,
+			IssueID:       row.issueID,
+			State:         daemonstate.SessionStateRunning,
+			ObservedState: daemonstate.SessionStateStopped,
+			UpdatedAt:     staleUpdatedAt,
+		}); err != nil {
+			t.Fatalf("seed %s session state: %v", row.name, err)
+		}
+	}
+	tmuxRunner := &testTmuxRunner{
+		sessions: map[string]bool{
+			firstSessionID:  true,
+			secondSessionID: true,
+		},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+
 	d := &Daemon{
-		cfg: Config{RepoDir: ".", Logger: logger},
+		cfg:  Config{RepoDir: ".", Logger: logger},
+		tmux: tmux.NewClient(tmuxRunner, logger),
 		issueClientsByProject: map[string]*issues.Client{
 			projectID: issuesClient,
 		},
 		sessionStore:           daemonstate.NewStore(),
 		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{},
-		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
 		revision:               map[string]uint64{projectID: 9},
 	}
 
@@ -3435,6 +3469,27 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 	}
 	if _, ok := taskByID[firstID]; !ok {
 		t.Fatalf("dependency context missing first issue: %+v", payload.Tasks)
+	}
+	for _, row := range []struct {
+		name      string
+		sessionID string
+	}{
+		{name: "requested", sessionID: secondSessionID},
+		{name: "context", sessionID: firstSessionID},
+	} {
+		session, found, err := runtimeStore.GetSessionState(ctx, projectID, row.sessionID)
+		if err != nil {
+			t.Fatalf("load %s session state: %v", row.name, err)
+		}
+		if !found {
+			t.Fatalf("%s session state missing", row.name)
+		}
+		if session.ObservedState != daemonstate.SessionStateRunning {
+			t.Fatalf("%s observed state = %s, want running", row.name, session.ObservedState)
+		}
+		if !session.UpdatedAt.After(staleUpdatedAt) {
+			t.Fatalf("%s updated_at = %s, want after %s", row.name, session.UpdatedAt, staleUpdatedAt)
+		}
 	}
 }
 
@@ -3857,7 +3912,7 @@ func TestHandleTaskGetTriggersOnlyRequestedIssueWorktreeRefreshAsync(t *testing.
 
 func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
 	ctx := context.Background()
-	projectID := protocol.DefaultProjectID
+	projectID := "azedarach"
 	repoDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
@@ -3865,27 +3920,71 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
 
 	issuesClient := issues.NewClient(repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
-	targetID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
-		Title: "target issue",
+	_, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "schema seed",
 		Type:  domain.TypeTask,
 	})
 	if err != nil {
-		t.Fatalf("create target issue: %v", err)
+		t.Fatalf("create schema seed issue: %v", err)
 	}
 
-	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	targetID := "bra"
+	contextID := "brb"
+	dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(5000)&_txlock=immediate")
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, row := range []struct {
+		id    string
+		title string
+	}{
+		{id: targetID, title: "target issue"},
+		{id: contextID, title: "context issue"},
+	} {
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO issues (
+				id, title, description, status, priority, issue_type,
+				created_at, updated_at, closed_at, assignee, labels_json,
+				implementations_json, design, notes, acceptance, estimate, deleted_at
+			)
+			VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+		`, row.id, row.title, string(domain.StatusOpen), int(domain.P3), string(domain.TypeTask), now, now); err != nil {
+			t.Fatalf("insert issue %s: %v", row.id, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at)
+		VALUES (?, ?, ?, NULL)
+	`, contextID, targetID, string(domain.DependencyBlocks)); err != nil {
+		t.Fatalf("insert context dependency: %v", err)
+	}
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
 
 	targetSessionID := naming.CanonicalSessionID(projectID, targetID)
+	contextSessionID := naming.CanonicalSessionID(projectID, contextID)
 	targetUpdatedAt := time.Date(2026, time.April, 2, 10, 0, 0, 0, time.UTC)
-	if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
-		ID:            targetSessionID,
-		IssueID:       targetID,
-		State:         daemonstate.SessionStateRunning,
-		ObservedState: daemonstate.SessionStateStopped,
-		UpdatedAt:     targetUpdatedAt,
-	}); err != nil {
-		t.Fatalf("seed target session state: %v", err)
+	for _, row := range []struct {
+		name      string
+		sessionID string
+		issueID   string
+	}{
+		{name: "target", sessionID: targetSessionID, issueID: targetSessionID},
+		{name: "context", sessionID: contextSessionID, issueID: contextID},
+	} {
+		if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			ID:            row.sessionID,
+			IssueID:       row.issueID,
+			State:         daemonstate.SessionStateRunning,
+			ObservedState: daemonstate.SessionStateStopped,
+			UpdatedAt:     targetUpdatedAt,
+		}); err != nil {
+			t.Fatalf("seed %s session state: %v", row.name, err)
+		}
 	}
 
 	otherUpdatedAt := time.Date(2026, time.April, 2, 9, 0, 0, 0, time.UTC)
@@ -3902,7 +4001,14 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
 		}
 	}
 
-	tmuxRunner := newTestTmuxRunner(targetSessionID)
+	tmuxRunner := &testTmuxRunner{
+		sessions: map[string]bool{
+			targetSessionID:  true,
+			contextSessionID: true,
+		},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
 	d := &Daemon{
 		cfg:    Config{Logger: slog.Default()},
 		issues: issuesClient,
@@ -3934,18 +4040,26 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
 		t.Fatalf("task.get response not OK: %+v", resp.Error)
 	}
 
-	targetSession, found, err := store.GetSessionState(ctx, projectID, targetSessionID)
-	if err != nil {
-		t.Fatalf("load target session state: %v", err)
-	}
-	if !found {
-		t.Fatal("target session state missing")
-	}
-	if targetSession.ObservedState != daemonstate.SessionStateRunning {
-		t.Fatalf("target observed state = %s, want running", targetSession.ObservedState)
-	}
-	if !targetSession.UpdatedAt.After(targetUpdatedAt) {
-		t.Fatalf("target updated_at = %s, want after %s", targetSession.UpdatedAt, targetUpdatedAt)
+	for _, row := range []struct {
+		name      string
+		sessionID string
+	}{
+		{name: "target", sessionID: targetSessionID},
+		{name: "context", sessionID: contextSessionID},
+	} {
+		session, found, err := store.GetSessionState(ctx, projectID, row.sessionID)
+		if err != nil {
+			t.Fatalf("load %s session state: %v", row.name, err)
+		}
+		if !found {
+			t.Fatalf("%s session state missing", row.name)
+		}
+		if session.ObservedState != daemonstate.SessionStateRunning {
+			t.Fatalf("%s observed state = %s, want running", row.name, session.ObservedState)
+		}
+		if !session.UpdatedAt.After(targetUpdatedAt) {
+			t.Fatalf("%s updated_at = %s, want after %s", row.name, session.UpdatedAt, targetUpdatedAt)
+		}
 	}
 
 	sessions, err := store.ListSessionStates(ctx, projectID)
@@ -3953,7 +4067,7 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
 		t.Fatalf("list session states: %v", err)
 	}
 	for _, session := range sessions {
-		if session.ID == targetSessionID {
+		if session.ID == targetSessionID || session.ID == contextSessionID {
 			continue
 		}
 		if !session.UpdatedAt.Equal(otherUpdatedAt) {
