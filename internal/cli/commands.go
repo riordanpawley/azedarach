@@ -5528,7 +5528,7 @@ func PrimeCommand(deps *Dependencies) error {
 			if detailTask, err := loadIssueDetailTask(context.Background(), deps, issueID); err == nil {
 				task = detailTask
 			}
-			issueSection = renderPrimeIssueSection(issueID, task)
+			issueSection = renderPrimeIssueSection(issueID, task, snapshot.Tasks, tmuxAvailable)
 			if task.Status == domain.StatusDone {
 				activeIssueClosedWarning = fmt.Sprintf("- Active issue `%s` is currently `closed`; start by picking/opening actionable work (for example `az issue list --limit 20` or `az issue create \"Next task\"`). Use `--deferred` only for standalone backlog work.", task.ID)
 			}
@@ -5672,7 +5672,7 @@ func renderPrimeImplementationSection(implementations []string) string {
 		strings.Join(quoted, ", "), exampleImpl)
 }
 
-func renderPrimeIssueSection(issueID string, task domain.Task) string {
+func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Task, tmuxAvailable bool) string {
 	description := ""
 	if strings.TrimSpace(task.Description) != "" {
 		description = fmt.Sprintf("\nDescription: %s", summarizePrimeDescription(issueID, task.Description))
@@ -5685,8 +5685,9 @@ func renderPrimeIssueSection(issueID string, task domain.Task) string {
 		parent = fmt.Sprintf("\nParent: %s", parentID)
 		mailbox = fmt.Sprintf("- Worker mailbox: receive orchestrator messages with `az mail list --parent %s --since 0 --json`; use `az mail watch --parent %s --since <seq> --jsonl` only when explicitly asked to monitor continuously.\n", parentID, parentID)
 	}
+	childWorkRecommendation := renderPrimeChildWorkRecommendation(task, tasks, tmuxAvailable)
 	return fmt.Sprintf(
-		"Active issue context (AZEDARACH_ISSUE_ID=%s):\nRefresh with `az issue get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s impl=%s]%s%s\nDependencies:\n%s\n```\n%s",
+		"Active issue context (AZEDARACH_ISSUE_ID=%s):\nRefresh with `az issue get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s impl=%s]%s%s\nDependencies:\n%s\n```\n%s%s",
 		issueID,
 		issueID,
 		task.ID,
@@ -5698,8 +5699,34 @@ func renderPrimeIssueSection(issueID string, task domain.Task) string {
 		parent,
 		description,
 		formatPrimeDependencyLines(task.Dependencies),
+		childWorkRecommendation,
 		mailbox,
 	)
+}
+
+func renderPrimeChildWorkRecommendation(task domain.Task, tasks []domain.Task, tmuxAvailable bool) string {
+	if task.Type != domain.TypeEpic && !issueHasChildren(task.ID, tasks) {
+		return ""
+	}
+	commands := "`az issue create \"Child task\"`"
+	sessionCommands := "`az session start <child-issue>`"
+	if tmuxAvailable {
+		commands += " or `az issue split \"Child task\"`"
+		sessionCommands += " or `az issue split \"Child task\"`"
+	}
+	return fmt.Sprintf("- Parent-context recommendation: `%s` is an epic or already has child issues; keep implementation/subtask work in child issues with %s instead of accumulating detailed work on the parent. Do the child implementation from the child issue execution context: preferably a child session (%s) and at minimum the child worktree (`az worktree create <child-issue>`).\n", task.ID, commands, sessionCommands)
+}
+
+func issueHasChildren(issueID naming.IssueID, tasks []domain.Task) bool {
+	for _, candidate := range tasks {
+		if candidate.ParentID == nil {
+			continue
+		}
+		if strings.TrimSpace(candidate.ParentID.String()) == issueID.String() {
+			return true
+		}
+	}
+	return false
 }
 
 func summarizePrimeDescription(issueID, description string) string {
