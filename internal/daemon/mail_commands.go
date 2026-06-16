@@ -146,7 +146,7 @@ func (d *Daemon) handleMailWatch(_ context.Context, req protocol.RequestEnvelope
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required fields: repo_dir/parent_issue"), nil
 	}
 	if d.cfg.Logger != nil {
-		d.cfg.Logger.Info("daemon mail watch requested",
+		d.cfg.Logger.Debug("daemon mail watch requested",
 			"repo_dir", repoDir,
 			"parent_issue", parentIssue,
 			"since_seq", cmd.SinceSeq,
@@ -164,7 +164,7 @@ func (d *Daemon) handleMailWatch(_ context.Context, req protocol.RequestEnvelope
 	resp := d.successResponse(req)
 	resp.Body = body
 	if d.cfg.Logger != nil {
-		d.cfg.Logger.Info("daemon mail watch completed",
+		d.cfg.Logger.Debug("daemon mail watch completed",
 			"repo_dir", repoDir,
 			"parent_issue", parentIssue,
 			"result_count", len(filtered),

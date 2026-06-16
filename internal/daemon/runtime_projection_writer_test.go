@@ -152,7 +152,7 @@ func TestRuntimeProjectionHelpersRouteThroughSingleWriter(t *testing.T) {
 		runtimeStateStore:       runtimeStateStore,
 		logger:                  logger,
 	}
-	wa.writeWorktreeProjectionSnapshot(ctx, projectID, []git.Worktree{{IssueID: issueID, Path: worktree, Branch: branch}})
+	wa.writeWorktreeProjectionSnapshot(ctx, projectID, []git.Worktree{{IssueID: issueID, Path: worktree, Branch: branch}}, nil)
 
 	ga := &gitServiceAdapter{
 		client:                  git.NewClient(statusRunner{status: " M README.md\n"}, logger),
