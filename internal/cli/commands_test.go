@@ -9068,6 +9068,143 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az mail watch --parent az-parent --since <seq> --jsonl` only when explicitly asked") {
 		t.Fatalf("prime output missing bounded mailbox watch guidance: %q", output)
 	}
+	if strings.Contains(output, "Parent-context recommendation:") {
+		t.Fatalf("prime output should not show parent-context recommendation for task without children: %q", output)
+	}
+}
+
+func TestPrimeCommandRecommendsChildIssuesForEpicContext(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
+	setPrimeTmuxAvailable(t, true)
+	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskList {
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+				body, err := marshalTaskListBody([]domain.Task{{
+					ID:        "az-1",
+					Title:     "Parent epic",
+					Status:    domain.StatusInProgress,
+					Priority:  domain.P2,
+					Type:      domain.TypeEpic,
+					CreatedAt: now,
+					UpdatedAt: now,
+				}})
+				if err != nil {
+					t.Fatalf("marshal task list: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Config: &config.Config{Spec: config.SpecConfig{Enabled: true}},
+	}
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(deps)
+	})
+
+	if !strings.Contains(output, "Parent-context recommendation: `az-1` is an epic or already has child issues") {
+		t.Fatalf("prime output missing epic child-work recommendation: %q", output)
+	}
+	if !strings.Contains(output, "keep implementation/subtask work in child issues with `az issue create \"Child task\"` or `az issue split \"Child task\"`") {
+		t.Fatalf("prime output missing child issue commands for epic context: %q", output)
+	}
+	if !strings.Contains(output, "Do the child implementation from the child issue execution context: preferably a child session (`az session start <child-issue>` or `az issue split \"Child task\"`) and at minimum the child worktree (`az worktree create <child-issue>`).") {
+		t.Fatalf("prime output missing child execution context guidance for epic context: %q", output)
+	}
+}
+
+func TestPrimeCommandRecommendsChildIssuesWhenActiveIssueHasChildren(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
+	setPrimeTmuxAvailable(t, false)
+	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+	parentID := naming.IssueID("az-1")
+
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskList {
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+				body, err := marshalTaskListBody([]domain.Task{
+					{
+						ID:        "az-1",
+						Title:     "Parent task",
+						Status:    domain.StatusInProgress,
+						Priority:  domain.P2,
+						Type:      domain.TypeTask,
+						CreatedAt: now,
+						UpdatedAt: now,
+					},
+					{
+						ID:        "az-2",
+						Title:     "Child task",
+						Status:    domain.StatusOpen,
+						Priority:  domain.P2,
+						Type:      domain.TypeTask,
+						ParentID:  &parentID,
+						CreatedAt: now,
+						UpdatedAt: now,
+					},
+				})
+				if err != nil {
+					t.Fatalf("marshal task list: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Config: &config.Config{Spec: config.SpecConfig{Enabled: true}},
+	}
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(deps)
+	})
+
+	if !strings.Contains(output, "Parent-context recommendation: `az-1` is an epic or already has child issues") {
+		t.Fatalf("prime output missing child-work recommendation for parent task: %q", output)
+	}
+	if !strings.Contains(output, "with `az issue create \"Child task\"` instead of accumulating detailed work on the parent") {
+		t.Fatalf("prime output missing non-tmux child issue command: %q", output)
+	}
+	if !strings.Contains(output, "Do the child implementation from the child issue execution context: preferably a child session (`az session start <child-issue>`) and at minimum the child worktree (`az worktree create <child-issue>`).") {
+		t.Fatalf("prime output missing child execution context guidance for parent task: %q", output)
+	}
+	if strings.Contains(output, "Parent-context recommendation: `az-1` is an epic or already has child issues; keep implementation/subtask work in child issues with `az issue create \"Child task\"` or `az issue split \"Child task\"`") {
+		t.Fatalf("prime output should not mention split command when tmux is unavailable: %q", output)
+	}
 }
 
 func TestPrimeCommandUsesTmuxSessionContextWhenEnvMissing(t *testing.T) {
