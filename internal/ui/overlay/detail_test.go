@@ -63,6 +63,7 @@ func TestDetailPanelView(t *testing.T) {
 
 	// Check that key information is present
 	assert.Contains(t, view, "az-123")
+	assert.Contains(t, view, "Title:")
 	assert.Contains(t, view, "Implement feature")
 	assert.Contains(t, view, "In Progress")
 	assert.Contains(t, view, "P1")
@@ -622,14 +623,20 @@ func TestDetailPanelCompactModeScrollsEntirePanel(t *testing.T) {
 	panel.wrapWidth = 24
 
 	initialView := panel.View()
-	assert.Contains(t, initialView, "Unique Compact Header")
+	assert.Contains(t, initialView, "Title:")
+	assert.Contains(t, initialView, "Unique")
+	assert.Contains(t, initialView, "Compact")
+	assert.Contains(t, initialView, "Header")
 	assert.Greater(t, panel.maxScroll(), 0)
 
-	m, _ := panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	panel = m.(*DetailPanel)
+	for i := 0; i < 5; i++ {
+		m, _ := panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+		panel = m.(*DetailPanel)
+	}
 	scrolledView := panel.View()
 
-	assert.NotContains(t, scrolledView, "Unique Compact Header")
+	assert.NotContains(t, scrolledView, "Title:")
+	assert.NotContains(t, scrolledView, "Unique")
 }
 
 func TestDetailPanelAutoScrollsToFocusedGraphRow(t *testing.T) {

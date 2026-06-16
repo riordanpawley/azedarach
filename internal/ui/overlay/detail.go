@@ -290,8 +290,29 @@ func (d *DetailPanel) buildLines() ([]string, int) {
 	addLine := func(line string) {
 		lines = append(lines, line)
 	}
+	addWrappedField := func(label, value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		labelText := label + ":"
+		renderedLabel := labelStyle.Render(labelText)
+		labelWidth := lipgloss.Width(renderedLabel)
+		prefix := renderedLabel + "  "
+		continuation := strings.Repeat(" ", labelWidth+2)
+		wrapWidth := max(10, d.wrapWidth-labelWidth-2)
+		wrapped := wrapDescriptionLines(value, wrapWidth)
+		for i, line := range wrapped {
+			if i == 0 {
+				addLine(prefix + valueStyle.Render(line))
+				continue
+			}
+			addLine(continuation + valueStyle.Render(line))
+		}
+	}
 
-	addLine(titleStyle.Render(fmt.Sprintf("[%s] %s", d.task.ID, d.task.Title)))
+	addLine(titleStyle.Render(fmt.Sprintf("[%s]", d.task.ID)))
+	addWrappedField("Title", d.task.Title)
 	addLine("")
 	addLine(labelStyle.Render("Issue:") + "  " + d.formatIssueCardSummary())
 	if metadata := d.renderIssueMetadataLines(labelStyle, valueStyle); metadata != "" {
