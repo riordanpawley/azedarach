@@ -7294,6 +7294,17 @@ func TestIssueCheckDoctorAndDeleteCommandsUseDaemonTaskCommands(t *testing.T) {
 	if !strings.Contains(doctorOut, "Doctor: OK az-1") {
 		t.Fatalf("doctor output = %q", doctorOut)
 	}
+	cfg := config.DefaultConfig()
+	cfg.IssueResources.PrepareCommands = []string{"just prepare"}
+	cfg.IssueResources.ReconcileCommand = "just reconcile"
+	deps.Config = cfg
+	doctorOut = captureStdout(t, func() error {
+		return IssueDoctorCommand(deps, IssueDoctorOptions{IssueID: "az-1"})
+	})
+	if !strings.Contains(doctorOut, "Doctor: WARN az-1") ||
+		!strings.Contains(doctorOut, "issueResources config mixes reconcileCommand") {
+		t.Fatalf("doctor mixed lifecycle output = %q", doctorOut)
+	}
 
 	deleteOut := captureStdout(t, func() error {
 		return IssueDeleteCommand(deps, IssueDeleteOptions{

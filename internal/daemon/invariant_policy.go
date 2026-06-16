@@ -31,6 +31,7 @@ const (
 	daemonInvariantTaskFollowOnMerge   daemonInvariantID = "task.follow_on_merge_candidates"
 
 	daemonInvariantRuntimeKnownProjectIDs daemonInvariantID = "runtime.known_project_ids"
+	daemonInvariantIssueResourceLifecycle daemonInvariantID = "issue_resources.lifecycle"
 )
 
 var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
@@ -50,6 +51,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantTaskMergeBaseTarget:    daemonInvariantSourceProjection,
 	daemonInvariantTaskFollowOnMerge:      daemonInvariantSourceProjection,
 	daemonInvariantRuntimeKnownProjectIDs: daemonInvariantSourceProjection,
+	daemonInvariantIssueResourceLifecycle: daemonInvariantSourceProjection,
 }
 
 func sourceForInvariant(id daemonInvariantID) daemonInvariantSource {

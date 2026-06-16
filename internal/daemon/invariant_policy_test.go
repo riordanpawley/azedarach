@@ -21,6 +21,7 @@ func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 		daemonInvariantTaskMergeBaseTarget:    daemonInvariantSourceProjection,
 		daemonInvariantTaskFollowOnMerge:      daemonInvariantSourceProjection,
 		daemonInvariantRuntimeKnownProjectIDs: daemonInvariantSourceProjection,
+		daemonInvariantIssueResourceLifecycle: daemonInvariantSourceProjection,
 	}
 	for id, want := range expected {
 		got, ok := matrix[id]

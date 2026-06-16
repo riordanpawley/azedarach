@@ -1583,7 +1583,8 @@ func (d *Daemon) stopTaskSessionForClose(ctx context.Context, req protocol.Reque
 }
 
 func (d *Daemon) cleanupTaskIssueResourcesForClose(ctx context.Context, projectID, taskID, worktreePath string) error {
-	if len(d.runtimeConfigForProject(projectID).IssueResources.CleanupCommands) == 0 {
+	resources := d.runtimeConfigForProject(projectID).IssueResources
+	if len(resources.CleanupCommands) == 0 && strings.TrimSpace(resources.ReconcileCommand) == "" {
 		return nil
 	}
 	lookupPath, branch := d.issueWorktreeContext(ctx, projectID, taskID)
@@ -1591,6 +1592,9 @@ func (d *Daemon) cleanupTaskIssueResourcesForClose(ctx context.Context, projectI
 		worktreePath = lookupPath
 	}
 	resourceCtx := d.issueResourceLifecycleContext(projectID, taskID, naming.CanonicalSessionID(projectID, taskID), worktreePath, branch)
+	if _, err := d.runIssueResourceReconcileCommand(ctx, projectID, resourceCtx, "absent"); err != nil {
+		return err
+	}
 	_, err := d.runIssueResourceCleanupCommands(ctx, projectID, resourceCtx)
 	return err
 }

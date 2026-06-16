@@ -1849,6 +1849,74 @@ func TestTaskCloseRunsIssueResourceCleanupWithSessionBeforeWorktreeRemoval(t *te
 	}
 }
 
+func TestCleanupTaskIssueResourcesRunsReconcileAbsentBeforeCleanup(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	worktreePath := filepath.Join(repoDir, "wt-az-1")
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	marker := filepath.Join(repoDir, "resource-order")
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			SessionShell: "sh",
+			IssueResources: appconfig.IssueResourcesConfig{
+				ReconcileCommand: fmt.Sprintf("printf '%%s\\n' \"$AZEDARACH_RESOURCE_DESIRED_STATE\" >> %q", marker),
+				CleanupCommands: []string{
+					fmt.Sprintf("printf 'cleanup\\n' >> %q", marker),
+				},
+			},
+			Logger: slog.Default(),
+		},
+	}
+
+	if err := d.cleanupTaskIssueResourcesForClose(ctx, protocol.DefaultProjectID, "az-1", worktreePath); err != nil {
+		t.Fatalf("cleanupTaskIssueResourcesForClose error: %v", err)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if got, want := strings.TrimSpace(string(data)), "absent\ncleanup"; got != want {
+		t.Fatalf("resource order = %q, want %q", got, want)
+	}
+}
+
+func TestCleanupTaskIssueResourcesReconcileAbsentFailureSkipsCleanup(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	worktreePath := filepath.Join(repoDir, "wt-az-1")
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	marker := filepath.Join(repoDir, "resource-order")
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			SessionShell: "sh",
+			IssueResources: appconfig.IssueResourcesConfig{
+				ReconcileCommand: "printf 'absent failed'; exit 7",
+				CleanupCommands: []string{
+					fmt.Sprintf("printf 'cleanup\\n' >> %q", marker),
+				},
+			},
+			Logger: slog.Default(),
+		},
+	}
+
+	err := d.cleanupTaskIssueResourcesForClose(ctx, protocol.DefaultProjectID, "az-1", worktreePath)
+	if err == nil {
+		t.Fatal("cleanupTaskIssueResourcesForClose error = nil, want reconcile failure")
+	}
+	if !strings.Contains(err.Error(), "absent failed") {
+		t.Fatalf("cleanup error = %q, want reconcile command output", err.Error())
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("cleanup marker stat = %v, want not exist", statErr)
+	}
+}
+
 func TestTaskUpdateStatusRejectsRawCloseActiveRuntime(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

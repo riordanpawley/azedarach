@@ -359,6 +359,11 @@
             "type": "string"
           },
           "default": []
+        },
+        "reconcileCommand": {
+          "type": "string",
+          "description": "Optional idempotent command that converges issue-scoped resources to AZEDARACH_RESOURCE_DESIRED_STATE=present or absent using stable AZEDARACH_* context.",
+          "default": ""
         }
       }
     },

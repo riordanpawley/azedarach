@@ -216,6 +216,7 @@ func cloneIssueResourcesConfig(cfg appconfig.IssueResourcesConfig) appconfig.Iss
 		PrepareCommands:            append([]string(nil), cfg.PrepareCommands...),
 		FailedStartCleanupCommands: append([]string(nil), cfg.FailedStartCleanupCommands...),
 		CleanupCommands:            append([]string(nil), cfg.CleanupCommands...),
+		ReconcileCommand:           cfg.ReconcileCommand,
 	}
 	for key, value := range cfg.Env {
 		clone.Env[key] = value
