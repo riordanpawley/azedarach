@@ -186,9 +186,9 @@ func TestModelTreeRendersHookActivityInsteadOfLifecycleBusy(t *testing.T) {
 		want     string
 		reject   string
 	}{
-		{name: "hook idle", activity: "idle", want: "cmd [idle] False busy flag", reject: "cmd [busy] False busy flag"},
-		{name: "agent working", activity: "working", want: "cmd [working] False busy flag", reject: "cmd [waiting] False busy flag"},
-		{name: "agent waiting", activity: "waiting", want: "cmd [waiting] False busy flag", reject: "cmd [busy] False busy flag"},
+		{name: "hook idle", activity: "idle", want: "az-cmd [idle] False busy flag", reject: "az-cmd [busy] False busy flag"},
+		{name: "agent working", activity: "working", want: "az-cmd [working] False busy flag", reject: "az-cmd [waiting] False busy flag"},
+		{name: "agent waiting", activity: "waiting", want: "az-cmd [waiting] False busy flag", reject: "az-cmd [busy] False busy flag"},
 	}
 
 	for _, tt := range tests {
@@ -218,6 +218,74 @@ func TestModelTreeRendersHookActivityInsteadOfLifecycleBusy(t *testing.T) {
 				t.Fatalf("view rendered wrong activity label %q:\n%s", tt.reject, view)
 			}
 		})
+	}
+}
+
+func TestModelTreeRendersIssueStatusBesideAgentStatus(t *testing.T) {
+	entries := []InventoryEntry{{
+		SessionID:      "az-coh",
+		IssueID:        "coh",
+		TaskTitle:      "Show issue status in selector",
+		State:          domain.SessionBusy,
+		IssueStatus:    domain.StatusInReview,
+		HasTmuxSession: true,
+	}}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	model.activeTab = selectorTabTree
+
+	view := ansi.Strip(model.View())
+	if !strings.Contains(view, "az-coh [busy] [in_review] Show issue status in selector") {
+		t.Fatalf("tree view missing separate agent and issue statuses:\n%s", view)
+	}
+}
+
+func TestModelTreePrefersPrefixedSessionIDForIssueRows(t *testing.T) {
+	entries := []InventoryEntry{{
+		SessionID:      "ch-enw",
+		IssueID:        "enw",
+		TaskTitle:      "Store DevTools split focus inspector",
+		State:          domain.SessionBusy,
+		IssueStatus:    domain.StatusInProgress,
+		HasTmuxSession: true,
+	}}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	model.activeTab = selectorTabTree
+
+	view := ansi.Strip(model.View())
+	if !strings.Contains(view, "ch-enw [busy] [in_progress] Store DevTools split focus inspector") {
+		t.Fatalf("tree view missing prefixed row identity:\n%s", view)
+	}
+	if strings.Contains(view, "> enw [busy] [in_progress]") || strings.Contains(view, "`- enw [busy] [in_progress]") {
+		t.Fatalf("tree view rendered bare issue id before prefixed id:\n%s", view)
+	}
+}
+
+func TestRenderSessionRowIncludesIssueStatusInCardMeta(t *testing.T) {
+	row := SessionRow{
+		SessionID:      "az-coh",
+		IssueID:        "coh",
+		TaskTitle:      "Show issue status in selector",
+		State:          domain.SessionBusy,
+		IssueStatus:    domain.StatusInProgress,
+		HasTmuxSession: true,
+	}
+
+	view := ansi.Strip(RenderSessionRow(row, false, 64, lipgloss.Style{}, lipgloss.Style{}, lipgloss.Style{}, styles.New()))
+	if !strings.Contains(view, "issue in_progress") {
+		t.Fatalf("card missing issue status meta:\n%s", view)
+	}
+	if !strings.Contains(view, "tmux az-coh") {
+		t.Fatalf("card missing tmux meta:\n%s", view)
 	}
 }
 
@@ -519,7 +587,7 @@ func TestModelTabTogglesTreeViewAndPersistsGlobally(t *testing.T) {
 		t.Fatalf("persisted keys = %q", got)
 	}
 	view := ansi.Strip(model.View())
-	if !strings.Contains(view, "[ Tree ]") || !strings.Contains(view, "`- az-child") {
+	if !strings.Contains(view, "[ Tree ]") || !strings.Contains(view, "`- az-proj-child") {
 		t.Fatalf("tree view missing tab or child hierarchy:\n%s", view)
 	}
 
