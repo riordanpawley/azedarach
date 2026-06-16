@@ -182,6 +182,8 @@ type Model struct {
 	err                error
 	status             string
 	defaultedToCurrent bool
+	selectorTabLoaded  bool
+	selectorTabUserSet bool
 
 	searchMode  bool
 	searchQuery string
@@ -245,6 +247,7 @@ func New(loader SnapshotLoader, opts ...Option) Model {
 			opt(&m)
 		}
 	}
+	m.selectorTabLoaded = m.uiStateStore == nil
 	return m
 }
 
@@ -259,12 +262,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		return m, nil
 	case LoadedMsg:
-		m.loading = false
+		m.loading = !m.selectorTabLoaded
 		m.err = nil
 		m.snapshot = msg.Snapshot
 		m.normalizeSnapshot()
 		m.status = formatSnapshotStatus(m.snapshot, len(m.snapshot.Entries))
-		cmds := []tea.Cmd{m.loadSelectorTabCmd()}
+		cmds := []tea.Cmd{}
+		if !m.selectorTabLoaded {
+			cmds = append(cmds, m.loadSelectorTabCmd())
+		}
 		if liveLoader, ok := m.loader.(LiveSnapshotLoader); ok && m.snapshot.Enriching {
 			cmds = append(cmds, m.enrichCmd(liveLoader, m.snapshot))
 		}
@@ -318,8 +324,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		return m, m.loadCmd()
 	case selectorTabLoadedMsg:
-		if msg.err == nil && msg.found {
+		if msg.err == nil && msg.found && !m.selectorTabUserSet {
 			m.activeTab = msg.tab
+		}
+		m.selectorTabLoaded = true
+		if m.err == nil {
+			m.loading = false
 		}
 		return m, nil
 	case selectorTabSavedMsg:
@@ -368,6 +378,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "tab":
 			m.toggleActiveTab()
+			m.selectorTabLoaded = true
+			m.selectorTabUserSet = true
+			m.loading = false
 			return m, m.persistSelectorTabCmd(m.activeTab)
 		case "1", "2", "3", "4", "5", "6", "7", "8", "9", "0":
 			m.selectCardHotkey(msg.String())
