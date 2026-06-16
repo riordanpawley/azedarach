@@ -440,6 +440,96 @@ func TestEditTaskSubmitSavesTitleAndKeepsWorkspaceOpen(t *testing.T) {
 	}
 }
 
+func TestEditTaskActionLoadsFullDetailsBeforeSubmit(t *testing.T) {
+	const issueID = "az-1"
+	var updateBody struct {
+		TaskID string `json:"task_id"`
+		daemonclient.TaskUpdateParams
+	}
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandTaskGet:
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+						{ID: naming.IssueID(issueID), Title: "Full title", Description: "stored description", Type: domain.TypeTask, Priority: domain.P2, Status: domain.StatusOpen},
+					}),
+				}, nil
+			case daemonclient.CommandTaskUpdate:
+				if err := json.Unmarshal(req.Body, &updateBody); err != nil {
+					t.Fatalf("unmarshal update body: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{
+		ID:       naming.IssueID(issueID),
+		Title:    "Summary title",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	}}
+	m.nav.SelectTask(issueID, 0)
+
+	updatedAny, loadCmd := m.handleActionMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	updated := updatedAny.(Model)
+	if loadCmd == nil {
+		t.Fatal("expected edit action to load full task detail")
+	}
+	loadedAny, openCmd := updated.Update(loadCmd())
+	loaded := loadedAny.(Model)
+	if openCmd == nil {
+		t.Fatal("expected full detail load to open edit overlay")
+	}
+	_ = openCmd()
+	if _, ok := loaded.overlayStack.Current().(*overlay.CreateTaskOverlay); !ok {
+		t.Fatalf("current overlay = %T, want edit task overlay", loaded.overlayStack.Current())
+	}
+
+	submittedAny, submitCmd := loaded.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	submitted := submittedAny.(Model)
+	if submitCmd == nil {
+		t.Fatal("expected edit submit command")
+	}
+	msgs := teaBatchMessages(submitCmd())
+	if len(msgs) != 1 {
+		t.Fatalf("submit messages = %d, want one save message: %#v", len(msgs), msgs)
+	}
+	savingAny, saveCmd := submitted.Update(msgs[0])
+	saving := savingAny.(Model)
+	if saveCmd == nil {
+		t.Fatal("expected save command")
+	}
+	savedAny, _ := saving.Update(saveCmd())
+	saved := savedAny.(Model)
+
+	if updateBody.TaskID != issueID || updateBody.Title != "Full title" || updateBody.Description != "stored description" {
+		t.Fatalf("update body = %+v, want full detail fields preserved", updateBody)
+	}
+	if got := saved.tasks[0].Description; got != "stored description" {
+		t.Fatalf("task description after save = %q, want stored description", got)
+	}
+	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandTaskGet || got[1] != daemonclient.CommandTaskUpdate {
+		t.Fatalf("requests = %v", got)
+	}
+}
+
 func TestEditTaskSubmitSavesTypedDescriptionAndKeepsWorkspaceOpen(t *testing.T) {
 	var updateBody struct {
 		TaskID string `json:"task_id"`

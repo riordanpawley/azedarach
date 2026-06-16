@@ -151,6 +151,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleSelection(msg)
 
+	case editTaskDetailLoadedMsg:
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Could not load full issue detail for edit: %v", msg.err),
+				Expires: time.Now().Add(6 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.openOverlay(overlay.NewEditTaskOverlayWithImplOptionsAndAttachmentService(msg.task, m.availableTaskImplementations(), m.attachmentService))
+
 	case overlay.BulkActionMsg:
 		m.overlayStack.Pop()
 		return m.handleBulkAction(msg)

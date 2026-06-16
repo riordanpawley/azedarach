@@ -664,7 +664,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		m.beginTaskStatusMoveFeedback(task.ID.String(), previousStatus, newStatus)
 		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
 	case "e":
-		return m, m.openOverlay(overlay.NewEditTaskOverlayWithImplOptionsAndAttachmentService(*task, m.availableTaskImplementations(), m.attachmentService))
+		return m.openEditTaskOverlay(*task)
 	case "T":
 		m.beginMutationFeedback(fmt.Sprintf("Archive queued for %s", task.ID))
 		return m, m.deleteTaskCmd(task.ID.String())
