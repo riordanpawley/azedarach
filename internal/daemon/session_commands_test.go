@@ -4656,6 +4656,50 @@ func TestIssueResourceCommandsReceiveContextAndConfiguredEnv(t *testing.T) {
 	}
 }
 
+func TestIssueResourceReconcileCommandReceivesDesiredState(t *testing.T) {
+	worktree := t.TempDir()
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      "/repo/root",
+			SessionShell: "sh",
+			IssueResources: appconfig.IssueResourcesConfig{
+				Env: map[string]string{
+					"AZEDARACH_RESOURCE_DESIRED_STATE": "wrong",
+				},
+				ReconcileCommand: "printf '%s|%s|%s' \"$AZEDARACH_ISSUE_ID\" \"$AZEDARACH_RESOURCE_DESIRED_STATE\" \"$(pwd)\" > reconcile-env",
+			},
+		},
+	}
+	resourceCtx := issueResourceLifecycleContext{
+		ProjectID:    "proj",
+		IssueID:      "az-123",
+		SessionID:    "proj-az-123",
+		WorktreePath: worktree,
+		RootPath:     "/repo/root",
+		Branch:       "user/az-123/demo",
+	}
+
+	result, err := d.runIssueResourceReconcileCommand(context.Background(), protocol.DefaultProjectID, resourceCtx, "present")
+	if err != nil {
+		t.Fatalf("runIssueResourceReconcileCommand error: %v", err)
+	}
+	if len(result.Ran) != 1 {
+		t.Fatalf("commands ran = %+v, want one reconcile command", result.Ran)
+	}
+	data, err := os.ReadFile(filepath.Join(worktree, "reconcile-env"))
+	if err != nil {
+		t.Fatalf("read reconcile env marker: %v", err)
+	}
+	wantWorktree, err := filepath.EvalSymlinks(worktree)
+	if err != nil {
+		t.Fatalf("eval worktree symlink: %v", err)
+	}
+	want := "az-123|present|" + wantWorktree
+	if strings.TrimSpace(string(data)) != want {
+		t.Fatalf("reconcile env marker = %q, want %q", strings.TrimSpace(string(data)), want)
+	}
+}
+
 func TestIssueResourceCommandsUseRootPathWhenWorktreeMissing(t *testing.T) {
 	root := t.TempDir()
 	d := &Daemon{

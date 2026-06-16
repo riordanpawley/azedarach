@@ -59,6 +59,7 @@ type issueResourceLifecycleContext struct {
 	WorktreePath string
 	RootPath     string
 	Branch       string
+	DesiredState string
 }
 
 type issueResourceLifecycleResult struct {
@@ -655,6 +656,11 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
 		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue resource prepare failed for %s: %v%s%s", cmd.IssueID, err, cleanupNote, worktreeCleanupNote)), nil
+	}
+	if _, err := d.runIssueResourceReconcileCommand(ctx, cmd.ProjectID, resourceCtx, "present"); err != nil {
+		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue resource reconcile present failed for %s: %v%s%s", cmd.IssueID, err, cleanupNote, worktreeCleanupNote)), nil
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session start worktree prepared",
@@ -2836,6 +2842,16 @@ func (d *Daemon) runIssueResourceCleanupCommands(ctx context.Context, projectID 
 	return d.runIssueResourceCommands(ctx, projectID, resourceCtx, d.runtimeConfigForProject(projectID).IssueResources.CleanupCommands)
 }
 
+func (d *Daemon) runIssueResourceReconcileCommand(ctx context.Context, projectID string, resourceCtx issueResourceLifecycleContext, desiredState string) (issueResourceLifecycleResult, error) {
+	projectCfg := d.runtimeConfigForProject(projectID)
+	command := strings.TrimSpace(projectCfg.IssueResources.ReconcileCommand)
+	if command == "" {
+		return issueResourceLifecycleResult{}, nil
+	}
+	resourceCtx.DesiredState = normalizeIssueResourceDesiredState(desiredState)
+	return d.runIssueResourceCommands(ctx, projectID, resourceCtx, []string{command})
+}
+
 func (d *Daemon) runIssueResourceCommands(ctx context.Context, projectID string, resourceCtx issueResourceLifecycleContext, commands []string) (issueResourceLifecycleResult, error) {
 	result := issueResourceLifecycleResult{}
 	if len(commands) == 0 {
@@ -2897,7 +2913,8 @@ func issueResourcesConfigured(cfg appconfig.IssueResourcesConfig) bool {
 	return len(cfg.Env) > 0 ||
 		len(cfg.PrepareCommands) > 0 ||
 		len(cfg.FailedStartCleanupCommands) > 0 ||
-		len(cfg.CleanupCommands) > 0
+		len(cfg.CleanupCommands) > 0 ||
+		strings.TrimSpace(cfg.ReconcileCommand) != ""
 }
 
 func (d *Daemon) issueResourceEnv(cfg appconfig.IssueResourcesConfig, resourceCtx issueResourceLifecycleContext) []string {
@@ -2952,13 +2969,26 @@ func issueResourceCommandDir(resourceCtx issueResourceLifecycleContext) string {
 }
 
 func issueResourceContextValues(resourceCtx issueResourceLifecycleContext) map[string]string {
-	return map[string]string{
+	values := map[string]string{
 		"AZEDARACH_PROJECT_ID":    resourceCtx.ProjectID,
 		"AZEDARACH_ISSUE_ID":      resourceCtx.IssueID,
 		"AZEDARACH_SESSION_ID":    resourceCtx.SessionID,
 		"AZEDARACH_WORKTREE_PATH": resourceCtx.WorktreePath,
 		"AZEDARACH_ROOT_PATH":     resourceCtx.RootPath,
 		"AZEDARACH_BRANCH":        resourceCtx.Branch,
+	}
+	if desired := normalizeIssueResourceDesiredState(resourceCtx.DesiredState); desired != "" {
+		values["AZEDARACH_RESOURCE_DESIRED_STATE"] = desired
+	}
+	return values
+}
+
+func normalizeIssueResourceDesiredState(state string) string {
+	switch strings.TrimSpace(strings.ToLower(state)) {
+	case "present", "absent":
+		return strings.TrimSpace(strings.ToLower(state))
+	default:
+		return ""
 	}
 }
 

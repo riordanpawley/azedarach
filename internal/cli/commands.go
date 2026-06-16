@@ -3575,6 +3575,9 @@ func IssueDoctorCommand(deps *Dependencies, opts IssueDoctorOptions) error {
 	if strings.TrimSpace(task.Status.String()) == "" {
 		diagnostics = append(diagnostics, "missing status")
 	}
+	if mixedIssueResourceLifecycleHooksConfigured(deps) {
+		diagnostics = append(diagnostics, "issueResources config mixes reconcileCommand with one-shot prepare/cleanup hooks; verify lifecycle ownership is intentional")
+	}
 
 	if len(diagnostics) == 0 {
 		if opts.JSON {
@@ -3604,6 +3607,19 @@ func IssueDoctorCommand(deps *Dependencies, opts IssueDoctorOptions) error {
 		fmt.Printf("- %s\n", diagnostic)
 	}
 	return nil
+}
+
+func mixedIssueResourceLifecycleHooksConfigured(deps *Dependencies) bool {
+	if deps == nil || deps.Config == nil {
+		return false
+	}
+	resources := deps.Config.IssueResources
+	if strings.TrimSpace(resources.ReconcileCommand) == "" {
+		return false
+	}
+	return len(resources.PrepareCommands) > 0 ||
+		len(resources.FailedStartCleanupCommands) > 0 ||
+		len(resources.CleanupCommands) > 0
 }
 
 func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {

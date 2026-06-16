@@ -23,7 +23,8 @@ Example configuration:
     "cleanupCommands": [
       "just db-drop \"$DATABASE_NAME\"",
       "rm -rf \".runtime/$AZEDARACH_ISSUE_ID\""
-    ]
+    ],
+    "reconcileCommand": "just issue-resource-reconcile"
   }
 }
 ```
@@ -38,6 +39,16 @@ reported.
 session stop or issue close cleanup paths. Azedarach does not infer destructive
 cleanup when the section is absent or empty.
 
+`reconcileCommand` is an optional idempotent command for richer resource
+managers such as per-issue compose projects, cloud resources, env files, and
+runtime directories. Azedarach runs it with
+`AZEDARACH_RESOURCE_DESIRED_STATE=present` during session start and runtime
+reconcile for non-closed issues with active runtime attachments. It runs with
+`AZEDARACH_RESOURCE_DESIRED_STATE=absent` during issue close/delete cleanup,
+before worktree removal, so project files are still available. A non-zero exit
+status fails the lifecycle operation and the command output is surfaced as
+evidence.
+
 Resource commands and launched sessions receive these stable variables:
 
 - `AZEDARACH_PROJECT_ID`
@@ -46,8 +57,12 @@ Resource commands and launched sessions receive these stable variables:
 - `AZEDARACH_WORKTREE_PATH`
 - `AZEDARACH_ROOT_PATH`
 - `AZEDARACH_BRANCH`
+- `AZEDARACH_RESOURCE_DESIRED_STATE` (`present` or `absent`, only for
+  `reconcileCommand`)
 
 Values in `issueResources.env` may reference these variables with shell-style
 `$NAME` expansion before they are exported. `AZEDARACH_*` names are reserved for
 Azedarach lifecycle context and cannot be overridden from project config. Keep
 resource names issue-scoped and make cleanup commands target only those names.
+If `reconcileCommand` and one-shot prepare/cleanup commands are both configured,
+use `az issue doctor`/review output to verify the mixed ownership is intentional.

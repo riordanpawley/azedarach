@@ -13,6 +13,8 @@ import (
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
@@ -89,6 +91,9 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 	if err := d.refreshSessionRuntimeState(ctx, result.ProjectID.String()); err != nil {
 		errs = append(errs, fmt.Errorf("refresh session runtime state: %w", err))
 	}
+	if err := d.reconcileIssueResourcesPresent(ctx, result.ProjectID.String(), nil); err != nil {
+		errs = append(errs, fmt.Errorf("reconcile issue resources present: %w", err))
+	}
 
 	return result, errors.Join(errs...)
 }
@@ -126,7 +131,102 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 			result.AlignedDaemonSessions += sessionResult.AlignedDaemonSessions
 		}
 	}
+	if err := d.reconcileIssueResourcesPresent(ctx, result.ProjectID.String(), issueIDs); err != nil {
+		errs = append(errs, fmt.Errorf("reconcile issue resources present: %w", err))
+	}
 	return result, errors.Join(errs...)
+}
+
+func (d *Daemon) reconcileIssueResourcesPresent(ctx context.Context, projectID string, issueIDs []string) error {
+	if d == nil {
+		return nil
+	}
+	if !usesProjectionSource(sourceForInvariant(daemonInvariantIssueResourceLifecycle)) {
+		return nil
+	}
+	projectCfg := d.runtimeConfigForProject(projectID)
+	if strings.TrimSpace(projectCfg.IssueResources.ReconcileCommand) == "" {
+		return nil
+	}
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil
+	}
+	tasks, err := issueClient.List(ctx)
+	if err != nil {
+		return err
+	}
+	allowed := map[string]struct{}{}
+	if len(issueIDs) > 0 {
+		for _, issueID := range normalizeRuntimeReconcileIssueIDs(issueIDs) {
+			allowed[issueID] = struct{}{}
+		}
+	}
+
+	attachedIssueIDs, err := d.issueResourceAttachedIssueIDs(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, task := range tasks {
+		issueID := strings.TrimSpace(task.ID.String())
+		if issueID == "" || task.Status == domain.StatusDone {
+			continue
+		}
+		if len(allowed) > 0 {
+			if _, ok := allowed[issueID]; !ok {
+				continue
+			}
+		}
+		if _, ok := attachedIssueIDs[sessionKey(issueID)]; !ok {
+			continue
+		}
+		worktreePath, branch := d.issueWorktreeContext(ctx, projectID, issueID)
+		sessionID := naming.CanonicalSessionID(projectID, issueID)
+		resourceCtx := d.issueResourceLifecycleContext(projectID, issueID, sessionID, worktreePath, branch)
+		if _, err := d.runIssueResourceReconcileCommand(ctx, projectID, resourceCtx, "present"); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", issueID, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (d *Daemon) issueResourceAttachedIssueIDs(ctx context.Context, projectID string) (map[string]struct{}, error) {
+	attached := map[string]struct{}{}
+	projectID = d.canonicalProjectID(projectID)
+	namingScope := d.sessionNamingScope(projectID)
+	if store := d.worktreeRuntimeStateStoreIfConfigured(projectID); store != nil {
+		rows, err := store.ListWorktreeStates(ctx, projectID)
+		if err != nil {
+			return nil, fmt.Errorf("load worktree projections for issue resource reconcile: %w", err)
+		}
+		for _, row := range rows {
+			key := sessionKey(row.IssueID)
+			if key != "" {
+				attached[key] = struct{}{}
+			}
+		}
+	}
+	if store := d.sessionRuntimeStateStoreIfConfigured(projectID); store != nil {
+		rows, err := store.ListSessionStates(ctx, projectID)
+		if err != nil {
+			return nil, fmt.Errorf("load session projections for issue resource reconcile: %w", err)
+		}
+		for key := range activeSessionIssueKeysFromProjection(rows, namingScope) {
+			attached[key] = struct{}{}
+		}
+	}
+	if d.sessionStore != nil {
+		snapshot := d.sessionStore.ReadSnapshot(projectID)
+		rows := make([]daemonstate.Session, 0, len(snapshot.Sessions))
+		for _, session := range snapshot.Sessions {
+			rows = append(rows, session)
+		}
+		for key := range activeSessionIssueKeysFromProjection(rows, namingScope) {
+			attached[key] = struct{}{}
+		}
+	}
+	return attached, nil
 }
 
 func (d *Daemon) runtimeReconcileInterval() time.Duration {

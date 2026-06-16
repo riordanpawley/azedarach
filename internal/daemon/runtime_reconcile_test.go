@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
@@ -1227,6 +1230,79 @@ func TestDefaultRuntimeReconcilePathIsNilSafe(t *testing.T) {
 	}
 	if result.WorktreesRefreshed != 0 || result.RecreatedTmuxSessions != 0 || result.AlignedDaemonSessions != 0 {
 		t.Fatalf("default reconcile result = %+v, want zero counts", result)
+	}
+}
+
+func TestReconcileIssueResourcesPresentRunsForActiveRuntimeAttachmentsOnly(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-resource-reconcile"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	activeID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Active resources",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create active issue: %v", err)
+	}
+	if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Open without runtime resources",
+		Type:   domain.TypeTask,
+		Status: domain.StatusOpen,
+	}); err != nil {
+		t.Fatalf("create open issue: %v", err)
+	}
+	activeWorktree := filepath.Join(repoDir, "wt-"+activeID)
+	if err := os.MkdirAll(activeWorktree, 0o755); err != nil {
+		t.Fatalf("mkdir worktree %s: %v", activeWorktree, err)
+	}
+	if err := runtimeStateStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   activeID,
+		Path:      activeWorktree,
+		Branch:    "riordan/" + activeID + "/resources",
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree state: %v", err)
+	}
+
+	marker := filepath.Join(repoDir, "resource-reconcile")
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			SessionShell: "sh",
+			IssueResources: appconfig.IssueResourcesConfig{
+				ReconcileCommand: fmt.Sprintf("printf '%%s|%%s|%%s\\n' \"$AZEDARACH_ISSUE_ID\" \"$AZEDARACH_RESOURCE_DESIRED_STATE\" \"$AZEDARACH_WORKTREE_PATH\" >> %q", marker),
+			},
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+	}
+
+	if err := d.reconcileIssueResourcesPresent(ctx, projectID, nil); err != nil {
+		t.Fatalf("reconcileIssueResourcesPresent error: %v", err)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	got := strings.TrimSpace(string(data))
+	want := activeID + "|present|" + activeWorktree
+	if got != want {
+		t.Fatalf("resource reconcile marker = %q, want %q", got, want)
 	}
 }
 

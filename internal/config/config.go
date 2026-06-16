@@ -171,6 +171,7 @@ type IssueResourcesConfig struct {
 	PrepareCommands            []string          `json:"prepareCommands"`
 	FailedStartCleanupCommands []string          `json:"failedStartCleanupCommands"`
 	CleanupCommands            []string          `json:"cleanupCommands"`
+	ReconcileCommand           string            `json:"reconcileCommand"`
 }
 
 type SpecConfig struct {
@@ -283,6 +284,7 @@ func DefaultConfig() *Config {
 			PrepareCommands:            []string{},
 			FailedStartCleanupCommands: []string{},
 			CleanupCommands:            []string{},
+			ReconcileCommand:           "",
 		},
 		Spec: SpecConfig{
 			Enabled: true,
