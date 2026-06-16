@@ -82,6 +82,49 @@ func TestOpenTaskWorkspaceRoutesThroughDaemon(t *testing.T) {
 	}
 }
 
+func TestOpenTaskDrillDownRoutesThroughDaemon(t *testing.T) {
+	transport := &uiRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != protocol.CommandUIOpenTaskDrillDown {
+				t.Fatalf("command = %q, want %q", req.Command, protocol.CommandUIOpenTaskDrillDown)
+			}
+			var body protocol.UICommandRequestBody
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal request body: %v", err)
+			}
+			if body.Command != protocol.UICommandOpenTaskDrillDown || body.IssueID != "az-1" {
+				t.Fatalf("request body = %+v", body)
+			}
+			respBody, err := json.Marshal(protocol.UICommandResponseBody{
+				ProjectID: "proj-ui",
+				IssueID:   "az-1",
+				Command:   protocol.UICommandOpenTaskDrillDown,
+				RequestID: "req-1",
+				CreatedAt: time.Date(2026, time.May, 5, 15, 45, 0, 0, time.UTC),
+			})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	client := New(transport).WithProjectID("proj-ui")
+
+	resp, err := client.OpenTaskDrillDown(context.Background(), naming.IssueID("az-1"))
+	if err != nil {
+		t.Fatalf("OpenTaskDrillDown error: %v", err)
+	}
+	if resp.ProjectID != "proj-ui" || resp.IssueID != "az-1" || resp.Command != protocol.UICommandOpenTaskDrillDown {
+		t.Fatalf("response = %+v", resp)
+	}
+}
+
 func TestUIStateGetSetRoutesThroughDaemon(t *testing.T) {
 	transport := &uiRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

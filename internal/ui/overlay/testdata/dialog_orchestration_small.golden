@@ -4,12 +4,12 @@
 ││  Azedarach tmux sessions: 1                 Keys                  │
 ││                                             ──────────────────────│
 ││  ▶ az-123  in_progress    ● busy             j/k navigate         │
-││    Implement feature X with caref...         Enter/a switch       │
-││    ⏱ not started  📁                         x kill               │
-││ /Users/riordan/prog/azedarach                r refresh            │
-││    tmux yes  worktree yes  git dirty (+8/    Esc close            │
-││ 2; ↑2)                                                            │
-││    💬 renderDialogTwoPane ok                                      │
+││    Implement feature X with caref...         Enter drill          │
+││    ⏱ not started  📁                         a switch             │
+││ /Users/riordan/prog/azedarach                Space details        │
+││    tmux yes  worktree yes  git dirty (+8/    x kill               │
+││ 2; ↑2)                                       r refresh            │
+││    💬 renderDialogTwoPane ok                 Esc close            │
 ││                                                                   │
 ││                                                                   │
 ││                                                                   │

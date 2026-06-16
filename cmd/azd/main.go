@@ -18,6 +18,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/logging"
 )
 
+var daemonExecutable = os.Executable
+
 func main() {
 	var socketPath string
 	var lockPath string
@@ -58,6 +60,10 @@ func main() {
 	if lockPath == "" {
 		lockPath = config.DaemonLockPathFor(repoDir)
 	}
+	if err := validateDaemonLaunchFence(socketPath); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
 	scopedRuntime := config.UseScopedDaemonRuntimeFor(repoDir)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -92,6 +98,14 @@ func main() {
 func newDaemonLogger() *slog.Logger {
 	// Daemon stderr is redirected to azd.log by the launcher.
 	return logging.NewTextStreamLogger(os.Stderr, slog.LevelInfo)
+}
+
+func validateDaemonLaunchFence(socketPath string) error {
+	executable, err := daemonExecutable()
+	if err != nil || strings.TrimSpace(executable) == "" {
+		return nil
+	}
+	return config.ValidateSharedDaemonExecutable(socketPath, executable)
 }
 
 func resolveScopedWorktreeWatchPath(repoDir string) string {

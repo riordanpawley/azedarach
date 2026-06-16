@@ -36,7 +36,11 @@ func NewDaemonKiller(tmuxClient tmuxSessionKiller, logger *slog.Logger) *DaemonK
 }
 
 func (k *DaemonKiller) KillSession(ctx context.Context, entry InventoryEntry) error {
-	if socketPath, projectID, issueID, ok := resolveDaemonStopTarget(entry); ok {
+	socketPath, projectID, issueID, ok, err := resolveDaemonStopTarget(entry)
+	if err != nil {
+		return err
+	}
+	if ok {
 		if err := k.daemonStop(ctx, socketPath, projectID, issueID); err != nil {
 			return fmt.Errorf("daemon stop session %s: %w", issueID, err)
 		}
@@ -55,21 +59,21 @@ func (k *DaemonKiller) KillSession(ctx context.Context, entry InventoryEntry) er
 	return nil
 }
 
-func resolveDaemonStopTarget(entry InventoryEntry) (socketPath, projectID, issueID string, ok bool) {
+func resolveDaemonStopTarget(entry InventoryEntry) (socketPath, projectID, issueID string, ok bool, err error) {
 	rawIssueID := strings.TrimSpace(firstNonEmpty(entry.IssueID, entry.Task.ID.String()))
 	if rawIssueID == "" {
-		return "", "", "", false
+		return "", "", "", false, nil
 	}
 	parsed, err := naming.ParseIssueID(rawIssueID)
 	if err != nil {
-		return "", "", "", false
+		return "", "", "", false, nil
 	}
 	projectPath := strings.TrimSpace(firstNonEmpty(entry.ProjectPath, entry.Worktree))
 	if projectPath == "" && entry.Task.Session != nil {
 		projectPath = strings.TrimSpace(entry.Task.Session.Worktree)
 	}
 	if projectPath == "" {
-		return "", "", "", false
+		return "", "", "", false, nil
 	}
 	if root, err := config.ResolveProjectRoot(projectPath); err == nil && strings.TrimSpace(root) != "" {
 		projectPath = root
@@ -79,9 +83,13 @@ func resolveDaemonStopTarget(entry InventoryEntry) (socketPath, projectID, issue
 		pid = strings.TrimSpace(entry.ProjectID)
 	}
 	if pid == "" {
-		return "", "", "", false
+		return "", "", "", false, nil
 	}
-	return config.DaemonSocketPathFor(projectPath), pid, parsed.String(), true
+	socketPath = config.DaemonSocketPathFor(projectPath)
+	if err := validateSharedDaemonExecutable(socketPath); err != nil {
+		return "", "", "", false, err
+	}
+	return socketPath, pid, parsed.String(), true, nil
 }
 
 func defaultDaemonStop(ctx context.Context, socketPath, projectID, issueID string) error {

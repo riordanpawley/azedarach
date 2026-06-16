@@ -9,6 +9,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
@@ -25,6 +26,14 @@ func NewDaemonDetailOpener(logger *slog.Logger) *DaemonDetailOpener {
 }
 
 func (o *DaemonDetailOpener) OpenDetail(ctx context.Context, entry InventoryEntry) error {
+	return o.openIssueCommand(ctx, entry, protocol.UICommandOpenTaskWorkspace)
+}
+
+func (o *DaemonDetailOpener) OpenDrillDown(ctx context.Context, entry InventoryEntry) error {
+	return o.openIssueCommand(ctx, entry, protocol.UICommandOpenTaskDrillDown)
+}
+
+func (o *DaemonDetailOpener) openIssueCommand(ctx context.Context, entry InventoryEntry, command string) error {
 	totalStarted := time.Now()
 	var logger *slog.Logger
 	if o != nil {
@@ -66,16 +75,27 @@ func (o *DaemonDetailOpener) OpenDetail(ctx context.Context, entry InventoryEntr
 		"elapsed_ms", time.Since(socketStarted).Milliseconds(),
 		"issue_id", issueID.String(),
 		"project_id", projectID,
+		"command", command,
 		"socket_path", socketPath,
 	)
+	if err := validateSharedDaemonExecutable(socketPath); err != nil {
+		return err
+	}
 	client := daemonclient.New(transport.NewClient(socketPath)).WithProjectID(projectID)
 	commandStarted := time.Now()
-	if _, err := client.OpenTaskWorkspace(ctx, issueID); err != nil {
+	switch command {
+	case protocol.UICommandOpenTaskDrillDown:
+		_, err = client.OpenTaskDrillDown(ctx, issueID)
+	default:
+		_, err = client.OpenTaskWorkspace(ctx, issueID)
+	}
+	if err != nil {
 		logger.Warn("tmux selector workspace open daemon command failed",
 			"elapsed_ms", time.Since(commandStarted).Milliseconds(),
 			"total_elapsed_ms", time.Since(totalStarted).Milliseconds(),
 			"issue_id", issueID.String(),
 			"project_id", projectID,
+			"command", command,
 			"error", err,
 		)
 		return err
@@ -85,6 +105,7 @@ func (o *DaemonDetailOpener) OpenDetail(ctx context.Context, entry InventoryEntr
 		"total_elapsed_ms", time.Since(totalStarted).Milliseconds(),
 		"issue_id", issueID.String(),
 		"project_id", projectID,
+		"command", command,
 	)
 	return nil
 }

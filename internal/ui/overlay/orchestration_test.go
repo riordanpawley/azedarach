@@ -13,7 +13,7 @@ import (
 )
 
 func TestOrchestrationOverlay_Title(t *testing.T) {
-	overlay := NewOrchestrationOverlay(nil, nil, nil, nil)
+	overlay := NewOrchestrationOverlay(nil, nil, nil, nil, nil, nil)
 	assert.Equal(t, "Tmux Sessions", overlay.Title())
 }
 
@@ -30,7 +30,7 @@ func TestOrchestrationOverlay_Size(t *testing.T) {
 			HasTmuxSession: true,
 			HasWorktree:    true,
 		},
-	}, nil, nil, nil)
+	}, nil, nil, nil, nil, nil)
 
 	width, height := overlay.Size()
 	assert.Greater(t, width, 0)
@@ -52,7 +52,7 @@ func TestOrchestrationOverlay_View(t *testing.T) {
 			GitAheadCount:  1,
 			RecentOutput:   "build finished\nview rendered\nrenderDialogTwoPane ok",
 		},
-	}, nil, nil, nil)
+	}, nil, nil, nil, nil, nil)
 
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
 	overlay = model.(*OrchestrationOverlay)
@@ -63,7 +63,11 @@ func TestOrchestrationOverlay_View(t *testing.T) {
 	assert.Contains(t, view, "Azedarach tmux sessions")
 	assert.Contains(t, view, "Keys")
 	assert.Contains(t, view, "git clean")
-	assert.Contains(t, view, "Enter/a")
+	assert.Contains(t, view, "Enter")
+	assert.Contains(t, view, "drill")
+	assert.Contains(t, view, "a")
+	assert.Contains(t, view, "switch")
+	assert.Contains(t, view, "Space")
 }
 
 func TestOrchestrationOverlay_WindowSizeFitsNarrowViewport(t *testing.T) {
@@ -79,7 +83,7 @@ func TestOrchestrationOverlay_WindowSizeFitsNarrowViewport(t *testing.T) {
 			HasTmuxSession: true,
 			HasWorktree:    true,
 		},
-	}, nil, nil, nil)
+	}, nil, nil, nil, nil, nil)
 
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
 	overlay = model.(*OrchestrationOverlay)
@@ -102,7 +106,7 @@ func TestOrchestrationOverlay_RowRenderingIsStandalone(t *testing.T) {
 		HasUncommittedChanges: true,
 		GitAdditions:          5,
 		GitDeletions:          3,
-	}}, nil, nil, nil)
+	}}, nil, nil, nil, nil, nil)
 
 	row := overlay.renderSession(0, overlay.sessions[0], 64)
 
@@ -123,7 +127,7 @@ func TestOrchestrationOverlay_RowRendersAgentActivity(t *testing.T) {
 		Activity:       "idle",
 		ActivitySource: "hooks",
 		HasTmuxSession: true,
-	}}, nil, nil, nil)
+	}}, nil, nil, nil, nil, nil)
 
 	row := ansi.Strip(overlay.renderSession(0, overlay.sessions[0], 64))
 
@@ -144,16 +148,26 @@ func TestOrchestrationOverlay_EnterAAndRefreshCallbacks(t *testing.T) {
 		func() tea.Cmd {
 			return func() tea.Msg { return "refresh" }
 		},
+		func(issueID string) tea.Cmd {
+			return func() tea.Msg { return "workspace:" + issueID }
+		},
+		func(issueID string) tea.Cmd {
+			return func() tea.Msg { return "drill:" + issueID }
+		},
 	)
 
 	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	require.NotNil(t, cmd)
-	assert.Equal(t, "attach:bxl", cmd())
+	assert.Equal(t, "drill:bxl", cmd())
 
 	_, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	require.NotNil(t, cmd)
 	assert.Equal(t, "attach:bxf", cmd())
+
+	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeySpace})
+	require.NotNil(t, cmd)
+	assert.Equal(t, "workspace:bxf", cmd())
 
 	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 	require.NotNil(t, cmd)

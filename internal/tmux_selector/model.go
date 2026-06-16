@@ -109,11 +109,16 @@ func (f KillerFunc) KillSession(ctx context.Context, entry InventoryEntry) error
 
 type DetailOpener interface {
 	OpenDetail(context.Context, InventoryEntry) error
+	OpenDrillDown(context.Context, InventoryEntry) error
 }
 
 type DetailOpenerFunc func(context.Context, InventoryEntry) error
 
 func (f DetailOpenerFunc) OpenDetail(ctx context.Context, entry InventoryEntry) error {
+	return f(ctx, entry)
+}
+
+func (f DetailOpenerFunc) OpenDrillDown(ctx context.Context, entry InventoryEntry) error {
 	return f(ctx, entry)
 }
 
@@ -394,7 +399,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "refreshing"
 			m.defaultedToCurrent = false
 			return m, m.loadCmd()
-		case "enter", "a":
+		case "enter":
+			entry, ok := m.selectedEntry()
+			if !ok {
+				return m, nil
+			}
+			m.status = fmt.Sprintf("Opening %s drill-down in full az...", entry.IssueID)
+			return m, m.openDrillDownCmd(entry)
+		case "a":
 			entry, ok := m.selectedEntry()
 			if !ok {
 				return m, nil
@@ -580,9 +592,10 @@ func (m Model) renderFooter() string {
 		{Key: "q/Esc", Description: "close"},
 		{Key: "/", Description: "search"},
 		{Key: "gw", Description: "labels"},
-		{Key: "Enter/a", Description: "switch"},
-		{Key: "o/Space", Description: "open"},
+		{Key: "Enter", Description: "drill"},
+		{Key: "a", Description: "switch"},
 		{Key: "x", Description: "kill"},
+		{Key: "o/Sp", Description: "open"},
 	}
 	right := m.styles.StatusHint.Render(keybinds.RenderPlain(bindings, "  "))
 	if m.searchMode || strings.TrimSpace(m.searchQuery) != "" {
@@ -1231,7 +1244,40 @@ func (m Model) openDetailCmd(entry InventoryEntry) tea.Cmd {
 	}
 }
 
+func (m Model) openDrillDownCmd(entry InventoryEntry) tea.Cmd {
+	return func() tea.Msg {
+		switcher, ok := m.switcher.(fullAzSwitcher)
+		if !ok {
+			return DetailOpenResultMsg{Err: fmt.Errorf("full az tmux switcher unavailable")}
+		}
+		if m.detailOpener == nil {
+			return DetailOpenResultMsg{Err: fmt.Errorf("detail opener unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return DetailOpenResultMsg{Err: openFullAzDrillDown(ctx, switcher, m.detailOpener, entry)}
+	}
+}
+
 func openFullAzDetail(ctx context.Context, switcher fullAzSwitcher, opener DetailOpener, entry InventoryEntry) error {
+	return openFullAzIssueCommand(ctx, switcher, entry, func(entry InventoryEntry) error {
+		if err := opener.OpenDetail(ctx, entry); err != nil {
+			return fmt.Errorf("request full az detail open: %w", err)
+		}
+		return nil
+	})
+}
+
+func openFullAzDrillDown(ctx context.Context, switcher fullAzSwitcher, opener DetailOpener, entry InventoryEntry) error {
+	return openFullAzIssueCommand(ctx, switcher, entry, func(entry InventoryEntry) error {
+		if err := opener.OpenDrillDown(ctx, entry); err != nil {
+			return fmt.Errorf("request full az drill-down open: %w", err)
+		}
+		return nil
+	})
+}
+
+func openFullAzIssueCommand(ctx context.Context, switcher fullAzSwitcher, entry InventoryEntry, send func(InventoryEntry) error) error {
 	issueID := strings.TrimSpace(entry.IssueID)
 	if issueID == "" {
 		issueID = entry.Task.ID.String()
@@ -1247,8 +1293,8 @@ func openFullAzDetail(ctx context.Context, switcher fullAzSwitcher, opener Detai
 		return fmt.Errorf("full az tmux session %q not found", defaultFullAzSession)
 	}
 	entry.IssueID = issueID
-	if err := opener.OpenDetail(ctx, entry); err != nil {
-		return fmt.Errorf("request full az detail open: %w", err)
+	if err := send(entry); err != nil {
+		return err
 	}
 	if err := switcher.SwitchClient(ctx, defaultFullAzSession); err != nil {
 		return fmt.Errorf("switch to full az tmux session: %w", err)

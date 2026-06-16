@@ -992,7 +992,7 @@ func (m Model) renderDrillDownToolbar() string {
 	}
 	left := m.styles.OverlayTitle.Render("Drill-down")
 	body := m.styles.MenuItem.Render("Children of " + target)
-	right := m.styles.StatusHint.Render("Esc: back to board  Space: details+actions")
+	right := m.styles.StatusHint.Render("Esc: back  Space: details  a: attach")
 	return lipgloss.JoinHorizontal(lipgloss.Left, left+"  ", body+"  ", right)
 }
 

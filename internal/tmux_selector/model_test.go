@@ -101,9 +101,10 @@ func (f *fakeFullAzSwitcher) SwitchClient(_ context.Context, sessionID string) e
 }
 
 type fakeDetailOpener struct {
-	entries []InventoryEntry
-	err     error
-	events  *[]string
+	entries      []InventoryEntry
+	drillEntries []InventoryEntry
+	err          error
+	events       *[]string
 }
 
 func (f *fakeDetailOpener) OpenDetail(_ context.Context, entry InventoryEntry) error {
@@ -111,6 +112,11 @@ func (f *fakeDetailOpener) OpenDetail(_ context.Context, entry InventoryEntry) e
 		*f.events = append(*f.events, "open "+entryIssueID(entry))
 	}
 	f.entries = append(f.entries, entry)
+	return f.err
+}
+
+func (f *fakeDetailOpener) OpenDrillDown(_ context.Context, entry InventoryEntry) error {
+	f.drillEntries = append(f.drillEntries, entry)
 	return f.err
 }
 
@@ -160,9 +166,9 @@ func TestModelUsesFakeInventoryAndSwitchesSessionID(t *testing.T) {
 
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	model = updated.(Model)
-	_, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	if cmd == nil {
-		t.Fatalf("enter did not produce switch command")
+		t.Fatalf("a did not produce switch command")
 	}
 	msg := cmd()
 	if _, ok := msg.(switchCompleteMsg); !ok {
@@ -276,12 +282,51 @@ func TestModelOpenDetailSupportsOAndSpaceKeysWithoutOpenIssueCommand(t *testing.
 	}
 }
 
-func TestModelEnterAndASwitchSelectedIssueSessionThenOpensDetail(t *testing.T) {
+func TestModelOpenDrillDownSupportsEnterKeyWithoutOpenIssueCommand(t *testing.T) {
+	switcher := &fakeFullAzSwitcher{hasSession: true}
+	opener := &fakeDetailOpener{}
+	entries := []InventoryEntry{{
+		SessionID:   "az-one",
+		IssueID:     "one",
+		TaskTitle:   "One",
+		ProjectPath: "/tmp/project one",
+	}}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}}, WithSwitcher(switcher), WithDetailOpener(opener))
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	_, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("Enter did not produce drill-down command")
+	}
+	msg, ok := cmd().(DetailOpenResultMsg)
+	if !ok {
+		t.Fatalf("drill-down msg = %T, want DetailOpenResultMsg", msg)
+	}
+	if msg.Err != nil {
+		t.Fatalf("open drill-down returned error: %v", msg.Err)
+	}
+
+	want := []string{"has az", "switch az"}
+	if got := strings.Join(switcher.commands, "\n"); got != strings.Join(want, "\n") {
+		t.Fatalf("commands:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
+	}
+	if len(opener.drillEntries) != 1 || opener.drillEntries[0].IssueID != "one" {
+		t.Fatalf("drill entries = %+v, want issue one", opener.drillEntries)
+	}
+	if len(opener.entries) != 0 {
+		t.Fatalf("detail entries = %+v, want none", opener.entries)
+	}
+}
+
+func TestModelASwitchesSelectedIssueSessionThenOpensDetail(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		key  tea.KeyMsg
 	}{
-		{name: "enter", key: tea.KeyMsg{Type: tea.KeyEnter}},
 		{name: "a", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -341,9 +386,9 @@ func TestModelAttachKeepsSwitchSuccessWhenDetailOpenFails(t *testing.T) {
 		t.Fatalf("snapshot update returned command")
 	}
 
-	_, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	if cmd == nil {
-		t.Fatal("enter did not produce attach command")
+		t.Fatal("a did not produce attach command")
 	}
 	msg, ok := cmd().(SwitchResultMsg)
 	if !ok {
