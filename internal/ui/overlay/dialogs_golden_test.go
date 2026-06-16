@@ -519,7 +519,7 @@ func goldenOrchestrationView(t *testing.T) string {
 				HasWorktree:    true,
 			},
 		},
-		nil, nil, nil,
+		nil, nil, nil, nil, nil,
 	)
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
 	return model.(*OrchestrationOverlay).View()
@@ -527,7 +527,7 @@ func goldenOrchestrationView(t *testing.T) string {
 
 func goldenOrchestrationEmptyView(t *testing.T) string {
 	t.Helper()
-	overlay := NewOrchestrationOverlay(nil, nil, nil, nil)
+	overlay := NewOrchestrationOverlay(nil, nil, nil, nil, nil, nil)
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
 	return model.(*OrchestrationOverlay).View()
 }
@@ -552,7 +552,7 @@ func goldenOrchestrationSmallView(t *testing.T) string {
 				RecentOutput:          "build finished\nview rendered\nrenderDialogTwoPane ok",
 			},
 		},
-		nil, nil, nil,
+		nil, nil, nil, nil, nil,
 	)
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
 	return model.(*OrchestrationOverlay).View()

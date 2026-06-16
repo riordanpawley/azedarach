@@ -4,12 +4,12 @@
 ││  Azedarach tmux sessions: 2                                     Keys                            │
 ││                                                                 ────────────────────────────────│
 ││  ▶ az-123  in_progress    ● busy                                 j/k navigate                   │
-││    Implement feature X with careful layout handling              Enter/a switch                 │
-││    ⏱ not started  📁 /Users/riordan/prog/azedarach               x kill                         │
-││    tmux yes  worktree yes  git dirty (+8/-2; ↑2)                 r refresh                      │
-││    💬 renderDialogTwoPane ok                                     Esc close                      │
-││ ───────────────────────────────────────────────────────────                                     │
-││    az-456  in_review    ◐ waiting                                                               │
+││    Implement feature X with careful layout handling              Enter drill                    │
+││    ⏱ not started  📁 /Users/riordan/prog/azedarach               a switch                       │
+││    tmux yes  worktree yes  git dirty (+8/-2; ↑2)                 Space details                  │
+││    💬 renderDialogTwoPane ok                                     x kill                         │
+││ ───────────────────────────────────────────────────────────      r refresh                      │
+││    az-456  in_review    ◐ waiting                                Esc close                      │
 ││    Fix selector overflow on mobile                                                              │
 ││    ⏱ not started  📁 /Users/riordan/prog/Chefy                                                  │
 ││    tmux yes  worktree yes  git clean                                                            │

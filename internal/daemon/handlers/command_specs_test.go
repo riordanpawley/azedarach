@@ -204,6 +204,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		protocol.CommandHookLogAppend,
 		protocol.CommandHookLogList,
 		protocol.CommandUIOpenTaskWorkspace,
+		protocol.CommandUIOpenTaskDrillDown,
 		protocol.CommandUIStateGet,
 		protocol.CommandUIStateSet,
 		protocol.CommandProjectCleanup,

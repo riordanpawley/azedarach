@@ -180,6 +180,7 @@ type Model struct {
 	pendingCreatedTaskID          string
 	pendingCreatedWorkspaceTaskID string
 	pendingUIOpenTaskID           string
+	pendingUIDrillDownTaskID      string
 	openCreatedTaskInWorkspace    bool
 	openSessionSelectorOnLoad     bool
 	sessionTreeFilterOnly         bool
@@ -462,6 +463,37 @@ func (m Model) openTaskWorkspaceByID(taskID string) (tea.Model, tea.Cmd) {
 	)
 }
 
+func (m Model) enterDrillDownByID(taskID string) (tea.Model, tea.Cmd) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return m, nil
+	}
+	task, _, ok := m.taskAndSessionByID(taskID)
+	if !ok || task == nil {
+		return m, nil
+	}
+	children := m.getTaskChildren(task.ID.String())
+	if len(children) == 0 {
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: "No children to drill into (use Space for details/actions)",
+			Expires: time.Now().Add(2 * time.Second),
+		})
+		return m, nil
+	}
+	m.overlayStack.Pop()
+	m.enterDrillDown(task.ID.String(), task.Title)
+	columns := m.buildColumns()
+	m.nav.JumpToTaskByID(columns, children[0].ID.String())
+	m.ensureCursorVisible(columns)
+	issueIDs := make([]string, 0, len(children)+1)
+	issueIDs = append(issueIDs, task.ID.String())
+	for _, child := range children {
+		issueIDs = append(issueIDs, child.ID.String())
+	}
+	return m, m.scheduleIssuesRefreshAfterIssueReconcileCmd(issueIDs)
+}
+
 // handleKey processes keyboard input based on current mode
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Always-available global keys.
@@ -632,24 +664,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keybinds.ActionDrillDown: // Drill into children
 		task, _ := m.getCurrentTaskAndSession()
 		if task != nil {
-			children := m.getTaskChildren(task.ID.String())
-			if len(children) > 0 {
-				m.enterDrillDown(task.ID.String(), task.Title)
-				columns := m.buildColumns()
-				m.nav.JumpToTaskByID(columns, children[0].ID.String())
-				m.ensureCursorVisible(columns)
-				issueIDs := make([]string, 0, len(children)+1)
-				issueIDs = append(issueIDs, task.ID.String())
-				for _, child := range children {
-					issueIDs = append(issueIDs, child.ID.String())
-				}
-				return m, m.scheduleIssuesRefreshAfterIssueReconcileCmd(issueIDs)
-			}
-			m.addToast(Toast{
-				Level:   ToastInfo,
-				Message: "No children to drill into (use Space for details/actions)",
-				Expires: time.Now().Add(2 * time.Second),
-			})
+			return m.enterDrillDownByID(task.ID.String())
 		}
 		return m, nil
 
@@ -6037,6 +6052,18 @@ func (m Model) openOrchestrationOverlay() tea.Cmd {
 		// onRefresh
 		func() tea.Cmd {
 			return m.loadIssuesCmd()
+		},
+		// onOpenWorkspace
+		func(issueID string) tea.Cmd {
+			return func() tea.Msg {
+				return overlay.SelectionMsg{Key: "task_workspace_open_task", Value: issueID}
+			}
+		},
+		// onDrillDown
+		func(issueID string) tea.Cmd {
+			return func() tea.Msg {
+				return overlay.SelectionMsg{Key: "task_workspace_drill_down", Value: issueID}
+			}
 		},
 	)
 

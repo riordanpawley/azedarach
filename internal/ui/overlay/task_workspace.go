@@ -107,6 +107,11 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return w, nil
 			}
 			if w.focus == taskWorkspaceFocusDetail {
+				if w.hasChildren() {
+					return w, func() tea.Msg {
+						return SelectionMsg{Key: "task_workspace_drill_down", Value: w.TaskID()}
+					}
+				}
 				return w, nil
 			}
 			return w, w.actions.selectCurrentAction()
@@ -170,7 +175,15 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+u":
 			w.detail.scrollY = max(0, w.detail.scrollY-w.halfPageStep())
 			return w, nil
-		case "g", "home":
+		case "g":
+			if w.focus == taskWorkspaceFocusActions {
+				w.actions.cursor = 0
+				w.actions.ensureCursorVisible()
+				return w, nil
+			}
+			w.detail.scrollY = 0
+			return w, nil
+		case "home":
 			if w.focus == taskWorkspaceFocusActions {
 				w.actions.cursor = 0
 				w.actions.ensureCursorVisible()
@@ -277,16 +290,26 @@ func (w *TaskWorkspaceOverlay) StatusBindings() []keybinds.Binding {
 			{Key: "Esc/q", Description: "close"},
 		}
 	default:
-		return []keybinds.Binding{
+		bindings := []keybinds.Binding{
 			{Key: "j/k/↑/↓", Description: "scroll"},
 			{Key: "ctrl+u/d", Description: "half-page"},
-			{Key: "g/G", Description: "top/bottom"},
-			{Key: "Tab", Description: "focus"},
-			{Key: "r", Description: "refresh issue"},
-			{Key: "V", Description: "dev servers"},
-			{Key: "1/2/3/4", Description: "set status"},
-			{Key: "Esc/q", Description: "close"},
 		}
+		if w.hasChildren() {
+			bindings = append(bindings,
+				keybinds.Binding{Key: "Enter", Description: "drill"},
+				keybinds.Binding{Key: "g/G", Description: "top/bottom"},
+			)
+		} else {
+			bindings = append(bindings, keybinds.Binding{Key: "g/G", Description: "top/bottom"})
+		}
+		bindings = append(bindings,
+			keybinds.Binding{Key: "Tab", Description: "focus"},
+			keybinds.Binding{Key: "r", Description: "refresh issue"},
+			keybinds.Binding{Key: "V", Description: "dev servers"},
+			keybinds.Binding{Key: "1/2/3/4", Description: "set status"},
+			keybinds.Binding{Key: "Esc/q", Description: "close"},
+		)
+		return bindings
 	}
 }
 
@@ -323,6 +346,14 @@ func (w *TaskWorkspaceOverlay) halfPageStep() int {
 		return 1
 	}
 	return step
+}
+
+func (w *TaskWorkspaceOverlay) hasChildren() bool {
+	if w == nil || w.actions == nil {
+		return false
+	}
+	total, _ := w.actions.childProgress()
+	return total > 0
 }
 
 // TaskID returns the selected task ID shown in the workspace.

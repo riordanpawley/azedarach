@@ -3129,6 +3129,82 @@ func TestTaskWorkspaceGraphNavigationRefreshPreservesGraphFocus(t *testing.T) {
 	}
 }
 
+func TestTaskWorkspaceDrillDownSelectionOpensChildBoard(t *testing.T) {
+	m := newTestModel()
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	m.tasks = []domain.Task{
+		{
+			ID:     parentID,
+			Title:  "Parent task",
+			Status: domain.StatusOpen,
+		},
+		{
+			ID:       childID,
+			Title:    "Child task",
+			Status:   domain.StatusInProgress,
+			ParentID: &parentID,
+		},
+	}
+	m.nav.SelectTask(parentID.String(), 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30))
+
+	updated, _ := m.handleSelection(overlay.SelectionMsg{
+		Key:   "task_workspace_drill_down",
+		Value: parentID.String(),
+	})
+	next := updated.(Model)
+
+	if current := next.overlayStack.Current(); current != nil {
+		t.Fatalf("expected workspace to close before drill-down board opens, got %T", current)
+	}
+	if got := next.drillDownParentID; got != parentID.String() {
+		t.Fatalf("drillDownParentID = %q, want %q", got, parentID)
+	}
+	columns := next.buildColumns()
+	pos := next.nav.GetPosition(columns)
+	if !pos.Valid || pos.Column >= len(columns) || pos.Task >= len(columns[pos.Column].Tasks) {
+		t.Fatalf("expected valid drill-down child selection, got %+v", pos)
+	}
+	if got := columns[pos.Column].Tasks[pos.Task].ID.String(); got != childID.String() {
+		t.Fatalf("selected task = %q, want %q", got, childID)
+	}
+}
+
+func TestDrillDownBoardAttachKeyTargetsSelectedChild(t *testing.T) {
+	m := newTestModel()
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	m.tasks = []domain.Task{
+		{
+			ID:     parentID,
+			Title:  "Parent task",
+			Status: domain.StatusOpen,
+		},
+		{
+			ID:             childID,
+			Title:          "Child task",
+			Status:         domain.StatusInProgress,
+			ParentID:       &parentID,
+			HasTmuxSession: true,
+		},
+	}
+	m.enterDrillDown(parentID.String(), "Parent task")
+	m.nav.SelectTask(childID.String(), 1)
+
+	updated, cmd := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if cmd == nil {
+		t.Fatal("expected attach command from drill-down board")
+	}
+	next := updated.(Model)
+	if len(next.toasts) == 0 {
+		t.Fatal("expected attach feedback toast")
+	}
+	if got := next.toasts[len(next.toasts)-1].Message; got != "Attach queued for az-child" {
+		t.Fatalf("toast = %q, want attach feedback for selected child", got)
+	}
+}
+
 func assertTaskWorkspaceGraphFocus(t *testing.T, m Model) {
 	t.Helper()
 	current := m.overlayStack.Current()
@@ -4826,6 +4902,44 @@ func TestDaemonStreamUICommandOpensTaskWorkspace(t *testing.T) {
 	}
 	if updated.daemonRevision != 2 {
 		t.Fatalf("daemon revision = %d, want 2", updated.daemonRevision)
+	}
+}
+
+func TestDaemonStreamUICommandOpensTaskDrillDown(t *testing.T) {
+	m := newTestModel()
+	m.daemonRevision = 1
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	m.tasks = []domain.Task{
+		{ID: parentID, Title: "Parent", Status: domain.StatusOpen},
+		{ID: childID, Title: "Child", Status: domain.StatusInProgress, ParentID: &parentID},
+	}
+	body, err := json.Marshal(protocol.UICommandEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		IssueID:   parentID,
+		Command:   protocol.UICommandOpenTaskDrillDown,
+		RequestID: "req-ui-drill",
+		CreatedAt: time.Date(2026, time.May, 5, 15, 45, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("marshal ui command body: %v", err)
+	}
+
+	updatedAny, _ := m.Update(daemonStreamEventMsg{
+		event: protocol.EventEnvelope{
+			ProjectID: naming.ProjectID(m.daemonProjectID()),
+			Revision:  2,
+			Event:     protocol.EventUICommandRequested,
+			Body:      body,
+		},
+	})
+	updated := updatedAny.(Model)
+
+	if got := updated.drillDownParentID; got != parentID.String() {
+		t.Fatalf("drillDownParentID = %q, want %q", got, parentID)
+	}
+	if current := updated.overlayStack.Current(); current != nil {
+		t.Fatalf("expected no overlay after drill-down command, got %T", current)
 	}
 }
 

@@ -8,12 +8,14 @@ import (
 
 const (
 	CommandUIOpenTaskWorkspace = "ui.open_task_workspace"
+	CommandUIOpenTaskDrillDown = "ui.open_task_drill_down"
 	CommandUIStateGet          = "ui.state.get"
 	CommandUIStateSet          = "ui.state.set"
 
 	EventUICommandRequested = "ui.command.requested"
 
 	UICommandOpenTaskWorkspace = "ui.open_task_workspace"
+	UICommandOpenTaskDrillDown = "ui.open_task_drill_down"
 )
 
 const (

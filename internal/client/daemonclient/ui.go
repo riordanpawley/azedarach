@@ -9,15 +9,23 @@ import (
 )
 
 func (c *Client) OpenTaskWorkspace(ctx context.Context, issueID naming.IssueID) (protocol.UICommandResponseBody, error) {
+	return c.sendUIIssueCommand(ctx, protocol.CommandUIOpenTaskWorkspace, protocol.UICommandOpenTaskWorkspace, issueID)
+}
+
+func (c *Client) OpenTaskDrillDown(ctx context.Context, issueID naming.IssueID) (protocol.UICommandResponseBody, error) {
+	return c.sendUIIssueCommand(ctx, protocol.CommandUIOpenTaskDrillDown, protocol.UICommandOpenTaskDrillDown, issueID)
+}
+
+func (c *Client) sendUIIssueCommand(ctx context.Context, transportCommand, uiCommand string, issueID naming.IssueID) (protocol.UICommandResponseBody, error) {
 	body := protocol.UICommandRequestBody{
 		IssueID: issueID,
-		Command: protocol.UICommandOpenTaskWorkspace,
+		Command: uiCommand,
 	}
 	if strings.TrimSpace(c.projectID.String()) != "" {
 		body.ProjectID = c.projectID
 	}
 	var out protocol.UICommandResponseBody
-	if err := c.commandJSON(ctx, protocol.CommandUIOpenTaskWorkspace, body, &out); err != nil {
+	if err := c.commandJSON(ctx, transportCommand, body, &out); err != nil {
 		return protocol.UICommandResponseBody{}, err
 	}
 	return out, nil

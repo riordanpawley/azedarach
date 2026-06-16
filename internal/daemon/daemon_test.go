@@ -370,6 +370,55 @@ func TestUIOpenTaskWorkspacePublishesProjectEvent(t *testing.T) {
 	}
 }
 
+func TestUIOpenTaskDrillDownPublishesProjectEvent(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	d := &Daemon{
+		cfg: Config{Logger: logger},
+		hub: publish.NewHub(32, 16, logger),
+	}
+	events, cancel := d.hub.Subscribe("proj-ui", 0)
+	defer cancel()
+
+	body, err := json.Marshal(protocol.UICommandRequestBody{
+		IssueID: "az-1",
+		Command: protocol.UICommandOpenTaskDrillDown,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       naming.RequestID("ui-drill-req"),
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: "proj-ui"},
+		Command:         protocol.CommandUIOpenTaskDrillDown,
+		SentAt:          time.Now().UTC(),
+		Body:            body,
+	}
+
+	resp, err := d.command(ctx, req)
+	if err != nil {
+		t.Fatalf("ui command error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("ui response = %+v", resp.Error)
+	}
+
+	select {
+	case evt := <-events:
+		var got protocol.UICommandEventBody
+		if err := json.Unmarshal(evt.Body, &got); err != nil {
+			t.Fatalf("unmarshal event body: %v", err)
+		}
+		if got.ProjectID != "proj-ui" || got.IssueID != "az-1" || got.Command != protocol.UICommandOpenTaskDrillDown {
+			t.Fatalf("event body = %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for ui command event")
+	}
+}
+
 func TestUIStateSetAndGet(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
