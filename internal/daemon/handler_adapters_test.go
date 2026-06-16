@@ -509,3 +509,45 @@ branch refs/heads/main
 	}
 	t.Fatal("timed out waiting for poller to reconcile stale worktree projection")
 }
+
+func TestWorktreeServiceAdapterSnapshotSkipsClosedIssueWorktrees(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	dir, err := os.MkdirTemp("", "azedarach-worktree-closed-*")
+	if err != nil {
+		t.Fatalf("create runtime state temp dir: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(dir, "projection.db"), logger)
+	t.Cleanup(func() {
+		_ = store.Close()
+		_ = os.RemoveAll(dir)
+	})
+
+	projectID := "proj"
+	closedID := naming.IssueID("az-closed")
+	adapter := &worktreeServiceAdapter{
+		runtimeStateStore: store,
+		logger:            logger,
+		runtimeIssueTasks: func(context.Context, string) map[string]domain.Task {
+			return map[string]domain.Task{
+				closedID.String(): {
+					ID:     closedID,
+					Status: domain.StatusDone,
+					Type:   domain.TypeTask,
+				},
+			}
+		},
+	}
+
+	taskByIssue := adapter.runtimeIssueTaskSnapshot(context.Background(), projectID)
+	adapter.writeWorktreeProjectionSnapshot(context.Background(), projectID, []git.Worktree{
+		{IssueID: closedID.String(), Path: "/tmp/repo-az-closed", Branch: "az/az-closed"},
+	}, taskByIssue)
+
+	worktrees, err := store.ListWorktreeStates(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("ListWorktreeStates returned error: %v", err)
+	}
+	if len(worktrees) != 0 {
+		t.Fatalf("worktrees = %+v, want none for closed issue", worktrees)
+	}
+}

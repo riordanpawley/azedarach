@@ -4563,6 +4563,162 @@ func TestRefreshWorktreeRuntimeStatePersistsGitMetricsFromWorktreeList(t *testin
 	}
 }
 
+func TestRefreshWorktreeRuntimeStateSkipsClosedIssueWorktrees(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-refresh-closed-worktrees"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	closedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "closed with stale live worktree",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if err := issuesClient.Update(ctx, closedID, domain.StatusDone); err != nil {
+		t.Fatalf("close issue: %v", err)
+	}
+
+	worktreePath := filepath.Join(repoDir, "wt-"+closedID)
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		if len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" {
+			return strings.Join([]string{
+				"worktree " + repoDir,
+				"branch refs/heads/main",
+				"",
+				"worktree " + worktreePath,
+				"branch refs/heads/az/" + closedID,
+				"",
+			}, "\n"), nil
+		}
+		t.Fatalf("unexpected git args: %v", args)
+		return "", nil
+	}}
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(runner, repoDir, slog.Default()),
+		},
+	}
+
+	count, err := d.refreshWorktreeRuntimeState(ctx, projectID)
+	if err != nil {
+		t.Fatalf("refreshWorktreeRuntimeState error: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("refreshWorktreeRuntimeState count = %d, want 0", count)
+	}
+	if _, found, err := store.GetWorktreeStateByIssueID(ctx, projectID, closedID); err != nil {
+		t.Fatalf("get worktree state: %v", err)
+	} else if found {
+		t.Fatalf("closed issue worktree projection persisted for %s", closedID)
+	}
+}
+
+func TestRefreshWorktreeRuntimeStateForIssuesDeletesClosedIssueWorktreeProjection(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-refresh-closed-target"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	closedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "closed targeted worktree",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if err := issuesClient.Update(ctx, closedID, domain.StatusDone); err != nil {
+		t.Fatalf("close issue: %v", err)
+	}
+
+	worktreePath := filepath.Join(repoDir, "wt-"+closedID)
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		if len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" {
+			return strings.Join([]string{
+				"worktree " + repoDir,
+				"branch refs/heads/main",
+				"",
+				"worktree " + worktreePath,
+				"branch refs/heads/az/" + closedID,
+				"",
+			}, "\n"), nil
+		}
+		t.Fatalf("unexpected git args: %v", args)
+		return "", nil
+	}}
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(runner, repoDir, slog.Default()),
+		},
+	}
+
+	count, err := d.refreshWorktreeRuntimeStateForIssues(ctx, projectID, []string{closedID})
+	if err != nil {
+		t.Fatalf("refreshWorktreeRuntimeStateForIssues error: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("refreshWorktreeRuntimeStateForIssues count = %d, want 0", count)
+	}
+	if _, found, err := store.GetWorktreeStateByIssueID(ctx, projectID, closedID); err != nil {
+		t.Fatalf("get worktree state: %v", err)
+	} else if found {
+		t.Fatalf("closed issue worktree projection persisted for %s", closedID)
+	}
+}
+
+func TestRuntimeWorktreeIssueEligibleRejectsClosedAncestor(t *testing.T) {
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	taskByIssue := map[string]domain.Task{
+		parentID.String(): {
+			ID:     parentID,
+			Status: domain.StatusDone,
+			Type:   domain.TypeTask,
+		},
+		childID.String(): {
+			ID:       childID,
+			Status:   domain.StatusInProgress,
+			Type:     domain.TypeTask,
+			ParentID: &parentID,
+		},
+	}
+
+	if runtimeWorktreeIssueEligible(childID.String(), taskByIssue) {
+		t.Fatal("child under closed ancestor should not be runtime-worktree eligible")
+	}
+}
+
 func TestRefreshWorktreeRuntimeStateUsesClosestNonDoneAncestorBranch(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-refresh-ancestor-base"

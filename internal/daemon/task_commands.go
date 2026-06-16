@@ -759,6 +759,9 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 		if issueID == "" {
 			continue
 		}
+		if !runtimeWorktreeIssueEligible(issueID, taskByIssue) {
+			continue
+		}
 		worktreePath := strings.TrimSpace(wt.Path)
 		if d.git != nil && worktreePath != "" {
 			issueBaseBranch := d.runtimeDiffBaseBranchForIssue(issueID, baseBranch, taskByIssue, worktreeByIssue)
@@ -867,6 +870,56 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 	return len(rows), nil
 }
 
+func runtimeWorktreeIssueEligible(issueID string, taskByIssue map[string]domain.Task) bool {
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return false
+	}
+	if len(taskByIssue) == 0 {
+		return true
+	}
+	task, ok := runtimeTaskByIssueID(taskByIssue, issueID)
+	if !ok {
+		return true
+	}
+	if task.Status == domain.StatusDone {
+		return false
+	}
+	seen := map[string]struct{}{strings.ToLower(issueID): {}}
+	for parentID := domain.TaskParentIssueID(task); parentID != ""; {
+		key := strings.ToLower(parentID)
+		if _, ok := seen[key]; ok {
+			return true
+		}
+		seen[key] = struct{}{}
+		parent, ok := runtimeTaskByIssueID(taskByIssue, parentID)
+		if !ok {
+			return true
+		}
+		if parent.Status == domain.StatusDone {
+			return false
+		}
+		parentID = domain.TaskParentIssueID(parent)
+	}
+	return true
+}
+
+func runtimeTaskByIssueID(taskByIssue map[string]domain.Task, issueID string) (domain.Task, bool) {
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return domain.Task{}, false
+	}
+	if task, ok := taskByIssue[issueID]; ok {
+		return task, true
+	}
+	for id, task := range taskByIssue {
+		if naming.IssueIDsEqual(id, issueID) {
+			return task, true
+		}
+	}
+	return domain.Task{}, false
+}
+
 func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, projectID string, issueIDs []string) (int, error) {
 	if d == nil || d.worktreeRuntimeStateStore(projectID) == nil {
 		return 0, nil
@@ -912,6 +965,10 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 	for _, issueID := range issueIDs {
 		wt, ok := worktreeByIssue[issueID]
 		if !ok || strings.TrimSpace(wt.Path) == "" {
+			d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID)
+			continue
+		}
+		if !runtimeWorktreeIssueEligible(issueID, taskByIssue) {
 			d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID)
 			continue
 		}

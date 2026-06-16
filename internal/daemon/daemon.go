@@ -21,6 +21,7 @@ import (
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -323,7 +324,25 @@ func New(cfg Config) *Daemon {
 		runtimeProjectionWriter:            d.runtimeProjectionStateWriter(),
 		ensureRuntimeFreshForMutation:      d.ensureFreshRuntimeForMutation,
 		ensureRuntimeFreshForIssueMutation: d.ensureFreshRuntimeForIssueMutation,
-		logger:                             cfg.Logger,
+		runtimeIssueTasks: func(ctx context.Context, projectID string) map[string]domain.Task {
+			issueClient := d.issueClientForProject(projectID)
+			if issueClient == nil {
+				return nil
+			}
+			tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+			if err != nil {
+				if cfg.Logger != nil {
+					cfg.Logger.Debug("worktree projection issue snapshot failed", "project_id", projectID, "error", err)
+				}
+				return nil
+			}
+			taskByIssue := make(map[string]domain.Task, len(tasks))
+			for _, task := range tasks {
+				taskByIssue[strings.TrimSpace(task.ID.String())] = task
+			}
+			return taskByIssue
+		},
+		logger: cfg.Logger,
 		onProjectionUpdate: func(ctx context.Context, projectID, issueID, path string) {
 			d.runtimeProjectionStateWriter().PublishWorktreeProjectionEvent(ctx, projectID, issueID, path)
 		},

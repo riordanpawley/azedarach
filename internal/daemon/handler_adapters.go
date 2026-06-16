@@ -506,6 +506,7 @@ type worktreeServiceAdapter struct {
 	runtimeProjectionWriter            runtimeProjectionWriter
 	ensureRuntimeFreshForMutation      func(context.Context, string, string) error
 	ensureRuntimeFreshForIssueMutation func(context.Context, string, string, string) error
+	runtimeIssueTasks                  func(context.Context, string) map[string]domain.Task
 	logger                             *slog.Logger
 	pollInterval                       time.Duration
 	onProjectionUpdate                 func(ctx context.Context, projectID, issueID, path string)
@@ -562,9 +563,10 @@ func (a *worktreeServiceAdapter) List(ctx context.Context, projectID string) ([]
 		}
 		return nil, cacheErr
 	}
-	worktrees := mapProjectionWorktrees(cached)
+	taskByIssue := a.runtimeIssueTaskSnapshot(ctx, projectID)
+	worktrees := filterRuntimeEligibleGitWorktrees(mapProjectionWorktrees(cached), taskByIssue)
 	if len(worktrees) > 0 {
-		a.observeWorktrees(ctx, projectID, worktrees)
+		a.observeWorktrees(ctx, projectID, worktrees, taskByIssue)
 	}
 	a.ensureBackgroundPoller(projectID)
 	if a.logger != nil {
@@ -591,10 +593,14 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 		return nil, err
 	}
 	if a.runtimeStore(projectID) != nil && worktree != nil {
+		taskByIssue := a.runtimeIssueTaskSnapshot(ctx, projectID)
+		if !runtimeWorktreeIssueEligible(worktree.IssueID, taskByIssue) {
+			return worktree, nil
+		}
 		if a.runtimeProjectionWriter != nil {
 			a.runtimeProjectionWriter.PersistWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), worktree.IssueID, worktree.Path, worktree.Branch)
 		}
-		a.observeWorktrees(ctx, normalizedProjectID(projectID), []git.Worktree{*worktree})
+		a.observeWorktrees(ctx, normalizedProjectID(projectID), []git.Worktree{*worktree}, taskByIssue)
 	}
 	return worktree, nil
 }
@@ -725,14 +731,22 @@ func (a *worktreeServiceAdapter) pollAndPersistWorktrees(ctx context.Context, pr
 		}
 		return
 	}
-	a.writeWorktreeProjectionSnapshot(ctx, projectID, worktrees)
-	a.observeWorktrees(ctx, projectID, worktrees)
+	taskByIssue := a.runtimeIssueTaskSnapshot(ctx, projectID)
+	a.writeWorktreeProjectionSnapshot(ctx, projectID, worktrees, taskByIssue)
+	a.observeWorktrees(ctx, projectID, worktrees, taskByIssue)
 	if a.onProjectionUpdate != nil {
-		publishWorktreeProjectionDelta(ctx, a.onProjectionUpdate, projectID, previous, worktrees)
+		publishWorktreeProjectionDelta(ctx, a.onProjectionUpdate, projectID, previous, filterRuntimeEligibleGitWorktrees(worktrees, taskByIssue))
 	}
 }
 
-func (a *worktreeServiceAdapter) observeWorktrees(ctx context.Context, projectID string, worktrees []git.Worktree) {
+func (a *worktreeServiceAdapter) runtimeIssueTaskSnapshot(ctx context.Context, projectID string) map[string]domain.Task {
+	if a == nil || a.runtimeIssueTasks == nil {
+		return nil
+	}
+	return a.runtimeIssueTasks(ctx, normalizedProjectID(projectID))
+}
+
+func (a *worktreeServiceAdapter) observeWorktrees(ctx context.Context, projectID string, worktrees []git.Worktree, taskByIssue map[string]domain.Task) {
 	if a.onWorktreeObserved == nil || len(worktrees) == 0 {
 		return
 	}
@@ -741,6 +755,9 @@ func (a *worktreeServiceAdapter) observeWorktrees(ctx context.Context, projectID
 		issueID := strings.TrimSpace(wt.IssueID)
 		path := strings.TrimSpace(wt.Path)
 		if issueID == "" || path == "" {
+			continue
+		}
+		if !runtimeWorktreeIssueEligible(issueID, taskByIssue) {
 			continue
 		}
 		if runtimeStore := a.runtimeStore(projectID); runtimeStore != nil {
@@ -759,7 +776,7 @@ func (a *worktreeServiceAdapter) observeWorktrees(ctx context.Context, projectID
 	}
 }
 
-func (a *worktreeServiceAdapter) writeWorktreeProjectionSnapshot(ctx context.Context, projectID string, worktrees []git.Worktree) {
+func (a *worktreeServiceAdapter) writeWorktreeProjectionSnapshot(ctx context.Context, projectID string, worktrees []git.Worktree, taskByIssue map[string]domain.Task) {
 	runtimeStore := a.runtimeStore(projectID)
 	if runtimeStore == nil {
 		return
@@ -767,12 +784,16 @@ func (a *worktreeServiceAdapter) writeWorktreeProjectionSnapshot(ctx context.Con
 	rows := make([]daemonstate.WorktreeState, 0, len(worktrees))
 	now := time.Now().UTC()
 	for _, wt := range worktrees {
-		if strings.TrimSpace(wt.IssueID) == "" {
+		issueID := strings.TrimSpace(wt.IssueID)
+		if issueID == "" {
+			continue
+		}
+		if !runtimeWorktreeIssueEligible(issueID, taskByIssue) {
 			continue
 		}
 		rows = append(rows, daemonstate.WorktreeState{
 			ProjectID: normalizedProjectID(projectID),
-			IssueID:   wt.IssueID,
+			IssueID:   issueID,
 			Path:      wt.Path,
 			Branch:    wt.Branch,
 			UpdatedAt: now,
@@ -787,6 +808,19 @@ func (a *worktreeServiceAdapter) writeWorktreeProjectionSnapshot(ctx context.Con
 	if err := runtimeStore.ReplaceWorktreeStates(ctx, normalizedProjectID(projectID), rows); err != nil && a.logger != nil {
 		a.logger.Warn("replace worktree projection snapshot failed", "project_id", projectID, "error", err)
 	}
+}
+
+func filterRuntimeEligibleGitWorktrees(worktrees []git.Worktree, taskByIssue map[string]domain.Task) []git.Worktree {
+	if len(worktrees) == 0 {
+		return nil
+	}
+	out := make([]git.Worktree, 0, len(worktrees))
+	for _, wt := range worktrees {
+		if runtimeWorktreeIssueEligible(wt.IssueID, taskByIssue) {
+			out = append(out, wt)
+		}
+	}
+	return out
 }
 
 func mapProjectionWorktrees(projections []daemonstate.WorktreeState) []git.Worktree {
