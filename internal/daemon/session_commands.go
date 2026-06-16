@@ -1800,6 +1800,39 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 			)
 		}
 	}
+	pruneMissingWorktreeSessionProjection := func(session daemonstate.Session, issueID string, cause error) {
+		runtimeStore := d.sessionRuntimeStateStoreIfConfigured(projectID)
+		if runtimeStore == nil {
+			return
+		}
+		sessionIDToDelete := strings.TrimSpace(session.ID)
+		if sessionIDToDelete == "" {
+			sessionIDToDelete = naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
+		}
+		if sessionIDToDelete == "" {
+			return
+		}
+		if err := runtimeStore.DeleteSessionState(ctx, projectID, sessionIDToDelete); err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("session reconciliation failed to prune missing-worktree desired session",
+					"project_id", projectID,
+					"issue_id", issueID,
+					"session_id", sessionIDToDelete,
+					"cause", cause,
+					"error", err,
+				)
+			}
+			return
+		}
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Info("session reconciliation pruned missing-worktree desired session",
+				"project_id", projectID,
+				"issue_id", issueID,
+				"session_id", sessionIDToDelete,
+				"cause", cause,
+			)
+		}
+	}
 
 	source := d.sourceForSessionInvariant(sessionInvariantSessionReconcile)
 	tmuxSessions := []string{}
@@ -1857,6 +1890,10 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 		}
 		wt, getErr := worktreeManager.Get(ctx, issueID)
 		if getErr != nil {
+			if issueValidationEnabled && errors.Is(getErr, git.ErrWorktreeNotFound) {
+				pruneMissingWorktreeSessionProjection(session, issueID, getErr)
+				continue
+			}
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("session reconciliation skipped worktree restore",
 					"project_id", projectID,

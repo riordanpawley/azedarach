@@ -3438,6 +3438,91 @@ func TestReconcileDoesNotAlignUnknownTmuxSessionWithoutIssueRecord(t *testing.T)
 	}
 }
 
+func TestReconcilePrunesMissingWorktreeSessionProjection(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Stale projected session",
+		Type:   domain.TypeBug,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	sessionID := naming.CanonicalSessionID(repoDir, issueID)
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            sessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateAttached,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed session projection: %v", err)
+	}
+
+	tmuxRunner := &testTmuxRunner{
+		sessions:    map[string]bool{},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	store := daemonstate.NewStore()
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: repoDir,
+			CLITool: "claude",
+			Logger:  slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(&testGitRunner{worktreePath: repoDir, branchName: "main"}, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(&testGitRunner{worktreePath: repoDir, branchName: "main"}, repoDir, slog.Default()),
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+		issueClientsByRoot: map[string]*issues.Client{
+			repoDir: issuesClient,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+	}
+
+	result, err := daemon.reconcileTmuxAndDaemonSessions(ctx, projectID, "")
+	if err != nil {
+		t.Fatalf("reconcile sessions: %v", err)
+	}
+	if result.RecreatedTmuxSessions != 0 {
+		t.Fatalf("recreated tmux sessions = %d, want 0", result.RecreatedTmuxSessions)
+	}
+	if tmuxRunner.newSessionCalls != 0 {
+		t.Fatalf("new tmux sessions = %d, want 0", tmuxRunner.newSessionCalls)
+	}
+	if _, found, err := runtimeStateStore.GetSessionState(ctx, projectID, sessionID); err != nil {
+		t.Fatalf("GetSessionState: %v", err)
+	} else if found {
+		t.Fatalf("stale session projection still present for %s", sessionID)
+	}
+}
+
 func TestReconcileDoesNotResurrectStoppedSessionAcrossDaemons(t *testing.T) {
 	const (
 		projectID = "proj"
