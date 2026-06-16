@@ -532,7 +532,9 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	req.Meta.ProjectID = naming.ProjectID(projectID)
 	ctx = withDaemonProjectIDContext(ctx, projectID)
 	if d.cfg.Logger != nil {
-		d.cfg.Logger.Info(
+		d.cfg.Logger.Log(
+			ctx,
+			daemonCommandSuccessLogLevel(req.Command),
 			"daemon command received",
 			append([]any{
 				"command", req.Command,
@@ -561,7 +563,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 				append(attrs, "error_code", resp.Error.Code, "error", resp.Error.Message)...,
 			)
 		default:
-			d.cfg.Logger.Info("daemon command completed", attrs...)
+			d.cfg.Logger.Log(ctx, daemonCommandSuccessLogLevel(req.Command), "daemon command completed", attrs...)
 		}
 	}()
 
@@ -684,6 +686,15 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleRuntimeReconcileIssue(ctx, req)
 	default:
 		return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported command"), nil
+	}
+}
+
+func daemonCommandSuccessLogLevel(command string) slog.Level {
+	switch command {
+	case protocol.CommandMailWatch:
+		return slog.LevelDebug
+	default:
+		return slog.LevelInfo
 	}
 }
 
