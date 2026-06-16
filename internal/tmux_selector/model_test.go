@@ -497,9 +497,12 @@ func TestModelTabTogglesTreeViewAndPersistsGlobally(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("snapshot update did not defer selector tab load")
 	}
-	if msg := cmd(); msg.(selectorTabLoadedMsg).err != nil {
+	msg := cmd()
+	if msg.(selectorTabLoadedMsg).err != nil {
 		t.Fatalf("selector tab load msg = %+v", msg)
 	}
+	updated, _ = model.Update(msg)
+	model = updated.(Model)
 
 	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyTab})
 	model = updated.(Model)
@@ -702,6 +705,77 @@ func TestModelInitialLoadDoesNotWaitForPersistedSelectorTab(t *testing.T) {
 	}
 	if len(store.gets) != 0 {
 		t.Fatalf("selector tab store gets during init = %v, want none before live snapshot", store.gets)
+	}
+}
+
+func TestModelSnapshotLoadWaitsForPersistedSelectorTabBeforeRendering(t *testing.T) {
+	store := &fakeUIStateStore{values: map[string]string{
+		protocol.UIStateKeyTMUXSelectorLastActiveTab: "tree",
+	}}
+	snapshot := Snapshot{Entries: []InventoryEntry{{
+		SessionID: "az-ckx",
+		IssueID:   "ckx",
+		TaskTitle: "ckx",
+	}}}
+	model := New(fakeSnapshotLoader{snapshot: snapshot}, WithUIStateStore(store))
+
+	updated, cmd := model.Update(LoadedMsg{Snapshot: snapshot})
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("snapshot load did not request persisted selector tab")
+	}
+	if !model.loading {
+		t.Fatal("model rendered before persisted selector tab loaded")
+	}
+	if view := model.View(); !strings.Contains(view, "Loading tmux sessions") {
+		t.Fatalf("view before tab load = %q, want loading", view)
+	}
+
+	msg := cmd()
+	updated, _ = model.Update(msg)
+	model = updated.(Model)
+	if model.loading {
+		t.Fatal("model stayed loading after persisted selector tab loaded")
+	}
+	if model.activeTab != selectorTabTree {
+		t.Fatalf("active tab = %v, want restored tree", model.activeTab)
+	}
+	if view := ansi.Strip(model.View()); !strings.Contains(view, "[ Tree ]") {
+		t.Fatalf("view after tab load missing restored tree tab:\n%s", view)
+	}
+}
+
+func TestModelUserTabChangeWinsOverLatePersistedSelectorTabLoad(t *testing.T) {
+	store := &fakeUIStateStore{values: map[string]string{
+		protocol.UIStateKeyTMUXSelectorLastActiveTab: "cards",
+	}}
+	snapshot := Snapshot{Entries: []InventoryEntry{{
+		SessionID: "az-ckx",
+		IssueID:   "ckx",
+		TaskTitle: "ckx",
+	}}}
+	model := New(fakeSnapshotLoader{snapshot: snapshot}, WithUIStateStore(store))
+
+	updated, cmd := model.Update(LoadedMsg{Snapshot: snapshot})
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("snapshot load did not request persisted selector tab")
+	}
+	lateLoaded := cmd()
+
+	updated, persistCmd := model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = updated.(Model)
+	if model.activeTab != selectorTabTree {
+		t.Fatalf("active tab after user tab = %v, want tree", model.activeTab)
+	}
+	if persistCmd == nil {
+		t.Fatal("user tab did not persist active selector tab")
+	}
+
+	updated, _ = model.Update(lateLoaded)
+	model = updated.(Model)
+	if model.activeTab != selectorTabTree {
+		t.Fatalf("active tab after late persisted load = %v, want user-selected tree", model.activeTab)
 	}
 }
 
