@@ -46,6 +46,9 @@ func (o *DaemonDetailOpener) OpenDetail(ctx context.Context, entry InventoryEntr
 		return fmt.Errorf("resolve project id for %s", projectPath)
 	}
 	socketPath := config.DaemonSocketPathFor(projectPath)
+	if err := validateSharedDaemonExecutable(socketPath); err != nil {
+		return err
+	}
 	client := daemonclient.New(transport.NewClient(socketPath)).WithProjectID(projectID)
 	if _, err := client.OpenTaskWorkspace(ctx, issueID); err != nil {
 		return err

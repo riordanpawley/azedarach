@@ -180,6 +180,58 @@ func TestDaemonPathsUseGlobalForLinkedWorktreeWithoutEnv(t *testing.T) {
 	}
 }
 
+func TestValidateSharedDaemonExecutableRejectsAzedarachWorktreeBinary(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
+	_, worktree := makeLinkedDaemonPathWorktreeWithModule(t, "github.com/riordanpawley/azedarach")
+	executable := filepath.Join(worktree, "bin", "az")
+	if err := os.MkdirAll(filepath.Dir(executable), 0o755); err != nil {
+		t.Fatalf("mkdir executable dir: %v", err)
+	}
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+
+	err := ValidateSharedDaemonExecutable(GlobalDaemonSocketPath(), executable)
+	if err == nil {
+		t.Fatal("ValidateSharedDaemonExecutable() error = nil, want fence error")
+	}
+	if !strings.Contains(err.Error(), "refusing to use the shared production daemon") {
+		t.Fatalf("ValidateSharedDaemonExecutable() error = %q, want shared daemon fence error", err)
+	}
+}
+
+func TestValidateSharedDaemonExecutableAllowsCanonicalRootBinary(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
+	repo, _ := makeLinkedDaemonPathWorktreeWithModule(t, "github.com/riordanpawley/azedarach")
+	executable := filepath.Join(repo, "bin", "az")
+	if err := os.MkdirAll(filepath.Dir(executable), 0o755); err != nil {
+		t.Fatalf("mkdir executable dir: %v", err)
+	}
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+
+	if err := ValidateSharedDaemonExecutable(GlobalDaemonSocketPath(), executable); err != nil {
+		t.Fatalf("ValidateSharedDaemonExecutable() error = %v", err)
+	}
+}
+
+func TestValidateSharedDaemonExecutableAllowsScopedSocket(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
+	_, worktree := makeLinkedDaemonPathWorktreeWithModule(t, "github.com/riordanpawley/azedarach")
+	executable := filepath.Join(worktree, "bin", "az")
+	if err := os.MkdirAll(filepath.Dir(executable), 0o755); err != nil {
+		t.Fatalf("mkdir executable dir: %v", err)
+	}
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+
+	if err := ValidateSharedDaemonExecutable(ScopedDaemonSocketPath(worktree), executable); err != nil {
+		t.Fatalf("ValidateSharedDaemonExecutable() error = %v", err)
+	}
+}
+
 func TestDaemonPathsUseScopedWhenEnabledInAzedarachDevelopmentWorktree(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")

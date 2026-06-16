@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,6 +67,27 @@ func DaemonLockPathFor(startPath string) string {
 		return ScopedDaemonLockPath(startPath)
 	}
 	return GlobalDaemonLockPath()
+}
+
+// ValidateSharedDaemonExecutable rejects a development-worktree az binary before
+// it can talk to the user-global production daemon.
+func ValidateSharedDaemonExecutable(socketPath, executable string) error {
+	if filepath.Clean(socketPath) != filepath.Clean(GlobalDaemonSocketPath()) {
+		return nil
+	}
+	executable = strings.TrimSpace(executable)
+	if executable == "" {
+		return nil
+	}
+	absExecutable, err := filepath.Abs(executable)
+	if err != nil {
+		return nil
+	}
+	resolvedExecutable := resolveSymlinkBestEffort(absExecutable)
+	if !IsAzedarachDevelopmentWorktree(resolvedExecutable) {
+		return nil
+	}
+	return fmt.Errorf("refusing to use the shared production daemon from Azedarach development worktree binary %s; run the canonical production az binary or set AZEDARACH_DAEMON_SCOPE=worktree when intentionally testing this worktree", resolvedExecutable)
 }
 
 // ScopedDaemonRuntimeDir returns a deterministic runtime directory for a worktree scope.
@@ -144,6 +166,14 @@ func IsLinkedGitWorktree(startPath string) bool {
 		return false
 	}
 	return filepath.Clean(worktreeRoot) != filepath.Clean(projectRoot)
+}
+
+func resolveSymlinkBestEffort(path string) string {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || strings.TrimSpace(resolved) == "" {
+		return filepath.Clean(path)
+	}
+	return filepath.Clean(resolved)
 }
 
 func daemonRuntimeDirWritable(dir string) bool {
