@@ -318,7 +318,9 @@ func (c *Client) MergeBase(ctx context.Context, worktree, baseBranch string) (st
 	}
 
 	var lastErr error
+	attempted := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
+		attempted = append(attempted, candidate)
 		mergeBaseOutput, err := c.runInWorktree(ctx, worktree, "merge-base", candidate, "HEAD")
 		if err != nil {
 			lastErr = err
@@ -332,7 +334,7 @@ func (c *Client) MergeBase(ctx context.Context, worktree, baseBranch string) (st
 	}
 
 	if lastErr != nil {
-		return "", fmt.Errorf("failed to resolve merge-base for %s: %w", baseBranch, lastErr)
+		return "", fmt.Errorf("failed to resolve merge-base for %s after trying %s: %w", baseBranch, strings.Join(attempted, ", "), lastErr)
 	}
 	return "", fmt.Errorf("failed to resolve merge-base for %s", baseBranch)
 }
@@ -505,7 +507,9 @@ func (c *Client) BranchAheadBehind(ctx context.Context, worktree, baseBranch str
 	}
 
 	var lastErr error
+	attempted := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
+		attempted = append(attempted, candidate)
 		behind, err := c.RevListCount(ctx, worktree, "HEAD.."+candidate)
 		if err != nil {
 			lastErr = err
@@ -520,7 +524,7 @@ func (c *Client) BranchAheadBehind(ctx context.Context, worktree, baseBranch str
 	}
 
 	if lastErr != nil {
-		return 0, 0, fmt.Errorf("failed to resolve branch delta for %s: %w", baseBranch, lastErr)
+		return 0, 0, fmt.Errorf("failed to resolve branch delta for %s after trying %s: %w", baseBranch, strings.Join(attempted, ", "), lastErr)
 	}
 	return 0, 0, fmt.Errorf("failed to resolve branch delta for %s", baseBranch)
 }
@@ -541,13 +545,14 @@ func (c *Client) baseRefCandidates(ctx context.Context, worktree, baseBranch str
 	}
 
 	normalizedBase := strings.ToLower(strings.TrimSpace(baseBranch))
+	genericBase := normalizedBase == "" || normalizedBase == "main" || normalizedBase == "master"
 
 	// Prefer remote default branch when configured base is generic (main/master).
 	// This avoids massive, misleading deltas in repos whose canonical base branch differs.
 	if headRef, err := c.runInWorktree(ctx, worktree, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"); err == nil {
 		headRef = strings.TrimSpace(headRef) // e.g. origin/main or origin/trunk
 		headLocal := strings.TrimPrefix(headRef, "origin/")
-		if normalizedBase == "" || normalizedBase == "main" || normalizedBase == "master" {
+		if genericBase {
 			if !strings.EqualFold(headRef, "origin/"+normalizedBase) && !strings.EqualFold(headLocal, normalizedBase) {
 				add(headRef)
 				add(headLocal)
@@ -557,8 +562,10 @@ func (c *Client) baseRefCandidates(ctx context.Context, worktree, baseBranch str
 		if baseBranch != "" && !strings.Contains(baseBranch, "/") {
 			add("origin/" + baseBranch)
 		}
-		add(headRef)
-		add(headLocal)
+		if genericBase {
+			add(headRef)
+			add(headLocal)
+		}
 	} else {
 		add(baseBranch)
 		if baseBranch != "" && !strings.Contains(baseBranch, "/") {
@@ -567,10 +574,12 @@ func (c *Client) baseRefCandidates(ctx context.Context, worktree, baseBranch str
 	}
 
 	// Conservative well-known fallback refs.
-	add("main")
-	add("origin/main")
-	add("master")
-	add("origin/master")
+	if genericBase {
+		add("main")
+		add("origin/main")
+		add("master")
+		add("origin/master")
+	}
 
 	return ordered
 }

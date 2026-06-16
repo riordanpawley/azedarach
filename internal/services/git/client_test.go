@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -837,6 +838,48 @@ func TestMergeBasePrefersOriginHeadWhenBaseIsGeneric(t *testing.T) {
 	}
 	if mergeBase != "fedcba" {
 		t.Fatalf("MergeBase() = %q, want fedcba", mergeBase)
+	}
+}
+
+func TestMergeBaseNonGenericBaseDoesNotFallbackToMainOrMaster(t *testing.T) {
+	var attempts []string
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 3 && args[0] == "symbolic-ref" && args[1] == "--short" && args[2] == "refs/remotes/origin/HEAD" {
+				return "origin/main\n", nil
+			}
+			if len(args) >= 3 && args[0] == "merge-base" && args[2] == "HEAD" {
+				attempts = append(attempts, args[1])
+				switch args[1] {
+				case "preview", "origin/preview":
+					return "", fmt.Errorf("unknown revision %s", args[1])
+				case "main", "origin/main", "master", "origin/master":
+					return "", fmt.Errorf("should not fallback to %s for explicit preview base", args[1])
+				default:
+					return "", fmt.Errorf("unexpected merge-base ref %s", args[1])
+				}
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	_, err := client.MergeBase(context.Background(), "/fake/worktree", "preview")
+	if err == nil {
+		t.Fatal("MergeBase() expected error")
+	}
+	if strings.Contains(err.Error(), "should not fallback") {
+		t.Fatalf("MergeBase() used unrelated fallback refs: %v; attempts=%v", err, attempts)
+	}
+	wantAttempts := []string{"preview", "origin/preview"}
+	if !reflect.DeepEqual(attempts, wantAttempts) {
+		t.Fatalf("merge-base attempts = %v, want %v", attempts, wantAttempts)
+	}
+	if !strings.Contains(err.Error(), "preview") || !strings.Contains(err.Error(), "origin/preview") {
+		t.Fatalf("MergeBase() error = %v, want attempted preview refs", err)
+	}
+	if strings.Contains(err.Error(), "origin/master") {
+		t.Fatalf("MergeBase() error = %v, should not mention origin/master", err)
 	}
 }
 
