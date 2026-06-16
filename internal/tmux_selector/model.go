@@ -658,9 +658,9 @@ func (m Model) renderTreeRow(row sessionTreeRow, entry InventoryEntry) string {
 		cursor = "> "
 	}
 	indent := treePrefix(row.ancestorLast, row.last)
-	issueID := entryIssueID(entry)
-	if issueID == "" {
-		issueID = strings.TrimSpace(entry.SessionID)
+	displayID := entryDisplayID(entry)
+	if displayID == "" {
+		displayID = strings.TrimSpace(entry.SessionID)
 	}
 	title := strings.TrimSpace(entry.TaskTitle)
 	if title == "" {
@@ -673,6 +673,7 @@ func (m Model) renderTreeRow(row sessionTreeRow, entry InventoryEntry) string {
 	if state == "" {
 		state = string(domain.SessionIdle)
 	}
+	issueStatus := issueStatusLabel(entry)
 	metaParts := []string{}
 	if entry.SessionID != "" {
 		metaParts = append(metaParts, tmuxSessionMeta(entry))
@@ -686,7 +687,11 @@ func (m Model) renderTreeRow(row sessionTreeRow, entry InventoryEntry) string {
 	if len(metaParts) > 0 {
 		meta = "  " + strings.Join(metaParts, "  ")
 	}
-	line := fmt.Sprintf("%s%s%s [%s] %s%s", cursor, indent, issueID, state, title, meta)
+	statusSuffix := ""
+	if issueStatus != "" {
+		statusSuffix = " [" + issueStatus + "]"
+	}
+	line := fmt.Sprintf("%s%s%s [%s]%s %s%s", cursor, indent, displayID, state, statusSuffix, title, meta)
 	line = ansi.Truncate(line, maxInt(1, m.width), "…")
 	if row.entryIndex >= 0 && row.entryIndex == m.cursor {
 		return lipgloss.NewStyle().Foreground(styles.Blue).Bold(true).Render(line)
@@ -1678,6 +1683,9 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 	}
 	project := firstNonEmpty(row.ProjectPath, row.ProjectID)
 	metaParts := []string{}
+	if issueStatus := issueStatusLabel(row); issueStatus != "" {
+		metaParts = append(metaParts, "issue "+issueStatus)
+	}
 	if row.SessionID != "" {
 		metaParts = append(metaParts, tmuxSessionMeta(row))
 	}
@@ -1708,6 +1716,30 @@ func entryDisplayLabel(entry InventoryEntry) string {
 		return label
 	}
 	return strings.TrimSpace(entry.State.String())
+}
+
+func entryDisplayID(entry InventoryEntry) string {
+	if issueID := entryIssueID(entry); issueID != "" {
+		if sessionID := strings.TrimSpace(entry.SessionID); sessionID != "" {
+			return sessionID
+		}
+		if project := firstNonEmpty(entry.ProjectID, entry.ProjectPath); strings.TrimSpace(project) != "" {
+			return naming.CanonicalSessionID(project, issueID)
+		}
+		return issueID
+	}
+	return strings.TrimSpace(entry.SessionID)
+}
+
+func issueStatusLabel(entry InventoryEntry) string {
+	if entryIssueID(entry) == "" {
+		return ""
+	}
+	status := entry.IssueStatus
+	if status == "" {
+		status = entry.Task.Status
+	}
+	return strings.TrimSpace(status.String())
 }
 
 func rowCardDisplayState(row InventoryEntry) domain.SessionState {
