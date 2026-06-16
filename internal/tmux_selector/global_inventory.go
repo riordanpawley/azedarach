@@ -890,6 +890,16 @@ func (s *DaemonSnapshotSource) ListProjectSnapshots(ctx context.Context) ([]Proj
 				return
 			}
 			socketPath := config.DaemonSocketPathFor(projectDir)
+			if err := validateSharedDaemonExecutable(socketPath); err != nil {
+				if s.logger != nil {
+					s.logger.Warn("global selector project snapshot blocked by daemon fence",
+						"project_dir", projectDir,
+						"project_id", projectID,
+						"error", err,
+					)
+				}
+				return
+			}
 			client := daemonclient.New(transport.NewClient(socketPath)).WithProjectID(projectID)
 			taskIDs := s.taskIDsForProjectDir(projectDir)
 			snapshot, err := s.loadTaskSnapshot(ctx, client, taskIDs)

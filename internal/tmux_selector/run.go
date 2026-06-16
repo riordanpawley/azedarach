@@ -18,12 +18,16 @@ func Run(cfg *config.Config) error {
 	logger := newSelectorLogger(cfg)
 	slog.SetDefault(logger)
 	tmuxClient := tmux.NewClient(&tmux.ExecRunner{}, logger)
+	uiStateSocketPath := config.GlobalDaemonSocketPath()
+	if err := validateSharedDaemonExecutable(uiStateSocketPath); err != nil {
+		return err
+	}
 	model := New(
 		NewDefaultGlobalInventoryLoader(tmuxClient, logger),
 		WithSwitcher(tmuxClient),
 		WithKiller(NewDaemonKiller(tmuxClient, logger)),
 		WithDetailOpener(NewDaemonDetailOpener(logger)),
-		WithUIStateStore(daemonclient.New(transport.NewClient(config.GlobalDaemonSocketPath()))),
+		WithUIStateStore(daemonclient.New(transport.NewClient(uiStateSocketPath))),
 	)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	_, err := p.Run()

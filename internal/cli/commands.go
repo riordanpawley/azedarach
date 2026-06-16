@@ -40,6 +40,8 @@ var newLauncher = func(repoDir, socketPath string) daemonStarter {
 	return daemonprocess.NewLauncher(repoDir, socketPath)
 }
 
+var currentExecutable = os.Executable
+
 var tmuxPaneSessionName = defaultTmuxPaneSessionName
 
 const (
@@ -442,6 +444,9 @@ func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error
 		return nil, fmt.Errorf("failed to derive project id from %q: %w", rootRepoDir, err)
 	}
 	socketPath := config.DaemonSocketPathFor(absRepoDir)
+	if err := validateSharedDaemonFence(absRepoDir, socketPath); err != nil {
+		return nil, err
+	}
 	daemonTransport := transport.NewClient(socketPath)
 
 	return &Dependencies{
@@ -453,6 +458,17 @@ func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error
 		RepoDir:        rootRepoDir,
 		RuntimeRepoDir: runtimeRepoDir,
 	}, nil
+}
+
+func validateSharedDaemonFence(startPath, socketPath string) error {
+	if config.UseScopedDaemonRuntimeFor(startPath) {
+		return nil
+	}
+	executable, err := currentExecutable()
+	if err != nil || strings.TrimSpace(executable) == "" {
+		return nil
+	}
+	return config.ValidateSharedDaemonExecutable(socketPath, executable)
 }
 
 func StartCommand(deps *Dependencies, issueID string) error {
