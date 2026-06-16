@@ -289,6 +289,12 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.refreshTaskWorkspaceInBackgroundCmd(task.ID.String())
+	case "task_workspace_drill_down":
+		targetID, ok := msg.Value.(string)
+		if !ok || strings.TrimSpace(targetID) == "" {
+			return m, nil
+		}
+		return m.enterDrillDownByID(targetID)
 	case "set-default-success", "remove-success", "detect-success":
 		// Project registry actions succeeded - just show success toast
 		if name, ok := msg.Value.(string); ok {

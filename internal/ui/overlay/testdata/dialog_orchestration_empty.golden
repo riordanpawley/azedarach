@@ -4,12 +4,12 @@
 ││                                                                 Keys                            │
 ││                                                                 ────────────────────────────────│
 ││                                                                  j/k navigate                   │
-││                                                                  Enter/a switch                 │
-││                      No tmux sessions                            x kill                         │
+││                                                                  Enter drill                    │
+││                      No tmux sessions                            a switch                       │
+││                                                                  Space details                  │
+││            Start a session from a task workspace                 x kill                         │
 ││                                                                  r refresh                      │
-││            Start a session from a task workspace                 Esc close                      │
-││                                                                                                 │
-││                                                                                                 │
+││                                                                  Esc close                      │
 ││                                                                                                 │
 ││                                                                                                 │
 ││                                                                                                 │

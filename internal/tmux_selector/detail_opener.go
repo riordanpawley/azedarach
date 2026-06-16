@@ -8,6 +8,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
@@ -24,6 +25,14 @@ func NewDaemonDetailOpener(logger *slog.Logger) *DaemonDetailOpener {
 }
 
 func (o *DaemonDetailOpener) OpenDetail(ctx context.Context, entry InventoryEntry) error {
+	return o.openIssueCommand(ctx, entry, protocol.UICommandOpenTaskWorkspace)
+}
+
+func (o *DaemonDetailOpener) OpenDrillDown(ctx context.Context, entry InventoryEntry) error {
+	return o.openIssueCommand(ctx, entry, protocol.UICommandOpenTaskDrillDown)
+}
+
+func (o *DaemonDetailOpener) openIssueCommand(ctx context.Context, entry InventoryEntry, command string) error {
 	issueID, err := naming.ParseIssueID(strings.TrimSpace(firstNonEmpty(entry.IssueID, entry.Task.ID.String())))
 	if err != nil {
 		return fmt.Errorf("invalid issue id: %w", err)
@@ -50,7 +59,13 @@ func (o *DaemonDetailOpener) OpenDetail(ctx context.Context, entry InventoryEntr
 		return err
 	}
 	client := daemonclient.New(transport.NewClient(socketPath)).WithProjectID(projectID)
-	if _, err := client.OpenTaskWorkspace(ctx, issueID); err != nil {
+	switch command {
+	case protocol.UICommandOpenTaskDrillDown:
+		_, err = client.OpenTaskDrillDown(ctx, issueID)
+	default:
+		_, err = client.OpenTaskWorkspace(ctx, issueID)
+	}
+	if err != nil {
 		return err
 	}
 	return nil

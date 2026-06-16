@@ -11,7 +11,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
-func (d *Daemon) handleUIOpenTaskWorkspace(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+func (d *Daemon) handleUIIssueCommand(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
 	var cmd protocol.UICommandRequestBody
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
@@ -26,9 +26,9 @@ func (d *Daemon) handleUIOpenTaskWorkspace(_ context.Context, req protocol.Reque
 	}
 	command := strings.TrimSpace(cmd.Command)
 	if command == "" {
-		command = protocol.UICommandOpenTaskWorkspace
+		command = defaultUICommandForTransport(req.Command)
 	}
-	if command != protocol.UICommandOpenTaskWorkspace {
+	if !supportedUIIssueCommand(command) || command != defaultUICommandForTransport(req.Command) {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "unsupported ui command"), nil
 	}
 	createdAt := cmd.CreatedAt
@@ -67,6 +67,24 @@ func (d *Daemon) handleUIOpenTaskWorkspace(_ context.Context, req protocol.Reque
 	resp.Revision = rev
 	resp.Body = payload
 	return resp, nil
+}
+
+func defaultUICommandForTransport(command string) string {
+	switch command {
+	case protocol.CommandUIOpenTaskDrillDown:
+		return protocol.UICommandOpenTaskDrillDown
+	default:
+		return protocol.UICommandOpenTaskWorkspace
+	}
+}
+
+func supportedUIIssueCommand(command string) bool {
+	switch command {
+	case protocol.UICommandOpenTaskWorkspace, protocol.UICommandOpenTaskDrillDown:
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *Daemon) handleUIStateGet(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

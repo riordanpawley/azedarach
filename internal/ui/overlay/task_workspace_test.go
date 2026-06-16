@@ -300,6 +300,34 @@ func TestTaskWorkspaceOverlay_GraphFocusUsesSelectionAndHorizontalOpen(t *testin
 	}
 }
 
+func TestTaskWorkspaceOverlay_DetailFocusEnterDrillsIntoChildren(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-parent",
+		Title:  "Parent",
+		Status: domain.StatusOpen,
+	}
+	child := domain.Task{
+		ID:       "az-child",
+		Title:    "Child",
+		Status:   domain.StatusOpen,
+		ParentID: &task.ID,
+	}
+	overlay := NewTaskWorkspaceOverlay(task, []domain.Task{task, child}, nil, 120, 30)
+	overlay.focus = taskWorkspaceFocusDetail
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected Enter to emit drill-down selection from detail focus")
+	}
+	msg, ok := cmd().(SelectionMsg)
+	if !ok {
+		t.Fatalf("command emitted %T, want SelectionMsg", cmd())
+	}
+	if msg.Key != "task_workspace_drill_down" || msg.Value != "az-parent" {
+		t.Fatalf("selection = %+v, want task_workspace_drill_down az-parent", msg)
+	}
+}
+
 func TestTaskWorkspaceOverlay_ActionShortcutsWorkFromNonActionFocus(t *testing.T) {
 	child := domain.Task{ID: "az-child", Title: "Child", Status: domain.StatusOpen}
 	task := domain.Task{

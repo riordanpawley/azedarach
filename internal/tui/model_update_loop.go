@@ -1001,6 +1001,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 			}
 		}
+		if taskID := strings.TrimSpace(m.pendingUIDrillDownTaskID); taskID != "" {
+			m.pendingUIDrillDownTaskID = ""
+			drilled, drillCmd := m.enterDrillDownByID(taskID)
+			if drilledModel, ok := drilled.(Model); ok {
+				m = drilledModel
+			}
+			if drillCmd != nil {
+				cmds = append(cmds, drillCmd)
+			}
+			if !m.isDrillDownActive() {
+				m.addToast(Toast{
+					Level:   ToastWarning,
+					Message: fmt.Sprintf("Task %s not found or has no children in project %s", taskID, msg.project.Name),
+					Expires: time.Now().Add(5 * time.Second),
+				})
+			}
+		}
 		return m, tea.Batch(cmds...)
 
 	case operationRecordsLoadedMsg:
@@ -1682,7 +1699,7 @@ func (m *Model) applyUICommandEvent(event protocol.EventEnvelope) tea.Cmd {
 	if err := json.Unmarshal(event.Body, &body); err != nil {
 		return nil
 	}
-	if body.Command != protocol.UICommandOpenTaskWorkspace {
+	if body.Command != protocol.UICommandOpenTaskWorkspace && body.Command != protocol.UICommandOpenTaskDrillDown {
 		return nil
 	}
 	issueID := strings.TrimSpace(body.IssueID.String())
@@ -1703,7 +1720,11 @@ func (m *Model) applyUICommandEvent(event protocol.EventEnvelope) tea.Cmd {
 			})
 			return nil
 		}
-		m.pendingUIOpenTaskID = issueID
+		if body.Command == protocol.UICommandOpenTaskDrillDown {
+			m.pendingUIDrillDownTaskID = issueID
+		} else {
+			m.pendingUIOpenTaskID = issueID
+		}
 		m.loading = false
 		m.boardRefreshing = true
 		m.projectSwitchInFlight = true
@@ -1711,6 +1732,13 @@ func (m *Model) applyUICommandEvent(event protocol.EventEnvelope) tea.Cmd {
 		m.projectSwitchSeq++
 		m.beginMutationFeedback(fmt.Sprintf("Switching project: %s", project.Name))
 		return m.switchProjectCmd(project)
+	}
+	if body.Command == protocol.UICommandOpenTaskDrillDown {
+		updatedModel, cmd := m.enterDrillDownByID(issueID)
+		if drilled, ok := updatedModel.(Model); ok {
+			*m = drilled
+		}
+		return cmd
 	}
 	updatedModel, cmd := m.openTaskWorkspaceByID(issueID)
 	if opened, ok := updatedModel.(Model); ok {

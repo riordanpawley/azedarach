@@ -78,9 +78,11 @@ type OrchestrationOverlay struct {
 	styles   *Styles
 
 	// Callbacks
-	onAttach  func(issueID string) tea.Cmd
-	onKill    func(issueID string) tea.Cmd
-	onRefresh func() tea.Cmd
+	onAttach        func(issueID string) tea.Cmd
+	onKill          func(issueID string) tea.Cmd
+	onRefresh       func() tea.Cmd
+	onOpenWorkspace func(issueID string) tea.Cmd
+	onDrillDown     func(issueID string) tea.Cmd
 }
 
 // NewOrchestrationOverlay creates a new orchestration overlay
@@ -89,14 +91,18 @@ func NewOrchestrationOverlay(
 	onAttach func(issueID string) tea.Cmd,
 	onKill func(issueID string) tea.Cmd,
 	onRefresh func() tea.Cmd,
+	onOpenWorkspace func(issueID string) tea.Cmd,
+	onDrillDown func(issueID string) tea.Cmd,
 ) *OrchestrationOverlay {
 	return &OrchestrationOverlay{
-		sessions:  sessions,
-		cursor:    0,
-		styles:    New(),
-		onAttach:  onAttach,
-		onKill:    onKill,
-		onRefresh: onRefresh,
+		sessions:        sessions,
+		cursor:          0,
+		styles:          New(),
+		onAttach:        onAttach,
+		onKill:          onKill,
+		onRefresh:       onRefresh,
+		onOpenWorkspace: onOpenWorkspace,
+		onDrillDown:     onDrillDown,
 	}
 }
 
@@ -140,12 +146,30 @@ func (o *OrchestrationOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return o, nil
 
-		case "enter", "a":
+		case "enter":
+			if o.cursor >= 0 && o.cursor < len(o.sessions) {
+				issueID := o.sessions[o.cursor].IssueID
+				if o.onDrillDown != nil {
+					return o, o.onDrillDown(issueID)
+				}
+			}
+			return o, nil
+
+		case "a":
 			// Attach to selected session
 			if o.cursor >= 0 && o.cursor < len(o.sessions) {
 				issueID := o.sessions[o.cursor].IssueID
 				if o.onAttach != nil {
 					return o, o.onAttach(issueID)
+				}
+			}
+			return o, nil
+
+		case " ":
+			if o.cursor >= 0 && o.cursor < len(o.sessions) {
+				issueID := o.sessions[o.cursor].IssueID
+				if o.onOpenWorkspace != nil {
+					return o, o.onOpenWorkspace(issueID)
 				}
 			}
 			return o, nil
@@ -195,7 +219,9 @@ func (o *OrchestrationOverlay) View() string {
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
 			return renderDialogActions(o.styles, []keybinds.Binding{
 				{Key: "j/k", Description: "navigate"},
-				{Key: "Enter/a", Description: "switch"},
+				{Key: "Enter", Description: "drill"},
+				{Key: "a", Description: "switch"},
+				{Key: "Space", Description: "details"},
 				{Key: "x", Description: "kill"},
 				{Key: "r", Description: "refresh"},
 				{Key: "Esc", Description: "close"},

@@ -139,6 +139,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandHookLogAppend:         {Command: protocol.CommandHookLogAppend, RequiresProjectID: true},
 	protocol.CommandHookLogList:           {Command: protocol.CommandHookLogList, RequiresProjectID: true},
 	protocol.CommandUIOpenTaskWorkspace:   {Command: protocol.CommandUIOpenTaskWorkspace, RequiresProjectID: true},
+	protocol.CommandUIOpenTaskDrillDown:   {Command: protocol.CommandUIOpenTaskDrillDown, RequiresProjectID: true},
 	protocol.CommandUIStateGet:            {Command: protocol.CommandUIStateGet, RequiresProjectID: true},
 	protocol.CommandUIStateSet:            {Command: protocol.CommandUIStateSet, RequiresProjectID: true},
 	protocol.CommandProjectCleanup:        {Command: protocol.CommandProjectCleanup, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
