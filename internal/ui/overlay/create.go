@@ -516,10 +516,7 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		c.acceptance = msg.msg.Acceptance
 		c.acceptanceInput.SetValue(msg.msg.Acceptance)
 		c.estimate = msg.msg.Estimate
-		return c, tea.Batch(
-			func() tea.Msg { return msg.msg },
-			func() tea.Msg { return CloseOverlayMsg{} },
-		)
+		return c, func() tea.Msg { return msg.msg }
 	case taskEditorErrorMsg:
 		c.editorError = msg.err.Error()
 		return c, nil
@@ -1069,7 +1066,7 @@ func wrapTitleLines(value string, width int) []string {
 	return out
 }
 
-// submit creates a TaskCreatedMsg and closes the overlay
+// submit emits a TaskCreatedMsg; the parent model owns the overlay transition.
 func (c *CreateTaskOverlay) submit() tea.Cmd {
 	// Validate title is not empty
 	title := strings.TrimSpace(c.title.Value())
@@ -1080,28 +1077,25 @@ func (c *CreateTaskOverlay) submit() tea.Cmd {
 	acceptance := strings.TrimSpace(c.acceptanceInput.Value())
 	c.acceptance = acceptance
 
-	return tea.Batch(
-		func() tea.Msg {
-			return TaskCreatedMsg{
-				ID:              c.id,
-				Title:           title,
-				Description:     strings.TrimSpace(c.description.Value()),
-				Type:            c.taskType,
-				Priority:        c.priority,
-				Status:          domain.StatusOpen,
-				Assignee:        strings.TrimSpace(c.assignee),
-				Labels:          append([]string(nil), c.labels...),
-				Implementations: append([]string(nil), implementations...),
-				Design:          strings.TrimSpace(c.design),
-				Notes:           strings.TrimSpace(c.notes),
-				Acceptance:      acceptance,
-				Estimate:        c.estimate,
-				ParentID:        c.parentID,
-				AttachmentPaths: c.stagedAttachmentPaths(),
-			}
-		},
-		func() tea.Msg { return CloseOverlayMsg{} },
-	)
+	return func() tea.Msg {
+		return TaskCreatedMsg{
+			ID:              c.id,
+			Title:           title,
+			Description:     strings.TrimSpace(c.description.Value()),
+			Type:            c.taskType,
+			Priority:        c.priority,
+			Status:          domain.StatusOpen,
+			Assignee:        strings.TrimSpace(c.assignee),
+			Labels:          append([]string(nil), c.labels...),
+			Implementations: append([]string(nil), implementations...),
+			Design:          strings.TrimSpace(c.design),
+			Notes:           strings.TrimSpace(c.notes),
+			Acceptance:      acceptance,
+			Estimate:        c.estimate,
+			ParentID:        c.parentID,
+			AttachmentPaths: c.stagedAttachmentPaths(),
+		}
+	}
 }
 
 func (c *CreateTaskOverlay) stagedAttachmentPaths() []string {

@@ -370,6 +370,94 @@ func TestEditedTaskDetailsStayVisibleAcrossStaleHydration(t *testing.T) {
 	}
 }
 
+func TestEditTaskSubmitSavesTitleAndKeepsWorkspaceOpen(t *testing.T) {
+	var updateBody struct {
+		TaskID string `json:"task_id"`
+		daemonclient.TaskUpdateParams
+	}
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskUpdate {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskUpdate)
+			}
+			if err := json.Unmarshal(req.Body, &updateBody); err != nil {
+				t.Fatalf("unmarshal update body: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				Meta:            req.Meta,
+				OK:              true,
+				CompletedAt:     req.SentAt,
+			}, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{
+		ID:       "az-1",
+		Title:    "Original title",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	}}
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30))
+	m.overlayStack.Push(overlay.NewEditTaskOverlay(m.tasks[0]))
+
+	modelAny, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	model := modelAny.(Model)
+	for _, r := range "Edited title" {
+		modelAny, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		model = modelAny.(Model)
+	}
+	modelAny, submitCmd := model.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	model = modelAny.(Model)
+	if submitCmd == nil {
+		t.Fatal("expected submit command")
+	}
+	msgs := teaBatchMessages(submitCmd())
+	if len(msgs) != 1 {
+		t.Fatalf("submit messages = %d, want one save message: %#v", len(msgs), msgs)
+	}
+
+	modelAny, saveCmd := model.Update(msgs[0])
+	model = modelAny.(Model)
+	if saveCmd == nil {
+		t.Fatal("expected save command")
+	}
+	result := saveCmd()
+	modelAny, _ = model.Update(result)
+	model = modelAny.(Model)
+
+	if updateBody.TaskID != "az-1" || updateBody.Title != "Edited title" {
+		t.Fatalf("update body = %+v, want edited title for az-1", updateBody)
+	}
+	if current, ok := model.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok || current.TaskID() != "az-1" {
+		t.Fatalf("current overlay = %T, want workspace for az-1", model.overlayStack.Current())
+	}
+	if got := model.tasks[0].Title; got != "Edited title" {
+		t.Fatalf("task title after save = %q, want edited title", got)
+	}
+}
+
+func teaBatchMessages(msg tea.Msg) []tea.Msg {
+	if msg == nil {
+		return nil
+	}
+	switch batch := msg.(type) {
+	case tea.BatchMsg:
+		msgs := make([]tea.Msg, 0, len(batch))
+		for _, cmd := range batch {
+			if cmd != nil {
+				msgs = append(msgs, cmd())
+			}
+		}
+		return msgs
+	default:
+		return []tea.Msg{msg}
+	}
+}
+
 func mustMarshalTaskListSnapshot(t *testing.T, protocolVersion protocol.Version, revision uint64, projectID string, tasks []domain.Task) []byte {
 	t.Helper()
 	body, err := json.Marshal(protocol.TaskListSnapshotPayload{
