@@ -11,13 +11,13 @@ func TestReconcileHydratedTasks_UsesHydratedRuntimeProjectionForMatchingTasks(t 
 	startedAt := time.Date(2026, 4, 2, 3, 15, 0, 0, time.UTC)
 	current := []domain.Task{
 		{
-			ID:          "az-1",
-			HasWorktree: true,
-			GitAheadCount: 1,
-			GitBehindCount: 3,
+			ID:                    "az-1",
+			HasWorktree:           true,
+			GitAheadCount:         1,
+			GitBehindCount:        3,
 			HasUncommittedChanges: true,
-			GitAdditions: 8,
-			GitDeletions: 2,
+			GitAdditions:          8,
+			GitDeletions:          2,
 			Session: &domain.Session{
 				IssueID:   "az-1",
 				State:     domain.SessionBusy,
@@ -31,15 +31,15 @@ func TestReconcileHydratedTasks_UsesHydratedRuntimeProjectionForMatchingTasks(t 
 	}
 	hydrated := []domain.Task{
 		{
-			ID:                   "az-1",
-			Title:                "Refreshed",
-			Status:               domain.StatusInProgress,
-			HasWorktree:          true,
-			GitAheadCount:        0,
-			GitBehindCount:       1,
+			ID:                    "az-1",
+			Title:                 "Refreshed",
+			Status:                domain.StatusInProgress,
+			HasWorktree:           true,
+			GitAheadCount:         0,
+			GitBehindCount:        1,
 			HasUncommittedChanges: false,
-			GitAdditions:         0,
-			GitDeletions:         0,
+			GitAdditions:          0,
+			GitDeletions:          0,
 			Session: &domain.Session{
 				IssueID:   "az-1",
 				State:     domain.SessionPaused,
@@ -66,6 +66,48 @@ func TestReconcileHydratedTasks_UsesHydratedRuntimeProjectionForMatchingTasks(t 
 	}
 	if got[1].ID != "az-2" || got[1].HasTmuxSession || got[1].HasWorktree || got[1].GitBehindCount != 0 {
 		t.Fatalf("unexpected overlay leakage into fresh task: %+v", got[1])
+	}
+}
+
+func TestReconcileHydratedTasks_PreservesLoadedDetailsOmittedFromSummaries(t *testing.T) {
+	estimate := 3
+	current := []domain.Task{
+		{
+			ID:          "az-1",
+			Title:       "Current full detail",
+			Description: "Loaded description",
+			Notes:       "Loaded notes",
+			Design:      "Loaded design",
+			Acceptance:  "Loaded acceptance",
+			Estimate:    &estimate,
+			Status:      domain.StatusInProgress,
+			Type:        domain.TypeTask,
+		},
+	}
+	hydrated := []domain.Task{
+		{
+			ID:       "az-1",
+			Title:    "Summary title",
+			Status:   domain.StatusInReview,
+			Type:     domain.TypeTask,
+			Priority: domain.P1,
+		},
+	}
+
+	got := ReconcileHydratedTasks(current, hydrated)
+
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	task := got[0]
+	if task.Title != "Summary title" || task.Status != domain.StatusInReview || task.Priority != domain.P1 {
+		t.Fatalf("summary fields = %+v, want hydrated values", task)
+	}
+	if task.Description != "Loaded description" || task.Notes != "Loaded notes" || task.Design != "Loaded design" || task.Acceptance != "Loaded acceptance" {
+		t.Fatalf("detail fields = %+v, want existing loaded details preserved", task)
+	}
+	if task.Estimate == nil || *task.Estimate != 3 {
+		t.Fatalf("estimate = %+v, want preserved estimate 3", task.Estimate)
 	}
 }
 

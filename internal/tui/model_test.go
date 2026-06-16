@@ -1325,6 +1325,52 @@ func TestTaskWorkspaceMergeUsesWorkspaceTask(t *testing.T) {
 	}
 }
 
+func TestTaskWorkspacePreservesDetailsAcrossSummaryRefresh(t *testing.T) {
+	m := newTestModel()
+	task := domain.Task{
+		ID:          "az-1",
+		Title:       "Workspace task",
+		Description: "Long description stays visible",
+		Notes:       "Detailed notes stay visible",
+		Status:      domain.StatusInProgress,
+		Priority:    domain.P2,
+		Type:        domain.TypeTask,
+	}
+	m.tasks = []domain.Task{task}
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(task, m.tasks, nil, 120, 30))
+
+	result, _ := m.Update(issuesLoadedMsg{
+		refreshSeq: 1,
+		projectID:  m.daemonProjectID(),
+		tasks: []domain.Task{
+			{
+				ID:       "az-1",
+				Title:    "Workspace task after merge",
+				Status:   domain.StatusInReview,
+				Priority: domain.P1,
+				Type:     domain.TypeTask,
+			},
+		},
+		revision: 1,
+	})
+	updated := result.(Model)
+
+	workspace, ok := updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("current overlay = %T, want TaskWorkspaceOverlay", updated.overlayStack.Current())
+	}
+	view := workspace.View()
+	if !strings.Contains(view, "Workspace task after merge") {
+		t.Fatalf("workspace did not pick up summary refresh title:\n%s", view)
+	}
+	if !strings.Contains(view, "Long description stays visible") || !strings.Contains(view, "Detailed notes stay visible") {
+		t.Fatalf("workspace lost full details after summary refresh:\n%s", view)
+	}
+	if updated.tasks[0].Description != "Long description stays visible" || updated.tasks[0].Notes != "Detailed notes stay visible" {
+		t.Fatalf("model task details after summary refresh = %+v", updated.tasks[0])
+	}
+}
+
 func TestSettingsSaveErrorKeepsOverlayOpen(t *testing.T) {
 	m := newTestModel()
 	m.overlayStack.Push(overlay.NewDefaultSettingsOverlay())
