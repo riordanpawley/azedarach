@@ -4106,6 +4106,78 @@ func TestHandleTaskGetManyIncludesAncestorContextWhenRequested(t *testing.T) {
 	}
 }
 
+func TestHandleTaskGetManyCanExcludeDependents(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	projectID := "proj-get-many-no-dependents"
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Parent",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create parent issue: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Child",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+		ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("create child issue: %v", err)
+	}
+	d := &Daemon{
+		cfg: Config{RepoDir: ".", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		sessionStore: daemonstate.NewStore(),
+		revision:     map[string]uint64{projectID: 12},
+	}
+	body, err := json.Marshal(map[string]any{
+		"task_ids":           []string{parentID},
+		"exclude_dependents": true,
+	})
+	if err != nil {
+		t.Fatalf("marshal get-many request: %v", err)
+	}
+
+	resp, err := d.handleTaskGetMany(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-get-many-no-dependents",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.get_many",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskGetMany error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.get_many response = %+v", resp.Error)
+	}
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("decode task.get_many body: %v", err)
+	}
+	taskByID := map[string]domain.Task{}
+	for _, task := range payload.Tasks {
+		taskByID[task.ID.String()] = task
+	}
+	if _, ok := taskByID[parentID]; !ok {
+		t.Fatalf("parent task missing from payload: %+v", payload.Tasks)
+	}
+	if _, ok := taskByID[childID]; ok {
+		t.Fatalf("dependent child task should be omitted from payload: %+v", payload.Tasks)
+	}
+}
+
 func TestHandleTaskSnapshotExportUsesProjectionSessions(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()

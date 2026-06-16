@@ -415,8 +415,9 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 	projectID := d.projectID(req.Meta)
 	startedAt := time.Now()
 	var cmd struct {
-		TaskIDs          []string `json:"task_ids"`
-		IncludeAncestors bool     `json:"include_ancestors,omitempty"`
+		TaskIDs           []string `json:"task_ids"`
+		IncludeAncestors  bool     `json:"include_ancestors,omitempty"`
+		ExcludeDependents bool     `json:"exclude_dependents,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -438,6 +439,9 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 	contextOptions := []issues.DependencyContextOption(nil)
 	if cmd.IncludeAncestors {
 		contextOptions = append(contextOptions, issues.WithAncestorContext())
+	}
+	if cmd.ExcludeDependents {
+		contextOptions = append(contextOptions, issues.WithoutDependentContext())
 	}
 	tasks, err := issueClient.GetManyWithDependencyContextRuntime(ctx, projectID, taskIDs, contextOptions...)
 	if err != nil {

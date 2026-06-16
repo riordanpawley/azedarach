@@ -210,8 +210,9 @@ type TaskIDRequest struct {
 
 // TaskIDsRequest contains the payload used for batch task reads.
 type TaskIDsRequest struct {
-	TaskIDs          []naming.IssueID `json:"task_ids"`
-	IncludeAncestors bool             `json:"include_ancestors,omitempty"`
+	TaskIDs           []naming.IssueID `json:"task_ids"`
+	IncludeAncestors  bool             `json:"include_ancestors,omitempty"`
+	ExcludeDependents bool             `json:"exclude_dependents,omitempty"`
 }
 
 // TaskDependencyParams contains the payload used for dependency operations.
@@ -444,7 +445,7 @@ func (c *Client) GetManyTaskSnapshot(ctx context.Context, taskIDs []string) (Tas
 
 // GetManyTaskSnapshotWithMode fetches multiple tasks and their direct dependency context with the requested bounded read budget.
 func (c *Client) GetManyTaskSnapshotWithMode(ctx context.Context, taskIDs []string, mode ReadWaitMode) (TaskSnapshot, error) {
-	return c.getManyTaskSnapshot(ctx, taskIDs, mode, false)
+	return c.getManyTaskSnapshot(ctx, taskIDs, mode, false, false)
 }
 
 // GetManyTaskSnapshotWithAncestors fetches multiple tasks, their direct dependency context, and full parent-child ancestor chains.
@@ -454,10 +455,20 @@ func (c *Client) GetManyTaskSnapshotWithAncestors(ctx context.Context, taskIDs [
 
 // GetManyTaskSnapshotWithAncestorsMode fetches multiple tasks with ancestor context using the requested bounded read budget.
 func (c *Client) GetManyTaskSnapshotWithAncestorsMode(ctx context.Context, taskIDs []string, mode ReadWaitMode) (TaskSnapshot, error) {
-	return c.getManyTaskSnapshot(ctx, taskIDs, mode, true)
+	return c.getManyTaskSnapshot(ctx, taskIDs, mode, true, false)
 }
 
-func (c *Client) getManyTaskSnapshot(ctx context.Context, taskIDs []string, mode ReadWaitMode, includeAncestors bool) (TaskSnapshot, error) {
+// GetManyTaskSnapshotWithAncestorsNoDependents fetches tasks and ancestor chains without expanding direct dependents.
+func (c *Client) GetManyTaskSnapshotWithAncestorsNoDependents(ctx context.Context, taskIDs []string) (TaskSnapshot, error) {
+	return c.GetManyTaskSnapshotWithAncestorsNoDependentsMode(ctx, taskIDs, ReadWaitModeDefault)
+}
+
+// GetManyTaskSnapshotWithAncestorsNoDependentsMode fetches tasks and ancestor chains without dependent context.
+func (c *Client) GetManyTaskSnapshotWithAncestorsNoDependentsMode(ctx context.Context, taskIDs []string, mode ReadWaitMode) (TaskSnapshot, error) {
+	return c.getManyTaskSnapshot(ctx, taskIDs, mode, true, true)
+}
+
+func (c *Client) getManyTaskSnapshot(ctx context.Context, taskIDs []string, mode ReadWaitMode, includeAncestors bool, excludeDependents bool) (TaskSnapshot, error) {
 	parsedTaskIDs := make([]naming.IssueID, 0, len(taskIDs))
 	for _, taskID := range taskIDs {
 		trimmed := strings.TrimSpace(taskID)
@@ -477,7 +488,7 @@ func (c *Client) getManyTaskSnapshot(ctx context.Context, taskIDs []string, mode
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
 
-	resp, err := c.commandJSONResponse(waitCtx, CommandTaskGetMany, TaskIDsRequest{TaskIDs: parsedTaskIDs, IncludeAncestors: includeAncestors})
+	resp, err := c.commandJSONResponse(waitCtx, CommandTaskGetMany, TaskIDsRequest{TaskIDs: parsedTaskIDs, IncludeAncestors: includeAncestors, ExcludeDependents: excludeDependents})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)

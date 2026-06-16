@@ -487,6 +487,52 @@ func TestClient_GetManyWithDependencyContextRuntimeIncludesAncestorContextWhenRe
 	require.Contains(t, ancestorByID, rootID)
 }
 
+func TestClient_GetManyWithDependencyContextRuntimeCanOmitDependents(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-batch-no-dependents"
+
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Parent",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	require.NoError(t, err)
+	childIDs := make([]string, 0, 50)
+	for i := 0; i < 50; i++ {
+		childID, err := client.Create(ctx, CreateTaskParams{
+			Title:    "Child",
+			Type:     domain.TypeTask,
+			Priority: domain.P2,
+			Status:   domain.StatusOpen,
+			ParentID: &parentID,
+		})
+		require.NoError(t, err)
+		childIDs = append(childIDs, childID)
+	}
+
+	defaultTasks, err := client.GetManyWithDependencyContextRuntime(ctx, projectID, []string{parentID})
+	require.NoError(t, err)
+	defaultByID := map[string]domain.Task{}
+	for _, task := range defaultTasks {
+		defaultByID[task.ID.String()] = task
+	}
+	require.Contains(t, defaultByID, parentID)
+	require.Contains(t, defaultByID, childIDs[0])
+
+	leanTasks, err := client.GetManyWithDependencyContextRuntime(ctx, projectID, []string{parentID}, WithoutDependentContext())
+	require.NoError(t, err)
+	leanByID := map[string]domain.Task{}
+	for _, task := range leanTasks {
+		leanByID[task.ID.String()] = task
+	}
+	require.Contains(t, leanByID, parentID)
+	for _, childID := range childIDs {
+		require.NotContains(t, leanByID, childID)
+	}
+}
+
 func TestTaskRuntimeProjectionQueryFiltersRuntimeCTEsForRequestedIDs(t *testing.T) {
 	query, args := taskRuntimeProjectionQuery("proj-batch-context", true, " second ", "", "second", "third")
 

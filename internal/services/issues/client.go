@@ -776,7 +776,8 @@ func (c *Client) GetWithDependencyContextRuntime(ctx context.Context, projectID,
 }
 
 type dependencyContextOptions struct {
-	includeAncestors bool
+	includeAncestors  bool
+	includeDependents bool
 }
 
 // DependencyContextOption configures task dependency context reads.
@@ -789,13 +790,20 @@ func WithAncestorContext() DependencyContextOption {
 	}
 }
 
+// WithoutDependentContext omits direct dependents from dependency context reads.
+func WithoutDependentContext() DependencyContextOption {
+	return func(opts *dependencyContextOptions) {
+		opts.includeDependents = false
+	}
+}
+
 // GetManyWithDependencyContextRuntime fetches issues plus direct dependencies and dependents.
 func (c *Client) GetManyWithDependencyContextRuntime(ctx context.Context, projectID string, ids []string, options ...DependencyContextOption) ([]domain.Task, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return nil, err
 	}
-	opts := dependencyContextOptions{}
+	opts := dependencyContextOptions{includeDependents: true}
 	for _, option := range options {
 		if option != nil {
 			option(&opts)
@@ -824,6 +832,15 @@ func (c *Client) GetManyWithDependencyContextRuntime(ctx context.Context, projec
 	}
 
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(issueIDs)), ",")
+	dependentQuery := ""
+	if opts.includeDependents {
+		dependentQuery = fmt.Sprintf(`
+			UNION ALL
+			SELECT issue_id AS id
+			FROM issue_dependencies
+			WHERE depends_on_id IN (%s) AND tombstoned_at IS NULL
+		`, placeholders)
+	}
 	query := fmt.Sprintf(`
 		SELECT DISTINCT id
 		FROM (
@@ -834,14 +851,17 @@ func (c *Client) GetManyWithDependencyContextRuntime(ctx context.Context, projec
 			SELECT depends_on_id AS id
 			FROM issue_dependencies
 			WHERE issue_id IN (%s) AND tombstoned_at IS NULL
-			UNION ALL
-			SELECT issue_id AS id
-			FROM issue_dependencies
-			WHERE depends_on_id IN (%s) AND tombstoned_at IS NULL
+			%s
 		)
-	`, placeholders, placeholders, placeholders)
+	`, placeholders, placeholders, dependentQuery)
 	args := make([]any, 0, len(issueIDs)*3)
-	for i := 0; i < 3; i++ {
+	for _, issueID := range issueIDs {
+		args = append(args, issueID)
+	}
+	for _, issueID := range issueIDs {
+		args = append(args, issueID)
+	}
+	if opts.includeDependents {
 		for _, issueID := range issueIDs {
 			args = append(args, issueID)
 		}

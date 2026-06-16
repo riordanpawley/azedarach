@@ -39,7 +39,17 @@ func (f fakeProjectSnapshotSource) ListProjectSnapshots(context.Context) ([]Proj
 type fakeTaskSnapshotReader struct {
 	tasksByID     map[string]domain.Task
 	ancestorCalls [][]string
+	leanCalls     [][]string
 	listCalls     int
+}
+
+func (f *fakeTaskSnapshotReader) GetManyTaskSnapshotWithAncestorsNoDependents(_ context.Context, taskIDs []string) (daemonclient.TaskSnapshot, error) {
+	f.leanCalls = append(f.leanCalls, append([]string(nil), taskIDs...))
+	tasks := make([]domain.Task, 0, len(f.tasksByID))
+	for _, task := range f.tasksByID {
+		tasks = append(tasks, task)
+	}
+	return daemonclient.TaskSnapshot{Tasks: tasks}, nil
 }
 
 func (f *fakeTaskSnapshotReader) GetManyTaskSnapshotWithAncestors(_ context.Context, taskIDs []string) (daemonclient.TaskSnapshot, error) {
@@ -654,12 +664,15 @@ func TestDaemonSnapshotSourceTargetedLoadRequestsAncestorContext(t *testing.T) {
 	if reader.listCalls != 0 {
 		t.Fatalf("ListTasksSnapshot calls = %d, want 0 for targeted load", reader.listCalls)
 	}
-	gotCalls := make([]string, 0, len(reader.ancestorCalls))
-	for _, call := range reader.ancestorCalls {
+	gotCalls := make([]string, 0, len(reader.leanCalls))
+	for _, call := range reader.leanCalls {
 		gotCalls = append(gotCalls, strings.Join(call, ","))
 	}
 	if strings.Join(gotCalls, "|") != "az-child" {
-		t.Fatalf("GetManyTaskSnapshotWithAncestors calls = %v, want child only", gotCalls)
+		t.Fatalf("GetManyTaskSnapshotWithAncestorsNoDependents calls = %v, want child only", gotCalls)
+	}
+	if len(reader.ancestorCalls) != 0 {
+		t.Fatalf("GetManyTaskSnapshotWithAncestors calls = %v, want none", reader.ancestorCalls)
 	}
 	gotTasks := make(map[string]struct{}, len(snapshot.Tasks))
 	for _, task := range snapshot.Tasks {
@@ -684,8 +697,8 @@ func TestDaemonSnapshotSourceFallsBackToFullSnapshotWithoutTargetIDs(t *testing.
 	if err != nil {
 		t.Fatalf("loadTaskSnapshot: %v", err)
 	}
-	if reader.listCalls != 1 || len(reader.ancestorCalls) != 0 {
-		t.Fatalf("reader calls = list:%d ancestors:%v, want one list only", reader.listCalls, reader.ancestorCalls)
+	if reader.listCalls != 1 || len(reader.ancestorCalls) != 0 || len(reader.leanCalls) != 0 {
+		t.Fatalf("reader calls = list:%d ancestors:%v lean:%v, want one list only", reader.listCalls, reader.ancestorCalls, reader.leanCalls)
 	}
 	if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].ID.String() != "az-1" {
 		t.Fatalf("snapshot tasks = %#v, want az-1", snapshot.Tasks)
