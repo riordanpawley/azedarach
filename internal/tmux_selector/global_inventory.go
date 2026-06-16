@@ -39,6 +39,11 @@ type ProjectSnapshotSource interface {
 	ListProjectSnapshots(context.Context) ([]ProjectInventorySnapshot, error)
 }
 
+type taskSnapshotReader interface {
+	GetManyTaskSnapshotWithAncestors(context.Context, []string) (daemonclient.TaskSnapshot, error)
+	ListTasksSnapshot(context.Context) (daemonclient.TaskSnapshot, error)
+}
+
 type ProjectInventorySnapshot struct {
 	ProjectID   string
 	ProjectPath string
@@ -159,7 +164,7 @@ func (l *GlobalInventoryLoader) ListTasksSnapshot(ctx context.Context) (Snapshot
 	}
 	snapshot := l.snapshotFromLive(ctx, live, nil, true)
 	projectDirs := l.projectDirsForLiveSessions(live)
-	projections, tasks := l.loadProjections(ctx, projectDirs)
+	projections, tasks := l.loadProjectionsForEntries(ctx, projectDirs, snapshot.Entries)
 	enriched := l.enrichEntries(snapshot, projections, tasks, projectDirs)
 	if l.logger != nil {
 		l.logger.Info("global selector full snapshot loaded",
@@ -202,7 +207,7 @@ func (l *GlobalInventoryLoader) EnrichSnapshot(ctx context.Context, snapshot Sna
 	}
 	start := time.Now()
 	projectDirs := l.projectDirsForEntries(snapshot.Entries)
-	projections, tasks := l.loadProjections(ctx, projectDirs)
+	projections, tasks := l.loadProjectionsForEntries(ctx, projectDirs, snapshot.Entries)
 	enriched := l.enrichEntries(snapshot, projections, tasks, projectDirs)
 	if l.logger != nil {
 		l.logger.Info("global selector snapshot enriched",
@@ -504,7 +509,7 @@ func addProjectDir(dirs *[]string, seen map[string]struct{}, path string) {
 	*dirs = append(*dirs, abs)
 }
 
-func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs []string) (map[string]projectedInventory, projectTaskIndex) {
+func (l *GlobalInventoryLoader) loadProjectionsForEntries(ctx context.Context, projectDirs []string, entries []InventoryEntry) (map[string]projectedInventory, projectTaskIndex) {
 	out := map[string]projectedInventory{}
 	tasks := projectTaskIndex{
 		byScope: map[string]map[string]domain.Task{},
@@ -515,7 +520,7 @@ func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs
 		return out, tasks
 	}
 	if _, ok := source.(*DaemonSnapshotSource); ok {
-		source = NewDaemonSnapshotSource(projectDirs, l.logger)
+		source = NewDaemonSnapshotSourceForTasks(projectDirs, taskIDsByProjectDir(entries, projectDirs), l.logger)
 	}
 	start := time.Now()
 	snapshots, err := source.ListProjectSnapshots(ctx)
@@ -568,6 +573,55 @@ func (l *GlobalInventoryLoader) loadProjections(ctx context.Context, projectDirs
 		)
 	}
 	return out, tasks
+}
+
+func taskIDsByProjectDir(entries []InventoryEntry, projectDirs []string) map[string][]string {
+	if len(entries) == 0 || len(projectDirs) == 0 {
+		return nil
+	}
+	out := map[string][]string{}
+	for _, entry := range entries {
+		issueID := entryIssueIDForInventory(entry)
+		if issueID == "" {
+			continue
+		}
+		projectDir := inventoryEntryProjectDir(entry, projectDirs)
+		if projectDir == "" {
+			continue
+		}
+		key := cleanProjectDirKey(projectDir)
+		if key == "" {
+			continue
+		}
+		out[key] = append(out[key], issueID)
+	}
+	return normalizeTaskIDsByProjectDir(out)
+}
+
+func inventoryEntryProjectDir(entry InventoryEntry, projectDirs []string) string {
+	if projectPath := strings.TrimSpace(entry.ProjectPath); projectPath != "" {
+		return projectPath
+	}
+	if projectPath := projectPathForSessionPrefix(entry, projectDirs); projectPath != "" {
+		return projectPath
+	}
+	if worktree := strings.TrimSpace(entry.Worktree); worktree != "" {
+		return inferProjectPath(worktree, projectDirs)
+	}
+	return ""
+}
+
+func entryIssueIDForInventory(entry InventoryEntry) string {
+	if issueID := strings.TrimSpace(entry.IssueID); issueID != "" {
+		return issueID
+	}
+	if issueID := strings.TrimSpace(entry.Task.ID.String()); issueID != "" {
+		return issueID
+	}
+	if parsed, ok := ParseAzedarachSessionName(strings.TrimSpace(entry.SessionID)); ok && !parsed.IssueID.IsZero() {
+		return parsed.IssueID.String()
+	}
+	return ""
 }
 
 func (i projectTaskIndex) add(projectID, projectPath, issueID string, task domain.Task) {
@@ -792,8 +846,9 @@ func intMin(a, b int) int {
 }
 
 type DaemonSnapshotSource struct {
-	projectDirs []string
-	logger      *slog.Logger
+	projectDirs  []string
+	taskIDsByDir map[string][]string
+	logger       *slog.Logger
 }
 
 func NewDaemonSnapshotSource(projectDirs []string, logger *slog.Logger) *DaemonSnapshotSource {
@@ -805,6 +860,12 @@ func NewDaemonSnapshotSource(projectDirs []string, logger *slog.Logger) *DaemonS
 		limited = limited[:defaultInventoryProjectLimit]
 	}
 	return &DaemonSnapshotSource{projectDirs: limited, logger: logger}
+}
+
+func NewDaemonSnapshotSourceForTasks(projectDirs []string, taskIDsByDir map[string][]string, logger *slog.Logger) *DaemonSnapshotSource {
+	source := NewDaemonSnapshotSource(projectDirs, logger)
+	source.taskIDsByDir = normalizeTaskIDsByProjectDir(taskIDsByDir)
+	return source
 }
 
 func (s *DaemonSnapshotSource) ListProjectSnapshots(ctx context.Context) ([]ProjectInventorySnapshot, error) {
@@ -830,13 +891,15 @@ func (s *DaemonSnapshotSource) ListProjectSnapshots(ctx context.Context) ([]Proj
 			}
 			socketPath := config.DaemonSocketPathFor(projectDir)
 			client := daemonclient.New(transport.NewClient(socketPath)).WithProjectID(projectID)
-			snapshot, err := client.ListTasksSnapshot(ctx)
+			taskIDs := s.taskIDsForProjectDir(projectDir)
+			snapshot, err := s.loadTaskSnapshot(ctx, client, taskIDs)
 			if err != nil {
 				if s.logger != nil {
 					s.logger.Debug("global selector project snapshot failed",
 						"elapsed_ms", time.Since(projectStart).Milliseconds(),
 						"project_dir", projectDir,
 						"project_id", projectID,
+						"requested_task_count", len(taskIDs),
 						"error", err,
 					)
 				}
@@ -848,6 +911,7 @@ func (s *DaemonSnapshotSource) ListProjectSnapshots(ctx context.Context) ([]Proj
 					"project_dir", projectDir,
 					"project_id", projectID,
 					"task_count", len(snapshot.Tasks),
+					"requested_task_count", len(taskIDs),
 				)
 			}
 			results[i] = projectResult{
@@ -875,4 +939,68 @@ func (s *DaemonSnapshotSource) ListProjectSnapshots(ctx context.Context) ([]Proj
 		)
 	}
 	return out, nil
+}
+
+func (s *DaemonSnapshotSource) loadTaskSnapshot(ctx context.Context, client taskSnapshotReader, taskIDs []string) (daemonclient.TaskSnapshot, error) {
+	if len(taskIDs) == 0 {
+		return client.ListTasksSnapshot(ctx)
+	}
+	return client.GetManyTaskSnapshotWithAncestors(ctx, taskIDs)
+}
+
+func (s *DaemonSnapshotSource) taskIDsForProjectDir(projectDir string) []string {
+	if s == nil || len(s.taskIDsByDir) == 0 {
+		return nil
+	}
+	keys := []string{
+		cleanProjectDirKey(projectDir),
+		strings.TrimSpace(projectDir),
+	}
+	for _, key := range keys {
+		if taskIDs := s.taskIDsByDir[key]; len(taskIDs) > 0 {
+			return append([]string(nil), taskIDs...)
+		}
+	}
+	return nil
+}
+
+func normalizeTaskIDsByProjectDir(in map[string][]string) map[string][]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(in))
+	for projectDir, taskIDs := range in {
+		key := cleanProjectDirKey(projectDir)
+		if key == "" {
+			continue
+		}
+		seen := map[string]struct{}{}
+		normalized := make([]string, 0, len(taskIDs))
+		for _, taskID := range taskIDs {
+			taskID = strings.TrimSpace(taskID)
+			if taskID == "" {
+				continue
+			}
+			if _, exists := seen[taskID]; exists {
+				continue
+			}
+			seen[taskID] = struct{}{}
+			normalized = append(normalized, taskID)
+		}
+		if len(normalized) > 0 {
+			out[key] = normalized
+		}
+	}
+	return out
+}
+
+func cleanProjectDirKey(projectDir string) string {
+	projectDir = strings.TrimSpace(projectDir)
+	if projectDir == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(projectDir); err == nil {
+		projectDir = abs
+	}
+	return filepath.Clean(projectDir)
 }

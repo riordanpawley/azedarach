@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
@@ -33,6 +34,30 @@ type fakeProjectSnapshotSource struct {
 
 func (f fakeProjectSnapshotSource) ListProjectSnapshots(context.Context) ([]ProjectInventorySnapshot, error) {
 	return append([]ProjectInventorySnapshot(nil), f.snapshots...), nil
+}
+
+type fakeTaskSnapshotReader struct {
+	tasksByID     map[string]domain.Task
+	ancestorCalls [][]string
+	listCalls     int
+}
+
+func (f *fakeTaskSnapshotReader) GetManyTaskSnapshotWithAncestors(_ context.Context, taskIDs []string) (daemonclient.TaskSnapshot, error) {
+	f.ancestorCalls = append(f.ancestorCalls, append([]string(nil), taskIDs...))
+	tasks := make([]domain.Task, 0, len(f.tasksByID))
+	for _, task := range f.tasksByID {
+		tasks = append(tasks, task)
+	}
+	return daemonclient.TaskSnapshot{Tasks: tasks}, nil
+}
+
+func (f *fakeTaskSnapshotReader) ListTasksSnapshot(context.Context) (daemonclient.TaskSnapshot, error) {
+	f.listCalls++
+	tasks := make([]domain.Task, 0, len(f.tasksByID))
+	for _, task := range f.tasksByID {
+		tasks = append(tasks, task)
+	}
+	return daemonclient.TaskSnapshot{Tasks: tasks}, nil
 }
 
 func TestGlobalInventoryLoaderUsesTmuxFirstAcrossProjects(t *testing.T) {
@@ -552,6 +577,118 @@ func TestGlobalInventoryLoaderRefreshesProjectDirProviderOnEachEnrichment(t *tes
 	}
 	if got := enriched.Entries[0].ProjectPath; got != secondRoot {
 		t.Fatalf("second enriched project path = %q, want newly added %q", got, secondRoot)
+	}
+}
+
+func TestTaskIDsByProjectDirTargetsOnlyLiveSessionIssues(t *testing.T) {
+	root := t.TempDir()
+	projectID := naming.ProjectSessionPrefix(root)
+	entries := []InventoryEntry{
+		{
+			SessionID: naming.CanonicalSessionID(projectID, "az-1"),
+			IssueID:   "az-1",
+			ProjectID: projectID,
+			Worktree:  filepath.Join(root, "worktrees", "az-1"),
+		},
+		{
+			SessionID: naming.CanonicalSessionID(projectID, "az-2"),
+			ProjectID: projectID,
+			Worktree:  filepath.Join(root, "worktrees", "az-2"),
+		},
+		{
+			SessionID: "plain-tmux",
+			Worktree:  filepath.Join(root, "scratch"),
+		},
+	}
+
+	got := taskIDsByProjectDir(entries, []string{root})
+	key := cleanProjectDirKey(root)
+	if strings.Join(got[key], ",") != "az-1,az-2" {
+		t.Fatalf("targeted task ids = %#v, want az-1 and az-2 only", got)
+	}
+}
+
+func TestTaskIDsByProjectDirDeduplicatesByProject(t *testing.T) {
+	root := t.TempDir()
+	projectID := naming.ProjectSessionPrefix(root)
+	entries := []InventoryEntry{
+		{SessionID: naming.CanonicalSessionID(projectID, "az-1"), ProjectID: projectID},
+		{SessionID: naming.CanonicalSessionID(projectID, "az-1"), ProjectID: projectID},
+	}
+
+	got := taskIDsByProjectDir(entries, []string{root})
+	key := cleanProjectDirKey(root)
+	if len(got[key]) != 1 || got[key][0] != "az-1" {
+		t.Fatalf("deduplicated task ids = %#v, want one az-1", got)
+	}
+}
+
+func TestDaemonSnapshotSourceTargetedLoadRequestsAncestorContext(t *testing.T) {
+	rootID := naming.IssueID("az-root")
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	reader := &fakeTaskSnapshotReader{
+		tasksByID: map[string]domain.Task{
+			rootID.String(): {
+				ID:    rootID,
+				Title: "Root",
+			},
+			parentID.String(): {
+				ID:       parentID,
+				Title:    "Parent",
+				ParentID: &rootID,
+			},
+			childID.String(): {
+				ID:       childID,
+				Title:    "Child",
+				ParentID: &parentID,
+			},
+		},
+	}
+	source := NewDaemonSnapshotSourceForTasks(nil, nil, nil)
+
+	snapshot, err := source.loadTaskSnapshot(context.Background(), reader, []string{childID.String()})
+	if err != nil {
+		t.Fatalf("loadTaskSnapshot: %v", err)
+	}
+	if reader.listCalls != 0 {
+		t.Fatalf("ListTasksSnapshot calls = %d, want 0 for targeted load", reader.listCalls)
+	}
+	gotCalls := make([]string, 0, len(reader.ancestorCalls))
+	for _, call := range reader.ancestorCalls {
+		gotCalls = append(gotCalls, strings.Join(call, ","))
+	}
+	if strings.Join(gotCalls, "|") != "az-child" {
+		t.Fatalf("GetManyTaskSnapshotWithAncestors calls = %v, want child only", gotCalls)
+	}
+	gotTasks := make(map[string]struct{}, len(snapshot.Tasks))
+	for _, task := range snapshot.Tasks {
+		gotTasks[task.ID.String()] = struct{}{}
+	}
+	for _, id := range []string{childID.String(), parentID.String(), rootID.String()} {
+		if _, ok := gotTasks[id]; !ok {
+			t.Fatalf("snapshot tasks missing %s: %#v", id, snapshot.Tasks)
+		}
+	}
+}
+
+func TestDaemonSnapshotSourceFallsBackToFullSnapshotWithoutTargetIDs(t *testing.T) {
+	reader := &fakeTaskSnapshotReader{
+		tasksByID: map[string]domain.Task{
+			"az-1": {ID: "az-1", Title: "One"},
+		},
+	}
+	source := NewDaemonSnapshotSourceForTasks(nil, nil, nil)
+
+	snapshot, err := source.loadTaskSnapshot(context.Background(), reader, nil)
+	if err != nil {
+		t.Fatalf("loadTaskSnapshot: %v", err)
+	}
+	if reader.listCalls != 1 || len(reader.ancestorCalls) != 0 {
+		t.Fatalf("reader calls = list:%d ancestors:%v, want one list only", reader.listCalls, reader.ancestorCalls)
+	}
+	if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].ID.String() != "az-1" {
+		t.Fatalf("snapshot tasks = %#v, want az-1", snapshot.Tasks)
 	}
 }
 

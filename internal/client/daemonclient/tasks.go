@@ -210,7 +210,8 @@ type TaskIDRequest struct {
 
 // TaskIDsRequest contains the payload used for batch task reads.
 type TaskIDsRequest struct {
-	TaskIDs []naming.IssueID `json:"task_ids"`
+	TaskIDs          []naming.IssueID `json:"task_ids"`
+	IncludeAncestors bool             `json:"include_ancestors,omitempty"`
 }
 
 // TaskDependencyParams contains the payload used for dependency operations.
@@ -443,6 +444,20 @@ func (c *Client) GetManyTaskSnapshot(ctx context.Context, taskIDs []string) (Tas
 
 // GetManyTaskSnapshotWithMode fetches multiple tasks and their direct dependency context with the requested bounded read budget.
 func (c *Client) GetManyTaskSnapshotWithMode(ctx context.Context, taskIDs []string, mode ReadWaitMode) (TaskSnapshot, error) {
+	return c.getManyTaskSnapshot(ctx, taskIDs, mode, false)
+}
+
+// GetManyTaskSnapshotWithAncestors fetches multiple tasks, their direct dependency context, and full parent-child ancestor chains.
+func (c *Client) GetManyTaskSnapshotWithAncestors(ctx context.Context, taskIDs []string) (TaskSnapshot, error) {
+	return c.GetManyTaskSnapshotWithAncestorsMode(ctx, taskIDs, ReadWaitModeDefault)
+}
+
+// GetManyTaskSnapshotWithAncestorsMode fetches multiple tasks with ancestor context using the requested bounded read budget.
+func (c *Client) GetManyTaskSnapshotWithAncestorsMode(ctx context.Context, taskIDs []string, mode ReadWaitMode) (TaskSnapshot, error) {
+	return c.getManyTaskSnapshot(ctx, taskIDs, mode, true)
+}
+
+func (c *Client) getManyTaskSnapshot(ctx context.Context, taskIDs []string, mode ReadWaitMode, includeAncestors bool) (TaskSnapshot, error) {
 	parsedTaskIDs := make([]naming.IssueID, 0, len(taskIDs))
 	for _, taskID := range taskIDs {
 		trimmed := strings.TrimSpace(taskID)
@@ -462,7 +477,7 @@ func (c *Client) GetManyTaskSnapshotWithMode(ctx context.Context, taskIDs []stri
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
 
-	resp, err := c.commandJSONResponse(waitCtx, CommandTaskGetMany, TaskIDsRequest{TaskIDs: parsedTaskIDs})
+	resp, err := c.commandJSONResponse(waitCtx, CommandTaskGetMany, TaskIDsRequest{TaskIDs: parsedTaskIDs, IncludeAncestors: includeAncestors})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)

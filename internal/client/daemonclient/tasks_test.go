@@ -286,6 +286,47 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("get many snapshot with ancestors", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				if req.Command != CommandTaskGetMany {
+					t.Fatalf("command = %q, want %q", req.Command, CommandTaskGetMany)
+				}
+				var body TaskIDsRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal request body: %v", err)
+				}
+				if !body.IncludeAncestors {
+					t.Fatalf("include_ancestors = false, want true")
+				}
+				if len(body.TaskIDs) != 1 || body.TaskIDs[0] != "az-child" {
+					t.Fatalf("task_ids = %+v, want [az-child]", body.TaskIDs)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Revision:        19,
+					OK:              true,
+					Body:            mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 19, []domain.Task{{ID: "az-child", Title: "Child", Status: domain.StatusOpen}, {ID: "az-root", Title: "Root", Status: domain.StatusOpen}}),
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		snapshot, err := client.GetManyTaskSnapshotWithAncestors(context.Background(), []string{"az-child"})
+		if err != nil {
+			t.Fatalf("GetManyTaskSnapshotWithAncestors error: %v", err)
+		}
+		if snapshot.Revision != 19 {
+			t.Fatalf("revision = %d, want 19", snapshot.Revision)
+		}
+		if len(snapshot.Tasks) != 2 {
+			t.Fatalf("snapshot tasks = %+v", snapshot.Tasks)
+		}
+	})
+
 	t.Run("list snapshot rejects legacy raw task array", func(t *testing.T) {
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

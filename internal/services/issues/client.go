@@ -775,11 +775,31 @@ func (c *Client) GetWithDependencyContextRuntime(ctx context.Context, projectID,
 	return nil, c.wrapError("get-with-dependency-context-runtime", id, domain.ErrNotFound)
 }
 
+type dependencyContextOptions struct {
+	includeAncestors bool
+}
+
+// DependencyContextOption configures task dependency context reads.
+type DependencyContextOption func(*dependencyContextOptions)
+
+// WithAncestorContext includes the full parent-child ancestor chain for each requested issue.
+func WithAncestorContext() DependencyContextOption {
+	return func(opts *dependencyContextOptions) {
+		opts.includeAncestors = true
+	}
+}
+
 // GetManyWithDependencyContextRuntime fetches issues plus direct dependencies and dependents.
-func (c *Client) GetManyWithDependencyContextRuntime(ctx context.Context, projectID string, ids []string) ([]domain.Task, error) {
+func (c *Client) GetManyWithDependencyContextRuntime(ctx context.Context, projectID string, ids []string, options ...DependencyContextOption) ([]domain.Task, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return nil, err
+	}
+	opts := dependencyContextOptions{}
+	for _, option := range options {
+		if option != nil {
+			option(&opts)
+		}
 	}
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
@@ -849,6 +869,13 @@ func (c *Client) GetManyWithDependencyContextRuntime(ctx context.Context, projec
 	if err := rows.Close(); err != nil {
 		return nil, c.wrapError("get-many-with-dependency-context-runtime", strings.Join(issueIDs, ","), err)
 	}
+	if opts.includeAncestors {
+		ancestorIDs, err := c.parentAncestorIDs(ctx, db, issueIDs)
+		if err != nil {
+			return nil, c.wrapError("get-many-with-dependency-context-runtime", strings.Join(issueIDs, ","), err)
+		}
+		contextIDs = append(contextIDs, ancestorIDs...)
+	}
 	if len(contextIDs) == 0 {
 		return []domain.Task{}, nil
 	}
@@ -858,6 +885,74 @@ func (c *Client) GetManyWithDependencyContextRuntime(ctx context.Context, projec
 		return nil, c.wrapError("get-many-with-dependency-context-runtime", strings.Join(issueIDs, ","), err)
 	}
 	return tasks, nil
+}
+
+func (c *Client) parentAncestorIDs(ctx context.Context, db *sql.DB, issueIDs []string) ([]string, error) {
+	seen := map[string]struct{}{}
+	seeds := make([]string, 0, len(issueIDs))
+	for _, issueID := range issueIDs {
+		issueID = strings.TrimSpace(issueID)
+		if issueID == "" {
+			continue
+		}
+		if _, ok := seen[issueID]; ok {
+			continue
+		}
+		seen[issueID] = struct{}{}
+		seeds = append(seeds, issueID)
+	}
+	if len(seeds) == 0 {
+		return nil, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(seeds)), ",")
+	query := fmt.Sprintf(`
+		WITH RECURSIVE ancestor_ids(id) AS (
+			SELECT depends_on_id
+			FROM issue_dependencies
+			WHERE issue_id IN (%s)
+				AND tombstoned_at IS NULL
+				AND dependency_type IN (?, ?)
+			UNION
+			SELECT d.depends_on_id
+			FROM issue_dependencies d
+			JOIN ancestor_ids a ON d.issue_id = a.id
+			WHERE d.tombstoned_at IS NULL
+				AND d.dependency_type IN (?, ?)
+		)
+		SELECT DISTINCT a.id
+		FROM ancestor_ids a
+		JOIN issues i ON i.id = a.id
+		WHERE i.deleted_at IS NULL
+	`, placeholders)
+	args := make([]any, 0, len(seeds)+4)
+	for _, seed := range seeds {
+		args = append(args, seed)
+	}
+	args = append(args,
+		string(domain.DependencyParentChild),
+		"parent_child",
+		string(domain.DependencyParentChild),
+		"parent_child",
+	)
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ancestors := make([]string, 0, len(seeds))
+	for rows.Next() {
+		var issueID string
+		if err := rows.Scan(&issueID); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(issueID) != "" {
+			ancestors = append(ancestors, issueID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ancestors, nil
 }
 
 // Search queries issues by id/title/description.

@@ -415,7 +415,8 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 	projectID := d.projectID(req.Meta)
 	startedAt := time.Now()
 	var cmd struct {
-		TaskIDs []string `json:"task_ids"`
+		TaskIDs          []string `json:"task_ids"`
+		IncludeAncestors bool     `json:"include_ancestors,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -434,7 +435,11 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 	if issueClient == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
-	tasks, err := issueClient.GetManyWithDependencyContextRuntime(ctx, projectID, taskIDs)
+	contextOptions := []issues.DependencyContextOption(nil)
+	if cmd.IncludeAncestors {
+		contextOptions = append(contextOptions, issues.WithAncestorContext())
+	}
+	tasks, err := issueClient.GetManyWithDependencyContextRuntime(ctx, projectID, taskIDs, contextOptions...)
 	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("daemon task get-many failed", "project_id", projectID, "task_count", len(taskIDs), "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
@@ -448,7 +453,7 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 	}
 	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.get_many.issue_session_refresh", refreshSessionStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(contextTaskIDs))
 	if len(contextTaskIDs) > 0 {
-		tasks, err = issueClient.GetManyWithDependencyContextRuntime(ctx, projectID, taskIDs)
+		tasks, err = issueClient.GetManyWithDependencyContextRuntime(ctx, projectID, taskIDs, contextOptions...)
 		if err != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("daemon task get-many reload after session refresh failed", "project_id", projectID, "task_count", len(taskIDs), "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)

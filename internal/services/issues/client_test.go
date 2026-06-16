@@ -437,6 +437,56 @@ func TestClient_GetManyWithDependencyContextRuntimeIncludesRequestedAndDirectCon
 	assert.Equal(t, firstID, taskByID[secondID].Dependencies[0].ID.String())
 }
 
+func TestClient_GetManyWithDependencyContextRuntimeIncludesAncestorContextWhenRequested(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-batch-ancestor-context"
+
+	rootID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Root",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	require.NoError(t, err)
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Parent",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+		ParentID: &rootID,
+	})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Child",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+		ParentID: &parentID,
+	})
+	require.NoError(t, err)
+
+	directTasks, err := client.GetManyWithDependencyContextRuntime(ctx, projectID, []string{childID})
+	require.NoError(t, err)
+	directByID := map[string]domain.Task{}
+	for _, task := range directTasks {
+		directByID[task.ID.String()] = task
+	}
+	require.Contains(t, directByID, childID)
+	require.Contains(t, directByID, parentID)
+	require.NotContains(t, directByID, rootID)
+
+	ancestorTasks, err := client.GetManyWithDependencyContextRuntime(ctx, projectID, []string{childID}, WithAncestorContext())
+	require.NoError(t, err)
+	ancestorByID := map[string]domain.Task{}
+	for _, task := range ancestorTasks {
+		ancestorByID[task.ID.String()] = task
+	}
+	require.Contains(t, ancestorByID, childID)
+	require.Contains(t, ancestorByID, parentID)
+	require.Contains(t, ancestorByID, rootID)
+}
+
 func TestTaskRuntimeProjectionQueryFiltersRuntimeCTEsForRequestedIDs(t *testing.T) {
 	query, args := taskRuntimeProjectionQuery("proj-batch-context", true, " second ", "", "second", "third")
 
