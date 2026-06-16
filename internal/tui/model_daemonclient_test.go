@@ -5608,14 +5608,14 @@ func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
 					OK:              true,
 					Body:            respBody,
 				}, nil
-			case daemonclient.CommandTaskList:
+			case daemonclient.CommandTaskGet:
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
 					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
-						{ID: naming.IssueID(issueID), Title: "Task fresh", Status: domain.StatusDone, Type: domain.TypeTask},
+						{ID: naming.IssueID(issueID), Title: "Task fresh", Description: "persisted description", Status: domain.StatusDone, Type: domain.TypeTask},
 					}),
 				}, nil
 			case daemonclient.CommandDecisionLinkList:
@@ -5670,7 +5670,10 @@ func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
 	if !strings.Contains(refreshed.View(), "Task fresh") {
 		t.Fatalf("workspace should refresh from daemon snapshot, got %q", refreshed.View())
 	}
-	if len(next.tasks) != 2 || next.tasks[0].Title != "Task fresh" || next.tasks[0].Status != domain.StatusDone {
+	if !strings.Contains(refreshed.View(), "persisted description") {
+		t.Fatalf("workspace should render full task details after refresh, got %q", refreshed.View())
+	}
+	if len(next.tasks) != 2 || next.tasks[0].Title != "Task fresh" || next.tasks[0].Description != "persisted description" || next.tasks[0].Status != domain.StatusDone {
 		t.Fatalf("board task after workspace refresh = %+v, want fresh done task plus preserved unrelated task", next.tasks)
 	}
 	if next.tasks[1].ID.String() != "az-2" || next.tasks[1].Status != domain.StatusInReview {
@@ -5681,7 +5684,7 @@ func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
 	if len(doneTasks) != 1 || doneTasks[0].ID.String() != issueID {
 		t.Fatalf("done column after workspace refresh = %+v, want %s", doneTasks, issueID)
 	}
-	if got := transport.requests; len(got) != 3 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskList || got[2] != daemonclient.CommandDecisionLinkList {
+	if got := transport.requests; len(got) != 3 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskGet || got[2] != daemonclient.CommandDecisionLinkList {
 		t.Fatalf("requests = %v", got)
 	}
 }
@@ -5711,14 +5714,14 @@ func TestTaskWorkspaceRKeyRefreshesCurrentIssue(t *testing.T) {
 					OK:              true,
 					Body:            respBody,
 				}, nil
-			case daemonclient.CommandTaskList:
+			case daemonclient.CommandTaskGet:
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
 					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
-						{ID: naming.IssueID(issueID), Title: "Task fresh from r", Status: domain.StatusInReview, Type: domain.TypeTask},
+						{ID: naming.IssueID(issueID), Title: "Task fresh from r", Description: "refreshed description", Status: domain.StatusInReview, Type: domain.TypeTask},
 					}),
 				}, nil
 			case daemonclient.CommandDecisionLinkList:
@@ -5775,10 +5778,13 @@ func TestTaskWorkspaceRKeyRefreshesCurrentIssue(t *testing.T) {
 	if !strings.Contains(workspace.View(), "Task fresh from r") {
 		t.Fatalf("workspace should refresh current issue on r, got %q", workspace.View())
 	}
-	if len(refreshed.tasks) != 1 || refreshed.tasks[0].Title != "Task fresh from r" || refreshed.tasks[0].Status != domain.StatusInReview {
+	if !strings.Contains(workspace.View(), "refreshed description") {
+		t.Fatalf("workspace should render full task details after r refresh, got %q", workspace.View())
+	}
+	if len(refreshed.tasks) != 1 || refreshed.tasks[0].Title != "Task fresh from r" || refreshed.tasks[0].Description != "refreshed description" || refreshed.tasks[0].Status != domain.StatusInReview {
 		t.Fatalf("board task after r refresh = %+v", refreshed.tasks)
 	}
-	if got := transport.requests; len(got) != 3 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskList || got[2] != daemonclient.CommandDecisionLinkList {
+	if got := transport.requests; len(got) != 3 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskGet || got[2] != daemonclient.CommandDecisionLinkList {
 		t.Fatalf("requests = %v", got)
 	}
 }
