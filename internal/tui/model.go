@@ -3092,8 +3092,12 @@ func (m Model) refreshTaskWorkspaceInBackgroundCmd(taskID string) tea.Cmd {
 
 		snapshotCtx, snapshotCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer snapshotCancel()
-		snapshot, err := m.readTaskSnapshot(snapshotCtx, m.daemonClient)
+		snapshot, err := m.daemonClient.GetTaskSnapshotWithMode(snapshotCtx, msg.taskID, daemonclient.ReadWaitModeExplicit)
 		if err != nil {
+			msg.snapshotErr = err
+			return msg
+		}
+		if err := snapshot.RequireFullDetails("task workspace refresh"); err != nil {
 			msg.snapshotErr = err
 			return msg
 		}
