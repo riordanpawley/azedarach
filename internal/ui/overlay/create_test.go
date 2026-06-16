@@ -293,10 +293,10 @@ func TestCreateTaskOverlaySubmitWithTitle(t *testing.T) {
 	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	require.NotNil(t, cmd)
 
-	// Should emit TaskCreatedMsg and CloseOverlayMsg
+	// Should emit TaskCreatedMsg; the app model closes the overlay after accepting it
 	// Check batch command returns messages
 	msgs := batchToSlice(cmd())
-	require.Len(t, msgs, 2)
+	require.Len(t, msgs, 1)
 
 	// Check TaskCreatedMsg
 	taskMsg, ok := msgs[0].(TaskCreatedMsg)
@@ -305,9 +305,6 @@ func TestCreateTaskOverlaySubmitWithTitle(t *testing.T) {
 	assert.Equal(t, domain.TypeTask, taskMsg.Type)
 	assert.Equal(t, domain.P2, taskMsg.Priority)
 
-	// Check CloseOverlayMsg
-	_, ok = msgs[1].(CloseOverlayMsg)
-	assert.True(t, ok)
 }
 
 func TestCreateTaskOverlaySubmitWithDescription(t *testing.T) {
@@ -322,7 +319,7 @@ func TestCreateTaskOverlaySubmitWithDescription(t *testing.T) {
 	require.NotNil(t, cmd)
 
 	msgs := batchToSlice(cmd())
-	require.Len(t, msgs, 2)
+	require.Len(t, msgs, 1)
 
 	taskMsg, ok := msgs[0].(TaskCreatedMsg)
 	require.True(t, ok)
@@ -351,7 +348,7 @@ func TestEditTaskOverlayTabEnterSubmitsEditedDescription(t *testing.T) {
 	require.NotNil(t, submitCmd)
 
 	msgs := batchToSlice(submitCmd())
-	require.Len(t, msgs, 2)
+	require.Len(t, msgs, 1)
 	taskMsg, ok := msgs[0].(TaskCreatedMsg)
 	require.True(t, ok)
 	assert.Equal(t, "az-1", taskMsg.ID)
@@ -403,7 +400,7 @@ func TestCreateTaskOverlaySubmitWithAcceptance(t *testing.T) {
 	require.NotNil(t, cmd)
 
 	msgs := batchToSlice(cmd())
-	require.Len(t, msgs, 2)
+	require.Len(t, msgs, 1)
 
 	taskMsg, ok := msgs[0].(TaskCreatedMsg)
 	require.True(t, ok)
@@ -423,7 +420,7 @@ func TestCreateTaskOverlaySubmitWithCustomTypeAndPriority(t *testing.T) {
 	require.NotNil(t, cmd)
 
 	msgs := batchToSlice(cmd())
-	require.Len(t, msgs, 2)
+	require.Len(t, msgs, 1)
 
 	taskMsg, ok := msgs[0].(TaskCreatedMsg)
 	require.True(t, ok)
@@ -442,7 +439,7 @@ func TestCreateTaskOverlaySubmitWithImplementations(t *testing.T) {
 	require.NotNil(t, cmd)
 
 	msgs := batchToSlice(cmd())
-	require.Len(t, msgs, 2)
+	require.Len(t, msgs, 1)
 
 	taskMsg, ok := msgs[0].(TaskCreatedMsg)
 	require.True(t, ok)
@@ -467,7 +464,7 @@ func TestEditTaskOverlaySubmitPreservesEmptyImplementations(t *testing.T) {
 	require.NotNil(t, cmd)
 
 	msgs := batchToSlice(cmd())
-	require.Len(t, msgs, 2)
+	require.Len(t, msgs, 1)
 	taskMsg, ok := msgs[0].(TaskCreatedMsg)
 	require.True(t, ok)
 	assert.Empty(t, taskMsg.Implementations)
@@ -491,7 +488,7 @@ func TestEditTaskOverlaySubmitPreservesUnmatchedImplementations(t *testing.T) {
 	require.NotNil(t, cmd)
 
 	msgs := batchToSlice(cmd())
-	require.Len(t, msgs, 2)
+	require.Len(t, msgs, 1)
 	taskMsg, ok := msgs[0].(TaskCreatedMsg)
 	require.True(t, ok)
 	assert.Equal(t, []string{"legacy-impl"}, taskMsg.Implementations)
@@ -535,7 +532,7 @@ func TestCreateTaskOverlayEnterOnSubmitButton(t *testing.T) {
 	require.NotNil(t, cmd)
 
 	msgs := batchToSlice(cmd())
-	require.Len(t, msgs, 2)
+	require.Len(t, msgs, 1)
 
 	taskMsg, ok := msgs[0].(TaskCreatedMsg)
 	require.True(t, ok)
@@ -550,7 +547,7 @@ func TestCreateTaskOverlayEnterOnTitleSubmits(t *testing.T) {
 	require.NotNil(t, cmd)
 
 	msgs := batchToSlice(cmd())
-	require.Len(t, msgs, 2)
+	require.Len(t, msgs, 1)
 
 	taskMsg, ok := msgs[0].(TaskCreatedMsg)
 	require.True(t, ok)
@@ -997,7 +994,7 @@ func TestCreateTaskOverlayCtrlEAppliesEditedTemplate(t *testing.T) {
 	require.NotNil(t, cmd)
 
 	msgs := batchToSlice(cmd())
-	require.Len(t, msgs, 2)
+	require.Len(t, msgs, 1)
 	created, ok := msgs[0].(TaskCreatedMsg)
 	require.True(t, ok)
 	assert.Equal(t, "Edited Task", created.Title)
@@ -1067,7 +1064,7 @@ func TestEditTaskOverlayCtrlEEmitsEditedDescriptionWithTaskID(t *testing.T) {
 	require.NotNil(t, cmd)
 
 	msgs := batchToSlice(cmd())
-	require.Len(t, msgs, 2)
+	require.Len(t, msgs, 1)
 	edited, ok := msgs[0].(TaskCreatedMsg)
 	require.True(t, ok)
 	assert.Equal(t, "az-1", edited.ID)
@@ -1134,7 +1131,7 @@ func TestCreateTaskOverlayCtrlEUsesExecProcessByDefault(t *testing.T) {
 	model, cmd = model.(*CreateTaskOverlay).Update(editorMsg)
 	require.NotNil(t, cmd)
 	msgs := batchToSlice(cmd())
-	require.Len(t, msgs, 2)
+	require.Len(t, msgs, 1)
 	created, ok := msgs[0].(TaskCreatedMsg)
 	require.True(t, ok)
 	assert.Equal(t, "Edited via Exec", created.Title)
