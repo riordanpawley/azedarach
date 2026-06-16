@@ -399,13 +399,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !ok {
 				return m, nil
 			}
-			if m.shouldOpenDetailOnSwitch(entry) {
-				if issueID := entryIssueID(entry); issueID != "" {
-					m.status = fmt.Sprintf("Opening %s in full az...", issueID)
-				}
-				return m, m.openDetailAndSwitchCmd(entry)
-			}
-			return m, m.switchCmd(entry)
+			return m, m.attachCmd(entry)
 		case " ", "space", "o":
 			entry, ok := m.selectedEntry()
 			if !ok {
@@ -1133,14 +1127,71 @@ func (m Model) switchCmd(entry InventoryEntry) tea.Cmd {
 		if m.switcher == nil {
 			return SwitchResultMsg{Err: fmt.Errorf("tmux switcher unavailable")}
 		}
-		target := strings.TrimSpace(entry.SessionID)
-		if target == "" {
-			target = strings.TrimSpace(entry.IssueID)
-		}
+		target := switchTarget(entry)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		return SwitchResultMsg{Err: m.switcher.SwitchClient(ctx, target)}
 	}
+}
+
+func (m Model) attachCmd(entry InventoryEntry) tea.Cmd {
+	return func() tea.Msg {
+		if m.switcher == nil {
+			return SwitchResultMsg{Err: fmt.Errorf("tmux switcher unavailable")}
+		}
+		target := switchTarget(entry)
+		if target == "" {
+			return SwitchResultMsg{Err: fmt.Errorf("selected session has no tmux target")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		switchStarted := time.Now()
+		if err := m.switcher.SwitchClient(ctx, target); err != nil {
+			slog.Default().Warn("tmux selector attach switch failed",
+				"elapsed_ms", time.Since(switchStarted).Milliseconds(),
+				"session_id", target,
+				"error", err,
+			)
+			return SwitchResultMsg{Err: err}
+		}
+		slog.Default().Info("tmux selector attach switch completed",
+			"elapsed_ms", time.Since(switchStarted).Milliseconds(),
+			"session_id", target,
+		)
+
+		if !m.shouldOpenDetailAfterAttach(entry) {
+			return SwitchResultMsg{}
+		}
+		openStarted := time.Now()
+		if err := m.detailOpener.OpenDetail(ctx, entry); err != nil {
+			slog.Default().Warn("tmux selector attach workspace open failed",
+				"elapsed_ms", time.Since(openStarted).Milliseconds(),
+				"session_id", target,
+				"issue_id", entryIssueID(entry),
+				"error", err,
+			)
+			return SwitchResultMsg{}
+		}
+		slog.Default().Info("tmux selector attach workspace open completed",
+			"elapsed_ms", time.Since(openStarted).Milliseconds(),
+			"session_id", target,
+			"issue_id", entryIssueID(entry),
+		)
+		return SwitchResultMsg{}
+	}
+}
+
+func switchTarget(entry InventoryEntry) string {
+	target := strings.TrimSpace(entry.SessionID)
+	if target == "" {
+		target = strings.TrimSpace(entry.IssueID)
+	}
+	return target
+}
+
+func (m Model) shouldOpenDetailAfterAttach(entry InventoryEntry) bool {
+	return m.detailOpener != nil && strings.TrimSpace(entry.SessionID) != defaultFullAzSession && entryIssueID(entry) != ""
 }
 
 func (m Model) killCmd(entry InventoryEntry) tea.Cmd {
@@ -1163,36 +1214,6 @@ func killTargetLabel(entry InventoryEntry) string {
 		return id
 	}
 	return "(unknown)"
-}
-
-func (m Model) shouldOpenDetailOnSwitch(entry InventoryEntry) bool {
-	return m.detailOpener != nil && strings.TrimSpace(entry.SessionID) != defaultFullAzSession && entryIssueID(entry) != ""
-}
-
-func (m Model) openDetailAndSwitchCmd(entry InventoryEntry) tea.Cmd {
-	return func() tea.Msg {
-		if m.switcher == nil {
-			return SwitchResultMsg{Err: fmt.Errorf("tmux switcher unavailable")}
-		}
-		if m.detailOpener == nil {
-			return SwitchResultMsg{Err: fmt.Errorf("detail opener unavailable")}
-		}
-		issueID := entryIssueID(entry)
-		if issueID == "" {
-			return SwitchResultMsg{Err: fmt.Errorf("selected session has no issue id")}
-		}
-		entry.IssueID = issueID
-		target := strings.TrimSpace(entry.SessionID)
-		if target == "" {
-			target = issueID
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := m.detailOpener.OpenDetail(ctx, entry); err != nil {
-			return SwitchResultMsg{Err: fmt.Errorf("request full az detail open: %w", err)}
-		}
-		return SwitchResultMsg{Err: m.switcher.SwitchClient(ctx, target)}
-	}
 }
 
 func (m Model) openDetailCmd(entry InventoryEntry) tea.Cmd {
