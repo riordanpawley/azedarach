@@ -6,22 +6,25 @@ build-link-run:
     ./scripts/build-link-run.sh
 
 build:
+    mkdir -p .tmp/az-test
+    rm -f bin/az bin/azd
     SHA="$(git rev-parse HEAD 2>/dev/null || echo unknown)"; \
     LDFLAGS="-X github.com/riordanpawley/azedarach/internal/buildinfo.Version=dev -X github.com/riordanpawley/azedarach/internal/buildinfo.GitCommit=$SHA"; \
-    go build -ldflags "$LDFLAGS" -o bin/az ./cmd/az
+    go build -ldflags "$LDFLAGS" -o .tmp/az-test/az ./cmd/az
     SHA="$(git rev-parse HEAD 2>/dev/null || echo unknown)"; \
     LDFLAGS="-X github.com/riordanpawley/azedarach/internal/buildinfo.Version=dev -X github.com/riordanpawley/azedarach/internal/buildinfo.GitCommit=$SHA"; \
-    go build -ldflags "$LDFLAGS" -o bin/azd ./cmd/azd
+    go build -ldflags "$LDFLAGS" -o .tmp/az-test/azd ./cmd/azd
 
 run:
     just build
-    DAEMON_BIN="$(pwd)/bin/azd"; \
+    AZ_BIN="$(pwd)/.tmp/az-test/az"; \
+    DAEMON_BIN="$(pwd)/.tmp/az-test/azd"; \
     if [ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]; then \
-        AZEDARACH_DAEMON_BIN="$DAEMON_BIN" AZEDARACH_DAEMON_SCOPE=worktree AZEDARACH_DAEMON_SCOPE_SOURCE=just-run ./bin/az daemon restart; \
-        AZEDARACH_DAEMON_SCOPE=worktree AZEDARACH_DAEMON_SCOPE_SOURCE=just-run ./bin/az; \
+        AZEDARACH_DAEMON_BIN="$DAEMON_BIN" AZEDARACH_DAEMON_SCOPE=worktree AZEDARACH_DAEMON_SCOPE_SOURCE=just-run "$AZ_BIN" daemon restart; \
+        AZEDARACH_DAEMON_SCOPE=worktree AZEDARACH_DAEMON_SCOPE_SOURCE=just-run "$AZ_BIN"; \
     else \
-        AZEDARACH_DAEMON_BIN="$DAEMON_BIN" ./bin/az daemon restart; \
-        ./bin/az; \
+        AZEDARACH_DAEMON_BIN="$DAEMON_BIN" "$AZ_BIN" daemon restart; \
+        "$AZ_BIN"; \
     fi
 
 bench-git-runtime *ARGS:
@@ -41,7 +44,7 @@ type-check:
     go build ./...
 
 clean:
-    rm -rf bin/ coverage.out coverage.html
+    rm -rf bin/ .tmp/az-test/ coverage.out coverage.html
 
 install:
     go install ./cmd/az
