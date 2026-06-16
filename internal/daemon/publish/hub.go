@@ -22,11 +22,17 @@ type Hub struct {
 }
 
 type subscriber struct {
-	id        int
-	projectID string
-	ch        chan protocol.EventEnvelope
-	mu        sync.RWMutex
-	closed    bool
+	id              int
+	projectID       string
+	ch              chan protocol.EventEnvelope
+	notify          chan struct{}
+	done            chan struct{}
+	mu              sync.RWMutex
+	closed          bool
+	laneLimit       int
+	queue           []protocol.EventEnvelope
+	telemetryQueued int
+	durableQueued   int
 }
 
 // NewHub returns an event publish/subscribe hub.
@@ -86,11 +92,15 @@ func (h *Hub) Subscribe(projectID string, fromRevision uint64) (<-chan protocol.
 	sub := &subscriber{
 		id:        id,
 		projectID: projectID,
-		ch:        make(chan protocol.EventEnvelope, h.maxSubscriberQ),
+		ch:        make(chan protocol.EventEnvelope),
+		notify:    make(chan struct{}, 1),
+		done:      make(chan struct{}),
+		laneLimit: h.maxSubscriberQ,
 	}
 	h.subscribers[id] = sub
 	backlog := h.backlogForProjectLocked(projectID)
 	h.mu.Unlock()
+	go sub.pump()
 
 	// Catch-up on subscribe with strict > fromRevision ordering.
 	catchup := make([]protocol.EventEnvelope, 0, len(backlog))
@@ -99,14 +109,15 @@ func (h *Hub) Subscribe(projectID string, fromRevision uint64) (<-chan protocol.
 			catchup = append(catchup, evt)
 		}
 	}
-	if overflow := len(catchup) - h.maxSubscriberQ; overflow > 0 {
-		catchup = catchup[overflow:]
+	delivered := truncateCatchupByLane(catchup, h.maxSubscriberQ)
+	if dropped := len(catchup) - len(delivered); dropped > 0 {
+		catchup = delivered
 		h.logger.Warn(
 			"daemon.event.subscribe.catchup_truncated",
 			"project_id", projectID,
 			"subscriber_id", sub.id,
 			"from_revision", fromRevision,
-			"dropped_events", overflow,
+			"dropped_events", dropped,
 			"delivered_events", len(catchup),
 		)
 	}
@@ -185,14 +196,67 @@ func (s *subscriber) trySend(evt protocol.EventEnvelope) bool {
 	if s.closed {
 		return false
 	}
-	select {
-	case s.ch <- evt:
-		return true
-	default:
-		if !isPriorityEvent(evt) {
+	if isTelemetryEvent(evt) {
+		if s.telemetryQueued >= s.laneLimit {
 			return false
 		}
-		return s.trySendPriorityLocked(evt)
+		s.queue = append(s.queue, evt)
+		s.telemetryQueued++
+		s.notifyPumpLocked()
+		return true
+	}
+
+	if s.durableQueued >= s.laneLimit {
+		return false
+	}
+	s.queue = append(s.queue, evt)
+	s.durableQueued++
+	s.notifyPumpLocked()
+	return true
+}
+
+func (s *subscriber) pump() {
+	defer close(s.ch)
+	for {
+		s.mu.RLock()
+		if len(s.queue) == 0 {
+			s.mu.RUnlock()
+			select {
+			case <-s.done:
+				return
+			case <-s.notify:
+				continue
+			}
+		}
+		evt := s.queue[0]
+		s.mu.RUnlock()
+
+		s.mu.Lock()
+		if len(s.queue) == 0 {
+			s.mu.Unlock()
+			continue
+		}
+		evt = s.queue[0]
+		if isTelemetryEvent(evt) {
+			s.telemetryQueued--
+		} else {
+			s.durableQueued--
+		}
+		s.queue = s.queue[1:]
+		s.mu.Unlock()
+
+		select {
+		case <-s.done:
+			return
+		case s.ch <- evt:
+		}
+	}
+}
+
+func (s *subscriber) notifyPumpLocked() {
+	select {
+	case s.notify <- struct{}{}:
+	default:
 	}
 }
 
@@ -203,95 +267,10 @@ func (s *subscriber) close() {
 		return
 	}
 	s.closed = true
-	close(s.ch)
+	close(s.done)
 }
 
-func (s *subscriber) trySendPriorityLocked(evt protocol.EventEnvelope) bool {
-	pending := len(s.ch)
-	if pending == 0 {
-		select {
-		case s.ch <- evt:
-			return true
-		default:
-			return false
-		}
-	}
-
-	retained := make([]protocol.EventEnvelope, 0, pending)
-	skippedRevisions := make([]uint64, 0, pending)
-	droppedLowPriority := false
-	for i := 0; i < pending; i++ {
-		select {
-		case queued := <-s.ch:
-			if isLowPriorityEvent(queued) {
-				droppedLowPriority = true
-				if queued.Revision > 0 {
-					skippedRevisions = append(skippedRevisions, queued.Revision)
-				}
-				continue
-			}
-			retained = append(retained, queued)
-		default:
-			i = pending
-		}
-	}
-	if !droppedLowPriority {
-		for _, queued := range retained {
-			s.ch <- queued
-		}
-		return false
-	}
-	annotateSkippedRevisions(retained, skippedRevisions)
-	evt.SkippedRevisions = appendSkippedRevisions(evt.SkippedRevisions, skippedRevisions)
-	for _, queued := range retained {
-		s.ch <- queued
-	}
-	select {
-	case s.ch <- evt:
-		return true
-	default:
-		return false
-	}
-}
-
-func annotateSkippedRevisions(events []protocol.EventEnvelope, skipped []uint64) {
-	if len(skipped) == 0 {
-		return
-	}
-	for i := range events {
-		var before []uint64
-		for _, revision := range skipped {
-			if revision > 0 && revision < events[i].Revision {
-				before = append(before, revision)
-			}
-		}
-		events[i].SkippedRevisions = appendSkippedRevisions(events[i].SkippedRevisions, before)
-	}
-}
-
-func appendSkippedRevisions(existing, skipped []uint64) []uint64 {
-	if len(skipped) == 0 {
-		return existing
-	}
-	out := append([]uint64(nil), existing...)
-	out = append(out, skipped...)
-	slices.Sort(out)
-	return slices.Compact(out)
-}
-
-func isPriorityEvent(evt protocol.EventEnvelope) bool {
-	switch evt.Event {
-	case protocol.EventTaskCreated,
-		protocol.EventTaskUpdated,
-		protocol.EventTaskDeleted,
-		protocol.EventTaskArchived:
-		return true
-	default:
-		return false
-	}
-}
-
-func isLowPriorityEvent(evt protocol.EventEnvelope) bool {
+func isTelemetryEvent(evt protocol.EventEnvelope) bool {
 	switch evt.Event {
 	case protocol.EventGitStatusUpdated,
 		protocol.EventWorktreeProjectionUpdated:
@@ -299,6 +278,34 @@ func isLowPriorityEvent(evt protocol.EventEnvelope) bool {
 	default:
 		return false
 	}
+}
+
+func truncateCatchupByLane(events []protocol.EventEnvelope, laneLimit int) []protocol.EventEnvelope {
+	if laneLimit <= 0 {
+		return nil
+	}
+	telemetryCount := 0
+	durableCount := 0
+	keep := make([]protocol.EventEnvelope, 0, laneLimit*2)
+	for i := len(events) - 1; i >= 0; i-- {
+		evt := events[i]
+		if isTelemetryEvent(evt) {
+			if telemetryCount >= laneLimit {
+				continue
+			}
+			telemetryCount++
+		} else {
+			if durableCount >= laneLimit {
+				continue
+			}
+			durableCount++
+		}
+		keep = append(keep, evt)
+	}
+	for i, j := 0, len(keep)-1; i < j; i, j = i+1, j-1 {
+		keep[i], keep[j] = keep[j], keep[i]
+	}
+	return keep
 }
 
 func appendTrimmed(list []protocol.EventEnvelope, evt protocol.EventEnvelope, max int) []protocol.EventEnvelope {

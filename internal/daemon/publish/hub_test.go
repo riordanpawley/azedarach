@@ -2,7 +2,6 @@ package publish
 
 import (
 	"log/slog"
-	"slices"
 	"testing"
 	"time"
 
@@ -48,6 +47,7 @@ func TestOverflowSubscriberRemovedDeterministically(t *testing.T) {
 	// Fill queue and trigger overflow unsubscribe.
 	h.Publish(makeEvent("proj", 1, "r1"))
 	h.Publish(makeEvent("proj", 2, "r2"))
+	h.Publish(makeEvent("proj", 3, "r3"))
 
 	// Channel should eventually close after overflow unsubscribe.
 	select {
@@ -104,7 +104,7 @@ func TestSubscribeCatchupOverflowTruncatesToLatestEvents(t *testing.T) {
 	}
 }
 
-func TestPriorityTaskMutationEvictsQueuedRuntimeTelemetry(t *testing.T) {
+func TestTaskMutationUsesSeparateLaneFromRuntimeTelemetry(t *testing.T) {
 	h := NewHub(32, 2, slog.Default())
 	ch, cancel := h.Subscribe("proj", 0)
 	defer cancel()
@@ -113,44 +113,33 @@ func TestPriorityTaskMutationEvictsQueuedRuntimeTelemetry(t *testing.T) {
 	h.Publish(makeEvent("proj", 2, protocol.EventWorktreeProjectionUpdated))
 	h.Publish(makeEvent("proj", 3, protocol.EventTaskCreated))
 
-	first := recv(t, ch)
-	if first.Revision != 3 || first.Event != protocol.EventTaskCreated {
-		t.Fatalf("first event = %s:%d, want task created revision 3", first.Event, first.Revision)
-	}
-	if !slices.Equal(first.SkippedRevisions, []uint64{1, 2}) {
-		t.Fatalf("skipped revisions = %v, want [1 2]", first.SkippedRevisions)
-	}
-	select {
-	case evt := <-ch:
-		t.Fatalf("unexpected retained telemetry event: %s:%d", evt.Event, evt.Revision)
-	default:
+	for _, want := range []struct {
+		revision uint64
+		event    string
+	}{
+		{revision: 1, event: protocol.EventGitStatusUpdated},
+		{revision: 2, event: protocol.EventWorktreeProjectionUpdated},
+		{revision: 3, event: protocol.EventTaskCreated},
+	} {
+		got := recv(t, ch)
+		if got.Revision != want.revision || got.Event != want.event {
+			t.Fatalf("event = %s:%d, want %s:%d", got.Event, got.Revision, want.event, want.revision)
+		}
 	}
 }
 
-func TestPriorityTaskMutationAnnotatesRetainedEventsAfterTelemetryEviction(t *testing.T) {
+func TestDurableEventLaneOverflowsIndependentlyOfTelemetryLane(t *testing.T) {
 	h := NewHub(32, 3, slog.Default())
-	ch, cancel := h.Subscribe("proj", 0)
-	defer cancel()
+	ch, _ := h.Subscribe("proj", 0)
 
 	h.Publish(makeEvent("proj", 1, protocol.EventGitStatusUpdated))
 	h.Publish(makeEvent("proj", 2, protocol.EventUICommandRequested))
 	h.Publish(makeEvent("proj", 3, protocol.EventWorktreeProjectionUpdated))
 	h.Publish(makeEvent("proj", 4, protocol.EventTaskCreated))
+	h.Publish(makeEvent("proj", 5, protocol.EventTaskUpdated))
+	h.Publish(makeEvent("proj", 6, protocol.EventTaskDeleted))
 
-	first := recv(t, ch)
-	second := recv(t, ch)
-	if first.Revision != 2 || first.Event != protocol.EventUICommandRequested {
-		t.Fatalf("first event = %s:%d, want retained UI command revision 2", first.Event, first.Revision)
-	}
-	if !slices.Equal(first.SkippedRevisions, []uint64{1}) {
-		t.Fatalf("first skipped revisions = %v, want [1]", first.SkippedRevisions)
-	}
-	if second.Revision != 4 || second.Event != protocol.EventTaskCreated {
-		t.Fatalf("second event = %s:%d, want task created revision 4", second.Event, second.Revision)
-	}
-	if !slices.Equal(second.SkippedRevisions, []uint64{1, 3}) {
-		t.Fatalf("second skipped revisions = %v, want [1 3]", second.SkippedRevisions)
-	}
+	expectClosed(t, ch)
 }
 
 func TestPriorityTaskMutationDoesNotEvictQueuedTaskMutations(t *testing.T) {
@@ -159,18 +148,42 @@ func TestPriorityTaskMutationDoesNotEvictQueuedTaskMutations(t *testing.T) {
 
 	h.Publish(makeEvent("proj", 1, protocol.EventTaskUpdated))
 	h.Publish(makeEvent("proj", 2, protocol.EventTaskCreated))
+	h.Publish(makeEvent("proj", 3, protocol.EventTaskDeleted))
 
-	first := recv(t, ch)
-	if first.Revision != 1 || first.Event != protocol.EventTaskUpdated {
-		t.Fatalf("first event = %s:%d, want original queued task update", first.Event, first.Revision)
+	expectClosed(t, ch)
+}
+
+func TestTelemetryLaneOverflowsIndependentlyOfDurableLane(t *testing.T) {
+	h := NewHub(32, 2, slog.Default())
+	ch, _ := h.Subscribe("proj", 0)
+
+	h.Publish(makeEvent("proj", 1, protocol.EventGitStatusUpdated))
+	h.Publish(makeEvent("proj", 2, protocol.EventWorktreeProjectionUpdated))
+	h.Publish(makeEvent("proj", 3, protocol.EventTaskCreated))
+	h.Publish(makeEvent("proj", 4, protocol.EventGitStatusUpdated))
+	h.Publish(makeEvent("proj", 5, protocol.EventWorktreeProjectionUpdated))
+
+	expectClosed(t, ch)
+}
+
+func TestTelemetryLaneCapacityRecoversAfterSubscriberDrain(t *testing.T) {
+	h := NewHub(32, 2, slog.Default())
+	ch, cancel := h.Subscribe("proj", 0)
+	defer cancel()
+
+	h.Publish(makeEvent("proj", 1, protocol.EventGitStatusUpdated))
+	h.Publish(makeEvent("proj", 2, protocol.EventWorktreeProjectionUpdated))
+	if got := recv(t, ch); got.Revision != 1 {
+		t.Fatalf("first drained revision = %d, want 1", got.Revision)
 	}
-	select {
-	case _, ok := <-ch:
-		if ok {
-			t.Fatal("subscriber channel should close after priority overflow without low-priority telemetry")
+
+	h.Publish(makeEvent("proj", 3, protocol.EventGitStatusUpdated))
+
+	for _, want := range []uint64{2, 3} {
+		got := recv(t, ch)
+		if got.Revision != want {
+			t.Fatalf("drained revision = %d, want %d", got.Revision, want)
 		}
-	case <-time.After(250 * time.Millisecond):
-		t.Fatal("timed out waiting for overflow close")
 	}
 }
 
@@ -182,6 +195,20 @@ func recv(t *testing.T, ch <-chan protocol.EventEnvelope) protocol.EventEnvelope
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for event")
 		return protocol.EventEnvelope{}
+	}
+}
+
+func expectClosed(t *testing.T, ch <-chan protocol.EventEnvelope) {
+	t.Helper()
+	for {
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				return
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for subscriber channel to close")
+		}
 	}
 }
 
