@@ -124,6 +124,12 @@ type pendingTaskDetails struct {
 	updatedAt       time.Time
 }
 
+type editTaskDetailLoadedMsg struct {
+	taskID string
+	task   domain.Task
+	err    error
+}
+
 type pendingOperationProgress struct {
 	operationID  string
 	kind         string
@@ -461,6 +467,51 @@ func (m Model) openTaskWorkspaceByID(taskID string) (tea.Model, tea.Cmd) {
 		m.openOverlay(workspace),
 		m.refreshTaskWorkspaceInBackgroundCmd(taskID),
 	)
+}
+
+func (m Model) openEditTaskOverlay(task domain.Task) (tea.Model, tea.Cmd) {
+	taskID := strings.TrimSpace(task.ID.String())
+	if taskID == "" {
+		return m, nil
+	}
+	if m.daemonClient == nil {
+		return m, m.openOverlay(overlay.NewEditTaskOverlayWithImplOptionsAndAttachmentService(task, m.availableTaskImplementations(), m.attachmentService))
+	}
+	return m, m.loadEditTaskDetailCmd(taskID)
+}
+
+func (m Model) loadEditTaskDetailCmd(taskID string) tea.Cmd {
+	projectID := m.daemonProjectID()
+	return func() tea.Msg {
+		msg := editTaskDetailLoadedMsg{taskID: taskID}
+		if m.daemonClient == nil {
+			msg.err = fmt.Errorf("daemon client unavailable")
+			return msg
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		snapshot, err := m.daemonClient.GetTaskSnapshotWithMode(ctx, taskID, daemonclient.ReadWaitModeExplicit)
+		if err != nil {
+			msg.err = err
+			return msg
+		}
+		if m.shouldIgnoreDaemonSnapshot(projectID, snapshot.Revision) {
+			msg.err = fmt.Errorf("stale issue detail snapshot")
+			return msg
+		}
+		if err := snapshot.RequireFullDetails("edit task form"); err != nil {
+			msg.err = err
+			return msg
+		}
+		for _, candidate := range snapshot.Tasks {
+			if taskIDKey(candidate.ID.String()) == taskIDKey(taskID) {
+				msg.task = candidate
+				return msg
+			}
+		}
+		msg.err = fmt.Errorf("issue not found: %s", taskID)
+		return msg
+	}
 }
 
 func (m Model) enterDrillDownByID(taskID string) (tea.Model, tea.Cmd) {
@@ -829,7 +880,7 @@ func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if task == nil {
 			return m, nil
 		}
-		return m, m.openOverlay(overlay.NewEditTaskOverlayWithImplOptionsAndAttachmentService(*task, m.availableTaskImplementations(), m.attachmentService))
+		return m.openEditTaskOverlay(*task)
 	case "b":
 		return m, m.openMergeTargetSelection(task)
 	case "m":

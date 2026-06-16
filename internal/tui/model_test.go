@@ -1205,16 +1205,15 @@ func TestActionModeEOpensEditOverlay(t *testing.T) {
 	m.editor.EnterAction()
 	m.nav.SelectTask("az-1", 0)
 
-	result, _ := m.handleActionMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	result, cmd := m.handleActionMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	newModel := result.(Model)
 
 	current := newModel.overlayStack.Current()
-	editOverlay, ok := current.(*overlay.CreateTaskOverlay)
-	if !ok {
-		t.Fatalf("expected edit CreateTaskOverlay from action-mode e, got %T", current)
+	if current != nil {
+		t.Fatalf("expected action-mode e to load full detail before opening edit overlay, got %T", current)
 	}
-	if got := editOverlay.Title(); got != "Edit Task" {
-		t.Fatalf("overlay title = %q, want Edit Task", got)
+	if cmd == nil {
+		t.Fatal("expected action-mode e to start full-detail load")
 	}
 }
 
