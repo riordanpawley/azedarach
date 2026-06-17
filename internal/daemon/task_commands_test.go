@@ -4178,6 +4178,79 @@ func TestHandleTaskGetManyCanExcludeDependents(t *testing.T) {
 	}
 }
 
+func TestHandleTaskGetManyMetadataOnlyPreservesContextShape(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	projectID := "proj-get-many-metadata-only"
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Root",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create root issue: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Child",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create child issue: %v", err)
+	}
+	d := &Daemon{
+		cfg: Config{RepoDir: ".", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		sessionStore: daemonstate.NewStore(),
+		revision:     map[string]uint64{projectID: 12},
+	}
+	body, err := json.Marshal(map[string]any{
+		"task_ids":           []string{childID},
+		"include_ancestors":  true,
+		"exclude_dependents": true,
+		"metadata_only":      true,
+	})
+	if err != nil {
+		t.Fatalf("marshal get-many request: %v", err)
+	}
+
+	resp, err := d.handleTaskGetMany(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-get-many-metadata-only",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.get_many",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskGetMany error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.get_many response = %+v", resp.Error)
+	}
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("decode task.get_many body: %v", err)
+	}
+	taskByID := map[string]domain.Task{}
+	for _, task := range payload.Tasks {
+		taskByID[task.ID.String()] = task
+	}
+	for _, issueID := range []string{childID, rootID} {
+		if _, ok := taskByID[issueID]; !ok {
+			t.Fatalf("task %s missing from metadata-only payload: %+v", issueID, payload.Tasks)
+		}
+	}
+}
+
 func TestHandleTaskSnapshotExportUsesProjectionSessions(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()

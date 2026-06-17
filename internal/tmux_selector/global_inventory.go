@@ -40,7 +40,7 @@ type ProjectSnapshotSource interface {
 }
 
 type taskSnapshotReader interface {
-	GetManyTaskSnapshotWithAncestorsNoDependents(context.Context, []string) (daemonclient.TaskSnapshot, error)
+	GetManyTaskSnapshotWithAncestorsNoDependentsMetadataOnly(context.Context, []string) (daemonclient.TaskSnapshot, error)
 	GetManyTaskSnapshotWithAncestors(context.Context, []string) (daemonclient.TaskSnapshot, error)
 	ListTasksSnapshot(context.Context) (daemonclient.TaskSnapshot, error)
 }
@@ -956,7 +956,7 @@ func (s *DaemonSnapshotSource) loadTaskSnapshot(ctx context.Context, client task
 	if len(taskIDs) == 0 {
 		return client.ListTasksSnapshot(ctx)
 	}
-	return client.GetManyTaskSnapshotWithAncestorsNoDependents(ctx, taskIDs)
+	return client.GetManyTaskSnapshotWithAncestorsNoDependentsMetadataOnly(ctx, taskIDs)
 }
 
 func (s *DaemonSnapshotSource) taskIDsForProjectDir(projectDir string) []string {

@@ -882,6 +882,8 @@ func TestModelUserTabChangeWinsOverLatePersistedSelectorTabLoad(t *testing.T) {
 		t.Fatal("snapshot load did not request persisted selector tab")
 	}
 	lateLoaded := cmd()
+	updated, _ = model.Update(selectorTabLoadedMsg{})
+	model = updated.(Model)
 
 	updated, persistCmd := model.Update(tea.KeyMsg{Type: tea.KeyTab})
 	model = updated.(Model)
@@ -896,6 +898,46 @@ func TestModelUserTabChangeWinsOverLatePersistedSelectorTabLoad(t *testing.T) {
 	model = updated.(Model)
 	if model.activeTab != selectorTabTree {
 		t.Fatalf("active tab after late persisted load = %v, want user-selected tree", model.activeTab)
+	}
+}
+
+func TestModelIgnoresTabKeyWhilePersistedSelectorTabLoading(t *testing.T) {
+	store := &fakeUIStateStore{values: map[string]string{
+		protocol.UIStateKeyTMUXSelectorLastActiveTab: "tree",
+	}}
+	snapshot := Snapshot{Entries: []InventoryEntry{{
+		SessionID: "az-ckx",
+		IssueID:   "ckx",
+		TaskTitle: "ckx",
+	}}}
+	model := New(fakeSnapshotLoader{snapshot: snapshot}, WithUIStateStore(store))
+
+	updated, cmd := model.Update(LoadedMsg{Snapshot: snapshot})
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("snapshot load did not request persisted selector tab")
+	}
+	lateLoaded := cmd()
+
+	updated, persistCmd := model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = updated.(Model)
+	if persistCmd != nil {
+		t.Fatal("tab key persisted a value while persisted selector tab was still loading")
+	}
+	if model.activeTab != selectorTabGrid {
+		t.Fatalf("active tab before persisted load = %v, want default grid", model.activeTab)
+	}
+	if !model.loading {
+		t.Fatal("model stopped loading before persisted selector tab arrived")
+	}
+	if len(store.sets) != 0 {
+		t.Fatalf("persisted tab writes before load = %v, want none", store.sets)
+	}
+
+	updated, _ = model.Update(lateLoaded)
+	model = updated.(Model)
+	if model.activeTab != selectorTabTree {
+		t.Fatalf("active tab after persisted load = %v, want tree", model.activeTab)
 	}
 }
 

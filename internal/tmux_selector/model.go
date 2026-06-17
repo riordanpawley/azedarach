@@ -358,6 +358,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clearJumpMode()
 		return m, nil
 	case tea.KeyMsg:
+		if m.loading {
+			switch msg.String() {
+			case "ctrl+c", "q", "esc":
+				return m, tea.Quit
+			default:
+				return m, nil
+			}
+		}
 		if m.jumpMode != nil {
 			next, cmd := m.jumpMode.Update(msg)
 			if jump, ok := next.(*overlay.JumpMode); ok {
