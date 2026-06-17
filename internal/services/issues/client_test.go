@@ -582,6 +582,56 @@ func TestClient_GetManyMetadataWithAncestorContextRuntimeIsLean(t *testing.T) {
 	assert.Equal(t, rootID, taskByID[childID].ParentID.String())
 }
 
+func TestClient_GetManyMetadataWithRuntimeIncludesCachedGitProjection(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-metadata-runtime-git"
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Metadata runtime git projection",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInProgress,
+	})
+	require.NoError(t, err)
+
+	statusRaw, err := json.Marshal(git.GitStatus{
+		HasChanges:     true,
+		HasConflicts:   true,
+		Conflicted:     []string{"conflict.go"},
+		GitAdditions:   342,
+		GitDeletions:   21,
+		GitAheadCount:  1,
+		GitBehindCount: 10,
+	})
+	require.NoError(t, err)
+
+	db, err := sql.Open("sqlite", client.dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	updatedAt := time.Date(2026, time.June, 17, 12, 0, 0, 0, time.UTC)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at, git_status_json)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, projectID, taskID, "/tmp/proj-metadata-runtime-git-"+taskID, "riordan/"+taskID+"/task", updatedAt.Format(time.RFC3339Nano), string(statusRaw))
+	require.NoError(t, err)
+
+	tasks, err := client.GetManyMetadataWithRuntime(ctx, projectID, []string{taskID})
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+
+	got := tasks[0]
+	assert.True(t, got.HasWorktree)
+	assert.True(t, got.HasUncommittedChanges)
+	assert.True(t, got.HasConflicts)
+	assert.Equal(t, []string{"conflict.go"}, got.ConflictFiles)
+	assert.Equal(t, 342, got.GitAdditions)
+	assert.Equal(t, 21, got.GitDeletions)
+	assert.Equal(t, 1, got.GitAheadCount)
+	assert.Equal(t, 10, got.GitBehindCount)
+}
+
 func TestTaskRuntimeProjectionQueryFiltersRuntimeCTEsForRequestedIDs(t *testing.T) {
 	query, args := taskRuntimeProjectionQuery("proj-batch-context", true, " second ", "", "second", "third")
 

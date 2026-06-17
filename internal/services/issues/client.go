@@ -2395,6 +2395,7 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 			COALESCE(sp.updated_at, ''),
 			COALESCE(sp.tmux_attached_count, 0),
 			COALESCE(w.path, ''),
+			COALESCE(w.git_status_json, ''),
 			COALESCE(parent.depends_on_id, '')
 		FROM issues i
 		LEFT JOIN session_pick sp ON sp.issue_id = i.id
@@ -2438,6 +2439,7 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 			sessionUpdatedRaw string
 			tmuxAttachedCount int
 			worktreePath      string
+			gitStatusRaw      string
 			parentIDRaw       string
 		)
 		if err := rows.Scan(
@@ -2453,6 +2455,7 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 			&sessionUpdatedRaw,
 			&tmuxAttachedCount,
 			&worktreePath,
+			&gitStatusRaw,
 			&parentIDRaw,
 		); err != nil {
 			return nil, err
@@ -2478,6 +2481,7 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 		if worktreePath != "" {
 			task.HasWorktree = true
 		}
+		applyGitStatusProjection(&task, gitStatusRaw)
 		sessionStateRaw = strings.TrimSpace(sessionStateRaw)
 		if sessionStateRaw != "" && sessionStateRaw != "stopped" {
 			startedAt := parseOptionalTimestamp(sessionStartedRaw)
@@ -2601,24 +2605,7 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 			task.HasTmuxSession = true
 		}
 
-		if strings.TrimSpace(gitStatusRaw) != "" {
-			var status git.GitStatus
-			if err := json.Unmarshal([]byte(gitStatusRaw), &status); err == nil {
-				task.HasUncommittedChanges = status.HasChanges
-				task.HasConflicts = status.HasConflicts
-				task.ConflictFiles = append([]string(nil), status.Conflicted...)
-				task.GitAdditions = status.GitAdditions
-				task.GitDeletions = status.GitDeletions
-				task.GitAheadCount = status.GitAheadCount
-				task.GitBehindCount = status.GitBehindCount
-				if task.GitAdditions == 0 {
-					task.GitAdditions = len(status.Added) + len(status.Modified) + len(status.Staged)
-				}
-				if task.GitDeletions == 0 {
-					task.GitDeletions = len(status.Deleted)
-				}
-			}
-		}
+		applyGitStatusProjection(&task, gitStatusRaw)
 
 		tasks = append(tasks, task)
 		taskIDs = append(taskIDs, task.ID)
@@ -2634,6 +2621,29 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 		return nil, err
 	}
 	return tasks, nil
+}
+
+func applyGitStatusProjection(task *domain.Task, raw string) {
+	if task == nil || strings.TrimSpace(raw) == "" {
+		return
+	}
+	var status git.GitStatus
+	if err := json.Unmarshal([]byte(raw), &status); err != nil {
+		return
+	}
+	task.HasUncommittedChanges = status.HasChanges
+	task.HasConflicts = status.HasConflicts
+	task.ConflictFiles = append([]string(nil), status.Conflicted...)
+	task.GitAdditions = status.GitAdditions
+	task.GitDeletions = status.GitDeletions
+	task.GitAheadCount = status.GitAheadCount
+	task.GitBehindCount = status.GitBehindCount
+	if task.GitAdditions == 0 {
+		task.GitAdditions = len(status.Added) + len(status.Modified) + len(status.Staged)
+	}
+	if task.GitDeletions == 0 {
+		task.GitDeletions = len(status.Deleted)
+	}
 }
 
 func taskRuntimeProjectionQuery(projectID string, includeDetails bool, issueIDs ...string) (string, []any) {
