@@ -198,6 +198,8 @@ type Model struct {
 	defaultedToCurrent bool
 	selectorTabLoaded  bool
 	selectorTabUserSet bool
+	startedAt          time.Time
+	readyLogged        bool
 
 	searchMode  bool
 	searchQuery string
@@ -250,11 +252,12 @@ type selectorTabSavedMsg struct {
 
 func New(loader SnapshotLoader, opts ...Option) Model {
 	m := Model{
-		loader:  loader,
-		styles:  styles.New(),
-		width:   88,
-		height:  24,
-		loading: true,
+		loader:    loader,
+		styles:    styles.New(),
+		width:     88,
+		height:    24,
+		loading:   true,
+		startedAt: time.Now(),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -266,7 +269,38 @@ func New(loader SnapshotLoader, opts ...Option) Model {
 }
 
 func (m Model) Init() tea.Cmd {
+	slog.Default().Info("tmux selector model init",
+		"elapsed_ms", m.elapsedSinceStart().Milliseconds(),
+		"ui_state_store", m.uiStateStore != nil,
+	)
 	return m.loadCmd()
+}
+
+func (m Model) elapsedSinceStart() time.Duration {
+	if m.startedAt.IsZero() {
+		return 0
+	}
+	return time.Since(m.startedAt)
+}
+
+func (m *Model) logReadyToRender(trigger string) {
+	if m == nil || m.readyLogged || m.loading {
+		return
+	}
+	tab, ok := persistedValueForSelectorTab(m.activeTab)
+	if !ok {
+		tab = "unknown"
+	}
+	slog.Default().Info("tmux selector ready to render",
+		"elapsed_ms", m.elapsedSinceStart().Milliseconds(),
+		"trigger", trigger,
+		"session_count", len(m.snapshot.Entries),
+		"tree_task_count", len(m.snapshot.TreeTasks),
+		"active_tab", tab,
+		"selector_tab_loaded", m.selectorTabLoaded,
+		"enriching", m.snapshot.Enriching,
+	)
+	m.readyLogged = true
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -281,6 +315,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.snapshot = msg.Snapshot
 		m.normalizeSnapshot()
 		m.status = formatSnapshotStatus(m.snapshot, len(m.snapshot.Entries))
+		slog.Default().Info("tmux selector snapshot applied",
+			"elapsed_ms", m.elapsedSinceStart().Milliseconds(),
+			"session_count", len(m.snapshot.Entries),
+			"tree_task_count", len(m.snapshot.TreeTasks),
+			"loading", m.loading,
+			"selector_tab_loaded", m.selectorTabLoaded,
+			"enriching", m.snapshot.Enriching,
+		)
+		m.logReadyToRender("snapshot")
 		cmds := []tea.Cmd{}
 		if !m.selectorTabLoaded {
 			cmds = append(cmds, m.loadSelectorTabCmd())
@@ -345,6 +388,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.err == nil {
 			m.loading = false
 		}
+		m.logReadyToRender("selector_tab")
 		return m, nil
 	case selectorTabSavedMsg:
 		return m, nil

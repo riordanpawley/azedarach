@@ -38,6 +38,7 @@ const (
 	gitHookManagedBlockEnd     = "# <<< azedarach managed githook <<<"
 	tmuxSelectorBlockStart     = "# >>> azedarach managed tmux session selector >>>"
 	tmuxSelectorBlockEnd       = "# <<< azedarach managed tmux session selector <<<"
+	tmuxSelectorPopupStartEnv  = "AZEDARACH_TMUX_SELECTOR_POPUP_START_EPOCH"
 	primeEvidenceKey           = "AZEDARACH_PRIMER_KEY:azedarach-prime-v1"
 )
 
@@ -948,17 +949,20 @@ func buildTmuxSelectorPopupCommand(azCommand, projectDir string) string {
 	selectorCommand := strings.TrimSpace(azCommand) + " tmux selector"
 	return strings.Join([]string{
 		"set +e",
+		"popup_start_epoch=\"$(date -u +%s)\"",
 		"log_dir=\"${AZEDARACH_LOG_DIR:-$HOME/.azedarach/logs}\"",
 		"mkdir -p \"$log_dir\"",
 		"log=\"$log_dir/" + logging.TmuxSelectorLogFileName + "\"",
-		"printf 'time=%s level=info msg=\"az tmux selector popup start\" cwd=%s command=%s PATH=%s TMUX=%s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" " +
+		"printf 'time=%s level=info msg=\"az tmux selector popup start\" popup_start_epoch=%s cwd=%s command=%s PATH=%s TMUX=%s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$popup_start_epoch\" " +
 			shellSingleQuote(projectDir) + " " +
 			shellSingleQuote(selectorCommand) + " " +
 			"\"$PATH\" \"${TMUX:-}\" >>\"$log\"",
 		"cd " + shellSingleQuote(projectDir),
-		selectorCommand,
+		tmuxSelectorPopupStartEnv + "=\"$popup_start_epoch\" " + selectorCommand,
 		"status=$?",
-		"printf 'time=%s level=info msg=\"az tmux selector popup exit\" status=%s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$status\" >>\"$log\"",
+		"popup_exit_epoch=\"$(date -u +%s)\"",
+		"popup_elapsed_s=$((popup_exit_epoch - popup_start_epoch))",
+		"printf 'time=%s level=info msg=\"az tmux selector popup exit\" status=%s popup_exit_epoch=%s popup_elapsed_s=%s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$status\" \"$popup_exit_epoch\" \"$popup_elapsed_s\" >>\"$log\"",
 		"if [ \"$status\" -ne 0 ]; then printf '\\nAzedarach tmux selector failed (exit %s).\\nLog: %s\\nCommand: %s\\n\\nPress Enter to close.' \"$status\" \"$log\" " + shellSingleQuote(selectorCommand) + "; read -r _ </dev/tty 2>/dev/null || sleep 5; fi",
 		"exit \"$status\"",
 	}, "; ")

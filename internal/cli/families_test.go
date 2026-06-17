@@ -95,6 +95,7 @@ func TestTmuxInstallSelectorCommandWritesManagedBinding(t *testing.T) {
 		"bind-key S run-shell",
 		"display-popup -E",
 		"AZEDARACH_TMUX_CURRENT_SESSION=#{session_name}",
+		"AZEDARACH_TMUX_SELECTOR_POPUP_START_EPOCH",
 		"-T",
 		"tmux sessions",
 		"az-dev tmux selector",
@@ -143,11 +144,15 @@ func TestTmuxInstallSelectorCommandLogsPopupFailureDiagnostics(t *testing.T) {
 	command := buildTmuxSelectorPopupCommand("/missing/worktree/bin/az", projectDir)
 	for _, want := range []string{
 		"az tmux selector popup start",
+		"popup_start_epoch=%s",
 		"level=info",
 		"command=%s",
 		"'/missing/worktree/bin/az tmux selector'",
+		"AZEDARACH_TMUX_SELECTOR_POPUP_START_EPOCH=\"$popup_start_epoch\" /missing/worktree/bin/az tmux selector",
 		"PATH=%s",
 		"TMUX=%s",
+		"az tmux selector popup exit",
+		"popup_elapsed_s=%s",
 		"Azedarach tmux selector failed",
 		"Press Enter to close",
 	} {
@@ -159,6 +164,7 @@ func TestTmuxInstallSelectorCommandLogsPopupFailureDiagnostics(t *testing.T) {
 		"bind-key s run-shell",
 		"tmux display-popup -E",
 		"AZEDARACH_TMUX_CURRENT_SESSION=#{session_name}",
+		"AZEDARACH_TMUX_SELECTOR_POPUP_START_EPOCH",
 		"az-tmux-selector.log",
 		"/missing/worktree/bin/az tmux selector",
 	} {
