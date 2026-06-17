@@ -77,3 +77,24 @@ func TestSessionDisplayUnknownAgentActivity(t *testing.T) {
 		t.Fatalf("DisplayCode() = %q, want ?", got)
 	}
 }
+
+func TestSessionDisplayNoAgentActivity(t *testing.T) {
+	session := &Session{
+		State:          SessionBusy,
+		Activity:       "no-agent",
+		ActivitySource: "session",
+	}
+
+	if got := session.DisplayIcon(); got != SessionIdle.Icon() {
+		t.Fatalf("DisplayIcon() = %q, want idle icon", got)
+	}
+	if got := session.DisplayLabel(); got != "no-agent" {
+		t.Fatalf("DisplayLabel() = %q, want no-agent", got)
+	}
+	if got := session.DisplayCode(); got != "N" {
+		t.Fatalf("DisplayCode() = %q, want N", got)
+	}
+	if display, ok := session.DisplayState(); ok {
+		t.Fatalf("DisplayState() = %q/%v, want no derived lifecycle state", display, ok)
+	}
+}

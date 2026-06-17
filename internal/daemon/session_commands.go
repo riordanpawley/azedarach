@@ -79,6 +79,11 @@ type sessionHookActivity struct {
 	Paused int
 }
 
+type sessionDisplayActivity struct {
+	Activity string
+	Source   string
+}
+
 const (
 	sessionInvariantSessionStartConflict   daemonInvariantID = daemonInvariantSessionStartConflict
 	sessionInvariantSessionAttachTarget    daemonInvariantID = daemonInvariantSessionAttachTarget
@@ -185,6 +190,8 @@ func sessionProjectionAggregateByIssueKey(sessions []daemonstate.Session, naming
 			merged.ID = session.ID
 			merged.IssueID = session.IssueID
 			merged.UpdatedAt = session.UpdatedAt
+			merged.Activity = session.Activity
+			merged.ActivitySource = session.ActivitySource
 		}
 		if sessionProjectionStateRank(session.State) > sessionProjectionStateRank(merged.State) {
 			merged.State = session.State
@@ -199,6 +206,10 @@ func sessionProjectionAggregateByIssueKey(sessions []daemonstate.Session, naming
 			}
 		}
 		merged.TmuxAttachedCount += session.TmuxAttachedCount
+		if strings.TrimSpace(merged.Activity) == "" && strings.TrimSpace(session.Activity) != "" {
+			merged.Activity = session.Activity
+			merged.ActivitySource = session.ActivitySource
+		}
 		byIssueKey[key] = merged
 	}
 	return byIssueKey
@@ -711,13 +722,16 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			)
 		}
 	}
-	if err := d.applySessionLifecycleTransition(
+	initialActivity, initialActivitySource := initialSessionStartActivity(cmd.StartWork)
+	if err := d.applySessionLifecycleTransitionWithActivity(
 		ctx,
 		req,
 		cmd.ProjectID,
 		cmd.SessionID,
 		cmd.IssueID,
 		daemonhandlers.CommandSessionStart,
+		initialActivity,
+		initialActivitySource,
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session start transition: %v", err)), nil
 	}
@@ -1540,7 +1554,7 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Active Sessions (%d):\n\n", len(tmuxSessions))
-	activityByIssueKey := d.sessionHookActivityByIssueKey(ctx, cmd.ProjectID)
+	activityByIssueKey := d.sessionDisplayActivityByIssueKey(ctx, cmd.ProjectID)
 	b.WriteString("ISSUE ID\tSTATUS\tACTIVITY\tTITLE\n")
 	b.WriteString("-------\t------\t--------\t-----\n")
 	for _, name := range tmuxSessions {
@@ -1563,8 +1577,8 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 			}
 		}
 		activity := "unknown"
-		if hookActivity, ok := activityByIssueKey[sessionKey(issueIDRaw)]; ok && hookActivity.Total > 0 {
-			activity, _ = sessionActivityLabel(hookActivity)
+		if display, ok := activityByIssueKey[sessionKey(issueIDRaw)]; ok && display.Activity != "" {
+			activity = display.Activity
 		}
 		fmt.Fprintf(&b, "%s\t%s\t%s\t%s\n", issueIDRaw, status, activity, title)
 	}
@@ -1634,6 +1648,111 @@ func sessionActivityLabel(activity sessionHookActivity) (string, string) {
 		return "busy", "hooks"
 	}
 	return "idle", "hooks"
+}
+
+func initialSessionStartActivity(startWork bool) (string, string) {
+	if startWork {
+		return "busy", "session"
+	}
+	return "no-agent", "session"
+}
+
+func normalizeSessionActivity(activity string) string {
+	activity = strings.ToLower(strings.TrimSpace(activity))
+	switch activity {
+	case string(domain.SessionBusy),
+		string(domain.SessionIdle),
+		string(domain.SessionWaiting),
+		string(domain.SessionPaused),
+		string(domain.SessionDone),
+		string(domain.SessionError),
+		"unknown",
+		"no-agent",
+		"starting",
+		"working",
+		"ended":
+		return activity
+	default:
+		return ""
+	}
+}
+
+func normalizeSessionActivitySource(source, fallback string) string {
+	source = strings.ToLower(strings.TrimSpace(source))
+	if source != "" {
+		return source
+	}
+	return strings.ToLower(strings.TrimSpace(fallback))
+}
+
+func explicitSessionActivity(session daemonstate.Session) (sessionDisplayActivity, bool) {
+	if isAgentScopedSessionID(session.ID) {
+		return sessionDisplayActivity{}, false
+	}
+	state := daemonstate.NormalizeSessionState(session.State)
+	observed := daemonstate.NormalizeSessionState(session.ObservedState)
+	if strings.TrimSpace(string(observed)) == "" {
+		observed = state
+	}
+	if state == daemonstate.SessionStateStopped || observed == daemonstate.SessionStateStopped {
+		return sessionDisplayActivity{}, false
+	}
+	activity := normalizeSessionActivity(session.Activity)
+	if activity == "" {
+		return sessionDisplayActivity{}, false
+	}
+	return sessionDisplayActivity{
+		Activity: activity,
+		Source:   normalizeSessionActivitySource(session.ActivitySource, "session"),
+	}, true
+}
+
+func sessionDisplayActivityByIssueKeyFromSessions(sessions []daemonstate.Session, namingScope string) map[string]sessionDisplayActivity {
+	out := make(map[string]sessionDisplayActivity)
+	for key, session := range sessionProjectionAggregateByIssueKey(sessions, namingScope) {
+		display, ok := explicitSessionActivity(session)
+		if !ok {
+			continue
+		}
+		if key == "" {
+			continue
+		}
+		out[key] = display
+	}
+	for key, hookActivity := range sessionHookActivityByIssueKeyFromSessions(sessions, namingScope) {
+		activity, source := sessionActivityLabel(hookActivity)
+		if activity == "unknown" {
+			continue
+		}
+		out[key] = sessionDisplayActivity{Activity: activity, Source: source}
+	}
+	return out
+}
+
+func (d *Daemon) sessionDisplayActivityByIssueKey(ctx context.Context, projectID string) map[string]sessionDisplayActivity {
+	projectID = d.canonicalProjectID(projectID)
+	namingScope := d.sessionNamingScope(projectID)
+	sessions := []daemonstate.Session{}
+	if store := d.sessionRuntimeStateStoreIfConfigured(projectID); store != nil {
+		cachedSessions, err := store.ListSessionStates(ctx, projectID)
+		if err == nil {
+			sessions = cachedSessions
+		} else if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("load runtime session activity failed", "project_id", projectID, "error", err)
+		}
+	}
+	if len(sessions) == 0 && d.sessionStore != nil {
+		snapshot := d.sessionStore.ReadSnapshot(projectID)
+		sessions = make([]daemonstate.Session, 0, len(snapshot.Sessions))
+		for _, session := range snapshot.Sessions {
+			sessions = append(sessions, session)
+		}
+	}
+	return sessionDisplayActivityByIssueKeyFromSessions(sessions, namingScope)
+}
+
+func unknownActivityAdvice(issueID string) string {
+	return fmt.Sprintf("activity unknown: inspect hooks with az ai status --target=auto; run az ai install --target=auto only if hooks are missing, outdated, or not installed; use sparse pane capture only if status/watch looks stale, failed, or contradictory for %s", issueID)
 }
 
 func (d *Daemon) staleSessionRuntimeStatusOutput(ctx context.Context, projectID, issueID string) (string, bool) {
@@ -2176,11 +2295,11 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 	sessionByKey := sessionProjectionForTaskDisplayByIssueKey(snapshotByKey, projectionByKey)
 	activeIssueKeys := activeSessionIssueKeysFromProjection(projectionSessions, namingScope)
 	countsByKey := sessionProjectionCountsByIssueKey(projectionSessions, namingScope)
-	hookActivityByKey := sessionHookActivityByIssueKeyFromSessions(projectionSessions, namingScope)
+	activityByKey := sessionDisplayActivityByIssueKeyFromSessions(projectionSessions, namingScope)
 	if len(activeIssueKeys) == 0 {
 		activeIssueKeys = activeSessionIssueKeysFromProjection(snapshotSessions, namingScope)
 		countsByKey = sessionProjectionCountsByIssueKey(snapshotSessions, namingScope)
-		hookActivityByKey = sessionHookActivityByIssueKeyFromSessions(snapshotSessions, namingScope)
+		activityByKey = sessionDisplayActivityByIssueKeyFromSessions(snapshotSessions, namingScope)
 	}
 
 	for i := range tasks {
@@ -2210,7 +2329,12 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 				state = domain.SessionBusy
 			}
 		}
-		activity, activitySource := sessionActivityLabel(hookActivityByKey[taskKey])
+		activity := "unknown"
+		activitySource := "none"
+		if display := activityByKey[taskKey]; display.Activity != "" {
+			activity = display.Activity
+			activitySource = display.Source
+		}
 		tasks[i].Session = &domain.Session{
 			IssueID:           naming.IssueID(taskID),
 			State:             state,
@@ -2613,6 +2737,8 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 			IssueID:           issueID,
 			State:             daemonstate.SessionStateRunning,
 			ObservedState:     daemonstate.SessionStateRunning,
+			Activity:          "busy",
+			ActivitySource:    "runtime",
 			TmuxAttachedCount: info.AttachedCount,
 			StartedAt:         info.CreatedAt,
 			UpdatedAt:         time.Now().UTC(),
@@ -2620,6 +2746,10 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 		if existing, exists := existingByIssueKey[issueKey]; exists {
 			row.State = existing.State
 			row.ObservedState = daemonstate.SessionStateRunning
+			if activity := normalizeSessionActivity(existing.Activity); activity != "" {
+				row.Activity = activity
+				row.ActivitySource = normalizeSessionActivitySource(existing.ActivitySource, "runtime")
+			}
 			if (row.StartedAt == nil || row.StartedAt.IsZero()) && existing.StartedAt != nil && !existing.StartedAt.IsZero() {
 				started := existing.StartedAt.UTC()
 				row.StartedAt = &started
@@ -3166,7 +3296,7 @@ func buildStartWorkPrompt(issueID, issueType, title string, orchestratedWorker b
 		safeTitle,
 	)
 	if strings.EqualFold(safeIssueType, string(domain.TypeEpic)) {
-		return base + "\n\nRole: orchestrator\n- Use `az orchestrate status --root <issue-id>` for readiness snapshots including active worker activity (`busy|idle|unknown`).\n- Use `az orchestrate watch --root <issue-id> --since <seq> --jsonl` for continuous observe-only mailbox/runnable/activity updates; start it in another pane/session and leave it running while workers are active.\n- Do not use `--once` for orchestration monitoring; reserve it for diagnostic single polls.\n- Trust hook-backed `activity=busy|idle` for worker idleness checks. If activity is `unknown`, check hooks with `az ai status --target=auto` and install/update with `az ai install --target=auto`; use direct tmux pane capture only when watch/status look stale, failed, or contradictory, or when you need a sparse progress spot-check. Do not poll tmux panes on a fixed interval.\n- Start runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`, then immediately ensure the continuous watch is running.\n- Send running-worker nudges with `az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\"`; workers reporting their own status should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; bare `az mail send` is durable mailbox-only.\n- Treat blocked work as graph state from unresolved `blocks` dependencies or worker-blocked mailbox evidence, not as an issue status.\n- Treat `in_review` workers as ready for orchestrator validation; inspect evidence, run parent checks, then close accepted worker issues with `az issue close --id <issue-id>`.\n- Use `az orchestrate integrate --issue <issue-id>` for worker result inspection or repair guidance, not as the normal merge authority.\n- Use `az orchestrate close-session --issue <issue-id>` only for session cleanup repair when a worker must be stopped without closing the issue; daemon stop records stopped state before killing tmux so recovery cannot resurrect it.\n- Keep orchestration centralized in v1; do not auto-delegate sub-orchestrators.\n- Close only when `az orchestrate complete-check --root <issue-id>` passes."
+		return base + "\n\nRole: orchestrator\n- Use `az orchestrate status --root <issue-id>` for readiness snapshots including active worker activity (`busy|idle|no-agent|unknown`).\n- Use `az orchestrate watch --root <issue-id> --since <seq> --jsonl` for continuous observe-only mailbox/runnable/activity updates; start it in another pane/session and leave it running while workers are active.\n- Do not use `--once` for orchestration monitoring; reserve it for diagnostic single polls.\n- Trust hook-backed `activity=busy|idle` for worker idleness checks and treat `activity=no-agent` as an intentional session-only shell. If activity is `unknown`, inspect hooks with `az ai status --target=auto`; run `az ai install --target=auto` only when hooks are missing, outdated, or not installed. Use direct tmux pane capture only when watch/status look stale, failed, or contradictory, or when you need a sparse progress spot-check. Do not poll tmux panes on a fixed interval.\n- Start runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`, then immediately ensure the continuous watch is running.\n- Send running-worker nudges with `az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\"`; workers reporting their own status should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; bare `az mail send` is durable mailbox-only.\n- Treat blocked work as graph state from unresolved `blocks` dependencies or worker-blocked mailbox evidence, not as an issue status.\n- Treat `in_review` workers as ready for orchestrator validation; inspect evidence, run parent checks, then close accepted worker issues with `az issue close --id <issue-id>`.\n- Use `az orchestrate integrate --issue <issue-id>` for worker result inspection or repair guidance, not as the normal merge authority.\n- Use `az orchestrate close-session --issue <issue-id>` only for session cleanup repair when a worker must be stopped without closing the issue; daemon stop records stopped state before killing tmux so recovery cannot resurrect it.\n- Keep orchestration centralized in v1; do not auto-delegate sub-orchestrators.\n- Close only when `az orchestrate complete-check --root <issue-id>` passes."
 	}
 	if !orchestratedWorker {
 		return base + "\n\nRole: contributor\n- Focus only on this issue scope unless the user explicitly expands it.\n- Keep issue status/notes current with evidence.\n- Use `in_progress` while actively working, `in_review` when complete and awaiting review/integration, and `closed` only after acceptance criteria and validation are done.\n- Represent blocked work with dependency edges and notes, not by using `in_review`."

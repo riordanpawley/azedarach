@@ -2695,7 +2695,7 @@ func daemonTaskGraphActiveSessions(activeIDs []string, byID map[naming.IssueID]d
 			IssueID:        issueID,
 			Activity:       "unknown",
 			ActivitySource: "none",
-			Advice:         fmt.Sprintf("activity unknown: check hooks with az ai status --target=auto; install/update with az ai install --target=auto; use sparse pane capture only if status/watch looks stale, failed, or contradictory for %s", issueID),
+			Advice:         unknownActivityAdvice(issueID),
 		}
 		if ok && task.Session != nil {
 			active.State = string(task.Session.State)

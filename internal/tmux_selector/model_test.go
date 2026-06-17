@@ -203,6 +203,7 @@ func TestModelTreeRendersHookActivityInsteadOfLifecycleBusy(t *testing.T) {
 		{name: "hook idle", activity: "idle", want: "az-cmd [idle] False busy flag", reject: "az-cmd [busy] False busy flag"},
 		{name: "agent working", activity: "working", want: "az-cmd [working] False busy flag", reject: "az-cmd [waiting] False busy flag"},
 		{name: "agent waiting", activity: "waiting", want: "az-cmd [waiting] False busy flag", reject: "az-cmd [busy] False busy flag"},
+		{name: "session no agent", activity: "no-agent", want: "az-cmd [no-agent] False busy flag", reject: "az-cmd [unknown] False busy flag"},
 	}
 
 	for _, tt := range tests {

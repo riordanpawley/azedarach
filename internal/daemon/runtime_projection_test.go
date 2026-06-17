@@ -93,6 +93,28 @@ func TestBuildRuntimeProjectionUsesObservedSessionStateWhenPresent(t *testing.T)
 	}
 }
 
+func TestBuildRuntimeProjectionCarriesSessionActivity(t *testing.T) {
+	updatedAt := time.Date(2026, time.April, 1, 11, 10, 0, 0, time.UTC)
+	projection := buildRuntimeProjection("proj-runtime", &daemonstate.Session{
+		ID:             "sess-7",
+		IssueID:        "az-7",
+		State:          daemonstate.SessionStateRunning,
+		Activity:       "no-agent",
+		ActivitySource: "session",
+		UpdatedAt:      updatedAt,
+	}, nil)
+
+	if projection.Agent.Status != "no-agent" || projection.Agent.Source != "session" {
+		t.Fatalf("agent projection = %+v, want no-agent/session", projection.Agent)
+	}
+	if projection.Agent.SessionID != "sess-7" {
+		t.Fatalf("agent session id = %q, want sess-7", projection.Agent.SessionID)
+	}
+	if projection.Agent.UpdatedAt == nil || !projection.Agent.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("agent updated_at = %v, want %v", projection.Agent.UpdatedAt, updatedAt)
+	}
+}
+
 func TestBuildRuntimeProjectionKeepsPausedDesiredStateOverObservedRunning(t *testing.T) {
 	updatedAt := time.Date(2026, time.April, 1, 11, 0, 0, 0, time.UTC)
 	projection := buildRuntimeProjection("proj-runtime", &daemonstate.Session{

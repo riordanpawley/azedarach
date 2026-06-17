@@ -275,6 +275,8 @@ func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
 			session_id TEXT NOT NULL,
 			issue_id TEXT NOT NULL,
 			state TEXT NOT NULL,
+			activity TEXT,
+			activity_source TEXT,
 			started_at TEXT,
 			updated_at TEXT NOT NULL,
 			PRIMARY KEY (project_id, session_id)
@@ -303,6 +305,12 @@ func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
 		return fmt.Errorf("ensure runtime projection schema: %w", err)
 	}
 	if err := ensureSQLiteColumn(db, "daemon_session_projections", "observed_state", "TEXT"); err != nil {
+		return fmt.Errorf("ensure runtime projection schema: %w", err)
+	}
+	if err := ensureSQLiteColumn(db, "daemon_session_projections", "activity", "TEXT"); err != nil {
+		return fmt.Errorf("ensure runtime projection schema: %w", err)
+	}
+	if err := ensureSQLiteColumn(db, "daemon_session_projections", "activity_source", "TEXT"); err != nil {
 		return fmt.Errorf("ensure runtime projection schema: %w", err)
 	}
 	return nil

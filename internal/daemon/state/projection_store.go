@@ -156,10 +156,16 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 	}
 	session.State = NormalizeSessionState(session.State)
 	session.ObservedState = NormalizeSessionState(session.ObservedState)
+	session.Activity = strings.ToLower(strings.TrimSpace(session.Activity))
+	session.ActivitySource = strings.ToLower(strings.TrimSpace(session.ActivitySource))
 	existing, found, err := s.GetSessionState(ctx, projectID, session.ID)
 	if err == nil && found {
 		if strings.TrimSpace(string(session.ObservedState)) == "" && strings.TrimSpace(string(existing.ObservedState)) != "" {
 			session.ObservedState = existing.ObservedState
+		}
+		if session.Activity == "" && session.State != SessionStateStopped && session.ObservedState != SessionStateStopped && strings.TrimSpace(existing.Activity) != "" {
+			session.Activity = strings.TrimSpace(existing.Activity)
+			session.ActivitySource = strings.TrimSpace(existing.ActivitySource)
 		}
 		if session.StartedAt == nil || session.StartedAt.IsZero() {
 			if existing.StartedAt != nil && !existing.StartedAt.IsZero() {
@@ -174,6 +180,7 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 	if strings.TrimSpace(string(session.ObservedState)) == "" {
 		session.ObservedState = session.State
 	}
+	normalizeSessionProjectionActivity(&session)
 	if session.StartedAt == nil || session.StartedAt.IsZero() {
 		if session.State != SessionStateStopped {
 			started := session.UpdatedAt.UTC()
@@ -188,14 +195,18 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 			issue_id,
 			state,
 			observed_state,
+			activity,
+			activity_source,
 			tmux_attached_count,
 			started_at,
 			updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(project_id, session_id) DO UPDATE SET
 			issue_id = excluded.issue_id,
 			state = excluded.state,
 			observed_state = excluded.observed_state,
+			activity = excluded.activity,
+			activity_source = excluded.activity_source,
 			tmux_attached_count = excluded.tmux_attached_count,
 			started_at = excluded.started_at,
 			updated_at = excluded.updated_at
@@ -205,6 +216,8 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 		session.IssueID,
 		string(session.State),
 		string(session.ObservedState),
+		session.Activity,
+		session.ActivitySource,
 		session.TmuxAttachedCount,
 		startedAt,
 		session.UpdatedAt.UTC().Format(time.RFC3339Nano),
@@ -278,6 +291,7 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 		if strings.TrimSpace(string(session.ObservedState)) == "" {
 			session.ObservedState = session.State
 		}
+		normalizeSessionProjectionActivity(&session)
 		startedAt := nullableRuntimeStateTime(session.StartedAt)
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO `+sessionStateTable+` (
@@ -286,14 +300,18 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 				issue_id,
 				state,
 				observed_state,
+				activity,
+				activity_source,
 				tmux_attached_count,
 				started_at,
 				updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(project_id, session_id) DO UPDATE SET
 				issue_id = excluded.issue_id,
 				state = excluded.state,
 				observed_state = excluded.observed_state,
+				activity = excluded.activity,
+				activity_source = excluded.activity_source,
 				tmux_attached_count = excluded.tmux_attached_count,
 				started_at = excluded.started_at,
 				updated_at = excluded.updated_at
@@ -303,6 +321,8 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 			session.IssueID,
 			string(session.State),
 			string(session.ObservedState),
+			session.Activity,
+			session.ActivitySource,
 			session.TmuxAttachedCount,
 			startedAt,
 			updatedAt.UTC().Format(time.RFC3339Nano),
@@ -339,6 +359,24 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 	return nil
 }
 
+func normalizeSessionProjectionActivity(session *Session) {
+	if session == nil {
+		return
+	}
+	session.Activity = strings.ToLower(strings.TrimSpace(session.Activity))
+	session.ActivitySource = strings.ToLower(strings.TrimSpace(session.ActivitySource))
+	if NormalizeSessionState(session.State) == SessionStateStopped || NormalizeSessionState(session.ObservedState) == SessionStateStopped {
+		session.Activity = ""
+		session.ActivitySource = ""
+		return
+	}
+	if session.Activity == "" {
+		session.ActivitySource = ""
+	} else if session.ActivitySource == "" {
+		session.ActivitySource = "session"
+	}
+}
+
 func (s *RuntimeStateStore) ListSessionStates(ctx context.Context, projectID string) ([]Session, error) {
 	db, err := s.dbHandle()
 	if err != nil {
@@ -351,6 +389,8 @@ func (s *RuntimeStateStore) ListSessionStates(ctx context.Context, projectID str
 			issue_id,
 			state,
 			COALESCE(observed_state, state),
+			COALESCE(activity, ''),
+			COALESCE(activity_source, ''),
 			COALESCE(tmux_attached_count, 0),
 			COALESCE(started_at, ''),
 			updated_at
@@ -370,11 +410,13 @@ func (s *RuntimeStateStore) ListSessionStates(ctx context.Context, projectID str
 			issueID       string
 			stateRaw      string
 			observedRaw   string
+			activityRaw   string
+			sourceRaw     string
 			attachedCount int
 			startedAt     string
 			updatedAt     string
 		)
-		if err := rows.Scan(&sessionID, &issueID, &stateRaw, &observedRaw, &attachedCount, &startedAt, &updatedAt); err != nil {
+		if err := rows.Scan(&sessionID, &issueID, &stateRaw, &observedRaw, &activityRaw, &sourceRaw, &attachedCount, &startedAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scan session state row: %w", err)
 		}
 		parsedStartedAt, err := parseOptionalRuntimeStateTime(startedAt)
@@ -390,6 +432,8 @@ func (s *RuntimeStateStore) ListSessionStates(ctx context.Context, projectID str
 			IssueID:           issueID,
 			State:             NormalizeSessionState(SessionState(stateRaw)),
 			ObservedState:     NormalizeSessionState(SessionState(observedRaw)),
+			Activity:          strings.ToLower(strings.TrimSpace(activityRaw)),
+			ActivitySource:    strings.ToLower(strings.TrimSpace(sourceRaw)),
 			TmuxAttachedCount: attachedCount,
 			StartedAt:         parsedStartedAt,
 			UpdatedAt:         parsedUpdatedAt,
@@ -418,6 +462,8 @@ func (s *RuntimeStateStore) GetSessionState(ctx context.Context, projectID, sess
 			issue_id,
 			state,
 			COALESCE(observed_state, state),
+			COALESCE(activity, ''),
+			COALESCE(activity_source, ''),
 			COALESCE(tmux_attached_count, 0),
 			COALESCE(started_at, ''),
 			updated_at
@@ -429,11 +475,13 @@ func (s *RuntimeStateStore) GetSessionState(ctx context.Context, projectID, sess
 		issueID       string
 		stateRaw      string
 		observedRaw   string
+		activityRaw   string
+		sourceRaw     string
 		attachedCount int
 		startedAt     string
 		updatedAt     string
 	)
-	if err := row.Scan(&rowSessionID, &issueID, &stateRaw, &observedRaw, &attachedCount, &startedAt, &updatedAt); err != nil {
+	if err := row.Scan(&rowSessionID, &issueID, &stateRaw, &observedRaw, &activityRaw, &sourceRaw, &attachedCount, &startedAt, &updatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return Session{}, false, nil
 		}
@@ -452,6 +500,8 @@ func (s *RuntimeStateStore) GetSessionState(ctx context.Context, projectID, sess
 		IssueID:           issueID,
 		State:             NormalizeSessionState(SessionState(stateRaw)),
 		ObservedState:     NormalizeSessionState(SessionState(observedRaw)),
+		Activity:          strings.ToLower(strings.TrimSpace(activityRaw)),
+		ActivitySource:    strings.ToLower(strings.TrimSpace(sourceRaw)),
 		TmuxAttachedCount: attachedCount,
 		StartedAt:         parsedStartedAt,
 		UpdatedAt:         parsedUpdatedAt,
@@ -475,6 +525,8 @@ func (s *RuntimeStateStore) GetSessionStateByIssueID(ctx context.Context, projec
 			issue_id,
 			state,
 			COALESCE(observed_state, state),
+			COALESCE(activity, ''),
+			COALESCE(activity_source, ''),
 			COALESCE(tmux_attached_count, 0),
 			COALESCE(started_at, ''),
 			updated_at
@@ -488,11 +540,13 @@ func (s *RuntimeStateStore) GetSessionStateByIssueID(ctx context.Context, projec
 		rowIssue      string
 		stateRaw      string
 		observedRaw   string
+		activityRaw   string
+		sourceRaw     string
 		attachedCount int
 		startedAt     string
 		updatedAt     string
 	)
-	if err := row.Scan(&sessionID, &rowIssue, &stateRaw, &observedRaw, &attachedCount, &startedAt, &updatedAt); err != nil {
+	if err := row.Scan(&sessionID, &rowIssue, &stateRaw, &observedRaw, &activityRaw, &sourceRaw, &attachedCount, &startedAt, &updatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return Session{}, false, nil
 		}
@@ -511,6 +565,8 @@ func (s *RuntimeStateStore) GetSessionStateByIssueID(ctx context.Context, projec
 		IssueID:           rowIssue,
 		State:             NormalizeSessionState(SessionState(stateRaw)),
 		ObservedState:     NormalizeSessionState(SessionState(observedRaw)),
+		Activity:          strings.ToLower(strings.TrimSpace(activityRaw)),
+		ActivitySource:    strings.ToLower(strings.TrimSpace(sourceRaw)),
 		TmuxAttachedCount: attachedCount,
 		StartedAt:         parsedStartedAt,
 		UpdatedAt:         parsedUpdatedAt,
@@ -1003,6 +1059,8 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 			issue_id TEXT NOT NULL,
 			state TEXT NOT NULL,
 			observed_state TEXT,
+			activity TEXT,
+			activity_source TEXT,
 			tmux_attached_count INTEGER NOT NULL DEFAULT 0,
 			started_at TEXT,
 			updated_at TEXT NOT NULL,
@@ -1032,6 +1090,12 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if err := ensureColumn(ctx, db, sessionStateTable, "observed_state", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, sessionStateTable, "activity", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, sessionStateTable, "activity_source", "TEXT"); err != nil {
 		return err
 	}
 	if err := ensureColumn(ctx, db, sessionStateTable, "tmux_attached_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {

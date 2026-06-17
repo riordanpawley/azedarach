@@ -75,6 +75,7 @@ type RuntimeSessionProjection struct {
 // RuntimeAgentProjection captures actual agent activity when a separate agent signal is available.
 type RuntimeAgentProjection struct {
 	Status    string           `json:"status,omitempty" msgpack:"status,omitempty"`
+	Source    string           `json:"source,omitempty" msgpack:"source,omitempty"`
 	SessionID naming.SessionID `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
 	UpdatedAt *time.Time       `json:"updated_at,omitempty" msgpack:"updated_at,omitempty"`
 }

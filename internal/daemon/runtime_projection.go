@@ -31,6 +31,16 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 			UpdatedAt:         timePtr(updatedAt),
 			Worktree:          strings.TrimSpace(projection.Worktree.Path),
 		}
+		if hasSession {
+			if activity := normalizeSessionActivity(session.Activity); activity != "" {
+				projection.Agent = protocol.RuntimeAgentProjection{
+					Status:    activity,
+					Source:    normalizeSessionActivitySource(session.ActivitySource, "session"),
+					SessionID: projection.Session.SessionID,
+					UpdatedAt: timePtr(updatedAt),
+				}
+			}
+		}
 	}
 
 	if worktree != nil {

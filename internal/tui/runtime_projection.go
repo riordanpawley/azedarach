@@ -252,7 +252,11 @@ func applyProjectionAgentActivity(session *domain.Session, agent protocol.Runtim
 		return
 	}
 	session.Activity = status
-	session.ActivitySource = "agent"
+	source := strings.ToLower(strings.TrimSpace(agent.Source))
+	if source == "" {
+		source = "agent"
+	}
+	session.ActivitySource = source
 }
 
 func (m *Model) applyRuntimeProjectionFromUpdateEvent(body protocol.ProjectionUpdateEventBody) bool {

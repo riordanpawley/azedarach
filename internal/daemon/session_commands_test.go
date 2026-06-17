@@ -491,6 +491,8 @@ func TestSessionStartRecoversFromPartialWorktreeCreate(t *testing.T) {
 	}
 	tmuxRunner := newSessionStartTmuxRunner()
 	store := daemonstate.NewStore()
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 
 	d := &Daemon{
 		cfg: Config{
@@ -505,6 +507,9 @@ func TestSessionStartRecoversFromPartialWorktreeCreate(t *testing.T) {
 		session:      daemonhandlers.NewSessionHandler(store),
 		sessionStore: store,
 		revision:     map[string]uint64{},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
 		worktreeManagersByRoot: map[string]*git.WorktreeManager{
 			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
 		},
@@ -885,6 +890,8 @@ func TestSessionStartWithStartWorkFalseSkipsLaunchCommand(t *testing.T) {
 	}
 	tmuxRunner := newSessionStartTmuxRunner()
 	store := daemonstate.NewStore()
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 
 	d := &Daemon{
 		cfg: Config{
@@ -899,6 +906,9 @@ func TestSessionStartWithStartWorkFalseSkipsLaunchCommand(t *testing.T) {
 		session:      daemonhandlers.NewSessionHandler(store),
 		sessionStore: store,
 		revision:     map[string]uint64{},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
 		worktreeManagersByRoot: map[string]*git.WorktreeManager{
 			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
 		},
@@ -941,6 +951,106 @@ func TestSessionStartWithStartWorkFalseSkipsLaunchCommand(t *testing.T) {
 	}
 	if !strings.Contains(payload.Output, "Skipping AI launch (tmux session only)") {
 		t.Fatalf("output = %q, want tmux-only launch line", payload.Output)
+	}
+	sessionID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
+	session, found, err := runtimeStateStore.GetSessionState(ctx, projectID, sessionID)
+	if err != nil {
+		t.Fatalf("GetSessionState: %v", err)
+	}
+	if !found {
+		t.Fatalf("missing runtime session projection %q", sessionID)
+	}
+	if session.Activity != "no-agent" || session.ActivitySource != "session" {
+		t.Fatalf("session activity = %s/%s, want no-agent/session", session.Activity, session.ActivitySource)
+	}
+}
+
+func TestSessionStartDefaultsAgentActivityToBusy(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj-agent-start"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Start AI worker",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	branch := "testuser/" + issueID + "/start-ai-worker"
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
+	worktreeRunner := &recoveringWorktreeRunner{
+		worktreePath: worktreePath,
+		branchName:   branch,
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			Logger:       slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-ai-worker",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.start",
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+		Body: marshalJSON(map[string]any{
+			"project_id": projectID,
+			"session_id": issueID,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("session start response not OK: %+v", resp)
+	}
+	if tmuxRunner.sendKeysCalls == 0 {
+		t.Fatal("send-keys calls = 0, want AI launch")
+	}
+
+	sessionID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
+	session, found, err := runtimeStateStore.GetSessionState(ctx, projectID, sessionID)
+	if err != nil {
+		t.Fatalf("GetSessionState: %v", err)
+	}
+	if !found {
+		t.Fatalf("missing runtime session projection %q", sessionID)
+	}
+	if session.Activity != "busy" || session.ActivitySource != "session" {
+		t.Fatalf("session activity = %s/%s, want busy/session", session.Activity, session.ActivitySource)
 	}
 }
 
@@ -3987,6 +4097,82 @@ func TestSessionStatusReportsUnknownActivityWithoutHookRows(t *testing.T) {
 	}
 }
 
+func TestSessionStatusReportsNoAgentActivity(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Shell only session",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	sessionID := naming.CanonicalSessionID(repoDir, issueID)
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:             sessionID,
+		IssueID:        issueID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "no-agent",
+		ActivitySource: "session",
+		UpdatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed no-agent session projection: %v", err)
+	}
+
+	daemon := &Daemon{
+		cfg:          Config{RepoDir: repoDir, Logger: slog.Default()},
+		tmux:         tmux.NewClient(&testTmuxRunner{sessions: map[string]bool{sessionID: true}}, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(daemonstate.NewStore()),
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+	}
+
+	resp, err := daemon.handleSessionStatus(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-status-no-agent-activity",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.status",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            marshalJSON(map[string]string{"project_id": projectID}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStatus returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("session status response not OK: %+v", resp.Error)
+	}
+	var payload struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
+		t.Fatalf("unmarshal status response: %v", err)
+	}
+	if !strings.Contains(payload.Output, issueID+"\tin_progress\tno-agent\tShell only session") {
+		t.Fatalf("status output = %q, want no-agent activity", payload.Output)
+	}
+}
+
 func TestSessionStatusReportsStaleRuntimeForTargetIssue(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -4494,7 +4680,10 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "Trust hook-backed `activity=busy|idle` for worker idleness checks") {
 		t.Fatalf("prompt = %q, want bounded tmux observation guidance", prompt)
 	}
-	if !strings.Contains(prompt, "If activity is `unknown`, check hooks with `az ai status --target=auto` and install/update with `az ai install --target=auto`") {
+	if !strings.Contains(prompt, "treat `activity=no-agent` as an intentional session-only shell") {
+		t.Fatalf("prompt = %q, want no-agent session-only guidance", prompt)
+	}
+	if !strings.Contains(prompt, "If activity is `unknown`, inspect hooks with `az ai status --target=auto`; run `az ai install --target=auto` only when hooks are missing, outdated, or not installed") {
 		t.Fatalf("prompt = %q, want hook status/install fallback guidance", prompt)
 	}
 	if !strings.Contains(prompt, "Do not poll tmux panes on a fixed interval") {
@@ -5213,6 +5402,168 @@ func TestEnrichTasksWithSessionStateFallsBackToProjectionCache(t *testing.T) {
 	}
 	if enriched[0].Session.Activity != "unknown" || enriched[0].Session.ActivitySource != "none" {
 		t.Fatalf("activity = %s/%s, want unknown/none", enriched[0].Session.Activity, enriched[0].Session.ActivitySource)
+	}
+}
+
+func TestEnrichTasksWithSessionStateReportsNoAgentActivity(t *testing.T) {
+	const (
+		projectID = "proj-no-agent"
+		issueID   = "bna"
+	)
+
+	store := daemonstate.NewStore()
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	now := time.Date(2026, time.April, 1, 10, 30, 0, 0, time.UTC)
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:             sessionID,
+		IssueID:        issueID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "no-agent",
+		ActivitySource: "session",
+		StartedAt:      &now,
+		UpdatedAt:      now,
+	}); err != nil {
+		t.Fatalf("seed no-agent projection session: %v", err)
+	}
+
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	tasks := []domain.Task{{ID: issueID, Title: "shell only", Type: domain.TypeTask}}
+	enriched := d.enrichTasksWithSessionState(context.Background(), projectID, tasks)
+	if len(enriched) != 1 || enriched[0].Session == nil {
+		t.Fatalf("missing session projection: %+v", enriched)
+	}
+	if enriched[0].Session.Activity != "no-agent" || enriched[0].Session.ActivitySource != "session" {
+		t.Fatalf("activity = %s/%s, want no-agent/session", enriched[0].Session.Activity, enriched[0].Session.ActivitySource)
+	}
+}
+
+func TestSessionDisplayActivityUsesLatestParentSessionActivity(t *testing.T) {
+	const (
+		projectID = "proj-parent-activity"
+		issueID   = "bpa"
+	)
+
+	now := time.Date(2026, time.April, 1, 10, 45, 0, 0, time.UTC)
+	sessions := []daemonstate.Session{
+		{
+			ID:             naming.CanonicalSessionID(projectID, issueID) + "-older",
+			IssueID:        issueID,
+			State:          daemonstate.SessionStateRunning,
+			ObservedState:  daemonstate.SessionStateRunning,
+			Activity:       "busy",
+			ActivitySource: "runtime",
+			UpdatedAt:      now,
+		},
+		{
+			ID:             naming.CanonicalSessionID(projectID, issueID),
+			IssueID:        issueID,
+			State:          daemonstate.SessionStateRunning,
+			ObservedState:  daemonstate.SessionStateRunning,
+			Activity:       "no-agent",
+			ActivitySource: "session",
+			UpdatedAt:      now.Add(time.Minute),
+		},
+	}
+
+	activityByKey := sessionDisplayActivityByIssueKeyFromSessions(sessions, projectID)
+	display, found := activityByKey[sessionKey(issueID)]
+	if !found {
+		t.Fatal("expected session activity")
+	}
+	if display.Activity != "no-agent" || display.Source != "session" {
+		t.Fatalf("activity = %s/%s, want no-agent/session", display.Activity, display.Source)
+	}
+}
+
+func TestPersistTmuxSessionRuntimeStateDefaultsRecoveredSessionActivityBusy(t *testing.T) {
+	const (
+		projectID = "proj-recovered-agent"
+		issueID   = "brc"
+	)
+
+	store := daemonstate.NewStore()
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	if err := d.persistTmuxSessionRuntimeState(context.Background(), projectID, []tmux.SessionInfo{{Name: sessionID}}); err != nil {
+		t.Fatalf("persist tmux session runtime state: %v", err)
+	}
+
+	tasks := []domain.Task{{ID: issueID, Title: "recovered worker", Type: domain.TypeTask}}
+	enriched := d.enrichTasksWithSessionState(context.Background(), projectID, tasks)
+	if len(enriched) != 1 || enriched[0].Session == nil {
+		t.Fatalf("missing recovered session projection: %+v", enriched)
+	}
+	if enriched[0].Session.Activity != "busy" || enriched[0].Session.ActivitySource != "runtime" {
+		t.Fatalf("activity = %s/%s, want busy/runtime", enriched[0].Session.Activity, enriched[0].Session.ActivitySource)
+	}
+}
+
+func TestPersistTmuxSessionRuntimeStatePreservesNoAgentActivity(t *testing.T) {
+	const (
+		projectID = "proj-reconcile-no-agent"
+		issueID   = "bnr"
+	)
+
+	store := daemonstate.NewStore()
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	now := time.Date(2026, time.April, 1, 10, 45, 0, 0, time.UTC)
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:             sessionID,
+		IssueID:        issueID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "no-agent",
+		ActivitySource: "session",
+		StartedAt:      &now,
+		UpdatedAt:      now,
+	}); err != nil {
+		t.Fatalf("seed no-agent projection session: %v", err)
+	}
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	if err := d.persistTmuxSessionRuntimeState(context.Background(), projectID, []tmux.SessionInfo{{Name: sessionID}}); err != nil {
+		t.Fatalf("persist tmux session runtime state: %v", err)
+	}
+
+	session, found, err := runtimeStateStore.GetSessionState(context.Background(), projectID, sessionID)
+	if err != nil {
+		t.Fatalf("GetSessionState: %v", err)
+	}
+	if !found {
+		t.Fatalf("missing session projection %q", sessionID)
+	}
+	if session.Activity != "no-agent" || session.ActivitySource != "session" {
+		t.Fatalf("activity = %s/%s, want no-agent/session", session.Activity, session.ActivitySource)
 	}
 }
 

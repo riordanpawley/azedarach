@@ -160,6 +160,7 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 	root := naming.IssueID("az-1")
 	busy := naming.IssueID("az-2")
 	unknown := naming.IssueID("az-3")
+	noAgent := naming.IssueID("az-4")
 	deps := &Dependencies{
 		RepoDir:   "/repo",
 		ProjectID: protocol.DefaultProjectID,
@@ -170,10 +171,11 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
 						RootIssueID: root.String(),
 						Blocked:     map[string]string{},
-						Active:      []string{busy.String(), unknown.String()},
+						Active:      []string{busy.String(), unknown.String(), noAgent.String()},
 						ActiveSessions: []daemonclient.TaskActiveSession{
 							{IssueID: busy.String(), Activity: "busy", ActivitySource: "hooks", State: string(domain.SessionBusy), TmuxAttachedCount: 1},
-							{IssueID: unknown.String(), Activity: "unknown", ActivitySource: "none", State: string(domain.SessionBusy), TmuxAttachedCount: 1, Advice: "activity unknown: check hooks with az ai status --target=auto; install/update with az ai install --target=auto; use sparse pane capture only if status/watch looks stale, failed, or contradictory for az-3"},
+							{IssueID: unknown.String(), Activity: "unknown", ActivitySource: "none", State: string(domain.SessionBusy), TmuxAttachedCount: 1, Advice: "activity unknown: inspect hooks with az ai status --target=auto; run az ai install --target=auto only if hooks are missing, outdated, or not installed; use sparse pane capture only if status/watch looks stale, failed, or contradictory for az-3"},
+							{IssueID: noAgent.String(), Activity: "no-agent", ActivitySource: "session", State: string(domain.SessionBusy), TmuxAttachedCount: 1},
 						},
 					}), nil
 				case daemonclient.CommandTaskList:
@@ -201,8 +203,8 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, output)
 	}
-	if len(result.ActiveSessions) != 2 {
-		t.Fatalf("active_sessions = %+v, want two entries", result.ActiveSessions)
+	if len(result.ActiveSessions) != 3 {
+		t.Fatalf("active_sessions = %+v, want three entries", result.ActiveSessions)
 	}
 	byID := map[string]orchestrateActiveSession{}
 	for _, active := range result.ActiveSessions {
@@ -213,6 +215,9 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 	}
 	if byID[unknown.String()].Activity != "unknown" || !strings.Contains(byID[unknown.String()].Advice, "az ai status --target=auto") || !strings.Contains(byID[unknown.String()].Advice, "az ai install --target=auto") {
 		t.Fatalf("unknown active session = %+v", byID[unknown.String()])
+	}
+	if byID[noAgent.String()].Activity != "no-agent" || byID[noAgent.String()].ActivitySource != "session" || byID[noAgent.String()].Advice != "" {
+		t.Fatalf("no-agent active session = %+v", byID[noAgent.String()])
 	}
 }
 

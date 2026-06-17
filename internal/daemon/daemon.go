@@ -810,6 +810,19 @@ func (d *Daemon) applySessionLifecycleTransition(
 	issueID string,
 	command string,
 ) error {
+	return d.applySessionLifecycleTransitionWithActivity(ctx, req, projectID, sessionID, issueID, command, "", "")
+}
+
+func (d *Daemon) applySessionLifecycleTransitionWithActivity(
+	ctx context.Context,
+	req protocol.RequestEnvelope,
+	projectID string,
+	sessionID string,
+	issueID string,
+	command string,
+	activity string,
+	activitySource string,
+) error {
 	if d.sessionStore == nil {
 		return errors.New("session store unavailable")
 	}
@@ -838,6 +851,10 @@ func (d *Daemon) applySessionLifecycleTransition(
 			if strings.TrimSpace(string(observed.ObservedState)) != "" {
 				session.ObservedState = observed.ObservedState
 			}
+			if strings.TrimSpace(session.Activity) == "" && strings.TrimSpace(observed.Activity) != "" {
+				session.Activity = strings.TrimSpace(observed.Activity)
+				session.ActivitySource = strings.TrimSpace(observed.ActivitySource)
+			}
 			if observed.StartedAt != nil && !observed.StartedAt.IsZero() {
 				started := observed.StartedAt.UTC()
 				session.StartedAt = &started
@@ -848,6 +865,16 @@ func (d *Daemon) applySessionLifecycleTransition(
 		} else if loadErr != nil && d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("load runtime session projection for transition failed", "project_id", projectID, "session_id", sessionID, "error", loadErr)
 		}
+	}
+	if state == daemonstate.SessionStateStopped {
+		session.Activity = ""
+		session.ActivitySource = ""
+	} else if normalizedActivity := normalizeSessionActivity(activity); normalizedActivity != "" {
+		session.Activity = normalizedActivity
+		session.ActivitySource = normalizeSessionActivitySource(activitySource, "session")
+	} else if session.Activity != "" {
+		session.Activity = normalizeSessionActivity(session.Activity)
+		session.ActivitySource = normalizeSessionActivitySource(session.ActivitySource, "session")
 	}
 	d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, req.Meta, session)
 	return nil
@@ -1454,6 +1481,10 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 					copy := merged
 					session = &copy
 				}
+				if display, found := sessionDisplayActivityByIssueKeyFromSessions(loaded, d.sessionNamingScope(projectID))[sessionKey(issueID)]; found && session != nil {
+					session.Activity = display.Activity
+					session.ActivitySource = display.Source
+				}
 			} else if err != nil && d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("load runtime session projection failed", "project_id", projectID, "issue_id", issueID, "error", err)
 			}
@@ -1466,6 +1497,10 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 			}
 			if loaded, ok := nonAgentSessionProjectionByIssue(sessions, d.sessionNamingScope(projectID), issueID); ok {
 				session = &loaded
+			}
+			if display, found := sessionDisplayActivityByIssueKeyFromSessions(sessions, d.sessionNamingScope(projectID))[sessionKey(issueID)]; found && session != nil {
+				session.Activity = display.Activity
+				session.ActivitySource = display.Source
 			}
 		}
 	}
