@@ -3,10 +3,11 @@ package transport
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -228,6 +229,35 @@ func TestCommandTimesOutWhenContextDeadlineIsShorterThanClientTimeout(t *testing
 	}
 }
 
+func TestWatchCommandConnCloseStopPreventsStaleFutureReadDeadline(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	conn := newDeadlineRaceConn()
+	done, stop := watchCommandConnClose(ctx, conn, cancel)
+	defer conn.Close()
+
+	select {
+	case <-conn.futureDeadlineStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not set the initial future read deadline")
+	}
+
+	stop()
+	close(conn.allowFutureDeadline)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not stop after cancellation")
+	}
+	select {
+	case <-conn.readCalled:
+		t.Fatal("watcher read after stop cancellation")
+	default:
+	}
+}
+
 func TestCommandContextCancelsWhenClientDisconnects(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -286,6 +316,58 @@ func TestCommandContextCancelsWhenClientDisconnects(t *testing.T) {
 		t.Fatal("server command context was not canceled after client disconnected")
 	}
 }
+
+type deadlineRaceConn struct {
+	futureDeadlineStarted chan struct{}
+	allowFutureDeadline   chan struct{}
+	readCalled            chan struct{}
+	closed                chan struct{}
+	closeOnce             sync.Once
+	futureBlocked         atomic.Bool
+}
+
+func newDeadlineRaceConn() *deadlineRaceConn {
+	return &deadlineRaceConn{
+		futureDeadlineStarted: make(chan struct{}),
+		allowFutureDeadline:   make(chan struct{}),
+		readCalled:            make(chan struct{}),
+		closed:                make(chan struct{}),
+	}
+}
+
+func (c *deadlineRaceConn) Read(_ []byte) (int, error) {
+	select {
+	case <-c.readCalled:
+	default:
+		close(c.readCalled)
+	}
+	<-c.closed
+	return 0, net.ErrClosed
+}
+
+func (c *deadlineRaceConn) Write(p []byte) (int, error) { return len(p), nil }
+
+func (c *deadlineRaceConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return nil
+}
+
+func (c *deadlineRaceConn) LocalAddr() net.Addr              { return dummyAddr("local") }
+func (c *deadlineRaceConn) RemoteAddr() net.Addr             { return dummyAddr("remote") }
+func (c *deadlineRaceConn) SetDeadline(time.Time) error      { return nil }
+func (c *deadlineRaceConn) SetWriteDeadline(time.Time) error { return nil }
+func (c *deadlineRaceConn) SetReadDeadline(deadline time.Time) error {
+	if time.Until(deadline) > time.Second && c.futureBlocked.CompareAndSwap(false, true) {
+		close(c.futureDeadlineStarted)
+		<-c.allowFutureDeadline
+	}
+	return nil
+}
+
+type dummyAddr string
+
+func (a dummyAddr) Network() string { return string(a) }
+func (a dummyAddr) String() string  { return string(a) }
 
 func TestServerRecoversFromCommandHandlerPanic(t *testing.T) {
 	t.Parallel()
@@ -470,5 +552,10 @@ func isSocketPermissionError(err error) bool {
 
 func tempSocketPath(t *testing.T) string {
 	t.Helper()
-	return fmt.Sprintf("%s/azd-ipc-%d.sock", os.TempDir(), time.Now().UnixNano())
+	dir, err := os.MkdirTemp(os.TempDir(), "azd-ipc-*")
+	if err != nil {
+		t.Fatalf("create temp socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "ipc.sock")
 }

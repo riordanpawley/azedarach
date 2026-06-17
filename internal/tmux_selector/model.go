@@ -310,7 +310,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		return m, nil
 	case LoadedMsg:
-		m.loading = !m.selectorTabLoaded
+		m.loading = false
 		m.err = nil
 		m.snapshot = msg.Snapshot
 		m.normalizeSnapshot()
@@ -1123,7 +1123,7 @@ func (m Model) loadSelectorTabCmd() tea.Cmd {
 		defer cancel()
 		resp, err := store.GetUIStateForProject(ctx, protocol.DefaultProjectID, protocol.UIStateKeyTMUXSelectorLastActiveTab)
 		if err != nil {
-			slog.Default().Debug("tmux selector tab state load failed",
+			slog.Default().Info("tmux selector tab state load failed",
 				"elapsed_ms", time.Since(start).Milliseconds(),
 				"error", err,
 			)

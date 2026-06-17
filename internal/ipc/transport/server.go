@@ -267,7 +267,17 @@ func watchCommandConnClose(ctx context.Context, conn net.Conn, cancel context.Ca
 		defer close(done)
 		buf := make([]byte, 1)
 		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			_ = conn.SetReadDeadline(time.Now().Add(serverFrameTimeout))
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			_, err := conn.Read(buf)
 			if err != nil {
 				var netErr net.Error
