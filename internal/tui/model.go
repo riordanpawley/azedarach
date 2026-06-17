@@ -1161,6 +1161,12 @@ type conflictResolveAgentResultMsg struct {
 	err         error
 }
 
+type operationCancelledMsg struct {
+	taskID string
+	record protocol.OperationRecord
+	err    error
+}
+
 func pendingOperationDetails(err error) (*daemonclient.OperationPendingError, bool) {
 	var pending *daemonclient.OperationPendingError
 	if !errors.As(err, &pending) {
@@ -1222,11 +1228,13 @@ func (m *Model) applyOperationRecord(record protocol.OperationRecord, now time.T
 	if state == protocol.OperationStateDone {
 		delete(m.pendingOpsByTask, taskIDKey(taskID))
 		delete(m.operationTaskID, operationID)
+		m.clearPendingTaskStatusForOperation(taskID, operationID)
 		return
 	}
 	if operationStateTerminal(state) && !operationRecordRecentlyTerminal(record, now) {
 		delete(m.pendingOpsByTask, taskIDKey(taskID))
 		delete(m.operationTaskID, operationID)
+		m.clearPendingTaskStatusForOperation(taskID, operationID)
 		return
 	}
 	percent := 0
@@ -1253,6 +1261,9 @@ func (m *Model) applyOperationRecord(record protocol.OperationRecord, now time.T
 		message:      message,
 		errorMessage: errorMessage,
 		updatedAt:    now,
+	}
+	if state == protocol.OperationStateCancelled {
+		m.clearPendingTaskStatusForOperation(taskID, operationID)
 	}
 }
 
@@ -4935,6 +4946,21 @@ func (m *Model) clearPendingTaskStatus(taskID string) {
 	delete(m.pendingStatuses, taskIDKey(taskID))
 }
 
+func (m *Model) clearPendingTaskStatusForOperation(taskID, operationID string) {
+	key := taskIDKey(taskID)
+	if key == "" || len(m.pendingStatuses) == 0 {
+		return
+	}
+	pending, ok := m.pendingStatuses[key]
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(operationID) != "" && strings.TrimSpace(pending.operationID) != strings.TrimSpace(operationID) {
+		return
+	}
+	delete(m.pendingStatuses, key)
+}
+
 func (m Model) pendingMutationForTask(taskID string) *overlay.TaskMutationProgress {
 	key := taskIDKey(taskID)
 	progress := &overlay.TaskMutationProgress{}
@@ -4970,6 +4996,32 @@ func (m Model) pendingMutationForTask(taskID string) *overlay.TaskMutationProgre
 		return nil
 	}
 	return progress
+}
+
+func (m Model) activePendingOperationForTask(taskID string) (string, bool) {
+	key := taskIDKey(taskID)
+	if key == "" {
+		return "", false
+	}
+	if op, ok := m.pendingOpsByTask[key]; ok && pendingOperationCanCancel(op.operationID, op.state) {
+		return strings.TrimSpace(op.operationID), true
+	}
+	if pending, ok := m.pendingStatuses[key]; ok && pendingOperationCanCancel(pending.operationID, pending.state) {
+		return strings.TrimSpace(pending.operationID), true
+	}
+	return "", false
+}
+
+func pendingOperationCanCancel(operationID string, state protocol.OperationState) bool {
+	if strings.TrimSpace(operationID) == "" {
+		return false
+	}
+	switch state {
+	case protocol.OperationStateQueued, protocol.OperationStateRunning:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *Model) syncTaskWorkspaceOverlay() {
@@ -5583,6 +5635,23 @@ func (m Model) resolveIssueSessionStateFromSnapshot(ctx context.Context, issueID
 		return task.Session.State, true, nil
 	}
 	return domain.SessionIdle, false, nil
+}
+
+func (m Model) cancelTaskOperationCmd(taskID, operationID string) tea.Cmd {
+	taskID = strings.TrimSpace(taskID)
+	operationID = strings.TrimSpace(operationID)
+	return func() tea.Msg {
+		if operationID == "" {
+			return operationCancelledMsg{taskID: taskID, err: fmt.Errorf("operation id is required")}
+		}
+		if m.daemonClient == nil {
+			return operationCancelledMsg{taskID: taskID, err: fmt.Errorf("daemon client unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		record, err := m.daemonClient.CancelOperation(ctx, operationID, "cancelled from TUI")
+		return operationCancelledMsg{taskID: taskID, record: record, err: err}
+	}
 }
 
 func summarizeStatusChangeCounts(status daemonclient.GitStatus) string {

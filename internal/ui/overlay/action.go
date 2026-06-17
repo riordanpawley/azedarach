@@ -74,6 +74,9 @@ func (m *ActionMenu) buildActions() []Action {
 	activeMutation := m.hasActiveMutation()
 	if activeMutation {
 		actions = append(actions, Action{Key: "", Label: m.mutationActionLabel(), Enabled: false})
+		if m.hasCancellableMutation() {
+			actions = append(actions, Action{Key: "x", Label: "Cancel operation", Enabled: true})
+		}
 	}
 
 	// Session actions
@@ -180,6 +183,18 @@ func (m *ActionMenu) hasActiveMutation() bool {
 	}
 	switch strings.TrimSpace(strings.ToLower(m.mutation.State)) {
 	case "queued", "running", "preparing":
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *ActionMenu) hasCancellableMutation() bool {
+	if m == nil || m.mutation == nil || strings.TrimSpace(m.mutation.OperationID) == "" {
+		return false
+	}
+	switch strings.TrimSpace(strings.ToLower(m.mutation.State)) {
+	case "queued", "running":
 		return true
 	default:
 		return false
@@ -376,6 +391,7 @@ func (m *ActionMenu) StatusBindings() []keybinds.Binding {
 	return []keybinds.Binding{
 		{Key: "j/k/↑/↓", Description: "move"},
 		{Key: "Enter", Description: "run action"},
+		{Key: "x", Description: "cancel/stop"},
 		{Key: "r", Description: "refresh issue"},
 		{Key: "V", Description: "dev servers"},
 		{Key: "1/2/3/4", Description: "set status"},

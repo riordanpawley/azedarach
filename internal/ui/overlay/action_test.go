@@ -773,17 +773,39 @@ func TestActionMenu_DisablesMutatingActionsForActiveOperation(t *testing.T) {
 	if !strings.Contains(view, "Operation already queued: op-queued") {
 		t.Fatalf("expected active operation marker in menu, got: %s", view)
 	}
+	if !strings.Contains(view, "[x] Cancel operation") {
+		t.Fatalf("expected cancel action in menu, got: %s", view)
+	}
 
 	for _, key := range []string{"s", "S", "!", "u", "m", "b", "w", "W", "1", "2", "3", "4", "d", "e", "T"} {
 		if cmd := menu.selectByKey(key); cmd != nil {
 			t.Fatalf("expected key %q to be disabled while operation is queued", key)
 		}
 	}
+	if cmd := menu.selectByKey("x"); cmd == nil {
+		t.Fatal("expected cancel operation to remain available while operation is queued")
+	}
 	if cmd := menu.selectByKey("r"); cmd == nil {
 		t.Fatal("expected refresh to remain available while operation is queued")
 	}
 	if cmd := menu.selectByKey("c"); cmd == nil {
 		t.Fatal("expected child creation to remain available while operation is queued")
+	}
+}
+
+func TestActionMenu_DoesNotOfferCancelForNonCancellableOperationState(t *testing.T) {
+	task := domain.Task{ID: "az-123", Status: domain.StatusOpen, HasWorktree: true}
+	menu := NewActionMenu(task, nil).WithMutationProgress(&TaskMutationProgress{
+		OperationID: "op-preparing",
+		State:       "preparing",
+	})
+
+	view := menu.View()
+	if strings.Contains(view, "[x] Cancel operation") {
+		t.Fatalf("did not expect cancel action for preparing operation, got: %s", view)
+	}
+	if cmd := menu.selectByKey("x"); cmd != nil {
+		t.Fatal("did not expect cancel command for preparing operation")
 	}
 }
 

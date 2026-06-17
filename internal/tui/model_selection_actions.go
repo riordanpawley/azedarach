@@ -453,6 +453,14 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(3 * time.Second),
 		})
 	case "x":
+		if operationID, ok := m.activePendingOperationForTask(task.ID.String()); ok {
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: fmt.Sprintf("Cancelling operation %s for %s", operationID, task.ID),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, m.cancelTaskOperationCmd(task.ID.String(), operationID)
+		}
 		// Delegate stop decision to daemon authority; projection can be stale.
 		m.beginTaskMutationFeedback(task.ID.String(), "session_stop", "Session stop")
 		return m, m.stopSessionCmd(task.ID.String())

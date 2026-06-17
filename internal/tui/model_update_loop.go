@@ -475,6 +475,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		return m, m.scheduleIssuesRefreshCmd()
 
+	case operationCancelledMsg:
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Operation cancel failed: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		m.applyOperationRecord(msg.record, time.Now())
+		m.syncTaskWorkspaceOverlay()
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: fmt.Sprintf("Operation cancel requested: %s", msg.record.OperationID),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, m.scheduleIssuesRefreshCmd()
+
 	case daemonStreamEventMsg:
 		if msg.stream != nil && msg.stream != m.daemonEvents {
 			return m, nil
