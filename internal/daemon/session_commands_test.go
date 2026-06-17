@@ -5512,6 +5512,45 @@ func TestPersistTmuxSessionRuntimeStateKeepsAgentHookActivityWhenParentTmuxSessi
 	}
 }
 
+func TestSessionActivityLabelForDisplayUsesStartupGraceOnlyForFreshUnknownActivity(t *testing.T) {
+	now := time.Date(2026, time.June, 17, 8, 0, 0, 0, time.UTC)
+	previousNow := timeNow
+	timeNow = func() time.Time { return now }
+	t.Cleanup(func() { timeNow = previousNow })
+
+	freshStart := now.Add(-10 * time.Second)
+	label, source := sessionActivityLabelForDisplay(sessionHookActivity{}, daemonstate.Session{
+		ID:        "session-fresh",
+		IssueID:   "bif",
+		State:     daemonstate.SessionStateStarting,
+		StartedAt: &freshStart,
+	})
+	if label != "starting" || source != "startup-grace" {
+		t.Fatalf("fresh unknown activity = %s/%s, want starting/startup-grace", label, source)
+	}
+
+	oldStart := now.Add(-2 * time.Minute)
+	label, source = sessionActivityLabelForDisplay(sessionHookActivity{}, daemonstate.Session{
+		ID:        "session-old",
+		IssueID:   "big",
+		State:     daemonstate.SessionStateRunning,
+		StartedAt: &oldStart,
+	})
+	if label != "unknown" || source != "none" {
+		t.Fatalf("old unknown activity = %s/%s, want unknown/none", label, source)
+	}
+
+	label, source = sessionActivityLabelForDisplay(sessionHookActivity{Total: 1, Active: 1}, daemonstate.Session{
+		ID:        "session-hook",
+		IssueID:   "bih",
+		State:     daemonstate.SessionStateRunning,
+		StartedAt: &freshStart,
+	})
+	if label != "busy" || source != "hooks" {
+		t.Fatalf("hook-backed activity = %s/%s, want busy/hooks", label, source)
+	}
+}
+
 func TestPersistTmuxSessionRuntimeStatePrefersTmuxCreatedAtOverSnapshotStartedAt(t *testing.T) {
 	const (
 		projectID = "proj-created-at-priority"

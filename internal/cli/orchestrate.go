@@ -88,6 +88,7 @@ func issueCloseCommand(issueID string) string {
 type orchestrateStatusResult struct {
 	RootIssueID    string                     `json:"root_issue_id"`
 	Runnable       []string                   `json:"runnable"`
+	Pending        []orchestratePendingStart  `json:"pending,omitempty"`
 	Active         []string                   `json:"active,omitempty"`
 	ActiveSessions []orchestrateActiveSession `json:"active_sessions,omitempty"`
 	Blocked        map[string]string          `json:"blocked"`
@@ -130,10 +131,17 @@ type orchestrateWatchFrame struct {
 	SinceSeq       int64                      `json:"since_seq"`
 	NextSince      int64                      `json:"next_since"`
 	Runnable       []string                   `json:"runnable"`
+	Pending        []orchestratePendingStart  `json:"pending,omitempty"`
 	Active         []string                   `json:"active,omitempty"`
 	ActiveSessions []orchestrateActiveSession `json:"active_sessions,omitempty"`
 	Blocked        map[string]string          `json:"blocked"`
 	Events         []mailEvent                `json:"events"`
+}
+
+type orchestratePendingStart struct {
+	IssueID        string `json:"issue_id"`
+	OperationID    string `json:"operation_id,omitempty"`
+	OperationState string `json:"operation_state,omitempty"`
 }
 
 type orchestrateActiveSession struct {
@@ -141,6 +149,7 @@ type orchestrateActiveSession struct {
 	Activity          string `json:"activity"`
 	ActivitySource    string `json:"activity_source"`
 	State             string `json:"state,omitempty"`
+	Status            string `json:"status,omitempty"`
 	TmuxAttachedCount int    `json:"tmux_attached_count,omitempty"`
 	Advice            string `json:"advice,omitempty"`
 }
@@ -423,6 +432,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 	result := orchestrateStatusResult{
 		RootIssueID:    ready.RootIssueID,
 		Runnable:       ready.Runnable,
+		Pending:        orchestratePendingStartsFromDaemon(ready.Pending),
 		Active:         ready.Active,
 		ActiveSessions: orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
 		Blocked:        ready.Blocked,
@@ -446,6 +456,12 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 			fmt.Printf("- %s\n", id)
 		}
 	}
+	if len(result.Pending) > 0 {
+		fmt.Println("Pending starts:")
+		for _, pending := range result.Pending {
+			fmt.Printf("- %s operation=%s state=%s\n", pending.IssueID, pending.OperationID, pending.OperationState)
+		}
+	}
 	if len(result.Blocked) > 0 {
 		fmt.Println("Blocked leaves:")
 		ids := make([]string, 0, len(result.Blocked))
@@ -458,10 +474,14 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 			fmt.Printf("- %s: %s\n", id, reason)
 		}
 	}
-	if len(result.Active) > 0 {
-		fmt.Println("Active leaves:")
+	if len(result.ActiveSessions) > 0 {
+		fmt.Println("Active sessions:")
 		for _, active := range result.ActiveSessions {
-			fmt.Printf("- %s activity=%s source=%s\n", active.IssueID, active.Activity, active.ActivitySource)
+			status := strings.TrimSpace(active.Status)
+			if status == "" {
+				status = "active"
+			}
+			fmt.Printf("- %s status=%s activity=%s source=%s\n", active.IssueID, status, active.Activity, active.ActivitySource)
 			if active.Advice != "" {
 				fmt.Printf("  %s\n", active.Advice)
 			}
@@ -567,14 +587,14 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 			result.Failed[issueID] = err.Error()
 			continue
 		}
-		emitOrchestrateStartProgress(opts, "submitted", issueID)
+		emitOrchestrateStartProgressWithLaunch(opts, "submitted", launch)
 		pendingLaunches = append(pendingLaunches, launch)
 		count++
 	}
 
 	for _, launch := range pendingLaunches {
 		issueID := launch.IssueID
-		emitOrchestrateStartProgress(opts, "waiting", issueID)
+		emitOrchestrateStartProgressWithLaunch(opts, "waiting", launch)
 		completedLaunch, err := waitForSubmittedSessionStart(deps, launch)
 		if err != nil {
 			result.Failed[issueID] = err.Error()
@@ -605,6 +625,35 @@ func emitOrchestrateStartProgress(opts OrchestrateStartOptions, stage, issueID s
 	fmt.Fprintf(os.Stderr, "orchestrate start: %s %s\n", stage, issueID)
 }
 
+func emitOrchestrateStartProgressWithLaunch(opts OrchestrateStartOptions, stage string, launch orchestrateStartLaunch) {
+	if !opts.JSON {
+		return
+	}
+	details := strings.TrimSpace(launch.IssueID)
+	if launch.OperationID != "" {
+		details += " operation=" + launch.OperationID
+	}
+	if launch.OperationState != "" {
+		details += " state=" + launch.OperationState
+	}
+	fmt.Fprintf(os.Stderr, "orchestrate start: %s %s\n", stage, details)
+}
+
+func orchestratePendingStartsFromDaemon(pending []daemonclient.TaskPendingStart) []orchestratePendingStart {
+	if len(pending) == 0 {
+		return nil
+	}
+	out := make([]orchestratePendingStart, 0, len(pending))
+	for _, start := range pending {
+		out = append(out, orchestratePendingStart{
+			IssueID:        start.IssueID,
+			OperationID:    start.OperationID,
+			OperationState: start.OperationState,
+		})
+	}
+	return out
+}
+
 func orchestrateActiveSessionsFromDaemon(active []daemonclient.TaskActiveSession) []orchestrateActiveSession {
 	if len(active) == 0 {
 		return nil
@@ -616,6 +665,7 @@ func orchestrateActiveSessionsFromDaemon(active []daemonclient.TaskActiveSession
 			Activity:          session.Activity,
 			ActivitySource:    session.ActivitySource,
 			State:             session.State,
+			Status:            session.Status,
 			TmuxAttachedCount: session.TmuxAttachedCount,
 			Advice:            session.Advice,
 		})
@@ -731,6 +781,7 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 			SinceSeq:       lastSeq,
 			NextSince:      nextSince,
 			Runnable:       ready.Runnable,
+			Pending:        orchestratePendingStartsFromDaemon(ready.Pending),
 			Active:         ready.Active,
 			ActiveSessions: orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
 			Blocked:        ready.Blocked,
@@ -1118,6 +1169,7 @@ func buildOrchestrateWatchFrame(deps *Dependencies, rootIssueID string, since in
 		SinceSeq:       since,
 		NextSince:      nextMailboxSeq(events, since),
 		Runnable:       ready.Runnable,
+		Pending:        orchestratePendingStartsFromDaemon(ready.Pending),
 		Active:         ready.Active,
 		ActiveSessions: orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
 		Blocked:        ready.Blocked,
@@ -1149,10 +1201,20 @@ func emitOrchestrateWatchFrame(frame orchestrateWatchFrame, jsonl bool) error {
 			fmt.Printf("- %s: %s\n", id, frame.Blocked[id])
 		}
 	}
-	if len(frame.Active) > 0 {
+	if len(frame.Pending) > 0 {
+		fmt.Println("pending:")
+		for _, pending := range frame.Pending {
+			fmt.Printf("- %s operation=%s state=%s\n", pending.IssueID, pending.OperationID, pending.OperationState)
+		}
+	}
+	if len(frame.ActiveSessions) > 0 {
 		fmt.Println("active:")
 		for _, active := range frame.ActiveSessions {
-			fmt.Printf("- %s activity=%s source=%s\n", active.IssueID, active.Activity, active.ActivitySource)
+			status := strings.TrimSpace(active.Status)
+			if status == "" {
+				status = "active"
+			}
+			fmt.Printf("- %s status=%s activity=%s source=%s\n", active.IssueID, status, active.Activity, active.ActivitySource)
 			if active.Advice != "" {
 				fmt.Printf("  %s\n", active.Advice)
 			}

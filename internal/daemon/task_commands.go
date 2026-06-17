@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
@@ -144,9 +146,16 @@ type taskDeletePreflightResult struct {
 type taskGraphReadinessResult struct {
 	RootIssueID    string                   `json:"root_issue_id"`
 	Runnable       []string                 `json:"runnable"`
+	Pending        []taskGraphPendingStart  `json:"pending,omitempty"`
 	Active         []string                 `json:"active,omitempty"`
 	ActiveSessions []taskGraphActiveSession `json:"active_sessions,omitempty"`
 	Blocked        map[string]string        `json:"blocked"`
+}
+
+type taskGraphPendingStart struct {
+	IssueID        string `json:"issue_id"`
+	OperationID    string `json:"operation_id,omitempty"`
+	OperationState string `json:"operation_state,omitempty"`
 }
 
 type taskGraphActiveSession struct {
@@ -154,6 +163,7 @@ type taskGraphActiveSession struct {
 	Activity          string `json:"activity"`
 	ActivitySource    string `json:"activity_source"`
 	State             string `json:"state,omitempty"`
+	Status            string `json:"status,omitempty"`
 	TmuxAttachedCount int    `json:"tmux_attached_count,omitempty"`
 	Advice            string `json:"advice,omitempty"`
 }
@@ -1461,6 +1471,13 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 	if err != nil {
 		return taskCloseIntegrationResult{}, fmt.Errorf("list worktrees before close integration: %w", err)
 	}
+	if source, ok := daemonWorktreeForIssue(worktrees, taskID); !ok || strings.TrimSpace(source.Branch) == "" {
+		d.worktreeAdapter.pollAndPersistWorktrees(ctx, projectID)
+		worktrees, err = d.worktreeAdapter.List(ctx, projectID)
+		if err != nil {
+			return taskCloseIntegrationResult{}, fmt.Errorf("refresh worktrees before close integration: %w", err)
+		}
+	}
 	source, ok := daemonWorktreeForIssue(worktrees, taskID)
 	if !ok || strings.TrimSpace(source.Path) == "" {
 		return taskCloseIntegrationResult{}, nil
@@ -2567,7 +2584,15 @@ func (d *Daemon) taskGraphReadiness(ctx context.Context, projectID, rootIssueID 
 	if err != nil {
 		return taskGraphReadinessResult{}, err
 	}
+	pendingStarts, err := d.taskGraphPendingSessionStarts(ctx, projectID)
+	if err != nil {
+		return taskGraphReadinessResult{}, err
+	}
+	if len(pendingStarts) > 0 {
+		ready = daemonTaskGraphApplyPendingStarts(ready, pendingStarts)
+	}
 	ready.ActiveSessions = daemonTaskGraphActiveSessions(ready.Active, byID)
+	ready.ActiveSessions = append(ready.ActiveSessions, daemonTaskGraphCleanupPendingSessions(rootID, byID, children)...)
 	return ready, nil
 }
 
@@ -2647,6 +2672,60 @@ func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.
 	return result, nil
 }
 
+func (d *Daemon) taskGraphPendingSessionStarts(ctx context.Context, projectID string) (map[string]taskGraphPendingStart, error) {
+	if d == nil || d.operationRuntime == nil || d.operationRuntime.manager == nil {
+		return nil, nil
+	}
+	records, err := d.operationRuntime.manager.List(ctx, daemonops.Query{
+		ProjectID: projectID,
+		Kind:      daemonhandlers.CommandSessionStart,
+		States:    []daemonops.State{daemonops.StateQueued, daemonops.StateRunning},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(records) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]taskGraphPendingStart, len(records))
+	newest := make(map[string]time.Time, len(records))
+	for _, record := range records {
+		issueID := strings.TrimSpace(record.IssueID)
+		if issueID == "" {
+			continue
+		}
+		if latest, ok := newest[issueID]; ok && record.UpdatedAt.Before(latest) {
+			continue
+		}
+		newest[issueID] = record.UpdatedAt
+		out[issueID] = taskGraphPendingStart{
+			IssueID:        issueID,
+			OperationID:    strings.TrimSpace(record.ID),
+			OperationState: string(record.State),
+		}
+	}
+	return out, nil
+}
+
+func daemonTaskGraphApplyPendingStarts(result taskGraphReadinessResult, pending map[string]taskGraphPendingStart) taskGraphReadinessResult {
+	if len(pending) == 0 {
+		return result
+	}
+	runnable := make([]string, 0, len(result.Runnable))
+	for _, issueID := range result.Runnable {
+		if start, ok := pending[issueID]; ok {
+			result.Pending = append(result.Pending, start)
+			continue
+		}
+		runnable = append(runnable, issueID)
+	}
+	result.Runnable = runnable
+	sort.Slice(result.Pending, func(i, j int) bool {
+		return result.Pending[i].IssueID < result.Pending[j].IssueID
+	})
+	return result
+}
+
 func daemonTaskGraphDescendants(root naming.IssueID, children map[naming.IssueID][]naming.IssueID) []naming.IssueID {
 	out := make([]naming.IssueID, 0, 16)
 	stack := append([]naming.IssueID(nil), children[root]...)
@@ -2695,6 +2774,7 @@ func daemonTaskGraphActiveSessions(activeIDs []string, byID map[naming.IssueID]d
 			IssueID:        issueID,
 			Activity:       "unknown",
 			ActivitySource: "none",
+			Status:         "active",
 			Advice:         fmt.Sprintf("activity unknown: check hooks with az ai status --target=auto; install/update with az ai install --target=auto; use sparse pane capture only if status/watch looks stale, failed, or contradictory for %s", issueID),
 		}
 		if ok && task.Session != nil {
@@ -2712,6 +2792,39 @@ func daemonTaskGraphActiveSessions(activeIDs []string, byID map[naming.IssueID]d
 		}
 		out = append(out, active)
 	}
+	return out
+}
+
+func daemonTaskGraphCleanupPendingSessions(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) []taskGraphActiveSession {
+	desc := daemonTaskGraphDescendants(rootID, children)
+	out := make([]taskGraphActiveSession, 0)
+	for _, id := range desc {
+		task := byID[id]
+		if task.Status != domain.StatusDone || !daemonCloseGuardTaskHasSession(task) {
+			continue
+		}
+		active := taskGraphActiveSession{
+			IssueID:        id.String(),
+			Activity:       "unknown",
+			ActivitySource: "none",
+			Status:         "cleanup-pending",
+			Advice:         fmt.Sprintf("closed issue %s still has session projection; cleanup is pending or stale", id.String()),
+		}
+		if task.Session != nil {
+			active.State = string(task.Session.State)
+			active.TmuxAttachedCount = task.Session.TmuxAttachedCount
+			if activity := strings.TrimSpace(task.Session.Activity); activity != "" {
+				active.Activity = activity
+			}
+			if source := strings.TrimSpace(task.Session.ActivitySource); source != "" {
+				active.ActivitySource = source
+			}
+		}
+		out = append(out, active)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].IssueID < out[j].IssueID
+	})
 	return out
 }
 

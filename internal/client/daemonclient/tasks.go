@@ -124,9 +124,17 @@ type TaskDeleteResult struct {
 type TaskGraphReadiness struct {
 	RootIssueID    string              `json:"root_issue_id"`
 	Runnable       []string            `json:"runnable"`
+	Pending        []TaskPendingStart  `json:"pending,omitempty"`
 	Active         []string            `json:"active,omitempty"`
 	ActiveSessions []TaskActiveSession `json:"active_sessions,omitempty"`
 	Blocked        map[string]string   `json:"blocked"`
+}
+
+// TaskPendingStart contains durable operation state for submitted session starts.
+type TaskPendingStart struct {
+	IssueID        string `json:"issue_id"`
+	OperationID    string `json:"operation_id,omitempty"`
+	OperationState string `json:"operation_state,omitempty"`
 }
 
 // TaskActiveSession contains runtime activity details for active graph leaves.
@@ -135,6 +143,7 @@ type TaskActiveSession struct {
 	Activity          string `json:"activity"`
 	ActivitySource    string `json:"activity_source"`
 	State             string `json:"state,omitempty"`
+	Status            string `json:"status,omitempty"`
 	TmuxAttachedCount int    `json:"tmux_attached_count,omitempty"`
 	Advice            string `json:"advice,omitempty"`
 }

@@ -18,6 +18,7 @@ import (
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	opstore "github.com/riordanpawley/azedarach/internal/daemon/operations/store"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -2081,8 +2082,6 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	logger := slog.Default()
 	projectID := "proj-close-integrate"
 	repoDir := t.TempDir()
-	sourceWorktree := filepath.Join(repoDir, "wt-az-1")
-	sourceBranch := "riordan/az-1/integrate"
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
 	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
@@ -2098,11 +2097,12 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
+	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
+	sourceBranch := "riordan/" + taskID + "/integrate"
 	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
 		ProjectID: projectID,
 		IssueID:   taskID,
 		Path:      sourceWorktree,
-		Branch:    sourceBranch,
 		UpdatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("seed worktree projection: %v", err)
@@ -2161,7 +2161,8 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
 			return runtimeStore
 		},
-		logger: logger,
+		runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
+		logger:                  logger,
 	}
 	t.Cleanup(func() {
 		d.worktreeAdapter.mu.Lock()
@@ -2797,6 +2798,119 @@ func TestTaskMergeBaseTargetSelectsNearestAncestorWorktree(t *testing.T) {
 	}
 	if got.TargetID != parentID || got.Branch != parentBranch || got.WorktreePath != parentWorktree || !got.BranchAttached {
 		t.Fatalf("merge target = %+v, want parent %s branch %s worktree %s", got, parentID, parentBranch, parentWorktree)
+	}
+}
+
+func TestTaskGraphReadinessReportsPendingStartupAndCleanupTranscriptStates(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-graph-transcript"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Root",
+		Type:   domain.TypeEpic,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	pendingID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Pending child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusOpen,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create pending child: %v", err)
+	}
+	startingID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Starting child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusInProgress,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create starting child: %v", err)
+	}
+	closedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Closed child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusDone,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create closed child: %v", err)
+	}
+
+	runtime := newOperationRuntime(operationRuntimeConfig{
+		repoDir: repoDir,
+		logger:  logger,
+		hub:     publish.NewHub(16, 8, logger),
+	})
+	t.Cleanup(func() { _ = runtime.Close() })
+	submittedAt := time.Date(2026, time.June, 17, 8, 0, 0, 0, time.UTC)
+	if _, err := runtime.store.Create(ctx, opstore.CreateParams{
+		OperationID:  "op-session-start",
+		ProjectID:    projectID,
+		IssueID:      pendingID,
+		Kind:         daemonhandlers.CommandSessionStart,
+		DedupeKey:    "session.start:" + pendingID,
+		ResourceKeys: []string{"issue:" + projectID + ":" + pendingID},
+		State:        opstore.StateQueued,
+		SubmittedAt:  submittedAt,
+	}); err != nil {
+		t.Fatalf("seed pending session.start operation: %v", err)
+	}
+
+	sessionStore := daemonstate.NewStore()
+	startingSessionID := naming.CanonicalSessionID(projectID, startingID)
+	if _, err := sessionStore.UpsertSession(projectID, startingSessionID, startingID, daemonstate.SessionStateStarting); err != nil {
+		t.Fatalf("seed starting session: %v", err)
+	}
+	closedSessionID := naming.CanonicalSessionID(projectID, closedID)
+	if _, err := sessionStore.UpsertSession(projectID, closedSessionID, closedID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed stale closed session: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		sessionStore:     sessionStore,
+		operationRuntime: runtime,
+		revision:         map[string]uint64{projectID: 1},
+	}
+
+	ready, err := d.taskGraphReadiness(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskGraphReadiness error: %v", err)
+	}
+	if slices.Contains(ready.Runnable, pendingID) {
+		t.Fatalf("pending child still runnable: %+v", ready)
+	}
+	if len(ready.Pending) != 1 || ready.Pending[0].IssueID != pendingID || ready.Pending[0].OperationID != "op-session-start" || ready.Pending[0].OperationState != string(opstore.StateQueued) {
+		t.Fatalf("pending = %+v", ready.Pending)
+	}
+	if len(ready.Active) != 1 || ready.Active[0] != startingID {
+		t.Fatalf("active = %+v, want starting child only", ready.Active)
+	}
+	byID := map[string]taskGraphActiveSession{}
+	for _, active := range ready.ActiveSessions {
+		byID[active.IssueID] = active
+	}
+	if got := byID[startingID]; got.Status != "active" || got.Activity != "starting" || got.ActivitySource != "startup-grace" || got.Advice != "" {
+		t.Fatalf("starting active session = %+v", got)
+	}
+	if got := byID[closedID]; got.Status != "cleanup-pending" || !strings.Contains(got.Advice, "cleanup is pending") {
+		t.Fatalf("closed active session = %+v", got)
 	}
 }
 

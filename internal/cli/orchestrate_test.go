@@ -156,6 +156,54 @@ func TestShouldContinueOrchestrateWatchAfterTimeout(t *testing.T) {
 	}
 }
 
+func TestBuildOrchestrateWatchFrameIncludesPendingAndCleanupMarkers(t *testing.T) {
+	root := naming.IssueID("az-1")
+	pending := naming.IssueID("az-2")
+	closed := naming.IssueID("az-3")
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Blocked:     map[string]string{},
+						Pending: []daemonclient.TaskPendingStart{
+							{IssueID: pending.String(), OperationID: "op-start", OperationState: string(protocol.OperationStateRunning)},
+						},
+						ActiveSessions: []daemonclient.TaskActiveSession{
+							{IssueID: closed.String(), Status: "cleanup-pending", Activity: "unknown", ActivitySource: "none", State: string(domain.SessionBusy), Advice: "closed issue az-3 still has session projection; cleanup is pending or stale"},
+						},
+					}), nil
+				case protocol.CommandMailList:
+					return responseWithJSON(req, []protocol.MailEvent{
+						{Seq: 9, ParentIssue: root.String(), IssueID: pending, Type: "session-started"},
+					}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	frame, err := buildOrchestrateWatchFrame(deps, root.String(), 7)
+	if err != nil {
+		t.Fatalf("buildOrchestrateWatchFrame error = %v", err)
+	}
+	if len(frame.Pending) != 1 || frame.Pending[0].IssueID != pending.String() || frame.Pending[0].OperationState != string(protocol.OperationStateRunning) {
+		t.Fatalf("pending = %+v", frame.Pending)
+	}
+	if len(frame.ActiveSessions) != 1 || frame.ActiveSessions[0].Status != "cleanup-pending" {
+		t.Fatalf("active_sessions = %+v", frame.ActiveSessions)
+	}
+	if frame.NextSince != 9 {
+		t.Fatalf("next since = %d, want 9", frame.NextSince)
+	}
+}
+
 func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 	root := naming.IssueID("az-1")
 	busy := naming.IssueID("az-2")
@@ -213,6 +261,60 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 	}
 	if byID[unknown.String()].Activity != "unknown" || !strings.Contains(byID[unknown.String()].Advice, "az ai status --target=auto") || !strings.Contains(byID[unknown.String()].Advice, "az ai install --target=auto") {
 		t.Fatalf("unknown active session = %+v", byID[unknown.String()])
+	}
+}
+
+func TestOrchestrateStatusCommandIncludesPendingAndCleanupMarkers(t *testing.T) {
+	root := naming.IssueID("az-1")
+	pending := naming.IssueID("az-2")
+	closed := naming.IssueID("az-3")
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Blocked:     map[string]string{},
+						Pending: []daemonclient.TaskPendingStart{
+							{IssueID: pending.String(), OperationID: "op-start", OperationState: string(protocol.OperationStateQueued)},
+						},
+						ActiveSessions: []daemonclient.TaskActiveSession{
+							{IssueID: closed.String(), Status: "cleanup-pending", Activity: "unknown", ActivitySource: "none", State: string(domain.SessionBusy), Advice: "closed issue az-3 still has session projection; cleanup is pending or stale"},
+						},
+					}), nil
+				case daemonclient.CommandTaskList:
+					body, err := marshalTaskListBody([]domain.Task{
+						{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
+				case protocol.CommandMailList:
+					return responseWithJSON(req, []protocol.MailEvent{}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestrateStatusCommand(deps, OrchestrateStatusOptions{RootIssueID: root.String(), JSON: true})
+	})
+	var result orchestrateStatusResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if len(result.Pending) != 1 || result.Pending[0].IssueID != pending.String() || result.Pending[0].OperationID != "op-start" {
+		t.Fatalf("pending = %+v", result.Pending)
+	}
+	if len(result.ActiveSessions) != 1 || result.ActiveSessions[0].Status != "cleanup-pending" || !strings.Contains(result.ActiveSessions[0].Advice, "cleanup is pending") {
+		t.Fatalf("active_sessions = %+v", result.ActiveSessions)
 	}
 }
 
@@ -446,9 +548,21 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 		}),
 	}
 
+	var stderr string
 	output := captureStdout(t, func() error {
-		return OrchestrateStartCommand(deps, OrchestrateStartOptions{RootIssueID: "az-1", IssueIDs: []string{"az-2"}, Limit: 4, JSON: true})
+		stderr = captureStderr(t, func() error {
+			return OrchestrateStartCommand(deps, OrchestrateStartOptions{RootIssueID: "az-1", IssueIDs: []string{"az-2"}, Limit: 4, JSON: true})
+		})
+		return nil
 	})
+	for _, want := range []string{
+		"orchestrate start: submitted az-2 operation=op-1 state=queued",
+		"orchestrate start: waiting az-2 operation=op-1 state=queued",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr = %q, want %q", stderr, want)
+		}
+	}
 
 	var result orchestrateStartResult
 	if err := json.Unmarshal([]byte(output), &result); err != nil {

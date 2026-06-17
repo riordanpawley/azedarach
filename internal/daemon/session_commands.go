@@ -86,7 +86,8 @@ const (
 	sessionInvariantSessionStopTargets     daemonInvariantID = daemonInvariantSessionStopTargets
 	sessionInvariantSessionReconcile       daemonInvariantID = daemonInvariantSessionReconcile
 
-	sessionConflictWindowName = "resolve-conflict"
+	sessionConflictWindowName   = "resolve-conflict"
+	sessionActivityStartupGrace = 45 * time.Second
 )
 
 type SessionLongRunningExecutor interface {
@@ -1636,6 +1637,32 @@ func sessionActivityLabel(activity sessionHookActivity) (string, string) {
 	return "idle", "hooks"
 }
 
+func sessionActivityLabelForDisplay(activity sessionHookActivity, session daemonstate.Session) (string, string) {
+	label, source := sessionActivityLabel(activity)
+	if label != "unknown" || source != "none" {
+		return label, source
+	}
+	if sessionWithinActivityStartupGrace(session, timeNow()) {
+		return "starting", "startup-grace"
+	}
+	return label, source
+}
+
+func sessionWithinActivityStartupGrace(session daemonstate.Session, now time.Time) bool {
+	if sessionActivityStartupGrace <= 0 {
+		return false
+	}
+	start := session.StartedAt
+	if start == nil || start.IsZero() {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	age := now.Sub(start.UTC())
+	return age >= 0 && age <= sessionActivityStartupGrace
+}
+
 func (d *Daemon) staleSessionRuntimeStatusOutput(ctx context.Context, projectID, issueID string) (string, bool) {
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	if store == nil {
@@ -2210,7 +2237,7 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 				state = domain.SessionBusy
 			}
 		}
-		activity, activitySource := sessionActivityLabel(hookActivityByKey[taskKey])
+		activity, activitySource := sessionActivityLabelForDisplay(hookActivityByKey[taskKey], session)
 		tasks[i].Session = &domain.Session{
 			IssueID:           naming.IssueID(taskID),
 			State:             state,
