@@ -70,6 +70,20 @@ func (f *fakeKiller) KillSession(_ context.Context, entry InventoryEntry) error 
 	return f.err
 }
 
+type fakePopupCloser struct {
+	closed int
+	err    error
+	events *[]string
+}
+
+func (f *fakePopupCloser) ClosePopup(context.Context) error {
+	if f.events != nil {
+		*f.events = append(*f.events, "close-popup")
+	}
+	f.closed++
+	return f.err
+}
+
 type fakeFullAzSwitcher struct {
 	hasSession bool
 	commands   []string
@@ -441,13 +455,14 @@ func TestModelASwitchesSelectedIssueSessionThenOpensDetail(t *testing.T) {
 func TestModelAttachKeepsSwitchSuccessWhenDetailOpenFails(t *testing.T) {
 	switcher := &fakeSwitcher{}
 	opener := &fakeDetailOpener{err: errors.New("daemon busy")}
+	closer := &fakePopupCloser{}
 	entries := []InventoryEntry{{
 		SessionID:   "az-one",
 		IssueID:     "one",
 		TaskTitle:   "One",
 		ProjectPath: "/tmp/project one",
 	}}
-	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}}, WithSwitcher(switcher), WithDetailOpener(opener))
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}}, WithSwitcher(switcher), WithPopupCloser(closer), WithDetailOpener(opener))
 	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
 	model = updated.(Model)
 	if cmd != nil {
@@ -470,6 +485,43 @@ func TestModelAttachKeepsSwitchSuccessWhenDetailOpenFails(t *testing.T) {
 	}
 	if len(opener.entries) != 1 {
 		t.Fatalf("opener calls = %d, want 1", len(opener.entries))
+	}
+	if closer.closed != 1 {
+		t.Fatalf("popup close calls = %d, want 1", closer.closed)
+	}
+}
+
+func TestModelAttachClosesPopupBeforeWorkspaceOpen(t *testing.T) {
+	events := []string{}
+	switcher := &fakeSwitcher{events: &events}
+	closer := &fakePopupCloser{events: &events}
+	opener := &fakeDetailOpener{events: &events}
+	entries := []InventoryEntry{{
+		SessionID:   "az-one",
+		IssueID:     "one",
+		TaskTitle:   "One",
+		ProjectPath: "/tmp/project one",
+	}}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}}, WithSwitcher(switcher), WithPopupCloser(closer), WithDetailOpener(opener))
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	_, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if cmd == nil {
+		t.Fatal("a did not produce attach command")
+	}
+	msg, ok := cmd().(SwitchResultMsg)
+	if !ok {
+		t.Fatalf("attach msg = %T, want SwitchResultMsg", msg)
+	}
+	if msg.Err != nil {
+		t.Fatalf("attach error = %v", msg.Err)
+	}
+	if got, want := strings.Join(events, "\n"), "switch az-one\nclose-popup\nopen one"; got != want {
+		t.Fatalf("events:\n%s\nwant:\n%s", got, want)
 	}
 }
 
@@ -830,6 +882,8 @@ func TestModelUserTabChangeWinsOverLatePersistedSelectorTabLoad(t *testing.T) {
 		t.Fatal("snapshot load did not request persisted selector tab")
 	}
 	lateLoaded := cmd()
+	updated, _ = model.Update(selectorTabLoadedMsg{})
+	model = updated.(Model)
 
 	updated, persistCmd := model.Update(tea.KeyMsg{Type: tea.KeyTab})
 	model = updated.(Model)
@@ -844,6 +898,46 @@ func TestModelUserTabChangeWinsOverLatePersistedSelectorTabLoad(t *testing.T) {
 	model = updated.(Model)
 	if model.activeTab != selectorTabTree {
 		t.Fatalf("active tab after late persisted load = %v, want user-selected tree", model.activeTab)
+	}
+}
+
+func TestModelIgnoresTabKeyWhilePersistedSelectorTabLoading(t *testing.T) {
+	store := &fakeUIStateStore{values: map[string]string{
+		protocol.UIStateKeyTMUXSelectorLastActiveTab: "tree",
+	}}
+	snapshot := Snapshot{Entries: []InventoryEntry{{
+		SessionID: "az-ckx",
+		IssueID:   "ckx",
+		TaskTitle: "ckx",
+	}}}
+	model := New(fakeSnapshotLoader{snapshot: snapshot}, WithUIStateStore(store))
+
+	updated, cmd := model.Update(LoadedMsg{Snapshot: snapshot})
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("snapshot load did not request persisted selector tab")
+	}
+	lateLoaded := cmd()
+
+	updated, persistCmd := model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = updated.(Model)
+	if persistCmd != nil {
+		t.Fatal("tab key persisted a value while persisted selector tab was still loading")
+	}
+	if model.activeTab != selectorTabGrid {
+		t.Fatalf("active tab before persisted load = %v, want default grid", model.activeTab)
+	}
+	if !model.loading {
+		t.Fatal("model stopped loading before persisted selector tab arrived")
+	}
+	if len(store.sets) != 0 {
+		t.Fatalf("persisted tab writes before load = %v, want none", store.sets)
+	}
+
+	updated, _ = model.Update(lateLoaded)
+	model = updated.(Model)
+	if model.activeTab != selectorTabTree {
+		t.Fatalf("active tab after persisted load = %v, want tree", model.activeTab)
 	}
 }
 

@@ -127,6 +127,10 @@ type UIStateStore interface {
 	SetUIStateForProject(context.Context, string, string, string) (protocol.UIStateResponseBody, error)
 }
 
+type PopupCloser interface {
+	ClosePopup(context.Context) error
+}
+
 type fullAzSwitcher interface {
 	HasSession(context.Context, string) (bool, error)
 	SwitchClient(context.Context, string) error
@@ -137,6 +141,15 @@ type Option func(*Model)
 func WithSwitcher(switcher Switcher) Option {
 	return func(m *Model) {
 		m.switcher = switcher
+		if closer, ok := switcher.(PopupCloser); ok {
+			m.popupCloser = closer
+		}
+	}
+}
+
+func WithPopupCloser(closer PopupCloser) Option {
+	return func(m *Model) {
+		m.popupCloser = closer
 	}
 }
 
@@ -168,6 +181,7 @@ const (
 type Model struct {
 	loader       SnapshotLoader
 	switcher     Switcher
+	popupCloser  PopupCloser
 	killer       Killer
 	detailOpener DetailOpener
 	uiStateStore UIStateStore
@@ -344,6 +358,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clearJumpMode()
 		return m, nil
 	case tea.KeyMsg:
+		if m.loading {
+			switch msg.String() {
+			case "ctrl+c", "q", "esc":
+				return m, tea.Quit
+			default:
+				return m, nil
+			}
+		}
 		if m.jumpMode != nil {
 			next, cmd := m.jumpMode.Update(msg)
 			if jump, ok := next.(*overlay.JumpMode); ok {
@@ -1190,6 +1212,7 @@ func (m Model) attachCmd(entry InventoryEntry) tea.Cmd {
 			"elapsed_ms", time.Since(switchStarted).Milliseconds(),
 			"session_id", target,
 		)
+		m.closePopupAfterAttach(ctx, target)
 
 		if !m.shouldOpenDetailAfterAttach(entry) {
 			return SwitchResultMsg{}
@@ -1211,6 +1234,27 @@ func (m Model) attachCmd(entry InventoryEntry) tea.Cmd {
 		)
 		return SwitchResultMsg{}
 	}
+}
+
+func (m Model) closePopupAfterAttach(ctx context.Context, target string) {
+	if m.popupCloser == nil {
+		return
+	}
+	closeCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+	defer cancel()
+	startedAt := time.Now()
+	if err := m.popupCloser.ClosePopup(closeCtx); err != nil {
+		slog.Default().Debug("tmux selector attach popup close failed",
+			"elapsed_ms", time.Since(startedAt).Milliseconds(),
+			"session_id", target,
+			"error", err,
+		)
+		return
+	}
+	slog.Default().Info("tmux selector attach popup close completed",
+		"elapsed_ms", time.Since(startedAt).Milliseconds(),
+		"session_id", target,
+	)
 }
 
 func switchTarget(entry InventoryEntry) string {

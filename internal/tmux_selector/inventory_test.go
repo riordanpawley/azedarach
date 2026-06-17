@@ -40,6 +40,7 @@ type fakeTaskSnapshotReader struct {
 	tasksByID     map[string]domain.Task
 	ancestorCalls [][]string
 	leanCalls     [][]string
+	metadataCalls [][]string
 	listCalls     int
 }
 
@@ -50,6 +51,11 @@ func (f *fakeTaskSnapshotReader) GetManyTaskSnapshotWithAncestorsNoDependents(_ 
 		tasks = append(tasks, task)
 	}
 	return daemonclient.TaskSnapshot{Tasks: tasks}, nil
+}
+
+func (f *fakeTaskSnapshotReader) GetManyTaskSnapshotWithAncestorsNoDependentsMetadataOnly(ctx context.Context, taskIDs []string) (daemonclient.TaskSnapshot, error) {
+	f.metadataCalls = append(f.metadataCalls, append([]string(nil), taskIDs...))
+	return f.GetManyTaskSnapshotWithAncestorsNoDependents(ctx, taskIDs)
 }
 
 func (f *fakeTaskSnapshotReader) GetManyTaskSnapshotWithAncestors(_ context.Context, taskIDs []string) (daemonclient.TaskSnapshot, error) {
@@ -664,12 +670,15 @@ func TestDaemonSnapshotSourceTargetedLoadRequestsAncestorContext(t *testing.T) {
 	if reader.listCalls != 0 {
 		t.Fatalf("ListTasksSnapshot calls = %d, want 0 for targeted load", reader.listCalls)
 	}
-	gotCalls := make([]string, 0, len(reader.leanCalls))
-	for _, call := range reader.leanCalls {
+	gotCalls := make([]string, 0, len(reader.metadataCalls))
+	for _, call := range reader.metadataCalls {
 		gotCalls = append(gotCalls, strings.Join(call, ","))
 	}
 	if strings.Join(gotCalls, "|") != "az-child" {
-		t.Fatalf("GetManyTaskSnapshotWithAncestorsNoDependents calls = %v, want child only", gotCalls)
+		t.Fatalf("GetManyTaskSnapshotWithAncestorsNoDependentsMetadataOnly calls = %v, want child only", gotCalls)
+	}
+	if len(reader.leanCalls) != 1 {
+		t.Fatalf("underlying lean calls = %v, want one metadata-only delegated call", reader.leanCalls)
 	}
 	if len(reader.ancestorCalls) != 0 {
 		t.Fatalf("GetManyTaskSnapshotWithAncestors calls = %v, want none", reader.ancestorCalls)

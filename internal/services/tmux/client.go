@@ -402,3 +402,14 @@ func (c *Client) DisplayPopup(ctx context.Context, title, width, height, command
 
 	return nil
 }
+
+func (c *Client) ClosePopup(ctx context.Context) error {
+	c.logger.Debug("closing tmux popup")
+
+	_, err := c.runner.Run(ctx, "display-popup", "-C")
+	if err != nil {
+		return &domain.TmuxError{Op: "display-popup", Err: err}
+	}
+
+	return nil
+}

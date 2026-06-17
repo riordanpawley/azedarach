@@ -371,6 +371,47 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("get many snapshot metadata only with ancestors no dependents", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				if req.Command != CommandTaskGetMany {
+					t.Fatalf("command = %q, want %q", req.Command, CommandTaskGetMany)
+				}
+				var body TaskIDsRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal request body: %v", err)
+				}
+				if !body.IncludeAncestors || !body.ExcludeDependents || !body.MetadataOnly {
+					t.Fatalf("request flags ancestors=%v exclude_dependents=%v metadata_only=%v, want all true", body.IncludeAncestors, body.ExcludeDependents, body.MetadataOnly)
+				}
+				if len(body.TaskIDs) != 1 || body.TaskIDs[0] != "az-parent" {
+					t.Fatalf("task_ids = %+v, want [az-parent]", body.TaskIDs)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Revision:        21,
+					OK:              true,
+					Body:            mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 21, []domain.Task{{ID: "az-parent", Title: "Parent", Status: domain.StatusOpen}}),
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		snapshot, err := client.GetManyTaskSnapshotWithAncestorsNoDependentsMetadataOnly(context.Background(), []string{"az-parent"})
+		if err != nil {
+			t.Fatalf("GetManyTaskSnapshotWithAncestorsNoDependentsMetadataOnly error: %v", err)
+		}
+		if snapshot.Revision != 21 {
+			t.Fatalf("revision = %d, want 21", snapshot.Revision)
+		}
+		if len(snapshot.Tasks) != 1 {
+			t.Fatalf("snapshot tasks = %+v", snapshot.Tasks)
+		}
+	})
+
 	t.Run("list snapshot rejects legacy raw task array", func(t *testing.T) {
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
