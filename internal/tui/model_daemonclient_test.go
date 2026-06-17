@@ -370,7 +370,7 @@ func TestEditedTaskDetailsStayVisibleAcrossStaleHydration(t *testing.T) {
 	}
 }
 
-func TestEditTaskSubmitSavesTitleAndKeepsWorkspaceOpen(t *testing.T) {
+func TestEditTaskSubmitSavesTitleAndClosesEditOverlay(t *testing.T) {
 	var updateBody struct {
 		TaskID string `json:"task_id"`
 		daemonclient.TaskUpdateParams
@@ -432,8 +432,8 @@ func TestEditTaskSubmitSavesTitleAndKeepsWorkspaceOpen(t *testing.T) {
 	if updateBody.TaskID != "az-1" || updateBody.Title != "Edited title" {
 		t.Fatalf("update body = %+v, want edited title for az-1", updateBody)
 	}
-	if current, ok := model.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok || current.TaskID() != "az-1" {
-		t.Fatalf("current overlay = %T, want workspace for az-1", model.overlayStack.Current())
+	if current := model.overlayStack.Current(); current != nil {
+		t.Fatalf("current overlay = %T, want no stacked workspace after edit save", current)
 	}
 	if got := model.tasks[0].Title; got != "Edited title" {
 		t.Fatalf("task title after save = %q, want edited title", got)
@@ -530,7 +530,7 @@ func TestEditTaskActionLoadsFullDetailsBeforeSubmit(t *testing.T) {
 	}
 }
 
-func TestEditTaskSubmitSavesTypedDescriptionAndKeepsWorkspaceOpen(t *testing.T) {
+func TestEditTaskSubmitSavesTypedDescriptionAndClosesEditOverlay(t *testing.T) {
 	var updateBody struct {
 		TaskID string `json:"task_id"`
 		daemonclient.TaskUpdateParams
@@ -592,15 +592,15 @@ func TestEditTaskSubmitSavesTypedDescriptionAndKeepsWorkspaceOpen(t *testing.T) 
 	if updateBody.TaskID != "az-1" || updateBody.Description != "Typed description" {
 		t.Fatalf("update body = %+v, want typed description for az-1", updateBody)
 	}
-	if current, ok := model.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok || current.TaskID() != "az-1" {
-		t.Fatalf("current overlay = %T, want workspace for az-1", model.overlayStack.Current())
+	if current := model.overlayStack.Current(); current != nil {
+		t.Fatalf("current overlay = %T, want no stacked workspace after edit save", current)
 	}
 	if got := model.tasks[0].Description; got != "Typed description" {
 		t.Fatalf("task description after save = %q, want typed description", got)
 	}
 }
 
-func TestEditTaskTabOutThenEnterSavesTypedDescriptionAndKeepsWorkspaceOpen(t *testing.T) {
+func TestEditTaskTabOutThenEnterSavesTypedDescriptionAndClosesEditOverlay(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		exitKey   tea.KeyMsg
@@ -681,14 +681,11 @@ func TestEditTaskTabOutThenEnterSavesTypedDescriptionAndKeepsWorkspaceOpen(t *te
 			if updateBody.TaskID != "az-1" || updateBody.Description != tc.wantValue {
 				t.Fatalf("update body = %+v, want typed description for az-1", updateBody)
 			}
-			if current, ok := model.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok || current.TaskID() != "az-1" {
-				t.Fatalf("current overlay = %T, want workspace for az-1", model.overlayStack.Current())
+			if current := model.overlayStack.Current(); current != nil {
+				t.Fatalf("current overlay = %T, want no stacked workspace after edit save", current)
 			}
 			if got := model.tasks[0].Description; got != tc.wantValue {
 				t.Fatalf("task description after save = %q, want %q", got, tc.wantValue)
-			}
-			if view := model.overlayStack.Current().View(); !strings.Contains(view, tc.wantValue) {
-				t.Fatalf("workspace view did not show typed description after save:\n%s", view)
 			}
 		})
 	}
@@ -7762,7 +7759,7 @@ func TestTaskWorkspaceStopSessionKeyKeepsOverlayOpen(t *testing.T) {
 	}
 }
 
-func TestTaskWorkspaceCleanupSelectsTargetAndKeepsWorkspaceUnderConfirm(t *testing.T) {
+func TestTaskWorkspaceCleanupSelectsTargetAndConfirmReplacesWorkspace(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
@@ -7841,8 +7838,8 @@ func TestTaskWorkspaceCleanupSelectsTargetAndKeepsWorkspaceUnderConfirm(t *testi
 
 	cancelledAny, _ := prompted.handleSelection(overlay.SelectionMsg{Key: "no"})
 	cancelled := cancelledAny.(Model)
-	if _, ok := cancelled.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
-		t.Fatalf("expected task workspace after cancelling cleanup, got %T", cancelled.overlayStack.Current())
+	if current := cancelled.overlayStack.Current(); current != nil {
+		t.Fatalf("expected no stacked workspace after cancelling cleanup, got %T", current)
 	}
 }
 

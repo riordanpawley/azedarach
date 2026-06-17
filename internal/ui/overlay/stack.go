@@ -2,25 +2,39 @@ package overlay
 
 import tea "github.com/charmbracelet/bubbletea"
 
-const maxOverlayStackDepth = 2
+const defaultOverlayStackDepth = 1
 
 // Stack manages a stack of overlays with push/pop operations
 type Stack struct {
 	overlays []Overlay
+	maxDepth int
 }
 
 // NewStack creates a new empty overlay stack
 func NewStack() *Stack {
+	return NewStackWithMaxDepth(defaultOverlayStackDepth)
+}
+
+// NewStackWithMaxDepth creates a stack capped at maxDepth overlays.
+func NewStackWithMaxDepth(maxDepth int) *Stack {
+	if maxDepth < 1 {
+		maxDepth = 1
+	}
 	return &Stack{
-		overlays: make([]Overlay, 0),
+		overlays: make([]Overlay, 0, maxDepth),
+		maxDepth: maxDepth,
 	}
 }
 
 // Push adds an overlay to the top of the stack
 func (s *Stack) Push(o Overlay) tea.Cmd {
 	s.overlays = append(s.overlays, o)
-	if len(s.overlays) > maxOverlayStackDepth {
-		s.overlays = s.overlays[len(s.overlays)-maxOverlayStackDepth:]
+	maxDepth := s.maxDepth
+	if maxDepth < 1 {
+		maxDepth = defaultOverlayStackDepth
+	}
+	if len(s.overlays) > maxDepth {
+		s.overlays = s.overlays[len(s.overlays)-maxDepth:]
 	}
 	return o.Init()
 }

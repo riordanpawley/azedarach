@@ -1217,7 +1217,7 @@ func TestActionModeEOpensEditOverlay(t *testing.T) {
 	}
 }
 
-func TestTaskWorkspaceCreateChildKeepsWorkspaceBehindForm(t *testing.T) {
+func TestTaskWorkspaceCreateChildReplacesWorkspaceWithForm(t *testing.T) {
 	m := newTestModel()
 	m.editor.EnterNormal()
 	parent := domain.Task{ID: "az-1", Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask}
@@ -1233,8 +1233,8 @@ func TestTaskWorkspaceCreateChildKeepsWorkspaceBehindForm(t *testing.T) {
 		t.Fatalf("expected create overlay on top, got %T", current)
 	}
 	newModel.overlayStack.Pop()
-	if _, ok := newModel.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
-		t.Fatalf("expected task workspace to remain underneath create overlay, got %T", newModel.overlayStack.Current())
+	if current := newModel.overlayStack.Current(); current != nil {
+		t.Fatalf("expected no stacked workspace underneath create overlay, got %T", current)
 	}
 }
 

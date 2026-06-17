@@ -85,6 +85,25 @@ func TestStackPushCapsDepthWithFIFOEviction(t *testing.T) {
 
 	stack.Push(mockOverlay{title: "Overlay 1", width: 40, height: 10})
 	stack.Push(mockOverlay{title: "Overlay 2", width: 50, height: 15})
+
+	if stack.Current().Title() != "Overlay 2" {
+		t.Fatalf("expected newest overlay on top, got %q", stack.Current().Title())
+	}
+
+	popped := stack.Pop()
+	if popped.Title() != "Overlay 2" {
+		t.Fatalf("first pop = %q, want Overlay 2", popped.Title())
+	}
+	if popped = stack.Pop(); popped != nil {
+		t.Fatalf("second pop = %q, want nil because Overlay 1 was evicted", popped.Title())
+	}
+}
+
+func TestStackWithMaxDepthTwoPreservesStackingFeature(t *testing.T) {
+	stack := NewStackWithMaxDepth(2)
+
+	stack.Push(mockOverlay{title: "Overlay 1", width: 40, height: 10})
+	stack.Push(mockOverlay{title: "Overlay 2", width: 50, height: 15})
 	stack.Push(mockOverlay{title: "Overlay 3", width: 60, height: 20})
 
 	if stack.Current().Title() != "Overlay 3" {
@@ -105,7 +124,7 @@ func TestStackPushCapsDepthWithFIFOEviction(t *testing.T) {
 }
 
 func TestStackRemoveTaskWorkspacesPreservesOtherOverlays(t *testing.T) {
-	stack := NewStack()
+	stack := NewStackWithMaxDepth(2)
 	stack.Push(NewTaskWorkspaceOverlay(domain.Task{ID: "az-1", Title: "One"}, nil, nil, 120, 30))
 	stack.Push(mockOverlay{title: "Create Child", width: 40, height: 10})
 
@@ -124,7 +143,7 @@ func TestStackRemoveTaskWorkspacesPreservesOtherOverlays(t *testing.T) {
 }
 
 func TestStackPop(t *testing.T) {
-	stack := NewStack()
+	stack := NewStackWithMaxDepth(2)
 	overlay1 := mockOverlay{title: "Overlay 1", width: 40, height: 10}
 	overlay2 := mockOverlay{title: "Overlay 2", width: 50, height: 15}
 
@@ -164,7 +183,7 @@ func TestStackPop(t *testing.T) {
 }
 
 func TestStackCurrent(t *testing.T) {
-	stack := NewStack()
+	stack := NewStackWithMaxDepth(2)
 
 	// Current on empty stack should return nil
 	if stack.Current() != nil {
@@ -213,7 +232,7 @@ func TestStackIsEmpty(t *testing.T) {
 }
 
 func TestStackClear(t *testing.T) {
-	stack := NewStack()
+	stack := NewStackWithMaxDepth(3)
 
 	overlay1 := mockOverlay{title: "Overlay 1", width: 40, height: 10}
 	overlay2 := mockOverlay{title: "Overlay 2", width: 50, height: 15}
@@ -263,7 +282,7 @@ func TestStackUpdate(t *testing.T) {
 }
 
 func TestStackUpdateWithCloseMsg(t *testing.T) {
-	stack := NewStack()
+	stack := NewStackWithMaxDepth(2)
 
 	overlay1 := mockOverlay{title: "Overlay 1", width: 40, height: 10}
 	overlay2 := mockOverlay{title: "Overlay 2", width: 50, height: 15}
