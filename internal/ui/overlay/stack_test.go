@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
 // mockOverlay is a simple overlay implementation for testing
@@ -100,6 +101,25 @@ func TestStackPushCapsDepthWithFIFOEviction(t *testing.T) {
 	}
 	if popped = stack.Pop(); popped != nil {
 		t.Fatalf("third pop = %q, want nil because Overlay 1 was evicted", popped.Title())
+	}
+}
+
+func TestStackRemoveTaskWorkspacesPreservesOtherOverlays(t *testing.T) {
+	stack := NewStack()
+	stack.Push(NewTaskWorkspaceOverlay(domain.Task{ID: "az-1", Title: "One"}, nil, nil, 120, 30))
+	stack.Push(mockOverlay{title: "Create Child", width: 40, height: 10})
+
+	stack.RemoveTaskWorkspaces()
+
+	current := stack.Pop()
+	if current == nil {
+		t.Fatal("expected non-workspace overlay to remain")
+	}
+	if got := current.Title(); got != "Create Child" {
+		t.Fatalf("remaining overlay = %q, want Create Child", got)
+	}
+	if extra := stack.Pop(); extra != nil {
+		t.Fatalf("expected task workspace to be removed, got extra %T", extra)
 	}
 }
 

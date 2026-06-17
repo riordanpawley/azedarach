@@ -458,6 +458,7 @@ func (m Model) openTaskWorkspaceByID(taskID string) (tea.Model, tea.Cmd) {
 		return m, m.refreshTaskWorkspaceInBackgroundCmd(taskID)
 	}
 
+	m.overlayStack.RemoveTaskWorkspaces()
 	workspace := overlay.NewTaskWorkspaceOverlay(*task, m.tasks, m.pendingMutationForTask(taskID), m.width, m.height)
 	workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
 	if m.daemonClient == nil {

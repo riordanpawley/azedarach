@@ -65,6 +65,22 @@ func (s *Stack) PromoteTaskWorkspace(taskID string) (*TaskWorkspaceOverlay, bool
 	return nil, false
 }
 
+// RemoveTaskWorkspaces removes task workspace overlays while preserving other
+// transient overlays such as create/edit/confirmation dialogs.
+func (s *Stack) RemoveTaskWorkspaces() {
+	if len(s.overlays) == 0 {
+		return
+	}
+	filtered := s.overlays[:0]
+	for _, candidate := range s.overlays {
+		if _, ok := candidate.(*TaskWorkspaceOverlay); ok {
+			continue
+		}
+		filtered = append(filtered, candidate)
+	}
+	s.overlays = filtered
+}
+
 // IsEmpty returns true if the stack has no overlays
 func (s *Stack) IsEmpty() bool {
 	return len(s.overlays) == 0

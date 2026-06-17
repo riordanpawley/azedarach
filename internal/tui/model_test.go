@@ -3325,44 +3325,31 @@ func TestOpenTaskWorkspaceByIDDoesNotPushDuplicateCurrentWorkspace(t *testing.T)
 	}
 }
 
-func TestOpenTaskWorkspaceByIDPromotesBuriedWorkspaceToTop(t *testing.T) {
+func TestOpenTaskWorkspaceByIDReplacesExistingWorkspace(t *testing.T) {
 	m := newTestModel()
 
 	updated, _ := m.openTaskWorkspaceByID("az-1")
 	m = updated.(Model)
 	updated, _ = m.openTaskWorkspaceByID("az-2")
-	m = updated.(Model)
-
-	updated, _ = m.openTaskWorkspaceByID("az-1")
 	m = updated.(Model)
 
 	top, ok := m.overlayStack.Pop().(*overlay.TaskWorkspaceOverlay)
 	if !ok {
 		t.Fatalf("expected task workspace on top")
 	}
-	if got := top.TaskID(); got != "az-1" {
-		t.Fatalf("top workspace task ID = %q, want az-1 (should be promoted to top)", got)
-	}
-
-	below, ok := m.overlayStack.Pop().(*overlay.TaskWorkspaceOverlay)
-	if !ok {
-		t.Fatalf("expected task workspace below the top")
-	}
-	if got := below.TaskID(); got != "az-2" {
-		t.Fatalf("buried workspace task ID = %q, want az-2", got)
+	if got := top.TaskID(); got != "az-2" {
+		t.Fatalf("workspace task ID = %q, want az-2", got)
 	}
 
 	if extra := m.overlayStack.Pop(); extra != nil {
-		t.Fatalf("expected only two workspaces, got extra %T", extra)
+		t.Fatalf("expected one workspace after replacement, got extra %T", extra)
 	}
 }
 
-func TestOpenTaskWorkspaceByIDPromoteWithoutDuplicating(t *testing.T) {
+func TestOpenTaskWorkspaceByIDReopenSameWorkspaceWithoutDuplicating(t *testing.T) {
 	m := newTestModel()
 
 	updated, _ := m.openTaskWorkspaceByID("az-1")
-	m = updated.(Model)
-	updated, _ = m.openTaskWorkspaceByID("az-2")
 	m = updated.(Model)
 	updated, _ = m.openTaskWorkspaceByID("az-1")
 	m = updated.(Model)
@@ -3374,8 +3361,8 @@ func TestOpenTaskWorkspaceByIDPromoteWithoutDuplicating(t *testing.T) {
 		}
 		count++
 	}
-	if count != 2 {
-		t.Fatalf("expected exactly two overlays on the stack, got %d", count)
+	if count != 1 {
+		t.Fatalf("expected exactly one workspace overlay on the stack, got %d", count)
 	}
 }
 
