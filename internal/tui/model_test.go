@@ -5903,6 +5903,103 @@ func TestHandleSelectionSessionMutationsShowImmediatePendingFeedback(t *testing.
 	}
 }
 
+func TestHandleSelectionXCancelsActiveTaskOperation(t *testing.T) {
+	var cancelBody protocol.OperationCancelRequestBody
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != protocol.CommandOperationCancel {
+				t.Fatalf("command = %q, want %q", req.Command, protocol.CommandOperationCancel)
+			}
+			if err := json.Unmarshal(req.Body, &cancelBody); err != nil {
+				t.Fatalf("decode cancel body: %v", err)
+			}
+			body, err := json.Marshal(protocol.OperationCancelResponseBody{
+				Operation: protocol.OperationRecord{
+					OperationID: cancelBody.OperationID,
+					IssueID:     "az-1",
+					Kind:        daemonclient.CommandSessionStart,
+					State:       protocol.OperationStateCancelled,
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal cancel response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+	m.nav.SelectTask("az-1", 0)
+	m.markTaskOperationPending("az-1", "session_start", "op-session-start", protocol.OperationStateRunning)
+
+	updatedAny, cmd := m.handleSelection(overlay.SelectionMsg{Key: "x"})
+	if cmd == nil {
+		t.Fatal("expected cancel command")
+	}
+	updated := updatedAny.(Model)
+	if got := updated.toasts[len(updated.toasts)-1].Message; got != "Cancelling operation op-session-start for az-1" {
+		t.Fatalf("toast = %q, want cancellation feedback", got)
+	}
+
+	msg, ok := cmd().(operationCancelledMsg)
+	if !ok {
+		t.Fatalf("message = %T, want operationCancelledMsg", msg)
+	}
+	if msg.err != nil {
+		t.Fatalf("cancel command error: %v", msg.err)
+	}
+	if cancelBody.OperationID.String() != "op-session-start" {
+		t.Fatalf("operation id = %q, want op-session-start", cancelBody.OperationID)
+	}
+	for _, request := range transport.requests {
+		if request == daemonclient.CommandSessionStop {
+			t.Fatalf("unexpected session stop request: %v", transport.requests)
+		}
+	}
+
+	afterAny, _ := updated.Update(msg)
+	after := afterAny.(Model)
+	if _, ok := after.pendingStatuses[taskIDKey("az-1")]; ok {
+		t.Fatalf("expected optimistic pending session marker cleared, got %+v", after.pendingStatuses)
+	}
+	progress := after.pendingMutationForTask("az-1")
+	if progress == nil || progress.State != string(protocol.OperationStateCancelled) {
+		t.Fatalf("progress = %+v, want cancelled operation visible", progress)
+	}
+}
+
+func TestOperationCancelRunningResponseKeepsPendingSessionMarker(t *testing.T) {
+	m := newTestModel()
+	m.markTaskOperationPending("az-1", "session_start", "op-session-start", protocol.OperationStateRunning)
+
+	updatedAny, _ := m.Update(operationCancelledMsg{
+		taskID: "az-1",
+		record: protocol.OperationRecord{
+			OperationID: "op-session-start",
+			IssueID:     "az-1",
+			Kind:        daemonclient.CommandSessionStart,
+			State:       protocol.OperationStateRunning,
+		},
+	})
+	updated := updatedAny.(Model)
+	pending, ok := updated.pendingStatuses[taskIDKey("az-1")]
+	if !ok {
+		t.Fatal("expected pending session marker to remain while cancellation is still running")
+	}
+	if pending.operationID != "op-session-start" || pending.state != protocol.OperationStateRunning {
+		t.Fatalf("pending marker = %+v, want running op-session-start", pending)
+	}
+	progress := updated.pendingMutationForTask("az-1")
+	if progress == nil || progress.State != string(protocol.OperationStateRunning) {
+		t.Fatalf("progress = %+v, want running operation still visible", progress)
+	}
+}
+
 func TestHandleSelectionAsyncActionsShowImmediateFeedback(t *testing.T) {
 	tests := []struct {
 		name      string
