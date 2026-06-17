@@ -1694,17 +1694,47 @@ func TestSelectModeSelectionAndBulkEntry(t *testing.T) {
 		}
 	})
 
-	t.Run("enter also opens bulk actions when selection exists", func(t *testing.T) {
+	t.Run("enter drills into current parent instead of opening bulk actions", func(t *testing.T) {
 		m := newTestModel()
 		m.editor.EnterSelect()
 		m.editor.Select("az-1")
-		m.nav.SelectTask("az-1", 0)
+		parentID := naming.IssueID("az-parent")
+		childID := naming.IssueID("az-child")
+		m.tasks = append(m.tasks,
+			domain.Task{
+				ID:       parentID,
+				Title:    "Parent task",
+				Status:   domain.StatusOpen,
+				Priority: domain.P1,
+				Type:     domain.TypeEpic,
+			},
+			domain.Task{
+				ID:       childID,
+				Title:    "Child task",
+				Status:   domain.StatusOpen,
+				Priority: domain.P2,
+				Type:     domain.TypeTask,
+				ParentID: &parentID,
+			},
+		)
+		m.nav.SelectTask(parentID.String(), 0)
 
 		result, _ := m.handleSelectMode(tea.KeyMsg{Type: tea.KeyEnter})
 		newModel := result.(Model)
 
-		if _, ok := newModel.overlayStack.Current().(*overlay.BulkActionMenu); !ok {
-			t.Fatalf("expected bulk action menu, got %T", newModel.overlayStack.Current())
+		if current := newModel.overlayStack.Current(); current != nil {
+			t.Fatalf("expected no bulk action overlay after Enter drill-down, got %T", current)
+		}
+		if got := newModel.drillDownParentID; got != parentID.String() {
+			t.Fatalf("drillDownParentID = %q, want %q", got, parentID)
+		}
+		columns := newModel.buildColumns()
+		pos := newModel.nav.GetPosition(columns)
+		if !pos.Valid {
+			t.Fatalf("expected valid drill-down cursor position, got %+v", pos)
+		}
+		if got := columns[pos.Column].Tasks[pos.Task].ID.String(); got != childID.String() {
+			t.Fatalf("selected task = %q, want child %q", got, childID)
 		}
 	})
 

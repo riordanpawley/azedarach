@@ -106,7 +106,8 @@ var registry = []ActionSpec{
 	{ID: ActionSelectAllVisible, Mode: types.ModeSelect, Keys: []KeySpec{{Input: "%", Display: "%"}}, Hint: "all"},
 	{ID: ActionSelectInvert, Mode: types.ModeSelect, Keys: []KeySpec{{Input: "*", Display: "*"}}, Hint: "invert"},
 	{ID: ActionSelectClear, Mode: types.ModeSelect, Keys: []KeySpec{{Input: "x", Display: "x"}}, Hint: "clear"},
-	{ID: ActionSelectBulk, Mode: types.ModeSelect, Keys: []KeySpec{{Input: " ", Display: "Space"}, {Input: "enter", Display: "Enter"}}, Hint: "bulk", HintKey: "Space/Enter"},
+	{ID: ActionDrillDown, Mode: types.ModeSelect, Keys: []KeySpec{{Input: "enter", Display: "Enter"}}, Hint: "drill"},
+	{ID: ActionSelectBulk, Mode: types.ModeSelect, Keys: []KeySpec{{Input: " ", Display: "Space"}}, Hint: "bulk"},
 	{ID: ActionSelectExit, Mode: types.ModeSelect, Keys: []KeySpec{{Input: "v", Display: "v"}, {Input: "esc", Display: "Esc"}}, Hint: "exit", HintKey: "v/Esc"},
 
 	// Search mode status hints.
@@ -171,7 +172,8 @@ var registry = []ActionSpec{
 	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "v then %", Help: "Select all visible tasks"},
 	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "v then *", Help: "Invert visible selection"},
 	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "v then x", Help: "Clear selection"},
-	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "v then Space/Enter", Help: "Open bulk actions for selected tasks"},
+	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "v then Enter", Help: "Drill into epic children"},
+	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "v then Space", Help: "Open bulk actions for selected tasks"},
 	{Mode: types.ModeNormal, Category: "Selection", HelpKey: "v/Esc", Help: "Exit select mode"},
 
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "a", Help: "Attach to selected issue session"},

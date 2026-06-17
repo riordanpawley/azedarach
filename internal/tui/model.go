@@ -995,6 +995,12 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.editor.ClearSelection()
 		return m, nil
 
+	case keybinds.ActionDrillDown:
+		if task != nil {
+			return m.enterDrillDownByID(task.ID.String())
+		}
+		return m, nil
+
 	// Exit select mode and clear selection
 	case keybinds.ActionSelectExit:
 		m.editor.ClearSelection()

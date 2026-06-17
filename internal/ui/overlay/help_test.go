@@ -72,7 +72,8 @@ func TestHelpOverlay_View_ContainsKeyBindings(t *testing.T) {
 		"Open task workspace",      // Workspace
 		"Drill into epic children", // Workspace
 		"a/5",                      // Selection
-		"Space/Enter",              // Selection
+		"v then Enter",             // Selection
+		"v then Space",             // Selection
 		"Toggle selection",         // Selection
 		"Refresh board data",       // Task actions
 		"Refresh issue",            // Task actions
