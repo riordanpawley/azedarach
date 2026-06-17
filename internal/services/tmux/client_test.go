@@ -695,3 +695,26 @@ func TestClient_DisplayPopup(t *testing.T) {
 		assert.Equal(t, "display-popup", tmuxErr.Op)
 	})
 }
+
+func TestClient_ClosePopup(t *testing.T) {
+	t.Run("builds close popup command", func(t *testing.T) {
+		runner := &recordingRunner{}
+		client := NewClient(runner, slog.Default())
+
+		err := client.ClosePopup(context.Background())
+		require.NoError(t, err)
+		require.Len(t, runner.commands, 1)
+		assert.Equal(t, []string{"display-popup", "-C"}, runner.commands[0])
+	})
+
+	t.Run("wraps close popup error", func(t *testing.T) {
+		runner := &recordingRunner{err: errors.New("popup close failed")}
+		client := NewClient(runner, slog.Default())
+
+		err := client.ClosePopup(context.Background())
+		require.Error(t, err)
+		var tmuxErr *domain.TmuxError
+		require.ErrorAs(t, err, &tmuxErr)
+		assert.Equal(t, "display-popup", tmuxErr.Op)
+	})
+}
