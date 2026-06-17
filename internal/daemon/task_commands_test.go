@@ -4186,23 +4186,37 @@ func TestHandleTaskGetManyMetadataOnlyPreservesContextShape(t *testing.T) {
 
 	projectID := "proj-get-many-metadata-only"
 	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
-		Title:    "Root",
-		Type:     domain.TypeTask,
-		Priority: domain.P2,
-		Status:   domain.StatusOpen,
+		Title:       "Root",
+		Description: "root details should stay out of metadata-only payload",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+		Status:      domain.StatusOpen,
 	})
 	if err != nil {
 		t.Fatalf("create root issue: %v", err)
 	}
 	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
-		Title:    "Child",
-		Type:     domain.TypeTask,
-		Priority: domain.P2,
-		Status:   domain.StatusOpen,
-		ParentID: &rootID,
+		Title:       "Child",
+		Description: "child details should stay out of metadata-only payload",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+		Status:      domain.StatusOpen,
+		ParentID:    &rootID,
 	})
 	if err != nil {
 		t.Fatalf("create child issue: %v", err)
+	}
+	relatedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Related dependency",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create related issue: %v", err)
+	}
+	if err := issuesClient.AddDependency(ctx, childID, relatedID, string(domain.DependencyRelatedTo)); err != nil {
+		t.Fatalf("add related dependency: %v", err)
 	}
 	d := &Daemon{
 		cfg: Config{RepoDir: ".", Logger: logger},
@@ -4248,6 +4262,15 @@ func TestHandleTaskGetManyMetadataOnlyPreservesContextShape(t *testing.T) {
 		if _, ok := taskByID[issueID]; !ok {
 			t.Fatalf("task %s missing from metadata-only payload: %+v", issueID, payload.Tasks)
 		}
+	}
+	if _, ok := taskByID[relatedID]; ok {
+		t.Fatalf("metadata-only payload included unrelated dependency %s: %+v", relatedID, payload.Tasks)
+	}
+	if taskByID[childID].Description != "" {
+		t.Fatalf("metadata-only child description = %q, want empty", taskByID[childID].Description)
+	}
+	if taskByID[childID].ParentID == nil || taskByID[childID].ParentID.String() != rootID {
+		t.Fatalf("metadata-only child parent = %+v, want %s", taskByID[childID].ParentID, rootID)
 	}
 }
 

@@ -446,7 +446,19 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 	if cmd.ExcludeDependents {
 		contextOptions = append(contextOptions, issues.WithoutDependentContext())
 	}
-	tasks, err := issueClient.GetManyWithDependencyContextRuntime(ctx, projectID, taskIDs, contextOptions...)
+	var (
+		tasks []domain.Task
+		err   error
+	)
+	if cmd.MetadataOnly {
+		if cmd.IncludeAncestors {
+			tasks, err = issueClient.GetManyMetadataWithAncestorContextRuntime(ctx, projectID, taskIDs)
+		} else {
+			tasks, err = issueClient.GetManyMetadataWithRuntime(ctx, projectID, taskIDs)
+		}
+	} else {
+		tasks, err = issueClient.GetManyWithDependencyContextRuntime(ctx, projectID, taskIDs, contextOptions...)
+	}
 	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("daemon task get-many failed", "project_id", projectID, "task_count", len(taskIDs), "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)

@@ -907,6 +907,44 @@ func (c *Client) GetManyWithDependencyContextRuntime(ctx context.Context, projec
 	return tasks, nil
 }
 
+// GetManyMetadataWithRuntime fetches lightweight issue metadata plus stored runtime projection fields.
+func (c *Client) GetManyMetadataWithRuntime(ctx context.Context, projectID string, ids []string) ([]domain.Task, error) {
+	return c.getManyMetadataWithRuntime(ctx, projectID, ids, false)
+}
+
+// GetManyMetadataWithAncestorContextRuntime fetches lightweight issue metadata plus parent ancestor context.
+func (c *Client) GetManyMetadataWithAncestorContextRuntime(ctx context.Context, projectID string, ids []string) ([]domain.Task, error) {
+	return c.getManyMetadataWithRuntime(ctx, projectID, ids, true)
+}
+
+func (c *Client) getManyMetadataWithRuntime(ctx context.Context, projectID string, ids []string, includeAncestors bool) ([]domain.Task, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	issueIDs := uniqueIssueIDStrings(ids)
+	if len(issueIDs) == 0 {
+		return nil, c.wrapError("get-many-metadata-runtime", "", domain.ErrNotFound)
+	}
+	contextIDs := append([]string(nil), issueIDs...)
+	if includeAncestors {
+		ancestorIDs, err := c.parentAncestorIDs(ctx, db, issueIDs)
+		if err != nil {
+			return nil, c.wrapError("get-many-metadata-runtime", strings.Join(issueIDs, ","), err)
+		}
+		contextIDs = uniqueIssueIDStrings(append(contextIDs, ancestorIDs...))
+	}
+	tasks, err := c.queryTaskMetadataWithRuntime(ctx, db, projectID, contextIDs...)
+	if err != nil {
+		return nil, c.wrapError("get-many-metadata-runtime", strings.Join(issueIDs, ","), err)
+	}
+	return tasks, nil
+}
+
 func (c *Client) parentAncestorIDs(ctx context.Context, db *sql.DB, issueIDs []string) ([]string, error) {
 	seen := map[string]struct{}{}
 	seeds := make([]string, 0, len(issueIDs))
@@ -973,6 +1011,23 @@ func (c *Client) parentAncestorIDs(ctx context.Context, db *sql.DB, issueIDs []s
 		return nil, err
 	}
 	return ancestors, nil
+}
+
+func uniqueIssueIDStrings(ids []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 // Search queries issues by id/title/description.
@@ -2288,6 +2343,164 @@ func (c *Client) queryTaskSummariesWithRuntime(ctx context.Context, db *sql.DB, 
 
 func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectID string, issueIDs ...string) ([]domain.Task, error) {
 	return c.queryTasksWithRuntimeProjection(ctx, db, projectID, true, issueIDs...)
+}
+
+func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, projectID string, issueIDs ...string) ([]domain.Task, error) {
+	ids := uniqueIssueIDStrings(issueIDs)
+	if len(ids) == 0 {
+		return []domain.Task{}, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	query := fmt.Sprintf(`
+		WITH ranked_session AS (
+			SELECT
+				issue_id,
+				COALESCE(NULLIF(TRIM(observed_state), ''), state) AS state,
+				COALESCE(started_at, '') AS started_at,
+				updated_at,
+				session_id,
+				COALESCE(tmux_attached_count, 0) AS tmux_attached_count,
+				ROW_NUMBER() OVER (
+					PARTITION BY issue_id
+					ORDER BY
+						CASE COALESCE(NULLIF(TRIM(observed_state), ''), state)
+							WHEN 'running' THEN 0
+							WHEN 'attached' THEN 0
+							WHEN 'paused' THEN 1
+							WHEN 'starting' THEN 2
+							WHEN 'stopped' THEN 3
+							ELSE 4
+						END,
+						updated_at DESC,
+						session_id DESC
+				) AS rn
+			FROM daemon_session_projections
+			WHERE project_id = ? AND issue_id IN (%s)
+		),
+		session_pick AS (
+			SELECT issue_id, state, started_at, updated_at, tmux_attached_count
+			FROM ranked_session
+			WHERE rn = 1
+		)
+		SELECT
+			i.id,
+			i.title,
+			i.status,
+			i.priority,
+			i.issue_type,
+			i.created_at,
+			i.updated_at,
+			COALESCE(sp.state, ''),
+			COALESCE(sp.started_at, ''),
+			COALESCE(sp.updated_at, ''),
+			COALESCE(sp.tmux_attached_count, 0),
+			COALESCE(w.path, ''),
+			COALESCE(parent.depends_on_id, '')
+		FROM issues i
+		LEFT JOIN session_pick sp ON sp.issue_id = i.id
+		LEFT JOIN daemon_worktree_projections w
+			ON w.project_id = ? AND w.issue_id = i.id
+		LEFT JOIN issue_dependencies parent
+			ON parent.issue_id = i.id
+			AND parent.tombstoned_at IS NULL
+			AND parent.dependency_type IN (?, ?)
+		WHERE i.deleted_at IS NULL AND i.id IN (%s)
+		ORDER BY i.updated_at DESC
+	`, placeholders, placeholders)
+	args := make([]any, 0, len(ids)*2+4)
+	args = append(args, projectID)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	args = append(args, projectID, string(domain.DependencyParentChild), "parent_child")
+	for _, id := range ids {
+		args = append(args, id)
+	}
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	tasks := make([]domain.Task, 0, len(ids))
+	seen := map[naming.IssueID]int{}
+	for rows.Next() {
+		task := domain.Task{}
+		var (
+			statusRaw         string
+			typeRaw           string
+			priorityRaw       int
+			createdRaw        string
+			updatedRaw        string
+			sessionStateRaw   string
+			sessionStartedRaw string
+			sessionUpdatedRaw string
+			tmuxAttachedCount int
+			worktreePath      string
+			parentIDRaw       string
+		)
+		if err := rows.Scan(
+			&task.ID,
+			&task.Title,
+			&statusRaw,
+			&priorityRaw,
+			&typeRaw,
+			&createdRaw,
+			&updatedRaw,
+			&sessionStateRaw,
+			&sessionStartedRaw,
+			&sessionUpdatedRaw,
+			&tmuxAttachedCount,
+			&worktreePath,
+			&parentIDRaw,
+		); err != nil {
+			return nil, err
+		}
+		if idx, ok := seen[task.ID]; ok {
+			if tasks[idx].ParentID == nil {
+				if parentID, err := naming.ParseIssueID(parentIDRaw); err == nil {
+					tasks[idx].ParentID = &parentID
+				}
+			}
+			continue
+		}
+		task.Status = domain.Status(statusRaw)
+		task.Priority = domain.Priority(priorityRaw)
+		task.Type = domain.TaskType(typeRaw)
+		task.CreatedAt = parseTimestamp(createdRaw)
+		task.UpdatedAt = parseTimestamp(updatedRaw)
+		task.Origin = "local"
+		if parentID, err := naming.ParseIssueID(parentIDRaw); err == nil {
+			task.ParentID = &parentID
+		}
+		worktreePath = strings.TrimSpace(worktreePath)
+		if worktreePath != "" {
+			task.HasWorktree = true
+		}
+		sessionStateRaw = strings.TrimSpace(sessionStateRaw)
+		if sessionStateRaw != "" && sessionStateRaw != "stopped" {
+			startedAt := parseOptionalTimestamp(sessionStartedRaw)
+			if startedAt == nil {
+				startedAt = parseOptionalTimestamp(sessionUpdatedRaw)
+			}
+			task.Session = &domain.Session{
+				IssueID:           task.ID,
+				State:             mapRuntimeSessionState(sessionStateRaw),
+				TmuxAttached:      tmuxAttachedCount > 0,
+				TmuxAttachedCount: tmuxAttachedCount,
+				StartedAt:         startedAt,
+				Worktree:          worktreePath,
+			}
+			task.HasTmuxSession = true
+		}
+		seen[task.ID] = len(tasks)
+		tasks = append(tasks, task)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return tasks, nil
 }
 
 func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB, projectID string, includeDetails bool, issueIDs ...string) ([]domain.Task, error) {

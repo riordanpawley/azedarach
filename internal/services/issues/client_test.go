@@ -533,6 +533,55 @@ func TestClient_GetManyWithDependencyContextRuntimeCanOmitDependents(t *testing.
 	}
 }
 
+func TestClient_GetManyMetadataWithAncestorContextRuntimeIsLean(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-batch-metadata-ancestor"
+
+	rootID, err := client.Create(ctx, CreateTaskParams{
+		Title:       "Root",
+		Description: "root detail should not be loaded",
+		Type:        domain.TypeEpic,
+		Priority:    domain.P1,
+		Status:      domain.StatusOpen,
+		Labels:      []string{"expensive"},
+	})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:       "Child",
+		Description: "child detail should not be loaded",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+		Status:      domain.StatusInProgress,
+		ParentID:    &rootID,
+	})
+	require.NoError(t, err)
+	relatedID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Related",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+		Status:   domain.StatusOpen,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.AddDependency(ctx, childID, relatedID, string(domain.DependencyRelatedTo)))
+
+	tasks, err := client.GetManyMetadataWithAncestorContextRuntime(ctx, projectID, []string{childID})
+	require.NoError(t, err)
+	taskByID := map[string]domain.Task{}
+	for _, task := range tasks {
+		taskByID[task.ID.String()] = task
+	}
+	require.Contains(t, taskByID, childID)
+	require.Contains(t, taskByID, rootID)
+	require.NotContains(t, taskByID, relatedID)
+	assert.Equal(t, "Child", taskByID[childID].Title)
+	assert.Equal(t, domain.StatusInProgress, taskByID[childID].Status)
+	assert.Empty(t, taskByID[childID].Description)
+	assert.Empty(t, taskByID[childID].Labels)
+	require.NotNil(t, taskByID[childID].ParentID)
+	assert.Equal(t, rootID, taskByID[childID].ParentID.String())
+}
+
 func TestTaskRuntimeProjectionQueryFiltersRuntimeCTEsForRequestedIDs(t *testing.T) {
 	query, args := taskRuntimeProjectionQuery("proj-batch-context", true, " second ", "", "second", "third")
 
@@ -2340,13 +2389,72 @@ func BenchmarkClient_GetManyWithDependencyContextRuntimeLargeProject(b *testing.
 	require.NoError(b, depStmt.Close())
 	require.NoError(b, tx.Commit())
 
-	ids := []string{"bench-100", "bench-500", "bench-1000", "bench-1500", "bench-2000", "bench-2500", "bench-3000", "bench-3200", "bench-3400"}
+	ids := []string{"bench-101", "bench-501", "bench-1001", "bench-1501", "bench-2001", "bench-2501", "bench-3001", "bench-3201", "bench-3401"}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		tasks, err := client.GetManyWithDependencyContextRuntime(ctx, projectID, ids)
 		require.NoError(b, err)
 		if len(tasks) == 0 {
 			b.Fatal("expected context tasks")
+		}
+	}
+}
+
+func BenchmarkClient_GetManyMetadataWithAncestorContextRuntimeLargeProject(b *testing.B) {
+	ctx := context.Background()
+	dbPath := filepath.Join(b.TempDir(), "issues.db")
+	client := NewClientAtPath(dbPath, slog.Default())
+	b.Cleanup(func() {
+		require.NoError(b, client.CloseDB())
+	})
+	db, err := client.dbHandle()
+	require.NoError(b, err)
+
+	const (
+		projectID = "proj-large"
+		taskCount = 3500
+	)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(b, err)
+	issueStmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO issues (id, title, description, status, priority, issue_type, created_at, updated_at, labels_json, implementations_json)
+		VALUES (?, ?, 'large details that selector should not decode', ?, ?, ?, ?, ?, '["selector","ignored"]', '["impl"]')
+	`)
+	require.NoError(b, err)
+	sessionStmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`)
+	require.NoError(b, err)
+	depStmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type)
+		VALUES (?, ?, ?)
+	`)
+	require.NoError(b, err)
+	for i := 0; i < taskCount; i++ {
+		id := "bench-" + strconv.Itoa(i)
+		_, err = issueStmt.ExecContext(ctx, id, "Benchmark issue "+strconv.Itoa(i), string(domain.StatusOpen), int(domain.P2), string(domain.TypeTask), now, now)
+		require.NoError(b, err)
+		_, err = sessionStmt.ExecContext(ctx, projectID, "sess-"+strconv.Itoa(i), id, "stopped", now, now)
+		require.NoError(b, err)
+		if i > 0 && i%100 != 0 {
+			_, err = depStmt.ExecContext(ctx, id, "bench-"+strconv.Itoa(i-(i%100)), string(domain.DependencyParentChild))
+			require.NoError(b, err)
+		}
+	}
+	require.NoError(b, issueStmt.Close())
+	require.NoError(b, sessionStmt.Close())
+	require.NoError(b, depStmt.Close())
+	require.NoError(b, tx.Commit())
+
+	ids := []string{"bench-100", "bench-500", "bench-1000", "bench-1500", "bench-2000", "bench-2500", "bench-3000", "bench-3200", "bench-3400"}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tasks, err := client.GetManyMetadataWithAncestorContextRuntime(ctx, projectID, ids)
+		require.NoError(b, err)
+		if len(tasks) == 0 {
+			b.Fatal("expected metadata tasks")
 		}
 	}
 }
