@@ -207,6 +207,75 @@ func TestOperationRuntimeGitMergePublishesLifecycleEvents(t *testing.T) {
 	}
 }
 
+func TestOperationRuntimeSessionStartPersistsRunningProgress(t *testing.T) {
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), hub: publish.NewHub(32, 16, nil), nextRevision: sequentialRevision()})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	runtime.sessionStart = func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		if err := daemonops.ReportProgress(ctx, daemonops.Progress{
+			Phase:   "worktree_preflight",
+			Message: "creating or reusing worktree",
+			Current: 25,
+			Total:   100,
+			Unit:    "percent",
+			Percent: 25,
+		}); err != nil {
+			t.Fatalf("ReportProgress error: %v", err)
+		}
+		close(started)
+		<-release
+		return testResponse(req, map[string]string{"output": "session started"}), nil
+	}
+
+	payload := mustJSON(t, map[string]string{"project_id": "proj-1", "session_id": "AZ-1"})
+	ch, cancel := runtime.hub.Subscribe("proj-1", 0)
+	defer cancel()
+	resp := runtime.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+		ProjectID: "proj-1",
+		Kind:      "session.start",
+		IssueID:   naming.IssueID("AZ-1"),
+		Payload:   payload,
+	}))
+	if !resp.OK {
+		t.Fatalf("submit response = %+v", resp)
+	}
+	var submitBody protocol.OperationSubmitResponseBody
+	if err := json.Unmarshal(resp.Body, &submitBody); err != nil {
+		t.Fatalf("unmarshal submit body: %v", err)
+	}
+	<-started
+
+	record := waitForRuntimeProgress(t, runtime, submitBody.Operation.OperationID.String(), "worktree_preflight")
+	if record.State != daemonops.StateRunning {
+		t.Fatalf("record state = %s, want running", record.State)
+	}
+
+	getResp := runtime.Handle(context.Background(), testRequest(protocol.CommandOperationGet, protocol.OperationGetRequestBody{OperationID: submitBody.Operation.OperationID}))
+	if !getResp.OK {
+		t.Fatalf("get response = %+v", getResp)
+	}
+	var getBody protocol.OperationGetResponseBody
+	if err := json.Unmarshal(getResp.Body, &getBody); err != nil {
+		t.Fatalf("unmarshal get body: %v", err)
+	}
+	if getBody.Operation.Progress == nil || getBody.Operation.Progress.Phase != "worktree_preflight" || getBody.Operation.Progress.Percent != 25 {
+		t.Fatalf("operation progress = %+v, want worktree_preflight 25%%", getBody.Operation.Progress)
+	}
+
+	events := collectOperationEvents(t, ch, 5)
+	if events[4].Event != protocol.EventOperationProgress {
+		t.Fatalf("event[4] = %s, want progress-only update without duplicate lifecycle event", events[4].Event)
+	}
+	var progress protocol.OperationProgressEventBody
+	if err := json.Unmarshal(events[4].Body, &progress); err != nil {
+		t.Fatalf("unmarshal progress event: %v", err)
+	}
+	if progress.Progress.Phase != "worktree_preflight" {
+		t.Fatalf("progress event phase = %q, want worktree_preflight", progress.Progress.Phase)
+	}
+}
+
 func TestOperationRuntimeDirectGitMergeWaitTimeoutReturnsPendingEnvelope(t *testing.T) {
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), nextRevision: sequentialRevision()})
 	runtime.gitHandler = daemonhandlers.NewGitHandler(runtimeGitService{})
@@ -324,6 +393,51 @@ func TestOperationRuntimeCancelMarksRunningOperationCancelled(t *testing.T) {
 	submitResp := runtime.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
 		ProjectID: "proj-1",
 		Kind:      "session.stop",
+		IssueID:   naming.IssueID("AZ-2"),
+		Payload:   payload,
+	}))
+	if !submitResp.OK {
+		t.Fatalf("submit response = %+v", submitResp)
+	}
+	var submitBody protocol.OperationSubmitResponseBody
+	if err := json.Unmarshal(submitResp.Body, &submitBody); err != nil {
+		t.Fatalf("unmarshal submit body: %v", err)
+	}
+
+	select {
+	case <-blocked:
+	case <-time.After(time.Second):
+		t.Fatal("operation did not start running")
+	}
+
+	cancelResp := runtime.Handle(context.Background(), testRequest(protocol.CommandOperationCancel, protocol.OperationCancelRequestBody{
+		ProjectID:   "proj-1",
+		OperationID: submitBody.Operation.OperationID,
+		Reason:      "user requested cancel",
+	}))
+	if !cancelResp.OK {
+		t.Fatalf("cancel response = %+v", cancelResp)
+	}
+
+	record := waitForRuntimeState(t, runtime, submitBody.Operation.OperationID.String(), daemonops.StateCancelled)
+	if record.ErrorMessage != "user requested cancel" {
+		t.Fatalf("cancel error message = %q, want user requested cancel", record.ErrorMessage)
+	}
+}
+
+func TestOperationRuntimeCancelMapsCancelledErrorResponseToCancelled(t *testing.T) {
+	blocked := make(chan struct{})
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), nextRevision: sequentialRevision()})
+	runtime.sessionStart = func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		close(blocked)
+		<-ctx.Done()
+		return runtime.errorResponse(req, protocol.ErrorCodeInternal, ctx.Err().Error()), nil
+	}
+
+	payload := mustJSON(t, map[string]string{"project_id": "proj-1", "session_id": "AZ-2"})
+	submitResp := runtime.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+		ProjectID: "proj-1",
+		Kind:      "session.start",
 		IssueID:   naming.IssueID("AZ-2"),
 		Payload:   payload,
 	}))
@@ -653,6 +767,182 @@ func TestDaemonDrainInFlightCommandsStopsIntakeCancelsQueuedAndDrainsRunning(t *
 	waitForRuntimeState(t, runtime, queuedResult.Record.ID, daemonops.StateCancelled)
 }
 
+func TestBuildSubmitRequestRoutesSessionStartThroughProjectHeavyResource(t *testing.T) {
+	runtime := newSessionStartOperationRuntime(t)
+
+	startReq := runtime.buildSubmitRequestForTest(
+		t,
+		daemonhandlers.CommandSessionStart,
+		"proj-1",
+		mustJSON(t, map[string]string{"project_id": "proj-1", "session_id": "AZ-10"}),
+	)
+	if !hasResourceKey(startReq.ResourceKeys, "issue:proj-1:AZ-10") {
+		t.Fatalf("session.start resource keys = %v, want issue key", startReq.ResourceKeys)
+	}
+	if !hasResourceKey(startReq.ResourceKeys, heavySessionStartResourceKey("proj-1")) {
+		t.Fatalf("session.start resource keys = %v, want project heavy-start key", startReq.ResourceKeys)
+	}
+
+	stopReq := runtime.buildSubmitRequestForTest(
+		t,
+		daemonhandlers.CommandSessionStop,
+		"proj-1",
+		mustJSON(t, map[string]string{"project_id": "proj-1", "session_id": "AZ-10"}),
+	)
+	if hasResourceKey(stopReq.ResourceKeys, heavySessionStartResourceKey("proj-1")) {
+		t.Fatalf("session.stop resource keys = %v, did not want project heavy-start key", stopReq.ResourceKeys)
+	}
+}
+
+func TestBuildSubmitRequestUsesPayloadProjectForHeavySessionStartResource(t *testing.T) {
+	runtime := newSessionStartOperationRuntime(t)
+
+	req := runtime.buildSubmitRequestForTest(
+		t,
+		daemonhandlers.CommandSessionStart,
+		protocol.DefaultProjectID,
+		mustJSON(t, map[string]string{"project_id": "payload-proj", "session_id": "AZ-10"}),
+	)
+
+	if !hasResourceKey(req.ResourceKeys, "issue:payload-proj:AZ-10") {
+		t.Fatalf("session.start resource keys = %v, want payload project issue key", req.ResourceKeys)
+	}
+	if !hasResourceKey(req.ResourceKeys, heavySessionStartResourceKey("payload-proj")) {
+		t.Fatalf("session.start resource keys = %v, want payload project heavy-start key", req.ResourceKeys)
+	}
+	if hasResourceKey(req.ResourceKeys, heavySessionStartResourceKey(protocol.DefaultProjectID)) {
+		t.Fatalf("session.start resource keys = %v, did not want meta project heavy-start key", req.ResourceKeys)
+	}
+}
+
+func TestBuildSubmitRequestAddsHeavyResourceToExplicitSessionStartKeys(t *testing.T) {
+	runtime := newSessionStartOperationRuntime(t)
+	payload := mustJSON(t, map[string]string{"project_id": "proj-1", "session_id": "AZ-11"})
+
+	req, err := runtime.buildSubmitRequest(daemonhandlers.CommandSessionStart, "proj-1", payload, operationSubmitOverrides{
+		IssueID:      naming.IssueID("AZ-11"),
+		DedupeKey:    "session.start:AZ-11",
+		ResourceKeys: []string{"session:AZ-11", "worktree:AZ-11"},
+	})
+	if err != nil {
+		t.Fatalf("build submit request: %v", err)
+	}
+
+	for _, key := range []string{"session:AZ-11", "worktree:AZ-11", heavySessionStartResourceKey("proj-1")} {
+		if !hasResourceKey(req.ResourceKeys, key) {
+			t.Fatalf("resource keys = %v, want %s", req.ResourceKeys, key)
+		}
+	}
+}
+
+func TestOperationRuntimeSerializesSameProjectSessionStarts(t *testing.T) {
+	runtime := newSessionStartOperationRuntime(t)
+	firstStarted := make(chan struct{})
+	firstRelease := make(chan struct{})
+	secondStarted := make(chan struct{}, 1)
+
+	firstReq := runtime.buildSubmitRequestForTest(
+		t,
+		daemonhandlers.CommandSessionStart,
+		"proj-1",
+		mustJSON(t, map[string]string{"project_id": "proj-1", "session_id": "AZ-10"}),
+	)
+	secondReq := runtime.buildSubmitRequestForTest(
+		t,
+		daemonhandlers.CommandSessionStart,
+		"proj-1",
+		mustJSON(t, map[string]string{"project_id": "proj-1", "session_id": "AZ-11"}),
+	)
+
+	if _, err := runtime.manager.Submit(context.Background(), firstReq, func(context.Context) ([]byte, error) {
+		close(firstStarted)
+		<-firstRelease
+		return nil, nil
+	}); err != nil {
+		t.Fatalf("submit first session.start: %v", err)
+	}
+	<-firstStarted
+
+	second, err := runtime.manager.Submit(context.Background(), secondReq, func(context.Context) ([]byte, error) {
+		secondStarted <- struct{}{}
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("submit second session.start: %v", err)
+	}
+	if second.Record.State != daemonops.StateQueued {
+		t.Fatalf("second state = %s, want queued", second.Record.State)
+	}
+	if !hasResourceKey(second.Record.ResourceKeys, heavySessionStartResourceKey("proj-1")) {
+		t.Fatalf("second resource keys = %v, want durable heavy-start key", second.Record.ResourceKeys)
+	}
+
+	select {
+	case <-secondStarted:
+		t.Fatal("second same-project session.start entered heavyweight work while first was running")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(firstRelease)
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("second same-project session.start did not start after first completed")
+	}
+
+	if err := runtime.manager.Drain(context.Background()); err != nil {
+		t.Fatalf("drain error: %v", err)
+	}
+}
+
+func TestOperationRuntimeAllowsDifferentProjectSessionStartsConcurrently(t *testing.T) {
+	runtime := newSessionStartOperationRuntime(t)
+	started := make(chan string, 2)
+	release := make(chan struct{})
+
+	runner := func(name string) daemonops.Runner {
+		return func(context.Context) ([]byte, error) {
+			started <- name
+			<-release
+			return nil, nil
+		}
+	}
+	firstReq := runtime.buildSubmitRequestForTest(
+		t,
+		daemonhandlers.CommandSessionStart,
+		"proj-1",
+		mustJSON(t, map[string]string{"project_id": "proj-1", "session_id": "AZ-10"}),
+	)
+	secondReq := runtime.buildSubmitRequestForTest(
+		t,
+		daemonhandlers.CommandSessionStart,
+		"proj-2",
+		mustJSON(t, map[string]string{"project_id": "proj-2", "session_id": "AZ-11"}),
+	)
+
+	if _, err := runtime.manager.Submit(context.Background(), firstReq, runner("first")); err != nil {
+		t.Fatalf("submit first session.start: %v", err)
+	}
+	if _, err := runtime.manager.Submit(context.Background(), secondReq, runner("second")); err != nil {
+		t.Fatalf("submit second session.start: %v", err)
+	}
+
+	seen := map[string]bool{}
+	for len(seen) < 2 {
+		select {
+		case name := <-started:
+			seen[name] = true
+		case <-time.After(time.Second):
+			t.Fatalf("expected both different-project starts to run concurrently, saw %v", seen)
+		}
+	}
+
+	close(release)
+	if err := runtime.manager.Drain(context.Background()); err != nil {
+		t.Fatalf("drain error: %v", err)
+	}
+}
+
 func TestBuildSubmitRequestDefaultsGitFetchRemote(t *testing.T) {
 	runtime := newOperationRuntime(operationRuntimeConfig{
 		repoDir:      t.TempDir(),
@@ -801,6 +1091,18 @@ func (r *operationRuntime) buildSubmitRequestForTest(t *testing.T, kind, project
 	return req
 }
 
+func newSessionStartOperationRuntime(t *testing.T) *operationRuntime {
+	t.Helper()
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), nextRevision: sequentialRevision()})
+	runtime.sessionStart = func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		return testResponse(req, map[string]string{"output": "started"}), nil
+	}
+	runtime.sessionStop = func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		return testResponse(req, map[string]string{"output": "stopped"}), nil
+	}
+	return runtime
+}
+
 func testRequest(command string, body any) protocol.RequestEnvelope {
 	return protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: naming.RequestID("req-" + command), Kind: protocol.EnvelopeKindCommand, Command: command, Body: marshalJSON(body)}
 }
@@ -839,6 +1141,33 @@ func waitForRuntimeState(t *testing.T, runtime *operationRuntime, operationID st
 	}
 	t.Fatalf("operation %s state = %s, want %s", operationID, record.State, want)
 	return daemonops.Record{}
+}
+
+func waitForRuntimeProgress(t *testing.T, runtime *operationRuntime, operationID, wantPhase string) daemonops.Record {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		record, err := runtime.manager.Get(context.Background(), operationID)
+		if err == nil && record.Progress != nil && record.Progress.Phase == wantPhase {
+			return record
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	record, err := runtime.manager.Get(context.Background(), operationID)
+	if err != nil {
+		t.Fatalf("get operation %s: %v", operationID, err)
+	}
+	t.Fatalf("operation %s progress = %+v, want phase %s", operationID, record.Progress, wantPhase)
+	return daemonops.Record{}
+}
+
+func hasResourceKey(keys []string, want string) bool {
+	for _, key := range keys {
+		if key == want {
+			return true
+		}
+	}
+	return false
 }
 
 func collectOperationEvents(t *testing.T, ch <-chan protocol.EventEnvelope, count int) []protocol.EventEnvelope {

@@ -275,6 +275,8 @@ func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
 			session_id TEXT NOT NULL,
 			issue_id TEXT NOT NULL,
 			state TEXT NOT NULL,
+			activity TEXT,
+			activity_source TEXT,
 			started_at TEXT,
 			updated_at TEXT NOT NULL,
 			PRIMARY KEY (project_id, session_id)
@@ -303,6 +305,12 @@ func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
 		return fmt.Errorf("ensure runtime projection schema: %w", err)
 	}
 	if err := ensureSQLiteColumn(db, "daemon_session_projections", "observed_state", "TEXT"); err != nil {
+		return fmt.Errorf("ensure runtime projection schema: %w", err)
+	}
+	if err := ensureSQLiteColumn(db, "daemon_session_projections", "activity", "TEXT"); err != nil {
+		return fmt.Errorf("ensure runtime projection schema: %w", err)
+	}
+	if err := ensureSQLiteColumn(db, "daemon_session_projections", "activity_source", "TEXT"); err != nil {
 		return fmt.Errorf("ensure runtime projection schema: %w", err)
 	}
 	return nil
@@ -2359,6 +2367,8 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 				COALESCE(started_at, '') AS started_at,
 				updated_at,
 				session_id,
+				COALESCE(activity, '') AS activity,
+				COALESCE(activity_source, '') AS activity_source,
 				COALESCE(tmux_attached_count, 0) AS tmux_attached_count,
 				ROW_NUMBER() OVER (
 					PARTITION BY issue_id
@@ -2378,7 +2388,7 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 			WHERE project_id = ? AND issue_id IN (%s)
 		),
 		session_pick AS (
-			SELECT issue_id, state, started_at, updated_at, tmux_attached_count
+			SELECT issue_id, state, started_at, updated_at, activity, activity_source, tmux_attached_count
 			FROM ranked_session
 			WHERE rn = 1
 		)
@@ -2393,6 +2403,8 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 			COALESCE(sp.state, ''),
 			COALESCE(sp.started_at, ''),
 			COALESCE(sp.updated_at, ''),
+			COALESCE(sp.activity, ''),
+			COALESCE(sp.activity_source, ''),
 			COALESCE(sp.tmux_attached_count, 0),
 			COALESCE(w.path, ''),
 			COALESCE(w.git_status_json, ''),
@@ -2429,18 +2441,20 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 	for rows.Next() {
 		task := domain.Task{}
 		var (
-			statusRaw         string
-			typeRaw           string
-			priorityRaw       int
-			createdRaw        string
-			updatedRaw        string
-			sessionStateRaw   string
-			sessionStartedRaw string
-			sessionUpdatedRaw string
-			tmuxAttachedCount int
-			worktreePath      string
-			gitStatusRaw      string
-			parentIDRaw       string
+			statusRaw          string
+			typeRaw            string
+			priorityRaw        int
+			createdRaw         string
+			updatedRaw         string
+			sessionStateRaw    string
+			sessionStartedRaw  string
+			sessionUpdatedRaw  string
+			sessionActivityRaw string
+			sessionSourceRaw   string
+			tmuxAttachedCount  int
+			worktreePath       string
+			gitStatusRaw       string
+			parentIDRaw        string
 		)
 		if err := rows.Scan(
 			&task.ID,
@@ -2453,6 +2467,8 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 			&sessionStateRaw,
 			&sessionStartedRaw,
 			&sessionUpdatedRaw,
+			&sessionActivityRaw,
+			&sessionSourceRaw,
 			&tmuxAttachedCount,
 			&worktreePath,
 			&gitStatusRaw,
@@ -2491,6 +2507,8 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 			task.Session = &domain.Session{
 				IssueID:           task.ID,
 				State:             mapRuntimeSessionState(sessionStateRaw),
+				Activity:          strings.ToLower(strings.TrimSpace(sessionActivityRaw)),
+				ActivitySource:    strings.ToLower(strings.TrimSpace(sessionSourceRaw)),
 				TmuxAttached:      tmuxAttachedCount > 0,
 				TmuxAttachedCount: tmuxAttachedCount,
 				StartedAt:         startedAt,
@@ -2534,6 +2552,8 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 			sessionStateRaw    string
 			sessionStartedRaw  string
 			sessionUpdatedRaw  string
+			sessionActivityRaw string
+			sessionSourceRaw   string
 			tmuxAttachedCount  int
 			worktreePath       string
 			gitStatusRaw       string
@@ -2558,6 +2578,8 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 			&sessionStateRaw,
 			&sessionStartedRaw,
 			&sessionUpdatedRaw,
+			&sessionActivityRaw,
+			&sessionSourceRaw,
 			&tmuxAttachedCount,
 			&worktreePath,
 			&gitStatusRaw,
@@ -2597,6 +2619,8 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 			task.Session = &domain.Session{
 				IssueID:           task.ID,
 				State:             mapRuntimeSessionState(sessionStateRaw),
+				Activity:          strings.ToLower(strings.TrimSpace(sessionActivityRaw)),
+				ActivitySource:    strings.ToLower(strings.TrimSpace(sessionSourceRaw)),
 				TmuxAttached:      tmuxAttachedCount > 0,
 				TmuxAttachedCount: tmuxAttachedCount,
 				StartedAt:         startedAt,
@@ -2695,6 +2719,8 @@ func taskRuntimeProjectionQuery(projectID string, includeDetails bool, issueIDs 
 				COALESCE(started_at, '') AS started_at,
 				updated_at,
 				session_id,
+				COALESCE(activity, '') AS activity,
+				COALESCE(activity_source, '') AS activity_source,
 				COALESCE(tmux_attached_count, 0) AS tmux_attached_count,
 				ROW_NUMBER() OVER (
 					PARTITION BY issue_id
@@ -2714,7 +2740,7 @@ func taskRuntimeProjectionQuery(projectID string, includeDetails bool, issueIDs 
 			WHERE project_id = ?` + sessionFilter + `
 		),
 		session_pick AS (
-			SELECT issue_id, state, started_at, updated_at, tmux_attached_count
+			SELECT issue_id, state, started_at, updated_at, activity, activity_source, tmux_attached_count
 			FROM ranked_session
 			WHERE rn = 1
 		),
@@ -2740,6 +2766,8 @@ func taskRuntimeProjectionQuery(projectID string, includeDetails bool, issueIDs 
 			COALESCE(sp.state, ''),
 			COALESCE(sp.started_at, ''),
 			COALESCE(sp.updated_at, ''),
+			COALESCE(sp.activity, ''),
+			COALESCE(sp.activity_source, ''),
 			COALESCE(sp.tmux_attached_count, 0),
 			COALESCE(w.path, ''),
 			COALESCE(w.git_status_json, ''),

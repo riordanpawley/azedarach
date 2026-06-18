@@ -610,32 +610,47 @@ func (a *worktreeServiceAdapter) Delete(ctx context.Context, projectID string, i
 	if manager == nil {
 		return errors.New("worktree manager unavailable")
 	}
-	worktree, err := manager.Get(ctx, issueID)
+	projectID = normalizedProjectID(projectID)
+	projectedWorktree, hasProjectedWorktree, err := a.projectedWorktreeForIssue(ctx, projectID, issueID)
+	if err != nil {
+		return err
+	}
+	opts := git.WorktreeDeleteOptions{
+		Force:         force,
+		BranchCleanup: git.WorktreeBranchCleanupRequired,
+	}
+	if hasProjectedWorktree {
+		opts.FallbackBranch = projectedWorktree.Branch
+	}
+	removedWorktree, err := manager.DeleteWithOptions(ctx, issueID, opts)
 	if err != nil {
 		if errors.Is(err, git.ErrWorktreeNotFound) {
 			if a.runtimeProjectionWriter != nil {
-				a.runtimeProjectionWriter.DeleteWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), issueID)
+				a.runtimeProjectionWriter.DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID)
 			}
 			return nil
 		}
 		return err
 	}
-	if err := manager.DeleteWithOptions(ctx, issueID, force); err != nil {
-		if errors.Is(err, git.ErrWorktreeNotFound) {
-			if a.runtimeProjectionWriter != nil {
-				a.runtimeProjectionWriter.DeleteWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), issueID)
-			}
-			return nil
-		}
-		return err
-	}
-	if worktree != nil {
-		_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(worktree.Path))
+	if removedWorktree != nil {
+		_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(removedWorktree.Path))
 	}
 	if a.runtimeProjectionWriter != nil {
-		a.runtimeProjectionWriter.DeleteWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), issueID)
+		a.runtimeProjectionWriter.DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID)
 	}
 	return nil
+}
+
+func (a *worktreeServiceAdapter) projectedWorktreeForIssue(ctx context.Context, projectID, issueID string) (daemonstate.WorktreeState, bool, error) {
+	store := a.runtimeStore(projectID)
+	if store == nil {
+		return daemonstate.WorktreeState{}, false, nil
+	}
+	worktree, found, err := store.GetWorktreeStateByIssueID(ctx, projectID, issueID)
+	if err != nil {
+		return daemonstate.WorktreeState{}, false, fmt.Errorf("read worktree projection for %s: %w", issueID, err)
+	}
+	return worktree, found, nil
 }
 
 func (a *worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID string) (*daemonhandlers.CleanupOrphanedResult, error) {

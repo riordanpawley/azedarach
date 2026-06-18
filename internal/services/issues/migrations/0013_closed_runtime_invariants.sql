@@ -7,6 +7,8 @@ CREATE TABLE IF NOT EXISTS daemon_session_projections (
 	updated_at TEXT NOT NULL,
 	tmux_attached_count INTEGER NOT NULL DEFAULT 0,
 	observed_state TEXT,
+	activity TEXT,
+	activity_source TEXT,
 	PRIMARY KEY (project_id, session_id)
 );
 

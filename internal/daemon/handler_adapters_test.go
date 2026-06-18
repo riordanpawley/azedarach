@@ -333,6 +333,7 @@ type staticWorktreeListRunner struct {
 	listCalls int
 	output    string
 	commands  []string
+	branchErr error
 }
 
 func (r *staticWorktreeListRunner) Run(_ context.Context, args ...string) (string, error) {
@@ -340,6 +341,27 @@ func (r *staticWorktreeListRunner) Run(_ context.Context, args ...string) (strin
 	if len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" {
 		r.listCalls++
 		return r.output, nil
+	}
+	if len(args) >= 2 && args[0] == "branch" && args[1] == "-D" && r.branchErr != nil {
+		return "", r.branchErr
+	}
+	return "", nil
+}
+
+type sequenceWorktreeListRunner struct {
+	outputs  []string
+	commands []string
+}
+
+func (r *sequenceWorktreeListRunner) Run(_ context.Context, args ...string) (string, error) {
+	r.commands = append(r.commands, strings.Join(args, " "))
+	if len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" {
+		if len(r.outputs) == 0 {
+			return "", nil
+		}
+		output := r.outputs[0]
+		r.outputs = r.outputs[1:]
+		return output, nil
 	}
 	return "", nil
 }
@@ -372,12 +394,152 @@ branch refs/heads/riordan/bvx/worktree-delete
 	}
 	wantCommands := []string{
 		"worktree list --porcelain",
-		"worktree list --porcelain",
 		"worktree remove " + worktreePath,
 		"branch -D riordan/bvx/worktree-delete",
 	}
 	if strings.Join(runner.commands, "\n") != strings.Join(wantCommands, "\n") {
 		t.Fatalf("commands = %v, want %v", runner.commands, wantCommands)
+	}
+}
+
+func TestWorktreeServiceAdapterDeleteReturnsBranchCleanupError(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	repoDir := t.TempDir()
+	worktreePath := filepath.Join(t.TempDir(), "repo-bvx")
+	branchName := "riordan/bvx/worktree-delete"
+	runner := &staticWorktreeListRunner{
+		output: `worktree ` + repoDir + `
+HEAD abc123
+branch refs/heads/main
+
+worktree ` + worktreePath + `
+HEAD def456
+branch refs/heads/` + branchName + `
+`,
+		branchErr: errors.New("cannot lock ref"),
+	}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	adapter := &worktreeServiceAdapter{
+		manager: manager,
+		logger:  logger,
+	}
+
+	err := adapter.Delete(context.Background(), "proj", "bvx", false)
+
+	if err == nil || !strings.Contains(err.Error(), "failed to delete branch "+branchName) {
+		t.Fatalf("Delete error = %v, want branch cleanup failure", err)
+	}
+	wantCommands := []string{
+		"worktree list --porcelain",
+		"worktree remove " + worktreePath,
+		"branch -D " + branchName,
+	}
+	if strings.Join(runner.commands, "\n") != strings.Join(wantCommands, "\n") {
+		t.Fatalf("commands = %v, want %v", runner.commands, wantCommands)
+	}
+}
+
+func TestWorktreeServiceAdapterDeleteCleansProjectedBranchWhenWorktreeAlreadyGone(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	projectID := "proj"
+	issueID := "bvx"
+	repoDir := t.TempDir()
+	branchName := "riordan/bvx/worktree-delete"
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   issueID,
+		Path:      filepath.Join(t.TempDir(), "repo-bvx"),
+		Branch:    branchName,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+	runner := &staticWorktreeListRunner{
+		output: `worktree ` + repoDir + `
+HEAD abc123
+branch refs/heads/main
+`,
+	}
+	writer := &recordingRuntimeProjectionWriter{}
+	adapter := &worktreeServiceAdapter{
+		manager:                 git.NewWorktreeManager(runner, repoDir, logger),
+		runtimeStateStore:       store,
+		runtimeProjectionWriter: writer,
+		logger:                  logger,
+	}
+
+	if err := adapter.Delete(ctx, projectID, issueID, false); err != nil {
+		t.Fatalf("Delete returned error: %v", err)
+	}
+	wantCommands := []string{
+		"worktree list --porcelain",
+		"branch -D " + branchName,
+	}
+	if strings.Join(runner.commands, "\n") != strings.Join(wantCommands, "\n") {
+		t.Fatalf("commands = %v, want %v", runner.commands, wantCommands)
+	}
+	if strings.Join(writer.snapshot(), "\n") != "worktree.delete+publish" {
+		t.Fatalf("projection writer calls = %v, want worktree.delete+publish", writer.snapshot())
+	}
+}
+
+func TestWorktreeServiceAdapterDeleteCleansProjectedBranchWhenWorktreeDisappearsDuringDelete(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	projectID := "proj"
+	issueID := "bvx"
+	repoDir := t.TempDir()
+	worktreePath := filepath.Join(t.TempDir(), "repo-bvx")
+	branchName := "riordan/bvx/worktree-delete"
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   issueID,
+		Path:      worktreePath,
+		Branch:    branchName,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+	runner := &sequenceWorktreeListRunner{outputs: []string{
+		`worktree ` + repoDir + `
+HEAD abc123
+branch refs/heads/main
+
+worktree ` + worktreePath + `
+HEAD def456
+branch refs/heads/` + branchName + `
+`,
+		`worktree ` + repoDir + `
+HEAD abc123
+branch refs/heads/main
+`,
+	}}
+	writer := &recordingRuntimeProjectionWriter{}
+	adapter := &worktreeServiceAdapter{
+		manager:                 git.NewWorktreeManager(runner, repoDir, logger),
+		runtimeStateStore:       store,
+		runtimeProjectionWriter: writer,
+		logger:                  logger,
+	}
+
+	if err := adapter.Delete(ctx, projectID, issueID, false); err != nil {
+		t.Fatalf("Delete returned error: %v", err)
+	}
+	wantCommands := []string{
+		"worktree list --porcelain",
+		"worktree remove " + worktreePath,
+		"branch -D " + branchName,
+	}
+	if strings.Join(runner.commands, "\n") != strings.Join(wantCommands, "\n") {
+		t.Fatalf("commands = %v, want %v", runner.commands, wantCommands)
+	}
+	if strings.Join(writer.snapshot(), "\n") != "worktree.delete+publish" {
+		t.Fatalf("projection writer calls = %v, want worktree.delete+publish", writer.snapshot())
 	}
 }
 

@@ -50,6 +50,8 @@ func (s SessionState) Icon() string {
 		return "✗"
 	case SessionPaused:
 		return "⏸"
+	case "no-agent":
+		return "○"
 	default:
 		return "?"
 	}
@@ -99,6 +101,9 @@ func (s *Session) DisplayCode() string {
 		return sessionStateDisplayCode(displayState)
 	}
 	if activity := s.DisplayActivity(); activity != "" {
+		if activity == "no-agent" {
+			return "N"
+		}
 		return "?"
 	}
 	if s.IsPartial() {
@@ -113,7 +118,7 @@ func (s *Session) DisplayActivity() string {
 	}
 	activity := strings.ToLower(strings.TrimSpace(s.Activity))
 	switch activity {
-	case string(SessionBusy), string(SessionIdle), string(SessionWaiting), string(SessionPaused), string(SessionDone), string(SessionError), "unknown", "starting", "working", "ended":
+	case string(SessionBusy), string(SessionIdle), string(SessionWaiting), string(SessionPaused), string(SessionDone), string(SessionError), "unknown", "no-agent", "starting", "working", "ended":
 		return activity
 	default:
 		return ""

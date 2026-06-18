@@ -869,7 +869,11 @@ func (d *DetailPanel) formatSessionState() string {
 	}
 	displayState, ok := d.task.Session.DisplayState()
 	if !ok {
-		displayState = d.task.Session.State
+		if d.task.Session.DisplayActivity() == "no-agent" {
+			displayState = domain.SessionIdle
+		} else {
+			displayState = d.task.Session.State
+		}
 	}
 	return d.sessionStateStyle(displayState).Render(stateLabel)
 }

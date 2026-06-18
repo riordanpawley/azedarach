@@ -10,8 +10,10 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -68,6 +70,53 @@ func TestSessionStartWarningFromOperationResult(t *testing.T) {
 	warning := sessionStartWarningFromOperationResult(raw)
 	if warning != "Worktree setup warning: git hook failed; recovered existing worktree" {
 		t.Fatalf("warning = %q", warning)
+	}
+}
+
+func TestExpensiveSessionInitCommandsDetectsKnownPatterns(t *testing.T) {
+	commands := []string{
+		"direnv allow",
+		"pnpm type-check",
+		"tsc --noEmit",
+		"tsgo ./...",
+		"nx affected:test",
+		"go test ./...",
+		"bun install",
+		"npm run build",
+		"pnpm run check:types",
+	}
+	got := expensiveSessionInitCommands(commands)
+	want := []string{
+		"pnpm type-check",
+		"tsc --noEmit",
+		"tsgo ./...",
+		"nx affected:test",
+		"go test ./...",
+		"bun install",
+		"npm run build",
+		"pnpm run check:types",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("expensive commands = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("expensive commands = %+v, want %+v", got, want)
+		}
+	}
+}
+
+func TestSessionInitCommandFanoutWarningsQuietForNonExpensiveOrSingleLaunch(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Session.InitCommands = []string{"direnv allow", "az prime", "printf ready"}
+	deps := &Dependencies{Config: cfg}
+	if warnings := sessionInitCommandFanoutWarnings(deps, "az-1", 3); len(warnings) != 0 {
+		t.Fatalf("warnings = %+v, want none for non-expensive init commands", warnings)
+	}
+
+	cfg.Session.InitCommands = []string{"pnpm type-check"}
+	if warnings := sessionInitCommandFanoutWarnings(deps, "az-1", 1); len(warnings) != 0 {
+		t.Fatalf("warnings = %+v, want none for single-session start", warnings)
 	}
 }
 
@@ -208,6 +257,7 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 	root := naming.IssueID("az-1")
 	busy := naming.IssueID("az-2")
 	unknown := naming.IssueID("az-3")
+	noAgent := naming.IssueID("az-4")
 	deps := &Dependencies{
 		RepoDir:   "/repo",
 		ProjectID: protocol.DefaultProjectID,
@@ -218,10 +268,11 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
 						RootIssueID: root.String(),
 						Blocked:     map[string]string{},
-						Active:      []string{busy.String(), unknown.String()},
+						Active:      []string{busy.String(), unknown.String(), noAgent.String()},
 						ActiveSessions: []daemonclient.TaskActiveSession{
 							{IssueID: busy.String(), Activity: "busy", ActivitySource: "hooks", State: string(domain.SessionBusy), TmuxAttachedCount: 1},
-							{IssueID: unknown.String(), Activity: "unknown", ActivitySource: "none", State: string(domain.SessionBusy), TmuxAttachedCount: 1, Advice: "activity unknown: check hooks with az ai status --target=auto; install/update with az ai install --target=auto; use sparse pane capture only if status/watch looks stale, failed, or contradictory for az-3"},
+							{IssueID: unknown.String(), Activity: "unknown", ActivitySource: "none", State: string(domain.SessionBusy), TmuxAttachedCount: 1, Advice: "activity unknown: inspect hooks with az ai status --target=auto; run az ai install --target=auto only if hooks are missing, outdated, or not installed; use sparse pane capture only if status/watch looks stale, failed, or contradictory for az-3"},
+							{IssueID: noAgent.String(), Activity: "no-agent", ActivitySource: "session", State: string(domain.SessionBusy), TmuxAttachedCount: 1},
 						},
 					}), nil
 				case daemonclient.CommandTaskList:
@@ -249,8 +300,8 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, output)
 	}
-	if len(result.ActiveSessions) != 2 {
-		t.Fatalf("active_sessions = %+v, want two entries", result.ActiveSessions)
+	if len(result.ActiveSessions) != 3 {
+		t.Fatalf("active_sessions = %+v, want three entries", result.ActiveSessions)
 	}
 	byID := map[string]orchestrateActiveSession{}
 	for _, active := range result.ActiveSessions {
@@ -261,6 +312,9 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 	}
 	if byID[unknown.String()].Activity != "unknown" || !strings.Contains(byID[unknown.String()].Advice, "az ai status --target=auto") || !strings.Contains(byID[unknown.String()].Advice, "az ai install --target=auto") {
 		t.Fatalf("unknown active session = %+v", byID[unknown.String()])
+	}
+	if byID[noAgent.String()].Activity != "no-agent" || byID[noAgent.String()].ActivitySource != "session" || byID[noAgent.String()].Advice != "" {
+		t.Fatalf("no-agent active session = %+v", byID[noAgent.String()])
 	}
 }
 
@@ -315,6 +369,125 @@ func TestOrchestrateStatusCommandIncludesPendingAndCleanupMarkers(t *testing.T) 
 	}
 	if len(result.ActiveSessions) != 1 || result.ActiveSessions[0].Status != "cleanup-pending" || !strings.Contains(result.ActiveSessions[0].Advice, "cleanup is pending") {
 		t.Fatalf("active_sessions = %+v", result.ActiveSessions)
+	}
+}
+
+func TestOrchestrateStatusCommandWarnsOnExpensiveSessionInitFanout(t *testing.T) {
+	root := naming.IssueID("az-1")
+	childA := naming.IssueID("az-2")
+	childB := naming.IssueID("az-3")
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+		{ID: childA, Title: "Worker A", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &root},
+		{ID: childB, Title: "Worker B", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &root},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Session.InitCommands = []string{"pnpm type-check"}
+	deps := &Dependencies{
+		Config:    cfg,
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{childA.String(), childB.String()},
+						Blocked:     map[string]string{},
+					}), nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: taskListBody}, nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees": []map[string]string{
+							{"issue_id": root.String(), "path": "/repo-az-1", "branch": "user/az-1/root"},
+						},
+					}), nil
+				case protocol.CommandMailList:
+					return responseWithJSON(req, []protocol.MailEvent{}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestrateStatusCommand(deps, OrchestrateStatusOptions{RootIssueID: root.String(), JSON: true})
+	})
+	var result orchestrateStatusResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	warnings := strings.Join(result.Warnings, "\n")
+	if !strings.Contains(warnings, "pnpm type-check") || !strings.Contains(warnings, "fanout count 2") {
+		t.Fatalf("warnings = %+v, want expensive init command fanout guidance", result.Warnings)
+	}
+}
+
+func TestOrchestrateStatusCommandIncludesSessionStartProgress(t *testing.T) {
+	root := naming.IssueID("az-1")
+	child := naming.IssueID("az-2")
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{},
+						Blocked:     map[string]string{},
+						SessionStartProgress: []daemonclient.TaskSessionStartProgress{
+							{
+								IssueID:        child.String(),
+								OperationID:    "op-session-start",
+								OperationState: "running",
+								Phase:          "init_commands",
+								Message:        "configured init commands likely running before agent hooks",
+								Percent:        90,
+								ElapsedMS:      12345,
+							},
+						},
+					}), nil
+				case daemonclient.CommandTaskList:
+					body, err := marshalTaskListBody([]domain.Task{
+						{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
+				case protocol.CommandMailList:
+					return responseWithJSON(req, []protocol.MailEvent{}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestrateStatusCommand(deps, OrchestrateStatusOptions{RootIssueID: root.String(), JSON: true})
+	})
+	var result orchestrateStatusResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if len(result.SessionStartProgress) != 1 {
+		t.Fatalf("session_start_progress = %+v, want one entry", result.SessionStartProgress)
+	}
+	progress := result.SessionStartProgress[0]
+	if progress.IssueID != child.String() || progress.OperationID != "op-session-start" || progress.Phase != "init_commands" || progress.ElapsedMS != 12345 {
+		t.Fatalf("session start progress = %+v", progress)
 	}
 }
 
@@ -413,6 +586,124 @@ func TestBuildOrchestrateWatchFrameIncludesActiveSessionActivity(t *testing.T) {
 	active := frame.ActiveSessions[0]
 	if active.IssueID != idle.String() || active.Activity != "idle" || active.ActivitySource != "hooks" || active.Advice != "" {
 		t.Fatalf("active session = %+v", active)
+	}
+}
+
+func TestBuildOrchestrateWatchFrameIncludesSessionStartProgress(t *testing.T) {
+	root := naming.IssueID("az-1")
+	child := naming.IssueID("az-2")
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Blocked:     map[string]string{},
+						SessionStartProgress: []daemonclient.TaskSessionStartProgress{
+							{IssueID: child.String(), OperationID: "op-session-start", OperationState: "queued", Phase: "queued", Message: "queued session.start"},
+						},
+					}), nil
+				case protocol.CommandMailList:
+					return responseWithJSON(req, []protocol.MailEvent{}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	frame, err := buildOrchestrateWatchFrame(deps, root.String(), 0)
+	if err != nil {
+		t.Fatalf("buildOrchestrateWatchFrame error = %v", err)
+	}
+	if len(frame.SessionStartProgress) != 1 {
+		t.Fatalf("session_start_progress = %+v, want one entry", frame.SessionStartProgress)
+	}
+	progress := frame.SessionStartProgress[0]
+	if progress.IssueID != child.String() || progress.OperationID != "op-session-start" || progress.Phase != "queued" {
+		t.Fatalf("session start progress = %+v", progress)
+	}
+}
+
+func TestEmitOrchestrateWatchFramePrintsSessionStartProgress(t *testing.T) {
+	frame := orchestrateWatchFrame{
+		RootIssueID: "az-1",
+		Active:      []string{"az-2"},
+		ActiveSessions: []orchestrateActiveSession{
+			{
+				IssueID:        "az-2",
+				Activity:       "busy",
+				ActivitySource: "session",
+				StartProgress: &orchestrateSessionStartProgress{
+					IssueID:        "az-2",
+					OperationState: "running",
+					Phase:          "init_commands",
+					Message:        "configured init commands likely running before agent hooks",
+					Percent:        90,
+				},
+			},
+		},
+		SessionStartProgress: []orchestrateSessionStartProgress{
+			{
+				IssueID:        "az-3",
+				OperationID:    "op-session-start",
+				OperationState: "queued",
+				Phase:          "queued",
+				Message:        "waiting for session.start resources",
+			},
+		},
+		Blocked: map[string]string{},
+	}
+
+	output := captureStdout(t, func() error {
+		return emitOrchestrateWatchFrame(frame, false)
+	})
+	for _, want := range []string{
+		"start: state=running phase=init_commands progress=90% configured init commands likely running before agent hooks",
+		"session start progress:",
+		"az-3: state=queued phase=queued operation=op-session-start waiting for session.start resources",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("watch output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestOrchestrateWatchSnapshotKeyIgnoresElapsedProgressTime(t *testing.T) {
+	frame := orchestrateWatchFrame{
+		Runnable: []string{"az-3"},
+		Active:   []string{"az-2"},
+		ActiveSessions: []orchestrateActiveSession{
+			{
+				IssueID:        "az-2",
+				Activity:       "busy",
+				ActivitySource: "session",
+				StartProgress: &orchestrateSessionStartProgress{
+					IssueID:        "az-2",
+					OperationState: "running",
+					Phase:          "init_commands",
+					ElapsedMS:      1000,
+				},
+			},
+		},
+		SessionStartProgress: []orchestrateSessionStartProgress{
+			{IssueID: "az-4", OperationID: "op-4", OperationState: "running", Phase: "worktree_preflight", ElapsedMS: 1000},
+		},
+		Blocked: map[string]string{},
+	}
+	first := orchestrateWatchFrameSnapshotKey(frame)
+	frame.ActiveSessions[0].StartProgress.ElapsedMS = 5000
+	frame.SessionStartProgress[0].ElapsedMS = 5000
+	if second := orchestrateWatchFrameSnapshotKey(frame); second != first {
+		t.Fatalf("snapshot key changed after elapsed-only update:\nfirst=%s\nsecond=%s", first, second)
+	}
+	frame.SessionStartProgress[0].Phase = "issue_resources"
+	if second := orchestrateWatchFrameSnapshotKey(frame); second == first {
+		t.Fatalf("snapshot key did not change after phase update")
 	}
 }
 
@@ -585,6 +876,118 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 	}
 }
 
+func TestOrchestrateStartWarnsOnExpensiveSessionInitCommandsDuringFanout(t *testing.T) {
+	root := naming.IssueID("az-1")
+	childA := naming.IssueID("az-2")
+	childB := naming.IssueID("az-3")
+	tasks := []domain.Task{
+		{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+		{ID: childA, Title: "Worker A", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &root},
+		{ID: childB, Title: "Worker B", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &root},
+	}
+	taskListBody, err := marshalTaskListBody(tasks)
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Session.InitCommands = []string{"direnv allow", "pnpm type-check"}
+	deps := &Dependencies{
+		Config:    cfg,
+		ProjectID: protocol.DefaultProjectID,
+		RepoDir:   "/repo",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{childA.String(), childB.String()},
+						Blocked:     map[string]string{},
+					}), nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: taskListBody}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					var body struct {
+						TaskID string `json:"task_id"`
+					}
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode merge base target body: %v", err)
+					}
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{IssueID: body.TaskID, TargetID: "base", Branch: "main"}), nil
+				case daemonclient.CommandGitStatus:
+					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{}}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees": []map[string]string{
+							{"issue_id": root.String(), "path": "/repo-az-1", "branch": "user/az-1/root"},
+							{"issue_id": childA.String(), "path": "/repo-az-2", "branch": "user/az-2/worker-a"},
+							{"issue_id": childB.String(), "path": "/repo-az-3", "branch": "user/az-3/worker-b"},
+						},
+					}), nil
+				case protocol.CommandOperationSubmit:
+					var body protocol.OperationSubmitRequestBody
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode submit body: %v", err)
+					}
+					return responseWithJSON(req, protocol.OperationSubmitResponseBody{
+						Created: true,
+						Operation: protocol.OperationRecord{
+							OperationID: naming.OperationID("op-" + body.IssueID.String()),
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     body.IssueID,
+							State:       protocol.OperationStateQueued,
+						},
+					}), nil
+				case protocol.CommandOperationGet:
+					var body protocol.OperationGetRequestBody
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode operation get body: %v", err)
+					}
+					issueID := strings.TrimPrefix(body.OperationID.String(), "op-")
+					return responseWithJSON(req, protocol.OperationGetResponseBody{
+						Operation: protocol.OperationRecord{
+							OperationID: body.OperationID,
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     naming.IssueID(issueID),
+							State:       protocol.OperationStateDone,
+						},
+					}), nil
+				case protocol.CommandMailSend:
+					var body protocol.MailSendCommandBody
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode mail body: %v", err)
+					}
+					return responseWithJSON(req, protocol.MailEvent{Seq: 1, ParentIssue: root.String(), IssueID: body.IssueID, Type: "session-started"}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestrateStartCommand(deps, OrchestrateStartOptions{RootIssueID: root.String(), Limit: 4, JSON: true})
+	})
+	var result orchestrateStartResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if len(result.Started) != 2 || len(result.Failed) != 0 {
+		t.Fatalf("started=%+v failed=%+v, want both workers started with no failures", result.Started, result.Failed)
+	}
+	warnings := strings.Join(result.Warnings, "\n")
+	for _, want := range []string{"pnpm type-check", "fanout count 2", "root az-1", "lowering --limit", "explicit verification", "one parent preflight"} {
+		if !strings.Contains(warnings, want) {
+			t.Fatalf("warnings missing %q: %+v", want, result.Warnings)
+		}
+	}
+}
+
 func TestOrchestrateStartWaitsForAllSubmittedOperationsBeforeMail(t *testing.T) {
 	root := naming.IssueID("az-1")
 	childA := naming.IssueID("az-2")
@@ -685,6 +1088,241 @@ func TestOrchestrateStartWaitsForAllSubmittedOperationsBeforeMail(t *testing.T) 
 	}
 	if len(result.Started) != 2 || len(result.Failed) != 0 {
 		t.Fatalf("result started=%+v failed=%+v, want both started with no failures", result.Started, result.Failed)
+	}
+}
+
+func TestOrchestrateStartReportsPendingWhenWaitTimeout(t *testing.T) {
+	oldTimeout := orchestrateStartOperationWaitTimeout
+	orchestrateStartOperationWaitTimeout = time.Millisecond
+	t.Cleanup(func() { orchestrateStartOperationWaitTimeout = oldTimeout })
+
+	root := naming.IssueID("az-1")
+	child := naming.IssueID("az-2")
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+		{ID: child, Title: "Worker", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &root},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	mailSends := 0
+	operationState := protocol.OperationStateRunning
+	deps := &Dependencies{
+		ProjectID: protocol.DefaultProjectID,
+		RepoDir:   "/repo",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{child.String()},
+						Blocked:     map[string]string{},
+					}), nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: taskListBody}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{IssueID: child.String(), TargetID: "base", Branch: "main"}), nil
+				case daemonclient.CommandGitStatus:
+					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{}}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees": []map[string]string{
+							{"issue_id": root.String(), "path": "/repo-az-1", "branch": "user/az-1/root"},
+						},
+					}), nil
+				case protocol.CommandOperationSubmit:
+					return responseWithJSON(req, protocol.OperationSubmitResponseBody{
+						Created: true,
+						Operation: protocol.OperationRecord{
+							OperationID: "op-1",
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     child,
+							State:       protocol.OperationStateQueued,
+						},
+					}), nil
+				case protocol.CommandOperationGet:
+					return responseWithJSON(req, protocol.OperationGetResponseBody{
+						Operation: protocol.OperationRecord{
+							OperationID: "op-1",
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     child,
+							State:       operationState,
+						},
+					}), nil
+				case protocol.CommandMailSend:
+					mailSends++
+					return responseWithJSON(req, protocol.MailEvent{}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output, err := captureStdoutAllowError(t, func() error {
+		return OrchestrateStartCommand(deps, OrchestrateStartOptions{RootIssueID: root.String(), IssueIDs: []string{child.String()}, Limit: 4, JSON: true})
+	})
+	if err == nil {
+		t.Fatal("OrchestrateStartCommand error = nil, want pending timeout error")
+	}
+	if strings.Contains(err.Error(), "completed with failures") || !strings.Contains(err.Error(), "pending session start operations") {
+		t.Fatalf("error = %q, want pending timeout without generic failure", err)
+	}
+	var result orchestrateStartResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if len(result.Failed) != 0 || len(result.Started) != 0 || len(result.Pending) != 1 {
+		t.Fatalf("started=%+v pending=%+v failed=%+v, want one pending and no failed/started", result.Started, result.Pending, result.Failed)
+	}
+	pending := result.Pending[0]
+	if pending.IssueID != child.String() || pending.OperationID != "op-1" || pending.OperationState != string(protocol.OperationStateRunning) {
+		t.Fatalf("pending = %+v", pending)
+	}
+	followUps := strings.Join(pending.FollowUpCommands, "\n")
+	for _, want := range []string{"az operation get --id op-1 --wait", "az orchestrate status --root az-1 --json"} {
+		if !strings.Contains(followUps, want) {
+			t.Fatalf("follow-up commands missing %q: %+v", want, pending.FollowUpCommands)
+		}
+	}
+	if mailSends != 0 {
+		t.Fatalf("mail sends = %d, want none for pending start", mailSends)
+	}
+
+	operationState = protocol.OperationStateDone
+	record, err := deps.DaemonClient.GetOperation(context.Background(), "op-1")
+	if err != nil {
+		t.Fatalf("GetOperation after pending start error = %v", err)
+	}
+	if record.State != protocol.OperationStateDone {
+		t.Fatalf("operation state after pending start = %q, want done", record.State)
+	}
+}
+
+func TestOrchestrateStartPreservesTerminalOperationFailure(t *testing.T) {
+	root := naming.IssueID("az-1")
+	child := naming.IssueID("az-2")
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+		{ID: child, Title: "Worker", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &root},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	deps := &Dependencies{
+		ProjectID: protocol.DefaultProjectID,
+		RepoDir:   "/repo",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{child.String()},
+						Blocked:     map[string]string{},
+					}), nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: taskListBody}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{IssueID: child.String(), TargetID: "base", Branch: "main"}), nil
+				case daemonclient.CommandGitStatus:
+					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{}}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees": []map[string]string{
+							{"issue_id": root.String(), "path": "/repo-az-1", "branch": "user/az-1/root"},
+						},
+					}), nil
+				case protocol.CommandOperationSubmit:
+					return responseWithJSON(req, protocol.OperationSubmitResponseBody{
+						Created: true,
+						Operation: protocol.OperationRecord{
+							OperationID: "op-1",
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     child,
+							State:       protocol.OperationStateQueued,
+						},
+					}), nil
+				case protocol.CommandOperationGet:
+					return responseWithJSON(req, protocol.OperationGetResponseBody{
+						Operation: protocol.OperationRecord{
+							OperationID: "op-1",
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     child,
+							State:       protocol.OperationStateFailed,
+							Error:       &protocol.OperationError{Code: protocol.ErrorCodeInternal, Message: "tmux launch failed"},
+						},
+					}), nil
+				case protocol.CommandMailSend:
+					t.Fatal("mail should not be sent for failed operation")
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output, err := captureStdoutAllowError(t, func() error {
+		return OrchestrateStartCommand(deps, OrchestrateStartOptions{RootIssueID: root.String(), IssueIDs: []string{child.String()}, Limit: 4, JSON: true})
+	})
+	if err == nil || !strings.Contains(err.Error(), "completed with failures") {
+		t.Fatalf("OrchestrateStartCommand error = %v, want failure error", err)
+	}
+	var result orchestrateStartResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if len(result.Pending) != 0 || result.Failed[child.String()] != "tmux launch failed" {
+		t.Fatalf("pending=%+v failed=%+v, want terminal failure only", result.Pending, result.Failed)
+	}
+}
+
+func TestPrintOrchestrateStartResultIncludesPendingFollowUps(t *testing.T) {
+	output := captureStdout(t, func() error {
+		printOrchestrateStartResult(orchestrateStartResult{
+			RootIssueID: "az-1",
+			Limit:       4,
+			Skipped:     map[string]string{},
+			Failed:      map[string]string{},
+			Pending: []orchestrateStartPending{
+				{
+					IssueID:        "az-2",
+					OperationID:    "op-1",
+					OperationState: string(protocol.OperationStateRunning),
+					Reason:         "timed out after 5m0s waiting for daemon operation to finish; operation is still running",
+					FollowUpCommands: []string{
+						"az operation get --id op-1 --wait",
+						"az orchestrate status --root az-1 --json",
+					},
+				},
+			},
+			Advice: orchestrateStartAdvice{
+				WatchCommand:     "az orchestrate watch --root az-1 --since 0 --jsonl",
+				WatchInstruction: "leave it running",
+			},
+		})
+		return nil
+	})
+	for _, want := range []string{
+		"Pending starts:",
+		"az-2: operation=op-1 state=running",
+		"follow up: az operation get --id op-1 --wait",
+		"follow up: az orchestrate status --root az-1 --json",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
 	}
 }
 

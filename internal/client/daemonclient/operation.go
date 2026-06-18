@@ -77,11 +77,16 @@ func (c *Client) WaitForOperation(ctx context.Context, operationID string, pollI
 		pollInterval = defaultOperationPollInterval
 	}
 
+	var last protocol.OperationRecord
 	for {
 		record, err := c.GetOperation(ctx, operationID)
 		if err != nil {
+			if ctx.Err() != nil && last.OperationID != "" {
+				return last, ctx.Err()
+			}
 			return protocol.OperationRecord{}, err
 		}
+		last = record
 		if isTerminalOperationState(record.State) {
 			return record, nil
 		}
@@ -90,7 +95,7 @@ func (c *Client) WaitForOperation(ctx context.Context, operationID string, pollI
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return protocol.OperationRecord{}, ctx.Err()
+			return last, ctx.Err()
 		case <-timer.C:
 		}
 	}

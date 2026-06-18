@@ -20,6 +20,7 @@ type migration struct {
 
 var orderedMigrations = []migration{
 	{id: "daemon_operations_0001", path: "migrations/0001_daemon_operations.sql"},
+	{id: "daemon_operations_0002_progress", path: "migrations/0002_daemon_operation_progress.sql"},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB) error {

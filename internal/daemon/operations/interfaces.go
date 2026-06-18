@@ -35,6 +35,7 @@ type Record struct {
 	UpdatedAt     time.Time
 	StartedAt     *time.Time
 	FinishedAt    *time.Time
+	Progress      *Progress
 	ErrorMessage  string
 	ResultPayload []byte
 }
@@ -52,6 +53,7 @@ type UpdateParams struct {
 	ToState       State
 	StartedAt     *time.Time
 	FinishedAt    *time.Time
+	Progress      *Progress
 	ErrorMessage  *string
 	ResultPayload []byte
 }

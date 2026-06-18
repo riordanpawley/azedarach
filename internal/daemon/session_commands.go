@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -15,6 +16,7 @@ import (
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -66,6 +68,12 @@ type issueResourceLifecycleResult struct {
 	Ran []string
 }
 
+type sessionInitReadyMarker struct {
+	RelativePath string
+	AbsolutePath string
+	CommandCount int
+}
+
 type sessionProjectionCounts struct {
 	Total             int
 	Active            int
@@ -79,6 +87,11 @@ type sessionHookActivity struct {
 	Paused int
 }
 
+type sessionDisplayActivity struct {
+	Activity string
+	Source   string
+}
+
 const (
 	sessionInvariantSessionStartConflict   daemonInvariantID = daemonInvariantSessionStartConflict
 	sessionInvariantSessionAttachTarget    daemonInvariantID = daemonInvariantSessionAttachTarget
@@ -89,6 +102,23 @@ const (
 	sessionConflictWindowName   = "resolve-conflict"
 	sessionActivityStartupGrace = 45 * time.Second
 )
+
+func reportSessionStartProgress(ctx context.Context, phase, message string, percent int) {
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	_ = daemonops.ReportProgress(ctx, daemonops.Progress{
+		Phase:   strings.TrimSpace(phase),
+		Message: strings.TrimSpace(message),
+		Current: int64(percent),
+		Total:   100,
+		Unit:    "percent",
+		Percent: percent,
+	})
+}
 
 type SessionLongRunningExecutor interface {
 	Execute(ctx context.Context, req protocol.RequestEnvelope, command string, exec func(context.Context) (protocol.ResponseEnvelope, error)) (protocol.ResponseEnvelope, error)
@@ -186,6 +216,8 @@ func sessionProjectionAggregateByIssueKey(sessions []daemonstate.Session, naming
 			merged.ID = session.ID
 			merged.IssueID = session.IssueID
 			merged.UpdatedAt = session.UpdatedAt
+			merged.Activity = session.Activity
+			merged.ActivitySource = session.ActivitySource
 		}
 		if sessionProjectionStateRank(session.State) > sessionProjectionStateRank(merged.State) {
 			merged.State = session.State
@@ -200,6 +232,10 @@ func sessionProjectionAggregateByIssueKey(sessions []daemonstate.Session, naming
 			}
 		}
 		merged.TmuxAttachedCount += session.TmuxAttachedCount
+		if strings.TrimSpace(merged.Activity) == "" && strings.TrimSpace(session.Activity) != "" {
+			merged.Activity = session.Activity
+			merged.ActivitySource = session.ActivitySource
+		}
 		byIssueKey[key] = merged
 	}
 	return byIssueKey
@@ -578,6 +614,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			"image_count", len(cmd.ImagePaths),
 		)
 	}
+	reportSessionStartProgress(ctx, "preflight", "checking runtime state and existing session", 5)
 	if err := d.ensureFreshRuntimeForIssueMutation(ctx, cmd.ProjectID, cmd.IssueID, daemonhandlers.CommandSessionStart); err != nil {
 		if d.cfg.Logger != nil {
 			if errors.Is(err, context.Canceled) {
@@ -611,6 +648,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if exists {
 		return d.errorResponse(req, protocol.ErrorCodeConflict, fmt.Sprintf("session already exists: %s (use 'az attach %s' to connect)", cmd.IssueID, cmd.IssueID)), nil
 	}
+	reportSessionStartProgress(ctx, "worktree_preflight", "loading issue and preparing worktree", 15)
 	issueClient := d.issueClientForProject(cmd.ProjectID)
 	if issueClient == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
@@ -627,6 +665,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "worktree manager unavailable"), nil
 	}
 	baseBranch, baseBranchAncestorIssueID := d.resolveSessionStartBaseBranch(ctx, cmd.ProjectID, cmd.BaseBranch, issueClient, worktreeManager, task)
+	reportSessionStartProgress(ctx, "worktree_preflight", fmt.Sprintf("creating or reusing worktree from %s", baseBranch), 25)
 	worktree, err := worktreeManager.CreateWithTitle(ctx, cmd.IssueID, task.Title, baseBranch)
 	reusedWorktree := false
 	worktreeSetupWarning := ""
@@ -646,11 +685,15 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		}
 	}
 	if !reusedWorktree {
+		if len(d.runtimeConfigForProject(cmd.ProjectID).WorktreeInitCommands) > 0 {
+			reportSessionStartProgress(ctx, "worktree_preflight", "running worktree init commands", 35)
+		}
 		if err := d.runWorktreeInitCommands(ctx, cmd.ProjectID, worktree.Path); err != nil {
 			cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree init failed for %s: %v%s", cmd.IssueID, err, cleanupNote)), nil
 		}
 	}
+	reportSessionStartProgress(ctx, "issue_resources", "preparing issue resources", 50)
 	resourceCtx := d.issueResourceLifecycleContext(cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktree.Path, worktree.Branch)
 	resourcePrep, err := d.runIssueResourcePrepareCommands(ctx, cmd.ProjectID, resourceCtx)
 	if err != nil {
@@ -676,6 +719,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		)
 	}
 	d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch)
+	reportSessionStartProgress(ctx, "tmux_launch", "creating tmux session", 70)
 	if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
 		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
@@ -688,6 +732,15 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("export issue resource env: %v%s", err, cleanupNote)), nil
 	}
+	sessionInitMarker := sessionInitReadyMarker{}
+	if cmd.StartWork {
+		var markerErr error
+		sessionInitMarker, markerErr = d.prepareSessionInitReadyMarker(cmd.ProjectID, worktree.Path, cmd.IssueID, cmd.SessionID)
+		if markerErr != nil {
+			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare session init marker: %v%s", markerErr, cleanupNote)), nil
+		}
+	}
 	if cmd.StartWork {
 		d.startSessionSideEffectCommands(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktree.Path)
 		initialPrompt := strings.TrimSpace(cmd.Prompt)
@@ -698,7 +751,12 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			}
 			initialPrompt = buildStartWorkPrompt(cmd.IssueID, task.Type.String(), task.Title, parentIssueID != "", parentIssueID)
 		}
-		launchCommand := d.buildSessionLaunchCommand(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, initialPrompt)
+		launchCommand := d.buildSessionLaunchCommandWithInitReadyPath(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, initialPrompt, sessionInitMarker.RelativePath)
+		if len(d.runtimeConfigForProject(cmd.ProjectID).SessionInitCommands) > 0 {
+			reportSessionStartProgress(ctx, "init_commands", "launch sent; configured init commands likely running before agent hooks", 90)
+		} else {
+			reportSessionStartProgress(ctx, "agent_launch", "launch sent; waiting for agent activity", 90)
+		}
 		if err := d.tmux.SendKeys(ctx, cmd.SessionID, launchCommand); err != nil {
 			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
@@ -711,16 +769,26 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 				"prompt_bytes", len(initialPrompt),
 			)
 		}
+	} else {
+		reportSessionStartProgress(ctx, "tmux_launch", "tmux session created without agent launch", 90)
 	}
-	if err := d.applySessionLifecycleTransition(
+	initialActivity, initialActivitySource := initialSessionStartActivity(cmd.StartWork)
+	if err := d.applySessionLifecycleTransitionWithActivity(
 		ctx,
 		req,
 		cmd.ProjectID,
 		cmd.SessionID,
 		cmd.IssueID,
 		daemonhandlers.CommandSessionStart,
+		initialActivity,
+		initialActivitySource,
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session start transition: %v", err)), nil
+	}
+	if cmd.StartWork && sessionInitMarker.AbsolutePath != "" {
+		if err := d.waitForSessionInitReady(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, sessionInitMarker); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
 	}
 	if updateErr := issueClient.Update(ctx, cmd.IssueID, domain.StatusInProgress); updateErr != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn("failed to update issue status to in_progress after session start",
@@ -754,6 +822,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			}
 			return "Skipping AI launch (tmux session only)"
 		}(),
+		sessionInitReadyOutput(sessionInitMarker),
 		"",
 		"✓ Session started successfully",
 		fmt.Sprintf("  To attach: az attach %s", cmd.IssueID),
@@ -1320,7 +1389,10 @@ func (d *Daemon) cleanupNewWorktreeAfterInitFailure(ctx context.Context, worktre
 	if reusedWorktree || worktreeManager == nil {
 		return ""
 	}
-	if err := worktreeManager.DeleteWithOptions(ctx, issueID, true); err != nil {
+	if _, err := worktreeManager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
+		Force:         true,
+		BranchCleanup: git.WorktreeBranchCleanupRequired,
+	}); err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("failed to cleanup worktree after init failure",
 				"issue_id", issueID,
@@ -1525,6 +1597,9 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 			}
 		}
 		if len(matching) == 0 {
+			if output, ok := d.pendingSessionStartStatusOutput(ctx, cmd.ProjectID, cmd.IssueID); ok {
+				return d.commandOutput(req, output), nil
+			}
 			if output, ok := d.staleSessionRuntimeStatusOutput(ctx, cmd.ProjectID, cmd.IssueID); ok {
 				return d.commandOutput(req, output), nil
 			}
@@ -1533,6 +1608,9 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 		tmuxSessions = matching
 	}
 	if len(tmuxSessions) == 0 {
+		if output, ok := d.pendingSessionStartStatusOutput(ctx, cmd.ProjectID, ""); ok {
+			return d.commandOutput(req, output), nil
+		}
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Info("daemon session status snapshot", "project_id", cmd.ProjectID, "issue_id", cmd.IssueID, "active_sessions", 0)
 		}
@@ -1541,7 +1619,9 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Active Sessions (%d):\n\n", len(tmuxSessions))
-	activityByIssueKey := d.sessionHookActivityByIssueKey(ctx, cmd.ProjectID)
+	activityByIssueKey := d.sessionDisplayActivityByIssueKey(ctx, cmd.ProjectID)
+	progressByIssue := d.sessionStartProgressByIssue(ctx, cmd.ProjectID)
+	sessionStartProgress := make([]taskGraphSessionStartProgress, 0, len(progressByIssue))
 	b.WriteString("ISSUE ID\tSTATUS\tACTIVITY\tTITLE\n")
 	b.WriteString("-------\t------\t--------\t-----\n")
 	for _, name := range tmuxSessions {
@@ -1564,16 +1644,106 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 			}
 		}
 		activity := "unknown"
-		if hookActivity, ok := activityByIssueKey[sessionKey(issueIDRaw)]; ok && hookActivity.Total > 0 {
-			activity, _ = sessionActivityLabel(hookActivity)
+		activitySource := ""
+		issueKey := sessionKey(issueIDRaw)
+		if display, ok := activityByIssueKey[issueKey]; ok && display.Activity != "" {
+			activity = display.Activity
+			activitySource = display.Source
+		}
+		if progress, found := progressByIssue[issueKey]; found {
+			sessionStartProgress = append(sessionStartProgress, progress)
+		} else if len(d.runtimeConfigForProject(cmd.ProjectID).SessionInitCommands) > 0 && activity == "busy" && activitySource == "session" {
+			sessionStartProgress = append(sessionStartProgress, taskGraphSessionStartProgress{
+				IssueID:        issueIDRaw,
+				OperationState: string(protocol.OperationStateRunning),
+				Phase:          "init_commands",
+				Message:        "configured init commands likely running before agent hooks",
+				Percent:        90,
+			})
 		}
 		fmt.Fprintf(&b, "%s\t%s\t%s\t%s\n", issueIDRaw, status, activity, title)
+	}
+	if output, ok := sessionStartStatusProgressSection(sessionStartProgress); ok {
+		b.WriteString("\n")
+		b.WriteString(output)
 	}
 	b.WriteString("\nUse 'az attach <issue-id>' to attach to a session\n")
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session status snapshot", "project_id", cmd.ProjectID, "issue_id", cmd.IssueID, "active_sessions", len(tmuxSessions))
 	}
 	return d.commandOutput(req, b.String()), nil
+}
+
+func (d *Daemon) pendingSessionStartStatusOutput(ctx context.Context, projectID, issueID string) (string, bool) {
+	section, ok := d.sessionStartStatusSection(ctx, projectID, issueID)
+	if !ok {
+		return "", false
+	}
+	return strings.TrimRight(section, "\n") + "\n", true
+}
+
+func (d *Daemon) sessionStartStatusSection(ctx context.Context, projectID, issueID string) (string, bool) {
+	progressByIssue := d.sessionStartProgressByIssue(ctx, projectID)
+	if len(progressByIssue) == 0 {
+		return "", false
+	}
+	var progress []taskGraphSessionStartProgress
+	if strings.TrimSpace(issueID) != "" {
+		item, found := progressByIssue[sessionKey(issueID)]
+		if !found {
+			return "", false
+		}
+		progress = append(progress, item)
+	} else {
+		for _, item := range progressByIssue {
+			progress = append(progress, item)
+		}
+		sort.SliceStable(progress, func(i, j int) bool {
+			if progress[i].IssueID != progress[j].IssueID {
+				return progress[i].IssueID < progress[j].IssueID
+			}
+			return progress[i].OperationID < progress[j].OperationID
+		})
+	}
+	return sessionStartStatusProgressSection(progress)
+}
+
+func sessionStartStatusProgressSection(progress []taskGraphSessionStartProgress) (string, bool) {
+	if len(progress) == 0 {
+		return "", false
+	}
+	var b strings.Builder
+	b.WriteString("Session start progress:\n")
+	for _, item := range progress {
+		fmt.Fprintf(&b, "- %s: %s\n", item.IssueID, daemonSessionStartProgressSummary(item))
+	}
+	return b.String(), true
+}
+
+func daemonSessionStartProgressSummary(progress taskGraphSessionStartProgress) string {
+	parts := make([]string, 0, 6)
+	if state := strings.TrimSpace(progress.OperationState); state != "" {
+		parts = append(parts, "state="+state)
+	}
+	if phase := strings.TrimSpace(progress.Phase); phase != "" {
+		parts = append(parts, "phase="+phase)
+	}
+	if operationID := strings.TrimSpace(progress.OperationID); operationID != "" {
+		parts = append(parts, "operation="+operationID)
+	}
+	if progress.ElapsedMS > 0 {
+		parts = append(parts, fmt.Sprintf("elapsed=%s", (time.Duration(progress.ElapsedMS)*time.Millisecond).Round(time.Second)))
+	}
+	if progress.Percent > 0 {
+		parts = append(parts, fmt.Sprintf("progress=%d%%", progress.Percent))
+	}
+	if message := strings.TrimSpace(progress.Message); message != "" {
+		parts = append(parts, message)
+	}
+	if len(parts) == 0 {
+		return "pending"
+	}
+	return strings.Join(parts, " ")
 }
 
 func (d *Daemon) sessionHookActivityByIssueKey(ctx context.Context, projectID string) map[string]sessionHookActivity {
@@ -1635,6 +1805,111 @@ func sessionActivityLabel(activity sessionHookActivity) (string, string) {
 		return "busy", "hooks"
 	}
 	return "idle", "hooks"
+}
+
+func initialSessionStartActivity(startWork bool) (string, string) {
+	if startWork {
+		return "busy", "session"
+	}
+	return "no-agent", "session"
+}
+
+func normalizeSessionActivity(activity string) string {
+	activity = strings.ToLower(strings.TrimSpace(activity))
+	switch activity {
+	case string(domain.SessionBusy),
+		string(domain.SessionIdle),
+		string(domain.SessionWaiting),
+		string(domain.SessionPaused),
+		string(domain.SessionDone),
+		string(domain.SessionError),
+		"unknown",
+		"no-agent",
+		"starting",
+		"working",
+		"ended":
+		return activity
+	default:
+		return ""
+	}
+}
+
+func normalizeSessionActivitySource(source, fallback string) string {
+	source = strings.ToLower(strings.TrimSpace(source))
+	if source != "" {
+		return source
+	}
+	return strings.ToLower(strings.TrimSpace(fallback))
+}
+
+func explicitSessionActivity(session daemonstate.Session) (sessionDisplayActivity, bool) {
+	if isAgentScopedSessionID(session.ID) {
+		return sessionDisplayActivity{}, false
+	}
+	state := daemonstate.NormalizeSessionState(session.State)
+	observed := daemonstate.NormalizeSessionState(session.ObservedState)
+	if strings.TrimSpace(string(observed)) == "" {
+		observed = state
+	}
+	if state == daemonstate.SessionStateStopped || observed == daemonstate.SessionStateStopped {
+		return sessionDisplayActivity{}, false
+	}
+	activity := normalizeSessionActivity(session.Activity)
+	if activity == "" {
+		return sessionDisplayActivity{}, false
+	}
+	return sessionDisplayActivity{
+		Activity: activity,
+		Source:   normalizeSessionActivitySource(session.ActivitySource, "session"),
+	}, true
+}
+
+func sessionDisplayActivityByIssueKeyFromSessions(sessions []daemonstate.Session, namingScope string) map[string]sessionDisplayActivity {
+	out := make(map[string]sessionDisplayActivity)
+	for key, session := range sessionProjectionAggregateByIssueKey(sessions, namingScope) {
+		display, ok := explicitSessionActivity(session)
+		if !ok {
+			continue
+		}
+		if key == "" {
+			continue
+		}
+		out[key] = display
+	}
+	for key, hookActivity := range sessionHookActivityByIssueKeyFromSessions(sessions, namingScope) {
+		activity, source := sessionActivityLabel(hookActivity)
+		if activity == "unknown" {
+			continue
+		}
+		out[key] = sessionDisplayActivity{Activity: activity, Source: source}
+	}
+	return out
+}
+
+func (d *Daemon) sessionDisplayActivityByIssueKey(ctx context.Context, projectID string) map[string]sessionDisplayActivity {
+	projectID = d.canonicalProjectID(projectID)
+	namingScope := d.sessionNamingScope(projectID)
+	sessions := []daemonstate.Session{}
+	if store := d.sessionRuntimeStateStoreIfConfigured(projectID); store != nil {
+		cachedSessions, err := store.ListSessionStates(ctx, projectID)
+		if err == nil {
+			sessions = cachedSessions
+		} else if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("load runtime session activity failed", "project_id", projectID, "error", err)
+		}
+	}
+	if len(sessions) == 0 && d.sessionStore != nil {
+		snapshot := d.sessionStore.ReadSnapshot(projectID)
+		sessions = make([]daemonstate.Session, 0, len(snapshot.Sessions))
+		for _, session := range snapshot.Sessions {
+			sessions = append(sessions, session)
+		}
+	}
+	return sessionDisplayActivityByIssueKeyFromSessions(sessions, namingScope)
+}
+
+func unknownActivityAdvice(issueID string) string {
+	return fmt.Sprintf("activity unknown: inspect hooks with az ai status --target=auto; run az ai install --target=auto only if hooks are missing, outdated, or not installed; use sparse pane capture only if status/watch looks stale, failed, or contradictory for %s", issueID)
 }
 
 func sessionActivityLabelForDisplay(activity sessionHookActivity, session daemonstate.Session) (string, string) {
@@ -2203,11 +2478,11 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 	sessionByKey := sessionProjectionForTaskDisplayByIssueKey(snapshotByKey, projectionByKey)
 	activeIssueKeys := activeSessionIssueKeysFromProjection(projectionSessions, namingScope)
 	countsByKey := sessionProjectionCountsByIssueKey(projectionSessions, namingScope)
-	hookActivityByKey := sessionHookActivityByIssueKeyFromSessions(projectionSessions, namingScope)
+	activityByKey := sessionDisplayActivityByIssueKeyFromSessions(projectionSessions, namingScope)
 	if len(activeIssueKeys) == 0 {
 		activeIssueKeys = activeSessionIssueKeysFromProjection(snapshotSessions, namingScope)
 		countsByKey = sessionProjectionCountsByIssueKey(snapshotSessions, namingScope)
-		hookActivityByKey = sessionHookActivityByIssueKeyFromSessions(snapshotSessions, namingScope)
+		activityByKey = sessionDisplayActivityByIssueKeyFromSessions(snapshotSessions, namingScope)
 	}
 
 	for i := range tasks {
@@ -2237,7 +2512,11 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 				state = domain.SessionBusy
 			}
 		}
-		activity, activitySource := sessionActivityLabelForDisplay(hookActivityByKey[taskKey], session)
+		activity, activitySource := sessionActivityLabelForDisplay(sessionHookActivity{}, session)
+		if display := activityByKey[taskKey]; display.Activity != "" {
+			activity = display.Activity
+			activitySource = display.Source
+		}
 		tasks[i].Session = &domain.Session{
 			IssueID:           naming.IssueID(taskID),
 			State:             state,
@@ -2640,6 +2919,8 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 			IssueID:           issueID,
 			State:             daemonstate.SessionStateRunning,
 			ObservedState:     daemonstate.SessionStateRunning,
+			Activity:          "busy",
+			ActivitySource:    "runtime",
 			TmuxAttachedCount: info.AttachedCount,
 			StartedAt:         info.CreatedAt,
 			UpdatedAt:         time.Now().UTC(),
@@ -2647,6 +2928,10 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 		if existing, exists := existingByIssueKey[issueKey]; exists {
 			row.State = existing.State
 			row.ObservedState = daemonstate.SessionStateRunning
+			if activity := normalizeSessionActivity(existing.Activity); activity != "" {
+				row.Activity = activity
+				row.ActivitySource = normalizeSessionActivitySource(existing.ActivitySource, "runtime")
+			}
 			if (row.StartedAt == nil || row.StartedAt.IsZero()) && existing.StartedAt != nil && !existing.StartedAt.IsZero() {
 				started := existing.StartedAt.UTC()
 				row.StartedAt = &started
@@ -2694,14 +2979,24 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 }
 
 func (d *Daemon) buildSessionLaunchCommand(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {
+	return d.buildSessionLaunchCommandWithInitReadyPath(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt, "")
+}
+
+func (d *Daemon) buildSessionLaunchCommandWithInitReadyPath(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt, initReadyPath string) string {
 	projectCfg := d.runtimeConfigForProject(projectID)
 	toolCommand := d.buildCLIToolCommand(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt)
-	commands := make([]string, 0, len(projectCfg.SessionInitCommands)+1)
+	commands := make([]string, 0, len(projectCfg.SessionInitCommands)+2)
+	if trapCommand := sessionInitReadyTrapCommand(initReadyPath); trapCommand != "" {
+		commands = append(commands, trapCommand)
+	}
 	for _, initCmd := range projectCfg.SessionInitCommands {
 		trimmed := strings.TrimSpace(initCmd)
 		if trimmed != "" {
 			commands = append(commands, trimmed)
 		}
+	}
+	if markerCommand := sessionInitReadyMarkerCommand(initReadyPath); markerCommand != "" {
+		commands = append(commands, markerCommand)
 	}
 	commands = append(commands, toolCommand)
 
@@ -2714,7 +3009,115 @@ func (d *Daemon) buildSessionLaunchCommand(projectID, issueID, sessionID string,
 	return fmt.Sprintf("%s -i -c %s", shell, singleQuoteForShell(inner))
 }
 
+func sessionInitReadyMarkerCommand(initReadyPath string) string {
+	initReadyPath = strings.TrimSpace(initReadyPath)
+	if initReadyPath == "" {
+		return ""
+	}
+	return "printf %s ready > " + singleQuoteForShell(filepath.ToSlash(initReadyPath)) + " && __azedarach_session_init_ready=1"
+}
+
+func sessionInitReadyTrapCommand(initReadyPath string) string {
+	initReadyPath = strings.TrimSpace(initReadyPath)
+	if initReadyPath == "" {
+		return ""
+	}
+	action := "if [ \"${__azedarach_session_init_ready:-0}\" != 1 ]; then printf %s ready > " + singleQuoteForShell(filepath.ToSlash(initReadyPath)) + "; fi"
+	return "__azedarach_session_init_ready=0; trap " + singleQuoteForShell(action) + " EXIT"
+}
+
 const sessionSideEffectWindowName = "side-effects"
+const sessionInitReadyPollInterval = 100 * time.Millisecond
+
+func (d *Daemon) prepareSessionInitReadyMarker(projectID, worktreePath, issueID, sessionID string) (sessionInitReadyMarker, error) {
+	commandCount := countNonEmptyStrings(d.runtimeConfigForProject(projectID).SessionInitCommands)
+	if commandCount == 0 {
+		return sessionInitReadyMarker{}, nil
+	}
+	worktreePath = strings.TrimSpace(worktreePath)
+	if worktreePath == "" {
+		return sessionInitReadyMarker{}, errors.New("missing worktree path")
+	}
+	relativePath := sessionInitReadyMarkerPath(issueID, sessionID)
+	absolutePath := filepath.Join(worktreePath, relativePath)
+	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
+		return sessionInitReadyMarker{}, err
+	}
+	if err := os.Remove(absolutePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return sessionInitReadyMarker{}, err
+	}
+	return sessionInitReadyMarker{
+		RelativePath: relativePath,
+		AbsolutePath: absolutePath,
+		CommandCount: commandCount,
+	}, nil
+}
+
+func sessionInitReadyMarkerPath(issueID, sessionID string) string {
+	return filepath.Join(
+		".azedarach",
+		"session-init-ready",
+		safeSessionSideEffectPathSegment(issueID),
+		safeSessionSideEffectPathSegment(sessionID),
+		"ready",
+	)
+}
+
+func countNonEmptyStrings(values []string) int {
+	count := 0
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func (d *Daemon) waitForSessionInitReady(ctx context.Context, projectID, issueID, sessionID string, marker sessionInitReadyMarker) error {
+	if strings.TrimSpace(marker.AbsolutePath) == "" {
+		return nil
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon session start waiting for init commands",
+			"project_id", projectID,
+			"issue_id", issueID,
+			"session_id", sessionID,
+			"command_count", marker.CommandCount,
+			"marker", marker.RelativePath,
+		)
+	}
+	if sessionInitReady(marker.AbsolutePath) {
+		return nil
+	}
+	ticker := time.NewTicker(sessionInitReadyPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("session init commands did not finish for %s before start context ended: %w", issueID, ctx.Err())
+		case <-ticker.C:
+			if sessionInitReady(marker.AbsolutePath) {
+				if d.cfg.Logger != nil {
+					d.cfg.Logger.Info("daemon session start init commands finished",
+						"project_id", projectID,
+						"issue_id", issueID,
+						"session_id", sessionID,
+						"command_count", marker.CommandCount,
+					)
+				}
+				return nil
+			}
+		}
+	}
+}
+
+func sessionInitReady(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return true
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
 
 func (d *Daemon) startSessionSideEffectCommands(ctx context.Context, projectID, issueID, sessionID, worktreePath string) {
 	projectCfg := d.runtimeConfigForProject(projectID)
@@ -3081,6 +3484,13 @@ func issueResourceStartOutput(result issueResourceLifecycleResult) string {
 	return fmt.Sprintf("Issue resources prepared: %d command(s)", len(result.Ran))
 }
 
+func sessionInitReadyOutput(marker sessionInitReadyMarker) string {
+	if marker.CommandCount == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Session init commands finished: %d command(s)", marker.CommandCount)
+}
+
 func issueResourceCleanupOutput(result issueResourceLifecycleResult) string {
 	if len(result.Ran) == 0 {
 		return ""
@@ -3193,7 +3603,7 @@ func buildStartWorkPrompt(issueID, issueType, title string, orchestratedWorker b
 		safeTitle,
 	)
 	if strings.EqualFold(safeIssueType, string(domain.TypeEpic)) {
-		return base + "\n\nRole: orchestrator\n- Use `az orchestrate status --root <issue-id>` for readiness snapshots including active worker activity (`busy|idle|unknown`).\n- Use `az orchestrate watch --root <issue-id> --since <seq> --jsonl` for continuous observe-only mailbox/runnable/activity updates; start it in another pane/session and leave it running while workers are active.\n- Do not use `--once` for orchestration monitoring; reserve it for diagnostic single polls.\n- Trust hook-backed `activity=busy|idle` for worker idleness checks. If activity is `unknown`, check hooks with `az ai status --target=auto` and install/update with `az ai install --target=auto`; use direct tmux pane capture only when watch/status look stale, failed, or contradictory, or when you need a sparse progress spot-check. Do not poll tmux panes on a fixed interval.\n- Start runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`, then immediately ensure the continuous watch is running.\n- Send running-worker nudges with `az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\"`; workers reporting their own status should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; bare `az mail send` is durable mailbox-only.\n- Treat blocked work as graph state from unresolved `blocks` dependencies or worker-blocked mailbox evidence, not as an issue status.\n- Treat `in_review` workers as ready for orchestrator validation; inspect evidence, run parent checks, then close accepted worker issues with `az issue close --id <issue-id>`.\n- Use `az orchestrate integrate --issue <issue-id>` for worker result inspection or repair guidance, not as the normal merge authority.\n- Use `az orchestrate close-session --issue <issue-id>` only for session cleanup repair when a worker must be stopped without closing the issue; daemon stop records stopped state before killing tmux so recovery cannot resurrect it.\n- Keep orchestration centralized in v1; do not auto-delegate sub-orchestrators.\n- Close only when `az orchestrate complete-check --root <issue-id>` passes."
+		return base + "\n\nRole: orchestrator\n- Use `az orchestrate status --root <issue-id>` for readiness snapshots including active worker activity (`busy|idle|no-agent|unknown`).\n- Use `az orchestrate watch --root <issue-id> --since <seq> --jsonl` for continuous observe-only mailbox/runnable/activity updates; start it in another pane/session and leave it running while workers are active.\n- Do not use `--once` for orchestration monitoring; reserve it for diagnostic single polls.\n- Trust hook-backed `activity=busy|idle` for worker idleness checks and treat `activity=no-agent` as an intentional session-only shell. If activity is `unknown`, inspect hooks with `az ai status --target=auto`; run `az ai install --target=auto` only when hooks are missing, outdated, or not installed. Use direct tmux pane capture only when watch/status look stale, failed, or contradictory, or when you need a sparse progress spot-check. Do not poll tmux panes on a fixed interval.\n- Start runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`, then immediately ensure the continuous watch is running.\n- Send running-worker nudges with `az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\"`; workers reporting their own status should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; bare `az mail send` is durable mailbox-only.\n- Treat blocked work as graph state from unresolved `blocks` dependencies or worker-blocked mailbox evidence, not as an issue status.\n- Treat `in_review` workers as ready for orchestrator validation; inspect evidence, run parent checks, then close accepted worker issues with `az issue close --id <issue-id>`.\n- Use `az orchestrate integrate --issue <issue-id>` for worker result inspection or repair guidance, not as the normal merge authority.\n- Use `az orchestrate close-session --issue <issue-id>` only for session cleanup repair when a worker must be stopped without closing the issue; daemon stop records stopped state before killing tmux so recovery cannot resurrect it.\n- Keep orchestration centralized in v1; do not auto-delegate sub-orchestrators.\n- Close only when `az orchestrate complete-check --root <issue-id>` passes."
 	}
 	if !orchestratedWorker {
 		return base + "\n\nRole: contributor\n- Focus only on this issue scope unless the user explicitly expands it.\n- Keep issue status/notes current with evidence.\n- Use `in_progress` while actively working, `in_review` when complete and awaiting review/integration, and `closed` only after acceptance criteria and validation are done.\n- Represent blocked work with dependency edges and notes, not by using `in_review`."

@@ -38,6 +38,7 @@ type gitServiceAdapter struct {
 	baseBranch                  string
 	baseBranchForProject        func(string) string
 	baseBranchForWorktree       func(context.Context, string, string) string
+	heavySessionStartActive     func(context.Context, string) bool
 
 	refreshMu      sync.Mutex
 	refreshRunning map[string]bool
@@ -428,6 +429,23 @@ func (a *gitServiceAdapter) queueGitStatusRefresh(projectID, worktree string, pr
 		return reconcileQueueSubmission[*git.GitStatus]{}, fmt.Errorf("missing worktree")
 	}
 	key := gitStatusRefreshQueueKey(projectID, worktree)
+	if a != nil && priority <= reconcilePriorityBackground && a.heavySessionStartActive != nil && a.gitStatusHeavySessionStartActive(projectID) {
+		until := time.Now().UTC().Add(defaultGitStatusRefreshCadence)
+		if a.logger != nil {
+			a.logger.Debug("git status refresh deferred during heavy session start",
+				"project_id", projectID,
+				"worktree", worktree,
+				"reason", reason,
+				"until", until,
+			)
+		}
+		return immediateReconcileSubmission(reconcileQueueResult[*git.GitStatus]{
+			Key:      key,
+			Deferred: true,
+			Reason:   heavySessionStartBackgroundDeferReason,
+			Until:    until,
+		}), nil
+	}
 	queue := a.ensureStatusRefreshQueue()
 	force := priority >= reconcilePriorityManual
 	throttle := a.ensureStatusRefreshThrottle()
@@ -489,6 +507,12 @@ func (a *gitServiceAdapter) queueGitStatusRefresh(projectID, worktree string, pr
 		throttle.Refund(admission)
 	}
 	return submission, nil
+}
+
+func (a *gitServiceAdapter) gitStatusHeavySessionStartActive(projectID string) bool {
+	checkCtx, cancel := heavySessionStartSignalCheckContext(context.Background())
+	defer cancel()
+	return a.heavySessionStartActive(checkCtx, projectID)
 }
 
 func (a *gitServiceAdapter) refreshGitStatusVisible(projectID, worktree string) {

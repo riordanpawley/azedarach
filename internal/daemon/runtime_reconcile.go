@@ -419,6 +419,9 @@ func (d *Daemon) refreshRuntimeForIssueMutationAsync(projectID string, issueID s
 	if len(issueIDs) == 0 {
 		return
 	}
+	if d.shouldDeferBackgroundScanForHeavySessionStart(context.Background(), projectID, "runtime_reconcile_issue", reconcilePriorityBackground) {
+		return
+	}
 
 	key := runtimeReconcileIssueQueueKey(projectID, issueIDs)
 	submission, err := d.ensureRuntimeReconcileQueue().Enqueue(reconcileQueueRequest[protocol.RuntimeReconcileResponseBody]{
@@ -691,6 +694,10 @@ func (d *Daemon) runRuntimeReconcileSweepWithPriority(ctx context.Context, prior
 	throttle := d.ensureRuntimeReconcileThrottle()
 	force := priority >= reconcilePriorityManual
 	for _, projectID := range projectIDs {
+		if d.shouldDeferBackgroundScanForHeavySessionStart(ctx, projectID, "runtime_reconcile", priority) {
+			metrics.Deferred++
+			continue
+		}
 		admission := reconcileThrottleDecision{Action: reconcileThrottleProcess}
 		if !force && !queue.HasJob(projectID) {
 			admission = throttle.Admit(projectID, false)

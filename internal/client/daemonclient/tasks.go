@@ -122,12 +122,13 @@ type TaskDeleteResult struct {
 
 // TaskGraphReadiness describes daemon-owned runnable-leaf policy for a root issue graph.
 type TaskGraphReadiness struct {
-	RootIssueID    string              `json:"root_issue_id"`
-	Runnable       []string            `json:"runnable"`
-	Pending        []TaskPendingStart  `json:"pending,omitempty"`
-	Active         []string            `json:"active,omitempty"`
-	ActiveSessions []TaskActiveSession `json:"active_sessions,omitempty"`
-	Blocked        map[string]string   `json:"blocked"`
+	RootIssueID          string                     `json:"root_issue_id"`
+	Runnable             []string                   `json:"runnable"`
+	Pending              []TaskPendingStart         `json:"pending,omitempty"`
+	Active               []string                   `json:"active,omitempty"`
+	ActiveSessions       []TaskActiveSession        `json:"active_sessions,omitempty"`
+	SessionStartProgress []TaskSessionStartProgress `json:"session_start_progress,omitempty"`
+	Blocked              map[string]string          `json:"blocked"`
 }
 
 // TaskPendingStart contains durable operation state for submitted session starts.
@@ -139,13 +140,27 @@ type TaskPendingStart struct {
 
 // TaskActiveSession contains runtime activity details for active graph leaves.
 type TaskActiveSession struct {
-	IssueID           string `json:"issue_id"`
-	Activity          string `json:"activity"`
-	ActivitySource    string `json:"activity_source"`
-	State             string `json:"state,omitempty"`
-	Status            string `json:"status,omitempty"`
-	TmuxAttachedCount int    `json:"tmux_attached_count,omitempty"`
-	Advice            string `json:"advice,omitempty"`
+	IssueID           string                    `json:"issue_id"`
+	Activity          string                    `json:"activity"`
+	ActivitySource    string                    `json:"activity_source"`
+	State             string                    `json:"state,omitempty"`
+	Status            string                    `json:"status,omitempty"`
+	TmuxAttachedCount int                       `json:"tmux_attached_count,omitempty"`
+	StartProgress     *TaskSessionStartProgress `json:"start_progress,omitempty"`
+	Advice            string                    `json:"advice,omitempty"`
+}
+
+type TaskSessionStartProgress struct {
+	IssueID        string     `json:"issue_id"`
+	OperationID    string     `json:"operation_id,omitempty"`
+	OperationState string     `json:"operation_state"`
+	Phase          string     `json:"phase,omitempty"`
+	Message        string     `json:"message,omitempty"`
+	Percent        int        `json:"percent,omitempty"`
+	ElapsedMS      int64      `json:"elapsed_ms,omitempty"`
+	EnqueuedAt     time.Time  `json:"enqueued_at,omitempty"`
+	StartedAt      *time.Time `json:"started_at,omitempty"`
+	FinishedAt     *time.Time `json:"finished_at,omitempty"`
 }
 
 // TaskCompleteCheckResult is the daemon-owned root close readiness gate.
