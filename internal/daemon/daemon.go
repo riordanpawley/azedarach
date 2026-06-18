@@ -299,6 +299,19 @@ func New(cfg Config) *Daemon {
 	}
 	gitService.baseBranchForProject = d.baseBranchForProject
 	gitService.baseBranchForWorktree = d.runtimeDiffBaseBranchForWorktree
+	gitService.heavySessionStartActive = func(ctx context.Context, projectID string) bool {
+		active, err := d.hasActiveHeavySessionStart(ctx, projectID)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Debug("git status heavy session-start check failed open",
+					"project_id", d.canonicalProjectID(projectID),
+					"error", err,
+				)
+			}
+			return false
+		}
+		return active
+	}
 	gitService.onStatusUpdate = func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) {
 		d.runtimeProjectionStateWriter().PublishGitStatusProjectionEvent(ctx, projectID, issueID, worktree, status)
 	}

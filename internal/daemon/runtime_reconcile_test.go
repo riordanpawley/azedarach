@@ -17,7 +17,9 @@ import (
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
+	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -84,6 +86,44 @@ func (r *runtimeReconcileRecorder) issueSnapshot() [][]string {
 		out = append(out, append([]string(nil), issueIDs...))
 	}
 	return out
+}
+
+func startBlockingHeavySessionStart(t *testing.T, projectID, issueID string) *operationRuntime {
+	t.Helper()
+
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir()})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	cleanup := func() {
+		releaseOnce.Do(func() {
+			close(release)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			_ = runtime.Drain(ctx)
+			_ = runtime.Close()
+		})
+	}
+	t.Cleanup(cleanup)
+
+	submitResult, err := runtime.manager.Submit(context.Background(), daemonops.SubmitRequest{
+		ProjectID:    projectID,
+		IssueID:      issueID,
+		Kind:         daemonhandlers.CommandSessionStart,
+		DedupeKey:    daemonhandlers.CommandSessionStart + ":" + issueID,
+		ResourceKeys: []string{"issue:" + projectID + ":" + issueID, heavySessionStartResourceKey(projectID)},
+	}, func(ctx context.Context) ([]byte, error) {
+		select {
+		case <-release:
+			return []byte(`{}`), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})
+	if err != nil {
+		t.Fatalf("submit heavy session-start operation: %v", err)
+	}
+	waitForRuntimeState(t, runtime, submitResult.Record.ID, daemonops.StateRunning)
+	return runtime
 }
 
 type sequentialRuntimeReconciler struct {
@@ -695,6 +735,61 @@ func TestRunRuntimeReconcileSweepDefersProjectsWhenBudgetExhausted(t *testing.T)
 	}
 }
 
+func TestRunRuntimeReconcileSweepDefersBackgroundDuringHeavySessionStart(t *testing.T) {
+	projectID := "proj-burst"
+	recorder := &runtimeReconcileRecorder{
+		result: protocol.RuntimeReconcileResponseBody{
+			ProjectID:             naming.ProjectID(projectID),
+			WorktreesRefreshed:    1,
+			RecreatedTmuxSessions: 1,
+			AlignedDaemonSessions: 1,
+		},
+	}
+	d := &Daemon{
+		cfg:               Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		operationRuntime:  startBlockingHeavySessionStart(t, projectID, "az-starting"),
+		runtimeReconciler: recorder,
+		revision: map[string]uint64{
+			projectID: 1,
+		},
+	}
+	t.Cleanup(func() {
+		if d.runtimeReconcileQueue != nil {
+			_ = d.runtimeReconcileQueue.Close()
+		}
+	})
+
+	results, metrics, err := d.runRuntimeReconcileSweepWithPriority(context.Background(), reconcilePriorityBackground, "periodic")
+	if err != nil {
+		t.Fatalf("background sweep error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("background results len = %d, want 0", len(results))
+	}
+	if metrics.Processed != 0 || metrics.Deferred != 1 || metrics.Skipped != 0 || metrics.Failed != 0 {
+		t.Fatalf("background metrics = %+v, want processed=0 deferred=1 skipped=0 failed=0", metrics)
+	}
+	calls, projectIDs := recorder.snapshot()
+	if calls != 0 || len(projectIDs) != 0 {
+		t.Fatalf("background reconcile calls = %d projectIDs=%v, want none", calls, projectIDs)
+	}
+
+	results, metrics, err = d.runRuntimeReconcileSweepWithPriority(context.Background(), reconcilePriorityManual, "manual")
+	if err != nil {
+		t.Fatalf("manual sweep error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("manual results len = %d, want 1", len(results))
+	}
+	if metrics.Processed != 1 || metrics.Deferred != 0 || metrics.Skipped != 0 || metrics.Failed != 0 {
+		t.Fatalf("manual metrics = %+v, want processed=1 deferred=0 skipped=0 failed=0", metrics)
+	}
+	calls, projectIDs = recorder.snapshot()
+	if calls != 1 || len(projectIDs) != 1 || projectIDs[0] != projectID {
+		t.Fatalf("manual reconcile calls = %d projectIDs=%v, want [%s]", calls, projectIDs, projectID)
+	}
+}
+
 func TestRunRuntimeReconcileSweepSkipsProjectDuringBackoffAfterUnchangedResult(t *testing.T) {
 	now := time.Date(2026, time.April, 3, 15, 0, 0, 0, time.UTC)
 	recorder := &runtimeReconcileRecorder{
@@ -1104,6 +1199,36 @@ func TestRefreshRuntimeForIssueMutationAsyncReturnsBeforeReconcileCompletes(t *t
 	case <-started:
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for async issue reconcile to start")
+	}
+}
+
+func TestRefreshRuntimeForIssueMutationAsyncDefersDuringHeavySessionStart(t *testing.T) {
+	projectID := "proj-burst"
+	recorder := &runtimeReconcileRecorder{}
+	d := &Daemon{
+		cfg:               Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		operationRuntime:  startBlockingHeavySessionStart(t, projectID, "az-starting"),
+		runtimeReconciler: recorder,
+	}
+	t.Cleanup(func() {
+		if d.runtimeReconcileQueue != nil {
+			_ = d.runtimeReconcileQueue.Close()
+		}
+	})
+
+	d.refreshRuntimeForIssueMutationAsync(projectID, "az-paused", "session.pause")
+	if d.runtimeReconcileQueue != nil {
+		snapshot := d.runtimeReconcileQueue.snapshot()
+		if len(snapshot.Pending) != 0 || len(snapshot.Running) != 0 {
+			t.Fatalf("runtime reconcile queue = %+v, want no async issue job", snapshot)
+		}
+	}
+	calls, projectIDs := recorder.snapshot()
+	if calls != 0 || len(projectIDs) != 0 {
+		t.Fatalf("async reconcile calls = %d projectIDs=%v, want none", calls, projectIDs)
+	}
+	if issueCalls := recorder.issueSnapshot(); len(issueCalls) != 0 {
+		t.Fatalf("async issue reconcile calls = %v, want none", issueCalls)
 	}
 }
 

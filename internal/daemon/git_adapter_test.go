@@ -784,6 +784,71 @@ func TestGitServiceAdapterQueueGitStatusRefreshDefersWhenBudgetExhausted(t *test
 	}
 }
 
+func TestGitServiceAdapterQueueGitStatusRefreshDefersBackgroundDuringHeavySessionStart(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	projectID := "default"
+	issueID := "az-target"
+	worktree := "/tmp/az-target"
+	store := newGitAdapterStore(t, projectID, issueID, worktree, cleanGitStatus())
+
+	var statusCalls atomic.Int32
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		if len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "status" && args[3] == "--porcelain" {
+			statusCalls.Add(1)
+			return "", nil
+		}
+		t.Fatalf("unexpected git args: %v", args)
+		return "", nil
+	}}
+	queue := newReconcileQueue[*git.GitStatus](reconcileQueueConfig{
+		Name:    "git_status_refresh_heavy_start_test",
+		Workers: 1,
+		Logger:  slog.Default(),
+	})
+	t.Cleanup(func() {
+		_ = queue.Close()
+	})
+	adapter := &gitServiceAdapter{
+		client:                  git.NewClient(runner, slog.Default()),
+		runtimeStateStore:       store,
+		statusRefreshQueue:      queue,
+		logger:                  slog.Default(),
+		heavySessionStartActive: func(context.Context, string) bool { return true },
+	}
+
+	background, err := adapter.queueGitStatusRefresh(projectID, worktree, reconcilePriorityBackground, "background")
+	if err != nil {
+		t.Fatalf("queue background refresh: %v", err)
+	}
+	backgroundResult, err := background.Wait(ctx)
+	if err != nil {
+		t.Fatalf("wait background refresh: %v", err)
+	}
+	if !backgroundResult.Deferred || backgroundResult.Skipped || backgroundResult.Reason != heavySessionStartBackgroundDeferReason {
+		t.Fatalf("background refresh result = %+v, want deferred for heavy session start", backgroundResult)
+	}
+	if got := statusCalls.Load(); got != 0 {
+		t.Fatalf("status calls after background refresh = %d, want 0", got)
+	}
+
+	visible, err := adapter.queueGitStatusRefresh(projectID, worktree, reconcilePriorityVisible, "visible")
+	if err != nil {
+		t.Fatalf("queue visible refresh: %v", err)
+	}
+	visibleResult, err := visible.Wait(ctx)
+	if err != nil {
+		t.Fatalf("wait visible refresh: %v", err)
+	}
+	if visibleResult.Err != nil {
+		t.Fatalf("visible refresh error = %v, want nil", visibleResult.Err)
+	}
+	if got := statusCalls.Load(); got != 1 {
+		t.Fatalf("status calls after visible refresh = %d, want 1", got)
+	}
+}
+
 func TestGitServiceAdapterQueueGitStatusRefreshBacksOffUnchangedTarget(t *testing.T) {
 	t.Parallel()
 
