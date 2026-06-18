@@ -337,16 +337,12 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 // handleMergeTargetSelection handles merge target selection
 func (m Model) handleMergeTargetSelection(msg overlay.MergeTargetSelectedMsg) (tea.Model, tea.Cmd) {
 	m.overlayStack.Pop()
-	targetState := domain.SessionIdle
-	if targetSession := m.sessionForIssue(msg.TargetID); targetSession != nil {
-		targetState = targetSession.State
-	}
 	m.markMergeOperationPreparing(msg.SourceID, msg.TargetID, "preparing merge")
 	m.beginMutationFeedback(fmt.Sprintf("Resolving merge %s -> %s", msg.SourceID, msg.TargetID))
-	return m, m.resolveMergeTargetSelectionCmd(msg.SourceID, msg.TargetID, targetState, !msg.SkipPreflightStatusRefresh)
+	return m, m.resolveMergeTargetSelectionCmd(msg.SourceID, msg.TargetID, !msg.SkipPreflightStatusRefresh)
 }
 
-func (m Model) resolveMergeTargetSelectionCmd(sourceID, targetID string, targetState domain.SessionState, refreshStatus bool) tea.Cmd {
+func (m Model) resolveMergeTargetSelectionCmd(sourceID, targetID string, refreshStatus bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
 		defer cancel()
@@ -356,7 +352,6 @@ func (m Model) resolveMergeTargetSelectionCmd(sourceID, targetID string, targetS
 			return mergeTargetSelectionResolvedMsg{
 				sourceID:      sourceID,
 				targetID:      targetID,
-				targetState:   targetState,
 				refreshStatus: refreshStatus,
 				err:           fmt.Errorf("source session worktree not found"),
 			}
@@ -368,7 +363,6 @@ func (m Model) resolveMergeTargetSelectionCmd(sourceID, targetID string, targetS
 				targetID:       targetID,
 				sourceWorktree: sourceWorktree,
 				targetWorktree: m.activeProjectPath(),
-				targetState:    targetState,
 				refreshStatus:  refreshStatus,
 			}
 		}
@@ -379,7 +373,6 @@ func (m Model) resolveMergeTargetSelectionCmd(sourceID, targetID string, targetS
 				sourceID:       sourceID,
 				targetID:       targetID,
 				sourceWorktree: sourceWorktree,
-				targetState:    targetState,
 				refreshStatus:  refreshStatus,
 				err:            fmt.Errorf("target session worktree not found"),
 			}
@@ -389,7 +382,6 @@ func (m Model) resolveMergeTargetSelectionCmd(sourceID, targetID string, targetS
 			targetID:       targetID,
 			sourceWorktree: sourceWorktree,
 			targetWorktree: targetWorktree,
-			targetState:    targetState,
 			refreshStatus:  refreshStatus,
 		}
 	}
@@ -436,7 +428,6 @@ type mergeTargetSelectionResolvedMsg struct {
 	targetID       string
 	sourceWorktree string
 	targetWorktree string
-	targetState    domain.SessionState
 	refreshStatus  bool
 	err            error
 }
@@ -665,12 +656,8 @@ func (m Model) mergeCurrentIssueIntoDefaultTarget(task *domain.Task) (tea.Model,
 	}
 
 	targetID := task.ParentID.String()
-	targetState := domain.SessionIdle
-	if targetSession := m.sessionForIssue(targetID); targetSession != nil {
-		targetState = targetSession.State
-	}
 	m.markMergeOperationPreparing(sourceID, targetID, "preparing merge")
-	return m, m.resolveMergeTargetSelectionCmd(sourceID, targetID, targetState, true)
+	return m, m.resolveMergeTargetSelectionCmd(sourceID, targetID, true)
 }
 
 func (m Model) followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, sourceID, targetID string, targetState domain.SessionState, refreshStatus bool) tea.Cmd {

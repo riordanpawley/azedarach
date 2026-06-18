@@ -796,7 +796,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.targetID == mergeBaseTargetID {
 			return m, m.mergeToBaseCmd(msg.sourceWorktree, msg.sourceID, msg.refreshStatus)
 		}
-		return m, m.followOnMergeIntoTargetCmd(msg.sourceWorktree, msg.targetWorktree, msg.sourceID, msg.targetID, msg.targetState, msg.refreshStatus)
+		return m, m.mergeFeatureIntoFeatureCmd(msg.sourceWorktree, msg.targetWorktree, msg.sourceID, msg.targetID, msg.refreshStatus)
 
 	case diffViewerResolvedMsg:
 		return m.openDiffViewerFromResolved(msg)
