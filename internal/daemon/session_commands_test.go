@@ -862,6 +862,135 @@ func TestSessionStartContinuesWhenFreshnessTimesOut(t *testing.T) {
 	}
 }
 
+func waitForDirectoryOrCompletion[T any](t *testing.T, path string, done <-chan T) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return
+		}
+		select {
+		case result := <-done:
+			t.Fatalf("operation completed before directory %s existed: %+v", path, result)
+		case <-deadline:
+			t.Fatalf("timed out waiting for directory %s", path)
+		case <-ticker.C:
+		}
+	}
+}
+
+func TestSessionStartWaitsForInitReadyMarkerBeforeCompleting(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Start waits for init marker",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
+	worktreeRunner := &initFailureCleanupWorktreeRunner{
+		repoDir:      repoDir,
+		worktreePath: worktreePath,
+		branchName:   "testuser/" + issueID + "/init-marker",
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:             repoDir,
+			BaseBranch:          "main",
+			CLITool:             "codex",
+			SessionShell:        "zsh",
+			SessionInitCommands: []string{"direnv allow"},
+			Logger:              slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	type startResult struct {
+		resp protocol.ResponseEnvelope
+		err  error
+	}
+	done := make(chan startResult, 1)
+	go func() {
+		resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-start-init-marker",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         "session.start",
+			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+			Body: marshalJSON(map[string]string{
+				"project_id": projectID,
+				"session_id": issueID,
+			}),
+		})
+		done <- startResult{resp: resp, err: err}
+	}()
+
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	markerPath := filepath.Join(worktreePath, sessionInitReadyMarkerPath(issueID, sessionID))
+	waitForDirectoryOrCompletion(t, filepath.Dir(markerPath), done)
+
+	select {
+	case result := <-done:
+		t.Fatalf("session start completed before init marker existed: resp=%+v err=%v", result.resp, result.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	if err := os.WriteFile(markerPath, []byte("ready"), 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+
+	var result startResult
+	select {
+	case result = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("session start did not complete after init marker was written")
+	}
+	if result.err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", result.err)
+	}
+	if !result.resp.OK {
+		t.Fatalf("session start response not OK: %+v", result.resp)
+	}
+	var payload struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(result.resp.Body, &payload); err != nil {
+		t.Fatalf("unmarshal response body: %v", err)
+	}
+	if !strings.Contains(payload.Output, "Session init commands finished: 1 command(s)") {
+		t.Fatalf("output = %q, want init command completion line", payload.Output)
+	}
+	if len(tmuxRunner.sendKeysPayloads) != 1 || !strings.Contains(tmuxRunner.sendKeysPayloads[0], filepath.ToSlash(sessionInitReadyMarkerPath(issueID, sessionID))) {
+		t.Fatalf("sendKeysPayloads = %+v, want init marker path", tmuxRunner.sendKeysPayloads)
+	}
+}
+
 func TestSessionStartWithStartWorkFalseSkipsLaunchCommand(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -4460,6 +4589,45 @@ func TestBuildSessionLaunchCommandDoesNotSerializeSideEffectCommandsBeforeToolLa
 	}
 	if !strings.Contains(command, `AZEDARACH_ISSUE_ID="cnb" codex`) {
 		t.Fatalf("command = %q, want foreground AI tool launch", command)
+	}
+}
+
+func TestBuildSessionLaunchCommandWritesInitReadyMarkerAfterInitCommands(t *testing.T) {
+	d := &Daemon{
+		cfg: Config{
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			SessionInitCommands: []string{
+				"direnv allow",
+				"go test ./...",
+			},
+		},
+	}
+
+	markerPath := sessionInitReadyMarkerPath("axt-123", "session-axt-123")
+	command := d.buildSessionLaunchCommandWithInitReadyPath(
+		protocol.DefaultProjectID,
+		"axt-123",
+		"session-axt-123",
+		false,
+		nil,
+		`work on issue axt-123 (task): Verify startup behavior`,
+		markerPath,
+	)
+
+	if !strings.Contains(command, "__azedarach_session_init_ready=0") ||
+		!strings.Contains(command, "trap") ||
+		!strings.Contains(command, filepath.ToSlash(markerPath)) {
+		t.Fatalf("command = %q, want init-ready trap and marker path", command)
+	}
+	initIndex := strings.Index(command, "go test ./...")
+	markerIndex := strings.LastIndex(command, "printf %s ready")
+	toolIndex := strings.Index(command, `AZEDARACH_ISSUE_ID="axt-123" codex`)
+	if initIndex < 0 || markerIndex < 0 || toolIndex < 0 {
+		t.Fatalf("command = %q, missing init, marker, or tool command", command)
+	}
+	if !(initIndex < markerIndex && markerIndex < toolIndex) {
+		t.Fatalf("command = %q, want init commands before marker before tool launch", command)
 	}
 }
 

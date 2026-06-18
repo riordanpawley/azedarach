@@ -66,6 +66,12 @@ type issueResourceLifecycleResult struct {
 	Ran []string
 }
 
+type sessionInitReadyMarker struct {
+	RelativePath string
+	AbsolutePath string
+	CommandCount int
+}
+
 type sessionProjectionCounts struct {
 	Total             int
 	Active            int
@@ -698,6 +704,15 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("export issue resource env: %v%s", err, cleanupNote)), nil
 	}
+	sessionInitMarker := sessionInitReadyMarker{}
+	if cmd.StartWork {
+		var markerErr error
+		sessionInitMarker, markerErr = d.prepareSessionInitReadyMarker(cmd.ProjectID, worktree.Path, cmd.IssueID, cmd.SessionID)
+		if markerErr != nil {
+			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare session init marker: %v%s", markerErr, cleanupNote)), nil
+		}
+	}
 	if cmd.StartWork {
 		d.startSessionSideEffectCommands(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktree.Path)
 		initialPrompt := strings.TrimSpace(cmd.Prompt)
@@ -708,7 +723,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			}
 			initialPrompt = buildStartWorkPrompt(cmd.IssueID, task.Type.String(), task.Title, parentIssueID != "", parentIssueID)
 		}
-		launchCommand := d.buildSessionLaunchCommand(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, initialPrompt)
+		launchCommand := d.buildSessionLaunchCommandWithInitReadyPath(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, initialPrompt, sessionInitMarker.RelativePath)
 		if err := d.tmux.SendKeys(ctx, cmd.SessionID, launchCommand); err != nil {
 			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
@@ -734,6 +749,11 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		initialActivitySource,
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session start transition: %v", err)), nil
+	}
+	if cmd.StartWork && sessionInitMarker.AbsolutePath != "" {
+		if err := d.waitForSessionInitReady(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, sessionInitMarker); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
 	}
 	if updateErr := issueClient.Update(ctx, cmd.IssueID, domain.StatusInProgress); updateErr != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn("failed to update issue status to in_progress after session start",
@@ -767,6 +787,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			}
 			return "Skipping AI launch (tmux session only)"
 		}(),
+		sessionInitReadyOutput(sessionInitMarker),
 		"",
 		"✓ Session started successfully",
 		fmt.Sprintf("  To attach: az attach %s", cmd.IssueID),
@@ -2800,14 +2821,24 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 }
 
 func (d *Daemon) buildSessionLaunchCommand(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {
+	return d.buildSessionLaunchCommandWithInitReadyPath(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt, "")
+}
+
+func (d *Daemon) buildSessionLaunchCommandWithInitReadyPath(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt, initReadyPath string) string {
 	projectCfg := d.runtimeConfigForProject(projectID)
 	toolCommand := d.buildCLIToolCommand(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt)
-	commands := make([]string, 0, len(projectCfg.SessionInitCommands)+1)
+	commands := make([]string, 0, len(projectCfg.SessionInitCommands)+2)
+	if trapCommand := sessionInitReadyTrapCommand(initReadyPath); trapCommand != "" {
+		commands = append(commands, trapCommand)
+	}
 	for _, initCmd := range projectCfg.SessionInitCommands {
 		trimmed := strings.TrimSpace(initCmd)
 		if trimmed != "" {
 			commands = append(commands, trimmed)
 		}
+	}
+	if markerCommand := sessionInitReadyMarkerCommand(initReadyPath); markerCommand != "" {
+		commands = append(commands, markerCommand)
 	}
 	commands = append(commands, toolCommand)
 
@@ -2820,7 +2851,115 @@ func (d *Daemon) buildSessionLaunchCommand(projectID, issueID, sessionID string,
 	return fmt.Sprintf("%s -i -c %s", shell, singleQuoteForShell(inner))
 }
 
+func sessionInitReadyMarkerCommand(initReadyPath string) string {
+	initReadyPath = strings.TrimSpace(initReadyPath)
+	if initReadyPath == "" {
+		return ""
+	}
+	return "printf %s ready > " + singleQuoteForShell(filepath.ToSlash(initReadyPath)) + " && __azedarach_session_init_ready=1"
+}
+
+func sessionInitReadyTrapCommand(initReadyPath string) string {
+	initReadyPath = strings.TrimSpace(initReadyPath)
+	if initReadyPath == "" {
+		return ""
+	}
+	action := "if [ \"${__azedarach_session_init_ready:-0}\" != 1 ]; then printf %s ready > " + singleQuoteForShell(filepath.ToSlash(initReadyPath)) + "; fi"
+	return "__azedarach_session_init_ready=0; trap " + singleQuoteForShell(action) + " EXIT"
+}
+
 const sessionSideEffectWindowName = "side-effects"
+const sessionInitReadyPollInterval = 100 * time.Millisecond
+
+func (d *Daemon) prepareSessionInitReadyMarker(projectID, worktreePath, issueID, sessionID string) (sessionInitReadyMarker, error) {
+	commandCount := countNonEmptyStrings(d.runtimeConfigForProject(projectID).SessionInitCommands)
+	if commandCount == 0 {
+		return sessionInitReadyMarker{}, nil
+	}
+	worktreePath = strings.TrimSpace(worktreePath)
+	if worktreePath == "" {
+		return sessionInitReadyMarker{}, errors.New("missing worktree path")
+	}
+	relativePath := sessionInitReadyMarkerPath(issueID, sessionID)
+	absolutePath := filepath.Join(worktreePath, relativePath)
+	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
+		return sessionInitReadyMarker{}, err
+	}
+	if err := os.Remove(absolutePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return sessionInitReadyMarker{}, err
+	}
+	return sessionInitReadyMarker{
+		RelativePath: relativePath,
+		AbsolutePath: absolutePath,
+		CommandCount: commandCount,
+	}, nil
+}
+
+func sessionInitReadyMarkerPath(issueID, sessionID string) string {
+	return filepath.Join(
+		".azedarach",
+		"session-init-ready",
+		safeSessionSideEffectPathSegment(issueID),
+		safeSessionSideEffectPathSegment(sessionID),
+		"ready",
+	)
+}
+
+func countNonEmptyStrings(values []string) int {
+	count := 0
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func (d *Daemon) waitForSessionInitReady(ctx context.Context, projectID, issueID, sessionID string, marker sessionInitReadyMarker) error {
+	if strings.TrimSpace(marker.AbsolutePath) == "" {
+		return nil
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon session start waiting for init commands",
+			"project_id", projectID,
+			"issue_id", issueID,
+			"session_id", sessionID,
+			"command_count", marker.CommandCount,
+			"marker", marker.RelativePath,
+		)
+	}
+	if sessionInitReady(marker.AbsolutePath) {
+		return nil
+	}
+	ticker := time.NewTicker(sessionInitReadyPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("session init commands did not finish for %s before start context ended: %w", issueID, ctx.Err())
+		case <-ticker.C:
+			if sessionInitReady(marker.AbsolutePath) {
+				if d.cfg.Logger != nil {
+					d.cfg.Logger.Info("daemon session start init commands finished",
+						"project_id", projectID,
+						"issue_id", issueID,
+						"session_id", sessionID,
+						"command_count", marker.CommandCount,
+					)
+				}
+				return nil
+			}
+		}
+	}
+}
+
+func sessionInitReady(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return true
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
 
 func (d *Daemon) startSessionSideEffectCommands(ctx context.Context, projectID, issueID, sessionID, worktreePath string) {
 	projectCfg := d.runtimeConfigForProject(projectID)
@@ -3185,6 +3324,13 @@ func issueResourceStartOutput(result issueResourceLifecycleResult) string {
 		return ""
 	}
 	return fmt.Sprintf("Issue resources prepared: %d command(s)", len(result.Ran))
+}
+
+func sessionInitReadyOutput(marker sessionInitReadyMarker) string {
+	if marker.CommandCount == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Session init commands finished: %d command(s)", marker.CommandCount)
 }
 
 func issueResourceCleanupOutput(result issueResourceLifecycleResult) string {
