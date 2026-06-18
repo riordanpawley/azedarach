@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -98,15 +99,16 @@ type orchestrateStatusResult struct {
 }
 
 type orchestrateStartResult struct {
-	RootIssueID string                   `json:"root_issue_id"`
-	Limit       int                      `json:"limit"`
-	Requested   []string                 `json:"requested"`
-	Started     []string                 `json:"started"`
-	Launched    []orchestrateStartLaunch `json:"launched,omitempty"`
-	Skipped     map[string]string        `json:"skipped"`
-	Failed      map[string]string        `json:"failed"`
-	Warnings    []string                 `json:"warnings,omitempty"`
-	Advice      orchestrateStartAdvice   `json:"advice,omitempty"`
+	RootIssueID string                    `json:"root_issue_id"`
+	Limit       int                       `json:"limit"`
+	Requested   []string                  `json:"requested"`
+	Started     []string                  `json:"started"`
+	Launched    []orchestrateStartLaunch  `json:"launched,omitempty"`
+	Pending     []orchestrateStartPending `json:"pending,omitempty"`
+	Skipped     map[string]string         `json:"skipped"`
+	Failed      map[string]string         `json:"failed"`
+	Warnings    []string                  `json:"warnings,omitempty"`
+	Advice      orchestrateStartAdvice    `json:"advice,omitempty"`
 }
 
 type orchestrateStartLaunch struct {
@@ -121,8 +123,17 @@ type orchestrateStartLaunch struct {
 	CloseHint      string `json:"close_hint"`
 }
 
+type orchestrateStartPending struct {
+	IssueID          string   `json:"issue_id"`
+	OperationID      string   `json:"operation_id"`
+	OperationState   string   `json:"operation_state"`
+	Reason           string   `json:"reason"`
+	FollowUpCommands []string `json:"follow_up_commands,omitempty"`
+}
+
 type orchestrateStartAdvice struct {
 	WatchCommand     string `json:"watch_command,omitempty"`
+	StatusCommand    string `json:"status_command,omitempty"`
 	WatchInstruction string `json:"watch_instruction,omitempty"`
 }
 
@@ -518,14 +529,26 @@ func OrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOptions) e
 		return err
 	}
 	if opts.JSON {
-		return printJSON(result)
+		if err := printJSON(result); err != nil {
+			return err
+		}
+		return orchestrateStartResultError(result)
 	}
 	printOrchestrateStartResult(result)
+	return orchestrateStartResultError(result)
+}
+
+func orchestrateStartResultError(result orchestrateStartResult) error {
 	if len(result.Failed) > 0 {
 		return fmt.Errorf("orchestrate start completed with failures")
 	}
+	if len(result.Pending) > 0 {
+		return fmt.Errorf("orchestrate start has pending session start operations")
+	}
 	return nil
 }
+
+var orchestrateStartOperationWaitTimeout = sessionStartCommandTimeout
 
 func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchestrateStartResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
@@ -576,6 +599,7 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		Warnings:    orchestrateStartWarnings(ctx, deps, opts.RootIssueID, plannedOrchestrateStartLaunchCount(len(requested), opts.Limit)),
 		Advice: orchestrateStartAdvice{
 			WatchCommand:     fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", opts.RootIssueID),
+			StatusCommand:    fmt.Sprintf("az orchestrate status --root %s --json", opts.RootIssueID),
 			WatchInstruction: "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
 		},
 	}
@@ -601,7 +625,12 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	for _, launch := range pendingLaunches {
 		issueID := launch.IssueID
 		emitOrchestrateStartProgress(opts, "waiting", issueID)
-		completedLaunch, err := waitForSubmittedSessionStart(deps, launch)
+		completedLaunch, pending, err := waitForSubmittedSessionStart(deps, opts.RootIssueID, launch)
+		if pending != nil {
+			result.Pending = append(result.Pending, *pending)
+			emitOrchestrateStartProgress(opts, "pending", issueID)
+			continue
+		}
 		if err != nil {
 			result.Failed[issueID] = err.Error()
 			continue
@@ -753,6 +782,15 @@ func printOrchestrateStartResult(result orchestrateStartResult) {
 		fmt.Printf("- %s\n", result.Advice.WatchCommand)
 		if result.Advice.WatchInstruction != "" {
 			fmt.Printf("- %s\n", result.Advice.WatchInstruction)
+		}
+	}
+	if len(result.Pending) > 0 {
+		fmt.Println("Pending starts:")
+		for _, pending := range result.Pending {
+			fmt.Printf("- %s: operation=%s state=%s reason=%s\n", pending.IssueID, pending.OperationID, pending.OperationState, pending.Reason)
+			for _, command := range pending.FollowUpCommands {
+				fmt.Printf("  follow up: %s\n", command)
+			}
 		}
 	}
 	if len(result.Failed) > 0 {
@@ -1405,15 +1443,18 @@ func submitSessionStartForIssue(deps *Dependencies, issueID string) (orchestrate
 	return submitSessionStartForIssueWithBaseBranch(deps, issueID, "")
 }
 
-func waitForSubmittedSessionStart(deps *Dependencies, launch orchestrateStartLaunch) (orchestrateStartLaunch, error) {
+func waitForSubmittedSessionStart(deps *Dependencies, rootIssueID string, launch orchestrateStartLaunch) (orchestrateStartLaunch, *orchestrateStartPending, error) {
 	if launch.OperationID == "" {
-		return launch, fmt.Errorf("session start operation missing operation id")
+		return launch, nil, fmt.Errorf("session start operation missing operation id")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), sessionStartCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), orchestrateStartOperationWaitTimeout)
 	defer cancel()
 	record, err := deps.DaemonClient.WaitForOperation(ctx, launch.OperationID, 0)
 	if err != nil {
-		return launch, fmt.Errorf("wait for session start operation %s: %w", launch.OperationID, err)
+		if pending, ok := pendingSessionStartFromWaitError(rootIssueID, launch, record, err); ok {
+			return launch, &pending, nil
+		}
+		return launch, nil, fmt.Errorf("wait for session start operation %s: %w", launch.OperationID, err)
 	}
 	launch.OperationState = string(record.State)
 	if record.State != protocol.OperationStateDone {
@@ -1424,13 +1465,55 @@ func waitForSubmittedSessionStart(deps *Dependencies, launch orchestrateStartLau
 		if message == "" {
 			message = fmt.Sprintf("session start operation ended in state %s", record.State)
 		}
-		return launch, fmt.Errorf("%s", message)
+		return launch, nil, fmt.Errorf("%s", message)
 	}
 	if wt, found, wtErr := worktreeForIssue(ctx, deps, launch.IssueID); wtErr == nil && found {
 		launch.WorktreePath = wt.Path
 	}
 	launch.Warning = sessionStartWarningFromOperationResult(record.Result)
-	return launch, nil
+	return launch, nil, nil
+}
+
+func pendingSessionStartFromWaitError(rootIssueID string, launch orchestrateStartLaunch, record protocol.OperationRecord, err error) (orchestrateStartPending, bool) {
+	if !operationWaitTimedOut(err) {
+		return orchestrateStartPending{}, false
+	}
+	state := record.State
+	if state == "" {
+		state = protocol.OperationState(strings.TrimSpace(launch.OperationState))
+	}
+	if state == "" || operationStateTerminal(state) {
+		return orchestrateStartPending{}, false
+	}
+	reason := fmt.Sprintf("timed out after %s waiting for daemon operation to finish; operation is still %s", orchestrateStartOperationWaitTimeout, state)
+	return orchestrateStartPending{
+		IssueID:        launch.IssueID,
+		OperationID:    launch.OperationID,
+		OperationState: string(state),
+		Reason:         reason,
+		FollowUpCommands: []string{
+			fmt.Sprintf("az operation get --id %s --wait", launch.OperationID),
+			fmt.Sprintf("az orchestrate status --root %s --json", rootIssueID),
+		},
+	}, true
+}
+
+func operationWaitTimedOut(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	type timeout interface {
+		Timeout() bool
+	}
+	var timeoutErr timeout
+	if errors.As(err, &timeoutErr) && timeoutErr.Timeout() {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "context deadline exceeded") || strings.Contains(message, "i/o timeout")
 }
 
 func sessionStartWarningFromOperationResult(result json.RawMessage) string {

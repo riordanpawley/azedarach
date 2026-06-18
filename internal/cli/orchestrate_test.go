@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/config"
@@ -973,6 +974,241 @@ func TestOrchestrateStartWaitsForAllSubmittedOperationsBeforeMail(t *testing.T) 
 	}
 	if len(result.Started) != 2 || len(result.Failed) != 0 {
 		t.Fatalf("result started=%+v failed=%+v, want both started with no failures", result.Started, result.Failed)
+	}
+}
+
+func TestOrchestrateStartReportsPendingWhenWaitTimeout(t *testing.T) {
+	oldTimeout := orchestrateStartOperationWaitTimeout
+	orchestrateStartOperationWaitTimeout = time.Millisecond
+	t.Cleanup(func() { orchestrateStartOperationWaitTimeout = oldTimeout })
+
+	root := naming.IssueID("az-1")
+	child := naming.IssueID("az-2")
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+		{ID: child, Title: "Worker", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &root},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	mailSends := 0
+	operationState := protocol.OperationStateRunning
+	deps := &Dependencies{
+		ProjectID: protocol.DefaultProjectID,
+		RepoDir:   "/repo",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{child.String()},
+						Blocked:     map[string]string{},
+					}), nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: taskListBody}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{IssueID: child.String(), TargetID: "base", Branch: "main"}), nil
+				case daemonclient.CommandGitStatus:
+					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{}}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees": []map[string]string{
+							{"issue_id": root.String(), "path": "/repo-az-1", "branch": "user/az-1/root"},
+						},
+					}), nil
+				case protocol.CommandOperationSubmit:
+					return responseWithJSON(req, protocol.OperationSubmitResponseBody{
+						Created: true,
+						Operation: protocol.OperationRecord{
+							OperationID: "op-1",
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     child,
+							State:       protocol.OperationStateQueued,
+						},
+					}), nil
+				case protocol.CommandOperationGet:
+					return responseWithJSON(req, protocol.OperationGetResponseBody{
+						Operation: protocol.OperationRecord{
+							OperationID: "op-1",
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     child,
+							State:       operationState,
+						},
+					}), nil
+				case protocol.CommandMailSend:
+					mailSends++
+					return responseWithJSON(req, protocol.MailEvent{}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output, err := captureStdoutAllowError(t, func() error {
+		return OrchestrateStartCommand(deps, OrchestrateStartOptions{RootIssueID: root.String(), IssueIDs: []string{child.String()}, Limit: 4, JSON: true})
+	})
+	if err == nil {
+		t.Fatal("OrchestrateStartCommand error = nil, want pending timeout error")
+	}
+	if strings.Contains(err.Error(), "completed with failures") || !strings.Contains(err.Error(), "pending session start operations") {
+		t.Fatalf("error = %q, want pending timeout without generic failure", err)
+	}
+	var result orchestrateStartResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if len(result.Failed) != 0 || len(result.Started) != 0 || len(result.Pending) != 1 {
+		t.Fatalf("started=%+v pending=%+v failed=%+v, want one pending and no failed/started", result.Started, result.Pending, result.Failed)
+	}
+	pending := result.Pending[0]
+	if pending.IssueID != child.String() || pending.OperationID != "op-1" || pending.OperationState != string(protocol.OperationStateRunning) {
+		t.Fatalf("pending = %+v", pending)
+	}
+	followUps := strings.Join(pending.FollowUpCommands, "\n")
+	for _, want := range []string{"az operation get --id op-1 --wait", "az orchestrate status --root az-1 --json"} {
+		if !strings.Contains(followUps, want) {
+			t.Fatalf("follow-up commands missing %q: %+v", want, pending.FollowUpCommands)
+		}
+	}
+	if mailSends != 0 {
+		t.Fatalf("mail sends = %d, want none for pending start", mailSends)
+	}
+
+	operationState = protocol.OperationStateDone
+	record, err := deps.DaemonClient.GetOperation(context.Background(), "op-1")
+	if err != nil {
+		t.Fatalf("GetOperation after pending start error = %v", err)
+	}
+	if record.State != protocol.OperationStateDone {
+		t.Fatalf("operation state after pending start = %q, want done", record.State)
+	}
+}
+
+func TestOrchestrateStartPreservesTerminalOperationFailure(t *testing.T) {
+	root := naming.IssueID("az-1")
+	child := naming.IssueID("az-2")
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+		{ID: child, Title: "Worker", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &root},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	deps := &Dependencies{
+		ProjectID: protocol.DefaultProjectID,
+		RepoDir:   "/repo",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{child.String()},
+						Blocked:     map[string]string{},
+					}), nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: taskListBody}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{IssueID: child.String(), TargetID: "base", Branch: "main"}), nil
+				case daemonclient.CommandGitStatus:
+					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{}}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees": []map[string]string{
+							{"issue_id": root.String(), "path": "/repo-az-1", "branch": "user/az-1/root"},
+						},
+					}), nil
+				case protocol.CommandOperationSubmit:
+					return responseWithJSON(req, protocol.OperationSubmitResponseBody{
+						Created: true,
+						Operation: protocol.OperationRecord{
+							OperationID: "op-1",
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     child,
+							State:       protocol.OperationStateQueued,
+						},
+					}), nil
+				case protocol.CommandOperationGet:
+					return responseWithJSON(req, protocol.OperationGetResponseBody{
+						Operation: protocol.OperationRecord{
+							OperationID: "op-1",
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     child,
+							State:       protocol.OperationStateFailed,
+							Error:       &protocol.OperationError{Code: protocol.ErrorCodeInternal, Message: "tmux launch failed"},
+						},
+					}), nil
+				case protocol.CommandMailSend:
+					t.Fatal("mail should not be sent for failed operation")
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output, err := captureStdoutAllowError(t, func() error {
+		return OrchestrateStartCommand(deps, OrchestrateStartOptions{RootIssueID: root.String(), IssueIDs: []string{child.String()}, Limit: 4, JSON: true})
+	})
+	if err == nil || !strings.Contains(err.Error(), "completed with failures") {
+		t.Fatalf("OrchestrateStartCommand error = %v, want failure error", err)
+	}
+	var result orchestrateStartResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if len(result.Pending) != 0 || result.Failed[child.String()] != "tmux launch failed" {
+		t.Fatalf("pending=%+v failed=%+v, want terminal failure only", result.Pending, result.Failed)
+	}
+}
+
+func TestPrintOrchestrateStartResultIncludesPendingFollowUps(t *testing.T) {
+	output := captureStdout(t, func() error {
+		printOrchestrateStartResult(orchestrateStartResult{
+			RootIssueID: "az-1",
+			Limit:       4,
+			Skipped:     map[string]string{},
+			Failed:      map[string]string{},
+			Pending: []orchestrateStartPending{
+				{
+					IssueID:        "az-2",
+					OperationID:    "op-1",
+					OperationState: string(protocol.OperationStateRunning),
+					Reason:         "timed out after 5m0s waiting for daemon operation to finish; operation is still running",
+					FollowUpCommands: []string{
+						"az operation get --id op-1 --wait",
+						"az orchestrate status --root az-1 --json",
+					},
+				},
+			},
+			Advice: orchestrateStartAdvice{
+				WatchCommand:     "az orchestrate watch --root az-1 --since 0 --jsonl",
+				WatchInstruction: "leave it running",
+			},
+		})
+		return nil
+	})
+	for _, want := range []string{
+		"Pending starts:",
+		"az-2: operation=op-1 state=running",
+		"follow up: az operation get --id op-1 --wait",
+		"follow up: az orchestrate status --root az-1 --json",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
 	}
 }
 
