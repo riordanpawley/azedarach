@@ -811,11 +811,16 @@ func TestGitServiceAdapterQueueGitStatusRefreshDefersBackgroundDuringHeavySessio
 		_ = queue.Close()
 	})
 	adapter := &gitServiceAdapter{
-		client:                  git.NewClient(runner, slog.Default()),
-		runtimeStateStore:       store,
-		statusRefreshQueue:      queue,
-		logger:                  slog.Default(),
-		heavySessionStartActive: func(context.Context, string) bool { return true },
+		client:             git.NewClient(runner, slog.Default()),
+		runtimeStateStore:  store,
+		statusRefreshQueue: queue,
+		logger:             slog.Default(),
+		heavySessionStartActive: func(ctx context.Context, _ string) bool {
+			if _, ok := ctx.Deadline(); !ok {
+				t.Fatal("heavy session-start check context missing deadline")
+			}
+			return true
+		},
 	}
 
 	background, err := adapter.queueGitStatusRefresh(projectID, worktree, reconcilePriorityBackground, "background")

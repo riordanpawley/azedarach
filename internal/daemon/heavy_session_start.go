@@ -3,18 +3,24 @@ package daemon
 import (
 	"context"
 	"strings"
+	"time"
 
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 )
 
-const heavySessionStartBackgroundDeferReason = "heavy_session_start_active"
+const (
+	heavySessionStartBackgroundDeferReason = "heavy_session_start_active"
+	heavySessionStartSignalCheckTimeout    = 250 * time.Millisecond
+)
 
 func (d *Daemon) shouldDeferBackgroundScanForHeavySessionStart(ctx context.Context, projectID, scan string, priority reconcileQueuePriority) bool {
 	if d == nil || priority > reconcilePriorityBackground {
 		return false
 	}
-	active, err := d.hasActiveHeavySessionStart(ctx, projectID)
+	checkCtx, cancel := heavySessionStartSignalCheckContext(ctx)
+	defer cancel()
+	active, err := d.hasActiveHeavySessionStart(checkCtx, projectID)
 	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("heavy session-start scan check failed open",
@@ -36,6 +42,13 @@ func (d *Daemon) shouldDeferBackgroundScanForHeavySessionStart(ctx context.Conte
 		)
 	}
 	return true
+}
+
+func heavySessionStartSignalCheckContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, heavySessionStartSignalCheckTimeout)
 }
 
 func (d *Daemon) hasActiveHeavySessionStart(ctx context.Context, projectID string) (bool, error) {
