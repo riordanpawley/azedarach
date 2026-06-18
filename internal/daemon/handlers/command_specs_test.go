@@ -34,8 +34,8 @@ func TestCommandSpecRegistryProjectIDPolicy(t *testing.T) {
 
 func TestCommandSpecRegistrySyncBootstrapPolicy(t *testing.T) {
 	taskResp := CommandRequiresSyncBootstrap(protocol.RequestEnvelope{Command: "task.list"})
-	if !taskResp {
-		t.Fatal("expected task.list to require sync bootstrap")
+	if taskResp {
+		t.Fatal("expected task.list not to require sync bootstrap")
 	}
 
 	taskGetResp := CommandRequiresSyncBootstrap(protocol.RequestEnvelope{Command: "task.get"})

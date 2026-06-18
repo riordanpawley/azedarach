@@ -139,11 +139,24 @@ func indexOfBootstrapEvent(events []string, want string) int {
 func TestSyncBootstrapGuardBlocksDependentCommands(t *testing.T) {
 	d := &Daemon{}
 
+	listResp, err := d.command(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-0",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.list",
+	})
+	if err != nil {
+		t.Fatalf("task.list command() error = %v", err)
+	}
+	if listResp.Error != nil && listResp.Error.Message == "sync bootstrap not ready" {
+		t.Fatal("task.list should not be rejected by sync bootstrap guard")
+	}
+
 	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-1",
 		Kind:            protocol.EnvelopeKindCommand,
-		Command:         "task.list",
+		Command:         "task.create",
 	})
 	if err != nil {
 		t.Fatalf("command() error = %v", err)
