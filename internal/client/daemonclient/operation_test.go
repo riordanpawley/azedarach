@@ -3,6 +3,7 @@ package daemonclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -25,7 +26,7 @@ func TestOperationCommandsRouteThroughDaemon(t *testing.T) {
 				respBody, _ := json.Marshal(protocol.OperationGetResponseBody{
 					Operation: protocol.OperationRecord{
 						OperationID: "op-1",
-							ProjectID:   naming.ProjectID("proj-a"),
+						ProjectID:   naming.ProjectID("proj-a"),
 						Kind:        "session.start",
 						State:       protocol.OperationStateRunning,
 					},
@@ -42,19 +43,19 @@ func TestOperationCommandsRouteThroughDaemon(t *testing.T) {
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal list body: %v", err)
 				}
-					if body.ProjectID != naming.ProjectID("proj-a") || body.IssueID != naming.IssueID("az-1") || body.Kind != "session.start" || body.Limit != 5 {
-						t.Fatalf("list body = %+v", body)
-					}
-					respBody, _ := json.Marshal(protocol.OperationListResponseBody{
-						ProjectID: naming.ProjectID("proj-a"),
-						Operations: []protocol.OperationRecord{
-							{
-								OperationID: "op-1",
-								ProjectID:   naming.ProjectID("proj-a"),
-								Kind:        "session.start",
-								State:       protocol.OperationStateQueued,
-							},
+				if body.ProjectID != naming.ProjectID("proj-a") || body.IssueID != naming.IssueID("az-1") || body.Kind != "session.start" || body.Limit != 5 {
+					t.Fatalf("list body = %+v", body)
+				}
+				respBody, _ := json.Marshal(protocol.OperationListResponseBody{
+					ProjectID: naming.ProjectID("proj-a"),
+					Operations: []protocol.OperationRecord{
+						{
+							OperationID: "op-1",
+							ProjectID:   naming.ProjectID("proj-a"),
+							Kind:        "session.start",
+							State:       protocol.OperationStateQueued,
 						},
+					},
 				})
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -71,15 +72,15 @@ func TestOperationCommandsRouteThroughDaemon(t *testing.T) {
 				if body.ProjectID != "proj-a" || body.OperationID != "op-1" || body.Reason != "user request" {
 					t.Fatalf("cancel body = %+v", body)
 				}
-					respBody, _ := json.Marshal(protocol.OperationCancelResponseBody{
-						Cancelled: true,
-						Operation: protocol.OperationRecord{
-							OperationID: "op-1",
-							ProjectID:   naming.ProjectID("proj-a"),
-							Kind:        "session.start",
-							State:       protocol.OperationStateCancelled,
-						},
-					})
+				respBody, _ := json.Marshal(protocol.OperationCancelResponseBody{
+					Cancelled: true,
+					Operation: protocol.OperationRecord{
+						OperationID: "op-1",
+						ProjectID:   naming.ProjectID("proj-a"),
+						Kind:        "session.start",
+						State:       protocol.OperationStateCancelled,
+					},
+				})
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
@@ -138,7 +139,7 @@ func TestWaitForOperationPollsUntilTerminalState(t *testing.T) {
 			respBody, _ := json.Marshal(protocol.OperationGetResponseBody{
 				Operation: protocol.OperationRecord{
 					OperationID: "op-1",
-						ProjectID:   naming.ProjectID("proj-a"),
+					ProjectID:   naming.ProjectID("proj-a"),
 					Kind:        "session.start",
 					State:       state,
 				},
@@ -163,5 +164,39 @@ func TestWaitForOperationPollsUntilTerminalState(t *testing.T) {
 	}
 	if calls < 2 {
 		t.Fatalf("calls = %d, want at least 2", calls)
+	}
+}
+
+func TestWaitForOperationReturnsLastRecordOnContextDeadline(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			respBody, _ := json.Marshal(protocol.OperationGetResponseBody{
+				Operation: protocol.OperationRecord{
+					OperationID: "op-1",
+					ProjectID:   naming.ProjectID("proj-a"),
+					Kind:        "session.start",
+					State:       protocol.OperationStateRunning,
+				},
+			})
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-a")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+
+	record, err := client.WaitForOperation(ctx, "op-1", time.Hour)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("WaitForOperation error = %v, want context deadline", err)
+	}
+	if record.OperationID != "op-1" || record.State != protocol.OperationStateRunning {
+		t.Fatalf("record = %+v, want last running op-1", record)
 	}
 }
