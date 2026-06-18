@@ -53,6 +53,9 @@ func (s SessionInfo) displayState() domain.SessionState {
 	if displayState, ok := session.DisplayState(); ok {
 		return displayState
 	}
+	if session.DisplayActivity() == "no-agent" {
+		return domain.SessionIdle
+	}
 	return s.State
 }
 

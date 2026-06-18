@@ -19,10 +19,12 @@ func TestRuntimeStateStoreSessionRoundTrip(t *testing.T) {
 
 	updatedAt := time.Date(2026, time.April, 1, 8, 0, 0, 0, time.UTC)
 	if err := store.UpsertSessionState(context.Background(), "proj-a", Session{
-		ID:        "sess-1",
-		IssueID:   "bja",
-		State:     SessionStateAttached,
-		UpdatedAt: updatedAt,
+		ID:             "sess-1",
+		IssueID:        "bja",
+		State:          SessionStateAttached,
+		Activity:       "NO-AGENT",
+		ActivitySource: "SESSION",
+		UpdatedAt:      updatedAt,
 	}); err != nil {
 		t.Fatalf("UpsertSessionState: %v", err)
 	}
@@ -40,6 +42,9 @@ func TestRuntimeStateStoreSessionRoundTrip(t *testing.T) {
 	if sessions[0].State != SessionStateAttached {
 		t.Fatalf("session state = %s, want %s", sessions[0].State, SessionStateAttached)
 	}
+	if sessions[0].Activity != "no-agent" || sessions[0].ActivitySource != "session" {
+		t.Fatalf("session activity = %s/%s, want no-agent/session", sessions[0].Activity, sessions[0].ActivitySource)
+	}
 
 	if err := store.DeleteSessionState(context.Background(), "proj-a", "sess-1"); err != nil {
 		t.Fatalf("DeleteSessionState: %v", err)
@@ -50,6 +55,61 @@ func TestRuntimeStateStoreSessionRoundTrip(t *testing.T) {
 	}
 	if len(sessions) != 0 {
 		t.Fatalf("sessions after delete = %d, want 0", len(sessions))
+	}
+}
+
+func TestRuntimeStateStoreClearsSessionActivityForStoppedRows(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	ctx := context.Background()
+	now := time.Date(2026, time.April, 1, 8, 5, 0, 0, time.UTC)
+	if err := store.UpsertSessionState(ctx, "proj-a", Session{
+		ID:             "sess-1",
+		IssueID:        "bja",
+		State:          SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "runtime",
+		UpdatedAt:      now,
+	}); err != nil {
+		t.Fatalf("UpsertSessionState running: %v", err)
+	}
+	if err := store.UpsertSessionState(ctx, "proj-a", Session{
+		ID:        "sess-1",
+		IssueID:   "bja",
+		State:     SessionStateStopped,
+		UpdatedAt: now.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("UpsertSessionState stopped: %v", err)
+	}
+
+	session, found, err := store.GetSessionState(ctx, "proj-a", "sess-1")
+	if err != nil {
+		t.Fatalf("GetSessionState: %v", err)
+	}
+	if !found {
+		t.Fatal("expected stopped session row")
+	}
+	if session.Activity != "" || session.ActivitySource != "" {
+		t.Fatalf("session activity = %s/%s, want empty activity for stopped row", session.Activity, session.ActivitySource)
+	}
+
+	if err := store.ReplaceSessionStates(ctx, "proj-a", []Session{
+		{ID: "sess-2", IssueID: "bjb", State: SessionStateStopped, Activity: "no-agent", ActivitySource: "session", UpdatedAt: now},
+	}); err != nil {
+		t.Fatalf("ReplaceSessionStates stopped: %v", err)
+	}
+	session, found, err = store.GetSessionState(ctx, "proj-a", "sess-2")
+	if err != nil {
+		t.Fatalf("GetSessionState replaced: %v", err)
+	}
+	if !found {
+		t.Fatal("expected replaced stopped session row")
+	}
+	if session.Activity != "" || session.ActivitySource != "" {
+		t.Fatalf("replaced session activity = %s/%s, want empty activity for stopped row", session.Activity, session.ActivitySource)
 	}
 }
 
@@ -104,8 +164,8 @@ func TestRuntimeStateStoreSessionGetters(t *testing.T) {
 
 	now := time.Date(2026, time.April, 1, 8, 20, 0, 0, time.UTC)
 	rows := []Session{
-		{ID: "sess-1", IssueID: "bja", State: SessionStateAttached, UpdatedAt: now},
-		{ID: "sess-2", IssueID: "bja", State: SessionStatePaused, UpdatedAt: now.Add(1 * time.Minute)},
+		{ID: "sess-1", IssueID: "bja", State: SessionStateAttached, Activity: "busy", ActivitySource: "runtime", UpdatedAt: now},
+		{ID: "sess-2", IssueID: "bja", State: SessionStatePaused, Activity: "idle", ActivitySource: "hooks", UpdatedAt: now.Add(1 * time.Minute)},
 	}
 	if err := store.ReplaceSessionStates(context.Background(), "proj-a", rows); err != nil {
 		t.Fatalf("ReplaceSessionStates: %v", err)
@@ -131,6 +191,9 @@ func TestRuntimeStateStoreSessionGetters(t *testing.T) {
 	}
 	if session.ID != "sess-2" || session.State != SessionStatePaused {
 		t.Fatalf("session by issue = %+v", session)
+	}
+	if session.Activity != "idle" || session.ActivitySource != "hooks" {
+		t.Fatalf("session activity by issue = %s/%s, want idle/hooks", session.Activity, session.ActivitySource)
 	}
 }
 

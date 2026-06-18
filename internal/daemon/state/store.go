@@ -36,6 +36,8 @@ type Session struct {
 	IssueID           string
 	State             SessionState
 	ObservedState     SessionState
+	Activity          string
+	ActivitySource    string
 	TmuxAttachedCount int
 	StartedAt         *time.Time
 	UpdatedAt         time.Time
@@ -148,12 +150,14 @@ func (s *Store) upsertSession(projectID, sessionID, issueID string, state Sessio
 		observedState = NormalizeSessionState(existing.ObservedState)
 	}
 	next := Session{
-		ID:            sessionID,
-		IssueID:       issueID,
-		State:         state,
-		ObservedState: observedState,
-		StartedAt:     startedAt,
-		UpdatedAt:     now,
+		ID:             sessionID,
+		IssueID:        issueID,
+		State:          state,
+		ObservedState:  observedState,
+		Activity:       strings.TrimSpace(existing.Activity),
+		ActivitySource: strings.TrimSpace(existing.ActivitySource),
+		StartedAt:      startedAt,
+		UpdatedAt:      now,
 	}
 	ps.sessions[sessionID] = next
 	return SessionEvent{

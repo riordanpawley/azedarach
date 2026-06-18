@@ -5465,6 +5465,42 @@ func TestRuntimeProjectionAppliesAgentActivityToSessionDisplay(t *testing.T) {
 
 }
 
+func TestRuntimeProjectionAppliesSessionSourcedNoAgentActivity(t *testing.T) {
+	m := newTestModel()
+	updatedAt := time.Date(2026, time.June, 15, 10, 5, 0, 0, time.UTC)
+
+	ok := m.applyRuntimeProjection(protocol.RuntimeProjection{
+		ProjectID: "proj",
+		IssueID:   "az-1",
+		Session: protocol.RuntimeSessionProjection{
+			HasSession: true,
+			SessionID:  "sess-1",
+			State:      protocol.SessionLifecycleStateRunning,
+			UpdatedAt:  &updatedAt,
+		},
+		Agent: protocol.RuntimeAgentProjection{
+			Status:    "no-agent",
+			Source:    "session",
+			SessionID: "sess-1",
+			UpdatedAt: &updatedAt,
+		},
+	})
+	if !ok {
+		t.Fatal("applyRuntimeProjection returned false")
+	}
+
+	session := m.tasks[0].Session
+	if session == nil {
+		t.Fatal("task session is nil")
+	}
+	if session.Activity != "no-agent" || session.ActivitySource != "session" {
+		t.Fatalf("session activity = %q/%q, want no-agent/session", session.Activity, session.ActivitySource)
+	}
+	if got := session.DisplayCode(); got != "N" {
+		t.Fatalf("display code = %q, want N", got)
+	}
+}
+
 func TestSessionProjectionEventAppliesAgentActivityToSessionDisplay(t *testing.T) {
 	m := newTestModel()
 	startedAt := time.Date(2026, time.June, 15, 10, 0, 0, 0, time.UTC)

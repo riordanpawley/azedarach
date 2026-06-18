@@ -1838,7 +1838,8 @@ func rowCardDisplayState(row InventoryEntry) domain.SessionState {
 	if displayState, ok := session.DisplayState(); ok {
 		return displayState
 	}
-	if session.DisplayActivity() == "unknown" {
+	switch session.DisplayActivity() {
+	case "unknown", "no-agent":
 		return domain.SessionIdle
 	}
 	return row.State

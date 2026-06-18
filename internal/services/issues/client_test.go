@@ -316,9 +316,9 @@ func TestClient_ListWithRuntimeReturnsJoinedProjectionFields(t *testing.T) {
 	startedAt := time.Date(2026, time.April, 4, 12, 0, 0, 0, time.UTC)
 	updatedAt := startedAt.Add(2 * time.Minute)
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, projectID, sessionID, taskID, "attached", startedAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, activity, activity_source, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, projectID, sessionID, taskID, "attached", "no-agent", "session", startedAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
 	require.NoError(t, err)
 
 	statusRaw, err := json.Marshal(git.GitStatus{
@@ -344,6 +344,8 @@ func TestClient_ListWithRuntimeReturnsJoinedProjectionFields(t *testing.T) {
 	assert.Equal(t, naming.IssueID(taskID), got.ID)
 	require.NotNil(t, got.Session)
 	assert.Equal(t, domain.SessionBusy, got.Session.State)
+	assert.Equal(t, "no-agent", got.Session.Activity)
+	assert.Equal(t, "session", got.Session.ActivitySource)
 	assert.Equal(t, worktreePath, got.Session.Worktree)
 	require.NotNil(t, got.Session.StartedAt)
 	assert.True(t, got.Session.StartedAt.Equal(startedAt))
@@ -358,6 +360,8 @@ func TestClient_ListWithRuntimeReturnsJoinedProjectionFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, got.ID, one.ID)
 	require.NotNil(t, one.Session)
+	assert.Equal(t, "no-agent", one.Session.Activity)
+	assert.Equal(t, "session", one.Session.ActivitySource)
 	assert.Equal(t, worktreePath, one.Session.Worktree)
 	assert.True(t, one.HasWorktree)
 	assert.Equal(t, 7, one.GitAdditions)
@@ -612,6 +616,12 @@ func TestClient_GetManyMetadataWithRuntimeIncludesCachedGitProjection(t *testing
 
 	updatedAt := time.Date(2026, time.June, 17, 12, 0, 0, 0, time.UTC)
 	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, activity, activity_source, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-metadata-runtime", taskID, "running", "no-agent", "session", updatedAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at, git_status_json)
 		VALUES (?, ?, ?, ?, ?, ?)
 	`, projectID, taskID, "/tmp/proj-metadata-runtime-git-"+taskID, "riordan/"+taskID+"/task", updatedAt.Format(time.RFC3339Nano), string(statusRaw))
@@ -622,6 +632,9 @@ func TestClient_GetManyMetadataWithRuntimeIncludesCachedGitProjection(t *testing
 	require.Len(t, tasks, 1)
 
 	got := tasks[0]
+	require.NotNil(t, got.Session)
+	assert.Equal(t, "no-agent", got.Session.Activity)
+	assert.Equal(t, "session", got.Session.ActivitySource)
 	assert.True(t, got.HasWorktree)
 	assert.True(t, got.HasUncommittedChanges)
 	assert.True(t, got.HasConflicts)

@@ -444,7 +444,11 @@ func renderSessionStatus(session *domain.Session, s *styles.Styles) string {
 	var elapsed string
 	displayState, hasDisplayState := session.DisplayState()
 	if !hasDisplayState {
-		displayState = session.State
+		if session.DisplayActivity() == "no-agent" {
+			displayState = domain.SessionIdle
+		} else {
+			displayState = session.State
+		}
 	}
 	if session.StartedAt != nil && (displayState == domain.SessionBusy || displayState == domain.SessionWaiting) {
 		d := time.Since(*session.StartedAt)
@@ -470,7 +474,11 @@ func renderSessionStatusCompact(session *domain.Session) string {
 	icon := session.DisplayIcon()
 	displayState, hasDisplayState := session.DisplayState()
 	if !hasDisplayState {
-		displayState = session.State
+		if session.DisplayActivity() == "no-agent" {
+			displayState = domain.SessionIdle
+		} else {
+			displayState = session.State
+		}
 	}
 	if session.StartedAt != nil && (displayState == domain.SessionBusy || displayState == domain.SessionWaiting) {
 		return fmt.Sprintf("%s%s", icon, formatCompactDuration(time.Since(*session.StartedAt)))

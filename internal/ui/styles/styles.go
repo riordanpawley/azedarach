@@ -221,6 +221,9 @@ func (s *Styles) Session(session *domain.Session) lipgloss.Style {
 	if displayState, ok := session.DisplayState(); ok {
 		return s.SessionState(displayState)
 	}
+	if session.DisplayActivity() == "no-agent" {
+		return s.SessionIdle
+	}
 	return s.SessionState(session.State)
 }
 

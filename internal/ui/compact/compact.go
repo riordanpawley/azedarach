@@ -318,7 +318,11 @@ func (cv *CompactView) renderSessionCell(session *domain.Session, width int) str
 	var style lipgloss.Style
 	displayState, hasDisplayState := session.DisplayState()
 	if !hasDisplayState {
-		displayState = session.State
+		if session.DisplayActivity() == "no-agent" {
+			displayState = domain.SessionIdle
+		} else {
+			displayState = session.State
+		}
 	}
 	switch displayState {
 	case domain.SessionBusy:
