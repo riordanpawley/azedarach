@@ -1262,6 +1262,59 @@ func TestTaskStatusDoneSuccessKeepsOptimisticOverlayAcrossStaleHydration(t *test
 	}
 }
 
+func TestTaskStatusDonePendingOverlaySurvivesCloseOperationDoneBeforeHydration(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{{ID: "az-4", Status: domain.StatusDone}}
+	m.pendingStatuses = map[string]pendingTaskStatus{
+		taskIDKey("az-4"): {
+			previousStatus: domain.StatusInReview,
+			targetStatus:   domain.StatusDone,
+			operationID:    "op-close",
+			state:          protocol.OperationStateRunning,
+			action:         "task_move",
+			updatedAt:      time.Now(),
+		},
+	}
+
+	body, err := json.Marshal(protocol.OperationEventBody{
+		Operation: protocol.OperationRecord{
+			OperationID: "op-close",
+			IssueID:     naming.IssueID("az-4"),
+			State:       protocol.OperationStateDone,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal close done event: %v", err)
+	}
+
+	m.applyOperationProgressEvent(protocol.EventEnvelope{
+		Event: protocol.EventOperationDone,
+		Body:  body,
+	})
+	if _, ok := m.pendingStatuses[taskIDKey("az-4")]; !ok {
+		t.Fatal("pending done overlay should survive task.close operation.done until task status confirms closed")
+	}
+
+	staleAny, _ := m.Update(issuesLoadedMsg{
+		tasks: []domain.Task{{ID: "az-4", Status: domain.StatusInReview}},
+	})
+	stale := staleAny.(Model)
+	if stale.tasks[0].Status != domain.StatusDone {
+		t.Fatalf("stale hydration status = %s, want optimistic %s", stale.tasks[0].Status, domain.StatusDone)
+	}
+	if _, ok := stale.pendingStatuses[taskIDKey("az-4")]; !ok {
+		t.Fatal("pending done overlay should survive stale hydration after close operation.done")
+	}
+
+	confirmedAny, _ := stale.Update(issuesLoadedMsg{
+		tasks: []domain.Task{{ID: "az-4", Status: domain.StatusDone}},
+	})
+	confirmed := confirmedAny.(Model)
+	if _, ok := confirmed.pendingStatuses[taskIDKey("az-4")]; ok {
+		t.Fatal("pending done overlay should clear once hydration confirms closed")
+	}
+}
+
 func TestTaskStatusMoveFailureRollsBackOptimisticState(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

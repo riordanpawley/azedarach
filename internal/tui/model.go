@@ -1228,6 +1228,9 @@ func (m *Model) applyOperationRecord(record protocol.OperationRecord, now time.T
 	if state == protocol.OperationStateDone {
 		delete(m.pendingOpsByTask, taskIDKey(taskID))
 		delete(m.operationTaskID, operationID)
+		if m.keepPendingStatusUntilCloseProjection(taskID, operationID, record.Kind, now) {
+			return
+		}
 		m.clearPendingTaskStatusForOperation(taskID, operationID)
 		return
 	}
@@ -1265,6 +1268,34 @@ func (m *Model) applyOperationRecord(record protocol.OperationRecord, now time.T
 	if state == protocol.OperationStateCancelled {
 		m.clearPendingTaskStatusForOperation(taskID, operationID)
 	}
+}
+
+func (m *Model) keepPendingStatusUntilCloseProjection(taskID, operationID, kind string, now time.Time) bool {
+	kind = strings.TrimSpace(kind)
+	if kind != "" && kind != daemonclient.CommandTaskClose {
+		return false
+	}
+	key := taskIDKey(taskID)
+	if key == "" {
+		return false
+	}
+	pending, ok := m.pendingStatuses[key]
+	if !ok {
+		return false
+	}
+	if strings.TrimSpace(operationID) == "" || strings.TrimSpace(pending.operationID) != strings.TrimSpace(operationID) {
+		return false
+	}
+	if pending.targetStatus != domain.StatusDone {
+		return false
+	}
+	pending.state = protocol.OperationStateDone
+	if now.IsZero() {
+		now = time.Now()
+	}
+	pending.updatedAt = now
+	m.pendingStatuses[key] = pending
+	return true
 }
 
 func operationRecordRecentlyTerminal(record protocol.OperationRecord, now time.Time) bool {
