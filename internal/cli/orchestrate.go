@@ -86,14 +86,15 @@ func issueCloseCommand(issueID string) string {
 }
 
 type orchestrateStatusResult struct {
-	RootIssueID    string                     `json:"root_issue_id"`
-	Runnable       []string                   `json:"runnable"`
-	Active         []string                   `json:"active,omitempty"`
-	ActiveSessions []orchestrateActiveSession `json:"active_sessions,omitempty"`
-	Blocked        map[string]string          `json:"blocked"`
-	MailboxEvents  []protocol.MailEvent       `json:"mailbox_events"`
-	Warnings       []string                   `json:"warnings,omitempty"`
-	Advice         map[string]interface{}     `json:"advice,omitempty"`
+	RootIssueID          string                            `json:"root_issue_id"`
+	Runnable             []string                          `json:"runnable"`
+	Active               []string                          `json:"active,omitempty"`
+	ActiveSessions       []orchestrateActiveSession        `json:"active_sessions,omitempty"`
+	SessionStartProgress []orchestrateSessionStartProgress `json:"session_start_progress,omitempty"`
+	Blocked              map[string]string                 `json:"blocked"`
+	MailboxEvents        []protocol.MailEvent              `json:"mailbox_events"`
+	Warnings             []string                          `json:"warnings,omitempty"`
+	Advice               map[string]interface{}            `json:"advice,omitempty"`
 }
 
 type orchestrateStartResult struct {
@@ -126,23 +127,38 @@ type orchestrateStartAdvice struct {
 }
 
 type orchestrateWatchFrame struct {
-	RootIssueID    string                     `json:"root_issue_id"`
-	SinceSeq       int64                      `json:"since_seq"`
-	NextSince      int64                      `json:"next_since"`
-	Runnable       []string                   `json:"runnable"`
-	Active         []string                   `json:"active,omitempty"`
-	ActiveSessions []orchestrateActiveSession `json:"active_sessions,omitempty"`
-	Blocked        map[string]string          `json:"blocked"`
-	Events         []mailEvent                `json:"events"`
+	RootIssueID          string                            `json:"root_issue_id"`
+	SinceSeq             int64                             `json:"since_seq"`
+	NextSince            int64                             `json:"next_since"`
+	Runnable             []string                          `json:"runnable"`
+	Active               []string                          `json:"active,omitempty"`
+	ActiveSessions       []orchestrateActiveSession        `json:"active_sessions,omitempty"`
+	SessionStartProgress []orchestrateSessionStartProgress `json:"session_start_progress,omitempty"`
+	Blocked              map[string]string                 `json:"blocked"`
+	Events               []mailEvent                       `json:"events"`
 }
 
 type orchestrateActiveSession struct {
-	IssueID           string `json:"issue_id"`
-	Activity          string `json:"activity"`
-	ActivitySource    string `json:"activity_source"`
-	State             string `json:"state,omitempty"`
-	TmuxAttachedCount int    `json:"tmux_attached_count,omitempty"`
-	Advice            string `json:"advice,omitempty"`
+	IssueID           string                           `json:"issue_id"`
+	Activity          string                           `json:"activity"`
+	ActivitySource    string                           `json:"activity_source"`
+	State             string                           `json:"state,omitempty"`
+	TmuxAttachedCount int                              `json:"tmux_attached_count,omitempty"`
+	StartProgress     *orchestrateSessionStartProgress `json:"start_progress,omitempty"`
+	Advice            string                           `json:"advice,omitempty"`
+}
+
+type orchestrateSessionStartProgress struct {
+	IssueID        string     `json:"issue_id"`
+	OperationID    string     `json:"operation_id,omitempty"`
+	OperationState string     `json:"operation_state"`
+	Phase          string     `json:"phase,omitempty"`
+	Message        string     `json:"message,omitempty"`
+	Percent        int        `json:"percent,omitempty"`
+	ElapsedMS      int64      `json:"elapsed_ms,omitempty"`
+	EnqueuedAt     time.Time  `json:"enqueued_at,omitempty"`
+	StartedAt      *time.Time `json:"started_at,omitempty"`
+	FinishedAt     *time.Time `json:"finished_at,omitempty"`
 }
 
 type orchestratePromptResult struct {
@@ -421,13 +437,14 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 	}
 
 	result := orchestrateStatusResult{
-		RootIssueID:    ready.RootIssueID,
-		Runnable:       ready.Runnable,
-		Active:         ready.Active,
-		ActiveSessions: orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
-		Blocked:        ready.Blocked,
-		MailboxEvents:  events,
-		Warnings:       orchestrateRootWorktreeWarnings(ctx, deps, ready.RootIssueID),
+		RootIssueID:          ready.RootIssueID,
+		Runnable:             ready.Runnable,
+		Active:               ready.Active,
+		ActiveSessions:       orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
+		SessionStartProgress: orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
+		Blocked:              ready.Blocked,
+		MailboxEvents:        events,
+		Warnings:             orchestrateRootWorktreeWarnings(ctx, deps, ready.RootIssueID),
 		Advice: map[string]interface{}{
 			"watch":             fmt.Sprintf("az orchestrate watch --root %s --since %d --jsonl", ready.RootIssueID, nextMailboxSeq(events, opts.SinceSeq)),
 			"watch_instruction": "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
@@ -462,9 +479,18 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		fmt.Println("Active leaves:")
 		for _, active := range result.ActiveSessions {
 			fmt.Printf("- %s activity=%s source=%s\n", active.IssueID, active.Activity, active.ActivitySource)
+			if active.StartProgress != nil {
+				fmt.Printf("  start: %s\n", formatSessionStartProgress(*active.StartProgress))
+			}
 			if active.Advice != "" {
 				fmt.Printf("  %s\n", active.Advice)
 			}
+		}
+	}
+	if len(result.SessionStartProgress) > 0 {
+		fmt.Println("Session start progress:")
+		for _, progress := range result.SessionStartProgress {
+			fmt.Printf("- %s: %s\n", progress.IssueID, formatSessionStartProgress(progress))
 		}
 	}
 	fmt.Printf("Mailbox events (latest %d, since seq>%d): %d\n", opts.Limit, opts.SinceSeq, len(result.MailboxEvents))
@@ -611,16 +637,81 @@ func orchestrateActiveSessionsFromDaemon(active []daemonclient.TaskActiveSession
 	}
 	out := make([]orchestrateActiveSession, 0, len(active))
 	for _, session := range active {
+		var startProgress *orchestrateSessionStartProgress
+		if session.StartProgress != nil {
+			converted := orchestrateSessionStartProgressFromDaemonOne(*session.StartProgress)
+			startProgress = &converted
+		}
 		out = append(out, orchestrateActiveSession{
 			IssueID:           session.IssueID,
 			Activity:          session.Activity,
 			ActivitySource:    session.ActivitySource,
 			State:             session.State,
 			TmuxAttachedCount: session.TmuxAttachedCount,
+			StartProgress:     startProgress,
 			Advice:            session.Advice,
 		})
 	}
 	return out
+}
+
+func orchestrateSessionStartProgressFromDaemon(progress []daemonclient.TaskSessionStartProgress) []orchestrateSessionStartProgress {
+	if len(progress) == 0 {
+		return nil
+	}
+	out := make([]orchestrateSessionStartProgress, 0, len(progress))
+	for _, item := range progress {
+		out = append(out, orchestrateSessionStartProgressFromDaemonOne(item))
+	}
+	return out
+}
+
+func orchestrateSessionStartProgressFromDaemonOne(progress daemonclient.TaskSessionStartProgress) orchestrateSessionStartProgress {
+	return orchestrateSessionStartProgress{
+		IssueID:        progress.IssueID,
+		OperationID:    progress.OperationID,
+		OperationState: progress.OperationState,
+		Phase:          progress.Phase,
+		Message:        progress.Message,
+		Percent:        progress.Percent,
+		ElapsedMS:      progress.ElapsedMS,
+		EnqueuedAt:     progress.EnqueuedAt,
+		StartedAt:      progress.StartedAt,
+		FinishedAt:     progress.FinishedAt,
+	}
+}
+
+func formatSessionStartProgress(progress orchestrateSessionStartProgress) string {
+	parts := make([]string, 0, 6)
+	if state := strings.TrimSpace(progress.OperationState); state != "" {
+		parts = append(parts, "state="+state)
+	}
+	if phase := strings.TrimSpace(progress.Phase); phase != "" {
+		parts = append(parts, "phase="+phase)
+	}
+	if progress.OperationID != "" {
+		parts = append(parts, "operation="+progress.OperationID)
+	}
+	if progress.ElapsedMS > 0 {
+		parts = append(parts, fmt.Sprintf("elapsed=%s", formatMillisDuration(progress.ElapsedMS)))
+	}
+	if progress.Percent > 0 {
+		parts = append(parts, fmt.Sprintf("progress=%d%%", progress.Percent))
+	}
+	if message := strings.TrimSpace(progress.Message); message != "" {
+		parts = append(parts, message)
+	}
+	if len(parts) == 0 {
+		return "pending"
+	}
+	return strings.Join(parts, " ")
+}
+
+func formatMillisDuration(ms int64) string {
+	if ms < 0 {
+		ms = 0
+	}
+	return (time.Duration(ms) * time.Millisecond).Round(time.Second).String()
 }
 
 func printOrchestrateStartResult(result orchestrateStartResult) {
@@ -687,7 +778,8 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 	if err != nil {
 		return err
 	}
-	if len(frame.Events) > 0 || opts.Once {
+	lastSnapshotKey := orchestrateWatchFrameSnapshotKey(frame)
+	if len(frame.Events) > 0 || len(frame.SessionStartProgress) > 0 || len(frame.ActiveSessions) > 0 || opts.Once {
 		if err := emitOrchestrateWatchFrame(frame, opts.JSONL); err != nil {
 			return err
 		}
@@ -712,9 +804,6 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 			}
 			return err
 		}
-		if len(events) == 0 {
-			continue
-		}
 		watchEvents := make([]mailEvent, 0, len(events))
 		for _, event := range events {
 			watchEvents = append(watchEvents, protocolToLocalMailEvent(event))
@@ -727,20 +816,59 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 		}
 		nextSince := nextMailboxSeq(events, lastSeq)
 		frame := orchestrateWatchFrame{
-			RootIssueID:    ready.RootIssueID,
-			SinceSeq:       lastSeq,
-			NextSince:      nextSince,
-			Runnable:       ready.Runnable,
-			Active:         ready.Active,
-			ActiveSessions: orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
-			Blocked:        ready.Blocked,
-			Events:         watchEvents,
+			RootIssueID:          ready.RootIssueID,
+			SinceSeq:             lastSeq,
+			NextSince:            nextSince,
+			Runnable:             ready.Runnable,
+			Active:               ready.Active,
+			ActiveSessions:       orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
+			SessionStartProgress: orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
+			Blocked:              ready.Blocked,
+			Events:               watchEvents,
+		}
+		snapshotKey := orchestrateWatchFrameSnapshotKey(frame)
+		if len(events) == 0 && snapshotKey == lastSnapshotKey {
+			continue
 		}
 		if err := emitOrchestrateWatchFrame(frame, opts.JSONL); err != nil {
 			return err
 		}
+		lastSnapshotKey = snapshotKey
 		lastSeq = nextSince
 	}
+}
+
+func orchestrateWatchFrameSnapshotKey(frame orchestrateWatchFrame) string {
+	type snapshot struct {
+		Runnable             []string                          `json:"runnable"`
+		Active               []string                          `json:"active,omitempty"`
+		ActiveSessions       []orchestrateActiveSession        `json:"active_sessions,omitempty"`
+		SessionStartProgress []orchestrateSessionStartProgress `json:"session_start_progress,omitempty"`
+		Blocked              map[string]string                 `json:"blocked"`
+	}
+	activeSessions := append([]orchestrateActiveSession(nil), frame.ActiveSessions...)
+	for i := range activeSessions {
+		if activeSessions[i].StartProgress != nil {
+			progress := *activeSessions[i].StartProgress
+			progress.ElapsedMS = 0
+			activeSessions[i].StartProgress = &progress
+		}
+	}
+	sessionStartProgress := append([]orchestrateSessionStartProgress(nil), frame.SessionStartProgress...)
+	for i := range sessionStartProgress {
+		sessionStartProgress[i].ElapsedMS = 0
+	}
+	encoded, err := json.Marshal(snapshot{
+		Runnable:             frame.Runnable,
+		Active:               frame.Active,
+		ActiveSessions:       activeSessions,
+		SessionStartProgress: sessionStartProgress,
+		Blocked:              frame.Blocked,
+	})
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
 }
 
 func watchDaemonCommand[T any](deps *Dependencies, call func(context.Context) (T, error)) (T, error) {
@@ -1114,14 +1242,15 @@ func buildOrchestrateWatchFrame(deps *Dependencies, rootIssueID string, since in
 		watchEvents = append(watchEvents, protocolToLocalMailEvent(event))
 	}
 	return orchestrateWatchFrame{
-		RootIssueID:    ready.RootIssueID,
-		SinceSeq:       since,
-		NextSince:      nextMailboxSeq(events, since),
-		Runnable:       ready.Runnable,
-		Active:         ready.Active,
-		ActiveSessions: orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
-		Blocked:        ready.Blocked,
-		Events:         watchEvents,
+		RootIssueID:          ready.RootIssueID,
+		SinceSeq:             since,
+		NextSince:            nextMailboxSeq(events, since),
+		Runnable:             ready.Runnable,
+		Active:               ready.Active,
+		ActiveSessions:       orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
+		SessionStartProgress: orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
+		Blocked:              ready.Blocked,
+		Events:               watchEvents,
 	}, nil
 }
 
@@ -1153,9 +1282,18 @@ func emitOrchestrateWatchFrame(frame orchestrateWatchFrame, jsonl bool) error {
 		fmt.Println("active:")
 		for _, active := range frame.ActiveSessions {
 			fmt.Printf("- %s activity=%s source=%s\n", active.IssueID, active.Activity, active.ActivitySource)
+			if active.StartProgress != nil {
+				fmt.Printf("  start: %s\n", formatSessionStartProgress(*active.StartProgress))
+			}
 			if active.Advice != "" {
 				fmt.Printf("  %s\n", active.Advice)
 			}
+		}
+	}
+	if len(frame.SessionStartProgress) > 0 {
+		fmt.Println("session start progress:")
+		for _, progress := range frame.SessionStartProgress {
+			fmt.Printf("- %s: %s\n", progress.IssueID, formatSessionStartProgress(progress))
 		}
 	}
 	fmt.Println("events:")

@@ -221,6 +221,66 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 	}
 }
 
+func TestOrchestrateStatusCommandIncludesSessionStartProgress(t *testing.T) {
+	root := naming.IssueID("az-1")
+	child := naming.IssueID("az-2")
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{},
+						Blocked:     map[string]string{},
+						SessionStartProgress: []daemonclient.TaskSessionStartProgress{
+							{
+								IssueID:        child.String(),
+								OperationID:    "op-session-start",
+								OperationState: "running",
+								Phase:          "init_commands",
+								Message:        "configured init commands likely running before agent hooks",
+								Percent:        90,
+								ElapsedMS:      12345,
+							},
+						},
+					}), nil
+				case daemonclient.CommandTaskList:
+					body, err := marshalTaskListBody([]domain.Task{
+						{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
+				case protocol.CommandMailList:
+					return responseWithJSON(req, []protocol.MailEvent{}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestrateStatusCommand(deps, OrchestrateStatusOptions{RootIssueID: root.String(), JSON: true})
+	})
+	var result orchestrateStatusResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if len(result.SessionStartProgress) != 1 {
+		t.Fatalf("session_start_progress = %+v, want one entry", result.SessionStartProgress)
+	}
+	progress := result.SessionStartProgress[0]
+	if progress.IssueID != child.String() || progress.OperationID != "op-session-start" || progress.Phase != "init_commands" || progress.ElapsedMS != 12345 {
+		t.Fatalf("session start progress = %+v", progress)
+	}
+}
+
 func TestOrchestrateStatusCommandWarnsWhenRootEpicLacksWorktree(t *testing.T) {
 	root := naming.IssueID("az-1")
 	child := naming.IssueID("az-2")
@@ -316,6 +376,124 @@ func TestBuildOrchestrateWatchFrameIncludesActiveSessionActivity(t *testing.T) {
 	active := frame.ActiveSessions[0]
 	if active.IssueID != idle.String() || active.Activity != "idle" || active.ActivitySource != "hooks" || active.Advice != "" {
 		t.Fatalf("active session = %+v", active)
+	}
+}
+
+func TestBuildOrchestrateWatchFrameIncludesSessionStartProgress(t *testing.T) {
+	root := naming.IssueID("az-1")
+	child := naming.IssueID("az-2")
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Blocked:     map[string]string{},
+						SessionStartProgress: []daemonclient.TaskSessionStartProgress{
+							{IssueID: child.String(), OperationID: "op-session-start", OperationState: "queued", Phase: "queued", Message: "queued session.start"},
+						},
+					}), nil
+				case protocol.CommandMailList:
+					return responseWithJSON(req, []protocol.MailEvent{}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	frame, err := buildOrchestrateWatchFrame(deps, root.String(), 0)
+	if err != nil {
+		t.Fatalf("buildOrchestrateWatchFrame error = %v", err)
+	}
+	if len(frame.SessionStartProgress) != 1 {
+		t.Fatalf("session_start_progress = %+v, want one entry", frame.SessionStartProgress)
+	}
+	progress := frame.SessionStartProgress[0]
+	if progress.IssueID != child.String() || progress.OperationID != "op-session-start" || progress.Phase != "queued" {
+		t.Fatalf("session start progress = %+v", progress)
+	}
+}
+
+func TestEmitOrchestrateWatchFramePrintsSessionStartProgress(t *testing.T) {
+	frame := orchestrateWatchFrame{
+		RootIssueID: "az-1",
+		Active:      []string{"az-2"},
+		ActiveSessions: []orchestrateActiveSession{
+			{
+				IssueID:        "az-2",
+				Activity:       "busy",
+				ActivitySource: "session",
+				StartProgress: &orchestrateSessionStartProgress{
+					IssueID:        "az-2",
+					OperationState: "running",
+					Phase:          "init_commands",
+					Message:        "configured init commands likely running before agent hooks",
+					Percent:        90,
+				},
+			},
+		},
+		SessionStartProgress: []orchestrateSessionStartProgress{
+			{
+				IssueID:        "az-3",
+				OperationID:    "op-session-start",
+				OperationState: "queued",
+				Phase:          "queued",
+				Message:        "waiting for session.start resources",
+			},
+		},
+		Blocked: map[string]string{},
+	}
+
+	output := captureStdout(t, func() error {
+		return emitOrchestrateWatchFrame(frame, false)
+	})
+	for _, want := range []string{
+		"start: state=running phase=init_commands progress=90% configured init commands likely running before agent hooks",
+		"session start progress:",
+		"az-3: state=queued phase=queued operation=op-session-start waiting for session.start resources",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("watch output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestOrchestrateWatchSnapshotKeyIgnoresElapsedProgressTime(t *testing.T) {
+	frame := orchestrateWatchFrame{
+		Runnable: []string{"az-3"},
+		Active:   []string{"az-2"},
+		ActiveSessions: []orchestrateActiveSession{
+			{
+				IssueID:        "az-2",
+				Activity:       "busy",
+				ActivitySource: "session",
+				StartProgress: &orchestrateSessionStartProgress{
+					IssueID:        "az-2",
+					OperationState: "running",
+					Phase:          "init_commands",
+					ElapsedMS:      1000,
+				},
+			},
+		},
+		SessionStartProgress: []orchestrateSessionStartProgress{
+			{IssueID: "az-4", OperationID: "op-4", OperationState: "running", Phase: "worktree_preflight", ElapsedMS: 1000},
+		},
+		Blocked: map[string]string{},
+	}
+	first := orchestrateWatchFrameSnapshotKey(frame)
+	frame.ActiveSessions[0].StartProgress.ElapsedMS = 5000
+	frame.SessionStartProgress[0].ElapsedMS = 5000
+	if second := orchestrateWatchFrameSnapshotKey(frame); second != first {
+		t.Fatalf("snapshot key changed after elapsed-only update:\nfirst=%s\nsecond=%s", first, second)
+	}
+	frame.SessionStartProgress[0].Phase = "issue_resources"
+	if second := orchestrateWatchFrameSnapshotKey(frame); second == first {
+		t.Fatalf("snapshot key did not change after phase update")
 	}
 }
 

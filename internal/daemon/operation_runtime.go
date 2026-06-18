@@ -861,6 +861,8 @@ func (r *operationRuntime) toProtocolRecord(record daemonops.Record) protocol.Op
 		StartedAt:    record.StartedAt,
 		FinishedAt:   record.FinishedAt,
 	}
+	progress := protocolOperationProgress(record)
+	out.Progress = &progress
 	if record.ErrorMessage != "" {
 		out.Error = &protocol.OperationError{
 			Code:      mapOperationRecordErrorCode(record),
@@ -889,6 +891,7 @@ func (s *operationStoreAdapter) Create(ctx context.Context, record daemonops.Rec
 		FinishedAt:   record.FinishedAt,
 		ResultJSON:   append(json.RawMessage(nil), record.ResultPayload...),
 		ErrorJSON:    marshalOperationErrorJSON(record.ErrorMessage),
+		ProgressJSON: marshalOperationProgressJSON(record.Progress),
 	})
 	if err != nil {
 		return daemonops.Record{}, err
@@ -925,18 +928,28 @@ func (s *operationStoreAdapter) List(ctx context.Context, query daemonops.Query)
 }
 
 func (s *operationStoreAdapter) Update(ctx context.Context, params daemonops.UpdateParams) (daemonops.Record, error) {
+	progressOnly := params.Progress != nil &&
+		params.StartedAt == nil &&
+		params.FinishedAt == nil &&
+		params.ResultPayload == nil &&
+		params.ErrorMessage == nil
 	updated, err := s.repo.Transition(ctx, opstore.TransitionParams{
-		OperationID: params.ID,
-		ToState:     toStoreState(params.ToState),
-		StartedAt:   params.StartedAt,
-		FinishedAt:  params.FinishedAt,
-		ResultJSON:  append(json.RawMessage(nil), params.ResultPayload...),
-		ErrorJSON:   marshalOperationErrorJSON(derefString(params.ErrorMessage)),
+		OperationID:  params.ID,
+		ToState:      toStoreState(params.ToState),
+		StartedAt:    params.StartedAt,
+		FinishedAt:   params.FinishedAt,
+		ResultJSON:   append(json.RawMessage(nil), params.ResultPayload...),
+		ErrorJSON:    marshalOperationErrorJSON(derefString(params.ErrorMessage)),
+		ProgressJSON: marshalOperationProgressJSON(params.Progress),
 	})
 	if err != nil {
 		return daemonops.Record{}, err
 	}
 	out := fromStoreRecord(updated)
+	if progressOnly {
+		s.publishProgress(out)
+		return out, nil
+	}
 	s.publish(out)
 	return out, nil
 }
@@ -971,11 +984,22 @@ func (s *operationStoreAdapter) publish(record daemonops.Record) {
 		EmittedAt:       time.Now().UTC(),
 		Body:            body,
 	})
+	s.publishProgress(record)
+}
+
+func (s *operationStoreAdapter) publishProgress(record daemonops.Record) {
+	if s.hub == nil || s.nextRevision == nil {
+		return
+	}
+	projectID := coalesceProjectID(record.ProjectID, "")
+	if s.canonicalizeProjectID != nil {
+		projectID = s.canonicalizeProjectID(projectID)
+	}
 	progressBody, err := json.Marshal(protocol.OperationProgressEventBody{
 		OperationID: parseOperationIDOrZero(record.ID),
 		ProjectID:   naming.ProjectID(projectID),
 		State:       protocol.OperationState(record.State),
-		Progress:    operationProgressForState(record.State, record.Kind),
+		Progress:    protocolOperationProgress(record),
 	})
 	if err != nil {
 		if s.logger != nil {
@@ -997,7 +1021,8 @@ func (s *operationStoreAdapter) publish(record daemonops.Record) {
 
 func operationProgressForState(state daemonops.State, kind string) protocol.OperationProgress {
 	progress := protocol.OperationProgress{
-		Unit: "percent",
+		Phase: string(state),
+		Unit:  "percent",
 	}
 	action := strings.TrimSpace(kind)
 	if kind == protocol.CommandSessionResolveConflict {
@@ -1033,6 +1058,38 @@ func operationProgressForState(state daemonops.State, kind string) protocol.Oper
 	return progress
 }
 
+func protocolOperationProgress(record daemonops.Record) protocol.OperationProgress {
+	fallback := operationProgressForState(record.State, record.Kind)
+	switch record.State {
+	case daemonops.StateDone, daemonops.StateFailed, daemonops.StateCancelled:
+		return fallback
+	}
+	if record.Progress == nil {
+		return fallback
+	}
+	progress := protocol.OperationProgress{
+		Phase:   strings.TrimSpace(record.Progress.Phase),
+		Message: strings.TrimSpace(record.Progress.Message),
+		Current: record.Progress.Current,
+		Total:   record.Progress.Total,
+		Unit:    strings.TrimSpace(record.Progress.Unit),
+		Percent: record.Progress.Percent,
+	}
+	if progress.Phase == "" {
+		progress.Phase = fallback.Phase
+	}
+	if progress.Message == "" {
+		progress.Message = fallback.Message
+	}
+	if progress.Unit == "" {
+		progress.Unit = fallback.Unit
+	}
+	if progress.Total == 0 {
+		progress.Total = fallback.Total
+	}
+	return progress
+}
+
 func daemonOperationRecord(record daemonops.Record) protocol.OperationRecord {
 	state := protocol.OperationState(record.State)
 	out := protocol.OperationRecord{
@@ -1048,6 +1105,8 @@ func daemonOperationRecord(record daemonops.Record) protocol.OperationRecord {
 		StartedAt:    record.StartedAt,
 		FinishedAt:   record.FinishedAt,
 	}
+	progress := protocolOperationProgress(record)
+	out.Progress = &progress
 	if record.ErrorMessage != "" {
 		code := mapOperationRecordErrorCode(record)
 		out.Error = &protocol.OperationError{Code: code, Message: record.ErrorMessage, Retryable: code.Retryable()}
@@ -1077,6 +1136,7 @@ func fromStoreRecord(record opstore.Record) daemonops.Record {
 		StartedAt:     record.StartedAt,
 		FinishedAt:    record.FinishedAt,
 		ErrorMessage:  unmarshalOperationErrorMessage(record.ErrorJSON),
+		Progress:      unmarshalOperationProgress(record.ProgressJSON),
 		ResultPayload: append([]byte(nil), record.ResultJSON...),
 	}
 }
@@ -1196,6 +1256,46 @@ func unmarshalOperationErrorMessage(payload []byte) string {
 		return body.Message
 	}
 	return strings.TrimSpace(string(payload))
+}
+
+func marshalOperationProgressJSON(progress *daemonops.Progress) json.RawMessage {
+	if progress == nil {
+		return nil
+	}
+	body, err := json.Marshal(protocol.OperationProgress{
+		Phase:   strings.TrimSpace(progress.Phase),
+		Message: strings.TrimSpace(progress.Message),
+		Current: progress.Current,
+		Total:   progress.Total,
+		Unit:    strings.TrimSpace(progress.Unit),
+		Percent: progress.Percent,
+	})
+	if err != nil {
+		return nil
+	}
+	return body
+}
+
+func unmarshalOperationProgress(payload []byte) *daemonops.Progress {
+	if len(payload) == 0 {
+		return nil
+	}
+	var body protocol.OperationProgress
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return nil
+	}
+	progress := daemonops.Progress{
+		Phase:   strings.TrimSpace(body.Phase),
+		Message: strings.TrimSpace(body.Message),
+		Current: body.Current,
+		Total:   body.Total,
+		Unit:    strings.TrimSpace(body.Unit),
+		Percent: body.Percent,
+	}
+	if progress.Phase == "" && progress.Message == "" && progress.Current == 0 && progress.Total == 0 && progress.Unit == "" && progress.Percent == 0 {
+		return nil
+	}
+	return &progress
 }
 
 func sanitizeOperationResourceKeys(keys []string, kind string) []string {

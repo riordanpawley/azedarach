@@ -47,6 +47,7 @@ func TestOperationSubmitRequestBodyJSONRoundTrip(t *testing.T) {
 			ResourceKeys: []string{"issue:az-1", "session:az-1"},
 			State:        OperationStateDone,
 			Progress: &OperationProgress{
+				Phase:   "done",
 				Message: "completed",
 				Current: 1,
 				Total:   1,
@@ -86,8 +87,8 @@ func TestOperationSubmitRequestBodyJSONRoundTrip(t *testing.T) {
 	if string(got.Operation.Payload) != `{"base_branch":"main"}` {
 		t.Fatalf("Payload = %s, want base branch JSON", string(got.Operation.Payload))
 	}
-	if got.Operation.Progress == nil || got.Operation.Progress.Percent != 100 {
-		t.Fatalf("Progress = %+v, want percent 100", got.Operation.Progress)
+	if got.Operation.Progress == nil || got.Operation.Progress.Phase != "done" || got.Operation.Progress.Percent != 100 {
+		t.Fatalf("Progress = %+v, want phase done percent 100", got.Operation.Progress)
 	}
 	if got.Operation.StartedAt == nil || !got.Operation.StartedAt.Equal(startedAt) {
 		t.Fatalf("StartedAt = %v, want %v", got.Operation.StartedAt, startedAt)
@@ -103,6 +104,7 @@ func TestOperationProgressEventBodyJSONRoundTrip(t *testing.T) {
 		ProjectID:   "proj",
 		State:       OperationStateRunning,
 		Progress: OperationProgress{
+			Phase:   "worktree_preflight",
 			Message: "fetching origin",
 			Current: 2,
 			Total:   4,
@@ -127,7 +129,7 @@ func TestOperationProgressEventBodyJSONRoundTrip(t *testing.T) {
 	if got.State != OperationStateRunning {
 		t.Fatalf("State = %q, want %q", got.State, OperationStateRunning)
 	}
-	if got.Progress.Message != want.Progress.Message || got.Progress.Percent != 50 {
+	if got.Progress.Phase != want.Progress.Phase || got.Progress.Message != want.Progress.Message || got.Progress.Percent != 50 {
 		t.Fatalf("Progress = %+v, want %+v", got.Progress, want.Progress)
 	}
 }

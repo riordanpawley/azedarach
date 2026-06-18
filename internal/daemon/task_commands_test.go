@@ -18,6 +18,7 @@ import (
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -2665,6 +2666,86 @@ func TestTaskGraphReadinessReportsMissingDependencyAndActiveSession(t *testing.T
 	}
 	if len(result.Active) != 1 || result.Active[0] != activeLeaf.String() {
 		t.Fatalf("active = %v, want [%s]", result.Active, activeLeaf.String())
+	}
+}
+
+func TestTaskGraphReadinessSurfacesPendingSessionStartProgress(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Root",
+		Type:     domain.TypeEpic,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Worker",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusOpen,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir, nextRevision: sequentialRevision()})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	if _, err := runtime.manager.Submit(ctx, daemonops.SubmitRequest{
+		ID:           "op-session-start",
+		ProjectID:    projectID,
+		IssueID:      childID,
+		Kind:         daemonhandlers.CommandSessionStart,
+		ResourceKeys: []string{"issue:" + projectID + ":" + childID},
+	}, func(ctx context.Context) ([]byte, error) {
+		_ = daemonops.ReportProgress(ctx, daemonops.Progress{
+			Phase:   "worktree_preflight",
+			Message: "creating or reusing worktree",
+			Current: 25,
+			Total:   100,
+			Unit:    "percent",
+			Percent: 25,
+		})
+		close(started)
+		<-release
+		return nil, nil
+	}); err != nil {
+		t.Fatalf("submit session start operation: %v", err)
+	}
+	<-started
+	waitForRuntimeProgress(t, runtime, "op-session-start", "worktree_preflight")
+
+	daemon := &Daemon{
+		cfg:              Config{RepoDir: repoDir, Logger: slog.Default()},
+		operationRuntime: runtime,
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+	}
+	ready, err := daemon.taskGraphReadiness(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskGraphReadiness error: %v", err)
+	}
+	if len(ready.Runnable) != 0 {
+		t.Fatalf("runnable = %+v, want pending session start removed", ready.Runnable)
+	}
+	if len(ready.SessionStartProgress) != 1 {
+		t.Fatalf("session_start_progress = %+v, want one entry", ready.SessionStartProgress)
+	}
+	progress := ready.SessionStartProgress[0]
+	if progress.IssueID != childID || progress.OperationID != "op-session-start" || progress.Phase != "worktree_preflight" || progress.Percent != 25 {
+		t.Fatalf("session start progress = %+v", progress)
 	}
 }
 

@@ -34,6 +34,7 @@ const (
 )
 
 type OperationProgress struct {
+	Phase   string `json:"phase,omitempty" msgpack:"phase,omitempty"`
 	Message string `json:"message,omitempty" msgpack:"message,omitempty"`
 	Current int64  `json:"current,omitempty" msgpack:"current,omitempty"`
 	Total   int64  `json:"total,omitempty" msgpack:"total,omitempty"`
@@ -117,9 +118,9 @@ type OperationEventBody struct {
 
 type OperationProgressEventBody struct {
 	OperationID naming.OperationID `json:"operation_id" msgpack:"operation_id"`
-	ProjectID   naming.ProjectID  `json:"project_id" msgpack:"project_id"`
-	State       OperationState    `json:"state" msgpack:"state"`
-	Progress    OperationProgress `json:"progress" msgpack:"progress"`
+	ProjectID   naming.ProjectID   `json:"project_id" msgpack:"project_id"`
+	State       OperationState     `json:"state" msgpack:"state"`
+	Progress    OperationProgress  `json:"progress" msgpack:"progress"`
 }
 
 func (s OperationState) Valid() bool {

@@ -341,6 +341,18 @@ func (m *Manager) execute(ctx context.Context, op *managedOp) {
 		return
 	}
 	op.record = updated
+	ctx = daemonops.WithProgressReporter(ctx, func(_ context.Context, progress daemonops.Progress) error {
+		progressCopy := progress
+		updated, err := m.store.Update(context.Background(), daemonops.UpdateParams{
+			ID:       op.record.ID,
+			ToState:  op.record.State,
+			Progress: &progressCopy,
+		})
+		if err == nil {
+			op.record = updated
+		}
+		return err
+	})
 
 	var (
 		payload []byte
