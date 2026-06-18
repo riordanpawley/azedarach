@@ -847,6 +847,58 @@ func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 	}
 }
 
+func TestStatusCommandSkipsTaskValidationReadWait(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	var gotReq protocol.RequestEnvelope
+	commands := []string{}
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					<-ctx.Done()
+					return protocol.ResponseEnvelope{}, ctx.Err()
+				case commandSessionStatus:
+					gotReq = req
+					return responseWithOutput(req, "ok\n"), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj").WithReadWaitPolicy(daemonclient.ReadWaitPolicy{
+			Default:  time.Nanosecond,
+			Explicit: 2 * time.Nanosecond,
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return StatusCommand(deps, "eqa")
+	})
+
+	if output != "ok\n" {
+		t.Fatalf("output = %q, want ok", output)
+	}
+	if gotReq.Command != commandSessionStatus {
+		t.Fatalf("command = %q, want %q", gotReq.Command, commandSessionStatus)
+	}
+	if commands[0] == daemonclient.CommandTaskList {
+		t.Fatalf("commands = %v, want status to avoid task validation read wait", commands)
+	}
+	var body sessionRequestBody
+	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if body.ProjectID != "proj" || body.SessionID != "eqa" {
+		t.Fatalf("session request body = %+v, want project proj session eqa", body)
+	}
+}
+
 func TestSessionCommandsRejectInvalidOrUnknownIssueIDs(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 

@@ -660,7 +660,7 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 	targetProjectID := deps.ProjectID
 	targetIssueID := strings.TrimSpace(issueID)
 	if targetIssueID != "" {
-		target, err := resolveSessionIssueTarget(ctx, deps, targetIssueID)
+		target, err := resolveSessionStatusTarget(deps, targetIssueID)
 		if err != nil {
 			return err
 		}
@@ -681,6 +681,33 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 	}
 
 	return printCommandOutput(resp)
+}
+
+func resolveSessionStatusTarget(deps *Dependencies, issueID string) (sessionIssueTarget, error) {
+	trimmed := strings.TrimSpace(issueID)
+	if trimmed == "" {
+		return sessionIssueTarget{}, fmt.Errorf("issue id is required")
+	}
+	if projectPart, issuePart, ok := splitExplicitSessionIssueTarget(trimmed); ok {
+		return resolveExplicitSessionStatusTarget(deps, trimmed, projectPart, issuePart)
+	}
+	parsedIssueID, err := naming.ParseIssueID(trimmed)
+	if err != nil {
+		return sessionIssueTarget{}, fmt.Errorf("invalid issue id %q: %w", issueID, err)
+	}
+	return sessionIssueTarget{ProjectID: deps.ProjectID, IssueID: parsedIssueID.String()}, nil
+}
+
+func resolveExplicitSessionStatusTarget(deps *Dependencies, raw, projectPart, issuePart string) (sessionIssueTarget, error) {
+	issueID, err := naming.ParseIssueID(issuePart)
+	if err != nil {
+		return sessionIssueTarget{}, fmt.Errorf("invalid project-prefixed issue id %q: %w", raw, err)
+	}
+	project, ok := findSessionProjectCandidate(deps, projectPart)
+	if !ok {
+		return sessionIssueTarget{}, fmt.Errorf("unknown project in project-prefixed issue id %q: %s", raw, projectPart)
+	}
+	return sessionIssueTarget{ProjectID: project.Route, IssueID: issueID.String()}, nil
 }
 
 func resolveSessionIssueTarget(ctx context.Context, deps *Dependencies, issueID string) (sessionIssueTarget, error) {
