@@ -1319,7 +1319,10 @@ func (d *Daemon) cleanupNewWorktreeAfterInitFailure(ctx context.Context, worktre
 	if reusedWorktree || worktreeManager == nil {
 		return ""
 	}
-	if err := worktreeManager.DeleteWithOptions(ctx, issueID, true); err != nil {
+	if _, err := worktreeManager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
+		Force:         true,
+		BranchCleanup: git.WorktreeBranchCleanupRequired,
+	}); err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("failed to cleanup worktree after init failure",
 				"issue_id", issueID,

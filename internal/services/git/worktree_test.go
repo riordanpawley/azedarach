@@ -251,10 +251,143 @@ branch refs/heads/az/issue-123
 
 	manager := NewWorktreeManager(mock, repoDir, slog.Default())
 
-	err := manager.DeleteWithOptions(ctx, issueID, true)
+	_, err := manager.DeleteWithOptions(ctx, issueID, WorktreeDeleteOptions{
+		Force:         true,
+		BranchCleanup: WorktreeBranchCleanupBestEffort,
+	})
 
 	require.NoError(t, err)
 	mock.AssertCommand(t, "worktree remove --force /home/user/test-repo-issue-123")
+	mock.AssertCommand(t, "branch -D az/issue-123")
+}
+
+func TestWorktreeManager_DeleteWithOptions_ToleratesBranchDeleteError(t *testing.T) {
+	ctx := context.Background()
+	repoDir := "/home/user/test-repo"
+	issueID := "issue-123"
+
+	mock := NewMockRunner()
+	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "list" {
+			return `worktree /home/user/test-repo
+HEAD abc123
+branch refs/heads/main
+
+worktree /home/user/test-repo-issue-123
+HEAD def456
+branch refs/heads/az/issue-123
+`, nil
+		}
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "remove" {
+			return "", nil
+		}
+		if len(args) > 1 && args[0] == "branch" && args[1] == "-D" {
+			return "", fmt.Errorf("git branch -D az/issue-123 failed: exit status 1: error: cannot lock ref 'refs/heads/az/issue-123'")
+		}
+		return "", nil
+	}
+
+	manager := NewWorktreeManager(mock, repoDir, slog.Default())
+
+	_, err := manager.DeleteWithOptions(ctx, issueID, WorktreeDeleteOptions{
+		BranchCleanup: WorktreeBranchCleanupBestEffort,
+	})
+
+	require.NoError(t, err)
+	mock.AssertCommand(t, "worktree remove /home/user/test-repo-issue-123")
+	mock.AssertCommand(t, "branch -D az/issue-123")
+}
+
+func TestWorktreeManager_DeleteBranch_ReturnsBranchDeleteError(t *testing.T) {
+	ctx := context.Background()
+	mock := NewMockRunner()
+	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "branch" && args[1] == "-D" {
+			return "", fmt.Errorf("git branch -D az/issue-123 failed: exit status 1: error: cannot lock ref 'refs/heads/az/issue-123'")
+		}
+		return "", nil
+	}
+	manager := NewWorktreeManager(mock, "/home/user/test-repo", slog.Default())
+
+	err := manager.DeleteBranch(ctx, "az/issue-123")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to delete branch az/issue-123")
+	mock.AssertCommand(t, "branch -D az/issue-123")
+}
+
+func TestWorktreeManager_DeleteWithOptions_ReturnsRequiredBranchDeleteError(t *testing.T) {
+	ctx := context.Background()
+	repoDir := "/home/user/test-repo"
+	issueID := "issue-123"
+
+	mock := NewMockRunner()
+	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "list" {
+			return `worktree /home/user/test-repo
+HEAD abc123
+branch refs/heads/main
+
+worktree /home/user/test-repo-issue-123
+HEAD def456
+branch refs/heads/az/issue-123
+`, nil
+		}
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "remove" {
+			return "", nil
+		}
+		if len(args) > 1 && args[0] == "branch" && args[1] == "-D" {
+			return "", fmt.Errorf("git branch -D az/issue-123 failed: exit status 1: error: cannot lock ref 'refs/heads/az/issue-123'")
+		}
+		return "", nil
+	}
+
+	manager := NewWorktreeManager(mock, repoDir, slog.Default())
+
+	_, err := manager.DeleteWithOptions(ctx, issueID, WorktreeDeleteOptions{
+		BranchCleanup: WorktreeBranchCleanupRequired,
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to delete branch az/issue-123")
+	mock.AssertCommand(t, "worktree remove /home/user/test-repo-issue-123")
+	mock.AssertCommand(t, "branch -D az/issue-123")
+}
+
+func TestWorktreeManager_DeleteWithOptions_ToleratesAlreadyDeletedBranch(t *testing.T) {
+	ctx := context.Background()
+	repoDir := "/home/user/test-repo"
+	issueID := "issue-123"
+
+	mock := NewMockRunner()
+	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "list" {
+			return `worktree /home/user/test-repo
+HEAD abc123
+branch refs/heads/main
+
+worktree /home/user/test-repo-issue-123
+HEAD def456
+branch refs/heads/az/issue-123
+`, nil
+		}
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "remove" {
+			return "", nil
+		}
+		if len(args) > 1 && args[0] == "branch" && args[1] == "-D" {
+			return "", fmt.Errorf("git branch -D az/issue-123 failed: exit status 1: error: branch 'az/issue-123' not found")
+		}
+		return "", nil
+	}
+
+	manager := NewWorktreeManager(mock, repoDir, slog.Default())
+
+	_, err := manager.DeleteWithOptions(ctx, issueID, WorktreeDeleteOptions{
+		BranchCleanup: WorktreeBranchCleanupBestEffort,
+	})
+
+	require.NoError(t, err)
+	mock.AssertCommand(t, "worktree remove /home/user/test-repo-issue-123")
 	mock.AssertCommand(t, "branch -D az/issue-123")
 }
 
@@ -292,7 +425,9 @@ branch refs/heads/az/issue-123
 	}
 
 	manager := NewWorktreeManager(mock, repoDir, slog.Default())
-	err := manager.DeleteWithOptions(ctx, issueID, false)
+	_, err := manager.DeleteWithOptions(ctx, issueID, WorktreeDeleteOptions{
+		BranchCleanup: WorktreeBranchCleanupBestEffort,
+	})
 	require.NoError(t, err)
 	assert.Equal(t, 2, removeCalls)
 	mock.AssertCommand(t, "branch -D az/issue-123")
@@ -326,7 +461,9 @@ branch refs/heads/az/issue-123
 	}
 
 	manager := NewWorktreeManager(mock, repoDir, slog.Default())
-	err := manager.DeleteWithOptions(ctx, issueID, false)
+	_, err := manager.DeleteWithOptions(ctx, issueID, WorktreeDeleteOptions{
+		BranchCleanup: WorktreeBranchCleanupBestEffort,
+	})
 	require.NoError(t, err)
 	mock.AssertCommand(t, "worktree remove /home/user/test-repo-issue-123")
 	mock.AssertCommand(t, "branch -D az/issue-123")
@@ -358,7 +495,9 @@ branch refs/heads/az/issue-123
 	}
 
 	manager := NewWorktreeManager(mock, repoDir, slog.Default())
-	err := manager.DeleteWithOptions(ctx, issueID, false)
+	_, err := manager.DeleteWithOptions(ctx, issueID, WorktreeDeleteOptions{
+		BranchCleanup: WorktreeBranchCleanupBestEffort,
+	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "worktree path still exists but git reports it is not a working tree")
 }
@@ -399,7 +538,9 @@ branch refs/heads/az/issue-123
 	}
 
 	manager := NewWorktreeManager(mock, repoDir, slog.Default())
-	err := manager.DeleteWithOptions(ctx, issueID, false)
+	_, err := manager.DeleteWithOptions(ctx, issueID, WorktreeDeleteOptions{
+		BranchCleanup: WorktreeBranchCleanupBestEffort,
+	})
 	require.NoError(t, err)
 
 	exists, statErr := pathExists(worktreePath)

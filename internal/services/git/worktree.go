@@ -27,6 +27,20 @@ type Worktree struct {
 	IssueID string // Associated issue ID
 }
 
+type WorktreeBranchCleanupMode int
+
+const (
+	WorktreeBranchCleanupBestEffort WorktreeBranchCleanupMode = iota
+	WorktreeBranchCleanupRequired
+	WorktreeBranchCleanupNone
+)
+
+type WorktreeDeleteOptions struct {
+	Force          bool
+	BranchCleanup  WorktreeBranchCleanupMode
+	FallbackBranch string
+}
+
 var (
 	ErrWorktreeNotFound      = errors.New("worktree not found")
 	ErrWorktreeAlreadyExists = errors.New("worktree already exists")
@@ -109,17 +123,36 @@ func (w *WorktreeManager) CreateWithTitle(ctx context.Context, issueID, issueTit
 
 // Delete removes the worktree and branch for the given issue ID.
 func (w *WorktreeManager) Delete(ctx context.Context, issueID string) error {
-	return w.DeleteWithOptions(ctx, issueID, false)
+	_, err := w.DeleteWithOptions(ctx, issueID, WorktreeDeleteOptions{
+		BranchCleanup: WorktreeBranchCleanupBestEffort,
+	})
+	return err
 }
 
-// DeleteWithOptions removes the worktree and branch for the given issue ID.
-func (w *WorktreeManager) DeleteWithOptions(ctx context.Context, issueID string, force bool) error {
+// DeleteWithOptions removes a worktree and applies the requested local branch cleanup policy.
+func (w *WorktreeManager) DeleteWithOptions(ctx context.Context, issueID string, opts WorktreeDeleteOptions) (*Worktree, error) {
+	worktree, err := w.deleteWorktreeWithOptions(ctx, issueID, opts.Force)
+	if err != nil {
+		if errors.Is(err, ErrWorktreeNotFound) {
+			if branchErr := w.deleteBranchForPolicy(ctx, opts.FallbackBranch, opts.BranchCleanup); branchErr != nil {
+				return nil, branchErr
+			}
+		}
+		return nil, err
+	}
+	if err := w.deleteBranchForPolicy(ctx, worktree.Branch, opts.BranchCleanup); err != nil {
+		return nil, err
+	}
+	return worktree, nil
+}
+
+func (w *WorktreeManager) deleteWorktreeWithOptions(ctx context.Context, issueID string, force bool) (*Worktree, error) {
 	w.logger.Info("deleting worktree", "issueID", issueID)
 
 	// Get worktree info to find the path
 	worktree, err := w.Get(ctx, issueID)
 	if err != nil {
-		return fmt.Errorf("failed to get worktree info: %w", err)
+		return nil, fmt.Errorf("failed to get worktree info: %w", err)
 	}
 
 	// Remove worktree
@@ -144,42 +177,65 @@ func (w *WorktreeManager) DeleteWithOptions(ctx context.Context, issueID string,
 		if isWorktreeAlreadyRemovedError(err) {
 			exists, statErr := pathExists(worktree.Path)
 			if statErr != nil {
-				return fmt.Errorf("failed to verify worktree path after remove error: %w", statErr)
+				return nil, fmt.Errorf("failed to verify worktree path after remove error: %w", statErr)
 			}
 			if exists {
 				orphaned, orphanErr := isOrphanedWorktreeDirectory(worktree.Path, w.repoDir)
 				if orphanErr != nil {
-					return fmt.Errorf("failed to verify orphaned worktree path: %w", orphanErr)
+					return nil, fmt.Errorf("failed to verify orphaned worktree path: %w", orphanErr)
 				}
 				if orphaned {
 					if removeErr := os.RemoveAll(worktree.Path); removeErr != nil {
-						return fmt.Errorf("failed to remove orphaned worktree directory %s: %w", worktree.Path, removeErr)
+						return nil, fmt.Errorf("failed to remove orphaned worktree directory %s: %w", worktree.Path, removeErr)
 					}
 					w.logger.Info("removed orphaned worktree directory with missing git metadata", "issueID", issueID, "path", worktree.Path)
 					err = nil
 				}
 			}
 			if exists && err != nil {
-				return fmt.Errorf("worktree path still exists but git reports it is not a working tree: %s", worktree.Path)
+				return nil, fmt.Errorf("worktree path still exists but git reports it is not a working tree: %s", worktree.Path)
 			}
 			w.logger.Info("worktree already removed", "issueID", issueID, "path", worktree.Path)
 			err = nil
 		}
 		if err != nil {
-			return fmt.Errorf("failed to remove worktree: %w", err)
+			return nil, fmt.Errorf("failed to remove worktree: %w", err)
 		}
-	}
-
-	// Delete branch
-	// git branch -D az/issueID
-	_, err = w.runner.Run(ctx, "branch", "-D", worktree.Branch)
-	if err != nil {
-		// Log warning but don't fail - branch might already be deleted
-		w.logger.Warn("failed to delete branch", "branch", worktree.Branch, "error", err)
 	}
 
 	w.logger.Info("worktree deleted successfully", "issueID", issueID)
 
+	return worktree, nil
+}
+
+func (w *WorktreeManager) deleteBranchForPolicy(ctx context.Context, branchName string, mode WorktreeBranchCleanupMode) error {
+	branchName = strings.TrimSpace(branchName)
+	if mode == WorktreeBranchCleanupNone || branchName == "" {
+		return nil
+	}
+	err := w.DeleteBranch(ctx, branchName)
+	if err == nil {
+		return nil
+	}
+	if mode == WorktreeBranchCleanupRequired {
+		return err
+	}
+	w.logger.Warn("failed to delete branch", "branch", branchName, "error", err)
+	return nil
+}
+
+// DeleteBranch deletes a local issue branch and treats an already-missing branch as success.
+func (w *WorktreeManager) DeleteBranch(ctx context.Context, branchName string) error {
+	branchName = strings.TrimSpace(branchName)
+	if branchName == "" {
+		return fmt.Errorf("branch name is required")
+	}
+	if _, err := w.runner.Run(ctx, "branch", "-D", branchName); err != nil {
+		if !isBranchAlreadyDeletedError(err, branchName) {
+			return fmt.Errorf("failed to delete branch %s: %w", branchName, err)
+		}
+		w.logger.Info("issue branch already deleted", "branch", branchName)
+	}
 	return nil
 }
 
@@ -412,4 +468,17 @@ func isBranchAlreadyExistsError(err error, branchName string) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "already exists") && strings.Contains(msg, strings.ToLower(branchName))
+}
+
+func isBranchAlreadyDeletedError(err error, branchName string) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	branchName = strings.ToLower(strings.TrimSpace(branchName))
+	return strings.Contains(msg, "branch") &&
+		strings.Contains(msg, branchName) &&
+		(strings.Contains(msg, "not found") ||
+			strings.Contains(msg, "not fully qualified") ||
+			strings.Contains(msg, "not a valid branch name"))
 }
