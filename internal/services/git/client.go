@@ -174,6 +174,57 @@ func (c *Client) Merge(ctx context.Context, worktree, branch string) (*MergeResu
 	return result, nil
 }
 
+// MergeCleanly merges a branch and verifies the target worktree is clean after
+// a nominally successful merge. If post-merge hooks leave new dirty files after
+// starting from a clean target, those hook side effects are discarded and the
+// merge result is reported as unsuccessful so higher-level integration can halt
+// without leaving the target branch dirty.
+func (c *Client) MergeCleanly(ctx context.Context, worktree, branch string) (*MergeResult, error) {
+	preStatus, preStatusErr := c.Status(ctx, worktree)
+	targetWasClean := preStatusErr == nil && !gitStatusDirty(preStatus)
+	if preStatusErr != nil {
+		c.logger.Debug("pre-merge target status check failed; post-merge cleanup disabled",
+			"worktree", worktree,
+			"branch", branch,
+			"error", preStatusErr,
+		)
+	}
+
+	result, err := c.Merge(ctx, worktree, branch)
+	if err != nil || result == nil || !result.Success {
+		return result, err
+	}
+
+	postStatus, err := c.Status(ctx, worktree)
+	if err != nil {
+		return nil, fmt.Errorf("inspect target status after merge: %w", err)
+	}
+	if !gitStatusDirty(postStatus) {
+		return result, nil
+	}
+
+	dirtySummary := gitStatusSummary(postStatus)
+	if !targetWasClean {
+		result.Success = false
+		result.Message = appendMergeResultDetail(result.Message,
+			fmt.Sprintf("merge completed but target worktree is dirty after merge; pre-merge status was not clean, leaving dirty files untouched: %s", dirtySummary))
+		return result, nil
+	}
+
+	if err := c.DiscardChanges(ctx, worktree); err != nil {
+		return nil, fmt.Errorf("merge completed but target worktree is dirty after merge (%s); failed to discard post-merge changes: %w", dirtySummary, err)
+	}
+	c.logger.Warn("merge left target dirty; discarded post-merge changes",
+		"worktree", worktree,
+		"branch", branch,
+		"status", dirtySummary,
+	)
+	result.Success = false
+	result.Message = appendMergeResultDetail(result.Message,
+		fmt.Sprintf("merge completed but target worktree was dirty after post-merge hooks; discarded post-merge changes: %s", dirtySummary))
+	return result, nil
+}
+
 func mergeResultMessage(output string, err error) string {
 	output = strings.TrimSpace(output)
 	if err == nil {
@@ -183,6 +234,19 @@ func mergeResultMessage(output string, err error) string {
 		return err.Error()
 	}
 	return output + "\n" + err.Error()
+}
+
+func appendMergeResultDetail(message, detail string) string {
+	message = strings.TrimSpace(message)
+	detail = strings.TrimSpace(detail)
+	switch {
+	case message == "":
+		return detail
+	case detail == "":
+		return message
+	default:
+		return message + "\n" + detail
+	}
 }
 
 func (c *Client) mergeInProgress(ctx context.Context, worktree string) bool {
@@ -689,6 +753,43 @@ func parseGitStatus(output string) *GitStatus {
 	status.HasConflicts = len(status.Conflicted) > 0
 
 	return status
+}
+
+func gitStatusDirty(status *GitStatus) bool {
+	if status == nil {
+		return false
+	}
+	return status.HasChanges ||
+		status.HasConflicts ||
+		len(status.Modified) > 0 ||
+		len(status.Added) > 0 ||
+		len(status.Deleted) > 0 ||
+		len(status.Untracked) > 0 ||
+		len(status.Staged) > 0 ||
+		len(status.Conflicted) > 0
+}
+
+func gitStatusSummary(status *GitStatus) string {
+	if status == nil {
+		return "unknown"
+	}
+	parts := make([]string, 0, 6)
+	add := func(label string, values []string) {
+		if len(values) == 0 {
+			return
+		}
+		parts = append(parts, fmt.Sprintf("%d %s (%s)", len(values), label, strings.Join(values, ", ")))
+	}
+	add("modified", status.Modified)
+	add("added", status.Added)
+	add("deleted", status.Deleted)
+	add("untracked", status.Untracked)
+	add("staged", status.Staged)
+	add("conflicted", status.Conflicted)
+	if len(parts) == 0 {
+		return "dirty"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func isUnmergedStatus(statusCode string) bool {

@@ -408,6 +408,44 @@ func TestMergePreservesCommitHooksAndAbortsIncompleteMerge(t *testing.T) {
 	}
 }
 
+func TestMergeCleanlyDiscardsDirtyPostMergeHookAndReportsFailure(t *testing.T) {
+	repo := initDivergedRepo(t)
+	hookPath := filepath.Join(repo, ".git", "hooks", "post-merge")
+	hook := "#!/bin/sh\nprintf hook-dirty\\n > hook-created.txt\ngit add hook-created.txt\necho post-merge hook dirtied target >&2\nexit 0\n"
+	if err := os.WriteFile(hookPath, []byte(hook), 0o755); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	result, err := client.MergeCleanly(context.Background(), repo, "feature")
+	if err != nil {
+		t.Fatalf("MergeCleanly() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("MergeCleanly() result = nil")
+	}
+	if result.Success {
+		t.Fatalf("MergeCleanly() result = %+v, want post-merge dirty failure", result)
+	}
+	if result.HasConflicts {
+		t.Fatalf("MergeCleanly() result = %+v, want non-conflict failure", result)
+	}
+	if !strings.Contains(result.Message, "post-merge hooks") || !strings.Contains(result.Message, "hook-created.txt") {
+		t.Fatalf("MergeCleanly() message = %q, want post-merge dirty detail", result.Message)
+	}
+
+	status, err := client.Status(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if status.HasChanges {
+		t.Fatalf("status = %+v, want clean after discarded post-merge hook changes", status)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "hook-created.txt")); !os.IsNotExist(err) {
+		t.Fatalf("hook-created.txt stat err = %v, want removed", err)
+	}
+}
+
 func TestAbortMerge(t *testing.T) {
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {

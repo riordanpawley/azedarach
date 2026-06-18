@@ -89,7 +89,7 @@ func (a *gitServiceAdapter) Fetch(ctx context.Context, projectID, worktree, remo
 }
 
 func (a *gitServiceAdapter) Merge(ctx context.Context, projectID, worktree, branch string) (*git.MergeResult, error) {
-	result, err := a.client.Merge(ctx, worktree, branch)
+	result, err := a.client.MergeCleanly(ctx, worktree, branch)
 	if err != nil {
 		return nil, err
 	}
