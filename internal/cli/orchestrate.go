@@ -444,7 +444,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		SessionStartProgress: orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
 		Blocked:              ready.Blocked,
 		MailboxEvents:        events,
-		Warnings:             orchestrateRootWorktreeWarnings(ctx, deps, ready.RootIssueID),
+		Warnings:             orchestrateStatusWarnings(ctx, deps, ready.RootIssueID, len(ready.Runnable)),
 		Advice: map[string]interface{}{
 			"watch":             fmt.Sprintf("az orchestrate watch --root %s --since %d --jsonl", ready.RootIssueID, nextMailboxSeq(events, opts.SinceSeq)),
 			"watch_instruction": "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
@@ -573,7 +573,7 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		Launched:    make([]orchestrateStartLaunch, 0, len(requested)),
 		Skipped:     skipped,
 		Failed:      map[string]string{},
-		Warnings:    orchestrateStartWarnings(ctx, deps, opts.RootIssueID, len(requested) > 0),
+		Warnings:    orchestrateStartWarnings(ctx, deps, opts.RootIssueID, plannedOrchestrateStartLaunchCount(len(requested), opts.Limit)),
 		Advice: orchestrateStartAdvice{
 			WatchCommand:     fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", opts.RootIssueID),
 			WatchInstruction: "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
@@ -1514,12 +1514,13 @@ func submitSessionStartForIssueWithBaseBranch(deps *Dependencies, issueID, baseB
 	return launch, nil
 }
 
-func orchestrateStartWarnings(ctx context.Context, deps *Dependencies, rootIssueID string, willStart bool) []string {
+func orchestrateStartWarnings(ctx context.Context, deps *Dependencies, rootIssueID string, launchCount int) []string {
 	if deps == nil || deps.DaemonClient == nil {
 		return nil
 	}
 	warnings := orchestrateRootWorktreeWarnings(ctx, deps, rootIssueID)
-	if !willStart {
+	warnings = append(warnings, sessionInitCommandFanoutWarnings(deps, rootIssueID, launchCount)...)
+	if launchCount < 1 {
 		return warnings
 	}
 	cwd, err := os.Getwd()
@@ -1537,6 +1538,104 @@ func orchestrateStartWarnings(ctx context.Context, deps *Dependencies, rootIssue
 	return append(warnings,
 		fmt.Sprintf("parent worktree has uncommitted tracked changes (%s); worker worktrees are created from committed branch state and will not see these files: %s", summarizeGitStatusCounts(status), strings.Join(dirty, ", ")),
 	)
+}
+
+func orchestrateStatusWarnings(ctx context.Context, deps *Dependencies, rootIssueID string, runnableCount int) []string {
+	if deps == nil || deps.DaemonClient == nil {
+		return nil
+	}
+	warnings := orchestrateRootWorktreeWarnings(ctx, deps, rootIssueID)
+	warnings = append(warnings, sessionInitCommandFanoutWarnings(deps, rootIssueID, runnableCount)...)
+	return warnings
+}
+
+func plannedOrchestrateStartLaunchCount(requestedCount, limit int) int {
+	if requestedCount < 1 || limit < 1 {
+		return 0
+	}
+	if requestedCount < limit {
+		return requestedCount
+	}
+	return limit
+}
+
+func sessionInitCommandFanoutWarnings(deps *Dependencies, rootIssueID string, fanoutCount int) []string {
+	if fanoutCount < 2 || deps == nil || deps.Config == nil {
+		return nil
+	}
+	commands := expensiveSessionInitCommands(deps.Config.Session.InitCommands)
+	if len(commands) == 0 {
+		return nil
+	}
+	warnings := make([]string, 0, len(commands))
+	rootIssueID = strings.TrimSpace(rootIssueID)
+	if rootIssueID == "" {
+		rootIssueID = "this root"
+	}
+	for _, command := range commands {
+		warnings = append(warnings, fmt.Sprintf("session.initCommands contains expensive command %q; fanout count %d for same-project sessions under root %s can run it %d times concurrently. Consider lowering --limit, moving the command to explicit verification, or running one parent preflight before fanout.", command, fanoutCount, rootIssueID, fanoutCount))
+	}
+	return warnings
+}
+
+func expensiveSessionInitCommands(commands []string) []string {
+	out := make([]string, 0, len(commands))
+	seen := map[string]struct{}{}
+	for _, command := range commands {
+		command = strings.TrimSpace(command)
+		if command == "" || !isExpensiveSessionInitCommand(command) {
+			continue
+		}
+		if _, ok := seen[command]; ok {
+			continue
+		}
+		seen[command] = struct{}{}
+		out = append(out, command)
+	}
+	return out
+}
+
+func isExpensiveSessionInitCommand(command string) bool {
+	tokens := sessionInitCommandTokens(command)
+	for _, token := range tokens {
+		switch token {
+		case "tsc", "tsgo", "nx", "test", "install", "build":
+			return true
+		}
+		if strings.Contains(token, "type-check") || strings.Contains(token, "typecheck") || strings.Contains(token, "check:types") || strings.Contains(token, "types:check") {
+			return true
+		}
+	}
+	return false
+}
+
+func sessionInitCommandTokens(command string) []string {
+	command = strings.ToLower(command)
+	replacer := strings.NewReplacer(
+		"&&", " ",
+		"||", " ",
+		";", " ",
+		"(", " ",
+		")", " ",
+		"\"", " ",
+		"'", " ",
+		"`", " ",
+	)
+	fields := strings.Fields(replacer.Replace(command))
+	tokens := make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = strings.Trim(field, " \t\r\n,")
+		if field == "" || strings.Contains(field, "=") {
+			continue
+		}
+		for _, part := range strings.Split(field, "/") {
+			part = strings.Trim(part, " \t\r\n,.")
+			if part != "" {
+				tokens = append(tokens, part)
+			}
+		}
+	}
+	return tokens
 }
 
 func orchestrateRootWorktreeWarnings(ctx context.Context, deps *Dependencies, rootIssueID string) []string {

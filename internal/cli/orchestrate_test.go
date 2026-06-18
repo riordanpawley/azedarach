@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -68,6 +69,53 @@ func TestSessionStartWarningFromOperationResult(t *testing.T) {
 	warning := sessionStartWarningFromOperationResult(raw)
 	if warning != "Worktree setup warning: git hook failed; recovered existing worktree" {
 		t.Fatalf("warning = %q", warning)
+	}
+}
+
+func TestExpensiveSessionInitCommandsDetectsKnownPatterns(t *testing.T) {
+	commands := []string{
+		"direnv allow",
+		"pnpm type-check",
+		"tsc --noEmit",
+		"tsgo ./...",
+		"nx affected:test",
+		"go test ./...",
+		"bun install",
+		"npm run build",
+		"pnpm run check:types",
+	}
+	got := expensiveSessionInitCommands(commands)
+	want := []string{
+		"pnpm type-check",
+		"tsc --noEmit",
+		"tsgo ./...",
+		"nx affected:test",
+		"go test ./...",
+		"bun install",
+		"npm run build",
+		"pnpm run check:types",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("expensive commands = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("expensive commands = %+v, want %+v", got, want)
+		}
+	}
+}
+
+func TestSessionInitCommandFanoutWarningsQuietForNonExpensiveOrSingleLaunch(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Session.InitCommands = []string{"direnv allow", "az prime", "printf ready"}
+	deps := &Dependencies{Config: cfg}
+	if warnings := sessionInitCommandFanoutWarnings(deps, "az-1", 3); len(warnings) != 0 {
+		t.Fatalf("warnings = %+v, want none for non-expensive init commands", warnings)
+	}
+
+	cfg.Session.InitCommands = []string{"pnpm type-check"}
+	if warnings := sessionInitCommandFanoutWarnings(deps, "az-1", 1); len(warnings) != 0 {
+		t.Fatalf("warnings = %+v, want none for single-session start", warnings)
 	}
 }
 
@@ -218,6 +266,65 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 	}
 	if byID[noAgent.String()].Activity != "no-agent" || byID[noAgent.String()].ActivitySource != "session" || byID[noAgent.String()].Advice != "" {
 		t.Fatalf("no-agent active session = %+v", byID[noAgent.String()])
+	}
+}
+
+func TestOrchestrateStatusCommandWarnsOnExpensiveSessionInitFanout(t *testing.T) {
+	root := naming.IssueID("az-1")
+	childA := naming.IssueID("az-2")
+	childB := naming.IssueID("az-3")
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+		{ID: childA, Title: "Worker A", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &root},
+		{ID: childB, Title: "Worker B", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &root},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Session.InitCommands = []string{"pnpm type-check"}
+	deps := &Dependencies{
+		Config:    cfg,
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{childA.String(), childB.String()},
+						Blocked:     map[string]string{},
+					}), nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: taskListBody}, nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees": []map[string]string{
+							{"issue_id": root.String(), "path": "/repo-az-1", "branch": "user/az-1/root"},
+						},
+					}), nil
+				case protocol.CommandMailList:
+					return responseWithJSON(req, []protocol.MailEvent{}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestrateStatusCommand(deps, OrchestrateStatusOptions{RootIssueID: root.String(), JSON: true})
+	})
+	var result orchestrateStatusResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	warnings := strings.Join(result.Warnings, "\n")
+	if !strings.Contains(warnings, "pnpm type-check") || !strings.Contains(warnings, "fanout count 2") {
+		t.Fatalf("warnings = %+v, want expensive init command fanout guidance", result.Warnings)
 	}
 }
 
@@ -651,6 +758,118 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 	}
 	if strings.Join(commands, ",") == "" || !containsString(commands, protocol.CommandOperationSubmit) || !containsString(commands, protocol.CommandOperationGet) {
 		t.Fatalf("commands = %+v, want operation submit and wait", commands)
+	}
+}
+
+func TestOrchestrateStartWarnsOnExpensiveSessionInitCommandsDuringFanout(t *testing.T) {
+	root := naming.IssueID("az-1")
+	childA := naming.IssueID("az-2")
+	childB := naming.IssueID("az-3")
+	tasks := []domain.Task{
+		{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+		{ID: childA, Title: "Worker A", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &root},
+		{ID: childB, Title: "Worker B", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &root},
+	}
+	taskListBody, err := marshalTaskListBody(tasks)
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Session.InitCommands = []string{"direnv allow", "pnpm type-check"}
+	deps := &Dependencies{
+		Config:    cfg,
+		ProjectID: protocol.DefaultProjectID,
+		RepoDir:   "/repo",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Runnable:    []string{childA.String(), childB.String()},
+						Blocked:     map[string]string{},
+					}), nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: taskListBody}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					var body struct {
+						TaskID string `json:"task_id"`
+					}
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode merge base target body: %v", err)
+					}
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{IssueID: body.TaskID, TargetID: "base", Branch: "main"}), nil
+				case daemonclient.CommandGitStatus:
+					return responseWithJSON(req, map[string]any{"status": gitservice.GitStatus{}}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees": []map[string]string{
+							{"issue_id": root.String(), "path": "/repo-az-1", "branch": "user/az-1/root"},
+							{"issue_id": childA.String(), "path": "/repo-az-2", "branch": "user/az-2/worker-a"},
+							{"issue_id": childB.String(), "path": "/repo-az-3", "branch": "user/az-3/worker-b"},
+						},
+					}), nil
+				case protocol.CommandOperationSubmit:
+					var body protocol.OperationSubmitRequestBody
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode submit body: %v", err)
+					}
+					return responseWithJSON(req, protocol.OperationSubmitResponseBody{
+						Created: true,
+						Operation: protocol.OperationRecord{
+							OperationID: naming.OperationID("op-" + body.IssueID.String()),
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     body.IssueID,
+							State:       protocol.OperationStateQueued,
+						},
+					}), nil
+				case protocol.CommandOperationGet:
+					var body protocol.OperationGetRequestBody
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode operation get body: %v", err)
+					}
+					issueID := strings.TrimPrefix(body.OperationID.String(), "op-")
+					return responseWithJSON(req, protocol.OperationGetResponseBody{
+						Operation: protocol.OperationRecord{
+							OperationID: body.OperationID,
+							ProjectID:   protocol.DefaultProjectID,
+							Kind:        commandSessionStart,
+							IssueID:     naming.IssueID(issueID),
+							State:       protocol.OperationStateDone,
+						},
+					}), nil
+				case protocol.CommandMailSend:
+					var body protocol.MailSendCommandBody
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode mail body: %v", err)
+					}
+					return responseWithJSON(req, protocol.MailEvent{Seq: 1, ParentIssue: root.String(), IssueID: body.IssueID, Type: "session-started"}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestrateStartCommand(deps, OrchestrateStartOptions{RootIssueID: root.String(), Limit: 4, JSON: true})
+	})
+	var result orchestrateStartResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if len(result.Started) != 2 || len(result.Failed) != 0 {
+		t.Fatalf("started=%+v failed=%+v, want both workers started with no failures", result.Started, result.Failed)
+	}
+	warnings := strings.Join(result.Warnings, "\n")
+	for _, want := range []string{"pnpm type-check", "fanout count 2", "root az-1", "lowering --limit", "explicit verification", "one parent preflight"} {
+		if !strings.Contains(warnings, want) {
+			t.Fatalf("warnings missing %q: %+v", want, result.Warnings)
+		}
 	}
 }
 
