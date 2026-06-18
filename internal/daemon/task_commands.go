@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
@@ -142,20 +144,35 @@ type taskDeletePreflightResult struct {
 }
 
 type taskGraphReadinessResult struct {
-	RootIssueID    string                   `json:"root_issue_id"`
-	Runnable       []string                 `json:"runnable"`
-	Active         []string                 `json:"active,omitempty"`
-	ActiveSessions []taskGraphActiveSession `json:"active_sessions,omitempty"`
-	Blocked        map[string]string        `json:"blocked"`
+	RootIssueID          string                          `json:"root_issue_id"`
+	Runnable             []string                        `json:"runnable"`
+	Active               []string                        `json:"active,omitempty"`
+	ActiveSessions       []taskGraphActiveSession        `json:"active_sessions,omitempty"`
+	SessionStartProgress []taskGraphSessionStartProgress `json:"session_start_progress,omitempty"`
+	Blocked              map[string]string               `json:"blocked"`
 }
 
 type taskGraphActiveSession struct {
-	IssueID           string `json:"issue_id"`
-	Activity          string `json:"activity"`
-	ActivitySource    string `json:"activity_source"`
-	State             string `json:"state,omitempty"`
-	TmuxAttachedCount int    `json:"tmux_attached_count,omitempty"`
-	Advice            string `json:"advice,omitempty"`
+	IssueID           string                         `json:"issue_id"`
+	Activity          string                         `json:"activity"`
+	ActivitySource    string                         `json:"activity_source"`
+	State             string                         `json:"state,omitempty"`
+	TmuxAttachedCount int                            `json:"tmux_attached_count,omitempty"`
+	StartProgress     *taskGraphSessionStartProgress `json:"start_progress,omitempty"`
+	Advice            string                         `json:"advice,omitempty"`
+}
+
+type taskGraphSessionStartProgress struct {
+	IssueID        string     `json:"issue_id"`
+	OperationID    string     `json:"operation_id,omitempty"`
+	OperationState string     `json:"operation_state"`
+	Phase          string     `json:"phase,omitempty"`
+	Message        string     `json:"message,omitempty"`
+	Percent        int        `json:"percent,omitempty"`
+	ElapsedMS      int64      `json:"elapsed_ms,omitempty"`
+	EnqueuedAt     time.Time  `json:"enqueued_at,omitempty"`
+	StartedAt      *time.Time `json:"started_at,omitempty"`
+	FinishedAt     *time.Time `json:"finished_at,omitempty"`
 }
 
 type taskCompleteCheckResult struct {
@@ -2567,8 +2584,25 @@ func (d *Daemon) taskGraphReadiness(ctx context.Context, projectID, rootIssueID 
 	if err != nil {
 		return taskGraphReadinessResult{}, err
 	}
-	ready.ActiveSessions = daemonTaskGraphActiveSessions(ready.Active, byID)
+	startProgressByIssue := d.sessionStartProgressByIssue(ctx, projectID)
+	ready.removeRunnableSessionStarts(startProgressByIssue)
+	ready.ActiveSessions = d.daemonTaskGraphActiveSessions(ctx, projectID, ready.Active, byID, startProgressByIssue)
+	ready.SessionStartProgress = daemonTaskGraphSessionStartProgressList(rootID, children, startProgressByIssue)
 	return ready, nil
+}
+
+func (result *taskGraphReadinessResult) removeRunnableSessionStarts(progressByIssue map[string]taskGraphSessionStartProgress) {
+	if result == nil || len(result.Runnable) == 0 || len(progressByIssue) == 0 {
+		return
+	}
+	runnable := result.Runnable[:0]
+	for _, issueID := range result.Runnable {
+		if _, launching := progressByIssue[sessionKey(issueID)]; launching {
+			continue
+		}
+		runnable = append(runnable, issueID)
+	}
+	result.Runnable = runnable
 }
 
 func (d *Daemon) loadTaskGraphDomainTasks(ctx context.Context, projectID string) ([]domain.Task, error) {
@@ -2683,7 +2717,7 @@ func daemonTaskGraphUnresolvedBlockers(task domain.Task, byID map[naming.IssueID
 	return out
 }
 
-func daemonTaskGraphActiveSessions(activeIDs []string, byID map[naming.IssueID]domain.Task) []taskGraphActiveSession {
+func (d *Daemon) daemonTaskGraphActiveSessions(ctx context.Context, projectID string, activeIDs []string, byID map[naming.IssueID]domain.Task, progressByIssue map[string]taskGraphSessionStartProgress) []taskGraphActiveSession {
 	if len(activeIDs) == 0 {
 		return nil
 	}
@@ -2709,9 +2743,116 @@ func daemonTaskGraphActiveSessions(activeIDs []string, byID map[naming.IssueID]d
 			if active.Activity != "unknown" {
 				active.Advice = ""
 			}
+			if progress, found := progressByIssue[sessionKey(issueID)]; found {
+				active.StartProgress = &progress
+			} else if progress, found := d.sessionInitCommandProgress(ctx, projectID, task); found {
+				active.StartProgress = &progress
+			}
 		}
 		out = append(out, active)
 	}
+	return out
+}
+
+func (d *Daemon) sessionStartProgressByIssue(ctx context.Context, projectID string) map[string]taskGraphSessionStartProgress {
+	if d == nil || d.operationRuntime == nil || d.operationRuntime.manager == nil {
+		return nil
+	}
+	projectID = d.canonicalProjectID(projectID)
+	records, err := d.operationRuntime.manager.List(ctx, daemonops.Query{
+		ProjectID: projectID,
+		Kind:      daemonhandlers.CommandSessionStart,
+		States:    []daemonops.State{daemonops.StateQueued, daemonops.StateRunning},
+		Limit:     500,
+	})
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("list session start operations for graph readiness failed", "project_id", projectID, "error", err)
+		}
+		return nil
+	}
+	now := time.Now().UTC()
+	out := make(map[string]taskGraphSessionStartProgress, len(records))
+	for _, record := range records {
+		issueID := strings.TrimSpace(record.IssueID)
+		if issueID == "" {
+			continue
+		}
+		key := sessionKey(issueID)
+		if _, exists := out[key]; exists {
+			continue
+		}
+		out[key] = taskGraphSessionStartProgressFromOperation(record, now)
+	}
+	return out
+}
+
+func taskGraphSessionStartProgressFromOperation(record daemonops.Record, now time.Time) taskGraphSessionStartProgress {
+	progress := protocolOperationProgress(record)
+	elapsedFrom := record.CreatedAt
+	if elapsedFrom.IsZero() {
+		elapsedFrom = record.UpdatedAt
+	}
+	elapsedMS := int64(0)
+	if !elapsedFrom.IsZero() && !now.Before(elapsedFrom) {
+		elapsedMS = now.Sub(elapsedFrom).Milliseconds()
+	}
+	return taskGraphSessionStartProgress{
+		IssueID:        strings.TrimSpace(record.IssueID),
+		OperationID:    strings.TrimSpace(record.ID),
+		OperationState: string(record.State),
+		Phase:          progress.Phase,
+		Message:        progress.Message,
+		Percent:        progress.Percent,
+		ElapsedMS:      elapsedMS,
+		EnqueuedAt:     record.CreatedAt,
+		StartedAt:      record.StartedAt,
+		FinishedAt:     record.FinishedAt,
+	}
+}
+
+func (d *Daemon) sessionInitCommandProgress(_ context.Context, projectID string, task domain.Task) (taskGraphSessionStartProgress, bool) {
+	if task.Session == nil || len(d.runtimeConfigForProject(projectID).SessionInitCommands) == 0 {
+		return taskGraphSessionStartProgress{}, false
+	}
+	if strings.TrimSpace(task.Session.Activity) != "busy" || strings.TrimSpace(task.Session.ActivitySource) != "session" {
+		return taskGraphSessionStartProgress{}, false
+	}
+	elapsedMS := int64(0)
+	if task.Session.StartedAt != nil && !task.Session.StartedAt.IsZero() {
+		elapsedMS = time.Since(task.Session.StartedAt.UTC()).Milliseconds()
+		if elapsedMS < 0 {
+			elapsedMS = 0
+		}
+	}
+	return taskGraphSessionStartProgress{
+		IssueID:        task.ID.String(),
+		OperationState: string(protocol.OperationStateRunning),
+		Phase:          "init_commands",
+		Message:        "configured init commands likely running before agent hooks",
+		Percent:        90,
+		ElapsedMS:      elapsedMS,
+		StartedAt:      task.Session.StartedAt,
+	}, true
+}
+
+func daemonTaskGraphSessionStartProgressList(rootID naming.IssueID, children map[naming.IssueID][]naming.IssueID, progressByIssue map[string]taskGraphSessionStartProgress) []taskGraphSessionStartProgress {
+	if len(progressByIssue) == 0 {
+		return nil
+	}
+	desc := daemonTaskGraphDescendants(rootID, children)
+	out := make([]taskGraphSessionStartProgress, 0, len(progressByIssue))
+	for _, id := range desc {
+		if progress, found := progressByIssue[sessionKey(id.String())]; found {
+			out = append(out, progress)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].IssueID != out[j].IssueID {
+			return out[i].IssueID < out[j].IssueID
+		}
+		return out[i].OperationID < out[j].OperationID
+	})
 	return out
 }
 

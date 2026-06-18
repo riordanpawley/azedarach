@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -15,6 +16,7 @@ import (
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -99,6 +101,23 @@ const (
 
 	sessionConflictWindowName = "resolve-conflict"
 )
+
+func reportSessionStartProgress(ctx context.Context, phase, message string, percent int) {
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	_ = daemonops.ReportProgress(ctx, daemonops.Progress{
+		Phase:   strings.TrimSpace(phase),
+		Message: strings.TrimSpace(message),
+		Current: int64(percent),
+		Total:   100,
+		Unit:    "percent",
+		Percent: percent,
+	})
+}
 
 type SessionLongRunningExecutor interface {
 	Execute(ctx context.Context, req protocol.RequestEnvelope, command string, exec func(context.Context) (protocol.ResponseEnvelope, error)) (protocol.ResponseEnvelope, error)
@@ -594,6 +613,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			"image_count", len(cmd.ImagePaths),
 		)
 	}
+	reportSessionStartProgress(ctx, "preflight", "checking runtime state and existing session", 5)
 	if err := d.ensureFreshRuntimeForIssueMutation(ctx, cmd.ProjectID, cmd.IssueID, daemonhandlers.CommandSessionStart); err != nil {
 		if d.cfg.Logger != nil {
 			if errors.Is(err, context.Canceled) {
@@ -627,6 +647,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if exists {
 		return d.errorResponse(req, protocol.ErrorCodeConflict, fmt.Sprintf("session already exists: %s (use 'az attach %s' to connect)", cmd.IssueID, cmd.IssueID)), nil
 	}
+	reportSessionStartProgress(ctx, "worktree_preflight", "loading issue and preparing worktree", 15)
 	issueClient := d.issueClientForProject(cmd.ProjectID)
 	if issueClient == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
@@ -643,6 +664,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "worktree manager unavailable"), nil
 	}
 	baseBranch, baseBranchAncestorIssueID := d.resolveSessionStartBaseBranch(ctx, cmd.ProjectID, cmd.BaseBranch, issueClient, worktreeManager, task)
+	reportSessionStartProgress(ctx, "worktree_preflight", fmt.Sprintf("creating or reusing worktree from %s", baseBranch), 25)
 	worktree, err := worktreeManager.CreateWithTitle(ctx, cmd.IssueID, task.Title, baseBranch)
 	reusedWorktree := false
 	worktreeSetupWarning := ""
@@ -662,11 +684,15 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		}
 	}
 	if !reusedWorktree {
+		if len(d.runtimeConfigForProject(cmd.ProjectID).WorktreeInitCommands) > 0 {
+			reportSessionStartProgress(ctx, "worktree_preflight", "running worktree init commands", 35)
+		}
 		if err := d.runWorktreeInitCommands(ctx, cmd.ProjectID, worktree.Path); err != nil {
 			cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree init failed for %s: %v%s", cmd.IssueID, err, cleanupNote)), nil
 		}
 	}
+	reportSessionStartProgress(ctx, "issue_resources", "preparing issue resources", 50)
 	resourceCtx := d.issueResourceLifecycleContext(cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktree.Path, worktree.Branch)
 	resourcePrep, err := d.runIssueResourcePrepareCommands(ctx, cmd.ProjectID, resourceCtx)
 	if err != nil {
@@ -692,6 +718,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		)
 	}
 	d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch)
+	reportSessionStartProgress(ctx, "tmux_launch", "creating tmux session", 70)
 	if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
 		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
@@ -724,6 +751,11 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			initialPrompt = buildStartWorkPrompt(cmd.IssueID, task.Type.String(), task.Title, parentIssueID != "", parentIssueID)
 		}
 		launchCommand := d.buildSessionLaunchCommandWithInitReadyPath(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, initialPrompt, sessionInitMarker.RelativePath)
+		if len(d.runtimeConfigForProject(cmd.ProjectID).SessionInitCommands) > 0 {
+			reportSessionStartProgress(ctx, "init_commands", "launch sent; configured init commands likely running before agent hooks", 90)
+		} else {
+			reportSessionStartProgress(ctx, "agent_launch", "launch sent; waiting for agent activity", 90)
+		}
 		if err := d.tmux.SendKeys(ctx, cmd.SessionID, launchCommand); err != nil {
 			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
@@ -736,6 +768,8 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 				"prompt_bytes", len(initialPrompt),
 			)
 		}
+	} else {
+		reportSessionStartProgress(ctx, "tmux_launch", "tmux session created without agent launch", 90)
 	}
 	initialActivity, initialActivitySource := initialSessionStartActivity(cmd.StartWork)
 	if err := d.applySessionLifecycleTransitionWithActivity(
@@ -1562,6 +1596,9 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 			}
 		}
 		if len(matching) == 0 {
+			if output, ok := d.pendingSessionStartStatusOutput(ctx, cmd.ProjectID, cmd.IssueID); ok {
+				return d.commandOutput(req, output), nil
+			}
 			if output, ok := d.staleSessionRuntimeStatusOutput(ctx, cmd.ProjectID, cmd.IssueID); ok {
 				return d.commandOutput(req, output), nil
 			}
@@ -1570,6 +1607,9 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 		tmuxSessions = matching
 	}
 	if len(tmuxSessions) == 0 {
+		if output, ok := d.pendingSessionStartStatusOutput(ctx, cmd.ProjectID, ""); ok {
+			return d.commandOutput(req, output), nil
+		}
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Info("daemon session status snapshot", "project_id", cmd.ProjectID, "issue_id", cmd.IssueID, "active_sessions", 0)
 		}
@@ -1579,6 +1619,8 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 	var b strings.Builder
 	fmt.Fprintf(&b, "Active Sessions (%d):\n\n", len(tmuxSessions))
 	activityByIssueKey := d.sessionDisplayActivityByIssueKey(ctx, cmd.ProjectID)
+	progressByIssue := d.sessionStartProgressByIssue(ctx, cmd.ProjectID)
+	sessionStartProgress := make([]taskGraphSessionStartProgress, 0, len(progressByIssue))
 	b.WriteString("ISSUE ID\tSTATUS\tACTIVITY\tTITLE\n")
 	b.WriteString("-------\t------\t--------\t-----\n")
 	for _, name := range tmuxSessions {
@@ -1601,16 +1643,106 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 			}
 		}
 		activity := "unknown"
-		if display, ok := activityByIssueKey[sessionKey(issueIDRaw)]; ok && display.Activity != "" {
+		activitySource := ""
+		issueKey := sessionKey(issueIDRaw)
+		if display, ok := activityByIssueKey[issueKey]; ok && display.Activity != "" {
 			activity = display.Activity
+			activitySource = display.Source
+		}
+		if progress, found := progressByIssue[issueKey]; found {
+			sessionStartProgress = append(sessionStartProgress, progress)
+		} else if len(d.runtimeConfigForProject(cmd.ProjectID).SessionInitCommands) > 0 && activity == "busy" && activitySource == "session" {
+			sessionStartProgress = append(sessionStartProgress, taskGraphSessionStartProgress{
+				IssueID:        issueIDRaw,
+				OperationState: string(protocol.OperationStateRunning),
+				Phase:          "init_commands",
+				Message:        "configured init commands likely running before agent hooks",
+				Percent:        90,
+			})
 		}
 		fmt.Fprintf(&b, "%s\t%s\t%s\t%s\n", issueIDRaw, status, activity, title)
+	}
+	if output, ok := sessionStartStatusProgressSection(sessionStartProgress); ok {
+		b.WriteString("\n")
+		b.WriteString(output)
 	}
 	b.WriteString("\nUse 'az attach <issue-id>' to attach to a session\n")
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session status snapshot", "project_id", cmd.ProjectID, "issue_id", cmd.IssueID, "active_sessions", len(tmuxSessions))
 	}
 	return d.commandOutput(req, b.String()), nil
+}
+
+func (d *Daemon) pendingSessionStartStatusOutput(ctx context.Context, projectID, issueID string) (string, bool) {
+	section, ok := d.sessionStartStatusSection(ctx, projectID, issueID)
+	if !ok {
+		return "", false
+	}
+	return strings.TrimRight(section, "\n") + "\n", true
+}
+
+func (d *Daemon) sessionStartStatusSection(ctx context.Context, projectID, issueID string) (string, bool) {
+	progressByIssue := d.sessionStartProgressByIssue(ctx, projectID)
+	if len(progressByIssue) == 0 {
+		return "", false
+	}
+	var progress []taskGraphSessionStartProgress
+	if strings.TrimSpace(issueID) != "" {
+		item, found := progressByIssue[sessionKey(issueID)]
+		if !found {
+			return "", false
+		}
+		progress = append(progress, item)
+	} else {
+		for _, item := range progressByIssue {
+			progress = append(progress, item)
+		}
+		sort.SliceStable(progress, func(i, j int) bool {
+			if progress[i].IssueID != progress[j].IssueID {
+				return progress[i].IssueID < progress[j].IssueID
+			}
+			return progress[i].OperationID < progress[j].OperationID
+		})
+	}
+	return sessionStartStatusProgressSection(progress)
+}
+
+func sessionStartStatusProgressSection(progress []taskGraphSessionStartProgress) (string, bool) {
+	if len(progress) == 0 {
+		return "", false
+	}
+	var b strings.Builder
+	b.WriteString("Session start progress:\n")
+	for _, item := range progress {
+		fmt.Fprintf(&b, "- %s: %s\n", item.IssueID, daemonSessionStartProgressSummary(item))
+	}
+	return b.String(), true
+}
+
+func daemonSessionStartProgressSummary(progress taskGraphSessionStartProgress) string {
+	parts := make([]string, 0, 6)
+	if state := strings.TrimSpace(progress.OperationState); state != "" {
+		parts = append(parts, "state="+state)
+	}
+	if phase := strings.TrimSpace(progress.Phase); phase != "" {
+		parts = append(parts, "phase="+phase)
+	}
+	if operationID := strings.TrimSpace(progress.OperationID); operationID != "" {
+		parts = append(parts, "operation="+operationID)
+	}
+	if progress.ElapsedMS > 0 {
+		parts = append(parts, fmt.Sprintf("elapsed=%s", (time.Duration(progress.ElapsedMS)*time.Millisecond).Round(time.Second)))
+	}
+	if progress.Percent > 0 {
+		parts = append(parts, fmt.Sprintf("progress=%d%%", progress.Percent))
+	}
+	if message := strings.TrimSpace(progress.Message); message != "" {
+		parts = append(parts, message)
+	}
+	if len(parts) == 0 {
+		return "pending"
+	}
+	return strings.Join(parts, " ")
 }
 
 func (d *Daemon) sessionHookActivityByIssueKey(ctx context.Context, projectID string) map[string]sessionHookActivity {

@@ -18,6 +18,7 @@ import (
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -4149,6 +4150,95 @@ func TestSessionStatusReportsHookBackedActivity(t *testing.T) {
 	}
 	if !strings.Contains(payload.Output, idleIssueID+"\tin_progress\tidle\tIdle worker") {
 		t.Fatalf("status output = %q, want idle hook-backed activity", payload.Output)
+	}
+}
+
+func TestSessionStatusReportsPendingSessionStartProgress(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Launching worker",
+		Type:   domain.TypeTask,
+		Status: domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir, nextRevision: sequentialRevision()})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	if _, err := runtime.manager.Submit(ctx, daemonops.SubmitRequest{
+		ID:           "op-session-start",
+		ProjectID:    projectID,
+		IssueID:      issueID,
+		Kind:         daemonhandlers.CommandSessionStart,
+		ResourceKeys: []string{"issue:" + projectID + ":" + issueID},
+	}, func(ctx context.Context) ([]byte, error) {
+		_ = daemonops.ReportProgress(ctx, daemonops.Progress{
+			Phase:   "issue_resources",
+			Message: "preparing issue resources",
+			Current: 50,
+			Total:   100,
+			Unit:    "percent",
+			Percent: 50,
+		})
+		close(started)
+		<-release
+		return nil, nil
+	}); err != nil {
+		t.Fatalf("submit session start operation: %v", err)
+	}
+	<-started
+	waitForRuntimeProgress(t, runtime, "op-session-start", "issue_resources")
+
+	daemon := &Daemon{
+		cfg:              Config{RepoDir: repoDir, Logger: slog.Default()},
+		tmux:             tmux.NewClient(&testTmuxRunner{sessions: map[string]bool{}}, slog.Default()),
+		issues:           issuesClient,
+		operationRuntime: runtime,
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+	}
+	resp, err := daemon.handleSessionStatus(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-status-pending-start",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.status",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            marshalJSON(map[string]string{"project_id": projectID, "session_id": issueID}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStatus returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("session status response not OK: %+v", resp.Error)
+	}
+	var payload struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
+		t.Fatalf("unmarshal status response: %v", err)
+	}
+	for _, want := range []string{
+		"Session start progress:",
+		issueID + ": state=running phase=issue_resources operation=op-session-start",
+		"preparing issue resources",
+	} {
+		if !strings.Contains(payload.Output, want) {
+			t.Fatalf("status output missing %q:\n%s", want, payload.Output)
+		}
 	}
 }
 

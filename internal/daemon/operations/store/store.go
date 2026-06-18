@@ -47,6 +47,7 @@ type Record struct {
 	FinishedAt   *time.Time
 	ResultJSON   json.RawMessage
 	ErrorJSON    json.RawMessage
+	ProgressJSON json.RawMessage
 	UpdatedAt    time.Time
 }
 
@@ -63,6 +64,7 @@ type CreateParams struct {
 	FinishedAt   *time.Time
 	ResultJSON   json.RawMessage
 	ErrorJSON    json.RawMessage
+	ProgressJSON json.RawMessage
 }
 
 type Query struct {
@@ -76,12 +78,13 @@ type Query struct {
 }
 
 type TransitionParams struct {
-	OperationID string
-	ToState     State
-	StartedAt   *time.Time
-	FinishedAt  *time.Time
-	ResultJSON  json.RawMessage
-	ErrorJSON   json.RawMessage
+	OperationID  string
+	ToState      State
+	StartedAt    *time.Time
+	FinishedAt   *time.Time
+	ResultJSON   json.RawMessage
+	ErrorJSON    json.RawMessage
+	ProgressJSON json.RawMessage
 }
 
 type Repository interface {
@@ -163,8 +166,9 @@ func (s *SQLiteStore) Create(ctx context.Context, params CreateParams) (Record, 
             finished_at,
             result_json,
             error_json,
+            progress_json,
             updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
 		record.OperationID,
 		record.ProjectID,
@@ -178,6 +182,7 @@ func (s *SQLiteStore) Create(ctx context.Context, params CreateParams) (Record, 
 		nullableTime(record.FinishedAt),
 		nullableJSON(record.ResultJSON),
 		nullableJSON(record.ErrorJSON),
+		nullableJSON(record.ProgressJSON),
 		record.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {
@@ -208,6 +213,7 @@ func (s *SQLiteStore) Get(ctx context.Context, operationID string) (Record, erro
             finished_at,
             result_json,
             error_json,
+            progress_json,
             updated_at
         FROM daemon_operations
         WHERE operation_id = ?
@@ -242,6 +248,7 @@ func (s *SQLiteStore) List(ctx context.Context, query Query) ([]Record, error) {
             finished_at,
             result_json,
             error_json,
+            progress_json,
             updated_at
         FROM daemon_operations
     `)
@@ -337,6 +344,7 @@ func (s *SQLiteStore) Transition(ctx context.Context, params TransitionParams) (
             finished_at,
             result_json,
             error_json,
+            progress_json,
             updated_at
         FROM daemon_operations
         WHERE operation_id = ?
@@ -372,6 +380,9 @@ func (s *SQLiteStore) Transition(ctx context.Context, params TransitionParams) (
 	if params.ErrorJSON != nil {
 		next.ErrorJSON = cloneJSON(params.ErrorJSON)
 	}
+	if params.ProgressJSON != nil {
+		next.ProgressJSON = cloneJSON(params.ProgressJSON)
+	}
 
 	_, err = tx.ExecContext(ctx, `
         UPDATE daemon_operations
@@ -380,6 +391,7 @@ func (s *SQLiteStore) Transition(ctx context.Context, params TransitionParams) (
             finished_at = ?,
             result_json = ?,
             error_json = ?,
+            progress_json = ?,
             updated_at = ?
         WHERE operation_id = ?
     `,
@@ -388,6 +400,7 @@ func (s *SQLiteStore) Transition(ctx context.Context, params TransitionParams) (
 		nullableTime(next.FinishedAt),
 		nullableJSON(next.ResultJSON),
 		nullableJSON(next.ErrorJSON),
+		nullableJSON(next.ProgressJSON),
 		next.UpdatedAt.UTC().Format(time.RFC3339Nano),
 		next.OperationID,
 	)
@@ -488,6 +501,7 @@ func normalizeCreateParams(params CreateParams) (Record, error) {
 		SubmittedAt:  submittedAt,
 		ResultJSON:   cloneJSON(params.ResultJSON),
 		ErrorJSON:    cloneJSON(params.ErrorJSON),
+		ProgressJSON: cloneJSON(params.ProgressJSON),
 		UpdatedAt:    updatedAt,
 	}
 	if params.StartedAt != nil {
@@ -589,6 +603,7 @@ func scanRecord(scanner interface{ Scan(...any) error }) (Record, error) {
 		finishedAtRaw    sql.NullString
 		resultJSONRaw    sql.NullString
 		errorJSONRaw     sql.NullString
+		progressJSONRaw  sql.NullString
 		updatedAtRaw     string
 	)
 	if err := scanner.Scan(
@@ -604,6 +619,7 @@ func scanRecord(scanner interface{ Scan(...any) error }) (Record, error) {
 		&finishedAtRaw,
 		&resultJSONRaw,
 		&errorJSONRaw,
+		&progressJSONRaw,
 		&updatedAtRaw,
 	); err != nil {
 		return Record{}, err
@@ -643,6 +659,9 @@ func scanRecord(scanner interface{ Scan(...any) error }) (Record, error) {
 	}
 	if errorJSONRaw.Valid && strings.TrimSpace(errorJSONRaw.String) != "" {
 		record.ErrorJSON = json.RawMessage(errorJSONRaw.String)
+	}
+	if progressJSONRaw.Valid && strings.TrimSpace(progressJSONRaw.String) != "" {
+		record.ProgressJSON = json.RawMessage(progressJSONRaw.String)
 	}
 	return record, nil
 }
