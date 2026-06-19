@@ -1325,7 +1325,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		AllowTargetSession:  true,
 		AllowTargetWorktree: true,
 		ForceWorktree:       cmd.ForceWorktree,
-		IgnoreAhead:         cmd.IgnoreAhead || integration.Integrated,
+		IgnoreAhead:         cmd.IgnoreAhead || integration.Integrated || integration.NoChanges,
 	}, req)
 	if err != nil {
 		return result, err
@@ -1468,6 +1468,7 @@ func (d *Daemon) liveTmuxSessionSet(ctx context.Context) (map[string]struct{}, b
 type taskCloseIntegrationResult struct {
 	Requested    bool
 	Integrated   bool
+	NoChanges    bool
 	SourceBranch string
 	TargetBranch string
 }
@@ -1530,6 +1531,7 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		if !hasChangesToIntegrate {
 			integration = taskCloseIntegrationResult{
 				Requested:    true,
+				NoChanges:    true,
 				SourceBranch: source.Branch,
 				TargetBranch: targetBranch,
 			}

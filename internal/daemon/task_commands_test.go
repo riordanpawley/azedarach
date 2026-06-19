@@ -2407,12 +2407,12 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceHasNoChangesEvenIfTargetDirty
 	logger := slog.Default()
 	projectID := "proj-close-integrate-no-changes"
 	repoDir := t.TempDir()
-	sourceWorktree := filepath.Join(repoDir, "wt-az-1")
-	sourceBranch := "riordan/az-1/no-changes"
-	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
-	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
-	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
 
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -2424,6 +2424,11 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceHasNoChangesEvenIfTargetDirty
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
+	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
+	if err := os.MkdirAll(sourceWorktree, 0o755); err != nil {
+		t.Fatalf("mkdir source worktree: %v", err)
+	}
+	sourceBranch := "riordan/" + taskID + "/no-changes"
 	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
 		ProjectID: projectID,
 		IssueID:   taskID,
@@ -2438,21 +2443,33 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceHasNoChangesEvenIfTargetDirty
 	commands := make([]string, 0, 12)
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		commands = append(commands, strings.Join(args, " "))
+		joined := strings.Join(args, " ")
 		switch {
 		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
 			return worktreeListOutput, nil
-		case len(args) >= 4 && args[0] == "-C" && args[2] == "status" && args[1] == repoDir:
+		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "status":
 			return " M README.md\n", nil
-		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
+		case len(args) >= 4 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "status":
 			return "", nil
-		case len(args) >= 5 && args[0] == "-C" && args[2] == "merge-base":
+		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "merge-base":
 			return "base-sha", nil
-		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff" && slices.Contains(args, "--name-status"):
+		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "diff" && slices.Contains(args, "--name-status"):
 			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "diff":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "rev-list" && args[4] == "HEAD..main":
+			return "0", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "rev-list" && args[4] == "main..HEAD":
+			return "2", nil
 		case len(args) >= 3 && args[0] == "worktree" && args[1] == "remove":
+			if err := os.RemoveAll(sourceWorktree); err != nil {
+				return "", err
+			}
+			return "", nil
+		case len(args) >= 3 && args[0] == "branch" && args[1] == "-D":
 			return "", nil
 		default:
-			return "", nil
+			return "", fmt.Errorf("unexpected git args: %s", joined)
 		}
 	}}
 
@@ -2472,6 +2489,12 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceHasNoChangesEvenIfTargetDirty
 		revision: map[string]uint64{projectID: 1},
 		hub:      publish.NewHub(16, 8, logger),
 	}
+	d.gitStatusAdapter = &gitServiceAdapter{
+		client:            git.NewClient(runner, logger),
+		runtimeStateStore: runtimeStore,
+		logger:            logger,
+		baseBranch:        "main",
+	}
 	d.worktreeAdapter = &worktreeServiceAdapter{
 		managerForProject: func(string) *git.WorktreeManager { return manager },
 		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
@@ -2486,6 +2509,24 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceHasNoChangesEvenIfTargetDirty
 			cancel()
 		}
 	})
+
+	beforeCloseTasks, err := issuesClient.ListWithRuntime(ctx, projectID)
+	if err != nil {
+		t.Fatalf("list tasks before close: %v", err)
+	}
+	var beforeClose domain.Task
+	for _, task := range beforeCloseTasks {
+		if task.ID.String() == taskID {
+			beforeClose = task
+			break
+		}
+	}
+	if beforeClose.ID.IsZero() {
+		t.Fatalf("task %s missing before close", taskID)
+	}
+	if !beforeClose.HasWorktree {
+		t.Fatalf("task before close HasWorktree = false, want seeded runtime projection; task = %+v", beforeClose)
+	}
 
 	body, err := json.Marshal(taskCloseRequest{
 		TaskID:               taskID,
@@ -2506,6 +2547,9 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceHasNoChangesEvenIfTargetDirty
 		t.Fatalf("handleTaskClose error: %v", err)
 	}
 	if !resp.OK {
+		if resp.Error != nil {
+			t.Fatalf("handleTaskClose error = %s", resp.Error.Message)
+		}
 		t.Fatalf("handleTaskClose response = %+v", resp)
 	}
 	var result taskCloseResult
@@ -2514,6 +2558,9 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceHasNoChangesEvenIfTargetDirty
 	}
 	if !result.IntegrationRequested || result.Integrated {
 		t.Fatalf("close integration result = %+v, want requested no-op integration", result)
+	}
+	if !result.WorktreeRemoved {
+		t.Fatalf("close integration result = %+v, want worktree cleanup", result)
 	}
 	closed, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
 	if err != nil {
@@ -2531,6 +2578,15 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceHasNoChangesEvenIfTargetDirty
 	} {
 		if strings.Contains(joined, blocked) {
 			t.Fatalf("git commands should skip no-op integration but included %q:\n%s", blocked, joined)
+		}
+	}
+	for _, want := range []string{
+		"-C " + sourceWorktree + " rev-list --count main..HEAD",
+		"worktree remove " + sourceWorktree,
+		"branch -D " + sourceBranch,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("git commands missing %q:\n%s", want, joined)
 		}
 	}
 }
