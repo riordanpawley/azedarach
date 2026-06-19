@@ -446,6 +446,176 @@ func TestMergeCleanlyDiscardsDirtyPostMergeHookAndReportsFailure(t *testing.T) {
 	}
 }
 
+func TestMergeCleanlyDiscardsDirtyCommitMsgHookAfterAbort(t *testing.T) {
+	repo := initDivergedRepo(t)
+	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
+	hook := "#!/bin/sh\nprintf hook-dirty\\n > hook-created.txt\necho commit-msg hook dirtied target >&2\nexit 1\n"
+	if err := os.WriteFile(hookPath, []byte(hook), 0o755); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	result, err := client.MergeCleanly(context.Background(), repo, "feature")
+	if err != nil {
+		t.Fatalf("MergeCleanly() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("MergeCleanly() result = nil")
+	}
+	if result.Success {
+		t.Fatalf("MergeCleanly() result = %+v, want commit-msg dirty failure", result)
+	}
+	if !strings.Contains(result.Message, "commit-msg hook dirtied target") ||
+		!strings.Contains(result.Message, "discarded partial merge changes") ||
+		!strings.Contains(result.Message, "hook-created.txt") {
+		t.Fatalf("MergeCleanly() message = %q, want commit-msg cleanup detail", result.Message)
+	}
+
+	status, err := client.Status(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if status.HasChanges {
+		t.Fatalf("status = %+v, want clean after discarded commit-msg hook changes", status)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "hook-created.txt")); !os.IsNotExist(err) {
+		t.Fatalf("hook-created.txt stat err = %v, want removed", err)
+	}
+}
+
+func TestMergeCleanlyDiscardsDirtyTargetAfterKilledMergeCommand(t *testing.T) {
+	var calls []string
+	statusCalls := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			calls = append(calls, strings.Join(args, " "))
+			switch {
+			case len(args) >= 2 && args[0] == "status" && args[1] == "--porcelain":
+				statusCalls++
+				if statusCalls == 1 {
+					return "", nil
+				}
+				if ctx.Err() != nil {
+					return "", fmt.Errorf("cleanup status used canceled context: %w", ctx.Err())
+				}
+				return "M  internal/tui/model.go\nM  internal/tui/model_daemonclient_test.go", nil
+			case len(args) >= 3 && args[0] == "merge" && args[1] == "--no-edit" && args[2] == "feature-branch":
+				cancel()
+				return "[gate] build+tests passed", fmt.Errorf("signal: killed")
+			case len(args) >= 4 && args[0] == "rev-parse" && args[1] == "-q" && args[2] == "--verify" && args[3] == "MERGE_HEAD":
+				return "", fmt.Errorf("exit status 1")
+			case len(args) >= 4 && args[0] == "restore" && args[1] == "--staged" && args[2] == "--worktree" && args[3] == ".":
+				if ctx.Err() != nil {
+					return "", fmt.Errorf("cleanup restore used canceled context: %w", ctx.Err())
+				}
+				return "", nil
+			case len(args) >= 2 && args[0] == "clean" && args[1] == "-fd":
+				if ctx.Err() != nil {
+					return "", fmt.Errorf("cleanup clean used canceled context: %w", ctx.Err())
+				}
+				return "", nil
+			default:
+				return "", fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
+			}
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	result, err := client.MergeCleanly(ctx, "/fake/worktree", "feature-branch")
+	if err != nil {
+		t.Fatalf("MergeCleanly() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("MergeCleanly() result = nil")
+	}
+	if result.Success {
+		t.Fatalf("MergeCleanly() result = %+v, want failed merge result", result)
+	}
+	if result.HasConflicts {
+		t.Fatalf("MergeCleanly() result = %+v, want non-conflict failure", result)
+	}
+	if !strings.Contains(result.Message, "signal: killed") ||
+		!strings.Contains(result.Message, "discarded partial merge changes") ||
+		!strings.Contains(result.Message, "internal/tui/model.go") ||
+		!strings.Contains(result.Message, "internal/tui/model_daemonclient_test.go") {
+		t.Fatalf("MergeCleanly() message = %q, want killed merge cleanup detail", result.Message)
+	}
+	compareStringSlices(t, "calls", calls, []string{
+		"status --porcelain",
+		"merge --no-edit feature-branch",
+		"rev-parse -q --verify MERGE_HEAD",
+		"rev-parse -q --verify MERGE_HEAD",
+		"status --porcelain",
+		"restore --staged --worktree .",
+		"clean -fd",
+	})
+}
+
+func TestMergeCleanlyAbortsIncompleteMergeWithDetachedCleanupContext(t *testing.T) {
+	var calls []string
+	ctx, cancel := context.WithCancel(context.Background())
+	mergeHeadChecks := 0
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			calls = append(calls, strings.Join(args, " "))
+			switch {
+			case len(args) >= 2 && args[0] == "status" && args[1] == "--porcelain":
+				if ctx.Err() != nil {
+					return "", fmt.Errorf("cleanup status used canceled context: %w", ctx.Err())
+				}
+				return "", nil
+			case len(args) >= 3 && args[0] == "merge" && args[1] == "--no-edit" && args[2] == "feature-branch":
+				cancel()
+				return "[gate] running test check", fmt.Errorf("signal: killed")
+			case len(args) >= 4 && args[0] == "rev-parse" && args[1] == "-q" && args[2] == "--verify" && args[3] == "MERGE_HEAD":
+				mergeHeadChecks++
+				if mergeHeadChecks == 1 {
+					if ctx.Err() == nil {
+						return "", fmt.Errorf("initial merge probe should use canceled context")
+					}
+					return "", ctx.Err()
+				}
+				if ctx.Err() != nil {
+					return "", fmt.Errorf("cleanup merge probe used canceled context: %w", ctx.Err())
+				}
+				return "abcdef", nil
+			case len(args) >= 2 && args[0] == "merge" && args[1] == "--abort":
+				if ctx.Err() != nil {
+					return "", fmt.Errorf("cleanup abort used canceled context: %w", ctx.Err())
+				}
+				return "", nil
+			default:
+				return "", fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
+			}
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	result, err := client.MergeCleanly(ctx, "/fake/worktree", "feature-branch")
+	if err != nil {
+		t.Fatalf("MergeCleanly() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("MergeCleanly() result = nil")
+	}
+	if result.Success || result.HasConflicts {
+		t.Fatalf("MergeCleanly() result = %+v, want non-conflict failure", result)
+	}
+	if !strings.Contains(result.Message, "signal: killed") ||
+		!strings.Contains(result.Message, "aborted incomplete merge during cleanup") {
+		t.Fatalf("MergeCleanly() message = %q, want detached abort cleanup detail", result.Message)
+	}
+	compareStringSlices(t, "calls", calls, []string{
+		"status --porcelain",
+		"merge --no-edit feature-branch",
+		"rev-parse -q --verify MERGE_HEAD",
+		"rev-parse -q --verify MERGE_HEAD",
+		"merge --abort",
+		"status --porcelain",
+	})
+}
+
 func TestAbortMerge(t *testing.T) {
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {
