@@ -8241,6 +8241,121 @@ func TestBulkCleanupWorktreeUsesPerStepExtendedDaemonDeadlines(t *testing.T) {
 	}
 }
 
+func TestBulkCleanupWorktreeTracksPendingDaemonOperations(t *testing.T) {
+	pendingResponse := func(t *testing.T, req protocol.RequestEnvelope, operationID string) protocol.ResponseEnvelope {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{
+			"operation_id": operationID,
+			"state":        string(protocol.OperationStateQueued),
+		})
+		if err != nil {
+			t.Fatalf("marshal pending response: %v", err)
+		}
+		return protocol.ResponseEnvelope{
+			ProtocolVersion: req.ProtocolVersion,
+			RequestID:       req.RequestID,
+			Kind:            protocol.EnvelopeKindResponse,
+			OK:              true,
+			Body:            body,
+		}
+	}
+
+	t.Run("cleanup only", func(t *testing.T) {
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandSessionStop:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+					}, nil
+				case daemonclient.CommandWorktreeRemove:
+					return pendingResponse(t, req, "op-remove"), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{{ID: "az-1", Status: domain.StatusOpen}}
+
+		msg := m.bulkCleanupWorktreeCmd([]string{"az-1"}, false)()
+		result, ok := msg.(bulkStatusResultMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want bulkStatusResultMsg", msg)
+		}
+		if result.updated != 0 || result.failed != 0 || len(result.pending) != 1 {
+			t.Fatalf("bulk result = %+v, want one pending operation", result)
+		}
+
+		updatedAny, cmd := m.Update(result)
+		updated, ok := updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if cmd == nil {
+			t.Fatal("expected refresh command after pending cleanup")
+		}
+		if pending := updated.pendingCleanupOps["op-remove"]; pending.taskID != "az-1" || pending.deletedTask || pending.force {
+			t.Fatalf("pending cleanup = %+v, want cleanup-only az-1", pending)
+		}
+		if got := updated.operationTaskID["op-remove"]; got != "az-1" {
+			t.Fatalf("operation task id = %q, want az-1", got)
+		}
+		progress := updated.pendingMutationForTask("az-1")
+		if progress == nil || progress.OperationID != "op-remove" || progress.State != string(protocol.OperationStateQueued) {
+			t.Fatalf("pending progress = %+v, want queued op-remove", progress)
+		}
+	})
+
+	t.Run("delete and cleanup", func(t *testing.T) {
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskDelete:
+					return pendingResponse(t, req, "op-delete"), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{{ID: "az-1", Status: domain.StatusOpen}}
+
+		msg := m.bulkCleanupWorktreeCmd([]string{"az-1"}, true)()
+		result, ok := msg.(bulkStatusResultMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want bulkStatusResultMsg", msg)
+		}
+		if result.updated != 0 || result.failed != 0 || len(result.pending) != 1 {
+			t.Fatalf("bulk result = %+v, want one pending operation", result)
+		}
+
+		updatedAny, cmd := m.Update(result)
+		updated, ok := updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if cmd == nil {
+			t.Fatal("expected refresh command after pending cleanup")
+		}
+		if pending := updated.pendingCleanupOps["op-delete"]; pending.taskID != "az-1" || !pending.deletedTask || pending.force {
+			t.Fatalf("pending cleanup = %+v, want delete+cleanup az-1", pending)
+		}
+		if got := updated.operationTaskID["op-delete"]; got != "az-1" {
+			t.Fatalf("operation task id = %q, want az-1", got)
+		}
+		progress := updated.pendingMutationForTask("az-1")
+		if progress == nil || progress.OperationID != "op-delete" || progress.State != string(protocol.OperationStateQueued) {
+			t.Fatalf("pending progress = %+v, want queued op-delete", progress)
+		}
+	})
+}
+
 func TestFetchAndMergeCommandReturnsPendingOperationToast(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -9368,6 +9483,76 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		}
 	})
 
+	t.Run("bulk status done tracks pending close", func(t *testing.T) {
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskClose {
+					t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskClose)
+				}
+				var body struct {
+					TaskID               string `json:"task_id"`
+					IntegrateBeforeClose bool   `json:"integrate_before_close"`
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal close request: %v", err)
+				}
+				if body.TaskID != "az-1" || !body.IntegrateBeforeClose {
+					t.Fatalf("close body = %+v, want az-1 integrate", body)
+				}
+				respBody, err := json.Marshal(map[string]any{
+					"operation_id": "op-close",
+					"state":        string(protocol.OperationStateQueued),
+				})
+				if err != nil {
+					t.Fatalf("marshal pending close response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			},
+		}
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{{ID: "az-1", Status: domain.StatusInReview}}
+
+		msg := m.bulkSetStatusCmd([]string{"az-1"}, domain.StatusDone)()
+		result, ok := msg.(bulkStatusResultMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want bulkStatusResultMsg", msg)
+		}
+		if result.updated != 0 || result.failed != 0 || len(result.pending) != 1 {
+			t.Fatalf("bulk status result = %+v, want one pending close", result)
+		}
+
+		updatedAny, cmd := m.Update(result)
+		updated, ok := updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if cmd == nil {
+			t.Fatal("expected refresh command after pending close")
+		}
+		if got := updated.operationTaskID["op-close"]; got != "az-1" {
+			t.Fatalf("operation task id = %q, want az-1", got)
+		}
+		progress := updated.pendingMutationForTask("az-1")
+		if progress == nil {
+			t.Fatal("expected pending mutation for az-1")
+		}
+		if progress.OperationID != "op-close" || progress.State != string(protocol.OperationStateQueued) {
+			t.Fatalf("pending progress = %+v, want queued op-close", progress)
+		}
+		if progress.PreviousStatus != domain.StatusInReview || progress.TargetStatus != domain.StatusDone {
+			t.Fatalf("pending statuses = %s -> %s, want in_review -> done", progress.PreviousStatus, progress.TargetStatus)
+		}
+		if got := updated.tasks[0].Status; got != domain.StatusDone {
+			t.Fatalf("optimistic status = %s, want done", got)
+		}
+	})
+
 	t.Run("bulk delete reports per-item failures", func(t *testing.T) {
 		deleteCount := 0
 		transport := &recordingDaemonTransport{
@@ -9485,6 +9670,63 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 			got[0] != daemonclient.CommandTaskUpdateStatus ||
 			got[1] != daemonclient.CommandTaskUpdateStatus {
 			t.Fatalf("requests = %v", got)
+		}
+	})
+
+	t.Run("bulk move right tracks pending close", func(t *testing.T) {
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskClose {
+					t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskClose)
+				}
+				respBody, err := json.Marshal(map[string]any{
+					"operation_id": "op-move-close",
+					"state":        string(protocol.OperationStateQueued),
+				})
+				if err != nil {
+					t.Fatalf("marshal pending close response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			},
+		}
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{{ID: "az-1", Status: domain.StatusInReview}}
+
+		msg := m.bulkMoveStatusCmd([]string{"az-1"}, 1)()
+		result, ok := msg.(bulkStatusResultMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want bulkStatusResultMsg", msg)
+		}
+		if result.updated != 0 || result.failed != 0 || len(result.pending) != 1 {
+			t.Fatalf("bulk move result = %+v, want one pending close", result)
+		}
+
+		updatedAny, cmd := m.Update(result)
+		updated, ok := updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if cmd == nil {
+			t.Fatal("expected refresh command after pending move close")
+		}
+		if got := updated.operationTaskID["op-move-close"]; got != "az-1" {
+			t.Fatalf("operation task id = %q, want az-1", got)
+		}
+		progress := updated.pendingMutationForTask("az-1")
+		if progress == nil || progress.OperationID != "op-move-close" || progress.State != string(protocol.OperationStateQueued) {
+			t.Fatalf("pending progress = %+v, want queued op-move-close", progress)
+		}
+		if progress.PreviousStatus != domain.StatusInReview || progress.TargetStatus != domain.StatusDone {
+			t.Fatalf("pending statuses = %s -> %s, want in_review -> done", progress.PreviousStatus, progress.TargetStatus)
+		}
+		if got := updated.tasks[0].Status; got != domain.StatusDone {
+			t.Fatalf("optimistic status = %s, want done", got)
 		}
 	})
 

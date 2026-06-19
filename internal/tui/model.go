@@ -3933,6 +3933,7 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 		updated := 0
 		failed := 0
 		issues := make([]bulkTaskIssue, 0)
+		pendingOps := make([]bulkTaskPendingOperation, 0)
 
 		for _, taskID := range taskIDs {
 			// Find the task to get current status
@@ -3974,6 +3975,17 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 
 			err := m.updateTaskStatusWithTimeout(taskID, newStatus, 10*time.Second)
 			if err != nil {
+				if pending, ok := pendingOperationDetails(err); ok {
+					pendingOps = append(pendingOps, bulkTaskPendingOperation{
+						taskID:         taskID,
+						action:         "task_move",
+						previousStatus: currentTask.Status,
+						targetStatus:   newStatus,
+						operationID:    pending.OperationID,
+						state:          pending.State,
+					})
+					continue
+				}
 				failed++
 				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: err.Error()})
 				continue
@@ -3982,7 +3994,7 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 			updated++
 		}
 
-		return bulkStatusResultMsg{updated: updated, issues: issues, failed: failed}
+		return bulkStatusResultMsg{updated: updated, issues: issues, failed: failed, pending: pendingOps}
 	}
 }
 
@@ -4055,6 +4067,7 @@ func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd
 		updated := 0
 		failed := 0
 		issues := make([]bulkTaskIssue, 0)
+		pendingOps := make([]bulkTaskPendingOperation, 0)
 
 		for _, taskID := range taskIDs {
 			if !m.taskExists(taskID) {
@@ -4072,6 +4085,16 @@ func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd
 				_, err := m.daemonClient.DeleteTaskWithOptions(deleteCtx, taskID, daemonclient.TaskDeleteOptions{Cleanup: true})
 				deleteCancel()
 				if err != nil {
+					if pending, ok := pendingOperationDetails(err); ok {
+						pendingOps = append(pendingOps, bulkTaskPendingOperation{
+							taskID:      taskID,
+							action:      "worktree_cleanup",
+							deletedTask: true,
+							operationID: pending.OperationID,
+							state:       pending.State,
+						})
+						continue
+					}
 					failed++
 					reason := err.Error()
 					if isDirtyWorktreeRemovalError(err) {
@@ -4099,6 +4122,16 @@ func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd
 			removeErr := m.daemonClient.RemoveWorktreeWithOptions(removeCtx, taskID, false)
 			removeCancel()
 			if removeErr != nil {
+				if pending, ok := pendingOperationDetails(removeErr); ok {
+					pendingOps = append(pendingOps, bulkTaskPendingOperation{
+						taskID:      taskID,
+						action:      "worktree_cleanup",
+						deletedTask: deleteTask,
+						operationID: pending.OperationID,
+						state:       pending.State,
+					})
+					continue
+				}
 				failed++
 				reason := removeErr.Error()
 				if isDirtyWorktreeRemovalError(removeErr) {
@@ -4111,7 +4144,7 @@ func (m Model) bulkCleanupWorktreeCmd(taskIDs []string, deleteTask bool) tea.Cmd
 			updated++
 		}
 
-		return bulkStatusResultMsg{updated: updated, issues: issues, failed: failed}
+		return bulkStatusResultMsg{updated: updated, issues: issues, failed: failed, pending: pendingOps}
 	}
 }
 
@@ -4181,14 +4214,27 @@ func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd 
 		updated := 0
 		failed := 0
 		issues := make([]bulkTaskIssue, 0)
+		pendingOps := make([]bulkTaskPendingOperation, 0)
 
 		for _, taskID := range taskIDs {
 			if !m.taskExists(taskID) {
 				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "task not found"})
 				continue
 			}
+			previousStatus, _ := m.taskStatusByID(taskID)
 			err := m.updateTaskStatusWithTimeout(taskID, status, 10*time.Second)
 			if err != nil {
+				if pending, ok := pendingOperationDetails(err); ok {
+					pendingOps = append(pendingOps, bulkTaskPendingOperation{
+						taskID:         taskID,
+						action:         "task_move",
+						previousStatus: previousStatus,
+						targetStatus:   status,
+						operationID:    pending.OperationID,
+						state:          pending.State,
+					})
+					continue
+				}
 				failed++
 				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: err.Error()})
 				continue
@@ -4196,7 +4242,7 @@ func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd 
 			updated++
 		}
 
-		return bulkStatusResultMsg{updated: updated, issues: issues, failed: failed}
+		return bulkStatusResultMsg{updated: updated, issues: issues, failed: failed, pending: pendingOps}
 	}
 }
 
