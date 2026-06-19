@@ -5735,10 +5735,10 @@ func renderPrimeChildWorkRecommendation(task domain.Task, tasks []domain.Task, t
 	if task.Type != domain.TypeEpic && !issueHasChildren(task.ID, tasks) {
 		return ""
 	}
-	commands := "`az issue create \"Child task\"`"
+	commands := "`az issue create \"Child task\"` for tracking-only child work"
 	sessionCommands := "`az session start <child-issue>`"
 	if tmuxAvailable {
-		commands += " or `az issue split \"Child task\"`"
+		commands += "; use `az issue split \"Child task\"` only when that child should launch immediately in its own session"
 		sessionCommands += " or `az issue split \"Child task\"`"
 	}
 	return fmt.Sprintf("- Parent-context recommendation: `%s` is an epic or already has child issues; keep implementation/subtask work in child issues with %s instead of accumulating detailed work on the parent. Do the child implementation from the child issue execution context: preferably a child session (%s) and at minimum the child worktree (`az worktree create <child-issue>`).\n", task.ID, commands, sessionCommands)

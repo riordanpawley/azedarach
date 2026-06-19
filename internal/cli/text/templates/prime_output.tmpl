@@ -8,7 +8,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
 - First 3 commands for this session:
   - {{ if .ActiveIssueID }}`az issue get {{ .ActiveIssueID }}`{{ else }}`az issue get <issue-id>`{{ end }}
   - {{ if .SpecEnabled }}{{ if .ActiveIssueID }}`az spec read --issue {{ .ActiveIssueID }}`{{ else }}`az spec read --issue <issue-id>`{{ end }} (inspect linked requirements before behavior changes){{ else }}Spec workflows are disabled for this project (skip spec checks).{{ end }}
-  - Optional (only when splitting work): {{ if .TmuxAvailable }}`az issue split "Child task"` to create an isolated child issue/session{{ else }}`az issue create "Child task"` to break the active issue into smaller, independently actionable chunks{{ end }}
+  - Optional child-work setup: {{ if .TmuxAvailable }}`az issue split "Child task"` launches isolated worker fanout; use `az issue create "Child task"` or `az issue bulk-create --input issues.json` for tracking-only child issues{{ else }}`az issue create "Child task"` creates tracking-only child issues; worker fanout needs tmux and `az issue split`{{ end }}
 {{ if .ImplementationSection }}{{ .ImplementationSection }}{{ end }}
 - How to use `az` command map:
   - Issue lifecycle:
@@ -17,6 +17,10 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Status semantics: use `open` for not-yet-active work, `in_progress` while actively working, `in_review` when implementation is complete and waiting for human/orchestrator review or integration, and `closed` only after acceptance/integration is complete.
   - Blocked is not an issue status. Represent blocked work with dependency edges (`az issue dep add <blocked-issue> <blocker-issue> --type blocks`) and record blocker evidence in issue notes or mailbox events.
   - `az issue bulk-create --input issues.json --json` (create many issues, epics, or nested `children` trees from JSON when shaping a graph up front), `az issue bulk-update --input updates.json --json`, `az issue update <issue-id> --design "..."`, `az issue update <issue-id> --notes "..."`, `az issue update <issue-id> --append-notes "..."`
+  - Child issue creation without worker launch:
+  - Batch planning/catalog fanout: `az issue bulk-create --input issues.json --json` with `parent_id` or nested `children` creates parented child issues without starting sessions or orchestration.
+  - Single tracking-only child: `az issue create "Child task" [--json]` auto-parents under `AZEDARACH_ISSUE_ID`; for another parent, create the issue and attach it with `az issue dep add <child-id> <parent-id> --type parent-child`.
+  - Worker fanout/session launch: `az issue split --parent <issue-id> "Child task"` can create the child and start orchestration/session work; use `az issue split` only when you intentionally want isolated worker fanout.
   - Issue dependency graph:
   - `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from|created-in] [--json]`, `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from|created-in] [--confirm] [--json]`
   - Issue graph/root membership comes only from auto-parenting with `AZEDARACH_ISSUE_ID` or explicit `parent-child` dependency edges. `--impl` is implementation metadata only; it never attaches an issue to a graph/root.
@@ -91,7 +95,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
 - Create follow-up/child work in the tracker instead of local TODOs.
 - Parent vs child issue scope:
   - Parent/epic issues describe the overarching goal, scope, and success criteria; keep their description high-level and stable.
-  - Track subtask goals, implementation steps, and nitty-gritty decisions in child issues created with `az issue create "Child task"`{{ if .TmuxAvailable }} or `az issue split "Child task"` when the child should launch immediately{{ end }}, not buried inside the parent's description or notes.
+  - Track subtask goals, implementation steps, and nitty-gritty decisions in child issues created with `az issue create "Child task"` for tracking-only child work{{ if .TmuxAvailable }} or `az issue split "Child task"` only when the child should launch immediately{{ end }}, not buried inside the parent's description or notes.
   - Atomic-merge test before using `--deferred`: ask "would the parent be correct and complete if it lands in the base branch without this new piece?" If no, the new piece must land with the parent — track it as a child issue (child issues are part of the parent's merge unit and land in the same base-branch commit) or fold it into the parent's commit; do not use `--deferred`. If yes, it can land separately and `--deferred` (or a standalone issue) is appropriate. `--deferred` only changes issue bookkeeping: it skips active-issue auto-parenting and defaults priority lower; do not use it to avoid, force, or reason about worktree/session creation.
   - When a new subtask surfaces mid-work, create a child issue immediately rather than expanding the parent's description; link extra dependencies with `az issue dep add` when needed.
 {{ if .ActiveIssueClosedWarning }}{{ .ActiveIssueClosedWarning }}
@@ -100,7 +104,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
 {{ end }}{{ if .QuestionFirstGuardrails }}{{ .QuestionFirstGuardrails }}
 {{ end }}- Follow-up and dependency rules:
   - Atomic-merge test before reaching for `--deferred`: if the parent would land incorrect or incomplete in the base branch without this new piece, the new piece is part of the parent's merge unit. Track it as a normal child issue (child issues land in the same base-branch commit as the parent) or include it in the parent's commit — never `--deferred`. Reserve `--deferred` for work that can land separately later.
-  - Create immediate child/blocking scope with `az issue create "Title"`; when `AZEDARACH_ISSUE_ID` is set this auto-creates a child issue under that parent.{{ if .TmuxAvailable }} Use `az issue split "Title"` when the child should also launch in its own az/tmux session/worktree.{{ end }}
+  - Create immediate child/blocking scope with `az issue create "Title"`; when `AZEDARACH_ISSUE_ID` is set this auto-creates a tracking-only child issue under that parent.{{ if .TmuxAvailable }} Use `az issue split "Title"` only when the child should also launch in its own az/tmux session/worktree.{{ end }}
   {{ if .TmuxAvailable }}- If the user names a root other than the active issue, first run `az issue get <intended-root>`, then create/link the child with a `parent-child` edge and verify with `az orchestrate status --root <intended-root> --json` before `az orchestrate start`.
   {{ else }}- If the user names a root other than the active issue, first run `az issue get <intended-root>`, then create/link the child with a `parent-child` edge before handing off or continuing work.
   {{ end }}
