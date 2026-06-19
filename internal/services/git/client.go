@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 var (
@@ -14,10 +16,14 @@ var (
 	diffStatDeletionsPattern  = regexp.MustCompile(`(\d+)\s+deletion(?:s)?\(-\)`)
 )
 
+const mergeCleanupTimeout = 15 * time.Second
+
 // Client provides high-level git operations.
 type Client struct {
-	runner CommandRunner
-	logger *slog.Logger
+	runner          CommandRunner
+	logger          *slog.Logger
+	worktreeLocksMu sync.Mutex
+	worktreeLocks   map[string]*worktreeLock
 }
 
 // GitStatus represents the status of a git repository.
@@ -175,9 +181,9 @@ func (c *Client) Merge(ctx context.Context, worktree, branch string) (*MergeResu
 }
 
 // MergeCleanly merges a branch and verifies the target worktree is clean after
-// a nominally successful merge. If post-merge hooks leave new dirty files after
-// starting from a clean target, those hook side effects are discarded and the
-// merge result is reported as unsuccessful so higher-level integration can halt
+// a merge attempt. If hooks or an interrupted merge leave new dirty files after
+// starting from a clean target, those side effects are discarded and the merge
+// result is reported as unsuccessful so higher-level integration can halt
 // without leaving the target branch dirty.
 func (c *Client) MergeCleanly(ctx context.Context, worktree, branch string) (*MergeResult, error) {
 	preStatus, preStatusErr := c.Status(ctx, worktree)
@@ -191,8 +197,14 @@ func (c *Client) MergeCleanly(ctx context.Context, worktree, branch string) (*Me
 	}
 
 	result, err := c.Merge(ctx, worktree, branch)
-	if err != nil || result == nil || !result.Success {
+	if err != nil {
+		return c.cleanFailedMergeSideEffects(ctx, worktree, branch, targetWasClean, preStatusErr, err)
+	}
+	if result == nil {
 		return result, err
+	}
+	if !result.Success {
+		return c.cleanUnsuccessfulMergeSideEffects(ctx, worktree, branch, targetWasClean, preStatusErr, result)
 	}
 
 	postStatus, err := c.Status(ctx, worktree)
@@ -222,6 +234,108 @@ func (c *Client) MergeCleanly(ctx context.Context, worktree, branch string) (*Me
 	result.Success = false
 	result.Message = appendMergeResultDetail(result.Message,
 		fmt.Sprintf("merge completed but target worktree was dirty after post-merge hooks; discarded post-merge changes: %s", dirtySummary))
+	return result, nil
+}
+
+func (c *Client) cleanUnsuccessfulMergeSideEffects(ctx context.Context, worktree, branch string, targetWasClean bool, preStatusErr error, result *MergeResult) (*MergeResult, error) {
+	if preStatusErr != nil {
+		return result, nil
+	}
+
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mergeCleanupTimeout)
+	defer cancel()
+
+	postStatus, statusErr := c.Status(cleanupCtx, worktree)
+	if statusErr != nil {
+		return nil, fmt.Errorf("inspect target status after unsuccessful merge: %w", statusErr)
+	}
+	if !gitStatusDirty(postStatus) {
+		return result, nil
+	}
+
+	dirtySummary := gitStatusSummary(postStatus)
+	if !targetWasClean {
+		result.Message = appendMergeResultDetail(result.Message,
+			fmt.Sprintf("merge was unsuccessful and target worktree is dirty; pre-merge status was not clean, leaving dirty files untouched: %s", dirtySummary))
+		return result, nil
+	}
+
+	if err := c.DiscardChanges(cleanupCtx, worktree); err != nil {
+		return nil, fmt.Errorf("merge was unsuccessful and target worktree is dirty (%s); failed to discard partial merge changes: %w", dirtySummary, err)
+	}
+	c.logger.Warn("unsuccessful merge left target dirty; discarded partial merge changes",
+		"worktree", worktree,
+		"branch", branch,
+		"status", dirtySummary,
+		"has_conflicts", result.HasConflicts,
+	)
+	result.Message = appendMergeResultDetail(result.Message,
+		fmt.Sprintf("merge was unsuccessful after dirtying target worktree; discarded partial merge changes: %s", dirtySummary))
+	return result, nil
+}
+
+func (c *Client) cleanFailedMergeSideEffects(ctx context.Context, worktree, branch string, targetWasClean bool, preStatusErr error, mergeErr error) (*MergeResult, error) {
+	if preStatusErr != nil {
+		return nil, mergeErr
+	}
+
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mergeCleanupTimeout)
+	defer cancel()
+
+	abortedIncompleteMerge := false
+	if c.mergeInProgress(cleanupCtx, worktree) {
+		if abortErr := c.AbortMerge(cleanupCtx, worktree); abortErr != nil {
+			return nil, fmt.Errorf("merge failed (%v); failed to abort incomplete merge during cleanup: %w", mergeErr, abortErr)
+		}
+		abortedIncompleteMerge = true
+	}
+
+	postStatus, statusErr := c.Status(cleanupCtx, worktree)
+	if statusErr != nil {
+		return nil, fmt.Errorf("merge failed (%v); inspect target status after failed merge: %w", mergeErr, statusErr)
+	}
+	if !gitStatusDirty(postStatus) {
+		if abortedIncompleteMerge {
+			return &MergeResult{
+				Success:      false,
+				HasConflicts: false,
+				Message: appendMergeResultDetail(
+					strings.TrimSpace(mergeErr.Error()),
+					"merge command failed with an incomplete merge in progress; aborted incomplete merge during cleanup",
+				),
+			}, nil
+		}
+		return nil, mergeErr
+	}
+
+	dirtySummary := gitStatusSummary(postStatus)
+	result := &MergeResult{
+		Success:      false,
+		HasConflicts: false,
+		Message:      strings.TrimSpace(mergeErr.Error()),
+	}
+	if !targetWasClean {
+		result.Message = appendMergeResultDetail(result.Message,
+			fmt.Sprintf("merge command failed and target worktree is dirty; pre-merge status was not clean, leaving dirty files untouched: %s", dirtySummary))
+		return result, nil
+	}
+
+	if err := c.DiscardChanges(cleanupCtx, worktree); err != nil {
+		return nil, fmt.Errorf("merge failed and target worktree is dirty (%s); failed to discard partial merge changes: %w", dirtySummary, err)
+	}
+	c.logger.Warn("failed merge left target dirty; discarded partial merge changes",
+		"worktree", worktree,
+		"branch", branch,
+		"status", dirtySummary,
+		"merge_error", mergeErr,
+		"aborted_incomplete_merge", abortedIncompleteMerge,
+	)
+	detail := "merge command failed after dirtying target worktree; discarded partial merge changes"
+	if abortedIncompleteMerge {
+		detail = "merge command failed with an incomplete merge in progress; aborted incomplete merge and discarded partial merge changes"
+	}
+	result.Message = appendMergeResultDetail(result.Message,
+		fmt.Sprintf("%s: %s", detail, dirtySummary))
 	return result, nil
 }
 

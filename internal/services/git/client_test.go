@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // mockRunner is a test implementation of CommandRunner.
@@ -25,6 +26,29 @@ func (m *mockRunner) Run(ctx context.Context, args ...string) (string, error) {
 		return m.runFunc(ctx, args...)
 	}
 	return "", nil
+}
+
+type rawMockRunner struct {
+	runFunc func(ctx context.Context, args ...string) (string, error)
+}
+
+func (m *rawMockRunner) Run(ctx context.Context, args ...string) (string, error) {
+	if m.runFunc != nil {
+		return m.runFunc(ctx, args...)
+	}
+	return "", nil
+}
+
+func clientTestArgsForWorktree(args []string, worktree string, want ...string) bool {
+	if len(args) != len(want)+2 || args[0] != "-C" || args[1] != worktree {
+		return false
+	}
+	for i, part := range want {
+		if args[i+2] != part {
+			return false
+		}
+	}
+	return true
 }
 
 func initDivergedRepo(t *testing.T) string {
@@ -65,6 +89,18 @@ func runClientTestGit(t *testing.T, dir string, args ...string) {
 	if err != nil {
 		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 	}
+}
+
+func runClientTestGitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func TestStatus(t *testing.T) {
@@ -444,6 +480,436 @@ func TestMergeCleanlyDiscardsDirtyPostMergeHookAndReportsFailure(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(repo, "hook-created.txt")); !os.IsNotExist(err) {
 		t.Fatalf("hook-created.txt stat err = %v, want removed", err)
 	}
+}
+
+func TestMergeCleanlyDiscardsDirtyCommitMsgHookAfterAbort(t *testing.T) {
+	repo := initDivergedRepo(t)
+	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
+	hook := "#!/bin/sh\nprintf hook-dirty\\n > hook-created.txt\necho commit-msg hook dirtied target >&2\nexit 1\n"
+	if err := os.WriteFile(hookPath, []byte(hook), 0o755); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	result, err := client.MergeCleanly(context.Background(), repo, "feature")
+	if err != nil {
+		t.Fatalf("MergeCleanly() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("MergeCleanly() result = nil")
+	}
+	if result.Success {
+		t.Fatalf("MergeCleanly() result = %+v, want commit-msg dirty failure", result)
+	}
+	if !strings.Contains(result.Message, "commit-msg hook dirtied target") ||
+		!strings.Contains(result.Message, "discarded partial merge changes") ||
+		!strings.Contains(result.Message, "hook-created.txt") {
+		t.Fatalf("MergeCleanly() message = %q, want commit-msg cleanup detail", result.Message)
+	}
+
+	status, err := client.Status(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if status.HasChanges {
+		t.Fatalf("status = %+v, want clean after discarded commit-msg hook changes", status)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "hook-created.txt")); !os.IsNotExist(err) {
+		t.Fatalf("hook-created.txt stat err = %v, want removed", err)
+	}
+}
+
+func TestMergeCleanlyTransactionalAppliesScratchMergeToCleanTarget(t *testing.T) {
+	repo := initDivergedRepo(t)
+	originalHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	result, err := client.MergeCleanlyTransactional(context.Background(), repo, "feature")
+	if err != nil {
+		t.Fatalf("MergeCleanlyTransactional() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("MergeCleanlyTransactional() result = nil")
+	}
+	if !result.Success {
+		t.Fatalf("MergeCleanlyTransactional() result = %+v, want success", result)
+	}
+	if head := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); head == originalHead {
+		t.Fatalf("HEAD = %s, want transactional merge to advance target", head)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "feature.txt")); err != nil {
+		t.Fatalf("feature.txt stat err = %v, want merged file in target", err)
+	}
+
+	status, err := client.Status(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if status.HasChanges {
+		t.Fatalf("status = %+v, want clean target after transactional merge", status)
+	}
+	if worktrees := runClientTestGitOutput(t, repo, "worktree", "list", "--porcelain"); strings.Contains(worktrees, "azedarach-integration-") {
+		t.Fatalf("worktree list contains scratch integration worktree after cleanup:\n%s", worktrees)
+	}
+}
+
+func TestMergeCleanlyTransactionalKeepsTargetCleanWhenScratchMergeHookFails(t *testing.T) {
+	repo := initDivergedRepo(t)
+	originalHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
+	hook := "#!/bin/sh\nprintf hook-dirty\\n > hook-created.txt\necho commit-msg hook dirtied scratch >&2\nexit 1\n"
+	if err := os.WriteFile(hookPath, []byte(hook), 0o755); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	result, err := client.MergeCleanlyTransactional(context.Background(), repo, "feature")
+	if err != nil {
+		t.Fatalf("MergeCleanlyTransactional() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("MergeCleanlyTransactional() result = nil")
+	}
+	if result.Success {
+		t.Fatalf("MergeCleanlyTransactional() result = %+v, want hook failure", result)
+	}
+	if !strings.Contains(result.Message, "commit-msg hook dirtied scratch") ||
+		!strings.Contains(result.Message, "discarded partial merge changes") {
+		t.Fatalf("MergeCleanlyTransactional() message = %q, want scratch hook cleanup detail", result.Message)
+	}
+	if head := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); head != originalHead {
+		t.Fatalf("HEAD = %s, want target unchanged at %s", head, originalHead)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "feature.txt")); !os.IsNotExist(err) {
+		t.Fatalf("feature.txt stat err = %v, want target untouched", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "hook-created.txt")); !os.IsNotExist(err) {
+		t.Fatalf("hook-created.txt stat err = %v, want scratch hook output isolated from target", err)
+	}
+
+	status, err := client.Status(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if status.HasChanges {
+		t.Fatalf("status = %+v, want clean target after scratch merge failure", status)
+	}
+}
+
+func TestRecoverIntegrationJournalCompletesInterruptedFinalReset(t *testing.T) {
+	repo := initDivergedRepo(t)
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	ctx := context.Background()
+	targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+	tree := runClientTestGitOutput(t, repo, "merge-tree", "--write-tree", targetHead, "feature")
+	desiredHead := runClientTestGitOutput(t, repo, "commit-tree", tree, "-p", targetHead, "-p", "feature", "-m", "scratch merge")
+
+	if err := client.writeIntegrationJournal(ctx, repo, integrationJournal{
+		Version:        integrationJournalVersion,
+		TargetWorktree: repo,
+		TargetHead:     targetHead,
+		DesiredHead:    desiredHead,
+		StartedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("writeIntegrationJournal() error = %v", err)
+	}
+	runClientTestGit(t, repo, "reset", "--soft", desiredHead)
+	if status, err := client.Status(ctx, repo); err != nil {
+		t.Fatalf("Status() before recovery error = %v", err)
+	} else if !status.HasChanges {
+		t.Fatalf("status before recovery = %+v, want simulated interrupted reset to look dirty", status)
+	}
+
+	if err := client.RecoverIntegrationJournal(ctx, repo); err != nil {
+		t.Fatalf("RecoverIntegrationJournal() error = %v", err)
+	}
+	if head := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); head != desiredHead {
+		t.Fatalf("HEAD = %s, want recovered desired head %s", head, desiredHead)
+	}
+	status, err := client.Status(ctx, repo)
+	if err != nil {
+		t.Fatalf("Status() after recovery error = %v", err)
+	}
+	if status.HasChanges {
+		t.Fatalf("status after recovery = %+v, want clean target", status)
+	}
+	journalPath, err := client.integrationJournalPath(ctx, repo)
+	if err != nil {
+		t.Fatalf("integrationJournalPath() error = %v", err)
+	}
+	if _, err := os.Stat(journalPath); !os.IsNotExist(err) {
+		t.Fatalf("journal stat err = %v, want removed", err)
+	}
+}
+
+func TestMergeCleanlyTransactionalRecoversDirtyFinalApplyAndRemovesJournal(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+
+	var scratchWorktree string
+	targetStatusReads := 0
+	scratchStatusReads := 0
+	runner := &rawMockRunner{runFunc: func(ctx context.Context, args ...string) (string, error) {
+		switch {
+		case clientTestArgsForWorktree(args, repo, "status", "--porcelain"):
+			targetStatusReads++
+			if targetStatusReads >= 3 {
+				return "?? user-created.txt\n", nil
+			}
+			return "", nil
+		case clientTestArgsForWorktree(args, repo, "rev-parse", "--verify", "HEAD"):
+			if targetStatusReads >= 3 {
+				return "desired-sha", nil
+			}
+			return "target-sha", nil
+		case clientTestArgsForWorktree(args, repo, "rev-parse", "--git-common-dir"):
+			return filepath.Join(repo, ".git"), nil
+		case len(args) >= 7 &&
+			args[0] == "-C" &&
+			args[1] == repo &&
+			args[2] == "worktree" &&
+			args[3] == "add" &&
+			args[4] == "--detach":
+			scratchWorktree = args[5]
+			if args[6] != "target-sha" {
+				t.Fatalf("worktree add ref = %q, want target-sha", args[6])
+			}
+			return "", nil
+		case scratchWorktree != "" && clientTestArgsForWorktree(args, scratchWorktree, "status", "--porcelain"):
+			scratchStatusReads++
+			return "", nil
+		case scratchWorktree != "" && clientTestArgsForWorktree(args, scratchWorktree, "merge", "--no-edit", "feature"):
+			return "Merge made by the 'ort' strategy.", nil
+		case scratchWorktree != "" && clientTestArgsForWorktree(args, scratchWorktree, "rev-parse", "--verify", "HEAD"):
+			return "desired-sha", nil
+		case clientTestArgsForWorktree(args, repo, "reset", "--hard", "desired-sha"):
+			return "", nil
+		case scratchWorktree != "" && clientTestArgsForWorktree(args, repo, "worktree", "remove", "--force", scratchWorktree):
+			return "", nil
+		default:
+			return "", fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
+		}
+	}}
+
+	client := NewClient(runner, slog.Default())
+	result, err := client.MergeCleanlyTransactional(context.Background(), repo, "feature")
+	if err != nil {
+		t.Fatalf("MergeCleanlyTransactional() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("MergeCleanlyTransactional() result = nil")
+	}
+	if result.Success {
+		t.Fatalf("MergeCleanlyTransactional() result = %+v, want dirty final apply failure", result)
+	}
+	if !strings.Contains(result.Message, "left target dirty after recovery") ||
+		!strings.Contains(result.Message, "user-created.txt") {
+		t.Fatalf("MergeCleanlyTransactional() message = %q, want recovery dirty detail", result.Message)
+	}
+	if scratchStatusReads != 3 {
+		t.Fatalf("scratch status reads = %d, want 3", scratchStatusReads)
+	}
+	journalPath, err := client.integrationJournalPath(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("integrationJournalPath() error = %v", err)
+	}
+	if _, err := os.Stat(journalPath); !os.IsNotExist(err) {
+		t.Fatalf("journal stat err = %v, want removed", err)
+	}
+}
+
+func TestClientWorktreeLockSerializesSameWorktree(t *testing.T) {
+	client := NewClient(&mockRunner{}, slog.Default())
+	ctx := context.Background()
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- client.WithWorktreeLock(ctx, "/tmp/same-worktree", func(context.Context) error {
+			close(firstEntered)
+			<-releaseFirst
+			return nil
+		})
+	}()
+	<-firstEntered
+
+	secondEntered := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- client.WithWorktreeLock(ctx, "/tmp/same-worktree", func(context.Context) error {
+			close(secondEntered)
+			return nil
+		})
+	}()
+
+	select {
+	case <-secondEntered:
+		t.Fatal("second lock entered while first lock was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first lock error = %v", err)
+	}
+	select {
+	case <-secondEntered:
+	case <-time.After(time.Second):
+		t.Fatal("second lock did not enter after first lock released")
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second lock error = %v", err)
+	}
+}
+
+func TestNormalizeWorktreeLockKeyCanonicalizesSymlink(t *testing.T) {
+	root := t.TempDir()
+	realPath := filepath.Join(root, "real")
+	if err := os.Mkdir(realPath, 0o755); err != nil {
+		t.Fatalf("mkdir real path: %v", err)
+	}
+	linkPath := filepath.Join(root, "link")
+	if err := os.Symlink(realPath, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	if got, want := normalizeWorktreeLockKey(linkPath), normalizeWorktreeLockKey(realPath); got != want {
+		t.Fatalf("normalizeWorktreeLockKey(link) = %q, want %q", got, want)
+	}
+}
+
+func TestMergeCleanlyDiscardsDirtyTargetAfterKilledMergeCommand(t *testing.T) {
+	var calls []string
+	statusCalls := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			calls = append(calls, strings.Join(args, " "))
+			switch {
+			case len(args) >= 2 && args[0] == "status" && args[1] == "--porcelain":
+				statusCalls++
+				if statusCalls == 1 {
+					return "", nil
+				}
+				if ctx.Err() != nil {
+					return "", fmt.Errorf("cleanup status used canceled context: %w", ctx.Err())
+				}
+				return "M  internal/tui/model.go\nM  internal/tui/model_daemonclient_test.go", nil
+			case len(args) >= 3 && args[0] == "merge" && args[1] == "--no-edit" && args[2] == "feature-branch":
+				cancel()
+				return "[gate] build+tests passed", fmt.Errorf("signal: killed")
+			case len(args) >= 4 && args[0] == "rev-parse" && args[1] == "-q" && args[2] == "--verify" && args[3] == "MERGE_HEAD":
+				return "", fmt.Errorf("exit status 1")
+			case len(args) >= 4 && args[0] == "restore" && args[1] == "--staged" && args[2] == "--worktree" && args[3] == ".":
+				if ctx.Err() != nil {
+					return "", fmt.Errorf("cleanup restore used canceled context: %w", ctx.Err())
+				}
+				return "", nil
+			case len(args) >= 2 && args[0] == "clean" && args[1] == "-fd":
+				if ctx.Err() != nil {
+					return "", fmt.Errorf("cleanup clean used canceled context: %w", ctx.Err())
+				}
+				return "", nil
+			default:
+				return "", fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
+			}
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	result, err := client.MergeCleanly(ctx, "/fake/worktree", "feature-branch")
+	if err != nil {
+		t.Fatalf("MergeCleanly() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("MergeCleanly() result = nil")
+	}
+	if result.Success {
+		t.Fatalf("MergeCleanly() result = %+v, want failed merge result", result)
+	}
+	if result.HasConflicts {
+		t.Fatalf("MergeCleanly() result = %+v, want non-conflict failure", result)
+	}
+	if !strings.Contains(result.Message, "signal: killed") ||
+		!strings.Contains(result.Message, "discarded partial merge changes") ||
+		!strings.Contains(result.Message, "internal/tui/model.go") ||
+		!strings.Contains(result.Message, "internal/tui/model_daemonclient_test.go") {
+		t.Fatalf("MergeCleanly() message = %q, want killed merge cleanup detail", result.Message)
+	}
+	compareStringSlices(t, "calls", calls, []string{
+		"status --porcelain",
+		"merge --no-edit feature-branch",
+		"rev-parse -q --verify MERGE_HEAD",
+		"rev-parse -q --verify MERGE_HEAD",
+		"status --porcelain",
+		"restore --staged --worktree .",
+		"clean -fd",
+	})
+}
+
+func TestMergeCleanlyAbortsIncompleteMergeWithDetachedCleanupContext(t *testing.T) {
+	var calls []string
+	ctx, cancel := context.WithCancel(context.Background())
+	mergeHeadChecks := 0
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			calls = append(calls, strings.Join(args, " "))
+			switch {
+			case len(args) >= 2 && args[0] == "status" && args[1] == "--porcelain":
+				if ctx.Err() != nil {
+					return "", fmt.Errorf("cleanup status used canceled context: %w", ctx.Err())
+				}
+				return "", nil
+			case len(args) >= 3 && args[0] == "merge" && args[1] == "--no-edit" && args[2] == "feature-branch":
+				cancel()
+				return "[gate] running test check", fmt.Errorf("signal: killed")
+			case len(args) >= 4 && args[0] == "rev-parse" && args[1] == "-q" && args[2] == "--verify" && args[3] == "MERGE_HEAD":
+				mergeHeadChecks++
+				if mergeHeadChecks == 1 {
+					if ctx.Err() == nil {
+						return "", fmt.Errorf("initial merge probe should use canceled context")
+					}
+					return "", ctx.Err()
+				}
+				if ctx.Err() != nil {
+					return "", fmt.Errorf("cleanup merge probe used canceled context: %w", ctx.Err())
+				}
+				return "abcdef", nil
+			case len(args) >= 2 && args[0] == "merge" && args[1] == "--abort":
+				if ctx.Err() != nil {
+					return "", fmt.Errorf("cleanup abort used canceled context: %w", ctx.Err())
+				}
+				return "", nil
+			default:
+				return "", fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
+			}
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	result, err := client.MergeCleanly(ctx, "/fake/worktree", "feature-branch")
+	if err != nil {
+		t.Fatalf("MergeCleanly() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("MergeCleanly() result = nil")
+	}
+	if result.Success || result.HasConflicts {
+		t.Fatalf("MergeCleanly() result = %+v, want non-conflict failure", result)
+	}
+	if !strings.Contains(result.Message, "signal: killed") ||
+		!strings.Contains(result.Message, "aborted incomplete merge during cleanup") {
+		t.Fatalf("MergeCleanly() message = %q, want detached abort cleanup detail", result.Message)
+	}
+	compareStringSlices(t, "calls", calls, []string{
+		"status --porcelain",
+		"merge --no-edit feature-branch",
+		"rev-parse -q --verify MERGE_HEAD",
+		"rev-parse -q --verify MERGE_HEAD",
+		"merge --abort",
+		"status --porcelain",
+	})
 }
 
 func TestAbortMerge(t *testing.T) {
