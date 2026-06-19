@@ -89,8 +89,12 @@ func (a *gitServiceAdapter) Fetch(ctx context.Context, projectID, worktree, remo
 }
 
 func (a *gitServiceAdapter) Merge(ctx context.Context, projectID, worktree, branch string) (*git.MergeResult, error) {
-	result, err := a.client.MergeCleanly(ctx, worktree, branch)
-	if err != nil {
+	var result *git.MergeResult
+	if err := a.client.WithWorktreeLock(ctx, worktree, func(ctx context.Context) error {
+		var err error
+		result, err = a.client.MergeCleanlyTransactional(ctx, worktree, branch)
+		return err
+	}); err != nil {
 		return nil, err
 	}
 	// Merge completion should always trigger an update notification so clients
@@ -100,7 +104,9 @@ func (a *gitServiceAdapter) Merge(ctx context.Context, projectID, worktree, bran
 }
 
 func (a *gitServiceAdapter) Checkout(ctx context.Context, projectID, worktree, branch string) error {
-	if err := a.client.Checkout(ctx, worktree, branch); err != nil {
+	if err := a.client.WithWorktreeLock(ctx, worktree, func(ctx context.Context) error {
+		return a.client.Checkout(ctx, worktree, branch)
+	}); err != nil {
 		return err
 	}
 	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, false)
@@ -112,7 +118,9 @@ func (a *gitServiceAdapter) WorktreePathForBranch(ctx context.Context, _ string,
 }
 
 func (a *gitServiceAdapter) AbortMerge(ctx context.Context, projectID, worktree string) error {
-	if err := a.client.AbortMerge(ctx, worktree); err != nil {
+	if err := a.client.WithWorktreeLock(ctx, worktree, func(ctx context.Context) error {
+		return a.client.AbortMerge(ctx, worktree)
+	}); err != nil {
 		return err
 	}
 	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, false)
@@ -160,7 +168,9 @@ func (a *gitServiceAdapter) MergePreflight(ctx context.Context, _ string, req da
 }
 
 func (a *gitServiceAdapter) DiscardChanges(ctx context.Context, projectID, worktree string) (*daemonhandlers.GitDiscardChangesResult, error) {
-	if err := a.client.DiscardChanges(ctx, worktree); err != nil {
+	if err := a.client.WithWorktreeLock(ctx, worktree, func(ctx context.Context) error {
+		return a.client.DiscardChanges(ctx, worktree)
+	}); err != nil {
 		return nil, err
 	}
 	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, false)
@@ -168,7 +178,9 @@ func (a *gitServiceAdapter) DiscardChanges(ctx context.Context, projectID, workt
 }
 
 func (a *gitServiceAdapter) Checkpoint(ctx context.Context, projectID string, req daemonhandlers.GitCheckpointRequest) (*daemonhandlers.GitCheckpointResult, error) {
-	if err := a.client.CreateCheckpoint(ctx, req.Worktree, req.Message); err != nil {
+	if err := a.client.WithWorktreeLock(ctx, req.Worktree, func(ctx context.Context) error {
+		return a.client.CreateCheckpoint(ctx, req.Worktree, req.Message)
+	}); err != nil {
 		return nil, err
 	}
 	a.refreshGitStatusWriteThrough(ctx, projectID, req.Worktree, true, false)
@@ -540,6 +552,15 @@ func (a *gitServiceAdapter) refreshGitStatusWriteThrough(ctx context.Context, pr
 func (a *gitServiceAdapter) refreshGitStatusWriteThroughResult(ctx context.Context, projectID, worktree string, publishOnChange, forcePublish bool) (*git.GitStatus, error) {
 	projectID = normalizeProjectID(projectID)
 	baseBranch := a.resolvedBaseBranchForWorktree(ctx, projectID, worktree)
+	if err := a.client.WithWorktreeLock(ctx, worktree, func(ctx context.Context) error {
+		return a.client.RecoverIntegrationJournal(ctx, worktree)
+	}); err != nil && a.logger != nil {
+		a.logger.Warn("failed to recover interrupted transactional integration before status refresh",
+			"project_id", projectID,
+			"worktree", worktree,
+			"error", err,
+		)
+	}
 
 	var (
 		status *git.GitStatus

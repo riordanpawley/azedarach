@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,8 +20,10 @@ const mergeCleanupTimeout = 15 * time.Second
 
 // Client provides high-level git operations.
 type Client struct {
-	runner CommandRunner
-	logger *slog.Logger
+	runner          CommandRunner
+	logger          *slog.Logger
+	worktreeLocksMu sync.Mutex
+	worktreeLocks   map[string]*worktreeLock
 }
 
 // GitStatus represents the status of a git repository.

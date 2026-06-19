@@ -2111,6 +2111,7 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 
 	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
 	commands := make([]string, 0, 12)
+	var scratchWorktree string
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		commands = append(commands, strings.Join(args, " "))
 		switch {
@@ -2118,6 +2119,12 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 			return worktreeListOutput, nil
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
 			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
+			return filepath.Join(repoDir, ".git"), nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
+			return "target-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
+			return "merged-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "merge-base":
 			return "base-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff" && slices.Contains(args, "--name-status"):
@@ -2132,9 +2139,14 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 			return "", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "checkout":
 			return "", nil
-		case len(args) >= 5 && args[0] == "-C" && args[2] == "merge":
+		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "worktree" && args[3] == "add":
+			scratchWorktree = args[5]
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "merge":
 			return "merge complete", nil
-		case len(args) >= 3 && args[0] == "worktree" && args[1] == "remove":
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "reset" && args[3] == "--hard":
+			return "", nil
+		case len(args) >= 6 && args[0] == "-C" && args[1] == repoDir && args[2] == "worktree" && args[3] == "remove":
 			return "", nil
 		default:
 			return "", nil
@@ -2214,7 +2226,9 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 		"-C " + repoDir + " merge-tree --write-tree main " + sourceBranch,
 		"-C " + repoDir + " fetch origin",
 		"-C " + repoDir + " checkout main",
-		"-C " + repoDir + " merge --no-edit " + sourceBranch,
+		"-C " + repoDir + " worktree add --detach ",
+		"merge --no-edit " + sourceBranch,
+		"-C " + repoDir + " reset --hard merged-sha",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("git commands missing %q:\n%s", want, joined)
@@ -2222,7 +2236,7 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	}
 }
 
-func TestTaskCloseCommandCleansPostMergeDirtyTargetAndHalts(t *testing.T) {
+func TestTaskCloseCommandKeepsTargetCleanWhenScratchMergeDirties(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	projectID := "proj-close-integrate-post-merge-dirty"
@@ -2256,7 +2270,8 @@ func TestTaskCloseCommandCleansPostMergeDirtyTargetAndHalts(t *testing.T) {
 
 	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
 	commands := make([]string, 0, 16)
-	targetStatusReads := 0
+	var scratchWorktree string
+	scratchStatusReads := 0
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		commands = append(commands, strings.Join(args, " "))
 		switch {
@@ -2265,11 +2280,19 @@ func TestTaskCloseCommandCleansPostMergeDirtyTargetAndHalts(t *testing.T) {
 		case len(args) >= 4 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "status":
 			return "", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "status":
-			targetStatusReads++
-			if targetStatusReads >= 4 {
+			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "status":
+			scratchStatusReads++
+			if scratchStatusReads >= 2 {
 				return "A  hook-created.txt\n", nil
 			}
 			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
+			return filepath.Join(repoDir, ".git"), nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
+			return "target-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "-q" && args[4] == "--verify":
+			return "", fmt.Errorf("no merge head")
 		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "merge-base":
 			return "base-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "diff" && slices.Contains(args, "--name-status"):
@@ -2284,11 +2307,16 @@ func TestTaskCloseCommandCleansPostMergeDirtyTargetAndHalts(t *testing.T) {
 			return "", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "checkout":
 			return "", nil
-		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "merge":
-			return "Merge made by the 'ort' strategy.", nil
-		case len(args) >= 6 && args[0] == "-C" && args[1] == repoDir && args[2] == "restore":
+		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "worktree" && args[3] == "add":
+			scratchWorktree = args[5]
 			return "", nil
-		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "clean":
+		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "merge":
+			return "Merge made by the 'ort' strategy.", nil
+		case len(args) >= 6 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "restore":
+			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "clean":
+			return "", nil
+		case len(args) >= 6 && args[0] == "-C" && args[1] == repoDir && args[2] == "worktree" && args[3] == "remove":
 			return "", nil
 		default:
 			t.Fatalf("unexpected git args: %v", args)
@@ -2360,16 +2388,17 @@ func TestTaskCloseCommandCleansPostMergeDirtyTargetAndHalts(t *testing.T) {
 	}
 	joined := strings.Join(commands, "\n")
 	for _, want := range []string{
-		"-C " + repoDir + " merge --no-edit " + sourceBranch,
-		"-C " + repoDir + " restore --staged --worktree .",
-		"-C " + repoDir + " clean -fd",
+		"-C " + repoDir + " worktree add --detach ",
+		"merge --no-edit " + sourceBranch,
+		"restore --staged --worktree .",
+		"clean -fd",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("git commands missing %q:\n%s", want, joined)
 		}
 	}
-	if strings.Contains(joined, "worktree remove") {
-		t.Fatalf("source worktree should not be removed after failed integration:\n%s", joined)
+	if strings.Contains(joined, "-C "+repoDir+" reset --hard") {
+		t.Fatalf("target should not be reset after scratch merge failure:\n%s", joined)
 	}
 }
 
