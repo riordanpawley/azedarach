@@ -61,6 +61,7 @@ const (
 	eventTickerCapacity            = 64
 	eventLogCapacity               = 256
 	eventSummaryMaxRunes           = 140
+	taskCloseMutationTimeout       = 2 * time.Minute
 	worktreeCleanupMutationTimeout = 2 * time.Minute
 	orphanedWorktreeCleanupTimeout = 2 * time.Minute
 )
@@ -3922,9 +3923,6 @@ type helixOpenResultMsg struct {
 // fetchAndMergeCmd fetches and merges from the specified branch
 func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
 		statusOrder := []domain.Status{
 			domain.StatusOpen,
 			domain.StatusInProgress,
@@ -3974,18 +3972,7 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 
 			newStatus := statusOrder[newIdx]
 
-			// Update via daemon client
-			if m.daemonClient == nil {
-				failed++
-				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "daemon client unavailable"})
-				continue
-			}
-			var err error
-			if newStatus == domain.StatusDone {
-				err = m.closeTaskWithIntegrationAndCleanup(ctx, taskID)
-			} else {
-				err = m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, newStatus, taskStatusOptionsForStatus(newStatus))
-			}
+			err := m.updateTaskStatusWithTimeout(taskID, newStatus, 10*time.Second)
 			if err != nil {
 				failed++
 				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: err.Error()})
@@ -4191,9 +4178,6 @@ func (m Model) bulkCleanupPreflightCmd(taskIDs []string, deleteTask bool) tea.Cm
 // bulkSetStatusCmd sets all selected tasks to a specific status
 func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
 		updated := 0
 		failed := 0
 		issues := make([]bulkTaskIssue, 0)
@@ -4203,17 +4187,7 @@ func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd 
 				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "task not found"})
 				continue
 			}
-			if m.daemonClient == nil {
-				failed++
-				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "daemon client unavailable"})
-				continue
-			}
-			var err error
-			if status == domain.StatusDone {
-				err = m.closeTaskWithIntegrationAndCleanup(ctx, taskID)
-			} else {
-				err = m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, status, taskStatusOptionsForStatus(status))
-			}
+			err := m.updateTaskStatusWithTimeout(taskID, status, 10*time.Second)
 			if err != nil {
 				failed++
 				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: err.Error()})
@@ -4404,24 +4378,7 @@ type taskStatusResultMsg struct {
 // moveTaskStatusCmd updates a single task's status.
 func (m Model) moveTaskStatusCmd(taskID string, previousStatus, newStatus domain.Status) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		// Update via daemon client
-		if m.daemonClient == nil {
-			return taskStatusResultMsg{
-				taskID:         taskID,
-				previousStatus: previousStatus,
-				newStatus:      newStatus,
-				err:            fmt.Errorf("daemon client unavailable"),
-			}
-		}
-		var err error
-		if newStatus == domain.StatusDone {
-			err = m.closeTaskWithIntegrationAndCleanup(ctx, taskID)
-		} else {
-			err = m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, newStatus, taskStatusOptionsForStatus(newStatus))
-		}
+		err := m.updateTaskStatusWithTimeout(taskID, newStatus, 5*time.Second)
 		if err != nil {
 			return taskStatusResultMsg{
 				taskID:         taskID,
@@ -4437,6 +4394,25 @@ func (m Model) moveTaskStatusCmd(taskID string, previousStatus, newStatus domain
 			newStatus:      newStatus,
 		}
 	}
+}
+
+func (m Model) updateTaskStatusWithTimeout(taskID string, status domain.Status, defaultTimeout time.Duration) error {
+	if m.daemonClient == nil {
+		return fmt.Errorf("daemon client unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), taskStatusMutationTimeout(status, defaultTimeout))
+	defer cancel()
+	if status == domain.StatusDone {
+		return m.closeTaskWithIntegrationAndCleanup(ctx, taskID)
+	}
+	return m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, status, taskStatusOptionsForStatus(status))
+}
+
+func taskStatusMutationTimeout(status domain.Status, defaultTimeout time.Duration) time.Duration {
+	if status == domain.StatusDone {
+		return taskCloseMutationTimeout
+	}
+	return defaultTimeout
 }
 
 func shiftedTaskStatus(current domain.Status, delta int) (domain.Status, bool) {

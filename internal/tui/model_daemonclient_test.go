@@ -1157,6 +1157,46 @@ func TestTaskStatusDoneRequiresCloseCleanupConfirmation(t *testing.T) {
 	}
 }
 
+func TestTaskStatusDoneUsesExtendedCloseTimeout(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskClose {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskClose)
+			}
+			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
+				TaskID: "az-4",
+				Status: string(domain.StatusDone),
+			})
+			if err != nil {
+				t.Fatalf("marshal close response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+
+	msg := m.moveTaskStatusCmd("az-4", domain.StatusInReview, domain.StatusDone)()
+	status, ok := msg.(taskStatusResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want taskStatusResultMsg", msg)
+	}
+	if status.err != nil {
+		t.Fatalf("status err = %v", status.err)
+	}
+	if len(transport.commandBudgets) != 1 {
+		t.Fatalf("command budget count = %d, want 1", len(transport.commandBudgets))
+	}
+	if got := transport.commandBudgets[0]; got < taskCloseMutationTimeout-10*time.Second {
+		t.Fatalf("close timeout budget = %s, want near %s", got, taskCloseMutationTimeout)
+	}
+}
+
 func TestTaskStatusDoneSuccessKeepsOptimisticOverlayAcrossStaleHydration(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -9317,6 +9357,14 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 			transport.requests[3] != daemonclient.CommandTaskDelete ||
 			transport.requests[4] != daemonclient.CommandTaskArchive {
 			t.Fatalf("requests = %v", transport.requests)
+		}
+		if got := len(transport.commandBudgets); got != 5 {
+			t.Fatalf("command budget count = %d, want 5", got)
+		}
+		for i := 0; i < 2; i++ {
+			if budget := transport.commandBudgets[i]; budget < taskCloseMutationTimeout-10*time.Second {
+				t.Fatalf("close command budget[%d] = %s, want near %s", i, budget, taskCloseMutationTimeout)
+			}
 		}
 	})
 
