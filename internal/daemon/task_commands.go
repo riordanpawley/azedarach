@@ -1551,7 +1551,7 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("checkout target branch before close integration: %w", err)
 		}
 	}
-	merge, err := d.git.Merge(ctx, targetWorktree, source.Branch)
+	merge, err := d.git.MergeCleanly(ctx, targetWorktree, source.Branch)
 	if err != nil {
 		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge %s into %s: %w", source.Branch, targetBranch, err)
 	}
