@@ -553,10 +553,24 @@ func TestSessionStartRecoversFromPartialWorktreeCreate(t *testing.T) {
 	if !strings.Contains(payload.Output, "Worktree setup warning:") {
 		t.Fatalf("output = %q, want recovered worktree warning", payload.Output)
 	}
-	if tmuxRunner.sendKeysCalls != 1 {
-		t.Fatalf("send-keys calls = %d, want 1", tmuxRunner.sendKeysCalls)
-	}
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	if tmuxRunner.sendKeysCalls != 2 {
+		t.Fatalf("send-keys calls = %d, want context export and launch", tmuxRunner.sendKeysCalls)
+	}
+	contextExport := tmuxRunner.sendKeysPayloads[0]
+	for _, want := range []string{
+		"export ",
+		"AZEDARACH_PROJECT_ID='" + projectID + "'",
+		"AZEDARACH_ISSUE_ID='" + issueID + "'",
+		"AZEDARACH_SESSION_ID='" + sessionID + "'",
+	} {
+		if !strings.Contains(contextExport, want) {
+			t.Fatalf("context export = %q, want %q", contextExport, want)
+		}
+	}
+	if !strings.Contains(tmuxRunner.sendKeysPayloads[1], `AZEDARACH_ISSUE_ID="`+issueID+`" codex`) {
+		t.Fatalf("launch payload = %q, want codex launch with issue env", tmuxRunner.sendKeysPayloads[1])
+	}
 	if got := tmuxRunner.env[sessionID]["AZEDARACH_PROJECT_ID"]; got != projectID {
 		t.Fatalf("tmux AZEDARACH_PROJECT_ID = %q, want %q", got, projectID)
 	}
@@ -565,6 +579,109 @@ func TestSessionStartRecoversFromPartialWorktreeCreate(t *testing.T) {
 	}
 	if got := tmuxRunner.env[sessionID]["AZEDARACH_SESSION_ID"]; got != sessionID {
 		t.Fatalf("tmux AZEDARACH_SESSION_ID = %q, want %q", got, sessionID)
+	}
+}
+
+func TestSessionStartWithoutAgentExportsContextToLiveShell(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Shell only session",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	worktreeRunner := &recoveringWorktreeRunner{
+		worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID),
+		branchName:   "testuser/" + issueID + "/shell-only-session",
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			Logger:       slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-shell-only-context",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.start",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body: marshalJSON(map[string]any{
+			"project_id": projectID,
+			"session_id": issueID,
+			"start_work": false,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("session start response not OK: %+v", resp)
+	}
+
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	if tmuxRunner.sendKeysCalls != 1 {
+		t.Fatalf("send-keys calls = %d, want one live-shell context export", tmuxRunner.sendKeysCalls)
+	}
+	if got := tmuxRunner.sendKeysTargets[0]; got != sessionID {
+		t.Fatalf("send-keys target = %q, want %q", got, sessionID)
+	}
+	contextExport := tmuxRunner.sendKeysPayloads[0]
+	for _, want := range []string{
+		"export ",
+		"AZEDARACH_PROJECT_ID='" + projectID + "'",
+		"AZEDARACH_ISSUE_ID='" + issueID + "'",
+		"AZEDARACH_SESSION_ID='" + sessionID + "'",
+	} {
+		if !strings.Contains(contextExport, want) {
+			t.Fatalf("context export = %q, want %q", contextExport, want)
+		}
+	}
+	if strings.Contains(contextExport, " codex") {
+		t.Fatalf("context export = %q, shell-only start must not launch codex", contextExport)
+	}
+	for key, want := range map[string]string{
+		"AZEDARACH_PROJECT_ID": projectID,
+		"AZEDARACH_ISSUE_ID":   issueID,
+		"AZEDARACH_SESSION_ID": sessionID,
+	} {
+		if got := tmuxRunner.env[sessionID][key]; got != want {
+			t.Fatalf("tmux %s = %q, want %q", key, got, want)
+		}
+	}
+
+	snapshot := store.ReadSnapshot(projectID)
+	if _, ok := snapshot.Sessions[sessionID]; !ok {
+		t.Fatalf("missing session %q in snapshot: %+v", sessionID, snapshot.Sessions)
 	}
 }
 
@@ -671,13 +788,20 @@ func TestSessionStartReportsFailedStartCleanupFailures(t *testing.T) {
 			startWork:         false,
 			sendKeysErr:       errors.New("env export failed"),
 			sendKeysErrOnCall: 1,
+			wantPrimary:       "export session context env",
+		},
+		{
+			name:              "issue resource env export failure",
+			startWork:         false,
+			sendKeysErr:       errors.New("env export failed"),
+			sendKeysErrOnCall: 2,
 			wantPrimary:       "export issue resource env",
 		},
 		{
 			name:              "launch failure",
 			startWork:         true,
 			sendKeysErr:       errors.New("launch failed"),
-			sendKeysErrOnCall: 2,
+			sendKeysErrOnCall: 3,
 			wantPrimary:       "launch failed",
 		},
 	}
@@ -987,7 +1111,7 @@ func TestSessionStartWaitsForInitReadyMarkerBeforeCompleting(t *testing.T) {
 	if !strings.Contains(payload.Output, "Session init commands finished: 1 command(s)") {
 		t.Fatalf("output = %q, want init command completion line", payload.Output)
 	}
-	if len(tmuxRunner.sendKeysPayloads) != 1 || !strings.Contains(tmuxRunner.sendKeysPayloads[0], filepath.ToSlash(sessionInitReadyMarkerPath(issueID, sessionID))) {
+	if len(tmuxRunner.sendKeysPayloads) != 2 || !strings.Contains(tmuxRunner.sendKeysPayloads[1], filepath.ToSlash(sessionInitReadyMarkerPath(issueID, sessionID))) {
 		t.Fatalf("sendKeysPayloads = %+v, want init marker path", tmuxRunner.sendKeysPayloads)
 	}
 }
@@ -1069,8 +1193,22 @@ func TestSessionStartWithStartWorkFalseSkipsLaunchCommand(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("session start response not OK: %+v", resp)
 	}
-	if tmuxRunner.sendKeysCalls != 0 {
-		t.Fatalf("send-keys calls = %d, want 0 when start_work=false", tmuxRunner.sendKeysCalls)
+	if tmuxRunner.sendKeysCalls != 1 {
+		t.Fatalf("send-keys calls = %d, want context export only when start_work=false", tmuxRunner.sendKeysCalls)
+	}
+	contextExport := tmuxRunner.sendKeysPayloads[0]
+	for _, want := range []string{
+		"export ",
+		"AZEDARACH_PROJECT_ID='" + projectID + "'",
+		"AZEDARACH_ISSUE_ID='" + issueID + "'",
+		"AZEDARACH_SESSION_ID='" + naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID) + "'",
+	} {
+		if !strings.Contains(contextExport, want) {
+			t.Fatalf("context export = %q, want %q", contextExport, want)
+		}
+	}
+	if strings.Contains(contextExport, " codex") {
+		t.Fatalf("context export = %q, start_work=false must not launch codex", contextExport)
 	}
 
 	var payload struct {

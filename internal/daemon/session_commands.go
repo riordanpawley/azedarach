@@ -3164,16 +3164,36 @@ func buildSessionSideEffectWindowCommand(projectCfg daemonProjectRuntimeConfig, 
 		return ""
 	}
 	commands := make([]string, 0, len(sideEffectCommands)+2)
-	commands = append(commands, sessionLaunchContextExportCommand(projectID, issueID, sessionID))
+	if contextExport := sessionLaunchContextExportCommand(projectID, issueID, sessionID); contextExport != "" {
+		commands = append(commands, contextExport)
+	}
 	commands = append(commands, sideEffectCommands...)
 	return strings.Join(commands, "; ")
 }
 
+type sessionContextEnvAssignment struct {
+	Key   string
+	Value string
+}
+
+func sessionLaunchContextEnvAssignments(projectID, issueID, sessionID string) []sessionContextEnvAssignment {
+	return []sessionContextEnvAssignment{
+		{Key: "AZEDARACH_PROJECT_ID", Value: strings.TrimSpace(projectID)},
+		{Key: "AZEDARACH_ISSUE_ID", Value: strings.TrimSpace(issueID)},
+		{Key: "AZEDARACH_SESSION_ID", Value: strings.TrimSpace(sessionID)},
+	}
+}
+
 func sessionLaunchContextExportCommand(projectID, issueID, sessionID string) string {
-	assignments := []string{
-		"AZEDARACH_PROJECT_ID=" + singleQuoteForShell(strings.TrimSpace(projectID)),
-		"AZEDARACH_ISSUE_ID=" + singleQuoteForShell(strings.TrimSpace(issueID)),
-		"AZEDARACH_SESSION_ID=" + singleQuoteForShell(strings.TrimSpace(sessionID)),
+	assignments := make([]string, 0, 3)
+	for _, assignment := range sessionLaunchContextEnvAssignments(projectID, issueID, sessionID) {
+		if assignment.Value == "" {
+			continue
+		}
+		assignments = append(assignments, assignment.Key+"="+singleQuoteForShell(assignment.Value))
+	}
+	if len(assignments) == 0 {
+		return ""
 	}
 	return "export " + strings.Join(assignments, " ")
 }
@@ -3360,16 +3380,16 @@ func (d *Daemon) exportIssueResourceSessionEnv(ctx context.Context, projectID st
 }
 
 func (d *Daemon) exportSessionContextEnv(ctx context.Context, projectID, issueID, sessionID string) error {
-	assignments := map[string]string{
-		"AZEDARACH_PROJECT_ID": strings.TrimSpace(projectID),
-		"AZEDARACH_ISSUE_ID":   strings.TrimSpace(issueID),
-		"AZEDARACH_SESSION_ID": strings.TrimSpace(sessionID),
-	}
-	for key, value := range assignments {
-		if value == "" {
+	for _, assignment := range sessionLaunchContextEnvAssignments(projectID, issueID, sessionID) {
+		if assignment.Value == "" {
 			continue
 		}
-		if err := d.tmux.SetEnvironment(ctx, sessionID, key, value); err != nil {
+		if err := d.tmux.SetEnvironment(ctx, sessionID, assignment.Key, assignment.Value); err != nil {
+			return err
+		}
+	}
+	if exportCommand := sessionLaunchContextExportCommand(projectID, issueID, sessionID); exportCommand != "" {
+		if err := d.tmux.SendKeys(ctx, sessionID, exportCommand); err != nil {
 			return err
 		}
 	}
