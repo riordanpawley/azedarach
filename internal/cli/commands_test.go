@@ -8869,19 +8869,22 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Do not poll tmux panes on a fixed interval") {
 		t.Fatalf("prime output missing tmux polling guardrail: %q", output)
 	}
+	if !strings.Contains(output, "Worker intervention threshold: use status/watch/mailbox output for routine observation, and do not preemptively message, interrupt, or redirect child workers unless there is concrete, high-confidence evidence that the worker is about to violate scope, use the wrong parent/root, take a destructive action, or make a material mistake.") {
+		t.Fatalf("prime output missing worker intervention threshold guidance: %q", output)
+	}
 	if !strings.Contains(output, "`orchestration.via=az` means do not spawn harness-native subagents yourself.") {
 		t.Fatalf("prime output missing follow-up native subagent prohibition: %q", output)
 	}
 	if !strings.Contains(output, "Then run the az orchestration loop: `status` to identify runnable leaves and active worker activity") {
 		t.Fatalf("prime output missing az orchestration workflow guidance: %q", output)
 	}
-	if !strings.Contains(output, "use `az orchestrate message --root <parent> --issue <worker> --body \"...\"` for active worker nudges") {
+	if !strings.Contains(output, "use `az orchestrate message --root <parent> --issue <worker> --body \"...\"` only for evidence-backed worker nudges when the intervention threshold is met") {
 		t.Fatalf("prime output missing active nudge loop guidance: %q", output)
 	}
 	if !strings.Contains(output, "Az orchestration loop:") {
 		t.Fatalf("prime output missing az orchestration operating loop: %q", output)
 	}
-	if !strings.Contains(output, "use `az orchestrate message` for active worker nudges") {
+	if !strings.Contains(output, "use `az orchestrate message` only for evidence-backed worker nudges when the intervention threshold is met") {
 		t.Fatalf("prime output missing active nudge step guidance: %q", output)
 	}
 	if !strings.Contains(output, "Small graph: 1-3 leaves") {
@@ -8932,7 +8935,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az mail send --parent <parent-issue> --type dependency-ready --body \"...\"`") {
 		t.Fatalf("prime output missing mail send command example: %q", output)
 	}
-	if !strings.Contains(output, "Use `az orchestrate message --root <parent-issue> --issue <worker-issue> --body \"...\"` for orchestrator-to-running-worker nudges") {
+	if !strings.Contains(output, "Use `az orchestrate message --root <parent-issue> --issue <worker-issue> --body \"...\"` only for evidence-backed orchestrator-to-running-worker nudges when the intervention threshold is met") {
 		t.Fatalf("prime output missing active worker nudge guidance: %q", output)
 	}
 	if !strings.Contains(output, "workers reporting their own progress/status must use `az mail send --parent <parent-issue> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`") {
