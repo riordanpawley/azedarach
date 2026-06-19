@@ -959,12 +959,24 @@ type bulkStatusResultMsg struct {
 	updated int
 	issues  []bulkTaskIssue
 	failed  int
+	pending []bulkTaskPendingOperation
 	err     error
 }
 
 type bulkTaskIssue struct {
 	taskID string
 	reason string
+}
+
+type bulkTaskPendingOperation struct {
+	taskID         string
+	action         string
+	previousStatus domain.Status
+	targetStatus   domain.Status
+	deletedTask    bool
+	force          bool
+	operationID    string
+	state          protocol.OperationState
 }
 
 // bulkMoveStatusCmd moves tasks by delta (-1 = left, +1 = right)

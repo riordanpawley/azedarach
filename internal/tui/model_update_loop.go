@@ -1551,9 +1551,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
+		queued := 0
+		for _, pending := range msg.pending {
+			if strings.TrimSpace(pending.operationID) == "" || operationStateTerminal(pending.state) {
+				continue
+			}
+			if m.operationTaskID == nil {
+				m.operationTaskID = make(map[string]string)
+			}
+			switch pending.action {
+			case "worktree_cleanup":
+				if m.pendingCleanupOps == nil {
+					m.pendingCleanupOps = make(map[string]pendingWorktreeCleanupConfirmation)
+				}
+				m.pendingCleanupOps[pending.operationID] = pendingWorktreeCleanupConfirmation{
+					taskID:      pending.taskID,
+					deletedTask: pending.deletedTask,
+					force:       pending.force,
+				}
+				m.markTaskOperationPending(pending.taskID, "worktree_cleanup", pending.operationID, pending.state)
+			case "task_move":
+				m.markTaskStatusPending(pending.taskID, pending.previousStatus, pending.targetStatus, pending.operationID, pending.state)
+				m.applyOptimisticTaskStatus(pending.taskID, pending.targetStatus)
+			default:
+				continue
+			}
+			m.operationTaskID[pending.operationID] = pending.taskID
+			queued++
+		}
+		if queued > 0 {
+			m.syncTaskWorkspaceOverlay()
+		}
 
 		summary := fmt.Sprintf("Bulk action completed: %d updated", msg.updated)
 		level := ToastSuccess
+		if queued > 0 {
+			level = ToastInfo
+			summary = fmt.Sprintf("%s, %d queued", summary, queued)
+		}
 		if len(msg.issues) > 0 {
 			level = ToastWarning
 			summary = fmt.Sprintf("%s, %d reported issues (%s)", summary, len(msg.issues), summarizeBulkIssues(msg.issues))
