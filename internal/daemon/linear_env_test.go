@@ -6,10 +6,29 @@ import (
 	"testing"
 )
 
-func TestResolveLinearAPIKeyPrefersEnvironment(t *testing.T) {
+func TestResolveLinearAPIKeyPrefersProjectEnvLocal(t *testing.T) {
 	repoDir := t.TempDir()
 	t.Setenv(linearAPIKeyEnv, " env-key ")
 	writeLinearEnvLocal(t, repoDir, "LINEAR_API_KEY=file-key\n")
+
+	if got, want := resolveLinearAPIKey(repoDir), "file-key"; got != want {
+		t.Fatalf("resolveLinearAPIKey() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveLinearAPIKeyFallsBackToEnvironment(t *testing.T) {
+	repoDir := t.TempDir()
+	t.Setenv(linearAPIKeyEnv, " env-key ")
+
+	if got, want := resolveLinearAPIKey(repoDir), "env-key"; got != want {
+		t.Fatalf("resolveLinearAPIKey() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveLinearAPIKeyIgnoresBlankProjectEnvLocal(t *testing.T) {
+	repoDir := t.TempDir()
+	t.Setenv(linearAPIKeyEnv, " env-key ")
+	writeLinearEnvLocal(t, repoDir, "LINEAR_API_KEY=   \n")
 
 	if got, want := resolveLinearAPIKey(repoDir), "env-key"; got != want {
 		t.Fatalf("resolveLinearAPIKey() = %q, want %q", got, want)
