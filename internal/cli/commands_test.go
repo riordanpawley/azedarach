@@ -8809,6 +8809,18 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "create many issues, epics, or nested `children` trees from JSON when shaping a graph up front") {
 		t.Fatalf("prime output missing bulk-create nested tree guidance: %q", output)
 	}
+	if !strings.Contains(output, "Child issue creation without worker launch:") {
+		t.Fatalf("prime output missing child-creation/no-worker section: %q", output)
+	}
+	if !strings.Contains(output, "Batch planning/catalog fanout: `az issue bulk-create --input issues.json --json` with `parent_id` or nested `children` creates parented child issues without starting sessions or orchestration.") {
+		t.Fatalf("prime output missing non-orchestrating batch child creation guidance: %q", output)
+	}
+	if !strings.Contains(output, "Single tracking-only child: `az issue create \"Child task\" [--json]` auto-parents under `AZEDARACH_ISSUE_ID`; for another parent, create the issue and attach it with `az issue dep add <child-id> <parent-id> --type parent-child`.") {
+		t.Fatalf("prime output missing non-orchestrating single child creation guidance: %q", output)
+	}
+	if !strings.Contains(output, "Worker fanout/session launch: `az issue split --parent <issue-id> \"Child task\"` can create the child and start orchestration/session work; use `az issue split` only when you intentionally want isolated worker fanout.") {
+		t.Fatalf("prime output missing split/session launch warning: %q", output)
+	}
 	if !strings.Contains(output, "`az orchestrate status --root <issue-id> [--since <seq>] [--limit <n>] [--json]`") {
 		t.Fatalf("prime output missing orchestrate status command example: %q", output)
 	}
@@ -8857,19 +8869,22 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Do not poll tmux panes on a fixed interval") {
 		t.Fatalf("prime output missing tmux polling guardrail: %q", output)
 	}
+	if !strings.Contains(output, "Worker intervention threshold: use status/watch/mailbox output for routine observation, and do not preemptively message, interrupt, or redirect child workers unless there is concrete, high-confidence evidence that the worker is about to violate scope, use the wrong parent/root, take a destructive action, or make a material mistake.") {
+		t.Fatalf("prime output missing worker intervention threshold guidance: %q", output)
+	}
 	if !strings.Contains(output, "`orchestration.via=az` means do not spawn harness-native subagents yourself.") {
 		t.Fatalf("prime output missing follow-up native subagent prohibition: %q", output)
 	}
 	if !strings.Contains(output, "Then run the az orchestration loop: `status` to identify runnable leaves and active worker activity") {
 		t.Fatalf("prime output missing az orchestration workflow guidance: %q", output)
 	}
-	if !strings.Contains(output, "use `az orchestrate message --root <parent> --issue <worker> --body \"...\"` for active worker nudges") {
+	if !strings.Contains(output, "use `az orchestrate message --root <parent> --issue <worker> --body \"...\"` only for evidence-backed worker nudges when the intervention threshold is met") {
 		t.Fatalf("prime output missing active nudge loop guidance: %q", output)
 	}
 	if !strings.Contains(output, "Az orchestration loop:") {
 		t.Fatalf("prime output missing az orchestration operating loop: %q", output)
 	}
-	if !strings.Contains(output, "use `az orchestrate message` for active worker nudges") {
+	if !strings.Contains(output, "use `az orchestrate message` only for evidence-backed worker nudges when the intervention threshold is met") {
 		t.Fatalf("prime output missing active nudge step guidance: %q", output)
 	}
 	if !strings.Contains(output, "Small graph: 1-3 leaves") {
@@ -8920,7 +8935,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az mail send --parent <parent-issue> --type dependency-ready --body \"...\"`") {
 		t.Fatalf("prime output missing mail send command example: %q", output)
 	}
-	if !strings.Contains(output, "Use `az orchestrate message --root <parent-issue> --issue <worker-issue> --body \"...\"` for orchestrator-to-running-worker nudges") {
+	if !strings.Contains(output, "Use `az orchestrate message --root <parent-issue> --issue <worker-issue> --body \"...\"` only for evidence-backed orchestrator-to-running-worker nudges when the intervention threshold is met") {
 		t.Fatalf("prime output missing active worker nudge guidance: %q", output)
 	}
 	if !strings.Contains(output, "workers reporting their own progress/status must use `az mail send --parent <parent-issue> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`") {
@@ -8953,7 +8968,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az session start <issue-id>` is for explicit/manual orchestration; agents should not run it unless the user asks.") {
 		t.Fatalf("prime output missing session start guardrail: %q", output)
 	}
-	if !strings.Contains(output, "Optional (only when splitting work): `az issue split \"Child task\"`") {
+	if !strings.Contains(output, "Optional child-work setup: `az issue split \"Child task\"` launches isolated worker fanout; use `az issue create \"Child task\"` or `az issue bulk-create --input issues.json` for tracking-only child issues") {
 		t.Fatalf("prime output missing optional child-task split guidance: %q", output)
 	}
 	if strings.Contains(output, "`az spec` (inspect linked requirements before behavior changes)") {
@@ -8977,7 +8992,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Parent/epic issues describe the overarching goal, scope, and success criteria; keep their description high-level and stable.") {
 		t.Fatalf("prime output missing parent overarching-goal guidance: %q", output)
 	}
-	if !strings.Contains(output, "Track subtask goals, implementation steps, and nitty-gritty decisions in child issues created with `az issue create \"Child task\"` or `az issue split \"Child task\"`") {
+	if !strings.Contains(output, "Track subtask goals, implementation steps, and nitty-gritty decisions in child issues created with `az issue create \"Child task\"` for tracking-only child work or `az issue split \"Child task\"` only when the child should launch immediately") {
 		t.Fatalf("prime output missing subtask-detail-into-child-issue guidance: %q", output)
 	}
 	if !strings.Contains(output, "When a new subtask surfaces mid-work, create a child issue immediately rather than expanding the parent's description") {
@@ -9179,7 +9194,7 @@ func TestPrimeCommandRecommendsChildIssuesForEpicContext(t *testing.T) {
 	if !strings.Contains(output, "Parent-context recommendation: `az-1` is an epic or already has child issues") {
 		t.Fatalf("prime output missing epic child-work recommendation: %q", output)
 	}
-	if !strings.Contains(output, "keep implementation/subtask work in child issues with `az issue create \"Child task\"` or `az issue split \"Child task\"`") {
+	if !strings.Contains(output, "keep implementation/subtask work in child issues with `az issue create \"Child task\"` for tracking-only child work; use `az issue split \"Child task\"` only when that child should launch immediately in its own session") {
 		t.Fatalf("prime output missing child issue commands for epic context: %q", output)
 	}
 	if !strings.Contains(output, "Do the child implementation from the child issue execution context: preferably a child session (`az session start <child-issue>` or `az issue split \"Child task\"`) and at minimum the child worktree (`az worktree create <child-issue>`).") {
@@ -9251,7 +9266,7 @@ func TestPrimeCommandRecommendsChildIssuesWhenActiveIssueHasChildren(t *testing.
 	if !strings.Contains(output, "Parent-context recommendation: `az-1` is an epic or already has child issues") {
 		t.Fatalf("prime output missing child-work recommendation for parent task: %q", output)
 	}
-	if !strings.Contains(output, "with `az issue create \"Child task\"` instead of accumulating detailed work on the parent") {
+	if !strings.Contains(output, "with `az issue create \"Child task\"` for tracking-only child work instead of accumulating detailed work on the parent") {
 		t.Fatalf("prime output missing non-tmux child issue command: %q", output)
 	}
 	if !strings.Contains(output, "Do the child implementation from the child issue execution context: preferably a child session (`az session start <child-issue>`) and at minimum the child worktree (`az worktree create <child-issue>`).") {
