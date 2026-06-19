@@ -94,6 +94,8 @@ const (
 	nextAlphaIssueIndexMetaKey = "issue:id_next_alpha_index"
 	sqliteBusyPrimaryCode      = 5
 	sqliteBusyRetryDelay       = 100 * time.Millisecond
+	// Keep at least one foreground reader available while Linear sync owns a write connection.
+	sqliteMaxOpenConns = 4
 )
 
 // Client wraps local SQLite task store operations.
@@ -193,14 +195,17 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		}
 	}
 
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_txlock=immediate", filepath.ToSlash(c.dbPath))
+	dsn := fmt.Sprintf(
+		"file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)&_txlock=immediate",
+		filepath.ToSlash(c.dbPath),
+	)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, c.wrapError("open-db", "", err)
 	}
 
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	db.SetMaxOpenConns(sqliteMaxOpenConns)
+	db.SetMaxIdleConns(sqliteMaxOpenConns)
 	db.SetConnMaxLifetime(0)
 	db.SetConnMaxIdleTime(0)
 

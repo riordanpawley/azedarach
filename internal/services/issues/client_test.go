@@ -1629,6 +1629,7 @@ func TestClient_DBHandleCreatesMissingParentDirectory(t *testing.T) {
 }
 
 func TestClient_ConfiguresSQLitePragmas(t *testing.T) {
+	ctx := context.Background()
 	client := newTestClient(t)
 	db, err := client.dbHandle()
 	require.NoError(t, err)
@@ -1640,6 +1641,16 @@ func TestClient_ConfiguresSQLitePragmas(t *testing.T) {
 	var journalMode string
 	require.NoError(t, db.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode))
 	assert.Equal(t, "wal", strings.ToLower(journalMode))
+
+	firstConn, err := db.Conn(ctx)
+	require.NoError(t, err)
+	defer firstConn.Close()
+	secondConn, err := db.Conn(ctx)
+	require.NoError(t, err)
+	defer secondConn.Close()
+	var secondForeignKeys int
+	require.NoError(t, secondConn.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&secondForeignKeys))
+	assert.Equal(t, 1, secondForeignKeys)
 }
 
 func TestClient_EnsuresDependencyForeignKeysAndIndexes(t *testing.T) {
@@ -2179,6 +2190,36 @@ func TestClient_CreateWaitsForWriteLockAndSucceedsWithinBusyTimeout(t *testing.T
 	}
 
 	assert.GreaterOrEqual(t, time.Since(start), 200*time.Millisecond)
+}
+
+func TestClient_ListWithRuntimeContinuesWhileSyncWriterHoldsConnection(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "local-first read",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	writerConn, err := db.Conn(ctx)
+	require.NoError(t, err)
+	defer func() {
+		_, _ = writerConn.ExecContext(context.Background(), `ROLLBACK`)
+		_ = writerConn.Close()
+	}()
+	_, err = writerConn.ExecContext(ctx, `BEGIN IMMEDIATE`)
+	require.NoError(t, err)
+
+	readCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	tasks, err := client.ListWithRuntime(readCtx, "project-1")
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, naming.IssueID(issueID), tasks[0].ID)
+	assert.Equal(t, "local-first read", tasks[0].Title)
 }
 
 func TestClient_AddDependencyWaitsForIssueMutationLock(t *testing.T) {
