@@ -10,14 +10,14 @@ import (
 const linearAPIKeyEnv = "LINEAR_API_KEY"
 
 func resolveLinearAPIKey(repoDir string) string {
-	if value := strings.TrimSpace(os.Getenv(linearAPIKeyEnv)); value != "" {
-		return value
+	repoDir = strings.TrimSpace(repoDir)
+	if repoDir != "" {
+		value, _ := readDotEnvValue(filepath.Join(repoDir, ".env.local"), linearAPIKeyEnv)
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
 	}
-	if strings.TrimSpace(repoDir) == "" {
-		return ""
-	}
-	value, _ := readDotEnvValue(filepath.Join(repoDir, ".env.local"), linearAPIKeyEnv)
-	return strings.TrimSpace(value)
+	return strings.TrimSpace(os.Getenv(linearAPIKeyEnv))
 }
 
 func readDotEnvValue(path, key string) (string, bool) {
