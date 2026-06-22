@@ -725,9 +725,9 @@ func (c *Client) baseRefCandidates(ctx context.Context, worktree, baseBranch str
 	normalizedBase := strings.ToLower(strings.TrimSpace(baseBranch))
 	genericBase := normalizedBase == "" || normalizedBase == "main" || normalizedBase == "master"
 
-	// Prefer remote default branch when configured base is generic (main/master).
-	// This avoids massive, misleading deltas in repos whose canonical base branch differs.
-	if headRef, err := c.runInWorktree(ctx, worktree, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"); err == nil {
+	// Prefer current remote refs when origin metadata is available. This avoids
+	// massive, misleading deltas from stale local base branches.
+	if headRef, err := c.runInWorktree(ctx, worktree, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"); err == nil && strings.TrimSpace(headRef) != "" {
 		headRef = strings.TrimSpace(headRef) // e.g. origin/main or origin/trunk
 		headLocal := strings.TrimPrefix(headRef, "origin/")
 		if genericBase {
@@ -736,10 +736,10 @@ func (c *Client) baseRefCandidates(ctx context.Context, worktree, baseBranch str
 				add(headLocal)
 			}
 		}
-		add(baseBranch)
 		if baseBranch != "" && !strings.Contains(baseBranch, "/") {
 			add("origin/" + baseBranch)
 		}
+		add(baseBranch)
 		if genericBase {
 			add(headRef)
 			add(headLocal)
