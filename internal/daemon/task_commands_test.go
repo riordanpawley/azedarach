@@ -1253,6 +1253,9 @@ func TestTaskCloseCommandUpdatesStatusThroughDaemon(t *testing.T) {
 	if result.TaskID != taskID || result.Status != string(domain.StatusDone) || result.Revision == 0 {
 		t.Fatalf("close result = %+v", result)
 	}
+	if got := taskClosePhaseNames(result.Phases); !slices.Contains(got, "preflight") || !slices.Contains(got, "status_write") {
+		t.Fatalf("close phases = %v, want preflight and status_write", got)
+	}
 	tasks, err := issuesClient.List(ctx)
 	if err != nil {
 		t.Fatalf("list tasks: %v", err)
@@ -1272,6 +1275,14 @@ func TestTaskCloseCommandUpdatesStatusThroughDaemon(t *testing.T) {
 	if task.Status != domain.StatusDone {
 		t.Fatalf("task status = %s, want done", task.Status)
 	}
+}
+
+func taskClosePhaseNames(phases []taskClosePhaseTiming) []string {
+	names := make([]string, 0, len(phases))
+	for _, phase := range phases {
+		names = append(names, phase.Name)
+	}
+	return names
 }
 
 func TestTaskCloseRepairsLegacyProjectRuntimeProjectionBeforeFinalStatusUpdate(t *testing.T) {
@@ -2224,7 +2235,6 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	for _, want := range []string{
 		"-C " + sourceWorktree + " status --porcelain",
 		"-C " + repoDir + " merge-tree --write-tree main " + sourceBranch,
-		"-C " + repoDir + " fetch origin",
 		"-C " + repoDir + " checkout main",
 		"-C " + repoDir + " worktree add --detach ",
 		"merge --no-edit " + sourceBranch,
@@ -2233,6 +2243,9 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("git commands missing %q:\n%s", want, joined)
 		}
+	}
+	if strings.Contains(joined, "-C "+repoDir+" fetch origin") {
+		t.Fatalf("git commands should not fetch during local close integration:\n%s", joined)
 	}
 }
 
@@ -2571,7 +2584,6 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceHasNoChangesEvenIfTargetDirty
 	}
 	joined := strings.Join(commands, "\n")
 	for _, blocked := range []string{
-		"-C " + repoDir + " fetch origin",
 		"-C " + repoDir + " checkout main",
 		"-C " + repoDir + " merge --no-edit " + sourceBranch,
 		"-C " + repoDir + " merge-tree --write-tree main " + sourceBranch,

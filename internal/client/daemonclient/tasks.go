@@ -99,16 +99,30 @@ type taskDeleteRequest struct {
 }
 
 type TaskCloseResult struct {
-	TaskID                 string `json:"task_id"`
-	Status                 string `json:"status"`
-	IntegrationRequested   bool   `json:"integration_requested,omitempty"`
-	Integrated             bool   `json:"integrated,omitempty"`
-	IntegratedSourceBranch string `json:"integrated_source_branch,omitempty"`
-	IntegratedTargetBranch string `json:"integrated_target_branch,omitempty"`
-	SessionStopped         bool   `json:"session_stopped,omitempty"`
-	WorktreeRemoved        bool   `json:"worktree_removed,omitempty"`
-	WorktreeForced         bool   `json:"worktree_forced,omitempty"`
-	Revision               uint64 `json:"revision,omitempty"`
+	TaskID                 string                 `json:"task_id"`
+	Status                 string                 `json:"status"`
+	IntegrationRequested   bool                   `json:"integration_requested,omitempty"`
+	Integrated             bool                   `json:"integrated,omitempty"`
+	IntegratedSourceBranch string                 `json:"integrated_source_branch,omitempty"`
+	IntegratedTargetBranch string                 `json:"integrated_target_branch,omitempty"`
+	SessionStopped         bool                   `json:"session_stopped,omitempty"`
+	WorktreeRemoved        bool                   `json:"worktree_removed,omitempty"`
+	WorktreeForced         bool                   `json:"worktree_forced,omitempty"`
+	Revision               uint64                 `json:"revision,omitempty"`
+	Phases                 []TaskClosePhaseTiming `json:"phases,omitempty"`
+}
+
+type TaskClosePhaseTiming struct {
+	Name      string `json:"name"`
+	ElapsedMS int64  `json:"elapsed_ms"`
+	Skipped   bool   `json:"skipped,omitempty"`
+}
+
+func (p TaskClosePhaseTiming) Elapsed() time.Duration {
+	if p.ElapsedMS <= 0 {
+		return 0
+	}
+	return time.Duration(p.ElapsedMS) * time.Millisecond
 }
 
 type TaskDeleteResult struct {

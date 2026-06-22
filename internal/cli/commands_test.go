@@ -1566,6 +1566,9 @@ func TestBranchMergeToBaseCommandUsesDaemonGitFlow(t *testing.T) {
 	if !strings.Contains(output, "Merged riordan/az-123/some-change into trunk (az-123)") {
 		t.Fatalf("output = %q, want final summary", output)
 	}
+	if !strings.Contains(output, "- Phase timings:") || !strings.Contains(output, "merge:") {
+		t.Fatalf("output = %q, want phase timings", output)
+	}
 
 	want := []string{
 		daemonclient.CommandWorktreeList,
@@ -1573,7 +1576,6 @@ func TestBranchMergeToBaseCommandUsesDaemonGitFlow(t *testing.T) {
 		daemonclient.CommandGitWorktreeForBranch,
 		daemonclient.CommandGitStatus,
 		daemonclient.CommandGitStatus,
-		daemonclient.CommandGitFetch,
 		daemonclient.CommandGitCheckout,
 		daemonclient.CommandGitMerge,
 	}
@@ -6671,6 +6673,10 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 						SessionStopped:         true,
 						WorktreeRemoved:        true,
 						WorktreeForced:         body.ForceWorktree,
+						Phases: []daemonclient.TaskClosePhaseTiming{
+							{Name: "integrate_before_close", ElapsedMS: 123},
+							{Name: "session_cleanup", ElapsedMS: 0, Skipped: true},
+						},
 					}), nil
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
@@ -6699,6 +6705,9 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 		t.Fatal("task close force_worktree = false, want true")
 	}
 	if !strings.Contains(output, "Closed issue: az-9") || !strings.Contains(output, "- Integration requested") || !strings.Contains(output, "- Cleanup performed") {
+		t.Fatalf("output = %q", output)
+	}
+	if !strings.Contains(output, "- Phase timings:") || !strings.Contains(output, "integrate_before_close: 123ms") || !strings.Contains(output, "session_cleanup: 0s (skipped)") {
 		t.Fatalf("output = %q", output)
 	}
 }

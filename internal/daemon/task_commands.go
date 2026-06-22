@@ -111,16 +111,23 @@ type taskDeleteRequest struct {
 }
 
 type taskCloseResult struct {
-	TaskID                 string `json:"task_id"`
-	Status                 string `json:"status"`
-	IntegrationRequested   bool   `json:"integration_requested,omitempty"`
-	Integrated             bool   `json:"integrated,omitempty"`
-	IntegratedSourceBranch string `json:"integrated_source_branch,omitempty"`
-	IntegratedTargetBranch string `json:"integrated_target_branch,omitempty"`
-	SessionStopped         bool   `json:"session_stopped,omitempty"`
-	WorktreeRemoved        bool   `json:"worktree_removed,omitempty"`
-	WorktreeForced         bool   `json:"worktree_forced,omitempty"`
-	Revision               uint64 `json:"revision,omitempty"`
+	TaskID                 string                 `json:"task_id"`
+	Status                 string                 `json:"status"`
+	IntegrationRequested   bool                   `json:"integration_requested,omitempty"`
+	Integrated             bool                   `json:"integrated,omitempty"`
+	IntegratedSourceBranch string                 `json:"integrated_source_branch,omitempty"`
+	IntegratedTargetBranch string                 `json:"integrated_target_branch,omitempty"`
+	SessionStopped         bool                   `json:"session_stopped,omitempty"`
+	WorktreeRemoved        bool                   `json:"worktree_removed,omitempty"`
+	WorktreeForced         bool                   `json:"worktree_forced,omitempty"`
+	Revision               uint64                 `json:"revision,omitempty"`
+	Phases                 []taskClosePhaseTiming `json:"phases,omitempty"`
+}
+
+type taskClosePhaseTiming struct {
+	Name      string `json:"name"`
+	ElapsedMS int64  `json:"elapsed_ms"`
+	Skipped   bool   `json:"skipped,omitempty"`
 }
 
 type taskDeleteResult struct {
@@ -1312,50 +1319,83 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		Status:         string(domain.StatusDone),
 		WorktreeForced: cmd.ForceWorktree,
 	}
+	recordPhase := func(name string, startedAt time.Time, skipped bool) {
+		result.Phases = append(result.Phases, taskClosePhaseTiming{
+			Name:      name,
+			ElapsedMS: time.Since(startedAt).Milliseconds(),
+			Skipped:   skipped,
+		})
+		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.close."+name, startedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "skipped", skipped)
+	}
+
+	phaseStartedAt := time.Now()
 	integration, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, cmd.IntegrateBeforeClose)
+	recordPhase("integrate_before_close", phaseStartedAt, !cmd.IntegrateBeforeClose)
 	if err != nil {
-		return result, fmt.Errorf("integrate before closing %s: %w", taskID, err)
+		return result, fmt.Errorf("phase integrate_before_close for issue %s: %w", taskID, err)
 	}
 	result.IntegrationRequested = integration.Requested
 	result.Integrated = integration.Integrated
 	result.IntegratedSourceBranch = integration.SourceBranch
 	result.IntegratedTargetBranch = integration.TargetBranch
 
+	phaseStartedAt = time.Now()
 	guard, err := d.validateTaskClosePreflight(ctx, projectID, taskID, taskClosePreflightOptions{
 		AllowTargetSession:  true,
 		AllowTargetWorktree: true,
 		ForceWorktree:       cmd.ForceWorktree,
 		IgnoreAhead:         cmd.IgnoreAhead || integration.Integrated || integration.NoChanges,
 	}, req)
+	recordPhase("preflight", phaseStartedAt, false)
 	if err != nil {
-		return result, err
+		return result, fmt.Errorf("phase preflight for issue %s: %w", taskID, err)
 	}
+
+	phaseStartedAt = time.Now()
 	if err := d.cleanupTaskIssueResourcesForClose(ctx, projectID, taskID, guard.Worktree); err != nil {
-		return result, fmt.Errorf("cleanup issue resources before closing %s: %w", taskID, err)
+		recordPhase("issue_resource_cleanup", phaseStartedAt, false)
+		return result, fmt.Errorf("phase issue_resource_cleanup for issue %s: %w", taskID, err)
 	}
+	recordPhase("issue_resource_cleanup", phaseStartedAt, false)
+
+	phaseStartedAt = time.Now()
 	if daemonCloseGuardTaskHasSession(guard.Task) {
 		if err := d.stopTaskSessionForClose(ctx, req, projectID, taskID); err != nil {
-			return result, fmt.Errorf("stop session before closing %s: %w", taskID, err)
+			recordPhase("session_cleanup", phaseStartedAt, false)
+			return result, fmt.Errorf("phase session_cleanup for issue %s: %w", taskID, err)
 		}
 		result.SessionStopped = true
 	}
+	recordPhase("session_cleanup", phaseStartedAt, !daemonCloseGuardTaskHasSession(guard.Task))
+
+	phaseStartedAt = time.Now()
 	if daemonCloseGuardTaskHasWorktree(guard.Task) {
 		if d.worktreeAdapter == nil {
-			return result, fmt.Errorf("remove worktree before closing %s: worktree cleanup unavailable", taskID)
+			recordPhase("worktree_cleanup", phaseStartedAt, false)
+			return result, fmt.Errorf("phase worktree_cleanup for issue %s: worktree cleanup unavailable", taskID)
 		}
 		if err := d.worktreeAdapter.Delete(ctx, projectID, taskID, cmd.ForceWorktree); err != nil {
-			return result, fmt.Errorf("remove worktree before closing %s: %w", taskID, err)
+			recordPhase("worktree_cleanup", phaseStartedAt, false)
+			return result, fmt.Errorf("phase worktree_cleanup for issue %s: %w", taskID, err)
 		}
 		result.WorktreeRemoved = true
 	}
+	recordPhase("worktree_cleanup", phaseStartedAt, !daemonCloseGuardTaskHasWorktree(guard.Task))
 
+	phaseStartedAt = time.Now()
 	if err := d.repairStaleCloseRuntimeProjections(ctx, projectID, taskID); err != nil {
-		return result, fmt.Errorf("repair runtime projections before closing %s: %w", taskID, err)
+		recordPhase("runtime_projection_repair", phaseStartedAt, false)
+		return result, fmt.Errorf("phase runtime_projection_repair for issue %s: %w", taskID, err)
 	}
+	recordPhase("runtime_projection_repair", phaseStartedAt, false)
+
+	phaseStartedAt = time.Now()
 	task, err := issueClient.UpdateWithRuntime(ctx, projectID, taskID, domain.StatusDone)
 	if err != nil {
-		return result, err
+		recordPhase("status_write", phaseStartedAt, false)
+		return result, fmt.Errorf("phase status_write for issue %s: %w", taskID, err)
 	}
+	recordPhase("status_write", phaseStartedAt, false)
 	rev := d.nextRevision(projectID)
 	result.Revision = rev
 	d.publishTaskEvent(req, protocol.EventTaskUpdated, rev, taskEventBodyFromTask(projectID, task))
@@ -1547,9 +1587,6 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 				reasons = append(reasons, "unknown")
 			}
 			return fmt.Errorf("merge preflight failed: predicted conflicts %s", strings.Join(reasons, ", "))
-		}
-		if err := d.git.Fetch(ctx, targetWorktree, "origin"); err != nil {
-			return fmt.Errorf("fetch target branch before close integration: %w", err)
 		}
 		if !branchAttached {
 			if err := d.git.Checkout(ctx, targetWorktree, targetBranch); err != nil {

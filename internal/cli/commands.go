@@ -1088,35 +1088,68 @@ type branchMergeToBaseCommandResult struct {
 	SourceBranch string
 	BaseBranch   string
 	Message      string
+	Phases       []commandPhaseTiming
 }
 
 type mergeHookFailureFixer struct {
 	ID string
 }
 
+type commandPhaseTiming struct {
+	Name    string
+	Elapsed time.Duration
+}
+
 func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (branchMergeToBaseCommandResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), branchMergeToBaseTimeout)
 	defer cancel()
-	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
-		return branchMergeToBaseCommandResult{}, err
+	var phases []commandPhaseTiming
+	recordPhase := func(name string, startedAt time.Time) {
+		phases = append(phases, commandPhaseTiming{Name: name, Elapsed: time.Since(startedAt)})
+		latencytrace.LogPhase(deps.Logger, "cli", "branch.merge."+name, startedAt, "issue_id", opts.IssueID)
+	}
+	wrapPhaseErr := func(name string, err error) error {
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("phase %s timed out after %s while running az branch merge: %w", name, branchMergeToBaseTimeout, err)
+		}
+		return fmt.Errorf("phase %s failed while running az branch merge: %w", name, err)
 	}
 
+	phaseStartedAt := time.Now()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		recordPhase("ensure_daemon", phaseStartedAt)
+		return branchMergeToBaseCommandResult{}, wrapPhaseErr("ensure_daemon", err)
+	}
+	recordPhase("ensure_daemon", phaseStartedAt)
+
+	phaseStartedAt = time.Now()
 	source, err := resolveMergeToBaseSourceWorktree(ctx, deps, opts.IssueID)
 	if err != nil {
-		return branchMergeToBaseCommandResult{}, err
+		recordPhase("resolve_source", phaseStartedAt)
+		return branchMergeToBaseCommandResult{}, wrapPhaseErr("resolve_source", err)
 	}
+	recordPhase("resolve_source", phaseStartedAt)
+
+	phaseStartedAt = time.Now()
 	target, decision, err := resolveMergeToBaseTarget(ctx, deps, source.IssueID, opts.AllowBaseForChild)
 	if err != nil {
-		return branchMergeToBaseCommandResult{}, err
+		recordPhase("resolve_target", phaseStartedAt)
+		return branchMergeToBaseCommandResult{}, wrapPhaseErr("resolve_target", err)
 	}
+	recordPhase("resolve_target", phaseStartedAt)
 	baseBranch := target.Branch
 	baseWorktree := strings.TrimSpace(target.WorktreePath)
 	branchAttached := target.BranchAttached
 	if baseWorktree == "" {
+		phaseStartedAt = time.Now()
 		if attached, err := deps.DaemonClient.GitWorktreeForBranch(ctx, baseBranch); err == nil && attached.Found && strings.TrimSpace(attached.Worktree) != "" {
 			baseWorktree = strings.TrimSpace(attached.Worktree)
 			branchAttached = true
 		}
+		recordPhase("resolve_target_worktree", phaseStartedAt)
 	}
 	if baseWorktree == "" {
 		baseWorktree = strings.TrimSpace(deps.RepoDir)
@@ -1134,9 +1167,12 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 		"allow_base_for_child", opts.AllowBaseForChild,
 	)
 
+	phaseStartedAt = time.Now()
 	if err := checkMergeToBasePreflight(ctx, deps, source, baseWorktree); err != nil {
-		return branchMergeToBaseCommandResult{}, err
+		recordPhase("preflight", phaseStartedAt)
+		return branchMergeToBaseCommandResult{}, wrapPhaseErr("preflight", err)
 	}
+	recordPhase("preflight", phaseStartedAt)
 
 	deps.Logger.Info("merging issue branch into target branch",
 		"issue_id", source.IssueID,
@@ -1146,19 +1182,21 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 		"base_branch", baseBranch,
 	)
 
-	if _, err := deps.DaemonClient.GitFetch(ctx, baseWorktree, "origin"); err != nil {
-		return branchMergeToBaseCommandResult{}, wrapPendingGitOperation("fetch", err)
-	}
 	if !branchAttached {
-
+		phaseStartedAt = time.Now()
 		if _, err := deps.DaemonClient.GitCheckout(ctx, baseWorktree, baseBranch); err != nil {
-			return branchMergeToBaseCommandResult{}, wrapPendingGitOperation("checkout", err)
+			recordPhase("checkout", phaseStartedAt)
+			return branchMergeToBaseCommandResult{}, wrapPhaseErr("checkout", wrapPendingGitOperation("checkout", err))
 		}
+		recordPhase("checkout", phaseStartedAt)
 	}
+	phaseStartedAt = time.Now()
 	result, err := deps.DaemonClient.GitMerge(ctx, baseWorktree, source.Branch)
 	if err != nil {
-		return branchMergeToBaseCommandResult{}, wrapPendingGitOperation("merge", err)
+		recordPhase("merge", phaseStartedAt)
+		return branchMergeToBaseCommandResult{}, wrapPhaseErr("merge", wrapPendingGitOperation("merge", err))
 	}
+	recordPhase("merge", phaseStartedAt)
 	if !result.Result.Success {
 		details := strings.TrimSpace(result.Result.Message)
 		if len(result.Result.ConflictFiles) > 0 {
@@ -1193,6 +1231,7 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 		SourceBranch: source.Branch,
 		BaseBranch:   baseBranch,
 		Message:      result.Result.Message,
+		Phases:       phases,
 	}, nil
 }
 
@@ -1205,6 +1244,21 @@ func printBranchMergeToBaseResult(result branchMergeToBaseCommandResult) {
 		}
 	}
 	fmt.Printf("Merged %s into %s (%s)\n", result.SourceBranch, result.BaseBranch, result.IssueID)
+	printCommandPhases(result.Phases)
+}
+
+func printCommandPhases(phases []commandPhaseTiming) {
+	if len(phases) == 0 {
+		return
+	}
+	fmt.Println("- Phase timings:")
+	for _, phase := range phases {
+		name := strings.TrimSpace(phase.Name)
+		if name == "" {
+			continue
+		}
+		fmt.Printf("  - %s: %s\n", name, phase.Elapsed.Round(time.Millisecond))
+	}
 }
 
 type mergeHookFailureFixerParams struct {
@@ -3944,6 +3998,7 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 			"integrated":            result.Integrated,
 			"cleanup_performed":     true,
 			"worktree_forced":       opts.ForceWorktree,
+			"phases":                taskClosePhaseJSON(result.Phases),
 		})
 	}
 	fmt.Printf("Closed issue: %s\n", opts.IssueID)
@@ -3957,7 +4012,45 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 	if opts.ForceWorktree {
 		fmt.Println("- Worktree removal forced")
 	}
+	printTaskClosePhases(result.Phases)
 	return nil
+}
+
+func taskClosePhaseJSON(phases []daemonclient.TaskClosePhaseTiming) []map[string]any {
+	out := make([]map[string]any, 0, len(phases))
+	for _, phase := range phases {
+		name := strings.TrimSpace(phase.Name)
+		if name == "" {
+			continue
+		}
+		item := map[string]any{
+			"name":       name,
+			"elapsed_ms": phase.ElapsedMS,
+		}
+		if phase.Skipped {
+			item["skipped"] = true
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func printTaskClosePhases(phases []daemonclient.TaskClosePhaseTiming) {
+	if len(phases) == 0 {
+		return
+	}
+	fmt.Println("- Phase timings:")
+	for _, phase := range phases {
+		name := strings.TrimSpace(phase.Name)
+		if name == "" {
+			continue
+		}
+		suffix := ""
+		if phase.Skipped {
+			suffix = " (skipped)"
+		}
+		fmt.Printf("  - %s: %s%s\n", name, phase.Elapsed().Round(time.Millisecond), suffix)
+	}
 }
 
 func IssueDeleteCommand(deps *Dependencies, opts IssueDeleteOptions) error {
