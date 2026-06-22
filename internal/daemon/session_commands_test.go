@@ -149,9 +149,14 @@ func (r *testGitRunner) Run(_ context.Context, args ...string) (string, error) {
 }
 
 type recoveringWorktreeRunner struct {
-	worktreePath string
-	branchName   string
-	listCalls    int
+	worktreePath     string
+	branchName       string
+	deletedFiles     []string
+	porcelainStatus  string
+	listCalls        int
+	lsFilesDeleted   int
+	statusCalls      int
+	worktreeAddCalls int
 }
 
 func (r *recoveringWorktreeRunner) Run(_ context.Context, args ...string) (string, error) {
@@ -165,7 +170,16 @@ func (r *recoveringWorktreeRunner) Run(_ context.Context, args ...string) (strin
 		}
 		return "worktree " + r.worktreePath + "\nbranch refs/heads/" + r.branchName + "\n\n", nil
 	}
+	if len(args) >= 4 && args[0] == "-C" && args[1] == r.worktreePath && args[2] == "ls-files" && args[3] == "-d" {
+		r.lsFilesDeleted++
+		return strings.Join(r.deletedFiles, "\n"), nil
+	}
+	if len(args) >= 4 && args[0] == "-C" && args[1] == r.worktreePath && args[2] == "status" && args[3] == "--porcelain" {
+		r.statusCalls++
+		return r.porcelainStatus, nil
+	}
 	if len(args) >= 3 && args[0] == "worktree" && args[1] == "add" && args[2] == "-b" {
+		r.worktreeAddCalls++
 		return "", fmt.Errorf("git worktree add -b failed: exit status 1: hook failed")
 	}
 	return "", nil
@@ -734,6 +748,110 @@ func TestSessionStartRecoversFromPartialWorktreeCreate(t *testing.T) {
 	}
 	if got := tmuxRunner.env[sessionID]["AZEDARACH_SESSION_ID"]; got != sessionID {
 		t.Fatalf("tmux AZEDARACH_SESSION_ID = %q, want %q", got, sessionID)
+	}
+}
+
+func TestSessionStartRefusesRecoveredDirtyWorktreeBeforeInitAndLaunch(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Refuse dirty recovered worktree",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	branch := "testuser/" + issueID + "/refuse-dirty-recovery"
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	initMarker := filepath.Join(worktreePath, "init-ran")
+	worktreeRunner := &recoveringWorktreeRunner{
+		worktreePath:    worktreePath,
+		branchName:      branch,
+		deletedFiles:    []string{"internal-docs/setup.md", "ui/package.json"},
+		porcelainStatus: " D internal-docs/setup.md\n D ui/package.json\n?? generated.js\n",
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:              repoDir,
+			BaseBranch:           "main",
+			CLITool:              "codex",
+			SessionShell:         "zsh",
+			WorktreeInitCommands: []string{"touch init-ran"},
+			Logger:               slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-refuse-dirty-recovered",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.start",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"session_id": issueID,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if resp.OK || resp.Error == nil {
+		t.Fatalf("session start response = %+v, want dirty worktree error", resp)
+	}
+	for _, want := range []string{
+		"refusing to start session",
+		issueID,
+		worktreePath,
+		"2 tracked deletion(s) from git ls-files -d",
+		"dirty git status --porcelain output",
+		"git -C " + worktreePath + " status --porcelain",
+		"repair the checkout or remove the worktree",
+	} {
+		if !strings.Contains(resp.Error.Message, want) {
+			t.Fatalf("error message = %q, want %q", resp.Error.Message, want)
+		}
+	}
+	if worktreeRunner.lsFilesDeleted != 1 {
+		t.Fatalf("ls-files -d calls = %d, want 1", worktreeRunner.lsFilesDeleted)
+	}
+	if worktreeRunner.statusCalls != 1 {
+		t.Fatalf("status --porcelain calls = %d, want 1", worktreeRunner.statusCalls)
+	}
+	if _, err := os.Stat(initMarker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("init marker stat error = %v, want not exist", err)
+	}
+	if tmuxRunner.sendKeysCalls != 0 {
+		t.Fatalf("send-keys calls = %d, want 0", tmuxRunner.sendKeysCalls)
+	}
+	if tmuxRunner.sessions[naming.CanonicalSessionID(projectID, issueID)] {
+		t.Fatalf("tmux session %q was created", naming.CanonicalSessionID(projectID, issueID))
 	}
 }
 

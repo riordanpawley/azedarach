@@ -684,6 +684,10 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree already exists but could not be loaded: %v", recoverErr)), nil
 		}
 	}
+	if err := d.ensureSessionStartWorktreeClean(ctx, worktreeManager, cmd.IssueID, worktree.Path); err != nil {
+		cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
+	}
 	if !reusedWorktree {
 		if len(d.runtimeConfigForProject(cmd.ProjectID).WorktreeInitCommands) > 0 {
 			reportSessionStartProgress(ctx, "worktree_preflight", "running worktree init commands", 35)
@@ -1501,6 +1505,9 @@ func (d *Daemon) ensureConflictWorktree(ctx context.Context, projectID, issueID,
 		return "", "", false, errors.New("worktree manager unavailable")
 	}
 	if worktree, getErr := worktreeManager.Get(ctx, issueID); getErr == nil {
+		if err := d.ensureSessionStartWorktreeClean(ctx, worktreeManager, issueID, worktree.Path); err != nil {
+			return "", "", false, err
+		}
 		return worktree.Path, worktree.Branch, true, nil
 	}
 
@@ -1508,15 +1515,49 @@ func (d *Daemon) ensureConflictWorktree(ctx context.Context, projectID, issueID,
 	worktree, createErr := worktreeManager.CreateWithTitle(ctx, issueID, issueTitle, baseBranch)
 	if createErr != nil {
 		if recoveredWorktree, recoverErr := worktreeManager.Get(ctx, issueID); recoverErr == nil {
+			if err := d.ensureSessionStartWorktreeClean(ctx, worktreeManager, issueID, recoveredWorktree.Path); err != nil {
+				return "", "", false, err
+			}
 			return recoveredWorktree.Path, recoveredWorktree.Branch, true, nil
 		}
 		return "", "", false, createErr
+	}
+	if err := d.ensureSessionStartWorktreeClean(ctx, worktreeManager, issueID, worktree.Path); err != nil {
+		cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, issueID, worktree.Path, false)
+		return "", "", false, fmt.Errorf("%w%s", err, cleanupNote)
 	}
 	if err := d.runWorktreeInitCommands(ctx, projectID, worktree.Path); err != nil {
 		cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, issueID, worktree.Path, false)
 		return "", "", false, fmt.Errorf("worktree init failed for %s: %w%s", issueID, err, cleanupNote)
 	}
 	return worktree.Path, worktree.Branch, false, nil
+}
+
+func (d *Daemon) ensureSessionStartWorktreeClean(ctx context.Context, worktreeManager *git.WorktreeManager, issueID, worktreePath string) error {
+	if worktreeManager == nil {
+		return errors.New("worktree manager unavailable")
+	}
+	status, err := worktreeManager.CleanStatus(ctx, worktreePath)
+	if err != nil {
+		return fmt.Errorf("pre-init worktree clean check failed for issue %s at %s: %w. Inspect with 'git -C %s status --porcelain' and repair or remove the worktree before starting the session", issueID, worktreePath, err, worktreePath)
+	}
+	if status == nil || !status.HasChanges {
+		return nil
+	}
+
+	reasons := make([]string, 0, 2)
+	if len(status.DeletedTrackedFiles) > 0 {
+		reasons = append(reasons, fmt.Sprintf("%d tracked deletion(s) from git ls-files -d", len(status.DeletedTrackedFiles)))
+	}
+	if strings.TrimSpace(status.PorcelainStatus) != "" {
+		reasons = append(reasons, "dirty git status --porcelain output")
+	}
+	detail := strings.Join(reasons, "; ")
+	if detail == "" {
+		detail = "dirty worktree"
+	}
+
+	return fmt.Errorf("refusing to start session for issue %s: worktree %s is not clean before init (%s). Inspect with 'git -C %s status --porcelain' and 'git -C %s ls-files -d', then repair the checkout or remove the worktree and retry", issueID, worktreePath, detail, worktreePath, worktreePath)
 }
 
 func (d *Daemon) cleanupNewWorktreeAfterInitFailure(ctx context.Context, worktreeManager *git.WorktreeManager, issueID, worktreePath string, reusedWorktree bool) string {
