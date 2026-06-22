@@ -894,7 +894,7 @@ func lookupSessionTaskInProject(ctx context.Context, deps *Dependencies, project
 	restoreProject := applyIssueProjectOverride(deps, projectID)
 	defer restoreProject()
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := deps.DaemonClient.GetManyTaskSnapshotWithAncestorsNoDependentsMetadataOnly(ctx, []string{issueID})
 	if err != nil {
 		return domain.Task{}, nil, false, fmt.Errorf("failed to validate issue %s in project %s: %w", issueID, projectID, err)
 	}
