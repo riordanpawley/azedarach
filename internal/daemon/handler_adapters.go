@@ -590,7 +590,17 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 	}
 	worktree, err := manager.Create(ctx, issueID, baseBranch)
 	if err != nil {
-		return nil, err
+		if !errors.Is(err, git.ErrWorktreeAlreadyExists) {
+			if recoveredWorktree, recoverErr := manager.Get(ctx, issueID); recoverErr == nil {
+				worktree = recoveredWorktree
+			} else {
+				return nil, err
+			}
+		} else if existingWorktree, getErr := manager.Get(ctx, issueID); getErr == nil {
+			worktree = existingWorktree
+		} else {
+			return nil, fmt.Errorf("worktree already exists for issue %s but could not be loaded: %w", issueID, getErr)
+		}
 	}
 	if a.runtimeStore(projectID) != nil && worktree != nil {
 		taskByIssue := a.runtimeIssueTaskSnapshot(ctx, projectID)

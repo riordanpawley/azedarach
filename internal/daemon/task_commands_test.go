@@ -2728,7 +2728,7 @@ func TestTaskCloseCommandRefusesChildIntegrationToBaseWithoutAncestorTarget(t *t
 		t.Fatalf("handleTaskClose response = %+v, want child base refusal", resp)
 	}
 	if !strings.Contains(resp.Error.Message, "no active ancestor worktree branch was found") ||
-		!strings.Contains(resp.Error.Message, "start or recover the parent/ancestor worktree") ||
+		!strings.Contains(resp.Error.Message, "az worktree create "+parentID) ||
 		strings.Contains(resp.Error.Message, "--allow-base-for-child") {
 		t.Fatalf("handleTaskClose error = %q, want parent target guidance without override suggestion", resp.Error.Message)
 	}
