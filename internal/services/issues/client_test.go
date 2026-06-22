@@ -178,6 +178,142 @@ func TestClient_ExternalIssueRefsAreBackendNeutralMetadata(t *testing.T) {
 	assert.Equal(t, naming.IssueID(issueID), task.ID, "runtime task id stays Az-owned, not provider-owned")
 }
 
+func TestClient_LinearSyncExternalRefsUseCanonicalOriginTable(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:       "Synced Linear task",
+		Description: "Body",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+		Status:      domain.StatusInProgress,
+	})
+	require.NoError(t, err)
+
+	syncedAt := time.Date(2026, time.June, 19, 10, 0, 0, 0, time.UTC)
+	err = client.UpsertExternalRef(ctx, ExternalRef{
+		Provider:           "linear",
+		IssueID:            issueID,
+		ExternalID:         "lin_opaque_key",
+		ExternalIdentifier: "CHE-02091",
+		ExternalURL:        "https://linear.app/acme/issue/CHE-02091",
+		ExternalUpdatedAt:  syncedAt.Add(-time.Hour),
+		LastSyncedAt:       syncedAt,
+		LastSyncHash:       "hash-a",
+		LastSyncPayload:    `{"title":"Synced Linear task","description":"Body","priority":3}`,
+	})
+	require.NoError(t, err)
+
+	originRefs, err := client.ListExternalIssueRefs(ctx, issueID)
+	require.NoError(t, err)
+	require.Len(t, originRefs, 1)
+	assert.Equal(t, "linear", originRefs[0].Provider)
+	assert.Equal(t, "lin_opaque_key", originRefs[0].RemoteKey)
+	assert.Equal(t, "CHE-02091", originRefs[0].DisplayKey)
+
+	syncRefs, err := client.ListExternalRefs(ctx, "linear")
+	require.NoError(t, err)
+	require.Len(t, syncRefs, 1)
+	assert.Equal(t, issueID, syncRefs[0].IssueID)
+	assert.Equal(t, "lin_opaque_key", syncRefs[0].ExternalID)
+	assert.Equal(t, "CHE-02091", syncRefs[0].ExternalIdentifier)
+	assert.Equal(t, "hash-a", syncRefs[0].LastSyncHash)
+	assert.Equal(t, `{"title":"Synced Linear task","description":"Body","priority":3}`, syncRefs[0].LastSyncPayload)
+	assert.Equal(t, syncedAt, syncRefs[0].LastSyncedAt)
+
+	task, err := client.GetWithRuntime(ctx, "proj", issueID)
+	require.NoError(t, err)
+	assert.Equal(t, "linear", task.Origin)
+}
+
+func TestClient_LinearSyncExternalRefsSynthesizeBaselineForLegacyOriginRows(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:       "Legacy Linear task",
+		Description: "Legacy body",
+		Type:        domain.TypeTask,
+		Priority:    domain.P1,
+		Status:      domain.StatusOpen,
+		Labels:      []string{"bug"},
+	})
+	require.NoError(t, err)
+
+	_, err = client.UpsertExternalIssueRef(ctx, UpsertExternalIssueRefParams{
+		IssueID:       issueID,
+		Provider:      "linear",
+		ProviderScope: "team:CHE",
+		RemoteKey:     "lin_legacy_key",
+		DisplayKey:    "CHE-02092",
+	})
+	require.NoError(t, err)
+
+	syncRefs, err := client.ListExternalRefs(ctx, "linear")
+	require.NoError(t, err)
+	require.Len(t, syncRefs, 1)
+	ref := syncRefs[0]
+	assert.Equal(t, issueID, ref.IssueID)
+	assert.Equal(t, "lin_legacy_key", ref.ExternalID)
+	assert.Equal(t, "CHE-02092", ref.ExternalIdentifier)
+	assert.NotEmpty(t, ref.LastSyncHash, "legacy origin rows should not trigger a blind first push")
+	assert.JSONEq(t, `{"title":"Legacy Linear task","description":"Legacy body","priority":1}`, ref.LastSyncPayload)
+}
+
+func TestClient_MigratesLinearSyncRefsIntoCanonicalOriginTable(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	client := NewClientAtPath(dbPath, slog.Default())
+
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Legacy sync row",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	now := time.Date(2026, time.June, 19, 11, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO azedarach_external_issue_refs (
+			provider,
+			issue_id,
+			external_id,
+			external_identifier,
+			external_url,
+			last_synced_at,
+			last_sync_hash,
+			last_sync_payload
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, "linear", issueID, "lin_backfill", "CHE-02093", "https://linear.app/acme/issue/CHE-02093", now, "hash-backfill", `{"title":"Legacy sync row","description":"","priority":3}`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `DELETE FROM issue_external_refs`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE id = '0014_linear_sync_external_refs_backfill'`)
+	require.NoError(t, err)
+	require.NoError(t, client.CloseDB())
+
+	client = NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		require.NoError(t, client.CloseDB())
+	})
+
+	originRefs, err := client.ListExternalIssueRefs(ctx, issueID)
+	require.NoError(t, err)
+	require.Len(t, originRefs, 1)
+	assert.Equal(t, "linear", originRefs[0].Provider)
+	assert.Equal(t, "lin_backfill", originRefs[0].RemoteKey)
+	assert.Equal(t, "CHE-02093", originRefs[0].DisplayKey)
+
+	syncRefs, err := client.ListExternalRefs(ctx, "linear")
+	require.NoError(t, err)
+	require.Len(t, syncRefs, 1)
+	assert.Equal(t, "hash-backfill", syncRefs[0].LastSyncHash)
+}
+
 func TestClient_NormalizeProviderDisplayKeyIssueIDsMigratesDurableRefs(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -1799,6 +1935,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0011_decisions_consequences",
 		"0012_blocked_status_to_open",
 		"0013_closed_runtime_invariants",
+		"0014_linear_sync_external_refs_backfill",
 	}, got)
 }
 
