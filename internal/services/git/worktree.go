@@ -266,6 +266,16 @@ func (w *WorktreeManager) List(ctx context.Context) ([]Worktree, error) {
 	return w.parseWorktreeList(output), nil
 }
 
+// ListPaths returns every path reported by git worktree list, including paths
+// that are not parseable as Az-managed issue worktrees.
+func (w *WorktreeManager) ListPaths(ctx context.Context) ([]string, error) {
+	output, err := w.runner.Run(ctx, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list worktree paths: %w", err)
+	}
+	return parseWorktreePaths(output), nil
+}
+
 // Exists checks if a worktree exists for the given issue ID.
 func (w *WorktreeManager) Exists(ctx context.Context, issueID string) (bool, error) {
 	_, err := w.Get(ctx, issueID)
@@ -322,6 +332,21 @@ func (w *WorktreeManager) parseWorktreeList(output string) []Worktree {
 	}
 
 	return worktrees
+}
+
+func parseWorktreePaths(output string) []string {
+	paths := make([]string, 0)
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "worktree ") {
+			continue
+		}
+		path := strings.TrimSpace(strings.TrimPrefix(line, "worktree "))
+		if path != "" {
+			paths = append(paths, path)
+		}
+	}
+	return paths
 }
 
 func (w *WorktreeManager) extractCanonicalIssueID(branchName, worktreePath string) (string, bool) {
