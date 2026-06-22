@@ -301,6 +301,12 @@ type SessionCommandOptions struct {
 	PollInterval time.Duration
 }
 
+type SessionRestartAllOptions struct {
+	ForceBusy bool
+	Yolo      bool
+	JSON      bool
+}
+
 type WorktreeCreateOptions struct {
 	Project    string
 	IssueID    string
@@ -346,6 +352,22 @@ func ParseSessionStartArgs(args []string, allowProject bool, usage string) (stri
 	}
 	opts.Project = strings.TrimSpace(opts.Project)
 	return fs.Arg(0), opts, nil
+}
+
+func ParseSessionRestartAllArgs(args []string) (SessionRestartAllOptions, error) {
+	opts := SessionRestartAllOptions{}
+	fs := flag.NewFlagSet("session restart-all", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.ForceBusy, "force-busy", false, "restart busy sessions too")
+	fs.BoolVar(&opts.Yolo, "yolo", false, "resume sessions with dangerous bypass enabled")
+	fs.BoolVar(&opts.JSON, "json", false, "print JSON output")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return SessionRestartAllOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return SessionRestartAllOptions{}, fmt.Errorf("usage: az session restart-all [--force-busy] [--yolo] [--json]")
+	}
+	return opts, nil
 }
 
 type SessionResolveConflictOptions struct {
@@ -681,6 +703,58 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 	}
 
 	return printCommandOutput(resp)
+}
+
+func SessionRestartAllCommand(deps *Dependencies, opts SessionRestartAllOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	result, err := deps.DaemonClient.RestartAllSessions(ctx, daemonclient.RestartAllSessionsParams{
+		ForceBusy: opts.ForceBusy,
+		Yolo:      opts.Yolo,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to restart sessions: %w", err)
+	}
+	if opts.JSON {
+		if err := printJSON(result); err != nil {
+			return err
+		}
+		if result.Failed > 0 {
+			return fmt.Errorf("failed to restart %d session(s)", result.Failed)
+		}
+		return nil
+	}
+	printSessionRestartAllResult(result)
+	if result.Failed > 0 {
+		return fmt.Errorf("failed to restart %d session(s)", result.Failed)
+	}
+	return nil
+}
+
+func printSessionRestartAllResult(result protocol.SessionRestartAllResponseBody) {
+	fmt.Printf("Restarted %d session(s)", result.Restarted)
+	if result.Skipped > 0 || result.Failed > 0 {
+		fmt.Printf(" (%d skipped, %d failed)", result.Skipped, result.Failed)
+	}
+	fmt.Println()
+	for _, session := range result.Sessions {
+		issueID := strings.TrimSpace(session.IssueID.String())
+		if issueID == "" {
+			issueID = "(unknown issue)"
+		}
+		status := "restarted"
+		if session.Skipped {
+			status = "skipped: " + strings.TrimSpace(session.Reason)
+		}
+		if strings.TrimSpace(session.Error) != "" {
+			status = "failed: " + strings.TrimSpace(session.Error)
+		}
+		fmt.Printf("- %s (%s, activity=%s): %s\n", issueID, session.SessionID, session.Activity, status)
+	}
 }
 
 func resolveSessionStatusTarget(deps *Dependencies, issueID string) (sessionIssueTarget, error) {

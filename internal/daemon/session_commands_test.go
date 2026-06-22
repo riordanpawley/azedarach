@@ -356,6 +356,161 @@ func TestSourceForSessionInvariant(t *testing.T) {
 	}
 }
 
+func TestSessionRestartAllSkipsBusySessionsByDefault(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	idleIssue := "cph"
+	busyIssue := "cpi"
+	idleSession := naming.CanonicalSessionID(repoDir, idleIssue)
+	busySession := naming.CanonicalSessionID(repoDir, busyIssue)
+	for _, row := range []daemonstate.Session{
+		{ID: idleSession, IssueID: idleIssue, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: time.Now().UTC()},
+		{ID: busySession, IssueID: busyIssue, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: time.Now().UTC()},
+	} {
+		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, row); err != nil {
+			t.Fatalf("seed session state: %v", err)
+		}
+	}
+
+	tmuxRunner := newSessionStartTmuxRunner()
+	tmuxRunner.sessions[idleSession] = true
+	tmuxRunner.sessions[busySession] = true
+	store := daemonstate.NewStore()
+	daemon := &Daemon{
+		cfg:          Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+	}
+
+	resp, err := daemon.handleSessionRestartAll(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-restart-all",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID)}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionRestartAll error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("restart-all response error: %+v", resp.Error)
+	}
+	var result protocol.SessionRestartAllResponseBody
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if result.Restarted != 1 || result.Skipped != 1 || result.Failed != 0 {
+		t.Fatalf("result = %+v, want restarted=1 skipped=1 failed=0", result)
+	}
+	if tmuxRunner.sendKeysCalls != 2 {
+		t.Fatalf("send-keys calls = %d, want C-c and resume for idle session only", tmuxRunner.sendKeysCalls)
+	}
+	if got := tmuxRunner.sendKeysTargets; !reflect.DeepEqual(got, []string{idleSession, idleSession}) {
+		t.Fatalf("sendKeysTargets = %+v, want idle session twice", got)
+	}
+	if got := tmuxRunner.sendKeysPayloads[1]; !strings.Contains(got, "codex resume") || !strings.Contains(got, "--last") {
+		t.Fatalf("resume command = %q, want codex resume --last for idle session", got)
+	}
+}
+
+func TestSessionRestartAllForceBusyIncludesBusySessionsAndConfiguredFlags(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	issueIDs := []string{"cpj", "cpk"}
+	tmuxRunner := newSessionStartTmuxRunner()
+	for _, issueID := range issueIDs {
+		sessionID := naming.CanonicalSessionID(repoDir, issueID)
+		tmuxRunner.sessions[sessionID] = true
+		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			ID:             sessionID,
+			IssueID:        issueID,
+			State:          daemonstate.SessionStateRunning,
+			ObservedState:  daemonstate.SessionStateRunning,
+			Activity:       "busy",
+			ActivitySource: "hooks",
+			UpdatedAt:      time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("seed session state: %v", err)
+		}
+	}
+	store := daemonstate.NewStore()
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir:                    repoDir,
+			CLITool:                    "codex",
+			DangerouslySkipPermissions: true,
+			SessionShell:               "zsh",
+			Logger:                     slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+	}
+
+	resp, err := daemon.handleSessionRestartAll(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-restart-all-force",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body: marshalJSON(protocol.SessionRestartAllRequestBody{
+			ProjectID: naming.ProjectID(projectID),
+			ForceBusy: true,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionRestartAll error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("restart-all response error: %+v", resp.Error)
+	}
+	var result protocol.SessionRestartAllResponseBody
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if result.Restarted != 2 || result.Skipped != 0 || result.Failed != 0 {
+		t.Fatalf("result = %+v, want restarted=2 skipped=0 failed=0", result)
+	}
+	if tmuxRunner.sendKeysCalls != 4 {
+		t.Fatalf("send-keys calls = %d, want C-c and resume for two sessions", tmuxRunner.sendKeysCalls)
+	}
+	for _, payload := range tmuxRunner.sendKeysPayloads {
+		if strings.Contains(payload, "codex resume") && !strings.Contains(payload, "--dangerously-bypass-approvals-and-sandbox") {
+			t.Fatalf("resume command missing configured bypass flag: %q", payload)
+		}
+	}
+}
+
 type sessionStartTmuxRunner struct {
 	sessions          map[string]bool
 	windows           map[string]map[string]bool
@@ -5184,6 +5339,27 @@ func TestBuildSessionLaunchCommandAddsCodexDangerousBypassFlagInYoloMode(t *test
 	command := d.buildSessionLaunchCommand(protocol.DefaultProjectID, "axt-123", "codex-axt-123", true, nil, "")
 	if !strings.Contains(command, "--dangerously-bypass-approvals-and-sandbox") {
 		t.Fatalf("command = %q, want yolo codex bypass flag", command)
+	}
+}
+
+func TestBuildSessionResumeCommandUsesCodexResumeLastWithOptionsBeforeSelector(t *testing.T) {
+	d := &Daemon{
+		cfg: Config{
+			CLITool:                    "codex",
+			DangerouslySkipPermissions: true,
+			SessionShell:               "zsh",
+		},
+	}
+
+	command := d.buildSessionResumeCommand(protocol.DefaultProjectID, "axt-123", "codex-axt-123", false, []string{"/tmp/screen.png"})
+	wantOrder := []string{"codex", "resume", `--image "/tmp/screen.png"`, "--dangerously-bypass-approvals-and-sandbox", "--last"}
+	last := -1
+	for _, part := range wantOrder {
+		idx := strings.Index(command, part)
+		if idx <= last {
+			t.Fatalf("command = %q, want %q after index %d", command, part, last)
+		}
+		last = idx
 	}
 }
 

@@ -20,6 +20,7 @@ const (
 	CommandSessionStop            = "session.stop"
 	CommandSessionMessage         = "session.message"
 	CommandSessionResolveConflict = protocol.CommandSessionResolveConflict
+	CommandSessionRestartAll      = protocol.CommandSessionRestartAll
 )
 
 // SessionHandler routes and applies session lifecycle commands.

@@ -120,6 +120,57 @@ func TestSessionLifecycleCommandsRouteThroughDaemon(t *testing.T) {
 	}
 }
 
+func TestRestartAllSessionsRoutesThroughDaemon(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			body, err := json.Marshal(protocol.SessionRestartAllResponseBody{
+				ProjectID: naming.ProjectID("proj-a"),
+				ForceBusy: true,
+				Restarted: 1,
+				Sessions: []protocol.SessionRestartAllItem{{
+					IssueID:   naming.IssueID("az-1"),
+					SessionID: naming.SessionID("proj-a-az-1"),
+					Activity:  "busy",
+					Restarted: true,
+				}},
+			})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-a")
+	got, err := client.RestartAllSessions(context.Background(), RestartAllSessionsParams{
+		ForceBusy:  true,
+		Yolo:       true,
+		ImagePaths: []string{"/tmp/a.png"},
+	})
+	if err != nil {
+		t.Fatalf("RestartAllSessions error: %v", err)
+	}
+	if got.Restarted != 1 || !got.ForceBusy {
+		t.Fatalf("RestartAllSessions result = %+v, want restarted force result", got)
+	}
+	if transport.lastReq.Command != CommandSessionRestartAll {
+		t.Fatalf("command = %q, want %q", transport.lastReq.Command, CommandSessionRestartAll)
+	}
+	var body protocol.SessionRestartAllRequestBody
+	if err := json.Unmarshal(transport.lastReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if body.ProjectID != "proj-a" || !body.ForceBusy || !body.Yolo || len(body.ImagePaths) != 1 {
+		t.Fatalf("request body = %+v, want project force yolo image", body)
+	}
+}
+
 func TestCleanupProjectRoutesThroughDaemon(t *testing.T) {
 	transport := &lifecycleRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

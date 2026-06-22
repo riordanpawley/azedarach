@@ -12,6 +12,7 @@ const (
 
 const (
 	CommandSessionResolveConflict = "session.resolve_conflict"
+	CommandSessionRestartAll      = "session.restart_all"
 )
 
 type SessionLifecycleState string
@@ -60,4 +61,30 @@ type SessionResolveConflictResponseBody struct {
 	ConflictFiles []string         `json:"conflict_files,omitempty" msgpack:"conflict_files,omitempty"`
 	ReusedSession bool             `json:"reused_session" msgpack:"reused_session"`
 	ReusedWindow  bool             `json:"reused_window" msgpack:"reused_window"`
+}
+
+type SessionRestartAllRequestBody struct {
+	ProjectID  naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	ForceBusy  bool             `json:"force_busy,omitempty" msgpack:"force_busy,omitempty"`
+	Yolo       bool             `json:"yolo,omitempty" msgpack:"yolo,omitempty"`
+	ImagePaths []string         `json:"image_paths,omitempty" msgpack:"image_paths,omitempty"`
+}
+
+type SessionRestartAllItem struct {
+	IssueID   naming.IssueID   `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
+	SessionID naming.SessionID `json:"session_id" msgpack:"session_id"`
+	Activity  string           `json:"activity" msgpack:"activity"`
+	Restarted bool             `json:"restarted" msgpack:"restarted"`
+	Skipped   bool             `json:"skipped,omitempty" msgpack:"skipped,omitempty"`
+	Reason    string           `json:"reason,omitempty" msgpack:"reason,omitempty"`
+	Error     string           `json:"error,omitempty" msgpack:"error,omitempty"`
+}
+
+type SessionRestartAllResponseBody struct {
+	ProjectID naming.ProjectID        `json:"project_id" msgpack:"project_id"`
+	ForceBusy bool                    `json:"force_busy" msgpack:"force_busy"`
+	Restarted int                     `json:"restarted" msgpack:"restarted"`
+	Skipped   int                     `json:"skipped" msgpack:"skipped"`
+	Failed    int                     `json:"failed" msgpack:"failed"`
+	Sessions  []SessionRestartAllItem `json:"sessions" msgpack:"sessions"`
 }

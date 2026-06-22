@@ -1261,6 +1261,140 @@ func (d *Daemon) handleSessionResolveConflict(ctx context.Context, req protocol.
 	return d.handleSessionResolveConflictDirect(ctx, req)
 }
 
+func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	var body protocol.SessionRestartAllRequestBody
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	projectID := protocol.TrimProjectID(body.ProjectID.String())
+	if projectID == "" {
+		projectID = req.Meta.ProjectID.String()
+	}
+	projectID = d.canonicalProjectID(projectID)
+	if d.tmux == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "tmux client unavailable"), nil
+	}
+
+	sessionNames, err := d.listTmuxSessionsLiveForProject(ctx, projectID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	activityByIssueKey := d.sessionDisplayActivityByIssueKey(ctx, projectID)
+	namingScope := d.sessionNamingScope(projectID)
+	result := protocol.SessionRestartAllResponseBody{
+		ProjectID: naming.ProjectID(projectID),
+		ForceBusy: body.ForceBusy,
+		Sessions:  make([]protocol.SessionRestartAllItem, 0, len(sessionNames)),
+	}
+
+	for _, sessionID := range sessionNames {
+		item := protocol.SessionRestartAllItem{
+			SessionID: naming.SessionID(sessionID),
+			Activity:  "unknown",
+		}
+		issueID, ok := naming.ParseIssueIDFromSessionName(sessionID, namingScope)
+		if ok {
+			item.IssueID = naming.IssueID(issueID)
+		}
+		issueKey := sessionKey(issueID)
+		if display, found := activityByIssueKey[issueKey]; found && strings.TrimSpace(display.Activity) != "" {
+			item.Activity = display.Activity
+		}
+		if !body.ForceBusy && !sessionRestartActivityAllowed(item.Activity) {
+			item.Skipped = true
+			item.Reason = "busy"
+			if item.Activity != "busy" {
+				item.Reason = "activity_" + item.Activity
+			}
+			result.Skipped++
+			result.Sessions = append(result.Sessions, item)
+			continue
+		}
+
+		if err := d.tmux.SendKey(ctx, sessionID, "C-c"); err != nil {
+			item.Error = err.Error()
+			result.Failed++
+			result.Sessions = append(result.Sessions, item)
+			continue
+		}
+		if err := waitBeforeSessionResume(ctx, 250*time.Millisecond); err != nil {
+			item.Error = err.Error()
+			result.Failed++
+			result.Sessions = append(result.Sessions, item)
+			continue
+		}
+		resumeCommand := d.buildSessionResumeCommand(projectID, issueID, sessionID, body.Yolo, body.ImagePaths)
+		if err := d.tmux.SendKeys(ctx, sessionID, resumeCommand); err != nil {
+			item.Error = err.Error()
+			result.Failed++
+			result.Sessions = append(result.Sessions, item)
+			continue
+		}
+		item.Restarted = true
+		result.Restarted++
+		if issueID != "" {
+			d.persistRestartedSessionProjection(ctx, projectID, sessionID, issueID)
+		}
+		result.Sessions = append(result.Sessions, item)
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon session restart-all completed",
+			"project_id", projectID,
+			"force_busy", body.ForceBusy,
+			"restarted", result.Restarted,
+			"skipped", result.Skipped,
+			"failed", result.Failed,
+		)
+	}
+	resp := d.successResponse(req)
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal response body: %v", err)), nil
+	}
+	resp.Body = encoded
+	return resp, nil
+}
+
+func sessionRestartActivityAllowed(activity string) bool {
+	switch strings.ToLower(strings.TrimSpace(activity)) {
+	case "idle", "waiting", "paused":
+		return true
+	default:
+		return false
+	}
+}
+
+func waitBeforeSessionResume(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (d *Daemon) persistRestartedSessionProjection(ctx context.Context, projectID, sessionID, issueID string) {
+	session := daemonstate.Session{
+		ID:             sessionID,
+		IssueID:        issueID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "session",
+		UpdatedAt:      time.Now().UTC(),
+	}
+	if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, session); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("persist restarted session projection failed",
+			"project_id", projectID,
+			"session_id", sessionID,
+			"issue_id", issueID,
+			"error", err,
+		)
+	}
+}
+
 func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	var body protocol.SessionResolveConflictRequestBody
 	if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -2980,6 +3114,37 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 
 func (d *Daemon) buildSessionLaunchCommand(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {
 	return d.buildSessionLaunchCommandWithInitReadyPath(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt, "")
+}
+
+func (d *Daemon) buildSessionResumeCommand(projectID, issueID, sessionID string, yolo bool, imagePaths []string) string {
+	projectCfg := d.runtimeConfigForProject(projectID)
+	tool := strings.TrimSpace(projectCfg.CLITool)
+	if tool == "" {
+		tool = "claude"
+	}
+	if !strings.EqualFold(tool, "codex") {
+		return d.buildSessionLaunchCommand(projectID, issueID, sessionID, yolo, imagePaths, "")
+	}
+
+	parts := []string{
+		fmt.Sprintf(`AZEDARACH_ISSUE_ID="%s"`, escapeForShellDoubleQuotes(issueID)),
+		tool,
+		"resume",
+	}
+	for _, imagePath := range imagePaths {
+		trimmedPath := strings.TrimSpace(imagePath)
+		if trimmedPath == "" {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf(`--image "%s"`, escapeForShellDoubleQuotes(trimmedPath)))
+	}
+	if yolo || projectCfg.DangerouslySkipPermissions {
+		parts = append(parts, "--dangerously-bypass-approvals-and-sandbox")
+	}
+	// Azedarach tracks tmux session IDs, not Codex conversation UUIDs.
+	// Codex's cwd filter makes --last target this worktree's latest session.
+	parts = append(parts, "--last")
+	return strings.Join(parts, " ")
 }
 
 func (d *Daemon) buildSessionLaunchCommandWithInitReadyPath(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt, initReadyPath string) string {

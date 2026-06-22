@@ -847,6 +847,112 @@ func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 	}
 }
 
+func TestSessionRestartAllCommandUsesDaemonEnvelope(t *testing.T) {
+	var gotReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandSessionRestartAll {
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				gotReq = req
+				body, err := json.Marshal(protocol.SessionRestartAllResponseBody{
+					ProjectID: naming.ProjectID("proj"),
+					ForceBusy: false,
+					Restarted: 1,
+					Skipped:   1,
+					Sessions: []protocol.SessionRestartAllItem{
+						{IssueID: naming.IssueID("az-1"), SessionID: naming.SessionID("proj-az-1"), Activity: "idle", Restarted: true},
+						{IssueID: naming.IssueID("az-2"), SessionID: naming.SessionID("proj-az-2"), Activity: "busy", Skipped: true, Reason: "busy"},
+					},
+				})
+				if err != nil {
+					t.Fatalf("marshal response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					CompletedAt:     req.SentAt,
+					OK:              true,
+					Body:            body,
+				}, nil
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return SessionRestartAllCommand(deps, SessionRestartAllOptions{Yolo: true})
+	})
+
+	if gotReq.Command != daemonclient.CommandSessionRestartAll {
+		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandSessionRestartAll)
+	}
+	var body protocol.SessionRestartAllRequestBody
+	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if body.ProjectID != "proj" || body.ForceBusy || !body.Yolo {
+		t.Fatalf("request body = %+v, want project proj force false", body)
+	}
+	if !strings.Contains(output, "Restarted 1 session(s) (1 skipped, 0 failed)") ||
+		!strings.Contains(output, "az-2") ||
+		!strings.Contains(output, "skipped: busy") {
+		t.Fatalf("output = %q, want restart summary and skipped session", output)
+	}
+}
+
+func TestSessionRestartAllCommandPrintsFailuresBeforeReturningError(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := json.Marshal(protocol.SessionRestartAllResponseBody{
+					ProjectID: naming.ProjectID("proj"),
+					Failed:    1,
+					Sessions: []protocol.SessionRestartAllItem{{
+						IssueID:   naming.IssueID("az-1"),
+						SessionID: naming.SessionID("proj-az-1"),
+						Activity:  "idle",
+						Error:     "send-keys failed",
+					}},
+				})
+				if err != nil {
+					t.Fatalf("marshal response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					CompletedAt:     req.SentAt,
+					OK:              true,
+					Body:            body,
+				}, nil
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	var commandErr error
+	output := captureStdout(t, func() error {
+		commandErr = SessionRestartAllCommand(deps, SessionRestartAllOptions{})
+		return nil
+	})
+
+	if commandErr == nil || !strings.Contains(commandErr.Error(), "failed to restart 1 session") {
+		t.Fatalf("error = %v, want failed restart error", commandErr)
+	}
+	if !strings.Contains(output, "az-1") || !strings.Contains(output, "failed: send-keys failed") {
+		t.Fatalf("output = %q, want failed session detail", output)
+	}
+}
+
 func TestStatusCommandSkipsTaskValidationReadWait(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 

@@ -22,6 +22,7 @@ const (
 	CommandSessionMessage         = "session.message"
 	CommandSessionStatus          = "session.status"
 	CommandSessionResolveConflict = protocol.CommandSessionResolveConflict
+	CommandSessionRestartAll      = protocol.CommandSessionRestartAll
 	CommandRuntimeReconcile       = "runtime.reconcile"
 	CommandRuntimeReconcileIssue  = "runtime.reconcile_issue"
 	CommandDevServerStart         = "devserver.start"
@@ -60,6 +61,12 @@ type ResolveConflictParams struct {
 	Yolo          bool
 	ImagePaths    []string
 	Prompt        string
+}
+
+type RestartAllSessionsParams struct {
+	ForceBusy  bool
+	Yolo       bool
+	ImagePaths []string
 }
 
 type commandOutputBody struct {
@@ -266,6 +273,20 @@ func (c *Client) ResolveConflict(ctx context.Context, params ResolveConflictPara
 		Prompt:        params.Prompt,
 	}, &out); err != nil {
 		return protocol.SessionResolveConflictResponseBody{}, err
+	}
+	return out, nil
+}
+
+// RestartAllSessions asks the daemon to restart active AI sessions for the project.
+func (c *Client) RestartAllSessions(ctx context.Context, params RestartAllSessionsParams) (protocol.SessionRestartAllResponseBody, error) {
+	var out protocol.SessionRestartAllResponseBody
+	if err := c.commandJSON(ctx, CommandSessionRestartAll, protocol.SessionRestartAllRequestBody{
+		ProjectID:  c.projectID,
+		ForceBusy:  params.ForceBusy,
+		Yolo:       params.Yolo,
+		ImagePaths: append([]string(nil), params.ImagePaths...),
+	}, &out); err != nil {
+		return protocol.SessionRestartAllResponseBody{}, err
 	}
 	return out, nil
 }

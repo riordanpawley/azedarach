@@ -52,7 +52,7 @@ func main() {
 	switch command {
 	case "session":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az session <start|attach|stop|status> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az session <start|attach|stop|status|restart-all> [arguments]\n")
 			os.Exit(1)
 		}
 		sessionCommand := commandArgs[0]
@@ -1057,9 +1057,9 @@ func printRootUsage() {
 		return
 	}
 	replacements := map[string]string{
-		"session <subcommand>  Session commands (start|attach|stop|status)":                                              "session <subcommand>  Session commands (start|attach|stop|status|resolve-conflict)",
+		"session <subcommand>  Session commands (start|attach|stop|status)":                                              "session <subcommand>  Session commands (start|attach|stop|status|restart-all|resolve-conflict)",
 		"branch <subcommand>   Branch commands (merge)":                                                                  "branch <subcommand>   Branch commands (merge|agent-merge)",
-		"az session status az-123  # Show status for az-123":                                                             "az session status az-123  # Show status for az-123\n  az session resolve-conflict az-123 --file README.md",
+		"az session status az-123  # Show status for az-123":                                                             "az session status az-123  # Show status for az-123\n  az session restart-all --force-busy\n  az session resolve-conflict az-123 --file README.md",
 		"az branch merge az-123    # Repair/manual merge into resolved target branch (normal close uses az issue close)": "az branch merge az-123    # Repair/manual merge into resolved target branch (normal close uses az issue close)\n  az branch agent-merge az-123 --target base",
 	}
 	for old, new := range replacements {
@@ -1070,13 +1070,14 @@ func printRootUsage() {
 }
 
 func printSessionUsage() {
-	fmt.Println("Usage: az session <start|attach|stop|status|resolve-conflict> [arguments]")
+	fmt.Println("Usage: az session <start|attach|stop|status|restart-all|resolve-conflict> [arguments]")
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  start <issue-id>      Start a session for an issue")
 	fmt.Println("  attach <issue-id>     Attach to an existing issue session")
 	fmt.Println("  stop <issue-id>       Stop an issue session")
 	fmt.Println("  status [issue-id]     Show all sessions or one issue session status")
+	fmt.Println("  restart-all           Restart idle AI sessions; use --force-busy to include busy sessions")
 	fmt.Println("  resolve-conflict <issue-id> [--worktree <path>] [--file <path> ...] [--prompt <text>]")
 	fmt.Println("                        Launch conflict-resolution agent")
 	fmt.Println()
@@ -1132,6 +1133,11 @@ func sessionCommandUsage(command string, namespaced bool) (string, bool) {
 			return "usage: az session status [issue-id]", true
 		}
 		return "usage: az status [issue-id]", true
+	case "restart-all":
+		if namespaced {
+			return "usage: az session restart-all [--force-busy] [--yolo] [--json]", true
+		}
+		return "", false
 	case "resolve-conflict":
 		if namespaced {
 			return "usage: az session resolve-conflict <issue-id> [--worktree <path>] [--file <path> ...] [--prompt <text>]", true
@@ -1292,6 +1298,20 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
 			return cli.StatusCommand(deps, issueID)
 		})
+	case "restart-all":
+		if !namespaced {
+			return fmt.Errorf("unknown session command: %s", command)
+		}
+		if sessionHelpRequested(args...) {
+			return fmt.Errorf("usage: az session restart-all [--force-busy] [--yolo] [--json]")
+		}
+		opts, err := cli.ParseSessionRestartAllArgs(args)
+		if err != nil {
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.SessionRestartAllCommand(deps, opts)
+		})
 	case "resolve-conflict":
 		if !namespaced {
 			return fmt.Errorf("unknown session command: %s", command)
@@ -1308,7 +1328,7 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 		})
 	default:
 		if namespaced {
-			return fmt.Errorf("unknown session command: %s (usage: az session <start|attach|stop|status|resolve-conflict>)", command)
+			return fmt.Errorf("unknown session command: %s (usage: az session <start|attach|stop|status|restart-all|resolve-conflict>)", command)
 		}
 		return fmt.Errorf("unknown session command: %s", command)
 	}
