@@ -894,12 +894,11 @@ func lookupSessionTaskInProject(ctx context.Context, deps *Dependencies, project
 	restoreProject := applyIssueProjectOverride(deps, projectID)
 	defer restoreProject()
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	task, taskContext, ok, err := loadIssueMetadataTask(ctx, deps, issueID)
 	if err != nil {
 		return domain.Task{}, nil, false, fmt.Errorf("failed to validate issue %s in project %s: %w", issueID, projectID, err)
 	}
-	task, ok := findTaskByID(snapshot.Tasks, issueID)
-	return task, snapshot.Tasks, ok, nil
+	return task, taskContext, ok, nil
 }
 
 func findSessionProjectCandidate(deps *Dependencies, projectID string) (sessionProjectCandidate, bool) {
@@ -1039,11 +1038,10 @@ func validateSessionIssueID(ctx context.Context, deps *Dependencies, issueID str
 		return domain.Task{}, fmt.Errorf("invalid issue id %q: %w", issueID, err)
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	task, _, ok, err := loadIssueMetadataTask(ctx, deps, trimmed)
 	if err != nil {
 		return domain.Task{}, fmt.Errorf("failed to validate issue %s: %w", trimmed, err)
 	}
-	task, ok := findTaskByID(snapshot.Tasks, trimmed)
 	if !ok {
 		return domain.Task{}, fmt.Errorf("issue not found: %s", trimmed)
 	}
@@ -1053,6 +1051,26 @@ func validateSessionIssueID(ctx context.Context, deps *Dependencies, issueID str
 func resolveSessionStartBaseBranch(ctx context.Context, deps *Dependencies, task domain.Task) (string, error) {
 	baseBranch := resolveCLIBaseBranch(deps.Config)
 	return resolveParentWorktreeBaseBranch(ctx, deps, baseBranch, task.ID.String())
+}
+
+func loadIssueMetadataTask(ctx context.Context, deps *Dependencies, issueID string) (domain.Task, []domain.Task, bool, error) {
+	snapshot, err := deps.DaemonClient.GetManyTaskSnapshotWithAncestorsNoDependentsMetadataOnly(ctx, []string{issueID})
+	if err != nil {
+		return domain.Task{}, nil, false, err
+	}
+	task, ok := findTaskByID(snapshot.Tasks, issueID)
+	return task, snapshot.Tasks, ok, nil
+}
+
+func loadIssueMetadataTaskWithDaemonAutostartRetry(ctx context.Context, deps *Dependencies, issueID string) (domain.Task, []domain.Task, bool, error) {
+	snapshot, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskSnapshot, error) {
+		return deps.DaemonClient.GetManyTaskSnapshotWithAncestorsNoDependentsMetadataOnly(callCtx, []string{issueID})
+	})
+	if err != nil {
+		return domain.Task{}, nil, false, err
+	}
+	task, ok := findTaskByID(snapshot.Tasks, issueID)
+	return task, snapshot.Tasks, ok, nil
 }
 
 func resolveParentWorktreeBaseBranch(ctx context.Context, deps *Dependencies, baseBranch, issueIDForError string) (string, error) {
@@ -3727,11 +3745,10 @@ func IssueDoctorCommand(deps *Dependencies, opts IssueDoctorOptions) error {
 		return err
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	task, _, ok, err := loadIssueMetadataTask(ctx, deps, opts.IssueID)
 	if err != nil {
 		return fmt.Errorf("failed to inspect issue %s: %w", opts.IssueID, err)
 	}
-	task, ok := findTaskByID(snapshot.Tasks, opts.IssueID)
 	if !ok {
 		return fmt.Errorf("issue not found: %s", opts.IssueID)
 	}
@@ -3863,13 +3880,10 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 	implementations := append([]string{}, opts.Implementations...)
 	if !opts.Deferred && opts.AutoParentFromIssueID != nil && strings.TrimSpace(*opts.AutoParentFromIssueID) != "" {
 		parentIssueID := strings.TrimSpace(*opts.AutoParentFromIssueID)
-		snapshot, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskSnapshot, error) {
-			return deps.DaemonClient.ListTasksSnapshot(callCtx)
-		})
+		parentTask, _, ok, err := loadIssueMetadataTaskWithDaemonAutostartRetry(ctx, deps, parentIssueID)
 		if err != nil {
 			return issueCreateResult{}, fmt.Errorf("failed to resolve active parent issue %s: %w", parentIssueID, err)
 		}
-		parentTask, ok := findTaskByID(snapshot.Tasks, parentIssueID)
 		if !ok {
 			return issueCreateResult{}, fmt.Errorf("active issue not found for auto-parenting: %s", parentIssueID)
 		}
@@ -4424,11 +4438,11 @@ func IssueImageAddCommand(deps *Dependencies, opts IssueImageAddOptions) error {
 		return err
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	_, _, ok, err := loadIssueMetadataTask(ctx, deps, opts.IssueID)
 	if err != nil {
 		return fmt.Errorf("failed to load issue %s for image attach: %w", opts.IssueID, err)
 	}
-	if _, ok := findTaskByID(snapshot.Tasks, opts.IssueID); !ok {
+	if !ok {
 		return fmt.Errorf("issue not found: %s", opts.IssueID)
 	}
 
@@ -4474,11 +4488,11 @@ func IssueImageRemoveCommand(deps *Dependencies, opts IssueImageRemoveOptions) e
 		return err
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	_, _, ok, err := loadIssueMetadataTask(ctx, deps, opts.IssueID)
 	if err != nil {
 		return fmt.Errorf("failed to load issue %s for image removal: %w", opts.IssueID, err)
 	}
-	if _, ok := findTaskByID(snapshot.Tasks, opts.IssueID); !ok {
+	if !ok {
 		return fmt.Errorf("issue not found: %s", opts.IssueID)
 	}
 
@@ -5778,11 +5792,15 @@ func activeIssueIDFromTmuxPane(ctx context.Context, deps *Dependencies) (string,
 }
 
 func activeIssueIDFromTmuxPaneIfKnown(ctx context.Context, deps *Dependencies) (string, bool) {
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
-	if err != nil {
+	issueID, ok := activeIssueIDFromTmuxPane(ctx, deps)
+	if !ok {
 		return "", false
 	}
-	return activeIssueIDFromTmuxPaneInSnapshot(ctx, deps, snapshot)
+	_, _, found, err := loadIssueMetadataTask(ctx, deps, issueID)
+	if err != nil || !found {
+		return "", false
+	}
+	return issueID, true
 }
 
 func activeIssueIDFromTmuxPaneInSnapshot(ctx context.Context, deps *Dependencies, snapshot daemonclient.TaskSnapshot) (string, bool) {

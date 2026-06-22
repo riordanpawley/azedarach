@@ -14,7 +14,6 @@ import (
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
-	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 )
 
@@ -127,6 +126,52 @@ func TestRunStartsServingBeforeSyncBootstrapCompletes(t *testing.T) {
 	}
 }
 
+func TestRunContinuesWhenSyncBootstrapFails(t *testing.T) {
+	recorder := &bootstrapRecorder{}
+	serveStarted := make(chan struct{})
+	d := &Daemon{
+		cfg: Config{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		lock:  bootstrapRecordingLock{},
+		serve: &bootstrapRecordingServer{recorder: recorder, started: serveStarted},
+	}
+	wantErr := errors.New("linear sync bootstrap unavailable")
+	d.syncBootstrapFn = func(context.Context) error {
+		recorder.add("bootstrap-failed")
+		return wantErr
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- d.Run(ctx)
+	}()
+
+	select {
+	case <-serveStarted:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("daemon server did not continue serving after bootstrap failure")
+	}
+
+	diag := d.syncBootstrapDiagnostic()
+	if diag.Ready || diag.State != "failed" || diag.Reason != wantErr.Error() {
+		cancel()
+		t.Fatalf("sync bootstrap diagnostic = %+v, want failed diagnostic", diag)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("daemon did not stop after context cancellation")
+	}
+}
+
 func indexOfBootstrapEvent(events []string, want string) int {
 	for i, event := range events {
 		if event == want {
@@ -136,43 +181,16 @@ func indexOfBootstrapEvent(events []string, want string) int {
 	return len(events)
 }
 
-func TestSyncBootstrapGuardBlocksDependentCommands(t *testing.T) {
+func TestSyncBootstrapFailureDoesNotBlockCommands(t *testing.T) {
 	d := &Daemon{}
 
-	listResp, err := d.command(context.Background(), protocol.RequestEnvelope{
-		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-0",
-		Kind:            protocol.EnvelopeKindCommand,
-		Command:         "task.list",
-	})
-	if err != nil {
-		t.Fatalf("task.list command() error = %v", err)
-	}
-	if listResp.Error != nil && listResp.Error.Message == "sync bootstrap not ready" {
-		t.Fatal("task.list should not be rejected by sync bootstrap guard")
-	}
-
-	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
+	taskCreateReq := protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-1",
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         "task.create",
-	})
-	if err != nil {
-		t.Fatalf("command() error = %v", err)
 	}
-	if resp.OK {
-		t.Fatal("expected sync-dependent command to be rejected before bootstrap")
-	}
-	if resp.Error == nil {
-		t.Fatal("expected error envelope")
-	}
-	if got, want := resp.Error.Code, protocol.ErrorCodeUnavailable; got != want {
-		t.Fatalf("error code = %s, want %s", got, want)
-	}
-	if got, want := resp.Error.Message, "sync bootstrap not ready"; got != want {
-		t.Fatalf("error message = %q, want %q", got, want)
-	}
+	d.syncBootstrapState.markFailed(errors.New("linear sync unavailable"))
 
 	body, err := json.Marshal(protocol.OperationSubmitRequestBody{
 		ProjectID: "proj-a",
@@ -181,30 +199,42 @@ func TestSyncBootstrapGuardBlocksDependentCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
-	operationResp, err := d.command(context.Background(), protocol.RequestEnvelope{
+	operationReq := protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-1b",
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         protocol.CommandOperationSubmit,
 		Body:            body,
-	})
-	if err != nil {
-		t.Fatalf("operation command() error = %v", err)
-	}
-	if operationResp.OK {
-		t.Fatal("expected sync-dependent operation submit to be rejected before bootstrap")
-	}
-	if operationResp.Error == nil {
-		t.Fatal("expected operation error envelope")
-	}
-	if got, want := operationResp.Error.Code, protocol.ErrorCodeUnavailable; got != want {
-		t.Fatalf("operation error code = %s, want %s", got, want)
-	}
-	if got, want := operationResp.Error.Message, "sync bootstrap not ready"; got != want {
-		t.Fatalf("operation error message = %q, want %q", got, want)
 	}
 
-	d.router = daemonhandlers.NewDispatcher(nil)
+	resp, err := d.command(context.Background(), taskCreateReq)
+	if err != nil {
+		t.Fatalf("task.create command() error = %v", err)
+	}
+	if resp.Error == nil {
+		t.Fatal("expected normal task.create handler error without issue store")
+	}
+	if got := resp.Error.Code; got == protocol.ErrorCodeUnavailable {
+		t.Fatalf("task.create error code = %s, want non-bootstrap handler error", got)
+	}
+	if got := resp.Error.Message; got == "sync bootstrap not ready" {
+		t.Fatalf("task.create error message = %q, want non-bootstrap handler error", got)
+	}
+
+	operationResp, err := d.command(context.Background(), operationReq)
+	if err != nil {
+		t.Fatalf("operation.submit command() error = %v", err)
+	}
+	if operationResp.Error == nil {
+		t.Fatal("expected normal operation.submit handler error without router")
+	}
+	if got := operationResp.Error.Code; got == protocol.ErrorCodeUnavailable {
+		t.Fatalf("operation.submit error code = %s, want non-bootstrap handler error", got)
+	}
+	if got := operationResp.Error.Message; got == "sync bootstrap not ready" {
+		t.Fatalf("operation.submit error message = %q, want non-bootstrap handler error", got)
+	}
+
 	nonSyncResp, err := d.command(context.Background(), protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-2",
@@ -249,23 +279,23 @@ func TestSyncBootstrapFailureDiagnosticContract(t *testing.T) {
 		t.Fatalf("diagnostic reason = %q, want %q", got, want)
 	}
 
-	resp, handled := d.guardSyncDependentCommand(protocol.RequestEnvelope{
+	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-3",
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         "session.start",
 	})
-	if !handled {
-		t.Fatal("expected sync-dependent command to be guarded after bootstrap failure")
+	if err != nil {
+		t.Fatalf("session.start command() error = %v", err)
 	}
 	if resp.Error == nil {
-		t.Fatal("expected guarded response to include error envelope")
+		t.Fatal("expected normal session.start handler error without runtime dependencies")
 	}
-	if got, want := resp.Error.Code, protocol.ErrorCodeUnavailable; got != want {
-		t.Fatalf("guarded error code = %s, want %s", got, want)
+	if got := resp.Error.Code; got == protocol.ErrorCodeUnavailable {
+		t.Fatalf("session.start error code = %s, want non-bootstrap handler error", got)
 	}
-	if got, want := resp.Error.Message, "sync bootstrap failed: open issue store: boom"; got != want {
-		t.Fatalf("guarded error message = %q, want %q", got, want)
+	if got := resp.Error.Message; got == "sync bootstrap not ready" {
+		t.Fatalf("session.start error message = %q, want non-bootstrap handler error", got)
 	}
 }
 

@@ -57,6 +57,23 @@ func marshalTaskListBodyForProject(projectID string, tasks []domain.Task) ([]byt
 	})
 }
 
+func assertMetadataOnlyTaskGetManyRequest(t *testing.T, req protocol.RequestEnvelope, issueID string) {
+	t.Helper()
+	if req.Command != daemonclient.CommandTaskGetMany {
+		t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskGetMany)
+	}
+	var body daemonclient.TaskIDsRequest
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		t.Fatalf("unmarshal task.get_many request body: %v", err)
+	}
+	if len(body.TaskIDs) != 1 || body.TaskIDs[0].String() != issueID {
+		t.Fatalf("task_ids = %+v, want [%s]", body.TaskIDs, issueID)
+	}
+	if !body.IncludeAncestors || !body.ExcludeDependents || !body.MetadataOnly {
+		t.Fatalf("request flags ancestors=%v exclude_dependents=%v metadata_only=%v, want all true", body.IncludeAncestors, body.ExcludeDependents, body.MetadataOnly)
+	}
+}
+
 func TestNewDependenciesAtUsesBaseProjectAndGlobalRuntimeForLinkedWorktree(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
@@ -369,7 +386,8 @@ func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "issue-1")
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
@@ -405,7 +423,7 @@ func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 	if gotReq.Command != commandSessionStart {
 		t.Fatalf("command = %q, want %q", gotReq.Command, commandSessionStart)
 	}
-	if len(commands) != 3 || commands[0] != daemonclient.CommandTaskList || commands[1] != daemonclient.CommandTaskMergeBaseTarget || commands[2] != commandSessionStart {
+	if len(commands) != 3 || commands[0] != daemonclient.CommandTaskGetMany || commands[1] != daemonclient.CommandTaskMergeBaseTarget || commands[2] != commandSessionStart {
 		t.Fatalf("commands = %v", commands)
 	}
 	var body sessionRequestBody
@@ -417,6 +435,68 @@ func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 	}
 	if output != "Starting session for: issue-1 - Example\nCreating worktree from branch: main\nWorktree created: /tmp/repo-issue-1\nCreating tmux session: issue-1\n\n✓ Session started successfully\n  To attach: az attach issue-1\n  Or run:    tmux attach-session -t issue-1\n" {
 		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestStartCommandValidatesIssueFromMetadataOnlyLocalSnapshot(t *testing.T) {
+	var gotReq protocol.RequestEnvelope
+	commands := []string{}
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: "issue-1", Title: "Local issue", Status: domain.StatusOpen},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					<-ctx.Done()
+					return protocol.ResponseEnvelope{}, ctx.Err()
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "issue-1")
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:  "issue-1",
+						TargetID: "base",
+						Branch:   "main",
+					}), nil
+				case commandSessionStart:
+					gotReq = req
+					return responseWithOutput(req, "started\n"), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj").WithReadWaitPolicy(daemonclient.ReadWaitPolicy{
+			Default:  time.Nanosecond,
+			Explicit: 2 * time.Nanosecond,
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	if err := StartCommand(deps, "issue-1"); err != nil {
+		t.Fatalf("StartCommand error: %v", err)
+	}
+	if gotReq.Command != commandSessionStart {
+		t.Fatalf("command = %q, want %q", gotReq.Command, commandSessionStart)
+	}
+	if !reflect.DeepEqual(commands, []string{daemonclient.CommandTaskGetMany, daemonclient.CommandTaskMergeBaseTarget, commandSessionStart}) {
+		t.Fatalf("commands = %v", commands)
 	}
 }
 
@@ -446,7 +526,8 @@ func TestWorktreeCreateCommandCreatesWorktreeWithoutStartingSession(t *testing.T
 			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-1")
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
@@ -492,7 +573,7 @@ func TestWorktreeCreateCommandCreatesWorktreeWithoutStartingSession(t *testing.T
 	if gotCreateReq.Command != daemonclient.CommandWorktreeCreate {
 		t.Fatalf("command = %q, want %q", gotCreateReq.Command, daemonclient.CommandWorktreeCreate)
 	}
-	if !reflect.DeepEqual(commands, []string{daemonclient.CommandTaskList, daemonclient.CommandTaskMergeBaseTarget, daemonclient.CommandWorktreeCreate}) {
+	if !reflect.DeepEqual(commands, []string{daemonclient.CommandTaskGetMany, daemonclient.CommandTaskMergeBaseTarget, daemonclient.CommandWorktreeCreate}) {
 		t.Fatalf("commands = %v", commands)
 	}
 	var body map[string]any
@@ -521,7 +602,8 @@ func TestStartCommandUsesExtendedTimeout(t *testing.T) {
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "issue-1")
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
@@ -580,7 +662,8 @@ func TestStartCommandPrintsProgressStatus(t *testing.T) {
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "issue-1")
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
@@ -633,7 +716,8 @@ func TestStartCommandUsesParentWorktreeBranchForChildIssue(t *testing.T) {
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-child")
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
@@ -669,7 +753,7 @@ func TestStartCommandUsesParentWorktreeBranchForChildIssue(t *testing.T) {
 	if err := StartCommand(deps, "az-child"); err != nil {
 		t.Fatalf("StartCommand error: %v", err)
 	}
-	if len(commands) != 3 || commands[0] != daemonclient.CommandTaskList || commands[1] != daemonclient.CommandTaskMergeBaseTarget || commands[2] != commandSessionStart {
+	if len(commands) != 3 || commands[0] != daemonclient.CommandTaskGetMany || commands[1] != daemonclient.CommandTaskMergeBaseTarget || commands[2] != commandSessionStart {
 		t.Fatalf("commands = %v", commands)
 	}
 	var body sessionRequestBody
@@ -701,7 +785,8 @@ func TestStartCommandUsesNearestAncestorWorktreeBranchForNestedChildIssue(t *tes
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
 				switch req.Command {
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-child")
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
@@ -738,7 +823,7 @@ func TestStartCommandUsesNearestAncestorWorktreeBranchForNestedChildIssue(t *tes
 		t.Fatalf("StartCommand error: %v", err)
 	}
 	if len(commands) != 3 ||
-		commands[0] != daemonclient.CommandTaskList ||
+		commands[0] != daemonclient.CommandTaskGetMany ||
 		commands[1] != daemonclient.CommandTaskMergeBaseTarget ||
 		commands[2] != commandSessionStart {
 		t.Fatalf("commands = %v", commands)
@@ -798,7 +883,8 @@ func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 				DaemonClient: daemonclient.New(&fakeDaemonTransport{
 					commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 						commands = append(commands, req.Command)
-						if tt.wantCommand != commandSessionStatus && req.Command == daemonclient.CommandTaskList {
+						if tt.wantCommand != commandSessionStatus && req.Command == daemonclient.CommandTaskGetMany {
+							assertMetadataOnlyTaskGetManyRequest(t, req, tt.sessionID)
 							return protocol.ResponseEnvelope{
 								ProtocolVersion: req.ProtocolVersion,
 								RequestID:       req.RequestID,
@@ -829,7 +915,7 @@ func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 			}
 			switch tt.wantCommand {
 			case commandSessionAttach, commandSessionStop:
-				if len(commands) != 2 || commands[0] != daemonclient.CommandTaskList || commands[1] != tt.wantCommand {
+				if len(commands) != 2 || commands[0] != daemonclient.CommandTaskGetMany || commands[1] != tt.wantCommand {
 					t.Fatalf("commands = %v", commands)
 				}
 			case commandSessionStatus:
@@ -1052,9 +1138,10 @@ func TestSessionCommandsRejectInvalidOrUnknownIssueIDs(t *testing.T) {
 				DaemonClient: daemonclient.New(&fakeDaemonTransport{
 					commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 						commands = append(commands, req.Command)
-						if req.Command != daemonclient.CommandTaskList {
+						if req.Command != daemonclient.CommandTaskGetMany {
 							t.Fatalf("unexpected command: %s", req.Command)
 						}
+						assertMetadataOnlyTaskGetManyRequest(t, req, tt.issueID)
 						tasks := make([]domain.Task, 0, len(tt.taskIDs))
 						for _, id := range tt.taskIDs {
 							tasks = append(tasks, domain.Task{ID: naming.IssueID(id), Title: id, Status: domain.StatusOpen})
@@ -1089,8 +1176,8 @@ func TestSessionCommandsRejectInvalidOrUnknownIssueIDs(t *testing.T) {
 				}
 				return
 			}
-			if len(commands) != 1 || commands[0] != daemonclient.CommandTaskList {
-				t.Fatalf("commands for unknown ID = %v, want [%s]", commands, daemonclient.CommandTaskList)
+			if len(commands) != 1 || commands[0] != daemonclient.CommandTaskGetMany {
+				t.Fatalf("commands for unknown ID = %v, want [%s]", commands, daemonclient.CommandTaskGetMany)
 			}
 		})
 	}
@@ -1147,6 +1234,7 @@ func TestSessionCommandsResolveProjectPrefixedIssueIDs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var gotReq protocol.RequestEnvelope
+			resolvedIssueID := "bxc"
 			commands := []string{}
 			deps := &Dependencies{
 				Config: config.DefaultConfig(),
@@ -1154,11 +1242,22 @@ func TestSessionCommandsResolveProjectPrefixedIssueIDs(t *testing.T) {
 					commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 						commands = append(commands, req.Command+":"+req.Meta.ProjectID.String())
 						switch req.Command {
-						case daemonclient.CommandTaskList:
+						case daemonclient.CommandTaskGetMany:
+							var requestBody daemonclient.TaskIDsRequest
+							if err := json.Unmarshal(req.Body, &requestBody); err != nil {
+								t.Fatalf("unmarshal task.get_many request body: %v", err)
+							}
+							if len(requestBody.TaskIDs) != 1 {
+								t.Fatalf("task_ids = %+v, want one", requestBody.TaskIDs)
+							}
+							if !requestBody.IncludeAncestors || !requestBody.ExcludeDependents || !requestBody.MetadataOnly {
+								t.Fatalf("request flags ancestors=%v exclude_dependents=%v metadata_only=%v, want all true", requestBody.IncludeAncestors, requestBody.ExcludeDependents, requestBody.MetadataOnly)
+							}
+							resolvedIssueID = requestBody.TaskIDs[0].String()
 							projectID := req.Meta.ProjectID.String()
 							tasks := []domain.Task{{ID: "local-only", Title: "Local", Status: domain.StatusOpen}}
 							if projectID == projectB {
-								tasks = []domain.Task{{ID: "bxc", Title: "Remote", Status: domain.StatusOpen}}
+								tasks = []domain.Task{{ID: naming.IssueID(resolvedIssueID), Title: "Remote", Status: domain.StatusOpen}}
 							}
 							body, err := marshalTaskListBodyForProject(projectID, tasks)
 							if err != nil {
@@ -1204,8 +1303,8 @@ func TestSessionCommandsResolveProjectPrefixedIssueIDs(t *testing.T) {
 			if err := json.Unmarshal(gotReq.Body, &body); err != nil {
 				t.Fatalf("unmarshal body: %v", err)
 			}
-			if body.ProjectID != projectB || body.SessionID != "bxc" {
-				t.Fatalf("session request body = %+v, want project %s issue bxc", body, projectB)
+			if body.ProjectID != projectB || body.SessionID != resolvedIssueID {
+				t.Fatalf("session request body = %+v, want project %s issue %s", body, projectB, resolvedIssueID)
 			}
 			if len(commands) == 0 || !strings.Contains(commands[len(commands)-1], tt.wantCommand+":"+projectB) {
 				t.Fatalf("commands = %v, want final %s:%s", commands, tt.wantCommand, projectB)
@@ -1298,7 +1397,8 @@ func TestStartCommandWithProjectOptionTargetsRegisteredProject(t *testing.T) {
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command+":"+req.Meta.ProjectID.String())
 				switch req.Command {
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "cif")
 					projectID := req.Meta.ProjectID.String()
 					tasks := []domain.Task{{ID: "local-only", Title: "Local", Status: domain.StatusOpen}}
 					if projectID == projectB {
@@ -1358,7 +1458,7 @@ func TestStartCommandWithProjectOptionTargetsRegisteredProject(t *testing.T) {
 		t.Fatalf("session request body = %+v, want project %s issue cif base main", body, projectB)
 	}
 	if !reflect.DeepEqual(commands, []string{
-		daemonclient.CommandTaskList + ":" + projectB,
+		daemonclient.CommandTaskGetMany + ":" + projectB,
 		daemonclient.CommandTaskMergeBaseTarget + ":" + projectB,
 		commandSessionStart + ":" + projectB,
 	}) {
@@ -1392,9 +1492,10 @@ func TestSessionCommandsKeepBareIssueIDsCurrentProjectScoped(t *testing.T) {
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				if req.Command != daemonclient.CommandTaskList {
+				if req.Command != daemonclient.CommandTaskGetMany {
 					t.Fatalf("unexpected command: %s", req.Command)
 				}
+				assertMetadataOnlyTaskGetManyRequest(t, req, "bxc")
 				projectID := req.Meta.ProjectID.String()
 				seenProjects = append(seenProjects, projectID)
 				tasks := []domain.Task{}
@@ -1426,7 +1527,7 @@ func TestSessionCommandsKeepBareIssueIDsCurrentProjectScoped(t *testing.T) {
 		t.Fatalf("err = %v, want current-project issue not found", err)
 	}
 	if len(seenProjects) != 1 || seenProjects[0] != projectA {
-		t.Fatalf("task list projects = %v, want only current project %s", seenProjects, projectA)
+		t.Fatalf("task get projects = %v, want only current project %s", seenProjects, projectA)
 	}
 }
 
@@ -1441,7 +1542,8 @@ func TestStartCommandPrintsNestedOperationOutput(t *testing.T) {
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				if req.Command == daemonclient.CommandTaskList {
+				if req.Command == daemonclient.CommandTaskGetMany {
+					assertMetadataOnlyTaskGetManyRequest(t, req, "issue-1")
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
@@ -2564,7 +2666,8 @@ func TestStartCommandPrintsPendingOperationState(t *testing.T) {
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				if req.Command == daemonclient.CommandTaskList {
+				if req.Command == daemonclient.CommandTaskGetMany {
+					assertMetadataOnlyTaskGetManyRequest(t, req, "issue-1")
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
@@ -2623,7 +2726,8 @@ func TestStartCommandWithWaitPrintsTerminalOperationOutput(t *testing.T) {
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				calls++
 				switch req.Command {
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "issue-1")
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
@@ -3003,7 +3107,8 @@ func TestCommandErrorUsesTransportMessage(t *testing.T) {
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				if req.Command == daemonclient.CommandTaskList {
+				if req.Command == daemonclient.CommandTaskGetMany {
+					assertMetadataOnlyTaskGetManyRequest(t, req, "issue-1")
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
@@ -6721,7 +6826,8 @@ func TestIssueCreateCommandAutoParentsAndInheritsImplsFromActiveIssue(t *testing
 				requests = append(requests, req)
 				body := []byte{}
 				switch req.Command {
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-parent")
 					tasks, err := marshalTaskListBody([]domain.Task{
 						{
 							ID:              "az-parent",
@@ -6774,8 +6880,8 @@ func TestIssueCreateCommandAutoParentsAndInheritsImplsFromActiveIssue(t *testing
 	if len(requests) != 3 {
 		t.Fatalf("request count = %d, want 3", len(requests))
 	}
-	if requests[0].Command != daemonclient.CommandTaskList {
-		t.Fatalf("requests[0].Command = %q, want %q", requests[0].Command, daemonclient.CommandTaskList)
+	if requests[0].Command != daemonclient.CommandTaskGetMany {
+		t.Fatalf("requests[0].Command = %q, want %q", requests[0].Command, daemonclient.CommandTaskGetMany)
 	}
 	if requests[1].Command != daemonclient.CommandTaskCreate {
 		t.Fatalf("requests[1].Command = %q, want %q", requests[1].Command, daemonclient.CommandTaskCreate)
@@ -6830,7 +6936,8 @@ func TestIssueCreateCommandAutoParentsFromTmuxSessionWhenEnvMissing(t *testing.T
 				requests = append(requests, req)
 				body := []byte{}
 				switch req.Command {
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-parent")
 					tasks, err := marshalTaskListBody([]domain.Task{{
 						ID:              "az-parent",
 						Title:           "Parent",
@@ -6879,8 +6986,8 @@ func TestIssueCreateCommandAutoParentsFromTmuxSessionWhenEnvMissing(t *testing.T
 	if len(requests) != 4 {
 		t.Fatalf("request count = %d, want 4", len(requests))
 	}
-	if requests[0].Command != daemonclient.CommandTaskList || requests[1].Command != daemonclient.CommandTaskList {
-		t.Fatalf("first requests = %s, %s; want task-list confirmation then parent resolution", requests[0].Command, requests[1].Command)
+	if requests[0].Command != daemonclient.CommandTaskGetMany || requests[1].Command != daemonclient.CommandTaskGetMany {
+		t.Fatalf("first requests = %s, %s; want targeted task metadata confirmation then parent resolution", requests[0].Command, requests[1].Command)
 	}
 	var createReq daemonclient.TaskCreateParams
 	if err := json.Unmarshal(requests[2].Body, &createReq); err != nil {
@@ -7161,6 +7268,49 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 					body, err := marshalTaskListBody(tasks)
 					if err != nil {
 						t.Fatalf("marshal task list response: %v", err)
+					}
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
+				case daemonclient.CommandTaskGetMany:
+					var getManyReq daemonclient.TaskIDsRequest
+					if err := json.Unmarshal(req.Body, &getManyReq); err != nil {
+						t.Fatalf("decode task.get_many request: %v", err)
+					}
+					if len(getManyReq.TaskIDs) != 1 || !getManyReq.IncludeAncestors || !getManyReq.ExcludeDependents || !getManyReq.MetadataOnly {
+						t.Fatalf("task.get_many request = %+v, want one metadata-only issue with ancestors/no dependents", getManyReq)
+					}
+					var tasks []domain.Task
+					switch getManyReq.TaskIDs[0] {
+					case root:
+						tasks = []domain.Task{{
+							ID:              root,
+							Title:           "Parent",
+							Status:          domain.StatusInProgress,
+							Priority:        domain.P1,
+							Type:            domain.TypeTask,
+							Implementations: []string{"go-bubbletea"},
+						}}
+					case child:
+						tasks = []domain.Task{{
+							ID:       child,
+							Title:    "Child work",
+							Status:   domain.StatusOpen,
+							Priority: domain.P2,
+							Type:     domain.TypeTask,
+							ParentID: &root,
+						}, {
+							ID:              root,
+							Title:           "Parent",
+							Status:          domain.StatusInProgress,
+							Priority:        domain.P1,
+							Type:            domain.TypeTask,
+							Implementations: []string{"go-bubbletea"},
+						}}
+					default:
+						t.Fatalf("unexpected task.get_many id: %+v", getManyReq.TaskIDs)
+					}
+					body, err := marshalTaskListBody(tasks)
+					if err != nil {
+						t.Fatalf("marshal task get-many response: %v", err)
 					}
 					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
 				case daemonclient.CommandTaskCreate:
@@ -7484,7 +7634,8 @@ func TestIssueCheckDoctorAndDeleteCommandsUseDaemonTaskCommands(t *testing.T) {
 						Revision:        2,
 						Body:            body,
 					}, nil
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-1")
 					body, err := marshalTaskListBody([]domain.Task{
 						{
 							ID:        "az-1",
@@ -8310,7 +8461,8 @@ func TestIssueImageCommands(t *testing.T) {
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-1")
 					body, err := marshalTaskListBody([]domain.Task{
 						{
 							ID:        "az-1",

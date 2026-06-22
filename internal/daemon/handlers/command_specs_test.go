@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"slices"
 	"testing"
 
@@ -29,64 +28,6 @@ func TestCommandSpecRegistryProjectIDPolicy(t *testing.T) {
 		if got := CommandRequiresProjectID(tt.command); got != tt.want {
 			t.Fatalf("CommandRequiresProjectID(%q) = %v, want %v", tt.command, got, tt.want)
 		}
-	}
-}
-
-func TestCommandSpecRegistrySyncBootstrapPolicy(t *testing.T) {
-	taskResp := CommandRequiresSyncBootstrap(protocol.RequestEnvelope{Command: "task.list"})
-	if taskResp {
-		t.Fatal("expected task.list not to require sync bootstrap")
-	}
-
-	taskGetResp := CommandRequiresSyncBootstrap(protocol.RequestEnvelope{Command: "task.get"})
-	if taskGetResp {
-		t.Fatal("expected task.get not to require sync bootstrap")
-	}
-
-	sessionPauseResp := CommandRequiresSyncBootstrap(protocol.RequestEnvelope{Command: CommandSessionPause})
-	if sessionPauseResp {
-		t.Fatal("expected session.pause not to require sync bootstrap")
-	}
-
-	sessionResumeResp := CommandRequiresSyncBootstrap(protocol.RequestEnvelope{Command: CommandSessionResume})
-	if sessionResumeResp {
-		t.Fatal("expected session.resume not to require sync bootstrap")
-	}
-
-	sessionStatusResp := CommandRequiresSyncBootstrap(protocol.RequestEnvelope{Command: "session.status"})
-	if sessionStatusResp {
-		t.Fatal("expected session.status not to require sync bootstrap")
-	}
-
-	nonSyncResp := CommandRequiresSyncBootstrap(protocol.RequestEnvelope{Command: CommandGitStatus})
-	if nonSyncResp {
-		t.Fatal("expected git.status not to require sync bootstrap")
-	}
-
-	syncBody, err := json.Marshal(protocol.OperationSubmitRequestBody{
-		Kind: " session.start ",
-	})
-	if err != nil {
-		t.Fatalf("marshal sync body: %v", err)
-	}
-	if !CommandRequiresSyncBootstrap(protocol.RequestEnvelope{
-		Command: protocol.CommandOperationSubmit,
-		Body:    syncBody,
-	}) {
-		t.Fatal("expected operation.submit(session.start) to require sync bootstrap")
-	}
-
-	nonSyncBody, err := json.Marshal(protocol.OperationSubmitRequestBody{
-		Kind: "worktree.create",
-	})
-	if err != nil {
-		t.Fatalf("marshal non-sync body: %v", err)
-	}
-	if CommandRequiresSyncBootstrap(protocol.RequestEnvelope{
-		Command: protocol.CommandOperationSubmit,
-		Body:    nonSyncBody,
-	}) {
-		t.Fatal("expected operation.submit(worktree.create) not to require sync bootstrap")
 	}
 }
 
