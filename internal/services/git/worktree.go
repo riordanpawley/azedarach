@@ -27,6 +27,12 @@ type Worktree struct {
 	IssueID string // Associated issue ID
 }
 
+type WorktreeCleanStatus struct {
+	DeletedTrackedFiles []string
+	PorcelainStatus     string
+	HasChanges          bool
+}
+
 type WorktreeBranchCleanupMode int
 
 const (
@@ -58,6 +64,42 @@ func NewWorktreeManager(runner CommandRunner, repoDir string, logger *slog.Logge
 		logger:  logger,
 		repoDir: repoDir,
 	}
+}
+
+func (w *WorktreeManager) CleanStatus(ctx context.Context, worktreePath string) (*WorktreeCleanStatus, error) {
+	path := strings.TrimSpace(worktreePath)
+	if path == "" {
+		return nil, errors.New("worktree path is required")
+	}
+
+	deletedOutput, err := w.runner.Run(ctx, "-C", path, "ls-files", "-d")
+	if err != nil {
+		return nil, fmt.Errorf("list tracked deletions: %w", err)
+	}
+	statusOutput, err := w.runner.Run(ctx, "-C", path, "status", "--porcelain")
+	if err != nil {
+		return nil, fmt.Errorf("git status porcelain: %w", err)
+	}
+
+	deletedFiles := splitNonEmptyLines(deletedOutput)
+	porcelain := strings.Trim(statusOutput, "\r\n")
+	return &WorktreeCleanStatus{
+		DeletedTrackedFiles: deletedFiles,
+		PorcelainStatus:     porcelain,
+		HasChanges:          len(deletedFiles) > 0 || porcelain != "",
+	}, nil
+}
+
+func splitNonEmptyLines(value string) []string {
+	lines := strings.Split(strings.TrimSpace(value), "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 // Create creates a new worktree for the given issue ID.

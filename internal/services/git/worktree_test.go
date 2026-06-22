@@ -49,6 +49,32 @@ func (m *MockRunner) Reset() {
 	m.commands = []string{}
 }
 
+func TestWorktreeManager_CleanStatusDetectsTrackedDeletionsAndPorcelain(t *testing.T) {
+	ctx := context.Background()
+	worktreePath := "/home/user/test-repo-issue-123"
+	mock := NewMockRunner()
+	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) >= 4 && args[0] == "-C" && args[1] == worktreePath && args[2] == "ls-files" && args[3] == "-d" {
+			return "internal-docs/setup.md\nui/package.json\n", nil
+		}
+		if len(args) >= 4 && args[0] == "-C" && args[1] == worktreePath && args[2] == "status" && args[3] == "--porcelain" {
+			return " D internal-docs/setup.md\n?? generated.js\n", nil
+		}
+		return "", fmt.Errorf("unexpected git args: %v", args)
+	}
+
+	manager := NewWorktreeManager(mock, "/home/user/test-repo", slog.Default())
+	status, err := manager.CleanStatus(ctx, worktreePath)
+
+	require.NoError(t, err)
+	require.NotNil(t, status)
+	assert.True(t, status.HasChanges)
+	assert.Equal(t, []string{"internal-docs/setup.md", "ui/package.json"}, status.DeletedTrackedFiles)
+	assert.Equal(t, " D internal-docs/setup.md\n?? generated.js", status.PorcelainStatus)
+	mock.AssertCommand(t, "-C "+worktreePath+" ls-files -d")
+	mock.AssertCommand(t, "-C "+worktreePath+" status --porcelain")
+}
+
 func TestWorktreeManager_Create(t *testing.T) {
 	ctx := context.Background()
 	repoDir := "/home/user/test-repo"
