@@ -141,21 +141,28 @@ func (c *Client) UpsertExternalRef(ctx context.Context, ref ExternalRef) error {
 	if ref.LastSyncHash == "" {
 		ref.LastSyncHash = HashTaskForSync(domain.Task{ID: naming.IssueID(ref.IssueID)})
 	}
+	providerScope, metadata, err := c.linearSyncExternalRefTarget(ctx, db, ref)
+	if err != nil {
+		return c.wrapError("external-ref-upsert", ref.IssueID, err)
+	}
+	applyExternalRefSyncMetadata(metadata, ref)
+	metadataJSON, err := marshalStringMap(metadata)
+	if err != nil {
+		return c.wrapError("external-ref-upsert", ref.IssueID, err)
+	}
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO azedarach_external_issue_refs (
-			provider, issue_id, external_id, external_identifier, external_url,
-			external_updated_at, last_synced_at, last_sync_hash, last_sync_payload
+		INSERT INTO issue_external_refs (
+			issue_id, provider, provider_scope, remote_key, display_key, url,
+			metadata_json, created_at, updated_at, deleted_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(provider, issue_id) DO UPDATE SET
-			external_id = excluded.external_id,
-			external_identifier = excluded.external_identifier,
-			external_url = excluded.external_url,
-			external_updated_at = excluded.external_updated_at,
-			last_synced_at = excluded.last_synced_at,
-			last_sync_hash = excluded.last_sync_hash,
-			last_sync_payload = excluded.last_sync_payload
-	`, ref.Provider, ref.IssueID, ref.ExternalID, ref.ExternalIdentifier, nullableString(ref.ExternalURL), formatOptionalTime(ref.ExternalUpdatedAt), ref.LastSyncedAt.UTC().Format(time.RFC3339Nano), ref.LastSyncHash, nullableString(ref.LastSyncPayload))
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+		ON CONFLICT(issue_id, provider, provider_scope, remote_key) DO UPDATE SET
+			display_key = excluded.display_key,
+			url = excluded.url,
+			metadata_json = excluded.metadata_json,
+			updated_at = excluded.updated_at,
+			deleted_at = NULL
+	`, ref.IssueID, ref.Provider, providerScope, ref.ExternalID, nullableString(ref.ExternalIdentifier), nullableString(ref.ExternalURL), nullableString(metadataJSON), ref.LastSyncedAt.UTC().Format(time.RFC3339Nano), ref.LastSyncedAt.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return c.wrapError("external-ref-upsert", ref.IssueID, err)
 	}
@@ -168,11 +175,30 @@ func (c *Client) ListExternalRefs(ctx context.Context, provider string) ([]Exter
 		return nil, err
 	}
 	rows, err := db.QueryContext(ctx, `
-		SELECT provider, issue_id, external_id, external_identifier,
-			COALESCE(external_url, ''), COALESCE(external_updated_at, ''),
-			last_synced_at, last_sync_hash, COALESCE(last_sync_payload, '')
-		FROM azedarach_external_issue_refs
-		WHERE provider = ?
+		SELECT
+			r.provider,
+			r.issue_id,
+			r.remote_key,
+			COALESCE(r.display_key, ''),
+			COALESCE(r.url, ''),
+			COALESCE(r.metadata_json, ''),
+			r.updated_at,
+			COALESCE(a.external_updated_at, ''),
+			COALESCE(a.last_synced_at, ''),
+			COALESCE(a.last_sync_hash, ''),
+			COALESCE(a.last_sync_payload, ''),
+			COALESCE(i.title, ''),
+			COALESCE(i.description, ''),
+			COALESCE(i.status, ''),
+			COALESCE(i.priority, 0),
+			COALESCE(i.issue_type, ''),
+			COALESCE(i.assignee, ''),
+			COALESCE(i.labels_json, '[]')
+		FROM issue_external_refs r
+		INNER JOIN issues i ON i.id = r.issue_id AND i.deleted_at IS NULL
+		LEFT JOIN azedarach_external_issue_refs a
+			ON a.provider = r.provider AND a.issue_id = r.issue_id
+		WHERE r.provider = ? AND r.deleted_at IS NULL
 	`, strings.TrimSpace(provider))
 	if err != nil {
 		return nil, c.wrapError("external-ref-list", provider, err)
@@ -181,15 +207,136 @@ func (c *Client) ListExternalRefs(ctx context.Context, provider string) ([]Exter
 	refs := []ExternalRef{}
 	for rows.Next() {
 		var ref ExternalRef
-		var externalUpdatedRaw, lastSyncedRaw string
-		if err := rows.Scan(&ref.Provider, &ref.IssueID, &ref.ExternalID, &ref.ExternalIdentifier, &ref.ExternalURL, &externalUpdatedRaw, &lastSyncedRaw, &ref.LastSyncHash, &ref.LastSyncPayload); err != nil {
+		var metadataRaw, rowUpdatedRaw string
+		var legacyExternalUpdatedRaw, legacyLastSyncedRaw, legacyHash, legacyPayload string
+		var task domain.Task
+		var statusRaw, typeRaw, labelsRaw string
+		var priorityRaw int
+		if err := rows.Scan(
+			&ref.Provider,
+			&ref.IssueID,
+			&ref.ExternalID,
+			&ref.ExternalIdentifier,
+			&ref.ExternalURL,
+			&metadataRaw,
+			&rowUpdatedRaw,
+			&legacyExternalUpdatedRaw,
+			&legacyLastSyncedRaw,
+			&legacyHash,
+			&legacyPayload,
+			&task.Title,
+			&task.Description,
+			&statusRaw,
+			&priorityRaw,
+			&typeRaw,
+			&task.Assignee,
+			&labelsRaw,
+		); err != nil {
 			return nil, err
 		}
-		ref.ExternalUpdatedAt = parseTimestamp(externalUpdatedRaw)
-		ref.LastSyncedAt = parseTimestamp(lastSyncedRaw)
+		metadata := map[string]string{}
+		if strings.TrimSpace(metadataRaw) != "" {
+			if err := json.Unmarshal([]byte(metadataRaw), &metadata); err != nil {
+				return nil, c.wrapError("external-ref-list", ref.IssueID, err)
+			}
+		}
+		ref.ExternalUpdatedAt = parseTimestamp(firstNonEmpty(metadata[externalRefMetadataExternalUpdatedAt], legacyExternalUpdatedRaw))
+		ref.LastSyncedAt = parseTimestamp(firstNonEmpty(metadata[externalRefMetadataLastSyncedAt], legacyLastSyncedRaw, rowUpdatedRaw))
+		ref.LastSyncHash = firstNonEmpty(metadata[externalRefMetadataLastSyncHash], legacyHash)
+		ref.LastSyncPayload = firstNonEmpty(metadata[externalRefMetadataLastSyncPayload], legacyPayload)
+		if ref.ExternalIdentifier == "" {
+			ref.ExternalIdentifier = ref.ExternalID
+		}
+		if ref.LastSyncHash == "" {
+			task.ID = naming.IssueID(ref.IssueID)
+			task.Status = domain.Status(statusRaw)
+			task.Priority = domain.Priority(priorityRaw)
+			task.Type = domain.TaskType(typeRaw)
+			task.Labels = decodeStringSliceJSON(labelsRaw)
+			ref.LastSyncHash = HashTaskForSync(task)
+			ref.LastSyncPayload = encodeExternalRefBaselinePayload(task)
+		}
 		refs = append(refs, ref)
 	}
 	return refs, rows.Err()
+}
+
+const (
+	externalRefMetadataExternalUpdatedAt = "linearsync.external_updated_at"
+	externalRefMetadataLastSyncedAt      = "linearsync.last_synced_at"
+	externalRefMetadataLastSyncHash      = "linearsync.last_sync_hash"
+	externalRefMetadataLastSyncPayload   = "linearsync.last_sync_payload"
+)
+
+func (c *Client) linearSyncExternalRefTarget(ctx context.Context, db *sql.DB, ref ExternalRef) (string, map[string]string, error) {
+	row := db.QueryRowContext(ctx, `
+		SELECT provider_scope, COALESCE(metadata_json, '')
+		FROM issue_external_refs
+		WHERE provider = ?
+			AND deleted_at IS NULL
+			AND (
+				issue_id = ?
+				OR remote_key = ?
+				OR display_key = ?
+			)
+		ORDER BY
+			CASE
+				WHEN issue_id = ? AND remote_key = ? THEN 0
+				WHEN issue_id = ? THEN 1
+				WHEN remote_key = ? THEN 2
+				ELSE 3
+			END,
+			updated_at DESC
+		LIMIT 1
+	`, ref.Provider, ref.IssueID, ref.ExternalID, ref.ExternalIdentifier, ref.IssueID, ref.ExternalID, ref.IssueID, ref.ExternalID)
+
+	providerScope := ""
+	metadataRaw := ""
+	err := row.Scan(&providerScope, &metadataRaw)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", nil, err
+	}
+	metadata := map[string]string{}
+	if strings.TrimSpace(metadataRaw) != "" {
+		if err := json.Unmarshal([]byte(metadataRaw), &metadata); err != nil {
+			return "", nil, err
+		}
+	}
+	return providerScope, metadata, nil
+}
+
+func applyExternalRefSyncMetadata(metadata map[string]string, ref ExternalRef) {
+	if !ref.ExternalUpdatedAt.IsZero() {
+		metadata[externalRefMetadataExternalUpdatedAt] = ref.ExternalUpdatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if !ref.LastSyncedAt.IsZero() {
+		metadata[externalRefMetadataLastSyncedAt] = ref.LastSyncedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if strings.TrimSpace(ref.LastSyncHash) != "" {
+		metadata[externalRefMetadataLastSyncHash] = strings.TrimSpace(ref.LastSyncHash)
+	}
+	if strings.TrimSpace(ref.LastSyncPayload) != "" {
+		metadata[externalRefMetadataLastSyncPayload] = strings.TrimSpace(ref.LastSyncPayload)
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func encodeExternalRefBaselinePayload(task domain.Task) string {
+	payload := map[string]any{
+		"title":       strings.TrimSpace(task.Title),
+		"description": strings.TrimSpace(task.Description),
+		"priority":    int(task.Priority),
+	}
+	raw, _ := json.Marshal(payload)
+	return string(raw)
 }
 
 func (c *Client) GetExternalSyncState(ctx context.Context, provider, projectID string) (ExternalSyncState, bool, error) {
