@@ -579,6 +579,40 @@ branch refs/heads/main
 	}
 }
 
+func TestWorktreeServiceAdapterCreateReusesExistingWorktree(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	repoDir := t.TempDir()
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-bvx")
+	runner := &staticWorktreeListRunner{
+		output: `worktree ` + repoDir + `
+HEAD abc123
+branch refs/heads/main
+
+worktree ` + worktreePath + `
+HEAD def456
+branch refs/heads/riordan/bvx/work
+`,
+	}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	adapter := &worktreeServiceAdapter{
+		manager: manager,
+		logger:  logger,
+	}
+
+	wt, err := adapter.Create(context.Background(), "proj", "bvx", "main")
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if wt == nil || wt.Path != worktreePath || wt.Branch != "riordan/bvx/work" || wt.IssueID != "bvx" {
+		t.Fatalf("worktree = %+v, want existing worktree", wt)
+	}
+	for _, command := range runner.commands {
+		if strings.HasPrefix(command, "worktree add ") {
+			t.Fatalf("existing worktree should be reused without add command, commands=%v", runner.commands)
+		}
+	}
+}
+
 func TestWorktreeServiceAdapterListUsesProjectionOnlyWhenRuntimeStoreAvailable(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	dir, err := os.MkdirTemp("", "azedarach-worktree-adapter-*")

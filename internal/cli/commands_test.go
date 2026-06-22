@@ -502,7 +502,7 @@ func TestWorktreeCreateCommandCreatesWorktreeWithoutStartingSession(t *testing.T
 	if body["project_id"] != "proj" || body["issue_id"] != "az-1" || body["base_branch"] != "main" {
 		t.Fatalf("create body = %+v", body)
 	}
-	if output != "Worktree created: /tmp/az-1\nBranch: az/az-1\nBase: main\n" {
+	if output != "Worktree ready: /tmp/az-1\nBranch: az/az-1\nBase: main\n" {
 		t.Fatalf("output = %q", output)
 	}
 }
@@ -2047,7 +2047,7 @@ func TestBranchMergeToBaseCommandBlocksChildWithoutAncestorWorktreeUnlessOverrid
 						},
 					}), nil
 				case daemonclient.CommandTaskMergeBaseTarget:
-					return protocol.ResponseEnvelope{}, fmt.Errorf("refusing to merge child issue az-child directly into base: no active ancestor worktree branch was found; start or recover the parent/ancestor worktree and close the child into that target")
+					return protocol.ResponseEnvelope{}, fmt.Errorf("refusing to merge child issue az-child directly into base: no active ancestor worktree branch was found; run `az worktree create az-parent`, then close the child into that target")
 				default:
 					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
 				}
@@ -2181,7 +2181,7 @@ func TestBranchMergeToBaseCommandBlocksChildBaseMergeWithoutOverride(t *testing.
 						},
 					}), nil
 				case daemonclient.CommandTaskMergeBaseTarget:
-					return protocol.ResponseEnvelope{}, fmt.Errorf("refusing to merge child issue az-child directly into base: no active ancestor worktree branch was found; start or recover the parent/ancestor worktree and close the child into that target")
+					return protocol.ResponseEnvelope{}, fmt.Errorf("refusing to merge child issue az-child directly into base: no active ancestor worktree branch was found; run `az worktree create az-parent`, then close the child into that target")
 				default:
 					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
 				}
@@ -2193,7 +2193,7 @@ func TestBranchMergeToBaseCommandBlocksChildBaseMergeWithoutOverride(t *testing.
 	}
 
 	err := BranchMergeToBaseCommand(deps, "az-child")
-	if err == nil || !strings.Contains(err.Error(), "start or recover the parent/ancestor worktree") || strings.Contains(err.Error(), "--allow-base-for-child") {
+	if err == nil || !strings.Contains(err.Error(), "az worktree create az-parent") || strings.Contains(err.Error(), "--allow-base-for-child") {
 		t.Fatalf("err = %v, want child base merge refusal without override suggestion", err)
 	}
 }
@@ -9043,7 +9043,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Child work should target the closest ancestor with an active worktree branch.") {
 		t.Fatalf("prime output missing child ancestor target guidance: %q", output)
 	}
-	if !strings.Contains(output, "restore or start the parent/ancestor integration target before closing the child") {
+	if !strings.Contains(output, "run `az worktree create <ancestor-issue>` to materialize the parent/ancestor integration target before closing the child") {
 		t.Fatalf("prime output missing parent/ancestor restore guidance: %q", output)
 	}
 	if !strings.Contains(output, "az worktree create <issue-id>") {

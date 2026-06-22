@@ -549,7 +549,7 @@ func WorktreeCreateCommand(deps *Dependencies, opts WorktreeCreateOptions) error
 		})
 	}
 
-	fmt.Printf("Worktree created: %s\n", worktree.Path)
+	fmt.Printf("Worktree ready: %s\n", worktree.Path)
 	fmt.Printf("Branch: %s\n", worktree.Branch)
 	fmt.Printf("Base: %s\n", baseBranch)
 	return nil

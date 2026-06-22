@@ -71,7 +71,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   {{ end }}
   - Worker intervention threshold: use status/watch/mailbox output for routine observation, and do not preemptively message, interrupt, or redirect child workers unless there is concrete, high-confidence evidence that the worker is about to violate scope, use the wrong parent/root, take a destructive action, or make a material mistake.
   - Branch merge repair targeting: `az branch merge <issue-id>` and `az branch agent-merge <issue-id> --target base` are low-level repair tools for manual merge/conflict recovery. Normal accepted-worker completion should go through `az issue close --id <issue-id>` so merge, stopped session cleanup, worktree cleanup, and issue closure stay one authoritative operation.
-  - Child work should target the closest ancestor with an active worktree branch. If no ancestor worktree exists, restore or start the parent/ancestor integration target before closing the child; do not route child work directly to base as a normal completion path.
+  - Child work should target the closest ancestor with an active worktree branch. If no ancestor worktree exists, run `az worktree create <ancestor-issue>` to materialize the parent/ancestor integration target before closing the child; do not route child work directly to base as a normal completion path.
   - Mailbox coordination:
   - Preferred event types: `worker-progress`, `worker-blocked`, `worker-integration-ready`, and `dependency-ready`; `worker-ready` and `worker-complete` are legacy aliases for `worker-integration-ready`.
   {{ if and .OrchestrationViaAz .TmuxAvailable }}
