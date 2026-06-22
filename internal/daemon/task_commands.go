@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -1349,7 +1350,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		result.WorktreeRemoved = true
 	}
 
-	if err := d.repairStaleCloseRuntimeProjections(ctx, projectID, taskID); err != nil {
+	if err := d.repairStaleRuntimeProjections(ctx, projectID, taskID); err != nil {
 		return result, fmt.Errorf("repair runtime projections before closing %s: %w", taskID, err)
 	}
 	task, err := issueClient.UpdateWithRuntime(ctx, projectID, taskID, domain.StatusDone)
@@ -1362,7 +1363,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	return result, nil
 }
 
-func (d *Daemon) repairStaleCloseRuntimeProjections(ctx context.Context, projectID, taskID string) error {
+func (d *Daemon) repairStaleRuntimeProjections(ctx context.Context, projectID, taskID string) error {
 	store := d.runtimeStateStoreForProject(projectID)
 	if store == nil {
 		return nil
@@ -1376,6 +1377,9 @@ func (d *Daemon) repairStaleCloseRuntimeProjections(ctx context.Context, project
 		return err
 	}
 	blocked := make([]string, 0)
+	var liveWorktreePaths map[string]struct{}
+	worktreePathsLoaded := false
+	worktreePathsLoadAttempted := false
 	for _, projectionProjectID := range projectIDs {
 		worktrees, err := store.ListWorktreeStates(ctx, projectionProjectID)
 		if err != nil {
@@ -1385,9 +1389,25 @@ func (d *Daemon) repairStaleCloseRuntimeProjections(ctx context.Context, project
 			if !naming.IssueIDsEqual(worktree.IssueID, taskID) || strings.TrimSpace(worktree.Path) == "" {
 				continue
 			}
-			stale, err := closeWorktreeProjectionIsStale(worktree)
+			stale, needsLivePaths, err := worktreeProjectionStaleState(worktree, liveWorktreePaths, worktreePathsLoaded)
 			if err != nil {
 				return err
+			}
+			if needsLivePaths && !worktreePathsLoadAttempted {
+				worktreePathsLoadAttempted = true
+				loadedPaths, loaded, loadErr := d.liveWorktreePathSet(ctx, projectID)
+				if loadErr != nil {
+					if d.cfg.Logger != nil {
+						d.cfg.Logger.Debug("load live worktree paths for stale projection repair failed", "project_id", projectID, "error", loadErr)
+					}
+				} else {
+					liveWorktreePaths = loadedPaths
+					worktreePathsLoaded = loaded
+				}
+				stale, _, err = worktreeProjectionStaleState(worktree, liveWorktreePaths, worktreePathsLoaded)
+				if err != nil {
+					return err
+				}
 			}
 			if stale {
 				if err := store.DeleteWorktreeState(ctx, projectionProjectID, taskID); err != nil {
@@ -1427,18 +1447,73 @@ func (d *Daemon) repairStaleCloseRuntimeProjections(ctx context.Context, project
 	return nil
 }
 
-func closeWorktreeProjectionIsStale(worktree daemonstate.WorktreeState) (bool, error) {
+func (d *Daemon) liveWorktreePathSet(ctx context.Context, projectID string) (map[string]struct{}, bool, error) {
+	manager := d.cachedWorktreeManagerForProject(projectID)
+	if manager == nil {
+		return nil, false, nil
+	}
+	paths, err := manager.ListPaths(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	out := make(map[string]struct{}, len(paths))
+	for _, worktreePath := range paths {
+		path := normalizeWorktreeProjectionPath(worktreePath)
+		if path != "" {
+			out[path] = struct{}{}
+		}
+	}
+	return out, true, nil
+}
+
+func (d *Daemon) cachedWorktreeManagerForProject(projectID string) *git.WorktreeManager {
+	if d == nil {
+		return nil
+	}
+	projectID = d.canonicalProjectID(projectID)
+	d.worktreeManagersMu.Lock()
+	defer d.worktreeManagersMu.Unlock()
+	if manager, ok := d.worktreeManagersByProject[projectID]; ok && manager != nil {
+		return manager
+	}
+	repoDir := strings.TrimSpace(d.resolveRepoDirForProjectLocked(projectID))
+	if repoDir == "" {
+		return nil
+	}
+	if manager, ok := d.worktreeManagersByRoot[repoDir]; ok && manager != nil {
+		if d.worktreeManagersByProject == nil {
+			d.worktreeManagersByProject = make(map[string]*git.WorktreeManager)
+		}
+		d.worktreeManagersByProject[projectID] = manager
+		return manager
+	}
+	return nil
+}
+
+func worktreeProjectionStaleState(worktree daemonstate.WorktreeState, liveWorktreePaths map[string]struct{}, liveWorktreePathsLoaded bool) (stale bool, needsLivePaths bool, err error) {
 	path := strings.TrimSpace(worktree.Path)
 	if path == "" {
-		return true, nil
+		return true, false, nil
 	}
 	if _, err := os.Stat(path); err == nil {
-		return false, nil
+		if liveWorktreePathsLoaded {
+			_, live := liveWorktreePaths[normalizeWorktreeProjectionPath(path)]
+			return !live, false, nil
+		}
+		return false, true, nil
 	} else if os.IsNotExist(err) {
-		return true, nil
+		return true, false, nil
 	} else {
-		return false, fmt.Errorf("inspect worktree projection %s/%s: %w", worktree.ProjectID, path, err)
+		return false, false, fmt.Errorf("inspect worktree projection %s/%s: %w", worktree.ProjectID, path, err)
 	}
+}
+
+func normalizeWorktreeProjectionPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	return filepath.Clean(path)
 }
 
 func closeSessionProjectionStopped(session daemonstate.Session) bool {
@@ -3176,6 +3251,9 @@ func (d *Daemon) deleteTask(ctx context.Context, issueClient *issues.Client, pro
 		if err := d.cleanupTaskIssueResourcesBeforeDelete(ctx, projectID, taskID, preflight.Task, result.SessionStopped); err != nil {
 			return result, err
 		}
+	}
+	if err := d.repairStaleRuntimeProjections(ctx, projectID, taskID); err != nil {
+		return result, fmt.Errorf("repair runtime projections before deleting %s: %w", taskID, err)
 	}
 	if err := issueClient.Delete(ctx, taskID); err != nil {
 		return result, err

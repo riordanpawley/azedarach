@@ -686,6 +686,41 @@ branch refs/heads/feature/something
 	assert.Equal(t, "/home/user/test-repo-issue-456", worktrees[1].Path)
 }
 
+func TestWorktreeManager_ListPathsIncludesUnmanagedWorktrees(t *testing.T) {
+	ctx := context.Background()
+	repoDir := "/home/user/test-repo"
+
+	mock := NewMockRunner()
+	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 0 && args[0] == "worktree" && args[1] == "list" {
+			return `worktree /home/user/test-repo
+HEAD abc123
+branch refs/heads/main
+
+worktree /home/user/test-repo-issue-123
+HEAD def456
+branch refs/heads/az/issue-123
+
+worktree /home/user/test-repo-feature
+HEAD jkl012
+branch refs/heads/feature/something
+`, nil
+		}
+		return "", nil
+	}
+
+	manager := NewWorktreeManager(mock, repoDir, slog.Default())
+
+	paths, err := manager.ListPaths(ctx)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"/home/user/test-repo",
+		"/home/user/test-repo-issue-123",
+		"/home/user/test-repo-feature",
+	}, paths)
+}
+
 func TestWorktreeManager_List_Empty(t *testing.T) {
 	ctx := context.Background()
 	repoDir := "/home/user/test-repo"

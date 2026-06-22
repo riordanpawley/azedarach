@@ -3945,6 +3945,9 @@ func TestTaskDeleteCleanupRepairsStaleMissingWorktreeProjection(t *testing.T) {
 		worktreeManagersByProject: map[string]*git.WorktreeManager{
 			projectID: manager,
 		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: manager,
+		},
 		sessionStore: daemonstate.NewStore(),
 		revision:     map[string]uint64{projectID: 1},
 		hub:          publish.NewHub(16, 8, logger),
@@ -3957,7 +3960,6 @@ func TestTaskDeleteCleanupRepairsStaleMissingWorktreeProjection(t *testing.T) {
 		runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
 		logger:                  logger,
 	}
-
 	body, err := json.Marshal(taskDeleteRequest{
 		TaskID:         taskID,
 		Cleanup:        true,
@@ -4007,6 +4009,338 @@ func TestTaskDeleteCleanupRepairsStaleMissingWorktreeProjection(t *testing.T) {
 	}
 	if session.State != daemonstate.SessionStateStopped || session.ObservedState != daemonstate.SessionStateStopped {
 		t.Fatalf("session projection = %+v, want desired/observed stopped", session)
+	}
+}
+
+func TestTaskDeleteCleanupRepairsStaleLegacyProjectWorktreeProjection(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-task-delete-current-runtime"
+	legacyProjectID := "proj-task-delete-legacy-runtime"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Delete stale legacy runtime",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	staleWorktreePath := filepath.Join(repoDir, "missing-legacy-"+taskID)
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: legacyProjectID,
+		IssueID:   taskID,
+		Path:      staleWorktreePath,
+		Branch:    "riordan/" + taskID + "/legacy-stale-runtime",
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed legacy worktree projection: %v", err)
+	}
+
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if joined == "worktree list --porcelain" {
+			return fmt.Sprintf("worktree %s\nbranch refs/heads/main\n\n", repoDir), nil
+		}
+		return "", nil
+	}}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			SessionShell: "sh",
+			BaseBranch:   "main",
+			Logger:       logger,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: manager,
+		},
+		sessionStore: daemonstate.NewStore(),
+		revision:     map[string]uint64{projectID: 1},
+		hub:          publish.NewHub(16, 8, logger),
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
+		logger:                  logger,
+	}
+	body, err := json.Marshal(taskDeleteRequest{
+		TaskID:         taskID,
+		Cleanup:        true,
+		RemoveWorktree: true,
+		ForceWorktree:  true,
+	})
+	if err != nil {
+		t.Fatalf("marshal delete request: %v", err)
+	}
+	resp, err := d.handleTaskDelete(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-delete-stale-legacy-runtime",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.delete",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskDelete error: %v", err)
+	}
+	if !resp.OK {
+		if resp.Error != nil {
+			t.Fatalf("handleTaskDelete error = %s", resp.Error.Message)
+		}
+		t.Fatalf("handleTaskDelete response = %+v", resp)
+	}
+
+	tasks, err := issuesClient.Search(ctx, taskID)
+	if err != nil {
+		t.Fatalf("search task: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("task %s still present after cleanup delete", taskID)
+	}
+	if _, ok, err := runtimeStore.GetWorktreeStateByIssueID(ctx, legacyProjectID, taskID); err != nil {
+		t.Fatalf("get legacy worktree projection: %v", err)
+	} else if ok {
+		t.Fatalf("stale legacy worktree projection still present for %s", taskID)
+	}
+}
+
+func TestTaskDeleteCleanupRepairsLegacyProjectWorktreeProjectionMissingFromGitList(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-task-delete-current-git-list"
+	legacyProjectID := "proj-task-delete-legacy-git-list"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Delete stale legacy runtime absent from git list",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	staleWorktreePath := filepath.Join(repoDir, "existing-but-unlisted-"+taskID)
+	if err := os.MkdirAll(staleWorktreePath, 0o755); err != nil {
+		t.Fatalf("mkdir stale worktree path: %v", err)
+	}
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: legacyProjectID,
+		IssueID:   taskID,
+		Path:      staleWorktreePath,
+		Branch:    "riordan/" + taskID + "/legacy-unlisted-runtime",
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed legacy worktree projection: %v", err)
+	}
+
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if joined == "worktree list --porcelain" {
+			return fmt.Sprintf("worktree %s\nbranch refs/heads/main\n\n", repoDir), nil
+		}
+		return "", nil
+	}}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			SessionShell: "sh",
+			BaseBranch:   "main",
+			Logger:       logger,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: manager,
+		},
+		sessionStore: daemonstate.NewStore(),
+		revision:     map[string]uint64{projectID: 1},
+		hub:          publish.NewHub(16, 8, logger),
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
+		logger:                  logger,
+	}
+	body, err := json.Marshal(taskDeleteRequest{
+		TaskID:         taskID,
+		Cleanup:        true,
+		RemoveWorktree: true,
+		ForceWorktree:  true,
+	})
+	if err != nil {
+		t.Fatalf("marshal delete request: %v", err)
+	}
+	resp, err := d.handleTaskDelete(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-delete-stale-legacy-runtime-git-list",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.delete",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskDelete error: %v", err)
+	}
+	if !resp.OK {
+		if resp.Error != nil {
+			t.Fatalf("handleTaskDelete error = %s", resp.Error.Message)
+		}
+		t.Fatalf("handleTaskDelete response = %+v", resp)
+	}
+
+	tasks, err := issuesClient.Search(ctx, taskID)
+	if err != nil {
+		t.Fatalf("search task: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("task %s still present after cleanup delete", taskID)
+	}
+	if _, ok, err := runtimeStore.GetWorktreeStateByIssueID(ctx, legacyProjectID, taskID); err != nil {
+		t.Fatalf("get legacy worktree projection: %v", err)
+	} else if ok {
+		t.Fatalf("git-unlisted legacy worktree projection still present for %s", taskID)
+	}
+}
+
+func TestTaskDeleteCleanupBlocksLiveLegacyProjectWorktreeProjectionFromGitList(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-task-delete-current-live-git-list"
+	legacyProjectID := "proj-task-delete-legacy-live-git-list"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Delete live legacy runtime still in git list",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	liveWorktreePath := filepath.Join(repoDir, "existing-live-"+taskID)
+	if err := os.MkdirAll(liveWorktreePath, 0o755); err != nil {
+		t.Fatalf("mkdir live worktree path: %v", err)
+	}
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: legacyProjectID,
+		IssueID:   taskID,
+		Path:      liveWorktreePath,
+		Branch:    "feature/unparseable",
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed legacy worktree projection: %v", err)
+	}
+
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if joined == "worktree list --porcelain" {
+			return fmt.Sprintf("worktree %s\nbranch refs/heads/main\n\nworktree %s\nbranch refs/heads/feature/unparseable\n\n", repoDir, liveWorktreePath), nil
+		}
+		return "", nil
+	}}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			SessionShell: "sh",
+			BaseBranch:   "main",
+			Logger:       logger,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: manager,
+		},
+		sessionStore: daemonstate.NewStore(),
+		revision:     map[string]uint64{projectID: 1},
+		hub:          publish.NewHub(16, 8, logger),
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
+		logger:                  logger,
+	}
+
+	body, err := json.Marshal(taskDeleteRequest{
+		TaskID:         taskID,
+		Cleanup:        true,
+		RemoveWorktree: true,
+		ForceWorktree:  true,
+	})
+	if err != nil {
+		t.Fatalf("marshal delete request: %v", err)
+	}
+	resp, err := d.handleTaskDelete(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-delete-live-legacy-runtime-git-list",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.delete",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskDelete error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "active runtime projection aliases remain") {
+		t.Fatalf("handleTaskDelete response = %+v, want live alias blocker", resp)
+	}
+	if _, ok, err := runtimeStore.GetWorktreeStateByIssueID(ctx, legacyProjectID, taskID); err != nil {
+		t.Fatalf("get legacy worktree projection: %v", err)
+	} else if !ok {
+		t.Fatalf("live legacy worktree projection was removed for %s", taskID)
 	}
 }
 
