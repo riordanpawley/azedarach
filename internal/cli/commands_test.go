@@ -6826,7 +6826,8 @@ func TestIssueCreateCommandAutoParentsAndInheritsImplsFromActiveIssue(t *testing
 				requests = append(requests, req)
 				body := []byte{}
 				switch req.Command {
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-parent")
 					tasks, err := marshalTaskListBody([]domain.Task{
 						{
 							ID:              "az-parent",
@@ -6879,8 +6880,8 @@ func TestIssueCreateCommandAutoParentsAndInheritsImplsFromActiveIssue(t *testing
 	if len(requests) != 3 {
 		t.Fatalf("request count = %d, want 3", len(requests))
 	}
-	if requests[0].Command != daemonclient.CommandTaskList {
-		t.Fatalf("requests[0].Command = %q, want %q", requests[0].Command, daemonclient.CommandTaskList)
+	if requests[0].Command != daemonclient.CommandTaskGetMany {
+		t.Fatalf("requests[0].Command = %q, want %q", requests[0].Command, daemonclient.CommandTaskGetMany)
 	}
 	if requests[1].Command != daemonclient.CommandTaskCreate {
 		t.Fatalf("requests[1].Command = %q, want %q", requests[1].Command, daemonclient.CommandTaskCreate)
@@ -6935,7 +6936,8 @@ func TestIssueCreateCommandAutoParentsFromTmuxSessionWhenEnvMissing(t *testing.T
 				requests = append(requests, req)
 				body := []byte{}
 				switch req.Command {
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-parent")
 					tasks, err := marshalTaskListBody([]domain.Task{{
 						ID:              "az-parent",
 						Title:           "Parent",
@@ -6984,8 +6986,8 @@ func TestIssueCreateCommandAutoParentsFromTmuxSessionWhenEnvMissing(t *testing.T
 	if len(requests) != 4 {
 		t.Fatalf("request count = %d, want 4", len(requests))
 	}
-	if requests[0].Command != daemonclient.CommandTaskList || requests[1].Command != daemonclient.CommandTaskList {
-		t.Fatalf("first requests = %s, %s; want task-list confirmation then parent resolution", requests[0].Command, requests[1].Command)
+	if requests[0].Command != daemonclient.CommandTaskGetMany || requests[1].Command != daemonclient.CommandTaskGetMany {
+		t.Fatalf("first requests = %s, %s; want targeted task metadata confirmation then parent resolution", requests[0].Command, requests[1].Command)
 	}
 	var createReq daemonclient.TaskCreateParams
 	if err := json.Unmarshal(requests[2].Body, &createReq); err != nil {
@@ -7266,6 +7268,49 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 					body, err := marshalTaskListBody(tasks)
 					if err != nil {
 						t.Fatalf("marshal task list response: %v", err)
+					}
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
+				case daemonclient.CommandTaskGetMany:
+					var getManyReq daemonclient.TaskIDsRequest
+					if err := json.Unmarshal(req.Body, &getManyReq); err != nil {
+						t.Fatalf("decode task.get_many request: %v", err)
+					}
+					if len(getManyReq.TaskIDs) != 1 || !getManyReq.IncludeAncestors || !getManyReq.ExcludeDependents || !getManyReq.MetadataOnly {
+						t.Fatalf("task.get_many request = %+v, want one metadata-only issue with ancestors/no dependents", getManyReq)
+					}
+					var tasks []domain.Task
+					switch getManyReq.TaskIDs[0] {
+					case root:
+						tasks = []domain.Task{{
+							ID:              root,
+							Title:           "Parent",
+							Status:          domain.StatusInProgress,
+							Priority:        domain.P1,
+							Type:            domain.TypeTask,
+							Implementations: []string{"go-bubbletea"},
+						}}
+					case child:
+						tasks = []domain.Task{{
+							ID:       child,
+							Title:    "Child work",
+							Status:   domain.StatusOpen,
+							Priority: domain.P2,
+							Type:     domain.TypeTask,
+							ParentID: &root,
+						}, {
+							ID:              root,
+							Title:           "Parent",
+							Status:          domain.StatusInProgress,
+							Priority:        domain.P1,
+							Type:            domain.TypeTask,
+							Implementations: []string{"go-bubbletea"},
+						}}
+					default:
+						t.Fatalf("unexpected task.get_many id: %+v", getManyReq.TaskIDs)
+					}
+					body, err := marshalTaskListBody(tasks)
+					if err != nil {
+						t.Fatalf("marshal task get-many response: %v", err)
 					}
 					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
 				case daemonclient.CommandTaskCreate:
@@ -7589,7 +7634,8 @@ func TestIssueCheckDoctorAndDeleteCommandsUseDaemonTaskCommands(t *testing.T) {
 						Revision:        2,
 						Body:            body,
 					}, nil
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-1")
 					body, err := marshalTaskListBody([]domain.Task{
 						{
 							ID:        "az-1",
@@ -8415,7 +8461,8 @@ func TestIssueImageCommands(t *testing.T) {
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-1")
 					body, err := marshalTaskListBody([]domain.Task{
 						{
 							ID:        "az-1",

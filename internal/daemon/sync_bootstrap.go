@@ -9,7 +9,6 @@ import (
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
-	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	"github.com/riordanpawley/azedarach/internal/services/linearsync"
 )
@@ -150,19 +149,4 @@ func (d *Daemon) bootstrapProjectSelection() linearsync.BootstrapProjectSelectio
 
 func (d *Daemon) syncBootstrapDiagnostic() syncBootstrapDiagnostic {
 	return d.syncBootstrapState.diagnostic()
-}
-
-func (d *Daemon) guardSyncDependentCommand(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, bool) {
-	if !d.shouldGuardSyncDependentCommand(req) {
-		return protocol.ResponseEnvelope{}, false
-	}
-	diag := d.syncBootstrapDiagnostic()
-	if diag.Ready {
-		return protocol.ResponseEnvelope{}, false
-	}
-	return d.errorResponse(req, protocol.ErrorCodeUnavailable, diag.message()), true
-}
-
-func (d *Daemon) shouldGuardSyncDependentCommand(req protocol.RequestEnvelope) bool {
-	return daemonhandlers.CommandRequiresSyncBootstrap(req)
 }

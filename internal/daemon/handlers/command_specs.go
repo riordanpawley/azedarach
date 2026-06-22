@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -24,20 +23,11 @@ const (
 	CommandDispatchDevServer
 )
 
-type syncBootstrapPolicy int
-
-const (
-	syncBootstrapPolicyNever syncBootstrapPolicy = iota
-	syncBootstrapPolicyAlways
-	syncBootstrapPolicyOperationKind
-)
-
 // CommandSpec describes daemon policy metadata and dispatch ownership.
 type CommandSpec struct {
-	Command             string
-	DispatchTarget      CommandDispatchTarget
-	RequiresProjectID   bool
-	syncBootstrapPolicy syncBootstrapPolicy
+	Command           string
+	DispatchTarget    CommandDispatchTarget
+	RequiresProjectID bool
 }
 
 const (
@@ -70,19 +60,19 @@ const (
 )
 
 var commandSpecRegistry = map[string]CommandSpec{
-	CommandSessionStart:                   {Command: CommandSessionStart, DispatchTarget: CommandDispatchSession, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	CommandSessionAttach:                  {Command: CommandSessionAttach, DispatchTarget: CommandDispatchSession, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
+	CommandSessionStart:                   {Command: CommandSessionStart, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},
+	CommandSessionAttach:                  {Command: CommandSessionAttach, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},
 	CommandSessionPause:                   {Command: CommandSessionPause, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},
 	CommandSessionResume:                  {Command: CommandSessionResume, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},
-	CommandSessionStop:                    {Command: CommandSessionStop, DispatchTarget: CommandDispatchSession, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	CommandSessionMessage:                 {Command: CommandSessionMessage, DispatchTarget: CommandDispatchSession, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	CommandSessionResolveConflict:         {Command: CommandSessionResolveConflict, DispatchTarget: CommandDispatchSession, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	CommandSessionRestartAll:              {Command: CommandSessionRestartAll, DispatchTarget: CommandDispatchSession, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
+	CommandSessionStop:                    {Command: CommandSessionStop, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},
+	CommandSessionMessage:                 {Command: CommandSessionMessage, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},
+	CommandSessionResolveConflict:         {Command: CommandSessionResolveConflict, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},
+	CommandSessionRestartAll:              {Command: CommandSessionRestartAll, DispatchTarget: CommandDispatchSession, RequiresProjectID: true},
 	commandSessionStatus:                  {Command: commandSessionStatus, RequiresProjectID: true},
-	commandSessionRecover:                 {Command: commandSessionRecover, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
+	commandSessionRecover:                 {Command: commandSessionRecover, RequiresProjectID: true},
 	commandRuntimeReconcile:               {Command: commandRuntimeReconcile, RequiresProjectID: true},
 	commandRuntimeReconcileIssue:          {Command: commandRuntimeReconcileIssue, RequiresProjectID: true},
-	protocol.CommandOperationSubmit:       {Command: protocol.CommandOperationSubmit, DispatchTarget: CommandDispatchOperation, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyOperationKind},
+	protocol.CommandOperationSubmit:       {Command: protocol.CommandOperationSubmit, DispatchTarget: CommandDispatchOperation, RequiresProjectID: true},
 	protocol.CommandOperationGet:          {Command: protocol.CommandOperationGet, DispatchTarget: CommandDispatchOperation, RequiresProjectID: true},
 	protocol.CommandOperationList:         {Command: protocol.CommandOperationList, DispatchTarget: CommandDispatchOperation, RequiresProjectID: true},
 	protocol.CommandOperationCancel:       {Command: protocol.CommandOperationCancel, DispatchTarget: CommandDispatchOperation, RequiresProjectID: true},
@@ -143,30 +133,30 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandUIOpenTaskDrillDown:   {Command: protocol.CommandUIOpenTaskDrillDown, RequiresProjectID: true},
 	protocol.CommandUIStateGet:            {Command: protocol.CommandUIStateGet, RequiresProjectID: true},
 	protocol.CommandUIStateSet:            {Command: protocol.CommandUIStateSet, RequiresProjectID: true},
-	protocol.CommandProjectCleanup:        {Command: protocol.CommandProjectCleanup, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
+	protocol.CommandProjectCleanup:        {Command: protocol.CommandProjectCleanup, RequiresProjectID: true},
 	commandTaskList:                       {Command: commandTaskList, RequiresProjectID: true},
 	commandTaskGet:                        {Command: commandTaskGet, RequiresProjectID: true},
 	commandTaskGetMany:                    {Command: commandTaskGetMany, RequiresProjectID: true},
-	commandTaskCreate:                     {Command: commandTaskCreate, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	commandTaskClose:                      {Command: commandTaskClose, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	commandTaskClosePreflight:             {Command: commandTaskClosePreflight, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	commandTaskDeletePreflight:            {Command: commandTaskDeletePreflight, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	commandTaskGraphReadiness:             {Command: commandTaskGraphReadiness, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	commandTaskCompleteCheck:              {Command: commandTaskCompleteCheck, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	commandTaskIntegrationReady:           {Command: commandTaskIntegrationReady, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	commandTaskMergeBaseTarget:            {Command: commandTaskMergeBaseTarget, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	commandTaskFollowOnMerge:              {Command: commandTaskFollowOnMerge, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	commandTaskUpdateStatus:               {Command: commandTaskUpdateStatus, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	commandTaskUpdateDetails:              {Command: commandTaskUpdateDetails, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	commandTaskAppendNotes:                {Command: commandTaskAppendNotes, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	commandTaskDelete:                     {Command: commandTaskDelete, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	commandTaskArchive:                    {Command: commandTaskArchive, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	commandTaskDependencyAdd:              {Command: commandTaskDependencyAdd, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	commandTaskDependencyRemove:           {Command: commandTaskDependencyRemove, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	commandTaskSnapshotExport:             {Command: commandTaskSnapshotExport, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	commandSyncRun:                        {Command: commandSyncRun, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	commandSyncConflicts:                  {Command: commandSyncConflicts, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
-	protocol.CommandTaskBulkApply:         {Command: protocol.CommandTaskBulkApply, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
+	commandTaskCreate:                     {Command: commandTaskCreate, RequiresProjectID: true},
+	commandTaskClose:                      {Command: commandTaskClose, RequiresProjectID: true},
+	commandTaskClosePreflight:             {Command: commandTaskClosePreflight, RequiresProjectID: true},
+	commandTaskDeletePreflight:            {Command: commandTaskDeletePreflight, RequiresProjectID: true},
+	commandTaskGraphReadiness:             {Command: commandTaskGraphReadiness, RequiresProjectID: true},
+	commandTaskCompleteCheck:              {Command: commandTaskCompleteCheck, RequiresProjectID: true},
+	commandTaskIntegrationReady:           {Command: commandTaskIntegrationReady, RequiresProjectID: true},
+	commandTaskMergeBaseTarget:            {Command: commandTaskMergeBaseTarget, RequiresProjectID: true},
+	commandTaskFollowOnMerge:              {Command: commandTaskFollowOnMerge, RequiresProjectID: true},
+	commandTaskUpdateStatus:               {Command: commandTaskUpdateStatus, RequiresProjectID: true},
+	commandTaskUpdateDetails:              {Command: commandTaskUpdateDetails, RequiresProjectID: true},
+	commandTaskAppendNotes:                {Command: commandTaskAppendNotes, RequiresProjectID: true},
+	commandTaskDelete:                     {Command: commandTaskDelete, RequiresProjectID: true},
+	commandTaskArchive:                    {Command: commandTaskArchive, RequiresProjectID: true},
+	commandTaskDependencyAdd:              {Command: commandTaskDependencyAdd, RequiresProjectID: true},
+	commandTaskDependencyRemove:           {Command: commandTaskDependencyRemove, RequiresProjectID: true},
+	commandTaskSnapshotExport:             {Command: commandTaskSnapshotExport, RequiresProjectID: true},
+	commandSyncRun:                        {Command: commandSyncRun, RequiresProjectID: true},
+	commandSyncConflicts:                  {Command: commandSyncConflicts, RequiresProjectID: true},
+	protocol.CommandTaskBulkApply:         {Command: protocol.CommandTaskBulkApply, RequiresProjectID: true},
 }
 
 // LookupCommandSpec returns the typed command specification for a command.
@@ -179,22 +169,6 @@ func LookupCommandSpec(command string) (CommandSpec, bool) {
 func CommandRequiresProjectID(command string) bool {
 	spec, ok := LookupCommandSpec(command)
 	return ok && spec.RequiresProjectID
-}
-
-// CommandRequiresSyncBootstrap reports whether sync bootstrap readiness is required.
-func CommandRequiresSyncBootstrap(req protocol.RequestEnvelope) bool {
-	spec, ok := LookupCommandSpec(req.Command)
-	if !ok {
-		return false
-	}
-	switch spec.syncBootstrapPolicy {
-	case syncBootstrapPolicyAlways:
-		return true
-	case syncBootstrapPolicyOperationKind:
-		return syncDependentOperationKind(req.Body)
-	default:
-		return false
-	}
 }
 
 // DispatcherTarget returns the handler module responsible for a command.
@@ -218,15 +192,6 @@ func DaemonRoutesThroughDispatcher(command string) bool {
 	default:
 		return false
 	}
-}
-
-func syncDependentOperationKind(body []byte) bool {
-	var req protocol.OperationSubmitRequestBody
-	if err := json.Unmarshal(body, &req); err != nil {
-		return false
-	}
-	kind := strings.TrimSpace(req.Kind)
-	return strings.HasPrefix(kind, "task.") || strings.HasPrefix(kind, "session.")
 }
 
 // RegisteredCommands returns all commands in the registry sorted lexicographically.
@@ -259,9 +224,6 @@ func ValidateCommandSpecs() error {
 		case CommandDispatchNone, CommandDispatchSession, CommandDispatchOperation, CommandDispatchPR, CommandDispatchSpec, CommandDispatchDecision, CommandDispatchGit, CommandDispatchWorktree, CommandDispatchDevServer:
 		default:
 			return fmt.Errorf("command spec %q declares unknown dispatch target %d", key, spec.DispatchTarget)
-		}
-		if spec.syncBootstrapPolicy == syncBootstrapPolicyOperationKind && key != protocol.CommandOperationSubmit {
-			return fmt.Errorf("command spec %q uses operation-kind sync policy but is not %q", key, protocol.CommandOperationSubmit)
 		}
 	}
 	return nil

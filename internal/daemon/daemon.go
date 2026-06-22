@@ -481,10 +481,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	bootstrapStartedAt := time.Now()
 	if err := d.bootstrapSyncOrchestrator(ctx); err != nil {
-		d.cfg.Logger.Error("daemon startup phase failed", "phase", "sync_bootstrap", "duration_ms", time.Since(bootstrapStartedAt).Milliseconds(), "error", err)
-		return err
+		d.cfg.Logger.Warn("daemon startup optional phase failed",
+			"phase", "sync_bootstrap",
+			"duration_ms", time.Since(bootstrapStartedAt).Milliseconds(),
+			"error", err,
+		)
+	} else {
+		d.cfg.Logger.Info("daemon startup phase", "phase", "sync_bootstrap", "duration_ms", time.Since(bootstrapStartedAt).Milliseconds())
 	}
-	d.cfg.Logger.Info("daemon startup phase", "phase", "sync_bootstrap", "duration_ms", time.Since(bootstrapStartedAt).Milliseconds())
 	if err := checkServeErr("sync bootstrap"); err != nil {
 		return err
 	}
@@ -580,12 +584,6 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		}
 	}()
 
-	guardStartedAt := time.Now()
-	if resp, handled := d.guardSyncDependentCommand(req); handled {
-		latencytrace.LogPhase(d.cfg.Logger, "daemon", "command.guard_sync_dependent", guardStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "handled", true)
-		return resp, nil
-	}
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "command.guard_sync_dependent", guardStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "handled", false)
 	beginStartedAt := time.Now()
 	if err := d.beginCommand(); err != nil {
 		latencytrace.LogPhase(d.cfg.Logger, "daemon", "command.begin", beginStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "error", err)
