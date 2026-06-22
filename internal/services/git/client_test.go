@@ -1296,14 +1296,56 @@ func TestRuntimeStatus(t *testing.T) {
 	}
 }
 
+func TestRuntimeStatusUsesCurrentRemoteBaseWhenLocalBaseIsStale(t *testing.T) {
+	repo := t.TempDir()
+	runClientTestGit(t, repo, "init", "-q", "-b", "preview")
+	runClientTestGit(t, repo, "config", "user.email", "test@example.com")
+	runClientTestGit(t, repo, "config", "user.name", "Test User")
+	runClientTestGit(t, repo, "config", "remote.origin.url", "https://example.invalid/repo.git")
+	runClientTestGit(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/preview")
+
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base file: %v", err)
+	}
+	runClientTestGit(t, repo, "add", "base.txt")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "base")
+	runClientTestGit(t, repo, "update-ref", "refs/remotes/origin/preview", "HEAD")
+
+	runClientTestGit(t, repo, "checkout", "-q", "-b", "issue")
+	if err := os.WriteFile(filepath.Join(repo, "issue.txt"), []byte("issue\n"), 0o644); err != nil {
+		t.Fatalf("write issue file: %v", err)
+	}
+	runClientTestGit(t, repo, "add", "issue.txt")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "issue")
+	issueHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+	remoteBaseHead := runClientTestGitOutput(t, repo, "commit-tree", "HEAD^{tree}", "-p", issueHead, "-m", "base contains issue")
+
+	runClientTestGit(t, repo, "update-ref", "refs/remotes/origin/preview", remoteBaseHead)
+
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	status, err := client.RuntimeStatus(context.Background(), repo, "preview")
+	if err != nil {
+		t.Fatalf("RuntimeStatus() error = %v", err)
+	}
+	if status.HasChanges {
+		t.Fatalf("RuntimeStatus() dirty = true, want clean: %+v", status)
+	}
+	if status.GitAdditions != 0 || status.GitDeletions != 0 {
+		t.Fatalf("RuntimeStatus() diff totals = %d/%d, want 0/0 for merged issue head", status.GitAdditions, status.GitDeletions)
+	}
+	if status.GitAheadCount != 0 || status.GitBehindCount != 1 {
+		t.Fatalf("RuntimeStatus() ahead/behind = %d/%d, want 0/1 for issue head contained in current base", status.GitAheadCount, status.GitBehindCount)
+	}
+}
+
 func TestMergeBaseFallsBackToOriginRef(t *testing.T) {
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {
-			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "HEAD" {
-				return "", fmt.Errorf("unknown revision")
-			}
 			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "origin/main" && args[2] == "HEAD" {
 				return "def456\n", nil
+			}
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "HEAD" {
+				return "", fmt.Errorf("unknown revision")
 			}
 			return "", fmt.Errorf("unexpected command: %v", args)
 		},
@@ -1375,7 +1417,7 @@ func TestMergeBaseNonGenericBaseDoesNotFallbackToMainOrMaster(t *testing.T) {
 	if strings.Contains(err.Error(), "should not fallback") {
 		t.Fatalf("MergeBase() used unrelated fallback refs: %v; attempts=%v", err, attempts)
 	}
-	wantAttempts := []string{"preview", "origin/preview"}
+	wantAttempts := []string{"origin/preview", "preview"}
 	if !reflect.DeepEqual(attempts, wantAttempts) {
 		t.Fatalf("merge-base attempts = %v, want %v", attempts, wantAttempts)
 	}
