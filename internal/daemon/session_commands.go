@@ -685,10 +685,6 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		}
 	}
 	if !reusedWorktree {
-		if err := d.ensureSessionStartWorktreeClean(ctx, worktreeManager, cmd.IssueID, worktree.Path); err != nil {
-			cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
-		}
 		if len(d.runtimeConfigForProject(cmd.ProjectID).WorktreeInitCommands) > 0 {
 			reportSessionStartProgress(ctx, "worktree_preflight", "running worktree init commands", 35)
 		}

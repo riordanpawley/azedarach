@@ -215,6 +215,9 @@ type initFailureCleanupWorktreeRunner struct {
 	branchName     string
 	worktreeExists bool
 	removeForced   bool
+	deletedFiles   []string
+	porcelain      string
+	statusCalls    int
 }
 
 func (r *initFailureCleanupWorktreeRunner) Run(_ context.Context, args ...string) (string, error) {
@@ -232,6 +235,14 @@ func (r *initFailureCleanupWorktreeRunner) Run(_ context.Context, args ...string
 	if len(args) >= 6 && args[0] == "worktree" && args[1] == "add" && args[2] == "-b" {
 		r.worktreeExists = true
 		return "", nil
+	}
+	if len(args) >= 4 && args[0] == "-C" && args[1] == r.worktreePath && args[2] == "ls-files" && args[3] == "-d" {
+		r.statusCalls++
+		return strings.Join(r.deletedFiles, "\n"), nil
+	}
+	if len(args) >= 4 && args[0] == "-C" && args[1] == r.worktreePath && args[2] == "status" && args[3] == "--porcelain" {
+		r.statusCalls++
+		return r.porcelain, nil
 	}
 	if len(args) >= 3 && args[0] == "worktree" && args[1] == "remove" {
 		for _, arg := range args {
@@ -855,6 +866,91 @@ func TestSessionStartAllowsRecoveredDirtyWorktreeWithoutInit(t *testing.T) {
 		if strings.Contains(payload, "codex") {
 			t.Fatalf("send-keys payload = %q, want no AI launch when start_work=false", payload)
 		}
+	}
+	if !tmuxRunner.sessions[naming.CanonicalSessionID(projectID, issueID)] {
+		t.Fatalf("tmux session %q was not created", naming.CanonicalSessionID(projectID, issueID))
+	}
+}
+
+func TestSessionStartAllowsNewWorktreeWithPreInitStatusOutput(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Chefy preinit status should start",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
+	branchName := "testuser/" + issueID + "/chefy-preinit-status-shou"
+	worktreeRunner := &initFailureCleanupWorktreeRunner{
+		repoDir:      repoDir,
+		worktreePath: worktreePath,
+		branchName:   branchName,
+		deletedFiles: []string{"internal-docs/setup.md"},
+		porcelain:    " D internal-docs/setup.md\n?? generated.js\n",
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			Logger:       slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-preinit-status-worktree",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.start",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body: marshalJSON(map[string]any{
+			"project_id": projectID,
+			"session_id": issueID,
+			"start_work": false,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if !resp.OK || resp.Error != nil {
+		t.Fatalf("session start response = %+v, want success", resp)
+	}
+	if worktreeRunner.statusCalls != 0 {
+		t.Fatalf("pre-init clean status calls = %d, want 0", worktreeRunner.statusCalls)
+	}
+	if worktreeRunner.removeForced {
+		t.Fatal("new worktree should not be removed during successful session start")
+	}
+	if !worktreeRunner.worktreeExists {
+		t.Fatal("new worktree should remain after successful session start")
 	}
 	if !tmuxRunner.sessions[naming.CanonicalSessionID(projectID, issueID)] {
 		t.Fatalf("tmux session %q was not created", naming.CanonicalSessionID(projectID, issueID))

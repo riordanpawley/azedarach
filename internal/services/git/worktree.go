@@ -146,7 +146,20 @@ func (w *WorktreeManager) CreateWithTitle(ctx context.Context, issueID, issueTit
 		// In that case, attach a new worktree to the existing branch.
 		if isBranchAlreadyExistsError(err, branchName) {
 			_, retryErr := w.runner.Run(ctx, "worktree", "add", worktreePath, branchName)
+			if retryErr != nil && isWorktreeAddPathAlreadyExistsError(retryErr, worktreePath) {
+				if removeErr := w.removeOrphanedWorktreePath(worktreePath); removeErr != nil {
+					return nil, removeErr
+				}
+				_, retryErr = w.runner.Run(ctx, "worktree", "add", worktreePath, branchName)
+			}
 			if retryErr != nil {
+				return nil, fmt.Errorf("failed to create worktree: %w", retryErr)
+			}
+		} else if isWorktreeAddPathAlreadyExistsError(err, worktreePath) {
+			if removeErr := w.removeOrphanedWorktreePath(worktreePath); removeErr != nil {
+				return nil, removeErr
+			}
+			if _, retryErr := w.runner.Run(ctx, "worktree", "add", "-b", branchName, worktreePath, baseBranch); retryErr != nil {
 				return nil, fmt.Errorf("failed to create worktree: %w", retryErr)
 			}
 		} else {
@@ -161,6 +174,21 @@ func (w *WorktreeManager) CreateWithTitle(ctx context.Context, issueID, issueTit
 		Branch:  branchName,
 		IssueID: issueID,
 	}, nil
+}
+
+func (w *WorktreeManager) removeOrphanedWorktreePath(worktreePath string) error {
+	orphaned, err := isOrphanedWorktreeDirectory(worktreePath, w.repoDir)
+	if err != nil {
+		return fmt.Errorf("inspect existing worktree path %s: %w", worktreePath, err)
+	}
+	if !orphaned {
+		return fmt.Errorf("worktree path %s already exists and is not an orphaned git worktree directory", worktreePath)
+	}
+	if err := os.RemoveAll(worktreePath); err != nil {
+		return fmt.Errorf("remove orphaned worktree directory %s before create retry: %w", worktreePath, err)
+	}
+	w.logger.Info("removed orphaned worktree directory before create retry", "path", worktreePath)
+	return nil
 }
 
 // Delete removes the worktree and branch for the given issue ID.
@@ -535,6 +563,15 @@ func isBranchAlreadyExistsError(err error, branchName string) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "already exists") && strings.Contains(msg, strings.ToLower(branchName))
+}
+
+func isWorktreeAddPathAlreadyExistsError(err error, worktreePath string) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	path := strings.ToLower(strings.TrimSpace(worktreePath))
+	return path != "" && strings.Contains(msg, "already exists") && strings.Contains(msg, path)
 }
 
 func isBranchAlreadyDeletedError(err error, branchName string) bool {

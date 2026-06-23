@@ -210,6 +210,53 @@ func TestWorktreeManager_CreateWithTitle_ReusesExistingBranchOnRetry(t *testing.
 	mock.AssertCommand(t, "worktree add /home/user/test-repo-bhh "+branchName)
 }
 
+func TestWorktreeManager_CreateWithTitle_RemovesOrphanedPathBeforeExistingBranchRetry(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	issueID := "exd"
+	baseBranch := "preview"
+	issueTitle := "CIF merge code review orchestration"
+	branchName := "testuser/exd/cif-merge-code-review-or"
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
+	missingAdminPath := filepath.Join(repoDir, ".git", "worktrees", filepath.Base(worktreePath))
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755))
+	require.NoError(t, os.MkdirAll(worktreePath, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(worktreePath, ".git"), []byte("gitdir: "+missingAdminPath+"\n"), 0o644))
+
+	addExistingBranchCalls := 0
+	mock := NewMockRunner()
+	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "config" && args[1] == "user.name" {
+			return "testuser\n", nil
+		}
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "list" {
+			return fmt.Sprintf("worktree %s\nHEAD abc123\nbranch refs/heads/%s\n\n", repoDir, baseBranch), nil
+		}
+		if len(args) >= 6 && args[0] == "worktree" && args[1] == "add" && args[2] == "-b" {
+			return "", fmt.Errorf("git worktree add -b %s %s %s failed: exit status 255: Preparing worktree (new branch '%s')\nfatal: a branch named '%s' already exists", branchName, worktreePath, baseBranch, branchName, branchName)
+		}
+		if len(args) == 4 && args[0] == "worktree" && args[1] == "add" && args[2] == worktreePath && args[3] == branchName {
+			addExistingBranchCalls++
+			if addExistingBranchCalls == 1 {
+				return "", fmt.Errorf("git worktree add %s %s failed: exit status 128: Preparing worktree (checking out '%s')\nfatal: '%s' already exists", worktreePath, branchName, branchName, worktreePath)
+			}
+			require.NoError(t, os.MkdirAll(worktreePath, 0o755))
+			return "", nil
+		}
+		return "", nil
+	}
+
+	manager := NewWorktreeManager(mock, repoDir, slog.Default())
+	worktree, err := manager.CreateWithTitle(ctx, issueID, issueTitle, baseBranch)
+	require.NoError(t, err)
+	require.NotNil(t, worktree)
+	assert.Equal(t, worktreePath, worktree.Path)
+	assert.Equal(t, branchName, worktree.Branch)
+	assert.Equal(t, 2, addExistingBranchCalls)
+	mock.AssertCommand(t, "worktree add -b "+branchName+" "+worktreePath+" "+baseBranch)
+	mock.AssertCommand(t, "worktree add "+worktreePath+" "+branchName)
+}
+
 func TestWorktreeManager_Delete(t *testing.T) {
 	ctx := context.Background()
 	repoDir := "/home/user/test-repo"
