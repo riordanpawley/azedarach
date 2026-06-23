@@ -140,7 +140,7 @@ if [[ ! -d "$TAP_DIR_ABS/.git" ]]; then
   exit 1
 fi
 
-if [[ -n "$(git -C "$TAP_DIR_ABS" status --porcelain)" ]]; then
+if [[ -n "$(git -C "$TAP_DIR_ABS" status --porcelain -- . ':(exclude).DS_Store' ':(exclude)**/.DS_Store')" ]]; then
   echo "Tap repository has uncommitted changes: $TAP_DIR_ABS" >&2
   exit 1
 fi
