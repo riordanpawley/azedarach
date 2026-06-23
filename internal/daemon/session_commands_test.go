@@ -751,7 +751,7 @@ func TestSessionStartRecoversFromPartialWorktreeCreate(t *testing.T) {
 	}
 }
 
-func TestSessionStartRefusesRecoveredDirtyWorktreeBeforeInitAndLaunch(t *testing.T) {
+func TestSessionStartAllowsRecoveredDirtyWorktreeWithoutInit(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID := "proj"
@@ -764,14 +764,14 @@ func TestSessionStartRefusesRecoveredDirtyWorktreeBeforeInitAndLaunch(t *testing
 		_ = issuesClient.CloseDB()
 	})
 	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
-		Title: "Refuse dirty recovered worktree",
+		Title: "Allow dirty recovered worktree",
 		Type:  domain.TypeTask,
 	})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	branch := "testuser/" + issueID + "/refuse-dirty-recovery"
+	branch := "testuser/" + issueID + "/allow-dirty-recovery"
 	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
 	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
 		t.Fatalf("mkdir worktree: %v", err)
@@ -810,48 +810,54 @@ func TestSessionStartRefusesRecoveredDirtyWorktreeBeforeInitAndLaunch(t *testing
 
 	resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-start-refuse-dirty-recovered",
+		RequestID:       "req-start-allow-dirty-recovered",
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         "session.start",
 		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-		Body: marshalJSON(map[string]string{
+		Body: marshalJSON(map[string]any{
 			"project_id": projectID,
 			"session_id": issueID,
+			"start_work": false,
 		}),
 	})
 	if err != nil {
 		t.Fatalf("handleSessionStartDirect returned error: %v", err)
 	}
-	if resp.OK || resp.Error == nil {
-		t.Fatalf("session start response = %+v, want dirty worktree error", resp)
+	if !resp.OK || resp.Error != nil {
+		t.Fatalf("session start response = %+v, want success", resp)
+	}
+	var payload struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
+		t.Fatalf("unmarshal response body: %v", err)
 	}
 	for _, want := range []string{
-		"refusing to start session",
-		issueID,
-		worktreePath,
-		"2 tracked deletion(s) from git ls-files -d",
-		"dirty git status --porcelain output",
-		"git -C " + worktreePath + " status --porcelain",
-		"repair the checkout or remove the worktree",
+		"Worktree reused: " + worktreePath,
+		"recovered existing worktree",
+		"Skipping AI launch (tmux session only)",
+		"Session started successfully",
 	} {
-		if !strings.Contains(resp.Error.Message, want) {
-			t.Fatalf("error message = %q, want %q", resp.Error.Message, want)
+		if !strings.Contains(payload.Output, want) {
+			t.Fatalf("output = %q, want %q", payload.Output, want)
 		}
 	}
-	if worktreeRunner.lsFilesDeleted != 1 {
-		t.Fatalf("ls-files -d calls = %d, want 1", worktreeRunner.lsFilesDeleted)
+	if worktreeRunner.lsFilesDeleted != 0 {
+		t.Fatalf("ls-files -d calls = %d, want 0 for reused worktree", worktreeRunner.lsFilesDeleted)
 	}
-	if worktreeRunner.statusCalls != 1 {
-		t.Fatalf("status --porcelain calls = %d, want 1", worktreeRunner.statusCalls)
+	if worktreeRunner.statusCalls != 0 {
+		t.Fatalf("status --porcelain calls = %d, want 0 for reused worktree", worktreeRunner.statusCalls)
 	}
 	if _, err := os.Stat(initMarker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("init marker stat error = %v, want not exist", err)
 	}
-	if tmuxRunner.sendKeysCalls != 0 {
-		t.Fatalf("send-keys calls = %d, want 0", tmuxRunner.sendKeysCalls)
+	for _, payload := range tmuxRunner.sendKeysPayloads {
+		if strings.Contains(payload, "codex") {
+			t.Fatalf("send-keys payload = %q, want no AI launch when start_work=false", payload)
+		}
 	}
-	if tmuxRunner.sessions[naming.CanonicalSessionID(projectID, issueID)] {
-		t.Fatalf("tmux session %q was created", naming.CanonicalSessionID(projectID, issueID))
+	if !tmuxRunner.sessions[naming.CanonicalSessionID(projectID, issueID)] {
+		t.Fatalf("tmux session %q was not created", naming.CanonicalSessionID(projectID, issueID))
 	}
 }
 

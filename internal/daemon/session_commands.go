@@ -684,11 +684,11 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree already exists but could not be loaded: %v", recoverErr)), nil
 		}
 	}
-	if err := d.ensureSessionStartWorktreeClean(ctx, worktreeManager, cmd.IssueID, worktree.Path); err != nil {
-		cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
-	}
 	if !reusedWorktree {
+		if err := d.ensureSessionStartWorktreeClean(ctx, worktreeManager, cmd.IssueID, worktree.Path); err != nil {
+			cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
+		}
 		if len(d.runtimeConfigForProject(cmd.ProjectID).WorktreeInitCommands) > 0 {
 			reportSessionStartProgress(ctx, "worktree_preflight", "running worktree init commands", 35)
 		}
@@ -1505,9 +1505,6 @@ func (d *Daemon) ensureConflictWorktree(ctx context.Context, projectID, issueID,
 		return "", "", false, errors.New("worktree manager unavailable")
 	}
 	if worktree, getErr := worktreeManager.Get(ctx, issueID); getErr == nil {
-		if err := d.ensureSessionStartWorktreeClean(ctx, worktreeManager, issueID, worktree.Path); err != nil {
-			return "", "", false, err
-		}
 		return worktree.Path, worktree.Branch, true, nil
 	}
 
@@ -1515,9 +1512,6 @@ func (d *Daemon) ensureConflictWorktree(ctx context.Context, projectID, issueID,
 	worktree, createErr := worktreeManager.CreateWithTitle(ctx, issueID, issueTitle, baseBranch)
 	if createErr != nil {
 		if recoveredWorktree, recoverErr := worktreeManager.Get(ctx, issueID); recoverErr == nil {
-			if err := d.ensureSessionStartWorktreeClean(ctx, worktreeManager, issueID, recoveredWorktree.Path); err != nil {
-				return "", "", false, err
-			}
 			return recoveredWorktree.Path, recoveredWorktree.Branch, true, nil
 		}
 		return "", "", false, createErr
