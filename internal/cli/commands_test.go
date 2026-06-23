@@ -4861,6 +4861,21 @@ func TestParseIssueDependencyArgs(t *testing.T) {
 	if !add.ForceParentChange {
 		t.Fatalf("ParseIssueDependencyAddArgs() force parent change not set: %+v", add)
 	}
+	add, err = ParseIssueDependencyAddArgs([]string{"chefy:az-1", "chefy:az-2", "--type", "blocks"})
+	if err != nil {
+		t.Fatalf("ParseIssueDependencyAddArgs() project-qualified refs error = %v", err)
+	}
+	if add.Project != "chefy" || add.IssueID != "az-1" || add.DependsOnID != "az-2" || add.IssueProjectID != "chefy" || add.DependsOnProjectID != "chefy" {
+		t.Fatalf("ParseIssueDependencyAddArgs() project-qualified refs = %+v", add)
+	}
+	_, err = ParseIssueDependencyAddArgs([]string{"chefy:az-1", "azedarach:az-2"})
+	if err == nil || !strings.Contains(err.Error(), "dependency endpoints must be in the same project") {
+		t.Fatalf("expected cross-project dependency rejection, got %v", err)
+	}
+	_, err = ParseIssueDependencyAddArgs([]string{"--project", "azedarach", "chefy:az-1", "chefy:az-2"})
+	if err == nil || !strings.Contains(err.Error(), "does not match --project") {
+		t.Fatalf("expected endpoint/project mismatch rejection, got %v", err)
+	}
 
 	remove, err := ParseIssueDependencyRemoveArgs([]string{"--type", "blocks", "--confirm", "--confirm-parent-orphan", "az-3", "az-4"})
 	if err != nil {
@@ -8400,6 +8415,47 @@ func TestIssueDependencyCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 	if !strings.Contains(removeOut, "Removed dependency: az-5 --(parent-child)--> az-2") {
 		t.Fatalf("remove output = %q", removeOut)
+	}
+}
+
+func TestIssueDependencyAddCommandCarriesProjectQualifiedEndpointMetadata(t *testing.T) {
+	var gotReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				gotReq = req
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	opts, err := ParseIssueDependencyAddArgs([]string{"chefy:az-5", "chefy:az-2", "--type", "blocks"})
+	if err != nil {
+		t.Fatalf("ParseIssueDependencyAddArgs() error = %v", err)
+	}
+	_ = captureStdout(t, func() error {
+		return IssueDependencyAddCommand(deps, opts)
+	})
+
+	if gotReq.Meta.ProjectID.String() != "chefy" {
+		t.Fatalf("request project = %q, want chefy", gotReq.Meta.ProjectID)
+	}
+	var body daemonclient.TaskDependencyParams
+	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal add body: %v", err)
+	}
+	if body.TaskID != "az-5" || body.DependsOnID != "az-2" || body.IssueProjectID != "chefy" || body.DependsOnProjectID != "chefy" {
+		t.Fatalf("dependency body = %+v", body)
 	}
 }
 

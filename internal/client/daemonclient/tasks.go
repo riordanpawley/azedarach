@@ -256,10 +256,12 @@ type TaskIDsRequest struct {
 
 // TaskDependencyParams contains the payload used for dependency operations.
 type TaskDependencyParams struct {
-	TaskID            naming.IssueID `json:"task_id"`
-	DependsOnID       naming.IssueID `json:"depends_on_id"`
-	Type              string         `json:"dependency_type"`
-	ForceParentChange bool           `json:"force_parent_change,omitempty"`
+	TaskID             naming.IssueID `json:"task_id"`
+	DependsOnID        naming.IssueID `json:"depends_on_id"`
+	Type               string         `json:"dependency_type"`
+	ForceParentChange  bool           `json:"force_parent_change,omitempty"`
+	IssueProjectID     string         `json:"issue_project_id,omitempty"`
+	DependsOnProjectID string         `json:"depends_on_project_id,omitempty"`
 }
 
 // TaskDependencyRemoveParams extends dependency params with explicit confirmation.

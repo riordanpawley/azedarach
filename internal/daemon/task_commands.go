@@ -3381,13 +3381,18 @@ func (d *Daemon) handleTaskDependencyAdd(ctx context.Context, req protocol.Reque
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
 	var cmd struct {
-		TaskID            string `json:"task_id"`
-		DependsOnID       string `json:"depends_on_id"`
-		DependencyType    string `json:"dependency_type"`
-		ForceParentChange bool   `json:"force_parent_change"`
+		TaskID             string `json:"task_id"`
+		DependsOnID        string `json:"depends_on_id"`
+		DependencyType     string `json:"dependency_type"`
+		ForceParentChange  bool   `json:"force_parent_change"`
+		IssueProjectID     string `json:"issue_project_id,omitempty"`
+		DependsOnProjectID string `json:"depends_on_project_id,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	if err := validateDependencyEndpointProjects(projectID, cmd.IssueProjectID, cmd.DependsOnProjectID); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task dependency add requested",
@@ -3396,6 +3401,8 @@ func (d *Daemon) handleTaskDependencyAdd(ctx context.Context, req protocol.Reque
 			"depends_on_id", cmd.DependsOnID,
 			"dependency_type", cmd.DependencyType,
 			"force_parent_change", cmd.ForceParentChange,
+			"issue_project_id", cmd.IssueProjectID,
+			"depends_on_project_id", cmd.DependsOnProjectID,
 		)
 	}
 	task, err := issueClient.AddDependencyWithRuntimeAndParentChange(ctx, projectID, cmd.TaskID, cmd.DependsOnID, cmd.DependencyType, cmd.ForceParentChange)
@@ -3416,6 +3423,30 @@ func (d *Daemon) handleTaskDependencyAdd(ctx context.Context, req protocol.Reque
 		)
 	}
 	return resp, nil
+}
+
+func validateDependencyEndpointProjects(requestProjectID, issueProjectID, dependsOnProjectID string) error {
+	requestProjectID = strings.TrimSpace(requestProjectID)
+	issueProjectID = strings.TrimSpace(issueProjectID)
+	dependsOnProjectID = strings.TrimSpace(dependsOnProjectID)
+	if issueProjectID != "" && dependsOnProjectID != "" && protocol.NormalizeProjectID(issueProjectID) != protocol.NormalizeProjectID(dependsOnProjectID) {
+		return fmt.Errorf("dependency endpoints must be in the same project: issue_project_id %q, depends_on_project_id %q", issueProjectID, dependsOnProjectID)
+	}
+	for _, endpoint := range []struct {
+		field     string
+		projectID string
+	}{
+		{field: "issue_project_id", projectID: issueProjectID},
+		{field: "depends_on_project_id", projectID: dependsOnProjectID},
+	} {
+		if endpoint.projectID == "" {
+			continue
+		}
+		if protocol.NormalizeProjectID(endpoint.projectID) != protocol.NormalizeProjectID(requestProjectID) {
+			return fmt.Errorf("%s %q does not match request project %q", endpoint.field, endpoint.projectID, requestProjectID)
+		}
+	}
+	return nil
 }
 
 func (d *Daemon) handleTaskDependencyRemove(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

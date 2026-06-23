@@ -220,6 +220,37 @@ func TestProjectSwitchResultUpdatesModelConfig(t *testing.T) {
 	}
 }
 
+func TestProjectSwitchResultClearsDrillDownState(t *testing.T) {
+	m := newTestModel()
+	m.drillDownParentID = "az-parent"
+	m.drillDownParentName = "Parent issue"
+	m.drillDownTrail = []drillDownContext{
+		{parentID: "az-root", parentName: "Root issue"},
+	}
+
+	next, _ := m.Update(projectSwitchResultMsg{
+		project: config.Project{
+			Name: "Chefy",
+			Path: "/work/Chefy",
+		},
+		projectConfig: &config.Config{},
+	})
+
+	updated, ok := next.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", next)
+	}
+	if updated.isDrillDownActive() {
+		t.Fatalf("drill-down parent = %q, want cleared", updated.drillDownParentID)
+	}
+	if updated.drillDownParentName != "" {
+		t.Fatalf("drillDownParentName = %q, want empty", updated.drillDownParentName)
+	}
+	if len(updated.drillDownTrail) != 0 {
+		t.Fatalf("drillDownTrail = %+v, want empty", updated.drillDownTrail)
+	}
+}
+
 func TestProjectSwitchResultRebindsProjectScopedServices(t *testing.T) {
 	oldRepo := t.TempDir()
 	newRepo := t.TempDir()
