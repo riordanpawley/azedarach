@@ -230,12 +230,14 @@ type IssueDeleteOptions struct {
 }
 
 type IssueDependencyAddOptions struct {
-	Project           string
-	IssueID           string
-	DependsOnID       string
-	Type              string
-	ForceParentChange bool
-	JSON              bool
+	Project            string
+	IssueID            string
+	DependsOnID        string
+	IssueProjectID     string
+	DependsOnProjectID string
+	Type               string
+	ForceParentChange  bool
+	JSON               bool
 }
 
 type IssueDependencyRemoveOptions struct {
@@ -2691,7 +2693,59 @@ func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, erro
 		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from|created-in] [--force-parent-change] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
+	issueProject, issueID, err := parseDependencyEndpointProject(opts.IssueID, "issue_id")
+	if err != nil {
+		return IssueDependencyAddOptions{}, err
+	}
+	dependsOnProject, dependsOnID, err := parseDependencyEndpointProject(opts.DependsOnID, "depends_on_id")
+	if err != nil {
+		return IssueDependencyAddOptions{}, err
+	}
+	opts.IssueID = issueID
+	opts.DependsOnID = dependsOnID
+	opts.IssueProjectID = issueProject
+	opts.DependsOnProjectID = dependsOnProject
+	if err := reconcileDependencyEndpointProjects(&opts.Project, opts.IssueProjectID, opts.DependsOnProjectID); err != nil {
+		return IssueDependencyAddOptions{}, err
+	}
 	return opts, nil
+}
+
+func parseDependencyEndpointProject(raw, field string) (projectID, issueID string, err error) {
+	trimmed := strings.TrimSpace(raw)
+	if projectPart, issuePart, ok := splitExplicitSessionIssueTarget(trimmed); ok {
+		if _, parseErr := naming.ParseIssueID(issuePart); parseErr != nil {
+			return "", "", fmt.Errorf("invalid %s %q: %w", field, raw, parseErr)
+		}
+		return normalizeIssueProject(projectPart), strings.TrimSpace(issuePart), nil
+	}
+	return "", trimmed, nil
+}
+
+func reconcileDependencyEndpointProjects(requestProject *string, issueProject, dependsOnProject string) error {
+	issueProject = normalizeIssueProject(issueProject)
+	dependsOnProject = normalizeIssueProject(dependsOnProject)
+	if issueProject != "" && dependsOnProject != "" && protocol.NormalizeProjectID(issueProject) != protocol.NormalizeProjectID(dependsOnProject) {
+		return fmt.Errorf("dependency endpoints must be in the same project: issue_id project %q, depends_on_id project %q", issueProject, dependsOnProject)
+	}
+	endpointProject := issueProject
+	if endpointProject == "" {
+		endpointProject = dependsOnProject
+	}
+	if endpointProject == "" {
+		return nil
+	}
+	if requestProject == nil {
+		return nil
+	}
+	if strings.TrimSpace(*requestProject) == "" {
+		*requestProject = endpointProject
+		return nil
+	}
+	if protocol.NormalizeProjectID(*requestProject) != protocol.NormalizeProjectID(endpointProject) {
+		return fmt.Errorf("dependency endpoint project %q does not match --project %q", endpointProject, *requestProject)
+	}
+	return nil
 }
 
 func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions, error) {
@@ -4224,10 +4278,12 @@ func IssueDependencyAddCommand(deps *Dependencies, opts IssueDependencyAddOption
 		return fmt.Errorf("invalid depends_on_id %q: %w", opts.DependsOnID, err)
 	}
 	if err := deps.DaemonClient.AddTaskDependency(ctx, daemonclient.TaskDependencyParams{
-		TaskID:            typedIssueID,
-		DependsOnID:       typedDependsOnID,
-		Type:              opts.Type,
-		ForceParentChange: opts.ForceParentChange,
+		TaskID:             typedIssueID,
+		DependsOnID:        typedDependsOnID,
+		Type:               opts.Type,
+		ForceParentChange:  opts.ForceParentChange,
+		IssueProjectID:     opts.IssueProjectID,
+		DependsOnProjectID: opts.DependsOnProjectID,
 	}); err != nil {
 		return fmt.Errorf("%s: %w", parentChangeGuidance(opts), err)
 	}

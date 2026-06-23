@@ -981,6 +981,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.rebindProjectContext(msg.project, msg.projectConfig)
+		m.clearDrillDown()
 
 		// Reuse the normal loaded-state reducer path.
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)

@@ -126,6 +126,105 @@ func TestBuildTaskSnapshotExportBodyIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestValidateDependencyEndpointProjectsRejectsCrossProjectRefs(t *testing.T) {
+	tests := []struct {
+		name             string
+		requestProject   string
+		issueProject     string
+		dependsOnProject string
+		wantErr          string
+	}{
+		{
+			name:             "same declared project passes",
+			requestProject:   "chefy",
+			issueProject:     "chefy",
+			dependsOnProject: "chefy",
+		},
+		{
+			name:             "mixed endpoint projects rejected",
+			requestProject:   "chefy",
+			issueProject:     "chefy",
+			dependsOnProject: "azedarach",
+			wantErr:          "dependency endpoints must be in the same project",
+		},
+		{
+			name:             "issue endpoint project must match request project",
+			requestProject:   "azedarach",
+			issueProject:     "chefy",
+			dependsOnProject: "chefy",
+			wantErr:          `issue_project_id "chefy" does not match request project "azedarach"`,
+		},
+		{
+			name:             "depends endpoint project must match request project",
+			requestProject:   "azedarach",
+			dependsOnProject: "chefy",
+			wantErr:          `depends_on_project_id "chefy" does not match request project "azedarach"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateDependencyEndpointProjects(tt.requestProject, tt.issueProject, tt.dependsOnProject)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateDependencyEndpointProjects() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateDependencyEndpointProjects() error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestHandleTaskDependencyAddRejectsCrossProjectEndpointMetadata(t *testing.T) {
+	logger := slog.Default()
+	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), logger)
+	t.Cleanup(func() {
+		if err := issuesClient.CloseDB(); err != nil {
+			t.Fatalf("close issues db: %v", err)
+		}
+	})
+
+	d := &Daemon{
+		cfg: Config{Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			"chefy": issuesClient,
+		},
+		revision: map[string]uint64{"chefy": 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	body, err := json.Marshal(map[string]any{
+		"task_id":               "az-1",
+		"depends_on_id":         "az-2",
+		"dependency_type":       "blocks",
+		"issue_project_id":      "chefy",
+		"depends_on_project_id": "azedarach",
+	})
+	if err != nil {
+		t.Fatalf("marshal dependency add body: %v", err)
+	}
+
+	resp, err := d.handleTaskDependencyAdd(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-cross-project-dep",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID("chefy")},
+		Command:         "task.dependency.add",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskDependencyAdd error: %v", err)
+	}
+	if resp.OK {
+		t.Fatalf("handleTaskDependencyAdd OK = true, want rejection")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest || !strings.Contains(resp.Error.Message, "dependency endpoints must be in the same project") {
+		t.Fatalf("response error = %+v, want invalid cross-project dependency", resp.Error)
+	}
+}
+
 func TestBuildTaskSnapshotExportBody_ProjectScopedSessionPrefixMatchesIssue(t *testing.T) {
 	body := buildTaskSnapshotExportBody(
 		"Chefy",
