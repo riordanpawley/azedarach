@@ -4,8 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-GOCACHE="${GOCACHE:-$ROOT_DIR/.gocache}"
-GOPATH="${GOPATH:-$ROOT_DIR/.gopath}"
+GIT_COMMON_DIR="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+if [[ -n "$GIT_COMMON_DIR" && "$(basename "$GIT_COMMON_DIR")" == ".git" ]]; then
+  GO_CACHE_ROOT="$(dirname "$GIT_COMMON_DIR")/.azedarach/go"
+else
+  GO_CACHE_ROOT="$ROOT_DIR/.azedarach/go"
+fi
+GOCACHE="${GOCACHE:-$GO_CACHE_ROOT/build-cache}"
+GOPATH="${GOPATH:-$GO_CACHE_ROOT/path}"
 
 TEST_ENV_DIR="$(mktemp -d)"
 cleanup() {
@@ -65,18 +71,18 @@ run_expect_failure_contains() {
   echo "[smoke] PASS: $label"
 }
 
-run_expect_success "session help" "Usage: az session <start|attach|kill|status>" ./bin/az session --help
+run_expect_success "session help" "Usage: az session <start|attach|stop|status|restart-all|resolve-conflict>" ./bin/az session --help
 run_expect_success "top-level help" "Usage:" ./bin/az --help
 run_expect_success "top-level version" "dev" ./bin/az --version
-run_expect_success "impl help usage" "Usage: az impl delete --confirm <implementation>" ./bin/az impl --help
+run_expect_success "impl help usage" "az impl delete --confirm <implementation>" ./bin/az impl --help
 run_expect_success "prime banner" "Azedarach Session Primer" ./bin/az prime
-run_expect_success "issue help has lifecycle and bulk" "bulk-update --impl <implementation> --input <path> [--dry-run]" ./bin/az issue --help
-run_expect_success "issue help has delete guard" "delete [--id <issue-id>] [<issue-id>] --confirm" ./bin/az issue --help
-run_expect_failure_contains "daemon usage guard" "Usage: az daemon restart" ./bin/az daemon
-run_expect_failure_contains "impl delete confirm guard" "Usage: az impl delete --confirm <implementation>" ./bin/az impl delete ts-opentui
-run_expect_failure_contains "issue get usage guard" "Usage: az issue get [--id <issue-id>] [--json] [--deps] [<issue-id>]" ./bin/az issue get
-run_expect_failure_contains "issue delete confirm guard" "Usage: az issue delete --confirm [--id <issue-id>] [<issue-id>]" ./bin/az issue delete az-1 --impl go-bubbletea
-run_expect_failure_contains "issue bulk-create usage guard" "Usage: az issue bulk-create --impl <implementation> --input <path> [--dry-run]" ./bin/az issue bulk-create
+run_expect_success "issue help has lifecycle and bulk" "bulk-update [--project <project-id>] [--impl <implementation>] --input <path>" ./bin/az issue --help
+run_expect_success "issue help has delete guard" "delete [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] --confirm" ./bin/az issue --help
+run_expect_failure_contains "daemon usage guard" "Usage: az daemon <start|stop|restart>" ./bin/az daemon
+run_expect_failure_contains "impl delete confirm guard" "az impl delete --confirm <implementation>" ./bin/az impl delete ts-opentui
+run_expect_failure_contains "issue get usage guard" "az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]" ./bin/az issue get
+run_expect_failure_contains "issue delete confirm guard" "az issue delete [--project <project-id>] --confirm [--id <issue-id>] [--json] [<issue-id>]" ./bin/az issue delete az-1 --impl go-bubbletea
+run_expect_failure_contains "issue bulk-create usage guard" "az issue bulk-create [--project <project-id>] [--impl <implementation>] --input <path>" ./bin/az issue bulk-create
 
 real_db_after_state="missing"
 if [[ -f "$REAL_DB_PATH" ]]; then

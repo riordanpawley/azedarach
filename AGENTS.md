@@ -189,7 +189,7 @@ If any are missing, keep issue state `in_progress` or `open`.
 
 ## Environment Rules
 
-- `.envrc` exports repo-local `GOCACHE`/`GOPATH` (`.gocache`, `.gopath`).
+- `.envrc` exports shared repo-family `GOCACHE`/`GOPATH` under the primary repo's `.azedarach/go/` so linked worktrees do not duplicate multi-GB Go caches. If Git common-dir detection fails, it falls back to the current checkout's `.azedarach/go/`. Use `AZEDARACH_GO_CACHE_ROOT`, `AZEDARACH_GOCACHE`, or `AZEDARACH_GOPATH` for explicit local overrides.
 - After `direnv allow`, use normal `go ...` commands from repo root without per-command env prefixes.
 
 ## Git Safety Rules
