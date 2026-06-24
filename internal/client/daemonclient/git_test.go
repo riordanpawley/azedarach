@@ -314,6 +314,64 @@ func TestGitFetchCheckoutAndMergeCommandsRouteThroughDaemon(t *testing.T) {
 	})
 }
 
+func TestGitRuntimeSignalsWithRefreshSetsRefreshFlag(t *testing.T) {
+	const wantProjectID = "proj-git"
+	targets := []GitRuntimeSignalsTarget{{IssueID: "az-1", Worktree: "/tmp/az-1"}}
+	transport := &gitRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != CommandGitRuntimeSignals {
+				t.Fatalf("command = %q, want %q", req.Command, CommandGitRuntimeSignals)
+			}
+			var body GitCommandRequest
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal request: %v", err)
+			}
+			if !body.Refresh {
+				t.Fatalf("refresh = false, want true")
+			}
+			if body.BaseBranch != "preview" || !body.CompareRemote || body.Remote != "origin" {
+				t.Fatalf("request body = %+v", body)
+			}
+			if len(body.Targets) != 1 || body.Targets[0].IssueID != "az-1" || body.Targets[0].Worktree != "/tmp/az-1" {
+				t.Fatalf("targets = %+v", body.Targets)
+			}
+			respBody, err := json.Marshal(gitRuntimeSignalsBody{
+				Signals: []GitRuntimeSignalsResult{{
+					IssueID:      "az-1",
+					Worktree:     "/tmp/az-1",
+					GitAdditions: 4,
+					GitDeletions: 2,
+				}},
+			})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID(wantProjectID)
+	signals, partialFailures, err := client.GitRuntimeSignalsWithRefresh(context.Background(), targets, "preview", true, "origin", true)
+	if err != nil {
+		t.Fatalf("GitRuntimeSignalsWithRefresh error: %v", err)
+	}
+	if partialFailures != 0 {
+		t.Fatalf("partial failures = %d, want 0", partialFailures)
+	}
+	if len(signals) != 1 || signals[0].GitAdditions != 4 || signals[0].GitDeletions != 2 {
+		t.Fatalf("signals = %+v, want refreshed metrics", signals)
+	}
+	if transport.lastReq.Meta.ProjectID != wantProjectID {
+		t.Fatalf("project_id = %q, want %q", transport.lastReq.Meta.ProjectID, wantProjectID)
+	}
+}
+
 func TestGitStatusRefreshCommandSetsRefreshFlag(t *testing.T) {
 	const worktree = "/tmp/az-1"
 	transport := &gitRecordingTransport{

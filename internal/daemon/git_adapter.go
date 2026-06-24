@@ -191,11 +191,17 @@ func (a *gitServiceAdapter) Checkpoint(ctx context.Context, projectID string, re
 	return &daemonhandlers.GitCheckpointResult{Worktree: req.Worktree, Message: message}, nil
 }
 
-func (a *gitServiceAdapter) DiffStat(ctx context.Context, _ string, worktree, baseBranch string) (string, error) {
+func (a *gitServiceAdapter) DiffStat(ctx context.Context, projectID string, worktree, baseBranch string) (string, error) {
+	baseBranch = strings.TrimSpace(baseBranch)
+	if resolved := a.worktreeSpecificBaseBranch(ctx, projectID, worktree); resolved != "" {
+		baseBranch = resolved
+	} else if baseBranch == "" {
+		baseBranch = a.resolvedBaseBranch(projectID)
+	}
 	return a.client.DiffStat(ctx, worktree, baseBranch)
 }
 
-func (a *gitServiceAdapter) RuntimeSignals(ctx context.Context, projectID string, targets []daemonhandlers.GitRuntimeSignalsTarget, baseBranch string, compareRemote bool, remote string) ([]daemonhandlers.GitRuntimeSignalsResult, int, error) {
+func (a *gitServiceAdapter) RuntimeSignals(ctx context.Context, projectID string, targets []daemonhandlers.GitRuntimeSignalsTarget, baseBranch string, compareRemote bool, remote string, refresh bool) ([]daemonhandlers.GitRuntimeSignalsResult, int, error) {
 	projectID = normalizeProjectID(projectID)
 	baseBranch = strings.TrimSpace(baseBranch)
 	if baseBranch == "" {
@@ -223,10 +229,17 @@ func (a *gitServiceAdapter) RuntimeSignals(ctx context.Context, projectID string
 		if issueID == "" || worktree == "" {
 			continue
 		}
+		if refresh {
+			if _, err := a.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, true, false); err != nil {
+				partialFailures++
+			}
+		}
 		cacheKey := runtimeSignalCacheKey(projectID, issueID, worktree, baseBranch, compareRemote, remote)
-		if cached, ok := a.cachedRuntimeSignal(cacheKey, now); ok {
-			results = append(results, cached)
-			continue
+		if !refresh {
+			if cached, ok := a.cachedRuntimeSignal(cacheKey, now); ok {
+				results = append(results, cached)
+				continue
+			}
 		}
 
 		signal, found, err := a.computeRuntimeSignalFromProjection(ctx, projectID, issueID, worktree)
@@ -600,12 +613,19 @@ func (a *gitServiceAdapter) refreshGitStatusWriteThroughResult(ctx context.Conte
 }
 
 func (a *gitServiceAdapter) resolvedBaseBranchForWorktree(ctx context.Context, projectID, worktree string) string {
+	if baseBranch := a.worktreeSpecificBaseBranch(ctx, projectID, worktree); baseBranch != "" {
+		return baseBranch
+	}
+	return a.resolvedBaseBranch(projectID)
+}
+
+func (a *gitServiceAdapter) worktreeSpecificBaseBranch(ctx context.Context, projectID, worktree string) string {
 	if a != nil && a.baseBranchForWorktree != nil {
 		if baseBranch := strings.TrimSpace(a.baseBranchForWorktree(ctx, projectID, worktree)); baseBranch != "" {
 			return baseBranch
 		}
 	}
-	return a.resolvedBaseBranch(projectID)
+	return ""
 }
 
 func (a *gitServiceAdapter) refreshGitStatusAsync(projectID, worktree string) {

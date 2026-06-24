@@ -1065,6 +1065,94 @@ func TestGitServiceAdapterStatusRefreshUsesWorktreeSpecificBaseBranch(t *testing
 	}
 }
 
+func TestGitServiceAdapterDiffStatUsesWorktreeSpecificBaseBranch(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	projectID := "default"
+	worktree := "/tmp/az-child"
+	var mergeBaseRef string
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktree && args[2] == "merge-base":
+			mergeBaseRef = args[3]
+			if args[3] != "az/parent" {
+				return "", errors.New("preview should have been resolved to parent branch")
+			}
+			return "abc123\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktree && args[2] == "symbolic-ref":
+			return "", errors.New("no remote head")
+		case len(args) >= 8 && args[0] == "-C" && args[1] == worktree && args[2] == "diff" && args[3] == "--shortstat":
+			return " 2 files changed, 5 insertions(+), 1 deletion(-)\n", nil
+		default:
+			t.Fatalf("unexpected git args: %v", args)
+			return "", nil
+		}
+	}}
+	adapter := &gitServiceAdapter{
+		client:     git.NewClient(runner, slog.Default()),
+		baseBranch: "preview",
+		baseBranchForWorktree: func(context.Context, string, string) string {
+			return "az/parent"
+		},
+	}
+
+	stat, err := adapter.DiffStat(ctx, projectID, worktree, "preview")
+	if err != nil {
+		t.Fatalf("DiffStat: %v", err)
+	}
+	if stat != "2 files changed, 5 insertions(+), 1 deletion(-)" {
+		t.Fatalf("diff stat = %q, want parent-relative stat", stat)
+	}
+	if mergeBaseRef != "az/parent" {
+		t.Fatalf("merge-base ref = %q, want worktree-specific ancestor base", mergeBaseRef)
+	}
+}
+
+func TestGitServiceAdapterDiffStatPreservesExplicitBaseWithoutWorktreeSpecificBase(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	projectID := "default"
+	worktree := "/tmp/az-child"
+	var mergeBaseRef string
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktree && args[2] == "merge-base":
+			mergeBaseRef = args[3]
+			if args[3] != "main" {
+				return "", errors.New("explicit base should be preserved")
+			}
+			return "abc123\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktree && args[2] == "symbolic-ref":
+			return "", errors.New("no remote head")
+		case len(args) >= 8 && args[0] == "-C" && args[1] == worktree && args[2] == "diff" && args[3] == "--shortstat":
+			return " 1 file changed, 2 insertions(+)\n", nil
+		default:
+			t.Fatalf("unexpected git args: %v", args)
+			return "", nil
+		}
+	}}
+	adapter := &gitServiceAdapter{
+		client:     git.NewClient(runner, slog.Default()),
+		baseBranch: "preview",
+		baseBranchForWorktree: func(context.Context, string, string) string {
+			return ""
+		},
+	}
+
+	stat, err := adapter.DiffStat(ctx, projectID, worktree, "main")
+	if err != nil {
+		t.Fatalf("DiffStat: %v", err)
+	}
+	if stat != "1 file changed, 2 insertions(+)" {
+		t.Fatalf("diff stat = %q, want explicit-base stat", stat)
+	}
+	if mergeBaseRef != "main" {
+		t.Fatalf("merge-base ref = %q, want explicit base", mergeBaseRef)
+	}
+}
+
 func TestGitServiceAdapterRuntimeSignalsUsesProjectionOnly(t *testing.T) {
 	t.Parallel()
 
@@ -1091,7 +1179,7 @@ func TestGitServiceAdapterRuntimeSignalsUsesProjectionOnly(t *testing.T) {
 
 	signals, partialFailures, err := adapter.RuntimeSignals(ctx, projectID, []daemonhandlers.GitRuntimeSignalsTarget{
 		{IssueID: issueID, Worktree: worktree},
-	}, "main", true, "origin")
+	}, "main", true, "origin", false)
 	if err != nil {
 		t.Fatalf("RuntimeSignals: %v", err)
 	}
@@ -1107,6 +1195,74 @@ func TestGitServiceAdapterRuntimeSignalsUsesProjectionOnly(t *testing.T) {
 	}
 	if !got.HasUncommittedChanges || got.GitAdditions != 7 || got.GitDeletions != 3 || got.GitAheadCount != 2 || got.GitBehindCount != 1 {
 		t.Fatalf("signal = %+v, want projected git metrics", got)
+	}
+}
+
+func TestGitServiceAdapterRuntimeSignalsRefreshBypassesStaleCache(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	projectID := "default"
+	issueID := "az-signal"
+	worktree := "/tmp/az-signal"
+	store := newGitAdapterStore(t, projectID, issueID, worktree, &git.GitStatus{
+		HasChanges:   true,
+		GitAdditions: 1,
+		GitDeletions: 1,
+	})
+
+	var mergeBaseRef string
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "status" && args[3] == "--porcelain":
+			return " M changed.go\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktree && args[2] == "merge-base":
+			mergeBaseRef = args[3]
+			return "abc123\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktree && args[2] == "symbolic-ref":
+			return "", errors.New("no remote head")
+		case len(args) >= 8 && args[0] == "-C" && args[1] == worktree && args[2] == "diff" && args[3] == "--shortstat":
+			return " 2 files changed, 4 insertions(+), 2 deletions(-)\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktree && args[2] == "rev-list" && args[3] == "--count":
+			return "0\n", nil
+		default:
+			t.Fatalf("unexpected git args: %v", args)
+			return "", nil
+		}
+	}}
+	adapter := &gitServiceAdapter{
+		client:            git.NewClient(runner, slog.Default()),
+		runtimeStateStore: store,
+		baseBranch:        "preview",
+		baseBranchForWorktree: func(context.Context, string, string) string {
+			return "az/parent"
+		},
+	}
+	adapter.storeRuntimeSignal(runtimeSignalCacheKey(projectID, issueID, worktree, "preview", true, "origin"), daemonhandlers.GitRuntimeSignalsResult{
+		IssueID:      issueID,
+		Worktree:     worktree,
+		GitAdditions: 99,
+		GitDeletions: 99,
+	}, time.Now())
+
+	signals, partialFailures, err := adapter.RuntimeSignals(ctx, projectID, []daemonhandlers.GitRuntimeSignalsTarget{
+		{IssueID: issueID, Worktree: worktree},
+	}, "preview", true, "origin", true)
+	if err != nil {
+		t.Fatalf("RuntimeSignals refresh: %v", err)
+	}
+	if partialFailures != 0 {
+		t.Fatalf("partial failures = %d, want 0", partialFailures)
+	}
+	if len(signals) != 1 {
+		t.Fatalf("signals len = %d, want 1", len(signals))
+	}
+	got := signals[0]
+	if !got.HasUncommittedChanges || got.GitAdditions != 4 || got.GitDeletions != 2 {
+		t.Fatalf("signal = %+v, want refreshed projection metrics", got)
+	}
+	if mergeBaseRef != "az/parent" {
+		t.Fatalf("merge-base ref = %q, want worktree-specific ancestor base", mergeBaseRef)
 	}
 }
 
@@ -1132,7 +1288,7 @@ func TestGitServiceAdapterRuntimeSignalsMissingProjectionReturnsZeroSignal(t *te
 
 	signals, partialFailures, err := adapter.RuntimeSignals(ctx, projectID, []daemonhandlers.GitRuntimeSignalsTarget{
 		{IssueID: issueID, Worktree: worktree},
-	}, "main", false, "origin")
+	}, "main", false, "origin", false)
 	if err != nil {
 		t.Fatalf("RuntimeSignals: %v", err)
 	}
