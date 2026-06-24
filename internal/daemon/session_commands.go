@@ -2674,7 +2674,7 @@ func (d *Daemon) sessionSnapshotForReconcile(ctx context.Context, projectID stri
 	if d.sessionRuntimeStateStoreIfConfigured(projectID) == nil {
 		return []daemonstate.Session{}, nil
 	}
-	return d.sessionProjectionSnapshot(ctx, projectID)
+	return d.sessionRuntimeStateStoreIfConfigured(projectID).ListSessionIntentStates(ctx, projectID)
 }
 
 func (d *Daemon) ensureSessionWorktreeProjection(ctx context.Context, projectID, issueID string) {

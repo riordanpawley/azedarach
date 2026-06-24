@@ -27,6 +27,34 @@ type dependencyRemovalConfirmationKey struct{}
 type parentChildOrphanConfirmationKey struct{}
 type issueMutationLockKey struct{}
 
+const runtimeSessionProjectionUnionSQL = `
+	SELECT
+		project_id,
+		session_id,
+		issue_id,
+		state,
+		observed_state,
+		activity,
+		activity_source,
+		tmux_attached_count,
+		started_at,
+		updated_at
+	FROM daemon_session_projections
+	UNION ALL
+	SELECT
+		project_id,
+		session_id,
+		issue_id,
+		state,
+		observed_state,
+		activity,
+		activity_source,
+		tmux_attached_count,
+		started_at,
+		updated_at
+	FROM daemon_session_observations
+`
+
 // ErrDependencyRemovalConfirmationRequired is returned when a removal that can
 // unblock or retarget workflow is attempted without explicit confirmation.
 var ErrDependencyRemovalConfirmationRequired = errors.New("explicit confirmation required")
@@ -288,6 +316,21 @@ func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_session_projections_project_issue
 			ON daemon_session_projections (project_id, issue_id)`,
+		`CREATE TABLE IF NOT EXISTS daemon_session_observations (
+			project_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			issue_id TEXT NOT NULL,
+			state TEXT NOT NULL,
+			observed_state TEXT,
+			activity TEXT,
+			activity_source TEXT,
+			tmux_attached_count INTEGER NOT NULL DEFAULT 0,
+			started_at TEXT,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, session_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_daemon_session_observations_project_issue
+			ON daemon_session_observations (project_id, issue_id)`,
 		`CREATE TABLE IF NOT EXISTS daemon_worktree_projections (
 			project_id TEXT NOT NULL,
 			issue_id TEXT NOT NULL,
@@ -317,6 +360,71 @@ func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
 	}
 	if err := ensureSQLiteColumn(db, "daemon_session_projections", "activity_source", "TEXT"); err != nil {
 		return fmt.Errorf("ensure runtime projection schema: %w", err)
+	}
+	for _, column := range []struct {
+		name string
+		ddl  string
+	}{
+		{"started_at", "TEXT"},
+		{"observed_state", "TEXT"},
+		{"activity", "TEXT"},
+		{"activity_source", "TEXT"},
+		{"tmux_attached_count", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := ensureSQLiteColumn(db, "daemon_session_observations", column.name, column.ddl); err != nil {
+			return fmt.Errorf("ensure runtime projection schema: %w", err)
+		}
+	}
+	if err := migrateRuntimeSessionObservations(db); err != nil {
+		return fmt.Errorf("ensure runtime projection schema: %w", err)
+	}
+	return nil
+}
+
+func migrateRuntimeSessionObservations(db *sql.DB) error {
+	if _, err := db.Exec(`
+		INSERT INTO daemon_session_observations (
+			project_id,
+			session_id,
+			issue_id,
+			state,
+			observed_state,
+			activity,
+			activity_source,
+			tmux_attached_count,
+			started_at,
+			updated_at
+		)
+		SELECT
+			project_id,
+			session_id,
+			issue_id,
+			state,
+			observed_state,
+			activity,
+			activity_source,
+			COALESCE(tmux_attached_count, 0),
+			started_at,
+			updated_at
+		FROM daemon_session_projections
+		WHERE instr(session_id, '.pane-') > 0
+		ON CONFLICT(project_id, session_id) DO UPDATE SET
+			issue_id = excluded.issue_id,
+			state = excluded.state,
+			observed_state = excluded.observed_state,
+			activity = excluded.activity,
+			activity_source = excluded.activity_source,
+			tmux_attached_count = excluded.tmux_attached_count,
+			started_at = excluded.started_at,
+			updated_at = excluded.updated_at
+	`); err != nil {
+		return fmt.Errorf("migrate session observations: copy pane rows: %w", err)
+	}
+	if _, err := db.Exec(`
+		DELETE FROM daemon_session_projections
+		WHERE instr(session_id, '.pane-') > 0
+	`); err != nil {
+		return fmt.Errorf("migrate session observations: delete pane rows from intent table: %w", err)
 	}
 	return nil
 }
@@ -566,6 +674,7 @@ func (c *Client) migrateProviderDisplayKeyIssueID(ctx context.Context, tx *sql.T
 		{`UPDATE spec_links SET issue_id = ? WHERE issue_id = ?`, []any{migration.NewID, migration.OldID}},
 		{`UPDATE issue_external_refs SET issue_id = ?, updated_at = ? WHERE issue_id = ?`, []any{migration.NewID, now, migration.OldID}},
 		{`UPDATE daemon_session_projections SET issue_id = ?, updated_at = ? WHERE issue_id = ?`, []any{migration.NewID, now, migration.OldID}},
+		{`UPDATE daemon_session_observations SET issue_id = ?, updated_at = ? WHERE issue_id = ?`, []any{migration.NewID, now, migration.OldID}},
 		{`UPDATE daemon_worktree_projections SET issue_id = ?, updated_at = ? WHERE issue_id = ?`, []any{migration.NewID, now, migration.OldID}},
 	}
 	for _, stmt := range statements {
@@ -1994,7 +2103,7 @@ func (c *Client) deleteLocked(ctx context.Context, id string) error {
 		}
 	}()
 	var runtimeAttachmentCount int
-	if err := tx.QueryRowContext(ctx, `
+	runtimeAttachmentQuery := `
 		SELECT (
 			CASE
 				WHEN EXISTS (
@@ -2008,13 +2117,14 @@ func (c *Client) deleteLocked(ctx context.Context, id string) error {
 			CASE
 				WHEN EXISTS (
 					SELECT 1
-					FROM daemon_session_projections
+					FROM (` + runtimeSessionProjectionUnionSQL + `)
 					WHERE issue_id = ? AND LOWER(TRIM(COALESCE(state, ''))) <> 'stopped'
 				)
 				THEN 1 ELSE 0
 			END
 		)
-	`, id, id).Scan(&runtimeAttachmentCount); err != nil {
+	`
+	if err := tx.QueryRowContext(ctx, runtimeAttachmentQuery, id, id).Scan(&runtimeAttachmentCount); err != nil {
 		return c.wrapError("delete", id, err)
 	}
 	if runtimeAttachmentCount > 0 {
@@ -2410,7 +2520,7 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 						updated_at DESC,
 						session_id DESC
 				) AS rn
-			FROM daemon_session_projections
+			FROM (%s)
 			WHERE project_id = ? AND issue_id IN (%s)
 		),
 		session_pick AS (
@@ -2447,7 +2557,7 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 			AND parent.dependency_type IN (?, ?)
 		WHERE i.deleted_at IS NULL AND i.id IN (%s)
 		ORDER BY i.updated_at DESC
-	`, placeholders, placeholders)
+	`, runtimeSessionProjectionUnionSQL, placeholders, placeholders)
 	args := make([]any, 0, len(ids)*2+4)
 	args = append(args, projectID)
 	for _, id := range ids {
@@ -2776,7 +2886,7 @@ func taskRuntimeProjectionQuery(projectID string, includeDetails bool, issueIDs 
 						updated_at DESC,
 						session_id DESC
 				) AS rn
-			FROM daemon_session_projections
+			FROM (` + runtimeSessionProjectionUnionSQL + `)
 			WHERE project_id = ?` + sessionFilter + `
 		),
 		session_pick AS (

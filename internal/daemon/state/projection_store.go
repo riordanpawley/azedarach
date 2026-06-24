@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	sessionStateTable  = "daemon_session_projections"
-	worktreeStateTable = "daemon_worktree_projections"
+	sessionStateTable       = "daemon_session_projections"
+	sessionObservationTable = "daemon_session_observations"
+	worktreeStateTable      = "daemon_worktree_projections"
 )
 
 // WorktreeState captures durable daemon worktree state stored in sqlite.
@@ -47,6 +48,7 @@ type RuntimeStateStore struct {
 // SessionStateReader loads persisted session state rows for a project.
 type SessionStateReader interface {
 	ListSessionStates(context.Context, string) ([]Session, error)
+	ListSessionIntentStates(context.Context, string) ([]Session, error)
 	GetSessionState(context.Context, string, string) (Session, bool, error)
 	GetSessionStateByIssueID(context.Context, string, string) (Session, bool, error)
 }
@@ -190,9 +192,10 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 			session.StartedAt = &started
 		}
 	}
+	targetTable := sessionStorageTableForID(session.ID)
 	startedAt := nullableRuntimeStateTime(session.StartedAt)
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO `+sessionStateTable+` (
+		INSERT INTO `+targetTable+` (
 			project_id,
 			session_id,
 			issue_id,
@@ -228,6 +231,15 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 	if err != nil {
 		return fmt.Errorf("upsert session state %s/%s: %w", projectID, session.ID, err)
 	}
+	if targetTable == sessionStateTable {
+		if _, err := db.ExecContext(ctx, `DELETE FROM `+sessionObservationTable+` WHERE project_id = ? AND session_id = ?`, projectID, session.ID); err != nil {
+			return fmt.Errorf("delete moved session observation %s/%s: %w", projectID, session.ID, err)
+		}
+	} else {
+		if _, err := db.ExecContext(ctx, `DELETE FROM `+sessionStateTable+` WHERE project_id = ? AND session_id = ?`, projectID, session.ID); err != nil {
+			return fmt.Errorf("delete moved session intent %s/%s: %w", projectID, session.ID, err)
+		}
+	}
 	return nil
 }
 
@@ -252,6 +264,12 @@ func (s *RuntimeStateStore) deleteSessionStateLocked(ctx context.Context, projec
 		WHERE project_id = ? AND session_id = ?
 	`, projectID, sessionID); err != nil {
 		return fmt.Errorf("delete session state %s/%s: %w", projectID, sessionID, err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		DELETE FROM `+sessionObservationTable+`
+		WHERE project_id = ? AND session_id = ?
+	`, projectID, sessionID); err != nil {
+		return fmt.Errorf("delete session observation %s/%s: %w", projectID, sessionID, err)
 	}
 	return nil
 }
@@ -278,7 +296,8 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 		}
 	}()
 
-	activeSessions := make(map[string]struct{}, len(sessions))
+	activeIntentSessions := make(map[string]struct{}, len(sessions))
+	activeObservationSessions := make(map[string]struct{}, len(sessions))
 	for _, session := range sessions {
 		sessionID := strings.TrimSpace(session.ID)
 		if sessionID == "" {
@@ -289,7 +308,12 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 		if session.State == SessionStateStopped {
 			session.ObservedState = SessionStateStopped
 		}
-		activeSessions[sessionID] = struct{}{}
+		targetTable := sessionStorageTableForID(sessionID)
+		if targetTable == sessionStateTable {
+			activeIntentSessions[sessionID] = struct{}{}
+		} else {
+			activeObservationSessions[sessionID] = struct{}{}
+		}
 		updatedAt := session.UpdatedAt
 		if updatedAt.IsZero() {
 			updatedAt = time.Now().UTC()
@@ -300,7 +324,7 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 		normalizeSessionProjectionActivity(&session)
 		startedAt := nullableRuntimeStateTime(session.StartedAt)
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO `+sessionStateTable+` (
+			INSERT INTO `+targetTable+` (
 				project_id,
 				session_id,
 				issue_id,
@@ -335,33 +359,50 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 		); err != nil {
 			return fmt.Errorf("upsert session state %s/%s: %w", projectID, sessionID, err)
 		}
+		otherTable := sessionStateTable
+		if targetTable == sessionStateTable {
+			otherTable = sessionObservationTable
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+otherTable+` WHERE project_id = ? AND session_id = ?`, projectID, sessionID); err != nil {
+			return fmt.Errorf("delete moved session state %s/%s: %w", projectID, sessionID, err)
+		}
 	}
 
-	if len(activeSessions) == 0 {
-		if _, err := tx.ExecContext(ctx, `
-			DELETE FROM `+sessionStateTable+`
-			WHERE project_id = ?
-		`, projectID); err != nil {
-			return fmt.Errorf("clear session state rows %s: %w", projectID, err)
-		}
-	} else {
-		args := make([]any, 0, len(activeSessions)+1)
-		args = append(args, projectID)
-		placeholders := make([]string, 0, len(activeSessions))
-		for sessionID := range activeSessions {
-			placeholders = append(placeholders, "?")
-			args = append(args, sessionID)
-		}
-		query := `DELETE FROM ` + sessionStateTable + ` WHERE project_id = ? AND session_id NOT IN (` + strings.Join(placeholders, ",") + `)`
-		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
-			return fmt.Errorf("delete stale session state rows %s: %w", projectID, err)
-		}
+	if err := deleteStaleSessionRows(ctx, tx, sessionStateTable, projectID, activeIntentSessions); err != nil {
+		return err
+	}
+	if err := deleteStaleSessionRows(ctx, tx, sessionObservationTable, projectID, activeObservationSessions); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit replace session state rows %s: %w", projectID, err)
 	}
 	tx = nil
+	return nil
+}
+
+func deleteStaleSessionRows(ctx context.Context, tx *sql.Tx, tableName, projectID string, activeSessions map[string]struct{}) error {
+	if len(activeSessions) == 0 {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM `+tableName+`
+			WHERE project_id = ?
+		`, projectID); err != nil {
+			return fmt.Errorf("clear session state rows %s: %w", projectID, err)
+		}
+		return nil
+	}
+	args := make([]any, 0, len(activeSessions)+1)
+	args = append(args, projectID)
+	placeholders := make([]string, 0, len(activeSessions))
+	for sessionID := range activeSessions {
+		placeholders = append(placeholders, "?")
+		args = append(args, sessionID)
+	}
+	query := `DELETE FROM ` + tableName + ` WHERE project_id = ? AND session_id NOT IN (` + strings.Join(placeholders, ",") + `)`
+	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("delete stale session state rows %s: %w", projectID, err)
+	}
 	return nil
 }
 
@@ -383,7 +424,67 @@ func normalizeSessionProjectionActivity(session *Session) {
 	}
 }
 
+func sessionStorageTableForID(sessionID string) string {
+	if isSessionObservationID(sessionID) {
+		return sessionObservationTable
+	}
+	return sessionStateTable
+}
+
+func isSessionObservationID(sessionID string) bool {
+	return strings.Contains(strings.TrimSpace(sessionID), ".pane-")
+}
+
+func sessionProjectionUnionSQL() string {
+	return `
+		SELECT
+			project_id,
+			session_id,
+			issue_id,
+			state,
+			observed_state,
+			activity,
+			activity_source,
+			tmux_attached_count,
+			started_at,
+			updated_at
+		FROM ` + sessionStateTable + `
+		UNION ALL
+		SELECT
+			project_id,
+			session_id,
+			issue_id,
+			state,
+			observed_state,
+			activity,
+			activity_source,
+			tmux_attached_count,
+			started_at,
+			updated_at
+		FROM ` + sessionObservationTable
+}
+
 func (s *RuntimeStateStore) ListSessionStates(ctx context.Context, projectID string) ([]Session, error) {
+	return s.listSessionStatesFromQuery(ctx, projectID, sessionProjectionUnionSQL())
+}
+
+func (s *RuntimeStateStore) ListSessionIntentStates(ctx context.Context, projectID string) ([]Session, error) {
+	return s.listSessionStatesFromQuery(ctx, projectID, `
+		SELECT
+			project_id,
+			session_id,
+			issue_id,
+			state,
+			observed_state,
+			activity,
+			activity_source,
+			tmux_attached_count,
+			started_at,
+			updated_at
+		FROM `+sessionStateTable)
+}
+
+func (s *RuntimeStateStore) listSessionStatesFromQuery(ctx context.Context, projectID, sourceQuery string) ([]Session, error) {
 	db, err := s.dbHandle()
 	if err != nil {
 		return nil, err
@@ -400,7 +501,7 @@ func (s *RuntimeStateStore) ListSessionStates(ctx context.Context, projectID str
 			COALESCE(tmux_attached_count, 0),
 			COALESCE(started_at, ''),
 			updated_at
-		FROM `+sessionStateTable+`
+		FROM (`+sourceQuery+`)
 		WHERE project_id = ?
 		ORDER BY updated_at DESC, session_id ASC
 	`, projectID)
@@ -473,8 +574,10 @@ func (s *RuntimeStateStore) GetSessionState(ctx context.Context, projectID, sess
 			COALESCE(tmux_attached_count, 0),
 			COALESCE(started_at, ''),
 			updated_at
-		FROM `+sessionStateTable+`
+		FROM (`+sessionProjectionUnionSQL()+`)
 		WHERE project_id = ? AND session_id = ?
+		ORDER BY CASE WHEN session_id LIKE '%.pane-%' THEN 1 ELSE 0 END
+		LIMIT 1
 	`, projectID, sessionID)
 	var (
 		rowSessionID  string
@@ -536,7 +639,7 @@ func (s *RuntimeStateStore) GetSessionStateByIssueID(ctx context.Context, projec
 			COALESCE(tmux_attached_count, 0),
 			COALESCE(started_at, ''),
 			updated_at
-		FROM `+sessionStateTable+`
+		FROM (`+sessionProjectionUnionSQL()+`)
 		WHERE project_id = ? AND issue_id = ?
 		ORDER BY updated_at DESC, session_id ASC
 		LIMIT 1
@@ -587,6 +690,8 @@ func (s *RuntimeStateStore) ListProjectIDs(ctx context.Context) ([]string, error
 	}
 	rows, err := db.QueryContext(ctx, `
 		SELECT project_id FROM `+sessionStateTable+`
+		UNION
+		SELECT project_id FROM `+sessionObservationTable+`
 		UNION
 		SELECT project_id FROM `+worktreeStateTable+`
 	`)
@@ -1074,6 +1179,21 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_session_projections_project_issue
 			ON ` + sessionStateTable + ` (project_id, issue_id)`,
+		`CREATE TABLE IF NOT EXISTS ` + sessionObservationTable + ` (
+			project_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			issue_id TEXT NOT NULL,
+			state TEXT NOT NULL,
+			observed_state TEXT,
+			activity TEXT,
+			activity_source TEXT,
+			tmux_attached_count INTEGER NOT NULL DEFAULT 0,
+			started_at TEXT,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, session_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_daemon_session_observations_project_issue
+			ON ` + sessionObservationTable + ` (project_id, issue_id)`,
 		`CREATE TABLE IF NOT EXISTS ` + worktreeStateTable + ` (
 			project_id TEXT NOT NULL,
 			issue_id TEXT NOT NULL,
@@ -1107,11 +1227,77 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 	if err := ensureColumn(ctx, db, sessionStateTable, "tmux_attached_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	if err := ensureColumn(ctx, db, sessionObservationTable, "started_at", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, sessionObservationTable, "observed_state", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, sessionObservationTable, "activity", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, sessionObservationTable, "activity_source", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, sessionObservationTable, "tmux_attached_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := migrateSessionObservations(ctx, db); err != nil {
+		return err
+	}
 	if err := ensureColumn(ctx, db, worktreeStateTable, "git_status_json", "TEXT"); err != nil {
 		return err
 	}
 	if err := ensureColumn(ctx, db, worktreeStateTable, "git_status_updated_at", "TEXT"); err != nil {
 		return err
+	}
+	return nil
+}
+
+func migrateSessionObservations(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO `+sessionObservationTable+` (
+			project_id,
+			session_id,
+			issue_id,
+			state,
+			observed_state,
+			activity,
+			activity_source,
+			tmux_attached_count,
+			started_at,
+			updated_at
+		)
+		SELECT
+			project_id,
+			session_id,
+			issue_id,
+			state,
+			observed_state,
+			activity,
+			activity_source,
+			COALESCE(tmux_attached_count, 0),
+			started_at,
+			updated_at
+		FROM `+sessionStateTable+`
+		WHERE instr(session_id, '.pane-') > 0
+		ON CONFLICT(project_id, session_id) DO UPDATE SET
+			issue_id = excluded.issue_id,
+			state = excluded.state,
+			observed_state = excluded.observed_state,
+			activity = excluded.activity,
+			activity_source = excluded.activity_source,
+			tmux_attached_count = excluded.tmux_attached_count,
+			started_at = excluded.started_at,
+			updated_at = excluded.updated_at
+	`); err != nil {
+		return fmt.Errorf("migrate session observations: copy pane rows: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		DELETE FROM `+sessionStateTable+`
+		WHERE instr(session_id, '.pane-') > 0
+	`); err != nil {
+		return fmt.Errorf("migrate session observations: delete pane rows from intent table: %w", err)
 	}
 	return nil
 }
