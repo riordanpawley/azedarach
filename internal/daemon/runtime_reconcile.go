@@ -152,18 +152,24 @@ func (d *Daemon) reconcileIssueResourcesPresent(ctx context.Context, projectID s
 	if issueClient == nil {
 		return nil
 	}
-	tasks, err := issueClient.List(ctx)
-	if err != nil {
-		return err
-	}
 	allowed := map[string]struct{}{}
 	if len(issueIDs) > 0 {
 		for _, issueID := range normalizeRuntimeReconcileIssueIDs(issueIDs) {
 			allowed[issueID] = struct{}{}
 		}
 	}
-
 	attachedIssueIDs, err := d.issueResourceAttachedIssueIDs(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	readIssueIDs := issueIDs
+	if len(allowed) == 0 {
+		readIssueIDs = make([]string, 0, len(attachedIssueIDs))
+		for issueKey := range attachedIssueIDs {
+			readIssueIDs = append(readIssueIDs, issueKey)
+		}
+	}
+	tasks, err := issueClient.GetManyWithRuntime(ctx, projectID, readIssueIDs)
 	if err != nil {
 		return err
 	}

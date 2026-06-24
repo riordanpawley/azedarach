@@ -178,6 +178,50 @@ func TestClient_ExternalIssueRefsAreBackendNeutralMetadata(t *testing.T) {
 	assert.Equal(t, naming.IssueID(issueID), task.ID, "runtime task id stays Az-owned, not provider-owned")
 }
 
+func TestClient_GetManyWithRuntimeFiltersRequestedActiveIssues(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	firstID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "first",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+	secondID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "second",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+	thirdID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "third",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+	archivedID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "archived",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.Archive(ctx, archivedID))
+
+	tasks, err := client.GetManyWithRuntime(ctx, "proj", []string{secondID, "", firstID, secondID, archivedID})
+	require.NoError(t, err)
+
+	got := map[string]domain.Task{}
+	for _, task := range tasks {
+		got[task.ID.String()] = task
+	}
+	require.Len(t, got, 2)
+	assert.Equal(t, "first", got[firstID].Title)
+	assert.Equal(t, "second", got[secondID].Title)
+	assert.NotContains(t, got, thirdID)
+	assert.NotContains(t, got, archivedID)
+}
+
 func TestClient_LinearSyncExternalRefsUseCanonicalOriginTable(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
