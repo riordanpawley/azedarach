@@ -56,9 +56,9 @@ var hookEventStatuses = map[string]string{
 }
 
 var (
-	gitHookDaemonRefreshTimeout        = 10 * time.Second
-	gitHookDaemonRefreshAttemptTimeout = 3 * time.Second
-	gitHookDaemonRefreshInitialBackoff = 150 * time.Millisecond
+	gitHookDaemonRefreshTimeout        = 750 * time.Millisecond
+	gitHookDaemonRefreshAttemptTimeout = 700 * time.Millisecond
+	gitHookDaemonRefreshInitialBackoff = 25 * time.Millisecond
 )
 
 type GitHooksInstallOptions struct {

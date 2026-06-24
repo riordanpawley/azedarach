@@ -693,7 +693,7 @@ func TestGitHooksNotifyCommandAutostartsDaemonOnTransientGitStatusError(t *testi
 
 	started := false
 	newLauncher = func(_, _ string) daemonStarter {
-		return &timeoutBudgetLauncher{minBudget: 1 * time.Second, started: &started}
+		return &timeoutBudgetLauncher{minBudget: 200 * time.Millisecond, started: &started}
 	}
 
 	attempts := 0
@@ -771,7 +771,7 @@ func TestGitHooksNotifyCommandRetriesTransientGitStatusErrorsAcrossAttempts(t *t
 
 	started := false
 	newLauncher = func(_, _ string) daemonStarter {
-		return &timeoutBudgetLauncher{minBudget: 1 * time.Second, started: &started}
+		return &timeoutBudgetLauncher{minBudget: 200 * time.Millisecond, started: &started}
 	}
 
 	attempts := 0

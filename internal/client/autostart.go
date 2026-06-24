@@ -69,7 +69,6 @@ func NewAutostartOrchestrator(handshaker Handshaker, starter Starter) *Autostart
 		backoffFn: func(attempt int) time.Duration {
 			return time.Duration(attempt+1) * 100 * time.Millisecond
 		},
-		sleepFn:    time.Sleep,
 		startKey:   "daemon-autostart",
 		replaceKey: "daemon-replace",
 	}
@@ -92,13 +91,18 @@ func (o *AutostartOrchestrator) EnsureAttached(ctx context.Context, hello protoc
 			if ctx.Err() != nil {
 				break
 			}
-			o.sleepFn(o.preStartBackoff(attempt))
+			if !o.sleep(ctx, o.preStartBackoff(attempt)) {
+				break
+			}
 			retryStartedAt := time.Now()
 			ack, err = o.handshaker.Handshake(ctx, hello)
 			latencytrace.LogPhase(slog.Default(), "cli", "autostart.pre_start_handshake", retryStartedAt, "client_name", hello.ClientName, "attempt", attempt+1, "accepted", err == nil && ack.Accepted, "error", err)
 			if err == nil && ack.Accepted {
 				return ack, nil
 			}
+		}
+		if ctx.Err() != nil {
+			return protocol.HelloAck{}, ctx.Err()
 		}
 	}
 	if err == nil {
@@ -144,8 +148,13 @@ func (o *AutostartOrchestrator) awaitAttached(ctx context.Context, hello protoco
 			return ack, ErrUpgradeRequired
 		}
 		if attempt < o.maxRetries {
-			o.sleepFn(o.backoffFn(attempt))
+			if !o.sleep(ctx, o.backoffFn(attempt)) {
+				break
+			}
 		}
+	}
+	if ctx.Err() != nil {
+		return protocol.HelloAck{}, ctx.Err()
 	}
 
 	if err != nil {
@@ -155,6 +164,36 @@ func (o *AutostartOrchestrator) awaitAttached(ctx context.Context, hello protoco
 		return ack, ErrUpgradeRequired
 	}
 	return ack, fmt.Errorf("attach rejected after autostart: %s", ack.ErrorCode)
+}
+
+func (o *AutostartOrchestrator) sleep(ctx context.Context, d time.Duration) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if d <= 0 {
+		return true
+	}
+	if o.sleepFn == nil {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return true
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		o.sleepFn(d)
+		close(done)
+	}()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-done:
+		return true
+	}
 }
 
 func (o *AutostartOrchestrator) startDaemon(ctx context.Context) error {

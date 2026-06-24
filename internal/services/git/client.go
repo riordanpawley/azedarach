@@ -105,17 +105,23 @@ func (c *Client) Status(ctx context.Context, worktree string) (*GitStatus, error
 // RuntimeStatus returns porcelain status plus base-relative diff and branch counts.
 // Metric failures are treated as best-effort so callers still receive dirty/clean state.
 func (c *Client) RuntimeStatus(ctx context.Context, worktree, baseBranch string) (*GitStatus, error) {
+	return c.RuntimeStatusWithBasePreference(ctx, worktree, baseBranch, false)
+}
+
+// RuntimeStatusWithBasePreference returns runtime status, optionally preferring
+// remote base refs before local base refs for origin-oriented workflows.
+func (c *Client) RuntimeStatusWithBasePreference(ctx context.Context, worktree, baseBranch string, preferRemote bool) (*GitStatus, error) {
 	status, err := c.Status(ctx, worktree)
 	if err != nil {
 		return nil, err
 	}
 
-	if additions, deletions, err := c.DiffStatTotals(ctx, worktree, baseBranch); err == nil {
+	if additions, deletions, err := c.DiffStatTotalsWithBasePreference(ctx, worktree, baseBranch, preferRemote); err == nil {
 		status.GitAdditions = additions
 		status.GitDeletions = deletions
 	}
 
-	if ahead, behind, err := c.BranchAheadBehind(ctx, worktree, baseBranch); err == nil {
+	if ahead, behind, err := c.BranchAheadBehindWithBasePreference(ctx, worktree, baseBranch, preferRemote); err == nil {
 		status.GitAheadCount = ahead
 		status.GitBehindCount = behind
 	}
@@ -436,9 +442,15 @@ func (c *Client) Diff(ctx context.Context, worktree string) (string, error) {
 
 // DiffStat returns the diff stat output (summary of changes).
 func (c *Client) DiffStat(ctx context.Context, worktree, baseBranch string) (string, error) {
+	return c.DiffStatWithBasePreference(ctx, worktree, baseBranch, false)
+}
+
+// DiffStatWithBasePreference returns diff stat output using a configurable
+// base-ref preference for local or origin-oriented workflows.
+func (c *Client) DiffStatWithBasePreference(ctx context.Context, worktree, baseBranch string, preferRemote bool) (string, error) {
 	c.logger.Debug("getting diff stat", "worktree", worktree)
 
-	mergeBase, err := c.MergeBase(ctx, worktree, baseBranch)
+	mergeBase, err := c.mergeBase(ctx, worktree, baseBranch, preferRemote)
 	if err == nil {
 		output, diffErr := c.runInWorktree(ctx, worktree, "diff", "--shortstat", mergeBase, "HEAD", "--", ":^.azedarach")
 		if diffErr == nil {
@@ -479,7 +491,13 @@ func (c *Client) DiffStat(ctx context.Context, worktree, baseBranch string) (str
 
 // DiffStatTotals parses additions and deletions from DiffStat output.
 func (c *Client) DiffStatTotals(ctx context.Context, worktree, baseBranch string) (int, int, error) {
-	diffStat, err := c.DiffStat(ctx, worktree, baseBranch)
+	return c.DiffStatTotalsWithBasePreference(ctx, worktree, baseBranch, false)
+}
+
+// DiffStatTotalsWithBasePreference parses additions and deletions from
+// DiffStatWithBasePreference output.
+func (c *Client) DiffStatTotalsWithBasePreference(ctx context.Context, worktree, baseBranch string, preferRemote bool) (int, int, error) {
+	diffStat, err := c.DiffStatWithBasePreference(ctx, worktree, baseBranch, preferRemote)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -489,8 +507,12 @@ func (c *Client) DiffStatTotals(ctx context.Context, worktree, baseBranch string
 
 // MergeBase resolves the merge base between base branch and HEAD.
 func (c *Client) MergeBase(ctx context.Context, worktree, baseBranch string) (string, error) {
+	return c.mergeBase(ctx, worktree, baseBranch, false)
+}
+
+func (c *Client) mergeBase(ctx context.Context, worktree, baseBranch string, preferRemote bool) (string, error) {
 	baseBranch = strings.TrimSpace(baseBranch)
-	candidates := c.baseRefCandidates(ctx, worktree, baseBranch)
+	candidates := c.baseRefCandidates(ctx, worktree, baseBranch, preferRemote)
 	if len(candidates) == 0 {
 		return "", fmt.Errorf("base branch is empty")
 	}
@@ -678,8 +700,14 @@ func (c *Client) RevListCount(ctx context.Context, worktree, revRange string) (i
 // BranchAheadBehind reports commit deltas for HEAD relative to the base branch.
 // It tries the local base branch first, then falls back to origin/<base>.
 func (c *Client) BranchAheadBehind(ctx context.Context, worktree, baseBranch string) (int, int, error) {
+	return c.BranchAheadBehindWithBasePreference(ctx, worktree, baseBranch, false)
+}
+
+// BranchAheadBehindWithBasePreference reports commit deltas for HEAD relative
+// to a base ref chosen by the configured local/remote workflow preference.
+func (c *Client) BranchAheadBehindWithBasePreference(ctx context.Context, worktree, baseBranch string, preferRemote bool) (int, int, error) {
 	baseBranch = strings.TrimSpace(baseBranch)
-	candidates := c.baseRefCandidates(ctx, worktree, baseBranch)
+	candidates := c.baseRefCandidates(ctx, worktree, baseBranch, preferRemote)
 	if len(candidates) == 0 {
 		return 0, 0, fmt.Errorf("base branch is empty")
 	}
@@ -707,7 +735,7 @@ func (c *Client) BranchAheadBehind(ctx context.Context, worktree, baseBranch str
 	return 0, 0, fmt.Errorf("failed to resolve branch delta for %s", baseBranch)
 }
 
-func (c *Client) baseRefCandidates(ctx context.Context, worktree, baseBranch string) []string {
+func (c *Client) baseRefCandidates(ctx context.Context, worktree, baseBranch string, preferRemote bool) []string {
 	ordered := make([]string, 0, 10)
 	seen := map[string]struct{}{}
 	add := func(ref string) {
@@ -725,30 +753,45 @@ func (c *Client) baseRefCandidates(ctx context.Context, worktree, baseBranch str
 	normalizedBase := strings.ToLower(strings.TrimSpace(baseBranch))
 	genericBase := normalizedBase == "" || normalizedBase == "main" || normalizedBase == "master"
 
-	// Prefer current remote refs when origin metadata is available. This avoids
-	// massive, misleading deltas from stale local base branches.
+	var originHeadRef string
+	var originHeadLocal string
 	if headRef, err := c.runInWorktree(ctx, worktree, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"); err == nil && strings.TrimSpace(headRef) != "" {
-		headRef = strings.TrimSpace(headRef) // e.g. origin/main or origin/trunk
-		headLocal := strings.TrimPrefix(headRef, "origin/")
-		if genericBase {
-			if !strings.EqualFold(headRef, "origin/"+normalizedBase) && !strings.EqualFold(headLocal, normalizedBase) {
-				add(headRef)
-				add(headLocal)
-			}
+		originHeadRef = strings.TrimSpace(headRef) // e.g. origin/main or origin/trunk
+		originHeadLocal = strings.TrimPrefix(originHeadRef, "origin/")
+	}
+
+	addOriginHeadFallbacks := func() {
+		if !genericBase || originHeadRef == "" {
+			return
 		}
+		if !strings.EqualFold(originHeadRef, "origin/"+normalizedBase) {
+			add(originHeadRef)
+		}
+		if !strings.EqualFold(originHeadLocal, normalizedBase) {
+			add(originHeadLocal)
+		}
+	}
+
+	if preferRemote {
+		addOriginHeadFallbacks()
 		if baseBranch != "" && !strings.Contains(baseBranch, "/") {
 			add("origin/" + baseBranch)
 		}
 		add(baseBranch)
 		if genericBase {
-			add(headRef)
-			add(headLocal)
+			if originHeadRef != "" {
+				add(originHeadRef)
+			}
+			if originHeadLocal != "" {
+				add(originHeadLocal)
+			}
 		}
 	} else {
 		add(baseBranch)
 		if baseBranch != "" && !strings.Contains(baseBranch, "/") {
 			add("origin/" + baseBranch)
 		}
+		addOriginHeadFallbacks()
 	}
 
 	// Conservative well-known fallback refs.

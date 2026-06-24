@@ -36,6 +36,7 @@ type gitServiceAdapter struct {
 	pollInterval                time.Duration
 	onStatusUpdate              func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus)
 	baseBranch                  string
+	workflowMode                string
 	baseBranchForProject        func(string) string
 	baseBranchForWorktree       func(context.Context, string, string) string
 	heavySessionStartActive     func(context.Context, string) bool
@@ -185,13 +186,18 @@ func (a *gitServiceAdapter) Checkpoint(ctx context.Context, projectID string, re
 }
 
 func (a *gitServiceAdapter) DiffStat(ctx context.Context, projectID string, worktree, baseBranch string) (string, error) {
-	baseBranch = strings.TrimSpace(baseBranch)
-	if resolved := a.worktreeSpecificBaseBranch(ctx, projectID, worktree); resolved != "" {
-		baseBranch = resolved
-	} else if baseBranch == "" {
-		baseBranch = a.resolvedBaseBranch(projectID)
+	requestedBase := strings.TrimSpace(baseBranch)
+	defaultBase := strings.TrimSpace(a.resolvedBaseBranch(projectID))
+	preferRemote := a.preferRemoteRuntimeBase()
+	if requestedBase == "" || requestedBase == defaultBase {
+		if resolved := a.worktreeSpecificBaseBranch(ctx, projectID, worktree); resolved != "" {
+			requestedBase = resolved
+			preferRemote = false
+		} else if requestedBase == "" {
+			requestedBase = defaultBase
+		}
 	}
-	return a.client.DiffStat(ctx, worktree, baseBranch)
+	return a.client.DiffStatWithBasePreference(ctx, worktree, requestedBase, preferRemote)
 }
 
 func (a *gitServiceAdapter) RuntimeSignals(ctx context.Context, projectID string, targets []daemonhandlers.GitRuntimeSignalsTarget, baseBranch string, compareRemote bool, remote string, refresh bool) ([]daemonhandlers.GitRuntimeSignalsResult, int, error) {
@@ -531,7 +537,8 @@ func (a *gitServiceAdapter) refreshGitStatusWriteThrough(ctx context.Context, pr
 
 func (a *gitServiceAdapter) refreshGitStatusWriteThroughResult(ctx context.Context, projectID, worktree string, publishOnChange, forcePublish bool) (*git.GitStatus, error) {
 	projectID = normalizeProjectID(projectID)
-	baseBranch := a.resolvedBaseBranchForWorktree(ctx, projectID, worktree)
+	baseBranch, worktreeSpecificBase := a.resolvedBaseBranchForWorktree(ctx, projectID, worktree)
+	preferRemoteBase := a.preferRemoteRuntimeBase() && !worktreeSpecificBase
 	if err := a.client.WithWorktreeLock(ctx, worktree, func(ctx context.Context) error {
 		return a.client.RecoverIntegrationJournal(ctx, worktree)
 	}); err != nil && a.logger != nil {
@@ -547,7 +554,7 @@ func (a *gitServiceAdapter) refreshGitStatusWriteThroughResult(ctx context.Conte
 		err    error
 	)
 	if baseBranch != "" {
-		status, err = a.client.RuntimeStatus(ctx, worktree, baseBranch)
+		status, err = a.client.RuntimeStatusWithBasePreference(ctx, worktree, baseBranch, preferRemoteBase)
 		if err != nil && a.logger != nil {
 			a.logger.Debug("runtime git status refresh failed; falling back to porcelain status",
 				"project_id", projectID,
@@ -579,11 +586,11 @@ func (a *gitServiceAdapter) refreshGitStatusWriteThroughResult(ctx context.Conte
 	return status, nil
 }
 
-func (a *gitServiceAdapter) resolvedBaseBranchForWorktree(ctx context.Context, projectID, worktree string) string {
+func (a *gitServiceAdapter) resolvedBaseBranchForWorktree(ctx context.Context, projectID, worktree string) (string, bool) {
 	if baseBranch := a.worktreeSpecificBaseBranch(ctx, projectID, worktree); baseBranch != "" {
-		return baseBranch
+		return baseBranch, true
 	}
-	return a.resolvedBaseBranch(projectID)
+	return a.resolvedBaseBranch(projectID), false
 }
 
 func (a *gitServiceAdapter) worktreeSpecificBaseBranch(ctx context.Context, projectID, worktree string) string {
@@ -740,6 +747,13 @@ func (a *gitServiceAdapter) resolvedBaseBranch(projectID string) string {
 		}
 	}
 	return strings.TrimSpace(a.baseBranch)
+}
+
+func (a *gitServiceAdapter) preferRemoteRuntimeBase() bool {
+	if a == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(a.workflowMode), "origin")
 }
 
 func gitStatusSignature(status *git.GitStatus) string {

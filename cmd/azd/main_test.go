@@ -7,7 +7,87 @@ import (
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/logging"
 )
+
+func TestRedirectDaemonProcessOutputKeepsRotatingStderrWrites(t *testing.T) {
+	repoDir := t.TempDir()
+	logPath := filepath.Join(repoDir, ".azedarach", logging.DaemonLogFileName)
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(log dir): %v", err)
+	}
+	seed, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("OpenFile(seed) error = %v", err)
+	}
+	if err := seed.Truncate(logging.DefaultMaxLogBytes); err != nil {
+		_ = seed.Close()
+		t.Fatalf("Truncate(seed) error = %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("Close(seed) error = %v", err)
+	}
+
+	redirect, err := redirectDaemonProcessOutput(repoDir)
+	if err != nil {
+		t.Fatalf("redirectDaemonProcessOutput() error = %v", err)
+	}
+	if err := writeAll(os.Stderr, []byte("new\n")); err != nil {
+		_ = redirect.Close()
+		t.Fatalf("write new log: %v", err)
+	}
+	filler := strings.Repeat("x", int(logging.DefaultMaxLogBytes)-len("new\n"))
+	if err := writeAll(os.Stderr, []byte(filler)); err != nil {
+		_ = redirect.Close()
+		t.Fatalf("write filler: %v", err)
+	}
+	if err := writeAll(os.Stderr, []byte("after-rotation\n")); err != nil {
+		_ = redirect.Close()
+		t.Fatalf("write after rotation: %v", err)
+	}
+	if err := redirect.Close(); err != nil {
+		t.Fatalf("Close(redirect) error = %v", err)
+	}
+
+	if info, err := os.Stat(logPath + ".1"); err != nil {
+		t.Fatalf("Stat(rotated backup) error = %v", err)
+	} else if info.Size() <= 0 || info.Size() > logging.DefaultMaxLogBytes {
+		t.Fatalf("rotated backup size = %d, want between 1 and %d", info.Size(), logging.DefaultMaxLogBytes)
+	}
+	if info, err := os.Stat(logPath + ".2"); err != nil {
+		t.Fatalf("Stat(startup rotated backup) error = %v", err)
+	} else if info.Size() != logging.DefaultMaxLogBytes {
+		t.Fatalf("startup rotated backup size = %d, want %d", info.Size(), logging.DefaultMaxLogBytes)
+	}
+	if info, err := os.Stat(logPath); err != nil {
+		t.Fatalf("Stat(active daemon log) error = %v", err)
+	} else if info.Size() <= 0 || info.Size() > logging.DefaultMaxLogBytes {
+		t.Fatalf("active daemon log size = %d, want between 1 and %d", info.Size(), logging.DefaultMaxLogBytes)
+	}
+	if got := mustReadFile(t, logPath); !strings.HasSuffix(got, "after-rotation\n") {
+		t.Fatalf("active daemon log suffix = %q, want latest write", got[max(0, len(got)-64):])
+	}
+}
+
+func writeAll(file *os.File, p []byte) error {
+	for len(p) > 0 {
+		n, err := file.Write(p)
+		if err != nil {
+			return err
+		}
+		p = p[n:]
+	}
+	return nil
+}
+
+func mustReadFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", path, err)
+	}
+	return string(b)
+}
 
 func TestResolveScopedWorktreeWatchPathUsesRepoDir(t *testing.T) {
 	base := t.TempDir()

@@ -118,6 +118,35 @@ func TestEnsureAttachedTransientHandshakeFailureDoesNotAutostart(t *testing.T) {
 	}
 }
 
+func TestEnsureAttachedPreStartBackoffStopsOnContextCancellation(t *testing.T) {
+	h := &fakeHandshaker{
+		fn: func() (protocol.HelloAck, error) {
+			return protocol.HelloAck{}, errors.New("dial unavailable")
+		},
+	}
+	s := &fakeStarter{}
+	o := NewAutostartOrchestrator(h, s)
+	o.preStartBackoff = func(_ int) time.Duration { return time.Second }
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	startedAt := time.Now()
+	_, err := o.EnsureAttached(ctx, protocol.Hello{
+		ProtocolVersion: protocol.CurrentVersion,
+		ClientName:      "cli",
+		ClientVersion:   "dev",
+	})
+	if err == nil {
+		t.Fatal("EnsureAttached error = nil, want context cancellation error")
+	}
+	if elapsed := time.Since(startedAt); elapsed > 250*time.Millisecond {
+		t.Fatalf("EnsureAttached elapsed = %s, want context-bounded return", elapsed)
+	}
+	if got := s.startCalls.Load(); got != 0 {
+		t.Fatalf("starter calls = %d, want 0 after context cancellation", got)
+	}
+}
+
 func TestEnsureAttachedHandshakeRejectedDoesNotAutostart(t *testing.T) {
 	h := &fakeHandshaker{
 		fn: func() (protocol.HelloAck, error) {

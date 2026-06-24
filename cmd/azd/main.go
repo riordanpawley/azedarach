@@ -4,9 +4,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -71,6 +73,12 @@ func main() {
 	if scopeWatchPath := resolveScopedWorktreeWatchPath(repoDir); scopeWatchPath != "" {
 		startWorktreeExistenceWatch(ctx, cancel, scopeWatchPath, 2*time.Second)
 	}
+	outputRedirect, err := redirectDaemonProcessOutput(repoDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to configure daemon log rotation: %v\n", err)
+	} else {
+		defer outputRedirect.Close()
+	}
 	logger := newDaemonLogger()
 	slog.SetDefault(logger)
 
@@ -80,6 +88,7 @@ func main() {
 		LockPath:                   lockPath,
 		ScopedRuntime:              scopedRuntime,
 		BaseBranch:                 cfg.Git.BaseBranch,
+		GitWorkflowMode:            cfg.Git.WorkflowMode,
 		CLITool:                    cfg.CLITool,
 		DangerouslySkipPermissions: cfg.Session.DangerouslySkipPermissions,
 		SessionShell:               cfg.Session.Shell,
@@ -96,8 +105,59 @@ func main() {
 }
 
 func newDaemonLogger() *slog.Logger {
-	// Daemon stderr is redirected to azd.log by the launcher.
+	// Daemon stderr is redirected to a rotating azd.log by this process.
 	return logging.NewTextStreamLogger(os.Stderr, slog.LevelInfo)
+}
+
+type daemonProcessOutputRedirect struct {
+	previousStdout *os.File
+	previousStderr *os.File
+	reader         *os.File
+	writer         *os.File
+	logFile        io.Closer
+	done           chan struct{}
+}
+
+func redirectDaemonProcessOutput(repoDir string) (*daemonProcessOutputRedirect, error) {
+	logFile, err := logging.OpenRotatingFile(filepath.Join(repoDir, ".azedarach", logging.DaemonLogFileName), logging.DefaultMaxLogBytes, logging.DefaultLogBackups)
+	if err != nil {
+		return nil, err
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		_ = logFile.Close()
+		return nil, fmt.Errorf("create daemon output pipe: %w", err)
+	}
+	redirect := &daemonProcessOutputRedirect{
+		previousStdout: os.Stdout,
+		previousStderr: os.Stderr,
+		reader:         reader,
+		writer:         writer,
+		logFile:        logFile,
+		done:           make(chan struct{}),
+	}
+	os.Stdout = writer
+	os.Stderr = writer
+	go func() {
+		defer close(redirect.done)
+		defer reader.Close()
+		_, _ = io.Copy(logFile, reader)
+	}()
+	return redirect, nil
+}
+
+func (r *daemonProcessOutputRedirect) Close() error {
+	if r == nil {
+		return nil
+	}
+	os.Stdout = r.previousStdout
+	os.Stderr = r.previousStderr
+	err := r.writer.Close()
+	<-r.done
+	if closeErr := r.logFile.Close(); err == nil {
+		err = closeErr
+	}
+	return err
 }
 
 func validateDaemonLaunchFence(socketPath string) error {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -221,6 +222,167 @@ func TestGitServiceAdapterRefreshWriteThroughUsesRuntimeStatusWhenBaseBranchConf
 	}
 	if persisted.GitAdditions != 7 || persisted.GitDeletions != 3 {
 		t.Fatalf("persisted diff totals = %d/%d, want 7/3", persisted.GitAdditions, persisted.GitDeletions)
+	}
+}
+
+func TestGitServiceAdapterOriginWorkflowPrefersRemoteRuntimeBase(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	projectID := "default"
+	issueID := "az-target"
+	worktree := "/tmp/az-target"
+	store := newGitAdapterStore(t, projectID, issueID, worktree, cleanGitStatus())
+
+	var mergeBaseRef string
+	revListRanges := make([]string, 0, 2)
+	runner := &recordingGitRunner{
+		runFn: func(args ...string) (string, error) {
+			if len(args) < 3 || args[0] != "-C" || args[1] != worktree {
+				t.Fatalf("unexpected git args: %v", args)
+			}
+			switch args[2] {
+			case "status":
+				if len(args) >= 4 && args[3] == "--porcelain" {
+					return "", nil
+				}
+			case "symbolic-ref":
+				if len(args) >= 5 && args[3] == "--short" && args[4] == "refs/remotes/origin/HEAD" {
+					return "origin/preview\n", nil
+				}
+			case "merge-base":
+				if len(args) >= 5 {
+					mergeBaseRef = args[3]
+					if args[3] != "origin/preview" {
+						return "", fmt.Errorf("want remote base first, got %s", args[3])
+					}
+					return "abc123", nil
+				}
+			case "diff":
+				if len(args) >= 4 && args[3] == "--shortstat" {
+					return " 1 file changed, 4 insertions(+), 2 deletions(-)", nil
+				}
+			case "rev-list":
+				if len(args) >= 5 && args[3] == "--count" {
+					revListRanges = append(revListRanges, args[4])
+					switch args[4] {
+					case "HEAD..origin/preview":
+						return "3", nil
+					case "origin/preview..HEAD":
+						return "1", nil
+					}
+				}
+			}
+			t.Fatalf("unexpected git args: %v", args)
+			return "", nil
+		},
+	}
+
+	adapter := &gitServiceAdapter{
+		client:            git.NewClient(runner, slog.Default()),
+		runtimeStateStore: store,
+		baseBranch:        "main",
+		workflowMode:      "origin",
+	}
+
+	status, err := adapter.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, true, false)
+	if err != nil {
+		t.Fatalf("refreshGitStatusWriteThroughResult: %v", err)
+	}
+	if mergeBaseRef != "origin/preview" {
+		t.Fatalf("merge-base ref = %q, want origin/preview", mergeBaseRef)
+	}
+	wantRanges := []string{"HEAD..origin/preview", "origin/preview..HEAD"}
+	if !reflect.DeepEqual(revListRanges, wantRanges) {
+		t.Fatalf("rev-list ranges = %v, want %v", revListRanges, wantRanges)
+	}
+	if status.GitAdditions != 4 || status.GitDeletions != 2 {
+		t.Fatalf("diff totals = %d/%d, want 4/2", status.GitAdditions, status.GitDeletions)
+	}
+	if status.GitAheadCount != 1 || status.GitBehindCount != 3 {
+		t.Fatalf("ahead/behind = %d/%d, want 1/3", status.GitAheadCount, status.GitBehindCount)
+	}
+}
+
+func TestGitServiceAdapterOriginWorkflowUsesLocalParentWorktreeBase(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	projectID := "default"
+	issueID := "az-child"
+	worktree := "/tmp/az-child"
+	store := newGitAdapterStore(t, projectID, issueID, worktree, cleanGitStatus())
+
+	var mergeBaseRef string
+	revListRanges := make([]string, 0, 2)
+	runner := &recordingGitRunner{
+		runFn: func(args ...string) (string, error) {
+			if len(args) < 3 || args[0] != "-C" || args[1] != worktree {
+				t.Fatalf("unexpected git args: %v", args)
+			}
+			switch args[2] {
+			case "status":
+				if len(args) >= 4 && args[3] == "--porcelain" {
+					return "", nil
+				}
+			case "symbolic-ref":
+				if len(args) >= 5 && args[3] == "--short" && args[4] == "refs/remotes/origin/HEAD" {
+					return "origin/preview\n", nil
+				}
+			case "merge-base":
+				if len(args) >= 5 {
+					mergeBaseRef = args[3]
+					if args[3] != "az/parent" {
+						return "", fmt.Errorf("want parent base first, got %s", args[3])
+					}
+					return "abc123", nil
+				}
+			case "diff":
+				if len(args) >= 4 && args[3] == "--shortstat" {
+					return " 2 files changed, 5 insertions(+), 1 deletion(-)", nil
+				}
+			case "rev-list":
+				if len(args) >= 5 && args[3] == "--count" {
+					revListRanges = append(revListRanges, args[4])
+					switch args[4] {
+					case "HEAD..az/parent":
+						return "0", nil
+					case "az/parent..HEAD":
+						return "2", nil
+					}
+				}
+			}
+			t.Fatalf("unexpected git args: %v", args)
+			return "", nil
+		},
+	}
+
+	adapter := &gitServiceAdapter{
+		client:            git.NewClient(runner, slog.Default()),
+		runtimeStateStore: store,
+		baseBranch:        "main",
+		workflowMode:      "origin",
+		baseBranchForWorktree: func(context.Context, string, string) string {
+			return "az/parent"
+		},
+	}
+
+	status, err := adapter.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, true, false)
+	if err != nil {
+		t.Fatalf("refreshGitStatusWriteThroughResult: %v", err)
+	}
+	if mergeBaseRef != "az/parent" {
+		t.Fatalf("merge-base ref = %q, want az/parent", mergeBaseRef)
+	}
+	wantRanges := []string{"HEAD..az/parent", "az/parent..HEAD"}
+	if !reflect.DeepEqual(revListRanges, wantRanges) {
+		t.Fatalf("rev-list ranges = %v, want %v", revListRanges, wantRanges)
+	}
+	if status.GitAdditions != 5 || status.GitDeletions != 1 {
+		t.Fatalf("diff totals = %d/%d, want 5/1", status.GitAdditions, status.GitDeletions)
+	}
+	if status.GitAheadCount != 2 || status.GitBehindCount != 0 {
+		t.Fatalf("ahead/behind = %d/%d, want 2/0", status.GitAheadCount, status.GitBehindCount)
 	}
 }
 
@@ -1088,7 +1250,7 @@ func TestGitServiceAdapterStatusRefreshUsesWorktreeSpecificBaseBranch(t *testing
 	}
 }
 
-func TestGitServiceAdapterDiffStatUsesWorktreeSpecificBaseBranch(t *testing.T) {
+func TestGitServiceAdapterDiffStatUsesWorktreeSpecificBaseBranchForDefaultBase(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -1161,6 +1323,50 @@ func TestGitServiceAdapterDiffStatPreservesExplicitBaseWithoutWorktreeSpecificBa
 		baseBranch: "preview",
 		baseBranchForWorktree: func(context.Context, string, string) string {
 			return ""
+		},
+	}
+
+	stat, err := adapter.DiffStat(ctx, projectID, worktree, "main")
+	if err != nil {
+		t.Fatalf("DiffStat: %v", err)
+	}
+	if stat != "1 file changed, 2 insertions(+)" {
+		t.Fatalf("diff stat = %q, want explicit-base stat", stat)
+	}
+	if mergeBaseRef != "main" {
+		t.Fatalf("merge-base ref = %q, want explicit base", mergeBaseRef)
+	}
+}
+
+func TestGitServiceAdapterDiffStatPreservesExplicitBaseWithWorktreeSpecificBase(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	projectID := "default"
+	worktree := "/tmp/az-child"
+	var mergeBaseRef string
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktree && args[2] == "merge-base":
+			mergeBaseRef = args[3]
+			if args[3] != "main" {
+				return "", errors.New("explicit base should override worktree-specific default")
+			}
+			return "abc123\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktree && args[2] == "symbolic-ref":
+			return "", errors.New("no remote head")
+		case len(args) >= 8 && args[0] == "-C" && args[1] == worktree && args[2] == "diff" && args[3] == "--shortstat":
+			return " 1 file changed, 2 insertions(+)\n", nil
+		default:
+			t.Fatalf("unexpected git args: %v", args)
+			return "", nil
+		}
+	}}
+	adapter := &gitServiceAdapter{
+		client:     git.NewClient(runner, slog.Default()),
+		baseBranch: "preview",
+		baseBranchForWorktree: func(context.Context, string, string) string {
+			return "az/parent"
 		},
 	}
 

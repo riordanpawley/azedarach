@@ -1227,7 +1227,39 @@ func TestBranchAheadBehindFallsBackToOriginRef(t *testing.T) {
 	}
 }
 
-func TestBranchAheadBehindPrefersOriginHeadWhenBaseIsGeneric(t *testing.T) {
+func TestBranchAheadBehindPrefersLocalBaseWhenOriginHeadDiffers(t *testing.T) {
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 3 && args[0] == "symbolic-ref" && args[1] == "--short" && args[2] == "refs/remotes/origin/HEAD" {
+				return "origin/preview\n", nil
+			}
+			if len(args) >= 3 && args[0] == "rev-list" && args[1] == "--count" && args[2] == "HEAD..main" {
+				return "5\n", nil
+			}
+			if len(args) >= 3 && args[0] == "rev-list" && args[1] == "--count" && args[2] == "main..HEAD" {
+				return "2\n", nil
+			}
+			if len(args) >= 3 && args[0] == "rev-list" && args[1] == "--count" && args[2] == "HEAD..origin/preview" {
+				return "", fmt.Errorf("should not use origin/HEAD before local main")
+			}
+			if len(args) >= 3 && args[0] == "rev-list" && args[1] == "--count" && args[2] == "origin/preview..HEAD" {
+				return "", fmt.Errorf("should not use origin/HEAD before local main")
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	ahead, behind, err := client.BranchAheadBehind(context.Background(), "/fake/worktree", "main")
+	if err != nil {
+		t.Fatalf("BranchAheadBehind() error = %v", err)
+	}
+	if ahead != 2 || behind != 5 {
+		t.Fatalf("BranchAheadBehind() = %d/%d, want 2/5", ahead, behind)
+	}
+}
+
+func TestBranchAheadBehindWithRemoteBasePreferencePrefersOriginHeadWhenBaseIsGeneric(t *testing.T) {
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {
 			if len(args) >= 3 && args[0] == "symbolic-ref" && args[1] == "--short" && args[2] == "refs/remotes/origin/HEAD" {
@@ -1240,19 +1272,19 @@ func TestBranchAheadBehindPrefersOriginHeadWhenBaseIsGeneric(t *testing.T) {
 				return "3\n", nil
 			}
 			if len(args) >= 3 && args[0] == "rev-list" && args[1] == "--count" && (args[2] == "HEAD..main" || args[2] == "main..HEAD") {
-				return "", fmt.Errorf("should not use main when origin/HEAD differs")
+				return "", fmt.Errorf("should not use local main before origin/HEAD")
 			}
 			return "", fmt.Errorf("unexpected command: %v", args)
 		},
 	}
 
 	client := NewClient(runner, slog.Default())
-	ahead, behind, err := client.BranchAheadBehind(context.Background(), "/fake/worktree", "main")
+	ahead, behind, err := client.BranchAheadBehindWithBasePreference(context.Background(), "/fake/worktree", "main", true)
 	if err != nil {
-		t.Fatalf("BranchAheadBehind() error = %v", err)
+		t.Fatalf("BranchAheadBehindWithBasePreference() error = %v", err)
 	}
 	if ahead != 3 || behind != 7 {
-		t.Fatalf("BranchAheadBehind() = %d/%d, want 3/7", ahead, behind)
+		t.Fatalf("BranchAheadBehindWithBasePreference() = %d/%d, want 3/7", ahead, behind)
 	}
 }
 
@@ -1296,7 +1328,7 @@ func TestRuntimeStatus(t *testing.T) {
 	}
 }
 
-func TestRuntimeStatusUsesCurrentRemoteBaseWhenLocalBaseIsStale(t *testing.T) {
+func TestRuntimeStatusUsesLocalBaseBeforeCurrentRemoteBase(t *testing.T) {
 	repo := t.TempDir()
 	runClientTestGit(t, repo, "init", "-q", "-b", "preview")
 	runClientTestGit(t, repo, "config", "user.email", "test@example.com")
@@ -1330,11 +1362,53 @@ func TestRuntimeStatusUsesCurrentRemoteBaseWhenLocalBaseIsStale(t *testing.T) {
 	if status.HasChanges {
 		t.Fatalf("RuntimeStatus() dirty = true, want clean: %+v", status)
 	}
+	if status.GitAdditions != 1 || status.GitDeletions != 0 {
+		t.Fatalf("RuntimeStatus() diff totals = %d/%d, want 1/0 from local base", status.GitAdditions, status.GitDeletions)
+	}
+	if status.GitAheadCount != 1 || status.GitBehindCount != 0 {
+		t.Fatalf("RuntimeStatus() ahead/behind = %d/%d, want 1/0 from local base", status.GitAheadCount, status.GitBehindCount)
+	}
+}
+
+func TestRuntimeStatusWithRemoteBasePreferenceUsesCurrentRemoteBase(t *testing.T) {
+	repo := t.TempDir()
+	runClientTestGit(t, repo, "init", "-q", "-b", "preview")
+	runClientTestGit(t, repo, "config", "user.email", "test@example.com")
+	runClientTestGit(t, repo, "config", "user.name", "Test User")
+	runClientTestGit(t, repo, "config", "remote.origin.url", "https://example.invalid/repo.git")
+	runClientTestGit(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/preview")
+
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base file: %v", err)
+	}
+	runClientTestGit(t, repo, "add", "base.txt")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "base")
+	runClientTestGit(t, repo, "update-ref", "refs/remotes/origin/preview", "HEAD")
+
+	runClientTestGit(t, repo, "checkout", "-q", "-b", "issue")
+	if err := os.WriteFile(filepath.Join(repo, "issue.txt"), []byte("issue\n"), 0o644); err != nil {
+		t.Fatalf("write issue file: %v", err)
+	}
+	runClientTestGit(t, repo, "add", "issue.txt")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "issue")
+	issueHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+	remoteBaseHead := runClientTestGitOutput(t, repo, "commit-tree", "HEAD^{tree}", "-p", issueHead, "-m", "base contains issue")
+
+	runClientTestGit(t, repo, "update-ref", "refs/remotes/origin/preview", remoteBaseHead)
+
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	status, err := client.RuntimeStatusWithBasePreference(context.Background(), repo, "preview", true)
+	if err != nil {
+		t.Fatalf("RuntimeStatusWithBasePreference() error = %v", err)
+	}
+	if status.HasChanges {
+		t.Fatalf("RuntimeStatusWithBasePreference() dirty = true, want clean: %+v", status)
+	}
 	if status.GitAdditions != 0 || status.GitDeletions != 0 {
-		t.Fatalf("RuntimeStatus() diff totals = %d/%d, want 0/0 for merged issue head", status.GitAdditions, status.GitDeletions)
+		t.Fatalf("RuntimeStatusWithBasePreference() diff totals = %d/%d, want 0/0 from remote base", status.GitAdditions, status.GitDeletions)
 	}
 	if status.GitAheadCount != 0 || status.GitBehindCount != 1 {
-		t.Fatalf("RuntimeStatus() ahead/behind = %d/%d, want 0/1 for issue head contained in current base", status.GitAheadCount, status.GitBehindCount)
+		t.Fatalf("RuntimeStatusWithBasePreference() ahead/behind = %d/%d, want 0/1 from remote base", status.GitAheadCount, status.GitBehindCount)
 	}
 }
 
@@ -1361,17 +1435,17 @@ func TestMergeBaseFallsBackToOriginRef(t *testing.T) {
 	}
 }
 
-func TestMergeBasePrefersOriginHeadWhenBaseIsGeneric(t *testing.T) {
+func TestMergeBasePrefersLocalBaseWhenOriginHeadDiffers(t *testing.T) {
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {
 			if len(args) >= 3 && args[0] == "symbolic-ref" && args[1] == "--short" && args[2] == "refs/remotes/origin/HEAD" {
 				return "origin/preview\n", nil
 			}
-			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "origin/preview" && args[2] == "HEAD" {
-				return "fedcba\n", nil
-			}
 			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "HEAD" {
-				return "", fmt.Errorf("should not use main when origin/HEAD differs")
+				return "abc123\n", nil
+			}
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "origin/preview" && args[2] == "HEAD" {
+				return "", fmt.Errorf("should not use origin/HEAD before local main")
 			}
 			return "", fmt.Errorf("unexpected command: %v", args)
 		},
@@ -1382,8 +1456,34 @@ func TestMergeBasePrefersOriginHeadWhenBaseIsGeneric(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MergeBase() error = %v", err)
 	}
+	if mergeBase != "abc123" {
+		t.Fatalf("MergeBase() = %q, want abc123", mergeBase)
+	}
+}
+
+func TestMergeBaseWithRemoteBasePreferencePrefersOriginHeadWhenBaseIsGeneric(t *testing.T) {
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 3 && args[0] == "symbolic-ref" && args[1] == "--short" && args[2] == "refs/remotes/origin/HEAD" {
+				return "origin/preview\n", nil
+			}
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "origin/preview" && args[2] == "HEAD" {
+				return "fedcba\n", nil
+			}
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "HEAD" {
+				return "", fmt.Errorf("should not use local main before origin/HEAD")
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	mergeBase, err := client.mergeBase(context.Background(), "/fake/worktree", "main", true)
+	if err != nil {
+		t.Fatalf("mergeBase() error = %v", err)
+	}
 	if mergeBase != "fedcba" {
-		t.Fatalf("MergeBase() = %q, want fedcba", mergeBase)
+		t.Fatalf("mergeBase() = %q, want fedcba", mergeBase)
 	}
 }
 
@@ -1417,7 +1517,7 @@ func TestMergeBaseNonGenericBaseDoesNotFallbackToMainOrMaster(t *testing.T) {
 	if strings.Contains(err.Error(), "should not fallback") {
 		t.Fatalf("MergeBase() used unrelated fallback refs: %v; attempts=%v", err, attempts)
 	}
-	wantAttempts := []string{"origin/preview", "preview"}
+	wantAttempts := []string{"preview", "origin/preview"}
 	if !reflect.DeepEqual(attempts, wantAttempts) {
 		t.Fatalf("merge-base attempts = %v, want %v", attempts, wantAttempts)
 	}

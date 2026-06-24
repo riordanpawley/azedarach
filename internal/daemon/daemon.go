@@ -65,6 +65,7 @@ type Config struct {
 	LockPath                   string
 	ScopedRuntime              bool
 	BaseBranch                 string
+	GitWorkflowMode            string
 	CLITool                    string
 	DangerouslySkipPermissions bool
 	SessionShell               string
@@ -221,6 +222,7 @@ func New(cfg Config) *Daemon {
 		statusRefreshQueue: gitStatusRefreshQueue,
 		logger:             cfg.Logger,
 		baseBranch:         cfg.BaseBranch,
+		workflowMode:       cfg.GitWorkflowMode,
 	}
 	prWorkflow := pr.NewPRWorkflow(&pr.ExecRunner{}, cfg.Logger)
 	devServerManager := devserver.NewManager(devserver.NewPortAllocator(3000), cfg.Logger)
