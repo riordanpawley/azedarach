@@ -1272,6 +1272,91 @@ func TestTaskStatusDoneCloseCleanChildrenConfirmationSetsDaemonOption(t *testing
 	}
 }
 
+func TestTaskStatusDoneWithUnresolvedChildRejectsTargetOnlyConfirmation(t *testing.T) {
+	var closeBody struct {
+		TaskID               string `json:"task_id"`
+		IntegrateBeforeClose bool   `json:"integrate_before_close"`
+		CloseCleanChildren   bool   `json:"close_clean_children"`
+	}
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskClose {
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			if err := json.Unmarshal(req.Body, &closeBody); err != nil {
+				t.Fatalf("unmarshal close request: %v", err)
+			}
+			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
+				TaskID:             "az-4",
+				Status:             string(domain.StatusDone),
+				AutoClosedChildren: []string{"az-child"},
+			})
+			if err != nil {
+				t.Fatalf("marshal close response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	parentID := naming.IssueID("az-4")
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{
+		{ID: parentID, Status: domain.StatusInReview},
+		{ID: "az-child", ParentID: &parentID, Status: domain.StatusOpen},
+	}
+	m.nav.SelectTask("az-4", domain.StatusInReview.Column())
+
+	updatedAny, promptCmd := m.handleSelection(overlay.SelectionMsg{Key: "l"})
+	if promptCmd == nil {
+		t.Fatal("expected confirmation overlay command")
+	}
+	prompted := updatedAny.(Model)
+	if prompted.pendingClose == nil || !prompted.pendingClose.targetOnlyBlockedByChildren {
+		t.Fatalf("pending close = %+v, want target-only blocked by child", prompted.pendingClose)
+	}
+
+	rejectedAny, rejectedCmd := prompted.handleSelection(overlay.SelectionMsg{Key: "yes"})
+	rejected := rejectedAny.(Model)
+	if rejectedCmd == nil {
+		t.Fatal("expected confirmation overlay to be reopened after rejected target-only close")
+	}
+	if rejected.pendingClose == nil {
+		t.Fatal("pending close should remain after rejected target-only close")
+	}
+	if len(transport.requests) != 0 {
+		t.Fatalf("daemon requests after rejected target-only close = %v, want none", transport.requests)
+	}
+	if len(rejected.toasts) == 0 || !strings.Contains(rejected.toasts[len(rejected.toasts)-1].Message, "Target-only close is blocked") {
+		t.Fatalf("toasts = %+v, want target-only blocked warning", rejected.toasts)
+	}
+
+	confirmedAny, statusCmd := rejected.handleSelection(overlay.SelectionMsg{Key: "close_clean_children"})
+	if statusCmd == nil {
+		t.Fatal("expected status update command after close-clean-children confirmation")
+	}
+	confirmed := confirmedAny.(Model)
+	if confirmed.pendingClose != nil {
+		t.Fatal("pending close confirmation was not cleared")
+	}
+	msg := statusCmd()
+	status, ok := msg.(taskStatusResultMsg)
+	if !ok {
+		t.Fatalf("result = %T, want taskStatusResultMsg", msg)
+	}
+	if status.err != nil {
+		t.Fatalf("status result error = %v", status.err)
+	}
+	if closeBody.TaskID != "az-4" || !closeBody.IntegrateBeforeClose || !closeBody.CloseCleanChildren {
+		t.Fatalf("close body = %+v, want az-4 integrate and close_clean_children", closeBody)
+	}
+}
+
 func TestTaskStatusDoneUsesExtendedCloseTimeout(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

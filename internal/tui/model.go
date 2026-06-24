@@ -3105,21 +3105,23 @@ type pendingBulkCleanupConfirmation struct {
 }
 
 type pendingCloseCleanupConfirmation struct {
-	taskID             string
-	taskIDs            []string
-	closeTaskIDs       []string
-	previousStatus     domain.Status
-	targetStatus       domain.Status
-	bulkMode           string
-	delta              int
-	summaries          []closeCleanupTaskSummary
-	closeCleanChildren bool
+	taskID                      string
+	taskIDs                     []string
+	closeTaskIDs                []string
+	previousStatus              domain.Status
+	targetStatus                domain.Status
+	bulkMode                    string
+	delta                       int
+	summaries                   []closeCleanupTaskSummary
+	closeCleanChildren          bool
+	targetOnlyBlockedByChildren bool
 }
 
 type closeCleanupConfirmPreflightMsg struct {
-	pending   pendingCloseCleanupConfirmation
-	summaries []closeCleanupTaskSummary
-	err       error
+	pending        pendingCloseCleanupConfirmation
+	summaries      []closeCleanupTaskSummary
+	refreshedTasks []domain.Task
+	err            error
 }
 
 type closeCleanupTaskSummary struct {
@@ -4558,6 +4560,11 @@ func (m Model) confirmCloseCleanupCmd(pending pendingCloseCleanupConfirmation) t
 	}))
 }
 
+func (m Model) prepareCloseCleanupConfirmation(pending pendingCloseCleanupConfirmation) pendingCloseCleanupConfirmation {
+	pending.targetOnlyBlockedByChildren = closeCleanupTargetsHaveBlockingDescendants(m.tasks, pendingCloseCleanupTargetIDs(pending))
+	return pending
+}
+
 func (m Model) confirmCloseCleanupPreflightCmd(pending pendingCloseCleanupConfirmation) tea.Cmd {
 	return func() tea.Msg {
 		msg := closeCleanupConfirmPreflightMsg{pending: pending}
@@ -4581,6 +4588,7 @@ func (m Model) confirmCloseCleanupPreflightCmd(pending pendingCloseCleanupConfir
 			return msg
 		}
 		msg.summaries = closeCleanupSummariesFromTasks(snapshot.Tasks, taskIDs)
+		msg.refreshedTasks = append([]domain.Task(nil), snapshot.Tasks...)
 		return msg
 	}
 }
@@ -4664,8 +4672,15 @@ func formatCloseCleanupConfirmPrompt(pending pendingCloseCleanupConfirmation) st
 		"Dirty or conflicted worktrees must be cleaned before close; daemon guards still block unmerged or unresolved child work.",
 		"Press C to also close clean child issues with no projected session, dirty state, or diff.",
 		"",
-		"Proceed? Y closes only the target; C closes the target plus clean children.",
 	)
+	if pending.targetOnlyBlockedByChildren {
+		lines = append(lines,
+			"Target-only close is unavailable while child issues remain unresolved.",
+			"Proceed? C closes the target plus clean children; N cancels.",
+		)
+	} else {
+		lines = append(lines, "Proceed? Y closes only the target; C closes the target plus clean children.")
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -4712,6 +4727,88 @@ func pendingCloseCleanupTargetIDs(pending pendingCloseCleanupConfirmation) []str
 	default:
 		return nil
 	}
+}
+
+func closeCleanupTargetsHaveBlockingDescendants(tasks []domain.Task, targetIDs []string) bool {
+	if len(tasks) == 0 || len(targetIDs) == 0 {
+		return false
+	}
+
+	targetSet := make(map[string]struct{}, len(targetIDs))
+	for _, targetID := range targetIDs {
+		key := taskIDKey(targetID)
+		if key != "" {
+			targetSet[key] = struct{}{}
+		}
+	}
+	if len(targetSet) == 0 {
+		return false
+	}
+
+	byID := make(map[string]domain.Task, len(tasks))
+	childrenByParent := make(map[string][]string, len(tasks))
+	for _, task := range tasks {
+		taskID := taskIDKey(task.ID.String())
+		if taskID == "" {
+			continue
+		}
+		byID[taskID] = task
+		if task.ParentID != nil {
+			parentID := taskIDKey(task.ParentID.String())
+			if parentID != "" {
+				childrenByParent[parentID] = append(childrenByParent[parentID], taskID)
+			}
+		}
+		for _, dep := range task.Dependencies {
+			depType := string(dep.Type)
+			if depType != string(domain.DependencyParentChild) && depType != "parent_child" {
+				continue
+			}
+			parentID := taskIDKey(dep.ID.String())
+			if parentID != "" {
+				childrenByParent[parentID] = append(childrenByParent[parentID], taskID)
+			}
+		}
+	}
+
+	queue := make([]string, 0, len(targetSet))
+	for targetID := range targetSet {
+		queue = append(queue, targetID)
+	}
+	seen := make(map[string]struct{}, len(queue))
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if _, ok := seen[current]; ok {
+			continue
+		}
+		seen[current] = struct{}{}
+		for _, childID := range childrenByParent[current] {
+			if _, selected := targetSet[childID]; !selected {
+				if task, ok := byID[childID]; ok && closeCleanupDescendantBlocksTargetOnly(task) {
+					return true
+				}
+			}
+			queue = append(queue, childID)
+		}
+	}
+	return false
+}
+
+func closeCleanupDescendantBlocksTargetOnly(task domain.Task) bool {
+	if task.Status != domain.StatusDone {
+		return true
+	}
+	if task.HasTmuxSession || task.Session != nil {
+		return true
+	}
+	if task.HasWorktree {
+		return true
+	}
+	if task.Session != nil && strings.TrimSpace(task.Session.Worktree) != "" {
+		return true
+	}
+	return false
 }
 
 func formatCloseCleanupGitStateLines(summaries []closeCleanupTaskSummary, targetCount int, bulk bool) []string {
