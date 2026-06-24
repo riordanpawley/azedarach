@@ -50,6 +50,16 @@ type refreshableDiffClient struct {
 	statusCalls int
 }
 
+type sessionOperationPayload struct {
+	ProjectID  naming.ProjectID `json:"project_id"`
+	SessionID  naming.SessionID `json:"session_id,omitempty"`
+	BaseBranch string           `json:"base_branch,omitempty"`
+	Yolo       bool             `json:"yolo,omitempty"`
+	StartWork  *bool            `json:"start_work,omitempty"`
+	ImagePaths []string         `json:"image_paths,omitempty"`
+	Message    string           `json:"message,omitempty"`
+}
+
 func (r *refreshableDiffClient) Status(context.Context, string) (*git.GitStatus, error) {
 	r.statusCalls++
 	return &git.GitStatus{
@@ -111,6 +121,49 @@ func emptyWorktreeListResponse(t *testing.T, req protocol.RequestEnvelope) proto
 	})
 	if err != nil {
 		t.Fatalf("marshal worktree response: %v", err)
+	}
+	return protocol.ResponseEnvelope{
+		ProtocolVersion: req.ProtocolVersion,
+		RequestID:       req.RequestID,
+		Kind:            protocol.EnvelopeKindResponse,
+		OK:              true,
+		Body:            respBody,
+	}
+}
+
+func decodeSessionOperationSubmit(t *testing.T, req protocol.RequestEnvelope, wantKind string) sessionOperationPayload {
+	t.Helper()
+	if req.Command != protocol.CommandOperationSubmit {
+		t.Fatalf("command = %q, want %q", req.Command, protocol.CommandOperationSubmit)
+	}
+	var submit protocol.OperationSubmitRequestBody
+	if err := json.Unmarshal(req.Body, &submit); err != nil {
+		t.Fatalf("unmarshal operation submit request: %v", err)
+	}
+	if submit.Kind != wantKind {
+		t.Fatalf("operation kind = %q, want %q", submit.Kind, wantKind)
+	}
+	var payload sessionOperationPayload
+	if err := json.Unmarshal(submit.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal session operation payload: %v", err)
+	}
+	return payload
+}
+
+func sessionOperationSubmitResponse(t *testing.T, req protocol.RequestEnvelope, operationID, kind, issueID string, state protocol.OperationState) protocol.ResponseEnvelope {
+	t.Helper()
+	respBody, err := json.Marshal(protocol.OperationSubmitResponseBody{
+		Created: true,
+		Operation: protocol.OperationRecord{
+			OperationID: naming.OperationID(operationID),
+			ProjectID:   req.Meta.ProjectID,
+			IssueID:     naming.IssueID(issueID),
+			Kind:        kind,
+			State:       state,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal operation submit response: %v", err)
 	}
 	return protocol.ResponseEnvelope{
 		ProtocolVersion: req.ProtocolVersion,
@@ -7378,18 +7431,9 @@ func TestStartSessionShiftSStartsDirectlyFromBaseBranch(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
-			case daemonclient.CommandSessionStart:
-				var body struct {
-					ProjectID  string `json:"project_id"`
-					SessionID  string `json:"session_id"`
-					BaseBranch string `json:"base_branch,omitempty"`
-					Yolo       bool   `json:"yolo,omitempty"`
-					StartWork  bool   `json:"start_work,omitempty"`
-				}
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal session start request: %v", err)
-				}
-				if body.SessionID != childID {
+			case protocol.CommandOperationSubmit:
+				body := decodeSessionOperationSubmit(t, req, daemonclient.CommandSessionStart)
+				if body.SessionID != naming.SessionID(childID) {
 					t.Fatalf("session ID = %q, want %q", body.SessionID, childID)
 				}
 				if body.BaseBranch != baseBranch {
@@ -7398,19 +7442,10 @@ func TestStartSessionShiftSStartsDirectlyFromBaseBranch(t *testing.T) {
 				if body.Yolo {
 					t.Fatal("expected yolo=false for Shift+S start")
 				}
-				if !body.StartWork {
+				if body.StartWork == nil || !*body.StartWork {
 					t.Fatal("expected start_work=true for Shift+S start")
 				}
-				respBody, _ := json.Marshal(struct {
-					Output string `json:"output"`
-				}{Output: "started"})
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
+				return sessionOperationSubmitResponse(t, req, "op-start", daemonclient.CommandSessionStart, childID, protocol.OperationStateQueued), nil
 			default:
 				t.Fatalf("unexpected command: %s", req.Command)
 			}
@@ -7443,7 +7478,7 @@ func TestStartSessionShiftSStartsDirectlyFromBaseBranch(t *testing.T) {
 	if started.issueID != childID {
 		t.Fatalf("started issue = %q, want %q", started.issueID, childID)
 	}
-	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStart {
+	if len(transport.requests) != 1 || transport.requests[0] != protocol.CommandOperationSubmit {
 		t.Fatalf("requests = %v", transport.requests)
 	}
 }
@@ -7455,18 +7490,9 @@ func TestStartSessionLowercaseSStartsTmuxOnly(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
-			case daemonclient.CommandSessionStart:
-				var body struct {
-					ProjectID  string `json:"project_id"`
-					SessionID  string `json:"session_id"`
-					BaseBranch string `json:"base_branch,omitempty"`
-					Yolo       bool   `json:"yolo,omitempty"`
-					StartWork  bool   `json:"start_work,omitempty"`
-				}
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal session start request: %v", err)
-				}
-				if body.SessionID != childID {
+			case protocol.CommandOperationSubmit:
+				body := decodeSessionOperationSubmit(t, req, daemonclient.CommandSessionStart)
+				if body.SessionID != naming.SessionID(childID) {
 					t.Fatalf("session ID = %q, want %q", body.SessionID, childID)
 				}
 				if body.BaseBranch != baseBranch {
@@ -7475,19 +7501,10 @@ func TestStartSessionLowercaseSStartsTmuxOnly(t *testing.T) {
 				if body.Yolo {
 					t.Fatal("expected yolo=false for s start")
 				}
-				if body.StartWork {
+				if body.StartWork == nil || *body.StartWork {
 					t.Fatal("expected start_work=false for s start")
 				}
-				respBody, _ := json.Marshal(struct {
-					Output string `json:"output"`
-				}{Output: "started"})
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
+				return sessionOperationSubmitResponse(t, req, "op-start", daemonclient.CommandSessionStart, childID, protocol.OperationStateQueued), nil
 			default:
 				t.Fatalf("unexpected command: %s", req.Command)
 			}
@@ -7520,7 +7537,7 @@ func TestStartSessionLowercaseSStartsTmuxOnly(t *testing.T) {
 	if started.issueID != childID {
 		t.Fatalf("started issue = %q, want %q", started.issueID, childID)
 	}
-	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStart {
+	if len(transport.requests) != 1 || transport.requests[0] != protocol.CommandOperationSubmit {
 		t.Fatalf("requests = %v", transport.requests)
 	}
 }
@@ -7528,20 +7545,8 @@ func TestStartSessionLowercaseSStartsTmuxOnly(t *testing.T) {
 func TestStartSessionCommandReturnsPendingOperationToast(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandSessionStart {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionStart)
-			}
-			respBody, _ := json.Marshal(map[string]any{
-				"operation_id": "op-start",
-				"state":        string(protocol.OperationStateQueued),
-			})
-			return protocol.ResponseEnvelope{
-				ProtocolVersion: req.ProtocolVersion,
-				RequestID:       req.RequestID,
-				Kind:            protocol.EnvelopeKindResponse,
-				OK:              true,
-				Body:            respBody,
-			}, nil
+			_ = decodeSessionOperationSubmit(t, req, daemonclient.CommandSessionStart)
+			return sessionOperationSubmitResponse(t, req, "op-start", daemonclient.CommandSessionStart, "az-child", protocol.OperationStateQueued), nil
 		},
 	}
 
@@ -7629,18 +7634,9 @@ func TestStartSessionShiftSIgnoresUpstreamChoices(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
-			case daemonclient.CommandSessionStart:
-				var body struct {
-					ProjectID  string `json:"project_id"`
-					SessionID  string `json:"session_id"`
-					BaseBranch string `json:"base_branch,omitempty"`
-					Yolo       bool   `json:"yolo,omitempty"`
-					StartWork  bool   `json:"start_work,omitempty"`
-				}
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal session start request: %v", err)
-				}
-				if body.SessionID != childID {
+			case protocol.CommandOperationSubmit:
+				body := decodeSessionOperationSubmit(t, req, daemonclient.CommandSessionStart)
+				if body.SessionID != naming.SessionID(childID) {
 					t.Fatalf("session ID = %q, want %q", body.SessionID, childID)
 				}
 				if body.BaseBranch != baseBranch {
@@ -7649,19 +7645,10 @@ func TestStartSessionShiftSIgnoresUpstreamChoices(t *testing.T) {
 				if body.Yolo {
 					t.Fatal("expected yolo=false for Shift+S start")
 				}
-				if !body.StartWork {
+				if body.StartWork == nil || !*body.StartWork {
 					t.Fatal("expected start_work=true for Shift+S start")
 				}
-				respBody, _ := json.Marshal(struct {
-					Output string `json:"output"`
-				}{Output: "started"})
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
+				return sessionOperationSubmitResponse(t, req, "op-start", daemonclient.CommandSessionStart, childID, protocol.OperationStateQueued), nil
 			default:
 				t.Fatalf("unexpected command: %s", req.Command)
 			}
@@ -7728,7 +7715,7 @@ func TestStartSessionShiftSIgnoresUpstreamChoices(t *testing.T) {
 	if started.issueID != childID {
 		t.Fatalf("started issue = %q, want %q", started.issueID, childID)
 	}
-	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStart {
+	if len(transport.requests) != 1 || transport.requests[0] != protocol.CommandOperationSubmit {
 		t.Fatalf("requests = %v", transport.requests)
 	}
 }
@@ -7740,18 +7727,9 @@ func TestStartSessionBangStartsYoloFromBaseBranch(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
-			case daemonclient.CommandSessionStart:
-				var body struct {
-					ProjectID  string `json:"project_id"`
-					SessionID  string `json:"session_id"`
-					BaseBranch string `json:"base_branch,omitempty"`
-					Yolo       bool   `json:"yolo,omitempty"`
-					StartWork  bool   `json:"start_work,omitempty"`
-				}
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal session start request: %v", err)
-				}
-				if body.SessionID != childID {
+			case protocol.CommandOperationSubmit:
+				body := decodeSessionOperationSubmit(t, req, daemonclient.CommandSessionStart)
+				if body.SessionID != naming.SessionID(childID) {
 					t.Fatalf("session ID = %q, want %q", body.SessionID, childID)
 				}
 				if body.BaseBranch != baseBranch {
@@ -7760,19 +7738,10 @@ func TestStartSessionBangStartsYoloFromBaseBranch(t *testing.T) {
 				if !body.Yolo {
 					t.Fatal("expected yolo=true for ! start")
 				}
-				if !body.StartWork {
+				if body.StartWork == nil || !*body.StartWork {
 					t.Fatal("expected start_work=true for ! start")
 				}
-				respBody, _ := json.Marshal(struct {
-					Output string `json:"output"`
-				}{Output: "started"})
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
+				return sessionOperationSubmitResponse(t, req, "op-start", daemonclient.CommandSessionStart, childID, protocol.OperationStateQueued), nil
 			default:
 				t.Fatalf("unexpected command: %s", req.Command)
 			}
@@ -7805,7 +7774,7 @@ func TestStartSessionBangStartsYoloFromBaseBranch(t *testing.T) {
 	if started.issueID != childID {
 		t.Fatalf("started issue = %q, want %q", started.issueID, childID)
 	}
-	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStart {
+	if len(transport.requests) != 1 || transport.requests[0] != protocol.CommandOperationSubmit {
 		t.Fatalf("requests = %v", transport.requests)
 	}
 }
@@ -7814,29 +7783,11 @@ func TestStopSessionCommandPreservesDaemonProjection(t *testing.T) {
 	startedAt := time.Date(2026, time.March, 25, 11, 0, 0, 0, time.UTC)
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandSessionStop {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionStop)
-			}
-			var body struct {
-				ProjectID string `json:"project_id"`
-				SessionID string `json:"session_id"`
-			}
-			if err := json.Unmarshal(req.Body, &body); err != nil {
-				t.Fatalf("unmarshal stop request: %v", err)
-			}
-			if body.SessionID != "az-child" {
+			body := decodeSessionOperationSubmit(t, req, daemonclient.CommandSessionStop)
+			if body.SessionID != naming.SessionID("az-child") {
 				t.Fatalf("stop body = %+v, want az-child", body)
 			}
-			respBody, _ := json.Marshal(struct {
-				Output string `json:"output"`
-			}{Output: "stopped"})
-			return protocol.ResponseEnvelope{
-				ProtocolVersion: req.ProtocolVersion,
-				RequestID:       req.RequestID,
-				Kind:            protocol.EnvelopeKindResponse,
-				OK:              true,
-				Body:            respBody,
-			}, nil
+			return sessionOperationSubmitResponse(t, req, "op-stop", daemonclient.CommandSessionStop, "az-child", protocol.OperationStateQueued), nil
 		},
 	}
 
@@ -7868,7 +7819,7 @@ func TestStopSessionCommandPreservesDaemonProjection(t *testing.T) {
 	if session, ok := updatedModel.sessions["az-child"]; !ok || session == nil || session.Worktree != "/tmp/az-child" {
 		t.Fatalf("session projection = %+v, want preserved worktree /tmp/az-child", session)
 	}
-	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStop {
+	if len(transport.requests) != 1 || transport.requests[0] != protocol.CommandOperationSubmit {
 		t.Fatalf("requests = %v", transport.requests)
 	}
 }
@@ -7877,26 +7828,12 @@ func TestTaskWorkspaceStopSessionKeyKeepsOverlayOpen(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
-			case daemonclient.CommandSessionStop:
-				var body struct {
-					SessionID string `json:"session_id"`
-				}
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal stop request: %v", err)
-				}
-				if body.SessionID != "az-1" {
+			case protocol.CommandOperationSubmit:
+				body := decodeSessionOperationSubmit(t, req, daemonclient.CommandSessionStop)
+				if body.SessionID != naming.SessionID("az-1") {
 					t.Fatalf("stop body = %+v, want az-1", body)
 				}
-				respBody, _ := json.Marshal(struct {
-					Output string `json:"output"`
-				}{Output: "stopped"})
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
+				return sessionOperationSubmitResponse(t, req, "op-stop", daemonclient.CommandSessionStop, "az-1", protocol.OperationStateQueued), nil
 			case daemonclient.CommandTaskList:
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -7912,7 +7849,7 @@ func TestTaskWorkspaceStopSessionKeyKeepsOverlayOpen(t *testing.T) {
 					}}),
 				}, nil
 			default:
-				t.Fatalf("command = %q, want %q or %q", req.Command, daemonclient.CommandSessionStop, daemonclient.CommandTaskList)
+				t.Fatalf("command = %q, want %q or %q", req.Command, protocol.CommandOperationSubmit, daemonclient.CommandTaskList)
 			}
 			return protocol.ResponseEnvelope{}, nil
 		},
@@ -7955,7 +7892,7 @@ func TestTaskWorkspaceStopSessionKeyKeepsOverlayOpen(t *testing.T) {
 	if _, ok := updatedModel.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
 		t.Fatalf("expected task workspace overlay to remain open, got %T", updatedModel.overlayStack.Current())
 	}
-	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStop {
+	if len(transport.requests) != 1 || transport.requests[0] != protocol.CommandOperationSubmit {
 		t.Fatalf("requests = %v", transport.requests)
 	}
 
@@ -7982,7 +7919,7 @@ func TestTaskWorkspaceStopSessionKeyKeepsOverlayOpen(t *testing.T) {
 	if !strings.Contains(view, "Start session") {
 		t.Fatalf("expected start action after daemon refresh removed session: %q", view)
 	}
-	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandSessionStop || got[1] != daemonclient.CommandTaskList {
+	if got := transport.requests; len(got) != 2 || got[0] != protocol.CommandOperationSubmit || got[1] != daemonclient.CommandTaskList {
 		t.Fatalf("requests = %v", got)
 	}
 }

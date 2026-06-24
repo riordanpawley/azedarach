@@ -127,6 +127,56 @@ func TestOperationCommandsRouteThroughDaemon(t *testing.T) {
 	}
 }
 
+func TestSessionLifecycleOperationSubmitRoutesThroughDaemon(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != protocol.CommandOperationSubmit {
+				t.Fatalf("command = %q, want %q", req.Command, protocol.CommandOperationSubmit)
+			}
+			var body protocol.OperationSubmitRequestBody
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal submit body: %v", err)
+			}
+			if body.ProjectID != naming.ProjectID("proj-a") || body.Kind != CommandSessionStop || body.IssueID != naming.IssueID("az-1") {
+				t.Fatalf("submit body = %+v", body)
+			}
+			var payload sessionCommandBody
+			if err := json.Unmarshal(body.Payload, &payload); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			if payload.ProjectID != naming.ProjectID("proj-a") || payload.SessionID != naming.SessionID("az-1") {
+				t.Fatalf("payload = %+v", payload)
+			}
+			respBody, _ := json.Marshal(protocol.OperationSubmitResponseBody{
+				Created: true,
+				Operation: protocol.OperationRecord{
+					OperationID: "op-stop",
+					ProjectID:   naming.ProjectID("proj-a"),
+					IssueID:     naming.IssueID("az-1"),
+					Kind:        CommandSessionStop,
+					State:       protocol.OperationStateQueued,
+				},
+			})
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-a")
+	record, err := client.StopSessionOperation(context.Background(), "az-1")
+	if err != nil {
+		t.Fatalf("StopSessionOperation error: %v", err)
+	}
+	if record.OperationID != "op-stop" || record.State != protocol.OperationStateQueued {
+		t.Fatalf("record = %+v", record)
+	}
+}
+
 func TestWaitForOperationPollsUntilTerminalState(t *testing.T) {
 	var calls int
 	transport := &lifecycleRecordingTransport{

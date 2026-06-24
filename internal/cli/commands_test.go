@@ -7435,8 +7435,8 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 		t.Fatalf("advice = %+v, want explicit review/close guidance", result.Advice)
 	}
 	commands := commandNames(requests)
-	if !containsString(commands, protocol.CommandOperationSubmit) || !containsString(commands, protocol.CommandMailSend) {
-		t.Fatalf("commands = %+v, want operation submit and mail send", commands)
+	if !containsString(commands, protocol.CommandOperationSubmit) || containsString(commands, protocol.CommandMailSend) {
+		t.Fatalf("commands = %+v, want operation submit without immediate mail send", commands)
 	}
 }
 

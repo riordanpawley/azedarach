@@ -589,7 +589,6 @@ func (r *operationRuntime) buildSubmitRequest(kind, projectID string, payload []
 	if overrideDedupeKey := strings.TrimSpace(overrides.DedupeKey); overrideDedupeKey != "" {
 		dedupeKey = overrideDedupeKey
 	}
-	resourceKeys = r.withHeavySessionStartResource(kind, projectID, payload, resourceKeys)
 	if len(resourceKeys) == 0 {
 		resourceKeys = []string{"operation:" + kind}
 	}
@@ -603,40 +602,8 @@ func (r *operationRuntime) buildSubmitRequest(kind, projectID string, payload []
 	}, nil
 }
 
-func (r *operationRuntime) withHeavySessionStartResource(kind, projectID string, payload []byte, resourceKeys []string) []string {
-	if strings.TrimSpace(kind) != daemonhandlers.CommandSessionStart {
-		return resourceKeys
-	}
-	projectID = r.sessionStartProjectID(projectID, payload)
-	return appendUniqueOperationResourceKey(resourceKeys, heavySessionStartResourceKey(projectID))
-}
-
-func (r *operationRuntime) sessionStartProjectID(projectID string, payload []byte) string {
-	var body struct {
-		ProjectID string `json:"project_id"`
-	}
-	if err := json.Unmarshal(payload, &body); err == nil {
-		projectID = r.coalesceProjectID(body.ProjectID, projectID)
-	}
-	return r.coalesceProjectID(projectID, "")
-}
-
 func heavySessionStartResourceKey(projectID string) string {
 	return heavySessionStartResourcePrefix + coalesceProjectID(projectID)
-}
-
-func appendUniqueOperationResourceKey(keys []string, key string) []string {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return normalizeOperationResourceKeys(keys)
-	}
-	out := normalizeOperationResourceKeys(keys)
-	for _, existing := range out {
-		if existing == key {
-			return out
-		}
-	}
-	return append(out, key)
 }
 
 func (r *operationRuntime) deriveOperationRouting(kind, projectID string, payload []byte) (issueID string, resourceKeys []string, dedupeKey string, err error) {

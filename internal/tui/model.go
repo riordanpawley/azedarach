@@ -2504,20 +2504,17 @@ func (m Model) startSessionCmd(issueID string, baseBranch string, yolo bool, sta
 		if m.daemonClient == nil {
 			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("daemon client unavailable")}
 		}
-		if _, err := m.daemonClient.StartSession(ctx, daemonclient.StartSessionParams{
+		record, err := m.daemonClient.StartSessionOperation(ctx, daemonclient.StartSessionParams{
 			IssueID:    issueID,
 			BaseBranch: baseBranch,
 			Yolo:       yolo,
 			StartWork:  &startWorkValue,
 			ImagePaths: m.sessionImagePaths(ctx, issueID),
-		}); err != nil {
-			if pending, ok := pendingOperationDetails(err); ok {
-				return sessionStartedMsg{issueID: issueID, operationID: pending.OperationID, state: pending.State}
-			}
+		})
+		if err != nil {
 			return sessionErrorMsg{issueID: issueID, err: err}
 		}
-
-		return sessionStartedMsg{issueID: issueID}
+		return sessionStartedMsg{issueID: issueID, operationID: record.OperationID.String(), state: record.State}
 	}
 }
 
@@ -2556,14 +2553,11 @@ func (m Model) stopSessionCmd(issueID string) tea.Cmd {
 		// Stop local projection observer state; lifecycle authority remains daemon-owned.
 		m.sessionMonitor.Stop(issueID)
 
-		if _, err := m.daemonClient.StopSession(ctx, issueID); err != nil {
-			if pending, ok := pendingOperationDetails(err); ok {
-				return sessionStoppedMsg{issueID: issueID, operationID: pending.OperationID, state: pending.State}
-			}
+		record, err := m.daemonClient.StopSessionOperation(ctx, issueID)
+		if err != nil {
 			return sessionErrorMsg{issueID: issueID, err: err}
 		}
-
-		return sessionStoppedMsg{issueID: issueID}
+		return sessionStoppedMsg{issueID: issueID, operationID: record.OperationID.String(), state: record.State}
 	}
 }
 

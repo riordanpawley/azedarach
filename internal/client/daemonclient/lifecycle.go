@@ -157,6 +157,36 @@ func (c *Client) projectRoute() string {
 	return c.projectID.String()
 }
 
+// StartSessionOperation submits a daemon-owned session start operation and
+// returns immediately with the durable operation record.
+func (c *Client) StartSessionOperation(ctx context.Context, params StartSessionParams) (protocol.OperationRecord, error) {
+	issueID, err := parseIssueID(params.IssueID)
+	if err != nil {
+		return protocol.OperationRecord{}, err
+	}
+	payload, err := json.Marshal(sessionCommandBody{
+		ProjectID:  c.projectID,
+		SessionID:  naming.SessionID(issueID),
+		BaseBranch: params.BaseBranch,
+		Yolo:       params.Yolo,
+		StartWork:  params.StartWork,
+		ImagePaths: params.ImagePaths,
+	})
+	if err != nil {
+		return protocol.OperationRecord{}, fmt.Errorf("marshal session start payload: %w", err)
+	}
+	var out protocol.OperationSubmitResponseBody
+	if err := c.commandJSON(ctx, protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+		ProjectID: c.projectID,
+		Kind:      CommandSessionStart,
+		IssueID:   naming.IssueID(issueID),
+		Payload:   payload,
+	}, &out); err != nil {
+		return protocol.OperationRecord{}, err
+	}
+	return out.Operation, nil
+}
+
 // StartSession asks the daemon to start one session for issue/task id.
 func (c *Client) StartSession(ctx context.Context, params StartSessionParams) (string, error) {
 	issueID, err := parseIssueID(params.IssueID)
@@ -171,6 +201,32 @@ func (c *Client) StartSession(ctx context.Context, params StartSessionParams) (s
 		StartWork:  params.StartWork,
 		ImagePaths: params.ImagePaths,
 	})
+}
+
+// StopSessionOperation submits a daemon-owned session stop operation and
+// returns immediately with the durable operation record.
+func (c *Client) StopSessionOperation(ctx context.Context, issueID string) (protocol.OperationRecord, error) {
+	parsedIssueID, err := parseIssueID(issueID)
+	if err != nil {
+		return protocol.OperationRecord{}, err
+	}
+	payload, err := json.Marshal(sessionCommandBody{
+		ProjectID: c.projectID,
+		SessionID: naming.SessionID(parsedIssueID),
+	})
+	if err != nil {
+		return protocol.OperationRecord{}, fmt.Errorf("marshal session stop payload: %w", err)
+	}
+	var out protocol.OperationSubmitResponseBody
+	if err := c.commandJSON(ctx, protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+		ProjectID: c.projectID,
+		Kind:      CommandSessionStop,
+		IssueID:   naming.IssueID(parsedIssueID),
+		Payload:   payload,
+	}, &out); err != nil {
+		return protocol.OperationRecord{}, err
+	}
+	return out.Operation, nil
 }
 
 // StopSession asks the daemon to stop one session for issue/task id.

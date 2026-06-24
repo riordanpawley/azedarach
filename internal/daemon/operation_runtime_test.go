@@ -767,7 +767,7 @@ func TestDaemonDrainInFlightCommandsStopsIntakeCancelsQueuedAndDrainsRunning(t *
 	waitForRuntimeState(t, runtime, queuedResult.Record.ID, daemonops.StateCancelled)
 }
 
-func TestBuildSubmitRequestRoutesSessionStartThroughProjectHeavyResource(t *testing.T) {
+func TestBuildSubmitRequestRoutesSessionStartByIssueOnly(t *testing.T) {
 	runtime := newSessionStartOperationRuntime(t)
 
 	startReq := runtime.buildSubmitRequestForTest(
@@ -779,8 +779,8 @@ func TestBuildSubmitRequestRoutesSessionStartThroughProjectHeavyResource(t *test
 	if !hasResourceKey(startReq.ResourceKeys, "issue:proj-1:AZ-10") {
 		t.Fatalf("session.start resource keys = %v, want issue key", startReq.ResourceKeys)
 	}
-	if !hasResourceKey(startReq.ResourceKeys, heavySessionStartResourceKey("proj-1")) {
-		t.Fatalf("session.start resource keys = %v, want project heavy-start key", startReq.ResourceKeys)
+	if hasResourceKey(startReq.ResourceKeys, heavySessionStartResourceKey("proj-1")) {
+		t.Fatalf("session.start resource keys = %v, did not want project heavy-start key", startReq.ResourceKeys)
 	}
 
 	stopReq := runtime.buildSubmitRequestForTest(
@@ -794,7 +794,7 @@ func TestBuildSubmitRequestRoutesSessionStartThroughProjectHeavyResource(t *test
 	}
 }
 
-func TestBuildSubmitRequestUsesPayloadProjectForHeavySessionStartResource(t *testing.T) {
+func TestBuildSubmitRequestUsesPayloadProjectForSessionStartIssueResource(t *testing.T) {
 	runtime := newSessionStartOperationRuntime(t)
 
 	req := runtime.buildSubmitRequestForTest(
@@ -807,15 +807,15 @@ func TestBuildSubmitRequestUsesPayloadProjectForHeavySessionStartResource(t *tes
 	if !hasResourceKey(req.ResourceKeys, "issue:payload-proj:AZ-10") {
 		t.Fatalf("session.start resource keys = %v, want payload project issue key", req.ResourceKeys)
 	}
-	if !hasResourceKey(req.ResourceKeys, heavySessionStartResourceKey("payload-proj")) {
-		t.Fatalf("session.start resource keys = %v, want payload project heavy-start key", req.ResourceKeys)
+	if hasResourceKey(req.ResourceKeys, heavySessionStartResourceKey("payload-proj")) {
+		t.Fatalf("session.start resource keys = %v, did not want payload project heavy-start key", req.ResourceKeys)
 	}
 	if hasResourceKey(req.ResourceKeys, heavySessionStartResourceKey(protocol.DefaultProjectID)) {
 		t.Fatalf("session.start resource keys = %v, did not want meta project heavy-start key", req.ResourceKeys)
 	}
 }
 
-func TestBuildSubmitRequestAddsHeavyResourceToExplicitSessionStartKeys(t *testing.T) {
+func TestBuildSubmitRequestPreservesExplicitSessionStartKeys(t *testing.T) {
 	runtime := newSessionStartOperationRuntime(t)
 	payload := mustJSON(t, map[string]string{"project_id": "proj-1", "session_id": "AZ-11"})
 
@@ -828,14 +828,17 @@ func TestBuildSubmitRequestAddsHeavyResourceToExplicitSessionStartKeys(t *testin
 		t.Fatalf("build submit request: %v", err)
 	}
 
-	for _, key := range []string{"session:AZ-11", "worktree:AZ-11", heavySessionStartResourceKey("proj-1")} {
+	for _, key := range []string{"session:AZ-11", "worktree:AZ-11"} {
 		if !hasResourceKey(req.ResourceKeys, key) {
 			t.Fatalf("resource keys = %v, want %s", req.ResourceKeys, key)
 		}
 	}
+	if hasResourceKey(req.ResourceKeys, heavySessionStartResourceKey("proj-1")) {
+		t.Fatalf("resource keys = %v, did not want project heavy-start key", req.ResourceKeys)
+	}
 }
 
-func TestOperationRuntimeSerializesSameProjectSessionStarts(t *testing.T) {
+func TestOperationRuntimeAllowsDifferentIssueSessionStartsConcurrently(t *testing.T) {
 	runtime := newSessionStartOperationRuntime(t)
 	firstStarted := make(chan struct{})
 	firstRelease := make(chan struct{})
@@ -863,33 +866,20 @@ func TestOperationRuntimeSerializesSameProjectSessionStarts(t *testing.T) {
 	}
 	<-firstStarted
 
-	second, err := runtime.manager.Submit(context.Background(), secondReq, func(context.Context) ([]byte, error) {
+	if _, err := runtime.manager.Submit(context.Background(), secondReq, func(context.Context) ([]byte, error) {
 		secondStarted <- struct{}{}
 		return nil, nil
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("submit second session.start: %v", err)
 	}
-	if second.Record.State != daemonops.StateQueued {
-		t.Fatalf("second state = %s, want queued", second.Record.State)
-	}
-	if !hasResourceKey(second.Record.ResourceKeys, heavySessionStartResourceKey("proj-1")) {
-		t.Fatalf("second resource keys = %v, want durable heavy-start key", second.Record.ResourceKeys)
-	}
 
-	select {
-	case <-secondStarted:
-		t.Fatal("second same-project session.start entered heavyweight work while first was running")
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	close(firstRelease)
 	select {
 	case <-secondStarted:
 	case <-time.After(time.Second):
-		t.Fatal("second same-project session.start did not start after first completed")
+		t.Fatal("second different-issue session.start did not run concurrently")
 	}
 
+	close(firstRelease)
 	if err := runtime.manager.Drain(context.Background()); err != nil {
 		t.Fatalf("drain error: %v", err)
 	}

@@ -10,7 +10,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/config"
@@ -57,19 +56,6 @@ func TestParseOrchestrateStartArgs_DefaultLimitAndIssues(t *testing.T) {
 	}
 	if len(opts.IssueIDs) != 2 || opts.IssueIDs[0] != "az-2" || opts.IssueIDs[1] != "az-3" {
 		t.Fatalf("IssueIDs = %+v, want [az-2 az-3]", opts.IssueIDs)
-	}
-}
-
-func TestSessionStartWarningFromOperationResult(t *testing.T) {
-	raw, err := json.Marshal(map[string]string{
-		"output": "Starting session\nWorktree setup warning: git hook failed; recovered existing worktree\nSession started",
-	})
-	if err != nil {
-		t.Fatalf("marshal output: %v", err)
-	}
-	warning := sessionStartWarningFromOperationResult(raw)
-	if warning != "Worktree setup warning: git hook failed; recovered existing worktree" {
-		t.Fatalf("warning = %q", warning)
 	}
 }
 
@@ -823,17 +809,9 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 						},
 					}), nil
 				case protocol.CommandOperationGet:
-					return responseWithJSON(req, protocol.OperationGetResponseBody{
-						Operation: protocol.OperationRecord{
-							OperationID: "op-1",
-							ProjectID:   protocol.DefaultProjectID,
-							Kind:        commandSessionStart,
-							IssueID:     child,
-							State:       protocol.OperationStateDone,
-						},
-					}), nil
+					t.Fatal("orchestrate start should not wait for submitted session start operation")
 				case protocol.CommandMailSend:
-					return responseWithJSON(req, protocol.MailEvent{Seq: 1, ParentIssue: "az-1", IssueID: child, Type: "session-started"}), nil
+					t.Fatal("orchestrate start should not send session-started mail before operation completion is observed")
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
 				}
@@ -851,7 +829,7 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 	})
 	for _, want := range []string{
 		"orchestrate start: submitted az-2 operation=op-1 state=queued",
-		"orchestrate start: waiting az-2 operation=op-1 state=queued",
+		"orchestrate start: launched az-2 operation=op-1 state=queued",
 	} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr = %q, want %q", stderr, want)
@@ -862,7 +840,7 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, output)
 	}
-	if len(result.Launched) != 1 || result.Launched[0].OperationID != "op-1" || result.Launched[0].WorktreePath != "/repo-az-2" {
+	if len(result.Launched) != 1 || result.Launched[0].OperationID != "op-1" || result.Launched[0].OperationState != string(protocol.OperationStateQueued) {
 		t.Fatalf("launched = %+v", result.Launched)
 	}
 	if !strings.Contains(result.Advice.WatchInstruction, "leave it running") || strings.Contains(result.Advice.WatchCommand, "--once") {
@@ -874,8 +852,11 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 	if submitted.Kind != commandSessionStart || submitted.IssueID != child || len(submitted.Payload) == 0 {
 		t.Fatalf("submitted = %+v", submitted)
 	}
-	if strings.Join(commands, ",") == "" || !containsString(commands, protocol.CommandOperationSubmit) || !containsString(commands, protocol.CommandOperationGet) {
-		t.Fatalf("commands = %+v, want operation submit and wait", commands)
+	if !containsString(submitted.ResourceKeys, "issue:"+protocol.DefaultProjectID+":"+child.String()) {
+		t.Fatalf("submitted resource keys = %+v, want issue resource key", submitted.ResourceKeys)
+	}
+	if strings.Join(commands, ",") == "" || !containsString(commands, protocol.CommandOperationSubmit) || containsString(commands, protocol.CommandOperationGet) {
+		t.Fatalf("commands = %+v, want operation submit without wait", commands)
 	}
 }
 
@@ -993,7 +974,7 @@ func TestOrchestrateStartWarnsOnExpensiveSessionInitCommandsDuringFanout(t *test
 	}
 }
 
-func TestOrchestrateStartWaitsForAllSubmittedOperationsBeforeMail(t *testing.T) {
+func TestOrchestrateStartSubmitsAllOperationsBeforeReturning(t *testing.T) {
 	root := naming.IssueID("az-1")
 	childA := naming.IssueID("az-2")
 	childB := naming.IssueID("az-3")
@@ -1008,7 +989,6 @@ func TestOrchestrateStartWaitsForAllSubmittedOperationsBeforeMail(t *testing.T) 
 	}
 
 	submitted := map[string]bool{}
-	waited := map[string]bool{}
 	deps := &Dependencies{
 		ProjectID: protocol.DefaultProjectID,
 		RepoDir:   "/repo",
@@ -1052,35 +1032,11 @@ func TestOrchestrateStartWaitsForAllSubmittedOperationsBeforeMail(t *testing.T) 
 						},
 					}), nil
 				case protocol.CommandOperationGet:
-					var body protocol.OperationGetRequestBody
-					if err := json.Unmarshal(req.Body, &body); err != nil {
-						t.Fatalf("decode operation get body: %v", err)
-					}
-					if !submitted[childA.String()] || !submitted[childB.String()] {
-						t.Fatalf("waited for %s before all requested starts were submitted: submitted=%+v", body.OperationID, submitted)
-					}
-					issueID := strings.TrimPrefix(body.OperationID.String(), "op-")
-					waited[issueID] = true
-					return responseWithJSON(req, protocol.OperationGetResponseBody{
-						Operation: protocol.OperationRecord{
-							OperationID: body.OperationID,
-							ProjectID:   protocol.DefaultProjectID,
-							Kind:        commandSessionStart,
-							IssueID:     naming.IssueID(issueID),
-							State:       protocol.OperationStateDone,
-						},
-					}), nil
+					t.Fatal("orchestrate start should not wait for submitted session start operations")
 				case daemonclient.CommandWorktreeList:
 					return responseWithJSON(req, map[string]any{"project_id": protocol.DefaultProjectID, "worktrees": []map[string]string{}}), nil
 				case protocol.CommandMailSend:
-					var body protocol.MailSendCommandBody
-					if err := json.Unmarshal(req.Body, &body); err != nil {
-						t.Fatalf("decode mail body: %v", err)
-					}
-					if !waited[body.IssueID.String()] {
-						t.Fatalf("sent session-started mail for %s before operation wait completed", body.IssueID)
-					}
-					return responseWithJSON(req, protocol.MailEvent{Seq: 1, ParentIssue: "az-1", IssueID: body.IssueID, Type: "session-started"}), nil
+					t.Fatal("orchestrate start should not send session-started mail before watch/status observe completion")
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
 				}
@@ -1093,16 +1049,20 @@ func TestOrchestrateStartWaitsForAllSubmittedOperationsBeforeMail(t *testing.T) 
 	if err != nil {
 		t.Fatalf("orchestrateStart error = %v", err)
 	}
-	if len(result.Started) != 2 || len(result.Failed) != 0 {
-		t.Fatalf("result started=%+v failed=%+v, want both started with no failures", result.Started, result.Failed)
+	if len(result.Started) != 2 || len(result.Launched) != 2 || len(result.Failed) != 0 {
+		t.Fatalf("result started=%+v launched=%+v failed=%+v, want both submitted with no failures", result.Started, result.Launched, result.Failed)
+	}
+	if !submitted[childA.String()] || !submitted[childB.String()] {
+		t.Fatalf("submitted = %+v, want both children", submitted)
+	}
+	for _, launch := range result.Launched {
+		if launch.OperationID == "" || launch.OperationState != string(protocol.OperationStateQueued) {
+			t.Fatalf("launch = %+v, want queued operation id", launch)
+		}
 	}
 }
 
-func TestOrchestrateStartReportsPendingWhenWaitTimeout(t *testing.T) {
-	oldTimeout := orchestrateStartOperationWaitTimeout
-	orchestrateStartOperationWaitTimeout = time.Millisecond
-	t.Cleanup(func() { orchestrateStartOperationWaitTimeout = oldTimeout })
-
+func TestOrchestrateStartReportsSubmittedOperationWithoutWaiting(t *testing.T) {
 	root := naming.IssueID("az-1")
 	child := naming.IssueID("az-2")
 	taskListBody, err := marshalTaskListBody([]domain.Task{
@@ -1113,8 +1073,6 @@ func TestOrchestrateStartReportsPendingWhenWaitTimeout(t *testing.T) {
 		t.Fatalf("marshal task list: %v", err)
 	}
 
-	mailSends := 0
-	operationState := protocol.OperationStateRunning
 	deps := &Dependencies{
 		ProjectID: protocol.DefaultProjectID,
 		RepoDir:   "/repo",
@@ -1155,18 +1113,9 @@ func TestOrchestrateStartReportsPendingWhenWaitTimeout(t *testing.T) {
 						},
 					}), nil
 				case protocol.CommandOperationGet:
-					return responseWithJSON(req, protocol.OperationGetResponseBody{
-						Operation: protocol.OperationRecord{
-							OperationID: "op-1",
-							ProjectID:   protocol.DefaultProjectID,
-							Kind:        commandSessionStart,
-							IssueID:     child,
-							State:       operationState,
-						},
-					}), nil
+					t.Fatal("orchestrate start should not wait for submitted session start operation")
 				case protocol.CommandMailSend:
-					mailSends++
-					return responseWithJSON(req, protocol.MailEvent{}), nil
+					t.Fatal("orchestrate start should not send session-started mail before operation completion is observed")
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
 				}
@@ -1178,44 +1127,23 @@ func TestOrchestrateStartReportsPendingWhenWaitTimeout(t *testing.T) {
 	output, err := captureStdoutAllowError(t, func() error {
 		return OrchestrateStartCommand(deps, OrchestrateStartOptions{RootIssueID: root.String(), IssueIDs: []string{child.String()}, Limit: 4, JSON: true})
 	})
-	if err == nil {
-		t.Fatal("OrchestrateStartCommand error = nil, want pending timeout error")
-	}
-	if strings.Contains(err.Error(), "completed with failures") || !strings.Contains(err.Error(), "pending session start operations") {
-		t.Fatalf("error = %q, want pending timeout without generic failure", err)
+	if err != nil {
+		t.Fatalf("OrchestrateStartCommand error = %v", err)
 	}
 	var result orchestrateStartResult
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, output)
 	}
-	if len(result.Failed) != 0 || len(result.Started) != 0 || len(result.Pending) != 1 {
-		t.Fatalf("started=%+v pending=%+v failed=%+v, want one pending and no failed/started", result.Started, result.Pending, result.Failed)
+	if len(result.Failed) != 0 || len(result.Pending) != 0 || len(result.Started) != 1 || len(result.Launched) != 1 {
+		t.Fatalf("started=%+v launched=%+v pending=%+v failed=%+v, want one launched start", result.Started, result.Launched, result.Pending, result.Failed)
 	}
-	pending := result.Pending[0]
-	if pending.IssueID != child.String() || pending.OperationID != "op-1" || pending.OperationState != string(protocol.OperationStateRunning) {
-		t.Fatalf("pending = %+v", pending)
-	}
-	followUps := strings.Join(pending.FollowUpCommands, "\n")
-	for _, want := range []string{"az operation get --id op-1 --wait", "az orchestrate status --root az-1 --json"} {
-		if !strings.Contains(followUps, want) {
-			t.Fatalf("follow-up commands missing %q: %+v", want, pending.FollowUpCommands)
-		}
-	}
-	if mailSends != 0 {
-		t.Fatalf("mail sends = %d, want none for pending start", mailSends)
-	}
-
-	operationState = protocol.OperationStateDone
-	record, err := deps.DaemonClient.GetOperation(context.Background(), "op-1")
-	if err != nil {
-		t.Fatalf("GetOperation after pending start error = %v", err)
-	}
-	if record.State != protocol.OperationStateDone {
-		t.Fatalf("operation state after pending start = %q, want done", record.State)
+	launch := result.Launched[0]
+	if launch.IssueID != child.String() || launch.OperationID != "op-1" || launch.OperationState != string(protocol.OperationStateQueued) {
+		t.Fatalf("launch = %+v", launch)
 	}
 }
 
-func TestOrchestrateStartPreservesTerminalOperationFailure(t *testing.T) {
+func TestOrchestrateStartPreservesSubmitFailure(t *testing.T) {
 	root := naming.IssueID("az-1")
 	child := naming.IssueID("az-2")
 	taskListBody, err := marshalTaskListBody([]domain.Task{
@@ -1255,29 +1183,17 @@ func TestOrchestrateStartPreservesTerminalOperationFailure(t *testing.T) {
 						},
 					}), nil
 				case protocol.CommandOperationSubmit:
-					return responseWithJSON(req, protocol.OperationSubmitResponseBody{
-						Created: true,
-						Operation: protocol.OperationRecord{
-							OperationID: "op-1",
-							ProjectID:   protocol.DefaultProjectID,
-							Kind:        commandSessionStart,
-							IssueID:     child,
-							State:       protocol.OperationStateQueued,
-						},
-					}), nil
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              false,
+						Error:           &protocol.ErrorEnvelope{Code: protocol.ErrorCodeInternal, Message: "tmux launch failed"},
+					}, nil
 				case protocol.CommandOperationGet:
-					return responseWithJSON(req, protocol.OperationGetResponseBody{
-						Operation: protocol.OperationRecord{
-							OperationID: "op-1",
-							ProjectID:   protocol.DefaultProjectID,
-							Kind:        commandSessionStart,
-							IssueID:     child,
-							State:       protocol.OperationStateFailed,
-							Error:       &protocol.OperationError{Code: protocol.ErrorCodeInternal, Message: "tmux launch failed"},
-						},
-					}), nil
+					t.Fatal("orchestrate start should not poll submitted operations")
 				case protocol.CommandMailSend:
-					t.Fatal("mail should not be sent for failed operation")
+					t.Fatal("mail should not be sent for failed submission")
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
 				}
@@ -1297,7 +1213,7 @@ func TestOrchestrateStartPreservesTerminalOperationFailure(t *testing.T) {
 		t.Fatalf("decode output: %v\n%s", err, output)
 	}
 	if len(result.Pending) != 0 || result.Failed[child.String()] != "tmux launch failed" {
-		t.Fatalf("pending=%+v failed=%+v, want terminal failure only", result.Pending, result.Failed)
+		t.Fatalf("pending=%+v failed=%+v, want submit failure only", result.Pending, result.Failed)
 	}
 }
 
