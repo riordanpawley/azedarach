@@ -1641,62 +1641,58 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 	}
 
 	var integration taskCloseIntegrationResult
-	if err := d.git.WithWorktreeLock(ctx, targetWorktree, func(ctx context.Context) error {
-		hasChangesToIntegrate, err := d.ensureMergeToBaseClean(ctx, source, targetWorktree, targetBranch)
-		if err != nil {
-			return err
-		}
-		if !hasChangesToIntegrate {
-			integration = taskCloseIntegrationResult{
-				Requested:    true,
-				NoChanges:    true,
-				SourceBranch: source.Branch,
-				TargetBranch: targetBranch,
-			}
-			return nil
-		}
-		preflight, err := d.git.MergePreflight(ctx, source.Path, targetWorktree, targetBranch, source.Branch)
-		if err != nil {
-			return fmt.Errorf("merge preflight failed: %w", err)
-		}
-		if preflight != nil && preflight.HasConflicts {
-			reasons := uniqueNonEmpty(preflight.ConflictFiles)
-			if len(reasons) == 0 {
-				reasons = append(reasons, "unknown")
-			}
-			return fmt.Errorf("merge preflight failed: predicted conflicts %s", strings.Join(reasons, ", "))
-		}
-		if !branchAttached {
-			if err := d.git.Checkout(ctx, targetWorktree, targetBranch); err != nil {
-				return fmt.Errorf("checkout target branch before close integration: %w", err)
-			}
-		}
-		merge, err := d.git.MergeCleanlyTransactional(ctx, targetWorktree, source.Branch)
-		if err != nil {
-			return fmt.Errorf("merge %s into %s: %w", source.Branch, targetBranch, err)
-		}
-		if merge == nil {
-			return fmt.Errorf("merge %s into %s returned no result", source.Branch, targetBranch)
-		}
-		if !merge.Success {
-			details := strings.TrimSpace(merge.Message)
-			if len(merge.ConflictFiles) > 0 {
-				details = strings.TrimSpace(details + "\nconflicts: " + strings.Join(merge.ConflictFiles, ", "))
-			}
-			if details == "" {
-				details = "merge did not complete successfully"
-			}
-			return fmt.Errorf("merge %s into %s failed: %s", source.Branch, targetBranch, details)
-		}
-		integration = taskCloseIntegrationResult{
+	hasChangesToIntegrate, err := d.ensureMergeToBaseClean(ctx, source, targetWorktree, targetBranch)
+	if err != nil {
+		return taskCloseIntegrationResult{Requested: true}, err
+	}
+	if !hasChangesToIntegrate {
+		return taskCloseIntegrationResult{
 			Requested:    true,
-			Integrated:   true,
+			NoChanges:    true,
 			SourceBranch: source.Branch,
 			TargetBranch: targetBranch,
+		}, nil
+	}
+	preflight, err := d.git.MergePreflight(ctx, source.Path, targetWorktree, targetBranch, source.Branch)
+	if err != nil {
+		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge preflight failed: %w", err)
+	}
+	if preflight != nil && preflight.HasConflicts {
+		reasons := uniqueNonEmpty(preflight.ConflictFiles)
+		if len(reasons) == 0 {
+			reasons = append(reasons, "unknown")
 		}
-		return nil
-	}); err != nil {
-		return taskCloseIntegrationResult{Requested: true}, err
+		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge preflight failed: predicted conflicts %s", strings.Join(reasons, ", "))
+	}
+	if !branchAttached {
+		if err := d.git.WithWorktreeLock(ctx, targetWorktree, func(ctx context.Context) error {
+			return d.git.Checkout(ctx, targetWorktree, targetBranch)
+		}); err != nil {
+			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("checkout target branch before close integration: %w", err)
+		}
+	}
+	merge, err := d.git.MergeCleanlyTransactional(ctx, targetWorktree, source.Branch)
+	if err != nil {
+		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge %s into %s: %w", source.Branch, targetBranch, err)
+	}
+	if merge == nil {
+		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge %s into %s returned no result", source.Branch, targetBranch)
+	}
+	if !merge.Success {
+		details := strings.TrimSpace(merge.Message)
+		if len(merge.ConflictFiles) > 0 {
+			details = strings.TrimSpace(details + "\nconflicts: " + strings.Join(merge.ConflictFiles, ", "))
+		}
+		if details == "" {
+			details = "merge did not complete successfully"
+		}
+		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge %s into %s failed: %s", source.Branch, targetBranch, details)
+	}
+	integration = taskCloseIntegrationResult{
+		Requested:    true,
+		Integrated:   true,
+		SourceBranch: source.Branch,
+		TargetBranch: targetBranch,
 	}
 	return integration, nil
 }

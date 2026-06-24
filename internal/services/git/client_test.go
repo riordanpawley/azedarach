@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -720,6 +721,141 @@ func TestMergeCleanlyTransactionalRecoversDirtyFinalApplyAndRemovesJournal(t *te
 	}
 }
 
+func TestMergeCleanlyTransactionalAllowsConcurrentScratchValidationAndRejectsStaleFinalApply(t *testing.T) {
+	repo := t.TempDir()
+	gitDir := filepath.Join(repo, ".git")
+	if err := os.Mkdir(gitDir, 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+
+	ctx := context.Background()
+	var (
+		mu               sync.Mutex
+		currentHead      = "target-sha"
+		scratchBranches  = map[string]string{}
+		resetRefs        []string
+		scratchEntered   = make(chan string, 2)
+		releaseScratch   = make(chan struct{})
+		firstApplyDone   = make(chan struct{})
+		firstApplyDoneMu sync.Once
+	)
+	runner := &rawMockRunner{runFunc: func(ctx context.Context, args ...string) (string, error) {
+		switch {
+		case clientTestArgsForWorktree(args, repo, "rev-parse", "--git-common-dir"):
+			return gitDir, nil
+		case clientTestArgsForWorktree(args, repo, "status", "--porcelain"):
+			return "", nil
+		case clientTestArgsForWorktree(args, repo, "rev-parse", "--verify", "HEAD"):
+			mu.Lock()
+			defer mu.Unlock()
+			return currentHead, nil
+		case len(args) >= 7 &&
+			args[0] == "-C" &&
+			args[1] == repo &&
+			args[2] == "worktree" &&
+			args[3] == "add" &&
+			args[4] == "--detach":
+			if args[6] != "target-sha" {
+				t.Fatalf("worktree add ref = %q, want target-sha", args[6])
+			}
+			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && strings.HasPrefix(args[1], os.TempDir()) && args[2] == "status" && args[3] == "--porcelain":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && strings.HasPrefix(args[1], os.TempDir()) && args[2] == "merge" && args[3] == "--no-edit":
+			scratch := args[1]
+			branch := args[4]
+			mu.Lock()
+			scratchBranches[scratch] = branch
+			mu.Unlock()
+			scratchEntered <- branch
+			<-releaseScratch
+			if branch == "feature-b" {
+				<-firstApplyDone
+			}
+			return "Merge made by the 'ort' strategy.", nil
+		case len(args) >= 5 && args[0] == "-C" && strings.HasPrefix(args[1], os.TempDir()) && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
+			mu.Lock()
+			branch := scratchBranches[args[1]]
+			mu.Unlock()
+			if branch == "" {
+				t.Fatalf("unknown scratch worktree %q", args[1])
+			}
+			return "desired-" + branch, nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repo && args[2] == "reset" && args[3] == "--hard":
+			mu.Lock()
+			currentHead = args[4]
+			resetRefs = append(resetRefs, args[4])
+			mu.Unlock()
+			firstApplyDoneMu.Do(func() { close(firstApplyDone) })
+			return "", nil
+		case len(args) >= 6 && args[0] == "-C" && args[1] == repo && args[2] == "worktree" && args[3] == "remove":
+			return "", nil
+		default:
+			return "", fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
+		}
+	}}
+
+	client := NewClient(runner, slog.Default())
+	type mergeOutcome struct {
+		branch string
+		result *MergeResult
+		err    error
+	}
+	outcomes := make(chan mergeOutcome, 2)
+	for _, branch := range []string{"feature-a", "feature-b"} {
+		branch := branch
+		go func() {
+			result, err := client.MergeCleanlyTransactional(ctx, repo, branch)
+			outcomes <- mergeOutcome{branch: branch, result: result, err: err}
+		}()
+	}
+
+	entered := map[string]bool{}
+	for len(entered) < 2 {
+		select {
+		case branch := <-scratchEntered:
+			entered[branch] = true
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for both scratch validations; entered=%v", entered)
+		}
+	}
+	close(releaseScratch)
+
+	got := map[string]mergeOutcome{}
+	for len(got) < 2 {
+		select {
+		case outcome := <-outcomes:
+			got[outcome.branch] = outcome
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for merge outcomes; got=%v", got)
+		}
+	}
+
+	first := got["feature-a"]
+	if first.err != nil {
+		t.Fatalf("feature-a error = %v", first.err)
+	}
+	if first.result == nil || !first.result.Success {
+		t.Fatalf("feature-a result = %+v, want success", first.result)
+	}
+	second := got["feature-b"]
+	if second.err != nil {
+		t.Fatalf("feature-b error = %v", second.err)
+	}
+	if second.result == nil || second.result.Success {
+		t.Fatalf("feature-b result = %+v, want stale-base failure", second.result)
+	}
+	if !strings.Contains(second.result.Message, "target HEAD moved from target-sha to desired-feature-a") ||
+		!strings.Contains(second.result.Message, "retry integration") {
+		t.Fatalf("feature-b message = %q, want stale-base retry detail", second.result.Message)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !reflect.DeepEqual(resetRefs, []string{"desired-feature-a"}) {
+		t.Fatalf("reset refs = %v, want only first final apply", resetRefs)
+	}
+}
+
 func TestClientWorktreeLockSerializesSameWorktree(t *testing.T) {
 	client := NewClient(&mockRunner{}, slog.Default())
 	ctx := context.Background()
@@ -761,6 +897,155 @@ func TestClientWorktreeLockSerializesSameWorktree(t *testing.T) {
 	if err := <-secondDone; err != nil {
 		t.Fatalf("second lock error = %v", err)
 	}
+}
+
+func TestWorktreeLockReleasesWaitersFIFO(t *testing.T) {
+	lock := newWorktreeLock()
+	ctx := context.Background()
+	unlockFirst, err := lock.acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire first: %v", err)
+	}
+
+	secondEntered := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		unlock, err := lock.acquire(ctx)
+		if err != nil {
+			secondDone <- err
+			return
+		}
+		close(secondEntered)
+		<-releaseSecond
+		unlock()
+		secondDone <- nil
+	}()
+	waitForWorktreeLockWaiters(t, lock, 1)
+
+	thirdEntered := make(chan struct{})
+	thirdDone := make(chan error, 1)
+	go func() {
+		unlock, err := lock.acquire(ctx)
+		if err != nil {
+			thirdDone <- err
+			return
+		}
+		close(thirdEntered)
+		unlock()
+		thirdDone <- nil
+	}()
+	waitForWorktreeLockWaiters(t, lock, 2)
+
+	unlockFirst()
+	select {
+	case <-secondEntered:
+	case <-time.After(time.Second):
+		t.Fatal("second waiter did not enter after first release")
+	}
+	select {
+	case <-thirdEntered:
+		t.Fatal("third waiter entered before second released")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseSecond)
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second waiter error = %v", err)
+	}
+	select {
+	case <-thirdEntered:
+	case <-time.After(time.Second):
+		t.Fatal("third waiter did not enter after second release")
+	}
+	if err := <-thirdDone; err != nil {
+		t.Fatalf("third waiter error = %v", err)
+	}
+}
+
+func TestWorktreeLockRemovesCanceledWaiter(t *testing.T) {
+	lock := newWorktreeLock()
+	ctx := context.Background()
+	unlockFirst, err := lock.acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire first: %v", err)
+	}
+
+	waitCtx, cancelWait := context.WithCancel(ctx)
+	waiterDone := make(chan error, 1)
+	go func() {
+		unlock, err := lock.acquire(waitCtx)
+		if unlock != nil {
+			unlock()
+		}
+		waiterDone <- err
+	}()
+	waitForWorktreeLockWaiters(t, lock, 1)
+	cancelWait()
+	if err := <-waiterDone; err == nil {
+		t.Fatal("canceled waiter error = nil, want context cancellation")
+	}
+	waitForWorktreeLockWaiters(t, lock, 0)
+
+	nextEntered := make(chan struct{})
+	nextDone := make(chan error, 1)
+	go func() {
+		unlock, err := lock.acquire(ctx)
+		if err != nil {
+			nextDone <- err
+			return
+		}
+		close(nextEntered)
+		unlock()
+		nextDone <- nil
+	}()
+	waitForWorktreeLockWaiters(t, lock, 1)
+	unlockFirst()
+	select {
+	case <-nextEntered:
+	case <-time.After(time.Second):
+		t.Fatal("next waiter did not enter after canceled waiter was removed")
+	}
+	if err := <-nextDone; err != nil {
+		t.Fatalf("next waiter error = %v", err)
+	}
+}
+
+func TestWorktreeLockRejectsAlreadyCanceledContext(t *testing.T) {
+	lock := newWorktreeLock()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	unlock, err := lock.acquire(ctx)
+	if err == nil {
+		if unlock != nil {
+			unlock()
+		}
+		t.Fatal("acquire with canceled context error = nil")
+	}
+	lock.mu.Lock()
+	held := lock.held
+	waiters := len(lock.waiters)
+	lock.mu.Unlock()
+	if held || waiters != 0 {
+		t.Fatalf("lock state after canceled acquire: held=%t waiters=%d, want free", held, waiters)
+	}
+}
+
+func waitForWorktreeLockWaiters(t *testing.T, lock *worktreeLock, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		lock.mu.Lock()
+		got := len(lock.waiters)
+		lock.mu.Unlock()
+		if got == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	lock.mu.Lock()
+	got := len(lock.waiters)
+	lock.mu.Unlock()
+	t.Fatalf("worktree lock waiters = %d, want %d", got, want)
 }
 
 func TestNormalizeWorktreeLockKeyCanonicalizesSymlink(t *testing.T) {

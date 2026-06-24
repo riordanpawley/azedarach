@@ -84,12 +84,8 @@ func (a *gitServiceAdapter) Fetch(ctx context.Context, projectID, worktree, remo
 }
 
 func (a *gitServiceAdapter) Merge(ctx context.Context, projectID, worktree, branch string) (*git.MergeResult, error) {
-	var result *git.MergeResult
-	if err := a.client.WithWorktreeLock(ctx, worktree, func(ctx context.Context) error {
-		var err error
-		result, err = a.client.MergeCleanlyTransactional(ctx, worktree, branch)
-		return err
-	}); err != nil {
+	result, err := a.client.MergeCleanlyTransactional(ctx, worktree, branch)
+	if err != nil {
 		return nil, err
 	}
 	// Merge completion should always trigger an update notification so clients
