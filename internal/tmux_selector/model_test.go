@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -259,6 +260,44 @@ func TestModelTreeRendersIssueStatusBesideAgentStatus(t *testing.T) {
 	}
 }
 
+func TestModelTreeColorizesSessionAndIssueStatus(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+
+	entries := []InventoryEntry{{
+		SessionID:         "az-coh",
+		IssueID:           "coh",
+		TaskTitle:         "Show issue status in selector",
+		State:             domain.SessionBusy,
+		IssueStatus:       domain.StatusInProgress,
+		HasTmuxSession:    true,
+		TmuxAttachedCount: 1,
+	}}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	model.activeTab = selectorTabTree
+
+	view := model.View()
+	stripped := ansi.Strip(view)
+	if !strings.Contains(stripped, "az-coh [busy] [in_progress] Show issue status in selector") {
+		t.Fatalf("tree view text changed after colorization:\n%s", stripped)
+	}
+	for _, want := range []string{
+		model.styles.SessionBusy.Render("busy"),
+		issueStatusStyle("in_progress").Render("in_progress"),
+		lipgloss.NewStyle().Foreground(styles.Teal).Bold(true).Render("tmux az-coh  attached"),
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("tree view missing styled token %q:\n%s", want, view)
+		}
+	}
+}
+
 func TestModelTreePrefersPrefixedSessionIDForIssueRows(t *testing.T) {
 	entries := []InventoryEntry{{
 		SessionID:      "ch-enw",
@@ -301,6 +340,40 @@ func TestRenderSessionRowIncludesIssueStatusInCardMeta(t *testing.T) {
 	}
 	if !strings.Contains(view, "tmux az-coh") {
 		t.Fatalf("card missing tmux meta:\n%s", view)
+	}
+}
+
+func TestRenderSessionRowColorizesCardMeta(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+
+	row := SessionRow{
+		SessionID:         "az-coh",
+		IssueID:           "coh",
+		TaskTitle:         "Show issue status in selector",
+		State:             domain.SessionBusy,
+		IssueStatus:       domain.StatusInProgress,
+		HasTmuxSession:    true,
+		TmuxAttachedCount: 1,
+		ProjectPath:       "/tmp/project",
+	}
+	s := styles.New()
+
+	view := RenderSessionRow(row, false, 64, lipgloss.Style{}, lipgloss.Style{}, lipgloss.Style{}, s)
+	stripped := ansi.Strip(view)
+	for _, want := range []string{"issue in_progress", "tmux az-coh  attached", "/tmp/project"} {
+		if !strings.Contains(stripped, want) {
+			t.Fatalf("card meta text changed, missing %q:\n%s", want, stripped)
+		}
+	}
+	for _, want := range []string{
+		issueStatusStyle("in_progress").Render("in_progress"),
+		lipgloss.NewStyle().Foreground(styles.Teal).Bold(true).Render("tmux az-coh  attached"),
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("card meta missing styled token %q:\n%s", want, view)
+		}
 	}
 }
 

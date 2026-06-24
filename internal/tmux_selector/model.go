@@ -719,11 +719,11 @@ func (m Model) renderTree(entries []InventoryEntry) string {
 }
 
 func (m Model) renderTreeRow(row sessionTreeRow, entry InventoryEntry) string {
-	cursor := "  "
+	cursor := m.styles.StatusHint.Render("  ")
 	if row.entryIndex >= 0 && row.entryIndex == m.cursor {
-		cursor = "> "
+		cursor = lipgloss.NewStyle().Foreground(styles.Blue).Bold(true).Render("> ")
 	}
-	indent := treePrefix(row.ancestorLast, row.last)
+	indent := m.styles.StatusHint.Render(treePrefix(row.ancestorLast, row.last))
 	displayID := entryDisplayID(entry)
 	if displayID == "" {
 		displayID = strings.TrimSpace(entry.SessionID)
@@ -742,12 +742,12 @@ func (m Model) renderTreeRow(row sessionTreeRow, entry InventoryEntry) string {
 	issueStatus := issueStatusLabel(entry)
 	metaParts := []string{}
 	if entry.SessionID != "" {
-		metaParts = append(metaParts, tmuxSessionMeta(entry))
+		metaParts = append(metaParts, renderTmuxSessionMeta(entry, m.styles))
 	}
 	if entry.ProjectPath != "" {
-		metaParts = append(metaParts, entry.ProjectPath)
+		metaParts = append(metaParts, m.styles.StatusHint.Render(entry.ProjectPath))
 	} else if entry.ProjectID != "" {
-		metaParts = append(metaParts, entry.ProjectID)
+		metaParts = append(metaParts, m.styles.StatusHint.Render(entry.ProjectID))
 	}
 	meta := ""
 	if len(metaParts) > 0 {
@@ -755,12 +755,15 @@ func (m Model) renderTreeRow(row sessionTreeRow, entry InventoryEntry) string {
 	}
 	statusSuffix := ""
 	if issueStatus != "" {
-		statusSuffix = " [" + issueStatus + "]"
+		statusSuffix = " " + renderBracketed(issueStatus, issueStatusStyle(issueStatus))
 	}
-	line := fmt.Sprintf("%s%s%s [%s]%s %s%s", cursor, indent, displayID, state, statusSuffix, title, meta)
+	displayID = m.styles.TaskID.Render(displayID)
+	stateToken := renderBracketed(state, sessionLabelStyle(state, m.styles))
+	title = m.styles.TaskTitle.Render(title)
+	line := fmt.Sprintf("%s%s%s %s%s %s%s", cursor, indent, displayID, stateToken, statusSuffix, title, meta)
 	line = ansi.Truncate(line, maxInt(1, m.width), "…")
 	if row.entryIndex >= 0 && row.entryIndex == m.cursor {
-		return lipgloss.NewStyle().Foreground(styles.Blue).Bold(true).Render(line)
+		return lipgloss.NewStyle().Bold(true).Render(line)
 	}
 	return line
 }
@@ -1772,13 +1775,13 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 	project := firstNonEmpty(row.ProjectPath, row.ProjectID)
 	metaParts := []string{}
 	if issueStatus := issueStatusLabel(row); issueStatus != "" {
-		metaParts = append(metaParts, "issue "+issueStatus)
+		metaParts = append(metaParts, renderIssueMeta(issueStatus))
 	}
 	if row.SessionID != "" {
-		metaParts = append(metaParts, tmuxSessionMeta(row))
+		metaParts = append(metaParts, renderTmuxSessionMeta(row, s))
 	}
 	if project != "" {
-		metaParts = append(metaParts, project)
+		metaParts = append(metaParts, s.StatusHint.Render(project))
 	}
 	origin := task.Origin
 	if len(metaParts) > 0 {
@@ -1830,6 +1833,48 @@ func issueStatusLabel(entry InventoryEntry) string {
 	return strings.TrimSpace(status.String())
 }
 
+func renderBracketed(label string, style lipgloss.Style) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return ""
+	}
+	return "[" + style.Render(label) + "]"
+}
+
+func sessionLabelStyle(label string, s *styles.Styles) lipgloss.Style {
+	if s == nil {
+		s = styles.New()
+	}
+	switch strings.TrimSpace(strings.ToLower(label)) {
+	case "busy", "working":
+		return s.SessionBusy
+	case "waiting":
+		return s.SessionWaiting
+	case "done":
+		return s.SessionDone
+	case "error":
+		return s.SessionError
+	case "paused":
+		return s.SessionPaused
+	case "idle", "no-agent", "unknown":
+		return s.SessionIdle
+	default:
+		return s.StatusInfo
+	}
+}
+
+func issueStatusStyle(status string) lipgloss.Style {
+	color, ok := styles.StatusColors[strings.TrimSpace(strings.ToLower(status))]
+	if !ok {
+		color = styles.Subtext0
+	}
+	return lipgloss.NewStyle().Foreground(color).Bold(true)
+}
+
+func renderIssueMeta(status string) string {
+	return lipgloss.NewStyle().Foreground(styles.Overlay1).Render("issue ") + issueStatusStyle(status).Render(status)
+}
+
 func rowCardDisplayState(row InventoryEntry) domain.SessionState {
 	session := domain.Session{
 		State:    row.State,
@@ -1861,6 +1906,20 @@ func tmuxSessionMeta(entry InventoryEntry) string {
 		return "tmux " + sessionID + "  attached"
 	}
 	return "tmux " + sessionID
+}
+
+func renderTmuxSessionMeta(entry InventoryEntry, s *styles.Styles) string {
+	meta := tmuxSessionMeta(entry)
+	if meta == "" {
+		return ""
+	}
+	if entry.TmuxAttached || entry.TmuxAttachedCount > 0 {
+		return lipgloss.NewStyle().Foreground(styles.Teal).Bold(true).Render(meta)
+	}
+	if s == nil {
+		s = styles.New()
+	}
+	return s.StatusInfo.Render(meta)
 }
 
 func compactSelectorCard(card string) string {
@@ -1919,7 +1978,7 @@ func insertCardMetaLine(card string, meta string, origin string, s *styles.Style
 		metaRoom = 1
 	}
 	meta = ansi.Truncate(meta, metaRoom, "…")
-	renderedMeta := s.StatusInfo.Render(meta)
+	renderedMeta := meta
 	padding := maxInt(0, innerWidth-ansi.StringWidth(renderedMeta)-badgeWidth)
 	referenceLine := lines[maxInt(0, len(lines)-2)]
 	leftBorder := ansi.Cut(referenceLine, 0, 1)
