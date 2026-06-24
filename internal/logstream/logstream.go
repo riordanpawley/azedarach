@@ -31,6 +31,7 @@ type followState struct {
 	Source SourceSpec
 	Offset int64
 	Carry  string
+	Info   os.FileInfo
 }
 
 var logTimeLayouts = []string{
@@ -40,6 +41,11 @@ var logTimeLayouts = []string{
 }
 
 var daemonTimePrefixLayout = "2006/01/02 15:04:05"
+
+const (
+	tailReadChunkBytes = 32 * 1024
+	maxTailReadBytes   = 4 * 1024 * 1024
+)
 
 // ReadLastMerged returns a merged/sorted view of the last maxLines from each source.
 func ReadLastMerged(sources []SourceSpec, maxLines int) ([]Entry, error) {
@@ -77,6 +83,7 @@ func Follow(ctx context.Context, sources []SourceSpec, pollInterval time.Duratio
 		states = append(states, &followState{
 			Source: source,
 			Offset: info.Size(),
+			Info:   info,
 		})
 	}
 
@@ -203,19 +210,61 @@ func readLastLogLines(path string, maxLines int) ([]string, error) {
 	}
 	defer file.Close()
 
-	lines := make([]string, 0, maxLines)
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-		if len(lines) > maxLines {
-			lines = lines[1:]
-		}
-	}
-	if err := scanner.Err(); err != nil {
+	info, err := file.Stat()
+	if err != nil {
 		return nil, err
 	}
+	if info.Size() == 0 {
+		return nil, nil
+	}
+
+	var data []byte
+	readBytes := int64(0)
+	offset := info.Size()
+	newlines := 0
+	for offset > 0 && readBytes < maxTailReadBytes && newlines <= maxLines {
+		chunkSize := int64(tailReadChunkBytes)
+		if chunkSize > offset {
+			chunkSize = offset
+		}
+		remainingBudget := maxTailReadBytes - readBytes
+		if chunkSize > remainingBudget {
+			chunkSize = remainingBudget
+		}
+		offset -= chunkSize
+		chunk := make([]byte, int(chunkSize))
+		if _, err := file.ReadAt(chunk, offset); err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		data = append(chunk, data...)
+		readBytes += chunkSize
+		newlines += countNewlines(chunk)
+	}
+	text := strings.TrimRight(string(data), "\n")
+	if text == "" {
+		return nil, nil
+	}
+	lines := strings.Split(text, "\n")
+	for i := range lines {
+		lines[i] = strings.TrimSuffix(lines[i], "\r")
+	}
+	if offset > 0 && len(lines) > 1 {
+		lines = lines[1:]
+	}
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
 	return lines, nil
+}
+
+func countNewlines(data []byte) int {
+	count := 0
+	for _, b := range data {
+		if b == '\n' {
+			count++
+		}
+	}
+	return count
 }
 
 func flushNewLogData(state *followState, seq *int64) ([]Entry, error) {
@@ -224,15 +273,21 @@ func flushNewLogData(state *followState, seq *int64) ([]Entry, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			state.Offset = 0
 			state.Carry = ""
+			state.Info = nil
 			return nil, nil
 		}
 		return nil, fmt.Errorf("inspect log file %s: %w", state.Source.Path, err)
+	}
+	if state.Info != nil && !os.SameFile(info, state.Info) {
+		state.Offset = 0
+		state.Carry = ""
 	}
 	if info.Size() < state.Offset {
 		state.Offset = 0
 		state.Carry = ""
 	}
 	if info.Size() == state.Offset {
+		state.Info = info
 		return nil, nil
 	}
 
@@ -267,5 +322,6 @@ func flushNewLogData(state *followState, seq *int64) ([]Entry, error) {
 	}
 
 	state.Offset = info.Size()
+	state.Info = info
 	return out, nil
 }
