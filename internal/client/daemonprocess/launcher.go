@@ -165,14 +165,12 @@ func (l *Launcher) Start(ctx context.Context) error {
 		}
 	}
 
-	if err := os.MkdirAll(filepath.Join(l.RepoDir, ".azedarach"), 0o755); err != nil {
-		return fmt.Errorf("create .azedarach dir: %w", err)
-	}
 	openLogFile := l.openLogFile
 	if openLogFile == nil {
 		openLogFile = openDaemonLog
 	}
-	logFile, err := openLogFile(filepath.Join(l.RepoDir, ".azedarach", logging.DaemonLogFileName))
+	cfg, _ := config.LoadConfig(l.RepoDir)
+	logFile, err := openLogFile(filepath.Join(config.SessionLogDirFor(cfg, l.RepoDir), logging.DaemonLogFileName))
 	if err != nil {
 		return fmt.Errorf("open daemon log: %w", err)
 	}

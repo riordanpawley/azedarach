@@ -2765,7 +2765,7 @@ func (d *Daemon) loadTaskGraphDomainTasks(ctx context.Context, projectID string)
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
 	}
-	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+	tasks, err := issueClient.ListSummariesWithRuntime(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}

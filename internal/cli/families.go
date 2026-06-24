@@ -250,34 +250,6 @@ func ParseTmuxUninstallSelectorArgs(args []string) (TmuxUninstallSelectorOptions
 	return opts, nil
 }
 
-func notifyDaemonSessionStatus(ctx context.Context, deps *Dependencies, issueID, event string) error {
-	callWithAutostart := func(call func(context.Context) error) error {
-		_, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (struct{}, error) {
-			return struct{}{}, call(callCtx)
-		})
-		return err
-	}
-
-	// We trust the daemon to keep its runtime projection fresh: handleSessionPause
-	// and handleSessionResume already call ensureFreshRuntimeForIssueMutation for
-	// the specific issue, which reconciles only that issue's projection. No
-	// client-side reconcile fan-out is needed.
-	switch event {
-	case hookEventIdlePrompt, hookEventPermissionRequest, hookEventStop, hookEventSessionEnd:
-		return callWithAutostart(func(callCtx context.Context) error {
-			_, pauseErr := deps.DaemonClient.PauseSession(callCtx, issueID)
-			return pauseErr
-		})
-	case hookEventSessionStart, hookEventUserPromptSubmit, hookEventPreToolUse, hookEventPostToolUse:
-		return callWithAutostart(func(callCtx context.Context) error {
-			_, resumeErr := deps.DaemonClient.ResumeSession(callCtx, issueID)
-			return resumeErr
-		})
-	default:
-		return nil
-	}
-}
-
 // renderNotifyOutput formats a human-readable hook status line for a given
 // canonical event. JSON mode emits "{}" so the caller's stdout stays
 // hook-schema compatible.
@@ -1124,8 +1096,8 @@ func codexGuardResponse(projectDir, event string, payloadMap map[string]any) (ma
 	case "pre-tool-use":
 		command := codexGuardCommandFromPayload(payloadMap)
 		if codexGuardIsPrimeCommand(command) {
-			// Temporary tradeoff: we mark prime success during PreToolUse to reduce Codex
-			// hook spam by removing PostToolUse hooks. Revert this once hook noise is fixed.
+			// Temporary tradeoff: mark prime success before the tool runs so
+			// guard state does not depend on per-tool PostToolUse output.
 			threadState.Primed = true
 			threadState.NeedsRefresh = false
 			threadState.LastPrimeAt = time.Now().UTC()

@@ -1048,14 +1048,21 @@ func TestAIHookRunCommandPrioritizesLifecycleNotifyBeforeHookLog(t *testing.T) {
 	}
 }
 
-func TestAIHookRunCommandSkipsPreToolUseDaemonCalls(t *testing.T) {
+func TestAIHookRunCommandRoutesPreToolUseLifecycleNotify(t *testing.T) {
 	projectDir := t.TempDir()
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")
 
+	var sessionLifecycle []string
 	transport := &fakeDaemonTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			t.Fatalf("unexpected daemon command for pre_tool_use: %s", req.Command)
-			return protocol.ResponseEnvelope{}, nil
+			switch req.Command {
+			case daemonclient.CommandSessionResume:
+				sessionLifecycle = append(sessionLifecycle, req.Command)
+				return responseWithOutput(req, "ok"), nil
+			default:
+				t.Fatalf("unexpected daemon command for pre_tool_use: %s", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
 		},
 	}
 	deps := &Dependencies{
@@ -1089,9 +1096,12 @@ func TestAIHookRunCommandSkipsPreToolUseDaemonCalls(t *testing.T) {
 	if strings.TrimSpace(output) != "{}" {
 		t.Fatalf("ai hook run json output = %q, want {}", output)
 	}
+	if !reflect.DeepEqual(sessionLifecycle, []string{daemonclient.CommandSessionResume}) {
+		t.Fatalf("session lifecycle = %v, want [session.resume]", sessionLifecycle)
+	}
 }
 
-func TestAIHookRunCommandSkipsPostToolUseDaemonCalls(t *testing.T) {
+func TestAIHookRunCommandSkipsPostToolUseLifecycleNotify(t *testing.T) {
 	projectDir := t.TempDir()
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")
 

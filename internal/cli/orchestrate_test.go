@@ -261,14 +261,11 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 							{IssueID: noAgent.String(), Activity: "no-agent", ActivitySource: "session", State: string(domain.SessionBusy), TmuxAttachedCount: 1},
 						},
 					}), nil
-				case daemonclient.CommandTaskList:
-					body, err := marshalTaskListBody([]domain.Task{
-						{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
-					})
-					if err != nil {
-						t.Fatalf("marshal task list: %v", err)
-					}
-					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees":  []map[string]string{},
+					}), nil
 				case protocol.CommandMailList:
 					return responseWithJSON(req, []protocol.MailEvent{}), nil
 				default:
@@ -325,14 +322,11 @@ func TestOrchestrateStatusCommandIncludesPendingAndCleanupMarkers(t *testing.T) 
 							{IssueID: closed.String(), Status: "cleanup-pending", Activity: "unknown", ActivitySource: "none", State: string(domain.SessionBusy), Advice: "closed issue az-3 still has session projection; cleanup is pending or stale"},
 						},
 					}), nil
-				case daemonclient.CommandTaskList:
-					body, err := marshalTaskListBody([]domain.Task{
-						{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
-					})
-					if err != nil {
-						t.Fatalf("marshal task list: %v", err)
-					}
-					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees":  []map[string]string{},
+					}), nil
 				case protocol.CommandMailList:
 					return responseWithJSON(req, []protocol.MailEvent{}), nil
 				default:
@@ -443,14 +437,11 @@ func TestOrchestrateStatusCommandIncludesSessionStartProgress(t *testing.T) {
 							},
 						},
 					}), nil
-				case daemonclient.CommandTaskList:
-					body, err := marshalTaskListBody([]domain.Task{
-						{ID: root, Title: "Root", Status: domain.StatusInProgress, Type: domain.TypeEpic},
-					})
-					if err != nil {
-						t.Fatalf("marshal task list: %v", err)
-					}
-					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: body}, nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees":  []map[string]string{},
+					}), nil
 				case protocol.CommandMailList:
 					return responseWithJSON(req, []protocol.MailEvent{}), nil
 				default:
@@ -527,7 +518,7 @@ func TestOrchestrateStatusCommandWarnsWhenRootEpicLacksWorktree(t *testing.T) {
 		t.Fatalf("decode output: %v\n%s", err, output)
 	}
 	if len(result.Warnings) != 1 ||
-		!strings.Contains(result.Warnings[0], "root epic az-1 has child orchestration but no dedicated worktree") ||
+		!strings.Contains(result.Warnings[0], "root issue az-1 has child orchestration but no dedicated worktree") ||
 		!strings.Contains(result.Warnings[0], "current worktree/path is /repo-cif") ||
 		!strings.Contains(result.Warnings[0], "az worktree create az-1") {
 		t.Fatalf("warnings = %+v", result.Warnings)
@@ -1298,7 +1289,7 @@ func TestOrchestrateStartWarnsWhenRootWorktreeMissingWithoutRunnableLaunches(t *
 		t.Fatalf("requested=%+v started=%+v, want no launches", result.Requested, result.Started)
 	}
 	if len(result.Warnings) != 1 ||
-		!strings.Contains(result.Warnings[0], "root epic az-1 has child orchestration but no dedicated worktree") ||
+		!strings.Contains(result.Warnings[0], "root issue az-1 has child orchestration but no dedicated worktree") ||
 		!strings.Contains(result.Warnings[0], "current worktree/path is /repo-cif") ||
 		!strings.Contains(result.Warnings[0], "az worktree create az-1") {
 		t.Fatalf("warnings = %+v", result.Warnings)
