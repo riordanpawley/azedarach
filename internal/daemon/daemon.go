@@ -56,6 +56,8 @@ const (
 	maxGitStatusRefreshFailureBackoff       = 5 * time.Minute
 
 	defaultRuntimeProjectionCoalesceWindow = 25 * time.Millisecond
+	defaultAgentHookIdleQuietWindow        = 2 * time.Second
+	defaultAgentHookIdleApplyTimeout       = 2 * time.Second
 )
 
 // Config configures daemon runtime wiring.
@@ -142,6 +144,9 @@ type Daemon struct {
 	sessionStateRefreshMu              sync.Mutex
 	sessionStateRefreshing             map[string]bool
 	sessionStateLastRefresh            map[string]time.Time
+	agentHookIdleMu                    sync.Mutex
+	agentHookIdleGeneration            map[string]uint64
+	agentHookIdleDelay                 time.Duration
 	worktreeStateRefreshMu             sync.Mutex
 	worktreeStateRefreshing            map[string]bool
 	worktreeStateLastRefresh           map[string]time.Time
@@ -274,6 +279,8 @@ func New(cfg Config) *Daemon {
 		sessionStopPending:                 map[string]int{},
 		sessionStateRefreshing:             map[string]bool{},
 		sessionStateLastRefresh:            map[string]time.Time{},
+		agentHookIdleGeneration:            map[string]uint64{},
+		agentHookIdleDelay:                 defaultAgentHookIdleQuietWindow,
 		worktreeStateRefreshing:            map[string]bool{},
 		worktreeStateLastRefresh:           map[string]time.Time{},
 		taskListSnapshotCache:              map[string]taskListSnapshotCacheEntry{},
@@ -686,6 +693,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleSessionAttach(ctx, req)
 	case "session.pause":
 		return d.handleSessionPause(ctx, req)
+	case daemonhandlers.CommandSessionPauseDebounced:
+		return d.handleSessionPauseDebounced(ctx, req)
 	case "session.resume":
 		return d.handleSessionResume(ctx, req)
 	case "session.stop":

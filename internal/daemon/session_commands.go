@@ -1002,11 +1002,36 @@ func (d *Daemon) handleSessionPause(ctx context.Context, req protocol.RequestEnv
 	return d.commandOutput(req, fmt.Sprintf("Paused session: %s\n", cmd.IssueID)), nil
 }
 
+func (d *Daemon) handleSessionPauseDebounced(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	cmd, _, ok := d.decodeSessionRequest(req, true)
+	if !ok {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("daemon session debounced pause requested",
+			"project_id", cmd.ProjectID,
+			"issue_id", cmd.IssueID,
+			"session_id", cmd.SessionID,
+		)
+	}
+	exists, err := d.sessionLifecycleTargetExists(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if !exists {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found: %s (use 'az start %s' to create)", cmd.IssueID, cmd.IssueID)), nil
+	}
+	generation := d.scheduleAgentHookIdle(cmd.ProjectID, cmd.SessionID)
+	go d.applyAgentHookIdleAfterQuietWindow(req, cmd, generation)
+	return d.commandOutput(req, fmt.Sprintf("Scheduled idle check for session: %s\n", cmd.IssueID)), nil
+}
+
 func (d *Daemon) handleSessionResume(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	cmd, _, ok := d.decodeSessionRequest(req, true)
 	if !ok {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
 	}
+	d.cancelAgentHookIdle(cmd.ProjectID, cmd.SessionID)
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session resume requested",
 			"project_id", cmd.ProjectID,
@@ -1050,6 +1075,75 @@ func (d *Daemon) handleSessionResume(ctx context.Context, req protocol.RequestEn
 		)
 	}
 	return d.commandOutput(req, fmt.Sprintf("Resumed session: %s\n", cmd.IssueID)), nil
+}
+
+func (d *Daemon) agentHookIdleKey(projectID, sessionID string) string {
+	return strings.TrimSpace(projectID) + "\x00" + strings.TrimSpace(sessionID)
+}
+
+func (d *Daemon) scheduleAgentHookIdle(projectID, sessionID string) uint64 {
+	key := d.agentHookIdleKey(projectID, sessionID)
+	d.agentHookIdleMu.Lock()
+	defer d.agentHookIdleMu.Unlock()
+	if d.agentHookIdleGeneration == nil {
+		d.agentHookIdleGeneration = map[string]uint64{}
+	}
+	d.agentHookIdleGeneration[key]++
+	return d.agentHookIdleGeneration[key]
+}
+
+func (d *Daemon) cancelAgentHookIdle(projectID, sessionID string) {
+	key := d.agentHookIdleKey(projectID, sessionID)
+	d.agentHookIdleMu.Lock()
+	if d.agentHookIdleGeneration == nil {
+		d.agentHookIdleGeneration = map[string]uint64{}
+	}
+	d.agentHookIdleGeneration[key]++
+	d.agentHookIdleMu.Unlock()
+}
+
+func (d *Daemon) agentHookIdleGenerationMatches(projectID, sessionID string, generation uint64) bool {
+	key := d.agentHookIdleKey(projectID, sessionID)
+	d.agentHookIdleMu.Lock()
+	defer d.agentHookIdleMu.Unlock()
+	return d.agentHookIdleGeneration[key] == generation
+}
+
+func (d *Daemon) applyAgentHookIdleAfterQuietWindow(req protocol.RequestEnvelope, cmd resolvedSessionTarget, generation uint64) {
+	delay := d.agentHookIdleDelay
+	if delay <= 0 {
+		delay = defaultAgentHookIdleQuietWindow
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	<-timer.C
+	if !d.agentHookIdleGenerationMatches(cmd.ProjectID, cmd.SessionID, generation) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), defaultAgentHookIdleApplyTimeout)
+	defer cancel()
+	if !d.sessionLifecycleTransitionNeeded(cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonstate.SessionStatePaused) {
+		return
+	}
+	if err := d.applySessionLifecycleTransition(
+		ctx,
+		req,
+		cmd.ProjectID,
+		cmd.SessionID,
+		cmd.IssueID,
+		daemonhandlers.CommandSessionPause,
+	); err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("daemon session debounced pause failed",
+				"project_id", cmd.ProjectID,
+				"issue_id", cmd.IssueID,
+				"session_id", cmd.SessionID,
+				"error", err,
+			)
+		}
+		return
+	}
+	d.refreshRuntimeForIssueMutationAsync(cmd.ProjectID, cmd.IssueID, daemonhandlers.CommandSessionPause)
 }
 
 func (d *Daemon) handleSessionStop(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

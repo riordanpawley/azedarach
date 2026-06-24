@@ -3197,6 +3197,139 @@ func TestSessionPauseAcceptsAgentScopedTargetWhenParentTmuxSessionExists(t *test
 	}
 }
 
+func TestSessionPauseDebouncedAppliesAfterQuietWindow(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+	parentSessionID := naming.CanonicalSessionID(projectID, issueID)
+	agentSessionID := parentSessionID + ".pane-190"
+	store := daemonstate.NewStore()
+	if _, err := store.UpsertSession(projectID, agentSessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed agent session: %v", err)
+	}
+	recorder := &runtimeReconcileRecorder{}
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  slog.Default(),
+		},
+		session:                 daemonhandlers.NewSessionHandler(store),
+		sessionStore:            store,
+		runtimeReconciler:       recorder,
+		agentHookIdleGeneration: map[string]uint64{},
+		agentHookIdleDelay:      20 * time.Millisecond,
+	}
+
+	resp, err := daemon.handleSessionPauseDebounced(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-agent-pause-debounced",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         daemonhandlers.CommandSessionPauseDebounced,
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"issue_id":   issueID,
+			"session_id": agentSessionID,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionPauseDebounced returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("debounced pause response not ok: %+v", resp.Error)
+	}
+	waitForSessionState(t, store, projectID, agentSessionID, daemonstate.SessionStatePaused)
+	waitForRuntimeReconcileCalls(t, recorder, 1)
+}
+
+func TestSessionPauseDebouncedCanceledByResume(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+	parentSessionID := naming.CanonicalSessionID(projectID, issueID)
+	agentSessionID := parentSessionID + ".pane-190"
+	store := daemonstate.NewStore()
+	if _, err := store.UpsertSession(projectID, agentSessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed agent session: %v", err)
+	}
+	recorder := &runtimeReconcileRecorder{}
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  slog.Default(),
+		},
+		session:                 daemonhandlers.NewSessionHandler(store),
+		sessionStore:            store,
+		runtimeReconciler:       recorder,
+		agentHookIdleGeneration: map[string]uint64{},
+		agentHookIdleDelay:      20 * time.Millisecond,
+	}
+	body := marshalJSON(map[string]string{
+		"project_id": projectID,
+		"issue_id":   issueID,
+		"session_id": agentSessionID,
+	})
+	resp, err := daemon.handleSessionPauseDebounced(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-agent-pause-debounced",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         daemonhandlers.CommandSessionPauseDebounced,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleSessionPauseDebounced returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("debounced pause response not ok: %+v", resp.Error)
+	}
+	resp, err = daemon.handleSessionResume(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-agent-resume",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         daemonhandlers.CommandSessionResume,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleSessionResume returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("resume response not ok: %+v", resp.Error)
+	}
+	time.Sleep(3 * daemon.agentHookIdleDelay)
+	session, err := store.Session(projectID, agentSessionID)
+	if err != nil {
+		t.Fatalf("load agent session: %v", err)
+	}
+	if session.State != daemonstate.SessionStateAttached {
+		t.Fatalf("agent session state = %s, want %s", session.State, daemonstate.SessionStateAttached)
+	}
+}
+
+func waitForSessionState(t *testing.T, store *daemonstate.Store, projectID, sessionID string, want daemonstate.SessionState) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		session, err := store.Session(projectID, sessionID)
+		if err == nil && session.State == want {
+			return
+		}
+		select {
+		case <-deadline:
+			if err != nil {
+				t.Fatalf("timed out waiting for session %s state %s: %v", sessionID, want, err)
+			}
+			t.Fatalf("timed out waiting for session %s state %s; got %s", sessionID, want, session.State)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 func TestSessionPauseResumeSkipRuntimeReconcileWhenLifecycleUnchanged(t *testing.T) {
 	const (
 		projectID = "proj"
