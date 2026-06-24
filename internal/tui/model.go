@@ -61,7 +61,7 @@ const (
 	eventTickerCapacity            = 64
 	eventLogCapacity               = 256
 	eventSummaryMaxRunes           = 140
-	taskCloseMutationTimeout       = 2 * time.Minute
+	taskCloseMutationTimeout       = 10 * time.Minute
 	worktreeCleanupMutationTimeout = 2 * time.Minute
 	orphanedWorktreeCleanupTimeout = 2 * time.Minute
 )
