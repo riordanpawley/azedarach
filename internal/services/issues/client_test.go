@@ -874,7 +874,7 @@ func TestClient_GetManyMetadataWithRuntimeIncludesCachedGitProjection(t *testing
 	require.NoError(t, err)
 	defer db.Close()
 
-	updatedAt := time.Date(2026, time.June, 17, 12, 0, 0, 0, time.UTC)
+	updatedAt := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, activity, activity_source, started_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -882,9 +882,9 @@ func TestClient_GetManyMetadataWithRuntimeIncludesCachedGitProjection(t *testing
 	require.NoError(t, err)
 
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at, git_status_json)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, projectID, taskID, "/tmp/proj-metadata-runtime-git-"+taskID, "riordan/"+taskID+"/task", updatedAt.Format(time.RFC3339Nano), string(statusRaw))
+		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at, git_status_json, git_status_updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, projectID, taskID, "/tmp/proj-metadata-runtime-git-"+taskID, "riordan/"+taskID+"/task", updatedAt.Format(time.RFC3339Nano), string(statusRaw), updatedAt.Format(time.RFC3339Nano))
 	require.NoError(t, err)
 
 	tasks, err := client.GetManyMetadataWithRuntime(ctx, projectID, []string{taskID})
@@ -903,6 +903,56 @@ func TestClient_GetManyMetadataWithRuntimeIncludesCachedGitProjection(t *testing
 	assert.Equal(t, 21, got.GitDeletions)
 	assert.Equal(t, 1, got.GitAheadCount)
 	assert.Equal(t, 10, got.GitBehindCount)
+	assert.Truef(t, got.Session.UpdatedAt.Equal(updatedAt), "session updated_at = %v, want %v", got.Session.UpdatedAt, updatedAt)
+	assert.Truef(t, got.RuntimeUpdatedAt.Equal(updatedAt), "runtime updated_at = %v, want %v", got.RuntimeUpdatedAt, updatedAt)
+}
+
+func TestClient_MetadataRuntimeUpdatedAtIgnoresProjectionRefreshTimestamps(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-runtime-refresh"
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Projection refresh should not look new",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInProgress,
+	})
+	require.NoError(t, err)
+
+	db, err := sql.Open("sqlite", client.dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	issueUpdatedAt := time.Now().UTC().Add(-6 * time.Hour).Truncate(time.Microsecond)
+	projectionRefreshedAt := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
+	_, err = db.ExecContext(ctx, `
+		UPDATE issues
+		SET updated_at = ?
+		WHERE id = ?
+	`, issueUpdatedAt.Format(time.RFC3339Nano), taskID)
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, activity, activity_source, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-runtime-refresh", taskID, "running", "idle", "hooks", projectionRefreshedAt.Format(time.RFC3339Nano), projectionRefreshedAt.Format(time.RFC3339Nano))
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, projectID, taskID, "/tmp/proj-runtime-refresh-"+taskID, "riordan/"+taskID+"/task", projectionRefreshedAt.Format(time.RFC3339Nano))
+	require.NoError(t, err)
+
+	tasks, err := client.GetManyMetadataWithRuntime(ctx, projectID, []string{taskID})
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+
+	got := tasks[0]
+	require.NotNil(t, got.Session)
+	assert.Truef(t, got.Session.UpdatedAt.Equal(projectionRefreshedAt), "session updated_at = %v, want raw projection %v", got.Session.UpdatedAt, projectionRefreshedAt)
+	assert.Truef(t, got.RuntimeUpdatedAt.Equal(issueUpdatedAt), "runtime_updated_at = %v, want issue update %v", got.RuntimeUpdatedAt, issueUpdatedAt)
 }
 
 func TestTaskRuntimeProjectionQueryFiltersRuntimeCTEsForRequestedIDs(t *testing.T) {

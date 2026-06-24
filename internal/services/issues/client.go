@@ -2434,6 +2434,8 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 			COALESCE(sp.tmux_attached_count, 0),
 			COALESCE(w.path, ''),
 			COALESCE(w.git_status_json, ''),
+			COALESCE(w.updated_at, ''),
+			COALESCE(w.git_status_updated_at, ''),
 			COALESCE(parent.depends_on_id, '')
 		FROM issues i
 		LEFT JOIN session_pick sp ON sp.issue_id = i.id
@@ -2480,6 +2482,8 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 			tmuxAttachedCount  int
 			worktreePath       string
 			gitStatusRaw       string
+			worktreeUpdatedRaw string
+			gitUpdatedRaw      string
 			parentIDRaw        string
 		)
 		if err := rows.Scan(
@@ -2498,6 +2502,8 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 			&tmuxAttachedCount,
 			&worktreePath,
 			&gitStatusRaw,
+			&worktreeUpdatedRaw,
+			&gitUpdatedRaw,
 			&parentIDRaw,
 		); err != nil {
 			return nil, err
@@ -2515,6 +2521,7 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 		task.Type = domain.TaskType(typeRaw)
 		task.CreatedAt = parseTimestamp(createdRaw)
 		task.UpdatedAt = parseTimestamp(updatedRaw)
+		task.RuntimeUpdatedAt = newestParsedTimestamp(task.UpdatedAt, gitUpdatedRaw)
 		task.Origin = "local"
 		if parentID, err := naming.ParseIssueID(parentIDRaw); err == nil {
 			task.ParentID = &parentID
@@ -2538,6 +2545,7 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 				TmuxAttached:      tmuxAttachedCount > 0,
 				TmuxAttachedCount: tmuxAttachedCount,
 				StartedAt:         startedAt,
+				UpdatedAt:         parseTimestamp(sessionUpdatedRaw),
 				Worktree:          worktreePath,
 			}
 			task.HasTmuxSession = true
@@ -2583,6 +2591,8 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 			tmuxAttachedCount  int
 			worktreePath       string
 			gitStatusRaw       string
+			worktreeUpdatedRaw string
+			gitUpdatedRaw      string
 			originProvider     string
 		)
 		if err := rows.Scan(
@@ -2609,6 +2619,8 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 			&tmuxAttachedCount,
 			&worktreePath,
 			&gitStatusRaw,
+			&worktreeUpdatedRaw,
+			&gitUpdatedRaw,
 			&originProvider,
 		); err != nil {
 			return nil, err
@@ -2624,6 +2636,7 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 		task.Type = domain.TaskType(typeRaw)
 		task.CreatedAt = parseTimestamp(createdRaw)
 		task.UpdatedAt = parseTimestamp(updatedRaw)
+		task.RuntimeUpdatedAt = newestParsedTimestamp(task.UpdatedAt, gitUpdatedRaw)
 		task.Assignee = strings.TrimSpace(assigneeRaw)
 		task.Labels = decodeStringSliceJSON(labelsRaw)
 		if estimateRaw.Valid {
@@ -2650,6 +2663,7 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 				TmuxAttached:      tmuxAttachedCount > 0,
 				TmuxAttachedCount: tmuxAttachedCount,
 				StartedAt:         startedAt,
+				UpdatedAt:         parseTimestamp(sessionUpdatedRaw),
 				Worktree:          worktreePath,
 			}
 			task.HasTmuxSession = true
@@ -2797,6 +2811,8 @@ func taskRuntimeProjectionQuery(projectID string, includeDetails bool, issueIDs 
 			COALESCE(sp.tmux_attached_count, 0),
 			COALESCE(w.path, ''),
 			COALESCE(w.git_status_json, ''),
+			COALESCE(w.updated_at, ''),
+			COALESCE(w.git_status_updated_at, ''),
 			COALESCE(o.provider, '')
 		FROM issues i
 		LEFT JOIN session_pick sp ON sp.issue_id = i.id
@@ -2854,6 +2870,20 @@ func parseOptionalTimestamp(raw string) *time.Time {
 	}
 	utc := parsed.UTC()
 	return &utc
+}
+
+func newestParsedTimestamp(base time.Time, rawValues ...string) time.Time {
+	latest := base
+	for _, raw := range rawValues {
+		candidate := parseTimestamp(raw)
+		if candidate.IsZero() {
+			continue
+		}
+		if latest.IsZero() || candidate.After(latest) {
+			latest = candidate
+		}
+	}
+	return latest
 }
 
 func mapRuntimeSessionState(value string) domain.SessionState {

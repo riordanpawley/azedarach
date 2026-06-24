@@ -2792,6 +2792,7 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 			TmuxAttached:      counts.TmuxAttachedCount > 0,
 			TmuxAttachedCount: counts.TmuxAttachedCount,
 			StartedAt:         startedAt,
+			UpdatedAt:         session.UpdatedAt,
 			Worktree:          worktree,
 		}
 	}

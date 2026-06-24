@@ -260,6 +260,30 @@ func TestModelTreeRendersIssueStatusBesideAgentStatus(t *testing.T) {
 	}
 }
 
+func TestModelTreeRendersHumanReadableUpdatedAge(t *testing.T) {
+	updatedAt := time.Now().Add(-5 * time.Minute).UTC()
+	entries := []InventoryEntry{{
+		SessionID:     "az-cqg",
+		IssueID:       "cqg",
+		TaskTitle:     "Human readable selector duration",
+		State:         domain.SessionBusy,
+		IssueStatus:   domain.StatusInProgress,
+		LastUpdatedAt: &updatedAt,
+	}}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	model.activeTab = selectorTabTree
+
+	view := ansi.Strip(model.View())
+	if !strings.Contains(view, "updated 5m") {
+		t.Fatalf("tree view missing updated duration:\n%s", view)
+	}
+}
+
 func TestModelTreeColorizesSessionAndIssueStatus(t *testing.T) {
 	prev := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
@@ -325,6 +349,7 @@ func TestModelTreePrefersPrefixedSessionIDForIssueRows(t *testing.T) {
 }
 
 func TestRenderSessionRowIncludesIssueStatusInCardMeta(t *testing.T) {
+	updatedAt := time.Now().Add(-3 * time.Hour).UTC()
 	row := SessionRow{
 		SessionID:      "az-coh",
 		IssueID:        "coh",
@@ -332,14 +357,57 @@ func TestRenderSessionRowIncludesIssueStatusInCardMeta(t *testing.T) {
 		State:          domain.SessionBusy,
 		IssueStatus:    domain.StatusInProgress,
 		HasTmuxSession: true,
+		LastUpdatedAt:  &updatedAt,
 	}
 
 	view := ansi.Strip(RenderSessionRow(row, false, 64, lipgloss.Style{}, lipgloss.Style{}, lipgloss.Style{}, styles.New()))
 	if !strings.Contains(view, "issue in_progress") {
 		t.Fatalf("card missing issue status meta:\n%s", view)
 	}
+	if !strings.Contains(view, "updated 3h") {
+		t.Fatalf("card missing updated duration meta:\n%s", view)
+	}
 	if !strings.Contains(view, "tmux az-coh") {
 		t.Fatalf("card missing tmux meta:\n%s", view)
+	}
+}
+
+func TestFormatShortDuration(t *testing.T) {
+	tests := []struct {
+		name string
+		in   time.Duration
+		want string
+	}{
+		{name: "seconds", in: 20 * time.Second, want: "20s"},
+		{name: "minutes", in: 3*time.Minute + 45*time.Second, want: "3m"},
+		{name: "hours", in: 5*time.Hour + 59*time.Minute, want: "5h"},
+		{name: "days", in: 2*24*time.Hour + time.Hour, want: "2d"},
+		{name: "weeks", in: 15 * 24 * time.Hour, want: "2w"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatShortDuration(tt.in); got != tt.want {
+				t.Fatalf("formatShortDuration(%s) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatEntryUpdatedAgeIgnoresSessionProjectionRefresh(t *testing.T) {
+	now := time.Now().UTC()
+	issueUpdatedAt := now.Add(-6 * time.Hour)
+	sessionUpdatedAt := now.Add(-2 * time.Second)
+	entry := InventoryEntry{
+		Task: domain.Task{
+			UpdatedAt: issueUpdatedAt,
+			Session: &domain.Session{
+				UpdatedAt: sessionUpdatedAt,
+			},
+		},
+	}
+
+	if got := formatEntryUpdatedAge(entry, now); got != "6h" {
+		t.Fatalf("formatEntryUpdatedAge = %q, want 6h from issue update, not 2s from projection refresh", got)
 	}
 }
 
