@@ -31,6 +31,7 @@ type CommandSpec struct {
 }
 
 const (
+	commandBoardFetch            = protocol.CommandBoardFetch
 	commandTaskList              = "task.list"
 	commandTaskGet               = "task.get"
 	commandTaskGetMany           = "task.get_many"
@@ -134,6 +135,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandUIStateGet:            {Command: protocol.CommandUIStateGet, RequiresProjectID: true},
 	protocol.CommandUIStateSet:            {Command: protocol.CommandUIStateSet, RequiresProjectID: true},
 	protocol.CommandProjectCleanup:        {Command: protocol.CommandProjectCleanup, RequiresProjectID: true},
+	commandBoardFetch:                     {Command: commandBoardFetch, RequiresProjectID: true},
 	commandTaskList:                       {Command: commandTaskList, RequiresProjectID: true},
 	commandTaskGet:                        {Command: commandTaskGet, RequiresProjectID: true},
 	commandTaskGetMany:                    {Command: commandTaskGetMany, RequiresProjectID: true},

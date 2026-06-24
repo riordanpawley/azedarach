@@ -1852,7 +1852,7 @@ func (m Model) readTaskSnapshot(ctx context.Context, client *daemonclient.Client
 	if client == nil {
 		return daemonclient.TaskSnapshot{}, fmt.Errorf("daemon client unavailable")
 	}
-	return client.ListTasksSnapshotWithMode(ctx, daemonclient.ReadWaitModeExplicit)
+	return client.BoardSnapshotWithMode(ctx, daemonclient.ReadWaitModeExplicit)
 }
 
 func (m Model) loadOperationsCmd() tea.Cmd {

@@ -15,6 +15,7 @@ import (
 )
 
 const (
+	CommandBoardFetch           = protocol.CommandBoardFetch
 	CommandTaskList             = "task.list"
 	CommandTaskGet              = "task.get"
 	CommandTaskGetMany          = "task.get_many"
@@ -609,6 +610,30 @@ func (c *Client) ListTasksSnapshotWithMode(ctx context.Context, mode ReadWaitMod
 	return TaskSnapshot{}, fmt.Errorf("decode %s response: %w (expected %s payload; daemon likely outdated)", CommandTaskList, decodeErr, "TaskListSnapshotPayload")
 }
 
+// BoardSnapshot fetches the board view's summary-only task set and revision.
+func (c *Client) BoardSnapshot(ctx context.Context) (TaskSnapshot, error) {
+	return c.BoardSnapshotWithMode(ctx, ReadWaitModeDefault)
+}
+
+// BoardSnapshotWithMode fetches a board snapshot with the requested bounded read budget.
+func (c *Client) BoardSnapshotWithMode(ctx context.Context, mode ReadWaitMode) (TaskSnapshot, error) {
+	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
+	defer cancel()
+
+	resp, err := c.commandJSONResponse(waitCtx, CommandBoardFetch, nil)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
+		}
+		return TaskSnapshot{}, err
+	}
+	snapshot, decodeErr := c.decodeBoardSnapshotResponse(resp)
+	if decodeErr != nil {
+		return TaskSnapshot{}, fmt.Errorf("decode %s response: %w (expected %s payload; daemon likely outdated)", CommandBoardFetch, decodeErr, "BoardSnapshotPayload")
+	}
+	return snapshot, nil
+}
+
 func (c *Client) decodeTaskSnapshotResponse(resp protocol.ResponseEnvelope) (TaskSnapshot, error) {
 	if len(resp.Body) == 0 {
 		return TaskSnapshot{Revision: resp.Revision}, nil
@@ -628,6 +653,28 @@ func (c *Client) decodeTaskSnapshotResponse(resp protocol.ResponseEnvelope) (Tas
 		LastCheckedAt: payload.LastCheckedAt,
 		Freshness:     payload.Freshness,
 		SummariesOnly: payload.SummariesOnly,
+	}, nil
+}
+
+func (c *Client) decodeBoardSnapshotResponse(resp protocol.ResponseEnvelope) (TaskSnapshot, error) {
+	if len(resp.Body) == 0 {
+		return TaskSnapshot{Revision: resp.Revision, SummariesOnly: true}, nil
+	}
+
+	payload, err := protocol.DecodeBoardSnapshotPayload(resp.Body)
+	if err != nil {
+		return TaskSnapshot{}, err
+	}
+	revision := payload.SnapshotRevision
+	if revision == 0 {
+		revision = resp.Revision
+	}
+	return TaskSnapshot{
+		Tasks:         protocol.DomainTasksFromBoardSummaries(payload.Tasks),
+		Revision:      revision,
+		LastCheckedAt: payload.LastCheckedAt,
+		Freshness:     payload.Freshness,
+		SummariesOnly: true,
 	}, nil
 }
 
