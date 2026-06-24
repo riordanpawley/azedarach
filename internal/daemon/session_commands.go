@@ -1997,11 +1997,12 @@ func sessionHookActivityByIssueKeyFromSessions(sessions []daemonstate.Session, n
 		if !isAgentScopedSessionID(session.ID) {
 			continue
 		}
+		state := daemonstate.NormalizeSessionState(session.State)
 		observed := daemonstate.NormalizeSessionState(session.ObservedState)
 		if strings.TrimSpace(string(observed)) == "" {
-			observed = daemonstate.NormalizeSessionState(session.State)
+			observed = state
 		}
-		if observed == daemonstate.SessionStateStopped {
+		if state == daemonstate.SessionStateStopped || observed == daemonstate.SessionStateStopped {
 			continue
 		}
 		key := sessionKey(sessionProjectionIssueID(session, namingScope))
@@ -2802,11 +2803,12 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 func activeSessionIssueKeysFromProjection(sessions []daemonstate.Session, namingScope string) map[string]struct{} {
 	active := make(map[string]struct{}, len(sessions))
 	for _, session := range sessions {
+		state := session.State
 		observed := session.ObservedState
 		if strings.TrimSpace(string(observed)) == "" {
-			observed = session.State
+			observed = state
 		}
-		if observed == daemonstate.SessionStateStopped {
+		if state == daemonstate.SessionStateStopped || observed == daemonstate.SessionStateStopped {
 			continue
 		}
 		key := sessionKey(sessionProjectionIssueID(session, namingScope))
@@ -2868,11 +2870,12 @@ func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID strin
 func (d *Daemon) activeSessionIDsFromProjection(projectID string, sessions []daemonstate.Session) []string {
 	active := make([]string, 0, len(sessions))
 	for _, session := range sessions {
+		state := session.State
 		observed := session.ObservedState
 		if strings.TrimSpace(string(observed)) == "" {
-			observed = session.State
+			observed = state
 		}
-		if observed == daemonstate.SessionStateStopped {
+		if state == daemonstate.SessionStateStopped || observed == daemonstate.SessionStateStopped {
 			continue
 		}
 		if d.isSessionStopPending(projectID, session.IssueID) {

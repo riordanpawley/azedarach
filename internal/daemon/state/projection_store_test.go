@@ -95,6 +95,9 @@ func TestRuntimeStateStoreClearsSessionActivityForStoppedRows(t *testing.T) {
 	if session.Activity != "" || session.ActivitySource != "" {
 		t.Fatalf("session activity = %s/%s, want empty activity for stopped row", session.Activity, session.ActivitySource)
 	}
+	if session.ObservedState != SessionStateStopped {
+		t.Fatalf("session observed state = %s, want %s", session.ObservedState, SessionStateStopped)
+	}
 
 	if err := store.ReplaceSessionStates(ctx, "proj-a", []Session{
 		{ID: "sess-2", IssueID: "bjb", State: SessionStateStopped, Activity: "no-agent", ActivitySource: "session", UpdatedAt: now},
@@ -110,6 +113,9 @@ func TestRuntimeStateStoreClearsSessionActivityForStoppedRows(t *testing.T) {
 	}
 	if session.Activity != "" || session.ActivitySource != "" {
 		t.Fatalf("replaced session activity = %s/%s, want empty activity for stopped row", session.Activity, session.ActivitySource)
+	}
+	if session.ObservedState != SessionStateStopped {
+		t.Fatalf("replaced session observed state = %s, want %s", session.ObservedState, SessionStateStopped)
 	}
 }
 

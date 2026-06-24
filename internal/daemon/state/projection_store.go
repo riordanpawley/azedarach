@@ -156,6 +156,9 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 	}
 	session.State = NormalizeSessionState(session.State)
 	session.ObservedState = NormalizeSessionState(session.ObservedState)
+	if session.State == SessionStateStopped {
+		session.ObservedState = SessionStateStopped
+	}
 	session.Activity = strings.ToLower(strings.TrimSpace(session.Activity))
 	session.ActivitySource = strings.ToLower(strings.TrimSpace(session.ActivitySource))
 	existing, found, err := s.GetSessionState(ctx, projectID, session.ID)
@@ -283,6 +286,9 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 		}
 		session.State = NormalizeSessionState(session.State)
 		session.ObservedState = NormalizeSessionState(session.ObservedState)
+		if session.State == SessionStateStopped {
+			session.ObservedState = SessionStateStopped
+		}
 		activeSessions[sessionID] = struct{}{}
 		updatedAt := session.UpdatedAt
 		if updatedAt.IsZero() {

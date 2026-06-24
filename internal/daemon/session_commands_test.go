@@ -6541,6 +6541,45 @@ func TestEnrichTasksWithSessionStateFallsBackToProjectionCache(t *testing.T) {
 	}
 }
 
+func TestActiveSessionIssueKeysIgnoreDesiredStoppedWithStaleObservedRunning(t *testing.T) {
+	const issueID = "bix"
+	sessionID := naming.CanonicalSessionID("proj-stale-observed", issueID)
+
+	active := activeSessionIssueKeysFromProjection([]daemonstate.Session{
+		{
+			ID:            sessionID,
+			IssueID:       issueID,
+			State:         daemonstate.SessionStateStopped,
+			ObservedState: daemonstate.SessionStateRunning,
+			UpdatedAt:     time.Now().UTC(),
+		},
+	}, "proj-stale-observed")
+
+	if _, ok := active[sessionKey(issueID)]; ok {
+		t.Fatalf("desired-stopped session %s was treated as active: %+v", issueID, active)
+	}
+}
+
+func TestActiveSessionIDsFromProjectionIgnoreDesiredStoppedWithStaleObservedRunning(t *testing.T) {
+	const issueID = "biy"
+	sessionID := naming.CanonicalSessionID("proj-stale-observed", issueID)
+	daemon := &Daemon{}
+
+	active := daemon.activeSessionIDsFromProjection("proj-stale-observed", []daemonstate.Session{
+		{
+			ID:            sessionID,
+			IssueID:       issueID,
+			State:         daemonstate.SessionStateStopped,
+			ObservedState: daemonstate.SessionStateRunning,
+			UpdatedAt:     time.Now().UTC(),
+		},
+	})
+
+	if len(active) != 0 {
+		t.Fatalf("desired-stopped session %s was treated as active IDs: %+v", issueID, active)
+	}
+}
+
 func TestEnrichTasksWithSessionStateReportsNoAgentActivity(t *testing.T) {
 	const (
 		projectID = "proj-no-agent"
@@ -6619,6 +6658,30 @@ func TestSessionDisplayActivityUsesLatestParentSessionActivity(t *testing.T) {
 	}
 	if display.Activity != "no-agent" || display.Source != "session" {
 		t.Fatalf("activity = %s/%s, want no-agent/session", display.Activity, display.Source)
+	}
+}
+
+func TestSessionHookActivityIgnoresDesiredStoppedWithStaleObservedRunning(t *testing.T) {
+	const (
+		projectID = "proj-stale-hook"
+		issueID   = "bih"
+	)
+	sessionID := naming.CanonicalSessionID(projectID, issueID) + ".pane-1"
+
+	activityByKey := sessionHookActivityByIssueKeyFromSessions([]daemonstate.Session{
+		{
+			ID:             sessionID,
+			IssueID:        issueID,
+			State:          daemonstate.SessionStateStopped,
+			ObservedState:  daemonstate.SessionStateRunning,
+			Activity:       "busy",
+			ActivitySource: "hooks",
+			UpdatedAt:      time.Now().UTC(),
+		},
+	}, projectID)
+
+	if activity, ok := activityByKey[sessionKey(issueID)]; ok {
+		t.Fatalf("desired-stopped hook activity was carried forward: %+v", activity)
 	}
 }
 
