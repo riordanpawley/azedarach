@@ -89,6 +89,7 @@ type taskClosePreflightOptions struct {
 	AllowTargetWorktree bool `json:"allow_target_worktree,omitempty"`
 	ForceWorktree       bool `json:"force_worktree,omitempty"`
 	IgnoreAhead         bool `json:"ignore_ahead,omitempty"`
+	CloseCleanChildren  bool `json:"close_clean_children,omitempty"`
 }
 
 type taskClosePreflightRequest struct {
@@ -101,6 +102,7 @@ type taskCloseRequest struct {
 	ForceWorktree        bool   `json:"force_worktree,omitempty"`
 	IgnoreAhead          bool   `json:"ignore_ahead,omitempty"`
 	IntegrateBeforeClose bool   `json:"integrate_before_close,omitempty"`
+	CloseCleanChildren   bool   `json:"close_clean_children,omitempty"`
 }
 
 type taskDeleteRequest struct {
@@ -123,6 +125,7 @@ type taskCloseResult struct {
 	WorktreeForced         bool                   `json:"worktree_forced,omitempty"`
 	Revision               uint64                 `json:"revision,omitempty"`
 	Phases                 []taskClosePhaseTiming `json:"phases,omitempty"`
+	AutoClosedChildren     []string               `json:"auto_closed_children,omitempty"`
 }
 
 type taskClosePhaseTiming struct {
@@ -1330,6 +1333,14 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	}
 
 	phaseStartedAt := time.Now()
+	autoClosedChildren, err := d.closeCleanDescendantsBeforeParent(ctx, projectID, taskID, cmd, req)
+	recordPhase("close_clean_children", phaseStartedAt, !cmd.CloseCleanChildren)
+	if err != nil {
+		return result, fmt.Errorf("phase close_clean_children for issue %s: %w", taskID, err)
+	}
+	result.AutoClosedChildren = autoClosedChildren
+
+	phaseStartedAt = time.Now()
 	integration, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, cmd.IntegrateBeforeClose)
 	recordPhase("integrate_before_close", phaseStartedAt, !cmd.IntegrateBeforeClose)
 	if err != nil {
@@ -1346,6 +1357,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		AllowTargetWorktree: true,
 		ForceWorktree:       cmd.ForceWorktree,
 		IgnoreAhead:         cmd.IgnoreAhead || integration.Integrated || integration.NoChanges,
+		CloseCleanChildren:  cmd.CloseCleanChildren,
 	}, req)
 	recordPhase("preflight", phaseStartedAt, false)
 	if err != nil {
@@ -1892,7 +1904,7 @@ func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, task
 
 	reasons := make([]string, 0, 3)
 	reasons = append(reasons, daemonCloseGuardRuntimeBlockers(task, opts)...)
-	reasons = append(reasons, daemonCloseGuardChildBlockers(task.ID, tasks)...)
+	reasons = append(reasons, daemonCloseGuardChildBlockers(task.ID, tasks, opts)...)
 	if len(reasons) > 0 {
 		repairs, repairErr := d.reopenClosedCloseGuardBlockers(ctx, issueClient, projectID, req, task, tasks, reasons)
 		if repairErr != nil {
@@ -1923,6 +1935,58 @@ func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, task
 		return taskClosePreflightResult{}, fmt.Errorf("%s", daemonCloseGuardFailureMessage(taskID, reasons, repairs))
 	}
 	return taskClosePreflightResult{Task: task, Worktree: worktreePath, Status: *status}, nil
+}
+
+func (d *Daemon) closeCleanDescendantsBeforeParent(ctx context.Context, projectID, taskID string, cmd taskCloseRequest, req protocol.RequestEnvelope) ([]string, error) {
+	if !cmd.CloseCleanChildren {
+		return nil, nil
+	}
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil, fmt.Errorf("issue store unavailable")
+	}
+	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("inspect child issues before closing %s: %w", taskID, err)
+	}
+	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
+	childrenByParent := daemonCloseGuardChildrenByParent(tasks)
+	root, err := naming.ParseIssueID(taskID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid task id: %w", err)
+	}
+	descendants := daemonCloseGuardDescendants(root, childrenByParent)
+	if len(descendants) == 0 {
+		return nil, nil
+	}
+	byID := make(map[naming.IssueID]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID] = task
+	}
+	closed := make([]string, 0, len(descendants))
+	for i := len(descendants) - 1; i >= 0; i-- {
+		childID := descendants[i]
+		child, ok := byID[childID]
+		if !ok || child.Status == domain.StatusDone {
+			continue
+		}
+		if !daemonCloseGuardCleanChildAutoCloseEligible(child) {
+			continue
+		}
+		childResult, err := d.closeTask(ctx, projectID, taskCloseRequest{
+			TaskID:               child.ID.String(),
+			ForceWorktree:        false,
+			IgnoreAhead:          false,
+			IntegrateBeforeClose: false,
+			CloseCleanChildren:   true,
+		}, req)
+		if err != nil {
+			return closed, fmt.Errorf("close clean child %s: %w", child.ID.String(), err)
+		}
+		closed = append(closed, child.ID.String())
+		closed = append(closed, childResult.AutoClosedChildren...)
+	}
+	return closed, nil
 }
 
 type daemonCloseGuardStatusRepair struct {
@@ -2135,7 +2199,7 @@ func daemonCloseGuardDirtyFiles(status git.GitStatus) []string {
 	return out
 }
 
-func daemonCloseGuardChildBlockers(parentID naming.IssueID, tasks []domain.Task) []string {
+func daemonCloseGuardChildBlockers(parentID naming.IssueID, tasks []domain.Task, opts taskClosePreflightOptions) []string {
 	childrenByParent := daemonCloseGuardChildrenByParent(tasks)
 	descendants := daemonCloseGuardDescendants(parentID, childrenByParent)
 	if len(descendants) == 0 {
@@ -2151,6 +2215,9 @@ func daemonCloseGuardChildBlockers(parentID naming.IssueID, tasks []domain.Task)
 		if !ok {
 			continue
 		}
+		if opts.CloseCleanChildren && daemonCloseGuardCleanChildAutoCloseEligible(child) {
+			continue
+		}
 		reasons := daemonCloseGuardChildReasons(child)
 		if len(reasons) == 0 {
 			continue
@@ -2161,6 +2228,22 @@ func daemonCloseGuardChildBlockers(parentID naming.IssueID, tasks []domain.Task)
 		return nil
 	}
 	return []string{"unresolved child issues remain: " + strings.Join(blocked, "; ")}
+}
+
+func daemonCloseGuardCleanChildAutoCloseEligible(task domain.Task) bool {
+	if task.Status == domain.StatusDone {
+		return true
+	}
+	if daemonCloseGuardTaskHasSession(task) {
+		return false
+	}
+	if task.HasUncommittedChanges || task.HasConflicts {
+		return false
+	}
+	if task.GitAheadCount > 0 || task.GitAdditions > 0 || task.GitDeletions > 0 {
+		return false
+	}
+	return true
 }
 
 func daemonCloseGuardChildrenByParent(tasks []domain.Task) map[naming.IssueID][]naming.IssueID {

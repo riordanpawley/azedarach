@@ -1210,6 +1210,68 @@ func TestTaskStatusDoneRequiresCloseCleanupConfirmation(t *testing.T) {
 	}
 }
 
+func TestTaskStatusDoneCloseCleanChildrenConfirmationSetsDaemonOption(t *testing.T) {
+	var closeBody struct {
+		TaskID               string `json:"task_id"`
+		IntegrateBeforeClose bool   `json:"integrate_before_close"`
+		CloseCleanChildren   bool   `json:"close_clean_children"`
+	}
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskClose {
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			if err := json.Unmarshal(req.Body, &closeBody); err != nil {
+				t.Fatalf("unmarshal close request: %v", err)
+			}
+			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
+				TaskID:             "az-4",
+				Status:             string(domain.StatusDone),
+				AutoClosedChildren: []string{"az-child"},
+			})
+			if err != nil {
+				t.Fatalf("marshal close response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{ID: "az-4", Status: domain.StatusInReview}}
+	m.nav.SelectTask("az-4", domain.StatusInReview.Column())
+
+	updatedAny, promptCmd := m.handleSelection(overlay.SelectionMsg{Key: "l"})
+	if promptCmd == nil {
+		t.Fatal("expected confirmation overlay command")
+	}
+	prompted := updatedAny.(Model)
+	confirmedAny, statusCmd := prompted.handleSelection(overlay.SelectionMsg{Key: "close_clean_children"})
+	if statusCmd == nil {
+		t.Fatal("expected status update command after close-clean-children confirmation")
+	}
+	confirmed := confirmedAny.(Model)
+	if confirmed.pendingClose != nil {
+		t.Fatal("pending close confirmation was not cleared")
+	}
+	msg := statusCmd()
+	status, ok := msg.(taskStatusResultMsg)
+	if !ok {
+		t.Fatalf("result = %T, want taskStatusResultMsg", msg)
+	}
+	if status.err != nil {
+		t.Fatalf("status result error = %v", status.err)
+	}
+	if closeBody.TaskID != "az-4" || !closeBody.IntegrateBeforeClose || !closeBody.CloseCleanChildren {
+		t.Fatalf("close body = %+v, want az-4 integrate and close_clean_children", closeBody)
+	}
+}
+
 func TestTaskStatusDoneUsesExtendedCloseTimeout(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

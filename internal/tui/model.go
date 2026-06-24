@@ -3105,14 +3105,15 @@ type pendingBulkCleanupConfirmation struct {
 }
 
 type pendingCloseCleanupConfirmation struct {
-	taskID         string
-	taskIDs        []string
-	closeTaskIDs   []string
-	previousStatus domain.Status
-	targetStatus   domain.Status
-	bulkMode       string
-	delta          int
-	summaries      []closeCleanupTaskSummary
+	taskID             string
+	taskIDs            []string
+	closeTaskIDs       []string
+	previousStatus     domain.Status
+	targetStatus       domain.Status
+	bulkMode           string
+	delta              int
+	summaries          []closeCleanupTaskSummary
+	closeCleanChildren bool
 }
 
 type closeCleanupConfirmPreflightMsg struct {
@@ -3897,6 +3898,10 @@ type helixOpenResultMsg struct {
 
 // fetchAndMergeCmd fetches and merges from the specified branch
 func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
+	return m.bulkMoveStatusCmdWithOptions(taskIDs, delta, daemonclient.TaskStatusOptions{})
+}
+
+func (m Model) bulkMoveStatusCmdWithOptions(taskIDs []string, delta int, opts daemonclient.TaskStatusOptions) tea.Cmd {
 	return func() tea.Msg {
 		statusOrder := []domain.Status{
 			domain.StatusOpen,
@@ -3948,7 +3953,7 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 
 			newStatus := statusOrder[newIdx]
 
-			err := m.updateTaskStatusWithTimeout(taskID, newStatus, 10*time.Second)
+			err := m.updateTaskStatusWithTimeoutOptions(taskID, newStatus, 10*time.Second, opts)
 			if err != nil {
 				if pending, ok := pendingOperationDetails(err); ok {
 					pendingOps = append(pendingOps, bulkTaskPendingOperation{
@@ -4185,6 +4190,10 @@ func (m Model) bulkCleanupPreflightCmd(taskIDs []string, deleteTask bool) tea.Cm
 
 // bulkSetStatusCmd sets all selected tasks to a specific status
 func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd {
+	return m.bulkSetStatusCmdWithOptions(taskIDs, status, daemonclient.TaskStatusOptions{})
+}
+
+func (m Model) bulkSetStatusCmdWithOptions(taskIDs []string, status domain.Status, opts daemonclient.TaskStatusOptions) tea.Cmd {
 	return func() tea.Msg {
 		updated := 0
 		failed := 0
@@ -4197,7 +4206,7 @@ func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd 
 				continue
 			}
 			previousStatus, _ := m.taskStatusByID(taskID)
-			err := m.updateTaskStatusWithTimeout(taskID, status, 10*time.Second)
+			err := m.updateTaskStatusWithTimeoutOptions(taskID, status, 10*time.Second, opts)
 			if err != nil {
 				if pending, ok := pendingOperationDetails(err); ok {
 					pendingOps = append(pendingOps, bulkTaskPendingOperation{
@@ -4398,8 +4407,12 @@ type taskStatusResultMsg struct {
 
 // moveTaskStatusCmd updates a single task's status.
 func (m Model) moveTaskStatusCmd(taskID string, previousStatus, newStatus domain.Status) tea.Cmd {
+	return m.moveTaskStatusCmdWithOptions(taskID, previousStatus, newStatus, daemonclient.TaskStatusOptions{})
+}
+
+func (m Model) moveTaskStatusCmdWithOptions(taskID string, previousStatus, newStatus domain.Status, opts daemonclient.TaskStatusOptions) tea.Cmd {
 	return func() tea.Msg {
-		err := m.updateTaskStatusWithTimeout(taskID, newStatus, 5*time.Second)
+		err := m.updateTaskStatusWithTimeoutOptions(taskID, newStatus, 5*time.Second, opts)
 		if err != nil {
 			return taskStatusResultMsg{
 				taskID:         taskID,
@@ -4418,13 +4431,21 @@ func (m Model) moveTaskStatusCmd(taskID string, previousStatus, newStatus domain
 }
 
 func (m Model) updateTaskStatusWithTimeout(taskID string, status domain.Status, defaultTimeout time.Duration) error {
+	return m.updateTaskStatusWithTimeoutOptions(taskID, status, defaultTimeout, daemonclient.TaskStatusOptions{})
+}
+
+func (m Model) updateTaskStatusWithTimeoutOptions(taskID string, status domain.Status, defaultTimeout time.Duration, opts daemonclient.TaskStatusOptions) error {
 	if m.daemonClient == nil {
 		return fmt.Errorf("daemon client unavailable")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), taskStatusMutationTimeout(status, defaultTimeout))
 	defer cancel()
 	if status == domain.StatusDone {
-		return m.closeTaskWithIntegrationAndCleanup(ctx, taskID)
+		closeOpts := taskStatusOptionsForStatus(status)
+		closeOpts.ForceWorktree = opts.ForceWorktree
+		closeOpts.IgnoreAhead = opts.IgnoreAhead
+		closeOpts.CloseCleanChildren = opts.CloseCleanChildren
+		return m.closeTaskWithIntegrationAndCleanup(ctx, taskID, closeOpts)
 	}
 	return m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, status, taskStatusOptionsForStatus(status))
 }
@@ -4475,11 +4496,14 @@ func exactTaskStatusForKey(key string) (domain.Status, bool) {
 	}
 }
 
-func (m Model) closeTaskWithIntegrationAndCleanup(ctx context.Context, taskID string) error {
+func (m Model) closeTaskWithIntegrationAndCleanup(ctx context.Context, taskID string, opts daemonclient.TaskStatusOptions) error {
 	if m.daemonClient == nil {
 		return fmt.Errorf("daemon client unavailable")
 	}
-	return m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, domain.StatusDone, taskStatusOptionsForStatus(domain.StatusDone))
+	if !opts.IntegrateBeforeClose {
+		opts.IntegrateBeforeClose = true
+	}
+	return m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, domain.StatusDone, opts)
 }
 
 func statusDisplayName(status domain.Status) string {
@@ -4528,7 +4552,10 @@ func (m Model) confirmCloseCleanupCmd(pending pendingCloseCleanupConfirmation) t
 	if pendingCloseCleanupCount(pending) > 1 {
 		title = "Confirm bulk integrate and close?"
 	}
-	return m.openOverlay(overlay.NewConfirmDialogExplicitYN(title, formatCloseCleanupConfirmPrompt(pending)))
+	return m.openOverlay(overlay.NewConfirmDialogExplicitYNWithExtraKeys(title, formatCloseCleanupConfirmPrompt(pending), map[string]overlay.SelectionMsg{
+		"c": {Key: "close_clean_children", Value: overlay.ConfirmResult{Confirmed: true}},
+		"C": {Key: "close_clean_children", Value: overlay.ConfirmResult{Confirmed: true}},
+	}))
 }
 
 func (m Model) confirmCloseCleanupPreflightCmd(pending pendingCloseCleanupConfirmation) tea.Cmd {
@@ -4635,8 +4662,9 @@ func formatCloseCleanupConfirmPrompt(pending pendingCloseCleanupConfirmation) st
 		"",
 		"This may merge into the closest ancestor worktree branch, stop active sessions, and remove issue worktrees before closing.",
 		"Dirty or conflicted worktrees must be cleaned before close; daemon guards still block unmerged or unresolved child work.",
+		"Press C to also close clean child issues with no projected session, dirty state, or diff.",
 		"",
-		"Proceed?",
+		"Proceed? Y closes only the target; C closes the target plus clean children.",
 	)
 	return strings.Join(lines, "\n")
 }

@@ -4569,12 +4569,12 @@ func TestParseIssueCloseArgs(t *testing.T) {
 		{
 			name:        "missing id",
 			args:        []string{},
-			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [<issue-id>]",
+			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]",
 		},
 		{
 			name:        "extra args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [<issue-id>]",
+			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]",
 		},
 		{
 			name: "named id",
@@ -4595,6 +4595,11 @@ func TestParseIssueCloseArgs(t *testing.T) {
 			name: "force worktree",
 			args: []string{"--id", "az-2", "--force-worktree"},
 			want: IssueCloseOptions{IssueID: "az-2", ForceWorktree: true},
+		},
+		{
+			name: "close clean children",
+			args: []string{"--id", "az-2", "--close-clean-children"},
+			want: IssueCloseOptions{IssueID: "az-2", CloseCleanChildren: true},
 		},
 		{
 			name:        "allow base for child unsupported on close",
