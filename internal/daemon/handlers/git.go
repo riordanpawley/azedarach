@@ -34,7 +34,7 @@ type GitService interface {
 	AbortMerge(ctx context.Context, projectID, worktree string) error
 	DiffStat(ctx context.Context, projectID, worktree, baseBranch string) (string, error)
 	Status(ctx context.Context, projectID, worktree string) (*git.GitStatus, error)
-	RuntimeSignals(ctx context.Context, projectID string, targets []GitRuntimeSignalsTarget, baseBranch string, compareRemote bool, remote string) ([]GitRuntimeSignalsResult, int, error)
+	RuntimeSignals(ctx context.Context, projectID string, targets []GitRuntimeSignalsTarget, baseBranch string, compareRemote bool, remote string, refresh bool) ([]GitRuntimeSignalsResult, int, error)
 	WorktreePathForBranch(ctx context.Context, projectID, branch string) (string, bool, error)
 }
 
@@ -334,7 +334,7 @@ func decodeGitCommandBody(resp *protocol.ResponseEnvelope, req protocol.RequestE
 }
 
 func (h *GitHandler) handleRuntimeSignals(ctx context.Context, resp protocol.ResponseEnvelope, cmd gitCommandBody) protocol.ResponseEnvelope {
-	signals, partialFailures, err := h.service.RuntimeSignals(ctx, cmd.ProjectID, cmd.Targets, cmd.BaseBranch, cmd.CompareRemote, cmd.Remote)
+	signals, partialFailures, err := h.service.RuntimeSignals(ctx, cmd.ProjectID, cmd.Targets, cmd.BaseBranch, cmd.CompareRemote, cmd.Remote, cmd.Refresh)
 	if err != nil {
 		resp.Error = mapGitError(err)
 		return resp

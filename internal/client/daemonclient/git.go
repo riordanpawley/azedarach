@@ -261,12 +261,18 @@ func (c *Client) GitStatusHookRefresh(ctx context.Context, worktree string) (git
 
 // GitRuntimeSignals asks the daemon to compute runtime git signals for issue worktrees.
 func (c *Client) GitRuntimeSignals(ctx context.Context, targets []GitRuntimeSignalsTarget, baseBranch string, compareRemote bool, remote string) ([]GitRuntimeSignalsResult, int, error) {
+	return c.GitRuntimeSignalsWithRefresh(ctx, targets, baseBranch, compareRemote, remote, false)
+}
+
+// GitRuntimeSignalsWithRefresh asks the daemon to refresh projection-backed runtime git signals first.
+func (c *Client) GitRuntimeSignalsWithRefresh(ctx context.Context, targets []GitRuntimeSignalsTarget, baseBranch string, compareRemote bool, remote string, refresh bool) ([]GitRuntimeSignalsResult, int, error) {
 	var resp gitRuntimeSignalsBody
 	if err := c.commandJSON(ctx, CommandGitRuntimeSignals, GitCommandRequest{
 		Targets:       targets,
 		BaseBranch:    baseBranch,
 		CompareRemote: compareRemote,
 		Remote:        remote,
+		Refresh:       refresh,
 	}, &resp); err != nil {
 		return nil, 0, err
 	}

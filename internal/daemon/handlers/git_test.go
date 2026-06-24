@@ -20,7 +20,7 @@ type fakeGitService struct {
 	statusFn            func(context.Context, string, string) (*git.GitStatus, error)
 	refreshStatusFn     func(context.Context, string, string) (*git.GitStatus, error)
 	hookRefreshStatusFn func(context.Context, string, string) (*git.GitStatus, error)
-	runtimeSignalsFn    func(context.Context, string, []GitRuntimeSignalsTarget, string, bool, string) ([]GitRuntimeSignalsResult, int, error)
+	runtimeSignalsFn    func(context.Context, string, []GitRuntimeSignalsTarget, string, bool, string, bool) ([]GitRuntimeSignalsResult, int, error)
 	worktreeForBranchFn func(context.Context, string, string) (string, bool, error)
 	preflightFn         func(context.Context, string, GitMergePreflightRequest) (*GitMergePreflightResult, error)
 	discardFn           func(context.Context, string, string) (*GitDiscardChangesResult, error)
@@ -92,9 +92,9 @@ func (f *fakeGitService) RefreshStatusForHook(ctx context.Context, projectID, wo
 	return &git.GitStatus{}, nil
 }
 
-func (f *fakeGitService) RuntimeSignals(ctx context.Context, projectID string, targets []GitRuntimeSignalsTarget, baseBranch string, compareRemote bool, remote string) ([]GitRuntimeSignalsResult, int, error) {
+func (f *fakeGitService) RuntimeSignals(ctx context.Context, projectID string, targets []GitRuntimeSignalsTarget, baseBranch string, compareRemote bool, remote string, refresh bool) ([]GitRuntimeSignalsResult, int, error) {
 	if f.runtimeSignalsFn != nil {
-		return f.runtimeSignalsFn(ctx, projectID, targets, baseBranch, compareRemote, remote)
+		return f.runtimeSignalsFn(ctx, projectID, targets, baseBranch, compareRemote, remote, refresh)
 	}
 	return nil, 0, nil
 }
@@ -381,6 +381,46 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGitHandlerRuntimeSignalsPassesRefreshFlag(t *testing.T) {
+	handler := NewGitHandler(&fakeGitService{
+		runtimeSignalsFn: func(_ context.Context, projectID string, targets []GitRuntimeSignalsTarget, baseBranch string, compareRemote bool, remote string, refresh bool) ([]GitRuntimeSignalsResult, int, error) {
+			if projectID == "" {
+				t.Fatal("projectID is empty")
+			}
+			if len(targets) != 1 || targets[0].IssueID != "az-1" || targets[0].Worktree != "/tmp/az-1" {
+				t.Fatalf("targets = %+v", targets)
+			}
+			if baseBranch != "preview" || !compareRemote || remote != "origin" || !refresh {
+				t.Fatalf("runtime signal args base=%q compare=%v remote=%q refresh=%v", baseBranch, compareRemote, remote, refresh)
+			}
+			return []GitRuntimeSignalsResult{{
+				IssueID:      "az-1",
+				Worktree:     "/tmp/az-1",
+				GitAdditions: 4,
+				GitDeletions: 2,
+			}}, 0, nil
+		},
+	})
+
+	resp := handler.Handle(context.Background(), gitRequest(t, CommandGitRuntimeSignals, gitCommandBody{
+		BaseBranch:    "preview",
+		CompareRemote: true,
+		Remote:        "origin",
+		Refresh:       true,
+		Targets:       []GitRuntimeSignalsTarget{{IssueID: "az-1", Worktree: "/tmp/az-1"}},
+	}))
+	if !resp.OK {
+		t.Fatalf("expected OK response, got %+v", resp.Error)
+	}
+	var body gitRuntimeSignalsBody
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(body.Signals) != 1 || body.Signals[0].GitAdditions != 4 || body.Signals[0].GitDeletions != 2 {
+		t.Fatalf("signals = %+v, want refreshed metrics", body.Signals)
 	}
 }
 

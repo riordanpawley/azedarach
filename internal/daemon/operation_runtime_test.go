@@ -32,7 +32,7 @@ func (runtimeGitService) DiffStat(context.Context, string, string, string) (stri
 func (runtimeGitService) Status(context.Context, string, string) (*git.GitStatus, error) {
 	return &git.GitStatus{}, nil
 }
-func (runtimeGitService) RuntimeSignals(context.Context, string, []daemonhandlers.GitRuntimeSignalsTarget, string, bool, string) ([]daemonhandlers.GitRuntimeSignalsResult, int, error) {
+func (runtimeGitService) RuntimeSignals(context.Context, string, []daemonhandlers.GitRuntimeSignalsTarget, string, bool, string, bool) ([]daemonhandlers.GitRuntimeSignalsResult, int, error) {
 	return nil, 0, nil
 }
 func (runtimeGitService) WorktreePathForBranch(context.Context, string, string) (string, bool, error) {
