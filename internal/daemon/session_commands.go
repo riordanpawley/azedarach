@@ -345,6 +345,18 @@ func sessionProjectionForReconcileByIssueKey(sessions []daemonstate.Session, nam
 	return sessionProjectionAggregateByIssueKey(sessions, namingScope)
 }
 
+func sessionProjectionCanRecreateTmuxSession(session daemonstate.Session) bool {
+	if isAgentScopedSessionID(session.ID) {
+		return false
+	}
+	switch daemonstate.NormalizeSessionState(session.State) {
+	case daemonstate.SessionStateStarting, daemonstate.SessionStateRunning, daemonstate.SessionStatePaused:
+		return true
+	default:
+		return false
+	}
+}
+
 func sessionProjectionForTmuxHydrationByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]daemonstate.Session {
 	return sessionProjectionAggregateByIssueKey(sessions, namingScope)
 }
@@ -2410,7 +2422,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 		if d.isSessionStopPending(projectID, issueID) {
 			continue
 		}
-		if session.State == daemonstate.SessionStateStopped {
+		if !sessionProjectionCanRecreateTmuxSession(session) {
 			continue
 		}
 		if _, ok := tmuxSet[issueKey]; ok {
@@ -3172,8 +3184,22 @@ func (d *Daemon) refreshStoppedSessionRuntimeState(ctx context.Context, projectI
 		}
 		matched = true
 	}
-	if matched {
+	if matched && issueID == "" {
 		return nil
+	}
+
+	if matched {
+		canonicalStopped := daemonstate.Session{
+			ID:            naming.CanonicalSessionID(namingScope, issueID),
+			IssueID:       issueID,
+			State:         daemonstate.SessionStateStopped,
+			ObservedState: daemonstate.SessionStateStopped,
+			UpdatedAt:     time.Now().UTC(),
+		}
+		if canonicalStopped.ID == "" {
+			return nil
+		}
+		return d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, canonicalStopped)
 	}
 
 	fallbackSessionID := ""
