@@ -2941,7 +2941,7 @@ func newTmuxRuntimeLiveness(tmuxSessions []tmux.SessionInfo, tmuxPanes []tmux.Pa
 	}
 	for _, pane := range tmuxPanes {
 		sessionName := strings.TrimSpace(pane.SessionName)
-		paneID := strings.TrimSpace(pane.PaneID)
+		paneID := sanitizeRuntimePaneID(pane.PaneID)
 		if sessionName == "" || paneID == "" {
 			continue
 		}
@@ -2967,8 +2967,29 @@ func (live tmuxRuntimeLiveness) paneLive(sessionID string) bool {
 	if len(panes) == 0 {
 		return false
 	}
-	_, ok = panes[paneID]
+	_, ok = panes[sanitizeRuntimePaneID(paneID)]
 	return ok
+}
+
+func sanitizeRuntimePaneID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+		}
+	}
+	return strings.Trim(b.String(), "-_.")
 }
 
 func applyObservedRuntimeLiveness(session *daemonstate.Session, info tmux.SessionInfo, infoLive bool, live tmuxRuntimeLiveness) {

@@ -5304,6 +5304,56 @@ func TestRefreshExistingSessionRuntimeStateKeepsLivePaneRowsBusy(t *testing.T) {
 	}
 }
 
+func TestRefreshExistingSessionRuntimeStateMatchesUnsanitizedPersistedPaneID(t *testing.T) {
+	const (
+		projectID = "proj-pane-unsanitized"
+		issueID   = "az-1"
+	)
+	ctx := context.Background()
+	parentSessionID := naming.CanonicalSessionID(projectID, issueID)
+	paneSessionID := parentSessionID + ".pane-%12"
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            paneSessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed live pane projection: %v", err)
+	}
+	tmuxRunner := newTestTmuxRunner(parentSessionID)
+	tmuxRunner.panes[parentSessionID] = []string{"%12"}
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil {
+		t.Fatalf("refreshExistingSessionRuntimeState: %v", err)
+	}
+
+	row, found, err := runtimeStateStore.GetSessionState(ctx, projectID, paneSessionID)
+	if err != nil {
+		t.Fatalf("get live pane row: %v", err)
+	}
+	if !found {
+		t.Fatal("live pane row not found")
+	}
+	if row.ObservedState != daemonstate.SessionStateRunning {
+		t.Fatalf("live pane observed state = %s, want %s", row.ObservedState, daemonstate.SessionStateRunning)
+	}
+	counts := d.sessionProjectionCountsForIssue(ctx, projectID, issueID)
+	if counts.Total != 1 || counts.Active != 1 || counts.Paused != 0 {
+		t.Fatalf("counts = %+v, want one active live row", counts)
+	}
+}
+
 func TestRefreshExistingSessionRuntimeStateCountsMultipleLivePanes(t *testing.T) {
 	const (
 		projectID = "proj-pane-multi"
