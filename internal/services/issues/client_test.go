@@ -547,6 +547,43 @@ func TestClient_ListWithRuntimeReturnsJoinedProjectionFields(t *testing.T) {
 	assert.Equal(t, 7, one.GitAdditions)
 }
 
+func TestClient_ListWithRuntimeReadsSessionObservations(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-runtime-observation"
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Runtime observation task",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	require.NoError(t, err)
+
+	db, err := sql.Open("sqlite", client.dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	startedAt := time.Date(2026, time.April, 4, 12, 30, 0, 0, time.UTC)
+	updatedAt := startedAt.Add(time.Minute)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_session_observations (
+			project_id, session_id, issue_id, state, observed_state, activity, activity_source, started_at, updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-runtime-observation.pane-535", taskID, "running", "running", "busy", "runtime", startedAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
+	require.NoError(t, err)
+
+	tasks, err := client.ListWithRuntime(ctx, projectID)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.NotNil(t, tasks[0].Session)
+	assert.Equal(t, domain.SessionBusy, tasks[0].Session.State)
+	assert.Equal(t, "busy", tasks[0].Session.Activity)
+	assert.Equal(t, "runtime", tasks[0].Session.ActivitySource)
+	assert.True(t, tasks[0].HasTmuxSession)
+}
+
 func TestClient_ListSummariesWithRuntimeKeepsGraphAndRuntimeProjection(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
