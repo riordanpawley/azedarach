@@ -1641,6 +1641,18 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 	}
 
 	var integration taskCloseIntegrationResult
+	sourceUniqueCommits, err := d.git.RevListCount(ctx, targetWorktree, targetBranch+".."+source.Branch)
+	if err == nil && sourceUniqueCommits == 0 {
+		return taskCloseIntegrationResult{
+			Requested:    true,
+			NoChanges:    true,
+			SourceBranch: source.Branch,
+			TargetBranch: targetBranch,
+		}, nil
+	}
+	if err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("target-side source containment check failed before close integration", "project_id", projectID, "task_id", taskID, "target_worktree", targetWorktree, "target_branch", targetBranch, "source_branch", source.Branch, "error", err)
+	}
 	hasChangesToIntegrate, err := d.ensureMergeToBaseClean(ctx, source, targetWorktree, targetBranch)
 	if err != nil {
 		return taskCloseIntegrationResult{Requested: true}, err

@@ -2241,6 +2241,8 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 			return "M\tmain.go\n", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff":
 			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-list" && args[4] == "main.."+sourceBranch:
+			return "1", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "rev-list":
 			return "0", nil
 		case len(args) >= 6 && args[0] == "-C" && args[2] == "merge-tree":
@@ -2417,6 +2419,8 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 			return "M\tmain.go\n", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff":
 			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == projectRepo && args[2] == "rev-list" && args[4] == "main.."+sourceBranch:
+			return "1", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "rev-list":
 			return "0", nil
 		case len(args) >= 6 && args[0] == "-C" && args[1] == projectRepo && args[2] == "merge-tree":
@@ -2550,6 +2554,8 @@ func TestTaskCloseCommandKeepsTargetCleanWhenScratchMergeDirties(t *testing.T) {
 			return "M\tmain.go\n", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "diff":
 			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-list" && args[4] == "main.."+sourceBranch:
+			return "1", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "rev-list":
 			return "0", nil
 		case len(args) >= 6 && args[0] == "-C" && args[1] == repoDir && args[2] == "merge-tree":
@@ -2832,6 +2838,178 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceHasNoChangesEvenIfTargetDirty
 	}
 	for _, want := range []string{
 		"-C " + sourceWorktree + " rev-list --count main..HEAD",
+		"worktree remove " + sourceWorktree,
+		"branch -D " + sourceBranch,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("git commands missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-integrate-already-reachable"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Close already integrated branch",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
+	if err := os.MkdirAll(sourceWorktree, 0o755); err != nil {
+		t.Fatalf("mkdir source worktree: %v", err)
+	}
+	sourceBranch := "riordan/" + taskID + "/already-integrated"
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      sourceWorktree,
+		Branch:    sourceBranch,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+
+	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
+	commands := make([]string, 0, 12)
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		commands = append(commands, strings.Join(args, " "))
+		joined := strings.Join(args, " ")
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+			return worktreeListOutput, nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-list" && args[3] == "--count" && args[4] == "main.."+sourceBranch:
+			return "0", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "status":
+			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "status":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "merge-base":
+			return "stale-base-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "diff" && slices.Contains(args, "--name-status"):
+			return "M\talready-integrated.go\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "diff":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "rev-list" && args[4] == "HEAD..main":
+			return "3", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "rev-list" && args[4] == "main..HEAD":
+			return "2", nil
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "remove":
+			if err := os.RemoveAll(sourceWorktree); err != nil {
+				return "", err
+			}
+			return "", nil
+		case len(args) >= 3 && args[0] == "branch" && args[1] == "-D":
+			return "", nil
+		default:
+			return "", fmt.Errorf("unexpected git args: %s", joined)
+		}
+	}}
+
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		git:      git.NewClient(runner, logger),
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	d.gitStatusAdapter = &gitServiceAdapter{
+		client:            git.NewClient(runner, logger),
+		runtimeStateStore: runtimeStore,
+		logger:            logger,
+		baseBranch:        "main",
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		logger: logger,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	body, err := json.Marshal(taskCloseRequest{
+		TaskID:               taskID,
+		IntegrateBeforeClose: true,
+	})
+	if err != nil {
+		t.Fatalf("marshal task close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-integrate-already-reachable",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.close",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if !resp.OK {
+		if resp.Error != nil {
+			t.Fatalf("handleTaskClose error = %s", resp.Error.Message)
+		}
+		t.Fatalf("handleTaskClose response = %+v", resp)
+	}
+	var result taskCloseResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal close result: %v", err)
+	}
+	if !result.IntegrationRequested || result.Integrated {
+		t.Fatalf("close integration result = %+v, want requested no-op integration", result)
+	}
+	if !result.WorktreeRemoved {
+		t.Fatalf("close integration result = %+v, want worktree cleanup", result)
+	}
+	closed, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get task after close: %v", err)
+	}
+	if closed.Status != domain.StatusDone {
+		t.Fatalf("task status = %s, want %s", closed.Status, domain.StatusDone)
+	}
+	joined := strings.Join(commands, "\n")
+	for _, blocked := range []string{
+		"-C " + repoDir + " merge-tree --write-tree main " + sourceBranch,
+		"merge --no-edit " + sourceBranch,
+		"-C " + sourceWorktree + " diff --name-status",
+	} {
+		if strings.Contains(joined, blocked) {
+			t.Fatalf("git commands should skip already-integrated source but included %q:\n%s", blocked, joined)
+		}
+	}
+	for _, want := range []string{
+		"-C " + repoDir + " rev-list --count main.." + sourceBranch,
 		"worktree remove " + sourceWorktree,
 		"branch -D " + sourceBranch,
 	} {
