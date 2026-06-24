@@ -561,13 +561,13 @@ func reconcileDaemonGitState(projectDir string, deps *Dependencies, hookName str
 		Worktree: worktreeRoot,
 		Source:   "githooks.hook",
 		Level:    "info",
-		Message:  "refreshed daemon git state",
+		Message:  "queued daemon git status refresh",
 	})
 	if deps.Logger != nil {
-		deps.Logger.Info("githooks hook: refreshed daemon git state", "hook", strings.TrimSpace(hookName), "worktree", worktreeRoot)
+		deps.Logger.Info("githooks hook: queued daemon git status refresh", "hook", strings.TrimSpace(hookName), "worktree", worktreeRoot)
 	}
 	if verbose {
-		fmt.Printf("githooks hook: refreshed daemon git state for %s (%s)\n", worktreeRoot, hookName)
+		fmt.Printf("githooks hook: queued daemon git status refresh for %s (%s)\n", worktreeRoot, hookName)
 	}
 	return nil
 }

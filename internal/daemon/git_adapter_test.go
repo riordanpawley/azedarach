@@ -947,7 +947,7 @@ func TestGitServiceAdapterQueueGitStatusRefreshBacksOffUnchangedTarget(t *testin
 	}
 }
 
-func TestGitServiceAdapterHookRefreshCoalescesBurstForWorktree(t *testing.T) {
+func TestGitServiceAdapterHookRefreshQueuesBurstWithoutWaiting(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -958,6 +958,12 @@ func TestGitServiceAdapterHookRefreshCoalescesBurstForWorktree(t *testing.T) {
 
 	var statusCalls atomic.Int32
 	releaseStatus := make(chan struct{})
+	var releaseStatusOnce sync.Once
+	releaseStatusFn := func() {
+		releaseStatusOnce.Do(func() {
+			close(releaseStatus)
+		})
+	}
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		if len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "status" && args[3] == "--porcelain" {
 			statusCalls.Add(1)
@@ -985,38 +991,55 @@ func TestGitServiceAdapterHookRefreshCoalescesBurstForWorktree(t *testing.T) {
 	}
 
 	start := make(chan struct{})
-	errs := make(chan error, 5)
+	type hookResult struct {
+		status *git.GitStatus
+		err    error
+	}
+	results := make(chan hookResult, 5)
 	for i := 0; i < 5; i++ {
 		go func() {
 			<-start
-			_, err := adapter.RefreshStatusForHook(ctx, projectID, worktree)
-			errs <- err
+			status, err := adapter.RefreshStatusForHook(ctx, projectID, worktree)
+			results <- hookResult{status: status, err: err}
 		}()
 	}
 	close(start)
+	startDeadline := time.After(time.Second)
 	for statusCalls.Load() == 0 {
-		time.Sleep(time.Millisecond)
+		select {
+		case <-startDeadline:
+			releaseStatusFn()
+			t.Fatal("timed out waiting for queued hook refresh to start")
+		default:
+			time.Sleep(time.Millisecond)
+		}
 	}
 	time.Sleep(20 * time.Millisecond)
-	close(releaseStatus)
 
 	for i := 0; i < 5; i++ {
 		select {
-		case err := <-errs:
-			if err != nil {
-				t.Fatalf("RefreshStatusForHook error: %v", err)
+		case result := <-results:
+			if result.err != nil {
+				releaseStatusFn()
+				t.Fatalf("RefreshStatusForHook error: %v", result.err)
+			}
+			if result.status == nil {
+				releaseStatusFn()
+				t.Fatal("RefreshStatusForHook returned nil status")
 			}
 		case <-time.After(time.Second):
-			t.Fatal("timed out waiting for hook refresh burst")
+			releaseStatusFn()
+			t.Fatal("timed out waiting for non-blocking hook refresh callers")
 		}
 	}
+	releaseStatusFn()
 
 	if got := statusCalls.Load(); got != 1 {
 		t.Fatalf("status calls = %d, want 1 coalesced hook refresh", got)
 	}
 	counters := queue.snapshotCounters()
-	if counters.Enqueued != 1 || counters.Deduped != 0 {
-		t.Fatalf("queue counters = %+v, want one queued hook refresh", counters)
+	if counters.Enqueued != 1 || counters.Deduped != 4 {
+		t.Fatalf("queue counters = %+v, want one queued hook refresh and four deduped callers", counters)
 	}
 }
 
