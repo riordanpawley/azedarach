@@ -51,18 +51,6 @@ func clientTestArgsForWorktree(args []string, worktree string, want ...string) b
 	return true
 }
 
-func clientTestArgsForWorktreeNoHooks(args []string, worktree string, want ...string) bool {
-	if len(args) != len(want)+4 || args[0] != "-C" || args[1] != worktree || args[2] != "-c" || args[3] != "core.hooksPath=" {
-		return false
-	}
-	for i, part := range want {
-		if args[i+4] != part {
-			return false
-		}
-	}
-	return true
-}
-
 func initDivergedRepo(t *testing.T) string {
 	t.Helper()
 
@@ -565,17 +553,13 @@ func TestMergeCleanlyTransactionalAppliesScratchMergeToCleanTarget(t *testing.T)
 	}
 }
 
-func TestMergeCleanlyTransactionalDisablesScratchHooks(t *testing.T) {
+func TestMergeCleanlyTransactionalRunsScratchHooksAndKeepsTargetCleanWhenHookFails(t *testing.T) {
 	repo := initDivergedRepo(t)
 	originalHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
-	hooks := map[string]string{
-		"post-checkout": "#!/bin/sh\nprintf post-checkout-dirty\\n > post-checkout-created.txt\necho post-checkout hook dirtied scratch >&2\nexit 1\n",
-		"commit-msg":    "#!/bin/sh\nprintf commit-msg-dirty\\n > commit-msg-created.txt\necho commit-msg hook dirtied scratch >&2\nexit 1\n",
-	}
-	for name, hook := range hooks {
-		if err := os.WriteFile(filepath.Join(repo, ".git", "hooks", name), []byte(hook), 0o755); err != nil {
-			t.Fatalf("write %s hook: %v", name, err)
-		}
+	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
+	hook := "#!/bin/sh\nprintf commit-msg-dirty\\n > commit-msg-created.txt\necho commit-msg hook dirtied scratch >&2\nexit 1\n"
+	if err := os.WriteFile(hookPath, []byte(hook), 0o755); err != nil {
+		t.Fatalf("write commit-msg hook: %v", err)
 	}
 
 	client := NewClient(NewExecRunner(repo), slog.Default())
@@ -586,19 +570,21 @@ func TestMergeCleanlyTransactionalDisablesScratchHooks(t *testing.T) {
 	if result == nil {
 		t.Fatal("MergeCleanlyTransactional() result = nil")
 	}
-	if !result.Success {
-		t.Fatalf("MergeCleanlyTransactional() result = %+v, want success with scratch hooks disabled", result)
+	if result.Success {
+		t.Fatalf("MergeCleanlyTransactional() result = %+v, want scratch hook failure", result)
 	}
-	if head := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); head == originalHead {
-		t.Fatalf("HEAD = %s, want transactional merge to advance target", head)
+	if !strings.Contains(result.Message, "commit-msg hook dirtied scratch") ||
+		!strings.Contains(result.Message, "discarded partial merge changes") {
+		t.Fatalf("MergeCleanlyTransactional() message = %q, want scratch hook cleanup detail", result.Message)
 	}
-	if _, err := os.Stat(filepath.Join(repo, "feature.txt")); err != nil {
-		t.Fatalf("feature.txt stat err = %v, want merged file in target", err)
+	if head := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); head != originalHead {
+		t.Fatalf("HEAD = %s, want target unchanged at %s", head, originalHead)
 	}
-	for _, name := range []string{"post-checkout-created.txt", "commit-msg-created.txt"} {
-		if _, err := os.Stat(filepath.Join(repo, name)); !os.IsNotExist(err) {
-			t.Fatalf("%s stat err = %v, want hook disabled", name, err)
-		}
+	if _, err := os.Stat(filepath.Join(repo, "feature.txt")); !os.IsNotExist(err) {
+		t.Fatalf("feature.txt stat err = %v, want target untouched", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "commit-msg-created.txt")); !os.IsNotExist(err) {
+		t.Fatalf("commit-msg-created.txt stat err = %v, want scratch hook output isolated from target", err)
 	}
 
 	status, err := client.Status(context.Background(), repo)
@@ -606,7 +592,7 @@ func TestMergeCleanlyTransactionalDisablesScratchHooks(t *testing.T) {
 		t.Fatalf("Status() error = %v", err)
 	}
 	if status.HasChanges {
-		t.Fatalf("status = %+v, want clean target after transactional merge", status)
+		t.Fatalf("status = %+v, want clean target after scratch merge failure", status)
 	}
 }
 
@@ -680,23 +666,21 @@ func TestMergeCleanlyTransactionalRecoversDirtyFinalApplyAndRemovesJournal(t *te
 			return "target-sha", nil
 		case clientTestArgsForWorktree(args, repo, "rev-parse", "--git-common-dir"):
 			return filepath.Join(repo, ".git"), nil
-		case len(args) >= 9 &&
+		case len(args) >= 7 &&
 			args[0] == "-C" &&
 			args[1] == repo &&
-			args[2] == "-c" &&
-			args[3] == "core.hooksPath=" &&
-			args[4] == "worktree" &&
-			args[5] == "add" &&
-			args[6] == "--detach":
-			scratchWorktree = args[7]
-			if args[8] != "target-sha" {
-				t.Fatalf("worktree add ref = %q, want target-sha", args[8])
+			args[2] == "worktree" &&
+			args[3] == "add" &&
+			args[4] == "--detach":
+			scratchWorktree = args[5]
+			if args[6] != "target-sha" {
+				t.Fatalf("worktree add ref = %q, want target-sha", args[6])
 			}
 			return "", nil
 		case scratchWorktree != "" && clientTestArgsForWorktree(args, scratchWorktree, "status", "--porcelain"):
 			scratchStatusReads++
 			return "", nil
-		case scratchWorktree != "" && clientTestArgsForWorktreeNoHooks(args, scratchWorktree, "merge", "--no-edit", "feature"):
+		case scratchWorktree != "" && clientTestArgsForWorktree(args, scratchWorktree, "merge", "--no-edit", "feature"):
 			return "Merge made by the 'ort' strategy.", nil
 		case scratchWorktree != "" && clientTestArgsForWorktree(args, scratchWorktree, "rev-parse", "--verify", "HEAD"):
 			return "desired-sha", nil

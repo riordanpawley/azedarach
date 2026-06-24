@@ -2249,10 +2249,10 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 			return "", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "checkout":
 			return "", nil
-		case len(args) >= 9 && args[0] == "-C" && args[1] == repoDir && args[2] == "-c" && args[3] == "core.hooksPath=" && args[4] == "worktree" && args[5] == "add":
-			scratchWorktree = args[7]
+		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "worktree" && args[3] == "add":
+			scratchWorktree = args[5]
 			return "", nil
-		case len(args) >= 7 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "-c" && args[3] == "core.hooksPath=" && args[4] == "merge":
+		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "merge":
 			return "merge complete", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "reset" && args[3] == "--hard":
 			return "", nil
@@ -2335,7 +2335,7 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 		"-C " + sourceWorktree + " status --porcelain",
 		"-C " + repoDir + " merge-tree --write-tree main " + sourceBranch,
 		"-C " + repoDir + " checkout main",
-		"-C " + repoDir + " -c core.hooksPath= worktree add --detach ",
+		"-C " + repoDir + " worktree add --detach ",
 		"merge --no-edit " + sourceBranch,
 		"-C " + repoDir + " reset --hard merged-sha",
 	} {
@@ -2425,10 +2425,10 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 			return "", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "checkout":
 			return "", nil
-		case len(args) >= 9 && args[0] == "-C" && args[1] == projectRepo && args[2] == "-c" && args[3] == "core.hooksPath=" && args[4] == "worktree" && args[5] == "add":
-			scratchWorktree = args[7]
+		case len(args) >= 7 && args[0] == "-C" && args[1] == projectRepo && args[2] == "worktree" && args[3] == "add":
+			scratchWorktree = args[5]
 			return "", nil
-		case len(args) >= 7 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "-c" && args[3] == "core.hooksPath=" && args[4] == "merge":
+		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "merge":
 			return "merge complete", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == projectRepo && args[2] == "reset" && args[3] == "--hard":
 			return "", nil
@@ -2482,7 +2482,7 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 	if strings.Contains(joined, "-C "+bootstrapRepo+" ") {
 		t.Fatalf("git commands used bootstrap repo, want project repo:\n%s", joined)
 	}
-	if !strings.Contains(joined, "-C "+projectRepo+" -c core.hooksPath= worktree add --detach ") {
+	if !strings.Contains(joined, "-C "+projectRepo+" worktree add --detach ") {
 		t.Fatalf("git commands missing project repo worktree add:\n%s", joined)
 	}
 }
@@ -2558,10 +2558,10 @@ func TestTaskCloseCommandKeepsTargetCleanWhenScratchMergeDirties(t *testing.T) {
 			return "", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "checkout":
 			return "", nil
-		case len(args) >= 9 && args[0] == "-C" && args[1] == repoDir && args[2] == "-c" && args[3] == "core.hooksPath=" && args[4] == "worktree" && args[5] == "add":
-			scratchWorktree = args[7]
+		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "worktree" && args[3] == "add":
+			scratchWorktree = args[5]
 			return "", nil
-		case len(args) >= 7 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "-c" && args[3] == "core.hooksPath=" && args[4] == "merge":
+		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "merge":
 			return "Merge made by the 'ort' strategy.", nil
 		case len(args) >= 6 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "restore":
 			return "", nil
@@ -2639,7 +2639,7 @@ func TestTaskCloseCommandKeepsTargetCleanWhenScratchMergeDirties(t *testing.T) {
 	}
 	joined := strings.Join(commands, "\n")
 	for _, want := range []string{
-		"-C " + repoDir + " -c core.hooksPath= worktree add --detach ",
+		"-C " + repoDir + " worktree add --detach ",
 		"merge --no-edit " + sourceBranch,
 		"restore --staged --worktree .",
 		"clean -fd",

@@ -58,7 +58,7 @@ const (
 	sessionStartCommandTimeout  = 5 * time.Minute
 	branchMergeToBaseTimeout    = 2 * time.Minute
 	daemonCommandTimeout        = 15 * time.Second
-	issueCloseCleanupTimeout    = 2 * time.Minute
+	issueCloseCleanupTimeout    = 10 * time.Minute
 	issueCreateCommandTimeout   = 10 * time.Second
 	issueCreateAutostartTimeout = 12 * time.Second
 	exitCodeHardFailure         = 1

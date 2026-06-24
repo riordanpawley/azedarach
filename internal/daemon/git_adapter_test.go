@@ -97,10 +97,10 @@ func TestGitServiceAdapterMergeForcesStatusUpdatePublish(t *testing.T) {
 				return filepath.Join(worktree, ".git"), nil
 			case len(args) >= 5 && args[0] == "-C" && args[1] == worktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 				return "target-sha", nil
-			case len(args) >= 9 && args[0] == "-C" && args[1] == worktree && args[2] == "-c" && args[3] == "core.hooksPath=" && args[4] == "worktree" && args[5] == "add":
-				scratchWorktree = args[7]
+			case len(args) >= 7 && args[0] == "-C" && args[1] == worktree && args[2] == "worktree" && args[3] == "add":
+				scratchWorktree = args[5]
 				return "", nil
-			case len(args) >= 7 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "-c" && args[3] == "core.hooksPath=" && args[4] == "merge":
+			case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "merge":
 				return "Already up to date.", nil
 			case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 				return "target-sha", nil
