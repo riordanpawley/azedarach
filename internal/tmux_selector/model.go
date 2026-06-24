@@ -42,6 +42,7 @@ type InventoryEntry struct {
 	ActivitySource        string
 	StartedAt             *time.Time
 	LastAttachedAt        *time.Time
+	LastUpdatedAt         *time.Time
 	TmuxAttached          bool
 	TmuxAttachedCount     int
 	HasTmuxSession        bool
@@ -743,6 +744,9 @@ func (m Model) renderTreeRow(row sessionTreeRow, entry InventoryEntry) string {
 	metaParts := []string{}
 	if entry.SessionID != "" {
 		metaParts = append(metaParts, renderTmuxSessionMeta(entry, m.styles))
+	}
+	if updated := formatEntryUpdatedAge(entry, time.Now()); updated != "" {
+		metaParts = append(metaParts, m.styles.StatusHint.Render("updated "+updated))
 	}
 	if entry.ProjectPath != "" {
 		metaParts = append(metaParts, m.styles.StatusHint.Render(entry.ProjectPath))
@@ -1756,6 +1760,7 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 			Activity:       row.Activity,
 			ActivitySource: row.ActivitySource,
 			StartedAt:      row.StartedAt,
+			UpdatedAt:      valueOrZeroTime(entryLastUpdatedAt(row)),
 			Worktree:       row.Worktree,
 		}
 		if task.Session.State == "" {
@@ -1776,6 +1781,9 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 	metaParts := []string{}
 	if issueStatus := issueStatusLabel(row); issueStatus != "" {
 		metaParts = append(metaParts, renderIssueMeta(issueStatus))
+	}
+	if updated := renderUpdatedMeta(row, time.Now(), s); updated != "" {
+		metaParts = append(metaParts, updated)
 	}
 	if row.SessionID != "" {
 		metaParts = append(metaParts, renderTmuxSessionMeta(row, s))
@@ -1873,6 +1881,17 @@ func issueStatusStyle(status string) lipgloss.Style {
 
 func renderIssueMeta(status string) string {
 	return lipgloss.NewStyle().Foreground(styles.Overlay1).Render("issue ") + issueStatusStyle(status).Render(status)
+}
+
+func renderUpdatedMeta(entry InventoryEntry, now time.Time, s *styles.Styles) string {
+	updated := formatEntryUpdatedAge(entry, now)
+	if updated == "" {
+		return ""
+	}
+	if s == nil {
+		s = styles.New()
+	}
+	return lipgloss.NewStyle().Foreground(styles.Overlay1).Render("updated ") + s.StatusHint.Render(updated)
 }
 
 func rowCardDisplayState(row InventoryEntry) domain.SessionState {
@@ -2327,6 +2346,80 @@ func formatSnapshotStatus(snapshot Snapshot, rows int) string {
 		parts = append(parts, snapshot.Freshness)
 	}
 	return strings.Join(parts, "  ")
+}
+
+func formatEntryUpdatedAge(entry InventoryEntry, now time.Time) string {
+	updatedAt := entryLastUpdatedAt(entry)
+	if updatedAt == nil || updatedAt.IsZero() {
+		return ""
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if now.Before(*updatedAt) {
+		return "0s"
+	}
+	return formatShortDuration(now.Sub(*updatedAt))
+}
+
+func entryLastUpdatedAt(entry InventoryEntry) *time.Time {
+	var latest time.Time
+	consider := func(candidate time.Time) {
+		if candidate.IsZero() {
+			return
+		}
+		candidate = candidate.UTC()
+		if latest.IsZero() || candidate.After(latest) {
+			latest = candidate
+		}
+	}
+	if entry.LastUpdatedAt != nil {
+		consider(*entry.LastUpdatedAt)
+	}
+	consider(entry.Task.RuntimeUpdatedAt)
+	consider(entry.Task.UpdatedAt)
+	if entry.Task.Session != nil {
+		consider(entry.Task.Session.UpdatedAt)
+	}
+	if entry.LastAttachedAt != nil {
+		consider(*entry.LastAttachedAt)
+	}
+	if entry.StartedAt != nil {
+		consider(*entry.StartedAt)
+	}
+	if latest.IsZero() {
+		return nil
+	}
+	return &latest
+}
+
+func formatShortDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d/time.Hour))
+	case d < 7*24*time.Hour:
+		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
+	case d < 30*24*time.Hour:
+		return fmt.Sprintf("%dw", int(d/(7*24*time.Hour)))
+	case d < 365*24*time.Hour:
+		return fmt.Sprintf("%dmo", int(d/(30*24*time.Hour)))
+	default:
+		return fmt.Sprintf("%dy", int(d/(365*24*time.Hour)))
+	}
+}
+
+func valueOrZeroTime(value *time.Time) time.Time {
+	if value == nil {
+		return time.Time{}
+	}
+	return *value
 }
 
 func ParseAzedarachSessionName(sessionName string) (ParsedSessionName, bool) {

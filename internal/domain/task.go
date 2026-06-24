@@ -52,6 +52,7 @@ type Task struct {
 	GitAdditions          int             `json:"git_additions,omitempty"`
 	GitDeletions          int             `json:"git_deletions,omitempty"`
 	Origin                string          `json:"origin,omitempty"`
+	RuntimeUpdatedAt      time.Time       `json:"runtime_updated_at,omitempty,omitzero"`
 	CreatedAt             time.Time       `json:"created_at"`
 	UpdatedAt             time.Time       `json:"updated_at"`
 }
