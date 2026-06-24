@@ -73,6 +73,56 @@ func TestLauncherStartClosesDaemonLog(t *testing.T) {
 	}
 }
 
+func TestOpenDaemonLogRotatesOversizedLogAndReturnsRawFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), logging.DaemonLogFileName)
+	seed, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("OpenFile(seed) error = %v", err)
+	}
+	if err := seed.Truncate(logging.DefaultMaxLogBytes); err != nil {
+		_ = seed.Close()
+		t.Fatalf("Truncate(seed) error = %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("Close(seed) error = %v", err)
+	}
+
+	logFile, err := openDaemonLog(path)
+	if err != nil {
+		t.Fatalf("openDaemonLog() error = %v", err)
+	}
+	rawFile, ok := logFile.(*os.File)
+	if !ok {
+		_ = logFile.Close()
+		t.Fatalf("openDaemonLog() returned %T, want *os.File for daemon stdio handoff", logFile)
+	}
+	if _, err := rawFile.WriteString("new\n"); err != nil {
+		_ = rawFile.Close()
+		t.Fatalf("WriteString(new log) error = %v", err)
+	}
+	if err := rawFile.Close(); err != nil {
+		t.Fatalf("Close(rawFile) error = %v", err)
+	}
+
+	if info, err := os.Stat(path + ".1"); err != nil {
+		t.Fatalf("Stat(rotated backup) error = %v", err)
+	} else if info.Size() != logging.DefaultMaxLogBytes {
+		t.Fatalf("rotated backup size = %d, want %d", info.Size(), logging.DefaultMaxLogBytes)
+	}
+	if got := mustReadFile(t, path); got != "new\n" {
+		t.Fatalf("active daemon log = %q, want new log content only", got)
+	}
+}
+
+func mustReadFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", path, err)
+	}
+	return string(b)
+}
+
 func TestNewLauncherNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")

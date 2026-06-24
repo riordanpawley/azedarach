@@ -107,7 +107,7 @@ func newSelectorLogger(cfg *config.Config) *slog.Logger {
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return logging.NewDiscardLogger(slog.LevelInfo)
 	}
-	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	logFile, err := logging.OpenRotatingFile(logPath, logging.DefaultMaxLogBytes, logging.DefaultLogBackups)
 	if err != nil {
 		return logging.NewDiscardLogger(slog.LevelInfo)
 	}

@@ -395,6 +395,13 @@ func (l *Launcher) readLockedPID() (int, bool) {
 }
 
 func openDaemonLog(path string) (io.WriteCloser, error) {
+	logFile, err := logging.OpenRotatingFile(path, logging.DefaultMaxLogBytes, logging.DefaultLogBackups)
+	if err != nil {
+		return nil, err
+	}
+	if err := logFile.Close(); err != nil {
+		return nil, err
+	}
 	return os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 }
 

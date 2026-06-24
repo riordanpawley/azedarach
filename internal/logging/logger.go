@@ -18,7 +18,7 @@ func NewTextFileLogger(path string, level slog.Leveler) *slog.Logger {
 		logger.Warn("failed to create log directory; falling back to stderr logger", "log_path", path, "error", err)
 		return logger
 	}
-	logFile, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	logFile, err := OpenRotatingFile(path, DefaultMaxLogBytes, DefaultLogBackups)
 	if err != nil {
 		logger := NewTextStreamLogger(os.Stderr, level)
 		logger.Warn("failed to open log file; falling back to stderr logger", "log_path", path, "error", err)
