@@ -28,6 +28,7 @@ func (m Model) Init() tea.Cmd {
 		m.attachLogStreamCmd(),
 		m.gitSyncService.FetchAndCheck(),
 		m.loadUIViewModeCmd(),
+		m.loadOrchestrationOverviewCmd(),
 	)
 }
 
@@ -276,6 +277,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, replayCmd)
 		} else if opCmd := m.loadOperationsCmd(); opCmd != nil {
 			cmds = append(cmds, opCmd)
+			cmds = append(cmds, m.loadOrchestrationOverviewCmd())
+		} else {
+			cmds = append(cmds, m.loadOrchestrationOverviewCmd())
 		}
 		if len(cmds) == 0 {
 			return m, nil
@@ -331,6 +335,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil && m.logger != nil {
 			m.logger.Debug("ui view-mode persist failed", "error", msg.err)
 		}
+		return m, nil
+
+	case orchestrationOverviewLoadedMsg:
+		m.orchestrationOverview = msg.projects
+		m.orchestrationOverviewHiddenProjects = msg.hiddenProjects
+		m.orchestrationOverviewHiddenTasks = msg.hiddenTasks
+		m.orchestrationOverviewBackendErrors = msg.backendErrors
+		m.orchestrationOverviewHiddenLabels = append([]string(nil), msg.hiddenLabels...)
+		m.orchestrationOverviewCursor = clampInt(m.orchestrationOverviewCursor, 0, max(0, orchestrationOverviewTaskCount(msg.projects)-1))
+		m.orchestrationOverviewLoadedAt = time.Now()
 		return m, nil
 
 	case issuesErrorMsg:
@@ -1010,7 +1024,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("Switched to project: %s", msg.project.Name),
 			Expires: time.Now().Add(3 * time.Second),
 		})
-		cmds := []tea.Cmd{m.waitForDaemonEventCmd()}
+		cmds := []tea.Cmd{m.waitForDaemonEventCmd(), m.loadOrchestrationOverviewCmd()}
 		if opCmd := m.loadOperationsCmd(); opCmd != nil {
 			cmds = append(cmds, opCmd)
 		}

@@ -35,6 +35,8 @@ func (m Model) View() string {
 	if currentOverlay == nil || overlayUsesFullScreen(currentOverlay) {
 		if m.viewMode == ViewModeCompact {
 			mainView = m.renderCompactView()
+		} else if m.viewMode == ViewModeOverview {
+			mainView = m.renderOrchestrationOverview()
 		} else {
 			mainView = m.renderBoardView()
 		}
@@ -59,6 +61,9 @@ func (m Model) View() string {
 	sb.SetAlertIndicator(m.recoveryNotificationIndicator())
 	if m.boardRefreshing {
 		sb.SetModeSuffix(m.spinner.View())
+	}
+	if currentOverlay == nil && m.viewMode == ViewModeOverview {
+		sb.SetHintBindings(orchestrationOverviewStatusBindings())
 	}
 	if current := currentOverlay; current != nil {
 		bindings := []keybinds.Binding(nil)
@@ -129,6 +134,16 @@ func (m Model) View() string {
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, contentView, statusBarView)
+}
+
+func orchestrationOverviewStatusBindings() []keybinds.Binding {
+	return []keybinds.Binding{
+		{Key: "j/k", Description: "move"},
+		{Key: "enter", Description: "task workspace"},
+		{Key: "Tab", Description: "switch view"},
+		{Key: "/", Description: "search"},
+		{Key: "f", Description: "filter"},
+	}
 }
 
 func (m Model) renderModalBackdrop(contentHeight int) string {

@@ -100,7 +100,20 @@ type ViewMode int
 const (
 	ViewModeBoard ViewMode = iota
 	ViewModeCompact
+	ViewModeOverview
 )
+
+type orchestrationProjectOverview struct {
+	Name          string
+	Path          string
+	ProjectID     string
+	Tasks         []domain.Task
+	MailByTask    map[string]protocol.MailEvent
+	Err           error
+	Revision      uint64
+	LastCheckedAt time.Time
+	Freshness     protocol.TaskListFreshness
+}
 
 type drillDownContext struct {
 	parentID   string
@@ -171,29 +184,36 @@ type Model struct {
 	editor *editor.Service
 
 	// UI state
-	overlayStack                  *overlay.Stack
-	createTaskOverlay             *overlay.CreateTaskOverlay
-	viewMode                      ViewMode
-	jumpMode                      *overlay.JumpMode
-	jumpTargets                   []string
-	mergePickMode                 *mergePickState
-	mouseDrag                     mouseDragState
-	mouseTap                      mouseTapState
-	viewportStarts                [board.DefaultColumnCount]int
-	columnViewportStart           int
-	drillDownParentID             string
-	drillDownParentName           string
-	drillDownTrail                []drillDownContext
-	pendingCreatedTaskID          string
-	pendingCreatedWorkspaceTaskID string
-	pendingUIOpenTaskID           string
-	pendingUIDrillDownTaskID      string
-	openCreatedTaskInWorkspace    bool
-	openSessionSelectorOnLoad     bool
-	sessionTreeFilterOnly         bool
-	runtimeSignalsByTask          map[string]board.RuntimeSignals
-	runtimeSignalWorktreeByTask   map[string]string
-	runtimeSignalBranchByTask     map[string]string
+	overlayStack                        *overlay.Stack
+	createTaskOverlay                   *overlay.CreateTaskOverlay
+	viewMode                            ViewMode
+	orchestrationOverview               []orchestrationProjectOverview
+	orchestrationOverviewLoadedAt       time.Time
+	orchestrationOverviewHiddenProjects int
+	orchestrationOverviewHiddenTasks    int
+	orchestrationOverviewBackendErrors  int
+	orchestrationOverviewHiddenLabels   []string
+	orchestrationOverviewCursor         int
+	jumpMode                            *overlay.JumpMode
+	jumpTargets                         []string
+	mergePickMode                       *mergePickState
+	mouseDrag                           mouseDragState
+	mouseTap                            mouseTapState
+	viewportStarts                      [board.DefaultColumnCount]int
+	columnViewportStart                 int
+	drillDownParentID                   string
+	drillDownParentName                 string
+	drillDownTrail                      []drillDownContext
+	pendingCreatedTaskID                string
+	pendingCreatedWorkspaceTaskID       string
+	pendingUIOpenTaskID                 string
+	pendingUIDrillDownTaskID            string
+	openCreatedTaskInWorkspace          bool
+	openSessionSelectorOnLoad           bool
+	sessionTreeFilterOnly               bool
+	runtimeSignalsByTask                map[string]board.RuntimeSignals
+	runtimeSignalWorktreeByTask         map[string]string
+	runtimeSignalBranchByTask           map[string]string
 
 	// Project
 	currentProject       string
@@ -635,6 +655,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // handleNormalMode processes keyboard input in normal mode
 func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	columns := m.buildColumns()
+	if m.viewMode == ViewModeOverview {
+		if next, cmd, handled := m.handleOverviewModeKey(msg); handled {
+			return next, cmd
+		}
+	}
 	switch msg.String() {
 	case overlay.EventLogHotkey:
 		return m, tea.Batch(
@@ -753,22 +778,32 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.openRecoveryOverlayCmd()
 
 	case keybinds.ActionToggleView: // Toggle view mode
-		if m.viewMode == ViewModeBoard {
+		switch m.viewMode {
+		case ViewModeBoard:
 			m.viewMode = ViewModeCompact
 			m.addToast(Toast{
 				Level:   ToastInfo,
 				Message: "Switched to compact view",
 				Expires: time.Now().Add(2 * time.Second),
 			})
-		} else {
+			return m, m.persistUIViewModeCmd(m.viewMode)
+		case ViewModeCompact:
+			m.viewMode = ViewModeOverview
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: "Switched to orchestration overview",
+				Expires: time.Now().Add(2 * time.Second),
+			})
+			return m, tea.Batch(m.persistUIViewModeCmd(m.viewMode), m.loadOrchestrationOverviewCmd())
+		default:
 			m.viewMode = ViewModeBoard
 			m.addToast(Toast{
 				Level:   ToastInfo,
 				Message: "Switched to board view",
 				Expires: time.Now().Add(2 * time.Second),
 			})
+			return m, m.persistUIViewModeCmd(m.viewMode)
 		}
-		return m, m.persistUIViewModeCmd(m.viewMode)
 	}
 
 	return m, nil
@@ -1114,6 +1149,14 @@ type uiViewModeLoadedMsg struct {
 type uiViewModeSavedMsg struct {
 	viewMode ViewMode
 	err      error
+}
+
+type orchestrationOverviewLoadedMsg struct {
+	projects       []orchestrationProjectOverview
+	hiddenProjects int
+	hiddenTasks    int
+	backendErrors  int
+	hiddenLabels   []string
 }
 
 type hookLogLoadedMsg struct {
@@ -1612,6 +1655,8 @@ func persistedValueForViewMode(mode ViewMode) (string, bool) {
 		return "board", true
 	case ViewModeCompact:
 		return "compact", true
+	case ViewModeOverview:
+		return "overview", true
 	default:
 		return "", false
 	}
@@ -1623,6 +1668,8 @@ func viewModeFromPersistedValue(value string) (ViewMode, bool) {
 		return ViewModeBoard, true
 	case "compact":
 		return ViewModeCompact, true
+	case "overview", "orchestration":
+		return ViewModeOverview, true
 	default:
 		return ViewModeBoard, false
 	}

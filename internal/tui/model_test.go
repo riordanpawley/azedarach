@@ -2729,7 +2729,7 @@ func TestModeTransitions(t *testing.T) {
 		}
 	})
 
-	t.Run("tab still toggles board view in normal mode", func(t *testing.T) {
+	t.Run("tab cycles board compact and overview in normal mode", func(t *testing.T) {
 		m.editor.EnterNormal()
 		m.viewMode = ViewModeBoard
 		m.nav.SelectTask("az-2", 0)
@@ -2749,10 +2749,23 @@ func TestModeTransitions(t *testing.T) {
 		}
 
 		result, _ = compactModel.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
+		overviewModel := result.(Model)
+
+		if overviewModel.viewMode != ViewModeOverview {
+			t.Fatalf("expected second tab to switch to overview, got %v", overviewModel.viewMode)
+		}
+		if got := getCursorPosition(overviewModel); got != before {
+			t.Fatalf("cursor position changed after tab to overview: before=%+v after=%+v", before, got)
+		}
+		if got := overviewModel.toasts[len(overviewModel.toasts)-1].Message; got != "Switched to orchestration overview" {
+			t.Fatalf("expected overview toast, got %q", got)
+		}
+
+		result, _ = overviewModel.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
 		boardModel := result.(Model)
 
 		if boardModel.viewMode != ViewModeBoard {
-			t.Fatalf("expected second tab to restore board view, got %v", boardModel.viewMode)
+			t.Fatalf("expected third tab to restore board view, got %v", boardModel.viewMode)
 		}
 		if got := getCursorPosition(boardModel); got != before {
 			t.Fatalf("cursor position changed after tab back to board view: before=%+v after=%+v", before, got)
@@ -2770,14 +2783,43 @@ func TestUIViewModePersistenceMapping(t *testing.T) {
 	if got, ok := persistedValueForViewMode(ViewModeCompact); !ok || got != "compact" {
 		t.Fatalf("persistedValueForViewMode(compact) = %q,%v", got, ok)
 	}
+	if got, ok := persistedValueForViewMode(ViewModeOverview); !ok || got != "overview" {
+		t.Fatalf("persistedValueForViewMode(overview) = %q,%v", got, ok)
+	}
 	if mode, ok := viewModeFromPersistedValue("compact"); !ok || mode != ViewModeCompact {
 		t.Fatalf("viewModeFromPersistedValue(compact) = %v,%v", mode, ok)
+	}
+	if mode, ok := viewModeFromPersistedValue("overview"); !ok || mode != ViewModeOverview {
+		t.Fatalf("viewModeFromPersistedValue(overview) = %v,%v", mode, ok)
 	}
 	if mode, ok := viewModeFromPersistedValue("board"); !ok || mode != ViewModeBoard {
 		t.Fatalf("viewModeFromPersistedValue(board) = %v,%v", mode, ok)
 	}
 	if _, ok := viewModeFromPersistedValue("bogus"); ok {
 		t.Fatal("viewModeFromPersistedValue(bogus) should be invalid")
+	}
+}
+
+func TestOrchestrationOverviewProjectsIncludesCurrentProjectWithRegistry(t *testing.T) {
+	m := newTestModel()
+	m.currentProject = "current-project"
+	m.repoDir = "/work/current-project"
+	m.projectRegistry = &config.ProjectsRegistry{
+		Projects: []config.Project{
+			{Name: "registered-project", Path: "/work/registered-project"},
+		},
+	}
+
+	projects := m.orchestrationOverviewProjects()
+	names := make(map[string]bool, len(projects))
+	for _, project := range projects {
+		names[project.name] = true
+	}
+	if !names["registered-project"] {
+		t.Fatalf("registered project missing from overview projects: %+v", projects)
+	}
+	if !names["current-project"] {
+		t.Fatalf("current project missing from overview projects: %+v", projects)
 	}
 }
 
