@@ -462,6 +462,58 @@ func TestClient_ListSessions(t *testing.T) {
 	}
 }
 
+func TestClient_ListPaneInfos(t *testing.T) {
+	tests := []struct {
+		name    string
+		output  string
+		runErr  error
+		want    []PaneInfo
+		wantErr bool
+	}{
+		{
+			name:   "multiple panes",
+			output: "az-1\t%1\naz-1\t%12\naz-2\t%3\n",
+			want: []PaneInfo{
+				{SessionName: "az-1", PaneID: "1"},
+				{SessionName: "az-1", PaneID: "12"},
+				{SessionName: "az-2", PaneID: "3"},
+			},
+		},
+		{
+			name:   "skips malformed and empty rows",
+			output: "\nmissing-tab\naz-1\t%1\n\t%2\naz-2\t\n",
+			want:   []PaneInfo{{SessionName: "az-1", PaneID: "1"}},
+		},
+		{
+			name:   "no panes",
+			output: "",
+			runErr: errors.New("no sessions"),
+			want:   []PaneInfo{},
+		},
+		{
+			name:    "runner error",
+			runErr:  errors.New("tmux failed"),
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &mockRunner{output: tt.output, err: tt.runErr}
+			client := NewClient(runner, slog.Default())
+
+			panes, err := client.ListPaneInfos(context.Background())
+
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, panes)
+		})
+	}
+}
+
 func TestClient_ListSessionInfos(t *testing.T) {
 	createdOne := time.Unix(1775209200, 0).UTC()
 	attachedOne := time.Unix(1775212800, 0).UTC()

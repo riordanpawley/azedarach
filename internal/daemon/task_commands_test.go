@@ -675,11 +675,11 @@ func TestHandleTaskListIgnoresAgentPaneStatusForTaskLifecycle(t *testing.T) {
 		t.Fatalf("tasks = %+v, want one task with session", payload.Tasks)
 	}
 	session := payload.Tasks[0].Session
-	if session.State != domain.SessionBusy {
-		t.Fatalf("session state = %s, want %s", session.State, domain.SessionBusy)
+	if session.State != domain.SessionPaused {
+		t.Fatalf("session state = %s, want %s", session.State, domain.SessionPaused)
 	}
-	if session.TotalCount != 1 || session.ActiveCount != 1 || session.PausedCount != 0 {
-		t.Fatalf("session counts = %d/%d/%d, want 1/1/0", session.TotalCount, session.ActiveCount, session.PausedCount)
+	if session.TotalCount != 1 || session.ActiveCount != 0 || session.PausedCount != 1 {
+		t.Fatalf("session counts = %d/%d/%d, want 1/0/1", session.TotalCount, session.ActiveCount, session.PausedCount)
 	}
 	if !session.TmuxAttached || session.TmuxAttachedCount != 1 {
 		t.Fatalf("tmux attachment = %v/%d, want true/1", session.TmuxAttached, session.TmuxAttachedCount)

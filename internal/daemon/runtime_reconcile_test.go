@@ -300,7 +300,7 @@ func (runtimeReconcileTestLock) Release() error {
 type emptyTmuxRunner struct{}
 
 func (emptyTmuxRunner) Run(_ context.Context, args ...string) (string, error) {
-	if len(args) > 0 && args[0] == "list-sessions" {
+	if len(args) > 0 && (args[0] == "list-sessions" || args[0] == "list-panes") {
 		return "", errors.New("no tmux sessions")
 	}
 	return "", nil

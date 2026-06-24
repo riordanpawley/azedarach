@@ -31,6 +31,7 @@ import (
 type testTmuxRunner struct {
 	mu              sync.Mutex
 	sessions        map[string]bool
+	panes           map[string][]string
 	newSessionCalls int
 	killEntered     chan struct{}
 	killRelease     chan struct{}
@@ -41,6 +42,7 @@ func newTestTmuxRunner(initialSession string) *testTmuxRunner {
 		sessions: map[string]bool{
 			initialSession: true,
 		},
+		panes:       map[string][]string{},
 		killEntered: make(chan struct{}),
 		killRelease: make(chan struct{}),
 	}
@@ -79,6 +81,18 @@ func (r *testTmuxRunner) Run(_ context.Context, args ...string) (string, error) 
 			names = append(names, name)
 		}
 		return strings.Join(names, "\n"), nil
+	case "list-panes":
+		lines := make([]string, 0, len(r.sessions))
+		for name := range r.sessions {
+			panes := r.panes[name]
+			if len(panes) == 0 {
+				panes = []string{"%1"}
+			}
+			for _, pane := range panes {
+				lines = append(lines, name+"\t"+pane)
+			}
+		}
+		return strings.Join(lines, "\n"), nil
 	case "new-session":
 		session := args[3]
 		r.newSessionCalls++
@@ -582,6 +596,7 @@ func TestSessionRestartAllForceBusyIncludesBusySessionsAndConfiguredFlags(t *tes
 
 type sessionStartTmuxRunner struct {
 	sessions          map[string]bool
+	panes             map[string][]string
 	windows           map[string]map[string]bool
 	commands          [][]string
 	env               map[string]map[string]string
@@ -596,6 +611,7 @@ type sessionStartTmuxRunner struct {
 func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
 	return &sessionStartTmuxRunner{
 		sessions: map[string]bool{},
+		panes:    map[string][]string{},
 		windows:  map[string]map[string]bool{},
 		env:      map[string]map[string]string{},
 	}
@@ -683,6 +699,18 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 			names = append(names, name)
 		}
 		return strings.Join(names, "\n"), nil
+	case "list-panes":
+		lines := make([]string, 0, len(r.sessions))
+		for name := range r.sessions {
+			panes := r.panes[name]
+			if len(panes) == 0 {
+				panes = []string{"%1"}
+			}
+			for _, pane := range panes {
+				lines = append(lines, name+"\t"+pane)
+			}
+		}
+		return strings.Join(lines, "\n"), nil
 	default:
 		return "", nil
 	}
@@ -2650,7 +2678,7 @@ func TestPersistTmuxSessionProjectionSnapshotMarksMissingSessionsStopped(t *test
 		},
 	}
 
-	if err := daemon.persistTmuxSessionRuntimeState(ctx, projectID, []tmux.SessionInfo{{Name: liveSessionID}}); err != nil {
+	if err := daemon.persistTmuxSessionRuntimeState(ctx, projectID, []tmux.SessionInfo{{Name: liveSessionID}}, nil); err != nil {
 		t.Fatalf("persistTmuxSessionRuntimeState: %v", err)
 	}
 
@@ -3194,6 +3222,25 @@ func TestSessionPauseAcceptsAgentScopedTargetWhenParentTmuxSessionExists(t *test
 	}
 	if row.State != daemonstate.SessionStatePaused {
 		t.Fatalf("agent session state = %s, want %s", row.State, daemonstate.SessionStatePaused)
+	}
+}
+
+func waitForSessionState(t *testing.T, store *daemonstate.Store, projectID, sessionID string, want daemonstate.SessionState) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		session, err := store.Session(projectID, sessionID)
+		if err == nil && session.State == want {
+			return
+		}
+		select {
+		case <-deadline:
+			if err != nil {
+				t.Fatalf("timed out waiting for session %s state %s: %v", sessionID, want, err)
+			}
+			t.Fatalf("timed out waiting for session %s state %s; got %s", sessionID, want, session.State)
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 
@@ -5157,6 +5204,259 @@ func TestRefreshSessionRuntimeStateIgnoresForeignProjectPrefixedTmuxSessions(t *
 	}
 }
 
+func TestRefreshExistingSessionRuntimeStateStopsDeadPaneRows(t *testing.T) {
+	const (
+		projectID = "proj-pane-dead"
+		issueID   = "az-1"
+	)
+	ctx := context.Background()
+	parentSessionID := naming.CanonicalSessionID(projectID, issueID)
+	deadPaneSessionID := parentSessionID + ".pane-1"
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            deadPaneSessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed dead pane projection: %v", err)
+	}
+	tmuxRunner := newTestTmuxRunner(parentSessionID)
+	tmuxRunner.panes[parentSessionID] = []string{"%2"}
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil {
+		t.Fatalf("refreshExistingSessionRuntimeState: %v", err)
+	}
+
+	row, found, err := runtimeStateStore.GetSessionState(ctx, projectID, deadPaneSessionID)
+	if err != nil {
+		t.Fatalf("get dead pane row: %v", err)
+	}
+	if !found {
+		t.Fatal("dead pane row not found")
+	}
+	if row.ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("dead pane observed state = %s, want %s", row.ObservedState, daemonstate.SessionStateStopped)
+	}
+	counts := d.sessionProjectionCountsForIssue(ctx, projectID, issueID)
+	if counts.Total != 0 || counts.Active != 0 || counts.Paused != 0 {
+		t.Fatalf("counts = %+v, want no live rows", counts)
+	}
+}
+
+func TestRefreshExistingSessionRuntimeStateKeepsLivePaneRowsBusy(t *testing.T) {
+	const (
+		projectID = "proj-pane-live"
+		issueID   = "az-1"
+	)
+	ctx := context.Background()
+	parentSessionID := naming.CanonicalSessionID(projectID, issueID)
+	paneSessionID := parentSessionID + ".pane-12"
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            paneSessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed live pane projection: %v", err)
+	}
+	tmuxRunner := newTestTmuxRunner(parentSessionID)
+	tmuxRunner.panes[parentSessionID] = []string{"%12"}
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil {
+		t.Fatalf("refreshExistingSessionRuntimeState: %v", err)
+	}
+
+	row, found, err := runtimeStateStore.GetSessionState(ctx, projectID, paneSessionID)
+	if err != nil {
+		t.Fatalf("get live pane row: %v", err)
+	}
+	if !found {
+		t.Fatal("live pane row not found")
+	}
+	if row.ObservedState != daemonstate.SessionStateRunning {
+		t.Fatalf("live pane observed state = %s, want %s", row.ObservedState, daemonstate.SessionStateRunning)
+	}
+	counts := d.sessionProjectionCountsForIssue(ctx, projectID, issueID)
+	if counts.Total != 1 || counts.Active != 1 || counts.Paused != 0 {
+		t.Fatalf("counts = %+v, want one active live row", counts)
+	}
+}
+
+func TestRefreshExistingSessionRuntimeStateMatchesUnsanitizedPersistedPaneID(t *testing.T) {
+	const (
+		projectID = "proj-pane-unsanitized"
+		issueID   = "az-1"
+	)
+	ctx := context.Background()
+	parentSessionID := naming.CanonicalSessionID(projectID, issueID)
+	paneSessionID := parentSessionID + ".pane-%12"
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            paneSessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed live pane projection: %v", err)
+	}
+	tmuxRunner := newTestTmuxRunner(parentSessionID)
+	tmuxRunner.panes[parentSessionID] = []string{"%12"}
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil {
+		t.Fatalf("refreshExistingSessionRuntimeState: %v", err)
+	}
+
+	row, found, err := runtimeStateStore.GetSessionState(ctx, projectID, paneSessionID)
+	if err != nil {
+		t.Fatalf("get live pane row: %v", err)
+	}
+	if !found {
+		t.Fatal("live pane row not found")
+	}
+	if row.ObservedState != daemonstate.SessionStateRunning {
+		t.Fatalf("live pane observed state = %s, want %s", row.ObservedState, daemonstate.SessionStateRunning)
+	}
+	counts := d.sessionProjectionCountsForIssue(ctx, projectID, issueID)
+	if counts.Total != 1 || counts.Active != 1 || counts.Paused != 0 {
+		t.Fatalf("counts = %+v, want one active live row", counts)
+	}
+}
+
+func TestRefreshExistingSessionRuntimeStateCountsMultipleLivePanes(t *testing.T) {
+	const (
+		projectID = "proj-pane-multi"
+		issueID   = "az-1"
+	)
+	ctx := context.Background()
+	parentSessionID := naming.CanonicalSessionID(projectID, issueID)
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	now := time.Now().UTC()
+	for _, paneSessionID := range []string{parentSessionID + ".pane-1", parentSessionID + ".pane-2"} {
+		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			ID:            paneSessionID,
+			IssueID:       issueID,
+			State:         daemonstate.SessionStateRunning,
+			ObservedState: daemonstate.SessionStateRunning,
+			UpdatedAt:     now,
+		}); err != nil {
+			t.Fatalf("seed live pane projection %s: %v", paneSessionID, err)
+		}
+	}
+	tmuxRunner := newTestTmuxRunner(parentSessionID)
+	tmuxRunner.panes[parentSessionID] = []string{"%1", "%2"}
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil {
+		t.Fatalf("refreshExistingSessionRuntimeState: %v", err)
+	}
+
+	counts := d.sessionProjectionCountsForIssue(ctx, projectID, issueID)
+	if counts.Total != 2 || counts.Active != 2 || counts.Paused != 0 {
+		t.Fatalf("counts = %+v, want two active live rows", counts)
+	}
+}
+
+func TestRefreshExistingSessionRuntimeStatePausedLivePaneWithDeadRunningPaneIsIdle(t *testing.T) {
+	const (
+		projectID = "proj-pane-idle"
+		issueID   = "az-1"
+	)
+	ctx := context.Background()
+	parentSessionID := naming.CanonicalSessionID(projectID, issueID)
+	oldPaneSessionID := parentSessionID + ".pane-1"
+	currentPaneSessionID := parentSessionID + ".pane-2"
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	now := time.Now().UTC()
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            oldPaneSessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning,
+		UpdatedAt:     now,
+	}); err != nil {
+		t.Fatalf("seed old running pane projection: %v", err)
+	}
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            currentPaneSessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStatePaused,
+		ObservedState: daemonstate.SessionStatePaused,
+		UpdatedAt:     now,
+	}); err != nil {
+		t.Fatalf("seed current paused pane projection: %v", err)
+	}
+	tmuxRunner := newTestTmuxRunner(parentSessionID)
+	tmuxRunner.panes[parentSessionID] = []string{"%2"}
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil {
+		t.Fatalf("refreshExistingSessionRuntimeState: %v", err)
+	}
+
+	oldRow, found, err := runtimeStateStore.GetSessionState(ctx, projectID, oldPaneSessionID)
+	if err != nil {
+		t.Fatalf("get old pane row: %v", err)
+	}
+	if !found {
+		t.Fatal("old pane row not found")
+	}
+	if oldRow.ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("old pane observed state = %s, want %s", oldRow.ObservedState, daemonstate.SessionStateStopped)
+	}
+	counts := d.sessionProjectionCountsForIssue(ctx, projectID, issueID)
+	if counts.Total != 1 || counts.Active != 0 || counts.Paused != 1 {
+		t.Fatalf("counts = %+v, want one paused live row", counts)
+	}
+}
+
 func collectSessionProjectionEvents(t *testing.T, ch <-chan protocol.EventEnvelope, count int) []protocol.EventEnvelope {
 	t.Helper()
 	events := make([]protocol.EventEnvelope, 0, count)
@@ -6341,7 +6641,7 @@ func TestPersistTmuxSessionRuntimeStateDefaultsRecoveredSessionActivityBusy(t *t
 		},
 	}
 
-	if err := d.persistTmuxSessionRuntimeState(context.Background(), projectID, []tmux.SessionInfo{{Name: sessionID}}); err != nil {
+	if err := d.persistTmuxSessionRuntimeState(context.Background(), projectID, []tmux.SessionInfo{{Name: sessionID}}, nil); err != nil {
 		t.Fatalf("persist tmux session runtime state: %v", err)
 	}
 
@@ -6387,7 +6687,7 @@ func TestPersistTmuxSessionRuntimeStatePreservesNoAgentActivity(t *testing.T) {
 		},
 	}
 
-	if err := d.persistTmuxSessionRuntimeState(context.Background(), projectID, []tmux.SessionInfo{{Name: sessionID}}); err != nil {
+	if err := d.persistTmuxSessionRuntimeState(context.Background(), projectID, []tmux.SessionInfo{{Name: sessionID}}, nil); err != nil {
 		t.Fatalf("persist tmux session runtime state: %v", err)
 	}
 
@@ -6574,7 +6874,7 @@ func TestPersistTmuxSessionProjectionSnapshotPreservesCachedStartedAt(t *testing
 		},
 	}
 
-	if err := d.persistTmuxSessionRuntimeState(context.Background(), projectID, []tmux.SessionInfo{{Name: sessionID}}); err != nil {
+	if err := d.persistTmuxSessionRuntimeState(context.Background(), projectID, []tmux.SessionInfo{{Name: sessionID}}, nil); err != nil {
 		t.Fatalf("persist tmux session runtime state: %v", err)
 	}
 
@@ -6616,7 +6916,7 @@ func TestPersistTmuxSessionRuntimeStateSeedsStartedAtFromTmuxCreatedAt(t *testin
 	if err := d.persistTmuxSessionRuntimeState(context.Background(), projectID, []tmux.SessionInfo{{
 		Name:      sessionID,
 		CreatedAt: &createdAt,
-	}}); err != nil {
+	}}, nil); err != nil {
 		t.Fatalf("persist tmux session runtime state: %v", err)
 	}
 
@@ -6632,7 +6932,7 @@ func TestPersistTmuxSessionRuntimeStateSeedsStartedAtFromTmuxCreatedAt(t *testin
 	}
 }
 
-func TestPersistTmuxSessionRuntimeStateKeepsAgentHookActivityWhenParentTmuxSessionLives(t *testing.T) {
+func TestPersistTmuxSessionRuntimeStateKeepsAgentHookActivityWhenPaneLives(t *testing.T) {
 	const (
 		projectID = "proj-hook-parent-live"
 		issueID   = "bih"
@@ -6674,7 +6974,7 @@ func TestPersistTmuxSessionRuntimeStateKeepsAgentHookActivityWhenParentTmuxSessi
 		},
 	}
 
-	if err := d.persistTmuxSessionRuntimeState(context.Background(), projectID, []tmux.SessionInfo{{Name: sessionID}}); err != nil {
+	if err := d.persistTmuxSessionRuntimeState(context.Background(), projectID, []tmux.SessionInfo{{Name: sessionID}}, []tmux.PaneInfo{{SessionName: sessionID, PaneID: "2021"}}); err != nil {
 		t.Fatalf("persist tmux session runtime state: %v", err)
 	}
 
@@ -6769,7 +7069,7 @@ func TestPersistTmuxSessionRuntimeStatePrefersTmuxCreatedAtOverSnapshotStartedAt
 	if err := d.persistTmuxSessionRuntimeState(context.Background(), projectID, []tmux.SessionInfo{{
 		Name:      sessionID,
 		CreatedAt: &createdAt,
-	}}); err != nil {
+	}}, nil); err != nil {
 		t.Fatalf("persist tmux session runtime state: %v", err)
 	}
 
@@ -6853,7 +7153,7 @@ func TestEnrichTasksWithSessionStateKeepsEarlierStartedAtAcrossSnapshotAndProjec
 	}
 }
 
-func TestEnrichTasksWithSessionStateIgnoresAgentScopedRowsWithoutParentSession(t *testing.T) {
+func TestEnrichTasksWithSessionStateIgnoresStoppedAgentScopedRows(t *testing.T) {
 	const (
 		projectID = "proj-multi-agent"
 		issueID   = "ciw"
@@ -6878,7 +7178,7 @@ func TestEnrichTasksWithSessionStateIgnoresAgentScopedRowsWithoutParentSession(t
 		ID:            "ciw.pane-1",
 		IssueID:       issueID,
 		State:         daemonstate.SessionStatePaused,
-		ObservedState: daemonstate.SessionStatePaused,
+		ObservedState: daemonstate.SessionStateStopped,
 		StartedAt:     &startedAt,
 		UpdatedAt:     startedAt,
 	}); err != nil {
@@ -6888,7 +7188,7 @@ func TestEnrichTasksWithSessionStateIgnoresAgentScopedRowsWithoutParentSession(t
 		ID:                "ciw.pane-2",
 		IssueID:           issueID,
 		State:             daemonstate.SessionStateAttached,
-		ObservedState:     daemonstate.SessionStateAttached,
+		ObservedState:     daemonstate.SessionStateStopped,
 		TmuxAttachedCount: 1,
 		StartedAt:         &secondStartedAt,
 		UpdatedAt:         secondStartedAt,
@@ -6902,11 +7202,55 @@ func TestEnrichTasksWithSessionStateIgnoresAgentScopedRowsWithoutParentSession(t
 		t.Fatalf("enriched task count = %d, want 1", len(enriched))
 	}
 	if enriched[0].Session != nil {
-		t.Fatalf("session = %+v, want nil because agent-scoped rows are not task lifecycle sessions", enriched[0].Session)
+		t.Fatalf("session = %+v, want nil because stopped pane rows are not active lifecycle sessions", enriched[0].Session)
 	}
 }
 
-func TestEnrichTasksWithSessionStateIgnoresAgentScopedRowsInFavorOfParentContainer(t *testing.T) {
+func TestEnrichTasksWithSessionStateCountsLivePaneRowsWithoutParentProjection(t *testing.T) {
+	const (
+		projectID = "proj-agent-pane-only"
+		issueID   = "cix"
+	)
+
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	parentSessionID := naming.CanonicalSessionID(projectID, issueID)
+	now := time.Date(2026, time.May, 25, 9, 0, 0, 0, time.UTC)
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            parentSessionID + ".pane-1",
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning,
+		StartedAt:     &now,
+		UpdatedAt:     now,
+	}); err != nil {
+		t.Fatalf("seed live pane session: %v", err)
+	}
+
+	tasks := []domain.Task{{ID: issueID, Title: "single live codex pane", Type: domain.TypeTask}}
+	enriched := d.enrichTasksWithSessionState(context.Background(), projectID, tasks)
+	if len(enriched) != 1 || enriched[0].Session == nil {
+		t.Fatalf("missing session in enriched task: %+v", enriched)
+	}
+	if enriched[0].Session.State != domain.SessionBusy {
+		t.Fatalf("session state = %v, want %v", enriched[0].Session.State, domain.SessionBusy)
+	}
+	if enriched[0].Session.TotalCount != 1 || enriched[0].Session.ActiveCount != 1 || enriched[0].Session.PausedCount != 0 {
+		t.Fatalf("session aggregate counts = total %d active %d paused %d, want 1/1/0", enriched[0].Session.TotalCount, enriched[0].Session.ActiveCount, enriched[0].Session.PausedCount)
+	}
+}
+
+func TestEnrichTasksWithSessionStateUsesPaneActivityOverParentContainer(t *testing.T) {
 	const (
 		projectID = "proj-agent-container"
 		issueID   = "cjz"
@@ -6952,10 +7296,10 @@ func TestEnrichTasksWithSessionStateIgnoresAgentScopedRowsInFavorOfParentContain
 	if len(enriched) != 1 || enriched[0].Session == nil {
 		t.Fatalf("missing session in enriched task: %+v", enriched)
 	}
-	if enriched[0].Session.State != domain.SessionBusy {
-		t.Fatalf("session state = %v, want %v", enriched[0].Session.State, domain.SessionBusy)
+	if enriched[0].Session.State != domain.SessionPaused {
+		t.Fatalf("session state = %v, want %v", enriched[0].Session.State, domain.SessionPaused)
 	}
-	if enriched[0].Session.TotalCount != 1 || enriched[0].Session.ActiveCount != 1 || enriched[0].Session.PausedCount != 0 {
-		t.Fatalf("session aggregate counts = total %d active %d paused %d, want 1/1/0", enriched[0].Session.TotalCount, enriched[0].Session.ActiveCount, enriched[0].Session.PausedCount)
+	if enriched[0].Session.TotalCount != 1 || enriched[0].Session.ActiveCount != 0 || enriched[0].Session.PausedCount != 1 {
+		t.Fatalf("session aggregate counts = total %d active %d paused %d, want 1/0/1", enriched[0].Session.TotalCount, enriched[0].Session.ActiveCount, enriched[0].Session.PausedCount)
 	}
 }
