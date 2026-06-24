@@ -1631,7 +1631,10 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		}
 	}
 	if targetWorktree == "" {
-		targetWorktree = strings.TrimSpace(d.cfg.RepoDir)
+		targetWorktree = strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
+		if targetWorktree == "" {
+			targetWorktree = strings.TrimSpace(d.resolveRepoDirForProject(projectID))
+		}
 		if targetWorktree == "" {
 			targetWorktree = "."
 		}

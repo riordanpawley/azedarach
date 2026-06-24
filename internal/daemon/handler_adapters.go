@@ -263,7 +263,7 @@ func (s issueSpecService) Pack(ctx context.Context, req protocol.SpecPackRequest
 	if stage == "" {
 		stage = protocol.SpecPackStageBrownfield
 	}
-	sharding, err := s.loadSpecPackSharding(read.Requirements)
+	sharding, err := s.loadSpecPackSharding(ctx, read.Requirements)
 	if err != nil {
 		return protocol.SpecPackResponseBody{}, err
 	}
@@ -278,13 +278,21 @@ func (s issueSpecService) Pack(ctx context.Context, req protocol.SpecPackRequest
 	}, nil
 }
 
-func (s issueSpecService) loadSpecPackSharding(requirements []protocol.SpecRequirement) (protocol.SpecPackSharding, error) {
+func (s issueSpecService) loadSpecPackSharding(ctx context.Context, requirements []protocol.SpecRequirement) (protocol.SpecPackSharding, error) {
 	sharding := protocol.SpecPackSharding{}
 	if s.daemon == nil {
 		return sharding, nil
 	}
 
-	sourcePath := filepath.Join(s.daemon.cfg.RepoDir, ".azedarach", "spec-shards.json")
+	projectID := daemonProjectIDFromContext(ctx)
+	repoDir := strings.TrimSpace(s.daemon.resolveRepoDirForProjectExact(projectID))
+	if repoDir == "" {
+		repoDir = strings.TrimSpace(s.daemon.resolveRepoDirForProject(projectID))
+	}
+	if repoDir == "" {
+		repoDir = strings.TrimSpace(s.daemon.cfg.RepoDir)
+	}
+	sourcePath := filepath.Join(repoDir, ".azedarach", "spec-shards.json")
 	content, err := os.ReadFile(sourcePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

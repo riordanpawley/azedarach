@@ -2348,6 +2348,145 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	}
 }
 
+func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx := context.Background()
+	logger := slog.Default()
+	bootstrapRepo := t.TempDir()
+	projectRepo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(bootstrapRepo, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir bootstrap .azedarach: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(projectRepo, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir project .azedarach: %v", err)
+	}
+	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{
+		Projects: []appconfig.Project{{Name: "other", Path: projectRepo}},
+	}); err != nil {
+		t.Fatalf("save projects registry: %v", err)
+	}
+	projectID, err := appconfig.ProjectIDForRoot(projectRepo)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot(project): %v", err)
+	}
+
+	issuesClient := issues.NewClient(projectRepo, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Integrate me",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	sourceWorktree := filepath.Join(projectRepo, "wt-"+taskID)
+	sourceBranch := "riordan/" + taskID + "/integrate"
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      sourceWorktree,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+
+	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
+	commands := make([]string, 0, 12)
+	var scratchWorktree string
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		commands = append(commands, strings.Join(args, " "))
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+			return worktreeListOutput, nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
+			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == projectRepo && args[2] == "rev-parse" && args[3] == "--git-common-dir":
+			return filepath.Join(projectRepo, ".git"), nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == projectRepo && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
+			return "target-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
+			return "merged-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "merge-base":
+			return "base-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff" && slices.Contains(args, "--name-status"):
+			return "M\tmain.go\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "rev-list":
+			return "0", nil
+		case len(args) >= 6 && args[0] == "-C" && args[1] == projectRepo && args[2] == "merge-tree":
+			return "tree-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "fetch":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "checkout":
+			return "", nil
+		case len(args) >= 7 && args[0] == "-C" && args[1] == projectRepo && args[2] == "worktree" && args[3] == "add":
+			scratchWorktree = args[5]
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "merge":
+			return "merge complete", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == projectRepo && args[2] == "reset" && args[3] == "--hard":
+			return "", nil
+		case len(args) >= 6 && args[0] == "-C" && args[1] == projectRepo && args[2] == "worktree" && args[3] == "remove":
+			return "", nil
+		default:
+			return "", nil
+		}
+	}}
+
+	manager := git.NewWorktreeManager(runner, projectRepo, logger)
+	d := &Daemon{
+		cfg: Config{RepoDir: bootstrapRepo, BaseBranch: "main", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			protocol.NormalizeProjectID(projectID): issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			protocol.NormalizeProjectID(projectID): runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			protocol.NormalizeProjectID(projectID): manager,
+		},
+		git:      git.NewClient(runner, logger),
+		revision: map[string]uint64{protocol.NormalizeProjectID(projectID): 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
+		logger:                  logger,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true)
+	if err != nil {
+		t.Fatalf("integrateTaskBeforeClose error: %v", err)
+	}
+	if !result.Integrated {
+		t.Fatalf("integration result = %+v, want integrated", result)
+	}
+	joined := strings.Join(commands, "\n")
+	if strings.Contains(joined, "-C "+bootstrapRepo+" ") {
+		t.Fatalf("git commands used bootstrap repo, want project repo:\n%s", joined)
+	}
+	if !strings.Contains(joined, "-C "+projectRepo+" worktree add --detach ") {
+		t.Fatalf("git commands missing project repo worktree add:\n%s", joined)
+	}
+}
+
 func TestTaskCloseCommandKeepsTargetCleanWhenScratchMergeDirties(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

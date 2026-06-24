@@ -34,7 +34,7 @@ type routeDevServerManager struct {
 func newRouteDevServerManager() *routeDevServerManager {
 	return &routeDevServerManager{
 		servers: map[string]*devserver.Server{
-			"afl": {Name: "afl", Command: "run", Status: "stopped"},
+			"default:afl": {Name: "afl", Command: "run", Status: "stopped", IssueID: "default:afl"},
 		},
 	}
 }

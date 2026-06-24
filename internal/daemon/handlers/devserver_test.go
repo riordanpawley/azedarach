@@ -54,19 +54,20 @@ func TestDevServerHandlerStartStopStatusFlow(t *testing.T) {
 	ctx := context.Background()
 
 	startedAt := time.Date(2026, time.March, 24, 13, 0, 0, 0, time.UTC)
-	manager.startFn = func(context.Context, string, string, string) (*devserver.Server, error) {
+	manager.startFn = func(_ context.Context, issueID, name, command string) (*devserver.Server, error) {
 		current = &devserver.Server{
-			ID:        "issue-1",
-			Name:      "issue-1",
+			ID:        issueID,
+			IssueID:   issueID,
+			Name:      name,
 			Port:      3001,
 			Status:    "running",
-			Command:   "bun run dev",
+			Command:   command,
 			StartedAt: startedAt,
 		}
 		return current, nil
 	}
 	manager.getFn = func(issueID string) (*devserver.Server, bool) {
-		if issueID != "issue-1" || current == nil {
+		if issueID != "default:issue-1" || current == nil {
 			return nil, false
 		}
 		return current, true
@@ -131,19 +132,21 @@ func TestDevServerHandlerStartStopStatusFlow(t *testing.T) {
 	}
 }
 
-func TestDevServerHandlerListReturnsAllServers(t *testing.T) {
+func TestDevServerHandlerListReturnsProjectServers(t *testing.T) {
 	handler := NewDevServerHandler(fakeDevServerManager{
 		listFn: func() []*devserver.Server {
 			return []*devserver.Server{
 				{
-					ID:      "issue-1",
+					ID:      "default:issue-1",
+					IssueID: "default:issue-1",
 					Name:    "issue-1",
 					Port:    3001,
 					Status:  "running",
 					Command: "bun run dev",
 				},
 				{
-					ID:      "issue-2",
+					ID:      "other:issue-2",
+					IssueID: "other:issue-2",
 					Name:    "issue-2",
 					Port:    3002,
 					Status:  "stopped",
@@ -168,11 +171,81 @@ func TestDevServerHandlerListReturnsAllServers(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &body); err != nil {
 		t.Fatalf("unmarshal list response: %v", err)
 	}
-	if len(body.Servers) != 2 {
+	if len(body.Servers) != 1 {
+		t.Fatalf("servers = %+v, want only default project server", body.Servers)
+	}
+	if body.Servers[0].IssueID != "issue-1" || body.Servers[0].Status != "running" {
 		t.Fatalf("servers = %+v", body.Servers)
 	}
-	if body.Servers[0].Status != "running" || body.Servers[1].Status != "stopped" {
-		t.Fatalf("servers = %+v", body.Servers)
+}
+
+func TestDevServerHandlerScopesSameIssueIDByProject(t *testing.T) {
+	servers := map[string]*devserver.Server{}
+	handler := NewDevServerHandler(fakeDevServerManager{
+		getFn: func(issueID string) (*devserver.Server, bool) {
+			srv, ok := servers[issueID]
+			return srv, ok
+		},
+		startFn: func(_ context.Context, issueID, name, command string) (*devserver.Server, error) {
+			srv := &devserver.Server{
+				ID:      issueID,
+				IssueID: issueID,
+				Name:    name,
+				Status:  "running",
+				Command: command,
+			}
+			servers[issueID] = srv
+			return srv, nil
+		},
+		listFn: func() []*devserver.Server {
+			out := make([]*devserver.Server, 0, len(servers))
+			for _, srv := range servers {
+				out = append(out, srv)
+			}
+			return out
+		},
+	})
+
+	request := func(projectID string, command string) protocol.RequestEnvelope {
+		return protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       naming.RequestID("req-" + projectID + "-" + command),
+			Kind:            protocol.EnvelopeKindCommand,
+			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+			Command:         command,
+			Body:            mustJSON(t, map[string]string{"issue_id": "az-1"}),
+		}
+	}
+	for _, projectID := range []string{"proj-a", "proj-b"} {
+		resp := handler.Handle(context.Background(), request(projectID, CommandDevServerStart))
+		if !resp.OK {
+			t.Fatalf("start %s response = %+v", projectID, resp)
+		}
+	}
+	if _, ok := servers["proj-a:az-1"]; !ok {
+		t.Fatalf("missing proj-a scoped server: %+v", servers)
+	}
+	if _, ok := servers["proj-b:az-1"]; !ok {
+		t.Fatalf("missing proj-b scoped server: %+v", servers)
+	}
+
+	listResp := handler.Handle(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-list-a",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: "proj-a"},
+		Command:         CommandDevServerList,
+		Body:            mustJSON(t, map[string]string{}),
+	})
+	if !listResp.OK {
+		t.Fatalf("list response = %+v", listResp)
+	}
+	var body devServerListBody
+	if err := json.Unmarshal(listResp.Body, &body); err != nil {
+		t.Fatalf("unmarshal list response: %v", err)
+	}
+	if len(body.Servers) != 1 || body.Servers[0].IssueID != "az-1" {
+		t.Fatalf("project-scoped list = %+v, want only proj-a az-1", body.Servers)
 	}
 }
 
@@ -181,7 +254,7 @@ func TestDevServerHandlerInvalidStateAndFailureMappings(t *testing.T) {
 		current := &devserver.Server{ID: "issue-1", Name: "issue-1", Status: "running"}
 		handler := NewDevServerHandler(fakeDevServerManager{
 			getFn: func(issueID string) (*devserver.Server, bool) {
-				return current, issueID == "issue-1"
+				return current, issueID == "default:issue-1"
 			},
 		})
 		resp := handler.Handle(context.Background(), protocol.RequestEnvelope{

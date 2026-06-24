@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
@@ -231,6 +232,81 @@ func TestIssueSpecServicePackLoadsShardingSidecar(t *testing.T) {
 	}
 	if len(out.Sharding.Missing) != 0 {
 		t.Fatalf("sharding missing = %+v, want none", out.Sharding.Missing)
+	}
+}
+
+func TestIssueSpecServicePackLoadsShardingSidecarFromRequestProject(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx := context.Background()
+	baseClient, baseRepo := newTestIssueClient(t)
+	otherClient, otherRepo := newTestIssueClient(t)
+	_ = baseClient
+
+	issueID, err := otherClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "implementation issue",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	_, err = otherClient.CreateRequirement(ctx, issues.CreateRequirementParams{
+		LocalID: "REQ-PROJECT",
+		Title:   "project requirement",
+	})
+	if err != nil {
+		t.Fatalf("create requirement: %v", err)
+	}
+	_, err = otherClient.AddSpecLink(ctx, issues.AddSpecLinkParams{
+		IssueID:       issueID,
+		RequirementID: "REQ-PROJECT",
+		Role:          issues.LinkRoleImplements,
+	})
+	if err != nil {
+		t.Fatalf("add spec link: %v", err)
+	}
+
+	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{
+		Projects: []appconfig.Project{{Name: "other", Path: otherRepo}},
+	}); err != nil {
+		t.Fatalf("save projects registry: %v", err)
+	}
+	baseSidecar := filepath.Join(baseRepo, ".azedarach", "spec-shards.json")
+	if err := os.WriteFile(baseSidecar, []byte(`{"REQ-PROJECT":{"slice":"bootstrap"}}`), 0o644); err != nil {
+		t.Fatalf("write base sidecar: %v", err)
+	}
+	otherSidecar := filepath.Join(otherRepo, ".azedarach", "spec-shards.json")
+	if err := os.WriteFile(otherSidecar, []byte(`{"REQ-PROJECT":{"slice":"request-project","test_pack":"pack-project"}}`), 0o644); err != nil {
+		t.Fatalf("write other sidecar: %v", err)
+	}
+
+	otherProjectID, err := appconfig.ProjectIDForRoot(otherRepo)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot(other): %v", err)
+	}
+	d := &Daemon{
+		cfg: Config{RepoDir: baseRepo},
+		issueClientsByProject: map[string]*issues.Client{
+			protocol.NormalizeProjectID(otherProjectID): otherClient,
+		},
+		issueClientsByRoot: map[string]*issues.Client{
+			daemonStoreRootKey(otherRepo): otherClient,
+		},
+	}
+	service := issueSpecService{daemon: d}
+	out, err := service.Pack(withDaemonProjectIDContext(ctx, "other"), protocol.SpecPackRequestBody{
+		IssueID: naming.IssueID(issueID),
+		Stage:   protocol.SpecPackStageBrownfield,
+	})
+	if err != nil {
+		t.Fatalf("pack: %v", err)
+	}
+	entry, ok := out.Sharding.ByRequirement["REQ-PROJECT"]
+	if !ok {
+		t.Fatalf("missing project sharding entry: %+v", out.Sharding)
+	}
+	if entry.Slice != "request-project" || entry.TestPack != "pack-project" {
+		t.Fatalf("sharding entry = %+v, want request project sidecar", entry)
 	}
 }
 
