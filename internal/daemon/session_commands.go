@@ -2793,8 +2793,14 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 			TmuxAttached:      counts.TmuxAttachedCount > 0,
 			TmuxAttachedCount: counts.TmuxAttachedCount,
 			StartedAt:         startedAt,
+			UpdatedAt:         session.UpdatedAt,
 			Worktree:          worktree,
 		}
+		runtimeUpdatedAt := tasks[i].RuntimeUpdatedAt
+		if runtimeUpdatedAt.IsZero() {
+			runtimeUpdatedAt = tasks[i].UpdatedAt
+		}
+		tasks[i].RuntimeUpdatedAt = laterTime(runtimeUpdatedAt, session.UpdatedAt)
 	}
 
 	return tasks

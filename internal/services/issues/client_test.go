@@ -874,7 +874,7 @@ func TestClient_GetManyMetadataWithRuntimeIncludesCachedGitProjection(t *testing
 	require.NoError(t, err)
 	defer db.Close()
 
-	updatedAt := time.Date(2026, time.June, 17, 12, 0, 0, 0, time.UTC)
+	updatedAt := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, activity, activity_source, started_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -903,6 +903,8 @@ func TestClient_GetManyMetadataWithRuntimeIncludesCachedGitProjection(t *testing
 	assert.Equal(t, 21, got.GitDeletions)
 	assert.Equal(t, 1, got.GitAheadCount)
 	assert.Equal(t, 10, got.GitBehindCount)
+	assert.Truef(t, got.Session.UpdatedAt.Equal(updatedAt), "session updated_at = %v, want %v", got.Session.UpdatedAt, updatedAt)
+	assert.Truef(t, got.RuntimeUpdatedAt.Equal(updatedAt), "runtime updated_at = %v, want %v", got.RuntimeUpdatedAt, updatedAt)
 }
 
 func TestTaskRuntimeProjectionQueryFiltersRuntimeCTEsForRequestedIDs(t *testing.T) {

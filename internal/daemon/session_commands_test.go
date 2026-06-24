@@ -6466,8 +6466,9 @@ func TestEnrichTasksWithSessionStateSeedsStartedAtFromSnapshot(t *testing.T) {
 		t.Fatalf("seed projection session: %v", err)
 	}
 
+	runtimeUpdatedAt := time.Now().UTC().Add(time.Hour)
 	tasks := []domain.Task{
-		{ID: issueID, Title: "session elapsed should render", Type: domain.TypeTask},
+		{ID: issueID, Title: "session elapsed should render", Type: domain.TypeTask, RuntimeUpdatedAt: runtimeUpdatedAt},
 	}
 	enriched := d.enrichTasksWithSessionState(context.Background(), projectID, tasks)
 	if len(enriched) != 1 {
@@ -6481,6 +6482,9 @@ func TestEnrichTasksWithSessionStateSeedsStartedAtFromSnapshot(t *testing.T) {
 	}
 	if !enriched[0].Session.StartedAt.Equal(sessionSnapshot.StartedAt.UTC()) {
 		t.Fatalf("started_at = %v, want %v", enriched[0].Session.StartedAt, sessionSnapshot.StartedAt.UTC())
+	}
+	if !enriched[0].RuntimeUpdatedAt.Equal(runtimeUpdatedAt) {
+		t.Fatalf("runtime_updated_at = %v, want preserved newer %v", enriched[0].RuntimeUpdatedAt, runtimeUpdatedAt)
 	}
 }
 
