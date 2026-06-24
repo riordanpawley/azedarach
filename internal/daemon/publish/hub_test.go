@@ -153,9 +153,44 @@ func TestPriorityTaskMutationDoesNotEvictQueuedTaskMutations(t *testing.T) {
 	expectClosed(t, ch)
 }
 
-func TestTelemetryLaneOverflowsIndependentlyOfDurableLane(t *testing.T) {
+func TestProjectionLaneCoalescesInsteadOfOverflowing(t *testing.T) {
+	h := NewHub(32, 1, slog.Default())
+	ch, cancel := h.Subscribe("proj", 0)
+	defer cancel()
+
+	h.Publish(makeEvent("proj", 1, protocol.EventGitStatusUpdated))
+	h.Publish(makeEvent("proj", 2, protocol.EventGitStatusUpdated))
+	h.Publish(makeEvent("proj", 3, protocol.EventGitStatusUpdated))
+
+	recvUntilRevision(t, ch, 3)
+
+	h.Publish(makeEvent("proj", 4, protocol.EventGitStatusUpdated))
+	if got := recv(t, ch); got.Revision != 4 {
+		t.Fatalf("post-coalesce revision = %d, want 4", got.Revision)
+	}
+}
+
+func TestSessionProjectionLaneCoalescesInsteadOfOverflowing(t *testing.T) {
+	h := NewHub(32, 1, slog.Default())
+	ch, cancel := h.Subscribe("proj", 0)
+	defer cancel()
+
+	h.Publish(makeEvent("proj", 1, protocol.EventSessionUpdated))
+	h.Publish(makeEvent("proj", 2, protocol.EventSessionUpdated))
+	h.Publish(makeEvent("proj", 3, protocol.EventSessionUpdated))
+
+	recvUntilRevision(t, ch, 3)
+
+	h.Publish(makeEvent("proj", 4, protocol.EventSessionUpdated))
+	if got := recv(t, ch); got.Revision != 4 {
+		t.Fatalf("post-coalesce revision = %d, want 4", got.Revision)
+	}
+}
+
+func TestProjectionLaneCoalescesIndependentlyOfDurableLane(t *testing.T) {
 	h := NewHub(32, 2, slog.Default())
-	ch, _ := h.Subscribe("proj", 0)
+	ch, cancel := h.Subscribe("proj", 0)
+	defer cancel()
 
 	h.Publish(makeEvent("proj", 1, protocol.EventGitStatusUpdated))
 	h.Publish(makeEvent("proj", 2, protocol.EventWorktreeProjectionUpdated))
@@ -163,7 +198,17 @@ func TestTelemetryLaneOverflowsIndependentlyOfDurableLane(t *testing.T) {
 	h.Publish(makeEvent("proj", 4, protocol.EventGitStatusUpdated))
 	h.Publish(makeEvent("proj", 5, protocol.EventWorktreeProjectionUpdated))
 
-	expectClosed(t, ch)
+	sawTaskMutation := false
+	sawLatestProjection := false
+	for !sawTaskMutation || !sawLatestProjection {
+		got := recv(t, ch)
+		if got.Revision == 3 && got.Event == protocol.EventTaskCreated {
+			sawTaskMutation = true
+		}
+		if got.Revision == 5 && got.Event == protocol.EventWorktreeProjectionUpdated {
+			sawLatestProjection = true
+		}
+	}
 }
 
 func TestTelemetryLaneCapacityRecoversAfterSubscriberDrain(t *testing.T) {
@@ -190,11 +235,27 @@ func TestTelemetryLaneCapacityRecoversAfterSubscriberDrain(t *testing.T) {
 func recv(t *testing.T, ch <-chan protocol.EventEnvelope) protocol.EventEnvelope {
 	t.Helper()
 	select {
-	case evt := <-ch:
+	case evt, ok := <-ch:
+		if !ok {
+			t.Fatal("subscriber channel closed unexpectedly")
+		}
 		return evt
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for event")
 		return protocol.EventEnvelope{}
+	}
+}
+
+func recvUntilRevision(t *testing.T, ch <-chan protocol.EventEnvelope, revision uint64) protocol.EventEnvelope {
+	t.Helper()
+	for {
+		evt := recv(t, ch)
+		if evt.Revision == revision {
+			return evt
+		}
+		if evt.Revision > revision {
+			t.Fatalf("received revision %d after expected revision %d", evt.Revision, revision)
+		}
 	}
 }
 

@@ -196,9 +196,11 @@ func (s *subscriber) trySend(evt protocol.EventEnvelope) bool {
 	if s.closed {
 		return false
 	}
-	if isTelemetryEvent(evt) {
+	if isCoalescibleProjectionEvent(evt) {
 		if s.telemetryQueued >= s.laneLimit {
-			return false
+			if !s.dropQueuedProjectionEventLocked(evt) {
+				return false
+			}
 		}
 		s.queue = append(s.queue, evt)
 		s.telemetryQueued++
@@ -237,7 +239,7 @@ func (s *subscriber) pump() {
 			continue
 		}
 		evt = s.queue[0]
-		if isTelemetryEvent(evt) {
+		if isCoalescibleProjectionEvent(evt) {
 			s.telemetryQueued--
 		} else {
 			s.durableQueued--
@@ -270,10 +272,36 @@ func (s *subscriber) close() {
 	close(s.done)
 }
 
-func isTelemetryEvent(evt protocol.EventEnvelope) bool {
+func (s *subscriber) dropQueuedProjectionEventLocked(next protocol.EventEnvelope) bool {
+	dropIndex := -1
+	for i, queued := range s.queue {
+		if isCoalescibleProjectionEvent(queued) && queued.Event == next.Event {
+			dropIndex = i
+			break
+		}
+	}
+	if dropIndex == -1 {
+		for i, queued := range s.queue {
+			if isCoalescibleProjectionEvent(queued) {
+				dropIndex = i
+				break
+			}
+		}
+	}
+	if dropIndex == -1 {
+		return false
+	}
+	copy(s.queue[dropIndex:], s.queue[dropIndex+1:])
+	s.queue = s.queue[:len(s.queue)-1]
+	s.telemetryQueued--
+	return true
+}
+
+func isCoalescibleProjectionEvent(evt protocol.EventEnvelope) bool {
 	switch evt.Event {
 	case protocol.EventGitStatusUpdated,
-		protocol.EventWorktreeProjectionUpdated:
+		protocol.EventWorktreeProjectionUpdated,
+		protocol.EventSessionUpdated:
 		return true
 	default:
 		return false
@@ -289,7 +317,7 @@ func truncateCatchupByLane(events []protocol.EventEnvelope, laneLimit int) []pro
 	keep := make([]protocol.EventEnvelope, 0, laneLimit*2)
 	for i := len(events) - 1; i >= 0; i-- {
 		evt := events[i]
-		if isTelemetryEvent(evt) {
+		if isCoalescibleProjectionEvent(evt) {
 			if telemetryCount >= laneLimit {
 				continue
 			}
