@@ -31,6 +31,12 @@ type SessionInfo struct {
 	AttachedCount  int
 }
 
+// PaneInfo captures the tmux session and pane identity for liveness checks.
+type PaneInfo struct {
+	SessionName string
+	PaneID      string
+}
+
 // NewClient creates a new tmux client with dependency injection
 func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
 	return &Client{
@@ -264,6 +270,47 @@ func (c *Client) ListSessions(ctx context.Context) ([]string, error) {
 	return sessions, nil
 }
 
+// ListPaneInfos returns all tmux panes with their owning session name.
+// Uses: tmux list-panes -a -F "#{session_name}\t#{pane_id}"
+func (c *Client) ListPaneInfos(ctx context.Context) ([]PaneInfo, error) {
+	c.logger.Debug("listing tmux panes")
+
+	out, err := c.runner.Run(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_id}")
+	if err != nil {
+		if isNoTmuxSessionsError(err) {
+			c.logger.Debug("no tmux panes found")
+			return []PaneInfo{}, nil
+		}
+		return nil, &domain.TmuxError{Op: "list-panes", Err: err}
+	}
+
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) == 1 && strings.TrimSpace(lines[0]) == "" {
+		return []PaneInfo{}, nil
+	}
+
+	panes := make([]PaneInfo, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		sessionName := strings.TrimSpace(parts[0])
+		paneID := sanitizePaneID(parts[1])
+		if sessionName == "" || paneID == "" {
+			continue
+		}
+		panes = append(panes, PaneInfo{SessionName: sessionName, PaneID: paneID})
+	}
+
+	c.logger.Debug("tmux panes listed", "count", len(panes))
+	return panes, nil
+}
+
 // ListSessionInfos returns tmux sessions with timestamps and client attachment count.
 // Uses: tmux list-sessions -F "#{session_name}\t#{session_created}\t#{session_last_attached}\t#{session_path}\t#{session_attached}"
 func (c *Client) ListSessionInfos(ctx context.Context) ([]SessionInfo, error) {
@@ -313,6 +360,27 @@ func (c *Client) ListSessionInfos(ctx context.Context) ([]SessionInfo, error) {
 
 	c.logger.Debug("tmux sessions listed", "count", len(sessions))
 	return sessions, nil
+}
+
+func sanitizePaneID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+		}
+	}
+	return strings.Trim(b.String(), "-_.")
 }
 
 func isNoTmuxSessionsError(err error) bool {

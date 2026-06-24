@@ -78,6 +78,7 @@ type sessionProjectionCounts struct {
 	Total             int
 	Active            int
 	Paused            int
+	PaneScoped        int
 	TmuxAttachedCount int
 }
 
@@ -249,10 +250,25 @@ func nonAgentSessionProjectionByIssue(sessions []daemonstate.Session, namingScop
 
 func sessionProjectionCountsByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]sessionProjectionCounts {
 	byIssueKey := make(map[string]sessionProjectionCounts, len(sessions))
+	liveAgentRowsByKey := make(map[string]int, len(sessions))
 	for _, session := range sessions {
-		if isAgentScopedSessionID(session.ID) {
+		if !isAgentScopedSessionID(session.ID) {
 			continue
 		}
+		state := session.State
+		observed := session.ObservedState
+		if strings.TrimSpace(string(observed)) == "" {
+			observed = state
+		}
+		if state == daemonstate.SessionStateStopped || observed == daemonstate.SessionStateStopped {
+			continue
+		}
+		key := sessionKey(sessionProjectionIssueID(session, namingScope))
+		if key != "" {
+			liveAgentRowsByKey[key]++
+		}
+	}
+	for _, session := range sessions {
 		state := session.State
 		observed := session.ObservedState
 		if strings.TrimSpace(string(observed)) == "" {
@@ -266,8 +282,16 @@ func sessionProjectionCountsByIssueKey(sessions []daemonstate.Session, namingSco
 			continue
 		}
 		counts := byIssueKey[key]
+		if !isAgentScopedSessionID(session.ID) && liveAgentRowsByKey[key] > 0 {
+			counts.TmuxAttachedCount += session.TmuxAttachedCount
+			byIssueKey[key] = counts
+			continue
+		}
 		counts.TmuxAttachedCount += session.TmuxAttachedCount
 		counts.Total++
+		if isAgentScopedSessionID(session.ID) {
+			counts.PaneScoped++
+		}
 		switch state {
 		case daemonstate.SessionStatePaused:
 			counts.Paused++
@@ -281,6 +305,40 @@ func sessionProjectionCountsByIssueKey(sessions []daemonstate.Session, namingSco
 
 func isAgentScopedSessionID(sessionID string) bool {
 	return strings.Contains(strings.TrimSpace(sessionID), ".pane-")
+}
+
+func agentScopedSessionParentAndPane(sessionID string) (string, string, bool) {
+	sessionID = strings.TrimSpace(sessionID)
+	parent, paneID, ok := strings.Cut(sessionID, ".pane-")
+	if !ok || strings.TrimSpace(parent) == "" || strings.TrimSpace(paneID) == "" {
+		return "", "", false
+	}
+	paneID = sanitizeAgentScopedPaneID(paneID)
+	if paneID == "" {
+		return "", "", false
+	}
+	return strings.TrimSpace(parent), paneID, true
+}
+
+func sanitizeAgentScopedPaneID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+		}
+	}
+	return strings.Trim(b.String(), "-_.")
 }
 
 func sessionProjectionForReconcileByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]daemonstate.Session {
@@ -1002,36 +1060,11 @@ func (d *Daemon) handleSessionPause(ctx context.Context, req protocol.RequestEnv
 	return d.commandOutput(req, fmt.Sprintf("Paused session: %s\n", cmd.IssueID)), nil
 }
 
-func (d *Daemon) handleSessionPauseDebounced(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-	cmd, _, ok := d.decodeSessionRequest(req, true)
-	if !ok {
-		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
-	}
-	if d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("daemon session debounced pause requested",
-			"project_id", cmd.ProjectID,
-			"issue_id", cmd.IssueID,
-			"session_id", cmd.SessionID,
-		)
-	}
-	exists, err := d.sessionLifecycleTargetExists(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID)
-	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-	}
-	if !exists {
-		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found: %s (use 'az start %s' to create)", cmd.IssueID, cmd.IssueID)), nil
-	}
-	generation := d.scheduleAgentHookIdle(cmd.ProjectID, cmd.SessionID)
-	go d.applyAgentHookIdleAfterQuietWindow(req, cmd, generation)
-	return d.commandOutput(req, fmt.Sprintf("Scheduled idle check for session: %s\n", cmd.IssueID)), nil
-}
-
 func (d *Daemon) handleSessionResume(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	cmd, _, ok := d.decodeSessionRequest(req, true)
 	if !ok {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
 	}
-	d.cancelAgentHookIdle(cmd.ProjectID, cmd.SessionID)
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session resume requested",
 			"project_id", cmd.ProjectID,
@@ -1075,75 +1108,6 @@ func (d *Daemon) handleSessionResume(ctx context.Context, req protocol.RequestEn
 		)
 	}
 	return d.commandOutput(req, fmt.Sprintf("Resumed session: %s\n", cmd.IssueID)), nil
-}
-
-func (d *Daemon) agentHookIdleKey(projectID, sessionID string) string {
-	return strings.TrimSpace(projectID) + "\x00" + strings.TrimSpace(sessionID)
-}
-
-func (d *Daemon) scheduleAgentHookIdle(projectID, sessionID string) uint64 {
-	key := d.agentHookIdleKey(projectID, sessionID)
-	d.agentHookIdleMu.Lock()
-	defer d.agentHookIdleMu.Unlock()
-	if d.agentHookIdleGeneration == nil {
-		d.agentHookIdleGeneration = map[string]uint64{}
-	}
-	d.agentHookIdleGeneration[key]++
-	return d.agentHookIdleGeneration[key]
-}
-
-func (d *Daemon) cancelAgentHookIdle(projectID, sessionID string) {
-	key := d.agentHookIdleKey(projectID, sessionID)
-	d.agentHookIdleMu.Lock()
-	if d.agentHookIdleGeneration == nil {
-		d.agentHookIdleGeneration = map[string]uint64{}
-	}
-	d.agentHookIdleGeneration[key]++
-	d.agentHookIdleMu.Unlock()
-}
-
-func (d *Daemon) agentHookIdleGenerationMatches(projectID, sessionID string, generation uint64) bool {
-	key := d.agentHookIdleKey(projectID, sessionID)
-	d.agentHookIdleMu.Lock()
-	defer d.agentHookIdleMu.Unlock()
-	return d.agentHookIdleGeneration[key] == generation
-}
-
-func (d *Daemon) applyAgentHookIdleAfterQuietWindow(req protocol.RequestEnvelope, cmd resolvedSessionTarget, generation uint64) {
-	delay := d.agentHookIdleDelay
-	if delay <= 0 {
-		delay = defaultAgentHookIdleQuietWindow
-	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	<-timer.C
-	if !d.agentHookIdleGenerationMatches(cmd.ProjectID, cmd.SessionID, generation) {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), defaultAgentHookIdleApplyTimeout)
-	defer cancel()
-	if !d.sessionLifecycleTransitionNeeded(cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonstate.SessionStatePaused) {
-		return
-	}
-	if err := d.applySessionLifecycleTransition(
-		ctx,
-		req,
-		cmd.ProjectID,
-		cmd.SessionID,
-		cmd.IssueID,
-		daemonhandlers.CommandSessionPause,
-	); err != nil {
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.Debug("daemon session debounced pause failed",
-				"project_id", cmd.ProjectID,
-				"issue_id", cmd.IssueID,
-				"session_id", cmd.SessionID,
-				"error", err,
-			)
-		}
-		return
-	}
-	d.refreshRuntimeForIssueMutationAsync(cmd.ProjectID, cmd.IssueID, daemonhandlers.CommandSessionPause)
 }
 
 func (d *Daemon) handleSessionStop(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -2804,6 +2768,14 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 				state = domain.SessionBusy
 			}
 		}
+		counts := countsByKey[taskKey]
+		if counts.PaneScoped > 0 {
+			if counts.Active > 0 {
+				state = domain.SessionBusy
+			} else {
+				state = domain.SessionPaused
+			}
+		}
 		activity, activitySource := sessionActivityLabelForDisplay(sessionHookActivity{}, session)
 		if display := activityByKey[taskKey]; display.Activity != "" {
 			activity = display.Activity
@@ -2814,11 +2786,11 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 			State:             state,
 			Activity:          activity,
 			ActivitySource:    activitySource,
-			TotalCount:        countsByKey[taskKey].Total,
-			ActiveCount:       countsByKey[taskKey].Active,
-			PausedCount:       countsByKey[taskKey].Paused,
-			TmuxAttached:      countsByKey[taskKey].TmuxAttachedCount > 0,
-			TmuxAttachedCount: countsByKey[taskKey].TmuxAttachedCount,
+			TotalCount:        counts.Total,
+			ActiveCount:       counts.Active,
+			PausedCount:       counts.Paused,
+			TmuxAttached:      counts.TmuxAttachedCount > 0,
+			TmuxAttachedCount: counts.TmuxAttachedCount,
 			StartedAt:         startedAt,
 			Worktree:          worktree,
 		}
@@ -2830,9 +2802,6 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 func activeSessionIssueKeysFromProjection(sessions []daemonstate.Session, namingScope string) map[string]struct{} {
 	active := make(map[string]struct{}, len(sessions))
 	for _, session := range sessions {
-		if isAgentScopedSessionID(session.ID) {
-			continue
-		}
 		observed := session.ObservedState
 		if strings.TrimSpace(string(observed)) == "" {
 			observed = session.State
@@ -2943,7 +2912,90 @@ func (d *Daemon) refreshSessionRuntimeState(ctx context.Context, projectID strin
 	if err != nil {
 		return err
 	}
-	return d.persistTmuxSessionRuntimeState(ctx, projectID, tmuxSessions)
+	tmuxPanes, err := d.tmux.ListPaneInfos(ctx)
+	if err != nil {
+		return err
+	}
+	return d.persistTmuxSessionRuntimeState(ctx, projectID, tmuxSessions, tmuxPanes)
+}
+
+type tmuxRuntimeLiveness struct {
+	sessionByID    map[string]tmux.SessionInfo
+	sessionIDs     map[string]struct{}
+	panesBySession map[string]map[string]struct{}
+}
+
+func newTmuxRuntimeLiveness(tmuxSessions []tmux.SessionInfo, tmuxPanes []tmux.PaneInfo) tmuxRuntimeLiveness {
+	live := tmuxRuntimeLiveness{
+		sessionByID:    make(map[string]tmux.SessionInfo, len(tmuxSessions)),
+		sessionIDs:     make(map[string]struct{}, len(tmuxSessions)),
+		panesBySession: make(map[string]map[string]struct{}, len(tmuxPanes)),
+	}
+	for _, info := range tmuxSessions {
+		name := strings.TrimSpace(info.Name)
+		if name == "" {
+			continue
+		}
+		live.sessionByID[name] = info
+		live.sessionIDs[name] = struct{}{}
+	}
+	for _, pane := range tmuxPanes {
+		sessionName := strings.TrimSpace(pane.SessionName)
+		paneID := strings.TrimSpace(pane.PaneID)
+		if sessionName == "" || paneID == "" {
+			continue
+		}
+		if live.panesBySession[sessionName] == nil {
+			live.panesBySession[sessionName] = map[string]struct{}{}
+		}
+		live.panesBySession[sessionName][paneID] = struct{}{}
+	}
+	return live
+}
+
+func (live tmuxRuntimeLiveness) sessionLive(sessionID string) bool {
+	_, ok := live.sessionIDs[strings.TrimSpace(sessionID)]
+	return ok
+}
+
+func (live tmuxRuntimeLiveness) paneLive(sessionID string) bool {
+	parent, paneID, ok := agentScopedSessionParentAndPane(sessionID)
+	if !ok {
+		return false
+	}
+	panes := live.panesBySession[parent]
+	if len(panes) == 0 {
+		return false
+	}
+	_, ok = panes[paneID]
+	return ok
+}
+
+func applyObservedRuntimeLiveness(session *daemonstate.Session, info tmux.SessionInfo, infoLive bool, live tmuxRuntimeLiveness) {
+	if infoLive {
+		session.ObservedState = daemonstate.SessionStateRunning
+		session.TmuxAttachedCount = info.AttachedCount
+		if (session.StartedAt == nil || session.StartedAt.IsZero()) && info.CreatedAt != nil && !info.CreatedAt.IsZero() {
+			started := info.CreatedAt.UTC()
+			session.StartedAt = &started
+		}
+		return
+	}
+	if isAgentScopedSessionID(session.ID) {
+		parent, _, ok := agentScopedSessionParentAndPane(session.ID)
+		switch {
+		case !ok || !live.sessionLive(parent):
+			session.ObservedState = daemonstate.SessionStateStopped
+		case live.paneLive(session.ID):
+			session.ObservedState = daemonstate.NormalizeSessionState(session.State)
+		default:
+			session.ObservedState = daemonstate.SessionStateStopped
+		}
+		session.TmuxAttachedCount = 0
+		return
+	}
+	session.ObservedState = daemonstate.SessionStateStopped
+	session.TmuxAttachedCount = 0
 }
 
 func (d *Daemon) refreshExistingSessionRuntimeState(ctx context.Context, projectID string) error {
@@ -2963,43 +3015,19 @@ func (d *Daemon) refreshExistingSessionRuntimeState(ctx context.Context, project
 	if err != nil {
 		return err
 	}
-	liveByID := make(map[string]tmux.SessionInfo, len(tmuxSessions))
-	liveIssueKeys := make(map[string]struct{}, len(tmuxSessions))
-	namingScope := d.sessionNamingScope(projectID)
-	for _, info := range tmuxSessions {
-		name := strings.TrimSpace(info.Name)
-		if name != "" {
-			liveByID[name] = info
-		}
-		if issueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope); ok {
-			liveIssueKeys[sessionKey(issueID)] = struct{}{}
-		}
+	tmuxPanes, err := d.tmux.ListPaneInfos(ctx)
+	if err != nil {
+		return err
 	}
+	live := newTmuxRuntimeLiveness(tmuxSessions, tmuxPanes)
 	writer := d.runtimeProjectionStateWriter()
 	for _, session := range existingSessions {
 		sessionID := strings.TrimSpace(session.ID)
 		if sessionID == "" {
 			continue
 		}
-		if info, live := liveByID[sessionID]; live {
-			session.ObservedState = daemonstate.SessionStateRunning
-			session.TmuxAttachedCount = info.AttachedCount
-			if (session.StartedAt == nil || session.StartedAt.IsZero()) && info.CreatedAt != nil && !info.CreatedAt.IsZero() {
-				started := info.CreatedAt.UTC()
-				session.StartedAt = &started
-			}
-		} else if isAgentScopedSessionID(sessionID) {
-			issueKey := sessionKey(sessionProjectionIssueID(session, namingScope))
-			if _, parentLive := liveIssueKeys[issueKey]; parentLive {
-				session.ObservedState = daemonstate.NormalizeSessionState(session.State)
-			} else {
-				session.ObservedState = daemonstate.SessionStateStopped
-			}
-			session.TmuxAttachedCount = 0
-		} else {
-			session.ObservedState = daemonstate.SessionStateStopped
-			session.TmuxAttachedCount = 0
-		}
+		info, infoLive := live.sessionByID[sessionID]
+		applyObservedRuntimeLiveness(&session, info, infoLive, live)
 		session.UpdatedAt = time.Now().UTC()
 		if writer != nil {
 			if err := writer.PersistSessionProjection(ctx, projectID, session); err != nil {
@@ -3048,42 +3076,19 @@ func (d *Daemon) refreshIssueSessionRuntimeState(ctx context.Context, projectID 
 	if err != nil {
 		return err
 	}
-	liveByID := make(map[string]tmux.SessionInfo, len(tmuxSessions))
-	liveIssueKeys := make(map[string]struct{}, len(tmuxSessions))
-	for _, info := range tmuxSessions {
-		name := strings.TrimSpace(info.Name)
-		if name != "" {
-			liveByID[name] = info
-		}
-		if issueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope); ok {
-			liveIssueKeys[sessionKey(issueID)] = struct{}{}
-		}
+	tmuxPanes, err := d.tmux.ListPaneInfos(ctx)
+	if err != nil {
+		return err
 	}
+	live := newTmuxRuntimeLiveness(tmuxSessions, tmuxPanes)
 	writer := d.runtimeProjectionStateWriter()
 	for _, session := range targetSessions {
 		sessionID := strings.TrimSpace(session.ID)
 		if sessionID == "" {
 			continue
 		}
-		if info, live := liveByID[sessionID]; live {
-			session.ObservedState = daemonstate.SessionStateRunning
-			session.TmuxAttachedCount = info.AttachedCount
-			if (session.StartedAt == nil || session.StartedAt.IsZero()) && info.CreatedAt != nil && !info.CreatedAt.IsZero() {
-				started := info.CreatedAt.UTC()
-				session.StartedAt = &started
-			}
-		} else if isAgentScopedSessionID(sessionID) {
-			issueKey := sessionKey(sessionProjectionIssueID(session, namingScope))
-			if _, parentLive := liveIssueKeys[issueKey]; parentLive {
-				session.ObservedState = daemonstate.NormalizeSessionState(session.State)
-			} else {
-				session.ObservedState = daemonstate.SessionStateStopped
-			}
-			session.TmuxAttachedCount = 0
-		} else {
-			session.ObservedState = daemonstate.SessionStateStopped
-			session.TmuxAttachedCount = 0
-		}
+		info, infoLive := live.sessionByID[sessionID]
+		applyObservedRuntimeLiveness(&session, info, infoLive, live)
 		session.UpdatedAt = time.Now().UTC()
 		if writer != nil {
 			if err := writer.PersistSessionProjection(ctx, projectID, session); err != nil {
@@ -3178,7 +3183,7 @@ func (d *Daemon) refreshStoppedSessionRuntimeState(ctx context.Context, projectI
 	return d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, session)
 }
 
-func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID string, tmuxSessions []tmux.SessionInfo) error {
+func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID string, tmuxSessions []tmux.SessionInfo, tmuxPanes []tmux.PaneInfo) error {
 	if d.sessionRuntimeStateStoreIfConfigured(projectID) == nil || d.sessionStore == nil {
 		return nil
 	}
@@ -3192,20 +3197,17 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 		}
 	}
 	existingByIssueKey := sessionProjectionForTmuxHydrationByIssueKey(existingSessions, namingScope)
-	liveSessionIDs := make(map[string]struct{}, len(tmuxSessions))
-	liveIssueKeys := make(map[string]struct{}, len(tmuxSessions))
+	live := newTmuxRuntimeLiveness(tmuxSessions, tmuxPanes)
 	for _, info := range tmuxSessions {
 		name := strings.TrimSpace(info.Name)
 		if name == "" {
 			continue
 		}
-		liveSessionIDs[name] = struct{}{}
 		issueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope)
 		if !ok {
 			continue
 		}
 		issueKey := sessionKey(issueID)
-		liveIssueKeys[issueKey] = struct{}{}
 		row := daemonstate.Session{
 			ID:                name,
 			IssueID:           issueID,
@@ -3243,20 +3245,11 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 		}
 	}
 	for _, session := range existingSessions {
-		if _, live := liveSessionIDs[strings.TrimSpace(session.ID)]; live {
+		if _, liveSession := live.sessionIDs[strings.TrimSpace(session.ID)]; liveSession {
 			continue
 		}
 		stopped := session
-		if isAgentScopedSessionID(session.ID) {
-			issueKey := sessionKey(sessionProjectionIssueID(session, namingScope))
-			if _, parentLive := liveIssueKeys[issueKey]; parentLive {
-				stopped.ObservedState = daemonstate.NormalizeSessionState(stopped.State)
-			} else {
-				stopped.ObservedState = daemonstate.SessionStateStopped
-			}
-		} else {
-			stopped.ObservedState = daemonstate.SessionStateStopped
-		}
+		applyObservedRuntimeLiveness(&stopped, tmux.SessionInfo{}, false, live)
 		stopped.UpdatedAt = time.Now().UTC()
 		if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, stopped); err != nil && d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("persist missing tmux session as stopped failed",

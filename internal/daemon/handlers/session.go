@@ -16,7 +16,6 @@ const (
 	CommandSessionStart           = "session.start"
 	CommandSessionAttach          = "session.attach"
 	CommandSessionPause           = "session.pause"
-	CommandSessionPauseDebounced  = "session.pause_debounced"
 	CommandSessionResume          = "session.resume"
 	CommandSessionStop            = "session.stop"
 	CommandSessionMessage         = "session.message"
@@ -126,8 +125,6 @@ func mapCommandToState(command string) (daemonstate.SessionState, bool) {
 	case CommandSessionAttach:
 		return daemonstate.SessionStateRunning, true
 	case CommandSessionPause:
-		return daemonstate.SessionStatePaused, true
-	case CommandSessionPauseDebounced:
 		return daemonstate.SessionStatePaused, true
 	case CommandSessionResume:
 		return daemonstate.SessionStateRunning, true

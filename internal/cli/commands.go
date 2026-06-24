@@ -45,25 +45,24 @@ var currentExecutable = os.Executable
 var tmuxPaneSessionName = defaultTmuxPaneSessionName
 
 const (
-	commandSessionStart          = "session.start"
-	commandSessionAttach         = "session.attach"
-	commandSessionPause          = "session.pause"
-	commandSessionPauseDebounced = "session.pause_debounced"
-	commandSessionResume         = "session.resume"
-	commandSessionStop           = "session.stop"
-	commandSessionStatus         = "session.status"
-	commandTaskSnapshotExport    = "task.snapshot.export"
-	defaultExportFormat          = "json"
-	defaultIssueListLimit        = 200
-	defaultOperationListLimit    = 50
-	sessionStartCommandTimeout   = 5 * time.Minute
-	branchMergeToBaseTimeout     = 2 * time.Minute
-	daemonCommandTimeout         = 15 * time.Second
-	issueCloseCleanupTimeout     = 2 * time.Minute
-	issueCreateCommandTimeout    = 10 * time.Second
-	issueCreateAutostartTimeout  = 12 * time.Second
-	exitCodeHardFailure          = 1
-	exitCodePartialFailure       = 2
+	commandSessionStart         = "session.start"
+	commandSessionAttach        = "session.attach"
+	commandSessionPause         = "session.pause"
+	commandSessionResume        = "session.resume"
+	commandSessionStop          = "session.stop"
+	commandSessionStatus        = "session.status"
+	commandTaskSnapshotExport   = "task.snapshot.export"
+	defaultExportFormat         = "json"
+	defaultIssueListLimit       = 200
+	defaultOperationListLimit   = 50
+	sessionStartCommandTimeout  = 5 * time.Minute
+	branchMergeToBaseTimeout    = 2 * time.Minute
+	daemonCommandTimeout        = 15 * time.Second
+	issueCloseCleanupTimeout    = 2 * time.Minute
+	issueCreateCommandTimeout   = 10 * time.Second
+	issueCreateAutostartTimeout = 12 * time.Second
+	exitCodeHardFailure         = 1
+	exitCodePartialFailure      = 2
 )
 
 var sessionStartProgressTick = 15 * time.Second
