@@ -381,6 +381,50 @@ func TestSourceForSessionInvariant(t *testing.T) {
 	}
 }
 
+func TestReconcileSessionValidationIssueIDsUsesOnlyObservedCandidates(t *testing.T) {
+	namingScope := "/repo"
+	tmuxSet := map[string]struct{}{
+		"cpa": {},
+		"cpb": {},
+	}
+	snapshotSessions := []daemonstate.Session{
+		{ID: naming.CanonicalSessionID(namingScope, "cpc"), IssueID: "cpc"},
+		{ID: naming.CanonicalSessionID(namingScope, "cpa"), IssueID: "cpa"},
+		{ID: "###", IssueID: ""},
+	}
+
+	ids := reconcileSessionValidationIssueIDs("", tmuxSet, snapshotSessions, namingScope)
+	got := map[string]struct{}{}
+	for _, id := range ids {
+		got[id] = struct{}{}
+	}
+	for _, want := range []string{"cpa", "cpb", "cpc"} {
+		if _, ok := got[want]; !ok {
+			t.Fatalf("validation ids = %v, missing %s", ids, want)
+		}
+	}
+	if len(got) != 3 {
+		t.Fatalf("validation ids = %v, want only observed candidates", ids)
+	}
+}
+
+func TestReconcileSessionValidationIssueIDsHonorsTargetIssue(t *testing.T) {
+	namingScope := "/repo"
+	tmuxSet := map[string]struct{}{
+		"cpa": {},
+		"cpb": {},
+	}
+	snapshotSessions := []daemonstate.Session{
+		{ID: naming.CanonicalSessionID(namingScope, "cpa"), IssueID: "cpa"},
+		{ID: naming.CanonicalSessionID(namingScope, "cpb"), IssueID: "cpb"},
+	}
+
+	ids := reconcileSessionValidationIssueIDs("cpa", tmuxSet, snapshotSessions, namingScope)
+	if len(ids) != 1 || ids[0] != "cpa" {
+		t.Fatalf("validation ids = %v, want [cpa]", ids)
+	}
+}
+
 func TestSessionRestartAllSkipsBusySessionsByDefault(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()

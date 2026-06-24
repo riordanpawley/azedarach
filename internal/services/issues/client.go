@@ -724,6 +724,27 @@ func (c *Client) GetWithRuntime(ctx context.Context, projectID, id string) (doma
 	return tasks[0], nil
 }
 
+// GetManyWithRuntime fetches active issues by ID with runtime projection fields.
+func (c *Client) GetManyWithRuntime(ctx context.Context, projectID string, ids []string) ([]domain.Task, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	issueIDs := uniqueIssueIDStrings(ids)
+	if len(issueIDs) == 0 {
+		return []domain.Task{}, nil
+	}
+	tasks, err := c.queryTasksWithRuntime(ctx, db, projectID, issueIDs...)
+	if err != nil {
+		return nil, c.wrapError("get-many-with-runtime", strings.Join(issueIDs, ","), err)
+	}
+	return tasks, nil
+}
+
 // GetWithDependencyContextRuntime fetches one issue plus direct dependencies and dependents.
 func (c *Client) GetWithDependencyContextRuntime(ctx context.Context, projectID, id string) ([]domain.Task, error) {
 	db, err := c.dbHandle()
