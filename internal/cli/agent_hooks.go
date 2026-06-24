@@ -122,8 +122,6 @@ func notifyDaemonAgentSessionStatus(ctx context.Context, deps *Dependencies, iss
 	switch event {
 	case hookEventIdlePrompt, hookEventPermissionRequest, hookEventStop, hookEventSubagentStop, hookEventSessionEnd:
 		command = commandSessionPause
-	case hookEventPostToolUse:
-		command = commandSessionPause
 	case hookEventSessionStart, hookEventSubagentStart, hookEventUserPromptSubmit, hookEventPreToolUse:
 		command = commandSessionResume
 	default:

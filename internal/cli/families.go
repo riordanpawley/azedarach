@@ -48,7 +48,7 @@ var hookEventStatuses = map[string]string{
 	hookEventSessionStart:      "started",
 	hookEventUserPromptSubmit:  "active",
 	hookEventPreToolUse:        "running_tool",
-	hookEventPostToolUse:       "waiting",
+	hookEventPostToolUse:       "active",
 	hookEventStop:              "stopped",
 	hookEventSubagentStart:     "started",
 	hookEventSubagentStop:      "stopped",
@@ -1096,8 +1096,8 @@ func codexGuardResponse(projectDir, event string, payloadMap map[string]any) (ma
 	case "pre-tool-use":
 		command := codexGuardCommandFromPayload(payloadMap)
 		if codexGuardIsPrimeCommand(command) {
-			// Temporary tradeoff: we mark prime success during PreToolUse to reduce Codex
-			// hook spam by removing PostToolUse hooks. Revert this once hook noise is fixed.
+			// Temporary tradeoff: mark prime success before the tool runs so
+			// guard state does not depend on per-tool PostToolUse output.
 			threadState.Primed = true
 			threadState.NeedsRefresh = false
 			threadState.LastPrimeAt = time.Now().UTC()
