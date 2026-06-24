@@ -18,6 +18,13 @@ var (
 
 const mergeCleanupTimeout = 15 * time.Second
 
+type gitCommandHookMode bool
+
+const (
+	gitCommandHooksEnabled  gitCommandHookMode = false
+	gitCommandHooksDisabled gitCommandHookMode = true
+)
+
 // Client provides high-level git operations.
 type Client struct {
 	runner          CommandRunner
@@ -145,9 +152,17 @@ func (c *Client) Fetch(ctx context.Context, worktree, remote string) error {
 // Merge merges the specified branch into the current branch.
 // It detects merge conflicts and returns detailed information.
 func (c *Client) Merge(ctx context.Context, worktree, branch string) (*MergeResult, error) {
+	return c.merge(ctx, worktree, branch, gitCommandHooksEnabled)
+}
+
+func (c *Client) merge(ctx context.Context, worktree, branch string, hookMode gitCommandHookMode) (*MergeResult, error) {
 	c.logger.Info("merging branch", "worktree", worktree, "branch", branch)
 
-	output, err := c.runInWorktree(ctx, worktree, "merge", "--no-edit", branch)
+	run := c.runInWorktree
+	if hookMode == gitCommandHooksDisabled {
+		run = c.runInWorktreeNoHooks
+	}
+	output, err := run(ctx, worktree, "merge", "--no-edit", branch)
 
 	result := &MergeResult{
 		Success:      err == nil,
@@ -192,6 +207,10 @@ func (c *Client) Merge(ctx context.Context, worktree, branch string) (*MergeResu
 // result is reported as unsuccessful so higher-level integration can halt
 // without leaving the target branch dirty.
 func (c *Client) MergeCleanly(ctx context.Context, worktree, branch string) (*MergeResult, error) {
+	return c.mergeCleanly(ctx, worktree, branch, gitCommandHooksEnabled)
+}
+
+func (c *Client) mergeCleanly(ctx context.Context, worktree, branch string, hookMode gitCommandHookMode) (*MergeResult, error) {
 	preStatus, preStatusErr := c.Status(ctx, worktree)
 	targetWasClean := preStatusErr == nil && !gitStatusDirty(preStatus)
 	if preStatusErr != nil {
@@ -202,7 +221,7 @@ func (c *Client) MergeCleanly(ctx context.Context, worktree, branch string) (*Me
 		)
 	}
 
-	result, err := c.Merge(ctx, worktree, branch)
+	result, err := c.merge(ctx, worktree, branch, hookMode)
 	if err != nil {
 		return c.cleanFailedMergeSideEffects(ctx, worktree, branch, targetWasClean, preStatusErr, err)
 	}
@@ -814,6 +833,13 @@ func (c *Client) runInWorktree(ctx context.Context, worktree string, args ...str
 	prefixed = append(prefixed, "-C", worktree)
 	prefixed = append(prefixed, args...)
 	return c.runner.Run(ctx, prefixed...)
+}
+
+func (c *Client) runInWorktreeNoHooks(ctx context.Context, worktree string, args ...string) (string, error) {
+	withConfig := make([]string, 0, len(args)+2)
+	withConfig = append(withConfig, "-c", "core.hooksPath=")
+	withConfig = append(withConfig, args...)
+	return c.runInWorktree(ctx, worktree, withConfig...)
 }
 
 // Pull pulls updates from the remote repository.

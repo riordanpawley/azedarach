@@ -84,7 +84,7 @@ func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch
 	}
 	scratchAdded = true
 
-	result, err := c.MergeCleanly(ctx, scratchPath, branch)
+	result, err := c.mergeCleanly(ctx, scratchPath, branch, gitCommandHooksDisabled)
 	if err != nil {
 		return nil, fmt.Errorf("scratch merge %s: %w", branch, err)
 	}
@@ -233,7 +233,7 @@ func (c *Client) RecoverIntegrationJournal(ctx context.Context, worktree string)
 }
 
 func (c *Client) addDetachedWorktree(ctx context.Context, worktree, scratchPath, ref string) error {
-	if _, err := c.runInWorktree(ctx, worktree, "worktree", "add", "--detach", scratchPath, ref); err != nil {
+	if _, err := c.runInWorktreeNoHooks(ctx, worktree, "worktree", "add", "--detach", scratchPath, ref); err != nil {
 		return err
 	}
 	return nil
