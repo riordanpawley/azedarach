@@ -386,6 +386,85 @@ func TestGitServiceAdapterOriginWorkflowUsesLocalParentWorktreeBase(t *testing.T
 	}
 }
 
+func TestGitServiceAdapterProjectWorkflowModeOverridesBootstrapMode(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	projectID := "azedarach"
+	issueID := "cpu"
+	worktree := "/tmp/azedarach-cpu"
+	store := newGitAdapterStore(t, projectID, issueID, worktree, cleanGitStatus())
+
+	var mergeBaseRef string
+	runner := &recordingGitRunner{
+		runFn: func(args ...string) (string, error) {
+			if len(args) < 3 || args[0] != "-C" || args[1] != worktree {
+				t.Fatalf("unexpected git args: %v", args)
+			}
+			switch args[2] {
+			case "status":
+				if len(args) >= 4 && args[3] == "--porcelain" {
+					return "", nil
+				}
+			case "symbolic-ref":
+				if len(args) >= 5 && args[3] == "--short" && args[4] == "refs/remotes/origin/HEAD" {
+					return "origin/main\n", nil
+				}
+			case "merge-base":
+				if len(args) >= 5 {
+					mergeBaseRef = args[3]
+					if args[3] != "main" {
+						return "", fmt.Errorf("want project local mode to use main first, got %s", args[3])
+					}
+					return "abc123", nil
+				}
+			case "diff":
+				if len(args) >= 4 && args[3] == "--shortstat" {
+					return " 1 file changed, 6 insertions(+)", nil
+				}
+			case "rev-list":
+				if len(args) >= 5 && args[3] == "--count" {
+					switch args[4] {
+					case "HEAD..main":
+						return "0", nil
+					case "main..HEAD":
+						return "1", nil
+					}
+				}
+			}
+			t.Fatalf("unexpected git args: %v", args)
+			return "", nil
+		},
+	}
+
+	adapter := &gitServiceAdapter{
+		client:            git.NewClient(runner, slog.Default()),
+		runtimeStateStore: store,
+		baseBranch:        "preview",
+		workflowMode:      "origin",
+		baseBranchForProject: func(string) string {
+			return "main"
+		},
+		workflowModeForProject: func(string) string {
+			return "local"
+		},
+	}
+
+	status, err := adapter.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, true, false)
+	if err != nil {
+		t.Fatalf("refreshGitStatusWriteThroughResult: %v", err)
+	}
+	if mergeBaseRef != "main" {
+		t.Fatalf("merge-base ref = %q, want main", mergeBaseRef)
+	}
+	if status.GitAdditions != 6 || status.GitDeletions != 0 {
+		t.Fatalf("diff totals = %d/%d, want 6/0", status.GitAdditions, status.GitDeletions)
+	}
+	if status.GitAheadCount != 1 || status.GitBehindCount != 0 {
+		t.Fatalf("ahead/behind = %d/%d, want 1/0", status.GitAheadCount, status.GitBehindCount)
+	}
+}
+
 func TestGitServiceAdapterMergePreflightUsesWorktreeAwareClient(t *testing.T) {
 	t.Parallel()
 

@@ -10,6 +10,7 @@ import (
 
 type daemonProjectRuntimeConfig struct {
 	BaseBranch                 string
+	WorkflowMode               string
 	CLITool                    string
 	IssueTracker               appconfig.IssueTrackerConfig
 	DangerouslySkipPermissions bool
@@ -24,6 +25,10 @@ func (d *Daemon) baseBranchForProject(projectID string) string {
 	return d.runtimeConfigForProject(projectID).BaseBranch
 }
 
+func (d *Daemon) workflowModeForProject(projectID string) string {
+	return d.runtimeConfigForProject(projectID).WorkflowMode
+}
+
 func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeConfig {
 	if d == nil {
 		return daemonProjectRuntimeConfig{
@@ -36,6 +41,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 
 	defaultConfig := daemonProjectRuntimeConfig{
 		BaseBranch:                 strings.TrimSpace(d.cfg.BaseBranch),
+		WorkflowMode:               strings.TrimSpace(d.cfg.GitWorkflowMode),
 		CLITool:                    strings.TrimSpace(d.cfg.CLITool),
 		IssueTracker:               appconfig.DefaultConfig().IssueTracker,
 		DangerouslySkipPermissions: d.cfg.DangerouslySkipPermissions,
@@ -47,6 +53,9 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	}
 	if defaultConfig.BaseBranch == "" {
 		defaultConfig.BaseBranch = "main"
+	}
+	if defaultConfig.WorkflowMode == "" {
+		defaultConfig.WorkflowMode = "worktree"
 	}
 	if defaultConfig.CLITool == "" {
 		defaultConfig.CLITool = "claude"
@@ -61,6 +70,12 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	}
 	if d.baseBranchByRoot == nil {
 		d.baseBranchByRoot = map[string]string{}
+	}
+	if d.workflowModeByProject == nil {
+		d.workflowModeByProject = map[string]string{}
+	}
+	if d.workflowModeByRoot == nil {
+		d.workflowModeByRoot = map[string]string{}
 	}
 	if d.cliToolByProject == nil {
 		d.cliToolByProject = map[string]string{}
@@ -101,6 +116,9 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	if cached, ok := d.baseBranchByProject[projectID]; ok && strings.TrimSpace(cached) != "" {
 		cfg := defaultConfig
 		cfg.BaseBranch = cached
+		if workflowMode, ok := d.workflowModeByProject[projectID]; ok && strings.TrimSpace(workflowMode) != "" {
+			cfg.WorkflowMode = workflowMode
+		}
 		if tool, ok := d.cliToolByProject[projectID]; ok && strings.TrimSpace(tool) != "" {
 			cfg.CLITool = tool
 		}
@@ -131,6 +149,9 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		d.projectConfigMu.Lock()
 		if cached, ok := d.baseBranchByRoot[repoDir]; ok && strings.TrimSpace(cached) != "" {
 			cfg.BaseBranch = cached
+			if workflowMode, ok := d.workflowModeByRoot[repoDir]; ok && strings.TrimSpace(workflowMode) != "" {
+				cfg.WorkflowMode = workflowMode
+			}
 			if tool, ok := d.cliToolByRoot[repoDir]; ok && strings.TrimSpace(tool) != "" {
 				cfg.CLITool = tool
 			}
@@ -150,6 +171,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 				cfg.IssueResources = cloneIssueResourcesConfig(resources)
 			}
 			d.baseBranchByProject[projectID] = cfg.BaseBranch
+			d.workflowModeByProject[projectID] = cfg.WorkflowMode
 			d.cliToolByProject[projectID] = cfg.CLITool
 			d.sessionShellByProject[projectID] = cfg.SessionShell
 			d.sessionInitCommandsByProject[projectID] = append([]string(nil), cfg.SessionInitCommands...)
@@ -165,6 +187,9 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 			if loaded, err := appconfig.LoadConfig(repoDir); err == nil && loaded != nil {
 				if candidate := strings.TrimSpace(loaded.Git.BaseBranch); candidate != "" {
 					cfg.BaseBranch = candidate
+				}
+				if workflowMode := strings.TrimSpace(loaded.Git.WorkflowMode); workflowMode != "" {
+					cfg.WorkflowMode = workflowMode
 				}
 				if tool := strings.TrimSpace(loaded.CLITool); tool != "" {
 					cfg.CLITool = tool
@@ -187,6 +212,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		d.baseBranchByProject = map[string]string{}
 	}
 	d.baseBranchByProject[projectID] = cfg.BaseBranch
+	d.workflowModeByProject[projectID] = cfg.WorkflowMode
 	d.cliToolByProject[projectID] = cfg.CLITool
 	d.sessionShellByProject[projectID] = cfg.SessionShell
 	d.sessionInitCommandsByProject[projectID] = append([]string(nil), cfg.SessionInitCommands...)
@@ -198,6 +224,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 			d.baseBranchByRoot = map[string]string{}
 		}
 		d.baseBranchByRoot[repoDir] = cfg.BaseBranch
+		d.workflowModeByRoot[repoDir] = cfg.WorkflowMode
 		d.cliToolByRoot[repoDir] = cfg.CLITool
 		d.sessionShellByRoot[repoDir] = cfg.SessionShell
 		d.sessionInitCommandsByRoot[repoDir] = append([]string(nil), cfg.SessionInitCommands...)

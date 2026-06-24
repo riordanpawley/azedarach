@@ -38,6 +38,7 @@ type gitServiceAdapter struct {
 	baseBranch                  string
 	workflowMode                string
 	baseBranchForProject        func(string) string
+	workflowModeForProject      func(string) string
 	baseBranchForWorktree       func(context.Context, string, string) string
 	heavySessionStartActive     func(context.Context, string) bool
 
@@ -188,7 +189,7 @@ func (a *gitServiceAdapter) Checkpoint(ctx context.Context, projectID string, re
 func (a *gitServiceAdapter) DiffStat(ctx context.Context, projectID string, worktree, baseBranch string) (string, error) {
 	requestedBase := strings.TrimSpace(baseBranch)
 	defaultBase := strings.TrimSpace(a.resolvedBaseBranch(projectID))
-	preferRemote := a.preferRemoteRuntimeBase()
+	preferRemote := a.preferRemoteRuntimeBase(projectID)
 	if requestedBase == "" || requestedBase == defaultBase {
 		if resolved := a.worktreeSpecificBaseBranch(ctx, projectID, worktree); resolved != "" {
 			requestedBase = resolved
@@ -538,7 +539,7 @@ func (a *gitServiceAdapter) refreshGitStatusWriteThrough(ctx context.Context, pr
 func (a *gitServiceAdapter) refreshGitStatusWriteThroughResult(ctx context.Context, projectID, worktree string, publishOnChange, forcePublish bool) (*git.GitStatus, error) {
 	projectID = normalizeProjectID(projectID)
 	baseBranch, worktreeSpecificBase := a.resolvedBaseBranchForWorktree(ctx, projectID, worktree)
-	preferRemoteBase := a.preferRemoteRuntimeBase() && !worktreeSpecificBase
+	preferRemoteBase := a.preferRemoteRuntimeBase(projectID) && !worktreeSpecificBase
 	if err := a.client.WithWorktreeLock(ctx, worktree, func(ctx context.Context) error {
 		return a.client.RecoverIntegrationJournal(ctx, worktree)
 	}); err != nil && a.logger != nil {
@@ -749,11 +750,17 @@ func (a *gitServiceAdapter) resolvedBaseBranch(projectID string) string {
 	return strings.TrimSpace(a.baseBranch)
 }
 
-func (a *gitServiceAdapter) preferRemoteRuntimeBase() bool {
+func (a *gitServiceAdapter) preferRemoteRuntimeBase(projectID string) bool {
 	if a == nil {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(a.workflowMode), "origin")
+	workflowMode := strings.TrimSpace(a.workflowMode)
+	if a.workflowModeForProject != nil {
+		if projectMode := strings.TrimSpace(a.workflowModeForProject(projectID)); projectMode != "" {
+			workflowMode = projectMode
+		}
+	}
+	return strings.EqualFold(workflowMode, "origin")
 }
 
 func gitStatusSignature(status *git.GitStatus) string {

@@ -95,6 +95,8 @@ type Daemon struct {
 	projectConfigMu                    sync.Mutex
 	baseBranchByProject                map[string]string
 	baseBranchByRoot                   map[string]string
+	workflowModeByProject              map[string]string
+	workflowModeByRoot                 map[string]string
 	cliToolByProject                   map[string]string
 	cliToolByRoot                      map[string]string
 	sessionShellByProject              map[string]string
@@ -242,6 +244,8 @@ func New(cfg Config) *Daemon {
 		issueClientsByRoot:                 map[string]*issues.Client{},
 		baseBranchByProject:                map[string]string{},
 		baseBranchByRoot:                   map[string]string{},
+		workflowModeByProject:              map[string]string{},
+		workflowModeByRoot:                 map[string]string{},
 		cliToolByProject:                   map[string]string{},
 		cliToolByRoot:                      map[string]string{},
 		sessionShellByProject:              map[string]string{},
@@ -300,6 +304,7 @@ func New(cfg Config) *Daemon {
 		return d.worktreeRuntimeStateStore(projectID)
 	}
 	gitService.baseBranchForProject = d.baseBranchForProject
+	gitService.workflowModeForProject = d.workflowModeForProject
 	gitService.baseBranchForWorktree = d.runtimeDiffBaseBranchForWorktree
 	gitService.heavySessionStartActive = func(ctx context.Context, projectID string) bool {
 		active, err := d.hasActiveHeavySessionStart(ctx, projectID)
