@@ -235,7 +235,7 @@ func TestEventLogOverlay_Update_LogActionKeys(t *testing.T) {
 }
 
 func TestEventLogOverlay_Update_FilterCycles(t *testing.T) {
-	hookBody := []byte(`{"source":"githooks.hook","message":"refreshed daemon git state"}`)
+	hookBody := []byte(`{"source":"githooks.hook","message":"queued daemon git status refresh"}`)
 	overlay := NewEventLogOverlayWithLogFiles([]protocol.EventEnvelope{
 		testEvent(1, "operation.running"),
 		testEvent(2, "git.status.updated"),

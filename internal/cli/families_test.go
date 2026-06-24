@@ -521,8 +521,8 @@ func TestGitHooksNotifyCommandRefreshesDaemonGitStatus(t *testing.T) {
 	if len(hookLogMessages) != 1 {
 		t.Fatalf("hook log append count = %d, want 1; messages=%v", len(hookLogMessages), hookLogMessages)
 	}
-	if hookLogMessages[0] != "refreshed daemon git state" {
-		t.Fatalf("hook log message = %q, want %q", hookLogMessages[0], "refreshed daemon git state")
+	if hookLogMessages[0] != "queued daemon git status refresh" {
+		t.Fatalf("hook log message = %q, want %q", hookLogMessages[0], "queued daemon git status refresh")
 	}
 }
 

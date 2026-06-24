@@ -41,7 +41,7 @@ func TestHookLogCommands(t *testing.T) {
 					Worktree:  "/tmp/wt",
 					Source:    "githooks.hook",
 					Level:     "info",
-					Message:   "refreshed daemon git state",
+					Message:   "queued daemon git status refresh",
 					CreatedAt: now,
 				}})
 				if err != nil {
@@ -68,7 +68,7 @@ func TestHookLogCommands(t *testing.T) {
 		Worktree:  "/tmp/wt",
 		Source:    "githooks.hook",
 		Level:     "info",
-		Message:   "refreshed daemon git state",
+		Message:   "queued daemon git status refresh",
 		CreatedAt: now,
 	})
 	if err != nil {
@@ -85,7 +85,7 @@ func TestHookLogCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListHookLogEvents error: %v", err)
 	}
-	if len(events) != 1 || events[0].Message != "refreshed daemon git state" {
+	if len(events) != 1 || events[0].Message != "queued daemon git status refresh" {
 		t.Fatalf("list events = %+v", events)
 	}
 	if events[0].IssueID != "az-123" {

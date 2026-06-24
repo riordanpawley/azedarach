@@ -42,7 +42,6 @@ type gitServiceAdapter struct {
 
 	refreshMu      sync.Mutex
 	refreshRunning map[string]bool
-	hookRefreshes  map[string]*hookStatusRefresh
 	pollers        map[string]context.CancelFunc
 
 	runtimeSignalsMu    sync.Mutex
@@ -64,12 +63,6 @@ func (a *gitServiceAdapter) runtimeStore(projectID string) *daemonstate.RuntimeS
 type runtimeSignalProjection struct {
 	signal      daemonhandlers.GitRuntimeSignalsResult
 	refreshedAt time.Time
-}
-
-type hookStatusRefresh struct {
-	done   chan struct{}
-	status *git.GitStatus
-	err    error
 }
 
 var (
@@ -352,66 +345,40 @@ func (a *gitServiceAdapter) RefreshStatusForHook(ctx context.Context, projectID,
 	if worktree == "" {
 		return &git.GitStatus{}, nil
 	}
+
+	if _, err := a.queueGitStatusRefresh(projectID, worktree, reconcilePriorityManual, "hook"); err != nil {
+		return nil, err
+	}
+	return a.cachedGitStatus(ctx, projectID, worktree)
+}
+
+func (a *gitServiceAdapter) cachedGitStatus(ctx context.Context, projectID, worktree string) (*git.GitStatus, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-
-	key := gitStatusRefreshQueueKey(projectID, worktree)
-	refresh, owner := a.hookStatusRefresh(key)
-	if owner {
-		go a.runHookStatusRefresh(projectID, worktree, key, refresh)
+	runtimeStore := a.runtimeStore(projectID)
+	if runtimeStore == nil {
+		return &git.GitStatus{}, nil
 	}
-
-	select {
-	case <-refresh.done:
-		if refresh.err != nil {
-			return nil, refresh.err
-		}
-		if refresh.status == nil {
-			return &git.GitStatus{}, nil
-		}
-		return refresh.status, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	projection, found, err := runtimeStore.GetWorktreeStateByPath(ctx, projectID, worktree)
+	if err != nil {
+		return nil, err
 	}
-}
-
-func (a *gitServiceAdapter) hookStatusRefresh(key string) (*hookStatusRefresh, bool) {
-	a.refreshMu.Lock()
-	defer a.refreshMu.Unlock()
-	if a.hookRefreshes == nil {
-		a.hookRefreshes = map[string]*hookStatusRefresh{}
+	if !found || len(projection.GitStatusRaw) == 0 {
+		return &git.GitStatus{}, nil
 	}
-	if refresh := a.hookRefreshes[key]; refresh != nil {
-		return refresh, false
-	}
-	refresh := &hookStatusRefresh{done: make(chan struct{})}
-	a.hookRefreshes[key] = refresh
-	return refresh, true
-}
-
-func (a *gitServiceAdapter) runHookStatusRefresh(projectID, worktree, key string, refresh *hookStatusRefresh) {
-	defer func() {
-		a.refreshMu.Lock()
-		if a.hookRefreshes[key] == refresh {
-			delete(a.hookRefreshes, key)
-		}
-		a.refreshMu.Unlock()
-		close(refresh.done)
-	}()
-	if r := recover(); r != nil {
-		refresh.err = fmt.Errorf("git status hook refresh panicked: %v", r)
+	var cached git.GitStatus
+	if err := json.Unmarshal(projection.GitStatusRaw, &cached); err != nil {
 		if a.logger != nil {
-			a.logger.Error("git status hook refresh panicked", "project_id", projectID, "worktree", worktree, "panic", r, "stack", string(debug.Stack()))
+			a.logger.Debug("unmarshal cached git status projection failed for hook",
+				"project_id", projectID,
+				"worktree", worktree,
+				"error", err,
+			)
 		}
-		return
+		return &git.GitStatus{}, nil
 	}
-
-	refreshCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	status, err := a.refreshGitStatusManual(refreshCtx, projectID, worktree)
-	refresh.status = status
-	refresh.err = err
+	return &cached, nil
 }
 
 func (a *gitServiceAdapter) ensureStatusRefreshQueue() *reconcileQueue[*git.GitStatus] {
