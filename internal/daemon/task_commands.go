@@ -112,17 +112,18 @@ type taskDeleteRequest struct {
 }
 
 type taskCloseResult struct {
-	TaskID                 string                 `json:"task_id"`
-	Status                 string                 `json:"status"`
-	IntegrationRequested   bool                   `json:"integration_requested,omitempty"`
-	Integrated             bool                   `json:"integrated,omitempty"`
-	IntegratedSourceBranch string                 `json:"integrated_source_branch,omitempty"`
-	IntegratedTargetBranch string                 `json:"integrated_target_branch,omitempty"`
-	SessionStopped         bool                   `json:"session_stopped,omitempty"`
-	WorktreeRemoved        bool                   `json:"worktree_removed,omitempty"`
-	WorktreeForced         bool                   `json:"worktree_forced,omitempty"`
-	Revision               uint64                 `json:"revision,omitempty"`
-	Phases                 []taskClosePhaseTiming `json:"phases,omitempty"`
+	TaskID                  string                 `json:"task_id"`
+	Status                  string                 `json:"status"`
+	IntegrationRequested    bool                   `json:"integration_requested,omitempty"`
+	Integrated              bool                   `json:"integrated,omitempty"`
+	IntegratedSourceBranch  string                 `json:"integrated_source_branch,omitempty"`
+	IntegratedTargetBranch  string                 `json:"integrated_target_branch,omitempty"`
+	SessionStopped          bool                   `json:"session_stopped,omitempty"`
+	WorktreeRemoved         bool                   `json:"worktree_removed,omitempty"`
+	WorktreeCleanupDeferred bool                   `json:"worktree_cleanup_deferred,omitempty"`
+	WorktreeForced          bool                   `json:"worktree_forced,omitempty"`
+	Revision                uint64                 `json:"revision,omitempty"`
+	Phases                  []taskClosePhaseTiming `json:"phases,omitempty"`
 }
 
 type taskClosePhaseTiming struct {
@@ -1351,13 +1352,16 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	if err != nil {
 		return result, fmt.Errorf("phase preflight for issue %s: %w", taskID, err)
 	}
+	deferWorktreeCleanup := daemonShouldDeferWorktreeCleanupForClose(cmd, integration, guard)
 
 	phaseStartedAt = time.Now()
-	if err := d.cleanupTaskIssueResourcesForClose(ctx, projectID, taskID, guard.Worktree); err != nil {
-		recordPhase("issue_resource_cleanup", phaseStartedAt, false)
-		return result, fmt.Errorf("phase issue_resource_cleanup for issue %s: %w", taskID, err)
+	if !deferWorktreeCleanup {
+		if err := d.cleanupTaskIssueResourcesForClose(ctx, projectID, taskID, guard.Worktree); err != nil {
+			recordPhase("issue_resource_cleanup", phaseStartedAt, false)
+			return result, fmt.Errorf("phase issue_resource_cleanup for issue %s: %w", taskID, err)
+		}
 	}
-	recordPhase("issue_resource_cleanup", phaseStartedAt, false)
+	recordPhase("issue_resource_cleanup", phaseStartedAt, deferWorktreeCleanup)
 
 	phaseStartedAt = time.Now()
 	if daemonCloseGuardTaskHasSession(guard.Task) {
@@ -1375,11 +1379,19 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 			recordPhase("worktree_cleanup", phaseStartedAt, false)
 			return result, fmt.Errorf("phase worktree_cleanup for issue %s: worktree cleanup unavailable", taskID)
 		}
-		if err := d.worktreeAdapter.Delete(ctx, projectID, taskID, cmd.ForceWorktree); err != nil {
-			recordPhase("worktree_cleanup", phaseStartedAt, false)
-			return result, fmt.Errorf("phase worktree_cleanup for issue %s: %w", taskID, err)
+		if deferWorktreeCleanup {
+			if err := d.deferTaskWorktreeCleanupForClose(ctx, projectID, taskID); err != nil {
+				recordPhase("worktree_cleanup", phaseStartedAt, false)
+				return result, fmt.Errorf("phase worktree_cleanup for issue %s: %w", taskID, err)
+			}
+			result.WorktreeCleanupDeferred = true
+		} else {
+			if err := d.worktreeAdapter.Delete(ctx, projectID, taskID, cmd.ForceWorktree); err != nil {
+				recordPhase("worktree_cleanup", phaseStartedAt, false)
+				return result, fmt.Errorf("phase worktree_cleanup for issue %s: %w", taskID, err)
+			}
+			result.WorktreeRemoved = true
 		}
-		result.WorktreeRemoved = true
 	}
 	recordPhase("worktree_cleanup", phaseStartedAt, !daemonCloseGuardTaskHasWorktree(guard.Task))
 
@@ -1485,6 +1497,65 @@ func (d *Daemon) repairStaleRuntimeProjections(ctx context.Context, projectID, t
 		return fmt.Errorf("active runtime projection aliases remain: %s", strings.Join(blocked, ", "))
 	}
 	return nil
+}
+
+func daemonShouldDeferWorktreeCleanupForClose(cmd taskCloseRequest, integration taskCloseIntegrationResult, guard taskClosePreflightResult) bool {
+	return cmd.ForceWorktree &&
+		integration.Requested &&
+		integration.NoChanges &&
+		daemonCloseGuardTaskHasWorktree(guard.Task) &&
+		!daemonCloseGuardTaskHasSession(guard.Task)
+}
+
+func (d *Daemon) deferTaskWorktreeCleanupForClose(ctx context.Context, projectID, taskID string) error {
+	if d.worktreeAdapter == nil {
+		return fmt.Errorf("worktree cleanup unavailable")
+	}
+	var fallbackBranch string
+	if projected, found, err := d.worktreeAdapter.projectedWorktreeForIssue(ctx, projectID, taskID); err != nil {
+		return fmt.Errorf("read worktree projection before deferred cleanup: %w", err)
+	} else if found {
+		fallbackBranch = strings.TrimSpace(projected.Branch)
+	}
+	if store := d.worktreeRuntimeStateStore(projectID); store != nil {
+		if err := store.DeleteWorktreeState(ctx, projectID, taskID); err != nil {
+			return fmt.Errorf("clear worktree projection before close: %w", err)
+		}
+	}
+	d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, projectID, taskID)
+	d.startDeferredTaskWorktreeCleanup(projectID, taskID, fallbackBranch)
+	return nil
+}
+
+func (d *Daemon) startDeferredTaskWorktreeCleanup(projectID, taskID, fallbackBranch string) {
+	manager := d.worktreeManagerForProject(projectID)
+	if manager == nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("deferred worktree cleanup skipped: worktree manager unavailable", "project_id", projectID, "task_id", taskID)
+		}
+		return
+	}
+	projectID = normalizedProjectID(projectID)
+	taskID = strings.TrimSpace(taskID)
+	fallbackBranch = strings.TrimSpace(fallbackBranch)
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		_, err := manager.DeleteWithOptions(bgCtx, taskID, git.WorktreeDeleteOptions{
+			Force:          true,
+			BranchCleanup:  git.WorktreeBranchCleanupRequired,
+			FallbackBranch: fallbackBranch,
+		})
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("deferred worktree cleanup failed", "project_id", projectID, "task_id", taskID, "error", err)
+			}
+			return
+		}
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Info("deferred worktree cleanup completed", "project_id", projectID, "task_id", taskID)
+		}
+	}()
 }
 
 func (d *Daemon) liveWorktreePathSet(ctx context.Context, projectID string) (map[string]struct{}, bool, error) {

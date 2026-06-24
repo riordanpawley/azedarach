@@ -99,17 +99,18 @@ type taskDeleteRequest struct {
 }
 
 type TaskCloseResult struct {
-	TaskID                 string                 `json:"task_id"`
-	Status                 string                 `json:"status"`
-	IntegrationRequested   bool                   `json:"integration_requested,omitempty"`
-	Integrated             bool                   `json:"integrated,omitempty"`
-	IntegratedSourceBranch string                 `json:"integrated_source_branch,omitempty"`
-	IntegratedTargetBranch string                 `json:"integrated_target_branch,omitempty"`
-	SessionStopped         bool                   `json:"session_stopped,omitempty"`
-	WorktreeRemoved        bool                   `json:"worktree_removed,omitempty"`
-	WorktreeForced         bool                   `json:"worktree_forced,omitempty"`
-	Revision               uint64                 `json:"revision,omitempty"`
-	Phases                 []TaskClosePhaseTiming `json:"phases,omitempty"`
+	TaskID                  string                 `json:"task_id"`
+	Status                  string                 `json:"status"`
+	IntegrationRequested    bool                   `json:"integration_requested,omitempty"`
+	Integrated              bool                   `json:"integrated,omitempty"`
+	IntegratedSourceBranch  string                 `json:"integrated_source_branch,omitempty"`
+	IntegratedTargetBranch  string                 `json:"integrated_target_branch,omitempty"`
+	SessionStopped          bool                   `json:"session_stopped,omitempty"`
+	WorktreeRemoved         bool                   `json:"worktree_removed,omitempty"`
+	WorktreeCleanupDeferred bool                   `json:"worktree_cleanup_deferred,omitempty"`
+	WorktreeForced          bool                   `json:"worktree_forced,omitempty"`
+	Revision                uint64                 `json:"revision,omitempty"`
+	Phases                  []TaskClosePhaseTiming `json:"phases,omitempty"`
 }
 
 type TaskClosePhaseTiming struct {

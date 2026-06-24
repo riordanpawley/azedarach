@@ -3019,6 +3019,185 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	}
 }
 
+func TestTaskCloseCommandForceRemovesDirtyAlreadyIntegratedWorktree(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-force-dirty-already-reachable"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Force close dirty stale worktree",
+		Type:     domain.TypeBug,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
+	if err := os.MkdirAll(sourceWorktree, 0o755); err != nil {
+		t.Fatalf("mkdir source worktree: %v", err)
+	}
+	sourceBranch := "riordan/" + taskID + "/already-integrated-dirty"
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      sourceWorktree,
+		Branch:    sourceBranch,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+
+	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
+	commands := make([]string, 0, 12)
+	removeStarted := make(chan struct{})
+	releaseRemove := make(chan struct{})
+	removeDone := make(chan struct{})
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		commands = append(commands, strings.Join(args, " "))
+		joined := strings.Join(args, " ")
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+			return worktreeListOutput, nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-list" && args[3] == "--count" && args[4] == "main.."+sourceBranch:
+			return "0", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "status":
+			return "?? generated.txt\n", fmt.Errorf("forced close should not inspect dirty source status")
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "remove" && slices.Contains(args, "--force") && len(args) >= 5:
+			close(removeStarted)
+			<-releaseRemove
+			if err := os.RemoveAll(sourceWorktree); err != nil {
+				return "", err
+			}
+			close(removeDone)
+			return "", nil
+		case len(args) >= 3 && args[0] == "branch" && args[1] == "-D":
+			return "", nil
+		default:
+			return "", fmt.Errorf("unexpected git args: %s", joined)
+		}
+	}}
+
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		git:      git.NewClient(runner, logger),
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	d.gitStatusAdapter = &gitServiceAdapter{
+		client:            git.NewClient(runner, logger),
+		runtimeStateStore: runtimeStore,
+		logger:            logger,
+		baseBranch:        "main",
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		logger: logger,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	body, err := json.Marshal(taskCloseRequest{
+		TaskID:               taskID,
+		ForceWorktree:        true,
+		IntegrateBeforeClose: true,
+	})
+	if err != nil {
+		t.Fatalf("marshal task close request: %v", err)
+	}
+	type closeResponse struct {
+		resp protocol.ResponseEnvelope
+		err  error
+	}
+	closeDone := make(chan closeResponse, 1)
+	go func() {
+		resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-close-force-dirty-already-reachable",
+			Kind:            protocol.EnvelopeKindCommand,
+			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+			Command:         "task.close",
+			Body:            body,
+		})
+		closeDone <- closeResponse{resp: resp, err: err}
+	}()
+	var closeResult closeResponse
+	select {
+	case closeResult = <-closeDone:
+	case <-time.After(500 * time.Millisecond):
+		close(releaseRemove)
+		t.Fatal("handleTaskClose blocked on forced physical worktree removal")
+	}
+	resp := closeResult.resp
+	if closeResult.err != nil {
+		t.Fatalf("handleTaskClose error: %v", closeResult.err)
+	}
+	if !resp.OK {
+		if resp.Error != nil {
+			t.Fatalf("handleTaskClose error = %s", resp.Error.Message)
+		}
+		t.Fatalf("handleTaskClose response = %+v", resp)
+	}
+	var result taskCloseResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal close result: %v", err)
+	}
+	if !result.IntegrationRequested || result.Integrated || !result.WorktreeForced || !result.WorktreeCleanupDeferred || result.WorktreeRemoved {
+		t.Fatalf("close result = %+v, want requested no-op integration with forced worktree cleanup", result)
+	}
+	closed, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get task after close: %v", err)
+	}
+	if closed.Status != domain.StatusDone || closed.HasWorktree {
+		t.Fatalf("closed task status=%s has_worktree=%v, want closed without worktree", closed.Status, closed.HasWorktree)
+	}
+	select {
+	case <-removeStarted:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("deferred physical worktree cleanup did not start")
+	}
+	joined := strings.Join(commands, "\n")
+	if strings.Contains(joined, "-C "+sourceWorktree+" status") {
+		t.Fatalf("forced close should skip dirty source status, commands:\n%s", joined)
+	}
+	if !strings.Contains(joined, "worktree remove --force --force "+sourceWorktree) {
+		t.Fatalf("git commands missing double-force worktree removal:\n%s", joined)
+	}
+	close(releaseRemove)
+	select {
+	case <-removeDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("deferred physical worktree cleanup did not finish after release")
+	}
+}
+
 func TestTaskCloseCommandRefusesChildIntegrationToBaseWithoutAncestorTarget(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

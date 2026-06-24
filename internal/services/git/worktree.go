@@ -226,10 +226,10 @@ func (w *WorktreeManager) deleteWorktreeWithOptions(ctx context.Context, issueID
 	}
 
 	// Remove worktree
-	// git worktree remove [--force] <path>
+	// git worktree remove [-f -f] <path>
 	removeArgs := []string{"worktree", "remove"}
 	if force {
-		removeArgs = append(removeArgs, "--force")
+		removeArgs = append(removeArgs, "--force", "--force")
 	}
 	removeArgs = append(removeArgs, worktree.Path)
 	_, err = w.runner.Run(ctx, removeArgs...)
