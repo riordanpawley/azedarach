@@ -48,7 +48,7 @@ var hookEventStatuses = map[string]string{
 	hookEventSessionStart:      "started",
 	hookEventUserPromptSubmit:  "active",
 	hookEventPreToolUse:        "running_tool",
-	hookEventPostToolUse:       "active",
+	hookEventPostToolUse:       "waiting",
 	hookEventStop:              "stopped",
 	hookEventSubagentStart:     "started",
 	hookEventSubagentStop:      "stopped",
@@ -248,34 +248,6 @@ func ParseTmuxUninstallSelectorArgs(args []string) (TmuxUninstallSelectorOptions
 		return TmuxUninstallSelectorOptions{}, fmt.Errorf("usage: az tmux uninstall-selector [--config <path>] [--verbose]")
 	}
 	return opts, nil
-}
-
-func notifyDaemonSessionStatus(ctx context.Context, deps *Dependencies, issueID, event string) error {
-	callWithAutostart := func(call func(context.Context) error) error {
-		_, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (struct{}, error) {
-			return struct{}{}, call(callCtx)
-		})
-		return err
-	}
-
-	// We trust the daemon to keep its runtime projection fresh: handleSessionPause
-	// and handleSessionResume already call ensureFreshRuntimeForIssueMutation for
-	// the specific issue, which reconciles only that issue's projection. No
-	// client-side reconcile fan-out is needed.
-	switch event {
-	case hookEventIdlePrompt, hookEventPermissionRequest, hookEventStop, hookEventSessionEnd:
-		return callWithAutostart(func(callCtx context.Context) error {
-			_, pauseErr := deps.DaemonClient.PauseSession(callCtx, issueID)
-			return pauseErr
-		})
-	case hookEventSessionStart, hookEventUserPromptSubmit, hookEventPreToolUse, hookEventPostToolUse:
-		return callWithAutostart(func(callCtx context.Context) error {
-			_, resumeErr := deps.DaemonClient.ResumeSession(callCtx, issueID)
-			return resumeErr
-		})
-	default:
-		return nil
-	}
 }
 
 // renderNotifyOutput formats a human-readable hook status line for a given
