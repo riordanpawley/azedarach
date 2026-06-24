@@ -51,6 +51,7 @@ func (m *Model) applyTaskEvent(evt protocol.EventEnvelope) bool {
 		if body.Task == nil {
 			return false
 		}
+		m.reconcilePendingTaskDetailsFromHydrated([]domain.Task{*body.Task})
 		m.upsertTaskFromEvent(*body.Task)
 	default:
 		return false
@@ -70,6 +71,7 @@ func (m *Model) applyTaskEvent(evt protocol.EventEnvelope) bool {
 }
 
 func (m *Model) upsertTaskFromEvent(task domain.Task) {
+	task = boardTaskSummary(task)
 	taskKey := taskIDKey(task.ID.String())
 	for i := range m.tasks {
 		if taskIDKey(m.tasks[i].ID.String()) != taskKey {

@@ -69,7 +69,7 @@ func TestReconcileHydratedTasks_UsesHydratedRuntimeProjectionForMatchingTasks(t 
 	}
 }
 
-func TestReconcileHydratedTasks_PreservesLoadedDetailsOmittedFromSummaries(t *testing.T) {
+func TestReconcileHydratedTasks_UsesSummaryPayloadWithoutPreservingLoadedDetails(t *testing.T) {
 	estimate := 3
 	current := []domain.Task{
 		{
@@ -86,11 +86,15 @@ func TestReconcileHydratedTasks_PreservesLoadedDetailsOmittedFromSummaries(t *te
 	}
 	hydrated := []domain.Task{
 		{
-			ID:       "az-1",
-			Title:    "Summary title",
-			Status:   domain.StatusInReview,
-			Type:     domain.TypeTask,
-			Priority: domain.P1,
+			ID:          "az-1",
+			Title:       "Summary title",
+			Description: "Daemon detail should stay out of board state",
+			Design:      "Daemon design should stay out of board state",
+			Notes:       "Daemon notes should stay out of board state",
+			Acceptance:  "Daemon AC should stay out of board state",
+			Status:      domain.StatusInReview,
+			Type:        domain.TypeTask,
+			Priority:    domain.P1,
 		},
 	}
 
@@ -103,11 +107,11 @@ func TestReconcileHydratedTasks_PreservesLoadedDetailsOmittedFromSummaries(t *te
 	if task.Title != "Summary title" || task.Status != domain.StatusInReview || task.Priority != domain.P1 {
 		t.Fatalf("summary fields = %+v, want hydrated values", task)
 	}
-	if task.Description != "Loaded description" || task.Notes != "Loaded notes" || task.Design != "Loaded design" || task.Acceptance != "Loaded acceptance" {
-		t.Fatalf("detail fields = %+v, want existing loaded details preserved", task)
+	if task.Description != "" || task.Notes != "" || task.Design != "" || task.Acceptance != "" {
+		t.Fatalf("detail fields = %+v, want summary payload without preserved details", task)
 	}
-	if task.Estimate == nil || *task.Estimate != 3 {
-		t.Fatalf("estimate = %+v, want preserved estimate 3", task.Estimate)
+	if task.Estimate != nil {
+		t.Fatalf("estimate = %+v, want summary payload estimate", task.Estimate)
 	}
 }
 

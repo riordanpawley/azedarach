@@ -1369,8 +1369,8 @@ func TestTaskWorkspacePreservesDetailsAcrossSummaryRefresh(t *testing.T) {
 	if !strings.Contains(view, "Long description stays visible") || !strings.Contains(view, "Detailed notes stay visible") {
 		t.Fatalf("workspace lost full details after summary refresh:\n%s", view)
 	}
-	if updated.tasks[0].Description != "Long description stays visible" || updated.tasks[0].Notes != "Detailed notes stay visible" {
-		t.Fatalf("model task details after summary refresh = %+v", updated.tasks[0])
+	if updated.tasks[0].Description != "" || updated.tasks[0].Notes != "" {
+		t.Fatalf("model task details after summary refresh = %+v, want board summary without long details", updated.tasks[0])
 	}
 }
 

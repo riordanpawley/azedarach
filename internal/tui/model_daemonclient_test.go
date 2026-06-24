@@ -415,8 +415,8 @@ func TestEditedTaskDetailsStayVisibleAcrossStaleHydration(t *testing.T) {
 		revision: 43,
 	})
 	confirmed := confirmedAny.(Model)
-	if got := confirmed.tasks[0].Description; got != "Edited description from workspace form" {
-		t.Fatalf("description after confirmed hydration = %q, want edited description", got)
+	if got := confirmed.tasks[0].Description; got != "" {
+		t.Fatalf("description after confirmed hydration = %q, want board summary without description", got)
 	}
 	if _, ok := confirmed.pendingDetails[taskIDKey("az-1")]; ok {
 		t.Fatal("expected pending detail overlay to clear after confirmed hydration")
@@ -6041,8 +6041,8 @@ func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
 	if !strings.Contains(refreshed.View(), "persisted description") {
 		t.Fatalf("workspace should render full task details after refresh, got %q", refreshed.View())
 	}
-	if len(next.tasks) != 2 || next.tasks[0].Title != "Task fresh" || next.tasks[0].Description != "persisted description" || next.tasks[0].Status != domain.StatusDone {
-		t.Fatalf("board task after workspace refresh = %+v, want fresh done task plus preserved unrelated task", next.tasks)
+	if len(next.tasks) != 2 || next.tasks[0].Title != "Task fresh" || next.tasks[0].Description != "" || next.tasks[0].Status != domain.StatusDone {
+		t.Fatalf("board task after workspace refresh = %+v, want fresh summary task plus preserved unrelated task", next.tasks)
 	}
 	if next.tasks[1].ID.String() != "az-2" || next.tasks[1].Status != domain.StatusInReview {
 		t.Fatalf("unrelated board task after workspace refresh = %+v, want preserved blocked az-2", next.tasks[1])
@@ -6149,7 +6149,7 @@ func TestTaskWorkspaceRKeyRefreshesCurrentIssue(t *testing.T) {
 	if !strings.Contains(workspace.View(), "refreshed description") {
 		t.Fatalf("workspace should render full task details after r refresh, got %q", workspace.View())
 	}
-	if len(refreshed.tasks) != 1 || refreshed.tasks[0].Title != "Task fresh from r" || refreshed.tasks[0].Description != "refreshed description" || refreshed.tasks[0].Status != domain.StatusInReview {
+	if len(refreshed.tasks) != 1 || refreshed.tasks[0].Title != "Task fresh from r" || refreshed.tasks[0].Description != "" || refreshed.tasks[0].Status != domain.StatusInReview {
 		t.Fatalf("board task after r refresh = %+v", refreshed.tasks)
 	}
 	if got := transport.requests; len(got) != 3 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskGet || got[2] != daemonclient.CommandDecisionLinkList {
@@ -8425,7 +8425,7 @@ func TestTaskEventBodyAppliesWithoutSnapshotRefresh(t *testing.T) {
 	m.tasks = []domain.Task{{ID: "az-1", Title: "Old", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask}}
 	m.nav.SelectTask("az-1", 0)
 
-	updatedTask := domain.Task{ID: "az-1", Title: "Updated", Status: domain.StatusInReview, Priority: domain.P1, Type: domain.TypeBug}
+	updatedTask := domain.Task{ID: "az-1", Title: "Updated", Description: "Updated detail should stay out of board state", Status: domain.StatusInReview, Priority: domain.P1, Type: domain.TypeBug}
 	body, err := json.Marshal(protocol.TaskEventBody{
 		ProjectID: naming.ProjectID(m.daemonProjectID()),
 		TaskID:    "az-1",
@@ -8452,7 +8452,7 @@ func TestTaskEventBodyAppliesWithoutSnapshotRefresh(t *testing.T) {
 	if updated.daemonRevision != 5 {
 		t.Fatalf("daemonRevision = %d, want 5", updated.daemonRevision)
 	}
-	if len(updated.tasks) != 1 || updated.tasks[0].Title != "Updated" || updated.tasks[0].Status != domain.StatusInReview {
+	if len(updated.tasks) != 1 || updated.tasks[0].Title != "Updated" || updated.tasks[0].Description != "" || updated.tasks[0].Status != domain.StatusInReview {
 		t.Fatalf("tasks after task event = %+v", updated.tasks)
 	}
 	if got := updated.nav.GetCursor().TaskID; got != "az-1" {

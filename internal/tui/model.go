@@ -5114,7 +5114,7 @@ func (m *Model) applyTaskRefresh(taskID string, refreshed domain.Task, syncAfter
 		if taskIDKey(m.tasks[i].ID.String()) != key {
 			continue
 		}
-		m.tasks[i] = refreshed
+		m.tasks[i] = boardTaskSummary(refreshed)
 		m.tasks[i].Session = cloneSession(m.tasks[i].Session)
 		if syncAfter {
 			m.syncProjectionIndexesFromTasks()
@@ -5123,6 +5123,14 @@ func (m *Model) applyTaskRefresh(taskID string, refreshed domain.Task, syncAfter
 		return m.tasks[i], true
 	}
 	return domain.Task{}, false
+}
+
+func boardTaskSummary(task domain.Task) domain.Task {
+	task.Description = ""
+	task.Design = ""
+	task.Notes = ""
+	task.Acceptance = ""
+	return task
 }
 
 func (m *Model) applyPendingStatusOverlays() {
@@ -5207,6 +5215,22 @@ func (m *Model) reconcilePendingTaskDetails() {
 			continue
 		}
 		if !pending.updatedAt.IsZero() && now.Sub(pending.updatedAt) > stalePendingTTL {
+			delete(m.pendingDetails, key)
+		}
+	}
+}
+
+func (m *Model) reconcilePendingTaskDetailsFromHydrated(tasks []domain.Task) {
+	if len(m.pendingDetails) == 0 || len(tasks) == 0 {
+		return
+	}
+	for _, task := range tasks {
+		key := taskIDKey(task.ID.String())
+		pending, ok := m.pendingDetails[key]
+		if !ok {
+			continue
+		}
+		if taskDetailsMatchPending(task, pending) {
 			delete(m.pendingDetails, key)
 		}
 	}

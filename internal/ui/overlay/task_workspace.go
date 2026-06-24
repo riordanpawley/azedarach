@@ -375,6 +375,7 @@ func (w *TaskWorkspaceOverlay) SyncDecisionLinks(links []DecisionLinkSummary) {
 
 // SyncTask updates workspace detail/actions from refreshed task projection data.
 func (w *TaskWorkspaceOverlay) SyncTask(task domain.Task, relatedTasks []domain.Task, mutation *TaskMutationProgress) {
+	task = mergeWorkspaceTaskDetails(w.detail.task, task)
 	w.detail.task = task
 	w.detail.relatedTasks = append([]domain.Task(nil), relatedTasks...)
 	w.detail.mutation = cloneTaskMutationProgress(mutation)
@@ -399,4 +400,34 @@ func (w *TaskWorkspaceOverlay) SyncTask(task domain.Task, relatedTasks []domain.
 	}
 	w.actions.ensureCursorVisible()
 	w.normalizeFocus()
+}
+
+func mergeWorkspaceTaskDetails(existing, refreshed domain.Task) domain.Task {
+	if existing.ID.String() != refreshed.ID.String() {
+		return refreshed
+	}
+	if refreshed.Description == "" {
+		refreshed.Description = existing.Description
+	}
+	if refreshed.Design == "" {
+		refreshed.Design = existing.Design
+	}
+	if refreshed.Notes == "" {
+		refreshed.Notes = existing.Notes
+	}
+	if refreshed.Acceptance == "" {
+		refreshed.Acceptance = existing.Acceptance
+	}
+	if refreshed.Estimate == nil {
+		refreshed.Estimate = cloneInt(existing.Estimate)
+	}
+	return refreshed
+}
+
+func cloneInt(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
