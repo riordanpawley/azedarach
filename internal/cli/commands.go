@@ -6210,23 +6210,7 @@ func resolveSessionLogDir(cfg *config.Config) string {
 }
 
 func resolveSessionLogDirFor(cfg *config.Config, startPath string) string {
-	if config.UseScopedDaemonRuntimeFor(startPath) {
-		if worktreeRoot, ok := resolveScopedWorktreeRoot(startPath); ok {
-			return filepath.Join(worktreeRoot, ".azedarach")
-		}
-	}
-
-	if cfg == nil {
-		cfg = config.DefaultConfig()
-	}
-	logDir := strings.TrimSpace(cfg.Session.LogDir)
-	if logDir != "" {
-		return logDir
-	}
-	if homeDir, err := os.UserHomeDir(); err == nil && strings.TrimSpace(homeDir) != "" {
-		return filepath.Join(homeDir, ".azedarach", "logs")
-	}
-	return filepath.Join(".", ".azedarach", "logs")
+	return config.SessionLogDirFor(cfg, startPath)
 }
 
 func resolveRuntimeRepoDir(repoDir string) string {

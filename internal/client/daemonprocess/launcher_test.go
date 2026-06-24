@@ -31,6 +31,27 @@ func (w *trackingWriteCloser) Close() error {
 	return nil
 }
 
+func writeLauncherConfig(t *testing.T, repoDir, logDir string) {
+	t.Helper()
+	configDir := filepath.Join(repoDir, ".azedarach")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(config dir): %v", err)
+	}
+	body := fmt.Sprintf(`{"session":{"logDir":%q}}`, logDir)
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("WriteFile(config.json): %v", err)
+	}
+}
+
+func writeTestExecutable(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "azd-test")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(test executable): %v", err)
+	}
+	return path
+}
+
 func TestLauncherStartClosesDaemonLog(t *testing.T) {
 	repoDir := t.TempDir()
 	socketRoot, err := os.MkdirTemp(".", "azd-launcher-")
@@ -40,12 +61,14 @@ func TestLauncherStartClosesDaemonLog(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(socketRoot) })
 	socketPath := filepath.Join(socketRoot, "daemon.sock")
 	tracker := &trackingWriteCloser{}
+	logDir := filepath.Join(t.TempDir(), "logs")
+	writeLauncherConfig(t, repoDir, logDir)
 
 	launcher := NewLauncher(repoDir, socketPath)
 	if launcher.LockPath != filepath.Join(socketRoot, "daemon.lock") {
 		t.Fatalf("launcher.LockPath = %q, want %q", launcher.LockPath, filepath.Join(socketRoot, "daemon.lock"))
 	}
-	launcher.BinPath = "true"
+	launcher.BinPath = writeTestExecutable(t)
 	readyCalls := 0
 	launcher.waitForReady = func(context.Context, string) error {
 		readyCalls++
@@ -55,7 +78,7 @@ func TestLauncherStartClosesDaemonLog(t *testing.T) {
 		return nil
 	}
 	launcher.openLogFile = func(path string) (io.WriteCloser, error) {
-		want := filepath.Join(repoDir, ".azedarach", logging.DaemonLogFileName)
+		want := filepath.Join(logDir, logging.DaemonLogFileName)
 		if path != want {
 			t.Fatalf("daemon log path = %q, want %q", path, want)
 		}
@@ -68,8 +91,61 @@ func TestLauncherStartClosesDaemonLog(t *testing.T) {
 	if !tracker.closed.Load() {
 		t.Fatal("daemon log file was not closed after Start() returned")
 	}
-	if _, err := os.Stat(filepath.Join(repoDir, ".azedarach")); err != nil {
-		t.Fatalf("expected .azedarach dir to exist: %v", err)
+}
+
+func TestLauncherStartUsesWorktreeLocalDaemonLogForScopedRuntime(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "wt")
+	nested := filepath.Join(worktree, "nested")
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo worktrees): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module github.com/riordanpawley/azedarach\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(go.mod): %v", err)
+	}
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("MkdirAll(nested): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree .git): %v", err)
+	}
+	writeLauncherConfig(t, repo, filepath.Join(t.TempDir(), "logs"))
+	t.Setenv("PATH", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
+
+	socketRoot, err := os.MkdirTemp(".", "azd-launcher-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketRoot) })
+	socketPath := filepath.Join(socketRoot, "daemon.sock")
+	tracker := &trackingWriteCloser{}
+
+	launcher := NewLauncher(nested, socketPath)
+	launcher.BinPath = writeTestExecutable(t)
+	readyCalls := 0
+	launcher.waitForReady = func(context.Context, string) error {
+		readyCalls++
+		if readyCalls <= 2 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	launcher.openLogFile = func(path string) (io.WriteCloser, error) {
+		want := filepath.Join(worktree, ".azedarach", logging.DaemonLogFileName)
+		if path != want {
+			t.Fatalf("daemon log path = %q, want %q", path, want)
+		}
+		return tracker, nil
+	}
+
+	if err := launcher.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if !tracker.closed.Load() {
+		t.Fatal("daemon log file was not closed after Start() returned")
 	}
 }
 

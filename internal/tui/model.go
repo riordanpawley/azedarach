@@ -2711,30 +2711,11 @@ func (m Model) daemonLogFilePath() string {
 	if repoDir == "" {
 		repoDir = "."
 	}
-	return filepath.Join(repoDir, ".azedarach", logging.DaemonLogFileName)
+	return filepath.Join(config.SessionLogDirFor(m.config, repoDir), logging.DaemonLogFileName)
 }
 
 func resolveTUILogFilePath(cfg *config.Config) string {
-	if config.UseScopedDaemonRuntimeFor("") {
-		if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
-			if worktreeRoot, rootErr := config.ResolveWorktreeRoot(cwd); rootErr == nil && strings.TrimSpace(worktreeRoot) != "" {
-				return filepath.Join(worktreeRoot, ".azedarach", logging.TUILogFileName)
-			}
-		}
-	}
-
-	if cfg == nil {
-		cfg = config.DefaultConfig()
-	}
-	baseDir := strings.TrimSpace(cfg.Session.LogDir)
-	if baseDir == "" {
-		if homeDir, err := os.UserHomeDir(); err == nil && strings.TrimSpace(homeDir) != "" {
-			baseDir = filepath.Join(homeDir, ".azedarach", "logs")
-		} else {
-			baseDir = filepath.Join(".", ".azedarach", "logs")
-		}
-	}
-	return filepath.Join(baseDir, logging.TUILogFileName)
+	return filepath.Join(config.SessionLogDirFor(cfg, ""), logging.TUILogFileName)
 }
 
 func newTUILogger(logPath string) *slog.Logger {

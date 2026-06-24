@@ -73,7 +73,7 @@ func main() {
 	if scopeWatchPath := resolveScopedWorktreeWatchPath(repoDir); scopeWatchPath != "" {
 		startWorktreeExistenceWatch(ctx, cancel, scopeWatchPath, 2*time.Second)
 	}
-	outputRedirect, err := redirectDaemonProcessOutput(repoDir)
+	outputRedirect, err := redirectDaemonProcessOutput(repoDir, cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to configure daemon log rotation: %v\n", err)
 	} else {
@@ -118,8 +118,9 @@ type daemonProcessOutputRedirect struct {
 	done           chan struct{}
 }
 
-func redirectDaemonProcessOutput(repoDir string) (*daemonProcessOutputRedirect, error) {
-	logFile, err := logging.OpenRotatingFile(filepath.Join(repoDir, ".azedarach", logging.DaemonLogFileName), logging.DefaultMaxLogBytes, logging.DefaultLogBackups)
+func redirectDaemonProcessOutput(repoDir string, cfg *config.Config) (*daemonProcessOutputRedirect, error) {
+	logPath := filepath.Join(config.SessionLogDirFor(cfg, repoDir), logging.DaemonLogFileName)
+	logFile, err := logging.OpenRotatingFile(logPath, logging.DefaultMaxLogBytes, logging.DefaultLogBackups)
 	if err != nil {
 		return nil, err
 	}

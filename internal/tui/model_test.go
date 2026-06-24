@@ -305,14 +305,17 @@ func TestNewWithOptions_DoesNotWriteTUILogsDuringTests(t *testing.T) {
 	}
 }
 
-func TestDaemonLogFilePath_UsesRepoDir(t *testing.T) {
+func TestDaemonLogFilePath_UsesSessionLogDir(t *testing.T) {
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
 	m := newTestModel()
 	m.repoDir = "/tmp/worktree"
 	m.runtimeRepoDir = ""
+	cfg := config.DefaultConfig()
+	cfg.Session.LogDir = "/tmp/azedarach-user-logs"
+	m.config = cfg
 
 	got := m.daemonLogFilePath()
-	want := filepath.Join("/tmp/worktree", ".azedarach", logging.DaemonLogFileName)
+	want := filepath.Join("/tmp/azedarach-user-logs", logging.DaemonLogFileName)
 	if got != want {
 		t.Fatalf("daemonLogFilePath() = %q, want %q", got, want)
 	}

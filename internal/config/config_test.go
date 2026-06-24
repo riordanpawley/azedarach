@@ -650,3 +650,35 @@ func TestMergeWithDefaultsPreservesExplicitValues(t *testing.T) {
 	assert.Equal(t, 30000, merged.Session.TimeoutMs)
 	assert.Equal(t, 3100, merged.DevServer.MaxPort)
 }
+
+func TestSessionLogDirForUsesConfiguredGlobalLogDir(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
+	cfg := DefaultConfig()
+	cfg.Session.LogDir = filepath.Join(t.TempDir(), "logs")
+
+	got := SessionLogDirFor(cfg, t.TempDir())
+
+	assert.Equal(t, cfg.Session.LogDir, got)
+}
+
+func TestSessionLogDirForUsesWorktreeLocalDirForScopedRuntime(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "wt")
+	nested := filepath.Join(worktree, "nested")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module github.com/riordanpawley/azedarach\n"), 0o644))
+	require.NoError(t, os.MkdirAll(nested, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644))
+
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
+	t.Setenv("PATH", "")
+	cfg := DefaultConfig()
+	cfg.Session.LogDir = filepath.Join(t.TempDir(), "logs")
+
+	got := SessionLogDirFor(cfg, nested)
+
+	assert.Equal(t, filepath.Join(worktree, ".azedarach"), got)
+}
