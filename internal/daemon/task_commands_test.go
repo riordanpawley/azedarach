@@ -3229,6 +3229,37 @@ func TestTaskMergeBaseTargetSelectsNearestAncestorWorktree(t *testing.T) {
 	}
 }
 
+func TestTaskMergeBaseTargetDefaultUsesProjectBaseBranch(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	configDir := filepath.Join(repoDir, ".azedarach")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	configJSON := `{
+		"$version": 8,
+		"git": {
+			"baseBranch": "main"
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	d := New(Config{
+		RepoDir:    repoDir,
+		BaseBranch: "preview",
+		Logger:     slog.Default(),
+	})
+	got, err := d.taskMergeBaseTarget(ctx, filepath.Base(repoDir), "", "", false)
+	if err != nil {
+		t.Fatalf("taskMergeBaseTarget error: %v", err)
+	}
+	if got.Branch != "main" {
+		t.Fatalf("Branch = %q, want project base branch main", got.Branch)
+	}
+}
+
 func TestTaskGraphReadinessReportsPendingStartupAndCleanupTranscriptStates(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

@@ -2470,7 +2470,7 @@ func (d *Daemon) taskMergeBaseTarget(ctx context.Context, projectID, issueID, ba
 	issueID = strings.TrimSpace(issueID)
 	baseBranch = strings.TrimSpace(baseBranch)
 	if baseBranch == "" {
-		baseBranch = d.cfg.BaseBranch
+		baseBranch = d.baseBranchForProject(projectID)
 	}
 	if strings.TrimSpace(baseBranch) == "" {
 		baseBranch = "main"
