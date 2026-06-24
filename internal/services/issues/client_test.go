@@ -547,6 +547,86 @@ func TestClient_ListWithRuntimeReturnsJoinedProjectionFields(t *testing.T) {
 	assert.Equal(t, 7, one.GitAdditions)
 }
 
+func TestClient_ListSummariesWithRuntimeKeepsGraphAndRuntimeProjection(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-summary-runtime"
+
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Parent",
+		Type:     domain.TypeEpic,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	require.NoError(t, err)
+	blockerID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Blocker",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:       "Child",
+		Description: strings.Repeat("description ", 100),
+		Design:      strings.Repeat("design ", 100),
+		Notes:       strings.Repeat("notes ", 100),
+		Acceptance:  strings.Repeat("acceptance ", 100),
+		Type:        domain.TypeTask,
+		Priority:    domain.P1,
+		Status:      domain.StatusOpen,
+		ParentID:    &parentID,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.AddDependency(ctx, childID, blockerID, string(domain.DependencyBlocks)))
+
+	db, err := sql.Open("sqlite", client.dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	now := time.Date(2026, time.April, 4, 12, 0, 0, 0, time.UTC)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, activity, activity_source, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-summary-runtime", childID, "attached", "idle", "hooks", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	require.NoError(t, err)
+
+	statusRaw, err := json.Marshal(git.GitStatus{HasChanges: true, GitAdditions: 5, GitDeletions: 1})
+	require.NoError(t, err)
+	worktreePath := "/tmp/proj-summary-runtime-" + childID
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at, git_status_json)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, projectID, childID, worktreePath, "riordan/"+childID+"/task", now.Format(time.RFC3339Nano), string(statusRaw))
+	require.NoError(t, err)
+
+	tasks, err := client.ListSummariesWithRuntime(ctx, projectID)
+	require.NoError(t, err)
+	taskByID := map[string]domain.Task{}
+	for _, task := range tasks {
+		taskByID[task.ID.String()] = task
+	}
+	require.Contains(t, taskByID, childID)
+	got := taskByID[childID]
+	require.NotNil(t, got.ParentID)
+	assert.Equal(t, parentID, got.ParentID.String())
+	require.Len(t, got.Dependencies, 1)
+	assert.Equal(t, blockerID, got.Dependencies[0].ID.String())
+	assert.Equal(t, domain.DependencyBlocks, got.Dependencies[0].Type)
+	require.NotNil(t, got.Session)
+	assert.Equal(t, domain.SessionBusy, got.Session.State)
+	assert.Equal(t, "idle", got.Session.Activity)
+	assert.Equal(t, "hooks", got.Session.ActivitySource)
+	assert.True(t, got.HasWorktree)
+	assert.True(t, got.HasUncommittedChanges)
+	assert.Equal(t, 5, got.GitAdditions)
+	assert.Equal(t, 1, got.GitDeletions)
+	assert.Empty(t, got.Description)
+	assert.Empty(t, got.Design)
+	assert.Empty(t, got.Notes)
+	assert.Empty(t, got.Acceptance)
+}
+
 func TestClient_ListWithRuntimeUsesObservedSessionState(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
