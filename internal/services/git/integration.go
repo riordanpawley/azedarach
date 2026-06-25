@@ -24,8 +24,7 @@ type integrationJournal struct {
 }
 
 // MergeCleanlyTransactional performs the merge in a disposable worktree and only
-// updates the target worktree after the scratch merge succeeds. Callers that
-// share a Client should hold the target's WithWorktreeLock while this runs.
+// locks the target worktree for the base snapshot and final apply phases.
 func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch string) (*MergeResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -38,24 +37,35 @@ func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch
 	if branch == "" {
 		return nil, fmt.Errorf("source branch is required")
 	}
-	if err := c.RecoverIntegrationJournal(ctx, worktree); err != nil {
-		return nil, fmt.Errorf("recover interrupted integration: %w", err)
-	}
+	var targetHead string
+	var earlyResult *MergeResult
+	if err := c.WithWorktreeLock(ctx, worktree, func(ctx context.Context) error {
+		if err := c.RecoverIntegrationJournal(ctx, worktree); err != nil {
+			return fmt.Errorf("recover interrupted integration: %w", err)
+		}
 
-	targetStatus, err := c.Status(ctx, worktree)
-	if err != nil {
-		return nil, fmt.Errorf("inspect target status before transactional merge: %w", err)
-	}
-	if gitStatusDirty(targetStatus) {
-		return &MergeResult{
-			Success: false,
-			Message: fmt.Sprintf("target worktree is dirty before transactional merge; leaving files untouched: %s", gitStatusSummary(targetStatus)),
-		}, nil
-	}
+		targetStatus, err := c.Status(ctx, worktree)
+		if err != nil {
+			return fmt.Errorf("inspect target status before transactional merge: %w", err)
+		}
+		if gitStatusDirty(targetStatus) {
+			earlyResult = &MergeResult{
+				Success: false,
+				Message: fmt.Sprintf("target worktree is dirty before transactional merge; leaving files untouched: %s", gitStatusSummary(targetStatus)),
+			}
+			return nil
+		}
 
-	targetHead, err := c.revParseVerify(ctx, worktree, "HEAD")
-	if err != nil {
-		return nil, fmt.Errorf("resolve target HEAD before transactional merge: %w", err)
+		targetHead, err = c.revParseVerify(ctx, worktree, "HEAD")
+		if err != nil {
+			return fmt.Errorf("resolve target HEAD before transactional merge: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	if earlyResult != nil {
+		return earlyResult, nil
 	}
 	scratchPath, err := os.MkdirTemp("", "azedarach-integration-*")
 	if err != nil {
@@ -112,50 +122,79 @@ func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch
 		return result, nil
 	}
 
-	targetStatus, err = c.Status(ctx, worktree)
-	if err != nil {
-		return nil, fmt.Errorf("inspect target status before final apply: %w", err)
-	}
-	if gitStatusDirty(targetStatus) {
-		return &MergeResult{
-			Success: false,
-			Message: fmt.Sprintf("target worktree became dirty before final apply; target left untouched: %s", gitStatusSummary(targetStatus)),
-		}, nil
-	}
+	return c.applyValidatedScratchMerge(ctx, worktree, scratchPath, targetHead, desiredHead, result)
+}
 
-	journal := integrationJournal{
-		Version:         integrationJournalVersion,
-		TargetWorktree:  worktree,
-		TargetHead:      targetHead,
-		DesiredHead:     desiredHead,
-		ScratchWorktree: scratchPath,
-		StartedAt:       time.Now().UTC(),
-	}
-	if err := c.writeIntegrationJournal(ctx, worktree, journal); err != nil {
-		return nil, fmt.Errorf("write transactional merge journal: %w", err)
-	}
-	if err := c.resetHard(ctx, worktree, desiredHead); err != nil {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mergeCleanupTimeout)
-		defer cancel()
-		if recoverErr := c.RecoverIntegrationJournal(cleanupCtx, worktree); recoverErr != nil {
-			return nil, fmt.Errorf("apply transactional merge failed (%v); recovery failed: %w", err, recoverErr)
+func (c *Client) applyValidatedScratchMerge(ctx context.Context, worktree, scratchPath, targetHead, desiredHead string, result *MergeResult) (*MergeResult, error) {
+	var out *MergeResult
+	if err := c.WithWorktreeLock(ctx, worktree, func(ctx context.Context) error {
+		if err := c.RecoverIntegrationJournal(ctx, worktree); err != nil {
+			return fmt.Errorf("recover interrupted integration before final apply: %w", err)
 		}
-		return &MergeResult{
-			Success: false,
-			Message: fmt.Sprintf("transactional merge final apply failed; recovered target worktree: %v", err),
-		}, nil
+		targetStatus, err := c.Status(ctx, worktree)
+		if err != nil {
+			return fmt.Errorf("inspect target status before final apply: %w", err)
+		}
+		if gitStatusDirty(targetStatus) {
+			out = &MergeResult{
+				Success: false,
+				Message: fmt.Sprintf("target worktree became dirty before final apply; target left untouched: %s", gitStatusSummary(targetStatus)),
+			}
+			return nil
+		}
+		currentHead, err := c.revParseVerify(ctx, worktree, "HEAD")
+		if err != nil {
+			return fmt.Errorf("resolve target HEAD before final apply: %w", err)
+		}
+		if currentHead != targetHead {
+			out = &MergeResult{
+				Success: false,
+				Message: fmt.Sprintf("target HEAD moved from %s to %s after scratch validation; retry integration with a fresh scratch merge", targetHead, currentHead),
+			}
+			return nil
+		}
+
+		journal := integrationJournal{
+			Version:         integrationJournalVersion,
+			TargetWorktree:  worktree,
+			TargetHead:      targetHead,
+			DesiredHead:     desiredHead,
+			ScratchWorktree: scratchPath,
+			StartedAt:       time.Now().UTC(),
+		}
+		if err := c.writeIntegrationJournal(ctx, worktree, journal); err != nil {
+			return fmt.Errorf("write transactional merge journal: %w", err)
+		}
+		if err := c.resetHard(ctx, worktree, desiredHead); err != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mergeCleanupTimeout)
+			defer cancel()
+			if recoverErr := c.RecoverIntegrationJournal(cleanupCtx, worktree); recoverErr != nil {
+				return fmt.Errorf("apply transactional merge failed (%v); recovery failed: %w", err, recoverErr)
+			}
+			out = &MergeResult{
+				Success: false,
+				Message: fmt.Sprintf("transactional merge final apply failed; recovered target worktree: %v", err),
+			}
+			return nil
+		}
+		postStatus, err := c.Status(ctx, worktree)
+		if err != nil {
+			return fmt.Errorf("inspect target status after final apply: %w", err)
+		}
+		if gitStatusDirty(postStatus) {
+			var recoverErr error
+			out, recoverErr = c.recoverDirtyFinalApply(ctx, worktree, postStatus)
+			return recoverErr
+		}
+		if err := c.removeIntegrationJournal(ctx, worktree); err != nil && c.logger != nil {
+			c.logger.Warn("failed to remove transactional merge journal", "worktree", worktree, "error", err)
+		}
+		out = result
+		return nil
+	}); err != nil {
+		return nil, err
 	}
-	postStatus, err := c.Status(ctx, worktree)
-	if err != nil {
-		return nil, fmt.Errorf("inspect target status after final apply: %w", err)
-	}
-	if gitStatusDirty(postStatus) {
-		return c.recoverDirtyFinalApply(ctx, worktree, postStatus)
-	}
-	if err := c.removeIntegrationJournal(ctx, worktree); err != nil && c.logger != nil {
-		c.logger.Warn("failed to remove transactional merge journal", "worktree", worktree, "error", err)
-	}
-	return result, nil
+	return out, nil
 }
 
 func (c *Client) recoverDirtyFinalApply(ctx context.Context, worktree string, postStatus *GitStatus) (*MergeResult, error) {

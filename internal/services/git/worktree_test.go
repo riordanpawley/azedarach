@@ -330,7 +330,7 @@ branch refs/heads/az/issue-123
 	})
 
 	require.NoError(t, err)
-	mock.AssertCommand(t, "worktree remove --force /home/user/test-repo-issue-123")
+	mock.AssertCommand(t, "worktree remove --force --force /home/user/test-repo-issue-123")
 	mock.AssertCommand(t, "branch -D az/issue-123")
 }
 

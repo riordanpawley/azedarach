@@ -5851,6 +5851,41 @@ func TestPendingCloseCleanupTargetIDs(t *testing.T) {
 	}
 }
 
+func TestReviewCascadeChildIDsIncludesUnreadyDescendants(t *testing.T) {
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	legacyChildID := naming.IssueID("az-legacy")
+	m := Model{
+		tasks: []domain.Task{
+			{ID: parentID, Status: domain.StatusInProgress},
+			{ID: childID, Status: domain.StatusInProgress, ParentID: &parentID},
+			{ID: "az-grandchild", Status: domain.StatusOpen, ParentID: &childID},
+			{ID: "az-ready", Status: domain.StatusInReview, ParentID: &parentID},
+			{ID: "az-closed", Status: domain.StatusDone, ParentID: &parentID},
+			{
+				ID:     legacyChildID,
+				Status: domain.StatusOpen,
+				Dependencies: []domain.Dependency{
+					{ID: parentID, Type: domain.DependencyParentChild},
+				},
+			},
+		},
+	}
+
+	got := m.reviewCascadeChildIDs(parentID.String())
+	want := []string{"az-child", "az-grandchild", "az-legacy"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("reviewCascadeChildIDs() = %v, want %v", got, want)
+	}
+
+	prompt := formatReviewCascadeConfirmPrompt(pendingReviewCascadeConfirmation{taskID: parentID.String(), childIDs: got})
+	for _, wantText := range []string{"Parent: az-parent", "Children to move: 3", "- az-child", "- az-grandchild", "- az-legacy"} {
+		if !strings.Contains(prompt, wantText) {
+			t.Fatalf("prompt missing %q:\n%s", wantText, prompt)
+		}
+	}
+}
+
 func TestDirtyCloseConfirmationRefreshesAndClosesDialogBeforeBlocking(t *testing.T) {
 	m := newTestModel()
 	pending := pendingCloseCleanupConfirmation{

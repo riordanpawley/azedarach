@@ -260,6 +260,30 @@ func TestModelTreeRendersIssueStatusBesideAgentStatus(t *testing.T) {
 	}
 }
 
+func TestModelTreeRendersHumanReadableUpdatedAge(t *testing.T) {
+	updatedAt := time.Now().Add(-5 * time.Minute).UTC()
+	entries := []InventoryEntry{{
+		SessionID:     "az-cqg",
+		IssueID:       "cqg",
+		TaskTitle:     "Human readable selector duration",
+		State:         domain.SessionBusy,
+		IssueStatus:   domain.StatusInProgress,
+		LastUpdatedAt: &updatedAt,
+	}}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	model.activeTab = selectorTabTree
+
+	view := ansi.Strip(model.View())
+	if !strings.Contains(view, "updated 5m") {
+		t.Fatalf("tree view missing updated duration:\n%s", view)
+	}
+}
+
 func TestModelTreeColorizesSessionAndIssueStatus(t *testing.T) {
 	prev := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
@@ -325,6 +349,7 @@ func TestModelTreePrefersPrefixedSessionIDForIssueRows(t *testing.T) {
 }
 
 func TestRenderSessionRowIncludesIssueStatusInCardMeta(t *testing.T) {
+	updatedAt := time.Now().Add(-3 * time.Hour).UTC()
 	row := SessionRow{
 		SessionID:      "az-coh",
 		IssueID:        "coh",
@@ -332,14 +357,57 @@ func TestRenderSessionRowIncludesIssueStatusInCardMeta(t *testing.T) {
 		State:          domain.SessionBusy,
 		IssueStatus:    domain.StatusInProgress,
 		HasTmuxSession: true,
+		LastUpdatedAt:  &updatedAt,
 	}
 
 	view := ansi.Strip(RenderSessionRow(row, false, 64, lipgloss.Style{}, lipgloss.Style{}, lipgloss.Style{}, styles.New()))
 	if !strings.Contains(view, "issue in_progress") {
 		t.Fatalf("card missing issue status meta:\n%s", view)
 	}
+	if !strings.Contains(view, "updated 3h") {
+		t.Fatalf("card missing updated duration meta:\n%s", view)
+	}
 	if !strings.Contains(view, "tmux az-coh") {
 		t.Fatalf("card missing tmux meta:\n%s", view)
+	}
+}
+
+func TestFormatShortDuration(t *testing.T) {
+	tests := []struct {
+		name string
+		in   time.Duration
+		want string
+	}{
+		{name: "seconds", in: 20 * time.Second, want: "20s"},
+		{name: "minutes", in: 3*time.Minute + 45*time.Second, want: "3m"},
+		{name: "hours", in: 5*time.Hour + 59*time.Minute, want: "5h"},
+		{name: "days", in: 2*24*time.Hour + time.Hour, want: "2d"},
+		{name: "weeks", in: 15 * 24 * time.Hour, want: "2w"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatShortDuration(tt.in); got != tt.want {
+				t.Fatalf("formatShortDuration(%s) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatEntryUpdatedAgeIgnoresSessionProjectionRefresh(t *testing.T) {
+	now := time.Now().UTC()
+	issueUpdatedAt := now.Add(-6 * time.Hour)
+	sessionUpdatedAt := now.Add(-2 * time.Second)
+	entry := InventoryEntry{
+		Task: domain.Task{
+			UpdatedAt: issueUpdatedAt,
+			Session: &domain.Session{
+				UpdatedAt: sessionUpdatedAt,
+			},
+		},
+	}
+
+	if got := formatEntryUpdatedAge(entry, now); got != "6h" {
+		t.Fatalf("formatEntryUpdatedAge = %q, want 6h from issue update, not 2s from projection refresh", got)
 	}
 }
 
@@ -790,6 +858,80 @@ func TestModelTreeViewShowsNonSelectableAncestorsForActiveLeaves(t *testing.T) {
 	model = updateKey(t, model, "down")
 	if model.cursor != 0 {
 		t.Fatalf("tree cursor moved to ancestor/nonexistent row: %d", model.cursor)
+	}
+}
+
+func TestModelTreeSortUpdatedRanksBranchesByNewestDescendantSession(t *testing.T) {
+	now := time.Now().UTC()
+	alphaID := naming.IssueID("az-alpha")
+	betaID := naming.IssueID("az-beta")
+	alphaChildID := naming.IssueID("az-alpha-child")
+	betaChildID := naming.IssueID("az-beta-child")
+	oldUpdated := now.Add(-4 * time.Hour)
+	newUpdated := now.Add(-2 * time.Minute)
+	entries := []InventoryEntry{
+		{
+			SessionID:      "az-alpha-child",
+			IssueID:        alphaChildID.String(),
+			TaskTitle:      "Alpha child",
+			LastUpdatedAt:  &oldUpdated,
+			HasTmuxSession: true,
+			Task: domain.Task{
+				ID:       alphaChildID,
+				Title:    "Alpha child",
+				Status:   domain.StatusInProgress,
+				ParentID: &alphaID,
+			},
+		},
+		{
+			SessionID:      "az-beta-child",
+			IssueID:        betaChildID.String(),
+			TaskTitle:      "Beta child",
+			LastUpdatedAt:  &newUpdated,
+			HasTmuxSession: true,
+			Task: domain.Task{
+				ID:       betaChildID,
+				Title:    "Beta child",
+				Status:   domain.StatusInProgress,
+				ParentID: &betaID,
+			},
+		},
+	}
+	snapshot := Snapshot{
+		Entries: entries,
+		TreeTasks: []domain.Task{
+			{ID: alphaID, Title: "Alpha parent", Status: domain.StatusInProgress},
+			{ID: betaID, Title: "Beta parent", Status: domain.StatusInProgress},
+		},
+	}
+	model := New(fakeSnapshotLoader{snapshot: snapshot})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	model = updated.(Model)
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: snapshot})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	model = updateKey(t, model, "tab")
+	orderView := ansi.Strip(model.View())
+	alphaPos := strings.Index(orderView, "az-alpha")
+	betaPos := strings.Index(orderView, "az-beta")
+	if alphaPos < 0 || betaPos < 0 || alphaPos > betaPos {
+		t.Fatalf("structural tree order changed unexpectedly:\n%s", orderView)
+	}
+
+	model = updateKey(t, model, "u")
+	if model.treeSort != selectorTreeSortUpdated {
+		t.Fatalf("tree sort = %v, want updated", model.treeSort)
+	}
+	updatedView := ansi.Strip(model.View())
+	if !strings.Contains(updatedView, "[ Tree:updated ]") || !strings.Contains(updatedView, "u: sort") {
+		t.Fatalf("updated tree view missing sort controls:\n%s", updatedView)
+	}
+	alphaPos = strings.Index(updatedView, "az-alpha")
+	betaPos = strings.Index(updatedView, "az-beta")
+	if alphaPos < 0 || betaPos < 0 || betaPos > alphaPos {
+		t.Fatalf("updated tree order did not rank newest descendant first:\n%s", updatedView)
 	}
 }
 

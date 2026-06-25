@@ -42,6 +42,7 @@ type InventoryEntry struct {
 	ActivitySource        string
 	StartedAt             *time.Time
 	LastAttachedAt        *time.Time
+	LastUpdatedAt         *time.Time
 	TmuxAttached          bool
 	TmuxAttachedCount     int
 	HasTmuxSession        bool
@@ -178,6 +179,13 @@ const (
 	selectorTabTree
 )
 
+type selectorTreeSort int
+
+const (
+	selectorTreeSortOrder selectorTreeSort = iota
+	selectorTreeSortUpdated
+)
+
 type Model struct {
 	loader       SnapshotLoader
 	switcher     Switcher
@@ -190,6 +198,7 @@ type Model struct {
 	snapshot           Snapshot
 	cursor             int
 	activeTab          selectorTab
+	treeSort           selectorTreeSort
 	width              int
 	height             int
 	loading            bool
@@ -448,6 +457,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectorTabUserSet = true
 			m.loading = false
 			return m, m.persistSelectorTabCmd(m.activeTab)
+		case "u":
+			if m.activeTab == selectorTabTree {
+				m.toggleTreeSort()
+				return m, nil
+			}
 		case "1", "2", "3", "4", "5", "6", "7", "8", "9", "0":
 			m.selectCardHotkey(msg.String())
 			return m, nil
@@ -676,6 +690,9 @@ func (m Model) renderFooter() string {
 		{Key: "x", Description: "kill"},
 		{Key: "o/Sp", Description: "open"},
 	}
+	if m.activeTab == selectorTabTree {
+		bindings = append([]keybinds.Binding{{Key: "u", Description: "sort"}}, bindings...)
+	}
 	right := m.styles.StatusHint.Render(keybinds.RenderPlain(bindings, "  "))
 	if m.searchMode || strings.TrimSpace(m.searchQuery) != "" {
 		right += m.styles.StatusHint.Render("  /" + m.searchQuery)
@@ -698,7 +715,11 @@ func (m Model) renderTabs() string {
 		}
 		return m.styles.StatusHint.Render("  " + label + "  ")
 	}
-	return tab("Cards", m.activeTab == selectorTabGrid) + " " + tab("Tree", m.activeTab == selectorTabTree)
+	treeLabel := "Tree"
+	if m.activeTab == selectorTabTree && m.treeSort == selectorTreeSortUpdated {
+		treeLabel = "Tree:" + m.treeSortLabel()
+	}
+	return tab("Cards", m.activeTab == selectorTabGrid) + " " + tab(treeLabel, m.activeTab == selectorTabTree)
 }
 
 func (m Model) renderTree(entries []InventoryEntry) string {
@@ -743,6 +764,9 @@ func (m Model) renderTreeRow(row sessionTreeRow, entry InventoryEntry) string {
 	metaParts := []string{}
 	if entry.SessionID != "" {
 		metaParts = append(metaParts, renderTmuxSessionMeta(entry, m.styles))
+	}
+	if updated := formatEntryUpdatedAge(entry, time.Now()); updated != "" {
+		metaParts = append(metaParts, m.styles.StatusHint.Render("updated "+updated))
 	}
 	if entry.ProjectPath != "" {
 		metaParts = append(metaParts, m.styles.StatusHint.Render(entry.ProjectPath))
@@ -1064,6 +1088,23 @@ func (m *Model) toggleActiveTab() {
 		return
 	}
 	m.activeTab = selectorTabTree
+}
+
+func (m *Model) toggleTreeSort() {
+	if m.treeSort == selectorTreeSortUpdated {
+		m.treeSort = selectorTreeSortOrder
+		m.status = "tree sort: order"
+		return
+	}
+	m.treeSort = selectorTreeSortUpdated
+	m.status = "tree sort: updated"
+}
+
+func (m Model) treeSortLabel() string {
+	if m.treeSort == selectorTreeSortUpdated {
+		return "updated"
+	}
+	return "order"
 }
 
 func (m Model) selectedEntry() (InventoryEntry, bool) {
@@ -1469,7 +1510,7 @@ func activeSessionTreeRows(entries []InventoryEntry) []sessionTreeRow {
 }
 
 func (m Model) activeSessionTreeRows(entries []InventoryEntry) []sessionTreeRow {
-	return activeSessionTreeRowsWithAncestors(entries, m.treeAncestorTasks())
+	return activeSessionTreeRowsWithOptions(entries, m.treeAncestorTasks(), m.treeSort)
 }
 
 func (m Model) treeAncestorTasks() map[string]domain.Task {
@@ -1500,6 +1541,10 @@ type treeNode struct {
 }
 
 func activeSessionTreeRowsWithAncestors(entries []InventoryEntry, ancestorTasks map[string]domain.Task) []sessionTreeRow {
+	return activeSessionTreeRowsWithOptions(entries, ancestorTasks, selectorTreeSortOrder)
+}
+
+func activeSessionTreeRowsWithOptions(entries []InventoryEntry, ancestorTasks map[string]domain.Task, treeSort selectorTreeSort) []sessionTreeRow {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -1545,16 +1590,50 @@ func activeSessionTreeRowsWithAncestors(entries []InventoryEntry, ancestorTasks 
 		}
 		children[parentID] = append(children[parentID], key)
 	}
+	structuralLess := func(leftKey, rightKey string) bool {
+		left, right := nodes[leftKey], nodes[rightKey]
+		if left.order != right.order {
+			return left.order < right.order
+		}
+		if left.entryIndex != right.entryIndex {
+			return left.entryIndex < right.entryIndex
+		}
+		return leftKey < rightKey
+	}
+	latestByKey := map[string]time.Time{}
+	var latestForKey func(string) time.Time
+	latestForKey = func(key string) time.Time {
+		if latest, ok := latestByKey[key]; ok {
+			return latest
+		}
+		node := nodes[key]
+		var latest time.Time
+		if node != nil && node.entryIndex >= 0 {
+			if updatedAt := entryLastUpdatedAt(node.entry); updatedAt != nil && !updatedAt.IsZero() {
+				latest = updatedAt.UTC()
+			}
+		}
+		for _, childKey := range children[key] {
+			childLatest := latestForKey(childKey)
+			if !childLatest.IsZero() && (latest.IsZero() || childLatest.After(latest)) {
+				latest = childLatest
+			}
+		}
+		latestByKey[key] = latest
+		return latest
+	}
 	sortTreeKeys := func(keys []string) {
 		sort.SliceStable(keys, func(i, j int) bool {
-			left, right := nodes[keys[i]], nodes[keys[j]]
-			if left.order != right.order {
-				return left.order < right.order
+			if treeSort == selectorTreeSortUpdated {
+				leftUpdated, rightUpdated := latestForKey(keys[i]), latestForKey(keys[j])
+				if leftUpdated.IsZero() != rightUpdated.IsZero() {
+					return !leftUpdated.IsZero()
+				}
+				if !leftUpdated.IsZero() && !rightUpdated.IsZero() && !leftUpdated.Equal(rightUpdated) {
+					return leftUpdated.After(rightUpdated)
+				}
 			}
-			if left.entryIndex != right.entryIndex {
-				return left.entryIndex < right.entryIndex
-			}
-			return keys[i] < keys[j]
+			return structuralLess(keys[i], keys[j])
 		})
 	}
 	for parentID := range children {
@@ -1756,6 +1835,7 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 			Activity:       row.Activity,
 			ActivitySource: row.ActivitySource,
 			StartedAt:      row.StartedAt,
+			UpdatedAt:      valueOrZeroTime(entryLastUpdatedAt(row)),
 			Worktree:       row.Worktree,
 		}
 		if task.Session.State == "" {
@@ -1776,6 +1856,9 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 	metaParts := []string{}
 	if issueStatus := issueStatusLabel(row); issueStatus != "" {
 		metaParts = append(metaParts, renderIssueMeta(issueStatus))
+	}
+	if updated := renderUpdatedMeta(row, time.Now(), s); updated != "" {
+		metaParts = append(metaParts, updated)
 	}
 	if row.SessionID != "" {
 		metaParts = append(metaParts, renderTmuxSessionMeta(row, s))
@@ -1873,6 +1956,17 @@ func issueStatusStyle(status string) lipgloss.Style {
 
 func renderIssueMeta(status string) string {
 	return lipgloss.NewStyle().Foreground(styles.Overlay1).Render("issue ") + issueStatusStyle(status).Render(status)
+}
+
+func renderUpdatedMeta(entry InventoryEntry, now time.Time, s *styles.Styles) string {
+	updated := formatEntryUpdatedAge(entry, now)
+	if updated == "" {
+		return ""
+	}
+	if s == nil {
+		s = styles.New()
+	}
+	return lipgloss.NewStyle().Foreground(styles.Overlay1).Render("updated ") + s.StatusHint.Render(updated)
 }
 
 func rowCardDisplayState(row InventoryEntry) domain.SessionState {
@@ -2327,6 +2421,77 @@ func formatSnapshotStatus(snapshot Snapshot, rows int) string {
 		parts = append(parts, snapshot.Freshness)
 	}
 	return strings.Join(parts, "  ")
+}
+
+func formatEntryUpdatedAge(entry InventoryEntry, now time.Time) string {
+	updatedAt := entryLastUpdatedAt(entry)
+	if updatedAt == nil || updatedAt.IsZero() {
+		return ""
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if now.Before(*updatedAt) {
+		return "0s"
+	}
+	return formatShortDuration(now.Sub(*updatedAt))
+}
+
+func entryLastUpdatedAt(entry InventoryEntry) *time.Time {
+	var latest time.Time
+	consider := func(candidate time.Time) {
+		if candidate.IsZero() {
+			return
+		}
+		candidate = candidate.UTC()
+		if latest.IsZero() || candidate.After(latest) {
+			latest = candidate
+		}
+	}
+	if entry.LastUpdatedAt != nil {
+		consider(*entry.LastUpdatedAt)
+	}
+	consider(entry.Task.RuntimeUpdatedAt)
+	consider(entry.Task.UpdatedAt)
+	if entry.LastAttachedAt != nil {
+		consider(*entry.LastAttachedAt)
+	}
+	if entry.StartedAt != nil {
+		consider(*entry.StartedAt)
+	}
+	if latest.IsZero() {
+		return nil
+	}
+	return &latest
+}
+
+func formatShortDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d/time.Hour))
+	case d < 7*24*time.Hour:
+		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
+	case d < 30*24*time.Hour:
+		return fmt.Sprintf("%dw", int(d/(7*24*time.Hour)))
+	case d < 365*24*time.Hour:
+		return fmt.Sprintf("%dmo", int(d/(30*24*time.Hour)))
+	default:
+		return fmt.Sprintf("%dy", int(d/(365*24*time.Hour)))
+	}
+}
+
+func valueOrZeroTime(value *time.Time) time.Time {
+	if value == nil {
+		return time.Time{}
+	}
+	return *value
 }
 
 func ParseAzedarachSessionName(sessionName string) (ParsedSessionName, bool) {

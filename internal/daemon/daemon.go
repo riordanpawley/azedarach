@@ -892,6 +892,15 @@ func (d *Daemon) applySessionLifecycleTransitionWithActivity(
 	} else if normalizedActivity := normalizeSessionActivity(activity); normalizedActivity != "" {
 		session.Activity = normalizedActivity
 		session.ActivitySource = normalizeSessionActivitySource(activitySource, "session")
+	} else if isAgentScopedSessionID(sessionID) {
+		switch state {
+		case daemonstate.SessionStateRunning:
+			session.Activity = "busy"
+			session.ActivitySource = "hooks"
+		case daemonstate.SessionStatePaused:
+			session.Activity = "idle"
+			session.ActivitySource = "hooks"
+		}
 	} else if session.Activity != "" {
 		session.Activity = normalizeSessionActivity(session.Activity)
 		session.ActivitySource = normalizeSessionActivitySource(session.ActivitySource, "session")
@@ -979,7 +988,13 @@ func (d *Daemon) sessionRuntimeStateStoreIfConfigured(projectID string) *daemons
 }
 
 func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemonops.Record) (interruptedOperationRecovery, bool) {
-	if d == nil || record.Kind != daemonhandlers.CommandSessionStart {
+	if d == nil {
+		return interruptedOperationRecovery{}, false
+	}
+	if record.Kind == taskDeferredWorktreeCleanupOperationKind {
+		return d.recoverInterruptedDeferredWorktreeCleanup(ctx, record)
+	}
+	if record.Kind != daemonhandlers.CommandSessionStart {
 		return interruptedOperationRecovery{}, false
 	}
 	projectID := protocol.NormalizeProjectID(record.ProjectID)
@@ -1031,6 +1046,83 @@ func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemono
 		State:         daemonops.StateDone,
 		ResultPayload: result,
 	}, true
+}
+
+func (d *Daemon) recoverInterruptedDeferredWorktreeCleanup(ctx context.Context, record daemonops.Record) (interruptedOperationRecovery, bool) {
+	projectID := protocol.NormalizeProjectID(record.ProjectID)
+	if projectID == "" {
+		projectID = protocol.DefaultProjectID
+	}
+	taskID := strings.TrimSpace(record.IssueID)
+	if taskID == "" {
+		return interruptedOperationRecovery{}, false
+	}
+	fallbackPath, fallbackBranch := deferredCleanupFallbacksFromResourceKeys(record.ResourceKeys)
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient != nil {
+		task, err := issueClient.GetWithRuntime(ctx, projectID, taskID)
+		if err == nil && task.Status != domain.StatusDone {
+			if fallbackPath != "" {
+				d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, fallbackPath, fallbackBranch)
+			} else {
+				d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, taskID)
+			}
+			payload, _ := json.Marshal(deferredTaskWorktreeCleanupResult{
+				ProjectID: projectID,
+				TaskID:    taskID,
+				Skipped:   true,
+				Reason:    "issue no longer closed",
+			})
+			return interruptedOperationRecovery{
+				State:         daemonops.StateDone,
+				ResultPayload: payload,
+			}, true
+		}
+	}
+	manager := d.worktreeManagerForProject(projectID)
+	if manager == nil {
+		return interruptedOperationRecovery{
+			State:        daemonops.StateFailed,
+			ErrorMessage: "worktree manager unavailable",
+		}, true
+	}
+	cleanupCtx, cancel := context.WithTimeout(ctx, taskDeferredWorktreeCleanupTimeout)
+	defer cancel()
+	removedWorktree, err := manager.DeleteWithOptions(cleanupCtx, taskID, git.WorktreeDeleteOptions{
+		Force:          true,
+		BranchCleanup:  git.WorktreeBranchCleanupRequired,
+		FallbackBranch: fallbackBranch,
+	})
+	if err != nil && !errors.Is(err, git.ErrWorktreeNotFound) {
+		return interruptedOperationRecovery{
+			State:        daemonops.StateFailed,
+			ErrorMessage: err.Error(),
+		}, true
+	}
+	if removedWorktree != nil {
+		_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(removedWorktree.Path))
+	}
+	payload, _ := json.Marshal(deferredTaskWorktreeCleanupResult{
+		ProjectID: projectID,
+		TaskID:    taskID,
+	})
+	return interruptedOperationRecovery{
+		State:         daemonops.StateDone,
+		ResultPayload: payload,
+	}, true
+}
+
+func deferredCleanupFallbacksFromResourceKeys(resourceKeys []string) (path, branch string) {
+	for _, key := range resourceKeys {
+		if value, ok := strings.CutPrefix(key, "worktree:"); ok {
+			path = strings.TrimSpace(value)
+			continue
+		}
+		if value, ok := strings.CutPrefix(key, "branch:"); ok {
+			branch = strings.TrimSpace(value)
+		}
+	}
+	return path, branch
 }
 
 func interruptedSessionStartCompleted(session daemonstate.Session) bool {

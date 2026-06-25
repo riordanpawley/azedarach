@@ -4778,6 +4778,23 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 			}(),
 		},
 		{
+			name: "cascade children on in_review status",
+			args: []string{"az-1", "--status", "in_review", "--cascade-children"},
+			want: func() IssueUpdateOptions {
+				status := domain.StatusInReview
+				return IssueUpdateOptions{
+					IssueID:         "az-1",
+					Status:          &status,
+					CascadeChildren: true,
+				}
+			}(),
+		},
+		{
+			name:        "cascade children requires in_review",
+			args:        []string{"az-1", "--status", "open", "--cascade-children"},
+			errContains: "--cascade-children is only supported with --status in_review",
+		},
+		{
 			name: "force worktree on closed status",
 			args: []string{"az-1", "--status", "closed", "--force-worktree"},
 			want: func() IssueUpdateOptions {
@@ -4809,6 +4826,15 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 			}
 			if got.IssueID != tt.want.IssueID || got.Title != tt.want.Title || got.Description != tt.want.Description || got.DescriptionSet != tt.want.DescriptionSet || got.AppendNotes != tt.want.AppendNotes {
 				t.Fatalf("ParseIssueUpdateArgs() = %+v, want %+v", got, tt.want)
+			}
+			if got.ForceWorktree != tt.want.ForceWorktree || got.CascadeChildren != tt.want.CascadeChildren {
+				t.Fatalf("flag mismatch: got force=%v cascade=%v want force=%v cascade=%v", got.ForceWorktree, got.CascadeChildren, tt.want.ForceWorktree, tt.want.CascadeChildren)
+			}
+			if (got.Status == nil) != (tt.want.Status == nil) {
+				t.Fatalf("status presence mismatch: got=%v want=%v", got.Status, tt.want.Status)
+			}
+			if got.Status != nil && *got.Status != *tt.want.Status {
+				t.Fatalf("status mismatch: got=%v want=%v", *got.Status, *tt.want.Status)
 			}
 			if (got.Type == nil) != (tt.want.Type == nil) {
 				t.Fatalf("type presence mismatch: got=%v want=%v", got.Type, tt.want.Type)
@@ -7958,6 +7984,71 @@ func TestIssueUpdateCommandUsesDaemonTaskUpdateCommand(t *testing.T) {
 	}
 }
 
+func TestIssueUpdateCommandPassesCascadeChildrenForInReviewStatus(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	var gotStatusReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGet:
+					body, err := marshalTaskListBody([]domain.Task{
+						{
+							ID:        "az-1",
+							Title:     "Parent",
+							Type:      domain.TypeTask,
+							Priority:  domain.P2,
+							Status:    domain.StatusInProgress,
+							CreatedAt: now,
+							UpdatedAt: now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskUpdateStatus:
+					gotStatusReq = req
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+	status := domain.StatusInReview
+	if err := IssueUpdateCommand(deps, IssueUpdateOptions{IssueID: "az-1", Status: &status, CascadeChildren: true}); err != nil {
+		t.Fatalf("IssueUpdateCommand() error = %v", err)
+	}
+	if gotStatusReq.Command != daemonclient.CommandTaskUpdateStatus {
+		t.Fatalf("status command = %q, want %q", gotStatusReq.Command, daemonclient.CommandTaskUpdateStatus)
+	}
+	var body daemonclient.TaskStatusRequest
+	if err := json.Unmarshal(gotStatusReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal status body: %v", err)
+	}
+	if body.TaskID.String() != "az-1" || body.Status != domain.StatusInReview || !body.CascadeChildren {
+		t.Fatalf("status body = %+v, want cascade in_review for az-1", body)
+	}
+}
+
 func TestIssueUpdateCommandCanClearDescription(t *testing.T) {
 	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	var gotUpdateReq protocol.RequestEnvelope
@@ -9133,6 +9224,15 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "How to use `az` command map:") {
 		t.Fatalf("prime output missing az command map section: %q", output)
+	}
+	if !strings.Contains(output, "Proper issue creation: never leave an issue as just a title.") {
+		t.Fatalf("prime output missing proper issue creation guidance: %q", output)
+	}
+	if !strings.Contains(output, "Use `az issue create --title \"Specific outcome\" --description \"Context, scope, acceptance/validation notes\"`") {
+		t.Fatalf("prime output missing issue creation title/description example: %q", output)
+	}
+	if !strings.Contains(output, "immediately follow title-only creation with `az issue update <issue-id> --description \"...\"` before starting work or fanout") {
+		t.Fatalf("prime output missing title-only issue update guardrail: %q", output)
 	}
 	if !strings.Contains(output, "create many issues, epics, or nested `children` trees from JSON when shaping a graph up front") {
 		t.Fatalf("prime output missing bulk-create nested tree guidance: %q", output)

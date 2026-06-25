@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestRuntimeStateStoreSessionRoundTrip(t *testing.T) {
@@ -95,6 +98,9 @@ func TestRuntimeStateStoreClearsSessionActivityForStoppedRows(t *testing.T) {
 	if session.Activity != "" || session.ActivitySource != "" {
 		t.Fatalf("session activity = %s/%s, want empty activity for stopped row", session.Activity, session.ActivitySource)
 	}
+	if session.ObservedState != SessionStateStopped {
+		t.Fatalf("session observed state = %s, want %s", session.ObservedState, SessionStateStopped)
+	}
 
 	if err := store.ReplaceSessionStates(ctx, "proj-a", []Session{
 		{ID: "sess-2", IssueID: "bjb", State: SessionStateStopped, Activity: "no-agent", ActivitySource: "session", UpdatedAt: now},
@@ -110,6 +116,9 @@ func TestRuntimeStateStoreClearsSessionActivityForStoppedRows(t *testing.T) {
 	}
 	if session.Activity != "" || session.ActivitySource != "" {
 		t.Fatalf("replaced session activity = %s/%s, want empty activity for stopped row", session.Activity, session.ActivitySource)
+	}
+	if session.ObservedState != SessionStateStopped {
+		t.Fatalf("replaced session observed state = %s, want %s", session.ObservedState, SessionStateStopped)
 	}
 }
 
@@ -194,6 +203,129 @@ func TestRuntimeStateStoreSessionGetters(t *testing.T) {
 	}
 	if session.Activity != "idle" || session.ActivitySource != "hooks" {
 		t.Fatalf("session activity by issue = %s/%s, want idle/hooks", session.Activity, session.ActivitySource)
+	}
+}
+
+func TestRuntimeStateStoreSeparatesSessionIntentAndObservations(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	ctx := context.Background()
+	now := time.Date(2026, time.April, 1, 8, 25, 0, 0, time.UTC)
+	parent := Session{ID: "az-bja", IssueID: "bja", State: SessionStateRunning, UpdatedAt: now}
+	pane := Session{ID: "az-bja.pane-535", IssueID: "bja", State: SessionStateRunning, Activity: "busy", ActivitySource: "runtime", UpdatedAt: now.Add(time.Second)}
+	if err := store.UpsertSessionState(ctx, "proj-a", parent); err != nil {
+		t.Fatalf("UpsertSessionState parent: %v", err)
+	}
+	if err := store.UpsertSessionState(ctx, "proj-a", pane); err != nil {
+		t.Fatalf("UpsertSessionState pane: %v", err)
+	}
+
+	allRows, err := store.ListSessionStates(ctx, "proj-a")
+	if err != nil {
+		t.Fatalf("ListSessionStates: %v", err)
+	}
+	if got, want := len(allRows), 2; got != want {
+		t.Fatalf("all session rows = %d, want %d: %+v", got, want, allRows)
+	}
+	intentRows, err := store.ListSessionIntentStates(ctx, "proj-a")
+	if err != nil {
+		t.Fatalf("ListSessionIntentStates: %v", err)
+	}
+	if got, want := len(intentRows), 1; got != want {
+		t.Fatalf("intent session rows = %d, want %d: %+v", got, want, intentRows)
+	}
+	if intentRows[0].ID != parent.ID {
+		t.Fatalf("intent row = %+v, want parent %s", intentRows[0], parent.ID)
+	}
+
+	db, err := sql.Open("sqlite", store.dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	var parentCount, observationCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_session_projections WHERE session_id = ?`, parent.ID).Scan(&parentCount); err != nil {
+		t.Fatalf("count parent rows: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_session_observations WHERE session_id = ?`, pane.ID).Scan(&observationCount); err != nil {
+		t.Fatalf("count observation rows: %v", err)
+	}
+	if parentCount != 1 || observationCount != 1 {
+		t.Fatalf("physical rows parent=%d observation=%d, want 1/1", parentCount, observationCount)
+	}
+}
+
+func TestRuntimeStateStoreMigratesLegacyPaneRowsToObservations(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE daemon_session_projections (
+			project_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			issue_id TEXT NOT NULL,
+			state TEXT NOT NULL,
+			observed_state TEXT,
+			activity TEXT,
+			activity_source TEXT,
+			tmux_attached_count INTEGER NOT NULL DEFAULT 0,
+			started_at TEXT,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, session_id)
+		);
+		INSERT INTO daemon_session_projections (
+			project_id, session_id, issue_id, state, observed_state, activity, activity_source, tmux_attached_count, started_at, updated_at
+		) VALUES
+			('proj-a', 'az-bja', 'bja', 'running', 'running', '', '', 0, '2026-04-01T08:00:00Z', '2026-04-01T08:00:00Z'),
+			('proj-a', 'az-bja.pane-535', 'bja', 'running', 'stopped', 'busy', 'runtime', 0, '2026-04-01T08:00:01Z', '2026-04-01T08:00:01Z');
+	`)
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("seed legacy schema: %v", err)
+	}
+	_ = db.Close()
+
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+	ctx := context.Background()
+	allRows, err := store.ListSessionStates(ctx, "proj-a")
+	if err != nil {
+		t.Fatalf("ListSessionStates: %v", err)
+	}
+	if got, want := len(allRows), 2; got != want {
+		t.Fatalf("all session rows = %d, want %d: %+v", got, want, allRows)
+	}
+	intentRows, err := store.ListSessionIntentStates(ctx, "proj-a")
+	if err != nil {
+		t.Fatalf("ListSessionIntentStates: %v", err)
+	}
+	if got, want := len(intentRows), 1; got != want {
+		t.Fatalf("intent session rows = %d, want %d: %+v", got, want, intentRows)
+	}
+	if intentRows[0].ID != "az-bja" {
+		t.Fatalf("intent row = %+v, want parent", intentRows[0])
+	}
+	verifyDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open migrated sqlite: %v", err)
+	}
+	defer verifyDB.Close()
+	var legacyPaneCount, observationPaneCount int
+	if err := verifyDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_session_projections WHERE session_id = 'az-bja.pane-535'`).Scan(&legacyPaneCount); err != nil {
+		t.Fatalf("count legacy pane rows: %v", err)
+	}
+	if err := verifyDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_session_observations WHERE session_id = 'az-bja.pane-535'`).Scan(&observationPaneCount); err != nil {
+		t.Fatalf("count migrated pane rows: %v", err)
+	}
+	if legacyPaneCount != 0 || observationPaneCount != 1 {
+		t.Fatalf("pane physical rows legacy=%d observation=%d, want 0/1", legacyPaneCount, observationPaneCount)
 	}
 }
 

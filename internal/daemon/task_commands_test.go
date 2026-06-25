@@ -2451,6 +2451,8 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 			return "M\tmain.go\n", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff":
 			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-list" && args[4] == "main.."+sourceBranch:
+			return "1", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "rev-list":
 			return "0", nil
 		case len(args) >= 6 && args[0] == "-C" && args[2] == "merge-tree":
@@ -2627,6 +2629,8 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 			return "M\tmain.go\n", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff":
 			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == projectRepo && args[2] == "rev-list" && args[4] == "main.."+sourceBranch:
+			return "1", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "rev-list":
 			return "0", nil
 		case len(args) >= 6 && args[0] == "-C" && args[1] == projectRepo && args[2] == "merge-tree":
@@ -2760,6 +2764,8 @@ func TestTaskCloseCommandKeepsTargetCleanWhenScratchMergeDirties(t *testing.T) {
 			return "M\tmain.go\n", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "diff":
 			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-list" && args[4] == "main.."+sourceBranch:
+			return "1", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "rev-list":
 			return "0", nil
 		case len(args) >= 6 && args[0] == "-C" && args[1] == repoDir && args[2] == "merge-tree":
@@ -2950,6 +2956,12 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceHasNoChangesEvenIfTargetDirty
 		revision: map[string]uint64{projectID: 1},
 		hub:      publish.NewHub(16, 8, logger),
 	}
+	d.operationRuntime = newOperationRuntime(operationRuntimeConfig{
+		repoDir:      repoDir,
+		logger:       logger,
+		hub:          d.hub,
+		nextRevision: d.nextRevision,
+	})
 	d.gitStatusAdapter = &gitServiceAdapter{
 		client:            git.NewClient(runner, logger),
 		runtimeStateStore: runtimeStore,
@@ -3048,6 +3060,651 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceHasNoChangesEvenIfTargetDirty
 		if !strings.Contains(joined, want) {
 			t.Fatalf("git commands missing %q:\n%s", want, joined)
 		}
+	}
+}
+
+func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-integrate-already-reachable"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Close already integrated branch",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
+	if err := os.MkdirAll(sourceWorktree, 0o755); err != nil {
+		t.Fatalf("mkdir source worktree: %v", err)
+	}
+	sourceBranch := "riordan/" + taskID + "/already-integrated"
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      sourceWorktree,
+		Branch:    sourceBranch,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+
+	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
+	commands := make([]string, 0, 12)
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		commands = append(commands, strings.Join(args, " "))
+		joined := strings.Join(args, " ")
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+			return worktreeListOutput, nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-list" && args[3] == "--count" && args[4] == "main.."+sourceBranch:
+			return "0", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "status":
+			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "status":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "merge-base":
+			return "stale-base-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "diff" && slices.Contains(args, "--name-status"):
+			return "M\talready-integrated.go\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "diff":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "rev-list" && args[4] == "HEAD..main":
+			return "3", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "rev-list" && args[4] == "main..HEAD":
+			return "2", nil
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "remove":
+			if err := os.RemoveAll(sourceWorktree); err != nil {
+				return "", err
+			}
+			return "", nil
+		case len(args) >= 3 && args[0] == "branch" && args[1] == "-D":
+			return "", nil
+		default:
+			return "", fmt.Errorf("unexpected git args: %s", joined)
+		}
+	}}
+
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		git:      git.NewClient(runner, logger),
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	d.operationRuntime = newOperationRuntime(operationRuntimeConfig{
+		repoDir:      repoDir,
+		logger:       logger,
+		hub:          d.hub,
+		nextRevision: d.nextRevision,
+	})
+	d.gitStatusAdapter = &gitServiceAdapter{
+		client:            git.NewClient(runner, logger),
+		runtimeStateStore: runtimeStore,
+		logger:            logger,
+		baseBranch:        "main",
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		logger: logger,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	body, err := json.Marshal(taskCloseRequest{
+		TaskID:               taskID,
+		IntegrateBeforeClose: true,
+	})
+	if err != nil {
+		t.Fatalf("marshal task close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-integrate-already-reachable",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.close",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if !resp.OK {
+		if resp.Error != nil {
+			t.Fatalf("handleTaskClose error = %s", resp.Error.Message)
+		}
+		t.Fatalf("handleTaskClose response = %+v", resp)
+	}
+	var result taskCloseResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal close result: %v", err)
+	}
+	if !result.IntegrationRequested || result.Integrated {
+		t.Fatalf("close integration result = %+v, want requested no-op integration", result)
+	}
+	if !result.WorktreeRemoved {
+		t.Fatalf("close integration result = %+v, want worktree cleanup", result)
+	}
+	closed, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get task after close: %v", err)
+	}
+	if closed.Status != domain.StatusDone {
+		t.Fatalf("task status = %s, want %s", closed.Status, domain.StatusDone)
+	}
+	joined := strings.Join(commands, "\n")
+	for _, blocked := range []string{
+		"-C " + repoDir + " merge-tree --write-tree main " + sourceBranch,
+		"merge --no-edit " + sourceBranch,
+		"-C " + sourceWorktree + " diff --name-status",
+	} {
+		if strings.Contains(joined, blocked) {
+			t.Fatalf("git commands should skip already-integrated source but included %q:\n%s", blocked, joined)
+		}
+	}
+	for _, want := range []string{
+		"-C " + repoDir + " rev-list --count main.." + sourceBranch,
+		"worktree remove " + sourceWorktree,
+		"branch -D " + sourceBranch,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("git commands missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestTaskCloseCommandForceRemovesDirtyAlreadyIntegratedWorktree(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-force-dirty-already-reachable"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Force close dirty stale worktree",
+		Type:     domain.TypeBug,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
+	if err := os.MkdirAll(sourceWorktree, 0o755); err != nil {
+		t.Fatalf("mkdir source worktree: %v", err)
+	}
+	sourceBranch := "riordan/" + taskID + "/already-integrated-dirty"
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      sourceWorktree,
+		Branch:    sourceBranch,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+
+	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
+	commands := make([]string, 0, 12)
+	removeStarted := make(chan struct{})
+	releaseRemove := make(chan struct{})
+	removeDone := make(chan struct{})
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		commands = append(commands, strings.Join(args, " "))
+		joined := strings.Join(args, " ")
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+			return worktreeListOutput, nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-list" && args[3] == "--count" && args[4] == "main.."+sourceBranch:
+			return "0", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "status":
+			return "?? generated.txt\n", fmt.Errorf("forced close should not inspect dirty source status")
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "remove" && slices.Contains(args, "--force") && len(args) >= 5:
+			close(removeStarted)
+			<-releaseRemove
+			if err := os.RemoveAll(sourceWorktree); err != nil {
+				return "", err
+			}
+			close(removeDone)
+			return "", nil
+		case len(args) >= 3 && args[0] == "branch" && args[1] == "-D":
+			return "", nil
+		default:
+			return "", fmt.Errorf("unexpected git args: %s", joined)
+		}
+	}}
+
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		git:      git.NewClient(runner, logger),
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	d.operationRuntime = newOperationRuntime(operationRuntimeConfig{
+		repoDir:      repoDir,
+		logger:       logger,
+		hub:          d.hub,
+		nextRevision: d.nextRevision,
+	})
+	d.gitStatusAdapter = &gitServiceAdapter{
+		client:            git.NewClient(runner, logger),
+		runtimeStateStore: runtimeStore,
+		logger:            logger,
+		baseBranch:        "main",
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		logger: logger,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	body, err := json.Marshal(taskCloseRequest{
+		TaskID:               taskID,
+		ForceWorktree:        true,
+		IntegrateBeforeClose: true,
+	})
+	if err != nil {
+		t.Fatalf("marshal task close request: %v", err)
+	}
+	type closeResponse struct {
+		resp protocol.ResponseEnvelope
+		err  error
+	}
+	closeDone := make(chan closeResponse, 1)
+	go func() {
+		resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-close-force-dirty-already-reachable",
+			Kind:            protocol.EnvelopeKindCommand,
+			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+			Command:         "task.close",
+			Body:            body,
+		})
+		closeDone <- closeResponse{resp: resp, err: err}
+	}()
+	var closeResult closeResponse
+	select {
+	case closeResult = <-closeDone:
+	case <-time.After(500 * time.Millisecond):
+		close(releaseRemove)
+		t.Fatal("handleTaskClose blocked on forced physical worktree removal")
+	}
+	resp := closeResult.resp
+	if closeResult.err != nil {
+		t.Fatalf("handleTaskClose error: %v", closeResult.err)
+	}
+	if !resp.OK {
+		if resp.Error != nil {
+			t.Fatalf("handleTaskClose error = %s", resp.Error.Message)
+		}
+		t.Fatalf("handleTaskClose response = %+v", resp)
+	}
+	var result taskCloseResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal close result: %v", err)
+	}
+	if !result.IntegrationRequested || result.Integrated || !result.WorktreeForced || !result.WorktreeCleanupDeferred || result.WorktreeRemoved || result.WorktreeCleanupOperationID == "" {
+		t.Fatalf("close result = %+v, want requested no-op integration with forced worktree cleanup", result)
+	}
+	closed, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get task after close: %v", err)
+	}
+	if closed.Status != domain.StatusDone || closed.HasWorktree {
+		t.Fatalf("closed task status=%s has_worktree=%v, want closed without worktree", closed.Status, closed.HasWorktree)
+	}
+	select {
+	case <-removeStarted:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("deferred physical worktree cleanup did not start")
+	}
+	joined := strings.Join(commands, "\n")
+	if strings.Contains(joined, "-C "+sourceWorktree+" status") {
+		t.Fatalf("forced close should skip dirty source status, commands:\n%s", joined)
+	}
+	if !strings.Contains(joined, "worktree remove --force --force "+sourceWorktree) {
+		t.Fatalf("git commands missing double-force worktree removal:\n%s", joined)
+	}
+	close(releaseRemove)
+	select {
+	case <-removeDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("deferred physical worktree cleanup did not finish after release")
+	}
+	record := waitForRuntimeState(t, d.operationRuntime, result.WorktreeCleanupOperationID, daemonops.StateDone)
+	if record.Kind != taskDeferredWorktreeCleanupOperationKind {
+		t.Fatalf("cleanup operation kind = %s, want %s", record.Kind, taskDeferredWorktreeCleanupOperationKind)
+	}
+}
+
+func TestTaskCloseDeferredWorktreeCleanupCancelledWhenIssueReopens(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-deferred-reopen"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Reopen before deferred cleanup",
+		Type:     domain.TypeBug,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
+	if err := os.MkdirAll(sourceWorktree, 0o755); err != nil {
+		t.Fatalf("mkdir source worktree: %v", err)
+	}
+	sourceBranch := "riordan/" + taskID + "/already-integrated-dirty"
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      sourceWorktree,
+		Branch:    sourceBranch,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+
+	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
+	commands := make([]string, 0, 12)
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		commands = append(commands, strings.Join(args, " "))
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+			return worktreeListOutput, nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-list" && args[3] == "--count" && args[4] == "main.."+sourceBranch:
+			return "0", nil
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "remove":
+			return "", fmt.Errorf("cleanup should remain queued until reopened")
+		default:
+			return "", fmt.Errorf("unexpected git args: %s", strings.Join(args, " "))
+		}
+	}}
+
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		git:      git.NewClient(runner, logger),
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	d.operationRuntime = newOperationRuntime(operationRuntimeConfig{
+		repoDir:      repoDir,
+		logger:       logger,
+		hub:          d.hub,
+		nextRevision: d.nextRevision,
+	})
+	d.gitStatusAdapter = &gitServiceAdapter{
+		client:            git.NewClient(runner, logger),
+		runtimeStateStore: runtimeStore,
+		logger:            logger,
+		baseBranch:        "main",
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		logger: logger,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	blockerStarted := make(chan struct{})
+	releaseBlocker := make(chan struct{})
+	blocker, err := d.operationRuntime.manager.Submit(ctx, daemonops.SubmitRequest{
+		ProjectID:    normalizedProjectID(projectID),
+		IssueID:      taskID,
+		Kind:         "test.blocker",
+		ResourceKeys: []string{"issue:" + normalizedProjectID(projectID) + ":" + taskID},
+	}, func(runCtx context.Context) ([]byte, error) {
+		close(blockerStarted)
+		select {
+		case <-releaseBlocker:
+			return []byte(`{}`), nil
+		case <-runCtx.Done():
+			return nil, runCtx.Err()
+		}
+	})
+	if err != nil {
+		t.Fatalf("submit blocker operation: %v", err)
+	}
+	select {
+	case <-blockerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("blocker operation did not start")
+	}
+
+	closeBody, err := json.Marshal(taskCloseRequest{
+		TaskID:               taskID,
+		ForceWorktree:        true,
+		IntegrateBeforeClose: true,
+	})
+	if err != nil {
+		t.Fatalf("marshal close request: %v", err)
+	}
+	closeResp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-before-reopen",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.close",
+		Body:            closeBody,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if !closeResp.OK {
+		if closeResp.Error != nil {
+			t.Fatalf("handleTaskClose error = %s", closeResp.Error.Message)
+		}
+		t.Fatalf("handleTaskClose response = %+v", closeResp)
+	}
+	var closeResult taskCloseResult
+	if err := json.Unmarshal(closeResp.Body, &closeResult); err != nil {
+		t.Fatalf("unmarshal close result: %v", err)
+	}
+	if !closeResult.WorktreeCleanupDeferred || closeResult.WorktreeCleanupOperationID == "" {
+		t.Fatalf("close result = %+v, want deferred cleanup operation", closeResult)
+	}
+	queued := waitForRuntimeState(t, d.operationRuntime, closeResult.WorktreeCleanupOperationID, daemonops.StateQueued)
+	if queued.Kind != taskDeferredWorktreeCleanupOperationKind {
+		t.Fatalf("queued operation kind = %s, want %s", queued.Kind, taskDeferredWorktreeCleanupOperationKind)
+	}
+
+	updateBody, err := json.Marshal(map[string]any{
+		"task_id": taskID,
+		"status":  domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("marshal update request: %v", err)
+	}
+	updateResp, err := d.handleTaskUpdateStatus(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-reopen-after-close",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.update_status",
+		Body:            updateBody,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskUpdateStatus error: %v", err)
+	}
+	if !updateResp.OK {
+		if updateResp.Error != nil {
+			t.Fatalf("handleTaskUpdateStatus error = %s", updateResp.Error.Message)
+		}
+		t.Fatalf("handleTaskUpdateStatus response = %+v", updateResp)
+	}
+	cancelled := waitForRuntimeState(t, d.operationRuntime, closeResult.WorktreeCleanupOperationID, daemonops.StateCancelled)
+	if cancelled.ErrorMessage == "" {
+		t.Fatalf("cancelled cleanup error message empty")
+	}
+	restored, found, err := runtimeStore.GetWorktreeStateByIssueID(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("read restored worktree projection: %v", err)
+	}
+	if !found || restored.Path != sourceWorktree || restored.Branch != sourceBranch {
+		t.Fatalf("restored projection = %+v found=%v, want %s %s", restored, found, sourceWorktree, sourceBranch)
+	}
+	if strings.Contains(strings.Join(commands, "\n"), "worktree remove") {
+		t.Fatalf("cleanup should not remove worktree after reopen, commands:\n%s", strings.Join(commands, "\n"))
+	}
+	close(releaseBlocker)
+	_ = waitForRuntimeState(t, d.operationRuntime, blocker.Record.ID, daemonops.StateDone)
+}
+
+func TestRecoverInterruptedDeferredWorktreeCleanupRemovesClosedIssueWorktree(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-recover-deferred-cleanup"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Recover deferred cleanup",
+		Type:     domain.TypeBug,
+		Priority: domain.P2,
+		Status:   domain.StatusDone,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
+	if err := os.MkdirAll(sourceWorktree, 0o755); err != nil {
+		t.Fatalf("mkdir source worktree: %v", err)
+	}
+	sourceBranch := "riordan/" + taskID + "/recover-deferred-cleanup"
+	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
+	commands := make([]string, 0, 8)
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		commands = append(commands, strings.Join(args, " "))
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+			return worktreeListOutput, nil
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "remove" && slices.Contains(args, "--force"):
+			return "", nil
+		case len(args) >= 3 && args[0] == "branch" && args[1] == "-D" && args[2] == sourceBranch:
+			return "", nil
+		default:
+			return "", fmt.Errorf("unexpected git args: %s", strings.Join(args, " "))
+		}
+	}}
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(runner, repoDir, logger),
+		},
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+
+	recovery, ok := d.recoverInterruptedOperation(ctx, daemonops.Record{
+		ID:        "op-recover-cleanup",
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Kind:      taskDeferredWorktreeCleanupOperationKind,
+		ResourceKeys: []string{
+			"issue:" + normalizedProjectID(projectID) + ":" + taskID,
+			"worktree:" + sourceWorktree,
+			"branch:" + sourceBranch,
+		},
+	})
+	if !ok {
+		t.Fatal("recoverInterruptedOperation ok = false, want true")
+	}
+	if recovery.State != daemonops.StateDone {
+		t.Fatalf("recovery state = %s, want done: %s", recovery.State, recovery.ErrorMessage)
+	}
+	joined := strings.Join(commands, "\n")
+	if !strings.Contains(joined, "worktree remove --force --force "+sourceWorktree) {
+		t.Fatalf("commands missing forced worktree remove:\n%s", joined)
+	}
+	if !strings.Contains(joined, "branch -D "+sourceBranch) {
+		t.Fatalf("commands missing branch cleanup:\n%s", joined)
 	}
 }
 
@@ -4920,6 +5577,200 @@ func TestTaskDeleteRunsIssueResourceCleanupWithoutRuntimeAttachments(t *testing.
 			t.Fatalf("task %s still present after delete", taskID)
 		}
 	}
+}
+
+func TestTaskUpdateStatusRejectsInReviewWithUnreadyChildren(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-guard-children"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusInProgress,
+		ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+
+	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, false)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "child issues are not review-ready") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") || !strings.Contains(resp.Error.Message, "--cascade-children") {
+		t.Fatalf("task.update_status response = %+v, want child readiness guard", resp)
+	}
+	parent, err := issuesClient.GetWithRuntime(ctx, projectID, parentID)
+	if err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	if parent.Status != domain.StatusOpen {
+		t.Fatalf("parent status = %s, want open", parent.Status)
+	}
+}
+
+func TestTaskUpdateStatusCascadeChildrenMovesNestedDescendantsToInReview(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-cascade-children"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusInProgress,
+		ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	grandchildID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Grandchild",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusOpen,
+		ParentID: &childID,
+	})
+	if err != nil {
+		t.Fatalf("create grandchild: %v", err)
+	}
+
+	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, true)
+	if !resp.OK || resp.Error != nil {
+		t.Fatalf("task.update_status response = %+v, want cascade success", resp)
+	}
+	for _, id := range []string{parentID, childID, grandchildID} {
+		task, err := issuesClient.GetWithRuntime(ctx, projectID, id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if task.Status != domain.StatusInReview {
+			t.Fatalf("%s status = %s, want in_review", id, task.Status)
+		}
+	}
+}
+
+func TestTaskUpdateStatusReviewGuardHonorsLegacyParentChildDependency(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-guard-legacy-edge"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Child", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := issuesClient.AddDependency(ctx, childID, parentID, string(domain.DependencyParentChild)); err != nil {
+		t.Fatalf("add parent-child: %v", err)
+	}
+
+	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, false)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, childID+" (open)") {
+		t.Fatalf("task.update_status response = %+v, want legacy child guard", resp)
+	}
+}
+
+func TestTaskUpdateStatusAllowsInReviewWhenChildrenReviewReady(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-guard-ready"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	for _, status := range []domain.Status{domain.StatusInReview, domain.StatusDone} {
+		if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+			Title:    "Child",
+			Type:     domain.TypeTask,
+			Status:   status,
+			ParentID: &parentID,
+		}); err != nil {
+			t.Fatalf("create child %s: %v", status, err)
+		}
+	}
+
+	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, false)
+	if !resp.OK || resp.Error != nil {
+		t.Fatalf("task.update_status response = %+v, want success", resp)
+	}
+	parent, err := issuesClient.GetWithRuntime(ctx, projectID, parentID)
+	if err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	if parent.Status != domain.StatusInReview {
+		t.Fatalf("parent status = %s, want in_review", parent.Status)
+	}
+}
+
+func TestTaskUpdateStatusRejectsCascadeChildrenForNonReviewStatus(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-cascade-non-review"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Task", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	resp := updateStatusForTest(t, d, projectID, taskID, domain.StatusInProgress, true)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "cascade_children is only supported with status in_review") {
+		t.Fatalf("task.update_status response = %+v, want cascade non-review rejection", resp)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if task.Status != domain.StatusOpen {
+		t.Fatalf("task status = %s, want open", task.Status)
+	}
+}
+
+func newTaskStatusReviewGuardDaemon(t *testing.T, projectID string) (*Daemon, *issues.Client) {
+	t.Helper()
+	repoDir := t.TempDir()
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	return &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, slog.Default()),
+	}, issuesClient
+}
+
+func updateStatusForTest(t *testing.T, d *Daemon, projectID, taskID string, status domain.Status, cascadeChildren bool) protocol.ResponseEnvelope {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"task_id":          taskID,
+		"status":           status,
+		"cascade_children": cascadeChildren,
+	})
+	if err != nil {
+		t.Fatalf("marshal status request: %v", err)
+	}
+	resp, err := d.handleTaskUpdateStatus(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       naming.RequestID("req-review-guard-" + taskID),
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.update_status",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskUpdateStatus error: %v", err)
+	}
+	return resp
 }
 
 func assertNextTaskUpdatedEvent(t *testing.T, events <-chan protocol.EventEnvelope, taskID string, status domain.Status) {

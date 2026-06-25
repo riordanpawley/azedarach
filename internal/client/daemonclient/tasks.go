@@ -65,8 +65,9 @@ type TaskUpdateParams struct {
 
 // TaskStatusRequest contains the payload used to update a task status.
 type TaskStatusRequest struct {
-	TaskID naming.IssueID `json:"task_id"`
-	Status domain.Status  `json:"status"`
+	TaskID          naming.IssueID `json:"task_id"`
+	Status          domain.Status  `json:"status"`
+	CascadeChildren bool           `json:"cascade_children,omitempty"`
 }
 
 // TaskStatusOptions controls client-side status transition behavior.
@@ -75,6 +76,7 @@ type TaskStatusOptions struct {
 	IgnoreAhead          bool
 	IntegrateBeforeClose bool
 	CloseCleanChildren   bool
+	CascadeChildren      bool
 }
 
 type TaskDeleteOptions struct {
@@ -101,17 +103,19 @@ type taskDeleteRequest struct {
 }
 
 type TaskCloseResult struct {
-	TaskID                 string                 `json:"task_id"`
-	Status                 string                 `json:"status"`
-	IntegrationRequested   bool                   `json:"integration_requested,omitempty"`
-	Integrated             bool                   `json:"integrated,omitempty"`
-	IntegratedSourceBranch string                 `json:"integrated_source_branch,omitempty"`
-	IntegratedTargetBranch string                 `json:"integrated_target_branch,omitempty"`
-	SessionStopped         bool                   `json:"session_stopped,omitempty"`
-	WorktreeRemoved        bool                   `json:"worktree_removed,omitempty"`
-	WorktreeForced         bool                   `json:"worktree_forced,omitempty"`
-	Revision               uint64                 `json:"revision,omitempty"`
-	Phases                 []TaskClosePhaseTiming `json:"phases,omitempty"`
+	TaskID                     string                 `json:"task_id"`
+	Status                     string                 `json:"status"`
+	IntegrationRequested       bool                   `json:"integration_requested,omitempty"`
+	Integrated                 bool                   `json:"integrated,omitempty"`
+	IntegratedSourceBranch     string                 `json:"integrated_source_branch,omitempty"`
+	IntegratedTargetBranch     string                 `json:"integrated_target_branch,omitempty"`
+	SessionStopped             bool                   `json:"session_stopped,omitempty"`
+	WorktreeRemoved            bool                   `json:"worktree_removed,omitempty"`
+	WorktreeCleanupDeferred    bool                   `json:"worktree_cleanup_deferred,omitempty"`
+	WorktreeCleanupOperationID string                 `json:"worktree_cleanup_operation_id,omitempty"`
+	WorktreeForced             bool                   `json:"worktree_forced,omitempty"`
+	Revision                   uint64                 `json:"revision,omitempty"`
+	Phases                     []TaskClosePhaseTiming `json:"phases,omitempty"`
 	AutoClosedChildren     []string               `json:"auto_closed_children,omitempty"`
 }
 
@@ -666,8 +670,9 @@ func (c *Client) UpdateTaskStatusWithOptions(ctx context.Context, taskID string,
 		return err
 	}
 	return c.commandJSON(ctx, CommandTaskUpdateStatus, TaskStatusRequest{
-		TaskID: parsedTaskID,
-		Status: status,
+		TaskID:          parsedTaskID,
+		Status:          status,
+		CascadeChildren: opts.CascadeChildren,
 	}, nil)
 }
 

@@ -58,7 +58,7 @@ const (
 	sessionStartCommandTimeout  = 5 * time.Minute
 	branchMergeToBaseTimeout    = 2 * time.Minute
 	daemonCommandTimeout        = 15 * time.Second
-	issueCloseCleanupTimeout    = 2 * time.Minute
+	issueCloseCleanupTimeout    = 10 * time.Minute
 	issueCreateCommandTimeout   = 10 * time.Second
 	issueCreateAutostartTimeout = 12 * time.Second
 	exitCodeHardFailure         = 1
@@ -198,19 +198,20 @@ type IssueCloseOptions struct {
 }
 
 type IssueUpdateOptions struct {
-	Project        string
-	IssueID        string
-	JSON           bool
-	Title          string
-	Description    string
-	DescriptionSet bool
-	Notes          *string
-	AppendNotes    string
-	Type           *domain.TaskType
-	Priority       *domain.Priority
-	Status         *domain.Status
-	ForceWorktree  bool
-	UpdateImpls    []string
+	Project         string
+	IssueID         string
+	JSON            bool
+	Title           string
+	Description     string
+	DescriptionSet  bool
+	Notes           *string
+	AppendNotes     string
+	Type            *domain.TaskType
+	Priority        *domain.Priority
+	Status          *domain.Status
+	ForceWorktree   bool
+	CascadeChildren bool
+	UpdateImpls     []string
 }
 
 type IssueDoctorOptions struct {
@@ -2587,6 +2588,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue update result as JSON")
 	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal when setting closed")
+	fs.BoolVar(&opts.CascadeChildren, "cascade-children", false, "when setting in_review, move open/in_progress descendants to in_review first")
 	fs.StringVar(&statusRaw, "status", "", "updated status (open|in_progress|in_review|closed)")
 	fs.Func("update-impl", "set implementation assignment (repeatable)", func(v string) error {
 		trimmed := strings.TrimSpace(v)
@@ -2602,7 +2604,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		return IssueUpdateOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|in_review|closed] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|in_review|closed] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueUpdateOptions{}, fmt.Errorf("--impl is not supported for issue update (it is create-only); normal field updates do not need --update-impl, and --update-impl is only for changing issue implementations")
@@ -2614,7 +2616,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|in_review|closed] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|in_review|closed] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if typeRaw != "" {
 		tt, err := parseTaskType(typeRaw)
@@ -2639,6 +2641,9 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	}
 	if opts.ForceWorktree && (opts.Status == nil || *opts.Status != domain.StatusDone) {
 		return IssueUpdateOptions{}, fmt.Errorf("--force-worktree is only supported with --status closed")
+	}
+	if opts.CascadeChildren && (opts.Status == nil || *opts.Status != domain.StatusInReview) {
+		return IssueUpdateOptions{}, fmt.Errorf("--cascade-children is only supported with --status in_review")
 	}
 	if strings.TrimSpace(opts.AppendNotes) == "" {
 		opts.AppendNotes = ""
@@ -4061,15 +4066,16 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 
 	if opts.JSON {
 		return printJSON(map[string]any{
-			"issue_id":              opts.IssueID,
-			"status":                "closed",
-			"updated":               true,
-			"integration_requested": result.IntegrationRequested,
-			"integrated":            result.Integrated,
-			"cleanup_performed":     true,
-			"worktree_forced":       opts.ForceWorktree,
-			"auto_closed_children":  result.AutoClosedChildren,
-			"phases":                taskClosePhaseJSON(result.Phases),
+			"issue_id":                  opts.IssueID,
+			"status":                    "closed",
+			"updated":                   true,
+			"integration_requested":     result.IntegrationRequested,
+			"integrated":                result.Integrated,
+			"cleanup_performed":         true,
+			"worktree_forced":           opts.ForceWorktree,
+			"auto_closed_children":      result.AutoClosedChildren,
+			"worktree_cleanup_deferred": result.WorktreeCleanupDeferred,
+			"phases":                    taskClosePhaseJSON(result.Phases),
 		})
 	}
 	fmt.Printf("Closed issue: %s\n", opts.IssueID)
@@ -4085,6 +4091,9 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 	}
 	if len(result.AutoClosedChildren) > 0 {
 		fmt.Printf("- Closed clean child issues: %s\n", strings.Join(result.AutoClosedChildren, ", "))
+	}
+	if result.WorktreeCleanupDeferred {
+		fmt.Println("- Worktree cleanup deferred")
 	}
 	printTaskClosePhases(result.Phases)
 	return nil
@@ -4235,6 +4244,9 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 		statusOptions := daemonclient.TaskStatusOptions{}
 		if *opts.Status == domain.StatusDone {
 			statusOptions = cleanupCloseTaskStatusOptions(opts.ForceWorktree)
+		}
+		if *opts.Status == domain.StatusInReview {
+			statusOptions.CascadeChildren = opts.CascadeChildren
 		}
 		if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, *opts.Status, statusOptions); err != nil {
 			return fmt.Errorf("failed to set status for issue %s: %w", opts.IssueID, err)

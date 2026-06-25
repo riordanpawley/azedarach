@@ -292,8 +292,8 @@ func sessionProjectionCountsByIssueKey(sessions []daemonstate.Session, namingSco
 		if isAgentScopedSessionID(session.ID) {
 			counts.PaneScoped++
 		}
-		switch state {
-		case daemonstate.SessionStatePaused:
+		switch sessionActivityState(session) {
+		case domain.SessionPaused, domain.SessionIdle, domain.SessionWaiting:
 			counts.Paused++
 		default:
 			counts.Active++
@@ -343,6 +343,18 @@ func sanitizeAgentScopedPaneID(value string) string {
 
 func sessionProjectionForReconcileByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]daemonstate.Session {
 	return sessionProjectionAggregateByIssueKey(sessions, namingScope)
+}
+
+func sessionProjectionCanRecreateTmuxSession(session daemonstate.Session) bool {
+	if isAgentScopedSessionID(session.ID) {
+		return false
+	}
+	switch daemonstate.NormalizeSessionState(session.State) {
+	case daemonstate.SessionStateStarting, daemonstate.SessionStateRunning, daemonstate.SessionStatePaused:
+		return true
+	default:
+		return false
+	}
 }
 
 func sessionProjectionForTmuxHydrationByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]daemonstate.Session {
@@ -1514,7 +1526,7 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 		prompt = buildConflictResolutionPrompt(issueIDString, conflictFiles)
 	}
 	launchCommand := d.buildSessionLaunchCommand(projectID, issueIDString, canonicalSessionID, body.Yolo, body.ImagePaths, prompt)
-	if err := d.tmux.SendKeys(ctx, sessionName+":"+sessionConflictWindowName, launchCommand); err != nil {
+	if err := d.tmux.PasteTextAndSubmit(ctx, sessionName+":"+sessionConflictWindowName, launchCommand); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 
@@ -1997,11 +2009,12 @@ func sessionHookActivityByIssueKeyFromSessions(sessions []daemonstate.Session, n
 		if !isAgentScopedSessionID(session.ID) {
 			continue
 		}
+		state := daemonstate.NormalizeSessionState(session.State)
 		observed := daemonstate.NormalizeSessionState(session.ObservedState)
 		if strings.TrimSpace(string(observed)) == "" {
-			observed = daemonstate.NormalizeSessionState(session.State)
+			observed = state
 		}
-		if observed == daemonstate.SessionStateStopped {
+		if state == daemonstate.SessionStateStopped || observed == daemonstate.SessionStateStopped {
 			continue
 		}
 		key := sessionKey(sessionProjectionIssueID(session, namingScope))
@@ -2010,14 +2023,38 @@ func sessionHookActivityByIssueKeyFromSessions(sessions []daemonstate.Session, n
 		}
 		activity := activityByKey[key]
 		activity.Total++
-		if daemonstate.NormalizeSessionState(session.State) == daemonstate.SessionStatePaused {
+		switch sessionActivityState(session) {
+		case domain.SessionPaused, domain.SessionIdle, domain.SessionWaiting:
 			activity.Paused++
-		} else {
+		case domain.SessionBusy:
 			activity.Active++
 		}
 		activityByKey[key] = activity
 	}
 	return activityByKey
+}
+
+func sessionActivityState(session daemonstate.Session) domain.SessionState {
+	switch normalizeSessionActivity(session.Activity) {
+	case string(domain.SessionBusy), "starting", "working":
+		return domain.SessionBusy
+	case string(domain.SessionIdle), string(domain.SessionPaused), string(domain.SessionWaiting):
+		return domain.SessionPaused
+	}
+	switch daemonstate.NormalizeSessionState(session.State) {
+	case daemonstate.SessionStatePaused:
+		return domain.SessionPaused
+	case daemonstate.SessionStateStarting:
+		return domain.SessionBusy
+	default:
+		// Pane observations prove tmux liveness, not agent activity. Older hook
+		// writes left live pane rows without activity, so treat those as idle
+		// unless a hook explicitly recorded busy.
+		if isAgentScopedSessionID(session.ID) && strings.TrimSpace(session.Activity) == "" {
+			return domain.SessionPaused
+		}
+		return domain.SessionBusy
+	}
 }
 
 func sessionActivityLabel(activity sessionHookActivity) (string, string) {
@@ -2409,7 +2446,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 		if d.isSessionStopPending(projectID, issueID) {
 			continue
 		}
-		if session.State == daemonstate.SessionStateStopped {
+		if !sessionProjectionCanRecreateTmuxSession(session) {
 			continue
 		}
 		if _, ok := tmuxSet[issueKey]; ok {
@@ -2661,7 +2698,7 @@ func (d *Daemon) sessionSnapshotForReconcile(ctx context.Context, projectID stri
 	if d.sessionRuntimeStateStoreIfConfigured(projectID) == nil {
 		return []daemonstate.Session{}, nil
 	}
-	return d.sessionProjectionSnapshot(ctx, projectID)
+	return d.sessionRuntimeStateStoreIfConfigured(projectID).ListSessionIntentStates(ctx, projectID)
 }
 
 func (d *Daemon) ensureSessionWorktreeProjection(ctx context.Context, projectID, issueID string) {
@@ -2792,6 +2829,7 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 			TmuxAttached:      counts.TmuxAttachedCount > 0,
 			TmuxAttachedCount: counts.TmuxAttachedCount,
 			StartedAt:         startedAt,
+			UpdatedAt:         session.UpdatedAt,
 			Worktree:          worktree,
 		}
 	}
@@ -2802,11 +2840,12 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 func activeSessionIssueKeysFromProjection(sessions []daemonstate.Session, namingScope string) map[string]struct{} {
 	active := make(map[string]struct{}, len(sessions))
 	for _, session := range sessions {
+		state := session.State
 		observed := session.ObservedState
 		if strings.TrimSpace(string(observed)) == "" {
-			observed = session.State
+			observed = state
 		}
-		if observed == daemonstate.SessionStateStopped {
+		if state == daemonstate.SessionStateStopped || observed == daemonstate.SessionStateStopped {
 			continue
 		}
 		key := sessionKey(sessionProjectionIssueID(session, namingScope))
@@ -2868,11 +2907,12 @@ func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID strin
 func (d *Daemon) activeSessionIDsFromProjection(projectID string, sessions []daemonstate.Session) []string {
 	active := make([]string, 0, len(sessions))
 	for _, session := range sessions {
+		state := session.State
 		observed := session.ObservedState
 		if strings.TrimSpace(string(observed)) == "" {
-			observed = session.State
+			observed = state
 		}
-		if observed == daemonstate.SessionStateStopped {
+		if state == daemonstate.SessionStateStopped || observed == daemonstate.SessionStateStopped {
 			continue
 		}
 		if d.isSessionStopPending(projectID, session.IssueID) {
@@ -3163,8 +3203,22 @@ func (d *Daemon) refreshStoppedSessionRuntimeState(ctx context.Context, projectI
 		}
 		matched = true
 	}
-	if matched {
+	if matched && issueID == "" {
 		return nil
+	}
+
+	if matched {
+		canonicalStopped := daemonstate.Session{
+			ID:            naming.CanonicalSessionID(namingScope, issueID),
+			IssueID:       issueID,
+			State:         daemonstate.SessionStateStopped,
+			ObservedState: daemonstate.SessionStateStopped,
+			UpdatedAt:     time.Now().UTC(),
+		}
+		if canonicalStopped.ID == "" {
+			return nil
+		}
+		return d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, canonicalStopped)
 	}
 
 	fallbackSessionID := ""
