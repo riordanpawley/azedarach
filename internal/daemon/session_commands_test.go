@@ -1894,6 +1894,90 @@ func TestSessionStartUsesClosestAncestorWorktreeBranchAsBase(t *testing.T) {
 	}
 }
 
+func TestSessionStartMaterializesMissingParentWorktreeBranchAsBase(t *testing.T) {
+	ctx := context.Background()
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Parent issue",
+		Type:   domain.TypeTask,
+		Status: domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create parent issue: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Child issue",
+		Type:     domain.TypeTask,
+		ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("create child issue: %v", err)
+	}
+
+	worktreeRunner := &recordingWorktreeCreateRunner{repoDir: repoDir}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			Logger:       slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-create-parent-base",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.start",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"session_id": childID,
+		}),
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, req)
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("session start response not OK: %+v", resp)
+	}
+	if len(worktreeRunner.adds) != 2 {
+		t.Fatalf("adds = %+v, want parent then child", worktreeRunner.adds)
+	}
+	if worktreeRunner.adds[0].IssueID != parentID || worktreeRunner.adds[0].Base != "main" {
+		t.Fatalf("parent add = %+v, want base main", worktreeRunner.adds[0])
+	}
+	if worktreeRunner.adds[1].IssueID != childID || worktreeRunner.adds[1].Base != worktreeRunner.adds[0].Branch {
+		t.Fatalf("child add = %+v, want base %q", worktreeRunner.adds[1], worktreeRunner.adds[0].Branch)
+	}
+}
+
 func TestSessionStartDoesNotPersistTransitionWhenTmuxCreateFails(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()

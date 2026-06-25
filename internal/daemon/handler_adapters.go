@@ -586,41 +586,40 @@ func (a *worktreeServiceAdapter) List(ctx context.Context, projectID string) ([]
 	return worktrees, nil
 }
 
-func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, issueID string, baseBranch string) (*git.Worktree, error) {
+func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, issueID string, baseBranch string) (*git.Worktree, string, error) {
 	manager := a.managerFor(projectID)
 	if manager == nil {
-		return nil, errors.New("worktree manager unavailable")
+		return nil, "", errors.New("worktree manager unavailable")
 	}
 	if a.ensureRuntimeFreshForIssueMutation != nil {
 		if err := a.ensureRuntimeFreshForIssueMutation(ctx, normalizedProjectID(projectID), issueID, daemonhandlers.CommandWorktreeCreate); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 	}
-	worktree, err := manager.Create(ctx, issueID, baseBranch)
-	if err != nil {
-		if !errors.Is(err, git.ErrWorktreeAlreadyExists) {
-			if recoveredWorktree, recoverErr := manager.Get(ctx, issueID); recoverErr == nil {
-				worktree = recoveredWorktree
-			} else {
-				return nil, err
-			}
-		} else if existingWorktree, getErr := manager.Get(ctx, issueID); getErr == nil {
-			worktree = existingWorktree
-		} else {
-			return nil, fmt.Errorf("worktree already exists for issue %s but could not be loaded: %w", issueID, getErr)
+	taskByIssue := a.runtimeIssueTaskSnapshot(ctx, projectID)
+	title := ""
+	if task, ok := taskByIssueIDLocal(taskByIssue, issueID); ok {
+		title = task.Title
+		ensured, err := ensureAncestorWorktrees(ctx, projectID, task, baseBranch, manager, taskLookupFromMap(taskByIssue), a.runtimeProjectionWriter)
+		if err != nil {
+			return nil, "", err
 		}
+		baseBranch = ensured.BaseBranch
+	}
+	worktree, err := createOrLoadIssueWorktree(ctx, manager, issueID, title, baseBranch)
+	if err != nil {
+		return nil, "", err
 	}
 	if a.runtimeStore(projectID) != nil && worktree != nil {
-		taskByIssue := a.runtimeIssueTaskSnapshot(ctx, projectID)
 		if !runtimeWorktreeIssueEligible(worktree.IssueID, taskByIssue) {
-			return worktree, nil
+			return worktree, baseBranch, nil
 		}
 		if a.runtimeProjectionWriter != nil {
 			a.runtimeProjectionWriter.PersistWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), worktree.IssueID, worktree.Path, worktree.Branch)
 		}
 		a.observeWorktrees(ctx, normalizedProjectID(projectID), []git.Worktree{*worktree}, taskByIssue)
 	}
-	return worktree, nil
+	return worktree, baseBranch, nil
 }
 
 func (a *worktreeServiceAdapter) Delete(ctx context.Context, projectID string, issueID string, force bool) error {

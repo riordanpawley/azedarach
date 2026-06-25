@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -442,6 +443,126 @@ func (r *sequenceWorktreeListRunner) Run(_ context.Context, args ...string) (str
 	return "", nil
 }
 
+type recordingWorktreeCreateRunner struct {
+	repoDir  string
+	worktree map[string]git.Worktree
+	adds     []recordedWorktreeAdd
+}
+
+type recordedWorktreeAdd struct {
+	IssueID string
+	Branch  string
+	Base    string
+	Path    string
+}
+
+func (r *recordingWorktreeCreateRunner) Run(_ context.Context, args ...string) (string, error) {
+	if r.worktree == nil {
+		r.worktree = map[string]git.Worktree{}
+	}
+	if len(args) >= 2 && args[0] == "config" && args[1] == "user.name" {
+		return "testuser\n", nil
+	}
+	if len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" {
+		var b strings.Builder
+		b.WriteString("worktree " + r.repoDir + "\nHEAD abc123\nbranch refs/heads/main\n\n")
+		ids := make([]string, 0, len(r.worktree))
+		for id := range r.worktree {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			wt := r.worktree[id]
+			b.WriteString("worktree " + wt.Path + "\nHEAD def456\nbranch refs/heads/" + wt.Branch + "\n\n")
+		}
+		return b.String(), nil
+	}
+	if len(args) >= 6 && args[0] == "worktree" && args[1] == "add" && args[2] == "-b" {
+		branch := args[3]
+		path := args[4]
+		base := args[5]
+		issueID := strings.TrimPrefix(filepath.Base(path), filepath.Base(r.repoDir)+"-")
+		r.worktree[issueID] = git.Worktree{IssueID: issueID, Path: path, Branch: branch}
+		r.adds = append(r.adds, recordedWorktreeAdd{
+			IssueID: issueID,
+			Branch:  branch,
+			Base:    base,
+			Path:    path,
+		})
+		return "", nil
+	}
+	return "", nil
+}
+
+func TestWorktreeServiceAdapterCreateMaterializesMissingAncestorChain(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	runner := &recordingWorktreeCreateRunner{repoDir: repoDir}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+
+	rootID := "az-root"
+	parentID := "az-parent"
+	childID := "az-child"
+	tasks := map[string]domain.Task{
+		rootID: {
+			ID:     naming.IssueID(rootID),
+			Title:  "Root issue",
+			Type:   domain.TypeTask,
+			Status: domain.StatusOpen,
+		},
+		parentID: {
+			ID:       naming.IssueID(parentID),
+			Title:    "Parent issue",
+			Type:     domain.TypeTask,
+			Status:   domain.StatusOpen,
+			ParentID: ptrIssueID(rootID),
+		},
+		childID: {
+			ID:       naming.IssueID(childID),
+			Title:    "Child issue",
+			Type:     domain.TypeTask,
+			Status:   domain.StatusOpen,
+			ParentID: ptrIssueID(parentID),
+		},
+	}
+	adapter := &worktreeServiceAdapter{
+		manager: manager,
+		logger:  logger,
+		runtimeIssueTasks: func(context.Context, string) map[string]domain.Task {
+			return tasks
+		},
+	}
+
+	worktree, effectiveBase, err := adapter.Create(ctx, "proj", childID, "main")
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if worktree.IssueID != childID {
+		t.Fatalf("worktree issue = %q, want %q", worktree.IssueID, childID)
+	}
+	if len(runner.adds) != 3 {
+		t.Fatalf("adds = %+v, want root, parent, child", runner.adds)
+	}
+	if runner.adds[0].IssueID != rootID || runner.adds[0].Base != "main" {
+		t.Fatalf("root add = %+v, want base main", runner.adds[0])
+	}
+	if runner.adds[1].IssueID != parentID || runner.adds[1].Base != runner.adds[0].Branch {
+		t.Fatalf("parent add = %+v, want base %q", runner.adds[1], runner.adds[0].Branch)
+	}
+	if runner.adds[2].IssueID != childID || runner.adds[2].Base != runner.adds[1].Branch {
+		t.Fatalf("child add = %+v, want base %q", runner.adds[2], runner.adds[1].Branch)
+	}
+	if effectiveBase != runner.adds[1].Branch {
+		t.Fatalf("effective base = %q, want parent branch %q", effectiveBase, runner.adds[1].Branch)
+	}
+}
+
+func ptrIssueID(id string) *naming.IssueID {
+	issueID := naming.IssueID(id)
+	return &issueID
+}
+
 func TestWorktreeServiceAdapterDeleteDoesNotRequireProjectWideRuntimeFreshness(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	repoDir := t.TempDir()
@@ -642,7 +763,7 @@ branch refs/heads/main
 		},
 	}
 
-	wt, err := adapter.Create(context.Background(), "proj", "bvx", "main")
+	wt, _, err := adapter.Create(context.Background(), "proj", "bvx", "main")
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
@@ -675,7 +796,7 @@ branch refs/heads/riordan/bvx/work
 		logger:  logger,
 	}
 
-	wt, err := adapter.Create(context.Background(), "proj", "bvx", "main")
+	wt, _, err := adapter.Create(context.Background(), "proj", "bvx", "main")
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}

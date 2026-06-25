@@ -19,8 +19,8 @@ type fakeWorktreeService struct{}
 func (f *fakeWorktreeService) List(context.Context, string) ([]git.Worktree, error) {
 	return []git.Worktree{{Path: "/tmp/wt", Branch: "main", IssueID: "afk"}}, nil
 }
-func (f *fakeWorktreeService) Create(context.Context, string, string, string) (*git.Worktree, error) {
-	return &git.Worktree{Path: "/tmp/wt", Branch: "main", IssueID: "afk"}, nil
+func (f *fakeWorktreeService) Create(context.Context, string, string, string) (*git.Worktree, string, error) {
+	return &git.Worktree{Path: "/tmp/wt", Branch: "main", IssueID: "afk"}, "main", nil
 }
 func (f *fakeWorktreeService) Delete(context.Context, string, string, bool) error { return nil }
 func (f *fakeWorktreeService) CleanupOrphaned(context.Context, string) (*CleanupOrphanedResult, error) {

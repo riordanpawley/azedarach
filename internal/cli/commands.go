@@ -556,10 +556,12 @@ func WorktreeCreateCommand(deps *Dependencies, opts WorktreeCreateOptions) error
 	}
 
 	deps.Logger.Info("creating worktree", "project_id", target.ProjectID, "issue_id", target.IssueID, "base_branch", baseBranch)
-	worktree, err := deps.DaemonClient.CreateWorktree(ctx, target.IssueID, baseBranch)
+	createResult, err := deps.DaemonClient.CreateWorktreeResult(ctx, target.IssueID, baseBranch)
 	if err != nil {
 		return fmt.Errorf("failed to create worktree for %s: %w", target.IssueID, err)
 	}
+	worktree := createResult.Worktree
+	baseBranch = strings.TrimSpace(createResult.BaseBranch)
 
 	if opts.JSON {
 		return printJSON(map[string]any{

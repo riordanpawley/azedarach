@@ -21,7 +21,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
-	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
@@ -734,7 +733,19 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if worktreeManager == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "worktree manager unavailable"), nil
 	}
-	baseBranch, baseBranchAncestorIssueID := d.resolveSessionStartBaseBranch(ctx, cmd.ProjectID, cmd.BaseBranch, issueClient, worktreeManager, task)
+	baseBranch := strings.TrimSpace(cmd.BaseBranch)
+	if baseBranch == "" {
+		baseBranch = strings.TrimSpace(d.baseBranchForProject(cmd.ProjectID))
+	}
+	baseBranchAncestorIssueID := ""
+	ensuredAncestors, err := ensureAncestorWorktrees(ctx, cmd.ProjectID, task, baseBranch, worktreeManager, func(ctx context.Context, issueID string) (domain.Task, error) {
+		return issueClient.GetWithRuntime(ctx, cmd.ProjectID, issueID)
+	}, d.runtimeProjectionStateWriter())
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	baseBranch = ensuredAncestors.BaseBranch
+	baseBranchAncestorIssueID = ensuredAncestors.AncestorIssueID
 	reportSessionStartProgress(ctx, "worktree_preflight", fmt.Sprintf("creating or reusing worktree from %s", baseBranch), 25)
 	worktree, err := worktreeManager.CreateWithTitle(ctx, cmd.IssueID, task.Title, baseBranch)
 	reusedWorktree := false
@@ -909,60 +920,6 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		)
 	}
 	return d.commandOutput(req, output), nil
-}
-
-func (d *Daemon) resolveSessionStartBaseBranch(
-	ctx context.Context,
-	projectID string,
-	requestedBaseBranch string,
-	issueClient *issues.Client,
-	worktreeManager *git.WorktreeManager,
-	task domain.Task,
-) (baseBranch string, ancestorIssueID string) {
-	baseBranch = strings.TrimSpace(requestedBaseBranch)
-	if baseBranch == "" {
-		baseBranch = strings.TrimSpace(d.baseBranchForProject(projectID))
-	}
-	if issueClient == nil || worktreeManager == nil || task.ParentID == nil {
-		return baseBranch, ""
-	}
-
-	taskByIssue := map[string]domain.Task{
-		strings.TrimSpace(task.ID.String()): task,
-	}
-	worktreesByIssue := map[string]domain.IssueWorktreeRef{}
-	nextParentID := strings.TrimSpace(task.ParentID.String())
-	visited := map[string]struct{}{}
-	for nextParentID != "" {
-		if _, seen := visited[nextParentID]; seen {
-			break
-		}
-		visited[nextParentID] = struct{}{}
-
-		if parentWorktree, err := worktreeManager.Get(ctx, nextParentID); err == nil {
-			worktreesByIssue[nextParentID] = domain.IssueWorktreeRef{
-				Branch: strings.TrimSpace(parentWorktree.Branch),
-				Path:   strings.TrimSpace(parentWorktree.Path),
-			}
-		}
-
-		parentTask, err := issueClient.GetWithRuntime(ctx, projectID, nextParentID)
-		if err != nil {
-			break
-		}
-		taskByIssue[nextParentID] = parentTask
-
-		nextParentID = ""
-		if parentTask.ParentID != nil {
-			nextParentID = strings.TrimSpace(parentTask.ParentID.String())
-		}
-	}
-
-	if target, ok := domain.ClosestAncestorWithWorktree(task.ID.String(), taskByIssue, worktreesByIssue); ok {
-		return target.Branch, target.IssueID
-	}
-
-	return baseBranch, ""
 }
 
 func resolveSessionIssue(tasks []domain.Task, requestedIssueID string) (domain.Task, bool) {

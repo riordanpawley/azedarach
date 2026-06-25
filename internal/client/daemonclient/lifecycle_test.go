@@ -755,7 +755,8 @@ func TestCreateWorktreeUsesProjectRouteAndBaseBranch(t *testing.T) {
 	transport := &lifecycleRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			body, err := json.Marshal(worktreeResultBody{
-				ProjectID: naming.ProjectID("proj-a"),
+				ProjectID:  naming.ProjectID("proj-a"),
+				BaseBranch: "az/parent",
 				Worktree: worktreePayload{
 					Path:    "/tmp/az-1",
 					Branch:  "az/az-1",
@@ -796,6 +797,14 @@ func TestCreateWorktreeUsesProjectRouteAndBaseBranch(t *testing.T) {
 	}
 	if worktree.Path != "/tmp/az-1" || worktree.Branch != "az/az-1" || worktree.IssueID != "az-1" {
 		t.Fatalf("worktree = %+v", worktree)
+	}
+
+	result, err := client.CreateWorktreeResult(context.Background(), "az-1", "main")
+	if err != nil {
+		t.Fatalf("CreateWorktreeResult error: %v", err)
+	}
+	if result.ProjectID != "proj-a" || result.BaseBranch != "az/parent" {
+		t.Fatalf("result = %+v, want project proj-a base az/parent", result)
 	}
 }
 
