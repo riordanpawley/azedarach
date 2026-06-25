@@ -149,6 +149,9 @@ func (s *Store) upsertSession(projectID, sessionID, issueID string, state Sessio
 	if ok && strings.TrimSpace(string(existing.ObservedState)) != "" {
 		observedState = NormalizeSessionState(existing.ObservedState)
 	}
+	if state == SessionStateStopped {
+		observedState = SessionStateStopped
+	}
 	next := Session{
 		ID:             sessionID,
 		IssueID:        issueID,

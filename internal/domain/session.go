@@ -19,6 +19,7 @@ type Session struct {
 	TmuxAttached      bool           `json:"tmux_attached,omitempty"`
 	TmuxAttachedCount int            `json:"tmux_attached_count,omitempty"`
 	StartedAt         *time.Time     `json:"started_at,omitempty"`
+	UpdatedAt         time.Time      `json:"updated_at,omitempty,omitzero"`
 	Worktree          string         `json:"worktree,omitempty"`
 	DevServer         *DevServer     `json:"dev_server,omitempty"`
 }

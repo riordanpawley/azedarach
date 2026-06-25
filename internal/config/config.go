@@ -298,6 +298,29 @@ func DefaultConfig() *Config {
 	}
 }
 
+// SessionLogDirFor returns the user-facing log directory for CLI/TUI/daemon
+// process logs. Explicit worktree-scoped daemon development keeps logs local to
+// that worktree so test daemons do not mingle with the production log stream.
+func SessionLogDirFor(cfg *Config, startPath string) string {
+	if UseScopedDaemonRuntimeFor(startPath) {
+		if worktreeRoot, err := ResolveWorktreeRoot(startPath); err == nil && strings.TrimSpace(worktreeRoot) != "" {
+			return filepath.Join(worktreeRoot, ".azedarach")
+		}
+	}
+
+	if cfg == nil {
+		cfg = DefaultConfig()
+	}
+	logDir := strings.TrimSpace(cfg.Session.LogDir)
+	if logDir != "" {
+		return logDir
+	}
+	if homeDir, err := os.UserHomeDir(); err == nil && strings.TrimSpace(homeDir) != "" {
+		return filepath.Join(homeDir, ".azedarach", "logs")
+	}
+	return filepath.Join(".", ".azedarach", "logs")
+}
+
 func DefaultSessionShell() string {
 	if shell := strings.TrimSpace(os.Getenv("SHELL")); shell != "" {
 		return shell

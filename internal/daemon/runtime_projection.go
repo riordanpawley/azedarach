@@ -97,6 +97,14 @@ func applyRuntimeSessionCounts(projection *protocol.RuntimeProjection, counts se
 	projection.Session.PausedCount = counts.Paused
 	projection.Session.TmuxAttached = counts.TmuxAttachedCount > 0
 	projection.Session.TmuxAttachedCount = counts.TmuxAttachedCount
+	if counts.PaneScoped == 0 {
+		return
+	}
+	if counts.Active > 0 {
+		projection.Session.State = protocol.SessionLifecycleState(daemonstate.SessionStateRunning)
+	} else {
+		projection.Session.State = protocol.SessionLifecycleState(daemonstate.SessionStatePaused)
+	}
 }
 
 func parseIssueIDOrZero(raw string) naming.IssueID {

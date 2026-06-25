@@ -143,7 +143,7 @@ func TestRuntimeProjectionHelpersRouteThroughSingleWriter(t *testing.T) {
 		t.Fatalf("upsertSessionAndPublish: %v", err)
 	}
 	d.writeSessionStopProjection(projectID, sessionID, issueID)
-	if err := d.persistTmuxSessionRuntimeState(ctx, projectID, []tmux.SessionInfo{{Name: sessionID}}); err != nil {
+	if err := d.persistTmuxSessionRuntimeState(ctx, projectID, []tmux.SessionInfo{{Name: sessionID}}, nil); err != nil {
 		t.Fatalf("persistTmuxSessionRuntimeState: %v", err)
 	}
 

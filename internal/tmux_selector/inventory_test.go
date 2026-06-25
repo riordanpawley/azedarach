@@ -195,6 +195,8 @@ func TestGlobalInventoryLoaderClosedProjectedTaskKeepsLiveSessionState(t *testin
 
 func TestGlobalInventoryLoaderCarriesHookActivityFromProjection(t *testing.T) {
 	started := time.Unix(1775209200, 0).UTC()
+	issueUpdated := started.Add(10 * time.Minute)
+	runtimeUpdated := started.Add(20 * time.Minute)
 	projectDir := t.TempDir()
 	projectID := projectIDForPath(projectDir)
 	sessionID := naming.CanonicalSessionID(projectID, "cmd")
@@ -209,15 +211,18 @@ func TestGlobalInventoryLoaderCarriesHookActivityFromProjection(t *testing.T) {
 				ProjectID:   projectID,
 				ProjectPath: projectDir,
 				Tasks: []domain.Task{{
-					ID:     "cmd",
-					Title:  "Idle hook activity",
-					Status: domain.StatusInProgress,
+					ID:               "cmd",
+					Title:            "Idle hook activity",
+					Status:           domain.StatusInProgress,
+					UpdatedAt:        issueUpdated,
+					RuntimeUpdatedAt: runtimeUpdated,
 					Session: &domain.Session{
 						IssueID:        "cmd",
 						State:          domain.SessionBusy,
 						Activity:       "idle",
 						ActivitySource: "hooks",
 						StartedAt:      &started,
+						UpdatedAt:      runtimeUpdated,
 					},
 					HasTmuxSession: true,
 				}},
@@ -236,8 +241,14 @@ func TestGlobalInventoryLoaderCarriesHookActivityFromProjection(t *testing.T) {
 	if entry.State != domain.SessionBusy || entry.Activity != "idle" || entry.ActivitySource != "hooks" {
 		t.Fatalf("entry activity = state:%s activity:%s source:%s, want busy/idle/hooks", entry.State, entry.Activity, entry.ActivitySource)
 	}
+	if entry.LastUpdatedAt == nil || !entry.LastUpdatedAt.Equal(runtimeUpdated) {
+		t.Fatalf("entry last updated = %v, want %v", entry.LastUpdatedAt, runtimeUpdated)
+	}
 	if got := snapshot.Tasks[0].Session.Activity; got != "idle" {
 		t.Fatalf("task session activity = %q, want idle", got)
+	}
+	if !snapshot.Tasks[0].RuntimeUpdatedAt.Equal(runtimeUpdated) {
+		t.Fatalf("task runtime updated = %v, want %v", snapshot.Tasks[0].RuntimeUpdatedAt, runtimeUpdated)
 	}
 }
 

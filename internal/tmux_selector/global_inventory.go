@@ -260,6 +260,7 @@ func (l *GlobalInventoryLoader) snapshotFromLive(ctx context.Context, live []tmu
 			Worktree:          strings.TrimSpace(info.Path),
 			StartedAt:         info.CreatedAt,
 			LastAttachedAt:    info.LastAttachedAt,
+			LastUpdatedAt:     info.LastAttachedAt,
 			TmuxAttached:      info.AttachedCount > 0,
 			TmuxAttachedCount: info.AttachedCount,
 			HasTmuxSession:    true,
@@ -484,6 +485,7 @@ func entriesFromLive(live []tmux.SessionInfo) []InventoryEntry {
 			TmuxAttachedCount: info.AttachedCount,
 			LastAttachedAt:    info.LastAttachedAt,
 			StartedAt:         info.CreatedAt,
+			LastUpdatedAt:     info.LastAttachedAt,
 		}
 		if parsed, ok := ParseAzedarachSessionName(sessionName); ok {
 			entry.IssueID = parsed.IssueID.String()
@@ -742,6 +744,13 @@ func mergeProjectedInventory(entry InventoryEntry, projection projectedInventory
 		entry.IssueStatus = projection.task.Status
 		entry.Priority = projection.task.Priority
 		entry.Type = projection.task.Type
+		if !projection.task.RuntimeUpdatedAt.IsZero() {
+			lastUpdatedAt := projection.task.RuntimeUpdatedAt
+			entry.LastUpdatedAt = &lastUpdatedAt
+		} else if !projection.task.UpdatedAt.IsZero() {
+			lastUpdatedAt := projection.task.UpdatedAt
+			entry.LastUpdatedAt = &lastUpdatedAt
+		}
 		entry.HasWorktree = entry.HasWorktree || projection.task.HasWorktree
 		entry.GitAheadCount = projection.task.GitAheadCount
 		entry.GitBehindCount = projection.task.GitBehindCount
@@ -756,19 +765,21 @@ func mergeProjectedInventory(entry InventoryEntry, projection projectedInventory
 func taskFromInventoryEntry(entry InventoryEntry) domain.Task {
 	issueID := naming.IssueID(entry.IssueID)
 	return domain.Task{
-		ID:             issueID,
-		Title:          entry.TaskTitle,
-		Status:         entry.IssueStatus,
-		Priority:       entry.Priority,
-		Type:           entry.Type,
-		HasTmuxSession: entry.HasTmuxSession,
-		HasWorktree:    entry.HasWorktree,
+		ID:               issueID,
+		Title:            entry.TaskTitle,
+		Status:           entry.IssueStatus,
+		Priority:         entry.Priority,
+		Type:             entry.Type,
+		RuntimeUpdatedAt: valueOrZeroTime(entry.LastUpdatedAt),
+		HasTmuxSession:   entry.HasTmuxSession,
+		HasWorktree:      entry.HasWorktree,
 		Session: &domain.Session{
 			IssueID:        issueID,
 			State:          entry.State,
 			Activity:       entry.Activity,
 			ActivitySource: entry.ActivitySource,
 			StartedAt:      entry.StartedAt,
+			UpdatedAt:      valueOrZeroTime(entry.LastUpdatedAt),
 			Worktree:       entry.Worktree,
 		},
 	}

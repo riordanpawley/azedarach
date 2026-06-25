@@ -464,7 +464,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		SessionStartProgress: orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
 		Blocked:              ready.Blocked,
 		MailboxEvents:        events,
-		Warnings:             orchestrateStatusWarnings(ctx, deps, ready.RootIssueID, len(ready.Runnable)),
+		Warnings:             orchestrateStatusWarnings(ctx, deps, ready, len(ready.Runnable)),
 		Advice: map[string]interface{}{
 			"watch":             fmt.Sprintf("az orchestrate watch --root %s --since %d --jsonl", ready.RootIssueID, nextMailboxSeq(events, opts.SinceSeq)),
 			"watch_instruction": "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
@@ -610,7 +610,7 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		Launched:    make([]orchestrateStartLaunch, 0, len(requested)),
 		Skipped:     skipped,
 		Failed:      map[string]string{},
-		Warnings:    orchestrateStartWarnings(ctx, deps, opts.RootIssueID, plannedOrchestrateStartLaunchCount(len(requested), opts.Limit)),
+		Warnings:    orchestrateStartWarnings(ctx, deps, ready, plannedOrchestrateStartLaunchCount(len(requested), opts.Limit)),
 		Advice: orchestrateStartAdvice{
 			WatchCommand:     fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", opts.RootIssueID),
 			StatusCommand:    fmt.Sprintf("az orchestrate status --root %s --json", opts.RootIssueID),
@@ -1122,7 +1122,7 @@ func applyOrchestrateIntegration(deps *Dependencies, issueID string, mergeReady 
 	}
 	result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "completion_evidence", Status: "success"})
 
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), issueCloseCleanupTimeout)
 	defer cancel()
 	closeResult, err := deps.DaemonClient.CloseTask(cleanupCtx, issueID, daemonclient.TaskStatusOptions{
 		IntegrateBeforeClose: true,
@@ -1545,12 +1545,12 @@ func submitSessionStartForIssueWithBaseBranch(deps *Dependencies, issueID, baseB
 	return launch, nil
 }
 
-func orchestrateStartWarnings(ctx context.Context, deps *Dependencies, rootIssueID string, launchCount int) []string {
+func orchestrateStartWarnings(ctx context.Context, deps *Dependencies, ready daemonclient.TaskGraphReadiness, launchCount int) []string {
 	if deps == nil || deps.DaemonClient == nil {
 		return nil
 	}
-	warnings := orchestrateRootWorktreeWarnings(ctx, deps, rootIssueID)
-	warnings = append(warnings, sessionInitCommandFanoutWarnings(deps, rootIssueID, launchCount)...)
+	warnings := orchestrateRootWorktreeWarningsFromReadiness(ctx, deps, ready)
+	warnings = append(warnings, sessionInitCommandFanoutWarnings(deps, ready.RootIssueID, launchCount)...)
 	if launchCount < 1 {
 		return warnings
 	}
@@ -1571,12 +1571,12 @@ func orchestrateStartWarnings(ctx context.Context, deps *Dependencies, rootIssue
 	)
 }
 
-func orchestrateStatusWarnings(ctx context.Context, deps *Dependencies, rootIssueID string, runnableCount int) []string {
+func orchestrateStatusWarnings(ctx context.Context, deps *Dependencies, ready daemonclient.TaskGraphReadiness, runnableCount int) []string {
 	if deps == nil || deps.DaemonClient == nil {
 		return nil
 	}
-	warnings := orchestrateRootWorktreeWarnings(ctx, deps, rootIssueID)
-	warnings = append(warnings, sessionInitCommandFanoutWarnings(deps, rootIssueID, runnableCount)...)
+	warnings := orchestrateRootWorktreeWarningsFromReadiness(ctx, deps, ready)
+	warnings = append(warnings, sessionInitCommandFanoutWarnings(deps, ready.RootIssueID, runnableCount)...)
 	return warnings
 }
 
@@ -1669,27 +1669,12 @@ func sessionInitCommandTokens(command string) []string {
 	return tokens
 }
 
-func orchestrateRootWorktreeWarnings(ctx context.Context, deps *Dependencies, rootIssueID string) []string {
-	rootIssueID = strings.TrimSpace(rootIssueID)
+func orchestrateRootWorktreeWarningsFromReadiness(ctx context.Context, deps *Dependencies, ready daemonclient.TaskGraphReadiness) []string {
+	rootIssueID := strings.TrimSpace(ready.RootIssueID)
 	if rootIssueID == "" || deps == nil || deps.DaemonClient == nil {
 		return nil
 	}
-	tasks, err := deps.DaemonClient.ListTasks(ctx)
-	if err != nil {
-		return []string{fmt.Sprintf("could not inspect root worktree ownership for %s: list tasks: %v", rootIssueID, err)}
-	}
-	root, ok := findTaskByID(tasks, rootIssueID)
-	if !ok {
-		return nil
-	}
-	hasChild := false
-	for _, task := range tasks {
-		if task.ParentID != nil && naming.IssueIDsEqual(task.ParentID.String(), rootIssueID) {
-			hasChild = true
-			break
-		}
-	}
-	if !hasChild {
+	if len(ready.Runnable)+len(ready.Pending)+len(ready.Active)+len(ready.Blocked)+len(ready.ActiveSessions)+len(ready.SessionStartProgress) == 0 {
 		return nil
 	}
 	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
@@ -1712,12 +1697,8 @@ func orchestrateRootWorktreeWarnings(ctx context.Context, deps *Dependencies, ro
 		}
 		currentPath = strings.TrimSpace(cwd)
 	}
-	rootKind := "root issue"
-	if root.Type == domain.TypeEpic {
-		rootKind = "root epic"
-	}
 	return []string{
-		fmt.Sprintf("%s %s has child orchestration but no dedicated worktree; current worktree/path is %s. Recommended: az worktree create %s, then run orchestration from the issue worktree.", rootKind, rootIssueID, currentPath, rootIssueID),
+		fmt.Sprintf("root issue %s has child orchestration but no dedicated worktree; current worktree/path is %s. Recommended: az worktree create %s, then run orchestration from the issue worktree.", rootIssueID, currentPath, rootIssueID),
 	}
 }
 

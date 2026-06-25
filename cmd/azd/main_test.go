@@ -12,7 +12,10 @@ import (
 
 func TestRedirectDaemonProcessOutputKeepsRotatingStderrWrites(t *testing.T) {
 	repoDir := t.TempDir()
-	logPath := filepath.Join(repoDir, ".azedarach", logging.DaemonLogFileName)
+	logDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Session.LogDir = logDir
+	logPath := filepath.Join(logDir, logging.DaemonLogFileName)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll(log dir): %v", err)
 	}
@@ -28,7 +31,7 @@ func TestRedirectDaemonProcessOutputKeepsRotatingStderrWrites(t *testing.T) {
 		t.Fatalf("Close(seed) error = %v", err)
 	}
 
-	redirect, err := redirectDaemonProcessOutput(repoDir)
+	redirect, err := redirectDaemonProcessOutput(repoDir, cfg)
 	if err != nil {
 		t.Fatalf("redirectDaemonProcessOutput() error = %v", err)
 	}
