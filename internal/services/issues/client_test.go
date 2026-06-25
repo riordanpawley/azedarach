@@ -2147,6 +2147,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0012_blocked_status_to_open",
 		"0013_closed_runtime_invariants",
 		"0014_linear_sync_external_refs_backfill",
+		"0015_issue_attachments",
 	}, got)
 }
 

@@ -668,6 +668,59 @@ func main() {
 				os.Exit(1)
 			}
 
+		case "document":
+			if len(issueArgs) == 0 {
+				fmt.Fprintf(os.Stderr, "Usage: az issue document <add|list|remove> [arguments]\n")
+				os.Exit(1)
+			}
+			documentCommand := issueArgs[0]
+			documentArgs := issueArgs[1:]
+			switch documentCommand {
+			case "add":
+				opts, err := cli.ParseIssueDocumentAddArgs(documentArgs)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Usage: az issue document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+					return cli.IssueDocumentAddCommand(deps, opts)
+				}); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+			case "list":
+				opts, err := cli.ParseIssueDocumentListArgs(documentArgs)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Usage: az issue document list [--project <project-id>] [--issue-id <issue-id>] [<issue-id>] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+					return cli.IssueDocumentListCommand(deps, opts)
+				}); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+			case "remove":
+				opts, err := cli.ParseIssueDocumentRemoveArgs(documentArgs)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Usage: az issue document remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+					return cli.IssueDocumentRemoveCommand(deps, opts)
+				}); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+			default:
+				fmt.Fprintf(os.Stderr, "Unknown issue document command: %s\n", documentCommand)
+				fmt.Fprintf(os.Stderr, "Usage: az issue document <add|list|remove> [arguments]\n")
+				os.Exit(1)
+			}
+
 		case "dep":
 			if len(issueArgs) == 0 {
 				fmt.Fprintf(os.Stderr, "Usage: az issue dep <add|remove|bulk> [arguments]\n")
