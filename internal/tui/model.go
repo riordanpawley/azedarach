@@ -3106,14 +3106,16 @@ type pendingBulkCleanupConfirmation struct {
 }
 
 type pendingCloseCleanupConfirmation struct {
-	taskID         string
-	taskIDs        []string
-	closeTaskIDs   []string
-	previousStatus domain.Status
-	targetStatus   domain.Status
-	bulkMode       string
-	delta          int
-	summaries      []closeCleanupTaskSummary
+	taskID                      string
+	taskIDs                     []string
+	closeTaskIDs                []string
+	previousStatus              domain.Status
+	targetStatus                domain.Status
+	bulkMode                    string
+	delta                       int
+	summaries                   []closeCleanupTaskSummary
+	closeCleanChildren          bool
+	targetOnlyBlockedByChildren bool
 }
 
 type pendingReviewCascadeConfirmation struct {
@@ -3123,9 +3125,10 @@ type pendingReviewCascadeConfirmation struct {
 }
 
 type closeCleanupConfirmPreflightMsg struct {
-	pending   pendingCloseCleanupConfirmation
-	summaries []closeCleanupTaskSummary
-	err       error
+	pending        pendingCloseCleanupConfirmation
+	summaries      []closeCleanupTaskSummary
+	refreshedTasks []domain.Task
+	err            error
 }
 
 type closeCleanupTaskSummary struct {
@@ -3904,6 +3907,10 @@ type helixOpenResultMsg struct {
 
 // fetchAndMergeCmd fetches and merges from the specified branch
 func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
+	return m.bulkMoveStatusCmdWithOptions(taskIDs, delta, daemonclient.TaskStatusOptions{})
+}
+
+func (m Model) bulkMoveStatusCmdWithOptions(taskIDs []string, delta int, opts daemonclient.TaskStatusOptions) tea.Cmd {
 	return func() tea.Msg {
 		statusOrder := []domain.Status{
 			domain.StatusOpen,
@@ -3955,7 +3962,7 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 
 			newStatus := statusOrder[newIdx]
 
-			err := m.updateTaskStatusWithTimeout(taskID, newStatus, 10*time.Second)
+			err := m.updateTaskStatusWithTimeoutOptions(taskID, newStatus, 10*time.Second, opts)
 			if err != nil {
 				if pending, ok := pendingOperationDetails(err); ok {
 					pendingOps = append(pendingOps, bulkTaskPendingOperation{
@@ -4192,6 +4199,10 @@ func (m Model) bulkCleanupPreflightCmd(taskIDs []string, deleteTask bool) tea.Cm
 
 // bulkSetStatusCmd sets all selected tasks to a specific status
 func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd {
+	return m.bulkSetStatusCmdWithOptions(taskIDs, status, daemonclient.TaskStatusOptions{})
+}
+
+func (m Model) bulkSetStatusCmdWithOptions(taskIDs []string, status domain.Status, opts daemonclient.TaskStatusOptions) tea.Cmd {
 	return func() tea.Msg {
 		updated := 0
 		failed := 0
@@ -4204,7 +4215,7 @@ func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd 
 				continue
 			}
 			previousStatus, _ := m.taskStatusByID(taskID)
-			err := m.updateTaskStatusWithTimeout(taskID, status, 10*time.Second)
+			err := m.updateTaskStatusWithTimeoutOptions(taskID, status, 10*time.Second, opts)
 			if err != nil {
 				if pending, ok := pendingOperationDetails(err); ok {
 					pendingOps = append(pendingOps, bulkTaskPendingOperation{
@@ -4405,8 +4416,12 @@ type taskStatusResultMsg struct {
 
 // moveTaskStatusCmd updates a single task's status.
 func (m Model) moveTaskStatusCmd(taskID string, previousStatus, newStatus domain.Status) tea.Cmd {
+	return m.moveTaskStatusCmdWithOptions(taskID, previousStatus, newStatus, daemonclient.TaskStatusOptions{})
+}
+
+func (m Model) moveTaskStatusCmdWithOptions(taskID string, previousStatus, newStatus domain.Status, opts daemonclient.TaskStatusOptions) tea.Cmd {
 	return func() tea.Msg {
-		err := m.updateTaskStatusWithTimeout(taskID, newStatus, 5*time.Second)
+		err := m.updateTaskStatusWithTimeoutOptions(taskID, newStatus, 5*time.Second, opts)
 		if err != nil {
 			return taskStatusResultMsg{
 				taskID:         taskID,
@@ -4426,7 +4441,7 @@ func (m Model) moveTaskStatusCmd(taskID string, previousStatus, newStatus domain
 
 func (m Model) moveTaskStatusCascadeChildrenCmd(taskID string, previousStatus, newStatus domain.Status) tea.Cmd {
 	return func() tea.Msg {
-		err := m.updateTaskStatusWithTimeoutAndOptions(taskID, newStatus, 5*time.Second, daemonclient.TaskStatusOptions{CascadeChildren: true})
+		err := m.updateTaskStatusWithTimeoutOptions(taskID, newStatus, 5*time.Second, daemonclient.TaskStatusOptions{CascadeChildren: true})
 		if err != nil {
 			return taskStatusResultMsg{
 				taskID:         taskID,
@@ -4445,17 +4460,21 @@ func (m Model) moveTaskStatusCascadeChildrenCmd(taskID string, previousStatus, n
 }
 
 func (m Model) updateTaskStatusWithTimeout(taskID string, status domain.Status, defaultTimeout time.Duration) error {
-	return m.updateTaskStatusWithTimeoutAndOptions(taskID, status, defaultTimeout, taskStatusOptionsForStatus(status))
+	return m.updateTaskStatusWithTimeoutOptions(taskID, status, defaultTimeout, daemonclient.TaskStatusOptions{})
 }
 
-func (m Model) updateTaskStatusWithTimeoutAndOptions(taskID string, status domain.Status, defaultTimeout time.Duration, opts daemonclient.TaskStatusOptions) error {
+func (m Model) updateTaskStatusWithTimeoutOptions(taskID string, status domain.Status, defaultTimeout time.Duration, opts daemonclient.TaskStatusOptions) error {
 	if m.daemonClient == nil {
 		return fmt.Errorf("daemon client unavailable")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), taskStatusMutationTimeout(status, defaultTimeout))
 	defer cancel()
 	if status == domain.StatusDone {
-		return m.closeTaskWithIntegrationAndCleanup(ctx, taskID)
+		closeOpts := taskStatusOptionsForStatus(status)
+		closeOpts.ForceWorktree = opts.ForceWorktree
+		closeOpts.IgnoreAhead = opts.IgnoreAhead
+		closeOpts.CloseCleanChildren = opts.CloseCleanChildren
+		return m.closeTaskWithIntegrationAndCleanup(ctx, taskID, closeOpts)
 	}
 	return m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, status, opts)
 }
@@ -4567,11 +4586,14 @@ func exactTaskStatusForKey(key string) (domain.Status, bool) {
 	}
 }
 
-func (m Model) closeTaskWithIntegrationAndCleanup(ctx context.Context, taskID string) error {
+func (m Model) closeTaskWithIntegrationAndCleanup(ctx context.Context, taskID string, opts daemonclient.TaskStatusOptions) error {
 	if m.daemonClient == nil {
 		return fmt.Errorf("daemon client unavailable")
 	}
-	return m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, domain.StatusDone, taskStatusOptionsForStatus(domain.StatusDone))
+	if !opts.IntegrateBeforeClose {
+		opts.IntegrateBeforeClose = true
+	}
+	return m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, domain.StatusDone, opts)
 }
 
 func statusDisplayName(status domain.Status) string {
@@ -4620,7 +4642,15 @@ func (m Model) confirmCloseCleanupCmd(pending pendingCloseCleanupConfirmation) t
 	if pendingCloseCleanupCount(pending) > 1 {
 		title = "Confirm bulk integrate and close?"
 	}
-	return m.openOverlay(overlay.NewConfirmDialogExplicitYN(title, formatCloseCleanupConfirmPrompt(pending)))
+	return m.openOverlay(overlay.NewConfirmDialogExplicitYNWithExtraKeys(title, formatCloseCleanupConfirmPrompt(pending), map[string]overlay.SelectionMsg{
+		"c": {Key: "close_clean_children", Value: overlay.ConfirmResult{Confirmed: true}},
+		"C": {Key: "close_clean_children", Value: overlay.ConfirmResult{Confirmed: true}},
+	}))
+}
+
+func (m Model) prepareCloseCleanupConfirmation(pending pendingCloseCleanupConfirmation) pendingCloseCleanupConfirmation {
+	pending.targetOnlyBlockedByChildren = closeCleanupTargetsHaveBlockingDescendants(m.tasks, pendingCloseCleanupTargetIDs(pending))
+	return pending
 }
 
 func (m Model) confirmCloseCleanupPreflightCmd(pending pendingCloseCleanupConfirmation) tea.Cmd {
@@ -4646,6 +4676,7 @@ func (m Model) confirmCloseCleanupPreflightCmd(pending pendingCloseCleanupConfir
 			return msg
 		}
 		msg.summaries = closeCleanupSummariesFromTasks(snapshot.Tasks, taskIDs)
+		msg.refreshedTasks = append([]domain.Task(nil), snapshot.Tasks...)
 		return msg
 	}
 }
@@ -4727,9 +4758,17 @@ func formatCloseCleanupConfirmPrompt(pending pendingCloseCleanupConfirmation) st
 		"",
 		"This may merge into the closest ancestor worktree branch, stop active sessions, and remove issue worktrees before closing.",
 		"Dirty or conflicted worktrees must be cleaned before close; daemon guards still block unmerged or unresolved child work.",
+		"Press C to also close clean child issues with no projected session, dirty state, or diff.",
 		"",
-		"Proceed?",
 	)
+	if pending.targetOnlyBlockedByChildren {
+		lines = append(lines,
+			"Target-only close is unavailable while child issues remain unresolved.",
+			"Proceed? C closes the target plus clean children; N cancels.",
+		)
+	} else {
+		lines = append(lines, "Proceed? Y closes only the target; C closes the target plus clean children.")
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -4776,6 +4815,88 @@ func pendingCloseCleanupTargetIDs(pending pendingCloseCleanupConfirmation) []str
 	default:
 		return nil
 	}
+}
+
+func closeCleanupTargetsHaveBlockingDescendants(tasks []domain.Task, targetIDs []string) bool {
+	if len(tasks) == 0 || len(targetIDs) == 0 {
+		return false
+	}
+
+	targetSet := make(map[string]struct{}, len(targetIDs))
+	for _, targetID := range targetIDs {
+		key := taskIDKey(targetID)
+		if key != "" {
+			targetSet[key] = struct{}{}
+		}
+	}
+	if len(targetSet) == 0 {
+		return false
+	}
+
+	byID := make(map[string]domain.Task, len(tasks))
+	childrenByParent := make(map[string][]string, len(tasks))
+	for _, task := range tasks {
+		taskID := taskIDKey(task.ID.String())
+		if taskID == "" {
+			continue
+		}
+		byID[taskID] = task
+		if task.ParentID != nil {
+			parentID := taskIDKey(task.ParentID.String())
+			if parentID != "" {
+				childrenByParent[parentID] = append(childrenByParent[parentID], taskID)
+			}
+		}
+		for _, dep := range task.Dependencies {
+			depType := string(dep.Type)
+			if depType != string(domain.DependencyParentChild) && depType != "parent_child" {
+				continue
+			}
+			parentID := taskIDKey(dep.ID.String())
+			if parentID != "" {
+				childrenByParent[parentID] = append(childrenByParent[parentID], taskID)
+			}
+		}
+	}
+
+	queue := make([]string, 0, len(targetSet))
+	for targetID := range targetSet {
+		queue = append(queue, targetID)
+	}
+	seen := make(map[string]struct{}, len(queue))
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if _, ok := seen[current]; ok {
+			continue
+		}
+		seen[current] = struct{}{}
+		for _, childID := range childrenByParent[current] {
+			if _, selected := targetSet[childID]; !selected {
+				if task, ok := byID[childID]; ok && closeCleanupDescendantBlocksTargetOnly(task) {
+					return true
+				}
+			}
+			queue = append(queue, childID)
+		}
+	}
+	return false
+}
+
+func closeCleanupDescendantBlocksTargetOnly(task domain.Task) bool {
+	if task.Status != domain.StatusDone {
+		return true
+	}
+	if task.HasTmuxSession || task.Session != nil {
+		return true
+	}
+	if task.HasWorktree {
+		return true
+	}
+	if task.Session != nil && strings.TrimSpace(task.Session.Worktree) != "" {
+		return true
+	}
+	return false
 }
 
 func formatCloseCleanupGitStateLines(summaries []closeCleanupTaskSummary, targetCount int, bulk bool) []string {

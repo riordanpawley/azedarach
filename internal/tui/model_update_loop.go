@@ -1524,6 +1524,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		pending.summaries = msg.summaries
+		pending = m.prepareCloseCleanupConfirmation(pending)
+		if len(msg.refreshedTasks) > 0 {
+			pending.targetOnlyBlockedByChildren = closeCleanupTargetsHaveBlockingDescendants(msg.refreshedTasks, pendingCloseCleanupTargetIDs(pending))
+		}
 		if reason := pendingCloseCleanupBlockedReason(pending); reason != "" {
 			m.addToast(Toast{
 				Level:   ToastWarning,
@@ -1532,15 +1536,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
+		if pending.targetOnlyBlockedByChildren && !pending.closeCleanChildren {
+			m.pendingClose = &pending
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "Target-only close is blocked by unresolved children; press C or cancel",
+				Expires: time.Now().Add(4 * time.Second),
+			})
+			return m, m.confirmCloseCleanupCmd(pending)
+		}
 		if len(pending.taskIDs) > 0 {
 			m.beginMutationFeedback(fmt.Sprintf("Bulk close queued for %d task(s)", len(pending.taskIDs)))
+			opts := daemonclient.TaskStatusOptions{CloseCleanChildren: pending.closeCleanChildren}
 			if pending.bulkMode == "move" {
-				return m, m.bulkMoveStatusCmd(pending.taskIDs, pending.delta)
+				return m, m.bulkMoveStatusCmdWithOptions(pending.taskIDs, pending.delta, opts)
 			}
-			return m, m.bulkSetStatusCmd(pending.taskIDs, pending.targetStatus)
+			return m, m.bulkSetStatusCmdWithOptions(pending.taskIDs, pending.targetStatus, opts)
 		}
 		m.beginTaskStatusMoveFeedback(pending.taskID, pending.previousStatus, pending.targetStatus)
-		return m, m.moveTaskStatusCmd(pending.taskID, pending.previousStatus, pending.targetStatus)
+		return m, m.moveTaskStatusCmdWithOptions(pending.taskID, pending.previousStatus, pending.targetStatus, daemonclient.TaskStatusOptions{CloseCleanChildren: pending.closeCleanChildren})
 
 	case bulkStatusResultMsg:
 		m.loading = false

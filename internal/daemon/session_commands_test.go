@@ -2056,13 +2056,37 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 	if !tmuxRunner.windows[sessionID][sessionConflictWindowName] {
 		t.Fatalf("expected conflict window to be created in session %q", sessionID)
 	}
+	targetPane := sessionID + ":" + sessionConflictWindowName
 	if tmuxRunner.sendKeysCalls != 1 {
-		t.Fatalf("send-keys calls = %d, want 1", tmuxRunner.sendKeysCalls)
+		t.Fatalf("send-keys calls = %d, want explicit Enter submit only", tmuxRunner.sendKeysCalls)
 	}
-	if gotTarget := tmuxRunner.sendKeysTargets[0]; gotTarget != sessionID+":"+sessionConflictWindowName {
-		t.Fatalf("send-keys target = %q, want %q", gotTarget, sessionID+":"+sessionConflictWindowName)
+	if gotTarget := tmuxRunner.sendKeysTargets[0]; gotTarget != targetPane {
+		t.Fatalf("send-keys target = %q, want %q", gotTarget, targetPane)
 	}
-	launchCommand := tmuxRunner.sendKeysPayloads[0]
+	if gotKey := tmuxRunner.sendKeysPayloads[0]; gotKey != "Enter" {
+		t.Fatalf("send-keys payload = %q, want Enter submit", gotKey)
+	}
+	var launchCommand string
+	for _, cmd := range tmuxRunner.commands {
+		if len(cmd) == 4 && cmd[0] == "set-buffer" {
+			launchCommand = cmd[3]
+			break
+		}
+	}
+	if launchCommand == "" {
+		t.Fatalf("missing set-buffer launch command in tmux commands: %+v", tmuxRunner.commands)
+	}
+	wantPaste := []string{"paste-buffer", "-dp", "-b", "azedarach-message-" + sessionID + "_" + sessionConflictWindowName, "-t", targetPane}
+	foundPaste := false
+	for _, cmd := range tmuxRunner.commands {
+		if reflect.DeepEqual(cmd, wantPaste) {
+			foundPaste = true
+			break
+		}
+	}
+	if !foundPaste {
+		t.Fatalf("missing paste-buffer command %v in tmux commands: %+v", wantPaste, tmuxRunner.commands)
+	}
 	if !strings.Contains(launchCommand, "Resolve merge conflicts for issue "+issueID) ||
 		!strings.Contains(launchCommand, `AZEDARACH_ISSUE_ID="`+issueID+`" codex`) ||
 		!strings.Contains(launchCommand, "README.md") ||

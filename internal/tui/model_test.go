@@ -5703,6 +5703,83 @@ func TestCloseCleanupBulkMovePromptDescribesClosingSubset(t *testing.T) {
 	}
 }
 
+func TestCloseCleanupPromptSuppressesTargetOnlyWhenChildrenBlock(t *testing.T) {
+	prompt := formatCloseCleanupConfirmPrompt(pendingCloseCleanupConfirmation{
+		taskID:                      "az-parent",
+		targetStatus:                domain.StatusDone,
+		targetOnlyBlockedByChildren: true,
+	})
+
+	checks := []string{
+		"Target-only close is unavailable while child issues remain unresolved.",
+		"Proceed? C closes the target plus clean children; N cancels.",
+	}
+	for _, check := range checks {
+		if !strings.Contains(prompt, check) {
+			t.Fatalf("prompt = %q, want %q", prompt, check)
+		}
+	}
+	if strings.Contains(prompt, "Y closes only the target") {
+		t.Fatalf("prompt = %q, should not offer target-only close", prompt)
+	}
+}
+
+func TestCloseCleanupTargetsHaveBlockingDescendants(t *testing.T) {
+	parentID := naming.IssueID("az-parent")
+	tests := []struct {
+		name    string
+		tasks   []domain.Task
+		targets []string
+		want    bool
+	}{
+		{
+			name: "unresolved child blocks target only",
+			tasks: []domain.Task{
+				{ID: parentID, Status: domain.StatusInReview},
+				{ID: "az-child", ParentID: &parentID, Status: domain.StatusOpen},
+			},
+			targets: []string{"az-parent"},
+			want:    true,
+		},
+		{
+			name: "selected child does not block bulk target only",
+			tasks: []domain.Task{
+				{ID: parentID, Status: domain.StatusInReview},
+				{ID: "az-child", ParentID: &parentID, Status: domain.StatusOpen},
+			},
+			targets: []string{"az-parent", "az-child"},
+			want:    false,
+		},
+		{
+			name: "done child without runtime does not block",
+			tasks: []domain.Task{
+				{ID: parentID, Status: domain.StatusInReview},
+				{ID: "az-child", ParentID: &parentID, Status: domain.StatusDone},
+			},
+			targets: []string{"az-parent"},
+			want:    false,
+		},
+		{
+			name: "dependency child blocks",
+			tasks: []domain.Task{
+				{ID: parentID, Status: domain.StatusInReview},
+				{ID: "az-child", Status: domain.StatusInProgress, Dependencies: []domain.Dependency{{ID: parentID, Type: domain.DependencyParentChild}}},
+			},
+			targets: []string{"az-parent"},
+			want:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := closeCleanupTargetsHaveBlockingDescendants(tt.tasks, tt.targets)
+			if got != tt.want {
+				t.Fatalf("closeCleanupTargetsHaveBlockingDescendants() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPendingCloseCleanupBlockedReasonBlocksDirtyAndConflictedTargets(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -5863,6 +5940,44 @@ func TestClosePreflightRefreshCleanTargetContinuesClose(t *testing.T) {
 	updated := updatedAny.(Model)
 	if pending, ok := updated.pendingStatuses[taskIDKey("az-4")]; !ok || pending.targetStatus != domain.StatusDone {
 		t.Fatalf("pending status = %+v ok=%t, want close queued", pending, ok)
+	}
+}
+
+func TestClosePreflightRefreshWithChildBlockerReopensConfirmation(t *testing.T) {
+	m := newTestModel()
+	parentID := naming.IssueID("az-4")
+	pending := pendingCloseCleanupConfirmation{
+		taskID:         "az-4",
+		previousStatus: domain.StatusInReview,
+		targetStatus:   domain.StatusDone,
+		summaries: []closeCleanupTaskSummary{{
+			taskID: "az-4",
+			dirty:  true,
+		}},
+	}
+
+	updatedAny, cmd := m.Update(closeCleanupConfirmPreflightMsg{
+		pending: pending,
+		summaries: []closeCleanupTaskSummary{{
+			taskID: "az-4",
+		}},
+		refreshedTasks: []domain.Task{
+			{ID: parentID, Status: domain.StatusInReview},
+			{ID: "az-child", ParentID: &parentID, Status: domain.StatusOpen},
+		},
+	})
+	if cmd == nil {
+		t.Fatal("expected refreshed child blocker to reopen close confirmation")
+	}
+	updated := updatedAny.(Model)
+	if updated.pendingClose == nil || !updated.pendingClose.targetOnlyBlockedByChildren {
+		t.Fatalf("pending close = %+v, want target-only blocked confirmation", updated.pendingClose)
+	}
+	if _, ok := updated.pendingStatuses[taskIDKey("az-4")]; ok {
+		t.Fatal("target-only close should not be queued after refreshed child blocker")
+	}
+	if len(updated.toasts) == 0 || !strings.Contains(updated.toasts[len(updated.toasts)-1].Message, "Target-only close is blocked") {
+		t.Fatalf("toasts = %+v, want target-only blocked warning", updated.toasts)
 	}
 }
 

@@ -190,10 +190,11 @@ func (e issueCreatePartialError) Unwrap() error {
 }
 
 type IssueCloseOptions struct {
-	Project       string
-	IssueID       string
-	JSON          bool
-	ForceWorktree bool
+	Project            string
+	IssueID            string
+	JSON               bool
+	ForceWorktree      bool
+	CloseCleanChildren bool
 }
 
 type IssueUpdateOptions struct {
@@ -2495,11 +2496,12 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 	fs.StringVar(&issueIDFlag, "i", "", "issue id (short alternative to --id)")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue close result as JSON")
 	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal after integration")
+	fs.BoolVar(&opts.CloseCleanChildren, "close-clean-children", false, "also close clean unresolved child issues after confirmation")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueCloseOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [<issue-id>]")
+		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueCloseOptions{}, fmt.Errorf("--impl is not supported for issue close; issue implementations are already assigned")
@@ -2511,7 +2513,7 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [<issue-id>]")
+		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -4057,7 +4059,7 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 		return err
 	}
 
-	result, err := deps.DaemonClient.CloseTask(ctx, opts.IssueID, cleanupCloseTaskStatusOptions(opts.ForceWorktree))
+	result, err := deps.DaemonClient.CloseTask(ctx, opts.IssueID, cleanupCloseTaskStatusOptions(opts.ForceWorktree, opts.CloseCleanChildren))
 	if err != nil {
 		return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
 	}
@@ -4071,6 +4073,7 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 			"integrated":                result.Integrated,
 			"cleanup_performed":         true,
 			"worktree_forced":           opts.ForceWorktree,
+			"auto_closed_children":      result.AutoClosedChildren,
 			"worktree_cleanup_deferred": result.WorktreeCleanupDeferred,
 			"phases":                    taskClosePhaseJSON(result.Phases),
 		})
@@ -4085,6 +4088,9 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 	fmt.Println("- Cleanup performed")
 	if opts.ForceWorktree {
 		fmt.Println("- Worktree removal forced")
+	}
+	if len(result.AutoClosedChildren) > 0 {
+		fmt.Printf("- Closed clean child issues: %s\n", strings.Join(result.AutoClosedChildren, ", "))
 	}
 	if result.WorktreeCleanupDeferred {
 		fmt.Println("- Worktree cleanup deferred")
@@ -4264,10 +4270,15 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 	return nil
 }
 
-func cleanupCloseTaskStatusOptions(forceWorktree bool) daemonclient.TaskStatusOptions {
+func cleanupCloseTaskStatusOptions(forceWorktree bool, closeCleanChildren ...bool) daemonclient.TaskStatusOptions {
+	autoCloseChildren := false
+	if len(closeCleanChildren) > 0 {
+		autoCloseChildren = closeCleanChildren[0]
+	}
 	return daemonclient.TaskStatusOptions{
 		ForceWorktree:        forceWorktree,
 		IntegrateBeforeClose: true,
+		CloseCleanChildren:   autoCloseChildren,
 	}
 }
 

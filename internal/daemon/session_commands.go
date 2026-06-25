@@ -1526,7 +1526,7 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 		prompt = buildConflictResolutionPrompt(issueIDString, conflictFiles)
 	}
 	launchCommand := d.buildSessionLaunchCommand(projectID, issueIDString, canonicalSessionID, body.Yolo, body.ImagePaths, prompt)
-	if err := d.tmux.SendKeys(ctx, sessionName+":"+sessionConflictWindowName, launchCommand); err != nil {
+	if err := d.tmux.PasteTextAndSubmit(ctx, sessionName+":"+sessionConflictWindowName, launchCommand); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 

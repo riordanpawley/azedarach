@@ -75,6 +75,7 @@ type TaskStatusOptions struct {
 	ForceWorktree        bool
 	IgnoreAhead          bool
 	IntegrateBeforeClose bool
+	CloseCleanChildren   bool
 	CascadeChildren      bool
 }
 
@@ -90,6 +91,7 @@ type taskCloseRequest struct {
 	ForceWorktree        bool           `json:"force_worktree,omitempty"`
 	IgnoreAhead          bool           `json:"ignore_ahead,omitempty"`
 	IntegrateBeforeClose bool           `json:"integrate_before_close,omitempty"`
+	CloseCleanChildren   bool           `json:"close_clean_children,omitempty"`
 }
 
 type taskDeleteRequest struct {
@@ -114,6 +116,7 @@ type TaskCloseResult struct {
 	WorktreeForced             bool                   `json:"worktree_forced,omitempty"`
 	Revision                   uint64                 `json:"revision,omitempty"`
 	Phases                     []TaskClosePhaseTiming `json:"phases,omitempty"`
+	AutoClosedChildren     []string               `json:"auto_closed_children,omitempty"`
 }
 
 type TaskClosePhaseTiming struct {
@@ -684,6 +687,7 @@ func (c *Client) CloseTask(ctx context.Context, taskID string, opts TaskStatusOp
 		ForceWorktree:        opts.ForceWorktree,
 		IgnoreAhead:          opts.IgnoreAhead,
 		IntegrateBeforeClose: opts.IntegrateBeforeClose,
+		CloseCleanChildren:   opts.CloseCleanChildren,
 	}, &out); err != nil {
 		return TaskCloseResult{}, err
 	}
