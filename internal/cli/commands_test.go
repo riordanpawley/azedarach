@@ -9279,6 +9279,24 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Do not use harness-native subagent/delegation tooling for this graph unless the user explicitly overrides this or changes `orchestration.via` to `native`.") {
 		t.Fatalf("prime output missing native tooling prohibition in az mode: %q", output)
 	}
+	if !strings.Contains(output, "Parent-orchestrator checklist for new roots:") {
+		t.Fatalf("prime output missing parent orchestrator checklist: %q", output)
+	}
+	if !strings.Contains(output, "Start the parent orchestrator session first: `az session start <root>` unless the current session is already that root's orchestrator session; session start creates or reuses the parent worktree.") {
+		t.Fatalf("prime output missing parent session checklist step: %q", output)
+	}
+	if !strings.Contains(output, "From the parent worktree/session, run `az orchestrate status --root <root>` to verify the graph and runnable children.") {
+		t.Fatalf("prime output missing parent status checklist step: %q", output)
+	}
+	if !strings.Contains(output, "Launch child workers only from that orchestrator context: `az orchestrate start --root <root> ...`.") {
+		t.Fatalf("prime output missing parent start checklist step: %q", output)
+	}
+	if strings.Contains(output, "az worktree create <root>") {
+		t.Fatalf("prime parent orchestrator checklist should not mention manual worktree creation: %q", output)
+	}
+	if !strings.Contains(output, "do not rely on the original/current task session to own that new parent orchestration") {
+		t.Fatalf("prime output missing original session parent orchestration warning: %q", output)
+	}
 	if !strings.Contains(output, "Use `az orchestrate` for durable tracked task graphs that need issue dependencies, mailbox events, recoverable sessions, isolated worktrees, integration guidance, and `complete-check`.") {
 		t.Fatalf("prime output missing az/native tradeoff guidance: %q", output)
 	}
