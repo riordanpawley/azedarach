@@ -65,8 +65,6 @@ const (
 	exitCodePartialFailure      = 2
 )
 
-var sessionStartProgressTick = 15 * time.Second
-
 var primeLookPath = exec.LookPath
 
 type Dependencies struct {
@@ -302,6 +300,7 @@ type SessionCommandOptions struct {
 	Wait         bool
 	Project      string
 	PollInterval time.Duration
+	WaitTimeout  time.Duration
 }
 
 type SessionRestartAllOptions struct {
@@ -382,6 +381,7 @@ type SessionResolveConflictOptions struct {
 
 type sessionIssueTarget struct {
 	ProjectID   string
+	RepoDir     string
 	IssueID     string
 	Task        domain.Task
 	TaskContext []domain.Task
@@ -501,7 +501,7 @@ func StartCommand(deps *Dependencies, issueID string) error {
 }
 
 func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCommandOptions) error {
-	ctx, cancel := context.WithTimeout(context.Background(), sessionStartCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -518,19 +518,56 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 		return err
 	}
 
-	deps.Logger.Info("starting session", "project_id", target.ProjectID, "issue_id", target.IssueID)
-	stopProgress := startSessionProgressReporter(ctx, target.IssueID)
-	defer stopProgress()
-
-	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStart, target.ProjectID, target.IssueID, baseBranch))
+	deps.Logger.Info("submitting session start operation", "project_id", target.ProjectID, "issue_id", target.IssueID)
+	record, err := deps.DaemonClient.StartSessionOperation(ctx, daemonclient.StartSessionParams{
+		IssueID:    target.IssueID,
+		RepoDir:    target.RepoDir,
+		BaseBranch: baseBranch,
+	})
 	if err != nil {
-		return fmt.Errorf("failed to start session: %w", err)
-	}
-	if err := responseError(resp, "failed to start session"); err != nil {
-		return err
+		return fmt.Errorf("failed to submit session start: %w", err)
 	}
 
-	return printCommandOutputWithWait(ctx, deps, resp, opts)
+	if opts.Wait && !operationStateTerminal(record.State) {
+		waitTimeout := opts.WaitTimeout
+		if waitTimeout <= 0 {
+			waitTimeout = sessionStartCommandTimeout
+		}
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), waitTimeout)
+		defer waitCancel()
+		waited, waitErr := deps.DaemonClient.WaitForOperation(waitCtx, record.OperationID.String(), opts.PollInterval)
+		if waitErr != nil {
+			if errors.Is(waitErr, context.DeadlineExceeded) || errors.Is(waitErr, context.Canceled) {
+				if waited.OperationID == "" {
+					waited = record
+				}
+				return printPendingSessionStartOperation(waited, target.IssueID)
+			}
+			return fmt.Errorf("wait for operation %s: %w", record.OperationID, waitErr)
+		}
+		return printOperationOutcome(waited)
+	}
+
+	if operationStateTerminal(record.State) {
+		return printOperationOutcome(record)
+	}
+
+	return printPendingSessionStartOperation(record, target.IssueID)
+}
+
+func printPendingSessionStartOperation(record protocol.OperationRecord, issueID string) error {
+	if record.OperationID == "" || operationStateTerminal(record.State) {
+		return printOperationOutcome(record)
+	}
+
+	fmt.Printf("Session start is still %s for %s.\n", record.State, issueID)
+	fmt.Printf("Operation: %s (%s)\n", record.OperationID, record.State)
+	if progress := operationProgressSummary(record); progress != "" {
+		fmt.Printf("Progress: %s\n", progress)
+	}
+	fmt.Printf("Follow up: az operation get --id %s --wait\n", record.OperationID)
+	fmt.Printf("Follow up: az session status %s\n", issueID)
+	return nil
 }
 
 func WorktreeCreateCommand(deps *Dependencies, opts WorktreeCreateOptions) error {
@@ -590,35 +627,6 @@ func resolveSessionStartIssueTarget(ctx context.Context, deps *Dependencies, iss
 		return sessionIssueTarget{}, fmt.Errorf("issue id is required")
 	}
 	return resolveExplicitSessionIssueTarget(ctx, deps, trimmedIssueID, trimmedProject, trimmedIssueID)
-}
-
-func startSessionProgressReporter(ctx context.Context, issueID string) func() {
-	trimmedIssueID := strings.TrimSpace(issueID)
-	if trimmedIssueID == "" {
-		trimmedIssueID = "unknown"
-	}
-	startedAt := time.Now()
-	fmt.Fprintf(os.Stderr, "Starting session for %s... this can take up to %s.\n", trimmedIssueID, sessionStartCommandTimeout)
-
-	done := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(sessionStartProgressTick)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				elapsed := time.Since(startedAt).Round(time.Second)
-				fmt.Fprintf(os.Stderr, "Still starting session for %s... elapsed %s.\n", trimmedIssueID, elapsed)
-			}
-		}
-	}()
-	return func() {
-		close(done)
-	}
 }
 
 func AttachCommand(deps *Dependencies, issueID string) error {
@@ -772,7 +780,7 @@ func resolveSessionStatusTarget(deps *Dependencies, issueID string) (sessionIssu
 	if err != nil {
 		return sessionIssueTarget{}, fmt.Errorf("invalid issue id %q: %w", issueID, err)
 	}
-	return sessionIssueTarget{ProjectID: deps.ProjectID, IssueID: parsedIssueID.String()}, nil
+	return sessionIssueTarget{ProjectID: deps.ProjectID, RepoDir: deps.RepoDir, IssueID: parsedIssueID.String()}, nil
 }
 
 func resolveExplicitSessionStatusTarget(deps *Dependencies, raw, projectPart, issuePart string) (sessionIssueTarget, error) {
@@ -784,7 +792,7 @@ func resolveExplicitSessionStatusTarget(deps *Dependencies, raw, projectPart, is
 	if !ok {
 		return sessionIssueTarget{}, fmt.Errorf("unknown project in project-prefixed issue id %q: %s", raw, projectPart)
 	}
-	return sessionIssueTarget{ProjectID: project.Route, IssueID: issueID.String()}, nil
+	return sessionIssueTarget{ProjectID: project.Route, RepoDir: project.Path, IssueID: issueID.String()}, nil
 }
 
 func resolveSessionIssueTarget(ctx context.Context, deps *Dependencies, issueID string) (sessionIssueTarget, error) {
@@ -802,7 +810,7 @@ func resolveSessionIssueTarget(ctx context.Context, deps *Dependencies, issueID 
 	if task, taskContext, ok, err := lookupSessionTaskInProject(ctx, deps, deps.ProjectID, trimmed); err != nil {
 		return sessionIssueTarget{}, err
 	} else if ok {
-		return sessionIssueTarget{ProjectID: deps.ProjectID, IssueID: trimmed, Task: task, TaskContext: taskContext}, nil
+		return sessionIssueTarget{ProjectID: deps.ProjectID, RepoDir: deps.RepoDir, IssueID: trimmed, Task: task, TaskContext: taskContext}, nil
 	}
 
 	matches, err := resolveCanonicalSessionIssueTargets(ctx, deps, trimmed)
@@ -857,7 +865,7 @@ func resolveExplicitSessionIssueTarget(ctx context.Context, deps *Dependencies, 
 	if !found {
 		return sessionIssueTarget{}, fmt.Errorf("issue not found in project %s: %s", project.Route, issueID.String())
 	}
-	return sessionIssueTarget{ProjectID: project.Route, IssueID: issueID.String(), Task: task, TaskContext: taskContext}, nil
+	return sessionIssueTarget{ProjectID: project.Route, RepoDir: project.Path, IssueID: issueID.String(), Task: task, TaskContext: taskContext}, nil
 }
 
 func resolveCanonicalSessionIssueTargets(ctx context.Context, deps *Dependencies, raw string) ([]sessionIssueTarget, error) {
@@ -877,7 +885,7 @@ func resolveCanonicalSessionIssueTargets(ctx context.Context, deps *Dependencies
 				continue
 			}
 			key := candidate.Route + "\x00" + strings.ToLower(parsedIssueID)
-			matchesByKey[key] = sessionIssueTarget{ProjectID: candidate.Route, IssueID: parsedIssueID, Task: task, TaskContext: taskContext}
+			matchesByKey[key] = sessionIssueTarget{ProjectID: candidate.Route, RepoDir: candidate.Path, IssueID: parsedIssueID, Task: task, TaskContext: taskContext}
 		}
 	}
 	matches := make([]sessionIssueTarget, 0, len(matchesByKey))

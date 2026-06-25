@@ -847,6 +847,12 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 	if !containsString(submitted.ResourceKeys, "issue:"+protocol.DefaultProjectID+":"+child.String()) {
 		t.Fatalf("submitted resource keys = %+v, want issue resource key", submitted.ResourceKeys)
 	}
+	if !containsString(submitted.ResourceKeys, "worktree:"+child.String()) {
+		t.Fatalf("submitted resource keys = %+v, want worktree resource key", submitted.ResourceKeys)
+	}
+	if !containsString(submitted.ResourceKeys, "session:"+naming.CanonicalSessionID("/repo", child.String())) {
+		t.Fatalf("submitted resource keys = %+v, want session resource key", submitted.ResourceKeys)
+	}
 	if strings.Join(commands, ",") == "" || !containsString(commands, protocol.CommandOperationSubmit) || containsString(commands, protocol.CommandOperationGet) {
 		t.Fatalf("commands = %+v, want operation submit without wait", commands)
 	}
@@ -1204,7 +1210,7 @@ func TestOrchestrateStartPreservesSubmitFailure(t *testing.T) {
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, output)
 	}
-	if len(result.Pending) != 0 || result.Failed[child.String()] != "tmux launch failed" {
+	if len(result.Pending) != 0 || !strings.Contains(result.Failed[child.String()], "tmux launch failed") {
 		t.Fatalf("pending=%+v failed=%+v, want submit failure only", result.Pending, result.Failed)
 	}
 }

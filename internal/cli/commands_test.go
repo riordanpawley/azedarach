@@ -74,6 +74,57 @@ func assertMetadataOnlyTaskGetManyRequest(t *testing.T, req protocol.RequestEnve
 	}
 }
 
+func assertSessionStartOperationSubmitRequest(t *testing.T, req protocol.RequestEnvelope, projectID, repoDir, issueID, baseBranch string) protocol.OperationSubmitRequestBody {
+	t.Helper()
+	if req.Command != protocol.CommandOperationSubmit {
+		t.Fatalf("command = %q, want %q", req.Command, protocol.CommandOperationSubmit)
+	}
+	var body protocol.OperationSubmitRequestBody
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		t.Fatalf("unmarshal operation submit body: %v", err)
+	}
+	if body.ProjectID.String() != projectID || body.Kind != commandSessionStart || body.IssueID.String() != issueID {
+		t.Fatalf("operation submit body = %+v, want project=%s kind=%s issue=%s", body, projectID, commandSessionStart, issueID)
+	}
+	var payload sessionRequestBody
+	if err := json.Unmarshal(body.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal session start payload: %v", err)
+	}
+	if payload.ProjectID != projectID || payload.SessionID != issueID || payload.BaseBranch != baseBranch {
+		t.Fatalf("session start payload = %+v, want project=%s session=%s base=%s", payload, projectID, issueID, baseBranch)
+	}
+	wantKeys := []string{
+		"issue:" + projectID + ":" + issueID,
+		"worktree:" + issueID,
+	}
+	if strings.TrimSpace(repoDir) != "" {
+		wantKeys = append(wantKeys, "session:"+naming.CanonicalSessionID(repoDir, issueID))
+	}
+	for _, key := range wantKeys {
+		if !containsString(body.ResourceKeys, key) {
+			t.Fatalf("resource keys = %+v, want %s", body.ResourceKeys, key)
+		}
+	}
+	if body.DedupeKey != commandSessionStart+":"+issueID {
+		t.Fatalf("dedupe key = %q, want %q", body.DedupeKey, commandSessionStart+":"+issueID)
+	}
+	return body
+}
+
+func sessionStartOperationSubmitResponse(req protocol.RequestEnvelope, projectID, issueID string, state protocol.OperationState) protocol.ResponseEnvelope {
+	return responseWithJSON(req, protocol.OperationSubmitResponseBody{
+		Created: true,
+		Operation: protocol.OperationRecord{
+			OperationID: "op-start",
+			ProjectID:   naming.ProjectID(projectID),
+			Kind:        commandSessionStart,
+			IssueID:     naming.IssueID(issueID),
+			State:       state,
+			EnqueuedAt:  time.Date(2026, time.June, 25, 5, 46, 21, 0, time.UTC),
+		},
+	})
+}
+
 func TestNewDependenciesAtUsesBaseProjectAndGlobalRuntimeForLinkedWorktree(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
@@ -371,7 +422,7 @@ func (f *fakeDaemonTransport) Subscribe(context.Context, string, uint64) (<-chan
 	return nil, errors.New("not implemented")
 }
 
-func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
+func TestStartCommandSubmitsDaemonOperation(t *testing.T) {
 	var gotReq protocol.RequestEnvelope
 	commands := []string{}
 	taskListBody, err := marshalTaskListBody([]domain.Task{
@@ -403,9 +454,9 @@ func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 						TargetID: "base",
 						Branch:   "main",
 					}), nil
-				case commandSessionStart:
+				case protocol.CommandOperationSubmit:
 					gotReq = req
-					return responseWithOutput(req, "Starting session for: issue-1 - Example\nCreating worktree from branch: main\nWorktree created: /tmp/repo-issue-1\nCreating tmux session: issue-1\n\n✓ Session started successfully\n  To attach: az attach issue-1\n  Or run:    tmux attach-session -t issue-1\n"), nil
+					return sessionStartOperationSubmitResponse(req, "proj", "issue-1", protocol.OperationStateQueued), nil
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
 					return protocol.ResponseEnvelope{}, nil
@@ -414,26 +465,31 @@ func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
+		RepoDir:   "/repo",
 	}
 
 	output := captureStdout(t, func() error {
 		return StartCommand(deps, "issue-1")
 	})
 
-	if gotReq.Command != commandSessionStart {
-		t.Fatalf("command = %q, want %q", gotReq.Command, commandSessionStart)
+	if gotReq.Command != protocol.CommandOperationSubmit {
+		t.Fatalf("command = %q, want %q", gotReq.Command, protocol.CommandOperationSubmit)
 	}
-	if len(commands) != 3 || commands[0] != daemonclient.CommandTaskGetMany || commands[1] != daemonclient.CommandTaskMergeBaseTarget || commands[2] != commandSessionStart {
+	if !reflect.DeepEqual(commands, []string{daemonclient.CommandTaskGetMany, daemonclient.CommandTaskMergeBaseTarget, protocol.CommandOperationSubmit}) {
 		t.Fatalf("commands = %v", commands)
 	}
-	var body sessionRequestBody
-	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
-		t.Fatalf("unmarshal body: %v", err)
+	assertSessionStartOperationSubmitRequest(t, gotReq, "proj", "/repo", "issue-1", "main")
+	for _, want := range []string{
+		"Session start is still queued for issue-1.",
+		"Operation: op-start (queued)",
+		"Follow up: az operation get --id op-start --wait",
+		"Follow up: az session status issue-1",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
 	}
-	if body.ProjectID != "proj" || body.SessionID != "issue-1" || body.BaseBranch != "main" {
-		t.Fatalf("body = %+v", body)
-	}
-	if output != "Starting session for: issue-1 - Example\nCreating worktree from branch: main\nWorktree created: /tmp/repo-issue-1\nCreating tmux session: issue-1\n\n✓ Session started successfully\n  To attach: az attach issue-1\n  Or run:    tmux attach-session -t issue-1\n" {
+	if strings.Contains(output, "context deadline exceeded") {
 		t.Fatalf("output = %q", output)
 	}
 }
@@ -473,9 +529,9 @@ func TestStartCommandValidatesIssueFromMetadataOnlyLocalSnapshot(t *testing.T) {
 						TargetID: "base",
 						Branch:   "main",
 					}), nil
-				case commandSessionStart:
+				case protocol.CommandOperationSubmit:
 					gotReq = req
-					return responseWithOutput(req, "started\n"), nil
+					return sessionStartOperationSubmitResponse(req, "proj", "issue-1", protocol.OperationStateQueued), nil
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
 					return protocol.ResponseEnvelope{}, nil
@@ -492,10 +548,10 @@ func TestStartCommandValidatesIssueFromMetadataOnlyLocalSnapshot(t *testing.T) {
 	if err := StartCommand(deps, "issue-1"); err != nil {
 		t.Fatalf("StartCommand error: %v", err)
 	}
-	if gotReq.Command != commandSessionStart {
-		t.Fatalf("command = %q, want %q", gotReq.Command, commandSessionStart)
+	if gotReq.Command != protocol.CommandOperationSubmit {
+		t.Fatalf("command = %q, want %q", gotReq.Command, protocol.CommandOperationSubmit)
 	}
-	if !reflect.DeepEqual(commands, []string{daemonclient.CommandTaskGetMany, daemonclient.CommandTaskMergeBaseTarget, commandSessionStart}) {
+	if !reflect.DeepEqual(commands, []string{daemonclient.CommandTaskGetMany, daemonclient.CommandTaskMergeBaseTarget, protocol.CommandOperationSubmit}) {
 		t.Fatalf("commands = %v", commands)
 	}
 }
@@ -564,6 +620,7 @@ func TestWorktreeCreateCommandCreatesWorktreeWithoutStartingSession(t *testing.T
 		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
+		RepoDir:   "/repo",
 	}
 
 	output := captureStdout(t, func() error {
@@ -588,7 +645,7 @@ func TestWorktreeCreateCommandCreatesWorktreeWithoutStartingSession(t *testing.T
 	}
 }
 
-func TestStartCommandUsesExtendedTimeout(t *testing.T) {
+func TestStartCommandSubmitsOperationWithDaemonTimeout(t *testing.T) {
 	taskListBody, err := marshalTaskListBody([]domain.Task{
 		{ID: "issue-1", Title: "Example", Status: domain.StatusOpen},
 	})
@@ -596,7 +653,7 @@ func TestStartCommandUsesExtendedTimeout(t *testing.T) {
 		t.Fatalf("marshal task list: %v", err)
 	}
 
-	var startDeadline time.Time
+	var submitDeadline time.Time
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
@@ -619,13 +676,13 @@ func TestStartCommandUsesExtendedTimeout(t *testing.T) {
 						TargetID: "base",
 						Branch:   "main",
 					}), nil
-				case commandSessionStart:
+				case protocol.CommandOperationSubmit:
 					var ok bool
-					startDeadline, ok = ctx.Deadline()
+					submitDeadline, ok = ctx.Deadline()
 					if !ok {
-						t.Fatal("session.start context missing deadline")
+						t.Fatal("operation submit context missing deadline")
 					}
-					return responseWithOutput(req, "started\n"), nil
+					return sessionStartOperationSubmitResponse(req, "proj", "issue-1", protocol.OperationStateQueued), nil
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
 					return protocol.ResponseEnvelope{}, nil
@@ -634,22 +691,23 @@ func TestStartCommandUsesExtendedTimeout(t *testing.T) {
 		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
+		RepoDir:   "/repo",
 	}
 
 	if err := StartCommand(deps, "issue-1"); err != nil {
 		t.Fatalf("StartCommand error: %v", err)
 	}
 
-	remaining := time.Until(startDeadline)
-	if remaining < 4*time.Minute {
-		t.Fatalf("session.start deadline too short: remaining=%s", remaining)
+	remaining := time.Until(submitDeadline)
+	if remaining < daemonCommandTimeout-2*time.Second {
+		t.Fatalf("operation submit deadline too short: remaining=%s", remaining)
 	}
-	if remaining > sessionStartCommandTimeout+2*time.Second {
-		t.Fatalf("session.start deadline too long: remaining=%s", remaining)
+	if remaining > daemonCommandTimeout+2*time.Second {
+		t.Fatalf("operation submit deadline too long: remaining=%s", remaining)
 	}
 }
 
-func TestStartCommandPrintsProgressStatus(t *testing.T) {
+func TestStartCommandPrintsPendingOperationStatus(t *testing.T) {
 	taskListBody, err := marshalTaskListBody([]domain.Task{
 		{ID: "issue-1", Title: "Example", Status: domain.StatusOpen},
 	})
@@ -679,8 +737,8 @@ func TestStartCommandPrintsProgressStatus(t *testing.T) {
 						TargetID: "base",
 						Branch:   "main",
 					}), nil
-				case commandSessionStart:
-					return responseWithOutput(req, "started\n"), nil
+				case protocol.CommandOperationSubmit:
+					return sessionStartOperationSubmitResponse(req, "proj", "issue-1", protocol.OperationStateRunning), nil
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
 					return protocol.ResponseEnvelope{}, nil
@@ -689,13 +747,14 @@ func TestStartCommandPrintsProgressStatus(t *testing.T) {
 		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
+		RepoDir:   "/repo",
 	}
 
-	stderr := captureStderr(t, func() error {
+	output := captureStdout(t, func() error {
 		return StartCommand(deps, "issue-1")
 	})
-	if !strings.Contains(stderr, "Starting session for issue-1...") {
-		t.Fatalf("stderr = %q, want start progress message", stderr)
+	if !strings.Contains(output, "Session start is still running for issue-1.") || !strings.Contains(output, "Operation: op-start (running)") {
+		t.Fatalf("output = %q, want pending operation status", output)
 	}
 }
 
@@ -737,9 +796,9 @@ func TestStartCommandUsesParentWorktreeBranchForChildIssue(t *testing.T) {
 						Reason:         "selected closest ancestor worktree branch",
 						AncestorChain:  []string{"az-parent"},
 					}), nil
-				case commandSessionStart:
+				case protocol.CommandOperationSubmit:
 					gotReq = req
-					return responseWithOutput(req, "ok\n"), nil
+					return sessionStartOperationSubmitResponse(req, "proj", "az-child", protocol.OperationStateQueued), nil
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
 					return protocol.ResponseEnvelope{}, nil
@@ -748,21 +807,16 @@ func TestStartCommandUsesParentWorktreeBranchForChildIssue(t *testing.T) {
 		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
+		RepoDir:   "/repo",
 	}
 
 	if err := StartCommand(deps, "az-child"); err != nil {
 		t.Fatalf("StartCommand error: %v", err)
 	}
-	if len(commands) != 3 || commands[0] != daemonclient.CommandTaskGetMany || commands[1] != daemonclient.CommandTaskMergeBaseTarget || commands[2] != commandSessionStart {
+	if len(commands) != 3 || commands[0] != daemonclient.CommandTaskGetMany || commands[1] != daemonclient.CommandTaskMergeBaseTarget || commands[2] != protocol.CommandOperationSubmit {
 		t.Fatalf("commands = %v", commands)
 	}
-	var body sessionRequestBody
-	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
-		t.Fatalf("unmarshal body: %v", err)
-	}
-	if body.BaseBranch != "az/az-parent" {
-		t.Fatalf("base_branch = %q, want %q", body.BaseBranch, "az/az-parent")
-	}
+	assertSessionStartOperationSubmitRequest(t, gotReq, "proj", "/repo", "az-child", "az/az-parent")
 }
 
 func TestStartCommandUsesNearestAncestorWorktreeBranchForNestedChildIssue(t *testing.T) {
@@ -806,9 +860,9 @@ func TestStartCommandUsesNearestAncestorWorktreeBranchForNestedChildIssue(t *tes
 						Reason:         "selected closest ancestor worktree branch",
 						AncestorChain:  []string{"az-plan", "az-root"},
 					}), nil
-				case commandSessionStart:
+				case protocol.CommandOperationSubmit:
 					gotReq = req
-					return responseWithOutput(req, "ok\n"), nil
+					return sessionStartOperationSubmitResponse(req, "proj", "az-child", protocol.OperationStateQueued), nil
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
 					return protocol.ResponseEnvelope{}, nil
@@ -817,6 +871,7 @@ func TestStartCommandUsesNearestAncestorWorktreeBranchForNestedChildIssue(t *tes
 		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
+		RepoDir:   "/repo",
 	}
 
 	if err := StartCommand(deps, "az-child"); err != nil {
@@ -825,16 +880,10 @@ func TestStartCommandUsesNearestAncestorWorktreeBranchForNestedChildIssue(t *tes
 	if len(commands) != 3 ||
 		commands[0] != daemonclient.CommandTaskGetMany ||
 		commands[1] != daemonclient.CommandTaskMergeBaseTarget ||
-		commands[2] != commandSessionStart {
+		commands[2] != protocol.CommandOperationSubmit {
 		t.Fatalf("commands = %v", commands)
 	}
-	var body sessionRequestBody
-	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
-		t.Fatalf("unmarshal body: %v", err)
-	}
-	if body.BaseBranch != "user/az-root/root-branch" {
-		t.Fatalf("base_branch = %q, want %q", body.BaseBranch, "user/az-root/root-branch")
-	}
+	assertSessionStartOperationSubmitRequest(t, gotReq, "proj", "/repo", "az-child", "user/az-root/root-branch")
 }
 
 func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
@@ -1417,9 +1466,9 @@ func TestStartCommandWithProjectOptionTargetsRegisteredProject(t *testing.T) {
 						OK:              true,
 						Body:            body,
 					}, nil
-				case commandSessionStart:
+				case protocol.CommandOperationSubmit:
 					gotReq = req
-					return responseWithOutput(req, "started\n"), nil
+					return sessionStartOperationSubmitResponse(req, projectB, "cif", protocol.OperationStateQueued), nil
 				case daemonclient.CommandTaskMergeBaseTarget:
 					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
 						IssueID:  "cif",
@@ -1441,26 +1490,20 @@ func TestStartCommandWithProjectOptionTargetsRegisteredProject(t *testing.T) {
 		return StartCommandWithOptions(deps, "cif", SessionCommandOptions{Project: "azedarach"})
 	})
 
-	if output != "started\n" {
-		t.Fatalf("output = %q, want started", output)
+	if !strings.Contains(output, "Operation: op-start (queued)") {
+		t.Fatalf("output = %q, want queued operation", output)
 	}
-	if gotReq.Command != commandSessionStart {
-		t.Fatalf("command = %q, want %q", gotReq.Command, commandSessionStart)
+	if gotReq.Command != protocol.CommandOperationSubmit {
+		t.Fatalf("command = %q, want %q", gotReq.Command, protocol.CommandOperationSubmit)
 	}
 	if gotReq.Meta.ProjectID.String() != projectB {
 		t.Fatalf("meta project_id = %q, want %q", gotReq.Meta.ProjectID, projectB)
 	}
-	var body sessionRequestBody
-	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
-		t.Fatalf("unmarshal body: %v", err)
-	}
-	if body.ProjectID != projectB || body.SessionID != "cif" || body.BaseBranch != "main" {
-		t.Fatalf("session request body = %+v, want project %s issue cif base main", body, projectB)
-	}
+	assertSessionStartOperationSubmitRequest(t, gotReq, projectB, repoB, "cif", "main")
 	if !reflect.DeepEqual(commands, []string{
 		daemonclient.CommandTaskGetMany + ":" + projectB,
 		daemonclient.CommandTaskMergeBaseTarget + ":" + projectB,
-		commandSessionStart + ":" + projectB,
+		protocol.CommandOperationSubmit + ":" + projectB,
 	}) {
 		t.Fatalf("commands = %v, want task list and start scoped to %s", commands, projectB)
 	}
@@ -1531,18 +1574,21 @@ func TestSessionCommandsKeepBareIssueIDsCurrentProjectScoped(t *testing.T) {
 	}
 }
 
-func TestStartCommandPrintsNestedOperationOutput(t *testing.T) {
+func TestStartCommandWithWaitPrintsSubmittedOperationOutput(t *testing.T) {
 	taskListBody, err := marshalTaskListBody([]domain.Task{
 		{ID: "issue-1", Title: "Example", Status: domain.StatusOpen},
 	})
 	if err != nil {
 		t.Fatalf("marshal task list: %v", err)
 	}
+	calls := []string{}
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				if req.Command == daemonclient.CommandTaskGetMany {
+				calls = append(calls, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskGetMany:
 					assertMetadataOnlyTaskGetManyRequest(t, req, "issue-1")
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -1551,26 +1597,29 @@ func TestStartCommandPrintsNestedOperationOutput(t *testing.T) {
 						OK:              true,
 						Body:            taskListBody,
 					}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:  "issue-1",
+						TargetID: "base",
+						Branch:   "main",
+					}), nil
+				case protocol.CommandOperationSubmit:
+					return sessionStartOperationSubmitResponse(req, "proj", "issue-1", protocol.OperationStateQueued), nil
+				case protocol.CommandOperationGet:
+					return responseWithJSON(req, protocol.OperationGetResponseBody{
+						Operation: protocol.OperationRecord{
+							OperationID: "op-start",
+							ProjectID:   "proj",
+							Kind:        commandSessionStart,
+							IssueID:     "issue-1",
+							State:       protocol.OperationStateDone,
+							Result:      mustJSON(t, commandOutputBody{Output: "wrapped output\n"}),
+						},
+					}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
 				}
-				nested, err := json.Marshal(commandOutputBody{Output: "wrapped output\n"})
-				if err != nil {
-					t.Fatalf("marshal nested response: %v", err)
-				}
-				body, err := json.Marshal(map[string]any{
-					"operation_id": "op-start",
-					"state":        "done",
-					"result":       json.RawMessage(nested),
-				})
-				if err != nil {
-					t.Fatalf("marshal wrapped response: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            body,
-				}, nil
 			},
 		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -1578,11 +1627,19 @@ func TestStartCommandPrintsNestedOperationOutput(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() error {
-		return StartCommand(deps, "issue-1")
+		return StartCommandWithOptions(deps, "issue-1", SessionCommandOptions{Wait: true, PollInterval: time.Millisecond})
 	})
 
 	if output != "wrapped output\n" {
 		t.Fatalf("output = %q, want wrapped output", output)
+	}
+	if !reflect.DeepEqual(calls, []string{
+		daemonclient.CommandTaskGetMany,
+		daemonclient.CommandTaskMergeBaseTarget,
+		protocol.CommandOperationSubmit,
+		protocol.CommandOperationGet,
+	}) {
+		t.Fatalf("calls = %+v", calls)
 	}
 }
 
@@ -2683,20 +2740,10 @@ func TestStartCommandPrintsPendingOperationState(t *testing.T) {
 						Branch:   "main",
 					}), nil
 				}
-				body, err := json.Marshal(map[string]any{
-					"operation_id": "op-start",
-					"state":        string(protocol.OperationStateQueued),
-				})
-				if err != nil {
-					t.Fatalf("marshal wrapped response: %v", err)
+				if req.Command != protocol.CommandOperationSubmit {
+					t.Fatalf("unexpected command: %s", req.Command)
 				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            body,
-				}, nil
+				return sessionStartOperationSubmitResponse(req, "proj", "issue-1", protocol.OperationStateQueued), nil
 			},
 		}),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -2707,8 +2754,101 @@ func TestStartCommandPrintsPendingOperationState(t *testing.T) {
 		return StartCommand(deps, "issue-1")
 	})
 
-	if output != "Operation queued: op-start\n" {
-		t.Fatalf("output = %q, want queued operation line", output)
+	for _, want := range []string{
+		"Session start is still queued for issue-1.",
+		"Operation: op-start (queued)",
+		"Follow up: az operation get --id op-start --wait",
+		"Follow up: az session status issue-1",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestStartCommandWithWaitReportsPendingOperationOnWaitDeadline(t *testing.T) {
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: "issue-1", Title: "Example", Status: domain.StatusOpen},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+	commands := []string{}
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "issue-1")
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:  "issue-1",
+						TargetID: "base",
+						Branch:   "main",
+					}), nil
+				case protocol.CommandOperationSubmit:
+					return sessionStartOperationSubmitResponse(req, "proj", "issue-1", protocol.OperationStateRunning), nil
+				case protocol.CommandOperationGet:
+					return responseWithJSON(req, protocol.OperationGetResponseBody{
+						Operation: protocol.OperationRecord{
+							OperationID: "op-start",
+							ProjectID:   "proj",
+							Kind:        commandSessionStart,
+							IssueID:     "issue-1",
+							State:       protocol.OperationStateRunning,
+							Progress: &protocol.OperationProgress{
+								Phase:   "init_commands",
+								Message: "launch sent; configured init commands likely running before agent hooks",
+								Percent: 90,
+							},
+							EnqueuedAt: time.Date(2026, time.June, 25, 5, 46, 21, 0, time.UTC),
+						},
+					}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return StartCommandWithOptions(deps, "issue-1", SessionCommandOptions{
+			Wait:         true,
+			PollInterval: time.Hour,
+			WaitTimeout:  time.Millisecond,
+		})
+	})
+
+	if !reflect.DeepEqual(commands, []string{
+		daemonclient.CommandTaskGetMany,
+		daemonclient.CommandTaskMergeBaseTarget,
+		protocol.CommandOperationSubmit,
+		protocol.CommandOperationGet,
+	}) {
+		t.Fatalf("commands = %+v", commands)
+	}
+	for _, want := range []string{
+		"Session start is still running for issue-1.",
+		"Operation: op-start (running)",
+		"Progress: launch sent; configured init commands likely running before agent hooks (90%)",
+		"Follow up: az operation get --id op-start --wait",
+		"Follow up: az session status issue-1",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
 	}
 }
 
@@ -2741,21 +2881,8 @@ func TestStartCommandWithWaitPrintsTerminalOperationOutput(t *testing.T) {
 						TargetID: "base",
 						Branch:   "main",
 					}), nil
-				case commandSessionStart:
-					body, err := json.Marshal(map[string]any{
-						"operation_id": "op-start",
-						"state":        string(protocol.OperationStateQueued),
-					})
-					if err != nil {
-						t.Fatalf("marshal pending response: %v", err)
-					}
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						OK:              true,
-						Body:            body,
-					}, nil
+				case protocol.CommandOperationSubmit:
+					return sessionStartOperationSubmitResponse(req, "proj", "issue-1", protocol.OperationStateQueued), nil
 				case protocol.CommandOperationGet:
 					body, err := json.Marshal(protocol.OperationGetResponseBody{
 						Operation: protocol.OperationRecord{
@@ -3142,7 +3269,7 @@ func TestCommandErrorUsesTransportMessage(t *testing.T) {
 	}
 
 	err = StartCommand(deps, "issue-1")
-	if err == nil || err.Error() != "session already exists: issue-1 (use 'az attach issue-1' to connect)" {
+	if err == nil || !strings.Contains(err.Error(), "failed to submit session start") || !strings.Contains(err.Error(), "session already exists: issue-1 (use 'az attach issue-1' to connect)") {
 		t.Fatalf("error = %v", err)
 	}
 }

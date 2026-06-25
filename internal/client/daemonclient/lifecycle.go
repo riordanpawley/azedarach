@@ -48,6 +48,7 @@ type sessionCommandBody struct {
 // to avoid brittle positional argument expansion at callsites.
 type StartSessionParams struct {
 	IssueID    string
+	RepoDir    string
 	BaseBranch string
 	Yolo       bool
 	StartWork  *bool
@@ -164,6 +165,7 @@ func (c *Client) StartSessionOperation(ctx context.Context, params StartSessionP
 	if err != nil {
 		return protocol.OperationRecord{}, err
 	}
+	issueIDString := issueID.String()
 	payload, err := json.Marshal(sessionCommandBody{
 		ProjectID:  c.projectID,
 		SessionID:  naming.SessionID(issueID),
@@ -175,32 +177,26 @@ func (c *Client) StartSessionOperation(ctx context.Context, params StartSessionP
 	if err != nil {
 		return protocol.OperationRecord{}, fmt.Errorf("marshal session start payload: %w", err)
 	}
+	resourceKeys := []string{
+		"issue:" + c.projectID.String() + ":" + issueIDString,
+		"worktree:" + issueIDString,
+	}
+	if repoDir := strings.TrimSpace(params.RepoDir); repoDir != "" {
+		sessionID := naming.CanonicalSessionIDForIssue(repoDir, naming.IssueID(issueID))
+		resourceKeys = append(resourceKeys, "session:"+sessionID.String())
+	}
 	var out protocol.OperationSubmitResponseBody
 	if err := c.commandJSON(ctx, protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
-		ProjectID: c.projectID,
-		Kind:      CommandSessionStart,
-		IssueID:   naming.IssueID(issueID),
-		Payload:   payload,
+		ProjectID:    c.projectID,
+		Kind:         CommandSessionStart,
+		IssueID:      naming.IssueID(issueID),
+		DedupeKey:    CommandSessionStart + ":" + issueIDString,
+		ResourceKeys: resourceKeys,
+		Payload:      payload,
 	}, &out); err != nil {
 		return protocol.OperationRecord{}, err
 	}
 	return out.Operation, nil
-}
-
-// StartSession asks the daemon to start one session for issue/task id.
-func (c *Client) StartSession(ctx context.Context, params StartSessionParams) (string, error) {
-	issueID, err := parseIssueID(params.IssueID)
-	if err != nil {
-		return "", err
-	}
-	return c.commandOutput(ctx, CommandSessionStart, sessionCommandBody{
-		ProjectID:  c.projectID,
-		SessionID:  naming.SessionID(issueID),
-		BaseBranch: params.BaseBranch,
-		Yolo:       params.Yolo,
-		StartWork:  params.StartWork,
-		ImagePaths: params.ImagePaths,
-	})
 }
 
 // StopSessionOperation submits a daemon-owned session stop operation and

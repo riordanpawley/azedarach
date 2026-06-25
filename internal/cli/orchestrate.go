@@ -1458,27 +1458,6 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 	}
 }
 
-func startSessionForIssue(deps *Dependencies, issueID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), sessionStartCommandTimeout)
-	defer cancel()
-	task, err := validateSessionIssueID(ctx, deps, issueID)
-	if err != nil {
-		return err
-	}
-	baseBranch, err := resolveSessionStartBaseBranch(ctx, deps, task)
-	if err != nil {
-		return err
-	}
-	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStart, deps.ProjectID, issueID, baseBranch))
-	if err != nil {
-		return fmt.Errorf("failed to start session: %w", err)
-	}
-	if err := responseError(resp, "failed to start session"); err != nil {
-		return err
-	}
-	return nil
-}
-
 func submitSessionStartForIssue(deps *Dependencies, issueID string) (orchestrateStartLaunch, error) {
 	return submitSessionStartForIssueWithBaseBranch(deps, issueID, "")
 }
@@ -1503,44 +1482,19 @@ func submitSessionStartForIssueWithBaseBranch(deps *Dependencies, issueID, baseB
 		return orchestrateStartLaunch{}, fmt.Errorf("invalid issue id %q: %w", issueID, err)
 	}
 	sessionID := naming.CanonicalSessionIDForIssue(deps.RepoDir, parsedIssueID).String()
-	req := newSessionRequest(commandSessionStart, deps.ProjectID, issueID, baseBranch)
-	body, err := json.Marshal(protocol.OperationSubmitRequestBody{
-		ProjectID:    naming.ProjectID(deps.ProjectID),
-		Kind:         commandSessionStart,
-		IssueID:      parsedIssueID,
-		DedupeKey:    "session.start:" + issueID,
-		ResourceKeys: []string{"issue:" + deps.ProjectID + ":" + issueID, "session:" + sessionID, "worktree:" + issueID},
-		Payload:      append(json.RawMessage(nil), req.Body...),
-	})
-	if err != nil {
-		return orchestrateStartLaunch{}, fmt.Errorf("marshal operation submit: %w", err)
-	}
-	resp, err := deps.DaemonClient.Command(ctx, protocol.RequestEnvelope{
-		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       makeRequestID(protocol.CommandOperationSubmit),
-		Kind:            protocol.EnvelopeKindCommand,
-		Command:         protocol.CommandOperationSubmit,
-		Meta: protocol.Metadata{
-			ProjectID: naming.ProjectID(deps.ProjectID),
-		},
-		SentAt: time.Now().UTC(),
-		Body:   body,
+	record, err := deps.DaemonClient.StartSessionOperation(ctx, daemonclient.StartSessionParams{
+		IssueID:    issueID,
+		RepoDir:    deps.RepoDir,
+		BaseBranch: baseBranch,
 	})
 	if err != nil {
 		return orchestrateStartLaunch{}, fmt.Errorf("submit session start operation: %w", err)
 	}
-	if err := responseError(resp, "submit session start operation"); err != nil {
-		return orchestrateStartLaunch{}, err
-	}
-	var out protocol.OperationSubmitResponseBody
-	if err := json.Unmarshal(resp.Body, &out); err != nil {
-		return orchestrateStartLaunch{}, fmt.Errorf("decode session start operation: %w", err)
-	}
 	launch := orchestrateStartLaunch{
 		IssueID:        issueID,
 		SessionID:      sessionID,
-		OperationID:    out.Operation.OperationID.String(),
-		OperationState: string(out.Operation.State),
+		OperationID:    record.OperationID.String(),
+		OperationState: string(record.State),
 	}
 	return launch, nil
 }

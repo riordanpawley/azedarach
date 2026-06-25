@@ -68,47 +68,7 @@ func TestSessionLifecycleCommandsRouteThroughDaemon(t *testing.T) {
 	}
 
 	client := New(transport).WithProjectID("proj-a")
-	imagePaths := []string{"/tmp/a.png", "/tmp/with space/image.png"}
-	startWork := true
-	got, err := client.StartSession(context.Background(), StartSessionParams{
-		IssueID:    "az-1",
-		BaseBranch: "main",
-		Yolo:       false,
-		StartWork:  &startWork,
-		ImagePaths: imagePaths,
-	})
-	if err != nil {
-		t.Fatalf("StartSession error: %v", err)
-	}
-	if got != "ok" {
-		t.Fatalf("StartSession output = %q, want ok", got)
-	}
-	if transport.lastReq.Command != CommandSessionStart {
-		t.Fatalf("command = %q, want %q", transport.lastReq.Command, CommandSessionStart)
-	}
-	if transport.lastReq.Meta.ProjectID != "proj-a" {
-		t.Fatalf("project_id = %q, want proj-a", transport.lastReq.Meta.ProjectID)
-	}
-	var body sessionCommandBody
-	if err := json.Unmarshal(transport.lastReq.Body, &body); err != nil {
-		t.Fatalf("unmarshal body: %v", err)
-	}
-	if body.BaseBranch != "main" {
-		t.Fatalf("base branch = %q, want main", body.BaseBranch)
-	}
-	if body.StartWork == nil || !*body.StartWork {
-		t.Fatalf("start_work = %v, want true", body.StartWork)
-	}
-	if len(body.ImagePaths) != len(imagePaths) {
-		t.Fatalf("image path count = %d, want %d", len(body.ImagePaths), len(imagePaths))
-	}
-	for i := range imagePaths {
-		if body.ImagePaths[i] != imagePaths[i] {
-			t.Fatalf("image path[%d] = %q, want %q", i, body.ImagePaths[i], imagePaths[i])
-		}
-	}
-
-	got, err = client.StopSession(context.Background(), "az-1")
+	got, err := client.StopSession(context.Background(), "az-1")
 	if err != nil {
 		t.Fatalf("StopSession error: %v", err)
 	}
@@ -218,81 +178,6 @@ func TestCleanupProjectRoutesThroughDaemon(t *testing.T) {
 	}
 	if got.Deleted != 1 || got.Archived != 2 || got.WorktreesRemoved != 3 || got.SessionsCleaned != 4 {
 		t.Fatalf("cleanup result = %+v", got)
-	}
-}
-
-func TestStartSessionIncludesYoloFlagInRequestBody(t *testing.T) {
-	transport := &lifecycleRecordingTransport{
-		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			body, err := json.Marshal(commandOutputBody{Output: "ok"})
-			if err != nil {
-				t.Fatalf("marshal response: %v", err)
-			}
-			return protocol.ResponseEnvelope{
-				ProtocolVersion: req.ProtocolVersion,
-				RequestID:       req.RequestID,
-				Kind:            protocol.EnvelopeKindResponse,
-				OK:              true,
-				Body:            body,
-			}, nil
-		},
-	}
-
-	client := New(transport).WithProjectID("proj-a")
-	if _, err := client.StartSession(context.Background(), StartSessionParams{
-		IssueID:    "az-1",
-		BaseBranch: "main",
-		Yolo:       true,
-	}); err != nil {
-		t.Fatalf("StartSession error: %v", err)
-	}
-
-	var body sessionCommandBody
-	if err := json.Unmarshal(transport.lastReq.Body, &body); err != nil {
-		t.Fatalf("unmarshal request body: %v", err)
-	}
-	if !body.Yolo {
-		t.Fatal("expected yolo=true in session.start request body")
-	}
-}
-
-func TestStartSessionIncludesStartWorkFlagInRequestBody(t *testing.T) {
-	transport := &lifecycleRecordingTransport{
-		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			body, err := json.Marshal(commandOutputBody{Output: "ok"})
-			if err != nil {
-				t.Fatalf("marshal response: %v", err)
-			}
-			return protocol.ResponseEnvelope{
-				ProtocolVersion: req.ProtocolVersion,
-				RequestID:       req.RequestID,
-				Kind:            protocol.EnvelopeKindResponse,
-				OK:              true,
-				Body:            body,
-			}, nil
-		},
-	}
-
-	client := New(transport).WithProjectID("proj-a")
-	startWork := false
-	if _, err := client.StartSession(context.Background(), StartSessionParams{
-		IssueID:    "az-1",
-		BaseBranch: "main",
-		Yolo:       false,
-		StartWork:  &startWork,
-	}); err != nil {
-		t.Fatalf("StartSession error: %v", err)
-	}
-
-	var body sessionCommandBody
-	if err := json.Unmarshal(transport.lastReq.Body, &body); err != nil {
-		t.Fatalf("unmarshal request body: %v", err)
-	}
-	if body.StartWork == nil {
-		t.Fatal("expected start_work field in session.start request body")
-	}
-	if *body.StartWork {
-		t.Fatal("expected start_work=false in session.start request body")
 	}
 }
 
@@ -490,83 +375,6 @@ func TestReconcileRuntimeIssuesRejectsEmptyIssueIDs(t *testing.T) {
 	_, err := client.ReconcileRuntimeIssues(context.Background(), nil)
 	if err == nil {
 		t.Fatal("expected error for empty issue IDs")
-	}
-}
-
-func TestSessionLifecycleCommandsDecodeNestedOperationResult(t *testing.T) {
-	transport := &lifecycleRecordingTransport{
-		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			nested, err := json.Marshal(commandOutputBody{Output: "wrapped"})
-			if err != nil {
-				t.Fatalf("marshal nested response: %v", err)
-			}
-			body, err := json.Marshal(map[string]any{
-				"operation_id": "op-123",
-				"state":        "done",
-				"result":       json.RawMessage(nested),
-			})
-			if err != nil {
-				t.Fatalf("marshal wrapped response: %v", err)
-			}
-			return protocol.ResponseEnvelope{
-				ProtocolVersion: req.ProtocolVersion,
-				RequestID:       req.RequestID,
-				Kind:            protocol.EnvelopeKindResponse,
-				OK:              true,
-				Body:            body,
-			}, nil
-		},
-	}
-
-	client := New(transport).WithProjectID("proj-a")
-	got, err := client.StartSession(context.Background(), StartSessionParams{
-		IssueID:    "az-1",
-		BaseBranch: "main",
-		Yolo:       false,
-	})
-	if err != nil {
-		t.Fatalf("StartSession error: %v", err)
-	}
-	if got != "wrapped" {
-		t.Fatalf("StartSession output = %q, want wrapped", got)
-	}
-}
-
-func TestSessionLifecycleCommandsReturnPendingOperationError(t *testing.T) {
-	transport := &lifecycleRecordingTransport{
-		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			body, err := json.Marshal(map[string]any{
-				"operation_id": "op-123",
-				"state":        string(protocol.OperationStateRunning),
-			})
-			if err != nil {
-				t.Fatalf("marshal wrapped response: %v", err)
-			}
-			return protocol.ResponseEnvelope{
-				ProtocolVersion: req.ProtocolVersion,
-				RequestID:       req.RequestID,
-				Kind:            protocol.EnvelopeKindResponse,
-				OK:              true,
-				Body:            body,
-			}, nil
-		},
-	}
-
-	client := New(transport).WithProjectID("proj-a")
-	_, err := client.StartSession(context.Background(), StartSessionParams{
-		IssueID:    "az-1",
-		BaseBranch: "main",
-		Yolo:       false,
-	})
-	var pending *OperationPendingError
-	if !errors.As(err, &pending) {
-		t.Fatalf("StartSession error = %v, want OperationPendingError", err)
-	}
-	if pending.OperationID != "op-123" {
-		t.Fatalf("operation id = %q, want op-123", pending.OperationID)
-	}
-	if pending.State != protocol.OperationStateRunning {
-		t.Fatalf("state = %q, want running", pending.State)
 	}
 }
 
