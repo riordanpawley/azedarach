@@ -894,6 +894,15 @@ func (d *Daemon) applySessionLifecycleTransitionWithActivity(
 	} else if normalizedActivity := normalizeSessionActivity(activity); normalizedActivity != "" {
 		session.Activity = normalizedActivity
 		session.ActivitySource = normalizeSessionActivitySource(activitySource, "session")
+	} else if isAgentScopedSessionID(sessionID) {
+		switch state {
+		case daemonstate.SessionStateRunning:
+			session.Activity = "busy"
+			session.ActivitySource = "hooks"
+		case daemonstate.SessionStatePaused:
+			session.Activity = "idle"
+			session.ActivitySource = "hooks"
+		}
 	} else if session.Activity != "" {
 		session.Activity = normalizeSessionActivity(session.Activity)
 		session.ActivitySource = normalizeSessionActivitySource(session.ActivitySource, "session")
