@@ -1344,8 +1344,9 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
 	var cmd struct {
-		TaskID string        `json:"task_id"`
-		Status domain.Status `json:"status"`
+		TaskID          string        `json:"task_id"`
+		Status          domain.Status `json:"status"`
+		CascadeChildren bool          `json:"cascade_children,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -1357,7 +1358,7 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 	if cmd.Status != domain.StatusDone {
 		restoreDeferredWorktree = d.cancelDeferredTaskWorktreeCleanup(ctx, projectID, cmd.TaskID, "issue status changed before deferred worktree cleanup completed")
 	}
-	task, err := d.updateTaskStatusExcludingClose(ctx, projectID, cmd.TaskID, cmd.Status)
+	task, updatedTasks, err := d.updateTaskStatusExcludingClose(ctx, projectID, cmd.TaskID, cmd.Status, cmd.CascadeChildren)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -1366,6 +1367,9 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 	}
 	resp := d.successResponse(req)
 	resp.Revision = d.nextRevision(projectID)
+	for _, updatedTask := range updatedTasks {
+		d.publishTaskEvent(req, protocol.EventTaskUpdated, resp.Revision, taskEventBodyFromTask(projectID, updatedTask))
+	}
 	d.publishTaskEvent(req, protocol.EventTaskUpdated, resp.Revision, taskEventBodyFromTask(projectID, task))
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task status update completed", "project_id", projectID, "task_id", cmd.TaskID, "status", cmd.Status, "revision", resp.Revision)
@@ -2103,16 +2107,112 @@ func (d *Daemon) cleanupTaskIssueResourcesForClose(ctx context.Context, projectI
 	return err
 }
 
-func (d *Daemon) updateTaskStatusExcludingClose(ctx context.Context, projectID, taskID string, status domain.Status) (domain.Task, error) {
+func (d *Daemon) updateTaskStatusExcludingClose(ctx context.Context, projectID, taskID string, status domain.Status, cascadeChildren bool) (domain.Task, []domain.Task, error) {
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
-		return domain.Task{}, fmt.Errorf("issue store unavailable")
+		return domain.Task{}, nil, fmt.Errorf("issue store unavailable")
 	}
 	taskID = strings.TrimSpace(taskID)
 	if status == domain.StatusDone {
-		return domain.Task{}, fmt.Errorf("status %s must be applied with task.close", status)
+		return domain.Task{}, nil, fmt.Errorf("status %s must be applied with task.close", status)
 	}
-	return issueClient.UpdateWithRuntime(ctx, projectID, taskID, status)
+	if cascadeChildren && status != domain.StatusInReview {
+		return domain.Task{}, nil, fmt.Errorf("cascade_children is only supported with status %s", domain.StatusInReview)
+	}
+	var cascaded []domain.Task
+	if status == domain.StatusInReview {
+		updated, err := d.validateOrCascadeChildrenForReview(ctx, projectID, taskID, cascadeChildren)
+		if err != nil {
+			return domain.Task{}, nil, err
+		}
+		cascaded = updated
+	}
+	task, err := issueClient.UpdateWithRuntime(ctx, projectID, taskID, status)
+	if err != nil {
+		return domain.Task{}, nil, err
+	}
+	return task, cascaded, nil
+}
+
+func (d *Daemon) validateOrCascadeChildrenForReview(ctx context.Context, projectID, taskID string, cascadeChildren bool) ([]domain.Task, error) {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil, fmt.Errorf("issue store unavailable")
+	}
+	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("inspect child issues before moving %s to in_review: %w", taskID, err)
+	}
+	var task domain.Task
+	found := false
+	for _, candidate := range tasks {
+		if strings.EqualFold(strings.TrimSpace(candidate.ID.String()), taskID) {
+			task = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("issue not found: %s", taskID)
+	}
+	blocked := daemonReviewGuardChildBlockers(task.ID, tasks)
+	if len(blocked) == 0 {
+		return nil, nil
+	}
+	if !cascadeChildren {
+		return nil, fmt.Errorf("cannot move issue %s to in_review: child issues are not review-ready: %s. Next: move or finish the listed child issues first, or retry with --cascade-children to move them to in_review first", taskID, strings.Join(blocked, "; "))
+	}
+	updated := make([]domain.Task, 0)
+	for _, childID := range daemonReviewGuardChildIDsToCascade(task.ID, tasks) {
+		child, err := issueClient.UpdateWithRuntime(ctx, projectID, childID.String(), domain.StatusInReview)
+		if err != nil {
+			return nil, fmt.Errorf("cascade child %s to in_review before moving %s: %w", childID.String(), taskID, err)
+		}
+		updated = append(updated, child)
+	}
+	return updated, nil
+}
+
+func daemonReviewGuardChildBlockers(parentID naming.IssueID, tasks []domain.Task) []string {
+	childrenByParent := daemonCloseGuardChildrenByParent(tasks)
+	descendants := daemonCloseGuardDescendants(parentID, childrenByParent)
+	if len(descendants) == 0 {
+		return nil
+	}
+	byID := make(map[naming.IssueID]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID] = task
+	}
+	blocked := make([]string, 0, len(descendants))
+	for _, childID := range descendants {
+		child, ok := byID[childID]
+		if !ok || child.Status == domain.StatusInReview || child.Status == domain.StatusDone {
+			continue
+		}
+		blocked = append(blocked, fmt.Sprintf("%s (%s)", child.ID.String(), child.Status))
+	}
+	return blocked
+}
+
+func daemonReviewGuardChildIDsToCascade(parentID naming.IssueID, tasks []domain.Task) []naming.IssueID {
+	childrenByParent := daemonCloseGuardChildrenByParent(tasks)
+	descendants := daemonCloseGuardDescendants(parentID, childrenByParent)
+	if len(descendants) == 0 {
+		return nil
+	}
+	byID := make(map[naming.IssueID]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID] = task
+	}
+	out := make([]naming.IssueID, 0, len(descendants))
+	for _, childID := range descendants {
+		child, ok := byID[childID]
+		if !ok || child.Status == domain.StatusInReview || child.Status == domain.StatusDone {
+			continue
+		}
+		out = append(out, childID)
+	}
+	return out
 }
 
 func (d *Daemon) handleTaskClosePreflight(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

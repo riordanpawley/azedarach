@@ -14,7 +14,7 @@ func TestTaskWorkspaceOverlay_View_NoLocalFooterHints(t *testing.T) {
 		Title:  "Task",
 		Status: domain.StatusOpen,
 	}
-	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 36)
 	view := overlay.View()
 
 	if strings.Contains(view, "Tab/h/l") {
@@ -378,7 +378,7 @@ func TestTaskWorkspaceOverlay_ActionsPaneHidesReservedMoveRows(t *testing.T) {
 	if strings.Contains(view, "[h] Move left") || strings.Contains(view, "[l] Move right") {
 		t.Fatalf("workspace actions should not advertise reserved h/l status movement, got %q", view)
 	}
-	if !strings.Contains(view, "[1] Set status: Open") || !strings.Contains(view, "[4] Set status: Done") {
+	if !strings.Contains(view, "[1] Set status: Open") || !strings.Contains(view, "[3] Set status: In Review") || !strings.Contains(view, "[4] Set status: Done") {
 		t.Fatalf("workspace actions should keep explicit status keys, got %q", view)
 	}
 }
