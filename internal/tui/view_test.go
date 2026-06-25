@@ -370,6 +370,71 @@ func TestView_OrchestrationOverviewShowsProgressAndGitWithoutDumpingEverything(t
 	}
 }
 
+func TestOverviewMailParentsPrefersActiveIssueParent(t *testing.T) {
+	parent := naming.IssueID("parent-1")
+	tasks := []domain.Task{
+		{ID: naming.IssueID("cqb"), HasTmuxSession: true},
+		{ID: naming.IssueID("child-1"), ParentID: &parent, HasTmuxSession: true},
+	}
+
+	parents := overviewMailParents(tasks, "root-1")
+
+	want := []string{"root-1", "cqb", "parent-1", "child-1"}
+	if strings.Join(parents, ",") != strings.Join(want, ",") {
+		t.Fatalf("mail parents = %v, want %v", parents, want)
+	}
+}
+
+func TestParseOverviewSessionStatusTasksSkipsNonIssueShells(t *testing.T) {
+	status := strings.Join([]string{
+		"Active Sessions (3):",
+		"",
+		"ISSUE ID\tSTATUS\tACTIVITY\tTITLE",
+		"-------\t------\t--------\t-----",
+		"az\tunknown\tbusy\t(not in issues)",
+		"cif\tin_progress\tidle\tEffect v3 to v4 migration",
+		"dih\tin_review\tbusy\tinternationalization epic",
+		"",
+		"Use 'az attach <issue-id>' to attach to a session",
+	}, "\n")
+
+	tasks := parseOverviewSessionStatusTasks(status)
+
+	if len(tasks) != 2 {
+		t.Fatalf("parsed tasks = %+v, want 2 issue sessions", tasks)
+	}
+	if tasks[0].ID.String() != "cif" || tasks[0].Status != domain.StatusInProgress || tasks[0].Session.DisplayLabel() != "idle" {
+		t.Fatalf("first parsed task = %+v", tasks[0])
+	}
+	if tasks[1].ID.String() != "dih" || tasks[1].Status != domain.StatusInReview || tasks[1].Session.DisplayLabel() != "busy" {
+		t.Fatalf("second parsed task = %+v", tasks[1])
+	}
+}
+
+func TestView_OrchestrationOverviewFallsBackToSessionActivityProgress(t *testing.T) {
+	m := newTestModel()
+	m.width = 120
+	m.height = 24
+	m.loading = false
+	m.viewMode = ViewModeOverview
+	task := domain.Task{
+		ID:             naming.IssueID("cif"),
+		Title:          "Effect v3 to v4 migration",
+		Status:         domain.StatusInProgress,
+		Type:           domain.TypeTask,
+		Session:        &domain.Session{IssueID: naming.IssueID("cif"), State: domain.SessionBusy, Activity: "busy"},
+		HasTmuxSession: true,
+	}
+	m.orchestrationOverview = []orchestrationProjectOverview{{Name: "Chefy", Err: errors.New("Linear read sync timed out"), Tasks: []domain.Task{task}}}
+
+	view := m.View()
+	for _, want := range []string{"Chefy", "progress", "activity: busy"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("overview missing activity progress fallback %q:\n%s", want, view)
+		}
+	}
+}
+
 func TestView_OrchestrationOverviewKeepsSessionsVisibleWhenBackendDegraded(t *testing.T) {
 	m := newTestModel()
 	m.width = 120
@@ -399,7 +464,7 @@ func TestView_OrchestrationOverviewKeepsSessionsVisibleWhenBackendDegraded(t *te
 	}
 
 	view := m.View()
-	for _, want := range []string{"degraded: 2 backend", "alpha", task.ID.String(), "busy", "git dirty +5/-1", "progress", "local task progress should remain visible"} {
+	for _, want := range []string{"degraded: 2 backend", "alpha", "degraded: backend timeout", task.ID.String(), "busy", "git dirty +5/-1", "progress", "local task progress should remain visible"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("overview missing %q while backend degraded:\n%s", want, view)
 		}
@@ -447,10 +512,10 @@ func TestView_OrchestrationOverviewShowsHiddenProjectLabels(t *testing.T) {
 	m.orchestrationOverview = []orchestrationProjectOverview{{Name: "azedarach", Tasks: []domain.Task{task}}}
 	m.orchestrationOverviewHiddenProjects = 2
 	m.orchestrationOverviewBackendErrors = 1
-	m.orchestrationOverviewHiddenLabels = []string{"Chefy degraded", "otel-tui no sessions"}
+	m.orchestrationOverviewHiddenLabels = []string{"Chefy degraded: backend timeout", "otel-tui no sessions"}
 
 	view := m.View()
-	for _, want := range []string{"hidden/degraded projects", "Chefy degraded", "otel-tui no sessions"} {
+	for _, want := range []string{"hidden/degraded projects", "Chefy degraded: backend timeout", "otel-tui no sessions"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("overview missing hidden project label %q:\n%s", want, view)
 		}

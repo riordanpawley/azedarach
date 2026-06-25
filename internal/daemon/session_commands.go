@@ -292,8 +292,8 @@ func sessionProjectionCountsByIssueKey(sessions []daemonstate.Session, namingSco
 		if isAgentScopedSessionID(session.ID) {
 			counts.PaneScoped++
 		}
-		switch state {
-		case daemonstate.SessionStatePaused:
+		switch sessionActivityState(session) {
+		case domain.SessionPaused, domain.SessionIdle, domain.SessionWaiting:
 			counts.Paused++
 		default:
 			counts.Active++
@@ -2023,14 +2023,38 @@ func sessionHookActivityByIssueKeyFromSessions(sessions []daemonstate.Session, n
 		}
 		activity := activityByKey[key]
 		activity.Total++
-		if daemonstate.NormalizeSessionState(session.State) == daemonstate.SessionStatePaused {
+		switch sessionActivityState(session) {
+		case domain.SessionPaused, domain.SessionIdle, domain.SessionWaiting:
 			activity.Paused++
-		} else {
+		case domain.SessionBusy:
 			activity.Active++
 		}
 		activityByKey[key] = activity
 	}
 	return activityByKey
+}
+
+func sessionActivityState(session daemonstate.Session) domain.SessionState {
+	switch normalizeSessionActivity(session.Activity) {
+	case string(domain.SessionBusy), "starting", "working":
+		return domain.SessionBusy
+	case string(domain.SessionIdle), string(domain.SessionPaused), string(domain.SessionWaiting):
+		return domain.SessionPaused
+	}
+	switch daemonstate.NormalizeSessionState(session.State) {
+	case daemonstate.SessionStatePaused:
+		return domain.SessionPaused
+	case daemonstate.SessionStateStarting:
+		return domain.SessionBusy
+	default:
+		// Pane observations prove tmux liveness, not agent activity. Older hook
+		// writes left live pane rows without activity, so treat those as idle
+		// unless a hook explicitly recorded busy.
+		if isAgentScopedSessionID(session.ID) && strings.TrimSpace(session.Activity) == "" {
+			return domain.SessionPaused
+		}
+		return domain.SessionBusy
+	}
 }
 
 func sessionActivityLabel(activity sessionHookActivity) (string, string) {

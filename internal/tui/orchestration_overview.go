@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -80,9 +81,14 @@ func (m Model) loadOrchestrationOverviewCmd() tea.Cmd {
 				backendErrors++
 				if overviewProjectMatchesCurrent(project, currentProjectID, currentProjectPath) {
 					entry.Tasks, _ = sessionOverviewTasks(currentTasks)
+				} else if fallbackTasks, fallbackErr := overviewTasksFromSessionStatus(ctx, client); fallbackErr == nil {
+					entry.Tasks = fallbackTasks
 				}
 			}
 			if len(entry.Tasks) > 0 {
+				if entry.MailByTask == nil {
+					entry.MailByTask = overviewLatestMailByTask(ctx, client, project.path, entry.Tasks)
+				}
 				overview = append(overview, entry)
 			} else {
 				hiddenLabels = append(hiddenLabels, overviewHiddenProjectLabel(project.name, err))
@@ -108,9 +114,28 @@ func overviewHiddenProjectLabel(name string, err error) string {
 		name = "project"
 	}
 	if err != nil {
-		return name + " degraded"
+		return name + " degraded: " + overviewDegradedReason(err)
 	}
 	return name + " no sessions"
+}
+
+func overviewDegradedReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	switch {
+	case strings.Contains(msg, "timed out"), strings.Contains(msg, "timeout"), strings.Contains(msg, "deadline exceeded"):
+		return "backend timeout"
+	case strings.Contains(msg, "no such column"), strings.Contains(msg, "schema"):
+		return "store schema mismatch"
+	case strings.Contains(msg, "taskstore"), strings.Contains(msg, "issue store"):
+		return "task store error"
+	case strings.Contains(msg, "connection refused"), strings.Contains(msg, "socket"), strings.Contains(msg, "no such file"):
+		return "daemon unavailable"
+	default:
+		return "backend unavailable"
+	}
 }
 
 func overviewProjectMatchesCurrent(project orchestrationProjectRef, currentProjectID, currentProjectPath string) bool {
@@ -226,6 +251,102 @@ func sessionOverviewTasks(tasks []domain.Task) ([]domain.Task, int) {
 		return strings.ToLower(active[i].ID.String()) < strings.ToLower(active[j].ID.String())
 	})
 	return active, hidden
+}
+
+func overviewTasksFromSessionStatus(ctx context.Context, client *daemonclient.Client) ([]domain.Task, error) {
+	status, err := client.SessionStatus(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	tasks := parseOverviewSessionStatusTasks(status)
+	if len(tasks) == 0 {
+		return nil, nil
+	}
+	return sessionOverviewTasksNoHidden(tasks), nil
+}
+
+func parseOverviewSessionStatusTasks(status string) []domain.Task {
+	lines := strings.Split(status, "\n")
+	tasks := make([]domain.Task, 0)
+	inRows := false
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "ISSUE ID") {
+			inRows = true
+			continue
+		}
+		if !inRows || strings.HasPrefix(line, "-------") {
+			continue
+		}
+		if strings.HasPrefix(line, "Use 'az attach") {
+			break
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		issueID := strings.TrimSpace(fields[0])
+		statusRaw := strings.TrimSpace(fields[1])
+		activity := strings.TrimSpace(fields[2])
+		title := strings.Join(fields[3:], " ")
+		if !overviewSessionStatusRowIsIssue(issueID, statusRaw, title) {
+			continue
+		}
+		parsedIssueID, err := naming.ParseIssueID(issueID)
+		if err != nil {
+			continue
+		}
+		taskStatus := domain.Status(statusRaw)
+		if taskStatus == "" || taskStatus == domain.StatusDone {
+			continue
+		}
+		state := overviewSessionStateFromActivity(activity)
+		tasks = append(tasks, domain.Task{
+			ID:             parsedIssueID,
+			Title:          title,
+			Status:         taskStatus,
+			Priority:       domain.P2,
+			Type:           domain.TypeTask,
+			Session:        &domain.Session{IssueID: parsedIssueID, State: state, Activity: activity},
+			HasTmuxSession: true,
+		})
+	}
+	return tasks
+}
+
+func overviewSessionStatusRowIsIssue(issueID, status, title string) bool {
+	if strings.TrimSpace(issueID) == "" || strings.EqualFold(issueID, "az") {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(status), "unknown") {
+		return false
+	}
+	return strings.TrimSpace(title) != "" && !strings.EqualFold(strings.TrimSpace(title), "(not in issues)")
+}
+
+func overviewSessionStateFromActivity(activity string) domain.SessionState {
+	switch domain.SessionState(strings.TrimSpace(activity)) {
+	case domain.SessionBusy:
+		return domain.SessionBusy
+	case domain.SessionWaiting:
+		return domain.SessionWaiting
+	case domain.SessionError:
+		return domain.SessionError
+	case domain.SessionPaused:
+		return domain.SessionPaused
+	case "no-agent":
+		return "no-agent"
+	default:
+		return domain.SessionIdle
+	}
+}
+
+func sessionOverviewTasksNoHidden(tasks []domain.Task) []domain.Task {
+	active, _ := sessionOverviewTasks(tasks)
+	return active
 }
 
 func overviewStatusRank(status domain.Status) int {
@@ -590,7 +711,7 @@ func (m Model) renderOverviewProjectCard(project orchestrationProjectOverview, w
 	titleLine := ansi.Truncate(title, innerWidth, "...")
 	meta := fmt.Sprintf("%d sessions", len(project.Tasks))
 	if project.Err != nil {
-		meta = fmt.Sprintf("degraded  local state  %d sessions", len(project.Tasks))
+		meta = fmt.Sprintf("degraded: %s  %d sessions", overviewDegradedReason(project.Err), len(project.Tasks))
 	} else if project.Freshness != "" {
 		meta = fmt.Sprintf("%s  %d sessions", project.Freshness, len(project.Tasks))
 	}
@@ -775,7 +896,18 @@ func overviewTaskContext(project orchestrationProjectOverview, task domain.Task)
 			}
 		}
 	}
-	return firstNonEmptyLine(task.Notes, task.Acceptance, task.Description, task.Design)
+	if context := firstNonEmptyLine(task.Notes, task.Acceptance, task.Description, task.Design); context != "" {
+		return context
+	}
+	if task.Session != nil {
+		if label := strings.TrimSpace(task.Session.DisplayLabel()); label != "" {
+			return "activity: " + label
+		}
+	}
+	if task.HasTmuxSession {
+		return "activity: session"
+	}
+	return ""
 }
 
 func overviewLatestMailByTask(ctx context.Context, client *daemonclient.Client, repoDir string, tasks []domain.Task) map[string]protocol.MailEvent {
@@ -783,7 +915,7 @@ func overviewLatestMailByTask(ctx context.Context, client *daemonclient.Client, 
 	if repoDir == "" {
 		return nil
 	}
-	parents := overviewMailParents(tasks)
+	parents := overviewMailParents(tasks, os.Getenv("AZEDARACH_ISSUE_ID"))
 	if len(parents) == 0 {
 		return nil
 	}
@@ -814,7 +946,7 @@ func overviewLatestMailByTask(ctx context.Context, client *daemonclient.Client, 
 	return latest
 }
 
-func overviewMailParents(tasks []domain.Task) []string {
+func overviewMailParents(tasks []domain.Task, activeIssueID string) []string {
 	seen := map[string]struct{}{}
 	parents := make([]string, 0)
 	add := func(id string) {
@@ -828,6 +960,7 @@ func overviewMailParents(tasks []domain.Task) []string {
 		seen[id] = struct{}{}
 		parents = append(parents, id)
 	}
+	add(activeIssueID)
 	for _, task := range tasks {
 		if task.ParentID != nil {
 			add(task.ParentID.String())

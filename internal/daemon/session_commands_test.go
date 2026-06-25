@@ -3202,7 +3202,7 @@ func TestSessionPauseResumeRejectMissingExplicitRuntimeTarget(t *testing.T) {
 	}
 }
 
-func TestSessionPauseAcceptsAgentScopedTargetWhenParentTmuxSessionExists(t *testing.T) {
+func TestSessionPauseResumeAgentScopedTargetWritesHookActivity(t *testing.T) {
 	const (
 		projectID = "proj"
 		issueID   = "az-1"
@@ -3261,6 +3261,43 @@ func TestSessionPauseAcceptsAgentScopedTargetWhenParentTmuxSessionExists(t *test
 	}
 	if row.State != daemonstate.SessionStatePaused {
 		t.Fatalf("agent session state = %s, want %s", row.State, daemonstate.SessionStatePaused)
+	}
+	if row.Activity != "idle" || row.ActivitySource != "hooks" {
+		t.Fatalf("agent session activity = %s/%s, want idle/hooks", row.Activity, row.ActivitySource)
+	}
+
+	resp, err = daemon.handleSessionResume(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-agent-resume",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         daemonhandlers.CommandSessionResume,
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"issue_id":   issueID,
+			"session_id": agentSessionID,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionResume returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("resume response not ok: %+v", resp.Error)
+	}
+	row, found, err = runtimeStateStore.GetSessionState(context.Background(), projectID, agentSessionID)
+	if err != nil {
+		t.Fatalf("get resumed agent session runtime state: %v", err)
+	}
+	if !found {
+		t.Fatal("resumed agent session runtime state not found")
+	}
+	if row.State != daemonstate.SessionStateRunning {
+		t.Fatalf("agent session state = %s, want %s", row.State, daemonstate.SessionStateRunning)
+	}
+	if row.Activity != "busy" || row.ActivitySource != "hooks" {
+		t.Fatalf("agent session activity = %s/%s, want busy/hooks", row.Activity, row.ActivitySource)
 	}
 }
 
@@ -4945,20 +4982,24 @@ func TestSessionStatusReportsHookBackedActivity(t *testing.T) {
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 	now := time.Now().UTC()
 	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
-		ID:            busySessionID + ".pane-%1",
-		IssueID:       busyIssueID,
-		State:         daemonstate.SessionStateRunning,
-		ObservedState: daemonstate.SessionStateRunning,
-		UpdatedAt:     now,
+		ID:             busySessionID + ".pane-%1",
+		IssueID:        busyIssueID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "hooks",
+		UpdatedAt:      now,
 	}); err != nil {
 		t.Fatalf("seed busy hook activity: %v", err)
 	}
 	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
-		ID:            idleSessionID + ".pane-%2",
-		IssueID:       idleIssueID,
-		State:         daemonstate.SessionStatePaused,
-		ObservedState: daemonstate.SessionStatePaused,
-		UpdatedAt:     now,
+		ID:             idleSessionID + ".pane-%2",
+		IssueID:        idleIssueID,
+		State:          daemonstate.SessionStatePaused,
+		ObservedState:  daemonstate.SessionStatePaused,
+		Activity:       "idle",
+		ActivitySource: "hooks",
+		UpdatedAt:      now,
 	}); err != nil {
 		t.Fatalf("seed idle hook activity: %v", err)
 	}
@@ -5516,11 +5557,13 @@ func TestRefreshExistingSessionRuntimeStateKeepsLivePaneRowsBusy(t *testing.T) {
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
-		ID:            paneSessionID,
-		IssueID:       issueID,
-		State:         daemonstate.SessionStateRunning,
-		ObservedState: daemonstate.SessionStateRunning,
-		UpdatedAt:     time.Now().UTC(),
+		ID:             paneSessionID,
+		IssueID:        issueID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "hooks",
+		UpdatedAt:      time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("seed live pane projection: %v", err)
 	}
@@ -5555,6 +5598,61 @@ func TestRefreshExistingSessionRuntimeStateKeepsLivePaneRowsBusy(t *testing.T) {
 	}
 }
 
+func TestEnrichTasksWithSessionStateTreatsLegacyPaneRowsWithoutActivityAsIdle(t *testing.T) {
+	const (
+		projectID = "proj-legacy-pane-activity"
+		issueID   = "az-1"
+	)
+	ctx := context.Background()
+	parentSessionID := naming.CanonicalSessionID(projectID, issueID)
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:             parentSessionID,
+		IssueID:        issueID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "session",
+		UpdatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed parent projection: %v", err)
+	}
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:            parentSessionID + ".pane-506",
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning,
+		UpdatedAt:     time.Now().UTC().Add(time.Second),
+	}); err != nil {
+		t.Fatalf("seed legacy pane projection: %v", err)
+	}
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	counts := d.sessionProjectionCountsForIssue(ctx, projectID, issueID)
+	if counts.Total != 1 || counts.Active != 0 || counts.Paused != 1 {
+		t.Fatalf("counts = %+v, want one idle legacy pane row", counts)
+	}
+
+	tasks := []domain.Task{{ID: issueID, Title: "legacy pane row", Type: domain.TypeTask}}
+	enriched := d.enrichTasksWithSessionState(ctx, projectID, tasks)
+	if len(enriched) != 1 || enriched[0].Session == nil {
+		t.Fatalf("missing session in enriched task: %+v", enriched)
+	}
+	if enriched[0].Session.State != domain.SessionPaused {
+		t.Fatalf("enriched session state = %s, want %s", enriched[0].Session.State, domain.SessionPaused)
+	}
+	if enriched[0].Session.Activity != "idle" || enriched[0].Session.ActivitySource != "hooks" {
+		t.Fatalf("activity = %s/%s, want idle/hooks", enriched[0].Session.Activity, enriched[0].Session.ActivitySource)
+	}
+}
+
 func TestRefreshExistingSessionRuntimeStateMatchesUnsanitizedPersistedPaneID(t *testing.T) {
 	const (
 		projectID = "proj-pane-unsanitized"
@@ -5566,11 +5664,13 @@ func TestRefreshExistingSessionRuntimeStateMatchesUnsanitizedPersistedPaneID(t *
 	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
-		ID:            paneSessionID,
-		IssueID:       issueID,
-		State:         daemonstate.SessionStateRunning,
-		ObservedState: daemonstate.SessionStateRunning,
-		UpdatedAt:     time.Now().UTC(),
+		ID:             paneSessionID,
+		IssueID:        issueID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "hooks",
+		UpdatedAt:      time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("seed live pane projection: %v", err)
 	}
@@ -5617,11 +5717,13 @@ func TestRefreshExistingSessionRuntimeStateCountsMultipleLivePanes(t *testing.T)
 	now := time.Now().UTC()
 	for _, paneSessionID := range []string{parentSessionID + ".pane-1", parentSessionID + ".pane-2"} {
 		if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
-			ID:            paneSessionID,
-			IssueID:       issueID,
-			State:         daemonstate.SessionStateRunning,
-			ObservedState: daemonstate.SessionStateRunning,
-			UpdatedAt:     now,
+			ID:             paneSessionID,
+			IssueID:        issueID,
+			State:          daemonstate.SessionStateRunning,
+			ObservedState:  daemonstate.SessionStateRunning,
+			Activity:       "busy",
+			ActivitySource: "hooks",
+			UpdatedAt:      now,
 		}); err != nil {
 			t.Fatalf("seed live pane projection %s: %v", paneSessionID, err)
 		}
@@ -7056,20 +7158,24 @@ func TestEnrichTasksWithSessionStateReportsHookBackedActivity(t *testing.T) {
 		t.Fatalf("seed idle session: %v", err)
 	}
 	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
-		ID:            busySessionID,
-		IssueID:       busyID,
-		State:         daemonstate.SessionStateRunning,
-		ObservedState: daemonstate.SessionStateRunning,
-		UpdatedAt:     now,
+		ID:             busySessionID,
+		IssueID:        busyID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "hooks",
+		UpdatedAt:      now,
 	}); err != nil {
 		t.Fatalf("seed busy hook session: %v", err)
 	}
 	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
-		ID:            idleSessionID,
-		IssueID:       idleID,
-		State:         daemonstate.SessionStatePaused,
-		ObservedState: daemonstate.SessionStatePaused,
-		UpdatedAt:     now,
+		ID:             idleSessionID,
+		IssueID:        idleID,
+		State:          daemonstate.SessionStatePaused,
+		ObservedState:  daemonstate.SessionStatePaused,
+		Activity:       "idle",
+		ActivitySource: "hooks",
+		UpdatedAt:      now,
 	}); err != nil {
 		t.Fatalf("seed idle hook session: %v", err)
 	}
@@ -7275,11 +7381,13 @@ func TestPersistTmuxSessionRuntimeStateKeepsAgentHookActivityWhenPaneLives(t *te
 		t.Fatalf("seed parent session: %v", err)
 	}
 	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
-		ID:            agentSessionID,
-		IssueID:       issueID,
-		State:         daemonstate.SessionStateRunning,
-		ObservedState: daemonstate.SessionStateRunning,
-		UpdatedAt:     now,
+		ID:             agentSessionID,
+		IssueID:        issueID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "hooks",
+		UpdatedAt:      now,
 	}); err != nil {
 		t.Fatalf("seed agent session: %v", err)
 	}
@@ -7545,12 +7653,14 @@ func TestEnrichTasksWithSessionStateCountsLivePaneRowsWithoutParentProjection(t 
 	parentSessionID := naming.CanonicalSessionID(projectID, issueID)
 	now := time.Date(2026, time.May, 25, 9, 0, 0, 0, time.UTC)
 	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
-		ID:            parentSessionID + ".pane-1",
-		IssueID:       issueID,
-		State:         daemonstate.SessionStateRunning,
-		ObservedState: daemonstate.SessionStateRunning,
-		StartedAt:     &now,
-		UpdatedAt:     now,
+		ID:             parentSessionID + ".pane-1",
+		IssueID:        issueID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "busy",
+		ActivitySource: "hooks",
+		StartedAt:      &now,
+		UpdatedAt:      now,
 	}); err != nil {
 		t.Fatalf("seed live pane session: %v", err)
 	}
