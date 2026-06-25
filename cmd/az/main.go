@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,12 +12,31 @@ import (
 	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	"github.com/riordanpawley/azedarach/internal/cli"
 	clitext "github.com/riordanpawley/azedarach/internal/cli/text"
+	"github.com/riordanpawley/azedarach/internal/client/daemonprocess"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	app "github.com/riordanpawley/azedarach/internal/tui"
 )
 
 var processStartedAt = time.Now()
+
+type tuiDaemonStopper interface {
+	Stop(context.Context) error
+}
+
+type tuiProgramRunner interface {
+	Run() (tea.Model, error)
+}
+
+var newTUIDaemonStopper = func(repoDir, socketPath string) tuiDaemonStopper {
+	return daemonprocess.NewLauncher(repoDir, socketPath)
+}
+
+var newTUIProgramRunner = func(model tea.Model) tuiProgramRunner {
+	return tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+}
+
+var exitProcess = os.Exit
 
 func main() {
 	args := os.Args[1:]
@@ -1011,16 +1031,32 @@ func runTUIWithOptions(cfg *config.Config, opts ...app.Option) {
 	}
 	audit := beginCommandAudit(nil, nil, "tui", os.Args[1:])
 	var runErr error
+	exitCode := 0
+	defer func() {
+		if exitCode != 0 {
+			exitProcess(exitCode)
+		}
+	}()
+	if cleanup := ownedJustRunScopedDaemonCleanup(); cleanup != nil {
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := cleanup(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to stop worktree-scoped dev daemon: %v\n", err)
+			}
+		}()
+	}
 	defer func() {
 		finishCommandAudit(nil, audit, runErr)
 	}()
 	model := app.NewWithOptions(cfg, opts...)
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := newTUIProgramRunner(model)
 
 	if _, err := p.Run(); err != nil {
 		runErr = err
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		exitCode = 1
+		return
 	}
 }
 
@@ -1033,6 +1069,29 @@ func validateTUILaunchContext() error {
 		return nil
 	}
 	return fmt.Errorf("refusing to start the TUI from an Azedarach development worktree while AZEDARACH_DAEMON_SCOPE=%q uses the shared production daemon; set AZEDARACH_DAEMON_SCOPE=worktree when intentionally testing this worktree's azd", os.Getenv("AZEDARACH_DAEMON_SCOPE"))
+}
+
+func ownedJustRunScopedDaemonCleanup() func(context.Context) error {
+	if strings.TrimSpace(os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")) != "just-run" {
+		return nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil || !config.UseScopedDaemonRuntimeFor(cwd) || !config.IsAzedarachDevelopmentWorktree(cwd) {
+		return nil
+	}
+	worktreeRoot, err := config.ResolveWorktreeRoot(cwd)
+	if err != nil || strings.TrimSpace(worktreeRoot) == "" {
+		return nil
+	}
+	socketPath := config.ScopedDaemonSocketPath(worktreeRoot)
+	if filepath.Clean(socketPath) == filepath.Clean(config.GlobalDaemonSocketPath()) {
+		return nil
+	}
+	stopper := newTUIDaemonStopper(worktreeRoot, socketPath)
+	if stopper == nil {
+		return nil
+	}
+	return stopper.Stop
 }
 
 func isLinkedGitWorktree(startDir string) bool {
