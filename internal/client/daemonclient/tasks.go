@@ -65,8 +65,9 @@ type TaskUpdateParams struct {
 
 // TaskStatusRequest contains the payload used to update a task status.
 type TaskStatusRequest struct {
-	TaskID naming.IssueID `json:"task_id"`
-	Status domain.Status  `json:"status"`
+	TaskID          naming.IssueID `json:"task_id"`
+	Status          domain.Status  `json:"status"`
+	CascadeChildren bool           `json:"cascade_children,omitempty"`
 }
 
 // TaskStatusOptions controls client-side status transition behavior.
@@ -74,6 +75,7 @@ type TaskStatusOptions struct {
 	ForceWorktree        bool
 	IgnoreAhead          bool
 	IntegrateBeforeClose bool
+	CascadeChildren      bool
 }
 
 type TaskDeleteOptions struct {
@@ -663,8 +665,9 @@ func (c *Client) UpdateTaskStatusWithOptions(ctx context.Context, taskID string,
 		return err
 	}
 	return c.commandJSON(ctx, CommandTaskUpdateStatus, TaskStatusRequest{
-		TaskID: parsedTaskID,
-		Status: status,
+		TaskID:          parsedTaskID,
+		Status:          status,
+		CascadeChildren: opts.CascadeChildren,
 	}, nil)
 }
 

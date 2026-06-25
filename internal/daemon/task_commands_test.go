@@ -4712,6 +4712,200 @@ func TestTaskDeleteRunsIssueResourceCleanupWithoutRuntimeAttachments(t *testing.
 	}
 }
 
+func TestTaskUpdateStatusRejectsInReviewWithUnreadyChildren(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-guard-children"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusInProgress,
+		ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+
+	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, false)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "child issues are not review-ready") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") || !strings.Contains(resp.Error.Message, "--cascade-children") {
+		t.Fatalf("task.update_status response = %+v, want child readiness guard", resp)
+	}
+	parent, err := issuesClient.GetWithRuntime(ctx, projectID, parentID)
+	if err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	if parent.Status != domain.StatusOpen {
+		t.Fatalf("parent status = %s, want open", parent.Status)
+	}
+}
+
+func TestTaskUpdateStatusCascadeChildrenMovesNestedDescendantsToInReview(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-cascade-children"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusInProgress,
+		ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	grandchildID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Grandchild",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusOpen,
+		ParentID: &childID,
+	})
+	if err != nil {
+		t.Fatalf("create grandchild: %v", err)
+	}
+
+	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, true)
+	if !resp.OK || resp.Error != nil {
+		t.Fatalf("task.update_status response = %+v, want cascade success", resp)
+	}
+	for _, id := range []string{parentID, childID, grandchildID} {
+		task, err := issuesClient.GetWithRuntime(ctx, projectID, id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if task.Status != domain.StatusInReview {
+			t.Fatalf("%s status = %s, want in_review", id, task.Status)
+		}
+	}
+}
+
+func TestTaskUpdateStatusReviewGuardHonorsLegacyParentChildDependency(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-guard-legacy-edge"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Child", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := issuesClient.AddDependency(ctx, childID, parentID, string(domain.DependencyParentChild)); err != nil {
+		t.Fatalf("add parent-child: %v", err)
+	}
+
+	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, false)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, childID+" (open)") {
+		t.Fatalf("task.update_status response = %+v, want legacy child guard", resp)
+	}
+}
+
+func TestTaskUpdateStatusAllowsInReviewWhenChildrenReviewReady(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-guard-ready"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	for _, status := range []domain.Status{domain.StatusInReview, domain.StatusDone} {
+		if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+			Title:    "Child",
+			Type:     domain.TypeTask,
+			Status:   status,
+			ParentID: &parentID,
+		}); err != nil {
+			t.Fatalf("create child %s: %v", status, err)
+		}
+	}
+
+	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, false)
+	if !resp.OK || resp.Error != nil {
+		t.Fatalf("task.update_status response = %+v, want success", resp)
+	}
+	parent, err := issuesClient.GetWithRuntime(ctx, projectID, parentID)
+	if err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	if parent.Status != domain.StatusInReview {
+		t.Fatalf("parent status = %s, want in_review", parent.Status)
+	}
+}
+
+func TestTaskUpdateStatusRejectsCascadeChildrenForNonReviewStatus(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-review-cascade-non-review"
+	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Task", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	resp := updateStatusForTest(t, d, projectID, taskID, domain.StatusInProgress, true)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "cascade_children is only supported with status in_review") {
+		t.Fatalf("task.update_status response = %+v, want cascade non-review rejection", resp)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if task.Status != domain.StatusOpen {
+		t.Fatalf("task status = %s, want open", task.Status)
+	}
+}
+
+func newTaskStatusReviewGuardDaemon(t *testing.T, projectID string) (*Daemon, *issues.Client) {
+	t.Helper()
+	repoDir := t.TempDir()
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	return &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, slog.Default()),
+	}, issuesClient
+}
+
+func updateStatusForTest(t *testing.T, d *Daemon, projectID, taskID string, status domain.Status, cascadeChildren bool) protocol.ResponseEnvelope {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"task_id":          taskID,
+		"status":           status,
+		"cascade_children": cascadeChildren,
+	})
+	if err != nil {
+		t.Fatalf("marshal status request: %v", err)
+	}
+	resp, err := d.handleTaskUpdateStatus(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       naming.RequestID("req-review-guard-" + taskID),
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.update_status",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskUpdateStatus error: %v", err)
+	}
+	return resp
+}
+
 func assertNextTaskUpdatedEvent(t *testing.T, events <-chan protocol.EventEnvelope, taskID string, status domain.Status) {
 	t.Helper()
 	select {

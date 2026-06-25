@@ -410,6 +410,22 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		})
 		return m, nil
 	}
+	if msg.Key == "yes" && m.pendingReviewCascade != nil {
+		pending := *m.pendingReviewCascade
+		m.pendingReviewCascade = nil
+		m.beginTaskStatusMoveFeedback(pending.taskID, pending.previousStatus, domain.StatusInReview)
+		return m, m.moveTaskStatusCascadeChildrenCmd(pending.taskID, pending.previousStatus, domain.StatusInReview)
+	}
+	if msg.Key == "no" && m.pendingReviewCascade != nil {
+		pending := *m.pendingReviewCascade
+		m.pendingReviewCascade = nil
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: fmt.Sprintf("Cancelled review cascade for %s", pending.taskID),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+	}
 
 	task, session := m.getCurrentTaskAndSession()
 	if selectionTaskID != "" {
@@ -671,6 +687,29 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 		m.beginTaskStatusMoveFeedback(task.ID.String(), previousStatus, newStatus)
 		return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, newStatus)
+	case "C":
+		if task.Status == domain.StatusInReview {
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: "Task is already in In Review status",
+				Expires: time.Now().Add(2 * time.Second),
+			})
+			return m, nil
+		}
+		childIDs := m.reviewCascadeChildIDs(task.ID.String())
+		if len(childIDs) == 0 {
+			previousStatus := task.Status
+			m.beginTaskStatusMoveFeedback(task.ID.String(), previousStatus, domain.StatusInReview)
+			return m, m.moveTaskStatusCmd(task.ID.String(), previousStatus, domain.StatusInReview)
+		}
+		pending := pendingReviewCascadeConfirmation{
+			taskID:         task.ID.String(),
+			previousStatus: task.Status,
+			childIDs:       childIDs,
+		}
+		m.pendingReviewCascade = &pending
+		confirm := overlay.NewConfirmDialogExplicitYN("Move children to review?", formatReviewCascadeConfirmPrompt(pending))
+		return m, m.openOverlay(confirm)
 	case "e":
 		return m.openEditTaskOverlay(*task)
 	case "T":
