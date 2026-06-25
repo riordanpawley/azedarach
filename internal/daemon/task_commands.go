@@ -11,8 +11,10 @@ import (
 	"strings"
 	"time"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -58,6 +60,11 @@ const (
 	taskListSnapshotCacheTTL        = 5 * time.Second
 	taskListSnapshotRuntimeCacheTTL = 750 * time.Millisecond
 	taskListSnapshotLoadTimeout     = 10 * time.Second
+)
+
+const (
+	taskDeferredWorktreeCleanupOperationKind = "task.worktree_cleanup"
+	taskDeferredWorktreeCleanupTimeout       = 15 * time.Second
 )
 
 type taskListSnapshotCacheEntry struct {
@@ -112,18 +119,31 @@ type taskDeleteRequest struct {
 }
 
 type taskCloseResult struct {
-	TaskID                  string                 `json:"task_id"`
-	Status                  string                 `json:"status"`
-	IntegrationRequested    bool                   `json:"integration_requested,omitempty"`
-	Integrated              bool                   `json:"integrated,omitempty"`
-	IntegratedSourceBranch  string                 `json:"integrated_source_branch,omitempty"`
-	IntegratedTargetBranch  string                 `json:"integrated_target_branch,omitempty"`
-	SessionStopped          bool                   `json:"session_stopped,omitempty"`
-	WorktreeRemoved         bool                   `json:"worktree_removed,omitempty"`
-	WorktreeCleanupDeferred bool                   `json:"worktree_cleanup_deferred,omitempty"`
-	WorktreeForced          bool                   `json:"worktree_forced,omitempty"`
-	Revision                uint64                 `json:"revision,omitempty"`
-	Phases                  []taskClosePhaseTiming `json:"phases,omitempty"`
+	TaskID                     string                 `json:"task_id"`
+	Status                     string                 `json:"status"`
+	IntegrationRequested       bool                   `json:"integration_requested,omitempty"`
+	Integrated                 bool                   `json:"integrated,omitempty"`
+	IntegratedSourceBranch     string                 `json:"integrated_source_branch,omitempty"`
+	IntegratedTargetBranch     string                 `json:"integrated_target_branch,omitempty"`
+	SessionStopped             bool                   `json:"session_stopped,omitempty"`
+	WorktreeRemoved            bool                   `json:"worktree_removed,omitempty"`
+	WorktreeCleanupDeferred    bool                   `json:"worktree_cleanup_deferred,omitempty"`
+	WorktreeCleanupOperationID string                 `json:"worktree_cleanup_operation_id,omitempty"`
+	WorktreeForced             bool                   `json:"worktree_forced,omitempty"`
+	Revision                   uint64                 `json:"revision,omitempty"`
+	Phases                     []taskClosePhaseTiming `json:"phases,omitempty"`
+}
+
+type deferredTaskWorktreeCleanupResult struct {
+	ProjectID string `json:"project_id"`
+	TaskID    string `json:"task_id"`
+	Skipped   bool   `json:"skipped,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+type deferredTaskWorktreeCleanupPlan struct {
+	Path   string
+	Branch string
 }
 
 type taskClosePhaseTiming struct {
@@ -1274,9 +1294,16 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task status update requested", "project_id", projectID, "task_id", cmd.TaskID, "status", cmd.Status)
 	}
+	restoreDeferredWorktree := false
+	if cmd.Status != domain.StatusDone {
+		restoreDeferredWorktree = d.cancelDeferredTaskWorktreeCleanup(ctx, projectID, cmd.TaskID, "issue status changed before deferred worktree cleanup completed")
+	}
 	task, err := d.updateTaskStatusExcludingClose(ctx, projectID, cmd.TaskID, cmd.Status)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if restoreDeferredWorktree {
+		d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, cmd.TaskID)
 	}
 	resp := d.successResponse(req)
 	resp.Revision = d.nextRevision(projectID)
@@ -1329,6 +1356,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		})
 		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.close."+name, startedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "skipped", skipped)
 	}
+	var deferredCleanupPlan deferredTaskWorktreeCleanupPlan
 
 	phaseStartedAt := time.Now()
 	integration, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, cmd.IntegrateBeforeClose)
@@ -1380,11 +1408,13 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 			return result, fmt.Errorf("phase worktree_cleanup for issue %s: worktree cleanup unavailable", taskID)
 		}
 		if deferWorktreeCleanup {
-			if err := d.deferTaskWorktreeCleanupForClose(ctx, projectID, taskID); err != nil {
+			plan, err := d.deferTaskWorktreeCleanupForClose(ctx, projectID, taskID)
+			if err != nil {
 				recordPhase("worktree_cleanup", phaseStartedAt, false)
 				return result, fmt.Errorf("phase worktree_cleanup for issue %s: %w", taskID, err)
 			}
 			result.WorktreeCleanupDeferred = true
+			deferredCleanupPlan = plan
 		} else {
 			if err := d.worktreeAdapter.Delete(ctx, projectID, taskID, cmd.ForceWorktree); err != nil {
 				recordPhase("worktree_cleanup", phaseStartedAt, false)
@@ -1411,6 +1441,13 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	recordPhase("status_write", phaseStartedAt, false)
 	rev := d.nextRevision(projectID)
 	result.Revision = rev
+	if deferWorktreeCleanup {
+		operationID, err := d.submitDeferredTaskWorktreeCleanup(ctx, projectID, taskID, deferredCleanupPlan.Path, deferredCleanupPlan.Branch)
+		if err != nil {
+			return result, fmt.Errorf("phase worktree_cleanup_enqueue for issue %s: %w", taskID, err)
+		}
+		result.WorktreeCleanupOperationID = operationID
+	}
 	d.publishTaskEvent(req, protocol.EventTaskUpdated, rev, taskEventBodyFromTask(projectID, task))
 	return result, nil
 }
@@ -1507,55 +1544,149 @@ func daemonShouldDeferWorktreeCleanupForClose(cmd taskCloseRequest, integration 
 		!daemonCloseGuardTaskHasSession(guard.Task)
 }
 
-func (d *Daemon) deferTaskWorktreeCleanupForClose(ctx context.Context, projectID, taskID string) error {
+func (d *Daemon) deferTaskWorktreeCleanupForClose(ctx context.Context, projectID, taskID string) (deferredTaskWorktreeCleanupPlan, error) {
 	if d.worktreeAdapter == nil {
-		return fmt.Errorf("worktree cleanup unavailable")
+		return deferredTaskWorktreeCleanupPlan{}, fmt.Errorf("worktree cleanup unavailable")
 	}
-	var fallbackBranch string
+	var fallbackBranch, fallbackPath string
 	if projected, found, err := d.worktreeAdapter.projectedWorktreeForIssue(ctx, projectID, taskID); err != nil {
-		return fmt.Errorf("read worktree projection before deferred cleanup: %w", err)
+		return deferredTaskWorktreeCleanupPlan{}, fmt.Errorf("read worktree projection before deferred cleanup: %w", err)
 	} else if found {
 		fallbackBranch = strings.TrimSpace(projected.Branch)
+		fallbackPath = strings.TrimSpace(projected.Path)
 	}
 	if store := d.worktreeRuntimeStateStore(projectID); store != nil {
 		if err := store.DeleteWorktreeState(ctx, projectID, taskID); err != nil {
-			return fmt.Errorf("clear worktree projection before close: %w", err)
+			return deferredTaskWorktreeCleanupPlan{}, fmt.Errorf("clear worktree projection before close: %w", err)
 		}
 	}
 	d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, projectID, taskID)
-	d.startDeferredTaskWorktreeCleanup(projectID, taskID, fallbackBranch)
-	return nil
+	return deferredTaskWorktreeCleanupPlan{Path: fallbackPath, Branch: fallbackBranch}, nil
 }
 
-func (d *Daemon) startDeferredTaskWorktreeCleanup(projectID, taskID, fallbackBranch string) {
+func (d *Daemon) submitDeferredTaskWorktreeCleanup(ctx context.Context, projectID, taskID, fallbackPath, fallbackBranch string) (string, error) {
+	if d.operationRuntime == nil || d.operationRuntime.manager == nil {
+		return "", fmt.Errorf("operation runtime unavailable")
+	}
 	manager := d.worktreeManagerForProject(projectID)
 	if manager == nil {
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.Warn("deferred worktree cleanup skipped: worktree manager unavailable", "project_id", projectID, "task_id", taskID)
-		}
-		return
+		return "", fmt.Errorf("worktree manager unavailable")
 	}
 	projectID = normalizedProjectID(projectID)
 	taskID = strings.TrimSpace(taskID)
+	fallbackPath = strings.TrimSpace(fallbackPath)
 	fallbackBranch = strings.TrimSpace(fallbackBranch)
-	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	resourceKeys := []string{"issue:" + projectID + ":" + taskID}
+	if fallbackPath != "" {
+		resourceKeys = append(resourceKeys, "worktree:"+filepath.Clean(fallbackPath))
+	}
+	if fallbackBranch != "" {
+		resourceKeys = append(resourceKeys, "branch:"+fallbackBranch)
+	}
+	submitResult, err := d.operationRuntime.manager.Submit(ctx, daemonops.SubmitRequest{
+		ProjectID:    projectID,
+		IssueID:      taskID,
+		Kind:         taskDeferredWorktreeCleanupOperationKind,
+		DedupeKey:    taskDeferredWorktreeCleanupOperationKind + ":" + taskID,
+		ResourceKeys: resourceKeys,
+	}, func(runCtx context.Context) ([]byte, error) {
+		runCtx, cancel := context.WithTimeout(runCtx, taskDeferredWorktreeCleanupTimeout)
 		defer cancel()
-		_, err := manager.DeleteWithOptions(bgCtx, taskID, git.WorktreeDeleteOptions{
+		if d.deferredTaskWorktreeCleanupShouldSkip(runCtx, projectID, taskID, fallbackPath, fallbackBranch) {
+			return json.Marshal(deferredTaskWorktreeCleanupResult{
+				ProjectID: projectID,
+				TaskID:    taskID,
+				Skipped:   true,
+				Reason:    "issue no longer closed",
+			})
+		}
+		removedWorktree, err := manager.DeleteWithOptions(runCtx, taskID, git.WorktreeDeleteOptions{
 			Force:          true,
 			BranchCleanup:  git.WorktreeBranchCleanupRequired,
 			FallbackBranch: fallbackBranch,
 		})
 		if err != nil {
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Warn("deferred worktree cleanup failed", "project_id", projectID, "task_id", taskID, "error", err)
+			if errors.Is(err, git.ErrWorktreeNotFound) {
+				return json.Marshal(deferredTaskWorktreeCleanupResult{
+					ProjectID: projectID,
+					TaskID:    taskID,
+				})
 			}
-			return
+			return nil, err
 		}
+		if removedWorktree != nil {
+			_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(removedWorktree.Path))
+		}
+		return json.Marshal(deferredTaskWorktreeCleanupResult{
+			ProjectID: projectID,
+			TaskID:    taskID,
+		})
+	})
+	if err != nil {
+		return "", err
+	}
+	return submitResult.Record.ID, nil
+}
+
+func (d *Daemon) deferredTaskWorktreeCleanupShouldSkip(ctx context.Context, projectID, taskID, fallbackPath, fallbackBranch string) bool {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return false
+	}
+	task, err := issueClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil || task.Status == domain.StatusDone {
+		return false
+	}
+	if fallbackPath != "" {
+		d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, fallbackPath, fallbackBranch)
+	} else {
+		d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, taskID)
+	}
+	return true
+}
+
+func (d *Daemon) cancelDeferredTaskWorktreeCleanup(ctx context.Context, projectID, taskID, reason string) bool {
+	if d == nil || d.operationRuntime == nil || d.operationRuntime.manager == nil {
+		return false
+	}
+	projectID = normalizedProjectID(projectID)
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return false
+	}
+	records, err := d.operationRuntime.manager.List(ctx, daemonops.Query{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Kind:      taskDeferredWorktreeCleanupOperationKind,
+		States:    []daemonops.State{daemonops.StateQueued, daemonops.StateRunning},
+	})
+	if err != nil {
 		if d.cfg.Logger != nil {
-			d.cfg.Logger.Info("deferred worktree cleanup completed", "project_id", projectID, "task_id", taskID)
+			d.cfg.Logger.Warn("deferred worktree cleanup cancellation lookup failed", "project_id", projectID, "task_id", taskID, "error", err)
 		}
-	}()
+		return false
+	}
+	cancelled := false
+	for _, record := range records {
+		if _, err := d.operationRuntime.manager.Cancel(ctx, record.ID, reason); err != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("deferred worktree cleanup cancellation failed", "project_id", projectID, "task_id", taskID, "operation_id", record.ID, "error", err)
+			continue
+		}
+		cancelled = true
+	}
+	return cancelled
+}
+
+func (d *Daemon) restoreDeferredCleanupWorktreeProjection(ctx context.Context, projectID, taskID string) {
+	manager := d.worktreeManagerForProject(projectID)
+	if manager == nil {
+		return
+	}
+	worktree, err := manager.Get(ctx, taskID)
+	if err != nil || worktree == nil {
+		return
+	}
+	d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, worktree.Path, worktree.Branch)
 }
 
 func (d *Daemon) liveWorktreePathSet(ctx context.Context, projectID string) (map[string]struct{}, bool, error) {
