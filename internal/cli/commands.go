@@ -58,7 +58,7 @@ const (
 	sessionStartCommandTimeout  = 5 * time.Minute
 	branchMergeToBaseTimeout    = 2 * time.Minute
 	daemonCommandTimeout        = 15 * time.Second
-	issueCloseCleanupTimeout    = 2 * time.Minute
+	issueCloseCleanupTimeout    = 10 * time.Minute
 	issueCreateCommandTimeout   = 10 * time.Second
 	issueCreateAutostartTimeout = 12 * time.Second
 	exitCodeHardFailure         = 1
@@ -4059,14 +4059,15 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 
 	if opts.JSON {
 		return printJSON(map[string]any{
-			"issue_id":              opts.IssueID,
-			"status":                "closed",
-			"updated":               true,
-			"integration_requested": result.IntegrationRequested,
-			"integrated":            result.Integrated,
-			"cleanup_performed":     true,
-			"worktree_forced":       opts.ForceWorktree,
-			"phases":                taskClosePhaseJSON(result.Phases),
+			"issue_id":                  opts.IssueID,
+			"status":                    "closed",
+			"updated":                   true,
+			"integration_requested":     result.IntegrationRequested,
+			"integrated":                result.Integrated,
+			"cleanup_performed":         true,
+			"worktree_forced":           opts.ForceWorktree,
+			"worktree_cleanup_deferred": result.WorktreeCleanupDeferred,
+			"phases":                    taskClosePhaseJSON(result.Phases),
 		})
 	}
 	fmt.Printf("Closed issue: %s\n", opts.IssueID)
@@ -4079,6 +4080,9 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 	fmt.Println("- Cleanup performed")
 	if opts.ForceWorktree {
 		fmt.Println("- Worktree removal forced")
+	}
+	if result.WorktreeCleanupDeferred {
+		fmt.Println("- Worktree cleanup deferred")
 	}
 	printTaskClosePhases(result.Phases)
 	return nil

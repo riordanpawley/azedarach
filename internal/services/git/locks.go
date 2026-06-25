@@ -4,16 +4,17 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 type worktreeLock struct {
-	token chan struct{}
+	mu      sync.Mutex
+	held    bool
+	waiters []chan struct{}
 }
 
 func newWorktreeLock() *worktreeLock {
-	lock := &worktreeLock{token: make(chan struct{}, 1)}
-	lock.token <- struct{}{}
-	return lock
+	return &worktreeLock{}
 }
 
 // WithWorktreeLock serializes daemon-owned mutations for a target worktree.
@@ -24,16 +25,69 @@ func (c *Client) WithWorktreeLock(ctx context.Context, worktree string, fn func(
 	if fn == nil {
 		return nil
 	}
-	lock := c.lockForWorktree(worktree)
+	unlock, err := c.lockForWorktree(worktree).acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return fn(ctx)
+}
+
+func (l *worktreeLock) acquire(ctx context.Context) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	waiter := make(chan struct{})
+	l.mu.Lock()
+	if !l.held && len(l.waiters) == 0 {
+		l.held = true
+		l.mu.Unlock()
+		return l.release, nil
+	}
+	l.waiters = append(l.waiters, waiter)
+	l.mu.Unlock()
+
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
-	case <-lock.token:
+		if !l.removeWaiter(waiter) {
+			l.release()
+		}
+		return nil, ctx.Err()
+	case <-waiter:
+		return l.release, nil
 	}
-	defer func() {
-		lock.token <- struct{}{}
-	}()
-	return fn(ctx)
+}
+
+func (l *worktreeLock) release() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.waiters) == 0 {
+		l.held = false
+		return
+	}
+	next := l.waiters[0]
+	copy(l.waiters, l.waiters[1:])
+	l.waiters[len(l.waiters)-1] = nil
+	l.waiters = l.waiters[:len(l.waiters)-1]
+	close(next)
+}
+
+func (l *worktreeLock) removeWaiter(waiter chan struct{}) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i, candidate := range l.waiters {
+		if candidate != waiter {
+			continue
+		}
+		copy(l.waiters[i:], l.waiters[i+1:])
+		l.waiters[len(l.waiters)-1] = nil
+		l.waiters = l.waiters[:len(l.waiters)-1]
+		return true
+	}
+	return false
 }
 
 func (c *Client) lockForWorktree(worktree string) *worktreeLock {

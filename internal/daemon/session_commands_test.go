@@ -376,6 +376,45 @@ func TestLifecycleSessionProjectionByIssueKeyIgnoresAgentScopedRows(t *testing.T
 	}
 }
 
+func TestAgentScopedProjectionCannotRecreateTmuxSession(t *testing.T) {
+	if sessionProjectionCanRecreateTmuxSession(daemonstate.Session{
+		ID:            "az-bra.pane-190",
+		IssueID:       "bra",
+		State:         daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateAttached,
+	}) {
+		t.Fatal("agent-scoped projection authorized tmux recovery")
+	}
+	if !sessionProjectionCanRecreateTmuxSession(daemonstate.Session{
+		ID:            "az-bra",
+		IssueID:       "bra",
+		State:         daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateStopped,
+	}) {
+		t.Fatal("parent desired-active projection did not authorize tmux recovery")
+	}
+	if sessionProjectionCanRecreateTmuxSession(daemonstate.Session{
+		ID:      "az-bra",
+		IssueID: "bra",
+		State:   daemonstate.SessionStateStopped,
+	}) {
+		t.Fatal("stopped parent projection authorized tmux recovery")
+	}
+	if sessionProjectionCanRecreateTmuxSession(daemonstate.Session{
+		ID:      "az-bra",
+		IssueID: "bra",
+		State:   daemonstate.SessionStateStopping,
+	}) {
+		t.Fatal("stopping parent projection authorized tmux recovery")
+	}
+	if sessionProjectionCanRecreateTmuxSession(daemonstate.Session{
+		ID:      "az-bra",
+		IssueID: "bra",
+	}) {
+		t.Fatal("empty-state parent projection authorized tmux recovery")
+	}
+}
+
 func TestSourceForSessionInvariant(t *testing.T) {
 	d := &Daemon{}
 	if got := d.sourceForSessionInvariant(sessionInvariantSessionStartConflict); got != daemonInvariantSourceTmux {
@@ -3629,6 +3668,63 @@ func TestHandleSessionStopDirectKillsLiveProjectedIssueSessions(t *testing.T) {
 	}
 }
 
+func TestRefreshStoppedSessionRuntimeStateWritesCanonicalParentForPaneOnlyMatch(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "ciw"
+	)
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	paneSessionID := sessionID + ".pane-190"
+
+	store := daemonstate.NewStore()
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            paneSessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateStopped,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed pane runtime state: %v", err)
+	}
+
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  slog.Default(),
+		},
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	if err := daemon.refreshStoppedSessionRuntimeState(context.Background(), projectID, issueID, []string{paneSessionID}); err != nil {
+		t.Fatalf("refresh stopped runtime state: %v", err)
+	}
+
+	rows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("list session states: %v", err)
+	}
+	stoppedByID := map[string]bool{}
+	for _, row := range rows {
+		if row.State != daemonstate.SessionStateStopped || row.ObservedState != daemonstate.SessionStateStopped {
+			t.Fatalf("runtime row %s = desired %s observed %s, want stopped/stopped", row.ID, row.State, row.ObservedState)
+		}
+		stoppedByID[row.ID] = true
+	}
+	for _, want := range []string{sessionID, paneSessionID} {
+		if !stoppedByID[want] {
+			t.Fatalf("missing stopped runtime row for %s; rows=%+v", want, rows)
+		}
+	}
+}
+
 func TestHandleSessionStopDirectCanceledContextDoesNotContinueAfterFreshnessFailure(t *testing.T) {
 	const (
 		projectID = "proj"
@@ -4110,6 +4206,161 @@ func TestReconcileRecreatesObservedStoppedDesiredActiveSession(t *testing.T) {
 	}
 	if rows[0].State != daemonstate.SessionStateAttached || rows[0].ObservedState != daemonstate.SessionStateAttached {
 		t.Fatalf("runtime row = desired %s observed %s, want attached/attached", rows[0].State, rows[0].ObservedState)
+	}
+}
+
+func TestReconcileDoesNotRecreateFromAgentScopedProjection(t *testing.T) {
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	issueID, err := issuesClient.Create(context.Background(), issues.CreateTaskParams{
+		Title: "Pane projection only issue",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create local issue: %v", err)
+	}
+	sessionID := naming.CanonicalSessionID(repoDir, issueID)
+	paneSessionID := sessionID + ".pane-535"
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            paneSessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateStopped,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed pane projection: %v", err)
+	}
+
+	tmuxRunner := &testTmuxRunner{
+		sessions:    map[string]bool{},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	store := daemonstate.NewStore()
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: repoDir,
+			CLITool: "claude",
+			Logger:  slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/test"}, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/test"}, repoDir, slog.Default()),
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+	}
+
+	result, err := daemon.reconcileTmuxAndDaemonSessions(context.Background(), projectID, issueID)
+	if err != nil {
+		t.Fatalf("reconcile pane projection: %v", err)
+	}
+	if result.RecreatedTmuxSessions != 0 {
+		t.Fatalf("recreated tmux sessions = %d, want 0", result.RecreatedTmuxSessions)
+	}
+	tmuxRunner.mu.Lock()
+	created := tmuxRunner.newSessionCalls
+	sessionExists := tmuxRunner.sessions[sessionID]
+	tmuxRunner.mu.Unlock()
+	if created != 0 {
+		t.Fatalf("new-session calls = %d, want 0", created)
+	}
+	if sessionExists {
+		t.Fatalf("agent-scoped projection recreated parent tmux session %q", sessionID)
+	}
+}
+
+func TestReconcileStoppedParentWinsOverAgentScopedProjection(t *testing.T) {
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	issueID, err := issuesClient.Create(context.Background(), issues.CreateTaskParams{
+		Title: "Stopped parent with stale pane",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create local issue: %v", err)
+	}
+	sessionID := naming.CanonicalSessionID(repoDir, issueID)
+	paneSessionID := sessionID + ".pane-535"
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	for _, seed := range []daemonstate.Session{
+		{ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateStopped, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: time.Now().UTC()},
+		{ID: paneSessionID, IssueID: issueID, State: daemonstate.SessionStateAttached, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: time.Now().UTC().Add(time.Second)},
+	} {
+		if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, seed); err != nil {
+			t.Fatalf("seed runtime state %s: %v", seed.ID, err)
+		}
+	}
+
+	tmuxRunner := &testTmuxRunner{
+		sessions:    map[string]bool{},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	store := daemonstate.NewStore()
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: repoDir,
+			CLITool: "claude",
+			Logger:  slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/test"}, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/test"}, repoDir, slog.Default()),
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+	}
+
+	result, err := daemon.reconcileTmuxAndDaemonSessions(context.Background(), projectID, issueID)
+	if err != nil {
+		t.Fatalf("reconcile stopped parent with stale pane: %v", err)
+	}
+	if result.RecreatedTmuxSessions != 0 {
+		t.Fatalf("recreated tmux sessions = %d, want 0", result.RecreatedTmuxSessions)
+	}
+	tmuxRunner.mu.Lock()
+	created := tmuxRunner.newSessionCalls
+	sessionExists := tmuxRunner.sessions[sessionID]
+	tmuxRunner.mu.Unlock()
+	if created != 0 {
+		t.Fatalf("new-session calls = %d, want 0", created)
+	}
+	if sessionExists {
+		t.Fatalf("stale pane projection recreated stopped parent tmux session %q", sessionID)
 	}
 }
 
@@ -6466,8 +6717,9 @@ func TestEnrichTasksWithSessionStateSeedsStartedAtFromSnapshot(t *testing.T) {
 		t.Fatalf("seed projection session: %v", err)
 	}
 
+	runtimeUpdatedAt := time.Now().UTC().Add(time.Hour)
 	tasks := []domain.Task{
-		{ID: issueID, Title: "session elapsed should render", Type: domain.TypeTask},
+		{ID: issueID, Title: "session elapsed should render", Type: domain.TypeTask, RuntimeUpdatedAt: runtimeUpdatedAt},
 	}
 	enriched := d.enrichTasksWithSessionState(context.Background(), projectID, tasks)
 	if len(enriched) != 1 {
@@ -6481,6 +6733,9 @@ func TestEnrichTasksWithSessionStateSeedsStartedAtFromSnapshot(t *testing.T) {
 	}
 	if !enriched[0].Session.StartedAt.Equal(sessionSnapshot.StartedAt.UTC()) {
 		t.Fatalf("started_at = %v, want %v", enriched[0].Session.StartedAt, sessionSnapshot.StartedAt.UTC())
+	}
+	if !enriched[0].RuntimeUpdatedAt.Equal(runtimeUpdatedAt) {
+		t.Fatalf("runtime_updated_at = %v, want preserved newer %v", enriched[0].RuntimeUpdatedAt, runtimeUpdatedAt)
 	}
 }
 
@@ -6538,6 +6793,45 @@ func TestEnrichTasksWithSessionStateFallsBackToProjectionCache(t *testing.T) {
 	}
 	if enriched[0].Session.Activity != "unknown" || enriched[0].Session.ActivitySource != "none" {
 		t.Fatalf("activity = %s/%s, want unknown/none", enriched[0].Session.Activity, enriched[0].Session.ActivitySource)
+	}
+}
+
+func TestActiveSessionIssueKeysIgnoreDesiredStoppedWithStaleObservedRunning(t *testing.T) {
+	const issueID = "bix"
+	sessionID := naming.CanonicalSessionID("proj-stale-observed", issueID)
+
+	active := activeSessionIssueKeysFromProjection([]daemonstate.Session{
+		{
+			ID:            sessionID,
+			IssueID:       issueID,
+			State:         daemonstate.SessionStateStopped,
+			ObservedState: daemonstate.SessionStateRunning,
+			UpdatedAt:     time.Now().UTC(),
+		},
+	}, "proj-stale-observed")
+
+	if _, ok := active[sessionKey(issueID)]; ok {
+		t.Fatalf("desired-stopped session %s was treated as active: %+v", issueID, active)
+	}
+}
+
+func TestActiveSessionIDsFromProjectionIgnoreDesiredStoppedWithStaleObservedRunning(t *testing.T) {
+	const issueID = "biy"
+	sessionID := naming.CanonicalSessionID("proj-stale-observed", issueID)
+	daemon := &Daemon{}
+
+	active := daemon.activeSessionIDsFromProjection("proj-stale-observed", []daemonstate.Session{
+		{
+			ID:            sessionID,
+			IssueID:       issueID,
+			State:         daemonstate.SessionStateStopped,
+			ObservedState: daemonstate.SessionStateRunning,
+			UpdatedAt:     time.Now().UTC(),
+		},
+	})
+
+	if len(active) != 0 {
+		t.Fatalf("desired-stopped session %s was treated as active IDs: %+v", issueID, active)
 	}
 }
 
@@ -6619,6 +6913,30 @@ func TestSessionDisplayActivityUsesLatestParentSessionActivity(t *testing.T) {
 	}
 	if display.Activity != "no-agent" || display.Source != "session" {
 		t.Fatalf("activity = %s/%s, want no-agent/session", display.Activity, display.Source)
+	}
+}
+
+func TestSessionHookActivityIgnoresDesiredStoppedWithStaleObservedRunning(t *testing.T) {
+	const (
+		projectID = "proj-stale-hook"
+		issueID   = "bih"
+	)
+	sessionID := naming.CanonicalSessionID(projectID, issueID) + ".pane-1"
+
+	activityByKey := sessionHookActivityByIssueKeyFromSessions([]daemonstate.Session{
+		{
+			ID:             sessionID,
+			IssueID:        issueID,
+			State:          daemonstate.SessionStateStopped,
+			ObservedState:  daemonstate.SessionStateRunning,
+			Activity:       "busy",
+			ActivitySource: "hooks",
+			UpdatedAt:      time.Now().UTC(),
+		},
+	}, projectID)
+
+	if activity, ok := activityByKey[sessionKey(issueID)]; ok {
+		t.Fatalf("desired-stopped hook activity was carried forward: %+v", activity)
 	}
 }
 

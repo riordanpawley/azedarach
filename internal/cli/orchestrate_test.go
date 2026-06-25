@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/config"
@@ -1622,7 +1623,7 @@ func TestOrchestrateIntegrateCommandBlocksMergeWithoutCompletionEvidence(t *test
 }
 
 func TestOrchestrateIntegrateApplySuccess(t *testing.T) {
-	deps, commands := orchestrateIntegrateApplyDeps(t, "")
+	deps, commands, closeBudgets := orchestrateIntegrateApplyDeps(t, "")
 	output := captureStdout(t, func() error {
 		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2", Apply: true})
 	})
@@ -1641,10 +1642,16 @@ func TestOrchestrateIntegrateApplySuccess(t *testing.T) {
 			t.Fatalf("commands = %+v, did not expect client-side integration/cleanup command %s", *commands, unexpected)
 		}
 	}
+	if len(*closeBudgets) != 1 {
+		t.Fatalf("close budget count = %d, want 1", len(*closeBudgets))
+	}
+	if budget := (*closeBudgets)[0]; budget < issueCloseCleanupTimeout-10*time.Second {
+		t.Fatalf("close budget = %s, want near %s", budget, issueCloseCleanupTimeout)
+	}
 }
 
 func TestOrchestrateIntegrateApplyRequiresCompletionEvidence(t *testing.T) {
-	deps, commands := orchestrateIntegrateApplyDeps(t, "missing_evidence")
+	deps, commands, _ := orchestrateIntegrateApplyDeps(t, "missing_evidence")
 	output, err := captureStdoutAllowError(t, func() error {
 		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2", Apply: true, JSON: true})
 	})
@@ -1662,7 +1669,7 @@ func TestOrchestrateIntegrateApplyRequiresCompletionEvidence(t *testing.T) {
 }
 
 func TestOrchestrateIntegrateApplyDaemonIntegrationFailureStopsBeforeAppend(t *testing.T) {
-	deps, commands := orchestrateIntegrateApplyDeps(t, "merge")
+	deps, commands, _ := orchestrateIntegrateApplyDeps(t, "merge")
 	output, err := captureStdoutAllowError(t, func() error {
 		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2", Apply: true})
 	})
@@ -1678,7 +1685,7 @@ func TestOrchestrateIntegrateApplyDaemonIntegrationFailureStopsBeforeAppend(t *t
 }
 
 func TestOrchestrateIntegrateApplySurfacesDaemonIntegrationConflict(t *testing.T) {
-	deps, commands := orchestrateIntegrateApplyDeps(t, "merge_conflict")
+	deps, commands, _ := orchestrateIntegrateApplyDeps(t, "merge_conflict")
 	output, err := captureStdoutAllowError(t, func() error {
 		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2", Apply: true, JSON: true})
 	})
@@ -1694,7 +1701,7 @@ func TestOrchestrateIntegrateApplySurfacesDaemonIntegrationConflict(t *testing.T
 }
 
 func TestOrchestrateIntegrateApplyReportsDaemonCloseFailure(t *testing.T) {
-	deps, commands := orchestrateIntegrateApplyDeps(t, "close_issue")
+	deps, commands, _ := orchestrateIntegrateApplyDeps(t, "close_issue")
 	output, err := captureStdoutAllowError(t, func() error {
 		return OrchestrateIntegrateCommand(deps, OrchestrateIntegrateOptions{IssueID: "az-2", Apply: true})
 	})
@@ -1714,17 +1721,18 @@ func TestOrchestrateIntegrateApplyReportsDaemonCloseFailure(t *testing.T) {
 	}
 }
 
-func orchestrateIntegrateApplyDeps(t *testing.T, failStep string) (*Dependencies, *[]string) {
+func orchestrateIntegrateApplyDeps(t *testing.T, failStep string) (*Dependencies, *[]string, *[]time.Duration) {
 	t.Helper()
 	child := naming.IssueID("az-2")
 	parent := naming.IssueID("az-1")
 	commands := make([]string, 0, 16)
+	closeBudgets := make([]time.Duration, 0, 1)
 	deps := &Dependencies{
 		RepoDir:   "/repo-parent",
 		ProjectID: protocol.DefaultProjectID,
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
-			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
 				switch req.Command {
 				case daemonclient.CommandWorktreeList:
@@ -1798,6 +1806,9 @@ func orchestrateIntegrateApplyDeps(t *testing.T, failStep string) (*Dependencies
 						Result:   gitservice.MergeResult{Success: true},
 					}), nil
 				case daemonclient.CommandTaskClose:
+					if deadline, ok := ctx.Deadline(); ok {
+						closeBudgets = append(closeBudgets, time.Until(deadline))
+					}
 					var body struct {
 						IntegrateBeforeClose bool `json:"integrate_before_close"`
 					}
@@ -1836,7 +1847,7 @@ func orchestrateIntegrateApplyDeps(t *testing.T, failStep string) (*Dependencies
 			},
 		}),
 	}
-	return deps, &commands
+	return deps, &commands, &closeBudgets
 }
 
 func TestOrchestrateCloseSessionCommandStopsSession(t *testing.T) {

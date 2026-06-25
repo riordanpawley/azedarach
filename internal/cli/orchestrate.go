@@ -1122,7 +1122,7 @@ func applyOrchestrateIntegration(deps *Dependencies, issueID string, mergeReady 
 	}
 	result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "completion_evidence", Status: "success"})
 
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), issueCloseCleanupTimeout)
 	defer cancel()
 	closeResult, err := deps.DaemonClient.CloseTask(cleanupCtx, issueID, daemonclient.TaskStatusOptions{
 		IntegrateBeforeClose: true,
