@@ -152,17 +152,18 @@ type daemonStreamMetrics struct {
 // Model is the main application state
 type Model struct {
 	// Core data
-	tasks              []domain.Task
-	sessions           map[string]*domain.Session
-	suppressedTasks    map[string]struct{}
-	pendingStatuses    map[string]pendingTaskStatus
-	pendingDetails     map[string]pendingTaskDetails
-	operationTaskID    map[string]string
-	pendingOpsByTask   map[string]pendingOperationProgress
-	pendingCleanupOps  map[string]pendingWorktreeCleanupConfirmation
-	pendingCleanup     *pendingWorktreeCleanupConfirmation
-	pendingBulkCleanup *pendingBulkCleanupConfirmation
-	pendingClose       *pendingCloseCleanupConfirmation
+	tasks                []domain.Task
+	sessions             map[string]*domain.Session
+	suppressedTasks      map[string]struct{}
+	pendingStatuses      map[string]pendingTaskStatus
+	pendingDetails       map[string]pendingTaskDetails
+	operationTaskID      map[string]string
+	pendingOpsByTask     map[string]pendingOperationProgress
+	pendingCleanupOps    map[string]pendingWorktreeCleanupConfirmation
+	pendingCleanup       *pendingWorktreeCleanupConfirmation
+	pendingBulkCleanup   *pendingBulkCleanupConfirmation
+	pendingClose         *pendingCloseCleanupConfirmation
+	pendingReviewCascade *pendingReviewCascadeConfirmation
 
 	// Navigation (using NavigationService)
 	nav *navigation.Service
@@ -3115,6 +3116,12 @@ type pendingCloseCleanupConfirmation struct {
 	summaries      []closeCleanupTaskSummary
 }
 
+type pendingReviewCascadeConfirmation struct {
+	taskID         string
+	previousStatus domain.Status
+	childIDs       []string
+}
+
 type closeCleanupConfirmPreflightMsg struct {
 	pending   pendingCloseCleanupConfirmation
 	summaries []closeCleanupTaskSummary
@@ -4417,7 +4424,31 @@ func (m Model) moveTaskStatusCmd(taskID string, previousStatus, newStatus domain
 	}
 }
 
+func (m Model) moveTaskStatusCascadeChildrenCmd(taskID string, previousStatus, newStatus domain.Status) tea.Cmd {
+	return func() tea.Msg {
+		err := m.updateTaskStatusWithTimeoutAndOptions(taskID, newStatus, 5*time.Second, daemonclient.TaskStatusOptions{CascadeChildren: true})
+		if err != nil {
+			return taskStatusResultMsg{
+				taskID:         taskID,
+				previousStatus: previousStatus,
+				newStatus:      newStatus,
+				err:            err,
+			}
+		}
+
+		return taskStatusResultMsg{
+			taskID:         taskID,
+			previousStatus: previousStatus,
+			newStatus:      newStatus,
+		}
+	}
+}
+
 func (m Model) updateTaskStatusWithTimeout(taskID string, status domain.Status, defaultTimeout time.Duration) error {
+	return m.updateTaskStatusWithTimeoutAndOptions(taskID, status, defaultTimeout, taskStatusOptionsForStatus(status))
+}
+
+func (m Model) updateTaskStatusWithTimeoutAndOptions(taskID string, status domain.Status, defaultTimeout time.Duration, opts daemonclient.TaskStatusOptions) error {
 	if m.daemonClient == nil {
 		return fmt.Errorf("daemon client unavailable")
 	}
@@ -4426,7 +4457,68 @@ func (m Model) updateTaskStatusWithTimeout(taskID string, status domain.Status, 
 	if status == domain.StatusDone {
 		return m.closeTaskWithIntegrationAndCleanup(ctx, taskID)
 	}
-	return m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, status, taskStatusOptionsForStatus(status))
+	return m.daemonClient.UpdateTaskStatusWithOptions(ctx, taskID, status, opts)
+}
+
+func (m Model) reviewCascadeChildIDs(parentID string) []string {
+	parentID = strings.TrimSpace(parentID)
+	if parentID == "" {
+		return nil
+	}
+	tasksByID := make(map[string]domain.Task, len(m.tasks))
+	childrenByParent := make(map[string][]string)
+	for _, task := range m.tasks {
+		id := strings.TrimSpace(task.ID.String())
+		if id == "" {
+			continue
+		}
+		tasksByID[id] = task
+		if task.ParentID != nil {
+			parent := strings.TrimSpace(task.ParentID.String())
+			if parent != "" {
+				childrenByParent[parent] = append(childrenByParent[parent], id)
+			}
+		}
+		for _, dep := range task.Dependencies {
+			if dep.Type == domain.DependencyParentChild || string(dep.Type) == "parent_child" {
+				parent := strings.TrimSpace(dep.ID.String())
+				if parent != "" {
+					childrenByParent[parent] = append(childrenByParent[parent], id)
+				}
+			}
+		}
+	}
+	seen := make(map[string]struct{})
+	queue := append([]string(nil), childrenByParent[parentID]...)
+	out := make([]string, 0, len(queue))
+	for len(queue) > 0 {
+		childID := queue[0]
+		queue = queue[1:]
+		if _, ok := seen[childID]; ok {
+			continue
+		}
+		seen[childID] = struct{}{}
+		child, ok := tasksByID[childID]
+		if ok && child.Status != domain.StatusInReview && child.Status != domain.StatusDone {
+			out = append(out, childID)
+		}
+		queue = append(queue, childrenByParent[childID]...)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func formatReviewCascadeConfirmPrompt(pending pendingReviewCascadeConfirmation) string {
+	lines := []string{
+		fmt.Sprintf("Parent: %s", pending.taskID),
+		fmt.Sprintf("Children to move: %d", len(pending.childIDs)),
+		"",
+	}
+	for _, childID := range pending.childIDs {
+		lines = append(lines, "- "+childID)
+	}
+	lines = append(lines, "", "Move these child issues to in_review, then move the parent to in_review?")
+	return strings.Join(lines, "\n")
 }
 
 func taskStatusMutationTimeout(status domain.Status, defaultTimeout time.Duration) time.Duration {

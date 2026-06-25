@@ -289,6 +289,38 @@ func newDaemonTestModel(transport *recordingDaemonTransport) Model {
 	return m
 }
 
+func TestMoveTaskStatusCascadeChildrenCmdSendsDaemonCascadeOption(t *testing.T) {
+	var statusBody daemonclient.TaskStatusRequest
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskUpdateStatus {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskUpdateStatus)
+			}
+			if err := json.Unmarshal(req.Body, &statusBody); err != nil {
+				t.Fatalf("unmarshal status body: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				Meta:            req.Meta,
+				OK:              true,
+				CompletedAt:     req.SentAt,
+			}, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+
+	msg := m.moveTaskStatusCascadeChildrenCmd("az-1", domain.StatusInProgress, domain.StatusInReview)()
+	result, ok := msg.(taskStatusResultMsg)
+	if !ok || result.err != nil {
+		t.Fatalf("cascade status result = %#v", msg)
+	}
+	if statusBody.TaskID.String() != "az-1" || statusBody.Status != domain.StatusInReview || !statusBody.CascadeChildren {
+		t.Fatalf("status body = %+v, want cascade in_review for az-1", statusBody)
+	}
+}
+
 func TestSaveTaskCmdUpdatesEditedDescriptionThroughDaemon(t *testing.T) {
 	var updateBody struct {
 		TaskID string `json:"task_id"`

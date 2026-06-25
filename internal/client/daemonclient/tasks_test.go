@@ -798,10 +798,16 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 
 	t.Run("status update uses lightweight command for non-closed status", func(t *testing.T) {
 		commands := []string{}
+		var statusBody TaskStatusRequest
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				assertTaskProjectID(t, req, wantProjectID)
 				commands = append(commands, req.Command)
+				if req.Command == CommandTaskUpdateStatus {
+					if err := json.Unmarshal(req.Body, &statusBody); err != nil {
+						t.Fatalf("unmarshal status body: %v", err)
+					}
+				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
@@ -812,12 +818,15 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
-		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusInProgress, TaskStatusOptions{})
+		err := client.UpdateTaskStatusWithOptions(context.Background(), "az-3", domain.StatusInReview, TaskStatusOptions{CascadeChildren: true})
 		if err != nil {
 			t.Fatalf("UpdateTaskStatusWithOptions error: %v", err)
 		}
 		if strings.Join(commands, ",") != CommandTaskUpdateStatus {
 			t.Fatalf("commands = %v, want only %s", commands, CommandTaskUpdateStatus)
+		}
+		if statusBody.TaskID.String() != "az-3" || statusBody.Status != domain.StatusInReview || !statusBody.CascadeChildren {
+			t.Fatalf("status body = %+v, want cascade in_review for az-3", statusBody)
 		}
 	})
 
