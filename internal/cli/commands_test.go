@@ -9129,6 +9129,15 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "How to use `az` command map:") {
 		t.Fatalf("prime output missing az command map section: %q", output)
 	}
+	if !strings.Contains(output, "Proper issue creation: never leave an issue as just a title.") {
+		t.Fatalf("prime output missing proper issue creation guidance: %q", output)
+	}
+	if !strings.Contains(output, "Use `az issue create --title \"Specific outcome\" --description \"Context, scope, acceptance/validation notes\"`") {
+		t.Fatalf("prime output missing issue creation title/description example: %q", output)
+	}
+	if !strings.Contains(output, "immediately follow title-only creation with `az issue update <issue-id> --description \"...\"` before starting work or fanout") {
+		t.Fatalf("prime output missing title-only issue update guardrail: %q", output)
+	}
 	if !strings.Contains(output, "create many issues, epics, or nested `children` trees from JSON when shaping a graph up front") {
 		t.Fatalf("prime output missing bulk-create nested tree guidance: %q", output)
 	}
