@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -444,9 +445,10 @@ func (r *sequenceWorktreeListRunner) Run(_ context.Context, args ...string) (str
 }
 
 type recordingWorktreeCreateRunner struct {
-	repoDir  string
-	worktree map[string]git.Worktree
-	adds     []recordedWorktreeAdd
+	repoDir    string
+	eventsFile string
+	worktree   map[string]git.Worktree
+	adds       []recordedWorktreeAdd
 }
 
 type recordedWorktreeAdd struct {
@@ -482,6 +484,22 @@ func (r *recordingWorktreeCreateRunner) Run(_ context.Context, args ...string) (
 		path := args[4]
 		base := args[5]
 		issueID := strings.TrimPrefix(filepath.Base(path), filepath.Base(r.repoDir)+"-")
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(r.eventsFile) != "" {
+			f, err := os.OpenFile(r.eventsFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+			if err != nil {
+				return "", err
+			}
+			if _, err := fmt.Fprintf(f, "add:%s:base=%s\n", issueID, base); err != nil {
+				_ = f.Close()
+				return "", err
+			}
+			if err := f.Close(); err != nil {
+				return "", err
+			}
+		}
 		r.worktree[issueID] = git.Worktree{IssueID: issueID, Path: path, Branch: branch}
 		r.adds = append(r.adds, recordedWorktreeAdd{
 			IssueID: issueID,
@@ -526,11 +544,19 @@ func TestWorktreeServiceAdapterCreateMaterializesMissingAncestorChain(t *testing
 			ParentID: ptrIssueID(parentID),
 		},
 	}
+	initEvents := []string{}
 	adapter := &worktreeServiceAdapter{
 		manager: manager,
 		logger:  logger,
 		runtimeIssueTasks: func(context.Context, string) map[string]domain.Task {
 			return tasks
+		},
+		runWorktreeSyncInit: func(_ context.Context, initCtx worktreeInitContext) error {
+			initEvents = append(initEvents, fmt.Sprintf("sync:%s:adds=%d:parent=%s", initCtx.IssueID, len(runner.adds), initCtx.ParentIssueID))
+			return nil
+		},
+		startWorktreeAsyncInit: func(initCtx worktreeInitContext) {
+			initEvents = append(initEvents, fmt.Sprintf("async:%s:adds=%d", initCtx.IssueID, len(runner.adds)))
 		},
 	}
 
@@ -555,6 +581,17 @@ func TestWorktreeServiceAdapterCreateMaterializesMissingAncestorChain(t *testing
 	}
 	if effectiveBase != runner.adds[1].Branch {
 		t.Fatalf("effective base = %q, want parent branch %q", effectiveBase, runner.adds[1].Branch)
+	}
+	wantInitEvents := []string{
+		"sync:" + rootID + ":adds=1:parent=",
+		"async:" + rootID + ":adds=1",
+		"sync:" + parentID + ":adds=2:parent=" + rootID,
+		"async:" + parentID + ":adds=2",
+		"sync:" + childID + ":adds=3:parent=" + parentID,
+		"async:" + childID + ":adds=3",
+	}
+	if strings.Join(initEvents, "\n") != strings.Join(wantInitEvents, "\n") {
+		t.Fatalf("init events = %#v, want %#v", initEvents, wantInitEvents)
 	}
 }
 

@@ -316,6 +316,23 @@
         },
         "initCommands": {
           "type": "array",
+          "description": "Legacy blocking worktree init commands. These run before syncInitCommands after a new worktree is created. Failure stops worktree/session startup.",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "syncInitCommands": {
+          "type": "array",
+          "description": "Blocking worktree readiness commands. These run after initCommands for each newly created worktree, including missing ancestors, before descendant worktrees are created.",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "asyncInitCommands": {
+          "type": "array",
+          "description": "Non-blocking worktree warmup commands. These start after blocking init succeeds and do not delay descendant worktree creation or session startup.",
           "items": {
             "type": "string"
           },

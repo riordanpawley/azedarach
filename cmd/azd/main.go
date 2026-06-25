@@ -95,7 +95,8 @@ func main() {
 		SessionInitCommands:        cfg.Session.InitCommands,
 		SessionSideEffectCommands:  cfg.Session.SideEffectCommands,
 		Logger:                     logger,
-		WorktreeInitCommands:       cfg.Worktree.InitCommands,
+		WorktreeInitCommands:       append(append([]string(nil), cfg.Worktree.InitCommands...), cfg.Worktree.SyncInitCommands...),
+		WorktreeAsyncInitCommands:  cfg.Worktree.AsyncInitCommands,
 		IssueResources:             cfg.IssueResources,
 	})
 	if err := d.Run(ctx); err != nil {

@@ -158,11 +158,13 @@ type DevServerConfig struct {
 
 // WorktreeConfig contains git worktree settings
 type WorktreeConfig struct {
-	BasePath     string   `json:"basePath"`
-	NameFormat   string   `json:"nameFormat"`
-	AutoCleanup  bool     `json:"autoCleanup"`
-	KeepDays     int      `json:"keepDays"`
-	InitCommands []string `json:"initCommands"`
+	BasePath          string   `json:"basePath"`
+	NameFormat        string   `json:"nameFormat"`
+	AutoCleanup       bool     `json:"autoCleanup"`
+	KeepDays          int      `json:"keepDays"`
+	InitCommands      []string `json:"initCommands"`
+	SyncInitCommands  []string `json:"syncInitCommands"`
+	AsyncInitCommands []string `json:"asyncInitCommands"`
 }
 
 // IssueResourcesConfig contains opt-in issue-scoped lifecycle hooks.
@@ -273,11 +275,13 @@ func DefaultConfig() *Config {
 			Environments: make(map[string]string),
 		},
 		Worktree: WorktreeConfig{
-			BasePath:     "../",
-			NameFormat:   "{project}-{issueID}",
-			AutoCleanup:  true,
-			KeepDays:     7,
-			InitCommands: []string{},
+			BasePath:          "../",
+			NameFormat:        "{project}-{issueID}",
+			AutoCleanup:       true,
+			KeepDays:          7,
+			InitCommands:      []string{},
+			SyncInitCommands:  []string{},
+			AsyncInitCommands: []string{},
 		},
 		IssueResources: IssueResourcesConfig{
 			Env:                        map[string]string{},
@@ -628,6 +632,12 @@ func MergeWithDefaults(cfg *Config) *Config {
 	}
 	if cfg.Worktree.InitCommands == nil {
 		cfg.Worktree.InitCommands = defaults.Worktree.InitCommands
+	}
+	if cfg.Worktree.SyncInitCommands == nil {
+		cfg.Worktree.SyncInitCommands = defaults.Worktree.SyncInitCommands
+	}
+	if cfg.Worktree.AsyncInitCommands == nil {
+		cfg.Worktree.AsyncInitCommands = defaults.Worktree.AsyncInitCommands
 	}
 	if cfg.IssueResources.Env == nil {
 		cfg.IssueResources.Env = defaults.IssueResources.Env

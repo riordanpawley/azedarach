@@ -13,10 +13,22 @@ import (
 
 type ancestorTaskLookup func(context.Context, string) (domain.Task, error)
 
+type worktreeInitContext struct {
+	ProjectID          string
+	ProjectRoot        string
+	IssueID            string
+	WorktreePath       string
+	ParentIssueID      string
+	ParentWorktreePath string
+}
+
+type worktreeCreatedFunc func(context.Context, worktreeInitContext) error
+
 type ensureAncestorWorktreesResult struct {
-	BaseBranch      string
-	AncestorIssueID string
-	Created         []git.Worktree
+	BaseBranch           string
+	AncestorIssueID      string
+	AncestorWorktreePath string
+	Created              []git.Worktree
 }
 
 func ensureAncestorWorktrees(
@@ -27,6 +39,7 @@ func ensureAncestorWorktrees(
 	manager *git.WorktreeManager,
 	lookup ancestorTaskLookup,
 	projectionWriter runtimeProjectionWriter,
+	onCreated worktreeCreatedFunc,
 ) (ensureAncestorWorktreesResult, error) {
 	result := ensureAncestorWorktreesResult{BaseBranch: strings.TrimSpace(baseBranch)}
 	if result.BaseBranch == "" {
@@ -45,6 +58,8 @@ func ensureAncestorWorktrees(
 	}
 
 	currentBase := result.BaseBranch
+	parentIssueID := ""
+	parentWorktreePath := ""
 	for i := len(chain) - 1; i >= 0; i-- {
 		ancestor := chain[i]
 		ancestorID := strings.TrimSpace(ancestor.ID.String())
@@ -55,20 +70,36 @@ func ensureAncestorWorktrees(
 		if err != nil && !errors.Is(err, git.ErrWorktreeNotFound) {
 			return ensureAncestorWorktreesResult{}, fmt.Errorf("load ancestor worktree %s: %w", ancestorID, err)
 		}
+		created := false
 		if err != nil {
-			worktree, err = createOrLoadIssueWorktree(ctx, manager, ancestorID, ancestor.Title, currentBase)
+			worktree, created, err = createOrLoadIssueWorktree(ctx, manager, ancestorID, ancestor.Title, currentBase)
 			if err != nil {
 				return ensureAncestorWorktreesResult{}, fmt.Errorf("create ancestor worktree %s from %s: %w", ancestorID, currentBase, err)
 			}
-			if worktree != nil {
+			if created && worktree != nil {
 				result.Created = append(result.Created, *worktree)
 			}
 		}
 		if worktree == nil || strings.TrimSpace(worktree.Branch) == "" {
 			return ensureAncestorWorktreesResult{}, fmt.Errorf("ancestor worktree %s has no branch", ancestorID)
 		}
+		if created && onCreated != nil {
+			initCtx := worktreeInitContext{
+				ProjectID:          normalizedProjectID(projectID),
+				IssueID:            ancestorID,
+				WorktreePath:       worktree.Path,
+				ParentIssueID:      parentIssueID,
+				ParentWorktreePath: parentWorktreePath,
+			}
+			if err := onCreated(ctx, initCtx); err != nil {
+				return ensureAncestorWorktreesResult{}, fmt.Errorf("initialize ancestor worktree %s: %w", ancestorID, err)
+			}
+		}
 		currentBase = strings.TrimSpace(worktree.Branch)
 		result.AncestorIssueID = ancestorID
+		result.AncestorWorktreePath = worktree.Path
+		parentIssueID = ancestorID
+		parentWorktreePath = worktree.Path
 		if projectionWriter != nil {
 			projectionWriter.PersistWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), worktree.IssueID, worktree.Path, worktree.Branch)
 		}
@@ -96,18 +127,18 @@ func ancestorTaskChain(ctx context.Context, sourceTask domain.Task, lookup ances
 	return chain, nil
 }
 
-func createOrLoadIssueWorktree(ctx context.Context, manager *git.WorktreeManager, issueID, title, baseBranch string) (*git.Worktree, error) {
+func createOrLoadIssueWorktree(ctx context.Context, manager *git.WorktreeManager, issueID, title, baseBranch string) (*git.Worktree, bool, error) {
 	worktree, err := manager.CreateWithTitle(ctx, issueID, title, baseBranch)
 	if err == nil {
-		return worktree, nil
+		return worktree, true, nil
 	}
 	if existing, getErr := manager.Get(ctx, issueID); getErr == nil {
-		return existing, nil
+		return existing, !errors.Is(err, git.ErrWorktreeAlreadyExists), nil
 	}
 	if errors.Is(err, git.ErrWorktreeAlreadyExists) {
-		return nil, fmt.Errorf("worktree already exists for issue %s but could not be loaded", issueID)
+		return nil, false, fmt.Errorf("worktree already exists for issue %s but could not be loaded", issueID)
 	}
-	return nil, err
+	return nil, false, err
 }
 
 func taskLookupFromMap(tasksByIssue map[string]domain.Task) ancestorTaskLookup {
