@@ -179,6 +179,13 @@ const (
 	selectorTabTree
 )
 
+type selectorTreeSort int
+
+const (
+	selectorTreeSortOrder selectorTreeSort = iota
+	selectorTreeSortUpdated
+)
+
 type Model struct {
 	loader       SnapshotLoader
 	switcher     Switcher
@@ -191,6 +198,7 @@ type Model struct {
 	snapshot           Snapshot
 	cursor             int
 	activeTab          selectorTab
+	treeSort           selectorTreeSort
 	width              int
 	height             int
 	loading            bool
@@ -449,6 +457,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectorTabUserSet = true
 			m.loading = false
 			return m, m.persistSelectorTabCmd(m.activeTab)
+		case "u":
+			if m.activeTab == selectorTabTree {
+				m.toggleTreeSort()
+				return m, nil
+			}
 		case "1", "2", "3", "4", "5", "6", "7", "8", "9", "0":
 			m.selectCardHotkey(msg.String())
 			return m, nil
@@ -677,6 +690,9 @@ func (m Model) renderFooter() string {
 		{Key: "x", Description: "kill"},
 		{Key: "o/Sp", Description: "open"},
 	}
+	if m.activeTab == selectorTabTree {
+		bindings = append([]keybinds.Binding{{Key: "u", Description: "sort"}}, bindings...)
+	}
 	right := m.styles.StatusHint.Render(keybinds.RenderPlain(bindings, "  "))
 	if m.searchMode || strings.TrimSpace(m.searchQuery) != "" {
 		right += m.styles.StatusHint.Render("  /" + m.searchQuery)
@@ -699,7 +715,11 @@ func (m Model) renderTabs() string {
 		}
 		return m.styles.StatusHint.Render("  " + label + "  ")
 	}
-	return tab("Cards", m.activeTab == selectorTabGrid) + " " + tab("Tree", m.activeTab == selectorTabTree)
+	treeLabel := "Tree"
+	if m.activeTab == selectorTabTree && m.treeSort == selectorTreeSortUpdated {
+		treeLabel = "Tree:" + m.treeSortLabel()
+	}
+	return tab("Cards", m.activeTab == selectorTabGrid) + " " + tab(treeLabel, m.activeTab == selectorTabTree)
 }
 
 func (m Model) renderTree(entries []InventoryEntry) string {
@@ -1068,6 +1088,23 @@ func (m *Model) toggleActiveTab() {
 		return
 	}
 	m.activeTab = selectorTabTree
+}
+
+func (m *Model) toggleTreeSort() {
+	if m.treeSort == selectorTreeSortUpdated {
+		m.treeSort = selectorTreeSortOrder
+		m.status = "tree sort: order"
+		return
+	}
+	m.treeSort = selectorTreeSortUpdated
+	m.status = "tree sort: updated"
+}
+
+func (m Model) treeSortLabel() string {
+	if m.treeSort == selectorTreeSortUpdated {
+		return "updated"
+	}
+	return "order"
 }
 
 func (m Model) selectedEntry() (InventoryEntry, bool) {
@@ -1473,7 +1510,7 @@ func activeSessionTreeRows(entries []InventoryEntry) []sessionTreeRow {
 }
 
 func (m Model) activeSessionTreeRows(entries []InventoryEntry) []sessionTreeRow {
-	return activeSessionTreeRowsWithAncestors(entries, m.treeAncestorTasks())
+	return activeSessionTreeRowsWithOptions(entries, m.treeAncestorTasks(), m.treeSort)
 }
 
 func (m Model) treeAncestorTasks() map[string]domain.Task {
@@ -1504,6 +1541,10 @@ type treeNode struct {
 }
 
 func activeSessionTreeRowsWithAncestors(entries []InventoryEntry, ancestorTasks map[string]domain.Task) []sessionTreeRow {
+	return activeSessionTreeRowsWithOptions(entries, ancestorTasks, selectorTreeSortOrder)
+}
+
+func activeSessionTreeRowsWithOptions(entries []InventoryEntry, ancestorTasks map[string]domain.Task, treeSort selectorTreeSort) []sessionTreeRow {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -1549,16 +1590,50 @@ func activeSessionTreeRowsWithAncestors(entries []InventoryEntry, ancestorTasks 
 		}
 		children[parentID] = append(children[parentID], key)
 	}
+	structuralLess := func(leftKey, rightKey string) bool {
+		left, right := nodes[leftKey], nodes[rightKey]
+		if left.order != right.order {
+			return left.order < right.order
+		}
+		if left.entryIndex != right.entryIndex {
+			return left.entryIndex < right.entryIndex
+		}
+		return leftKey < rightKey
+	}
+	latestByKey := map[string]time.Time{}
+	var latestForKey func(string) time.Time
+	latestForKey = func(key string) time.Time {
+		if latest, ok := latestByKey[key]; ok {
+			return latest
+		}
+		node := nodes[key]
+		var latest time.Time
+		if node != nil && node.entryIndex >= 0 {
+			if updatedAt := entryLastUpdatedAt(node.entry); updatedAt != nil && !updatedAt.IsZero() {
+				latest = updatedAt.UTC()
+			}
+		}
+		for _, childKey := range children[key] {
+			childLatest := latestForKey(childKey)
+			if !childLatest.IsZero() && (latest.IsZero() || childLatest.After(latest)) {
+				latest = childLatest
+			}
+		}
+		latestByKey[key] = latest
+		return latest
+	}
 	sortTreeKeys := func(keys []string) {
 		sort.SliceStable(keys, func(i, j int) bool {
-			left, right := nodes[keys[i]], nodes[keys[j]]
-			if left.order != right.order {
-				return left.order < right.order
+			if treeSort == selectorTreeSortUpdated {
+				leftUpdated, rightUpdated := latestForKey(keys[i]), latestForKey(keys[j])
+				if leftUpdated.IsZero() != rightUpdated.IsZero() {
+					return !leftUpdated.IsZero()
+				}
+				if !leftUpdated.IsZero() && !rightUpdated.IsZero() && !leftUpdated.Equal(rightUpdated) {
+					return leftUpdated.After(rightUpdated)
+				}
 			}
-			if left.entryIndex != right.entryIndex {
-				return left.entryIndex < right.entryIndex
-			}
-			return keys[i] < keys[j]
+			return structuralLess(keys[i], keys[j])
 		})
 	}
 	for parentID := range children {

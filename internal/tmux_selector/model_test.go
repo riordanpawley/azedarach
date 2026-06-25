@@ -861,6 +861,80 @@ func TestModelTreeViewShowsNonSelectableAncestorsForActiveLeaves(t *testing.T) {
 	}
 }
 
+func TestModelTreeSortUpdatedRanksBranchesByNewestDescendantSession(t *testing.T) {
+	now := time.Now().UTC()
+	alphaID := naming.IssueID("az-alpha")
+	betaID := naming.IssueID("az-beta")
+	alphaChildID := naming.IssueID("az-alpha-child")
+	betaChildID := naming.IssueID("az-beta-child")
+	oldUpdated := now.Add(-4 * time.Hour)
+	newUpdated := now.Add(-2 * time.Minute)
+	entries := []InventoryEntry{
+		{
+			SessionID:      "az-alpha-child",
+			IssueID:        alphaChildID.String(),
+			TaskTitle:      "Alpha child",
+			LastUpdatedAt:  &oldUpdated,
+			HasTmuxSession: true,
+			Task: domain.Task{
+				ID:       alphaChildID,
+				Title:    "Alpha child",
+				Status:   domain.StatusInProgress,
+				ParentID: &alphaID,
+			},
+		},
+		{
+			SessionID:      "az-beta-child",
+			IssueID:        betaChildID.String(),
+			TaskTitle:      "Beta child",
+			LastUpdatedAt:  &newUpdated,
+			HasTmuxSession: true,
+			Task: domain.Task{
+				ID:       betaChildID,
+				Title:    "Beta child",
+				Status:   domain.StatusInProgress,
+				ParentID: &betaID,
+			},
+		},
+	}
+	snapshot := Snapshot{
+		Entries: entries,
+		TreeTasks: []domain.Task{
+			{ID: alphaID, Title: "Alpha parent", Status: domain.StatusInProgress},
+			{ID: betaID, Title: "Beta parent", Status: domain.StatusInProgress},
+		},
+	}
+	model := New(fakeSnapshotLoader{snapshot: snapshot})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	model = updated.(Model)
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: snapshot})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	model = updateKey(t, model, "tab")
+	orderView := ansi.Strip(model.View())
+	alphaPos := strings.Index(orderView, "az-alpha")
+	betaPos := strings.Index(orderView, "az-beta")
+	if alphaPos < 0 || betaPos < 0 || alphaPos > betaPos {
+		t.Fatalf("structural tree order changed unexpectedly:\n%s", orderView)
+	}
+
+	model = updateKey(t, model, "u")
+	if model.treeSort != selectorTreeSortUpdated {
+		t.Fatalf("tree sort = %v, want updated", model.treeSort)
+	}
+	updatedView := ansi.Strip(model.View())
+	if !strings.Contains(updatedView, "[ Tree:updated ]") || !strings.Contains(updatedView, "u: sort") {
+		t.Fatalf("updated tree view missing sort controls:\n%s", updatedView)
+	}
+	alphaPos = strings.Index(updatedView, "az-alpha")
+	betaPos = strings.Index(updatedView, "az-beta")
+	if alphaPos < 0 || betaPos < 0 || betaPos > alphaPos {
+		t.Fatalf("updated tree order did not rank newest descendant first:\n%s", updatedView)
+	}
+}
+
 func TestModelRestoresPersistedSelectorTab(t *testing.T) {
 	store := &fakeUIStateStore{values: map[string]string{
 		protocol.UIStateKeyTMUXSelectorLastActiveTab: "tree",
