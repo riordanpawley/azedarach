@@ -71,7 +71,6 @@ func (m *Model) applyTaskEvent(evt protocol.EventEnvelope) bool {
 }
 
 func (m *Model) upsertTaskFromEvent(task domain.Task) {
-	task = boardTaskSummary(task)
 	taskKey := taskIDKey(task.ID.String())
 	for i := range m.tasks {
 		if taskIDKey(m.tasks[i].ID.String()) != taskKey {

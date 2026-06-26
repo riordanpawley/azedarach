@@ -12,20 +12,12 @@ func ReconcileHydratedTasks(_ []domain.Task, hydrated []domain.Task) []domain.Ta
 	reconciled := make([]domain.Task, 0, len(hydrated))
 	for _, task := range hydrated {
 		merged := task
-		clearLongDetailFields(&merged)
 		merged.Session = cloneSession(merged.Session)
 		merged.HasTmuxSession = merged.Session != nil || merged.HasTmuxSession
 		reconciled = append(reconciled, merged)
 	}
 
 	return reconciled
-}
-
-func clearLongDetailFields(task *domain.Task) {
-	task.Description = ""
-	task.Design = ""
-	task.Notes = ""
-	task.Acceptance = ""
 }
 
 func cloneSession(session *domain.Session) *domain.Session {
