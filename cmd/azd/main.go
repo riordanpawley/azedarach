@@ -98,6 +98,7 @@ func main() {
 		WorktreeInitCommands:       cfg.Worktree.SyncInitCommands,
 		WorktreeAsyncInitCommands:  cfg.Worktree.AsyncInitCommands,
 		IssueResources:             cfg.IssueResources,
+		ScheduledScripts:           cfg.ScheduledScripts,
 	})
 	if err := d.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon failed: %v\n", err)

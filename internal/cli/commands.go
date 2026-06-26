@@ -218,6 +218,12 @@ type IssueDoctorOptions struct {
 	JSON    bool
 }
 
+type ProjectScriptsStatusOptions struct {
+	ProjectDir string
+	JSON       bool
+	Names      []string
+}
+
 type IssueDeleteOptions struct {
 	Project        string
 	IssueID        string
@@ -3804,6 +3810,51 @@ func IssueCheckCommand(deps *Dependencies, opts IssueCheckOptions) error {
 		IssueID: opts.IssueID,
 		JSON:    opts.JSON,
 	})
+}
+
+func ProjectScriptsStatusCommand(deps *Dependencies, opts ProjectScriptsStatusOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	result, err := deps.DaemonClient.ScheduledScriptsStatus(ctx, opts.Names)
+	if err != nil {
+		return fmt.Errorf("failed to get scheduled script status: %w", err)
+	}
+	if opts.JSON {
+		return printJSON(result)
+	}
+	if len(result.Scripts) == 0 {
+		fmt.Println("No scheduled project scripts configured.")
+		return nil
+	}
+	fmt.Printf("Scheduled project scripts for %s:\n", result.ProjectID)
+	for _, script := range result.Scripts {
+		state := "idle"
+		if !script.Enabled {
+			state = "disabled"
+		} else if script.Running {
+			state = "running"
+		} else if script.LastError != "" {
+			state = "failed"
+		}
+		fmt.Printf("- %s\t%s\tinterval=%s\truns=%d\tskips=%d\n", script.Name, state, script.Interval, script.RunCount, script.SkipCount)
+		if script.NextRunAt != nil {
+			fmt.Printf("  next: %s\n", script.NextRunAt.UTC().Format(time.RFC3339))
+		}
+		if script.LastFinishedAt != nil {
+			fmt.Printf("  last: %s exit=%d duration=%dms\n", script.LastFinishedAt.UTC().Format(time.RFC3339), script.LastExitCode, script.LastDurationMs)
+		}
+		if script.LastError != "" {
+			fmt.Printf("  error: %s\n", script.LastError)
+		}
+		if script.LastLogPath != "" {
+			fmt.Printf("  log: %s\n", script.LastLogPath)
+		}
+	}
+	return nil
 }
 
 func IssueDoctorCommand(deps *Dependencies, opts IssueDoctorOptions) error {
