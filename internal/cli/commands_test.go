@@ -9313,7 +9313,13 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "az issue create \"New task\"") {
 		t.Fatalf("usage missing plain issue create example: %q", output)
 	}
-	if !strings.Contains(output, "assigns implementation metadata, not graph parentage") {
+	if !strings.Contains(output, "child under AZEDARACH_ISSUE_ID; no --impl needed for parentage") {
+		t.Fatalf("usage missing no-impl-parentage create example: %q", output)
+	}
+	if !strings.Contains(output, "attach an existing issue to another parent/root") {
+		t.Fatalf("usage missing explicit parent-child attach example: %q", output)
+	}
+	if !strings.Contains(output, "only assigns implementation metadata; still not parentage") {
 		t.Fatalf("usage missing impl-not-graph example clarification: %q", output)
 	}
 	if strings.Contains(output, "issue close --impl") || strings.Contains(output, "issue delete --impl") || strings.Contains(output, "issue dep add --impl") {
@@ -9488,7 +9494,10 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Issue graph/root membership comes only from auto-parenting with `AZEDARACH_ISSUE_ID` or explicit `parent-child` dependency edges.") {
 		t.Fatalf("prime output missing graph membership source guidance: %q", output)
 	}
-	if !strings.Contains(output, "`--impl` is implementation metadata only; it never attaches an issue to a graph/root.") {
+	if !strings.Contains(output, "Do not use `--impl <id>` when you mean \"parent this under <id>\"") {
+		t.Fatalf("prime output missing do-not-use-impl-as-parent guidance: %q", output)
+	}
+	if !strings.Contains(output, "`--impl` is implementation metadata only and never attaches an issue to a graph/root.") {
 		t.Fatalf("prime output missing impl-not-graph guidance: %q", output)
 	}
 	if !strings.Contains(output, "If a child issue was requested and `az issue create --json` returns `parent_id: \"\"`, stop before launching work") {
@@ -9988,11 +9997,20 @@ func TestPrimeCommandShowsImplementationOptionsWhenMultipleConfigured(t *testing
 	if !strings.Contains(output, "Use `az impl list` to refresh the available options.") {
 		t.Fatalf("prime output missing impl list guidance: %q", output)
 	}
+	if !strings.Contains(output, "If you mean \"make this a child of the active issue\", run `az issue create \"Child task\"`; auto-parenting uses `AZEDARACH_ISSUE_ID`, not `--impl`.") {
+		t.Fatalf("prime output missing active-parent create guidance: %q", output)
+	}
+	if !strings.Contains(output, "If you mean \"attach this to another parent/root\", create the issue and add `az issue dep add <child-id> <parent-id> --type parent-child`.") {
+		t.Fatalf("prime output missing explicit parent-child guidance: %q", output)
+	}
 	if !strings.Contains(output, "`--impl` selects implementation/spec variant assignment only; it does not attach an issue to a parent/root graph.") {
 		t.Fatalf("prime output missing multi-impl graph distinction: %q", output)
 	}
 	if !strings.Contains(output, "`az issue create --impl default \"Implementation-specific task\"`") {
 		t.Fatalf("prime output missing create-with-impl example: %q", output)
+	}
+	if !strings.Contains(output, "this still relies on auto-parenting or parent-child edges for graph membership") {
+		t.Fatalf("prime output missing impl-example parentage caveat: %q", output)
 	}
 	if !strings.Contains(output, "Existing issue updates do not use `--impl`; use `--update-impl` only when changing assignments.") {
 		t.Fatalf("prime output missing update impl distinction: %q", output)

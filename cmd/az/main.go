@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -556,7 +557,7 @@ func main() {
 		case "create":
 			opts, err := cli.ParseIssueCreateArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]\n")
+				printIssueCreateUsage(os.Stderr)
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -570,7 +571,7 @@ func main() {
 		case "split":
 			opts, err := cli.ParseIssueSplitArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue split [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>\n")
+				printIssueSplitUsage(os.Stderr)
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -1155,6 +1156,17 @@ func printWorktreeUsage() {
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  create <issue-id>     Create an issue worktree without starting a session")
+}
+
+func printIssueCreateUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage: az issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
+	fmt.Fprintln(w, "Note: `az issue create \"Child task\"` auto-parents to AZEDARACH_ISSUE_ID when set; use `az issue dep add <child-id> <parent-id> --type parent-child` for another parent/root.")
+	fmt.Fprintln(w, "Note: --impl only assigns implementation/spec variant metadata; it is not parent/root selection.")
+}
+
+func printIssueSplitUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage: az issue split [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
+	fmt.Fprintln(w, "Note: use --parent or AZEDARACH_ISSUE_ID for parentage; --impl only assigns implementation/spec variant metadata.")
 }
 
 func printSessionCommandUsage(command string, namespaced bool) bool {
