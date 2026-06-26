@@ -4104,7 +4104,7 @@ func TestTaskGraphReadinessSurfacesPendingSessionStartProgress(t *testing.T) {
 }
 
 func TestTaskCompletionAdviceIncludesDomainNextSteps(t *testing.T) {
-	advice := daemonTaskCompletionAdvice("az-1", []string{"az-2"}, []string{"az-3"}, []string{"az-4"})
+	advice := daemonTaskCompletionAdvice("az-1", []string{"az-2"}, []string{"az-3"}, []string{"az-4"}, nil)
 	joined := strings.Join(advice, "\n")
 	for _, want := range []string{
 		"az orchestrate close-session --issue az-4",
@@ -4114,6 +4114,149 @@ func TestTaskCompletionAdviceIncludesDomainNextSteps(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("advice = %+v, missing %q", advice, want)
 		}
+	}
+}
+
+func TestTaskGraphReadinessSurfacesStaleCloseableChild(t *testing.T) {
+	root := naming.IssueID("az-root")
+	child := naming.IssueID("az-child")
+	childParent := root
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
+		{
+			ID:            child,
+			Type:          domain.TypeTask,
+			Status:        domain.StatusOpen,
+			ParentID:      &childParent,
+			HasWorktree:   true,
+			GitAheadCount: 0,
+		},
+	}
+
+	rootID, byID, children, err := daemonTaskGraphIndexes(root.String(), tasks)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphIndexes error: %v", err)
+	}
+	result, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphReadinessFromIndexes error: %v", err)
+	}
+	if slices.Contains(result.Runnable, child.String()) {
+		t.Fatalf("stale-closeable child should not be runnable: %+v", result)
+	}
+	if len(result.StaleCloseableChildren) != 1 {
+		t.Fatalf("stale_closeable_children = %+v, want one candidate", result.StaleCloseableChildren)
+	}
+	candidate := result.StaleCloseableChildren[0]
+	if candidate.IssueID != child.String() || candidate.SuggestedCommand != "az issue close --id az-root --close-clean-children" {
+		t.Fatalf("candidate = %+v", candidate)
+	}
+	joinedEvidence := strings.Join(candidate.Evidence, "\n")
+	for _, want := range []string{"no active session", "clean worktree", "branch not ahead", "status=open"} {
+		if !strings.Contains(joinedEvidence, want) {
+			t.Fatalf("candidate evidence = %+v, missing %q", candidate.Evidence, want)
+		}
+	}
+}
+
+func TestTaskGraphReadinessDoesNotMisreportIncompleteChildAsCloseable(t *testing.T) {
+	root := naming.IssueID("az-root")
+	child := naming.IssueID("az-child")
+	childParent := root
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
+		{ID: child, Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &childParent},
+	}
+
+	rootID, byID, children, err := daemonTaskGraphIndexes(root.String(), tasks)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphIndexes error: %v", err)
+	}
+	result, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphReadinessFromIndexes error: %v", err)
+	}
+	if len(result.StaleCloseableChildren) != 0 {
+		t.Fatalf("stale_closeable_children = %+v, want none", result.StaleCloseableChildren)
+	}
+	if !slices.Contains(result.Runnable, child.String()) {
+		t.Fatalf("runnable = %+v, want incomplete child runnable", result.Runnable)
+	}
+}
+
+func TestTaskCompleteCheckReportsMixedStaleCloseableAndIncompleteChildren(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-complete-check-stale-closeable"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	staleID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Stale child", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatalf("create stale child: %v", err)
+	}
+	incompleteID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Incomplete child", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatalf("create incomplete child: %v", err)
+	}
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   staleID,
+		Path:      filepath.Join(repoDir, "wt-"+staleID),
+		Branch:    "riordan/" + staleID + "/stale",
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed stale child worktree projection: %v", err)
+	}
+	cleanStatus, err := json.Marshal(git.GitStatus{HasChanges: false, GitAheadCount: 0})
+	if err != nil {
+		t.Fatalf("marshal clean git status: %v", err)
+	}
+	if err := runtimeStore.UpsertWorktreeStateGitStatus(ctx, projectID, staleID, cleanStatus, time.Now().UTC()); err != nil {
+		t.Fatalf("seed stale child git status: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 1},
+	}
+
+	result, err := d.taskCompleteCheck(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskCompleteCheck error: %v", err)
+	}
+	if result.Pass {
+		t.Fatalf("complete check unexpectedly passed: %+v", result)
+	}
+	if len(result.StaleCloseableChildren) != 1 || result.StaleCloseableChildren[0].IssueID != staleID {
+		t.Fatalf("stale_closeable_children = %+v, want %s", result.StaleCloseableChildren, staleID)
+	}
+	reasons := strings.Join(result.Reasons, "\n")
+	if !strings.Contains(reasons, "stale-closeable child candidates remain: "+staleID) {
+		t.Fatalf("reasons = %+v, missing stale-closeable reason", result.Reasons)
+	}
+	if !strings.Contains(reasons, "required descendants not closed: "+incompleteID) || strings.Contains(reasons, "required descendants not closed: "+staleID) {
+		t.Fatalf("reasons = %+v, want incomplete only in required descendants", result.Reasons)
+	}
+	advice := strings.Join(result.Advice, "\n")
+	if !strings.Contains(advice, "az issue close --id "+rootID+" --close-clean-children") {
+		t.Fatalf("advice = %+v, missing close-clean-children parent command", result.Advice)
+	}
+	if !strings.Contains(advice, "az orchestrate start --root "+rootID+" --issue "+incompleteID+" --json") {
+		t.Fatalf("advice = %+v, missing runnable incomplete child start command", result.Advice)
 	}
 }
 
