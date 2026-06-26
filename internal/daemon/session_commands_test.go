@@ -1894,6 +1894,148 @@ func TestSessionStartUsesClosestAncestorWorktreeBranchAsBase(t *testing.T) {
 	}
 }
 
+func TestSessionStartMaterializesMissingParentWorktreeBranchAsBase(t *testing.T) {
+	ctx := context.Background()
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Parent issue",
+		Type:   domain.TypeTask,
+		Status: domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create parent issue: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Child issue",
+		Type:     domain.TypeTask,
+		ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("create child issue: %v", err)
+	}
+
+	eventsFile := filepath.Join(repoDir, "worktree-init-events")
+	worktreeRunner := &recordingWorktreeCreateRunner{repoDir: repoDir, eventsFile: eventsFile}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:                   repoDir,
+			BaseBranch:                "main",
+			CLITool:                   "codex",
+			SessionShell:              "sh",
+			WorktreeInitCommands:      []string{`printf 'sync:%s:parent=%s\n' "$AZEDARACH_ISSUE_ID" "$AZEDARACH_PARENT_ISSUE_ID" >> "$AZEDARACH_PROJECT_ROOT/worktree-init-events"`},
+			WorktreeAsyncInitCommands: []string{`printf 'async:%s\n' "$AZEDARACH_ISSUE_ID" >> "$AZEDARACH_PROJECT_ROOT/worktree-init-events"`},
+			Logger:                    slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-create-parent-base",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.start",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"session_id": childID,
+		}),
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, req)
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("session start response not OK: %+v", resp)
+	}
+	if len(worktreeRunner.adds) != 2 {
+		t.Fatalf("adds = %+v, want parent then child", worktreeRunner.adds)
+	}
+	if worktreeRunner.adds[0].IssueID != parentID || worktreeRunner.adds[0].Base != "main" {
+		t.Fatalf("parent add = %+v, want base main", worktreeRunner.adds[0])
+	}
+	if worktreeRunner.adds[1].IssueID != childID || worktreeRunner.adds[1].Base != worktreeRunner.adds[0].Branch {
+		t.Fatalf("child add = %+v, want base %q", worktreeRunner.adds[1], worktreeRunner.adds[0].Branch)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	var eventLines []string
+	for {
+		data, err := os.ReadFile(eventsFile)
+		if err == nil {
+			eventLines = nonEmptyLines(string(data))
+			if containsLine(eventLines, "async:"+parentID) && containsLine(eventLines, "async:"+childID) {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("events = %#v, want async init for parent and child", eventLines)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	wantPrefix := []string{
+		"add:" + parentID + ":base=main",
+		"sync:" + parentID + ":parent=",
+		"add:" + childID + ":base=" + worktreeRunner.adds[0].Branch,
+		"sync:" + childID + ":parent=" + parentID,
+	}
+	blockingLines := filterOutPrefix(eventLines, "async:")
+	if len(blockingLines) < len(wantPrefix) || strings.Join(blockingLines[:len(wantPrefix)], "\n") != strings.Join(wantPrefix, "\n") {
+		t.Fatalf("blocking event prefix = %#v, want %#v (all events %#v)", blockingLines[:min(len(blockingLines), len(wantPrefix))], wantPrefix, eventLines)
+	}
+}
+
+func nonEmptyLines(value string) []string {
+	rawLines := strings.Split(strings.TrimSpace(value), "\n")
+	lines := make([]string, 0, len(rawLines))
+	for _, line := range rawLines {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			lines = append(lines, trimmed)
+		}
+	}
+	return lines
+}
+
+func containsLine(lines []string, want string) bool {
+	for _, line := range lines {
+		if line == want {
+			return true
+		}
+	}
+	return false
+}
+
+func filterOutPrefix(lines []string, prefix string) []string {
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if !strings.HasPrefix(line, prefix) {
+			filtered = append(filtered, line)
+		}
+	}
+	return filtered
+}
+
 func TestSessionStartDoesNotPersistTransitionWhenTmuxCreateFails(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -6335,16 +6477,26 @@ func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsFromConfigAcrossTo
 
 func TestRunWorktreeInitCommandsExecutesInWorktreeDirectory(t *testing.T) {
 	worktree := t.TempDir()
+	parentWorktree := t.TempDir()
+	repoDir := t.TempDir()
 	d := &Daemon{
 		cfg: Config{
+			RepoDir:      repoDir,
 			SessionShell: "sh",
 			WorktreeInitCommands: []string{
 				"printf seeded > .worktree-init-test",
+				"printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' \"$AZEDARACH_PROJECT_ID\" \"$AZEDARACH_PROJECT_ROOT\" \"$AZEDARACH_ISSUE_ID\" \"$AZEDARACH_WORKTREE_PATH\" \"$AZEDARACH_PARENT_WORKTREE_PATH\" \"$AZEDARACH_WORKTREE_INIT_PHASE\" > .worktree-init-env",
 			},
 		},
 	}
 
-	if err := d.runWorktreeInitCommands(context.Background(), protocol.DefaultProjectID, worktree); err != nil {
+	if err := d.runWorktreeSyncInitCommands(context.Background(), worktreeInitContext{
+		ProjectID:          protocol.DefaultProjectID,
+		IssueID:            "az-123",
+		WorktreePath:       worktree,
+		ParentIssueID:      "az-122",
+		ParentWorktreePath: parentWorktree,
+	}); err != nil {
 		t.Fatalf("runWorktreeInitCommands error: %v", err)
 	}
 
@@ -6354,6 +6506,21 @@ func TestRunWorktreeInitCommandsExecutesInWorktreeDirectory(t *testing.T) {
 	}
 	if strings.TrimSpace(string(data)) != "seeded" {
 		t.Fatalf("init marker content = %q, want seeded", string(data))
+	}
+	envData, err := os.ReadFile(filepath.Join(worktree, ".worktree-init-env"))
+	if err != nil {
+		t.Fatalf("read init env: %v", err)
+	}
+	wantEnv := strings.Join([]string{
+		protocol.DefaultProjectID,
+		repoDir,
+		"az-123",
+		worktree,
+		parentWorktree,
+		"sync",
+	}, "\n")
+	if strings.TrimSpace(string(envData)) != wantEnv {
+		t.Fatalf("init env = %q, want %q", strings.TrimSpace(string(envData)), wantEnv)
 	}
 }
 
@@ -6395,6 +6562,41 @@ func TestRunWorktreeInitCommandsMissingCommandReturnsFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("error = %q, want shell not-found signal", err.Error())
+	}
+}
+
+func TestStartWorktreeAsyncInitCommandsDoesNotBlock(t *testing.T) {
+	worktree := t.TempDir()
+	marker := filepath.Join(worktree, "async-marker")
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:                   t.TempDir(),
+			SessionShell:              "sh",
+			WorktreeAsyncInitCommands: []string{"sleep 0.2; printf async > async-marker"},
+			Logger:                    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+
+	started := time.Now()
+	d.startWorktreeAsyncInitCommands(worktreeInitContext{
+		ProjectID:    protocol.DefaultProjectID,
+		IssueID:      "az-async",
+		WorktreePath: worktree,
+	})
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("startWorktreeAsyncInitCommands blocked for %s", elapsed)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, err := os.ReadFile(marker)
+		if err == nil && strings.TrimSpace(string(data)) == "async" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("async marker not written before deadline")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

@@ -158,11 +158,13 @@ type DevServerConfig struct {
 
 // WorktreeConfig contains git worktree settings
 type WorktreeConfig struct {
-	BasePath     string   `json:"basePath"`
-	NameFormat   string   `json:"nameFormat"`
-	AutoCleanup  bool     `json:"autoCleanup"`
-	KeepDays     int      `json:"keepDays"`
-	InitCommands []string `json:"initCommands"`
+	BasePath          string   `json:"basePath"`
+	NameFormat        string   `json:"nameFormat"`
+	AutoCleanup       bool     `json:"autoCleanup"`
+	KeepDays          int      `json:"keepDays"`
+	InitCommands      []string `json:"initCommands"`
+	SyncInitCommands  []string `json:"syncInitCommands"`
+	AsyncInitCommands []string `json:"asyncInitCommands"`
 }
 
 // IssueResourcesConfig contains opt-in issue-scoped lifecycle hooks.
@@ -273,11 +275,13 @@ func DefaultConfig() *Config {
 			Environments: make(map[string]string),
 		},
 		Worktree: WorktreeConfig{
-			BasePath:     "../",
-			NameFormat:   "{project}-{issueID}",
-			AutoCleanup:  true,
-			KeepDays:     7,
-			InitCommands: []string{},
+			BasePath:          "../",
+			NameFormat:        "{project}-{issueID}",
+			AutoCleanup:       true,
+			KeepDays:          7,
+			InitCommands:      []string{},
+			SyncInitCommands:  []string{},
+			AsyncInitCommands: []string{},
 		},
 		IssueResources: IssueResourcesConfig{
 			Env:                        map[string]string{},
@@ -334,7 +338,7 @@ const (
 	LocalConfigFileName  = "config.local.json"
 	ConfigSchemaFileName = "config.schema.json"
 	ConfigSchemaURL      = "https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json"
-	CurrentConfigVersion = 8
+	CurrentConfigVersion = 9
 )
 
 type configFileMetadata struct {
@@ -446,8 +450,42 @@ func NormalizeConfigFileRaw(raw map[string]any) {
 	if issues, ok := raw["issues"].(map[string]any); ok {
 		delete(issues, "autoFinalizeOnClose")
 	}
+	if worktree, ok := raw["worktree"].(map[string]any); ok {
+		migrateWorktreeInitCommands(worktree)
+	}
 	raw["$schema"] = ConfigSchemaURL
 	raw["$version"] = CurrentConfigVersion
+}
+
+func migrateWorktreeInitCommands(worktree map[string]any) {
+	initCommands, ok := configRawArray(worktree["initCommands"])
+	if !ok {
+		delete(worktree, "initCommands")
+		return
+	}
+	if len(initCommands) > 0 {
+		syncCommands, _ := configRawArray(worktree["syncInitCommands"])
+		migrated := make([]any, 0, len(initCommands)+len(syncCommands))
+		migrated = append(migrated, initCommands...)
+		migrated = append(migrated, syncCommands...)
+		worktree["syncInitCommands"] = migrated
+	}
+	delete(worktree, "initCommands")
+}
+
+func configRawArray(value any) ([]any, bool) {
+	switch values := value.(type) {
+	case []any:
+		return values, true
+	case []string:
+		out := make([]any, 0, len(values))
+		for _, value := range values {
+			out = append(out, value)
+		}
+		return out, true
+	default:
+		return nil, false
+	}
 }
 
 func ResolveConfigBase(startPath string) (string, error) {
@@ -628,6 +666,12 @@ func MergeWithDefaults(cfg *Config) *Config {
 	}
 	if cfg.Worktree.InitCommands == nil {
 		cfg.Worktree.InitCommands = defaults.Worktree.InitCommands
+	}
+	if cfg.Worktree.SyncInitCommands == nil {
+		cfg.Worktree.SyncInitCommands = defaults.Worktree.SyncInitCommands
+	}
+	if cfg.Worktree.AsyncInitCommands == nil {
+		cfg.Worktree.AsyncInitCommands = defaults.Worktree.AsyncInitCommands
 	}
 	if cfg.IssueResources.Env == nil {
 		cfg.IssueResources.Env = defaults.IssueResources.Env

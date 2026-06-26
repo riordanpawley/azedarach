@@ -546,7 +546,8 @@ func TestWorktreeCreateCommandCreatesWorktreeWithoutStartingSession(t *testing.T
 				case daemonclient.CommandWorktreeCreate:
 					gotCreateReq = req
 					return responseWithJSON(req, map[string]any{
-						"project_id": "proj",
+						"project_id":  "proj",
+						"base_branch": "az/parent",
 						"worktree": map[string]any{
 							"path":     "/tmp/az-1",
 							"branch":   "az/az-1",
@@ -583,7 +584,7 @@ func TestWorktreeCreateCommandCreatesWorktreeWithoutStartingSession(t *testing.T
 	if body["project_id"] != "proj" || body["issue_id"] != "az-1" || body["base_branch"] != "main" {
 		t.Fatalf("create body = %+v", body)
 	}
-	if output != "Worktree ready: /tmp/az-1\nBranch: az/az-1\nBase: main\n" {
+	if output != "Worktree ready: /tmp/az-1\nBranch: az/az-1\nBase: az/parent\n" {
 		t.Fatalf("output = %q", output)
 	}
 }

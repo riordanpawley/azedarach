@@ -72,6 +72,7 @@ type Config struct {
 	SessionInitCommands        []string
 	SessionSideEffectCommands  []string
 	WorktreeInitCommands       []string
+	WorktreeAsyncInitCommands  []string
 	IssueResources             appconfig.IssueResourcesConfig
 	Logger                     *slog.Logger
 	IdleTimeout                time.Duration
@@ -107,6 +108,8 @@ type Daemon struct {
 	sessionSideEffectCommandsByRoot    map[string][]string
 	worktreeInitCommandsByProject      map[string][]string
 	worktreeInitCommandsByRoot         map[string][]string
+	worktreeAsyncInitCommandsByProject map[string][]string
+	worktreeAsyncInitCommandsByRoot    map[string][]string
 	issueResourcesByProject            map[string]appconfig.IssueResourcesConfig
 	issueResourcesByRoot               map[string]appconfig.IssueResourcesConfig
 	worktreeManagersMu                 sync.Mutex
@@ -256,6 +259,8 @@ func New(cfg Config) *Daemon {
 		sessionSideEffectCommandsByRoot:    map[string][]string{},
 		worktreeInitCommandsByProject:      map[string][]string{},
 		worktreeInitCommandsByRoot:         map[string][]string{},
+		worktreeAsyncInitCommandsByProject: map[string][]string{},
+		worktreeAsyncInitCommandsByRoot:    map[string][]string{},
 		issueResourcesByProject:            map[string]appconfig.IssueResourcesConfig{},
 		issueResourcesByRoot:               map[string]appconfig.IssueResourcesConfig{},
 		worktreeManagersByProject:          map[string]*git.WorktreeManager{},
@@ -362,7 +367,9 @@ func New(cfg Config) *Daemon {
 			}
 			return taskByIssue
 		},
-		logger: cfg.Logger,
+		runWorktreeSyncInit:    d.runWorktreeSyncInitCommands,
+		startWorktreeAsyncInit: d.startWorktreeAsyncInitCommands,
+		logger:                 cfg.Logger,
 		onProjectionUpdate: func(ctx context.Context, projectID, issueID, path string) {
 			d.runtimeProjectionStateWriter().PublishWorktreeProjectionEvent(ctx, projectID, issueID, path)
 		},

@@ -21,7 +21,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
-	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
@@ -734,7 +733,29 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if worktreeManager == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "worktree manager unavailable"), nil
 	}
-	baseBranch, baseBranchAncestorIssueID := d.resolveSessionStartBaseBranch(ctx, cmd.ProjectID, cmd.BaseBranch, issueClient, worktreeManager, task)
+	baseBranch := strings.TrimSpace(cmd.BaseBranch)
+	if baseBranch == "" {
+		baseBranch = strings.TrimSpace(d.baseBranchForProject(cmd.ProjectID))
+	}
+	baseBranchAncestorIssueID := ""
+	ensuredAncestors, err := ensureAncestorWorktrees(ctx, cmd.ProjectID, task, baseBranch, worktreeManager, func(ctx context.Context, issueID string) (domain.Task, error) {
+		return issueClient.GetWithRuntime(ctx, cmd.ProjectID, issueID)
+	}, d.runtimeProjectionStateWriter(), func(ctx context.Context, initCtx worktreeInitContext) error {
+		if len(d.runtimeConfigForProject(cmd.ProjectID).WorktreeInitCommands) > 0 {
+			reportSessionStartProgress(ctx, "worktree_preflight", fmt.Sprintf("running worktree init commands for %s", initCtx.IssueID), 20)
+		}
+		if err := d.runWorktreeSyncInitCommands(ctx, initCtx); err != nil {
+			cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, initCtx.IssueID, initCtx.WorktreePath, false)
+			return fmt.Errorf("%w%s", err, cleanupNote)
+		}
+		d.startWorktreeAsyncInitCommands(initCtx)
+		return nil
+	})
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	baseBranch = ensuredAncestors.BaseBranch
+	baseBranchAncestorIssueID = ensuredAncestors.AncestorIssueID
 	reportSessionStartProgress(ctx, "worktree_preflight", fmt.Sprintf("creating or reusing worktree from %s", baseBranch), 25)
 	worktree, err := worktreeManager.CreateWithTitle(ctx, cmd.IssueID, task.Title, baseBranch)
 	reusedWorktree := false
@@ -758,10 +779,23 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		if len(d.runtimeConfigForProject(cmd.ProjectID).WorktreeInitCommands) > 0 {
 			reportSessionStartProgress(ctx, "worktree_preflight", "running worktree init commands", 35)
 		}
-		if err := d.runWorktreeInitCommands(ctx, cmd.ProjectID, worktree.Path); err != nil {
+		if err := d.runWorktreeSyncInitCommands(ctx, worktreeInitContext{
+			ProjectID:          normalizedProjectID(cmd.ProjectID),
+			IssueID:            cmd.IssueID,
+			WorktreePath:       worktree.Path,
+			ParentIssueID:      baseBranchAncestorIssueID,
+			ParentWorktreePath: ensuredAncestors.AncestorWorktreePath,
+		}); err != nil {
 			cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree init failed for %s: %v%s", cmd.IssueID, err, cleanupNote)), nil
 		}
+		d.startWorktreeAsyncInitCommands(worktreeInitContext{
+			ProjectID:          normalizedProjectID(cmd.ProjectID),
+			IssueID:            cmd.IssueID,
+			WorktreePath:       worktree.Path,
+			ParentIssueID:      baseBranchAncestorIssueID,
+			ParentWorktreePath: ensuredAncestors.AncestorWorktreePath,
+		})
 	}
 	reportSessionStartProgress(ctx, "issue_resources", "preparing issue resources", 50)
 	resourceCtx := d.issueResourceLifecycleContext(cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktree.Path, worktree.Branch)
@@ -909,60 +943,6 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		)
 	}
 	return d.commandOutput(req, output), nil
-}
-
-func (d *Daemon) resolveSessionStartBaseBranch(
-	ctx context.Context,
-	projectID string,
-	requestedBaseBranch string,
-	issueClient *issues.Client,
-	worktreeManager *git.WorktreeManager,
-	task domain.Task,
-) (baseBranch string, ancestorIssueID string) {
-	baseBranch = strings.TrimSpace(requestedBaseBranch)
-	if baseBranch == "" {
-		baseBranch = strings.TrimSpace(d.baseBranchForProject(projectID))
-	}
-	if issueClient == nil || worktreeManager == nil || task.ParentID == nil {
-		return baseBranch, ""
-	}
-
-	taskByIssue := map[string]domain.Task{
-		strings.TrimSpace(task.ID.String()): task,
-	}
-	worktreesByIssue := map[string]domain.IssueWorktreeRef{}
-	nextParentID := strings.TrimSpace(task.ParentID.String())
-	visited := map[string]struct{}{}
-	for nextParentID != "" {
-		if _, seen := visited[nextParentID]; seen {
-			break
-		}
-		visited[nextParentID] = struct{}{}
-
-		if parentWorktree, err := worktreeManager.Get(ctx, nextParentID); err == nil {
-			worktreesByIssue[nextParentID] = domain.IssueWorktreeRef{
-				Branch: strings.TrimSpace(parentWorktree.Branch),
-				Path:   strings.TrimSpace(parentWorktree.Path),
-			}
-		}
-
-		parentTask, err := issueClient.GetWithRuntime(ctx, projectID, nextParentID)
-		if err != nil {
-			break
-		}
-		taskByIssue[nextParentID] = parentTask
-
-		nextParentID = ""
-		if parentTask.ParentID != nil {
-			nextParentID = strings.TrimSpace(parentTask.ParentID.String())
-		}
-	}
-
-	if target, ok := domain.ClosestAncestorWithWorktree(task.ID.String(), taskByIssue, worktreesByIssue); ok {
-		return target.Branch, target.IssueID
-	}
-
-	return baseBranch, ""
 }
 
 func resolveSessionIssue(tasks []domain.Task, requestedIssueID string) (domain.Task, bool) {
@@ -1586,10 +1566,16 @@ func (d *Daemon) ensureConflictWorktree(ctx context.Context, projectID, issueID,
 		cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, issueID, worktree.Path, false)
 		return "", "", false, fmt.Errorf("%w%s", err, cleanupNote)
 	}
-	if err := d.runWorktreeInitCommands(ctx, projectID, worktree.Path); err != nil {
+	initCtx := worktreeInitContext{
+		ProjectID:    normalizedProjectID(projectID),
+		IssueID:      issueID,
+		WorktreePath: worktree.Path,
+	}
+	if err := d.runWorktreeSyncInitCommands(ctx, initCtx); err != nil {
 		cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, issueID, worktree.Path, false)
 		return "", "", false, fmt.Errorf("worktree init failed for %s: %w%s", issueID, err, cleanupNote)
 	}
+	d.startWorktreeAsyncInitCommands(initCtx)
 	return worktree.Path, worktree.Branch, false, nil
 }
 
@@ -3909,13 +3895,51 @@ func issueResourceCleanupOutput(result issueResourceLifecycleResult) string {
 	return fmt.Sprintf("Issue resources cleaned: %d command(s)", len(result.Ran))
 }
 
+const worktreeAsyncInitTimeout = 30 * time.Minute
+
 func (d *Daemon) runWorktreeInitCommands(ctx context.Context, projectID string, worktreePath string) error {
-	commands := d.runtimeConfigForProject(projectID).WorktreeInitCommands
+	return d.runWorktreeSyncInitCommands(ctx, worktreeInitContext{
+		ProjectID:    normalizedProjectID(projectID),
+		WorktreePath: worktreePath,
+	})
+}
+
+func (d *Daemon) runWorktreeSyncInitCommands(ctx context.Context, initCtx worktreeInitContext) error {
+	projectCfg := d.runtimeConfigForProject(initCtx.ProjectID)
+	return d.runWorktreeInitCommandList(ctx, initCtx, "sync", projectCfg.WorktreeInitCommands)
+}
+
+func (d *Daemon) startWorktreeAsyncInitCommands(initCtx worktreeInitContext) {
+	projectCfg := d.runtimeConfigForProject(initCtx.ProjectID)
+	commands := append([]string(nil), projectCfg.WorktreeAsyncInitCommands...)
+	if len(commands) == 0 {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), worktreeAsyncInitTimeout)
+		defer cancel()
+		if err := d.runWorktreeInitCommandList(ctx, initCtx, "async", commands); err != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("worktree async init failed",
+				"project_id", initCtx.ProjectID,
+				"issue_id", initCtx.IssueID,
+				"worktree", initCtx.WorktreePath,
+				"error", err,
+			)
+		}
+	}()
+}
+
+func (d *Daemon) runWorktreeInitCommandList(ctx context.Context, initCtx worktreeInitContext, phase string, commands []string) error {
 	if len(commands) == 0 {
 		return nil
 	}
 
-	shell := strings.TrimSpace(d.runtimeConfigForProject(projectID).SessionShell)
+	projectID := normalizedProjectID(initCtx.ProjectID)
+	if strings.TrimSpace(initCtx.ProjectRoot) == "" {
+		initCtx.ProjectRoot = d.resolveRepoDirForProject(projectID)
+	}
+	projectCfg := d.runtimeConfigForProject(projectID)
+	shell := strings.TrimSpace(projectCfg.SessionShell)
 	if shell == "" {
 		shell = appconfig.DefaultSessionShell()
 	}
@@ -3926,7 +3950,8 @@ func (d *Daemon) runWorktreeInitCommands(ctx context.Context, projectID string, 
 			continue
 		}
 		cmd := exec.CommandContext(ctx, shell, "-lc", trimmed)
-		cmd.Dir = worktreePath
+		cmd.Dir = initCtx.WorktreePath
+		cmd.Env = worktreeInitCommandEnv(initCtx, phase)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("%s: %w (%s)", trimmed, err, strings.TrimSpace(string(output)))
@@ -3934,6 +3959,20 @@ func (d *Daemon) runWorktreeInitCommands(ctx context.Context, projectID string, 
 	}
 
 	return nil
+}
+
+func worktreeInitCommandEnv(initCtx worktreeInitContext, phase string) []string {
+	env := os.Environ()
+	env = append(env,
+		"AZEDARACH_PROJECT_ID="+normalizedProjectID(initCtx.ProjectID),
+		"AZEDARACH_PROJECT_ROOT="+strings.TrimSpace(initCtx.ProjectRoot),
+		"AZEDARACH_ISSUE_ID="+strings.TrimSpace(initCtx.IssueID),
+		"AZEDARACH_WORKTREE_PATH="+strings.TrimSpace(initCtx.WorktreePath),
+		"AZEDARACH_PARENT_ISSUE_ID="+strings.TrimSpace(initCtx.ParentIssueID),
+		"AZEDARACH_PARENT_WORKTREE_PATH="+strings.TrimSpace(initCtx.ParentWorktreePath),
+		"AZEDARACH_WORKTREE_INIT_PHASE="+strings.TrimSpace(phase),
+	)
+	return env
 }
 
 func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {

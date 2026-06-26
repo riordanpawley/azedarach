@@ -515,6 +515,8 @@ type worktreeServiceAdapter struct {
 	ensureRuntimeFreshForMutation      func(context.Context, string, string) error
 	ensureRuntimeFreshForIssueMutation func(context.Context, string, string, string) error
 	runtimeIssueTasks                  func(context.Context, string) map[string]domain.Task
+	runWorktreeSyncInit                func(context.Context, worktreeInitContext) error
+	startWorktreeAsyncInit             func(worktreeInitContext)
 	logger                             *slog.Logger
 	pollInterval                       time.Duration
 	onProjectionUpdate                 func(ctx context.Context, projectID, issueID, path string)
@@ -586,41 +588,93 @@ func (a *worktreeServiceAdapter) List(ctx context.Context, projectID string) ([]
 	return worktrees, nil
 }
 
-func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, issueID string, baseBranch string) (*git.Worktree, error) {
+func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, issueID string, baseBranch string) (*git.Worktree, string, error) {
 	manager := a.managerFor(projectID)
 	if manager == nil {
-		return nil, errors.New("worktree manager unavailable")
+		return nil, "", errors.New("worktree manager unavailable")
 	}
 	if a.ensureRuntimeFreshForIssueMutation != nil {
 		if err := a.ensureRuntimeFreshForIssueMutation(ctx, normalizedProjectID(projectID), issueID, daemonhandlers.CommandWorktreeCreate); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 	}
-	worktree, err := manager.Create(ctx, issueID, baseBranch)
-	if err != nil {
-		if !errors.Is(err, git.ErrWorktreeAlreadyExists) {
-			if recoveredWorktree, recoverErr := manager.Get(ctx, issueID); recoverErr == nil {
-				worktree = recoveredWorktree
-			} else {
-				return nil, err
+	taskByIssue := a.runtimeIssueTaskSnapshot(ctx, projectID)
+	title := ""
+	parentIssueID := ""
+	parentWorktreePath := ""
+	if task, ok := taskByIssueIDLocal(taskByIssue, issueID); ok {
+		title = task.Title
+		ensured, err := ensureAncestorWorktrees(ctx, projectID, task, baseBranch, manager, taskLookupFromMap(taskByIssue), a.runtimeProjectionWriter, func(ctx context.Context, initCtx worktreeInitContext) error {
+			if a.runWorktreeSyncInit != nil {
+				if err := a.runWorktreeSyncInit(ctx, initCtx); err != nil {
+					cleanupNote := cleanupWorktreeAfterInitFailure(ctx, manager, initCtx.IssueID, initCtx.WorktreePath, a.logger)
+					return fmt.Errorf("%w%s", err, cleanupNote)
+				}
 			}
-		} else if existingWorktree, getErr := manager.Get(ctx, issueID); getErr == nil {
-			worktree = existingWorktree
-		} else {
-			return nil, fmt.Errorf("worktree already exists for issue %s but could not be loaded: %w", issueID, getErr)
+			if a.startWorktreeAsyncInit != nil {
+				a.startWorktreeAsyncInit(initCtx)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, "", err
+		}
+		baseBranch = ensured.BaseBranch
+		parentIssueID = ensured.AncestorIssueID
+		parentWorktreePath = ensured.AncestorWorktreePath
+	}
+	worktree, created, err := createOrLoadIssueWorktree(ctx, manager, issueID, title, baseBranch)
+	if err != nil {
+		return nil, "", err
+	}
+	if created && worktree != nil {
+		initCtx := worktreeInitContext{
+			ProjectID:          normalizedProjectID(projectID),
+			IssueID:            issueID,
+			WorktreePath:       worktree.Path,
+			ParentIssueID:      parentIssueID,
+			ParentWorktreePath: parentWorktreePath,
+		}
+		if a.runWorktreeSyncInit != nil {
+			if err := a.runWorktreeSyncInit(ctx, initCtx); err != nil {
+				cleanupNote := cleanupWorktreeAfterInitFailure(ctx, manager, initCtx.IssueID, initCtx.WorktreePath, a.logger)
+				return nil, "", fmt.Errorf("%w%s", err, cleanupNote)
+			}
+		}
+		if a.startWorktreeAsyncInit != nil {
+			a.startWorktreeAsyncInit(initCtx)
 		}
 	}
 	if a.runtimeStore(projectID) != nil && worktree != nil {
-		taskByIssue := a.runtimeIssueTaskSnapshot(ctx, projectID)
 		if !runtimeWorktreeIssueEligible(worktree.IssueID, taskByIssue) {
-			return worktree, nil
+			return worktree, baseBranch, nil
 		}
 		if a.runtimeProjectionWriter != nil {
 			a.runtimeProjectionWriter.PersistWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), worktree.IssueID, worktree.Path, worktree.Branch)
 		}
 		a.observeWorktrees(ctx, normalizedProjectID(projectID), []git.Worktree{*worktree}, taskByIssue)
 	}
-	return worktree, nil
+	return worktree, baseBranch, nil
+}
+
+func cleanupWorktreeAfterInitFailure(ctx context.Context, manager *git.WorktreeManager, issueID, worktreePath string, logger *slog.Logger) string {
+	if manager == nil {
+		return ""
+	}
+	if _, err := manager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
+		Force:         true,
+		BranchCleanup: git.WorktreeBranchCleanupRequired,
+	}); err != nil {
+		if logger != nil {
+			logger.Warn("failed to cleanup worktree after init failure",
+				"issue_id", issueID,
+				"worktree", worktreePath,
+				"error", err,
+			)
+		}
+		return fmt.Sprintf(" (cleanup failed for worktree %s: %v)", worktreePath, err)
+	}
+	return fmt.Sprintf(" (removed failed worktree %s)", worktreePath)
 }
 
 func (a *worktreeServiceAdapter) Delete(ctx context.Context, projectID string, issueID string, force bool) error {

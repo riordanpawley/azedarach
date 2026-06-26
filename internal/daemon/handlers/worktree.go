@@ -51,7 +51,7 @@ func WithWorktreeLongRunningExecutor(executor WorktreeLongRunningExecutor) Workt
 
 type worktreeService interface {
 	List(context.Context, string) ([]git.Worktree, error)
-	Create(context.Context, string, string, string) (*git.Worktree, error)
+	Create(context.Context, string, string, string) (*git.Worktree, string, error)
 	Delete(context.Context, string, string, bool) error
 	CleanupOrphaned(context.Context, string) (*CleanupOrphanedResult, error)
 }
@@ -93,8 +93,9 @@ type worktreeListResultBody struct {
 }
 
 type worktreeResultBody struct {
-	ProjectID string          `json:"project_id"`
-	Worktree  worktreePayload `json:"worktree"`
+	ProjectID  string          `json:"project_id"`
+	BaseBranch string          `json:"base_branch,omitempty"`
+	Worktree   worktreePayload `json:"worktree"`
 }
 
 type worktreeRemoveResultBody struct {
@@ -178,15 +179,19 @@ func (h *WorktreeHandler) HandleDirect(ctx context.Context, req protocol.Request
 			return resp
 		}
 
-		worktree, err := h.service.Create(ctx, cmd.ProjectID, cmd.IssueID, cmd.BaseBranch)
+		worktree, effectiveBaseBranch, err := h.service.Create(ctx, cmd.ProjectID, cmd.IssueID, cmd.BaseBranch)
 		if err != nil {
 			resp.Error = mapWorktreeError(err)
 			return resp
 		}
+		if strings.TrimSpace(effectiveBaseBranch) == "" {
+			effectiveBaseBranch = cmd.BaseBranch
+		}
 
 		body, err := json.Marshal(worktreeResultBody{
-			ProjectID: cmd.ProjectID,
-			Worktree:  mapWorktreePayload(worktree),
+			ProjectID:  cmd.ProjectID,
+			BaseBranch: effectiveBaseBranch,
+			Worktree:   mapWorktreePayload(worktree),
 		})
 		if err != nil {
 			resp.Error = &protocol.ErrorEnvelope{
@@ -258,10 +263,10 @@ func (h *WorktreeHandler) HandleDirect(ctx context.Context, req protocol.Request
 
 		normalizeCleanupOrphanedResult(result)
 
-			body, err := json.Marshal(protocol.CleanupOrphanedResponseBody{
-				ProjectID:        naming.ProjectID(cmd.ProjectID),
-				WorktreesRemoved: len(result.Removed),
-			})
+		body, err := json.Marshal(protocol.CleanupOrphanedResponseBody{
+			ProjectID:        naming.ProjectID(cmd.ProjectID),
+			WorktreesRemoved: len(result.Removed),
+		})
 		if err != nil {
 			resp.Error = &protocol.ErrorEnvelope{
 				Code:      protocol.ErrorCodeInternal,

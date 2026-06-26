@@ -105,13 +105,20 @@ type worktreeCommandBody struct {
 }
 
 type worktreeResultBody struct {
-	ProjectID naming.ProjectID `json:"project_id"`
-	Worktree  worktreePayload  `json:"worktree"`
+	ProjectID  naming.ProjectID `json:"project_id"`
+	BaseBranch string           `json:"base_branch,omitempty"`
+	Worktree   worktreePayload  `json:"worktree"`
 }
 
 type worktreeRemoveResponseBody struct {
 	ProjectID naming.ProjectID `json:"project_id"`
 	IssueID   naming.IssueID   `json:"issue_id"`
+}
+
+type WorktreeCreateResult struct {
+	ProjectID  string
+	BaseBranch string
+	Worktree   git.Worktree
 }
 
 // RuntimeReconcileResult captures the runtime repair summary returned by the daemon.
@@ -486,13 +493,23 @@ func (c *Client) ListWorktrees(ctx context.Context) ([]git.Worktree, error) {
 
 // CreateWorktree asks the daemon to create one worktree for an issue in the current project route.
 func (c *Client) CreateWorktree(ctx context.Context, issueID, baseBranch string) (git.Worktree, error) {
-	parsedIssueID, err := parseIssueID(issueID)
+	result, err := c.CreateWorktreeResult(ctx, issueID, baseBranch)
 	if err != nil {
 		return git.Worktree{}, err
 	}
+	return result.Worktree, nil
+}
+
+// CreateWorktreeResult asks the daemon to create one worktree and returns the
+// effective base branch used by the daemon.
+func (c *Client) CreateWorktreeResult(ctx context.Context, issueID, baseBranch string) (WorktreeCreateResult, error) {
+	parsedIssueID, err := parseIssueID(issueID)
+	if err != nil {
+		return WorktreeCreateResult{}, err
+	}
 	baseBranch = strings.TrimSpace(baseBranch)
 	if baseBranch == "" {
-		return git.Worktree{}, fmt.Errorf("base branch is required")
+		return WorktreeCreateResult{}, fmt.Errorf("base branch is required")
 	}
 
 	var out worktreeResultBody
@@ -501,12 +518,20 @@ func (c *Client) CreateWorktree(ctx context.Context, issueID, baseBranch string)
 		IssueID:    parsedIssueID,
 		BaseBranch: baseBranch,
 	}, &out); err != nil {
-		return git.Worktree{}, err
+		return WorktreeCreateResult{}, err
 	}
-	return git.Worktree{
-		Path:    out.Worktree.Path,
-		Branch:  out.Worktree.Branch,
-		IssueID: out.Worktree.IssueID.String(),
+	effectiveBase := strings.TrimSpace(out.BaseBranch)
+	if effectiveBase == "" {
+		effectiveBase = baseBranch
+	}
+	return WorktreeCreateResult{
+		ProjectID:  out.ProjectID.String(),
+		BaseBranch: effectiveBase,
+		Worktree: git.Worktree{
+			Path:    out.Worktree.Path,
+			Branch:  out.Worktree.Branch,
+			IssueID: out.Worktree.IssueID.String(),
+		},
 	}, nil
 }
 
