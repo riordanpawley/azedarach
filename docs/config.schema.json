@@ -10,7 +10,7 @@
     },
     "$version": {
       "type": "integer",
-      "const": 8
+      "const": 9
     },
     "cliTool": {
       "type": "string",
@@ -364,6 +364,79 @@
           "type": "string",
           "description": "Optional idempotent command that converges issue-scoped resources to AZEDARACH_RESOURCE_DESIRED_STATE=present or absent using stable AZEDARACH_* context.",
           "default": ""
+        }
+      }
+    },
+    "scheduledScripts": {
+      "type": "object",
+      "description": "Daemon-owned project maintenance scripts run on interval schedules with project-scoped cwd, environment, logging, and last-run status.",
+      "additionalProperties": false,
+      "properties": {
+        "env": {
+          "type": "object",
+          "description": "Environment variables exported for every scheduled script. Values may reference AZEDARACH_* context variables.",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "scripts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "command"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Stable script identifier shown in CLI status and used in log paths."
+              },
+              "command": {
+                "type": "string",
+                "description": "Shell command run by the daemon."
+              },
+              "enabled": {
+                "type": "boolean",
+                "description": "Scripts are skipped unless explicitly enabled.",
+                "default": false
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Working directory. Relative paths resolve from the project root. Empty means project root.",
+                "default": ""
+              },
+              "interval": {
+                "type": "string",
+                "description": "Go duration string such as 15m, 1h, or 24h.",
+                "default": ""
+              },
+              "schedule": {
+                "type": "string",
+                "description": "Optional schedule expression. Currently supports @every <duration>.",
+                "default": ""
+              },
+              "timeoutMs": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Per-run timeout in milliseconds. Zero uses the daemon default.",
+                "default": 0
+              },
+              "allowOverlap": {
+                "type": "boolean",
+                "description": "Allow a new run to start while a previous run is still active.",
+                "default": false
+              },
+              "env": {
+                "type": "object",
+                "description": "Environment variables exported only for this script.",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "default": {}
+              }
+            }
+          }
         }
       }
     },

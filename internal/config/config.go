@@ -10,23 +10,24 @@ import (
 
 // Config represents the full Azedarach configuration
 type Config struct {
-	CLITool        string               `json:"cliTool"`
-	IssueTracker   IssueTrackerConfig   `json:"issueTracker"`
-	Git            GitConfig            `json:"git"`
-	GitHooks       GitHooksConfig       `json:"githooks"`
-	Keyboard       KeyboardConfig       `json:"keyboard"`
-	Session        SessionConfig        `json:"session"`
-	PR             PRConfig             `json:"pr"`
-	Merge          MergeConfig          `json:"merge"`
-	Notifications  NotifyConfig         `json:"notifications"`
-	Issues         IssuesConfig         `json:"issues"`
-	Network        NetworkConfig        `json:"network"`
-	DevServer      DevServerConfig      `json:"devServer"`
-	Worktree       WorktreeConfig       `json:"worktree"`
-	IssueResources IssueResourcesConfig `json:"issueResources"`
-	Spec           SpecConfig           `json:"spec"`
-	Orchestration  OrchestrationConfig  `json:"orchestration"`
-	Diagnostics    DiagnosticsConfig    `json:"diagnostics"`
+	CLITool          string                 `json:"cliTool"`
+	IssueTracker     IssueTrackerConfig     `json:"issueTracker"`
+	Git              GitConfig              `json:"git"`
+	GitHooks         GitHooksConfig         `json:"githooks"`
+	Keyboard         KeyboardConfig         `json:"keyboard"`
+	Session          SessionConfig          `json:"session"`
+	PR               PRConfig               `json:"pr"`
+	Merge            MergeConfig            `json:"merge"`
+	Notifications    NotifyConfig           `json:"notifications"`
+	Issues           IssuesConfig           `json:"issues"`
+	Network          NetworkConfig          `json:"network"`
+	DevServer        DevServerConfig        `json:"devServer"`
+	Worktree         WorktreeConfig         `json:"worktree"`
+	IssueResources   IssueResourcesConfig   `json:"issueResources"`
+	ScheduledScripts ScheduledScriptsConfig `json:"scheduledScripts"`
+	Spec             SpecConfig             `json:"spec"`
+	Orchestration    OrchestrationConfig    `json:"orchestration"`
+	Diagnostics      DiagnosticsConfig      `json:"diagnostics"`
 }
 
 type IssueTrackerConfig struct {
@@ -174,6 +175,24 @@ type IssueResourcesConfig struct {
 	ReconcileCommand           string            `json:"reconcileCommand"`
 }
 
+// ScheduledScriptsConfig contains daemon-owned project maintenance scripts.
+type ScheduledScriptsConfig struct {
+	Env     map[string]string       `json:"env"`
+	Scripts []ScheduledScriptConfig `json:"scripts"`
+}
+
+type ScheduledScriptConfig struct {
+	Name         string            `json:"name"`
+	Command      string            `json:"command"`
+	Enabled      bool              `json:"enabled"`
+	CWD          string            `json:"cwd"`
+	Interval     string            `json:"interval"`
+	Schedule     string            `json:"schedule"`
+	TimeoutMs    int               `json:"timeoutMs"`
+	AllowOverlap bool              `json:"allowOverlap"`
+	Env          map[string]string `json:"env"`
+}
+
 type SpecConfig struct {
 	Enabled bool `json:"enabled"`
 }
@@ -286,6 +305,10 @@ func DefaultConfig() *Config {
 			CleanupCommands:            []string{},
 			ReconcileCommand:           "",
 		},
+		ScheduledScripts: ScheduledScriptsConfig{
+			Env:     map[string]string{},
+			Scripts: []ScheduledScriptConfig{},
+		},
 		Spec: SpecConfig{
 			Enabled: true,
 		},
@@ -334,7 +357,7 @@ const (
 	LocalConfigFileName  = "config.local.json"
 	ConfigSchemaFileName = "config.schema.json"
 	ConfigSchemaURL      = "https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json"
-	CurrentConfigVersion = 8
+	CurrentConfigVersion = 9
 )
 
 type configFileMetadata struct {
@@ -640,6 +663,17 @@ func MergeWithDefaults(cfg *Config) *Config {
 	}
 	if cfg.IssueResources.CleanupCommands == nil {
 		cfg.IssueResources.CleanupCommands = defaults.IssueResources.CleanupCommands
+	}
+	if cfg.ScheduledScripts.Env == nil {
+		cfg.ScheduledScripts.Env = defaults.ScheduledScripts.Env
+	}
+	if cfg.ScheduledScripts.Scripts == nil {
+		cfg.ScheduledScripts.Scripts = defaults.ScheduledScripts.Scripts
+	}
+	for i := range cfg.ScheduledScripts.Scripts {
+		if cfg.ScheduledScripts.Scripts[i].Env == nil {
+			cfg.ScheduledScripts.Scripts[i].Env = map[string]string{}
+		}
 	}
 	if strings.TrimSpace(cfg.Orchestration.Via) == "" {
 		cfg.Orchestration.Via = defaults.Orchestration.Via

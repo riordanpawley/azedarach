@@ -24,6 +24,7 @@ This directory primarily contains **developer/internal documentation**.
 - [13-backlog-resilience-acceptance.md](13-backlog-resilience-acceptance.md)
 - [14-issue-resource-lifecycle.md](14-issue-resource-lifecycle.md)
 - [15-orchestration-flow-comparison.md](15-orchestration-flow-comparison.md)
+- [16-scheduled-project-scripts.md](16-scheduled-project-scripts.md)
 - [adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
 
 ## Daemon Invariant Rule

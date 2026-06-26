@@ -73,10 +73,12 @@ type Config struct {
 	SessionSideEffectCommands  []string
 	WorktreeInitCommands       []string
 	IssueResources             appconfig.IssueResourcesConfig
+	ScheduledScripts           appconfig.ScheduledScriptsConfig
 	Logger                     *slog.Logger
 	IdleTimeout                time.Duration
 	RuntimeReconcileInterval   time.Duration
 	RuntimeReconcileTimeout    time.Duration
+	scheduledScriptRunner      scheduledScriptCommandRunner
 }
 
 // Daemon is the daemon runtime root.
@@ -109,6 +111,8 @@ type Daemon struct {
 	worktreeInitCommandsByRoot         map[string][]string
 	issueResourcesByProject            map[string]appconfig.IssueResourcesConfig
 	issueResourcesByRoot               map[string]appconfig.IssueResourcesConfig
+	scheduledScriptsByProject          map[string]appconfig.ScheduledScriptsConfig
+	scheduledScriptsByRoot             map[string]appconfig.ScheduledScriptsConfig
 	worktreeManagersMu                 sync.Mutex
 	worktreeManagersByProject          map[string]*git.WorktreeManager
 	worktreeManagersByRoot             map[string]*git.WorktreeManager
@@ -137,6 +141,7 @@ type Daemon struct {
 	queueMu                            sync.Mutex
 	operationRuntime                   *operationRuntime
 	runtimeProjectionCoalescer         *runtimeProjectionEventCoalescer
+	scheduledScripts                   *scheduledScriptManager
 	sessionStopMu                      sync.Mutex
 	sessionStopPending                 map[string]int
 	sessionStateRefreshMu              sync.Mutex
@@ -258,6 +263,8 @@ func New(cfg Config) *Daemon {
 		worktreeInitCommandsByRoot:         map[string][]string{},
 		issueResourcesByProject:            map[string]appconfig.IssueResourcesConfig{},
 		issueResourcesByRoot:               map[string]appconfig.IssueResourcesConfig{},
+		scheduledScriptsByProject:          map[string]appconfig.ScheduledScriptsConfig{},
+		scheduledScriptsByRoot:             map[string]appconfig.ScheduledScriptsConfig{},
 		worktreeManagersByProject:          map[string]*git.WorktreeManager{},
 		worktreeManagersByRoot:             map[string]*git.WorktreeManager{},
 		runtimeStoresByProject:             map[string]*daemonstate.RuntimeStateStore{},
@@ -299,6 +306,7 @@ func New(cfg Config) *Daemon {
 	d.syncBootstrapFn = d.defaultSyncBootstrap
 	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
 	d.runtimeProjectionCoalescer = newRuntimeProjectionEventCoalescer(d, defaultRuntimeProjectionCoalesceWindow)
+	d.scheduledScripts = newScheduledScriptManager(d, cfg.Logger, cfg.scheduledScriptRunner)
 	gitService.runtimeProjectionWriter = d.runtimeProjectionStateWriter()
 	gitService.runtimeStateStoreForProject = func(projectID string) *daemonstate.RuntimeStateStore {
 		return d.worktreeRuntimeStateStore(projectID)
@@ -453,6 +461,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if d.runtimeProjectionCoalescer != nil {
 			d.runtimeProjectionCoalescer.Close()
 		}
+		if d.scheduledScripts != nil {
+			d.scheduledScripts.Close()
+		}
 		d.closeIssueClients()
 		if d.runtimeReconcileQueue != nil {
 			if closeErr := d.runtimeReconcileQueue.Close(); closeErr != nil && d.cfg.Logger != nil {
@@ -512,6 +523,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	d.startRuntimeReconcileWorker(serveCtx)
 	d.startLinearSyncWorker(serveCtx)
+	d.startScheduledScriptWorker(serveCtx)
 	d.cfg.Logger.Info("daemon startup phase", "phase", "startup_ready", "duration_ms", time.Since(startedAt).Milliseconds())
 	err = <-serveErrCh
 	if ctx.Err() != nil {
@@ -634,6 +646,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleUIStateSet(ctx, req)
 	case protocol.CommandProjectCleanup:
 		return d.handleProjectCleanup(ctx, req)
+	case protocol.CommandScheduledScriptsStatus:
+		return d.handleScheduledScriptsStatus(ctx, req)
 	case "task.list":
 		return d.handleTaskList(ctx, req)
 	case "task.get":

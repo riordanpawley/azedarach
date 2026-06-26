@@ -19,6 +19,7 @@ type daemonProjectRuntimeConfig struct {
 	SessionSideEffectCommands  []string
 	WorktreeInitCommands       []string
 	IssueResources             appconfig.IssueResourcesConfig
+	ScheduledScripts           appconfig.ScheduledScriptsConfig
 }
 
 func (d *Daemon) baseBranchForProject(projectID string) string {
@@ -50,6 +51,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		SessionSideEffectCommands:  append([]string(nil), d.cfg.SessionSideEffectCommands...),
 		WorktreeInitCommands:       append([]string(nil), d.cfg.WorktreeInitCommands...),
 		IssueResources:             cloneIssueResourcesConfig(d.cfg.IssueResources),
+		ScheduledScripts:           cloneScheduledScriptsConfig(d.cfg.ScheduledScripts),
 	}
 	if defaultConfig.BaseBranch == "" {
 		defaultConfig.BaseBranch = "main"
@@ -113,6 +115,12 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	if d.issueResourcesByRoot == nil {
 		d.issueResourcesByRoot = map[string]appconfig.IssueResourcesConfig{}
 	}
+	if d.scheduledScriptsByProject == nil {
+		d.scheduledScriptsByProject = map[string]appconfig.ScheduledScriptsConfig{}
+	}
+	if d.scheduledScriptsByRoot == nil {
+		d.scheduledScriptsByRoot = map[string]appconfig.ScheduledScriptsConfig{}
+	}
 	if cached, ok := d.baseBranchByProject[projectID]; ok && strings.TrimSpace(cached) != "" {
 		cfg := defaultConfig
 		cfg.BaseBranch = cached
@@ -136,6 +144,9 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		}
 		if resources, ok := d.issueResourcesByProject[projectID]; ok {
 			cfg.IssueResources = cloneIssueResourcesConfig(resources)
+		}
+		if scripts, ok := d.scheduledScriptsByProject[projectID]; ok {
+			cfg.ScheduledScripts = cloneScheduledScriptsConfig(scripts)
 		}
 		d.projectConfigMu.Unlock()
 		return cfg
@@ -170,6 +181,9 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 			if resources, ok := d.issueResourcesByRoot[repoDir]; ok {
 				cfg.IssueResources = cloneIssueResourcesConfig(resources)
 			}
+			if scripts, ok := d.scheduledScriptsByRoot[repoDir]; ok {
+				cfg.ScheduledScripts = cloneScheduledScriptsConfig(scripts)
+			}
 			d.baseBranchByProject[projectID] = cfg.BaseBranch
 			d.workflowModeByProject[projectID] = cfg.WorkflowMode
 			d.cliToolByProject[projectID] = cfg.CLITool
@@ -178,6 +192,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 			d.sessionSideEffectCommandsByProject[projectID] = append([]string(nil), cfg.SessionSideEffectCommands...)
 			d.worktreeInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeInitCommands...)
 			d.issueResourcesByProject[projectID] = cloneIssueResourcesConfig(cfg.IssueResources)
+			d.scheduledScriptsByProject[projectID] = cloneScheduledScriptsConfig(cfg.ScheduledScripts)
 			d.projectConfigMu.Unlock()
 			return cfg
 		}
@@ -203,6 +218,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 				cfg.SessionSideEffectCommands = append([]string(nil), loaded.Session.SideEffectCommands...)
 				cfg.WorktreeInitCommands = append([]string(nil), loaded.Worktree.InitCommands...)
 				cfg.IssueResources = cloneIssueResourcesConfig(loaded.IssueResources)
+				cfg.ScheduledScripts = cloneScheduledScriptsConfig(loaded.ScheduledScripts)
 			}
 		}
 	}
@@ -219,6 +235,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	d.sessionSideEffectCommandsByProject[projectID] = append([]string(nil), cfg.SessionSideEffectCommands...)
 	d.worktreeInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeInitCommands...)
 	d.issueResourcesByProject[projectID] = cloneIssueResourcesConfig(cfg.IssueResources)
+	d.scheduledScriptsByProject[projectID] = cloneScheduledScriptsConfig(cfg.ScheduledScripts)
 	if repoDir != "" {
 		if d.baseBranchByRoot == nil {
 			d.baseBranchByRoot = map[string]string{}
@@ -231,6 +248,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		d.sessionSideEffectCommandsByRoot[repoDir] = append([]string(nil), cfg.SessionSideEffectCommands...)
 		d.worktreeInitCommandsByRoot[repoDir] = append([]string(nil), cfg.WorktreeInitCommands...)
 		d.issueResourcesByRoot[repoDir] = cloneIssueResourcesConfig(cfg.IssueResources)
+		d.scheduledScriptsByRoot[repoDir] = cloneScheduledScriptsConfig(cfg.ScheduledScripts)
 	}
 	d.projectConfigMu.Unlock()
 
@@ -247,6 +265,25 @@ func cloneIssueResourcesConfig(cfg appconfig.IssueResourcesConfig) appconfig.Iss
 	}
 	for key, value := range cfg.Env {
 		clone.Env[key] = value
+	}
+	return clone
+}
+
+func cloneScheduledScriptsConfig(cfg appconfig.ScheduledScriptsConfig) appconfig.ScheduledScriptsConfig {
+	clone := appconfig.ScheduledScriptsConfig{
+		Env:     map[string]string{},
+		Scripts: make([]appconfig.ScheduledScriptConfig, 0, len(cfg.Scripts)),
+	}
+	for key, value := range cfg.Env {
+		clone.Env[key] = value
+	}
+	for _, script := range cfg.Scripts {
+		next := script
+		next.Env = map[string]string{}
+		for key, value := range script.Env {
+			next.Env[key] = value
+		}
+		clone.Scripts = append(clone.Scripts, next)
 	}
 	return clone
 }
