@@ -1466,6 +1466,120 @@ func TestStartCommandWithProjectOptionTargetsRegisteredProject(t *testing.T) {
 	}
 }
 
+func TestStartCommandWithProjectOptionAutostartsFromRequestedProject(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoA := filepath.Join(home, "project-a")
+	repoB := filepath.Join(home, "project-b")
+	if err := config.SaveProjectsRegistry(&config.ProjectsRegistry{
+		Projects: []config.Project{
+			{Name: "azedarach", Path: repoB},
+		},
+	}); err != nil {
+		t.Fatalf("save registry: %v", err)
+	}
+	projectA, err := config.ProjectIDForRoot(repoA)
+	if err != nil {
+		t.Fatalf("project A id: %v", err)
+	}
+	projectB, err := config.ProjectIDForRoot(repoB)
+	if err != nil {
+		t.Fatalf("project B id: %v", err)
+	}
+
+	oldLauncher := newLauncher
+	t.Cleanup(func() { newLauncher = oldLauncher })
+	fake := &fakeLauncher{}
+	var gotLauncherRepoDir string
+	newLauncher = func(repoDir, _ string) daemonStarter {
+		gotLauncherRepoDir = repoDir
+		return fake
+	}
+
+	var gotStartReq protocol.RequestEnvelope
+	commands := []string{}
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+				if !fake.startCalled {
+					return protocol.HelloAck{}, errors.New("daemon socket unavailable")
+				}
+				return protocol.HelloAck{Accepted: true}, nil
+			},
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command+":"+req.Meta.ProjectID.String())
+				switch req.Command {
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "cif")
+					projectID := req.Meta.ProjectID.String()
+					tasks := []domain.Task{}
+					if projectID == projectB {
+						tasks = []domain.Task{{ID: "cif", Title: "Remote", Status: domain.StatusOpen}}
+					}
+					body, err := marshalTaskListBodyForProject(projectID, tasks)
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:  "cif",
+						TargetID: "base",
+						Branch:   "main",
+					}), nil
+				case commandSessionStart:
+					gotStartReq = req
+					return responseWithOutput(req, "started\n"), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID(projectA),
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:      projectA,
+		RepoDir:        repoA,
+		RuntimeRepoDir: repoA,
+	}
+
+	output := captureStdout(t, func() error {
+		return StartCommandWithOptions(deps, "cif", SessionCommandOptions{Project: "azedarach"})
+	})
+
+	if output != "started\n" {
+		t.Fatalf("output = %q, want started", output)
+	}
+	if !fake.startCalled {
+		t.Fatal("expected daemon autostart")
+	}
+	if gotLauncherRepoDir != repoB {
+		t.Fatalf("launcher repoDir = %q, want requested project repo %q", gotLauncherRepoDir, repoB)
+	}
+	if gotStartReq.Meta.ProjectID.String() != projectB {
+		t.Fatalf("session start project = %q, want %q", gotStartReq.Meta.ProjectID, projectB)
+	}
+	if !reflect.DeepEqual(commands, []string{
+		daemonclient.CommandTaskGetMany + ":" + projectB,
+		daemonclient.CommandTaskMergeBaseTarget + ":" + projectB,
+		commandSessionStart + ":" + projectB,
+	}) {
+		t.Fatalf("commands = %v, want all scoped to %s", commands, projectB)
+	}
+	if deps.ProjectID != projectA || deps.RepoDir != repoA || deps.RuntimeRepoDir != repoA {
+		t.Fatalf("deps after start = project %q repo %q runtime %q, want restored %q/%q/%q",
+			deps.ProjectID, deps.RepoDir, deps.RuntimeRepoDir, projectA, repoA, repoA)
+	}
+}
+
 func TestSessionCommandsKeepBareIssueIDsCurrentProjectScoped(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

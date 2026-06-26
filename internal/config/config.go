@@ -334,7 +334,7 @@ const (
 	LocalConfigFileName  = "config.local.json"
 	ConfigSchemaFileName = "config.schema.json"
 	ConfigSchemaURL      = "https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json"
-	CurrentConfigVersion = 8
+	CurrentConfigVersion = 9
 )
 
 type configFileMetadata struct {

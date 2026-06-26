@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -499,6 +500,14 @@ func TestLoadConfigRejectsFutureVersion(t *testing.T) {
 	_, err := LoadConfig(root)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported config version")
+}
+
+func TestLoadConfigAcceptsCurrentVersion(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFile(t, root, fmt.Sprintf(`{"$schema":"./config.schema.json","$version":%d}`, CurrentConfigVersion))
+
+	_, err := LoadConfig(root)
+	require.NoError(t, err)
 }
 
 func TestLoadConfigRejectsFutureVersionInLocalConfigWithPath(t *testing.T) {

@@ -504,6 +504,10 @@ func StartCommand(deps *Dependencies, issueID string) error {
 func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCommandOptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), sessionStartCommandTimeout)
 	defer cancel()
+
+	restoreExplicitProject := applyExplicitSessionProjectOverride(deps, opts.Project)
+	defer restoreExplicitProject()
+
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
@@ -2186,6 +2190,49 @@ func applyIssueProjectOverride(deps *Dependencies, project string) func() {
 		deps.ProjectID = previousProject
 		deps.DaemonClient.WithProjectID(previousProject)
 	}
+}
+
+func applyExplicitSessionProjectOverride(deps *Dependencies, project string) func() {
+	project = normalizeIssueProject(project)
+	if deps == nil || project == "" {
+		return func() {}
+	}
+	candidate, ok := findSessionProjectCandidate(deps, project)
+	if !ok {
+		return func() {}
+	}
+	previousProject := deps.ProjectID
+	previousRepoDir := deps.RepoDir
+	previousRuntimeRepoDir := deps.RuntimeRepoDir
+
+	deps.ProjectID = candidate.Route
+	if deps.DaemonClient != nil {
+		deps.DaemonClient.WithProjectID(candidate.Route)
+	}
+	if repoDir := sessionProjectCandidateRepoDir(candidate); repoDir != "" {
+		deps.RepoDir = repoDir
+		deps.RuntimeRepoDir = resolveRuntimeRepoDir(repoDir)
+	}
+
+	return func() {
+		deps.ProjectID = previousProject
+		deps.RepoDir = previousRepoDir
+		deps.RuntimeRepoDir = previousRuntimeRepoDir
+		if deps.DaemonClient != nil {
+			deps.DaemonClient.WithProjectID(previousProject)
+		}
+	}
+}
+
+func sessionProjectCandidateRepoDir(candidate sessionProjectCandidate) string {
+	path := strings.TrimSpace(candidate.Path)
+	if path == "" {
+		return ""
+	}
+	if repoDir, err := config.ResolveProjectRoot(path); err == nil && strings.TrimSpace(repoDir) != "" {
+		return repoDir
+	}
+	return path
 }
 
 func isDifferentExplicitIssueProject(currentProject, explicitProject string) bool {
