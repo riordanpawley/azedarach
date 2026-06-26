@@ -86,16 +86,17 @@ func issueCloseCommand(issueID string) string {
 }
 
 type orchestrateStatusResult struct {
-	RootIssueID          string                            `json:"root_issue_id"`
-	Runnable             []string                          `json:"runnable"`
-	Pending              []orchestratePendingStart         `json:"pending,omitempty"`
-	Active               []string                          `json:"active,omitempty"`
-	ActiveSessions       []orchestrateActiveSession        `json:"active_sessions,omitempty"`
-	SessionStartProgress []orchestrateSessionStartProgress `json:"session_start_progress,omitempty"`
-	Blocked              map[string]string                 `json:"blocked"`
-	MailboxEvents        []protocol.MailEvent              `json:"mailbox_events"`
-	Warnings             []string                          `json:"warnings,omitempty"`
-	Advice               map[string]interface{}            `json:"advice,omitempty"`
+	RootIssueID            string                               `json:"root_issue_id"`
+	Runnable               []string                             `json:"runnable"`
+	Pending                []orchestratePendingStart            `json:"pending,omitempty"`
+	Active                 []string                             `json:"active,omitempty"`
+	ActiveSessions         []orchestrateActiveSession           `json:"active_sessions,omitempty"`
+	SessionStartProgress   []orchestrateSessionStartProgress    `json:"session_start_progress,omitempty"`
+	StaleCloseableChildren []orchestrateStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
+	Blocked                map[string]string                    `json:"blocked"`
+	MailboxEvents          []protocol.MailEvent                 `json:"mailbox_events"`
+	Warnings               []string                             `json:"warnings,omitempty"`
+	Advice                 map[string]interface{}               `json:"advice,omitempty"`
 }
 
 type orchestrateStartResult struct {
@@ -138,16 +139,17 @@ type orchestrateStartAdvice struct {
 }
 
 type orchestrateWatchFrame struct {
-	RootIssueID          string                            `json:"root_issue_id"`
-	SinceSeq             int64                             `json:"since_seq"`
-	NextSince            int64                             `json:"next_since"`
-	Runnable             []string                          `json:"runnable"`
-	Pending              []orchestratePendingStart         `json:"pending,omitempty"`
-	Active               []string                          `json:"active,omitempty"`
-	ActiveSessions       []orchestrateActiveSession        `json:"active_sessions,omitempty"`
-	SessionStartProgress []orchestrateSessionStartProgress `json:"session_start_progress,omitempty"`
-	Blocked              map[string]string                 `json:"blocked"`
-	Events               []mailEvent                       `json:"events"`
+	RootIssueID            string                               `json:"root_issue_id"`
+	SinceSeq               int64                                `json:"since_seq"`
+	NextSince              int64                                `json:"next_since"`
+	Runnable               []string                             `json:"runnable"`
+	Pending                []orchestratePendingStart            `json:"pending,omitempty"`
+	Active                 []string                             `json:"active,omitempty"`
+	ActiveSessions         []orchestrateActiveSession           `json:"active_sessions,omitempty"`
+	SessionStartProgress   []orchestrateSessionStartProgress    `json:"session_start_progress,omitempty"`
+	StaleCloseableChildren []orchestrateStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
+	Blocked                map[string]string                    `json:"blocked"`
+	Events                 []mailEvent                          `json:"events"`
 }
 
 type orchestratePendingStart struct {
@@ -178,6 +180,13 @@ type orchestrateSessionStartProgress struct {
 	EnqueuedAt     time.Time  `json:"enqueued_at,omitempty"`
 	StartedAt      *time.Time `json:"started_at,omitempty"`
 	FinishedAt     *time.Time `json:"finished_at,omitempty"`
+}
+
+type orchestrateStaleCloseableCandidate struct {
+	IssueID          string   `json:"issue_id"`
+	Status           string   `json:"status"`
+	Evidence         []string `json:"evidence"`
+	SuggestedCommand string   `json:"suggested_command"`
 }
 
 type orchestratePromptResult struct {
@@ -456,15 +465,16 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 	}
 
 	result := orchestrateStatusResult{
-		RootIssueID:          ready.RootIssueID,
-		Runnable:             ready.Runnable,
-		Pending:              orchestratePendingStartsFromDaemon(ready.Pending),
-		Active:               ready.Active,
-		ActiveSessions:       orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
-		SessionStartProgress: orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
-		Blocked:              ready.Blocked,
-		MailboxEvents:        events,
-		Warnings:             orchestrateStatusWarnings(ctx, deps, ready, len(ready.Runnable)),
+		RootIssueID:            ready.RootIssueID,
+		Runnable:               ready.Runnable,
+		Pending:                orchestratePendingStartsFromDaemon(ready.Pending),
+		Active:                 ready.Active,
+		ActiveSessions:         orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
+		SessionStartProgress:   orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
+		StaleCloseableChildren: orchestrateStaleCloseableFromDaemon(ready.StaleCloseableChildren),
+		Blocked:                ready.Blocked,
+		MailboxEvents:          events,
+		Warnings:               orchestrateStatusWarnings(ctx, deps, ready, len(ready.Runnable)),
 		Advice: map[string]interface{}{
 			"watch":             fmt.Sprintf("az orchestrate watch --root %s --since %d --jsonl", ready.RootIssueID, nextMailboxSeq(events, opts.SinceSeq)),
 			"watch_instruction": "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
@@ -521,6 +531,18 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		fmt.Println("Session start progress:")
 		for _, progress := range result.SessionStartProgress {
 			fmt.Printf("- %s: %s\n", progress.IssueID, formatSessionStartProgress(progress))
+		}
+	}
+	if len(result.StaleCloseableChildren) > 0 {
+		fmt.Println("Stale-closeable children:")
+		for _, candidate := range result.StaleCloseableChildren {
+			fmt.Printf("- %s status=%s\n", candidate.IssueID, candidate.Status)
+			if len(candidate.Evidence) > 0 {
+				fmt.Printf("  evidence: %s\n", strings.Join(candidate.Evidence, "; "))
+			}
+			if candidate.SuggestedCommand != "" {
+				fmt.Printf("  next: %s\n", candidate.SuggestedCommand)
+			}
 		}
 	}
 	fmt.Printf("Mailbox events (latest %d, since seq>%d): %d\n", opts.Limit, opts.SinceSeq, len(result.MailboxEvents))
@@ -736,6 +758,22 @@ func orchestrateSessionStartProgressFromDaemonOne(progress daemonclient.TaskSess
 	}
 }
 
+func orchestrateStaleCloseableFromDaemon(candidates []daemonclient.TaskStaleCloseableCandidate) []orchestrateStaleCloseableCandidate {
+	if len(candidates) == 0 {
+		return nil
+	}
+	out := make([]orchestrateStaleCloseableCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, orchestrateStaleCloseableCandidate{
+			IssueID:          candidate.IssueID,
+			Status:           candidate.Status,
+			Evidence:         append([]string(nil), candidate.Evidence...),
+			SuggestedCommand: candidate.SuggestedCommand,
+		})
+	}
+	return out
+}
+
 func formatSessionStartProgress(progress orchestrateSessionStartProgress) string {
 	parts := make([]string, 0, 6)
 	if state := strings.TrimSpace(progress.OperationState); state != "" {
@@ -880,16 +918,17 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 		}
 		nextSince := nextMailboxSeq(events, lastSeq)
 		frame := orchestrateWatchFrame{
-			RootIssueID:          ready.RootIssueID,
-			SinceSeq:             lastSeq,
-			NextSince:            nextSince,
-			Runnable:             ready.Runnable,
-			Pending:              orchestratePendingStartsFromDaemon(ready.Pending),
-			Active:               ready.Active,
-			ActiveSessions:       orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
-			SessionStartProgress: orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
-			Blocked:              ready.Blocked,
-			Events:               watchEvents,
+			RootIssueID:            ready.RootIssueID,
+			SinceSeq:               lastSeq,
+			NextSince:              nextSince,
+			Runnable:               ready.Runnable,
+			Pending:                orchestratePendingStartsFromDaemon(ready.Pending),
+			Active:                 ready.Active,
+			ActiveSessions:         orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
+			SessionStartProgress:   orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
+			StaleCloseableChildren: orchestrateStaleCloseableFromDaemon(ready.StaleCloseableChildren),
+			Blocked:                ready.Blocked,
+			Events:                 watchEvents,
 		}
 		snapshotKey := orchestrateWatchFrameSnapshotKey(frame)
 		if len(events) == 0 && snapshotKey == lastSnapshotKey {
@@ -905,12 +944,13 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 
 func orchestrateWatchFrameSnapshotKey(frame orchestrateWatchFrame) string {
 	type snapshot struct {
-		Runnable             []string                          `json:"runnable"`
-		Pending              []orchestratePendingStart         `json:"pending,omitempty"`
-		Active               []string                          `json:"active,omitempty"`
-		ActiveSessions       []orchestrateActiveSession        `json:"active_sessions,omitempty"`
-		SessionStartProgress []orchestrateSessionStartProgress `json:"session_start_progress,omitempty"`
-		Blocked              map[string]string                 `json:"blocked"`
+		Runnable               []string                             `json:"runnable"`
+		Pending                []orchestratePendingStart            `json:"pending,omitempty"`
+		Active                 []string                             `json:"active,omitempty"`
+		ActiveSessions         []orchestrateActiveSession           `json:"active_sessions,omitempty"`
+		SessionStartProgress   []orchestrateSessionStartProgress    `json:"session_start_progress,omitempty"`
+		StaleCloseableChildren []orchestrateStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
+		Blocked                map[string]string                    `json:"blocked"`
 	}
 	activeSessions := append([]orchestrateActiveSession(nil), frame.ActiveSessions...)
 	for i := range activeSessions {
@@ -925,12 +965,13 @@ func orchestrateWatchFrameSnapshotKey(frame orchestrateWatchFrame) string {
 		sessionStartProgress[i].ElapsedMS = 0
 	}
 	encoded, err := json.Marshal(snapshot{
-		Runnable:             frame.Runnable,
-		Pending:              frame.Pending,
-		Active:               frame.Active,
-		ActiveSessions:       activeSessions,
-		SessionStartProgress: sessionStartProgress,
-		Blocked:              frame.Blocked,
+		Runnable:               frame.Runnable,
+		Pending:                frame.Pending,
+		Active:                 frame.Active,
+		ActiveSessions:         activeSessions,
+		SessionStartProgress:   sessionStartProgress,
+		StaleCloseableChildren: frame.StaleCloseableChildren,
+		Blocked:                frame.Blocked,
 	})
 	if err != nil {
 		return ""
@@ -987,6 +1028,18 @@ func OrchestrateCompleteCheckCommand(deps *Dependencies, opts OrchestrateComplet
 	fmt.Printf("Root issue %s is NOT ready to close:\n", result.RootIssueID)
 	for _, reason := range result.Reasons {
 		fmt.Printf("- %s\n", reason)
+	}
+	if len(result.StaleCloseableChildren) > 0 {
+		fmt.Println("Stale-closeable children:")
+		for _, candidate := range result.StaleCloseableChildren {
+			fmt.Printf("- %s status=%s\n", candidate.IssueID, candidate.Status)
+			if len(candidate.Evidence) > 0 {
+				fmt.Printf("  evidence: %s\n", strings.Join(candidate.Evidence, "; "))
+			}
+			if candidate.SuggestedCommand != "" {
+				fmt.Printf("  next: %s\n", candidate.SuggestedCommand)
+			}
+		}
 	}
 	if len(result.Advice) > 0 {
 		fmt.Println("Suggested next steps:")
