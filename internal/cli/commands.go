@@ -2980,28 +2980,77 @@ func configuredIssueImplementations(tasks []domain.Task) []string {
 
 func resolveIssueWriteImplementation(ctx context.Context, deps *Dependencies, provided string) (string, error) {
 	trimmed := strings.TrimSpace(provided)
+	impls, err := issueWriteImplementationOptions(ctx, deps)
 	if trimmed != "" {
+		if err != nil {
+			return "", fmt.Errorf("unable to validate implementation %q: %w", trimmed, err)
+		}
+		if !implementationOptionExists(impls, trimmed) {
+			return "", unknownIssueWriteImplementationError(trimmed, impls)
+		}
 		return trimmed, nil
 	}
-	if deps == nil || deps.DaemonClient == nil {
-		return "", fmt.Errorf("missing required flag: --impl")
-	}
 
-	snapshot, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskSnapshot, error) {
-		return deps.DaemonClient.ListTasksSnapshot(callCtx)
-	})
 	if err != nil {
 		return "", fmt.Errorf("missing required flag: --impl (unable to infer implementation automatically: %v). Specify --impl <implementation>", err)
 	}
-	impls := configuredIssueImplementations(snapshot.Tasks)
 	switch len(impls) {
-	case 0:
-		return "default", nil
 	case 1:
 		return impls[0], nil
 	default:
 		return "", fmt.Errorf("missing required flag: --impl (multiple implementations configured: %s)", strings.Join(impls, ", "))
 	}
+}
+
+func resolveIssueWriteImplementations(ctx context.Context, deps *Dependencies, provided []string) ([]string, error) {
+	normalized := dedupeTrimmed(provided)
+	if len(normalized) == 0 {
+		impl, err := resolveIssueWriteImplementation(ctx, deps, "")
+		if err != nil {
+			return nil, err
+		}
+		return []string{impl}, nil
+	}
+	impls, err := issueWriteImplementationOptions(ctx, deps)
+	if err != nil {
+		return nil, fmt.Errorf("unable to validate implementations: %w", err)
+	}
+	for _, impl := range normalized {
+		if !implementationOptionExists(impls, impl) {
+			return nil, unknownIssueWriteImplementationError(impl, impls)
+		}
+	}
+	return normalized, nil
+}
+
+func issueWriteImplementationOptions(ctx context.Context, deps *Dependencies) ([]string, error) {
+	if deps == nil || deps.DaemonClient == nil {
+		return nil, fmt.Errorf("daemon client is required to validate implementations")
+	}
+	snapshot, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskSnapshot, error) {
+		return deps.DaemonClient.ListTasksSnapshot(callCtx)
+	})
+	if err != nil {
+		return nil, err
+	}
+	impls := configuredIssueImplementations(snapshot.Tasks)
+	if len(impls) == 0 {
+		return []string{"default"}, nil
+	}
+	return impls, nil
+}
+
+func implementationOptionExists(options []string, impl string) bool {
+	for _, option := range options {
+		if option == impl {
+			return true
+		}
+	}
+	return false
+}
+
+func unknownIssueWriteImplementationError(impl string, known []string) error {
+	return fmt.Errorf("unknown implementation %q (known implementations: %s). Run `az impl list` to inspect implementation assignments. If you meant to parent work under %q, omit --impl in the correct AZEDARACH_ISSUE_ID context or add a parent-child edge instead", impl, strings.Join(known, ", "), impl)
 }
 
 func ConfigSetCommand(deps *Dependencies, opts ConfigSetOptions) error {
@@ -3947,6 +3996,7 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 	ctx, cancel := context.WithTimeout(parentCtx, issueCreateCommandTimeout)
 	defer cancel()
 
+	var err error
 	var parentID *naming.IssueID
 	implementations := append([]string{}, opts.Implementations...)
 	if !opts.Deferred && opts.AutoParentFromIssueID != nil && strings.TrimSpace(*opts.AutoParentFromIssueID) != "" {
@@ -3963,18 +4013,9 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 			implementations = append([]string{}, parentTask.Implementations...)
 		}
 	}
-	if len(implementations) == 0 {
-		resolvedImpl, err := resolveIssueWriteImplementation(ctx, deps, "")
-		if err != nil {
-			return issueCreateResult{}, err
-		}
-		implementations = append(implementations, resolvedImpl)
-	} else if len(implementations) == 1 {
-		resolvedImpl, err := resolveIssueWriteImplementation(ctx, deps, implementations[0])
-		if err != nil {
-			return issueCreateResult{}, err
-		}
-		implementations[0] = resolvedImpl
+	implementations, err = resolveIssueWriteImplementations(ctx, deps, implementations)
+	if err != nil {
+		return issueCreateResult{}, err
 	}
 
 	taskID, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (string, error) {
@@ -4244,7 +4285,11 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 		update.Priority = *opts.Priority
 	}
 	if len(opts.UpdateImpls) > 0 {
-		update.Implementations = append([]string{}, opts.UpdateImpls...)
+		impls, err := resolveIssueWriteImplementations(ctx, deps, opts.UpdateImpls)
+		if err != nil {
+			return fmt.Errorf("invalid implementation update: %w", err)
+		}
+		update.Implementations = impls
 	}
 
 	if err := deps.DaemonClient.UpdateTaskDetails(ctx, opts.IssueID, update); err != nil {

@@ -5152,27 +5152,16 @@ func TestParseIssueBulkArgs(t *testing.T) {
 }
 
 func TestResolveIssueWriteImplementation(t *testing.T) {
-	t.Run("explicit implementation wins", func(t *testing.T) {
-		impl, err := resolveIssueWriteImplementation(context.Background(), nil, "go-bubbletea")
-		if err != nil {
-			t.Fatalf("resolveIssueWriteImplementation() error = %v", err)
-		}
-		if impl != "go-bubbletea" {
-			t.Fatalf("resolveIssueWriteImplementation() = %q, want go-bubbletea", impl)
-		}
-	})
-
-	t.Run("defaults to configured single implementation", func(t *testing.T) {
-		deps := &Dependencies{
+	depsWithTasks := func(t *testing.T, tasks []domain.Task) *Dependencies {
+		t.Helper()
+		return &Dependencies{
 			Config: config.DefaultConfig(),
 			DaemonClient: daemonclient.New(&fakeDaemonTransport{
 				commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 					if req.Command != daemonclient.CommandTaskList {
 						t.Fatalf("unexpected command %q", req.Command)
 					}
-					body, err := marshalTaskListBody([]domain.Task{
-						{ID: "az-1", Implementations: []string{"go-bubbletea"}},
-					})
+					body, err := marshalTaskListBody(tasks)
 					if err != nil {
 						t.Fatalf("marshal tasks: %v", err)
 					}
@@ -5189,6 +5178,25 @@ func TestResolveIssueWriteImplementation(t *testing.T) {
 				},
 			}),
 		}
+	}
+
+	t.Run("explicit implementation wins", func(t *testing.T) {
+		deps := depsWithTasks(t, []domain.Task{
+			{ID: "az-1", Implementations: []string{"go-bubbletea"}},
+		})
+		impl, err := resolveIssueWriteImplementation(context.Background(), deps, "go-bubbletea")
+		if err != nil {
+			t.Fatalf("resolveIssueWriteImplementation() error = %v", err)
+		}
+		if impl != "go-bubbletea" {
+			t.Fatalf("resolveIssueWriteImplementation() = %q, want go-bubbletea", impl)
+		}
+	})
+
+	t.Run("defaults to configured single implementation", func(t *testing.T) {
+		deps := depsWithTasks(t, []domain.Task{
+			{ID: "az-1", Implementations: []string{"go-bubbletea"}},
+		})
 		impl, err := resolveIssueWriteImplementation(context.Background(), deps, "")
 		if err != nil {
 			t.Fatalf("resolveIssueWriteImplementation() error = %v", err)
@@ -5199,32 +5207,7 @@ func TestResolveIssueWriteImplementation(t *testing.T) {
 	})
 
 	t.Run("falls back to default when no implementations are configured", func(t *testing.T) {
-		deps := &Dependencies{
-			Config: config.DefaultConfig(),
-			DaemonClient: daemonclient.New(&fakeDaemonTransport{
-				commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-					if req.Command != daemonclient.CommandTaskList {
-						t.Fatalf("unexpected command %q", req.Command)
-					}
-					body, err := marshalTaskListBody([]domain.Task{
-						{ID: "az-1"},
-					})
-					if err != nil {
-						t.Fatalf("marshal tasks: %v", err)
-					}
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						Meta:            req.Meta,
-						OK:              true,
-						CompletedAt:     req.SentAt,
-						Revision:        1,
-						Body:            body,
-					}, nil
-				},
-			}),
-		}
+		deps := depsWithTasks(t, []domain.Task{{ID: "az-1"}})
 		impl, err := resolveIssueWriteImplementation(context.Background(), deps, "")
 		if err != nil {
 			t.Fatalf("resolveIssueWriteImplementation() error = %v", err)
@@ -5235,36 +5218,67 @@ func TestResolveIssueWriteImplementation(t *testing.T) {
 	})
 
 	t.Run("requires explicit selection when multiple implementations are configured", func(t *testing.T) {
-		deps := &Dependencies{
-			Config: config.DefaultConfig(),
-			DaemonClient: daemonclient.New(&fakeDaemonTransport{
-				commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-					if req.Command != daemonclient.CommandTaskList {
-						t.Fatalf("unexpected command %q", req.Command)
-					}
-					body, err := marshalTaskListBody([]domain.Task{
-						{ID: "az-1", Implementations: []string{"go-bubbletea"}},
-						{ID: "az-2", Implementations: []string{"default"}},
-					})
-					if err != nil {
-						t.Fatalf("marshal tasks: %v", err)
-					}
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						Meta:            req.Meta,
-						OK:              true,
-						CompletedAt:     req.SentAt,
-						Revision:        1,
-						Body:            body,
-					}, nil
-				},
-			}),
-		}
+		deps := depsWithTasks(t, []domain.Task{
+			{ID: "az-1", Implementations: []string{"go-bubbletea"}},
+			{ID: "az-2", Implementations: []string{"default"}},
+		})
 		_, err := resolveIssueWriteImplementation(context.Background(), deps, "")
 		if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl (multiple implementations configured: default, go-bubbletea)") {
 			t.Fatalf("expected multi-implementation error, got %v", err)
+		}
+	})
+
+	t.Run("rejects explicit unknown implementation", func(t *testing.T) {
+		deps := depsWithTasks(t, []domain.Task{
+			{ID: "az-1", Implementations: []string{"default"}},
+			{ID: "az-2", Implementations: []string{"go-bubbletea"}},
+		})
+		_, err := resolveIssueWriteImplementation(context.Background(), deps, "cif")
+		if err == nil {
+			t.Fatal("resolveIssueWriteImplementation() error = nil, want unknown implementation")
+		}
+		for _, want := range []string{
+			`unknown implementation "cif"`,
+			"known implementations: default, go-bubbletea",
+			"Run `az impl list`",
+			"parent work under",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %v, want substring %q", err, want)
+			}
+		}
+	})
+
+	t.Run("allows only default when no implementations are configured", func(t *testing.T) {
+		deps := depsWithTasks(t, []domain.Task{{ID: "az-1"}})
+		impl, err := resolveIssueWriteImplementation(context.Background(), deps, "default")
+		if err != nil {
+			t.Fatalf("resolveIssueWriteImplementation(default) error = %v", err)
+		}
+		if impl != "default" {
+			t.Fatalf("resolveIssueWriteImplementation(default) = %q, want default", impl)
+		}
+		_, err = resolveIssueWriteImplementation(context.Background(), deps, "cif")
+		if err == nil || !strings.Contains(err.Error(), `unknown implementation "cif" (known implementations: default)`) {
+			t.Fatalf("resolveIssueWriteImplementation(cif) error = %v, want unknown default-only implementation", err)
+		}
+	})
+
+	t.Run("validates repeated implementation assignments", func(t *testing.T) {
+		deps := depsWithTasks(t, []domain.Task{
+			{ID: "az-1", Implementations: []string{"default"}},
+			{ID: "az-2", Implementations: []string{"go-bubbletea"}},
+		})
+		impls, err := resolveIssueWriteImplementations(context.Background(), deps, []string{" go-bubbletea ", "default", "go-bubbletea"})
+		if err != nil {
+			t.Fatalf("resolveIssueWriteImplementations() error = %v", err)
+		}
+		if !reflect.DeepEqual(impls, []string{"go-bubbletea", "default"}) {
+			t.Fatalf("resolveIssueWriteImplementations() = %+v, want deduped implementations", impls)
+		}
+		_, err = resolveIssueWriteImplementations(context.Background(), deps, []string{"default", "cif"})
+		if err == nil || !strings.Contains(err.Error(), `unknown implementation "cif"`) {
+			t.Fatalf("resolveIssueWriteImplementations() error = %v, want unknown implementation", err)
 		}
 	})
 }
@@ -6766,7 +6780,7 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 							body = payload
 						} else if req.Command == daemonclient.CommandTaskList {
 							payload, err := marshalTaskListBody([]domain.Task{
-								{ID: "az-9", Title: "Close me", Status: domain.StatusInReview},
+								{ID: "az-9", Title: "Close me", Status: domain.StatusInReview, Implementations: []string{"go-bubbletea"}},
 							})
 							if err != nil {
 								t.Fatalf("marshal task list response: %v", err)
@@ -7016,6 +7030,14 @@ func TestIssueCreateCommandAutoParentsAndInheritsImplsFromActiveIssue(t *testing
 						t.Fatalf("marshal task list response: %v", err)
 					}
 					body = tasks
+				case daemonclient.CommandTaskList:
+					tasks, err := marshalTaskListBody([]domain.Task{
+						{ID: "az-parent", Implementations: []string{"go-bubbletea"}},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list response: %v", err)
+					}
+					body = tasks
 				case daemonclient.CommandTaskCreate:
 					payload, err := json.Marshal(map[string]string{"task_id": "az-child"})
 					if err != nil {
@@ -7051,21 +7073,24 @@ func TestIssueCreateCommandAutoParentsAndInheritsImplsFromActiveIssue(t *testing
 		})
 	})
 
-	if len(requests) != 3 {
-		t.Fatalf("request count = %d, want 3", len(requests))
+	if len(requests) != 4 {
+		t.Fatalf("request count = %d, want 4", len(requests))
 	}
 	if requests[0].Command != daemonclient.CommandTaskGetMany {
 		t.Fatalf("requests[0].Command = %q, want %q", requests[0].Command, daemonclient.CommandTaskGetMany)
 	}
-	if requests[1].Command != daemonclient.CommandTaskCreate {
-		t.Fatalf("requests[1].Command = %q, want %q", requests[1].Command, daemonclient.CommandTaskCreate)
+	if requests[1].Command != daemonclient.CommandTaskList {
+		t.Fatalf("requests[1].Command = %q, want %q", requests[1].Command, daemonclient.CommandTaskList)
 	}
-	if requests[2].Command != daemonclient.CommandTaskDependencyAdd {
-		t.Fatalf("requests[2].Command = %q, want %q", requests[2].Command, daemonclient.CommandTaskDependencyAdd)
+	if requests[2].Command != daemonclient.CommandTaskCreate {
+		t.Fatalf("requests[2].Command = %q, want %q", requests[2].Command, daemonclient.CommandTaskCreate)
+	}
+	if requests[3].Command != daemonclient.CommandTaskDependencyAdd {
+		t.Fatalf("requests[3].Command = %q, want %q", requests[3].Command, daemonclient.CommandTaskDependencyAdd)
 	}
 
 	var createReq daemonclient.TaskCreateParams
-	if err := json.Unmarshal(requests[1].Body, &createReq); err != nil {
+	if err := json.Unmarshal(requests[2].Body, &createReq); err != nil {
 		t.Fatalf("unmarshal create body: %v", err)
 	}
 	if createReq.ParentID == nil || *createReq.ParentID != "az-parent" {
@@ -7081,7 +7106,7 @@ func TestIssueCreateCommandAutoParentsAndInheritsImplsFromActiveIssue(t *testing
 		t.Fatalf("create priority = %s, want P2", createReq.Priority.String())
 	}
 	var depReq daemonclient.TaskDependencyParams
-	if err := json.Unmarshal(requests[2].Body, &depReq); err != nil {
+	if err := json.Unmarshal(requests[3].Body, &depReq); err != nil {
 		t.Fatalf("unmarshal dependency body: %v", err)
 	}
 	if depReq.TaskID != "az-child" || depReq.DependsOnID != "az-parent" || depReq.Type != string(domain.DependencyCreatedIn) {
@@ -7124,6 +7149,14 @@ func TestIssueCreateCommandAutoParentsFromTmuxSessionWhenEnvMissing(t *testing.T
 						t.Fatalf("marshal task list response: %v", err)
 					}
 					body = tasks
+				case daemonclient.CommandTaskList:
+					tasks, err := marshalTaskListBody([]domain.Task{
+						{ID: "az-parent", Implementations: []string{"go-bubbletea"}},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list response: %v", err)
+					}
+					body = tasks
 				case daemonclient.CommandTaskCreate:
 					payload, err := json.Marshal(map[string]string{"task_id": "az-child"})
 					if err != nil {
@@ -7157,14 +7190,14 @@ func TestIssueCreateCommandAutoParentsFromTmuxSessionWhenEnvMissing(t *testing.T
 		})
 	})
 
-	if len(requests) != 4 {
-		t.Fatalf("request count = %d, want 4", len(requests))
+	if len(requests) != 5 {
+		t.Fatalf("request count = %d, want 5", len(requests))
 	}
-	if requests[0].Command != daemonclient.CommandTaskGetMany || requests[1].Command != daemonclient.CommandTaskGetMany {
-		t.Fatalf("first requests = %s, %s; want targeted task metadata confirmation then parent resolution", requests[0].Command, requests[1].Command)
+	if requests[0].Command != daemonclient.CommandTaskGetMany || requests[1].Command != daemonclient.CommandTaskGetMany || requests[2].Command != daemonclient.CommandTaskList {
+		t.Fatalf("first requests = %s, %s, %s; want metadata confirmation, parent resolution, then implementation validation", requests[0].Command, requests[1].Command, requests[2].Command)
 	}
 	var createReq daemonclient.TaskCreateParams
-	if err := json.Unmarshal(requests[2].Body, &createReq); err != nil {
+	if err := json.Unmarshal(requests[3].Body, &createReq); err != nil {
 		t.Fatalf("unmarshal create body: %v", err)
 	}
 	if createReq.ParentID == nil || *createReq.ParentID != "az-parent" {
@@ -7183,7 +7216,21 @@ func TestIssueCreateCommandDeferredIgnoresAutoParentFromIssueID(t *testing.T) {
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				requests = append(requests, req)
 				if req.Command == daemonclient.CommandTaskList {
-					t.Fatalf("unexpected %s request for deferred issue", daemonclient.CommandTaskList)
+					body, err := marshalTaskListBody([]domain.Task{
+						{ID: "az-1", Implementations: []string{"default"}},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            body,
+					}, nil
 				}
 				if req.Command == daemonclient.CommandTaskDependencyAdd {
 					return protocol.ResponseEnvelope{
@@ -7228,18 +7275,21 @@ func TestIssueCreateCommandDeferredIgnoresAutoParentFromIssueID(t *testing.T) {
 		})
 	})
 
-	if len(requests) != 2 {
-		t.Fatalf("request count = %d, want 2", len(requests))
+	if len(requests) != 3 {
+		t.Fatalf("request count = %d, want 3", len(requests))
 	}
-	if requests[0].Command != daemonclient.CommandTaskCreate {
-		t.Fatalf("requests[0].Command = %q, want %q", requests[0].Command, daemonclient.CommandTaskCreate)
+	if requests[0].Command != daemonclient.CommandTaskList {
+		t.Fatalf("requests[0].Command = %q, want %q", requests[0].Command, daemonclient.CommandTaskList)
 	}
-	if requests[1].Command != daemonclient.CommandTaskDependencyAdd {
-		t.Fatalf("requests[1].Command = %q, want %q", requests[1].Command, daemonclient.CommandTaskDependencyAdd)
+	if requests[1].Command != daemonclient.CommandTaskCreate {
+		t.Fatalf("requests[1].Command = %q, want %q", requests[1].Command, daemonclient.CommandTaskCreate)
+	}
+	if requests[2].Command != daemonclient.CommandTaskDependencyAdd {
+		t.Fatalf("requests[2].Command = %q, want %q", requests[2].Command, daemonclient.CommandTaskDependencyAdd)
 	}
 
 	var createReq daemonclient.TaskCreateParams
-	if err := json.Unmarshal(requests[0].Body, &createReq); err != nil {
+	if err := json.Unmarshal(requests[1].Body, &createReq); err != nil {
 		t.Fatalf("unmarshal create body: %v", err)
 	}
 	if createReq.ParentID != nil {
@@ -7249,7 +7299,7 @@ func TestIssueCreateCommandDeferredIgnoresAutoParentFromIssueID(t *testing.T) {
 		t.Fatalf("create implementations = %+v, want [default]", createReq.Implementations)
 	}
 	var depReq daemonclient.TaskDependencyParams
-	if err := json.Unmarshal(requests[1].Body, &depReq); err != nil {
+	if err := json.Unmarshal(requests[2].Body, &depReq); err != nil {
 		t.Fatalf("unmarshal dependency body: %v", err)
 	}
 	if depReq.TaskID != "az-child" || depReq.DependsOnID != "az-parent" || depReq.Type != string(domain.DependencyCreatedIn) {
@@ -7268,7 +7318,21 @@ func TestIssueCreateCommandCrossProjectSkipsImplicitAutoParentAndCreatedFrom(t *
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				requests = append(requests, req)
 				if req.Command == daemonclient.CommandTaskList {
-					t.Fatalf("unexpected %s request for cross-project create", daemonclient.CommandTaskList)
+					body, err := marshalTaskListBody([]domain.Task{
+						{ID: "az-1", Implementations: []string{"default"}},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            body,
+					}, nil
 				}
 				if req.Command == daemonclient.CommandTaskDependencyAdd {
 					t.Fatalf("unexpected %s request for cross-project create", daemonclient.CommandTaskDependencyAdd)
@@ -7305,17 +7369,20 @@ func TestIssueCreateCommandCrossProjectSkipsImplicitAutoParentAndCreatedFrom(t *
 		})
 	})
 
-	if len(requests) != 1 {
-		t.Fatalf("request count = %d, want 1", len(requests))
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d, want 2", len(requests))
 	}
-	if requests[0].Command != daemonclient.CommandTaskCreate {
-		t.Fatalf("request command = %q, want %q", requests[0].Command, daemonclient.CommandTaskCreate)
+	if requests[0].Command != daemonclient.CommandTaskList {
+		t.Fatalf("requests[0].Command = %q, want %q", requests[0].Command, daemonclient.CommandTaskList)
 	}
-	if requests[0].Meta.ProjectID.String() != "azedarach" {
-		t.Fatalf("request project = %q, want azedarach", requests[0].Meta.ProjectID)
+	if requests[1].Command != daemonclient.CommandTaskCreate {
+		t.Fatalf("requests[1].Command = %q, want %q", requests[1].Command, daemonclient.CommandTaskCreate)
+	}
+	if requests[1].Meta.ProjectID.String() != "azedarach" {
+		t.Fatalf("request project = %q, want azedarach", requests[1].Meta.ProjectID)
 	}
 	var createReq daemonclient.TaskCreateParams
-	if err := json.Unmarshal(requests[0].Body, &createReq); err != nil {
+	if err := json.Unmarshal(requests[1].Body, &createReq); err != nil {
 		t.Fatalf("unmarshal create body: %v", err)
 	}
 	if createReq.ParentID != nil {
@@ -7338,6 +7405,14 @@ func TestIssueCreateCommandReportsPartialSuccessWhenCreatedFromEdgeFails(t *test
 				requests = append(requests, req)
 				body := []byte{}
 				switch req.Command {
+				case daemonclient.CommandTaskList:
+					payload, err := marshalTaskListBody([]domain.Task{
+						{ID: "az-1", Implementations: []string{"default"}},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list response: %v", err)
+					}
+					body = payload
 				case daemonclient.CommandTaskCreate:
 					payload, err := json.Marshal(map[string]string{"task_id": "az-child"})
 					if err != nil {
@@ -7379,8 +7454,8 @@ func TestIssueCreateCommandReportsPartialSuccessWhenCreatedFromEdgeFails(t *test
 	if output != "" {
 		t.Fatalf("stdout = %q, want empty on text partial error", output)
 	}
-	if len(requests) != 2 {
-		t.Fatalf("request count = %d, want 2", len(requests))
+	if len(requests) != 3 {
+		t.Fatalf("request count = %d, want 3", len(requests))
 	}
 	var partial issueCreatePartialError
 	if !errors.As(err, &partial) {
@@ -7667,6 +7742,61 @@ func TestIssueCreateCommandAutoDefaultsImplWhenSingleConfigured(t *testing.T) {
 	}
 	if !reflect.DeepEqual(createReq.Implementations, []string{"go-bubbletea"}) {
 		t.Fatalf("create implementations = %+v, want [go-bubbletea]", createReq.Implementations)
+	}
+}
+
+func TestIssueCreateCommandRejectsUnknownExplicitImplementation(t *testing.T) {
+	createCalled := false
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := marshalTaskListBody([]domain.Task{
+						{ID: "az-1", Implementations: []string{"default"}},
+					})
+					if err != nil {
+						t.Fatalf("marshal list response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        1,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskCreate:
+					createCalled = true
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	err := IssueCreateCommand(deps, IssueCreateOptions{
+		Title:           "Bad impl",
+		Type:            domain.TypeTask,
+		Priority:        domain.P2,
+		Implementations: []string{"cif"},
+	})
+	if err == nil || !strings.Contains(err.Error(), `unknown implementation "cif"`) || !strings.Contains(err.Error(), "known implementations: default") {
+		t.Fatalf("IssueCreateCommand() error = %v, want unknown implementation", err)
+	}
+	if createCalled {
+		t.Fatal("task.create should not be called for an unknown implementation")
 	}
 }
 
@@ -8109,6 +8239,86 @@ func TestIssueUpdateCommandUsesDaemonTaskUpdateCommand(t *testing.T) {
 	}
 	if !strings.Contains(updateOut, "Updated issue: az-1") {
 		t.Fatalf("update output = %q", updateOut)
+	}
+}
+
+func TestIssueUpdateCommandRejectsUnknownImplementationAssignment(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	updateCalled := false
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGet:
+					body, err := marshalTaskListBody([]domain.Task{
+						{
+							ID:          "az-1",
+							Title:       "Old",
+							Description: "OldDesc",
+							Type:        domain.TypeTask,
+							Priority:    domain.P2,
+							Status:      domain.StatusOpen,
+							CreatedAt:   now,
+							UpdatedAt:   now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskList:
+					body, err := marshalTaskListBody([]domain.Task{
+						{ID: "az-1", Implementations: []string{"default"}},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskUpdate:
+					updateCalled = true
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	err := IssueUpdateCommand(deps, IssueUpdateOptions{
+		IssueID:     "az-1",
+		UpdateImpls: []string{"cif"},
+	})
+	if err == nil || !strings.Contains(err.Error(), `invalid implementation update: unknown implementation "cif"`) || !strings.Contains(err.Error(), "known implementations: default") {
+		t.Fatalf("IssueUpdateCommand() error = %v, want unknown implementation", err)
+	}
+	if updateCalled {
+		t.Fatal("task.update should not be called for an unknown implementation")
 	}
 }
 
@@ -8853,11 +9063,12 @@ func TestIssueBulkCommandsUseApplyCommand(t *testing.T) {
 				switch req.Command {
 				case daemonclient.CommandTaskList:
 					body, err := marshalTaskListBody([]domain.Task{{
-						ID:       "az-1",
-						Title:    "Old",
-						Type:     domain.TypeTask,
-						Priority: domain.P2,
-						Status:   domain.StatusOpen,
+						ID:              "az-1",
+						Title:           "Old",
+						Type:            domain.TypeTask,
+						Priority:        domain.P2,
+						Status:          domain.StatusOpen,
+						Implementations: []string{"go-bubbletea"},
 					}})
 					if err != nil {
 						t.Fatalf("marshal list response: %v", err)
@@ -8874,12 +9085,13 @@ func TestIssueBulkCommandsUseApplyCommand(t *testing.T) {
 					}, nil
 				case daemonclient.CommandTaskGet:
 					body, err := marshalTaskListBody([]domain.Task{{
-						ID:          "az-1",
-						Title:       "Old",
-						Description: "Desc",
-						Type:        domain.TypeTask,
-						Priority:    domain.P2,
-						Status:      domain.StatusOpen,
+						ID:              "az-1",
+						Title:           "Old",
+						Description:     "Desc",
+						Type:            domain.TypeTask,
+						Priority:        domain.P2,
+						Status:          domain.StatusOpen,
+						Implementations: []string{"go-bubbletea"},
 					}})
 					if err != nil {
 						t.Fatalf("marshal get response: %v", err)
@@ -9080,12 +9292,13 @@ func TestIssueBulkUpdateCommand_DependencyRetargetBuildsApplyOps(t *testing.T) {
 				switch req.Command {
 				case daemonclient.CommandTaskList:
 					body, err := marshalTaskListBody([]domain.Task{{
-						ID:          "az-1",
-						Title:       "Existing",
-						Description: "Desc",
-						Type:        domain.TypeTask,
-						Priority:    domain.P2,
-						Status:      domain.StatusOpen,
+						ID:              "az-1",
+						Title:           "Existing",
+						Description:     "Desc",
+						Type:            domain.TypeTask,
+						Priority:        domain.P2,
+						Status:          domain.StatusOpen,
+						Implementations: []string{"go-bubbletea"},
 					}})
 					if err != nil {
 						t.Fatalf("marshal list response: %v", err)
@@ -10391,6 +10604,22 @@ func TestIssueCreateCommandUsesExtendedDaemonAttachTimeout(t *testing.T) {
 					return protocol.ResponseEnvelope{}, errors.New("daemon socket unavailable")
 				}
 				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := marshalTaskListBody([]domain.Task{
+						{ID: "az-1", Implementations: []string{"default"}},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            body,
+					}, nil
 				case daemonclient.CommandTaskCreate:
 					body, err := json.Marshal(map[string]string{"task_id": "az-timeout"})
 					if err != nil {
