@@ -167,8 +167,8 @@ func TestLoadConfigFromDotAzedarachConfigJSON(t *testing.T) {
 	assert.Equal(t, 60000, cfg.Session.TimeoutMs)
 	assert.Empty(t, cfg.Session.InitCommands)
 	assert.Equal(t, []string{"pnpm type-check"}, cfg.Session.SideEffectCommands)
-	assert.Equal(t, []string{"direnv allow"}, cfg.Worktree.InitCommands)
-	assert.Equal(t, []string{"cp .env.local.example .env.local"}, cfg.Worktree.SyncInitCommands)
+	assert.Empty(t, cfg.Worktree.InitCommands)
+	assert.Equal(t, []string{"direnv allow", "cp .env.local.example .env.local"}, cfg.Worktree.SyncInitCommands)
 	assert.Equal(t, []string{"bun install"}, cfg.Worktree.AsyncInitCommands)
 	assert.Equal(t, "postgres://localhost/az_$AZEDARACH_ISSUE_ID", cfg.IssueResources.Env["DATABASE_URL"])
 	assert.Equal(t, []string{"just db-prepare"}, cfg.IssueResources.PrepareCommands)
@@ -211,9 +211,28 @@ func TestLoadConfigKeepsSessionAndWorktreeInitCommandsDistinct(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"session one", "session two"}, cfg.Session.InitCommands)
 	assert.Equal(t, []string{"session side effect"}, cfg.Session.SideEffectCommands)
-	assert.Equal(t, []string{"worktree one"}, cfg.Worktree.InitCommands)
-	assert.Equal(t, []string{"worktree sync"}, cfg.Worktree.SyncInitCommands)
+	assert.Empty(t, cfg.Worktree.InitCommands)
+	assert.Equal(t, []string{"worktree one", "worktree sync"}, cfg.Worktree.SyncInitCommands)
 	assert.Equal(t, []string{"worktree async"}, cfg.Worktree.AsyncInitCommands)
+}
+
+func TestNormalizeConfigMigratesWorktreeInitCommandsToSyncInitCommands(t *testing.T) {
+	raw := map[string]any{
+		"$version": float64(8),
+		"worktree": map[string]any{
+			"initCommands":      []any{"legacy one", "legacy two"},
+			"syncInitCommands":  []any{"sync one"},
+			"asyncInitCommands": []any{"async one"},
+		},
+	}
+
+	NormalizeConfigFileRaw(raw)
+
+	worktreeRaw, ok := raw["worktree"].(map[string]any)
+	require.True(t, ok)
+	assert.NotContains(t, worktreeRaw, "initCommands")
+	assert.Equal(t, []any{"legacy one", "legacy two", "sync one"}, worktreeRaw["syncInitCommands"])
+	assert.Equal(t, CurrentConfigVersion, raw["$version"])
 }
 
 func TestLoadAndSaveConfigUsesSingleIssueTrackerBackendConfig(t *testing.T) {
@@ -545,6 +564,8 @@ func TestSaveConfigWritesSchemaAndVersion(t *testing.T) {
 	cfg.Spec.Enabled = false
 	cfg.Diagnostics.LatencyTrace = true
 	cfg.Session.InitCommands = []string{"direnv allow", "bun install"}
+	cfg.Worktree.InitCommands = []string{"legacy worktree init"}
+	cfg.Worktree.SyncInitCommands = []string{"explicit worktree sync"}
 
 	err := SaveConfig(cfg, path)
 	require.NoError(t, err)
@@ -583,12 +604,10 @@ func TestSaveConfigWritesSchemaAndVersion(t *testing.T) {
 
 	worktreeRaw, ok := raw["worktree"].(map[string]any)
 	require.True(t, ok)
-	initRaw, ok := worktreeRaw["initCommands"].([]any)
-	require.True(t, ok)
-	require.Len(t, initRaw, 0)
+	assert.NotContains(t, worktreeRaw, "initCommands")
 	syncInitRaw, ok := worktreeRaw["syncInitCommands"].([]any)
 	require.True(t, ok)
-	require.Len(t, syncInitRaw, 0)
+	require.Equal(t, []any{"legacy worktree init", "explicit worktree sync"}, syncInitRaw)
 	asyncInitRaw, ok := worktreeRaw["asyncInitCommands"].([]any)
 	require.True(t, ok)
 	require.Len(t, asyncInitRaw, 0)

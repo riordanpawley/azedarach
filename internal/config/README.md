@@ -148,17 +148,16 @@ type WorktreeConfig struct {
     NameFormat        string    // default: "{project}-{issueID}"
     AutoCleanup       bool
     KeepDays          int       // days to keep old worktrees
-    InitCommands      []string  // legacy blocking init commands
     SyncInitCommands  []string  // blocking readiness commands
     AsyncInitCommands []string  // non-blocking warmup commands
 }
 ```
 
-`worktree.initCommands` is retained as a blocking legacy alias and runs before
-`worktree.syncInitCommands`. Blocking worktree init must complete for each newly
-created ancestor before a nested descendant worktree is created from it.
-`worktree.asyncInitCommands` starts after blocking init succeeds and does not
-delay session startup or nested worktree fanout.
+Older `worktree.initCommands` config entries are migrated into
+`worktree.syncInitCommands` when config is loaded or saved. Blocking worktree
+init must complete for each newly created ancestor before a nested descendant
+worktree is created from it. `worktree.asyncInitCommands` starts after blocking
+init succeeds and does not delay session startup or nested worktree fanout.
 
 ## Configuration Files
 

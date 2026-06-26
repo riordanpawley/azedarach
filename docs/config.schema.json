@@ -10,7 +10,7 @@
     },
     "$version": {
       "type": "integer",
-      "const": 8
+      "const": 9
     },
     "cliTool": {
       "type": "string",
@@ -314,17 +314,9 @@
           "minimum": 1,
           "default": 7
         },
-        "initCommands": {
-          "type": "array",
-          "description": "Legacy blocking worktree init commands. These run before syncInitCommands after a new worktree is created. Failure stops worktree/session startup.",
-          "items": {
-            "type": "string"
-          },
-          "default": []
-        },
         "syncInitCommands": {
           "type": "array",
-          "description": "Blocking worktree readiness commands. These run after initCommands for each newly created worktree, including missing ancestors, before descendant worktrees are created.",
+          "description": "Blocking worktree readiness commands. These run for each newly created worktree, including missing ancestors, before descendant worktrees are created. Older worktree.initCommands entries are migrated here.",
           "items": {
             "type": "string"
           },
