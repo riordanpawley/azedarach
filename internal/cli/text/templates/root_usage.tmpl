@@ -36,7 +36,7 @@ Commands:
   issue get-many [--project <project-id>] --id <id> [--id <id> ...] [--ids a,b,c] [--json] [--with-notes]  Fetch many issues in requested order
   issue check [--project <project-id>] [--id <id>] [--json] [<id>]  Alias for issue get
   issue doctor [--project <project-id>] [--id <id>] [--json] [<id>]  Run integrity checks for one issue
-  issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--title ...] [--description ...] [--json] [<title>]  Create an issue (auto-parent when AZEDARACH_ISSUE_ID is set)
+  issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--title ...] [--description ...] [--json] [<title>]  Create an issue (auto-parent when AZEDARACH_ISSUE_ID is set; --impl is not parentage)
   issue split [--project <project-id>] [--parent <id>] [--impl <implementation> ...] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create an isolated child issue/session for later parent-side merge
   issue update [--project <project-id>] [--id <id>] [--json] [<id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--force-worktree] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields (`--status closed` integrates, cleans, then closes)
   issue close [--project <project-id>] [--id <id>|-i <id>] [--json] [--force-worktree] [<id>]  Integrate, clean up, and close an issue
@@ -86,8 +86,9 @@ Examples:
   az issue check --id az-123
   az issue doctor --id az-123
   az issue create "New task"
-  az issue create "Follow-up task"                # auto-parent under AZEDARACH_ISSUE_ID
-  az issue create --impl go-bubbletea "Implementation-specific task"  # assigns implementation metadata, not graph parentage
+  az issue create "Follow-up task"                # child under AZEDARACH_ISSUE_ID; no --impl needed for parentage
+  az issue dep add --issue-id az-456 --depends-on-id az-123 --type parent-child  # attach an existing issue to another parent/root
+  az issue create --impl go-bubbletea "Implementation-specific task"  # only assigns implementation metadata; still not parentage
   az issue split "Implement child task"           # auto-parent and launch isolated child worktree; merge explicitly later
   az issue create --deferred "Investigate later"  # deferred follow-up (defaults priority to P4)
   az issue update --id az-123 --status in_progress --title "Renamed task" --priority P1
