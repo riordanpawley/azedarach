@@ -2978,6 +2978,13 @@ func configuredIssueImplementations(tasks []domain.Task) []string {
 	return impls
 }
 
+func listTasksSnapshotForCLI(ctx context.Context, deps *Dependencies) (daemonclient.TaskSnapshot, error) {
+	if deps == nil || deps.DaemonClient == nil {
+		return daemonclient.TaskSnapshot{}, fmt.Errorf("daemon client unavailable")
+	}
+	return deps.DaemonClient.ListTasksSnapshot(ctx)
+}
+
 func resolveIssueWriteImplementation(ctx context.Context, deps *Dependencies, provided string) (string, error) {
 	trimmed := strings.TrimSpace(provided)
 	if trimmed != "" {
@@ -2988,7 +2995,7 @@ func resolveIssueWriteImplementation(ctx context.Context, deps *Dependencies, pr
 	}
 
 	snapshot, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskSnapshot, error) {
-		return deps.DaemonClient.ListTasksSnapshot(callCtx)
+		return listTasksSnapshotForCLI(callCtx, deps)
 	})
 	if err != nil {
 		return "", fmt.Errorf("missing required flag: --impl (unable to infer implementation automatically: %v). Specify --impl <implementation>", err)
@@ -3254,7 +3261,7 @@ func ImplDeleteCommand(deps *Dependencies, opts ImplDeleteOptions) error {
 		return fmt.Errorf("implementation is required")
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := listTasksSnapshotForCLI(ctx, deps)
 	if err != nil {
 		return fmt.Errorf("failed to list issues for implementation delete: %w", err)
 	}
@@ -3310,7 +3317,7 @@ func ImplListCommand(deps *Dependencies, _ ImplListOptions) error {
 		return err
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := listTasksSnapshotForCLI(ctx, deps)
 	if err != nil {
 		return fmt.Errorf("failed to list issues for implementation list: %w", err)
 	}
@@ -3343,7 +3350,7 @@ func ImplMigrateCommand(deps *Dependencies, opts ImplMigrateOptions) error {
 		return fmt.Errorf("source and destination implementations must differ")
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := listTasksSnapshotForCLI(ctx, deps)
 	if err != nil {
 		return fmt.Errorf("failed to list issues for implementation migrate: %w", err)
 	}
@@ -3404,7 +3411,7 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 		return err
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := listTasksSnapshotForCLI(ctx, deps)
 	if err != nil {
 		return fmt.Errorf("failed to list issues: %w", err)
 	}
@@ -4446,7 +4453,7 @@ func IssueDependencyBulkApplyCommand(deps *Dependencies, opts IssueDependencyBul
 		return fmt.Errorf("dependency bulk input must contain at least one mutation")
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := listTasksSnapshotForCLI(ctx, deps)
 	if err != nil {
 		return fmt.Errorf("load issues for dependency bulk apply: %w", err)
 	}
@@ -4793,7 +4800,7 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 		return fmt.Errorf("bulk-update input must contain at least one item")
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := listTasksSnapshotForCLI(ctx, deps)
 	if err != nil {
 		return fmt.Errorf("load issues for bulk-update: %w", err)
 	}
@@ -5577,7 +5584,7 @@ func executeBulkApply(deps *Dependencies, dryRun bool, asJSON bool, operations [
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := listTasksSnapshotForCLI(ctx, deps)
 	if err != nil {
 		return fmt.Errorf("load snapshot revision for bulk apply: %w", err)
 	}

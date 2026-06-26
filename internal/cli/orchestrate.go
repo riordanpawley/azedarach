@@ -1006,10 +1006,11 @@ func OrchestratePromptCommand(deps *Dependencies, opts OrchestratePromptOptions)
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	tasks, err := deps.DaemonClient.ListTasks(ctx)
+	snapshot, err := listTasksSnapshotForCLI(ctx, deps)
 	if err != nil {
 		return fmt.Errorf("list tasks: %w", err)
 	}
+	tasks := snapshot.Tasks
 	task, ok := findTaskByID(tasks, strings.TrimSpace(opts.IssueID))
 	if !ok {
 		return fmt.Errorf("issue not found: %s", opts.IssueID)
