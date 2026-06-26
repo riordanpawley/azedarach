@@ -301,9 +301,12 @@ func TestProjectSwitchResultRebindsProjectScopedServices(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attach image in switched project: %v", err)
 	}
-	wantPrefix := filepath.Join(newRepo, ".azedarach", "images", "che-1") + string(os.PathSeparator)
+	wantPrefix := filepath.Join(newRepo, ".azedarach", "attachments") + string(os.PathSeparator)
 	if !strings.HasPrefix(attached.Path, wantPrefix) {
 		t.Fatalf("attachment path = %q, want prefix %q", attached.Path, wantPrefix)
+	}
+	if strings.Contains(attached.Path, string(os.PathSeparator)+"che-1"+string(os.PathSeparator)) {
+		t.Fatalf("attachment path = %q, should not include issue id", attached.Path)
 	}
 }
 

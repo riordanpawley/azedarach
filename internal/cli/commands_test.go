@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,11 +23,22 @@ import (
 	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	gitservice "github.com/riordanpawley/azedarach/internal/services/git"
+	_ "modernc.org/sqlite"
 )
 
 type fakeDaemonTransport struct {
 	handshakeFn func(context.Context, protocol.Hello) (protocol.HelloAck, error)
 	commandFn   func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+}
+
+func openSQLiteDB(t *testing.T, dbPath string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }
 
 func ptrToString(v string) *string {
@@ -5103,6 +5115,65 @@ func TestParseIssueImageArgs(t *testing.T) {
 	}
 }
 
+func TestParseIssueDocumentArgs(t *testing.T) {
+	add, err := ParseIssueDocumentAddArgs([]string{"--issue-id", "az-1", "--path", "report.md"})
+	if err != nil {
+		t.Fatalf("ParseIssueDocumentAddArgs() error = %v", err)
+	}
+	if add.IssueID != "az-1" || add.SourcePath != "report.md" {
+		t.Fatalf("ParseIssueDocumentAddArgs() = %+v", add)
+	}
+	add, err = ParseIssueDocumentAddArgs([]string{"az-2", "--path", "notes.md"})
+	if err != nil {
+		t.Fatalf("ParseIssueDocumentAddArgs() interspersed args error = %v", err)
+	}
+	if add.IssueID != "az-2" || add.SourcePath != "notes.md" {
+		t.Fatalf("ParseIssueDocumentAddArgs() interspersed args = %+v", add)
+	}
+	_, err = ParseIssueDocumentAddArgs([]string{"--impl", "go-bubbletea", "az-1", "report.md"})
+	if err == nil || !strings.Contains(err.Error(), "--impl is not supported for issue document add") {
+		t.Fatalf("expected impl forbidden error for document add, got %v", err)
+	}
+
+	list, err := ParseIssueDocumentListArgs([]string{"--issue-id", "az-1"})
+	if err != nil {
+		t.Fatalf("ParseIssueDocumentListArgs() error = %v", err)
+	}
+	if list.IssueID != "az-1" {
+		t.Fatalf("ParseIssueDocumentListArgs() = %+v", list)
+	}
+	list, err = ParseIssueDocumentListArgs([]string{"az-2", "--json"})
+	if err != nil {
+		t.Fatalf("ParseIssueDocumentListArgs() interspersed args error = %v", err)
+	}
+	if list.IssueID != "az-2" || !list.JSON {
+		t.Fatalf("ParseIssueDocumentListArgs() interspersed args = %+v", list)
+	}
+	_, err = ParseIssueDocumentListArgs([]string{"--impl", "go-bubbletea", "az-1"})
+	if err == nil || !strings.Contains(err.Error(), "--impl is not supported for issue document list") {
+		t.Fatalf("expected impl forbidden error for document list, got %v", err)
+	}
+
+	remove, err := ParseIssueDocumentRemoveArgs([]string{"--issue-id", "az-1", "--attachment-id", "abc123"})
+	if err != nil {
+		t.Fatalf("ParseIssueDocumentRemoveArgs() error = %v", err)
+	}
+	if remove.IssueID != "az-1" || remove.AttachmentID != "abc123" {
+		t.Fatalf("ParseIssueDocumentRemoveArgs() = %+v", remove)
+	}
+	remove, err = ParseIssueDocumentRemoveArgs([]string{"az-2", "--attachment-id", "def456"})
+	if err != nil {
+		t.Fatalf("ParseIssueDocumentRemoveArgs() interspersed args error = %v", err)
+	}
+	if remove.IssueID != "az-2" || remove.AttachmentID != "def456" {
+		t.Fatalf("ParseIssueDocumentRemoveArgs() interspersed args = %+v", remove)
+	}
+	_, err = ParseIssueDocumentRemoveArgs([]string{"--impl", "go-bubbletea", "az-1", "abc123"})
+	if err == nil || !strings.Contains(err.Error(), "--impl is not supported for issue document remove") {
+		t.Fatalf("expected impl forbidden error for document remove, got %v", err)
+	}
+}
+
 func TestParseIssueBulkArgs(t *testing.T) {
 	create, err := ParseIssueBulkCreateArgs([]string{"--impl", "go-bubbletea", "--input", "bulk-create.json", "--dry-run"})
 	if err != nil {
@@ -8730,8 +8801,10 @@ func TestIssueDependencyAddParentChildErrorIncludesDirectionGuidance(t *testing.
 func TestIssueImageCommands(t *testing.T) {
 	now := time.Date(2026, 4, 14, 12, 0, 0, 0, time.UTC)
 	tempRepo := t.TempDir()
+	dbPath := filepath.Join(tempRepo, ".azedarach", "azedarach.db")
+	t.Setenv("AZEDARACH_DB_PATH", dbPath)
 	sourceImage := filepath.Join(t.TempDir(), "screenshot.png")
-	if err := os.WriteFile(sourceImage, []byte("fake-png"), 0o644); err != nil {
+	if err := os.WriteFile(sourceImage, []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}, 0o644); err != nil {
 		t.Fatalf("write source image: %v", err)
 	}
 
@@ -8799,11 +8872,11 @@ func TestIssueImageCommands(t *testing.T) {
 	if err := json.Unmarshal(appendNotesReq.Body, &appendBody); err != nil {
 		t.Fatalf("unmarshal append notes body: %v", err)
 	}
-	if appendBody.TaskID != "az-1" || !strings.Contains(appendBody.Line, ".azedarach/images/az-1/") {
+	if appendBody.TaskID != "az-1" || !strings.Contains(appendBody.Line, ".azedarach/attachments/") || strings.Contains(appendBody.Line, ".azedarach/images/") || strings.Contains(appendBody.Line, ".azedarach/attachments/az-1/") {
 		t.Fatalf("append body = %+v", appendBody)
 	}
 
-	files, err := filepath.Glob(filepath.Join(tempRepo, ".azedarach", "images", "az-1", "*-screenshot.png"))
+	files, err := filepath.Glob(filepath.Join(tempRepo, ".azedarach", "attachments", "*-screenshot.png"))
 	if err != nil {
 		t.Fatalf("glob attachments: %v", err)
 	}
@@ -8815,6 +8888,17 @@ func TestIssueImageCommands(t *testing.T) {
 	if len(parts) != 2 {
 		t.Fatalf("attachment filename = %q, want <id>-<name> format", filename)
 	}
+	if _, err := os.Stat(filepath.Join(tempRepo, ".azedarach", "images", "az-1")); !os.IsNotExist(err) {
+		t.Fatalf("image command should not write old image directory: %v", err)
+	}
+	db := openSQLiteDB(t, dbPath)
+	var linkCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM issue_attachments WHERE issue_id = ? AND attachment_id = ?`, "az-1", parts[0]).Scan(&linkCount); err != nil {
+		t.Fatalf("query attachment link: %v", err)
+	}
+	if linkCount != 1 {
+		t.Fatalf("attachment link count = %d, want 1", linkCount)
+	}
 
 	removeOut := captureStdout(t, func() error {
 		return IssueImageRemoveCommand(deps, IssueImageRemoveOptions{
@@ -8825,8 +8909,147 @@ func TestIssueImageCommands(t *testing.T) {
 	if !strings.Contains(removeOut, "Removed image attachment "+parts[0]+" from issue az-1") {
 		t.Fatalf("remove output = %q", removeOut)
 	}
-	if _, statErr := os.Stat(files[0]); !os.IsNotExist(statErr) {
-		t.Fatalf("attachment file still exists after remove: statErr=%v", statErr)
+	if _, statErr := os.Stat(files[0]); statErr != nil {
+		t.Fatalf("shared attachment file should remain after remove: statErr=%v", statErr)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM issue_attachments WHERE issue_id = ? AND attachment_id = ?`, "az-1", parts[0]).Scan(&linkCount); err != nil {
+		t.Fatalf("query attachment link after remove: %v", err)
+	}
+	if linkCount != 0 {
+		t.Fatalf("attachment link count after remove = %d, want 0", linkCount)
+	}
+}
+
+func TestIssueDocumentCommands(t *testing.T) {
+	now := time.Date(2026, 4, 14, 12, 0, 0, 0, time.UTC)
+	tempRepo := t.TempDir()
+	dbPath := filepath.Join(tempRepo, ".azedarach", "azedarach.db")
+	t.Setenv("AZEDARACH_DB_PATH", dbPath)
+	sourceDoc := filepath.Join(t.TempDir(), "report.md")
+	if err := os.WriteFile(sourceDoc, []byte("# Report\n\nSession result.\n"), 0o644); err != nil {
+		t.Fatalf("write source document: %v", err)
+	}
+
+	var appendNotesReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-1")
+					body, err := marshalTaskListBody([]domain.Task{
+						{
+							ID:        "az-1",
+							Title:     "Task",
+							Status:    domain.StatusOpen,
+							CreatedAt: now,
+							UpdatedAt: now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        1,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskAppendNotes:
+					appendNotesReq = req
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   tempRepo,
+	}
+
+	addOut := captureStdout(t, func() error {
+		return IssueDocumentAddCommand(deps, IssueDocumentAddOptions{
+			IssueID:    "az-1",
+			SourcePath: sourceDoc,
+		})
+	})
+	if !strings.Contains(addOut, "Attached document to issue az-1:") {
+		t.Fatalf("add output = %q", addOut)
+	}
+	var appendBody daemonclient.TaskAppendNotesRequest
+	if err := json.Unmarshal(appendNotesReq.Body, &appendBody); err != nil {
+		t.Fatalf("unmarshal append notes body: %v", err)
+	}
+	if appendBody.TaskID != "az-1" || !strings.Contains(appendBody.Line, ".azedarach/attachments/") || strings.Contains(appendBody.Line, ".azedarach/attachments/az-1/") {
+		t.Fatalf("append body = %+v", appendBody)
+	}
+
+	files, err := filepath.Glob(filepath.Join(tempRepo, ".azedarach", "attachments", "*-report.md"))
+	if err != nil {
+		t.Fatalf("glob attachments: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("attachment files = %v, want 1 file", files)
+	}
+	filename := filepath.Base(files[0])
+	parts := strings.SplitN(filename, "-", 2)
+	if len(parts) != 2 {
+		t.Fatalf("attachment filename = %q, want <id>-<name> format", filename)
+	}
+	db := openSQLiteDB(t, dbPath)
+	var linkCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM issue_attachments WHERE issue_id = ? AND attachment_id = ?`, "az-1", parts[0]).Scan(&linkCount); err != nil {
+		t.Fatalf("query attachment link: %v", err)
+	}
+	if linkCount != 1 {
+		t.Fatalf("attachment link count = %d, want 1", linkCount)
+	}
+
+	listOut := captureStdout(t, func() error {
+		return IssueDocumentListCommand(deps, IssueDocumentListOptions{
+			IssueID: "az-1",
+		})
+	})
+	for _, want := range []string{
+		"Document attachments for issue az-1:",
+		parts[0],
+		filename,
+		"text/markdown",
+		".azedarach/attachments/",
+	} {
+		if !strings.Contains(listOut, want) {
+			t.Fatalf("list output missing %q: %q", want, listOut)
+		}
+	}
+
+	removeOut := captureStdout(t, func() error {
+		return IssueDocumentRemoveCommand(deps, IssueDocumentRemoveOptions{
+			IssueID:      "az-1",
+			AttachmentID: parts[0],
+		})
+	})
+	if !strings.Contains(removeOut, "Removed document attachment "+parts[0]+" from issue az-1") {
+		t.Fatalf("remove output = %q", removeOut)
+	}
+	if _, statErr := os.Stat(files[0]); statErr != nil {
+		t.Fatalf("shared attachment file should remain after remove: statErr=%v", statErr)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM issue_attachments WHERE issue_id = ? AND attachment_id = ?`, "az-1", parts[0]).Scan(&linkCount); err != nil {
+		t.Fatalf("query attachment link after remove: %v", err)
+	}
+	if linkCount != 0 {
+		t.Fatalf("attachment link count after remove = %d, want 0", linkCount)
 	}
 }
 
@@ -9247,6 +9470,15 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]") {
 		t.Fatalf("usage missing issue image remove command: %q", output)
 	}
+	if !strings.Contains(output, "issue document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]") {
+		t.Fatalf("usage missing issue document add command: %q", output)
+	}
+	if !strings.Contains(output, "issue document list [--project <project-id>] [--issue-id <issue-id>] [<issue-id>] [--json]") {
+		t.Fatalf("usage missing issue document list command: %q", output)
+	}
+	if !strings.Contains(output, "issue document remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]") {
+		t.Fatalf("usage missing issue document remove command: %q", output)
+	}
 	if !strings.Contains(output, "issue dep add [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--force-parent-change] [--json]") {
 		t.Fatalf("usage missing issue dep add command: %q", output)
 	}
@@ -9352,6 +9584,18 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "How to use `az` command map:") {
 		t.Fatalf("prime output missing az command map section: %q", output)
+	}
+	if !strings.Contains(output, "Reports and attachments:") {
+		t.Fatalf("prime output missing reports and attachments section: %q", output)
+	}
+	if !strings.Contains(output, "`az issue document add <issue-id> <file>`, `az issue document list <issue-id>`, `az issue document remove <issue-id> <attachment-id>`") {
+		t.Fatalf("prime output missing document attachment command map: %q", output)
+	}
+	if !strings.Contains(output, "Markdown attachments render in the TUI; other file types can be opened externally.") {
+		t.Fatalf("prime output missing attachment preview guidance: %q", output)
+	}
+	if strings.Contains(output, "image attachments now use the same generic attachment store") {
+		t.Fatalf("prime output should not mention image storage internals: %q", output)
 	}
 	if !strings.Contains(output, "Proper issue creation: never leave an issue as just a title.") {
 		t.Fatalf("prime output missing proper issue creation guidance: %q", output)

@@ -18,6 +18,9 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Status semantics: use `open` for not-yet-active work, `in_progress` while actively working, `in_review` when implementation is complete and waiting for human/orchestrator review or integration, and `closed` only after acceptance/integration is complete.
   - Blocked is not an issue status. Represent blocked work with dependency edges (`az issue dep add <blocked-issue> <blocker-issue> --type blocks`) and record blocker evidence in issue notes or mailbox events.
   - `az issue bulk-create --input issues.json --json` (create many issues, epics, or nested `children` trees from JSON when shaping a graph up front), `az issue bulk-update --input updates.json --json`, `az issue update <issue-id> --design "..."`, `az issue update <issue-id> --notes "..."`, `az issue update <issue-id> --append-notes "..."`
+  - Reports and attachments:
+  - `az issue document add <issue-id> <file>`, `az issue document list <issue-id>`, `az issue document remove <issue-id> <attachment-id>`
+  - Markdown attachments render in the TUI; other file types can be opened externally.
   - Child issue creation without worker launch:
   - Batch planning/catalog fanout: `az issue bulk-create --input issues.json --json` with `parent_id` or nested `children` creates parented child issues without starting sessions or orchestration.
   - Single tracking-only child: `az issue create "Child task" [--json]` auto-parents under `AZEDARACH_ISSUE_ID`; for another parent, create the issue and attach it with `az issue dep add <child-id> <parent-id> --type parent-child`.

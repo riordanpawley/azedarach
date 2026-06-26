@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -59,6 +60,12 @@ func TestAttach(t *testing.T) {
 	// Verify file was copied
 	if _, err := os.Stat(attachment.Path); os.IsNotExist(err) {
 		t.Errorf("attachment file does not exist at %s", attachment.Path)
+	}
+	if !strings.Contains(attachment.Relative, ".azedarach/attachments/") {
+		t.Fatalf("attachment relative path = %q, want shared attachments path", attachment.Relative)
+	}
+	if strings.Contains(attachment.Relative, "/az-123/") {
+		t.Fatalf("attachment relative path = %q, should not include issue id", attachment.Relative)
 	}
 }
 
@@ -142,6 +149,174 @@ func TestList(t *testing.T) {
 	}
 }
 
+func TestUnifiedServiceMigratesLegacyImageAttachments(t *testing.T) {
+	tmpDir := t.TempDir()
+	issuesPath := filepath.Join(tmpDir, "issues")
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	ctx := context.Background()
+
+	documentService := NewDocumentService(issuesPath, logger)
+	unifiedService := NewUnifiedService(issuesPath, logger)
+
+	db, err := unifiedService.openDB()
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`
+		CREATE TABLE issues (
+			id TEXT PRIMARY KEY,
+			notes TEXT
+		)
+	`); err != nil {
+		t.Fatalf("failed to create issues table: %v", err)
+	}
+
+	legacyImageDir := filepath.Join(issuesPath, "images", "az-123")
+	if err := os.MkdirAll(legacyImageDir, 0755); err != nil {
+		t.Fatalf("failed to create legacy image dir: %v", err)
+	}
+	imageData := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	legacyImagePath := filepath.Join(legacyImageDir, "legacyid-screenshot.png")
+	if err := os.WriteFile(legacyImagePath, imageData, 0644); err != nil {
+		t.Fatalf("failed to create legacy image file: %v", err)
+	}
+	oldRelative := ".azedarach/images/az-123/legacyid-screenshot.png"
+	if _, err := db.Exec(`INSERT INTO issues (id, notes) VALUES (?, ?)`, "az-123", "See ["+oldRelative+"]("+oldRelative+")"); err != nil {
+		t.Fatalf("failed to seed issue notes: %v", err)
+	}
+
+	reportFile := filepath.Join(tmpDir, "report.md")
+	if err := os.WriteFile(reportFile, []byte("# Report\n\nsummary"), 0644); err != nil {
+		t.Fatalf("failed to create report file: %v", err)
+	}
+	report, err := documentService.Attach(ctx, "az-123", reportFile)
+	if err != nil {
+		t.Fatalf("failed to attach document: %v", err)
+	}
+	if !strings.Contains(report.Relative, ".azedarach/attachments/") {
+		t.Fatalf("document relative path = %q, want attachments path", report.Relative)
+	}
+	if strings.Contains(report.Relative, "/az-123/") {
+		t.Fatalf("document relative path = %q, should not include issue id", report.Relative)
+	}
+
+	attachments, err := unifiedService.List(ctx, "az-123")
+	if err != nil {
+		t.Fatalf("failed to list unified attachments: %v", err)
+	}
+	if len(attachments) != 2 {
+		t.Fatalf("unified attachments = %d, want 2: %+v", len(attachments), attachments)
+	}
+
+	seen := map[string]bool{}
+	migratedRelative := ""
+	for _, att := range attachments {
+		switch {
+		case att.ID == "legacyid" && strings.Contains(att.Relative, ".azedarach/attachments/") && IsImage(att):
+			seen["image"] = true
+			migratedRelative = att.Relative
+		case strings.Contains(att.Relative, ".azedarach/attachments/"):
+			seen["document"] = true
+		}
+	}
+	if !seen["image"] || !seen["document"] {
+		t.Fatalf("unified attachments = %+v, want migrated image and document rows", attachments)
+	}
+	if _, err := os.Stat(legacyImagePath); !os.IsNotExist(err) {
+		t.Fatalf("legacy image file should be removed after migration: %v", err)
+	}
+	if _, err := os.Stat(legacyImageDir); !os.IsNotExist(err) {
+		t.Fatalf("legacy image dir should be removed after migration: %v", err)
+	}
+	var notes string
+	if err := db.QueryRow(`SELECT COALESCE(notes, '') FROM issues WHERE id = ?`, "az-123").Scan(&notes); err != nil {
+		t.Fatalf("failed to read migrated issue notes: %v", err)
+	}
+	if !strings.Contains(notes, migratedRelative) || strings.Contains(notes, oldRelative) {
+		t.Fatalf("migrated notes = %q, want new relative %q and no old relative %q", notes, migratedRelative, oldRelative)
+	}
+
+	if err := unifiedService.Delete(ctx, "az-123", "legacyid"); err != nil {
+		t.Fatalf("failed to delete migrated legacy image reference: %v", err)
+	}
+	attachments, err = unifiedService.List(ctx, "az-123")
+	if err != nil {
+		t.Fatalf("failed to list after migrated image delete: %v", err)
+	}
+	for _, att := range attachments {
+		if att.ID == "legacyid" {
+			t.Fatalf("migrated image reference should be deleted: %+v", attachments)
+		}
+	}
+}
+
+func TestDocumentServiceStoresSharedFileAndLinksMultipleIssues(t *testing.T) {
+	tmpDir := t.TempDir()
+	issuesPath := filepath.Join(tmpDir, "issues")
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	service := NewDocumentService(issuesPath, logger)
+	ctx := context.Background()
+
+	reportFile := filepath.Join(tmpDir, "report.md")
+	if err := os.WriteFile(reportFile, []byte("# Shared Report\n\nsame contents"), 0644); err != nil {
+		t.Fatalf("failed to create report file: %v", err)
+	}
+
+	first, err := service.Attach(ctx, "az-1", reportFile)
+	if err != nil {
+		t.Fatalf("failed to attach first issue: %v", err)
+	}
+	second, err := service.Attach(ctx, "az-2", reportFile)
+	if err != nil {
+		t.Fatalf("failed to attach second issue: %v", err)
+	}
+
+	if first.ID != second.ID {
+		t.Fatalf("attachment ids differ for same content: %q vs %q", first.ID, second.ID)
+	}
+	if first.Path != second.Path {
+		t.Fatalf("attachment paths differ for same content: %q vs %q", first.Path, second.Path)
+	}
+	if strings.Contains(first.Relative, "/az-1/") || strings.Contains(second.Relative, "/az-2/") {
+		t.Fatalf("shared attachment paths should not include issue ids: %q %q", first.Relative, second.Relative)
+	}
+
+	for _, issueID := range []string{"az-1", "az-2"} {
+		attachments, err := service.List(ctx, issueID)
+		if err != nil {
+			t.Fatalf("failed to list attachments for %s: %v", issueID, err)
+		}
+		if len(attachments) != 1 {
+			t.Fatalf("attachments for %s = %d, want 1: %+v", issueID, len(attachments), attachments)
+		}
+		if attachments[0].Path != first.Path {
+			t.Fatalf("attachment path for %s = %q, want %q", issueID, attachments[0].Path, first.Path)
+		}
+	}
+
+	if err := service.Delete(ctx, "az-1", first.ID); err != nil {
+		t.Fatalf("failed to remove first issue reference: %v", err)
+	}
+	if _, err := os.Stat(first.Path); err != nil {
+		t.Fatalf("shared attachment blob should remain after removing one reference: %v", err)
+	}
+	firstList, err := service.List(ctx, "az-1")
+	if err != nil {
+		t.Fatalf("failed to list first issue after delete: %v", err)
+	}
+	if len(firstList) != 0 {
+		t.Fatalf("first issue attachments after delete = %+v, want empty", firstList)
+	}
+	secondList, err := service.List(ctx, "az-2")
+	if err != nil {
+		t.Fatalf("failed to list second issue after delete: %v", err)
+	}
+	if len(secondList) != 1 || secondList[0].ID != first.ID {
+		t.Fatalf("second issue attachments after first delete = %+v, want shared attachment", secondList)
+	}
+}
+
 func TestDelete(t *testing.T) {
 	tmpDir := t.TempDir()
 	issuesPath := filepath.Join(tmpDir, "issues")
@@ -173,9 +348,9 @@ func TestDelete(t *testing.T) {
 		t.Fatalf("failed to delete attachment: %v", err)
 	}
 
-	// Verify file is deleted
-	if _, err := os.Stat(attachment.Path); !os.IsNotExist(err) {
-		t.Error("attachment file should be deleted")
+	// Shared attachment blobs remain available for any other references.
+	if _, err := os.Stat(attachment.Path); err != nil {
+		t.Fatalf("shared attachment file should remain after delete: %v", err)
 	}
 
 	// List should be empty
@@ -213,7 +388,7 @@ func TestGetPath(t *testing.T) {
 	service := NewService(issuesPath, logger)
 
 	path := service.GetPath("az-123", "test.png")
-	expected := filepath.Join(issuesPath, "images", "az-123", "test.png")
+	expected := filepath.Join(issuesPath, "attachments", "test.png")
 
 	if path != expected {
 		t.Errorf("expected path to be %s, got %s", expected, path)
@@ -275,11 +450,17 @@ func TestDetectMimeType(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := detectMimeType(tt.data)
+			result := detectMimeType(tt.data, "")
 			if result != tt.expected {
 				t.Errorf("expected %s, got %s", tt.expected, result)
 			}
 		})
+	}
+}
+
+func TestDetectMimeTypeMarkdownByFilename(t *testing.T) {
+	if got := detectMimeType([]byte("# Report\n\nbody"), "report.md"); got != "text/markdown" {
+		t.Fatalf("detectMimeType markdown = %q, want text/markdown", got)
 	}
 }
 
@@ -305,23 +486,5 @@ func TestMimeTypeToExt(t *testing.T) {
 				t.Errorf("expected %s, got %s", tt.expected, result)
 			}
 		})
-	}
-}
-
-func TestGenerateID(t *testing.T) {
-	id1 := generateID()
-	id2 := generateID()
-
-	if id1 == "" {
-		t.Error("expected non-empty ID")
-	}
-
-	if id2 == "" {
-		t.Error("expected non-empty ID")
-	}
-
-	// IDs should be different (with extremely high probability)
-	if id1 == id2 {
-		t.Error("expected unique IDs")
 	}
 }
