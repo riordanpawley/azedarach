@@ -270,52 +270,80 @@ func (d *Daemon) sourceForTaskInvariant(invariant daemonInvariantID) daemonInvar
 func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	resp := d.successResponse(req)
 	projectID := d.projectID(req.Meta)
+	listReq, err := decodeTaskListRequest(req.Body)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	query := strings.TrimSpace(listReq.Query)
 	startedAt := time.Now()
 	cacheStartedAt := time.Now()
-	if cached, ok := d.readFreshTaskListSnapshotCache(projectID); ok {
-		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", true)
-		payload := buildTaskListSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks, cached.SummariesOnly)
-		marshalStartedAt := time.Now()
-		body, err := json.Marshal(payload)
-		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(cached.Tasks), "cache_hit", true)
-		if err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	if query == "" {
+		if cached, ok := d.readFreshTaskListSnapshotCache(projectID); ok {
+			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", true)
+			payload := buildTaskListSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks, cached.SummariesOnly)
+			marshalStartedAt := time.Now()
+			body, err := json.Marshal(payload)
+			latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(cached.Tasks), "cache_hit", true)
+			if err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+			}
+			resp.Body = body
+			resp.Revision = payload.SnapshotRevision
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Info("daemon task list completed", "project_id", projectID, "task_count", len(cached.Tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "cache_hit", true)
+			}
+			return resp, nil
 		}
-		resp.Body = body
-		resp.Revision = payload.SnapshotRevision
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.Info("daemon task list completed", "project_id", projectID, "task_count", len(cached.Tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "cache_hit", true)
-		}
-		return resp, nil
 	}
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", false)
-	result, shared, err := d.loadTaskListSnapshot(ctx, req, projectID)
+	if query != "" {
+		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", false, "query", true)
+	} else {
+		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", false)
+	}
+	result, shared, err := d.loadTaskListSnapshot(ctx, req, projectID, query)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	payload := buildTaskListSnapshotPayload(projectID, result.Revision, result.LastCheckedAt, result.Freshness, result.Tasks, result.SummariesOnly)
 	marshalStartedAt := time.Now()
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(result.Tasks), "cache_hit", false, "shared_load", shared, "query", query != "")
 	body, err := json.Marshal(payload)
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(result.Tasks), "cache_hit", false, "shared_load", shared)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp.Body = body
 	resp.Revision = payload.SnapshotRevision
 	if d.cfg.Logger != nil {
-		d.cfg.Logger.Info("daemon task list completed", "project_id", projectID, "task_count", len(result.Tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "shared_load", shared)
+		d.cfg.Logger.Info("daemon task list completed", "project_id", projectID, "task_count", len(result.Tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "shared_load", shared, "query", query != "")
 	}
 	return resp, nil
 }
 
-func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string) (taskListSnapshotLoadResult, bool, error) {
+func decodeTaskListRequest(body []byte) (protocol.TaskListRequestBody, error) {
+	if len(body) == 0 || strings.TrimSpace(string(body)) == "null" {
+		return protocol.TaskListRequestBody{}, nil
+	}
+	var req protocol.TaskListRequestBody
+	if err := json.Unmarshal(body, &req); err != nil {
+		return protocol.TaskListRequestBody{}, err
+	}
+	req.Query = strings.TrimSpace(req.Query)
+	return req, nil
+}
+
+func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string) (taskListSnapshotLoadResult, bool, error) {
 	projectID = d.canonicalProjectID(projectID)
+	query = strings.TrimSpace(query)
+	loadKey := projectID
+	if query != "" {
+		loadKey = projectID + "\x00query:" + strings.ToLower(query)
+	}
 
 	d.taskListSnapshotLoadMu.Lock()
 	if d.taskListSnapshotLoads == nil {
 		d.taskListSnapshotLoads = map[string]*taskListSnapshotLoad{}
 	}
-	if load := d.taskListSnapshotLoads[projectID]; load != nil {
+	if load := d.taskListSnapshotLoads[loadKey]; load != nil {
 		d.taskListSnapshotLoadMu.Unlock()
 		select {
 		case <-ctx.Done():
@@ -325,29 +353,25 @@ func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestE
 		}
 	}
 	load := &taskListSnapshotLoad{done: make(chan struct{})}
-	d.taskListSnapshotLoads[projectID] = load
+	d.taskListSnapshotLoads[loadKey] = load
 	d.taskListSnapshotLoadMu.Unlock()
 
 	buildCtx, cancel := context.WithTimeout(context.Background(), taskListSnapshotLoadTimeout)
 	defer cancel()
-	result, err := d.buildTaskListSnapshot(buildCtx, req, projectID)
+	result, err := d.buildTaskListSnapshot(buildCtx, req, projectID, query)
 	load.result = cloneTaskListSnapshotLoadResult(result)
 	load.err = err
 
 	d.taskListSnapshotLoadMu.Lock()
-	delete(d.taskListSnapshotLoads, projectID)
+	delete(d.taskListSnapshotLoads, loadKey)
 	close(load.done)
 	d.taskListSnapshotLoadMu.Unlock()
 
 	return result, false, err
 }
 
-func cloneTaskListSnapshotLoadResult(result taskListSnapshotLoadResult) taskListSnapshotLoadResult {
-	result.Tasks = cloneTasks(result.Tasks)
-	return result
-}
-
-func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string) (taskListSnapshotLoadResult, error) {
+func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string) (taskListSnapshotLoadResult, error) {
+	query = strings.TrimSpace(query)
 	refreshStartedAt := time.Now()
 	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Debug("task list session runtime refresh failed", "project_id", projectID, "error", err)
@@ -355,31 +379,52 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 	d.triggerWorktreeStateRefresh(projectID)
 	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.worktree_refresh_trigger", refreshStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
 	if d.cfg.Logger != nil {
-		d.cfg.Logger.Info("daemon task list requested", "project_id", projectID)
+		d.cfg.Logger.Info("daemon task list requested", "project_id", projectID, "query", query != "")
 	}
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return taskListSnapshotLoadResult{}, errors.New("issue store unavailable")
 	}
 	queryStartedAt := time.Now()
-	tasks, err := issueClient.ListSummariesWithRuntime(ctx, projectID)
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.issue_store_list_summaries_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
+	var (
+		tasks         []domain.Task
+		summariesOnly bool
+		err           error
+	)
+	if query == "" {
+		tasks, err = issueClient.ListSummariesWithRuntime(ctx, projectID)
+		summariesOnly = true
+		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.issue_store_list_summaries_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
+	} else {
+		tasks, err = issueClient.ListWithRuntime(ctx, projectID)
+	}
 	if err != nil {
 		return taskListSnapshotLoadResult{}, err
+	}
+	if query != "" {
+		tasks = domain.FilterTasksByContentQuery(tasks, query)
+		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.issue_store_list_with_runtime_query", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(tasks))
 	}
 	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
 	freshnessStartedAt := time.Now()
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
 	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.snapshot_freshness", freshnessStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "freshness", freshness)
 	revision := d.currentRevision(projectID)
-	d.storeTaskListSnapshotCache(projectID, revision, lastCheckedAt, freshness, tasks, true)
+	if query == "" {
+		d.storeTaskListSnapshotCache(projectID, revision, lastCheckedAt, freshness, tasks, summariesOnly)
+	}
 	return taskListSnapshotLoadResult{
 		Revision:      revision,
 		LastCheckedAt: lastCheckedAt,
 		Freshness:     freshness,
-		SummariesOnly: true,
+		SummariesOnly: summariesOnly,
 		Tasks:         tasks,
 	}, nil
+}
+
+func cloneTaskListSnapshotLoadResult(result taskListSnapshotLoadResult) taskListSnapshotLoadResult {
+	result.Tasks = cloneTasks(result.Tasks)
+	return result
 }
 
 func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

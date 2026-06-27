@@ -5715,17 +5715,12 @@ func TestIssueListCommand_StatusFilter(t *testing.T) {
 	}
 }
 
-func TestIssueListCommand_ContentQueryLoadsFullIssueText(t *testing.T) {
+func TestIssueListCommand_ContentQueryDelegatesToTaskList(t *testing.T) {
 	now := time.Date(2026, 3, 26, 2, 0, 0, 0, time.UTC)
-	summaryTasks := []domain.Task{
-		{ID: "az-1", Title: "Alpha", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(3 * time.Hour)},
-		{ID: "az-2", Title: "Beta", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(2 * time.Hour)},
-	}
-	fullTasks := []domain.Task{
+	filteredTasks := []domain.Task{
 		{ID: "az-1", Title: "Alpha", Description: "Contains runtime cache evidence", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(3 * time.Hour)},
-		{ID: "az-2", Title: "Beta", Description: "Unrelated", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(2 * time.Hour)},
 	}
-	commands := make([]string, 0, 2)
+	commands := make([]string, 0, 1)
 
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
@@ -5734,24 +5729,18 @@ func TestIssueListCommand_ContentQueryLoadsFullIssueText(t *testing.T) {
 				commands = append(commands, req.Command)
 				switch req.Command {
 				case daemonclient.CommandTaskList:
-					body, err := marshalTaskListBody(summaryTasks)
-					if err != nil {
-						t.Fatalf("marshal task list: %v", err)
-					}
-					return responseWithBody(req, body), nil
-				case daemonclient.CommandTaskGetMany:
 					var got struct {
-						TaskIDs []string `json:"task_ids"`
+						Query string `json:"query"`
 					}
 					if err := json.Unmarshal(req.Body, &got); err != nil {
-						t.Fatalf("unmarshal get-many request: %v", err)
+						t.Fatalf("unmarshal task.list request: %v", err)
 					}
-					if !reflect.DeepEqual(got.TaskIDs, []string{"az-1", "az-2"}) {
-						t.Fatalf("get-many task ids = %+v, want [az-1 az-2]", got.TaskIDs)
+					if got.Query != "runtime CACHE" {
+						t.Fatalf("task.list query = %q, want runtime CACHE", got.Query)
 					}
-					body, err := marshalTaskListBody(fullTasks)
+					body, err := marshalTaskListBody(filteredTasks)
 					if err != nil {
-						t.Fatalf("marshal full task list: %v", err)
+						t.Fatalf("marshal task list: %v", err)
 					}
 					return responseWithBody(req, body), nil
 				default:
@@ -5767,8 +5756,8 @@ func TestIssueListCommand_ContentQueryLoadsFullIssueText(t *testing.T) {
 	output := captureStdout(t, func() error {
 		return IssueListCommand(deps, IssueListOptions{Query: "runtime CACHE"})
 	})
-	if !reflect.DeepEqual(commands, []string{daemonclient.CommandTaskList, daemonclient.CommandTaskGetMany}) {
-		t.Fatalf("commands = %v, want task.list then task.get_many", commands)
+	if !reflect.DeepEqual(commands, []string{daemonclient.CommandTaskList}) {
+		t.Fatalf("commands = %v, want only task.list", commands)
 	}
 	if !strings.Contains(output, "az-1") || strings.Contains(output, "az-2") {
 		t.Fatalf("content query output = %q, want only az-1", output)

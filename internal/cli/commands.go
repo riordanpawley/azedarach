@@ -3643,7 +3643,7 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 		return err
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := deps.DaemonClient.ListTasksSnapshotWithQuery(ctx, opts.Query)
 	if err != nil {
 		return fmt.Errorf("failed to list issues: %w", err)
 	}
@@ -3661,13 +3661,6 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 		tasks = filterTasksByDependencyIDs(tasks, opts.DependsOnIDs)
 	}
 	tasks = filterTasksByTimeRange(tasks, opts.CreatedAfter, opts.CreatedBefore, opts.UpdatedAfter, opts.UpdatedBefore)
-	if strings.TrimSpace(opts.Query) != "" {
-		tasks, err = fullTasksForContentQuery(ctx, deps, tasks)
-		if err != nil {
-			return fmt.Errorf("failed to load issue content for query: %w", err)
-		}
-		tasks = filterTasksByContent(tasks, opts.Query)
-	}
 	sort.SliceStable(tasks, func(i, j int) bool {
 		if tasks[i].UpdatedAt.Equal(tasks[j].UpdatedAt) {
 			return tasks[i].ID < tasks[j].ID
@@ -3764,21 +3757,6 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 		fmt.Println("Window note: all matching issues are shown.")
 	}
 	return nil
-}
-
-func fullTasksForContentQuery(ctx context.Context, deps *Dependencies, tasks []domain.Task) ([]domain.Task, error) {
-	if len(tasks) == 0 {
-		return tasks, nil
-	}
-	ids := make([]string, 0, len(tasks))
-	for _, task := range tasks {
-		ids = append(ids, task.ID.String())
-	}
-	snapshot, err := deps.DaemonClient.GetManyTaskSnapshot(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
-	return filterTasksByIDs(snapshot.Tasks, ids), nil
 }
 
 type issueGetManyItem struct {
@@ -5436,51 +5414,6 @@ func filterTasksByStatus(tasks []domain.Task, statuses []domain.Status) []domain
 		}
 	}
 	return filtered
-}
-
-func filterTasksByContent(tasks []domain.Task, query string) []domain.Task {
-	query = strings.ToLower(strings.TrimSpace(query))
-	if query == "" {
-		return tasks
-	}
-	filtered := make([]domain.Task, 0, len(tasks))
-	for _, task := range tasks {
-		if taskMatchesContentQuery(task, query) {
-			filtered = append(filtered, task)
-		}
-	}
-	return filtered
-}
-
-func taskMatchesContentQuery(task domain.Task, query string) bool {
-	fields := []string{
-		task.ID.String(),
-		task.Title,
-		task.Description,
-		task.Notes,
-		task.Design,
-		task.Acceptance,
-		task.Assignee,
-		string(task.Status),
-		task.Priority.String(),
-		string(task.Type),
-	}
-	for _, field := range fields {
-		if strings.Contains(strings.ToLower(field), query) {
-			return true
-		}
-	}
-	for _, label := range task.Labels {
-		if strings.Contains(strings.ToLower(label), query) {
-			return true
-		}
-	}
-	for _, impl := range task.Implementations {
-		if strings.Contains(strings.ToLower(impl), query) {
-			return true
-		}
-	}
-	return false
 }
 
 func filterTasksByParentIDs(tasks []domain.Task, parentIDs []string) []domain.Task {

@@ -128,6 +128,59 @@ func (f *Filter) Matches(t Task) bool {
 	return true
 }
 
+// FilterTasksByContentQuery returns tasks matching the issue content search
+// surface used by daemon-backed issue search commands.
+func FilterTasksByContentQuery(tasks []Task, query string) []Task {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return tasks
+	}
+	filtered := make([]Task, 0, len(tasks))
+	for _, task := range tasks {
+		if TaskMatchesContentQuery(task, query) {
+			filtered = append(filtered, task)
+		}
+	}
+	return filtered
+}
+
+// TaskMatchesContentQuery checks the durable issue fields that should be
+// discoverable through content search.
+func TaskMatchesContentQuery(task Task, query string) bool {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return true
+	}
+	fields := []string{
+		task.ID.String(),
+		task.Title,
+		task.Description,
+		task.Notes,
+		task.Design,
+		task.Acceptance,
+		task.Assignee,
+		string(task.Status),
+		task.Priority.String(),
+		string(task.Type),
+	}
+	for _, field := range fields {
+		if strings.Contains(strings.ToLower(field), query) {
+			return true
+		}
+	}
+	for _, label := range task.Labels {
+		if strings.Contains(strings.ToLower(label), query) {
+			return true
+		}
+	}
+	for _, impl := range task.Implementations {
+		if strings.Contains(strings.ToLower(impl), query) {
+			return true
+		}
+	}
+	return false
+}
+
 // Clear resets all filters
 func (f *Filter) Clear() {
 	f.Status = make(map[Status]bool)

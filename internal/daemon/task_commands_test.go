@@ -940,7 +940,7 @@ func TestLoadTaskListSnapshotSharesInFlightProjectLoad(t *testing.T) {
 			Kind:            protocol.EnvelopeKindCommand,
 			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 			Command:         "task.list",
-		}, projectID)
+		}, projectID, "")
 		if !shared {
 			errCh <- errors.New("load was not shared")
 			return
@@ -1019,7 +1019,7 @@ func TestLoadTaskListSnapshotUsesDetachedBuildContext(t *testing.T) {
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 		Command:         "task.list",
-	}, projectID)
+	}, projectID, "")
 	if err != nil {
 		t.Fatalf("loadTaskListSnapshot error = %v, want detached load to succeed", err)
 	}
@@ -1031,6 +1031,74 @@ func TestLoadTaskListSnapshotUsesDetachedBuildContext(t *testing.T) {
 	}
 	if len(result.Tasks) != 1 || result.Tasks[0].ID.String() != taskID {
 		t.Fatalf("result.Tasks = %+v, want task %s", result.Tasks, taskID)
+	}
+}
+
+func TestHandleTaskListAppliesContentQueryInDaemon(t *testing.T) {
+	logger := slog.Default()
+	projectID := "proj-query-list"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	matchID, err := issuesClient.Create(context.Background(), issues.CreateTaskParams{
+		Title:       "Alpha",
+		Description: "Contains runtime cache evidence",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+		Status:      domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create matching issue: %v", err)
+	}
+	if _, err := issuesClient.Create(context.Background(), issues.CreateTaskParams{
+		Title:       "Beta",
+		Description: "Unrelated",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+		Status:      domain.StatusOpen,
+	}); err != nil {
+		t.Fatalf("create nonmatching issue: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 23},
+	}
+	body, err := json.Marshal(protocol.TaskListRequestBody{Query: "RUNTIME cache"})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	resp, err := d.handleTaskList(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-query-list",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.list",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskList error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("handleTaskList response = %+v", resp.Error)
+	}
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("decode task list body: %v", err)
+	}
+	if payload.SummariesOnly {
+		t.Fatal("query task list should return full task payloads, got summaries_only")
+	}
+	if len(payload.Tasks) != 1 || payload.Tasks[0].ID.String() != matchID {
+		t.Fatalf("payload tasks = %+v, want only %s", payload.Tasks, matchID)
+	}
+	if payload.Tasks[0].Description == "" {
+		t.Fatalf("query task list lost full issue content: %+v", payload.Tasks[0])
 	}
 }
 
