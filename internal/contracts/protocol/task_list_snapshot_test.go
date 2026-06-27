@@ -16,6 +16,16 @@ func TestTaskListSnapshotPayloadContractConstants(t *testing.T) {
 	}
 }
 
+func TestTaskListRequestBodyJSONShapeIsDeterministic(t *testing.T) {
+	got, err := json.Marshal(TaskListRequestBody{Query: "runtime cache"})
+	if err != nil {
+		t.Fatalf("marshal task list request: %v", err)
+	}
+	if want := `{"query":"runtime cache"}`; string(got) != want {
+		t.Fatalf("json = %s, want %s", string(got), want)
+	}
+}
+
 func TestTaskListSnapshotPayloadJSONShapeIsDeterministic(t *testing.T) {
 	now := time.Date(2026, time.April, 2, 10, 30, 0, 0, time.UTC)
 	checkedAt := time.Date(2026, time.April, 2, 10, 31, 45, 0, time.UTC)

@@ -111,6 +111,67 @@ func TestFilter_Matches_EmptyFilter(t *testing.T) {
 	}
 }
 
+func TestTaskMatchesContentQuery(t *testing.T) {
+	task := Task{
+		ID:              issueID("az-1"),
+		Title:           "Runtime dashboard",
+		Description:     "Detailed cache behaviour",
+		Notes:           "Observed flaky worker",
+		Design:          "Use daemon projection",
+		Acceptance:      "Search by content",
+		Assignee:        "riordan",
+		Status:          StatusInProgress,
+		Priority:        P2,
+		Type:            TypeTask,
+		Labels:          []string{"observability"},
+		Implementations: []string{"go-bubbletea"},
+	}
+
+	for _, query := range []string{
+		"az-1",
+		"runtime",
+		"CACHE BEHAVIOUR",
+		"runtime cache",
+		"flaky worker",
+		"daemon projection",
+		"content",
+		"riordan",
+		"in_progress",
+		"in-progress",
+		"P2",
+		"task",
+		"observability",
+		"go-bubbletea",
+		"go bubbletea",
+	} {
+		if !TaskMatchesContentQuery(task, query) {
+			t.Fatalf("TaskMatchesContentQuery(%q) = false, want true", query)
+		}
+	}
+
+	if TaskMatchesContentQuery(task, "missing") {
+		t.Fatal("TaskMatchesContentQuery(missing) = true, want false")
+	}
+	if TaskMatchesContentQuery(task, "runtime missing") {
+		t.Fatal("TaskMatchesContentQuery(runtime missing) = true, want false")
+	}
+}
+
+func TestFilterTasksByContentQuery(t *testing.T) {
+	tasks := []Task{
+		{ID: issueID("az-1"), Title: "Alpha", Description: "runtime cache"},
+		{ID: issueID("az-2"), Title: "Beta", Description: "unrelated"},
+	}
+
+	filtered := FilterTasksByContentQuery(tasks, "CACHE")
+	if len(filtered) != 1 || filtered[0].ID != issueID("az-1") {
+		t.Fatalf("filtered = %+v, want only az-1", filtered)
+	}
+	if got := FilterTasksByContentQuery(tasks, " "); len(got) != len(tasks) {
+		t.Fatalf("blank query filtered len = %d, want %d", len(got), len(tasks))
+	}
+}
+
 func TestFilter_Apply_DefaultHidesChildIssues(t *testing.T) {
 	f := NewFilter()
 	parentID := issueID("az-parent")

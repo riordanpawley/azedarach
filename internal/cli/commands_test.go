@@ -4324,6 +4324,8 @@ func TestImplMigrateCommandMigratesAssignmentsAcrossIssues(t *testing.T) {
 }
 
 func TestParseIssueListArgs(t *testing.T) {
+	createdAfter := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	updatedBefore := time.Date(2026, 3, 27, 23, 59, 59, 0, time.UTC)
 	tests := []struct {
 		name        string
 		args        []string
@@ -4348,6 +4350,18 @@ func TestParseIssueListArgs(t *testing.T) {
 			name: "limit override",
 			args: []string{"--limit", "25"},
 			want: IssueListOptions{JSON: false, Deps: false, Limit: 25},
+		},
+		{
+			name: "query and date filters",
+			args: []string{"-q", "runtime cache", "--created-after", "2026-03-25T10:00:00Z", "--updated-before", "2026-03-27T23:59:59Z"},
+			want: IssueListOptions{
+				JSON:          false,
+				Deps:          false,
+				Limit:         defaultIssueListLimit,
+				Query:         "runtime cache",
+				CreatedAfter:  &createdAfter,
+				UpdatedBefore: &updatedBefore,
+			},
 		},
 		{
 			name: "status filters",
@@ -4379,6 +4393,11 @@ func TestParseIssueListArgs(t *testing.T) {
 			name:        "invalid limit",
 			args:        []string{"--limit", "0"},
 			errContains: "limit must be >= 1",
+		},
+		{
+			name:        "invalid date filter",
+			args:        []string{"--created-after", "yesterday-ish"},
+			errContains: "invalid --created-after",
 		},
 		{
 			name:        "rejects extra args",
@@ -4533,6 +4552,69 @@ func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
 	_, err = ParseIssueDoctorArgs([]string{})
 	if err == nil || !strings.Contains(err.Error(), "usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]") {
 		t.Fatalf("expected doctor usage error, got %v", err)
+	}
+}
+
+func TestParseIssueSearchArgs(t *testing.T) {
+	updatedAfter := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		args        []string
+		want        IssueListOptions
+		errContains string
+	}{
+		{
+			name: "positional query",
+			args: []string{"--status", "open", "--updated-after", "2026-03-25T10:00:00Z", "runtime", "cache"},
+			want: IssueListOptions{
+				Limit:        defaultIssueListLimit,
+				Query:        "runtime cache",
+				States:       []domain.Status{domain.StatusOpen},
+				UpdatedAfter: &updatedAfter,
+			},
+		},
+		{
+			name: "query flag",
+			args: []string{"--query", "linear error"},
+			want: IssueListOptions{Limit: defaultIssueListLimit, Query: "linear error"},
+		},
+		{
+			name: "short query flag",
+			args: []string{"-q", "linear error"},
+			want: IssueListOptions{Limit: defaultIssueListLimit, Query: "linear error"},
+		},
+		{
+			name:        "missing query",
+			errContains: "usage: az issue search",
+		},
+		{
+			name:        "duplicate query sources",
+			args:        []string{"--query", "linear", "runtime"},
+			errContains: "provide query either as --query or as positional text, not both",
+		},
+		{
+			name:        "rejects flags after positional query",
+			args:        []string{"runtime", "--status", "open"},
+			errContains: "flags/options must appear before positional query text",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseIssueSearchArgs(tt.args)
+			if tt.errContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseIssueSearchArgs() error = %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("ParseIssueSearchArgs() = %+v, want %+v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -5630,6 +5712,88 @@ func TestIssueListCommand_StatusFilter(t *testing.T) {
 	}
 	if !strings.Contains(output, "az-1") || !strings.Contains(output, "az-2") {
 		t.Fatalf("status filter should include matching issues: %q", output)
+	}
+}
+
+func TestIssueListCommand_ContentQueryDelegatesToTaskList(t *testing.T) {
+	now := time.Date(2026, 3, 26, 2, 0, 0, 0, time.UTC)
+	filteredTasks := []domain.Task{
+		{ID: "az-1", Title: "Alpha", Description: "Contains runtime cache evidence", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(3 * time.Hour)},
+	}
+	commands := make([]string, 0, 1)
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					var got struct {
+						Query string `json:"query"`
+					}
+					if err := json.Unmarshal(req.Body, &got); err != nil {
+						t.Fatalf("unmarshal task.list request: %v", err)
+					}
+					if got.Query != "runtime CACHE" {
+						t.Fatalf("task.list query = %q, want runtime CACHE", got.Query)
+					}
+					body, err := marshalTaskListBody(filteredTasks)
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return responseWithBody(req, body), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueListCommand(deps, IssueListOptions{Query: "runtime CACHE"})
+	})
+	if !reflect.DeepEqual(commands, []string{daemonclient.CommandTaskList}) {
+		t.Fatalf("commands = %v, want only task.list", commands)
+	}
+	if !strings.Contains(output, "az-1") || strings.Contains(output, "az-2") {
+		t.Fatalf("content query output = %q, want only az-1", output)
+	}
+}
+
+func TestIssueListCommand_DateRangeFilters(t *testing.T) {
+	base := time.Date(2026, 3, 26, 2, 0, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{ID: "az-1", Title: "Inside", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: base, UpdatedAt: base.Add(1 * time.Hour)},
+		{ID: "az-2", Title: "Too old", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: base.Add(-48 * time.Hour), UpdatedAt: base.Add(1 * time.Hour)},
+		{ID: "az-3", Title: "Too new", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: base, UpdatedAt: base.Add(48 * time.Hour)},
+	}
+	createdAfter := base.Add(-24 * time.Hour)
+	updatedBefore := base.Add(24 * time.Hour)
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := marshalTaskListBody(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return responseWithBody(req, body), nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueListCommand(deps, IssueListOptions{CreatedAfter: &createdAfter, UpdatedBefore: &updatedBefore})
+	})
+	if !strings.Contains(output, "az-1") || strings.Contains(output, "az-2") || strings.Contains(output, "az-3") {
+		t.Fatalf("date range output = %q, want only az-1", output)
 	}
 }
 
@@ -9638,8 +9802,15 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "az log --no-follow --lines 100 daemon tui") {
 		t.Fatalf("usage missing log example: %q", output)
 	}
-	if !strings.Contains(output, "issue list [--project <project-id>] [--json] [--deps] [--status <status> ...]") {
+	if !strings.Contains(output, "issue list [--project <project-id>] [--json] [--deps] [--query <text>|-q <text>]") {
 		t.Fatalf("usage missing issue list command: %q", output)
+	}
+	if !strings.Contains(output, "issue search [--project <project-id>] [--json] [--deps]") ||
+		!strings.Contains(output, "(--query <text>|-q <text>|<query>)  Search title, description, notes, design, acceptance, labels, and implementations") {
+		t.Fatalf("usage missing issue search command: %q", output)
+	}
+	if !strings.Contains(output, "az issue search --status open --query \"runtime cache\"") {
+		t.Fatalf("usage missing issue search example: %q", output)
 	}
 	if !strings.Contains(output, "issue get [--project <project-id>] [--id <id>] [--json] [--with-notes] [<id>]") {
 		t.Fatalf("usage missing issue get command: %q", output)
@@ -9797,6 +9968,18 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "single-window fanout") {
 		t.Fatalf("prime output missing orchestration shorthand: %q", output)
+	}
+	if !strings.Contains(output, "`az issue list --query \"text\" --updated-after YYYY-MM-DD --limit 20`") {
+		t.Fatalf("prime output missing issue list query guidance: %q", output)
+	}
+	if !strings.Contains(output, "`az issue search --status open --limit 20 --query \"text\"`") {
+		t.Fatalf("prime output missing issue search guidance: %q", output)
+	}
+	if !strings.Contains(output, "(or `az issue search --status open --limit 20 \"text\"`)") {
+		t.Fatalf("prime output missing positional query alternative: %q", output)
+	}
+	if !strings.Contains(output, "searches title, description, notes, design, acceptance, labels, and implementations") {
+		t.Fatalf("prime output missing issue search field coverage: %q", output)
 	}
 	if !strings.Contains(output, "split work until each child issue is independently actionable and fits within a single subagent context window") {
 		t.Fatalf("prime output missing subagent sizing guardrail: %q", output)
@@ -11148,6 +11331,10 @@ func responseWithJSON(req protocol.RequestEnvelope, body any) protocol.ResponseE
 	if err != nil {
 		panic(err)
 	}
+	return responseWithBody(req, payload)
+}
+
+func responseWithBody(req protocol.RequestEnvelope, body []byte) protocol.ResponseEnvelope {
 	return protocol.ResponseEnvelope{
 		ProtocolVersion: req.ProtocolVersion,
 		RequestID:       req.RequestID,
@@ -11155,7 +11342,7 @@ func responseWithJSON(req protocol.RequestEnvelope, body any) protocol.ResponseE
 		Meta:            req.Meta,
 		CompletedAt:     req.SentAt,
 		OK:              true,
-		Body:            payload,
+		Body:            body,
 	}
 }
 

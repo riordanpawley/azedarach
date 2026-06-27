@@ -790,6 +790,69 @@ func (c *Client) ListWithRuntime(ctx context.Context, projectID string) ([]domai
 	return tasks, nil
 }
 
+// SearchWithRuntime fetches active issues matching query through the issue
+// content FTS index, then hydrates only the matching runtime rows.
+func (c *Client) SearchWithRuntime(ctx context.Context, projectID, query string) ([]domain.Task, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	expr := issueContentFTSExpression(query)
+	if expr == "" {
+		return []domain.Task{}, nil
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT i.id
+		FROM issue_search_fts
+		JOIN issues i ON i.rowid = issue_search_fts.rowid
+		WHERE issue_search_fts MATCH ?
+			AND i.deleted_at IS NULL
+		ORDER BY i.updated_at DESC, i.id
+	`, expr)
+	if err != nil {
+		return nil, c.wrapError("search-with-runtime", projectID, err)
+	}
+
+	ids := make([]string, 0, 32)
+	seen := map[string]struct{}{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, c.wrapError("search-with-runtime", projectID, err)
+		}
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, c.wrapError("search-with-runtime", projectID, err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, c.wrapError("search-with-runtime", projectID, err)
+	}
+	if len(ids) == 0 {
+		return []domain.Task{}, nil
+	}
+
+	tasks, err := c.queryTasksWithRuntime(ctx, db, projectID, ids...)
+	if err != nil {
+		return nil, c.wrapError("search-with-runtime", projectID, err)
+	}
+	return domain.FilterTasksByContentQuery(tasks, query), nil
+}
+
 // ListSummariesWithRuntime fetches active issues with runtime projection fields
 // but without long-form detail text. It is intended for board/list snapshots
 // where fetching full issue bodies for every task dominates load time.
@@ -1213,6 +1276,18 @@ func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error
 		return nil, c.wrapError("search", query, err)
 	}
 	return tasks, nil
+}
+
+func issueContentFTSExpression(query string) string {
+	tokens := domain.ContentQueryTerms(query)
+	if len(tokens) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		parts = append(parts, `"`+token+`"`)
+	}
+	return strings.Join(parts, " AND ")
 }
 
 // Ready fetches open tasks that do not have unresolved blockers.
