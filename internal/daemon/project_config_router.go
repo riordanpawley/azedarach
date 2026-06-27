@@ -15,8 +15,8 @@ type daemonProjectRuntimeConfig struct {
 	IssueTracker               appconfig.IssueTrackerConfig
 	DangerouslySkipPermissions bool
 	SessionShell               string
-	SessionInitCommands        []string
-	SessionSideEffectCommands  []string
+	SessionSyncInitCommands    []string
+	SessionAsyncInitCommands   []string
 	WorktreeInitCommands       []string
 	WorktreeAsyncInitCommands  []string
 	IssueResources             appconfig.IssueResourcesConfig
@@ -48,8 +48,8 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		IssueTracker:               appconfig.DefaultConfig().IssueTracker,
 		DangerouslySkipPermissions: d.cfg.DangerouslySkipPermissions,
 		SessionShell:               strings.TrimSpace(d.cfg.SessionShell),
-		SessionInitCommands:        append([]string(nil), d.cfg.SessionInitCommands...),
-		SessionSideEffectCommands:  append([]string(nil), d.cfg.SessionSideEffectCommands...),
+		SessionSyncInitCommands:    append([]string(nil), d.cfg.SessionSyncInitCommands...),
+		SessionAsyncInitCommands:   append([]string(nil), d.cfg.SessionAsyncInitCommands...),
 		WorktreeInitCommands:       append([]string(nil), d.cfg.WorktreeInitCommands...),
 		WorktreeAsyncInitCommands:  append([]string(nil), d.cfg.WorktreeAsyncInitCommands...),
 		IssueResources:             cloneIssueResourcesConfig(d.cfg.IssueResources),
@@ -93,17 +93,17 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	if d.sessionShellByRoot == nil {
 		d.sessionShellByRoot = map[string]string{}
 	}
-	if d.sessionInitCommandsByProject == nil {
-		d.sessionInitCommandsByProject = map[string][]string{}
+	if d.sessionSyncInitCommandsByProject == nil {
+		d.sessionSyncInitCommandsByProject = map[string][]string{}
 	}
-	if d.sessionInitCommandsByRoot == nil {
-		d.sessionInitCommandsByRoot = map[string][]string{}
+	if d.sessionSyncInitCommandsByRoot == nil {
+		d.sessionSyncInitCommandsByRoot = map[string][]string{}
 	}
-	if d.sessionSideEffectCommandsByProject == nil {
-		d.sessionSideEffectCommandsByProject = map[string][]string{}
+	if d.sessionAsyncInitCommandsByProject == nil {
+		d.sessionAsyncInitCommandsByProject = map[string][]string{}
 	}
-	if d.sessionSideEffectCommandsByRoot == nil {
-		d.sessionSideEffectCommandsByRoot = map[string][]string{}
+	if d.sessionAsyncInitCommandsByRoot == nil {
+		d.sessionAsyncInitCommandsByRoot = map[string][]string{}
 	}
 	if d.worktreeInitCommandsByProject == nil {
 		d.worktreeInitCommandsByProject = map[string][]string{}
@@ -141,11 +141,11 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		if shell, ok := d.sessionShellByProject[projectID]; ok && strings.TrimSpace(shell) != "" {
 			cfg.SessionShell = shell
 		}
-		if cmds, ok := d.sessionInitCommandsByProject[projectID]; ok {
-			cfg.SessionInitCommands = append([]string(nil), cmds...)
+		if cmds, ok := d.sessionSyncInitCommandsByProject[projectID]; ok {
+			cfg.SessionSyncInitCommands = append([]string(nil), cmds...)
 		}
-		if cmds, ok := d.sessionSideEffectCommandsByProject[projectID]; ok {
-			cfg.SessionSideEffectCommands = append([]string(nil), cmds...)
+		if cmds, ok := d.sessionAsyncInitCommandsByProject[projectID]; ok {
+			cfg.SessionAsyncInitCommands = append([]string(nil), cmds...)
 		}
 		if cmds, ok := d.worktreeInitCommandsByProject[projectID]; ok {
 			cfg.WorktreeInitCommands = append([]string(nil), cmds...)
@@ -180,11 +180,11 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 			if shell, ok := d.sessionShellByRoot[repoDir]; ok && strings.TrimSpace(shell) != "" {
 				cfg.SessionShell = shell
 			}
-			if cmds, ok := d.sessionInitCommandsByRoot[repoDir]; ok {
-				cfg.SessionInitCommands = append([]string(nil), cmds...)
+			if cmds, ok := d.sessionSyncInitCommandsByRoot[repoDir]; ok {
+				cfg.SessionSyncInitCommands = append([]string(nil), cmds...)
 			}
-			if cmds, ok := d.sessionSideEffectCommandsByRoot[repoDir]; ok {
-				cfg.SessionSideEffectCommands = append([]string(nil), cmds...)
+			if cmds, ok := d.sessionAsyncInitCommandsByRoot[repoDir]; ok {
+				cfg.SessionAsyncInitCommands = append([]string(nil), cmds...)
 			}
 			if cmds, ok := d.worktreeInitCommandsByRoot[repoDir]; ok {
 				cfg.WorktreeInitCommands = append([]string(nil), cmds...)
@@ -202,8 +202,8 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 			d.workflowModeByProject[projectID] = cfg.WorkflowMode
 			d.cliToolByProject[projectID] = cfg.CLITool
 			d.sessionShellByProject[projectID] = cfg.SessionShell
-			d.sessionInitCommandsByProject[projectID] = append([]string(nil), cfg.SessionInitCommands...)
-			d.sessionSideEffectCommandsByProject[projectID] = append([]string(nil), cfg.SessionSideEffectCommands...)
+			d.sessionSyncInitCommandsByProject[projectID] = append([]string(nil), cfg.SessionSyncInitCommands...)
+			d.sessionAsyncInitCommandsByProject[projectID] = append([]string(nil), cfg.SessionAsyncInitCommands...)
 			d.worktreeInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeInitCommands...)
 			d.worktreeAsyncInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeAsyncInitCommands...)
 			d.issueResourcesByProject[projectID] = cloneIssueResourcesConfig(cfg.IssueResources)
@@ -229,8 +229,8 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 				if shell := strings.TrimSpace(loaded.Session.Shell); shell != "" {
 					cfg.SessionShell = shell
 				}
-				cfg.SessionInitCommands = append([]string(nil), loaded.Session.InitCommands...)
-				cfg.SessionSideEffectCommands = append([]string(nil), loaded.Session.SideEffectCommands...)
+				cfg.SessionSyncInitCommands = append([]string(nil), loaded.Session.SyncInitCommands...)
+				cfg.SessionAsyncInitCommands = append([]string(nil), loaded.Session.AsyncInitCommands...)
 				cfg.WorktreeInitCommands = append([]string(nil), loaded.Worktree.SyncInitCommands...)
 				cfg.WorktreeAsyncInitCommands = append([]string(nil), loaded.Worktree.AsyncInitCommands...)
 				cfg.IssueResources = cloneIssueResourcesConfig(loaded.IssueResources)
@@ -247,8 +247,8 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	d.workflowModeByProject[projectID] = cfg.WorkflowMode
 	d.cliToolByProject[projectID] = cfg.CLITool
 	d.sessionShellByProject[projectID] = cfg.SessionShell
-	d.sessionInitCommandsByProject[projectID] = append([]string(nil), cfg.SessionInitCommands...)
-	d.sessionSideEffectCommandsByProject[projectID] = append([]string(nil), cfg.SessionSideEffectCommands...)
+	d.sessionSyncInitCommandsByProject[projectID] = append([]string(nil), cfg.SessionSyncInitCommands...)
+	d.sessionAsyncInitCommandsByProject[projectID] = append([]string(nil), cfg.SessionAsyncInitCommands...)
 	d.worktreeInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeInitCommands...)
 	d.worktreeAsyncInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeAsyncInitCommands...)
 	d.issueResourcesByProject[projectID] = cloneIssueResourcesConfig(cfg.IssueResources)
@@ -261,8 +261,8 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		d.workflowModeByRoot[repoDir] = cfg.WorkflowMode
 		d.cliToolByRoot[repoDir] = cfg.CLITool
 		d.sessionShellByRoot[repoDir] = cfg.SessionShell
-		d.sessionInitCommandsByRoot[repoDir] = append([]string(nil), cfg.SessionInitCommands...)
-		d.sessionSideEffectCommandsByRoot[repoDir] = append([]string(nil), cfg.SessionSideEffectCommands...)
+		d.sessionSyncInitCommandsByRoot[repoDir] = append([]string(nil), cfg.SessionSyncInitCommands...)
+		d.sessionAsyncInitCommandsByRoot[repoDir] = append([]string(nil), cfg.SessionAsyncInitCommands...)
 		d.worktreeInitCommandsByRoot[repoDir] = append([]string(nil), cfg.WorktreeInitCommands...)
 		d.worktreeAsyncInitCommandsByRoot[repoDir] = append([]string(nil), cfg.WorktreeAsyncInitCommands...)
 		d.issueResourcesByRoot[repoDir] = cloneIssueResourcesConfig(cfg.IssueResources)

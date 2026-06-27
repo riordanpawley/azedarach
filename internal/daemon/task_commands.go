@@ -3529,7 +3529,7 @@ func taskGraphSessionStartProgressFromOperation(record daemonops.Record, now tim
 }
 
 func (d *Daemon) sessionInitCommandProgress(_ context.Context, projectID string, task domain.Task) (taskGraphSessionStartProgress, bool) {
-	if task.Session == nil || len(d.runtimeConfigForProject(projectID).SessionInitCommands) == 0 {
+	if task.Session == nil || len(d.runtimeConfigForProject(projectID).SessionSyncInitCommands) == 0 {
 		return taskGraphSessionStartProgress{}, false
 	}
 	if strings.TrimSpace(task.Session.Activity) != "busy" || strings.TrimSpace(task.Session.ActivitySource) != "session" {

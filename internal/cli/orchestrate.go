@@ -1601,7 +1601,7 @@ func sessionInitCommandFanoutWarnings(deps *Dependencies, rootIssueID string, fa
 	if fanoutCount < 2 || deps == nil || deps.Config == nil {
 		return nil
 	}
-	commands := expensiveSessionInitCommands(deps.Config.Session.InitCommands)
+	commands := expensiveSessionSyncInitCommands(deps.Config.Session.SyncInitCommands)
 	if len(commands) == 0 {
 		return nil
 	}
@@ -1611,12 +1611,12 @@ func sessionInitCommandFanoutWarnings(deps *Dependencies, rootIssueID string, fa
 		rootIssueID = "this root"
 	}
 	for _, command := range commands {
-		warnings = append(warnings, fmt.Sprintf("session.initCommands contains expensive command %q; fanout count %d for same-project sessions under root %s can run it %d times concurrently. Consider lowering --limit, moving the command to explicit verification, or running one parent preflight before fanout.", command, fanoutCount, rootIssueID, fanoutCount))
+		warnings = append(warnings, fmt.Sprintf("session.syncInitCommands contains expensive command %q; fanout count %d for same-project sessions under root %s can run it %d times concurrently. Consider lowering --limit, moving the command to explicit verification, or running one parent preflight before fanout.", command, fanoutCount, rootIssueID, fanoutCount))
 	}
 	return warnings
 }
 
-func expensiveSessionInitCommands(commands []string) []string {
+func expensiveSessionSyncInitCommands(commands []string) []string {
 	out := make([]string, 0, len(commands))
 	seen := map[string]struct{}{}
 	for _, command := range commands {

@@ -49,8 +49,8 @@ func TestDefaultConfig(t *testing.T) {
 	assert.False(t, cfg.Session.DangerouslySkipPermissions)
 	assert.Equal(t, 30000, cfg.Session.TimeoutMs)
 	assert.NotEmpty(t, cfg.Session.LogDir)
-	assert.NotNil(t, cfg.Session.InitCommands)
-	assert.NotNil(t, cfg.Session.SideEffectCommands)
+	assert.NotNil(t, cfg.Session.SyncInitCommands)
+	assert.NotNil(t, cfg.Session.AsyncInitCommands)
 
 	assert.Equal(t, 3000, cfg.DevServer.BasePort)
 	assert.Equal(t, 3100, cfg.DevServer.MaxPort)
@@ -88,6 +88,20 @@ func TestDefaultConfig(t *testing.T) {
 	assert.NotNil(t, cfg.GitHooks.Commands)
 	assert.False(t, cfg.GitHooks.Restage.Enabled)
 	assert.NotNil(t, cfg.GitHooks.Restage.Paths)
+}
+
+func TestConfigSchemaVersionMatchesCurrentConfigVersion(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "config.schema.json"))
+	require.NoError(t, err)
+
+	var schema struct {
+		Properties map[string]struct {
+			Const int `json:"const"`
+		} `json:"properties"`
+	}
+	require.NoError(t, json.Unmarshal(data, &schema))
+	require.Contains(t, schema.Properties, "$version")
+	assert.Equal(t, CurrentConfigVersion, schema.Properties["$version"].Const)
 }
 
 func TestResolveConfigBaseFindsNearestAncestorConfig(t *testing.T) {
@@ -128,7 +142,7 @@ func TestLoadConfigFromDotAzedarachConfigJSON(t *testing.T) {
     "dangerouslySkipPermissions": true,
     "shell": "bash",
     "timeoutMs": 60000,
-    "sideEffectCommands": ["pnpm type-check"]
+    "asyncInitCommands": ["pnpm type-check"]
   },
   "worktree": {
     "initCommands": ["direnv allow"],
@@ -165,8 +179,8 @@ func TestLoadConfigFromDotAzedarachConfigJSON(t *testing.T) {
 	assert.False(t, cfg.Git.FetchEnabled)
 	assert.Equal(t, "bash", cfg.Session.Shell)
 	assert.Equal(t, 60000, cfg.Session.TimeoutMs)
-	assert.Empty(t, cfg.Session.InitCommands)
-	assert.Equal(t, []string{"pnpm type-check"}, cfg.Session.SideEffectCommands)
+	assert.Empty(t, cfg.Session.SyncInitCommands)
+	assert.Equal(t, []string{"pnpm type-check"}, cfg.Session.AsyncInitCommands)
 	assert.Empty(t, cfg.Worktree.InitCommands)
 	assert.Equal(t, []string{"direnv allow", "cp .env.local.example .env.local"}, cfg.Worktree.SyncInitCommands)
 	assert.Equal(t, []string{"bun install"}, cfg.Worktree.AsyncInitCommands)
@@ -196,10 +210,10 @@ func TestLoadConfigKeepsSessionAndWorktreeInitCommandsDistinct(t *testing.T) {
 	writeConfigFile(t, root, `{
   "$schema": "./config.schema.json",
   "$version": 7,
-  "session": {
-    "initCommands": ["session one", "session two"],
-    "sideEffectCommands": ["session side effect"]
-  },
+	  "session": {
+	    "syncInitCommands": ["session one", "session two"],
+	    "asyncInitCommands": ["session async"]
+	  },
   "worktree": {
     "initCommands": ["worktree one"],
     "syncInitCommands": ["worktree sync"],
@@ -209,11 +223,33 @@ func TestLoadConfigKeepsSessionAndWorktreeInitCommandsDistinct(t *testing.T) {
 
 	cfg, err := LoadConfig(root)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"session one", "session two"}, cfg.Session.InitCommands)
-	assert.Equal(t, []string{"session side effect"}, cfg.Session.SideEffectCommands)
+	assert.Equal(t, []string{"session one", "session two"}, cfg.Session.SyncInitCommands)
+	assert.Equal(t, []string{"session async"}, cfg.Session.AsyncInitCommands)
 	assert.Empty(t, cfg.Worktree.InitCommands)
 	assert.Equal(t, []string{"worktree one", "worktree sync"}, cfg.Worktree.SyncInitCommands)
 	assert.Equal(t, []string{"worktree async"}, cfg.Worktree.AsyncInitCommands)
+}
+
+func TestNormalizeConfigMigratesSessionInitCommandsToSyncAndAsyncInitCommands(t *testing.T) {
+	raw := map[string]any{
+		"$version": float64(9),
+		"session": map[string]any{
+			"initCommands":       []any{"legacy sync one", "legacy sync two"},
+			"syncInitCommands":   []any{"explicit sync"},
+			"sideEffectCommands": []any{"legacy async"},
+			"asyncInitCommands":  []any{"explicit async"},
+		},
+	}
+
+	NormalizeConfigFileRaw(raw)
+
+	sessionRaw, ok := raw["session"].(map[string]any)
+	require.True(t, ok)
+	assert.NotContains(t, sessionRaw, "initCommands")
+	assert.NotContains(t, sessionRaw, "sideEffectCommands")
+	assert.Equal(t, []any{"legacy sync one", "legacy sync two", "explicit sync"}, sessionRaw["syncInitCommands"])
+	assert.Equal(t, []any{"legacy async", "explicit async"}, sessionRaw["asyncInitCommands"])
+	assert.Equal(t, CurrentConfigVersion, raw["$version"])
 }
 
 func TestNormalizeConfigMigratesWorktreeInitCommandsToSyncInitCommands(t *testing.T) {
@@ -432,13 +468,15 @@ func TestLoadConfigDeepMergesObjectsAcrossWorkspaceAndLocal(t *testing.T) {
 
 func TestLoadConfigLocalArraysReplaceWorkspaceArrays(t *testing.T) {
 	root := t.TempDir()
+	// Keep these fixtures on an older config version to verify legacy session
+	// init keys migrate before higher-priority local arrays replace them.
 	writeConfigFile(t, root, `{
-  "$schema": "./config.schema.json",
-  "$version": 7,
-  "session": {
-    "initCommands": ["workspace one", "workspace two"],
-    "sideEffectCommands": ["workspace side one", "workspace side two"]
-  },
+	  "$schema": "./config.schema.json",
+	  "$version": 7,
+	  "session": {
+	    "initCommands": ["workspace one", "workspace two"],
+	    "sideEffectCommands": ["workspace async one", "workspace async two"]
+	  },
   "issueTracker": {
     "linear": {
       "webhooks": {
@@ -448,12 +486,12 @@ func TestLoadConfigLocalArraysReplaceWorkspaceArrays(t *testing.T) {
   }
 }`)
 	writeLocalConfigFile(t, root, `{
-  "$schema": "./config.schema.json",
-  "$version": 7,
-  "session": {
-    "initCommands": ["local one"],
-    "sideEffectCommands": ["local side one"]
-  },
+	  "$schema": "./config.schema.json",
+	  "$version": 7,
+	  "session": {
+	    "initCommands": ["local one"],
+	    "sideEffectCommands": ["local async one"]
+	  },
   "issueTracker": {
     "linear": {
       "webhooks": {
@@ -465,8 +503,8 @@ func TestLoadConfigLocalArraysReplaceWorkspaceArrays(t *testing.T) {
 
 	cfg, err := LoadConfig(root)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"local one"}, cfg.Session.InitCommands)
-	assert.Equal(t, []string{"local side one"}, cfg.Session.SideEffectCommands)
+	assert.Equal(t, []string{"local one"}, cfg.Session.SyncInitCommands)
+	assert.Equal(t, []string{"local async one"}, cfg.Session.AsyncInitCommands)
 	assert.Equal(t, []string{"Issue"}, cfg.IssueTracker.Linear.Webhooks.Events)
 }
 
@@ -563,7 +601,10 @@ func TestSaveConfigWritesSchemaAndVersion(t *testing.T) {
 	cfg.Network.AutoDetect = false
 	cfg.Spec.Enabled = false
 	cfg.Diagnostics.LatencyTrace = true
-	cfg.Session.InitCommands = []string{"direnv allow", "bun install"}
+	cfg.Session.InitCommands = []string{"legacy session sync"}
+	cfg.Session.SideEffectCommands = []string{"legacy session async"}
+	cfg.Session.SyncInitCommands = []string{"explicit session sync"}
+	cfg.Session.AsyncInitCommands = []string{"explicit session async"}
 	cfg.Worktree.InitCommands = []string{"legacy worktree init"}
 	cfg.Worktree.SyncInitCommands = []string{"explicit worktree sync"}
 
@@ -581,6 +622,14 @@ func TestSaveConfigWritesSchemaAndVersion(t *testing.T) {
 	sessionRaw, ok := raw["session"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, true, sessionRaw["dangerouslySkipPermissions"])
+	assert.NotContains(t, sessionRaw, "initCommands")
+	assert.NotContains(t, sessionRaw, "sideEffectCommands")
+	sessionSyncInitRaw, ok := sessionRaw["syncInitCommands"].([]any)
+	require.True(t, ok)
+	require.Equal(t, []any{"legacy session sync", "explicit session sync"}, sessionSyncInitRaw)
+	sessionAsyncInitRaw, ok := sessionRaw["asyncInitCommands"].([]any)
+	require.True(t, ok)
+	require.Equal(t, []any{"legacy session async", "explicit session async"}, sessionAsyncInitRaw)
 
 	gitRaw, ok := raw["git"].(map[string]any)
 	require.True(t, ok)

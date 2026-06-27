@@ -10,7 +10,7 @@
     },
     "$version": {
       "type": "integer",
-      "const": 9
+      "const": 10
     },
     "cliTool": {
       "type": "string",
@@ -151,17 +151,17 @@
         "logDir": {
           "type": "string"
         },
-        "initCommands": {
+        "syncInitCommands": {
           "type": "array",
-          "description": "Commands run before the launched AI tool. These commands block session startup and failures prevent the tool launch.",
+          "description": "Blocking session readiness commands run before the launched AI tool. Older session.initCommands entries are migrated here.",
           "items": {
             "type": "string"
           },
           "default": []
         },
-        "sideEffectCommands": {
+        "asyncInitCommands": {
           "type": "array",
-          "description": "Commands started in a detached tmux side-effects window during session startup without blocking the AI tool launch. Output is visible in that window and written under .azedarach/session-side-effects/<issue>/<session>/ in the session worktree.",
+          "description": "Non-blocking session warmup commands started in a detached tmux async-init window during session startup. Older session.sideEffectCommands entries are migrated here. Output is visible in that window and written under .azedarach/session-async-init/<issue>/<session>/ in the session worktree.",
           "items": {
             "type": "string"
           },

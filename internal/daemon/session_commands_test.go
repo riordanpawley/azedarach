@@ -1522,12 +1522,12 @@ func TestSessionStartWaitsForInitReadyMarkerBeforeCompleting(t *testing.T) {
 	store := daemonstate.NewStore()
 	d := &Daemon{
 		cfg: Config{
-			RepoDir:             repoDir,
-			BaseBranch:          "main",
-			CLITool:             "codex",
-			SessionShell:        "zsh",
-			SessionInitCommands: []string{"direnv allow"},
-			Logger:              slog.Default(),
+			RepoDir:                 repoDir,
+			BaseBranch:              "main",
+			CLITool:                 "codex",
+			SessionShell:            "zsh",
+			SessionSyncInitCommands: []string{"direnv allow"},
+			Logger:                  slog.Default(),
 		},
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		issues:       issuesClient,
@@ -5996,7 +5996,7 @@ func TestBuildSessionLaunchCommandIncludesInitCommandsAndIssueEnv(t *testing.T) 
 		cfg: Config{
 			CLITool:      "claude",
 			SessionShell: "zsh",
-			SessionInitCommands: []string{
+			SessionSyncInitCommands: []string{
 				"direnv allow",
 				"go test ./...",
 			},
@@ -6024,15 +6024,15 @@ func TestBuildSessionLaunchCommandIncludesInitCommandsAndIssueEnv(t *testing.T) 
 	}
 }
 
-func TestBuildSessionLaunchCommandDoesNotSerializeSideEffectCommandsBeforeToolLaunch(t *testing.T) {
+func TestBuildSessionLaunchCommandDoesNotSerializeAsyncInitCommandsBeforeToolLaunch(t *testing.T) {
 	d := &Daemon{
 		cfg: Config{
 			CLITool:      "codex",
 			SessionShell: "zsh",
-			SessionInitCommands: []string{
+			SessionSyncInitCommands: []string{
 				"direnv allow",
 			},
-			SessionSideEffectCommands: []string{
+			SessionAsyncInitCommands: []string{
 				"pnpm type-check",
 				"echo $AZEDARACH_ISSUE_ID",
 			},
@@ -6044,14 +6044,14 @@ func TestBuildSessionLaunchCommandDoesNotSerializeSideEffectCommandsBeforeToolLa
 		"cnb",
 		"cnb", false,
 		nil,
-		`work on issue cnb (feature): Add non-blocking session side-effect commands`,
+		`work on issue cnb (feature): Add non-blocking session async init commands`,
 	)
 	if !strings.Contains(command, "direnv allow;") {
 		t.Fatalf("command = %q, want blocking init command before launch", command)
 	}
 	if strings.Contains(command, "pnpm type-check") {
-		// Side-effect commands must not be serialized into the AI pane launch command.
-		t.Fatalf("command = %q, want side-effect command excluded from AI launch shell", command)
+		// Async init commands must not be serialized into the AI pane launch command.
+		t.Fatalf("command = %q, want async init command excluded from AI launch shell", command)
 	}
 	if !strings.Contains(command, `AZEDARACH_ISSUE_ID="cnb" codex`) {
 		t.Fatalf("command = %q, want foreground AI tool launch", command)
@@ -6063,7 +6063,7 @@ func TestBuildSessionLaunchCommandWritesInitReadyMarkerAfterInitCommands(t *test
 		cfg: Config{
 			CLITool:      "codex",
 			SessionShell: "zsh",
-			SessionInitCommands: []string{
+			SessionSyncInitCommands: []string{
 				"direnv allow",
 				"go test ./...",
 			},
@@ -6097,14 +6097,14 @@ func TestBuildSessionLaunchCommandWritesInitReadyMarkerAfterInitCommands(t *test
 	}
 }
 
-func TestStartSessionSideEffectCommandsUsesSeparateTmuxWindow(t *testing.T) {
+func TestStartSessionAsyncInitCommandsUsesSeparateTmuxWindow(t *testing.T) {
 	tmuxRunner := newSessionStartTmuxRunner()
 	tmuxRunner.sessions["cnb"] = true
 	tmuxRunner.windows["cnb"] = map[string]bool{"shell": true}
 	d := &Daemon{
 		cfg: Config{
 			Logger: slog.Default(),
-			SessionSideEffectCommands: []string{
+			SessionAsyncInitCommands: []string{
 				"pnpm type-check",
 				"echo $AZEDARACH_ISSUE_ID",
 			},
@@ -6112,28 +6112,28 @@ func TestStartSessionSideEffectCommandsUsesSeparateTmuxWindow(t *testing.T) {
 		tmux: tmux.NewClient(tmuxRunner, slog.Default()),
 	}
 
-	d.startSessionSideEffectCommands(context.Background(), protocol.DefaultProjectID, "cnb", "cnb", "/tmp/worktree")
+	d.startSessionAsyncInitCommands(context.Background(), protocol.DefaultProjectID, "cnb", "cnb", "/tmp/worktree")
 
-	if !tmuxRunner.windows["cnb"][sessionSideEffectWindowName] {
-		t.Fatalf("windows = %+v, want %q window", tmuxRunner.windows["cnb"], sessionSideEffectWindowName)
+	if !tmuxRunner.windows["cnb"][sessionAsyncInitWindowName] {
+		t.Fatalf("windows = %+v, want %q window", tmuxRunner.windows["cnb"], sessionAsyncInitWindowName)
 	}
-	if len(tmuxRunner.sendKeysTargets) != 1 || tmuxRunner.sendKeysTargets[0] != "cnb:"+sessionSideEffectWindowName {
-		t.Fatalf("sendKeysTargets = %+v, want cnb:%s", tmuxRunner.sendKeysTargets, sessionSideEffectWindowName)
+	if len(tmuxRunner.sendKeysTargets) != 1 || tmuxRunner.sendKeysTargets[0] != "cnb:"+sessionAsyncInitWindowName {
+		t.Fatalf("sendKeysTargets = %+v, want cnb:%s", tmuxRunner.sendKeysTargets, sessionAsyncInitWindowName)
 	}
 	payload := tmuxRunner.sendKeysPayloads[0]
 	if !strings.Contains(payload, "export AZEDARACH_PROJECT_ID=") ||
 		!strings.Contains(payload, "AZEDARACH_ISSUE_ID=") ||
 		!strings.Contains(payload, "AZEDARACH_SESSION_ID=") {
-		t.Fatalf("payload = %q, want exported AZEDARACH context before side effects", payload)
+		t.Fatalf("payload = %q, want exported AZEDARACH context before async init", payload)
 	}
-	if !strings.Contains(payload, "session side-effect[1] log: .azedarach/session-side-effects/cnb/cnb/001.log") {
-		t.Fatalf("payload = %q, want discoverable side-effect log path", payload)
+	if !strings.Contains(payload, "session async-init[1] log: .azedarach/session-async-init/cnb/cnb/001.log") {
+		t.Fatalf("payload = %q, want discoverable async init log path", payload)
 	}
 	if !strings.Contains(payload, "pnpm type-check") {
-		t.Fatalf("payload = %q, want side-effect command", payload)
+		t.Fatalf("payload = %q, want async init command", payload)
 	}
-	if !strings.Contains(payload, "tee -a '.azedarach/session-side-effects/cnb/cnb/001.log'") {
-		t.Fatalf("payload = %q, want log tee for side-effect output", payload)
+	if !strings.Contains(payload, "tee -a '.azedarach/session-async-init/cnb/cnb/001.log'") {
+		t.Fatalf("payload = %q, want log tee for async init output", payload)
 	}
 }
 

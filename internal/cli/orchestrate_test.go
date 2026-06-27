@@ -60,7 +60,7 @@ func TestParseOrchestrateStartArgs_DefaultLimitAndIssues(t *testing.T) {
 	}
 }
 
-func TestExpensiveSessionInitCommandsDetectsKnownPatterns(t *testing.T) {
+func TestExpensiveSessionSyncInitCommandsDetectsKnownPatterns(t *testing.T) {
 	commands := []string{
 		"direnv allow",
 		"pnpm type-check",
@@ -72,7 +72,7 @@ func TestExpensiveSessionInitCommandsDetectsKnownPatterns(t *testing.T) {
 		"npm run build",
 		"pnpm run check:types",
 	}
-	got := expensiveSessionInitCommands(commands)
+	got := expensiveSessionSyncInitCommands(commands)
 	want := []string{
 		"pnpm type-check",
 		"tsc --noEmit",
@@ -95,13 +95,13 @@ func TestExpensiveSessionInitCommandsDetectsKnownPatterns(t *testing.T) {
 
 func TestSessionInitCommandFanoutWarningsQuietForNonExpensiveOrSingleLaunch(t *testing.T) {
 	cfg := config.DefaultConfig()
-	cfg.Session.InitCommands = []string{"direnv allow", "az prime", "printf ready"}
+	cfg.Session.SyncInitCommands = []string{"direnv allow", "az prime", "printf ready"}
 	deps := &Dependencies{Config: cfg}
 	if warnings := sessionInitCommandFanoutWarnings(deps, "az-1", 3); len(warnings) != 0 {
 		t.Fatalf("warnings = %+v, want none for non-expensive init commands", warnings)
 	}
 
-	cfg.Session.InitCommands = []string{"pnpm type-check"}
+	cfg.Session.SyncInitCommands = []string{"pnpm type-check"}
 	if warnings := sessionInitCommandFanoutWarnings(deps, "az-1", 1); len(warnings) != 0 {
 		t.Fatalf("warnings = %+v, want none for single-session start", warnings)
 	}
@@ -366,7 +366,7 @@ func TestOrchestrateStatusCommandWarnsOnExpensiveSessionInitFanout(t *testing.T)
 		t.Fatalf("marshal task list: %v", err)
 	}
 	cfg := config.DefaultConfig()
-	cfg.Session.InitCommands = []string{"pnpm type-check"}
+	cfg.Session.SyncInitCommands = []string{"pnpm type-check"}
 	deps := &Dependencies{
 		Config:    cfg,
 		RepoDir:   "/repo",
@@ -858,7 +858,7 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 	}
 }
 
-func TestOrchestrateStartWarnsOnExpensiveSessionInitCommandsDuringFanout(t *testing.T) {
+func TestOrchestrateStartWarnsOnExpensiveSessionSyncInitCommandsDuringFanout(t *testing.T) {
 	root := naming.IssueID("az-1")
 	childA := naming.IssueID("az-2")
 	childB := naming.IssueID("az-3")
@@ -873,7 +873,7 @@ func TestOrchestrateStartWarnsOnExpensiveSessionInitCommandsDuringFanout(t *test
 	}
 
 	cfg := config.DefaultConfig()
-	cfg.Session.InitCommands = []string{"direnv allow", "pnpm type-check"}
+	cfg.Session.SyncInitCommands = []string{"direnv allow", "pnpm type-check"}
 	deps := &Dependencies{
 		Config:    cfg,
 		ProjectID: protocol.DefaultProjectID,

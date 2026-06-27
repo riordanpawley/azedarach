@@ -69,8 +69,8 @@ type Config struct {
 	CLITool                    string
 	DangerouslySkipPermissions bool
 	SessionShell               string
-	SessionInitCommands        []string
-	SessionSideEffectCommands  []string
+	SessionSyncInitCommands    []string
+	SessionAsyncInitCommands   []string
 	WorktreeInitCommands       []string
 	WorktreeAsyncInitCommands  []string
 	IssueResources             appconfig.IssueResourcesConfig
@@ -104,10 +104,10 @@ type Daemon struct {
 	cliToolByRoot                      map[string]string
 	sessionShellByProject              map[string]string
 	sessionShellByRoot                 map[string]string
-	sessionInitCommandsByProject       map[string][]string
-	sessionInitCommandsByRoot          map[string][]string
-	sessionSideEffectCommandsByProject map[string][]string
-	sessionSideEffectCommandsByRoot    map[string][]string
+	sessionSyncInitCommandsByProject   map[string][]string
+	sessionSyncInitCommandsByRoot      map[string][]string
+	sessionAsyncInitCommandsByProject  map[string][]string
+	sessionAsyncInitCommandsByRoot     map[string][]string
 	worktreeInitCommandsByProject      map[string][]string
 	worktreeInitCommandsByRoot         map[string][]string
 	worktreeAsyncInitCommandsByProject map[string][]string
@@ -258,10 +258,10 @@ func New(cfg Config) *Daemon {
 		cliToolByRoot:                      map[string]string{},
 		sessionShellByProject:              map[string]string{},
 		sessionShellByRoot:                 map[string]string{},
-		sessionInitCommandsByProject:       map[string][]string{},
-		sessionInitCommandsByRoot:          map[string][]string{},
-		sessionSideEffectCommandsByProject: map[string][]string{},
-		sessionSideEffectCommandsByRoot:    map[string][]string{},
+		sessionSyncInitCommandsByProject:   map[string][]string{},
+		sessionSyncInitCommandsByRoot:      map[string][]string{},
+		sessionAsyncInitCommandsByProject:  map[string][]string{},
+		sessionAsyncInitCommandsByRoot:     map[string][]string{},
 		worktreeInitCommandsByProject:      map[string][]string{},
 		worktreeInitCommandsByRoot:         map[string][]string{},
 		worktreeAsyncInitCommandsByProject: map[string][]string{},
