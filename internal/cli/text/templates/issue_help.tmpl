@@ -2,7 +2,7 @@ Usage: az issue <list|search|get|get-many|check|doctor|create|split|update|close
 
 Commands:
   list [--project <project-id>] [--json] [--deps] [--query <text>|-q <text>] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c]  List issues from daemon-backed store
-  search [--project <project-id>] [--json] [--deps] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] <query>  Search issue content
+  search [--project <project-id>] [--json] [--deps] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)  Search issue content
   get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]  Show a single issue by ID
   get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json] [--with-notes]  Fetch many issues in requested order
   check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]  Alias for get

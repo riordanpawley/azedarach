@@ -2339,7 +2339,7 @@ func parseIssueListArgs(args []string, allowQueryArgs bool) (IssueListOptions, e
 	opts.Project = normalizeIssueProject(opts.Project)
 	opts.Query = strings.TrimSpace(opts.Query)
 	if allowQueryArgs && opts.Query == "" {
-		return IssueListOptions{}, fmt.Errorf("usage: az issue search [--project <project-id>] [--json] [--deps] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] <query>")
+		return IssueListOptions{}, fmt.Errorf("usage: az issue search [--project <project-id>] [--json] [--deps] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)")
 	}
 	var parseErr error
 	if opts.CreatedAfter, parseErr = parseIssueListDateFilter(createdAfterRaw, false); parseErr != nil {
