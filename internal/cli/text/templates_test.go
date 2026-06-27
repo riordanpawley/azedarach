@@ -12,6 +12,9 @@ func TestRenderIssueHelpPrefersNamedFlagForms(t *testing.T) {
 	}
 
 	for _, want := range []string{
+		"list [--project <project-id>] [--json] [--deps] [--query <text>|-q <text>]",
+		"search [--project <project-id>] [--json] [--deps]",
+		"[--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c]",
 		"get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]",
 		"get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json] [--with-notes]",
 		"check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]",

@@ -4555,6 +4555,64 @@ func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
 	}
 }
 
+func TestParseIssueSearchArgs(t *testing.T) {
+	updatedAfter := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		args        []string
+		want        IssueListOptions
+		errContains string
+	}{
+		{
+			name: "positional query",
+			args: []string{"--status", "open", "--updated-after", "2026-03-25T10:00:00Z", "runtime", "cache"},
+			want: IssueListOptions{
+				Limit:        defaultIssueListLimit,
+				Query:        "runtime cache",
+				States:       []domain.Status{domain.StatusOpen},
+				UpdatedAfter: &updatedAfter,
+			},
+		},
+		{
+			name: "query flag",
+			args: []string{"--query", "linear error"},
+			want: IssueListOptions{Limit: defaultIssueListLimit, Query: "linear error"},
+		},
+		{
+			name:        "missing query",
+			errContains: "usage: az issue search",
+		},
+		{
+			name:        "duplicate query sources",
+			args:        []string{"--query", "linear", "runtime"},
+			errContains: "provide query either as --query or as positional text, not both",
+		},
+		{
+			name:        "rejects flags after positional query",
+			args:        []string{"runtime", "--status", "open"},
+			errContains: "flags/options must appear before positional query text",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseIssueSearchArgs(tt.args)
+			if tt.errContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseIssueSearchArgs() error = %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("ParseIssueSearchArgs() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseIssueGetManyArgs(t *testing.T) {
 	got, err := ParseIssueGetManyArgs([]string{"--id", "az-1", "--id", "az-2", "--ids", "az-3,az-4", "--json", "--with-notes"})
 	if err != nil {
@@ -9753,6 +9811,12 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue list [--project <project-id>] [--json] [--deps] [--query <text>|-q <text>]") {
 		t.Fatalf("usage missing issue list command: %q", output)
 	}
+	if !strings.Contains(output, "issue search [--project <project-id>] [--json] [--deps]") {
+		t.Fatalf("usage missing issue search command: %q", output)
+	}
+	if !strings.Contains(output, "az issue search --status open \"runtime cache\"") {
+		t.Fatalf("usage missing issue search example: %q", output)
+	}
 	if !strings.Contains(output, "issue get [--project <project-id>] [--id <id>] [--json] [--with-notes] [<id>]") {
 		t.Fatalf("usage missing issue get command: %q", output)
 	}
@@ -9909,6 +9973,12 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "single-window fanout") {
 		t.Fatalf("prime output missing orchestration shorthand: %q", output)
+	}
+	if !strings.Contains(output, "`az issue list --query \"text\" --updated-after YYYY-MM-DD --limit 20`") {
+		t.Fatalf("prime output missing issue list query guidance: %q", output)
+	}
+	if !strings.Contains(output, "`az issue search --status open --limit 20 \"text\"`") {
+		t.Fatalf("prime output missing issue search guidance: %q", output)
 	}
 	if !strings.Contains(output, "split work until each child issue is independently actionable and fits within a single subagent context window") {
 		t.Fatalf("prime output missing subagent sizing guardrail: %q", output)

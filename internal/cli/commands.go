@@ -2247,6 +2247,14 @@ func formatProjectIssueRef(projectID, issueID string) string {
 }
 
 func ParseIssueListArgs(args []string) (IssueListOptions, error) {
+	return parseIssueListArgs(args, false)
+}
+
+func ParseIssueSearchArgs(args []string) (IssueListOptions, error) {
+	return parseIssueListArgs(args, true)
+}
+
+func parseIssueListArgs(args []string, allowQueryArgs bool) (IssueListOptions, error) {
 	opts := IssueListOptions{Limit: defaultIssueListLimit}
 	ids := make([]string, 0, 4)
 	idsCSV := ""
@@ -2310,7 +2318,19 @@ func ParseIssueListArgs(args []string) (IssueListOptions, error) {
 	if err := fs.Parse(args); err != nil {
 		return IssueListOptions{}, err
 	}
-	if fs.NArg() != 0 {
+	if allowQueryArgs {
+		if fs.NArg() > 0 {
+			if strings.TrimSpace(opts.Query) != "" {
+				return IssueListOptions{}, fmt.Errorf("provide query either as --query or as positional text, not both")
+			}
+			for _, arg := range fs.Args()[1:] {
+				if strings.HasPrefix(arg, "-") {
+					return IssueListOptions{}, fmt.Errorf("flags/options must appear before positional query text")
+				}
+			}
+			opts.Query = strings.Join(fs.Args(), " ")
+		}
+	} else if fs.NArg() != 0 {
 		return IssueListOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
 	if opts.Limit < 1 {
@@ -2318,6 +2338,9 @@ func ParseIssueListArgs(args []string) (IssueListOptions, error) {
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	opts.Query = strings.TrimSpace(opts.Query)
+	if allowQueryArgs && opts.Query == "" {
+		return IssueListOptions{}, fmt.Errorf("usage: az issue search [--project <project-id>] [--json] [--deps] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] <query>")
+	}
 	var parseErr error
 	if opts.CreatedAfter, parseErr = parseIssueListDateFilter(createdAfterRaw, false); parseErr != nil {
 		return IssueListOptions{}, fmt.Errorf("invalid --created-after: %w", parseErr)
