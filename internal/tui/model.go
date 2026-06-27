@@ -262,7 +262,7 @@ type Model struct {
 	// Project registry
 	projectRegistry *config.ProjectsRegistry
 
-	// Image attachment service
+	// Issue attachment service
 	attachmentService overlay.ImageAttachmentService
 
 	// Diagnostics service
@@ -2526,7 +2526,7 @@ func (m Model) sessionImagePaths(ctx context.Context, issueID string) []string {
 	attachments, err := m.attachmentService.List(ctx, issueID)
 	if err != nil {
 		if m.logger != nil {
-			m.logger.Warn("failed to list issue image attachments for session start", "issue_id", issueID, "error", err)
+			m.logger.Warn("failed to list issue attachments for session start", "issue_id", issueID, "error", err)
 		}
 		return nil
 	}
@@ -2971,7 +2971,7 @@ func (m Model) appendAttachmentNoteCmd(att *attachment.Attachment) tea.Cmd {
 		if err := m.daemonClient.AppendTaskNotes(ctx, issueID, line); err != nil {
 			return Toast{
 				Level:   ToastWarning,
-				Message: fmt.Sprintf("Image attached but failed to append notes: %s", compactErrorMessage(err)),
+				Message: fmt.Sprintf("Attachment added but failed to append notes: %s", compactErrorMessage(err)),
 				Expires: time.Now().Add(6 * time.Second),
 			}
 		}
@@ -2988,7 +2988,10 @@ func formatAttachmentNoteLine(att *attachment.Attachment) string {
 	if issueID == "" || filename == "" {
 		return ""
 	}
-	relativePath := filepath.ToSlash(filepath.Join(".azedarach", "images", issueID, filename))
+	relativePath := strings.TrimSpace(att.Relative)
+	if relativePath == "" {
+		relativePath = filepath.ToSlash(filepath.Join(".azedarach", "attachments", filename))
+	}
 	source := "file"
 	if strings.HasPrefix(strings.ToLower(filename), "clipboard-") {
 		source = "clipboard"
@@ -5589,7 +5592,7 @@ func (m Model) attachStagedAttachments(ctx context.Context, issueID string, path
 	if len(failed) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("Task created, but %d image attachment(s) failed: %s", len(failed), strings.Join(failed, ", "))
+	return fmt.Sprintf("Task created, but %d attachment(s) failed: %s", len(failed), strings.Join(failed, ", "))
 }
 
 func (m Model) createTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {

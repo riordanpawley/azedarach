@@ -743,7 +743,7 @@ func TestCreateTaskOverlayWithAttachmentServiceShowsGuidance(t *testing.T) {
 	overlay := NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(nil, nil, svc)
 
 	view := overlay.View()
-	assert.Contains(t, view, "Image Attachments:")
+	assert.Contains(t, view, "Attachments:")
 	assert.Contains(t, view, "No staged attachments yet.")
 }
 

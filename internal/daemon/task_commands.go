@@ -169,13 +169,14 @@ type taskDeletePreflightResult struct {
 }
 
 type taskGraphReadinessResult struct {
-	RootIssueID          string                          `json:"root_issue_id"`
-	Runnable             []string                        `json:"runnable"`
-	Pending              []taskGraphPendingStart         `json:"pending,omitempty"`
-	Active               []string                        `json:"active,omitempty"`
-	ActiveSessions       []taskGraphActiveSession        `json:"active_sessions,omitempty"`
-	SessionStartProgress []taskGraphSessionStartProgress `json:"session_start_progress,omitempty"`
-	Blocked              map[string]string               `json:"blocked"`
+	RootIssueID            string                          `json:"root_issue_id"`
+	Runnable               []string                        `json:"runnable"`
+	Pending                []taskGraphPendingStart         `json:"pending,omitempty"`
+	Active                 []string                        `json:"active,omitempty"`
+	ActiveSessions         []taskGraphActiveSession        `json:"active_sessions,omitempty"`
+	SessionStartProgress   []taskGraphSessionStartProgress `json:"session_start_progress,omitempty"`
+	StaleCloseableChildren []taskStaleCloseableCandidate   `json:"stale_closeable_children,omitempty"`
+	Blocked                map[string]string               `json:"blocked"`
 }
 
 type taskGraphPendingStart struct {
@@ -209,10 +210,18 @@ type taskGraphSessionStartProgress struct {
 }
 
 type taskCompleteCheckResult struct {
-	RootIssueID string   `json:"root_issue_id"`
-	Pass        bool     `json:"pass"`
-	Reasons     []string `json:"reasons,omitempty"`
-	Advice      []string `json:"advice,omitempty"`
+	RootIssueID            string                        `json:"root_issue_id"`
+	Pass                   bool                          `json:"pass"`
+	Reasons                []string                      `json:"reasons,omitempty"`
+	Advice                 []string                      `json:"advice,omitempty"`
+	StaleCloseableChildren []taskStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
+}
+
+type taskStaleCloseableCandidate struct {
+	IssueID          string   `json:"issue_id"`
+	Status           string   `json:"status"`
+	Evidence         []string `json:"evidence"`
+	SuggestedCommand string   `json:"suggested_command"`
 }
 
 type taskIntegrationReadinessResult struct {
@@ -3014,11 +3023,19 @@ func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID s
 	}
 
 	desc := daemonTaskGraphDescendants(rootID, children)
+	staleCloseable := daemonTaskGraphStaleCloseableCandidates(rootID, byID, children)
+	staleCloseableSet := make(map[string]struct{}, len(staleCloseable))
+	for _, candidate := range staleCloseable {
+		staleCloseableSet[candidate.IssueID] = struct{}{}
+	}
 	openDescendants := make([]string, 0, len(desc))
 	activeSessions := make([]string, 0, len(desc))
 	for _, id := range desc {
 		task := byID[id]
 		if task.Status != domain.StatusDone {
+			if _, closeable := staleCloseableSet[id.String()]; closeable {
+				continue
+			}
 			openDescendants = append(openDescendants, id.String())
 		}
 		if daemonCloseGuardTaskHasSession(task) {
@@ -3035,14 +3052,22 @@ func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID s
 	if len(openDescendants) > 0 {
 		reasons = append(reasons, fmt.Sprintf("required descendants not closed: %s", strings.Join(openDescendants, ",")))
 	}
+	if len(staleCloseable) > 0 {
+		ids := make([]string, 0, len(staleCloseable))
+		for _, candidate := range staleCloseable {
+			ids = append(ids, candidate.IssueID)
+		}
+		reasons = append(reasons, fmt.Sprintf("stale-closeable child candidates remain: %s", strings.Join(ids, ",")))
+	}
 	if len(activeSessions) > 0 {
 		reasons = append(reasons, fmt.Sprintf("active child sessions remain: %s", strings.Join(activeSessions, ",")))
 	}
 	return taskCompleteCheckResult{
-		RootIssueID: rootID.String(),
-		Pass:        len(reasons) == 0,
-		Reasons:     reasons,
-		Advice:      daemonTaskCompletionAdvice(rootID.String(), ready.Runnable, openDescendants, activeSessions),
+		RootIssueID:            rootID.String(),
+		Pass:                   len(reasons) == 0,
+		Reasons:                reasons,
+		Advice:                 daemonTaskCompletionAdvice(rootID.String(), ready.Runnable, openDescendants, activeSessions, staleCloseable),
+		StaleCloseableChildren: staleCloseable,
 	}, nil
 }
 
@@ -3141,6 +3166,7 @@ func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.
 		Active:      make([]string, 0),
 		Blocked:     make(map[string]string),
 	}
+	result.StaleCloseableChildren = daemonTaskGraphStaleCloseableCandidates(rootID, byID, children)
 	for _, idRaw := range leaves {
 		id, parseErr := naming.ParseIssueID(idRaw)
 		if parseErr != nil {
@@ -3159,9 +3185,66 @@ func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.
 			result.Blocked[idRaw] = "waiting on " + strings.Join(blockers, ",")
 			continue
 		}
+		if daemonTaskStaleCloseableCandidate(task) {
+			continue
+		}
 		result.Runnable = append(result.Runnable, idRaw)
 	}
 	return result, nil
+}
+
+func daemonTaskGraphStaleCloseableCandidates(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) []taskStaleCloseableCandidate {
+	desc := daemonTaskGraphDescendants(rootID, children)
+	out := make([]taskStaleCloseableCandidate, 0)
+	for _, id := range desc {
+		task := byID[id]
+		if !daemonTaskStaleCloseableCandidate(task) {
+			continue
+		}
+		if len(daemonTaskGraphUnresolvedBlockers(task, byID)) > 0 {
+			continue
+		}
+		out = append(out, taskStaleCloseableCandidate{
+			IssueID:          task.ID.String(),
+			Status:           string(task.Status),
+			Evidence:         daemonTaskStaleCloseableEvidence(task),
+			SuggestedCommand: fmt.Sprintf("az issue close --id %s --close-clean-children", rootID.String()),
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].IssueID < out[j].IssueID
+	})
+	return out
+}
+
+func daemonTaskStaleCloseableCandidate(task domain.Task) bool {
+	if task.Status == domain.StatusDone {
+		return false
+	}
+	if !daemonCloseGuardCleanChildAutoCloseEligible(task) {
+		return false
+	}
+	return task.Status == domain.StatusInReview || daemonCloseGuardTaskHasWorktree(task)
+}
+
+func daemonTaskStaleCloseableEvidence(task domain.Task) []string {
+	evidence := []string{
+		"no active session",
+		fmt.Sprintf("status=%s", task.Status),
+	}
+	if daemonCloseGuardTaskHasWorktree(task) {
+		evidence = append(evidence, "clean worktree")
+		evidence = append(evidence, "branch not ahead")
+		if task.GitBehindCount > 0 {
+			evidence = append(evidence, fmt.Sprintf("branch behind by %d commit(s)", task.GitBehindCount))
+		}
+	} else {
+		evidence = append(evidence, "no active worktree projection")
+	}
+	if task.Status == domain.StatusInReview {
+		evidence = append(evidence, "in_review status is completion evidence")
+	}
+	return evidence
 }
 
 func (d *Daemon) taskGraphPendingSessionStarts(ctx context.Context, projectID string) (map[string]taskGraphPendingStart, error) {
@@ -3428,10 +3511,13 @@ func daemonTaskGraphSessionStartProgressList(rootID naming.IssueID, children map
 	return out
 }
 
-func daemonTaskCompletionAdvice(rootIssueID string, runnable, openDescendants, activeSessions []string) []string {
-	advice := make([]string, 0, len(runnable)+len(openDescendants)+len(activeSessions))
+func daemonTaskCompletionAdvice(rootIssueID string, runnable, openDescendants, activeSessions []string, staleCloseable []taskStaleCloseableCandidate) []string {
+	advice := make([]string, 0, len(runnable)+len(openDescendants)+len(activeSessions)+len(staleCloseable))
 	for _, id := range activeSessions {
 		advice = append(advice, fmt.Sprintf("if intentionally abandoning active worker session, repair-stop it: az orchestrate close-session --issue %s", id))
+	}
+	if len(staleCloseable) > 0 {
+		advice = append(advice, fmt.Sprintf("stale-closeable children can be handled by the parent close path: az issue close --id %s --close-clean-children", rootIssueID))
 	}
 	for _, id := range openDescendants {
 		advice = append(advice, fmt.Sprintf("after integration/evidence, close required child issue: az issue close --id %s", id))

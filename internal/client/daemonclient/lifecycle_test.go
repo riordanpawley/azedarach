@@ -181,6 +181,52 @@ func TestCleanupProjectRoutesThroughDaemon(t *testing.T) {
 	}
 }
 
+func TestScheduledScriptsStatusRoutesThroughDaemon(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != protocol.CommandScheduledScriptsStatus {
+				t.Fatalf("command = %q, want %q", req.Command, protocol.CommandScheduledScriptsStatus)
+			}
+			if req.Meta.ProjectID != "proj-a" {
+				t.Fatalf("project id = %q, want proj-a", req.Meta.ProjectID)
+			}
+			var body protocol.ScheduledScriptsStatusRequestBody
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal scheduled scripts request: %v", err)
+			}
+			if body.ProjectID != "proj-a" || !reflect.DeepEqual(body.Names, []string{"prune"}) {
+				t.Fatalf("request body = %+v, want proj-a prune", body)
+			}
+			respBody, err := json.Marshal(protocol.ScheduledScriptsStatusResponseBody{
+				ProjectID: body.ProjectID,
+				Scripts: []protocol.ScheduledScriptStatus{{
+					Name:    "prune",
+					Enabled: true,
+				}},
+			})
+			if err != nil {
+				t.Fatalf("marshal scheduled scripts response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-a")
+	got, err := client.ScheduledScriptsStatus(context.Background(), []string{"prune"})
+	if err != nil {
+		t.Fatalf("ScheduledScriptsStatus error: %v", err)
+	}
+	if got.ProjectID != "proj-a" || len(got.Scripts) != 1 || got.Scripts[0].Name != "prune" {
+		t.Fatalf("scheduled script status = %+v", got)
+	}
+}
+
 func TestSessionAttachPauseResumeAndStatusCommandsRouteThroughDaemon(t *testing.T) {
 	tests := []struct {
 		name        string

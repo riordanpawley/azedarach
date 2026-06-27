@@ -2,20 +2,34 @@ package attachment
 
 import (
 	"context"
-	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/sqliteutil"
+	_ "modernc.org/sqlite"
 )
 
-// Service manages image attachments for issues
+const (
+	legacyImageCollection = "images"
+	attachmentCollection  = "attachments"
+)
+
+var errAttachmentNotFound = errors.New("attachment not found")
+
+// Service manages file attachments for issues.
 type Service struct {
 	issuesPath string
+	dbPath     string
 	logger     *slog.Logger
 }
 
@@ -28,17 +42,55 @@ type Attachment struct {
 	MimeType string    `json:"mime_type"`
 	Size     int64     `json:"size"`
 	Created  time.Time `json:"created"`
+	Relative string    `json:"relative_path,omitempty"`
 }
 
-// NewService creates a new attachment service
+func IsMarkdown(att Attachment) bool {
+	mimeType := strings.ToLower(strings.TrimSpace(att.MimeType))
+	if mimeType == "text/markdown" || mimeType == "text/x-markdown" {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(att.Filename)) {
+	case ".md", ".markdown", ".mdown", ".mkd":
+		return true
+	default:
+		return false
+	}
+}
+
+func IsImage(att Attachment) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(att.MimeType)), "image/")
+}
+
+// NewService creates a generic attachment service. Images use the same shared
+// attachment storage as documents; old .azedarach/images/<issue-id> files are
+// imported on access.
 func NewService(issuesPath string, logger *slog.Logger) *Service {
+	return newService(issuesPath, logger)
+}
+
+// NewDocumentService creates a service for non-image report/document attachments.
+func NewDocumentService(issuesPath string, logger *slog.Logger) *Service {
+	return newService(issuesPath, logger)
+}
+
+// NewUnifiedService creates a service for the TUI attachment flows.
+func NewUnifiedService(issuesPath string, logger *slog.Logger) *Service {
+	return newService(issuesPath, logger)
+}
+
+func newService(issuesPath string, logger *slog.Logger) *Service {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Service{
 		issuesPath: issuesPath,
+		dbPath:     resolveDBPath(issuesPath),
 		logger:     logger,
 	}
 }
 
-// Attach copies a file from sourcePath to the issues images directory
+// Attach copies a file from sourcePath to shared attachment storage.
 func (s *Service) Attach(ctx context.Context, issueID string, sourcePath string) (*Attachment, error) {
 	s.logger.Debug("attaching file", "issue_id", issueID, "source", sourcePath)
 
@@ -87,7 +139,7 @@ func (s *Service) AttachFromClipboard(ctx context.Context, issueID string) (*Att
 	}
 
 	// Determine mime type from data
-	mimeType := detectMimeType(data)
+	mimeType := detectMimeType(data, "")
 	ext := mimeTypeToExt(mimeType)
 
 	// Generate filename with timestamp
@@ -106,53 +158,84 @@ func (s *Service) AttachFromClipboard(ctx context.Context, issueID string) (*Att
 func (s *Service) List(ctx context.Context, issueID string) ([]Attachment, error) {
 	s.logger.Debug("listing attachments", "issue_id", issueID)
 
-	imagesDir := s.getImagesDir(issueID)
-
-	// Check if directory exists
-	if _, err := os.Stat(imagesDir); os.IsNotExist(err) {
-		return []Attachment{}, nil
+	if err := s.migrateLegacyImages(ctx, issueID); err != nil {
+		return nil, err
 	}
-
-	// Read directory entries
-	entries, err := os.ReadDir(imagesDir)
+	attachments, err := s.listAttachmentReferences(ctx, issueID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read images directory: %w", err)
+		return nil, err
 	}
+	s.logger.Debug("found attachments", "count", len(attachments))
+	return attachments, nil
+}
 
-	attachments := make([]Attachment, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
+func (s *Service) listAttachmentReferences(ctx context.Context, issueID string) ([]Attachment, error) {
+	db, err := s.openDB()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT attachment_id, filename, relative_path, mime_type, size, created_at
+		FROM issue_attachments
+		WHERE issue_id = ?
+		ORDER BY created_at, filename
+	`, issueID)
+	if err != nil {
+		return nil, fmt.Errorf("query issue attachment references: %w", err)
+	}
+	defer rows.Close()
+
+	attachments := make([]Attachment, 0)
+	for rows.Next() {
+		var (
+			id        string
+			filename  string
+			relative  string
+			mimeType  string
+			size      int64
+			createdAt string
+		)
+		if err := rows.Scan(&id, &filename, &relative, &mimeType, &size, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan issue attachment reference: %w", err)
 		}
-
-		info, err := entry.Info()
+		fullPath := s.pathFromRelative(relative)
+		mimeType = strings.TrimSpace(mimeType)
+		if mimeType == "" {
+			mimeType = detectMimeTypeFromFile(fullPath)
+		}
+		created, err := time.Parse(time.RFC3339Nano, createdAt)
 		if err != nil {
-			s.logger.Warn("failed to get file info", "file", entry.Name(), "error", err)
-			continue
+			created = time.Time{}
 		}
-
-		fullPath := filepath.Join(imagesDir, entry.Name())
-		mimeType := detectMimeTypeFromFile(fullPath)
-
-		// Parse ID from filename (format: <id>-<original-name>)
-		id := ""
-		parts := strings.SplitN(entry.Name(), "-", 2)
-		if len(parts) == 2 {
-			id = parts[0]
+		if info, err := os.Stat(fullPath); err == nil {
+			if size == 0 {
+				size = info.Size()
+			}
+			if created.IsZero() {
+				created = info.ModTime()
+			}
+		}
+		if created.IsZero() {
+			created = time.Now()
 		}
 
 		attachments = append(attachments, Attachment{
 			ID:       id,
 			IssueID:  issueID,
-			Filename: entry.Name(),
+			Filename: filename,
 			Path:     fullPath,
 			MimeType: mimeType,
-			Size:     info.Size(),
-			Created:  info.ModTime(),
+			Size:     size,
+			Created:  created,
+			Relative: relative,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate issue attachment references: %w", err)
+	}
 
-	s.logger.Debug("found attachments", "count", len(attachments))
 	return attachments, nil
 }
 
@@ -160,86 +243,325 @@ func (s *Service) List(ctx context.Context, issueID string) ([]Attachment, error
 func (s *Service) Delete(ctx context.Context, issueID, attachmentID string) error {
 	s.logger.Debug("deleting attachment", "issue_id", issueID, "attachment_id", attachmentID)
 
-	imagesDir := s.getImagesDir(issueID)
-
-	// Find the file with this ID prefix
-	entries, err := os.ReadDir(imagesDir)
-	if err != nil {
-		return fmt.Errorf("failed to read images directory: %w", err)
+	if err := s.migrateLegacyImages(ctx, issueID); err != nil {
+		return err
 	}
-
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), attachmentID+"-") {
-			filePath := filepath.Join(imagesDir, entry.Name())
-			if err := os.Remove(filePath); err != nil {
-				return fmt.Errorf("failed to delete file: %w", err)
-			}
-			s.logger.Debug("attachment deleted", "file", entry.Name())
-			return nil
+	if err := s.deleteAttachmentReference(ctx, issueID, attachmentID); err != nil {
+		if errors.Is(err, errAttachmentNotFound) {
+			return fmt.Errorf("attachment not found: %s", attachmentID)
 		}
+		return err
 	}
-
-	return fmt.Errorf("attachment not found: %s", attachmentID)
+	return nil
 }
 
 // GetPath returns the full path to an attachment
 func (s *Service) GetPath(issueID, filename string) string {
-	return filepath.Join(s.getImagesDir(issueID), filename)
+	return filepath.Join(s.getSharedAttachmentDir(), filename)
 }
 
 // createAttachment creates a new attachment file
 func (s *Service) createAttachment(ctx context.Context, issueID, filename string, data []byte, size int64) (*Attachment, error) {
-	// Ensure images directory exists
-	imagesDir := s.getImagesDir(issueID)
-	if err := os.MkdirAll(imagesDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create images directory: %w", err)
+	return s.createSharedAttachment(ctx, issueID, filename, data, size, time.Now(), "")
+}
+
+func (s *Service) createSharedAttachment(ctx context.Context, issueID, filename string, data []byte, size int64, created time.Time, attachmentID string) (*Attachment, error) {
+	dir := s.getSharedAttachmentDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create attachments directory: %w", err)
 	}
 
-	// Generate unique ID
-	id := generateID()
-
-	// Create filename with ID prefix
-	newFilename := fmt.Sprintf("%s-%s", id, filename)
-	destPath := filepath.Join(imagesDir, newFilename)
-
-	// Write file
-	if err := os.WriteFile(destPath, data, 0644); err != nil {
-		return nil, fmt.Errorf("failed to write attachment: %w", err)
+	contentID := contentID(data)
+	if strings.TrimSpace(attachmentID) == "" {
+		attachmentID = contentID
+	}
+	newFilename := fmt.Sprintf("%s-%s", contentID, filename)
+	destPath := filepath.Join(dir, newFilename)
+	if _, err := os.Stat(destPath); os.IsNotExist(err) {
+		if err := os.WriteFile(destPath, data, 0644); err != nil {
+			return nil, fmt.Errorf("failed to write attachment: %w", err)
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to inspect attachment: %w", err)
 	}
 
-	mimeType := detectMimeType(data)
-
+	mimeType := detectMimeType(data, filename)
+	if created.IsZero() {
+		created = time.Now()
+	}
+	relative := filepath.ToSlash(filepath.Join(".azedarach", attachmentCollection, newFilename))
 	attachment := &Attachment{
-		ID:       id,
+		ID:       attachmentID,
 		IssueID:  issueID,
 		Filename: newFilename,
 		Path:     destPath,
 		MimeType: mimeType,
 		Size:     size,
-		Created:  time.Now(),
+		Created:  created,
+		Relative: relative,
+	}
+	if err := s.writeAttachmentReference(ctx, *attachment); err != nil {
+		return nil, err
 	}
 
-	s.logger.Debug("attachment created", "id", id, "path", destPath)
+	s.logger.Debug("attachment created", "id", attachmentID, "path", destPath)
 	return attachment, nil
 }
 
-// getImagesDir returns the images directory for a issue
-func (s *Service) getImagesDir(issueID string) string {
-	return filepath.Join(s.issuesPath, "images", issueID)
+func (s *Service) writeAttachmentReference(ctx context.Context, att Attachment) error {
+	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+		db, err := s.openDB()
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+
+		_, err = db.ExecContext(ctx, `
+			INSERT INTO issue_attachments (
+				issue_id, attachment_id, filename, relative_path, mime_type, size, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(issue_id, attachment_id) DO UPDATE SET
+				filename = excluded.filename,
+				relative_path = excluded.relative_path,
+				mime_type = excluded.mime_type,
+				size = excluded.size,
+				created_at = excluded.created_at
+		`,
+			att.IssueID,
+			att.ID,
+			att.Filename,
+			att.Relative,
+			att.MimeType,
+			att.Size,
+			att.Created.UTC().Format(time.RFC3339Nano),
+		)
+		if err != nil {
+			return fmt.Errorf("write issue attachment reference: %w", err)
+		}
+		return nil
+	})
 }
 
-// generateID generates a random ID for an attachment
-func generateID() string {
-	b := make([]byte, 4)
-	if _, err := rand.Read(b); err != nil {
-		// Fallback to timestamp-based ID
-		return fmt.Sprintf("%d", time.Now().UnixNano())
+func (s *Service) deleteAttachmentReference(ctx context.Context, issueID, attachmentID string) error {
+	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+		db, err := s.openDB()
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+
+		result, err := db.ExecContext(ctx, `
+			DELETE FROM issue_attachments
+			WHERE issue_id = ? AND attachment_id = ?
+		`, issueID, attachmentID)
+		if err != nil {
+			return fmt.Errorf("delete issue attachment reference: %w", err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("inspect deleted issue attachment reference: %w", err)
+		}
+		if affected == 0 {
+			return fmt.Errorf("%w: %s", errAttachmentNotFound, attachmentID)
+		}
+		s.logger.Debug("attachment reference deleted", "issue_id", issueID, "attachment_id", attachmentID)
+		return nil
+	})
+}
+
+func (s *Service) migrateLegacyImages(ctx context.Context, issueID string) error {
+	dir := s.getIssueCollectionDir(issueID, legacyImageCollection)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read legacy image attachments: %w", err)
 	}
-	return hex.EncodeToString(b)
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		legacyPath := filepath.Join(dir, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("inspect legacy image attachment %q: %w", legacyPath, err)
+		}
+		data, err := os.ReadFile(legacyPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("read legacy image attachment %q: %w", legacyPath, err)
+		}
+
+		attachmentID, originalFilename := parseLegacyAttachmentFilename(entry.Name())
+		created := info.ModTime()
+		attachment, err := s.createSharedAttachment(ctx, issueID, originalFilename, data, info.Size(), created, attachmentID)
+		if err != nil {
+			return fmt.Errorf("migrate legacy image attachment %q: %w", legacyPath, err)
+		}
+		oldRelative := filepath.ToSlash(filepath.Join(".azedarach", legacyImageCollection, issueID, entry.Name()))
+		if err := s.rewriteLegacyImageNoteLink(ctx, issueID, oldRelative, attachment.Relative); err != nil {
+			return fmt.Errorf("rewrite legacy image note link %q: %w", oldRelative, err)
+		}
+		if err := os.Remove(legacyPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove migrated legacy image attachment %q: %w", legacyPath, err)
+		}
+	}
+
+	if err := os.Remove(dir); err != nil && !os.IsNotExist(err) && !errors.Is(err, os.ErrNotExist) {
+		if !errors.Is(err, syscall.ENOTEMPTY) {
+			return fmt.Errorf("remove migrated legacy image directory %q: %w", dir, err)
+		}
+	}
+	legacyRoot := filepath.Join(s.issuesPath, legacyImageCollection)
+	if err := os.Remove(legacyRoot); err != nil && !os.IsNotExist(err) && !errors.Is(err, os.ErrNotExist) {
+		if !errors.Is(err, syscall.ENOTEMPTY) {
+			return fmt.Errorf("remove empty legacy image root %q: %w", legacyRoot, err)
+		}
+	}
+	return nil
+}
+
+func (s *Service) rewriteLegacyImageNoteLink(ctx context.Context, issueID, oldRelative, newRelative string) error {
+	oldRelative = strings.TrimSpace(oldRelative)
+	newRelative = strings.TrimSpace(newRelative)
+	if oldRelative == "" || newRelative == "" {
+		return nil
+	}
+	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+		db, err := s.openDB()
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+
+		var tableName string
+		err = db.QueryRowContext(ctx, `
+			SELECT name
+			FROM sqlite_master
+			WHERE type = 'table' AND name = 'issues'
+		`).Scan(&tableName)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect issues table: %w", err)
+		}
+
+		_, err = db.ExecContext(ctx, `
+			UPDATE issues
+			SET notes = REPLACE(notes, ?, ?)
+			WHERE id = ? AND notes LIKE ?
+		`, oldRelative, newRelative, issueID, "%"+oldRelative+"%")
+		if err != nil {
+			return fmt.Errorf("rewrite issue note attachment link: %w", err)
+		}
+		return nil
+	})
+}
+
+func parseLegacyAttachmentFilename(filename string) (attachmentID, originalFilename string) {
+	parts := strings.SplitN(filename, "-", 2)
+	if len(parts) == 2 && strings.TrimSpace(parts[0]) != "" && strings.TrimSpace(parts[1]) != "" {
+		return parts[0], parts[1]
+	}
+	return "", filename
+}
+
+func (s *Service) openDB() (*sql.DB, error) {
+	if strings.TrimSpace(s.dbPath) == "" {
+		return nil, fmt.Errorf("attachment database path is empty")
+	}
+	if err := os.MkdirAll(filepath.Dir(s.dbPath), 0755); err != nil {
+		return nil, fmt.Errorf("create attachment database directory: %w", err)
+	}
+	dsn := fmt.Sprintf(
+		"file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)&_txlock=immediate",
+		filepath.ToSlash(s.dbPath),
+	)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open attachment database: %w", err)
+	}
+	if err := ensureIssueAttachmentSchema(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func ensureIssueAttachmentSchema(db *sql.DB) error {
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS issue_attachments (
+			issue_id TEXT NOT NULL,
+			attachment_id TEXT NOT NULL,
+			filename TEXT NOT NULL,
+			relative_path TEXT NOT NULL,
+			mime_type TEXT NOT NULL,
+			size INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY (issue_id, attachment_id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_issue_attachments_attachment_id
+			ON issue_attachments(attachment_id);
+	`)
+	if err != nil {
+		return fmt.Errorf("ensure issue attachment schema: %w", err)
+	}
+	return nil
+}
+
+func resolveDBPath(issuesPath string) string {
+	if fromEnv := strings.TrimSpace(os.Getenv("AZEDARACH_DB_PATH")); fromEnv != "" {
+		return fromEnv
+	}
+	return filepath.Join(issuesPath, "azedarach.db")
+}
+
+func (s *Service) pathFromRelative(relative string) string {
+	trimmed := strings.TrimPrefix(filepath.ToSlash(relative), ".azedarach/")
+	if trimmed == relative {
+		return filepath.FromSlash(relative)
+	}
+	return filepath.Join(s.issuesPath, filepath.FromSlash(trimmed))
+}
+
+func (s *Service) getIssueCollectionDir(issueID, collection string) string {
+	return filepath.Join(s.issuesPath, collection, issueID)
+}
+
+func (s *Service) getSharedAttachmentDir() string {
+	return filepath.Join(s.issuesPath, attachmentCollection)
+}
+
+func contentID(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:8])
 }
 
 // detectMimeType detects the MIME type from file data
-func detectMimeType(data []byte) string {
+func detectMimeType(data []byte, filename string) string {
+	switch strings.ToLower(filepath.Ext(filename)) {
+	case ".md", ".markdown", ".mdown", ".mkd":
+		return "text/markdown"
+	case ".txt", ".log":
+		return "text/plain"
+	case ".json":
+		return "application/json"
+	case ".csv":
+		return "text/csv"
+	case ".html", ".htm":
+		return "text/html"
+	case ".yaml", ".yml":
+		return "application/yaml"
+	}
+
 	if len(data) == 0 {
 		return "application/octet-stream"
 	}
@@ -284,6 +606,18 @@ func detectMimeType(data []byte) string {
 func detectMimeTypeFromFile(path string) string {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
+	case ".md", ".markdown", ".mdown", ".mkd":
+		return "text/markdown"
+	case ".txt", ".log":
+		return "text/plain"
+	case ".json":
+		return "application/json"
+	case ".csv":
+		return "text/csv"
+	case ".html", ".htm":
+		return "text/html"
+	case ".yaml", ".yml":
+		return "application/yaml"
 	case ".png":
 		return "image/png"
 	case ".jpg", ".jpeg":
@@ -298,7 +632,7 @@ func detectMimeTypeFromFile(path string) string {
 		if err != nil || len(data) == 0 {
 			return "application/octet-stream"
 		}
-		return detectMimeType(data)
+		return detectMimeType(data, path)
 	}
 }
 

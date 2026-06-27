@@ -36,13 +36,16 @@ Commands:
   issue get-many [--project <project-id>] --id <id> [--id <id> ...] [--ids a,b,c] [--json] [--with-notes]  Fetch many issues in requested order
   issue check [--project <project-id>] [--id <id>] [--json] [<id>]  Alias for issue get
   issue doctor [--project <project-id>] [--id <id>] [--json] [<id>]  Run integrity checks for one issue
-  issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--title ...] [--description ...] [--json] [<title>]  Create an issue (auto-parent when AZEDARACH_ISSUE_ID is set)
+  issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--title ...] [--description ...] [--json] [<title>]  Create an issue (auto-parent when AZEDARACH_ISSUE_ID is set; --impl is not parentage)
   issue split [--project <project-id>] [--parent <id>] [--impl <implementation> ...] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create an isolated child issue/session for later parent-side merge
   issue update [--project <project-id>] [--id <id>] [--json] [<id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--force-worktree] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields (`--status closed` integrates, cleans, then closes)
   issue close [--project <project-id>] [--id <id>|-i <id>] [--json] [--force-worktree] [<id>]  Integrate, clean up, and close an issue
   issue delete [--project <project-id>] [--id <id>] [--json] [<id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]  Permanently delete an issue
   issue image add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]  Attach an image to an issue
   issue image remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]  Remove an image attachment from an issue
+  issue document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]  Attach a report/document to an issue
+  issue document list [--project <project-id>] [--issue-id <issue-id>] [<issue-id>] [--json]  List report/document attachments for an issue
+  issue document remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]  Remove a document attachment from an issue
   issue dep add [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--force-parent-change] [--json]  Add a dependency edge
   issue dep remove [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--confirm] [--confirm-parent-orphan] [--json]  Remove a dependency edge
   issue dep bulk apply [--project <project-id>] --input <path> [--dry-run] [--json]  Apply dependency edge mutations
@@ -83,8 +86,9 @@ Examples:
   az issue check --id az-123
   az issue doctor --id az-123
   az issue create "New task"
-  az issue create "Follow-up task"                # auto-parent under AZEDARACH_ISSUE_ID
-  az issue create --impl go-bubbletea "Implementation-specific task"  # assigns implementation metadata, not graph parentage
+  az issue create "Follow-up task"                # child under AZEDARACH_ISSUE_ID; no --impl needed for parentage
+  az issue dep add --issue-id az-456 --depends-on-id az-123 --type parent-child  # attach an existing issue to another parent/root
+  az issue create --impl go-bubbletea "Implementation-specific task"  # only assigns implementation metadata; still not parentage
   az issue split "Implement child task"           # auto-parent and launch isolated child worktree; merge explicitly later
   az issue create --deferred "Investigate later"  # deferred follow-up (defaults priority to P4)
   az issue update --id az-123 --status in_progress --title "Renamed task" --priority P1
@@ -99,6 +103,8 @@ Examples:
   az issue delete --id az-123 --confirm
   az issue image add --issue-id az-123 --path ./screenshot.png
   az issue image remove --issue-id az-123 --attachment-id 1a2b3c4d
+  az issue document add --issue-id az-123 --path ./report.md
+  az issue document list --issue-id az-123
   az issue dep add --issue-id az-456 --depends-on-id az-123 --type blocks
   az issue dep remove --issue-id az-456 --depends-on-id az-123 --type blocks --confirm
   az issue dep bulk apply --input ./dep-bulk.json --dry-run --json
@@ -141,6 +147,7 @@ Examples:
   az project list
   az project add /path/to/project --name azedarach
   az project remove azedarach
+  az project scripts status --json
   az impl list
   az impl delete --confirm ts-opentui
   az impl migrate ts-opentui default

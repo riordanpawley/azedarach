@@ -20,7 +20,7 @@
 ││                                                                              [f] Show diff                          │
 ││                                                                              [w] Cleanup worktree                   │
 ││                                                                              [W] Delete task + cleanup worktree     │
-││                                                                              [i] Image attachments                  │
+││                                                                              [i] Attachments                        │
 ││                                                                              ───────────────────                    │
 ││                                                                              [1] Set status: Open                   │
 ││                                                                              [2] Set status: In Progress            │

@@ -577,6 +577,18 @@ func (c *Client) CleanupProject(ctx context.Context, categories []string) (proto
 	return out, nil
 }
 
+// ScheduledScriptsStatus asks the daemon for configured project scheduled script status.
+func (c *Client) ScheduledScriptsStatus(ctx context.Context, names []string) (protocol.ScheduledScriptsStatusResponseBody, error) {
+	var out protocol.ScheduledScriptsStatusResponseBody
+	if err := c.commandJSON(ctx, protocol.CommandScheduledScriptsStatus, protocol.ScheduledScriptsStatusRequestBody{
+		ProjectID: c.projectID,
+		Names:     append([]string(nil), names...),
+	}, &out); err != nil {
+		return protocol.ScheduledScriptsStatusResponseBody{}, err
+	}
+	return out, nil
+}
+
 func decodeCommandOutput(body []byte) (string, error) {
 	if len(body) == 0 {
 		return "", nil

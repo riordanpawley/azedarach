@@ -218,6 +218,12 @@ type IssueDoctorOptions struct {
 	JSON    bool
 }
 
+type ProjectScriptsStatusOptions struct {
+	ProjectDir string
+	JSON       bool
+	Names      []string
+}
+
 type IssueDeleteOptions struct {
 	Project        string
 	IssueID        string
@@ -265,6 +271,26 @@ type IssueImageAddOptions struct {
 }
 
 type IssueImageRemoveOptions struct {
+	Project      string
+	IssueID      string
+	AttachmentID string
+	JSON         bool
+}
+
+type IssueDocumentAddOptions struct {
+	Project    string
+	IssueID    string
+	SourcePath string
+	JSON       bool
+}
+
+type IssueDocumentListOptions struct {
+	Project string
+	IssueID string
+	JSON    bool
+}
+
+type IssueDocumentRemoveOptions struct {
 	Project      string
 	IssueID      string
 	AttachmentID string
@@ -2914,6 +2940,118 @@ func ParseIssueImageRemoveArgs(args []string) (IssueImageRemoveOptions, error) {
 	return opts, nil
 }
 
+func ParseIssueDocumentAddArgs(args []string) (IssueDocumentAddOptions, error) {
+	opts := IssueDocumentAddOptions{}
+	issueIDFlag := ""
+	pathFlag := ""
+	implFlag := ""
+	fs := flag.NewFlagSet("issue document add", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&pathFlag, "path", "", "source document path (named alternative to positional)")
+	fs.BoolVar(&opts.JSON, "json", false, "output document add result as JSON")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return IssueDocumentAddOptions{}, err
+	}
+	if fs.NArg() > 2 {
+		return IssueDocumentAddOptions{}, fmt.Errorf("usage: az issue document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]")
+	}
+	if strings.TrimSpace(implFlag) != "" {
+		return IssueDocumentAddOptions{}, fmt.Errorf("--impl is not supported for issue document add; issue implementations are already assigned")
+	}
+	if fs.NArg() >= 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if fs.NArg() >= 2 {
+		opts.SourcePath = fs.Arg(1)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(pathFlag) != "" {
+		opts.SourcePath = strings.TrimSpace(pathFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.SourcePath) == "" {
+		return IssueDocumentAddOptions{}, fmt.Errorf("usage: az issue document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]")
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
+func ParseIssueDocumentListArgs(args []string) (IssueDocumentListOptions, error) {
+	opts := IssueDocumentListOptions{}
+	issueIDFlag := ""
+	implFlag := ""
+	fs := flag.NewFlagSet("issue document list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.BoolVar(&opts.JSON, "json", false, "output document list result as JSON")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return IssueDocumentListOptions{}, err
+	}
+	if fs.NArg() > 1 {
+		return IssueDocumentListOptions{}, fmt.Errorf("usage: az issue document list [--project <project-id>] [--issue-id <issue-id>] [<issue-id>] [--json]")
+	}
+	if strings.TrimSpace(implFlag) != "" {
+		return IssueDocumentListOptions{}, fmt.Errorf("--impl is not supported for issue document list; issue implementations are already assigned")
+	}
+	if fs.NArg() >= 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" {
+		return IssueDocumentListOptions{}, fmt.Errorf("usage: az issue document list [--project <project-id>] [--issue-id <issue-id>] [<issue-id>] [--json]")
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
+func ParseIssueDocumentRemoveArgs(args []string) (IssueDocumentRemoveOptions, error) {
+	opts := IssueDocumentRemoveOptions{}
+	issueIDFlag := ""
+	attachmentIDFlag := ""
+	implFlag := ""
+	fs := flag.NewFlagSet("issue document remove", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&attachmentIDFlag, "attachment-id", "", "attachment id (named alternative to positional)")
+	fs.BoolVar(&opts.JSON, "json", false, "output document remove result as JSON")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return IssueDocumentRemoveOptions{}, err
+	}
+	if fs.NArg() > 2 {
+		return IssueDocumentRemoveOptions{}, fmt.Errorf("usage: az issue document remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]")
+	}
+	if strings.TrimSpace(implFlag) != "" {
+		return IssueDocumentRemoveOptions{}, fmt.Errorf("--impl is not supported for issue document remove; issue implementations are already assigned")
+	}
+	if fs.NArg() >= 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if fs.NArg() >= 2 {
+		opts.AttachmentID = fs.Arg(1)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(attachmentIDFlag) != "" {
+		opts.AttachmentID = strings.TrimSpace(attachmentIDFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.AttachmentID) == "" {
+		return IssueDocumentRemoveOptions{}, fmt.Errorf("usage: az issue document remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]")
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
 func ParseIssueBulkCreateArgs(args []string) (IssueBulkCreateOptions, error) {
 	opts := IssueBulkCreateOptions{}
 	fs := flag.NewFlagSet("issue bulk-create", flag.ContinueOnError)
@@ -2987,28 +3125,77 @@ func listTasksSnapshotForCLI(ctx context.Context, deps *Dependencies) (daemoncli
 
 func resolveIssueWriteImplementation(ctx context.Context, deps *Dependencies, provided string) (string, error) {
 	trimmed := strings.TrimSpace(provided)
+	impls, err := issueWriteImplementationOptions(ctx, deps)
 	if trimmed != "" {
+		if err != nil {
+			return "", fmt.Errorf("unable to validate implementation %q: %w", trimmed, err)
+		}
+		if !implementationOptionExists(impls, trimmed) {
+			return "", unknownIssueWriteImplementationError(trimmed, impls)
+		}
 		return trimmed, nil
 	}
-	if deps == nil || deps.DaemonClient == nil {
-		return "", fmt.Errorf("missing required flag: --impl")
-	}
 
-	snapshot, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskSnapshot, error) {
-		return listTasksSnapshotForCLI(callCtx, deps)
-	})
 	if err != nil {
 		return "", fmt.Errorf("missing required flag: --impl (unable to infer implementation automatically: %v). Specify --impl <implementation>", err)
 	}
-	impls := configuredIssueImplementations(snapshot.Tasks)
 	switch len(impls) {
-	case 0:
-		return "default", nil
 	case 1:
 		return impls[0], nil
 	default:
 		return "", fmt.Errorf("missing required flag: --impl (multiple implementations configured: %s)", strings.Join(impls, ", "))
 	}
+}
+
+func resolveIssueWriteImplementations(ctx context.Context, deps *Dependencies, provided []string) ([]string, error) {
+	normalized := dedupeTrimmed(provided)
+	if len(normalized) == 0 {
+		impl, err := resolveIssueWriteImplementation(ctx, deps, "")
+		if err != nil {
+			return nil, err
+		}
+		return []string{impl}, nil
+	}
+	impls, err := issueWriteImplementationOptions(ctx, deps)
+	if err != nil {
+		return nil, fmt.Errorf("unable to validate implementations: %w", err)
+	}
+	for _, impl := range normalized {
+		if !implementationOptionExists(impls, impl) {
+			return nil, unknownIssueWriteImplementationError(impl, impls)
+		}
+	}
+	return normalized, nil
+}
+
+func issueWriteImplementationOptions(ctx context.Context, deps *Dependencies) ([]string, error) {
+	if deps == nil || deps.DaemonClient == nil {
+		return nil, fmt.Errorf("daemon client is required to validate implementations")
+	}
+	snapshot, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskSnapshot, error) {
+		return listTasksSnapshotForCLI(callCtx, deps)
+	})
+	if err != nil {
+		return nil, err
+	}
+	impls := configuredIssueImplementations(snapshot.Tasks)
+	if len(impls) == 0 {
+		return []string{"default"}, nil
+	}
+	return impls, nil
+}
+
+func implementationOptionExists(options []string, impl string) bool {
+	for _, option := range options {
+		if option == impl {
+			return true
+		}
+	}
+	return false
+}
+
+func unknownIssueWriteImplementationError(impl string, known []string) error {
+	return fmt.Errorf("unknown implementation %q (known implementations: %s). Run `az impl list` to inspect implementation assignments. If you meant to parent work under %q, omit --impl in the correct AZEDARACH_ISSUE_ID context or add a parent-child edge instead", impl, strings.Join(known, ", "), impl)
 }
 
 func ConfigSetCommand(deps *Dependencies, opts ConfigSetOptions) error {
@@ -3813,6 +4000,51 @@ func IssueCheckCommand(deps *Dependencies, opts IssueCheckOptions) error {
 	})
 }
 
+func ProjectScriptsStatusCommand(deps *Dependencies, opts ProjectScriptsStatusOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	result, err := deps.DaemonClient.ScheduledScriptsStatus(ctx, opts.Names)
+	if err != nil {
+		return fmt.Errorf("failed to get scheduled script status: %w", err)
+	}
+	if opts.JSON {
+		return printJSON(result)
+	}
+	if len(result.Scripts) == 0 {
+		fmt.Println("No scheduled project scripts configured.")
+		return nil
+	}
+	fmt.Printf("Scheduled project scripts for %s:\n", result.ProjectID)
+	for _, script := range result.Scripts {
+		state := "idle"
+		if !script.Enabled {
+			state = "disabled"
+		} else if script.Running {
+			state = "running"
+		} else if script.LastError != "" {
+			state = "failed"
+		}
+		fmt.Printf("- %s\t%s\tinterval=%s\truns=%d\tskips=%d\n", script.Name, state, script.Interval, script.RunCount, script.SkipCount)
+		if script.NextRunAt != nil {
+			fmt.Printf("  next: %s\n", script.NextRunAt.UTC().Format(time.RFC3339))
+		}
+		if script.LastFinishedAt != nil {
+			fmt.Printf("  last: %s exit=%d duration=%dms\n", script.LastFinishedAt.UTC().Format(time.RFC3339), script.LastExitCode, script.LastDurationMs)
+		}
+		if script.LastError != "" {
+			fmt.Printf("  error: %s\n", script.LastError)
+		}
+		if script.LastLogPath != "" {
+			fmt.Printf("  log: %s\n", script.LastLogPath)
+		}
+	}
+	return nil
+}
+
 func IssueDoctorCommand(deps *Dependencies, opts IssueDoctorOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
@@ -3954,6 +4186,7 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 	ctx, cancel := context.WithTimeout(parentCtx, issueCreateCommandTimeout)
 	defer cancel()
 
+	var err error
 	var parentID *naming.IssueID
 	implementations := append([]string{}, opts.Implementations...)
 	if !opts.Deferred && opts.AutoParentFromIssueID != nil && strings.TrimSpace(*opts.AutoParentFromIssueID) != "" {
@@ -3970,18 +4203,9 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 			implementations = append([]string{}, parentTask.Implementations...)
 		}
 	}
-	if len(implementations) == 0 {
-		resolvedImpl, err := resolveIssueWriteImplementation(ctx, deps, "")
-		if err != nil {
-			return issueCreateResult{}, err
-		}
-		implementations = append(implementations, resolvedImpl)
-	} else if len(implementations) == 1 {
-		resolvedImpl, err := resolveIssueWriteImplementation(ctx, deps, implementations[0])
-		if err != nil {
-			return issueCreateResult{}, err
-		}
-		implementations[0] = resolvedImpl
+	implementations, err = resolveIssueWriteImplementations(ctx, deps, implementations)
+	if err != nil {
+		return issueCreateResult{}, err
 	}
 
 	taskID, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (string, error) {
@@ -4251,7 +4475,11 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 		update.Priority = *opts.Priority
 	}
 	if len(opts.UpdateImpls) > 0 {
-		update.Implementations = append([]string{}, opts.UpdateImpls...)
+		impls, err := resolveIssueWriteImplementations(ctx, deps, opts.UpdateImpls)
+		if err != nil {
+			return fmt.Errorf("invalid implementation update: %w", err)
+		}
+		update.Implementations = impls
 	}
 
 	if err := deps.DaemonClient.UpdateTaskDetails(ctx, opts.IssueID, update); err != nil {
@@ -4612,6 +4840,148 @@ func IssueImageRemoveCommand(deps *Dependencies, opts IssueImageRemoveOptions) e
 	return nil
 }
 
+func IssueDocumentAddCommand(deps *Dependencies, opts IssueDocumentAddOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	_, _, ok, err := loadIssueMetadataTask(ctx, deps, opts.IssueID)
+	if err != nil {
+		return fmt.Errorf("failed to load issue %s for document attach: %w", opts.IssueID, err)
+	}
+	if !ok {
+		return fmt.Errorf("issue not found: %s", opts.IssueID)
+	}
+
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	service := attachment.NewDocumentService(filepath.Join(deps.RepoDir, ".azedarach"), logger)
+	attached, err := service.Attach(ctx, opts.IssueID, opts.SourcePath)
+	if err != nil {
+		return fmt.Errorf("failed to attach document %q to issue %s: %w", opts.SourcePath, opts.IssueID, err)
+	}
+
+	notesAppended := false
+	if line := formatIssueAttachmentNoteLine(attached); strings.TrimSpace(line) != "" {
+		if err := deps.DaemonClient.AppendTaskNotes(ctx, opts.IssueID, line); err != nil {
+			return fmt.Errorf("document attached but failed to append notes for issue %s: %w", opts.IssueID, err)
+		}
+		notesAppended = true
+	}
+
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id":       opts.IssueID,
+			"attachment_id":  attached.ID,
+			"filename":       attached.Filename,
+			"path":           attached.Path,
+			"notes_appended": notesAppended,
+			"updated":        true,
+		})
+	}
+	fmt.Printf("Attached document to issue %s: %s (attachment_id=%s)\n", opts.IssueID, attached.Filename, attached.ID)
+	return nil
+}
+
+func IssueDocumentListCommand(deps *Dependencies, opts IssueDocumentListOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	_, _, ok, err := loadIssueMetadataTask(ctx, deps, opts.IssueID)
+	if err != nil {
+		return fmt.Errorf("failed to load issue %s for document list: %w", opts.IssueID, err)
+	}
+	if !ok {
+		return fmt.Errorf("issue not found: %s", opts.IssueID)
+	}
+
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	service := attachment.NewDocumentService(filepath.Join(deps.RepoDir, ".azedarach"), logger)
+	attachments, err := service.List(ctx, opts.IssueID)
+	if err != nil {
+		return fmt.Errorf("failed to list document attachments for issue %s: %w", opts.IssueID, err)
+	}
+
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id":    opts.IssueID,
+			"attachments": attachments,
+			"count":       len(attachments),
+		})
+	}
+	if len(attachments) == 0 {
+		fmt.Printf("No document attachments for issue %s\n", opts.IssueID)
+		return nil
+	}
+	fmt.Printf("Document attachments for issue %s:\n", opts.IssueID)
+	for _, att := range attachments {
+		relativePath := strings.TrimSpace(att.Relative)
+		if relativePath == "" {
+			relativePath = filepath.ToSlash(filepath.Join(".azedarach", "attachments", att.Filename))
+		}
+		mimeType := strings.TrimSpace(att.MimeType)
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+		fmt.Printf("- %s  %s  %s  %d bytes  %s\n", att.ID, att.Filename, mimeType, att.Size, relativePath)
+	}
+	return nil
+}
+
+func IssueDocumentRemoveCommand(deps *Dependencies, opts IssueDocumentRemoveOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	_, _, ok, err := loadIssueMetadataTask(ctx, deps, opts.IssueID)
+	if err != nil {
+		return fmt.Errorf("failed to load issue %s for document removal: %w", opts.IssueID, err)
+	}
+	if !ok {
+		return fmt.Errorf("issue not found: %s", opts.IssueID)
+	}
+
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	service := attachment.NewDocumentService(filepath.Join(deps.RepoDir, ".azedarach"), logger)
+	if err := service.Delete(ctx, opts.IssueID, opts.AttachmentID); err != nil {
+		return fmt.Errorf("failed to remove attachment %s from issue %s: %w", opts.AttachmentID, opts.IssueID, err)
+	}
+
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id":      opts.IssueID,
+			"attachment_id": opts.AttachmentID,
+			"removed":       true,
+		})
+	}
+	fmt.Printf("Removed document attachment %s from issue %s\n", opts.AttachmentID, opts.IssueID)
+	return nil
+}
+
 func formatIssueAttachmentNoteLine(att *attachment.Attachment) string {
 	if att == nil {
 		return ""
@@ -4621,7 +4991,10 @@ func formatIssueAttachmentNoteLine(att *attachment.Attachment) string {
 	if issueID == "" || filename == "" {
 		return ""
 	}
-	relativePath := filepath.ToSlash(filepath.Join(".azedarach", "images", issueID, filename))
+	relativePath := strings.TrimSpace(att.Relative)
+	if relativePath == "" {
+		relativePath = filepath.ToSlash(filepath.Join(".azedarach", "attachments", filename))
+	}
 	source := "file"
 	if strings.HasPrefix(strings.ToLower(filename), "clipboard-") {
 		source = "clipboard"
@@ -5775,7 +6148,7 @@ func PrimeCommand(deps *Dependencies) error {
 	specGuardrails := ""
 	questionFirstGuardrails := ""
 	implementationSection := ""
-	implementationGuardrails := "- Implementation guardrails: `--impl` assigns implementation/spec variants only; it is not graph/root membership. In multi-implementation repos, include explicit `--impl <impl>` on implementation-specific new issue writes and use repeated `--impl` only for intentional shared work. For `az issue update`, `--update-impl` is only for changing implementation assignments; status/title/notes updates do not require it."
+	implementationGuardrails := "- Implementation guardrails: `--impl` assigns implementation/spec variants only; it is not graph/root membership or parent selection. To parent new work under the active issue, run `az issue create \"Child task\"` from the correct `AZEDARACH_ISSUE_ID` context; for another parent/root, add an explicit `parent-child` edge. In multi-implementation repos, include explicit `--impl <impl>` only on implementation-specific new issue writes and use repeated `--impl` only for intentional shared work. For `az issue update`, `--update-impl` is only for changing implementation assignments; status/title/notes updates do not require it."
 	specEnabled := deps != nil && deps.Config != nil && deps.Config.Spec.Enabled
 	orchestrationVia := primeOrchestrationVia(deps)
 	orchestrationViaAz := strings.EqualFold(orchestrationVia, "az")
@@ -5974,8 +6347,10 @@ func renderPrimeImplementationSection(implementations []string) string {
 	return fmt.Sprintf("- Implementation selection (multi-implementation project):\n"+
 		"  - Available implementations: %s\n"+
 		"  - Use `az impl list` to refresh the available options.\n"+
+		"  - If you mean \"make this a child of the active issue\", run `az issue create \"Child task\"`; auto-parenting uses `AZEDARACH_ISSUE_ID`, not `--impl`.\n"+
+		"  - If you mean \"attach this to another parent/root\", create the issue and add `az issue dep add <child-id> <parent-id> --type parent-child`.\n"+
 		"  - `--impl` selects implementation/spec variant assignment only; it does not attach an issue to a parent/root graph.\n"+
-		"  - New issue writes for a specific implementation must choose one, for example `az issue create --impl %s \"Implementation-specific task\"`.\n"+
+		"  - New issue writes for a specific implementation must choose one, for example `az issue create --impl %s \"Implementation-specific task\"`; this still relies on auto-parenting or parent-child edges for graph membership.\n"+
 		"  - Repeat `--impl` only for intentionally shared implementation work. Existing issue updates do not use `--impl`; use `--update-impl` only when changing assignments.\n",
 		strings.Join(quoted, ", "), exampleImpl)
 }

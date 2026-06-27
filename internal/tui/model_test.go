@@ -505,7 +505,7 @@ func TestUpdate_AttachmentActionDeletedAddsToast(t *testing.T) {
 		t.Fatal("expected toast to be recorded")
 	}
 	last := next.toasts[len(next.toasts)-1]
-	if !strings.Contains(last.Message, "Image attachment deleted") {
+	if !strings.Contains(last.Message, "Attachment deleted") {
 		t.Fatalf("unexpected toast message: %q", last.Message)
 	}
 	if len(next.runtimeEvents) == 0 {
@@ -534,7 +534,7 @@ func TestUpdate_AttachmentActionStagedAddsToast(t *testing.T) {
 		t.Fatal("expected toast to be recorded")
 	}
 	last := next.toasts[len(next.toasts)-1]
-	if !strings.Contains(last.Message, "Image staged for new task") {
+	if !strings.Contains(last.Message, "Attachment staged for new task") {
 		t.Fatalf("unexpected toast message: %q", last.Message)
 	}
 }
