@@ -590,6 +590,11 @@ func TestClient_SearchWithRuntimeUsesFTSIndexAndHydratesMatches(t *testing.T) {
 	require.NotNil(t, tasks[0].Session)
 	assert.Equal(t, "busy", tasks[0].Session.Activity)
 
+	tasks, err = client.SearchWithRuntime(ctx, projectID, "evidence")
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, naming.IssueID(matchingID), tasks[0].ID)
+
 	tasks, err = client.SearchWithRuntime(ctx, projectID, "go-bubbletea")
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)

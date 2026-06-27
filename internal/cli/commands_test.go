@@ -9806,7 +9806,7 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 		t.Fatalf("usage missing issue list command: %q", output)
 	}
 	if !strings.Contains(output, "issue search [--project <project-id>] [--json] [--deps]") ||
-		!strings.Contains(output, "(--query <text>|-q <text>|<query>)  Search issue content") {
+		!strings.Contains(output, "(--query <text>|-q <text>|<query>)  Search title, description, notes, design, acceptance, labels, and implementations") {
 		t.Fatalf("usage missing issue search command: %q", output)
 	}
 	if !strings.Contains(output, "az issue search --status open --query \"runtime cache\"") {
@@ -9977,6 +9977,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "(or `az issue search --status open --limit 20 \"text\"`)") {
 		t.Fatalf("prime output missing positional query alternative: %q", output)
+	}
+	if !strings.Contains(output, "searches title, description, notes, design, acceptance, labels, and implementations") {
+		t.Fatalf("prime output missing issue search field coverage: %q", output)
 	}
 	if !strings.Contains(output, "split work until each child issue is independently actionable and fits within a single subagent context window") {
 		t.Fatalf("prime output missing subagent sizing guardrail: %q", output)
