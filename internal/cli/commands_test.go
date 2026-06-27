@@ -4324,6 +4324,8 @@ func TestImplMigrateCommandMigratesAssignmentsAcrossIssues(t *testing.T) {
 }
 
 func TestParseIssueListArgs(t *testing.T) {
+	createdAfter := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	updatedBefore := time.Date(2026, 3, 27, 23, 59, 59, 0, time.UTC)
 	tests := []struct {
 		name        string
 		args        []string
@@ -4348,6 +4350,18 @@ func TestParseIssueListArgs(t *testing.T) {
 			name: "limit override",
 			args: []string{"--limit", "25"},
 			want: IssueListOptions{JSON: false, Deps: false, Limit: 25},
+		},
+		{
+			name: "query and date filters",
+			args: []string{"-q", "runtime cache", "--created-after", "2026-03-25T10:00:00Z", "--updated-before", "2026-03-27T23:59:59Z"},
+			want: IssueListOptions{
+				JSON:          false,
+				Deps:          false,
+				Limit:         defaultIssueListLimit,
+				Query:         "runtime cache",
+				CreatedAfter:  &createdAfter,
+				UpdatedBefore: &updatedBefore,
+			},
 		},
 		{
 			name: "status filters",
@@ -4379,6 +4393,11 @@ func TestParseIssueListArgs(t *testing.T) {
 			name:        "invalid limit",
 			args:        []string{"--limit", "0"},
 			errContains: "limit must be >= 1",
+		},
+		{
+			name:        "invalid date filter",
+			args:        []string{"--created-after", "yesterday-ish"},
+			errContains: "invalid --created-after",
 		},
 		{
 			name:        "rejects extra args",
@@ -5630,6 +5649,99 @@ func TestIssueListCommand_StatusFilter(t *testing.T) {
 	}
 	if !strings.Contains(output, "az-1") || !strings.Contains(output, "az-2") {
 		t.Fatalf("status filter should include matching issues: %q", output)
+	}
+}
+
+func TestIssueListCommand_ContentQueryLoadsFullIssueText(t *testing.T) {
+	now := time.Date(2026, 3, 26, 2, 0, 0, 0, time.UTC)
+	summaryTasks := []domain.Task{
+		{ID: "az-1", Title: "Alpha", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(3 * time.Hour)},
+		{ID: "az-2", Title: "Beta", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(2 * time.Hour)},
+	}
+	fullTasks := []domain.Task{
+		{ID: "az-1", Title: "Alpha", Description: "Contains runtime cache evidence", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(3 * time.Hour)},
+		{ID: "az-2", Title: "Beta", Description: "Unrelated", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(2 * time.Hour)},
+	}
+	commands := make([]string, 0, 2)
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := marshalTaskListBody(summaryTasks)
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return responseWithBody(req, body), nil
+				case daemonclient.CommandTaskGetMany:
+					var got struct {
+						TaskIDs []string `json:"task_ids"`
+					}
+					if err := json.Unmarshal(req.Body, &got); err != nil {
+						t.Fatalf("unmarshal get-many request: %v", err)
+					}
+					if !reflect.DeepEqual(got.TaskIDs, []string{"az-1", "az-2"}) {
+						t.Fatalf("get-many task ids = %+v, want [az-1 az-2]", got.TaskIDs)
+					}
+					body, err := marshalTaskListBody(fullTasks)
+					if err != nil {
+						t.Fatalf("marshal full task list: %v", err)
+					}
+					return responseWithBody(req, body), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueListCommand(deps, IssueListOptions{Query: "runtime CACHE"})
+	})
+	if !reflect.DeepEqual(commands, []string{daemonclient.CommandTaskList, daemonclient.CommandTaskGetMany}) {
+		t.Fatalf("commands = %v, want task.list then task.get_many", commands)
+	}
+	if !strings.Contains(output, "az-1") || strings.Contains(output, "az-2") {
+		t.Fatalf("content query output = %q, want only az-1", output)
+	}
+}
+
+func TestIssueListCommand_DateRangeFilters(t *testing.T) {
+	base := time.Date(2026, 3, 26, 2, 0, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{ID: "az-1", Title: "Inside", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: base, UpdatedAt: base.Add(1 * time.Hour)},
+		{ID: "az-2", Title: "Too old", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: base.Add(-48 * time.Hour), UpdatedAt: base.Add(1 * time.Hour)},
+		{ID: "az-3", Title: "Too new", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: base, UpdatedAt: base.Add(48 * time.Hour)},
+	}
+	createdAfter := base.Add(-24 * time.Hour)
+	updatedBefore := base.Add(24 * time.Hour)
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := marshalTaskListBody(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return responseWithBody(req, body), nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueListCommand(deps, IssueListOptions{CreatedAfter: &createdAfter, UpdatedBefore: &updatedBefore})
+	})
+	if !strings.Contains(output, "az-1") || strings.Contains(output, "az-2") || strings.Contains(output, "az-3") {
+		t.Fatalf("date range output = %q, want only az-1", output)
 	}
 }
 
@@ -9638,7 +9750,7 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "az log --no-follow --lines 100 daemon tui") {
 		t.Fatalf("usage missing log example: %q", output)
 	}
-	if !strings.Contains(output, "issue list [--project <project-id>] [--json] [--deps] [--status <status> ...]") {
+	if !strings.Contains(output, "issue list [--project <project-id>] [--json] [--deps] [--query <text>|-q <text>]") {
 		t.Fatalf("usage missing issue list command: %q", output)
 	}
 	if !strings.Contains(output, "issue get [--project <project-id>] [--id <id>] [--json] [--with-notes] [<id>]") {
@@ -11148,6 +11260,10 @@ func responseWithJSON(req protocol.RequestEnvelope, body any) protocol.ResponseE
 	if err != nil {
 		panic(err)
 	}
+	return responseWithBody(req, payload)
+}
+
+func responseWithBody(req protocol.RequestEnvelope, body []byte) protocol.ResponseEnvelope {
 	return protocol.ResponseEnvelope{
 		ProtocolVersion: req.ProtocolVersion,
 		RequestID:       req.RequestID,
@@ -11155,7 +11271,7 @@ func responseWithJSON(req protocol.RequestEnvelope, body any) protocol.ResponseE
 		Meta:            req.Meta,
 		CompletedAt:     req.SentAt,
 		OK:              true,
-		Body:            payload,
+		Body:            body,
 	}
 }
 

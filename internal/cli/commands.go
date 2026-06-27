@@ -120,14 +120,19 @@ type ImplMigrateOptions struct {
 }
 
 type IssueListOptions struct {
-	Project      string
-	JSON         bool
-	Deps         bool
-	Limit        int
-	IDs          []string
-	States       []domain.Status
-	ParentIDs    []string
-	DependsOnIDs []string
+	Project       string
+	JSON          bool
+	Deps          bool
+	Limit         int
+	Query         string
+	IDs           []string
+	States        []domain.Status
+	ParentIDs     []string
+	DependsOnIDs  []string
+	CreatedAfter  *time.Time
+	CreatedBefore *time.Time
+	UpdatedAfter  *time.Time
+	UpdatedBefore *time.Time
 }
 
 type IssueGetOptions struct {
@@ -2251,12 +2256,22 @@ func ParseIssueListArgs(args []string) (IssueListOptions, error) {
 	depIDsCSV := ""
 	stateInputs := make([]string, 0, 4)
 	statesCSV := ""
+	createdAfterRaw := ""
+	createdBeforeRaw := ""
+	updatedAfterRaw := ""
+	updatedBeforeRaw := ""
 	fs := flag.NewFlagSet("issue list", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.BoolVar(&opts.JSON, "json", false, "output issues as JSON")
 	fs.BoolVar(&opts.Deps, "deps", false, "include dependency summary in table output")
 	fs.IntVar(&opts.Limit, "limit", defaultIssueListLimit, "maximum issues to list in one window")
+	fs.StringVar(&opts.Query, "query", "", "case-insensitive content query")
+	fs.StringVar(&opts.Query, "q", "", "case-insensitive content query")
+	fs.StringVar(&createdAfterRaw, "created-after", "", "include issues created at or after date/time")
+	fs.StringVar(&createdBeforeRaw, "created-before", "", "include issues created at or before date/time")
+	fs.StringVar(&updatedAfterRaw, "updated-after", "", "include issues updated at or after date/time")
+	fs.StringVar(&updatedBeforeRaw, "updated-before", "", "include issues updated at or before date/time")
 	addStatusInput := func(v string) error {
 		stateInputs = append(stateInputs, v)
 		return nil
@@ -2302,6 +2317,20 @@ func ParseIssueListArgs(args []string) (IssueListOptions, error) {
 		return IssueListOptions{}, fmt.Errorf("limit must be >= 1")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
+	opts.Query = strings.TrimSpace(opts.Query)
+	var parseErr error
+	if opts.CreatedAfter, parseErr = parseIssueListDateFilter(createdAfterRaw, false); parseErr != nil {
+		return IssueListOptions{}, fmt.Errorf("invalid --created-after: %w", parseErr)
+	}
+	if opts.CreatedBefore, parseErr = parseIssueListDateFilter(createdBeforeRaw, true); parseErr != nil {
+		return IssueListOptions{}, fmt.Errorf("invalid --created-before: %w", parseErr)
+	}
+	if opts.UpdatedAfter, parseErr = parseIssueListDateFilter(updatedAfterRaw, false); parseErr != nil {
+		return IssueListOptions{}, fmt.Errorf("invalid --updated-after: %w", parseErr)
+	}
+	if opts.UpdatedBefore, parseErr = parseIssueListDateFilter(updatedBeforeRaw, true); parseErr != nil {
+		return IssueListOptions{}, fmt.Errorf("invalid --updated-before: %w", parseErr)
+	}
 	if strings.TrimSpace(idsCSV) != "" {
 		for _, raw := range strings.Split(idsCSV, ",") {
 			trimmed := strings.TrimSpace(raw)
@@ -3608,6 +3637,14 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 	if len(opts.DependsOnIDs) > 0 {
 		tasks = filterTasksByDependencyIDs(tasks, opts.DependsOnIDs)
 	}
+	tasks = filterTasksByTimeRange(tasks, opts.CreatedAfter, opts.CreatedBefore, opts.UpdatedAfter, opts.UpdatedBefore)
+	if strings.TrimSpace(opts.Query) != "" {
+		tasks, err = fullTasksForContentQuery(ctx, deps, tasks)
+		if err != nil {
+			return fmt.Errorf("failed to load issue content for query: %w", err)
+		}
+		tasks = filterTasksByContent(tasks, opts.Query)
+	}
 	sort.SliceStable(tasks, func(i, j int) bool {
 		if tasks[i].UpdatedAt.Equal(tasks[j].UpdatedAt) {
 			return tasks[i].ID < tasks[j].ID
@@ -3704,6 +3741,21 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 		fmt.Println("Window note: all matching issues are shown.")
 	}
 	return nil
+}
+
+func fullTasksForContentQuery(ctx context.Context, deps *Dependencies, tasks []domain.Task) ([]domain.Task, error) {
+	if len(tasks) == 0 {
+		return tasks, nil
+	}
+	ids := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		ids = append(ids, task.ID.String())
+	}
+	snapshot, err := deps.DaemonClient.GetManyTaskSnapshot(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	return filterTasksByIDs(snapshot.Tasks, ids), nil
 }
 
 type issueGetManyItem struct {
@@ -5363,6 +5415,51 @@ func filterTasksByStatus(tasks []domain.Task, statuses []domain.Status) []domain
 	return filtered
 }
 
+func filterTasksByContent(tasks []domain.Task, query string) []domain.Task {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return tasks
+	}
+	filtered := make([]domain.Task, 0, len(tasks))
+	for _, task := range tasks {
+		if taskMatchesContentQuery(task, query) {
+			filtered = append(filtered, task)
+		}
+	}
+	return filtered
+}
+
+func taskMatchesContentQuery(task domain.Task, query string) bool {
+	fields := []string{
+		task.ID.String(),
+		task.Title,
+		task.Description,
+		task.Notes,
+		task.Design,
+		task.Acceptance,
+		task.Assignee,
+		string(task.Status),
+		task.Priority.String(),
+		string(task.Type),
+	}
+	for _, field := range fields {
+		if strings.Contains(strings.ToLower(field), query) {
+			return true
+		}
+	}
+	for _, label := range task.Labels {
+		if strings.Contains(strings.ToLower(label), query) {
+			return true
+		}
+	}
+	for _, impl := range task.Implementations {
+		if strings.Contains(strings.ToLower(impl), query) {
+			return true
+		}
+	}
+	return false
+}
+
 func filterTasksByParentIDs(tasks []domain.Task, parentIDs []string) []domain.Task {
 	if len(parentIDs) == 0 {
 		return tasks
@@ -5405,6 +5502,31 @@ func filterTasksByDependencyIDs(tasks []domain.Task, dependencyIDs []string) []d
 		}
 	}
 	return filtered
+}
+
+func filterTasksByTimeRange(tasks []domain.Task, createdAfter, createdBefore, updatedAfter, updatedBefore *time.Time) []domain.Task {
+	if createdAfter == nil && createdBefore == nil && updatedAfter == nil && updatedBefore == nil {
+		return tasks
+	}
+	filtered := make([]domain.Task, 0, len(tasks))
+	for _, task := range tasks {
+		if timeBeforeFilter(task.CreatedAt, createdAfter) || timeAfterFilter(task.CreatedAt, createdBefore) {
+			continue
+		}
+		if timeBeforeFilter(task.UpdatedAt, updatedAfter) || timeAfterFilter(task.UpdatedAt, updatedBefore) {
+			continue
+		}
+		filtered = append(filtered, task)
+	}
+	return filtered
+}
+
+func timeBeforeFilter(value time.Time, boundary *time.Time) bool {
+	return boundary != nil && value.Before(*boundary)
+}
+
+func timeAfterFilter(value time.Time, boundary *time.Time) bool {
+	return boundary != nil && value.After(*boundary)
 }
 
 func dedupeOrderedIDs(ids []string) []string {
@@ -6871,6 +6993,30 @@ func parseOperationStates(values []string) ([]protocol.OperationState, error) {
 		}
 	}
 	return states, nil
+}
+
+func parseIssueListDateFilter(raw string, endOfDay bool) (*time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		parsed = parsed.UTC()
+		return &parsed, nil
+	}
+	if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+		parsed = parsed.UTC()
+		return &parsed, nil
+	}
+	parsed, err := time.ParseInLocation("2006-01-02", raw, time.Local)
+	if err != nil {
+		return nil, fmt.Errorf("expected YYYY-MM-DD or RFC3339 timestamp")
+	}
+	if endOfDay {
+		parsed = parsed.AddDate(0, 0, 1).Add(-time.Nanosecond)
+	}
+	parsed = parsed.UTC()
+	return &parsed, nil
 }
 
 func parseIssueStatuses(values []string) ([]domain.Status, error) {
