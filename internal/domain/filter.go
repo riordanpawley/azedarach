@@ -3,6 +3,7 @@ package domain
 import (
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Filter represents task filtering state
@@ -131,26 +132,59 @@ func (f *Filter) Matches(t Task) bool {
 // FilterTasksByContentQuery returns tasks matching the issue content search
 // surface used by daemon-backed issue search commands.
 func FilterTasksByContentQuery(tasks []Task, query string) []Task {
-	query = strings.ToLower(strings.TrimSpace(query))
-	if query == "" {
+	terms := ContentQueryTerms(query)
+	if len(terms) == 0 {
 		return tasks
 	}
 	filtered := make([]Task, 0, len(tasks))
 	for _, task := range tasks {
-		if TaskMatchesContentQuery(task, query) {
+		if taskMatchesContentTerms(task, terms) {
 			filtered = append(filtered, task)
 		}
 	}
 	return filtered
 }
 
+// ContentQueryTerms normalizes a user search query into terms that must all be
+// present somewhere in the searchable issue content surface.
+func ContentQueryTerms(query string) []string {
+	seen := map[string]struct{}{}
+	terms := make([]string, 0, 4)
+	var b strings.Builder
+	flush := func() {
+		if b.Len() == 0 {
+			return
+		}
+		term := strings.ToLower(b.String())
+		b.Reset()
+		if _, ok := seen[term]; ok {
+			return
+		}
+		seen[term] = struct{}{}
+		terms = append(terms, term)
+	}
+	for _, r := range query {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(unicode.ToLower(r))
+			continue
+		}
+		flush()
+	}
+	flush()
+	return terms
+}
+
 // TaskMatchesContentQuery checks the durable issue fields that should be
 // discoverable through content search.
 func TaskMatchesContentQuery(task Task, query string) bool {
-	query = strings.ToLower(strings.TrimSpace(query))
-	if query == "" {
+	terms := ContentQueryTerms(query)
+	if len(terms) == 0 {
 		return true
 	}
+	return taskMatchesContentTerms(task, terms)
+}
+
+func taskMatchesContentTerms(task Task, terms []string) bool {
 	fields := []string{
 		task.ID.String(),
 		task.Title,
@@ -163,22 +197,35 @@ func TaskMatchesContentQuery(task Task, query string) bool {
 		task.Priority.String(),
 		string(task.Type),
 	}
-	for _, field := range fields {
-		if strings.Contains(strings.ToLower(field), query) {
-			return true
+	for _, term := range terms {
+		matched := false
+		for _, field := range fields {
+			if strings.Contains(strings.ToLower(field), term) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			for _, label := range task.Labels {
+				if strings.Contains(strings.ToLower(label), term) {
+					matched = true
+					break
+				}
+			}
+		}
+		if !matched {
+			for _, impl := range task.Implementations {
+				if strings.Contains(strings.ToLower(impl), term) {
+					matched = true
+					break
+				}
+			}
+		}
+		if !matched {
+			return false
 		}
 	}
-	for _, label := range task.Labels {
-		if strings.Contains(strings.ToLower(label), query) {
-			return true
-		}
-	}
-	for _, impl := range task.Implementations {
-		if strings.Contains(strings.ToLower(impl), query) {
-			return true
-		}
-	}
-	return false
+	return true
 }
 
 // Clear resets all filters

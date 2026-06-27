@@ -131,15 +131,18 @@ func TestTaskMatchesContentQuery(t *testing.T) {
 		"az-1",
 		"runtime",
 		"CACHE BEHAVIOUR",
+		"runtime cache",
 		"flaky worker",
 		"daemon projection",
 		"content",
 		"riordan",
 		"in_progress",
+		"in-progress",
 		"P2",
 		"task",
 		"observability",
 		"go-bubbletea",
+		"go bubbletea",
 	} {
 		if !TaskMatchesContentQuery(task, query) {
 			t.Fatalf("TaskMatchesContentQuery(%q) = false, want true", query)
@@ -148,6 +151,9 @@ func TestTaskMatchesContentQuery(t *testing.T) {
 
 	if TaskMatchesContentQuery(task, "missing") {
 		t.Fatal("TaskMatchesContentQuery(missing) = true, want false")
+	}
+	if TaskMatchesContentQuery(task, "runtime missing") {
+		t.Fatal("TaskMatchesContentQuery(runtime missing) = true, want false")
 	}
 }
 

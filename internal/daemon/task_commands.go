@@ -396,14 +396,13 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 		summariesOnly = true
 		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.issue_store_list_summaries_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
 	} else {
-		tasks, err = issueClient.ListWithRuntime(ctx, projectID)
+		tasks, err = issueClient.SearchWithRuntime(ctx, projectID, query)
 	}
 	if err != nil {
 		return taskListSnapshotLoadResult{}, err
 	}
 	if query != "" {
-		tasks = domain.FilterTasksByContentQuery(tasks, query)
-		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.issue_store_list_with_runtime_query", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(tasks))
+		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.issue_store_search_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(tasks))
 	}
 	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
 	freshnessStartedAt := time.Now()

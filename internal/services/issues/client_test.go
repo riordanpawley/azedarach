@@ -547,6 +547,102 @@ func TestClient_ListWithRuntimeReturnsJoinedProjectionFields(t *testing.T) {
 	assert.Equal(t, 7, one.GitAdditions)
 }
 
+func TestClient_SearchWithRuntimeUsesFTSIndexAndHydratesMatches(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-search-runtime"
+
+	matchingID, err := client.Create(ctx, CreateTaskParams{
+		Title:           "Runtime dashboard",
+		Description:     "Cache evidence lives in the issue body",
+		Type:            domain.TypeTask,
+		Priority:        domain.P2,
+		Status:          domain.StatusInProgress,
+		Labels:          []string{"observability"},
+		Implementations: []string{"go-bubbletea"},
+	})
+	require.NoError(t, err)
+	otherID, err := client.Create(ctx, CreateTaskParams{
+		Title:       "Runtime only",
+		Description: "No matching storage term here",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+		Status:      domain.StatusOpen,
+	})
+	require.NoError(t, err)
+
+	db, err := sql.Open("sqlite", client.dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	now := time.Date(2026, time.April, 4, 12, 0, 0, 0, time.UTC)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, activity, activity_source, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-search-runtime", matchingID, "attached", "busy", "session", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	require.NoError(t, err)
+
+	tasks, err := client.SearchWithRuntime(ctx, projectID, "runtime cache")
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, naming.IssueID(matchingID), tasks[0].ID)
+	assert.Equal(t, "Cache evidence lives in the issue body", tasks[0].Description)
+	require.NotNil(t, tasks[0].Session)
+	assert.Equal(t, "busy", tasks[0].Session.Activity)
+
+	tasks, err = client.SearchWithRuntime(ctx, projectID, "go-bubbletea")
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, naming.IssueID(matchingID), tasks[0].ID)
+
+	tasks, err = client.SearchWithRuntime(ctx, projectID, "runtime missing")
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+
+	tasks, err = client.SearchWithRuntime(ctx, projectID, otherID)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, naming.IssueID(otherID), tasks[0].ID)
+}
+
+func TestClient_SearchWithRuntimeMaintainsFTSOnUpdateAndArchive(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-search-maintenance"
+
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:       "Draft search task",
+		Description: "initial text",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+		Status:      domain.StatusOpen,
+	})
+	require.NoError(t, err)
+
+	tasks, err := client.SearchWithRuntime(ctx, projectID, "needle")
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+
+	err = client.UpdateDetails(ctx, issueID, UpdateTaskParams{
+		Title:       "Draft search task",
+		Description: "needle text",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+	})
+	require.NoError(t, err)
+
+	tasks, err = client.SearchWithRuntime(ctx, projectID, "needle")
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, naming.IssueID(issueID), tasks[0].ID)
+
+	require.NoError(t, client.Archive(ctx, issueID))
+
+	tasks, err = client.SearchWithRuntime(ctx, projectID, "needle")
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+}
+
 func TestClient_ListWithRuntimeReadsSessionObservations(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -2148,6 +2244,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0013_closed_runtime_invariants",
 		"0014_linear_sync_external_refs_backfill",
 		"0015_issue_attachments",
+		"0016_issue_search_fts",
 	}, got)
 }
 
