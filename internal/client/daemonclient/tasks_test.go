@@ -207,6 +207,49 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("list snapshot with query", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				if req.Command != CommandTaskList {
+					t.Fatalf("command = %q, want %q", req.Command, CommandTaskList)
+				}
+				var body protocol.TaskListRequestBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal task.list request body: %v", err)
+				}
+				if body.Query != "runtime cache" {
+					t.Fatalf("query = %q, want runtime cache", body.Query)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Revision:        17,
+					OK:              true,
+					Body: mustMarshalRawTaskListSnapshotBody(t, protocol.TaskListSnapshotPayload{
+						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+						ProtocolVersion:  req.ProtocolVersion,
+						SnapshotRevision: 17,
+						ProjectID:        naming.ProjectID(wantProjectID),
+						LastCheckedAt:    mustTaskSnapshotCheckedAt(),
+						Freshness:        protocol.TaskListFreshnessFresh,
+						Tasks:            []domain.Task{{ID: "az-9", Title: "Task 9", Status: domain.StatusInReview}},
+					}),
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		snapshot, err := client.ListTasksSnapshotWithQuery(context.Background(), " runtime cache ")
+		if err != nil {
+			t.Fatalf("ListTasksSnapshotWithQuery error: %v", err)
+		}
+		if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].ID != "az-9" {
+			t.Fatalf("snapshot tasks = %+v", snapshot.Tasks)
+		}
+	})
+
 	t.Run("get snapshot", func(t *testing.T) {
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

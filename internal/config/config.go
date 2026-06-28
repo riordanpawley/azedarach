@@ -106,12 +106,16 @@ type KeyboardConfig struct {
 
 // SessionConfig contains session management settings
 type SessionConfig struct {
-	DangerouslySkipPermissions bool     `json:"dangerouslySkipPermissions"`
-	Shell                      string   `json:"shell"`
-	TimeoutMs                  int      `json:"timeoutMs"`
-	LogDir                     string   `json:"logDir"`
-	InitCommands               []string `json:"initCommands"`
-	SideEffectCommands         []string `json:"sideEffectCommands"`
+	DangerouslySkipPermissions bool   `json:"dangerouslySkipPermissions"`
+	Shell                      string `json:"shell"`
+	TimeoutMs                  int    `json:"timeoutMs"`
+	LogDir                     string `json:"logDir"`
+	// Deprecated: use SyncInitCommands instead.
+	InitCommands []string `json:"initCommands"`
+	// Deprecated: use AsyncInitCommands instead.
+	SideEffectCommands []string `json:"sideEffectCommands"`
+	SyncInitCommands   []string `json:"syncInitCommands"`
+	AsyncInitCommands  []string `json:"asyncInitCommands"`
 }
 
 // PRConfig contains pull request settings
@@ -261,6 +265,8 @@ func DefaultConfig() *Config {
 			LogDir:             filepath.Join(homeDir, ".azedarach", "logs"),
 			InitCommands:       []string{},
 			SideEffectCommands: []string{},
+			SyncInitCommands:   []string{},
+			AsyncInitCommands:  []string{},
 		},
 		PR: PRConfig{
 			DraftByDefault:     true,
@@ -361,7 +367,7 @@ const (
 	LocalConfigFileName  = "config.local.json"
 	ConfigSchemaFileName = "config.schema.json"
 	ConfigSchemaURL      = "https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json"
-	CurrentConfigVersion = 9
+	CurrentConfigVersion = 10
 )
 
 type configFileMetadata struct {
@@ -473,6 +479,9 @@ func NormalizeConfigFileRaw(raw map[string]any) {
 	if issues, ok := raw["issues"].(map[string]any); ok {
 		delete(issues, "autoFinalizeOnClose")
 	}
+	if session, ok := raw["session"].(map[string]any); ok {
+		migrateSessionInitCommands(session)
+	}
 	if worktree, ok := raw["worktree"].(map[string]any); ok {
 		migrateWorktreeInitCommands(worktree)
 	}
@@ -480,20 +489,29 @@ func NormalizeConfigFileRaw(raw map[string]any) {
 	raw["$version"] = CurrentConfigVersion
 }
 
+func migrateSessionInitCommands(session map[string]any) {
+	migrateCommandArray(session, "initCommands", "syncInitCommands")
+	migrateCommandArray(session, "sideEffectCommands", "asyncInitCommands")
+}
+
 func migrateWorktreeInitCommands(worktree map[string]any) {
-	initCommands, ok := configRawArray(worktree["initCommands"])
+	migrateCommandArray(worktree, "initCommands", "syncInitCommands")
+}
+
+func migrateCommandArray(raw map[string]any, legacyKey, currentKey string) {
+	initCommands, ok := configRawArray(raw[legacyKey])
 	if !ok {
-		delete(worktree, "initCommands")
+		delete(raw, legacyKey)
 		return
 	}
 	if len(initCommands) > 0 {
-		syncCommands, _ := configRawArray(worktree["syncInitCommands"])
-		migrated := make([]any, 0, len(initCommands)+len(syncCommands))
+		currentCommands, _ := configRawArray(raw[currentKey])
+		migrated := make([]any, 0, len(initCommands)+len(currentCommands))
 		migrated = append(migrated, initCommands...)
-		migrated = append(migrated, syncCommands...)
-		worktree["syncInitCommands"] = migrated
+		migrated = append(migrated, currentCommands...)
+		raw[currentKey] = migrated
 	}
-	delete(worktree, "initCommands")
+	delete(raw, legacyKey)
 }
 
 func configRawArray(value any) ([]any, bool) {
@@ -640,6 +658,15 @@ func MergeWithDefaults(cfg *Config) *Config {
 	}
 	if cfg.Session.InitCommands == nil {
 		cfg.Session.InitCommands = defaults.Session.InitCommands
+	}
+	if cfg.Session.SideEffectCommands == nil {
+		cfg.Session.SideEffectCommands = defaults.Session.SideEffectCommands
+	}
+	if cfg.Session.SyncInitCommands == nil {
+		cfg.Session.SyncInitCommands = defaults.Session.SyncInitCommands
+	}
+	if cfg.Session.AsyncInitCommands == nil {
+		cfg.Session.AsyncInitCommands = defaults.Session.AsyncInitCommands
 	}
 
 	// Merge Merge config

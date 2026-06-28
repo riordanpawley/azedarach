@@ -120,14 +120,19 @@ type ImplMigrateOptions struct {
 }
 
 type IssueListOptions struct {
-	Project      string
-	JSON         bool
-	Deps         bool
-	Limit        int
-	IDs          []string
-	States       []domain.Status
-	ParentIDs    []string
-	DependsOnIDs []string
+	Project       string
+	JSON          bool
+	Deps          bool
+	Limit         int
+	Query         string
+	IDs           []string
+	States        []domain.Status
+	ParentIDs     []string
+	DependsOnIDs  []string
+	CreatedAfter  *time.Time
+	CreatedBefore *time.Time
+	UpdatedAfter  *time.Time
+	UpdatedBefore *time.Time
 }
 
 type IssueGetOptions struct {
@@ -2242,6 +2247,14 @@ func formatProjectIssueRef(projectID, issueID string) string {
 }
 
 func ParseIssueListArgs(args []string) (IssueListOptions, error) {
+	return parseIssueListArgs(args, false)
+}
+
+func ParseIssueSearchArgs(args []string) (IssueListOptions, error) {
+	return parseIssueListArgs(args, true)
+}
+
+func parseIssueListArgs(args []string, allowQueryArgs bool) (IssueListOptions, error) {
 	opts := IssueListOptions{Limit: defaultIssueListLimit}
 	ids := make([]string, 0, 4)
 	idsCSV := ""
@@ -2251,12 +2264,22 @@ func ParseIssueListArgs(args []string) (IssueListOptions, error) {
 	depIDsCSV := ""
 	stateInputs := make([]string, 0, 4)
 	statesCSV := ""
+	createdAfterRaw := ""
+	createdBeforeRaw := ""
+	updatedAfterRaw := ""
+	updatedBeforeRaw := ""
 	fs := flag.NewFlagSet("issue list", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.BoolVar(&opts.JSON, "json", false, "output issues as JSON")
 	fs.BoolVar(&opts.Deps, "deps", false, "include dependency summary in table output")
 	fs.IntVar(&opts.Limit, "limit", defaultIssueListLimit, "maximum issues to list in one window")
+	fs.StringVar(&opts.Query, "query", "", "case-insensitive content query")
+	fs.StringVar(&opts.Query, "q", "", "case-insensitive content query")
+	fs.StringVar(&createdAfterRaw, "created-after", "", "include issues created at or after date/time")
+	fs.StringVar(&createdBeforeRaw, "created-before", "", "include issues created at or before date/time")
+	fs.StringVar(&updatedAfterRaw, "updated-after", "", "include issues updated at or after date/time")
+	fs.StringVar(&updatedBeforeRaw, "updated-before", "", "include issues updated at or before date/time")
 	addStatusInput := func(v string) error {
 		stateInputs = append(stateInputs, v)
 		return nil
@@ -2295,13 +2318,42 @@ func ParseIssueListArgs(args []string) (IssueListOptions, error) {
 	if err := fs.Parse(args); err != nil {
 		return IssueListOptions{}, err
 	}
-	if fs.NArg() != 0 {
+	if allowQueryArgs {
+		if fs.NArg() > 0 {
+			if strings.TrimSpace(opts.Query) != "" {
+				return IssueListOptions{}, fmt.Errorf("provide query either as --query or as positional text, not both")
+			}
+			for _, arg := range fs.Args()[1:] {
+				if strings.HasPrefix(arg, "-") {
+					return IssueListOptions{}, fmt.Errorf("flags/options must appear before positional query text")
+				}
+			}
+			opts.Query = strings.Join(fs.Args(), " ")
+		}
+	} else if fs.NArg() != 0 {
 		return IssueListOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
 	if opts.Limit < 1 {
 		return IssueListOptions{}, fmt.Errorf("limit must be >= 1")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
+	opts.Query = strings.TrimSpace(opts.Query)
+	if allowQueryArgs && opts.Query == "" {
+		return IssueListOptions{}, fmt.Errorf("usage: az issue search [--project <project-id>] [--json] [--deps] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)")
+	}
+	var parseErr error
+	if opts.CreatedAfter, parseErr = parseIssueListDateFilter(createdAfterRaw, false); parseErr != nil {
+		return IssueListOptions{}, fmt.Errorf("invalid --created-after: %w", parseErr)
+	}
+	if opts.CreatedBefore, parseErr = parseIssueListDateFilter(createdBeforeRaw, true); parseErr != nil {
+		return IssueListOptions{}, fmt.Errorf("invalid --created-before: %w", parseErr)
+	}
+	if opts.UpdatedAfter, parseErr = parseIssueListDateFilter(updatedAfterRaw, false); parseErr != nil {
+		return IssueListOptions{}, fmt.Errorf("invalid --updated-after: %w", parseErr)
+	}
+	if opts.UpdatedBefore, parseErr = parseIssueListDateFilter(updatedBeforeRaw, true); parseErr != nil {
+		return IssueListOptions{}, fmt.Errorf("invalid --updated-before: %w", parseErr)
+	}
 	if strings.TrimSpace(idsCSV) != "" {
 		for _, raw := range strings.Split(idsCSV, ",") {
 			trimmed := strings.TrimSpace(raw)
@@ -3598,7 +3650,15 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 		return err
 	}
 
-	snapshot, err := listTasksSnapshotForCLI(ctx, deps)
+	var (
+		snapshot daemonclient.TaskSnapshot
+		err      error
+	)
+	if strings.TrimSpace(opts.Query) != "" {
+		snapshot, err = deps.DaemonClient.ListTasksSnapshotWithQuery(ctx, opts.Query)
+	} else {
+		snapshot, err = listTasksSnapshotForCLI(ctx, deps)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to list issues: %w", err)
 	}
@@ -3615,6 +3675,7 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 	if len(opts.DependsOnIDs) > 0 {
 		tasks = filterTasksByDependencyIDs(tasks, opts.DependsOnIDs)
 	}
+	tasks = filterTasksByTimeRange(tasks, opts.CreatedAfter, opts.CreatedBefore, opts.UpdatedAfter, opts.UpdatedBefore)
 	sort.SliceStable(tasks, func(i, j int) bool {
 		if tasks[i].UpdatedAt.Equal(tasks[j].UpdatedAt) {
 			return tasks[i].ID < tasks[j].ID
@@ -5414,6 +5475,31 @@ func filterTasksByDependencyIDs(tasks []domain.Task, dependencyIDs []string) []d
 	return filtered
 }
 
+func filterTasksByTimeRange(tasks []domain.Task, createdAfter, createdBefore, updatedAfter, updatedBefore *time.Time) []domain.Task {
+	if createdAfter == nil && createdBefore == nil && updatedAfter == nil && updatedBefore == nil {
+		return tasks
+	}
+	filtered := make([]domain.Task, 0, len(tasks))
+	for _, task := range tasks {
+		if timeBeforeFilter(task.CreatedAt, createdAfter) || timeAfterFilter(task.CreatedAt, createdBefore) {
+			continue
+		}
+		if timeBeforeFilter(task.UpdatedAt, updatedAfter) || timeAfterFilter(task.UpdatedAt, updatedBefore) {
+			continue
+		}
+		filtered = append(filtered, task)
+	}
+	return filtered
+}
+
+func timeBeforeFilter(value time.Time, boundary *time.Time) bool {
+	return boundary != nil && value.Before(*boundary)
+}
+
+func timeAfterFilter(value time.Time, boundary *time.Time) bool {
+	return boundary != nil && value.After(*boundary)
+}
+
 func dedupeOrderedIDs(ids []string) []string {
 	if len(ids) == 0 {
 		return nil
@@ -6878,6 +6964,30 @@ func parseOperationStates(values []string) ([]protocol.OperationState, error) {
 		}
 	}
 	return states, nil
+}
+
+func parseIssueListDateFilter(raw string, endOfDay bool) (*time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		parsed = parsed.UTC()
+		return &parsed, nil
+	}
+	if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+		parsed = parsed.UTC()
+		return &parsed, nil
+	}
+	parsed, err := time.ParseInLocation("2006-01-02", raw, time.Local)
+	if err != nil {
+		return nil, fmt.Errorf("expected YYYY-MM-DD or RFC3339 timestamp")
+	}
+	if endOfDay {
+		parsed = parsed.AddDate(0, 0, 1).Add(-time.Nanosecond)
+	}
+	parsed = parsed.UTC()
+	return &parsed, nil
 }
 
 func parseIssueStatuses(values []string) ([]domain.Status, error) {

@@ -582,10 +582,25 @@ func (c *Client) ListTasksSnapshot(ctx context.Context) (TaskSnapshot, error) {
 
 // ListTasksSnapshotWithMode fetches a task snapshot with the requested bounded read budget.
 func (c *Client) ListTasksSnapshotWithMode(ctx context.Context, mode ReadWaitMode) (TaskSnapshot, error) {
+	return c.ListTasksSnapshotWithQueryMode(ctx, "", mode)
+}
+
+// ListTasksSnapshotWithQuery fetches a daemon-filtered task snapshot for an issue content query.
+func (c *Client) ListTasksSnapshotWithQuery(ctx context.Context, query string) (TaskSnapshot, error) {
+	return c.ListTasksSnapshotWithQueryMode(ctx, query, ReadWaitModeDefault)
+}
+
+// ListTasksSnapshotWithQueryMode fetches a task snapshot with an optional daemon-side content query.
+func (c *Client) ListTasksSnapshotWithQueryMode(ctx context.Context, query string, mode ReadWaitMode) (TaskSnapshot, error) {
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
 
-	resp, err := c.commandJSONResponse(waitCtx, CommandTaskList, nil)
+	var body any
+	if query = strings.TrimSpace(query); query != "" {
+		body = protocol.TaskListRequestBody{Query: query}
+	}
+
+	resp, err := c.commandJSONResponse(waitCtx, CommandTaskList, body)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
@@ -612,7 +627,7 @@ func (c *Client) ListTasksSnapshotWithMode(ctx context.Context, mode ReadWaitMod
 		if !ack.Accepted {
 			return TaskSnapshot{}, fmt.Errorf("decode %s response: %w (handshake rejected after mismatch: %s)", CommandTaskList, decodeErr, ack.Reason)
 		}
-		retryResp, retryErr := c.commandJSONResponse(waitCtx, CommandTaskList, nil)
+		retryResp, retryErr := c.commandJSONResponse(waitCtx, CommandTaskList, body)
 		if retryErr != nil {
 			return TaskSnapshot{}, retryErr
 		}

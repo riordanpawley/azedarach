@@ -21,6 +21,12 @@ const (
 	TaskListFreshnessStale TaskListFreshness = "stale"
 )
 
+// TaskListRequestBody is the optional request body for task.list. Empty bodies
+// preserve the default summary-list behavior for older clients.
+type TaskListRequestBody struct {
+	Query string `json:"query,omitempty" msgpack:"query,omitempty"`
+}
+
 func (f TaskListFreshness) Valid() bool {
 	switch f {
 	case TaskListFreshnessFresh, TaskListFreshnessStale:
