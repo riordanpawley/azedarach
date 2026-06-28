@@ -658,6 +658,89 @@ func TestWorktreeCreateCommandCreatesWorktreeWithoutStartingSession(t *testing.T
 	}
 }
 
+func TestWorktreeCreateCommandJSONErrorIncludesRollbackDetails(t *testing.T) {
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: "az-1", Title: "Parent", Status: domain.StatusOpen},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	detail := "worktree create failed for az-1: failed to create worktree with git worktree add -b user/az-1/task /tmp/az-1 main: hook failed (rolled back worktree /tmp/az-1)"
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-1")
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:  "az-1",
+						TargetID: "base",
+						Branch:   "main",
+					}), nil
+				case daemonclient.CommandWorktreeCreate:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              false,
+						Error: &protocol.ErrorEnvelope{
+							Code:      protocol.ErrorCodeInternal,
+							Message:   detail,
+							Retryable: false,
+						},
+					}, nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   "/repo",
+	}
+
+	output, err := captureStdoutAllowError(t, func() error {
+		return WorktreeCreateCommand(deps, WorktreeCreateOptions{IssueID: "az-1", JSON: true})
+	})
+	if err == nil {
+		t.Fatal("expected worktree create error")
+	}
+	for _, want := range []string{"failed to create worktree for az-1", "git worktree add", "hook failed", "rolled back worktree /tmp/az-1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want substring %q", err.Error(), want)
+		}
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal([]byte(output), &body); err != nil {
+		t.Fatalf("unmarshal output JSON: %v\noutput:\n%s", err, output)
+	}
+	if body["ok"] != false || body["project_id"] != "proj" || body["issue_id"] != "az-1" || body["base_branch"] != "main" {
+		t.Fatalf("json body = %+v", body)
+	}
+	errorMessage, _ := body["error"].(string)
+	for _, want := range []string{"failed to create worktree for az-1", "git worktree add", "hook failed", "rolled back worktree /tmp/az-1"} {
+		if !strings.Contains(errorMessage, want) {
+			t.Fatalf("json error = %q, want substring %q", errorMessage, want)
+		}
+	}
+}
+
 func TestStartCommandSubmitsOperationWithDaemonTimeout(t *testing.T) {
 	taskListBody, err := marshalTaskListBody([]domain.Task{
 		{ID: "issue-1", Title: "Example", Status: domain.StatusOpen},
