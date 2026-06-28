@@ -1859,6 +1859,30 @@ func TestModelViewShowsNumericSelectionLabelsForFirstTenCards(t *testing.T) {
 	}
 }
 
+func TestModelTreeViewShowsNumericSelectionIndexColumn(t *testing.T) {
+	entries := []InventoryEntry{
+		{SessionID: "az-one", IssueID: "one", TaskTitle: "One", HasTmuxSession: true},
+		{SessionID: "az-two", IssueID: "two", TaskTitle: "Two", HasTmuxSession: true},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 18})
+	model = updated.(Model)
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+	model = updateKey(t, model, "tab")
+
+	view := ansi.Strip(model.View())
+	if !strings.Contains(view, ">0 az-one") {
+		t.Fatalf("selected tree row missing numeric index column:\n%s", view)
+	}
+	if !strings.Contains(view, " 1 az-two") {
+		t.Fatalf("unselected tree row missing numeric index column:\n%s", view)
+	}
+}
+
 func TestModelGotoWordJumpSelectsVisibleSession(t *testing.T) {
 	entries := []InventoryEntry{
 		{SessionID: "az-one", IssueID: "one", TaskTitle: "One", HasTmuxSession: true},
