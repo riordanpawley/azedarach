@@ -174,6 +174,49 @@ func ContentQueryTerms(query string) []string {
 	return terms
 }
 
+// ContentQueryFTSExpression builds the FTS5 MATCH expression used for durable
+// content search. Every normalized term must be present somewhere in the
+// searchable surface, matching FilterTasksByContentQuery semantics.
+func ContentQueryFTSExpression(query string) string {
+	tokens := ContentQueryTerms(query)
+	if len(tokens) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		parts = append(parts, `"`+token+`"`)
+	}
+	return strings.Join(parts, " AND ")
+}
+
+// ContentFieldsMatchQuery checks whether every normalized query term appears in
+// at least one field of a durable content-search surface.
+func ContentFieldsMatchQuery(fields []string, query string) bool {
+	terms := ContentQueryTerms(query)
+	if len(terms) == 0 {
+		return true
+	}
+	return ContentFieldsMatchTerms(fields, terms)
+}
+
+// ContentFieldsMatchTerms checks pre-normalized content query terms against a
+// caller-provided durable content-search surface.
+func ContentFieldsMatchTerms(fields []string, terms []string) bool {
+	for _, term := range terms {
+		matched := false
+		for _, field := range fields {
+			if strings.Contains(strings.ToLower(field), term) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
 // TaskMatchesContentQuery checks the durable issue fields that should be
 // discoverable through content search.
 func TaskMatchesContentQuery(task Task, query string) bool {
@@ -197,35 +240,9 @@ func taskMatchesContentTerms(task Task, terms []string) bool {
 		task.Priority.String(),
 		string(task.Type),
 	}
-	for _, term := range terms {
-		matched := false
-		for _, field := range fields {
-			if strings.Contains(strings.ToLower(field), term) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			for _, label := range task.Labels {
-				if strings.Contains(strings.ToLower(label), term) {
-					matched = true
-					break
-				}
-			}
-		}
-		if !matched {
-			for _, impl := range task.Implementations {
-				if strings.Contains(strings.ToLower(impl), term) {
-					matched = true
-					break
-				}
-			}
-		}
-		if !matched {
-			return false
-		}
-	}
-	return true
+	fields = append(fields, task.Labels...)
+	fields = append(fields, task.Implementations...)
+	return ContentFieldsMatchTerms(fields, terms)
 }
 
 // Clear resets all filters

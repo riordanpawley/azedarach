@@ -801,7 +801,7 @@ func (c *Client) SearchWithRuntime(ctx context.Context, projectID, query string)
 	if projectID == "" {
 		projectID = "default"
 	}
-	expr := issueContentFTSExpression(query)
+	expr := domain.ContentQueryFTSExpression(query)
 	if expr == "" {
 		return []domain.Task{}, nil
 	}
@@ -1276,18 +1276,6 @@ func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error
 		return nil, c.wrapError("search", query, err)
 	}
 	return tasks, nil
-}
-
-func issueContentFTSExpression(query string) string {
-	tokens := domain.ContentQueryTerms(query)
-	if len(tokens) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(tokens))
-	for _, token := range tokens {
-		parts = append(parts, `"`+token+`"`)
-	}
-	return strings.Join(parts, " AND ")
 }
 
 // Ready fetches open tasks that do not have unresolved blockers.
