@@ -14,7 +14,7 @@ import (
 
 type mockWorktreeService struct {
 	listFn            func(context.Context, string) ([]git.Worktree, error)
-	createFn          func(context.Context, string, string, string) (*git.Worktree, error)
+	createFn          func(context.Context, string, string, string) (*git.Worktree, string, error)
 	deleteFn          func(context.Context, string, string, bool) error
 	cleanupOrphanedFn func(context.Context, string) (*CleanupOrphanedResult, error)
 }
@@ -32,7 +32,7 @@ func (m mockWorktreeService) List(ctx context.Context, projectID string) ([]git.
 	return m.listFn(ctx, projectID)
 }
 
-func (m mockWorktreeService) Create(ctx context.Context, projectID, issueID, baseBranch string) (*git.Worktree, error) {
+func (m mockWorktreeService) Create(ctx context.Context, projectID, issueID, baseBranch string) (*git.Worktree, string, error) {
 	return m.createFn(ctx, projectID, issueID, baseBranch)
 }
 
@@ -52,8 +52,8 @@ func TestWorktreeHandlerHappyPath(t *testing.T) {
 				{Path: "/tmp/repo-b", Branch: "az/issue-b", IssueID: "issue-b"},
 			}, nil
 		},
-		createFn: func(context.Context, string, string, string) (*git.Worktree, error) {
-			return &git.Worktree{Path: "/tmp/repo-c", Branch: "az/issue-c", IssueID: "issue-c"}, nil
+		createFn: func(context.Context, string, string, string) (*git.Worktree, string, error) {
+			return &git.Worktree{Path: "/tmp/repo-c", Branch: "az/issue-c", IssueID: "issue-c"}, "main", nil
 		},
 		deleteFn: func(context.Context, string, string, bool) error {
 			return nil
@@ -122,6 +122,9 @@ func TestWorktreeHandlerHappyPath(t *testing.T) {
 				}
 				if body.Worktree.IssueID != "issue-c" || body.Worktree.Path != "/tmp/repo-c" {
 					t.Fatalf("unexpected worktree body: %+v", body.Worktree)
+				}
+				if body.BaseBranch != "main" {
+					t.Fatalf("base_branch = %q, want main", body.BaseBranch)
 				}
 			},
 		},
@@ -255,8 +258,8 @@ func TestWorktreeHandlerErrorMapping(t *testing.T) {
 				listFn: func(context.Context, string) ([]git.Worktree, error) {
 					return nil, tc.err
 				},
-				createFn: func(context.Context, string, string, string) (*git.Worktree, error) {
-					return nil, tc.err
+				createFn: func(context.Context, string, string, string) (*git.Worktree, string, error) {
+					return nil, "", tc.err
 				},
 				deleteFn: func(context.Context, string, string, bool) error {
 					return tc.err
@@ -274,7 +277,7 @@ func TestWorktreeHandlerErrorMapping(t *testing.T) {
 
 			resp := h.Handle(context.Background(), protocol.RequestEnvelope{
 				ProtocolVersion: protocol.CurrentVersion,
-					RequestID:       naming.RequestID("req-" + tc.name),
+				RequestID:       naming.RequestID("req-" + tc.name),
 				Kind:            protocol.EnvelopeKindCommand,
 				Command:         tc.command,
 				Body:            body,
@@ -297,8 +300,8 @@ func TestWorktreeHandlerRemovePassesForceFlag(t *testing.T) {
 	var gotForce bool
 	h := NewWorktreeHandler(mockWorktreeService{
 		listFn: func(context.Context, string) ([]git.Worktree, error) { return nil, nil },
-		createFn: func(context.Context, string, string, string) (*git.Worktree, error) {
-			return nil, nil
+		createFn: func(context.Context, string, string, string) (*git.Worktree, string, error) {
+			return nil, "", nil
 		},
 		deleteFn: func(context.Context, string, string, bool) error {
 			gotForce = true
@@ -335,7 +338,7 @@ func TestWorktreeHandlerRemovePassesForceFlag(t *testing.T) {
 func TestWorktreeHandlerUnsupportedCommand(t *testing.T) {
 	h := NewWorktreeHandler(mockWorktreeService{
 		listFn:   func(context.Context, string) ([]git.Worktree, error) { return nil, nil },
-		createFn: func(context.Context, string, string, string) (*git.Worktree, error) { return nil, nil },
+		createFn: func(context.Context, string, string, string) (*git.Worktree, string, error) { return nil, "", nil },
 		deleteFn: func(context.Context, string, string, bool) error { return nil },
 		cleanupOrphanedFn: func(context.Context, string) (*CleanupOrphanedResult, error) {
 			return nil, nil
@@ -455,8 +458,8 @@ func TestWorktreeHandlerUsesLongRunningExecutorForMutations(t *testing.T) {
 	executor := &recordingWorktreeLongRunningExecutor{}
 	h := NewWorktreeHandler(mockWorktreeService{
 		listFn: func(context.Context, string) ([]git.Worktree, error) { return nil, nil },
-		createFn: func(context.Context, string, string, string) (*git.Worktree, error) {
-			return &git.Worktree{Path: "/tmp/repo-c", Branch: "az/issue-c", IssueID: "issue-c"}, nil
+		createFn: func(context.Context, string, string, string) (*git.Worktree, string, error) {
+			return &git.Worktree{Path: "/tmp/repo-c", Branch: "az/issue-c", IssueID: "issue-c"}, "main", nil
 		},
 		deleteFn: func(context.Context, string, string, bool) error { return nil },
 		cleanupOrphanedFn: func(context.Context, string) (*CleanupOrphanedResult, error) {
@@ -496,8 +499,8 @@ func TestWorktreeHandlerProjectIDFallbacks(t *testing.T) {
 				gotProjectID = projectID
 				return []git.Worktree{}, nil
 			},
-			createFn: func(context.Context, string, string, string) (*git.Worktree, error) {
-				return nil, nil
+			createFn: func(context.Context, string, string, string) (*git.Worktree, string, error) {
+				return nil, "", nil
 			},
 			deleteFn: func(context.Context, string, string, bool) error { return nil },
 			cleanupOrphanedFn: func(context.Context, string) (*CleanupOrphanedResult, error) {
@@ -529,8 +532,8 @@ func TestWorktreeHandlerProjectIDFallbacks(t *testing.T) {
 				gotProjectID = projectID
 				return []git.Worktree{}, nil
 			},
-			createFn: func(context.Context, string, string, string) (*git.Worktree, error) {
-				return nil, nil
+			createFn: func(context.Context, string, string, string) (*git.Worktree, string, error) {
+				return nil, "", nil
 			},
 			deleteFn: func(context.Context, string, string, bool) error { return nil },
 			cleanupOrphanedFn: func(context.Context, string) (*CleanupOrphanedResult, error) {

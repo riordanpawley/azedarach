@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -468,7 +469,7 @@ func main() {
 
 	case "issue":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|get-many|check|doctor|create|split|update|close|delete|image|dep|bulk-create|bulk-update|fanout> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|get-many|check|doctor|create|split|update|close|delete|image|dep|bulk-create|bulk-update|fanout> [arguments]\n")
 			os.Exit(1)
 		}
 		issueCommand := commandArgs[0]
@@ -486,7 +487,21 @@ func main() {
 		case "list":
 			opts, err := cli.ParseIssueListArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue list [--project <project-id>] [--json] [--deps] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue list [--project <project-id>] [--json] [--deps] [--query <text>|-q <text>] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.IssueListCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+		case "search":
+			opts, err := cli.ParseIssueSearchArgs(issueArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az issue search [--project <project-id>] [--json] [--deps] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -556,7 +571,7 @@ func main() {
 		case "create":
 			opts, err := cli.ParseIssueCreateArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]\n")
+				printIssueCreateUsage(os.Stderr)
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -570,7 +585,7 @@ func main() {
 		case "split":
 			opts, err := cli.ParseIssueSplitArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue split [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>\n")
+				printIssueSplitUsage(os.Stderr)
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -665,6 +680,59 @@ func main() {
 			default:
 				fmt.Fprintf(os.Stderr, "Unknown issue image command: %s\n", imageCommand)
 				fmt.Fprintf(os.Stderr, "Usage: az issue image <add|remove> [arguments]\n")
+				os.Exit(1)
+			}
+
+		case "document":
+			if len(issueArgs) == 0 {
+				fmt.Fprintf(os.Stderr, "Usage: az issue document <add|list|remove> [arguments]\n")
+				os.Exit(1)
+			}
+			documentCommand := issueArgs[0]
+			documentArgs := issueArgs[1:]
+			switch documentCommand {
+			case "add":
+				opts, err := cli.ParseIssueDocumentAddArgs(documentArgs)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Usage: az issue document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+					return cli.IssueDocumentAddCommand(deps, opts)
+				}); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+			case "list":
+				opts, err := cli.ParseIssueDocumentListArgs(documentArgs)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Usage: az issue document list [--project <project-id>] [--issue-id <issue-id>] [<issue-id>] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+					return cli.IssueDocumentListCommand(deps, opts)
+				}); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+			case "remove":
+				opts, err := cli.ParseIssueDocumentRemoveArgs(documentArgs)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Usage: az issue document remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+					return cli.IssueDocumentRemoveCommand(deps, opts)
+				}); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+			default:
+				fmt.Fprintf(os.Stderr, "Unknown issue document command: %s\n", documentCommand)
+				fmt.Fprintf(os.Stderr, "Usage: az issue document <add|list|remove> [arguments]\n")
 				os.Exit(1)
 			}
 
@@ -813,7 +881,7 @@ func main() {
 
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown issue command: %s\n", issueCommand)
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|get-many|check|doctor|create|split|update|close|delete|image|dep|bulk-create|bulk-update|fanout> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|get-many|check|doctor|create|split|update|close|delete|image|dep|bulk-create|bulk-update|fanout> [arguments]\n")
 			os.Exit(1)
 		}
 
@@ -1155,6 +1223,17 @@ func printWorktreeUsage() {
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  create <issue-id>     Create an issue worktree without starting a session")
+}
+
+func printIssueCreateUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage: az issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--title text] [--description text] [--json] [<title>]")
+	fmt.Fprintln(w, "Note: `az issue create \"Child task\"` auto-parents to AZEDARACH_ISSUE_ID when set; use `az issue dep add <child-id> <parent-id> --type parent-child` for another parent/root.")
+	fmt.Fprintln(w, "Note: --impl only assigns implementation/spec variant metadata; it is not parent/root selection.")
+}
+
+func printIssueSplitUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage: az issue split [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
+	fmt.Fprintln(w, "Note: use --parent or AZEDARACH_ISSUE_ID for parentage; --impl only assigns implementation/spec variant metadata.")
 }
 
 func printSessionCommandUsage(command string, namespaced bool) bool {

@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json",
-  "$version": 7,
+  "$version": 9,
   "cliTool": "codex",
   "devServer": {
     "basePort": 3000,
@@ -97,7 +97,7 @@
   "worktree": {
     "autoCleanup": true,
     "basePath": "../",
-    "initCommands": [
+    "syncInitCommands": [
       "mkdir -p .gocache .gopath",
       "base_repo=$(dirname \"$(dirname \"$(dirname \"$(git rev-parse --git-dir)\")\")\") \u0026\u0026 cp -R \"$base_repo/.gocache\" \"$base_repo/.gopath\" . 2\u003e/dev/null || true",
       "direnv allow"

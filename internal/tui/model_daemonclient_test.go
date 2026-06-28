@@ -1696,7 +1696,7 @@ func TestLoadIssuesCmdTimeoutReturnsStaleIssuesMsg(t *testing.T) {
 	if !newModel.hasRefreshLoop {
 		t.Fatal("expected refresh loop to start after stale read timeout")
 	}
-	if len(newModel.toasts) == 0 || !strings.Contains(newModel.toasts[len(newModel.toasts)-1].Message, "local-first data") {
+	if len(newModel.toasts) == 0 || !strings.Contains(newModel.toasts[len(newModel.toasts)-1].Message, "keeping current local view") {
 		t.Fatalf("toasts = %+v, want freshness warning", newModel.toasts)
 	}
 }

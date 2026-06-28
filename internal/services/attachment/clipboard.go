@@ -164,7 +164,7 @@ func readClipboardMacOSFileAlias(ctx context.Context) ([]byte, error) {
 	}
 	result := strings.TrimSpace(string(output))
 	if strings.HasPrefix(result, "ERROR:") {
-		return nil, fmt.Errorf(strings.TrimPrefix(result, "ERROR:"))
+		return nil, fmt.Errorf("%s", strings.TrimPrefix(result, "ERROR:"))
 	}
 	if result == "" {
 		return nil, fmt.Errorf("clipboard alias path was empty")
@@ -267,7 +267,7 @@ function isImageLikeType(t) {
 
 	result := strings.TrimSpace(string(output))
 	if strings.HasPrefix(result, "ERROR:") {
-		return nil, fmt.Errorf(strings.TrimPrefix(result, "ERROR:"))
+		return nil, fmt.Errorf("%s", strings.TrimPrefix(result, "ERROR:"))
 	}
 	if result == "" {
 		return nil, fmt.Errorf("jxa pasteboard fallback returned empty path")
@@ -358,7 +358,7 @@ func readClipboardMacOSPBPasteRaw(ctx context.Context) ([]byte, error) {
 	if len(output) == 0 {
 		return nil, fmt.Errorf("pbpaste returned empty output")
 	}
-	mime := detectMimeType(output)
+	mime := detectMimeType(output, "")
 	if !strings.HasPrefix(mime, "image/") {
 		return nil, fmt.Errorf("pbpaste returned non-image mime %s", mime)
 	}
@@ -378,7 +378,7 @@ func readClipboardLinux(ctx context.Context) ([]byte, error) {
 		// Try without specifying type
 		cmd = exec.CommandContext(ctx, "wl-paste", "--no-newline")
 		output, err = cmd.Output()
-		if err == nil && len(output) > 0 && detectMimeType(output) != "application/octet-stream" {
+		if err == nil && len(output) > 0 && detectMimeType(output, "") != "application/octet-stream" {
 			return output, nil
 		}
 	}

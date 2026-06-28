@@ -177,6 +177,85 @@ func TestSessionLifecycleOperationSubmitRoutesThroughDaemon(t *testing.T) {
 	}
 }
 
+func TestStartSessionOperationIncludesDedupeAndResourceKeys(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != protocol.CommandOperationSubmit {
+				t.Fatalf("command = %q, want %q", req.Command, protocol.CommandOperationSubmit)
+			}
+			var body protocol.OperationSubmitRequestBody
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal submit body: %v", err)
+			}
+			if body.ProjectID != naming.ProjectID("proj-a") || body.Kind != CommandSessionStart || body.IssueID != naming.IssueID("az-1") {
+				t.Fatalf("submit body = %+v", body)
+			}
+			if body.DedupeKey != "session.start:az-1" {
+				t.Fatalf("dedupe key = %q", body.DedupeKey)
+			}
+			for _, want := range []string{
+				"issue:proj-a:az-1",
+				"worktree:az-1",
+				"session:" + naming.CanonicalSessionID("/repo", "az-1"),
+			} {
+				if !containsString(body.ResourceKeys, want) {
+					t.Fatalf("resource keys = %+v, want %s", body.ResourceKeys, want)
+				}
+			}
+			var payload sessionCommandBody
+			if err := json.Unmarshal(body.Payload, &payload); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			if payload.ProjectID != naming.ProjectID("proj-a") || payload.SessionID != naming.SessionID("az-1") || payload.BaseBranch != "main" {
+				t.Fatalf("payload = %+v", payload)
+			}
+			if !payload.Yolo {
+				t.Fatal("expected yolo=true in session.start operation payload")
+			}
+			if payload.StartWork == nil || *payload.StartWork {
+				t.Fatalf("start_work = %v, want false", payload.StartWork)
+			}
+			if len(payload.ImagePaths) != 2 || payload.ImagePaths[0] != "/tmp/a.png" || payload.ImagePaths[1] != "/tmp/with space/image.png" {
+				t.Fatalf("image_paths = %+v", payload.ImagePaths)
+			}
+			respBody, _ := json.Marshal(protocol.OperationSubmitResponseBody{
+				Created: true,
+				Operation: protocol.OperationRecord{
+					OperationID: "op-start",
+					ProjectID:   naming.ProjectID("proj-a"),
+					IssueID:     naming.IssueID("az-1"),
+					Kind:        CommandSessionStart,
+					State:       protocol.OperationStateQueued,
+				},
+			})
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-a")
+	startWork := false
+	record, err := client.StartSessionOperation(context.Background(), StartSessionParams{
+		IssueID:    "az-1",
+		RepoDir:    "/repo",
+		BaseBranch: "main",
+		Yolo:       true,
+		StartWork:  &startWork,
+		ImagePaths: []string{"/tmp/a.png", "/tmp/with space/image.png"},
+	})
+	if err != nil {
+		t.Fatalf("StartSessionOperation error: %v", err)
+	}
+	if record.OperationID != "op-start" || record.State != protocol.OperationStateQueued {
+		t.Fatalf("record = %+v", record)
+	}
+}
+
 func TestWaitForOperationPollsUntilTerminalState(t *testing.T) {
 	var calls int
 	transport := &lifecycleRecordingTransport{
@@ -249,4 +328,13 @@ func TestWaitForOperationReturnsLastRecordOnContextDeadline(t *testing.T) {
 	if record.OperationID != "op-1" || record.State != protocol.OperationStateRunning {
 		t.Fatalf("record = %+v, want last running op-1", record)
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

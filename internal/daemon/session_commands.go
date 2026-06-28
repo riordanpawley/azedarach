@@ -21,7 +21,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
-	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
@@ -734,7 +733,29 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if worktreeManager == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "worktree manager unavailable"), nil
 	}
-	baseBranch, baseBranchAncestorIssueID := d.resolveSessionStartBaseBranch(ctx, cmd.ProjectID, cmd.BaseBranch, issueClient, worktreeManager, task)
+	baseBranch := strings.TrimSpace(cmd.BaseBranch)
+	if baseBranch == "" {
+		baseBranch = strings.TrimSpace(d.baseBranchForProject(cmd.ProjectID))
+	}
+	baseBranchAncestorIssueID := ""
+	ensuredAncestors, err := ensureAncestorWorktrees(ctx, cmd.ProjectID, task, baseBranch, worktreeManager, func(ctx context.Context, issueID string) (domain.Task, error) {
+		return issueClient.GetWithRuntime(ctx, cmd.ProjectID, issueID)
+	}, d.runtimeProjectionStateWriter(), func(ctx context.Context, initCtx worktreeInitContext) error {
+		if len(d.runtimeConfigForProject(cmd.ProjectID).WorktreeInitCommands) > 0 {
+			reportSessionStartProgress(ctx, "worktree_preflight", fmt.Sprintf("running worktree init commands for %s", initCtx.IssueID), 20)
+		}
+		if err := d.runWorktreeSyncInitCommands(ctx, initCtx); err != nil {
+			cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, initCtx.IssueID, initCtx.WorktreePath, false)
+			return fmt.Errorf("%w%s", err, cleanupNote)
+		}
+		d.startWorktreeAsyncInitCommands(initCtx)
+		return nil
+	})
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	baseBranch = ensuredAncestors.BaseBranch
+	baseBranchAncestorIssueID = ensuredAncestors.AncestorIssueID
 	reportSessionStartProgress(ctx, "worktree_preflight", fmt.Sprintf("creating or reusing worktree from %s", baseBranch), 25)
 	worktree, err := worktreeManager.CreateWithTitle(ctx, cmd.IssueID, task.Title, baseBranch)
 	reusedWorktree := false
@@ -758,10 +779,23 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		if len(d.runtimeConfigForProject(cmd.ProjectID).WorktreeInitCommands) > 0 {
 			reportSessionStartProgress(ctx, "worktree_preflight", "running worktree init commands", 35)
 		}
-		if err := d.runWorktreeInitCommands(ctx, cmd.ProjectID, worktree.Path); err != nil {
+		if err := d.runWorktreeSyncInitCommands(ctx, worktreeInitContext{
+			ProjectID:          normalizedProjectID(cmd.ProjectID),
+			IssueID:            cmd.IssueID,
+			WorktreePath:       worktree.Path,
+			ParentIssueID:      baseBranchAncestorIssueID,
+			ParentWorktreePath: ensuredAncestors.AncestorWorktreePath,
+		}); err != nil {
 			cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree init failed for %s: %v%s", cmd.IssueID, err, cleanupNote)), nil
 		}
+		d.startWorktreeAsyncInitCommands(worktreeInitContext{
+			ProjectID:          normalizedProjectID(cmd.ProjectID),
+			IssueID:            cmd.IssueID,
+			WorktreePath:       worktree.Path,
+			ParentIssueID:      baseBranchAncestorIssueID,
+			ParentWorktreePath: ensuredAncestors.AncestorWorktreePath,
+		})
 	}
 	reportSessionStartProgress(ctx, "issue_resources", "preparing issue resources", 50)
 	resourceCtx := d.issueResourceLifecycleContext(cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktree.Path, worktree.Branch)
@@ -812,7 +846,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		}
 	}
 	if cmd.StartWork {
-		d.startSessionSideEffectCommands(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktree.Path)
+		d.startSessionAsyncInitCommands(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktree.Path)
 		initialPrompt := strings.TrimSpace(cmd.Prompt)
 		if initialPrompt == "" {
 			parentIssueID := ""
@@ -822,7 +856,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			initialPrompt = buildStartWorkPrompt(cmd.IssueID, task.Type.String(), task.Title, parentIssueID != "", parentIssueID)
 		}
 		launchCommand := d.buildSessionLaunchCommandWithInitReadyPath(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, initialPrompt, sessionInitMarker.RelativePath)
-		if len(d.runtimeConfigForProject(cmd.ProjectID).SessionInitCommands) > 0 {
+		if len(d.runtimeConfigForProject(cmd.ProjectID).SessionSyncInitCommands) > 0 {
 			reportSessionStartProgress(ctx, "init_commands", "launch sent; configured init commands likely running before agent hooks", 90)
 		} else {
 			reportSessionStartProgress(ctx, "agent_launch", "launch sent; waiting for agent activity", 90)
@@ -909,60 +943,6 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		)
 	}
 	return d.commandOutput(req, output), nil
-}
-
-func (d *Daemon) resolveSessionStartBaseBranch(
-	ctx context.Context,
-	projectID string,
-	requestedBaseBranch string,
-	issueClient *issues.Client,
-	worktreeManager *git.WorktreeManager,
-	task domain.Task,
-) (baseBranch string, ancestorIssueID string) {
-	baseBranch = strings.TrimSpace(requestedBaseBranch)
-	if baseBranch == "" {
-		baseBranch = strings.TrimSpace(d.baseBranchForProject(projectID))
-	}
-	if issueClient == nil || worktreeManager == nil || task.ParentID == nil {
-		return baseBranch, ""
-	}
-
-	taskByIssue := map[string]domain.Task{
-		strings.TrimSpace(task.ID.String()): task,
-	}
-	worktreesByIssue := map[string]domain.IssueWorktreeRef{}
-	nextParentID := strings.TrimSpace(task.ParentID.String())
-	visited := map[string]struct{}{}
-	for nextParentID != "" {
-		if _, seen := visited[nextParentID]; seen {
-			break
-		}
-		visited[nextParentID] = struct{}{}
-
-		if parentWorktree, err := worktreeManager.Get(ctx, nextParentID); err == nil {
-			worktreesByIssue[nextParentID] = domain.IssueWorktreeRef{
-				Branch: strings.TrimSpace(parentWorktree.Branch),
-				Path:   strings.TrimSpace(parentWorktree.Path),
-			}
-		}
-
-		parentTask, err := issueClient.GetWithRuntime(ctx, projectID, nextParentID)
-		if err != nil {
-			break
-		}
-		taskByIssue[nextParentID] = parentTask
-
-		nextParentID = ""
-		if parentTask.ParentID != nil {
-			nextParentID = strings.TrimSpace(parentTask.ParentID.String())
-		}
-	}
-
-	if target, ok := domain.ClosestAncestorWithWorktree(task.ID.String(), taskByIssue, worktreesByIssue); ok {
-		return target.Branch, target.IssueID
-	}
-
-	return baseBranch, ""
 }
 
 func resolveSessionIssue(tasks []domain.Task, requestedIssueID string) (domain.Task, bool) {
@@ -1586,10 +1566,16 @@ func (d *Daemon) ensureConflictWorktree(ctx context.Context, projectID, issueID,
 		cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, issueID, worktree.Path, false)
 		return "", "", false, fmt.Errorf("%w%s", err, cleanupNote)
 	}
-	if err := d.runWorktreeInitCommands(ctx, projectID, worktree.Path); err != nil {
+	initCtx := worktreeInitContext{
+		ProjectID:    normalizedProjectID(projectID),
+		IssueID:      issueID,
+		WorktreePath: worktree.Path,
+	}
+	if err := d.runWorktreeSyncInitCommands(ctx, initCtx); err != nil {
 		cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, issueID, worktree.Path, false)
 		return "", "", false, fmt.Errorf("worktree init failed for %s: %w%s", issueID, err, cleanupNote)
 	}
+	d.startWorktreeAsyncInitCommands(initCtx)
 	return worktree.Path, worktree.Branch, false, nil
 }
 
@@ -1887,7 +1873,7 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 		}
 		if progress, found := progressByIssue[issueKey]; found {
 			sessionStartProgress = append(sessionStartProgress, progress)
-		} else if len(d.runtimeConfigForProject(cmd.ProjectID).SessionInitCommands) > 0 && activity == "busy" && activitySource == "session" {
+		} else if len(d.runtimeConfigForProject(cmd.ProjectID).SessionSyncInitCommands) > 0 && activity == "busy" && activitySource == "session" {
 			sessionStartProgress = append(sessionStartProgress, taskGraphSessionStartProgress{
 				IssueID:        issueIDRaw,
 				OperationState: string(protocol.OperationStateRunning),
@@ -3376,11 +3362,11 @@ func (d *Daemon) buildSessionResumeCommand(projectID, issueID, sessionID string,
 func (d *Daemon) buildSessionLaunchCommandWithInitReadyPath(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt, initReadyPath string) string {
 	projectCfg := d.runtimeConfigForProject(projectID)
 	toolCommand := d.buildCLIToolCommand(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt)
-	commands := make([]string, 0, len(projectCfg.SessionInitCommands)+2)
+	commands := make([]string, 0, len(projectCfg.SessionSyncInitCommands)+2)
 	if trapCommand := sessionInitReadyTrapCommand(initReadyPath); trapCommand != "" {
 		commands = append(commands, trapCommand)
 	}
-	for _, initCmd := range projectCfg.SessionInitCommands {
+	for _, initCmd := range projectCfg.SessionSyncInitCommands {
 		trimmed := strings.TrimSpace(initCmd)
 		if trimmed != "" {
 			commands = append(commands, trimmed)
@@ -3417,11 +3403,11 @@ func sessionInitReadyTrapCommand(initReadyPath string) string {
 	return "__azedarach_session_init_ready=0; trap " + singleQuoteForShell(action) + " EXIT"
 }
 
-const sessionSideEffectWindowName = "side-effects"
+const sessionAsyncInitWindowName = "async-init"
 const sessionInitReadyPollInterval = 100 * time.Millisecond
 
 func (d *Daemon) prepareSessionInitReadyMarker(projectID, worktreePath, issueID, sessionID string) (sessionInitReadyMarker, error) {
-	commandCount := countNonEmptyStrings(d.runtimeConfigForProject(projectID).SessionInitCommands)
+	commandCount := countNonEmptyStrings(d.runtimeConfigForProject(projectID).SessionSyncInitCommands)
 	if commandCount == 0 {
 		return sessionInitReadyMarker{}, nil
 	}
@@ -3448,8 +3434,8 @@ func sessionInitReadyMarkerPath(issueID, sessionID string) string {
 	return filepath.Join(
 		".azedarach",
 		"session-init-ready",
-		safeSessionSideEffectPathSegment(issueID),
-		safeSessionSideEffectPathSegment(sessionID),
+		safeSessionAsyncInitPathSegment(issueID),
+		safeSessionAsyncInitPathSegment(sessionID),
 		"ready",
 	)
 }
@@ -3510,15 +3496,15 @@ func sessionInitReady(path string) bool {
 	return err == nil
 }
 
-func (d *Daemon) startSessionSideEffectCommands(ctx context.Context, projectID, issueID, sessionID, worktreePath string) {
+func (d *Daemon) startSessionAsyncInitCommands(ctx context.Context, projectID, issueID, sessionID, worktreePath string) {
 	projectCfg := d.runtimeConfigForProject(projectID)
-	sideEffectCommand := buildSessionSideEffectWindowCommand(projectCfg, projectID, issueID, sessionID)
-	if strings.TrimSpace(sideEffectCommand) == "" {
+	asyncInitCommand := buildSessionAsyncInitWindowCommand(projectCfg, projectID, issueID, sessionID)
+	if strings.TrimSpace(asyncInitCommand) == "" {
 		return
 	}
 	if d.tmux == nil {
 		if d.cfg.Logger != nil {
-			d.cfg.Logger.Warn("session side-effect commands skipped; tmux client unavailable",
+			d.cfg.Logger.Warn("session async init commands skipped; tmux client unavailable",
 				"project_id", projectID,
 				"issue_id", issueID,
 				"session_id", sessionID,
@@ -3526,9 +3512,9 @@ func (d *Daemon) startSessionSideEffectCommands(ctx context.Context, projectID, 
 		}
 		return
 	}
-	if _, err := d.tmux.EnsureWindow(ctx, sessionID, sessionSideEffectWindowName, worktreePath); err != nil {
+	if _, err := d.tmux.EnsureWindow(ctx, sessionID, sessionAsyncInitWindowName, worktreePath); err != nil {
 		if d.cfg.Logger != nil {
-			d.cfg.Logger.Warn("session side-effect window setup failed",
+			d.cfg.Logger.Warn("session async init window setup failed",
 				"project_id", projectID,
 				"issue_id", issueID,
 				"session_id", sessionID,
@@ -3537,9 +3523,9 @@ func (d *Daemon) startSessionSideEffectCommands(ctx context.Context, projectID, 
 		}
 		return
 	}
-	target := sessionID + ":" + sessionSideEffectWindowName
-	if err := d.tmux.SendKeys(ctx, target, sideEffectCommand); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Warn("session side-effect command dispatch failed",
+	target := sessionID + ":" + sessionAsyncInitWindowName
+	if err := d.tmux.SendKeys(ctx, target, asyncInitCommand); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn("session async init command dispatch failed",
 			"project_id", projectID,
 			"issue_id", issueID,
 			"session_id", sessionID,
@@ -3549,16 +3535,16 @@ func (d *Daemon) startSessionSideEffectCommands(ctx context.Context, projectID, 
 	}
 }
 
-func buildSessionSideEffectWindowCommand(projectCfg daemonProjectRuntimeConfig, projectID, issueID, sessionID string) string {
-	sideEffectCommands := buildSessionSideEffectCommands(projectCfg.SessionSideEffectCommands, issueID, sessionID)
-	if len(sideEffectCommands) == 0 {
+func buildSessionAsyncInitWindowCommand(projectCfg daemonProjectRuntimeConfig, projectID, issueID, sessionID string) string {
+	asyncInitCommands := buildSessionAsyncInitCommands(projectCfg.SessionAsyncInitCommands, issueID, sessionID)
+	if len(asyncInitCommands) == 0 {
 		return ""
 	}
-	commands := make([]string, 0, len(sideEffectCommands)+2)
+	commands := make([]string, 0, len(asyncInitCommands)+2)
 	if contextExport := sessionLaunchContextExportCommand(projectID, issueID, sessionID); contextExport != "" {
 		commands = append(commands, contextExport)
 	}
-	commands = append(commands, sideEffectCommands...)
+	commands = append(commands, asyncInitCommands...)
 	return strings.Join(commands, "; ")
 }
 
@@ -3589,44 +3575,44 @@ func sessionLaunchContextExportCommand(projectID, issueID, sessionID string) str
 	return "export " + strings.Join(assignments, " ")
 }
 
-func buildSessionSideEffectCommands(sideEffectCommands []string, issueID, sessionID string) []string {
-	if len(sideEffectCommands) == 0 {
+func buildSessionAsyncInitCommands(asyncInitCommands []string, issueID, sessionID string) []string {
+	if len(asyncInitCommands) == 0 {
 		return nil
 	}
-	logDir := sessionSideEffectLogDir(issueID, sessionID)
-	commands := make([]string, 0, len(sideEffectCommands))
+	logDir := sessionAsyncInitLogDir(issueID, sessionID)
+	commands := make([]string, 0, len(asyncInitCommands))
 	index := 0
-	for _, sideEffectCmd := range sideEffectCommands {
-		trimmed := strings.TrimSpace(sideEffectCmd)
+	for _, asyncInitCmd := range asyncInitCommands {
+		trimmed := strings.TrimSpace(asyncInitCmd)
 		if trimmed == "" {
 			continue
 		}
 		index++
 		logPath := filepath.ToSlash(filepath.Join(logDir, fmt.Sprintf("%03d.log", index)))
-		commands = append(commands, buildSessionSideEffectCommand(index, trimmed, logDir, logPath))
+		commands = append(commands, buildSessionAsyncInitCommand(index, trimmed, logDir, logPath))
 	}
 	return commands
 }
 
-func buildSessionSideEffectCommand(index int, command, logDir, logPath string) string {
+func buildSessionAsyncInitCommand(index int, command, logDir, logPath string) string {
 	quotedLogDir := singleQuoteForShell(filepath.ToSlash(logDir))
 	quotedLogPath := singleQuoteForShell(filepath.ToSlash(logPath))
 	quotedCommand := singleQuoteForShell(command)
 	return fmt.Sprintf(
 		"mkdir -p %s && echo %s && { printf 'command: %%s\\n' %s; (%s); status=$?; printf 'exit status: %%s\\n' \"$status\"; } 2>&1 | tee -a %s",
 		quotedLogDir,
-		singleQuoteForShell(fmt.Sprintf("session side-effect[%d] log: %s", index, filepath.ToSlash(logPath))),
+		singleQuoteForShell(fmt.Sprintf("session async-init[%d] log: %s", index, filepath.ToSlash(logPath))),
 		quotedCommand,
 		command,
 		quotedLogPath,
 	)
 }
 
-func sessionSideEffectLogDir(issueID, sessionID string) string {
-	return filepath.Join(".azedarach", "session-side-effects", safeSessionSideEffectPathSegment(issueID), safeSessionSideEffectPathSegment(sessionID))
+func sessionAsyncInitLogDir(issueID, sessionID string) string {
+	return filepath.Join(".azedarach", "session-async-init", safeSessionAsyncInitPathSegment(issueID), safeSessionAsyncInitPathSegment(sessionID))
 }
 
-func safeSessionSideEffectPathSegment(value string) string {
+func safeSessionAsyncInitPathSegment(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return "unknown"
@@ -3909,13 +3895,51 @@ func issueResourceCleanupOutput(result issueResourceLifecycleResult) string {
 	return fmt.Sprintf("Issue resources cleaned: %d command(s)", len(result.Ran))
 }
 
+const worktreeAsyncInitTimeout = 30 * time.Minute
+
 func (d *Daemon) runWorktreeInitCommands(ctx context.Context, projectID string, worktreePath string) error {
-	commands := d.runtimeConfigForProject(projectID).WorktreeInitCommands
+	return d.runWorktreeSyncInitCommands(ctx, worktreeInitContext{
+		ProjectID:    normalizedProjectID(projectID),
+		WorktreePath: worktreePath,
+	})
+}
+
+func (d *Daemon) runWorktreeSyncInitCommands(ctx context.Context, initCtx worktreeInitContext) error {
+	projectCfg := d.runtimeConfigForProject(initCtx.ProjectID)
+	return d.runWorktreeInitCommandList(ctx, initCtx, "sync", projectCfg.WorktreeInitCommands)
+}
+
+func (d *Daemon) startWorktreeAsyncInitCommands(initCtx worktreeInitContext) {
+	projectCfg := d.runtimeConfigForProject(initCtx.ProjectID)
+	commands := append([]string(nil), projectCfg.WorktreeAsyncInitCommands...)
+	if len(commands) == 0 {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), worktreeAsyncInitTimeout)
+		defer cancel()
+		if err := d.runWorktreeInitCommandList(ctx, initCtx, "async", commands); err != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("worktree async init failed",
+				"project_id", initCtx.ProjectID,
+				"issue_id", initCtx.IssueID,
+				"worktree", initCtx.WorktreePath,
+				"error", err,
+			)
+		}
+	}()
+}
+
+func (d *Daemon) runWorktreeInitCommandList(ctx context.Context, initCtx worktreeInitContext, phase string, commands []string) error {
 	if len(commands) == 0 {
 		return nil
 	}
 
-	shell := strings.TrimSpace(d.runtimeConfigForProject(projectID).SessionShell)
+	projectID := normalizedProjectID(initCtx.ProjectID)
+	if strings.TrimSpace(initCtx.ProjectRoot) == "" {
+		initCtx.ProjectRoot = d.resolveRepoDirForProject(projectID)
+	}
+	projectCfg := d.runtimeConfigForProject(projectID)
+	shell := strings.TrimSpace(projectCfg.SessionShell)
 	if shell == "" {
 		shell = appconfig.DefaultSessionShell()
 	}
@@ -3926,7 +3950,8 @@ func (d *Daemon) runWorktreeInitCommands(ctx context.Context, projectID string, 
 			continue
 		}
 		cmd := exec.CommandContext(ctx, shell, "-lc", trimmed)
-		cmd.Dir = worktreePath
+		cmd.Dir = initCtx.WorktreePath
+		cmd.Env = worktreeInitCommandEnv(initCtx, phase)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("%s: %w (%s)", trimmed, err, strings.TrimSpace(string(output)))
@@ -3934,6 +3959,20 @@ func (d *Daemon) runWorktreeInitCommands(ctx context.Context, projectID string, 
 	}
 
 	return nil
+}
+
+func worktreeInitCommandEnv(initCtx worktreeInitContext, phase string) []string {
+	env := os.Environ()
+	env = append(env,
+		"AZEDARACH_PROJECT_ID="+normalizedProjectID(initCtx.ProjectID),
+		"AZEDARACH_PROJECT_ROOT="+strings.TrimSpace(initCtx.ProjectRoot),
+		"AZEDARACH_ISSUE_ID="+strings.TrimSpace(initCtx.IssueID),
+		"AZEDARACH_WORKTREE_PATH="+strings.TrimSpace(initCtx.WorktreePath),
+		"AZEDARACH_PARENT_ISSUE_ID="+strings.TrimSpace(initCtx.ParentIssueID),
+		"AZEDARACH_PARENT_WORKTREE_PATH="+strings.TrimSpace(initCtx.ParentWorktreePath),
+		"AZEDARACH_WORKTREE_INIT_PHASE="+strings.TrimSpace(phase),
+	)
+	return env
 }
 
 func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {

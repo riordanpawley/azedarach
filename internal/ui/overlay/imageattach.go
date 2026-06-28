@@ -22,7 +22,7 @@ const (
 	imageAttachModePreview
 )
 
-// ImageAttachOverlay manages image attachments for a task
+// ImageAttachOverlay manages attachments for a task.
 type ImageAttachOverlay struct {
 	twoPaneDialogChrome
 	dialogViewportState
@@ -57,7 +57,7 @@ type OpenImagePreviewMsg struct {
 	InitialIndex int
 }
 
-// NewImageAttachOverlay creates a new image attachment overlay
+// NewImageAttachOverlay creates a new attachment overlay.
 func NewImageAttachOverlay(issueID string, service ImageAttachmentService) *ImageAttachOverlay {
 	ti := textinput.New()
 	ti.Placeholder = "Enter file path..."
@@ -411,7 +411,7 @@ func (i *ImageAttachOverlay) renderFileInputContent() string {
 
 // Title returns the overlay title
 func (i *ImageAttachOverlay) Title() string {
-	return "Image Attachments"
+	return "Attachments"
 }
 
 // Size returns the overlay dimensions

@@ -10,23 +10,24 @@ import (
 
 // Config represents the full Azedarach configuration
 type Config struct {
-	CLITool        string               `json:"cliTool"`
-	IssueTracker   IssueTrackerConfig   `json:"issueTracker"`
-	Git            GitConfig            `json:"git"`
-	GitHooks       GitHooksConfig       `json:"githooks"`
-	Keyboard       KeyboardConfig       `json:"keyboard"`
-	Session        SessionConfig        `json:"session"`
-	PR             PRConfig             `json:"pr"`
-	Merge          MergeConfig          `json:"merge"`
-	Notifications  NotifyConfig         `json:"notifications"`
-	Issues         IssuesConfig         `json:"issues"`
-	Network        NetworkConfig        `json:"network"`
-	DevServer      DevServerConfig      `json:"devServer"`
-	Worktree       WorktreeConfig       `json:"worktree"`
-	IssueResources IssueResourcesConfig `json:"issueResources"`
-	Spec           SpecConfig           `json:"spec"`
-	Orchestration  OrchestrationConfig  `json:"orchestration"`
-	Diagnostics    DiagnosticsConfig    `json:"diagnostics"`
+	CLITool          string                 `json:"cliTool"`
+	IssueTracker     IssueTrackerConfig     `json:"issueTracker"`
+	Git              GitConfig              `json:"git"`
+	GitHooks         GitHooksConfig         `json:"githooks"`
+	Keyboard         KeyboardConfig         `json:"keyboard"`
+	Session          SessionConfig          `json:"session"`
+	PR               PRConfig               `json:"pr"`
+	Merge            MergeConfig            `json:"merge"`
+	Notifications    NotifyConfig           `json:"notifications"`
+	Issues           IssuesConfig           `json:"issues"`
+	Network          NetworkConfig          `json:"network"`
+	DevServer        DevServerConfig        `json:"devServer"`
+	Worktree         WorktreeConfig         `json:"worktree"`
+	IssueResources   IssueResourcesConfig   `json:"issueResources"`
+	ScheduledScripts ScheduledScriptsConfig `json:"scheduledScripts"`
+	Spec             SpecConfig             `json:"spec"`
+	Orchestration    OrchestrationConfig    `json:"orchestration"`
+	Diagnostics      DiagnosticsConfig      `json:"diagnostics"`
 }
 
 type IssueTrackerConfig struct {
@@ -105,12 +106,16 @@ type KeyboardConfig struct {
 
 // SessionConfig contains session management settings
 type SessionConfig struct {
-	DangerouslySkipPermissions bool     `json:"dangerouslySkipPermissions"`
-	Shell                      string   `json:"shell"`
-	TimeoutMs                  int      `json:"timeoutMs"`
-	LogDir                     string   `json:"logDir"`
-	InitCommands               []string `json:"initCommands"`
-	SideEffectCommands         []string `json:"sideEffectCommands"`
+	DangerouslySkipPermissions bool   `json:"dangerouslySkipPermissions"`
+	Shell                      string `json:"shell"`
+	TimeoutMs                  int    `json:"timeoutMs"`
+	LogDir                     string `json:"logDir"`
+	// Deprecated: use SyncInitCommands instead.
+	InitCommands []string `json:"initCommands"`
+	// Deprecated: use AsyncInitCommands instead.
+	SideEffectCommands []string `json:"sideEffectCommands"`
+	SyncInitCommands   []string `json:"syncInitCommands"`
+	AsyncInitCommands  []string `json:"asyncInitCommands"`
 }
 
 // PRConfig contains pull request settings
@@ -158,11 +163,13 @@ type DevServerConfig struct {
 
 // WorktreeConfig contains git worktree settings
 type WorktreeConfig struct {
-	BasePath     string   `json:"basePath"`
-	NameFormat   string   `json:"nameFormat"`
-	AutoCleanup  bool     `json:"autoCleanup"`
-	KeepDays     int      `json:"keepDays"`
-	InitCommands []string `json:"initCommands"`
+	BasePath          string   `json:"basePath"`
+	NameFormat        string   `json:"nameFormat"`
+	AutoCleanup       bool     `json:"autoCleanup"`
+	KeepDays          int      `json:"keepDays"`
+	InitCommands      []string `json:"initCommands"`
+	SyncInitCommands  []string `json:"syncInitCommands"`
+	AsyncInitCommands []string `json:"asyncInitCommands"`
 }
 
 // IssueResourcesConfig contains opt-in issue-scoped lifecycle hooks.
@@ -172,6 +179,24 @@ type IssueResourcesConfig struct {
 	FailedStartCleanupCommands []string          `json:"failedStartCleanupCommands"`
 	CleanupCommands            []string          `json:"cleanupCommands"`
 	ReconcileCommand           string            `json:"reconcileCommand"`
+}
+
+// ScheduledScriptsConfig contains daemon-owned project maintenance scripts.
+type ScheduledScriptsConfig struct {
+	Env     map[string]string       `json:"env"`
+	Scripts []ScheduledScriptConfig `json:"scripts"`
+}
+
+type ScheduledScriptConfig struct {
+	Name         string            `json:"name"`
+	Command      string            `json:"command"`
+	Enabled      bool              `json:"enabled"`
+	CWD          string            `json:"cwd"`
+	Interval     string            `json:"interval"`
+	Schedule     string            `json:"schedule"`
+	TimeoutMs    int               `json:"timeoutMs"`
+	AllowOverlap bool              `json:"allowOverlap"`
+	Env          map[string]string `json:"env"`
 }
 
 type SpecConfig struct {
@@ -240,6 +265,8 @@ func DefaultConfig() *Config {
 			LogDir:             filepath.Join(homeDir, ".azedarach", "logs"),
 			InitCommands:       []string{},
 			SideEffectCommands: []string{},
+			SyncInitCommands:   []string{},
+			AsyncInitCommands:  []string{},
 		},
 		PR: PRConfig{
 			DraftByDefault:     true,
@@ -273,11 +300,13 @@ func DefaultConfig() *Config {
 			Environments: make(map[string]string),
 		},
 		Worktree: WorktreeConfig{
-			BasePath:     "../",
-			NameFormat:   "{project}-{issueID}",
-			AutoCleanup:  true,
-			KeepDays:     7,
-			InitCommands: []string{},
+			BasePath:          "../",
+			NameFormat:        "{project}-{issueID}",
+			AutoCleanup:       true,
+			KeepDays:          7,
+			InitCommands:      []string{},
+			SyncInitCommands:  []string{},
+			AsyncInitCommands: []string{},
 		},
 		IssueResources: IssueResourcesConfig{
 			Env:                        map[string]string{},
@@ -285,6 +314,10 @@ func DefaultConfig() *Config {
 			FailedStartCleanupCommands: []string{},
 			CleanupCommands:            []string{},
 			ReconcileCommand:           "",
+		},
+		ScheduledScripts: ScheduledScriptsConfig{
+			Env:     map[string]string{},
+			Scripts: []ScheduledScriptConfig{},
 		},
 		Spec: SpecConfig{
 			Enabled: true,
@@ -334,7 +367,7 @@ const (
 	LocalConfigFileName  = "config.local.json"
 	ConfigSchemaFileName = "config.schema.json"
 	ConfigSchemaURL      = "https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json"
-	CurrentConfigVersion = 9
+	CurrentConfigVersion = 10
 )
 
 type configFileMetadata struct {
@@ -446,8 +479,54 @@ func NormalizeConfigFileRaw(raw map[string]any) {
 	if issues, ok := raw["issues"].(map[string]any); ok {
 		delete(issues, "autoFinalizeOnClose")
 	}
+	if session, ok := raw["session"].(map[string]any); ok {
+		migrateSessionInitCommands(session)
+	}
+	if worktree, ok := raw["worktree"].(map[string]any); ok {
+		migrateWorktreeInitCommands(worktree)
+	}
 	raw["$schema"] = ConfigSchemaURL
 	raw["$version"] = CurrentConfigVersion
+}
+
+func migrateSessionInitCommands(session map[string]any) {
+	migrateCommandArray(session, "initCommands", "syncInitCommands")
+	migrateCommandArray(session, "sideEffectCommands", "asyncInitCommands")
+}
+
+func migrateWorktreeInitCommands(worktree map[string]any) {
+	migrateCommandArray(worktree, "initCommands", "syncInitCommands")
+}
+
+func migrateCommandArray(raw map[string]any, legacyKey, currentKey string) {
+	initCommands, ok := configRawArray(raw[legacyKey])
+	if !ok {
+		delete(raw, legacyKey)
+		return
+	}
+	if len(initCommands) > 0 {
+		currentCommands, _ := configRawArray(raw[currentKey])
+		migrated := make([]any, 0, len(initCommands)+len(currentCommands))
+		migrated = append(migrated, initCommands...)
+		migrated = append(migrated, currentCommands...)
+		raw[currentKey] = migrated
+	}
+	delete(raw, legacyKey)
+}
+
+func configRawArray(value any) ([]any, bool) {
+	switch values := value.(type) {
+	case []any:
+		return values, true
+	case []string:
+		out := make([]any, 0, len(values))
+		for _, value := range values {
+			out = append(out, value)
+		}
+		return out, true
+	default:
+		return nil, false
+	}
 }
 
 func ResolveConfigBase(startPath string) (string, error) {
@@ -580,6 +659,15 @@ func MergeWithDefaults(cfg *Config) *Config {
 	if cfg.Session.InitCommands == nil {
 		cfg.Session.InitCommands = defaults.Session.InitCommands
 	}
+	if cfg.Session.SideEffectCommands == nil {
+		cfg.Session.SideEffectCommands = defaults.Session.SideEffectCommands
+	}
+	if cfg.Session.SyncInitCommands == nil {
+		cfg.Session.SyncInitCommands = defaults.Session.SyncInitCommands
+	}
+	if cfg.Session.AsyncInitCommands == nil {
+		cfg.Session.AsyncInitCommands = defaults.Session.AsyncInitCommands
+	}
 
 	// Merge Merge config
 	if cfg.Merge.Strategy == "" {
@@ -629,6 +717,12 @@ func MergeWithDefaults(cfg *Config) *Config {
 	if cfg.Worktree.InitCommands == nil {
 		cfg.Worktree.InitCommands = defaults.Worktree.InitCommands
 	}
+	if cfg.Worktree.SyncInitCommands == nil {
+		cfg.Worktree.SyncInitCommands = defaults.Worktree.SyncInitCommands
+	}
+	if cfg.Worktree.AsyncInitCommands == nil {
+		cfg.Worktree.AsyncInitCommands = defaults.Worktree.AsyncInitCommands
+	}
 	if cfg.IssueResources.Env == nil {
 		cfg.IssueResources.Env = defaults.IssueResources.Env
 	}
@@ -640,6 +734,17 @@ func MergeWithDefaults(cfg *Config) *Config {
 	}
 	if cfg.IssueResources.CleanupCommands == nil {
 		cfg.IssueResources.CleanupCommands = defaults.IssueResources.CleanupCommands
+	}
+	if cfg.ScheduledScripts.Env == nil {
+		cfg.ScheduledScripts.Env = defaults.ScheduledScripts.Env
+	}
+	if cfg.ScheduledScripts.Scripts == nil {
+		cfg.ScheduledScripts.Scripts = defaults.ScheduledScripts.Scripts
+	}
+	for i := range cfg.ScheduledScripts.Scripts {
+		if cfg.ScheduledScripts.Scripts[i].Env == nil {
+			cfg.ScheduledScripts.Scripts[i].Env = map[string]string{}
+		}
 	}
 	if strings.TrimSpace(cfg.Orchestration.Via) == "" {
 		cfg.Orchestration.Via = defaults.Orchestration.Via

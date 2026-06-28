@@ -149,7 +149,7 @@ func (m *ActionMenu) buildActions() []Action {
 		Action{Key: "W", Label: "Delete task + cleanup worktree", Enabled: hasIssueScopedCleanupTarget && !activeMutation},
 	)
 
-	actions = append(actions, Action{Key: "i", Label: "Image attachments", Enabled: true})
+	actions = append(actions, Action{Key: "i", Label: "Attachments", Enabled: true})
 
 	// Task actions separator
 	actions = append(actions, Action{Key: "", Label: "───────────────────", Enabled: false})

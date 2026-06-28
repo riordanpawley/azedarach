@@ -125,8 +125,8 @@ type SessionConfig struct {
     Shell        string    // default: "zsh"
     TimeoutMs    int       // default: 30000
     LogDir       string    // default: "~/.azedarach/logs"
-    InitCommands []string  // blocking commands to run before AI tool launch
-    SideEffectCommands []string // non-blocking commands run in a tmux side-effects window
+    SyncInitCommands []string  // blocking commands to run before AI tool launch
+    AsyncInitCommands []string // non-blocking commands run in a tmux async-init window
 }
 ```
 
@@ -144,12 +144,23 @@ type DevServerConfig struct {
 
 ```go
 type WorktreeConfig struct {
-    BasePath    string  // default: "../"
-    NameFormat  string  // default: "{project}-{beadID}"
-    AutoCleanup bool
-    KeepDays    int     // days to keep old worktrees
+    BasePath          string    // default: "../"
+    NameFormat        string    // default: "{project}-{issueID}"
+    AutoCleanup       bool
+    KeepDays          int       // days to keep old worktrees
+    SyncInitCommands  []string  // blocking readiness commands
+    AsyncInitCommands []string  // non-blocking warmup commands
 }
 ```
+
+Older `session.initCommands` entries are migrated into
+`session.syncInitCommands`; older `session.sideEffectCommands` entries are
+migrated into `session.asyncInitCommands`. Older `worktree.initCommands`
+entries are migrated into `worktree.syncInitCommands` when config is loaded or
+saved. Blocking worktree init must complete for each newly created ancestor
+before a nested descendant worktree is created from it. `worktree.asyncInitCommands`
+starts after blocking init succeeds and does not delay session startup or nested
+worktree fanout.
 
 ## Configuration Files
 

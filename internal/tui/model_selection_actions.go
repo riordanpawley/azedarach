@@ -587,7 +587,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, m.requestWorktreeCleanupConfirmationCmd(task.ID.String(), true)
 
 	case "i":
-		// Image attachments
+		// Attachments
 		attachOverlay := overlay.NewImageAttachOverlay(task.ID.String(), m.attachmentService)
 		return m, m.openOverlay(attachOverlay)
 

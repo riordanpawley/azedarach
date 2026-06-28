@@ -121,7 +121,7 @@ type taskDeleteRequest struct {
 }
 
 type taskCloseResult struct {
-	TaskID                 string                 `json:"task_id"`
+	TaskID                     string                 `json:"task_id"`
 	Status                     string                 `json:"status"`
 	IntegrationRequested       bool                   `json:"integration_requested,omitempty"`
 	Integrated                 bool                   `json:"integrated,omitempty"`
@@ -132,7 +132,7 @@ type taskCloseResult struct {
 	WorktreeForced             bool                   `json:"worktree_forced,omitempty"`
 	Revision                   uint64                 `json:"revision,omitempty"`
 	Phases                     []taskClosePhaseTiming `json:"phases,omitempty"`
-	AutoClosedChildren     []string               `json:"auto_closed_children,omitempty"`
+	AutoClosedChildren         []string               `json:"auto_closed_children,omitempty"`
 	WorktreeCleanupDeferred    bool                   `json:"worktree_cleanup_deferred,omitempty"`
 	WorktreeCleanupOperationID string                 `json:"worktree_cleanup_operation_id,omitempty"`
 }
@@ -176,13 +176,14 @@ type taskDeletePreflightResult struct {
 }
 
 type taskGraphReadinessResult struct {
-	RootIssueID          string                          `json:"root_issue_id"`
-	Runnable             []string                        `json:"runnable"`
-	Pending              []taskGraphPendingStart         `json:"pending,omitempty"`
-	Active               []string                        `json:"active,omitempty"`
-	ActiveSessions       []taskGraphActiveSession        `json:"active_sessions,omitempty"`
-	SessionStartProgress []taskGraphSessionStartProgress `json:"session_start_progress,omitempty"`
-	Blocked              map[string]string               `json:"blocked"`
+	RootIssueID            string                          `json:"root_issue_id"`
+	Runnable               []string                        `json:"runnable"`
+	Pending                []taskGraphPendingStart         `json:"pending,omitempty"`
+	Active                 []string                        `json:"active,omitempty"`
+	ActiveSessions         []taskGraphActiveSession        `json:"active_sessions,omitempty"`
+	SessionStartProgress   []taskGraphSessionStartProgress `json:"session_start_progress,omitempty"`
+	StaleCloseableChildren []taskStaleCloseableCandidate   `json:"stale_closeable_children,omitempty"`
+	Blocked                map[string]string               `json:"blocked"`
 }
 
 type taskGraphPendingStart struct {
@@ -216,10 +217,18 @@ type taskGraphSessionStartProgress struct {
 }
 
 type taskCompleteCheckResult struct {
-	RootIssueID string   `json:"root_issue_id"`
-	Pass        bool     `json:"pass"`
-	Reasons     []string `json:"reasons,omitempty"`
-	Advice      []string `json:"advice,omitempty"`
+	RootIssueID            string                        `json:"root_issue_id"`
+	Pass                   bool                          `json:"pass"`
+	Reasons                []string                      `json:"reasons,omitempty"`
+	Advice                 []string                      `json:"advice,omitempty"`
+	StaleCloseableChildren []taskStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
+}
+
+type taskStaleCloseableCandidate struct {
+	IssueID          string   `json:"issue_id"`
+	Status           string   `json:"status"`
+	Evidence         []string `json:"evidence"`
+	SuggestedCommand string   `json:"suggested_command"`
 }
 
 type taskIntegrationReadinessResult struct {
@@ -261,52 +270,56 @@ func (d *Daemon) sourceForTaskInvariant(invariant daemonInvariantID) daemonInvar
 func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	resp := d.successResponse(req)
 	projectID := d.projectID(req.Meta)
-	startedAt := time.Now()
-	cacheStartedAt := time.Now()
-	if cached, ok := d.readFreshTaskListSnapshotCache(projectID); ok {
-		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", true)
-		payload := buildTaskListSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks, cached.SummariesOnly)
-		marshalStartedAt := time.Now()
-		body, err := json.Marshal(payload)
-		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(cached.Tasks), "cache_hit", true)
-		if err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-		}
-		resp.Body = body
-		resp.Revision = payload.SnapshotRevision
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.Info("daemon task list completed", "project_id", projectID, "task_count", len(cached.Tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "cache_hit", true)
-		}
-		return resp, nil
+	listReq, err := decodeTaskListRequest(req.Body)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", false)
-	result, shared, err := d.loadTaskListSnapshot(ctx, req, projectID)
+	query := strings.TrimSpace(listReq.Query)
+	startedAt := time.Now()
+	result, shared, err := d.loadTaskListSnapshot(ctx, req, projectID, query)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	payload := buildTaskListSnapshotPayload(projectID, result.Revision, result.LastCheckedAt, result.Freshness, result.Tasks, result.SummariesOnly)
 	marshalStartedAt := time.Now()
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(result.Tasks), "cache_hit", false, "shared_load", shared, "query", query != "")
 	body, err := json.Marshal(payload)
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(result.Tasks), "cache_hit", false, "shared_load", shared)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp.Body = body
 	resp.Revision = payload.SnapshotRevision
 	if d.cfg.Logger != nil {
-		d.cfg.Logger.Info("daemon task list completed", "project_id", projectID, "task_count", len(result.Tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "shared_load", shared)
+		d.cfg.Logger.Info("daemon task list completed", "project_id", projectID, "task_count", len(result.Tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "shared_load", shared, "query", query != "")
 	}
 	return resp, nil
 }
 
-func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string) (taskListSnapshotLoadResult, bool, error) {
+func decodeTaskListRequest(body []byte) (protocol.TaskListRequestBody, error) {
+	if len(body) == 0 || strings.TrimSpace(string(body)) == "null" {
+		return protocol.TaskListRequestBody{}, nil
+	}
+	var req protocol.TaskListRequestBody
+	if err := json.Unmarshal(body, &req); err != nil {
+		return protocol.TaskListRequestBody{}, err
+	}
+	req.Query = strings.TrimSpace(req.Query)
+	return req, nil
+}
+
+func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string) (taskListSnapshotLoadResult, bool, error) {
 	projectID = d.canonicalProjectID(projectID)
+	query = strings.TrimSpace(query)
+	loadKey := projectID
+	if query != "" {
+		loadKey = projectID + "\x00query:" + strings.ToLower(query)
+	}
 
 	d.taskListSnapshotLoadMu.Lock()
 	if d.taskListSnapshotLoads == nil {
 		d.taskListSnapshotLoads = map[string]*taskListSnapshotLoad{}
 	}
-	if load := d.taskListSnapshotLoads[projectID]; load != nil {
+	if load := d.taskListSnapshotLoads[loadKey]; load != nil {
 		d.taskListSnapshotLoadMu.Unlock()
 		select {
 		case <-ctx.Done():
@@ -316,61 +329,77 @@ func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestE
 		}
 	}
 	load := &taskListSnapshotLoad{done: make(chan struct{})}
-	d.taskListSnapshotLoads[projectID] = load
+	d.taskListSnapshotLoads[loadKey] = load
 	d.taskListSnapshotLoadMu.Unlock()
 
 	buildCtx, cancel := context.WithTimeout(context.Background(), taskListSnapshotLoadTimeout)
 	defer cancel()
-	result, err := d.buildTaskListSnapshot(buildCtx, req, projectID)
+	result, err := d.buildTaskListSnapshot(buildCtx, req, projectID, query)
 	load.result = cloneTaskListSnapshotLoadResult(result)
 	load.err = err
 
 	d.taskListSnapshotLoadMu.Lock()
-	delete(d.taskListSnapshotLoads, projectID)
+	delete(d.taskListSnapshotLoads, loadKey)
 	close(load.done)
 	d.taskListSnapshotLoadMu.Unlock()
 
 	return result, false, err
 }
 
-func cloneTaskListSnapshotLoadResult(result taskListSnapshotLoadResult) taskListSnapshotLoadResult {
-	result.Tasks = cloneTasks(result.Tasks)
-	return result
-}
-
-func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string) (taskListSnapshotLoadResult, error) {
+func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string) (taskListSnapshotLoadResult, error) {
+	query = strings.TrimSpace(query)
 	refreshStartedAt := time.Now()
 	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("task list session runtime refresh failed", "project_id", projectID, "error", err)
+		d.cfg.Logger.Debug("task list session runtime projection refresh failed", "project_id", projectID, "error", err)
 	}
 	d.triggerWorktreeStateRefresh(projectID)
 	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.worktree_refresh_trigger", refreshStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
 	if d.cfg.Logger != nil {
-		d.cfg.Logger.Info("daemon task list requested", "project_id", projectID)
+		d.cfg.Logger.Info("daemon task list requested", "project_id", projectID, "query", query != "")
 	}
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return taskListSnapshotLoadResult{}, errors.New("issue store unavailable")
 	}
 	queryStartedAt := time.Now()
-	tasks, err := issueClient.ListSummariesWithRuntime(ctx, projectID)
-	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.issue_store_list_summaries_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
+	var (
+		tasks         []domain.Task
+		summariesOnly bool
+		err           error
+	)
+	if query == "" {
+		tasks, err = issueClient.ListSummariesWithRuntime(ctx, projectID)
+		summariesOnly = true
+		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.issue_store_list_summaries_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
+	} else {
+		tasks, err = issueClient.SearchWithRuntime(ctx, projectID, query)
+	}
 	if err != nil {
 		return taskListSnapshotLoadResult{}, err
+	}
+	if query != "" {
+		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.issue_store_search_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(tasks))
 	}
 	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
 	freshnessStartedAt := time.Now()
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
 	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.snapshot_freshness", freshnessStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "freshness", freshness)
 	revision := d.currentRevision(projectID)
-	d.storeTaskListSnapshotCache(projectID, revision, lastCheckedAt, freshness, tasks, true)
+	if query == "" {
+		d.storeTaskListSnapshotCache(projectID, revision, lastCheckedAt, freshness, tasks, summariesOnly)
+	}
 	return taskListSnapshotLoadResult{
 		Revision:      revision,
 		LastCheckedAt: lastCheckedAt,
 		Freshness:     freshness,
-		SummariesOnly: true,
+		SummariesOnly: summariesOnly,
 		Tasks:         tasks,
 	}, nil
+}
+
+func cloneTaskListSnapshotLoadResult(result taskListSnapshotLoadResult) taskListSnapshotLoadResult {
+	result.Tasks = cloneTasks(result.Tasks)
+	return result
 }
 
 func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -722,7 +751,6 @@ func taskEventBodyFromTask(projectID string, task domain.Task) protocol.TaskEven
 const taskListSnapshotStaleAfter = 15 * time.Second
 
 func (d *Daemon) taskListSnapshotFreshness(ctx context.Context, projectID string) (time.Time, protocol.TaskListFreshness) {
-	lastCheckedAt := time.Time{}
 	projectID = d.canonicalProjectID(projectID)
 
 	sessionFreshnessSource := d.sourceForTaskInvariant(taskInvariantTaskListFreshness)
@@ -731,15 +759,23 @@ func (d *Daemon) taskListSnapshotFreshness(ctx context.Context, projectID string
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("refresh session freshness cache failed", "project_id", projectID, "error", err)
 			}
-		} else {
-			snapshot := d.sessionStore.ReadSnapshot(projectID)
-			sessions := make([]daemonstate.Session, 0, len(snapshot.Sessions))
-			for _, session := range snapshot.Sessions {
-				sessions = append(sessions, session)
-			}
-			for _, session := range sessions {
-				lastCheckedAt = laterTime(lastCheckedAt, session.UpdatedAt)
-			}
+		}
+	}
+	return d.taskListSnapshotLocalProjectionFreshness(ctx, projectID)
+}
+
+func (d *Daemon) taskListSnapshotLocalProjectionFreshness(ctx context.Context, projectID string) (time.Time, protocol.TaskListFreshness) {
+	lastCheckedAt := time.Time{}
+	projectID = d.canonicalProjectID(projectID)
+
+	if d.sessionStore != nil {
+		snapshot := d.sessionStore.ReadSnapshot(projectID)
+		sessions := make([]daemonstate.Session, 0, len(snapshot.Sessions))
+		for _, session := range snapshot.Sessions {
+			sessions = append(sessions, session)
+		}
+		for _, session := range sessions {
+			lastCheckedAt = laterTime(lastCheckedAt, session.UpdatedAt)
 		}
 	}
 
@@ -3076,11 +3112,19 @@ func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID s
 	}
 
 	desc := daemonTaskGraphDescendants(rootID, children)
+	staleCloseable := daemonTaskGraphStaleCloseableCandidates(rootID, byID, children)
+	staleCloseableSet := make(map[string]struct{}, len(staleCloseable))
+	for _, candidate := range staleCloseable {
+		staleCloseableSet[candidate.IssueID] = struct{}{}
+	}
 	openDescendants := make([]string, 0, len(desc))
 	activeSessions := make([]string, 0, len(desc))
 	for _, id := range desc {
 		task := byID[id]
 		if task.Status != domain.StatusDone {
+			if _, closeable := staleCloseableSet[id.String()]; closeable {
+				continue
+			}
 			openDescendants = append(openDescendants, id.String())
 		}
 		if daemonCloseGuardTaskHasSession(task) {
@@ -3097,14 +3141,22 @@ func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID s
 	if len(openDescendants) > 0 {
 		reasons = append(reasons, fmt.Sprintf("required descendants not closed: %s", strings.Join(openDescendants, ",")))
 	}
+	if len(staleCloseable) > 0 {
+		ids := make([]string, 0, len(staleCloseable))
+		for _, candidate := range staleCloseable {
+			ids = append(ids, candidate.IssueID)
+		}
+		reasons = append(reasons, fmt.Sprintf("stale-closeable child candidates remain: %s", strings.Join(ids, ",")))
+	}
 	if len(activeSessions) > 0 {
 		reasons = append(reasons, fmt.Sprintf("active child sessions remain: %s", strings.Join(activeSessions, ",")))
 	}
 	return taskCompleteCheckResult{
-		RootIssueID: rootID.String(),
-		Pass:        len(reasons) == 0,
-		Reasons:     reasons,
-		Advice:      daemonTaskCompletionAdvice(rootID.String(), ready.Runnable, openDescendants, activeSessions),
+		RootIssueID:            rootID.String(),
+		Pass:                   len(reasons) == 0,
+		Reasons:                reasons,
+		Advice:                 daemonTaskCompletionAdvice(rootID.String(), ready.Runnable, openDescendants, activeSessions, staleCloseable),
+		StaleCloseableChildren: staleCloseable,
 	}, nil
 }
 
@@ -3203,6 +3255,7 @@ func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.
 		Active:      make([]string, 0),
 		Blocked:     make(map[string]string),
 	}
+	result.StaleCloseableChildren = daemonTaskGraphStaleCloseableCandidates(rootID, byID, children)
 	for _, idRaw := range leaves {
 		id, parseErr := naming.ParseIssueID(idRaw)
 		if parseErr != nil {
@@ -3221,9 +3274,66 @@ func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.
 			result.Blocked[idRaw] = "waiting on " + strings.Join(blockers, ",")
 			continue
 		}
+		if daemonTaskStaleCloseableCandidate(task) {
+			continue
+		}
 		result.Runnable = append(result.Runnable, idRaw)
 	}
 	return result, nil
+}
+
+func daemonTaskGraphStaleCloseableCandidates(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) []taskStaleCloseableCandidate {
+	desc := daemonTaskGraphDescendants(rootID, children)
+	out := make([]taskStaleCloseableCandidate, 0)
+	for _, id := range desc {
+		task := byID[id]
+		if !daemonTaskStaleCloseableCandidate(task) {
+			continue
+		}
+		if len(daemonTaskGraphUnresolvedBlockers(task, byID)) > 0 {
+			continue
+		}
+		out = append(out, taskStaleCloseableCandidate{
+			IssueID:          task.ID.String(),
+			Status:           string(task.Status),
+			Evidence:         daemonTaskStaleCloseableEvidence(task),
+			SuggestedCommand: fmt.Sprintf("az issue close --id %s --close-clean-children", rootID.String()),
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].IssueID < out[j].IssueID
+	})
+	return out
+}
+
+func daemonTaskStaleCloseableCandidate(task domain.Task) bool {
+	if task.Status == domain.StatusDone {
+		return false
+	}
+	if !daemonCloseGuardCleanChildAutoCloseEligible(task) {
+		return false
+	}
+	return task.Status == domain.StatusInReview || daemonCloseGuardTaskHasWorktree(task)
+}
+
+func daemonTaskStaleCloseableEvidence(task domain.Task) []string {
+	evidence := []string{
+		"no active session",
+		fmt.Sprintf("status=%s", task.Status),
+	}
+	if daemonCloseGuardTaskHasWorktree(task) {
+		evidence = append(evidence, "clean worktree")
+		evidence = append(evidence, "branch not ahead")
+		if task.GitBehindCount > 0 {
+			evidence = append(evidence, fmt.Sprintf("branch behind by %d commit(s)", task.GitBehindCount))
+		}
+	} else {
+		evidence = append(evidence, "no active worktree projection")
+	}
+	if task.Status == domain.StatusInReview {
+		evidence = append(evidence, "in_review status is completion evidence")
+	}
+	return evidence
 }
 
 func (d *Daemon) taskGraphPendingSessionStarts(ctx context.Context, projectID string) (map[string]taskGraphPendingStart, error) {
@@ -3446,7 +3556,7 @@ func taskGraphSessionStartProgressFromOperation(record daemonops.Record, now tim
 }
 
 func (d *Daemon) sessionInitCommandProgress(_ context.Context, projectID string, task domain.Task) (taskGraphSessionStartProgress, bool) {
-	if task.Session == nil || len(d.runtimeConfigForProject(projectID).SessionInitCommands) == 0 {
+	if task.Session == nil || len(d.runtimeConfigForProject(projectID).SessionSyncInitCommands) == 0 {
 		return taskGraphSessionStartProgress{}, false
 	}
 	if strings.TrimSpace(task.Session.Activity) != "busy" || strings.TrimSpace(task.Session.ActivitySource) != "session" {
@@ -3490,10 +3600,13 @@ func daemonTaskGraphSessionStartProgressList(rootID naming.IssueID, children map
 	return out
 }
 
-func daemonTaskCompletionAdvice(rootIssueID string, runnable, openDescendants, activeSessions []string) []string {
-	advice := make([]string, 0, len(runnable)+len(openDescendants)+len(activeSessions))
+func daemonTaskCompletionAdvice(rootIssueID string, runnable, openDescendants, activeSessions []string, staleCloseable []taskStaleCloseableCandidate) []string {
+	advice := make([]string, 0, len(runnable)+len(openDescendants)+len(activeSessions)+len(staleCloseable))
 	for _, id := range activeSessions {
 		advice = append(advice, fmt.Sprintf("if intentionally abandoning active worker session, repair-stop it: az orchestrate close-session --issue %s", id))
+	}
+	if len(staleCloseable) > 0 {
+		advice = append(advice, fmt.Sprintf("stale-closeable children can be handled by the parent close path: az issue close --id %s --close-clean-children", rootIssueID))
 	}
 	for _, id := range openDescendants {
 		advice = append(advice, fmt.Sprintf("after integration/evidence, close required child issue: az issue close --id %s", id))

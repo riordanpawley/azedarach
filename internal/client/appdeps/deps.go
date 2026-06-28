@@ -84,7 +84,7 @@ func Build(cfg *config.Config, repoDir string, logger *slog.Logger) Deps {
 	ensureActiveProjectPresent(registry, repoDir)
 
 	issuesPath := filepath.Join(repoDir, ".azedarach")
-	attachmentSvc := attachment.NewService(issuesPath, logger)
+	attachmentSvc := attachment.NewUnifiedService(issuesPath, logger)
 	diagService := diagnostics.NewService(portAllocator, networkChecker)
 
 	return Deps{
