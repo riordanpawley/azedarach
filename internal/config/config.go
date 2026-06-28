@@ -346,12 +346,30 @@ func SessionLogDirFor(cfg *Config, startPath string) string {
 	}
 	logDir := strings.TrimSpace(cfg.Session.LogDir)
 	if logDir != "" {
-		return logDir
+		return expandHomeDir(logDir)
 	}
 	if homeDir, err := os.UserHomeDir(); err == nil && strings.TrimSpace(homeDir) != "" {
 		return filepath.Join(homeDir, ".azedarach", "logs")
 	}
 	return filepath.Join(".", ".azedarach", "logs")
+}
+
+func expandHomeDir(path string) string {
+	if path == "~" {
+		if homeDir, err := os.UserHomeDir(); err == nil && strings.TrimSpace(homeDir) != "" {
+			return homeDir
+		}
+		return path
+	}
+	for _, prefix := range []string{"~/", `~\`} {
+		if strings.HasPrefix(path, prefix) {
+			if homeDir, err := os.UserHomeDir(); err == nil && strings.TrimSpace(homeDir) != "" {
+				return filepath.Join(homeDir, filepath.FromSlash(strings.TrimPrefix(path, prefix)))
+			}
+			return path
+		}
+	}
+	return path
 }
 
 func DefaultSessionShell() string {

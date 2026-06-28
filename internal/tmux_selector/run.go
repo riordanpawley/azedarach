@@ -118,13 +118,6 @@ func selectorLogPath(cfg *config.Config) string {
 	if cfg == nil {
 		cfg = config.DefaultConfig()
 	}
-	logDir := strings.TrimSpace(cfg.Session.LogDir)
-	if logDir == "" {
-		if homeDir, err := os.UserHomeDir(); err == nil && strings.TrimSpace(homeDir) != "" {
-			logDir = filepath.Join(homeDir, ".azedarach", "logs")
-		} else {
-			logDir = filepath.Join(".", ".azedarach", "logs")
-		}
-	}
+	logDir := config.SessionLogDirFor(cfg, "")
 	return filepath.Join(logDir, logging.TmuxSelectorLogFileName)
 }
