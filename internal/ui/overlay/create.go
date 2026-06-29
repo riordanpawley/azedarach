@@ -362,7 +362,7 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if isPasteAttachmentKey(msg) {
 			if c.attachmentSvc == nil {
 				return c, func() tea.Msg {
-					return errorMsg{err: fmt.Errorf("image attachment service unavailable")}
+					return errorMsg{err: fmt.Errorf("attachment service unavailable")}
 				}
 			}
 			return c, c.pasteAttachment()
@@ -839,9 +839,9 @@ func (c *CreateTaskOverlay) renderFormContent(width, height int) string {
 	b.WriteString("\n")
 	if strings.TrimSpace(c.id) != "" || c.attachmentSvc != nil {
 		if c.focusIndex == focusAttachments {
-			b.WriteString(focusStyle.Render("Image Attachments:"))
+			b.WriteString(focusStyle.Render("Attachments:"))
 		} else {
-			b.WriteString(labelStyle.Render("Image Attachments:"))
+			b.WriteString(labelStyle.Render("Attachments:"))
 		}
 		b.WriteString("\n")
 		b.WriteString(c.renderAttachmentList())

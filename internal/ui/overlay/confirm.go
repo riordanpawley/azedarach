@@ -16,6 +16,7 @@ type ConfirmDialog struct {
 	styles               *Styles
 	selected             bool // true = Yes, false = No
 	requireExplicitYNKey bool
+	extraKeys            map[string]SelectionMsg
 }
 
 // ConfirmResult represents the result of a confirmation dialog
@@ -40,6 +41,14 @@ func NewConfirmDialogExplicitYN(title, message string) *ConfirmDialog {
 	return dialog
 }
 
+// NewConfirmDialogExplicitYNWithExtraKeys creates a confirmation dialog that
+// accepts Y/N plus explicitly supplied extra key actions.
+func NewConfirmDialogExplicitYNWithExtraKeys(title, message string, extraKeys map[string]SelectionMsg) *ConfirmDialog {
+	dialog := NewConfirmDialogExplicitYN(title, message)
+	dialog.extraKeys = extraKeys
+	return dialog
+}
+
 // Init initializes the dialog
 func (c *ConfirmDialog) Init() tea.Cmd {
 	return nil
@@ -49,7 +58,13 @@ func (c *ConfirmDialog) Init() tea.Cmd {
 func (c *ConfirmDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
+		key := msg.String()
+		if selection, ok := c.extraKeys[key]; ok {
+			return c, func() tea.Msg {
+				return selection
+			}
+		}
+		switch key {
 		case "y", "Y":
 			// Yes - confirm and close
 			return c, func() tea.Msg {

@@ -75,8 +75,8 @@ func TestImageAttachOverlay_Title(t *testing.T) {
 	overlay := NewImageAttachOverlay("az-123", service)
 
 	title := overlay.Title()
-	if title != "Image Attachments" {
-		t.Errorf("expected title to be 'Image Attachments', got %s", title)
+	if title != "Attachments" {
+		t.Errorf("expected title to be 'Attachments', got %s", title)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -123,7 +124,7 @@ func TestView_OrchestrationOverviewStatusBarShowsOverviewHints(t *testing.T) {
 		t.Fatalf("expected non-empty rendered view")
 	}
 	lastLine := lines[len(lines)-1]
-	for _, want := range []string{"j/k", "move", "enter", "task workspace"} {
+	for _, want := range []string{"↑/↓", "j/k", "row", "←/→", "h/l", "project", "Home/End", "g/G", "top/end", "Enter", "open"} {
 		if !strings.Contains(lastLine, want) {
 			t.Fatalf("overview status bar missing %q; last line=%q", want, lastLine)
 		}
@@ -360,7 +361,7 @@ func TestView_OrchestrationOverviewShowsProgressAndGitWithoutDumpingEverything(t
 	}
 
 	view := m.View()
-	for _, want := range []string{"dirty", "+12/-3", "ahead 1 behind 0", "worker-progress: wired mailbox progress into overview"} {
+	for _, want := range []string{"dirty", "+12/-3", "ahead 1 behind 0", "mail", "worker-progress: wired mailbox progress into overview"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("overview missing %q:\n%s", want, view)
 		}
@@ -428,7 +429,7 @@ func TestView_OrchestrationOverviewFallsBackToSessionActivityProgress(t *testing
 	m.orchestrationOverview = []orchestrationProjectOverview{{Name: "Chefy", Err: errors.New("Linear read sync timed out"), Tasks: []domain.Task{task}}}
 
 	view := m.View()
-	for _, want := range []string{"Chefy", "progress", "activity: busy"} {
+	for _, want := range []string{"Chefy", "activity", "busy"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("overview missing activity progress fallback %q:\n%s", want, view)
 		}
@@ -457,14 +458,15 @@ func TestView_OrchestrationOverviewKeepsSessionsVisibleWhenBackendDegraded(t *te
 	task.Notes = "local task progress should remain visible"
 	m.orchestrationOverview = []orchestrationProjectOverview{
 		{
-			Name:  "alpha",
-			Err:   errors.New("Linear read sync timed out after 2s; showing local-first data"),
-			Tasks: []domain.Task{task},
+			Name:     "alpha",
+			Err:      errors.New("Linear read sync timed out after 2s; showing local-first data"),
+			Fallback: "local state",
+			Tasks:    []domain.Task{task},
 		},
 	}
 
 	view := m.View()
-	for _, want := range []string{"degraded: 2 backend", "alpha", "degraded: backend timeout", task.ID.String(), "busy", "git dirty +5/-1", "progress", "local task progress should remain visible"} {
+	for _, want := range []string{"2 degraded", "alpha", "local state fallback  backend timeout", task.ID.String(), "busy", "git dirty +5/-1", "notes", "local task progress should remain visible"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("overview missing %q while backend degraded:\n%s", want, view)
 		}
@@ -515,7 +517,7 @@ func TestView_OrchestrationOverviewShowsHiddenProjectLabels(t *testing.T) {
 	m.orchestrationOverviewHiddenLabels = []string{"Chefy degraded: backend timeout", "otel-tui no sessions"}
 
 	view := m.View()
-	for _, want := range []string{"hidden/degraded projects", "Chefy degraded: backend timeout", "otel-tui no sessions"} {
+	for _, want := range []string{"hidden projects", "Chefy degraded: backend timeout", "otel-tui no sessions"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("overview missing hidden project label %q:\n%s", want, view)
 		}
@@ -539,6 +541,33 @@ func TestView_OrchestrationOverviewNavigationOpensSelectedTaskWorkspace(t *testi
 	if updated.orchestrationOverviewCursor != 1 {
 		t.Fatalf("overview cursor = %d, want 1", updated.orchestrationOverviewCursor)
 	}
+	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyUp})
+	updated = updatedAny.(Model)
+	if updated.orchestrationOverviewCursor != 0 {
+		t.Fatalf("overview cursor after up = %d, want 0", updated.orchestrationOverviewCursor)
+	}
+	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	updated = updatedAny.(Model)
+	if updated.orchestrationOverviewCursor != 1 {
+		t.Fatalf("overview cursor after j = %d, want 1", updated.orchestrationOverviewCursor)
+	}
+	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	updated = updatedAny.(Model)
+	if updated.orchestrationOverviewCursor != 0 {
+		t.Fatalf("overview cursor after k = %d, want 0", updated.orchestrationOverviewCursor)
+	}
+	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyEnd})
+	updated = updatedAny.(Model)
+	if updated.orchestrationOverviewCursor != 1 {
+		t.Fatalf("overview cursor after end = %d, want 1", updated.orchestrationOverviewCursor)
+	}
+	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyHome})
+	updated = updatedAny.(Model)
+	if updated.orchestrationOverviewCursor != 0 {
+		t.Fatalf("overview cursor after home = %d, want 0", updated.orchestrationOverviewCursor)
+	}
+	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyDown})
+	updated = updatedAny.(Model)
 	openedAny, _ := updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
 	opened := openedAny.(Model)
 	workspace, ok := opened.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
@@ -547,6 +576,53 @@ func TestView_OrchestrationOverviewNavigationOpensSelectedTaskWorkspace(t *testi
 	}
 	if workspace.TaskID() != second.ID.String() {
 		t.Fatalf("workspace task = %s, want %s", workspace.TaskID(), second.ID)
+	}
+}
+
+func TestView_OrchestrationOverviewProjectNavigationJumpsBetweenProjects(t *testing.T) {
+	m := newTestModel()
+	m.width = 120
+	m.height = 24
+	m.loading = false
+	m.viewMode = ViewModeOverview
+	firstProjectFirst := m.tasks[0]
+	firstProjectFirst.HasTmuxSession = true
+	firstProjectSecond := m.tasks[1]
+	firstProjectSecond.HasTmuxSession = true
+	secondProjectFirst := m.tasks[2]
+	secondProjectFirst.HasTmuxSession = true
+	secondProjectSecond := m.tasks[3]
+	secondProjectSecond.HasTmuxSession = true
+	m.orchestrationOverview = []orchestrationProjectOverview{
+		{Name: "azedarach", Tasks: []domain.Task{firstProjectFirst, firstProjectSecond}},
+		{Name: "Chefy", Tasks: []domain.Task{secondProjectFirst, secondProjectSecond}},
+	}
+
+	updatedAny, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRight})
+	updated := updatedAny.(Model)
+	if updated.orchestrationOverviewCursor != 2 {
+		t.Fatalf("overview cursor after right = %d, want 2", updated.orchestrationOverviewCursor)
+	}
+	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyLeft})
+	updated = updatedAny.(Model)
+	if updated.orchestrationOverviewCursor != 0 {
+		t.Fatalf("overview cursor after left = %d, want 0", updated.orchestrationOverviewCursor)
+	}
+	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	updated = updatedAny.(Model)
+	if updated.orchestrationOverviewCursor != 2 {
+		t.Fatalf("overview cursor after l = %d, want 2", updated.orchestrationOverviewCursor)
+	}
+	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	updated = updatedAny.(Model)
+	if updated.orchestrationOverviewCursor != 0 {
+		t.Fatalf("overview cursor after h = %d, want 0", updated.orchestrationOverviewCursor)
+	}
+	updated.orchestrationOverviewCursor = 1
+	updatedAny, _ = updated.handleNormalMode(tea.KeyMsg{Type: tea.KeyRight})
+	updated = updatedAny.(Model)
+	if updated.orchestrationOverviewCursor != 2 {
+		t.Fatalf("overview cursor after right from second row = %d, want 2", updated.orchestrationOverviewCursor)
 	}
 }
 
@@ -662,7 +738,36 @@ func TestView_OrchestrationOverviewFitsDefaultAndNarrowViewports(t *testing.T) {
 					t.Fatalf("phone overview missing complete top border:\n%s", view)
 				}
 			}
+			stripped := ansi.Strip(view)
+			if !strings.Contains(stripped, "└") || !strings.Contains(stripped, "┘") {
+				t.Fatalf("overview missing complete bottom border:\n%s", view)
+			}
 		})
+	}
+}
+
+func TestView_OrchestrationOverviewCompactsHugeGitCounts(t *testing.T) {
+	m := newTestModel()
+	m.width = 140
+	m.height = 24
+	m.loading = false
+	m.viewMode = ViewModeOverview
+	task := m.tasks[0]
+	task.HasTmuxSession = true
+	task.GitAdditions = 1074031
+	task.GitDeletions = 255402
+	task.GitAheadCount = 1932
+	task.GitBehindCount = 2
+	m.orchestrationOverview = []orchestrationProjectOverview{{Name: "Chefy", Tasks: []domain.Task{task}}}
+
+	view := m.View()
+	for _, want := range []string{"+1.1M/-255.4k", "ahead 1.9k behind 2"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("overview missing compact git count %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "1074031") || strings.Contains(view, "255402") {
+		t.Fatalf("overview should compact huge git counts:\n%s", view)
 	}
 }
 

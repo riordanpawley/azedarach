@@ -167,6 +167,7 @@ func isDaemonReadCommand(command string) bool {
 		CommandGitRuntimeSignals,
 		CommandGitMergePreflight,
 		CommandGitWorktreeForBranch,
+		protocol.CommandScheduledScriptsStatus,
 		protocol.CommandMailList,
 		protocol.CommandMailWatch:
 		return true

@@ -149,7 +149,7 @@ func (m *ActionMenu) buildActions() []Action {
 		Action{Key: "W", Label: "Delete task + cleanup worktree", Enabled: hasIssueScopedCleanupTarget && !activeMutation},
 	)
 
-	actions = append(actions, Action{Key: "i", Label: "Image attachments", Enabled: true})
+	actions = append(actions, Action{Key: "i", Label: "Attachments", Enabled: true})
 
 	// Task actions separator
 	actions = append(actions, Action{Key: "", Label: "───────────────────", Enabled: false})
@@ -160,6 +160,7 @@ func (m *ActionMenu) buildActions() []Action {
 		Action{Key: "2", Label: "Set status: In Progress", Enabled: m.task.Status != domain.StatusInProgress && !activeMutation},
 		Action{Key: "3", Label: "Set status: In Review", Enabled: m.task.Status != domain.StatusInReview && !activeMutation},
 		Action{Key: "4", Label: "Set status: Done", Enabled: m.task.Status != domain.StatusDone && !activeMutation},
+		Action{Key: "C", Label: "Set review incl children", Enabled: m.task.Status != domain.StatusInReview && !activeMutation},
 	)
 	if !m.hideStatusMoveActions {
 		actions = append(actions,

@@ -78,20 +78,20 @@ func TestActionMenu_BuildActions_NoSession(t *testing.T) {
 	}
 
 	hasCreateChild := false
-	hasImageAttachments := false
+	hasAttachments := false
 	for _, action := range menu.actions {
 		if action.Key == "c" && action.Label == "Create child task" && action.Enabled {
 			hasCreateChild = true
 		}
-		if action.Key == "i" && action.Label == "Image attachments" && action.Enabled {
-			hasImageAttachments = true
+		if action.Key == "i" && action.Label == "Attachments" && action.Enabled {
+			hasAttachments = true
 		}
 	}
 	if !hasCreateChild {
 		t.Error("expected 'Create child task' action in action menu")
 	}
-	if !hasImageAttachments {
-		t.Error("expected 'Image attachments' action in action menu")
+	if !hasAttachments {
+		t.Error("expected 'Attachments' action in action menu")
 	}
 
 	// Worktree-gated actions should be disabled without session/worktree.
@@ -546,6 +546,7 @@ func TestActionMenu_StatusKeyActions(t *testing.T) {
 		"2": {label: "Set status: In Progress", enabled: false},
 		"3": {label: "Set status: In Review", enabled: true},
 		"4": {label: "Set status: Done", enabled: true},
+		"C": {label: "Set review incl children", enabled: true},
 	}
 	for key, want := range statusActions {
 		t.Run(key, func(t *testing.T) {
@@ -653,7 +654,7 @@ func TestActionMenu_Update_DirectSelection(t *testing.T) {
 	task := domain.Task{ID: "az-123", Status: domain.StatusOpen}
 	menu := NewActionMenu(task, nil)
 
-	// Try selecting image attachments with 'i'
+	// Try selecting attachments with 'i'
 	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}}
 	_, cmd := menu.Update(msg)
 

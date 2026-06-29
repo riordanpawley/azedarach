@@ -65,8 +65,6 @@ const (
 	exitCodePartialFailure      = 2
 )
 
-var sessionStartProgressTick = 15 * time.Second
-
 var primeLookPath = exec.LookPath
 
 type Dependencies struct {
@@ -122,14 +120,19 @@ type ImplMigrateOptions struct {
 }
 
 type IssueListOptions struct {
-	Project      string
-	JSON         bool
-	Deps         bool
-	Limit        int
-	IDs          []string
-	States       []domain.Status
-	ParentIDs    []string
-	DependsOnIDs []string
+	Project       string
+	JSON          bool
+	Deps          bool
+	Limit         int
+	Query         string
+	IDs           []string
+	States        []domain.Status
+	ParentIDs     []string
+	DependsOnIDs  []string
+	CreatedAfter  *time.Time
+	CreatedBefore *time.Time
+	UpdatedAfter  *time.Time
+	UpdatedBefore *time.Time
 }
 
 type IssueGetOptions struct {
@@ -190,32 +193,40 @@ func (e issueCreatePartialError) Unwrap() error {
 }
 
 type IssueCloseOptions struct {
-	Project       string
-	IssueID       string
-	JSON          bool
-	ForceWorktree bool
+	Project            string
+	IssueID            string
+	JSON               bool
+	ForceWorktree      bool
+	CloseCleanChildren bool
 }
 
 type IssueUpdateOptions struct {
-	Project        string
-	IssueID        string
-	JSON           bool
-	Title          string
-	Description    string
-	DescriptionSet bool
-	Notes          *string
-	AppendNotes    string
-	Type           *domain.TaskType
-	Priority       *domain.Priority
-	Status         *domain.Status
-	ForceWorktree  bool
-	UpdateImpls    []string
+	Project         string
+	IssueID         string
+	JSON            bool
+	Title           string
+	Description     string
+	DescriptionSet  bool
+	Notes           *string
+	AppendNotes     string
+	Type            *domain.TaskType
+	Priority        *domain.Priority
+	Status          *domain.Status
+	ForceWorktree   bool
+	CascadeChildren bool
+	UpdateImpls     []string
 }
 
 type IssueDoctorOptions struct {
 	Project string
 	IssueID string
 	JSON    bool
+}
+
+type ProjectScriptsStatusOptions struct {
+	ProjectDir string
+	JSON       bool
+	Names      []string
 }
 
 type IssueDeleteOptions struct {
@@ -271,6 +282,26 @@ type IssueImageRemoveOptions struct {
 	JSON         bool
 }
 
+type IssueDocumentAddOptions struct {
+	Project    string
+	IssueID    string
+	SourcePath string
+	JSON       bool
+}
+
+type IssueDocumentListOptions struct {
+	Project string
+	IssueID string
+	JSON    bool
+}
+
+type IssueDocumentRemoveOptions struct {
+	Project      string
+	IssueID      string
+	AttachmentID string
+	JSON         bool
+}
+
 type IssueBulkCreateOptions struct {
 	Project        string
 	Implementation string
@@ -301,6 +332,7 @@ type SessionCommandOptions struct {
 	Wait         bool
 	Project      string
 	PollInterval time.Duration
+	WaitTimeout  time.Duration
 }
 
 type SessionRestartAllOptions struct {
@@ -381,6 +413,7 @@ type SessionResolveConflictOptions struct {
 
 type sessionIssueTarget struct {
 	ProjectID   string
+	RepoDir     string
 	IssueID     string
 	Task        domain.Task
 	TaskContext []domain.Task
@@ -500,8 +533,12 @@ func StartCommand(deps *Dependencies, issueID string) error {
 }
 
 func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCommandOptions) error {
-	ctx, cancel := context.WithTimeout(context.Background(), sessionStartCommandTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
 	defer cancel()
+
+	restoreExplicitProject := applyExplicitSessionProjectOverride(deps, opts.Project)
+	defer restoreExplicitProject()
+
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
@@ -517,19 +554,56 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 		return err
 	}
 
-	deps.Logger.Info("starting session", "project_id", target.ProjectID, "issue_id", target.IssueID)
-	stopProgress := startSessionProgressReporter(ctx, target.IssueID)
-	defer stopProgress()
-
-	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStart, target.ProjectID, target.IssueID, baseBranch))
+	deps.Logger.Info("submitting session start operation", "project_id", target.ProjectID, "issue_id", target.IssueID)
+	record, err := deps.DaemonClient.StartSessionOperation(ctx, daemonclient.StartSessionParams{
+		IssueID:    target.IssueID,
+		RepoDir:    target.RepoDir,
+		BaseBranch: baseBranch,
+	})
 	if err != nil {
-		return fmt.Errorf("failed to start session: %w", err)
-	}
-	if err := responseError(resp, "failed to start session"); err != nil {
-		return err
+		return fmt.Errorf("failed to submit session start: %w", err)
 	}
 
-	return printCommandOutputWithWait(ctx, deps, resp, opts)
+	if opts.Wait && !operationStateTerminal(record.State) {
+		waitTimeout := opts.WaitTimeout
+		if waitTimeout <= 0 {
+			waitTimeout = sessionStartCommandTimeout
+		}
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), waitTimeout)
+		defer waitCancel()
+		waited, waitErr := deps.DaemonClient.WaitForOperation(waitCtx, record.OperationID.String(), opts.PollInterval)
+		if waitErr != nil {
+			if errors.Is(waitErr, context.DeadlineExceeded) || errors.Is(waitErr, context.Canceled) {
+				if waited.OperationID == "" {
+					waited = record
+				}
+				return printPendingSessionStartOperation(waited, target.IssueID)
+			}
+			return fmt.Errorf("wait for operation %s: %w", record.OperationID, waitErr)
+		}
+		return printOperationOutcome(waited)
+	}
+
+	if operationStateTerminal(record.State) {
+		return printOperationOutcome(record)
+	}
+
+	return printPendingSessionStartOperation(record, target.IssueID)
+}
+
+func printPendingSessionStartOperation(record protocol.OperationRecord, issueID string) error {
+	if record.OperationID == "" || operationStateTerminal(record.State) {
+		return printOperationOutcome(record)
+	}
+
+	fmt.Printf("Session start is still %s for %s.\n", record.State, issueID)
+	fmt.Printf("Operation: %s (%s)\n", record.OperationID, record.State)
+	if progress := operationProgressSummary(record); progress != "" {
+		fmt.Printf("Progress: %s\n", progress)
+	}
+	fmt.Printf("Follow up: az operation get --id %s --wait\n", record.OperationID)
+	fmt.Printf("Follow up: az session status %s\n", issueID)
+	return nil
 }
 
 func WorktreeCreateCommand(deps *Dependencies, opts WorktreeCreateOptions) error {
@@ -555,10 +629,12 @@ func WorktreeCreateCommand(deps *Dependencies, opts WorktreeCreateOptions) error
 	}
 
 	deps.Logger.Info("creating worktree", "project_id", target.ProjectID, "issue_id", target.IssueID, "base_branch", baseBranch)
-	worktree, err := deps.DaemonClient.CreateWorktree(ctx, target.IssueID, baseBranch)
+	createResult, err := deps.DaemonClient.CreateWorktreeResult(ctx, target.IssueID, baseBranch)
 	if err != nil {
 		return fmt.Errorf("failed to create worktree for %s: %w", target.IssueID, err)
 	}
+	worktree := createResult.Worktree
+	baseBranch = strings.TrimSpace(createResult.BaseBranch)
 
 	if opts.JSON {
 		return printJSON(map[string]any{
@@ -589,35 +665,6 @@ func resolveSessionStartIssueTarget(ctx context.Context, deps *Dependencies, iss
 		return sessionIssueTarget{}, fmt.Errorf("issue id is required")
 	}
 	return resolveExplicitSessionIssueTarget(ctx, deps, trimmedIssueID, trimmedProject, trimmedIssueID)
-}
-
-func startSessionProgressReporter(ctx context.Context, issueID string) func() {
-	trimmedIssueID := strings.TrimSpace(issueID)
-	if trimmedIssueID == "" {
-		trimmedIssueID = "unknown"
-	}
-	startedAt := time.Now()
-	fmt.Fprintf(os.Stderr, "Starting session for %s... this can take up to %s.\n", trimmedIssueID, sessionStartCommandTimeout)
-
-	done := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(sessionStartProgressTick)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				elapsed := time.Since(startedAt).Round(time.Second)
-				fmt.Fprintf(os.Stderr, "Still starting session for %s... elapsed %s.\n", trimmedIssueID, elapsed)
-			}
-		}
-	}()
-	return func() {
-		close(done)
-	}
 }
 
 func AttachCommand(deps *Dependencies, issueID string) error {
@@ -771,7 +818,7 @@ func resolveSessionStatusTarget(deps *Dependencies, issueID string) (sessionIssu
 	if err != nil {
 		return sessionIssueTarget{}, fmt.Errorf("invalid issue id %q: %w", issueID, err)
 	}
-	return sessionIssueTarget{ProjectID: deps.ProjectID, IssueID: parsedIssueID.String()}, nil
+	return sessionIssueTarget{ProjectID: deps.ProjectID, RepoDir: deps.RepoDir, IssueID: parsedIssueID.String()}, nil
 }
 
 func resolveExplicitSessionStatusTarget(deps *Dependencies, raw, projectPart, issuePart string) (sessionIssueTarget, error) {
@@ -783,7 +830,7 @@ func resolveExplicitSessionStatusTarget(deps *Dependencies, raw, projectPart, is
 	if !ok {
 		return sessionIssueTarget{}, fmt.Errorf("unknown project in project-prefixed issue id %q: %s", raw, projectPart)
 	}
-	return sessionIssueTarget{ProjectID: project.Route, IssueID: issueID.String()}, nil
+	return sessionIssueTarget{ProjectID: project.Route, RepoDir: project.Path, IssueID: issueID.String()}, nil
 }
 
 func resolveSessionIssueTarget(ctx context.Context, deps *Dependencies, issueID string) (sessionIssueTarget, error) {
@@ -801,7 +848,7 @@ func resolveSessionIssueTarget(ctx context.Context, deps *Dependencies, issueID 
 	if task, taskContext, ok, err := lookupSessionTaskInProject(ctx, deps, deps.ProjectID, trimmed); err != nil {
 		return sessionIssueTarget{}, err
 	} else if ok {
-		return sessionIssueTarget{ProjectID: deps.ProjectID, IssueID: trimmed, Task: task, TaskContext: taskContext}, nil
+		return sessionIssueTarget{ProjectID: deps.ProjectID, RepoDir: deps.RepoDir, IssueID: trimmed, Task: task, TaskContext: taskContext}, nil
 	}
 
 	matches, err := resolveCanonicalSessionIssueTargets(ctx, deps, trimmed)
@@ -856,7 +903,7 @@ func resolveExplicitSessionIssueTarget(ctx context.Context, deps *Dependencies, 
 	if !found {
 		return sessionIssueTarget{}, fmt.Errorf("issue not found in project %s: %s", project.Route, issueID.String())
 	}
-	return sessionIssueTarget{ProjectID: project.Route, IssueID: issueID.String(), Task: task, TaskContext: taskContext}, nil
+	return sessionIssueTarget{ProjectID: project.Route, RepoDir: project.Path, IssueID: issueID.String(), Task: task, TaskContext: taskContext}, nil
 }
 
 func resolveCanonicalSessionIssueTargets(ctx context.Context, deps *Dependencies, raw string) ([]sessionIssueTarget, error) {
@@ -876,7 +923,7 @@ func resolveCanonicalSessionIssueTargets(ctx context.Context, deps *Dependencies
 				continue
 			}
 			key := candidate.Route + "\x00" + strings.ToLower(parsedIssueID)
-			matchesByKey[key] = sessionIssueTarget{ProjectID: candidate.Route, IssueID: parsedIssueID, Task: task, TaskContext: taskContext}
+			matchesByKey[key] = sessionIssueTarget{ProjectID: candidate.Route, RepoDir: candidate.Path, IssueID: parsedIssueID, Task: task, TaskContext: taskContext}
 		}
 	}
 	matches := make([]sessionIssueTarget, 0, len(matchesByKey))
@@ -2186,6 +2233,49 @@ func applyIssueProjectOverride(deps *Dependencies, project string) func() {
 	}
 }
 
+func applyExplicitSessionProjectOverride(deps *Dependencies, project string) func() {
+	project = normalizeIssueProject(project)
+	if deps == nil || project == "" {
+		return func() {}
+	}
+	candidate, ok := findSessionProjectCandidate(deps, project)
+	if !ok {
+		return func() {}
+	}
+	previousProject := deps.ProjectID
+	previousRepoDir := deps.RepoDir
+	previousRuntimeRepoDir := deps.RuntimeRepoDir
+
+	deps.ProjectID = candidate.Route
+	if deps.DaemonClient != nil {
+		deps.DaemonClient.WithProjectID(candidate.Route)
+	}
+	if repoDir := sessionProjectCandidateRepoDir(candidate); repoDir != "" {
+		deps.RepoDir = repoDir
+		deps.RuntimeRepoDir = resolveRuntimeRepoDir(repoDir)
+	}
+
+	return func() {
+		deps.ProjectID = previousProject
+		deps.RepoDir = previousRepoDir
+		deps.RuntimeRepoDir = previousRuntimeRepoDir
+		if deps.DaemonClient != nil {
+			deps.DaemonClient.WithProjectID(previousProject)
+		}
+	}
+}
+
+func sessionProjectCandidateRepoDir(candidate sessionProjectCandidate) string {
+	path := strings.TrimSpace(candidate.Path)
+	if path == "" {
+		return ""
+	}
+	if repoDir, err := config.ResolveProjectRoot(path); err == nil && strings.TrimSpace(repoDir) != "" {
+		return repoDir
+	}
+	return path
+}
+
 func isDifferentExplicitIssueProject(currentProject, explicitProject string) bool {
 	explicitProject = normalizeIssueProject(explicitProject)
 	if explicitProject == "" {
@@ -2204,6 +2294,14 @@ func formatProjectIssueRef(projectID, issueID string) string {
 }
 
 func ParseIssueListArgs(args []string) (IssueListOptions, error) {
+	return parseIssueListArgs(args, false)
+}
+
+func ParseIssueSearchArgs(args []string) (IssueListOptions, error) {
+	return parseIssueListArgs(args, true)
+}
+
+func parseIssueListArgs(args []string, allowQueryArgs bool) (IssueListOptions, error) {
 	opts := IssueListOptions{Limit: defaultIssueListLimit}
 	ids := make([]string, 0, 4)
 	idsCSV := ""
@@ -2213,12 +2311,22 @@ func ParseIssueListArgs(args []string) (IssueListOptions, error) {
 	depIDsCSV := ""
 	stateInputs := make([]string, 0, 4)
 	statesCSV := ""
+	createdAfterRaw := ""
+	createdBeforeRaw := ""
+	updatedAfterRaw := ""
+	updatedBeforeRaw := ""
 	fs := flag.NewFlagSet("issue list", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.BoolVar(&opts.JSON, "json", false, "output issues as JSON")
 	fs.BoolVar(&opts.Deps, "deps", false, "include dependency summary in table output")
 	fs.IntVar(&opts.Limit, "limit", defaultIssueListLimit, "maximum issues to list in one window")
+	fs.StringVar(&opts.Query, "query", "", "case-insensitive content query")
+	fs.StringVar(&opts.Query, "q", "", "case-insensitive content query")
+	fs.StringVar(&createdAfterRaw, "created-after", "", "include issues created at or after date/time")
+	fs.StringVar(&createdBeforeRaw, "created-before", "", "include issues created at or before date/time")
+	fs.StringVar(&updatedAfterRaw, "updated-after", "", "include issues updated at or after date/time")
+	fs.StringVar(&updatedBeforeRaw, "updated-before", "", "include issues updated at or before date/time")
 	addStatusInput := func(v string) error {
 		stateInputs = append(stateInputs, v)
 		return nil
@@ -2257,13 +2365,42 @@ func ParseIssueListArgs(args []string) (IssueListOptions, error) {
 	if err := fs.Parse(args); err != nil {
 		return IssueListOptions{}, err
 	}
-	if fs.NArg() != 0 {
+	if allowQueryArgs {
+		if fs.NArg() > 0 {
+			if strings.TrimSpace(opts.Query) != "" {
+				return IssueListOptions{}, fmt.Errorf("provide query either as --query or as positional text, not both")
+			}
+			for _, arg := range fs.Args()[1:] {
+				if strings.HasPrefix(arg, "-") {
+					return IssueListOptions{}, fmt.Errorf("flags/options must appear before positional query text")
+				}
+			}
+			opts.Query = strings.Join(fs.Args(), " ")
+		}
+	} else if fs.NArg() != 0 {
 		return IssueListOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
 	if opts.Limit < 1 {
 		return IssueListOptions{}, fmt.Errorf("limit must be >= 1")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
+	opts.Query = strings.TrimSpace(opts.Query)
+	if allowQueryArgs && opts.Query == "" {
+		return IssueListOptions{}, fmt.Errorf("usage: az issue search [--project <project-id>] [--json] [--deps] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)")
+	}
+	var parseErr error
+	if opts.CreatedAfter, parseErr = parseIssueListDateFilter(createdAfterRaw, false); parseErr != nil {
+		return IssueListOptions{}, fmt.Errorf("invalid --created-after: %w", parseErr)
+	}
+	if opts.CreatedBefore, parseErr = parseIssueListDateFilter(createdBeforeRaw, true); parseErr != nil {
+		return IssueListOptions{}, fmt.Errorf("invalid --created-before: %w", parseErr)
+	}
+	if opts.UpdatedAfter, parseErr = parseIssueListDateFilter(updatedAfterRaw, false); parseErr != nil {
+		return IssueListOptions{}, fmt.Errorf("invalid --updated-after: %w", parseErr)
+	}
+	if opts.UpdatedBefore, parseErr = parseIssueListDateFilter(updatedBeforeRaw, true); parseErr != nil {
+		return IssueListOptions{}, fmt.Errorf("invalid --updated-before: %w", parseErr)
+	}
 	if strings.TrimSpace(idsCSV) != "" {
 		for _, raw := range strings.Split(idsCSV, ",") {
 			trimmed := strings.TrimSpace(raw)
@@ -2494,11 +2631,12 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 	fs.StringVar(&issueIDFlag, "i", "", "issue id (short alternative to --id)")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue close result as JSON")
 	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal after integration")
+	fs.BoolVar(&opts.CloseCleanChildren, "close-clean-children", false, "also close clean unresolved child issues after confirmation")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueCloseOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [<issue-id>]")
+		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueCloseOptions{}, fmt.Errorf("--impl is not supported for issue close; issue implementations are already assigned")
@@ -2510,7 +2648,7 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [<issue-id>]")
+		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>|-i <issue-id>] [--json] [--force-worktree] [--close-clean-children] [<issue-id>]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -2585,6 +2723,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.BoolVar(&opts.JSON, "json", false, "output issue update result as JSON")
 	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal when setting closed")
+	fs.BoolVar(&opts.CascadeChildren, "cascade-children", false, "when setting in_review, move open/in_progress descendants to in_review first")
 	fs.StringVar(&statusRaw, "status", "", "updated status (open|in_progress|in_review|closed)")
 	fs.Func("update-impl", "set implementation assignment (repeatable)", func(v string) error {
 		trimmed := strings.TrimSpace(v)
@@ -2600,7 +2739,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		return IssueUpdateOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|in_review|closed] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|in_review|closed] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueUpdateOptions{}, fmt.Errorf("--impl is not supported for issue update (it is create-only); normal field updates do not need --update-impl, and --update-impl is only for changing issue implementations")
@@ -2612,7 +2751,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|in_review|closed] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status open|in_progress|in_review|closed] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if typeRaw != "" {
 		tt, err := parseTaskType(typeRaw)
@@ -2637,6 +2776,9 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	}
 	if opts.ForceWorktree && (opts.Status == nil || *opts.Status != domain.StatusDone) {
 		return IssueUpdateOptions{}, fmt.Errorf("--force-worktree is only supported with --status closed")
+	}
+	if opts.CascadeChildren && (opts.Status == nil || *opts.Status != domain.StatusInReview) {
+		return IssueUpdateOptions{}, fmt.Errorf("--cascade-children is only supported with --status in_review")
 	}
 	if strings.TrimSpace(opts.AppendNotes) == "" {
 		opts.AppendNotes = ""
@@ -2897,6 +3039,118 @@ func ParseIssueImageRemoveArgs(args []string) (IssueImageRemoveOptions, error) {
 	return opts, nil
 }
 
+func ParseIssueDocumentAddArgs(args []string) (IssueDocumentAddOptions, error) {
+	opts := IssueDocumentAddOptions{}
+	issueIDFlag := ""
+	pathFlag := ""
+	implFlag := ""
+	fs := flag.NewFlagSet("issue document add", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&pathFlag, "path", "", "source document path (named alternative to positional)")
+	fs.BoolVar(&opts.JSON, "json", false, "output document add result as JSON")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return IssueDocumentAddOptions{}, err
+	}
+	if fs.NArg() > 2 {
+		return IssueDocumentAddOptions{}, fmt.Errorf("usage: az issue document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]")
+	}
+	if strings.TrimSpace(implFlag) != "" {
+		return IssueDocumentAddOptions{}, fmt.Errorf("--impl is not supported for issue document add; issue implementations are already assigned")
+	}
+	if fs.NArg() >= 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if fs.NArg() >= 2 {
+		opts.SourcePath = fs.Arg(1)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(pathFlag) != "" {
+		opts.SourcePath = strings.TrimSpace(pathFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.SourcePath) == "" {
+		return IssueDocumentAddOptions{}, fmt.Errorf("usage: az issue document add [--project <project-id>] [--issue-id <issue-id>] [--path <file>] [<issue-id> <file>] [--json]")
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
+func ParseIssueDocumentListArgs(args []string) (IssueDocumentListOptions, error) {
+	opts := IssueDocumentListOptions{}
+	issueIDFlag := ""
+	implFlag := ""
+	fs := flag.NewFlagSet("issue document list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.BoolVar(&opts.JSON, "json", false, "output document list result as JSON")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return IssueDocumentListOptions{}, err
+	}
+	if fs.NArg() > 1 {
+		return IssueDocumentListOptions{}, fmt.Errorf("usage: az issue document list [--project <project-id>] [--issue-id <issue-id>] [<issue-id>] [--json]")
+	}
+	if strings.TrimSpace(implFlag) != "" {
+		return IssueDocumentListOptions{}, fmt.Errorf("--impl is not supported for issue document list; issue implementations are already assigned")
+	}
+	if fs.NArg() >= 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" {
+		return IssueDocumentListOptions{}, fmt.Errorf("usage: az issue document list [--project <project-id>] [--issue-id <issue-id>] [<issue-id>] [--json]")
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
+func ParseIssueDocumentRemoveArgs(args []string) (IssueDocumentRemoveOptions, error) {
+	opts := IssueDocumentRemoveOptions{}
+	issueIDFlag := ""
+	attachmentIDFlag := ""
+	implFlag := ""
+	fs := flag.NewFlagSet("issue document remove", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&attachmentIDFlag, "attachment-id", "", "attachment id (named alternative to positional)")
+	fs.BoolVar(&opts.JSON, "json", false, "output document remove result as JSON")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return IssueDocumentRemoveOptions{}, err
+	}
+	if fs.NArg() > 2 {
+		return IssueDocumentRemoveOptions{}, fmt.Errorf("usage: az issue document remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]")
+	}
+	if strings.TrimSpace(implFlag) != "" {
+		return IssueDocumentRemoveOptions{}, fmt.Errorf("--impl is not supported for issue document remove; issue implementations are already assigned")
+	}
+	if fs.NArg() >= 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if fs.NArg() >= 2 {
+		opts.AttachmentID = fs.Arg(1)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(attachmentIDFlag) != "" {
+		opts.AttachmentID = strings.TrimSpace(attachmentIDFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.AttachmentID) == "" {
+		return IssueDocumentRemoveOptions{}, fmt.Errorf("usage: az issue document remove [--project <project-id>] [--issue-id <issue-id>] [--attachment-id <attachment-id>] [<issue-id> <attachment-id>] [--json]")
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
 func ParseIssueBulkCreateArgs(args []string) (IssueBulkCreateOptions, error) {
 	opts := IssueBulkCreateOptions{}
 	fs := flag.NewFlagSet("issue bulk-create", flag.ContinueOnError)
@@ -2961,30 +3215,86 @@ func configuredIssueImplementations(tasks []domain.Task) []string {
 	return impls
 }
 
+func listTasksSnapshotForCLI(ctx context.Context, deps *Dependencies) (daemonclient.TaskSnapshot, error) {
+	if deps == nil || deps.DaemonClient == nil {
+		return daemonclient.TaskSnapshot{}, fmt.Errorf("daemon client unavailable")
+	}
+	return deps.DaemonClient.ListTasksSnapshot(ctx)
+}
+
 func resolveIssueWriteImplementation(ctx context.Context, deps *Dependencies, provided string) (string, error) {
 	trimmed := strings.TrimSpace(provided)
+	impls, err := issueWriteImplementationOptions(ctx, deps)
 	if trimmed != "" {
+		if err != nil {
+			return "", fmt.Errorf("unable to validate implementation %q: %w", trimmed, err)
+		}
+		if !implementationOptionExists(impls, trimmed) {
+			return "", unknownIssueWriteImplementationError(trimmed, impls)
+		}
 		return trimmed, nil
 	}
-	if deps == nil || deps.DaemonClient == nil {
-		return "", fmt.Errorf("missing required flag: --impl")
-	}
 
-	snapshot, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskSnapshot, error) {
-		return deps.DaemonClient.ListTasksSnapshot(callCtx)
-	})
 	if err != nil {
 		return "", fmt.Errorf("missing required flag: --impl (unable to infer implementation automatically: %v). Specify --impl <implementation>", err)
 	}
-	impls := configuredIssueImplementations(snapshot.Tasks)
 	switch len(impls) {
-	case 0:
-		return "default", nil
 	case 1:
 		return impls[0], nil
 	default:
 		return "", fmt.Errorf("missing required flag: --impl (multiple implementations configured: %s)", strings.Join(impls, ", "))
 	}
+}
+
+func resolveIssueWriteImplementations(ctx context.Context, deps *Dependencies, provided []string) ([]string, error) {
+	normalized := dedupeTrimmed(provided)
+	if len(normalized) == 0 {
+		impl, err := resolveIssueWriteImplementation(ctx, deps, "")
+		if err != nil {
+			return nil, err
+		}
+		return []string{impl}, nil
+	}
+	impls, err := issueWriteImplementationOptions(ctx, deps)
+	if err != nil {
+		return nil, fmt.Errorf("unable to validate implementations: %w", err)
+	}
+	for _, impl := range normalized {
+		if !implementationOptionExists(impls, impl) {
+			return nil, unknownIssueWriteImplementationError(impl, impls)
+		}
+	}
+	return normalized, nil
+}
+
+func issueWriteImplementationOptions(ctx context.Context, deps *Dependencies) ([]string, error) {
+	if deps == nil || deps.DaemonClient == nil {
+		return nil, fmt.Errorf("daemon client is required to validate implementations")
+	}
+	snapshot, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskSnapshot, error) {
+		return listTasksSnapshotForCLI(callCtx, deps)
+	})
+	if err != nil {
+		return nil, err
+	}
+	impls := configuredIssueImplementations(snapshot.Tasks)
+	if len(impls) == 0 {
+		return []string{"default"}, nil
+	}
+	return impls, nil
+}
+
+func implementationOptionExists(options []string, impl string) bool {
+	for _, option := range options {
+		if option == impl {
+			return true
+		}
+	}
+	return false
+}
+
+func unknownIssueWriteImplementationError(impl string, known []string) error {
+	return fmt.Errorf("unknown implementation %q (known implementations: %s). Run `az impl list` to inspect implementation assignments. If you meant to parent work under %q, omit --impl in the correct AZEDARACH_ISSUE_ID context or add a parent-child edge instead", impl, strings.Join(known, ", "), impl)
 }
 
 func ConfigSetCommand(deps *Dependencies, opts ConfigSetOptions) error {
@@ -3237,7 +3547,7 @@ func ImplDeleteCommand(deps *Dependencies, opts ImplDeleteOptions) error {
 		return fmt.Errorf("implementation is required")
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := listTasksSnapshotForCLI(ctx, deps)
 	if err != nil {
 		return fmt.Errorf("failed to list issues for implementation delete: %w", err)
 	}
@@ -3293,7 +3603,7 @@ func ImplListCommand(deps *Dependencies, _ ImplListOptions) error {
 		return err
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := listTasksSnapshotForCLI(ctx, deps)
 	if err != nil {
 		return fmt.Errorf("failed to list issues for implementation list: %w", err)
 	}
@@ -3326,7 +3636,7 @@ func ImplMigrateCommand(deps *Dependencies, opts ImplMigrateOptions) error {
 		return fmt.Errorf("source and destination implementations must differ")
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := listTasksSnapshotForCLI(ctx, deps)
 	if err != nil {
 		return fmt.Errorf("failed to list issues for implementation migrate: %w", err)
 	}
@@ -3387,7 +3697,15 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 		return err
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	var (
+		snapshot daemonclient.TaskSnapshot
+		err      error
+	)
+	if strings.TrimSpace(opts.Query) != "" {
+		snapshot, err = deps.DaemonClient.ListTasksSnapshotWithQuery(ctx, opts.Query)
+	} else {
+		snapshot, err = listTasksSnapshotForCLI(ctx, deps)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to list issues: %w", err)
 	}
@@ -3404,6 +3722,7 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 	if len(opts.DependsOnIDs) > 0 {
 		tasks = filterTasksByDependencyIDs(tasks, opts.DependsOnIDs)
 	}
+	tasks = filterTasksByTimeRange(tasks, opts.CreatedAfter, opts.CreatedBefore, opts.UpdatedAfter, opts.UpdatedBefore)
 	sort.SliceStable(tasks, func(i, j int) bool {
 		if tasks[i].UpdatedAt.Equal(tasks[j].UpdatedAt) {
 			return tasks[i].ID < tasks[j].ID
@@ -3789,6 +4108,51 @@ func IssueCheckCommand(deps *Dependencies, opts IssueCheckOptions) error {
 	})
 }
 
+func ProjectScriptsStatusCommand(deps *Dependencies, opts ProjectScriptsStatusOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	result, err := deps.DaemonClient.ScheduledScriptsStatus(ctx, opts.Names)
+	if err != nil {
+		return fmt.Errorf("failed to get scheduled script status: %w", err)
+	}
+	if opts.JSON {
+		return printJSON(result)
+	}
+	if len(result.Scripts) == 0 {
+		fmt.Println("No scheduled project scripts configured.")
+		return nil
+	}
+	fmt.Printf("Scheduled project scripts for %s:\n", result.ProjectID)
+	for _, script := range result.Scripts {
+		state := "idle"
+		if !script.Enabled {
+			state = "disabled"
+		} else if script.Running {
+			state = "running"
+		} else if script.LastError != "" {
+			state = "failed"
+		}
+		fmt.Printf("- %s\t%s\tinterval=%s\truns=%d\tskips=%d\n", script.Name, state, script.Interval, script.RunCount, script.SkipCount)
+		if script.NextRunAt != nil {
+			fmt.Printf("  next: %s\n", script.NextRunAt.UTC().Format(time.RFC3339))
+		}
+		if script.LastFinishedAt != nil {
+			fmt.Printf("  last: %s exit=%d duration=%dms\n", script.LastFinishedAt.UTC().Format(time.RFC3339), script.LastExitCode, script.LastDurationMs)
+		}
+		if script.LastError != "" {
+			fmt.Printf("  error: %s\n", script.LastError)
+		}
+		if script.LastLogPath != "" {
+			fmt.Printf("  log: %s\n", script.LastLogPath)
+		}
+	}
+	return nil
+}
+
 func IssueDoctorCommand(deps *Dependencies, opts IssueDoctorOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
@@ -3930,6 +4294,7 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 	ctx, cancel := context.WithTimeout(parentCtx, issueCreateCommandTimeout)
 	defer cancel()
 
+	var err error
 	var parentID *naming.IssueID
 	implementations := append([]string{}, opts.Implementations...)
 	if !opts.Deferred && opts.AutoParentFromIssueID != nil && strings.TrimSpace(*opts.AutoParentFromIssueID) != "" {
@@ -3946,18 +4311,9 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 			implementations = append([]string{}, parentTask.Implementations...)
 		}
 	}
-	if len(implementations) == 0 {
-		resolvedImpl, err := resolveIssueWriteImplementation(ctx, deps, "")
-		if err != nil {
-			return issueCreateResult{}, err
-		}
-		implementations = append(implementations, resolvedImpl)
-	} else if len(implementations) == 1 {
-		resolvedImpl, err := resolveIssueWriteImplementation(ctx, deps, implementations[0])
-		if err != nil {
-			return issueCreateResult{}, err
-		}
-		implementations[0] = resolvedImpl
+	implementations, err = resolveIssueWriteImplementations(ctx, deps, implementations)
+	if err != nil {
+		return issueCreateResult{}, err
 	}
 
 	taskID, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (string, error) {
@@ -4052,7 +4408,7 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 		return err
 	}
 
-	result, err := deps.DaemonClient.CloseTask(ctx, opts.IssueID, cleanupCloseTaskStatusOptions(opts.ForceWorktree))
+	result, err := deps.DaemonClient.CloseTask(ctx, opts.IssueID, cleanupCloseTaskStatusOptions(opts.ForceWorktree, opts.CloseCleanChildren))
 	if err != nil {
 		return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
 	}
@@ -4066,6 +4422,7 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 			"integrated":                result.Integrated,
 			"cleanup_performed":         true,
 			"worktree_forced":           opts.ForceWorktree,
+			"auto_closed_children":      result.AutoClosedChildren,
 			"worktree_cleanup_deferred": result.WorktreeCleanupDeferred,
 			"phases":                    taskClosePhaseJSON(result.Phases),
 		})
@@ -4080,6 +4437,9 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 	fmt.Println("- Cleanup performed")
 	if opts.ForceWorktree {
 		fmt.Println("- Worktree removal forced")
+	}
+	if len(result.AutoClosedChildren) > 0 {
+		fmt.Printf("- Closed clean child issues: %s\n", strings.Join(result.AutoClosedChildren, ", "))
 	}
 	if result.WorktreeCleanupDeferred {
 		fmt.Println("- Worktree cleanup deferred")
@@ -4223,7 +4583,11 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 		update.Priority = *opts.Priority
 	}
 	if len(opts.UpdateImpls) > 0 {
-		update.Implementations = append([]string{}, opts.UpdateImpls...)
+		impls, err := resolveIssueWriteImplementations(ctx, deps, opts.UpdateImpls)
+		if err != nil {
+			return fmt.Errorf("invalid implementation update: %w", err)
+		}
+		update.Implementations = impls
 	}
 
 	if err := deps.DaemonClient.UpdateTaskDetails(ctx, opts.IssueID, update); err != nil {
@@ -4233,6 +4597,9 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 		statusOptions := daemonclient.TaskStatusOptions{}
 		if *opts.Status == domain.StatusDone {
 			statusOptions = cleanupCloseTaskStatusOptions(opts.ForceWorktree)
+		}
+		if *opts.Status == domain.StatusInReview {
+			statusOptions.CascadeChildren = opts.CascadeChildren
 		}
 		if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, *opts.Status, statusOptions); err != nil {
 			return fmt.Errorf("failed to set status for issue %s: %w", opts.IssueID, err)
@@ -4256,10 +4623,15 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 	return nil
 }
 
-func cleanupCloseTaskStatusOptions(forceWorktree bool) daemonclient.TaskStatusOptions {
+func cleanupCloseTaskStatusOptions(forceWorktree bool, closeCleanChildren ...bool) daemonclient.TaskStatusOptions {
+	autoCloseChildren := false
+	if len(closeCleanChildren) > 0 {
+		autoCloseChildren = closeCleanChildren[0]
+	}
 	return daemonclient.TaskStatusOptions{
 		ForceWorktree:        forceWorktree,
 		IntegrateBeforeClose: true,
+		CloseCleanChildren:   autoCloseChildren,
 	}
 }
 
@@ -4417,7 +4789,7 @@ func IssueDependencyBulkApplyCommand(deps *Dependencies, opts IssueDependencyBul
 		return fmt.Errorf("dependency bulk input must contain at least one mutation")
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := listTasksSnapshotForCLI(ctx, deps)
 	if err != nil {
 		return fmt.Errorf("load issues for dependency bulk apply: %w", err)
 	}
@@ -4576,6 +4948,148 @@ func IssueImageRemoveCommand(deps *Dependencies, opts IssueImageRemoveOptions) e
 	return nil
 }
 
+func IssueDocumentAddCommand(deps *Dependencies, opts IssueDocumentAddOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	_, _, ok, err := loadIssueMetadataTask(ctx, deps, opts.IssueID)
+	if err != nil {
+		return fmt.Errorf("failed to load issue %s for document attach: %w", opts.IssueID, err)
+	}
+	if !ok {
+		return fmt.Errorf("issue not found: %s", opts.IssueID)
+	}
+
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	service := attachment.NewDocumentService(filepath.Join(deps.RepoDir, ".azedarach"), logger)
+	attached, err := service.Attach(ctx, opts.IssueID, opts.SourcePath)
+	if err != nil {
+		return fmt.Errorf("failed to attach document %q to issue %s: %w", opts.SourcePath, opts.IssueID, err)
+	}
+
+	notesAppended := false
+	if line := formatIssueAttachmentNoteLine(attached); strings.TrimSpace(line) != "" {
+		if err := deps.DaemonClient.AppendTaskNotes(ctx, opts.IssueID, line); err != nil {
+			return fmt.Errorf("document attached but failed to append notes for issue %s: %w", opts.IssueID, err)
+		}
+		notesAppended = true
+	}
+
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id":       opts.IssueID,
+			"attachment_id":  attached.ID,
+			"filename":       attached.Filename,
+			"path":           attached.Path,
+			"notes_appended": notesAppended,
+			"updated":        true,
+		})
+	}
+	fmt.Printf("Attached document to issue %s: %s (attachment_id=%s)\n", opts.IssueID, attached.Filename, attached.ID)
+	return nil
+}
+
+func IssueDocumentListCommand(deps *Dependencies, opts IssueDocumentListOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	_, _, ok, err := loadIssueMetadataTask(ctx, deps, opts.IssueID)
+	if err != nil {
+		return fmt.Errorf("failed to load issue %s for document list: %w", opts.IssueID, err)
+	}
+	if !ok {
+		return fmt.Errorf("issue not found: %s", opts.IssueID)
+	}
+
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	service := attachment.NewDocumentService(filepath.Join(deps.RepoDir, ".azedarach"), logger)
+	attachments, err := service.List(ctx, opts.IssueID)
+	if err != nil {
+		return fmt.Errorf("failed to list document attachments for issue %s: %w", opts.IssueID, err)
+	}
+
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id":    opts.IssueID,
+			"attachments": attachments,
+			"count":       len(attachments),
+		})
+	}
+	if len(attachments) == 0 {
+		fmt.Printf("No document attachments for issue %s\n", opts.IssueID)
+		return nil
+	}
+	fmt.Printf("Document attachments for issue %s:\n", opts.IssueID)
+	for _, att := range attachments {
+		relativePath := strings.TrimSpace(att.Relative)
+		if relativePath == "" {
+			relativePath = filepath.ToSlash(filepath.Join(".azedarach", "attachments", att.Filename))
+		}
+		mimeType := strings.TrimSpace(att.MimeType)
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+		fmt.Printf("- %s  %s  %s  %d bytes  %s\n", att.ID, att.Filename, mimeType, att.Size, relativePath)
+	}
+	return nil
+}
+
+func IssueDocumentRemoveCommand(deps *Dependencies, opts IssueDocumentRemoveOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	_, _, ok, err := loadIssueMetadataTask(ctx, deps, opts.IssueID)
+	if err != nil {
+		return fmt.Errorf("failed to load issue %s for document removal: %w", opts.IssueID, err)
+	}
+	if !ok {
+		return fmt.Errorf("issue not found: %s", opts.IssueID)
+	}
+
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	service := attachment.NewDocumentService(filepath.Join(deps.RepoDir, ".azedarach"), logger)
+	if err := service.Delete(ctx, opts.IssueID, opts.AttachmentID); err != nil {
+		return fmt.Errorf("failed to remove attachment %s from issue %s: %w", opts.AttachmentID, opts.IssueID, err)
+	}
+
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id":      opts.IssueID,
+			"attachment_id": opts.AttachmentID,
+			"removed":       true,
+		})
+	}
+	fmt.Printf("Removed document attachment %s from issue %s\n", opts.AttachmentID, opts.IssueID)
+	return nil
+}
+
 func formatIssueAttachmentNoteLine(att *attachment.Attachment) string {
 	if att == nil {
 		return ""
@@ -4585,7 +5099,10 @@ func formatIssueAttachmentNoteLine(att *attachment.Attachment) string {
 	if issueID == "" || filename == "" {
 		return ""
 	}
-	relativePath := filepath.ToSlash(filepath.Join(".azedarach", "images", issueID, filename))
+	relativePath := strings.TrimSpace(att.Relative)
+	if relativePath == "" {
+		relativePath = filepath.ToSlash(filepath.Join(".azedarach", "attachments", filename))
+	}
 	source := "file"
 	if strings.HasPrefix(strings.ToLower(filename), "clipboard-") {
 		source = "clipboard"
@@ -4764,7 +5281,7 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 		return fmt.Errorf("bulk-update input must contain at least one item")
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := listTasksSnapshotForCLI(ctx, deps)
 	if err != nil {
 		return fmt.Errorf("load issues for bulk-update: %w", err)
 	}
@@ -5003,6 +5520,31 @@ func filterTasksByDependencyIDs(tasks []domain.Task, dependencyIDs []string) []d
 		}
 	}
 	return filtered
+}
+
+func filterTasksByTimeRange(tasks []domain.Task, createdAfter, createdBefore, updatedAfter, updatedBefore *time.Time) []domain.Task {
+	if createdAfter == nil && createdBefore == nil && updatedAfter == nil && updatedBefore == nil {
+		return tasks
+	}
+	filtered := make([]domain.Task, 0, len(tasks))
+	for _, task := range tasks {
+		if timeBeforeFilter(task.CreatedAt, createdAfter) || timeAfterFilter(task.CreatedAt, createdBefore) {
+			continue
+		}
+		if timeBeforeFilter(task.UpdatedAt, updatedAfter) || timeAfterFilter(task.UpdatedAt, updatedBefore) {
+			continue
+		}
+		filtered = append(filtered, task)
+	}
+	return filtered
+}
+
+func timeBeforeFilter(value time.Time, boundary *time.Time) bool {
+	return boundary != nil && value.Before(*boundary)
+}
+
+func timeAfterFilter(value time.Time, boundary *time.Time) bool {
+	return boundary != nil && value.After(*boundary)
 }
 
 func dedupeOrderedIDs(ids []string) []string {
@@ -5548,7 +6090,7 @@ func executeBulkApply(deps *Dependencies, dryRun bool, asJSON bool, operations [
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := listTasksSnapshotForCLI(ctx, deps)
 	if err != nil {
 		return fmt.Errorf("load snapshot revision for bulk apply: %w", err)
 	}
@@ -5739,7 +6281,7 @@ func PrimeCommand(deps *Dependencies) error {
 	specGuardrails := ""
 	questionFirstGuardrails := ""
 	implementationSection := ""
-	implementationGuardrails := "- Implementation guardrails: `--impl` assigns implementation/spec variants only; it is not graph/root membership. In multi-implementation repos, include explicit `--impl <impl>` on implementation-specific new issue writes and use repeated `--impl` only for intentional shared work. For `az issue update`, `--update-impl` is only for changing implementation assignments; status/title/notes updates do not require it."
+	implementationGuardrails := "- Implementation guardrails: `--impl` assigns implementation/spec variants only; it is not graph/root membership or parent selection. To parent new work under the active issue, run `az issue create \"Child task\"` from the correct `AZEDARACH_ISSUE_ID` context; for another parent/root, add an explicit `parent-child` edge. In multi-implementation repos, include explicit `--impl <impl>` only on implementation-specific new issue writes and use repeated `--impl` only for intentional shared work. For `az issue update`, `--update-impl` is only for changing implementation assignments; status/title/notes updates do not require it."
 	specEnabled := deps != nil && deps.Config != nil && deps.Config.Spec.Enabled
 	orchestrationVia := primeOrchestrationVia(deps)
 	orchestrationViaAz := strings.EqualFold(orchestrationVia, "az")
@@ -5938,8 +6480,10 @@ func renderPrimeImplementationSection(implementations []string) string {
 	return fmt.Sprintf("- Implementation selection (multi-implementation project):\n"+
 		"  - Available implementations: %s\n"+
 		"  - Use `az impl list` to refresh the available options.\n"+
+		"  - If you mean \"make this a child of the active issue\", run `az issue create \"Child task\"`; auto-parenting uses `AZEDARACH_ISSUE_ID`, not `--impl`.\n"+
+		"  - If you mean \"attach this to another parent/root\", create the issue and add `az issue dep add <child-id> <parent-id> --type parent-child`.\n"+
 		"  - `--impl` selects implementation/spec variant assignment only; it does not attach an issue to a parent/root graph.\n"+
-		"  - New issue writes for a specific implementation must choose one, for example `az issue create --impl %s \"Implementation-specific task\"`.\n"+
+		"  - New issue writes for a specific implementation must choose one, for example `az issue create --impl %s \"Implementation-specific task\"`; this still relies on auto-parenting or parent-child edges for graph membership.\n"+
 		"  - Repeat `--impl` only for intentionally shared implementation work. Existing issue updates do not use `--impl`; use `--update-impl` only when changing assignments.\n",
 		strings.Join(quoted, ", "), exampleImpl)
 }
@@ -6467,6 +7011,30 @@ func parseOperationStates(values []string) ([]protocol.OperationState, error) {
 		}
 	}
 	return states, nil
+}
+
+func parseIssueListDateFilter(raw string, endOfDay bool) (*time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		parsed = parsed.UTC()
+		return &parsed, nil
+	}
+	if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+		parsed = parsed.UTC()
+		return &parsed, nil
+	}
+	parsed, err := time.ParseInLocation("2006-01-02", raw, time.Local)
+	if err != nil {
+		return nil, fmt.Errorf("expected YYYY-MM-DD or RFC3339 timestamp")
+	}
+	if endOfDay {
+		parsed = parsed.AddDate(0, 0, 1).Add(-time.Nanosecond)
+	}
+	parsed = parsed.UTC()
+	return &parsed, nil
 }
 
 func parseIssueStatuses(values []string) ([]domain.Status, error) {

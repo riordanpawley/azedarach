@@ -53,7 +53,9 @@ func (m Model) View() string {
 		Render(mainView)
 
 	sb := statusbar.New(m.statusBarMode(), m.width, m.styles)
-	sb.SetEventTicker(m.eventTicker)
+	if currentOverlay != nil || m.viewMode != ViewModeOverview {
+		sb.SetEventTicker(m.eventTicker)
+	}
 	sb.SetCurrentProject(m.currentProject)
 	sb.SetSelectionSummary(m.selectionSummary())
 	sb.SetFilterSummary(m.filterSummary())
@@ -138,8 +140,10 @@ func (m Model) View() string {
 
 func orchestrationOverviewStatusBindings() []keybinds.Binding {
 	return []keybinds.Binding{
-		{Key: "j/k", Description: "move"},
-		{Key: "enter", Description: "task workspace"},
+		{Key: "↑/↓ j/k", Description: "row"},
+		{Key: "←/→ h/l", Description: "project"},
+		{Key: "Home/End g/G", Description: "top/end"},
+		{Key: "Enter", Description: "open"},
 		{Key: "Tab", Description: "switch view"},
 		{Key: "/", Description: "search"},
 		{Key: "f", Description: "filter"},

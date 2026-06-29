@@ -81,8 +81,12 @@ func (m Model) loadOrchestrationOverviewCmd() tea.Cmd {
 				backendErrors++
 				if overviewProjectMatchesCurrent(project, currentProjectID, currentProjectPath) {
 					entry.Tasks, _ = sessionOverviewTasks(currentTasks)
+					entry.Fallback = "local state"
 				} else if fallbackTasks, fallbackErr := overviewTasksFromSessionStatus(ctx, client); fallbackErr == nil {
 					entry.Tasks = fallbackTasks
+					if len(fallbackTasks) > 0 {
+						entry.Fallback = "session status"
+					}
 				}
 			}
 			if len(entry.Tasks) > 0 {
@@ -366,7 +370,7 @@ func (m Model) handleOverviewModeKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	taskRefs := orchestrationOverviewTaskRefs(m.overviewProjectsForInteraction())
 	if len(taskRefs) == 0 {
 		switch msg.String() {
-		case "j", "down", "k", "up", "g", "G", "enter", " ":
+		case "j", "down", "k", "up", "h", "left", "l", "right", "g", "home", "G", "end", "enter", " ":
 			return m, nil, true
 		default:
 			return m, nil, overviewConsumesBoardActionKey(msg.String())
@@ -379,10 +383,16 @@ func (m Model) handleOverviewModeKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	case "k", "up":
 		m.orchestrationOverviewCursor = clampInt(m.orchestrationOverviewCursor-1, 0, len(taskRefs)-1)
 		return m, nil, true
-	case "g":
+	case "l", "right":
+		m.orchestrationOverviewCursor = overviewMoveProjectCursor(taskRefs, m.orchestrationOverviewCursor, 1)
+		return m, nil, true
+	case "h", "left":
+		m.orchestrationOverviewCursor = overviewMoveProjectCursor(taskRefs, m.orchestrationOverviewCursor, -1)
+		return m, nil, true
+	case "g", "home":
 		m.orchestrationOverviewCursor = 0
 		return m, nil, true
-	case "G":
+	case "G", "end":
 		m.orchestrationOverviewCursor = len(taskRefs) - 1
 		return m, nil, true
 	case "enter", " ":
@@ -399,6 +409,48 @@ func overviewConsumesBoardActionKey(key string) bool {
 	default:
 		return false
 	}
+}
+
+func overviewMoveProjectCursor(taskRefs []orchestrationOverviewTaskRef, cursor, delta int) int {
+	if len(taskRefs) == 0 {
+		return 0
+	}
+	cursor = clampInt(cursor, 0, len(taskRefs)-1)
+	current := taskRefs[cursor]
+	if delta > 0 {
+		for i := cursor + 1; i < len(taskRefs); i++ {
+			if !overviewSameProjectRef(current.Project, taskRefs[i].Project) {
+				return i
+			}
+		}
+		return cursor
+	}
+	if delta < 0 {
+		currentStart := cursor
+		for currentStart > 0 && overviewSameProjectRef(current.Project, taskRefs[currentStart-1].Project) {
+			currentStart--
+		}
+		if currentStart == 0 {
+			return cursor
+		}
+		previous := taskRefs[currentStart-1]
+		previousStart := currentStart - 1
+		for previousStart > 0 && overviewSameProjectRef(previous.Project, taskRefs[previousStart-1].Project) {
+			previousStart--
+		}
+		return previousStart
+	}
+	return cursor
+}
+
+func overviewSameProjectRef(a, b orchestrationProjectOverview) bool {
+	if a.ProjectID != "" && b.ProjectID != "" {
+		return a.ProjectID == b.ProjectID
+	}
+	if strings.TrimSpace(a.Path) != "" && strings.TrimSpace(b.Path) != "" {
+		return strings.TrimSpace(a.Path) == strings.TrimSpace(b.Path)
+	}
+	return strings.TrimSpace(a.Name) == strings.TrimSpace(b.Name)
 }
 
 func openOverviewTaskWorkspace(m Model, taskRef orchestrationOverviewTaskRef) (Model, tea.Cmd, bool) {
@@ -534,7 +586,7 @@ func (m Model) renderOverviewHiddenProjectsLine(width int) string {
 	if remaining := len(m.orchestrationOverviewHiddenLabels) - limit; remaining > 0 {
 		labels = append(labels, fmt.Sprintf("+%d more", remaining))
 	}
-	line := " hidden/degraded projects: " + strings.Join(labels, ", ")
+	line := " hidden projects: " + strings.Join(labels, ", ")
 	return lipgloss.NewStyle().
 		Foreground(uistyles.Overlay1).
 		Width(width).
@@ -589,7 +641,7 @@ func (m Model) renderOverviewHeader(projects []orchestrationProjectOverview, wid
 		parts = append(parts, overviewChip(fmt.Sprintf("%d non-session hidden", counts.hiddenTasks), uistyles.Overlay1))
 	}
 	if counts.backendErrors > 0 {
-		parts = append(parts, overviewChip(fmt.Sprintf("degraded: %d backend", counts.backendErrors), uistyles.Yellow))
+		parts = append(parts, overviewChip(fmt.Sprintf("%d degraded", counts.backendErrors), uistyles.Yellow))
 	}
 	if !m.orchestrationOverviewLoadedAt.IsZero() {
 		parts = append(parts, overviewHeaderDim("updated "+m.orchestrationOverviewLoadedAt.Format("15:04:05")))
@@ -652,26 +704,22 @@ func overviewChip(text string, color lipgloss.Color) string {
 }
 
 func (m Model) renderOverviewCards(projects []orchestrationProjectOverview, width, height int) string {
-	cardWidth := overviewCardWidth(width)
-	if cardWidth < 24 {
-		cardWidth = max(18, width)
-	}
-	cols := max(1, width/cardWidth)
-	if cols > len(projects) && len(projects) > 0 {
-		cols = len(projects)
-	}
-	if cols < 1 {
-		cols = 1
-	}
-	cardWidth = max(18, width/cols)
+	cols := overviewColumnCount(projects, width)
 	rows := max(1, (len(projects)+cols-1)/cols)
-	cardHeight := max(5, height/rows)
+	cardHeights := overviewRowHeights(height, rows)
 	renderedRows := make([]string, 0, rows)
 	cursor := 0
 	for row := 0; row < rows; row++ {
+		cardHeight := cardHeights[row]
+		rowProjects := projects[row*cols:]
+		if len(rowProjects) > cols {
+			rowProjects = rowProjects[:cols]
+		}
+		cardWidths := overviewCardWidths(rowProjects, width, cols)
 		rowCards := make([]string, 0, cols)
 		for col := 0; col < cols; col++ {
 			idx := row*cols + col
+			cardWidth := cardWidths[col]
 			if idx >= len(projects) {
 				rowCards = append(rowCards, lipgloss.NewStyle().Width(cardWidth).Height(cardHeight).Render(""))
 				continue
@@ -683,7 +731,19 @@ func (m Model) renderOverviewCards(projects []orchestrationProjectOverview, widt
 	return lipgloss.NewStyle().Width(width).Height(height).MaxHeight(height).Render(lipgloss.JoinVertical(lipgloss.Left, renderedRows...))
 }
 
-func overviewCardWidth(width int) int {
+func overviewColumnCount(projects []orchestrationProjectOverview, width int) int {
+	cardWidth := overviewBaseCardWidth(width)
+	if cardWidth < 24 {
+		cardWidth = max(18, width)
+	}
+	cols := max(1, width/cardWidth)
+	if cols > len(projects) && len(projects) > 0 {
+		cols = len(projects)
+	}
+	return max(1, cols)
+}
+
+func overviewBaseCardWidth(width int) int {
 	switch {
 	case width >= 150:
 		return 50
@@ -694,6 +754,57 @@ func overviewCardWidth(width int) int {
 	default:
 		return width
 	}
+}
+
+func overviewRowHeights(height, rows int) []int {
+	if rows < 1 {
+		rows = 1
+	}
+	out := make([]int, rows)
+	base := height / rows
+	if base < 1 {
+		base = 1
+	}
+	for i := range out {
+		out[i] = base
+	}
+	extra := height - base*rows
+	for i := 0; i < extra; i++ {
+		out[i%rows]++
+	}
+	if height >= rows*3 {
+		for i := range out {
+			out[i] = max(3, out[i])
+		}
+	}
+	return out
+}
+
+func overviewCardWidths(projects []orchestrationProjectOverview, width, cols int) []int {
+	if cols < 1 {
+		return []int{width}
+	}
+	out := make([]int, cols)
+	if cols == 2 && width >= 120 && len(projects) == 2 {
+		leftWeight := max(1, len(projects[0].Tasks))
+		rightWeight := max(1, len(projects[1].Tasks))
+		total := leftWeight + rightWeight
+		first := width * leftWeight / total
+		minWidth := max(36, width/4)
+		maxWidth := width - minWidth
+		first = clampInt(first, minWidth, maxWidth)
+		out[0] = first
+		out[1] = width - first
+		return out
+	}
+	base := width / cols
+	for i := range out {
+		out[i] = base
+	}
+	for i := 0; i < width-base*cols; i++ {
+		out[i%cols]++
+	}
+	return out
 }
 
 func (m Model) renderOverviewProjectCard(project orchestrationProjectOverview, width, height int, cursor *int) string {
@@ -709,11 +820,14 @@ func (m Model) renderOverviewProjectCard(project orchestrationProjectOverview, w
 		title = "project"
 	}
 	titleLine := ansi.Truncate(title, innerWidth, "...")
-	meta := fmt.Sprintf("%d sessions", len(project.Tasks))
-	if project.Err != nil {
-		meta = fmt.Sprintf("degraded: %s  %d sessions", overviewDegradedReason(project.Err), len(project.Tasks))
+	sessionCount := overviewProjectSessionCount(project)
+	meta := fmt.Sprintf("%d sessions", sessionCount)
+	if project.Err != nil && project.Fallback != "" {
+		meta = fmt.Sprintf("%s fallback  %s  %d sessions", project.Fallback, overviewDegradedReason(project.Err), sessionCount)
+	} else if project.Err != nil {
+		meta = fmt.Sprintf("degraded: %s  %d sessions", overviewDegradedReason(project.Err), sessionCount)
 	} else if project.Freshness != "" {
-		meta = fmt.Sprintf("%s  %d sessions", project.Freshness, len(project.Tasks))
+		meta = fmt.Sprintf("%s  %d sessions", project.Freshness, sessionCount)
 	}
 	lines := []string{
 		lipgloss.NewStyle().Foreground(uistyles.Text).Bold(true).Render(titleLine),
@@ -740,11 +854,21 @@ func (m Model) renderOverviewProjectCard(project orchestrationProjectOverview, w
 	return lipgloss.NewStyle().
 		Width(contentWidth).
 		Height(contentHeight).
-		MaxHeight(contentHeight).
+		MaxHeight(height).
 		Border(lipgloss.NormalBorder()).
 		BorderForeground(overviewProjectBorderColor(project)).
 		Padding(0, 1).
 		Render(content)
+}
+
+func overviewProjectSessionCount(project orchestrationProjectOverview) int {
+	count := 0
+	for _, task := range project.Tasks {
+		if task.Session != nil || task.HasTmuxSession {
+			count++
+		}
+	}
+	return count
 }
 
 func (m Model) renderOverviewTaskLines(project orchestrationProjectOverview, task domain.Task, width, budget int, selected bool) []string {
@@ -770,7 +894,7 @@ func (m Model) renderOverviewTaskLines(project orchestrationProjectOverview, tas
 	lineStyle := lipgloss.NewStyle()
 	if selected {
 		prefix = "> "
-		lineStyle = lineStyle.Background(uistyles.Surface0)
+		lineStyle = lineStyle.Background(uistyles.Surface0).Width(width).MaxWidth(width)
 	}
 	lines := []string{lineStyle.Render(ansi.Truncate(prefix+head, width, "..."))}
 	if budget == 1 {
@@ -782,19 +906,19 @@ func (m Model) renderOverviewTaskLines(project orchestrationProjectOverview, tas
 	}
 	titleStyle := lipgloss.NewStyle().Foreground(uistyles.Text)
 	if selected {
-		titleStyle = titleStyle.Background(uistyles.Surface0)
+		titleStyle = titleStyle.Background(uistyles.Surface0).Width(width).MaxWidth(width)
 	}
 	lines = append(lines, titleStyle.Render(ansi.Truncate("  "+title, width, "...")))
 	if budget == 2 {
 		return lines
 	}
-	context := overviewTaskContext(project, task)
+	source, context := overviewTaskContext(project, task)
 	if context != "" {
-		prefix := lipgloss.NewStyle().Foreground(uistyles.Teal).Bold(true).Render("progress")
-		body := m.styles.StatusHint.Render(ansi.Truncate(context, max(1, width-lipgloss.Width("progress  ")), "..."))
-		contextLine := prefix + "  " + body
+		sourceLabel := overviewProgressSourceBadge(source)
+		body := m.styles.StatusHint.Render(ansi.Truncate(context, max(1, width-lipgloss.Width(sourceLabel+" ")), "..."))
+		contextLine := sourceLabel + " " + body
 		if selected {
-			contextLine = lipgloss.NewStyle().Background(uistyles.Surface0).Render(contextLine)
+			contextLine = lipgloss.NewStyle().Background(uistyles.Surface0).Width(width).MaxWidth(width).Render(contextLine)
 		}
 		lines = append(lines, contextLine)
 	}
@@ -874,40 +998,74 @@ func overviewGitSummary(task domain.Task) string {
 		parts = append(parts, "dirty")
 	}
 	if task.GitAdditions != 0 || task.GitDeletions != 0 {
-		parts = append(parts, fmt.Sprintf("+%d/-%d", task.GitAdditions, task.GitDeletions))
+		parts = append(parts, fmt.Sprintf("+%s/-%s", overviewCompactCount(task.GitAdditions), overviewCompactCount(task.GitDeletions)))
 	}
 	if task.GitAheadCount != 0 || task.GitBehindCount != 0 {
-		parts = append(parts, fmt.Sprintf("ahead %d behind %d", task.GitAheadCount, task.GitBehindCount))
+		parts = append(parts, fmt.Sprintf("ahead %s behind %s", overviewCompactCount(task.GitAheadCount), overviewCompactCount(task.GitBehindCount)))
 	}
 	return strings.Join(parts, " ")
 }
 
-func overviewTaskContext(project orchestrationProjectOverview, task domain.Task) string {
+func overviewCompactCount(n int) string {
+	sign := ""
+	value := n
+	if value < 0 {
+		sign = "-"
+		value = -value
+	}
+	switch {
+	case value >= 1000000:
+		return fmt.Sprintf("%s%.1fM", sign, float64(value)/1000000)
+	case value >= 1000:
+		return fmt.Sprintf("%s%.1fk", sign, float64(value)/1000)
+	default:
+		return fmt.Sprintf("%s%d", sign, value)
+	}
+}
+
+func overviewProgressSourceBadge(source string) string {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		source = "progress"
+	}
+	return lipgloss.NewStyle().Foreground(uistyles.Teal).Bold(true).Render(source)
+}
+
+func overviewTaskContext(project orchestrationProjectOverview, task domain.Task) (string, string) {
 	taskID := strings.TrimSpace(task.ID.String())
 	if project.MailByTask != nil {
 		if evt, ok := project.MailByTask[taskID]; ok {
 			eventType := strings.TrimSpace(evt.Type)
 			body := firstNonEmptyLine(evt.Body)
 			if body != "" && eventType != "" {
-				return eventType + ": " + body
+				return "mail", eventType + ": " + body
 			}
 			if body != "" {
-				return body
+				return "mail", body
 			}
 		}
 	}
-	if context := firstNonEmptyLine(task.Notes, task.Acceptance, task.Description, task.Design); context != "" {
-		return context
+	if context := firstNonEmptyLine(task.Notes); context != "" {
+		return "notes", context
+	}
+	if context := firstNonEmptyLine(task.Acceptance); context != "" {
+		return "ac", context
+	}
+	if context := firstNonEmptyLine(task.Description); context != "" {
+		return "desc", context
+	}
+	if context := firstNonEmptyLine(task.Design); context != "" {
+		return "design", context
 	}
 	if task.Session != nil {
 		if label := strings.TrimSpace(task.Session.DisplayLabel()); label != "" {
-			return "activity: " + label
+			return "activity", label
 		}
 	}
 	if task.HasTmuxSession {
-		return "activity: session"
+		return "activity", "session"
 	}
-	return ""
+	return "", ""
 }
 
 func overviewLatestMailByTask(ctx context.Context, client *daemonclient.Client, repoDir string, tasks []domain.Task) map[string]protocol.MailEvent {

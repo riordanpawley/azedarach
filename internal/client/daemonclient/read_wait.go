@@ -71,7 +71,7 @@ func (p ReadWaitPolicy) timeoutError(mode ReadWaitMode, budget time.Duration, er
 	return &ReadWaitTimeoutError{
 		Mode:   mode,
 		Budget: budget,
-		Hint:   fmt.Sprintf("Linear read sync timed out after %s; showing local-first data", budget),
+		Hint:   fmt.Sprintf("Task snapshot read timed out after %s; keeping current local view", budget),
 		Err:    err,
 	}
 }
@@ -90,7 +90,7 @@ func (e *ReadWaitTimeoutError) Error() string {
 	if e.Hint != "" {
 		return e.Hint
 	}
-	return fmt.Sprintf("Linear read sync timed out after %s", e.Budget)
+	return fmt.Sprintf("Task snapshot read timed out after %s", e.Budget)
 }
 
 func (e *ReadWaitTimeoutError) Unwrap() error {

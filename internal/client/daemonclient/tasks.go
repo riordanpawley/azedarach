@@ -65,8 +65,9 @@ type TaskUpdateParams struct {
 
 // TaskStatusRequest contains the payload used to update a task status.
 type TaskStatusRequest struct {
-	TaskID naming.IssueID `json:"task_id"`
-	Status domain.Status  `json:"status"`
+	TaskID          naming.IssueID `json:"task_id"`
+	Status          domain.Status  `json:"status"`
+	CascadeChildren bool           `json:"cascade_children,omitempty"`
 }
 
 // TaskStatusOptions controls client-side status transition behavior.
@@ -74,6 +75,8 @@ type TaskStatusOptions struct {
 	ForceWorktree        bool
 	IgnoreAhead          bool
 	IntegrateBeforeClose bool
+	CloseCleanChildren   bool
+	CascadeChildren      bool
 }
 
 type TaskDeleteOptions struct {
@@ -88,6 +91,7 @@ type taskCloseRequest struct {
 	ForceWorktree        bool           `json:"force_worktree,omitempty"`
 	IgnoreAhead          bool           `json:"ignore_ahead,omitempty"`
 	IntegrateBeforeClose bool           `json:"integrate_before_close,omitempty"`
+	CloseCleanChildren   bool           `json:"close_clean_children,omitempty"`
 }
 
 type taskDeleteRequest struct {
@@ -112,6 +116,7 @@ type TaskCloseResult struct {
 	WorktreeForced             bool                   `json:"worktree_forced,omitempty"`
 	Revision                   uint64                 `json:"revision,omitempty"`
 	Phases                     []TaskClosePhaseTiming `json:"phases,omitempty"`
+	AutoClosedChildren         []string               `json:"auto_closed_children,omitempty"`
 }
 
 type TaskClosePhaseTiming struct {
@@ -138,13 +143,14 @@ type TaskDeleteResult struct {
 
 // TaskGraphReadiness describes daemon-owned runnable-leaf policy for a root issue graph.
 type TaskGraphReadiness struct {
-	RootIssueID          string                     `json:"root_issue_id"`
-	Runnable             []string                   `json:"runnable"`
-	Pending              []TaskPendingStart         `json:"pending,omitempty"`
-	Active               []string                   `json:"active,omitempty"`
-	ActiveSessions       []TaskActiveSession        `json:"active_sessions,omitempty"`
-	SessionStartProgress []TaskSessionStartProgress `json:"session_start_progress,omitempty"`
-	Blocked              map[string]string          `json:"blocked"`
+	RootIssueID            string                        `json:"root_issue_id"`
+	Runnable               []string                      `json:"runnable"`
+	Pending                []TaskPendingStart            `json:"pending,omitempty"`
+	Active                 []string                      `json:"active,omitempty"`
+	ActiveSessions         []TaskActiveSession           `json:"active_sessions,omitempty"`
+	SessionStartProgress   []TaskSessionStartProgress    `json:"session_start_progress,omitempty"`
+	StaleCloseableChildren []TaskStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
+	Blocked                map[string]string             `json:"blocked"`
 }
 
 // TaskPendingStart contains durable operation state for submitted session starts.
@@ -179,12 +185,20 @@ type TaskSessionStartProgress struct {
 	FinishedAt     *time.Time `json:"finished_at,omitempty"`
 }
 
+type TaskStaleCloseableCandidate struct {
+	IssueID          string   `json:"issue_id"`
+	Status           string   `json:"status"`
+	Evidence         []string `json:"evidence"`
+	SuggestedCommand string   `json:"suggested_command"`
+}
+
 // TaskCompleteCheckResult is the daemon-owned root close readiness gate.
 type TaskCompleteCheckResult struct {
-	RootIssueID string   `json:"root_issue_id"`
-	Pass        bool     `json:"pass"`
-	Reasons     []string `json:"reasons,omitempty"`
-	Advice      []string `json:"advice,omitempty"`
+	RootIssueID            string                        `json:"root_issue_id"`
+	Pass                   bool                          `json:"pass"`
+	Reasons                []string                      `json:"reasons,omitempty"`
+	Advice                 []string                      `json:"advice,omitempty"`
+	StaleCloseableChildren []TaskStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
 }
 
 // TaskIntegrationReadiness is the daemon-owned worker integration evidence gate.
@@ -568,10 +582,25 @@ func (c *Client) ListTasksSnapshot(ctx context.Context) (TaskSnapshot, error) {
 
 // ListTasksSnapshotWithMode fetches a task snapshot with the requested bounded read budget.
 func (c *Client) ListTasksSnapshotWithMode(ctx context.Context, mode ReadWaitMode) (TaskSnapshot, error) {
+	return c.ListTasksSnapshotWithQueryMode(ctx, "", mode)
+}
+
+// ListTasksSnapshotWithQuery fetches a daemon-filtered task snapshot for an issue content query.
+func (c *Client) ListTasksSnapshotWithQuery(ctx context.Context, query string) (TaskSnapshot, error) {
+	return c.ListTasksSnapshotWithQueryMode(ctx, query, ReadWaitModeDefault)
+}
+
+// ListTasksSnapshotWithQueryMode fetches a task snapshot with an optional daemon-side content query.
+func (c *Client) ListTasksSnapshotWithQueryMode(ctx context.Context, query string, mode ReadWaitMode) (TaskSnapshot, error) {
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
 
-	resp, err := c.commandJSONResponse(waitCtx, CommandTaskList, nil)
+	var body any
+	if query = strings.TrimSpace(query); query != "" {
+		body = protocol.TaskListRequestBody{Query: query}
+	}
+
+	resp, err := c.commandJSONResponse(waitCtx, CommandTaskList, body)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
@@ -598,7 +627,7 @@ func (c *Client) ListTasksSnapshotWithMode(ctx context.Context, mode ReadWaitMod
 		if !ack.Accepted {
 			return TaskSnapshot{}, fmt.Errorf("decode %s response: %w (handshake rejected after mismatch: %s)", CommandTaskList, decodeErr, ack.Reason)
 		}
-		retryResp, retryErr := c.commandJSONResponse(waitCtx, CommandTaskList, nil)
+		retryResp, retryErr := c.commandJSONResponse(waitCtx, CommandTaskList, body)
 		if retryErr != nil {
 			return TaskSnapshot{}, retryErr
 		}
@@ -665,8 +694,9 @@ func (c *Client) UpdateTaskStatusWithOptions(ctx context.Context, taskID string,
 		return err
 	}
 	return c.commandJSON(ctx, CommandTaskUpdateStatus, TaskStatusRequest{
-		TaskID: parsedTaskID,
-		Status: status,
+		TaskID:          parsedTaskID,
+		Status:          status,
+		CascadeChildren: opts.CascadeChildren,
 	}, nil)
 }
 
@@ -681,6 +711,7 @@ func (c *Client) CloseTask(ctx context.Context, taskID string, opts TaskStatusOp
 		ForceWorktree:        opts.ForceWorktree,
 		IgnoreAhead:          opts.IgnoreAhead,
 		IntegrateBeforeClose: opts.IntegrateBeforeClose,
+		CloseCleanChildren:   opts.CloseCleanChildren,
 	}, &out); err != nil {
 		return TaskCloseResult{}, err
 	}

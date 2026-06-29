@@ -1178,40 +1178,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		return m, nil
 
-		// Image attachment messages
+		// Attachment messages
 	case overlay.AttachmentActionMsg:
 		if msg.Action == "attached" {
-			filename := "image"
+			filename := "attachment"
 			if msg.Attachment != nil && strings.TrimSpace(msg.Attachment.Filename) != "" {
 				filename = msg.Attachment.Filename
 			}
 			m.addToast(Toast{
 				Level:   ToastSuccess,
-				Message: fmt.Sprintf("Image attached: %s", filename),
+				Message: fmt.Sprintf("Attachment added: %s", filename),
 				Expires: time.Now().Add(3 * time.Second),
 			})
 			return m, m.appendAttachmentNoteCmd(msg.Attachment)
 		} else if msg.Action == "staged" {
-			filename := "image"
+			filename := "attachment"
 			if msg.Attachment != nil && strings.TrimSpace(msg.Attachment.Filename) != "" {
 				filename = msg.Attachment.Filename
 			}
 			m.addToast(Toast{
 				Level:   ToastSuccess,
-				Message: fmt.Sprintf("Image staged for new task: %s", filename),
+				Message: fmt.Sprintf("Attachment staged for new task: %s", filename),
 				Expires: time.Now().Add(3 * time.Second),
 			})
 			return m, nil
 		} else if msg.Action == "deleted" {
 			m.addToast(Toast{
 				Level:   ToastSuccess,
-				Message: "Image attachment deleted",
+				Message: "Attachment deleted",
 				Expires: time.Now().Add(3 * time.Second),
 			})
 		} else if msg.Action == "error" && msg.Error != nil {
 			m.addToast(Toast{
 				Level:   ToastError,
-				Message: fmt.Sprintf("Image attachment failed: %s", compactErrorMessage(msg.Error)),
+				Message: fmt.Sprintf("Attachment failed: %s", compactErrorMessage(msg.Error)),
 				Expires: time.Now().Add(5 * time.Second),
 			})
 		}
@@ -1222,7 +1222,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !ok {
 			m.addToast(Toast{
 				Level:   ToastError,
-				Message: "Image preview unavailable: unsupported attachment service",
+				Message: "Attachment preview unavailable: unsupported attachment service",
 				Expires: time.Now().Add(5 * time.Second),
 			})
 			return m, nil
@@ -1538,6 +1538,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		pending.summaries = msg.summaries
+		pending = m.prepareCloseCleanupConfirmation(pending)
+		if len(msg.refreshedTasks) > 0 {
+			pending.targetOnlyBlockedByChildren = closeCleanupTargetsHaveBlockingDescendants(msg.refreshedTasks, pendingCloseCleanupTargetIDs(pending))
+		}
 		if reason := pendingCloseCleanupBlockedReason(pending); reason != "" {
 			m.addToast(Toast{
 				Level:   ToastWarning,
@@ -1546,15 +1550,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
+		if pending.targetOnlyBlockedByChildren && !pending.closeCleanChildren {
+			m.pendingClose = &pending
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "Target-only close is blocked by unresolved children; press C or cancel",
+				Expires: time.Now().Add(4 * time.Second),
+			})
+			return m, m.confirmCloseCleanupCmd(pending)
+		}
 		if len(pending.taskIDs) > 0 {
 			m.beginMutationFeedback(fmt.Sprintf("Bulk close queued for %d task(s)", len(pending.taskIDs)))
+			opts := daemonclient.TaskStatusOptions{CloseCleanChildren: pending.closeCleanChildren}
 			if pending.bulkMode == "move" {
-				return m, m.bulkMoveStatusCmd(pending.taskIDs, pending.delta)
+				return m, m.bulkMoveStatusCmdWithOptions(pending.taskIDs, pending.delta, opts)
 			}
-			return m, m.bulkSetStatusCmd(pending.taskIDs, pending.targetStatus)
+			return m, m.bulkSetStatusCmdWithOptions(pending.taskIDs, pending.targetStatus, opts)
 		}
 		m.beginTaskStatusMoveFeedback(pending.taskID, pending.previousStatus, pending.targetStatus)
-		return m, m.moveTaskStatusCmd(pending.taskID, pending.previousStatus, pending.targetStatus)
+		return m, m.moveTaskStatusCmdWithOptions(pending.taskID, pending.previousStatus, pending.targetStatus, daemonclient.TaskStatusOptions{CloseCleanChildren: pending.closeCleanChildren})
 
 	case bulkStatusResultMsg:
 		m.loading = false
