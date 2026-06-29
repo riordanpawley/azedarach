@@ -861,6 +861,278 @@ func TestModelTreeViewShowsNonSelectableAncestorsForActiveLeaves(t *testing.T) {
 	}
 }
 
+func TestModelCardsOrderActiveSessionsByGraphSlice(t *testing.T) {
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	entries := []InventoryEntry{
+		{
+			SessionID:      "az-child",
+			IssueID:        childID.String(),
+			TaskTitle:      "Child session",
+			HasTmuxSession: true,
+			Task: domain.Task{
+				ID:       childID,
+				Title:    "Child session",
+				Status:   domain.StatusInProgress,
+				ParentID: &parentID,
+			},
+		},
+		{
+			SessionID:      "az-parent",
+			IssueID:        parentID.String(),
+			TaskTitle:      "Parent session",
+			HasTmuxSession: true,
+			Task: domain.Task{
+				ID:     parentID,
+				Title:  "Parent session",
+				Status: domain.StatusInProgress,
+			},
+		},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	model = updated.(Model)
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	ordered := model.filteredEntries()
+	if got := []string{ordered[0].SessionID, ordered[1].SessionID}; strings.Join(got, ",") != "az-parent,az-child" {
+		t.Fatalf("card order = %v, want parent before child", got)
+	}
+	view := ansi.Strip(model.View())
+	parentPos := strings.Index(view, "Parent session")
+	childPos := strings.Index(view, "Child session")
+	if parentPos < 0 || childPos < 0 || parentPos > childPos {
+		t.Fatalf("cards view did not render parent before child:\n%s", view)
+	}
+	if !strings.Contains(view, "under az-parent Parent session") {
+		t.Fatalf("child card missing ancestor ribbon:\n%s", view)
+	}
+
+	model = updateKey(t, model, "1")
+	selected, ok := model.selectedEntry()
+	if !ok || selected.SessionID != "az-child" {
+		t.Fatalf("digit hotkey selected %+v, want graph-ordered child card", selected)
+	}
+}
+
+func TestModelCardsDefaultCurrentSessionUsesGraphOrder(t *testing.T) {
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	snapshot := Snapshot{
+		CurrentSessionID: "az-child",
+		Entries: []InventoryEntry{
+			{
+				SessionID:      "az-child",
+				IssueID:        childID.String(),
+				TaskTitle:      "Child session",
+				HasTmuxSession: true,
+				Task: domain.Task{
+					ID:       childID,
+					Title:    "Child session",
+					Status:   domain.StatusInProgress,
+					ParentID: &parentID,
+				},
+			},
+			{
+				SessionID:      "az-parent",
+				IssueID:        parentID.String(),
+				TaskTitle:      "Parent session",
+				HasTmuxSession: true,
+				Task: domain.Task{
+					ID:     parentID,
+					Title:  "Parent session",
+					Status: domain.StatusInProgress,
+				},
+			},
+		},
+	}
+	model := New(fakeSnapshotLoader{snapshot: snapshot})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: snapshot})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	selected, ok := model.selectedEntry()
+	if !ok || selected.SessionID != "az-child" {
+		t.Fatalf("selected entry = %+v, want graph-ordered current child session", selected)
+	}
+	if model.cursor != 1 {
+		t.Fatalf("cursor = %d, want child graph-order index 1", model.cursor)
+	}
+}
+
+func TestModelCardsGroupSessionsUnderInactiveAncestor(t *testing.T) {
+	parentID := naming.IssueID("az-parent")
+	firstChildID := naming.IssueID("az-first-child")
+	secondChildID := naming.IssueID("az-second-child")
+	entries := []InventoryEntry{
+		{
+			SessionID:      "az-first-child",
+			IssueID:        firstChildID.String(),
+			TaskTitle:      "First child",
+			HasTmuxSession: true,
+			Task: domain.Task{
+				ID:       firstChildID,
+				Title:    "First child",
+				Status:   domain.StatusInProgress,
+				ParentID: &parentID,
+			},
+		},
+		{SessionID: "plain-tmux", TaskTitle: "Plain tmux", HasTmuxSession: true},
+		{
+			SessionID:      "az-second-child",
+			IssueID:        secondChildID.String(),
+			TaskTitle:      "Second child",
+			HasTmuxSession: true,
+			Task: domain.Task{
+				ID:       secondChildID,
+				Title:    "Second child",
+				Status:   domain.StatusInProgress,
+				ParentID: &parentID,
+			},
+		},
+	}
+	snapshot := Snapshot{
+		Entries: entries,
+		TreeTasks: []domain.Task{
+			{ID: parentID, Title: "Inactive parent", Status: domain.StatusInProgress},
+		},
+	}
+	model := New(fakeSnapshotLoader{snapshot: snapshot})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	model = updated.(Model)
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: snapshot})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	ordered := model.filteredEntries()
+	if got := []string{ordered[0].SessionID, ordered[1].SessionID, ordered[2].SessionID}; strings.Join(got, ",") != "az-first-child,az-second-child,plain-tmux" {
+		t.Fatalf("card order = %v, want related children grouped before unrelated session", got)
+	}
+	view := ansi.Strip(model.View())
+	if !strings.Contains(view, "under az-parent Inactive parent") {
+		t.Fatalf("cards view missing inactive ancestor ribbon:\n%s", view)
+	}
+}
+
+func TestModelSlashSearchMatchesCardAncestorRibbon(t *testing.T) {
+	parentID := naming.IssueID("az-parent")
+	childID := naming.IssueID("az-child")
+	snapshot := Snapshot{
+		Entries: []InventoryEntry{
+			{
+				SessionID:      "az-child",
+				IssueID:        childID.String(),
+				TaskTitle:      "Worker session",
+				HasTmuxSession: true,
+				Task: domain.Task{
+					ID:       childID,
+					Title:    "Worker session",
+					Status:   domain.StatusInProgress,
+					ParentID: &parentID,
+				},
+			},
+		},
+		TreeTasks: []domain.Task{
+			{ID: parentID, Title: "Inactive parent", Status: domain.StatusInProgress},
+		},
+	}
+	model := New(fakeSnapshotLoader{snapshot: snapshot})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: snapshot})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	model = updateKey(t, model, "/")
+	for _, r := range "inactive" {
+		updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		model = updated.(Model)
+		if cmd != nil {
+			t.Fatalf("search rune %q returned command", r)
+		}
+	}
+
+	if got := len(model.filteredEntries()); got != 1 {
+		t.Fatalf("filtered sessions = %d, want child matched by ancestor ribbon", got)
+	}
+	view := ansi.Strip(model.View())
+	if !strings.Contains(view, "under az-parent Inactive parent") || !strings.Contains(view, "Worker session") {
+		t.Fatalf("ancestor-ribbon search did not keep descendant card visible:\n%s", view)
+	}
+}
+
+func TestModelCardsKeepOriginalOrderForDuplicateIssueSessions(t *testing.T) {
+	issueID := naming.IssueID("az-dup")
+	parentID := naming.IssueID("az-parent")
+	entries := []InventoryEntry{
+		{
+			SessionID:      "az-dup-one",
+			IssueID:        issueID.String(),
+			TaskTitle:      "Duplicate one",
+			HasTmuxSession: true,
+			Task: domain.Task{
+				ID:       issueID,
+				Title:    "Duplicate one",
+				Status:   domain.StatusInProgress,
+				ParentID: &parentID,
+			},
+		},
+		{
+			SessionID:      "az-dup-two",
+			IssueID:        issueID.String(),
+			TaskTitle:      "Duplicate two",
+			HasTmuxSession: true,
+			Task: domain.Task{
+				ID:       issueID,
+				Title:    "Duplicate two",
+				Status:   domain.StatusInProgress,
+				ParentID: &parentID,
+			},
+		},
+	}
+	snapshot := Snapshot{
+		Entries:   entries,
+		TreeTasks: []domain.Task{{ID: parentID, Title: "Parent", Status: domain.StatusInProgress}},
+	}
+	model := New(fakeSnapshotLoader{snapshot: snapshot})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: snapshot})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	ordered := model.filteredEntries()
+	if got := []string{ordered[0].SessionID, ordered[1].SessionID}; strings.Join(got, ",") != "az-dup-one,az-dup-two" {
+		t.Fatalf("card order = %v, want original order for duplicate issue sessions", got)
+	}
+}
+
+func TestRenderSessionRowIncludesGraphAncestorRibbon(t *testing.T) {
+	row := SessionRow{
+		SessionID:      "az-child",
+		IssueID:        "child",
+		TaskTitle:      "Child session",
+		HasTmuxSession: true,
+		GraphAncestors: []string{"az-root Root", "az-parent Parent"},
+	}
+
+	view := ansi.Strip(RenderSessionRow(row, false, 72, lipgloss.Style{}, lipgloss.Style{}, lipgloss.Style{}, styles.New()))
+	if !strings.Contains(view, "under az-root Root > az-parent Parent") {
+		t.Fatalf("card missing graph ancestor ribbon:\n%s", view)
+	}
+	if !strings.Contains(view, "tmux az-child") {
+		t.Fatalf("card missing tmux metadata after adding graph ribbon:\n%s", view)
+	}
+}
+
 func TestModelTreeSortUpdatedRanksBranchesByNewestDescendantSession(t *testing.T) {
 	now := time.Now().UTC()
 	alphaID := naming.IssueID("az-alpha")
