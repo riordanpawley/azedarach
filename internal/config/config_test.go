@@ -752,6 +752,20 @@ func TestSessionLogDirForUsesConfiguredGlobalLogDir(t *testing.T) {
 	assert.Equal(t, cfg.Session.LogDir, got)
 }
 
+func TestSessionLogDirForExpandsTildeConfiguredGlobalLogDir(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	worktree := filepath.Join(t.TempDir(), "repo-worktree")
+	require.NoError(t, os.MkdirAll(worktree, 0o755))
+	cfg := DefaultConfig()
+	cfg.Session.LogDir = "~/.azedarach/logs"
+
+	got := SessionLogDirFor(cfg, worktree)
+
+	assert.Equal(t, filepath.Join(homeDir, ".azedarach", "logs"), got)
+}
+
 func TestSessionLogDirForUsesWorktreeLocalDirForScopedRuntime(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")

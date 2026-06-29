@@ -213,6 +213,33 @@ func TestNewDependenciesAtUsesGlobalRuntimeForLinkedWorktreeWithoutEnv(t *testin
 	}
 }
 
+func TestNewDependenciesAtExpandsTildeSessionLogDirOutsideWorktree(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	repo := filepath.Join(t.TempDir(), "app-worktree")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo): %v", err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Session.LogDir = "~/.azedarach/logs"
+
+	deps, err := NewDependenciesAt(cfg, repo)
+	if err != nil {
+		t.Fatalf("NewDependenciesAt() error = %v", err)
+	}
+	if deps.Logger == nil {
+		t.Fatal("NewDependenciesAt() returned nil logger")
+	}
+
+	if _, err := os.Stat(filepath.Join(homeDir, ".azedarach", "logs", logging.CLILogFileName)); err != nil {
+		t.Fatalf("Stat(home CLI log) error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "~")); !os.IsNotExist(err) {
+		t.Fatalf("repo literal tilde dir stat error = %v, want not exist", err)
+	}
+}
+
 func TestNewDependenciesAtRejectsSharedDaemonFromLinkedAzedarachWorktreeBinary(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
