@@ -57,6 +57,7 @@ type SpecRequirementListRequestBody struct {
 	Status  SpecRequirementStatus  `json:"status,omitempty" msgpack:"status,omitempty"`
 	IDs     []naming.RequirementID `json:"ids,omitempty" msgpack:"ids,omitempty"`
 	Query   string                 `json:"query,omitempty" msgpack:"query,omitempty"`
+	Match   string                 `json:"match,omitempty" msgpack:"match,omitempty"`
 	Limit   int                    `json:"limit,omitempty" msgpack:"limit,omitempty"`
 }
 

@@ -88,7 +88,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   {{ end }}
   - `az mail send --parent <parent-issue> --type dependency-ready --body "..."`, `az mail send --parent <parent-issue> --issue <worker-issue> --type worker-integration-ready --body "evidence..."`, `az mail list --parent <parent-issue> --since <seq> --json`, `az mail watch --parent <parent-issue> --since <seq> --jsonl`
   - Spec traceability:
-  - {{ if .SpecEnabled }}`az spec req list --query "<topic>" --limit 5`, `az spec req get/create/update/delete`, `az spec link list/add/remove`, `az spec read`, `az spec lint`, and `az spec parity` before behavior changes and after behavior edits to keep requirements/links aligned.{{ else }}Spec workflows disabled for this project (`az config set spec.enabled false`).{{ end }}
+  - {{ if .SpecEnabled }}`az spec req list --query "<issue title and feature terms>" --match any --limit 10`, `az spec req get/create/update/delete`, `az spec link list/add/remove`, `az spec read`, `az spec lint`, and `az spec parity` before behavior changes and after behavior edits to keep requirements/links aligned.{{ else }}Spec workflows disabled for this project (`az config set spec.enabled false`).{{ end }}
   - Decision records:
   - Use `az decision` to capture durable architecture/product choices and link them to issues, requirements, or prior decisions.
   - `az decision list [--json] [--issue <id>] [--req <id>] [--id <id> ...] [--query <text>]`, `az decision get --id <id> [--with-links] [--json]`

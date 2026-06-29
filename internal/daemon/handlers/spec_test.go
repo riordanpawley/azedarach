@@ -189,12 +189,13 @@ func TestSpecHandlerRequirementCommands(t *testing.T) {
 			"REQ-2",
 		},
 		Query: " storage lifecycle ",
+		Match: " ANY ",
 		Limit: 5,
 	}))
 	if !resp.OK {
 		t.Fatalf("list response error: %+v", resp.Error)
 	}
-	if gotList.IssueID != "az-1" || len(gotList.IDs) != 2 || gotList.IDs[0] != "REQ-2" || gotList.IDs[1] != "REQ-1" || gotList.Query != "storage lifecycle" || gotList.Limit != 5 {
+	if gotList.IssueID != "az-1" || len(gotList.IDs) != 2 || gotList.IDs[0] != "REQ-2" || gotList.IDs[1] != "REQ-1" || gotList.Query != "storage lifecycle" || gotList.Match != "any" || gotList.Limit != 5 {
 		t.Fatalf("normalized list request = %+v", gotList)
 	}
 
@@ -416,6 +417,13 @@ func TestSpecHandlerValidationAndErrorMapping(t *testing.T) {
 			name: "invalid list limit",
 			req: specRequest(t, protocol.CommandSpecRequirementList, protocol.SpecRequirementListRequestBody{
 				Limit: -1,
+			}),
+			wantCode: protocol.ErrorCodeInvalidRequest,
+		},
+		{
+			name: "invalid list match",
+			req: specRequest(t, protocol.CommandSpecRequirementList, protocol.SpecRequirementListRequestBody{
+				Match: "near",
 			}),
 			wantCode: protocol.ErrorCodeInvalidRequest,
 		},

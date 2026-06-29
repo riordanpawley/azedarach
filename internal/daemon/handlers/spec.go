@@ -69,8 +69,12 @@ func (h *SpecHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) 
 		}
 		cmd.IDs = uniqueTrimmedRequirementIDs(cmd.IDs)
 		cmd.Query = strings.TrimSpace(cmd.Query)
+		cmd.Match = strings.ToLower(strings.TrimSpace(cmd.Match))
 		if cmd.Status != "" && !cmd.Status.Valid() {
 			return specInvalidRequest(resp, "invalid status: expected open|accepted|superseded")
+		}
+		if cmd.Match != "" && cmd.Match != "all" && cmd.Match != "any" {
+			return specInvalidRequest(resp, "invalid match: expected all|any")
 		}
 		if cmd.Limit < 0 {
 			return specInvalidRequest(resp, "limit must be non-negative")
