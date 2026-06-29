@@ -51,7 +51,7 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"az tmux install-selector",
 		"az tmux uninstall-selector",
 		"az tmux selector",
-		"az spec req list --query \"daemon lifecycle\" --limit 5",
+		"az spec req list --query \"daemon lifecycle recovery\" --match any --limit 10",
 		"az spec req create --id bfs-req-1 --title \"Restore az spec grammar\" --issue bgh",
 		"az spec link add --issue bgh --req bfs-req-1 --role implements",
 	} {

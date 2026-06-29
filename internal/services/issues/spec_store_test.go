@@ -447,6 +447,46 @@ func TestClient_ListRequirements_QueryAndLimit(t *testing.T) {
 	assert.Empty(t, listed)
 }
 
+func TestClient_ListRequirements_QueryAnyRanksBroadDiscoveryMatches(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	_, err := client.CreateRequirement(ctx, CreateRequirementParams{
+		LocalID:     "REQ-SESSION",
+		Title:       "Session lifecycle recovery",
+		Description: "Recover runtime state from durable projection",
+	})
+	require.NoError(t, err)
+	_, err = client.CreateRequirement(ctx, CreateRequirementParams{
+		LocalID:     "REQ-TMUX",
+		Title:       "Tmux runtime attachment",
+		Description: "Attach to panes and recover session metadata",
+	})
+	require.NoError(t, err)
+	_, err = client.CreateRequirement(ctx, CreateRequirementParams{
+		LocalID:     "REQ-OVERLAY",
+		Title:       "Overlay sizing",
+		Description: "Clamp dialog geometry",
+	})
+	require.NoError(t, err)
+
+	strict, err := client.ListRequirements(ctx, RequirementFilter{
+		Query: "tmux session panes recovery",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, strict)
+
+	broad, err := client.ListRequirements(ctx, RequirementFilter{
+		Query:      "tmux session panes recovery",
+		QueryMatch: RequirementQueryMatchAny,
+		Limit:      2,
+	})
+	require.NoError(t, err)
+	require.Len(t, broad, 2)
+	assert.Equal(t, "REQ-TMUX", broad[0].LocalID)
+	assert.Equal(t, "REQ-SESSION", broad[1].LocalID)
+}
+
 func TestClient_SpecLinksCRUDAndAuditOrdering(t *testing.T) {
 	ctx := WithSpecAuditActorSource(context.Background(), "spec-store-test")
 	client := newTestClient(t)

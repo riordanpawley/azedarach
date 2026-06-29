@@ -2,6 +2,8 @@ package attachment
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -146,6 +148,115 @@ func TestList(t *testing.T) {
 		if att.Size == 0 {
 			t.Error("expected attachment to have non-zero size")
 		}
+	}
+}
+
+func TestServiceMigratesLegacyBlobAttachmentSchema(t *testing.T) {
+	tmpDir := t.TempDir()
+	issuesPath := filepath.Join(tmpDir, "issues")
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	service := NewService(issuesPath, logger)
+	ctx := context.Background()
+
+	if err := os.MkdirAll(filepath.Dir(service.dbPath), 0755); err != nil {
+		t.Fatalf("failed to create db dir: %v", err)
+	}
+	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s", filepath.ToSlash(service.dbPath)))
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE issue_attachments (
+			issue_id TEXT NOT NULL,
+			attachment_id TEXT NOT NULL,
+			filename TEXT NOT NULL,
+			original_path TEXT NOT NULL,
+			mime_type TEXT NOT NULL,
+			size_bytes INTEGER NOT NULL,
+			created_at TEXT NOT NULL,
+			content_blob BLOB NOT NULL,
+			PRIMARY KEY (issue_id, attachment_id)
+		)
+	`); err != nil {
+		t.Fatalf("failed to create legacy attachment table: %v", err)
+	}
+	legacyData := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	if _, err := db.Exec(`
+		INSERT INTO issue_attachments (
+			issue_id, attachment_id, filename, original_path, mime_type, size_bytes, created_at, content_blob
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, "az-123", "legacy-id", "legacy.png", "clipboard", "image/png", len(legacyData), "2026-03-08T08:18:41.045Z", legacyData); err != nil {
+		t.Fatalf("failed to seed legacy attachment row: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("failed to close seed db: %v", err)
+	}
+
+	attachments, err := service.List(ctx, "az-123")
+	if err != nil {
+		t.Fatalf("failed to list migrated attachments: %v", err)
+	}
+	if len(attachments) != 1 {
+		t.Fatalf("attachments = %d, want 1: %+v", len(attachments), attachments)
+	}
+	got := attachments[0]
+	if got.ID != "legacy-id" {
+		t.Fatalf("migrated attachment id = %q, want legacy-id", got.ID)
+	}
+	if !strings.Contains(got.Relative, ".azedarach/attachments/") {
+		t.Fatalf("migrated relative path = %q, want shared attachments path", got.Relative)
+	}
+	if _, err := os.Stat(got.Path); err != nil {
+		t.Fatalf("migrated attachment file missing at %q: %v", got.Path, err)
+	}
+
+	db, err = sql.Open("sqlite", fmt.Sprintf("file:%s", filepath.ToSlash(service.dbPath)))
+	if err != nil {
+		t.Fatalf("failed to reopen db: %v", err)
+	}
+	defer db.Close()
+	columns := map[string]bool{}
+	rows, err := db.Query(`PRAGMA table_info(issue_attachments)`)
+	if err != nil {
+		t.Fatalf("failed to inspect migrated schema: %v", err)
+	}
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			columnType string
+			notNull    int
+			defaultVal sql.NullString
+			pk         int
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultVal, &pk); err != nil {
+			t.Fatalf("failed to scan migrated column: %v", err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("failed to close schema rows: %v", err)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("failed to iterate migrated columns: %v", err)
+	}
+	for _, legacyColumn := range []string{"original_path", "size_bytes", "content_blob"} {
+		if columns[legacyColumn] {
+			t.Fatalf("legacy column %q still present after migration", legacyColumn)
+		}
+	}
+	for _, currentColumn := range []string{"relative_path", "size"} {
+		if !columns[currentColumn] {
+			t.Fatalf("current column %q missing after migration", currentColumn)
+		}
+	}
+
+	newFile := filepath.Join(tmpDir, "new.png")
+	if err := os.WriteFile(newFile, []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01}, 0644); err != nil {
+		t.Fatalf("failed to create new attachment source: %v", err)
+	}
+	if _, err := service.Attach(ctx, "az-123", newFile); err != nil {
+		t.Fatalf("failed to attach after legacy schema migration: %v", err)
 	}
 }
 

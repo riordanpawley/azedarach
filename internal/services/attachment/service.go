@@ -489,14 +489,14 @@ func (s *Service) openDB() (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open attachment database: %w", err)
 	}
-	if err := ensureIssueAttachmentSchema(db); err != nil {
+	if err := s.ensureIssueAttachmentSchema(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return db, nil
 }
 
-func ensureIssueAttachmentSchema(db *sql.DB) error {
+func (s *Service) ensureIssueAttachmentSchema(db *sql.DB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS issue_attachments (
 			issue_id TEXT NOT NULL,
@@ -513,6 +513,22 @@ func ensureIssueAttachmentSchema(db *sql.DB) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("ensure issue attachment schema: %w", err)
+	}
+	columns, err := issueAttachmentColumns(db)
+	if err != nil {
+		return fmt.Errorf("inspect issue attachment schema: %w", err)
+	}
+	if issueAttachmentSchemaNeedsBlobMigration(columns) {
+		if err := s.migrateBlobAttachmentSchema(db); err != nil {
+			return err
+		}
+		columns, err = issueAttachmentColumns(db)
+		if err != nil {
+			return fmt.Errorf("inspect migrated issue attachment schema: %w", err)
+		}
+	}
+	if !issueAttachmentSchemaIsCurrent(columns) {
+		return fmt.Errorf("issue attachment schema is incompatible")
 	}
 	return nil
 }
@@ -543,6 +559,217 @@ func (s *Service) getSharedAttachmentDir() string {
 func contentID(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:8])
+}
+
+type issueAttachmentColumnSet map[string]bool
+
+type blobAttachmentReference struct {
+	IssueID      string
+	AttachmentID string
+	Filename     string
+	Relative     string
+	MimeType     string
+	Size         int64
+	CreatedAt    string
+}
+
+func issueAttachmentColumns(db *sql.DB) (issueAttachmentColumnSet, error) {
+	rows, err := db.Query(`PRAGMA table_info(issue_attachments)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	columns := issueAttachmentColumnSet{}
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			columnType string
+			notNull    int
+			defaultVal sql.NullString
+			pk         int
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultVal, &pk); err != nil {
+			return nil, err
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return columns, nil
+}
+
+func issueAttachmentSchemaNeedsBlobMigration(columns issueAttachmentColumnSet) bool {
+	return columns["content_blob"]
+}
+
+func issueAttachmentSchemaIsCurrent(columns issueAttachmentColumnSet) bool {
+	for _, required := range []string{"issue_id", "attachment_id", "filename", "relative_path", "mime_type", "size", "created_at"} {
+		if !columns[required] {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Service) migrateBlobAttachmentSchema(db *sql.DB) error {
+	refs, err := s.readBlobAttachmentReferences(db)
+	if err != nil {
+		return err
+	}
+	if err := replaceIssueAttachmentTable(db, refs); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) readBlobAttachmentReferences(db *sql.DB) ([]blobAttachmentReference, error) {
+	columns, err := issueAttachmentColumns(db)
+	if err != nil {
+		return nil, fmt.Errorf("inspect legacy issue attachment columns: %w", err)
+	}
+	if !columns["content_blob"] {
+		return nil, nil
+	}
+
+	rows, err := db.Query(`
+		SELECT issue_id, attachment_id, filename, original_path, mime_type, size_bytes, created_at, content_blob
+		FROM issue_attachments
+		ORDER BY created_at, filename
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("read legacy issue attachment rows: %w", err)
+	}
+	defer rows.Close()
+
+	if err := os.MkdirAll(s.getSharedAttachmentDir(), 0755); err != nil {
+		return nil, fmt.Errorf("create attachments directory for legacy rows: %w", err)
+	}
+
+	refs := make([]blobAttachmentReference, 0)
+	for rows.Next() {
+		var (
+			issueID      string
+			attachmentID string
+			filename     string
+			originalPath sql.NullString
+			mimeType     sql.NullString
+			sizeBytes    sql.NullInt64
+			createdAt    sql.NullString
+			data         []byte
+		)
+		if err := rows.Scan(&issueID, &attachmentID, &filename, &originalPath, &mimeType, &sizeBytes, &createdAt, &data); err != nil {
+			return nil, fmt.Errorf("scan legacy issue attachment row: %w", err)
+		}
+		name := strings.TrimSpace(filename)
+		if name == "" {
+			name = strings.TrimSpace(filepath.Base(originalPath.String))
+		}
+		name = filepath.Base(filepath.FromSlash(name))
+		if name == "" || name == "." || name == string(os.PathSeparator) {
+			name = "attachment" + mimeTypeToExt(strings.TrimSpace(mimeType.String))
+		}
+
+		newFilename := fmt.Sprintf("%s-%s", contentID(data), name)
+		destPath := filepath.Join(s.getSharedAttachmentDir(), newFilename)
+		if _, err := os.Stat(destPath); os.IsNotExist(err) {
+			if err := os.WriteFile(destPath, data, 0644); err != nil {
+				return nil, fmt.Errorf("write legacy attachment blob %q: %w", destPath, err)
+			}
+		} else if err != nil {
+			return nil, fmt.Errorf("inspect legacy attachment blob %q: %w", destPath, err)
+		}
+
+		size := sizeBytes.Int64
+		if size <= 0 {
+			size = int64(len(data))
+		}
+		created := strings.TrimSpace(createdAt.String)
+		if created == "" {
+			created = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+		mime := strings.TrimSpace(mimeType.String)
+		if mime == "" {
+			mime = detectMimeType(data, name)
+		}
+
+		refs = append(refs, blobAttachmentReference{
+			IssueID:      issueID,
+			AttachmentID: attachmentID,
+			Filename:     newFilename,
+			Relative:     filepath.ToSlash(filepath.Join(".azedarach", attachmentCollection, newFilename)),
+			MimeType:     mime,
+			Size:         size,
+			CreatedAt:    created,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate legacy issue attachment rows: %w", err)
+	}
+	return refs, nil
+}
+
+func replaceIssueAttachmentTable(db *sql.DB, refs []blobAttachmentReference) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin issue attachment schema migration: %w", err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err := tx.Exec(`
+		DROP TABLE IF EXISTS issue_attachments_migration_new;
+		CREATE TABLE issue_attachments_migration_new (
+			issue_id TEXT NOT NULL,
+			attachment_id TEXT NOT NULL,
+			filename TEXT NOT NULL,
+			relative_path TEXT NOT NULL,
+			mime_type TEXT NOT NULL,
+			size INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY (issue_id, attachment_id)
+		);
+	`); err != nil {
+		return fmt.Errorf("create replacement issue attachment table: %w", err)
+	}
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO issue_attachments_migration_new (
+			issue_id, attachment_id, filename, relative_path, mime_type, size, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return fmt.Errorf("prepare replacement issue attachment insert: %w", err)
+	}
+
+	for _, ref := range refs {
+		if _, err := stmt.Exec(ref.IssueID, ref.AttachmentID, ref.Filename, ref.Relative, ref.MimeType, ref.Size, ref.CreatedAt); err != nil {
+			_ = stmt.Close()
+			return fmt.Errorf("copy issue attachment reference %q/%q: %w", ref.IssueID, ref.AttachmentID, err)
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		return fmt.Errorf("close replacement issue attachment insert: %w", err)
+	}
+
+	if _, err := tx.Exec(`
+		DROP TABLE issue_attachments;
+		ALTER TABLE issue_attachments_migration_new RENAME TO issue_attachments;
+		CREATE INDEX IF NOT EXISTS idx_issue_attachments_attachment_id
+			ON issue_attachments(attachment_id);
+	`); err != nil {
+		return fmt.Errorf("replace issue attachment table: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit issue attachment schema migration: %w", err)
+	}
+	tx = nil
+	return nil
 }
 
 // detectMimeType detects the MIME type from file data

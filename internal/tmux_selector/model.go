@@ -53,6 +53,7 @@ type InventoryEntry struct {
 	HasConflicts          bool
 	GitAdditions          int
 	GitDeletions          int
+	GraphAncestors        []string
 	Task                  domain.Task
 }
 
@@ -537,7 +538,7 @@ func (m *Model) normalizeSnapshot() {
 	m.snapshot.Entries = keepTmuxEntries(m.snapshot.Entries)
 	m.snapshot.Entries = prioritizeAzSessionFirst(m.snapshot.Entries)
 	if !m.defaultedToCurrent {
-		if current := strings.TrimSpace(m.snapshot.CurrentSessionID); current != "" && m.selectSnapshotSessionID(current) {
+		if current := strings.TrimSpace(m.snapshot.CurrentSessionID); current != "" && m.selectSessionID(current) {
 			m.defaultedToCurrent = true
 		} else if m.selectAttachedSnapshotSession() {
 			m.defaultedToCurrent = true
@@ -570,22 +571,8 @@ func (m *Model) selectSessionID(sessionID string) bool {
 	return false
 }
 
-func (m *Model) selectSnapshotSessionID(sessionID string) bool {
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return false
-	}
-	for i, entry := range m.snapshot.Entries {
-		if strings.TrimSpace(entry.SessionID) == sessionID {
-			m.cursor = i
-			return true
-		}
-	}
-	return false
-}
-
 func (m *Model) selectAttachedSnapshotSession() bool {
-	for i, entry := range m.snapshot.Entries {
+	for i, entry := range m.filteredEntries() {
 		if entry.TmuxAttached || entry.TmuxAttachedCount > 0 {
 			m.cursor = i
 			return true
@@ -730,19 +717,27 @@ func (m Model) renderTree(entries []InventoryEntry) string {
 	availableHeight := maxInt(1, m.treeAvailableHeight())
 	visible := visibleTreeRows(rows, m.cursor, availableHeight)
 	lines := make([]string, 0, len(visible))
+	labels := m.labelsByEntry()
+	labelWidth := maxLabelWidth(labels)
 	for _, row := range visible {
 		if row.entryIndex >= len(entries) {
 			continue
 		}
-		lines = append(lines, m.renderTreeRow(row, row.entry))
+		lines = append(lines, m.renderTreeRow(row, row.entry, labels, labelWidth))
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
 
-func (m Model) renderTreeRow(row sessionTreeRow, entry InventoryEntry) string {
+func (m Model) renderTreeRow(row sessionTreeRow, entry InventoryEntry, labels map[int]string, labelWidth int) string {
 	cursor := m.styles.StatusHint.Render("  ")
+	if labelWidth > 0 {
+		cursor = m.styles.StatusHint.Render(" " + renderIndexColumn(labels[row.entryIndex], labelWidth) + " ")
+	}
 	if row.entryIndex >= 0 && row.entryIndex == m.cursor {
 		cursor = lipgloss.NewStyle().Foreground(styles.Blue).Bold(true).Render("> ")
+		if labelWidth > 0 {
+			cursor = lipgloss.NewStyle().Foreground(styles.Blue).Bold(true).Render(">") + renderIndexColumn(labels[row.entryIndex], labelWidth) + " "
+		}
 	}
 	indent := m.styles.StatusHint.Render(treePrefix(row.ancestorLast, row.last))
 	displayID := entryDisplayID(entry)
@@ -886,16 +881,148 @@ func (m Model) statusText() string {
 
 func (m Model) filteredEntries() []InventoryEntry {
 	query := strings.TrimSpace(strings.ToLower(m.searchQuery))
+	source := m.withGraphAncestors(m.snapshot.Entries)
+	var entries []InventoryEntry
 	if query == "" {
-		return m.snapshot.Entries
-	}
-	filtered := make([]InventoryEntry, 0, len(m.snapshot.Entries))
-	for _, entry := range m.snapshot.Entries {
-		if entryMatchesSearch(entry, query) {
-			filtered = append(filtered, entry)
+		entries = source
+	} else {
+		entries = make([]InventoryEntry, 0, len(source))
+		for _, entry := range source {
+			if entryMatchesSearch(entry, query) {
+				entries = append(entries, entry)
+			}
 		}
 	}
-	return filtered
+	return m.graphOrderedEntries(entries)
+}
+
+func (m Model) graphOrderedEntries(entries []InventoryEntry) []InventoryEntry {
+	ordered := entries
+	if len(entries) < 2 {
+		return m.withGraphAncestors(ordered)
+	}
+	rows := activeSessionTreeRowsWithOptions(entries, m.treeAncestorTasks(), selectorTreeSortOrder)
+	if len(rows) == 0 {
+		return m.withGraphAncestors(ordered)
+	}
+	treeOrdered := make([]InventoryEntry, 0, len(entries))
+	seen := make(map[int]struct{}, len(entries))
+	for _, row := range rows {
+		if row.entryIndex < 0 || row.entryIndex >= len(entries) {
+			continue
+		}
+		if _, ok := seen[row.entryIndex]; ok {
+			continue
+		}
+		seen[row.entryIndex] = struct{}{}
+		treeOrdered = append(treeOrdered, entries[row.entryIndex])
+	}
+	if len(treeOrdered) == len(entries) {
+		ordered = treeOrdered
+	}
+	return m.withGraphAncestors(ordered)
+}
+
+func (m Model) withGraphAncestors(entries []InventoryEntry) []InventoryEntry {
+	if len(entries) == 0 {
+		return entries
+	}
+	ancestorTasks := m.graphAncestorTasksForEntries(entries)
+	var out []InventoryEntry
+	for i, entry := range entries {
+		ancestors := graphAncestorLabels(entry, ancestorTasks)
+		if len(ancestors) == 0 && len(entry.GraphAncestors) == 0 {
+			continue
+		}
+		if out == nil {
+			out = append([]InventoryEntry(nil), entries...)
+		}
+		out[i].GraphAncestors = ancestors
+	}
+	if out == nil {
+		return entries
+	}
+	return out
+}
+
+func (m Model) graphAncestorTasksForEntries(entries []InventoryEntry) map[string]domain.Task {
+	tasks := m.snapshotTasksByID()
+	for _, entry := range entries {
+		issueID := entryIssueID(entry)
+		if issueID == "" {
+			continue
+		}
+		if tasks == nil {
+			tasks = map[string]domain.Task{}
+		}
+		task := entry.Task
+		if task.ID.String() == "" {
+			task.ID = naming.IssueID(issueID)
+		}
+		if strings.TrimSpace(task.Title) == "" {
+			task.Title = strings.TrimSpace(entry.TaskTitle)
+		}
+		if task.Status == "" {
+			task.Status = entry.IssueStatus
+		}
+		tasks[issueID] = task
+	}
+	return tasks
+}
+
+func (m Model) snapshotTasksByID() map[string]domain.Task {
+	tasks := append([]domain.Task(nil), m.snapshot.TreeTasks...)
+	tasks = append(tasks, m.snapshot.Tasks...)
+	if len(tasks) == 0 {
+		return nil
+	}
+	out := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		issueID := strings.TrimSpace(task.ID.String())
+		if issueID == "" {
+			continue
+		}
+		out[issueID] = task
+	}
+	return out
+}
+
+func graphAncestorLabels(entry InventoryEntry, ancestorTasks map[string]domain.Task) []string {
+	parentID := entryParentID(entry)
+	if parentID == "" {
+		return nil
+	}
+	labels := []string{}
+	seen := map[string]struct{}{}
+	for parentID != "" {
+		if _, ok := seen[parentID]; ok {
+			break
+		}
+		seen[parentID] = struct{}{}
+		task, ok := ancestorTasks[parentID]
+		if !ok {
+			labels = append(labels, parentID)
+			break
+		}
+		labels = append(labels, graphAncestorLabel(task))
+		parentID = taskParentID(task)
+	}
+	for i, j := 0, len(labels)-1; i < j; i, j = i+1, j-1 {
+		labels[i], labels[j] = labels[j], labels[i]
+	}
+	return labels
+}
+
+func graphAncestorLabel(task domain.Task) string {
+	id := strings.TrimSpace(task.ID.String())
+	title := strings.TrimSpace(task.Title)
+	if id == "" {
+		return title
+	}
+	if title == "" || title == id {
+		return id
+	}
+	return id + " " + title
 }
 
 func entryMatchesSearch(entry InventoryEntry, query string) bool {
@@ -918,6 +1045,7 @@ func entryMatchesSearch(entry InventoryEntry, query string) bool {
 		entry.Task.Priority.String(),
 		entry.Task.Type.String(),
 		entry.Task.Origin,
+		strings.Join(entry.GraphAncestors, " "),
 	}, "\n"))
 	return strings.Contains(haystack, query)
 }
@@ -1517,20 +1645,7 @@ func (m Model) treeAncestorTasks() map[string]domain.Task {
 	if strings.TrimSpace(m.searchQuery) != "" {
 		return nil
 	}
-	tasks := append([]domain.Task(nil), m.snapshot.TreeTasks...)
-	tasks = append(tasks, m.snapshot.Tasks...)
-	if len(tasks) == 0 {
-		return nil
-	}
-	out := make(map[string]domain.Task, len(tasks))
-	for _, task := range tasks {
-		issueID := strings.TrimSpace(task.ID.String())
-		if issueID == "" {
-			continue
-		}
-		out[issueID] = task
-	}
-	return out
+	return m.snapshotTasksByID()
 }
 
 type treeNode struct {
@@ -1874,6 +1989,9 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 	}
 	card := board.RenderCardWithRuntimeSignals(task, signals, selected, false, width, s)
 	card = compactSelectorCard(card)
+	if graph := renderGraphAncestorMeta(row, s); graph != "" {
+		card = insertCardMetaLine(card, graph, "", s)
+	}
 	if len(metaParts) == 0 {
 		return card
 	}
@@ -1967,6 +2085,17 @@ func renderUpdatedMeta(entry InventoryEntry, now time.Time, s *styles.Styles) st
 		s = styles.New()
 	}
 	return lipgloss.NewStyle().Foreground(styles.Overlay1).Render("updated ") + s.StatusHint.Render(updated)
+}
+
+func renderGraphAncestorMeta(entry InventoryEntry, s *styles.Styles) string {
+	if len(entry.GraphAncestors) == 0 {
+		return ""
+	}
+	if s == nil {
+		s = styles.New()
+	}
+	return lipgloss.NewStyle().Foreground(styles.Overlay1).Render("under ") +
+		s.StatusInfo.Render(strings.Join(entry.GraphAncestors, " > "))
 }
 
 func rowCardDisplayState(row InventoryEntry) domain.SessionState {
@@ -2300,6 +2429,28 @@ var jumpLabelStyle = lipgloss.NewStyle().
 	Foreground(styles.Base).
 	Background(styles.Pink).
 	Bold(true)
+
+func renderIndexColumn(label string, width int) string {
+	label = strings.TrimSpace(label)
+	if width <= 0 {
+		return ""
+	}
+	if label == "" {
+		return strings.Repeat(" ", width)
+	}
+	if ansi.StringWidth(label) > width {
+		label = ansi.Truncate(label, width, "…")
+	}
+	return jumpLabelStyle.Width(width).Align(lipgloss.Center).Render(label)
+}
+
+func maxLabelWidth(labels map[int]string) int {
+	width := 0
+	for _, label := range labels {
+		width = maxInt(width, ansi.StringWidth(strings.TrimSpace(label)))
+	}
+	return width
+}
 
 func insertJumpLabelInCardLine(line string, label string) (string, bool) {
 	// Cards are styled with BorderForeground(...), so each "│" is wrapped in

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -30,6 +31,13 @@ const (
 	RequirementStatusOpen       RequirementStatus = "open"
 	RequirementStatusAccepted   RequirementStatus = "accepted"
 	RequirementStatusSuperseded RequirementStatus = "superseded"
+)
+
+type RequirementQueryMatch string
+
+const (
+	RequirementQueryMatchAll RequirementQueryMatch = "all"
+	RequirementQueryMatchAny RequirementQueryMatch = "any"
 )
 
 type Requirement struct {
@@ -66,6 +74,7 @@ type RequirementFilter struct {
 	Statuses       []RequirementStatus
 	LocalIDs       []string
 	Query          string
+	QueryMatch     RequirementQueryMatch
 	Limit          int
 	IncludeDeleted bool
 }
@@ -276,7 +285,7 @@ func (c *Client) ListRequirements(ctx context.Context, filter RequirementFilter)
 		query.WriteString(` AND status IN (` + strings.Join(placeholders, ",") + `)`)
 	}
 	if trimmed := strings.TrimSpace(filter.Query); trimmed != "" {
-		expr := domain.ContentQueryFTSExpression(trimmed)
+		expr := requirementQueryFTSExpression(trimmed, filter.QueryMatch)
 		if expr == "" {
 			return []Requirement{}, nil
 		}
@@ -289,7 +298,7 @@ func (c *Client) ListRequirements(ctx context.Context, filter RequirementFilter)
 	}
 
 	query.WriteString(` ORDER BY updated_at DESC, local_id ASC`)
-	if filter.Limit > 0 && len(filter.LocalIDs) == 0 {
+	if filter.Limit > 0 && len(filter.LocalIDs) == 0 && filter.QueryMatch != RequirementQueryMatchAny {
 		query.WriteString(` LIMIT ?`)
 		args = append(args, filter.Limit)
 	}
@@ -317,7 +326,10 @@ func (c *Client) ListRequirements(ctx context.Context, filter RequirementFilter)
 		requirements = filterRequirementsByLocalID(requirements, normalizeOrderedIDs(filter.LocalIDs))
 	}
 	if strings.TrimSpace(filter.Query) != "" {
-		requirements = filterRequirementsByContentQuery(requirements, filter.Query)
+		requirements = filterRequirementsByContentQuery(requirements, filter.Query, filter.QueryMatch)
+	}
+	if strings.TrimSpace(filter.Query) != "" && filter.QueryMatch == RequirementQueryMatchAny {
+		sortRequirementsByContentQueryScore(requirements, filter.Query)
 	}
 	if filter.Limit > 0 && len(requirements) > filter.Limit {
 		requirements = requirements[:filter.Limit]
@@ -1348,27 +1360,59 @@ func filterRequirementsByLocalID(requirements []Requirement, ids []string) []Req
 	return ordered
 }
 
-func filterRequirementsByContentQuery(requirements []Requirement, query string) []Requirement {
+func requirementQueryFTSExpression(query string, match RequirementQueryMatch) string {
+	if match == RequirementQueryMatchAny {
+		return domain.ContentQueryAnyFTSExpression(query)
+	}
+	return domain.ContentQueryFTSExpression(query)
+}
+
+func filterRequirementsByContentQuery(requirements []Requirement, query string, match RequirementQueryMatch) []Requirement {
 	if strings.TrimSpace(query) == "" {
 		return requirements
 	}
+	terms := domain.ContentQueryTerms(query)
 	filtered := make([]Requirement, 0, len(requirements))
 	for _, requirement := range requirements {
-		externalCode := ""
-		if requirement.ExternalCode != nil {
-			externalCode = *requirement.ExternalCode
+		fields := requirementSearchFields(requirement)
+		if match == RequirementQueryMatchAny && domain.ContentFieldsMatchAnyTerm(fields, terms) {
+			filtered = append(filtered, requirement)
+			continue
 		}
-		if domain.ContentFieldsMatchQuery([]string{
-			requirement.LocalID,
-			externalCode,
-			requirement.Title,
-			requirement.Description,
-			string(requirement.Status),
-		}, query) {
+		if match != RequirementQueryMatchAny && domain.ContentFieldsMatchTerms(fields, terms) {
 			filtered = append(filtered, requirement)
 		}
 	}
 	return filtered
+}
+
+func sortRequirementsByContentQueryScore(requirements []Requirement, query string) {
+	terms := domain.ContentQueryTerms(query)
+	sort.SliceStable(requirements, func(i, j int) bool {
+		leftScore := domain.ContentFieldsMatchedTermCount(requirementSearchFields(requirements[i]), terms)
+		rightScore := domain.ContentFieldsMatchedTermCount(requirementSearchFields(requirements[j]), terms)
+		if leftScore != rightScore {
+			return leftScore > rightScore
+		}
+		if !requirements[i].UpdatedAt.Equal(requirements[j].UpdatedAt) {
+			return requirements[i].UpdatedAt.After(requirements[j].UpdatedAt)
+		}
+		return requirements[i].LocalID < requirements[j].LocalID
+	})
+}
+
+func requirementSearchFields(requirement Requirement) []string {
+	externalCode := ""
+	if requirement.ExternalCode != nil {
+		externalCode = *requirement.ExternalCode
+	}
+	return []string{
+		requirement.LocalID,
+		externalCode,
+		requirement.Title,
+		requirement.Description,
+		string(requirement.Status),
+	}
 }
 
 func recordsToSpecLinks(records []specLinkRecord) []SpecLink {

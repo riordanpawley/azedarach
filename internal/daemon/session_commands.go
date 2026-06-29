@@ -759,20 +759,42 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	reportSessionStartProgress(ctx, "worktree_preflight", fmt.Sprintf("creating or reusing worktree from %s", baseBranch), 25)
 	worktree, err := worktreeManager.CreateWithTitle(ctx, cmd.IssueID, task.Title, baseBranch)
 	reusedWorktree := false
+	worktreeCreateError := ""
 	worktreeSetupWarning := ""
 	if err != nil {
-		// Recovery path: git worktree add can return non-zero after materializing
-		// a usable worktree (for example, hooks that fail post-checkout).
-		// If we can load the worktree for the issue, continue by reusing it.
-		if recoveredWorktree, recoverErr := worktreeManager.Get(ctx, cmd.IssueID); recoverErr == nil {
+		worktreeCreateError = err.Error()
+		if errors.Is(err, git.ErrWorktreeAlreadyExists) {
+			recoveredWorktree, recoverErr := worktreeManager.Get(ctx, cmd.IssueID)
+			if recoverErr != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree already exists but could not be loaded: %v", recoverErr)), nil
+			}
 			worktree = recoveredWorktree
 			reusedWorktree = true
-			worktreeSetupWarning = fmt.Sprintf("Worktree setup warning: git worktree create reported %v; recovered existing worktree at %s. Validate setup in the worktree before relying on later checks.", err, worktree.Path)
-		} else {
-			if !errors.Is(err, git.ErrWorktreeAlreadyExists) {
-				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+			worktreeSetupWarning = fmt.Sprintf("Worktree setup warning: worktree already existed for %s; reused existing worktree at %s without running worktree init commands.", cmd.IssueID, worktree.Path)
+		} else if materializedWorktree, recoverErr := worktreeManager.Get(ctx, cmd.IssueID); recoverErr == nil {
+			cleanupNote := d.cleanupWorktreeAfterCreateFailure(ctx, worktreeManager, cmd.IssueID, materializedWorktree.Path)
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("git worktree create failed after materializing worktree",
+					"project_id", cmd.ProjectID,
+					"issue_id", cmd.IssueID,
+					"session_id", cmd.SessionID,
+					"worktree", materializedWorktree.Path,
+					"branch", materializedWorktree.Branch,
+					"worktree_create_error", worktreeCreateError,
+				)
 			}
-			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree already exists but could not be loaded: %v", recoverErr)), nil
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree create failed for %s: %v%s", cmd.IssueID, err, cleanupNote)), nil
+		} else {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("git worktree create failed",
+					"project_id", cmd.ProjectID,
+					"issue_id", cmd.IssueID,
+					"session_id", cmd.SessionID,
+					"worktree_create_error", worktreeCreateError,
+					"materialized_worktree_lookup_error", recoverErr,
+				)
+			}
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 		}
 	}
 	if !reusedWorktree {
@@ -820,6 +842,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			"base_branch", baseBranch,
 			"base_branch_ancestor_issue_id", baseBranchAncestorIssueID,
 			"reused_worktree", reusedWorktree,
+			"worktree_create_error", worktreeCreateError,
 		)
 	}
 	d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch)
@@ -940,6 +963,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			"session_id", cmd.SessionID,
 			"worktree", worktree.Path,
 			"reused_worktree", reusedWorktree,
+			"worktree_create_error", worktreeCreateError,
 		)
 	}
 	return d.commandOutput(req, output), nil
@@ -1557,8 +1581,15 @@ func (d *Daemon) ensureConflictWorktree(ctx context.Context, projectID, issueID,
 	baseBranch := d.baseBranchForProject(projectID)
 	worktree, createErr := worktreeManager.CreateWithTitle(ctx, issueID, issueTitle, baseBranch)
 	if createErr != nil {
-		if recoveredWorktree, recoverErr := worktreeManager.Get(ctx, issueID); recoverErr == nil {
-			return recoveredWorktree.Path, recoveredWorktree.Branch, true, nil
+		if errors.Is(createErr, git.ErrWorktreeAlreadyExists) {
+			if recoveredWorktree, recoverErr := worktreeManager.Get(ctx, issueID); recoverErr == nil {
+				return recoveredWorktree.Path, recoveredWorktree.Branch, true, nil
+			}
+			return "", "", false, createErr
+		}
+		if materializedWorktree, recoverErr := worktreeManager.Get(ctx, issueID); recoverErr == nil {
+			cleanupNote := d.cleanupWorktreeAfterCreateFailure(ctx, worktreeManager, issueID, materializedWorktree.Path)
+			return "", "", false, fmt.Errorf("worktree create failed for %s: %w%s", issueID, createErr, cleanupNote)
 		}
 		return "", "", false, createErr
 	}
@@ -1630,6 +1661,32 @@ func (d *Daemon) cleanupNewWorktreeAfterInitFailure(ctx context.Context, worktre
 		)
 	}
 	return fmt.Sprintf(" (cleaned up worktree %s)", worktreePath)
+}
+
+func (d *Daemon) cleanupWorktreeAfterCreateFailure(ctx context.Context, worktreeManager *git.WorktreeManager, issueID, worktreePath string) string {
+	if worktreeManager == nil {
+		return ""
+	}
+	if _, err := worktreeManager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
+		Force:         true,
+		BranchCleanup: git.WorktreeBranchCleanupRequired,
+	}); err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("failed to rollback worktree after create failure",
+				"issue_id", issueID,
+				"worktree", worktreePath,
+				"error", err,
+			)
+		}
+		return fmt.Sprintf(" (rollback failed for worktree %s: %v)", worktreePath, err)
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("rolled back worktree after create failure",
+			"issue_id", issueID,
+			"worktree", worktreePath,
+		)
+	}
+	return fmt.Sprintf(" (rolled back worktree %s)", worktreePath)
 }
 
 func (d *Daemon) ensureConflictSession(ctx context.Context, projectID, issueID, canonicalSessionID, worktreePath string) (sessionName string, reused bool, err error) {
