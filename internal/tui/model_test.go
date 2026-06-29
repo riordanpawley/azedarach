@@ -6763,6 +6763,53 @@ func TestDaemonOperationFailureEventRemainsVisibleWithReason(t *testing.T) {
 	}
 }
 
+func TestDaemonSessionStartFailureEventRemainsVisibleOnTask(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+	detail := "worktree create failed for az-1: failed to create worktree with git worktree add -b user/az-1/task /tmp/az-1 main: hook failed (rolled back worktree /tmp/az-1)"
+	body, err := json.Marshal(protocol.OperationEventBody{
+		Operation: protocol.OperationRecord{
+			OperationID: "op-start",
+			IssueID:     naming.IssueID("az-1"),
+			Kind:        daemonclient.CommandSessionStart,
+			State:       protocol.OperationStateFailed,
+			Error: &protocol.OperationError{
+				Code:      protocol.ErrorCodeInternal,
+				Message:   detail,
+				Retryable: false,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal failure body: %v", err)
+	}
+
+	m.applyDaemonStreamEvent(protocol.EventEnvelope{
+		Event: protocol.EventOperationFailed,
+		Body:  body,
+	}, false)
+
+	signals := m.runtimeSignalsForBoard()
+	got := signals["az-1"]
+	if got.PendingOperationID != "op-start" || got.PendingOperationState != string(protocol.OperationStateFailed) {
+		t.Fatalf("pending signal = %+v, want failed op-start", got)
+	}
+	progress := m.pendingMutationForTask("az-1")
+	if progress == nil {
+		t.Fatal("expected failed session start in task-local mutation progress")
+	}
+	if len(m.toasts) != 0 {
+		t.Fatalf("toasts = %+v, want task-local error surface only", m.toasts)
+	}
+	for _, want := range []string{"git worktree add", "hook failed", "rolled back worktree /tmp/az-1"} {
+		if !strings.Contains(progress.ProgressMessage, want) {
+			t.Fatalf("progress message = %q, want substring %q", progress.ProgressMessage, want)
+		}
+	}
+}
+
 func TestApplyOperationRecordsLoadsQueuedAndRecentFailedOperations(t *testing.T) {
 	now := time.Now().UTC()
 	finished := now.Add(-time.Minute)

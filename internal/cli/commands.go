@@ -631,7 +631,19 @@ func WorktreeCreateCommand(deps *Dependencies, opts WorktreeCreateOptions) error
 	deps.Logger.Info("creating worktree", "project_id", target.ProjectID, "issue_id", target.IssueID, "base_branch", baseBranch)
 	createResult, err := deps.DaemonClient.CreateWorktreeResult(ctx, target.IssueID, baseBranch)
 	if err != nil {
-		return fmt.Errorf("failed to create worktree for %s: %w", target.IssueID, err)
+		wrappedErr := fmt.Errorf("failed to create worktree for %s: %w", target.IssueID, err)
+		if opts.JSON {
+			if printErr := printJSON(map[string]any{
+				"ok":          false,
+				"project_id":  target.ProjectID,
+				"issue_id":    target.IssueID,
+				"base_branch": baseBranch,
+				"error":       wrappedErr.Error(),
+			}); printErr != nil {
+				return fmt.Errorf("%w (also failed to write JSON error response: %v)", wrappedErr, printErr)
+			}
+		}
+		return wrappedErr
 	}
 	worktree := createResult.Worktree
 	baseBranch = strings.TrimSpace(createResult.BaseBranch)
