@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 )
 
@@ -29,6 +30,7 @@ func setupTestAttachmentService(t *testing.T) (*attachment.Service, string, func
 
 func createTestImage(t *testing.T, service *attachment.Service, issueID string) *attachment.Attachment {
 	ctx := context.Background()
+	tmpDir := t.TempDir()
 
 	// Create a small test PNG
 	pngData := []byte{
@@ -37,9 +39,10 @@ func createTestImage(t *testing.T, service *attachment.Service, issueID string) 
 		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
 		0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,
 	}
+	pngData = append(pngData, []byte(tmpDir)...)
 
 	// Create temp file
-	tmpFile := filepath.Join(t.TempDir(), "test.png")
+	tmpFile := filepath.Join(tmpDir, "test.png")
 	err := os.WriteFile(tmpFile, pngData, 0644)
 	if err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
@@ -254,7 +257,7 @@ func TestImagePreviewOverlay_View(t *testing.T) {
 		t.Error("View should not be empty")
 	}
 
-	if !strings.Contains(view, "Image Preview") {
+	if !strings.Contains(view, "Attachment Preview") {
 		t.Error("View should contain title")
 	}
 
@@ -269,7 +272,7 @@ func TestImagePreviewOverlay_View(t *testing.T) {
 
 	view = overlay.View()
 
-	if !strings.Contains(view, "Image 1/2") {
+	if !strings.Contains(view, "Attachment 1/2") {
 		t.Error("View should contain position indicator showing 1/2")
 	}
 
@@ -308,8 +311,8 @@ func TestImagePreviewOverlay_TitleAndSize(t *testing.T) {
 	overlay := NewImagePreviewOverlay(issueID, service, 0)
 
 	title := overlay.Title()
-	if title != "Image Preview" {
-		t.Errorf("Expected title 'Image Preview', got '%s'", title)
+	if title != "Attachment Preview" {
+		t.Errorf("Expected title 'Attachment Preview', got '%s'", title)
 	}
 
 	width, height := overlay.Size()
@@ -324,6 +327,65 @@ func TestImagePreviewOverlay_TitleAndSize(t *testing.T) {
 	confWidth, confHeight := overlay.Size()
 	if confWidth <= 0 || confHeight <= 0 {
 		t.Errorf("Expected positive confirm mode dimensions, got %dx%d", confWidth, confHeight)
+	}
+}
+
+func TestImagePreviewOverlay_RendersMarkdownAttachment(t *testing.T) {
+	service, _, cleanup := setupTestAttachmentService(t)
+	defer cleanup()
+
+	issueID := "test-issue"
+	sourcePath := filepath.Join(t.TempDir(), "report.md")
+	if err := os.WriteFile(sourcePath, []byte("# Session Report\n\n- Result: done\n"), 0644); err != nil {
+		t.Fatalf("write markdown source: %v", err)
+	}
+	attached, err := service.Attach(context.Background(), issueID, sourcePath)
+	if err != nil {
+		t.Fatalf("attach markdown: %v", err)
+	}
+	if attached.MimeType != "text/markdown" {
+		t.Fatalf("attached mime type = %q, want text/markdown", attached.MimeType)
+	}
+
+	overlay := NewImagePreviewOverlay(issueID, service, 0)
+	model, cmd := overlay.Update(overlay.Init()())
+	overlay = model.(*ImagePreviewOverlay)
+	if cmd == nil {
+		t.Fatal("expected markdown render command after load")
+	}
+	model, _ = overlay.Update(cmd())
+	overlay = model.(*ImagePreviewOverlay)
+
+	view := overlay.View()
+	if !strings.Contains(view, "Markdown Report") {
+		t.Fatalf("view missing markdown preview header: %q", view)
+	}
+	plainView := ansi.Strip(view)
+	if !strings.Contains(plainView, "Session Report") {
+		t.Fatalf("view missing rendered markdown content: %q", view)
+	}
+}
+
+func TestImagePreviewOverlay_ShowsMarkdownReadError(t *testing.T) {
+	overlay := NewImagePreviewOverlay("test-issue", nil, 0)
+	overlay.images = []attachment.Attachment{{
+		ID:       "missing",
+		Filename: "missing-report.md",
+		MimeType: "text/markdown",
+		Path:     filepath.Join(t.TempDir(), "missing-report.md"),
+	}}
+	overlay.currentIndex = 0
+
+	cmd := overlay.loadCurrentMarkdown()
+	if cmd == nil {
+		t.Fatal("expected markdown render command")
+	}
+	model, _ := overlay.Update(cmd())
+	overlay = model.(*ImagePreviewOverlay)
+
+	view := overlay.View()
+	if !strings.Contains(ansi.Strip(view), "Error: read markdown:") {
+		t.Fatalf("view missing markdown read error: %q", view)
 	}
 }
 

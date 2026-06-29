@@ -68,47 +68,7 @@ func TestSessionLifecycleCommandsRouteThroughDaemon(t *testing.T) {
 	}
 
 	client := New(transport).WithProjectID("proj-a")
-	imagePaths := []string{"/tmp/a.png", "/tmp/with space/image.png"}
-	startWork := true
-	got, err := client.StartSession(context.Background(), StartSessionParams{
-		IssueID:    "az-1",
-		BaseBranch: "main",
-		Yolo:       false,
-		StartWork:  &startWork,
-		ImagePaths: imagePaths,
-	})
-	if err != nil {
-		t.Fatalf("StartSession error: %v", err)
-	}
-	if got != "ok" {
-		t.Fatalf("StartSession output = %q, want ok", got)
-	}
-	if transport.lastReq.Command != CommandSessionStart {
-		t.Fatalf("command = %q, want %q", transport.lastReq.Command, CommandSessionStart)
-	}
-	if transport.lastReq.Meta.ProjectID != "proj-a" {
-		t.Fatalf("project_id = %q, want proj-a", transport.lastReq.Meta.ProjectID)
-	}
-	var body sessionCommandBody
-	if err := json.Unmarshal(transport.lastReq.Body, &body); err != nil {
-		t.Fatalf("unmarshal body: %v", err)
-	}
-	if body.BaseBranch != "main" {
-		t.Fatalf("base branch = %q, want main", body.BaseBranch)
-	}
-	if body.StartWork == nil || !*body.StartWork {
-		t.Fatalf("start_work = %v, want true", body.StartWork)
-	}
-	if len(body.ImagePaths) != len(imagePaths) {
-		t.Fatalf("image path count = %d, want %d", len(body.ImagePaths), len(imagePaths))
-	}
-	for i := range imagePaths {
-		if body.ImagePaths[i] != imagePaths[i] {
-			t.Fatalf("image path[%d] = %q, want %q", i, body.ImagePaths[i], imagePaths[i])
-		}
-	}
-
-	got, err = client.StopSession(context.Background(), "az-1")
+	got, err := client.StopSession(context.Background(), "az-1")
 	if err != nil {
 		t.Fatalf("StopSession error: %v", err)
 	}
@@ -221,78 +181,49 @@ func TestCleanupProjectRoutesThroughDaemon(t *testing.T) {
 	}
 }
 
-func TestStartSessionIncludesYoloFlagInRequestBody(t *testing.T) {
+func TestScheduledScriptsStatusRoutesThroughDaemon(t *testing.T) {
 	transport := &lifecycleRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			body, err := json.Marshal(commandOutputBody{Output: "ok"})
+			if req.Command != protocol.CommandScheduledScriptsStatus {
+				t.Fatalf("command = %q, want %q", req.Command, protocol.CommandScheduledScriptsStatus)
+			}
+			if req.Meta.ProjectID != "proj-a" {
+				t.Fatalf("project id = %q, want proj-a", req.Meta.ProjectID)
+			}
+			var body protocol.ScheduledScriptsStatusRequestBody
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal scheduled scripts request: %v", err)
+			}
+			if body.ProjectID != "proj-a" || !reflect.DeepEqual(body.Names, []string{"prune"}) {
+				t.Fatalf("request body = %+v, want proj-a prune", body)
+			}
+			respBody, err := json.Marshal(protocol.ScheduledScriptsStatusResponseBody{
+				ProjectID: body.ProjectID,
+				Scripts: []protocol.ScheduledScriptStatus{{
+					Name:    "prune",
+					Enabled: true,
+				}},
+			})
 			if err != nil {
-				t.Fatalf("marshal response: %v", err)
+				t.Fatalf("marshal scheduled scripts response: %v", err)
 			}
 			return protocol.ResponseEnvelope{
 				ProtocolVersion: req.ProtocolVersion,
 				RequestID:       req.RequestID,
 				Kind:            protocol.EnvelopeKindResponse,
 				OK:              true,
-				Body:            body,
+				Body:            respBody,
 			}, nil
 		},
 	}
 
 	client := New(transport).WithProjectID("proj-a")
-	if _, err := client.StartSession(context.Background(), StartSessionParams{
-		IssueID:    "az-1",
-		BaseBranch: "main",
-		Yolo:       true,
-	}); err != nil {
-		t.Fatalf("StartSession error: %v", err)
+	got, err := client.ScheduledScriptsStatus(context.Background(), []string{"prune"})
+	if err != nil {
+		t.Fatalf("ScheduledScriptsStatus error: %v", err)
 	}
-
-	var body sessionCommandBody
-	if err := json.Unmarshal(transport.lastReq.Body, &body); err != nil {
-		t.Fatalf("unmarshal request body: %v", err)
-	}
-	if !body.Yolo {
-		t.Fatal("expected yolo=true in session.start request body")
-	}
-}
-
-func TestStartSessionIncludesStartWorkFlagInRequestBody(t *testing.T) {
-	transport := &lifecycleRecordingTransport{
-		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			body, err := json.Marshal(commandOutputBody{Output: "ok"})
-			if err != nil {
-				t.Fatalf("marshal response: %v", err)
-			}
-			return protocol.ResponseEnvelope{
-				ProtocolVersion: req.ProtocolVersion,
-				RequestID:       req.RequestID,
-				Kind:            protocol.EnvelopeKindResponse,
-				OK:              true,
-				Body:            body,
-			}, nil
-		},
-	}
-
-	client := New(transport).WithProjectID("proj-a")
-	startWork := false
-	if _, err := client.StartSession(context.Background(), StartSessionParams{
-		IssueID:    "az-1",
-		BaseBranch: "main",
-		Yolo:       false,
-		StartWork:  &startWork,
-	}); err != nil {
-		t.Fatalf("StartSession error: %v", err)
-	}
-
-	var body sessionCommandBody
-	if err := json.Unmarshal(transport.lastReq.Body, &body); err != nil {
-		t.Fatalf("unmarshal request body: %v", err)
-	}
-	if body.StartWork == nil {
-		t.Fatal("expected start_work field in session.start request body")
-	}
-	if *body.StartWork {
-		t.Fatal("expected start_work=false in session.start request body")
+	if got.ProjectID != "proj-a" || len(got.Scripts) != 1 || got.Scripts[0].Name != "prune" {
+		t.Fatalf("scheduled script status = %+v", got)
 	}
 }
 
@@ -493,83 +424,6 @@ func TestReconcileRuntimeIssuesRejectsEmptyIssueIDs(t *testing.T) {
 	}
 }
 
-func TestSessionLifecycleCommandsDecodeNestedOperationResult(t *testing.T) {
-	transport := &lifecycleRecordingTransport{
-		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			nested, err := json.Marshal(commandOutputBody{Output: "wrapped"})
-			if err != nil {
-				t.Fatalf("marshal nested response: %v", err)
-			}
-			body, err := json.Marshal(map[string]any{
-				"operation_id": "op-123",
-				"state":        "done",
-				"result":       json.RawMessage(nested),
-			})
-			if err != nil {
-				t.Fatalf("marshal wrapped response: %v", err)
-			}
-			return protocol.ResponseEnvelope{
-				ProtocolVersion: req.ProtocolVersion,
-				RequestID:       req.RequestID,
-				Kind:            protocol.EnvelopeKindResponse,
-				OK:              true,
-				Body:            body,
-			}, nil
-		},
-	}
-
-	client := New(transport).WithProjectID("proj-a")
-	got, err := client.StartSession(context.Background(), StartSessionParams{
-		IssueID:    "az-1",
-		BaseBranch: "main",
-		Yolo:       false,
-	})
-	if err != nil {
-		t.Fatalf("StartSession error: %v", err)
-	}
-	if got != "wrapped" {
-		t.Fatalf("StartSession output = %q, want wrapped", got)
-	}
-}
-
-func TestSessionLifecycleCommandsReturnPendingOperationError(t *testing.T) {
-	transport := &lifecycleRecordingTransport{
-		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			body, err := json.Marshal(map[string]any{
-				"operation_id": "op-123",
-				"state":        string(protocol.OperationStateRunning),
-			})
-			if err != nil {
-				t.Fatalf("marshal wrapped response: %v", err)
-			}
-			return protocol.ResponseEnvelope{
-				ProtocolVersion: req.ProtocolVersion,
-				RequestID:       req.RequestID,
-				Kind:            protocol.EnvelopeKindResponse,
-				OK:              true,
-				Body:            body,
-			}, nil
-		},
-	}
-
-	client := New(transport).WithProjectID("proj-a")
-	_, err := client.StartSession(context.Background(), StartSessionParams{
-		IssueID:    "az-1",
-		BaseBranch: "main",
-		Yolo:       false,
-	})
-	var pending *OperationPendingError
-	if !errors.As(err, &pending) {
-		t.Fatalf("StartSession error = %v, want OperationPendingError", err)
-	}
-	if pending.OperationID != "op-123" {
-		t.Fatalf("operation id = %q, want op-123", pending.OperationID)
-	}
-	if pending.State != protocol.OperationStateRunning {
-		t.Fatalf("state = %q, want running", pending.State)
-	}
-}
-
 func TestResolveConflictRoutesThroughDaemon(t *testing.T) {
 	transport := &lifecycleRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -755,7 +609,8 @@ func TestCreateWorktreeUsesProjectRouteAndBaseBranch(t *testing.T) {
 	transport := &lifecycleRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			body, err := json.Marshal(worktreeResultBody{
-				ProjectID: naming.ProjectID("proj-a"),
+				ProjectID:  naming.ProjectID("proj-a"),
+				BaseBranch: "az/parent",
 				Worktree: worktreePayload{
 					Path:    "/tmp/az-1",
 					Branch:  "az/az-1",
@@ -796,6 +651,14 @@ func TestCreateWorktreeUsesProjectRouteAndBaseBranch(t *testing.T) {
 	}
 	if worktree.Path != "/tmp/az-1" || worktree.Branch != "az/az-1" || worktree.IssueID != "az-1" {
 		t.Fatalf("worktree = %+v", worktree)
+	}
+
+	result, err := client.CreateWorktreeResult(context.Background(), "az-1", "main")
+	if err != nil {
+		t.Fatalf("CreateWorktreeResult error: %v", err)
+	}
+	if result.ProjectID != "proj-a" || result.BaseBranch != "az/parent" {
+		t.Fatalf("result = %+v, want project proj-a base az/parent", result)
 	}
 }
 

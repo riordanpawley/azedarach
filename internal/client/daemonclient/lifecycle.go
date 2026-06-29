@@ -48,6 +48,7 @@ type sessionCommandBody struct {
 // to avoid brittle positional argument expansion at callsites.
 type StartSessionParams struct {
 	IssueID    string
+	RepoDir    string
 	BaseBranch string
 	Yolo       bool
 	StartWork  *bool
@@ -105,13 +106,20 @@ type worktreeCommandBody struct {
 }
 
 type worktreeResultBody struct {
-	ProjectID naming.ProjectID `json:"project_id"`
-	Worktree  worktreePayload  `json:"worktree"`
+	ProjectID  naming.ProjectID `json:"project_id"`
+	BaseBranch string           `json:"base_branch,omitempty"`
+	Worktree   worktreePayload  `json:"worktree"`
 }
 
 type worktreeRemoveResponseBody struct {
 	ProjectID naming.ProjectID `json:"project_id"`
 	IssueID   naming.IssueID   `json:"issue_id"`
+}
+
+type WorktreeCreateResult struct {
+	ProjectID  string
+	BaseBranch string
+	Worktree   git.Worktree
 }
 
 // RuntimeReconcileResult captures the runtime repair summary returned by the daemon.
@@ -164,6 +172,7 @@ func (c *Client) StartSessionOperation(ctx context.Context, params StartSessionP
 	if err != nil {
 		return protocol.OperationRecord{}, err
 	}
+	issueIDString := issueID.String()
 	payload, err := json.Marshal(sessionCommandBody{
 		ProjectID:  c.projectID,
 		SessionID:  naming.SessionID(issueID),
@@ -175,32 +184,26 @@ func (c *Client) StartSessionOperation(ctx context.Context, params StartSessionP
 	if err != nil {
 		return protocol.OperationRecord{}, fmt.Errorf("marshal session start payload: %w", err)
 	}
+	resourceKeys := []string{
+		"issue:" + c.projectID.String() + ":" + issueIDString,
+		"worktree:" + issueIDString,
+	}
+	if repoDir := strings.TrimSpace(params.RepoDir); repoDir != "" {
+		sessionID := naming.CanonicalSessionIDForIssue(repoDir, naming.IssueID(issueID))
+		resourceKeys = append(resourceKeys, "session:"+sessionID.String())
+	}
 	var out protocol.OperationSubmitResponseBody
 	if err := c.commandJSON(ctx, protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
-		ProjectID: c.projectID,
-		Kind:      CommandSessionStart,
-		IssueID:   naming.IssueID(issueID),
-		Payload:   payload,
+		ProjectID:    c.projectID,
+		Kind:         CommandSessionStart,
+		IssueID:      naming.IssueID(issueID),
+		DedupeKey:    CommandSessionStart + ":" + issueIDString,
+		ResourceKeys: resourceKeys,
+		Payload:      payload,
 	}, &out); err != nil {
 		return protocol.OperationRecord{}, err
 	}
 	return out.Operation, nil
-}
-
-// StartSession asks the daemon to start one session for issue/task id.
-func (c *Client) StartSession(ctx context.Context, params StartSessionParams) (string, error) {
-	issueID, err := parseIssueID(params.IssueID)
-	if err != nil {
-		return "", err
-	}
-	return c.commandOutput(ctx, CommandSessionStart, sessionCommandBody{
-		ProjectID:  c.projectID,
-		SessionID:  naming.SessionID(issueID),
-		BaseBranch: params.BaseBranch,
-		Yolo:       params.Yolo,
-		StartWork:  params.StartWork,
-		ImagePaths: params.ImagePaths,
-	})
 }
 
 // StopSessionOperation submits a daemon-owned session stop operation and
@@ -486,13 +489,23 @@ func (c *Client) ListWorktrees(ctx context.Context) ([]git.Worktree, error) {
 
 // CreateWorktree asks the daemon to create one worktree for an issue in the current project route.
 func (c *Client) CreateWorktree(ctx context.Context, issueID, baseBranch string) (git.Worktree, error) {
-	parsedIssueID, err := parseIssueID(issueID)
+	result, err := c.CreateWorktreeResult(ctx, issueID, baseBranch)
 	if err != nil {
 		return git.Worktree{}, err
 	}
+	return result.Worktree, nil
+}
+
+// CreateWorktreeResult asks the daemon to create one worktree and returns the
+// effective base branch used by the daemon.
+func (c *Client) CreateWorktreeResult(ctx context.Context, issueID, baseBranch string) (WorktreeCreateResult, error) {
+	parsedIssueID, err := parseIssueID(issueID)
+	if err != nil {
+		return WorktreeCreateResult{}, err
+	}
 	baseBranch = strings.TrimSpace(baseBranch)
 	if baseBranch == "" {
-		return git.Worktree{}, fmt.Errorf("base branch is required")
+		return WorktreeCreateResult{}, fmt.Errorf("base branch is required")
 	}
 
 	var out worktreeResultBody
@@ -501,12 +514,20 @@ func (c *Client) CreateWorktree(ctx context.Context, issueID, baseBranch string)
 		IssueID:    parsedIssueID,
 		BaseBranch: baseBranch,
 	}, &out); err != nil {
-		return git.Worktree{}, err
+		return WorktreeCreateResult{}, err
 	}
-	return git.Worktree{
-		Path:    out.Worktree.Path,
-		Branch:  out.Worktree.Branch,
-		IssueID: out.Worktree.IssueID.String(),
+	effectiveBase := strings.TrimSpace(out.BaseBranch)
+	if effectiveBase == "" {
+		effectiveBase = baseBranch
+	}
+	return WorktreeCreateResult{
+		ProjectID:  out.ProjectID.String(),
+		BaseBranch: effectiveBase,
+		Worktree: git.Worktree{
+			Path:    out.Worktree.Path,
+			Branch:  out.Worktree.Branch,
+			IssueID: out.Worktree.IssueID.String(),
+		},
 	}, nil
 }
 
@@ -552,6 +573,18 @@ func (c *Client) CleanupProject(ctx context.Context, categories []string) (proto
 		Categories: append([]string(nil), categories...),
 	}, &out); err != nil {
 		return protocol.ProjectCleanupResponseBody{}, err
+	}
+	return out, nil
+}
+
+// ScheduledScriptsStatus asks the daemon for configured project scheduled script status.
+func (c *Client) ScheduledScriptsStatus(ctx context.Context, names []string) (protocol.ScheduledScriptsStatusResponseBody, error) {
+	var out protocol.ScheduledScriptsStatusResponseBody
+	if err := c.commandJSON(ctx, protocol.CommandScheduledScriptsStatus, protocol.ScheduledScriptsStatusRequestBody{
+		ProjectID: c.projectID,
+		Names:     append([]string(nil), names...),
+	}, &out); err != nil {
+		return protocol.ScheduledScriptsStatusResponseBody{}, err
 	}
 	return out, nil
 }

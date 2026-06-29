@@ -76,3 +76,17 @@ func TestSelectorLogPathUsesDefaultLogDirWhenConfigMissing(t *testing.T) {
 		t.Fatalf("selector log path = %q, want default selector log filename under .azedarach/logs", path)
 	}
 }
+
+func TestSelectorLogPathExpandsTildeSessionLogDir(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	cfg := config.DefaultConfig()
+	cfg.Session.LogDir = "~/.azedarach/logs"
+
+	path := selectorLogPath(cfg)
+
+	want := filepath.Join(homeDir, ".azedarach", "logs", logging.TmuxSelectorLogFileName)
+	if path != want {
+		t.Fatalf("selector log path = %q, want %q", path, want)
+	}
+}

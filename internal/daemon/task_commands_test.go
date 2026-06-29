@@ -801,7 +801,7 @@ func TestHandleTaskGetUsesFreshTaskListSnapshotCache(t *testing.T) {
 	}
 }
 
-func TestHandleTaskListFreshRuntimeCacheHitSkipsRuntimeRefreshTriggers(t *testing.T) {
+func TestHandleTaskListIgnoresFreshCacheAndReadsSQLiteProjection(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	projectID := "proj-cache-list"
@@ -812,7 +812,7 @@ func TestHandleTaskListFreshRuntimeCacheHitSkipsRuntimeRefreshTriggers(t *testin
 	t.Cleanup(func() { _ = runtimeStore.Close() })
 
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
-		Title:    "cached list",
+		Title:    "current sqlite list",
 		Type:     domain.TypeTask,
 		Priority: domain.P2,
 		Status:   domain.StatusOpen,
@@ -835,10 +835,10 @@ func TestHandleTaskListFreshRuntimeCacheHitSkipsRuntimeRefreshTriggers(t *testin
 	}
 	cachedTask := domain.Task{
 		ID:       naming.IssueID(taskID),
-		Title:    "cached list",
+		Title:    "stale cached list",
 		Type:     domain.TypeTask,
 		Priority: domain.P2,
-		Status:   domain.StatusOpen,
+		Status:   domain.StatusDone,
 	}
 	d.storeTaskListSnapshotCache(projectID, 11, time.Now().UTC(), protocol.TaskListFreshnessFresh, []domain.Task{cachedTask}, false)
 
@@ -866,18 +866,21 @@ func TestHandleTaskListFreshRuntimeCacheHitSkipsRuntimeRefreshTriggers(t *testin
 	if got, want := len(payload.Tasks), 1; got != want {
 		t.Fatalf("payload.Tasks len = %d, want %d", got, want)
 	}
+	if got, want := payload.Tasks[0].Title, "current sqlite list"; got != want {
+		t.Fatalf("payload task title = %q, want sqlite %q", got, want)
+	}
+	if got, want := payload.Tasks[0].Status, domain.StatusOpen; got != want {
+		t.Fatalf("payload task status = %q, want sqlite %q", got, want)
+	}
 
 	d.worktreeStateRefreshMu.Lock()
 	defer d.worktreeStateRefreshMu.Unlock()
-	if got := d.worktreeStateLastRefresh[projectID]; !got.IsZero() {
-		t.Fatalf("worktree refresh was triggered at %v on cache hit", got)
-	}
-	if d.worktreeStateRefreshing[projectID] {
-		t.Fatal("worktree refresh marked in-flight on cache hit")
+	if got := d.worktreeStateLastRefresh[projectID]; got.IsZero() {
+		t.Fatal("worktree refresh was not triggered on task.list sqlite projection read")
 	}
 }
 
-func TestHandleTaskListStaleRuntimeCacheRebuildsAndRefreshes(t *testing.T) {
+func TestHandleTaskListIgnoresStaleRuntimeCacheAndReadsSQLiteProjection(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	projectID := "proj-cache-list-runtime-stale"
@@ -958,7 +961,60 @@ func TestHandleTaskListStaleRuntimeCacheRebuildsAndRefreshes(t *testing.T) {
 	gotRefresh := d.worktreeStateLastRefresh[projectID]
 	d.worktreeStateRefreshMu.Unlock()
 	if gotRefresh.IsZero() {
-		t.Fatal("worktree refresh was not triggered after runtime cache staled")
+		t.Fatal("worktree refresh was not triggered on task.list sqlite projection read")
+	}
+}
+
+func TestHandleTaskListReadsSQLiteProjection(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	logger := slog.Default()
+	projectID := "proj-local-first-list"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "foreground reads local projection",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 17},
+	}
+
+	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-local-first-list",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.list",
+	})
+	if err != nil {
+		t.Fatalf("handleTaskList error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.list response = %+v", resp.Error)
+	}
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("decode task.list body: %v", err)
+	}
+	if got, want := len(payload.Tasks), 1; got != want {
+		t.Fatalf("task count = %d, want %d", got, want)
+	}
+	if payload.Tasks[0].ID.String() != taskID || payload.Tasks[0].Title != "foreground reads local projection" {
+		t.Fatalf("payload task = %+v, want local issue %s", payload.Tasks[0], taskID)
 	}
 }
 
@@ -983,7 +1039,7 @@ func TestLoadTaskListSnapshotSharesInFlightProjectLoad(t *testing.T) {
 			Kind:            protocol.EnvelopeKindCommand,
 			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 			Command:         "task.list",
-		}, projectID)
+		}, projectID, "")
 		if !shared {
 			errCh <- errors.New("load was not shared")
 			return
@@ -1062,7 +1118,7 @@ func TestLoadTaskListSnapshotUsesDetachedBuildContext(t *testing.T) {
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 		Command:         "task.list",
-	}, projectID)
+	}, projectID, "")
 	if err != nil {
 		t.Fatalf("loadTaskListSnapshot error = %v, want detached load to succeed", err)
 	}
@@ -1074,6 +1130,74 @@ func TestLoadTaskListSnapshotUsesDetachedBuildContext(t *testing.T) {
 	}
 	if len(result.Tasks) != 1 || result.Tasks[0].ID.String() != taskID {
 		t.Fatalf("result.Tasks = %+v, want task %s", result.Tasks, taskID)
+	}
+}
+
+func TestHandleTaskListAppliesContentQueryInDaemon(t *testing.T) {
+	logger := slog.Default()
+	projectID := "proj-query-list"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	matchID, err := issuesClient.Create(context.Background(), issues.CreateTaskParams{
+		Title:       "Alpha",
+		Description: "Contains runtime cache evidence",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+		Status:      domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create matching issue: %v", err)
+	}
+	if _, err := issuesClient.Create(context.Background(), issues.CreateTaskParams{
+		Title:       "Beta",
+		Description: "Unrelated",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+		Status:      domain.StatusOpen,
+	}); err != nil {
+		t.Fatalf("create nonmatching issue: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 23},
+	}
+	body, err := json.Marshal(protocol.TaskListRequestBody{Query: "RUNTIME cache"})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	resp, err := d.handleTaskList(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-query-list",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.list",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskList error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("handleTaskList response = %+v", resp.Error)
+	}
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("decode task list body: %v", err)
+	}
+	if payload.SummariesOnly {
+		t.Fatal("query task list should return full task payloads, got summaries_only")
+	}
+	if len(payload.Tasks) != 1 || payload.Tasks[0].ID.String() != matchID {
+		t.Fatalf("payload tasks = %+v, want only %s", payload.Tasks, matchID)
+	}
+	if payload.Tasks[0].Description == "" {
+		t.Fatalf("query task list lost full issue content: %+v", payload.Tasks[0])
 	}
 }
 
@@ -1416,6 +1540,216 @@ func TestTaskCloseCommandUpdatesStatusThroughDaemon(t *testing.T) {
 	}
 	if task.Status != domain.StatusDone {
 		t.Fatalf("task status = %s, want done", task.Status)
+	}
+}
+
+func TestTaskCloseBlocksUnresolvedChildrenByDefault(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-close-child-default"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Child", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &parentID})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
+		hub: publish.NewHub(16, 8, slog.Default()),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+		revision: map[string]uint64{},
+	}
+	body, err := json.Marshal(taskCloseRequest{TaskID: parentID})
+	if err != nil {
+		t.Fatalf("marshal close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-child-default",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.close",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain: "+childID+" (open)") {
+		t.Fatalf("handleTaskClose response = %+v, want unresolved child guard", resp)
+	}
+}
+
+func TestTaskCloseCanAutoCloseCleanUnresolvedChildren(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-close-clean-children"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Child", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &parentID})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
+		hub: publish.NewHub(16, 8, slog.Default()),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+		revision: map[string]uint64{},
+	}
+	body, err := json.Marshal(taskCloseRequest{TaskID: parentID, CloseCleanChildren: true})
+	if err != nil {
+		t.Fatalf("marshal close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-clean-children",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.close",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("handleTaskClose response = %+v", resp)
+	}
+	var result taskCloseResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal close response: %v", err)
+	}
+	if !slices.Contains(result.AutoClosedChildren, childID) {
+		t.Fatalf("auto closed children = %v, want %s", result.AutoClosedChildren, childID)
+	}
+	for _, issueID := range []string{parentID, childID} {
+		task, err := issuesClient.GetWithRuntime(ctx, projectID, issueID)
+		if err != nil {
+			t.Fatalf("get %s after close: %v", issueID, err)
+		}
+		if task.Status != domain.StatusDone {
+			t.Fatalf("%s status = %s, want %s", issueID, task.Status, domain.StatusDone)
+		}
+	}
+}
+
+func TestTaskCloseCleanChildrenDoesNotForceDirtyChildWorktree(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-task-close-clean-child-dirty"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Child", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &parentID})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = store.Close() })
+	childWorktree := filepath.Join(repoDir, "wt-"+childID)
+	childBranch := "riordan/" + childID + "/work"
+	if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   childID,
+		Path:      childWorktree,
+		Branch:    childBranch,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed child worktree: %v", err)
+	}
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "worktree list --porcelain"):
+			return fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", childWorktree, childBranch), nil
+		case strings.Contains(joined, "status --porcelain"):
+			return " M child.go\n", nil
+		default:
+			return "", nil
+		}
+	}}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: logger, BaseBranch: "main"},
+		hub: publish.NewHub(16, 8, logger),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		gitStatusAdapter: &gitServiceAdapter{
+			client:            git.NewClient(runner, logger),
+			runtimeStateStore: store,
+			logger:            logger,
+			baseBranch:        "main",
+		},
+		revision: map[string]uint64{},
+	}
+	body, err := json.Marshal(taskCloseRequest{
+		TaskID:             parentID,
+		ForceWorktree:      true,
+		CloseCleanChildren: true,
+	})
+	if err != nil {
+		t.Fatalf("marshal close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-clean-child-dirty",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.close",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "worktree has local changes: child.go") {
+		t.Fatalf("handleTaskClose response = %+v, want dirty child worktree guard", resp)
+	}
+	child, err := issuesClient.GetWithRuntime(ctx, projectID, childID)
+	if err != nil {
+		t.Fatalf("get child after blocked close: %v", err)
+	}
+	if child.Status != domain.StatusOpen {
+		t.Fatalf("child status = %s, want %s", child.Status, domain.StatusOpen)
 	}
 }
 
@@ -3937,7 +4271,7 @@ func TestTaskGraphReadinessSurfacesPendingSessionStartProgress(t *testing.T) {
 }
 
 func TestTaskCompletionAdviceIncludesDomainNextSteps(t *testing.T) {
-	advice := daemonTaskCompletionAdvice("az-1", []string{"az-2"}, []string{"az-3"}, []string{"az-4"})
+	advice := daemonTaskCompletionAdvice("az-1", []string{"az-2"}, []string{"az-3"}, []string{"az-4"}, nil)
 	joined := strings.Join(advice, "\n")
 	for _, want := range []string{
 		"az orchestrate close-session --issue az-4",
@@ -3947,6 +4281,149 @@ func TestTaskCompletionAdviceIncludesDomainNextSteps(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("advice = %+v, missing %q", advice, want)
 		}
+	}
+}
+
+func TestTaskGraphReadinessSurfacesStaleCloseableChild(t *testing.T) {
+	root := naming.IssueID("az-root")
+	child := naming.IssueID("az-child")
+	childParent := root
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
+		{
+			ID:            child,
+			Type:          domain.TypeTask,
+			Status:        domain.StatusOpen,
+			ParentID:      &childParent,
+			HasWorktree:   true,
+			GitAheadCount: 0,
+		},
+	}
+
+	rootID, byID, children, err := daemonTaskGraphIndexes(root.String(), tasks)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphIndexes error: %v", err)
+	}
+	result, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphReadinessFromIndexes error: %v", err)
+	}
+	if slices.Contains(result.Runnable, child.String()) {
+		t.Fatalf("stale-closeable child should not be runnable: %+v", result)
+	}
+	if len(result.StaleCloseableChildren) != 1 {
+		t.Fatalf("stale_closeable_children = %+v, want one candidate", result.StaleCloseableChildren)
+	}
+	candidate := result.StaleCloseableChildren[0]
+	if candidate.IssueID != child.String() || candidate.SuggestedCommand != "az issue close --id az-root --close-clean-children" {
+		t.Fatalf("candidate = %+v", candidate)
+	}
+	joinedEvidence := strings.Join(candidate.Evidence, "\n")
+	for _, want := range []string{"no active session", "clean worktree", "branch not ahead", "status=open"} {
+		if !strings.Contains(joinedEvidence, want) {
+			t.Fatalf("candidate evidence = %+v, missing %q", candidate.Evidence, want)
+		}
+	}
+}
+
+func TestTaskGraphReadinessDoesNotMisreportIncompleteChildAsCloseable(t *testing.T) {
+	root := naming.IssueID("az-root")
+	child := naming.IssueID("az-child")
+	childParent := root
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
+		{ID: child, Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &childParent},
+	}
+
+	rootID, byID, children, err := daemonTaskGraphIndexes(root.String(), tasks)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphIndexes error: %v", err)
+	}
+	result, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		t.Fatalf("daemonTaskGraphReadinessFromIndexes error: %v", err)
+	}
+	if len(result.StaleCloseableChildren) != 0 {
+		t.Fatalf("stale_closeable_children = %+v, want none", result.StaleCloseableChildren)
+	}
+	if !slices.Contains(result.Runnable, child.String()) {
+		t.Fatalf("runnable = %+v, want incomplete child runnable", result.Runnable)
+	}
+}
+
+func TestTaskCompleteCheckReportsMixedStaleCloseableAndIncompleteChildren(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-complete-check-stale-closeable"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	staleID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Stale child", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatalf("create stale child: %v", err)
+	}
+	incompleteID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Incomplete child", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatalf("create incomplete child: %v", err)
+	}
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   staleID,
+		Path:      filepath.Join(repoDir, "wt-"+staleID),
+		Branch:    "riordan/" + staleID + "/stale",
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed stale child worktree projection: %v", err)
+	}
+	cleanStatus, err := json.Marshal(git.GitStatus{HasChanges: false, GitAheadCount: 0})
+	if err != nil {
+		t.Fatalf("marshal clean git status: %v", err)
+	}
+	if err := runtimeStore.UpsertWorktreeStateGitStatus(ctx, projectID, staleID, cleanStatus, time.Now().UTC()); err != nil {
+		t.Fatalf("seed stale child git status: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 1},
+	}
+
+	result, err := d.taskCompleteCheck(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskCompleteCheck error: %v", err)
+	}
+	if result.Pass {
+		t.Fatalf("complete check unexpectedly passed: %+v", result)
+	}
+	if len(result.StaleCloseableChildren) != 1 || result.StaleCloseableChildren[0].IssueID != staleID {
+		t.Fatalf("stale_closeable_children = %+v, want %s", result.StaleCloseableChildren, staleID)
+	}
+	reasons := strings.Join(result.Reasons, "\n")
+	if !strings.Contains(reasons, "stale-closeable child candidates remain: "+staleID) {
+		t.Fatalf("reasons = %+v, missing stale-closeable reason", result.Reasons)
+	}
+	if !strings.Contains(reasons, "required descendants not closed: "+incompleteID) || strings.Contains(reasons, "required descendants not closed: "+staleID) {
+		t.Fatalf("reasons = %+v, want incomplete only in required descendants", result.Reasons)
+	}
+	advice := strings.Join(result.Advice, "\n")
+	if !strings.Contains(advice, "az issue close --id "+rootID+" --close-clean-children") {
+		t.Fatalf("advice = %+v, missing close-clean-children parent command", result.Advice)
+	}
+	if !strings.Contains(advice, "az orchestrate start --root "+rootID+" --issue "+incompleteID+" --json") {
+		t.Fatalf("advice = %+v, missing runnable incomplete child start command", result.Advice)
 	}
 }
 

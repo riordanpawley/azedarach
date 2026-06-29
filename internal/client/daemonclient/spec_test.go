@@ -60,7 +60,7 @@ func TestSpecRequirementCommandsEncodeAndDecode(t *testing.T) {
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal request: %v", err)
 				}
-				if body.IssueID != "az-1" || body.Status != "open" || len(body.RequirementIDs) != 2 {
+				if body.IssueID != "az-1" || body.Status != "open" || len(body.RequirementIDs) != 2 || body.Query != "daemon lifecycle" || body.Limit != 5 {
 					t.Fatalf("request body = %+v", body)
 				}
 				respBody, err := json.Marshal(SpecRequirementListResult{
@@ -92,6 +92,8 @@ func TestSpecRequirementCommandsEncodeAndDecode(t *testing.T) {
 			IssueID:        "az-1",
 			Status:         "open",
 			RequirementIDs: []string{"req-1", "req-2"},
+			Query:          "daemon lifecycle",
+			Limit:          5,
 		})
 		if err != nil {
 			t.Fatalf("ListSpecRequirements error: %v", err)

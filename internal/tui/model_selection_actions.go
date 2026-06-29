@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ui/diff"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
@@ -34,6 +35,7 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 				delta:        1,
 				summaries:    m.closeCleanupSummaries(closeTaskIDs),
 			}
+			pending = m.prepareCloseCleanupConfirmation(pending)
 			m.pendingClose = &pending
 			return m, m.confirmCloseCleanupCmd(pending)
 		}
@@ -60,6 +62,7 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 			targetStatus: domain.StatusDone,
 			summaries:    m.closeCleanupSummaries(msg.SelectedIDs),
 		}
+		pending = m.prepareCloseCleanupConfirmation(pending)
 		m.pendingClose = &pending
 		return m, m.confirmCloseCleanupCmd(pending)
 
@@ -372,9 +375,21 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if msg.Key == "yes" && m.pendingClose != nil {
+	if (msg.Key == "yes" || msg.Key == "close_clean_children") && m.pendingClose != nil {
 		pending := *m.pendingClose
 		m.pendingClose = nil
+		if msg.Key == "yes" && pending.targetOnlyBlockedByChildren {
+			m.pendingClose = &pending
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "Target-only close is blocked by unresolved children; press C or cancel",
+				Expires: time.Now().Add(4 * time.Second),
+			})
+			return m, m.confirmCloseCleanupCmd(pending)
+		}
+		if msg.Key == "close_clean_children" {
+			pending.closeCleanChildren = true
+		}
 		if reason := pendingCloseCleanupBlockedReason(pending); reason != "" {
 			m.overlayStack.Pop()
 			m.addToast(Toast{
@@ -386,13 +401,14 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 		if len(pending.taskIDs) > 0 {
 			m.beginMutationFeedback(fmt.Sprintf("Bulk close queued for %d task(s)", len(pending.taskIDs)))
+			opts := daemonclient.TaskStatusOptions{CloseCleanChildren: pending.closeCleanChildren}
 			if pending.bulkMode == "move" {
-				return m, m.bulkMoveStatusCmd(pending.taskIDs, pending.delta)
+				return m, m.bulkMoveStatusCmdWithOptions(pending.taskIDs, pending.delta, opts)
 			}
-			return m, m.bulkSetStatusCmd(pending.taskIDs, pending.targetStatus)
+			return m, m.bulkSetStatusCmdWithOptions(pending.taskIDs, pending.targetStatus, opts)
 		}
 		m.beginTaskStatusMoveFeedback(pending.taskID, pending.previousStatus, pending.targetStatus)
-		return m, m.moveTaskStatusCmd(pending.taskID, pending.previousStatus, pending.targetStatus)
+		return m, m.moveTaskStatusCmdWithOptions(pending.taskID, pending.previousStatus, pending.targetStatus, daemonclient.TaskStatusOptions{CloseCleanChildren: pending.closeCleanChildren})
 	}
 	if msg.Key == "no" && m.pendingClose != nil {
 		pending := *m.pendingClose
@@ -571,7 +587,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, m.requestWorktreeCleanupConfirmationCmd(task.ID.String(), true)
 
 	case "i":
-		// Image attachments
+		// Attachments
 		attachOverlay := overlay.NewImageAttachOverlay(task.ID.String(), m.attachmentService)
 		return m, m.openOverlay(attachOverlay)
 
@@ -623,6 +639,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 				targetStatus:   newStatus,
 				summaries:      []closeCleanupTaskSummary{closeCleanupSummary(*task)},
 			}
+			pending = m.prepareCloseCleanupConfirmation(pending)
 			m.pendingClose = &pending
 			return m, m.confirmCloseCleanupCmd(pending)
 		}
@@ -656,6 +673,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 				targetStatus:   newStatus,
 				summaries:      []closeCleanupTaskSummary{closeCleanupSummary(*task)},
 			}
+			pending = m.prepareCloseCleanupConfirmation(pending)
 			m.pendingClose = &pending
 			return m, m.confirmCloseCleanupCmd(pending)
 		}
@@ -682,6 +700,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 				targetStatus:   newStatus,
 				summaries:      []closeCleanupTaskSummary{closeCleanupSummary(*task)},
 			}
+			pending = m.prepareCloseCleanupConfirmation(pending)
 			m.pendingClose = &pending
 			return m, m.confirmCloseCleanupCmd(pending)
 		}

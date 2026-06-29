@@ -28,11 +28,11 @@ func (t *readWaitDeadlineTransport) Command(ctx context.Context, req protocol.Re
 	t.deadlines = append(t.deadlines, deadline)
 
 	body, err := json.Marshal(protocol.TaskListSnapshotPayload{
-			SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
-			ProtocolVersion:  req.ProtocolVersion,
-			SnapshotRevision: 0,
-			ProjectID:        req.Meta.ProjectID,
-			LastCheckedAt:    time.Unix(1700000000, 0).UTC(),
+		SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+		ProtocolVersion:  req.ProtocolVersion,
+		SnapshotRevision: 0,
+		ProjectID:        req.Meta.ProjectID,
+		LastCheckedAt:    time.Unix(1700000000, 0).UTC(),
 		Freshness:        protocol.TaskListFreshnessFresh,
 		Tasks:            []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}},
 	})
@@ -128,7 +128,7 @@ func TestListTasksSnapshotWithModeReturnsTimeoutError(t *testing.T) {
 	if timeoutErr.Budget <= 0 {
 		t.Fatalf("timeout budget = %s, want > 0", timeoutErr.Budget)
 	}
-	if timeoutErr.Hint == "" || !strings.Contains(timeoutErr.Hint, "local-first data") {
-		t.Fatalf("timeout hint = %q, want local-first freshness hint", timeoutErr.Hint)
+	if timeoutErr.Hint == "" || !strings.Contains(timeoutErr.Hint, "keeping current local view") {
+		t.Fatalf("timeout hint = %q, want local-view freshness hint", timeoutErr.Hint)
 	}
 }

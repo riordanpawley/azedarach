@@ -40,8 +40,8 @@ func (runtimeGitService) WorktreePathForBranch(context.Context, string, string) 
 }
 
 func (runtimeWorktreeService) List(context.Context, string) ([]git.Worktree, error) { return nil, nil }
-func (runtimeWorktreeService) Create(context.Context, string, string, string) (*git.Worktree, error) {
-	return &git.Worktree{Path: "/tmp/worktree", Branch: "az/test", IssueID: "AZ-1"}, nil
+func (runtimeWorktreeService) Create(context.Context, string, string, string) (*git.Worktree, string, error) {
+	return &git.Worktree{Path: "/tmp/worktree", Branch: "az/test", IssueID: "AZ-1"}, "main", nil
 }
 func (runtimeWorktreeService) Delete(context.Context, string, string, bool) error { return nil }
 func (runtimeWorktreeService) CleanupOrphaned(context.Context, string) (*daemonhandlers.CleanupOrphanedResult, error) {

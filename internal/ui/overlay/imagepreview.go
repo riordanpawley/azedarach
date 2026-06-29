@@ -3,27 +3,32 @@ package overlay
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
-// ImagePreviewOverlay displays and manages image attachments with navigation
+// ImagePreviewOverlay displays and manages issue attachments with navigation.
 type ImagePreviewOverlay struct {
 	twoPaneDialogChrome
 	dialogViewportState
-	issueID       string
-	service       *attachment.Service
-	images        []attachment.Attachment
-	currentIndex  int
-	confirmDelete bool
-	error         string
-	styles        *Styles
+	issueID            string
+	service            *attachment.Service
+	images             []attachment.Attachment
+	currentIndex       int
+	confirmDelete      bool
+	error              string
+	styles             *Styles
+	markdownAttachment string
+	markdownRendered   string
+	markdownScroll     int
 }
 
 // ImageDeletedMsg is sent when an image is deleted
@@ -32,7 +37,7 @@ type ImageDeletedMsg struct {
 	Error        error
 }
 
-// NewImagePreviewOverlay creates a new image preview overlay
+// NewImagePreviewOverlay creates a new attachment preview overlay.
 func NewImagePreviewOverlay(issueID string, service *attachment.Service, initialIndex int) *ImagePreviewOverlay {
 	return &ImagePreviewOverlay{
 		issueID:       issueID,
@@ -70,7 +75,8 @@ func (i *ImagePreviewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if i.currentIndex < 0 && len(i.images) > 0 {
 			i.currentIndex = 0
 		}
-		return i, nil
+		i.markdownScroll = 0
+		return i, i.loadCurrentMarkdown()
 
 	case imageDeletedMsg:
 		i.error = ""
@@ -90,6 +96,18 @@ func (i *ImagePreviewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		i.error = msg.err.Error()
 		i.confirmDelete = false
 		return i, nil
+
+	case markdownPreviewLoadedMsg:
+		if msg.attachmentID != i.currentAttachmentID() {
+			return i, nil
+		}
+		i.markdownAttachment = msg.attachmentID
+		i.markdownRendered = msg.rendered
+		i.error = ""
+		if msg.err != nil {
+			i.error = compactOverlayError(msg.err)
+		}
+		return i, nil
 	}
 
 	return i, nil
@@ -105,6 +123,8 @@ func (i *ImagePreviewOverlay) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.C
 		// Previous image
 		if len(i.images) > 0 && i.currentIndex > 0 {
 			i.currentIndex--
+			i.markdownScroll = 0
+			return i, i.loadCurrentMarkdown()
 		}
 		return i, nil
 
@@ -112,6 +132,32 @@ func (i *ImagePreviewOverlay) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.C
 		// Next image
 		if len(i.images) > 0 && i.currentIndex < len(i.images)-1 {
 			i.currentIndex++
+			i.markdownScroll = 0
+			return i, i.loadCurrentMarkdown()
+		}
+		return i, nil
+
+	case "j", "down":
+		if i.currentIsMarkdown() {
+			i.markdownScroll++
+		}
+		return i, nil
+
+	case "k", "up":
+		if i.currentIsMarkdown() && i.markdownScroll > 0 {
+			i.markdownScroll--
+		}
+		return i, nil
+
+	case "pgdown", "ctrl+f":
+		if i.currentIsMarkdown() {
+			i.markdownScroll += 10
+		}
+		return i, nil
+
+	case "pgup", "ctrl+b":
+		if i.currentIsMarkdown() {
+			i.markdownScroll = max(0, i.markdownScroll-10)
 		}
 		return i, nil
 
@@ -119,6 +165,8 @@ func (i *ImagePreviewOverlay) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.C
 		// Go to first image
 		if len(i.images) > 0 {
 			i.currentIndex = 0
+			i.markdownScroll = 0
+			return i, i.loadCurrentMarkdown()
 		}
 		return i, nil
 
@@ -126,6 +174,8 @@ func (i *ImagePreviewOverlay) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.C
 		// Go to last image
 		if len(i.images) > 0 {
 			i.currentIndex = len(i.images) - 1
+			i.markdownScroll = 0
+			return i, i.loadCurrentMarkdown()
 		}
 		return i, nil
 
@@ -199,7 +249,7 @@ func (i *ImagePreviewOverlay) View() string {
 		styles:            i.styles,
 		width:             width,
 		height:            height,
-		title:             "Image Preview",
+		title:             "Attachment Preview",
 		rightSectionTitle: "Actions",
 		breakpoint:        86,
 		gap:               3,
@@ -207,7 +257,7 @@ func (i *ImagePreviewOverlay) View() string {
 		minRight:          22,
 		leftFocused:       true,
 		renderLeft: func(mode dialogLayoutMode, width, height int) string {
-			return i.renderPreviewContent()
+			return i.renderPreviewContent(width, height)
 		},
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
 			return i.renderPreviewActions(width)
@@ -215,7 +265,7 @@ func (i *ImagePreviewOverlay) View() string {
 	})
 }
 
-func (i *ImagePreviewOverlay) renderPreviewContent() string {
+func (i *ImagePreviewOverlay) renderPreviewContent(width, height int) string {
 	var b strings.Builder
 
 	headerStyle := lipgloss.NewStyle().
@@ -231,18 +281,21 @@ func (i *ImagePreviewOverlay) renderPreviewContent() string {
 
 	// Header with navigation info
 	if len(i.images) == 0 {
-		b.WriteString(i.styles.Footer.Render("No images attached to this task."))
+		b.WriteString(i.styles.Footer.Render("No attachments on this issue."))
 		return b.String()
 	}
 
 	// Header with position indicator
-	position := fmt.Sprintf("Image %d/%d", i.currentIndex+1, len(i.images))
-	header := fmt.Sprintf("Image Preview - %s", position)
+	position := fmt.Sprintf("Attachment %d/%d", i.currentIndex+1, len(i.images))
+	header := fmt.Sprintf("Attachment Preview - %s", position)
 	b.WriteString(headerStyle.Render(header))
 	b.WriteString("\n\n")
 
 	// Current image details
 	img := i.images[i.currentIndex]
+	if attachment.IsMarkdown(img) {
+		return i.renderMarkdownPreviewContent(img, width, height, headerStyle, labelStyle, valueStyle, position)
+	}
 
 	b.WriteString(labelStyle.Render("Filename:"))
 	b.WriteString("  ")
@@ -308,6 +361,60 @@ func (i *ImagePreviewOverlay) renderPreviewContent() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+func (i *ImagePreviewOverlay) renderMarkdownPreviewContent(
+	file attachment.Attachment,
+	width, height int,
+	headerStyle, labelStyle, valueStyle lipgloss.Style,
+	position string,
+) string {
+	var b strings.Builder
+	b.WriteString(headerStyle.Render("Markdown Report - " + position))
+	b.WriteString("\n\n")
+	b.WriteString(labelStyle.Render("Filename:"))
+	b.WriteString("  ")
+	b.WriteString(valueStyle.Render(file.Filename))
+	b.WriteString("\n")
+	b.WriteString(labelStyle.Render("Size:"))
+	b.WriteString("  ")
+	b.WriteString(valueStyle.Render(formatFileSize(file.Size)))
+	b.WriteString("\n\n")
+
+	rendered := strings.TrimRight(i.markdownRendered, "\n")
+	if i.markdownAttachment != file.ID {
+		rendered = i.styles.Footer.Render("Loading Markdown preview...")
+	} else if i.error != "" {
+		errorStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#f38ba8")).
+			Bold(true)
+		rendered = errorStyle.Render("Error: " + i.error)
+	}
+	if rendered == "" && i.markdownAttachment == file.ID {
+		rendered = i.styles.Footer.Render("Markdown document is empty.")
+	}
+
+	lines := strings.Split(rendered, "\n")
+	visibleHeight := max(1, height-8)
+	maxScroll := max(0, len(lines)-visibleHeight)
+	scroll := i.markdownScroll
+	if scroll > maxScroll {
+		scroll = maxScroll
+	}
+	start := max(0, scroll)
+	end := min(len(lines), start+visibleHeight)
+	if start < end {
+		b.WriteString(strings.Join(lines[start:end], "\n"))
+	}
+	if maxScroll > 0 {
+		b.WriteString("\n")
+		scrollLine := fmt.Sprintf("Lines %d-%d/%d", start+1, end, len(lines))
+		if width > 0 {
+			scrollLine = truncate(scrollLine, max(8, width-2))
+		}
+		b.WriteString(i.styles.Footer.Render(scrollLine))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 func (i *ImagePreviewOverlay) renderPreviewActions(width int) string {
 	hints := make([]keybinds.Binding, 0, 6)
 	if len(i.images) > 1 {
@@ -315,6 +422,9 @@ func (i *ImagePreviewOverlay) renderPreviewActions(width int) string {
 			keybinds.Binding{Key: "h/l", Description: "Navigate"},
 			keybinds.Binding{Key: "g/G", Description: "First/Last"},
 		)
+	}
+	if i.currentIsMarkdown() {
+		hints = append(hints, keybinds.Binding{Key: "j/k", Description: "Scroll report"})
 	}
 	hints = append(hints,
 		keybinds.Binding{Key: "o", Description: "Open"},
@@ -337,7 +447,7 @@ func (i *ImagePreviewOverlay) renderDeleteConfirmationContent() string {
 
 	if i.currentIndex >= 0 && i.currentIndex < len(i.images) {
 		img := i.images[i.currentIndex]
-		b.WriteString(i.styles.MenuItem.Render(fmt.Sprintf("Delete image: %s?", img.Filename)))
+		b.WriteString(i.styles.MenuItem.Render(fmt.Sprintf("Delete attachment: %s?", img.Filename)))
 		b.WriteString("\n\n")
 		b.WriteString(i.styles.Footer.Render(fmt.Sprintf("Size: %s", formatFileSize(img.Size))))
 		b.WriteString("\n")
@@ -353,7 +463,7 @@ func (i *ImagePreviewOverlay) renderDeleteConfirmationContent() string {
 
 // Title returns the overlay title
 func (i *ImagePreviewOverlay) Title() string {
-	return "Image Preview"
+	return "Attachment Preview"
 }
 
 // Size returns the overlay dimensions
@@ -378,6 +488,12 @@ type imagePreviewErrorMsg struct {
 	err error
 }
 
+type markdownPreviewLoadedMsg struct {
+	attachmentID string
+	rendered     string
+	err          error
+}
+
 func (i *ImagePreviewOverlay) loadImages() tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
@@ -387,6 +503,49 @@ func (i *ImagePreviewOverlay) loadImages() tea.Cmd {
 		}
 		return imagesLoadedMsg{images: images}
 	}
+}
+
+func (i *ImagePreviewOverlay) loadCurrentMarkdown() tea.Cmd {
+	if !i.currentIsMarkdown() {
+		i.markdownAttachment = ""
+		i.markdownRendered = ""
+		return nil
+	}
+	file := i.images[i.currentIndex]
+	width, _ := i.Size()
+	wrap := max(24, width-12)
+	return func() tea.Msg {
+		data, err := os.ReadFile(file.Path)
+		if err != nil {
+			return markdownPreviewLoadedMsg{attachmentID: file.ID, err: fmt.Errorf("read markdown: %w", err)}
+		}
+		renderer, err := glamour.NewTermRenderer(
+			glamour.WithAutoStyle(),
+			glamour.WithWordWrap(wrap),
+		)
+		if err != nil {
+			return markdownPreviewLoadedMsg{attachmentID: file.ID, err: fmt.Errorf("create markdown renderer: %w", err)}
+		}
+		rendered, err := renderer.Render(string(data))
+		if err != nil {
+			return markdownPreviewLoadedMsg{attachmentID: file.ID, err: fmt.Errorf("render markdown: %w", err)}
+		}
+		return markdownPreviewLoadedMsg{attachmentID: file.ID, rendered: rendered}
+	}
+}
+
+func (i *ImagePreviewOverlay) currentIsMarkdown() bool {
+	if i.currentIndex < 0 || i.currentIndex >= len(i.images) {
+		return false
+	}
+	return attachment.IsMarkdown(i.images[i.currentIndex])
+}
+
+func (i *ImagePreviewOverlay) currentAttachmentID() string {
+	if i.currentIndex < 0 || i.currentIndex >= len(i.images) {
+		return ""
+	}
+	return i.images[i.currentIndex].ID
 }
 
 func (i *ImagePreviewOverlay) deleteCurrentImage() tea.Cmd {

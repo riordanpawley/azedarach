@@ -92,11 +92,13 @@ func main() {
 		CLITool:                    cfg.CLITool,
 		DangerouslySkipPermissions: cfg.Session.DangerouslySkipPermissions,
 		SessionShell:               cfg.Session.Shell,
-		SessionInitCommands:        cfg.Session.InitCommands,
-		SessionSideEffectCommands:  cfg.Session.SideEffectCommands,
+		SessionSyncInitCommands:    cfg.Session.SyncInitCommands,
+		SessionAsyncInitCommands:   cfg.Session.AsyncInitCommands,
 		Logger:                     logger,
-		WorktreeInitCommands:       cfg.Worktree.InitCommands,
+		WorktreeInitCommands:       cfg.Worktree.SyncInitCommands,
+		WorktreeAsyncInitCommands:  cfg.Worktree.AsyncInitCommands,
 		IssueResources:             cfg.IssueResources,
+		ScheduledScripts:           cfg.ScheduledScripts,
 	})
 	if err := d.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon failed: %v\n", err)

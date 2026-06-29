@@ -271,6 +271,12 @@ type projectAddOptions struct {
 	Name string
 }
 
+type projectScriptsStatusOptions struct {
+	ProjectDir string
+	JSON       bool
+	Names      []string
+}
+
 func runProjectCommand(cfg *config.Config, args []string) error {
 	_ = cfg
 	if len(args) == 0 || isHelpArg(args[0]) {
@@ -285,8 +291,40 @@ func runProjectCommand(cfg *config.Config, args []string) error {
 		return runProjectAddCommand(args[1:])
 	case "remove":
 		return runProjectRemoveCommand(args[1:])
+	case "scripts":
+		return runProjectScriptsCommand(cfg, args[1:])
 	default:
 		return fmt.Errorf("unknown project command: %s", args[0])
+	}
+}
+
+func runProjectScriptsCommand(cfg *config.Config, args []string) error {
+	if len(args) == 0 || isHelpArg(args[0]) {
+		printProjectScriptsUsage()
+		return nil
+	}
+	switch args[0] {
+	case "status":
+		opts, err := parseProjectScriptsStatusArgs(args[1:])
+		if err != nil {
+			printProjectScriptsStatusUsage()
+			return err
+		}
+		run := runCommand
+		if opts.ProjectDir != "" {
+			run = func(cfg *config.Config, fn func(*cli.Dependencies) error) error {
+				return runCommandAtRepoDir(cfg, opts.ProjectDir, fn)
+			}
+		}
+		return run(cfg, func(deps *cli.Dependencies) error {
+			return cli.ProjectScriptsStatusCommand(deps, cli.ProjectScriptsStatusOptions{
+				ProjectDir: opts.ProjectDir,
+				JSON:       opts.JSON,
+				Names:      opts.Names,
+			})
+		})
+	default:
+		return fmt.Errorf("unknown project scripts command: %s", args[0])
 	}
 }
 
@@ -385,6 +423,19 @@ func runProjectRemoveCommand(args []string) error {
 
 	fmt.Printf("Removed project %s\n", name)
 	return nil
+}
+
+func parseProjectScriptsStatusArgs(args []string) (projectScriptsStatusOptions, error) {
+	var opts projectScriptsStatusOptions
+	fs := flag.NewFlagSet("project scripts status", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.ProjectDir, "project-dir", "", "project directory")
+	fs.BoolVar(&opts.JSON, "json", false, "json output")
+	if err := fs.Parse(args); err != nil {
+		return opts, err
+	}
+	opts.Names = append([]string(nil), fs.Args()...)
+	return opts, nil
 }
 
 func parseProjectAddArgs(args []string) (projectAddOptions, error) {
@@ -720,11 +771,12 @@ func printDevListUsage() {
 }
 
 func printProjectUsage() {
-	fmt.Println("Usage: az project <list|add|remove>")
+	fmt.Println("Usage: az project <list|add|remove|scripts>")
 	fmt.Println("Manage registered projects.")
 	fmt.Println("  list [--json]")
 	fmt.Println("  add <path> [--name <name>]")
 	fmt.Println("  remove <name>")
+	fmt.Println("  scripts status [--project-dir <dir>] [--json] [<name> ...]")
 }
 
 func printProjectListUsage() {
@@ -737,6 +789,15 @@ func printProjectAddUsage() {
 
 func printProjectRemoveUsage() {
 	fmt.Println("Usage: az project remove <name>")
+}
+
+func printProjectScriptsUsage() {
+	fmt.Println("Usage: az project scripts <status>")
+	fmt.Println("  status [--project-dir <dir>] [--json] [<name> ...]")
+}
+
+func printProjectScriptsStatusUsage() {
+	fmt.Println("Usage: az project scripts status [--project-dir <dir>] [--json] [<name> ...]")
 }
 
 func printJSON(v any) error {

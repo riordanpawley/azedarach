@@ -1,12 +1,94 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/config"
 )
+
+type fakeTUIProgramRunner struct {
+	err error
+}
+
+func (r fakeTUIProgramRunner) Run() (tea.Model, error) {
+	return nil, r.err
+}
+
+type recordingTUIDaemonStopper struct {
+	stops  int
+	err    error
+	onStop func()
+}
+
+func (s *recordingTUIDaemonStopper) Stop(context.Context) error {
+	s.stops++
+	if s.onStop != nil {
+		s.onStop()
+	}
+	return s.err
+}
+
+type tuiLaunchTestHooks struct {
+	stopper   *recordingTUIDaemonStopper
+	repoDir   string
+	socket    string
+	exitCodes []int
+	events    []string
+}
+
+func installTUILaunchTestHooks(t *testing.T, programErr error) *tuiLaunchTestHooks {
+	t.Helper()
+	hooks := &tuiLaunchTestHooks{stopper: &recordingTUIDaemonStopper{}}
+	hooks.stopper.onStop = func() {
+		hooks.events = append(hooks.events, "stop")
+	}
+	previousStopper := newTUIDaemonStopper
+	previousProgram := newTUIProgramRunner
+	previousExit := exitProcess
+	newTUIDaemonStopper = func(repoDir, socketPath string) tuiDaemonStopper {
+		hooks.repoDir = repoDir
+		hooks.socket = socketPath
+		return hooks.stopper
+	}
+	newTUIProgramRunner = func(tea.Model) tuiProgramRunner {
+		return fakeTUIProgramRunner{err: programErr}
+	}
+	exitProcess = func(code int) {
+		hooks.events = append(hooks.events, "exit")
+		hooks.exitCodes = append(hooks.exitCodes, code)
+	}
+	t.Cleanup(func() {
+		newTUIDaemonStopper = previousStopper
+		newTUIProgramRunner = previousProgram
+		exitProcess = previousExit
+	})
+	return hooks
+}
+
+func forbidTUIDaemonStopper(t *testing.T) {
+	t.Helper()
+	previous := newTUIDaemonStopper
+	newTUIDaemonStopper = func(repoDir, socketPath string) tuiDaemonStopper {
+		t.Fatalf("newTUIDaemonStopper(%q, %q) called, want no scoped daemon cleanup", repoDir, socketPath)
+		return nil
+	}
+	t.Cleanup(func() {
+		newTUIDaemonStopper = previous
+	})
+}
+
+func testTUIConfig() *config.Config {
+	cfg := config.DefaultConfig()
+	cfg.Session.LogDir = filepath.Join(os.TempDir(), "azedarach-test-logs")
+	return cfg
+}
 
 func TestValidateTUILaunchContextRejectsLinkedWorktreeWithDefaultGlobalDaemon(t *testing.T) {
 	_, worktree := makeLinkedWorktree(t)
@@ -55,6 +137,102 @@ func TestValidateTUILaunchContextAllowsLinkedWorktreeWithExplicitWorktreeScope(t
 
 	if err := validateTUILaunchContext(); err != nil {
 		t.Fatalf("validateTUILaunchContext() error = %v, want nil", err)
+	}
+}
+
+func TestOwnedJustRunScopedDaemonCleanupStopsWorktreeScopedDaemon(t *testing.T) {
+	_, worktree := makeLinkedWorktree(t)
+	t.Chdir(worktree)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "runtime"))
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	hooks := installTUILaunchTestHooks(t, nil)
+
+	cleanup := ownedJustRunScopedDaemonCleanup()
+	if cleanup == nil {
+		t.Fatal("ownedJustRunScopedDaemonCleanup() = nil, want cleanup")
+	}
+	if err := cleanup(context.Background()); err != nil {
+		t.Fatalf("cleanup() error = %v, want nil", err)
+	}
+
+	if hooks.stopper.stops != 1 {
+		t.Fatalf("Stop calls = %d, want 1", hooks.stopper.stops)
+	}
+	wantWorktree, err := filepath.EvalSymlinks(worktree)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(worktree): %v", err)
+	}
+	if hooks.repoDir != wantWorktree {
+		t.Fatalf("launcher repoDir = %q, want %q", hooks.repoDir, wantWorktree)
+	}
+	wantSocket := config.ScopedDaemonSocketPath(wantWorktree)
+	if hooks.socket != wantSocket {
+		t.Fatalf("launcher socket = %q, want %q", hooks.socket, wantSocket)
+	}
+	if hooks.socket == config.GlobalDaemonSocketPath() {
+		t.Fatalf("launcher socket = global daemon socket %q, want scoped", hooks.socket)
+	}
+}
+
+func TestOwnedJustRunScopedDaemonCleanupSkipsWithoutJustRunSource(t *testing.T) {
+	_, worktree := makeLinkedWorktree(t)
+	t.Chdir(worktree)
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
+	forbidTUIDaemonStopper(t)
+
+	if cleanup := ownedJustRunScopedDaemonCleanup(); cleanup != nil {
+		t.Fatal("ownedJustRunScopedDaemonCleanup() returned cleanup without just-run ownership source")
+	}
+}
+
+func TestOwnedJustRunScopedDaemonCleanupSkipsGlobalDaemonScope(t *testing.T) {
+	_, worktree := makeLinkedWorktree(t)
+	t.Chdir(worktree)
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	forbidTUIDaemonStopper(t)
+
+	if cleanup := ownedJustRunScopedDaemonCleanup(); cleanup != nil {
+		t.Fatal("ownedJustRunScopedDaemonCleanup() returned cleanup for global daemon scope")
+	}
+}
+
+func TestRunTUICleansOwnedScopedDaemonOnNormalExit(t *testing.T) {
+	_, worktree := makeLinkedWorktree(t)
+	t.Chdir(worktree)
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	hooks := installTUILaunchTestHooks(t, nil)
+
+	runTUIWithOptions(testTUIConfig())
+
+	if hooks.stopper.stops != 1 {
+		t.Fatalf("Stop calls = %d, want 1", hooks.stopper.stops)
+	}
+	if len(hooks.exitCodes) != 0 {
+		t.Fatalf("exit codes = %v, want none", hooks.exitCodes)
+	}
+}
+
+func TestRunTUICleansOwnedScopedDaemonBeforeErrorExit(t *testing.T) {
+	_, worktree := makeLinkedWorktree(t)
+	t.Chdir(worktree)
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	hooks := installTUILaunchTestHooks(t, errors.New("program failed"))
+
+	runTUIWithOptions(testTUIConfig())
+
+	if hooks.stopper.stops != 1 {
+		t.Fatalf("Stop calls = %d, want 1", hooks.stopper.stops)
+	}
+	if len(hooks.exitCodes) != 1 || hooks.exitCodes[0] != 1 {
+		t.Fatalf("exit codes = %v, want [1]", hooks.exitCodes)
+	}
+	if got, want := strings.Join(hooks.events, ","), "stop,exit"; got != want {
+		t.Fatalf("events = %v, want cleanup before exit", hooks.events)
 	}
 }
 

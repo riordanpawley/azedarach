@@ -35,6 +35,9 @@ var orderedMigrations = []migration{
 	{id: "0012_blocked_status_to_open", path: "migrations/0012_blocked_status_to_open.sql"},
 	{id: "0013_closed_runtime_invariants", path: "migrations/0013_closed_runtime_invariants.sql"},
 	{id: "0014_linear_sync_external_refs_backfill", path: "migrations/0014_linear_sync_external_refs_backfill.sql"},
+	{id: "0015_issue_attachments", path: "migrations/0015_issue_attachments.sql"},
+	{id: "0016_issue_search_fts", path: "migrations/0016_issue_search_fts.sql"},
+	{id: "0017_spec_requirement_search_fts", path: "migrations/0017_spec_requirement_search_fts.sql"},
 }
 
 func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {

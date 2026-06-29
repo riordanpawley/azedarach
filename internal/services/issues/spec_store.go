@@ -66,6 +66,7 @@ type RequirementFilter struct {
 	Statuses       []RequirementStatus
 	LocalIDs       []string
 	Query          string
+	Limit          int
 	IncludeDeleted bool
 }
 
@@ -275,12 +276,23 @@ func (c *Client) ListRequirements(ctx context.Context, filter RequirementFilter)
 		query.WriteString(` AND status IN (` + strings.Join(placeholders, ",") + `)`)
 	}
 	if trimmed := strings.TrimSpace(filter.Query); trimmed != "" {
-		like := "%" + trimmed + "%"
-		query.WriteString(` AND (local_id LIKE ? OR COALESCE(external_code, '') LIKE ? OR title LIKE ? OR COALESCE(description, '') LIKE ?)`)
-		args = append(args, like, like, like, like)
+		expr := domain.ContentQueryFTSExpression(trimmed)
+		if expr == "" {
+			return []Requirement{}, nil
+		}
+		query.WriteString(` AND rowid IN (
+			SELECT rowid
+			FROM spec_requirement_search_fts
+			WHERE spec_requirement_search_fts MATCH ?
+		)`)
+		args = append(args, expr)
 	}
 
 	query.WriteString(` ORDER BY updated_at DESC, local_id ASC`)
+	if filter.Limit > 0 && len(filter.LocalIDs) == 0 {
+		query.WriteString(` LIMIT ?`)
+		args = append(args, filter.Limit)
+	}
 
 	rows, err := db.QueryContext(ctx, query.String(), args...)
 	if err != nil {
@@ -303,6 +315,12 @@ func (c *Client) ListRequirements(ctx context.Context, filter RequirementFilter)
 	requirements := recordsToRequirements(records)
 	if len(filter.LocalIDs) > 0 {
 		requirements = filterRequirementsByLocalID(requirements, normalizeOrderedIDs(filter.LocalIDs))
+	}
+	if strings.TrimSpace(filter.Query) != "" {
+		requirements = filterRequirementsByContentQuery(requirements, filter.Query)
+	}
+	if filter.Limit > 0 && len(requirements) > filter.Limit {
+		requirements = requirements[:filter.Limit]
 	}
 	return requirements, nil
 }
@@ -1328,6 +1346,29 @@ func filterRequirementsByLocalID(requirements []Requirement, ids []string) []Req
 		}
 	}
 	return ordered
+}
+
+func filterRequirementsByContentQuery(requirements []Requirement, query string) []Requirement {
+	if strings.TrimSpace(query) == "" {
+		return requirements
+	}
+	filtered := make([]Requirement, 0, len(requirements))
+	for _, requirement := range requirements {
+		externalCode := ""
+		if requirement.ExternalCode != nil {
+			externalCode = *requirement.ExternalCode
+		}
+		if domain.ContentFieldsMatchQuery([]string{
+			requirement.LocalID,
+			externalCode,
+			requirement.Title,
+			requirement.Description,
+			string(requirement.Status),
+		}, query) {
+			filtered = append(filtered, requirement)
+		}
+	}
+	return filtered
 }
 
 func recordsToSpecLinks(records []specLinkRecord) []SpecLink {

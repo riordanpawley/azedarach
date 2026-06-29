@@ -3,6 +3,7 @@ package domain
 import (
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Filter represents task filtering state
@@ -126,6 +127,122 @@ func (f *Filter) Matches(t Task) bool {
 	}
 
 	return true
+}
+
+// FilterTasksByContentQuery returns tasks matching the issue content search
+// surface used by daemon-backed issue search commands.
+func FilterTasksByContentQuery(tasks []Task, query string) []Task {
+	terms := ContentQueryTerms(query)
+	if len(terms) == 0 {
+		return tasks
+	}
+	filtered := make([]Task, 0, len(tasks))
+	for _, task := range tasks {
+		if taskMatchesContentTerms(task, terms) {
+			filtered = append(filtered, task)
+		}
+	}
+	return filtered
+}
+
+// ContentQueryTerms normalizes a user search query into terms that must all be
+// present somewhere in the searchable issue content surface.
+func ContentQueryTerms(query string) []string {
+	seen := map[string]struct{}{}
+	terms := make([]string, 0, 4)
+	var b strings.Builder
+	flush := func() {
+		if b.Len() == 0 {
+			return
+		}
+		term := strings.ToLower(b.String())
+		b.Reset()
+		if _, ok := seen[term]; ok {
+			return
+		}
+		seen[term] = struct{}{}
+		terms = append(terms, term)
+	}
+	for _, r := range query {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(unicode.ToLower(r))
+			continue
+		}
+		flush()
+	}
+	flush()
+	return terms
+}
+
+// ContentQueryFTSExpression builds the FTS5 MATCH expression used for durable
+// content search. Every normalized term must be present somewhere in the
+// searchable surface, matching FilterTasksByContentQuery semantics.
+func ContentQueryFTSExpression(query string) string {
+	tokens := ContentQueryTerms(query)
+	if len(tokens) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		parts = append(parts, `"`+token+`"`)
+	}
+	return strings.Join(parts, " AND ")
+}
+
+// ContentFieldsMatchQuery checks whether every normalized query term appears in
+// at least one field of a durable content-search surface.
+func ContentFieldsMatchQuery(fields []string, query string) bool {
+	terms := ContentQueryTerms(query)
+	if len(terms) == 0 {
+		return true
+	}
+	return ContentFieldsMatchTerms(fields, terms)
+}
+
+// ContentFieldsMatchTerms checks pre-normalized content query terms against a
+// caller-provided durable content-search surface.
+func ContentFieldsMatchTerms(fields []string, terms []string) bool {
+	for _, term := range terms {
+		matched := false
+		for _, field := range fields {
+			if strings.Contains(strings.ToLower(field), term) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+// TaskMatchesContentQuery checks the durable issue fields that should be
+// discoverable through content search.
+func TaskMatchesContentQuery(task Task, query string) bool {
+	terms := ContentQueryTerms(query)
+	if len(terms) == 0 {
+		return true
+	}
+	return taskMatchesContentTerms(task, terms)
+}
+
+func taskMatchesContentTerms(task Task, terms []string) bool {
+	fields := []string{
+		task.ID.String(),
+		task.Title,
+		task.Description,
+		task.Notes,
+		task.Design,
+		task.Acceptance,
+		task.Assignee,
+		string(task.Status),
+		task.Priority.String(),
+		string(task.Type),
+	}
+	fields = append(fields, task.Labels...)
+	fields = append(fields, task.Implementations...)
+	return ContentFieldsMatchTerms(fields, terms)
 }
 
 // Clear resets all filters

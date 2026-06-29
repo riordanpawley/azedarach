@@ -89,7 +89,7 @@ func TestImageAttachOverlay_UsesActionsSectionLayout(t *testing.T) {
 	overlay.files = []attachment.Attachment{{ID: "a1", IssueID: "az-1", Filename: "pic.png"}}
 	view := overlay.View()
 	if !strings.Contains(view, "ATTACHMENTS FOR az-1") {
-		t.Fatalf("expected image attachment title, got %q", view)
+		t.Fatalf("expected attachment title, got %q", view)
 	}
 	if !strings.Contains(view, "Actions") {
 		t.Fatalf("expected actions section, got %q", view)
@@ -101,8 +101,8 @@ func TestImagePreviewOverlay_UsesActionsSectionLayout(t *testing.T) {
 	defer cleanup()
 	overlay := NewImagePreviewOverlay("az-1", service, 0)
 	view := overlay.View()
-	if !strings.Contains(view, "Image Preview") {
-		t.Fatalf("expected image preview title, got %q", view)
+	if !strings.Contains(view, "Attachment Preview") {
+		t.Fatalf("expected attachment preview title, got %q", view)
 	}
 	if !strings.Contains(view, "Actions") {
 		t.Fatalf("expected actions section, got %q", view)
