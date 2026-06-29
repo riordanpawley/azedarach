@@ -189,6 +189,21 @@ func ContentQueryFTSExpression(query string) string {
 	return strings.Join(parts, " AND ")
 }
 
+// ContentQueryAnyFTSExpression builds an FTS5 MATCH expression where any
+// normalized query term may match. Use this for broad discovery, not strict
+// filtering.
+func ContentQueryAnyFTSExpression(query string) string {
+	tokens := ContentQueryTerms(query)
+	if len(tokens) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		parts = append(parts, `"`+token+`"`)
+	}
+	return strings.Join(parts, " OR ")
+}
+
 // ContentFieldsMatchQuery checks whether every normalized query term appears in
 // at least one field of a durable content-search surface.
 func ContentFieldsMatchQuery(fields []string, query string) bool {
@@ -197,6 +212,30 @@ func ContentFieldsMatchQuery(fields []string, query string) bool {
 		return true
 	}
 	return ContentFieldsMatchTerms(fields, terms)
+}
+
+// ContentFieldsMatchAnyTerm checks whether at least one normalized query term
+// appears in the caller-provided durable content-search surface.
+func ContentFieldsMatchAnyTerm(fields []string, terms []string) bool {
+	return ContentFieldsMatchedTermCount(fields, terms) > 0
+}
+
+// ContentFieldsMatchedTermCount returns the number of normalized query terms
+// that appear in the caller-provided durable content-search surface.
+func ContentFieldsMatchedTermCount(fields []string, terms []string) int {
+	if len(terms) == 0 {
+		return 0
+	}
+	count := 0
+	for _, term := range terms {
+		for _, field := range fields {
+			if strings.Contains(strings.ToLower(field), term) {
+				count++
+				break
+			}
+		}
+	}
+	return count
 }
 
 // ContentFieldsMatchTerms checks pre-normalized content query terms against a

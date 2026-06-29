@@ -161,8 +161,14 @@ func TestContentQueryFTSExpression(t *testing.T) {
 	if got, want := ContentQueryFTSExpression("Runtime cache, runtime!"), `"runtime" AND "cache"`; got != want {
 		t.Fatalf("ContentQueryFTSExpression = %q, want %q", got, want)
 	}
+	if got, want := ContentQueryAnyFTSExpression("Runtime cache, runtime!"), `"runtime" OR "cache"`; got != want {
+		t.Fatalf("ContentQueryAnyFTSExpression = %q, want %q", got, want)
+	}
 	if got := ContentQueryFTSExpression(" -- "); got != "" {
 		t.Fatalf("ContentQueryFTSExpression punctuation = %q, want empty", got)
+	}
+	if got := ContentQueryAnyFTSExpression(" -- "); got != "" {
+		t.Fatalf("ContentQueryAnyFTSExpression punctuation = %q, want empty", got)
 	}
 }
 
@@ -173,6 +179,13 @@ func TestContentFieldsMatchQuery(t *testing.T) {
 	}
 	if ContentFieldsMatchQuery(fields, "life missing") {
 		t.Fatal("ContentFieldsMatchQuery missing term = true, want false")
+	}
+	terms := ContentQueryTerms("life missing cleanup")
+	if !ContentFieldsMatchAnyTerm(fields, terms) {
+		t.Fatal("ContentFieldsMatchAnyTerm = false, want true")
+	}
+	if got, want := ContentFieldsMatchedTermCount(fields, terms), 2; got != want {
+		t.Fatalf("ContentFieldsMatchedTermCount = %d, want %d", got, want)
 	}
 }
 

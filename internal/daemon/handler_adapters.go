@@ -47,10 +47,11 @@ func (s issueSpecService) ListRequirements(ctx context.Context, req protocol.Spe
 		return protocol.SpecRequirementListResponseBody{}, err
 	}
 	filter := issues.RequirementFilter{
-		IssueID:  req.IssueID.String(),
-		LocalIDs: requirementIDsToStrings(req.IDs),
-		Query:    req.Query,
-		Limit:    req.Limit,
+		IssueID:    req.IssueID.String(),
+		LocalIDs:   requirementIDsToStrings(req.IDs),
+		Query:      req.Query,
+		QueryMatch: issues.RequirementQueryMatch(req.Match),
+		Limit:      req.Limit,
 	}
 	if req.Status != "" {
 		filter.Statuses = []issues.RequirementStatus{issues.RequirementStatus(req.Status)}

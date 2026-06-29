@@ -10936,7 +10936,7 @@ func TestPrimeCommandQuestionFirstAndSpecBlock(t *testing.T) {
 	if !strings.Contains(output, "ALWAYS run `az spec read --issue <issue-id>` before starting behavior work; use `az spec link list --issue <issue-id>` when you need link-only detail.") {
 		t.Fatalf("prime output missing mandatory pre-work spec check guardrail: %q", output)
 	}
-	if !strings.Contains(output, "To choose spec traceability, first inspect linked requirements, then use `az spec req list --query \"<feature area>\" --limit 5` and `az spec read --req <req-id>` to find nearby requirements by feature area or acceptance intent; avoid unbounded requirement lists during session startup.") {
+	if !strings.Contains(output, "To choose spec traceability, first inspect linked requirements, then use `az spec req list --query \"<issue title and feature terms>\" --match any --limit 10` and `az spec read --req <req-id>` to find nearby requirements across naming variants; avoid unbounded requirement lists during session startup.") {
 		t.Fatalf("prime output missing spec discovery guardrail: %q", output)
 	}
 	if !strings.Contains(output, "Link an existing requirement when it already defines the intended behavior; create or update a requirement before implementation when work adds behavior, changes user-visible behavior, changes a CLI/API/TUI contract, alters persistence/daemon semantics, or reveals an underspecified contract.") {
