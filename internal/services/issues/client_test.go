@@ -2250,6 +2250,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0014_linear_sync_external_refs_backfill",
 		"0015_issue_attachments",
 		"0016_issue_search_fts",
+		"0017_spec_requirement_search_fts",
 	}, got)
 }
 

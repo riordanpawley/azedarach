@@ -42,7 +42,7 @@ Scope: Go runtime restoration of `az spec` commands with daemon-authoritative ex
 
 ### Requirement commands
 
-1. `az spec req list [--json] [--issue <issue-id>] [--status <open|accepted|superseded>] [--id <req-id> ...] [--ids a,b,c]`
+1. `az spec req list [--json] [--issue <issue-id>] [--status <open|accepted|superseded>] [--query <text>] [--limit <n>] [--id <req-id> ...] [--ids a,b,c]`
 2. `az spec req get --id <req-id> [--json]`
 3. `az spec req create --id <req-id> --title <text> [--description <text>] [--issue <issue-id>] [--json]`
 4. `az spec req update --id <req-id> [--title <text>] [--description <text>] [--status <open|accepted|superseded>] [--json]`
@@ -76,6 +76,7 @@ Scope: Go runtime restoration of `az spec` commands with daemon-authoritative ex
 3. Repeated selectors (`--id`, `--ids`) preserve caller order in JSON/plain output where ordering is meaningful.
 4. `--ids` comma list ignores surrounding whitespace and drops empty tokens.
 5. Duplicate selector tokens are de-duplicated while preserving first occurrence.
+6. Requirement list discovery can be narrowed with `--query <text>` over requirement ID, external code, title, description, and status, using the shared content-query term semantics and daemon-store FTS index used by issue content search. Results can be bounded with `--limit <n>` where `n` is non-negative.
 
 ## Output and Error Determinism
 

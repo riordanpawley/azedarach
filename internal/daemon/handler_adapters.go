@@ -49,6 +49,8 @@ func (s issueSpecService) ListRequirements(ctx context.Context, req protocol.Spe
 	filter := issues.RequirementFilter{
 		IssueID:  req.IssueID.String(),
 		LocalIDs: requirementIDsToStrings(req.IDs),
+		Query:    req.Query,
+		Limit:    req.Limit,
 	}
 	if req.Status != "" {
 		filter.Statuses = []issues.RequirementStatus{issues.RequirementStatus(req.Status)}

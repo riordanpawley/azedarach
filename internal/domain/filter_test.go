@@ -157,6 +157,25 @@ func TestTaskMatchesContentQuery(t *testing.T) {
 	}
 }
 
+func TestContentQueryFTSExpression(t *testing.T) {
+	if got, want := ContentQueryFTSExpression("Runtime cache, runtime!"), `"runtime" AND "cache"`; got != want {
+		t.Fatalf("ContentQueryFTSExpression = %q, want %q", got, want)
+	}
+	if got := ContentQueryFTSExpression(" -- "); got != "" {
+		t.Fatalf("ContentQueryFTSExpression punctuation = %q, want empty", got)
+	}
+}
+
+func TestContentFieldsMatchQuery(t *testing.T) {
+	fields := []string{"REQ-LIFE-2", "Session lifecycle cleanup", "accepted"}
+	if !ContentFieldsMatchQuery(fields, "life cleanup") {
+		t.Fatal("ContentFieldsMatchQuery = false, want true")
+	}
+	if ContentFieldsMatchQuery(fields, "life missing") {
+		t.Fatal("ContentFieldsMatchQuery missing term = true, want false")
+	}
+}
+
 func TestFilterTasksByContentQuery(t *testing.T) {
 	tasks := []Task{
 		{ID: issueID("az-1"), Title: "Alpha", Description: "runtime cache"},
