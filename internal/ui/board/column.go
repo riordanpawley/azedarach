@@ -39,8 +39,7 @@ func renderColumn(
 	cardWidth := CardContentWidth(width)
 	linesPerCard := CardLineFootprint(s, cardWidth)
 	start, end := VisibleTaskWindow(len(tasks), viewportStart, bodyHeight, linesPerCard)
-	topIndicator := start > 0
-	bottomIndicator := end < len(tasks)
+	topIndicator, bottomIndicator := VisibleScrollIndicators(len(tasks), start, end, bodyHeight, linesPerCard)
 
 	var cardContent strings.Builder
 	if topIndicator {
@@ -161,6 +160,34 @@ func visibleTaskRange(taskCount int, viewportStart int, availableHeight int, lin
 		start = maxStart
 	}
 	return start, start + visibleCards
+}
+
+// VisibleScrollIndicators returns scroll marker visibility for a rendered task
+// window without allowing marker rows to push the visible card out of the
+// available column body.
+func VisibleScrollIndicators(taskCount int, start int, end int, bodyHeight int, linesPerCard int) (bool, bool) {
+	top := start > 0
+	bottom := end < taskCount
+	if !top && !bottom {
+		return false, false
+	}
+
+	if linesPerCard < 1 {
+		linesPerCard = 1
+	}
+	visibleCards := end - start
+	if visibleCards < 1 && taskCount > 0 {
+		visibleCards = 1
+	}
+	availableIndicatorRows := bodyHeight - visibleCards*linesPerCard
+	if availableIndicatorRows <= 0 {
+		return false, false
+	}
+
+	if top && bottom && availableIndicatorRows == 1 {
+		return false, true
+	}
+	return top, bottom
 }
 
 func renderScrollIndicator(count int, up bool, width int, s *styles.Styles) string {

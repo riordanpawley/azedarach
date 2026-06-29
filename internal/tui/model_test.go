@@ -2019,6 +2019,56 @@ func TestNormalModeDown_KeepsCursorVisibleWithIndicators(t *testing.T) {
 	}
 }
 
+func TestNormalModeDown_NarrowShortSingleColumnKeepsFinalIssueVisible(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.viewMode = ViewModeBoard
+	m.width = 50
+	m.tasks = make([]domain.Task, 0, 12)
+	for i := 1; i <= 12; i++ {
+		m.tasks = append(m.tasks, domain.Task{
+			ID:       naming.IssueID(fmt.Sprintf("open-%02d", i)),
+			Title:    fmt.Sprintf("Open Task %02d", i),
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+		})
+	}
+
+	columns := m.buildColumns()
+	columnCount := m.boardVisibleColumnCount(len(columns))
+	if columnCount != 1 {
+		t.Fatalf("expected single-column board at width %d, got %d columns", m.width, columnCount)
+	}
+	linesPerCard := board.CardLineFootprint(m.styles, board.CardContentWidth(m.width/columnCount))
+	m.height = linesPerCard + board.ColumnHeaderLines + board.BoardStatusBarLines
+	m.nav.SelectTask("open-01", 0)
+	m.ensureCursorVisible(columns)
+
+	for i := 1; i < len(columns[0].Tasks); i++ {
+		result, cmd := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyDown})
+		if cmd != nil {
+			t.Fatalf("expected no command during down navigation, got %T", cmd)
+		}
+		next, ok := result.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", result)
+		}
+		m = next
+	}
+
+	columns = m.buildColumns()
+	pos := m.nav.GetPosition(columns)
+	if !pos.Valid || pos.Column != 0 || pos.Task != len(columns[0].Tasks)-1 {
+		t.Fatalf("expected cursor on final open issue, got %+v", pos)
+	}
+
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "▶open-12") || !strings.Contains(view, "Open Task 12") {
+		t.Fatalf("expected final issue to remain visible in narrow short board view:\n%s", view)
+	}
+}
+
 func TestHorizontalColumnViewportFollowsCursorOnNarrowWidth(t *testing.T) {
 	m := newTestModel()
 	m.width = 80
