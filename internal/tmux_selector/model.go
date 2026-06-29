@@ -730,19 +730,27 @@ func (m Model) renderTree(entries []InventoryEntry) string {
 	availableHeight := maxInt(1, m.treeAvailableHeight())
 	visible := visibleTreeRows(rows, m.cursor, availableHeight)
 	lines := make([]string, 0, len(visible))
+	labels := m.labelsByEntry()
+	labelWidth := maxLabelWidth(labels)
 	for _, row := range visible {
 		if row.entryIndex >= len(entries) {
 			continue
 		}
-		lines = append(lines, m.renderTreeRow(row, row.entry))
+		lines = append(lines, m.renderTreeRow(row, row.entry, labels, labelWidth))
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
 
-func (m Model) renderTreeRow(row sessionTreeRow, entry InventoryEntry) string {
+func (m Model) renderTreeRow(row sessionTreeRow, entry InventoryEntry, labels map[int]string, labelWidth int) string {
 	cursor := m.styles.StatusHint.Render("  ")
+	if labelWidth > 0 {
+		cursor = m.styles.StatusHint.Render(" " + renderIndexColumn(labels[row.entryIndex], labelWidth) + " ")
+	}
 	if row.entryIndex >= 0 && row.entryIndex == m.cursor {
 		cursor = lipgloss.NewStyle().Foreground(styles.Blue).Bold(true).Render("> ")
+		if labelWidth > 0 {
+			cursor = lipgloss.NewStyle().Foreground(styles.Blue).Bold(true).Render(">") + renderIndexColumn(labels[row.entryIndex], labelWidth) + " "
+		}
 	}
 	indent := m.styles.StatusHint.Render(treePrefix(row.ancestorLast, row.last))
 	displayID := entryDisplayID(entry)
@@ -2300,6 +2308,28 @@ var jumpLabelStyle = lipgloss.NewStyle().
 	Foreground(styles.Base).
 	Background(styles.Pink).
 	Bold(true)
+
+func renderIndexColumn(label string, width int) string {
+	label = strings.TrimSpace(label)
+	if width <= 0 {
+		return ""
+	}
+	if label == "" {
+		return strings.Repeat(" ", width)
+	}
+	if ansi.StringWidth(label) > width {
+		label = ansi.Truncate(label, width, "…")
+	}
+	return jumpLabelStyle.Width(width).Align(lipgloss.Center).Render(label)
+}
+
+func maxLabelWidth(labels map[int]string) int {
+	width := 0
+	for _, label := range labels {
+		width = maxInt(width, ansi.StringWidth(strings.TrimSpace(label)))
+	}
+	return width
+}
 
 func insertJumpLabelInCardLine(line string, label string) (string, bool) {
 	// Cards are styled with BorderForeground(...), so each "│" is wrapped in
