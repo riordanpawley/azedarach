@@ -1144,35 +1144,8 @@ func (c *Client) GetManyWithDependencyContextRuntime(ctx context.Context, projec
 }
 
 func (c *Client) graphReadinessContextIDs(ctx context.Context, db *sql.DB, rootID string) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `
-		WITH RECURSIVE graph(id) AS (
-			SELECT id
-			FROM issues
-			WHERE id = ? AND deleted_at IS NULL
-
-			UNION
-
-			SELECT dep.issue_id
-			FROM issue_dependencies dep
-			JOIN graph parent ON parent.id = dep.depends_on_id
-			JOIN issues child ON child.id = dep.issue_id AND child.deleted_at IS NULL
-			WHERE dep.tombstoned_at IS NULL
-				AND dep.dependency_type IN (?, ?)
-		),
-		context(id) AS (
-			SELECT id FROM graph
-
-			UNION
-
-			SELECT dep.depends_on_id
-			FROM issue_dependencies dep
-			JOIN graph graph_issue ON graph_issue.id = dep.issue_id
-			WHERE dep.tombstoned_at IS NULL
-		)
-		SELECT DISTINCT context.id
-		FROM context
-		JOIN issues i ON i.id = context.id AND i.deleted_at IS NULL
-	`, rootID, string(domain.DependencyParentChild), "parent_child")
+	query, args := graphReadinessContextIDsQuery(rootID)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1192,6 +1165,49 @@ func (c *Client) graphReadinessContextIDs(ctx context.Context, db *sql.DB, rootI
 		return nil, err
 	}
 	return ids, nil
+}
+
+func graphReadinessContextIDsQuery(rootID string) (string, []any) {
+	query := `
+		WITH RECURSIVE graph(id) AS (
+			SELECT id
+			FROM issues
+			WHERE id = ? AND deleted_at IS NULL
+
+			UNION
+
+			SELECT dep.issue_id
+			FROM graph parent
+			CROSS JOIN issue_dependencies dep INDEXED BY idx_dependencies_depends_on_active_type
+			CROSS JOIN issues child
+			WHERE dep.depends_on_id = parent.id
+				AND child.id = dep.issue_id
+				AND child.deleted_at IS NULL
+				AND dep.tombstoned_at IS NULL
+				AND dep.dependency_type IN (?, ?)
+		),
+		context(id) AS (
+			SELECT id FROM graph
+
+			UNION
+
+			SELECT dep.depends_on_id
+			FROM graph graph_issue
+			CROSS JOIN issue_dependencies dep INDEXED BY idx_dependencies_issue_active_type
+			CROSS JOIN issues dep_issue
+			WHERE dep.issue_id = graph_issue.id
+				AND dep_issue.id = dep.depends_on_id
+				AND dep_issue.deleted_at IS NULL
+				AND dep.tombstoned_at IS NULL
+		)
+		SELECT id
+		FROM context
+	`
+	return query, []any{
+		strings.TrimSpace(rootID),
+		string(domain.DependencyParentChild),
+		"parent_child",
+	}
 }
 
 // GetManyMetadataWithRuntime fetches lightweight issue metadata plus stored runtime projection fields.
@@ -2625,8 +2641,8 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 	return tasks, nil
 }
 
-func (c *Client) queryTaskSummariesWithRuntime(ctx context.Context, db *sql.DB, projectID string) ([]domain.Task, error) {
-	return c.queryTasksWithRuntimeProjection(ctx, db, projectID, false)
+func (c *Client) queryTaskSummariesWithRuntime(ctx context.Context, db *sql.DB, projectID string, issueIDs ...string) ([]domain.Task, error) {
+	return c.queryTasksWithRuntimeProjection(ctx, db, projectID, false, issueIDs...)
 }
 
 func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectID string, issueIDs ...string) ([]domain.Task, error) {

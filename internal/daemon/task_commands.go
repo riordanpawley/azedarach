@@ -3123,7 +3123,7 @@ func daemonIssueWorktreeRefs(worktrees []git.Worktree) map[string]domain.IssueWo
 }
 
 func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID string) (taskCompleteCheckResult, error) {
-	tasks, err := d.loadTaskGraphDomainTasks(ctx, projectID)
+	tasks, err := d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootIssueID)
 	if err != nil {
 		return taskCompleteCheckResult{}, fmt.Errorf("inspect issue graph before completion check: %w", err)
 	}
