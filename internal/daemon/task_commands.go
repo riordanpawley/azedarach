@@ -863,10 +863,12 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 	skippedProbes := 0
 	deferredProbes := 0
 	failedProbes := 0
+	suppressedProbes := 0
 	processedIssueIDs := make([]string, 0, 10)
 	failedIssueIDs := make([]string, 0, 10)
 	skippedIssueIDs := make([]string, 0, 10)
 	deferredIssueIDs := make([]string, 0, 10)
+	suppressedIssueIDs := make([]string, 0, 10)
 	now := time.Now().UTC()
 	for _, wt := range worktrees {
 		issueID := strings.TrimSpace(wt.IssueID)
@@ -877,6 +879,13 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 			continue
 		}
 		worktreePath := strings.TrimSpace(wt.Path)
+		if d.suppressProjectedStaleWorktreeGitRefresh(ctx, projectID, issueID, worktreePath, nil) {
+			suppressedProbes++
+			if len(suppressedIssueIDs) < cap(suppressedIssueIDs) {
+				suppressedIssueIDs = append(suppressedIssueIDs, issueID)
+			}
+			continue
+		}
 		if d.git != nil && worktreePath != "" {
 			issueBaseBranch := d.runtimeDiffBaseBranchForIssue(issueID, baseBranch, taskByIssue, worktreeByIssue)
 			probeKey := worktreeGitProbeThrottleKey(projectID, worktreePath, issueBaseBranch)
@@ -900,6 +909,13 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 				status, err := d.git.RuntimeStatus(ctx, worktreePath, issueBaseBranch)
 				outcome := throttle.Record(probeKey, gitStatusSignature(status), err)
 				if err != nil {
+					if d.suppressStaleWorktreeGitRefresh(ctx, projectID, issueID, worktreePath, err) {
+						suppressedProbes++
+						if len(suppressedIssueIDs) < cap(suppressedIssueIDs) {
+							suppressedIssueIDs = append(suppressedIssueIDs, issueID)
+						}
+						continue
+					}
 					failedProbes++
 					if len(failedIssueIDs) < cap(failedIssueIDs) {
 						failedIssueIDs = append(failedIssueIDs, issueID)
@@ -962,7 +978,7 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 	if d.cfg.Logger != nil && d.git != nil {
 		counters := throttle.snapshotCounters()
 		logFn := d.cfg.Logger.Debug
-		if failedProbes > 0 || skippedProbes > 0 || deferredProbes > 0 || trigger.Priority >= reconcilePriorityManual {
+		if failedProbes > 0 || skippedProbes > 0 || deferredProbes > 0 || suppressedProbes > 0 || trigger.Priority >= reconcilePriorityManual {
 			logFn = d.cfg.Logger.Info
 		}
 		logFn("refresh worktree runtime state completed",
@@ -972,10 +988,12 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 			"skipped_tasks", skippedProbes,
 			"deferred_tasks", deferredProbes,
 			"failed_tasks", failedProbes,
+			"suppressed_stale_tasks", suppressedProbes,
 			"sample_processed_issue_ids", strings.Join(processedIssueIDs, ","),
 			"sample_skipped_issue_ids", strings.Join(skippedIssueIDs, ","),
 			"sample_deferred_issue_ids", strings.Join(deferredIssueIDs, ","),
 			"sample_failed_issue_ids", strings.Join(failedIssueIDs, ","),
+			"sample_suppressed_stale_issue_ids", strings.Join(suppressedIssueIDs, ","),
 			"throttle_processed", counters.Processed,
 			"throttle_skipped", counters.Skipped,
 			"throttle_deferred", counters.Deferred,
@@ -1088,6 +1106,9 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 		}
 
 		worktreePath := strings.TrimSpace(wt.Path)
+		if d.suppressProjectedStaleWorktreeGitRefresh(ctx, projectID, issueID, worktreePath, nil) {
+			continue
+		}
 		branch := strings.TrimSpace(wt.Branch)
 		d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktreePath, branch)
 		refreshed++
@@ -1098,6 +1119,10 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 		issueBaseBranch := d.runtimeDiffBaseBranchForIssue(issueID, baseBranch, taskByIssue, worktreeByIssue)
 		status, statusErr := d.git.RuntimeStatus(ctx, worktreePath, issueBaseBranch)
 		if statusErr != nil {
+			if d.suppressStaleWorktreeGitRefresh(ctx, projectID, issueID, worktreePath, statusErr) {
+				refreshed--
+				continue
+			}
 			errs = append(errs, fmt.Errorf("%s: refresh git status: %w", issueID, statusErr))
 			continue
 		}
