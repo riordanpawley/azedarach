@@ -918,6 +918,36 @@ func (c *Client) ListGraphReadinessWithRuntime(ctx context.Context, projectID, r
 	return tasks, nil
 }
 
+// ListParentChildSubtreeWithRuntime fetches the requested issue and active
+// parent-child descendants with runtime projection fields. It intentionally
+// avoids full-project scans for close/review guards.
+func (c *Client) ListParentChildSubtreeWithRuntime(ctx context.Context, projectID, rootID string) ([]domain.Task, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	rootID = strings.TrimSpace(rootID)
+	if rootID == "" {
+		return []domain.Task{}, nil
+	}
+	issueIDs, err := c.parentChildSubtreeIDs(ctx, db, rootID)
+	if err != nil {
+		return nil, c.wrapError("list-parent-child-subtree-with-runtime", rootID, err)
+	}
+	if len(issueIDs) == 0 {
+		return []domain.Task{}, nil
+	}
+	tasks, err := c.queryTasksWithRuntimeProjection(ctx, db, projectID, false, issueIDs...)
+	if err != nil {
+		return nil, c.wrapError("list-parent-child-subtree-with-runtime", rootID, err)
+	}
+	return tasks, nil
+}
+
 // GetWithRuntime fetches one active issue with runtime projection fields.
 func (c *Client) GetWithRuntime(ctx context.Context, projectID, id string) (domain.Task, error) {
 	db, err := c.dbHandle()
@@ -1183,6 +1213,30 @@ func (c *Client) graphReadinessContextIDs(ctx context.Context, db *sql.DB, rootI
 	return ids, nil
 }
 
+func (c *Client) parentChildSubtreeIDs(ctx context.Context, db *sql.DB, rootID string) ([]string, error) {
+	query, args := parentChildSubtreeIDsQuery(rootID)
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0, 16)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(id) != "" {
+			ids = append(ids, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 func graphReadinessContextIDsQuery(rootID string) (string, []any) {
 	query := `
 		WITH graph(id) AS (
@@ -1217,6 +1271,32 @@ func graphReadinessContextIDsQuery(rootID string) (string, []any) {
 		)
 		SELECT id
 		FROM context
+	`
+	return query, []any{
+		strings.TrimSpace(rootID),
+		issueGraphClosureProjectID,
+		string(domain.DependencyParentChild),
+		strings.TrimSpace(rootID),
+	}
+}
+
+func parentChildSubtreeIDsQuery(rootID string) (string, []any) {
+	query := `
+		SELECT id
+		FROM issues
+		WHERE id = ? AND deleted_at IS NULL
+
+		UNION
+
+		SELECT closure.descendant_id AS id
+		FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_ancestor
+		INNER JOIN issues child
+			ON child.id = closure.descendant_id
+			AND child.deleted_at IS NULL
+		WHERE closure.project_id = ?
+			AND closure.dependency_type = ?
+			AND closure.ancestor_id = ?
+		ORDER BY id
 	`
 	return query, []any{
 		strings.TrimSpace(rootID),

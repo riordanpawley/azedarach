@@ -2153,7 +2153,7 @@ func (d *Daemon) validateOrCascadeChildrenForReview(ctx context.Context, project
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
 	}
-	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+	tasks, err := d.loadTaskClosePreflightDomainTasks(ctx, projectID, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("inspect child issues before moving %s to in_review: %w", taskID, err)
 	}
@@ -2254,11 +2254,10 @@ func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, task
 	if issueClient == nil {
 		return taskClosePreflightResult{}, fmt.Errorf("issue store unavailable")
 	}
-	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+	tasks, err := d.loadTaskClosePreflightDomainTasks(ctx, projectID, taskID)
 	if err != nil {
 		return taskClosePreflightResult{}, fmt.Errorf("inspect runtime attachments before closing %s: %w", taskID, err)
 	}
-	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
 
 	var task domain.Task
 	found := false
@@ -2316,11 +2315,10 @@ func (d *Daemon) closeCleanDescendantsBeforeParent(ctx context.Context, projectI
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
 	}
-	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+	tasks, err := d.loadTaskClosePreflightDomainTasks(ctx, projectID, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("inspect child issues before closing %s: %w", taskID, err)
 	}
-	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
 	childrenByParent := daemonCloseGuardChildrenByParent(tasks)
 	root, err := naming.ParseIssueID(taskID)
 	if err != nil {
@@ -2358,6 +2356,18 @@ func (d *Daemon) closeCleanDescendantsBeforeParent(ctx context.Context, projectI
 		closed = append(closed, childResult.AutoClosedChildren...)
 	}
 	return closed, nil
+}
+
+func (d *Daemon) loadTaskClosePreflightDomainTasks(ctx context.Context, projectID, taskID string) ([]domain.Task, error) {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil, fmt.Errorf("issue store unavailable")
+	}
+	tasks, err := issueClient.ListParentChildSubtreeWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	return d.enrichTasksWithSessionState(ctx, projectID, tasks), nil
 }
 
 type daemonCloseGuardStatusRepair struct {

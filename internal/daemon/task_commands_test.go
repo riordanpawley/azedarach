@@ -4234,6 +4234,85 @@ func TestTaskGraphReadinessLoadsRootScopedTasksWithLargeUnrelatedProject(t *test
 	}
 }
 
+func TestTaskClosePreflightLoadsRootScopedSubtreeWithLargeUnrelatedProject(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-close-scoped-subtree"
+	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Close root",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Close child",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusOpen,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	grandchildID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Close grandchild",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusOpen,
+		ParentID: &childID,
+	})
+	if err != nil {
+		t.Fatalf("create grandchild: %v", err)
+	}
+	for i := 0; i < 250; i++ {
+		unrelatedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+			Title:    fmt.Sprintf("Unrelated %03d", i),
+			Type:     domain.TypeTask,
+			Priority: domain.P3,
+			Status:   domain.StatusOpen,
+		})
+		if err != nil {
+			t.Fatalf("create unrelated %d: %v", i, err)
+		}
+		if unrelatedID == rootID || unrelatedID == childID || unrelatedID == grandchildID {
+			t.Fatalf("unexpected duplicate unrelated id %s", unrelatedID)
+		}
+	}
+
+	d := &Daemon{
+		cfg: Config{Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+	}
+	tasks, err := d.loadTaskClosePreflightDomainTasks(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("loadTaskClosePreflightDomainTasks error: %v", err)
+	}
+	byID := map[string]domain.Task{}
+	for _, task := range tasks {
+		byID[task.ID.String()] = task
+	}
+	if got, want := len(byID), 3; got != want {
+		t.Fatalf("close preflight scoped task count = %d, want %d (%s, %s, %s); tasks=%v", got, want, rootID, childID, grandchildID, byID)
+	}
+	for _, wantID := range []string{rootID, childID, grandchildID} {
+		if _, ok := byID[wantID]; !ok {
+			t.Fatalf("close preflight scoped tasks missing %s: tasks=%v", wantID, byID)
+		}
+	}
+
+	guard := daemonCloseGuardChildBlockers(naming.IssueID(rootID), tasks, taskClosePreflightOptions{})
+	if len(guard) != 1 || !strings.Contains(guard[0], childID+" (open)") || !strings.Contains(guard[0], grandchildID+" (open)") {
+		t.Fatalf("close child guard = %+v, want root descendants only", guard)
+	}
+}
+
 func TestTaskGraphReadinessSurfacesPendingSessionStartProgress(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
