@@ -1,6 +1,7 @@
 package issues
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -964,21 +965,7 @@ func TestGraphReadinessContextIDsQueryUsesClosureIndexes(t *testing.T) {
 	require.NoError(t, err)
 
 	query, args := graphReadinessContextIDsQuery("root")
-	rows, err := db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+query, args...)
-	require.NoError(t, err)
-	defer rows.Close()
-
-	plan := strings.Builder{}
-	for rows.Next() {
-		var id, parent, notUsed int
-		var detail string
-		require.NoError(t, rows.Scan(&id, &parent, &notUsed, &detail))
-		plan.WriteString(detail)
-		plan.WriteByte('\n')
-	}
-	require.NoError(t, rows.Err())
-
-	got := plan.String()
+	got := explainQueryPlan(t, ctx, db, query, args...)
 	assert.Contains(t, got, "idx_issue_graph_closure_ancestor", got)
 	assert.Contains(t, got, "idx_dependencies_issue_active_type", got)
 	assert.NotContains(t, got, "SCAN child", got)
@@ -1342,21 +1329,7 @@ func TestTaskRuntimeProjectionFilteredQueryUsesProjectionIndexes(t *testing.T) {
 	require.NoError(t, err)
 
 	query, args := taskRuntimeProjectionQuery("proj-batch-context", false, "second", "third")
-	rows, err := db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+query, args...)
-	require.NoError(t, err)
-	defer rows.Close()
-
-	plan := strings.Builder{}
-	for rows.Next() {
-		var id, parent, notUsed int
-		var detail string
-		require.NoError(t, rows.Scan(&id, &parent, &notUsed, &detail))
-		plan.WriteString(detail)
-		plan.WriteByte('\n')
-	}
-	require.NoError(t, rows.Err())
-
-	got := plan.String()
+	got := explainQueryPlan(t, ctx, db, query, args...)
 	assert.Contains(t, got, "idx_daemon_session_projections_project_issue", got)
 	assert.Contains(t, got, "idx_daemon_session_observations_project_issue", got)
 	assert.Contains(t, got, "sqlite_autoindex_daemon_worktree_projections_1", got)
@@ -1445,6 +1418,130 @@ func TestClient_GetRuntimeWorktreeIssueContextScopesToRequestedIssuesAndAncestor
 	assert.Equal(t, parentIssueID, *byID[childIssueID].ParentID)
 	require.NotNil(t, byID[parentIssueID].ParentID)
 	assert.Equal(t, rootIssueID, *byID[parentIssueID].ParentID)
+}
+
+func TestSQLiteHotQueryPlansUseExpectedIndexes(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		build       func(t *testing.T) (string, []any)
+		want        []string
+		notWant     []string
+		description string
+	}{
+		{
+			name: "search candidate ids",
+			build: func(t *testing.T) (string, []any) {
+				t.Helper()
+				return issueSearchIDsQuery(), []any{domain.ContentQueryFTSExpression("runtime cache")}
+			},
+			want: []string{
+				"SCAN issue_search_fts VIRTUAL TABLE INDEX",
+				"SEARCH i USING INTEGER PRIMARY KEY",
+			},
+			description: "search must use the FTS virtual table and rowid hydration instead of scanning issues",
+		},
+		{
+			name: "dependency context ids",
+			build: func(t *testing.T) (string, []any) {
+				t.Helper()
+				return dependencyContextIDsQuery([]string{"second", "third"}, dependencyContextOptions{includeDependents: true})
+			},
+			want: []string{
+				"idx_dependencies_issue_active_type",
+				"idx_dependencies_depends_on_active_type",
+			},
+			notWant: []string{
+				"SCAN issue_dependencies",
+			},
+			description: "dependency context expansion must use both dependency-edge indexes",
+		},
+		{
+			name: "parent ancestor ids",
+			build: func(t *testing.T) (string, []any) {
+				t.Helper()
+				return parentAncestorIDsQuery([]string{"leaf"})
+			},
+			want: []string{
+				"idx_issue_graph_closure_descendant",
+			},
+			notWant: []string{
+				"SCAN closure",
+			},
+			description: "ancestor lookup must use the descendant-side graph closure index",
+		},
+		{
+			name: "metadata runtime projection",
+			build: func(t *testing.T) (string, []any) {
+				t.Helper()
+				return taskMetadataRuntimeProjectionQuery("project", "second", "third")
+			},
+			want: []string{
+				"idx_daemon_session_projections_project_issue",
+				"idx_daemon_session_observations_project_issue",
+				"sqlite_autoindex_daemon_worktree_projections_1",
+				"idx_dependencies_issue_active_type",
+			},
+			description: "metadata runtime projection must stay lean and use runtime/dependency projection indexes",
+		},
+		{
+			name: "unfiltered runtime projection",
+			build: func(t *testing.T) (string, []any) {
+				t.Helper()
+				return taskRuntimeProjectionQuery("project", false)
+			},
+			want: []string{
+				"idx_daemon_session_projections_project_issue",
+				"idx_daemon_session_observations_project_issue",
+				"idx_issues_deleted_updated",
+			},
+			description: "board snapshot reads may scan active issues through the deleted/updated index, not the table",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			query, args := tt.build(t)
+			require.NotEmpty(t, strings.TrimSpace(query))
+			got := explainQueryPlan(t, ctx, db, query, args...)
+			for _, want := range tt.want {
+				assert.Containsf(t, got, want, "%s\nplan:\n%s", tt.description, got)
+			}
+			for _, notWant := range tt.notWant {
+				assert.NotContainsf(t, got, notWant, "%s\nplan:\n%s", tt.description, got)
+			}
+		})
+	}
+}
+
+func TestClient_SQLiteReadLogsIncludeStableAttribution(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	client := newTestClientWithLogger(t, logger)
+
+	_, err := client.Create(context.Background(), CreateTaskParams{
+		Title:    "Logged runtime read",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	require.NoError(t, err)
+
+	_, err = client.ListWithRuntime(context.Background(), "project")
+	require.NoError(t, err)
+
+	got := logs.String()
+	assert.Contains(t, got, `"event":"sqlite.query.completed"`)
+	assert.Contains(t, got, `"service":"azedarach.issue_store"`)
+	assert.Contains(t, got, `"dependency.name":"sqlite"`)
+	assert.Contains(t, got, `"dependency.operation":"issue.runtime_projection"`)
+	assert.Contains(t, got, `"dependency.duration_ms":`)
+	assert.Contains(t, got, `"outcome":"success"`)
+	assert.Contains(t, got, `"row_count":1`)
 }
 
 func TestClient_UpdateWithRuntimeReturnsChangedTask(t *testing.T) {
@@ -3335,7 +3432,30 @@ func TestClient_CreateRetriesAfterSQLiteBusyTimeout(t *testing.T) {
 	assert.GreaterOrEqual(t, time.Since(start), 5*time.Second)
 }
 
+func explainQueryPlan(t *testing.T, ctx context.Context, db *sql.DB, query string, args ...any) string {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+query, args...)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	plan := strings.Builder{}
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &notUsed, &detail))
+		plan.WriteString(detail)
+		plan.WriteByte('\n')
+	}
+	require.NoError(t, rows.Err())
+	return plan.String()
+}
+
 func newTestClient(t *testing.T) *Client {
+	t.Helper()
+	return newTestClientWithLogger(t, slog.Default())
+}
+
+func newTestClientWithLogger(t *testing.T, logger *slog.Logger) *Client {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	db, err := sql.Open("sqlite", "file:"+dbPath)
@@ -3379,7 +3499,7 @@ func newTestClient(t *testing.T) *Client {
 		require.NoError(t, err)
 	}
 
-	client := NewClientAtPath(dbPath, slog.Default())
+	client := NewClientAtPath(dbPath, logger)
 	t.Cleanup(func() {
 		require.NoError(t, client.CloseDB())
 	})
