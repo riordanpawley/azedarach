@@ -765,6 +765,89 @@ func TestClient_ListSummariesWithRuntimeKeepsGraphAndRuntimeProjection(t *testin
 	assert.Empty(t, got.Acceptance)
 }
 
+func TestClient_ListGraphReadinessWithRuntimeScopesToRootClosure(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-graph-readiness"
+
+	rootID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Root",
+		Type:     domain.TypeEpic,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:       "Child",
+		Description: strings.Repeat("description ", 100),
+		Type:        domain.TypeTask,
+		Priority:    domain.P1,
+		Status:      domain.StatusOpen,
+		ParentID:    &rootID,
+	})
+	require.NoError(t, err)
+	grandchildID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Grandchild",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusOpen,
+		ParentID: &childID,
+	})
+	require.NoError(t, err)
+	blockerID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "External blocker",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.AddDependency(ctx, grandchildID, blockerID, string(domain.DependencyBlocks)))
+	unrelatedRootID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Unrelated root",
+		Type:     domain.TypeEpic,
+		Priority: domain.P3,
+		Status:   domain.StatusOpen,
+	})
+	require.NoError(t, err)
+	unrelatedChildID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Unrelated child",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+		Status:   domain.StatusOpen,
+		ParentID: &unrelatedRootID,
+	})
+	require.NoError(t, err)
+
+	db, err := sql.Open("sqlite", client.dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+	now := time.Date(2026, time.June, 30, 11, 30, 0, 0, time.UTC)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, activity, activity_source, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-graph-readiness", childID, "attached", "busy", "hooks", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	require.NoError(t, err)
+
+	tasks, err := client.ListGraphReadinessWithRuntime(ctx, projectID, rootID)
+	require.NoError(t, err)
+	taskByID := map[string]domain.Task{}
+	for _, task := range tasks {
+		taskByID[task.ID.String()] = task
+	}
+
+	for _, wantID := range []string{rootID, childID, grandchildID, blockerID} {
+		require.Contains(t, taskByID, wantID)
+	}
+	require.NotContains(t, taskByID, unrelatedRootID)
+	require.NotContains(t, taskByID, unrelatedChildID)
+	require.NotNil(t, taskByID[childID].Session)
+	assert.Equal(t, "busy", taskByID[childID].Session.Activity)
+	assert.Empty(t, taskByID[childID].Description, "graph readiness should use summary rows")
+	require.Len(t, taskByID[grandchildID].Dependencies, 1)
+	assert.Equal(t, blockerID, taskByID[grandchildID].Dependencies[0].ID.String())
+	assert.Equal(t, domain.DependencyBlocks, taskByID[grandchildID].Dependencies[0].Type)
+}
+
 func TestClient_ListWithRuntimeUsesObservedSessionState(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
