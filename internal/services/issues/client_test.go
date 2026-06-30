@@ -859,6 +859,104 @@ func TestClient_ListGraphReadinessWithRuntimeScopesToRootClosure(t *testing.T) {
 	assert.Equal(t, domain.DependencyBlocks, taskByID[grandchildID].Dependencies[0].Type)
 }
 
+func TestClient_ListParentChildSubtreeWithRuntimeScopesToTargetClosure(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-close-subtree"
+
+	rootID, err := client.Create(ctx, CreateTaskParams{
+		Title:       "Root",
+		Description: strings.Repeat("root detail ", 100),
+		Type:        domain.TypeTask,
+		Priority:    domain.P1,
+		Status:      domain.StatusInReview,
+	})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Child",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+		ParentID: &rootID,
+	})
+	require.NoError(t, err)
+	grandchildID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Grandchild",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+		ParentID: &childID,
+	})
+	require.NoError(t, err)
+	blockerID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "External blocker",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.AddDependency(ctx, grandchildID, blockerID, string(domain.DependencyBlocks)))
+	unrelatedRootID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Unrelated root",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+		Status:   domain.StatusOpen,
+	})
+	require.NoError(t, err)
+	unrelatedChildID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Unrelated child",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+		Status:   domain.StatusOpen,
+		ParentID: &unrelatedRootID,
+	})
+	require.NoError(t, err)
+
+	db, err := sql.Open("sqlite", client.dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+	now := time.Date(2026, time.June, 30, 12, 15, 0, 0, time.UTC)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, activity, activity_source, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-close-subtree", childID, "running", "busy", "hooks", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	require.NoError(t, err)
+	statusRaw, err := json.Marshal(git.GitStatus{
+		HasChanges:    true,
+		GitAdditions:  3,
+		GitAheadCount: 1,
+	})
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at, git_status_json, git_status_updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, projectID, grandchildID, "/tmp/proj-close-subtree-"+grandchildID, "riordan/"+grandchildID+"/task", now.Format(time.RFC3339Nano), string(statusRaw), now.Format(time.RFC3339Nano))
+	require.NoError(t, err)
+
+	tasks, err := client.ListParentChildSubtreeWithRuntime(ctx, projectID, rootID)
+	require.NoError(t, err)
+	taskByID := map[string]domain.Task{}
+	for _, task := range tasks {
+		taskByID[task.ID.String()] = task
+	}
+
+	for _, wantID := range []string{rootID, childID, grandchildID} {
+		require.Contains(t, taskByID, wantID)
+	}
+	require.NotContains(t, taskByID, blockerID)
+	require.NotContains(t, taskByID, unrelatedRootID)
+	require.NotContains(t, taskByID, unrelatedChildID)
+	assert.Empty(t, taskByID[rootID].Description, "close subtree read should use summary rows")
+	require.NotNil(t, taskByID[childID].Session)
+	assert.Equal(t, "busy", taskByID[childID].Session.Activity)
+	assert.True(t, taskByID[grandchildID].HasWorktree)
+	assert.True(t, taskByID[grandchildID].HasUncommittedChanges)
+	assert.Equal(t, 3, taskByID[grandchildID].GitAdditions)
+	assert.Equal(t, 1, taskByID[grandchildID].GitAheadCount)
+	require.Len(t, taskByID[grandchildID].Dependencies, 1)
+	assert.Equal(t, blockerID, taskByID[grandchildID].Dependencies[0].ID.String())
+}
+
 func TestGraphReadinessContextIDsQueryUsesClosureIndexes(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -1290,6 +1388,63 @@ func TestTaskDependencyRowsParentOnlyQueryUsesActiveIssueTypeIndex(t *testing.T)
 	got := plan.String()
 	assert.Contains(t, query, "dependency_type IN (?, ?)")
 	assert.Contains(t, got, "idx_dependencies_issue_active_type", got)
+}
+
+func TestClient_GetRuntimeWorktreeIssueContextScopesToRequestedIssuesAndAncestors(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	empty, err := client.GetRuntimeWorktreeIssueContext(ctx, "proj-runtime-context", nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+
+	rootID, err := client.Create(ctx, CreateTaskParams{
+		Title:  "Runtime root",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	require.NoError(t, err)
+	rootIssueID := naming.IssueID(rootID)
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Runtime parent",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusOpen,
+		ParentID: &rootID,
+	})
+	require.NoError(t, err)
+	parentIssueID := naming.IssueID(parentID)
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Runtime child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusOpen,
+		ParentID: &parentID,
+	})
+	require.NoError(t, err)
+	childIssueID := naming.IssueID(childID)
+	unrelatedID, err := client.Create(ctx, CreateTaskParams{
+		Title:  "Unrelated",
+		Type:   domain.TypeTask,
+		Status: domain.StatusOpen,
+	})
+	require.NoError(t, err)
+	unrelatedIssueID := naming.IssueID(unrelatedID)
+
+	tasks, err := client.GetRuntimeWorktreeIssueContext(ctx, "proj-runtime-context", []string{childID})
+	require.NoError(t, err)
+
+	byID := make(map[naming.IssueID]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID] = task
+	}
+	require.Len(t, byID, 3)
+	assert.Contains(t, byID, rootIssueID)
+	assert.Contains(t, byID, parentIssueID)
+	assert.Contains(t, byID, childIssueID)
+	assert.NotContains(t, byID, unrelatedIssueID)
+	require.NotNil(t, byID[childIssueID].ParentID)
+	assert.Equal(t, parentIssueID, *byID[childIssueID].ParentID)
+	require.NotNil(t, byID[parentIssueID].ParentID)
+	assert.Equal(t, rootIssueID, *byID[parentIssueID].ParentID)
 }
 
 func TestClient_UpdateWithRuntimeReturnsChangedTask(t *testing.T) {

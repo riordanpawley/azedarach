@@ -853,16 +853,7 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 		}
 		worktreeByIssue[issueID] = wt
 	}
-	issueClient := d.issueClientForProject(projectID)
-	taskByIssue := make(map[string]domain.Task)
-	if issueClient != nil {
-		if tasks, taskErr := issueClient.ListWithRuntime(ctx, projectID); taskErr == nil {
-			taskByIssue = make(map[string]domain.Task, len(tasks))
-			for _, task := range tasks {
-				taskByIssue[strings.TrimSpace(task.ID.String())] = task
-			}
-		}
-	}
+	taskByIssue := d.runtimeWorktreeIssueTaskContext(ctx, projectID, worktreeIssueIDsFromGitWorktrees(worktrees))
 	throttle := d.ensureWorktreeGitProbeThrottle()
 	trigger := runtimeReconcileRequestFromContext(ctx)
 	forceProbe := trigger.Priority >= reconcilePriorityManual && strings.TrimSpace(trigger.Reason) == "manual"
@@ -1087,16 +1078,7 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 		}
 		worktreeByIssue[issueID] = wt
 	}
-	issueClient := d.issueClientForProject(projectID)
-	taskByIssue := make(map[string]domain.Task)
-	if issueClient != nil {
-		if tasks, taskErr := issueClient.ListWithRuntime(ctx, projectID); taskErr == nil {
-			taskByIssue = make(map[string]domain.Task, len(tasks))
-			for _, task := range tasks {
-				taskByIssue[strings.TrimSpace(task.ID.String())] = task
-			}
-		}
-	}
+	taskByIssue := d.runtimeWorktreeIssueTaskContext(ctx, projectID, issueIDs)
 
 	refreshed := 0
 	var errs []error
@@ -1204,13 +1186,29 @@ func (d *Daemon) runtimeDiffBaseBranchForWorktree(ctx context.Context, projectID
 		worktreeByIssue[issueID] = wt
 	}
 
+	taskByIssue := d.runtimeWorktreeIssueTaskContext(ctx, projectID, []string{projection.IssueID})
+
+	return d.runtimeDiffBaseBranchForIssue(projection.IssueID, baseBranch, taskByIssue, worktreeByIssue)
+}
+
+func (d *Daemon) runtimeWorktreeIssueTaskContext(ctx context.Context, projectID string, issueIDs []string) map[string]domain.Task {
+	if d == nil {
+		return nil
+	}
+	issueIDs = worktreeIssueIDsFromStrings(issueIDs)
+	if len(issueIDs) == 0 {
+		return nil
+	}
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
-		return baseBranch
+		return nil
 	}
-	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+	tasks, err := issueClient.GetRuntimeWorktreeIssueContext(ctx, projectID, issueIDs)
 	if err != nil {
-		return baseBranch
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("runtime worktree issue context failed", "project_id", projectID, "error", err)
+		}
+		return nil
 	}
 	taskByIssue := make(map[string]domain.Task, len(tasks))
 	for _, task := range tasks {
@@ -1220,8 +1218,28 @@ func (d *Daemon) runtimeDiffBaseBranchForWorktree(ctx context.Context, projectID
 		}
 		taskByIssue[issueID] = task
 	}
+	return taskByIssue
+}
 
-	return d.runtimeDiffBaseBranchForIssue(projection.IssueID, baseBranch, taskByIssue, worktreeByIssue)
+func worktreeIssueIDsFromStrings(issueIDs []string) []string {
+	if len(issueIDs) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(issueIDs))
+	seen := map[string]struct{}{}
+	for _, issueID := range issueIDs {
+		issueID = strings.TrimSpace(issueID)
+		if issueID == "" {
+			continue
+		}
+		key := strings.ToLower(issueID)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		ids = append(ids, issueID)
+	}
+	return ids
 }
 
 func issueWorktreeRefsFromGitWorktrees(worktreesByIssue map[string]git.Worktree) map[string]domain.IssueWorktreeRef {
@@ -2160,7 +2178,7 @@ func (d *Daemon) validateOrCascadeChildrenForReview(ctx context.Context, project
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
 	}
-	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+	tasks, err := d.loadTaskClosePreflightDomainTasks(ctx, projectID, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("inspect child issues before moving %s to in_review: %w", taskID, err)
 	}
@@ -2261,11 +2279,10 @@ func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, task
 	if issueClient == nil {
 		return taskClosePreflightResult{}, fmt.Errorf("issue store unavailable")
 	}
-	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+	tasks, err := d.loadTaskClosePreflightDomainTasks(ctx, projectID, taskID)
 	if err != nil {
 		return taskClosePreflightResult{}, fmt.Errorf("inspect runtime attachments before closing %s: %w", taskID, err)
 	}
-	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
 
 	var task domain.Task
 	found := false
@@ -2323,11 +2340,10 @@ func (d *Daemon) closeCleanDescendantsBeforeParent(ctx context.Context, projectI
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
 	}
-	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+	tasks, err := d.loadTaskClosePreflightDomainTasks(ctx, projectID, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("inspect child issues before closing %s: %w", taskID, err)
 	}
-	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
 	childrenByParent := daemonCloseGuardChildrenByParent(tasks)
 	root, err := naming.ParseIssueID(taskID)
 	if err != nil {
@@ -2365,6 +2381,18 @@ func (d *Daemon) closeCleanDescendantsBeforeParent(ctx context.Context, projectI
 		closed = append(closed, childResult.AutoClosedChildren...)
 	}
 	return closed, nil
+}
+
+func (d *Daemon) loadTaskClosePreflightDomainTasks(ctx context.Context, projectID, taskID string) ([]domain.Task, error) {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil, fmt.Errorf("issue store unavailable")
+	}
+	tasks, err := issueClient.ListParentChildSubtreeWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	return d.enrichTasksWithSessionState(ctx, projectID, tasks), nil
 }
 
 type daemonCloseGuardStatusRepair struct {
