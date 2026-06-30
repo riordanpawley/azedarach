@@ -363,7 +363,20 @@ func (a *gitServiceAdapter) RefreshStatusForHook(ctx context.Context, projectID,
 	}
 
 	if _, err := a.queueGitStatusRefresh(projectID, worktree, reconcilePriorityManual, "hook"); err != nil {
+		if a.logger != nil {
+			a.logger.Warn("daemon hook git status refresh enqueue failed",
+				"project_id", projectID,
+				"worktree", worktree,
+				"error", err,
+			)
+		}
 		return nil, err
+	}
+	if a.logger != nil {
+		a.logger.Info("daemon hook git status refresh enqueued",
+			"project_id", projectID,
+			"worktree", worktree,
+		)
 	}
 	return a.cachedGitStatus(ctx, projectID, worktree)
 }
@@ -478,10 +491,19 @@ func (a *gitServiceAdapter) queueGitStatusRefresh(projectID, worktree string, pr
 		Work: func(ctx context.Context) (*git.GitStatus, error) {
 			refreshCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 			defer cancel()
-			status, refreshErr := a.refreshGitStatusWriteThroughResult(refreshCtx, projectID, worktree, true, false)
+			forcePublish := strings.EqualFold(strings.TrimSpace(reason), "hook")
+			status, refreshErr := a.refreshGitStatusWriteThroughResult(refreshCtx, projectID, worktree, true, forcePublish)
 			outcome := throttle.Record(key, gitStatusSignature(status), refreshErr)
 			if a.logger != nil {
 				counters := throttle.snapshotCounters()
+				if refreshErr != nil {
+					a.logger.Warn("daemon git status refresh failed",
+						"project_id", projectID,
+						"worktree", worktree,
+						"reason", reason,
+						"error", refreshErr,
+					)
+				}
 				a.logger.Debug("git status refresh processed",
 					"project_id", projectID,
 					"worktree", worktree,
@@ -570,17 +592,29 @@ func (a *gitServiceAdapter) refreshGitStatusWriteThroughResult(ctx context.Conte
 			return nil, err
 		}
 	}
+	persistCtx, persistCancel := gitStatusProjectionPersistContext(ctx)
+	defer persistCancel()
 	if a.runtimeProjectionWriter != nil {
-		_ = a.runtimeProjectionWriter.PersistGitStatusProjectionAndPublish(ctx, projectID, "", worktree, status, publishOnChange, forcePublish)
+		_ = a.runtimeProjectionWriter.PersistGitStatusProjectionAndPublish(persistCtx, projectID, "", worktree, status, publishOnChange, forcePublish)
 		a.invalidateRuntimeSignalCache(projectID, worktree)
 		return status, nil
 	}
-	changed, issueID := a.persistStatusSnapshot(ctx, projectID, worktree, status)
+	changed, issueID := a.persistStatusSnapshot(persistCtx, projectID, worktree, status)
 	a.invalidateRuntimeSignalCache(projectID, worktree)
 	if (forcePublish || (publishOnChange && changed)) && a.onStatusUpdate != nil && strings.TrimSpace(issueID) != "" {
-		a.onStatusUpdate(ctx, projectID, issueID, worktree, status)
+		a.onStatusUpdate(persistCtx, projectID, issueID, worktree, status)
 	}
 	return status, nil
+}
+
+func gitStatusProjectionPersistContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		return context.WithTimeout(context.Background(), 2*time.Second)
+	}
+	if ctx.Err() == nil {
+		return context.WithTimeout(ctx, 2*time.Second)
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 }
 
 func (a *gitServiceAdapter) resolvedBaseBranchForWorktree(ctx context.Context, projectID, worktree string) (string, bool) {
@@ -642,15 +676,23 @@ func (a *gitServiceAdapter) persistStatusSnapshot(ctx context.Context, projectID
 	}
 	projection, found, err := runtimeStore.GetWorktreeStateByPath(ctx, projectID, worktree)
 	if err != nil || !found || strings.TrimSpace(projection.IssueID) == "" {
+		if err != nil && a.logger != nil {
+			a.logger.Warn("persist git status projection lookup failed", "project_id", projectID, "worktree", worktree, "error", err)
+		}
 		return false, ""
 	}
 	rawStatus, err := json.Marshal(status)
 	if err != nil {
+		if a.logger != nil {
+			a.logger.Warn("marshal git status projection failed", "project_id", projectID, "issue_id", projection.IssueID, "worktree", worktree, "error", err)
+		}
 		return false, ""
 	}
 	changed := string(rawStatus) != string(projection.GitStatusRaw)
-	if err := runtimeStore.UpsertWorktreeStateGitStatus(ctx, projectID, projection.IssueID, rawStatus, time.Now().UTC()); err != nil && a.logger != nil {
-		a.logger.Debug("persist git status projection failed", "project_id", projectID, "issue_id", projection.IssueID, "worktree", worktree, "error", err)
+	if err := runtimeStore.UpsertWorktreeStateGitStatus(ctx, projectID, projection.IssueID, rawStatus, time.Now().UTC()); err != nil {
+		if a.logger != nil {
+			a.logger.Warn("persist git status projection failed", "project_id", projectID, "issue_id", projection.IssueID, "worktree", worktree, "error", err)
+		}
 		return false, ""
 	}
 	return changed, projection.IssueID

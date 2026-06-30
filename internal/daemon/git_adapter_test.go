@@ -15,12 +15,14 @@ import (
 	"time"
 
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
 
 type recordingGitRunner struct {
-	runFn func(args ...string) (string, error)
+	runFn            func(args ...string) (string, error)
+	runWithContextFn func(context.Context, ...string) (string, error)
 }
 
 func cleanGitStatus() *git.GitStatus {
@@ -34,7 +36,10 @@ func cleanGitStatus() *git.GitStatus {
 	}
 }
 
-func (r *recordingGitRunner) Run(_ context.Context, args ...string) (string, error) {
+func (r *recordingGitRunner) Run(ctx context.Context, args ...string) (string, error) {
+	if r.runWithContextFn != nil {
+		return r.runWithContextFn(ctx, args...)
+	}
 	if r.runFn == nil {
 		return "", nil
 	}
@@ -1281,6 +1286,143 @@ func TestGitServiceAdapterHookRefreshQueuesBurstWithoutWaiting(t *testing.T) {
 	counters := queue.snapshotCounters()
 	if counters.Enqueued != 1 || counters.Deduped != 4 {
 		t.Fatalf("queue counters = %+v, want one queued hook refresh and four deduped callers", counters)
+	}
+}
+
+func TestGitServiceAdapterHookRefreshForcesProjectionPublishWhenStatusUnchanged(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	projectID := "default"
+	issueID := "az-target"
+	worktree := "/tmp/az-target"
+	store := newGitAdapterStore(t, projectID, issueID, worktree, cleanGitStatus())
+
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "status" && args[3] == "--porcelain":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktree && args[2] == "merge-base":
+			return "", errors.New("base unavailable")
+		case len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "diff":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktree && args[2] == "rev-list":
+			return "0\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktree && args[2] == "symbolic-ref":
+			return "", errors.New("no origin head")
+		default:
+			t.Fatalf("unexpected git args: %v", args)
+			return "", nil
+		}
+	}}
+
+	queue := newReconcileQueue[*git.GitStatus](reconcileQueueConfig{
+		Name:    "git_status_hook_force_publish_test",
+		Workers: 1,
+		Logger:  slog.Default(),
+	})
+	t.Cleanup(func() {
+		_ = queue.Close()
+	})
+
+	published := make(chan struct{}, 1)
+	adapter := &gitServiceAdapter{
+		client:             git.NewClient(runner, slog.Default()),
+		runtimeStateStore:  store,
+		statusRefreshQueue: queue,
+		logger:             slog.Default(),
+		onStatusUpdate: func(_ context.Context, gotProjectID, gotIssueID, gotWorktree string, status *git.GitStatus) {
+			if gotProjectID != projectID || gotIssueID != issueID || gotWorktree != worktree {
+				t.Fatalf("status update target = %s/%s/%s", gotProjectID, gotIssueID, gotWorktree)
+			}
+			if status == nil || status.HasChanges {
+				t.Fatalf("status update = %+v, want unchanged status", status)
+			}
+			published <- struct{}{}
+		},
+	}
+
+	if _, err := adapter.RefreshStatusForHook(ctx, projectID, worktree); err != nil {
+		t.Fatalf("RefreshStatusForHook: %v", err)
+	}
+	select {
+	case <-published:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for unchanged hook refresh publish")
+	}
+}
+
+func TestGitServiceAdapterRefreshPersistsProjectionAfterMetadataContextDeadline(t *testing.T) {
+	t.Parallel()
+
+	projectID := "default"
+	issueID := "az-target"
+	worktree := t.TempDir()
+	store := newGitAdapterStore(t, projectID, issueID, worktree, cleanGitStatus())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runner := &recordingGitRunner{runWithContextFn: func(runCtx context.Context, args ...string) (string, error) {
+		if err := runCtx.Err(); err != nil {
+			return "", err
+		}
+		switch {
+		case len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "status" && args[3] == "--porcelain":
+			return " M changed.go\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktree && args[2] == "symbolic-ref":
+			return "", errors.New("no origin head")
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktree && args[2] == "merge-base":
+			return "abc123\n", nil
+		case len(args) >= 8 && args[0] == "-C" && args[1] == worktree && args[2] == "diff" && args[3] == "--shortstat":
+			cancel()
+			return "", context.DeadlineExceeded
+		default:
+			t.Fatalf("unexpected git args: %v", args)
+			return "", nil
+		}
+	}}
+
+	d := &Daemon{
+		cfg: Config{Logger: slog.Default()},
+		hub: publish.NewHub(8, 4, slog.Default()),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+		revision: map[string]uint64{},
+	}
+	adapter := &gitServiceAdapter{
+		client:                  git.NewClient(runner, slog.Default()),
+		runtimeProjectionWriter: newRuntimeProjectionWriter(d),
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return store
+		},
+		logger:     slog.Default(),
+		baseBranch: "main",
+	}
+
+	status, err := adapter.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, true, true)
+	if err != nil {
+		t.Fatalf("refreshGitStatusWriteThroughResult error: %v", err)
+	}
+	if status == nil || !status.HasChanges {
+		t.Fatalf("status = %+v, want changed porcelain status", status)
+	}
+	projection, found, err := store.GetWorktreeStateByIssueID(context.Background(), projectID, issueID)
+	if err != nil {
+		t.Fatalf("load projection: %v", err)
+	}
+	if !found {
+		t.Fatal("worktree projection not found")
+	}
+	var persisted git.GitStatus
+	if err := json.Unmarshal(projection.GitStatusRaw, &persisted); err != nil {
+		t.Fatalf("unmarshal persisted status: %v", err)
+	}
+	if !persisted.HasChanges || len(persisted.Modified) != 1 || persisted.Modified[0] != "changed.go" {
+		t.Fatalf("persisted status = %+v, want modified changed.go", persisted)
+	}
+	if got := d.currentRevision(projectID); got == 0 {
+		t.Fatal("git status projection was not published")
 	}
 }
 
