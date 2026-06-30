@@ -10233,6 +10233,15 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "immediately follow title-only creation with `az issue update <issue-id> --description \"...\"` before starting work or fanout") {
 		t.Fatalf("prime output missing title-only issue update guardrail: %q", output)
 	}
+	if !strings.Contains(output, "Start-issue wording: when the user says \"start an az issue\", \"add/start an issue\", or \"create and start an issue\"") {
+		t.Fatalf("prime output missing start-issue phrase family guidance: %q", output)
+	}
+	if !strings.Contains(output, "create or identify the issue and then run `az session start <issue-id>`") {
+		t.Fatalf("prime output missing start-issue session start command: %q", output)
+	}
+	if !strings.Contains(output, "Do not treat `az issue update <issue-id> --status in_progress` as starting a session unless the user explicitly asks to mark/update status.") {
+		t.Fatalf("prime output missing status-vs-session distinction: %q", output)
+	}
 	if !strings.Contains(output, "create many issues, epics, or nested `children` trees from JSON when shaping a graph up front") {
 		t.Fatalf("prime output missing bulk-create nested tree guidance: %q", output)
 	}
