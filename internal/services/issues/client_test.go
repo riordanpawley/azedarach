@@ -1352,6 +1352,63 @@ func TestTaskRuntimeProjectionFilteredQueryUsesProjectionIndexes(t *testing.T) {
 	assert.Contains(t, got, "idx_issue_external_refs_issue_active", got)
 }
 
+func TestClient_GetRuntimeWorktreeIssueContextScopesToRequestedIssuesAndAncestors(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	empty, err := client.GetRuntimeWorktreeIssueContext(ctx, "proj-runtime-context", nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+
+	rootID, err := client.Create(ctx, CreateTaskParams{
+		Title:  "Runtime root",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	require.NoError(t, err)
+	rootIssueID := naming.IssueID(rootID)
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Runtime parent",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusOpen,
+		ParentID: &rootID,
+	})
+	require.NoError(t, err)
+	parentIssueID := naming.IssueID(parentID)
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Runtime child",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusOpen,
+		ParentID: &parentID,
+	})
+	require.NoError(t, err)
+	childIssueID := naming.IssueID(childID)
+	unrelatedID, err := client.Create(ctx, CreateTaskParams{
+		Title:  "Unrelated",
+		Type:   domain.TypeTask,
+		Status: domain.StatusOpen,
+	})
+	require.NoError(t, err)
+	unrelatedIssueID := naming.IssueID(unrelatedID)
+
+	tasks, err := client.GetRuntimeWorktreeIssueContext(ctx, "proj-runtime-context", []string{childID})
+	require.NoError(t, err)
+
+	byID := make(map[naming.IssueID]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID] = task
+	}
+	require.Len(t, byID, 3)
+	assert.Contains(t, byID, rootIssueID)
+	assert.Contains(t, byID, parentIssueID)
+	assert.Contains(t, byID, childIssueID)
+	assert.NotContains(t, byID, unrelatedIssueID)
+	require.NotNil(t, byID[childIssueID].ParentID)
+	assert.Equal(t, parentIssueID, *byID[childIssueID].ParentID)
+	require.NotNil(t, byID[parentIssueID].ParentID)
+	assert.Equal(t, rootIssueID, *byID[parentIssueID].ParentID)
+}
+
 func TestClient_UpdateWithRuntimeReturnsChangedTask(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)

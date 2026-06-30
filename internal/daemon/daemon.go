@@ -357,12 +357,12 @@ func New(cfg Config) *Daemon {
 		runtimeProjectionWriter:            d.runtimeProjectionStateWriter(),
 		ensureRuntimeFreshForMutation:      d.ensureFreshRuntimeForMutation,
 		ensureRuntimeFreshForIssueMutation: d.ensureFreshRuntimeForIssueMutation,
-		runtimeIssueTasks: func(ctx context.Context, projectID string) map[string]domain.Task {
+		runtimeIssueTasks: func(ctx context.Context, projectID string, issueIDs []string) map[string]domain.Task {
 			issueClient := d.issueClientForProject(projectID)
 			if issueClient == nil {
 				return nil
 			}
-			tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+			tasks, err := issueClient.GetRuntimeWorktreeIssueContext(ctx, projectID, issueIDs)
 			if err != nil {
 				if cfg.Logger != nil {
 					cfg.Logger.Debug("worktree projection issue snapshot failed", "project_id", projectID, "error", err)
