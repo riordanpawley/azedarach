@@ -848,7 +848,7 @@ func TestClient_ListGraphReadinessWithRuntimeScopesToRootClosure(t *testing.T) {
 	assert.Equal(t, domain.DependencyBlocks, taskByID[grandchildID].Dependencies[0].Type)
 }
 
-func TestGraphReadinessContextIDsQueryUsesDependencyIndexes(t *testing.T) {
+func TestGraphReadinessContextIDsQueryUsesClosureIndexes(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
 	db, err := client.dbHandle()
@@ -870,7 +870,7 @@ func TestGraphReadinessContextIDsQueryUsesDependencyIndexes(t *testing.T) {
 	require.NoError(t, rows.Err())
 
 	got := plan.String()
-	assert.Contains(t, got, "idx_dependencies_depends_on_active_type", got)
+	assert.Contains(t, got, "idx_issue_graph_closure_ancestor", got)
 	assert.Contains(t, got, "idx_dependencies_issue_active_type", got)
 	assert.NotContains(t, got, "SCAN child", got)
 	assert.NotContains(t, got, "SCAN d", got)
@@ -1821,6 +1821,139 @@ func TestClient_AddParentChildDependencyGuardsParentMoves(t *testing.T) {
 	assert.Equal(t, 1, activeParentCount)
 }
 
+func TestClient_GraphClosureMaintainsParentChildMutations(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	rootID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Root",
+		Type:     domain.TypeEpic,
+		Priority: domain.P1,
+	})
+	require.NoError(t, err)
+	newRootID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "New root",
+		Type:     domain.TypeEpic,
+		Priority: domain.P1,
+	})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Child",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		ParentID: &rootID,
+	})
+	require.NoError(t, err)
+	grandchildID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Grandchild",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		ParentID: &childID,
+	})
+	require.NoError(t, err)
+
+	descendants, err := client.ListGraphDescendantIDs(ctx, rootID, string(domain.DependencyParentChild))
+	require.NoError(t, err)
+	assert.Equal(t, []string{childID, grandchildID}, descendants)
+	ancestors, err := client.ListGraphAncestorIDs(ctx, grandchildID, string(domain.DependencyParentChild))
+	require.NoError(t, err)
+	assert.Equal(t, []string{childID, rootID}, ancestors)
+
+	require.NoError(t, client.AddDependencyWithParentChange(ctx, childID, newRootID, "parent-child", true))
+	descendants, err = client.ListGraphDescendantIDs(ctx, rootID, string(domain.DependencyParentChild))
+	require.NoError(t, err)
+	assert.Empty(t, descendants)
+	descendants, err = client.ListGraphDescendantIDs(ctx, newRootID, string(domain.DependencyParentChild))
+	require.NoError(t, err)
+	assert.Equal(t, []string{childID, grandchildID}, descendants)
+	ancestors, err = client.ListGraphAncestorIDs(ctx, grandchildID, string(domain.DependencyParentChild))
+	require.NoError(t, err)
+	assert.Equal(t, []string{childID, newRootID}, ancestors)
+
+	confirmedCtx := WithParentChildOrphanConfirmation(WithDependencyRemovalConfirmation(ctx))
+	require.NoError(t, client.RemoveDependency(confirmedCtx, grandchildID, childID, "parent-child"))
+	descendants, err = client.ListGraphDescendantIDs(ctx, newRootID, string(domain.DependencyParentChild))
+	require.NoError(t, err)
+	assert.Equal(t, []string{childID}, descendants)
+	ancestors, err = client.ListGraphAncestorIDs(ctx, grandchildID, string(domain.DependencyParentChild))
+	require.NoError(t, err)
+	assert.Empty(t, ancestors)
+
+	leafID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Leaf",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		ParentID: &childID,
+	})
+	require.NoError(t, err)
+	descendants, err = client.ListGraphDescendantIDs(ctx, childID, string(domain.DependencyParentChild))
+	require.NoError(t, err)
+	assert.Equal(t, []string{leafID}, descendants)
+	require.NoError(t, client.Delete(ctx, leafID))
+	descendants, err = client.ListGraphDescendantIDs(ctx, childID, string(domain.DependencyParentChild))
+	require.NoError(t, err)
+	assert.Empty(t, descendants)
+}
+
+func TestClient_GraphClosureCyclePreventionLeavesProjectionUnchanged(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	rootID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Root",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+	})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Child",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		ParentID: &rootID,
+	})
+	require.NoError(t, err)
+	grandchildID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Grandchild",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		ParentID: &childID,
+	})
+	require.NoError(t, err)
+
+	err = client.AddDependencyWithParentChange(ctx, rootID, grandchildID, "parent-child", true)
+	require.Error(t, err)
+	var storeErr *domain.TaskStoreError
+	require.ErrorAs(t, err, &storeErr)
+	assert.ErrorIs(t, storeErr.Err, domain.ErrConflict)
+
+	descendants, err := client.ListGraphDescendantIDs(ctx, rootID, string(domain.DependencyParentChild))
+	require.NoError(t, err)
+	assert.Equal(t, []string{childID, grandchildID}, descendants)
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	var selfEdges int
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM issue_graph_closure
+		WHERE ancestor_id = descendant_id
+	`).Scan(&selfEdges))
+	assert.Equal(t, 0, selfEdges)
+}
+
+func TestClient_GraphClosureReadAPIsRejectUnsupportedDependencyTypes(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	_, err := client.ListGraphDescendantIDs(ctx, "root", string(domain.DependencyBlocks))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported graph closure dependency type")
+
+	_, err = client.ListGraphAncestorIDs(ctx, "child", string(domain.DependencyRelatedTo))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported graph closure dependency type")
+}
+
 func TestClient_ListHydratesParentChildAfterTaskSliceGrowth(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -2279,13 +2412,16 @@ func TestClient_EnsuresDependencyForeignKeysAndIndexes(t *testing.T) {
 		"idx_dependencies_issue_active_type",
 		"idx_dependencies_depends_on_active_type",
 		"idx_dependencies_depends_on",
+		"idx_issue_graph_closure_ancestor",
+		"idx_issue_graph_closure_descendant",
+		"idx_issue_graph_closure_guard",
 	}
 	indexRows, err := db.Query(`
 		SELECT name
 		FROM sqlite_master
-		WHERE type = 'index' AND name IN (?, ?, ?, ?, ?)
+		WHERE type = 'index' AND name IN (?, ?, ?, ?, ?, ?, ?, ?)
 		ORDER BY name
-	`, wantIndexes[0], wantIndexes[1], wantIndexes[2], wantIndexes[3], wantIndexes[4])
+	`, wantIndexes[0], wantIndexes[1], wantIndexes[2], wantIndexes[3], wantIndexes[4], wantIndexes[5], wantIndexes[6], wantIndexes[7])
 	require.NoError(t, err)
 	defer indexRows.Close()
 
@@ -2303,6 +2439,73 @@ func TestClient_EnsuresDependencyForeignKeysAndIndexes(t *testing.T) {
 		VALUES ('missing-source', 'missing-target', 'blocks', NULL)
 	`)
 	require.Error(t, err)
+}
+
+func TestClient_GraphClosureMigrationBackfillsParentChildEdges(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = db.ExecContext(ctx, `
+		CREATE TABLE issues (
+			id TEXT PRIMARY KEY,
+			title TEXT NOT NULL,
+			description TEXT,
+			status TEXT NOT NULL,
+			priority INTEGER NOT NULL,
+			issue_type TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			closed_at TEXT,
+			assignee TEXT,
+			labels_json TEXT,
+			implementations_json TEXT,
+			design TEXT,
+			notes TEXT,
+			acceptance TEXT,
+			estimate INTEGER,
+			deleted_at TEXT
+		);
+		CREATE TABLE issue_dependencies (
+			issue_id TEXT NOT NULL,
+			depends_on_id TEXT NOT NULL,
+			dependency_type TEXT NOT NULL,
+			tombstoned_at TEXT,
+			PRIMARY KEY (issue_id, depends_on_id, dependency_type)
+		);
+		CREATE TABLE meta (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+		INSERT INTO issues (id, title, status, priority, issue_type, created_at, updated_at)
+		VALUES
+			('root', 'Root', 'open', 1, 'epic', ?, ?),
+			('child', 'Child', 'open', 1, 'task', ?, ?),
+			('grandchild', 'Grandchild', 'open', 1, 'task', ?, ?),
+			('deleted-child', 'Deleted child', 'open', 1, 'task', ?, ?);
+		UPDATE issues SET deleted_at = ? WHERE id = 'deleted-child';
+		INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at)
+		VALUES
+			('child', 'root', 'parent_child', NULL),
+			('grandchild', 'child', 'parent-child', NULL),
+			('deleted-child', 'root', 'parent-child', NULL);
+	`, now, now, now, now, now, now, now, now, now)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	client := NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		require.NoError(t, client.CloseDB())
+	})
+	descendants, err := client.ListGraphDescendantIDs(ctx, "root", string(domain.DependencyParentChild))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"child", "grandchild"}, descendants)
+	ancestors, err := client.ListGraphAncestorIDs(ctx, "grandchild", string(domain.DependencyParentChild))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"child", "root"}, ancestors)
 }
 
 func TestClient_MigratesLegacySchemaShape(t *testing.T) {
@@ -2390,6 +2593,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0015_issue_attachments",
 		"0016_issue_search_fts",
 		"0017_spec_requirement_search_fts",
+		"0018_issue_graph_closure",
 	}, got)
 }
 
@@ -3083,6 +3287,7 @@ func BenchmarkClient_GetManyWithDependencyContextRuntimeLargeProject(b *testing.
 	require.NoError(b, externalRefStmt.Close())
 	require.NoError(b, depStmt.Close())
 	require.NoError(b, tx.Commit())
+	require.NoError(b, client.rebuildIssueGraphClosure(ctx, db))
 
 	ids := []string{"bench-101", "bench-501", "bench-1001", "bench-1501", "bench-2001", "bench-2501", "bench-3001", "bench-3201", "bench-3401"}
 	b.ResetTimer()
@@ -3164,6 +3369,7 @@ func BenchmarkClient_RuntimeSummariesLargeProject(b *testing.B) {
 	require.NoError(b, sessionStmt.Close())
 	require.NoError(b, depStmt.Close())
 	require.NoError(b, tx.Commit())
+	require.NoError(b, client.rebuildIssueGraphClosure(ctx, db))
 
 	b.Run("full_project_summaries", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
@@ -3232,6 +3438,7 @@ func BenchmarkClient_GetManyMetadataWithAncestorContextRuntimeLargeProject(b *te
 	require.NoError(b, sessionStmt.Close())
 	require.NoError(b, depStmt.Close())
 	require.NoError(b, tx.Commit())
+	require.NoError(b, client.rebuildIssueGraphClosure(ctx, db))
 
 	ids := []string{"bench-100", "bench-500", "bench-1000", "bench-1500", "bench-2000", "bench-2500", "bench-3000", "bench-3200", "bench-3400"}
 	b.ResetTimer()

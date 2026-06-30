@@ -123,7 +123,8 @@ const (
 	sqliteBusyPrimaryCode      = 5
 	sqliteBusyRetryDelay       = 100 * time.Millisecond
 	// Keep at least one foreground reader available while Linear sync owns a write connection.
-	sqliteMaxOpenConns = 4
+	sqliteMaxOpenConns         = 4
+	issueGraphClosureProjectID = "default"
 )
 
 // Client wraps local SQLite task store operations.
@@ -140,6 +141,12 @@ type sqlIssueExecer interface {
 }
 
 type sqlIssueQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+type sqlIssueDBTX interface {
+	sqlIssueExecer
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
@@ -498,7 +505,7 @@ func (c *Client) configureSQLite(db *sql.DB) error {
 }
 
 func (c *Client) normalizeDependencyEnumRows(db *sql.DB) error {
-	_, err := db.Exec(`
+	res, err := db.Exec(`
 		UPDATE issue_dependencies
 		SET dependency_type = CASE
 			WHEN dependency_type = 'parent_child' THEN 'parent-child'
@@ -514,6 +521,12 @@ func (c *Client) normalizeDependencyEnumRows(db *sql.DB) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("normalize dependency enum rows: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected > 0 {
+		if err := c.rebuildIssueGraphClosure(context.Background(), db); err != nil {
+			return fmt.Errorf("rebuild graph closure after dependency enum normalization: %w", err)
+		}
 	}
 	return nil
 }
@@ -607,6 +620,9 @@ func (c *Client) normalizeProviderDisplayKeyIssueIDs(ctx context.Context, db *sq
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value
 	`, nextAlphaIssueIndexMetaKey, strconv.Itoa(nextIndex)); err != nil {
 		return fmt.Errorf("persist next alpha id after provider display-key normalization: %w", err)
+	}
+	if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
+		return fmt.Errorf("rebuild graph closure after provider display-key normalization: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -1169,22 +1185,21 @@ func (c *Client) graphReadinessContextIDs(ctx context.Context, db *sql.DB, rootI
 
 func graphReadinessContextIDsQuery(rootID string) (string, []any) {
 	query := `
-		WITH RECURSIVE graph(id) AS (
+		WITH graph(id) AS (
 			SELECT id
 			FROM issues
 			WHERE id = ? AND deleted_at IS NULL
 
 			UNION
 
-			SELECT dep.issue_id
-			FROM graph parent
-			CROSS JOIN issue_dependencies dep INDEXED BY idx_dependencies_depends_on_active_type
-			CROSS JOIN issues child
-			WHERE dep.depends_on_id = parent.id
-				AND child.id = dep.issue_id
+			SELECT closure.descendant_id
+			FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_ancestor
+			INNER JOIN issues child
+				ON child.id = closure.descendant_id
 				AND child.deleted_at IS NULL
-				AND dep.tombstoned_at IS NULL
-				AND dep.dependency_type IN (?, ?)
+			WHERE closure.project_id = ?
+				AND closure.dependency_type = ?
+				AND closure.ancestor_id = ?
 		),
 		context(id) AS (
 			SELECT id FROM graph
@@ -1205,8 +1220,9 @@ func graphReadinessContextIDsQuery(rootID string) (string, []any) {
 	`
 	return query, []any{
 		strings.TrimSpace(rootID),
+		issueGraphClosureProjectID,
 		string(domain.DependencyParentChild),
-		"parent_child",
+		strings.TrimSpace(rootID),
 	}
 }
 
@@ -1267,34 +1283,19 @@ func (c *Client) parentAncestorIDs(ctx context.Context, db *sql.DB, issueIDs []s
 	}
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(seeds)), ",")
 	query := fmt.Sprintf(`
-		WITH RECURSIVE ancestor_ids(id) AS (
-			SELECT depends_on_id
-			FROM issue_dependencies
-			WHERE issue_id IN (%s)
-				AND tombstoned_at IS NULL
-				AND dependency_type IN (?, ?)
-			UNION
-			SELECT d.depends_on_id
-			FROM issue_dependencies d
-			JOIN ancestor_ids a ON d.issue_id = a.id
-			WHERE d.tombstoned_at IS NULL
-				AND d.dependency_type IN (?, ?)
-		)
-		SELECT DISTINCT a.id
-		FROM ancestor_ids a
-		JOIN issues i ON i.id = a.id
+		SELECT DISTINCT closure.ancestor_id
+		FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_descendant
+		JOIN issues i ON i.id = closure.ancestor_id
 		WHERE i.deleted_at IS NULL
+			AND closure.project_id = ?
+			AND closure.dependency_type = ?
+			AND closure.descendant_id IN (%s)
 	`, placeholders)
-	args := make([]any, 0, len(seeds)+4)
+	args := make([]any, 0, len(seeds)+2)
+	args = append(args, issueGraphClosureProjectID, string(domain.DependencyParentChild))
 	for _, seed := range seeds {
 		args = append(args, seed)
 	}
-	args = append(args,
-		string(domain.DependencyParentChild),
-		"parent_child",
-		string(domain.DependencyParentChild),
-		"parent_child",
-	)
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -1314,6 +1315,114 @@ func (c *Client) parentAncestorIDs(ctx context.Context, db *sql.DB, issueIDs []s
 		return nil, err
 	}
 	return ancestors, nil
+}
+
+// ListGraphDescendantIDs returns active descendant issue IDs for an ancestor in
+// the materialized issue graph closure projection.
+func (c *Client) ListGraphDescendantIDs(ctx context.Context, ancestorID, dependencyType string) ([]string, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	canonicalType, err := canonicalGraphClosureDependencyType(dependencyType)
+	if err != nil {
+		return nil, c.wrapError("list-graph-descendants", ancestorID, err)
+	}
+	ids, err := c.listGraphDescendantIDs(ctx, db, strings.TrimSpace(ancestorID), canonicalType)
+	if err != nil {
+		return nil, c.wrapError("list-graph-descendants", ancestorID, err)
+	}
+	return ids, nil
+}
+
+// ListGraphAncestorIDs returns active ancestor issue IDs for a descendant in
+// the materialized issue graph closure projection.
+func (c *Client) ListGraphAncestorIDs(ctx context.Context, descendantID, dependencyType string) ([]string, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	canonicalType, err := canonicalGraphClosureDependencyType(dependencyType)
+	if err != nil {
+		return nil, c.wrapError("list-graph-ancestors", descendantID, err)
+	}
+	ids, err := c.listGraphAncestorIDs(ctx, db, strings.TrimSpace(descendantID), canonicalType)
+	if err != nil {
+		return nil, c.wrapError("list-graph-ancestors", descendantID, err)
+	}
+	return ids, nil
+}
+
+func canonicalGraphClosureDependencyType(value string) (string, error) {
+	canonicalType, err := canonicalDependencyType(value)
+	if err != nil {
+		return "", err
+	}
+	if canonicalType != string(domain.DependencyParentChild) {
+		return "", fmt.Errorf("unsupported graph closure dependency type %q", strings.TrimSpace(value))
+	}
+	return canonicalType, nil
+}
+
+func (c *Client) listGraphDescendantIDs(ctx context.Context, queryer sqlIssueDBTX, ancestorID, dependencyType string) ([]string, error) {
+	if strings.TrimSpace(ancestorID) == "" {
+		return []string{}, nil
+	}
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT closure.descendant_id
+		FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_ancestor
+		INNER JOIN issues descendant
+			ON descendant.id = closure.descendant_id
+			AND descendant.deleted_at IS NULL
+		WHERE closure.project_id = ?
+			AND closure.dependency_type = ?
+			AND closure.ancestor_id = ?
+		ORDER BY closure.depth, closure.descendant_id
+	`, issueGraphClosureProjectID, dependencyType, ancestorID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanIssueIDRows(rows)
+}
+
+func (c *Client) listGraphAncestorIDs(ctx context.Context, queryer sqlIssueDBTX, descendantID, dependencyType string) ([]string, error) {
+	if strings.TrimSpace(descendantID) == "" {
+		return []string{}, nil
+	}
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT closure.ancestor_id
+		FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_descendant
+		INNER JOIN issues ancestor
+			ON ancestor.id = closure.ancestor_id
+			AND ancestor.deleted_at IS NULL
+		WHERE closure.project_id = ?
+			AND closure.dependency_type = ?
+			AND closure.descendant_id = ?
+		ORDER BY closure.depth, closure.ancestor_id
+	`, issueGraphClosureProjectID, dependencyType, descendantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanIssueIDRows(rows)
+}
+
+func scanIssueIDRows(rows *sql.Rows) ([]string, error) {
+	ids := []string{}
+	for rows.Next() {
+		var issueID string
+		if err := rows.Scan(&issueID); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(issueID) != "" {
+			ids = append(ids, issueID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 func uniqueIssueIDStrings(ids []string) []string {
@@ -1652,6 +1761,9 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 			ON CONFLICT(issue_id, depends_on_id, dependency_type)
 			DO UPDATE SET tombstoned_at = NULL
 		`, issueID, parentID, string(domain.DependencyParentChild)); err != nil {
+			return "", c.wrapError("create", issueID, err)
+		}
+		if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
 			return "", c.wrapError("create", issueID, err)
 		}
 	}
@@ -2010,6 +2122,11 @@ func (c *Client) addDependency(ctx context.Context, issueID, dependsOnID, depend
 	`, issueID, dependsOnID, canonicalType); err != nil {
 		return c.wrapError("add-dependency", issueID, err)
 	}
+	if canonicalType == string(domain.DependencyParentChild) {
+		if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
+			return c.wrapError("add-dependency", issueID, err)
+		}
+	}
 
 	if err := tx.Commit(); err != nil {
 		return c.wrapError("add-dependency", issueID, err)
@@ -2098,8 +2215,66 @@ func (c *Client) issueExists(ctx context.Context, queryer sqlIssueQueryer, id st
 	return exists, nil
 }
 
+func (c *Client) rebuildIssueGraphClosure(ctx context.Context, execer sqlIssueExecer) error {
+	if _, err := execer.ExecContext(ctx, `DELETE FROM issue_graph_closure`); err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := execer.ExecContext(ctx, `
+		INSERT INTO issue_graph_closure (
+			project_id,
+			ancestor_id,
+			descendant_id,
+			dependency_type,
+			depth,
+			updated_at
+		)
+		WITH RECURSIVE parent_edges(ancestor_id, descendant_id) AS (
+			SELECT d.depends_on_id, d.issue_id
+			FROM issue_dependencies d
+			INNER JOIN issues ancestor
+				ON ancestor.id = d.depends_on_id
+				AND ancestor.deleted_at IS NULL
+			INNER JOIN issues descendant
+				ON descendant.id = d.issue_id
+				AND descendant.deleted_at IS NULL
+			WHERE d.tombstoned_at IS NULL
+				AND d.dependency_type IN (?, 'parent_child')
+		),
+		closure(ancestor_id, descendant_id, depth, path) AS (
+			SELECT ancestor_id, descendant_id, 1, ',' || ancestor_id || ',' || descendant_id || ','
+			FROM parent_edges
+			UNION ALL
+			SELECT c.ancestor_id, e.descendant_id, c.depth + 1, c.path || e.descendant_id || ','
+			FROM closure c
+			INNER JOIN parent_edges e
+				ON e.ancestor_id = c.descendant_id
+			WHERE instr(c.path, ',' || e.descendant_id || ',') = 0
+		)
+		SELECT
+			?,
+			ancestor_id,
+			descendant_id,
+			?,
+			MIN(depth),
+			?
+		FROM closure
+		WHERE ancestor_id <> descendant_id
+		GROUP BY ancestor_id, descendant_id
+	`, string(domain.DependencyParentChild), issueGraphClosureProjectID, string(domain.DependencyParentChild), now); err != nil {
+		return err
+	}
+	return nil
+}
+
 // RemoveDependency tombstones a dependency edge between two issues.
 func (c *Client) RemoveDependency(ctx context.Context, issueID, dependsOnID, dependencyType string) error {
+	return c.withMutationLock(ctx, func(ctx context.Context) error {
+		return c.removeDependency(ctx, issueID, dependsOnID, dependencyType)
+	})
+}
+
+func (c *Client) removeDependency(ctx context.Context, issueID, dependsOnID, dependencyType string) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err
@@ -2130,7 +2305,18 @@ func (c *Client) RemoveDependency(ctx context.Context, issueID, dependsOnID, dep
 		}
 	}
 
-	res, err := db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return c.wrapError("remove-dependency", issueID, err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	res, err := tx.ExecContext(ctx, `
 		UPDATE issue_dependencies
 		SET tombstoned_at = ?
 		WHERE issue_id = ? AND depends_on_id = ? AND dependency_type = ? AND tombstoned_at IS NULL
@@ -2143,7 +2329,16 @@ func (c *Client) RemoveDependency(ctx context.Context, issueID, dependsOnID, dep
 	if affected == 0 {
 		return c.wrapError("remove-dependency", issueID, domain.ErrNotFound)
 	}
+	if canonicalType == string(domain.DependencyParentChild) {
+		if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
+			return c.wrapError("remove-dependency", issueID, err)
+		}
+	}
 
+	if err := tx.Commit(); err != nil {
+		return c.wrapError("remove-dependency", issueID, err)
+	}
+	committed = true
 	return nil
 }
 
@@ -2304,6 +2499,9 @@ func (c *Client) deleteLocked(ctx context.Context, id string) error {
 	if affected == 0 {
 		return c.wrapError("delete", id, domain.ErrNotFound)
 	}
+	if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
+		return c.wrapError("delete", id, err)
+	}
 	if err := tx.Commit(); err != nil {
 		return c.wrapError("delete", id, err)
 	}
@@ -2351,6 +2549,9 @@ func (c *Client) archiveLocked(ctx context.Context, id string) error {
 	if affected == 0 {
 		return c.wrapError("archive", id, domain.ErrNotFound)
 	}
+	if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
+		return c.wrapError("archive", id, err)
+	}
 	if err := tx.Commit(); err != nil {
 		return c.wrapError("archive", id, err)
 	}
@@ -2388,31 +2589,15 @@ func (c *Client) guardNoUndeletedParentChildDescendants(ctx context.Context, que
 func (c *Client) countUndeletedParentChildDescendants(ctx context.Context, queryer sqlIssueQueryer, issueID string) (int, error) {
 	var count int
 	if err := queryer.QueryRowContext(ctx, `
-		WITH RECURSIVE descendants(id) AS (
-			SELECT child.id
-			FROM issue_dependencies d
-			INNER JOIN issues child
-				ON child.id = d.issue_id
-				AND child.deleted_at IS NULL
-			WHERE
-				d.depends_on_id = ?
-				AND d.dependency_type IN (?, 'parent_child')
-				AND d.tombstoned_at IS NULL
-			UNION
-			SELECT child.id
-			FROM issue_dependencies d
-			INNER JOIN issues child
-				ON child.id = d.issue_id
-				AND child.deleted_at IS NULL
-			INNER JOIN descendants parent
-				ON parent.id = d.depends_on_id
-			WHERE
-				d.dependency_type IN (?, 'parent_child')
-				AND d.tombstoned_at IS NULL
-		)
-		SELECT COUNT(DISTINCT id)
-		FROM descendants
-	`, issueID, string(domain.DependencyParentChild), string(domain.DependencyParentChild)).Scan(&count); err != nil {
+		SELECT COUNT(DISTINCT closure.descendant_id)
+		FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_ancestor
+		INNER JOIN issues descendant
+			ON descendant.id = closure.descendant_id
+			AND descendant.deleted_at IS NULL
+		WHERE closure.project_id = ?
+			AND closure.dependency_type = ?
+			AND closure.ancestor_id = ?
+	`, issueGraphClosureProjectID, string(domain.DependencyParentChild), issueID).Scan(&count); err != nil {
 		return 0, err
 	}
 	return count, nil
