@@ -881,6 +881,14 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 		return err
 	}
 	lastSnapshotKey := orchestrateWatchFrameSnapshotKey(frame)
+	readinessCache := newOrchestrateWatchReadinessCache(frame, time.Now(), opts.PollInterval)
+	if deps.Logger != nil {
+		deps.Logger.Debug("orchestrate watch readiness cache initialized",
+			"root_issue_id", opts.RootIssueID,
+			"poll_interval_ms", opts.PollInterval.Milliseconds(),
+			"readiness_refresh_interval_ms", readinessCache.refreshInterval.Milliseconds(),
+		)
+	}
 	if len(frame.Events) > 0 || len(frame.Pending) > 0 || len(frame.SessionStartProgress) > 0 || len(frame.ActiveSessions) > 0 || opts.Once {
 		if err := emitOrchestrateWatchFrame(frame, opts.JSONL); err != nil {
 			return err
@@ -910,25 +918,33 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 		for _, event := range events {
 			watchEvents = append(watchEvents, protocolToLocalMailEvent(event))
 		}
-		ready, err := watchDaemonCommand(deps, func(ctx context.Context) (daemonclient.TaskGraphReadiness, error) {
-			return deps.DaemonClient.TaskGraphReadiness(ctx, opts.RootIssueID)
-		})
-		if err != nil {
-			return err
-		}
 		nextSince := nextMailboxSeq(events, lastSeq)
-		frame := orchestrateWatchFrame{
-			RootIssueID:            ready.RootIssueID,
-			SinceSeq:               lastSeq,
-			NextSince:              nextSince,
-			Runnable:               ready.Runnable,
-			Pending:                orchestratePendingStartsFromDaemon(ready.Pending),
-			Active:                 ready.Active,
-			ActiveSessions:         orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
-			SessionStartProgress:   orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
-			StaleCloseableChildren: orchestrateStaleCloseableFromDaemon(ready.StaleCloseableChildren),
-			Blocked:                ready.Blocked,
-			Events:                 watchEvents,
+		now := time.Now()
+		refreshReadiness, refreshReason := readinessCache.shouldRefresh(now, len(events))
+		if deps.Logger != nil {
+			deps.Logger.Debug("orchestrate watch tick",
+				"root_issue_id", opts.RootIssueID,
+				"mailbox_event_count", len(events),
+				"since_seq", lastSeq,
+				"next_since", nextSince,
+				"poll_interval_ms", opts.PollInterval.Milliseconds(),
+				"readiness_cache", readinessCache.decision(refreshReadiness),
+				"readiness_refresh_reason", refreshReason,
+				"readiness_refresh_interval_ms", readinessCache.refreshInterval.Milliseconds(),
+			)
+		}
+		var frame orchestrateWatchFrame
+		if refreshReadiness {
+			ready, err := watchDaemonCommand(deps, func(ctx context.Context) (daemonclient.TaskGraphReadiness, error) {
+				return deps.DaemonClient.TaskGraphReadiness(ctx, opts.RootIssueID)
+			})
+			if err != nil {
+				return err
+			}
+			frame = orchestrateWatchFrameFromReadiness(ready, watchEvents, lastSeq, nextSince)
+			readinessCache.store(frame, now)
+		} else {
+			frame = readinessCache.cachedReadinessFrame(watchEvents, lastSeq, nextSince)
 		}
 		snapshotKey := orchestrateWatchFrameSnapshotKey(frame)
 		if len(events) == 0 && snapshotKey == lastSnapshotKey {
@@ -939,6 +955,87 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 		}
 		lastSnapshotKey = snapshotKey
 		lastSeq = nextSince
+	}
+}
+
+type orchestrateWatchReadinessCache struct {
+	cachedFrame     orchestrateWatchFrame
+	refreshedAt     time.Time
+	refreshInterval time.Duration
+}
+
+func newOrchestrateWatchReadinessCache(frame orchestrateWatchFrame, refreshedAt time.Time, pollInterval time.Duration) orchestrateWatchReadinessCache {
+	return orchestrateWatchReadinessCache{
+		cachedFrame:     frame,
+		refreshedAt:     refreshedAt,
+		refreshInterval: orchestrateWatchReadinessRefreshInterval(pollInterval),
+	}
+}
+
+func orchestrateWatchReadinessRefreshInterval(pollInterval time.Duration) time.Duration {
+	const (
+		minInterval = 2 * time.Second
+		maxInterval = 10 * time.Second
+	)
+	if pollInterval <= 0 {
+		return minInterval
+	}
+	interval := pollInterval * 8
+	if interval < minInterval {
+		return minInterval
+	}
+	if interval > maxInterval {
+		return maxInterval
+	}
+	return interval
+}
+
+func (cache orchestrateWatchReadinessCache) shouldRefresh(now time.Time, eventCount int) (bool, string) {
+	if eventCount > 0 {
+		return true, "mailbox_events"
+	}
+	if cache.refreshedAt.IsZero() {
+		return true, "cache_empty"
+	}
+	if !now.Before(cache.refreshedAt.Add(cache.refreshInterval)) {
+		return true, "refresh_interval_elapsed"
+	}
+	return false, "unchanged_mailbox"
+}
+
+func (cache orchestrateWatchReadinessCache) decision(refresh bool) string {
+	if refresh {
+		return "miss"
+	}
+	return "hit"
+}
+
+func (cache *orchestrateWatchReadinessCache) store(frame orchestrateWatchFrame, refreshedAt time.Time) {
+	cache.cachedFrame = frame
+	cache.refreshedAt = refreshedAt
+}
+
+func (cache orchestrateWatchReadinessCache) cachedReadinessFrame(events []mailEvent, since, nextSince int64) orchestrateWatchFrame {
+	frame := cache.cachedFrame
+	frame.SinceSeq = since
+	frame.NextSince = nextSince
+	frame.Events = events
+	return frame
+}
+
+func orchestrateWatchFrameFromReadiness(ready daemonclient.TaskGraphReadiness, events []mailEvent, since, nextSince int64) orchestrateWatchFrame {
+	return orchestrateWatchFrame{
+		RootIssueID:            ready.RootIssueID,
+		SinceSeq:               since,
+		NextSince:              nextSince,
+		Runnable:               ready.Runnable,
+		Pending:                orchestratePendingStartsFromDaemon(ready.Pending),
+		Active:                 ready.Active,
+		ActiveSessions:         orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
+		SessionStartProgress:   orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
+		StaleCloseableChildren: orchestrateStaleCloseableFromDaemon(ready.StaleCloseableChildren),
+		Blocked:                ready.Blocked,
+		Events:                 events,
 	}
 }
 
@@ -1362,18 +1459,7 @@ func buildOrchestrateWatchFrame(deps *Dependencies, rootIssueID string, since in
 	for _, event := range events {
 		watchEvents = append(watchEvents, protocolToLocalMailEvent(event))
 	}
-	return orchestrateWatchFrame{
-		RootIssueID:          ready.RootIssueID,
-		SinceSeq:             since,
-		NextSince:            nextMailboxSeq(events, since),
-		Runnable:             ready.Runnable,
-		Pending:              orchestratePendingStartsFromDaemon(ready.Pending),
-		Active:               ready.Active,
-		ActiveSessions:       orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
-		SessionStartProgress: orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
-		Blocked:              ready.Blocked,
-		Events:               watchEvents,
-	}, nil
+	return orchestrateWatchFrameFromReadiness(ready, watchEvents, since, nextMailboxSeq(events, since)), nil
 }
 
 func emitOrchestrateWatchFrame(frame orchestrateWatchFrame, jsonl bool) error {
