@@ -7217,6 +7217,89 @@ func TestRefreshWorktreeRuntimeStateSkipsClosedIssueWorktrees(t *testing.T) {
 	}
 }
 
+func TestRefreshWorktreeRuntimeStateSuppressesMissingWorktreeFromGitList(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-refresh-missing-worktree"
+	repoDir := t.TempDir()
+	missingID := "az-missing"
+	missingWorktree := filepath.Join(repoDir, "missing-"+missingID)
+
+	statusCalls := 0
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain":
+			return strings.Join([]string{
+				"worktree " + repoDir,
+				"branch refs/heads/main",
+				"",
+				"worktree " + missingWorktree,
+				"branch refs/heads/az/" + missingID,
+				"",
+			}, "\n"), nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "status" && args[3] == "--porcelain":
+			statusCalls++
+			return "", nil
+		default:
+			return "", nil
+		}
+	}}
+
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   missingID,
+		Path:      missingWorktree,
+		Branch:    "az/" + missingID,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed stale worktree projection: %v", err)
+	}
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
+		git: git.NewClient(runner, slog.Default()),
+		hub: publish.NewHub(16, 8, slog.Default()),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: store,
+		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(runner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(runner, repoDir, slog.Default()),
+		},
+	}
+	ch, cancel := d.hub.Subscribe(projectID, 0)
+	t.Cleanup(cancel)
+
+	count, err := d.refreshWorktreeRuntimeState(ctx, projectID)
+	if err != nil {
+		t.Fatalf("refreshWorktreeRuntimeState error: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("refreshWorktreeRuntimeState count = %d, want 0", count)
+	}
+	if statusCalls != 0 {
+		t.Fatalf("status calls = %d, want 0 for missing stale worktree", statusCalls)
+	}
+	if _, found, err := store.GetWorktreeStateByIssueID(ctx, projectID, missingID); err != nil {
+		t.Fatalf("get worktree state: %v", err)
+	} else if found {
+		t.Fatalf("missing worktree projection still present for %s", missingID)
+	}
+	select {
+	case evt := <-ch:
+		if evt.Event != protocol.EventWorktreeProjectionUpdated {
+			t.Fatalf("event = %s, want %s", evt.Event, protocol.EventWorktreeProjectionUpdated)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for missing worktree projection delete event")
+	}
+}
+
 func TestRefreshWorktreeRuntimeStateForIssuesDeletesClosedIssueWorktreeProjection(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-refresh-closed-target"
@@ -7665,13 +7748,21 @@ func TestRefreshWorktreeRuntimeStateMutationDoesNotBypassGitProbeBudget(t *testi
 		Reason:   "mutation:session.stop",
 	})
 	projectID := "proj-refresh-budget"
+	repoDir := t.TempDir()
+	worktreeOne := filepath.Join(repoDir, "repo-az-1")
+	worktreeTwo := filepath.Join(repoDir, "repo-az-2")
+	for _, path := range []string{worktreeOne, worktreeTwo} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("mkdir worktree %s: %v", path, err)
+		}
+	}
 	statusCalls := 0
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		switch {
 		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain":
-			return "worktree /tmp/repo-root\nbranch refs/heads/main\n\n" +
-				"worktree /tmp/repo-az-1\nbranch refs/heads/az/az-1\n\n" +
-				"worktree /tmp/repo-az-2\nbranch refs/heads/az/az-2\n", nil
+			return "worktree " + repoDir + "\nbranch refs/heads/main\n\n" +
+				"worktree " + worktreeOne + "\nbranch refs/heads/az/az-1\n\n" +
+				"worktree " + worktreeTwo + "\nbranch refs/heads/az/az-2\n", nil
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status" && args[3] == "--porcelain":
 			statusCalls++
 			return "", nil
@@ -7685,16 +7776,16 @@ func TestRefreshWorktreeRuntimeStateMutationDoesNotBypassGitProbeBudget(t *testi
 
 	now := time.Date(2026, time.May, 6, 12, 0, 0, 0, time.UTC)
 	d := &Daemon{
-		cfg: Config{RepoDir: "/tmp/repo-root", BaseBranch: "main", Logger: slog.Default()},
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
 		git: git.NewClient(runner, slog.Default()),
 		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
-			"/tmp/repo-root": store,
+			repoDir: store,
 		},
 		worktreeManagersByRoot: map[string]*git.WorktreeManager{
-			"/tmp/repo-root": git.NewWorktreeManager(runner, "/tmp/repo-root", slog.Default()),
+			repoDir: git.NewWorktreeManager(runner, repoDir, slog.Default()),
 		},
 		worktreeManagersByProject: map[string]*git.WorktreeManager{
-			projectID: git.NewWorktreeManager(runner, "/tmp/repo-root", slog.Default()),
+			projectID: git.NewWorktreeManager(runner, repoDir, slog.Default()),
 		},
 		worktreeGitProbeThrottle: newReconcileThrottle(reconcileThrottleConfig{
 			Name:                 "worktree_git_probe_test",
@@ -7717,6 +7808,87 @@ func TestRefreshWorktreeRuntimeStateMutationDoesNotBypassGitProbeBudget(t *testi
 	}
 	if statusCalls != 1 {
 		t.Fatalf("status calls = %d, want 1", statusCalls)
+	}
+}
+
+func TestRefreshWorktreeRuntimeStateTransientGitFailureKeepsProjectionAndBacksOff(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-refresh-transient"
+	repoDir := t.TempDir()
+	worktreeOne := filepath.Join(repoDir, "repo-az-1")
+	worktreeTwo := filepath.Join(repoDir, "repo-az-2")
+	for _, path := range []string{worktreeOne, worktreeTwo} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("mkdir worktree %s: %v", path, err)
+		}
+	}
+
+	statusCalls := 0
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain":
+			return "worktree " + repoDir + "\nbranch refs/heads/main\n\n" +
+				"worktree " + worktreeOne + "\nbranch refs/heads/az/az-1\n\n" +
+				"worktree " + worktreeTwo + "\nbranch refs/heads/az/az-2\n", nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "status" && args[3] == "--porcelain":
+			statusCalls++
+			return "", errors.New("git status failed: exit status 128: index.lock busy")
+		default:
+			return "", nil
+		}
+	}}
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+
+	now := time.Date(2026, time.May, 6, 12, 0, 0, 0, time.UTC)
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
+		git: git.NewClient(runner, slog.Default()),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: store,
+		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(runner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(runner, repoDir, slog.Default()),
+		},
+		worktreeGitProbeThrottle: newReconcileThrottle(reconcileThrottleConfig{
+			Name:                 "worktree_git_probe_test",
+			Budget:               1,
+			Cadence:              time.Hour,
+			UnchangedBackoffBase: time.Hour,
+			UnchangedBackoffMax:  time.Hour,
+			FailureBackoffBase:   time.Hour,
+			FailureBackoffMax:    time.Hour,
+			Now:                  func() time.Time { return now },
+		}),
+	}
+
+	count, err := d.refreshWorktreeRuntimeState(ctx, projectID)
+	if err != nil {
+		t.Fatalf("first refreshWorktreeRuntimeState error: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("first refreshWorktreeRuntimeState count = %d, want 2", count)
+	}
+	count, err = d.refreshWorktreeRuntimeState(ctx, projectID)
+	if err != nil {
+		t.Fatalf("second refreshWorktreeRuntimeState error: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("second refreshWorktreeRuntimeState count = %d, want 2", count)
+	}
+	if statusCalls != 1 {
+		t.Fatalf("status calls = %d, want 1 after transient failure backoff/budget", statusCalls)
+	}
+	worktrees, err := store.ListWorktreeStates(ctx, projectID)
+	if err != nil {
+		t.Fatalf("list worktree projections: %v", err)
+	}
+	if len(worktrees) != 2 {
+		t.Fatalf("worktree projection count = %d, want 2", len(worktrees))
 	}
 }
 

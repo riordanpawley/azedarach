@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
@@ -227,6 +228,68 @@ func TestGitServiceAdapterRefreshWriteThroughUsesRuntimeStatusWhenBaseBranchConf
 	}
 	if persisted.GitAdditions != 7 || persisted.GitDeletions != 3 {
 		t.Fatalf("persisted diff totals = %d/%d, want 7/3", persisted.GitAdditions, persisted.GitDeletions)
+	}
+}
+
+func TestGitServiceAdapterSuppressesMissingWorktreeProjectionAndPublishes(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	projectID := "proj-stale-refresh"
+	issueID := "az-stale"
+	root := t.TempDir()
+	worktree := filepath.Join(root, "missing-worktree")
+	store := newGitAdapterStore(t, projectID, issueID, worktree, cleanGitStatus())
+	logger := slog.Default()
+	d := &Daemon{
+		cfg: Config{Logger: logger},
+		hub: publish.NewHub(16, 8, logger),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+	}
+	ch, cancel := d.hub.Subscribe(projectID, 0)
+	t.Cleanup(cancel)
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		if len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "status" && args[3] == "--porcelain" {
+			return "", fmt.Errorf("git -C %s status --porcelain failed: chdir %s: no such file or directory", worktree, worktree)
+		}
+		return "", nil
+	}}
+	adapter := &gitServiceAdapter{
+		client:                  git.NewClient(runner, logger),
+		runtimeStateStore:       store,
+		runtimeProjectionWriter: newRuntimeProjectionWriter(d),
+		logger:                  logger,
+	}
+
+	submission, err := adapter.queueGitStatusRefresh(projectID, worktree, reconcilePriorityVisible, "visible")
+	if err != nil {
+		t.Fatalf("queueGitStatusRefresh: %v", err)
+	}
+	result, err := submission.Wait(ctx)
+	if err != nil {
+		t.Fatalf("wait for stale refresh result: %v", err)
+	}
+	if _, ok := staleWorktreeGitRefreshErrorReason(result.Err); !ok {
+		t.Fatalf("refresh error = %v, want stale worktree suppression", result.Err)
+	}
+	if _, found, err := store.GetWorktreeStateByIssueID(ctx, projectID, issueID); err != nil {
+		t.Fatalf("load worktree projection: %v", err)
+	} else if found {
+		t.Fatal("stale worktree projection still present")
+	}
+
+	select {
+	case evt := <-ch:
+		if evt.Event != protocol.EventWorktreeProjectionUpdated {
+			t.Fatalf("event = %s, want %s", evt.Event, protocol.EventWorktreeProjectionUpdated)
+		}
+		if evt.Revision == 0 {
+			t.Fatal("published stale projection delete event has zero revision")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for stale worktree projection delete event")
 	}
 }
 
