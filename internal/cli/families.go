@@ -511,47 +511,53 @@ func reconcileDaemonGitState(projectDir string, deps *Dependencies, hookName str
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), gitHookDaemonRefreshTimeout)
 	defer cancel()
-	err = refreshDaemonGitStatusWithRetry(ctx, deps, worktreeRoot)
+	err = ingestGitHookRuntimeSignalWithRetry(ctx, deps, worktreeRoot, hookName)
 	if err != nil {
 		appendHookLogEventBestEffort(deps, protocol.HookLogEvent{
 			Hook:     strings.TrimSpace(hookName),
 			Worktree: worktreeRoot,
 			Source:   "githooks.hook",
 			Level:    "warn",
-			Message:  fmt.Sprintf("daemon git status refresh failed: %v", err),
+			Message:  fmt.Sprintf("daemon runtime signal ingest failed: %v", err),
 		})
 		if deps.Logger != nil {
-			deps.Logger.Warn("githooks hook: daemon git status refresh failed", "hook", strings.TrimSpace(hookName), "worktree", worktreeRoot, "error", err)
+			deps.Logger.Warn("githooks hook: daemon runtime signal ingest failed", "hook", strings.TrimSpace(hookName), "worktree", worktreeRoot, "error", err)
 		}
 		if verbose {
-			fmt.Fprintf(os.Stderr, "githooks hook: daemon git status refresh failed for %s: %v\n", worktreeRoot, err)
+			fmt.Fprintf(os.Stderr, "githooks hook: daemon runtime signal ingest failed for %s: %v\n", worktreeRoot, err)
 		}
 		return nil
 	}
-	appendHookLogEventBestEffort(deps, protocol.HookLogEvent{
-		Hook:     strings.TrimSpace(hookName),
-		Worktree: worktreeRoot,
-		Source:   "githooks.hook",
-		Level:    "info",
-		Message:  "queued daemon git status refresh",
-	})
 	if deps.Logger != nil {
-		deps.Logger.Info("githooks hook: queued daemon git status refresh", "hook", strings.TrimSpace(hookName), "worktree", worktreeRoot)
+		deps.Logger.Info("githooks hook: runtime signal ingested", "hook", strings.TrimSpace(hookName), "worktree", worktreeRoot)
 	}
 	if verbose {
-		fmt.Printf("githooks hook: queued daemon git status refresh for %s (%s)\n", worktreeRoot, hookName)
+		fmt.Printf("githooks hook: runtime signal ingested for %s (%s)\n", worktreeRoot, hookName)
 	}
 	return nil
 }
 
-func refreshDaemonGitStatusWithRetry(ctx context.Context, deps *Dependencies, worktreeRoot string) error {
+func ingestGitHookRuntimeSignalWithRetry(ctx context.Context, deps *Dependencies, worktreeRoot, hookName string) error {
+	return ingestRuntimeSignalWithRetry(ctx, deps, protocol.RuntimeSignalIngestCommandBody{
+		Source:    protocol.RuntimeSignalSourceGitHook,
+		Kind:      protocol.RuntimeSignalKindGitWorktreeChanged,
+		ProjectID: strings.TrimSpace(deps.ProjectID),
+		Worktree:  strings.TrimSpace(worktreeRoot),
+		Hook:      strings.TrimSpace(hookName),
+		Event:     strings.TrimSpace(hookName),
+		Log:       true,
+		Message:   "git hook runtime signal ingested",
+	})
+}
+
+func ingestRuntimeSignalWithRetry(ctx context.Context, deps *Dependencies, signal protocol.RuntimeSignalIngestCommandBody) error {
 	const maxAttempts = 3
 	backoff := gitHookDaemonRefreshInitialBackoff
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		attemptCtx, cancel := context.WithTimeout(ctx, gitHookDaemonRefreshAttemptTimeout)
 		_, err := commandWithDaemonAutostartRetryWithinContext(attemptCtx, deps, func(callCtx context.Context) (struct{}, error) {
-			_, callErr := deps.DaemonClient.GitStatusHookRefresh(callCtx, worktreeRoot)
+			_, callErr := deps.DaemonClient.RuntimeSignalIngest(callCtx, signal)
 			return struct{}{}, callErr
 		})
 		cancel()
@@ -574,7 +580,7 @@ func refreshDaemonGitStatusWithRetry(ctx context.Context, deps *Dependencies, wo
 		}
 	}
 	if lastErr == nil {
-		return fmt.Errorf("daemon git status refresh failed")
+		return fmt.Errorf("daemon runtime signal ingest failed")
 	}
 	return lastErr
 }

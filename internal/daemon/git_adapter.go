@@ -15,6 +15,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
 
@@ -554,6 +555,43 @@ func (a *gitServiceAdapter) refreshGitStatusWriteThrough(ctx context.Context, pr
 	_, _ = a.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, publishOnChange, forcePublish)
 }
 
+func (a *gitServiceAdapter) refreshGitStatusPorcelainWriteThroughResult(ctx context.Context, projectID, worktree string, publishOnChange, forcePublish bool) (*git.GitStatus, uint64, error) {
+	projectID = normalizeProjectID(projectID)
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return &git.GitStatus{}, 0, nil
+	}
+	status, err := a.client.Status(ctx, worktree)
+	if err != nil {
+		if a.logger != nil {
+			a.logger.Warn("runtime signal porcelain git status refresh failed",
+				"project_id", projectID,
+				"worktree", worktree,
+				"error", err,
+			)
+		}
+		return nil, 0, err
+	}
+	persistCtx, persistCancel := gitStatusProjectionPersistContext(ctx)
+	defer persistCancel()
+	issueID, branch := a.resolveWorktreeProjectionIdentity(persistCtx, projectID, worktree)
+	var rev uint64
+	if a.runtimeProjectionWriter != nil {
+		if issueID != "" {
+			_ = a.runtimeProjectionWriter.PersistWorktreeProjection(persistCtx, projectID, issueID, worktree, branch)
+		}
+		rev = a.runtimeProjectionWriter.PersistGitStatusProjectionAndPublish(persistCtx, projectID, issueID, worktree, status, publishOnChange, forcePublish)
+		a.invalidateRuntimeSignalCache(projectID, worktree)
+		return status, rev, nil
+	}
+	changed, issueID := a.persistStatusSnapshot(persistCtx, projectID, worktree, status)
+	a.invalidateRuntimeSignalCache(projectID, worktree)
+	if (forcePublish || (publishOnChange && changed)) && a.onStatusUpdate != nil && strings.TrimSpace(issueID) != "" {
+		a.onStatusUpdate(persistCtx, projectID, issueID, worktree, status)
+	}
+	return status, rev, nil
+}
+
 func (a *gitServiceAdapter) refreshGitStatusWriteThroughResult(ctx context.Context, projectID, worktree string, publishOnChange, forcePublish bool) (*git.GitStatus, error) {
 	projectID = normalizeProjectID(projectID)
 	baseBranch, worktreeSpecificBase := a.resolvedBaseBranchForWorktree(ctx, projectID, worktree)
@@ -605,6 +643,31 @@ func (a *gitServiceAdapter) refreshGitStatusWriteThroughResult(ctx context.Conte
 		a.onStatusUpdate(persistCtx, projectID, issueID, worktree, status)
 	}
 	return status, nil
+}
+
+func (a *gitServiceAdapter) resolveWorktreeProjectionIdentity(ctx context.Context, projectID, worktree string) (string, string) {
+	runtimeStore := a.runtimeStore(projectID)
+	if runtimeStore != nil {
+		projection, found, err := runtimeStore.GetWorktreeStateByPath(ctx, projectID, worktree)
+		if err == nil && found && strings.TrimSpace(projection.IssueID) != "" {
+			return strings.TrimSpace(projection.IssueID), strings.TrimSpace(projection.Branch)
+		}
+		if err != nil && a.logger != nil {
+			a.logger.Debug("runtime signal worktree projection lookup failed", "project_id", projectID, "worktree", worktree, "error", err)
+		}
+	}
+	branch, err := a.client.CurrentBranch(ctx, worktree)
+	if err != nil {
+		if a.logger != nil {
+			a.logger.Debug("runtime signal current branch lookup failed", "project_id", projectID, "worktree", worktree, "error", err)
+		}
+		return "", ""
+	}
+	issueID, ok := naming.ExtractIssueIDFromBranchName(branch)
+	if !ok {
+		return "", strings.TrimSpace(branch)
+	}
+	return strings.TrimSpace(issueID), strings.TrimSpace(branch)
 }
 
 func gitStatusProjectionPersistContext(ctx context.Context) (context.Context, context.CancelFunc) {
