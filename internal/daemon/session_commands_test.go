@@ -560,14 +560,24 @@ func TestSessionRestartAllSkipsBusySessionsByDefault(t *testing.T) {
 	if result.Restarted != 1 || result.Skipped != 1 || result.Failed != 0 {
 		t.Fatalf("result = %+v, want restarted=1 skipped=1 failed=0", result)
 	}
-	if tmuxRunner.sendKeysCalls != 2 {
-		t.Fatalf("send-keys calls = %d, want C-c and resume for idle session only", tmuxRunner.sendKeysCalls)
+	if tmuxRunner.sendKeysCalls != 3 {
+		t.Fatalf("send-keys calls = %d, want C-c, resume, and continuation submit for idle session only", tmuxRunner.sendKeysCalls)
 	}
-	if got := tmuxRunner.sendKeysTargets; !reflect.DeepEqual(got, []string{idleSession, idleSession}) {
-		t.Fatalf("sendKeysTargets = %+v, want idle session twice", got)
+	if got := tmuxRunner.sendKeysTargets; !reflect.DeepEqual(got, []string{idleSession, idleSession, idleSession}) {
+		t.Fatalf("sendKeysTargets = %+v, want idle session for interrupt, resume, and submit", got)
 	}
-	if got := tmuxRunner.sendKeysPayloads[1]; !strings.Contains(got, "codex resume") || !strings.Contains(got, "--last") {
-		t.Fatalf("resume command = %q, want codex resume --last for idle session", got)
+	if got := tmuxRunner.sendKeysPayloads[1]; !strings.Contains(got, "codex resume") || !strings.Contains(got, "--last") || strings.Contains(got, "Continue your prior task") {
+		t.Fatalf("resume command = %q, want codex resume --last without positional continuation prompt", got)
+	}
+	foundContinuationPrompt := false
+	for _, command := range tmuxRunner.commands {
+		if len(command) >= 4 && command[0] == "set-buffer" && strings.Contains(command[3], "Continue your prior task") {
+			foundContinuationPrompt = true
+			break
+		}
+	}
+	if !foundContinuationPrompt {
+		t.Fatalf("missing continuation prompt paste in tmux commands: %+v", tmuxRunner.commands)
 	}
 }
 
@@ -643,8 +653,8 @@ func TestSessionRestartAllForceBusyIncludesBusySessionsAndConfiguredFlags(t *tes
 	if result.Restarted != 2 || result.Skipped != 0 || result.Failed != 0 {
 		t.Fatalf("result = %+v, want restarted=2 skipped=0 failed=0", result)
 	}
-	if tmuxRunner.sendKeysCalls != 4 {
-		t.Fatalf("send-keys calls = %d, want C-c and resume for two sessions", tmuxRunner.sendKeysCalls)
+	if tmuxRunner.sendKeysCalls != 6 {
+		t.Fatalf("send-keys calls = %d, want C-c, resume, and continuation submit for two sessions", tmuxRunner.sendKeysCalls)
 	}
 	for _, payload := range tmuxRunner.sendKeysPayloads {
 		if strings.Contains(payload, "codex resume") && !strings.Contains(payload, "--dangerously-bypass-approvals-and-sandbox") {
@@ -6696,6 +6706,27 @@ func TestBuildSessionResumeCommandUsesCodexResumeLastWithOptionsBeforeSelector(t
 			t.Fatalf("command = %q, want %q after index %d", command, part, last)
 		}
 		last = idx
+	}
+	if strings.Contains(command, "Continue your prior task") {
+		t.Fatalf("command = %q, want continuation prompt delivered after launch for codex", command)
+	}
+}
+
+func TestBuildSessionResumeCommandUsesClaudeContinueWithPrompt(t *testing.T) {
+	d := &Daemon{
+		cfg: Config{
+			CLITool:                    "claude",
+			DangerouslySkipPermissions: true,
+			SessionShell:               "zsh",
+		},
+	}
+
+	command := d.buildSessionResumeCommand(protocol.DefaultProjectID, "axt-123", "claude-axt-123", false, nil)
+	wantParts := []string{`AZEDARACH_ISSUE_ID="axt-123"`, "claude", "--continue", "--dangerously-skip-permissions", "Continue your prior task"}
+	for _, part := range wantParts {
+		if !strings.Contains(command, part) {
+			t.Fatalf("command = %q, want part %q", command, part)
+		}
 	}
 }
 

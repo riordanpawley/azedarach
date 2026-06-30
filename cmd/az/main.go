@@ -1205,7 +1205,7 @@ func printSessionUsage() {
 	fmt.Println("  attach <issue-id>     Attach to an existing issue session")
 	fmt.Println("  stop <issue-id>       Stop an issue session")
 	fmt.Println("  status [issue-id]     Show all sessions or one issue session status")
-	fmt.Println("  restart-all           Restart idle AI sessions; use --force-busy to include busy sessions")
+	fmt.Println("  restart-all           Restart idle AI sessions and tell them to continue; use --force-busy to include busy sessions")
 	fmt.Println("  resolve-conflict <issue-id> [--worktree <path>] [--file <path> ...] [--prompt <text>]")
 	fmt.Println("                        Launch conflict-resolution agent")
 	fmt.Println()
