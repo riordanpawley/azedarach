@@ -945,6 +945,36 @@ func (d *Daemon) sessionLifecycleTransitionNeeded(projectID, sessionID, issueID 
 	return issueID != "" && strings.TrimSpace(session.IssueID) != issueID
 }
 
+func (d *Daemon) sessionLifecycleOrAgentActivityTransitionNeeded(projectID, sessionID, issueID string, state daemonstate.SessionState) bool {
+	if d.sessionLifecycleTransitionNeeded(projectID, sessionID, issueID, state) {
+		return true
+	}
+	if !isAgentScopedSessionID(sessionID) || d.sessionStore == nil {
+		return false
+	}
+	wantActivity, wantSource, ok := agentScopedSessionActivityForLifecycleState(state)
+	if !ok {
+		return false
+	}
+	session, err := d.sessionStore.Session(projectID, sessionID)
+	if err != nil {
+		return true
+	}
+	return normalizeSessionActivity(session.Activity) != wantActivity ||
+		strings.ToLower(strings.TrimSpace(session.ActivitySource)) != wantSource
+}
+
+func agentScopedSessionActivityForLifecycleState(state daemonstate.SessionState) (string, string, bool) {
+	switch daemonstate.NormalizeSessionState(state) {
+	case daemonstate.SessionStateRunning:
+		return "busy", "hooks", true
+	case daemonstate.SessionStatePaused:
+		return "idle", "hooks", true
+	default:
+		return "", "", false
+	}
+}
+
 func lifecycleCommandState(command string) (daemonstate.SessionState, bool) {
 	switch command {
 	case daemonhandlers.CommandSessionStart:
