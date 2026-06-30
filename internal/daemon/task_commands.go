@@ -276,7 +276,7 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	}
 	query := strings.TrimSpace(listReq.Query)
 	startedAt := time.Now()
-	result, shared, err := d.loadTaskListSnapshot(ctx, req, projectID, query)
+	result, shared, err := d.loadTaskListSnapshot(ctx, req, projectID, query, listReq.IncludeDependencies)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -307,12 +307,15 @@ func decodeTaskListRequest(body []byte) (protocol.TaskListRequestBody, error) {
 	return req, nil
 }
 
-func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string) (taskListSnapshotLoadResult, bool, error) {
+func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string, includeDependencies bool) (taskListSnapshotLoadResult, bool, error) {
 	projectID = d.canonicalProjectID(projectID)
 	query = strings.TrimSpace(query)
 	loadKey := projectID
 	if query != "" {
 		loadKey = projectID + "\x00query:" + strings.ToLower(query)
+	}
+	if includeDependencies {
+		loadKey += "\x00deps"
 	}
 
 	d.taskListSnapshotLoadMu.Lock()
@@ -334,7 +337,7 @@ func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestE
 
 	buildCtx, cancel := context.WithTimeout(context.Background(), taskListSnapshotLoadTimeout)
 	defer cancel()
-	result, err := d.buildTaskListSnapshot(buildCtx, req, projectID, query)
+	result, err := d.buildTaskListSnapshot(buildCtx, req, projectID, query, includeDependencies)
 	load.result = cloneTaskListSnapshotLoadResult(result)
 	load.err = err
 
@@ -346,7 +349,7 @@ func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestE
 	return result, false, err
 }
 
-func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string) (taskListSnapshotLoadResult, error) {
+func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string, includeDependencies bool) (taskListSnapshotLoadResult, error) {
 	query = strings.TrimSpace(query)
 	refreshStartedAt := time.Now()
 	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil && d.cfg.Logger != nil {
@@ -368,9 +371,13 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 		err           error
 	)
 	if query == "" {
-		tasks, err = issueClient.ListSummariesWithRuntime(ctx, projectID)
+		if includeDependencies {
+			tasks, err = issueClient.ListSummariesWithRuntimeDependencies(ctx, projectID)
+		} else {
+			tasks, err = issueClient.ListSummariesWithRuntime(ctx, projectID)
+		}
 		summariesOnly = true
-		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.issue_store_list_summaries_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
+		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.issue_store_list_summaries_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "include_dependencies", includeDependencies)
 	} else {
 		tasks, err = issueClient.SearchWithRuntime(ctx, projectID, query)
 	}
@@ -3257,7 +3264,7 @@ func (d *Daemon) loadTaskGraphDomainTasks(ctx context.Context, projectID string)
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
 	}
-	tasks, err := issueClient.ListSummariesWithRuntime(ctx, projectID)
+	tasks, err := issueClient.ListSummariesWithRuntimeDependencies(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}

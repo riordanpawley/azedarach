@@ -873,6 +873,16 @@ func (c *Client) SearchWithRuntime(ctx context.Context, projectID, query string)
 // but without long-form detail text. It is intended for board/list snapshots
 // where fetching full issue bodies for every task dominates load time.
 func (c *Client) ListSummariesWithRuntime(ctx context.Context, projectID string) ([]domain.Task, error) {
+	return c.listSummariesWithRuntime(ctx, projectID, false)
+}
+
+// ListSummariesWithRuntimeDependencies fetches active issue summaries with runtime projection fields
+// and full outgoing dependency edges.
+func (c *Client) ListSummariesWithRuntimeDependencies(ctx context.Context, projectID string) ([]domain.Task, error) {
+	return c.listSummariesWithRuntime(ctx, projectID, true)
+}
+
+func (c *Client) listSummariesWithRuntime(ctx context.Context, projectID string, includeDependencies bool) ([]domain.Task, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return nil, err
@@ -881,7 +891,7 @@ func (c *Client) ListSummariesWithRuntime(ctx context.Context, projectID string)
 	if projectID == "" {
 		projectID = "default"
 	}
-	tasks, err := c.queryTaskSummariesWithRuntime(ctx, db, projectID)
+	tasks, err := c.queryTaskSummariesWithRuntime(ctx, db, projectID, includeDependencies)
 	if err != nil {
 		return nil, c.wrapError("list-summaries-with-runtime", projectID, err)
 	}
@@ -911,7 +921,7 @@ func (c *Client) ListGraphReadinessWithRuntime(ctx context.Context, projectID, r
 	if len(issueIDs) == 0 {
 		return []domain.Task{}, nil
 	}
-	tasks, err := c.queryTasksWithRuntimeProjection(ctx, db, projectID, false, issueIDs...)
+	tasks, err := c.queryTasksWithRuntimeProjection(ctx, db, projectID, false, taskDependencyLoadAll, issueIDs...)
 	if err != nil {
 		return nil, c.wrapError("list-graph-readiness-with-runtime", rootID, err)
 	}
@@ -2819,19 +2829,23 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 		return tasks, nil
 	}
 
-	if err := c.loadDependenciesForTasks(ctx, db, taskIDs, taskIndexByID, tasks); err != nil {
+	if err := c.loadDependenciesForTasks(ctx, db, taskIDs, taskIndexByID, tasks, taskDependencyLoadAll); err != nil {
 		return nil, err
 	}
 
 	return tasks, nil
 }
 
-func (c *Client) queryTaskSummariesWithRuntime(ctx context.Context, db *sql.DB, projectID string, issueIDs ...string) ([]domain.Task, error) {
-	return c.queryTasksWithRuntimeProjection(ctx, db, projectID, false, issueIDs...)
+func (c *Client) queryTaskSummariesWithRuntime(ctx context.Context, db *sql.DB, projectID string, includeDependencies bool, issueIDs ...string) ([]domain.Task, error) {
+	dependencyMode := taskDependencyLoadParentOnly
+	if includeDependencies {
+		dependencyMode = taskDependencyLoadAll
+	}
+	return c.queryTasksWithRuntimeProjection(ctx, db, projectID, false, dependencyMode, issueIDs...)
 }
 
 func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectID string, issueIDs ...string) ([]domain.Task, error) {
-	return c.queryTasksWithRuntimeProjection(ctx, db, projectID, true, issueIDs...)
+	return c.queryTasksWithRuntimeProjection(ctx, db, projectID, true, taskDependencyLoadAll, issueIDs...)
 }
 
 func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, projectID string, issueIDs ...string) ([]domain.Task, error) {
@@ -3014,7 +3028,14 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 	return tasks, nil
 }
 
-func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB, projectID string, includeDetails bool, issueIDs ...string) ([]domain.Task, error) {
+type taskDependencyLoadMode int
+
+const (
+	taskDependencyLoadAll taskDependencyLoadMode = iota
+	taskDependencyLoadParentOnly
+)
+
+func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB, projectID string, includeDetails bool, dependencyMode taskDependencyLoadMode, issueIDs ...string) ([]domain.Task, error) {
 	query, args := taskRuntimeProjectionQuery(projectID, includeDetails, issueIDs...)
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -3136,7 +3157,7 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 	if len(tasks) == 0 {
 		return tasks, nil
 	}
-	if err := c.loadDependenciesForTasks(ctx, db, taskIDs, taskIndexByID, tasks); err != nil {
+	if err := c.loadDependenciesForTasks(ctx, db, taskIDs, taskIndexByID, tasks, dependencyMode); err != nil {
 		return nil, err
 	}
 	return tasks, nil
@@ -3364,6 +3385,7 @@ func (c *Client) loadDependenciesForTasks(
 	taskIDs []naming.IssueID,
 	taskIndexByID map[naming.IssueID]int,
 	tasks []domain.Task,
+	mode taskDependencyLoadMode,
 ) error {
 	const maxPlaceholders = 500
 	for start := 0; start < len(taskIDs); start += maxPlaceholders {
@@ -3372,18 +3394,14 @@ func (c *Client) loadDependenciesForTasks(
 			end = len(taskIDs)
 		}
 		chunk := taskIDs[start:end]
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		query, dependencyTypeArgs := taskDependencyRowsQuery(len(chunk), mode)
 		depArgs := make([]any, 0, len(chunk))
 		for _, id := range chunk {
 			depArgs = append(depArgs, id.String())
 		}
+		depArgs = append(depArgs, dependencyTypeArgs...)
 
-		rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-			SELECT issue_id, depends_on_id, dependency_type
-			FROM issue_dependencies
-			WHERE tombstoned_at IS NULL
-				AND issue_id IN (%s)
-		`, placeholders), depArgs...)
+		rows, err := db.QueryContext(ctx, query, depArgs...)
 		if err != nil {
 			return err
 		}
@@ -3431,6 +3449,23 @@ func (c *Client) loadDependenciesForTasks(
 		}
 	}
 	return nil
+}
+
+func taskDependencyRowsQuery(issueIDCount int, mode taskDependencyLoadMode) (string, []any) {
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", issueIDCount), ",")
+	typeFilter := ""
+	args := []any(nil)
+	if mode == taskDependencyLoadParentOnly {
+		typeFilter = " AND dependency_type IN (?, ?)"
+		args = append(args, string(domain.DependencyParentChild), "parent_child")
+	}
+	return fmt.Sprintf(`
+		SELECT issue_id, depends_on_id, dependency_type
+		FROM issue_dependencies
+		WHERE tombstoned_at IS NULL
+			AND issue_id IN (%s)
+			%s
+	`, placeholders, typeFilter), args
 }
 
 func normalizeDependencyType(value string) string {

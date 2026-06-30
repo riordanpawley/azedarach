@@ -685,7 +685,7 @@ func TestClient_ListWithRuntimeReadsSessionObservations(t *testing.T) {
 	assert.True(t, tasks[0].HasTmuxSession)
 }
 
-func TestClient_ListSummariesWithRuntimeKeepsGraphAndRuntimeProjection(t *testing.T) {
+func TestClient_ListSummariesWithRuntimeKeepsParentAndRuntimeProjection(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
 	const projectID = "proj-summary-runtime"
@@ -748,9 +748,7 @@ func TestClient_ListSummariesWithRuntimeKeepsGraphAndRuntimeProjection(t *testin
 	got := taskByID[childID]
 	require.NotNil(t, got.ParentID)
 	assert.Equal(t, parentID, got.ParentID.String())
-	require.Len(t, got.Dependencies, 1)
-	assert.Equal(t, blockerID, got.Dependencies[0].ID.String())
-	assert.Equal(t, domain.DependencyBlocks, got.Dependencies[0].Type)
+	assert.Empty(t, got.Dependencies)
 	require.NotNil(t, got.Session)
 	assert.Equal(t, domain.SessionBusy, got.Session.State)
 	assert.Equal(t, "idle", got.Session.Activity)
@@ -763,6 +761,19 @@ func TestClient_ListSummariesWithRuntimeKeepsGraphAndRuntimeProjection(t *testin
 	assert.Empty(t, got.Design)
 	assert.Empty(t, got.Notes)
 	assert.Empty(t, got.Acceptance)
+
+	tasks, err = client.ListSummariesWithRuntimeDependencies(ctx, projectID)
+	require.NoError(t, err)
+	taskByID = map[string]domain.Task{}
+	for _, task := range tasks {
+		taskByID[task.ID.String()] = task
+	}
+	got = taskByID[childID]
+	require.NotNil(t, got.ParentID)
+	assert.Equal(t, parentID, got.ParentID.String())
+	require.Len(t, got.Dependencies, 1)
+	assert.Equal(t, blockerID, got.Dependencies[0].ID.String())
+	assert.Equal(t, domain.DependencyBlocks, got.Dependencies[0].Type)
 }
 
 func TestClient_ListGraphReadinessWithRuntimeScopesToRootClosure(t *testing.T) {
@@ -1252,6 +1263,33 @@ func TestTaskRuntimeProjectionFilteredQueryUsesProjectionIndexes(t *testing.T) {
 	assert.Contains(t, got, "idx_daemon_session_observations_project_issue", got)
 	assert.Contains(t, got, "sqlite_autoindex_daemon_worktree_projections_1", got)
 	assert.Contains(t, got, "idx_issue_external_refs_issue_active", got)
+}
+
+func TestTaskDependencyRowsParentOnlyQueryUsesActiveIssueTypeIndex(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+
+	query, typeArgs := taskDependencyRowsQuery(2, taskDependencyLoadParentOnly)
+	args := append([]any{"first", "second"}, typeArgs...)
+	rows, err := db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+query, args...)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	plan := strings.Builder{}
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &notUsed, &detail))
+		plan.WriteString(detail)
+		plan.WriteByte('\n')
+	}
+	require.NoError(t, rows.Err())
+
+	got := plan.String()
+	assert.Contains(t, query, "dependency_type IN (?, ?)")
+	assert.Contains(t, got, "idx_dependencies_issue_active_type", got)
 }
 
 func TestClient_UpdateWithRuntimeReturnsChangedTask(t *testing.T) {

@@ -24,7 +24,8 @@ const (
 // TaskListRequestBody is the optional request body for task.list. Empty bodies
 // preserve the default summary-list behavior for older clients.
 type TaskListRequestBody struct {
-	Query string `json:"query,omitempty" msgpack:"query,omitempty"`
+	Query               string `json:"query,omitempty" msgpack:"query,omitempty"`
+	IncludeDependencies bool   `json:"include_dependencies,omitempty" msgpack:"include_dependencies,omitempty"`
 }
 
 func (f TaskListFreshness) Valid() bool {

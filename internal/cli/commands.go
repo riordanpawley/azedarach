@@ -3234,6 +3234,13 @@ func listTasksSnapshotForCLI(ctx context.Context, deps *Dependencies) (daemoncli
 	return deps.DaemonClient.ListTasksSnapshot(ctx)
 }
 
+func listTasksSnapshotWithDependenciesForCLI(ctx context.Context, deps *Dependencies) (daemonclient.TaskSnapshot, error) {
+	if deps == nil || deps.DaemonClient == nil {
+		return daemonclient.TaskSnapshot{}, fmt.Errorf("daemon client unavailable")
+	}
+	return deps.DaemonClient.ListTasksSnapshotWithDependencies(ctx)
+}
+
 func resolveIssueWriteImplementation(ctx context.Context, deps *Dependencies, provided string) (string, error) {
 	trimmed := strings.TrimSpace(provided)
 	impls, err := issueWriteImplementationOptions(ctx, deps)
@@ -3715,6 +3722,8 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 	)
 	if strings.TrimSpace(opts.Query) != "" {
 		snapshot, err = deps.DaemonClient.ListTasksSnapshotWithQuery(ctx, opts.Query)
+	} else if opts.Deps || len(opts.DependsOnIDs) > 0 {
+		snapshot, err = listTasksSnapshotWithDependenciesForCLI(ctx, deps)
 	} else {
 		snapshot, err = listTasksSnapshotForCLI(ctx, deps)
 	}
@@ -6324,7 +6333,7 @@ func PrimeCommand(deps *Dependencies) error {
 	var snapshot daemonclient.TaskSnapshot
 	snapshotLoaded := false
 	if deps != nil && deps.DaemonClient != nil {
-		loaded, err := deps.DaemonClient.ListTasksSnapshot(context.Background())
+		loaded, err := deps.DaemonClient.ListTasksSnapshotWithDependencies(context.Background())
 		if err == nil {
 			snapshot = loaded
 			snapshotLoaded = true

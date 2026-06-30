@@ -996,7 +996,7 @@ func TestLoadTaskListSnapshotSharesInFlightProjectLoad(t *testing.T) {
 			Kind:            protocol.EnvelopeKindCommand,
 			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 			Command:         "task.list",
-		}, projectID, "")
+		}, projectID, "", false)
 		if !shared {
 			errCh <- errors.New("load was not shared")
 			return
@@ -1075,7 +1075,7 @@ func TestLoadTaskListSnapshotUsesDetachedBuildContext(t *testing.T) {
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 		Command:         "task.list",
-	}, projectID, "")
+	}, projectID, "", false)
 	if err != nil {
 		t.Fatalf("loadTaskListSnapshot error = %v, want detached load to succeed", err)
 	}
@@ -1155,6 +1155,117 @@ func TestHandleTaskListAppliesContentQueryInDaemon(t *testing.T) {
 	}
 	if payload.Tasks[0].Description == "" {
 		t.Fatalf("query task list lost full issue content: %+v", payload.Tasks[0])
+	}
+}
+
+func TestHandleTaskListIncludesDependenciesOnlyWhenRequested(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-list-deps"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Parent",
+		Type:     domain.TypeEpic,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create parent issue: %v", err)
+	}
+	blockerID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Blocker",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create blocker issue: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Child",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusOpen,
+		ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("create child issue: %v", err)
+	}
+	if err := issuesClient.AddDependency(ctx, childID, blockerID, string(domain.DependencyBlocks)); err != nil {
+		t.Fatalf("add blocker dependency: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 4},
+	}
+
+	decodeChild := func(t *testing.T, body []byte) domain.Task {
+		t.Helper()
+		payload, err := protocol.DecodeTaskListSnapshotPayload(body)
+		if err != nil {
+			t.Fatalf("decode task list body: %v", err)
+		}
+		for _, task := range payload.Tasks {
+			if task.ID.String() == childID {
+				return task
+			}
+		}
+		t.Fatalf("child %s missing from payload: %+v", childID, payload.Tasks)
+		return domain.Task{}
+	}
+
+	defaultResp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-list-deps-default",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.list",
+	})
+	if err != nil {
+		t.Fatalf("handle default task.list error: %v", err)
+	}
+	if !defaultResp.OK {
+		t.Fatalf("default task.list response = %+v", defaultResp.Error)
+	}
+	defaultTask := decodeChild(t, defaultResp.Body)
+	if defaultTask.ParentID == nil || defaultTask.ParentID.String() != parentID {
+		t.Fatalf("default parent = %v, want %s", defaultTask.ParentID, parentID)
+	}
+	if len(defaultTask.Dependencies) != 0 {
+		t.Fatalf("default dependencies = %+v, want none", defaultTask.Dependencies)
+	}
+
+	body, err := json.Marshal(protocol.TaskListRequestBody{IncludeDependencies: true})
+	if err != nil {
+		t.Fatalf("marshal dependency request: %v", err)
+	}
+	fullResp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-list-deps-full",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.list",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handle full-dependency task.list error: %v", err)
+	}
+	if !fullResp.OK {
+		t.Fatalf("full-dependency task.list response = %+v", fullResp.Error)
+	}
+	fullTask := decodeChild(t, fullResp.Body)
+	if fullTask.ParentID == nil || fullTask.ParentID.String() != parentID {
+		t.Fatalf("full parent = %v, want %s", fullTask.ParentID, parentID)
+	}
+	if len(fullTask.Dependencies) != 1 || fullTask.Dependencies[0].ID.String() != blockerID {
+		t.Fatalf("full dependencies = %+v, want blocker %s", fullTask.Dependencies, blockerID)
 	}
 }
 
