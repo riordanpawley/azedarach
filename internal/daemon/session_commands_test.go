@@ -3587,6 +3587,139 @@ func TestSessionPauseResumeAgentScopedTargetWritesHookActivity(t *testing.T) {
 	}
 }
 
+func TestSessionPauseResumeAgentScopedTargetRefreshesHookActivityWhenLifecycleUnchanged(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+	tests := []struct {
+		name          string
+		command       string
+		state         daemonstate.SessionState
+		staleActivity string
+		staleSource   string
+		wantActivity  string
+		handle        func(*Daemon, context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	}{
+		{
+			name:          "pause clears stale busy",
+			command:       daemonhandlers.CommandSessionPause,
+			state:         daemonstate.SessionStatePaused,
+			staleActivity: "busy",
+			staleSource:   "hooks",
+			wantActivity:  "idle",
+			handle:        (*Daemon).handleSessionPause,
+		},
+		{
+			name:          "resume clears stale idle",
+			command:       daemonhandlers.CommandSessionResume,
+			state:         daemonstate.SessionStateRunning,
+			staleActivity: "idle",
+			staleSource:   "hooks",
+			wantActivity:  "busy",
+			handle:        (*Daemon).handleSessionResume,
+		},
+		{
+			name:          "pause restores missing hook source",
+			command:       daemonhandlers.CommandSessionPause,
+			state:         daemonstate.SessionStatePaused,
+			staleActivity: "idle",
+			wantActivity:  "idle",
+			handle:        (*Daemon).handleSessionPause,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			canonicalSessionID := naming.CanonicalSessionID(projectID, issueID)
+			agentSessionID := canonicalSessionID + ".pane-190"
+			tmuxRunner := newTestTmuxRunner(canonicalSessionID)
+			close(tmuxRunner.killRelease)
+			store := daemonstate.NewStore()
+			now := time.Now().UTC()
+			store.ReplaceProjectSessions(projectID, []daemonstate.Session{
+				{
+					ID:            canonicalSessionID,
+					IssueID:       issueID,
+					State:         daemonstate.SessionStateRunning,
+					ObservedState: daemonstate.SessionStateRunning,
+					Activity:      "busy",
+					StartedAt:     &now,
+					UpdatedAt:     now,
+				},
+				{
+					ID:             agentSessionID,
+					IssueID:        issueID,
+					State:          tt.state,
+					ObservedState:  tt.state,
+					Activity:       tt.staleActivity,
+					ActivitySource: tt.staleSource,
+					StartedAt:      &now,
+					UpdatedAt:      now,
+				},
+			})
+			runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+			t.Cleanup(func() {
+				_ = runtimeStateStore.Close()
+			})
+			if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+				ID:             agentSessionID,
+				IssueID:        issueID,
+				State:          tt.state,
+				ObservedState:  tt.state,
+				Activity:       tt.staleActivity,
+				ActivitySource: tt.staleSource,
+				StartedAt:      &now,
+				UpdatedAt:      now,
+			}); err != nil {
+				t.Fatalf("seed stale agent runtime state: %v", err)
+			}
+			daemon := &Daemon{
+				cfg: Config{
+					RepoDir: ".",
+					Logger:  slog.Default(),
+				},
+				tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+				session:      daemonhandlers.NewSessionHandler(store),
+				sessionStore: store,
+				runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+					".": runtimeStateStore,
+				},
+			}
+
+			resp, err := tt.handle(daemon, context.Background(), protocol.RequestEnvelope{
+				ProtocolVersion: protocol.CurrentVersion,
+				RequestID:       "req-agent-lifecycle-unchanged",
+				Kind:            protocol.EnvelopeKindCommand,
+				Command:         tt.command,
+				Meta: protocol.Metadata{
+					ProjectID: naming.ProjectID(projectID),
+				},
+				Body: marshalJSON(map[string]string{
+					"project_id": projectID,
+					"issue_id":   issueID,
+					"session_id": agentSessionID,
+				}),
+			})
+			if err != nil {
+				t.Fatalf("handler returned error: %v", err)
+			}
+			if !resp.OK {
+				t.Fatalf("response not ok: %+v", resp.Error)
+			}
+			row, found, err := runtimeStateStore.GetSessionState(context.Background(), projectID, agentSessionID)
+			if err != nil {
+				t.Fatalf("get agent session runtime state: %v", err)
+			}
+			if !found {
+				t.Fatal("agent session runtime state not found")
+			}
+			if row.Activity != tt.wantActivity || row.ActivitySource != "hooks" {
+				t.Fatalf("agent session activity = %s/%s, want %s/hooks", row.Activity, row.ActivitySource, tt.wantActivity)
+			}
+		})
+	}
+}
+
 func waitForSessionState(t *testing.T, store *daemonstate.Store, projectID, sessionID string, want daemonstate.SessionState) {
 	t.Helper()
 	deadline := time.After(time.Second)

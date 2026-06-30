@@ -1045,7 +1045,7 @@ func (d *Daemon) handleSessionPause(ctx context.Context, req protocol.RequestEnv
 	if !exists {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found: %s (use 'az start %s' to create)", cmd.IssueID, cmd.IssueID)), nil
 	}
-	if !d.sessionLifecycleTransitionNeeded(cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonstate.SessionStatePaused) {
+	if !d.sessionLifecycleOrAgentActivityTransitionNeeded(cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonstate.SessionStatePaused) {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("daemon session pause unchanged",
 				"project_id", cmd.ProjectID,
@@ -1095,7 +1095,7 @@ func (d *Daemon) handleSessionResume(ctx context.Context, req protocol.RequestEn
 	if !exists {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found: %s (use 'az start %s' to create)", cmd.IssueID, cmd.IssueID)), nil
 	}
-	if !d.sessionLifecycleTransitionNeeded(cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonstate.SessionStateAttached) {
+	if !d.sessionLifecycleOrAgentActivityTransitionNeeded(cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonstate.SessionStateAttached) {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("daemon session resume unchanged",
 				"project_id", cmd.ProjectID,
