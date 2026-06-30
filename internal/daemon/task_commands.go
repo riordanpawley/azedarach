@@ -3161,7 +3161,7 @@ func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID s
 }
 
 func (d *Daemon) taskGraphReadiness(ctx context.Context, projectID, rootIssueID string) (taskGraphReadinessResult, error) {
-	tasks, err := d.loadTaskGraphDomainTasks(ctx, projectID)
+	tasks, err := d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootIssueID)
 	if err != nil {
 		return taskGraphReadinessResult{}, fmt.Errorf("inspect issue graph readiness: %w", err)
 	}
@@ -3186,6 +3186,28 @@ func (d *Daemon) taskGraphReadiness(ctx context.Context, projectID, rootIssueID 
 	ready.ActiveSessions = append(ready.ActiveSessions, daemonTaskGraphCleanupPendingSessions(rootID, byID, children)...)
 	ready.SessionStartProgress = daemonTaskGraphSessionStartProgressList(rootID, children, startProgressByIssue)
 	return ready, nil
+}
+
+func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectID, rootIssueID string) ([]domain.Task, error) {
+	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("task graph session runtime refresh failed", "project_id", projectID, "root_issue_id", rootIssueID, "error", err)
+	}
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil, fmt.Errorf("issue store unavailable")
+	}
+	tasks, err := issueClient.ListGraphReadinessWithRuntime(ctx, projectID, rootIssueID)
+	if err != nil {
+		return nil, err
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("task graph readiness loaded root-scoped tasks",
+			"project_id", projectID,
+			"root_issue_id", rootIssueID,
+			"task_count", len(tasks),
+		)
+	}
+	return d.enrichTasksWithSessionState(ctx, projectID, tasks), nil
 }
 
 func (result *taskGraphReadinessResult) removeRunnableSessionStarts(progressByIssue map[string]taskGraphSessionStartProgress) {

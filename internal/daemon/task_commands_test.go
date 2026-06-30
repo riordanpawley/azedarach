@@ -4147,6 +4147,93 @@ func TestTaskGraphReadinessReportsMissingDependencyAndActiveSession(t *testing.T
 	}
 }
 
+func TestTaskGraphReadinessLoadsRootScopedTasksWithLargeUnrelatedProject(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-root-scoped-readiness"
+	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Watched root",
+		Type:     domain.TypeEpic,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	blockerID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "External blocker",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Watched child",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusOpen,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := issuesClient.AddDependency(ctx, childID, blockerID, string(domain.DependencyBlocks)); err != nil {
+		t.Fatalf("add blocker dependency: %v", err)
+	}
+	for i := 0; i < 250; i++ {
+		unrelatedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+			Title:    fmt.Sprintf("Unrelated %03d", i),
+			Type:     domain.TypeTask,
+			Priority: domain.P3,
+			Status:   domain.StatusOpen,
+		})
+		if err != nil {
+			t.Fatalf("create unrelated %d: %v", i, err)
+		}
+		if unrelatedID == rootID || unrelatedID == childID || unrelatedID == blockerID {
+			t.Fatalf("unexpected duplicate unrelated id %s", unrelatedID)
+		}
+	}
+
+	d := &Daemon{
+		cfg: Config{Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+	}
+	tasks, err := d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("loadTaskGraphReadinessDomainTasks error: %v", err)
+	}
+	byID := map[string]domain.Task{}
+	for _, task := range tasks {
+		byID[task.ID.String()] = task
+	}
+	if got, want := len(byID), 3; got != want {
+		t.Fatalf("root-scoped task count = %d, want %d (%s, %s, %s); tasks=%v", got, want, rootID, childID, blockerID, byID)
+	}
+	for _, wantID := range []string{rootID, childID, blockerID} {
+		if _, ok := byID[wantID]; !ok {
+			t.Fatalf("root-scoped tasks missing %s: tasks=%v", wantID, byID)
+		}
+	}
+
+	ready, err := d.taskGraphReadiness(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskGraphReadiness error: %v", err)
+	}
+	if got := ready.Blocked[childID]; !strings.Contains(got, blockerID) {
+		t.Fatalf("blocked[%s] = %q, want blocker %s", childID, got, blockerID)
+	}
+	if len(ready.Runnable) != 0 {
+		t.Fatalf("runnable = %v, want none while blocker is open", ready.Runnable)
+	}
+}
+
 func TestTaskGraphReadinessSurfacesPendingSessionStartProgress(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()

@@ -872,6 +872,36 @@ func (c *Client) ListSummariesWithRuntime(ctx context.Context, projectID string)
 	return tasks, nil
 }
 
+// ListGraphReadinessWithRuntime fetches the root graph plus direct dependency
+// context needed by daemon graph-readiness checks. The read scales with the
+// requested root graph instead of all active issues in the project.
+func (c *Client) ListGraphReadinessWithRuntime(ctx context.Context, projectID, rootID string) ([]domain.Task, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	rootID = strings.TrimSpace(rootID)
+	if rootID == "" {
+		return []domain.Task{}, nil
+	}
+	issueIDs, err := c.graphReadinessContextIDs(ctx, db, rootID)
+	if err != nil {
+		return nil, c.wrapError("list-graph-readiness-with-runtime", rootID, err)
+	}
+	if len(issueIDs) == 0 {
+		return []domain.Task{}, nil
+	}
+	tasks, err := c.queryTasksWithRuntimeProjection(ctx, db, projectID, false, issueIDs...)
+	if err != nil {
+		return nil, c.wrapError("list-graph-readiness-with-runtime", rootID, err)
+	}
+	return tasks, nil
+}
+
 // GetWithRuntime fetches one active issue with runtime projection fields.
 func (c *Client) GetWithRuntime(ctx context.Context, projectID, id string) (domain.Task, error) {
 	db, err := c.dbHandle()
@@ -1111,6 +1141,57 @@ func (c *Client) GetManyWithDependencyContextRuntime(ctx context.Context, projec
 		return nil, c.wrapError("get-many-with-dependency-context-runtime", strings.Join(issueIDs, ","), err)
 	}
 	return tasks, nil
+}
+
+func (c *Client) graphReadinessContextIDs(ctx context.Context, db *sql.DB, rootID string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		WITH RECURSIVE graph(id) AS (
+			SELECT id
+			FROM issues
+			WHERE id = ? AND deleted_at IS NULL
+
+			UNION
+
+			SELECT dep.issue_id
+			FROM issue_dependencies dep
+			JOIN graph parent ON parent.id = dep.depends_on_id
+			JOIN issues child ON child.id = dep.issue_id AND child.deleted_at IS NULL
+			WHERE dep.tombstoned_at IS NULL
+				AND dep.dependency_type IN (?, ?)
+		),
+		context(id) AS (
+			SELECT id FROM graph
+
+			UNION
+
+			SELECT dep.depends_on_id
+			FROM issue_dependencies dep
+			JOIN graph graph_issue ON graph_issue.id = dep.issue_id
+			WHERE dep.tombstoned_at IS NULL
+		)
+		SELECT DISTINCT context.id
+		FROM context
+		JOIN issues i ON i.id = context.id AND i.deleted_at IS NULL
+	`, rootID, string(domain.DependencyParentChild), "parent_child")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0, 16)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(id) != "" {
+			ids = append(ids, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // GetManyMetadataWithRuntime fetches lightweight issue metadata plus stored runtime projection fields.
