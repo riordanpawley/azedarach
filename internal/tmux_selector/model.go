@@ -303,6 +303,7 @@ func (m *Model) logReadyToRender(trigger string) {
 	}
 	slog.Default().Info("tmux selector ready to render",
 		"elapsed_ms", m.elapsedSinceStart().Milliseconds(),
+		"first_render_elapsed_ms", m.elapsedSinceStart().Milliseconds(),
 		"trigger", trigger,
 		"session_count", len(m.snapshot.Entries),
 		"tree_task_count", len(m.snapshot.TreeTasks),
