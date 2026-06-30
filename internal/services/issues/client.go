@@ -1236,6 +1236,17 @@ func (c *Client) GetManyMetadataWithAncestorContextRuntime(ctx context.Context, 
 	return c.getManyMetadataWithRuntime(ctx, projectID, ids, true)
 }
 
+// GetRuntimeWorktreeIssueContext fetches only the requested issues and their
+// parent-child ancestors, with lightweight metadata and runtime projection
+// fields. Runtime projection maintenance uses this to answer eligibility and
+// ancestor-base questions without hydrating the full project task list.
+func (c *Client) GetRuntimeWorktreeIssueContext(ctx context.Context, projectID string, ids []string) ([]domain.Task, error) {
+	if len(uniqueIssueIDStrings(ids)) == 0 {
+		return []domain.Task{}, nil
+	}
+	return c.getManyMetadataWithRuntime(ctx, projectID, ids, true)
+}
+
 func (c *Client) getManyMetadataWithRuntime(ctx context.Context, projectID string, ids []string, includeAncestors bool) ([]domain.Task, error) {
 	db, err := c.dbHandle()
 	if err != nil {
