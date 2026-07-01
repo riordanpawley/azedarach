@@ -30,7 +30,7 @@ Commands:
   ai hook run --agent=<claude|codex> [--json] <event>  Run an agent hook through the shared internal port
   tmux <selector|install-selector|uninstall-selector>  Manage tmux selector integration
   spec <subcommand>          Spec workflows (req|link|read|pack|lint|parity)
-  decision <subcommand>      Decision records with rationale (list|get|create|update|delete|link)
+  decision <subcommand>      Decision records with rationale (list|get|record|update|delete|revisit|sync|import|link)
   issue list [--project <project-id>] [--json] [--deps] [--query <text>|-q <text>] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c]  List issues from daemon-backed store
   issue search [--project <project-id>] [--json] [--deps] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)  Search title, description, notes, design, acceptance, labels, and implementations
   issue get [--project <project-id>] [--id <id>] [--json] [--with-notes] [<id>]  Show a single issue from daemon-backed store
@@ -179,10 +179,10 @@ Examples:
   az spec read --issue bgh
   az spec lint --strict
   az spec parity --fail-on-out
-  az decision create --id use-sqlite --title "Use SQLite for store" --status accepted --issue cgn
+  az decision record --title "Use SQLite for store" --rationale "Keep the store local and durable" --issue cgn
   az decision list --issue cgn
-  az decision get --id use-sqlite --with-links
-  az decision link add --id use-sqlite --req cgn-req-1 --relation implements
+  az decision get --id dec-1 --with-links
+  az decision link add --id dec-1 --req cgn-req-1 --relation applies-to
   az prime
   az export --format json
   az export --format json --out snapshot.json
