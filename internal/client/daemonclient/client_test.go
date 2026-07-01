@@ -156,7 +156,7 @@ func TestClientCommandRetriesSocketUnavailableForReadCommand(t *testing.T) {
 }
 
 func TestClientCommandRetriesUnavailableShuttingDownReadResponse(t *testing.T) {
-	for _, command := range []string{CommandTaskGet, CommandTaskGetMany, protocol.CommandMailWatch} {
+	for _, command := range []string{CommandTaskGet, CommandTaskGetMany, protocol.CommandLearnRecall, protocol.CommandMailWatch} {
 		t.Run(command, func(t *testing.T) {
 			attempts := 0
 			c := New(&fakeTransport{
@@ -191,6 +191,38 @@ func TestClientCommandRetriesUnavailableShuttingDownReadResponse(t *testing.T) {
 				t.Fatalf("command attempts = %d, want 2", attempts)
 			}
 		})
+	}
+}
+
+func TestClientCommandDoesNotRetryLearnReviewAsReadCommand(t *testing.T) {
+	attempts := 0
+	c := New(&fakeTransport{
+		commandFn: func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			attempts++
+			return protocol.ResponseEnvelope{
+				OK: false,
+				Error: &protocol.ErrorEnvelope{
+					Code:      protocol.ErrorCodeUnavailable,
+					Message:   "daemon shutting down",
+					Retryable: true,
+				},
+			}, nil
+		},
+	}).WithReconnectPolicy(reconnect.Policy{
+		MaxAttempts: 2,
+		BaseBackoff: 0,
+		MaxBackoff:  0,
+	})
+
+	resp, err := c.Command(context.Background(), protocol.RequestEnvelope{Command: protocol.CommandLearnReview})
+	if err != nil {
+		t.Fatalf("Command error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeUnavailable {
+		t.Fatalf("response = %+v, want final unavailable response", resp)
+	}
+	if attempts != 1 {
+		t.Fatalf("command attempts = %d, want 1", attempts)
 	}
 }
 

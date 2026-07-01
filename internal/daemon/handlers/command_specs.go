@@ -18,6 +18,7 @@ const (
 	CommandDispatchPR
 	CommandDispatchSpec
 	CommandDispatchDecision
+	CommandDispatchLearn
 	CommandDispatchGit
 	CommandDispatchWorktree
 	CommandDispatchDevServer
@@ -103,6 +104,11 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandDecisionLinkRemove:     {Command: protocol.CommandDecisionLinkRemove, DispatchTarget: CommandDispatchDecision},
 	protocol.CommandDecisionSyncMD:         {Command: protocol.CommandDecisionSyncMD, DispatchTarget: CommandDispatchDecision},
 	protocol.CommandDecisionImportMD:       {Command: protocol.CommandDecisionImportMD, DispatchTarget: CommandDispatchDecision},
+	protocol.CommandLearnAdd:               {Command: protocol.CommandLearnAdd, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
+	protocol.CommandLearnRecall:            {Command: protocol.CommandLearnRecall, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
+	protocol.CommandLearnShow:              {Command: protocol.CommandLearnShow, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
+	protocol.CommandLearnReview:            {Command: protocol.CommandLearnReview, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
+	protocol.CommandLearnPromote:           {Command: protocol.CommandLearnPromote, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	CommandGitFetch:                        {Command: CommandGitFetch, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
 	CommandGitMerge:                        {Command: CommandGitMerge, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
 	CommandGitCheckout:                     {Command: CommandGitCheckout, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
@@ -189,7 +195,7 @@ func DaemonRoutesThroughDispatcher(command string) bool {
 		return false
 	}
 	switch target {
-	case CommandDispatchOperation, CommandDispatchPR, CommandDispatchSpec, CommandDispatchDecision, CommandDispatchGit, CommandDispatchWorktree, CommandDispatchDevServer:
+	case CommandDispatchOperation, CommandDispatchPR, CommandDispatchSpec, CommandDispatchDecision, CommandDispatchLearn, CommandDispatchGit, CommandDispatchWorktree, CommandDispatchDevServer:
 		return true
 	default:
 		return false
@@ -223,7 +229,7 @@ func ValidateCommandSpecs() error {
 			return fmt.Errorf("command spec %q declares mismatched Command value %q", key, spec.Command)
 		}
 		switch spec.DispatchTarget {
-		case CommandDispatchNone, CommandDispatchSession, CommandDispatchOperation, CommandDispatchPR, CommandDispatchSpec, CommandDispatchDecision, CommandDispatchGit, CommandDispatchWorktree, CommandDispatchDevServer:
+		case CommandDispatchNone, CommandDispatchSession, CommandDispatchOperation, CommandDispatchPR, CommandDispatchSpec, CommandDispatchDecision, CommandDispatchLearn, CommandDispatchGit, CommandDispatchWorktree, CommandDispatchDevServer:
 		default:
 			return fmt.Errorf("command spec %q declares unknown dispatch target %d", key, spec.DispatchTarget)
 		}
@@ -258,6 +264,10 @@ func ValidateDispatcherWiring(d *Dispatcher) error {
 		case CommandDispatchDecision:
 			if d.decision == nil {
 				return fmt.Errorf("command %q dispatches to decision handler but dispatcher decision handler is nil", command)
+			}
+		case CommandDispatchLearn:
+			if d.learn == nil {
+				return fmt.Errorf("command %q dispatches to learn handler but dispatcher learn handler is nil", command)
 			}
 		case CommandDispatchGit:
 			if d.git == nil {

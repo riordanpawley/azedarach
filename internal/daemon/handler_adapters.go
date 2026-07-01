@@ -30,6 +30,10 @@ type issueSpecService struct {
 	daemon *Daemon
 }
 
+type issueLearnService struct {
+	daemon *Daemon
+}
+
 func (s issueSpecService) issueClient(ctx context.Context) (*issues.Client, error) {
 	if s.daemon == nil {
 		return nil, errors.New("issue store unavailable")
@@ -39,6 +43,150 @@ func (s issueSpecService) issueClient(ctx context.Context) (*issues.Client, erro
 		return nil, errors.New("issue store unavailable")
 	}
 	return client, nil
+}
+
+func (s issueLearnService) issueClient(ctx context.Context) (*issues.Client, error) {
+	if s.daemon == nil {
+		return nil, errors.New("issue store unavailable")
+	}
+	client := s.daemon.issueClientForProject(daemonProjectIDFromContext(ctx))
+	if client == nil {
+		return nil, errors.New("issue store unavailable")
+	}
+	return client, nil
+}
+
+func (s issueLearnService) Add(ctx context.Context, req protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnAddResponseBody{}, err
+	}
+	params := issues.CreateLearningParams{
+		ProjectID: firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)),
+		Summary:   req.Summary,
+		Evidence:  req.Evidence,
+		Tags:      req.Tags,
+		Files:     req.Files,
+	}
+	if req.IssueID != "" {
+		issueID := req.IssueID.String()
+		params.IssueID = &issueID
+	}
+	if req.ReqID != "" {
+		reqID := req.ReqID.String()
+		params.RequirementID = &reqID
+	}
+	if req.SessionID != "" {
+		sessionID := req.SessionID.String()
+		params.SessionID = &sessionID
+	}
+	learning, err := client.CreateLearning(ctx, params)
+	if err != nil {
+		return protocol.LearnAddResponseBody{}, err
+	}
+	return protocol.LearnAddResponseBody{Learning: mapLearningToProtocol(learning, true)}, nil
+}
+
+func (s issueLearnService) Recall(ctx context.Context, req protocol.LearnRecallRequestBody) (protocol.LearnRecallResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnRecallResponseBody{}, err
+	}
+	statuses := make([]issues.LearningStatus, 0, len(req.Statuses))
+	for _, status := range req.Statuses {
+		statuses = append(statuses, issues.LearningStatus(status))
+	}
+	if len(statuses) == 0 {
+		statuses = []issues.LearningStatus{issues.LearningStatusAccepted, issues.LearningStatusPromoted}
+	}
+	filter := issues.LearningFilter{
+		ProjectID:       firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)),
+		IssueID:         req.IssueID.String(),
+		RequirementID:   req.ReqID.String(),
+		Query:           req.Query,
+		Statuses:        statuses,
+		Tags:            req.Tags,
+		Files:           req.Files,
+		Limit:           req.Limit,
+		IncludeEvidence: req.IncludeEvidence,
+	}
+	if filter.Limit == 0 {
+		filter.Limit = 5
+	}
+	rows, err := client.ListLearnings(ctx, filter)
+	if err != nil {
+		return protocol.LearnRecallResponseBody{}, err
+	}
+	out := make([]protocol.Learning, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, mapLearningToProtocol(row, req.IncludeEvidence))
+	}
+	return protocol.LearnRecallResponseBody{Learnings: out}, nil
+}
+
+func (s issueLearnService) Show(ctx context.Context, req protocol.LearnShowRequestBody) (protocol.LearnShowResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnShowResponseBody{}, err
+	}
+	row, err := client.GetLearning(ctx, req.ID)
+	if err != nil {
+		return protocol.LearnShowResponseBody{}, err
+	}
+	return protocol.LearnShowResponseBody{Learning: mapLearningToProtocol(row, true)}, nil
+}
+
+func (s issueLearnService) Review(ctx context.Context, req protocol.LearnReviewRequestBody) (protocol.LearnReviewResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnReviewResponseBody{}, err
+	}
+	if req.ID != "" {
+		updated, err := client.UpdateLearningStatus(ctx, req.ID, issues.LearningStatus(req.Status), req.Note)
+		if err != nil {
+			return protocol.LearnReviewResponseBody{}, err
+		}
+		mapped := mapLearningToProtocol(updated, true)
+		return protocol.LearnReviewResponseBody{Updated: &mapped}, nil
+	}
+	limit := req.Limit
+	if limit == 0 {
+		limit = 20
+	}
+	rows, err := client.ListLearnings(ctx, issues.LearningFilter{
+		ProjectID:       daemonProjectIDFromContext(ctx),
+		Statuses:        []issues.LearningStatus{issues.LearningStatusCandidate},
+		Limit:           limit,
+		IncludeEvidence: false,
+	})
+	if err != nil {
+		return protocol.LearnReviewResponseBody{}, err
+	}
+	out := make([]protocol.Learning, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, mapLearningToProtocol(row, false))
+	}
+	return protocol.LearnReviewResponseBody{Learnings: out}, nil
+}
+
+func (s issueLearnService) Promote(ctx context.Context, req protocol.LearnPromoteRequestBody) (protocol.LearnPromoteResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnPromoteResponseBody{}, err
+	}
+	row, err := client.PromoteLearning(ctx, req.ID, issues.PromoteLearningParams{
+		Target:   issues.LearningPromotionTarget(req.Target),
+		TargetID: req.TargetID,
+		Note:     req.Note,
+	})
+	if err != nil {
+		return protocol.LearnPromoteResponseBody{}, err
+	}
+	mapped := mapLearningToProtocol(row, true)
+	return protocol.LearnPromoteResponseBody{
+		Learning: mapped,
+		Guidance: learningPromotionGuidance(mapped),
+	}, nil
 }
 
 func (s issueSpecService) ListRequirements(ctx context.Context, req protocol.SpecRequirementListRequestBody) (protocol.SpecRequirementListResponseBody, error) {
@@ -463,6 +611,77 @@ func mapLinkToProtocol(link issues.SpecLink) protocol.SpecLink {
 		out.Note = *link.Note
 	}
 	return out
+}
+
+func mapLearningToProtocol(learning issues.Learning, includeEvidence bool) protocol.Learning {
+	out := protocol.Learning{
+		ID:         learning.LocalID,
+		ProjectID:  learning.ProjectID,
+		Summary:    learning.Summary,
+		Status:     protocol.LearningStatus(learning.Status),
+		ReviewNote: learning.ReviewNote,
+		Tags:       append([]string(nil), learning.Tags...),
+		Files:      append([]string(nil), learning.Files...),
+		CreatedAt:  formatProtocolTime(learning.CreatedAt),
+		UpdatedAt:  formatProtocolTime(learning.UpdatedAt),
+	}
+	if includeEvidence {
+		out.Evidence = learning.Evidence
+	}
+	if learning.IssueID != nil {
+		out.IssueID = naming.IssueID(*learning.IssueID)
+	}
+	if learning.RequirementID != nil {
+		out.ReqID = naming.RequirementID(*learning.RequirementID)
+	}
+	if learning.SessionID != nil {
+		out.SessionID = naming.SessionID(*learning.SessionID)
+	}
+	if learning.ReviewedAt != nil {
+		out.ReviewedAt = formatProtocolTime(*learning.ReviewedAt)
+	}
+	if learning.Target != nil {
+		out.Target = protocol.LearningPromotionTarget(*learning.Target)
+	}
+	out.TargetID = learning.TargetID
+	out.TargetNote = learning.TargetNote
+	if learning.PromotedAt != nil {
+		out.PromotedAt = formatProtocolTime(*learning.PromotedAt)
+	}
+	return out
+}
+
+func formatProtocolTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func firstNonEmptyDaemon(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func learningPromotionGuidance(learning protocol.Learning) string {
+	switch learning.Target {
+	case protocol.LearningPromotionTargetDecision:
+		return fmt.Sprintf("Promotion recorded against decision %s. Keep the decision linked to the owning issue/requirement.", learning.TargetID)
+	case protocol.LearningPromotionTargetSpec:
+		return fmt.Sprintf("Promotion recorded against spec requirement %s. Keep the issue/spec link current.", learning.TargetID)
+	case protocol.LearningPromotionTargetRulesync:
+		return fmt.Sprintf("Promotion recorded against Rulesync target %s. Ensure generated agent instructions are refreshed from the source guidance.", learning.TargetID)
+	case protocol.LearningPromotionTargetAgents:
+		return fmt.Sprintf("Promotion recorded against AGENTS target %s. Keep the learning id in the guidance update evidence.", learning.TargetID)
+	case protocol.LearningPromotionTargetSkill:
+		return fmt.Sprintf("Promotion recorded against skill target %s. Keep the learning id in the skill update evidence.", learning.TargetID)
+	default:
+		return "Promotion recorded; update the selected curated guidance target and keep this learning id as evidence."
+	}
 }
 
 func requirementIDsToStrings(ids []naming.RequirementID) []string {

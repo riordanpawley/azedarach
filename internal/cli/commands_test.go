@@ -10600,6 +10600,79 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	}
 }
 
+func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
+	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+	var learnReq protocol.LearnRecallRequestBody
+
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := marshalTaskListBody([]domain.Task{{
+						ID:        "az-1",
+						Title:     "Prime issue",
+						Status:    domain.StatusOpen,
+						Priority:  domain.P2,
+						Type:      domain.TypeTask,
+						CreatedAt: now,
+						UpdatedAt: now,
+					}})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, CompletedAt: req.SentAt, Body: body}, nil
+				case protocol.CommandLearnRecall:
+					if err := json.Unmarshal(req.Body, &learnReq); err != nil {
+						t.Fatalf("decode learn recall request: %v", err)
+					}
+					body, err := json.Marshal(protocol.LearnRecallResponseBody{Learnings: []protocol.Learning{{
+						ID:       "learn-1",
+						IssueID:  naming.IssueID("az-1"),
+						Summary:  "Keep durable choices in decisions",
+						Evidence: "raw evidence should not be injected",
+						Status:   protocol.LearningStatusAccepted,
+					}}})
+					if err != nil {
+						t.Fatalf("marshal learn recall response: %v", err)
+					}
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, CompletedAt: req.SentAt, Body: body}, nil
+				default:
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, CompletedAt: req.SentAt}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		ProjectID: "proj",
+		Config:    &config.Config{Spec: config.SpecConfig{Enabled: true}},
+	}
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(deps)
+	})
+
+	if learnReq.IssueID != naming.IssueID("az-1") {
+		t.Fatalf("learn recall issue = %q, want az-1", learnReq.IssueID)
+	}
+	if learnReq.Limit != 3 {
+		t.Fatalf("learn recall limit = %d, want 3", learnReq.Limit)
+	}
+	if learnReq.IncludeEvidence {
+		t.Fatal("prime learn recall should not request evidence")
+	}
+	if !reflect.DeepEqual(learnReq.Statuses, []protocol.LearningStatus{protocol.LearningStatusAccepted, protocol.LearningStatusPromoted}) {
+		t.Fatalf("learn recall statuses = %#v", learnReq.Statuses)
+	}
+	if !strings.Contains(output, "Relevant accepted/promoted learnings:") ||
+		!strings.Contains(output, "- learn-1 [accepted]: Keep durable choices in decisions") ||
+		!strings.Contains(output, "Use `az learn show <learning-id>` for evidence; long evidence is not injected by default.") {
+		t.Fatalf("prime output missing learning section: %q", output)
+	}
+	if strings.Contains(output, "raw evidence should not be injected") {
+		t.Fatalf("prime output injected raw learning evidence: %q", output)
+	}
+}
+
 func TestPrimeCommandRecommendsChildIssuesForEpicContext(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
 	setPrimeTmuxAvailable(t, true)

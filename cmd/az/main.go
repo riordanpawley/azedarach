@@ -333,6 +333,12 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "learn":
+		if err := runLearnCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "sync":
 		if len(commandArgs) > 0 {
 			if commandArgs[0] == "help" || commandArgs[0] == "-h" || commandArgs[0] == "--help" {

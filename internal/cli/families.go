@@ -1295,6 +1295,15 @@ func PrintSpecUsage() {
 	fmt.Println("  az spec parity --fail-on-out")
 }
 
+func PrintLearnUsage() {
+	fmt.Println("Usage: az learn <add|recall|show|review|promote> [arguments]")
+	fmt.Println("  add      Capture an evidence-backed candidate learning")
+	fmt.Println("  recall   Search accepted/promoted learning summaries")
+	fmt.Println("  show     Show a learning with full evidence")
+	fmt.Println("  review   List candidates or update learning status")
+	fmt.Println("  promote  Mark a learning promoted toward curated guidance")
+}
+
 func PrintSpecReqUsage() {
 	fmt.Println("Usage: az spec req <list|get|create|update|delete> [arguments]")
 	fmt.Println("  list    List requirements")

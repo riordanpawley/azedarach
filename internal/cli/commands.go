@@ -6286,6 +6286,7 @@ type primeTemplateData struct {
 	QuestionFirstGuardrails  string
 	ImplementationSection    string
 	ImplementationGuardrails string
+	LearningSection          string
 	SpecGuardrails           string
 }
 
@@ -6303,6 +6304,7 @@ func PrimeCommand(deps *Dependencies) error {
 	questionFirstGuardrails := ""
 	implementationSection := ""
 	implementationGuardrails := "- Implementation guardrails: `--impl` assigns implementation/spec variants only; it is not graph/root membership or parent selection. To parent new work under the active issue, run `az issue create \"Child task\"` from the correct `AZEDARACH_ISSUE_ID` context; for another parent/root, add an explicit `parent-child` edge. In multi-implementation repos, include explicit `--impl <impl>` only on implementation-specific new issue writes and use repeated `--impl` only for intentional shared work. For `az issue update`, `--update-impl` is only for changing implementation assignments; status/title/notes updates do not require it."
+	learningSection := ""
 	specEnabled := deps != nil && deps.Config != nil && deps.Config.Spec.Enabled
 	orchestrationVia := primeOrchestrationVia(deps)
 	orchestrationViaAz := strings.EqualFold(orchestrationVia, "az")
@@ -6367,6 +6369,9 @@ func PrimeCommand(deps *Dependencies) error {
 			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nIssue not found in current project snapshot; run `az issue get %s`.\n", issueID, issueID)
 		}
 	}
+	if issueID != "" {
+		learningSection = renderPrimeLearningSection(context.Background(), deps, issueID)
+	}
 
 	output, err := clitext.Render("prime_output", primeTemplateData{
 		ActiveIssueID:            issueID,
@@ -6382,6 +6387,7 @@ func PrimeCommand(deps *Dependencies) error {
 		QuestionFirstGuardrails:  questionFirstGuardrails,
 		ImplementationSection:    implementationSection,
 		ImplementationGuardrails: implementationGuardrails,
+		LearningSection:          learningSection,
 		SpecGuardrails:           specGuardrails,
 	})
 	if err != nil {
@@ -6389,6 +6395,44 @@ func PrimeCommand(deps *Dependencies) error {
 	}
 	fmt.Print(output)
 	return nil
+}
+
+func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID string) string {
+	if deps == nil || deps.DaemonClient == nil || strings.TrimSpace(issueID) == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	payload, err := json.Marshal(protocol.LearnRecallRequestBody{
+		IssueID:  naming.IssueID(issueID),
+		Statuses: []protocol.LearningStatus{protocol.LearningStatusAccepted, protocol.LearningStatusPromoted},
+		Limit:    3,
+	})
+	if err != nil {
+		return ""
+	}
+	resp, err := deps.DaemonClient.Command(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       naming.RequestID(fmt.Sprintf("prime-learn-%d", time.Now().UnixNano())),
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         protocol.CommandLearnRecall,
+		SentAt:          time.Now().UTC(),
+		Body:            payload,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(deps.ProjectID)},
+	})
+	if err != nil || !resp.OK || len(resp.Body) == 0 {
+		return ""
+	}
+	var out protocol.LearnRecallResponseBody
+	if err := json.Unmarshal(resp.Body, &out); err != nil || len(out.Learnings) == 0 {
+		return ""
+	}
+	lines := []string{"Relevant accepted/promoted learnings:"}
+	for _, learning := range out.Learnings {
+		lines = append(lines, fmt.Sprintf("- %s [%s]: %s", learning.ID, learning.Status, learning.Summary))
+	}
+	lines = append(lines, "Use `az learn show <learning-id>` for evidence; long evidence is not injected by default.")
+	return strings.Join(lines, "\n")
 }
 
 func activeIssueIDFromTmuxPane(ctx context.Context, deps *Dependencies) (string, bool) {
