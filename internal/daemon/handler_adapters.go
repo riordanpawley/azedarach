@@ -181,13 +181,24 @@ func (s issueLearnService) Promote(ctx context.Context, req protocol.LearnPromot
 	if err != nil {
 		return protocol.LearnPromoteResponseBody{}, err
 	}
-	row, err := client.PromoteLearning(ctx, req.ID, issues.PromoteLearningParams{
-		Target:         issues.LearningPromotionTarget(req.Target),
-		TargetID:       req.TargetID,
-		Note:           req.Note,
-		TargetHash:     req.TargetHash,
-		TargetMetadata: req.TargetMetadata,
-	})
+	params := issues.PromoteLearningParams{
+		Target:               issues.LearningPromotionTarget(req.Target),
+		TargetID:             req.TargetID,
+		Note:                 req.Note,
+		TargetHash:           req.TargetHash,
+		TargetMetadata:       req.TargetMetadata,
+		CreateTarget:         req.CreateTarget,
+		TargetTitle:          req.TargetTitle,
+		TargetDescription:    req.TargetDescription,
+		DecisionRationale:    req.DecisionRationale,
+		DecisionContext:      req.DecisionContext,
+		DecisionConsequences: req.DecisionConsequences,
+	}
+	if req.TargetIssueID != "" {
+		issueID := req.TargetIssueID.String()
+		params.TargetIssueID = &issueID
+	}
+	row, err := client.PromoteLearning(ctx, req.ID, params)
 	if err != nil {
 		return protocol.LearnPromoteResponseBody{}, err
 	}

@@ -134,9 +134,13 @@ func TestParseLearnPromoteArgs(t *testing.T) {
 		errFrag string
 	}{
 		{name: "decision target", args: []string{"--target", "decision", "--target-id", "dec-1", "learn-1"}, ok: true},
+		{name: "create decision target", args: []string{"--target", "decision", "--create-target", "--target-title", "Decision title", "--decision-rationale", "Rationale.", "learn-1"}, ok: true},
+		{name: "create spec target", args: []string{"--target", "spec", "--target-id", "req-1", "--create-target", "--target-title", "Requirement title", "--target-description", "Requirement body.", "learn-1"}, ok: true},
 		{name: "target state metadata", args: []string{"--target", "agents", "--target-id", "AGENTS.md", "--target-hash", "sha256:target", "--target-meta", "path=AGENTS.md", "learn-1"}, ok: true},
 		{name: "missing target", args: []string{"--target-id", "dec-1", "learn-1"}, ok: false, errFrag: "--target"},
 		{name: "missing target id", args: []string{"--target", "decision", "learn-1"}, ok: false, errFrag: "--target-id"},
+		{name: "create decision missing rationale", args: []string{"--target", "decision", "--create-target", "--target-title", "Decision title", "learn-1"}, ok: false, errFrag: "--decision-rationale"},
+		{name: "create spec without title defers existence check", args: []string{"--target", "spec", "--target-id", "req-1", "--create-target", "learn-1"}, ok: true},
 		{name: "missing learning id", args: []string{"--target", "decision", "--target-id", "dec-1"}, ok: false, errFrag: "usage: az learn promote"},
 		{name: "bad target metadata", args: []string{"--target", "agents", "--target-id", "AGENTS.md", "--target-meta", "path", "learn-1"}, ok: false, errFrag: "target-meta must be key=value"},
 	}
