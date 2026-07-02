@@ -17,9 +17,12 @@ func TestRunLearnCommandHelpArgsReturnUsage(t *testing.T) {
 		{"recall", "-h"},
 		{"show", "help"},
 		{"review", "--help"},
+		{"stale", "--help"},
+		{"demote", "--help"},
 		{"promote", "--help"},
 		{"retire", "--help"},
 		{"relate", "--help"},
+		{"supersede", "--help"},
 	} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
 			output := captureLearnStdout(t, func() {
@@ -127,6 +130,51 @@ func TestParseLearnReviewArgs(t *testing.T) {
 	}
 }
 
+func TestParseLearnStaleArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		ok      bool
+		errFrag string
+	}{
+		{name: "learning id with note", args: []string{"--note", "No longer accurate.", "learn-1"}, ok: true},
+		{name: "json", args: []string{"--json", "--note", "No longer accurate.", "learn-1"}, ok: true},
+		{name: "missing note", args: []string{"learn-1"}, ok: false, errFrag: "--note"},
+		{name: "missing id", args: []string{"--note", "No longer accurate."}, ok: false, errFrag: "usage: az learn stale"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseLearnStaleArgs(tc.args)
+			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+			if tc.ok && (opts.ID != "learn-1" || opts.Note == "") {
+				t.Fatalf("opts = %+v, want id and note", opts)
+			}
+		})
+	}
+}
+
+func TestParseLearnDemoteArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		ok      bool
+		errFrag string
+	}{
+		{name: "learning id with note", args: []string{"--note", "Needs another review.", "learn-1"}, ok: true},
+		{name: "missing note", args: []string{"learn-1"}, ok: false, errFrag: "--note"},
+		{name: "too many ids", args: []string{"--note", "Needs another review.", "learn-1", "learn-2"}, ok: false, errFrag: "usage: az learn demote"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseLearnDemoteArgs(tc.args)
+			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+			if tc.ok && (opts.ID != "learn-1" || opts.Note == "") {
+				t.Fatalf("opts = %+v, want id and note", opts)
+			}
+		})
+	}
+}
+
 func TestParseLearnPromoteArgs(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -160,8 +208,9 @@ func TestParseLearnRetireArgs(t *testing.T) {
 		ok      bool
 		errFrag string
 	}{
-		{name: "learning id", args: []string{"learn-1"}, ok: true},
-		{name: "json", args: []string{"--json", "learn-1"}, ok: true},
+		{name: "learning id", args: []string{"--note", "Target removed.", "learn-1"}, ok: true},
+		{name: "json", args: []string{"--json", "--note", "Target removed.", "learn-1"}, ok: true},
+		{name: "missing note", args: []string{"learn-1"}, ok: false, errFrag: "--note"},
 		{name: "missing learning id", args: nil, ok: false, errFrag: "usage: az learn retire"},
 		{name: "too many learning ids", args: []string{"learn-1", "learn-2"}, ok: false, errFrag: "usage: az learn retire"},
 	}
@@ -169,8 +218,8 @@ func TestParseLearnRetireArgs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			opts, err := parseLearnRetireArgs(tc.args)
 			assertParseOutcome(t, err, tc.ok, tc.errFrag)
-			if tc.ok && opts.ID != "learn-1" {
-				t.Fatalf("id = %q, want learn-1", opts.ID)
+			if tc.ok && (opts.ID != "learn-1" || opts.Note == "") {
+				t.Fatalf("opts = %+v, want id and note", opts)
 			}
 		})
 	}
@@ -197,6 +246,33 @@ func TestParseLearnRelateArgs(t *testing.T) {
 			if tc.ok && opts.Type == "supersedes" {
 				if opts.SourceLearningID != "learn-2" || opts.TargetLearningID != "learn-1" {
 					t.Fatalf("relation ids = %q -> %q", opts.SourceLearningID, opts.TargetLearningID)
+				}
+				if len(opts.ScopeTags) != 1 {
+					t.Fatalf("scope tags = %+v, want deduped single tag", opts.ScopeTags)
+				}
+			}
+		})
+	}
+}
+
+func TestParseLearnSupersedeArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		ok      bool
+		errFrag string
+	}{
+		{name: "supersedes with scope", args: []string{"--note", "Newer guidance wins.", "--scope-issue", "cst", "--scope-req", "req-1", "--scope-tag", "daemon", "--scope-tag", "daemon", "--scope-file", "internal/config/config.go", "learn-2", "learn-1"}, ok: true},
+		{name: "missing note", args: []string{"learn-2", "learn-1"}, ok: false, errFrag: "--note"},
+		{name: "missing learning ids", args: []string{"--note", "Needs review.", "learn-2"}, ok: false, errFrag: "usage: az learn supersede"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseLearnSupersedeArgs(tc.args)
+			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+			if tc.ok {
+				if opts.NewLearningID != "learn-2" || opts.OldLearningID != "learn-1" {
+					t.Fatalf("relation ids = %q -> %q", opts.NewLearningID, opts.OldLearningID)
 				}
 				if len(opts.ScopeTags) != 1 {
 					t.Fatalf("scope tags = %+v, want deduped single tag", opts.ScopeTags)

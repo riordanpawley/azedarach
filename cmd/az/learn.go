@@ -54,6 +54,18 @@ type learnReviewOpts struct {
 	Limit  int
 }
 
+type learnStaleOpts struct {
+	JSON bool
+	ID   string
+	Note string
+}
+
+type learnDemoteOpts struct {
+	JSON bool
+	ID   string
+	Note string
+}
+
 type learnPromoteOpts struct {
 	JSON                 bool
 	ID                   string
@@ -74,6 +86,7 @@ type learnPromoteOpts struct {
 type learnRetireOpts struct {
 	JSON bool
 	ID   string
+	Note string
 }
 
 type learnRelateOpts struct {
@@ -87,6 +100,18 @@ type learnRelateOpts struct {
 	ScopeSession     string
 	ScopeTags        []string
 	ScopeFiles       []string
+}
+
+type learnSupersedeOpts struct {
+	JSON          bool
+	NewLearningID string
+	OldLearningID string
+	Note          string
+	ScopeIssue    string
+	ScopeReq      string
+	ScopeSession  string
+	ScopeTags     []string
+	ScopeFiles    []string
 }
 
 func runLearnCommand(cfg *config.Config, args []string) error {
@@ -127,6 +152,20 @@ func runLearnCommand(cfg *config.Config, args []string) error {
 			return err
 		}
 		return runLearnReviewRPC(cfg, opts)
+	case "stale":
+		opts, err := parseLearnStaleArgs(args[1:])
+		if err != nil {
+			printLearnUsage()
+			return err
+		}
+		return runLearnStaleRPC(cfg, opts)
+	case "demote":
+		opts, err := parseLearnDemoteArgs(args[1:])
+		if err != nil {
+			printLearnUsage()
+			return err
+		}
+		return runLearnDemoteRPC(cfg, opts)
 	case "promote":
 		opts, err := parseLearnPromoteArgs(args[1:])
 		if err != nil {
@@ -148,6 +187,13 @@ func runLearnCommand(cfg *config.Config, args []string) error {
 			return err
 		}
 		return runLearnRelateRPC(cfg, opts)
+	case "supersede":
+		opts, err := parseLearnSupersedeArgs(args[1:])
+		if err != nil {
+			printLearnUsage()
+			return err
+		}
+		return runLearnSupersedeRPC(cfg, opts)
 	default:
 		return fmt.Errorf("unknown learn command: %s", args[0])
 	}
@@ -231,6 +277,32 @@ func runLearnReviewRPC(cfg *config.Config, opts learnReviewOpts) error {
 	return nil
 }
 
+func runLearnStaleRPC(cfg *config.Config, opts learnStaleOpts) error {
+	req := protocol.LearnStaleRequestBody{ID: opts.ID, Note: opts.Note}
+	var out protocol.LearnStaleResponseBody
+	if err := runLearnRPC(cfg, protocol.CommandLearnStale, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Marked learning stale: %s [%s]\n", out.Learning.ID, out.Learning.Status)
+	return nil
+}
+
+func runLearnDemoteRPC(cfg *config.Config, opts learnDemoteOpts) error {
+	req := protocol.LearnDemoteRequestBody{ID: opts.ID, Note: opts.Note}
+	var out protocol.LearnDemoteResponseBody
+	if err := runLearnRPC(cfg, protocol.CommandLearnDemote, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Demoted learning: %s [%s]\n", out.Learning.ID, out.Learning.Status)
+	return nil
+}
+
 func runLearnPromoteRPC(cfg *config.Config, opts learnPromoteOpts) error {
 	req := protocol.LearnPromoteRequestBody{
 		ID:                   opts.ID,
@@ -260,7 +332,7 @@ func runLearnPromoteRPC(cfg *config.Config, opts learnPromoteOpts) error {
 
 func runLearnRetireRPC(cfg *config.Config, opts learnRetireOpts) error {
 	var out protocol.LearnRetireResponseBody
-	if err := runLearnRPC(cfg, protocol.CommandLearnRetire, protocol.LearnRetireRequestBody{ID: opts.ID}, &out); err != nil {
+	if err := runLearnRPC(cfg, protocol.CommandLearnRetire, protocol.LearnRetireRequestBody{ID: opts.ID, Note: opts.Note}, &out); err != nil {
 		return err
 	}
 	if opts.JSON {
@@ -284,6 +356,28 @@ func runLearnRelateRPC(cfg *config.Config, opts learnRelateOpts) error {
 	}
 	var out protocol.LearnRelateResponseBody
 	if err := runLearnRPC(cfg, protocol.CommandLearnRelate, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	printLearningRelation(out.Relation)
+	return nil
+}
+
+func runLearnSupersedeRPC(cfg *config.Config, opts learnSupersedeOpts) error {
+	req := protocol.LearnSupersedeRequestBody{
+		NewLearningID:  opts.NewLearningID,
+		OldLearningID:  opts.OldLearningID,
+		Note:           opts.Note,
+		ScopeIssueID:   naming.IssueID(opts.ScopeIssue),
+		ScopeReqID:     naming.RequirementID(opts.ScopeReq),
+		ScopeSessionID: naming.SessionID(opts.ScopeSession),
+		ScopeTags:      opts.ScopeTags,
+		ScopeFiles:     opts.ScopeFiles,
+	}
+	var out protocol.LearnSupersedeResponseBody
+	if err := runLearnRPC(cfg, protocol.CommandLearnSupersede, req, &out); err != nil {
 		return err
 	}
 	if opts.JSON {
@@ -523,6 +617,52 @@ func parseLearnReviewArgs(args []string) (learnReviewOpts, error) {
 	return opts, nil
 }
 
+func parseLearnStaleArgs(args []string) (learnStaleOpts, error) {
+	opts := learnStaleOpts{}
+	fs := flag.NewFlagSet("learn stale", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "json output")
+	fs.StringVar(&opts.Note, "note", "", "audit note")
+	if err := fs.Parse(args); err != nil {
+		return learnStaleOpts{}, err
+	}
+	if fs.NArg() != 1 {
+		return learnStaleOpts{}, fmt.Errorf("usage: az learn stale --note <text> <learning-id> [--json]")
+	}
+	opts.ID = strings.TrimSpace(fs.Arg(0))
+	opts.Note = strings.TrimSpace(opts.Note)
+	if opts.ID == "" {
+		return learnStaleOpts{}, fmt.Errorf("missing learning id")
+	}
+	if opts.Note == "" {
+		return learnStaleOpts{}, fmt.Errorf("missing required flag: --note")
+	}
+	return opts, nil
+}
+
+func parseLearnDemoteArgs(args []string) (learnDemoteOpts, error) {
+	opts := learnDemoteOpts{}
+	fs := flag.NewFlagSet("learn demote", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "json output")
+	fs.StringVar(&opts.Note, "note", "", "audit note")
+	if err := fs.Parse(args); err != nil {
+		return learnDemoteOpts{}, err
+	}
+	if fs.NArg() != 1 {
+		return learnDemoteOpts{}, fmt.Errorf("usage: az learn demote --note <text> <learning-id> [--json]")
+	}
+	opts.ID = strings.TrimSpace(fs.Arg(0))
+	opts.Note = strings.TrimSpace(opts.Note)
+	if opts.ID == "" {
+		return learnDemoteOpts{}, fmt.Errorf("missing learning id")
+	}
+	if opts.Note == "" {
+		return learnDemoteOpts{}, fmt.Errorf("missing required flag: --note")
+	}
+	return opts, nil
+}
+
 func isLearnReviewStatus(status string) bool {
 	switch status {
 	case string(protocol.LearningStatusAccepted), string(protocol.LearningStatusRejected), string(protocol.LearningStatusStale):
@@ -581,15 +721,20 @@ func parseLearnRetireArgs(args []string) (learnRetireOpts, error) {
 	fs := flag.NewFlagSet("learn retire", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.JSON, "json", false, "json output")
+	fs.StringVar(&opts.Note, "note", "", "retirement note")
 	if err := fs.Parse(args); err != nil {
 		return learnRetireOpts{}, err
 	}
 	if fs.NArg() != 1 {
-		return learnRetireOpts{}, fmt.Errorf("usage: az learn retire <learning-id> [--json]")
+		return learnRetireOpts{}, fmt.Errorf("usage: az learn retire --note <text> <learning-id> [--json]")
 	}
 	opts.ID = strings.TrimSpace(fs.Arg(0))
+	opts.Note = strings.TrimSpace(opts.Note)
 	if opts.ID == "" {
 		return learnRetireOpts{}, fmt.Errorf("missing learning id")
+	}
+	if opts.Note == "" {
+		return learnRetireOpts{}, fmt.Errorf("missing required flag: --note")
 	}
 	return opts, nil
 }
@@ -628,6 +773,35 @@ func parseLearnRelateArgs(args []string) (learnRelateOpts, error) {
 	return opts, nil
 }
 
+func parseLearnSupersedeArgs(args []string) (learnSupersedeOpts, error) {
+	opts := learnSupersedeOpts{}
+	fs := flag.NewFlagSet("learn supersede", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "json output")
+	fs.StringVar(&opts.Note, "note", "", "audit note")
+	fs.StringVar(&opts.ScopeIssue, "scope-issue", "", "issue scope")
+	fs.StringVar(&opts.ScopeReq, "scope-req", "", "requirement scope")
+	fs.StringVar(&opts.ScopeSession, "scope-session", "", "session scope")
+	addRepeatedStringFlag(fs, "scope-tag", &opts.ScopeTags)
+	addRepeatedStringFlag(fs, "scope-file", &opts.ScopeFiles)
+	if err := fs.Parse(args); err != nil {
+		return learnSupersedeOpts{}, err
+	}
+	if fs.NArg() != 2 {
+		return learnSupersedeOpts{}, fmt.Errorf("usage: az learn supersede --note <text> [--scope-issue <id>] [--scope-req <id>] [--scope-session <id>] [--scope-tag <tag> ...] [--scope-file <path> ...] <new-learning-id> <old-learning-id> [--json]")
+	}
+	opts.NewLearningID = strings.TrimSpace(fs.Arg(0))
+	opts.OldLearningID = strings.TrimSpace(fs.Arg(1))
+	opts.Note = strings.TrimSpace(opts.Note)
+	if opts.NewLearningID == "" || opts.OldLearningID == "" {
+		return learnSupersedeOpts{}, fmt.Errorf("missing learning id")
+	}
+	if opts.Note == "" {
+		return learnSupersedeOpts{}, fmt.Errorf("missing required flag: --note")
+	}
+	return opts, nil
+}
+
 func addRepeatedStringFlag(fs *flag.FlagSet, name string, values *[]string) {
 	fs.Func(name, "repeatable "+name, func(v string) error {
 		trimmed := strings.TrimSpace(v)
@@ -655,21 +829,27 @@ func addRepeatedKeyValueFlag(fs *flag.FlagSet, name string, values *map[string]s
 }
 
 func printLearnUsage() {
-	fmt.Println("Usage: az learn <add|recall|show|review|promote|relate> [arguments]")
+	fmt.Println("Usage: az learn <add|recall|show|review|stale|demote|promote|retire|relate|supersede> [arguments]")
 	fmt.Println("  add      Capture an evidence-backed candidate learning")
 	fmt.Println("  recall   Search accepted/promoted learning summaries")
 	fmt.Println("  show     Show a learning with full evidence")
 	fmt.Println("  review   List candidates or update learning status")
+	fmt.Println("  stale    Mark a learning stale with an audit note")
+	fmt.Println("  demote   Move a learning back to candidate review")
 	fmt.Println("  promote  Mark a learning promoted toward curated guidance")
 	fmt.Println("  retire   Retire an Az-managed promoted guidance block")
 	fmt.Println("  relate   Record supersession or conflict between learnings")
+	fmt.Println("  supersede Record that a newer learning supersedes an older one")
 	fmt.Println("")
 	fmt.Println("Commands:")
 	fmt.Println("  az learn add --evidence <text> [--summary <text>] [--private] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--json]")
 	fmt.Println("  az learn recall [--query <text>] [--issue <id>] [--req <id>] [--status <status> ...] [--tag <tag> ...] [--file <path> ...] [--limit N] [--include-evidence] [--include-private] [--json]")
 	fmt.Println("  az learn show <learning-id> [--json]")
 	fmt.Println("  az learn review [--id <learning-id> --status accepted|rejected|stale --note <text>] [--limit N] [--json]")
+	fmt.Println("  az learn stale --note <text> <learning-id> [--json]")
+	fmt.Println("  az learn demote --note <text> <learning-id> [--json]")
 	fmt.Println("  az learn promote --target rulesync|agents|skill|spec|decision [--target-id <id-or-path>] <learning-id> [--create-target] [--target-title <text>] [--target-description <text>] [--target-issue <id>] [--decision-rationale <text>] [--decision-context <text>] [--decision-consequences <text>] [--note <text>] [--target-hash <hash>] [--target-meta key=value ...] [--json]")
-	fmt.Println("  az learn retire <learning-id> [--json]")
+	fmt.Println("  az learn retire --note <text> <learning-id> [--json]")
 	fmt.Println("  az learn relate --type supersedes|conflicts --note <text> [--scope-issue <id>] [--scope-req <id>] [--scope-session <id>] [--scope-tag <tag> ...] [--scope-file <path> ...] <source-learning-id> <target-learning-id> [--json]")
+	fmt.Println("  az learn supersede --note <text> [--scope-issue <id>] [--scope-req <id>] [--scope-session <id>] [--scope-tag <tag> ...] [--scope-file <path> ...] <new-learning-id> <old-learning-id> [--json]")
 }

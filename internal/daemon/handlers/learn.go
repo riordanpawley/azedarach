@@ -17,9 +17,12 @@ type LearnService interface {
 	Recall(context.Context, protocol.LearnRecallRequestBody) (protocol.LearnRecallResponseBody, error)
 	Show(context.Context, protocol.LearnShowRequestBody) (protocol.LearnShowResponseBody, error)
 	Review(context.Context, protocol.LearnReviewRequestBody) (protocol.LearnReviewResponseBody, error)
+	Stale(context.Context, protocol.LearnStaleRequestBody) (protocol.LearnStaleResponseBody, error)
+	Demote(context.Context, protocol.LearnDemoteRequestBody) (protocol.LearnDemoteResponseBody, error)
 	Promote(context.Context, protocol.LearnPromoteRequestBody) (protocol.LearnPromoteResponseBody, error)
 	Retire(context.Context, protocol.LearnRetireRequestBody) (protocol.LearnRetireResponseBody, error)
 	Relate(context.Context, protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error)
+	Supersede(context.Context, protocol.LearnSupersedeRequestBody) (protocol.LearnSupersedeResponseBody, error)
 }
 
 type LearnHandler struct {
@@ -112,6 +115,36 @@ func (h *LearnHandler) Handle(ctx context.Context, req protocol.RequestEnvelope)
 		}
 		return learnJSONResponse(ctx, resp, h.service.Review, cmd)
 
+	case protocol.CommandLearnStale:
+		var cmd protocol.LearnStaleRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.ID = strings.TrimSpace(cmd.ID)
+		cmd.Note = strings.TrimSpace(cmd.Note)
+		if cmd.ID == "" {
+			return learnInvalidRequest(resp, "missing required field: id")
+		}
+		if cmd.Note == "" {
+			return learnInvalidRequest(resp, "stale note is required")
+		}
+		return learnJSONResponse(ctx, resp, h.service.Stale, cmd)
+
+	case protocol.CommandLearnDemote:
+		var cmd protocol.LearnDemoteRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.ID = strings.TrimSpace(cmd.ID)
+		cmd.Note = strings.TrimSpace(cmd.Note)
+		if cmd.ID == "" {
+			return learnInvalidRequest(resp, "missing required field: id")
+		}
+		if cmd.Note == "" {
+			return learnInvalidRequest(resp, "demotion note is required")
+		}
+		return learnJSONResponse(ctx, resp, h.service.Demote, cmd)
+
 	case protocol.CommandLearnPromote:
 		var cmd protocol.LearnPromoteRequestBody
 		if !decodeLearnRequest(req.Body, &cmd, &resp) {
@@ -142,8 +175,12 @@ func (h *LearnHandler) Handle(ctx context.Context, req protocol.RequestEnvelope)
 			return resp
 		}
 		cmd.ID = strings.TrimSpace(cmd.ID)
+		cmd.Note = strings.TrimSpace(cmd.Note)
 		if cmd.ID == "" {
 			return learnInvalidRequest(resp, "missing required field: id")
+		}
+		if cmd.Note == "" {
+			return learnInvalidRequest(resp, "retirement note is required")
 		}
 		return learnJSONResponse(ctx, resp, h.service.Retire, cmd)
 	case protocol.CommandLearnRelate:
@@ -165,6 +202,21 @@ func (h *LearnHandler) Handle(ctx context.Context, req protocol.RequestEnvelope)
 			return learnInvalidRequest(resp, "relation note is required")
 		}
 		return learnJSONResponse(ctx, resp, h.service.Relate, cmd)
+	case protocol.CommandLearnSupersede:
+		var cmd protocol.LearnSupersedeRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.NewLearningID = strings.TrimSpace(cmd.NewLearningID)
+		cmd.OldLearningID = strings.TrimSpace(cmd.OldLearningID)
+		cmd.Note = strings.TrimSpace(cmd.Note)
+		if cmd.NewLearningID == "" || cmd.OldLearningID == "" {
+			return learnInvalidRequest(resp, "missing required fields: new_learning_id/old_learning_id")
+		}
+		if cmd.Note == "" {
+			return learnInvalidRequest(resp, "supersede note is required")
+		}
+		return learnJSONResponse(ctx, resp, h.service.Supersede, cmd)
 	default:
 		resp.Error = &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeUnsupportedCommand,

@@ -145,6 +145,7 @@ type UpdateLearningTargetStateParams struct {
 	State          LearningTargetState
 	TargetHash     string
 	TargetMetadata map[string]string
+	Note           string
 }
 
 type RelateLearningParams struct {
@@ -632,6 +633,42 @@ func (c *Client) UpdateLearningStatus(ctx context.Context, selector string, stat
 	return c.GetLearning(ctx, record.LocalID)
 }
 
+func (c *Client) DemoteLearning(ctx context.Context, selector string, note string) (Learning, error) {
+	note = strings.TrimSpace(note)
+	if note == "" {
+		return Learning{}, c.wrapError("demote-learning", selector, errors.New("demotion note is required"))
+	}
+	db, err := c.dbHandle()
+	if err != nil {
+		return Learning{}, err
+	}
+	record, err := c.lookupLearningByLocalID(ctx, db, selector, false)
+	if err != nil {
+		return Learning{}, c.wrapError("demote-learning", selector, err)
+	}
+	switch record.Status {
+	case LearningStatusCandidate:
+	case LearningStatusAccepted, LearningStatusPromoted, LearningStatusRejected, LearningStatusStale:
+	default:
+		return Learning{}, c.wrapError("demote-learning", record.LocalID, errors.New("invalid learning status"))
+	}
+	if record.Status == LearningStatusPromoted {
+		switch record.TargetState {
+		case "", LearningTargetStateActive:
+			return Learning{}, c.wrapError("demote-learning", record.LocalID, fmt.Errorf("%w: retire active promotion target before demoting promoted learning", domain.ErrConflict))
+		}
+	}
+	now := time.Now().UTC()
+	if _, err := db.ExecContext(ctx, `
+		UPDATE agent_learnings
+		SET status = ?, review_note = ?, reviewed_at = ?, updated_at = ?
+		WHERE id = ?
+	`, string(LearningStatusCandidate), nullableString(note), formatTimestamp(now), formatTimestamp(now), record.rowID); err != nil {
+		return Learning{}, c.wrapError("demote-learning", record.LocalID, classifySQLiteConstraint(err))
+	}
+	return c.GetLearning(ctx, record.LocalID)
+}
+
 func (c *Client) PromoteLearning(ctx context.Context, selector string, params PromoteLearningParams) (Learning, error) {
 	params.TargetID = strings.TrimSpace(params.TargetID)
 	params.Note = strings.TrimSpace(params.Note)
@@ -724,6 +761,7 @@ func (c *Client) UpdateLearningTargetState(ctx context.Context, selector string,
 	params.State = LearningTargetState(strings.TrimSpace(string(params.State)))
 	params.TargetHash = strings.TrimSpace(params.TargetHash)
 	params.TargetMetadata = normalizeStringMap(params.TargetMetadata)
+	params.Note = strings.TrimSpace(params.Note)
 	if !params.State.Valid() {
 		return Learning{}, c.wrapError("update-learning-target-state", selector, errors.New("invalid learning target state"))
 	}
@@ -770,9 +808,11 @@ func (c *Client) UpdateLearningTargetState(ctx context.Context, selector string,
 	if _, err := db.ExecContext(ctx, `
 		UPDATE agent_learnings
 		SET target_state = ?, target_hash = ?, target_metadata_json = ?,
-			target_retired_at = ?, target_drifted_at = ?, updated_at = ?
+			target_retired_at = ?, target_drifted_at = ?,
+			promotion_note = CASE WHEN ? != '' THEN ? ELSE promotion_note END,
+			updated_at = ?
 		WHERE id = ?
-	`, string(params.State), nullableString(targetHash), string(metadataJSON), retiredAt, driftedAt, formatTimestamp(now), record.rowID); err != nil {
+	`, string(params.State), nullableString(targetHash), string(metadataJSON), retiredAt, driftedAt, params.Note, nullableString(params.Note), formatTimestamp(now), record.rowID); err != nil {
 		return Learning{}, c.wrapError("update-learning-target-state", record.LocalID, classifySQLiteConstraint(err))
 	}
 	return c.GetLearning(ctx, record.LocalID)
@@ -815,6 +855,17 @@ func (c *Client) RelateLearning(ctx context.Context, params RelateLearningParams
 		now := time.Now().UTC()
 		if !learningActiveAt(source.Learning, now) {
 			return LearningRelation{}, c.wrapError("relate-learning", source.LocalID, fmt.Errorf("%w: superseding learning must be active", domain.ErrConflict))
+		}
+		existing, existingErr := c.lookupLearningRelationByEdge(ctx, tx, normalized.Type, source.rowID, target.rowID)
+		if existingErr == nil {
+			if err := tx.Commit(); err != nil {
+				return LearningRelation{}, c.wrapError("relate-learning", existing.LocalID, err)
+			}
+			tx = nil
+			return existing, nil
+		}
+		if existingErr != nil && !errors.Is(existingErr, sql.ErrNoRows) {
+			return LearningRelation{}, c.wrapError("relate-learning", source.LocalID, existingErr)
 		}
 		if target.SupersededAt != nil {
 			return LearningRelation{}, c.wrapError("relate-learning", target.LocalID, fmt.Errorf("%w: target learning is already superseded", domain.ErrConflict))
@@ -1201,6 +1252,24 @@ func (c *Client) lookupLearningRelationByRowID(ctx context.Context, db sqlIssueD
 		WHERE rel.id = ?
 	`
 	return scanLearningRelation(db.QueryRowContext(ctx, query, rowID))
+}
+
+func (c *Client) lookupLearningRelationByEdge(ctx context.Context, db sqlIssueDBTX, relationType LearningRelationType, sourceRowID, targetRowID string) (LearningRelation, error) {
+	query := `
+		SELECT rel.local_id, rel.relation_type, source.local_id, target.local_id, rel.note,
+			rel.scope_issue_id, req.local_id, rel.scope_session_id,
+			COALESCE(rel.scope_tags_json, '[]'), COALESCE(rel.scope_files_json, '[]'),
+			rel.created_at, rel.updated_at, rel.deleted_at
+		FROM agent_learning_relations rel
+		JOIN agent_learnings source ON source.id = rel.source_learning_id
+		JOIN agent_learnings target ON target.id = rel.target_learning_id
+		LEFT JOIN spec_requirements req ON req.id = rel.scope_requirement_id
+		WHERE rel.relation_type = ?
+			AND rel.source_learning_id = ?
+			AND rel.target_learning_id = ?
+			AND rel.deleted_at IS NULL
+	`
+	return scanLearningRelation(db.QueryRowContext(ctx, query, string(relationType), sourceRowID, targetRowID))
 }
 
 func (c *Client) listLearningRelationsForRow(ctx context.Context, db sqlIssueDBTX, rowID string, includeDeleted bool) ([]LearningRelation, error) {

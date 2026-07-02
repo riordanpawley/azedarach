@@ -21,6 +21,7 @@ func TestCommandSpecRegistryProjectIDPolicy(t *testing.T) {
 		{command: protocol.CommandIssueFanout, want: true},
 		{command: protocol.CommandHookLogList, want: true},
 		{command: protocol.CommandSpecRead, want: false},
+		{command: protocol.CommandLearnSupersede, want: true},
 		{command: "unknown.command", want: false},
 	}
 
@@ -44,6 +45,7 @@ func TestCommandSpecRegistryDispatcherTargets(t *testing.T) {
 		{command: CommandGitBranchBehind, want: CommandDispatchPR, ok: true},
 		{command: protocol.CommandSpecRead, want: CommandDispatchSpec, ok: true},
 		{command: protocol.CommandLearnRetire, want: CommandDispatchLearn, ok: true},
+		{command: protocol.CommandLearnSupersede, want: CommandDispatchLearn, ok: true},
 		{command: CommandGitCheckpoint, want: CommandDispatchGit, ok: true},
 		{command: CommandWorktreeRemove, want: CommandDispatchWorktree, ok: true},
 		{command: CommandDevServerList, want: CommandDispatchDevServer, ok: true},
@@ -69,6 +71,7 @@ func TestCommandSpecRegistryDaemonDispatchOwnership(t *testing.T) {
 		{command: protocol.CommandOperationCancel, want: true},
 		{command: protocol.CommandSpecRead, want: true},
 		{command: protocol.CommandLearnRetire, want: true},
+		{command: protocol.CommandLearnSupersede, want: true},
 		{command: CommandSessionStart, want: false},
 		{command: "task.list", want: false},
 		{command: "unknown.command", want: false},
@@ -133,6 +136,9 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		protocol.CommandLearnPromote,
 		protocol.CommandLearnRetire,
 		protocol.CommandLearnRelate,
+		protocol.CommandLearnStale,
+		protocol.CommandLearnDemote,
+		protocol.CommandLearnSupersede,
 		CommandGitFetch,
 		CommandGitMerge,
 		CommandGitCheckout,

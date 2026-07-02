@@ -765,6 +765,7 @@ func TestClient_UpdateLearningTargetStateRecordsLifecycle(t *testing.T) {
 		State:          LearningTargetStateRetired,
 		TargetHash:     "sha256:retired",
 		TargetMetadata: map[string]string{"path": "AGENTS.md", "managed_block": "azedarach-learning"},
+		Note:           "Retired managed guidance block.",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, LearningTargetStateRetired, retired.TargetState)
@@ -772,6 +773,59 @@ func TestClient_UpdateLearningTargetStateRecordsLifecycle(t *testing.T) {
 	assert.Nil(t, retired.TargetDriftedAt)
 	assert.Equal(t, "sha256:retired", retired.TargetHash)
 	assert.Equal(t, map[string]string{"path": "AGENTS.md", "managed_block": "azedarach-learning"}, retired.TargetMetadata)
+	assert.Equal(t, "Retired managed guidance block.", retired.TargetNote)
+}
+
+func TestClient_DemoteLearningReturnsActiveLearningToCandidateWithAudit(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	accepted := createAcceptedLearning(t, ctx, client, "proj", "Accepted learning")
+	demoted, err := client.DemoteLearning(ctx, accepted.LocalID, "Needs another review.")
+	require.NoError(t, err)
+	assert.Equal(t, LearningStatusCandidate, demoted.Status)
+	assert.Equal(t, "Needs another review.", demoted.ReviewNote)
+	require.NotNil(t, demoted.ReviewedAt)
+
+	rows, err := client.ListLearnings(ctx, LearningFilter{
+		ProjectID:  "proj",
+		Statuses:   []LearningStatus{LearningStatusCandidate, LearningStatusAccepted},
+		ActiveOnly: true,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, rows)
+
+	again, err := client.DemoteLearning(ctx, accepted.LocalID, "Still needs another review.")
+	require.NoError(t, err)
+	assert.Equal(t, LearningStatusCandidate, again.Status)
+	assert.Equal(t, "Still needs another review.", again.ReviewNote)
+}
+
+func TestClient_DemoteLearningRequiresPromotedTargetRetiredFirst(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	learning := createAcceptedLearning(t, ctx, client, "proj", "Promoted learning")
+	promoted, err := client.PromoteLearning(ctx, learning.LocalID, PromoteLearningParams{
+		Target:   LearningPromotionTargetAgents,
+		TargetID: "AGENTS.md",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, LearningTargetStateActive, promoted.TargetState)
+
+	_, err = client.DemoteLearning(ctx, promoted.LocalID, "Needs another review.")
+	require.ErrorIs(t, err, domain.ErrConflict)
+	assert.Contains(t, err.Error(), "retire active promotion target")
+
+	retired, err := client.UpdateLearningTargetState(ctx, promoted.LocalID, UpdateLearningTargetStateParams{
+		State: LearningTargetStateRetired,
+		Note:  "Target retired first.",
+	})
+	require.NoError(t, err)
+	demoted, err := client.DemoteLearning(ctx, retired.LocalID, "Needs another review.")
+	require.NoError(t, err)
+	assert.Equal(t, LearningStatusCandidate, demoted.Status)
+	assert.Equal(t, "Needs another review.", demoted.ReviewNote)
 }
 
 func TestClient_RelateLearningSupersedesScopedGuidanceAndExcludesTargetFromActiveRecall(t *testing.T) {
@@ -835,6 +889,19 @@ func TestClient_RelateLearningSupersedesScopedGuidanceAndExcludesTargetFromActiv
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	assert.Equal(t, scoped.LocalID, rows[0].LocalID)
+
+	duplicate, err := client.RelateLearning(ctx, RelateLearningParams{
+		Type:               LearningRelationSupersedes,
+		SourceLearningID:   scoped.LocalID,
+		TargetLearningID:   generic.LocalID,
+		Note:               "Repeated command should be idempotent.",
+		ScopeIssueID:       &taskID,
+		ScopeRequirementID: &scopeReqID,
+		ScopeTags:          []string{"daemon"},
+		ScopeFiles:         []string{"internal/config/config.go"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, relation.LocalID, duplicate.LocalID)
 }
 
 func TestClient_RelateLearningConflictIsAuditableWithoutSuperseding(t *testing.T) {

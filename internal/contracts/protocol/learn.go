@@ -3,13 +3,16 @@ package protocol
 import "github.com/riordanpawley/azedarach/internal/naming"
 
 const (
-	CommandLearnAdd     = "learn.add"
-	CommandLearnRecall  = "learn.recall"
-	CommandLearnShow    = "learn.show"
-	CommandLearnReview  = "learn.review"
-	CommandLearnPromote = "learn.promote"
-	CommandLearnRetire  = "learn.retire"
-	CommandLearnRelate  = "learn.relate"
+	CommandLearnAdd       = "learn.add"
+	CommandLearnRecall    = "learn.recall"
+	CommandLearnShow      = "learn.show"
+	CommandLearnReview    = "learn.review"
+	CommandLearnPromote   = "learn.promote"
+	CommandLearnRetire    = "learn.retire"
+	CommandLearnRelate    = "learn.relate"
+	CommandLearnStale     = "learn.stale"
+	CommandLearnDemote    = "learn.demote"
+	CommandLearnSupersede = "learn.supersede"
 )
 
 type LearningStatus string
@@ -155,6 +158,24 @@ type LearnReviewResponseBody struct {
 	Updated   *Learning  `json:"updated,omitempty" msgpack:"updated,omitempty"`
 }
 
+type LearnStaleRequestBody struct {
+	ID   string `json:"id" msgpack:"id"`
+	Note string `json:"note" msgpack:"note"`
+}
+
+type LearnStaleResponseBody struct {
+	Learning Learning `json:"learning" msgpack:"learning"`
+}
+
+type LearnDemoteRequestBody struct {
+	ID   string `json:"id" msgpack:"id"`
+	Note string `json:"note" msgpack:"note"`
+}
+
+type LearnDemoteResponseBody struct {
+	Learning Learning `json:"learning" msgpack:"learning"`
+}
+
 type LearnPromoteRequestBody struct {
 	ID                   string                  `json:"id" msgpack:"id"`
 	Target               LearningPromotionTarget `json:"target" msgpack:"target"`
@@ -177,7 +198,8 @@ type LearnPromoteResponseBody struct {
 }
 
 type LearnRetireRequestBody struct {
-	ID string `json:"id" msgpack:"id"`
+	ID   string `json:"id" msgpack:"id"`
+	Note string `json:"note" msgpack:"note"`
 }
 
 type LearnRetireResponseBody struct {
@@ -198,6 +220,21 @@ type LearnRelateRequestBody struct {
 }
 
 type LearnRelateResponseBody struct {
+	Relation LearningRelation `json:"relation" msgpack:"relation"`
+}
+
+type LearnSupersedeRequestBody struct {
+	NewLearningID  string               `json:"new_learning_id" msgpack:"new_learning_id"`
+	OldLearningID  string               `json:"old_learning_id" msgpack:"old_learning_id"`
+	Note           string               `json:"note" msgpack:"note"`
+	ScopeIssueID   naming.IssueID       `json:"scope_issue_id,omitempty" msgpack:"scope_issue_id,omitempty"`
+	ScopeReqID     naming.RequirementID `json:"scope_req_id,omitempty" msgpack:"scope_req_id,omitempty"`
+	ScopeSessionID naming.SessionID     `json:"scope_session_id,omitempty" msgpack:"scope_session_id,omitempty"`
+	ScopeTags      []string             `json:"scope_tags,omitempty" msgpack:"scope_tags,omitempty"`
+	ScopeFiles     []string             `json:"scope_files,omitempty" msgpack:"scope_files,omitempty"`
+}
+
+type LearnSupersedeResponseBody struct {
 	Relation LearningRelation `json:"relation" msgpack:"relation"`
 }
 

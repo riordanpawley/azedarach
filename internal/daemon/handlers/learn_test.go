@@ -11,13 +11,16 @@ import (
 )
 
 type fakeLearnService struct {
-	addFn     func(context.Context, protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error)
-	recallFn  func(context.Context, protocol.LearnRecallRequestBody) (protocol.LearnRecallResponseBody, error)
-	showFn    func(context.Context, protocol.LearnShowRequestBody) (protocol.LearnShowResponseBody, error)
-	reviewFn  func(context.Context, protocol.LearnReviewRequestBody) (protocol.LearnReviewResponseBody, error)
-	promoteFn func(context.Context, protocol.LearnPromoteRequestBody) (protocol.LearnPromoteResponseBody, error)
-	retireFn  func(context.Context, protocol.LearnRetireRequestBody) (protocol.LearnRetireResponseBody, error)
-	relateFn  func(context.Context, protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error)
+	addFn       func(context.Context, protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error)
+	recallFn    func(context.Context, protocol.LearnRecallRequestBody) (protocol.LearnRecallResponseBody, error)
+	showFn      func(context.Context, protocol.LearnShowRequestBody) (protocol.LearnShowResponseBody, error)
+	reviewFn    func(context.Context, protocol.LearnReviewRequestBody) (protocol.LearnReviewResponseBody, error)
+	staleFn     func(context.Context, protocol.LearnStaleRequestBody) (protocol.LearnStaleResponseBody, error)
+	demoteFn    func(context.Context, protocol.LearnDemoteRequestBody) (protocol.LearnDemoteResponseBody, error)
+	promoteFn   func(context.Context, protocol.LearnPromoteRequestBody) (protocol.LearnPromoteResponseBody, error)
+	retireFn    func(context.Context, protocol.LearnRetireRequestBody) (protocol.LearnRetireResponseBody, error)
+	relateFn    func(context.Context, protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error)
+	supersedeFn func(context.Context, protocol.LearnSupersedeRequestBody) (protocol.LearnSupersedeResponseBody, error)
 }
 
 func (f *fakeLearnService) Add(ctx context.Context, req protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error) {
@@ -48,6 +51,20 @@ func (f *fakeLearnService) Review(ctx context.Context, req protocol.LearnReviewR
 	return protocol.LearnReviewResponseBody{}, nil
 }
 
+func (f *fakeLearnService) Stale(ctx context.Context, req protocol.LearnStaleRequestBody) (protocol.LearnStaleResponseBody, error) {
+	if f.staleFn != nil {
+		return f.staleFn(ctx, req)
+	}
+	return protocol.LearnStaleResponseBody{}, nil
+}
+
+func (f *fakeLearnService) Demote(ctx context.Context, req protocol.LearnDemoteRequestBody) (protocol.LearnDemoteResponseBody, error) {
+	if f.demoteFn != nil {
+		return f.demoteFn(ctx, req)
+	}
+	return protocol.LearnDemoteResponseBody{}, nil
+}
+
 func (f *fakeLearnService) Promote(ctx context.Context, req protocol.LearnPromoteRequestBody) (protocol.LearnPromoteResponseBody, error) {
 	if f.promoteFn != nil {
 		return f.promoteFn(ctx, req)
@@ -69,13 +86,23 @@ func (f *fakeLearnService) Relate(ctx context.Context, req protocol.LearnRelateR
 	return protocol.LearnRelateResponseBody{}, nil
 }
 
+func (f *fakeLearnService) Supersede(ctx context.Context, req protocol.LearnSupersedeRequestBody) (protocol.LearnSupersedeResponseBody, error) {
+	if f.supersedeFn != nil {
+		return f.supersedeFn(ctx, req)
+	}
+	return protocol.LearnSupersedeResponseBody{}, nil
+}
+
 func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	var gotAdd protocol.LearnAddRequestBody
 	var gotRecall protocol.LearnRecallRequestBody
 	var gotReview protocol.LearnReviewRequestBody
+	var gotStale protocol.LearnStaleRequestBody
+	var gotDemote protocol.LearnDemoteRequestBody
 	var gotPromote protocol.LearnPromoteRequestBody
 	var gotRetire protocol.LearnRetireRequestBody
 	var gotRelate protocol.LearnRelateRequestBody
+	var gotSupersede protocol.LearnSupersedeRequestBody
 	handler := NewLearnHandler(&fakeLearnService{
 		addFn: func(_ context.Context, req protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error) {
 			gotAdd = req
@@ -90,6 +117,14 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 			updated := protocol.Learning{ID: req.ID, Status: req.Status}
 			return protocol.LearnReviewResponseBody{Updated: &updated}, nil
 		},
+		staleFn: func(_ context.Context, req protocol.LearnStaleRequestBody) (protocol.LearnStaleResponseBody, error) {
+			gotStale = req
+			return protocol.LearnStaleResponseBody{Learning: protocol.Learning{ID: req.ID, Status: protocol.LearningStatusStale, ReviewNote: req.Note}}, nil
+		},
+		demoteFn: func(_ context.Context, req protocol.LearnDemoteRequestBody) (protocol.LearnDemoteResponseBody, error) {
+			gotDemote = req
+			return protocol.LearnDemoteResponseBody{Learning: protocol.Learning{ID: req.ID, Status: protocol.LearningStatusCandidate, ReviewNote: req.Note}}, nil
+		},
 		promoteFn: func(_ context.Context, req protocol.LearnPromoteRequestBody) (protocol.LearnPromoteResponseBody, error) {
 			gotPromote = req
 			return protocol.LearnPromoteResponseBody{Learning: protocol.Learning{ID: req.ID, Target: req.Target}}, nil
@@ -101,6 +136,10 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 		relateFn: func(_ context.Context, req protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error) {
 			gotRelate = req
 			return protocol.LearnRelateResponseBody{Relation: protocol.LearningRelation{ID: "learn-rel-1", Type: req.Type}}, nil
+		},
+		supersedeFn: func(_ context.Context, req protocol.LearnSupersedeRequestBody) (protocol.LearnSupersedeResponseBody, error) {
+			gotSupersede = req
+			return protocol.LearnSupersedeResponseBody{Relation: protocol.LearningRelation{ID: "learn-rel-2", Type: protocol.LearningRelationSupersedes, SourceLearningID: req.NewLearningID, TargetLearningID: req.OldLearningID}}, nil
 		},
 	})
 
@@ -132,6 +171,22 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 		t.Fatalf("review response=%+v got=%+v", reviewResp, gotReview)
 	}
 
+	staleResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnStale, protocol.LearnStaleRequestBody{
+		ID:   " learn-1 ",
+		Note: "No longer accurate.",
+	}))
+	if !staleResp.OK || gotStale.ID != "learn-1" || gotStale.Note != "No longer accurate." {
+		t.Fatalf("stale response=%+v got=%+v", staleResp, gotStale)
+	}
+
+	demoteResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnDemote, protocol.LearnDemoteRequestBody{
+		ID:   " learn-1 ",
+		Note: "Needs another review.",
+	}))
+	if !demoteResp.OK || gotDemote.ID != "learn-1" || gotDemote.Note != "Needs another review." {
+		t.Fatalf("demote response=%+v got=%+v", demoteResp, gotDemote)
+	}
+
 	promoteResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnPromote, protocol.LearnPromoteRequestBody{
 		ID:                   "learn-1",
 		Target:               protocol.LearningPromotionTargetDecision,
@@ -158,9 +213,10 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	}
 
 	retireResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnRetire, protocol.LearnRetireRequestBody{
-		ID: " learn-1 ",
+		ID:   " learn-1 ",
+		Note: "Target removed.",
 	}))
-	if !retireResp.OK || gotRetire.ID != "learn-1" {
+	if !retireResp.OK || gotRetire.ID != "learn-1" || gotRetire.Note != "Target removed." {
 		t.Fatalf("retire response=%+v got=%+v", retireResp, gotRetire)
 	}
 
@@ -173,6 +229,16 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	}))
 	if !relateResp.OK || gotRelate.Type != protocol.LearningRelationSupersedes || gotRelate.SourceLearningID != "learn-2" || gotRelate.TargetLearningID != "learn-1" {
 		t.Fatalf("relate response=%+v got=%+v", relateResp, gotRelate)
+	}
+
+	supersedeResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnSupersede, protocol.LearnSupersedeRequestBody{
+		NewLearningID: "learn-3",
+		OldLearningID: "learn-1",
+		Note:          "Newer guidance replaces older guidance.",
+		ScopeIssueID:  naming.IssueID("cst"),
+	}))
+	if !supersedeResp.OK || gotSupersede.NewLearningID != "learn-3" || gotSupersede.OldLearningID != "learn-1" || gotSupersede.ScopeIssueID != "cst" {
+		t.Fatalf("supersede response=%+v got=%+v", supersedeResp, gotSupersede)
 	}
 
 	badResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnAdd, protocol.LearnAddRequestBody{}))
@@ -197,6 +263,20 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 		t.Fatalf("bad list shortcut review response=%+v", badListShortcutResp)
 	}
 
+	badStaleResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnStale, protocol.LearnStaleRequestBody{
+		ID: "learn-1",
+	}))
+	if badStaleResp.OK || badStaleResp.Error == nil || badStaleResp.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("bad stale response=%+v", badStaleResp)
+	}
+
+	badDemoteResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnDemote, protocol.LearnDemoteRequestBody{
+		ID: "learn-1",
+	}))
+	if badDemoteResp.OK || badDemoteResp.Error == nil || badDemoteResp.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("bad demote response=%+v", badDemoteResp)
+	}
+
 	badRelateResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnRelate, protocol.LearnRelateRequestBody{
 		Type:             protocol.LearningRelationType("replaces"),
 		SourceLearningID: "learn-2",
@@ -205,6 +285,14 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	}))
 	if badRelateResp.OK || badRelateResp.Error == nil || badRelateResp.Error.Code != protocol.ErrorCodeInvalidRequest {
 		t.Fatalf("bad relate response=%+v", badRelateResp)
+	}
+
+	badSupersedeResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnSupersede, protocol.LearnSupersedeRequestBody{
+		NewLearningID: "learn-2",
+		OldLearningID: "learn-1",
+	}))
+	if badSupersedeResp.OK || badSupersedeResp.Error == nil || badSupersedeResp.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("bad supersede response=%+v", badSupersedeResp)
 	}
 
 	badCreateSpecResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnPromote, protocol.LearnPromoteRequestBody{

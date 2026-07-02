@@ -176,6 +176,30 @@ func (s issueLearnService) Review(ctx context.Context, req protocol.LearnReviewR
 	return protocol.LearnReviewResponseBody{Learnings: out}, nil
 }
 
+func (s issueLearnService) Stale(ctx context.Context, req protocol.LearnStaleRequestBody) (protocol.LearnStaleResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnStaleResponseBody{}, err
+	}
+	updated, err := client.UpdateLearningStatus(ctx, req.ID, issues.LearningStatusStale, req.Note)
+	if err != nil {
+		return protocol.LearnStaleResponseBody{}, err
+	}
+	return protocol.LearnStaleResponseBody{Learning: mapLearningToProtocol(updated, false)}, nil
+}
+
+func (s issueLearnService) Demote(ctx context.Context, req protocol.LearnDemoteRequestBody) (protocol.LearnDemoteResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnDemoteResponseBody{}, err
+	}
+	updated, err := client.DemoteLearning(ctx, req.ID, req.Note)
+	if err != nil {
+		return protocol.LearnDemoteResponseBody{}, err
+	}
+	return protocol.LearnDemoteResponseBody{Learning: mapLearningToProtocol(updated, false)}, nil
+}
+
 func (s issueLearnService) Promote(ctx context.Context, req protocol.LearnPromoteRequestBody) (protocol.LearnPromoteResponseBody, error) {
 	client, err := s.issueClient(ctx)
 	if err != nil {
@@ -216,7 +240,7 @@ func (s issueLearnService) Promote(ctx context.Context, req protocol.LearnPromot
 		targetMetadata["managed_block"] = managedGuidanceBlockKind
 		targetMetadata["source_learning_id"] = current.LocalID
 	}
-	params :=  issues.PromoteLearningParams{
+	params := issues.PromoteLearningParams{
 		Target:               issues.LearningPromotionTarget(target),
 		TargetID:             targetID,
 		Note:                 req.Note,
@@ -249,6 +273,10 @@ func (s issueLearnService) Retire(ctx context.Context, req protocol.LearnRetireR
 	if err != nil {
 		return protocol.LearnRetireResponseBody{}, err
 	}
+	req.Note = strings.TrimSpace(req.Note)
+	if req.Note == "" {
+		return protocol.LearnRetireResponseBody{}, errors.New("retirement note is required")
+	}
 	current, err := client.GetLearning(ctx, req.ID)
 	if err != nil {
 		return protocol.LearnRetireResponseBody{}, err
@@ -257,6 +285,7 @@ func (s issueLearnService) Retire(ctx context.Context, req protocol.LearnRetireR
 		return protocol.LearnRetireResponseBody{}, fmt.Errorf("%w: learning must be promoted before retirement", domain.ErrConflict)
 	}
 	target := protocol.LearningPromotionTarget(*current.Target)
+	var updated issues.Learning
 	if learningPromotionFileBacked(target) {
 		result, err := removeManagedGuidanceBlock(s.repoDir(ctx), mapLearningToProtocol(current, false), current.TargetHash)
 		if err != nil {
@@ -268,14 +297,20 @@ func (s issueLearnService) Retire(ctx context.Context, req protocol.LearnRetireR
 		if result.TargetHash != "" {
 			current.TargetHash = result.TargetHash
 		}
-	}
-	updated, err := client.UpdateLearningTargetState(ctx, req.ID, issues.UpdateLearningTargetStateParams{
-		State:          issues.LearningTargetStateRetired,
-		TargetHash:     current.TargetHash,
-		TargetMetadata: current.TargetMetadata,
-	})
-	if err != nil {
-		return protocol.LearnRetireResponseBody{}, err
+		updated, err = client.UpdateLearningTargetState(ctx, req.ID, issues.UpdateLearningTargetStateParams{
+			State:          issues.LearningTargetStateRetired,
+			TargetHash:     current.TargetHash,
+			TargetMetadata: current.TargetMetadata,
+			Note:           req.Note,
+		})
+		if err != nil {
+			return protocol.LearnRetireResponseBody{}, err
+		}
+	} else {
+		updated, err = client.RetireLearningTarget(ctx, req.ID, req.Note)
+		if err != nil {
+			return protocol.LearnRetireResponseBody{}, err
+		}
 	}
 	mapped := mapLearningToProtocol(updated, false)
 	return protocol.LearnRetireResponseBody{
@@ -314,6 +349,38 @@ func (s issueLearnService) Relate(ctx context.Context, req protocol.LearnRelateR
 		return protocol.LearnRelateResponseBody{}, err
 	}
 	return protocol.LearnRelateResponseBody{Relation: mapLearningRelationToProtocol(relation)}, nil
+}
+
+func (s issueLearnService) Supersede(ctx context.Context, req protocol.LearnSupersedeRequestBody) (protocol.LearnSupersedeResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnSupersedeResponseBody{}, err
+	}
+	params := issues.RelateLearningParams{
+		Type:             issues.LearningRelationSupersedes,
+		SourceLearningID: req.NewLearningID,
+		TargetLearningID: req.OldLearningID,
+		Note:             req.Note,
+		ScopeTags:        req.ScopeTags,
+		ScopeFiles:       req.ScopeFiles,
+	}
+	if req.ScopeIssueID != "" {
+		issueID := req.ScopeIssueID.String()
+		params.ScopeIssueID = &issueID
+	}
+	if req.ScopeReqID != "" {
+		reqID := req.ScopeReqID.String()
+		params.ScopeRequirementID = &reqID
+	}
+	if req.ScopeSessionID != "" {
+		sessionID := req.ScopeSessionID.String()
+		params.ScopeSessionID = &sessionID
+	}
+	relation, err := client.RelateLearning(ctx, params)
+	if err != nil {
+		return protocol.LearnSupersedeResponseBody{}, err
+	}
+	return protocol.LearnSupersedeResponseBody{Relation: mapLearningRelationToProtocol(relation)}, nil
 }
 
 func (s issueLearnService) repoDir(ctx context.Context) string {

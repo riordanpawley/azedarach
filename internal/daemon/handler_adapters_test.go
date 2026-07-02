@@ -516,12 +516,15 @@ func TestIssueLearnServicePromoteAndRetireManagedGuidanceFile(t *testing.T) {
 		t.Fatalf("duplicate promotion changed content:\n%s", string(afterDuplicate))
 	}
 
-	retired, err := service.Retire(ctx, protocol.LearnRetireRequestBody{ID: added.Learning.ID})
+	retired, err := service.Retire(ctx, protocol.LearnRetireRequestBody{ID: added.Learning.ID, Note: "Remove managed block."})
 	if err != nil {
 		t.Fatalf("retire learning: %v", err)
 	}
 	if retired.Learning.TargetState != protocol.LearningTargetStateRetired || retired.Learning.TargetRetiredAt == "" {
 		t.Fatalf("retired learning missing retired state/time: %+v", retired.Learning)
+	}
+	if retired.Learning.TargetNote != "Remove managed block." {
+		t.Fatalf("retired target note = %q, want audit note", retired.Learning.TargetNote)
 	}
 	retiredData, err := os.ReadFile(targetPath)
 	if err != nil {
@@ -530,6 +533,61 @@ func TestIssueLearnServicePromoteAndRetireManagedGuidanceFile(t *testing.T) {
 	retiredContent := string(retiredData)
 	if !strings.Contains(retiredContent, "# Existing guidance") || strings.Contains(retiredContent, "Source learning: "+added.Learning.ID) {
 		t.Fatalf("retire should remove only managed block:\n%s", retiredContent)
+	}
+}
+
+func TestIssueLearnServiceRetireStructuredSpecTargetUsesStoreLifecycle(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	service := newTestIssueLearnService(client, repoDir)
+
+	req, err := client.CreateRequirement(ctx, issues.CreateRequirementParams{
+		LocalID: "learn-retire-req",
+		Title:   "Learning-owned requirement",
+		Status:  issues.RequirementStatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create requirement: %v", err)
+	}
+	added, err := service.Add(ctx, protocol.LearnAddRequestBody{
+		Summary:  "Structured spec guidance",
+		Evidence: "Validated requirement guidance.",
+	})
+	if err != nil {
+		t.Fatalf("add learning: %v", err)
+	}
+	if _, err := service.Review(ctx, protocol.LearnReviewRequestBody{
+		ID:     added.Learning.ID,
+		Status: protocol.LearningStatusAccepted,
+		Note:   "Reviewed.",
+	}); err != nil {
+		t.Fatalf("review learning: %v", err)
+	}
+	if _, err := service.Promote(ctx, protocol.LearnPromoteRequestBody{
+		ID:       added.Learning.ID,
+		Target:   protocol.LearningPromotionTargetSpec,
+		TargetID: req.LocalID,
+		Note:     "Promote to structured requirement.",
+	}); err != nil {
+		t.Fatalf("promote learning: %v", err)
+	}
+
+	retired, err := service.Retire(ctx, protocol.LearnRetireRequestBody{
+		ID:   added.Learning.ID,
+		Note: "Structured target is obsolete.",
+	})
+	if err != nil {
+		t.Fatalf("retire learning: %v", err)
+	}
+	if retired.Learning.TargetState != protocol.LearningTargetStateRetired || retired.Learning.TargetNote != "Structured target is obsolete." {
+		t.Fatalf("retired learning = %+v, want retired state and note", retired.Learning)
+	}
+	storedReq, err := client.GetRequirement(ctx, req.LocalID)
+	if err != nil {
+		t.Fatalf("get requirement: %v", err)
+	}
+	if storedReq.Status != issues.RequirementStatusSuperseded {
+		t.Fatalf("requirement status = %s, want superseded", storedReq.Status)
 	}
 }
 
