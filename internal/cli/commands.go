@@ -6404,9 +6404,9 @@ func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	payload, err := json.Marshal(protocol.LearnRecallRequestBody{
-		IssueID:  naming.IssueID(issueID),
-		Statuses: []protocol.LearningStatus{protocol.LearningStatusAccepted, protocol.LearningStatusPromoted},
-		Limit:    3,
+		ContextIssueID: naming.IssueID(issueID),
+		Statuses:       []protocol.LearningStatus{protocol.LearningStatusAccepted, protocol.LearningStatusPromoted},
+		Limit:          3,
 	})
 	if err != nil {
 		return ""
@@ -6429,7 +6429,11 @@ func renderPrimeLearningSection(ctx context.Context, deps *Dependencies, issueID
 	}
 	lines := []string{"Relevant accepted/promoted learnings:"}
 	for _, learning := range out.Learnings {
-		lines = append(lines, fmt.Sprintf("- %s [%s]: %s", learning.ID, learning.Status, learning.Summary))
+		reason := strings.TrimSpace(learning.RecallReason)
+		if reason != "" {
+			reason = " (why: " + reason + ")"
+		}
+		lines = append(lines, fmt.Sprintf("- %s [%s]: %s%s", learning.ID, learning.Status, learning.Summary, reason))
 	}
 	lines = append(lines, "Use `az learn show <learning-id>` for evidence; long evidence is not injected by default.")
 	return strings.Join(lines, "\n")

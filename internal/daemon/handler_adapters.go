@@ -104,6 +104,10 @@ func (s issueLearnService) Recall(ctx context.Context, req protocol.LearnRecallR
 		ProjectID:       firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)),
 		IssueID:         req.IssueID.String(),
 		RequirementID:   req.ReqID.String(),
+		ContextIssueID:  req.ContextIssueID.String(),
+		ContextReqID:    req.ContextReqID.String(),
+		ContextTags:     req.ContextTags,
+		ContextFiles:    req.ContextFiles,
 		Query:           req.Query,
 		Statuses:        statuses,
 		Tags:            req.Tags,
@@ -662,6 +666,8 @@ func mapLearningToProtocol(learning issues.Learning, includeEvidence bool) proto
 		Files:           append([]string(nil), learning.Files...),
 		CreatedAt:       formatProtocolTime(learning.CreatedAt),
 		UpdatedAt:       formatProtocolTime(learning.UpdatedAt),
+		RecallScore:     learning.RecallScore,
+		RecallReason:    learning.RecallReason,
 	}
 	if includeEvidence {
 		out.Evidence = learning.Evidence

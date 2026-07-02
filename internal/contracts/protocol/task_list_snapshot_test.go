@@ -64,7 +64,7 @@ func TestTaskListSnapshotPayloadJSONShapeIsDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal task list snapshot: %v", err)
 	}
-	want := `{"schema_version":2,"protocol_version":13,"snapshot_revision":17,"project_id":"proj-joined","last_checked_at":"2026-04-02T10:31:45Z","freshness":"fresh","tasks":[{"id":"az-1","title":"Joined snapshot","description":"daemon-authored issue/session/worktree payload","status":"in_progress","priority":1,"issue_type":"task","session":{"issue_id":"az-1","state":"busy","started_at":"2026-04-02T10:30:00Z","worktree":"/tmp/repo-az-1"},"has_worktree":true,"git_ahead_count":2,"git_behind_count":1,"has_uncommitted_changes":true,"git_additions":7,"git_deletions":3,"created_at":"0001-01-01T00:00:00Z","updated_at":"0001-01-01T00:00:00Z"}]}`
+	want := `{"schema_version":2,"protocol_version":14,"snapshot_revision":17,"project_id":"proj-joined","last_checked_at":"2026-04-02T10:31:45Z","freshness":"fresh","tasks":[{"id":"az-1","title":"Joined snapshot","description":"daemon-authored issue/session/worktree payload","status":"in_progress","priority":1,"issue_type":"task","session":{"issue_id":"az-1","state":"busy","started_at":"2026-04-02T10:30:00Z","worktree":"/tmp/repo-az-1"},"has_worktree":true,"git_ahead_count":2,"git_behind_count":1,"has_uncommitted_changes":true,"git_additions":7,"git_deletions":3,"created_at":"0001-01-01T00:00:00Z","updated_at":"0001-01-01T00:00:00Z"}]}`
 	if string(got) != want {
 		t.Fatalf("json = %s, want %s", string(got), want)
 	}
@@ -108,7 +108,7 @@ func TestTaskListSnapshotPayloadMessagePackRoundTrip(t *testing.T) {
 
 func TestDecodeTaskListSnapshotPayloadRejectsVersionMismatch(t *testing.T) {
 	t.Run("schema version", func(t *testing.T) {
-		body := []byte(`{"schema_version":99,"protocol_version":13,"snapshot_revision":1,"project_id":"proj","last_checked_at":"2026-04-02T10:31:45Z","freshness":"fresh","tasks":[]}`)
+		body := []byte(`{"schema_version":99,"protocol_version":14,"snapshot_revision":1,"project_id":"proj","last_checked_at":"2026-04-02T10:31:45Z","freshness":"fresh","tasks":[]}`)
 
 		_, err := DecodeTaskListSnapshotPayload(body)
 		if err == nil {
@@ -126,13 +126,13 @@ func TestDecodeTaskListSnapshotPayloadRejectsVersionMismatch(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected protocol version mismatch error")
 		}
-		if got := err.Error(); !strings.Contains(got, "protocol_version mismatch: expected 13, actual 99") {
+		if got := err.Error(); !strings.Contains(got, "protocol_version mismatch: expected 14, actual 99") {
 			t.Fatalf("error = %q, want expected/actual protocol mismatch", got)
 		}
 	})
 
 	t.Run("missing freshness metadata", func(t *testing.T) {
-		body := []byte(`{"schema_version":2,"protocol_version":13,"snapshot_revision":1,"project_id":"proj","tasks":[]}`)
+		body := []byte(`{"schema_version":2,"protocol_version":14,"snapshot_revision":1,"project_id":"proj","tasks":[]}`)
 
 		_, err := DecodeTaskListSnapshotPayload(body)
 		if err == nil {
@@ -144,7 +144,7 @@ func TestDecodeTaskListSnapshotPayloadRejectsVersionMismatch(t *testing.T) {
 	})
 
 	t.Run("invalid freshness", func(t *testing.T) {
-		body := []byte(`{"schema_version":2,"protocol_version":13,"snapshot_revision":1,"project_id":"proj","last_checked_at":"2026-04-02T10:31:45Z","freshness":"unknown","tasks":[]}`)
+		body := []byte(`{"schema_version":2,"protocol_version":14,"snapshot_revision":1,"project_id":"proj","last_checked_at":"2026-04-02T10:31:45Z","freshness":"unknown","tasks":[]}`)
 
 		_, err := DecodeTaskListSnapshotPayload(body)
 		if err == nil {

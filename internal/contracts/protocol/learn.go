@@ -78,6 +78,8 @@ type Learning struct {
 	TargetDriftedAt string                  `json:"target_drifted_at,omitempty" msgpack:"target_drifted_at,omitempty"`
 	CreatedAt       string                  `json:"created_at" msgpack:"created_at"`
 	UpdatedAt       string                  `json:"updated_at" msgpack:"updated_at"`
+	RecallScore     int                     `json:"recall_score,omitempty" msgpack:"recall_score,omitempty"`
+	RecallReason    string                  `json:"recall_reason,omitempty" msgpack:"recall_reason,omitempty"`
 }
 
 type LearningRelation struct {
@@ -115,6 +117,10 @@ type LearnRecallRequestBody struct {
 	ProjectID       string               `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
 	IssueID         naming.IssueID       `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
 	ReqID           naming.RequirementID `json:"req_id,omitempty" msgpack:"req_id,omitempty"`
+	ContextIssueID  naming.IssueID       `json:"context_issue_id,omitempty" msgpack:"context_issue_id,omitempty"`
+	ContextReqID    naming.RequirementID `json:"context_req_id,omitempty" msgpack:"context_req_id,omitempty"`
+	ContextTags     []string             `json:"context_tags,omitempty" msgpack:"context_tags,omitempty"`
+	ContextFiles    []string             `json:"context_files,omitempty" msgpack:"context_files,omitempty"`
 	Query           string               `json:"query,omitempty" msgpack:"query,omitempty"`
 	Statuses        []LearningStatus     `json:"statuses,omitempty" msgpack:"statuses,omitempty"`
 	Tags            []string             `json:"tags,omitempty" msgpack:"tags,omitempty"`

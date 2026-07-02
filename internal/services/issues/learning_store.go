@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -86,6 +87,8 @@ type Learning struct {
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 	DeletedAt       *time.Time
+	RecallScore     int
+	RecallReason    string
 }
 
 type LearningRelation struct {
@@ -146,6 +149,10 @@ type LearningFilter struct {
 	ProjectID       string
 	IssueID         string
 	RequirementID   string
+	ContextIssueID  string
+	ContextReqID    string
+	ContextTags     []string
+	ContextFiles    []string
 	Query           string
 	Statuses        []LearningStatus
 	Tags            []string
@@ -390,12 +397,16 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 		}
 		record.Learning = learning
 		records = append(records, record)
-		if filter.Limit > 0 && len(records) >= filter.Limit {
+		if !filter.ActiveOnly && filter.Limit > 0 && len(records) >= filter.Limit {
 			break
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, c.wrapError("list-learnings", "", err)
+	}
+	rankLearningRecords(records, filter, strings.TrimSpace(filter.Query) != "")
+	if filter.ActiveOnly && filter.Limit > 0 && len(records) > filter.Limit {
+		records = records[:filter.Limit]
 	}
 	if filter.ActiveOnly && len(records) > 0 {
 		recalledAt := time.Now().UTC()
@@ -416,6 +427,159 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 		out = append(out, record.Learning)
 	}
 	return out, nil
+}
+
+func rankLearningRecords(records []learningRecord, filter LearningFilter, hasQuery bool) {
+	if len(records) == 0 {
+		return
+	}
+	context := learningRecallContext{
+		issueID:       strings.TrimSpace(filter.ContextIssueID),
+		requirementID: strings.TrimSpace(filter.ContextReqID),
+		query:         strings.TrimSpace(filter.Query),
+		tags:          mergeLearningFilterKeys(filter.ContextTags, filter.Tags),
+		files:         mergeLearningFilterKeys(filter.ContextFiles, filter.Files),
+		hasQuery:      hasQuery,
+	}
+	for i := range records {
+		score, reason := learningRecallRank(records[i].Learning, context)
+		records[i].RecallScore = score
+		records[i].RecallReason = reason
+	}
+	sort.SliceStable(records, func(i, j int) bool {
+		if records[i].RecallScore != records[j].RecallScore {
+			return records[i].RecallScore > records[j].RecallScore
+		}
+		if !records[i].UpdatedAt.Equal(records[j].UpdatedAt) {
+			return records[i].UpdatedAt.After(records[j].UpdatedAt)
+		}
+		return records[i].LocalID < records[j].LocalID
+	})
+}
+
+type learningRecallContext struct {
+	issueID       string
+	requirementID string
+	query         string
+	tags          []string
+	files         []string
+	hasQuery      bool
+}
+
+func learningRecallRank(learning Learning, context learningRecallContext) (int, string) {
+	score := 0
+	reasons := make([]string, 0, 6)
+	if context.issueID != "" && learning.IssueID != nil && strings.EqualFold(*learning.IssueID, context.issueID) {
+		score += 1000
+		reasons = append(reasons, "issue="+*learning.IssueID)
+	}
+	if context.requirementID != "" && learning.RequirementID != nil && strings.EqualFold(*learning.RequirementID, context.requirementID) {
+		score += 900
+		reasons = append(reasons, "req="+*learning.RequirementID)
+	}
+	if matched := matchingLearningKeys(context.files, learning.Files); len(matched) > 0 {
+		score += 250 * len(matched)
+		reasons = append(reasons, "file="+strings.Join(matched, ","))
+	}
+	if matched := matchingLearningKeys(context.tags, learning.Tags); len(matched) > 0 {
+		score += 125 * len(matched)
+		reasons = append(reasons, "tag="+strings.Join(matched, ","))
+	}
+	if context.hasQuery {
+		matches := learningQueryTokenMatches(context.query, learning)
+		if matches > 0 {
+			score += 75 * matches
+			reasons = append(reasons, "query")
+		}
+	}
+	switch learning.Status {
+	case LearningStatusPromoted:
+		score += 100
+		if learning.TargetState == "" || learning.TargetState == LearningTargetStateActive {
+			reasons = append(reasons, "active-target")
+		}
+	case LearningStatusAccepted:
+		score += 50
+	}
+	score += learningRecencyScore(learning.UpdatedAt)
+	if len(reasons) == 0 {
+		reasons = append(reasons, "recent")
+	}
+	return score, strings.Join(reasons, "; ")
+}
+
+func matchingLearningKeys(want, got []string) []string {
+	if len(want) == 0 || len(got) == 0 {
+		return nil
+	}
+	gotSet := make(map[string]struct{}, len(got))
+	for _, key := range normalizeLearningFilterKeys(got) {
+		gotSet[key] = struct{}{}
+	}
+	matched := make([]string, 0, len(want))
+	for _, key := range want {
+		if _, ok := gotSet[key]; ok {
+			matched = append(matched, key)
+		}
+	}
+	return matched
+}
+
+func mergeLearningFilterKeys(groups ...[]string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	for _, group := range groups {
+		for _, key := range normalizeLearningFilterKeys(group) {
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, key)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func learningQueryTokenMatches(query string, learning Learning) int {
+	tokens := normalizeLearningFilterKeys(strings.Fields(query))
+	if len(tokens) == 0 {
+		return 0
+	}
+	haystack := strings.ToLower(strings.Join([]string{
+		learning.LocalID,
+		learning.Summary,
+		strings.Join(learning.Tags, " "),
+		strings.Join(learning.Files, " "),
+	}, " "))
+	matches := 0
+	for _, token := range tokens {
+		if strings.Contains(haystack, token) {
+			matches++
+		}
+	}
+	return matches
+}
+
+func learningRecencyScore(updatedAt time.Time) int {
+	if updatedAt.IsZero() {
+		return 0
+	}
+	age := time.Since(updatedAt)
+	switch {
+	case age < 0:
+		return 40
+	case age <= 24*time.Hour:
+		return 40
+	case age <= 7*24*time.Hour:
+		return 25
+	case age <= 30*24*time.Hour:
+		return 10
+	default:
+		return 0
+	}
 }
 
 func (c *Client) UpdateLearningStatus(ctx context.Context, selector string, status LearningStatus, note string) (Learning, error) {

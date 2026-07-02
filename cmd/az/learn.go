@@ -269,6 +269,9 @@ func printLearnings(learnings []protocol.Learning, includeEvidence bool) {
 		if len(learning.Tags) > 0 {
 			fmt.Printf("  tags: %s\n", strings.Join(learning.Tags, ", "))
 		}
+		if reason := strings.TrimSpace(learning.RecallReason); reason != "" {
+			fmt.Printf("  reason: %s\n", reason)
+		}
 		if includeEvidence && strings.TrimSpace(learning.Evidence) != "" {
 			fmt.Printf("  evidence: %s\n", learning.Evidence)
 		}

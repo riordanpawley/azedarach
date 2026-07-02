@@ -10628,11 +10628,12 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 						t.Fatalf("decode learn recall request: %v", err)
 					}
 					learnings := []protocol.Learning{{
-						ID:       "learn-1",
-						IssueID:  naming.IssueID("az-1"),
-						Summary:  "Keep durable choices in decisions",
-						Evidence: "raw evidence should not be injected",
-						Status:   protocol.LearningStatusAccepted,
+						ID:           "learn-1",
+						IssueID:      naming.IssueID("az-1"),
+						Summary:      "Keep durable choices in decisions",
+						Evidence:     "raw evidence should not be injected",
+						Status:       protocol.LearningStatusAccepted,
+						RecallReason: "issue=az-1; query",
 					}}
 					if learnReq.IncludePrivate {
 						learnings = append(learnings, protocol.Learning{
@@ -10662,8 +10663,11 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 		return PrimeCommand(deps)
 	})
 
-	if learnReq.IssueID != naming.IssueID("az-1") {
-		t.Fatalf("learn recall issue = %q, want az-1", learnReq.IssueID)
+	if learnReq.IssueID != "" {
+		t.Fatalf("prime should not hard-filter learn recall issue, got %q", learnReq.IssueID)
+	}
+	if learnReq.ContextIssueID != naming.IssueID("az-1") {
+		t.Fatalf("learn recall context issue = %q, want az-1", learnReq.ContextIssueID)
 	}
 	if learnReq.Limit != 3 {
 		t.Fatalf("learn recall limit = %d, want 3", learnReq.Limit)
@@ -10678,7 +10682,7 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 		t.Fatalf("learn recall statuses = %#v", learnReq.Statuses)
 	}
 	if !strings.Contains(output, "Relevant accepted/promoted learnings:") ||
-		!strings.Contains(output, "- learn-1 [accepted]: Keep durable choices in decisions") ||
+		!strings.Contains(output, "- learn-1 [accepted]: Keep durable choices in decisions (why: issue=az-1; query)") ||
 		!strings.Contains(output, "Use `az learn show <learning-id>` for evidence; long evidence is not injected by default.") {
 		t.Fatalf("prime output missing learning section: %q", output)
 	}

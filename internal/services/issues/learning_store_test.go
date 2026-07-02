@@ -147,6 +147,78 @@ func TestClient_ListLearningsAppliesLimitAfterTagAndFileFilters(t *testing.T) {
 	assert.Equal(t, want.LocalID, rows[0].LocalID)
 }
 
+func TestClient_ListLearningsRanksContextAndExplainsRecall(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Recall ranking scope",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+	req, err := client.CreateRequirement(ctx, CreateRequirementParams{
+		LocalID: "learn-ranking-req",
+		Title:   "Recall ranking requirement",
+		Status:  RequirementStatusOpen,
+	})
+	require.NoError(t, err)
+
+	generic := createAcceptedLearning(t, ctx, client, "proj", "Daemon config guidance")
+	scopedIssueID := taskID
+	scopedReqID := req.LocalID
+	scoped, err := client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID:     "proj",
+		IssueID:       &scopedIssueID,
+		RequirementID: &scopedReqID,
+		Summary:       "Daemon config guidance for scoped issue",
+		Evidence:      "Use the scoped daemon config guidance for this issue.",
+		Tags:          []string{"daemon"},
+		Files:         []string{"internal/config/config.go"},
+	})
+	require.NoError(t, err)
+	scoped, err = client.UpdateLearningStatus(ctx, scoped.LocalID, LearningStatusAccepted, "Scoped guidance accepted.")
+	require.NoError(t, err)
+	newGeneric := createAcceptedLearning(t, ctx, client, "proj", "Newest generic daemon config guidance")
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	setLearningUpdatedTime(t, ctx, db, generic.LocalID, time.Now().UTC().Add(-72*time.Hour))
+	setLearningUpdatedTime(t, ctx, db, scoped.LocalID, time.Now().UTC().Add(-48*time.Hour))
+	setLearningUpdatedTime(t, ctx, db, newGeneric.LocalID, time.Now().UTC())
+
+	rows, err := client.ListLearnings(ctx, LearningFilter{
+		ProjectID:      "proj",
+		ContextIssueID: taskID,
+		ContextReqID:   req.LocalID,
+		ContextTags:    []string{"daemon"},
+		ContextFiles:   []string{"internal/config/config.go"},
+		Query:          "daemon config",
+		Statuses:       []LearningStatus{LearningStatusAccepted},
+		ActiveOnly:     true,
+		Limit:          2,
+	})
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	assert.Equal(t, scoped.LocalID, rows[0].LocalID)
+	assert.Contains(t, rows[0].RecallReason, "issue="+taskID)
+	assert.Contains(t, rows[0].RecallReason, "req="+req.LocalID)
+	assert.Contains(t, rows[0].RecallReason, "file=internal/config/config.go")
+	assert.Contains(t, rows[0].RecallReason, "tag=daemon")
+	assert.Greater(t, rows[0].RecallScore, rows[1].RecallScore)
+
+	filtered, err := client.ListLearnings(ctx, LearningFilter{
+		ProjectID:  "proj",
+		IssueID:    taskID,
+		Statuses:   []LearningStatus{LearningStatusAccepted},
+		ActiveOnly: true,
+		Limit:      10,
+	})
+	require.NoError(t, err)
+	require.Len(t, filtered, 1)
+	assert.Equal(t, scoped.LocalID, filtered[0].LocalID)
+}
+
 func TestClient_ListLearningsTagAndFileFiltersUseIndexedMetadata(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -167,6 +239,14 @@ func TestClient_ListLearningsTagAndFileFiltersUseIndexedMetadata(t *testing.T) {
 	assert.Contains(t, got, "idx_agent_learning_files_key_learning", got)
 	assert.NotContains(t, got, "SCAN agent_learning_tags", got)
 	assert.NotContains(t, got, "SCAN agent_learning_files", got)
+}
+
+func TestMergeLearningFilterKeysDeduplicatesContextAndHardFilters(t *testing.T) {
+	got := mergeLearningFilterKeys(
+		[]string{"Daemon", "config"},
+		[]string{"daemon", "review"},
+	)
+	assert.Equal(t, []string{"daemon", "config", "review"}, got)
 }
 
 func TestClient_ListLearningsIncludeDeletedUsesIndexedMetadata(t *testing.T) {
@@ -784,6 +864,12 @@ func setLearningLifecycleTime(t *testing.T, ctx context.Context, db sqlIssueExec
 		t.Fatalf("unsupported lifecycle column %q", column)
 	}
 	_, err := db.ExecContext(ctx, "UPDATE agent_learnings SET "+column+" = ? WHERE local_id = ?", formatTimestamp(value), localID)
+	require.NoError(t, err)
+}
+
+func setLearningUpdatedTime(t *testing.T, ctx context.Context, db sqlIssueExecer, localID string, value time.Time) {
+	t.Helper()
+	_, err := db.ExecContext(ctx, "UPDATE agent_learnings SET updated_at = ? WHERE local_id = ?", formatTimestamp(value), localID)
 	require.NoError(t, err)
 }
 
