@@ -96,22 +96,51 @@ func (h *LearnHandler) Handle(ctx context.Context, req protocol.RequestEnvelope)
 			return resp
 		}
 		cmd.ID = strings.TrimSpace(cmd.ID)
+		cmd.IDs = compactStrings(cmd.IDs)
 		cmd.Status = protocol.LearningStatus(strings.TrimSpace(string(cmd.Status)))
 		cmd.Note = strings.TrimSpace(cmd.Note)
 		if cmd.Limit < 0 {
 			return learnInvalidRequest(resp, "limit must be non-negative")
 		}
-		if cmd.ID == "" && (cmd.Status != "" || cmd.Note != "") {
+		if cmd.OlderThanSeconds < 0 {
+			return learnInvalidRequest(resp, "older_than_seconds must be non-negative")
+		}
+		for _, status := range cmd.QueueStatuses {
+			if !status.Valid() {
+				return learnInvalidRequest(resp, "invalid queue status: expected candidate|accepted|rejected|promoted|stale")
+			}
+		}
+		for _, state := range cmd.TargetStates {
+			if !state.Valid() {
+				return learnInvalidRequest(resp, "invalid target state: expected active|retired|drifted|missing")
+			}
+		}
+		if cmd.ID != "" {
+			cmd.IDs = append([]string{cmd.ID}, cmd.IDs...)
+		}
+		cmd.IDs = compactStrings(cmd.IDs)
+		if len(cmd.IDs) == 0 && (cmd.Status != "" || cmd.Note != "") && !cmd.BulkStale {
 			return learnInvalidRequest(resp, "id is required when status or note is provided")
 		}
-		if cmd.ID != "" && cmd.Status == "" {
+		if len(cmd.IDs) > 0 && cmd.Status == "" {
 			return learnInvalidRequest(resp, "review update requires status when id is provided")
 		}
-		if cmd.ID != "" && !learningReviewStatusValid(cmd.Status) {
+		if len(cmd.IDs) > 0 && !learningReviewStatusValid(cmd.Status) {
 			return learnInvalidRequest(resp, "invalid review status: expected accepted|rejected|stale")
 		}
-		if cmd.ID != "" && cmd.Note == "" {
+		if len(cmd.IDs) > 0 && cmd.Note == "" {
 			return learnInvalidRequest(resp, "review update requires note")
+		}
+		if cmd.BulkStale {
+			if cmd.Status != "" {
+				return learnInvalidRequest(resp, "bulk stale does not accept status")
+			}
+			if cmd.Note == "" {
+				return learnInvalidRequest(resp, "bulk stale requires note")
+			}
+			if cmd.OlderThanSeconds <= 0 {
+				return learnInvalidRequest(resp, "bulk stale requires older_than_seconds")
+			}
 		}
 		return learnJSONResponse(ctx, resp, h.service.Review, cmd)
 
@@ -225,6 +254,29 @@ func (h *LearnHandler) Handle(ctx context.Context, req protocol.RequestEnvelope)
 		}
 		return resp
 	}
+}
+
+func compactStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func learningReviewStatusValid(status protocol.LearningStatus) bool {

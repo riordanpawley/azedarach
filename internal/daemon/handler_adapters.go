@@ -148,32 +148,59 @@ func (s issueLearnService) Review(ctx context.Context, req protocol.LearnReviewR
 	if err != nil {
 		return protocol.LearnReviewResponseBody{}, err
 	}
+	ids := append([]string(nil), req.IDs...)
 	if req.ID != "" {
-		updated, err := client.UpdateLearningStatus(ctx, req.ID, issues.LearningStatus(req.Status), req.Note)
+		ids = append([]string{req.ID}, ids...)
+	}
+	ids = uniqueTrimmedStrings(ids)
+	if len(ids) > 0 {
+		updated, err := client.BulkReviewLearnings(ctx, issues.BulkReviewLearningsParams{
+			ProjectID: daemonProjectIDFromContext(ctx),
+			IDs:       ids,
+			Status:    issues.LearningStatus(req.Status),
+			Note:      req.Note,
+		})
 		if err != nil {
 			return protocol.LearnReviewResponseBody{}, err
 		}
-		mapped := mapLearningToProtocol(updated, false)
-		return protocol.LearnReviewResponseBody{Updated: &mapped}, nil
+		mapped := mapLearningsToProtocol(updated, false)
+		resp := protocol.LearnReviewResponseBody{UpdatedLearnings: mapped}
+		if len(mapped) == 1 {
+			resp.Updated = &mapped[0]
+		}
+		return resp, nil
 	}
-	limit := req.Limit
-	if limit == 0 {
-		limit = 20
+
+	filter := learningReviewFilterFromRequest(ctx, req)
+	if req.BulkStale {
+		filter.Statuses = []issues.LearningStatus{issues.LearningStatusCandidate}
+		rows, err := client.ListLearnings(ctx, filter)
+		if err != nil {
+			return protocol.LearnReviewResponseBody{}, err
+		}
+		ids := make([]string, 0, len(rows))
+		for _, row := range rows {
+			ids = append(ids, row.LocalID)
+		}
+		if len(ids) == 0 {
+			return protocol.LearnReviewResponseBody{}, nil
+		}
+		updated, err := client.BulkReviewLearnings(ctx, issues.BulkReviewLearningsParams{
+			ProjectID: daemonProjectIDFromContext(ctx),
+			IDs:       ids,
+			Status:    issues.LearningStatusStale,
+			Note:      req.Note,
+		})
+		if err != nil {
+			return protocol.LearnReviewResponseBody{}, err
+		}
+		return protocol.LearnReviewResponseBody{UpdatedLearnings: mapLearningsToProtocol(updated, false)}, nil
 	}
-	rows, err := client.ListLearnings(ctx, issues.LearningFilter{
-		ProjectID:       daemonProjectIDFromContext(ctx),
-		Statuses:        []issues.LearningStatus{issues.LearningStatusCandidate},
-		Limit:           limit,
-		IncludeEvidence: false,
-	})
+	rows, err := client.ListLearnings(ctx, filter)
 	if err != nil {
 		return protocol.LearnReviewResponseBody{}, err
 	}
-	out := make([]protocol.Learning, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, mapLearningToProtocol(row, false))
-	}
-	return protocol.LearnReviewResponseBody{Learnings: out}, nil
+	return protocol.LearnReviewResponseBody{Learnings: mapLearningsToProtocol(rows, false)}, nil
 }
 
 func (s issueLearnService) Stale(ctx context.Context, req protocol.LearnStaleRequestBody) (protocol.LearnStaleResponseBody, error) {
@@ -407,6 +434,71 @@ func cloneStringMap(values map[string]string) map[string]string {
 			continue
 		}
 		out[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func learningReviewFilterFromRequest(ctx context.Context, req protocol.LearnReviewRequestBody) issues.LearningFilter {
+	statuses := make([]issues.LearningStatus, 0, len(req.QueueStatuses))
+	for _, status := range req.QueueStatuses {
+		statuses = append(statuses, issues.LearningStatus(status))
+	}
+	if len(statuses) == 0 {
+		statuses = []issues.LearningStatus{issues.LearningStatusCandidate}
+	}
+	targetStates := make([]issues.LearningTargetState, 0, len(req.TargetStates))
+	for _, state := range req.TargetStates {
+		targetStates = append(targetStates, issues.LearningTargetState(state))
+	}
+	limit := req.Limit
+	if limit == 0 {
+		limit = 20
+	}
+	filter := issues.LearningFilter{
+		ProjectID:       daemonProjectIDFromContext(ctx),
+		IssueID:         req.IssueID.String(),
+		RequirementID:   req.ReqID.String(),
+		Statuses:        statuses,
+		TargetStates:    targetStates,
+		Tags:            req.Tags,
+		Files:           req.Files,
+		Limit:           limit,
+		IncludeEvidence: false,
+	}
+	if req.OlderThanSeconds > 0 {
+		cutoff := time.Now().UTC().Add(-time.Duration(req.OlderThanSeconds) * time.Second)
+		filter.UpdatedBefore = &cutoff
+	}
+	return filter
+}
+
+func mapLearningsToProtocol(rows []issues.Learning, includeEvidence bool) []protocol.Learning {
+	out := make([]protocol.Learning, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, mapLearningToProtocol(row, includeEvidence))
+	}
+	return out
+}
+
+func uniqueTrimmedStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
 	}
 	if len(out) == 0 {
 		return nil

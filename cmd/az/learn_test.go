@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
@@ -116,16 +117,30 @@ func TestParseLearnReviewArgs(t *testing.T) {
 		errFrag string
 	}{
 		{name: "list candidates", args: []string{"--limit", "10"}, ok: true},
+		{name: "list filtered queue", args: []string{"--queue-status", "stale", "--queue-status", "promoted", "--issue", "csw", "--req", "req-1", "--tag", "triage", "--file", "internal/daemon/learn.go", "--target-state", "drifted", "--older-than", "30d", "--limit", "10"}, ok: true},
 		{name: "accept with note", args: []string{"--id", "learn-1", "--status", "accepted", "--note", "Verified durable enough."}, ok: true},
+		{name: "bulk selected with positional ids", args: []string{"--id", "learn-1", "--status", "rejected", "--note", "Not durable.", "learn-2"}, ok: true},
+		{name: "bulk stale old queue", args: []string{"--bulk-stale", "--older-than", "2w", "--note", "Old candidates are stale.", "--tag", "daemon"}, ok: true},
 		{name: "status without id", args: []string{"--status", "accepted", "--note", "Reviewed."}, ok: false, errFrag: "--id is required"},
 		{name: "missing status", args: []string{"--id", "learn-1", "--note", "Reviewed."}, ok: false, errFrag: "--status is required"},
 		{name: "candidate is not a review outcome", args: []string{"--id", "learn-1", "--status", "candidate"}, ok: false, errFrag: "invalid review status"},
 		{name: "missing note", args: []string{"--id", "learn-1", "--status", "accepted"}, ok: false, errFrag: "--note is required"},
+		{name: "bulk stale requires age", args: []string{"--bulk-stale", "--note", "Old candidates are stale."}, ok: false, errFrag: "--older-than is required"},
+		{name: "bulk stale rejects status", args: []string{"--bulk-stale", "--older-than", "30d", "--status", "stale", "--note", "Old candidates are stale."}, ok: false, errFrag: "does not accept --status"},
+		{name: "bad queue status", args: []string{"--queue-status", "new"}, ok: false, errFrag: "invalid queue status"},
+		{name: "bad target state", args: []string{"--target-state", "gone"}, ok: false, errFrag: "invalid target state"},
+		{name: "bad older than", args: []string{"--older-than", "soon"}, ok: false, errFrag: "invalid --older-than"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := parseLearnReviewArgs(tc.args)
+			opts, err := parseLearnReviewArgs(tc.args)
 			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+			if tc.name == "bulk selected with positional ids" && (len(opts.IDs) != 2 || opts.IDs[0] != "learn-1" || opts.IDs[1] != "learn-2") {
+				t.Fatalf("ids = %+v, want selected ids", opts.IDs)
+			}
+			if tc.name == "list filtered queue" && (opts.OlderThan != 30*24*time.Hour || len(opts.QueueStatuses) != 2 || len(opts.TargetStates) != 1) {
+				t.Fatalf("opts = %+v, want parsed queue filters", opts)
+			}
 		})
 	}
 }

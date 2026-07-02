@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,11 +48,19 @@ type learnShowOpts struct {
 }
 
 type learnReviewOpts struct {
-	JSON   bool
-	ID     string
-	Status string
-	Note   string
-	Limit  int
+	JSON          bool
+	IDs           []string
+	Status        string
+	Note          string
+	Limit         int
+	QueueStatuses []string
+	Issue         string
+	Req           string
+	Tags          []string
+	Files         []string
+	TargetStates  []string
+	OlderThan     time.Duration
+	BulkStale     bool
 }
 
 type learnStaleOpts struct {
@@ -261,7 +270,28 @@ func runLearnShowRPC(cfg *config.Config, opts learnShowOpts) error {
 }
 
 func runLearnReviewRPC(cfg *config.Config, opts learnReviewOpts) error {
-	req := protocol.LearnReviewRequestBody{ID: opts.ID, Status: protocol.LearningStatus(opts.Status), Note: opts.Note, Limit: opts.Limit}
+	queueStatuses := make([]protocol.LearningStatus, 0, len(opts.QueueStatuses))
+	for _, status := range opts.QueueStatuses {
+		queueStatuses = append(queueStatuses, protocol.LearningStatus(status))
+	}
+	targetStates := make([]protocol.LearningTargetState, 0, len(opts.TargetStates))
+	for _, state := range opts.TargetStates {
+		targetStates = append(targetStates, protocol.LearningTargetState(state))
+	}
+	req := protocol.LearnReviewRequestBody{
+		IDs:              opts.IDs,
+		Status:           protocol.LearningStatus(opts.Status),
+		Note:             opts.Note,
+		Limit:            opts.Limit,
+		QueueStatuses:    queueStatuses,
+		IssueID:          naming.IssueID(opts.Issue),
+		ReqID:            naming.RequirementID(opts.Req),
+		Tags:             opts.Tags,
+		Files:            opts.Files,
+		TargetStates:     targetStates,
+		OlderThanSeconds: int64(opts.OlderThan / time.Second),
+		BulkStale:        opts.BulkStale,
+	}
 	var out protocol.LearnReviewResponseBody
 	if err := runLearnRPC(cfg, protocol.CommandLearnReview, req, &out); err != nil {
 		return err
@@ -269,11 +299,16 @@ func runLearnReviewRPC(cfg *config.Config, opts learnReviewOpts) error {
 	if opts.JSON {
 		return printJSON(out)
 	}
+	if len(out.UpdatedLearnings) > 0 {
+		fmt.Printf("Updated %d learning(s):\n", len(out.UpdatedLearnings))
+		printReviewLearnings(out.UpdatedLearnings)
+		return nil
+	}
 	if out.Updated != nil {
 		fmt.Printf("Updated learning: %s [%s]\n", out.Updated.ID, out.Updated.Status)
 		return nil
 	}
-	printLearnings(out.Learnings, false)
+	printReviewLearnings(out.Learnings)
 	return nil
 }
 
@@ -410,6 +445,32 @@ func printLearnings(learnings []protocol.Learning, includeEvidence bool) {
 		for _, relation := range learning.Relations {
 			fmt.Print("  relation: ")
 			printLearningRelationInline(relation)
+		}
+	}
+}
+
+func printReviewLearnings(learnings []protocol.Learning) {
+	if len(learnings) == 0 {
+		fmt.Println("No learnings found.")
+		return
+	}
+	for _, learning := range learnings {
+		printLearnings([]protocol.Learning{learning}, false)
+		if len(learning.Files) > 0 {
+			fmt.Printf("  files: %s\n", strings.Join(learning.Files, ", "))
+		}
+		if learning.Target != "" || learning.TargetID != "" || learning.TargetState != "" {
+			fmt.Printf("  target: %s:%s", learning.Target, learning.TargetID)
+			if learning.TargetState != "" {
+				fmt.Printf(" state=%s", learning.TargetState)
+			}
+			fmt.Println()
+		}
+		if learning.ReviewNote != "" {
+			fmt.Printf("  review: %s\n", learning.ReviewNote)
+		}
+		if learning.UpdatedAt != "" {
+			fmt.Printf("  updated: %s\n", learning.UpdatedAt)
 		}
 	}
 }
@@ -589,30 +650,73 @@ func parseLearnReviewArgs(args []string) (learnReviewOpts, error) {
 	fs := flag.NewFlagSet("learn review", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.JSON, "json", false, "json output")
-	fs.StringVar(&opts.ID, "id", "", "learning id to update")
 	fs.StringVar(&opts.Status, "status", "", "new status")
 	fs.StringVar(&opts.Note, "note", "", "review note")
 	fs.IntVar(&opts.Limit, "limit", opts.Limit, "maximum candidate rows")
+	fs.StringVar(&opts.Issue, "issue", "", "filter review queue by issue id")
+	fs.StringVar(&opts.Req, "req", "", "filter review queue by requirement id")
+	fs.BoolVar(&opts.BulkStale, "bulk-stale", false, "mark old matching candidate rows stale")
+	addRepeatedStringFlag(fs, "id", &opts.IDs)
+	addRepeatedStringFlag(fs, "queue-status", &opts.QueueStatuses)
+	addRepeatedStringFlag(fs, "tag", &opts.Tags)
+	addRepeatedStringFlag(fs, "file", &opts.Files)
+	addRepeatedStringFlag(fs, "target-state", &opts.TargetStates)
+	var olderThanRaw string
+	fs.StringVar(&olderThanRaw, "older-than", "", "filter rows updated before a duration such as 30d or 72h")
 	if err := fs.Parse(args); err != nil {
 		return learnReviewOpts{}, err
 	}
-	if fs.NArg() != 0 {
-		return learnReviewOpts{}, fmt.Errorf("usage: az learn review [--id <learning-id> --status accepted|rejected|stale --note <text>] [--limit N] [--json]")
+	if fs.NArg() > 0 {
+		opts.IDs = append(opts.IDs, fs.Args()...)
 	}
-	opts.ID = strings.TrimSpace(opts.ID)
+	opts.IDs = compactCLIStrings(opts.IDs)
 	opts.Status = strings.TrimSpace(opts.Status)
 	opts.Note = strings.TrimSpace(opts.Note)
-	if opts.ID == "" && (opts.Status != "" || opts.Note != "") {
+	if olderThanRaw != "" {
+		parsed, err := parseLearningAgeDuration(olderThanRaw)
+		if err != nil {
+			return learnReviewOpts{}, err
+		}
+		opts.OlderThan = parsed
+	}
+	if opts.Limit < 0 {
+		return learnReviewOpts{}, fmt.Errorf("limit must be non-negative")
+	}
+	if len(opts.IDs) == 0 && (opts.Status != "" || opts.Note != "") && !opts.BulkStale {
 		return learnReviewOpts{}, fmt.Errorf("--id is required with --status or --note")
 	}
-	if opts.ID != "" && opts.Status == "" {
+	if len(opts.IDs) > 0 && opts.Status == "" {
 		return learnReviewOpts{}, fmt.Errorf("--status is required with --id")
 	}
-	if opts.ID != "" && !isLearnReviewStatus(opts.Status) {
+	if len(opts.IDs) > 0 && !isLearnReviewStatus(opts.Status) {
 		return learnReviewOpts{}, fmt.Errorf("invalid review status: expected accepted|rejected|stale")
 	}
-	if opts.ID != "" && opts.Note == "" {
+	if len(opts.IDs) > 0 && opts.Note == "" {
 		return learnReviewOpts{}, fmt.Errorf("--note is required with review status")
+	}
+	if opts.BulkStale {
+		if len(opts.IDs) > 0 {
+			return learnReviewOpts{}, fmt.Errorf("--bulk-stale cannot be combined with --id")
+		}
+		if opts.Status != "" {
+			return learnReviewOpts{}, fmt.Errorf("--bulk-stale does not accept --status")
+		}
+		if opts.Note == "" {
+			return learnReviewOpts{}, fmt.Errorf("--note is required with --bulk-stale")
+		}
+		if opts.OlderThan <= 0 {
+			return learnReviewOpts{}, fmt.Errorf("--older-than is required with --bulk-stale")
+		}
+	}
+	for _, status := range opts.QueueStatuses {
+		if !protocol.LearningStatus(status).Valid() {
+			return learnReviewOpts{}, fmt.Errorf("invalid queue status: expected candidate|accepted|rejected|promoted|stale")
+		}
+	}
+	for _, state := range opts.TargetStates {
+		if !protocol.LearningTargetState(state).Valid() {
+			return learnReviewOpts{}, fmt.Errorf("invalid target state: expected active|retired|drifted|missing")
+		}
 	}
 	return opts, nil
 }
@@ -828,12 +932,65 @@ func addRepeatedKeyValueFlag(fs *flag.FlagSet, name string, values *map[string]s
 	})
 }
 
+func compactCLIStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func parseLearningAgeDuration(raw string) (time.Duration, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, nil
+	}
+	if d, err := time.ParseDuration(value); err == nil {
+		if d < 0 {
+			return 0, fmt.Errorf("--older-than must be non-negative")
+		}
+		return d, nil
+	}
+	multiplier := time.Duration(0)
+	number := value
+	switch {
+	case strings.HasSuffix(value, "d"):
+		multiplier = 24 * time.Hour
+		number = strings.TrimSuffix(value, "d")
+	case strings.HasSuffix(value, "w"):
+		multiplier = 7 * 24 * time.Hour
+		number = strings.TrimSuffix(value, "w")
+	default:
+		return 0, fmt.Errorf("invalid --older-than duration %q", raw)
+	}
+	count, err := strconv.ParseInt(strings.TrimSpace(number), 10, 64)
+	if err != nil || count < 0 {
+		return 0, fmt.Errorf("invalid --older-than duration %q", raw)
+	}
+	return time.Duration(count) * multiplier, nil
+}
+
 func printLearnUsage() {
 	fmt.Println("Usage: az learn <add|recall|show|review|stale|demote|promote|retire|relate|supersede> [arguments]")
 	fmt.Println("  add      Capture an evidence-backed candidate learning")
 	fmt.Println("  recall   Search accepted/promoted learning summaries")
 	fmt.Println("  show     Show a learning with full evidence")
-	fmt.Println("  review   List candidates or update learning status")
+	fmt.Println("  review   List review queues or bulk update selected learnings")
 	fmt.Println("  stale    Mark a learning stale with an audit note")
 	fmt.Println("  demote   Move a learning back to candidate review")
 	fmt.Println("  promote  Mark a learning promoted toward curated guidance")
@@ -845,7 +1002,9 @@ func printLearnUsage() {
 	fmt.Println("  az learn add --evidence <text> [--summary <text>] [--private] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--json]")
 	fmt.Println("  az learn recall [--query <text>] [--issue <id>] [--req <id>] [--status <status> ...] [--tag <tag> ...] [--file <path> ...] [--limit N] [--include-evidence] [--include-private] [--json]")
 	fmt.Println("  az learn show <learning-id> [--json]")
-	fmt.Println("  az learn review [--id <learning-id> --status accepted|rejected|stale --note <text>] [--limit N] [--json]")
+	fmt.Println("  az learn review [--queue-status <status> ...] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--target-state active|retired|drifted|missing ...] [--older-than 30d] [--limit N] [--json]")
+	fmt.Println("  az learn review --id <learning-id> [--id <learning-id> ...] --status accepted|rejected|stale --note <text> [--json]")
+	fmt.Println("  az learn review --bulk-stale --older-than 30d --note <reason> [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--limit N] [--json]")
 	fmt.Println("  az learn stale --note <text> <learning-id> [--json]")
 	fmt.Println("  az learn demote --note <text> <learning-id> [--json]")
 	fmt.Println("  az learn promote --target rulesync|agents|skill|spec|decision [--target-id <id-or-path>] <learning-id> [--create-target] [--target-title <text>] [--target-description <text>] [--target-issue <id>] [--decision-rationale <text>] [--decision-context <text>] [--decision-consequences <text>] [--note <text>] [--target-hash <hash>] [--target-meta key=value ...] [--json]")

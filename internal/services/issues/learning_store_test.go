@@ -408,6 +408,152 @@ func TestClient_ListLearningsRanksContextAndExplainsRecall(t *testing.T) {
 	assert.Equal(t, scoped.LocalID, filtered[0].LocalID)
 }
 
+func TestClient_ListLearningReviewQueueFiltersByStatusAgeScopeAndTargetState(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Review queue scope",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+	req, err := client.CreateRequirement(ctx, CreateRequirementParams{
+		LocalID: "review-queue-req",
+		Title:   "Review queue requirement",
+		IssueID: &issueID,
+		Status:  RequirementStatusOpen,
+	})
+	require.NoError(t, err)
+
+	oldCandidate, err := client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID:     "proj",
+		IssueID:       &issueID,
+		RequirementID: &req.LocalID,
+		Summary:       "Old candidate queue item",
+		Evidence:      "Old scoped candidate evidence.",
+		Tags:          []string{"triage"},
+		Files:         []string{"internal/daemon/learn.go"},
+	})
+	require.NoError(t, err)
+	newCandidate, err := client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID:     "proj",
+		IssueID:       &issueID,
+		RequirementID: &req.LocalID,
+		Summary:       "New candidate queue item",
+		Evidence:      "New scoped candidate evidence.",
+		Tags:          []string{"triage"},
+		Files:         []string{"internal/daemon/learn.go"},
+	})
+	require.NoError(t, err)
+	otherCandidate, err := client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID: "proj",
+		Summary:   "Other candidate queue item",
+		Evidence:  "Other candidate evidence.",
+		Tags:      []string{"triage"},
+	})
+	require.NoError(t, err)
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	oldTime := time.Now().UTC().Add(-96 * time.Hour)
+	cutoff := time.Now().UTC().Add(-48 * time.Hour)
+	setLearningUpdatedTime(t, ctx, db, oldCandidate.LocalID, oldTime)
+	setLearningUpdatedTime(t, ctx, db, newCandidate.LocalID, time.Now().UTC())
+	setLearningUpdatedTime(t, ctx, db, otherCandidate.LocalID, oldTime)
+
+	rows, err := client.ListLearnings(ctx, LearningFilter{
+		ProjectID:     "proj",
+		IssueID:       issueID,
+		RequirementID: req.LocalID,
+		Statuses:      []LearningStatus{LearningStatusCandidate},
+		Tags:          []string{"triage"},
+		Files:         []string{"internal/daemon/learn.go"},
+		UpdatedBefore: &cutoff,
+		Limit:         10,
+	})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, oldCandidate.LocalID, rows[0].LocalID)
+	assert.Empty(t, rows[0].Evidence)
+
+	accepted := createAcceptedLearning(t, ctx, client, "proj", "Accepted target state row")
+	decision, err := client.RecordDecision(ctx, RecordDecisionParams{
+		Title:     "Target state decision",
+		Rationale: "Target state queue filtering should inspect promoted target state.",
+	})
+	require.NoError(t, err)
+	promoted, err := client.PromoteLearning(ctx, accepted.LocalID, PromoteLearningParams{
+		Target:   LearningPromotionTargetDecision,
+		TargetID: decision.LocalID,
+		Note:     "Promoted for target state filtering.",
+	})
+	require.NoError(t, err)
+	setLearningTargetState(t, ctx, db, promoted.LocalID, LearningTargetStateDrifted)
+
+	targetRows, err := client.ListLearnings(ctx, LearningFilter{
+		ProjectID:    "proj",
+		Statuses:     []LearningStatus{LearningStatusPromoted},
+		TargetStates: []LearningTargetState{LearningTargetStateDrifted},
+		Limit:        10,
+	})
+	require.NoError(t, err)
+	require.Len(t, targetRows, 1)
+	assert.Equal(t, promoted.LocalID, targetRows[0].LocalID)
+	assert.Equal(t, LearningTargetStateDrifted, targetRows[0].TargetState)
+}
+
+func TestClient_BulkReviewLearningsUpdatesFrozenSelectedRows(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	first, err := client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID: "proj",
+		Summary:   "First candidate",
+		Evidence:  "First candidate evidence.",
+	})
+	require.NoError(t, err)
+	second, err := client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID: "proj",
+		Summary:   "Second candidate",
+		Evidence:  "Second candidate evidence.",
+	})
+	require.NoError(t, err)
+	other, err := client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID: "proj",
+		Summary:   "Unselected candidate",
+		Evidence:  "Unselected candidate evidence.",
+	})
+	require.NoError(t, err)
+
+	updated, err := client.BulkReviewLearnings(ctx, BulkReviewLearningsParams{
+		ProjectID: "proj",
+		IDs:       []string{first.LocalID, second.LocalID, first.LocalID},
+		Status:    LearningStatusStale,
+		Note:      "Old candidates no longer apply.",
+	})
+	require.NoError(t, err)
+	require.Len(t, updated, 2)
+	assert.Equal(t, []string{first.LocalID, second.LocalID}, []string{updated[0].LocalID, updated[1].LocalID})
+	for _, row := range updated {
+		assert.Equal(t, LearningStatusStale, row.Status)
+		assert.Equal(t, "Old candidates no longer apply.", row.ReviewNote)
+		require.NotNil(t, row.ReviewedAt)
+	}
+
+	stillCandidate, err := client.GetLearning(ctx, other.LocalID)
+	require.NoError(t, err)
+	assert.Equal(t, LearningStatusCandidate, stillCandidate.Status)
+
+	_, err = client.BulkReviewLearnings(ctx, BulkReviewLearningsParams{
+		ProjectID: "proj",
+		IDs:       []string{other.LocalID},
+		Status:    LearningStatusStale,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "review note is required")
+}
+
 func TestClient_ListLearningsTagAndFileFiltersUseIndexedMetadata(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)

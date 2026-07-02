@@ -171,6 +171,29 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 		t.Fatalf("review response=%+v got=%+v", reviewResp, gotReview)
 	}
 
+	bulkReviewResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnReview, protocol.LearnReviewRequestBody{
+		IDs:              []string{" learn-1 ", "learn-2", "learn-1"},
+		Status:           protocol.LearningStatusStale,
+		Note:             "Old candidates are stale.",
+		QueueStatuses:    []protocol.LearningStatus{protocol.LearningStatusCandidate},
+		TargetStates:     []protocol.LearningTargetState{protocol.LearningTargetStateDrifted},
+		OlderThanSeconds: 86400,
+	}))
+	if !bulkReviewResp.OK || len(gotReview.IDs) != 2 || gotReview.IDs[0] != "learn-1" || gotReview.IDs[1] != "learn-2" || gotReview.OlderThanSeconds != 86400 {
+		t.Fatalf("bulk review response=%+v got=%+v", bulkReviewResp, gotReview)
+	}
+
+	bulkStaleResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnReview, protocol.LearnReviewRequestBody{
+		BulkStale:        true,
+		Note:             "Old candidates are stale.",
+		QueueStatuses:    []protocol.LearningStatus{protocol.LearningStatusCandidate},
+		OlderThanSeconds: 86400,
+		IssueID:          naming.IssueID("csw"),
+	}))
+	if !bulkStaleResp.OK || !gotReview.BulkStale || gotReview.IssueID != "csw" || gotReview.Note != "Old candidates are stale." {
+		t.Fatalf("bulk stale response=%+v got=%+v", bulkStaleResp, gotReview)
+	}
+
 	staleResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnStale, protocol.LearnStaleRequestBody{
 		ID:   " learn-1 ",
 		Note: "No longer accurate.",
@@ -261,6 +284,14 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	}))
 	if badListShortcutResp.OK || badListShortcutResp.Error == nil || badListShortcutResp.Error.Code != protocol.ErrorCodeInvalidRequest {
 		t.Fatalf("bad list shortcut review response=%+v", badListShortcutResp)
+	}
+
+	badBulkStaleResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnReview, protocol.LearnReviewRequestBody{
+		BulkStale: true,
+		Note:      "missing age",
+	}))
+	if badBulkStaleResp.OK || badBulkStaleResp.Error == nil || badBulkStaleResp.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("bad bulk stale response=%+v", badBulkStaleResp)
 	}
 
 	badStaleResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnStale, protocol.LearnStaleRequestBody{

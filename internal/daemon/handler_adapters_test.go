@@ -451,6 +451,76 @@ func TestIssueLearnServiceOmitEvidenceFromReviewAndPromoteResponses(t *testing.T
 	}
 }
 
+func TestIssueLearnServiceReviewQueuesAndBulkSelectedReview(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	service := newTestIssueLearnService(client, repoDir)
+
+	first, err := service.Add(ctx, protocol.LearnAddRequestBody{
+		Summary:  "First queue candidate",
+		Evidence: "First queue candidate evidence.",
+		Tags:     []string{"triage"},
+		Files:    []string{"internal/daemon/learn.go"},
+	})
+	if err != nil {
+		t.Fatalf("add first learning: %v", err)
+	}
+	second, err := service.Add(ctx, protocol.LearnAddRequestBody{
+		Summary:  "Second queue candidate",
+		Evidence: "Second queue candidate evidence.",
+		Tags:     []string{"triage"},
+		Files:    []string{"internal/daemon/learn.go"},
+	})
+	if err != nil {
+		t.Fatalf("add second learning: %v", err)
+	}
+	unmatched, err := service.Add(ctx, protocol.LearnAddRequestBody{
+		Summary:  "Unmatched queue candidate",
+		Evidence: "Unmatched queue candidate evidence.",
+		Tags:     []string{"other"},
+	})
+	if err != nil {
+		t.Fatalf("add unmatched learning: %v", err)
+	}
+
+	queue, err := service.Review(ctx, protocol.LearnReviewRequestBody{
+		QueueStatuses: []protocol.LearningStatus{protocol.LearningStatusCandidate},
+		Tags:          []string{"triage"},
+		Files:         []string{"internal/daemon/learn.go"},
+		Limit:         10,
+	})
+	if err != nil {
+		t.Fatalf("list review queue: %v", err)
+	}
+	if len(queue.Learnings) != 2 || queue.Learnings[0].Evidence != "" {
+		t.Fatalf("queue learnings = %+v, want two rows without evidence", queue.Learnings)
+	}
+
+	updated, err := service.Review(ctx, protocol.LearnReviewRequestBody{
+		IDs:    []string{first.Learning.ID, second.Learning.ID, first.Learning.ID},
+		Status: protocol.LearningStatusRejected,
+		Note:   "Reviewed together as duplicate guidance.",
+	})
+	if err != nil {
+		t.Fatalf("bulk review: %v", err)
+	}
+	if len(updated.UpdatedLearnings) != 2 || updated.Updated != nil {
+		t.Fatalf("updated response = %+v, want bulk rows without single compatibility pointer", updated)
+	}
+	for _, row := range updated.UpdatedLearnings {
+		if row.Status != protocol.LearningStatusRejected || row.ReviewNote != "Reviewed together as duplicate guidance." || row.Evidence != "" {
+			t.Fatalf("updated row = %+v, want rejected without evidence", row)
+		}
+	}
+	stillCandidate, err := service.Show(ctx, protocol.LearnShowRequestBody{ID: unmatched.Learning.ID})
+	if err != nil {
+		t.Fatalf("show unmatched learning: %v", err)
+	}
+	if stillCandidate.Learning.Status != protocol.LearningStatusCandidate {
+		t.Fatalf("unmatched status = %s, want candidate", stillCandidate.Learning.Status)
+	}
+}
+
 func TestIssueLearnServicePromoteAndRetireManagedGuidanceFile(t *testing.T) {
 	ctx := context.Background()
 	client, repoDir := newTestIssueClient(t)

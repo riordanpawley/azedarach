@@ -1296,13 +1296,17 @@ func PrintSpecUsage() {
 }
 
 func PrintLearnUsage() {
-	fmt.Println("Usage: az learn <add|recall|show|review|promote|relate> [arguments]")
+	fmt.Println("Usage: az learn <add|recall|show|review|stale|demote|promote|retire|relate|supersede> [arguments]")
 	fmt.Println("  add      Capture an evidence-backed candidate learning")
 	fmt.Println("  recall   Search accepted/promoted learning summaries")
 	fmt.Println("  show     Show a learning with full evidence")
-	fmt.Println("  review   List candidates or update learning status")
+	fmt.Println("  review   List review queues or bulk update selected learnings")
+	fmt.Println("  stale    Mark a learning stale with an audit note")
+	fmt.Println("  demote   Move a learning back to candidate review")
 	fmt.Println("  promote  Mark a learning promoted toward curated guidance")
+	fmt.Println("  retire   Retire an Az-managed promoted guidance block")
 	fmt.Println("  relate   Record supersession or conflict between learnings")
+	fmt.Println("  supersede Record that a newer learning supersedes an older one")
 }
 
 func PrintSpecReqUsage() {

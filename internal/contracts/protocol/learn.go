@@ -147,15 +147,25 @@ type LearnShowResponseBody struct {
 }
 
 type LearnReviewRequestBody struct {
-	ID     string         `json:"id,omitempty" msgpack:"id,omitempty"`
-	Status LearningStatus `json:"status,omitempty" msgpack:"status,omitempty"`
-	Note   string         `json:"note,omitempty" msgpack:"note,omitempty"`
-	Limit  int            `json:"limit,omitempty" msgpack:"limit,omitempty"`
+	ID               string                `json:"id,omitempty" msgpack:"id,omitempty"`
+	IDs              []string              `json:"ids,omitempty" msgpack:"ids,omitempty"`
+	Status           LearningStatus        `json:"status,omitempty" msgpack:"status,omitempty"`
+	Note             string                `json:"note,omitempty" msgpack:"note,omitempty"`
+	Limit            int                   `json:"limit,omitempty" msgpack:"limit,omitempty"`
+	QueueStatuses    []LearningStatus      `json:"queue_statuses,omitempty" msgpack:"queue_statuses,omitempty"`
+	IssueID          naming.IssueID        `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
+	ReqID            naming.RequirementID  `json:"req_id,omitempty" msgpack:"req_id,omitempty"`
+	Tags             []string              `json:"tags,omitempty" msgpack:"tags,omitempty"`
+	Files            []string              `json:"files,omitempty" msgpack:"files,omitempty"`
+	TargetStates     []LearningTargetState `json:"target_states,omitempty" msgpack:"target_states,omitempty"`
+	OlderThanSeconds int64                 `json:"older_than_seconds,omitempty" msgpack:"older_than_seconds,omitempty"`
+	BulkStale        bool                  `json:"bulk_stale,omitempty" msgpack:"bulk_stale,omitempty"`
 }
 
 type LearnReviewResponseBody struct {
-	Learnings []Learning `json:"learnings" msgpack:"learnings"`
-	Updated   *Learning  `json:"updated,omitempty" msgpack:"updated,omitempty"`
+	Learnings        []Learning `json:"learnings" msgpack:"learnings"`
+	Updated          *Learning  `json:"updated,omitempty" msgpack:"updated,omitempty"`
+	UpdatedLearnings []Learning `json:"updated_learnings,omitempty" msgpack:"updated_learnings,omitempty"`
 }
 
 type LearnStaleRequestBody struct {

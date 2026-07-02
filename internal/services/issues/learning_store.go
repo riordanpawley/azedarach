@@ -125,6 +125,13 @@ type ReviewLearningParams struct {
 	Note   string
 }
 
+type BulkReviewLearningsParams struct {
+	ProjectID string
+	IDs       []string
+	Status    LearningStatus
+	Note      string
+}
+
 type PromoteLearningParams struct {
 	Target         LearningPromotionTarget
 	TargetID       string
@@ -170,6 +177,7 @@ type LearningFilter struct {
 	ContextFiles    []string
 	Query           string
 	Statuses        []LearningStatus
+	TargetStates    []LearningTargetState
 	Tags            []string
 	Files           []string
 	Limit           int
@@ -177,6 +185,7 @@ type LearningFilter struct {
 	ExcludePrivate  bool
 	IncludeDeleted  bool
 	ActiveOnly      bool
+	UpdatedBefore   *time.Time
 }
 
 type learningRecord struct {
@@ -377,6 +386,17 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 		for _, status := range filter.Statuses {
 			args = append(args, string(status))
 		}
+	}
+	if len(filter.TargetStates) > 0 {
+		query.WriteString(` AND l.promotion_target IS NOT NULL AND COALESCE(NULLIF(l.target_state, ''), ?) IN (` + placeholders(len(filter.TargetStates)) + `)`)
+		args = append(args, string(LearningTargetStateActive))
+		for _, state := range filter.TargetStates {
+			args = append(args, string(state))
+		}
+	}
+	if filter.UpdatedBefore != nil {
+		query.WriteString(` AND l.updated_at <= ?`)
+		args = append(args, formatTimestamp(*filter.UpdatedBefore))
 	}
 	if strings.TrimSpace(filter.Query) != "" {
 		query.WriteString(` ORDER BY bm25(agent_learning_search_fts), l.updated_at DESC, l.local_id ASC`)
@@ -631,6 +651,74 @@ func (c *Client) UpdateLearningStatus(ctx context.Context, selector string, stat
 		return Learning{}, c.wrapError("update-learning-status", record.LocalID, classifySQLiteConstraint(err))
 	}
 	return c.GetLearning(ctx, record.LocalID)
+}
+
+func (c *Client) BulkReviewLearnings(ctx context.Context, params BulkReviewLearningsParams) ([]Learning, error) {
+	params.ProjectID = strings.TrimSpace(params.ProjectID)
+	params.IDs = normalizeStringSlice(params.IDs)
+	params.Note = strings.TrimSpace(params.Note)
+	if len(params.IDs) == 0 {
+		return nil, c.wrapError("bulk-review-learnings", "", errors.New("at least one learning id is required"))
+	}
+	if !params.Status.Valid() {
+		return nil, c.wrapError("bulk-review-learnings", "", errors.New("invalid learning status"))
+	}
+	if params.Status == LearningStatusCandidate {
+		return nil, c.wrapError("bulk-review-learnings", "", errors.New("review status must be accepted, rejected, or stale"))
+	}
+	if params.Status == LearningStatusPromoted {
+		return nil, c.wrapError("bulk-review-learnings", "", fmt.Errorf("%w: use promote-learning to mark a learning promoted", domain.ErrConflict))
+	}
+	if params.Note == "" {
+		return nil, c.wrapError("bulk-review-learnings", "", errors.New("review note is required"))
+	}
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, c.wrapError("bulk-review-learnings", "", err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	records := make([]learningRecord, 0, len(params.IDs))
+	for _, id := range params.IDs {
+		record, lookupErr := c.lookupLearningByLocalID(ctx, tx, id, false)
+		if lookupErr != nil {
+			return nil, c.wrapError("bulk-review-learnings", id, lookupErr)
+		}
+		if params.ProjectID != "" && record.ProjectID != params.ProjectID {
+			return nil, c.wrapError("bulk-review-learnings", record.LocalID, domain.ErrNotFound)
+		}
+		records = append(records, record)
+	}
+	now := time.Now().UTC()
+	for _, record := range records {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE agent_learnings
+			SET status = ?, review_note = ?, reviewed_at = ?, updated_at = ?
+			WHERE id = ?
+		`, string(params.Status), nullableString(params.Note), formatTimestamp(now), formatTimestamp(now), record.rowID); err != nil {
+			return nil, c.wrapError("bulk-review-learnings", record.LocalID, classifySQLiteConstraint(err))
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, c.wrapError("bulk-review-learnings", "", err)
+	}
+	tx = nil
+	out := make([]Learning, 0, len(records))
+	for _, record := range records {
+		updated, err := c.GetLearning(ctx, record.LocalID)
+		if err != nil {
+			return nil, c.wrapError("bulk-review-learnings", record.LocalID, err)
+		}
+		out = append(out, updated)
+	}
+	return out, nil
 }
 
 func (c *Client) DemoteLearning(ctx context.Context, selector string, note string) (Learning, error) {
