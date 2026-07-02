@@ -10627,13 +10627,24 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 					if err := json.Unmarshal(req.Body, &learnReq); err != nil {
 						t.Fatalf("decode learn recall request: %v", err)
 					}
-					body, err := json.Marshal(protocol.LearnRecallResponseBody{Learnings: []protocol.Learning{{
+					learnings := []protocol.Learning{{
 						ID:       "learn-1",
 						IssueID:  naming.IssueID("az-1"),
 						Summary:  "Keep durable choices in decisions",
 						Evidence: "raw evidence should not be injected",
 						Status:   protocol.LearningStatusAccepted,
-					}}})
+					}}
+					if learnReq.IncludePrivate {
+						learnings = append(learnings, protocol.Learning{
+							ID:              "learn-private",
+							IssueID:         naming.IssueID("az-1"),
+							Summary:         "Private local handling detail",
+							Evidence:        "private raw evidence should not be injected",
+							EvidencePrivate: true,
+							Status:          protocol.LearningStatusAccepted,
+						})
+					}
+					body, err := json.Marshal(protocol.LearnRecallResponseBody{Learnings: learnings})
 					if err != nil {
 						t.Fatalf("marshal learn recall response: %v", err)
 					}
@@ -10660,6 +10671,9 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 	if learnReq.IncludeEvidence {
 		t.Fatal("prime learn recall should not request evidence")
 	}
+	if learnReq.IncludePrivate {
+		t.Fatal("prime learn recall should not request private rows")
+	}
 	if !reflect.DeepEqual(learnReq.Statuses, []protocol.LearningStatus{protocol.LearningStatusAccepted, protocol.LearningStatusPromoted}) {
 		t.Fatalf("learn recall statuses = %#v", learnReq.Statuses)
 	}
@@ -10670,6 +10684,9 @@ func TestPrimeCommandSurfacesBoundedLearningSummaries(t *testing.T) {
 	}
 	if strings.Contains(output, "raw evidence should not be injected") {
 		t.Fatalf("prime output injected raw learning evidence: %q", output)
+	}
+	if strings.Contains(output, "Private local handling detail") || strings.Contains(output, "private raw evidence should not be injected") {
+		t.Fatalf("prime output injected private learning: %q", output)
 	}
 }
 

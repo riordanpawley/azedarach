@@ -227,6 +227,57 @@ func TestClient_ListLearningsActiveOnlyExcludesInactiveLifecycleRows(t *testing.
 	assert.Nil(t, storedCandidate.LastRecalledAt)
 }
 
+func TestClient_ListLearningsCanExcludePrivateEvidenceRows(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	public := createAcceptedLearning(t, ctx, client, "proj", "Public accepted learning")
+	privateCreated, err := client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID:       "proj",
+		Summary:         "Private accepted learning",
+		Evidence:        "Sensitive evidence must stay out of prime and default recall.",
+		EvidencePrivate: true,
+	})
+	require.NoError(t, err)
+	private, err := client.UpdateLearningStatus(ctx, privateCreated.LocalID, LearningStatusAccepted, "Accepted but private.")
+	require.NoError(t, err)
+	require.True(t, private.EvidencePrivate)
+
+	rows, err := client.ListLearnings(ctx, LearningFilter{
+		ProjectID:       "proj",
+		Statuses:        []LearningStatus{LearningStatusAccepted},
+		ActiveOnly:      true,
+		ExcludePrivate:  true,
+		IncludeEvidence: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, public.LocalID, rows[0].LocalID)
+	assert.Contains(t, rows[0].Evidence, "Public accepted learning evidence.")
+
+	storedPrivate, err := client.GetLearning(ctx, private.LocalID)
+	require.NoError(t, err)
+	assert.True(t, storedPrivate.EvidencePrivate)
+	assert.Contains(t, storedPrivate.Evidence, "Sensitive evidence")
+	assert.Zero(t, storedPrivate.RecallCount, "excluded private rows should not be counted as recalled")
+
+	withPrivate, err := client.ListLearnings(ctx, LearningFilter{
+		ProjectID:       "proj",
+		Statuses:        []LearningStatus{LearningStatusAccepted},
+		ActiveOnly:      true,
+		IncludeEvidence: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, withPrivate, 2)
+
+	got := make(map[string]Learning, len(withPrivate))
+	for _, row := range withPrivate {
+		got[row.LocalID] = row
+	}
+	require.True(t, got[private.LocalID].EvidencePrivate)
+	assert.Contains(t, got[private.LocalID].Evidence, "Sensitive evidence")
+}
+
 func TestLearningActiveAtUsesParsedTimestampBoundaries(t *testing.T) {
 	now := time.Date(2026, 7, 2, 3, 45, 0, 500, time.UTC)
 	expiresAtBoundary := now.Truncate(time.Second)
@@ -314,6 +365,34 @@ func TestClient_CreateLearningRejectsOversizedEvidence(t *testing.T) {
 		Evidence:  strings.Repeat("x", maxLearningEvidenceRunes+1),
 	})
 	require.Error(t, err)
+}
+
+func TestClient_CreateLearningRejectsControlCharacters(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	_, err := client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID: "proj",
+		Summary:   "Bad evidence",
+		Evidence:  "contains\x00nul",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "control characters")
+
+	_, err = client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID: "proj",
+		Summary:   "Bad edge evidence",
+		Evidence:  "\vtrimmed control",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "control characters")
+
+	_, err = client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID: "proj",
+		Summary:   "Allowed whitespace evidence",
+		Evidence:  "line one\nline two\twith tab",
+	})
+	require.NoError(t, err)
 }
 
 func TestClient_CreateLearningRejectsOversizedSummary(t *testing.T) {

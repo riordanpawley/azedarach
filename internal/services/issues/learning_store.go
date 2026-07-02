@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
@@ -45,6 +46,7 @@ type Learning struct {
 	SessionID       *string
 	Summary         string
 	Evidence        string
+	EvidencePrivate bool
 	Status          LearningStatus
 	ReviewNote      string
 	ReviewedAt      *time.Time
@@ -66,15 +68,16 @@ type Learning struct {
 }
 
 type CreateLearningParams struct {
-	ProjectID     string
-	IssueID       *string
-	RequirementID *string
-	SessionID     *string
-	Summary       string
-	Evidence      string
-	Status        LearningStatus
-	Tags          []string
-	Files         []string
+	ProjectID       string
+	IssueID         *string
+	RequirementID   *string
+	SessionID       *string
+	Summary         string
+	Evidence        string
+	EvidencePrivate bool
+	Status          LearningStatus
+	Tags            []string
+	Files           []string
 }
 
 type ReviewLearningParams struct {
@@ -98,6 +101,7 @@ type LearningFilter struct {
 	Files           []string
 	Limit           int
 	IncludeEvidence bool
+	ExcludePrivate  bool
 	IncludeDeleted  bool
 	ActiveOnly      bool
 }
@@ -158,11 +162,11 @@ func (c *Client) CreateLearning(ctx context.Context, params CreateLearningParams
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO agent_learnings (
 			local_id, project_id, issue_id, requirement_id, session_id,
-			summary, evidence, status, tags_json, files_json,
+			summary, evidence, evidence_private, status, tags_json, files_json,
 			created_at, updated_at, deleted_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-	`, fmt.Sprintf("pending-%d", now.UnixNano()), normalized.ProjectID, nullableTextPtr(normalized.IssueID), reqRowID, nullableTextPtr(normalized.SessionID), normalized.Summary, normalized.Evidence, string(normalized.Status), mustMarshalJSONSlice(tags), mustMarshalJSONSlice(files), formatTimestamp(now), formatTimestamp(now))
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+	`, fmt.Sprintf("pending-%d", now.UnixNano()), normalized.ProjectID, nullableTextPtr(normalized.IssueID), reqRowID, nullableTextPtr(normalized.SessionID), normalized.Summary, normalized.Evidence, boolInt(normalized.EvidencePrivate), string(normalized.Status), mustMarshalJSONSlice(tags), mustMarshalJSONSlice(files), formatTimestamp(now), formatTimestamp(now))
 	if err != nil {
 		return Learning{}, c.wrapError("create-learning", "", classifySQLiteConstraint(err))
 	}
@@ -179,18 +183,19 @@ func (c *Client) CreateLearning(ctx context.Context, params CreateLearningParams
 	}
 	tx = nil
 	return Learning{
-		LocalID:       localID,
-		ProjectID:     normalized.ProjectID,
-		IssueID:       cloneStringPointer(normalized.IssueID),
-		RequirementID: cloneStringPointer(normalized.RequirementID),
-		SessionID:     cloneStringPointer(normalized.SessionID),
-		Summary:       normalized.Summary,
-		Evidence:      normalized.Evidence,
-		Status:        normalized.Status,
-		Tags:          tags,
-		Files:         files,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		LocalID:         localID,
+		ProjectID:       normalized.ProjectID,
+		IssueID:         cloneStringPointer(normalized.IssueID),
+		RequirementID:   cloneStringPointer(normalized.RequirementID),
+		SessionID:       cloneStringPointer(normalized.SessionID),
+		Summary:         normalized.Summary,
+		Evidence:        normalized.Evidence,
+		EvidencePrivate: normalized.EvidencePrivate,
+		Status:          normalized.Status,
+		Tags:            tags,
+		Files:           files,
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}, nil
 }
 
@@ -215,7 +220,7 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 	args := make([]any, 0, 8)
 	query.WriteString(`
 		SELECT l.id, l.local_id, l.project_id, l.issue_id, r.local_id, l.session_id,
-			l.summary, l.evidence, l.status, l.review_note, l.reviewed_at,
+			l.summary, l.evidence, l.evidence_private, l.status, l.review_note, l.reviewed_at,
 			COALESCE(l.tags_json, '[]'), COALESCE(l.files_json, '[]'),
 			l.promotion_target, l.promotion_target_id, l.promotion_note, l.promoted_at,
 			l.expires_at, l.stale_at, l.last_recalled_at, l.recall_count,
@@ -240,6 +245,9 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 			AND l.target_retired_at IS NULL
 		`)
 		args = append(args, string(LearningStatusAccepted), string(LearningStatusPromoted))
+	}
+	if filter.ExcludePrivate {
+		query.WriteString(` AND l.evidence_private = 0`)
 	}
 	if trimmed := strings.TrimSpace(filter.ProjectID); trimmed != "" {
 		query.WriteString(` AND l.project_id = ?`)
@@ -420,6 +428,12 @@ func normalizeCreateLearningParams(params CreateLearningParams) (CreateLearningP
 	params.IssueID = normalizeOptionalString(params.IssueID)
 	params.RequirementID = normalizeOptionalString(params.RequirementID)
 	params.SessionID = normalizeOptionalString(params.SessionID)
+	if hasDisallowedControlRune(params.Evidence) {
+		return params, errors.New("evidence contains disallowed control characters")
+	}
+	if hasDisallowedControlRune(params.Summary) {
+		return params, errors.New("summary contains disallowed control characters")
+	}
 	params.Summary = strings.TrimSpace(params.Summary)
 	params.Evidence = strings.TrimSpace(params.Evidence)
 	if params.Evidence == "" {
@@ -482,7 +496,7 @@ func (c *Client) lookupLearningByLocalID(ctx context.Context, db sqlIssueDBTX, s
 	}
 	query := `
 		SELECT l.id, l.local_id, l.project_id, l.issue_id, r.local_id, l.session_id,
-			l.summary, l.evidence, l.status, l.review_note, l.reviewed_at,
+			l.summary, l.evidence, l.evidence_private, l.status, l.review_note, l.reviewed_at,
 			COALESCE(l.tags_json, '[]'), COALESCE(l.files_json, '[]'),
 			l.promotion_target, l.promotion_target_id, l.promotion_note, l.promoted_at,
 			l.expires_at, l.stale_at, l.last_recalled_at, l.recall_count,
@@ -510,6 +524,7 @@ func scanLearningRecord(scanner interface {
 	var expiresRaw, staleRaw, lastRecalledRaw, supersededRaw, targetRetiredRaw, deletedRaw sql.NullString
 	var tagsJSON, filesJSON string
 	var createdRaw, updatedRaw string
+	var evidencePrivateRaw int
 	if err := scanner.Scan(
 		&record.rowID,
 		&record.LocalID,
@@ -519,6 +534,7 @@ func scanLearningRecord(scanner interface {
 		&sessionRaw,
 		&record.Summary,
 		&record.Evidence,
+		&evidencePrivateRaw,
 		&record.Status,
 		&reviewNoteRaw,
 		&reviewedRaw,
@@ -541,6 +557,7 @@ func scanLearningRecord(scanner interface {
 		return learningRecord{}, err
 	}
 	record.IssueID = nullableStringPointer(issueRaw)
+	record.EvidencePrivate = evidencePrivateRaw != 0
 	record.RequirementID = nullableStringPointer(reqRaw)
 	record.SessionID = nullableStringPointer(sessionRaw)
 	record.ReviewNote = strings.TrimSpace(reviewNoteRaw.String)
@@ -563,6 +580,18 @@ func scanLearningRecord(scanner interface {
 	record.UpdatedAt = parseTimestamp(updatedRaw)
 	record.DeletedAt = nullableTimePointer(deletedRaw)
 	return record, nil
+}
+
+func hasDisallowedControlRune(value string) bool {
+	for _, r := range value {
+		if r == '\n' || r == '\r' || r == '\t' {
+			continue
+		}
+		if unicode.IsControl(r) {
+			return true
+		}
+	}
+	return false
 }
 
 func learningFTSMatchQuery(raw string) string {
@@ -663,4 +692,11 @@ func cloneStringPointer(value *string) *string {
 	}
 	cloned := *value
 	return &cloned
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }

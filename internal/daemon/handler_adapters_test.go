@@ -365,6 +365,58 @@ func TestIssueSpecServiceLintDoesNotFailOnOverlappingLocalAndExternalCodes(t *te
 	}
 }
 
+func TestIssueLearnServiceOmitEvidenceFromReviewAndPromoteResponses(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	service := newTestIssueLearnService(client, repoDir)
+
+	added, err := service.Add(ctx, protocol.LearnAddRequestBody{
+		Summary:  "Private credential handling",
+		Evidence: "Sensitive placeholder evidence",
+		Private:  true,
+	})
+	if err != nil {
+		t.Fatalf("add learning: %v", err)
+	}
+	if added.Learning.Evidence == "" || !added.Learning.EvidencePrivate {
+		t.Fatalf("add response should echo explicit capture evidence and private flag: %+v", added.Learning)
+	}
+
+	reviewed, err := service.Review(ctx, protocol.LearnReviewRequestBody{
+		ID:     added.Learning.ID,
+		Status: protocol.LearningStatusAccepted,
+		Note:   "Reviewed private row.",
+	})
+	if err != nil {
+		t.Fatalf("review learning: %v", err)
+	}
+	if reviewed.Updated == nil {
+		t.Fatal("review response missing updated learning")
+	}
+	if reviewed.Updated.Evidence != "" || !reviewed.Updated.EvidencePrivate {
+		t.Fatalf("review response evidence/private = %q/%v, want no evidence and private marker", reviewed.Updated.Evidence, reviewed.Updated.EvidencePrivate)
+	}
+
+	decision, err := client.RecordDecision(ctx, issues.RecordDecisionParams{
+		Title:     "Private evidence target",
+		Rationale: "Decision exists so promotion can validate target ownership.",
+	})
+	if err != nil {
+		t.Fatalf("record decision: %v", err)
+	}
+	promoted, err := service.Promote(ctx, protocol.LearnPromoteRequestBody{
+		ID:       added.Learning.ID,
+		Target:   protocol.LearningPromotionTargetDecision,
+		TargetID: decision.LocalID,
+	})
+	if err != nil {
+		t.Fatalf("promote learning: %v", err)
+	}
+	if promoted.Learning.Evidence != "" || !promoted.Learning.EvidencePrivate {
+		t.Fatalf("promote response evidence/private = %q/%v, want no evidence and private marker", promoted.Learning.Evidence, promoted.Learning.EvidencePrivate)
+	}
+}
+
 func newTestIssueSpecService(client *issues.Client, repoDir string) issueSpecService {
 	d := &Daemon{
 		cfg: Config{
@@ -379,6 +431,22 @@ func newTestIssueSpecService(client *issues.Client, repoDir string) issueSpecSer
 		},
 	}
 	return issueSpecService{daemon: d}
+}
+
+func newTestIssueLearnService(client *issues.Client, repoDir string) issueLearnService {
+	d := &Daemon{
+		cfg: Config{
+			RepoDir: repoDir,
+		},
+		issues: client,
+		issueClientsByProject: map[string]*issues.Client{
+			protocol.DefaultProjectID: client,
+		},
+		issueClientsByRoot: map[string]*issues.Client{
+			repoDir: client,
+		},
+	}
+	return issueLearnService{daemon: d}
 }
 
 func newTestIssueClient(t *testing.T) (*issues.Client, string) {
