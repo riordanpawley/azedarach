@@ -13,6 +13,8 @@ const (
 	CommandLearnStale     = "learn.stale"
 	CommandLearnDemote    = "learn.demote"
 	CommandLearnSupersede = "learn.supersede"
+	CommandLearnDoctor    = "learn.doctor"
+	CommandLearnGC        = "learn.gc"
 )
 
 type LearningStatus string
@@ -246,6 +248,40 @@ type LearnSupersedeRequestBody struct {
 
 type LearnSupersedeResponseBody struct {
 	Relation LearningRelation `json:"relation" msgpack:"relation"`
+}
+
+type LearnMaintenanceFinding struct {
+	Type       string   `json:"type" msgpack:"type"`
+	Severity   string   `json:"severity" msgpack:"severity"`
+	LearningID string   `json:"learning_id" msgpack:"learning_id"`
+	Message    string   `json:"message" msgpack:"message"`
+	Action     string   `json:"action" msgpack:"action"`
+	Learning   Learning `json:"learning" msgpack:"learning"`
+}
+
+type LearnDoctorRequestBody struct {
+	ProjectID              string `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	CandidateOlderThanDays int    `json:"candidate_older_than_days,omitempty" msgpack:"candidate_older_than_days,omitempty"`
+	InactiveOlderThanDays  int    `json:"inactive_older_than_days,omitempty" msgpack:"inactive_older_than_days,omitempty"`
+	Limit                  int    `json:"limit,omitempty" msgpack:"limit,omitempty"`
+}
+
+type LearnDoctorResponseBody struct {
+	Findings []LearnMaintenanceFinding `json:"findings" msgpack:"findings"`
+}
+
+type LearnGCRequestBody struct {
+	ProjectID              string `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	CandidateOlderThanDays int    `json:"candidate_older_than_days,omitempty" msgpack:"candidate_older_than_days,omitempty"`
+	InactiveOlderThanDays  int    `json:"inactive_older_than_days,omitempty" msgpack:"inactive_older_than_days,omitempty"`
+	Limit                  int    `json:"limit,omitempty" msgpack:"limit,omitempty"`
+	Confirm                bool   `json:"confirm,omitempty" msgpack:"confirm,omitempty"`
+}
+
+type LearnGCResponseBody struct {
+	DryRun  bool                      `json:"dry_run" msgpack:"dry_run"`
+	Deleted []LearnMaintenanceFinding `json:"deleted,omitempty" msgpack:"deleted,omitempty"`
+	Skipped []LearnMaintenanceFinding `json:"skipped,omitempty" msgpack:"skipped,omitempty"`
 }
 
 func (s LearningStatus) Valid() bool {

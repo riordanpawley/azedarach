@@ -23,6 +23,8 @@ type LearnService interface {
 	Retire(context.Context, protocol.LearnRetireRequestBody) (protocol.LearnRetireResponseBody, error)
 	Relate(context.Context, protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error)
 	Supersede(context.Context, protocol.LearnSupersedeRequestBody) (protocol.LearnSupersedeResponseBody, error)
+	Doctor(context.Context, protocol.LearnDoctorRequestBody) (protocol.LearnDoctorResponseBody, error)
+	GC(context.Context, protocol.LearnGCRequestBody) (protocol.LearnGCResponseBody, error)
 }
 
 type LearnHandler struct {
@@ -246,6 +248,32 @@ func (h *LearnHandler) Handle(ctx context.Context, req protocol.RequestEnvelope)
 			return learnInvalidRequest(resp, "supersede note is required")
 		}
 		return learnJSONResponse(ctx, resp, h.service.Supersede, cmd)
+	case protocol.CommandLearnDoctor:
+		var cmd protocol.LearnDoctorRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.ProjectID = strings.TrimSpace(cmd.ProjectID)
+		if cmd.CandidateOlderThanDays < 0 || cmd.InactiveOlderThanDays < 0 {
+			return learnInvalidRequest(resp, "age thresholds must be non-negative")
+		}
+		if cmd.Limit < 0 {
+			return learnInvalidRequest(resp, "limit must be non-negative")
+		}
+		return learnJSONResponse(ctx, resp, h.service.Doctor, cmd)
+	case protocol.CommandLearnGC:
+		var cmd protocol.LearnGCRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.ProjectID = strings.TrimSpace(cmd.ProjectID)
+		if cmd.CandidateOlderThanDays < 0 || cmd.InactiveOlderThanDays < 0 {
+			return learnInvalidRequest(resp, "age thresholds must be non-negative")
+		}
+		if cmd.Limit < 0 {
+			return learnInvalidRequest(resp, "limit must be non-negative")
+		}
+		return learnJSONResponse(ctx, resp, h.service.GC, cmd)
 	default:
 		resp.Error = &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeUnsupportedCommand,

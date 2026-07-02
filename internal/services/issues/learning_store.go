@@ -167,6 +167,37 @@ type RelateLearningParams struct {
 	ScopeFiles         []string
 }
 
+type LearningMaintenanceParams struct {
+	ProjectID          string
+	CandidateOlderThan time.Duration
+	InactiveOlderThan  time.Duration
+	Limit              int
+}
+
+type LearningDoctorReport struct {
+	Findings []LearningMaintenanceFinding
+}
+
+type LearningMaintenanceFinding struct {
+	Type       string
+	Severity   string
+	LearningID string
+	Message    string
+	Action     string
+	Learning   Learning
+}
+
+type LearningGCParams struct {
+	LearningMaintenanceParams
+	Confirm bool
+}
+
+type LearningGCReport struct {
+	DryRun  bool
+	Deleted []LearningMaintenanceFinding
+	Skipped []LearningMaintenanceFinding
+}
+
 type LearningFilter struct {
 	ProjectID       string
 	IssueID         string
@@ -462,6 +493,79 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 		out = append(out, record.Learning)
 	}
 	return out, nil
+}
+
+func (c *Client) DoctorLearnings(ctx context.Context, params LearningMaintenanceParams) (LearningDoctorReport, error) {
+	records, err := c.listLearningMaintenanceRecords(ctx, params.ProjectID)
+	if err != nil {
+		return LearningDoctorReport{}, c.wrapError("doctor-learnings", "", err)
+	}
+	now := time.Now().UTC()
+	findings := make([]LearningMaintenanceFinding, 0)
+	for _, record := range records {
+		findings = append(findings, learningMaintenanceFindings(record.Learning, params, now)...)
+		if params.Limit > 0 && len(findings) >= params.Limit {
+			findings = findings[:params.Limit]
+			break
+		}
+	}
+	return LearningDoctorReport{Findings: findings}, nil
+}
+
+func (c *Client) GCLearnings(ctx context.Context, params LearningGCParams) (LearningGCReport, error) {
+	records, err := c.listLearningMaintenanceRecords(ctx, params.ProjectID)
+	if err != nil {
+		return LearningGCReport{}, c.wrapError("gc-learnings", "", err)
+	}
+	now := time.Now().UTC()
+	candidates := make([]learningRecord, 0)
+	for _, record := range records {
+		if learningGCEligible(record.Learning, params.LearningMaintenanceParams, now) {
+			candidates = append(candidates, record)
+			if params.Limit > 0 && len(candidates) >= params.Limit {
+				break
+			}
+		}
+	}
+	report := LearningGCReport{
+		DryRun:  !params.Confirm,
+		Deleted: make([]LearningMaintenanceFinding, 0, len(candidates)),
+	}
+	for _, record := range candidates {
+		report.Deleted = append(report.Deleted, learningGCFinding(record.Learning, params.LearningMaintenanceParams, now))
+	}
+	if !params.Confirm || len(candidates) == 0 {
+		return report, nil
+	}
+
+	db, err := c.dbHandle()
+	if err != nil {
+		return LearningGCReport{}, err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return LearningGCReport{}, c.wrapError("gc-learnings", "", err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	deletedAt := formatTimestamp(now)
+	for _, record := range candidates {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE agent_learnings
+			SET deleted_at = ?, updated_at = ?
+			WHERE id = ? AND deleted_at IS NULL
+		`, deletedAt, deletedAt, record.rowID); err != nil {
+			return LearningGCReport{}, c.wrapError("gc-learnings", record.LocalID, classifySQLiteConstraint(err))
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return LearningGCReport{}, c.wrapError("gc-learnings", "", err)
+	}
+	tx = nil
+	return report, nil
 }
 
 func rankLearningRecords(records []learningRecord, filter LearningFilter, hasQuery bool) {
@@ -1393,6 +1497,169 @@ func (c *Client) listLearningRelationsForRow(ctx context.Context, db sqlIssueDBT
 		return nil, err
 	}
 	return relations, nil
+}
+
+func (c *Client) listLearningMaintenanceRecords(ctx context.Context, projectID string) ([]learningRecord, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	query := `
+		SELECT l.id, l.local_id, l.project_id, l.issue_id, r.local_id, l.session_id,
+			l.summary, l.evidence, l.evidence_private, l.status, l.review_note, l.reviewed_at,
+			COALESCE(l.tags_json, '[]'), COALESCE(l.files_json, '[]'),
+			l.promotion_target, l.promotion_target_id, l.promotion_note, l.promoted_at,
+			l.target_state, l.target_hash, COALESCE(l.target_metadata_json, '{}'),
+			l.expires_at, l.stale_at, l.last_recalled_at, l.recall_count,
+			l.superseded_at, l.target_retired_at, l.target_drifted_at,
+			l.created_at, l.updated_at, l.deleted_at
+		FROM agent_learnings l
+		LEFT JOIN spec_requirements r ON r.id = l.requirement_id
+		WHERE l.deleted_at IS NULL
+	`
+	args := make([]any, 0, 1)
+	if trimmed := strings.TrimSpace(projectID); trimmed != "" {
+		query += ` AND l.project_id = ?`
+		args = append(args, trimmed)
+	}
+	query += ` ORDER BY l.updated_at ASC, l.local_id ASC`
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	records := make([]learningRecord, 0)
+	for rows.Next() {
+		record, scanErr := scanLearningRecord(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		record.Evidence = ""
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+func learningMaintenanceFindings(learning Learning, params LearningMaintenanceParams, now time.Time) []LearningMaintenanceFinding {
+	findings := make([]LearningMaintenanceFinding, 0, 2)
+	if params.CandidateOlderThan > 0 && learning.Status == LearningStatusCandidate && learning.UpdatedAt.Before(now.Add(-params.CandidateOlderThan)) {
+		findings = append(findings, LearningMaintenanceFinding{
+			Type:       "old_candidate",
+			Severity:   "warning",
+			LearningID: learning.LocalID,
+			Message:    "candidate learning has exceeded the review age threshold",
+			Action:     "review, stale, or run learn gc with confirmation",
+			Learning:   learning,
+		})
+	}
+	if params.InactiveOlderThan > 0 && learningInactiveForGC(learning, now) && learning.UpdatedAt.Before(now.Add(-params.InactiveOlderThan)) {
+		findings = append(findings, LearningMaintenanceFinding{
+			Type:       "old_inactive",
+			Severity:   "info",
+			LearningID: learning.LocalID,
+			Message:    "inactive learning is eligible for bounded cleanup",
+			Action:     "run learn gc with confirmation",
+			Learning:   learning,
+		})
+	}
+	if learning.Status == LearningStatusPromoted {
+		switch learning.TargetState {
+		case LearningTargetStateMissing:
+			findings = append(findings, LearningMaintenanceFinding{
+				Type:       "missing_target",
+				Severity:   "error",
+				LearningID: learning.LocalID,
+				Message:    "promoted learning target is marked missing",
+				Action:     "re-promote to recreate the target or retire the target",
+				Learning:   learning,
+			})
+		case LearningTargetStateDrifted:
+			findings = append(findings, LearningMaintenanceFinding{
+				Type:       "drifted_target",
+				Severity:   "error",
+				LearningID: learning.LocalID,
+				Message:    "promoted learning target is marked drifted",
+				Action:     "inspect the managed block and re-promote or retire explicitly",
+				Learning:   learning,
+			})
+		}
+		if learning.Target == nil || strings.TrimSpace(learning.TargetID) == "" {
+			findings = append(findings, LearningMaintenanceFinding{
+				Type:       "policy_inconsistency",
+				Severity:   "error",
+				LearningID: learning.LocalID,
+				Message:    "promoted learning is missing target metadata",
+				Action:     "demote or re-promote the learning with a target",
+				Learning:   learning,
+			})
+		}
+	}
+	if learning.Status == LearningStatusAccepted && learning.ReviewedAt == nil {
+		findings = append(findings, LearningMaintenanceFinding{
+			Type:       "policy_inconsistency",
+			Severity:   "warning",
+			LearningID: learning.LocalID,
+			Message:    "accepted learning is missing review timestamp",
+			Action:     "demote and review again with an audit note",
+			Learning:   learning,
+		})
+	}
+	return findings
+}
+
+func learningGCEligible(learning Learning, params LearningMaintenanceParams, now time.Time) bool {
+	if params.CandidateOlderThan > 0 && learning.Status == LearningStatusCandidate && learning.UpdatedAt.Before(now.Add(-params.CandidateOlderThan)) {
+		return true
+	}
+	return params.InactiveOlderThan > 0 && learningInactiveForGC(learning, now) && learning.UpdatedAt.Before(now.Add(-params.InactiveOlderThan))
+}
+
+func learningGCFinding(learning Learning, params LearningMaintenanceParams, now time.Time) LearningMaintenanceFinding {
+	if params.CandidateOlderThan > 0 && learning.Status == LearningStatusCandidate && learning.UpdatedAt.Before(now.Add(-params.CandidateOlderThan)) {
+		return LearningMaintenanceFinding{
+			Type:       "old_candidate",
+			Severity:   "warning",
+			LearningID: learning.LocalID,
+			Message:    "candidate learning has exceeded the review age threshold",
+			Action:     "soft-delete candidate learning",
+			Learning:   learning,
+		}
+	}
+	return LearningMaintenanceFinding{
+		Type:       "old_inactive",
+		Severity:   "info",
+		LearningID: learning.LocalID,
+		Message:    "inactive learning is eligible for bounded cleanup",
+		Action:     "soft-delete inactive learning",
+		Learning:   learning,
+	}
+}
+
+func learningInactiveForGC(learning Learning, now time.Time) bool {
+	switch learning.Status {
+	case LearningStatusRejected, LearningStatusStale:
+		return true
+	}
+	if learning.ExpiresAt != nil && !learning.ExpiresAt.After(now) {
+		return true
+	}
+	if learning.StaleAt != nil && !learning.StaleAt.After(now) {
+		return true
+	}
+	if learning.SupersededAt != nil {
+		return true
+	}
+	if learning.TargetRetiredAt != nil || learning.TargetDriftedAt != nil {
+		return true
+	}
+	switch learning.TargetState {
+	case LearningTargetStateRetired, LearningTargetStateDrifted, LearningTargetStateMissing:
+		return true
+	}
+	return false
 }
 
 func scanLearningRelation(scanner interface {

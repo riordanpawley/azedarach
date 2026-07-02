@@ -604,6 +604,15 @@ func TestIssueLearnServicePromoteAndRetireManagedGuidanceFile(t *testing.T) {
 	if !strings.Contains(retiredContent, "# Existing guidance") || strings.Contains(retiredContent, "Source learning: "+added.Learning.ID) {
 		t.Fatalf("retire should remove only managed block:\n%s", retiredContent)
 	}
+	doctor, err := service.Doctor(ctx, protocol.LearnDoctorRequestBody{Limit: 10})
+	if err != nil {
+		t.Fatalf("doctor after retire: %v", err)
+	}
+	for _, finding := range doctor.Findings {
+		if finding.LearningID == added.Learning.ID && finding.Type == "missing_target" {
+			t.Fatalf("doctor reported retired managed block as missing: %+v", doctor.Findings)
+		}
+	}
 }
 
 func TestIssueLearnServiceRetireStructuredSpecTargetUsesStoreLifecycle(t *testing.T) {
@@ -723,6 +732,73 @@ func TestIssueLearnServiceRefusesDriftedManagedGuidanceFile(t *testing.T) {
 	}
 	if string(after) != drifted {
 		t.Fatalf("drift refusal changed file:\n%s", string(after))
+	}
+}
+
+func TestIssueLearnServiceDoctorReportsManagedGuidanceDriftWithoutMutation(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	service := newTestIssueLearnService(client, repoDir)
+
+	added, err := service.Add(ctx, protocol.LearnAddRequestBody{
+		Summary:  "Doctor should find drifted file guidance",
+		Evidence: "Evidence.",
+	})
+	if err != nil {
+		t.Fatalf("add learning: %v", err)
+	}
+	if _, err := service.Review(ctx, protocol.LearnReviewRequestBody{
+		ID:     added.Learning.ID,
+		Status: protocol.LearningStatusAccepted,
+		Note:   "Reviewed.",
+	}); err != nil {
+		t.Fatalf("review learning: %v", err)
+	}
+	promoted, err := service.Promote(ctx, protocol.LearnPromoteRequestBody{
+		ID:       added.Learning.ID,
+		Target:   protocol.LearningPromotionTargetAgents,
+		TargetID: "AGENTS.md",
+	})
+	if err != nil {
+		t.Fatalf("promote learning: %v", err)
+	}
+	targetPath := filepath.Join(repoDir, "AGENTS.md")
+	raw, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	drifted := strings.Replace(string(raw), "Doctor should find drifted file guidance", "Human edited file guidance", 1)
+	if err := os.WriteFile(targetPath, []byte(drifted), 0o644); err != nil {
+		t.Fatalf("write drifted target: %v", err)
+	}
+
+	report, err := service.Doctor(ctx, protocol.LearnDoctorRequestBody{Limit: 10})
+	if err != nil {
+		t.Fatalf("doctor: %v", err)
+	}
+	found := false
+	for _, finding := range report.Findings {
+		if finding.LearningID == added.Learning.ID && finding.Type == "drifted_managed_block" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("doctor findings = %+v, want drifted managed block", report.Findings)
+	}
+	stored, err := client.GetLearning(ctx, added.Learning.ID)
+	if err != nil {
+		t.Fatalf("get learning: %v", err)
+	}
+	if stored.TargetState != issues.LearningTargetStateActive || stored.TargetHash != promoted.Learning.TargetHash {
+		t.Fatalf("doctor mutated lifecycle state: %+v", stored)
+	}
+	after, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read after doctor: %v", err)
+	}
+	if string(after) != drifted {
+		t.Fatalf("doctor changed target file:\n%s", string(after))
 	}
 }
 

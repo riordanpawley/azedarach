@@ -100,6 +100,28 @@ func removeManagedGuidanceBlock(repoDir string, learning protocol.Learning, expe
 	return managedGuidanceResult{Path: relPath, TargetHash: blockRange.MarkerHash, Changed: true}, nil
 }
 
+func inspectManagedGuidanceBlock(repoDir string, learning protocol.Learning) (managedGuidanceResult, error) {
+	path, relPath, err := resolveManagedGuidancePath(repoDir, learning.TargetID)
+	if err != nil {
+		return managedGuidanceResult{}, err
+	}
+	content, _, err := readManagedGuidanceFile(path)
+	if err != nil {
+		return managedGuidanceResult{}, err
+	}
+	blockRange, found, err := findManagedGuidanceBlock(content, learning.ID)
+	if err != nil {
+		return managedGuidanceResult{Path: relPath}, err
+	}
+	if !found {
+		return managedGuidanceResult{Path: relPath, BlockMissing: true}, managedGuidanceMissingError(learning.ID, relPath)
+	}
+	if err := validateManagedGuidanceBlock(blockRange, strings.TrimSpace(learning.TargetHash)); err != nil {
+		return managedGuidanceResult{Path: relPath, TargetHash: blockRange.MarkerHash}, err
+	}
+	return managedGuidanceResult{Path: relPath, TargetHash: blockRange.MarkerHash}, nil
+}
+
 type managedGuidanceBlockRange struct {
 	Start      int
 	End        int

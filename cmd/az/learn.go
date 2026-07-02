@@ -123,6 +123,23 @@ type learnSupersedeOpts struct {
 	ScopeFiles    []string
 }
 
+type learnDoctorOpts struct {
+	JSON                   bool
+	ProjectID              string
+	CandidateOlderThanDays int
+	InactiveOlderThanDays  int
+	Limit                  int
+}
+
+type learnGCOpts struct {
+	JSON                   bool
+	ProjectID              string
+	CandidateOlderThanDays int
+	InactiveOlderThanDays  int
+	Limit                  int
+	Confirm                bool
+}
+
 func runLearnCommand(cfg *config.Config, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
 		printLearnUsage()
@@ -203,6 +220,20 @@ func runLearnCommand(cfg *config.Config, args []string) error {
 			return err
 		}
 		return runLearnSupersedeRPC(cfg, opts)
+	case "doctor":
+		opts, err := parseLearnDoctorArgs(args[1:])
+		if err != nil {
+			printLearnUsage()
+			return err
+		}
+		return runLearnDoctorRPC(cfg, opts)
+	case "gc":
+		opts, err := parseLearnGCArgs(args[1:])
+		if err != nil {
+			printLearnUsage()
+			return err
+		}
+		return runLearnGCRPC(cfg, opts)
 	default:
 		return fmt.Errorf("unknown learn command: %s", args[0])
 	}
@@ -422,6 +453,46 @@ func runLearnSupersedeRPC(cfg *config.Config, opts learnSupersedeOpts) error {
 	return nil
 }
 
+func runLearnDoctorRPC(cfg *config.Config, opts learnDoctorOpts) error {
+	req := protocol.LearnDoctorRequestBody{
+		ProjectID:              opts.ProjectID,
+		CandidateOlderThanDays: opts.CandidateOlderThanDays,
+		InactiveOlderThanDays:  opts.InactiveOlderThanDays,
+		Limit:                  opts.Limit,
+	}
+	var out protocol.LearnDoctorResponseBody
+	if err := runLearnRPC(cfg, protocol.CommandLearnDoctor, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	printLearningMaintenanceFindings(out.Findings, "No learning maintenance problems found.")
+	return nil
+}
+
+func runLearnGCRPC(cfg *config.Config, opts learnGCOpts) error {
+	req := protocol.LearnGCRequestBody{
+		ProjectID:              opts.ProjectID,
+		CandidateOlderThanDays: opts.CandidateOlderThanDays,
+		InactiveOlderThanDays:  opts.InactiveOlderThanDays,
+		Limit:                  opts.Limit,
+		Confirm:                opts.Confirm,
+	}
+	var out protocol.LearnGCResponseBody
+	if err := runLearnRPC(cfg, protocol.CommandLearnGC, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	if out.DryRun {
+		fmt.Println("Dry run: no learning rows were deleted. Re-run with --confirm to apply cleanup.")
+	}
+	printLearningMaintenanceFindings(out.Deleted, "No learning rows eligible for cleanup.")
+	return nil
+}
+
 func printLearnings(learnings []protocol.Learning, includeEvidence bool) {
 	if len(learnings) == 0 {
 		fmt.Println("No learnings found.")
@@ -471,6 +542,22 @@ func printReviewLearnings(learnings []protocol.Learning) {
 		}
 		if learning.UpdatedAt != "" {
 			fmt.Printf("  updated: %s\n", learning.UpdatedAt)
+		}
+	}
+}
+
+func printLearningMaintenanceFindings(findings []protocol.LearnMaintenanceFinding, empty string) {
+	if len(findings) == 0 {
+		fmt.Println(empty)
+		return
+	}
+	for _, finding := range findings {
+		fmt.Printf("%s [%s] %s: %s\n", finding.LearningID, finding.Severity, finding.Type, finding.Message)
+		if summary := strings.TrimSpace(finding.Learning.Summary); summary != "" {
+			fmt.Printf("  summary: %s\n", summary)
+		}
+		if action := strings.TrimSpace(finding.Action); action != "" {
+			fmt.Printf("  action: %s\n", action)
 		}
 	}
 }
@@ -906,6 +993,57 @@ func parseLearnSupersedeArgs(args []string) (learnSupersedeOpts, error) {
 	return opts, nil
 }
 
+func parseLearnDoctorArgs(args []string) (learnDoctorOpts, error) {
+	opts := learnDoctorOpts{CandidateOlderThanDays: 30, InactiveOlderThanDays: 30, Limit: 50}
+	fs := flag.NewFlagSet("learn doctor", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "json output")
+	fs.StringVar(&opts.ProjectID, "project", "", "project id")
+	fs.IntVar(&opts.CandidateOlderThanDays, "candidate-older-than-days", opts.CandidateOlderThanDays, "candidate age threshold")
+	fs.IntVar(&opts.InactiveOlderThanDays, "inactive-older-than-days", opts.InactiveOlderThanDays, "inactive row age threshold")
+	fs.IntVar(&opts.Limit, "limit", opts.Limit, "maximum findings")
+	if err := fs.Parse(args); err != nil {
+		return learnDoctorOpts{}, err
+	}
+	if fs.NArg() != 0 {
+		return learnDoctorOpts{}, fmt.Errorf("usage: az learn doctor [--candidate-older-than-days N] [--inactive-older-than-days N] [--limit N] [--json]")
+	}
+	opts.ProjectID = strings.TrimSpace(opts.ProjectID)
+	if opts.CandidateOlderThanDays < 0 || opts.InactiveOlderThanDays < 0 {
+		return learnDoctorOpts{}, fmt.Errorf("age thresholds must be non-negative")
+	}
+	if opts.Limit < 0 {
+		return learnDoctorOpts{}, fmt.Errorf("limit must be non-negative")
+	}
+	return opts, nil
+}
+
+func parseLearnGCArgs(args []string) (learnGCOpts, error) {
+	opts := learnGCOpts{CandidateOlderThanDays: 30, InactiveOlderThanDays: 30, Limit: 50}
+	fs := flag.NewFlagSet("learn gc", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "json output")
+	fs.StringVar(&opts.ProjectID, "project", "", "project id")
+	fs.IntVar(&opts.CandidateOlderThanDays, "candidate-older-than-days", opts.CandidateOlderThanDays, "candidate age threshold")
+	fs.IntVar(&opts.InactiveOlderThanDays, "inactive-older-than-days", opts.InactiveOlderThanDays, "inactive row age threshold")
+	fs.IntVar(&opts.Limit, "limit", opts.Limit, "maximum rows")
+	fs.BoolVar(&opts.Confirm, "confirm", false, "apply cleanup")
+	if err := fs.Parse(args); err != nil {
+		return learnGCOpts{}, err
+	}
+	if fs.NArg() != 0 {
+		return learnGCOpts{}, fmt.Errorf("usage: az learn gc [--confirm] [--candidate-older-than-days N] [--inactive-older-than-days N] [--limit N] [--json]")
+	}
+	opts.ProjectID = strings.TrimSpace(opts.ProjectID)
+	if opts.CandidateOlderThanDays < 0 || opts.InactiveOlderThanDays < 0 {
+		return learnGCOpts{}, fmt.Errorf("age thresholds must be non-negative")
+	}
+	if opts.Limit < 0 {
+		return learnGCOpts{}, fmt.Errorf("limit must be non-negative")
+	}
+	return opts, nil
+}
+
 func addRepeatedStringFlag(fs *flag.FlagSet, name string, values *[]string) {
 	fs.Func(name, "repeatable "+name, func(v string) error {
 		trimmed := strings.TrimSpace(v)
@@ -986,7 +1124,7 @@ func parseLearningAgeDuration(raw string) (time.Duration, error) {
 }
 
 func printLearnUsage() {
-	fmt.Println("Usage: az learn <add|recall|show|review|stale|demote|promote|retire|relate|supersede> [arguments]")
+	fmt.Println("Usage: az learn <add|recall|show|review|stale|demote|promote|retire|relate|supersede|doctor|gc> [arguments]")
 	fmt.Println("  add      Capture an evidence-backed candidate learning")
 	fmt.Println("  recall   Search accepted/promoted learning summaries")
 	fmt.Println("  show     Show a learning with full evidence")
@@ -997,6 +1135,8 @@ func printLearnUsage() {
 	fmt.Println("  retire   Retire an Az-managed promoted guidance block")
 	fmt.Println("  relate   Record supersession or conflict between learnings")
 	fmt.Println("  supersede Record that a newer learning supersedes an older one")
+	fmt.Println("  doctor   Report learning lifecycle maintenance problems without mutation")
+	fmt.Println("  gc       Dry-run or confirm bounded cleanup of inactive learnings")
 	fmt.Println("")
 	fmt.Println("Commands:")
 	fmt.Println("  az learn add --evidence <text> [--summary <text>] [--private] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--json]")
@@ -1011,4 +1151,6 @@ func printLearnUsage() {
 	fmt.Println("  az learn retire --note <text> <learning-id> [--json]")
 	fmt.Println("  az learn relate --type supersedes|conflicts --note <text> [--scope-issue <id>] [--scope-req <id>] [--scope-session <id>] [--scope-tag <tag> ...] [--scope-file <path> ...] <source-learning-id> <target-learning-id> [--json]")
 	fmt.Println("  az learn supersede --note <text> [--scope-issue <id>] [--scope-req <id>] [--scope-session <id>] [--scope-tag <tag> ...] [--scope-file <path> ...] <new-learning-id> <old-learning-id> [--json]")
+	fmt.Println("  az learn doctor [--candidate-older-than-days N] [--inactive-older-than-days N] [--limit N] [--json]")
+	fmt.Println("  az learn gc [--confirm] [--candidate-older-than-days N] [--inactive-older-than-days N] [--limit N] [--json]")
 }
