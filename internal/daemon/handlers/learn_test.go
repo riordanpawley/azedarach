@@ -21,6 +21,8 @@ type fakeLearnService struct {
 	retireFn    func(context.Context, protocol.LearnRetireRequestBody) (protocol.LearnRetireResponseBody, error)
 	relateFn    func(context.Context, protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error)
 	supersedeFn func(context.Context, protocol.LearnSupersedeRequestBody) (protocol.LearnSupersedeResponseBody, error)
+	doctorFn    func(context.Context, protocol.LearnDoctorRequestBody) (protocol.LearnDoctorResponseBody, error)
+	gcFn        func(context.Context, protocol.LearnGCRequestBody) (protocol.LearnGCResponseBody, error)
 }
 
 func (f *fakeLearnService) Add(ctx context.Context, req protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error) {
@@ -93,6 +95,20 @@ func (f *fakeLearnService) Supersede(ctx context.Context, req protocol.LearnSupe
 	return protocol.LearnSupersedeResponseBody{}, nil
 }
 
+func (f *fakeLearnService) Doctor(ctx context.Context, req protocol.LearnDoctorRequestBody) (protocol.LearnDoctorResponseBody, error) {
+	if f.doctorFn != nil {
+		return f.doctorFn(ctx, req)
+	}
+	return protocol.LearnDoctorResponseBody{}, nil
+}
+
+func (f *fakeLearnService) GC(ctx context.Context, req protocol.LearnGCRequestBody) (protocol.LearnGCResponseBody, error) {
+	if f.gcFn != nil {
+		return f.gcFn(ctx, req)
+	}
+	return protocol.LearnGCResponseBody{}, nil
+}
+
 func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	var gotAdd protocol.LearnAddRequestBody
 	var gotRecall protocol.LearnRecallRequestBody
@@ -103,6 +119,8 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	var gotRetire protocol.LearnRetireRequestBody
 	var gotRelate protocol.LearnRelateRequestBody
 	var gotSupersede protocol.LearnSupersedeRequestBody
+	var gotDoctor protocol.LearnDoctorRequestBody
+	var gotGC protocol.LearnGCRequestBody
 	handler := NewLearnHandler(&fakeLearnService{
 		addFn: func(_ context.Context, req protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error) {
 			gotAdd = req
@@ -140,6 +158,14 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 		supersedeFn: func(_ context.Context, req protocol.LearnSupersedeRequestBody) (protocol.LearnSupersedeResponseBody, error) {
 			gotSupersede = req
 			return protocol.LearnSupersedeResponseBody{Relation: protocol.LearningRelation{ID: "learn-rel-2", Type: protocol.LearningRelationSupersedes, SourceLearningID: req.NewLearningID, TargetLearningID: req.OldLearningID}}, nil
+		},
+		doctorFn: func(_ context.Context, req protocol.LearnDoctorRequestBody) (protocol.LearnDoctorResponseBody, error) {
+			gotDoctor = req
+			return protocol.LearnDoctorResponseBody{Findings: []protocol.LearnMaintenanceFinding{{LearningID: "learn-1", Type: "old_candidate"}}}, nil
+		},
+		gcFn: func(_ context.Context, req protocol.LearnGCRequestBody) (protocol.LearnGCResponseBody, error) {
+			gotGC = req
+			return protocol.LearnGCResponseBody{DryRun: !req.Confirm, Deleted: []protocol.LearnMaintenanceFinding{{LearningID: "learn-1", Type: "old_candidate"}}}, nil
 		},
 	})
 
@@ -241,6 +267,27 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 		t.Fatalf("supersede response=%+v got=%+v", supersedeResp, gotSupersede)
 	}
 
+	doctorResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnDoctor, protocol.LearnDoctorRequestBody{
+		ProjectID:              " proj ",
+		CandidateOlderThanDays: 14,
+		InactiveOlderThanDays:  60,
+		Limit:                  5,
+	}))
+	if !doctorResp.OK || gotDoctor.ProjectID != "proj" || gotDoctor.CandidateOlderThanDays != 14 || gotDoctor.Limit != 5 {
+		t.Fatalf("doctor response=%+v got=%+v", doctorResp, gotDoctor)
+	}
+
+	gcResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnGC, protocol.LearnGCRequestBody{
+		ProjectID:              " proj ",
+		CandidateOlderThanDays: 14,
+		InactiveOlderThanDays:  60,
+		Limit:                  5,
+		Confirm:                true,
+	}))
+	if !gcResp.OK || gotGC.ProjectID != "proj" || gotGC.CandidateOlderThanDays != 14 || gotGC.Limit != 5 || !gotGC.Confirm {
+		t.Fatalf("gc response=%+v got=%+v", gcResp, gotGC)
+	}
+
 	badResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnAdd, protocol.LearnAddRequestBody{}))
 	if badResp.OK || badResp.Error == nil || badResp.Error.Code != protocol.ErrorCodeInvalidRequest {
 		t.Fatalf("bad add response=%+v", badResp)
@@ -293,6 +340,13 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	}))
 	if badSupersedeResp.OK || badSupersedeResp.Error == nil || badSupersedeResp.Error.Code != protocol.ErrorCodeInvalidRequest {
 		t.Fatalf("bad supersede response=%+v", badSupersedeResp)
+	}
+
+	badDoctorResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnDoctor, protocol.LearnDoctorRequestBody{
+		CandidateOlderThanDays: -1,
+	}))
+	if badDoctorResp.OK || badDoctorResp.Error == nil || badDoctorResp.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("bad doctor response=%+v", badDoctorResp)
 	}
 
 	badCreateSpecResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnPromote, protocol.LearnPromoteRequestBody{

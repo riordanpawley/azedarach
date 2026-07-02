@@ -23,6 +23,8 @@ func TestRunLearnCommandHelpArgsReturnUsage(t *testing.T) {
 		{"retire", "--help"},
 		{"relate", "--help"},
 		{"supersede", "--help"},
+		{"doctor", "--help"},
+		{"gc", "--help"},
 	} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
 			output := captureLearnStdout(t, func() {
@@ -277,6 +279,52 @@ func TestParseLearnSupersedeArgs(t *testing.T) {
 				if len(opts.ScopeTags) != 1 {
 					t.Fatalf("scope tags = %+v, want deduped single tag", opts.ScopeTags)
 				}
+			}
+		})
+	}
+}
+
+func TestParseLearnDoctorArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		ok      bool
+		errFrag string
+	}{
+		{name: "defaults", args: nil, ok: true},
+		{name: "explicit thresholds", args: []string{"--candidate-older-than-days", "14", "--inactive-older-than-days", "60", "--limit", "10", "--json"}, ok: true},
+		{name: "negative threshold", args: []string{"--candidate-older-than-days", "-1"}, ok: false, errFrag: "non-negative"},
+		{name: "positional rejected", args: []string{"learn-1"}, ok: false, errFrag: "usage: az learn doctor"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseLearnDoctorArgs(tc.args)
+			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+			if tc.ok && opts.Limit < 0 {
+				t.Fatalf("opts = %+v, want non-negative limit", opts)
+			}
+		})
+	}
+}
+
+func TestParseLearnGCArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		ok      bool
+		errFrag string
+	}{
+		{name: "dry run default", args: nil, ok: true},
+		{name: "confirmed cleanup", args: []string{"--confirm", "--limit", "3"}, ok: true},
+		{name: "negative limit", args: []string{"--limit", "-1"}, ok: false, errFrag: "limit must be non-negative"},
+		{name: "positional rejected", args: []string{"learn-1"}, ok: false, errFrag: "usage: az learn gc"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseLearnGCArgs(tc.args)
+			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+			if tc.ok && tc.name == "confirmed cleanup" && !opts.Confirm {
+				t.Fatalf("opts = %+v, want confirmed cleanup", opts)
 			}
 		})
 	}

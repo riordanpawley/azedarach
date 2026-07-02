@@ -694,6 +694,113 @@ func TestClient_ListLearningsActiveOnlyExcludesInactiveLifecycleRows(t *testing.
 	assert.Nil(t, storedCandidate.LastRecalledAt)
 }
 
+func TestClient_LearningMaintenanceDoctorReportsWithoutMutation(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	oldCandidate, err := client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID: "proj",
+		Summary:   "Old candidate",
+		Evidence:  "Candidate needs review.",
+	})
+	require.NoError(t, err)
+	oldRejected := createAcceptedLearning(t, ctx, client, "proj", "Old rejected learning")
+	_, err = client.UpdateLearningStatus(ctx, oldRejected.LocalID, LearningStatusRejected, "Rejected.")
+	require.NoError(t, err)
+	drifted := createAcceptedLearning(t, ctx, client, "proj", "Drifted promoted learning")
+	decision, err := client.RecordDecision(ctx, RecordDecisionParams{Title: "Drifted", Rationale: "Target drifted."})
+	require.NoError(t, err)
+	_, err = client.PromoteLearning(ctx, drifted.LocalID, PromoteLearningParams{
+		Target:   LearningPromotionTargetDecision,
+		TargetID: decision.LocalID,
+	})
+	require.NoError(t, err)
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	old := time.Now().UTC().Add(-45 * 24 * time.Hour)
+	setLearningUpdatedTime(t, ctx, db, oldCandidate.LocalID, old)
+	setLearningUpdatedTime(t, ctx, db, oldRejected.LocalID, old)
+	setLearningTargetState(t, ctx, db, drifted.LocalID, LearningTargetStateDrifted)
+
+	report, err := client.DoctorLearnings(ctx, LearningMaintenanceParams{
+		ProjectID:          "proj",
+		CandidateOlderThan: 30 * 24 * time.Hour,
+		InactiveOlderThan:  30 * 24 * time.Hour,
+	})
+	require.NoError(t, err)
+
+	got := map[string]string{}
+	for _, finding := range report.Findings {
+		got[finding.LearningID+":"+finding.Type] = finding.Severity
+	}
+	assert.Equal(t, "warning", got[oldCandidate.LocalID+":old_candidate"])
+	assert.Equal(t, "info", got[oldRejected.LocalID+":old_inactive"])
+	assert.Equal(t, "error", got[drifted.LocalID+":drifted_target"])
+
+	rows, err := client.ListLearnings(ctx, LearningFilter{ProjectID: "proj", IncludeDeleted: true})
+	require.NoError(t, err)
+	for _, row := range rows {
+		assert.Nil(t, row.DeletedAt, "doctor must not mutate %s", row.LocalID)
+	}
+}
+
+func TestClient_LearningGCIsBoundedAndRequiresConfirmation(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	oldCandidate, err := client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID: "proj",
+		Summary:   "Old candidate",
+		Evidence:  "Candidate needs review.",
+	})
+	require.NoError(t, err)
+	oldRejected := createAcceptedLearning(t, ctx, client, "proj", "Old rejected learning")
+	_, err = client.UpdateLearningStatus(ctx, oldRejected.LocalID, LearningStatusRejected, "Rejected.")
+	require.NoError(t, err)
+	active := createAcceptedLearning(t, ctx, client, "proj", "Active accepted learning")
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	old := time.Now().UTC().Add(-45 * 24 * time.Hour)
+	setLearningUpdatedTime(t, ctx, db, oldCandidate.LocalID, old)
+	setLearningUpdatedTime(t, ctx, db, oldRejected.LocalID, old)
+	setLearningUpdatedTime(t, ctx, db, active.LocalID, old)
+
+	params := LearningGCParams{
+		LearningMaintenanceParams: LearningMaintenanceParams{
+			ProjectID:          "proj",
+			CandidateOlderThan: 30 * 24 * time.Hour,
+			InactiveOlderThan:  30 * 24 * time.Hour,
+			Limit:              1,
+		},
+	}
+	dryRun, err := client.GCLearnings(ctx, params)
+	require.NoError(t, err)
+	assert.True(t, dryRun.DryRun)
+	require.Len(t, dryRun.Deleted, 1)
+
+	stored, err := client.GetLearning(ctx, dryRun.Deleted[0].LearningID)
+	require.NoError(t, err)
+	assert.Nil(t, stored.DeletedAt)
+
+	params.Confirm = true
+	confirmed, err := client.GCLearnings(ctx, params)
+	require.NoError(t, err)
+	assert.False(t, confirmed.DryRun)
+	require.Len(t, confirmed.Deleted, 1)
+
+	visible, err := client.ListLearnings(ctx, LearningFilter{ProjectID: "proj"})
+	require.NoError(t, err)
+	gotVisible := make(map[string]Learning, len(visible))
+	for _, row := range visible {
+		gotVisible[row.LocalID] = row
+	}
+	assert.NotContains(t, gotVisible, confirmed.Deleted[0].LearningID)
+	assert.Contains(t, gotVisible, active.LocalID)
+	assert.Equal(t, 2, len(gotVisible), "limit should delete only one eligible row")
+}
+
 func TestClient_MigratesPromotedLearningTargetState(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "issues.db")

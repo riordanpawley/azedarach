@@ -383,6 +383,59 @@ func (s issueLearnService) Supersede(ctx context.Context, req protocol.LearnSupe
 	return protocol.LearnSupersedeResponseBody{Relation: mapLearningRelationToProtocol(relation)}, nil
 }
 
+func (s issueLearnService) Doctor(ctx context.Context, req protocol.LearnDoctorRequestBody) (protocol.LearnDoctorResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnDoctorResponseBody{}, err
+	}
+	report, err := client.DoctorLearnings(ctx, issues.LearningMaintenanceParams{
+		ProjectID:          firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)),
+		CandidateOlderThan: learningMaintenanceAge(req.CandidateOlderThanDays),
+		InactiveOlderThan:  learningMaintenanceAge(req.InactiveOlderThanDays),
+	})
+	if err != nil {
+		return protocol.LearnDoctorResponseBody{}, err
+	}
+	findings := mapLearningMaintenanceFindings(report.Findings)
+	fileRows, err := client.ListLearnings(ctx, issues.LearningFilter{
+		ProjectID: firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)),
+		Statuses:  []issues.LearningStatus{issues.LearningStatusPromoted},
+	})
+	if err != nil {
+		return protocol.LearnDoctorResponseBody{}, err
+	}
+	fileFindings := s.doctorManagedGuidanceTargets(ctx, fileRows)
+	findings = append(findings, fileFindings...)
+	if req.Limit > 0 && len(findings) > req.Limit {
+		findings = findings[:req.Limit]
+	}
+	return protocol.LearnDoctorResponseBody{Findings: findings}, nil
+}
+
+func (s issueLearnService) GC(ctx context.Context, req protocol.LearnGCRequestBody) (protocol.LearnGCResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnGCResponseBody{}, err
+	}
+	report, err := client.GCLearnings(ctx, issues.LearningGCParams{
+		LearningMaintenanceParams: issues.LearningMaintenanceParams{
+			ProjectID:          firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)),
+			CandidateOlderThan: learningMaintenanceAge(req.CandidateOlderThanDays),
+			InactiveOlderThan:  learningMaintenanceAge(req.InactiveOlderThanDays),
+			Limit:              req.Limit,
+		},
+		Confirm: req.Confirm,
+	})
+	if err != nil {
+		return protocol.LearnGCResponseBody{}, err
+	}
+	return protocol.LearnGCResponseBody{
+		DryRun:  report.DryRun,
+		Deleted: mapLearningMaintenanceFindings(report.Deleted),
+		Skipped: mapLearningMaintenanceFindings(report.Skipped),
+	}, nil
+}
+
 func (s issueLearnService) repoDir(ctx context.Context) string {
 	if s.daemon == nil {
 		return ""
@@ -395,6 +448,74 @@ func (s issueLearnService) repoDir(ctx context.Context) string {
 		return repoDir
 	}
 	return strings.TrimSpace(s.daemon.cfg.RepoDir)
+}
+
+func (s issueLearnService) doctorManagedGuidanceTargets(ctx context.Context, learnings []issues.Learning) []protocol.LearnMaintenanceFinding {
+	if len(learnings) == 0 {
+		return nil
+	}
+	repoDir := s.repoDir(ctx)
+	out := make([]protocol.LearnMaintenanceFinding, 0)
+	seen := make(map[string]struct{})
+	for _, learning := range learnings {
+		if _, ok := seen[learning.LocalID]; ok {
+			continue
+		}
+		seen[learning.LocalID] = struct{}{}
+		if learning.Target == nil || !learningPromotionFileBacked(protocol.LearningPromotionTarget(*learning.Target)) {
+			continue
+		}
+		if learning.Status != issues.LearningStatusPromoted {
+			continue
+		}
+		if learning.TargetState != "" && learning.TargetState != issues.LearningTargetStateActive {
+			continue
+		}
+		result, err := inspectManagedGuidanceBlock(repoDir, mapLearningToProtocol(learning, false))
+		if err == nil {
+			continue
+		}
+		findingType := "drifted_managed_block"
+		message := err.Error()
+		if result.BlockMissing {
+			findingType = "missing_target"
+			message = "managed guidance block is missing"
+		}
+		out = append(out, protocol.LearnMaintenanceFinding{
+			Type:       findingType,
+			Severity:   "error",
+			LearningID: learning.LocalID,
+			Message:    message,
+			Action:     "inspect the managed block and re-promote or retire explicitly",
+			Learning:   mapLearningToProtocol(learning, false),
+		})
+	}
+	return out
+}
+
+func learningMaintenanceAge(days int) time.Duration {
+	if days <= 0 {
+		return 0
+	}
+	return time.Duration(days) * 24 * time.Hour
+}
+
+func mapLearningMaintenanceFindings(findings []issues.LearningMaintenanceFinding) []protocol.LearnMaintenanceFinding {
+	if len(findings) == 0 {
+		return nil
+	}
+	out := make([]protocol.LearnMaintenanceFinding, 0, len(findings))
+	for _, finding := range findings {
+		out = append(out, protocol.LearnMaintenanceFinding{
+			Type:       finding.Type,
+			Severity:   finding.Severity,
+			LearningID: finding.LearningID,
+			Message:    finding.Message,
+			Action:     finding.Action,
+			Learning:   mapLearningToProtocol(finding.Learning, false),
+		})
+	}
+	return out
 }
 
 func cloneStringMap(values map[string]string) map[string]string {
