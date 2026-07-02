@@ -149,12 +149,19 @@ type LearnReviewResponseBody struct {
 }
 
 type LearnPromoteRequestBody struct {
-	ID             string                  `json:"id" msgpack:"id"`
-	Target         LearningPromotionTarget `json:"target" msgpack:"target"`
-	TargetID       string                  `json:"target_id" msgpack:"target_id"`
-	Note           string                  `json:"note,omitempty" msgpack:"note,omitempty"`
-	TargetHash     string                  `json:"target_hash,omitempty" msgpack:"target_hash,omitempty"`
-	TargetMetadata map[string]string       `json:"target_metadata,omitempty" msgpack:"target_metadata,omitempty"`
+	ID                   string                  `json:"id" msgpack:"id"`
+	Target               LearningPromotionTarget `json:"target" msgpack:"target"`
+	TargetID             string                  `json:"target_id,omitempty" msgpack:"target_id,omitempty"`
+	Note                 string                  `json:"note,omitempty" msgpack:"note,omitempty"`
+	TargetHash           string                  `json:"target_hash,omitempty" msgpack:"target_hash,omitempty"`
+	TargetMetadata       map[string]string       `json:"target_metadata,omitempty" msgpack:"target_metadata,omitempty"`
+	CreateTarget         bool                    `json:"create_target,omitempty" msgpack:"create_target,omitempty"`
+	TargetTitle          string                  `json:"target_title,omitempty" msgpack:"target_title,omitempty"`
+	TargetDescription    string                  `json:"target_description,omitempty" msgpack:"target_description,omitempty"`
+	TargetIssueID        naming.IssueID          `json:"target_issue_id,omitempty" msgpack:"target_issue_id,omitempty"`
+	DecisionRationale    string                  `json:"decision_rationale,omitempty" msgpack:"decision_rationale,omitempty"`
+	DecisionContext      string                  `json:"decision_context,omitempty" msgpack:"decision_context,omitempty"`
+	DecisionConsequences string                  `json:"decision_consequences,omitempty" msgpack:"decision_consequences,omitempty"`
 }
 
 type LearnPromoteResponseBody struct {

@@ -120,14 +120,28 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	}
 
 	promoteResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnPromote, protocol.LearnPromoteRequestBody{
-		ID:             "learn-1",
-		Target:         protocol.LearningPromotionTargetDecision,
-		TargetID:       "dec-1",
-		TargetHash:     "sha256:target",
-		TargetMetadata: map[string]string{"path": "docs/decisions/dec-1.md"},
+		ID:                   "learn-1",
+		Target:               protocol.LearningPromotionTargetDecision,
+		TargetID:             "dec-1",
+		TargetHash:           "sha256:target",
+		TargetMetadata:       map[string]string{"path": "docs/decisions/dec-1.md"},
+		TargetTitle:          "Updated decision",
+		DecisionRationale:    "Updated rationale.",
+		DecisionConsequences: "Updated consequences.",
 	}))
-	if !promoteResp.OK || gotPromote.Target != protocol.LearningPromotionTargetDecision || gotPromote.TargetID != "dec-1" || gotPromote.TargetHash != "sha256:target" || gotPromote.TargetMetadata["path"] != "docs/decisions/dec-1.md" {
+	if !promoteResp.OK || gotPromote.Target != protocol.LearningPromotionTargetDecision || gotPromote.TargetID != "dec-1" || gotPromote.TargetHash != "sha256:target" || gotPromote.TargetMetadata["path"] != "docs/decisions/dec-1.md" || gotPromote.DecisionRationale != "Updated rationale." {
 		t.Fatalf("promote response=%+v got=%+v", promoteResp, gotPromote)
+	}
+
+	createDecisionResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnPromote, protocol.LearnPromoteRequestBody{
+		ID:                "learn-1",
+		Target:            protocol.LearningPromotionTargetDecision,
+		CreateTarget:      true,
+		TargetTitle:       "Created decision",
+		DecisionRationale: "Created rationale.",
+	}))
+	if !createDecisionResp.OK || !gotPromote.CreateTarget || gotPromote.TargetID != "" || gotPromote.TargetTitle != "Created decision" {
+		t.Fatalf("create decision promote response=%+v got=%+v", createDecisionResp, gotPromote)
 	}
 
 	relateResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnRelate, protocol.LearnRelateRequestBody{
@@ -171,6 +185,15 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	}))
 	if badRelateResp.OK || badRelateResp.Error == nil || badRelateResp.Error.Code != protocol.ErrorCodeInvalidRequest {
 		t.Fatalf("bad relate response=%+v", badRelateResp)
+	}
+
+	badCreateSpecResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnPromote, protocol.LearnPromoteRequestBody{
+		ID:           "learn-1",
+		Target:       protocol.LearningPromotionTargetSpec,
+		CreateTarget: true,
+	}))
+	if badCreateSpecResp.OK || badCreateSpecResp.Error == nil || badCreateSpecResp.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("bad create spec response=%+v", badCreateSpecResp)
 	}
 
 	conflictHandler := NewLearnHandler(&fakeLearnService{

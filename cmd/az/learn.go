@@ -55,13 +55,20 @@ type learnReviewOpts struct {
 }
 
 type learnPromoteOpts struct {
-	JSON           bool
-	ID             string
-	Target         string
-	TargetID       string
-	Note           string
-	TargetHash     string
-	TargetMetadata map[string]string
+	JSON                 bool
+	ID                   string
+	Target               string
+	TargetID             string
+	Note                 string
+	TargetHash           string
+	TargetMetadata       map[string]string
+	CreateTarget         bool
+	TargetTitle          string
+	TargetDescription    string
+	TargetIssue          string
+	DecisionRationale    string
+	DecisionContext      string
+	DecisionConsequences string
 }
 
 type learnRelateOpts struct {
@@ -214,12 +221,19 @@ func runLearnReviewRPC(cfg *config.Config, opts learnReviewOpts) error {
 
 func runLearnPromoteRPC(cfg *config.Config, opts learnPromoteOpts) error {
 	req := protocol.LearnPromoteRequestBody{
-		ID:             opts.ID,
-		Target:         protocol.LearningPromotionTarget(opts.Target),
-		TargetID:       opts.TargetID,
-		Note:           opts.Note,
-		TargetHash:     opts.TargetHash,
-		TargetMetadata: opts.TargetMetadata,
+		ID:                   opts.ID,
+		Target:               protocol.LearningPromotionTarget(opts.Target),
+		TargetID:             opts.TargetID,
+		Note:                 opts.Note,
+		TargetHash:           opts.TargetHash,
+		TargetMetadata:       opts.TargetMetadata,
+		CreateTarget:         opts.CreateTarget,
+		TargetTitle:          opts.TargetTitle,
+		TargetDescription:    opts.TargetDescription,
+		TargetIssueID:        naming.IssueID(opts.TargetIssue),
+		DecisionRationale:    opts.DecisionRationale,
+		DecisionContext:      opts.DecisionContext,
+		DecisionConsequences: opts.DecisionConsequences,
 	}
 	var out protocol.LearnPromoteResponseBody
 	if err := runLearnRPC(cfg, protocol.CommandLearnPromote, req, &out); err != nil {
@@ -500,19 +514,37 @@ func parseLearnPromoteArgs(args []string) (learnPromoteOpts, error) {
 	fs.StringVar(&opts.TargetID, "target-id", "", "existing decision/spec/guidance target id")
 	fs.StringVar(&opts.Note, "note", "", "promotion note")
 	fs.StringVar(&opts.TargetHash, "target-hash", "", "current target content hash")
+	fs.BoolVar(&opts.CreateTarget, "create-target", false, "create a missing structured decision/spec target")
+	fs.StringVar(&opts.TargetTitle, "target-title", "", "structured decision/spec title")
+	fs.StringVar(&opts.TargetDescription, "target-description", "", "structured spec requirement description")
+	fs.StringVar(&opts.TargetIssue, "target-issue", "", "issue id to link/own a structured spec target")
+	fs.StringVar(&opts.DecisionRationale, "decision-rationale", "", "structured decision rationale")
+	fs.StringVar(&opts.DecisionContext, "decision-context", "", "structured decision context")
+	fs.StringVar(&opts.DecisionConsequences, "decision-consequences", "", "structured decision consequences")
 	addRepeatedKeyValueFlag(fs, "target-meta", &opts.TargetMetadata)
 	if err := fs.Parse(args); err != nil {
 		return learnPromoteOpts{}, err
 	}
 	if fs.NArg() != 1 {
-		return learnPromoteOpts{}, fmt.Errorf("usage: az learn promote --target rulesync|agents|skill|spec|decision --target-id <id-or-path> <learning-id> [--note <text>] [--target-hash <hash>] [--target-meta key=value ...] [--json]")
+		return learnPromoteOpts{}, fmt.Errorf("usage: az learn promote --target rulesync|agents|skill|spec|decision [--target-id <id-or-path>] <learning-id> [--create-target] [--target-title <text>] [--target-description <text>] [--target-issue <id>] [--decision-rationale <text>] [--decision-context <text>] [--decision-consequences <text>] [--note <text>] [--target-hash <hash>] [--target-meta key=value ...] [--json]")
 	}
 	opts.ID = strings.TrimSpace(fs.Arg(0))
-	if strings.TrimSpace(opts.Target) == "" {
+	opts.Target = strings.TrimSpace(opts.Target)
+	opts.TargetID = strings.TrimSpace(opts.TargetID)
+	opts.TargetTitle = strings.TrimSpace(opts.TargetTitle)
+	opts.TargetDescription = strings.TrimSpace(opts.TargetDescription)
+	opts.TargetIssue = strings.TrimSpace(opts.TargetIssue)
+	opts.DecisionRationale = strings.TrimSpace(opts.DecisionRationale)
+	opts.DecisionContext = strings.TrimSpace(opts.DecisionContext)
+	opts.DecisionConsequences = strings.TrimSpace(opts.DecisionConsequences)
+	if opts.Target == "" {
 		return learnPromoteOpts{}, fmt.Errorf("missing required flag: --target")
 	}
-	if strings.TrimSpace(opts.TargetID) == "" {
+	if opts.TargetID == "" && (!opts.CreateTarget || opts.Target != string(protocol.LearningPromotionTargetDecision)) {
 		return learnPromoteOpts{}, fmt.Errorf("missing required flag: --target-id")
+	}
+	if opts.CreateTarget && opts.Target == string(protocol.LearningPromotionTargetDecision) && opts.TargetID == "" && (opts.TargetTitle == "" || opts.DecisionRationale == "") {
+		return learnPromoteOpts{}, fmt.Errorf("--create-target decision requires --target-title and --decision-rationale")
 	}
 	return opts, nil
 }
@@ -591,6 +623,6 @@ func printLearnUsage() {
 	fmt.Println("  az learn recall [--query <text>] [--issue <id>] [--req <id>] [--status <status> ...] [--tag <tag> ...] [--file <path> ...] [--limit N] [--include-evidence] [--include-private] [--json]")
 	fmt.Println("  az learn show <learning-id> [--json]")
 	fmt.Println("  az learn review [--id <learning-id> --status accepted|rejected|stale --note <text>] [--limit N] [--json]")
-	fmt.Println("  az learn promote --target rulesync|agents|skill|spec|decision --target-id <id-or-path> <learning-id> [--note <text>] [--target-hash <hash>] [--target-meta key=value ...] [--json]")
+	fmt.Println("  az learn promote --target rulesync|agents|skill|spec|decision [--target-id <id-or-path>] <learning-id> [--create-target] [--target-title <text>] [--target-description <text>] [--target-issue <id>] [--decision-rationale <text>] [--decision-context <text>] [--decision-consequences <text>] [--note <text>] [--target-hash <hash>] [--target-meta key=value ...] [--json]")
 	fmt.Println("  az learn relate --type supersedes|conflicts --note <text> [--scope-issue <id>] [--scope-req <id>] [--scope-session <id>] [--scope-tag <tag> ...] [--scope-file <path> ...] <source-learning-id> <target-learning-id> [--json]")
 }

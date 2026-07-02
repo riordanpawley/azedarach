@@ -110,6 +110,195 @@ func TestClient_LearningLifecycleRecallReviewAndPromote(t *testing.T) {
 	assert.Equal(t, map[string]string{"path": "docs/decisions/decision.md"}, promoted.TargetMetadata)
 }
 
+func TestClient_PromoteLearningCreatesDecisionTargetAndLinksScopesIdempotently(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Decision promotion scope",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+	req, err := client.CreateRequirement(ctx, CreateRequirementParams{
+		LocalID: "promote-decision-req",
+		Title:   "Decision promotion requirement",
+		IssueID: &issueID,
+		Status:  RequirementStatusOpen,
+	})
+	require.NoError(t, err)
+	learning, err := client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID:     "proj",
+		IssueID:       &issueID,
+		RequirementID: &req.LocalID,
+		Summary:       "Promote durable decisions through the decision store",
+		Evidence:      "Promotion should create, update, and link a structured decision record.",
+	})
+	require.NoError(t, err)
+	learning, err = client.UpdateLearningStatus(ctx, learning.LocalID, LearningStatusAccepted, "Accepted.")
+	require.NoError(t, err)
+
+	promoted, err := client.PromoteLearning(ctx, learning.LocalID, PromoteLearningParams{
+		Target:            LearningPromotionTargetDecision,
+		CreateTarget:      true,
+		TargetTitle:       "Use structured decision promotion",
+		DecisionRationale: "Structured promotion keeps rationale in SQLite.",
+		Note:              "Initial promotion.",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, LearningStatusPromoted, promoted.Status)
+	require.NotEmpty(t, promoted.TargetID)
+
+	decision, err := client.GetDecision(ctx, promoted.TargetID)
+	require.NoError(t, err)
+	assert.Equal(t, "Use structured decision promotion", decision.Title)
+	assert.Equal(t, "Structured promotion keeps rationale in SQLite.", decision.Rationale)
+	links, err := client.ListDecisionLinks(ctx, DecisionLinkFilter{DecisionID: promoted.TargetID})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []DecisionTargetKind{DecisionTargetIssue, DecisionTargetRequirement}, decisionLinkKinds(links))
+
+	repeated, err := client.PromoteLearning(ctx, learning.LocalID, PromoteLearningParams{
+		Target:               LearningPromotionTargetDecision,
+		CreateTarget:         true,
+		TargetTitle:          "Use structured decision promotion",
+		DecisionRationale:    "Updated rationale remains on the existing decision.",
+		DecisionConsequences: "Audit rows capture the structured update.",
+		Note:                 "Repeat promotion updates the same target.",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, promoted.TargetID, repeated.TargetID)
+	decision, err = client.GetDecision(ctx, repeated.TargetID)
+	require.NoError(t, err)
+	assert.Equal(t, "Updated rationale remains on the existing decision.", decision.Rationale)
+	assert.Equal(t, "Audit rows capture the structured update.", decision.Consequences)
+	decisions, err := client.ListDecisions(ctx, DecisionFilter{})
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	links, err = client.ListDecisionLinks(ctx, DecisionLinkFilter{DecisionID: repeated.TargetID})
+	require.NoError(t, err)
+	require.Len(t, links, 2)
+}
+
+func TestClient_PromoteLearningCreatesAndUpdatesSpecTarget(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Spec promotion scope",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+	learning, err := client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID: "proj",
+		IssueID:   &issueID,
+		Summary:   "Promote specs through the spec store",
+		Evidence:  "Promotion should create or update a structured requirement and link it.",
+	})
+	require.NoError(t, err)
+	learning, err = client.UpdateLearningStatus(ctx, learning.LocalID, LearningStatusAccepted, "Accepted.")
+	require.NoError(t, err)
+
+	promoted, err := client.PromoteLearning(ctx, learning.LocalID, PromoteLearningParams{
+		Target:            LearningPromotionTargetSpec,
+		TargetID:          "learn-structured-spec",
+		CreateTarget:      true,
+		TargetTitle:       "Structured spec promotion",
+		TargetDescription: "Initial structured requirement.",
+		Note:              "Create spec requirement.",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "learn-structured-spec", promoted.TargetID)
+	req, err := client.GetRequirement(ctx, promoted.TargetID)
+	require.NoError(t, err)
+	assert.Equal(t, "Structured spec promotion", req.Title)
+	assert.Equal(t, "Initial structured requirement.", req.Description)
+	links, err := client.ListSpecLinks(ctx, SpecLinkFilter{IssueID: issueID, RequirementID: promoted.TargetID})
+	require.NoError(t, err)
+	require.Len(t, links, 1)
+
+	repeated, err := client.PromoteLearning(ctx, learning.LocalID, PromoteLearningParams{
+		Target:            LearningPromotionTargetSpec,
+		TargetID:          "learn-structured-spec",
+		CreateTarget:      true,
+		TargetDescription: "Updated structured requirement.",
+		Note:              "Repeat promotion updates the same requirement.",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, promoted.TargetID, repeated.TargetID)
+	req, err = client.GetRequirement(ctx, promoted.TargetID)
+	require.NoError(t, err)
+	assert.Equal(t, "Updated structured requirement.", req.Description)
+	links, err = client.ListSpecLinks(ctx, SpecLinkFilter{IssueID: issueID, RequirementID: promoted.TargetID})
+	require.NoError(t, err)
+	require.Len(t, links, 1)
+}
+
+func TestClient_PromoteLearningMissingStructuredTargetRequiresCreateTarget(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	learning := createAcceptedLearning(t, ctx, client, "proj", "Missing target learning")
+
+	_, err := client.PromoteLearning(ctx, learning.LocalID, PromoteLearningParams{
+		Target:   LearningPromotionTargetDecision,
+		TargetID: "missing-decision",
+	})
+	require.ErrorIs(t, err, domain.ErrNotFound)
+
+	_, err = client.PromoteLearning(ctx, learning.LocalID, PromoteLearningParams{
+		Target:       LearningPromotionTargetSpec,
+		TargetID:     "missing-spec",
+		CreateTarget: true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "target title")
+
+	_, err = client.PromoteLearning(ctx, learning.LocalID, PromoteLearningParams{
+		Target:       LearningPromotionTargetAgents,
+		CreateTarget: true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "target id")
+}
+
+func TestClient_RetireLearningTargetPreservesStructuredTargetHistory(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	specLearning := createAcceptedLearning(t, ctx, client, "proj", "Retire spec target")
+	promotedSpec, err := client.PromoteLearning(ctx, specLearning.LocalID, PromoteLearningParams{
+		Target:            LearningPromotionTargetSpec,
+		TargetID:          "retired-spec-target",
+		CreateTarget:      true,
+		TargetTitle:       "Retired spec target",
+		TargetDescription: "History should remain after retirement.",
+	})
+	require.NoError(t, err)
+
+	retiredSpec, err := client.RetireLearningTarget(ctx, promotedSpec.LocalID, "Structured spec target is retired.")
+	require.NoError(t, err)
+	assert.Equal(t, LearningTargetStateRetired, retiredSpec.TargetState)
+	require.NotNil(t, retiredSpec.TargetRetiredAt)
+	requirement, err := client.GetRequirement(ctx, promotedSpec.TargetID)
+	require.NoError(t, err)
+	assert.Equal(t, RequirementStatusSuperseded, requirement.Status)
+	assert.Equal(t, "History should remain after retirement.", requirement.Description)
+
+	decisionLearning := createAcceptedLearning(t, ctx, client, "proj", "Retire decision target")
+	promotedDecision, err := client.PromoteLearning(ctx, decisionLearning.LocalID, PromoteLearningParams{
+		Target:            LearningPromotionTargetDecision,
+		CreateTarget:      true,
+		TargetTitle:       "Retired decision target",
+		DecisionRationale: "Decision rationale must remain after retirement.",
+	})
+	require.NoError(t, err)
+	retiredDecision, err := client.RetireLearningTarget(ctx, promotedDecision.LocalID, "Structured decision target is retired.")
+	require.NoError(t, err)
+	assert.Equal(t, LearningTargetStateRetired, retiredDecision.TargetState)
+	decision, err := client.GetDecision(ctx, promotedDecision.TargetID)
+	require.NoError(t, err)
+	assert.Equal(t, "Decision rationale must remain after retirement.", decision.Rationale)
+}
+
 func TestClient_ListLearningsAppliesLimitAfterTagAndFileFilters(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -791,6 +980,14 @@ func setLearningTargetState(t *testing.T, ctx context.Context, db sqlIssueExecer
 	t.Helper()
 	_, err := db.ExecContext(ctx, "UPDATE agent_learnings SET target_state = ? WHERE local_id = ?", string(state), localID)
 	require.NoError(t, err)
+}
+
+func decisionLinkKinds(links []DecisionLink) []DecisionTargetKind {
+	out := make([]DecisionTargetKind, 0, len(links))
+	for _, link := range links {
+		out = append(out, link.TargetKind)
+	}
+	return out
 }
 
 func applyIssueMigrationsThrough(t *testing.T, ctx context.Context, db *sql.DB, throughID string) {

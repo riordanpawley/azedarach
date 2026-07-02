@@ -120,11 +120,19 @@ func (h *LearnHandler) Handle(ctx context.Context, req protocol.RequestEnvelope)
 		cmd.Target = protocol.LearningPromotionTarget(strings.TrimSpace(string(cmd.Target)))
 		cmd.TargetID = strings.TrimSpace(cmd.TargetID)
 		cmd.Note = strings.TrimSpace(cmd.Note)
-		if cmd.ID == "" || cmd.Target == "" || cmd.TargetID == "" {
-			return learnInvalidRequest(resp, "missing required fields: id/target/target_id")
+		cmd.TargetTitle = strings.TrimSpace(cmd.TargetTitle)
+		cmd.TargetDescription = strings.TrimSpace(cmd.TargetDescription)
+		cmd.DecisionRationale = strings.TrimSpace(cmd.DecisionRationale)
+		cmd.DecisionContext = strings.TrimSpace(cmd.DecisionContext)
+		cmd.DecisionConsequences = strings.TrimSpace(cmd.DecisionConsequences)
+		if cmd.ID == "" || cmd.Target == "" {
+			return learnInvalidRequest(resp, "missing required fields: id/target")
 		}
 		if !cmd.Target.Valid() {
 			return learnInvalidRequest(resp, "invalid target: expected rulesync|agents|skill|spec|decision")
+		}
+		if cmd.TargetID == "" && (!cmd.CreateTarget || cmd.Target != protocol.LearningPromotionTargetDecision) {
+			return learnInvalidRequest(resp, "missing required field: target_id")
 		}
 		return learnJSONResponse(ctx, resp, h.service.Promote, cmd)
 	case protocol.CommandLearnRelate:

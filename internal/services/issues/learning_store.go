@@ -128,6 +128,14 @@ type PromoteLearningParams struct {
 	Note           string
 	TargetHash     string
 	TargetMetadata map[string]string
+	CreateTarget   bool
+
+	TargetTitle          string
+	TargetDescription    string
+	TargetIssueID        *string
+	DecisionRationale    string
+	DecisionContext      string
+	DecisionConsequences string
 }
 
 type RelateLearningParams struct {
@@ -459,10 +467,16 @@ func (c *Client) PromoteLearning(ctx context.Context, selector string, params Pr
 	params.Note = strings.TrimSpace(params.Note)
 	params.TargetHash = strings.TrimSpace(params.TargetHash)
 	params.TargetMetadata = normalizeStringMap(params.TargetMetadata)
+	params.TargetTitle = strings.TrimSpace(params.TargetTitle)
+	params.TargetDescription = strings.TrimSpace(params.TargetDescription)
+	params.TargetIssueID = normalizeOptionalString(params.TargetIssueID)
+	params.DecisionRationale = strings.TrimSpace(params.DecisionRationale)
+	params.DecisionContext = strings.TrimSpace(params.DecisionContext)
+	params.DecisionConsequences = strings.TrimSpace(params.DecisionConsequences)
 	if !params.Target.Valid() {
 		return Learning{}, c.wrapError("promote-learning", selector, errors.New("invalid promotion target"))
 	}
-	if params.TargetID == "" {
+	if params.TargetID == "" && (!params.CreateTarget || params.Target != LearningPromotionTargetDecision) {
 		return Learning{}, c.wrapError("promote-learning", selector, errors.New("promotion target id is required"))
 	}
 	db, err := c.dbHandle()
@@ -476,6 +490,11 @@ func (c *Client) PromoteLearning(ctx context.Context, selector string, params Pr
 	if record.Status != LearningStatusAccepted && record.Status != LearningStatusPromoted {
 		return Learning{}, c.wrapError("promote-learning", record.LocalID, fmt.Errorf("%w: learning must be accepted before promotion", domain.ErrConflict))
 	}
+	targetID, err := c.prepareLearningPromotionTarget(ctx, record.Learning, params)
+	if err != nil {
+		return Learning{}, c.wrapError("promote-learning", record.LocalID, err)
+	}
+	params.TargetID = targetID
 	if err := c.validateLearningPromotionTarget(ctx, db, params); err != nil {
 		return Learning{}, c.wrapError("promote-learning", record.LocalID, err)
 	}
@@ -496,6 +515,36 @@ func (c *Client) PromoteLearning(ctx context.Context, selector string, params Pr
 		WHERE id = ?
 	`, string(LearningStatusPromoted), string(params.Target), params.TargetID, nullableString(params.Note), formatTimestamp(now), string(LearningTargetStateActive), nullableString(params.TargetHash), string(metadataJSON), formatTimestamp(now), record.rowID); err != nil {
 		return Learning{}, c.wrapError("promote-learning", record.LocalID, classifySQLiteConstraint(err))
+	}
+	return c.GetLearning(ctx, record.LocalID)
+}
+
+func (c *Client) RetireLearningTarget(ctx context.Context, selector string, note string) (Learning, error) {
+	note = strings.TrimSpace(note)
+	if note == "" {
+		return Learning{}, c.wrapError("retire-learning-target", selector, errors.New("retirement note is required"))
+	}
+	db, err := c.dbHandle()
+	if err != nil {
+		return Learning{}, err
+	}
+	record, err := c.lookupLearningByLocalID(ctx, db, selector, false)
+	if err != nil {
+		return Learning{}, c.wrapError("retire-learning-target", selector, err)
+	}
+	if record.Status != LearningStatusPromoted || record.Target == nil || record.TargetID == "" {
+		return Learning{}, c.wrapError("retire-learning-target", record.LocalID, fmt.Errorf("%w: learning has no promoted target", domain.ErrConflict))
+	}
+	if err := c.retireStructuredLearningTarget(ctx, record.Learning); err != nil {
+		return Learning{}, c.wrapError("retire-learning-target", record.LocalID, err)
+	}
+	now := time.Now().UTC()
+	if _, err := db.ExecContext(ctx, `
+		UPDATE agent_learnings
+		SET target_state = ?, target_retired_at = ?, promotion_note = ?, updated_at = ?
+		WHERE id = ?
+	`, string(LearningTargetStateRetired), formatTimestamp(now), nullableString(note), formatTimestamp(now), record.rowID); err != nil {
+		return Learning{}, c.wrapError("retire-learning-target", record.LocalID, classifySQLiteConstraint(err))
 	}
 	return c.GetLearning(ctx, record.LocalID)
 }
@@ -607,6 +656,190 @@ func (c *Client) validateLearningPromotionTarget(ctx context.Context, db sqlIssu
 	default:
 		return errors.New("invalid promotion target")
 	}
+}
+
+func (c *Client) prepareLearningPromotionTarget(ctx context.Context, learning Learning, params PromoteLearningParams) (string, error) {
+	switch params.Target {
+	case LearningPromotionTargetDecision:
+		return c.prepareDecisionPromotionTarget(ctx, learning, params)
+	case LearningPromotionTargetSpec:
+		return c.prepareSpecPromotionTarget(ctx, learning, params)
+	default:
+		return params.TargetID, nil
+	}
+}
+
+func (c *Client) prepareDecisionPromotionTarget(ctx context.Context, learning Learning, params PromoteLearningParams) (string, error) {
+	targetID := params.TargetID
+	if targetID == "" && learning.Target != nil && *learning.Target == LearningPromotionTargetDecision {
+		targetID = learning.TargetID
+	}
+	auditCtx := WithSpecAuditActorSource(ctx, "learn.promote")
+	if targetID == "" {
+		if !params.CreateTarget {
+			return "", errors.New("promotion target id is required")
+		}
+		if params.TargetTitle == "" || params.DecisionRationale == "" {
+			return "", errors.New("decision target creation requires target title and decision rationale")
+		}
+		decision, err := c.RecordDecision(auditCtx, RecordDecisionParams{
+			Title:        params.TargetTitle,
+			Rationale:    params.DecisionRationale,
+			Context:      params.DecisionContext,
+			Consequences: params.DecisionConsequences,
+		})
+		if err != nil {
+			return "", err
+		}
+		targetID = decision.LocalID
+	} else {
+		if _, err := c.GetDecision(ctx, targetID); err != nil {
+			return "", err
+		}
+		if decisionPromotionHasUpdates(params) {
+			update := UpdateDecisionParams{}
+			if params.TargetTitle != "" {
+				update.Title = &params.TargetTitle
+			}
+			if params.DecisionRationale != "" {
+				update.Rationale = &params.DecisionRationale
+			}
+			if params.DecisionContext != "" {
+				update.Context = &params.DecisionContext
+			}
+			if params.DecisionConsequences != "" {
+				update.Consequences = &params.DecisionConsequences
+			}
+			if _, err := c.UpdateDecision(auditCtx, targetID, update); err != nil {
+				return "", err
+			}
+		}
+	}
+	if learning.IssueID != nil {
+		if _, err := c.AddDecisionLink(auditCtx, AddDecisionLinkParams{
+			DecisionID: targetID,
+			TargetKind: DecisionTargetIssue,
+			TargetID:   *learning.IssueID,
+			Relation:   DecisionRelationAppliesTo,
+			Note:       learningPromotionAuditNote(learning.LocalID, params.Note),
+		}); err != nil {
+			return "", err
+		}
+	}
+	if learning.RequirementID != nil {
+		if _, err := c.AddDecisionLink(auditCtx, AddDecisionLinkParams{
+			DecisionID: targetID,
+			TargetKind: DecisionTargetRequirement,
+			TargetID:   *learning.RequirementID,
+			Relation:   DecisionRelationInforms,
+			Note:       learningPromotionAuditNote(learning.LocalID, params.Note),
+		}); err != nil {
+			return "", err
+		}
+	}
+	return targetID, nil
+}
+
+func (c *Client) prepareSpecPromotionTarget(ctx context.Context, learning Learning, params PromoteLearningParams) (string, error) {
+	if params.TargetID == "" {
+		return "", errors.New("spec target id is required")
+	}
+	auditCtx := WithSpecAuditActorSource(ctx, "learn.promote")
+	_, err := c.GetRequirement(ctx, params.TargetID)
+	if errors.Is(err, domain.ErrNotFound) && params.CreateTarget {
+		if params.TargetTitle == "" {
+			return "", errors.New("spec target creation requires target title")
+		}
+		issueID := params.TargetIssueID
+		if issueID == nil {
+			issueID = learning.IssueID
+		}
+		if _, err := c.CreateRequirement(auditCtx, CreateRequirementParams{
+			LocalID:     params.TargetID,
+			Title:       params.TargetTitle,
+			Description: params.TargetDescription,
+			IssueID:     cloneStringPointer(issueID),
+			Status:      RequirementStatusOpen,
+		}); err != nil {
+			return "", err
+		}
+	} else if err != nil {
+		return "", err
+	} else if specPromotionHasUpdates(params) {
+		update := UpdateRequirementParams{}
+		if params.TargetTitle != "" {
+			update.Title = &params.TargetTitle
+		}
+		if params.TargetDescription != "" {
+			update.Description = &params.TargetDescription
+		}
+		if params.TargetIssueID != nil {
+			update.IssueID = params.TargetIssueID
+		}
+		if _, err := c.UpdateRequirement(auditCtx, params.TargetID, update); err != nil {
+			return "", err
+		}
+	}
+	linkIssueID := params.TargetIssueID
+	if linkIssueID == nil {
+		linkIssueID = learning.IssueID
+	}
+	if linkIssueID != nil {
+		if _, err := c.AddSpecLink(auditCtx, AddSpecLinkParams{
+			IssueID:       *linkIssueID,
+			RequirementID: params.TargetID,
+			Role:          LinkRoleImplements,
+			Note:          learningPromotionAuditNote(learning.LocalID, params.Note),
+		}); err != nil {
+			return "", err
+		}
+	}
+	return params.TargetID, nil
+}
+
+func (c *Client) retireStructuredLearningTarget(ctx context.Context, learning Learning) error {
+	if learning.Target == nil {
+		return nil
+	}
+	auditCtx := WithSpecAuditActorSource(ctx, "learn.retire")
+	switch *learning.Target {
+	case LearningPromotionTargetDecision:
+		_, err := c.GetDecision(ctx, learning.TargetID)
+		return err
+	case LearningPromotionTargetSpec:
+		req, err := c.GetRequirement(ctx, learning.TargetID)
+		if err != nil {
+			return err
+		}
+		if req.Status == RequirementStatusSuperseded {
+			return nil
+		}
+		status := RequirementStatusSuperseded
+		_, err = c.UpdateRequirement(auditCtx, learning.TargetID, UpdateRequirementParams{Status: &status})
+		return err
+	default:
+		return nil
+	}
+}
+
+func decisionPromotionHasUpdates(params PromoteLearningParams) bool {
+	return params.TargetTitle != "" ||
+		params.DecisionRationale != "" ||
+		params.DecisionContext != "" ||
+		params.DecisionConsequences != ""
+}
+
+func specPromotionHasUpdates(params PromoteLearningParams) bool {
+	return params.TargetTitle != "" || params.TargetDescription != "" || params.TargetIssueID != nil
+}
+
+func learningPromotionAuditNote(learningID, note string) *string {
+	parts := []string{"promoted from learning " + strings.TrimSpace(learningID)}
+	if trimmed := strings.TrimSpace(note); trimmed != "" {
+		parts = append(parts, trimmed)
+	}
+	out := strings.Join(parts, ": ")
+	return &out
 }
 
 func normalizeRelateLearningParams(params RelateLearningParams) (RelateLearningParams, error) {
