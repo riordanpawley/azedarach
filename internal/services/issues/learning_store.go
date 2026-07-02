@@ -37,6 +37,15 @@ const (
 	LearningPromotionTargetDecision LearningPromotionTarget = "decision"
 )
 
+type LearningTargetState string
+
+const (
+	LearningTargetStateActive  LearningTargetState = "active"
+	LearningTargetStateRetired LearningTargetState = "retired"
+	LearningTargetStateDrifted LearningTargetState = "drifted"
+	LearningTargetStateMissing LearningTargetState = "missing"
+)
+
 type Learning struct {
 	LocalID         string
 	ProjectID       string
@@ -54,12 +63,16 @@ type Learning struct {
 	TargetID        string
 	TargetNote      string
 	PromotedAt      *time.Time
+	TargetState     LearningTargetState
+	TargetHash      string
+	TargetMetadata  map[string]string
 	ExpiresAt       *time.Time
 	StaleAt         *time.Time
 	LastRecalledAt  *time.Time
 	RecallCount     int
 	SupersededAt    *time.Time
 	TargetRetiredAt *time.Time
+	TargetDriftedAt *time.Time
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 	DeletedAt       *time.Time
@@ -83,9 +96,11 @@ type ReviewLearningParams struct {
 }
 
 type PromoteLearningParams struct {
-	Target   LearningPromotionTarget
-	TargetID string
-	Note     string
+	Target         LearningPromotionTarget
+	TargetID       string
+	Note           string
+	TargetHash     string
+	TargetMetadata map[string]string
 }
 
 type LearningFilter struct {
@@ -119,6 +134,15 @@ func (s LearningStatus) Valid() bool {
 func (t LearningPromotionTarget) Valid() bool {
 	switch t {
 	case LearningPromotionTargetRulesync, LearningPromotionTargetAgents, LearningPromotionTargetSkill, LearningPromotionTargetSpec, LearningPromotionTargetDecision:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s LearningTargetState) Valid() bool {
+	switch s {
+	case LearningTargetStateActive, LearningTargetStateRetired, LearningTargetStateDrifted, LearningTargetStateMissing:
 		return true
 	default:
 		return false
@@ -218,8 +242,9 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 			l.summary, l.evidence, l.status, l.review_note, l.reviewed_at,
 			COALESCE(l.tags_json, '[]'), COALESCE(l.files_json, '[]'),
 			l.promotion_target, l.promotion_target_id, l.promotion_note, l.promoted_at,
+			l.target_state, l.target_hash, COALESCE(l.target_metadata_json, '{}'),
 			l.expires_at, l.stale_at, l.last_recalled_at, l.recall_count,
-			l.superseded_at, l.target_retired_at,
+			l.superseded_at, l.target_retired_at, l.target_drifted_at,
 			l.created_at, l.updated_at, l.deleted_at
 		FROM agent_learnings l
 		LEFT JOIN spec_requirements r ON r.id = l.requirement_id
@@ -238,8 +263,10 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 			AND l.status IN (?, ?)
 			AND l.superseded_at IS NULL
 			AND l.target_retired_at IS NULL
+			AND l.target_drifted_at IS NULL
+			AND (l.status != ? OR COALESCE(NULLIF(l.target_state, ''), ?) = ?)
 		`)
-		args = append(args, string(LearningStatusAccepted), string(LearningStatusPromoted))
+		args = append(args, string(LearningStatusAccepted), string(LearningStatusPromoted), string(LearningStatusPromoted), string(LearningTargetStateActive), string(LearningTargetStateActive))
 	}
 	if trimmed := strings.TrimSpace(filter.ProjectID); trimmed != "" {
 		query.WriteString(` AND l.project_id = ?`)
@@ -366,6 +393,8 @@ func (c *Client) UpdateLearningStatus(ctx context.Context, selector string, stat
 func (c *Client) PromoteLearning(ctx context.Context, selector string, params PromoteLearningParams) (Learning, error) {
 	params.TargetID = strings.TrimSpace(params.TargetID)
 	params.Note = strings.TrimSpace(params.Note)
+	params.TargetHash = strings.TrimSpace(params.TargetHash)
+	params.TargetMetadata = normalizeStringMap(params.TargetMetadata)
 	if !params.Target.Valid() {
 		return Learning{}, c.wrapError("promote-learning", selector, errors.New("invalid promotion target"))
 	}
@@ -387,11 +416,21 @@ func (c *Client) PromoteLearning(ctx context.Context, selector string, params Pr
 		return Learning{}, c.wrapError("promote-learning", record.LocalID, err)
 	}
 	now := time.Now().UTC()
+	targetMetadata := params.TargetMetadata
+	if targetMetadata == nil {
+		targetMetadata = map[string]string{}
+	}
+	metadataJSON, err := json.Marshal(targetMetadata)
+	if err != nil {
+		return Learning{}, c.wrapError("promote-learning", record.LocalID, fmt.Errorf("marshal target metadata: %w", err))
+	}
 	if _, err := db.ExecContext(ctx, `
 		UPDATE agent_learnings
-		SET status = ?, promotion_target = ?, promotion_target_id = ?, promotion_note = ?, promoted_at = ?, updated_at = ?
+		SET status = ?, promotion_target = ?, promotion_target_id = ?, promotion_note = ?, promoted_at = ?,
+			target_state = ?, target_hash = ?, target_metadata_json = ?, target_retired_at = NULL,
+			target_drifted_at = NULL, updated_at = ?
 		WHERE id = ?
-	`, string(LearningStatusPromoted), string(params.Target), params.TargetID, nullableString(params.Note), formatTimestamp(now), formatTimestamp(now), record.rowID); err != nil {
+	`, string(LearningStatusPromoted), string(params.Target), params.TargetID, nullableString(params.Note), formatTimestamp(now), string(LearningTargetStateActive), nullableString(params.TargetHash), string(metadataJSON), formatTimestamp(now), record.rowID); err != nil {
 		return Learning{}, c.wrapError("promote-learning", record.LocalID, classifySQLiteConstraint(err))
 	}
 	return c.GetLearning(ctx, record.LocalID)
@@ -485,8 +524,9 @@ func (c *Client) lookupLearningByLocalID(ctx context.Context, db sqlIssueDBTX, s
 			l.summary, l.evidence, l.status, l.review_note, l.reviewed_at,
 			COALESCE(l.tags_json, '[]'), COALESCE(l.files_json, '[]'),
 			l.promotion_target, l.promotion_target_id, l.promotion_note, l.promoted_at,
+			l.target_state, l.target_hash, COALESCE(l.target_metadata_json, '{}'),
 			l.expires_at, l.stale_at, l.last_recalled_at, l.recall_count,
-			l.superseded_at, l.target_retired_at,
+			l.superseded_at, l.target_retired_at, l.target_drifted_at,
 			l.created_at, l.updated_at, l.deleted_at
 		FROM agent_learnings l
 		LEFT JOIN spec_requirements r ON r.id = l.requirement_id
@@ -507,8 +547,8 @@ func scanLearningRecord(scanner interface {
 }) (learningRecord, error) {
 	var record learningRecord
 	var issueRaw, reqRaw, sessionRaw, reviewNoteRaw, reviewedRaw, targetRaw, targetIDRaw, targetNoteRaw, promotedRaw sql.NullString
-	var expiresRaw, staleRaw, lastRecalledRaw, supersededRaw, targetRetiredRaw, deletedRaw sql.NullString
-	var tagsJSON, filesJSON string
+	var targetStateRaw, targetHashRaw, expiresRaw, staleRaw, lastRecalledRaw, supersededRaw, targetRetiredRaw, targetDriftedRaw, deletedRaw sql.NullString
+	var tagsJSON, filesJSON, targetMetadataJSON string
 	var createdRaw, updatedRaw string
 	if err := scanner.Scan(
 		&record.rowID,
@@ -528,12 +568,16 @@ func scanLearningRecord(scanner interface {
 		&targetIDRaw,
 		&targetNoteRaw,
 		&promotedRaw,
+		&targetStateRaw,
+		&targetHashRaw,
+		&targetMetadataJSON,
 		&expiresRaw,
 		&staleRaw,
 		&lastRecalledRaw,
 		&record.RecallCount,
 		&supersededRaw,
 		&targetRetiredRaw,
+		&targetDriftedRaw,
 		&createdRaw,
 		&updatedRaw,
 		&deletedRaw,
@@ -554,11 +598,17 @@ func scanLearningRecord(scanner interface {
 	record.TargetID = strings.TrimSpace(targetIDRaw.String)
 	record.TargetNote = strings.TrimSpace(targetNoteRaw.String)
 	record.PromotedAt = nullableTimePointer(promotedRaw)
+	if targetStateRaw.Valid && strings.TrimSpace(targetStateRaw.String) != "" {
+		record.TargetState = LearningTargetState(strings.TrimSpace(targetStateRaw.String))
+	}
+	record.TargetHash = strings.TrimSpace(targetHashRaw.String)
+	record.TargetMetadata = unmarshalJSONStringMap(targetMetadataJSON)
 	record.ExpiresAt = nullableTimePointer(expiresRaw)
 	record.StaleAt = nullableTimePointer(staleRaw)
 	record.LastRecalledAt = nullableTimePointer(lastRecalledRaw)
 	record.SupersededAt = nullableTimePointer(supersededRaw)
 	record.TargetRetiredAt = nullableTimePointer(targetRetiredRaw)
+	record.TargetDriftedAt = nullableTimePointer(targetDriftedRaw)
 	record.CreatedAt = parseTimestamp(createdRaw)
 	record.UpdatedAt = parseTimestamp(updatedRaw)
 	record.DeletedAt = nullableTimePointer(deletedRaw)
@@ -613,7 +663,20 @@ func learningActiveAt(learning Learning, now time.Time) bool {
 	if learning.StaleAt != nil && !learning.StaleAt.After(now) {
 		return false
 	}
-	return learning.SupersededAt == nil && learning.TargetRetiredAt == nil
+	if learning.SupersededAt != nil || learning.TargetRetiredAt != nil || learning.TargetDriftedAt != nil {
+		return false
+	}
+	if learning.Status == LearningStatusPromoted {
+		switch learning.TargetState {
+		case "", LearningTargetStateActive:
+			return true
+		case LearningTargetStateRetired, LearningTargetStateDrifted, LearningTargetStateMissing:
+			return false
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func unmarshalJSONStringSlice(raw string) []string {
@@ -622,6 +685,36 @@ func unmarshalJSONStringSlice(raw string) []string {
 		return nil
 	}
 	return normalizeStringSlice(out)
+}
+
+func unmarshalJSONStringMap(raw string) map[string]string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	out := map[string]string{}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return normalizeStringMap(out)
+}
+
+func normalizeStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		out[key] = strings.TrimSpace(value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func nullableStringPointer(raw sql.NullString) *string {

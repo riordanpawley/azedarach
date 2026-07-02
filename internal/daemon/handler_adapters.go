@@ -176,9 +176,11 @@ func (s issueLearnService) Promote(ctx context.Context, req protocol.LearnPromot
 		return protocol.LearnPromoteResponseBody{}, err
 	}
 	row, err := client.PromoteLearning(ctx, req.ID, issues.PromoteLearningParams{
-		Target:   issues.LearningPromotionTarget(req.Target),
-		TargetID: req.TargetID,
-		Note:     req.Note,
+		Target:         issues.LearningPromotionTarget(req.Target),
+		TargetID:       req.TargetID,
+		Note:           req.Note,
+		TargetHash:     req.TargetHash,
+		TargetMetadata: req.TargetMetadata,
 	})
 	if err != nil {
 		return protocol.LearnPromoteResponseBody{}, err
@@ -649,6 +651,14 @@ func mapLearningToProtocol(learning issues.Learning, includeEvidence bool) proto
 	if learning.PromotedAt != nil {
 		out.PromotedAt = formatProtocolTime(*learning.PromotedAt)
 	}
+	out.TargetState = protocol.LearningTargetState(learning.TargetState)
+	out.TargetHash = learning.TargetHash
+	if len(learning.TargetMetadata) > 0 {
+		out.TargetMetadata = make(map[string]string, len(learning.TargetMetadata))
+		for key, value := range learning.TargetMetadata {
+			out.TargetMetadata[key] = value
+		}
+	}
 	if learning.ExpiresAt != nil {
 		out.ExpiresAt = formatProtocolTime(*learning.ExpiresAt)
 	}
@@ -664,6 +674,9 @@ func mapLearningToProtocol(learning issues.Learning, includeEvidence bool) proto
 	}
 	if learning.TargetRetiredAt != nil {
 		out.TargetRetiredAt = formatProtocolTime(*learning.TargetRetiredAt)
+	}
+	if learning.TargetDriftedAt != nil {
+		out.TargetDriftedAt = formatProtocolTime(*learning.TargetDriftedAt)
 	}
 	return out
 }

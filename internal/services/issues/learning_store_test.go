@@ -2,6 +2,9 @@ package issues
 
 import (
 	"context"
+	"database/sql"
+	"log/slog"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -87,9 +90,11 @@ func TestClient_LearningLifecycleRecallReviewAndPromote(t *testing.T) {
 	})
 	require.NoError(t, err)
 	promoted, err := client.PromoteLearning(ctx, created.LocalID, PromoteLearningParams{
-		Target:   LearningPromotionTargetDecision,
-		TargetID: decision.LocalID,
-		Note:     "Decision recorded and linked separately.",
+		Target:         LearningPromotionTargetDecision,
+		TargetID:       decision.LocalID,
+		Note:           "Decision recorded and linked separately.",
+		TargetHash:     "sha256:decision-hash",
+		TargetMetadata: map[string]string{"path": "docs/decisions/decision.md"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, LearningStatusPromoted, promoted.Status)
@@ -98,6 +103,9 @@ func TestClient_LearningLifecycleRecallReviewAndPromote(t *testing.T) {
 	assert.Equal(t, decision.LocalID, promoted.TargetID)
 	assert.Equal(t, "Decision recorded and linked separately.", promoted.TargetNote)
 	require.NotNil(t, promoted.PromotedAt)
+	assert.Equal(t, LearningTargetStateActive, promoted.TargetState)
+	assert.Equal(t, "sha256:decision-hash", promoted.TargetHash)
+	assert.Equal(t, map[string]string{"path": "docs/decisions/decision.md"}, promoted.TargetMetadata)
 }
 
 func TestClient_ListLearningsAppliesLimitAfterTagFilter(t *testing.T) {
@@ -167,6 +175,8 @@ func TestClient_ListLearningsActiveOnlyExcludesInactiveLifecycleRows(t *testing.
 	staleByTime := createAcceptedLearning(t, ctx, client, "proj", "Time-stale learning")
 	superseded := createAcceptedLearning(t, ctx, client, "proj", "Superseded learning")
 	retiredTarget := createAcceptedLearning(t, ctx, client, "proj", "Retired target learning")
+	driftedTarget := createAcceptedLearning(t, ctx, client, "proj", "Drifted target learning")
+	missingTarget := createAcceptedLearning(t, ctx, client, "proj", "Missing target learning")
 	retiredDecision, err := client.RecordDecision(ctx, RecordDecisionParams{
 		Title:     "Retired target",
 		Rationale: "The target was later retired.",
@@ -177,6 +187,26 @@ func TestClient_ListLearningsActiveOnlyExcludesInactiveLifecycleRows(t *testing.
 		TargetID: retiredDecision.LocalID,
 	})
 	require.NoError(t, err)
+	driftedDecision, err := client.RecordDecision(ctx, RecordDecisionParams{
+		Title:     "Drifted target",
+		Rationale: "The target changed after promotion.",
+	})
+	require.NoError(t, err)
+	_, err = client.PromoteLearning(ctx, driftedTarget.LocalID, PromoteLearningParams{
+		Target:   LearningPromotionTargetDecision,
+		TargetID: driftedDecision.LocalID,
+	})
+	require.NoError(t, err)
+	missingDecision, err := client.RecordDecision(ctx, RecordDecisionParams{
+		Title:     "Missing target",
+		Rationale: "The target could not be found.",
+	})
+	require.NoError(t, err)
+	_, err = client.PromoteLearning(ctx, missingTarget.LocalID, PromoteLearningParams{
+		Target:   LearningPromotionTargetDecision,
+		TargetID: missingDecision.LocalID,
+	})
+	require.NoError(t, err)
 
 	db, err := client.dbHandle()
 	require.NoError(t, err)
@@ -185,6 +215,9 @@ func TestClient_ListLearningsActiveOnlyExcludesInactiveLifecycleRows(t *testing.
 	setLearningLifecycleTime(t, ctx, db, staleByTime.LocalID, "stale_at", past)
 	setLearningLifecycleTime(t, ctx, db, superseded.LocalID, "superseded_at", past)
 	setLearningLifecycleTime(t, ctx, db, retiredTarget.LocalID, "target_retired_at", past)
+	setLearningTargetState(t, ctx, db, retiredTarget.LocalID, LearningTargetStateRetired)
+	setLearningTargetState(t, ctx, db, driftedTarget.LocalID, LearningTargetStateDrifted)
+	setLearningTargetState(t, ctx, db, missingTarget.LocalID, LearningTargetStateMissing)
 
 	rows, err := client.ListLearnings(ctx, LearningFilter{
 		ProjectID: "proj",
@@ -212,6 +245,8 @@ func TestClient_ListLearningsActiveOnlyExcludesInactiveLifecycleRows(t *testing.
 	assert.NotContains(t, got, staleByTime.LocalID)
 	assert.NotContains(t, got, superseded.LocalID)
 	assert.NotContains(t, got, retiredTarget.LocalID)
+	assert.NotContains(t, got, driftedTarget.LocalID)
+	assert.NotContains(t, got, missingTarget.LocalID)
 
 	for _, id := range []string{activeAccepted.LocalID, activePromoted.LocalID} {
 		assert.Equal(t, 1, got[id].RecallCount)
@@ -225,6 +260,49 @@ func TestClient_ListLearningsActiveOnlyExcludesInactiveLifecycleRows(t *testing.
 	require.NoError(t, err)
 	assert.Zero(t, storedCandidate.RecallCount)
 	assert.Nil(t, storedCandidate.LastRecalledAt)
+}
+
+func TestClient_MigratesPromotedLearningTargetState(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	applyIssueMigrationsThrough(t, ctx, db, "0020_agent_learning_lifecycle")
+
+	now := formatTimestamp(time.Now().UTC())
+	retiredAt := formatTimestamp(time.Now().UTC().Add(-time.Hour))
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO agent_learnings (
+			local_id, project_id, summary, evidence, status, tags_json, files_json,
+			promotion_target, promotion_target_id, promoted_at, target_retired_at,
+			created_at, updated_at, deleted_at
+		)
+		VALUES
+			('learn-active', 'proj', 'Active promoted', 'Evidence.', 'promoted', '[]', '[]', 'decision', 'dec-active', ?, NULL, ?, ?, NULL),
+			('learn-retired', 'proj', 'Retired promoted', 'Evidence.', 'promoted', '[]', '[]', 'decision', 'dec-retired', ?, ?, ?, ?, NULL)
+	`, now, now, now, now, retiredAt, now, now)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	client := NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { require.NoError(t, client.CloseDB()) })
+
+	active, err := client.GetLearning(ctx, "learn-active")
+	require.NoError(t, err)
+	assert.Equal(t, LearningTargetStateActive, active.TargetState)
+
+	retired, err := client.GetLearning(ctx, "learn-retired")
+	require.NoError(t, err)
+	assert.Equal(t, LearningTargetStateRetired, retired.TargetState)
+	require.NotNil(t, retired.TargetRetiredAt)
+
+	rows, err := client.ListLearnings(ctx, LearningFilter{
+		ProjectID:  "proj",
+		ActiveOnly: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "learn-active", rows[0].LocalID)
 }
 
 func TestLearningActiveAtUsesParsedTimestampBoundaries(t *testing.T) {
@@ -350,4 +428,33 @@ func setLearningLifecycleTime(t *testing.T, ctx context.Context, db sqlIssueExec
 	}
 	_, err := db.ExecContext(ctx, "UPDATE agent_learnings SET "+column+" = ? WHERE local_id = ?", formatTimestamp(value), localID)
 	require.NoError(t, err)
+}
+
+func setLearningTargetState(t *testing.T, ctx context.Context, db sqlIssueExecer, localID string, state LearningTargetState) {
+	t.Helper()
+	_, err := db.ExecContext(ctx, "UPDATE agent_learnings SET target_state = ? WHERE local_id = ?", string(state), localID)
+	require.NoError(t, err)
+}
+
+func applyIssueMigrationsThrough(t *testing.T, ctx context.Context, db *sql.DB, throughID string) {
+	t.Helper()
+	require.NoError(t, ensureMigrationTable(ctx, db))
+	for _, migration := range orderedMigrations {
+		sqlText, err := loadMigrationSQL(migration.path)
+		require.NoError(t, err)
+		tx, err := db.BeginTx(ctx, nil)
+		require.NoError(t, err)
+		_, err = tx.ExecContext(ctx, sqlText)
+		require.NoError(t, err)
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO schema_migrations (id, applied_at)
+			VALUES (?, ?)
+		`, migration.id, time.Now().UTC().Format(time.RFC3339Nano))
+		require.NoError(t, err)
+		require.NoError(t, tx.Commit())
+		if migration.id == throughID {
+			return
+		}
+	}
+	t.Fatalf("migration %q not found", throughID)
 }
