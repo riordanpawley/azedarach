@@ -1511,6 +1511,20 @@ func TestTaskStatusDoneSuccessKeepsOptimisticOverlayAcrossStaleHydration(t *test
 		t.Fatal("pending done overlay should remain until hydration confirms done")
 	}
 
+	afterStatus.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(afterStatus.tasks[0], afterStatus.tasks, afterStatus.pendingMutationForTask("az-4"), 120, 30))
+	staleWorkspaceAny, _ := afterStatus.Update(refreshTaskWorkspaceResultMsg{
+		taskID:  "az-4",
+		hasTask: true,
+		task:    domain.Task{ID: "az-4", Status: domain.StatusInReview},
+	})
+	staleWorkspace := staleWorkspaceAny.(Model)
+	if staleWorkspace.tasks[0].Status != domain.StatusDone {
+		t.Fatalf("stale workspace refresh status = %s, want optimistic %s", staleWorkspace.tasks[0].Status, domain.StatusDone)
+	}
+	if _, ok := staleWorkspace.pendingStatuses[taskIDKey("az-4")]; !ok {
+		t.Fatal("pending done overlay should survive stale workspace refresh")
+	}
+
 	staleAny, _ := afterStatus.Update(issuesLoadedMsg{
 		tasks: []domain.Task{{ID: "az-4", Status: domain.StatusInReview}},
 	})
@@ -1531,6 +1545,121 @@ func TestTaskStatusDoneSuccessKeepsOptimisticOverlayAcrossStaleHydration(t *test
 	}
 	if _, ok := confirmedHydration.pendingStatuses[taskIDKey("az-4")]; ok {
 		t.Fatal("pending done overlay should clear after hydration confirms done")
+	}
+}
+
+func TestSpaceFourYDoneKeepsOptimisticStatusAcrossStaleHydration(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskClose {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskClose)
+			}
+			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
+				TaskID: "az-4",
+				Status: string(domain.StatusDone),
+			})
+			if err != nil {
+				t.Fatalf("marshal close response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{ID: "az-4", Title: "Ready to close", Status: domain.StatusInReview}}
+	m.nav.SelectTask("az-4", domain.StatusInReview.Column())
+
+	openedAny, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	opened := openedAny.(Model)
+	if _, ok := opened.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
+		t.Fatalf("overlay = %T, want TaskWorkspaceOverlay", opened.overlayStack.Current())
+	}
+
+	afterFourAny, selectCmd := opened.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
+	if selectCmd == nil {
+		t.Fatal("expected workspace status shortcut to emit selection")
+	}
+	afterFour := afterFourAny.(Model)
+	selected, ok := selectCmd().(overlay.SelectionMsg)
+	if !ok || selected.Key != "4" {
+		t.Fatalf("selection = %#v, want key 4", selected)
+	}
+
+	promptedAny, _ := afterFour.Update(selected)
+	prompted := promptedAny.(Model)
+	if prompted.pendingClose == nil {
+		t.Fatal("expected Done action to stage close confirmation")
+	}
+
+	afterYKeyAny, yesCmd := prompted.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if yesCmd == nil {
+		t.Fatal("expected y to confirm close dialog")
+	}
+	afterYKey := afterYKeyAny.(Model)
+	yesMsg, ok := yesCmd().(overlay.SelectionMsg)
+	if !ok || yesMsg.Key != "yes" {
+		t.Fatalf("confirmation message = %#v, want yes selection", yesMsg)
+	}
+
+	confirmedAny, statusCmd := afterYKey.Update(yesMsg)
+	if statusCmd == nil {
+		t.Fatal("expected status command after y confirmation")
+	}
+	confirmed := confirmedAny.(Model)
+	if confirmed.tasks[0].Status != domain.StatusDone {
+		t.Fatalf("optimistic status after y = %s, want %s", confirmed.tasks[0].Status, domain.StatusDone)
+	}
+
+	statusMsg := statusCmd()
+	afterStatusAny, _ := confirmed.Update(statusMsg)
+	afterStatus := afterStatusAny.(Model)
+	if afterStatus.tasks[0].Status != domain.StatusDone {
+		t.Fatalf("status after close success = %s, want %s", afterStatus.tasks[0].Status, domain.StatusDone)
+	}
+
+	staleAny, _ := afterStatus.Update(issuesLoadedMsg{
+		tasks: []domain.Task{{ID: "az-4", Title: "Ready to close", Status: domain.StatusInReview}},
+	})
+	stale := staleAny.(Model)
+	if stale.tasks[0].Status != domain.StatusDone {
+		t.Fatalf("stale hydration after space 4 y status = %s, want %s", stale.tasks[0].Status, domain.StatusDone)
+	}
+	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandTaskClose {
+		t.Fatalf("requests = %v, want one task close", transport.requests)
+	}
+}
+
+func TestStaleSingleTaskRefreshDoesNotApplyExpiredPendingStatus(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{{ID: "az-4", Status: domain.StatusDone}}
+	m.pendingStatuses = map[string]pendingTaskStatus{
+		taskIDKey("az-4"): {
+			previousStatus: domain.StatusInReview,
+			targetStatus:   domain.StatusDone,
+			state:          protocol.OperationStateDone,
+			action:         "task_move",
+			updatedAt:      time.Now().Add(-3 * time.Minute),
+		},
+	}
+
+	refreshed, ok := m.applySingleTaskWorkspaceRefresh("az-4", domain.Task{ID: "az-4", Status: domain.StatusInReview})
+	if !ok {
+		t.Fatal("expected single task refresh to apply")
+	}
+	if refreshed.Status != domain.StatusInReview {
+		t.Fatalf("expired pending status masked refreshed task: got %s, want %s", refreshed.Status, domain.StatusInReview)
+	}
+	if m.tasks[0].Status != domain.StatusInReview {
+		t.Fatalf("task status = %s, want refreshed %s", m.tasks[0].Status, domain.StatusInReview)
+	}
+	if _, ok := m.pendingStatuses[taskIDKey("az-4")]; ok {
+		t.Fatal("expired pending status should be cleared before single task refresh overlay")
 	}
 }
 
