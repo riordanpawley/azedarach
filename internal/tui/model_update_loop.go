@@ -826,7 +826,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			currentWorkspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
 		}
-		currentWorkspace.SyncTask(msg.task, m.tasks, m.pendingMutationForTask(boardTask.ID.String()))
+		currentWorkspace.SyncFullTask(msg.task, m.tasks, m.pendingMutationForTask(boardTask.ID.String()))
 		if msg.decisionErr != nil {
 			if m.logger != nil {
 				m.logger.Debug("task workspace decision link refresh failed", "task_id", msg.taskID, "error", msg.decisionErr)

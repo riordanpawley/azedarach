@@ -1374,6 +1374,63 @@ func TestTaskWorkspacePreservesDetailsAcrossSummaryRefresh(t *testing.T) {
 	}
 }
 
+func TestTaskWorkspaceFullRefreshAllowsClearedDetails(t *testing.T) {
+	m := newTestModel()
+	task := domain.Task{
+		ID:          "az-1",
+		Title:       "Workspace task",
+		Description: "Long description should clear",
+		Design:      "Design should clear",
+		Notes:       "Notes should clear",
+		Acceptance:  "Acceptance should clear",
+		Status:      domain.StatusInProgress,
+		Priority:    domain.P2,
+		Type:        domain.TypeTask,
+	}
+	m.tasks = []domain.Task{task}
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(task, m.tasks, nil, 120, 30))
+
+	cleared := domain.Task{
+		ID:       "az-1",
+		Title:    "Workspace task after full refresh",
+		Status:   domain.StatusInReview,
+		Priority: domain.P1,
+		Type:     domain.TypeTask,
+	}
+	result, _ := m.Update(refreshTaskWorkspaceResultMsg{
+		projectID: m.daemonProjectID(),
+		revision:  1,
+		taskID:    "az-1",
+		hasTask:   true,
+		task:      cleared,
+		tasks:     []domain.Task{cleared},
+	})
+	updated := result.(Model)
+
+	workspace, ok := updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("current overlay = %T, want TaskWorkspaceOverlay", updated.overlayStack.Current())
+	}
+	view := workspace.View()
+	if !strings.Contains(view, "Workspace task after full refresh") {
+		t.Fatalf("workspace did not pick up full refresh title:\n%s", view)
+	}
+	for _, stale := range []string{
+		"Long description should clear",
+		"Design should clear",
+		"Notes should clear",
+		"Acceptance should clear",
+	} {
+		if strings.Contains(view, stale) {
+			t.Fatalf("workspace retained cleared full-detail field %q:\n%s", stale, view)
+		}
+	}
+	if updated.tasks[0].Description != "" || updated.tasks[0].Notes != "" ||
+		updated.tasks[0].Design != "" || updated.tasks[0].Acceptance != "" {
+		t.Fatalf("model task details after full refresh = %+v, want cleared details", updated.tasks[0])
+	}
+}
+
 func TestSettingsSaveErrorKeepsOverlayOpen(t *testing.T) {
 	m := newTestModel()
 	m.overlayStack.Push(overlay.NewDefaultSettingsOverlay())

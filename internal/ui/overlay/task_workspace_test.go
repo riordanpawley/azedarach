@@ -556,6 +556,45 @@ func TestTaskWorkspaceOverlay_SyncTaskPreservesDetailsOmittedFromSummary(t *test
 	}
 }
 
+func TestTaskWorkspaceOverlay_SyncFullTaskAllowsClearedDetails(t *testing.T) {
+	estimate := 5
+	task := domain.Task{
+		ID:          "az-1",
+		Title:       "Task",
+		Description: "Loaded description",
+		Design:      "Loaded design",
+		Notes:       "Loaded notes",
+		Acceptance:  "Loaded acceptance",
+		Estimate:    &estimate,
+		Status:      domain.StatusOpen,
+	}
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+
+	overlay.SyncFullTask(domain.Task{
+		ID:       "az-1",
+		Title:    "Task after full refresh",
+		Status:   domain.StatusInReview,
+		Priority: domain.P1,
+	}, nil, nil)
+
+	view := overlay.View()
+	for _, stale := range []string{
+		"Loaded description",
+		"Loaded design",
+		"Loaded notes",
+		"Loaded acceptance",
+		"Estimate:",
+		"5",
+	} {
+		if strings.Contains(view, stale) {
+			t.Fatalf("workspace view retained cleared full-detail field %q:\n%s", stale, view)
+		}
+	}
+	if !strings.Contains(view, "Task after full refresh") {
+		t.Fatalf("workspace view missing refreshed title:\n%s", view)
+	}
+}
+
 func TestTaskWorkspaceOverlay_SyncTaskDoesNotPreserveDetailsAcrossTasks(t *testing.T) {
 	task := domain.Task{
 		ID:          "az-1",

@@ -375,7 +375,18 @@ func (w *TaskWorkspaceOverlay) SyncDecisionLinks(links []DecisionLinkSummary) {
 
 // SyncTask updates workspace detail/actions from refreshed task projection data.
 func (w *TaskWorkspaceOverlay) SyncTask(task domain.Task, relatedTasks []domain.Task, mutation *TaskMutationProgress) {
-	task = mergeWorkspaceTaskDetails(w.detail.task, task)
+	w.syncTask(task, relatedTasks, mutation, true)
+}
+
+// SyncFullTask updates workspace detail/actions from a full task detail payload.
+func (w *TaskWorkspaceOverlay) SyncFullTask(task domain.Task, relatedTasks []domain.Task, mutation *TaskMutationProgress) {
+	w.syncTask(task, relatedTasks, mutation, false)
+}
+
+func (w *TaskWorkspaceOverlay) syncTask(task domain.Task, relatedTasks []domain.Task, mutation *TaskMutationProgress, preserveExistingDetails bool) {
+	if preserveExistingDetails {
+		task = mergeWorkspaceTaskDetails(w.detail.task, task)
+	}
 	w.detail.task = task
 	w.detail.relatedTasks = append([]domain.Task(nil), relatedTasks...)
 	w.detail.mutation = cloneTaskMutationProgress(mutation)
