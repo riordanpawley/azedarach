@@ -8,6 +8,7 @@ const (
 	CommandLearnShow    = "learn.show"
 	CommandLearnReview  = "learn.review"
 	CommandLearnPromote = "learn.promote"
+	CommandLearnRelate  = "learn.relate"
 )
 
 type LearningStatus string
@@ -28,6 +29,13 @@ const (
 	LearningPromotionTargetSkill    LearningPromotionTarget = "skill"
 	LearningPromotionTargetSpec     LearningPromotionTarget = "spec"
 	LearningPromotionTargetDecision LearningPromotionTarget = "decision"
+)
+
+type LearningRelationType string
+
+const (
+	LearningRelationSupersedes LearningRelationType = "supersedes"
+	LearningRelationConflicts  LearningRelationType = "conflicts"
 )
 
 type Learning struct {
@@ -53,8 +61,24 @@ type Learning struct {
 	RecallCount     int                     `json:"recall_count,omitempty" msgpack:"recall_count,omitempty"`
 	SupersededAt    string                  `json:"superseded_at,omitempty" msgpack:"superseded_at,omitempty"`
 	TargetRetiredAt string                  `json:"target_retired_at,omitempty" msgpack:"target_retired_at,omitempty"`
+	Relations       []LearningRelation      `json:"relations,omitempty" msgpack:"relations,omitempty"`
 	CreatedAt       string                  `json:"created_at" msgpack:"created_at"`
 	UpdatedAt       string                  `json:"updated_at" msgpack:"updated_at"`
+}
+
+type LearningRelation struct {
+	ID               string               `json:"id" msgpack:"id"`
+	Type             LearningRelationType `json:"type" msgpack:"type"`
+	SourceLearningID string               `json:"source_learning_id" msgpack:"source_learning_id"`
+	TargetLearningID string               `json:"target_learning_id" msgpack:"target_learning_id"`
+	Note             string               `json:"note" msgpack:"note"`
+	ScopeIssueID     naming.IssueID       `json:"scope_issue_id,omitempty" msgpack:"scope_issue_id,omitempty"`
+	ScopeReqID       naming.RequirementID `json:"scope_req_id,omitempty" msgpack:"scope_req_id,omitempty"`
+	ScopeSessionID   naming.SessionID     `json:"scope_session_id,omitempty" msgpack:"scope_session_id,omitempty"`
+	ScopeTags        []string             `json:"scope_tags,omitempty" msgpack:"scope_tags,omitempty"`
+	ScopeFiles       []string             `json:"scope_files,omitempty" msgpack:"scope_files,omitempty"`
+	CreatedAt        string               `json:"created_at" msgpack:"created_at"`
+	UpdatedAt        string               `json:"updated_at" msgpack:"updated_at"`
 }
 
 type LearnAddRequestBody struct {
@@ -120,6 +144,22 @@ type LearnPromoteResponseBody struct {
 	Guidance string   `json:"guidance" msgpack:"guidance"`
 }
 
+type LearnRelateRequestBody struct {
+	Type             LearningRelationType `json:"type" msgpack:"type"`
+	SourceLearningID string               `json:"source_learning_id" msgpack:"source_learning_id"`
+	TargetLearningID string               `json:"target_learning_id" msgpack:"target_learning_id"`
+	Note             string               `json:"note" msgpack:"note"`
+	ScopeIssueID     naming.IssueID       `json:"scope_issue_id,omitempty" msgpack:"scope_issue_id,omitempty"`
+	ScopeReqID       naming.RequirementID `json:"scope_req_id,omitempty" msgpack:"scope_req_id,omitempty"`
+	ScopeSessionID   naming.SessionID     `json:"scope_session_id,omitempty" msgpack:"scope_session_id,omitempty"`
+	ScopeTags        []string             `json:"scope_tags,omitempty" msgpack:"scope_tags,omitempty"`
+	ScopeFiles       []string             `json:"scope_files,omitempty" msgpack:"scope_files,omitempty"`
+}
+
+type LearnRelateResponseBody struct {
+	Relation LearningRelation `json:"relation" msgpack:"relation"`
+}
+
 func (s LearningStatus) Valid() bool {
 	switch s {
 	case LearningStatusCandidate, LearningStatusAccepted, LearningStatusRejected, LearningStatusPromoted, LearningStatusStale:
@@ -132,6 +172,15 @@ func (s LearningStatus) Valid() bool {
 func (t LearningPromotionTarget) Valid() bool {
 	switch t {
 	case LearningPromotionTargetRulesync, LearningPromotionTargetAgents, LearningPromotionTargetSkill, LearningPromotionTargetSpec, LearningPromotionTargetDecision:
+		return true
+	default:
+		return false
+	}
+}
+
+func (t LearningRelationType) Valid() bool {
+	switch t {
+	case LearningRelationSupersedes, LearningRelationConflicts:
 		return true
 	default:
 		return false

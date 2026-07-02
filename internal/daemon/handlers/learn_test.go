@@ -16,6 +16,7 @@ type fakeLearnService struct {
 	showFn    func(context.Context, protocol.LearnShowRequestBody) (protocol.LearnShowResponseBody, error)
 	reviewFn  func(context.Context, protocol.LearnReviewRequestBody) (protocol.LearnReviewResponseBody, error)
 	promoteFn func(context.Context, protocol.LearnPromoteRequestBody) (protocol.LearnPromoteResponseBody, error)
+	relateFn  func(context.Context, protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error)
 }
 
 func (f *fakeLearnService) Add(ctx context.Context, req protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error) {
@@ -53,11 +54,19 @@ func (f *fakeLearnService) Promote(ctx context.Context, req protocol.LearnPromot
 	return protocol.LearnPromoteResponseBody{}, nil
 }
 
+func (f *fakeLearnService) Relate(ctx context.Context, req protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error) {
+	if f.relateFn != nil {
+		return f.relateFn(ctx, req)
+	}
+	return protocol.LearnRelateResponseBody{}, nil
+}
+
 func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	var gotAdd protocol.LearnAddRequestBody
 	var gotRecall protocol.LearnRecallRequestBody
 	var gotReview protocol.LearnReviewRequestBody
 	var gotPromote protocol.LearnPromoteRequestBody
+	var gotRelate protocol.LearnRelateRequestBody
 	handler := NewLearnHandler(&fakeLearnService{
 		addFn: func(_ context.Context, req protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error) {
 			gotAdd = req
@@ -75,6 +84,10 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 		promoteFn: func(_ context.Context, req protocol.LearnPromoteRequestBody) (protocol.LearnPromoteResponseBody, error) {
 			gotPromote = req
 			return protocol.LearnPromoteResponseBody{Learning: protocol.Learning{ID: req.ID, Target: req.Target}}, nil
+		},
+		relateFn: func(_ context.Context, req protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error) {
+			gotRelate = req
+			return protocol.LearnRelateResponseBody{Relation: protocol.LearningRelation{ID: "learn-rel-1", Type: req.Type}}, nil
 		},
 	})
 
@@ -113,6 +126,17 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 		t.Fatalf("promote response=%+v got=%+v", promoteResp, gotPromote)
 	}
 
+	relateResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnRelate, protocol.LearnRelateRequestBody{
+		Type:             protocol.LearningRelationSupersedes,
+		SourceLearningID: "learn-2",
+		TargetLearningID: "learn-1",
+		Note:             "Newer guidance replaces older guidance.",
+		ScopeIssueID:     naming.IssueID("csp"),
+	}))
+	if !relateResp.OK || gotRelate.Type != protocol.LearningRelationSupersedes || gotRelate.SourceLearningID != "learn-2" || gotRelate.TargetLearningID != "learn-1" {
+		t.Fatalf("relate response=%+v got=%+v", relateResp, gotRelate)
+	}
+
 	badResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnAdd, protocol.LearnAddRequestBody{}))
 	if badResp.OK || badResp.Error == nil || badResp.Error.Code != protocol.ErrorCodeInvalidRequest {
 		t.Fatalf("bad add response=%+v", badResp)
@@ -133,6 +157,16 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	}))
 	if badListShortcutResp.OK || badListShortcutResp.Error == nil || badListShortcutResp.Error.Code != protocol.ErrorCodeInvalidRequest {
 		t.Fatalf("bad list shortcut review response=%+v", badListShortcutResp)
+	}
+
+	badRelateResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnRelate, protocol.LearnRelateRequestBody{
+		Type:             protocol.LearningRelationType("replaces"),
+		SourceLearningID: "learn-2",
+		TargetLearningID: "learn-1",
+		Note:             "bad",
+	}))
+	if badRelateResp.OK || badRelateResp.Error == nil || badRelateResp.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("bad relate response=%+v", badRelateResp)
 	}
 
 	conflictHandler := NewLearnHandler(&fakeLearnService{

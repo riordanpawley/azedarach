@@ -227,6 +227,121 @@ func TestClient_ListLearningsActiveOnlyExcludesInactiveLifecycleRows(t *testing.
 	assert.Nil(t, storedCandidate.LastRecalledAt)
 }
 
+func TestClient_RelateLearningSupersedesScopedGuidanceAndExcludesTargetFromActiveRecall(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Scoped learning",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+	req, err := client.CreateRequirement(ctx, CreateRequirementParams{
+		LocalID: "learn-scope-req",
+		Title:   "Scoped learning requirement",
+		Status:  RequirementStatusOpen,
+	})
+	require.NoError(t, err)
+
+	generic := createAcceptedLearning(t, ctx, client, "proj", "Use generic daemon config guidance")
+	scoped := createAcceptedLearning(t, ctx, client, "proj", "Use file-specific daemon config guidance")
+	scopeReqID := req.LocalID
+	relation, err := client.RelateLearning(ctx, RelateLearningParams{
+		Type:               LearningRelationSupersedes,
+		SourceLearningID:   scoped.LocalID,
+		TargetLearningID:   generic.LocalID,
+		Note:               "Newer file guidance is verified against the daemon config path.",
+		ScopeIssueID:       &taskID,
+		ScopeRequirementID: &scopeReqID,
+		ScopeTags:          []string{"daemon", "daemon"},
+		ScopeFiles:         []string{"internal/config/config.go"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, LearningRelationSupersedes, relation.Type)
+	assert.Equal(t, scoped.LocalID, relation.SourceLearningID)
+	assert.Equal(t, generic.LocalID, relation.TargetLearningID)
+	require.NotNil(t, relation.ScopeIssueID)
+	assert.Equal(t, taskID, *relation.ScopeIssueID)
+	require.NotNil(t, relation.ScopeRequirementID)
+	assert.Equal(t, req.LocalID, *relation.ScopeRequirementID)
+	assert.Equal(t, []string{"daemon"}, relation.ScopeTags)
+	assert.Equal(t, []string{"internal/config/config.go"}, relation.ScopeFiles)
+
+	storedGeneric, err := client.GetLearning(ctx, generic.LocalID)
+	require.NoError(t, err)
+	require.NotNil(t, storedGeneric.SupersededAt)
+	require.Len(t, storedGeneric.Relations, 1)
+	assert.Equal(t, relation.LocalID, storedGeneric.Relations[0].LocalID)
+
+	storedScoped, err := client.GetLearning(ctx, scoped.LocalID)
+	require.NoError(t, err)
+	require.Len(t, storedScoped.Relations, 1)
+	assert.Equal(t, relation.LocalID, storedScoped.Relations[0].LocalID)
+
+	rows, err := client.ListLearnings(ctx, LearningFilter{
+		ProjectID:  "proj",
+		Query:      "daemon config guidance",
+		Statuses:   []LearningStatus{LearningStatusAccepted},
+		ActiveOnly: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, scoped.LocalID, rows[0].LocalID)
+}
+
+func TestClient_RelateLearningConflictIsAuditableWithoutSuperseding(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	left := createAcceptedLearning(t, ctx, client, "proj", "Use daemon cache for config")
+	right := createAcceptedLearning(t, ctx, client, "proj", "Avoid daemon cache for config")
+	relation, err := client.RelateLearning(ctx, RelateLearningParams{
+		Type:             LearningRelationConflicts,
+		SourceLearningID: left.LocalID,
+		TargetLearningID: right.LocalID,
+		Note:             "The cache guidance conflicts and needs review before promotion.",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, LearningRelationConflicts, relation.Type)
+
+	storedRight, err := client.GetLearning(ctx, right.LocalID)
+	require.NoError(t, err)
+	assert.Nil(t, storedRight.SupersededAt)
+	require.Len(t, storedRight.Relations, 1)
+	assert.Equal(t, relation.LocalID, storedRight.Relations[0].LocalID)
+
+	rows, err := client.ListLearnings(ctx, LearningFilter{
+		ProjectID:  "proj",
+		Query:      "daemon cache config",
+		Statuses:   []LearningStatus{LearningStatusAccepted},
+		ActiveOnly: true,
+	})
+	require.NoError(t, err)
+	assert.Len(t, rows, 2)
+}
+
+func TestClient_RelateLearningSupersedesRequiresActiveSource(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	candidate, err := client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID: "proj",
+		Summary:   "Candidate replacement",
+		Evidence:  "Candidate evidence.",
+	})
+	require.NoError(t, err)
+	target := createAcceptedLearning(t, ctx, client, "proj", "Accepted target")
+
+	_, err = client.RelateLearning(ctx, RelateLearningParams{
+		Type:             LearningRelationSupersedes,
+		SourceLearningID: candidate.LocalID,
+		TargetLearningID: target.LocalID,
+		Note:             "Candidate guidance cannot suppress active guidance.",
+	})
+	require.ErrorIs(t, err, domain.ErrConflict)
+}
+
 func TestLearningActiveAtUsesParsedTimestampBoundaries(t *testing.T) {
 	now := time.Date(2026, 7, 2, 3, 45, 0, 500, time.UTC)
 	expiresAtBoundary := now.Truncate(time.Second)

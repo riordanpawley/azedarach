@@ -16,6 +16,7 @@ func TestRunLearnCommandHelpArgsReturnUsage(t *testing.T) {
 		{"show", "help"},
 		{"review", "--help"},
 		{"promote", "--help"},
+		{"relate", "--help"},
 	} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
 			output := captureLearnStdout(t, func() {
@@ -109,6 +110,36 @@ func TestParseLearnPromoteArgs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := parseLearnPromoteArgs(tc.args)
 			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+		})
+	}
+}
+
+func TestParseLearnRelateArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		ok      bool
+		errFrag string
+	}{
+		{name: "supersedes with scope", args: []string{"--type", "supersedes", "--note", "Newer guidance wins.", "--scope-issue", "csp", "--scope-req", "req-1", "--scope-tag", "daemon", "--scope-tag", "daemon", "--scope-file", "internal/config/config.go", "learn-2", "learn-1"}, ok: true},
+		{name: "conflicts", args: []string{"--type", "conflicts", "--note", "Needs review.", "learn-2", "learn-1"}, ok: true},
+		{name: "missing type", args: []string{"--note", "Needs review.", "learn-2", "learn-1"}, ok: false, errFrag: "--type"},
+		{name: "invalid type", args: []string{"--type", "replaces", "--note", "Needs review.", "learn-2", "learn-1"}, ok: false, errFrag: "invalid relation type"},
+		{name: "missing note", args: []string{"--type", "supersedes", "learn-2", "learn-1"}, ok: false, errFrag: "--note"},
+		{name: "missing learning ids", args: []string{"--type", "supersedes", "--note", "Needs review.", "learn-2"}, ok: false, errFrag: "usage: az learn relate"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseLearnRelateArgs(tc.args)
+			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+			if tc.ok && opts.Type == "supersedes" {
+				if opts.SourceLearningID != "learn-2" || opts.TargetLearningID != "learn-1" {
+					t.Fatalf("relation ids = %q -> %q", opts.SourceLearningID, opts.TargetLearningID)
+				}
+				if len(opts.ScopeTags) != 1 {
+					t.Fatalf("scope tags = %+v, want deduped single tag", opts.ScopeTags)
+				}
+			}
 		})
 	}
 }

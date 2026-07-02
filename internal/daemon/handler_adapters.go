@@ -190,6 +190,38 @@ func (s issueLearnService) Promote(ctx context.Context, req protocol.LearnPromot
 	}, nil
 }
 
+func (s issueLearnService) Relate(ctx context.Context, req protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnRelateResponseBody{}, err
+	}
+	params := issues.RelateLearningParams{
+		Type:             issues.LearningRelationType(req.Type),
+		SourceLearningID: req.SourceLearningID,
+		TargetLearningID: req.TargetLearningID,
+		Note:             req.Note,
+		ScopeTags:        req.ScopeTags,
+		ScopeFiles:       req.ScopeFiles,
+	}
+	if req.ScopeIssueID != "" {
+		issueID := req.ScopeIssueID.String()
+		params.ScopeIssueID = &issueID
+	}
+	if req.ScopeReqID != "" {
+		reqID := req.ScopeReqID.String()
+		params.ScopeRequirementID = &reqID
+	}
+	if req.ScopeSessionID != "" {
+		sessionID := req.ScopeSessionID.String()
+		params.ScopeSessionID = &sessionID
+	}
+	relation, err := client.RelateLearning(ctx, params)
+	if err != nil {
+		return protocol.LearnRelateResponseBody{}, err
+	}
+	return protocol.LearnRelateResponseBody{Relation: mapLearningRelationToProtocol(relation)}, nil
+}
+
 func (s issueSpecService) ListRequirements(ctx context.Context, req protocol.SpecRequirementListRequestBody) (protocol.SpecRequirementListResponseBody, error) {
 	client, err := s.issueClient(ctx)
 	if err != nil {
@@ -664,6 +696,36 @@ func mapLearningToProtocol(learning issues.Learning, includeEvidence bool) proto
 	}
 	if learning.TargetRetiredAt != nil {
 		out.TargetRetiredAt = formatProtocolTime(*learning.TargetRetiredAt)
+	}
+	if len(learning.Relations) > 0 {
+		out.Relations = make([]protocol.LearningRelation, 0, len(learning.Relations))
+		for _, relation := range learning.Relations {
+			out.Relations = append(out.Relations, mapLearningRelationToProtocol(relation))
+		}
+	}
+	return out
+}
+
+func mapLearningRelationToProtocol(relation issues.LearningRelation) protocol.LearningRelation {
+	out := protocol.LearningRelation{
+		ID:               relation.LocalID,
+		Type:             protocol.LearningRelationType(relation.Type),
+		SourceLearningID: relation.SourceLearningID,
+		TargetLearningID: relation.TargetLearningID,
+		Note:             relation.Note,
+		ScopeTags:        append([]string(nil), relation.ScopeTags...),
+		ScopeFiles:       append([]string(nil), relation.ScopeFiles...),
+		CreatedAt:        formatProtocolTime(relation.CreatedAt),
+		UpdatedAt:        formatProtocolTime(relation.UpdatedAt),
+	}
+	if relation.ScopeIssueID != nil {
+		out.ScopeIssueID = naming.IssueID(*relation.ScopeIssueID)
+	}
+	if relation.ScopeRequirementID != nil {
+		out.ScopeReqID = naming.RequirementID(*relation.ScopeRequirementID)
+	}
+	if relation.ScopeSessionID != nil {
+		out.ScopeSessionID = naming.SessionID(*relation.ScopeSessionID)
 	}
 	return out
 }

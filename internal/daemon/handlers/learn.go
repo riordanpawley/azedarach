@@ -18,6 +18,7 @@ type LearnService interface {
 	Show(context.Context, protocol.LearnShowRequestBody) (protocol.LearnShowResponseBody, error)
 	Review(context.Context, protocol.LearnReviewRequestBody) (protocol.LearnReviewResponseBody, error)
 	Promote(context.Context, protocol.LearnPromoteRequestBody) (protocol.LearnPromoteResponseBody, error)
+	Relate(context.Context, protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error)
 }
 
 type LearnHandler struct {
@@ -126,6 +127,25 @@ func (h *LearnHandler) Handle(ctx context.Context, req protocol.RequestEnvelope)
 			return learnInvalidRequest(resp, "invalid target: expected rulesync|agents|skill|spec|decision")
 		}
 		return learnJSONResponse(ctx, resp, h.service.Promote, cmd)
+	case protocol.CommandLearnRelate:
+		var cmd protocol.LearnRelateRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.Type = protocol.LearningRelationType(strings.TrimSpace(string(cmd.Type)))
+		cmd.SourceLearningID = strings.TrimSpace(cmd.SourceLearningID)
+		cmd.TargetLearningID = strings.TrimSpace(cmd.TargetLearningID)
+		cmd.Note = strings.TrimSpace(cmd.Note)
+		if cmd.Type == "" || cmd.SourceLearningID == "" || cmd.TargetLearningID == "" {
+			return learnInvalidRequest(resp, "missing required fields: type/source_learning_id/target_learning_id")
+		}
+		if !cmd.Type.Valid() {
+			return learnInvalidRequest(resp, "invalid relation type: expected supersedes|conflicts")
+		}
+		if cmd.Note == "" {
+			return learnInvalidRequest(resp, "relation note is required")
+		}
+		return learnJSONResponse(ctx, resp, h.service.Relate, cmd)
 	default:
 		resp.Error = &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeUnsupportedCommand,

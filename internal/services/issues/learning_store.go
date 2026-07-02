@@ -37,6 +37,13 @@ const (
 	LearningPromotionTargetDecision LearningPromotionTarget = "decision"
 )
 
+type LearningRelationType string
+
+const (
+	LearningRelationSupersedes LearningRelationType = "supersedes"
+	LearningRelationConflicts  LearningRelationType = "conflicts"
+)
+
 type Learning struct {
 	LocalID         string
 	ProjectID       string
@@ -60,9 +67,26 @@ type Learning struct {
 	RecallCount     int
 	SupersededAt    *time.Time
 	TargetRetiredAt *time.Time
+	Relations       []LearningRelation
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 	DeletedAt       *time.Time
+}
+
+type LearningRelation struct {
+	LocalID            string
+	Type               LearningRelationType
+	SourceLearningID   string
+	TargetLearningID   string
+	Note               string
+	ScopeIssueID       *string
+	ScopeRequirementID *string
+	ScopeSessionID     *string
+	ScopeTags          []string
+	ScopeFiles         []string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	DeletedAt          *time.Time
 }
 
 type CreateLearningParams struct {
@@ -86,6 +110,18 @@ type PromoteLearningParams struct {
 	Target   LearningPromotionTarget
 	TargetID string
 	Note     string
+}
+
+type RelateLearningParams struct {
+	Type               LearningRelationType
+	SourceLearningID   string
+	TargetLearningID   string
+	Note               string
+	ScopeIssueID       *string
+	ScopeRequirementID *string
+	ScopeSessionID     *string
+	ScopeTags          []string
+	ScopeFiles         []string
 }
 
 type LearningFilter struct {
@@ -119,6 +155,15 @@ func (s LearningStatus) Valid() bool {
 func (t LearningPromotionTarget) Valid() bool {
 	switch t {
 	case LearningPromotionTargetRulesync, LearningPromotionTargetAgents, LearningPromotionTargetSkill, LearningPromotionTargetSpec, LearningPromotionTargetDecision:
+		return true
+	default:
+		return false
+	}
+}
+
+func (t LearningRelationType) Valid() bool {
+	switch t {
+	case LearningRelationSupersedes, LearningRelationConflicts:
 		return true
 	default:
 		return false
@@ -203,6 +248,11 @@ func (c *Client) GetLearning(ctx context.Context, selector string) (Learning, er
 	if err != nil {
 		return Learning{}, c.wrapError("get-learning", strings.TrimSpace(selector), err)
 	}
+	relations, err := c.listLearningRelationsForRow(ctx, db, record.rowID, false)
+	if err != nil {
+		return Learning{}, c.wrapError("get-learning", record.LocalID, err)
+	}
+	record.Relations = relations
 	return record.Learning, nil
 }
 
@@ -397,6 +447,100 @@ func (c *Client) PromoteLearning(ctx context.Context, selector string, params Pr
 	return c.GetLearning(ctx, record.LocalID)
 }
 
+func (c *Client) RelateLearning(ctx context.Context, params RelateLearningParams) (LearningRelation, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return LearningRelation{}, err
+	}
+	normalized, err := normalizeRelateLearningParams(params)
+	if err != nil {
+		return LearningRelation{}, c.wrapError("relate-learning", "", err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return LearningRelation{}, c.wrapError("relate-learning", "", err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	source, err := c.lookupLearningByLocalID(ctx, tx, normalized.SourceLearningID, false)
+	if err != nil {
+		return LearningRelation{}, c.wrapError("relate-learning", normalized.SourceLearningID, err)
+	}
+	target, err := c.lookupLearningByLocalID(ctx, tx, normalized.TargetLearningID, false)
+	if err != nil {
+		return LearningRelation{}, c.wrapError("relate-learning", normalized.TargetLearningID, err)
+	}
+	if source.rowID == target.rowID {
+		return LearningRelation{}, c.wrapError("relate-learning", source.LocalID, fmt.Errorf("%w: learning cannot relate to itself", domain.ErrConflict))
+	}
+	if source.ProjectID != target.ProjectID {
+		return LearningRelation{}, c.wrapError("relate-learning", source.LocalID, fmt.Errorf("%w: learning relations must stay within one project", domain.ErrConflict))
+	}
+	if normalized.Type == LearningRelationSupersedes {
+		now := time.Now().UTC()
+		if !learningActiveAt(source.Learning, now) {
+			return LearningRelation{}, c.wrapError("relate-learning", source.LocalID, fmt.Errorf("%w: superseding learning must be active", domain.ErrConflict))
+		}
+		if target.SupersededAt != nil {
+			return LearningRelation{}, c.wrapError("relate-learning", target.LocalID, fmt.Errorf("%w: target learning is already superseded", domain.ErrConflict))
+		}
+	}
+	if err := ensureIssueExists(ctx, tx, normalized.ScopeIssueID); err != nil {
+		return LearningRelation{}, c.wrapError("relate-learning", "", err)
+	}
+	scopeReqRowID, err := learningRequirementRowID(ctx, tx, normalized.ScopeRequirementID)
+	if err != nil {
+		return LearningRelation{}, c.wrapError("relate-learning", "", err)
+	}
+
+	now := time.Now().UTC()
+	scopeTags := normalizeStringSlice(normalized.ScopeTags)
+	scopeFiles := normalizeStringSlice(normalized.ScopeFiles)
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO agent_learning_relations (
+			local_id, relation_type, source_learning_id, target_learning_id, note,
+			scope_issue_id, scope_requirement_id, scope_session_id, scope_tags_json, scope_files_json,
+			created_at, updated_at, deleted_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+	`, fmt.Sprintf("pending-%d", now.UnixNano()), string(normalized.Type), source.rowID, target.rowID, normalized.Note,
+		nullableTextPtr(normalized.ScopeIssueID), scopeReqRowID, nullableTextPtr(normalized.ScopeSessionID),
+		mustMarshalJSONSlice(scopeTags), mustMarshalJSONSlice(scopeFiles), formatTimestamp(now), formatTimestamp(now))
+	if err != nil {
+		return LearningRelation{}, c.wrapError("relate-learning", source.LocalID, classifySQLiteConstraint(err))
+	}
+	rowID, err := result.LastInsertId()
+	if err != nil {
+		return LearningRelation{}, c.wrapError("relate-learning", source.LocalID, err)
+	}
+	localID := fmt.Sprintf("learn-rel-%d", rowID)
+	if _, err := tx.ExecContext(ctx, `UPDATE agent_learning_relations SET local_id = ?, updated_at = ? WHERE id = ?`, localID, formatTimestamp(now), rowID); err != nil {
+		return LearningRelation{}, c.wrapError("relate-learning", localID, classifySQLiteConstraint(err))
+	}
+	if normalized.Type == LearningRelationSupersedes {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE agent_learnings
+			SET superseded_at = ?, updated_at = ?
+			WHERE id = ?
+		`, formatTimestamp(now), formatTimestamp(now), target.rowID); err != nil {
+			return LearningRelation{}, c.wrapError("relate-learning", target.LocalID, classifySQLiteConstraint(err))
+		}
+	}
+	relation, err := c.lookupLearningRelationByRowID(ctx, tx, rowID)
+	if err != nil {
+		return LearningRelation{}, c.wrapError("relate-learning", localID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return LearningRelation{}, c.wrapError("relate-learning", localID, err)
+	}
+	tx = nil
+	return relation, nil
+}
+
 func (c *Client) validateLearningPromotionTarget(ctx context.Context, db sqlIssueDBTX, params PromoteLearningParams) error {
 	switch params.Target {
 	case LearningPromotionTargetDecision:
@@ -410,6 +554,26 @@ func (c *Client) validateLearningPromotionTarget(ctx context.Context, db sqlIssu
 	default:
 		return errors.New("invalid promotion target")
 	}
+}
+
+func normalizeRelateLearningParams(params RelateLearningParams) (RelateLearningParams, error) {
+	params.Type = LearningRelationType(strings.TrimSpace(string(params.Type)))
+	params.SourceLearningID = strings.TrimSpace(params.SourceLearningID)
+	params.TargetLearningID = strings.TrimSpace(params.TargetLearningID)
+	params.Note = strings.TrimSpace(params.Note)
+	params.ScopeIssueID = normalizeOptionalString(params.ScopeIssueID)
+	params.ScopeRequirementID = normalizeOptionalString(params.ScopeRequirementID)
+	params.ScopeSessionID = normalizeOptionalString(params.ScopeSessionID)
+	if !params.Type.Valid() {
+		return params, errors.New("invalid learning relation type")
+	}
+	if params.SourceLearningID == "" || params.TargetLearningID == "" {
+		return params, errors.New("source and target learning ids are required")
+	}
+	if params.Note == "" {
+		return params, errors.New("relation note is required")
+	}
+	return params, nil
 }
 
 func normalizeCreateLearningParams(params CreateLearningParams) (CreateLearningParams, error) {
@@ -500,6 +664,91 @@ func (c *Client) lookupLearningByLocalID(ctx context.Context, db sqlIssueDBTX, s
 		return learningRecord{}, domain.ErrNotFound
 	}
 	return record, err
+}
+
+func (c *Client) lookupLearningRelationByRowID(ctx context.Context, db sqlIssueDBTX, rowID int64) (LearningRelation, error) {
+	query := `
+		SELECT rel.local_id, rel.relation_type, source.local_id, target.local_id, rel.note,
+			rel.scope_issue_id, req.local_id, rel.scope_session_id,
+			COALESCE(rel.scope_tags_json, '[]'), COALESCE(rel.scope_files_json, '[]'),
+			rel.created_at, rel.updated_at, rel.deleted_at
+		FROM agent_learning_relations rel
+		JOIN agent_learnings source ON source.id = rel.source_learning_id
+		JOIN agent_learnings target ON target.id = rel.target_learning_id
+		LEFT JOIN spec_requirements req ON req.id = rel.scope_requirement_id
+		WHERE rel.id = ?
+	`
+	return scanLearningRelation(db.QueryRowContext(ctx, query, rowID))
+}
+
+func (c *Client) listLearningRelationsForRow(ctx context.Context, db sqlIssueDBTX, rowID string, includeDeleted bool) ([]LearningRelation, error) {
+	query := `
+		SELECT rel.local_id, rel.relation_type, source.local_id, target.local_id, rel.note,
+			rel.scope_issue_id, req.local_id, rel.scope_session_id,
+			COALESCE(rel.scope_tags_json, '[]'), COALESCE(rel.scope_files_json, '[]'),
+			rel.created_at, rel.updated_at, rel.deleted_at
+		FROM agent_learning_relations rel
+		JOIN agent_learnings source ON source.id = rel.source_learning_id
+		JOIN agent_learnings target ON target.id = rel.target_learning_id
+		LEFT JOIN spec_requirements req ON req.id = rel.scope_requirement_id
+		WHERE (rel.source_learning_id = ? OR rel.target_learning_id = ?)
+	`
+	if !includeDeleted {
+		query += ` AND rel.deleted_at IS NULL`
+	}
+	query += ` ORDER BY rel.created_at DESC, rel.local_id ASC`
+	rows, err := db.QueryContext(ctx, query, rowID, rowID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	relations := make([]LearningRelation, 0, 4)
+	for rows.Next() {
+		relation, scanErr := scanLearningRelation(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		relations = append(relations, relation)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return relations, nil
+}
+
+func scanLearningRelation(scanner interface {
+	Scan(dest ...any) error
+}) (LearningRelation, error) {
+	var relation LearningRelation
+	var scopeIssueRaw, scopeReqRaw, scopeSessionRaw, deletedRaw sql.NullString
+	var scopeTagsJSON, scopeFilesJSON string
+	var createdRaw, updatedRaw string
+	if err := scanner.Scan(
+		&relation.LocalID,
+		&relation.Type,
+		&relation.SourceLearningID,
+		&relation.TargetLearningID,
+		&relation.Note,
+		&scopeIssueRaw,
+		&scopeReqRaw,
+		&scopeSessionRaw,
+		&scopeTagsJSON,
+		&scopeFilesJSON,
+		&createdRaw,
+		&updatedRaw,
+		&deletedRaw,
+	); err != nil {
+		return LearningRelation{}, err
+	}
+	relation.ScopeIssueID = nullableStringPointer(scopeIssueRaw)
+	relation.ScopeRequirementID = nullableStringPointer(scopeReqRaw)
+	relation.ScopeSessionID = nullableStringPointer(scopeSessionRaw)
+	relation.ScopeTags = unmarshalJSONStringSlice(scopeTagsJSON)
+	relation.ScopeFiles = unmarshalJSONStringSlice(scopeFilesJSON)
+	relation.CreatedAt = parseTimestamp(createdRaw)
+	relation.UpdatedAt = parseTimestamp(updatedRaw)
+	relation.DeletedAt = nullableTimePointer(deletedRaw)
+	return relation, nil
 }
 
 func scanLearningRecord(scanner interface {

@@ -60,6 +60,19 @@ type learnPromoteOpts struct {
 	Note     string
 }
 
+type learnRelateOpts struct {
+	JSON             bool
+	Type             string
+	SourceLearningID string
+	TargetLearningID string
+	Note             string
+	ScopeIssue       string
+	ScopeReq         string
+	ScopeSession     string
+	ScopeTags        []string
+	ScopeFiles       []string
+}
+
 func runLearnCommand(cfg *config.Config, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
 		printLearnUsage()
@@ -105,6 +118,13 @@ func runLearnCommand(cfg *config.Config, args []string) error {
 			return err
 		}
 		return runLearnPromoteRPC(cfg, opts)
+	case "relate":
+		opts, err := parseLearnRelateArgs(args[1:])
+		if err != nil {
+			printLearnUsage()
+			return err
+		}
+		return runLearnRelateRPC(cfg, opts)
 	default:
 		return fmt.Errorf("unknown learn command: %s", args[0])
 	}
@@ -199,6 +219,29 @@ func runLearnPromoteRPC(cfg *config.Config, opts learnPromoteOpts) error {
 	return nil
 }
 
+func runLearnRelateRPC(cfg *config.Config, opts learnRelateOpts) error {
+	req := protocol.LearnRelateRequestBody{
+		Type:             protocol.LearningRelationType(opts.Type),
+		SourceLearningID: opts.SourceLearningID,
+		TargetLearningID: opts.TargetLearningID,
+		Note:             opts.Note,
+		ScopeIssueID:     naming.IssueID(opts.ScopeIssue),
+		ScopeReqID:       naming.RequirementID(opts.ScopeReq),
+		ScopeSessionID:   naming.SessionID(opts.ScopeSession),
+		ScopeTags:        opts.ScopeTags,
+		ScopeFiles:       opts.ScopeFiles,
+	}
+	var out protocol.LearnRelateResponseBody
+	if err := runLearnRPC(cfg, protocol.CommandLearnRelate, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	printLearningRelation(out.Relation)
+	return nil
+}
+
 func printLearnings(learnings []protocol.Learning, includeEvidence bool) {
 	if len(learnings) == 0 {
 		fmt.Println("No learnings found.")
@@ -216,7 +259,50 @@ func printLearnings(learnings []protocol.Learning, includeEvidence bool) {
 		if includeEvidence && strings.TrimSpace(learning.Evidence) != "" {
 			fmt.Printf("  evidence: %s\n", learning.Evidence)
 		}
+		for _, relation := range learning.Relations {
+			fmt.Print("  relation: ")
+			printLearningRelationInline(relation)
+		}
 	}
+}
+
+func printLearningRelation(relation protocol.LearningRelation) {
+	fmt.Print("Recorded relation: ")
+	printLearningRelationInline(relation)
+}
+
+func printLearningRelationInline(relation protocol.LearningRelation) {
+	scope := learningRelationScope(relation)
+	if scope != "" {
+		scope = " " + scope
+	}
+	fmt.Printf("%s [%s] %s -> %s%s\n", relation.ID, relation.Type, relation.SourceLearningID, relation.TargetLearningID, scope)
+	if strings.TrimSpace(relation.Note) != "" {
+		fmt.Printf("    note: %s\n", relation.Note)
+	}
+}
+
+func learningRelationScope(relation protocol.LearningRelation) string {
+	parts := make([]string, 0, 5)
+	if relation.ScopeIssueID != "" {
+		parts = append(parts, "issue="+relation.ScopeIssueID.String())
+	}
+	if relation.ScopeReqID != "" {
+		parts = append(parts, "req="+relation.ScopeReqID.String())
+	}
+	if relation.ScopeSessionID != "" {
+		parts = append(parts, "session="+relation.ScopeSessionID.String())
+	}
+	if len(relation.ScopeTags) > 0 {
+		parts = append(parts, "tags="+strings.Join(relation.ScopeTags, ","))
+	}
+	if len(relation.ScopeFiles) > 0 {
+		parts = append(parts, "files="+strings.Join(relation.ScopeFiles, ","))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "(" + strings.Join(parts, " ") + ")"
 }
 
 func learningScope(learning protocol.Learning) string {
@@ -407,6 +493,40 @@ func parseLearnPromoteArgs(args []string) (learnPromoteOpts, error) {
 	return opts, nil
 }
 
+func parseLearnRelateArgs(args []string) (learnRelateOpts, error) {
+	opts := learnRelateOpts{}
+	fs := flag.NewFlagSet("learn relate", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "json output")
+	fs.StringVar(&opts.Type, "type", "", "relation type")
+	fs.StringVar(&opts.Note, "note", "", "audit note")
+	fs.StringVar(&opts.ScopeIssue, "scope-issue", "", "issue scope")
+	fs.StringVar(&opts.ScopeReq, "scope-req", "", "requirement scope")
+	fs.StringVar(&opts.ScopeSession, "scope-session", "", "session scope")
+	addRepeatedStringFlag(fs, "scope-tag", &opts.ScopeTags)
+	addRepeatedStringFlag(fs, "scope-file", &opts.ScopeFiles)
+	if err := fs.Parse(args); err != nil {
+		return learnRelateOpts{}, err
+	}
+	if fs.NArg() != 2 {
+		return learnRelateOpts{}, fmt.Errorf("usage: az learn relate --type supersedes|conflicts --note <text> [--scope-issue <id>] [--scope-req <id>] [--scope-session <id>] [--scope-tag <tag> ...] [--scope-file <path> ...] <source-learning-id> <target-learning-id> [--json]")
+	}
+	opts.SourceLearningID = strings.TrimSpace(fs.Arg(0))
+	opts.TargetLearningID = strings.TrimSpace(fs.Arg(1))
+	opts.Type = strings.TrimSpace(opts.Type)
+	opts.Note = strings.TrimSpace(opts.Note)
+	if opts.Type == "" {
+		return learnRelateOpts{}, fmt.Errorf("missing required flag: --type")
+	}
+	if opts.Type != string(protocol.LearningRelationSupersedes) && opts.Type != string(protocol.LearningRelationConflicts) {
+		return learnRelateOpts{}, fmt.Errorf("invalid relation type: expected supersedes|conflicts")
+	}
+	if opts.Note == "" {
+		return learnRelateOpts{}, fmt.Errorf("missing required flag: --note")
+	}
+	return opts, nil
+}
+
 func addRepeatedStringFlag(fs *flag.FlagSet, name string, values *[]string) {
 	fs.Func(name, "repeatable "+name, func(v string) error {
 		trimmed := strings.TrimSpace(v)
@@ -419,12 +539,13 @@ func addRepeatedStringFlag(fs *flag.FlagSet, name string, values *[]string) {
 }
 
 func printLearnUsage() {
-	fmt.Println("Usage: az learn <add|recall|show|review|promote> [arguments]")
+	fmt.Println("Usage: az learn <add|recall|show|review|promote|relate> [arguments]")
 	fmt.Println("  add      Capture an evidence-backed candidate learning")
 	fmt.Println("  recall   Search accepted/promoted learning summaries")
 	fmt.Println("  show     Show a learning with full evidence")
 	fmt.Println("  review   List candidates or update learning status")
 	fmt.Println("  promote  Mark a learning promoted toward curated guidance")
+	fmt.Println("  relate   Record supersession or conflict between learnings")
 	fmt.Println("")
 	fmt.Println("Commands:")
 	fmt.Println("  az learn add --evidence <text> [--summary <text>] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--json]")
@@ -432,4 +553,5 @@ func printLearnUsage() {
 	fmt.Println("  az learn show <learning-id> [--json]")
 	fmt.Println("  az learn review [--id <learning-id> --status accepted|rejected|stale --note <text>] [--limit N] [--json]")
 	fmt.Println("  az learn promote --target rulesync|agents|skill|spec|decision --target-id <id-or-path> <learning-id> [--note <text>] [--json]")
+	fmt.Println("  az learn relate --type supersedes|conflicts --note <text> [--scope-issue <id>] [--scope-req <id>] [--scope-session <id>] [--scope-tag <tag> ...] [--scope-file <path> ...] <source-learning-id> <target-learning-id> [--json]")
 }
