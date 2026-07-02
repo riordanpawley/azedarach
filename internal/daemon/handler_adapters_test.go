@@ -77,6 +77,40 @@ func TestIssueSpecServiceReadResolvesExternalCodeSelector(t *testing.T) {
 	}
 }
 
+func TestMapLearningToProtocolIncludesPromotedTargetState(t *testing.T) {
+	retiredAt := time.Date(2026, 7, 2, 5, 0, 0, 0, time.UTC)
+	driftedAt := retiredAt.Add(time.Minute)
+	learning := issues.Learning{
+		LocalID:         "learn-1",
+		ProjectID:       "proj",
+		Summary:         "Promoted target state",
+		Evidence:        "Evidence.",
+		Status:          issues.LearningStatusPromoted,
+		TargetState:     issues.LearningTargetStateDrifted,
+		TargetHash:      "sha256:target",
+		TargetMetadata:  map[string]string{"path": "docs/target.md"},
+		TargetRetiredAt: &retiredAt,
+		TargetDriftedAt: &driftedAt,
+		CreatedAt:       retiredAt,
+		UpdatedAt:       driftedAt,
+	}
+
+	out := mapLearningToProtocol(learning, true)
+
+	if out.TargetState != protocol.LearningTargetStateDrifted {
+		t.Fatalf("target state = %q, want drifted", out.TargetState)
+	}
+	if out.TargetHash != "sha256:target" {
+		t.Fatalf("target hash = %q", out.TargetHash)
+	}
+	if out.TargetMetadata["path"] != "docs/target.md" {
+		t.Fatalf("target metadata = %+v", out.TargetMetadata)
+	}
+	if out.TargetRetiredAt == "" || out.TargetDriftedAt == "" {
+		t.Fatalf("target timestamps missing: %+v", out)
+	}
+}
+
 func TestIssueSpecServiceReadIssueScopeIncludesLinkedRequirementsWithoutIssueID(t *testing.T) {
 	ctx := context.Background()
 	client, repoDir := newTestIssueClient(t)

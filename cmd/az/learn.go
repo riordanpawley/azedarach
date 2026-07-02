@@ -53,11 +53,13 @@ type learnReviewOpts struct {
 }
 
 type learnPromoteOpts struct {
-	JSON     bool
-	ID       string
-	Target   string
-	TargetID string
-	Note     string
+	JSON           bool
+	ID             string
+	Target         string
+	TargetID       string
+	Note           string
+	TargetHash     string
+	TargetMetadata map[string]string
 }
 
 type learnRelateOpts struct {
@@ -207,7 +209,14 @@ func runLearnReviewRPC(cfg *config.Config, opts learnReviewOpts) error {
 }
 
 func runLearnPromoteRPC(cfg *config.Config, opts learnPromoteOpts) error {
-	req := protocol.LearnPromoteRequestBody{ID: opts.ID, Target: protocol.LearningPromotionTarget(opts.Target), TargetID: opts.TargetID, Note: opts.Note}
+	req := protocol.LearnPromoteRequestBody{
+		ID:             opts.ID,
+		Target:         protocol.LearningPromotionTarget(opts.Target),
+		TargetID:       opts.TargetID,
+		Note:           opts.Note,
+		TargetHash:     opts.TargetHash,
+		TargetMetadata: opts.TargetMetadata,
+	}
 	var out protocol.LearnPromoteResponseBody
 	if err := runLearnRPC(cfg, protocol.CommandLearnPromote, req, &out); err != nil {
 		return err
@@ -477,11 +486,13 @@ func parseLearnPromoteArgs(args []string) (learnPromoteOpts, error) {
 	fs.StringVar(&opts.Target, "target", "", "promotion target")
 	fs.StringVar(&opts.TargetID, "target-id", "", "existing decision/spec/guidance target id")
 	fs.StringVar(&opts.Note, "note", "", "promotion note")
+	fs.StringVar(&opts.TargetHash, "target-hash", "", "current target content hash")
+	addRepeatedKeyValueFlag(fs, "target-meta", &opts.TargetMetadata)
 	if err := fs.Parse(args); err != nil {
 		return learnPromoteOpts{}, err
 	}
 	if fs.NArg() != 1 {
-		return learnPromoteOpts{}, fmt.Errorf("usage: az learn promote --target rulesync|agents|skill|spec|decision --target-id <id-or-path> <learning-id> [--note <text>] [--json]")
+		return learnPromoteOpts{}, fmt.Errorf("usage: az learn promote --target rulesync|agents|skill|spec|decision --target-id <id-or-path> <learning-id> [--note <text>] [--target-hash <hash>] [--target-meta key=value ...] [--json]")
 	}
 	opts.ID = strings.TrimSpace(fs.Arg(0))
 	if strings.TrimSpace(opts.Target) == "" {
@@ -538,6 +549,21 @@ func addRepeatedStringFlag(fs *flag.FlagSet, name string, values *[]string) {
 	})
 }
 
+func addRepeatedKeyValueFlag(fs *flag.FlagSet, name string, values *map[string]string) {
+	fs.Func(name, "repeatable "+name+" key=value", func(v string) error {
+		key, value, ok := strings.Cut(v, "=")
+		key = strings.TrimSpace(key)
+		if !ok || key == "" {
+			return fmt.Errorf("%s must be key=value", name)
+		}
+		if *values == nil {
+			*values = map[string]string{}
+		}
+		(*values)[key] = strings.TrimSpace(value)
+		return nil
+	})
+}
+
 func printLearnUsage() {
 	fmt.Println("Usage: az learn <add|recall|show|review|promote|relate> [arguments]")
 	fmt.Println("  add      Capture an evidence-backed candidate learning")
@@ -552,6 +578,6 @@ func printLearnUsage() {
 	fmt.Println("  az learn recall [--query <text>] [--issue <id>] [--req <id>] [--status <status> ...] [--tag <tag> ...] [--file <path> ...] [--limit N] [--include-evidence] [--json]")
 	fmt.Println("  az learn show <learning-id> [--json]")
 	fmt.Println("  az learn review [--id <learning-id> --status accepted|rejected|stale --note <text>] [--limit N] [--json]")
-	fmt.Println("  az learn promote --target rulesync|agents|skill|spec|decision --target-id <id-or-path> <learning-id> [--note <text>] [--json]")
+	fmt.Println("  az learn promote --target rulesync|agents|skill|spec|decision --target-id <id-or-path> <learning-id> [--note <text>] [--target-hash <hash>] [--target-meta key=value ...] [--json]")
 	fmt.Println("  az learn relate --type supersedes|conflicts --note <text> [--scope-issue <id>] [--scope-req <id>] [--scope-session <id>] [--scope-tag <tag> ...] [--scope-file <path> ...] <source-learning-id> <target-learning-id> [--json]")
 }

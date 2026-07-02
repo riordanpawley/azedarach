@@ -38,6 +38,15 @@ const (
 	LearningRelationConflicts  LearningRelationType = "conflicts"
 )
 
+type LearningTargetState string
+
+const (
+	LearningTargetStateActive  LearningTargetState = "active"
+	LearningTargetStateRetired LearningTargetState = "retired"
+	LearningTargetStateDrifted LearningTargetState = "drifted"
+	LearningTargetStateMissing LearningTargetState = "missing"
+)
+
 type Learning struct {
 	ID              string                  `json:"id" msgpack:"id"`
 	ProjectID       string                  `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
@@ -55,6 +64,9 @@ type Learning struct {
 	TargetID        string                  `json:"target_id,omitempty" msgpack:"target_id,omitempty"`
 	TargetNote      string                  `json:"target_note,omitempty" msgpack:"target_note,omitempty"`
 	PromotedAt      string                  `json:"promoted_at,omitempty" msgpack:"promoted_at,omitempty"`
+	TargetState     LearningTargetState     `json:"target_state,omitempty" msgpack:"target_state,omitempty"`
+	TargetHash      string                  `json:"target_hash,omitempty" msgpack:"target_hash,omitempty"`
+	TargetMetadata  map[string]string       `json:"target_metadata,omitempty" msgpack:"target_metadata,omitempty"`
 	ExpiresAt       string                  `json:"expires_at,omitempty" msgpack:"expires_at,omitempty"`
 	StaleAt         string                  `json:"stale_at,omitempty" msgpack:"stale_at,omitempty"`
 	LastRecalledAt  string                  `json:"last_recalled_at,omitempty" msgpack:"last_recalled_at,omitempty"`
@@ -62,6 +74,7 @@ type Learning struct {
 	SupersededAt    string                  `json:"superseded_at,omitempty" msgpack:"superseded_at,omitempty"`
 	TargetRetiredAt string                  `json:"target_retired_at,omitempty" msgpack:"target_retired_at,omitempty"`
 	Relations       []LearningRelation      `json:"relations,omitempty" msgpack:"relations,omitempty"`
+	TargetDriftedAt string                  `json:"target_drifted_at,omitempty" msgpack:"target_drifted_at,omitempty"`
 	CreatedAt       string                  `json:"created_at" msgpack:"created_at"`
 	UpdatedAt       string                  `json:"updated_at" msgpack:"updated_at"`
 }
@@ -133,10 +146,12 @@ type LearnReviewResponseBody struct {
 }
 
 type LearnPromoteRequestBody struct {
-	ID       string                  `json:"id" msgpack:"id"`
-	Target   LearningPromotionTarget `json:"target" msgpack:"target"`
-	TargetID string                  `json:"target_id" msgpack:"target_id"`
-	Note     string                  `json:"note,omitempty" msgpack:"note,omitempty"`
+	ID             string                  `json:"id" msgpack:"id"`
+	Target         LearningPromotionTarget `json:"target" msgpack:"target"`
+	TargetID       string                  `json:"target_id" msgpack:"target_id"`
+	Note           string                  `json:"note,omitempty" msgpack:"note,omitempty"`
+	TargetHash     string                  `json:"target_hash,omitempty" msgpack:"target_hash,omitempty"`
+	TargetMetadata map[string]string       `json:"target_metadata,omitempty" msgpack:"target_metadata,omitempty"`
 }
 
 type LearnPromoteResponseBody struct {
@@ -181,6 +196,15 @@ func (t LearningPromotionTarget) Valid() bool {
 func (t LearningRelationType) Valid() bool {
 	switch t {
 	case LearningRelationSupersedes, LearningRelationConflicts:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s LearningTargetState) Valid() bool {
+	switch s {
+	case LearningTargetStateActive, LearningTargetStateRetired, LearningTargetStateDrifted, LearningTargetStateMissing:
 		return true
 	default:
 		return false

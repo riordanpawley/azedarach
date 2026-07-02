@@ -118,11 +118,13 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	}
 
 	promoteResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnPromote, protocol.LearnPromoteRequestBody{
-		ID:       "learn-1",
-		Target:   protocol.LearningPromotionTargetDecision,
-		TargetID: "dec-1",
+		ID:             "learn-1",
+		Target:         protocol.LearningPromotionTargetDecision,
+		TargetID:       "dec-1",
+		TargetHash:     "sha256:target",
+		TargetMetadata: map[string]string{"path": "docs/decisions/dec-1.md"},
 	}))
-	if !promoteResp.OK || gotPromote.Target != protocol.LearningPromotionTargetDecision || gotPromote.TargetID != "dec-1" {
+	if !promoteResp.OK || gotPromote.Target != protocol.LearningPromotionTargetDecision || gotPromote.TargetID != "dec-1" || gotPromote.TargetHash != "sha256:target" || gotPromote.TargetMetadata["path"] != "docs/decisions/dec-1.md" {
 		t.Fatalf("promote response=%+v got=%+v", promoteResp, gotPromote)
 	}
 
