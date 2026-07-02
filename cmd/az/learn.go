@@ -23,6 +23,7 @@ type learnAddOpts struct {
 	Session  string
 	Summary  string
 	Evidence string
+	Private  bool
 	Tags     []string
 	Files    []string
 }
@@ -37,6 +38,7 @@ type learnRecallOpts struct {
 	Files           []string
 	Limit           int
 	IncludeEvidence bool
+	IncludePrivate  bool
 }
 
 type learnShowOpts struct {
@@ -139,6 +141,7 @@ func runLearnAddRPC(cfg *config.Config, opts learnAddOpts) error {
 		SessionID: naming.SessionID(opts.Session),
 		Summary:   opts.Summary,
 		Evidence:  opts.Evidence,
+		Private:   opts.Private,
 		Tags:      opts.Tags,
 		Files:     opts.Files,
 	}
@@ -167,6 +170,7 @@ func runLearnRecallRPC(cfg *config.Config, opts learnRecallOpts) error {
 		Files:           opts.Files,
 		Limit:           opts.Limit,
 		IncludeEvidence: opts.IncludeEvidence,
+		IncludePrivate:  opts.IncludePrivate,
 	}
 	var out protocol.LearnRecallResponseBody
 	if err := runLearnRPC(cfg, protocol.CommandLearnRecall, req, &out); err != nil {
@@ -261,7 +265,7 @@ func printLearnings(learnings []protocol.Learning, includeEvidence bool) {
 		if scope != "" {
 			scope = " " + scope
 		}
-		fmt.Printf("%s [%s]%s %s\n", learning.ID, learning.Status, scope, learning.Summary)
+		fmt.Printf("%s [%s]%s %s\n", learning.ID, learningStatusLabel(learning), scope, learning.Summary)
 		if len(learning.Tags) > 0 {
 			fmt.Printf("  tags: %s\n", strings.Join(learning.Tags, ", "))
 		}
@@ -312,6 +316,13 @@ func learningRelationScope(relation protocol.LearningRelation) string {
 		return ""
 	}
 	return "(" + strings.Join(parts, " ") + ")"
+}
+
+func learningStatusLabel(learning protocol.Learning) string {
+	if learning.EvidencePrivate {
+		return fmt.Sprintf("%s, private", learning.Status)
+	}
+	return string(learning.Status)
 }
 
 func learningScope(learning protocol.Learning) string {
@@ -374,13 +385,14 @@ func parseLearnAddArgs(args []string) (learnAddOpts, error) {
 	fs.StringVar(&opts.Session, "session", "", "session id scope")
 	fs.StringVar(&opts.Summary, "summary", "", "short summary")
 	fs.StringVar(&opts.Evidence, "evidence", "", "evidence text")
+	fs.BoolVar(&opts.Private, "private", false, "exclude from prime/default recall output")
 	addRepeatedStringFlag(fs, "tag", &opts.Tags)
 	addRepeatedStringFlag(fs, "file", &opts.Files)
 	if err := fs.Parse(args); err != nil {
 		return learnAddOpts{}, err
 	}
 	if fs.NArg() != 0 {
-		return learnAddOpts{}, fmt.Errorf("usage: az learn add --evidence <text> [--summary <text>] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--json]")
+		return learnAddOpts{}, fmt.Errorf("usage: az learn add --evidence <text> [--summary <text>] [--private] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--json]")
 	}
 	if strings.TrimSpace(opts.Evidence) == "" {
 		return learnAddOpts{}, fmt.Errorf("missing required flag: --evidence")
@@ -398,6 +410,7 @@ func parseLearnRecallArgs(args []string) (learnRecallOpts, error) {
 	fs.StringVar(&opts.Req, "req", "", "filter by requirement id")
 	fs.IntVar(&opts.Limit, "limit", opts.Limit, "maximum results")
 	fs.BoolVar(&opts.IncludeEvidence, "include-evidence", false, "include long evidence")
+	fs.BoolVar(&opts.IncludePrivate, "include-private", false, "include private evidence rows")
 	addRepeatedStringFlag(fs, "status", &opts.Statuses)
 	addRepeatedStringFlag(fs, "tag", &opts.Tags)
 	addRepeatedStringFlag(fs, "file", &opts.Files)
@@ -405,7 +418,7 @@ func parseLearnRecallArgs(args []string) (learnRecallOpts, error) {
 		return learnRecallOpts{}, err
 	}
 	if fs.NArg() > 1 {
-		return learnRecallOpts{}, fmt.Errorf("usage: az learn recall [--query <text>] [--issue <id>] [--req <id>] [--status <status> ...] [--tag <tag> ...] [--file <path> ...] [--limit N] [--include-evidence] [--json]")
+		return learnRecallOpts{}, fmt.Errorf("usage: az learn recall [--query <text>] [--issue <id>] [--req <id>] [--status <status> ...] [--tag <tag> ...] [--file <path> ...] [--limit N] [--include-evidence] [--include-private] [--json]")
 	}
 	if fs.NArg() == 1 && strings.TrimSpace(opts.Query) == "" {
 		opts.Query = strings.TrimSpace(fs.Arg(0))
@@ -574,8 +587,8 @@ func printLearnUsage() {
 	fmt.Println("  relate   Record supersession or conflict between learnings")
 	fmt.Println("")
 	fmt.Println("Commands:")
-	fmt.Println("  az learn add --evidence <text> [--summary <text>] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--json]")
-	fmt.Println("  az learn recall [--query <text>] [--issue <id>] [--req <id>] [--status <status> ...] [--tag <tag> ...] [--file <path> ...] [--limit N] [--include-evidence] [--json]")
+	fmt.Println("  az learn add --evidence <text> [--summary <text>] [--private] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--json]")
+	fmt.Println("  az learn recall [--query <text>] [--issue <id>] [--req <id>] [--status <status> ...] [--tag <tag> ...] [--file <path> ...] [--limit N] [--include-evidence] [--include-private] [--json]")
 	fmt.Println("  az learn show <learning-id> [--json]")
 	fmt.Println("  az learn review [--id <learning-id> --status accepted|rejected|stale --note <text>] [--limit N] [--json]")
 	fmt.Println("  az learn promote --target rulesync|agents|skill|spec|decision --target-id <id-or-path> <learning-id> [--note <text>] [--target-hash <hash>] [--target-meta key=value ...] [--json]")

@@ -62,11 +62,12 @@ func (s issueLearnService) Add(ctx context.Context, req protocol.LearnAddRequest
 		return protocol.LearnAddResponseBody{}, err
 	}
 	params := issues.CreateLearningParams{
-		ProjectID: firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)),
-		Summary:   req.Summary,
-		Evidence:  req.Evidence,
-		Tags:      req.Tags,
-		Files:     req.Files,
+		ProjectID:       firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)),
+		Summary:         req.Summary,
+		Evidence:        req.Evidence,
+		EvidencePrivate: req.Private,
+		Tags:            req.Tags,
+		Files:           req.Files,
 	}
 	if req.IssueID != "" {
 		issueID := req.IssueID.String()
@@ -109,6 +110,7 @@ func (s issueLearnService) Recall(ctx context.Context, req protocol.LearnRecallR
 		Files:           req.Files,
 		Limit:           req.Limit,
 		IncludeEvidence: req.IncludeEvidence,
+		ExcludePrivate:  !req.IncludePrivate,
 		ActiveOnly:      true,
 	}
 	if filter.Limit == 0 {
@@ -147,7 +149,7 @@ func (s issueLearnService) Review(ctx context.Context, req protocol.LearnReviewR
 		if err != nil {
 			return protocol.LearnReviewResponseBody{}, err
 		}
-		mapped := mapLearningToProtocol(updated, true)
+		mapped := mapLearningToProtocol(updated, false)
 		return protocol.LearnReviewResponseBody{Updated: &mapped}, nil
 	}
 	limit := req.Limit
@@ -185,7 +187,7 @@ func (s issueLearnService) Promote(ctx context.Context, req protocol.LearnPromot
 	if err != nil {
 		return protocol.LearnPromoteResponseBody{}, err
 	}
-	mapped := mapLearningToProtocol(row, true)
+	mapped := mapLearningToProtocol(row, false)
 	return protocol.LearnPromoteResponseBody{
 		Learning: mapped,
 		Guidance: learningPromotionGuidance(mapped),
@@ -650,15 +652,16 @@ func mapLinkToProtocol(link issues.SpecLink) protocol.SpecLink {
 
 func mapLearningToProtocol(learning issues.Learning, includeEvidence bool) protocol.Learning {
 	out := protocol.Learning{
-		ID:         learning.LocalID,
-		ProjectID:  learning.ProjectID,
-		Summary:    learning.Summary,
-		Status:     protocol.LearningStatus(learning.Status),
-		ReviewNote: learning.ReviewNote,
-		Tags:       append([]string(nil), learning.Tags...),
-		Files:      append([]string(nil), learning.Files...),
-		CreatedAt:  formatProtocolTime(learning.CreatedAt),
-		UpdatedAt:  formatProtocolTime(learning.UpdatedAt),
+		ID:              learning.LocalID,
+		ProjectID:       learning.ProjectID,
+		Summary:         learning.Summary,
+		EvidencePrivate: learning.EvidencePrivate,
+		Status:          protocol.LearningStatus(learning.Status),
+		ReviewNote:      learning.ReviewNote,
+		Tags:            append([]string(nil), learning.Tags...),
+		Files:           append([]string(nil), learning.Files...),
+		CreatedAt:       formatProtocolTime(learning.CreatedAt),
+		UpdatedAt:       formatProtocolTime(learning.UpdatedAt),
 	}
 	if includeEvidence {
 		out.Evidence = learning.Evidence

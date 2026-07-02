@@ -94,17 +94,19 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	addResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnAdd, protocol.LearnAddRequestBody{
 		IssueID:  naming.IssueID("csk"),
 		Evidence: "evidence",
+		Private:  true,
 	}))
-	if !addResp.OK || gotAdd.IssueID != "csk" || gotAdd.Evidence != "evidence" {
+	if !addResp.OK || gotAdd.IssueID != "csk" || gotAdd.Evidence != "evidence" || !gotAdd.Private {
 		t.Fatalf("add response=%+v got=%+v", addResp, gotAdd)
 	}
 
 	recallResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnRecall, protocol.LearnRecallRequestBody{
-		Query:    "daemon",
-		Statuses: []protocol.LearningStatus{protocol.LearningStatusPromoted},
-		Limit:    2,
+		Query:          "daemon",
+		Statuses:       []protocol.LearningStatus{protocol.LearningStatusPromoted},
+		Limit:          2,
+		IncludePrivate: true,
 	}))
-	if !recallResp.OK || gotRecall.Query != "daemon" || gotRecall.Limit != 2 {
+	if !recallResp.OK || gotRecall.Query != "daemon" || gotRecall.Limit != 2 || !gotRecall.IncludePrivate {
 		t.Fatalf("recall response=%+v got=%+v", recallResp, gotRecall)
 	}
 

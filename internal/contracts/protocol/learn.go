@@ -55,6 +55,7 @@ type Learning struct {
 	SessionID       naming.SessionID        `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
 	Summary         string                  `json:"summary" msgpack:"summary"`
 	Evidence        string                  `json:"evidence,omitempty" msgpack:"evidence,omitempty"`
+	EvidencePrivate bool                    `json:"evidence_private,omitempty" msgpack:"evidence_private,omitempty"`
 	Status          LearningStatus          `json:"status" msgpack:"status"`
 	ReviewNote      string                  `json:"review_note,omitempty" msgpack:"review_note,omitempty"`
 	ReviewedAt      string                  `json:"reviewed_at,omitempty" msgpack:"reviewed_at,omitempty"`
@@ -101,6 +102,7 @@ type LearnAddRequestBody struct {
 	SessionID naming.SessionID     `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
 	Summary   string               `json:"summary,omitempty" msgpack:"summary,omitempty"`
 	Evidence  string               `json:"evidence" msgpack:"evidence"`
+	Private   bool                 `json:"private,omitempty" msgpack:"private,omitempty"`
 	Tags      []string             `json:"tags,omitempty" msgpack:"tags,omitempty"`
 	Files     []string             `json:"files,omitempty" msgpack:"files,omitempty"`
 }
@@ -119,6 +121,7 @@ type LearnRecallRequestBody struct {
 	Files           []string             `json:"files,omitempty" msgpack:"files,omitempty"`
 	Limit           int                  `json:"limit,omitempty" msgpack:"limit,omitempty"`
 	IncludeEvidence bool                 `json:"include_evidence,omitempty" msgpack:"include_evidence,omitempty"`
+	IncludePrivate  bool                 `json:"include_private,omitempty" msgpack:"include_private,omitempty"`
 }
 
 type LearnRecallResponseBody struct {

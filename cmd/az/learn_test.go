@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
 
 func TestRunLearnCommandHelpArgsReturnUsage(t *testing.T) {
@@ -39,6 +41,7 @@ func TestParseLearnAddArgs(t *testing.T) {
 		errFrag string
 	}{
 		{name: "minimum required", args: []string{"--evidence", "Use daemon projection before local cache."}, ok: true},
+		{name: "private evidence flag", args: []string{"--evidence", "Sensitive local detail.", "--private"}, ok: true},
 		{name: "scoped with repeated metadata", args: []string{"--issue", "csk", "--req", "req-1", "--evidence", "Evidence", "--tag", "daemon", "--tag", "daemon", "--file", "internal/foo.go"}, ok: true},
 		{name: "missing evidence", args: []string{"--summary", "No evidence"}, ok: false, errFrag: "missing required flag: --evidence"},
 		{name: "status removed from capture", args: []string{"--evidence", "Evidence", "--status", "accepted"}, ok: false, errFrag: "flag provided but not defined"},
@@ -48,6 +51,35 @@ func TestParseLearnAddArgs(t *testing.T) {
 			_, err := parseLearnAddArgs(tc.args)
 			assertParseOutcome(t, err, tc.ok, tc.errFrag)
 		})
+	}
+}
+
+func TestParseLearnRecallArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		ok      bool
+		errFrag string
+	}{
+		{name: "default recall", args: []string{"--query", "daemon"}, ok: true},
+		{name: "explicit private diagnostic recall", args: []string{"--query", "daemon", "--include-private", "--include-evidence"}, ok: true},
+		{name: "negative limit", args: []string{"--limit", "-1"}, ok: false, errFrag: "limit must be non-negative"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseLearnRecallArgs(tc.args)
+			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+		})
+	}
+}
+
+func TestLearningStatusLabelMarksPrivateEvidence(t *testing.T) {
+	got := learningStatusLabel(protocol.Learning{
+		Status:          protocol.LearningStatusAccepted,
+		EvidencePrivate: true,
+	})
+	if got != "accepted, private" {
+		t.Fatalf("learningStatusLabel() = %q, want private marker", got)
 	}
 }
 
