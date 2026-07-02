@@ -2885,6 +2885,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0017_spec_requirement_search_fts",
 		"0018_issue_graph_closure",
 		"0019_agent_learnings",
+		"0020_agent_learning_lifecycle",
 	}, got)
 }
 

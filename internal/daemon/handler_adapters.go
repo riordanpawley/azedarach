@@ -109,6 +109,7 @@ func (s issueLearnService) Recall(ctx context.Context, req protocol.LearnRecallR
 		Files:           req.Files,
 		Limit:           req.Limit,
 		IncludeEvidence: req.IncludeEvidence,
+		ActiveOnly:      true,
 	}
 	if filter.Limit == 0 {
 		filter.Limit = 5
@@ -647,6 +648,22 @@ func mapLearningToProtocol(learning issues.Learning, includeEvidence bool) proto
 	out.TargetNote = learning.TargetNote
 	if learning.PromotedAt != nil {
 		out.PromotedAt = formatProtocolTime(*learning.PromotedAt)
+	}
+	if learning.ExpiresAt != nil {
+		out.ExpiresAt = formatProtocolTime(*learning.ExpiresAt)
+	}
+	if learning.StaleAt != nil {
+		out.StaleAt = formatProtocolTime(*learning.StaleAt)
+	}
+	if learning.LastRecalledAt != nil {
+		out.LastRecalledAt = formatProtocolTime(*learning.LastRecalledAt)
+	}
+	out.RecallCount = learning.RecallCount
+	if learning.SupersededAt != nil {
+		out.SupersededAt = formatProtocolTime(*learning.SupersededAt)
+	}
+	if learning.TargetRetiredAt != nil {
+		out.TargetRetiredAt = formatProtocolTime(*learning.TargetRetiredAt)
 	}
 	return out
 }

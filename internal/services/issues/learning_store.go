@@ -38,25 +38,31 @@ const (
 )
 
 type Learning struct {
-	LocalID       string
-	ProjectID     string
-	IssueID       *string
-	RequirementID *string
-	SessionID     *string
-	Summary       string
-	Evidence      string
-	Status        LearningStatus
-	ReviewNote    string
-	ReviewedAt    *time.Time
-	Tags          []string
-	Files         []string
-	Target        *LearningPromotionTarget
-	TargetID      string
-	TargetNote    string
-	PromotedAt    *time.Time
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-	DeletedAt     *time.Time
+	LocalID         string
+	ProjectID       string
+	IssueID         *string
+	RequirementID   *string
+	SessionID       *string
+	Summary         string
+	Evidence        string
+	Status          LearningStatus
+	ReviewNote      string
+	ReviewedAt      *time.Time
+	Tags            []string
+	Files           []string
+	Target          *LearningPromotionTarget
+	TargetID        string
+	TargetNote      string
+	PromotedAt      *time.Time
+	ExpiresAt       *time.Time
+	StaleAt         *time.Time
+	LastRecalledAt  *time.Time
+	RecallCount     int
+	SupersededAt    *time.Time
+	TargetRetiredAt *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	DeletedAt       *time.Time
 }
 
 type CreateLearningParams struct {
@@ -93,6 +99,7 @@ type LearningFilter struct {
 	Limit           int
 	IncludeEvidence bool
 	IncludeDeleted  bool
+	ActiveOnly      bool
 }
 
 type learningRecord struct {
@@ -211,6 +218,8 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 			l.summary, l.evidence, l.status, l.review_note, l.reviewed_at,
 			COALESCE(l.tags_json, '[]'), COALESCE(l.files_json, '[]'),
 			l.promotion_target, l.promotion_target_id, l.promotion_note, l.promoted_at,
+			l.expires_at, l.stale_at, l.last_recalled_at, l.recall_count,
+			l.superseded_at, l.target_retired_at,
 			l.created_at, l.updated_at, l.deleted_at
 		FROM agent_learnings l
 		LEFT JOIN spec_requirements r ON r.id = l.requirement_id
@@ -222,6 +231,15 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 	query.WriteString(` WHERE 1 = 1`)
 	if !filter.IncludeDeleted {
 		query.WriteString(` AND l.deleted_at IS NULL`)
+	}
+	if filter.ActiveOnly {
+		query.WriteString(`
+			AND l.deleted_at IS NULL
+			AND l.status IN (?, ?)
+			AND l.superseded_at IS NULL
+			AND l.target_retired_at IS NULL
+		`)
+		args = append(args, string(LearningStatusAccepted), string(LearningStatusPromoted))
 	}
 	if trimmed := strings.TrimSpace(filter.ProjectID); trimmed != "" {
 		query.WriteString(` AND l.project_id = ?`)
@@ -251,7 +269,7 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 		query.WriteString(` ORDER BY l.updated_at DESC, l.local_id ASC`)
 	}
 	sqlLimit := filter.Limit
-	if len(filter.Tags) > 0 || len(filter.Files) > 0 {
+	if len(filter.Tags) > 0 || len(filter.Files) > 0 || filter.ActiveOnly {
 		sqlLimit = 0
 	}
 	if sqlLimit > 0 {
@@ -263,7 +281,8 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 		return nil, c.wrapError("list-learnings", "", err)
 	}
 	defer rows.Close()
-	records := make([]Learning, 0, 16)
+	activeAt := time.Now().UTC()
+	records := make([]learningRecord, 0, 16)
 	for rows.Next() {
 		record, scanErr := scanLearningRecord(rows)
 		if scanErr != nil {
@@ -273,8 +292,12 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 		if !filter.IncludeEvidence {
 			learning.Evidence = ""
 		}
+		if filter.ActiveOnly && !learningActiveAt(learning, activeAt) {
+			continue
+		}
 		if learningHasAll(learning.Tags, filter.Tags) && learningHasAll(learning.Files, filter.Files) {
-			records = append(records, learning)
+			record.Learning = learning
+			records = append(records, record)
 			if filter.Limit > 0 && len(records) >= filter.Limit {
 				break
 			}
@@ -283,7 +306,25 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 	if err := rows.Err(); err != nil {
 		return nil, c.wrapError("list-learnings", "", err)
 	}
-	return records, nil
+	if filter.ActiveOnly && len(records) > 0 {
+		recalledAt := time.Now().UTC()
+		for i := range records {
+			if _, err := db.ExecContext(ctx, `
+				UPDATE agent_learnings
+				SET last_recalled_at = ?, recall_count = recall_count + 1
+				WHERE id = ?
+			`, formatTimestamp(recalledAt), records[i].rowID); err != nil {
+				return nil, c.wrapError("list-learnings", records[i].LocalID, err)
+			}
+			records[i].LastRecalledAt = &recalledAt
+			records[i].RecallCount++
+		}
+	}
+	out := make([]Learning, 0, len(records))
+	for _, record := range records {
+		out = append(out, record.Learning)
+	}
+	return out, nil
 }
 
 func (c *Client) UpdateLearningStatus(ctx context.Context, selector string, status LearningStatus, note string) (Learning, error) {
@@ -444,6 +485,8 @@ func (c *Client) lookupLearningByLocalID(ctx context.Context, db sqlIssueDBTX, s
 			l.summary, l.evidence, l.status, l.review_note, l.reviewed_at,
 			COALESCE(l.tags_json, '[]'), COALESCE(l.files_json, '[]'),
 			l.promotion_target, l.promotion_target_id, l.promotion_note, l.promoted_at,
+			l.expires_at, l.stale_at, l.last_recalled_at, l.recall_count,
+			l.superseded_at, l.target_retired_at,
 			l.created_at, l.updated_at, l.deleted_at
 		FROM agent_learnings l
 		LEFT JOIN spec_requirements r ON r.id = l.requirement_id
@@ -463,7 +506,8 @@ func scanLearningRecord(scanner interface {
 	Scan(dest ...any) error
 }) (learningRecord, error) {
 	var record learningRecord
-	var issueRaw, reqRaw, sessionRaw, reviewNoteRaw, reviewedRaw, targetRaw, targetIDRaw, targetNoteRaw, promotedRaw, deletedRaw sql.NullString
+	var issueRaw, reqRaw, sessionRaw, reviewNoteRaw, reviewedRaw, targetRaw, targetIDRaw, targetNoteRaw, promotedRaw sql.NullString
+	var expiresRaw, staleRaw, lastRecalledRaw, supersededRaw, targetRetiredRaw, deletedRaw sql.NullString
 	var tagsJSON, filesJSON string
 	var createdRaw, updatedRaw string
 	if err := scanner.Scan(
@@ -484,6 +528,12 @@ func scanLearningRecord(scanner interface {
 		&targetIDRaw,
 		&targetNoteRaw,
 		&promotedRaw,
+		&expiresRaw,
+		&staleRaw,
+		&lastRecalledRaw,
+		&record.RecallCount,
+		&supersededRaw,
+		&targetRetiredRaw,
 		&createdRaw,
 		&updatedRaw,
 		&deletedRaw,
@@ -504,6 +554,11 @@ func scanLearningRecord(scanner interface {
 	record.TargetID = strings.TrimSpace(targetIDRaw.String)
 	record.TargetNote = strings.TrimSpace(targetNoteRaw.String)
 	record.PromotedAt = nullableTimePointer(promotedRaw)
+	record.ExpiresAt = nullableTimePointer(expiresRaw)
+	record.StaleAt = nullableTimePointer(staleRaw)
+	record.LastRecalledAt = nullableTimePointer(lastRecalledRaw)
+	record.SupersededAt = nullableTimePointer(supersededRaw)
+	record.TargetRetiredAt = nullableTimePointer(targetRetiredRaw)
 	record.CreatedAt = parseTimestamp(createdRaw)
 	record.UpdatedAt = parseTimestamp(updatedRaw)
 	record.DeletedAt = nullableTimePointer(deletedRaw)
@@ -541,6 +596,24 @@ func learningHasAll(values []string, required []string) bool {
 		}
 	}
 	return true
+}
+
+func learningActiveAt(learning Learning, now time.Time) bool {
+	if learning.DeletedAt != nil {
+		return false
+	}
+	switch learning.Status {
+	case LearningStatusAccepted, LearningStatusPromoted:
+	default:
+		return false
+	}
+	if learning.ExpiresAt != nil && !learning.ExpiresAt.After(now) {
+		return false
+	}
+	if learning.StaleAt != nil && !learning.StaleAt.After(now) {
+		return false
+	}
+	return learning.SupersededAt == nil && learning.TargetRetiredAt == nil
 }
 
 func unmarshalJSONStringSlice(raw string) []string {

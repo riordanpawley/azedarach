@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/stretchr/testify/assert"
@@ -133,6 +134,119 @@ func TestClient_ListLearningsAppliesLimitAfterTagFilter(t *testing.T) {
 	assert.Equal(t, want.LocalID, rows[0].LocalID)
 }
 
+func TestClient_ListLearningsActiveOnlyExcludesInactiveLifecycleRows(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	activeAccepted := createAcceptedLearning(t, ctx, client, "proj", "Active accepted learning")
+	activePromoted := createAcceptedLearning(t, ctx, client, "proj", "Active promoted learning")
+	decision, err := client.RecordDecision(ctx, RecordDecisionParams{
+		Title:     "Promoted active target",
+		Rationale: "The target is still live.",
+	})
+	require.NoError(t, err)
+	_, err = client.PromoteLearning(ctx, activePromoted.LocalID, PromoteLearningParams{
+		Target:   LearningPromotionTargetDecision,
+		TargetID: decision.LocalID,
+	})
+	require.NoError(t, err)
+
+	candidate, err := client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID: "proj",
+		Summary:   "Candidate learning",
+		Evidence:  "Candidates are not reviewed.",
+	})
+	require.NoError(t, err)
+	rejected := createAcceptedLearning(t, ctx, client, "proj", "Rejected learning")
+	_, err = client.UpdateLearningStatus(ctx, rejected.LocalID, LearningStatusRejected, "Rejected.")
+	require.NoError(t, err)
+	staleStatus := createAcceptedLearning(t, ctx, client, "proj", "Stale status learning")
+	_, err = client.UpdateLearningStatus(ctx, staleStatus.LocalID, LearningStatusStale, "Stale.")
+	require.NoError(t, err)
+	expired := createAcceptedLearning(t, ctx, client, "proj", "Expired learning")
+	staleByTime := createAcceptedLearning(t, ctx, client, "proj", "Time-stale learning")
+	superseded := createAcceptedLearning(t, ctx, client, "proj", "Superseded learning")
+	retiredTarget := createAcceptedLearning(t, ctx, client, "proj", "Retired target learning")
+	retiredDecision, err := client.RecordDecision(ctx, RecordDecisionParams{
+		Title:     "Retired target",
+		Rationale: "The target was later retired.",
+	})
+	require.NoError(t, err)
+	_, err = client.PromoteLearning(ctx, retiredTarget.LocalID, PromoteLearningParams{
+		Target:   LearningPromotionTargetDecision,
+		TargetID: retiredDecision.LocalID,
+	})
+	require.NoError(t, err)
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	past := time.Now().UTC().Add(-time.Hour)
+	setLearningLifecycleTime(t, ctx, db, expired.LocalID, "expires_at", past)
+	setLearningLifecycleTime(t, ctx, db, staleByTime.LocalID, "stale_at", past)
+	setLearningLifecycleTime(t, ctx, db, superseded.LocalID, "superseded_at", past)
+	setLearningLifecycleTime(t, ctx, db, retiredTarget.LocalID, "target_retired_at", past)
+
+	rows, err := client.ListLearnings(ctx, LearningFilter{
+		ProjectID: "proj",
+		Statuses: []LearningStatus{
+			LearningStatusCandidate,
+			LearningStatusAccepted,
+			LearningStatusRejected,
+			LearningStatusPromoted,
+			LearningStatusStale,
+		},
+		ActiveOnly: true,
+	})
+	require.NoError(t, err)
+
+	got := make(map[string]Learning, len(rows))
+	for _, row := range rows {
+		got[row.LocalID] = row
+	}
+	assert.Contains(t, got, activeAccepted.LocalID)
+	assert.Contains(t, got, activePromoted.LocalID)
+	assert.NotContains(t, got, candidate.LocalID)
+	assert.NotContains(t, got, rejected.LocalID)
+	assert.NotContains(t, got, staleStatus.LocalID)
+	assert.NotContains(t, got, expired.LocalID)
+	assert.NotContains(t, got, staleByTime.LocalID)
+	assert.NotContains(t, got, superseded.LocalID)
+	assert.NotContains(t, got, retiredTarget.LocalID)
+
+	for _, id := range []string{activeAccepted.LocalID, activePromoted.LocalID} {
+		assert.Equal(t, 1, got[id].RecallCount)
+		assert.NotNil(t, got[id].LastRecalledAt)
+		stored, err := client.GetLearning(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, 1, stored.RecallCount)
+		assert.NotNil(t, stored.LastRecalledAt)
+	}
+	storedCandidate, err := client.GetLearning(ctx, candidate.LocalID)
+	require.NoError(t, err)
+	assert.Zero(t, storedCandidate.RecallCount)
+	assert.Nil(t, storedCandidate.LastRecalledAt)
+}
+
+func TestLearningActiveAtUsesParsedTimestampBoundaries(t *testing.T) {
+	now := time.Date(2026, 7, 2, 3, 45, 0, 500, time.UTC)
+	expiresAtBoundary := now.Truncate(time.Second)
+	staleAtBoundary := now.Truncate(time.Second)
+	future := now.Add(time.Nanosecond)
+
+	assert.False(t, learningActiveAt(Learning{
+		Status:    LearningStatusAccepted,
+		ExpiresAt: &expiresAtBoundary,
+	}, now))
+	assert.False(t, learningActiveAt(Learning{
+		Status:  LearningStatusPromoted,
+		StaleAt: &staleAtBoundary,
+	}, now))
+	assert.True(t, learningActiveAt(Learning{
+		Status:    LearningStatusAccepted,
+		ExpiresAt: &future,
+	}, now))
+}
+
 func TestClient_PromoteLearningRequiresAcceptedStatus(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -212,4 +326,28 @@ func TestClient_CreateLearningRejectsOversizedSummary(t *testing.T) {
 		Evidence:  "Short evidence remains stored separately.",
 	})
 	require.Error(t, err)
+}
+
+func createAcceptedLearning(t *testing.T, ctx context.Context, client *Client, projectID, summary string) Learning {
+	t.Helper()
+	created, err := client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID: projectID,
+		Summary:   summary,
+		Evidence:  summary + " evidence.",
+	})
+	require.NoError(t, err)
+	accepted, err := client.UpdateLearningStatus(ctx, created.LocalID, LearningStatusAccepted, "Accepted.")
+	require.NoError(t, err)
+	return accepted
+}
+
+func setLearningLifecycleTime(t *testing.T, ctx context.Context, db sqlIssueExecer, localID, column string, value time.Time) {
+	t.Helper()
+	switch column {
+	case "expires_at", "stale_at", "superseded_at", "target_retired_at":
+	default:
+		t.Fatalf("unsupported lifecycle column %q", column)
+	}
+	_, err := db.ExecContext(ctx, "UPDATE agent_learnings SET "+column+" = ? WHERE local_id = ?", formatTimestamp(value), localID)
+	require.NoError(t, err)
 }

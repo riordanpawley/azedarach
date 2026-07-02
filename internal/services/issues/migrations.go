@@ -40,6 +40,7 @@ var orderedMigrations = []migration{
 	{id: "0017_spec_requirement_search_fts", path: "migrations/0017_spec_requirement_search_fts.sql"},
 	{id: "0018_issue_graph_closure", path: "migrations/0018_issue_graph_closure.sql"},
 	{id: "0019_agent_learnings", path: "migrations/0019_agent_learnings.sql"},
+	{id: "0020_agent_learning_lifecycle", path: "migrations/0020_agent_learning_lifecycle.sql"},
 }
 
 func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {

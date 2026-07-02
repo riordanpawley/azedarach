@@ -31,24 +31,30 @@ const (
 )
 
 type Learning struct {
-	ID         string                  `json:"id" msgpack:"id"`
-	ProjectID  string                  `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
-	IssueID    naming.IssueID          `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
-	ReqID      naming.RequirementID    `json:"req_id,omitempty" msgpack:"req_id,omitempty"`
-	SessionID  naming.SessionID        `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
-	Summary    string                  `json:"summary" msgpack:"summary"`
-	Evidence   string                  `json:"evidence,omitempty" msgpack:"evidence,omitempty"`
-	Status     LearningStatus          `json:"status" msgpack:"status"`
-	ReviewNote string                  `json:"review_note,omitempty" msgpack:"review_note,omitempty"`
-	ReviewedAt string                  `json:"reviewed_at,omitempty" msgpack:"reviewed_at,omitempty"`
-	Tags       []string                `json:"tags,omitempty" msgpack:"tags,omitempty"`
-	Files      []string                `json:"files,omitempty" msgpack:"files,omitempty"`
-	Target     LearningPromotionTarget `json:"target,omitempty" msgpack:"target,omitempty"`
-	TargetID   string                  `json:"target_id,omitempty" msgpack:"target_id,omitempty"`
-	TargetNote string                  `json:"target_note,omitempty" msgpack:"target_note,omitempty"`
-	PromotedAt string                  `json:"promoted_at,omitempty" msgpack:"promoted_at,omitempty"`
-	CreatedAt  string                  `json:"created_at" msgpack:"created_at"`
-	UpdatedAt  string                  `json:"updated_at" msgpack:"updated_at"`
+	ID              string                  `json:"id" msgpack:"id"`
+	ProjectID       string                  `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	IssueID         naming.IssueID          `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
+	ReqID           naming.RequirementID    `json:"req_id,omitempty" msgpack:"req_id,omitempty"`
+	SessionID       naming.SessionID        `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
+	Summary         string                  `json:"summary" msgpack:"summary"`
+	Evidence        string                  `json:"evidence,omitempty" msgpack:"evidence,omitempty"`
+	Status          LearningStatus          `json:"status" msgpack:"status"`
+	ReviewNote      string                  `json:"review_note,omitempty" msgpack:"review_note,omitempty"`
+	ReviewedAt      string                  `json:"reviewed_at,omitempty" msgpack:"reviewed_at,omitempty"`
+	Tags            []string                `json:"tags,omitempty" msgpack:"tags,omitempty"`
+	Files           []string                `json:"files,omitempty" msgpack:"files,omitempty"`
+	Target          LearningPromotionTarget `json:"target,omitempty" msgpack:"target,omitempty"`
+	TargetID        string                  `json:"target_id,omitempty" msgpack:"target_id,omitempty"`
+	TargetNote      string                  `json:"target_note,omitempty" msgpack:"target_note,omitempty"`
+	PromotedAt      string                  `json:"promoted_at,omitempty" msgpack:"promoted_at,omitempty"`
+	ExpiresAt       string                  `json:"expires_at,omitempty" msgpack:"expires_at,omitempty"`
+	StaleAt         string                  `json:"stale_at,omitempty" msgpack:"stale_at,omitempty"`
+	LastRecalledAt  string                  `json:"last_recalled_at,omitempty" msgpack:"last_recalled_at,omitempty"`
+	RecallCount     int                     `json:"recall_count,omitempty" msgpack:"recall_count,omitempty"`
+	SupersededAt    string                  `json:"superseded_at,omitempty" msgpack:"superseded_at,omitempty"`
+	TargetRetiredAt string                  `json:"target_retired_at,omitempty" msgpack:"target_retired_at,omitempty"`
+	CreatedAt       string                  `json:"created_at" msgpack:"created_at"`
+	UpdatedAt       string                  `json:"updated_at" msgpack:"updated_at"`
 }
 
 type LearnAddRequestBody struct {
