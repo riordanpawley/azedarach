@@ -232,6 +232,14 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 	if !filter.IncludeDeleted {
 		query.WriteString(` AND l.deleted_at IS NULL`)
 	}
+	for _, tagKey := range normalizeLearningFilterKeys(filter.Tags) {
+		query.WriteString(` AND l.id IN (SELECT learning_id FROM agent_learning_tags WHERE tag_key = ?)`)
+		args = append(args, tagKey)
+	}
+	for _, fileKey := range normalizeLearningFilterKeys(filter.Files) {
+		query.WriteString(` AND l.id IN (SELECT learning_id FROM agent_learning_files WHERE file_key = ?)`)
+		args = append(args, fileKey)
+	}
 	if filter.ActiveOnly {
 		query.WriteString(`
 			AND l.deleted_at IS NULL
@@ -269,7 +277,7 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 		query.WriteString(` ORDER BY l.updated_at DESC, l.local_id ASC`)
 	}
 	sqlLimit := filter.Limit
-	if len(filter.Tags) > 0 || len(filter.Files) > 0 || filter.ActiveOnly {
+	if filter.ActiveOnly {
 		sqlLimit = 0
 	}
 	if sqlLimit > 0 {
@@ -295,12 +303,10 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 		if filter.ActiveOnly && !learningActiveAt(learning, activeAt) {
 			continue
 		}
-		if learningHasAll(learning.Tags, filter.Tags) && learningHasAll(learning.Files, filter.Files) {
-			record.Learning = learning
-			records = append(records, record)
-			if filter.Limit > 0 && len(records) >= filter.Limit {
-				break
-			}
+		record.Learning = learning
+		records = append(records, record)
+		if filter.Limit > 0 && len(records) >= filter.Limit {
+			break
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -582,20 +588,27 @@ func learningFTSMatchQuery(raw string) string {
 	return strings.Join(out, " AND ")
 }
 
-func learningHasAll(values []string, required []string) bool {
-	if len(required) == 0 {
-		return true
+func normalizeLearningFilterKeys(values []string) []string {
+	if len(values) == 0 {
+		return nil
 	}
-	have := make(map[string]struct{}, len(values))
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
 	for _, value := range values {
-		have[strings.ToLower(strings.TrimSpace(value))] = struct{}{}
-	}
-	for _, value := range required {
-		if _, ok := have[strings.ToLower(strings.TrimSpace(value))]; !ok {
-			return false
+		key := strings.ToLower(strings.TrimSpace(value))
+		if key == "" {
+			continue
 		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
 	}
-	return true
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func learningActiveAt(learning Learning, now time.Time) bool {

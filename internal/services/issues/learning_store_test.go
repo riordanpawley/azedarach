@@ -2,9 +2,14 @@ package issues
 
 import (
 	"context"
+	"database/sql"
+	"log/slog"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/stretchr/testify/assert"
@@ -100,15 +105,16 @@ func TestClient_LearningLifecycleRecallReviewAndPromote(t *testing.T) {
 	require.NotNil(t, promoted.PromotedAt)
 }
 
-func TestClient_ListLearningsAppliesLimitAfterTagFilter(t *testing.T) {
+func TestClient_ListLearningsAppliesLimitAfterTagAndFileFilters(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
 
 	other, err := client.CreateLearning(ctx, CreateLearningParams{
 		ProjectID: "proj",
 		Summary:   "Newer unrelated learning",
-		Evidence:  "This row is newer but does not have the requested tag.",
-		Tags:      []string{"other"},
+		Evidence:  "This row is newer but does not have the requested file.",
+		Tags:      []string{"decision"},
+		Files:     []string{"internal/daemon/other.go"},
 	})
 	require.NoError(t, err)
 	_, err = client.UpdateLearningStatus(ctx, other.LocalID, LearningStatusAccepted, "Accepted unrelated row.")
@@ -116,8 +122,9 @@ func TestClient_ListLearningsAppliesLimitAfterTagFilter(t *testing.T) {
 	want, err := client.CreateLearning(ctx, CreateLearningParams{
 		ProjectID: "proj",
 		Summary:   "Older decision learning",
-		Evidence:  "This older row has the requested decision tag.",
-		Tags:      []string{"decision"},
+		Evidence:  "This older row has the requested decision tag and file.",
+		Tags:      []string{"decision", "guidance"},
+		Files:     []string{"internal/daemon/handler_adapters.go"},
 	})
 	require.NoError(t, err)
 	_, err = client.UpdateLearningStatus(ctx, want.LocalID, LearningStatusAccepted, "Accepted decision row.")
@@ -126,12 +133,171 @@ func TestClient_ListLearningsAppliesLimitAfterTagFilter(t *testing.T) {
 	rows, err := client.ListLearnings(ctx, LearningFilter{
 		ProjectID: "proj",
 		Statuses:  []LearningStatus{LearningStatusAccepted},
-		Tags:      []string{"decision"},
+		Tags:      []string{" Decision "},
+		Files:     []string{"INTERNAL/DAEMON/HANDLER_ADAPTERS.GO"},
 		Limit:     1,
 	})
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	assert.Equal(t, want.LocalID, rows[0].LocalID)
+}
+
+func TestClient_ListLearningsTagAndFileFiltersUseIndexedMetadata(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+
+	got := explainQueryPlan(t, ctx, db, `
+		SELECT l.id
+		FROM agent_learnings l
+		WHERE l.id IN (SELECT learning_id FROM agent_learning_tags WHERE tag_key = ?)
+			AND l.id IN (SELECT learning_id FROM agent_learning_files WHERE file_key = ?)
+			AND l.deleted_at IS NULL
+			AND l.project_id = ?
+		ORDER BY l.updated_at DESC, l.local_id ASC
+		LIMIT ?
+	`, "decision", "internal/daemon/handler_adapters.go", "proj", 1)
+	assert.Contains(t, got, "idx_agent_learning_tags_key_learning", got)
+	assert.Contains(t, got, "idx_agent_learning_files_key_learning", got)
+	assert.NotContains(t, got, "SCAN agent_learning_tags", got)
+	assert.NotContains(t, got, "SCAN agent_learning_files", got)
+}
+
+func TestClient_ListLearningsIncludeDeletedUsesIndexedMetadata(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	created, err := client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID: "proj",
+		Summary:   "Deleted indexed learning",
+		Evidence:  "Deleted rows remain queryable when explicitly included.",
+		Tags:      []string{"decision"},
+		Files:     []string{"internal/daemon/handler_adapters.go"},
+	})
+	require.NoError(t, err)
+	_, err = client.UpdateLearningStatus(ctx, created.LocalID, LearningStatusAccepted, "Accepted before deletion.")
+	require.NoError(t, err)
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `
+		UPDATE agent_learnings SET deleted_at = ? WHERE local_id = ?
+	`, time.Now().UTC().Format(time.RFC3339Nano), created.LocalID)
+	require.NoError(t, err)
+
+	filter := LearningFilter{
+		ProjectID: "proj",
+		Statuses:  []LearningStatus{LearningStatusAccepted},
+		Tags:      []string{"decision"},
+		Files:     []string{"internal/daemon/handler_adapters.go"},
+		Limit:     1,
+	}
+	rows, err := client.ListLearnings(ctx, filter)
+	require.NoError(t, err)
+	assert.Empty(t, rows)
+
+	filter.IncludeDeleted = true
+	rows, err = client.ListLearnings(ctx, filter)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, created.LocalID, rows[0].LocalID)
+	require.NotNil(t, rows[0].DeletedAt)
+}
+
+func TestClient_MigratesLearningTagAndFileMetadataBackfill(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	legacy := NewClientAtPath(dbPath, slog.Default())
+	require.NoError(t, ensureMigrationTable(ctx, db))
+	for _, migration := range orderedMigrations {
+		if migration.id == "0021_agent_learning_metadata" {
+			break
+		}
+		shouldApply := true
+		if migration.shouldApply != nil {
+			shouldApply, err = migration.shouldApply(ctx, db)
+			require.NoError(t, err)
+		}
+		if !shouldApply {
+			require.NoError(t, recordAppliedMigration(ctx, db, migration.id))
+			continue
+		}
+		sqlText, loadErr := loadMigrationSQL(migration.path)
+		require.NoError(t, loadErr)
+		require.NoError(t, legacy.applyMigration(ctx, db, migration.id, sqlText))
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO agent_learnings (
+			local_id, project_id, summary, evidence, status,
+			tags_json, files_json, created_at, updated_at, deleted_at
+		)
+		VALUES (
+			'learn-existing', 'proj', 'Existing learning', 'Existing evidence.', 'accepted',
+			'["Decision", "guidance"]', '["internal/daemon/handler_adapters.go"]', ?, ?, NULL
+		),
+		(
+			'learn-existing-deleted', 'proj', 'Existing deleted learning', 'Existing deleted evidence.', 'accepted',
+			'["decision"]', '["internal/daemon/handler_adapters.go"]', ?, ?, ?
+		),
+		(
+			'learn-existing-scalar-metadata', 'proj', 'Existing scalar metadata learning', 'Existing scalar metadata evidence.', 'accepted',
+			'"decision"', '{"path":"internal/daemon/handler_adapters.go"}', ?, ?, NULL
+		)
+	`, now, now, now, now, now, now, now)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	migrated := NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		require.NoError(t, migrated.CloseDB())
+	})
+	migratedDB, err := migrated.dbHandle()
+	require.NoError(t, err)
+
+	var tagCount, fileCount int
+	require.NoError(t, migratedDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM agent_learning_tags WHERE tag_key IN ('decision', 'guidance')
+	`).Scan(&tagCount))
+	require.NoError(t, migratedDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM agent_learning_files WHERE file_key = 'internal/daemon/handler_adapters.go'
+	`).Scan(&fileCount))
+	assert.Equal(t, 3, tagCount)
+	assert.Equal(t, 2, fileCount)
+
+	rows, err := migrated.ListLearnings(ctx, LearningFilter{
+		ProjectID: "proj",
+		Statuses:  []LearningStatus{LearningStatusAccepted},
+		Tags:      []string{"decision"},
+		Files:     []string{"internal/daemon/handler_adapters.go"},
+		Limit:     1,
+	})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "learn-existing", rows[0].LocalID)
+
+	rows, err = migrated.ListLearnings(ctx, LearningFilter{
+		ProjectID:      "proj",
+		Statuses:       []LearningStatus{LearningStatusAccepted},
+		Tags:           []string{"decision"},
+		Files:          []string{"internal/daemon/handler_adapters.go"},
+		Limit:          10,
+		IncludeDeleted: true,
+	})
+	require.NoError(t, err)
+	got := make(map[string]Learning, len(rows))
+	for _, row := range rows {
+		got[row.LocalID] = row
+	}
+	assert.Contains(t, got, "learn-existing")
+	assert.Contains(t, got, "learn-existing-deleted")
+	require.NotNil(t, got["learn-existing-deleted"].DeletedAt)
 }
 
 func TestClient_ListLearningsActiveOnlyExcludesInactiveLifecycleRows(t *testing.T) {
