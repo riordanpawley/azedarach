@@ -16,6 +16,7 @@ type fakeLearnService struct {
 	showFn    func(context.Context, protocol.LearnShowRequestBody) (protocol.LearnShowResponseBody, error)
 	reviewFn  func(context.Context, protocol.LearnReviewRequestBody) (protocol.LearnReviewResponseBody, error)
 	promoteFn func(context.Context, protocol.LearnPromoteRequestBody) (protocol.LearnPromoteResponseBody, error)
+	retireFn  func(context.Context, protocol.LearnRetireRequestBody) (protocol.LearnRetireResponseBody, error)
 	relateFn  func(context.Context, protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error)
 }
 
@@ -54,6 +55,13 @@ func (f *fakeLearnService) Promote(ctx context.Context, req protocol.LearnPromot
 	return protocol.LearnPromoteResponseBody{}, nil
 }
 
+func (f *fakeLearnService) Retire(ctx context.Context, req protocol.LearnRetireRequestBody) (protocol.LearnRetireResponseBody, error) {
+	if f.retireFn != nil {
+		return f.retireFn(ctx, req)
+	}
+	return protocol.LearnRetireResponseBody{}, nil
+}
+
 func (f *fakeLearnService) Relate(ctx context.Context, req protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error) {
 	if f.relateFn != nil {
 		return f.relateFn(ctx, req)
@@ -66,6 +74,7 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	var gotRecall protocol.LearnRecallRequestBody
 	var gotReview protocol.LearnReviewRequestBody
 	var gotPromote protocol.LearnPromoteRequestBody
+	var gotRetire protocol.LearnRetireRequestBody
 	var gotRelate protocol.LearnRelateRequestBody
 	handler := NewLearnHandler(&fakeLearnService{
 		addFn: func(_ context.Context, req protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error) {
@@ -84,6 +93,10 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 		promoteFn: func(_ context.Context, req protocol.LearnPromoteRequestBody) (protocol.LearnPromoteResponseBody, error) {
 			gotPromote = req
 			return protocol.LearnPromoteResponseBody{Learning: protocol.Learning{ID: req.ID, Target: req.Target}}, nil
+		},
+		retireFn: func(_ context.Context, req protocol.LearnRetireRequestBody) (protocol.LearnRetireResponseBody, error) {
+			gotRetire = req
+			return protocol.LearnRetireResponseBody{Learning: protocol.Learning{ID: req.ID, TargetState: protocol.LearningTargetStateRetired}}, nil
 		},
 		relateFn: func(_ context.Context, req protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error) {
 			gotRelate = req
@@ -128,6 +141,13 @@ func TestLearnHandlerRoutesAndValidates(t *testing.T) {
 	}))
 	if !promoteResp.OK || gotPromote.Target != protocol.LearningPromotionTargetDecision || gotPromote.TargetID != "dec-1" || gotPromote.TargetHash != "sha256:target" || gotPromote.TargetMetadata["path"] != "docs/decisions/dec-1.md" {
 		t.Fatalf("promote response=%+v got=%+v", promoteResp, gotPromote)
+	}
+
+	retireResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnRetire, protocol.LearnRetireRequestBody{
+		ID: " learn-1 ",
+	}))
+	if !retireResp.OK || gotRetire.ID != "learn-1" {
+		t.Fatalf("retire response=%+v got=%+v", retireResp, gotRetire)
 	}
 
 	relateResp := handler.Handle(context.Background(), specRequest(t, protocol.CommandLearnRelate, protocol.LearnRelateRequestBody{

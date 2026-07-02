@@ -18,6 +18,7 @@ func TestRunLearnCommandHelpArgsReturnUsage(t *testing.T) {
 		{"show", "help"},
 		{"review", "--help"},
 		{"promote", "--help"},
+		{"retire", "--help"},
 		{"relate", "--help"},
 	} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
@@ -144,6 +145,29 @@ func TestParseLearnPromoteArgs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := parseLearnPromoteArgs(tc.args)
 			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+		})
+	}
+}
+
+func TestParseLearnRetireArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		ok      bool
+		errFrag string
+	}{
+		{name: "learning id", args: []string{"learn-1"}, ok: true},
+		{name: "json", args: []string{"--json", "learn-1"}, ok: true},
+		{name: "missing learning id", args: nil, ok: false, errFrag: "usage: az learn retire"},
+		{name: "too many learning ids", args: []string{"learn-1", "learn-2"}, ok: false, errFrag: "usage: az learn retire"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseLearnRetireArgs(tc.args)
+			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+			if tc.ok && opts.ID != "learn-1" {
+				t.Fatalf("id = %q, want learn-1", opts.ID)
+			}
 		})
 	}
 }

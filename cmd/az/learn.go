@@ -64,6 +64,11 @@ type learnPromoteOpts struct {
 	TargetMetadata map[string]string
 }
 
+type learnRetireOpts struct {
+	JSON bool
+	ID   string
+}
+
 type learnRelateOpts struct {
 	JSON             bool
 	Type             string
@@ -122,6 +127,13 @@ func runLearnCommand(cfg *config.Config, args []string) error {
 			return err
 		}
 		return runLearnPromoteRPC(cfg, opts)
+	case "retire":
+		opts, err := parseLearnRetireArgs(args[1:])
+		if err != nil {
+			printLearnUsage()
+			return err
+		}
+		return runLearnRetireRPC(cfg, opts)
 	case "relate":
 		opts, err := parseLearnRelateArgs(args[1:])
 		if err != nil {
@@ -229,6 +241,18 @@ func runLearnPromoteRPC(cfg *config.Config, opts learnPromoteOpts) error {
 		return printJSON(out)
 	}
 	fmt.Printf("Promoted learning: %s -> %s:%s\n%s\n", out.Learning.ID, out.Learning.Target, out.Learning.TargetID, out.Guidance)
+	return nil
+}
+
+func runLearnRetireRPC(cfg *config.Config, opts learnRetireOpts) error {
+	var out protocol.LearnRetireResponseBody
+	if err := runLearnRPC(cfg, protocol.CommandLearnRetire, protocol.LearnRetireRequestBody{ID: opts.ID}, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Retired promoted learning: %s\n%s\n", out.Learning.ID, out.Guidance)
 	return nil
 }
 
@@ -517,6 +541,24 @@ func parseLearnPromoteArgs(args []string) (learnPromoteOpts, error) {
 	return opts, nil
 }
 
+func parseLearnRetireArgs(args []string) (learnRetireOpts, error) {
+	opts := learnRetireOpts{}
+	fs := flag.NewFlagSet("learn retire", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "json output")
+	if err := fs.Parse(args); err != nil {
+		return learnRetireOpts{}, err
+	}
+	if fs.NArg() != 1 {
+		return learnRetireOpts{}, fmt.Errorf("usage: az learn retire <learning-id> [--json]")
+	}
+	opts.ID = strings.TrimSpace(fs.Arg(0))
+	if opts.ID == "" {
+		return learnRetireOpts{}, fmt.Errorf("missing learning id")
+	}
+	return opts, nil
+}
+
 func parseLearnRelateArgs(args []string) (learnRelateOpts, error) {
 	opts := learnRelateOpts{}
 	fs := flag.NewFlagSet("learn relate", flag.ContinueOnError)
@@ -584,6 +626,7 @@ func printLearnUsage() {
 	fmt.Println("  show     Show a learning with full evidence")
 	fmt.Println("  review   List candidates or update learning status")
 	fmt.Println("  promote  Mark a learning promoted toward curated guidance")
+	fmt.Println("  retire   Retire an Az-managed promoted guidance block")
 	fmt.Println("  relate   Record supersession or conflict between learnings")
 	fmt.Println("")
 	fmt.Println("Commands:")
@@ -592,5 +635,6 @@ func printLearnUsage() {
 	fmt.Println("  az learn show <learning-id> [--json]")
 	fmt.Println("  az learn review [--id <learning-id> --status accepted|rejected|stale --note <text>] [--limit N] [--json]")
 	fmt.Println("  az learn promote --target rulesync|agents|skill|spec|decision --target-id <id-or-path> <learning-id> [--note <text>] [--target-hash <hash>] [--target-meta key=value ...] [--json]")
+	fmt.Println("  az learn retire <learning-id> [--json]")
 	fmt.Println("  az learn relate --type supersedes|conflicts --note <text> [--scope-issue <id>] [--scope-req <id>] [--scope-session <id>] [--scope-tag <tag> ...] [--scope-file <path> ...] <source-learning-id> <target-learning-id> [--json]")
 }
