@@ -181,12 +181,47 @@ func (s issueLearnService) Promote(ctx context.Context, req protocol.LearnPromot
 	if err != nil {
 		return protocol.LearnPromoteResponseBody{}, err
 	}
-	params := issues.PromoteLearningParams{
-		Target:               issues.LearningPromotionTarget(req.Target),
-		TargetID:             req.TargetID,
+	target := protocol.LearningPromotionTarget(req.Target)
+	targetID := strings.TrimSpace(req.TargetID)
+	targetHash := strings.TrimSpace(req.TargetHash)
+	targetMetadata := cloneStringMap(req.TargetMetadata)
+	if learningPromotionFileBacked(target) {
+		current, err := client.GetLearning(ctx, req.ID)
+		if err != nil {
+			return protocol.LearnPromoteResponseBody{}, err
+		}
+		if current.Status != issues.LearningStatusAccepted && current.Status != issues.LearningStatusPromoted {
+			return protocol.LearnPromoteResponseBody{}, fmt.Errorf("%w: learning must be accepted before promotion", domain.ErrConflict)
+		}
+		repoDir := s.repoDir(ctx)
+		expectedHash := targetHash
+		if expectedHash == "" && current.Target != nil && protocol.LearningPromotionTarget(*current.Target) == target && current.TargetID == targetID {
+			expectedHash = current.TargetHash
+		}
+		mappedCurrent := mapLearningToProtocol(current, false)
+		mappedCurrent.Target = target
+		mappedCurrent.TargetID = targetID
+		result, err := upsertManagedGuidanceBlock(repoDir, mappedCurrent, req.Note, expectedHash)
+		if err != nil {
+			_, _ = client.UpdateLearningTargetState(ctx, req.ID, issues.UpdateLearningTargetStateParams{
+				State: stateForManagedGuidanceFailure(result),
+			})
+			return protocol.LearnPromoteResponseBody{}, err
+		}
+		targetHash = result.TargetHash
+		if targetMetadata == nil {
+			targetMetadata = map[string]string{}
+		}
+		targetMetadata["path"] = result.Path
+		targetMetadata["managed_block"] = managedGuidanceBlockKind
+		targetMetadata["source_learning_id"] = current.LocalID
+	}
+	params :=  issues.PromoteLearningParams{
+		Target:               issues.LearningPromotionTarget(target),
+		TargetID:             targetID,
 		Note:                 req.Note,
-		TargetHash:           req.TargetHash,
-		TargetMetadata:       req.TargetMetadata,
+		TargetHash:           targetHash,
+		TargetMetadata:       targetMetadata,
 		CreateTarget:         req.CreateTarget,
 		TargetTitle:          req.TargetTitle,
 		TargetDescription:    req.TargetDescription,
@@ -206,6 +241,46 @@ func (s issueLearnService) Promote(ctx context.Context, req protocol.LearnPromot
 	return protocol.LearnPromoteResponseBody{
 		Learning: mapped,
 		Guidance: learningPromotionGuidance(mapped),
+	}, nil
+}
+
+func (s issueLearnService) Retire(ctx context.Context, req protocol.LearnRetireRequestBody) (protocol.LearnRetireResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnRetireResponseBody{}, err
+	}
+	current, err := client.GetLearning(ctx, req.ID)
+	if err != nil {
+		return protocol.LearnRetireResponseBody{}, err
+	}
+	if current.Status != issues.LearningStatusPromoted || current.Target == nil {
+		return protocol.LearnRetireResponseBody{}, fmt.Errorf("%w: learning must be promoted before retirement", domain.ErrConflict)
+	}
+	target := protocol.LearningPromotionTarget(*current.Target)
+	if learningPromotionFileBacked(target) {
+		result, err := removeManagedGuidanceBlock(s.repoDir(ctx), mapLearningToProtocol(current, false), current.TargetHash)
+		if err != nil {
+			_, _ = client.UpdateLearningTargetState(ctx, req.ID, issues.UpdateLearningTargetStateParams{
+				State: stateForManagedGuidanceFailure(result),
+			})
+			return protocol.LearnRetireResponseBody{}, err
+		}
+		if result.TargetHash != "" {
+			current.TargetHash = result.TargetHash
+		}
+	}
+	updated, err := client.UpdateLearningTargetState(ctx, req.ID, issues.UpdateLearningTargetStateParams{
+		State:          issues.LearningTargetStateRetired,
+		TargetHash:     current.TargetHash,
+		TargetMetadata: current.TargetMetadata,
+	})
+	if err != nil {
+		return protocol.LearnRetireResponseBody{}, err
+	}
+	mapped := mapLearningToProtocol(updated, false)
+	return protocol.LearnRetireResponseBody{
+		Learning: mapped,
+		Guidance: learningRetireGuidance(mapped),
 	}, nil
 }
 
@@ -239,6 +314,44 @@ func (s issueLearnService) Relate(ctx context.Context, req protocol.LearnRelateR
 		return protocol.LearnRelateResponseBody{}, err
 	}
 	return protocol.LearnRelateResponseBody{Relation: mapLearningRelationToProtocol(relation)}, nil
+}
+
+func (s issueLearnService) repoDir(ctx context.Context) string {
+	if s.daemon == nil {
+		return ""
+	}
+	projectID := daemonProjectIDFromContext(ctx)
+	if repoDir := strings.TrimSpace(s.daemon.resolveRepoDirForProjectExact(projectID)); repoDir != "" {
+		return repoDir
+	}
+	if repoDir := strings.TrimSpace(s.daemon.resolveRepoDirForProject(projectID)); repoDir != "" {
+		return repoDir
+	}
+	return strings.TrimSpace(s.daemon.cfg.RepoDir)
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		out[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func stateForManagedGuidanceFailure(result managedGuidanceResult) issues.LearningTargetState {
+	if result.BlockMissing {
+		return issues.LearningTargetStateMissing
+	}
+	return issues.LearningTargetStateDrifted
 }
 
 func (s issueSpecService) ListRequirements(ctx context.Context, req protocol.SpecRequirementListRequestBody) (protocol.SpecRequirementListResponseBody, error) {
@@ -786,14 +899,25 @@ func learningPromotionGuidance(learning protocol.Learning) string {
 	case protocol.LearningPromotionTargetSpec:
 		return fmt.Sprintf("Promotion recorded against spec requirement %s. Keep the issue/spec link current.", learning.TargetID)
 	case protocol.LearningPromotionTargetRulesync:
-		return fmt.Sprintf("Promotion recorded against Rulesync target %s. Ensure generated agent instructions are refreshed from the source guidance.", learning.TargetID)
+		return fmt.Sprintf("Promotion wrote an Az-managed guidance block to Rulesync target %s. Refresh generated agent instructions from the source guidance when needed.", learning.TargetID)
 	case protocol.LearningPromotionTargetAgents:
-		return fmt.Sprintf("Promotion recorded against AGENTS target %s. Keep the learning id in the guidance update evidence.", learning.TargetID)
+		return fmt.Sprintf("Promotion wrote an Az-managed guidance block to AGENTS target %s.", learning.TargetID)
 	case protocol.LearningPromotionTargetSkill:
-		return fmt.Sprintf("Promotion recorded against skill target %s. Keep the learning id in the skill update evidence.", learning.TargetID)
+		return fmt.Sprintf("Promotion wrote an Az-managed guidance block to skill target %s.", learning.TargetID)
 	default:
 		return "Promotion recorded; update the selected curated guidance target and keep this learning id as evidence."
 	}
+}
+
+func learningRetireGuidance(learning protocol.Learning) string {
+	path := strings.TrimSpace(learning.TargetMetadata["path"])
+	if path == "" {
+		path = strings.TrimSpace(learning.TargetID)
+	}
+	if learningPromotionFileBacked(learning.Target) && path != "" {
+		return fmt.Sprintf("Retired Az-managed guidance block for %s from %s. Human-authored content was preserved.", learning.ID, path)
+	}
+	return fmt.Sprintf("Retired promoted learning target for %s.", learning.ID)
 }
 
 func requirementIDsToStrings(ids []naming.RequirementID) []string {

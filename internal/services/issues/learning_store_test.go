@@ -737,6 +737,43 @@ func TestClient_MigratesPromotedLearningTargetState(t *testing.T) {
 	assert.Equal(t, "learn-active", rows[0].LocalID)
 }
 
+func TestClient_UpdateLearningTargetStateRecordsLifecycle(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	learning := createAcceptedLearning(t, ctx, client, "proj", "Managed guidance target")
+	promoted, err := client.PromoteLearning(ctx, learning.LocalID, PromoteLearningParams{
+		Target:         LearningPromotionTargetAgents,
+		TargetID:       "AGENTS.md",
+		TargetHash:     "sha256:old",
+		TargetMetadata: map[string]string{"path": "AGENTS.md"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, LearningTargetStateActive, promoted.TargetState)
+
+	drifted, err := client.UpdateLearningTargetState(ctx, learning.LocalID, UpdateLearningTargetStateParams{
+		State: LearningTargetStateDrifted,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, LearningTargetStateDrifted, drifted.TargetState)
+	require.NotNil(t, drifted.TargetDriftedAt)
+	assert.Nil(t, drifted.TargetRetiredAt)
+	assert.Equal(t, "sha256:old", drifted.TargetHash)
+	assert.Equal(t, map[string]string{"path": "AGENTS.md"}, drifted.TargetMetadata)
+
+	retired, err := client.UpdateLearningTargetState(ctx, learning.LocalID, UpdateLearningTargetStateParams{
+		State:          LearningTargetStateRetired,
+		TargetHash:     "sha256:retired",
+		TargetMetadata: map[string]string{"path": "AGENTS.md", "managed_block": "azedarach-learning"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, LearningTargetStateRetired, retired.TargetState)
+	require.NotNil(t, retired.TargetRetiredAt)
+	assert.Nil(t, retired.TargetDriftedAt)
+	assert.Equal(t, "sha256:retired", retired.TargetHash)
+	assert.Equal(t, map[string]string{"path": "AGENTS.md", "managed_block": "azedarach-learning"}, retired.TargetMetadata)
+}
+
 func TestClient_RelateLearningSupersedesScopedGuidanceAndExcludesTargetFromActiveRecall(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)

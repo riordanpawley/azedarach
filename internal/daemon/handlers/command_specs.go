@@ -109,6 +109,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandLearnShow:              {Command: protocol.CommandLearnShow, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	protocol.CommandLearnReview:            {Command: protocol.CommandLearnReview, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	protocol.CommandLearnPromote:           {Command: protocol.CommandLearnPromote, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
+	protocol.CommandLearnRetire:            {Command: protocol.CommandLearnRetire, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	protocol.CommandLearnRelate:            {Command: protocol.CommandLearnRelate, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	CommandGitFetch:                        {Command: CommandGitFetch, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
 	CommandGitMerge:                        {Command: CommandGitMerge, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},

@@ -141,6 +141,12 @@ type PromoteLearningParams struct {
 	DecisionConsequences string
 }
 
+type UpdateLearningTargetStateParams struct {
+	State          LearningTargetState
+	TargetHash     string
+	TargetMetadata map[string]string
+}
+
 type RelateLearningParams struct {
 	Type               LearningRelationType
 	SourceLearningID   string
@@ -709,6 +715,65 @@ func (c *Client) RetireLearningTarget(ctx context.Context, selector string, note
 		WHERE id = ?
 	`, string(LearningTargetStateRetired), formatTimestamp(now), nullableString(note), formatTimestamp(now), record.rowID); err != nil {
 		return Learning{}, c.wrapError("retire-learning-target", record.LocalID, classifySQLiteConstraint(err))
+	}
+	return c.GetLearning(ctx, record.LocalID)
+}
+
+func (c *Client) UpdateLearningTargetState(ctx context.Context, selector string, params UpdateLearningTargetStateParams) (Learning, error) {
+	selector = strings.TrimSpace(selector)
+	params.State = LearningTargetState(strings.TrimSpace(string(params.State)))
+	params.TargetHash = strings.TrimSpace(params.TargetHash)
+	params.TargetMetadata = normalizeStringMap(params.TargetMetadata)
+	if !params.State.Valid() {
+		return Learning{}, c.wrapError("update-learning-target-state", selector, errors.New("invalid learning target state"))
+	}
+	db, err := c.dbHandle()
+	if err != nil {
+		return Learning{}, err
+	}
+	record, err := c.lookupLearningByLocalID(ctx, db, selector, false)
+	if err != nil {
+		return Learning{}, c.wrapError("update-learning-target-state", selector, err)
+	}
+	if record.Status != LearningStatusPromoted {
+		return Learning{}, c.wrapError("update-learning-target-state", record.LocalID, fmt.Errorf("%w: learning must be promoted before target state updates", domain.ErrConflict))
+	}
+
+	now := time.Now().UTC()
+	targetHash := record.TargetHash
+	if params.TargetHash != "" || params.State == LearningTargetStateActive {
+		targetHash = params.TargetHash
+	}
+	targetMetadata := record.TargetMetadata
+	if params.TargetMetadata != nil {
+		targetMetadata = params.TargetMetadata
+	}
+	if targetMetadata == nil {
+		targetMetadata = map[string]string{}
+	}
+	metadataJSON, err := json.Marshal(targetMetadata)
+	if err != nil {
+		return Learning{}, c.wrapError("update-learning-target-state", record.LocalID, fmt.Errorf("marshal target metadata: %w", err))
+	}
+
+	var retiredAt, driftedAt any
+	switch params.State {
+	case LearningTargetStateRetired:
+		retiredAt = formatTimestamp(now)
+	case LearningTargetStateDrifted:
+		driftedAt = formatTimestamp(now)
+	case LearningTargetStateMissing:
+	case LearningTargetStateActive:
+	default:
+		return Learning{}, c.wrapError("update-learning-target-state", record.LocalID, errors.New("invalid learning target state"))
+	}
+	if _, err := db.ExecContext(ctx, `
+		UPDATE agent_learnings
+		SET target_state = ?, target_hash = ?, target_metadata_json = ?,
+			target_retired_at = ?, target_drifted_at = ?, updated_at = ?
+		WHERE id = ?
+	`, string(params.State), nullableString(targetHash), string(metadataJSON), retiredAt, driftedAt, formatTimestamp(now), record.rowID); err != nil {
+		return Learning{}, c.wrapError("update-learning-target-state", record.LocalID, classifySQLiteConstraint(err))
 	}
 	return c.GetLearning(ctx, record.LocalID)
 }

@@ -451,6 +451,153 @@ func TestIssueLearnServiceOmitEvidenceFromReviewAndPromoteResponses(t *testing.T
 	}
 }
 
+func TestIssueLearnServicePromoteAndRetireManagedGuidanceFile(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	service := newTestIssueLearnService(client, repoDir)
+
+	added, err := service.Add(ctx, protocol.LearnAddRequestBody{
+		Summary:  "Prefer daemon-owned managed guidance blocks",
+		Evidence: "Validated against managed block requirement.",
+	})
+	if err != nil {
+		t.Fatalf("add learning: %v", err)
+	}
+	if _, err := service.Review(ctx, protocol.LearnReviewRequestBody{
+		ID:     added.Learning.ID,
+		Status: protocol.LearningStatusAccepted,
+		Note:   "Reviewed.",
+	}); err != nil {
+		t.Fatalf("review learning: %v", err)
+	}
+
+	targetPath := filepath.Join(repoDir, "AGENTS.md")
+	if err := os.WriteFile(targetPath, []byte("# Existing guidance\n\nKeep humans safe.\n"), 0o644); err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+	promoted, err := service.Promote(ctx, protocol.LearnPromoteRequestBody{
+		ID:       added.Learning.ID,
+		Target:   protocol.LearningPromotionTargetAgents,
+		TargetID: "AGENTS.md",
+		Note:     "Promote to root instructions.",
+	})
+	if err != nil {
+		t.Fatalf("promote learning: %v", err)
+	}
+	if promoted.Learning.TargetHash == "" || promoted.Learning.TargetMetadata["path"] != "AGENTS.md" || promoted.Learning.TargetMetadata["managed_block"] != managedGuidanceBlockKind {
+		t.Fatalf("promoted metadata/hash missing: %+v", promoted.Learning)
+	}
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "# Existing guidance") || !strings.Contains(content, "Source learning: "+added.Learning.ID) {
+		t.Fatalf("target content missing human or managed guidance:\n%s", content)
+	}
+
+	duplicate, err := service.Promote(ctx, protocol.LearnPromoteRequestBody{
+		ID:       added.Learning.ID,
+		Target:   protocol.LearningPromotionTargetAgents,
+		TargetID: "AGENTS.md",
+		Note:     "Promote to root instructions.",
+	})
+	if err != nil {
+		t.Fatalf("duplicate promote learning: %v", err)
+	}
+	if duplicate.Learning.TargetHash != promoted.Learning.TargetHash {
+		t.Fatalf("duplicate target hash = %q, want %q", duplicate.Learning.TargetHash, promoted.Learning.TargetHash)
+	}
+	afterDuplicate, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read duplicate target: %v", err)
+	}
+	if string(afterDuplicate) != content {
+		t.Fatalf("duplicate promotion changed content:\n%s", string(afterDuplicate))
+	}
+
+	retired, err := service.Retire(ctx, protocol.LearnRetireRequestBody{ID: added.Learning.ID})
+	if err != nil {
+		t.Fatalf("retire learning: %v", err)
+	}
+	if retired.Learning.TargetState != protocol.LearningTargetStateRetired || retired.Learning.TargetRetiredAt == "" {
+		t.Fatalf("retired learning missing retired state/time: %+v", retired.Learning)
+	}
+	retiredData, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read retired target: %v", err)
+	}
+	retiredContent := string(retiredData)
+	if !strings.Contains(retiredContent, "# Existing guidance") || strings.Contains(retiredContent, "Source learning: "+added.Learning.ID) {
+		t.Fatalf("retire should remove only managed block:\n%s", retiredContent)
+	}
+}
+
+func TestIssueLearnServiceRefusesDriftedManagedGuidanceFile(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	service := newTestIssueLearnService(client, repoDir)
+
+	added, err := service.Add(ctx, protocol.LearnAddRequestBody{
+		Summary:  "Original file guidance",
+		Evidence: "Evidence.",
+	})
+	if err != nil {
+		t.Fatalf("add learning: %v", err)
+	}
+	if _, err := service.Review(ctx, protocol.LearnReviewRequestBody{
+		ID:     added.Learning.ID,
+		Status: protocol.LearningStatusAccepted,
+		Note:   "Reviewed.",
+	}); err != nil {
+		t.Fatalf("review learning: %v", err)
+	}
+	promoted, err := service.Promote(ctx, protocol.LearnPromoteRequestBody{
+		ID:       added.Learning.ID,
+		Target:   protocol.LearningPromotionTargetAgents,
+		TargetID: "AGENTS.md",
+	})
+	if err != nil {
+		t.Fatalf("promote learning: %v", err)
+	}
+	targetPath := filepath.Join(repoDir, "AGENTS.md")
+	raw, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	drifted := strings.Replace(string(raw), "Original file guidance", "Human edited file guidance", 1)
+	if err := os.WriteFile(targetPath, []byte(drifted), 0o644); err != nil {
+		t.Fatalf("write drifted target: %v", err)
+	}
+
+	_, err = service.Promote(ctx, protocol.LearnPromoteRequestBody{
+		ID:       added.Learning.ID,
+		Target:   protocol.LearningPromotionTargetAgents,
+		TargetID: "AGENTS.md",
+		Note:     "Try update after drift.",
+	})
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("promote drift error = %v, want conflict", err)
+	}
+	stored, err := client.GetLearning(ctx, added.Learning.ID)
+	if err != nil {
+		t.Fatalf("get learning: %v", err)
+	}
+	if stored.TargetState != issues.LearningTargetStateDrifted || stored.TargetDriftedAt == nil {
+		t.Fatalf("stored target state = %s drifted_at=%v, want drifted timestamp", stored.TargetState, stored.TargetDriftedAt)
+	}
+	if stored.TargetHash != promoted.Learning.TargetHash {
+		t.Fatalf("drift refusal should preserve recorded hash = %q, want %q", stored.TargetHash, promoted.Learning.TargetHash)
+	}
+	after, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read after drift refusal: %v", err)
+	}
+	if string(after) != drifted {
+		t.Fatalf("drift refusal changed file:\n%s", string(after))
+	}
+}
+
 func newTestIssueSpecService(client *issues.Client, repoDir string) issueSpecService {
 	d := &Daemon{
 		cfg: Config{

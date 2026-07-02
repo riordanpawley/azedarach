@@ -18,6 +18,7 @@ type LearnService interface {
 	Show(context.Context, protocol.LearnShowRequestBody) (protocol.LearnShowResponseBody, error)
 	Review(context.Context, protocol.LearnReviewRequestBody) (protocol.LearnReviewResponseBody, error)
 	Promote(context.Context, protocol.LearnPromoteRequestBody) (protocol.LearnPromoteResponseBody, error)
+	Retire(context.Context, protocol.LearnRetireRequestBody) (protocol.LearnRetireResponseBody, error)
 	Relate(context.Context, protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error)
 }
 
@@ -135,6 +136,16 @@ func (h *LearnHandler) Handle(ctx context.Context, req protocol.RequestEnvelope)
 			return learnInvalidRequest(resp, "missing required field: target_id")
 		}
 		return learnJSONResponse(ctx, resp, h.service.Promote, cmd)
+	case protocol.CommandLearnRetire:
+		var cmd protocol.LearnRetireRequestBody
+		if !decodeLearnRequest(req.Body, &cmd, &resp) {
+			return resp
+		}
+		cmd.ID = strings.TrimSpace(cmd.ID)
+		if cmd.ID == "" {
+			return learnInvalidRequest(resp, "missing required field: id")
+		}
+		return learnJSONResponse(ctx, resp, h.service.Retire, cmd)
 	case protocol.CommandLearnRelate:
 		var cmd protocol.LearnRelateRequestBody
 		if !decodeLearnRequest(req.Body, &cmd, &resp) {

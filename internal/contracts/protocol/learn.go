@@ -8,6 +8,7 @@ const (
 	CommandLearnShow    = "learn.show"
 	CommandLearnReview  = "learn.review"
 	CommandLearnPromote = "learn.promote"
+	CommandLearnRetire  = "learn.retire"
 	CommandLearnRelate  = "learn.relate"
 )
 
@@ -171,6 +172,15 @@ type LearnPromoteRequestBody struct {
 }
 
 type LearnPromoteResponseBody struct {
+	Learning Learning `json:"learning" msgpack:"learning"`
+	Guidance string   `json:"guidance" msgpack:"guidance"`
+}
+
+type LearnRetireRequestBody struct {
+	ID string `json:"id" msgpack:"id"`
+}
+
+type LearnRetireResponseBody struct {
 	Learning Learning `json:"learning" msgpack:"learning"`
 	Guidance string   `json:"guidance" msgpack:"guidance"`
 }
