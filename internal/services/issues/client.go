@@ -48,11 +48,11 @@ const runtimeSessionProjectionUnionSQL = `
 		state,
 		observed_state,
 		activity,
-		activity_source,
-		tmux_attached_count,
-		started_at,
-		updated_at
-	FROM daemon_session_observations
+			activity_source,
+			tmux_attached_count,
+			started_at,
+			updated_at
+		FROM daemon_session_observations
 `
 
 // ErrDependencyRemovalConfirmationRequired is returned when a removal that can

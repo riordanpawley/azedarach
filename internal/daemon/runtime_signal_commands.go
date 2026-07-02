@@ -11,6 +11,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
@@ -207,6 +208,147 @@ func (d *Daemon) ingestAgentActivitySignal(ctx context.Context, req protocol.Req
 	}
 	out.ProjectionRevisions = appendRevision(out.ProjectionRevisions, rev)
 	out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity", OK: true, Revision: rev})
+
+	if parentSessionID, _, ok := agentScopedSessionParentAndPane(sessionID); ok {
+		canonicalRev, err := d.recordAgentHookActivityEvidenceAndMaterialize(ctx, req.Meta, projectID, parentSessionID, sessionID, cmd.IssueID, activity, cmd)
+		if err != nil {
+			out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity_canonical", OK: false, Message: err.Error()})
+			return
+		}
+		out.ProjectionRevisions = appendRevision(out.ProjectionRevisions, canonicalRev)
+		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity_evidence", OK: true})
+		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity_canonical", OK: true, Revision: canonicalRev})
+	}
+}
+
+func (d *Daemon) recordAgentHookActivityEvidenceAndMaterialize(ctx context.Context, meta protocol.Metadata, projectID, sessionID, sourceSessionID, issueID, activity string, cmd protocol.RuntimeSignalIngestCommandBody) (uint64, error) {
+	if d == nil {
+		return 0, nil
+	}
+	activity = normalizeSessionActivity(activity)
+	if activity == "" {
+		return 0, nil
+	}
+	now := time.Now().UTC()
+	evidence := daemonstate.SessionActivityEvidence{
+		ProjectID:       projectID,
+		SessionID:       strings.TrimSpace(sessionID),
+		IssueID:         strings.TrimSpace(issueID),
+		Activity:        activity,
+		ActivitySource:  "hooks",
+		SourceSessionID: strings.TrimSpace(sourceSessionID),
+		Agent:           strings.TrimSpace(cmd.Agent),
+		Hook:            strings.TrimSpace(cmd.Hook),
+		Event:           strings.TrimSpace(cmd.Event),
+		ObservedAt:      now,
+		UpdatedAt:       now,
+	}
+	store := d.sessionRuntimeStateStore(projectID)
+	if store == nil {
+		return 0, nil
+	}
+	if err := store.UpsertSessionActivityEvidence(ctx, evidence); err != nil {
+		return 0, err
+	}
+	return d.applySessionActivityEvidenceToCanonicalSession(ctx, meta, evidence)
+}
+
+func (d *Daemon) applySessionActivityEvidenceToCanonicalSession(ctx context.Context, meta protocol.Metadata, evidence daemonstate.SessionActivityEvidence) (uint64, error) {
+	if d == nil {
+		return 0, nil
+	}
+	projectID := strings.TrimSpace(evidence.ProjectID)
+	sessionID := strings.TrimSpace(evidence.SessionID)
+	issueID := strings.TrimSpace(evidence.IssueID)
+	activity := normalizeSessionActivity(evidence.Activity)
+	activitySource := normalizeSessionActivitySource(evidence.ActivitySource, "hooks")
+	if projectID == "" || sessionID == "" || issueID == "" || activity == "" {
+		return 0, nil
+	}
+
+	now := time.Now().UTC()
+	if !evidence.UpdatedAt.IsZero() {
+		now = evidence.UpdatedAt.UTC()
+	}
+	state := daemonstate.SessionStateRunning
+	session := daemonstate.Session{
+		ID:             sessionID,
+		IssueID:        issueID,
+		State:          state,
+		ObservedState:  state,
+		Activity:       activity,
+		ActivitySource: activitySource,
+		UpdatedAt:      now,
+	}
+
+	seededFromSessionStore := false
+	if d.sessionStore != nil {
+		if existing, err := d.sessionStore.Session(projectID, sessionID); err == nil {
+			if daemonstate.NormalizeSessionState(existing.State) == daemonstate.SessionStateStopped ||
+				daemonstate.NormalizeSessionState(existing.ObservedState) == daemonstate.SessionStateStopped {
+				return 0, nil
+			}
+			session = existing
+			seededFromSessionStore = true
+		}
+	}
+
+	if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil {
+		existing, found, err := runtimeStore.GetSessionState(ctx, projectID, sessionID)
+		if err != nil {
+			return 0, fmt.Errorf("load canonical session projection: %w", err)
+		}
+		if found {
+			if !seededFromSessionStore &&
+				(daemonstate.NormalizeSessionState(existing.State) == daemonstate.SessionStateStopped ||
+					daemonstate.NormalizeSessionState(existing.ObservedState) == daemonstate.SessionStateStopped) {
+				return 0, nil
+			}
+			if !seededFromSessionStore {
+				session = existing
+			} else if strings.TrimSpace(string(session.State)) == "" {
+				session.State = existing.State
+			}
+			if seededFromSessionStore && strings.TrimSpace(string(session.ObservedState)) == "" {
+				session.ObservedState = existing.ObservedState
+			}
+			if existing.StartedAt != nil && !existing.StartedAt.IsZero() {
+				started := existing.StartedAt.UTC()
+				session.StartedAt = &started
+			}
+			if existing.TmuxAttachedCount > 0 {
+				session.TmuxAttachedCount = existing.TmuxAttachedCount
+			}
+		}
+	}
+
+	session.ID = sessionID
+	issueID = strings.TrimSpace(issueID)
+	session.IssueID = issueID
+	session.Activity = activity
+	session.ActivitySource = activitySource
+	session.UpdatedAt = now
+	return d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, meta, session), nil
+}
+
+func (d *Daemon) materializeSessionActivityEvidence(ctx context.Context, meta protocol.Metadata, projectID string, issueIDs []string) error {
+	if d == nil {
+		return nil
+	}
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return nil
+	}
+	evidenceRows, err := store.ListSessionActivityEvidence(ctx, projectID, issueIDs)
+	if err != nil {
+		return fmt.Errorf("load session activity evidence: %w", err)
+	}
+	for _, evidence := range evidenceRows {
+		if _, err := d.applySessionActivityEvidenceToCanonicalSession(ctx, meta, evidence); err != nil {
+			return fmt.Errorf("materialize session activity evidence %s/%s: %w", projectID, evidence.SessionID, err)
+		}
+	}
+	return nil
 }
 
 func runtimeSignalAgentLifecycle(cmd protocol.RuntimeSignalIngestCommandBody) (string, string, bool) {
