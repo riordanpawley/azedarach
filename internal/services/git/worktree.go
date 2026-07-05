@@ -131,39 +131,54 @@ func (w *WorktreeManager) CreateWithTitle(ctx context.Context, issueID, issueTit
 	)
 
 	// Check if worktree already exists
+	w.logger.Info("checking worktree existence before create",
+		"issueID", issueID,
+		"path", worktreePath,
+	)
 	exists, err := w.Exists(ctx, issueID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check if worktree exists: %w", err)
 	}
+	w.logger.Info("worktree existence checked before create",
+		"issueID", issueID,
+		"path", worktreePath,
+		"exists", exists,
+	)
 	if exists {
 		return nil, fmt.Errorf("%w for issue %s", ErrWorktreeAlreadyExists, issueID)
 	}
 
 	// Create worktree with new branch from baseBranch.
-	_, err = w.runner.Run(ctx, "worktree", "add", "-b", branchName, worktreePath, baseBranch)
+	createArgs := []string{"worktree", "add", "-b", branchName, worktreePath, baseBranch}
+	w.logger.Info("running git worktree add",
+		"issueID", issueID,
+		"command", "git "+strings.Join(createArgs, " "),
+	)
+	_, err = w.runner.Run(ctx, createArgs...)
 	if err != nil {
 		// A previous partial attempt may have created the branch already.
 		// In that case, attach a new worktree to the existing branch.
 		if isBranchAlreadyExistsError(err, branchName) {
-			_, retryErr := w.runner.Run(ctx, "worktree", "add", worktreePath, branchName)
+			retryArgs := []string{"worktree", "add", worktreePath, branchName}
+			_, retryErr := w.runner.Run(ctx, retryArgs...)
 			if retryErr != nil && isWorktreeAddPathAlreadyExistsError(retryErr, worktreePath) {
 				if removeErr := w.removeOrphanedWorktreePath(worktreePath); removeErr != nil {
 					return nil, removeErr
 				}
-				_, retryErr = w.runner.Run(ctx, "worktree", "add", worktreePath, branchName)
+				_, retryErr = w.runner.Run(ctx, retryArgs...)
 			}
 			if retryErr != nil {
-				return nil, fmt.Errorf("failed to create worktree: %w", retryErr)
+				return nil, fmt.Errorf("failed to create worktree with git %s: %w", strings.Join(retryArgs, " "), retryErr)
 			}
 		} else if isWorktreeAddPathAlreadyExistsError(err, worktreePath) {
 			if removeErr := w.removeOrphanedWorktreePath(worktreePath); removeErr != nil {
 				return nil, removeErr
 			}
-			if _, retryErr := w.runner.Run(ctx, "worktree", "add", "-b", branchName, worktreePath, baseBranch); retryErr != nil {
-				return nil, fmt.Errorf("failed to create worktree: %w", retryErr)
+			if _, retryErr := w.runner.Run(ctx, createArgs...); retryErr != nil {
+				return nil, fmt.Errorf("failed to create worktree with git %s: %w", strings.Join(createArgs, " "), retryErr)
 			}
 		} else {
-			return nil, fmt.Errorf("failed to create worktree: %w", err)
+			return nil, fmt.Errorf("failed to create worktree with git %s: %w", strings.Join(createArgs, " "), err)
 		}
 	}
 

@@ -126,6 +126,8 @@ type SpecRequirementListRequest struct {
 	Status         string              `json:"status,omitempty"`
 	RequirementIDs []string            `json:"ids,omitempty"`
 	Query          string              `json:"query,omitempty"`
+	Match          string              `json:"match,omitempty"`
+	Limit          int                 `json:"limit,omitempty"`
 	Kind           SpecRequirementKind `json:"kind,omitempty"`
 	Priority       *int                `json:"priority,omitempty"`
 }

@@ -47,8 +47,11 @@ func (s issueSpecService) ListRequirements(ctx context.Context, req protocol.Spe
 		return protocol.SpecRequirementListResponseBody{}, err
 	}
 	filter := issues.RequirementFilter{
-		IssueID:  req.IssueID.String(),
-		LocalIDs: requirementIDsToStrings(req.IDs),
+		IssueID:    req.IssueID.String(),
+		LocalIDs:   requirementIDsToStrings(req.IDs),
+		Query:      req.Query,
+		QueryMatch: issues.RequirementQueryMatch(req.Match),
+		Limit:      req.Limit,
 	}
 	if req.Status != "" {
 		filter.Statuses = []issues.RequirementStatus{issues.RequirementStatus(req.Status)}
@@ -514,7 +517,7 @@ type worktreeServiceAdapter struct {
 	runtimeProjectionWriter            runtimeProjectionWriter
 	ensureRuntimeFreshForMutation      func(context.Context, string, string) error
 	ensureRuntimeFreshForIssueMutation func(context.Context, string, string, string) error
-	runtimeIssueTasks                  func(context.Context, string) map[string]domain.Task
+	runtimeIssueTasks                  func(context.Context, string, []string) map[string]domain.Task
 	runWorktreeSyncInit                func(context.Context, worktreeInitContext) error
 	startWorktreeAsyncInit             func(worktreeInitContext)
 	logger                             *slog.Logger
@@ -573,7 +576,7 @@ func (a *worktreeServiceAdapter) List(ctx context.Context, projectID string) ([]
 		}
 		return nil, cacheErr
 	}
-	taskByIssue := a.runtimeIssueTaskSnapshot(ctx, projectID)
+	taskByIssue := a.runtimeIssueTaskSnapshot(ctx, projectID, worktreeIssueIDsFromStates(cached))
 	worktrees := filterRuntimeEligibleGitWorktrees(mapProjectionWorktrees(cached), taskByIssue)
 	if len(worktrees) > 0 {
 		a.observeWorktrees(ctx, projectID, worktrees, taskByIssue)
@@ -598,7 +601,7 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 			return nil, "", err
 		}
 	}
-	taskByIssue := a.runtimeIssueTaskSnapshot(ctx, projectID)
+	taskByIssue := a.runtimeIssueTaskSnapshot(ctx, projectID, []string{issueID})
 	title := ""
 	parentIssueID := ""
 	parentWorktreePath := ""
@@ -818,7 +821,7 @@ func (a *worktreeServiceAdapter) pollAndPersistWorktrees(ctx context.Context, pr
 		}
 		return
 	}
-	taskByIssue := a.runtimeIssueTaskSnapshot(ctx, projectID)
+	taskByIssue := a.runtimeIssueTaskSnapshot(ctx, projectID, worktreeIssueIDsFromGitWorktrees(worktrees))
 	a.writeWorktreeProjectionSnapshot(ctx, projectID, worktrees, taskByIssue)
 	a.observeWorktrees(ctx, projectID, worktrees, taskByIssue)
 	if a.onProjectionUpdate != nil {
@@ -826,11 +829,11 @@ func (a *worktreeServiceAdapter) pollAndPersistWorktrees(ctx context.Context, pr
 	}
 }
 
-func (a *worktreeServiceAdapter) runtimeIssueTaskSnapshot(ctx context.Context, projectID string) map[string]domain.Task {
+func (a *worktreeServiceAdapter) runtimeIssueTaskSnapshot(ctx context.Context, projectID string, issueIDs []string) map[string]domain.Task {
 	if a == nil || a.runtimeIssueTasks == nil {
 		return nil
 	}
-	return a.runtimeIssueTasks(ctx, normalizedProjectID(projectID))
+	return a.runtimeIssueTasks(ctx, normalizedProjectID(projectID), issueIDs)
 }
 
 func (a *worktreeServiceAdapter) observeWorktrees(ctx context.Context, projectID string, worktrees []git.Worktree, taskByIssue map[string]domain.Task) {
@@ -920,6 +923,48 @@ func mapProjectionWorktrees(projections []daemonstate.WorktreeState) []git.Workt
 		})
 	}
 	return out
+}
+
+func worktreeIssueIDsFromStates(worktrees []daemonstate.WorktreeState) []string {
+	if len(worktrees) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(worktrees))
+	seen := map[string]struct{}{}
+	for _, wt := range worktrees {
+		issueID := strings.TrimSpace(wt.IssueID)
+		if issueID == "" {
+			continue
+		}
+		key := strings.ToLower(issueID)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		ids = append(ids, issueID)
+	}
+	return ids
+}
+
+func worktreeIssueIDsFromGitWorktrees(worktrees []git.Worktree) []string {
+	if len(worktrees) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(worktrees))
+	seen := map[string]struct{}{}
+	for _, wt := range worktrees {
+		issueID := strings.TrimSpace(wt.IssueID)
+		if issueID == "" {
+			continue
+		}
+		key := strings.ToLower(issueID)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		ids = append(ids, issueID)
+	}
+	return ids
 }
 
 func publishWorktreeProjectionDelta(ctx context.Context, publish func(ctx context.Context, projectID, issueID, path string), projectID string, previous []daemonstate.WorktreeState, next []git.Worktree) {

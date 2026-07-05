@@ -631,7 +631,19 @@ func WorktreeCreateCommand(deps *Dependencies, opts WorktreeCreateOptions) error
 	deps.Logger.Info("creating worktree", "project_id", target.ProjectID, "issue_id", target.IssueID, "base_branch", baseBranch)
 	createResult, err := deps.DaemonClient.CreateWorktreeResult(ctx, target.IssueID, baseBranch)
 	if err != nil {
-		return fmt.Errorf("failed to create worktree for %s: %w", target.IssueID, err)
+		wrappedErr := fmt.Errorf("failed to create worktree for %s: %w", target.IssueID, err)
+		if opts.JSON {
+			if printErr := printJSON(map[string]any{
+				"ok":          false,
+				"project_id":  target.ProjectID,
+				"issue_id":    target.IssueID,
+				"base_branch": baseBranch,
+				"error":       wrappedErr.Error(),
+			}); printErr != nil {
+				return fmt.Errorf("%w (also failed to write JSON error response: %v)", wrappedErr, printErr)
+			}
+		}
+		return wrappedErr
 	}
 	worktree := createResult.Worktree
 	baseBranch = strings.TrimSpace(createResult.BaseBranch)
@@ -3222,6 +3234,13 @@ func listTasksSnapshotForCLI(ctx context.Context, deps *Dependencies) (daemoncli
 	return deps.DaemonClient.ListTasksSnapshot(ctx)
 }
 
+func listTasksSnapshotWithDependenciesForCLI(ctx context.Context, deps *Dependencies) (daemonclient.TaskSnapshot, error) {
+	if deps == nil || deps.DaemonClient == nil {
+		return daemonclient.TaskSnapshot{}, fmt.Errorf("daemon client unavailable")
+	}
+	return deps.DaemonClient.ListTasksSnapshotWithDependencies(ctx)
+}
+
 func resolveIssueWriteImplementation(ctx context.Context, deps *Dependencies, provided string) (string, error) {
 	trimmed := strings.TrimSpace(provided)
 	impls, err := issueWriteImplementationOptions(ctx, deps)
@@ -3703,6 +3722,8 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 	)
 	if strings.TrimSpace(opts.Query) != "" {
 		snapshot, err = deps.DaemonClient.ListTasksSnapshotWithQuery(ctx, opts.Query)
+	} else if opts.Deps || len(opts.DependsOnIDs) > 0 {
+		snapshot, err = listTasksSnapshotWithDependenciesForCLI(ctx, deps)
 	} else {
 		snapshot, err = listTasksSnapshotForCLI(ctx, deps)
 	}
@@ -6297,7 +6318,7 @@ func PrimeCommand(deps *Dependencies) error {
 	if specEnabled {
 		specGuardrails = `  - In this repo, when guidance says ` + "`spec`" + `, it means records managed by ` + "`az spec req ...`" + ` and ` + "`az spec link ...`" + `, not README.md, AGENTS.md, or other internal docs.
   - ALWAYS run ` + "`az spec read --issue <issue-id>`" + ` before starting behavior work; use ` + "`az spec link list --issue <issue-id>`" + ` when you need link-only detail.
-  - To choose spec traceability, first inspect linked requirements, then use ` + "`az spec req list`" + ` and ` + "`az spec read --req <req-id>`" + ` to find nearby requirements by feature area or acceptance intent.
+  - To choose spec traceability, first inspect linked requirements, then use ` + "`az spec req list --query \"<issue title and feature terms>\" --match any --limit 10`" + ` and ` + "`az spec read --req <req-id>`" + ` to find nearby requirements across naming variants; avoid unbounded requirement lists during session startup.
   - Link an existing requirement when it already defines the intended behavior; create or update a requirement before implementation when work adds behavior, changes user-visible behavior, changes a CLI/API/TUI contract, alters persistence/daemon semantics, or reveals an underspecified contract.
   - Contract-preserving work usually does not need a new requirement: refactors, tests, formatting, tooling, observability, dependency/internal cleanup, docs/process-only edits, or fixes that restore already-specified behavior.
   - For contract-preserving work, record explicit issue-note evidence such as ` + "`Spec impact: none (contract-preserving refactor)`" + `, ` + "`Spec impact: none (tests/tooling only)`" + `, or ` + "`Spec impact: none (fix restores existing behavior)`" + `.
@@ -6312,7 +6333,7 @@ func PrimeCommand(deps *Dependencies) error {
 	var snapshot daemonclient.TaskSnapshot
 	snapshotLoaded := false
 	if deps != nil && deps.DaemonClient != nil {
-		loaded, err := deps.DaemonClient.ListTasksSnapshot(context.Background())
+		loaded, err := deps.DaemonClient.ListTasksSnapshotWithDependencies(context.Background())
 		if err == nil {
 			snapshot = loaded
 			snapshotLoaded = true

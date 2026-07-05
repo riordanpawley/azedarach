@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
@@ -20,9 +19,10 @@ import (
 )
 
 const (
-	defaultInventorySessionLimit = 200
-	defaultInventoryProjectLimit = 64
-	currentSessionEnvKey         = "AZEDARACH_TMUX_CURRENT_SESSION"
+	defaultInventorySessionLimit          = 200
+	defaultInventoryProjectLimit          = 64
+	defaultInventoryProjectSnapshotBudget = 750 * time.Millisecond
+	currentSessionEnvKey                  = "AZEDARACH_TMUX_CURRENT_SESSION"
 )
 
 // SessionInventory lists live tmux sessions for the global loader.
@@ -858,9 +858,11 @@ func intMin(a, b int) int {
 }
 
 type DaemonSnapshotSource struct {
-	projectDirs  []string
-	taskIDsByDir map[string][]string
-	logger       *slog.Logger
+	projectDirs           []string
+	taskIDsByDir          map[string][]string
+	logger                *slog.Logger
+	projectSnapshotBudget time.Duration
+	projectSnapshotLoader func(context.Context, string) (ProjectInventorySnapshot, bool)
 }
 
 func NewDaemonSnapshotSource(projectDirs []string, logger *slog.Logger) *DaemonSnapshotSource {
@@ -886,69 +888,56 @@ func (s *DaemonSnapshotSource) ListProjectSnapshots(ctx context.Context) ([]Proj
 	}
 	start := time.Now()
 	type projectResult struct {
+		index    int
 		snapshot ProjectInventorySnapshot
 		ok       bool
 	}
-	results := make([]projectResult, len(s.projectDirs))
-	var wg sync.WaitGroup
+	budget := s.snapshotBudget()
+	results := make(chan projectResult, len(s.projectDirs))
+	pending := make(map[int]string, len(s.projectDirs))
 	for i, projectDir := range s.projectDirs {
 		i, projectDir := i, projectDir
-		wg.Add(1)
+		pending[i] = projectDir
 		go func() {
-			defer wg.Done()
-			projectStart := time.Now()
-			projectID := projectIDForPath(projectDir)
-			if projectID == "" {
-				return
-			}
-			socketPath := config.DaemonSocketPathFor(projectDir)
-			if err := validateSharedDaemonExecutable(socketPath); err != nil {
-				if s.logger != nil {
-					s.logger.Warn("global selector project snapshot blocked by daemon fence",
-						"project_dir", projectDir,
-						"project_id", projectID,
-						"error", err,
-					)
-				}
-				return
-			}
-			client := daemonclient.New(transport.NewClient(socketPath)).WithProjectID(projectID)
-			taskIDs := s.taskIDsForProjectDir(projectDir)
-			snapshot, err := s.loadTaskSnapshot(ctx, client, taskIDs)
-			if err != nil {
-				if s.logger != nil {
-					s.logger.Debug("global selector project snapshot failed",
-						"elapsed_ms", time.Since(projectStart).Milliseconds(),
-						"project_dir", projectDir,
-						"project_id", projectID,
-						"requested_task_count", len(taskIDs),
-						"error", err,
-					)
-				}
-				return
-			}
-			if s.logger != nil {
-				s.logger.Info("global selector project snapshot loaded",
-					"elapsed_ms", time.Since(projectStart).Milliseconds(),
-					"project_dir", projectDir,
-					"project_id", projectID,
-					"task_count", len(snapshot.Tasks),
-					"requested_task_count", len(taskIDs),
-				)
-			}
-			results[i] = projectResult{
-				snapshot: ProjectInventorySnapshot{
-					ProjectID:   projectID,
-					ProjectPath: projectDir,
-					Tasks:       snapshot.Tasks,
-				},
-				ok: true,
-			}
+			projectCtx, cancel := context.WithTimeout(ctx, budget)
+			defer cancel()
+			snapshot, ok := s.loadProjectSnapshot(projectCtx, projectDir)
+			results <- projectResult{index: i, snapshot: snapshot, ok: ok}
 		}()
 	}
-	wg.Wait()
-	out := make([]ProjectInventorySnapshot, 0, len(results))
-	for _, result := range results {
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	completed := make([]projectResult, 0, len(s.projectDirs))
+	timeoutCount := 0
+	for len(pending) > 0 {
+		select {
+		case result := <-results:
+			delete(pending, result.index)
+			if result.ok {
+				completed = append(completed, result)
+			}
+		case <-timer.C:
+			timeoutCount = len(pending)
+			for _, projectDir := range pending {
+				if s.logger != nil {
+					s.logger.Warn("global selector project snapshot timed out",
+						"elapsed_ms", time.Since(start).Milliseconds(),
+						"project_dir", projectDir,
+						"budget_ms", budget.Milliseconds(),
+					)
+				}
+			}
+			pending = nil
+		case <-ctx.Done():
+			timeoutCount = len(pending)
+			pending = nil
+		}
+	}
+	sort.SliceStable(completed, func(i, j int) bool {
+		return completed[i].index < completed[j].index
+	})
+	out := make([]ProjectInventorySnapshot, 0, len(completed))
+	for _, result := range completed {
 		if result.ok {
 			out = append(out, result.snapshot)
 		}
@@ -958,9 +947,73 @@ func (s *DaemonSnapshotSource) ListProjectSnapshots(ctx context.Context) ([]Proj
 			"elapsed_ms", time.Since(start).Milliseconds(),
 			"project_count", len(s.projectDirs),
 			"snapshot_count", len(out),
+			"timeout_count", timeoutCount,
+			"fallback_count", len(s.projectDirs)-len(out),
+			"budget_ms", budget.Milliseconds(),
 		)
 	}
 	return out, nil
+}
+
+func (s *DaemonSnapshotSource) snapshotBudget() time.Duration {
+	if s != nil && s.projectSnapshotBudget > 0 {
+		return s.projectSnapshotBudget
+	}
+	return defaultInventoryProjectSnapshotBudget
+}
+
+func (s *DaemonSnapshotSource) loadProjectSnapshot(ctx context.Context, projectDir string) (ProjectInventorySnapshot, bool) {
+	if s == nil {
+		return ProjectInventorySnapshot{}, false
+	}
+	if s.projectSnapshotLoader != nil {
+		return s.projectSnapshotLoader(ctx, projectDir)
+	}
+	projectStart := time.Now()
+	projectID := projectIDForPath(projectDir)
+	if projectID == "" {
+		return ProjectInventorySnapshot{}, false
+	}
+	socketPath := config.DaemonSocketPathFor(projectDir)
+	if err := validateSharedDaemonExecutable(socketPath); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("global selector project snapshot blocked by daemon fence",
+				"project_dir", projectDir,
+				"project_id", projectID,
+				"error", err,
+			)
+		}
+		return ProjectInventorySnapshot{}, false
+	}
+	client := daemonclient.New(transport.NewClient(socketPath)).WithProjectID(projectID)
+	taskIDs := s.taskIDsForProjectDir(projectDir)
+	snapshot, err := s.loadTaskSnapshot(ctx, client, taskIDs)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Debug("global selector project snapshot failed",
+				"elapsed_ms", time.Since(projectStart).Milliseconds(),
+				"project_dir", projectDir,
+				"project_id", projectID,
+				"requested_task_count", len(taskIDs),
+				"error", err,
+			)
+		}
+		return ProjectInventorySnapshot{}, false
+	}
+	if s.logger != nil {
+		s.logger.Info("global selector project snapshot loaded",
+			"elapsed_ms", time.Since(projectStart).Milliseconds(),
+			"project_dir", projectDir,
+			"project_id", projectID,
+			"task_count", len(snapshot.Tasks),
+			"requested_task_count", len(taskIDs),
+		)
+	}
+	return ProjectInventorySnapshot{
+		ProjectID:   projectID,
+		ProjectPath: projectDir,
+		Tasks:       snapshot.Tasks,
+	}, true
 }
 
 func (s *DaemonSnapshotSource) loadTaskSnapshot(ctx context.Context, client taskSnapshotReader, taskIDs []string) (daemonclient.TaskSnapshot, error) {

@@ -322,8 +322,7 @@ func (m Model) boardTaskAtMouse(msg tea.MouseMsg, columns []board.Column) boardM
 		return boardMouseHit{}
 	}
 
-	topIndicator := start > 0
-	bottomIndicator := end < len(tasks)
+	topIndicator, bottomIndicator := board.VisibleScrollIndicators(len(tasks), start, end, bodyHeight, linesPerCard)
 	if topIndicator && bottomIndicator {
 		contentHeight := (end - start) * linesPerCard
 		if topIndicator {

@@ -585,6 +585,11 @@ func (c *Client) ListTasksSnapshotWithMode(ctx context.Context, mode ReadWaitMod
 	return c.ListTasksSnapshotWithQueryMode(ctx, "", mode)
 }
 
+// ListTasksSnapshotWithDependencies fetches the current task set including non-parent dependency edges.
+func (c *Client) ListTasksSnapshotWithDependencies(ctx context.Context) (TaskSnapshot, error) {
+	return c.listTasksSnapshotWithQueryMode(ctx, "", ReadWaitModeDefault, true)
+}
+
 // ListTasksSnapshotWithQuery fetches a daemon-filtered task snapshot for an issue content query.
 func (c *Client) ListTasksSnapshotWithQuery(ctx context.Context, query string) (TaskSnapshot, error) {
 	return c.ListTasksSnapshotWithQueryMode(ctx, query, ReadWaitModeDefault)
@@ -592,12 +597,17 @@ func (c *Client) ListTasksSnapshotWithQuery(ctx context.Context, query string) (
 
 // ListTasksSnapshotWithQueryMode fetches a task snapshot with an optional daemon-side content query.
 func (c *Client) ListTasksSnapshotWithQueryMode(ctx context.Context, query string, mode ReadWaitMode) (TaskSnapshot, error) {
+	return c.listTasksSnapshotWithQueryMode(ctx, query, mode, false)
+}
+
+func (c *Client) listTasksSnapshotWithQueryMode(ctx context.Context, query string, mode ReadWaitMode, includeDependencies bool) (TaskSnapshot, error) {
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
 
 	var body any
-	if query = strings.TrimSpace(query); query != "" {
-		body = protocol.TaskListRequestBody{Query: query}
+	query = strings.TrimSpace(query)
+	if query != "" || includeDependencies {
+		body = protocol.TaskListRequestBody{Query: query, IncludeDependencies: includeDependencies}
 	}
 
 	resp, err := c.commandJSONResponse(waitCtx, CommandTaskList, body)

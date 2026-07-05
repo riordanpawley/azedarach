@@ -68,6 +68,9 @@ func TestEventLogOverlay_View_RendersNewestFirst(t *testing.T) {
 		t.Fatalf("events[last].Revision = %d, want newest revision %d", got, newer.Revision)
 	}
 
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 160, Height: 34})
+	overlay = model.(*EventLogOverlay)
+
 	view := overlay.View()
 	if !strings.Contains(view, "Event Log") {
 		t.Fatalf("View() missing title: %s", view)
@@ -78,18 +81,28 @@ func TestEventLogOverlay_View_RendersNewestFirst(t *testing.T) {
 	if strings.Contains(view, "Newest runtime events first") {
 		t.Fatalf("View() still contains legacy header: %s", view)
 	}
+	if !strings.Contains(view, "TIME") || !strings.Contains(view, "SUMMARY") {
+		t.Fatalf("View() missing compact table header: %s", view)
+	}
 
-	newerIdx := strings.Index(view, newer.Event)
-	olderIdx := strings.Index(view, older.Event)
+	newerIdx := strings.Index(view, "Daemon event newer")
+	olderIdx := strings.Index(view, "Daemon event older")
 	if newerIdx < 0 || olderIdx < 0 {
-		t.Fatalf("View() missing event names: %s", view)
+		t.Fatalf("View() missing compact event summaries: %s", view)
 	}
 	if newerIdx > olderIdx {
 		t.Fatalf("newer event rendered after older event: newer=%d older=%d view=%s", newerIdx, olderIdx, view)
 	}
 
-	if !strings.Contains(view, "correlation=corr-new") {
-		t.Fatalf("View() missing newer metadata: %s", view)
+	if strings.Contains(view, "correlation=corr-new") {
+		t.Fatalf("compact View() should hide detail metadata until expanded: %s", view)
+	}
+
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	overlay = model.(*EventLogOverlay)
+	expanded := overlay.View()
+	if !strings.Contains(expanded, newer.Event) || !strings.Contains(expanded, "correlation=corr-new") {
+		t.Fatalf("expanded View() missing newer details: %s", expanded)
 	}
 }
 
@@ -234,18 +247,65 @@ func TestEventLogOverlay_Update_LogActionKeys(t *testing.T) {
 	}
 }
 
+func TestEventLogOverlay_Update_ExpandUsesFirstVisibleEventWithLogPaths(t *testing.T) {
+	newer := testEvent(2, "daemon.event.newer")
+	older := testEvent(1, "daemon.event.older")
+	overlay := NewEventLogOverlayWithLogFiles([]protocol.EventEnvelope{older, newer}, "/tmp/az-tui.log", "/tmp/azd.log")
+
+	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	overlay = model.(*EventLogOverlay)
+
+	view := overlay.View()
+	if !strings.Contains(view, newer.Event) {
+		t.Fatalf("expanded view missing newest event: %s", view)
+	}
+	if strings.Contains(view, older.Event) {
+		t.Fatalf("expanded view should not expand older event at top: %s", view)
+	}
+}
+
+func TestEventLogOverlay_Update_ExpandsRevisionlessLocalEvent(t *testing.T) {
+	overlay := NewEventLogOverlay([]protocol.EventEnvelope{
+		{
+			ProtocolVersion: protocol.CurrentVersion,
+			ProjectID:       "proj-a",
+			Event:           "ui.toast",
+			Kind:            protocol.EnvelopeKind("info"),
+			EmittedAt:       time.Date(2026, time.March, 25, 17, 0, 0, 0, time.UTC),
+			Body:            []byte("Saved settings"),
+		},
+	})
+
+	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	overlay = model.(*EventLogOverlay)
+
+	view := overlay.View()
+	if !strings.Contains(view, "ui.toast") || !strings.Contains(view, "Saved settings") {
+		t.Fatalf("expanded revisionless event missing details: %s", view)
+	}
+}
+
 func TestEventLogOverlay_Update_FilterCycles(t *testing.T) {
 	hookBody := []byte(`{"source":"githooks.hook","message":"queued daemon git status refresh"}`)
 	overlay := NewEventLogOverlayWithLogFiles([]protocol.EventEnvelope{
 		testEvent(1, "operation.running"),
-		testEvent(2, "git.status.updated"),
 		{
 			ProtocolVersion: protocol.CurrentVersion,
 			ProjectID:       "proj-a",
-			Revision:        3,
+			Revision:        2,
+			Event:           protocol.EventTaskUpdated,
+			Kind:            protocol.EnvelopeKindEvent,
+			EmittedAt:       time.Date(2026, time.March, 25, 17, 0, 2, 0, time.UTC),
+			Body:            []byte(`{"project_id":"proj-a","task_id":"az-2"}`),
+		},
+		testEvent(3, "git.status.updated"),
+		{
+			ProtocolVersion: protocol.CurrentVersion,
+			ProjectID:       "proj-a",
+			Revision:        4,
 			Event:           protocol.EventHookLogAppended,
 			Kind:            protocol.EnvelopeKindEvent,
-			EmittedAt:       time.Date(2026, time.March, 25, 17, 0, 3, 0, time.UTC),
+			EmittedAt:       time.Date(2026, time.March, 25, 17, 0, 4, 0, time.UTC),
 			Body:            hookBody,
 		},
 	}, "", "")
@@ -258,8 +318,18 @@ func TestEventLogOverlay_Update_FilterCycles(t *testing.T) {
 	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
 	overlay = model.(*EventLogOverlay)
 	opView := overlay.View()
-	if !strings.Contains(opView, "[Operation]") {
+	if !strings.Contains(opView, "[Ops]") {
 		t.Fatalf("operation filter not highlighted after tab: %s", opView)
+	}
+
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
+	overlay = model.(*EventLogOverlay)
+	mutationView := overlay.View()
+	if !strings.Contains(mutationView, "[Tasks]") {
+		t.Fatalf("mutation filter not highlighted after tab: %s", mutationView)
+	}
+	if !strings.Contains(mutationView, "az-2") || !strings.Contains(mutationView, "task") {
+		t.Fatalf("mutation filter view missing task event: %s", mutationView)
 	}
 
 	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
@@ -275,7 +345,7 @@ func TestEventLogOverlay_Update_FilterCycles(t *testing.T) {
 	if !strings.Contains(hookView, "[Hooks]") {
 		t.Fatalf("hook filter not highlighted after tab: %s", hookView)
 	}
-	if !strings.Contains(hookView, protocol.EventHookLogAppended) {
+	if !strings.Contains(hookView, protocol.EventHookLogAppended) && !strings.Contains(hookView, "Hook log") {
 		t.Fatalf("hook filter view missing hook event: %s", hookView)
 	}
 }
@@ -324,11 +394,11 @@ func TestEventLogOverlay_ContentCacheInvalidation(t *testing.T) {
 		t.Fatal("expected initial content cache to be dirty")
 	}
 
-	first := overlay.contentLines()
+	first := overlay.contentLines(80)
 	if overlay.contentDirty {
 		t.Fatal("expected cache to be clean after rendering content lines")
 	}
-	second := overlay.contentLines()
+	second := overlay.contentLines(80)
 	if len(first) != len(second) {
 		t.Fatalf("cache size mismatch: %d vs %d", len(first), len(second))
 	}

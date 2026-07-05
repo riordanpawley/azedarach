@@ -99,8 +99,10 @@ const (
 	sessionInvariantSessionStopTargets     daemonInvariantID = daemonInvariantSessionStopTargets
 	sessionInvariantSessionReconcile       daemonInvariantID = daemonInvariantSessionReconcile
 
-	sessionConflictWindowName   = "resolve-conflict"
-	sessionActivityStartupGrace = 45 * time.Second
+	sessionConflictWindowName         = "resolve-conflict"
+	sessionActivityStartupGrace       = 45 * time.Second
+	sessionRestartContinuePromptDelay = 500 * time.Millisecond
+	sessionRestartContinuePrompt      = "Continue your prior task. Start by running `az prime` if you need to refresh issue context, then keep working from the existing conversation without waiting for further instruction."
 )
 
 func reportSessionStartProgress(ctx context.Context, phase, message string, percent int) {
@@ -759,20 +761,42 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	reportSessionStartProgress(ctx, "worktree_preflight", fmt.Sprintf("creating or reusing worktree from %s", baseBranch), 25)
 	worktree, err := worktreeManager.CreateWithTitle(ctx, cmd.IssueID, task.Title, baseBranch)
 	reusedWorktree := false
+	worktreeCreateError := ""
 	worktreeSetupWarning := ""
 	if err != nil {
-		// Recovery path: git worktree add can return non-zero after materializing
-		// a usable worktree (for example, hooks that fail post-checkout).
-		// If we can load the worktree for the issue, continue by reusing it.
-		if recoveredWorktree, recoverErr := worktreeManager.Get(ctx, cmd.IssueID); recoverErr == nil {
+		worktreeCreateError = err.Error()
+		if errors.Is(err, git.ErrWorktreeAlreadyExists) {
+			recoveredWorktree, recoverErr := worktreeManager.Get(ctx, cmd.IssueID)
+			if recoverErr != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree already exists but could not be loaded: %v", recoverErr)), nil
+			}
 			worktree = recoveredWorktree
 			reusedWorktree = true
-			worktreeSetupWarning = fmt.Sprintf("Worktree setup warning: git worktree create reported %v; recovered existing worktree at %s. Validate setup in the worktree before relying on later checks.", err, worktree.Path)
-		} else {
-			if !errors.Is(err, git.ErrWorktreeAlreadyExists) {
-				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+			worktreeSetupWarning = fmt.Sprintf("Worktree setup warning: worktree already existed for %s; reused existing worktree at %s without running worktree init commands.", cmd.IssueID, worktree.Path)
+		} else if materializedWorktree, recoverErr := worktreeManager.Get(ctx, cmd.IssueID); recoverErr == nil {
+			cleanupNote := d.cleanupWorktreeAfterCreateFailure(ctx, worktreeManager, cmd.IssueID, materializedWorktree.Path)
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("git worktree create failed after materializing worktree",
+					"project_id", cmd.ProjectID,
+					"issue_id", cmd.IssueID,
+					"session_id", cmd.SessionID,
+					"worktree", materializedWorktree.Path,
+					"branch", materializedWorktree.Branch,
+					"worktree_create_error", worktreeCreateError,
+				)
 			}
-			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree already exists but could not be loaded: %v", recoverErr)), nil
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree create failed for %s: %v%s", cmd.IssueID, err, cleanupNote)), nil
+		} else {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("git worktree create failed",
+					"project_id", cmd.ProjectID,
+					"issue_id", cmd.IssueID,
+					"session_id", cmd.SessionID,
+					"worktree_create_error", worktreeCreateError,
+					"materialized_worktree_lookup_error", recoverErr,
+				)
+			}
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 		}
 	}
 	if !reusedWorktree {
@@ -820,6 +844,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			"base_branch", baseBranch,
 			"base_branch_ancestor_issue_id", baseBranchAncestorIssueID,
 			"reused_worktree", reusedWorktree,
+			"worktree_create_error", worktreeCreateError,
 		)
 	}
 	d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch)
@@ -940,6 +965,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			"session_id", cmd.SessionID,
 			"worktree", worktree.Path,
 			"reused_worktree", reusedWorktree,
+			"worktree_create_error", worktreeCreateError,
 		)
 	}
 	return d.commandOutput(req, output), nil
@@ -1021,7 +1047,7 @@ func (d *Daemon) handleSessionPause(ctx context.Context, req protocol.RequestEnv
 	if !exists {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found: %s (use 'az start %s' to create)", cmd.IssueID, cmd.IssueID)), nil
 	}
-	if !d.sessionLifecycleTransitionNeeded(cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonstate.SessionStatePaused) {
+	if !d.sessionLifecycleOrAgentActivityTransitionNeeded(cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonstate.SessionStatePaused) {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("daemon session pause unchanged",
 				"project_id", cmd.ProjectID,
@@ -1071,7 +1097,7 @@ func (d *Daemon) handleSessionResume(ctx context.Context, req protocol.RequestEn
 	if !exists {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found: %s (use 'az start %s' to create)", cmd.IssueID, cmd.IssueID)), nil
 	}
-	if !d.sessionLifecycleTransitionNeeded(cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonstate.SessionStateAttached) {
+	if !d.sessionLifecycleOrAgentActivityTransitionNeeded(cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonstate.SessionStateAttached) {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("daemon session resume unchanged",
 				"project_id", cmd.ProjectID,
@@ -1380,6 +1406,20 @@ func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.Reque
 			result.Sessions = append(result.Sessions, item)
 			continue
 		}
+		if d.sessionRestartNeedsPostLaunchPrompt(projectID) {
+			if err := waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
+				item.Error = err.Error()
+				result.Failed++
+				result.Sessions = append(result.Sessions, item)
+				continue
+			}
+			if err := d.tmux.PasteTextAndSubmit(ctx, sessionID, sessionRestartContinuePrompt); err != nil {
+				item.Error = err.Error()
+				result.Failed++
+				result.Sessions = append(result.Sessions, item)
+				continue
+			}
+		}
 		item.Restarted = true
 		result.Restarted++
 		if issueID != "" {
@@ -1557,8 +1597,15 @@ func (d *Daemon) ensureConflictWorktree(ctx context.Context, projectID, issueID,
 	baseBranch := d.baseBranchForProject(projectID)
 	worktree, createErr := worktreeManager.CreateWithTitle(ctx, issueID, issueTitle, baseBranch)
 	if createErr != nil {
-		if recoveredWorktree, recoverErr := worktreeManager.Get(ctx, issueID); recoverErr == nil {
-			return recoveredWorktree.Path, recoveredWorktree.Branch, true, nil
+		if errors.Is(createErr, git.ErrWorktreeAlreadyExists) {
+			if recoveredWorktree, recoverErr := worktreeManager.Get(ctx, issueID); recoverErr == nil {
+				return recoveredWorktree.Path, recoveredWorktree.Branch, true, nil
+			}
+			return "", "", false, createErr
+		}
+		if materializedWorktree, recoverErr := worktreeManager.Get(ctx, issueID); recoverErr == nil {
+			cleanupNote := d.cleanupWorktreeAfterCreateFailure(ctx, worktreeManager, issueID, materializedWorktree.Path)
+			return "", "", false, fmt.Errorf("worktree create failed for %s: %w%s", issueID, createErr, cleanupNote)
 		}
 		return "", "", false, createErr
 	}
@@ -1630,6 +1677,32 @@ func (d *Daemon) cleanupNewWorktreeAfterInitFailure(ctx context.Context, worktre
 		)
 	}
 	return fmt.Sprintf(" (cleaned up worktree %s)", worktreePath)
+}
+
+func (d *Daemon) cleanupWorktreeAfterCreateFailure(ctx context.Context, worktreeManager *git.WorktreeManager, issueID, worktreePath string) string {
+	if worktreeManager == nil {
+		return ""
+	}
+	if _, err := worktreeManager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
+		Force:         true,
+		BranchCleanup: git.WorktreeBranchCleanupRequired,
+	}); err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("failed to rollback worktree after create failure",
+				"issue_id", issueID,
+				"worktree", worktreePath,
+				"error", err,
+			)
+		}
+		return fmt.Sprintf(" (rollback failed for worktree %s: %v)", worktreePath, err)
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("rolled back worktree after create failure",
+			"issue_id", issueID,
+			"worktree", worktreePath,
+		)
+	}
+	return fmt.Sprintf(" (rolled back worktree %s)", worktreePath)
 }
 
 func (d *Daemon) ensureConflictSession(ctx context.Context, projectID, issueID, canonicalSessionID, worktreePath string) (sessionName string, reused bool, err error) {
@@ -3334,8 +3407,11 @@ func (d *Daemon) buildSessionResumeCommand(projectID, issueID, sessionID string,
 	if tool == "" {
 		tool = "claude"
 	}
+	if strings.EqualFold(tool, "claude") {
+		return d.buildClaudeContinueCommand(projectID, issueID, yolo, sessionRestartContinuePrompt)
+	}
 	if !strings.EqualFold(tool, "codex") {
-		return d.buildSessionLaunchCommand(projectID, issueID, sessionID, yolo, imagePaths, "")
+		return d.buildSessionLaunchCommand(projectID, issueID, sessionID, yolo, imagePaths, sessionRestartContinuePrompt)
 	}
 
 	parts := []string{
@@ -3356,6 +3432,31 @@ func (d *Daemon) buildSessionResumeCommand(projectID, issueID, sessionID string,
 	// Azedarach tracks tmux session IDs, not Codex conversation UUIDs.
 	// Codex's cwd filter makes --last target this worktree's latest session.
 	parts = append(parts, "--last")
+	return strings.Join(parts, " ")
+}
+
+func (d *Daemon) sessionRestartNeedsPostLaunchPrompt(projectID string) bool {
+	tool := strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool)
+	return strings.EqualFold(tool, "codex")
+}
+
+func (d *Daemon) buildClaudeContinueCommand(projectID, issueID string, yolo bool, prompt string) string {
+	projectCfg := d.runtimeConfigForProject(projectID)
+	tool := strings.TrimSpace(projectCfg.CLITool)
+	if tool == "" {
+		tool = "claude"
+	}
+	parts := []string{
+		fmt.Sprintf(`AZEDARACH_ISSUE_ID="%s"`, escapeForShellDoubleQuotes(issueID)),
+		tool,
+		"--continue",
+	}
+	if yolo || projectCfg.DangerouslySkipPermissions {
+		parts = append(parts, "--dangerously-skip-permissions")
+	}
+	if strings.TrimSpace(prompt) != "" {
+		parts = append(parts, fmt.Sprintf(`"%s"`, escapeForShellDoubleQuotes(prompt)))
+	}
 	return strings.Join(parts, " ")
 }
 

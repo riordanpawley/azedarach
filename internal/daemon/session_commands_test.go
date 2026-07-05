@@ -162,24 +162,31 @@ func (r *testGitRunner) Run(_ context.Context, args ...string) (string, error) {
 	return "", nil
 }
 
-type recoveringWorktreeRunner struct {
+type worktreeCreateRunner struct {
 	worktreePath     string
 	branchName       string
+	preexisting      bool
+	failCreate       bool
 	deletedFiles     []string
 	porcelainStatus  string
 	listCalls        int
 	lsFilesDeleted   int
 	statusCalls      int
 	worktreeAddCalls int
+	worktreeRemoved  bool
+	branchDeleted    bool
 }
 
-func (r *recoveringWorktreeRunner) Run(_ context.Context, args ...string) (string, error) {
+func (r *worktreeCreateRunner) Run(_ context.Context, args ...string) (string, error) {
 	if len(args) >= 2 && args[0] == "config" && args[1] == "user.name" {
 		return "testuser\n", nil
 	}
 	if len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" {
 		r.listCalls++
-		if r.listCalls == 1 {
+		if r.worktreeRemoved {
+			return "", nil
+		}
+		if !r.preexisting && r.worktreeAddCalls == 0 {
 			return "", nil
 		}
 		return "worktree " + r.worktreePath + "\nbranch refs/heads/" + r.branchName + "\n\n", nil
@@ -194,7 +201,20 @@ func (r *recoveringWorktreeRunner) Run(_ context.Context, args ...string) (strin
 	}
 	if len(args) >= 3 && args[0] == "worktree" && args[1] == "add" && args[2] == "-b" {
 		r.worktreeAddCalls++
-		return "", fmt.Errorf("git worktree add -b failed: exit status 1: hook failed")
+		_ = os.MkdirAll(r.worktreePath, 0o755)
+		if r.failCreate {
+			return "", fmt.Errorf("git worktree add -b failed: exit status 1: hook failed")
+		}
+		return "", nil
+	}
+	if len(args) >= 3 && args[0] == "worktree" && args[1] == "remove" {
+		r.worktreeRemoved = true
+		_ = os.RemoveAll(r.worktreePath)
+		return "", nil
+	}
+	if len(args) >= 3 && args[0] == "branch" && args[1] == "-D" {
+		r.branchDeleted = true
+		return "", nil
 	}
 	return "", nil
 }
@@ -540,14 +560,24 @@ func TestSessionRestartAllSkipsBusySessionsByDefault(t *testing.T) {
 	if result.Restarted != 1 || result.Skipped != 1 || result.Failed != 0 {
 		t.Fatalf("result = %+v, want restarted=1 skipped=1 failed=0", result)
 	}
-	if tmuxRunner.sendKeysCalls != 2 {
-		t.Fatalf("send-keys calls = %d, want C-c and resume for idle session only", tmuxRunner.sendKeysCalls)
+	if tmuxRunner.sendKeysCalls != 3 {
+		t.Fatalf("send-keys calls = %d, want C-c, resume, and continuation submit for idle session only", tmuxRunner.sendKeysCalls)
 	}
-	if got := tmuxRunner.sendKeysTargets; !reflect.DeepEqual(got, []string{idleSession, idleSession}) {
-		t.Fatalf("sendKeysTargets = %+v, want idle session twice", got)
+	if got := tmuxRunner.sendKeysTargets; !reflect.DeepEqual(got, []string{idleSession, idleSession, idleSession}) {
+		t.Fatalf("sendKeysTargets = %+v, want idle session for interrupt, resume, and submit", got)
 	}
-	if got := tmuxRunner.sendKeysPayloads[1]; !strings.Contains(got, "codex resume") || !strings.Contains(got, "--last") {
-		t.Fatalf("resume command = %q, want codex resume --last for idle session", got)
+	if got := tmuxRunner.sendKeysPayloads[1]; !strings.Contains(got, "codex resume") || !strings.Contains(got, "--last") || strings.Contains(got, "Continue your prior task") {
+		t.Fatalf("resume command = %q, want codex resume --last without positional continuation prompt", got)
+	}
+	foundContinuationPrompt := false
+	for _, command := range tmuxRunner.commands {
+		if len(command) >= 4 && command[0] == "set-buffer" && strings.Contains(command[3], "Continue your prior task") {
+			foundContinuationPrompt = true
+			break
+		}
+	}
+	if !foundContinuationPrompt {
+		t.Fatalf("missing continuation prompt paste in tmux commands: %+v", tmuxRunner.commands)
 	}
 }
 
@@ -623,8 +653,8 @@ func TestSessionRestartAllForceBusyIncludesBusySessionsAndConfiguredFlags(t *tes
 	if result.Restarted != 2 || result.Skipped != 0 || result.Failed != 0 {
 		t.Fatalf("result = %+v, want restarted=2 skipped=0 failed=0", result)
 	}
-	if tmuxRunner.sendKeysCalls != 4 {
-		t.Fatalf("send-keys calls = %d, want C-c and resume for two sessions", tmuxRunner.sendKeysCalls)
+	if tmuxRunner.sendKeysCalls != 6 {
+		t.Fatalf("send-keys calls = %d, want C-c, resume, and continuation submit for two sessions", tmuxRunner.sendKeysCalls)
 	}
 	for _, payload := range tmuxRunner.sendKeysPayloads {
 		if strings.Contains(payload, "codex resume") && !strings.Contains(payload, "--dangerously-bypass-approvals-and-sandbox") {
@@ -755,7 +785,7 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 	}
 }
 
-func TestSessionStartRecoversFromPartialWorktreeCreate(t *testing.T) {
+func TestSessionStartRollsBackWorktreeWhenCreateFailsAfterMaterializing(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID := "proj"
@@ -768,18 +798,23 @@ func TestSessionStartRecoversFromPartialWorktreeCreate(t *testing.T) {
 		_ = issuesClient.CloseDB()
 	})
 	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
-		Title: "Recover from partial worktree create",
+		Title: "Rollback failed worktree create",
 		Type:  domain.TypeTask,
 	})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	branch := "testuser/" + issueID + "/recover-from-partial-work"
+	branch := "testuser/" + issueID + "/rollback-failed-create"
 	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
-	worktreeRunner := &recoveringWorktreeRunner{
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatalf("mkdir materialized worktree: %v", err)
+	}
+	initMarker := filepath.Join(worktreePath, "init-ran")
+	worktreeRunner := &worktreeCreateRunner{
 		worktreePath: worktreePath,
 		branchName:   branch,
+		failCreate:   true,
 	}
 	tmuxRunner := newSessionStartTmuxRunner()
 	store := daemonstate.NewStore()
@@ -792,7 +827,10 @@ func TestSessionStartRecoversFromPartialWorktreeCreate(t *testing.T) {
 			BaseBranch:   "main",
 			CLITool:      "codex",
 			SessionShell: "zsh",
-			Logger:       slog.Default(),
+			WorktreeInitCommands: []string{
+				"touch init-ran",
+			},
+			Logger: slog.Default(),
 		},
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		issues:       issuesClient,
@@ -812,7 +850,7 @@ func TestSessionStartRecoversFromPartialWorktreeCreate(t *testing.T) {
 
 	req := protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-start-recover",
+		RequestID:       "req-start-rollback-create",
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         "session.start",
 		Meta: protocol.Metadata{
@@ -828,52 +866,44 @@ func TestSessionStartRecoversFromPartialWorktreeCreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleSessionStartDirect returned error: %v", err)
 	}
-	if !resp.OK {
-		t.Fatalf("session start response not OK: %+v", resp)
+	if resp.OK || resp.Error == nil {
+		t.Fatalf("session start response = %+v, want worktree create failure", resp)
 	}
-
-	var payload struct {
-		Output string `json:"output"`
-	}
-	if err := json.Unmarshal(resp.Body, &payload); err != nil {
-		t.Fatalf("unmarshal response body: %v", err)
-	}
-	if !strings.Contains(payload.Output, "Worktree reused: "+worktreePath) {
-		t.Fatalf("output = %q, want reused worktree path", payload.Output)
-	}
-	if !strings.Contains(payload.Output, "Worktree setup warning:") {
-		t.Fatalf("output = %q, want recovered worktree warning", payload.Output)
-	}
-	sessionID := naming.CanonicalSessionID(projectID, issueID)
-	if tmuxRunner.sendKeysCalls != 2 {
-		t.Fatalf("send-keys calls = %d, want context export and launch", tmuxRunner.sendKeysCalls)
-	}
-	contextExport := tmuxRunner.sendKeysPayloads[0]
 	for _, want := range []string{
-		"export ",
-		"AZEDARACH_PROJECT_ID='" + projectID + "'",
-		"AZEDARACH_ISSUE_ID='" + issueID + "'",
-		"AZEDARACH_SESSION_ID='" + sessionID + "'",
+		"worktree create failed for " + issueID,
+		"git worktree add -b",
+		worktreePath,
+		"hook failed",
+		"rolled back worktree " + worktreePath,
 	} {
-		if !strings.Contains(contextExport, want) {
-			t.Fatalf("context export = %q, want %q", contextExport, want)
+		if !strings.Contains(resp.Error.Message, want) {
+			t.Fatalf("error message = %q, want %q", resp.Error.Message, want)
 		}
 	}
-	if !strings.Contains(tmuxRunner.sendKeysPayloads[1], `AZEDARACH_ISSUE_ID="`+issueID+`" codex`) {
-		t.Fatalf("launch payload = %q, want codex launch with issue env", tmuxRunner.sendKeysPayloads[1])
+	if worktreeRunner.lsFilesDeleted != 0 {
+		t.Fatalf("ls-files -d calls = %d, want 0 when create fails", worktreeRunner.lsFilesDeleted)
 	}
-	if got := tmuxRunner.env[sessionID]["AZEDARACH_PROJECT_ID"]; got != projectID {
-		t.Fatalf("tmux AZEDARACH_PROJECT_ID = %q, want %q", got, projectID)
+	if worktreeRunner.statusCalls != 0 {
+		t.Fatalf("status --porcelain calls = %d, want 0 when create fails", worktreeRunner.statusCalls)
 	}
-	if got := tmuxRunner.env[sessionID]["AZEDARACH_ISSUE_ID"]; got != issueID {
-		t.Fatalf("tmux AZEDARACH_ISSUE_ID = %q, want %q", got, issueID)
+	if _, err := os.Stat(initMarker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("init marker stat error = %v, want not exist", err)
 	}
-	if got := tmuxRunner.env[sessionID]["AZEDARACH_SESSION_ID"]; got != sessionID {
-		t.Fatalf("tmux AZEDARACH_SESSION_ID = %q, want %q", got, sessionID)
+	if !worktreeRunner.worktreeRemoved {
+		t.Fatal("expected failed create to roll back materialized worktree")
+	}
+	if !worktreeRunner.branchDeleted {
+		t.Fatal("expected failed create rollback to delete issue branch")
+	}
+	if len(tmuxRunner.sessions) != 0 {
+		t.Fatalf("tmux sessions = %v, want none when create fails", tmuxRunner.sessions)
+	}
+	if tmuxRunner.sendKeysCalls != 0 {
+		t.Fatalf("send-keys calls = %d, want none when create fails", tmuxRunner.sendKeysCalls)
 	}
 }
 
-func TestSessionStartAllowsRecoveredDirtyWorktreeWithoutInit(t *testing.T) {
+func TestSessionStartDoesNotInspectDirtyWorktreeAfterCreateFailure(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID := "proj"
@@ -886,22 +916,23 @@ func TestSessionStartAllowsRecoveredDirtyWorktreeWithoutInit(t *testing.T) {
 		_ = issuesClient.CloseDB()
 	})
 	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
-		Title: "Allow dirty recovered worktree",
+		Title: "Rollback dirty materialized worktree",
 		Type:  domain.TypeTask,
 	})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	branch := "testuser/" + issueID + "/allow-dirty-recovery"
+	branch := "testuser/" + issueID + "/rollback-dirty-create"
 	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
 	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
 		t.Fatalf("mkdir worktree: %v", err)
 	}
 	initMarker := filepath.Join(worktreePath, "init-ran")
-	worktreeRunner := &recoveringWorktreeRunner{
+	worktreeRunner := &worktreeCreateRunner{
 		worktreePath:    worktreePath,
 		branchName:      branch,
+		failCreate:      true,
 		deletedFiles:    []string{"internal-docs/setup.md", "ui/package.json"},
 		porcelainStatus: " D internal-docs/setup.md\n D ui/package.json\n?? generated.js\n",
 	}
@@ -932,7 +963,111 @@ func TestSessionStartAllowsRecoveredDirtyWorktreeWithoutInit(t *testing.T) {
 
 	resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-start-allow-dirty-recovered",
+		RequestID:       "req-start-rollback-dirty-materialized",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.start",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body: marshalJSON(map[string]any{
+			"project_id": projectID,
+			"session_id": issueID,
+			"start_work": false,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if resp.OK || resp.Error == nil {
+		t.Fatalf("session start response = %+v, want materialized worktree create failure", resp)
+	}
+	if !strings.Contains(resp.Error.Message, "worktree create failed for "+issueID) {
+		t.Fatalf("error message = %q, want create failure", resp.Error.Message)
+	}
+	if !strings.Contains(resp.Error.Message, "rolled back worktree "+worktreePath) {
+		t.Fatalf("error message = %q, want rollback note", resp.Error.Message)
+	}
+	if worktreeRunner.lsFilesDeleted != 0 {
+		t.Fatalf("ls-files -d calls = %d, want 0 when create fails", worktreeRunner.lsFilesDeleted)
+	}
+	if worktreeRunner.statusCalls != 0 {
+		t.Fatalf("status --porcelain calls = %d, want 0 when create fails", worktreeRunner.statusCalls)
+	}
+	if _, err := os.Stat(initMarker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("init marker stat error = %v, want not exist", err)
+	}
+	for _, payload := range tmuxRunner.sendKeysPayloads {
+		if strings.Contains(payload, "codex") {
+			t.Fatalf("send-keys payload = %q, want no AI launch when start_work=false", payload)
+		}
+	}
+	if tmuxRunner.sessions[naming.CanonicalSessionID(projectID, issueID)] {
+		t.Fatalf("tmux session %q was created", naming.CanonicalSessionID(projectID, issueID))
+	}
+	if !worktreeRunner.worktreeRemoved {
+		t.Fatal("expected failed create to roll back materialized worktree")
+	}
+}
+
+func TestSessionStartReusesPreexistingDirtyWorktreeWithoutInit(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Reuse existing dirty worktree",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	branch := "testuser/" + issueID + "/reuse-existing-dirty-wor"
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	initMarker := filepath.Join(worktreePath, "init-ran")
+	worktreeRunner := &worktreeCreateRunner{
+		worktreePath:    worktreePath,
+		branchName:      branch,
+		preexisting:     true,
+		deletedFiles:    []string{"internal-docs/setup.md"},
+		porcelainStatus: " D internal-docs/setup.md\n?? generated.js\n",
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:              repoDir,
+			BaseBranch:           "main",
+			CLITool:              "codex",
+			SessionShell:         "zsh",
+			WorktreeInitCommands: []string{"touch init-ran"},
+			Logger:               slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-reuse-preexisting-dirty",
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         "session.start",
 		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
@@ -946,7 +1081,7 @@ func TestSessionStartAllowsRecoveredDirtyWorktreeWithoutInit(t *testing.T) {
 		t.Fatalf("handleSessionStartDirect returned error: %v", err)
 	}
 	if !resp.OK || resp.Error != nil {
-		t.Fatalf("session start response = %+v, want success", resp)
+		t.Fatalf("session start response = %+v, want pre-existing worktree reuse success", resp)
 	}
 	var payload struct {
 		Output string `json:"output"`
@@ -956,7 +1091,7 @@ func TestSessionStartAllowsRecoveredDirtyWorktreeWithoutInit(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Worktree reused: " + worktreePath,
-		"recovered existing worktree",
+		"without running worktree init commands",
 		"Skipping AI launch (tmux session only)",
 		"Session started successfully",
 	} {
@@ -965,18 +1100,13 @@ func TestSessionStartAllowsRecoveredDirtyWorktreeWithoutInit(t *testing.T) {
 		}
 	}
 	if worktreeRunner.lsFilesDeleted != 0 {
-		t.Fatalf("ls-files -d calls = %d, want 0 for reused worktree", worktreeRunner.lsFilesDeleted)
+		t.Fatalf("ls-files -d calls = %d, want 0 for reused pre-existing worktree", worktreeRunner.lsFilesDeleted)
 	}
 	if worktreeRunner.statusCalls != 0 {
-		t.Fatalf("status --porcelain calls = %d, want 0 for reused worktree", worktreeRunner.statusCalls)
+		t.Fatalf("status --porcelain calls = %d, want 0 for reused pre-existing worktree", worktreeRunner.statusCalls)
 	}
 	if _, err := os.Stat(initMarker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("init marker stat error = %v, want not exist", err)
-	}
-	for _, payload := range tmuxRunner.sendKeysPayloads {
-		if strings.Contains(payload, "codex") {
-			t.Fatalf("send-keys payload = %q, want no AI launch when start_work=false", payload)
-		}
 	}
 	if !tmuxRunner.sessions[naming.CanonicalSessionID(projectID, issueID)] {
 		t.Fatalf("tmux session %q was not created", naming.CanonicalSessionID(projectID, issueID))
@@ -1088,7 +1218,7 @@ func TestSessionStartWithoutAgentExportsContextToLiveShell(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	worktreeRunner := &recoveringWorktreeRunner{
+	worktreeRunner := &worktreeCreateRunner{
 		worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID),
 		branchName:   "testuser/" + issueID + "/shell-only-session",
 	}
@@ -1193,7 +1323,7 @@ func TestSessionStartIgnoresStaleProjectionWhenTmuxHasNoSession(t *testing.T) {
 
 	branch := "testuser/" + issueID + "/tmux-truth"
 	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
-	worktreeRunner := &recoveringWorktreeRunner{
+	worktreeRunner := &worktreeCreateRunner{
 		worktreePath: worktreePath,
 		branchName:   branch,
 	}
@@ -1312,7 +1442,7 @@ func TestSessionStartReportsFailedStartCleanupFailures(t *testing.T) {
 				t.Fatalf("create issue: %v", err)
 			}
 
-			worktreeRunner := &recoveringWorktreeRunner{
+			worktreeRunner := &worktreeCreateRunner{
 				worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID),
 				branchName:   "testuser/" + issueID + "/cleanup-report",
 			}
@@ -1395,7 +1525,7 @@ func TestSessionStartContinuesWhenFreshnessTimesOut(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	worktreeRunner := &recoveringWorktreeRunner{
+	worktreeRunner := &worktreeCreateRunner{
 		worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID),
 		branchName:   "testuser/" + issueID + "/freshness-timeout-continue",
 	}
@@ -1624,7 +1754,7 @@ func TestSessionStartWithStartWorkFalseSkipsLaunchCommand(t *testing.T) {
 
 	branch := "testuser/" + issueID + "/start-tmux-only"
 	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
-	worktreeRunner := &recoveringWorktreeRunner{
+	worktreeRunner := &worktreeCreateRunner{
 		worktreePath: worktreePath,
 		branchName:   branch,
 	}
@@ -1739,7 +1869,7 @@ func TestSessionStartDefaultsAgentActivityToBusy(t *testing.T) {
 
 	branch := "testuser/" + issueID + "/start-ai-worker"
 	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
-	worktreeRunner := &recoveringWorktreeRunner{
+	worktreeRunner := &worktreeCreateRunner{
 		worktreePath: worktreePath,
 		branchName:   branch,
 	}
@@ -2056,7 +2186,7 @@ func TestSessionStartDoesNotPersistTransitionWhenTmuxCreateFails(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	worktreeRunner := &recoveringWorktreeRunner{
+	worktreeRunner := &worktreeCreateRunner{
 		worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID),
 		branchName:   "testuser/" + issueID + "/fail-tmux-create",
 	}
@@ -3464,6 +3594,139 @@ func TestSessionPauseResumeAgentScopedTargetWritesHookActivity(t *testing.T) {
 	}
 	if row.Activity != "busy" || row.ActivitySource != "hooks" {
 		t.Fatalf("agent session activity = %s/%s, want busy/hooks", row.Activity, row.ActivitySource)
+	}
+}
+
+func TestSessionPauseResumeAgentScopedTargetRefreshesHookActivityWhenLifecycleUnchanged(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+	tests := []struct {
+		name          string
+		command       string
+		state         daemonstate.SessionState
+		staleActivity string
+		staleSource   string
+		wantActivity  string
+		handle        func(*Daemon, context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	}{
+		{
+			name:          "pause clears stale busy",
+			command:       daemonhandlers.CommandSessionPause,
+			state:         daemonstate.SessionStatePaused,
+			staleActivity: "busy",
+			staleSource:   "hooks",
+			wantActivity:  "idle",
+			handle:        (*Daemon).handleSessionPause,
+		},
+		{
+			name:          "resume clears stale idle",
+			command:       daemonhandlers.CommandSessionResume,
+			state:         daemonstate.SessionStateRunning,
+			staleActivity: "idle",
+			staleSource:   "hooks",
+			wantActivity:  "busy",
+			handle:        (*Daemon).handleSessionResume,
+		},
+		{
+			name:          "pause restores missing hook source",
+			command:       daemonhandlers.CommandSessionPause,
+			state:         daemonstate.SessionStatePaused,
+			staleActivity: "idle",
+			wantActivity:  "idle",
+			handle:        (*Daemon).handleSessionPause,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			canonicalSessionID := naming.CanonicalSessionID(projectID, issueID)
+			agentSessionID := canonicalSessionID + ".pane-190"
+			tmuxRunner := newTestTmuxRunner(canonicalSessionID)
+			close(tmuxRunner.killRelease)
+			store := daemonstate.NewStore()
+			now := time.Now().UTC()
+			store.ReplaceProjectSessions(projectID, []daemonstate.Session{
+				{
+					ID:            canonicalSessionID,
+					IssueID:       issueID,
+					State:         daemonstate.SessionStateRunning,
+					ObservedState: daemonstate.SessionStateRunning,
+					Activity:      "busy",
+					StartedAt:     &now,
+					UpdatedAt:     now,
+				},
+				{
+					ID:             agentSessionID,
+					IssueID:        issueID,
+					State:          tt.state,
+					ObservedState:  tt.state,
+					Activity:       tt.staleActivity,
+					ActivitySource: tt.staleSource,
+					StartedAt:      &now,
+					UpdatedAt:      now,
+				},
+			})
+			runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+			t.Cleanup(func() {
+				_ = runtimeStateStore.Close()
+			})
+			if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+				ID:             agentSessionID,
+				IssueID:        issueID,
+				State:          tt.state,
+				ObservedState:  tt.state,
+				Activity:       tt.staleActivity,
+				ActivitySource: tt.staleSource,
+				StartedAt:      &now,
+				UpdatedAt:      now,
+			}); err != nil {
+				t.Fatalf("seed stale agent runtime state: %v", err)
+			}
+			daemon := &Daemon{
+				cfg: Config{
+					RepoDir: ".",
+					Logger:  slog.Default(),
+				},
+				tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+				session:      daemonhandlers.NewSessionHandler(store),
+				sessionStore: store,
+				runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+					".": runtimeStateStore,
+				},
+			}
+
+			resp, err := tt.handle(daemon, context.Background(), protocol.RequestEnvelope{
+				ProtocolVersion: protocol.CurrentVersion,
+				RequestID:       "req-agent-lifecycle-unchanged",
+				Kind:            protocol.EnvelopeKindCommand,
+				Command:         tt.command,
+				Meta: protocol.Metadata{
+					ProjectID: naming.ProjectID(projectID),
+				},
+				Body: marshalJSON(map[string]string{
+					"project_id": projectID,
+					"issue_id":   issueID,
+					"session_id": agentSessionID,
+				}),
+			})
+			if err != nil {
+				t.Fatalf("handler returned error: %v", err)
+			}
+			if !resp.OK {
+				t.Fatalf("response not ok: %+v", resp.Error)
+			}
+			row, found, err := runtimeStateStore.GetSessionState(context.Background(), projectID, agentSessionID)
+			if err != nil {
+				t.Fatalf("get agent session runtime state: %v", err)
+			}
+			if !found {
+				t.Fatal("agent session runtime state not found")
+			}
+			if row.Activity != tt.wantActivity || row.ActivitySource != "hooks" {
+				t.Fatalf("agent session activity = %s/%s, want %s/hooks", row.Activity, row.ActivitySource, tt.wantActivity)
+			}
+		})
 	}
 }
 
@@ -6443,6 +6706,27 @@ func TestBuildSessionResumeCommandUsesCodexResumeLastWithOptionsBeforeSelector(t
 			t.Fatalf("command = %q, want %q after index %d", command, part, last)
 		}
 		last = idx
+	}
+	if strings.Contains(command, "Continue your prior task") {
+		t.Fatalf("command = %q, want continuation prompt delivered after launch for codex", command)
+	}
+}
+
+func TestBuildSessionResumeCommandUsesClaudeContinueWithPrompt(t *testing.T) {
+	d := &Daemon{
+		cfg: Config{
+			CLITool:                    "claude",
+			DangerouslySkipPermissions: true,
+			SessionShell:               "zsh",
+		},
+	}
+
+	command := d.buildSessionResumeCommand(protocol.DefaultProjectID, "axt-123", "claude-axt-123", false, nil)
+	wantParts := []string{`AZEDARACH_ISSUE_ID="axt-123"`, "claude", "--continue", "--dangerously-skip-permissions", "Continue your prior task"}
+	for _, part := range wantParts {
+		if !strings.Contains(command, part) {
+			t.Fatalf("command = %q, want part %q", command, part)
+		}
 	}
 }
 

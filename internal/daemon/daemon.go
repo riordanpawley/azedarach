@@ -357,12 +357,12 @@ func New(cfg Config) *Daemon {
 		runtimeProjectionWriter:            d.runtimeProjectionStateWriter(),
 		ensureRuntimeFreshForMutation:      d.ensureFreshRuntimeForMutation,
 		ensureRuntimeFreshForIssueMutation: d.ensureFreshRuntimeForIssueMutation,
-		runtimeIssueTasks: func(ctx context.Context, projectID string) map[string]domain.Task {
+		runtimeIssueTasks: func(ctx context.Context, projectID string, issueIDs []string) map[string]domain.Task {
 			issueClient := d.issueClientForProject(projectID)
 			if issueClient == nil {
 				return nil
 			}
-			tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+			tasks, err := issueClient.GetRuntimeWorktreeIssueContext(ctx, projectID, issueIDs)
 			if err != nil {
 				if cfg.Logger != nil {
 					cfg.Logger.Debug("worktree projection issue snapshot failed", "project_id", projectID, "error", err)
@@ -645,6 +645,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleHookLogAppend(ctx, req)
 	case protocol.CommandHookLogList:
 		return d.handleHookLogList(ctx, req)
+	case protocol.CommandRuntimeSignalIngest:
+		return d.handleRuntimeSignalIngest(ctx, req)
 	case protocol.CommandUIOpenTaskWorkspace, protocol.CommandUIOpenTaskDrillDown:
 		return d.handleUIIssueCommand(ctx, req)
 	case protocol.CommandUIStateGet:
@@ -943,6 +945,36 @@ func (d *Daemon) sessionLifecycleTransitionNeeded(projectID, sessionID, issueID 
 	}
 	issueID = strings.TrimSpace(issueID)
 	return issueID != "" && strings.TrimSpace(session.IssueID) != issueID
+}
+
+func (d *Daemon) sessionLifecycleOrAgentActivityTransitionNeeded(projectID, sessionID, issueID string, state daemonstate.SessionState) bool {
+	if d.sessionLifecycleTransitionNeeded(projectID, sessionID, issueID, state) {
+		return true
+	}
+	if !isAgentScopedSessionID(sessionID) || d.sessionStore == nil {
+		return false
+	}
+	wantActivity, wantSource, ok := agentScopedSessionActivityForLifecycleState(state)
+	if !ok {
+		return false
+	}
+	session, err := d.sessionStore.Session(projectID, sessionID)
+	if err != nil {
+		return true
+	}
+	return normalizeSessionActivity(session.Activity) != wantActivity ||
+		strings.ToLower(strings.TrimSpace(session.ActivitySource)) != wantSource
+}
+
+func agentScopedSessionActivityForLifecycleState(state daemonstate.SessionState) (string, string, bool) {
+	switch daemonstate.NormalizeSessionState(state) {
+	case daemonstate.SessionStateRunning:
+		return "busy", "hooks", true
+	case daemonstate.SessionStatePaused:
+		return "idle", "hooks", true
+	default:
+		return "", "", false
+	}
 }
 
 func lifecycleCommandState(command string) (daemonstate.SessionState, bool) {

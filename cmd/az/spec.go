@@ -26,6 +26,9 @@ type specReqListOptions struct {
 	Issue  string
 	Status string
 	IDs    []string
+	Query  string
+	Match  string
+	Limit  int
 }
 
 type specReqGetOptions struct {
@@ -327,6 +330,9 @@ func runSpecReqListRPC(cfg *config.Config, opts specReqListOptions) error {
 		IssueID: naming.IssueID(opts.Issue),
 		Status:  protocol.SpecRequirementStatus(opts.Status),
 		IDs:     requirementIDsFromStrings(opts.IDs),
+		Query:   opts.Query,
+		Match:   opts.Match,
+		Limit:   opts.Limit,
 	}
 	var out protocol.SpecRequirementListResponseBody
 	if err := runSpecRPC(cfg, protocol.CommandSpecRequirementList, req, &out); err != nil {
@@ -732,16 +738,30 @@ func parseSpecReqListArgs(args []string) (specReqListOptions, error) {
 	fs.BoolVar(&opts.JSON, "json", false, "json output")
 	fs.StringVar(&opts.Issue, "issue", "", "issue id filter")
 	fs.StringVar(&opts.Status, "status", "", "requirement status filter")
+	fs.StringVar(&opts.Query, "query", "", "content query over requirement id, external code, title, and description")
+	fs.StringVar(&opts.Match, "match", "all", "query match mode: all or any")
+	fs.IntVar(&opts.Limit, "limit", 0, "maximum requirements to return")
 	addSelectorFlags(fs, &opts.IDs, "req")
 	if err := fs.Parse(args); err != nil {
 		return specReqListOptions{}, err
 	}
 	if fs.NArg() != 0 {
-		return specReqListOptions{}, fmt.Errorf("usage: az spec req list [--json] [--issue <issue-id>] [--status <open|accepted|superseded>] [--id <req-id> ...] [--ids a,b,c]")
+		return specReqListOptions{}, fmt.Errorf("usage: az spec req list [--json] [--issue <issue-id>] [--status <open|accepted|superseded>] [--query <text>] [--match <all|any>] [--limit <n>] [--id <req-id> ...] [--ids a,b,c]")
 	}
 	var err error
 	if opts.Issue, err = normalizeOptionalIdentifier("issue-id", opts.Issue); err != nil {
 		return specReqListOptions{}, err
+	}
+	opts.Query = strings.TrimSpace(opts.Query)
+	opts.Match = strings.TrimSpace(strings.ToLower(opts.Match))
+	if opts.Match == "" {
+		opts.Match = "all"
+	}
+	if opts.Match != "all" && opts.Match != "any" {
+		return specReqListOptions{}, fmt.Errorf("invalid match %q; expected all|any", opts.Match)
+	}
+	if opts.Limit < 0 {
+		return specReqListOptions{}, fmt.Errorf("limit must be non-negative")
 	}
 	if opts.Status != "" {
 		if opts.Status, err = parseRequirementStatus(opts.Status); err != nil {

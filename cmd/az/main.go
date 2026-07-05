@@ -41,6 +41,9 @@ var exitProcess = os.Exit
 
 func main() {
 	args := os.Args[1:]
+	if maybePrintCommandHelp(args) {
+		return
+	}
 	if len(args) > 0 {
 		switch args[0] {
 		case "version", "-v", "--version":
@@ -469,7 +472,7 @@ func main() {
 
 	case "issue":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|get-many|check|doctor|create|split|update|close|delete|image|dep|bulk-create|bulk-update|fanout> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|get-many|check|doctor|create|split|update|close|delete|image|document|dep|bulk-create|bulk-update|fanout> [arguments]\n")
 			os.Exit(1)
 		}
 		issueCommand := commandArgs[0]
@@ -881,7 +884,7 @@ func main() {
 
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown issue command: %s\n", issueCommand)
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|get-many|check|doctor|create|split|update|close|delete|image|dep|bulk-create|bulk-update|fanout> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|get-many|check|doctor|create|split|update|close|delete|image|document|dep|bulk-create|bulk-update|fanout> [arguments]\n")
 			os.Exit(1)
 		}
 
@@ -1205,7 +1208,7 @@ func printSessionUsage() {
 	fmt.Println("  attach <issue-id>     Attach to an existing issue session")
 	fmt.Println("  stop <issue-id>       Stop an issue session")
 	fmt.Println("  status [issue-id]     Show all sessions or one issue session status")
-	fmt.Println("  restart-all           Restart idle AI sessions; use --force-busy to include busy sessions")
+	fmt.Println("  restart-all           Restart idle AI sessions and tell them to continue; use --force-busy to include busy sessions")
 	fmt.Println("  resolve-conflict <issue-id> [--worktree <path>] [--file <path> ...] [--prompt <text>]")
 	fmt.Println("                        Launch conflict-resolution agent")
 	fmt.Println()

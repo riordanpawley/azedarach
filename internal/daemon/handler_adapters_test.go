@@ -548,7 +548,7 @@ func TestWorktreeServiceAdapterCreateMaterializesMissingAncestorChain(t *testing
 	adapter := &worktreeServiceAdapter{
 		manager: manager,
 		logger:  logger,
-		runtimeIssueTasks: func(context.Context, string) map[string]domain.Task {
+		runtimeIssueTasks: func(context.Context, string, []string) map[string]domain.Task {
 			return tasks
 		},
 		runWorktreeSyncInit: func(_ context.Context, initCtx worktreeInitContext) error {
@@ -957,7 +957,7 @@ func TestWorktreeServiceAdapterSnapshotSkipsClosedIssueWorktrees(t *testing.T) {
 	adapter := &worktreeServiceAdapter{
 		runtimeStateStore: store,
 		logger:            logger,
-		runtimeIssueTasks: func(context.Context, string) map[string]domain.Task {
+		runtimeIssueTasks: func(context.Context, string, []string) map[string]domain.Task {
 			return map[string]domain.Task{
 				closedID.String(): {
 					ID:     closedID,
@@ -968,7 +968,7 @@ func TestWorktreeServiceAdapterSnapshotSkipsClosedIssueWorktrees(t *testing.T) {
 		},
 	}
 
-	taskByIssue := adapter.runtimeIssueTaskSnapshot(context.Background(), projectID)
+	taskByIssue := adapter.runtimeIssueTaskSnapshot(context.Background(), projectID, []string{closedID.String()})
 	adapter.writeWorktreeProjectionSnapshot(context.Background(), projectID, []git.Worktree{
 		{IssueID: closedID.String(), Path: "/tmp/repo-az-closed", Branch: "az/az-closed"},
 	}, taskByIssue)

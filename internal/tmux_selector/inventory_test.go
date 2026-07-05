@@ -1,7 +1,9 @@
 package tmuxselector
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -722,6 +724,49 @@ func TestDaemonSnapshotSourceFallsBackToFullSnapshotWithoutTargetIDs(t *testing.
 	}
 	if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].ID.String() != "az-1" {
 		t.Fatalf("snapshot tasks = %#v, want az-1", snapshot.Tasks)
+	}
+}
+
+func TestDaemonSnapshotSourceReturnsPartialSnapshotsWhenProjectIgnoresDeadline(t *testing.T) {
+	var logs bytes.Buffer
+	source := &DaemonSnapshotSource{
+		projectDirs:           []string{"fast", "slow"},
+		logger:                slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		projectSnapshotBudget: 10 * time.Millisecond,
+		projectSnapshotLoader: func(_ context.Context, projectDir string) (ProjectInventorySnapshot, bool) {
+			if projectDir == "slow" {
+				time.Sleep(200 * time.Millisecond)
+				return ProjectInventorySnapshot{
+					ProjectID:   "slow",
+					ProjectPath: projectDir,
+					Tasks:       []domain.Task{{ID: "slow-task", Title: "Slow"}},
+				}, true
+			}
+			return ProjectInventorySnapshot{
+				ProjectID:   "fast",
+				ProjectPath: projectDir,
+				Tasks:       []domain.Task{{ID: "fast-task", Title: "Fast"}},
+			}, true
+		},
+	}
+
+	start := time.Now()
+	snapshots, err := source.ListProjectSnapshots(context.Background())
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("ListProjectSnapshots: %v", err)
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("ListProjectSnapshots elapsed = %s, want bounded partial return", elapsed)
+	}
+	if len(snapshots) != 1 || snapshots[0].ProjectID != "fast" {
+		t.Fatalf("snapshots = %#v, want only fast project before deadline", snapshots)
+	}
+	logOutput := logs.String()
+	for _, want := range []string{"global selector project snapshot timed out", "project_dir=slow", "timeout_count=1", "fallback_count=1"} {
+		if !strings.Contains(logOutput, want) {
+			t.Fatalf("logs missing %q:\n%s", want, logOutput)
+		}
 	}
 }
 

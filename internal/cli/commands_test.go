@@ -685,6 +685,89 @@ func TestWorktreeCreateCommandCreatesWorktreeWithoutStartingSession(t *testing.T
 	}
 }
 
+func TestWorktreeCreateCommandJSONErrorIncludesRollbackDetails(t *testing.T) {
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: "az-1", Title: "Parent", Status: domain.StatusOpen},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+
+	detail := "worktree create failed for az-1: failed to create worktree with git worktree add -b user/az-1/task /tmp/az-1 main: hook failed (rolled back worktree /tmp/az-1)"
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGetMany:
+					assertMetadataOnlyTaskGetManyRequest(t, req, "az-1")
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				case daemonclient.CommandTaskMergeBaseTarget:
+					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
+						IssueID:  "az-1",
+						TargetID: "base",
+						Branch:   "main",
+					}), nil
+				case daemonclient.CommandWorktreeCreate:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              false,
+						Error: &protocol.ErrorEnvelope{
+							Code:      protocol.ErrorCodeInternal,
+							Message:   detail,
+							Retryable: false,
+						},
+					}, nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}).WithProjectID("proj"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   "/repo",
+	}
+
+	output, err := captureStdoutAllowError(t, func() error {
+		return WorktreeCreateCommand(deps, WorktreeCreateOptions{IssueID: "az-1", JSON: true})
+	})
+	if err == nil {
+		t.Fatal("expected worktree create error")
+	}
+	for _, want := range []string{"failed to create worktree for az-1", "git worktree add", "hook failed", "rolled back worktree /tmp/az-1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want substring %q", err.Error(), want)
+		}
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal([]byte(output), &body); err != nil {
+		t.Fatalf("unmarshal output JSON: %v\noutput:\n%s", err, output)
+	}
+	if body["ok"] != false || body["project_id"] != "proj" || body["issue_id"] != "az-1" || body["base_branch"] != "main" {
+		t.Fatalf("json body = %+v", body)
+	}
+	errorMessage, _ := body["error"].(string)
+	for _, want := range []string{"failed to create worktree for az-1", "git worktree add", "hook failed", "rolled back worktree /tmp/az-1"} {
+		if !strings.Contains(errorMessage, want) {
+			t.Fatalf("json error = %q, want substring %q", errorMessage, want)
+		}
+	}
+}
+
 func TestStartCommandSubmitsOperationWithDaemonTimeout(t *testing.T) {
 	taskListBody, err := marshalTaskListBody([]domain.Task{
 		{ID: "issue-1", Title: "Example", Status: domain.StatusOpen},
@@ -10150,6 +10233,15 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "immediately follow title-only creation with `az issue update <issue-id> --description \"...\"` before starting work or fanout") {
 		t.Fatalf("prime output missing title-only issue update guardrail: %q", output)
 	}
+	if !strings.Contains(output, "Start-issue wording: when the user says \"start an az issue\", \"add/start an issue\", or \"create and start an issue\"") {
+		t.Fatalf("prime output missing start-issue phrase family guidance: %q", output)
+	}
+	if !strings.Contains(output, "create or identify the issue and then run `az session start <issue-id>`") {
+		t.Fatalf("prime output missing start-issue session start command: %q", output)
+	}
+	if !strings.Contains(output, "Do not treat `az issue update <issue-id> --status in_progress` as starting a session unless the user explicitly asks to mark/update status.") {
+		t.Fatalf("prime output missing status-vs-session distinction: %q", output)
+	}
 	if !strings.Contains(output, "create many issues, epics, or nested `children` trees from JSON when shaping a graph up front") {
 		t.Fatalf("prime output missing bulk-create nested tree guidance: %q", output)
 	}
@@ -10324,7 +10416,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az decision link add --id <decision-id> (--issue <id> | --req <id> | --decision <id>) [--relation <applies-to|revises|informs>] [--note <text>] [--json]`") {
 		t.Fatalf("prime output missing decision link options: %q", output)
 	}
-	if !strings.Contains(output, "`az decision sync [--check] [--json]` writes `docs/decisions/*.md` from the store; `az decision import [--check] [--force] [--json]` reads markdown back into the store.") {
+	if !strings.Contains(output, "`az decision sync [--check] [--project-dir <dir>] [--json]` writes `docs/decisions/*.md` from the store; `az decision import [--check] [--force] [--project-dir <dir>] [--json]` reads markdown back into the store.") {
 		t.Fatalf("prime output missing decision sync/import guidance: %q", output)
 	}
 	if !strings.Contains(output, "`az session status [issue-id]`, `az worktree create <issue-id>`") {
@@ -10936,7 +11028,7 @@ func TestPrimeCommandQuestionFirstAndSpecBlock(t *testing.T) {
 	if !strings.Contains(output, "ALWAYS run `az spec read --issue <issue-id>` before starting behavior work; use `az spec link list --issue <issue-id>` when you need link-only detail.") {
 		t.Fatalf("prime output missing mandatory pre-work spec check guardrail: %q", output)
 	}
-	if !strings.Contains(output, "To choose spec traceability, first inspect linked requirements, then use `az spec req list` and `az spec read --req <req-id>` to find nearby requirements by feature area or acceptance intent.") {
+	if !strings.Contains(output, "To choose spec traceability, first inspect linked requirements, then use `az spec req list --query \"<issue title and feature terms>\" --match any --limit 10` and `az spec read --req <req-id>` to find nearby requirements across naming variants; avoid unbounded requirement lists during session startup.") {
 		t.Fatalf("prime output missing spec discovery guardrail: %q", output)
 	}
 	if !strings.Contains(output, "Link an existing requirement when it already defines the intended behavior; create or update a requirement before implementation when work adds behavior, changes user-visible behavior, changes a CLI/API/TUI contract, alters persistence/daemon semantics, or reveals an underspecified contract.") {

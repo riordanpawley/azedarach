@@ -685,6 +685,127 @@ func TestOrchestrateWatchSnapshotKeyIgnoresElapsedProgressTime(t *testing.T) {
 	}
 }
 
+func TestOrchestrateWatchReadinessRefreshIntervalBounds(t *testing.T) {
+	tests := []struct {
+		name string
+		poll time.Duration
+		want time.Duration
+	}{
+		{name: "zero uses minimum", poll: 0, want: 2 * time.Second},
+		{name: "default poll scales to minimum", poll: 250 * time.Millisecond, want: 2 * time.Second},
+		{name: "larger poll scales", poll: time.Second, want: 8 * time.Second},
+		{name: "large poll caps", poll: 2 * time.Second, want: 10 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := orchestrateWatchReadinessRefreshInterval(tt.poll); got != tt.want {
+				t.Fatalf("refresh interval = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOrchestrateWatchReadinessCachePolicyDedupesQuietTicks(t *testing.T) {
+	start := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	cache := newOrchestrateWatchReadinessCache(orchestrateWatchFrame{RootIssueID: "az-1"}, start, 250*time.Millisecond)
+
+	refreshes := 1
+	for i := 1; i <= 7; i++ {
+		refresh, reason := cache.shouldRefresh(start.Add(time.Duration(i)*250*time.Millisecond), 0)
+		if refresh {
+			t.Fatalf("tick %d refreshed early with reason %q", i, reason)
+		}
+	}
+	refresh, reason := cache.shouldRefresh(start.Add(2*time.Second), 0)
+	if !refresh || reason != "refresh_interval_elapsed" {
+		t.Fatalf("refresh at interval = %v reason=%q, want interval refresh", refresh, reason)
+	}
+	if refresh {
+		refreshes++
+	}
+	if refreshes != 2 {
+		t.Fatalf("refreshes across eight quiet ticks = %d, want initial plus one interval refresh", refreshes)
+	}
+	refresh, reason = cache.shouldRefresh(start.Add(250*time.Millisecond), 1)
+	if !refresh || reason != "mailbox_events" {
+		t.Fatalf("refresh with mailbox event = %v reason=%q, want mailbox refresh", refresh, reason)
+	}
+}
+
+func TestOrchestrateWatchReadinessCacheBoundsChefyScaleQuietTicks(t *testing.T) {
+	const tickCount = 2203
+	pollInterval := 250 * time.Millisecond
+	start := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	cache := newOrchestrateWatchReadinessCache(orchestrateWatchFrame{RootIssueID: "az-1"}, start, pollInterval)
+
+	refreshes := 1
+	lastRefresh := start
+	for i := 1; i <= tickCount; i++ {
+		now := start.Add(time.Duration(i) * pollInterval)
+		cache.refreshedAt = lastRefresh
+		refresh, _ := cache.shouldRefresh(now, 0)
+		if refresh {
+			refreshes++
+			lastRefresh = now
+		}
+	}
+	if refreshes >= tickCount/4 {
+		t.Fatalf("readiness refreshes = %d across %d quiet ticks, want bounded coalescing", refreshes, tickCount)
+	}
+	wantMax := int((time.Duration(tickCount)*pollInterval)/cache.refreshInterval) + 2
+	if refreshes > wantMax {
+		t.Fatalf("readiness refreshes = %d, want <= %d for interval %s", refreshes, wantMax, cache.refreshInterval)
+	}
+}
+
+func TestOrchestrateWatchReadinessCacheReusesSnapshotFields(t *testing.T) {
+	cached := orchestrateWatchFrame{
+		RootIssueID: "az-1",
+		Runnable:    []string{"az-2"},
+		Pending: []orchestratePendingStart{
+			{IssueID: "az-3", OperationID: "op-1", OperationState: "queued"},
+		},
+		Active: []string{"az-4"},
+		ActiveSessions: []orchestrateActiveSession{
+			{IssueID: "az-4", Activity: "busy", ActivitySource: "hooks", State: "busy"},
+		},
+		SessionStartProgress: []orchestrateSessionStartProgress{
+			{IssueID: "az-5", OperationID: "op-2", OperationState: "running", Phase: "worktree"},
+		},
+		StaleCloseableChildren: []orchestrateStaleCloseableCandidate{
+			{IssueID: "az-6", Status: "in_review", Evidence: []string{"child closed with stale runtime"}},
+		},
+		Blocked: map[string]string{"az-7": "blocked by az-8"},
+	}
+	cache := newOrchestrateWatchReadinessCache(cached, time.Now(), 250*time.Millisecond)
+	frame := cache.cachedReadinessFrame([]mailEvent{{Seq: 12, Type: "worker-progress"}}, 10, 12)
+
+	if frame.RootIssueID != cached.RootIssueID || frame.SinceSeq != 10 || frame.NextSince != 12 {
+		t.Fatalf("frame identifiers = %+v", frame)
+	}
+	if len(frame.Runnable) != 1 || frame.Runnable[0] != "az-2" {
+		t.Fatalf("runnable = %+v", frame.Runnable)
+	}
+	if len(frame.Pending) != 1 || frame.Pending[0].IssueID != "az-3" {
+		t.Fatalf("pending = %+v", frame.Pending)
+	}
+	if len(frame.ActiveSessions) != 1 || frame.ActiveSessions[0].IssueID != "az-4" {
+		t.Fatalf("active sessions = %+v", frame.ActiveSessions)
+	}
+	if len(frame.SessionStartProgress) != 1 || frame.SessionStartProgress[0].IssueID != "az-5" {
+		t.Fatalf("session start progress = %+v", frame.SessionStartProgress)
+	}
+	if len(frame.StaleCloseableChildren) != 1 || frame.StaleCloseableChildren[0].IssueID != "az-6" {
+		t.Fatalf("stale closeable children = %+v", frame.StaleCloseableChildren)
+	}
+	if frame.Blocked["az-7"] != "blocked by az-8" {
+		t.Fatalf("blocked = %+v", frame.Blocked)
+	}
+	if len(frame.Events) != 1 || frame.Events[0].Seq != 12 {
+		t.Fatalf("events = %+v", frame.Events)
+	}
+}
+
 func TestParseOrchestrateCompleteCheckArgs(t *testing.T) {
 	opts, err := ParseOrchestrateCompleteCheckArgs([]string{"--root", "az-1", "--json"})
 	if err != nil {

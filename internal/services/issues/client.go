@@ -123,7 +123,8 @@ const (
 	sqliteBusyPrimaryCode      = 5
 	sqliteBusyRetryDelay       = 100 * time.Millisecond
 	// Keep at least one foreground reader available while Linear sync owns a write connection.
-	sqliteMaxOpenConns = 4
+	sqliteMaxOpenConns         = 4
+	issueGraphClosureProjectID = "default"
 )
 
 // Client wraps local SQLite task store operations.
@@ -140,6 +141,12 @@ type sqlIssueExecer interface {
 }
 
 type sqlIssueQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+type sqlIssueDBTX interface {
+	sqlIssueExecer
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
@@ -498,7 +505,7 @@ func (c *Client) configureSQLite(db *sql.DB) error {
 }
 
 func (c *Client) normalizeDependencyEnumRows(db *sql.DB) error {
-	_, err := db.Exec(`
+	res, err := db.Exec(`
 		UPDATE issue_dependencies
 		SET dependency_type = CASE
 			WHEN dependency_type = 'parent_child' THEN 'parent-child'
@@ -514,6 +521,12 @@ func (c *Client) normalizeDependencyEnumRows(db *sql.DB) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("normalize dependency enum rows: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected > 0 {
+		if err := c.rebuildIssueGraphClosure(context.Background(), db); err != nil {
+			return fmt.Errorf("rebuild graph closure after dependency enum normalization: %w", err)
+		}
 	}
 	return nil
 }
@@ -607,6 +620,9 @@ func (c *Client) normalizeProviderDisplayKeyIssueIDs(ctx context.Context, db *sq
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value
 	`, nextAlphaIssueIndexMetaKey, strconv.Itoa(nextIndex)); err != nil {
 		return fmt.Errorf("persist next alpha id after provider display-key normalization: %w", err)
+	}
+	if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
+		return fmt.Errorf("rebuild graph closure after provider display-key normalization: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -793,6 +809,7 @@ func (c *Client) ListWithRuntime(ctx context.Context, projectID string) ([]domai
 // SearchWithRuntime fetches active issues matching query through the issue
 // content FTS index, then hydrates only the matching runtime rows.
 func (c *Client) SearchWithRuntime(ctx context.Context, projectID, query string) ([]domain.Task, error) {
+	startedAt := time.Now()
 	db, err := c.dbHandle()
 	if err != nil {
 		return nil, err
@@ -801,19 +818,13 @@ func (c *Client) SearchWithRuntime(ctx context.Context, projectID, query string)
 	if projectID == "" {
 		projectID = "default"
 	}
-	expr := issueContentFTSExpression(query)
+	expr := domain.ContentQueryFTSExpression(query)
 	if expr == "" {
 		return []domain.Task{}, nil
 	}
-	rows, err := db.QueryContext(ctx, `
-		SELECT i.id
-		FROM issue_search_fts
-		JOIN issues i ON i.rowid = issue_search_fts.rowid
-		WHERE issue_search_fts MATCH ?
-			AND i.deleted_at IS NULL
-		ORDER BY i.updated_at DESC, i.id
-	`, expr)
+	rows, err := db.QueryContext(ctx, issueSearchIDsQuery(), expr)
 	if err != nil {
+		c.logSQLiteRead(ctx, "issue.search_ids_fts", startedAt, 0, err)
 		return nil, c.wrapError("search-with-runtime", projectID, err)
 	}
 
@@ -823,6 +834,7 @@ func (c *Client) SearchWithRuntime(ctx context.Context, projectID, query string)
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			_ = rows.Close()
+			c.logSQLiteRead(ctx, "issue.search_ids_fts", startedAt, len(ids), err)
 			return nil, c.wrapError("search-with-runtime", projectID, err)
 		}
 		id = strings.TrimSpace(id)
@@ -837,11 +849,14 @@ func (c *Client) SearchWithRuntime(ctx context.Context, projectID, query string)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
+		c.logSQLiteRead(ctx, "issue.search_ids_fts", startedAt, len(ids), err)
 		return nil, c.wrapError("search-with-runtime", projectID, err)
 	}
 	if err := rows.Close(); err != nil {
+		c.logSQLiteRead(ctx, "issue.search_ids_fts", startedAt, len(ids), err)
 		return nil, c.wrapError("search-with-runtime", projectID, err)
 	}
+	c.logSQLiteRead(ctx, "issue.search_ids_fts", startedAt, len(ids), nil)
 	if len(ids) == 0 {
 		return []domain.Task{}, nil
 	}
@@ -853,10 +868,31 @@ func (c *Client) SearchWithRuntime(ctx context.Context, projectID, query string)
 	return domain.FilterTasksByContentQuery(tasks, query), nil
 }
 
+func issueSearchIDsQuery() string {
+	return `
+		SELECT i.id
+		FROM issue_search_fts
+		JOIN issues i ON i.rowid = issue_search_fts.rowid
+		WHERE issue_search_fts MATCH ?
+			AND i.deleted_at IS NULL
+		ORDER BY i.updated_at DESC, i.id
+	`
+}
+
 // ListSummariesWithRuntime fetches active issues with runtime projection fields
 // but without long-form detail text. It is intended for board/list snapshots
 // where fetching full issue bodies for every task dominates load time.
 func (c *Client) ListSummariesWithRuntime(ctx context.Context, projectID string) ([]domain.Task, error) {
+	return c.listSummariesWithRuntime(ctx, projectID, false)
+}
+
+// ListSummariesWithRuntimeDependencies fetches active issue summaries with runtime projection fields
+// and full outgoing dependency edges.
+func (c *Client) ListSummariesWithRuntimeDependencies(ctx context.Context, projectID string) ([]domain.Task, error) {
+	return c.listSummariesWithRuntime(ctx, projectID, true)
+}
+
+func (c *Client) listSummariesWithRuntime(ctx context.Context, projectID string, includeDependencies bool) ([]domain.Task, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return nil, err
@@ -865,9 +901,69 @@ func (c *Client) ListSummariesWithRuntime(ctx context.Context, projectID string)
 	if projectID == "" {
 		projectID = "default"
 	}
-	tasks, err := c.queryTaskSummariesWithRuntime(ctx, db, projectID)
+	tasks, err := c.queryTaskSummariesWithRuntime(ctx, db, projectID, includeDependencies)
 	if err != nil {
 		return nil, c.wrapError("list-summaries-with-runtime", projectID, err)
+	}
+	return tasks, nil
+}
+
+// ListGraphReadinessWithRuntime fetches the root graph plus direct dependency
+// context needed by daemon graph-readiness checks. The read scales with the
+// requested root graph instead of all active issues in the project.
+func (c *Client) ListGraphReadinessWithRuntime(ctx context.Context, projectID, rootID string) ([]domain.Task, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	rootID = strings.TrimSpace(rootID)
+	if rootID == "" {
+		return []domain.Task{}, nil
+	}
+	issueIDs, err := c.graphReadinessContextIDs(ctx, db, rootID)
+	if err != nil {
+		return nil, c.wrapError("list-graph-readiness-with-runtime", rootID, err)
+	}
+	if len(issueIDs) == 0 {
+		return []domain.Task{}, nil
+	}
+	tasks, err := c.queryTasksWithRuntimeProjection(ctx, db, projectID, false, taskDependencyLoadAll, issueIDs...)
+	if err != nil {
+		return nil, c.wrapError("list-graph-readiness-with-runtime", rootID, err)
+	}
+	return tasks, nil
+}
+
+// ListParentChildSubtreeWithRuntime fetches the requested issue and active
+// parent-child descendants with runtime projection fields. It intentionally
+// avoids full-project scans for close/review guards.
+func (c *Client) ListParentChildSubtreeWithRuntime(ctx context.Context, projectID, rootID string) ([]domain.Task, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	rootID = strings.TrimSpace(rootID)
+	if rootID == "" {
+		return []domain.Task{}, nil
+	}
+	issueIDs, err := c.parentChildSubtreeIDs(ctx, db, rootID)
+	if err != nil {
+		return nil, c.wrapError("list-parent-child-subtree-with-runtime", rootID, err)
+	}
+	if len(issueIDs) == 0 {
+		return []domain.Task{}, nil
+	}
+	tasks, err := c.queryTasksWithRuntimeProjection(ctx, db, projectID, false, taskDependencyLoadAll, issueIDs...)
+	if err != nil {
+		return nil, c.wrapError("list-parent-child-subtree-with-runtime", rootID, err)
 	}
 	return tasks, nil
 }
@@ -1037,41 +1133,7 @@ func (c *Client) GetManyWithDependencyContextRuntime(ctx context.Context, projec
 		return nil, c.wrapError("get-many-with-dependency-context-runtime", "", domain.ErrNotFound)
 	}
 
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(issueIDs)), ",")
-	dependentQuery := ""
-	if opts.includeDependents {
-		dependentQuery = fmt.Sprintf(`
-			UNION ALL
-			SELECT issue_id AS id
-			FROM issue_dependencies
-			WHERE depends_on_id IN (%s) AND tombstoned_at IS NULL
-		`, placeholders)
-	}
-	query := fmt.Sprintf(`
-		SELECT DISTINCT id
-		FROM (
-			SELECT id
-			FROM issues
-			WHERE deleted_at IS NULL AND id IN (%s)
-			UNION ALL
-			SELECT depends_on_id AS id
-			FROM issue_dependencies
-			WHERE issue_id IN (%s) AND tombstoned_at IS NULL
-			%s
-		)
-	`, placeholders, placeholders, dependentQuery)
-	args := make([]any, 0, len(issueIDs)*3)
-	for _, issueID := range issueIDs {
-		args = append(args, issueID)
-	}
-	for _, issueID := range issueIDs {
-		args = append(args, issueID)
-	}
-	if opts.includeDependents {
-		for _, issueID := range issueIDs {
-			args = append(args, issueID)
-		}
-	}
+	query, args := dependencyContextIDsQuery(issueIDs, opts)
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, c.wrapError("get-many-with-dependency-context-runtime", strings.Join(issueIDs, ","), err)
@@ -1113,6 +1175,171 @@ func (c *Client) GetManyWithDependencyContextRuntime(ctx context.Context, projec
 	return tasks, nil
 }
 
+func dependencyContextIDsQuery(ids []string, opts dependencyContextOptions) (string, []any) {
+	issueIDs := uniqueIssueIDStrings(ids)
+	if len(issueIDs) == 0 {
+		return "", nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(issueIDs)), ",")
+	dependentQuery := ""
+	if opts.includeDependents {
+		dependentQuery = fmt.Sprintf(`
+			UNION ALL
+			SELECT issue_id AS id
+			FROM issue_dependencies
+			WHERE depends_on_id IN (%s) AND tombstoned_at IS NULL
+		`, placeholders)
+	}
+	query := fmt.Sprintf(`
+		SELECT DISTINCT id
+		FROM (
+			SELECT id
+			FROM issues
+			WHERE deleted_at IS NULL AND id IN (%s)
+			UNION ALL
+			SELECT depends_on_id AS id
+			FROM issue_dependencies
+			WHERE issue_id IN (%s) AND tombstoned_at IS NULL
+			%s
+		)
+	`, placeholders, placeholders, dependentQuery)
+	args := make([]any, 0, len(issueIDs)*3)
+	for _, issueID := range issueIDs {
+		args = append(args, issueID)
+	}
+	for _, issueID := range issueIDs {
+		args = append(args, issueID)
+	}
+	if opts.includeDependents {
+		for _, issueID := range issueIDs {
+			args = append(args, issueID)
+		}
+	}
+	return query, args
+}
+
+func (c *Client) graphReadinessContextIDs(ctx context.Context, db *sql.DB, rootID string) ([]string, error) {
+	startedAt := time.Now()
+	query, args := graphReadinessContextIDsQuery(rootID)
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		c.logSQLiteRead(ctx, "issue.graph_readiness_context_ids", startedAt, 0, err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0, 16)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			c.logSQLiteRead(ctx, "issue.graph_readiness_context_ids", startedAt, len(ids), err)
+			return nil, err
+		}
+		if strings.TrimSpace(id) != "" {
+			ids = append(ids, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		c.logSQLiteRead(ctx, "issue.graph_readiness_context_ids", startedAt, len(ids), err)
+		return nil, err
+	}
+	c.logSQLiteRead(ctx, "issue.graph_readiness_context_ids", startedAt, len(ids), nil)
+	return ids, nil
+}
+
+func (c *Client) parentChildSubtreeIDs(ctx context.Context, db *sql.DB, rootID string) ([]string, error) {
+	query, args := parentChildSubtreeIDsQuery(rootID)
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0, 16)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(id) != "" {
+			ids = append(ids, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+func graphReadinessContextIDsQuery(rootID string) (string, []any) {
+	query := `
+		WITH graph(id) AS (
+			SELECT id
+			FROM issues
+			WHERE id = ? AND deleted_at IS NULL
+
+			UNION
+
+			SELECT closure.descendant_id
+			FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_ancestor
+			INNER JOIN issues child
+				ON child.id = closure.descendant_id
+				AND child.deleted_at IS NULL
+			WHERE closure.project_id = ?
+				AND closure.dependency_type = ?
+				AND closure.ancestor_id = ?
+		),
+		context(id) AS (
+			SELECT id FROM graph
+
+			UNION
+
+			SELECT dep.depends_on_id
+			FROM graph graph_issue
+			CROSS JOIN issue_dependencies dep INDEXED BY idx_dependencies_issue_active_type
+			CROSS JOIN issues dep_issue
+			WHERE dep.issue_id = graph_issue.id
+				AND dep_issue.id = dep.depends_on_id
+				AND dep_issue.deleted_at IS NULL
+				AND dep.tombstoned_at IS NULL
+		)
+		SELECT id
+		FROM context
+	`
+	return query, []any{
+		strings.TrimSpace(rootID),
+		issueGraphClosureProjectID,
+		string(domain.DependencyParentChild),
+		strings.TrimSpace(rootID),
+	}
+}
+
+func parentChildSubtreeIDsQuery(rootID string) (string, []any) {
+	query := `
+		SELECT id
+		FROM issues
+		WHERE id = ? AND deleted_at IS NULL
+
+		UNION
+
+		SELECT closure.descendant_id AS id
+		FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_ancestor
+		INNER JOIN issues child
+			ON child.id = closure.descendant_id
+			AND child.deleted_at IS NULL
+		WHERE closure.project_id = ?
+			AND closure.dependency_type = ?
+			AND closure.ancestor_id = ?
+		ORDER BY id
+	`
+	return query, []any{
+		strings.TrimSpace(rootID),
+		issueGraphClosureProjectID,
+		string(domain.DependencyParentChild),
+		strings.TrimSpace(rootID),
+	}
+}
+
 // GetManyMetadataWithRuntime fetches lightweight issue metadata plus stored runtime projection fields.
 func (c *Client) GetManyMetadataWithRuntime(ctx context.Context, projectID string, ids []string) ([]domain.Task, error) {
 	return c.getManyMetadataWithRuntime(ctx, projectID, ids, false)
@@ -1120,6 +1347,17 @@ func (c *Client) GetManyMetadataWithRuntime(ctx context.Context, projectID strin
 
 // GetManyMetadataWithAncestorContextRuntime fetches lightweight issue metadata plus parent ancestor context.
 func (c *Client) GetManyMetadataWithAncestorContextRuntime(ctx context.Context, projectID string, ids []string) ([]domain.Task, error) {
+	return c.getManyMetadataWithRuntime(ctx, projectID, ids, true)
+}
+
+// GetRuntimeWorktreeIssueContext fetches only the requested issues and their
+// parent-child ancestors, with lightweight metadata and runtime projection
+// fields. Runtime projection maintenance uses this to answer eligibility and
+// ancestor-base questions without hydrating the full project task list.
+func (c *Client) GetRuntimeWorktreeIssueContext(ctx context.Context, projectID string, ids []string) ([]domain.Task, error) {
+	if len(uniqueIssueIDStrings(ids)) == 0 {
+		return []domain.Task{}, nil
+	}
 	return c.getManyMetadataWithRuntime(ctx, projectID, ids, true)
 }
 
@@ -1168,36 +1406,7 @@ func (c *Client) parentAncestorIDs(ctx context.Context, db *sql.DB, issueIDs []s
 	if len(seeds) == 0 {
 		return nil, nil
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(seeds)), ",")
-	query := fmt.Sprintf(`
-		WITH RECURSIVE ancestor_ids(id) AS (
-			SELECT depends_on_id
-			FROM issue_dependencies
-			WHERE issue_id IN (%s)
-				AND tombstoned_at IS NULL
-				AND dependency_type IN (?, ?)
-			UNION
-			SELECT d.depends_on_id
-			FROM issue_dependencies d
-			JOIN ancestor_ids a ON d.issue_id = a.id
-			WHERE d.tombstoned_at IS NULL
-				AND d.dependency_type IN (?, ?)
-		)
-		SELECT DISTINCT a.id
-		FROM ancestor_ids a
-		JOIN issues i ON i.id = a.id
-		WHERE i.deleted_at IS NULL
-	`, placeholders)
-	args := make([]any, 0, len(seeds)+4)
-	for _, seed := range seeds {
-		args = append(args, seed)
-	}
-	args = append(args,
-		string(domain.DependencyParentChild),
-		"parent_child",
-		string(domain.DependencyParentChild),
-		"parent_child",
-	)
+	query, args := parentAncestorIDsQuery(seeds)
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -1217,6 +1426,137 @@ func (c *Client) parentAncestorIDs(ctx context.Context, db *sql.DB, issueIDs []s
 		return nil, err
 	}
 	return ancestors, nil
+}
+
+func parentAncestorIDsQuery(issueIDs []string) (string, []any) {
+	seeds := uniqueIssueIDStrings(issueIDs)
+	if len(seeds) == 0 {
+		return "", nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(seeds)), ",")
+	query := fmt.Sprintf(`
+		SELECT DISTINCT closure.ancestor_id
+		FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_descendant
+		JOIN issues i ON i.id = closure.ancestor_id
+		WHERE i.deleted_at IS NULL
+			AND closure.project_id = ?
+			AND closure.dependency_type = ?
+			AND closure.descendant_id IN (%s)
+	`, placeholders)
+	args := make([]any, 0, len(seeds)+2)
+	args = append(args, issueGraphClosureProjectID, string(domain.DependencyParentChild))
+	for _, seed := range seeds {
+		args = append(args, seed)
+	}
+	return query, args
+}
+
+// ListGraphDescendantIDs returns active descendant issue IDs for an ancestor in
+// the materialized issue graph closure projection.
+func (c *Client) ListGraphDescendantIDs(ctx context.Context, ancestorID, dependencyType string) ([]string, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	canonicalType, err := canonicalGraphClosureDependencyType(dependencyType)
+	if err != nil {
+		return nil, c.wrapError("list-graph-descendants", ancestorID, err)
+	}
+	ids, err := c.listGraphDescendantIDs(ctx, db, strings.TrimSpace(ancestorID), canonicalType)
+	if err != nil {
+		return nil, c.wrapError("list-graph-descendants", ancestorID, err)
+	}
+	return ids, nil
+}
+
+// ListGraphAncestorIDs returns active ancestor issue IDs for a descendant in
+// the materialized issue graph closure projection.
+func (c *Client) ListGraphAncestorIDs(ctx context.Context, descendantID, dependencyType string) ([]string, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	canonicalType, err := canonicalGraphClosureDependencyType(dependencyType)
+	if err != nil {
+		return nil, c.wrapError("list-graph-ancestors", descendantID, err)
+	}
+	ids, err := c.listGraphAncestorIDs(ctx, db, strings.TrimSpace(descendantID), canonicalType)
+	if err != nil {
+		return nil, c.wrapError("list-graph-ancestors", descendantID, err)
+	}
+	return ids, nil
+}
+
+func canonicalGraphClosureDependencyType(value string) (string, error) {
+	canonicalType, err := canonicalDependencyType(value)
+	if err != nil {
+		return "", err
+	}
+	if canonicalType != string(domain.DependencyParentChild) {
+		return "", fmt.Errorf("unsupported graph closure dependency type %q", strings.TrimSpace(value))
+	}
+	return canonicalType, nil
+}
+
+func (c *Client) listGraphDescendantIDs(ctx context.Context, queryer sqlIssueDBTX, ancestorID, dependencyType string) ([]string, error) {
+	if strings.TrimSpace(ancestorID) == "" {
+		return []string{}, nil
+	}
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT closure.descendant_id
+		FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_ancestor
+		INNER JOIN issues descendant
+			ON descendant.id = closure.descendant_id
+			AND descendant.deleted_at IS NULL
+		WHERE closure.project_id = ?
+			AND closure.dependency_type = ?
+			AND closure.ancestor_id = ?
+		ORDER BY closure.depth, closure.descendant_id
+	`, issueGraphClosureProjectID, dependencyType, ancestorID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanIssueIDRows(rows)
+}
+
+func (c *Client) listGraphAncestorIDs(ctx context.Context, queryer sqlIssueDBTX, descendantID, dependencyType string) ([]string, error) {
+	if strings.TrimSpace(descendantID) == "" {
+		return []string{}, nil
+	}
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT closure.ancestor_id
+		FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_descendant
+		INNER JOIN issues ancestor
+			ON ancestor.id = closure.ancestor_id
+			AND ancestor.deleted_at IS NULL
+		WHERE closure.project_id = ?
+			AND closure.dependency_type = ?
+			AND closure.descendant_id = ?
+		ORDER BY closure.depth, closure.ancestor_id
+	`, issueGraphClosureProjectID, dependencyType, descendantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanIssueIDRows(rows)
+}
+
+func scanIssueIDRows(rows *sql.Rows) ([]string, error) {
+	ids := []string{}
+	for rows.Next() {
+		var issueID string
+		if err := rows.Scan(&issueID); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(issueID) != "" {
+			ids = append(ids, issueID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 func uniqueIssueIDStrings(ids []string) []string {
@@ -1276,18 +1616,6 @@ func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error
 		return nil, c.wrapError("search", query, err)
 	}
 	return tasks, nil
-}
-
-func issueContentFTSExpression(query string) string {
-	tokens := domain.ContentQueryTerms(query)
-	if len(tokens) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(tokens))
-	for _, token := range tokens {
-		parts = append(parts, `"`+token+`"`)
-	}
-	return strings.Join(parts, " AND ")
 }
 
 // Ready fetches open tasks that do not have unresolved blockers.
@@ -1567,6 +1895,9 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 			ON CONFLICT(issue_id, depends_on_id, dependency_type)
 			DO UPDATE SET tombstoned_at = NULL
 		`, issueID, parentID, string(domain.DependencyParentChild)); err != nil {
+			return "", c.wrapError("create", issueID, err)
+		}
+		if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
 			return "", c.wrapError("create", issueID, err)
 		}
 	}
@@ -1925,6 +2256,11 @@ func (c *Client) addDependency(ctx context.Context, issueID, dependsOnID, depend
 	`, issueID, dependsOnID, canonicalType); err != nil {
 		return c.wrapError("add-dependency", issueID, err)
 	}
+	if canonicalType == string(domain.DependencyParentChild) {
+		if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
+			return c.wrapError("add-dependency", issueID, err)
+		}
+	}
 
 	if err := tx.Commit(); err != nil {
 		return c.wrapError("add-dependency", issueID, err)
@@ -2013,8 +2349,66 @@ func (c *Client) issueExists(ctx context.Context, queryer sqlIssueQueryer, id st
 	return exists, nil
 }
 
+func (c *Client) rebuildIssueGraphClosure(ctx context.Context, execer sqlIssueExecer) error {
+	if _, err := execer.ExecContext(ctx, `DELETE FROM issue_graph_closure`); err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := execer.ExecContext(ctx, `
+		INSERT INTO issue_graph_closure (
+			project_id,
+			ancestor_id,
+			descendant_id,
+			dependency_type,
+			depth,
+			updated_at
+		)
+		WITH RECURSIVE parent_edges(ancestor_id, descendant_id) AS (
+			SELECT d.depends_on_id, d.issue_id
+			FROM issue_dependencies d
+			INNER JOIN issues ancestor
+				ON ancestor.id = d.depends_on_id
+				AND ancestor.deleted_at IS NULL
+			INNER JOIN issues descendant
+				ON descendant.id = d.issue_id
+				AND descendant.deleted_at IS NULL
+			WHERE d.tombstoned_at IS NULL
+				AND d.dependency_type IN (?, 'parent_child')
+		),
+		closure(ancestor_id, descendant_id, depth, path) AS (
+			SELECT ancestor_id, descendant_id, 1, ',' || ancestor_id || ',' || descendant_id || ','
+			FROM parent_edges
+			UNION ALL
+			SELECT c.ancestor_id, e.descendant_id, c.depth + 1, c.path || e.descendant_id || ','
+			FROM closure c
+			INNER JOIN parent_edges e
+				ON e.ancestor_id = c.descendant_id
+			WHERE instr(c.path, ',' || e.descendant_id || ',') = 0
+		)
+		SELECT
+			?,
+			ancestor_id,
+			descendant_id,
+			?,
+			MIN(depth),
+			?
+		FROM closure
+		WHERE ancestor_id <> descendant_id
+		GROUP BY ancestor_id, descendant_id
+	`, string(domain.DependencyParentChild), issueGraphClosureProjectID, string(domain.DependencyParentChild), now); err != nil {
+		return err
+	}
+	return nil
+}
+
 // RemoveDependency tombstones a dependency edge between two issues.
 func (c *Client) RemoveDependency(ctx context.Context, issueID, dependsOnID, dependencyType string) error {
+	return c.withMutationLock(ctx, func(ctx context.Context) error {
+		return c.removeDependency(ctx, issueID, dependsOnID, dependencyType)
+	})
+}
+
+func (c *Client) removeDependency(ctx context.Context, issueID, dependsOnID, dependencyType string) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err
@@ -2045,7 +2439,18 @@ func (c *Client) RemoveDependency(ctx context.Context, issueID, dependsOnID, dep
 		}
 	}
 
-	res, err := db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return c.wrapError("remove-dependency", issueID, err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	res, err := tx.ExecContext(ctx, `
 		UPDATE issue_dependencies
 		SET tombstoned_at = ?
 		WHERE issue_id = ? AND depends_on_id = ? AND dependency_type = ? AND tombstoned_at IS NULL
@@ -2058,7 +2463,16 @@ func (c *Client) RemoveDependency(ctx context.Context, issueID, dependsOnID, dep
 	if affected == 0 {
 		return c.wrapError("remove-dependency", issueID, domain.ErrNotFound)
 	}
+	if canonicalType == string(domain.DependencyParentChild) {
+		if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
+			return c.wrapError("remove-dependency", issueID, err)
+		}
+	}
 
+	if err := tx.Commit(); err != nil {
+		return c.wrapError("remove-dependency", issueID, err)
+	}
+	committed = true
 	return nil
 }
 
@@ -2219,6 +2633,9 @@ func (c *Client) deleteLocked(ctx context.Context, id string) error {
 	if affected == 0 {
 		return c.wrapError("delete", id, domain.ErrNotFound)
 	}
+	if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
+		return c.wrapError("delete", id, err)
+	}
 	if err := tx.Commit(); err != nil {
 		return c.wrapError("delete", id, err)
 	}
@@ -2266,6 +2683,9 @@ func (c *Client) archiveLocked(ctx context.Context, id string) error {
 	if affected == 0 {
 		return c.wrapError("archive", id, domain.ErrNotFound)
 	}
+	if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
+		return c.wrapError("archive", id, err)
+	}
 	if err := tx.Commit(); err != nil {
 		return c.wrapError("archive", id, err)
 	}
@@ -2303,31 +2723,15 @@ func (c *Client) guardNoUndeletedParentChildDescendants(ctx context.Context, que
 func (c *Client) countUndeletedParentChildDescendants(ctx context.Context, queryer sqlIssueQueryer, issueID string) (int, error) {
 	var count int
 	if err := queryer.QueryRowContext(ctx, `
-		WITH RECURSIVE descendants(id) AS (
-			SELECT child.id
-			FROM issue_dependencies d
-			INNER JOIN issues child
-				ON child.id = d.issue_id
-				AND child.deleted_at IS NULL
-			WHERE
-				d.depends_on_id = ?
-				AND d.dependency_type IN (?, 'parent_child')
-				AND d.tombstoned_at IS NULL
-			UNION
-			SELECT child.id
-			FROM issue_dependencies d
-			INNER JOIN issues child
-				ON child.id = d.issue_id
-				AND child.deleted_at IS NULL
-			INNER JOIN descendants parent
-				ON parent.id = d.depends_on_id
-			WHERE
-				d.dependency_type IN (?, 'parent_child')
-				AND d.tombstoned_at IS NULL
-		)
-		SELECT COUNT(DISTINCT id)
-		FROM descendants
-	`, issueID, string(domain.DependencyParentChild), string(domain.DependencyParentChild)).Scan(&count); err != nil {
+		SELECT COUNT(DISTINCT closure.descendant_id)
+		FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_ancestor
+		INNER JOIN issues descendant
+			ON descendant.id = closure.descendant_id
+			AND descendant.deleted_at IS NULL
+		WHERE closure.project_id = ?
+			AND closure.dependency_type = ?
+			AND closure.ancestor_id = ?
+	`, issueGraphClosureProjectID, string(domain.DependencyParentChild), issueID).Scan(&count); err != nil {
 		return 0, err
 	}
 	return count, nil
@@ -2549,25 +2953,142 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 		return tasks, nil
 	}
 
-	if err := c.loadDependenciesForTasks(ctx, db, taskIDs, taskIndexByID, tasks); err != nil {
+	if err := c.loadDependenciesForTasks(ctx, db, taskIDs, taskIndexByID, tasks, taskDependencyLoadAll); err != nil {
 		return nil, err
 	}
 
 	return tasks, nil
 }
 
-func (c *Client) queryTaskSummariesWithRuntime(ctx context.Context, db *sql.DB, projectID string) ([]domain.Task, error) {
-	return c.queryTasksWithRuntimeProjection(ctx, db, projectID, false)
+func (c *Client) queryTaskSummariesWithRuntime(ctx context.Context, db *sql.DB, projectID string, includeDependencies bool, issueIDs ...string) ([]domain.Task, error) {
+	dependencyMode := taskDependencyLoadParentOnly
+	if includeDependencies {
+		dependencyMode = taskDependencyLoadAll
+	}
+	return c.queryTasksWithRuntimeProjection(ctx, db, projectID, false, dependencyMode, issueIDs...)
 }
 
 func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectID string, issueIDs ...string) ([]domain.Task, error) {
-	return c.queryTasksWithRuntimeProjection(ctx, db, projectID, true, issueIDs...)
+	return c.queryTasksWithRuntimeProjection(ctx, db, projectID, true, taskDependencyLoadAll, issueIDs...)
 }
 
 func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, projectID string, issueIDs ...string) ([]domain.Task, error) {
 	ids := uniqueIssueIDStrings(issueIDs)
 	if len(ids) == 0 {
 		return []domain.Task{}, nil
+	}
+	startedAt := time.Now()
+	query, args := taskMetadataRuntimeProjectionQuery(projectID, ids...)
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		c.logSQLiteRead(ctx, "issue.metadata_runtime_projection", startedAt, 0, err, "issue_count", len(ids))
+		return nil, err
+	}
+	defer rows.Close()
+
+	tasks := make([]domain.Task, 0, len(ids))
+	seen := map[naming.IssueID]int{}
+	for rows.Next() {
+		task := domain.Task{}
+		var (
+			statusRaw          string
+			typeRaw            string
+			priorityRaw        int
+			createdRaw         string
+			updatedRaw         string
+			sessionStateRaw    string
+			sessionStartedRaw  string
+			sessionUpdatedRaw  string
+			sessionActivityRaw string
+			sessionSourceRaw   string
+			tmuxAttachedCount  int
+			worktreePath       string
+			gitStatusRaw       string
+			worktreeUpdatedRaw string
+			gitUpdatedRaw      string
+			parentIDRaw        string
+		)
+		if err := rows.Scan(
+			&task.ID,
+			&task.Title,
+			&statusRaw,
+			&priorityRaw,
+			&typeRaw,
+			&createdRaw,
+			&updatedRaw,
+			&sessionStateRaw,
+			&sessionStartedRaw,
+			&sessionUpdatedRaw,
+			&sessionActivityRaw,
+			&sessionSourceRaw,
+			&tmuxAttachedCount,
+			&worktreePath,
+			&gitStatusRaw,
+			&worktreeUpdatedRaw,
+			&gitUpdatedRaw,
+			&parentIDRaw,
+		); err != nil {
+			c.logSQLiteRead(ctx, "issue.metadata_runtime_projection", startedAt, len(tasks), err, "issue_count", len(ids))
+			return nil, err
+		}
+		if idx, ok := seen[task.ID]; ok {
+			if tasks[idx].ParentID == nil {
+				if parentID, err := naming.ParseIssueID(parentIDRaw); err == nil {
+					tasks[idx].ParentID = &parentID
+				}
+			}
+			continue
+		}
+		task.Status = domain.Status(statusRaw)
+		task.Priority = domain.Priority(priorityRaw)
+		task.Type = domain.TaskType(typeRaw)
+		task.CreatedAt = parseTimestamp(createdRaw)
+		task.UpdatedAt = parseTimestamp(updatedRaw)
+		task.RuntimeUpdatedAt = newestParsedTimestamp(task.UpdatedAt, gitUpdatedRaw)
+		task.Origin = "local"
+		if parentID, err := naming.ParseIssueID(parentIDRaw); err == nil {
+			task.ParentID = &parentID
+		}
+		worktreePath = strings.TrimSpace(worktreePath)
+		if worktreePath != "" {
+			task.HasWorktree = true
+		}
+		applyGitStatusProjection(&task, gitStatusRaw)
+		sessionStateRaw = strings.TrimSpace(sessionStateRaw)
+		if sessionStateRaw != "" && sessionStateRaw != "stopped" {
+			startedAt := parseOptionalTimestamp(sessionStartedRaw)
+			if startedAt == nil {
+				startedAt = parseOptionalTimestamp(sessionUpdatedRaw)
+			}
+			task.Session = &domain.Session{
+				IssueID:           task.ID,
+				State:             mapRuntimeSessionState(sessionStateRaw),
+				Activity:          strings.ToLower(strings.TrimSpace(sessionActivityRaw)),
+				ActivitySource:    strings.ToLower(strings.TrimSpace(sessionSourceRaw)),
+				TmuxAttached:      tmuxAttachedCount > 0,
+				TmuxAttachedCount: tmuxAttachedCount,
+				StartedAt:         startedAt,
+				UpdatedAt:         parseTimestamp(sessionUpdatedRaw),
+				Worktree:          worktreePath,
+			}
+			task.HasTmuxSession = true
+		}
+		seen[task.ID] = len(tasks)
+		tasks = append(tasks, task)
+	}
+	if err := rows.Err(); err != nil {
+		c.logSQLiteRead(ctx, "issue.metadata_runtime_projection", startedAt, len(tasks), err, "issue_count", len(ids))
+		return nil, err
+	}
+	c.logSQLiteRead(ctx, "issue.metadata_runtime_projection", startedAt, len(tasks), nil, "issue_count", len(ids))
+	return tasks, nil
+}
+
+func taskMetadataRuntimeProjectionQuery(projectID string, issueIDs ...string) (string, []any) {
+	ids := uniqueIssueIDStrings(issueIDs)
+	if len(ids) == 0 {
+		return "", nil
 	}
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
 	query := fmt.Sprintf(`
@@ -2642,112 +3163,23 @@ func (c *Client) queryTaskMetadataWithRuntime(ctx context.Context, db *sql.DB, p
 	for _, id := range ids {
 		args = append(args, id)
 	}
-
-	rows, err := db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	tasks := make([]domain.Task, 0, len(ids))
-	seen := map[naming.IssueID]int{}
-	for rows.Next() {
-		task := domain.Task{}
-		var (
-			statusRaw          string
-			typeRaw            string
-			priorityRaw        int
-			createdRaw         string
-			updatedRaw         string
-			sessionStateRaw    string
-			sessionStartedRaw  string
-			sessionUpdatedRaw  string
-			sessionActivityRaw string
-			sessionSourceRaw   string
-			tmuxAttachedCount  int
-			worktreePath       string
-			gitStatusRaw       string
-			worktreeUpdatedRaw string
-			gitUpdatedRaw      string
-			parentIDRaw        string
-		)
-		if err := rows.Scan(
-			&task.ID,
-			&task.Title,
-			&statusRaw,
-			&priorityRaw,
-			&typeRaw,
-			&createdRaw,
-			&updatedRaw,
-			&sessionStateRaw,
-			&sessionStartedRaw,
-			&sessionUpdatedRaw,
-			&sessionActivityRaw,
-			&sessionSourceRaw,
-			&tmuxAttachedCount,
-			&worktreePath,
-			&gitStatusRaw,
-			&worktreeUpdatedRaw,
-			&gitUpdatedRaw,
-			&parentIDRaw,
-		); err != nil {
-			return nil, err
-		}
-		if idx, ok := seen[task.ID]; ok {
-			if tasks[idx].ParentID == nil {
-				if parentID, err := naming.ParseIssueID(parentIDRaw); err == nil {
-					tasks[idx].ParentID = &parentID
-				}
-			}
-			continue
-		}
-		task.Status = domain.Status(statusRaw)
-		task.Priority = domain.Priority(priorityRaw)
-		task.Type = domain.TaskType(typeRaw)
-		task.CreatedAt = parseTimestamp(createdRaw)
-		task.UpdatedAt = parseTimestamp(updatedRaw)
-		task.RuntimeUpdatedAt = newestParsedTimestamp(task.UpdatedAt, gitUpdatedRaw)
-		task.Origin = "local"
-		if parentID, err := naming.ParseIssueID(parentIDRaw); err == nil {
-			task.ParentID = &parentID
-		}
-		worktreePath = strings.TrimSpace(worktreePath)
-		if worktreePath != "" {
-			task.HasWorktree = true
-		}
-		applyGitStatusProjection(&task, gitStatusRaw)
-		sessionStateRaw = strings.TrimSpace(sessionStateRaw)
-		if sessionStateRaw != "" && sessionStateRaw != "stopped" {
-			startedAt := parseOptionalTimestamp(sessionStartedRaw)
-			if startedAt == nil {
-				startedAt = parseOptionalTimestamp(sessionUpdatedRaw)
-			}
-			task.Session = &domain.Session{
-				IssueID:           task.ID,
-				State:             mapRuntimeSessionState(sessionStateRaw),
-				Activity:          strings.ToLower(strings.TrimSpace(sessionActivityRaw)),
-				ActivitySource:    strings.ToLower(strings.TrimSpace(sessionSourceRaw)),
-				TmuxAttached:      tmuxAttachedCount > 0,
-				TmuxAttachedCount: tmuxAttachedCount,
-				StartedAt:         startedAt,
-				UpdatedAt:         parseTimestamp(sessionUpdatedRaw),
-				Worktree:          worktreePath,
-			}
-			task.HasTmuxSession = true
-		}
-		seen[task.ID] = len(tasks)
-		tasks = append(tasks, task)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return tasks, nil
+	return query, args
 }
 
-func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB, projectID string, includeDetails bool, issueIDs ...string) ([]domain.Task, error) {
+type taskDependencyLoadMode int
+
+const (
+	taskDependencyLoadAll taskDependencyLoadMode = iota
+	taskDependencyLoadParentOnly
+)
+
+func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB, projectID string, includeDetails bool, dependencyMode taskDependencyLoadMode, issueIDs ...string) ([]domain.Task, error) {
+	startedAt := time.Now()
+	issueCount := len(uniqueIssueIDStrings(issueIDs))
 	query, args := taskRuntimeProjectionQuery(projectID, includeDetails, issueIDs...)
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
+		c.logSQLiteRead(ctx, "issue.runtime_projection", startedAt, 0, err, "include_details", includeDetails, "issue_count", issueCount)
 		return nil, err
 	}
 	defer rows.Close()
@@ -2808,6 +3240,7 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 			&gitUpdatedRaw,
 			&originProvider,
 		); err != nil {
+			c.logSQLiteRead(ctx, "issue.runtime_projection", startedAt, len(tasks), err, "include_details", includeDetails, "issue_count", issueCount)
 			return nil, err
 		}
 		if origin := strings.TrimSpace(strings.ToLower(originProvider)); origin != "" {
@@ -2861,15 +3294,45 @@ func (c *Client) queryTasksWithRuntimeProjection(ctx context.Context, db *sql.DB
 		taskIndexByID[task.ID] = len(tasks) - 1
 	}
 	if err := rows.Err(); err != nil {
+		c.logSQLiteRead(ctx, "issue.runtime_projection", startedAt, len(tasks), err, "include_details", includeDetails, "issue_count", issueCount)
 		return nil, err
 	}
 	if len(tasks) == 0 {
+		c.logSQLiteRead(ctx, "issue.runtime_projection", startedAt, len(tasks), nil, "include_details", includeDetails, "issue_count", issueCount)
 		return tasks, nil
 	}
-	if err := c.loadDependenciesForTasks(ctx, db, taskIDs, taskIndexByID, tasks); err != nil {
+	if err := c.loadDependenciesForTasks(ctx, db, taskIDs, taskIndexByID, tasks, dependencyMode); err != nil {
+		c.logSQLiteRead(ctx, "issue.runtime_projection", startedAt, len(tasks), err, "include_details", includeDetails, "issue_count", issueCount)
 		return nil, err
 	}
+	c.logSQLiteRead(ctx, "issue.runtime_projection", startedAt, len(tasks), nil, "include_details", includeDetails, "issue_count", issueCount)
 	return tasks, nil
+}
+
+func (c *Client) logSQLiteRead(ctx context.Context, operation string, startedAt time.Time, rowCount int, err error, attrs ...any) {
+	if c == nil || c.logger == nil || startedAt.IsZero() {
+		return
+	}
+	outcome := "success"
+	if err != nil {
+		outcome = "error"
+	}
+	base := []any{
+		"event", "sqlite.query.completed",
+		"service", "azedarach.issue_store",
+		"dependency.name", "sqlite",
+		"dependency.operation", operation,
+		"dependency.duration_ms", time.Since(startedAt).Milliseconds(),
+		"outcome", outcome,
+		"row_count", rowCount,
+	}
+	base = append(base, attrs...)
+	if err != nil {
+		base = append(base, "error_class", "sqlite_query")
+		c.logger.WarnContext(ctx, "sqlite query completed", base...)
+		return
+	}
+	c.logger.DebugContext(ctx, "sqlite query completed", base...)
 }
 
 func applyGitStatusProjection(task *domain.Task, raw string) {
@@ -3094,6 +3557,7 @@ func (c *Client) loadDependenciesForTasks(
 	taskIDs []naming.IssueID,
 	taskIndexByID map[naming.IssueID]int,
 	tasks []domain.Task,
+	mode taskDependencyLoadMode,
 ) error {
 	const maxPlaceholders = 500
 	for start := 0; start < len(taskIDs); start += maxPlaceholders {
@@ -3102,18 +3566,14 @@ func (c *Client) loadDependenciesForTasks(
 			end = len(taskIDs)
 		}
 		chunk := taskIDs[start:end]
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		query, dependencyTypeArgs := taskDependencyRowsQuery(len(chunk), mode)
 		depArgs := make([]any, 0, len(chunk))
 		for _, id := range chunk {
 			depArgs = append(depArgs, id.String())
 		}
+		depArgs = append(depArgs, dependencyTypeArgs...)
 
-		rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-			SELECT issue_id, depends_on_id, dependency_type
-			FROM issue_dependencies
-			WHERE tombstoned_at IS NULL
-				AND issue_id IN (%s)
-		`, placeholders), depArgs...)
+		rows, err := db.QueryContext(ctx, query, depArgs...)
 		if err != nil {
 			return err
 		}
@@ -3161,6 +3621,23 @@ func (c *Client) loadDependenciesForTasks(
 		}
 	}
 	return nil
+}
+
+func taskDependencyRowsQuery(issueIDCount int, mode taskDependencyLoadMode) (string, []any) {
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", issueIDCount), ",")
+	typeFilter := ""
+	args := []any(nil)
+	if mode == taskDependencyLoadParentOnly {
+		typeFilter = " AND dependency_type IN (?, ?)"
+		args = append(args, string(domain.DependencyParentChild), "parent_child")
+	}
+	return fmt.Sprintf(`
+		SELECT issue_id, depends_on_id, dependency_type
+		FROM issue_dependencies
+		WHERE tombstoned_at IS NULL
+			AND issue_id IN (%s)
+			%s
+	`, placeholders, typeFilter), args
 }
 
 func normalizeDependencyType(value string) string {

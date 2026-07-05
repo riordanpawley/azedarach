@@ -1890,7 +1890,9 @@ func TestEventLogHotkeyPushesOverlay(t *testing.T) {
 		t.Fatalf("expected EventLogOverlay on stack, got %T", current)
 	}
 
-	if view := logOverlay.View(); !strings.Contains(view, "ui.toast") {
+	model, _ := logOverlay.Update(tea.WindowSizeMsg{Width: 160, Height: 34})
+	logOverlay = model.(*overlay.EventLogOverlay)
+	if view := logOverlay.View(); !strings.Contains(view, "Toast") || !strings.Contains(view, "event seed") {
 		t.Fatalf("expected event log to render runtime events, got %q", view)
 	}
 }
@@ -2016,6 +2018,56 @@ func TestNormalModeDown_KeepsCursorVisibleWithIndicators(t *testing.T) {
 			nextEnd,
 			next.viewportStarts[0],
 		)
+	}
+}
+
+func TestNormalModeDown_NarrowShortSingleColumnKeepsFinalIssueVisible(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.viewMode = ViewModeBoard
+	m.width = 50
+	m.tasks = make([]domain.Task, 0, 12)
+	for i := 1; i <= 12; i++ {
+		m.tasks = append(m.tasks, domain.Task{
+			ID:       naming.IssueID(fmt.Sprintf("open-%02d", i)),
+			Title:    fmt.Sprintf("Open Task %02d", i),
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+		})
+	}
+
+	columns := m.buildColumns()
+	columnCount := m.boardVisibleColumnCount(len(columns))
+	if columnCount != 1 {
+		t.Fatalf("expected single-column board at width %d, got %d columns", m.width, columnCount)
+	}
+	linesPerCard := board.CardLineFootprint(m.styles, board.CardContentWidth(m.width/columnCount))
+	m.height = linesPerCard + board.ColumnHeaderLines + board.BoardStatusBarLines
+	m.nav.SelectTask("open-01", 0)
+	m.ensureCursorVisible(columns)
+
+	for i := 1; i < len(columns[0].Tasks); i++ {
+		result, cmd := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyDown})
+		if cmd != nil {
+			t.Fatalf("expected no command during down navigation, got %T", cmd)
+		}
+		next, ok := result.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", result)
+		}
+		m = next
+	}
+
+	columns = m.buildColumns()
+	pos := m.nav.GetPosition(columns)
+	if !pos.Valid || pos.Column != 0 || pos.Task != len(columns[0].Tasks)-1 {
+		t.Fatalf("expected cursor on final open issue, got %+v", pos)
+	}
+
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "▶open-12") || !strings.Contains(view, "Open Task 12") {
+		t.Fatalf("expected final issue to remain visible in narrow short board view:\n%s", view)
 	}
 }
 
@@ -6802,6 +6854,53 @@ func TestDaemonOperationFailureEventRemainsVisibleWithReason(t *testing.T) {
 	}
 	if progress.ProgressMessage != "merge failed: dirty worktree" {
 		t.Fatalf("progress message = %q, want failure reason", progress.ProgressMessage)
+	}
+}
+
+func TestDaemonSessionStartFailureEventRemainsVisibleOnTask(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+	detail := "worktree create failed for az-1: failed to create worktree with git worktree add -b user/az-1/task /tmp/az-1 main: hook failed (rolled back worktree /tmp/az-1)"
+	body, err := json.Marshal(protocol.OperationEventBody{
+		Operation: protocol.OperationRecord{
+			OperationID: "op-start",
+			IssueID:     naming.IssueID("az-1"),
+			Kind:        daemonclient.CommandSessionStart,
+			State:       protocol.OperationStateFailed,
+			Error: &protocol.OperationError{
+				Code:      protocol.ErrorCodeInternal,
+				Message:   detail,
+				Retryable: false,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal failure body: %v", err)
+	}
+
+	m.applyDaemonStreamEvent(protocol.EventEnvelope{
+		Event: protocol.EventOperationFailed,
+		Body:  body,
+	}, false)
+
+	signals := m.runtimeSignalsForBoard()
+	got := signals["az-1"]
+	if got.PendingOperationID != "op-start" || got.PendingOperationState != string(protocol.OperationStateFailed) {
+		t.Fatalf("pending signal = %+v, want failed op-start", got)
+	}
+	progress := m.pendingMutationForTask("az-1")
+	if progress == nil {
+		t.Fatal("expected failed session start in task-local mutation progress")
+	}
+	if len(m.toasts) != 0 {
+		t.Fatalf("toasts = %+v, want task-local error surface only", m.toasts)
+	}
+	for _, want := range []string{"git worktree add", "hook failed", "rolled back worktree /tmp/az-1"} {
+		if !strings.Contains(progress.ProgressMessage, want) {
+			t.Fatalf("progress message = %q, want substring %q", progress.ProgressMessage, want)
+		}
 	}
 }
 

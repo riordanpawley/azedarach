@@ -184,22 +184,44 @@ func (w *daemonRuntimeProjectionWriter) PersistGitStatusProjectionAndPublish(
 		projection, found, err = w.d.worktreeRuntimeStateStore(projectID).GetWorktreeStateByIssueID(ctx, projectID, issueID)
 	}
 	if err != nil || !found {
+		if err != nil && w.d.cfg.Logger != nil {
+			w.d.cfg.Logger.Warn("persist worktree runtime-state git status lookup by issue failed",
+				"project_id", projectID,
+				"issue_id", issueID,
+				"error", err,
+			)
+		}
 		if worktree == "" {
 			return 0
 		}
 		projection, found, err = w.d.worktreeRuntimeStateStore(projectID).GetWorktreeStateByPath(ctx, projectID, worktree)
 	}
 	if err != nil || !found || strings.TrimSpace(projection.IssueID) == "" {
+		if err != nil && w.d.cfg.Logger != nil {
+			w.d.cfg.Logger.Warn("persist worktree runtime-state git status lookup by path failed",
+				"project_id", projectID,
+				"worktree", worktree,
+				"error", err,
+			)
+		}
 		return 0
 	}
 	rawStatus, err := json.Marshal(status)
 	if err != nil {
+		if w.d.cfg.Logger != nil {
+			w.d.cfg.Logger.Warn("marshal worktree runtime-state git status failed",
+				"project_id", projectID,
+				"issue_id", projection.IssueID,
+				"worktree", worktree,
+				"error", err,
+			)
+		}
 		return 0
 	}
 	changed := string(rawStatus) != string(projection.GitStatusRaw)
 	if err := w.d.worktreeRuntimeStateStore(projectID).UpsertWorktreeStateGitStatus(ctx, projectID, projection.IssueID, rawStatus, time.Now().UTC()); err != nil {
 		if w.d.cfg.Logger != nil {
-			w.d.cfg.Logger.Debug("persist worktree runtime-state git status failed", "project_id", projectID, "issue_id", projection.IssueID, "worktree", worktree, "error", err)
+			w.d.cfg.Logger.Warn("persist worktree runtime-state git status failed", "project_id", projectID, "issue_id", projection.IssueID, "worktree", worktree, "error", err)
 		}
 		return 0
 	}
