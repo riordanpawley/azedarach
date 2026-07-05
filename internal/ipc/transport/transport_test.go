@@ -130,6 +130,53 @@ func TestSubscribeStreamsEvents(t *testing.T) {
 	}
 }
 
+func TestSubscribeContextCancelClosesServerSubscriber(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	socket := tempSocketPath(t)
+	defer os.Remove(socket)
+	serverCanceled := make(chan struct{})
+	events := make(chan protocol.EventEnvelope)
+	srv := NewServer(socket, Handlers{
+		Handshake: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+			return protocol.HelloAck{Accepted: true}, nil
+		},
+		Command: func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			return protocol.ResponseEnvelope{OK: true}, nil
+		},
+		Subscribe: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, func(), error) {
+			return events, func() { close(serverCanceled) }, nil
+		},
+	})
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ctx) }()
+	waitForSocket(t, socket, errCh)
+
+	client := NewClient(socket)
+	subCtx, subCancel := context.WithCancel(context.Background())
+	ch, err := client.Subscribe(subCtx, "proj", 1)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	subCancel()
+
+	select {
+	case <-serverCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server subscriber was not canceled after client context cancellation")
+	}
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("client event channel should close after context cancellation")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("client event channel did not close after context cancellation")
+	}
+}
+
 func TestCommandHonorsContextDeadlineOverDefaultTimeout(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())

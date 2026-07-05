@@ -177,9 +177,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case issuesLoadedMsg:
 		if msg.refreshSeq != 0 && msg.refreshSeq < m.issueRefreshSeq {
+			if msg.eventsCancel != nil {
+				msg.eventsCancel()
+			}
 			return m, nil
 		}
 		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
+			if msg.eventsCancel != nil {
+				msg.eventsCancel()
+			}
 			return m, m.finishIssuesRefreshCmd(msg.refreshSeq)
 		}
 		if msg.daemonClient != nil {
@@ -265,7 +271,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, tickEvery(2*time.Second))
 		}
 		if msg.events != nil {
-			m.daemonEvents = msg.events
+			m.replaceDaemonEventStream(msg.events, msg.eventsCancel)
 			cmds = append(cmds, m.waitForDaemonEventCmd())
 		}
 		if m.openSessionSelectorOnLoad {
@@ -310,7 +316,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logStreamReconnectQueued = true
 			return m, m.queueLogStreamReconnectCmd(delay)
 		}
-		m.logStreamEvents = msg.stream
+		m.replaceLogStream(msg.stream, msg.cancel)
 		m.lastLogStreamReattachAt = time.Time{}
 		m.logStreamReconnectQueued = false
 		return m, m.waitForLogStreamEventCmd()
@@ -528,7 +534,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.stream != nil && msg.stream != m.daemonEvents {
 			return m, nil
 		}
-		m.daemonEvents = nil
+		m.clearDaemonEventStream()
 		return m, m.attachDaemonCmd()
 
 	case logStreamEventMsg:
@@ -561,7 +567,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.stream != nil && msg.stream != m.logStreamEvents {
 			return m, nil
 		}
-		m.logStreamEvents = nil
+		m.clearLogStream()
 		interval := reconnect.DefaultReconciliationPolicy().ReattachRetryInterval
 		if interval <= 0 {
 			interval = 5 * time.Second
@@ -942,6 +948,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case projectSwitchResultMsg:
 		if msg.switchSeq != 0 && msg.switchSeq != m.projectSwitchSeq {
+			if msg.eventsCancel != nil {
+				msg.eventsCancel()
+			}
 			return m, nil
 		}
 		if msg.err != nil {
@@ -984,7 +993,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.boardRefreshing = false
 		m.projectSwitchInFlight = false
 		m.lastRefresh = time.Now()
-		m.daemonEvents = msg.events
+		m.replaceDaemonEventStream(msg.events, msg.eventsCancel)
 
 		m.addToast(Toast{
 			Level:   ToastSuccess,
@@ -1596,7 +1605,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		case protocol.StreamProjectionDecisionIgnore:
 			return daemonStreamEventResult{}
 		case protocol.StreamProjectionDecisionResync:
-			m.daemonEvents = nil
+			m.clearDaemonEventStream()
 			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 		}
 		if m.applyTaskEvent(evt) {
@@ -1609,7 +1618,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		case protocol.StreamProjectionDecisionIgnore:
 			return daemonStreamEventResult{}
 		case protocol.StreamProjectionDecisionResync:
-			m.daemonEvents = nil
+			m.clearDaemonEventStream()
 			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 		}
 		m.applySessionProjectionEvent(evt)
@@ -1621,7 +1630,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		case protocol.StreamProjectionDecisionIgnore:
 			return daemonStreamEventResult{}
 		case protocol.StreamProjectionDecisionResync:
-			m.daemonEvents = nil
+			m.clearDaemonEventStream()
 			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 		}
 		if skipProjectionApply {
@@ -1642,7 +1651,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		case protocol.StreamProjectionDecisionIgnore:
 			return daemonStreamEventResult{}
 		case protocol.StreamProjectionDecisionResync:
-			m.daemonEvents = nil
+			m.clearDaemonEventStream()
 			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 		}
 		cmd := m.applyUICommandEvent(evt)
@@ -1657,7 +1666,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		m.daemonRevision = cursor.Advance(evt).Revision
 		return daemonStreamEventResult{key: daemonStreamCommandIssuesRefresh}
 	case daemonEventRehydrate:
-		m.daemonEvents = nil
+		m.clearDaemonEventStream()
 		return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 	default:
 		return daemonStreamEventResult{}

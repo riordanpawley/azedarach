@@ -241,6 +241,8 @@ type Model struct {
 	daemonSocketPath          string
 	daemonEvents              <-chan protocol.EventEnvelope
 	logStreamEvents           <-chan protocol.EventEnvelope
+	daemonEventsCancel        context.CancelFunc
+	logStreamEventsCancel     context.CancelFunc
 	daemonRevision            uint64
 	daemonStreamMetrics       daemonStreamMetrics
 	lastDaemonReattachAttempt time.Time
@@ -1032,6 +1034,7 @@ type issuesLoadedMsg struct {
 	lastCheckedAt time.Time
 	freshness     protocol.TaskListFreshness
 	events        <-chan protocol.EventEnvelope
+	eventsCancel  context.CancelFunc
 	daemonClient  *daemonclient.Client
 	daemonSocket  string
 	stale         bool
@@ -1054,6 +1057,7 @@ type projectSwitchResultMsg struct {
 	lastCheckedAt time.Time
 	freshness     protocol.TaskListFreshness
 	events        <-chan protocol.EventEnvelope
+	eventsCancel  context.CancelFunc
 	daemonClient  *daemonclient.Client
 	daemonSocket  string
 	err           error
@@ -1077,6 +1081,7 @@ type daemonStreamClosedMsg struct {
 
 type logStreamAttachedMsg struct {
 	stream <-chan protocol.EventEnvelope
+	cancel context.CancelFunc
 	err    error
 }
 
@@ -1878,8 +1883,10 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 				err:       err,
 			}
 		}
-		events, err := daemonClient.Subscribe(context.Background(), projectRouteID.String(), snapshot.Revision)
+		streamCtx, streamCancel := context.WithCancel(context.Background())
+		events, err := daemonClient.Subscribe(streamCtx, projectRouteID.String(), snapshot.Revision)
 		if err != nil {
+			streamCancel()
 			if m.logger != nil {
 				m.logger.Warn("project switch subscribe failed", "to_project", project.Name, "to_project_route", projectRouteID.String(), "revision", snapshot.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
 			}
@@ -1902,6 +1909,7 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 			lastCheckedAt: snapshot.LastCheckedAt,
 			freshness:     snapshot.Freshness,
 			events:        events,
+			eventsCancel:  streamCancel,
 			daemonClient:  daemonClient,
 			daemonSocket:  socketPath,
 		}
@@ -1957,8 +1965,10 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 			}
 			return issuesErrorMsg{projectID: projectID, err: err}
 		}
-		events, err := daemonClient.Subscribe(context.Background(), projectID, snapshot.Revision)
+		streamCtx, streamCancel := context.WithCancel(context.Background())
+		events, err := daemonClient.Subscribe(streamCtx, projectID, snapshot.Revision)
 		if err != nil {
+			streamCancel()
 			if m.logger != nil {
 				m.logger.Warn("daemon attach subscribe failed", "project_id", projectID, "revision", snapshot.Revision, "error", err)
 			}
@@ -1975,6 +1985,7 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 			lastCheckedAt: snapshot.LastCheckedAt,
 			freshness:     snapshot.Freshness,
 			events:        events,
+			eventsCancel:  streamCancel,
 			daemonClient:  daemonClient,
 			daemonSocket:  socketPath,
 		}
@@ -2059,12 +2070,46 @@ func (m Model) attachLogStreamCmd() tea.Cmd {
 		if m.daemonClient == nil {
 			return logStreamAttachedMsg{err: fmt.Errorf("daemon client unavailable")}
 		}
-		events, err := m.daemonClient.Subscribe(context.Background(), protocol.GlobalEventStreamProjectID, noCatchupRevision)
+		streamCtx, streamCancel := context.WithCancel(context.Background())
+		events, err := m.daemonClient.Subscribe(streamCtx, protocol.GlobalEventStreamProjectID, noCatchupRevision)
 		if err != nil {
+			streamCancel()
 			return logStreamAttachedMsg{err: err}
 		}
-		return logStreamAttachedMsg{stream: events}
+		return logStreamAttachedMsg{stream: events, cancel: streamCancel}
 	}
+}
+
+func (m *Model) replaceDaemonEventStream(stream <-chan protocol.EventEnvelope, cancel context.CancelFunc) {
+	if m.daemonEventsCancel != nil && m.daemonEvents != stream {
+		m.daemonEventsCancel()
+	}
+	m.daemonEvents = stream
+	m.daemonEventsCancel = cancel
+}
+
+func (m *Model) clearDaemonEventStream() {
+	if m.daemonEventsCancel != nil {
+		m.daemonEventsCancel()
+	}
+	m.daemonEvents = nil
+	m.daemonEventsCancel = nil
+}
+
+func (m *Model) replaceLogStream(stream <-chan protocol.EventEnvelope, cancel context.CancelFunc) {
+	if m.logStreamEventsCancel != nil && m.logStreamEvents != stream {
+		m.logStreamEventsCancel()
+	}
+	m.logStreamEvents = stream
+	m.logStreamEventsCancel = cancel
+}
+
+func (m *Model) clearLogStream() {
+	if m.logStreamEventsCancel != nil {
+		m.logStreamEventsCancel()
+	}
+	m.logStreamEvents = nil
+	m.logStreamEventsCancel = nil
 }
 
 func (m Model) queueLogStreamReconnectCmd(delay time.Duration) tea.Cmd {

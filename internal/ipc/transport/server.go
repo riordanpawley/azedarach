@@ -222,7 +222,13 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			})
 			return
 		}
-		ch, cancel, err := s.handlers.Subscribe(ctx, first.Subscribe.ProjectID, first.Subscribe.FromRevision)
+		subscribeCtx, cancelSubscribe := context.WithCancel(ctx)
+		doneWatchingSubscribeConn, stopWatchingSubscribeConn := watchCommandConnClose(subscribeCtx, conn, cancelSubscribe)
+		defer func() {
+			stopWatchingSubscribeConn()
+			<-doneWatchingSubscribeConn
+		}()
+		ch, cancel, err := s.handlers.Subscribe(subscribeCtx, first.Subscribe.ProjectID, first.Subscribe.FromRevision)
 		if err != nil {
 			_ = writeFrame(conn, s.codec, rpcFrame{
 				Type: frameTypeError,
@@ -236,12 +242,13 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		defer cancel()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-subscribeCtx.Done():
 				return
 			case evt, ok := <-ch:
 				if !ok {
 					return
 				}
+				_ = conn.SetWriteDeadline(time.Now().Add(serverFrameTimeout))
 				if err := writeFrame(conn, s.codec, rpcFrame{
 					Type:  frameTypeEvent,
 					Event: &evt,
