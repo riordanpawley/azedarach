@@ -1780,6 +1780,131 @@ func TestTaskStatusMoveFailureRollsBackOptimisticState(t *testing.T) {
 	}
 }
 
+func TestTaskStatusDoneFailureShowsRecoveryDialogWithRetryActions(t *testing.T) {
+	closeBodies := make([]struct {
+		TaskID               string `json:"task_id"`
+		IntegrateBeforeClose bool   `json:"integrate_before_close"`
+		ForceWorktree        bool   `json:"force_worktree"`
+	}, 0, 2)
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskClose {
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			var body struct {
+				TaskID               string `json:"task_id"`
+				IntegrateBeforeClose bool   `json:"integrate_before_close"`
+				ForceWorktree        bool   `json:"force_worktree"`
+			}
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal close request: %v", err)
+			}
+			closeBodies = append(closeBodies, body)
+			if len(closeBodies) == 1 {
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              false,
+					Error: &protocol.ErrorEnvelope{
+						Code:    protocol.ErrorCodeInternal,
+						Message: "cannot close issue az-4: worktree has local changes: main.go. Next: commit, discard, or merge the worktree changes first, then retry",
+					},
+				}, nil
+			}
+			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
+				TaskID: "az-4",
+				Status: string(domain.StatusDone),
+			})
+			if err != nil {
+				t.Fatalf("marshal close response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{ID: "az-4", Status: domain.StatusInReview}}
+	m.nav.SelectTask("az-4", domain.StatusInReview.Column())
+
+	promptedAny, promptCmd := m.handleSelection(overlay.SelectionMsg{Key: "l"})
+	if promptCmd == nil {
+		t.Fatal("expected close confirmation command")
+	}
+	prompted := promptedAny.(Model)
+	confirmedAny, statusCmd := prompted.handleSelection(overlay.SelectionMsg{Key: "yes"})
+	if statusCmd == nil {
+		t.Fatal("expected status command after confirmation")
+	}
+	confirmed := confirmedAny.(Model)
+	if confirmed.tasks[0].Status != domain.StatusDone {
+		t.Fatalf("optimistic status = %s, want done", confirmed.tasks[0].Status)
+	}
+
+	failedAny, dialogCmd := confirmed.Update(statusCmd())
+	if dialogCmd == nil {
+		t.Fatal("expected close failure dialog command")
+	}
+	failed := failedAny.(Model)
+	if failed.tasks[0].Status != domain.StatusInReview {
+		t.Fatalf("status after failed close = %s, want rollback to in_review", failed.tasks[0].Status)
+	}
+	if _, ok := failed.pendingStatuses[taskIDKey("az-4")]; ok {
+		t.Fatal("pending status should clear after failed close rollback")
+	}
+	dialog, ok := failed.overlayStack.Current().(*overlay.CloseFailureDialog)
+	if !ok {
+		t.Fatalf("overlay = %T, want CloseFailureDialog", failed.overlayStack.Current())
+	}
+	view := dialog.View()
+	if !strings.Contains(view, "The issue was not closed.") ||
+		!strings.Contains(view, "worktree has local") ||
+		!strings.Contains(view, "Force cleanup") {
+		t.Fatalf("dialog view missing recovery details:\n%s", view)
+	}
+
+	afterFAny, forceSelectionCmd := failed.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	afterF := afterFAny.(Model)
+	if forceSelectionCmd == nil {
+		t.Fatal("expected force action selection command")
+	}
+	selection, ok := forceSelectionCmd().(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("force selection = %T, want SelectionMsg", forceSelectionCmd())
+	}
+	retryAny, retryCmd := afterF.Update(selection)
+	if retryCmd == nil {
+		t.Fatal("expected retry close command")
+	}
+	retrying := retryAny.(Model)
+	if retrying.overlayStack.Current() != nil {
+		t.Fatalf("overlay after force selection = %T, want none", retrying.overlayStack.Current())
+	}
+	if retrying.tasks[0].Status != domain.StatusDone {
+		t.Fatalf("optimistic status after retry = %s, want done", retrying.tasks[0].Status)
+	}
+	result := retryCmd()
+	statusResult, ok := result.(taskStatusResultMsg)
+	if !ok {
+		t.Fatalf("retry result = %T, want taskStatusResultMsg", result)
+	}
+	if statusResult.err != nil {
+		t.Fatalf("retry status err = %v", statusResult.err)
+	}
+	if len(closeBodies) != 2 {
+		t.Fatalf("close request count = %d, want 2", len(closeBodies))
+	}
+	if !closeBodies[1].ForceWorktree || !closeBodies[1].IntegrateBeforeClose {
+		t.Fatalf("second close body = %+v, want force worktree integrate close", closeBodies[1])
+	}
+}
+
 func TestDaemonCommandsReportMissingDaemonClient(t *testing.T) {
 	m := newTestModel()
 	m.daemonClient = nil

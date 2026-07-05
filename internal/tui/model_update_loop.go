@@ -1501,6 +1501,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Message: fmt.Sprintf("Failed to update task: %v", msg.err),
 				Expires: expires,
 			})
+			if dialogCmd := m.closeFailureDialogCmd(msg); dialogCmd != nil {
+				return m, dialogCmd
+			}
 			return m, nil
 		}
 		if msg.newStatus != domain.StatusDone {
