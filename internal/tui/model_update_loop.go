@@ -1491,6 +1491,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.scheduleIssuesRefreshCmd()
 			}
 			m.rollbackTaskStatus(msg.taskID, msg.previousStatus)
+			userMessage := formatStatusMutationFailure(msg.taskID, msg.previousStatus, msg.newStatus, msg.err)
+			if m.logger != nil {
+				m.logger.Warn("task status mutation failed",
+					"task_id", msg.taskID,
+					"target_status", msg.newStatus,
+					"current_status", msg.previousStatus,
+					"error", msg.err,
+					"user_message", userMessage,
+				)
+			}
+			m.markTaskMutationFailed(msg.taskID, "task.update_status", userMessage)
 			m.syncTaskWorkspaceOverlay()
 			expires := time.Now().Add(3 * time.Second)
 			if msg.newStatus == domain.StatusDone {
@@ -1498,7 +1509,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.addToast(Toast{
 				Level:   ToastError,
-				Message: fmt.Sprintf("Failed to update task: %v", msg.err),
+				Message: userMessage,
 				Expires: expires,
 			})
 			return m, nil
@@ -1661,6 +1672,15 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		return daemonStreamEventResult{cmd: cmd}
 	}
 	m.applyOperationProgressEvent(evt)
+	if evt.Event == protocol.EventOperationFailed {
+		if message := m.operationFailureUserMessage(evt); message != "" {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: message,
+				Expires: time.Now().Add(8 * time.Second),
+			})
+		}
+	}
 	if isTaskMutationEvent(evt.Event) && len(evt.Body) > 0 {
 		switch cursor.Decide(evt) {
 		case protocol.StreamProjectionDecisionIgnore:

@@ -6867,8 +6867,42 @@ func TestDaemonOperationFailureEventRemainsVisibleWithReason(t *testing.T) {
 	if progress == nil {
 		t.Fatal("expected failed operation in workspace mutation progress")
 	}
-	if progress.ProgressMessage != "merge failed: dirty worktree" {
-		t.Fatalf("progress message = %q, want failure reason", progress.ProgressMessage)
+	want := "Could not merge az-1. It stayed In Progress. Reason: close cleanup is blocked by local worktree changes. Next: commit, discard, or merge the worktree changes, then retry"
+	if progress.ProgressMessage != want {
+		t.Fatalf("progress message = %q, want %q", progress.ProgressMessage, want)
+	}
+}
+
+func TestDaemonOperationFailureEventNormalizesProgressOnlyFailure(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task", Status: domain.StatusInReview, Priority: domain.P2, Type: domain.TypeTask},
+	}
+	body, err := json.Marshal(protocol.OperationEventBody{
+		Operation: protocol.OperationRecord{
+			OperationID: "op-close",
+			IssueID:     naming.IssueID("az-1"),
+			Kind:        daemonclient.CommandTaskClose,
+			State:       protocol.OperationStateFailed,
+			Progress: &protocol.OperationProgress{
+				Message: "cannot close issue az-1: child issues remain unresolved: az-child",
+				Percent: 40,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal failure body: %v", err)
+	}
+
+	m.applyOperationProgressEvent(protocol.EventEnvelope{
+		Event: protocol.EventOperationFailed,
+		Body:  body,
+	})
+
+	progress := m.pendingMutationForTask("az-1")
+	want := "Could not move az-1 to Done. It stayed In Review. Reason: Done is blocked by unresolved child issues. Next: press C to close clean children too, or resolve child issues and retry"
+	if progress == nil || progress.ProgressMessage != want {
+		t.Fatalf("progress = %+v, want %q", progress, want)
 	}
 }
 
@@ -6909,12 +6943,16 @@ func TestDaemonSessionStartFailureEventRemainsVisibleOnTask(t *testing.T) {
 	if progress == nil {
 		t.Fatal("expected failed session start in task-local mutation progress")
 	}
-	if len(m.toasts) != 0 {
-		t.Fatalf("toasts = %+v, want task-local error surface only", m.toasts)
+	if len(m.toasts) == 0 {
+		t.Fatal("expected floating failure toast")
 	}
+	toast := m.toasts[len(m.toasts)-1].Message
 	for _, want := range []string{"git worktree add", "hook failed", "rolled back worktree /tmp/az-1"} {
 		if !strings.Contains(progress.ProgressMessage, want) {
 			t.Fatalf("progress message = %q, want substring %q", progress.ProgressMessage, want)
+		}
+		if !strings.Contains(toast, want) {
+			t.Fatalf("toast message = %q, want substring %q", toast, want)
 		}
 	}
 }
@@ -6953,8 +6991,9 @@ func TestApplyOperationRecordsLoadsQueuedAndRecentFailedOperations(t *testing.T)
 		t.Fatalf("az-2 pending = %+v, want failed op-failed", got)
 	}
 	progress := m.pendingMutationForTask("az-2")
-	if progress == nil || progress.ProgressMessage != "conflict while merging" {
-		t.Fatalf("az-2 progress = %+v, want failure message", progress)
+	want := "Could not merge az-2. It stayed Open. Reason: the change conflicts with current daemon state. Next: refresh the task, resolve the reported blocker, then retry"
+	if progress == nil || progress.ProgressMessage != want {
+		t.Fatalf("az-2 progress = %+v, want %q", progress, want)
 	}
 }
 

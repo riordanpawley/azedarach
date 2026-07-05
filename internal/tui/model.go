@@ -1255,6 +1255,11 @@ func (m *Model) applyOperationRecord(record protocol.OperationRecord, now time.T
 	if record.Error != nil {
 		errorMessage = strings.TrimSpace(record.Error.Message)
 	}
+	if state == protocol.OperationStateFailed && (errorMessage != "" || message != "") {
+		if status, ok := m.taskStatusByID(taskID); ok {
+			errorMessage = formatOperationMutationFailure(taskID, status, record)
+		}
+	}
 	if errorMessage != "" {
 		message = errorMessage
 	}
@@ -5114,6 +5119,23 @@ func (m *Model) markTaskGitOperationPreparing(taskID, message string) {
 		state:     protocol.OperationState("preparing"),
 		message:   strings.TrimSpace(message),
 		updatedAt: time.Now(),
+	}
+}
+
+func (m *Model) markTaskMutationFailed(taskID, action, message string) {
+	key := taskIDKey(taskID)
+	if key == "" {
+		return
+	}
+	if m.pendingOpsByTask == nil {
+		m.pendingOpsByTask = make(map[string]pendingOperationProgress)
+	}
+	m.pendingOpsByTask[key] = pendingOperationProgress{
+		kind:         strings.TrimSpace(action),
+		state:        protocol.OperationStateFailed,
+		message:      strings.TrimSpace(message),
+		errorMessage: strings.TrimSpace(message),
+		updatedAt:    time.Now(),
 	}
 }
 

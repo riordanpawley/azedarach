@@ -1652,6 +1652,91 @@ func TestSpaceFourYDoneKeepsOptimisticStatusAcrossStaleHydration(t *testing.T) {
 	}
 }
 
+func TestSpaceFourYDoneFailureShowsNormalizedMutationMessage(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskClose {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskClose)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              false,
+				Error: &protocol.ErrorEnvelope{
+					Code:    protocol.ErrorCodeConflict,
+					Message: "cannot close issue az-4: child issues remain unresolved: az-child. Next: press C to close clean children too, or resolve child issues and retry",
+				},
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{ID: "az-4", Title: "Ready to close", Status: domain.StatusInReview}}
+	m.nav.SelectTask("az-4", domain.StatusInReview.Column())
+
+	openedAny, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	opened := openedAny.(Model)
+	afterFourAny, selectCmd := opened.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
+	if selectCmd == nil {
+		t.Fatal("expected workspace status shortcut to emit selection")
+	}
+	selected := selectCmd().(overlay.SelectionMsg)
+	promptedAny, _ := afterFourAny.(Model).Update(selected)
+	prompted := promptedAny.(Model)
+	afterYKeyAny, yesCmd := prompted.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if yesCmd == nil {
+		t.Fatal("expected y to confirm close dialog")
+	}
+	yesMsg := yesCmd().(overlay.SelectionMsg)
+	confirmedAny, statusCmd := afterYKeyAny.(Model).Update(yesMsg)
+	if statusCmd == nil {
+		t.Fatal("expected status command after y confirmation")
+	}
+	confirmed := confirmedAny.(Model)
+	if confirmed.tasks[0].Status != domain.StatusDone {
+		t.Fatalf("optimistic status after y = %s, want %s", confirmed.tasks[0].Status, domain.StatusDone)
+	}
+
+	afterStatusAny, cmd := confirmed.Update(statusCmd())
+	if cmd != nil {
+		t.Fatalf("unexpected command after failed close: %T", cmd)
+	}
+	afterStatus := afterStatusAny.(Model)
+	if afterStatus.tasks[0].Status != domain.StatusInReview {
+		t.Fatalf("status after failed close = %s, want trusted %s", afterStatus.tasks[0].Status, domain.StatusInReview)
+	}
+
+	want := "Could not move az-4 to Done. It stayed In Review. Reason: Done is blocked by unresolved child issues. Next: press C to close clean children too, or resolve child issues and retry"
+	if len(afterStatus.toasts) == 0 || afterStatus.toasts[len(afterStatus.toasts)-1].Message != want {
+		t.Fatalf("last toast = %+v, want %q", afterStatus.toasts, want)
+	}
+	progress := afterStatus.pendingMutationForTask("az-4")
+	if progress == nil || progress.State != string(protocol.OperationStateFailed) || progress.ProgressMessage != want {
+		t.Fatalf("pending mutation = %+v, want failed normalized message", progress)
+	}
+	if len(afterStatus.runtimeEvents) == 0 || string(afterStatus.runtimeEvents[len(afterStatus.runtimeEvents)-1].Body) != want {
+		t.Fatalf("last runtime event = %+v, want normalized toast history", afterStatus.runtimeEvents)
+	}
+	reopenedAny, _ := afterStatus.openTaskWorkspaceByID("az-4")
+	reopened := reopenedAny.(Model)
+	workspace, ok := reopened.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("overlay = %T, want TaskWorkspaceOverlay", reopened.overlayStack.Current())
+	}
+	view := workspace.View()
+	for _, piece := range []string{
+		"Could not move az-4 to Done",
+		"It stayed In Review",
+		"Done is blocked by",
+		"resolve child issues and",
+	} {
+		if !strings.Contains(view, piece) {
+			t.Fatalf("workspace view missing %q:\n%s", piece, view)
+		}
+	}
+}
+
 func TestStaleSingleTaskRefreshDoesNotApplyExpiredPendingStatus(t *testing.T) {
 	m := newTestModel()
 	m.tasks = []domain.Task{{ID: "az-4", Status: domain.StatusDone}}
@@ -1775,8 +1860,10 @@ func TestTaskStatusMoveFailureRollsBackOptimisticState(t *testing.T) {
 		t.Fatal("expected error toast")
 	}
 	lastToast := rolledBackModel.toasts[len(rolledBackModel.toasts)-1].Message
-	if !strings.Contains(lastToast, "Failed to update task") {
-		t.Fatalf("toast = %q, want update failure message", lastToast)
+	for _, want := range []string{"Could not move az-1 to In Progress", "It stayed Open", "Next: wait for daemon reconnect"} {
+		if !strings.Contains(lastToast, want) {
+			t.Fatalf("toast = %q, want substring %q", lastToast, want)
+		}
 	}
 }
 
