@@ -752,11 +752,11 @@ func (m Model) renderBoardView() string {
 
 func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {
 	activeDescendantSessionByTask := buildActiveDescendantSessionByTask(m.tasks)
-	if len(m.pendingStatuses) == 0 && len(m.pendingOpsByTask) == 0 && len(activeDescendantSessionByTask) == 0 && len(m.tasks) == 0 {
+	if len(m.pendingStatuses) == 0 && len(m.pendingOpsByTask) == 0 && len(m.pendingFailures) == 0 && len(activeDescendantSessionByTask) == 0 && len(m.tasks) == 0 {
 		return nil
 	}
 
-	signalsByTask := make(map[string]board.RuntimeSignals, len(m.tasks)+len(m.pendingStatuses)+len(m.pendingOpsByTask)+len(activeDescendantSessionByTask))
+	signalsByTask := make(map[string]board.RuntimeSignals, len(m.tasks)+len(m.pendingStatuses)+len(m.pendingOpsByTask)+len(m.pendingFailures)+len(activeDescendantSessionByTask))
 	for i := range m.tasks {
 		task := m.tasks[i]
 		signals := board.RuntimeSignals{
@@ -803,6 +803,19 @@ func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {
 		signals.PendingOperationState = string(pending.state)
 		signals.PendingOperationID = pending.operationID
 		signals.PendingOperationPercent = pending.percent
+		signalsByTask[taskID] = signals
+	}
+	for i := range m.tasks {
+		task := m.tasks[i]
+		taskID := task.ID.String()
+		failure, ok := m.pendingFailures[taskIDKey(taskID)]
+		if !ok {
+			continue
+		}
+		signals := signalsByTask[taskID]
+		signals.PendingOperationState = string(protocol.OperationStateFailed)
+		signals.PendingOperationID = failure.operationID
+		signals.PendingOperationPercent = 0
 		signalsByTask[taskID] = signals
 	}
 	for taskID := range activeDescendantSessionByTask {

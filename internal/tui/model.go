@@ -141,6 +141,15 @@ type pendingOperationProgress struct {
 	updatedAt    time.Time
 }
 
+type taskMutationFailure struct {
+	operationID    string
+	action         string
+	message        string
+	previousStatus domain.Status
+	targetStatus   domain.Status
+	updatedAt      time.Time
+}
+
 type daemonStreamMetrics struct {
 	EventsDrained               uint64
 	RefreshesCoalesced          uint64
@@ -159,6 +168,7 @@ type Model struct {
 	pendingDetails       map[string]pendingTaskDetails
 	operationTaskID      map[string]string
 	pendingOpsByTask     map[string]pendingOperationProgress
+	pendingFailures      map[string]taskMutationFailure
 	pendingCleanupOps    map[string]pendingWorktreeCleanupConfirmation
 	pendingCleanup       *pendingWorktreeCleanupConfirmation
 	pendingBulkCleanup   *pendingBulkCleanupConfirmation
@@ -325,6 +335,7 @@ func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 		pendingDetails:              make(map[string]pendingTaskDetails),
 		operationTaskID:             make(map[string]string),
 		pendingOpsByTask:            make(map[string]pendingOperationProgress),
+		pendingFailures:             make(map[string]taskMutationFailure),
 		pendingCleanupOps:           make(map[string]pendingWorktreeCleanupConfirmation),
 		nav:                         navigation.NewService(),
 		editor:                      editor.NewService(),
@@ -1234,6 +1245,7 @@ func (m *Model) applyOperationRecord(record protocol.OperationRecord, now time.T
 	if state == protocol.OperationStateDone {
 		delete(m.pendingOpsByTask, taskIDKey(taskID))
 		delete(m.operationTaskID, operationID)
+		m.clearTaskMutationFailure(taskID)
 		if m.keepPendingStatusUntilCloseProjection(taskID, operationID, record.Kind, now) {
 			return
 		}
@@ -1243,6 +1255,7 @@ func (m *Model) applyOperationRecord(record protocol.OperationRecord, now time.T
 	if operationStateTerminal(state) && !operationRecordRecentlyTerminal(record, now) {
 		delete(m.pendingOpsByTask, taskIDKey(taskID))
 		delete(m.operationTaskID, operationID)
+		m.clearTaskMutationFailure(taskID)
 		m.clearPendingTaskStatusForOperation(taskID, operationID)
 		return
 	}
@@ -2165,6 +2178,7 @@ func (m *Model) applySessionProjectionEvent(evt protocol.EventEnvelope) {
 	m.applyRuntimeProjectionFromSessionEvent(body)
 	m.reconcilePendingStatuses()
 	m.reconcilePendingOperations()
+	m.reconcilePendingMutationFailures()
 }
 
 func (m Model) reduceDaemonEvent(evt protocol.EventEnvelope) daemonEventDecision {
@@ -5042,6 +5056,7 @@ func (m *Model) markTaskStatusPending(taskID string, previousStatus, targetStatu
 	if m.pendingStatuses == nil {
 		m.pendingStatuses = make(map[string]pendingTaskStatus)
 	}
+	m.clearTaskMutationFailure(taskID)
 	m.pendingStatuses[taskIDKey(taskID)] = pendingTaskStatus{
 		previousStatus: previousStatus,
 		targetStatus:   targetStatus,
@@ -5063,6 +5078,10 @@ func (m *Model) markTaskOperationPending(taskID, action, operationID string, sta
 		m.pendingStatuses = make(map[string]pendingTaskStatus)
 	}
 	key := taskIDKey(taskID)
+	if key == "" {
+		return
+	}
+	m.clearTaskMutationFailure(taskID)
 	current := m.pendingStatuses[key]
 	if action == "session_start" && current.targetStatus == "" {
 		if status, ok := m.taskStatusByID(taskID); ok && status != domain.StatusDone {
@@ -5097,6 +5116,7 @@ func (m *Model) markTaskGitOperationPending(taskID, kind, operationID string, st
 	if key == "" {
 		return
 	}
+	m.clearTaskMutationFailure(taskID)
 	if m.pendingOpsByTask == nil {
 		m.pendingOpsByTask = make(map[string]pendingOperationProgress)
 	}
@@ -5129,6 +5149,7 @@ func (m *Model) markTaskGitOperationPreparing(taskID, message string) {
 	if key == "" {
 		return
 	}
+	m.clearTaskMutationFailure(taskID)
 	if m.pendingOpsByTask == nil {
 		m.pendingOpsByTask = make(map[string]pendingOperationProgress)
 	}
@@ -5141,19 +5162,24 @@ func (m *Model) markTaskGitOperationPreparing(taskID, message string) {
 }
 
 func (m *Model) markTaskMutationFailed(taskID, action, message string) {
+	m.markTaskStatusMutationFailed(taskID, action, "", "", message)
+}
+
+func (m *Model) markTaskStatusMutationFailed(taskID, action string, previousStatus, targetStatus domain.Status, message string) {
 	key := taskIDKey(taskID)
 	if key == "" {
 		return
 	}
-	if m.pendingOpsByTask == nil {
-		m.pendingOpsByTask = make(map[string]pendingOperationProgress)
+	if m.pendingFailures == nil {
+		m.pendingFailures = make(map[string]taskMutationFailure)
 	}
-	m.pendingOpsByTask[key] = pendingOperationProgress{
-		kind:         strings.TrimSpace(action),
-		state:        protocol.OperationStateFailed,
-		message:      strings.TrimSpace(message),
-		errorMessage: strings.TrimSpace(message),
-		updatedAt:    time.Now(),
+	delete(m.pendingOpsByTask, key)
+	m.pendingFailures[key] = taskMutationFailure{
+		action:         strings.TrimSpace(action),
+		message:        strings.TrimSpace(message),
+		previousStatus: previousStatus,
+		targetStatus:   targetStatus,
+		updatedAt:      time.Now(),
 	}
 }
 
@@ -5230,6 +5256,13 @@ func (m *Model) clearPendingTaskStatus(taskID string) {
 	delete(m.pendingStatuses, taskIDKey(taskID))
 }
 
+func (m *Model) clearTaskMutationFailure(taskID string) {
+	if len(m.pendingFailures) == 0 {
+		return
+	}
+	delete(m.pendingFailures, taskIDKey(taskID))
+}
+
 func (m *Model) clearPendingTaskStatusForOperation(taskID, operationID string) {
 	key := taskIDKey(taskID)
 	if key == "" || len(m.pendingStatuses) == 0 {
@@ -5264,6 +5297,15 @@ func (m Model) pendingMutationForTask(taskID string) *overlay.TaskMutationProgre
 		if strings.TrimSpace(op.errorMessage) != "" {
 			progress.ProgressMessage = op.errorMessage
 		}
+	}
+	if failure, ok := m.pendingFailures[key]; ok {
+		if progress.OperationID == "" {
+			progress.OperationID = failure.operationID
+		}
+		progress.State = string(protocol.OperationStateFailed)
+		progress.ProgressMessage = strings.TrimSpace(failure.message)
+		progress.PreviousStatus = failure.previousStatus
+		progress.TargetStatus = failure.targetStatus
 	}
 	if runtime, ok := m.runtimeSignalsByTask[key]; ok {
 		if progress.OperationID == "" {
@@ -5346,11 +5388,13 @@ func (m *Model) syncTaskWorkspaceOverlay() {
 
 func (m *Model) applySingleTaskWorkspaceRefresh(taskID string, refreshed domain.Task) (domain.Task, bool) {
 	m.reconcilePendingStatuses()
+	m.reconcilePendingMutationFailures()
 	return m.applyTaskRefresh(taskID, refreshed, true)
 }
 
 func (m *Model) applyTaskRefreshes(refreshed []domain.Task) {
 	m.reconcilePendingStatuses()
+	m.reconcilePendingMutationFailures()
 	updated := false
 	for _, task := range refreshed {
 		if _, ok := m.applyTaskRefresh(task.ID.String(), task, false); ok {
@@ -5375,6 +5419,7 @@ func (m *Model) applyTaskRefresh(taskID string, refreshed domain.Task, syncAfter
 		refreshed = m.applyPendingStatusOverlayToTask(refreshed)
 		m.tasks[i] = refreshed
 		m.tasks[i].Session = cloneSession(m.tasks[i].Session)
+		m.reconcilePendingMutationFailures()
 		if syncAfter {
 			m.syncProjectionIndexesFromTasks()
 			m.reconcileCursorAfterIssuesRefresh()
@@ -5591,6 +5636,39 @@ func (m *Model) reconcilePendingOperations() {
 			if task.Session == nil && !task.HasTmuxSession {
 				delete(m.pendingOpsByTask, key)
 			}
+		}
+	}
+}
+
+func (m *Model) reconcilePendingMutationFailures() {
+	if len(m.pendingFailures) == 0 {
+		return
+	}
+
+	taskByID := make(map[string]domain.Task, len(m.tasks))
+	for _, task := range m.tasks {
+		taskByID[taskIDKey(task.ID.String())] = task
+	}
+
+	const staleFailureTTL = visibleTerminalOperationTTL
+	now := time.Now()
+
+	for key, failure := range m.pendingFailures {
+		task, ok := taskByID[key]
+		if !ok {
+			delete(m.pendingFailures, key)
+			continue
+		}
+		if !failure.updatedAt.IsZero() && now.Sub(failure.updatedAt) > staleFailureTTL {
+			delete(m.pendingFailures, key)
+			continue
+		}
+		if failure.targetStatus != "" && task.Status == failure.targetStatus {
+			delete(m.pendingFailures, key)
+			continue
+		}
+		if failure.previousStatus != "" && task.Status != failure.previousStatus {
+			delete(m.pendingFailures, key)
 		}
 	}
 }

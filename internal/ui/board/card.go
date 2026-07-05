@@ -507,7 +507,7 @@ func renderRuntimeSignals(signals *RuntimeSignals, s *styles.Styles) string {
 		parts = append(parts, renderRuntimeSignalToken(worktreeToken, styles.Teal, s))
 	}
 	if pendingToken := renderPendingOperationToken(signals.PendingOperationState, signals.PendingOperationPercent, false); pendingToken != "" {
-		parts = append(parts, renderRuntimeSignalToken(pendingToken, styles.Mauve, s))
+		parts = append(parts, renderRuntimeSignalToken(pendingToken, pendingOperationTokenColor(signals.PendingOperationState), s))
 	}
 	if signals.HasConflicts {
 		parts = append(parts, renderRuntimeSignalToken("conflict", styles.Red, s))
@@ -554,7 +554,7 @@ func renderRuntimeSignalsCompact(signals *RuntimeSignals, s *styles.Styles) stri
 		parts = append(parts, renderRuntimeSignalToken(worktreeToken, styles.Teal, s))
 	}
 	if pendingToken := renderPendingOperationToken(signals.PendingOperationState, signals.PendingOperationPercent, true); pendingToken != "" {
-		parts = append(parts, renderRuntimeSignalToken(pendingToken, styles.Mauve, s))
+		parts = append(parts, renderRuntimeSignalToken(pendingToken, pendingOperationTokenColor(signals.PendingOperationState), s))
 	}
 	if signals.HasConflicts {
 		parts = append(parts, renderRuntimeSignalToken("C!", styles.Red, s))
@@ -609,6 +609,9 @@ func renderPendingOperationToken(state string, percent int, compact bool) string
 	if state == "" {
 		return ""
 	}
+	if state == "failed" {
+		return "M:!"
+	}
 	if percent < 0 {
 		percent = 0
 	}
@@ -625,6 +628,13 @@ func renderPendingOperationToken(state string, percent int, compact bool) string
 		return fmt.Sprintf("M:%s(%d%%)", state, percent)
 	}
 	return "M:" + state
+}
+
+func pendingOperationTokenColor(state string) lipgloss.Color {
+	if strings.EqualFold(strings.TrimSpace(state), "failed") {
+		return styles.Red
+	}
+	return styles.Mauve
 }
 
 func renderRuntimeSignalToken(token string, color lipgloss.Color, s *styles.Styles) string {
