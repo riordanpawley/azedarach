@@ -140,6 +140,7 @@ func isDaemonReadCommand(command string) bool {
 	case CommandTaskList,
 		CommandTaskGet,
 		CommandTaskGetMany,
+		CommandTaskEvents,
 		CommandTaskGraphReadiness,
 		CommandTaskCompleteCheck,
 		CommandTaskIntegrationReady,

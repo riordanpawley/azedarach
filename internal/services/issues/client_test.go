@@ -129,6 +129,34 @@ func TestClient_CRUDLifecycle(t *testing.T) {
 	assert.Empty(t, tasks)
 }
 
+func TestClient_UpdateDetailsPreservesImplementationsWhenUnset(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	createdID, err := client.Create(ctx, CreateTaskParams{
+		Title:           "Implementation scoped task",
+		Type:            domain.TypeTask,
+		Priority:        domain.P2,
+		Implementations: []string{"default", "alt"},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, client.UpdateDetails(ctx, createdID, UpdateTaskParams{
+		Title:       "Implementation scoped task updated",
+		Description: "metadata edit",
+		Type:        domain.TypeTask,
+		Priority:    domain.P1,
+	}))
+
+	db, err := sql.Open("sqlite", client.dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	var implementationsJSON string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COALESCE(implementations_json, '') FROM issues WHERE id = ?`, createdID).Scan(&implementationsJSON))
+	assert.JSONEq(t, `["default","alt"]`, implementationsJSON)
+}
+
 func TestClient_ExternalIssueRefsAreBackendNeutralMetadata(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -1609,6 +1637,111 @@ func TestClient_AppendNotes(t *testing.T) {
 	assert.Equal(t, "📎 [one.png](.azedarach/images/axu/one.png)\n📎 [two.png](.azedarach/images/axu/two.png)", notes)
 }
 
+func TestClient_IssueObservationEventsRecordIssueMutations(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Observable task",
+		Type:     domain.TypeFeature,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.Update(ctx, taskID, domain.StatusInProgress))
+	require.NoError(t, client.AppendNotes(ctx, taskID, "first evidence"))
+	require.NoError(t, client.UpdateDetails(ctx, taskID, UpdateTaskParams{
+		Title:    "Observable task updated",
+		Type:     domain.TypeBug,
+		Priority: domain.P1,
+	}))
+
+	events, err := client.ListIssueObservationEvents(ctx, taskID, IssueObservationEventListOptions{})
+	require.NoError(t, err)
+	require.Len(t, events, 4)
+	assert.Equal(t, domain.IssueEventIssueCreated, events[0].Type)
+	assert.Equal(t, "issue-store", events[0].Source)
+	assert.Equal(t, "Observable task", events[0].Payload["title"])
+	assert.Equal(t, domain.IssueEventIssueStatusChanged, events[1].Type)
+	assert.Equal(t, "open", events[1].Payload["from_status"])
+	assert.Equal(t, "in_progress", events[1].Payload["to_status"])
+	assert.Equal(t, domain.IssueEventIssueNotesAppended, events[2].Type)
+	assert.Equal(t, "first evidence", events[2].Payload["line"])
+	assert.Equal(t, domain.IssueEventIssueDetailsChanged, events[3].Type)
+	assert.Contains(t, events[3].Payload["changed_fields"], "title")
+
+	filtered, err := client.ListIssueObservationEvents(ctx, taskID, IssueObservationEventListOptions{
+		Types: []domain.IssueObservationEventType{domain.IssueEventIssueStatusChanged},
+	})
+	require.NoError(t, err)
+	require.Len(t, filtered, 1)
+	assert.Equal(t, domain.IssueEventIssueStatusChanged, filtered[0].Type)
+}
+
+func TestClient_AppendIssueObservationEventRecordsSourceMetadata(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "External observation",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	observedAt := time.Date(2026, 7, 6, 2, 30, 0, 0, time.UTC)
+	event, err := client.AppendIssueObservationEvent(ctx, taskID, IssueObservationEventParams{
+		Type:          domain.IssueEventValidationPassed,
+		ObservedAt:    observedAt,
+		Source:        "cli",
+		SourceCommand: "az validate",
+		OperationID:   "op-1",
+		SessionID:     "sess-1",
+		WorktreePath:  "/tmp/worktree",
+		Payload: map[string]any{
+			"command": "go test ./...",
+			"status":  "passed",
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, domain.IssueEventValidationPassed, event.Type)
+	assert.Equal(t, observedAt, event.ObservedAt)
+	assert.Equal(t, "cli", event.Source)
+	assert.Equal(t, "az validate", event.SourceCommand)
+	assert.Equal(t, "op-1", event.OperationID)
+	assert.Equal(t, "sess-1", event.SessionID)
+	assert.Equal(t, "/tmp/worktree", event.WorktreePath)
+	assert.Equal(t, "go test ./...", event.Payload["command"])
+
+	filtered, err := client.ListIssueObservationEvents(ctx, taskID, IssueObservationEventListOptions{
+		Types: []domain.IssueObservationEventType{domain.IssueEventValidationPassed},
+	})
+	require.NoError(t, err)
+	require.Len(t, filtered, 1)
+	assert.Equal(t, event.ID, filtered[0].ID)
+}
+
+func TestClient_IssueObservationEventsSurviveHardDelete(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Delete audit",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.Delete(ctx, taskID))
+
+	events, err := client.ListIssueObservationEvents(ctx, taskID, IssueObservationEventListOptions{})
+	require.NoError(t, err)
+	eventTypes := make([]domain.IssueObservationEventType, 0, len(events))
+	for _, event := range events {
+		eventTypes = append(eventTypes, event.Type)
+	}
+	assert.Contains(t, eventTypes, domain.IssueEventIssueCreated)
+	assert.Contains(t, eventTypes, domain.IssueEventIssueDeleted)
+}
+
 func TestClient_CreateWithParentDependency(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -2884,6 +3017,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0016_issue_search_fts",
 		"0017_spec_requirement_search_fts",
 		"0018_issue_graph_closure",
+		"0019_issue_observation_events",
 	}, got)
 }
 

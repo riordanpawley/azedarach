@@ -663,6 +663,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleTaskGet(ctx, req)
 	case "task.get_many":
 		return d.handleTaskGetMany(ctx, req)
+	case "task.events":
+		return d.handleTaskEvents(ctx, req)
 	case "task.create":
 		return d.handleTaskCreate(ctx, req)
 	case "task.close":

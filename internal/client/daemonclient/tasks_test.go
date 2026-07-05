@@ -128,6 +128,60 @@ func TestTaskSnapshotRequireFullDetails(t *testing.T) {
 	}
 }
 
+func TestListTaskEventsCommand(t *testing.T) {
+	const wantProjectID = "proj-task"
+	observedAt := time.Date(2026, 7, 6, 2, 0, 0, 0, time.UTC)
+	transport := &taskRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			assertTaskProjectID(t, req, wantProjectID)
+			if req.Command != CommandTaskEvents {
+				t.Fatalf("command = %q, want %q", req.Command, CommandTaskEvents)
+			}
+			var body TaskEventsRequest
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal request: %v", err)
+			}
+			if body.TaskID != "az-1" || body.Limit != 10 || len(body.Types) != 1 || body.Types[0] != "issue.status_changed" {
+				t.Fatalf("request body = %+v", body)
+			}
+			respBody, err := json.Marshal(struct {
+				Events []domain.IssueObservationEvent `json:"events"`
+			}{
+				Events: []domain.IssueObservationEvent{{
+					ID:         42,
+					IssueID:    "az-1",
+					Type:       domain.IssueEventIssueStatusChanged,
+					ObservedAt: observedAt,
+					Source:     "issue-store",
+					Payload: map[string]any{
+						"from_status": "open",
+						"to_status":   "in_progress",
+					},
+				}},
+			})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID(wantProjectID)
+	events, err := client.ListTaskEvents(context.Background(), "az-1", []string{"issue.status_changed"}, 10)
+	if err != nil {
+		t.Fatalf("ListTaskEvents error: %v", err)
+	}
+	if len(events) != 1 || events[0].ID != 42 || events[0].Type != domain.IssueEventIssueStatusChanged {
+		t.Fatalf("events = %+v", events)
+	}
+}
+
 func TestTaskListCreateAndMutationCommands(t *testing.T) {
 	const wantProjectID = "proj-task"
 

@@ -590,6 +590,53 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 	return resp, nil
 }
 
+func (d *Daemon) handleTaskEvents(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
+	var cmd struct {
+		TaskID string   `json:"task_id"`
+		Types  []string `json:"event_types,omitempty"`
+		Limit  int      `json:"limit,omitempty"`
+	}
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	taskID := strings.TrimSpace(cmd.TaskID)
+	if taskID == "" {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "task id is required"), nil
+	}
+	eventTypes := make([]domain.IssueObservationEventType, 0, len(cmd.Types))
+	for _, rawType := range cmd.Types {
+		rawType = strings.TrimSpace(rawType)
+		if rawType != "" {
+			eventTypes = append(eventTypes, domain.IssueObservationEventType(rawType))
+		}
+	}
+	events, err := issueClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{
+		Types: eventTypes,
+		Limit: cmd.Limit,
+	})
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue not found: %s", taskID)), nil
+		}
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	body, err := json.Marshal(struct {
+		Events []domain.IssueObservationEvent `json:"events"`
+	}{Events: events})
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	resp := d.successResponse(req)
+	resp.Body = body
+	resp.Revision = d.currentRevision(projectID)
+	return resp, nil
+}
+
 func uniqueTrimmedTaskIDs(ids []string) []string {
 	seen := make(map[string]struct{}, len(ids))
 	out := make([]string, 0, len(ids))

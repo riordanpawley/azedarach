@@ -472,7 +472,7 @@ func main() {
 
 	case "issue":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|get-many|check|doctor|create|split|update|close|delete|image|document|dep|bulk-create|bulk-update|fanout> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|search|get|events|get-many|check|doctor|create|split|update|close|delete|image|document|dep|bulk-create|bulk-update|fanout> [arguments]\n")
 			os.Exit(1)
 		}
 		issueCommand := commandArgs[0]
@@ -524,6 +524,20 @@ func main() {
 			}
 			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
 				return cli.IssueGetCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+		case "events":
+			opts, err := cli.ParseIssueEventsArgs(issueArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.IssueEventsCommand(deps, opts)
 			}); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)

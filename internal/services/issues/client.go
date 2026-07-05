@@ -1666,12 +1666,41 @@ func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
 
 // Update changes an issue status.
 func (c *Client) Update(ctx context.Context, id string, status domain.Status) error {
+	return c.withMutationLock(ctx, func(ctx context.Context) error {
+		return sqliteutil.WithWriteLock(c.dbPath, func() error {
+			return c.updateLocked(ctx, id, status)
+		})
+	})
+}
+
+func (c *Client) updateLocked(ctx context.Context, id string, status domain.Status) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err
 	}
+	id = strings.TrimSpace(id)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return c.wrapError("update", id, err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	var oldStatusRaw string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT status
+		FROM issues
+		WHERE id = ? AND deleted_at IS NULL
+	`, id).Scan(&oldStatusRaw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.wrapError("update", id, domain.ErrNotFound)
+		}
+		return c.wrapError("update", id, err)
+	}
 	if status == domain.StatusDone {
-		openChildCount, err := c.countOpenChildren(ctx, db, id)
+		openChildCount, err := c.countOpenChildren(ctx, tx, id)
 		if err != nil {
 			return c.wrapError("update", id, err)
 		}
@@ -1684,7 +1713,7 @@ func (c *Client) Update(ctx context.Context, id string, status domain.Status) er
 	if status == domain.StatusDone {
 		closedAt = &now
 	}
-	res, err := db.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE issues
 		SET
 			status = ?,
@@ -1699,6 +1728,18 @@ func (c *Client) Update(ctx context.Context, id string, status domain.Status) er
 	if affected == 0 {
 		return c.wrapError("update", id, domain.ErrNotFound)
 	}
+	if oldStatusRaw != string(status) {
+		if err := c.appendIssueObservationEvent(ctx, tx, id, domain.IssueEventIssueStatusChanged, map[string]any{
+			"from_status": oldStatusRaw,
+			"to_status":   string(status),
+		}); err != nil {
+			return c.wrapError("update", id, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return c.wrapError("update", id, err)
+	}
+	tx = nil
 	return nil
 }
 
@@ -1710,7 +1751,7 @@ func (c *Client) UpdateWithRuntime(ctx context.Context, projectID, id string, st
 	return c.GetWithRuntime(ctx, projectID, id)
 }
 
-func (c *Client) countOpenChildren(ctx context.Context, db *sql.DB, parentID string) (int, error) {
+func (c *Client) countOpenChildren(ctx context.Context, db sqlIssueQueryer, parentID string) (int, error) {
 	var count int
 	err := db.QueryRowContext(ctx, `
 		SELECT COUNT(1)
@@ -1876,6 +1917,18 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 	`, issueID, params.Title, nullableString(params.Description), string(status), int(params.Priority), string(issueType), now, now, closedAt, nullableString(params.Assignee), labelsJSON, implementationsJSON, nullableString(params.Design), nullableString(params.Notes), nullableString(params.Acceptance), estimate); err != nil {
 		return "", c.wrapError("create", issueID, err)
 	}
+	createPayload := map[string]any{
+		"title":      params.Title,
+		"status":     string(status),
+		"issue_type": string(issueType),
+		"priority":   int(params.Priority),
+	}
+	if params.ParentID != nil && strings.TrimSpace(*params.ParentID) != "" {
+		createPayload["parent_id"] = strings.TrimSpace(*params.ParentID)
+	}
+	if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueCreated, createPayload); err != nil {
+		return "", c.wrapError("create", issueID, err)
+	}
 
 	if params.ParentID != nil && strings.TrimSpace(*params.ParentID) != "" {
 		parentID := strings.TrimSpace(*params.ParentID)
@@ -1895,6 +1948,12 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 			ON CONFLICT(issue_id, depends_on_id, dependency_type)
 			DO UPDATE SET tombstoned_at = NULL
 		`, issueID, parentID, string(domain.DependencyParentChild)); err != nil {
+			return "", c.wrapError("create", issueID, err)
+		}
+		if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueDependencyAdded, map[string]any{
+			"depends_on_id":   parentID,
+			"dependency_type": string(domain.DependencyParentChild),
+		}); err != nil {
 			return "", c.wrapError("create", issueID, err)
 		}
 		if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
@@ -2227,6 +2286,13 @@ func (c *Client) addDependency(ctx context.Context, issueID, dependsOnID, depend
 		`, time.Now().UTC().Format(time.RFC3339Nano), issueID, dependsOnID, canonicalType); err != nil {
 			return c.wrapError("add-dependency", issueID, err)
 		}
+		if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueDependencyRemoved, map[string]any{
+			"depends_on_id":   tombstoneOldParent,
+			"dependency_type": canonicalType,
+			"reason":          "parent_replaced",
+		}); err != nil {
+			return c.wrapError("add-dependency", issueID, err)
+		}
 	}
 
 	if canonicalType == string(domain.DependencyParentChild) {
@@ -2254,6 +2320,12 @@ func (c *Client) addDependency(ctx context.Context, issueID, dependsOnID, depend
 		ON CONFLICT(issue_id, depends_on_id, dependency_type)
 		DO UPDATE SET tombstoned_at = NULL
 	`, issueID, dependsOnID, canonicalType); err != nil {
+		return c.wrapError("add-dependency", issueID, err)
+	}
+	if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueDependencyAdded, map[string]any{
+		"depends_on_id":   dependsOnID,
+		"dependency_type": canonicalType,
+	}); err != nil {
 		return c.wrapError("add-dependency", issueID, err)
 	}
 	if canonicalType == string(domain.DependencyParentChild) {
@@ -2463,6 +2535,12 @@ func (c *Client) removeDependency(ctx context.Context, issueID, dependsOnID, dep
 	if affected == 0 {
 		return c.wrapError("remove-dependency", issueID, domain.ErrNotFound)
 	}
+	if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueDependencyRemoved, map[string]any{
+		"depends_on_id":   dependsOnID,
+		"dependency_type": canonicalType,
+	}); err != nil {
+		return c.wrapError("remove-dependency", issueID, err)
+	}
 	if canonicalType == string(domain.DependencyParentChild) {
 		if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
 			return c.wrapError("remove-dependency", issueID, err)
@@ -2622,6 +2700,9 @@ func (c *Client) deleteLocked(ctx context.Context, id string) error {
 	if err := c.guardNoUndeletedParentChildDescendants(ctx, tx, "delete", id); err != nil {
 		return c.wrapError("delete", id, err)
 	}
+	if err := c.appendIssueObservationEvent(ctx, tx, id, domain.IssueEventIssueDeleted, map[string]any{}); err != nil {
+		return c.wrapError("delete", id, err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM issue_dependencies WHERE issue_id = ? OR depends_on_id = ?`, id, id); err != nil {
 		return c.wrapError("delete", id, err)
 	}
@@ -2682,6 +2763,9 @@ func (c *Client) archiveLocked(ctx context.Context, id string) error {
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
 		return c.wrapError("archive", id, domain.ErrNotFound)
+	}
+	if err := c.appendIssueObservationEvent(ctx, tx, id, domain.IssueEventIssueArchived, map[string]any{}); err != nil {
+		return c.wrapError("archive", id, err)
 	}
 	if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
 		return c.wrapError("archive", id, err)
@@ -2748,16 +2832,34 @@ type UpdateTaskParams struct {
 
 // AppendNotes appends a single line to task notes.
 func (c *Client) AppendNotes(ctx context.Context, id, line string) error {
+	return c.withMutationLock(ctx, func(ctx context.Context) error {
+		return sqliteutil.WithWriteLock(c.dbPath, func() error {
+			return c.appendNotesLocked(ctx, id, line)
+		})
+	})
+}
+
+func (c *Client) appendNotesLocked(ctx context.Context, id, line string) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err
 	}
+	id = strings.TrimSpace(id)
 	noteLine := strings.TrimSpace(line)
 	if noteLine == "" {
 		return nil
 	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return c.wrapError("append-notes", id, err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	res, err := db.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE issues
 		SET
 			notes = CASE
@@ -2774,6 +2876,15 @@ func (c *Client) AppendNotes(ctx context.Context, id, line string) error {
 	if affected == 0 {
 		return c.wrapError("append-notes", id, domain.ErrNotFound)
 	}
+	if err := c.appendIssueObservationEvent(ctx, tx, id, domain.IssueEventIssueNotesAppended, map[string]any{
+		"line": noteLine,
+	}); err != nil {
+		return c.wrapError("append-notes", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return c.wrapError("append-notes", id, err)
+	}
+	tx = nil
 	return nil
 }
 
@@ -2787,89 +2898,69 @@ func (c *Client) AppendNotesWithRuntime(ctx context.Context, projectID, id, line
 
 // UpdateDetails updates non-status issue metadata.
 func (c *Client) UpdateDetails(ctx context.Context, id string, params UpdateTaskParams) error {
+	return c.withMutationLock(ctx, func(ctx context.Context) error {
+		return sqliteutil.WithWriteLock(c.dbPath, func() error {
+			return c.updateDetailsLocked(ctx, id, params)
+		})
+	})
+}
+
+func (c *Client) updateDetailsLocked(ctx context.Context, id string, params UpdateTaskParams) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err
 	}
+	id = strings.TrimSpace(id)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return c.wrapError("update-details", id, err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	var oldTitle, oldDescription, oldNotes, oldType, oldImplementations string
+	var oldPriority int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT title, COALESCE(description, ''), COALESCE(notes, ''), issue_type, priority, COALESCE(implementations_json, '[]')
+		FROM issues
+		WHERE id = ? AND deleted_at IS NULL
+	`, id).Scan(&oldTitle, &oldDescription, &oldNotes, &oldType, &oldPriority, &oldImplementations); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.wrapError("update-details", id, domain.ErrNotFound)
+		}
+		return c.wrapError("update-details", id, err)
+	}
+	implSet := 0
+	implementationsJSON := ""
 	if params.Implementations != nil {
 		implsJSON, err := json.Marshal(params.Implementations)
 		if err != nil {
 			return c.wrapError("update-details", id, err)
 		}
-		if params.Notes != nil {
-			res, err := db.ExecContext(ctx, `
-		UPDATE issues
-		SET
-			title = ?,
-			description = ?,
-			notes = ?,
-			issue_type = ?,
-			priority = ?,
-			implementations_json = ?,
-			updated_at = ?
-		WHERE id = ? AND deleted_at IS NULL
-	`, params.Title, nullableString(params.Description), nullableString(*params.Notes), string(params.Type), int(params.Priority), string(implsJSON), now, id)
-			if err != nil {
-				return c.wrapError("update-details", id, err)
-			}
-			affected, _ := res.RowsAffected()
-			if affected == 0 {
-				return c.wrapError("update-details", id, domain.ErrNotFound)
-			}
-			return nil
-		}
-		res, err := db.ExecContext(ctx, `
-		UPDATE issues
-		SET
-			title = ?,
-			description = ?,
-			issue_type = ?,
-			priority = ?,
-			implementations_json = ?,
-			updated_at = ?
-		WHERE id = ? AND deleted_at IS NULL
-	`, params.Title, nullableString(params.Description), string(params.Type), int(params.Priority), string(implsJSON), now, id)
-		if err != nil {
-			return c.wrapError("update-details", id, err)
-		}
-		affected, _ := res.RowsAffected()
-		if affected == 0 {
-			return c.wrapError("update-details", id, domain.ErrNotFound)
-		}
-		return nil
+		implSet = 1
+		implementationsJSON = string(implsJSON)
 	}
+	noteSet := 0
+	noteValue := ""
 	if params.Notes != nil {
-		res, err := db.ExecContext(ctx, `
-		UPDATE issues
-		SET
-			title = ?,
-			description = ?,
-			notes = ?,
-			issue_type = ?,
-			priority = ?,
-			updated_at = ?
-		WHERE id = ? AND deleted_at IS NULL
-	`, params.Title, nullableString(params.Description), nullableString(*params.Notes), string(params.Type), int(params.Priority), now, id)
-		if err != nil {
-			return c.wrapError("update-details", id, err)
-		}
-		affected, _ := res.RowsAffected()
-		if affected == 0 {
-			return c.wrapError("update-details", id, domain.ErrNotFound)
-		}
-		return nil
+		noteSet = 1
+		noteValue = *params.Notes
 	}
-	res, err := db.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE issues
 		SET
 			title = ?,
 			description = ?,
+			notes = CASE WHEN ? = 1 THEN ? ELSE notes END,
 			issue_type = ?,
 			priority = ?,
+			implementations_json = CASE WHEN ? = 1 THEN ? ELSE implementations_json END,
 			updated_at = ?
 		WHERE id = ? AND deleted_at IS NULL
-	`, params.Title, nullableString(params.Description), string(params.Type), int(params.Priority), now, id)
+	`, params.Title, nullableString(params.Description), noteSet, nullableString(noteValue), string(params.Type), int(params.Priority), implSet, implementationsJSON, now, id)
 	if err != nil {
 		return c.wrapError("update-details", id, err)
 	}
@@ -2877,6 +2968,36 @@ func (c *Client) UpdateDetails(ctx context.Context, id string, params UpdateTask
 	if affected == 0 {
 		return c.wrapError("update-details", id, domain.ErrNotFound)
 	}
+	changedFields := make([]string, 0, 6)
+	if oldTitle != params.Title {
+		changedFields = append(changedFields, "title")
+	}
+	if oldDescription != params.Description {
+		changedFields = append(changedFields, "description")
+	}
+	if params.Notes != nil && oldNotes != noteValue {
+		changedFields = append(changedFields, "notes")
+	}
+	if oldType != string(params.Type) {
+		changedFields = append(changedFields, "issue_type")
+	}
+	if oldPriority != int(params.Priority) {
+		changedFields = append(changedFields, "priority")
+	}
+	if implSet == 1 && oldImplementations != implementationsJSON {
+		changedFields = append(changedFields, "implementations")
+	}
+	if len(changedFields) > 0 {
+		if err := c.appendIssueObservationEvent(ctx, tx, id, domain.IssueEventIssueDetailsChanged, map[string]any{
+			"changed_fields": changedFields,
+		}); err != nil {
+			return c.wrapError("update-details", id, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return c.wrapError("update-details", id, err)
+	}
+	tx = nil
 	return nil
 }
 

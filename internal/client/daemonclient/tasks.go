@@ -18,6 +18,7 @@ const (
 	CommandTaskList             = "task.list"
 	CommandTaskGet              = "task.get"
 	CommandTaskGetMany          = "task.get_many"
+	CommandTaskEvents           = "task.events"
 	CommandTaskCreate           = "task.create"
 	CommandTaskClose            = "task.close"
 	CommandTaskGraphReadiness   = "task.graph_readiness"
@@ -268,6 +269,13 @@ type TaskIDsRequest struct {
 	IncludeAncestors  bool             `json:"include_ancestors,omitempty"`
 	ExcludeDependents bool             `json:"exclude_dependents,omitempty"`
 	MetadataOnly      bool             `json:"metadata_only,omitempty"`
+}
+
+// TaskEventsRequest contains the payload used to list issue observation events.
+type TaskEventsRequest struct {
+	TaskID naming.IssueID `json:"task_id"`
+	Types  []string       `json:"event_types,omitempty"`
+	Limit  int            `json:"limit,omitempty"`
 }
 
 // TaskDependencyParams contains the payload used for dependency operations.
@@ -573,6 +581,32 @@ func (c *Client) getManyTaskSnapshot(ctx context.Context, taskIDs []string, mode
 		return TaskSnapshot{}, fmt.Errorf("decode %s response: %w (expected %s payload; daemon likely outdated)", CommandTaskGetMany, decodeErr, "TaskListSnapshotPayload")
 	}
 	return snapshot, nil
+}
+
+// ListTaskEvents fetches the durable observation event stream for one task.
+func (c *Client) ListTaskEvents(ctx context.Context, taskID string, eventTypes []string, limit int) ([]domain.IssueObservationEvent, error) {
+	parsedTaskID, err := naming.ParseIssueID(taskID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid task id: %w", err)
+	}
+	types := make([]string, 0, len(eventTypes))
+	for _, eventType := range eventTypes {
+		trimmed := strings.TrimSpace(eventType)
+		if trimmed != "" {
+			types = append(types, trimmed)
+		}
+	}
+	var out struct {
+		Events []domain.IssueObservationEvent `json:"events"`
+	}
+	if err := c.commandJSON(ctx, CommandTaskEvents, TaskEventsRequest{
+		TaskID: parsedTaskID,
+		Types:  types,
+		Limit:  limit,
+	}, &out); err != nil {
+		return nil, err
+	}
+	return append([]domain.IssueObservationEvent(nil), out.Events...), nil
 }
 
 // ListTasksSnapshot fetches the current task set and revision through the daemon client boundary.

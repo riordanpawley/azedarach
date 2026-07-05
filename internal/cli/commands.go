@@ -77,6 +77,20 @@ type Dependencies struct {
 	RuntimeRepoDir string
 }
 
+type repeatedStringFlag []string
+
+func (f *repeatedStringFlag) String() string {
+	if f == nil {
+		return ""
+	}
+	return strings.Join(*f, ",")
+}
+
+func (f *repeatedStringFlag) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
 type daemonStarter interface {
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
@@ -140,6 +154,14 @@ type IssueGetOptions struct {
 	IssueID      string
 	JSON         bool
 	IncludeNotes bool
+}
+
+type IssueEventsOptions struct {
+	Project    string
+	IssueID    string
+	JSON       bool
+	EventTypes []string
+	Limit      int
 }
 
 type IssueGetManyOptions struct {
@@ -2482,6 +2504,46 @@ func ParseIssueGetArgs(args []string) (IssueGetOptions, error) {
 	return opts, nil
 }
 
+func ParseIssueEventsArgs(args []string) (IssueEventsOptions, error) {
+	opts := IssueEventsOptions{}
+	issueIDFlag := ""
+	typesCSV := ""
+	var typeFlags repeatedStringFlag
+	fs := flag.NewFlagSet("issue events", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.BoolVar(&opts.JSON, "json", false, "output issue events as JSON")
+	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
+	fs.Var(&typeFlags, "type", "filter by event type; may be repeated")
+	fs.StringVar(&typesCSV, "types", "", "comma-separated event types")
+	fs.IntVar(&opts.Limit, "limit", 0, "maximum events to return")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return IssueEventsOptions{}, err
+	}
+	if fs.NArg() > 1 {
+		return IssueEventsOptions{}, fmt.Errorf("usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]")
+	}
+	if fs.NArg() == 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" {
+		return IssueEventsOptions{}, fmt.Errorf("usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]")
+	}
+	if opts.Limit < 0 {
+		return IssueEventsOptions{}, fmt.Errorf("--limit must be non-negative")
+	}
+	types := append([]string(nil), typeFlags...)
+	if strings.TrimSpace(typesCSV) != "" {
+		types = append(types, strings.Split(typesCSV, ",")...)
+	}
+	opts.EventTypes = dedupeOrderedIDs(types)
+	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
 func ParseIssueGetManyArgs(args []string) (IssueGetManyOptions, error) {
 	opts := IssueGetManyOptions{}
 	ids := make([]string, 0, 4)
@@ -4031,6 +4093,69 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 	}
 	fmt.Printf("Created: %s\n", task.CreatedAt.UTC().Format(time.RFC3339))
 	fmt.Printf("Updated: %s\n", task.UpdatedAt.UTC().Format(time.RFC3339))
+	return nil
+}
+
+func IssueEventsCommand(deps *Dependencies, opts IssueEventsOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	events, err := deps.DaemonClient.ListTaskEvents(ctx, opts.IssueID, opts.EventTypes, opts.Limit)
+	if err != nil {
+		if strings.Contains(err.Error(), fmt.Sprintf("issue not found: %s", opts.IssueID)) {
+			return fmt.Errorf("issue not found: %s", opts.IssueID)
+		}
+		return fmt.Errorf("failed to list issue events for %s: %w", opts.IssueID, err)
+	}
+
+	if opts.JSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(struct {
+			IssueID string                         `json:"issue_id"`
+			Events  []domain.IssueObservationEvent `json:"events"`
+		}{
+			IssueID: opts.IssueID,
+			Events:  events,
+		})
+	}
+
+	if len(events) == 0 {
+		fmt.Printf("No observation events for issue %s\n", opts.IssueID)
+		return nil
+	}
+	for _, event := range events {
+		fmt.Printf("%d %s %s", event.ID, event.ObservedAt.Format(time.RFC3339Nano), event.Type)
+		if event.Source != "" {
+			fmt.Printf(" source=%s", event.Source)
+		}
+		if event.SourceCommand != "" {
+			fmt.Printf(" command=%s", event.SourceCommand)
+		}
+		if event.OperationID != "" {
+			fmt.Printf(" operation=%s", event.OperationID)
+		}
+		if event.SessionID != "" {
+			fmt.Printf(" session=%s", event.SessionID)
+		}
+		if event.WorktreePath != "" {
+			fmt.Printf(" worktree=%s", event.WorktreePath)
+		}
+		if len(event.Payload) > 0 {
+			payload, err := json.Marshal(event.Payload)
+			if err != nil {
+				return fmt.Errorf("marshal event payload: %w", err)
+			}
+			fmt.Printf(" payload=%s", payload)
+		}
+		fmt.Println()
+	}
 	return nil
 }
 

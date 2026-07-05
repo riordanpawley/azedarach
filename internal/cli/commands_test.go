@@ -4733,6 +4733,42 @@ func TestParseIssueGetArgs(t *testing.T) {
 	}
 }
 
+func TestParseIssueEventsArgs(t *testing.T) {
+	got, err := ParseIssueEventsArgs([]string{
+		"az-1",
+		"--json",
+		"--type", "issue.status_changed",
+		"--types", "validation.passed,review.completed",
+		"--limit", "25",
+	})
+	if err != nil {
+		t.Fatalf("ParseIssueEventsArgs() error = %v", err)
+	}
+	if got.IssueID != "az-1" || !got.JSON || got.Limit != 25 {
+		t.Fatalf("ParseIssueEventsArgs() = %+v", got)
+	}
+	if !reflect.DeepEqual(got.EventTypes, []string{"issue.status_changed", "validation.passed", "review.completed"}) {
+		t.Fatalf("event types = %+v", got.EventTypes)
+	}
+
+	got, err = ParseIssueEventsArgs([]string{"--id", "az-2", "--type", "issue.created"})
+	if err != nil {
+		t.Fatalf("ParseIssueEventsArgs(named id) error = %v", err)
+	}
+	if got.IssueID != "az-2" || !reflect.DeepEqual(got.EventTypes, []string{"issue.created"}) {
+		t.Fatalf("ParseIssueEventsArgs(named id) = %+v", got)
+	}
+
+	_, err = ParseIssueEventsArgs([]string{"--json"})
+	if err == nil || !strings.Contains(err.Error(), "usage: az issue events") {
+		t.Fatalf("expected missing id usage error, got %v", err)
+	}
+	_, err = ParseIssueEventsArgs([]string{"az-1", "--limit", "-1"})
+	if err == nil || !strings.Contains(err.Error(), "--limit must be non-negative") {
+		t.Fatalf("expected negative limit error, got %v", err)
+	}
+}
+
 func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
 	check, err := ParseIssueCheckArgs([]string{"az-1"})
 	if err != nil {
@@ -6244,6 +6280,69 @@ func TestIssueGetCommandJSON(t *testing.T) {
 	})
 	if !strings.Contains(output, "\"id\": \"az-5\"") || !strings.Contains(output, "\"title\": \"Lookup issue\"") {
 		t.Fatalf("output missing issue json fields: %q", output)
+	}
+}
+
+func TestIssueEventsCommandJSON(t *testing.T) {
+	observedAt := time.Date(2026, 7, 6, 2, 0, 0, 0, time.UTC)
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskEvents {
+					t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskEvents)
+				}
+				var body daemonclient.TaskEventsRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal task events body: %v", err)
+				}
+				if body.TaskID != "az-5" || body.Limit != 10 || !reflect.DeepEqual(body.Types, []string{"issue.status_changed"}) {
+					t.Fatalf("task events body = %+v", body)
+				}
+				respBody, err := json.Marshal(struct {
+					Events []domain.IssueObservationEvent `json:"events"`
+				}{
+					Events: []domain.IssueObservationEvent{{
+						ID:         7,
+						IssueID:    "az-5",
+						Type:       domain.IssueEventIssueStatusChanged,
+						ObservedAt: observedAt,
+						Source:     "issue-store",
+						Payload: map[string]any{
+							"from_status": "open",
+							"to_status":   "in_progress",
+						},
+					}},
+				})
+				if err != nil {
+					t.Fatalf("marshal response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        4,
+					Body:            respBody,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueEventsCommand(deps, IssueEventsOptions{
+			IssueID:    "az-5",
+			JSON:       true,
+			EventTypes: []string{"issue.status_changed"},
+			Limit:      10,
+		})
+	})
+	if !strings.Contains(output, "\"issue_id\": \"az-5\"") || !strings.Contains(output, "\"event_type\": \"issue.status_changed\"") {
+		t.Fatalf("output missing event json fields: %q", output)
 	}
 }
 
