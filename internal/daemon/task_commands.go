@@ -295,6 +295,47 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	return resp, nil
 }
 
+func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	resp := d.successResponse(req)
+	projectID := d.projectID(req.Meta)
+	startedAt := time.Now()
+	cacheStartedAt := time.Now()
+	if cached, ok := d.readFreshTaskListSnapshotCache(projectID); ok {
+		latencytrace.LogPhase(d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", true)
+		payload := buildBoardSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks)
+		marshalStartedAt := time.Now()
+		body, err := json.Marshal(payload)
+		latencytrace.LogPhase(d.cfg.Logger, "daemon", "board.fetch.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(cached.Tasks), "cache_hit", true)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		resp.Body = body
+		resp.Revision = payload.SnapshotRevision
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Info("daemon board fetch completed", "project_id", projectID, "task_count", len(cached.Tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "cache_hit", true)
+		}
+		return resp, nil
+	}
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", false)
+	result, shared, err := d.loadTaskListSnapshot(ctx, req, projectID, "", false)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	payload := buildBoardSnapshotPayload(projectID, result.Revision, result.LastCheckedAt, result.Freshness, result.Tasks)
+	marshalStartedAt := time.Now()
+	body, err := json.Marshal(payload)
+	latencytrace.LogPhase(d.cfg.Logger, "daemon", "board.fetch.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(result.Tasks), "cache_hit", false, "shared_load", shared)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	resp.Body = body
+	resp.Revision = payload.SnapshotRevision
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon board fetch completed", "project_id", projectID, "task_count", len(result.Tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "shared_load", shared)
+	}
+	return resp, nil
+}
+
 func decodeTaskListRequest(body []byte) (protocol.TaskListRequestBody, error) {
 	if len(body) == 0 || strings.TrimSpace(string(body)) == "null" {
 		return protocol.TaskListRequestBody{}, nil
@@ -392,7 +433,7 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
 	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.snapshot_freshness", freshnessStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "freshness", freshness)
 	revision := d.currentRevision(projectID)
-	if query == "" {
+	if query == "" && !includeDependencies {
 		d.storeTaskListSnapshotCache(projectID, revision, lastCheckedAt, freshness, tasks, summariesOnly)
 	}
 	return taskListSnapshotLoadResult{
@@ -714,6 +755,24 @@ func buildTaskListSnapshotPayload(projectID string, revision uint64, lastChecked
 		Freshness:        freshness,
 		SummariesOnly:    summariesOnly,
 		Tasks:            tasks,
+	}
+}
+
+func buildBoardSnapshotPayload(projectID string, revision uint64, lastCheckedAt time.Time, freshness protocol.TaskListFreshness, tasks []domain.Task) protocol.BoardSnapshotPayload {
+	if lastCheckedAt.IsZero() {
+		lastCheckedAt = timeNow()
+	}
+	if !freshness.Valid() {
+		freshness = protocol.TaskListFreshnessFresh
+	}
+	return protocol.BoardSnapshotPayload{
+		SchemaVersion:    protocol.BoardSnapshotSchemaVersion,
+		ProtocolVersion:  protocol.CurrentVersion,
+		SnapshotRevision: revision,
+		ProjectID:        naming.ProjectID(projectID),
+		LastCheckedAt:    lastCheckedAt.UTC(),
+		Freshness:        freshness,
+		Tasks:            protocol.BoardTaskSummariesFromDomain(tasks),
 	}
 }
 

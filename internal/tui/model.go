@@ -1853,7 +1853,7 @@ func (m Model) readTaskSnapshot(ctx context.Context, client *daemonclient.Client
 	if client == nil {
 		return daemonclient.TaskSnapshot{}, fmt.Errorf("daemon client unavailable")
 	}
-	return client.ListTasksSnapshotWithMode(ctx, daemonclient.ReadWaitModeExplicit)
+	return client.BoardSnapshotWithMode(ctx, daemonclient.ReadWaitModeExplicit)
 }
 
 func (m Model) loadOperationsCmd() tea.Cmd {
@@ -5305,10 +5305,12 @@ func (m *Model) syncTaskWorkspaceOverlay() {
 }
 
 func (m *Model) applySingleTaskWorkspaceRefresh(taskID string, refreshed domain.Task) (domain.Task, bool) {
+	m.reconcilePendingStatuses()
 	return m.applyTaskRefresh(taskID, refreshed, true)
 }
 
 func (m *Model) applyTaskRefreshes(refreshed []domain.Task) {
+	m.reconcilePendingStatuses()
 	updated := false
 	for _, task := range refreshed {
 		if _, ok := m.applyTaskRefresh(task.ID.String(), task, false); ok {
@@ -5330,6 +5332,7 @@ func (m *Model) applyTaskRefresh(taskID string, refreshed domain.Task, syncAfter
 		if taskIDKey(m.tasks[i].ID.String()) != key {
 			continue
 		}
+		refreshed = m.applyPendingStatusOverlayToTask(refreshed)
 		m.tasks[i] = refreshed
 		m.tasks[i].Session = cloneSession(m.tasks[i].Session)
 		if syncAfter {
@@ -5341,26 +5344,31 @@ func (m *Model) applyTaskRefresh(taskID string, refreshed domain.Task, syncAfter
 	return domain.Task{}, false
 }
 
+func (m *Model) applyPendingStatusOverlayToTask(task domain.Task) domain.Task {
+	key := taskIDKey(task.ID.String())
+	if key == "" || len(m.pendingStatuses) == 0 {
+		return task
+	}
+	pending, ok := m.pendingStatuses[key]
+	if !ok || pending.targetStatus == "" {
+		return task
+	}
+	if task.Status == pending.targetStatus {
+		if pending.action != "session_start" {
+			delete(m.pendingStatuses, key)
+		}
+		return task
+	}
+	task.Status = pending.targetStatus
+	return task
+}
+
 func (m *Model) applyPendingStatusOverlays() {
 	if len(m.pendingStatuses) == 0 {
 		return
 	}
 	for i := range m.tasks {
-		key := taskIDKey(m.tasks[i].ID.String())
-		pending, ok := m.pendingStatuses[key]
-		if !ok {
-			continue
-		}
-		if pending.targetStatus == "" {
-			continue
-		}
-		if m.tasks[i].Status == pending.targetStatus {
-			if pending.action != "session_start" {
-				delete(m.pendingStatuses, key)
-			}
-			continue
-		}
-		m.tasks[i].Status = pending.targetStatus
+		m.tasks[i] = m.applyPendingStatusOverlayToTask(m.tasks[i])
 	}
 }
 
@@ -5423,6 +5431,22 @@ func (m *Model) reconcilePendingTaskDetails() {
 			continue
 		}
 		if !pending.updatedAt.IsZero() && now.Sub(pending.updatedAt) > stalePendingTTL {
+			delete(m.pendingDetails, key)
+		}
+	}
+}
+
+func (m *Model) reconcilePendingTaskDetailsFromHydrated(tasks []domain.Task) {
+	if len(m.pendingDetails) == 0 || len(tasks) == 0 {
+		return
+	}
+	for _, task := range tasks {
+		key := taskIDKey(task.ID.String())
+		pending, ok := m.pendingDetails[key]
+		if !ok {
+			continue
+		}
+		if taskDetailsMatchPending(task, pending) {
 			delete(m.pendingDetails, key)
 		}
 	}

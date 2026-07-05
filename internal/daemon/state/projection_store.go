@@ -22,6 +22,7 @@ import (
 const (
 	sessionStateTable       = "daemon_session_projections"
 	sessionObservationTable = "daemon_session_observations"
+	sessionActivityTable    = "daemon_session_activity_evidence"
 	worktreeStateTable      = "daemon_worktree_projections"
 )
 
@@ -34,6 +35,22 @@ type WorktreeState struct {
 	UpdatedAt        time.Time
 	GitStatusRaw     json.RawMessage
 	GitStatusUpdated *time.Time
+}
+
+// SessionActivityEvidence records durable activity evidence before it is
+// materialized into the canonical session projection.
+type SessionActivityEvidence struct {
+	ProjectID       string
+	SessionID       string
+	IssueID         string
+	Activity        string
+	ActivitySource  string
+	SourceSessionID string
+	Agent           string
+	Hook            string
+	Event           string
+	ObservedAt      time.Time
+	UpdatedAt       time.Time
 }
 
 // RuntimeStateStore persists daemon-owned session/worktree state in sqlite.
@@ -272,6 +289,217 @@ func (s *RuntimeStateStore) deleteSessionStateLocked(ctx context.Context, projec
 		return fmt.Errorf("delete session observation %s/%s: %w", projectID, sessionID, err)
 	}
 	return nil
+}
+
+func (s *RuntimeStateStore) UpsertSessionActivityEvidence(ctx context.Context, evidence SessionActivityEvidence) error {
+	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+		return s.upsertSessionActivityEvidenceLocked(ctx, evidence)
+	})
+}
+
+func (s *RuntimeStateStore) upsertSessionActivityEvidenceLocked(ctx context.Context, evidence SessionActivityEvidence) error {
+	db, err := s.dbHandle()
+	if err != nil {
+		return err
+	}
+	projectID := normalizedProjectID(evidence.ProjectID)
+	sessionID := strings.TrimSpace(evidence.SessionID)
+	issueID := strings.TrimSpace(evidence.IssueID)
+	activity := strings.ToLower(strings.TrimSpace(evidence.Activity))
+	if projectID == "" || sessionID == "" || issueID == "" || activity == "" {
+		return fmt.Errorf("upsert session activity evidence: missing project, session, issue, or activity")
+	}
+	activitySource := strings.ToLower(strings.TrimSpace(evidence.ActivitySource))
+	if activitySource == "" {
+		activitySource = "hooks"
+	}
+	observedAt := evidence.ObservedAt
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
+	updatedAt := evidence.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = observedAt
+	}
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO `+sessionActivityTable+` (
+			project_id,
+			session_id,
+			issue_id,
+			activity,
+			activity_source,
+			source_session_id,
+			agent,
+			hook,
+			event,
+			observed_at,
+			updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(project_id, session_id) DO UPDATE SET
+			issue_id = excluded.issue_id,
+			activity = excluded.activity,
+			activity_source = excluded.activity_source,
+			source_session_id = excluded.source_session_id,
+			agent = excluded.agent,
+			hook = excluded.hook,
+			event = excluded.event,
+			observed_at = excluded.observed_at,
+			updated_at = excluded.updated_at
+		WHERE excluded.observed_at >= `+sessionActivityTable+`.observed_at
+	`,
+		projectID,
+		sessionID,
+		issueID,
+		activity,
+		activitySource,
+		strings.TrimSpace(evidence.SourceSessionID),
+		strings.TrimSpace(evidence.Agent),
+		strings.TrimSpace(evidence.Hook),
+		strings.TrimSpace(evidence.Event),
+		observedAt.UTC().Format(time.RFC3339Nano),
+		updatedAt.UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return fmt.Errorf("upsert session activity evidence %s/%s: %w", projectID, sessionID, err)
+	}
+	return nil
+}
+
+func (s *RuntimeStateStore) GetSessionActivityEvidence(ctx context.Context, projectID, sessionID string) (SessionActivityEvidence, bool, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return SessionActivityEvidence{}, false, err
+	}
+	projectID = normalizedProjectID(projectID)
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return SessionActivityEvidence{}, false, nil
+	}
+	row := db.QueryRowContext(ctx, `
+		SELECT
+			project_id,
+			session_id,
+			issue_id,
+			activity,
+			activity_source,
+			source_session_id,
+			agent,
+			hook,
+			event,
+			observed_at,
+			updated_at
+		FROM `+sessionActivityTable+`
+		WHERE project_id = ? AND session_id = ?
+	`, projectID, sessionID)
+	evidence, err := scanSessionActivityEvidence(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return SessionActivityEvidence{}, false, nil
+		}
+		return SessionActivityEvidence{}, false, err
+	}
+	return evidence, true, nil
+}
+
+func (s *RuntimeStateStore) ListSessionActivityEvidence(ctx context.Context, projectID string, issueIDs []string) ([]SessionActivityEvidence, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	projectID = normalizedProjectID(projectID)
+	rows, err := db.QueryContext(ctx, `
+		SELECT
+			project_id,
+			session_id,
+			issue_id,
+			activity,
+			activity_source,
+			source_session_id,
+			agent,
+			hook,
+			event,
+			observed_at,
+			updated_at
+		FROM `+sessionActivityTable+`
+		WHERE project_id = ?
+		ORDER BY observed_at DESC, session_id ASC
+	`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("list session activity evidence %s: %w", projectID, err)
+	}
+	defer rows.Close()
+
+	allowed := make(map[string]struct{}, len(issueIDs))
+	for _, issueID := range issueIDs {
+		issueID = strings.ToLower(strings.TrimSpace(issueID))
+		if issueID != "" {
+			allowed[issueID] = struct{}{}
+		}
+	}
+	evidenceRows := make([]SessionActivityEvidence, 0)
+	for rows.Next() {
+		evidence, err := scanSessionActivityEvidence(rows)
+		if err != nil {
+			return nil, err
+		}
+		if len(allowed) > 0 {
+			if _, ok := allowed[strings.ToLower(strings.TrimSpace(evidence.IssueID))]; !ok {
+				continue
+			}
+		}
+		evidenceRows = append(evidenceRows, evidence)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list session activity evidence rows %s: %w", projectID, err)
+	}
+	return evidenceRows, nil
+}
+
+type sessionActivityEvidenceScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanSessionActivityEvidence(scanner sessionActivityEvidenceScanner) (SessionActivityEvidence, error) {
+	var (
+		evidence      SessionActivityEvidence
+		observedAtRaw string
+		updatedAtRaw  string
+	)
+	if err := scanner.Scan(
+		&evidence.ProjectID,
+		&evidence.SessionID,
+		&evidence.IssueID,
+		&evidence.Activity,
+		&evidence.ActivitySource,
+		&evidence.SourceSessionID,
+		&evidence.Agent,
+		&evidence.Hook,
+		&evidence.Event,
+		&observedAtRaw,
+		&updatedAtRaw,
+	); err != nil {
+		return SessionActivityEvidence{}, err
+	}
+	observedAt, err := parseRuntimeStateTime(observedAtRaw)
+	if err != nil {
+		return SessionActivityEvidence{}, fmt.Errorf("parse session activity observed_at: %w", err)
+	}
+	updatedAt, err := parseRuntimeStateTime(updatedAtRaw)
+	if err != nil {
+		return SessionActivityEvidence{}, fmt.Errorf("parse session activity updated_at: %w", err)
+	}
+	evidence.ProjectID = normalizedProjectID(evidence.ProjectID)
+	evidence.SessionID = strings.TrimSpace(evidence.SessionID)
+	evidence.IssueID = strings.TrimSpace(evidence.IssueID)
+	evidence.Activity = strings.ToLower(strings.TrimSpace(evidence.Activity))
+	evidence.ActivitySource = strings.ToLower(strings.TrimSpace(evidence.ActivitySource))
+	evidence.SourceSessionID = strings.TrimSpace(evidence.SourceSessionID)
+	evidence.Agent = strings.TrimSpace(evidence.Agent)
+	evidence.Hook = strings.TrimSpace(evidence.Hook)
+	evidence.Event = strings.TrimSpace(evidence.Event)
+	evidence.ObservedAt = observedAt
+	evidence.UpdatedAt = updatedAt
+	return evidence, nil
 }
 
 func (s *RuntimeStateStore) ReplaceSessionStates(ctx context.Context, projectID string, sessions []Session) error {
@@ -1194,6 +1422,22 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_session_observations_project_issue
 			ON ` + sessionObservationTable + ` (project_id, issue_id)`,
+		`CREATE TABLE IF NOT EXISTS ` + sessionActivityTable + ` (
+			project_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			issue_id TEXT NOT NULL,
+			activity TEXT NOT NULL,
+			activity_source TEXT NOT NULL,
+			source_session_id TEXT,
+			agent TEXT,
+			hook TEXT,
+			event TEXT,
+			observed_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, session_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_daemon_session_activity_evidence_project_issue
+			ON ` + sessionActivityTable + ` (project_id, issue_id)`,
 		`CREATE TABLE IF NOT EXISTS ` + worktreeStateTable + ` (
 			project_id TEXT NOT NULL,
 			issue_id TEXT NOT NULL,
@@ -1245,11 +1489,87 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 	if err := migrateSessionObservations(ctx, db); err != nil {
 		return err
 	}
+	if err := migrateSessionActivityEvidence(ctx, db); err != nil {
+		return err
+	}
 	if err := ensureColumn(ctx, db, worktreeStateTable, "git_status_json", "TEXT"); err != nil {
 		return err
 	}
 	if err := ensureColumn(ctx, db, worktreeStateTable, "git_status_updated_at", "TEXT"); err != nil {
 		return err
+	}
+	return nil
+}
+
+func migrateSessionActivityEvidence(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO `+sessionActivityTable+` (
+			project_id,
+			session_id,
+			issue_id,
+			activity,
+			activity_source,
+			source_session_id,
+			agent,
+			hook,
+			event,
+			observed_at,
+			updated_at
+		)
+		SELECT
+			project_id,
+			parent_session_id,
+			issue_id,
+			activity,
+			'hooks',
+			session_id,
+			'',
+			'',
+			'',
+			updated_at,
+			updated_at
+		FROM (
+			SELECT
+				project_id,
+				substr(session_id, 1, instr(session_id, '.pane-') - 1) AS parent_session_id,
+				session_id,
+				issue_id,
+				CASE lower(trim(COALESCE(activity, '')))
+					WHEN 'busy' THEN 'busy'
+					WHEN 'idle' THEN 'idle'
+					ELSE CASE lower(trim(COALESCE(state, '')))
+						WHEN 'running' THEN 'busy'
+						WHEN 'paused' THEN 'idle'
+						ELSE ''
+					END
+				END AS activity,
+				updated_at,
+				row_number() OVER (
+					PARTITION BY project_id, substr(session_id, 1, instr(session_id, '.pane-') - 1)
+					ORDER BY updated_at DESC, session_id ASC
+				) AS row_rank
+			FROM `+sessionObservationTable+`
+			WHERE instr(session_id, '.pane-') > 0
+				AND lower(trim(COALESCE(activity_source, ''))) = 'hooks'
+				AND trim(COALESCE(issue_id, '')) <> ''
+				AND trim(COALESCE(updated_at, '')) <> ''
+		)
+		WHERE row_rank = 1
+			AND parent_session_id <> ''
+			AND activity <> ''
+		ON CONFLICT(project_id, session_id) DO UPDATE SET
+			issue_id = excluded.issue_id,
+			activity = excluded.activity,
+			activity_source = excluded.activity_source,
+			source_session_id = excluded.source_session_id,
+			agent = excluded.agent,
+			hook = excluded.hook,
+			event = excluded.event,
+			observed_at = excluded.observed_at,
+			updated_at = excluded.updated_at
+		WHERE excluded.observed_at >= `+sessionActivityTable+`.observed_at
+	`); err != nil {
+		return fmt.Errorf("migrate session activity evidence: %w", err)
 	}
 	return nil
 }

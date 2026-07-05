@@ -351,6 +351,7 @@ func (codexInstaller) Install(_ context.Context, deps *Dependencies, opts AIInst
 		{"UserPromptSubmit", "user-prompt-submit", ""},
 		{"PreToolUse", "pre-tool-use", ""},
 		{"PostToolUse", "post-tool-use", ""},
+		{"Notification", "idle_prompt", "idle_prompt"},
 		{"PermissionRequest", "permission-request", ""},
 		{"Stop", "stop", ""},
 		{"SubagentStart", "subagent-start", ""},
@@ -389,7 +390,7 @@ func (codexInstaller) Install(_ context.Context, deps *Dependencies, opts AIInst
 
 	fmt.Printf("Installed codex hooks in %s\n", hooksPath)
 	if opts.Verbose {
-		fmt.Println("  Events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest, Stop, SubagentStart, SubagentStop")
+		fmt.Println("  Events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Notification, PermissionRequest, Stop, SubagentStart, SubagentStop")
 	}
 	return nil
 }
@@ -731,6 +732,7 @@ func rulesyncCodexHookEntries(_ AIInstallOptions) map[string][]rulesyncHookEntry
 		"beforeSubmitPrompt": {{Type: "command", Command: cmd("user_prompt_submit")}},
 		"preToolUse":         {{Type: "command", Command: cmd("pre_tool_use")}},
 		"postToolUse":        {{Type: "command", Command: cmd("post_tool_use")}},
+		"notification":       {{Type: "command", Matcher: "idle_prompt", Command: cmd("idle_prompt")}},
 		"permissionRequest":  {{Type: "command", Command: cmd("permission_request")}},
 		"stop":               {{Type: "command", Command: cmd("stop")}},
 		"subagentStart":      {{Type: "command", Command: cmd("subagent_start")}},

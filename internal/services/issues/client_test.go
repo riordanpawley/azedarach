@@ -15,6 +15,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
@@ -684,6 +685,81 @@ func TestClient_ListWithRuntimeReadsSessionObservations(t *testing.T) {
 	assert.Equal(t, "busy", tasks[0].Session.Activity)
 	assert.Equal(t, "runtime", tasks[0].Session.ActivitySource)
 	assert.True(t, tasks[0].HasTmuxSession)
+}
+
+func TestClient_ListWithRuntimeReadsCanonicalHookActivityProjection(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-hook-pane-activity"
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Hook pane activity task",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	require.NoError(t, err)
+
+	startedAt := time.Date(2026, time.April, 4, 12, 30, 0, 0, time.UTC)
+	hookUpdatedAt := startedAt.Add(5 * time.Minute)
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(client.dbPath, slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStore.Close()
+	})
+	started := startedAt
+	err = runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:             "az-" + taskID,
+		IssueID:        taskID,
+		State:          daemonstate.SessionStateRunning,
+		ObservedState:  daemonstate.SessionStateRunning,
+		Activity:       "idle",
+		ActivitySource: "hooks",
+		StartedAt:      &started,
+		UpdatedAt:      hookUpdatedAt,
+	})
+	require.NoError(t, err)
+	err = runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:             "az-" + taskID + ".pane-19",
+		IssueID:        taskID,
+		State:          daemonstate.SessionStatePaused,
+		ObservedState:  daemonstate.SessionStatePaused,
+		Activity:       "idle",
+		ActivitySource: "hooks",
+		StartedAt:      &started,
+		UpdatedAt:      hookUpdatedAt,
+	})
+	require.NoError(t, err)
+
+	tasks, err := client.ListWithRuntime(ctx, projectID)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.NotNil(t, tasks[0].Session)
+	assert.Equal(t, "idle", tasks[0].Session.Activity)
+	assert.Equal(t, "hooks", tasks[0].Session.ActivitySource)
+	assert.Equal(t, "idle", tasks[0].Session.DisplayLabel())
+
+	got, err := client.GetWithRuntime(ctx, projectID, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, got.Session)
+	assert.Equal(t, "idle", got.Session.Activity)
+	assert.Equal(t, "hooks", got.Session.ActivitySource)
+	assert.Equal(t, "idle", got.Session.DisplayLabel())
+
+	summaries, err := client.ListSummariesWithRuntime(ctx, projectID)
+	require.NoError(t, err)
+	require.Len(t, summaries, 1)
+	require.NotNil(t, summaries[0].Session)
+	assert.Equal(t, "idle", summaries[0].Session.Activity)
+	assert.Equal(t, "hooks", summaries[0].Session.ActivitySource)
+	assert.Equal(t, "idle", summaries[0].Session.DisplayLabel())
+
+	metadata, err := client.GetManyMetadataWithRuntime(ctx, projectID, []string{taskID})
+	require.NoError(t, err)
+	require.Len(t, metadata, 1)
+	require.NotNil(t, metadata[0].Session)
+	assert.Equal(t, "idle", metadata[0].Session.Activity)
+	assert.Equal(t, "hooks", metadata[0].Session.ActivitySource)
+	assert.Equal(t, "idle", metadata[0].Session.DisplayLabel())
 }
 
 func TestClient_ListSummariesWithRuntimeKeepsParentAndRuntimeProjection(t *testing.T) {

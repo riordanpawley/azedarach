@@ -219,6 +219,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Batch(cmds...)
 		}
+		m.reconcilePendingTaskDetailsFromHydrated(msg.tasks)
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
 		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
 		for i := range m.tasks {
@@ -815,7 +816,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !ok || taskIDKey(currentWorkspace.TaskID()) != taskIDKey(msg.taskID) {
 			return m, nil
 		}
-		task, ok := m.applySingleTaskWorkspaceRefresh(msg.taskID, msg.task)
+		boardTask, ok := m.applySingleTaskWorkspaceRefresh(msg.taskID, msg.task)
 		if !ok {
 			return m, nil
 		}
@@ -825,7 +826,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			currentWorkspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
 		}
-		currentWorkspace.SyncTask(task, m.tasks, m.pendingMutationForTask(msg.taskID))
+		currentWorkspace.SyncFullTask(msg.task, m.tasks, m.pendingMutationForTask(boardTask.ID.String()))
 		if msg.decisionErr != nil {
 			if m.logger != nil {
 				m.logger.Debug("task workspace decision link refresh failed", "task_id", msg.taskID, "error", msg.decisionErr)
@@ -984,6 +985,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clearDrillDown()
 
 		// Reuse the normal loaded-state reducer path.
+		m.reconcilePendingTaskDetailsFromHydrated(msg.tasks)
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
 		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
 		for i := range m.tasks {

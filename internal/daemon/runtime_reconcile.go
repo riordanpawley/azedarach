@@ -88,6 +88,9 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 		}
 	}
 
+	if err := d.materializeSessionActivityEvidence(ctx, protocol.Metadata{ProjectID: result.ProjectID}, result.ProjectID.String(), nil); err != nil {
+		errs = append(errs, fmt.Errorf("materialize session activity evidence: %w", err))
+	}
 	if err := d.refreshSessionRuntimeState(ctx, result.ProjectID.String()); err != nil {
 		errs = append(errs, fmt.Errorf("refresh session runtime state: %w", err))
 	}
@@ -130,6 +133,9 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 			result.RecreatedTmuxSessions += sessionResult.RecreatedTmuxSessions
 			result.AlignedDaemonSessions += sessionResult.AlignedDaemonSessions
 		}
+	}
+	if err := d.materializeSessionActivityEvidence(ctx, protocol.Metadata{ProjectID: result.ProjectID}, result.ProjectID.String(), issueIDs); err != nil {
+		errs = append(errs, fmt.Errorf("materialize session activity evidence: %w", err))
 	}
 	if err := d.reconcileIssueResourcesPresent(ctx, result.ProjectID.String(), issueIDs); err != nil {
 		errs = append(errs, fmt.Errorf("reconcile issue resources present: %w", err))

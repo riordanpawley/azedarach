@@ -540,7 +540,7 @@ func TestEditTaskActionLoadsFullDetailsBeforeSubmit(t *testing.T) {
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
-					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+					Body: mustMarshalFullTaskSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
 						{ID: naming.IssueID(issueID), Title: "Full title", Description: "stored description", Type: domain.TypeTask, Priority: domain.P2, Status: domain.StatusOpen},
 					}),
 				}, nil
@@ -794,7 +794,24 @@ func teaBatchMessages(msg tea.Msg) []tea.Msg {
 	}
 }
 
-func mustMarshalTaskListSnapshot(t *testing.T, protocolVersion protocol.Version, revision uint64, projectID string, tasks []domain.Task) []byte {
+func mustMarshalBoardSnapshot(t *testing.T, protocolVersion protocol.Version, revision uint64, projectID string, tasks []domain.Task) []byte {
+	t.Helper()
+	body, err := json.Marshal(protocol.BoardSnapshotPayload{
+		SchemaVersion:    protocol.BoardSnapshotSchemaVersion,
+		ProtocolVersion:  protocolVersion,
+		SnapshotRevision: revision,
+		ProjectID:        naming.ProjectID(projectID),
+		LastCheckedAt:    daemonSnapshotCheckedAt(),
+		Freshness:        protocol.TaskListFreshnessFresh,
+		Tasks:            protocol.BoardTaskSummariesFromDomain(tasks),
+	})
+	if err != nil {
+		t.Fatalf("marshal board snapshot: %v", err)
+	}
+	return body
+}
+
+func mustMarshalFullTaskSnapshot(t *testing.T, protocolVersion protocol.Version, revision uint64, projectID string, tasks []domain.Task) []byte {
 	t.Helper()
 	body, err := json.Marshal(protocol.TaskListSnapshotPayload{
 		SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
@@ -806,7 +823,7 @@ func mustMarshalTaskListSnapshot(t *testing.T, protocolVersion protocol.Version,
 		Tasks:            tasks,
 	})
 	if err != nil {
-		t.Fatalf("marshal task list snapshot: %v", err)
+		t.Fatalf("marshal full task snapshot: %v", err)
 	}
 	return body
 }
@@ -832,15 +849,15 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 	t.Run("load", func(t *testing.T) {
 		transport := &recordingDaemonTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				if req.Command != daemonclient.CommandTaskList {
-					t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
+				if req.Command != daemonclient.CommandBoardFetch {
+					t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandBoardFetch)
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
-					Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 0, req.Meta.ProjectID.String(), []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
+					Body:            mustMarshalBoardSnapshot(t, req.ProtocolVersion, 0, req.Meta.ProjectID.String(), []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
 				}, nil
 			},
 		}
@@ -860,7 +877,7 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 		if loaded.freshness != protocol.TaskListFreshnessFresh {
 			t.Fatalf("freshness = %q, want %q", loaded.freshness, protocol.TaskListFreshnessFresh)
 		}
-		if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandTaskList {
+		if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandBoardFetch {
 			t.Fatalf("requests = %v", transport.requests)
 		}
 	})
@@ -1123,13 +1140,13 @@ func TestTaskStatusDoneRequiresCloseCleanupConfirmation(t *testing.T) {
 	}
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command == daemonclient.CommandTaskList {
+			if req.Command == daemonclient.CommandBoardFetch {
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
-					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+					Body: mustMarshalBoardSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
 						{ID: "az-4", Status: domain.StatusInReview},
 					}),
 				}, nil
@@ -1433,13 +1450,13 @@ func TestTaskStatusDoneSuccessKeepsOptimisticOverlayAcrossStaleHydration(t *test
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
-			case daemonclient.CommandTaskList:
+			case daemonclient.CommandBoardFetch:
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
-					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+					Body: mustMarshalBoardSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
 						{ID: "az-4", Status: domain.StatusInReview},
 					}),
 				}, nil
@@ -1511,6 +1528,20 @@ func TestTaskStatusDoneSuccessKeepsOptimisticOverlayAcrossStaleHydration(t *test
 		t.Fatal("pending done overlay should remain until hydration confirms done")
 	}
 
+	afterStatus.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(afterStatus.tasks[0], afterStatus.tasks, afterStatus.pendingMutationForTask("az-4"), 120, 30))
+	staleWorkspaceAny, _ := afterStatus.Update(refreshTaskWorkspaceResultMsg{
+		taskID:  "az-4",
+		hasTask: true,
+		task:    domain.Task{ID: "az-4", Status: domain.StatusInReview},
+	})
+	staleWorkspace := staleWorkspaceAny.(Model)
+	if staleWorkspace.tasks[0].Status != domain.StatusDone {
+		t.Fatalf("stale workspace refresh status = %s, want optimistic %s", staleWorkspace.tasks[0].Status, domain.StatusDone)
+	}
+	if _, ok := staleWorkspace.pendingStatuses[taskIDKey("az-4")]; !ok {
+		t.Fatal("pending done overlay should survive stale workspace refresh")
+	}
+
 	staleAny, _ := afterStatus.Update(issuesLoadedMsg{
 		tasks: []domain.Task{{ID: "az-4", Status: domain.StatusInReview}},
 	})
@@ -1531,6 +1562,121 @@ func TestTaskStatusDoneSuccessKeepsOptimisticOverlayAcrossStaleHydration(t *test
 	}
 	if _, ok := confirmedHydration.pendingStatuses[taskIDKey("az-4")]; ok {
 		t.Fatal("pending done overlay should clear after hydration confirms done")
+	}
+}
+
+func TestSpaceFourYDoneKeepsOptimisticStatusAcrossStaleHydration(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskClose {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskClose)
+			}
+			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
+				TaskID: "az-4",
+				Status: string(domain.StatusDone),
+			})
+			if err != nil {
+				t.Fatalf("marshal close response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{ID: "az-4", Title: "Ready to close", Status: domain.StatusInReview}}
+	m.nav.SelectTask("az-4", domain.StatusInReview.Column())
+
+	openedAny, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	opened := openedAny.(Model)
+	if _, ok := opened.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
+		t.Fatalf("overlay = %T, want TaskWorkspaceOverlay", opened.overlayStack.Current())
+	}
+
+	afterFourAny, selectCmd := opened.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
+	if selectCmd == nil {
+		t.Fatal("expected workspace status shortcut to emit selection")
+	}
+	afterFour := afterFourAny.(Model)
+	selected, ok := selectCmd().(overlay.SelectionMsg)
+	if !ok || selected.Key != "4" {
+		t.Fatalf("selection = %#v, want key 4", selected)
+	}
+
+	promptedAny, _ := afterFour.Update(selected)
+	prompted := promptedAny.(Model)
+	if prompted.pendingClose == nil {
+		t.Fatal("expected Done action to stage close confirmation")
+	}
+
+	afterYKeyAny, yesCmd := prompted.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if yesCmd == nil {
+		t.Fatal("expected y to confirm close dialog")
+	}
+	afterYKey := afterYKeyAny.(Model)
+	yesMsg, ok := yesCmd().(overlay.SelectionMsg)
+	if !ok || yesMsg.Key != "yes" {
+		t.Fatalf("confirmation message = %#v, want yes selection", yesMsg)
+	}
+
+	confirmedAny, statusCmd := afterYKey.Update(yesMsg)
+	if statusCmd == nil {
+		t.Fatal("expected status command after y confirmation")
+	}
+	confirmed := confirmedAny.(Model)
+	if confirmed.tasks[0].Status != domain.StatusDone {
+		t.Fatalf("optimistic status after y = %s, want %s", confirmed.tasks[0].Status, domain.StatusDone)
+	}
+
+	statusMsg := statusCmd()
+	afterStatusAny, _ := confirmed.Update(statusMsg)
+	afterStatus := afterStatusAny.(Model)
+	if afterStatus.tasks[0].Status != domain.StatusDone {
+		t.Fatalf("status after close success = %s, want %s", afterStatus.tasks[0].Status, domain.StatusDone)
+	}
+
+	staleAny, _ := afterStatus.Update(issuesLoadedMsg{
+		tasks: []domain.Task{{ID: "az-4", Title: "Ready to close", Status: domain.StatusInReview}},
+	})
+	stale := staleAny.(Model)
+	if stale.tasks[0].Status != domain.StatusDone {
+		t.Fatalf("stale hydration after space 4 y status = %s, want %s", stale.tasks[0].Status, domain.StatusDone)
+	}
+	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandTaskClose {
+		t.Fatalf("requests = %v, want one task close", transport.requests)
+	}
+}
+
+func TestStaleSingleTaskRefreshDoesNotApplyExpiredPendingStatus(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{{ID: "az-4", Status: domain.StatusDone}}
+	m.pendingStatuses = map[string]pendingTaskStatus{
+		taskIDKey("az-4"): {
+			previousStatus: domain.StatusInReview,
+			targetStatus:   domain.StatusDone,
+			state:          protocol.OperationStateDone,
+			action:         "task_move",
+			updatedAt:      time.Now().Add(-3 * time.Minute),
+		},
+	}
+
+	refreshed, ok := m.applySingleTaskWorkspaceRefresh("az-4", domain.Task{ID: "az-4", Status: domain.StatusInReview})
+	if !ok {
+		t.Fatal("expected single task refresh to apply")
+	}
+	if refreshed.Status != domain.StatusInReview {
+		t.Fatalf("expired pending status masked refreshed task: got %s, want %s", refreshed.Status, domain.StatusInReview)
+	}
+	if m.tasks[0].Status != domain.StatusInReview {
+		t.Fatalf("task status = %s, want refreshed %s", m.tasks[0].Status, domain.StatusInReview)
+	}
+	if _, ok := m.pendingStatuses[taskIDKey("az-4")]; ok {
+		t.Fatal("expired pending status should be cleared before single task refresh overlay")
 	}
 }
 
@@ -1753,7 +1899,7 @@ func TestTaskSnapshotReadPathsUseExplicitTimeoutBudget(t *testing.T) {
 				Kind:            protocol.EnvelopeKindResponse,
 				Revision:        11,
 				OK:              true,
-				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 11, req.Meta.ProjectID.String(), []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
+				Body:            mustMarshalBoardSnapshot(t, req.ProtocolVersion, 11, req.Meta.ProjectID.String(), []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
 			}, nil
 		}
 	}
@@ -1831,8 +1977,8 @@ func TestTaskSnapshotReadPathsUseExplicitTimeoutBudget(t *testing.T) {
 func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandTaskList {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
+			if req.Command != daemonclient.CommandBoardFetch {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandBoardFetch)
 			}
 			return protocol.ResponseEnvelope{
 				ProtocolVersion: req.ProtocolVersion,
@@ -1840,7 +1986,7 @@ func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
 				Kind:            protocol.EnvelopeKindResponse,
 				Revision:        8,
 				OK:              true,
-				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 8, req.Meta.ProjectID.String(), []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
+				Body:            mustMarshalBoardSnapshot(t, req.ProtocolVersion, 8, req.Meta.ProjectID.String(), []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
 			}, nil
 		},
 		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
@@ -1866,7 +2012,7 @@ func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
 	if loaded.events == nil {
 		t.Fatal("expected daemon event subscription channel")
 	}
-	if got := transport.calls; len(got) != 3 || got[0] != "handshake" || got[1] != daemonclient.CommandTaskList || got[2] != "subscribe" {
+	if got := transport.calls; len(got) != 3 || got[0] != "handshake" || got[1] != daemonclient.CommandBoardFetch || got[2] != "subscribe" {
 		t.Fatalf("calls = %v", got)
 	}
 	if transport.lastHello.ClientName != "tui" || transport.lastHello.ClientVersion != "dev" || transport.lastHello.ProtocolVersion != protocol.CurrentVersion {
@@ -1944,8 +2090,8 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandTaskList {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
+			if req.Command != daemonclient.CommandBoardFetch {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandBoardFetch)
 			}
 			tasks := []domain.Task{
 				{
@@ -1962,7 +2108,7 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 				Kind:            protocol.EnvelopeKindResponse,
 				Revision:        7,
 				OK:              true,
-				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 7, req.Meta.ProjectID.String(), tasks),
+				Body:            mustMarshalBoardSnapshot(t, req.ProtocolVersion, 7, req.Meta.ProjectID.String(), tasks),
 			}, nil
 		},
 		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
@@ -2287,8 +2433,8 @@ func TestShouldQueueDaemonReattach(t *testing.T) {
 func TestDaemonStreamClosedTriggersReattachAndSnapshotRehydrate(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandTaskList {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
+			if req.Command != daemonclient.CommandBoardFetch {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandBoardFetch)
 			}
 			return protocol.ResponseEnvelope{
 				ProtocolVersion: req.ProtocolVersion,
@@ -2296,7 +2442,7 @@ func TestDaemonStreamClosedTriggersReattachAndSnapshotRehydrate(t *testing.T) {
 				Kind:            protocol.EnvelopeKindResponse,
 				Revision:        8,
 				OK:              true,
-				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 8, req.Meta.ProjectID.String(), []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
+				Body:            mustMarshalBoardSnapshot(t, req.ProtocolVersion, 8, req.Meta.ProjectID.String(), []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
 			}, nil
 		},
 		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
@@ -2349,8 +2495,8 @@ func TestDaemonStreamClosedIgnoresStaleStreamClose(t *testing.T) {
 func TestDaemonGapEventTriggersSnapshotRehydrate(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandTaskList {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
+			if req.Command != daemonclient.CommandBoardFetch {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandBoardFetch)
 			}
 			return protocol.ResponseEnvelope{
 				ProtocolVersion: req.ProtocolVersion,
@@ -2358,7 +2504,7 @@ func TestDaemonGapEventTriggersSnapshotRehydrate(t *testing.T) {
 				Kind:            protocol.EnvelopeKindResponse,
 				Revision:        12,
 				OK:              true,
-				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 12, req.Meta.ProjectID.String(), []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
+				Body:            mustMarshalBoardSnapshot(t, req.ProtocolVersion, 12, req.Meta.ProjectID.String(), []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
 			}, nil
 		},
 		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
@@ -2421,8 +2567,8 @@ func TestDaemonGapEventTriggersSnapshotRehydrate(t *testing.T) {
 func TestDaemonStreamClosedRehydratesCurrentStreamAndIgnoresStaleClose(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandTaskList {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
+			if req.Command != daemonclient.CommandBoardFetch {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandBoardFetch)
 			}
 			return protocol.ResponseEnvelope{
 				ProtocolVersion: req.ProtocolVersion,
@@ -2430,7 +2576,7 @@ func TestDaemonStreamClosedRehydratesCurrentStreamAndIgnoresStaleClose(t *testin
 				Kind:            protocol.EnvelopeKindResponse,
 				Revision:        8,
 				OK:              true,
-				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 8, req.Meta.ProjectID.String(), []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
+				Body:            mustMarshalBoardSnapshot(t, req.ProtocolVersion, 8, req.Meta.ProjectID.String(), []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
 			}, nil
 		},
 		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
@@ -3065,7 +3211,7 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 					OK:              true,
 					Body:            respBody,
 				}, nil
-			case daemonclient.CommandTaskList:
+			case daemonclient.CommandBoardFetch:
 				childIssueID := naming.IssueID(childID)
 				parentIssueID := naming.IssueID(parentID)
 				tasks := []domain.Task{
@@ -3089,7 +3235,7 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
-					Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 0, req.Meta.ProjectID.String(), tasks),
+					Body:            mustMarshalBoardSnapshot(t, req.ProtocolVersion, 0, req.Meta.ProjectID.String(), tasks),
 				}, nil
 			case daemonclient.CommandSessionStop:
 				var body struct {
@@ -3229,7 +3375,7 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 	if mergeMsg.err != nil {
 		t.Fatalf("merge err = %v", mergeMsg.err)
 	}
-	if got := transport.requests; len(got) != 11 || got[0] != daemonclient.CommandTaskFollowOnMerge || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandWorktreeList || got[3] != daemonclient.CommandTaskList || got[4] != daemonclient.CommandWorktreeList || got[5] != daemonclient.CommandRuntimeReconcileIssue || got[6] != daemonclient.CommandGitStatus || got[7] != daemonclient.CommandGitStatus || got[8] != daemonclient.CommandGitMergePreflight || got[9] != daemonclient.CommandSessionStop || got[10] != daemonclient.CommandGitMerge {
+	if got := transport.requests; len(got) != 11 || got[0] != daemonclient.CommandTaskFollowOnMerge || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandWorktreeList || got[3] != daemonclient.CommandBoardFetch || got[4] != daemonclient.CommandWorktreeList || got[5] != daemonclient.CommandRuntimeReconcileIssue || got[6] != daemonclient.CommandGitStatus || got[7] != daemonclient.CommandGitStatus || got[8] != daemonclient.CommandGitMergePreflight || got[9] != daemonclient.CommandSessionStop || got[10] != daemonclient.CommandGitMerge {
 		t.Fatalf("requests = %v", got)
 	}
 }
@@ -5450,13 +5596,13 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 						OK:              true,
 						Body:            respBody,
 					}, nil
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandBoardFetch:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
 						Kind:            protocol.EnvelopeKindResponse,
 						OK:              true,
-						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+						Body: mustMarshalBoardSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
 							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true},
 						}),
 					}, nil
@@ -5540,7 +5686,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		}
 		if got := transport.requests; len(got) != 2 ||
 			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
-			got[1] != daemonclient.CommandTaskList {
+			got[1] != daemonclient.CommandBoardFetch {
 			t.Fatalf("requests before confirmation = %v", got)
 		}
 
@@ -5581,7 +5727,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		}
 		if got := transport.requests; len(got) != 4 ||
 			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
-			got[1] != daemonclient.CommandTaskList ||
+			got[1] != daemonclient.CommandBoardFetch ||
 			got[2] != daemonclient.CommandSessionStop ||
 			got[3] != daemonclient.CommandWorktreeRemove {
 			t.Fatalf("requests = %v", got)
@@ -5614,13 +5760,13 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 						OK:              true,
 						Body:            respBody,
 					}, nil
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandBoardFetch:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
 						Kind:            protocol.EnvelopeKindResponse,
 						OK:              true,
-						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+						Body: mustMarshalBoardSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
 							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true},
 						}),
 					}, nil
@@ -5706,7 +5852,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		}
 		if got := transport.requests; len(got) != 3 ||
 			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
-			got[1] != daemonclient.CommandTaskList ||
+			got[1] != daemonclient.CommandBoardFetch ||
 			got[2] != daemonclient.CommandTaskDelete {
 			t.Fatalf("requests = %v", got)
 		}
@@ -5728,13 +5874,13 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 						OK:              true,
 						Body:            respBody,
 					}, nil
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandBoardFetch:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
 						Kind:            protocol.EnvelopeKindResponse,
 						OK:              true,
-						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+						Body: mustMarshalBoardSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
 							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true},
 						}),
 					}, nil
@@ -5825,7 +5971,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 
 		if got := transport.requests; len(got) != 4 ||
 			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
-			got[1] != daemonclient.CommandTaskList ||
+			got[1] != daemonclient.CommandBoardFetch ||
 			got[2] != daemonclient.CommandSessionStop ||
 			got[3] != daemonclient.CommandWorktreeRemove {
 			t.Fatalf("requests = %v", got)
@@ -5850,13 +5996,13 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 						OK:              true,
 						Body:            respBody,
 					}, nil
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandBoardFetch:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
 						Kind:            protocol.EnvelopeKindResponse,
 						OK:              true,
-						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+						Body: mustMarshalBoardSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
 							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true, HasUncommittedChanges: false, GitAdditions: 4, GitDeletions: 2},
 						}),
 					}, nil
@@ -6011,7 +6157,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		}
 		if got := transport.requests; len(got) != 6 ||
 			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
-			got[1] != daemonclient.CommandTaskList ||
+			got[1] != daemonclient.CommandBoardFetch ||
 			got[2] != daemonclient.CommandSessionStop ||
 			got[3] != daemonclient.CommandWorktreeRemove ||
 			got[4] != daemonclient.CommandSessionStop ||
@@ -6037,13 +6183,13 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 						OK:              true,
 						Body:            respBody,
 					}, nil
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandBoardFetch:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
 						Kind:            protocol.EnvelopeKindResponse,
 						OK:              true,
-						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+						Body: mustMarshalBoardSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
 							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true, HasUncommittedChanges: true, GitAdditions: 4, GitDeletions: 2},
 						}),
 					}, nil
@@ -6161,7 +6307,7 @@ func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
-					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+					Body: mustMarshalFullTaskSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
 						{ID: naming.IssueID(issueID), Title: "Task fresh", Description: "persisted description", Status: domain.StatusDone, Type: domain.TypeTask},
 					}),
 				}, nil
@@ -6221,7 +6367,7 @@ func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
 		t.Fatalf("workspace should render full task details after refresh, got %q", refreshed.View())
 	}
 	if len(next.tasks) != 2 || next.tasks[0].Title != "Task fresh" || next.tasks[0].Description != "persisted description" || next.tasks[0].Status != domain.StatusDone {
-		t.Fatalf("board task after workspace refresh = %+v, want fresh done task plus preserved unrelated task", next.tasks)
+		t.Fatalf("board task after workspace refresh = %+v, want fresh task plus preserved unrelated task", next.tasks)
 	}
 	if next.tasks[1].ID.String() != "az-2" || next.tasks[1].Status != domain.StatusInReview {
 		t.Fatalf("unrelated board task after workspace refresh = %+v, want preserved blocked az-2", next.tasks[1])
@@ -6267,7 +6413,7 @@ func TestTaskWorkspaceRKeyRefreshesCurrentIssue(t *testing.T) {
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
-					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+					Body: mustMarshalFullTaskSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
 						{ID: naming.IssueID(issueID), Title: "Task fresh from r", Description: "refreshed description", Status: domain.StatusInReview, Type: domain.TypeTask},
 					}),
 				}, nil
@@ -8013,13 +8159,13 @@ func TestTaskWorkspaceStopSessionKeyKeepsOverlayOpen(t *testing.T) {
 					t.Fatalf("stop body = %+v, want az-1", body)
 				}
 				return sessionOperationSubmitResponse(t, req, "op-stop", daemonclient.CommandSessionStop, "az-1", protocol.OperationStateQueued), nil
-			case daemonclient.CommandTaskList:
+			case daemonclient.CommandBoardFetch:
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
-					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{{
+					Body: mustMarshalBoardSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{{
 						ID:          "az-1",
 						Title:       "Task 1",
 						Status:      domain.StatusInProgress,
@@ -8028,7 +8174,7 @@ func TestTaskWorkspaceStopSessionKeyKeepsOverlayOpen(t *testing.T) {
 					}}),
 				}, nil
 			default:
-				t.Fatalf("command = %q, want %q or %q", req.Command, protocol.CommandOperationSubmit, daemonclient.CommandTaskList)
+				t.Fatalf("command = %q, want %q or %q", req.Command, protocol.CommandOperationSubmit, daemonclient.CommandBoardFetch)
 			}
 			return protocol.ResponseEnvelope{}, nil
 		},
@@ -8098,7 +8244,7 @@ func TestTaskWorkspaceStopSessionKeyKeepsOverlayOpen(t *testing.T) {
 	if !strings.Contains(view, "Start session") {
 		t.Fatalf("expected start action after daemon refresh removed session: %q", view)
 	}
-	if got := transport.requests; len(got) != 2 || got[0] != protocol.CommandOperationSubmit || got[1] != daemonclient.CommandTaskList {
+	if got := transport.requests; len(got) != 2 || got[0] != protocol.CommandOperationSubmit || got[1] != daemonclient.CommandBoardFetch {
 		t.Fatalf("requests = %v", got)
 	}
 }
@@ -8119,13 +8265,13 @@ func TestTaskWorkspaceCleanupSelectsTargetAndConfirmReplacesWorkspace(t *testing
 					OK:              true,
 					Body:            respBody,
 				}, nil
-			case daemonclient.CommandTaskList:
+			case daemonclient.CommandBoardFetch:
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
-					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+					Body: mustMarshalBoardSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
 						{ID: "az-1", Title: "Cleanup target", Status: domain.StatusOpen, HasWorktree: true},
 						{ID: "az-2", Title: "Previous board selection", Status: domain.StatusOpen},
 					}),
@@ -8604,7 +8750,7 @@ func TestTaskEventBodyAppliesWithoutSnapshotRefresh(t *testing.T) {
 	m.tasks = []domain.Task{{ID: "az-1", Title: "Old", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask}}
 	m.nav.SelectTask("az-1", 0)
 
-	updatedTask := domain.Task{ID: "az-1", Title: "Updated", Status: domain.StatusInReview, Priority: domain.P1, Type: domain.TypeBug}
+	updatedTask := domain.Task{ID: "az-1", Title: "Updated", Description: "Updated detail", Status: domain.StatusInReview, Priority: domain.P1, Type: domain.TypeBug}
 	body, err := json.Marshal(protocol.TaskEventBody{
 		ProjectID: naming.ProjectID(m.daemonProjectID()),
 		TaskID:    "az-1",
@@ -8631,7 +8777,7 @@ func TestTaskEventBodyAppliesWithoutSnapshotRefresh(t *testing.T) {
 	if updated.daemonRevision != 5 {
 		t.Fatalf("daemonRevision = %d, want 5", updated.daemonRevision)
 	}
-	if len(updated.tasks) != 1 || updated.tasks[0].Title != "Updated" || updated.tasks[0].Status != domain.StatusInReview {
+	if len(updated.tasks) != 1 || updated.tasks[0].Title != "Updated" || updated.tasks[0].Description != "Updated detail" || updated.tasks[0].Status != domain.StatusInReview {
 		t.Fatalf("tasks after task event = %+v", updated.tasks)
 	}
 	if got := updated.nav.GetCursor().TaskID; got != "az-1" {
@@ -8988,8 +9134,8 @@ func TestScheduleIssuesRefreshDedupesInFlightAndReplaysPending(t *testing.T) {
 	snapshotReads := uint64(0)
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandTaskList {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
+			if req.Command != daemonclient.CommandBoardFetch {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandBoardFetch)
 			}
 			snapshotReads++
 			return protocol.ResponseEnvelope{
@@ -8997,7 +9143,7 @@ func TestScheduleIssuesRefreshDedupesInFlightAndReplaysPending(t *testing.T) {
 				RequestID:       req.RequestID,
 				Kind:            protocol.EnvelopeKindResponse,
 				OK:              true,
-				Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, snapshotReads, req.Meta.ProjectID.String(), []domain.Task{
+				Body: mustMarshalBoardSnapshot(t, req.ProtocolVersion, snapshotReads, req.Meta.ProjectID.String(), []domain.Task{
 					{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen},
 				}),
 			}, nil
@@ -9393,13 +9539,13 @@ func TestLoadIssuesAfterRuntimeReconcileCmd_ReconcilesBeforeSnapshot(t *testing.
 					OK:              true,
 					Body:            body,
 				}, nil
-			case daemonclient.CommandTaskList:
+			case daemonclient.CommandBoardFetch:
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
-					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 12, "azedarach-bte", []domain.Task{
+					Body: mustMarshalBoardSnapshot(t, req.ProtocolVersion, 12, "azedarach-bte", []domain.Task{
 						{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen},
 					}),
 				}, nil
@@ -9430,7 +9576,7 @@ func TestLoadIssuesAfterRuntimeReconcileCmd_ReconcilesBeforeSnapshot(t *testing.
 	if len(transport.requests) < 2 {
 		t.Fatalf("requests = %v, want at least two commands", transport.requests)
 	}
-	if transport.requests[0] != daemonclient.CommandRuntimeReconcile || transport.requests[1] != daemonclient.CommandTaskList {
+	if transport.requests[0] != daemonclient.CommandRuntimeReconcile || transport.requests[1] != daemonclient.CommandBoardFetch {
 		t.Fatalf("command order = %v, want runtime reconcile before task list", transport.requests[:2])
 	}
 }
@@ -9453,13 +9599,13 @@ func TestLoadIssuesAfterIssueReconcileCmd_ReconcilesSelectedIssuesBeforeSnapshot
 					OK:              true,
 					Body:            body,
 				}, nil
-			case daemonclient.CommandTaskList:
+			case daemonclient.CommandBoardFetch:
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
-					Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 18, "azedarach-bte", []domain.Task{
+					Body: mustMarshalBoardSnapshot(t, req.ProtocolVersion, 18, "azedarach-bte", []domain.Task{
 						{ID: "az-parent", Title: "Parent", Status: domain.StatusOpen},
 						{ID: "az-child", Title: "Child", Status: domain.StatusOpen},
 					}),
@@ -9491,7 +9637,7 @@ func TestLoadIssuesAfterIssueReconcileCmd_ReconcilesSelectedIssuesBeforeSnapshot
 	if len(transport.requests) < 2 {
 		t.Fatalf("requests = %v, want at least two commands", transport.requests)
 	}
-	if transport.requests[0] != daemonclient.CommandRuntimeReconcileIssue || transport.requests[1] != daemonclient.CommandTaskList {
+	if transport.requests[0] != daemonclient.CommandRuntimeReconcileIssue || transport.requests[1] != daemonclient.CommandBoardFetch {
 		t.Fatalf("command order = %v, want issue reconcile before task list", transport.requests[:2])
 	}
 }
@@ -9528,13 +9674,13 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 						OK:              true,
 						Body:            respBody,
 					}, nil
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandBoardFetch:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
 						Kind:            protocol.EnvelopeKindResponse,
 						OK:              true,
-						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, protocol.DefaultProjectID, []domain.Task{
+						Body: mustMarshalBoardSnapshot(t, req.ProtocolVersion, 1, protocol.DefaultProjectID, []domain.Task{
 							{ID: "az-1", Status: domain.StatusOpen},
 							{ID: "az-2", Status: domain.StatusOpen},
 						}),
@@ -9856,13 +10002,13 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 				if req.Command == daemonclient.CommandWorktreeList {
 					return emptyWorktreeListResponse(t, req), nil
 				}
-				if req.Command == daemonclient.CommandTaskList {
+				if req.Command == daemonclient.CommandBoardFetch {
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
 						Kind:            protocol.EnvelopeKindResponse,
 						OK:              true,
-						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+						Body: mustMarshalBoardSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
 							{ID: "az-1", Status: domain.StatusOpen},
 							{ID: "az-2", Status: domain.StatusInReview},
 						}),
@@ -10058,13 +10204,13 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 						OK:              true,
 						Body:            respBody,
 					}, nil
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandBoardFetch:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
 						Kind:            protocol.EnvelopeKindResponse,
 						OK:              true,
-						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+						Body: mustMarshalBoardSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
 							{ID: "az-1", Status: domain.StatusOpen, HasUncommittedChanges: true, GitAdditions: 3, GitDeletions: 1},
 							{ID: "az-2", Status: domain.StatusOpen, GitAheadCount: 2},
 						}),
@@ -10123,7 +10269,7 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		if next.tasks[2].ID.String() != "az-3" || next.tasks[2].Status != domain.StatusInReview {
 			t.Fatalf("unrelated task after preflight = %+v, want preserved blocked az-3", next.tasks[2])
 		}
-		if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskList {
+		if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandBoardFetch {
 			t.Fatalf("requests = %v", got)
 		}
 	})
@@ -10144,13 +10290,13 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 						OK:              true,
 						Body:            respBody,
 					}, nil
-				case daemonclient.CommandTaskList:
+				case daemonclient.CommandBoardFetch:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
 						Kind:            protocol.EnvelopeKindResponse,
 						OK:              true,
-						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+						Body: mustMarshalBoardSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
 							{ID: "az-1", Status: domain.StatusOpen, HasUncommittedChanges: false, GitAheadCount: 0},
 						}),
 					}, nil
@@ -10210,7 +10356,7 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		}
 		if got := transport.requests; len(got) != 4 ||
 			got[0] != daemonclient.CommandRuntimeReconcileIssue ||
-			got[1] != daemonclient.CommandTaskList ||
+			got[1] != daemonclient.CommandBoardFetch ||
 			got[2] != daemonclient.CommandSessionStop ||
 			got[3] != daemonclient.CommandWorktreeRemove {
 			t.Fatalf("requests = %v", got)

@@ -131,7 +131,7 @@ func aiStatusForTarget(projectDir string, target AgentInstallTarget) AIStatusTar
 	case AgentInstallTargetRulesync:
 		result.Detected = rulesyncProjectMarker(projectDir)
 		result.Path = filepath.Join(projectDir, ".rulesync", "hooks.json")
-		result.Installed = fileContainsAll(result.Path, "az ai hook run --agent=claude", "az ai hook run --agent=codex")
+		result.Installed = fileContainsAll(result.Path, "az ai hook run --agent=claude", "az ai hook run --agent=codex", "az ai hook run --agent=codex --json idle_prompt")
 	case AgentInstallTargetClaude:
 		result.Detected = fileExists(filepath.Join(projectDir, ".claude"))
 		result.Path = filepath.Join(projectDir, ".claude", "settings.local.json")
@@ -139,7 +139,7 @@ func aiStatusForTarget(projectDir string, target AgentInstallTarget) AIStatusTar
 	case AgentInstallTargetCodex:
 		result.Detected = fileExists(filepath.Join(projectDir, ".codex"))
 		result.Path = filepath.Join(projectDir, ".codex", "hooks.json")
-		result.Installed = fileContainsAll(result.Path, "az ai hook run --agent=codex")
+		result.Installed = fileContainsAll(result.Path, "az ai hook run --agent=codex", "az ai hook run --agent=codex --json idle_prompt")
 	case AgentInstallTargetOpencode:
 		result.Detected = fileExists(filepath.Join(projectDir, ".opencode")) || fileExists(filepath.Join(projectDir, "opencode.json"))
 		result.Path = filepath.Join(projectDir, ".opencode", "plugins", openCodePluginFilename)

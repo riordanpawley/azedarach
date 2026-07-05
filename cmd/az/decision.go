@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -69,14 +70,16 @@ type decisionRevisitOpts struct {
 }
 
 type decisionSyncOpts struct {
-	JSON  bool
-	Check bool
+	JSON       bool
+	Check      bool
+	ProjectDir string
 }
 
 type decisionImportOpts struct {
-	JSON  bool
-	Check bool
-	Force bool
+	JSON       bool
+	Check      bool
+	Force      bool
+	ProjectDir string
 }
 
 type decisionLinkListOpts struct {
@@ -213,7 +216,7 @@ func runDecisionListRPC(cfg *config.Config, opts decisionListOpts) error {
 		Query:         opts.Query,
 	}
 	var out protocol.DecisionListResponseBody
-	if err := runDecisionRPC(cfg, protocol.CommandDecisionList, req, &out); err != nil {
+	if err := runDecisionRPC(cfg, "", protocol.CommandDecisionList, req, &out); err != nil {
 		return err
 	}
 	if opts.JSON {
@@ -228,7 +231,7 @@ func runDecisionListRPC(cfg *config.Config, opts decisionListOpts) error {
 func runDecisionGetRPC(cfg *config.Config, opts decisionGetOpts) error {
 	req := protocol.DecisionGetRequestBody{ID: opts.ID, IncludeLinks: opts.WithLinks}
 	var out protocol.DecisionGetResponseBody
-	if err := runDecisionRPC(cfg, protocol.CommandDecisionGet, req, &out); err != nil {
+	if err := runDecisionRPC(cfg, "", protocol.CommandDecisionGet, req, &out); err != nil {
 		return err
 	}
 	if opts.JSON {
@@ -265,7 +268,7 @@ func runDecisionRecordRPC(cfg *config.Config, opts decisionRecordOpts) error {
 		Consequences: opts.Consequences,
 	}
 	var out protocol.DecisionRecordResponseBody
-	if err := runDecisionRPC(cfg, protocol.CommandDecisionRecord, req, &out); err != nil {
+	if err := runDecisionRPC(cfg, "", protocol.CommandDecisionRecord, req, &out); err != nil {
 		return err
 	}
 	for _, issueID := range opts.Issues {
@@ -275,7 +278,7 @@ func runDecisionRecordRPC(cfg *config.Config, opts decisionRecordOpts) error {
 			TargetID:   issueID,
 		}
 		var linkOut protocol.DecisionLinkAddResponseBody
-		if err := runDecisionRPC(cfg, protocol.CommandDecisionLinkAdd, linkReq, &linkOut); err != nil {
+		if err := runDecisionRPC(cfg, "", protocol.CommandDecisionLinkAdd, linkReq, &linkOut); err != nil {
 			return fmt.Errorf("recorded %s but linking issue %s failed: %w", out.Decision.ID, issueID, err)
 		}
 	}
@@ -286,7 +289,7 @@ func runDecisionRecordRPC(cfg *config.Config, opts decisionRecordOpts) error {
 			TargetID:   reqID,
 		}
 		var linkOut protocol.DecisionLinkAddResponseBody
-		if err := runDecisionRPC(cfg, protocol.CommandDecisionLinkAdd, linkReq, &linkOut); err != nil {
+		if err := runDecisionRPC(cfg, "", protocol.CommandDecisionLinkAdd, linkReq, &linkOut); err != nil {
 			return fmt.Errorf("recorded %s but linking requirement %s failed: %w", out.Decision.ID, reqID, err)
 		}
 	}
@@ -316,7 +319,7 @@ func runDecisionUpdateRPC(cfg *config.Config, opts decisionUpdateOpts) error {
 		req.Consequences = &v
 	}
 	var out protocol.DecisionUpdateResponseBody
-	if err := runDecisionRPC(cfg, protocol.CommandDecisionUpdate, req, &out); err != nil {
+	if err := runDecisionRPC(cfg, "", protocol.CommandDecisionUpdate, req, &out); err != nil {
 		return err
 	}
 	if opts.JSON {
@@ -329,7 +332,7 @@ func runDecisionUpdateRPC(cfg *config.Config, opts decisionUpdateOpts) error {
 func runDecisionDeleteRPC(cfg *config.Config, opts decisionDeleteOpts) error {
 	req := protocol.DecisionDeleteRequestBody{ID: opts.ID, Confirm: opts.Confirm}
 	var out protocol.DecisionDeleteResponseBody
-	if err := runDecisionRPC(cfg, protocol.CommandDecisionDelete, req, &out); err != nil {
+	if err := runDecisionRPC(cfg, "", protocol.CommandDecisionDelete, req, &out); err != nil {
 		return err
 	}
 	if opts.JSON {
@@ -351,7 +354,7 @@ func runDecisionRevisitRPC(cfg *config.Config, opts decisionRevisitOpts) error {
 			Context:   opts.Context,
 		}
 		var out protocol.DecisionRecordResponseBody
-		if err := runDecisionRPC(cfg, protocol.CommandDecisionRecord, req, &out); err != nil {
+		if err := runDecisionRPC(cfg, "", protocol.CommandDecisionRecord, req, &out); err != nil {
 			return err
 		}
 		newID = out.Decision.ID
@@ -364,7 +367,7 @@ func runDecisionRevisitRPC(cfg *config.Config, opts decisionRevisitOpts) error {
 		Note:       opts.Note,
 	}
 	var linkOut protocol.DecisionLinkAddResponseBody
-	if err := runDecisionRPC(cfg, protocol.CommandDecisionLinkAdd, linkReq, &linkOut); err != nil {
+	if err := runDecisionRPC(cfg, "", protocol.CommandDecisionLinkAdd, linkReq, &linkOut); err != nil {
 		return fmt.Errorf("recorded %s but linking revises %s failed: %w", newID, opts.Old, err)
 	}
 	if opts.JSON {
@@ -375,9 +378,13 @@ func runDecisionRevisitRPC(cfg *config.Config, opts decisionRevisitOpts) error {
 }
 
 func runDecisionSyncRPC(cfg *config.Config, opts decisionSyncOpts) error {
-	req := protocol.DecisionSyncMDRequestBody{Check: opts.Check}
+	repoDir, err := decisionRequestRepoDir(opts.ProjectDir)
+	if err != nil {
+		return err
+	}
+	req := protocol.DecisionSyncMDRequestBody{Check: opts.Check, RepoDir: repoDir}
 	var out protocol.DecisionSyncMDResponseBody
-	if err := runDecisionRPC(cfg, protocol.CommandDecisionSyncMD, req, &out); err != nil {
+	if err := runDecisionRPC(cfg, opts.ProjectDir, protocol.CommandDecisionSyncMD, req, &out); err != nil {
 		return err
 	}
 	if opts.JSON {
@@ -408,19 +415,24 @@ func parseDecisionSyncArgs(args []string) (decisionSyncOpts, error) {
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.JSON, "json", false, "json output")
 	fs.BoolVar(&opts.Check, "check", false, "report drift without writing files")
+	fs.StringVar(&opts.ProjectDir, "project-dir", "", "project/worktree directory for markdown files")
 	if err := fs.Parse(args); err != nil {
 		return decisionSyncOpts{}, err
 	}
 	if fs.NArg() != 0 {
-		return decisionSyncOpts{}, fmt.Errorf("usage: az decision sync [--check] [--json]")
+		return decisionSyncOpts{}, fmt.Errorf("usage: az decision sync [--check] [--project-dir <dir>] [--json]")
 	}
 	return opts, nil
 }
 
 func runDecisionImportRPC(cfg *config.Config, opts decisionImportOpts) error {
-	req := protocol.DecisionImportMDRequestBody{Check: opts.Check, Force: opts.Force}
+	repoDir, err := decisionRequestRepoDir(opts.ProjectDir)
+	if err != nil {
+		return err
+	}
+	req := protocol.DecisionImportMDRequestBody{Check: opts.Check, Force: opts.Force, RepoDir: repoDir}
 	var out protocol.DecisionImportMDResponseBody
-	if err := runDecisionRPC(cfg, protocol.CommandDecisionImportMD, req, &out); err != nil {
+	if err := runDecisionRPC(cfg, opts.ProjectDir, protocol.CommandDecisionImportMD, req, &out); err != nil {
 		return err
 	}
 	if opts.JSON {
@@ -477,11 +489,12 @@ func parseDecisionImportArgs(args []string) (decisionImportOpts, error) {
 	fs.BoolVar(&opts.JSON, "json", false, "json output")
 	fs.BoolVar(&opts.Check, "check", false, "report plan without applying")
 	fs.BoolVar(&opts.Force, "force", false, "apply even when fields conflict (markdown wins)")
+	fs.StringVar(&opts.ProjectDir, "project-dir", "", "project/worktree directory for markdown files")
 	if err := fs.Parse(args); err != nil {
 		return decisionImportOpts{}, err
 	}
 	if fs.NArg() != 0 {
-		return decisionImportOpts{}, fmt.Errorf("usage: az decision import [--check] [--force] [--json]")
+		return decisionImportOpts{}, fmt.Errorf("usage: az decision import [--check] [--force] [--project-dir <dir>] [--json]")
 	}
 	return opts, nil
 }
@@ -493,7 +506,7 @@ func runDecisionLinkListRPC(cfg *config.Config, opts decisionLinkListOpts) error
 		TargetID:   opts.TargetID,
 	}
 	var out protocol.DecisionLinkListResponseBody
-	if err := runDecisionRPC(cfg, protocol.CommandDecisionLinkList, req, &out); err != nil {
+	if err := runDecisionRPC(cfg, "", protocol.CommandDecisionLinkList, req, &out); err != nil {
 		return err
 	}
 	if opts.JSON {
@@ -522,7 +535,7 @@ func runDecisionLinkAddRPC(cfg *config.Config, opts decisionLinkAddOpts) error {
 		Note:       opts.Note,
 	}
 	var out protocol.DecisionLinkAddResponseBody
-	if err := runDecisionRPC(cfg, protocol.CommandDecisionLinkAdd, req, &out); err != nil {
+	if err := runDecisionRPC(cfg, "", protocol.CommandDecisionLinkAdd, req, &out); err != nil {
 		return err
 	}
 	if opts.JSON {
@@ -543,7 +556,7 @@ func runDecisionLinkRemoveRPC(cfg *config.Config, opts decisionLinkRemoveOpts) e
 		TargetID:   target,
 	}
 	var out protocol.DecisionLinkRemoveResponseBody
-	if err := runDecisionRPC(cfg, protocol.CommandDecisionLinkRemove, req, &out); err != nil {
+	if err := runDecisionRPC(cfg, "", protocol.CommandDecisionLinkRemove, req, &out); err != nil {
 		return err
 	}
 	if opts.JSON {
@@ -579,8 +592,14 @@ func resolveDecisionLinkTarget(issue, req, otherDec string) (protocol.DecisionTa
 	}
 }
 
-func runDecisionRPC(cfg *config.Config, command string, body any, out any) error {
-	return runCommand(cfg, func(deps *cli.Dependencies) error {
+func runDecisionRPC(cfg *config.Config, projectDir, command string, body any, out any) error {
+	run := runCommand
+	if strings.TrimSpace(projectDir) != "" {
+		run = func(cfg *config.Config, fn func(*cli.Dependencies) error) error {
+			return runCommandAtRepoDir(cfg, projectDir, fn)
+		}
+	}
+	return run(cfg, func(deps *cli.Dependencies) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
@@ -614,6 +633,18 @@ func runDecisionRPC(cfg *config.Config, command string, body any, out any) error
 		}
 		return nil
 	})
+}
+
+func decisionRequestRepoDir(projectDir string) (string, error) {
+	projectDir = strings.TrimSpace(projectDir)
+	if projectDir == "" {
+		return "", nil
+	}
+	abs, err := filepath.Abs(projectDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve decision markdown project dir: %w", err)
+	}
+	return abs, nil
 }
 
 func parseDecisionListArgs(args []string) (decisionListOpts, error) {
@@ -894,8 +925,8 @@ func printDecisionUsage() {
 	fmt.Println("  az decision update --id <id> [--title ...] [--rationale ...] [--context ...] [--consequences ...] [--json]")
 	fmt.Println("  az decision delete --id <id> --confirm [--json]")
 	fmt.Println("  az decision revisit --id <old-id> (--new <existing-id> | --title <text> --rationale <text>) [--context ...] [--note ...] [--json]")
-	fmt.Println("  az decision sync [--check] [--json]")
-	fmt.Println("  az decision import [--check] [--force] [--json]")
+	fmt.Println("  az decision sync [--check] [--project-dir <dir>] [--json]")
+	fmt.Println("  az decision import [--check] [--force] [--project-dir <dir>] [--json]")
 	fmt.Println("  az decision link list|add|remove ...")
 	fmt.Println("")
 	fmt.Println("Examples:")

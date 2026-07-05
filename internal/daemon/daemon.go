@@ -657,6 +657,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleUIStateSet(ctx, req)
 	case protocol.CommandProjectCleanup:
 		return d.handleProjectCleanup(ctx, req)
+	case protocol.CommandBoardFetch:
+		return d.handleBoardFetch(ctx, req)
 	case protocol.CommandScheduledScriptsStatus:
 		return d.handleScheduledScriptsStatus(ctx, req)
 	case "task.list":
