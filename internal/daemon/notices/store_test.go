@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -222,6 +224,139 @@ func TestServicePublishesNoticeEvents(t *testing.T) {
 	updatedEvent := receiveNoticeEvent(t, ch)
 	if updatedEvent.Event != protocol.EventNoticeUpdated || updatedEvent.Revision != 2 {
 		t.Fatalf("updated event = %s rev %d, want notice.updated rev 2", updatedEvent.Event, updatedEvent.Revision)
+	}
+}
+
+func TestServiceDurableLifecycleSurvivesRestartSharedClientsAndFloodDedupe(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	now := time.Unix(1_700_000_000, 0).UTC()
+	nextRevision := sequentialNoticeRevision()
+	newService := func(t *testing.T) *Service {
+		t.Helper()
+		service := NewService(ServiceConfig{
+			Repository:   NewAtPath(dbPath, nil),
+			NextRevision: nextRevision,
+		})
+		t.Cleanup(func() {
+			_ = service.Close()
+		})
+		return service
+	}
+
+	firstDaemon := newService(t)
+	var firstID string
+	const repeatedFailures = 25
+	for i := 0; i < repeatedFailures; i++ {
+		candidate := noticeCandidate(
+			"notice-flood-"+strconv.Itoa(i),
+			"proj-1",
+			"az-1",
+			now.Add(time.Duration(i)*time.Second),
+		)
+		candidate.Summary = fmt.Sprintf("deduped failure %02d", i+1)
+		record, created, _, err := firstDaemon.Upsert(ctx, candidate)
+		if err != nil {
+			t.Fatalf("upsert flood notice %d: %v", i, err)
+		}
+		if i == 0 {
+			if !created {
+				t.Fatal("first flood notice created = false, want true")
+			}
+			firstID = record.NoticeID
+			continue
+		}
+		if created {
+			t.Fatalf("flood notice %d created = true, want dedupe update", i)
+		}
+		if record.NoticeID != firstID {
+			t.Fatalf("flood notice %d id = %q, want original id %q", i, record.NoticeID, firstID)
+		}
+	}
+	if err := firstDaemon.Close(); err != nil {
+		t.Fatalf("close first daemon service: %v", err)
+	}
+
+	restartedDaemon := newService(t)
+	active, err := restartedDaemon.List(ctx, Query{
+		ProjectID: "proj-1",
+		States:    []State{StateActive},
+	})
+	if err != nil {
+		t.Fatalf("list active notices after restart: %v", err)
+	}
+	if len(active) != 1 {
+		t.Fatalf("active notices after restart = %+v, want one deduped notice", active)
+	}
+	if active[0].NoticeID != firstID ||
+		active[0].OccurrenceCount != repeatedFailures ||
+		active[0].Summary != "deduped failure 25" ||
+		active[0].Read {
+		t.Fatalf("deduped notice after restart = %+v, want original id, occurrence count %d, latest summary, unread", active[0], repeatedFailures)
+	}
+
+	secondClient := newService(t)
+	read := true
+	updated, changed, _, err := secondClient.Update(ctx, UpdateParams{
+		ProjectID: "proj-1",
+		NoticeID:  firstID,
+		Read:      &read,
+		Now:       now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("mark read from second client: %v", err)
+	}
+	if !changed || !updated.Read {
+		t.Fatalf("mark read changed=%v read=%v, want changed read", changed, updated.Read)
+	}
+
+	visibleToRestarted, err := restartedDaemon.Get(ctx, "proj-1", firstID)
+	if err != nil {
+		t.Fatalf("get notice from restarted daemon after second client update: %v", err)
+	}
+	if !visibleToRestarted.Read {
+		t.Fatalf("shared notice read = false, want second client lifecycle update visible")
+	}
+
+	dismissed, changed, _, err := restartedDaemon.Update(ctx, UpdateParams{
+		ProjectID: "proj-1",
+		NoticeID:  firstID,
+		State:     StateDismissed,
+		Now:       now.Add(2 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("dismiss from restarted daemon: %v", err)
+	}
+	if !changed || dismissed.State != StateDismissed || dismissed.DismissedAt == nil {
+		t.Fatalf("dismissed notice = %+v changed=%v, want dismissed timestamp", dismissed, changed)
+	}
+	if err := restartedDaemon.Close(); err != nil {
+		t.Fatalf("close restarted daemon service: %v", err)
+	}
+	if err := secondClient.Close(); err != nil {
+		t.Fatalf("close second client service: %v", err)
+	}
+
+	finalDaemon := newService(t)
+	active, err = finalDaemon.List(ctx, Query{
+		ProjectID: "proj-1",
+		States:    []State{StateActive},
+	})
+	if err != nil {
+		t.Fatalf("list active notices after final restart: %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("active notices after dismiss restart = %+v, want none", active)
+	}
+	terminal, err := finalDaemon.List(ctx, Query{
+		ProjectID: "proj-1",
+		States:    []State{StateDismissed},
+	})
+	if err != nil {
+		t.Fatalf("list dismissed notices after final restart: %v", err)
+	}
+	if len(terminal) != 1 || terminal[0].NoticeID != firstID || !terminal[0].Read || terminal[0].DismissedAt == nil {
+		t.Fatalf("dismissed notices after final restart = %+v, want persisted read dismissed notice", terminal)
 	}
 }
 

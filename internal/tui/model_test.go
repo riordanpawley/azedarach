@@ -785,6 +785,105 @@ func TestDaemonNoticeProjectionOrdersFloatingToastsByOccurrence(t *testing.T) {
 	}
 }
 
+func TestDaemonNoticeSnapshotSurvivesTUIRestartMultipleClientsAndViewports(t *testing.T) {
+	now := time.Now().UTC()
+	base := newTestModel()
+	notices := []protocol.NoticeRecord{
+		testDaemonNotice(base, "notice-1", "az-1", protocol.NoticeSeverityInfo, "operation_info", "first durable notice", now),
+		testDaemonNotice(base, "notice-2", "az-2", protocol.NoticeSeverityWarning, "operation_warning", "second durable notice", now.Add(time.Second)),
+		testDaemonNotice(base, "notice-3", "az-3", protocol.NoticeSeverityInfo, "operation_info", "third durable notice", now.Add(2*time.Second)),
+		testDaemonNotice(base, "notice-4", "az-4", protocol.NoticeSeverityError, "operation_failed", "failed to close az-4", now.Add(3*time.Second)),
+	}
+	notices[3].Title = "Close failed"
+	notices[3].Detail = "Resolve blockers, then retry"
+	notices[3].Cause = &protocol.NoticeCause{Code: "operation_failed", Message: "child blockers remain"}
+	notices[3].Source = &protocol.NoticeSource{
+		OperationID:    naming.OperationID("op-close-4"),
+		OperationKind:  daemonclient.CommandTaskClose,
+		OperationState: protocol.OperationStateFailed,
+		Producer:       "daemon.operation",
+	}
+
+	firstClient := newTestModel()
+	firstClient.width = 100
+	firstClient.height = 24
+	firstClient.loading = false
+	firstClient.applyFeedbackNoticeSnapshot(notices)
+
+	restartedClient := newTestModel()
+	restartedClient.width = 100
+	restartedClient.height = 24
+	restartedClient.loading = false
+	restartedClient.applyFeedbackNoticeSnapshot(notices)
+
+	secondClient := newTestModel()
+	secondClient.width = 48
+	secondClient.height = 16
+	secondClient.loading = false
+	secondClient.applyFeedbackNoticeSnapshot(notices)
+
+	for name, model := range map[string]Model{
+		"first client":     firstClient,
+		"restarted client": restartedClient,
+		"second client":    secondClient,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, want := len(model.notificationHistory), 4; got != want {
+				t.Fatalf("notification history len = %d, want %d", got, want)
+			}
+			if got := model.notificationHistoryIndicator(); got != "1 error / 3 notices (N)" {
+				t.Fatalf("notification indicator = %q, want durable snapshot counts", got)
+			}
+			if got, want := len(model.toasts), 3; got != want {
+				t.Fatalf("floating toasts len = %d, want bounded latest three", got)
+			}
+			if strings.Contains(toastMessages(model.toasts), "first durable notice") {
+				t.Fatalf("oldest notice should be retained in history but hidden from floating stack: %+v", model.toasts)
+			}
+			progress := model.pendingMutationForTask("az-4")
+			if progress == nil {
+				t.Fatal("expected daemon notice to project task failure detail")
+			}
+			if progress.OperationID != "op-close-4" ||
+				progress.ProgressMessage != "failed to close az-4" ||
+				progress.FailureReason != "child blockers remain" ||
+				progress.FailureRecovery != "Resolve blockers, then retry" ||
+				progress.CurrentStatus != domain.StatusInReview {
+				t.Fatalf("projected mutation progress = %+v, want durable failure detail", progress)
+			}
+		})
+	}
+
+	defaultView := firstClient.View()
+	defaultLines := strings.Split(strings.TrimRight(defaultView, "\n"), "\n")
+	if len(defaultLines) > firstClient.height {
+		t.Fatalf("default viewport rendered %d lines, want <= %d", len(defaultLines), firstClient.height)
+	}
+	if !strings.Contains(defaultView, "failed to close az-4") || !strings.Contains(defaultView, "1 error / 3 notices (N)") {
+		t.Fatalf("default viewport omitted durable notice surfaces; view=%q", defaultView)
+	}
+	if strings.Contains(defaultLines[len(defaultLines)-1], "failed to close az-4") {
+		t.Fatalf("default footer contains full notice text: %q", defaultLines[len(defaultLines)-1])
+	}
+
+	narrowView := secondClient.View()
+	narrowLines := strings.Split(strings.TrimRight(narrowView, "\n"), "\n")
+	if len(narrowLines) > secondClient.height {
+		t.Fatalf("narrow viewport rendered %d lines, want <= %d", len(narrowLines), secondClient.height)
+	}
+	if !strings.Contains(narrowView, "failed to close") {
+		t.Fatalf("narrow viewport omitted wrapped durable notice; view=%q", narrowView)
+	}
+	if !strings.Contains(narrowLines[len(narrowLines)-1], "N!") && !strings.Contains(narrowLines[len(narrowLines)-1], "(N)") {
+		t.Fatalf("narrow footer omitted compact notice route indicator: %q", narrowLines[len(narrowLines)-1])
+	}
+	for i, line := range narrowLines {
+		if width := ansi.StringWidth(line); width > secondClient.width {
+			t.Fatalf("narrow line %d width = %d, want <= %d: %q", i, width, secondClient.width, line)
+		}
+	}
+}
+
 func TestNotificationActionCenterMarkReadUsesDaemonNoticeUpdate(t *testing.T) {
 	m := newTestModel()
 	var gotBody protocol.NoticeUpdateRequestBody
@@ -969,6 +1068,33 @@ func TestNotificationActionCenterOpenTaskRoutesUseExistingWorkspaceRoute(t *test
 			}
 		})
 	}
+}
+
+func testDaemonNotice(m Model, id, taskID string, severity protocol.NoticeSeverity, category, summary string, occurredAt time.Time) protocol.NoticeRecord {
+	return protocol.NoticeRecord{
+		NoticeID:          id,
+		ProjectID:         naming.ProjectID(m.daemonProjectID()),
+		Scope:             protocol.NoticeScope{Type: "issue", ID: taskID},
+		Severity:          severity,
+		Category:          category,
+		State:             protocol.NoticeStateActive,
+		Title:             summary,
+		Summary:           summary,
+		OccurrenceCount:   1,
+		FirstOccurrenceAt: occurredAt,
+		LastOccurrenceAt:  occurredAt,
+		CreatedAt:         occurredAt,
+		UpdatedAt:         occurredAt,
+		RetentionClass:    protocol.NoticeRetentionError,
+	}
+}
+
+func toastMessages(toasts []Toast) string {
+	messages := make([]string, 0, len(toasts))
+	for _, toast := range toasts {
+		messages = append(messages, toast.Message)
+	}
+	return strings.Join(messages, "\n")
 }
 
 func TestUpdate_AttachmentActionStagedAddsToast(t *testing.T) {

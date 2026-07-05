@@ -191,9 +191,11 @@ func runtimeBoundaryRoots(repoRoot string) []string {
 }
 
 func isForbiddenAuthorityImport(imported string) bool {
-	switch imported {
-	case "github.com/riordanpawley/azedarach/internal/daemon":
+	if imported == "github.com/riordanpawley/azedarach/internal/daemon" ||
+		strings.HasPrefix(imported, "github.com/riordanpawley/azedarach/internal/daemon/") {
 		return true
+	}
+	switch imported {
 	case "github.com/riordanpawley/azedarach/internal/services/git",
 		"github.com/riordanpawley/azedarach/internal/services/issues",
 		"github.com/riordanpawley/azedarach/internal/services/worktree",
