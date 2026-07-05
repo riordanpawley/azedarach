@@ -166,13 +166,14 @@ type daemonStreamMetrics struct {
 }
 
 type notificationHistoryEntry struct {
-	ID        string
-	CreatedAt time.Time
-	Level     ToastLevel
-	Reference string
-	Message   string
-	Read      bool
-	Dismissed bool
+	ID             string
+	DaemonNoticeID string
+	CreatedAt      time.Time
+	Level          ToastLevel
+	Reference      string
+	Message        string
+	Read           bool
+	Dismissed      bool
 }
 
 // Model is the main application state
@@ -236,6 +237,7 @@ type Model struct {
 	activeToastHistoryIDs []string
 	notificationHistory   []notificationHistoryEntry
 	notificationSeq       uint64
+	feedback              feedbackProjection
 	// Recoverable async failures surfaced in notifications/recovery overlay.
 	recoveryNotifications   []asyncRecoveryNotification
 	recoveryNotificationSeq uint64
@@ -366,6 +368,7 @@ func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 		toasts:                      []Toast{},
 		activeToastHistoryIDs:       []string{},
 		notificationHistory:         []notificationHistoryEntry{},
+		feedback:                    newFeedbackProjection(),
 		recoveryNotifications:       []asyncRecoveryNotification{},
 		runtimeEvents:               []protocol.EventEnvelope{},
 		styles:                      styles.New(),
@@ -1142,6 +1145,18 @@ type logStreamReconnectMsg struct{}
 type operationRecordsLoadedMsg struct {
 	projectID string
 	records   []protocol.OperationRecord
+	err       error
+}
+
+type noticeRecordsLoadedMsg struct {
+	projectID string
+	notices   []protocol.NoticeRecord
+	err       error
+}
+
+type noticeUpdateResultMsg struct {
+	projectID string
+	notice    protocol.NoticeRecord
 	err       error
 }
 
@@ -1937,6 +1952,50 @@ func (m Model) loadOperationsCmd() tea.Cmd {
 			Limit: 100,
 		})
 		return operationRecordsLoadedMsg{projectID: projectID, records: records, err: err}
+	}
+}
+
+func (m Model) loadFeedbackProjectionCmd() tea.Cmd {
+	client := m.daemonClient
+	projectID := m.daemonProjectID()
+	if client == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		notices, err := client.ListNotices(ctx, daemonclient.NoticeListOptions{
+			States: []protocol.NoticeState{
+				protocol.NoticeStateActive,
+				protocol.NoticeStateResolved,
+				protocol.NoticeStateDismissed,
+			},
+			Limit: notificationHistoryCapacity,
+		})
+		return noticeRecordsLoadedMsg{projectID: projectID, notices: notices, err: err}
+	}
+}
+
+func (m Model) markDaemonNoticesReadCmd(noticeIDs []string) tea.Cmd {
+	client := m.daemonClient
+	projectID := m.daemonProjectID()
+	if client == nil || len(noticeIDs) == 0 {
+		return nil
+	}
+	ids := append([]string(nil), noticeIDs...)
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		read := true
+		var last protocol.NoticeRecord
+		for _, id := range ids {
+			notice, err := client.UpdateNotice(ctx, id, &read, "")
+			if err != nil {
+				return noticeUpdateResultMsg{projectID: projectID, err: err}
+			}
+			last = notice
+		}
+		return noticeUpdateResultMsg{projectID: projectID, notice: last}
 	}
 }
 
@@ -3808,10 +3867,11 @@ func (m Model) renderLoading() string {
 
 // addToast adds a toast notification to the list
 func (m *Model) addToast(toast Toast) {
-	m.toasts = append(m.toasts, toast)
 	now := time.Now().UTC()
 	historyID := m.recordNotificationHistory(toast, now)
-	m.activeToastHistoryIDs = append(m.activeToastHistoryIDs, historyID)
+	if historyID == "" {
+		return
+	}
 	kind := protocol.EnvelopeKind("info")
 	switch toast.Level {
 	case ToastSuccess:
@@ -3926,35 +3986,26 @@ func truncateSummary(value string) string {
 // expireToasts removes expired toasts from the list
 func (m *Model) expireToasts() {
 	now := time.Now()
-	filtered := make([]Toast, 0, len(m.toasts))
-	filteredHistoryIDs := make([]string, 0, len(m.toasts))
-
-	for i, toast := range m.toasts {
-		if toast.Expires.After(now) {
-			filtered = append(filtered, toast)
-			if i < len(m.activeToastHistoryIDs) {
-				filteredHistoryIDs = append(filteredHistoryIDs, m.activeToastHistoryIDs[i])
-			} else {
-				filteredHistoryIDs = append(filteredHistoryIDs, "")
-			}
-		}
-	}
-
-	m.toasts = filtered
-	m.activeToastHistoryIDs = filteredHistoryIDs
+	m.feedback.expireLocalToasts(now)
+	m.refreshFeedbackProjectionOutputs(now)
 }
 
 func (m *Model) dismissLatestToast() bool {
 	if len(m.toasts) == 0 {
 		return false
 	}
+	if len(m.activeToastHistoryIDs) == 0 {
+		m.toasts = m.toasts[:len(m.toasts)-1]
+		return true
+	}
 	if len(m.activeToastHistoryIDs) == len(m.toasts) {
 		m.markNotificationDismissed(m.activeToastHistoryIDs[len(m.activeToastHistoryIDs)-1])
-		m.activeToastHistoryIDs = m.activeToastHistoryIDs[:len(m.activeToastHistoryIDs)-1]
 	} else if len(m.activeToastHistoryIDs) > len(m.toasts) {
 		m.activeToastHistoryIDs = m.activeToastHistoryIDs[:len(m.toasts)-1]
+		m.refreshFeedbackProjectionOutputs(time.Now())
+	} else {
+		m.toasts = m.toasts[:len(m.toasts)-1]
 	}
-	m.toasts = m.toasts[:len(m.toasts)-1]
 	return true
 }
 
@@ -5230,7 +5281,7 @@ func (m *Model) markTaskMutationFailure(details mutationFailureDetails) {
 		m.pendingFailures = make(map[string]taskMutationFailure)
 	}
 	delete(m.pendingOpsByTask, key)
-	m.pendingFailures[key] = taskMutationFailure{
+	failure := taskMutationFailure{
 		action:         strings.TrimSpace(details.Action),
 		message:        strings.TrimSpace(details.Message),
 		reason:         strings.TrimSpace(details.Reason),
@@ -5240,6 +5291,8 @@ func (m *Model) markTaskMutationFailure(details mutationFailureDetails) {
 		targetStatus:   details.TargetStatus,
 		updatedAt:      time.Now(),
 	}
+	m.feedback.setLocalFailure(key, failure)
+	m.refreshFeedbackProjectionOutputs(time.Now())
 }
 
 func (m *Model) markMergeOperationPending(sourceID, targetID, operationID string, state protocol.OperationState) {
@@ -5316,10 +5369,8 @@ func (m *Model) clearPendingTaskStatus(taskID string) {
 }
 
 func (m *Model) clearTaskMutationFailure(taskID string) {
-	if len(m.pendingFailures) == 0 {
-		return
-	}
-	delete(m.pendingFailures, taskIDKey(taskID))
+	m.feedback.clearLocalFailure(taskID)
+	m.refreshFeedbackProjectionOutputs(time.Now())
 }
 
 func (m *Model) clearPendingTaskStatusForOperation(taskID, operationID string) {
@@ -5476,6 +5527,7 @@ func (m *Model) applyTaskRefreshes(refreshed []domain.Task) {
 	}
 	if updated {
 		m.syncProjectionIndexesFromTasks()
+		m.refreshFeedbackProjectionOutputs(time.Now())
 		m.reconcileCursorAfterIssuesRefresh()
 	}
 }
@@ -5493,6 +5545,7 @@ func (m *Model) applyTaskRefresh(taskID string, refreshed domain.Task, syncAfter
 		m.tasks[i] = refreshed
 		m.tasks[i].Session = cloneSession(m.tasks[i].Session)
 		m.reconcilePendingMutationFailures()
+		m.refreshFeedbackProjectionOutputs(time.Now())
 		if syncAfter {
 			m.syncProjectionIndexesFromTasks()
 			m.reconcileCursorAfterIssuesRefresh()
@@ -5714,7 +5767,7 @@ func (m *Model) reconcilePendingOperations() {
 }
 
 func (m *Model) reconcilePendingMutationFailures() {
-	if len(m.pendingFailures) == 0 {
+	if len(m.feedback.localFailures) == 0 {
 		return
 	}
 
@@ -5726,24 +5779,25 @@ func (m *Model) reconcilePendingMutationFailures() {
 	const staleFailureTTL = visibleTerminalOperationTTL
 	now := time.Now()
 
-	for key, failure := range m.pendingFailures {
+	for key, failure := range m.feedback.localFailures {
 		task, ok := taskByID[key]
 		if !ok {
-			delete(m.pendingFailures, key)
+			delete(m.feedback.localFailures, key)
 			continue
 		}
 		if !failure.updatedAt.IsZero() && now.Sub(failure.updatedAt) > staleFailureTTL {
-			delete(m.pendingFailures, key)
+			delete(m.feedback.localFailures, key)
 			continue
 		}
 		if failure.targetStatus != "" && task.Status == failure.targetStatus {
-			delete(m.pendingFailures, key)
+			delete(m.feedback.localFailures, key)
 			continue
 		}
 		if failure.previousStatus != "" && task.Status != failure.previousStatus {
-			delete(m.pendingFailures, key)
+			delete(m.feedback.localFailures, key)
 		}
 	}
+	m.refreshFeedbackProjectionOutputs(now)
 }
 
 // Phase 6 helper methods

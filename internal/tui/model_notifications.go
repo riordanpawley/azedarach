@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
@@ -14,22 +15,8 @@ var notificationStructuredReferencePattern = regexp.MustCompile(`\b(?:[a-z]{2,10
 var notificationBareIssueReferencePattern = regexp.MustCompile(`\b[a-z]{3,5}[a-z0-9]{0,2}\b`)
 
 func (m *Model) recordNotificationHistory(toast Toast, createdAt time.Time) string {
-	message := compactSummaryText(toast.Message)
-	if message == "" {
-		return ""
-	}
-	m.notificationSeq++
-	id := fmt.Sprintf("notice-%d", m.notificationSeq)
-	m.notificationHistory = append(m.notificationHistory, notificationHistoryEntry{
-		ID:        id,
-		CreatedAt: createdAt,
-		Level:     toast.Level,
-		Reference: notificationReference(message),
-		Message:   message,
-	})
-	if len(m.notificationHistory) > notificationHistoryCapacity {
-		m.notificationHistory = append([]notificationHistoryEntry(nil), m.notificationHistory[len(m.notificationHistory)-notificationHistoryCapacity:]...)
-	}
+	id := m.feedback.addLocalToast(toast, createdAt)
+	m.refreshFeedbackProjectionOutputs(createdAt)
 	return id
 }
 
@@ -109,11 +96,15 @@ func (m Model) alertIndicator() string {
 }
 
 func (m *Model) openNotificationHistoryOverlayCmd() tea.Cmd {
+	daemonNoticeIDs := make([]string, 0, len(m.notificationHistory))
 	items := make([]overlay.NotificationHistoryItem, 0, len(m.notificationHistory))
 	for i := len(m.notificationHistory) - 1; i >= 0; i-- {
 		entry := m.notificationHistory[i]
+		_ = m.feedback.markRead(entry.ID)
+		if strings.TrimSpace(entry.DaemonNoticeID) != "" && !entry.Read {
+			daemonNoticeIDs = append(daemonNoticeIDs, entry.DaemonNoticeID)
+		}
 		entry.Read = true
-		m.notificationHistory[i].Read = true
 		items = append(items, overlay.NotificationHistoryItem{
 			ID:        entry.ID,
 			CreatedAt: entry.CreatedAt,
@@ -124,7 +115,11 @@ func (m *Model) openNotificationHistoryOverlayCmd() tea.Cmd {
 			Dismissed: entry.Dismissed,
 		})
 	}
-	return m.openOverlay(overlay.NewNotificationHistoryOverlay(items))
+	m.refreshFeedbackProjectionOutputs(time.Now())
+	return tea.Batch(
+		m.openOverlay(overlay.NewNotificationHistoryOverlay(items)),
+		m.markDaemonNoticesReadCmd(daemonNoticeIDs),
+	)
 }
 
 func notificationLevelLabel(level ToastLevel) string {
@@ -145,10 +140,34 @@ func (m *Model) markNotificationDismissed(id string) {
 	if id == "" {
 		return
 	}
-	for i := range m.notificationHistory {
-		if m.notificationHistory[i].ID == id {
-			m.notificationHistory[i].Dismissed = true
-			return
-		}
+	_ = m.feedback.dismissNotice(id)
+	m.refreshFeedbackProjectionOutputs(time.Now())
+}
+
+func (m *Model) refreshFeedbackProjectionOutputs(now time.Time) {
+	out := m.feedback.materialize(m.tasks, now)
+	m.toasts = out.toasts
+	m.activeToastHistoryIDs = out.activeToastHistoryIDs
+	m.notificationHistory = out.history
+	m.pendingFailures = out.failures
+}
+
+func (m *Model) applyFeedbackNoticeSnapshot(notices []protocol.NoticeRecord) {
+	m.feedback.replaceDaemonNotices(notices)
+	m.refreshFeedbackProjectionOutputs(time.Now())
+	m.syncTaskWorkspaceOverlay()
+}
+
+func (m Model) feedbackNotices() []protocol.NoticeRecord {
+	notices := make([]protocol.NoticeRecord, 0, len(m.feedback.noticesByID))
+	for _, notice := range m.feedback.noticesByID {
+		notices = append(notices, notice)
 	}
+	return notices
+}
+
+func (m *Model) applyFeedbackNoticeEvent(body protocol.NoticeEventBody) {
+	m.feedback.applyDaemonNoticeEvent(body)
+	m.refreshFeedbackProjectionOutputs(body.UpdatedAt)
+	m.syncTaskWorkspaceOverlay()
 }
