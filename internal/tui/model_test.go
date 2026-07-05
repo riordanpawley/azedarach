@@ -666,6 +666,24 @@ func TestCtrlGDismissesLatestToastWithoutOverlay(t *testing.T) {
 	}
 }
 
+func TestCtrlGClosesOverlayBeforeDismissingToast(t *testing.T) {
+	m := newTestModel()
+	m.overlayStack.Push(overlay.NewHelpOverlay())
+	m.toasts = []Toast{{Message: "background notice", Expires: time.Now().Add(time.Hour)}}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+	if cmd == nil {
+		t.Fatal("expected ctrl+g to emit close-all command")
+	}
+	next := updated.(Model)
+	if len(next.toasts) != 1 {
+		t.Fatalf("toasts len = %d, want 1", len(next.toasts))
+	}
+	if _, ok := cmd().(overlay.CloseAllOverlaysMsg); !ok {
+		t.Fatalf("ctrl+g command emitted %T, want overlay.CloseAllOverlaysMsg", cmd())
+	}
+}
+
 func TestResolveDaemonBinaryForRepo(t *testing.T) {
 	t.Run("prefers azd sibling of invoked az command", func(t *testing.T) {
 		repoDir := t.TempDir()

@@ -591,7 +591,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Force redraw
 		return m, tea.ClearScreen
 	case "ctrl+g":
-		if m.dismissLatestToast() {
+		if m.overlayStack.IsEmpty() && m.dismissLatestToast() {
 			return m, nil
 		}
 	}
