@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
 func TestRuntimeSignalIngestGitHookPersistsFastProjectionAndQueuesEnrichment(t *testing.T) {
@@ -451,13 +453,26 @@ func TestRuntimeSignalMaterializesActivityEvidenceForRequestedIssuesOnly(t *test
 }
 
 func TestRuntimeReconcileMaterializesStoredActivityEvidenceToCanonical(t *testing.T) {
-	repoDir := initRuntimeSignalGitRepo(t)
-	d := New(Config{
-		RepoDir: repoDir,
-		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
 	projectID := "proj-signals"
 	issueID := "az-42"
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	tmuxRunner := &runtimeSignalNoRealTmuxRunner{liveSessions: []string{"pr-az-42"}}
+	// This test exercises projection/evidence materialization through runtime.reconcile.
+	// Keep it on a fake tmux client so fixture IDs such as pr-az-42 can never touch
+	// the user's real tmux server.
+	d := &Daemon{
+		cfg: Config{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+	}
 	startedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
 	store := d.sessionRuntimeStateStore(projectID)
 	if err := store.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
@@ -502,6 +517,9 @@ func TestRuntimeReconcileMaterializesStoredActivityEvidenceToCanonical(t *testin
 		canonical.ActivitySource != "hooks" {
 		t.Fatalf("canonical session projection = %+v", canonical)
 	}
+	if got := tmuxRunner.mutatingCalls(); len(got) != 0 {
+		t.Fatalf("runtime reconcile attempted mutating tmux commands: %+v", got)
+	}
 }
 
 func TestRuntimeSignalIngestRejectsUnsupportedKindWithoutHookLogSideEffect(t *testing.T) {
@@ -544,6 +562,45 @@ func runtimeSignalStageOK(stages []protocol.RuntimeSignalStageOutcome, name stri
 		}
 	}
 	return false
+}
+
+type runtimeSignalNoRealTmuxRunner struct {
+	calls        [][]string
+	liveSessions []string
+}
+
+func (r *runtimeSignalNoRealTmuxRunner) Run(_ context.Context, args ...string) (string, error) {
+	r.calls = append(r.calls, append([]string(nil), args...))
+	if len(args) == 0 {
+		return "", nil
+	}
+	switch args[0] {
+	case "list-sessions":
+		if len(r.liveSessions) == 0 {
+			return "", nil
+		}
+		return strings.Join(r.liveSessions, "\n"), nil
+	case "list-panes":
+		return "", nil
+	default:
+		return "", nil
+	}
+}
+
+func (r *runtimeSignalNoRealTmuxRunner) mutatingCalls() [][]string {
+	mutating := make([][]string, 0)
+	for _, call := range r.calls {
+		if len(call) == 0 {
+			continue
+		}
+		switch call[0] {
+		case "list-sessions", "list-panes":
+			continue
+		default:
+			mutating = append(mutating, append([]string(nil), call...))
+		}
+	}
+	return mutating
 }
 
 func initRuntimeSignalGitRepo(t *testing.T) string {
