@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
@@ -487,6 +488,92 @@ func TestTaskWorkspaceOverlay_View_ShowsMutationProgress(t *testing.T) {
 	}
 	if !strings.Contains(view, "40%") || !strings.Contains(view, "queued task.update_status") {
 		t.Fatalf("expected mutation progress payload in detail panel, got: %q", view)
+	}
+}
+
+func TestTaskWorkspaceOverlay_View_ShowsFullMutationFailureExplanation(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-4",
+		Title:  "Ready to close",
+		Status: domain.StatusInReview,
+	}
+	overlay := NewTaskWorkspaceOverlay(task, nil, &TaskMutationProgress{
+		State:           "failed",
+		ProgressMessage: "Could not move az-4 to Done. It stayed In Review. Reason: Done is blocked by unresolved child issues. Next: close children first or retry with cascade.",
+		PreviousStatus:  domain.StatusInReview,
+		CurrentStatus:   domain.StatusInReview,
+		TargetStatus:    domain.StatusDone,
+		FailureAction:   "update status",
+		FailureReason:   "Done is blocked by unresolved child issues",
+		FailureRecovery: "close children first or retry with cascade",
+	}, 120, 30)
+
+	view := ansi.Strip(overlay.View())
+	for _, want := range []string{
+		"Mutation Failure",
+		"Attempt:  move az-4 to Done",
+		"Previous:  In Review",
+		"Trusted now:  In Review",
+		"Reason:  Done is blocked by unresolved child issues",
+		"Next:  close children first or retry with cascade",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("workspace failure explanation missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestTaskWorkspaceOverlay_View_WrapsMutationFailureExplanationNarrow(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-4",
+		Title:  "Ready to close",
+		Status: domain.StatusInReview,
+	}
+	overlay := NewTaskWorkspaceOverlay(task, nil, &TaskMutationProgress{
+		State:           "failed",
+		ProgressMessage: "Could not move az-4 to Done. It stayed In Review. Reason: Done is blocked by unresolved child issues with a deliberately long explanation. Next: close children first, refresh the task workspace, and retry with cascade only when that is intended.",
+		PreviousStatus:  domain.StatusInReview,
+		CurrentStatus:   domain.StatusInReview,
+		TargetStatus:    domain.StatusDone,
+		FailureAction:   "update status",
+		FailureReason:   "Done is blocked by unresolved child issues with a deliberately long explanation",
+		FailureRecovery: "close children first, refresh the task workspace, and retry with cascade only when that is intended",
+	}, 58, 22)
+
+	width, _ := overlay.Size()
+	view := ansi.Strip(overlay.View())
+	if !strings.Contains(view, "Mutation Failure") {
+		t.Fatalf("narrow workspace failure explanation missing section header:\n%s", view)
+	}
+	for _, line := range strings.Split(view, "\n") {
+		if got := ansi.StringWidth(line); got > width {
+			t.Fatalf("narrow workspace line width = %d, want <= %d:\n%s\nfull view:\n%s", got, width, line, view)
+		}
+	}
+
+	seen := map[string]bool{
+		"Trusted now:": false,
+		"Reason:":      false,
+		"Next:":        false,
+	}
+	for scrollY := 0; scrollY <= overlay.detail.maxScroll(); scrollY++ {
+		overlay.detail.scrollY = scrollY
+		scrolled := ansi.Strip(overlay.View())
+		for want := range seen {
+			if strings.Contains(scrolled, want) {
+				seen[want] = true
+			}
+		}
+		for _, line := range strings.Split(scrolled, "\n") {
+			if got := ansi.StringWidth(line); got > width {
+				t.Fatalf("scrolled narrow workspace line width = %d, want <= %d:\n%s\nfull view:\n%s", got, width, line, scrolled)
+			}
+		}
+	}
+	for want, ok := range seen {
+		if !ok {
+			t.Fatalf("narrow workspace never showed %q across scroll positions", want)
+		}
 	}
 }
 

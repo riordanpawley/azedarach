@@ -6989,6 +6989,13 @@ func TestDaemonOperationFailureEventRemainsVisibleWithReason(t *testing.T) {
 	if progress.ProgressMessage != want {
 		t.Fatalf("progress message = %q, want %q", progress.ProgressMessage, want)
 	}
+	if progress.CurrentStatus != domain.StatusInProgress || progress.PreviousStatus != domain.StatusInProgress {
+		t.Fatalf("progress status context = previous %q current %q, want trusted In Progress", progress.PreviousStatus, progress.CurrentStatus)
+	}
+	if progress.FailureReason != "close cleanup is blocked by local worktree changes" ||
+		progress.FailureRecovery != "commit, discard, or merge the worktree changes, then retry" {
+		t.Fatalf("progress failure details = reason %q recovery %q", progress.FailureReason, progress.FailureRecovery)
+	}
 }
 
 func TestDaemonOperationFailureEventNormalizesProgressOnlyFailure(t *testing.T) {
@@ -7021,6 +7028,15 @@ func TestDaemonOperationFailureEventNormalizesProgressOnlyFailure(t *testing.T) 
 	want := "Could not move az-1 to Done. It stayed In Review. Reason: Done is blocked by unresolved child issues. Next: press C to close clean children too, or resolve child issues and retry"
 	if progress == nil || progress.ProgressMessage != want {
 		t.Fatalf("progress = %+v, want %q", progress, want)
+	}
+	if progress.PreviousStatus != domain.StatusInReview ||
+		progress.CurrentStatus != domain.StatusInReview ||
+		progress.TargetStatus != domain.StatusDone {
+		t.Fatalf("progress status context = previous %q current %q target %q, want In Review/In Review/Done", progress.PreviousStatus, progress.CurrentStatus, progress.TargetStatus)
+	}
+	if progress.FailureReason != "Done is blocked by unresolved child issues" ||
+		progress.FailureRecovery != "press C to close clean children too, or resolve child issues and retry" {
+		t.Fatalf("progress failure details = reason %q recovery %q", progress.FailureReason, progress.FailureRecovery)
 	}
 }
 

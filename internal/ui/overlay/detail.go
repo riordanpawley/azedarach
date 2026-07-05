@@ -49,7 +49,11 @@ type TaskMutationProgress struct {
 	ProgressPercent int
 	ProgressMessage string
 	PreviousStatus  domain.Status
+	CurrentStatus   domain.Status
 	TargetStatus    domain.Status
+	FailureAction   string
+	FailureReason   string
+	FailureRecovery string
 }
 
 type taskGraphLink struct {
@@ -322,6 +326,11 @@ func (d *DetailPanel) buildLines() ([]string, int) {
 	}
 	if d.mutation != nil {
 		addLine(labelStyle.Render("Issue Ops:") + "  " + valueStyle.Render(d.formatMutationProgress()))
+		if d.isFailedMutation() {
+			addLine("")
+			addLine(headerStyle.Render("Mutation Failure"))
+			d.addMutationFailureLines(addWrappedField)
+		}
 	}
 	if d.task.ParentID != nil {
 		addLine(labelStyle.Render("Parent:") + "  " + valueStyle.Render(d.task.ParentID.String()))
@@ -796,6 +805,9 @@ func (d *DetailPanel) formatMutationProgress() string {
 		progress = fmt.Sprintf("%s (%s -> %s)", state, d.formatStatus(d.mutation.PreviousStatus), d.formatStatus(d.mutation.TargetStatus))
 	}
 	if operationID := strings.TrimSpace(d.mutation.OperationID); operationID != "" {
+		if d.isFailedMutation() {
+			return fmt.Sprintf("%s [operation %s]", progress, operationID)
+		}
 		if d.mutation.ProgressPercent > 0 || strings.TrimSpace(d.mutation.ProgressMessage) != "" {
 			progressBits := make([]string, 0, 2)
 			if d.mutation.ProgressPercent > 0 {
@@ -808,10 +820,67 @@ func (d *DetailPanel) formatMutationProgress() string {
 		}
 		return fmt.Sprintf("%s [operation %s]", progress, operationID)
 	}
+	if d.isFailedMutation() {
+		return progress
+	}
 	if message := strings.TrimSpace(d.mutation.ProgressMessage); message != "" {
 		return fmt.Sprintf("%s [%s]", progress, message)
 	}
 	return progress
+}
+
+func (d *DetailPanel) isFailedMutation() bool {
+	if d.mutation == nil {
+		return false
+	}
+	return strings.TrimSpace(strings.ToLower(d.mutation.State)) == string(protocol.OperationStateFailed)
+}
+
+func (d *DetailPanel) addMutationFailureLines(addWrappedField func(label, value string)) {
+	if d.mutation == nil {
+		return
+	}
+	if attempt := d.formatMutationFailureAttempt(); attempt != "" {
+		addWrappedField("Attempt", attempt)
+	}
+	if d.mutation.PreviousStatus != "" {
+		addWrappedField("Previous", d.formatStatus(d.mutation.PreviousStatus))
+	}
+	if d.mutation.CurrentStatus != "" {
+		addWrappedField("Result", "It stayed "+d.formatStatus(d.mutation.CurrentStatus))
+		addWrappedField("Trusted now", d.formatStatus(d.mutation.CurrentStatus))
+	}
+	if reason := strings.TrimSpace(d.mutation.FailureReason); reason != "" {
+		addWrappedField("Reason", reason)
+	}
+	if recovery := strings.TrimSpace(d.mutation.FailureRecovery); recovery != "" {
+		addWrappedField("Next", recovery)
+	}
+	if d.mutation.FailureReason == "" && d.mutation.FailureRecovery == "" {
+		addWrappedField("Message", d.mutation.ProgressMessage)
+	}
+}
+
+func (d *DetailPanel) formatMutationFailureAttempt() string {
+	if d.mutation == nil {
+		return ""
+	}
+	action := strings.TrimSpace(d.mutation.FailureAction)
+	if action == "" {
+		action = "update"
+	}
+	taskID := strings.TrimSpace(d.task.ID.String())
+	if d.mutation.TargetStatus != "" {
+		target := d.formatStatus(d.mutation.TargetStatus)
+		if taskID != "" {
+			return fmt.Sprintf("move %s to %s", taskID, target)
+		}
+		return fmt.Sprintf("move task to %s", target)
+	}
+	if taskID != "" {
+		return fmt.Sprintf("%s %s", action, taskID)
+	}
+	return action
 }
 
 // maxScroll returns the maximum scroll position

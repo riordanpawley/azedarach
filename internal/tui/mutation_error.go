@@ -24,7 +24,18 @@ type mutationFailureContext struct {
 	Recovery      string
 }
 
-func formatMutationFailure(ctx mutationFailureContext) string {
+type mutationFailureDetails struct {
+	TaskID         string
+	Action         string
+	PreviousStatus domain.Status
+	TargetStatus   domain.Status
+	CurrentStatus  domain.Status
+	Reason         string
+	Recovery       string
+	Message        string
+}
+
+func buildMutationFailureDetails(ctx mutationFailureContext) mutationFailureDetails {
 	taskID := strings.TrimSpace(ctx.TaskID)
 	action := strings.TrimSpace(ctx.Action)
 	if action == "" {
@@ -56,7 +67,19 @@ func formatMutationFailure(ctx mutationFailureContext) string {
 	if recovery != "" {
 		parts = append(parts, "Next: "+recovery)
 	}
-	return strings.Join(parts, ". ")
+	return mutationFailureDetails{
+		TaskID:        taskID,
+		Action:        action,
+		TargetStatus:  ctx.TargetStatus,
+		CurrentStatus: ctx.CurrentStatus,
+		Reason:        reason,
+		Recovery:      recovery,
+		Message:       strings.Join(parts, ". "),
+	}
+}
+
+func formatMutationFailure(ctx mutationFailureContext) string {
+	return buildMutationFailureDetails(ctx).Message
 }
 
 func mutationFailureRawMessage(ctx mutationFailureContext) string {
@@ -184,7 +207,11 @@ func mutationErrorCode(err error) protocol.ErrorCode {
 }
 
 func formatStatusMutationFailure(taskID string, previousStatus, targetStatus domain.Status, err error) string {
-	return formatMutationFailure(mutationFailureContext{
+	return statusMutationFailureDetails(taskID, previousStatus, targetStatus, err).Message
+}
+
+func statusMutationFailureDetails(taskID string, previousStatus, targetStatus domain.Status, err error) mutationFailureDetails {
+	details := buildMutationFailureDetails(mutationFailureContext{
 		TaskID:        taskID,
 		Action:        "update status",
 		TargetStatus:  targetStatus,
@@ -192,9 +219,15 @@ func formatStatusMutationFailure(taskID string, previousStatus, targetStatus dom
 		Err:           err,
 		ErrorCode:     mutationErrorCode(err),
 	})
+	details.PreviousStatus = previousStatus
+	return details
 }
 
 func formatOperationMutationFailure(taskID string, currentStatus domain.Status, record protocol.OperationRecord) string {
+	return operationMutationFailureDetails(taskID, currentStatus, record).Message
+}
+
+func operationMutationFailureDetails(taskID string, currentStatus domain.Status, record protocol.OperationRecord) mutationFailureDetails {
 	target := domain.Status("")
 	action := mutationActionForOperationKind(record.Kind)
 	if strings.TrimSpace(record.Kind) == daemonclient.CommandTaskClose {
@@ -209,7 +242,7 @@ func formatOperationMutationFailure(taskID string, currentStatus domain.Status, 
 	if raw == "" && record.Progress != nil {
 		raw = record.Progress.Message
 	}
-	return formatMutationFailure(mutationFailureContext{
+	details := buildMutationFailureDetails(mutationFailureContext{
 		TaskID:        taskID,
 		Action:        action,
 		TargetStatus:  target,
@@ -217,6 +250,8 @@ func formatOperationMutationFailure(taskID string, currentStatus domain.Status, 
 		ErrorCode:     code,
 		RawMessage:    raw,
 	})
+	details.PreviousStatus = currentStatus
+	return details
 }
 
 func (m Model) operationFailureUserMessage(evt protocol.EventEnvelope) string {
