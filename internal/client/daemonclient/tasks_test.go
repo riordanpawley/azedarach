@@ -182,6 +182,55 @@ func TestListTaskEventsCommand(t *testing.T) {
 	}
 }
 
+func TestTaskGraphReadinessDecodesWorkerObservations(t *testing.T) {
+	const wantProjectID = "proj-task"
+	transport := &taskRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			assertTaskProjectID(t, req, wantProjectID)
+			if req.Command != CommandTaskGraphReadiness {
+				t.Fatalf("command = %q, want %q", req.Command, CommandTaskGraphReadiness)
+			}
+			var body TaskIDRequest
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal request: %v", err)
+			}
+			if body.TaskID != "az-root" {
+				t.Fatalf("request body = %+v", body)
+			}
+			return responseWithJSON(t, req, TaskGraphReadiness{
+				RootIssueID: "az-root",
+				Runnable:    []string{"az-1"},
+				Blocked:     map[string]string{},
+				WorkerObservations: []domain.WorkerObservation{{
+					IssueID: "az-1",
+					State:   domain.WorkerObservationRunnable,
+					Reason:  "leaf worker has no unresolved blockers or active runtime",
+					SourceTruthPolicy: domain.WorkerObservationSourcePolicy{
+						IssueGraph:       "projection",
+						SessionRuntime:   "hybrid",
+						WorktreeGit:      "projection",
+						MailboxEvidence:  "projection",
+						ActiveOperations: "projection",
+					},
+				}},
+			}), nil
+		},
+	}
+
+	client := New(transport).WithProjectID(wantProjectID)
+	ready, err := client.TaskGraphReadiness(context.Background(), "az-root")
+	if err != nil {
+		t.Fatalf("TaskGraphReadiness error: %v", err)
+	}
+	if len(ready.WorkerObservations) != 1 {
+		t.Fatalf("worker observations = %+v", ready.WorkerObservations)
+	}
+	observation := ready.WorkerObservations[0]
+	if observation.IssueID != "az-1" || observation.State != domain.WorkerObservationRunnable || observation.SourceTruthPolicy.SessionRuntime != "hybrid" {
+		t.Fatalf("worker observation = %+v", observation)
+	}
+}
+
 func TestTaskListCreateAndMutationCommands(t *testing.T) {
 	const wantProjectID = "proj-task"
 

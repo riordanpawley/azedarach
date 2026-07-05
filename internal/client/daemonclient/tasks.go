@@ -151,6 +151,7 @@ type TaskGraphReadiness struct {
 	ActiveSessions         []TaskActiveSession           `json:"active_sessions,omitempty"`
 	SessionStartProgress   []TaskSessionStartProgress    `json:"session_start_progress,omitempty"`
 	StaleCloseableChildren []TaskStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
+	WorkerObservations     []domain.WorkerObservation    `json:"worker_observations,omitempty"`
 	Blocked                map[string]string             `json:"blocked"`
 }
 

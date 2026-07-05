@@ -183,6 +183,7 @@ type taskGraphReadinessResult struct {
 	ActiveSessions         []taskGraphActiveSession        `json:"active_sessions,omitempty"`
 	SessionStartProgress   []taskGraphSessionStartProgress `json:"session_start_progress,omitempty"`
 	StaleCloseableChildren []taskStaleCloseableCandidate   `json:"stale_closeable_children,omitempty"`
+	WorkerObservations     []domain.WorkerObservation      `json:"worker_observations,omitempty"`
 	Blocked                map[string]string               `json:"blocked"`
 }
 
@@ -3320,6 +3321,7 @@ func (d *Daemon) taskGraphReadiness(ctx context.Context, projectID, rootIssueID 
 	ready.ActiveSessions = d.daemonTaskGraphActiveSessions(ctx, projectID, ready.Active, byID, startProgressByIssue)
 	ready.ActiveSessions = append(ready.ActiveSessions, daemonTaskGraphCleanupPendingSessions(rootID, byID, children)...)
 	ready.SessionStartProgress = daemonTaskGraphSessionStartProgressList(rootID, children, startProgressByIssue)
+	ready.WorkerObservations = d.daemonTaskGraphWorkerObservations(ctx, projectID, rootID, byID, children, ready)
 	return ready, nil
 }
 
@@ -3491,6 +3493,449 @@ func daemonTaskStaleCloseableEvidence(task domain.Task) []string {
 		evidence = append(evidence, "in_review status is completion evidence")
 	}
 	return evidence
+}
+
+func (d *Daemon) daemonTaskGraphWorkerObservations(
+	ctx context.Context,
+	projectID string,
+	rootID naming.IssueID,
+	byID map[naming.IssueID]domain.Task,
+	children map[naming.IssueID][]naming.IssueID,
+	ready taskGraphReadinessResult,
+) []domain.WorkerObservation {
+	desc := daemonTaskGraphDescendants(rootID, children)
+	if len(desc) == 0 {
+		return nil
+	}
+	activeByIssue := daemonTaskGraphActiveSessionsByIssue(ready.ActiveSessions)
+	pendingByIssue := daemonTaskGraphPendingByIssue(ready.Pending)
+	startProgressByIssue := daemonTaskGraphStartProgressByIssue(ready.SessionStartProgress)
+	staleByIssue := daemonTaskGraphStaleCloseableByIssue(ready.StaleCloseableChildren)
+	runnable := stringSet(ready.Runnable)
+	mailByIssue := d.workerObservationMailboxEvents(rootID.String())
+
+	out := make([]domain.WorkerObservation, 0, len(desc))
+	for _, id := range desc {
+		task := byID[id]
+		if task.ID.IsZero() || task.Type == domain.TypeEpic {
+			continue
+		}
+		issueID := task.ID.String()
+		issueEvents := d.workerObservationIssueEvents(ctx, projectID, issueID)
+		observation := daemonWorkerObservationFromInputs(workerObservationInputs{
+			RootIssueID:   rootID.String(),
+			Task:          task,
+			BlockedReason: ready.Blocked[issueID],
+			Runnable:      runnable[issueID],
+			Active:        activeByIssue[issueID],
+			Pending:       pendingByIssue[issueID],
+			StartProgress: startProgressByIssue[issueID],
+			Stale:         staleByIssue[issueID],
+			IssueEvents:   issueEvents,
+			MailEvents:    mailByIssue[issueID],
+		})
+		out = append(out, observation)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].IssueID < out[j].IssueID
+	})
+	return out
+}
+
+type workerObservationInputs struct {
+	RootIssueID   string
+	Task          domain.Task
+	BlockedReason string
+	Runnable      bool
+	Active        *taskGraphActiveSession
+	Pending       *taskGraphPendingStart
+	StartProgress *taskGraphSessionStartProgress
+	Stale         *taskStaleCloseableCandidate
+	IssueEvents   []domain.IssueObservationEvent
+	MailEvents    []daemonMailEvent
+}
+
+func daemonWorkerObservationFromInputs(in workerObservationInputs) domain.WorkerObservation {
+	issueID := in.Task.ID.String()
+	observation := domain.WorkerObservation{
+		IssueID:           issueID,
+		SourceTruthPolicy: daemonWorkerObservationSourcePolicy(),
+		LastEvent:         daemonWorkerObservationLastEvent(in.IssueEvents, in.MailEvents),
+		EvidenceSummary:   daemonWorkerObservationEvidenceSummary(in),
+		Risks:             daemonWorkerObservationRisks(in),
+	}
+
+	switch {
+	case in.Task.Status == domain.StatusDone && (daemonCloseGuardTaskHasSession(in.Task) || daemonCloseGuardTaskHasWorktree(in.Task) || in.Active != nil):
+		observation.State = domain.WorkerObservationCleanupPending
+		observation.Reason = "issue is closed but runtime projection remains"
+	case in.Task.Status == domain.StatusDone:
+		observation.State = domain.WorkerObservationDone
+		observation.Reason = "issue is closed"
+	case in.Active != nil && daemonWorkerObservationActiveFailed(*in.Active):
+		observation.State = domain.WorkerObservationFailed
+		observation.Reason = "active session reports failed runtime state"
+	case in.Active != nil && daemonWorkerObservationActiveWaiting(*in.Active):
+		observation.State = domain.WorkerObservationWaitingHuman
+		observation.Reason = "active session is waiting for human input"
+	case in.Active != nil:
+		observation.State = domain.WorkerObservationWorking
+		observation.Reason = "active worker session is present"
+	case in.Task.Status == domain.StatusInReview:
+		observation.State = domain.WorkerObservationReviewReady
+		observation.Reason = "issue is in_review"
+	case strings.TrimSpace(in.BlockedReason) != "":
+		observation.State = domain.WorkerObservationBlocked
+		observation.Reason = in.BlockedReason
+	case in.Stale != nil:
+		observation.State = domain.WorkerObservationStale
+		observation.Reason = "runtime projection indicates stale closeable work"
+	case in.Pending != nil || in.StartProgress != nil:
+		observation.State = domain.WorkerObservationWorking
+		observation.Reason = "session start operation is queued or running"
+	case in.Runnable:
+		observation.State = domain.WorkerObservationRunnable
+		observation.Reason = "leaf worker has no unresolved blockers or active runtime"
+	default:
+		observation.State = domain.WorkerObservationStale
+		observation.Reason = "issue is not runnable and has no active session projection"
+	}
+	observation.NextActions = daemonWorkerObservationNextActions(in.RootIssueID, observation, in)
+	return observation
+}
+
+func daemonWorkerObservationSourcePolicy() domain.WorkerObservationSourcePolicy {
+	return domain.WorkerObservationSourcePolicy{
+		IssueGraph:       string(daemonInvariantSourceProjection),
+		SessionRuntime:   string(daemonInvariantSourceHybrid),
+		WorktreeGit:      string(daemonInvariantSourceProjection),
+		MailboxEvidence:  string(daemonInvariantSourceProjection),
+		ActiveOperations: string(daemonInvariantSourceProjection),
+	}
+}
+
+func daemonWorkerObservationActiveFailed(active taskGraphActiveSession) bool {
+	for _, value := range []string{active.Activity, active.State, active.Status} {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "failed", "failure", "error":
+			return true
+		}
+	}
+	return false
+}
+
+func daemonWorkerObservationActiveWaiting(active taskGraphActiveSession) bool {
+	activity := strings.ToLower(strings.TrimSpace(active.Activity))
+	return activity == "waiting" || activity == "waiting_human"
+}
+
+func daemonWorkerObservationEvidenceSummary(in workerObservationInputs) []string {
+	evidence := make([]string, 0, 8)
+	evidence = append(evidence, fmt.Sprintf("status=%s", in.Task.Status))
+	if in.Active != nil {
+		evidence = append(evidence, fmt.Sprintf("session activity=%s source=%s", in.Active.Activity, in.Active.ActivitySource))
+		if strings.TrimSpace(in.Active.State) != "" {
+			evidence = append(evidence, fmt.Sprintf("session state=%s", in.Active.State))
+		}
+	}
+	if in.Pending != nil {
+		evidence = append(evidence, fmt.Sprintf("session start %s operation=%s", in.Pending.OperationState, in.Pending.OperationID))
+	}
+	if in.StartProgress != nil && strings.TrimSpace(in.StartProgress.Phase) != "" {
+		evidence = append(evidence, fmt.Sprintf("session start phase=%s percent=%d", in.StartProgress.Phase, in.StartProgress.Percent))
+	}
+	if in.Stale != nil {
+		evidence = append(evidence, in.Stale.Evidence...)
+	}
+	if in.Task.HasWorktree {
+		evidence = append(evidence, "worktree projection present")
+	}
+	if in.Task.HasConflicts {
+		evidence = append(evidence, fmt.Sprintf("conflicts=%d", len(in.Task.ConflictFiles)))
+	}
+	if in.Task.HasUncommittedChanges {
+		evidence = append(evidence, fmt.Sprintf("git changes +%d -%d", in.Task.GitAdditions, in.Task.GitDeletions))
+	}
+	if in.Task.GitAheadCount > 0 || in.Task.GitBehindCount > 0 {
+		evidence = append(evidence, fmt.Sprintf("git ahead=%d behind=%d", in.Task.GitAheadCount, in.Task.GitBehindCount))
+	}
+	if evt := latestWorkerMailEvent(in.MailEvents); evt != nil {
+		evidence = append(evidence, fmt.Sprintf("mailbox %s: %s", strings.TrimSpace(evt.Type), truncateObservationSummary(evt.Body)))
+	}
+	if evt := latestIssueObservationEvent(in.IssueEvents); evt != nil {
+		evidence = append(evidence, fmt.Sprintf("event %s from %s", evt.Type, strings.TrimSpace(evt.Source)))
+	}
+	for _, evt := range workerObservationEvidenceEvents(in.IssueEvents) {
+		summary := issueObservationEventSummary(evt)
+		if summary == "" {
+			summary = strings.TrimSpace(evt.Source)
+		}
+		if summary != "" {
+			evidence = append(evidence, fmt.Sprintf("evidence %s: %s", evt.Type, summary))
+		} else {
+			evidence = append(evidence, fmt.Sprintf("evidence %s", evt.Type))
+		}
+	}
+	return uniqueDaemonTaskAdvice(evidence)
+}
+
+func daemonWorkerObservationRisks(in workerObservationInputs) []string {
+	risks := make([]string, 0, 4)
+	if strings.TrimSpace(in.BlockedReason) != "" {
+		risks = append(risks, in.BlockedReason)
+	}
+	if in.Task.HasConflicts {
+		risks = append(risks, "worktree has merge conflicts")
+	}
+	if in.Task.HasUncommittedChanges {
+		risks = append(risks, "worktree has uncommitted changes")
+	}
+	if in.Task.GitBehindCount > 0 {
+		risks = append(risks, fmt.Sprintf("branch is behind by %d commit(s)", in.Task.GitBehindCount))
+	}
+	if in.Active != nil && strings.TrimSpace(in.Active.Activity) == "unknown" {
+		risks = append(risks, "session activity is unknown")
+	}
+	if in.Stale != nil {
+		risks = append(risks, "runtime projection may be stale")
+	}
+	return uniqueDaemonTaskAdvice(risks)
+}
+
+func daemonWorkerObservationNextActions(rootIssueID string, observation domain.WorkerObservation, in workerObservationInputs) []string {
+	issueID := observation.IssueID
+	switch observation.State {
+	case domain.WorkerObservationRunnable:
+		return []string{fmt.Sprintf("az orchestrate start --root %s --issue %s --json", rootIssueID, issueID)}
+	case domain.WorkerObservationWorking:
+		if in.Active != nil && strings.TrimSpace(in.Active.Advice) != "" {
+			return []string{in.Active.Advice}
+		}
+		return []string{fmt.Sprintf("watch worker activity for %s", issueID)}
+	case domain.WorkerObservationWaitingHuman:
+		return []string{fmt.Sprintf("inspect worker %s and answer the pending prompt", issueID)}
+	case domain.WorkerObservationBlocked:
+		return []string{fmt.Sprintf("resolve blockers for %s", issueID)}
+	case domain.WorkerObservationReviewReady:
+		return []string{fmt.Sprintf("validate evidence, then close accepted worker: az issue close --id %s", issueID)}
+	case domain.WorkerObservationStale:
+		if in.Stale != nil && strings.TrimSpace(in.Stale.SuggestedCommand) != "" {
+			return []string{in.Stale.SuggestedCommand}
+		}
+		return []string{fmt.Sprintf("refresh or repair runtime projection for %s", issueID)}
+	case domain.WorkerObservationFailed:
+		return []string{fmt.Sprintf("inspect failed worker session for %s", issueID)}
+	case domain.WorkerObservationCleanupPending:
+		return []string{fmt.Sprintf("cleanup runtime for closed worker: az orchestrate close-session --issue %s", issueID)}
+	case domain.WorkerObservationDone:
+		return nil
+	default:
+		return nil
+	}
+}
+
+func daemonWorkerObservationLastEvent(issueEvents []domain.IssueObservationEvent, mailEvents []daemonMailEvent) *domain.WorkerObservationEventSummary {
+	var last *domain.WorkerObservationEventSummary
+	if evt := latestIssueObservationEvent(issueEvents); evt != nil {
+		last = &domain.WorkerObservationEventSummary{
+			Kind:      "issue_event",
+			Type:      string(evt.Type),
+			At:        evt.ObservedAt,
+			Source:    strings.TrimSpace(evt.Source),
+			Summary:   issueObservationEventSummary(*evt),
+			SessionID: strings.TrimSpace(evt.SessionID),
+			Worktree:  strings.TrimSpace(evt.WorktreePath),
+		}
+	}
+	if evt := latestWorkerMailEvent(mailEvents); evt != nil {
+		summary := &domain.WorkerObservationEventSummary{
+			Kind:    "mailbox",
+			Type:    strings.TrimSpace(evt.Type),
+			At:      evt.CreatedAt,
+			Source:  strings.TrimSpace(evt.From),
+			Summary: truncateObservationSummary(evt.Body),
+			Seq:     evt.Seq,
+		}
+		if last == nil || (!summary.At.IsZero() && summary.At.After(last.At)) {
+			last = summary
+		}
+	}
+	return last
+}
+
+func issueObservationEventSummary(evt domain.IssueObservationEvent) string {
+	if len(evt.Payload) == 0 {
+		return ""
+	}
+	for _, key := range []string{"summary", "message", "body", "reason", "status"} {
+		if value, ok := evt.Payload[key]; ok {
+			text := strings.TrimSpace(fmt.Sprint(value))
+			if text != "" {
+				return truncateObservationSummary(text)
+			}
+		}
+	}
+	return ""
+}
+
+func latestIssueObservationEvent(events []domain.IssueObservationEvent) *domain.IssueObservationEvent {
+	var latest *domain.IssueObservationEvent
+	for i := range events {
+		if strings.TrimSpace(string(events[i].Type)) == "" {
+			continue
+		}
+		if latest == nil ||
+			(!events[i].ObservedAt.IsZero() && events[i].ObservedAt.After(latest.ObservedAt)) ||
+			(events[i].ObservedAt.Equal(latest.ObservedAt) && events[i].ID > latest.ID) {
+			latest = &events[i]
+		}
+	}
+	return latest
+}
+
+func latestWorkerMailEvent(events []daemonMailEvent) *daemonMailEvent {
+	for i := len(events) - 1; i >= 0; i-- {
+		if strings.TrimSpace(events[i].Type) == "" {
+			continue
+		}
+		return &events[i]
+	}
+	return nil
+}
+
+func workerObservationEvidenceEvents(events []domain.IssueObservationEvent) []domain.IssueObservationEvent {
+	out := make([]domain.IssueObservationEvent, 0, 4)
+	for _, evt := range events {
+		switch evt.Type {
+		case domain.IssueEventEvidenceSubmitted,
+			domain.IssueEventValidationPassed,
+			domain.IssueEventValidationFailed,
+			domain.IssueEventReviewCompleted,
+			domain.IssueEventRiskRecorded,
+			domain.IssueEventBlockerReported,
+			domain.IssueEventHumanInputRequested,
+			domain.IssueEventHumanInputProvided:
+			out = append(out, evt)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].ObservedAt.Equal(out[j].ObservedAt) {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].ObservedAt.After(out[j].ObservedAt)
+	})
+	if len(out) > 5 {
+		out = out[:5]
+	}
+	return out
+}
+
+func truncateObservationSummary(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	const max = 160
+	if len(value) <= max {
+		return value
+	}
+	return strings.TrimSpace(value[:max-1]) + "..."
+}
+
+func daemonTaskGraphActiveSessionsByIssue(active []taskGraphActiveSession) map[string]*taskGraphActiveSession {
+	out := make(map[string]*taskGraphActiveSession, len(active))
+	for i := range active {
+		issueID := strings.TrimSpace(active[i].IssueID)
+		if issueID == "" {
+			continue
+		}
+		out[issueID] = &active[i]
+	}
+	return out
+}
+
+func daemonTaskGraphPendingByIssue(pending []taskGraphPendingStart) map[string]*taskGraphPendingStart {
+	out := make(map[string]*taskGraphPendingStart, len(pending))
+	for i := range pending {
+		issueID := strings.TrimSpace(pending[i].IssueID)
+		if issueID == "" {
+			continue
+		}
+		out[issueID] = &pending[i]
+	}
+	return out
+}
+
+func daemonTaskGraphStartProgressByIssue(progress []taskGraphSessionStartProgress) map[string]*taskGraphSessionStartProgress {
+	out := make(map[string]*taskGraphSessionStartProgress, len(progress))
+	for i := range progress {
+		issueID := strings.TrimSpace(progress[i].IssueID)
+		if issueID == "" {
+			continue
+		}
+		out[issueID] = &progress[i]
+	}
+	return out
+}
+
+func daemonTaskGraphStaleCloseableByIssue(stale []taskStaleCloseableCandidate) map[string]*taskStaleCloseableCandidate {
+	out := make(map[string]*taskStaleCloseableCandidate, len(stale))
+	for i := range stale {
+		issueID := strings.TrimSpace(stale[i].IssueID)
+		if issueID == "" {
+			continue
+		}
+		out[issueID] = &stale[i]
+	}
+	return out
+}
+
+func stringSet(values []string) map[string]bool {
+	out := make(map[string]bool, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out[value] = true
+		}
+	}
+	return out
+}
+
+func (d *Daemon) workerObservationMailboxEvents(rootIssueID string) map[string][]daemonMailEvent {
+	if d == nil || strings.TrimSpace(d.cfg.RepoDir) == "" || strings.TrimSpace(rootIssueID) == "" {
+		return nil
+	}
+	events, err := readMailboxEvents(d.cfg.RepoDir, rootIssueID)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("worker observation mailbox read failed", "root_issue_id", rootIssueID, "error", err)
+		}
+		return nil
+	}
+	out := make(map[string][]daemonMailEvent)
+	for _, evt := range events {
+		issueID := strings.TrimSpace(evt.IssueID)
+		if issueID == "" {
+			continue
+		}
+		out[issueID] = append(out[issueID], evt)
+	}
+	return out
+}
+
+func (d *Daemon) workerObservationIssueEvents(ctx context.Context, projectID, issueID string) []domain.IssueObservationEvent {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil
+	}
+	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{
+		Limit:       50,
+		NewestFirst: true,
+	})
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("worker observation issue events read failed", "project_id", projectID, "issue_id", issueID, "error", err)
+		}
+		return nil
+	}
+	return events
 }
 
 func (d *Daemon) taskGraphPendingSessionStarts(ctx context.Context, projectID string) (map[string]taskGraphPendingStart, error) {

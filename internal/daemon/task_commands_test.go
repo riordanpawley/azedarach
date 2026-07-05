@@ -4585,6 +4585,265 @@ func TestTaskGraphReadinessDoesNotMisreportIncompleteChildAsCloseable(t *testing
 	}
 }
 
+func TestWorkerObservationStateDerivationPrecedence(t *testing.T) {
+	rootID := "az-root"
+	baseTask := func(id string, status domain.Status) domain.Task {
+		return domain.Task{
+			ID:       naming.IssueID(id),
+			Type:     domain.TypeTask,
+			Status:   status,
+			Priority: domain.P2,
+		}
+	}
+
+	tests := []struct {
+		name string
+		in   workerObservationInputs
+		want domain.WorkerObservationState
+	}{
+		{
+			name: "done with runtime cleanup pending wins over active",
+			in: workerObservationInputs{
+				RootIssueID: rootID,
+				Task: func() domain.Task {
+					task := baseTask("az-cleanup", domain.StatusDone)
+					task.HasTmuxSession = true
+					return task
+				}(),
+				Active: &taskGraphActiveSession{IssueID: "az-cleanup", Activity: "busy", Status: "active"},
+			},
+			want: domain.WorkerObservationCleanupPending,
+		},
+		{
+			name: "plain done",
+			in: workerObservationInputs{
+				RootIssueID: rootID,
+				Task:        baseTask("az-done", domain.StatusDone),
+			},
+			want: domain.WorkerObservationDone,
+		},
+		{
+			name: "failed active session wins over review",
+			in: workerObservationInputs{
+				RootIssueID: rootID,
+				Task:        baseTask("az-failed", domain.StatusInReview),
+				Active:      &taskGraphActiveSession{IssueID: "az-failed", Activity: "failed", Status: "active"},
+			},
+			want: domain.WorkerObservationFailed,
+		},
+		{
+			name: "waiting active session",
+			in: workerObservationInputs{
+				RootIssueID: rootID,
+				Task:        baseTask("az-waiting", domain.StatusInProgress),
+				Active:      &taskGraphActiveSession{IssueID: "az-waiting", Activity: "waiting", Status: "active"},
+			},
+			want: domain.WorkerObservationWaitingHuman,
+		},
+		{
+			name: "working active session",
+			in: workerObservationInputs{
+				RootIssueID: rootID,
+				Task:        baseTask("az-working", domain.StatusInProgress),
+				Active:      &taskGraphActiveSession{IssueID: "az-working", Activity: "busy", Status: "active"},
+			},
+			want: domain.WorkerObservationWorking,
+		},
+		{
+			name: "review beats blocked",
+			in: workerObservationInputs{
+				RootIssueID:   rootID,
+				Task:          baseTask("az-review", domain.StatusInReview),
+				BlockedReason: "waiting on az-blocker",
+			},
+			want: domain.WorkerObservationReviewReady,
+		},
+		{
+			name: "blocked",
+			in: workerObservationInputs{
+				RootIssueID:   rootID,
+				Task:          baseTask("az-blocked", domain.StatusOpen),
+				BlockedReason: "waiting on az-blocker",
+			},
+			want: domain.WorkerObservationBlocked,
+		},
+		{
+			name: "stale closeable",
+			in: workerObservationInputs{
+				RootIssueID: rootID,
+				Task:        baseTask("az-stale", domain.StatusOpen),
+				Stale:       &taskStaleCloseableCandidate{IssueID: "az-stale", Evidence: []string{"clean worktree"}},
+			},
+			want: domain.WorkerObservationStale,
+		},
+		{
+			name: "pending start",
+			in: workerObservationInputs{
+				RootIssueID: rootID,
+				Task:        baseTask("az-pending", domain.StatusOpen),
+				Pending:     &taskGraphPendingStart{IssueID: "az-pending", OperationID: "op-1", OperationState: "queued"},
+			},
+			want: domain.WorkerObservationWorking,
+		},
+		{
+			name: "runnable",
+			in: workerObservationInputs{
+				RootIssueID: rootID,
+				Task:        baseTask("az-runnable", domain.StatusOpen),
+				Runnable:    true,
+			},
+			want: domain.WorkerObservationRunnable,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := daemonWorkerObservationFromInputs(tt.in)
+			if got.State != tt.want {
+				t.Fatalf("state = %q, want %q (observation=%+v)", got.State, tt.want, got)
+			}
+			if got.SourceTruthPolicy.IssueGraph != string(daemonInvariantSourceProjection) ||
+				got.SourceTruthPolicy.SessionRuntime != string(daemonInvariantSourceHybrid) ||
+				got.SourceTruthPolicy.MailboxEvidence != string(daemonInvariantSourceProjection) {
+				t.Fatalf("source policy = %+v", got.SourceTruthPolicy)
+			}
+			if got.Reason == "" && got.State != domain.WorkerObservationDone {
+				t.Fatalf("reason missing for %+v", got)
+			}
+		})
+	}
+}
+
+func TestTaskGraphReadinessWorkerObservationsIncludeEvidenceAndMissingProjectionStates(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	projectID := "proj-worker-observation"
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Root",
+		Type:   domain.TypeEpic,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	runnableID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Runnable worker",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusOpen,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create runnable: %v", err)
+	}
+	blockerID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Blocker",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusOpen,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	blockedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Blocked worker",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusOpen,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create blocked: %v", err)
+	}
+	if err := issuesClient.AddDependency(ctx, blockedID, blockerID, string(domain.DependencyBlocks)); err != nil {
+		t.Fatalf("add blocker dependency: %v", err)
+	}
+	reviewID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Review worker",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusInReview,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create review: %v", err)
+	}
+	closedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Closed worker",
+		Type:     domain.TypeTask,
+		Status:   domain.StatusDone,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create closed: %v", err)
+	}
+
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, reviewID, issues.IssueObservationEventParams{
+		Type:       domain.IssueEventEvidenceSubmitted,
+		ObservedAt: time.Date(2026, time.June, 17, 9, 0, 0, 0, time.UTC),
+		Source:     "test",
+		Payload:    map[string]any{"summary": "focused validation passed"},
+	}); err != nil {
+		t.Fatalf("append review event: %v", err)
+	}
+	if err := appendMailboxEvent(repoDir, daemonMailEvent{
+		Seq:         7,
+		ParentIssue: rootID,
+		IssueID:     reviewID,
+		Type:        "worker-integration-ready",
+		Body:        "ready with commands and files changed",
+		CreatedAt:   time.Date(2026, time.July, 6, 10, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("append mailbox event: %v", err)
+	}
+
+	sessionStore := daemonstate.NewStore()
+	closedSessionID := naming.CanonicalSessionID(projectID, closedID)
+	if _, err := sessionStore.UpsertSession(projectID, closedSessionID, closedID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed closed session: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		sessionStore: sessionStore,
+	}
+	ready, err := d.taskGraphReadiness(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskGraphReadiness error: %v", err)
+	}
+	observations := map[string]domain.WorkerObservation{}
+	for _, observation := range ready.WorkerObservations {
+		observations[observation.IssueID] = observation
+	}
+	for _, wantID := range []string{runnableID, blockerID, blockedID, reviewID, closedID} {
+		if _, ok := observations[wantID]; !ok {
+			t.Fatalf("worker observations missing %s: %+v", wantID, ready.WorkerObservations)
+		}
+	}
+	if got := observations[runnableID]; got.State != domain.WorkerObservationRunnable {
+		t.Fatalf("runnable observation = %+v", got)
+	}
+	if got := observations[blockedID]; got.State != domain.WorkerObservationBlocked || !strings.Contains(got.Reason, blockerID) {
+		t.Fatalf("blocked observation = %+v", got)
+	}
+	if got := observations[reviewID]; got.State != domain.WorkerObservationReviewReady || got.LastEvent == nil || got.LastEvent.Kind != "mailbox" || got.LastEvent.Seq != 7 {
+		t.Fatalf("review observation = %+v", got)
+	}
+	if got := strings.Join(observations[reviewID].EvidenceSummary, "\n"); !strings.Contains(got, "worker-integration-ready") || !strings.Contains(got, "evidence.submitted") {
+		t.Fatalf("review evidence = %q", got)
+	}
+	if got := observations[closedID]; got.State != domain.WorkerObservationCleanupPending {
+		t.Fatalf("closed observation = %+v", got)
+	}
+}
+
 func TestTaskCompleteCheckReportsMixedStaleCloseableAndIncompleteChildren(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
