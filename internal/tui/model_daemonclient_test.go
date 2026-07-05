@@ -321,6 +321,127 @@ func TestMoveTaskStatusCascadeChildrenCmdSendsDaemonCascadeOption(t *testing.T) 
 	}
 }
 
+func TestIssuesLoadedCancelsReplacedDaemonStream(t *testing.T) {
+	m := newDaemonTestModel(&recordingDaemonTransport{})
+	first := make(chan protocol.EventEnvelope)
+	second := make(chan protocol.EventEnvelope)
+	firstCanceled := false
+	secondCanceled := false
+
+	loadedAny, _ := m.Update(issuesLoadedMsg{
+		events:       first,
+		eventsCancel: func() { firstCanceled = true },
+		revision:     1,
+	})
+	loaded := loadedAny.(Model)
+	if loaded.daemonEvents != first {
+		t.Fatal("expected first daemon stream to be installed")
+	}
+
+	reloadedAny, _ := loaded.Update(issuesLoadedMsg{
+		events:       second,
+		eventsCancel: func() { secondCanceled = true },
+		revision:     2,
+	})
+	reloaded := reloadedAny.(Model)
+	if !firstCanceled {
+		t.Fatal("expected replaced daemon stream to be canceled")
+	}
+	if secondCanceled {
+		t.Fatal("new daemon stream should remain active")
+	}
+	if reloaded.daemonEvents != second {
+		t.Fatal("expected second daemon stream to be installed")
+	}
+}
+
+func TestDaemonStreamClosedCancelsCurrentStreamOnly(t *testing.T) {
+	m := newDaemonTestModel(&recordingDaemonTransport{})
+	current := make(chan protocol.EventEnvelope)
+	stale := make(chan protocol.EventEnvelope)
+	currentCanceled := false
+
+	loadedAny, _ := m.Update(issuesLoadedMsg{
+		events:       current,
+		eventsCancel: func() { currentCanceled = true },
+		revision:     1,
+	})
+	loaded := loadedAny.(Model)
+
+	staleAny, _ := loaded.Update(daemonStreamClosedMsg{stream: stale})
+	afterStale := staleAny.(Model)
+	if currentCanceled {
+		t.Fatal("stale stream close should not cancel current daemon stream")
+	}
+	if afterStale.daemonEvents != current {
+		t.Fatal("stale stream close should leave current daemon stream installed")
+	}
+
+	closedAny, _ := afterStale.Update(daemonStreamClosedMsg{stream: current})
+	closed := closedAny.(Model)
+	if !currentCanceled {
+		t.Fatal("expected current daemon stream to be canceled on close")
+	}
+	if closed.daemonEvents != nil {
+		t.Fatal("expected daemon stream to clear after current close")
+	}
+}
+
+func TestStaleProjectSwitchResultCancelsUnusedDaemonStream(t *testing.T) {
+	m := newDaemonTestModel(&recordingDaemonTransport{})
+	m.projectSwitchSeq = 2
+	stream := make(chan protocol.EventEnvelope)
+	canceled := false
+
+	updatedAny, _ := m.Update(projectSwitchResultMsg{
+		switchSeq:    1,
+		events:       stream,
+		eventsCancel: func() { canceled = true },
+	})
+	updated := updatedAny.(Model)
+	if !canceled {
+		t.Fatal("expected stale project switch stream to be canceled")
+	}
+	if updated.daemonEvents != nil {
+		t.Fatal("stale project switch stream should not be installed")
+	}
+}
+
+func TestLogStreamReplacementAndCloseCancelSubscriptions(t *testing.T) {
+	m := newDaemonTestModel(&recordingDaemonTransport{})
+	first := make(chan protocol.EventEnvelope)
+	second := make(chan protocol.EventEnvelope)
+	firstCanceled := false
+	secondCanceled := false
+
+	attachedAny, _ := m.Update(logStreamAttachedMsg{
+		stream: first,
+		cancel: func() { firstCanceled = true },
+	})
+	attached := attachedAny.(Model)
+
+	replacedAny, _ := attached.Update(logStreamAttachedMsg{
+		stream: second,
+		cancel: func() { secondCanceled = true },
+	})
+	replaced := replacedAny.(Model)
+	if !firstCanceled {
+		t.Fatal("expected replaced log stream to be canceled")
+	}
+	if secondCanceled {
+		t.Fatal("new log stream should remain active")
+	}
+
+	closedAny, _ := replaced.Update(logStreamClosedMsg{stream: second})
+	closed := closedAny.(Model)
+	if !secondCanceled {
+		t.Fatal("expected current log stream to be canceled on close")
+	}
+	if closed.logStreamEvents != nil {
+		t.Fatal("expected log stream to clear after current close")
+	}
+}
+
 func TestSaveTaskCmdUpdatesEditedDescriptionThroughDaemon(t *testing.T) {
 	var updateBody struct {
 		TaskID string `json:"task_id"`
