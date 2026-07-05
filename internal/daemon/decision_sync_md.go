@@ -30,8 +30,8 @@ func (s issueDecisionService) SyncMD(ctx context.Context, req protocol.DecisionS
 	if s.daemon == nil {
 		return protocol.DecisionSyncMDResponseBody{}, errors.New("decision sync_md unavailable: daemon nil")
 	}
-	repoDir := strings.TrimSpace(s.daemon.resolveRepoDirForProject(daemonProjectIDFromContext(ctx)))
-	if repoDir == "" {
+	repoDir, err := decisionMDRepoDir(s.daemon.resolveRepoDirForProject(daemonProjectIDFromContext(ctx)), req.RepoDir)
+	if err != nil {
 		return protocol.DecisionSyncMDResponseBody{}, errors.New("decision sync_md unavailable: repo dir not resolved")
 	}
 
@@ -87,6 +87,19 @@ func (s issueDecisionService) SyncMD(ctx context.Context, req protocol.DecisionS
 		Changed: len(changedFiles) > 0,
 		Files:   changedFiles,
 	}, nil
+}
+
+func decisionMDRepoDir(fallbackRepoDir, requestRepoDir string) (string, error) {
+	if repoDir := strings.TrimSpace(requestRepoDir); repoDir != "" {
+		if !filepath.IsAbs(repoDir) {
+			return "", fmt.Errorf("repo dir must be absolute: %s", repoDir)
+		}
+		return repoDir, nil
+	}
+	if repoDir := strings.TrimSpace(fallbackRepoDir); repoDir != "" {
+		return repoDir, nil
+	}
+	return "", errors.New("repo dir not resolved")
 }
 
 // decisionMDFilename produces a stable file name for a decision. Format is

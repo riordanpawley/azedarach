@@ -1,14 +1,14 @@
 ╭──────────────────────────────────────────────────────────────────────────────────────────────╮
 │Event Log                                                                                     │
 │──────────────────────────────────────────────────────────────────────────────────────────────│
-││ Filter: [All]  |  Operation  |  Git  |  Hooks                Actions                        │
+││ Filter: [All]  |  Ops  |  Tasks  |  Git  |  Hooks            Actions                        │
 ││ TUI log: /tmp/az-tui.log                                     ───────────────────────────────│
-││ 2026-03-30 08:21:00  #42  daemon.event.new  [event]           Tab/Shift+Tab/f cycle filter  │
-││   project=azedarach  session=sess-1  correlation=corr-new     s stream (Ctrl+C to stop)     │
-││   new payload line                                            t open TUI log                │
-││ 2026-03-30 08:20:00  #41  daemon.event.old  [event]           Esc/q/backspace close         │
-││   project=azedarach  session=sess-1  correlation=corr-old                                   │
-││   old payload line                                                                          │
+││    TIME     SUBJECT          KIND          SUMMARY            Tab/Shift+Tab/f cycle filter  │
+││ >+ 08:21:00 sess-1           event         Daemon even...     Enter/Space expand            │
+││  + 08:20:00 sess-1           event         Daemon even...     s stream (Ctrl+C to stop)     │
+││                                                               t open TUI log                │
+││                                                               Esc/q/backspace close         │
+││                                                                                             │
 ││                                                                                             │
 ││                                                                                             │
 ││                                                                                             │
