@@ -3016,6 +3016,86 @@ func TestClient_ReplaysAgentLearningPrivacyMigrationWhenColumnAlreadyExists(t *t
 	assert.True(t, indexed)
 }
 
+func TestClient_RepairsAppliedAgentLearningMigrationMissingReviewColumns(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		seedLearning bool
+	}{
+		{name: "with learnings", seedLearning: true},
+		{name: "without learnings", seedLearning: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+
+			client := NewClientAtPath(dbPath, slog.Default())
+			_, err := client.List(ctx)
+			require.NoError(t, err)
+			var created Learning
+			if tc.seedLearning {
+				issueID, err := client.Create(ctx, CreateTaskParams{
+					Title:    "learning schema repair",
+					Type:     domain.TypeTask,
+					Priority: domain.P3,
+				})
+				require.NoError(t, err)
+				created, err = client.CreateLearning(ctx, CreateLearningParams{
+					ProjectID: "proj",
+					IssueID:   &issueID,
+					Summary:   "Keep migration repair idempotent",
+					Evidence:  "Affected databases have 0019 marked applied but are missing review columns.",
+					Tags:      []string{"migration"},
+				})
+				require.NoError(t, err)
+			}
+			require.NoError(t, client.CloseDB())
+
+			db, err := sql.Open("sqlite", "file:"+dbPath)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = db.Close() })
+			for _, column := range []string{"review_note", "reviewed_at"} {
+				_, err = db.ExecContext(ctx, "ALTER TABLE agent_learnings DROP COLUMN "+column)
+				require.NoError(t, err)
+			}
+
+			var applied bool
+			err = db.QueryRowContext(ctx, `
+				SELECT EXISTS(
+					SELECT 1 FROM schema_migrations WHERE id = '0019_agent_learnings'
+				)
+			`).Scan(&applied)
+			require.NoError(t, err)
+			require.True(t, applied)
+
+			client = NewClientAtPath(dbPath, slog.Default())
+			t.Cleanup(func() {
+				require.NoError(t, client.CloseDB())
+			})
+			rows, err := client.ListLearnings(ctx, LearningFilter{
+				ProjectID: "proj",
+				Query:     "idempotent",
+				Limit:     5,
+			})
+			require.NoError(t, err)
+			if !tc.seedLearning {
+				assert.Empty(t, rows)
+			} else {
+				require.Len(t, rows, 1)
+				assert.Equal(t, created.LocalID, rows[0].LocalID)
+				assert.Empty(t, rows[0].ReviewNote)
+				assert.Nil(t, rows[0].ReviewedAt)
+			}
+
+			columns, err := tableColumns(db, "agent_learnings")
+			require.NoError(t, err)
+			for _, column := range []string{"review_note", "reviewed_at"} {
+				_, exists := columns[column]
+				assert.True(t, exists)
+			}
+		})
+	}
+}
+
 func TestClient_MigratesClosedRuntimeInvariantViolationsToInReview(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
