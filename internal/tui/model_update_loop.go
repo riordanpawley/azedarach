@@ -78,6 +78,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case overlay.SelectionMsg:
+		if strings.HasPrefix(msg.Key, "notification_") {
+			return m.handleNotificationActionCenterSelection(msg)
+		}
 		if msg.Key == "async_recovery_recover" {
 			id, _ := msg.Value.(string)
 			notification, ok := m.asyncRecoveryNotificationByID(id)
@@ -1099,11 +1102,70 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.logger != nil {
 				m.logger.Debug("daemon notice update failed", "error", msg.err)
 			}
+			if strings.TrimSpace(msg.label) != "" {
+				m.addToast(Toast{
+					Level:   ToastError,
+					Message: fmt.Sprintf("%s failed: %v", msg.label, msg.err),
+					Expires: time.Now().Add(5 * time.Second),
+				})
+			}
 			return m, nil
 		}
 		if strings.TrimSpace(msg.notice.NoticeID) != "" {
 			m.applyFeedbackNoticeSnapshot(append(m.feedbackNotices(), msg.notice))
 		}
+		if strings.TrimSpace(msg.label) != "" {
+			m.addToast(Toast{
+				Level:   ToastSuccess,
+				Message: msg.label,
+				Expires: time.Now().Add(3 * time.Second),
+			})
+		}
+		return m, nil
+
+	case noticeActionResultMsg:
+		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
+			return m, nil
+		}
+		if msg.err != nil {
+			if m.logger != nil {
+				m.logger.Debug("daemon notice action failed", "error", msg.err)
+			}
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Notice action failed: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		if strings.TrimSpace(msg.notice.NoticeID) != "" {
+			m.applyFeedbackNoticeSnapshot(append(m.feedbackNotices(), msg.notice))
+		}
+		label := strings.TrimSpace(msg.label)
+		if label == "" {
+			label = "Notice action"
+		}
+		m.addToast(Toast{
+			Level:   ToastSuccess,
+			Message: label + " applied",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+
+	case notificationCopyDetailsResultMsg:
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Copy details failed: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		m.addToast(Toast{
+			Level:   ToastSuccess,
+			Message: "Notification details copied",
+			Expires: time.Now().Add(3 * time.Second),
+		})
 		return m, nil
 
 	case overlay.TaskCreatedMsg:

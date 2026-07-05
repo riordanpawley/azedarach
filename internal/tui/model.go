@@ -170,10 +170,17 @@ type notificationHistoryEntry struct {
 	DaemonNoticeID string
 	CreatedAt      time.Time
 	Level          ToastLevel
+	Category       string
+	State          protocol.NoticeState
 	Reference      string
+	ScopeType      string
+	ScopeID        string
+	OperationID    string
 	Message        string
+	Detail         string
 	Read           bool
 	Dismissed      bool
+	Actions        []protocol.NoticeAction
 }
 
 // Model is the main application state
@@ -1157,7 +1164,19 @@ type noticeRecordsLoadedMsg struct {
 type noticeUpdateResultMsg struct {
 	projectID string
 	notice    protocol.NoticeRecord
+	label     string
 	err       error
+}
+
+type noticeActionResultMsg struct {
+	projectID string
+	notice    protocol.NoticeRecord
+	label     string
+	err       error
+}
+
+type notificationCopyDetailsResultMsg struct {
+	err error
 }
 
 type uiViewModeLoadedMsg struct {

@@ -785,6 +785,192 @@ func TestDaemonNoticeProjectionOrdersFloatingToastsByOccurrence(t *testing.T) {
 	}
 }
 
+func TestNotificationActionCenterMarkReadUsesDaemonNoticeUpdate(t *testing.T) {
+	m := newTestModel()
+	var gotBody protocol.NoticeUpdateRequestBody
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != protocol.CommandNoticeUpdate {
+				t.Fatalf("command = %q, want notice.update", req.Command)
+			}
+			if err := json.Unmarshal(req.Body, &gotBody); err != nil {
+				t.Fatalf("unmarshal notice update request: %v", err)
+			}
+			respBody, err := json.Marshal(protocol.NoticeUpdateResponseBody{
+				Notice: protocol.NoticeRecord{
+					NoticeID:  gotBody.NoticeID,
+					ProjectID: naming.ProjectID(m.daemonProjectID()),
+					State:     protocol.NoticeStateActive,
+					Read:      gotBody.Read != nil && *gotBody.Read,
+				},
+			})
+			if err != nil {
+				return protocol.ResponseEnvelope{}, err
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m.daemonClient = daemonclient.New(transport).WithProjectID(m.daemonProjectID())
+
+	_, cmd := m.handleNotificationActionCenterSelection(overlay.SelectionMsg{
+		Key: "notification_mark_read",
+		Value: overlay.NotificationActionCenterMsg{
+			DaemonNoticeID: "notice-1",
+			Read:           true,
+		},
+	})
+	if cmd == nil {
+		t.Fatal("expected notice update command")
+	}
+	msg, ok := cmd().(noticeUpdateResultMsg)
+	if !ok || msg.err != nil {
+		t.Fatalf("message = %T/%+v, want successful noticeUpdateResultMsg", msg, msg)
+	}
+	if gotBody.NoticeID != "notice-1" || gotBody.Read == nil || !*gotBody.Read || gotBody.State != "" {
+		t.Fatalf("notice update body = %+v, want read-only update", gotBody)
+	}
+	if msg.label != "Marked read" {
+		t.Fatalf("notice update label = %q, want Marked read", msg.label)
+	}
+}
+
+func TestNotificationActionCenterNoticeUpdateFailureShowsToast(t *testing.T) {
+	m := newTestModel()
+
+	updatedAny, _ := m.Update(noticeUpdateResultMsg{
+		projectID: m.daemonProjectID(),
+		label:     "Marked read",
+		err:       errors.New("daemon unavailable"),
+	})
+	updated := updatedAny.(Model)
+	if len(updated.toasts) == 0 {
+		t.Fatal("expected notice update failure toast")
+	}
+	if got := updated.toasts[len(updated.toasts)-1].Message; !strings.Contains(got, "Marked read failed") || !strings.Contains(got, "daemon unavailable") {
+		t.Fatalf("toast = %q, want labeled notice update failure", got)
+	}
+}
+
+func TestNotificationActionCenterRunsDaemonNoticeAction(t *testing.T) {
+	m := newTestModel()
+	var gotBody protocol.NoticeActionRequestBody
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != protocol.CommandNoticeAction {
+				t.Fatalf("command = %q, want notice.action", req.Command)
+			}
+			if err := json.Unmarshal(req.Body, &gotBody); err != nil {
+				t.Fatalf("unmarshal notice action request: %v", err)
+			}
+			respBody, err := json.Marshal(protocol.NoticeActionResponseBody{
+				Notice: protocol.NoticeRecord{
+					NoticeID:  gotBody.NoticeID,
+					ProjectID: naming.ProjectID(m.daemonProjectID()),
+					State:     protocol.NoticeStateDismissed,
+					Read:      true,
+				},
+			})
+			if err != nil {
+				return protocol.ResponseEnvelope{}, err
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m.daemonClient = daemonclient.New(transport).WithProjectID(m.daemonProjectID())
+
+	_, cmd := m.handleNotificationActionCenterSelection(overlay.SelectionMsg{
+		Key: "notification_action",
+		Value: overlay.NotificationActionCenterMsg{
+			DaemonNoticeID: "notice-1",
+			ActionID:       "dismiss",
+			Kind:           "dismiss",
+			Label:          "Dismiss",
+		},
+	})
+	if cmd == nil {
+		t.Fatal("expected notice action command")
+	}
+	msg, ok := cmd().(noticeActionResultMsg)
+	if !ok || msg.err != nil {
+		t.Fatalf("message = %T/%+v, want successful noticeActionResultMsg", msg, msg)
+	}
+	if gotBody.NoticeID != "notice-1" || gotBody.ActionID != "dismiss" {
+		t.Fatalf("notice action body = %+v, want dismiss action", gotBody)
+	}
+}
+
+func TestNotificationActionCenterLocalCopyDetailsUsesClipboardHelper(t *testing.T) {
+	m := newTestModel()
+	old := writeNotificationClipboardText
+	var copied string
+	writeNotificationClipboardText = func(_ context.Context, text string) error {
+		copied = text
+		return nil
+	}
+	defer func() { writeNotificationClipboardText = old }()
+
+	_, cmd := m.handleNotificationActionCenterSelection(overlay.SelectionMsg{
+		Key: "notification_action",
+		Value: overlay.NotificationActionCenterMsg{
+			ActionID: "copy_details",
+			Kind:     "client.copy_details",
+			Details:  "failure details\noperation: op-1",
+		},
+	})
+	if cmd == nil {
+		t.Fatal("expected copy details command")
+	}
+	msg, ok := cmd().(notificationCopyDetailsResultMsg)
+	if !ok || msg.err != nil {
+		t.Fatalf("message = %T/%+v, want successful notificationCopyDetailsResultMsg", msg, msg)
+	}
+	if copied != "failure details\noperation: op-1" {
+		t.Fatalf("copied = %q, want notice details", copied)
+	}
+}
+
+func TestNotificationActionCenterOpenTaskRoutesUseExistingWorkspaceRoute(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		actionID string
+		kind     string
+	}{
+		{name: "open task", actionID: "open_task", kind: "client.open_task"},
+		{name: "open workspace", actionID: "open_workspace", kind: "client.open_workspace"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModel()
+			m.overlayStack.Push(overlay.NewNotificationHistoryOverlay(nil))
+
+			updatedAny, _ := m.handleNotificationActionCenterSelection(overlay.SelectionMsg{
+				Key: "notification_action",
+				Value: overlay.NotificationActionCenterMsg{
+					ActionID:  tt.actionID,
+					Kind:      tt.kind,
+					ScopeType: "issue",
+					ScopeID:   "az-1",
+				},
+			})
+			updated := updatedAny.(Model)
+			if _, ok := updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
+				t.Fatalf("current overlay = %T, want TaskWorkspaceOverlay", updated.overlayStack.Current())
+			}
+		})
+	}
+}
+
 func TestUpdate_AttachmentActionStagedAddsToast(t *testing.T) {
 	m := newTestModel()
 

@@ -140,18 +140,22 @@ func (p *feedbackProjection) dismissNotice(id string) bool {
 }
 
 func (p *feedbackProjection) markRead(id string) bool {
+	return p.setRead(id, true)
+}
+
+func (p *feedbackProjection) setRead(id string, read bool) bool {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return false
 	}
 	for i := range p.localNotices {
 		if p.localNotices[i].ID == id {
-			p.localNotices[i].Read = true
+			p.localNotices[i].Read = read
 			return true
 		}
 	}
 	if notice, ok := p.noticesByID[id]; ok {
-		notice.Read = true
+		notice.Read = read
 		p.noticesByID[id] = notice
 		return true
 	}
@@ -193,6 +197,8 @@ func (p *feedbackProjection) materialize(tasks []domain.Task, now time.Time) fee
 			ID:        local.ID,
 			CreatedAt: local.CreatedAt,
 			Level:     local.Toast.Level,
+			Category:  "local",
+			State:     protocol.NoticeStateActive,
 			Reference: notificationReference(local.Toast.Message),
 			Message:   local.Toast.Message,
 			Read:      local.Read,
@@ -222,10 +228,19 @@ func (p *feedbackProjection) materialize(tasks []domain.Task, now time.Time) fee
 			DaemonNoticeID: strings.TrimSpace(notice.NoticeID),
 			CreatedAt:      noticeCreatedAt(notice),
 			Level:          noticeToastLevel(notice.Severity),
+			Category:       strings.TrimSpace(notice.Category),
+			State:          notice.State,
 			Reference:      noticeReference(notice),
+			ScopeType:      strings.TrimSpace(notice.Scope.Type),
+			ScopeID:        strings.TrimSpace(notice.Scope.ID),
 			Message:        noticeSummary(notice),
+			Detail:         compactSummaryText(notice.Detail),
 			Read:           notice.Read,
 			Dismissed:      notice.State == protocol.NoticeStateDismissed,
+			Actions:        cloneNoticeActions(notice.Actions),
+		}
+		if notice.Source != nil {
+			entry.OperationID = strings.TrimSpace(notice.Source.OperationID.String())
 		}
 		if entry.Message != "" {
 			history = append(history, entry)
@@ -279,6 +294,15 @@ func (p *feedbackProjection) materialize(tasks []domain.Task, now time.Time) fee
 		history:               history,
 		failures:              failures,
 	}
+}
+
+func cloneNoticeActions(actions []protocol.NoticeAction) []protocol.NoticeAction {
+	if len(actions) == 0 {
+		return nil
+	}
+	copied := make([]protocol.NoticeAction, len(actions))
+	copy(copied, actions)
+	return copied
 }
 
 func noticeCreatedAt(notice protocol.NoticeRecord) time.Time {

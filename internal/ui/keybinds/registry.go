@@ -186,7 +186,7 @@ var registry = []ActionSpec{
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "V (workspace)", Help: "Open dev server menu"},
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "w/W", Help: "Cleanup worktree / delete + cleanup"},
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "n", Help: "Open async failure recovery overlay"},
-	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "N", Help: "Open notification history drawer"},
+	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "N", Help: "Open notification action center"},
 
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "Tab", Help: "Toggle compact/kanban view"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "esc", Help: "Close overlay / exit mode"},

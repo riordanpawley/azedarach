@@ -1,7 +1,10 @@
 package app
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -13,6 +16,7 @@ import (
 
 var notificationStructuredReferencePattern = regexp.MustCompile(`\b(?:[a-z]{2,10}-\d+|op[-_][a-zA-Z0-9._:-]+)\b`)
 var notificationBareIssueReferencePattern = regexp.MustCompile(`\b[a-z]{3,5}[a-z0-9]{0,2}\b`)
+var writeNotificationClipboardText = writeClipboardText
 
 func (m *Model) recordNotificationHistory(toast Toast, createdAt time.Time) string {
 	id := m.feedback.addLocalToast(toast, createdAt)
@@ -106,13 +110,21 @@ func (m *Model) openNotificationHistoryOverlayCmd() tea.Cmd {
 		}
 		entry.Read = true
 		items = append(items, overlay.NotificationHistoryItem{
-			ID:        entry.ID,
-			CreatedAt: entry.CreatedAt,
-			Level:     notificationLevelLabel(entry.Level),
-			Reference: entry.Reference,
-			Message:   entry.Message,
-			Read:      entry.Read,
-			Dismissed: entry.Dismissed,
+			ID:             entry.ID,
+			DaemonNoticeID: strings.TrimSpace(entry.DaemonNoticeID),
+			CreatedAt:      entry.CreatedAt,
+			Level:          notificationLevelLabel(entry.Level),
+			Category:       strings.TrimSpace(entry.Category),
+			State:          string(entry.State),
+			Reference:      entry.Reference,
+			ScopeType:      strings.TrimSpace(entry.ScopeType),
+			ScopeID:        strings.TrimSpace(entry.ScopeID),
+			OperationID:    strings.TrimSpace(entry.OperationID),
+			Message:        entry.Message,
+			Detail:         entry.Detail,
+			Read:           entry.Read,
+			Dismissed:      entry.Dismissed,
+			Actions:        cloneOverlayNoticeActions(entry.Actions),
 		})
 	}
 	m.refreshFeedbackProjectionOutputs(time.Now())
@@ -135,6 +147,15 @@ func notificationLevelLabel(level ToastLevel) string {
 	}
 }
 
+func cloneOverlayNoticeActions(actions []protocol.NoticeAction) []protocol.NoticeAction {
+	if len(actions) == 0 {
+		return nil
+	}
+	copied := make([]protocol.NoticeAction, len(actions))
+	copy(copied, actions)
+	return copied
+}
+
 func (m *Model) markNotificationDismissed(id string) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -142,6 +163,250 @@ func (m *Model) markNotificationDismissed(id string) {
 	}
 	_ = m.feedback.dismissNotice(id)
 	m.refreshFeedbackProjectionOutputs(time.Now())
+}
+
+func (m Model) updateNotificationReadCmd(action overlay.NotificationActionCenterMsg) tea.Cmd {
+	daemonNoticeID := strings.TrimSpace(action.DaemonNoticeID)
+	if daemonNoticeID == "" {
+		return nil
+	}
+	client := m.daemonClient
+	projectID := m.daemonProjectID()
+	if client == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		read := action.Read
+		notice, err := client.UpdateNotice(ctx, daemonNoticeID, &read, "")
+		label := "Marked read"
+		if !read {
+			label = "Marked unread"
+		}
+		return noticeUpdateResultMsg{projectID: projectID, notice: notice, label: label, err: err}
+	}
+}
+
+func (m Model) dismissDaemonNoticesCmd(actions []overlay.NotificationActionCenterMsg) tea.Cmd {
+	client := m.daemonClient
+	projectID := m.daemonProjectID()
+	if client == nil || len(actions) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(actions))
+	seen := map[string]struct{}{}
+	for _, action := range actions {
+		id := strings.TrimSpace(action.DaemonNoticeID)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var last protocol.NoticeRecord
+		count := 0
+		for _, id := range ids {
+			notice, err := client.UpdateNotice(ctx, id, nil, protocol.NoticeStateDismissed)
+			if err != nil {
+				return noticeUpdateResultMsg{projectID: projectID, label: "Dismiss notification", err: err}
+			}
+			count++
+			last = notice
+		}
+		label := "Dismissed notification"
+		if count > 1 {
+			label = fmt.Sprintf("Dismissed %d notifications", count)
+		}
+		return noticeUpdateResultMsg{projectID: projectID, notice: last, label: label}
+	}
+}
+
+func (m Model) runNotificationActionCmd(action overlay.NotificationActionCenterMsg) tea.Cmd {
+	daemonNoticeID := strings.TrimSpace(action.DaemonNoticeID)
+	actionID := strings.TrimSpace(action.ActionID)
+	if daemonNoticeID == "" || actionID == "" {
+		return nil
+	}
+	client := m.daemonClient
+	projectID := m.daemonProjectID()
+	if client == nil {
+		return nil
+	}
+	label := strings.TrimSpace(action.Label)
+	if label == "" {
+		label = actionID
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		notice, err := client.RunNoticeAction(ctx, daemonNoticeID, actionID, nil)
+		return noticeActionResultMsg{projectID: projectID, notice: notice, label: label, err: err}
+	}
+}
+
+func (m Model) copyNotificationDetailsCmd(details string) tea.Cmd {
+	details = strings.TrimSpace(details)
+	if details == "" {
+		return func() tea.Msg { return notificationCopyDetailsResultMsg{err: fmt.Errorf("notice details are empty")} }
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return notificationCopyDetailsResultMsg{err: writeNotificationClipboardText(ctx, details)}
+	}
+}
+
+func (m Model) handleNotificationActionCenterSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
+	switch msg.Key {
+	case "notification_mark_read":
+		action, ok := msg.Value.(overlay.NotificationActionCenterMsg)
+		if !ok {
+			return m, nil
+		}
+		if strings.TrimSpace(action.DaemonNoticeID) == "" {
+			_ = m.feedback.setRead(action.NoticeID, action.Read)
+			m.refreshFeedbackProjectionOutputs(time.Now())
+			return m, nil
+		}
+		return m, m.updateNotificationReadCmd(action)
+
+	case "notification_dismiss":
+		action, ok := msg.Value.(overlay.NotificationActionCenterMsg)
+		if !ok {
+			return m, nil
+		}
+		if strings.TrimSpace(action.DaemonNoticeID) == "" {
+			m.markNotificationDismissed(action.NoticeID)
+			return m, nil
+		}
+		return m, m.dismissDaemonNoticesCmd([]overlay.NotificationActionCenterMsg{action})
+
+	case "notification_dismiss_all":
+		actions, ok := msg.Value.([]overlay.NotificationActionCenterMsg)
+		if !ok {
+			return m, nil
+		}
+		for _, action := range actions {
+			if strings.TrimSpace(action.DaemonNoticeID) == "" {
+				m.markNotificationDismissed(action.NoticeID)
+			}
+		}
+		return m, m.dismissDaemonNoticesCmd(actions)
+
+	case "notification_action":
+		action, ok := msg.Value.(overlay.NotificationActionCenterMsg)
+		if !ok {
+			return m, nil
+		}
+		if notificationActionIsClientLocal(action) {
+			return m.handleNotificationClientAction(action)
+		}
+		return m, m.runNotificationActionCmd(action)
+	}
+	return m, nil
+}
+
+func (m Model) handleNotificationClientAction(action overlay.NotificationActionCenterMsg) (tea.Model, tea.Cmd) {
+	kind := strings.TrimSpace(action.Kind)
+	if kind == "" {
+		kind = strings.TrimSpace(action.ActionID)
+	}
+	switch kind {
+	case "client.open_task", "open_task":
+		issueID := notificationActionIssueID(action)
+		if issueID == "" {
+			m.addToast(Toast{Level: ToastWarning, Message: "Notification has no task target", Expires: time.Now().Add(4 * time.Second)})
+			return m, nil
+		}
+		m.overlayStack.Pop()
+		return m.openTaskWorkspaceByID(issueID)
+
+	case "client.open_workspace", "open_workspace":
+		issueID := notificationActionIssueID(action)
+		if issueID == "" {
+			m.addToast(Toast{Level: ToastWarning, Message: "Notification has no workspace target", Expires: time.Now().Add(4 * time.Second)})
+			return m, nil
+		}
+		m.overlayStack.Pop()
+		return m.openTaskWorkspaceByID(issueID)
+
+	case "client.open_logs", "open_logs":
+		m.overlayStack.Pop()
+		return m, tea.Batch(
+			m.openOverlay(overlay.NewEventLogOverlayWithLogFiles(
+				m.runtimeEvents,
+				m.eventLogFilePath(),
+				m.daemonLogFilePath(),
+			)),
+			m.loadHookLogEventsCmd(),
+		)
+
+	case "client.copy_details", "copy_details":
+		return m, m.copyNotificationDetailsCmd(action.Details)
+	}
+	return m, m.runNotificationActionCmd(action)
+}
+
+func notificationActionIsClientLocal(action overlay.NotificationActionCenterMsg) bool {
+	kind := strings.TrimSpace(action.Kind)
+	if strings.HasPrefix(kind, "client.") {
+		return true
+	}
+	switch strings.TrimSpace(action.ActionID) {
+	case "open_task", "open_workspace", "open_logs", "copy_details":
+		return true
+	default:
+		return false
+	}
+}
+
+func notificationActionIssueID(action overlay.NotificationActionCenterMsg) string {
+	if strings.TrimSpace(action.ScopeType) == "issue" && strings.TrimSpace(action.ScopeID) != "" {
+		return strings.TrimSpace(action.ScopeID)
+	}
+	return ""
+}
+
+func writeClipboardText(ctx context.Context, text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return fmt.Errorf("clipboard text is empty")
+	}
+	candidates := [][]string{
+		{"pbcopy"},
+		{"wl-copy"},
+		{"xclip", "-selection", "clipboard"},
+	}
+	var tried []string
+	for _, candidate := range candidates {
+		path, err := exec.LookPath(candidate[0])
+		if err != nil {
+			continue
+		}
+		cmd := exec.CommandContext(ctx, path, candidate[1:]...)
+		cmd.Stdin = strings.NewReader(text)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			tried = append(tried, candidate[0]+": "+strings.TrimSpace(stderr.String()))
+			continue
+		}
+		return nil
+	}
+	if len(tried) > 0 {
+		return fmt.Errorf("copy details: %s", strings.Join(tried, "; "))
+	}
+	return fmt.Errorf("no clipboard command found")
 }
 
 func (m *Model) refreshFeedbackProjectionOutputs(now time.Time) {
