@@ -337,6 +337,12 @@ func New(cfg Config) *Daemon {
 	gitService.onStatusUpdate = func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) {
 		d.runtimeProjectionStateWriter().PublishGitStatusProjectionEvent(ctx, projectID, issueID, worktree, status)
 	}
+	noticeService := daemonnotices.NewService(daemonnotices.ServiceConfig{
+		Repository:   daemonnotices.New(cfg.RepoDir, cfg.Logger),
+		Hub:          d.hub,
+		NextRevision: d.nextRevision,
+		Logger:       cfg.Logger,
+	})
 	runtime := newOperationRuntime(operationRuntimeConfig{
 		repoDir:                cfg.RepoDir,
 		logger:                 cfg.Logger,
@@ -346,12 +352,7 @@ func New(cfg Config) *Daemon {
 		sessionStop:            d.handleSessionStopDirect,
 		sessionResolveConflict: d.handleSessionResolveConflictDirect,
 		recoverInterrupted:     d.recoverInterruptedOperation,
-	})
-	noticeService := daemonnotices.NewService(daemonnotices.ServiceConfig{
-		Repository:   daemonnotices.New(cfg.RepoDir, cfg.Logger),
-		Hub:          d.hub,
-		NextRevision: d.nextRevision,
-		Logger:       cfg.Logger,
+		noticeService:          noticeService,
 	})
 	commandExecutor := operationCommandExecutor{runtime: runtime}
 	sessionExecutor := sessionOperationExecutor{runtime: runtime}

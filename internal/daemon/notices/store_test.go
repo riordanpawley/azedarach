@@ -58,6 +58,14 @@ func TestSQLiteStoreUpsertActiveDedupesWithinProject(t *testing.T) {
 	if len(records) != 1 || records[0].NoticeID != first.NoticeID {
 		t.Fatalf("proj-1 records = %+v, want one deduped record", records)
 	}
+
+	records, err = store.List(ctx, Query{ProjectID: "proj-1", DedupeKey: first.DedupeKey})
+	if err != nil {
+		t.Fatalf("list by dedupe key: %v", err)
+	}
+	if len(records) != 1 || records[0].NoticeID != first.NoticeID {
+		t.Fatalf("dedupe-key records = %+v, want first notice", records)
+	}
 }
 
 func TestSQLiteStoreUpdateLifecycleAndRejectsInvalidTransition(t *testing.T) {

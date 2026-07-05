@@ -181,6 +181,10 @@ func (s *SQLiteStore) List(ctx context.Context, query Query) ([]Record, error) {
 		where = append(where, "source_operation_id = ?")
 		args = append(args, operationID)
 	}
+	if dedupeKey := strings.TrimSpace(query.DedupeKey); dedupeKey != "" {
+		where = append(where, "dedupe_key = ?")
+		args = append(args, dedupeKey)
+	}
 	if query.UpdatedAfter != nil {
 		where = append(where, "updated_at > ?")
 		args = append(args, query.UpdatedAfter.UTC().Format(time.RFC3339Nano))

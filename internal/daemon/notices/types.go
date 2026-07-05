@@ -97,6 +97,7 @@ type Query struct {
 	ScopeType    string
 	ScopeID      string
 	OperationID  string
+	DedupeKey    string
 	UpdatedAfter *time.Time
 	Limit        int
 }

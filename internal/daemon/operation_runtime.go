@@ -14,6 +14,7 @@ import (
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	daemonnotices "github.com/riordanpawley/azedarach/internal/daemon/notices"
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	opmanager "github.com/riordanpawley/azedarach/internal/daemon/operations/manager"
 	opstore "github.com/riordanpawley/azedarach/internal/daemon/operations/store"
@@ -40,6 +41,7 @@ type operationRuntimeConfig struct {
 	recoverInterrupted     func(context.Context, daemonops.Record) (interruptedOperationRecovery, bool)
 	gitHandler             *daemonhandlers.GitHandler
 	worktreeHandler        *daemonhandlers.WorktreeHandler
+	noticeService          *daemonnotices.Service
 }
 
 type operationRuntime struct {
@@ -72,6 +74,7 @@ type operationStoreAdapter struct {
 	nextRevision          func(string) uint64
 	logger                *slog.Logger
 	canonicalizeProjectID func(string) string
+	noticeService         *daemonnotices.Service
 }
 
 type operationResultEnvelope struct {
@@ -134,6 +137,7 @@ func newOperationRuntime(cfg operationRuntimeConfig) *operationRuntime {
 		nextRevision:          cfg.nextRevision,
 		logger:                logger,
 		canonicalizeProjectID: canonicalizeProjectID,
+		noticeService:         cfg.noticeService,
 	}
 	reconcileInterruptedOperations(context.Background(), adapter, logger, cfg.recoverInterrupted)
 	manager := opmanager.New(adapter, opmanager.Config{Logger: logger})
@@ -963,6 +967,7 @@ func (s *operationStoreAdapter) Update(ctx context.Context, params daemonops.Upd
 		return out, nil
 	}
 	s.publish(out)
+	s.publishOperationNotice(ctx, out)
 	return out, nil
 }
 
@@ -1029,6 +1034,294 @@ func (s *operationStoreAdapter) publishProgress(record daemonops.Record) {
 		EmittedAt:       time.Now().UTC(),
 		Body:            progressBody,
 	})
+}
+
+func (s *operationStoreAdapter) publishOperationNotice(ctx context.Context, record daemonops.Record) {
+	if s.noticeService == nil {
+		return
+	}
+	switch record.State {
+	case daemonops.StateFailed:
+		s.upsertOperationFailureNotice(ctx, record)
+	case daemonops.StateDone:
+		s.resolveOperationFailureNotices(ctx, record)
+	}
+}
+
+func (s *operationStoreAdapter) upsertOperationFailureNotice(ctx context.Context, record daemonops.Record) {
+	dedupeKey := operationNoticeDedupeKey(record)
+	projectID := s.operationNoticeProjectID(record.ProjectID)
+	if s.staleOperationFailureNotice(ctx, projectID, dedupeKey, record) {
+		return
+	}
+	candidate := daemonnotices.Candidate{
+		ProjectID: projectID,
+		Scope:     operationNoticeScope(record),
+		Source: &daemonnotices.Source{
+			OperationID:    parseOperationIDOrZero(record.ID),
+			OperationKind:  strings.TrimSpace(record.Kind),
+			OperationState: protocol.OperationState(record.State),
+			Producer:       "daemon.operation",
+		},
+		Severity:       daemonnotices.SeverityError,
+		Category:       "operation_failed",
+		Title:          operationFailureNoticeTitle(record),
+		Summary:        operationFailureNoticeSummary(record),
+		Detail:         operationFailureNoticeDetail(record),
+		Cause:          operationFailureNoticeCause(record),
+		Actions:        operationFailureNoticeActions(record),
+		DedupeKey:      dedupeKey,
+		OccurredAt:     operationNoticeOccurredAt(record),
+		RetentionClass: daemonnotices.RetentionError,
+	}
+	if _, _, _, err := s.noticeService.Upsert(ctx, candidate); err != nil && s.logger != nil {
+		s.logger.Warn("failed to upsert operation failure notice",
+			"operation_id", record.ID,
+			"project_id", projectID,
+			"kind", record.Kind,
+			"error", err,
+		)
+	}
+}
+
+func (s *operationStoreAdapter) staleOperationFailureNotice(ctx context.Context, projectID, dedupeKey string, record daemonops.Record) bool {
+	if dedupeKey == "" {
+		return false
+	}
+	records, err := s.noticeService.List(ctx, daemonnotices.Query{
+		ProjectID: projectID,
+		Category:  "operation_failed",
+		DedupeKey: dedupeKey,
+		Limit:     1,
+	})
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("failed to inspect operation failure notice freshness",
+				"operation_id", record.ID,
+				"project_id", projectID,
+				"kind", record.Kind,
+				"error", err,
+			)
+		}
+		return false
+	}
+	if len(records) == 0 {
+		return false
+	}
+	latest := records[0]
+	if latest.State == daemonnotices.StateActive {
+		return false
+	}
+	generation := record.CreatedAt
+	if record.StartedAt != nil {
+		generation = *record.StartedAt
+	}
+	return !generation.IsZero() && !latest.UpdatedAt.IsZero() && !generation.After(latest.UpdatedAt)
+}
+
+func (s *operationStoreAdapter) resolveOperationFailureNotices(ctx context.Context, record daemonops.Record) {
+	dedupeKey := operationNoticeDedupeKey(record)
+	if dedupeKey == "" {
+		return
+	}
+	projectID := s.operationNoticeProjectID(record.ProjectID)
+	records, err := s.noticeService.List(ctx, daemonnotices.Query{
+		ProjectID: projectID,
+		States:    []daemonnotices.State{daemonnotices.StateActive},
+		Category:  "operation_failed",
+		DedupeKey: dedupeKey,
+		Limit:     16,
+	})
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("failed to list operation failure notices for resolution",
+				"operation_id", record.ID,
+				"project_id", projectID,
+				"kind", record.Kind,
+				"error", err,
+			)
+		}
+		return
+	}
+	for _, notice := range records {
+		if _, _, _, err := s.noticeService.Update(ctx, daemonnotices.UpdateParams{
+			ProjectID: projectID,
+			NoticeID:  notice.NoticeID,
+			State:     daemonnotices.StateResolved,
+			Now:       operationNoticeOccurredAt(record),
+		}); err != nil && s.logger != nil {
+			s.logger.Warn("failed to resolve operation failure notice",
+				"operation_id", record.ID,
+				"notice_id", notice.NoticeID,
+				"project_id", projectID,
+				"kind", record.Kind,
+				"error", err,
+			)
+		}
+	}
+}
+
+func (s *operationStoreAdapter) operationNoticeProjectID(projectID string) string {
+	projectID = coalesceProjectID(projectID, "")
+	if s.canonicalizeProjectID != nil {
+		projectID = s.canonicalizeProjectID(projectID)
+	}
+	return projectID
+}
+
+func operationNoticeDedupeKey(record daemonops.Record) string {
+	kind := strings.TrimSpace(record.Kind)
+	if kind == "" {
+		kind = "operation"
+	}
+	intent := strings.TrimSpace(record.DedupeKey)
+	switch {
+	case intent != "":
+		return "operation_failed:" + kind + ":" + intent
+	case strings.TrimSpace(record.IssueID) != "":
+		return "operation_failed:" + kind + ":issue:" + strings.TrimSpace(record.IssueID)
+	case len(record.ResourceKeys) > 0:
+		return "operation_failed:" + kind + ":resources:" + strings.Join(normalizeOperationResourceKeys(record.ResourceKeys), ",")
+	default:
+		return "operation_failed:" + kind + ":" + strings.TrimSpace(record.ID)
+	}
+}
+
+func operationNoticeScope(record daemonops.Record) daemonnotices.Scope {
+	if issueID := strings.TrimSpace(record.IssueID); issueID != "" {
+		return daemonnotices.Scope{Type: "task", ID: issueID}
+	}
+	if operationID := strings.TrimSpace(record.ID); operationID != "" {
+		return daemonnotices.Scope{Type: "operation", ID: operationID}
+	}
+	return daemonnotices.Scope{Type: "project"}
+}
+
+func operationNoticeOccurredAt(record daemonops.Record) time.Time {
+	if record.FinishedAt != nil && !record.FinishedAt.IsZero() {
+		return record.FinishedAt.UTC()
+	}
+	if !record.UpdatedAt.IsZero() {
+		return record.UpdatedAt.UTC()
+	}
+	return time.Now().UTC()
+}
+
+func operationFailureNoticeTitle(record daemonops.Record) string {
+	return operationDisplayName(record.Kind) + " failed"
+}
+
+func operationFailureNoticeSummary(record daemonops.Record) string {
+	action := strings.ToLower(operationDisplayName(record.Kind))
+	if issueID := strings.TrimSpace(record.IssueID); issueID != "" {
+		return fmt.Sprintf("Could not complete %s for %s", action, issueID)
+	}
+	return "Could not complete " + action
+}
+
+func operationFailureNoticeDetail(record daemonops.Record) string {
+	parts := []string{
+		fmt.Sprintf("Operation %s (%s) failed.", strings.TrimSpace(record.ID), strings.TrimSpace(record.Kind)),
+	}
+	if msg := strings.TrimSpace(record.ErrorMessage); msg != "" {
+		parts = append(parts, "Reason: "+msg+".")
+	}
+	if len(record.ResourceKeys) > 0 {
+		parts = append(parts, "Resources: "+strings.Join(normalizeOperationResourceKeys(record.ResourceKeys), ", ")+".")
+	}
+	if next := operationFailureRecovery(record); next != "" {
+		parts = append(parts, "Next: "+next+".")
+	}
+	return strings.Join(parts, " ")
+}
+
+func operationFailureNoticeCause(record daemonops.Record) *daemonnotices.Cause {
+	code := mapOperationRecordErrorCode(record)
+	return &daemonnotices.Cause{
+		Code:      operationFailureCauseCode(record),
+		Message:   operationErrorMessage(record),
+		Retryable: code.Retryable(),
+		ErrorCode: code,
+	}
+}
+
+func operationFailureCauseCode(record daemonops.Record) string {
+	msg := strings.ToLower(strings.TrimSpace(record.ErrorMessage))
+	switch {
+	case strings.Contains(msg, "context deadline exceeded"), strings.Contains(msg, "timeout"), strings.Contains(msg, "timed out"):
+		return "timeout"
+	case strings.Contains(msg, "dirty"), strings.Contains(msg, "uncommitted"), strings.Contains(msg, "modified or untracked"):
+		return "worktree_dirty"
+	case strings.Contains(msg, "conflict"):
+		return "conflict"
+	case strings.Contains(msg, "permission denied"), strings.Contains(msg, "operation not permitted"):
+		return "permission_denied"
+	case strings.Contains(msg, "not found"):
+		return "not_found"
+	default:
+		return "operation_failed"
+	}
+}
+
+func operationFailureRecovery(record daemonops.Record) string {
+	msg := strings.ToLower(strings.TrimSpace(record.ErrorMessage))
+	switch {
+	case strings.Contains(msg, "dirty"), strings.Contains(msg, "uncommitted"), strings.Contains(msg, "modified or untracked"):
+		return "commit, discard, or merge local worktree changes, then retry"
+	case strings.Contains(msg, "conflict"):
+		return "resolve the conflict, refresh, and retry"
+	case strings.Contains(msg, "permission denied"), strings.Contains(msg, "operation not permitted"):
+		return "check filesystem permissions or the lock owner, then retry"
+	case strings.Contains(msg, "context deadline exceeded"), strings.Contains(msg, "timeout"), strings.Contains(msg, "timed out"):
+		return "refresh the project and retry if the operation is still needed"
+	default:
+		return "open the task or operation details, fix the reported blocker, and retry"
+	}
+}
+
+func operationFailureNoticeActions(record daemonops.Record) []daemonnotices.Action {
+	scope := operationNoticeScope(record)
+	actions := []daemonnotices.Action{
+		{ActionID: "dismiss", Kind: "dismiss", Label: "Dismiss", Enabled: true, TargetScope: scope},
+		{ActionID: "mark_read", Kind: "mark_read", Label: "Mark read", Enabled: true, TargetScope: scope},
+		{ActionID: "copy_details", Kind: "client.copy_details", Label: "Copy details", Enabled: true, TargetScope: scope},
+	}
+	if strings.TrimSpace(record.IssueID) != "" {
+		actions = append(actions, daemonnotices.Action{ActionID: "open_task", Kind: "client.open_task", Label: "Open task", Enabled: true, TargetScope: scope})
+	}
+	return actions
+}
+
+func operationDisplayName(kind string) string {
+	switch strings.TrimSpace(kind) {
+	case "session.start":
+		return "Session start"
+	case "session.stop":
+		return "Session stop"
+	case protocol.CommandSessionResolveConflict:
+		return "Session conflict recovery"
+	case daemonhandlers.CommandGitFetch:
+		return "Git fetch"
+	case daemonhandlers.CommandGitMerge:
+		return "Git merge"
+	case daemonhandlers.CommandGitCheckout:
+		return "Git checkout"
+	case daemonhandlers.CommandGitAbortMerge:
+		return "Git abort merge"
+	case daemonhandlers.CommandWorktreeCreate:
+		return "Worktree create"
+	case daemonhandlers.CommandWorktreeRemove:
+		return "Worktree remove"
+	case daemonhandlers.CommandWorktreeCleanupOrphaned:
+		return "Worktree cleanup"
+	case taskDeferredWorktreeCleanupOperationKind:
+		return "Deferred worktree cleanup"
+	default:
+		if trimmed := strings.TrimSpace(kind); trimmed != "" {
+			return trimmed
+		}
+		return "Operation"
+	}
 }
 
 func operationProgressForState(state daemonops.State, kind string) protocol.OperationProgress {
