@@ -789,6 +789,9 @@ func (m Model) agentMergeFromPreflight(ctx context.Context, selection overlay.Me
 		if preflight == nil {
 			return mergePreflightRefreshResultMsg{cleared: true}
 		}
+		if len(preflight.conflictFiles) == 0 {
+			return *preflight
+		}
 
 		selection.ConflictFiles = mergePreflightAgentFiles(preflight)
 		return m.resolveMergePreflightWithAgentCmd(selection)()
@@ -800,7 +803,7 @@ func mergePreflightAgentFiles(preflight *mergePreflightFailureMsg) []string {
 		return nil
 	}
 	seen := make(map[string]struct{})
-	files := make([]string, 0, len(preflight.conflictFiles)+len(preflight.sourceFiles)+len(preflight.targetFiles))
+	files := make([]string, 0, len(preflight.conflictFiles))
 	appendFile := func(file string) {
 		file = strings.TrimSpace(file)
 		if file == "" {
@@ -814,14 +817,6 @@ func mergePreflightAgentFiles(preflight *mergePreflightFailureMsg) []string {
 	}
 	for _, file := range preflight.conflictFiles {
 		appendFile(file)
-	}
-	if len(files) == 0 {
-		for _, file := range preflight.sourceFiles {
-			appendFile(file)
-		}
-		for _, file := range preflight.targetFiles {
-			appendFile(file)
-		}
 	}
 	return files
 }

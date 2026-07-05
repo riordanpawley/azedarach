@@ -266,7 +266,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 				})
 				return m, nil
 			}
-			m.beginMutationFeedback(fmt.Sprintf("AI merge queued for %s", action.TaskID))
+			m.beginMutationFeedback(fmt.Sprintf("Checking AI merge readiness for %s", action.TaskID))
 			return m.agentMergeCurrentIssueIntoDefaultTarget(task)
 		}
 		previousStatus := domain.Status(strings.TrimSpace(action.PreviousStatus))
