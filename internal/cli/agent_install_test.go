@@ -103,14 +103,28 @@ func TestAIStatusReportsInstalledAndMissingHooks(t *testing.T) {
 	for _, target := range result.Targets {
 		byTarget[target.Target] = target
 	}
-	if !byTarget[AgentInstallTargetCodex].Detected || !byTarget[AgentInstallTargetCodex].Installed {
-		t.Fatalf("codex status = %+v, want detected installed", byTarget[AgentInstallTargetCodex])
+	if !byTarget[AgentInstallTargetCodex].Detected || byTarget[AgentInstallTargetCodex].Installed {
+		t.Fatalf("codex status = %+v, want detected stale install missing idle_prompt", byTarget[AgentInstallTargetCodex])
 	}
 	if !byTarget[AgentInstallTargetClaude].Detected || byTarget[AgentInstallTargetClaude].Installed {
 		t.Fatalf("claude status = %+v, want detected missing", byTarget[AgentInstallTargetClaude])
 	}
 	if !strings.Contains(byTarget[AgentInstallTargetClaude].Reason, "managed Azedarach hook command not found") {
 		t.Fatalf("claude reason = %q", byTarget[AgentInstallTargetClaude].Reason)
+	}
+
+	if err := os.WriteFile(codexHooksPath, []byte(`{"hooks":{"Notification":[{"matcher":"idle_prompt","hooks":[{"type":"command","command":"az ai hook run --agent=codex --json idle_prompt"}]}],"Stop":[{"hooks":[{"type":"command","command":"az ai hook run --agent=codex --json stop"}]}]}}`), 0o644); err != nil {
+		t.Fatalf("write current codex hooks: %v", err)
+	}
+	result, err = AIStatus(&Dependencies{RepoDir: dir}, AIStatusOptions{
+		Targets:    []AgentInstallTarget{AgentInstallTargetCodex},
+		ProjectDir: dir,
+	})
+	if err != nil {
+		t.Fatalf("AIStatus current codex: %v", err)
+	}
+	if len(result.Targets) != 1 || !result.Targets[0].Installed {
+		t.Fatalf("current codex status = %+v, want installed", result.Targets)
 	}
 }
 
@@ -216,7 +230,7 @@ func TestRulesyncInstallerWritesCanonicalConfig(t *testing.T) {
 		t.Fatalf("missing codexcli section: %s", data)
 	}
 	codexHooks, _ := codex["hooks"].(map[string]any)
-	for _, key := range []string{"sessionStart", "preToolUse", "postToolUse", "permissionRequest", "stop"} {
+	for _, key := range []string{"sessionStart", "preToolUse", "postToolUse", "notification", "permissionRequest", "stop"} {
 		if _, ok := codexHooks[key]; !ok {
 			t.Fatalf("codexcli.hooks.%s missing: %s", key, data)
 		}
@@ -356,7 +370,7 @@ func TestAIInstallCommandAutoFallsBackToDetectedAgentsWhenNoRulesync(t *testing.
 		t.Fatalf("read codex hooks: %v", err)
 	}
 	content := string(raw)
-	for _, want := range []string{"SubagentStart", "subagent-start", "SubagentStop", "subagent-stop"} {
+	for _, want := range []string{"Notification", "idle_prompt", "SubagentStart", "subagent-start", "SubagentStop", "subagent-stop"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("codex hooks missing %q: %s", want, content)
 		}

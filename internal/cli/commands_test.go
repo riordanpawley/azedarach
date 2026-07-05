@@ -10311,7 +10311,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "After every `az orchestrate start`, immediately start `az orchestrate watch --root <issue-id> --since <seq> --jsonl` in another pane/session and keep it running") {
 		t.Fatalf("prime output missing post-start continuous watch guidance: %q", output)
 	}
-	if !strings.Contains(output, "Trust hook-backed `activity=busy|idle` for idleness checks") {
+	if !strings.Contains(output, "Trust hook-backed `activity=busy|idle|waiting` for idleness checks") {
 		t.Fatalf("prime output missing bounded tmux observation guidance: %q", output)
 	}
 	if !strings.Contains(output, "treat `activity=no-agent` as an intentional session-only shell") {

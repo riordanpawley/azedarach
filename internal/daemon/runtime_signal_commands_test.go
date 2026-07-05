@@ -149,7 +149,7 @@ func TestRuntimeSignalIngestAgentHookPersistsActivityAndHookLog(t *testing.T) {
 	}
 	if session.IssueID != issueID ||
 		session.State != daemonstate.SessionStatePaused ||
-		session.Activity != "idle" ||
+		session.Activity != "waiting" ||
 		session.ActivitySource != "hooks" {
 		t.Fatalf("session projection = %+v", session)
 	}
@@ -162,7 +162,7 @@ func TestRuntimeSignalIngestAgentHookPersistsActivityAndHookLog(t *testing.T) {
 	}
 	if canonical.IssueID != issueID ||
 		canonical.State != daemonstate.SessionStateRunning ||
-		canonical.Activity != "idle" ||
+		canonical.Activity != "waiting" ||
 		canonical.ActivitySource != "hooks" {
 		t.Fatalf("canonical session projection = %+v", canonical)
 	}
@@ -173,7 +173,7 @@ func TestRuntimeSignalIngestAgentHookPersistsActivityAndHookLog(t *testing.T) {
 	if !found {
 		t.Fatal("expected session activity evidence")
 	}
-	if evidence.Activity != "idle" ||
+	if evidence.Activity != "waiting" ||
 		evidence.ActivitySource != "hooks" ||
 		evidence.SourceSessionID != sessionID ||
 		evidence.Agent != "codex" ||
@@ -230,7 +230,56 @@ func TestRuntimeSignalIngestAgentHookCreatesRunningCanonicalProjection(t *testin
 	if canonical.IssueID != issueID ||
 		canonical.State != daemonstate.SessionStateRunning ||
 		canonical.ObservedState != daemonstate.SessionStateRunning ||
-		canonical.Activity != "idle" ||
+		canonical.Activity != "waiting" ||
+		canonical.ActivitySource != "hooks" {
+		t.Fatalf("canonical session projection = %+v", canonical)
+	}
+}
+
+func TestRuntimeSignalIngestAgentIdlePromptPersistsWaitingActivity(t *testing.T) {
+	repoDir := initRuntimeSignalGitRepo(t)
+	d := New(Config{
+		RepoDir: repoDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	projectID := "proj-signals"
+	issueID := "az-42"
+
+	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "runtime-signal-agent-idle-prompt",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         protocol.CommandRuntimeSignalIngest,
+		Body: mustMarshal(t, protocol.RuntimeSignalIngestCommandBody{
+			Source:    protocol.RuntimeSignalSourceAgentHook,
+			Kind:      protocol.RuntimeSignalKindAgentActivityChanged,
+			IssueID:   issueID,
+			SessionID: "pr-az-42.pane-12",
+			Worktree:  repoDir,
+			Agent:     "codex",
+			Hook:      "idle_prompt",
+			Event:     "idle_prompt",
+			Log:       true,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("runtime.signal.ingest command error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("runtime.signal.ingest response not ok: %+v", resp.Error)
+	}
+
+	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetSessionState(context.Background(), projectID, "pr-az-42")
+	if err != nil {
+		t.Fatalf("GetSessionState canonical: %v", err)
+	}
+	if !found {
+		t.Fatal("expected canonical session projection")
+	}
+	if canonical.IssueID != issueID ||
+		canonical.State != daemonstate.SessionStateRunning ||
+		canonical.Activity != "waiting" ||
 		canonical.ActivitySource != "hooks" {
 		t.Fatalf("canonical session projection = %+v", canonical)
 	}
