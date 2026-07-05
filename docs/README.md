@@ -25,7 +25,13 @@ This directory primarily contains **developer/internal documentation**.
 - [14-issue-resource-lifecycle.md](14-issue-resource-lifecycle.md)
 - [15-orchestration-flow-comparison.md](15-orchestration-flow-comparison.md)
 - [16-scheduled-project-scripts.md](16-scheduled-project-scripts.md)
+- [17-sqlite-query-plan-guardrails.md](17-sqlite-query-plan-guardrails.md)
 - [adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
+
+## Contributor Workflow
+
+- Use `az prime` at session start, keep non-trivial implementation tied to an `az issue`, and work from that issue's worktree/session instead of editing the main worktree directly.
+- If accidental main-worktree changes exist, preserve any useful state in the issue worktree before cleaning main.
 
 ## Daemon Invariant Rule
 

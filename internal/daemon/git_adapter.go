@@ -15,6 +15,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
 
@@ -363,7 +364,20 @@ func (a *gitServiceAdapter) RefreshStatusForHook(ctx context.Context, projectID,
 	}
 
 	if _, err := a.queueGitStatusRefresh(projectID, worktree, reconcilePriorityManual, "hook"); err != nil {
+		if a.logger != nil {
+			a.logger.Warn("daemon hook git status refresh enqueue failed",
+				"project_id", projectID,
+				"worktree", worktree,
+				"error", err,
+			)
+		}
 		return nil, err
+	}
+	if a.logger != nil {
+		a.logger.Info("daemon hook git status refresh enqueued",
+			"project_id", projectID,
+			"worktree", worktree,
+		)
 	}
 	return a.cachedGitStatus(ctx, projectID, worktree)
 }
@@ -478,10 +492,29 @@ func (a *gitServiceAdapter) queueGitStatusRefresh(projectID, worktree string, pr
 		Work: func(ctx context.Context) (*git.GitStatus, error) {
 			refreshCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 			defer cancel()
-			status, refreshErr := a.refreshGitStatusWriteThroughResult(refreshCtx, projectID, worktree, true, false)
+			forcePublish := strings.EqualFold(strings.TrimSpace(reason), "hook")
+			status, refreshErr := a.refreshGitStatusWriteThroughResult(refreshCtx, projectID, worktree, true, forcePublish)
 			outcome := throttle.Record(key, gitStatusSignature(status), refreshErr)
 			if a.logger != nil {
 				counters := throttle.snapshotCounters()
+				if refreshErr != nil {
+					if staleReason, ok := staleWorktreeGitRefreshErrorReason(refreshErr); ok {
+						a.logger.Info("daemon git status refresh suppressed stale worktree",
+							"project_id", projectID,
+							"worktree", worktree,
+							"reason", reason,
+							"stale_reason", staleReason,
+							"error", refreshErr,
+						)
+					} else {
+						a.logger.Warn("daemon git status refresh failed",
+							"project_id", projectID,
+							"worktree", worktree,
+							"reason", reason,
+							"error", refreshErr,
+						)
+					}
+				}
 				a.logger.Debug("git status refresh processed",
 					"project_id", projectID,
 					"worktree", worktree,
@@ -532,18 +565,73 @@ func (a *gitServiceAdapter) refreshGitStatusWriteThrough(ctx context.Context, pr
 	_, _ = a.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, publishOnChange, forcePublish)
 }
 
+func (a *gitServiceAdapter) refreshGitStatusPorcelainWriteThroughResult(ctx context.Context, projectID, worktree string, publishOnChange, forcePublish bool) (*git.GitStatus, uint64, error) {
+	projectID = normalizeProjectID(projectID)
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return &git.GitStatus{}, 0, nil
+	}
+	status, err := a.client.Status(ctx, worktree)
+	if err != nil {
+		persistCtx, persistCancel := gitStatusProjectionPersistContext(ctx)
+		if a.suppressStaleWorktreeGitRefresh(persistCtx, projectID, worktree, err) {
+			persistCancel()
+			return nil, 0, newStaleWorktreeGitRefreshError(staleGitWorktreeRefreshReasonForError(worktree, err), worktree, err)
+		}
+		persistCancel()
+		if a.logger != nil {
+			a.logger.Warn("runtime signal porcelain git status refresh failed",
+				"project_id", projectID,
+				"worktree", worktree,
+				"error", err,
+			)
+		}
+		return nil, 0, err
+	}
+	statusPersistCtx, statusPersistCancel := gitStatusProjectionPersistContext(ctx)
+	defer statusPersistCancel()
+	issueID, branch := a.resolveWorktreeProjectionIdentity(statusPersistCtx, projectID, worktree)
+	var rev uint64
+	if a.runtimeProjectionWriter != nil {
+		if issueID != "" {
+			_ = a.runtimeProjectionWriter.PersistWorktreeProjection(statusPersistCtx, projectID, issueID, worktree, branch)
+		}
+		rev = a.runtimeProjectionWriter.PersistGitStatusProjectionAndPublish(statusPersistCtx, projectID, issueID, worktree, status, publishOnChange, forcePublish)
+		a.invalidateRuntimeSignalCache(projectID, worktree)
+		return status, rev, nil
+	}
+	changed, issueID := a.persistStatusSnapshot(statusPersistCtx, projectID, worktree, status)
+	a.invalidateRuntimeSignalCache(projectID, worktree)
+	if (forcePublish || (publishOnChange && changed)) && a.onStatusUpdate != nil && strings.TrimSpace(issueID) != "" {
+		a.onStatusUpdate(statusPersistCtx, projectID, issueID, worktree, status)
+	}
+	return status, rev, nil
+}
+
 func (a *gitServiceAdapter) refreshGitStatusWriteThroughResult(ctx context.Context, projectID, worktree string, publishOnChange, forcePublish bool) (*git.GitStatus, error) {
 	projectID = normalizeProjectID(projectID)
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return &git.GitStatus{}, nil
+	}
 	baseBranch, worktreeSpecificBase := a.resolvedBaseBranchForWorktree(ctx, projectID, worktree)
 	preferRemoteBase := a.preferRemoteRuntimeBase(projectID) && !worktreeSpecificBase
 	if err := a.client.WithWorktreeLock(ctx, worktree, func(ctx context.Context) error {
 		return a.client.RecoverIntegrationJournal(ctx, worktree)
-	}); err != nil && a.logger != nil {
-		a.logger.Warn("failed to recover interrupted transactional integration before status refresh",
-			"project_id", projectID,
-			"worktree", worktree,
-			"error", err,
-		)
+	}); err != nil {
+		persistCtx, persistCancel := gitStatusProjectionPersistContext(ctx)
+		if staleReason, ok := staleGitWorktreeRefreshReason(worktree, err); ok && staleReason != "missing_worktree_path" && a.suppressStaleWorktreeGitRefresh(persistCtx, projectID, worktree, err) {
+			persistCancel()
+			return nil, newStaleWorktreeGitRefreshError(staleReason, worktree, err)
+		}
+		persistCancel()
+		if a.logger != nil {
+			a.logger.Warn("failed to recover interrupted transactional integration before status refresh",
+				"project_id", projectID,
+				"worktree", worktree,
+				"error", err,
+			)
+		}
 	}
 
 	var (
@@ -564,23 +652,66 @@ func (a *gitServiceAdapter) refreshGitStatusWriteThroughResult(ctx context.Conte
 	if status == nil {
 		status, err = a.client.Status(ctx, worktree)
 		if err != nil {
+			persistCtx, persistCancel := gitStatusProjectionPersistContext(ctx)
+			if a.suppressStaleWorktreeGitRefresh(persistCtx, projectID, worktree, err) {
+				persistCancel()
+				return nil, newStaleWorktreeGitRefreshError(staleGitWorktreeRefreshReasonForError(worktree, err), worktree, err)
+			}
+			persistCancel()
 			if a.logger != nil {
 				a.logger.Debug("git status refresh after mutation failed", "project_id", projectID, "worktree", worktree, "error", err)
 			}
 			return nil, err
 		}
 	}
+	statusPersistCtx, statusPersistCancel := gitStatusProjectionPersistContext(ctx)
+	defer statusPersistCancel()
 	if a.runtimeProjectionWriter != nil {
-		_ = a.runtimeProjectionWriter.PersistGitStatusProjectionAndPublish(ctx, projectID, "", worktree, status, publishOnChange, forcePublish)
+		_ = a.runtimeProjectionWriter.PersistGitStatusProjectionAndPublish(statusPersistCtx, projectID, "", worktree, status, publishOnChange, forcePublish)
 		a.invalidateRuntimeSignalCache(projectID, worktree)
 		return status, nil
 	}
-	changed, issueID := a.persistStatusSnapshot(ctx, projectID, worktree, status)
+	changed, issueID := a.persistStatusSnapshot(statusPersistCtx, projectID, worktree, status)
 	a.invalidateRuntimeSignalCache(projectID, worktree)
 	if (forcePublish || (publishOnChange && changed)) && a.onStatusUpdate != nil && strings.TrimSpace(issueID) != "" {
-		a.onStatusUpdate(ctx, projectID, issueID, worktree, status)
+		a.onStatusUpdate(statusPersistCtx, projectID, issueID, worktree, status)
 	}
 	return status, nil
+}
+
+func (a *gitServiceAdapter) resolveWorktreeProjectionIdentity(ctx context.Context, projectID, worktree string) (string, string) {
+	runtimeStore := a.runtimeStore(projectID)
+	if runtimeStore != nil {
+		projection, found, err := runtimeStore.GetWorktreeStateByPath(ctx, projectID, worktree)
+		if err == nil && found && strings.TrimSpace(projection.IssueID) != "" {
+			return strings.TrimSpace(projection.IssueID), strings.TrimSpace(projection.Branch)
+		}
+		if err != nil && a.logger != nil {
+			a.logger.Debug("runtime signal worktree projection lookup failed", "project_id", projectID, "worktree", worktree, "error", err)
+		}
+	}
+	branch, err := a.client.CurrentBranch(ctx, worktree)
+	if err != nil {
+		if a.logger != nil {
+			a.logger.Debug("runtime signal current branch lookup failed", "project_id", projectID, "worktree", worktree, "error", err)
+		}
+		return "", ""
+	}
+	issueID, ok := naming.ExtractIssueIDFromBranchName(branch)
+	if !ok {
+		return "", strings.TrimSpace(branch)
+	}
+	return strings.TrimSpace(issueID), strings.TrimSpace(branch)
+}
+
+func gitStatusProjectionPersistContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		return context.WithTimeout(context.Background(), 2*time.Second)
+	}
+	if ctx.Err() == nil {
+		return context.WithTimeout(ctx, 2*time.Second)
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 }
 
 func (a *gitServiceAdapter) resolvedBaseBranchForWorktree(ctx context.Context, projectID, worktree string) (string, bool) {
@@ -642,15 +773,23 @@ func (a *gitServiceAdapter) persistStatusSnapshot(ctx context.Context, projectID
 	}
 	projection, found, err := runtimeStore.GetWorktreeStateByPath(ctx, projectID, worktree)
 	if err != nil || !found || strings.TrimSpace(projection.IssueID) == "" {
+		if err != nil && a.logger != nil {
+			a.logger.Warn("persist git status projection lookup failed", "project_id", projectID, "worktree", worktree, "error", err)
+		}
 		return false, ""
 	}
 	rawStatus, err := json.Marshal(status)
 	if err != nil {
+		if a.logger != nil {
+			a.logger.Warn("marshal git status projection failed", "project_id", projectID, "issue_id", projection.IssueID, "worktree", worktree, "error", err)
+		}
 		return false, ""
 	}
 	changed := string(rawStatus) != string(projection.GitStatusRaw)
-	if err := runtimeStore.UpsertWorktreeStateGitStatus(ctx, projectID, projection.IssueID, rawStatus, time.Now().UTC()); err != nil && a.logger != nil {
-		a.logger.Debug("persist git status projection failed", "project_id", projectID, "issue_id", projection.IssueID, "worktree", worktree, "error", err)
+	if err := runtimeStore.UpsertWorktreeStateGitStatus(ctx, projectID, projection.IssueID, rawStatus, time.Now().UTC()); err != nil {
+		if a.logger != nil {
+			a.logger.Warn("persist git status projection failed", "project_id", projectID, "issue_id", projection.IssueID, "worktree", worktree, "error", err)
+		}
 		return false, ""
 	}
 	return changed, projection.IssueID
@@ -696,6 +835,42 @@ func (a *gitServiceAdapter) ensureStatusPoller(projectID, worktree string) {
 			}
 		}
 	}()
+}
+
+func (a *gitServiceAdapter) stopStatusPoller(projectID, worktree string) {
+	if a == nil {
+		return
+	}
+	projectID = normalizeProjectID(projectID)
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return
+	}
+	key := projectID + "|" + worktree
+	a.refreshMu.Lock()
+	cancel := a.pollers[key]
+	if cancel != nil {
+		delete(a.pollers, key)
+	}
+	a.refreshMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (a *gitServiceAdapter) suppressStaleWorktreeGitRefresh(ctx context.Context, projectID, worktree string, cause error) bool {
+	if a == nil {
+		return false
+	}
+	runtimeStore := a.runtimeStore(projectID)
+	return suppressStaleWorktreeGitRefreshProjection(ctx, projectID, worktree, cause, runtimeStore, a.runtimeProjectionWriter, a.logger, func() {
+		a.stopStatusPoller(projectID, worktree)
+	})
+}
+
+func staleGitWorktreeRefreshReasonForError(worktree string, err error) string {
+	reason, _ := staleGitWorktreeRefreshReason(worktree, err)
+	return reason
 }
 
 func gitStatusRefreshQueueKey(projectID, worktree string) string {

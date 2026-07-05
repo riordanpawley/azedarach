@@ -172,10 +172,13 @@ type DecisionLinkRemoveResponseBody struct {
 }
 
 // DecisionSyncMDRequestBody asks the daemon to write decision records to
-// markdown files under docs/decisions/. When Check is true the daemon
-// computes what would change without writing anything.
+// markdown files under docs/decisions/. RepoDir optionally overrides the
+// project root as the markdown target, which lets hooks sync the active
+// worktree while retaining the durable daemon store. When Check is true the
+// daemon computes what would change without writing anything.
 type DecisionSyncMDRequestBody struct {
-	Check bool `json:"check,omitempty" msgpack:"check,omitempty"`
+	Check   bool   `json:"check,omitempty" msgpack:"check,omitempty"`
+	RepoDir string `json:"repo_dir,omitempty" msgpack:"repo_dir,omitempty"`
 }
 
 // DecisionSyncMDResponseBody reports the outcome of the sync. Files is the
@@ -187,12 +190,15 @@ type DecisionSyncMDResponseBody struct {
 }
 
 // DecisionImportMDRequestBody asks the daemon to read decision markdown files
-// from docs/decisions/ and merge them into the SQLite store. With Check=true,
-// no rows are mutated; the response describes the plan. Force=true overrides
-// per-field conflicts (markdown wins).
+// from docs/decisions/ and merge them into the SQLite store. RepoDir optionally
+// overrides the project root as the markdown source, which lets hooks import
+// from the active worktree while retaining the durable daemon store. With
+// Check=true, no rows are mutated; the response describes the plan. Force=true
+// overrides per-field conflicts (markdown wins).
 type DecisionImportMDRequestBody struct {
-	Check bool `json:"check,omitempty" msgpack:"check,omitempty"`
-	Force bool `json:"force,omitempty" msgpack:"force,omitempty"`
+	Check   bool   `json:"check,omitempty" msgpack:"check,omitempty"`
+	Force   bool   `json:"force,omitempty" msgpack:"force,omitempty"`
+	RepoDir string `json:"repo_dir,omitempty" msgpack:"repo_dir,omitempty"`
 }
 
 // DecisionImportMDFieldChange describes one field that would change.

@@ -480,20 +480,23 @@ func TestGitHooksNotifyCommandRefreshesDaemonGitStatus(t *testing.T) {
 	}
 	var gotReq protocol.RequestEnvelope
 	for _, req := range reqs {
-		if req.Command == daemonclient.CommandGitStatus {
+		if req.Command == protocol.CommandRuntimeSignalIngest {
 			gotReq = req
 			break
 		}
 	}
-	if gotReq.Command != daemonclient.CommandGitStatus {
-		t.Fatalf("expected %q in requests, got=%v", daemonclient.CommandGitStatus, requestCommands(reqs))
+	if gotReq.Command != protocol.CommandRuntimeSignalIngest {
+		t.Fatalf("expected %q in requests, got=%v", protocol.CommandRuntimeSignalIngest, requestCommands(reqs))
 	}
-	var body daemonclient.GitCommandRequest
+	var body protocol.RuntimeSignalIngestCommandBody
 	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
 		t.Fatalf("unmarshal request body: %v", err)
 	}
-	if !body.Refresh || !body.HookTriggered {
-		t.Fatal("expected hook daemon git status request to use hook-triggered refresh")
+	if body.Source != protocol.RuntimeSignalSourceGitHook ||
+		body.Kind != protocol.RuntimeSignalKindGitWorktreeChanged ||
+		body.Hook != "post-commit" ||
+		!body.Log {
+		t.Fatalf("runtime signal body = %+v", body)
 	}
 	gotWorktree, err := filepath.EvalSymlinks(body.Worktree)
 	if err != nil {
@@ -507,22 +510,8 @@ func TestGitHooksNotifyCommandRefreshesDaemonGitStatus(t *testing.T) {
 		t.Fatalf("worktree = %q (canon %q), want %q (canon %q)", body.Worktree, gotWorktree, projectDir, wantWorktree)
 	}
 
-	hookLogMessages := make([]string, 0, 2)
-	for _, req := range reqs {
-		if req.Command != protocol.CommandHookLogAppend {
-			continue
-		}
-		var appendBody protocol.HookLogAppendCommandBody
-		if err := json.Unmarshal(req.Body, &appendBody); err != nil {
-			t.Fatalf("unmarshal hook log append body: %v", err)
-		}
-		hookLogMessages = append(hookLogMessages, appendBody.Event.Message)
-	}
-	if len(hookLogMessages) != 1 {
-		t.Fatalf("hook log append count = %d, want 1; messages=%v", len(hookLogMessages), hookLogMessages)
-	}
-	if hookLogMessages[0] != "queued daemon git status refresh" {
-		t.Fatalf("hook log message = %q, want %q", hookLogMessages[0], "queued daemon git status refresh")
+	if got := requestCommands(reqs); containsString(got, protocol.CommandHookLogAppend) {
+		t.Fatalf("githook should send one runtime signal instead of client-side hook log append: %v", got)
 	}
 }
 
@@ -578,21 +567,24 @@ func TestGitHooksNotifyCommandPrefersCurrentWorktreeWhenProjectDirUnset(t *testi
 	}
 	var gotReq protocol.RequestEnvelope
 	for _, req := range reqs {
-		if req.Command == daemonclient.CommandGitStatus {
+		if req.Command == protocol.CommandRuntimeSignalIngest {
 			gotReq = req
 			break
 		}
 	}
-	if gotReq.Command != daemonclient.CommandGitStatus {
-		t.Fatalf("expected %q in requests, got=%v", daemonclient.CommandGitStatus, requestCommands(reqs))
+	if gotReq.Command != protocol.CommandRuntimeSignalIngest {
+		t.Fatalf("expected %q in requests, got=%v", protocol.CommandRuntimeSignalIngest, requestCommands(reqs))
 	}
 
-	var body daemonclient.GitCommandRequest
+	var body protocol.RuntimeSignalIngestCommandBody
 	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
 		t.Fatalf("unmarshal request body: %v", err)
 	}
-	if !body.Refresh || !body.HookTriggered {
-		t.Fatal("expected hook daemon git status request to use hook-triggered refresh")
+	if body.Source != protocol.RuntimeSignalSourceGitHook ||
+		body.Kind != protocol.RuntimeSignalKindGitWorktreeChanged ||
+		body.Hook != "post-commit" ||
+		!body.Log {
+		t.Fatalf("runtime signal body = %+v", body)
 	}
 	gotWorktree, err := filepath.EvalSymlinks(body.Worktree)
 	if err != nil {
@@ -705,14 +697,14 @@ func TestGitHooksNotifyCommandAutostartsDaemonOnTransientGitStatusError(t *testi
 			return protocol.HelloAck{Accepted: true}, nil
 		},
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandGitStatus {
+			if req.Command != protocol.CommandRuntimeSignalIngest {
 				return responseWithJSON(req, map[string]any{}), nil
 			}
 			attempts++
 			if !started {
 				return protocol.ResponseEnvelope{}, errors.New("dial unix /tmp/azedarach.sock: connect: connection refused")
 			}
-			return responseWithJSON(req, map[string]any{"status": map[string]any{}}), nil
+			return responseWithJSON(req, protocol.RuntimeSignalIngestResponseBody{Accepted: true, SignalID: "sig-1"}), nil
 		},
 	}
 	deps := &Dependencies{
@@ -729,7 +721,7 @@ func TestGitHooksNotifyCommandAutostartsDaemonOnTransientGitStatusError(t *testi
 		t.Fatalf("expected daemon autostart attempt")
 	}
 	if attempts < 2 {
-		t.Fatalf("git status attempts = %d, want at least 2", attempts)
+		t.Fatalf("runtime signal attempts = %d, want at least 2", attempts)
 	}
 }
 
@@ -777,14 +769,14 @@ func TestGitHooksNotifyCommandRetriesTransientGitStatusErrorsAcrossAttempts(t *t
 	attempts := 0
 	transport := &fakeDaemonTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandGitStatus {
+			if req.Command != protocol.CommandRuntimeSignalIngest {
 				return responseWithJSON(req, map[string]any{}), nil
 			}
 			attempts++
 			if attempts <= 2 {
 				return protocol.ResponseEnvelope{}, errors.New("dial unix /tmp/azedarach.sock: connect: connection refused")
 			}
-			return responseWithJSON(req, map[string]any{"status": map[string]any{}}), nil
+			return responseWithJSON(req, protocol.RuntimeSignalIngestResponseBody{Accepted: true, SignalID: "sig-1"}), nil
 		},
 	}
 	deps := &Dependencies{
@@ -798,7 +790,7 @@ func TestGitHooksNotifyCommandRetriesTransientGitStatusErrorsAcrossAttempts(t *t
 		t.Fatalf("GitHooksNotifyCommand error: %v", err)
 	}
 	if attempts != 3 {
-		t.Fatalf("git status attempts = %d, want 3", attempts)
+		t.Fatalf("runtime signal attempts = %d, want 3", attempts)
 	}
 }
 
@@ -815,7 +807,7 @@ func TestGitHooksNotifyCommandRetriesAfterStalledGitStatusAttempt(t *testing.T) 
 	attempts := 0
 	transport := &fakeDaemonTransport{
 		commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandGitStatus {
+			if req.Command != protocol.CommandRuntimeSignalIngest {
 				return responseWithJSON(req, map[string]any{}), nil
 			}
 			attempts++
@@ -823,7 +815,7 @@ func TestGitHooksNotifyCommandRetriesAfterStalledGitStatusAttempt(t *testing.T) 
 				<-ctx.Done()
 				return protocol.ResponseEnvelope{}, ctx.Err()
 			}
-			return responseWithJSON(req, map[string]any{"status": map[string]any{}}), nil
+			return responseWithJSON(req, protocol.RuntimeSignalIngestResponseBody{Accepted: true, SignalID: "sig-1"}), nil
 		},
 	}
 	deps := &Dependencies{
@@ -833,11 +825,11 @@ func TestGitHooksNotifyCommandRetriesAfterStalledGitStatusAttempt(t *testing.T) 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	if err := refreshDaemonGitStatusWithRetry(ctx, deps, t.TempDir()); err != nil {
-		t.Fatalf("refreshDaemonGitStatusWithRetry error: %v", err)
+	if err := ingestGitHookRuntimeSignalWithRetry(ctx, deps, t.TempDir(), "post-commit"); err != nil {
+		t.Fatalf("ingestGitHookRuntimeSignalWithRetry error: %v", err)
 	}
 	if attempts != 3 {
-		t.Fatalf("git status attempts = %d, want 3", attempts)
+		t.Fatalf("runtime signal attempts = %d, want 3", attempts)
 	}
 }
 
@@ -857,32 +849,22 @@ func runGitCommandIsolated(repoDir string, args ...string) error {
 	return cmd.Run()
 }
 
-func TestAIHookRunCommandRoutesCodexAgentThroughPort(t *testing.T) {
+func TestAIHookRunCommandRoutesCodexAgentThroughRuntimeSignalPort(t *testing.T) {
 	projectDir := t.TempDir()
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")
 	t.Setenv("TMUX_PANE", "%12")
 
-	var sessionLifecycle []string
-	var sessionBodies []sessionRequestBody
-	var hookLogSources []string
+	var signals []protocol.RuntimeSignalIngestCommandBody
 	transport := &fakeDaemonTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
-			case protocol.CommandHookLogAppend:
-				var body protocol.HookLogAppendCommandBody
+			case protocol.CommandRuntimeSignalIngest:
+				var body protocol.RuntimeSignalIngestCommandBody
 				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal hook append body: %v", err)
+					t.Fatalf("unmarshal runtime signal body: %v", err)
 				}
-				hookLogSources = append(hookLogSources, body.Event.Source)
-				return responseWithJSON(req, body.Event), nil
-			case daemonclient.CommandSessionPause, daemonclient.CommandSessionResume:
-				sessionLifecycle = append(sessionLifecycle, req.Command)
-				var body sessionRequestBody
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal session lifecycle body: %v", err)
-				}
-				sessionBodies = append(sessionBodies, body)
-				return responseWithOutput(req, "ok"), nil
+				signals = append(signals, body)
+				return responseWithJSON(req, protocol.RuntimeSignalIngestResponseBody{Accepted: true, SignalID: "sig-1"}), nil
 			case daemonclient.CommandRuntimeReconcileIssue:
 				t.Fatalf("unexpected client-side reconcile; daemon reconciles internally")
 				return protocol.ResponseEnvelope{}, nil
@@ -923,14 +905,18 @@ func TestAIHookRunCommandRoutesCodexAgentThroughPort(t *testing.T) {
 		t.Fatalf("ai hook run json output = %q, want {}", output)
 	}
 
-	if !reflect.DeepEqual(sessionLifecycle, []string{daemonclient.CommandSessionPause}) {
-		t.Fatalf("session lifecycle = %v, want [session.pause]", sessionLifecycle)
+	if len(signals) != 1 {
+		t.Fatalf("runtime signals = %+v, want one signal", signals)
 	}
-	if len(sessionBodies) != 1 || sessionBodies[0].IssueID != "az-port-1" || sessionBodies[0].SessionID != "pr-az-port-1.pane-12" {
-		t.Fatalf("session lifecycle bodies = %+v, want issue az-port-1 and pane-scoped canonical session pr-az-port-1.pane-12", sessionBodies)
-	}
-	if len(hookLogSources) != 1 || hookLogSources[0] != "codex.hook" {
-		t.Fatalf("hook log sources = %v, want one codex.hook", hookLogSources)
+	signal := signals[0]
+	if signal.Source != protocol.RuntimeSignalSourceAgentHook ||
+		signal.Kind != protocol.RuntimeSignalKindAgentActivityChanged ||
+		signal.Agent != "codex" ||
+		signal.Event != "permission_request" ||
+		signal.IssueID != "az-port-1" ||
+		signal.SessionID != "pr-az-port-1.pane-12" ||
+		!signal.Log {
+		t.Fatalf("runtime signal = %+v", signal)
 	}
 }
 
@@ -938,14 +924,12 @@ func TestAIHookRunCommandDoesNotAutostartRetryBestEffortLifecycleNotify(t *testi
 	projectDir := t.TempDir()
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")
 
-	var sessionLifecycleCalls int
+	var signalCalls int
 	transport := &fakeDaemonTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
-			case protocol.CommandHookLogAppend:
-				return responseWithJSON(req, protocol.HookLogEvent{}), nil
-			case daemonclient.CommandSessionPause, daemonclient.CommandSessionResume:
-				sessionLifecycleCalls++
+			case protocol.CommandRuntimeSignalIngest:
+				signalCalls++
 				return protocol.ResponseEnvelope{}, errors.New("daemon command transport: dial unavailable")
 			default:
 				t.Fatalf("unexpected command: %s", req.Command)
@@ -981,26 +965,22 @@ func TestAIHookRunCommandDoesNotAutostartRetryBestEffortLifecycleNotify(t *testi
 	if strings.TrimSpace(output) != "{}" {
 		t.Fatalf("ai hook run json output = %q, want {}", output)
 	}
-	if sessionLifecycleCalls != 1 {
-		t.Fatalf("session lifecycle calls = %d, want exactly one best-effort attempt", sessionLifecycleCalls)
+	if signalCalls != 1 {
+		t.Fatalf("runtime signal calls = %d, want exactly one best-effort attempt", signalCalls)
 	}
 }
 
-func TestAIHookRunCommandPrioritizesLifecycleNotifyBeforeHookLog(t *testing.T) {
+func TestAIHookRunCommandSendsSingleRuntimeSignalForLifecycleAndHookLog(t *testing.T) {
 	projectDir := t.TempDir()
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")
 
-	calls := make(chan string, 2)
+	var calls []string
 	transport := &fakeDaemonTransport{
-		commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
-			case daemonclient.CommandSessionPause:
-				calls <- req.Command
-				return responseWithJSON(req, struct{}{}), nil
-			case protocol.CommandHookLogAppend:
-				calls <- req.Command
-				<-ctx.Done()
-				return protocol.ResponseEnvelope{}, ctx.Err()
+			case protocol.CommandRuntimeSignalIngest:
+				calls = append(calls, req.Command)
+				return responseWithJSON(req, protocol.RuntimeSignalIngestResponseBody{Accepted: true, SignalID: "sig-1"}), nil
 			default:
 				t.Fatalf("unexpected command: %s", req.Command)
 				return protocol.ResponseEnvelope{}, nil
@@ -1041,10 +1021,8 @@ func TestAIHookRunCommandPrioritizesLifecycleNotifyBeforeHookLog(t *testing.T) {
 		t.Fatalf("RunAgentHook error: %v", err)
 	}
 
-	first := <-calls
-	second := <-calls
-	if first != daemonclient.CommandSessionPause || second != protocol.CommandHookLogAppend {
-		t.Fatalf("call order = [%s %s], want [%s %s]", first, second, daemonclient.CommandSessionPause, protocol.CommandHookLogAppend)
+	if !reflect.DeepEqual(calls, []string{protocol.CommandRuntimeSignalIngest}) {
+		t.Fatalf("calls = %v, want one runtime signal", calls)
 	}
 }
 
@@ -1052,13 +1030,17 @@ func TestAIHookRunCommandRoutesPreToolUseLifecycleNotify(t *testing.T) {
 	projectDir := t.TempDir()
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")
 
-	var sessionLifecycle []string
+	var signals []protocol.RuntimeSignalIngestCommandBody
 	transport := &fakeDaemonTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
-			case daemonclient.CommandSessionResume:
-				sessionLifecycle = append(sessionLifecycle, req.Command)
-				return responseWithOutput(req, "ok"), nil
+			case protocol.CommandRuntimeSignalIngest:
+				var body protocol.RuntimeSignalIngestCommandBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal runtime signal body: %v", err)
+				}
+				signals = append(signals, body)
+				return responseWithJSON(req, protocol.RuntimeSignalIngestResponseBody{Accepted: true, SignalID: "sig-1"}), nil
 			default:
 				t.Fatalf("unexpected daemon command for pre_tool_use: %s", req.Command)
 				return protocol.ResponseEnvelope{}, nil
@@ -1096,8 +1078,8 @@ func TestAIHookRunCommandRoutesPreToolUseLifecycleNotify(t *testing.T) {
 	if strings.TrimSpace(output) != "{}" {
 		t.Fatalf("ai hook run json output = %q, want {}", output)
 	}
-	if !reflect.DeepEqual(sessionLifecycle, []string{daemonclient.CommandSessionResume}) {
-		t.Fatalf("session lifecycle = %v, want [session.resume]", sessionLifecycle)
+	if len(signals) != 1 || signals[0].Event != hookEventPreToolUse || signals[0].Log {
+		t.Fatalf("runtime signals = %+v, want one non-logged pre_tool_use signal", signals)
 	}
 }
 
@@ -1105,7 +1087,7 @@ func TestAIHookRunCommandLeavesPostToolUseLifecycleNeutral(t *testing.T) {
 	projectDir := t.TempDir()
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")
 
-	var sessionLifecycle []string
+	var signals []protocol.RuntimeSignalIngestCommandBody
 	transport := &fakeDaemonTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
@@ -1146,8 +1128,8 @@ func TestAIHookRunCommandLeavesPostToolUseLifecycleNeutral(t *testing.T) {
 	if strings.TrimSpace(output) != "{}" {
 		t.Fatalf("ai hook run json output = %q, want {}", output)
 	}
-	if len(sessionLifecycle) != 0 {
-		t.Fatalf("session lifecycle = %v, want no lifecycle command", sessionLifecycle)
+	if len(signals) != 0 {
+		t.Fatalf("runtime signals = %v, want no lifecycle command", signals)
 	}
 }
 
@@ -1155,21 +1137,17 @@ func TestAIHookRunCommandRoutesClaudeAgentThroughPort(t *testing.T) {
 	projectDir := t.TempDir()
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-2")
 
-	var sessionLifecycle []string
-	var hookLogSources []string
+	var signals []protocol.RuntimeSignalIngestCommandBody
 	transport := &fakeDaemonTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
-			case protocol.CommandHookLogAppend:
-				var body protocol.HookLogAppendCommandBody
+			case protocol.CommandRuntimeSignalIngest:
+				var body protocol.RuntimeSignalIngestCommandBody
 				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal hook append body: %v", err)
+					t.Fatalf("unmarshal runtime signal body: %v", err)
 				}
-				hookLogSources = append(hookLogSources, body.Event.Source)
-				return responseWithJSON(req, body.Event), nil
-			case daemonclient.CommandSessionPause, daemonclient.CommandSessionResume:
-				sessionLifecycle = append(sessionLifecycle, req.Command)
-				return responseWithOutput(req, "ok"), nil
+				signals = append(signals, body)
+				return responseWithJSON(req, protocol.RuntimeSignalIngestResponseBody{Accepted: true, SignalID: "sig-1"}), nil
 			default:
 				return responseWithJSON(req, map[string]any{}), nil
 			}
@@ -1203,11 +1181,12 @@ func TestAIHookRunCommandRoutesClaudeAgentThroughPort(t *testing.T) {
 		t.Fatalf("AIHookRunCommand error: %v", err)
 	}
 
-	if !reflect.DeepEqual(sessionLifecycle, []string{daemonclient.CommandSessionPause}) {
-		t.Fatalf("session lifecycle = %v, want [session.pause] for claude idle_prompt", sessionLifecycle)
-	}
-	if len(hookLogSources) != 1 || hookLogSources[0] != "claude.hook" {
-		t.Fatalf("hook log sources = %v, want one claude.hook", hookLogSources)
+	if len(signals) != 1 ||
+		signals[0].Agent != "claude" ||
+		signals[0].Event != hookEventIdlePrompt ||
+		signals[0].IssueID != "az-port-2" ||
+		!signals[0].Log {
+		t.Fatalf("runtime signals = %+v", signals)
 	}
 }
 

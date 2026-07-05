@@ -276,7 +276,7 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	}
 	query := strings.TrimSpace(listReq.Query)
 	startedAt := time.Now()
-	result, shared, err := d.loadTaskListSnapshot(ctx, req, projectID, query)
+	result, shared, err := d.loadTaskListSnapshot(ctx, req, projectID, query, listReq.IncludeDependencies)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -317,7 +317,7 @@ func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvel
 		return resp, nil
 	}
 	latencytrace.LogPhase(d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", false)
-	result, shared, err := d.loadTaskListSnapshot(ctx, req, projectID, "")
+	result, shared, err := d.loadTaskListSnapshot(ctx, req, projectID, "", false)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -348,12 +348,15 @@ func decodeTaskListRequest(body []byte) (protocol.TaskListRequestBody, error) {
 	return req, nil
 }
 
-func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string) (taskListSnapshotLoadResult, bool, error) {
+func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string, includeDependencies bool) (taskListSnapshotLoadResult, bool, error) {
 	projectID = d.canonicalProjectID(projectID)
 	query = strings.TrimSpace(query)
 	loadKey := projectID
 	if query != "" {
 		loadKey = projectID + "\x00query:" + strings.ToLower(query)
+	}
+	if includeDependencies {
+		loadKey += "\x00deps"
 	}
 
 	d.taskListSnapshotLoadMu.Lock()
@@ -375,7 +378,7 @@ func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestE
 
 	buildCtx, cancel := context.WithTimeout(context.Background(), taskListSnapshotLoadTimeout)
 	defer cancel()
-	result, err := d.buildTaskListSnapshot(buildCtx, req, projectID, query)
+	result, err := d.buildTaskListSnapshot(buildCtx, req, projectID, query, includeDependencies)
 	load.result = cloneTaskListSnapshotLoadResult(result)
 	load.err = err
 
@@ -387,7 +390,7 @@ func (d *Daemon) loadTaskListSnapshot(ctx context.Context, req protocol.RequestE
 	return result, false, err
 }
 
-func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string) (taskListSnapshotLoadResult, error) {
+func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string, includeDependencies bool) (taskListSnapshotLoadResult, error) {
 	query = strings.TrimSpace(query)
 	refreshStartedAt := time.Now()
 	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil && d.cfg.Logger != nil {
@@ -409,9 +412,13 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 		err           error
 	)
 	if query == "" {
-		tasks, err = issueClient.ListSummariesWithRuntime(ctx, projectID)
+		if includeDependencies {
+			tasks, err = issueClient.ListSummariesWithRuntimeDependencies(ctx, projectID)
+		} else {
+			tasks, err = issueClient.ListSummariesWithRuntime(ctx, projectID)
+		}
 		summariesOnly = true
-		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.issue_store_list_summaries_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
+		latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.issue_store_list_summaries_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "include_dependencies", includeDependencies)
 	} else {
 		tasks, err = issueClient.SearchWithRuntime(ctx, projectID, query)
 	}
@@ -426,7 +433,7 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
 	latencytrace.LogPhase(d.cfg.Logger, "daemon", "task.list.snapshot_freshness", freshnessStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "freshness", freshness)
 	revision := d.currentRevision(projectID)
-	if query == "" {
+	if query == "" && !includeDependencies {
 		d.storeTaskListSnapshotCache(projectID, revision, lastCheckedAt, freshness, tasks, summariesOnly)
 	}
 	return taskListSnapshotLoadResult{
@@ -905,16 +912,7 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 		}
 		worktreeByIssue[issueID] = wt
 	}
-	issueClient := d.issueClientForProject(projectID)
-	taskByIssue := make(map[string]domain.Task)
-	if issueClient != nil {
-		if tasks, taskErr := issueClient.ListWithRuntime(ctx, projectID); taskErr == nil {
-			taskByIssue = make(map[string]domain.Task, len(tasks))
-			for _, task := range tasks {
-				taskByIssue[strings.TrimSpace(task.ID.String())] = task
-			}
-		}
-	}
+	taskByIssue := d.runtimeWorktreeIssueTaskContext(ctx, projectID, worktreeIssueIDsFromGitWorktrees(worktrees))
 	throttle := d.ensureWorktreeGitProbeThrottle()
 	trigger := runtimeReconcileRequestFromContext(ctx)
 	forceProbe := trigger.Priority >= reconcilePriorityManual && strings.TrimSpace(trigger.Reason) == "manual"
@@ -922,10 +920,12 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 	skippedProbes := 0
 	deferredProbes := 0
 	failedProbes := 0
+	suppressedProbes := 0
 	processedIssueIDs := make([]string, 0, 10)
 	failedIssueIDs := make([]string, 0, 10)
 	skippedIssueIDs := make([]string, 0, 10)
 	deferredIssueIDs := make([]string, 0, 10)
+	suppressedIssueIDs := make([]string, 0, 10)
 	now := time.Now().UTC()
 	for _, wt := range worktrees {
 		issueID := strings.TrimSpace(wt.IssueID)
@@ -936,6 +936,13 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 			continue
 		}
 		worktreePath := strings.TrimSpace(wt.Path)
+		if d.suppressProjectedStaleWorktreeGitRefresh(ctx, projectID, issueID, worktreePath, nil) {
+			suppressedProbes++
+			if len(suppressedIssueIDs) < cap(suppressedIssueIDs) {
+				suppressedIssueIDs = append(suppressedIssueIDs, issueID)
+			}
+			continue
+		}
 		if d.git != nil && worktreePath != "" {
 			issueBaseBranch := d.runtimeDiffBaseBranchForIssue(issueID, baseBranch, taskByIssue, worktreeByIssue)
 			probeKey := worktreeGitProbeThrottleKey(projectID, worktreePath, issueBaseBranch)
@@ -959,6 +966,13 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 				status, err := d.git.RuntimeStatus(ctx, worktreePath, issueBaseBranch)
 				outcome := throttle.Record(probeKey, gitStatusSignature(status), err)
 				if err != nil {
+					if d.suppressStaleWorktreeGitRefresh(ctx, projectID, issueID, worktreePath, err) {
+						suppressedProbes++
+						if len(suppressedIssueIDs) < cap(suppressedIssueIDs) {
+							suppressedIssueIDs = append(suppressedIssueIDs, issueID)
+						}
+						continue
+					}
 					failedProbes++
 					if len(failedIssueIDs) < cap(failedIssueIDs) {
 						failedIssueIDs = append(failedIssueIDs, issueID)
@@ -1021,7 +1035,7 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 	if d.cfg.Logger != nil && d.git != nil {
 		counters := throttle.snapshotCounters()
 		logFn := d.cfg.Logger.Debug
-		if failedProbes > 0 || skippedProbes > 0 || deferredProbes > 0 || trigger.Priority >= reconcilePriorityManual {
+		if failedProbes > 0 || skippedProbes > 0 || deferredProbes > 0 || suppressedProbes > 0 || trigger.Priority >= reconcilePriorityManual {
 			logFn = d.cfg.Logger.Info
 		}
 		logFn("refresh worktree runtime state completed",
@@ -1031,10 +1045,12 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 			"skipped_tasks", skippedProbes,
 			"deferred_tasks", deferredProbes,
 			"failed_tasks", failedProbes,
+			"suppressed_stale_tasks", suppressedProbes,
 			"sample_processed_issue_ids", strings.Join(processedIssueIDs, ","),
 			"sample_skipped_issue_ids", strings.Join(skippedIssueIDs, ","),
 			"sample_deferred_issue_ids", strings.Join(deferredIssueIDs, ","),
 			"sample_failed_issue_ids", strings.Join(failedIssueIDs, ","),
+			"sample_suppressed_stale_issue_ids", strings.Join(suppressedIssueIDs, ","),
 			"throttle_processed", counters.Processed,
 			"throttle_skipped", counters.Skipped,
 			"throttle_deferred", counters.Deferred,
@@ -1121,16 +1137,7 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 		}
 		worktreeByIssue[issueID] = wt
 	}
-	issueClient := d.issueClientForProject(projectID)
-	taskByIssue := make(map[string]domain.Task)
-	if issueClient != nil {
-		if tasks, taskErr := issueClient.ListWithRuntime(ctx, projectID); taskErr == nil {
-			taskByIssue = make(map[string]domain.Task, len(tasks))
-			for _, task := range tasks {
-				taskByIssue[strings.TrimSpace(task.ID.String())] = task
-			}
-		}
-	}
+	taskByIssue := d.runtimeWorktreeIssueTaskContext(ctx, projectID, issueIDs)
 
 	refreshed := 0
 	var errs []error
@@ -1147,6 +1154,9 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 		}
 
 		worktreePath := strings.TrimSpace(wt.Path)
+		if d.suppressProjectedStaleWorktreeGitRefresh(ctx, projectID, issueID, worktreePath, nil) {
+			continue
+		}
 		branch := strings.TrimSpace(wt.Branch)
 		d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktreePath, branch)
 		refreshed++
@@ -1157,6 +1167,10 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 		issueBaseBranch := d.runtimeDiffBaseBranchForIssue(issueID, baseBranch, taskByIssue, worktreeByIssue)
 		status, statusErr := d.git.RuntimeStatus(ctx, worktreePath, issueBaseBranch)
 		if statusErr != nil {
+			if d.suppressStaleWorktreeGitRefresh(ctx, projectID, issueID, worktreePath, statusErr) {
+				refreshed--
+				continue
+			}
 			errs = append(errs, fmt.Errorf("%s: refresh git status: %w", issueID, statusErr))
 			continue
 		}
@@ -1231,13 +1245,29 @@ func (d *Daemon) runtimeDiffBaseBranchForWorktree(ctx context.Context, projectID
 		worktreeByIssue[issueID] = wt
 	}
 
+	taskByIssue := d.runtimeWorktreeIssueTaskContext(ctx, projectID, []string{projection.IssueID})
+
+	return d.runtimeDiffBaseBranchForIssue(projection.IssueID, baseBranch, taskByIssue, worktreeByIssue)
+}
+
+func (d *Daemon) runtimeWorktreeIssueTaskContext(ctx context.Context, projectID string, issueIDs []string) map[string]domain.Task {
+	if d == nil {
+		return nil
+	}
+	issueIDs = worktreeIssueIDsFromStrings(issueIDs)
+	if len(issueIDs) == 0 {
+		return nil
+	}
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
-		return baseBranch
+		return nil
 	}
-	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+	tasks, err := issueClient.GetRuntimeWorktreeIssueContext(ctx, projectID, issueIDs)
 	if err != nil {
-		return baseBranch
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("runtime worktree issue context failed", "project_id", projectID, "error", err)
+		}
+		return nil
 	}
 	taskByIssue := make(map[string]domain.Task, len(tasks))
 	for _, task := range tasks {
@@ -1247,8 +1277,28 @@ func (d *Daemon) runtimeDiffBaseBranchForWorktree(ctx context.Context, projectID
 		}
 		taskByIssue[issueID] = task
 	}
+	return taskByIssue
+}
 
-	return d.runtimeDiffBaseBranchForIssue(projection.IssueID, baseBranch, taskByIssue, worktreeByIssue)
+func worktreeIssueIDsFromStrings(issueIDs []string) []string {
+	if len(issueIDs) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(issueIDs))
+	seen := map[string]struct{}{}
+	for _, issueID := range issueIDs {
+		issueID = strings.TrimSpace(issueID)
+		if issueID == "" {
+			continue
+		}
+		key := strings.ToLower(issueID)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		ids = append(ids, issueID)
+	}
+	return ids
 }
 
 func issueWorktreeRefsFromGitWorktrees(worktreesByIssue map[string]git.Worktree) map[string]domain.IssueWorktreeRef {
@@ -2187,7 +2237,7 @@ func (d *Daemon) validateOrCascadeChildrenForReview(ctx context.Context, project
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
 	}
-	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+	tasks, err := d.loadTaskClosePreflightDomainTasks(ctx, projectID, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("inspect child issues before moving %s to in_review: %w", taskID, err)
 	}
@@ -2288,11 +2338,10 @@ func (d *Daemon) validateTaskClosePreflight(ctx context.Context, projectID, task
 	if issueClient == nil {
 		return taskClosePreflightResult{}, fmt.Errorf("issue store unavailable")
 	}
-	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+	tasks, err := d.loadTaskClosePreflightDomainTasks(ctx, projectID, taskID)
 	if err != nil {
 		return taskClosePreflightResult{}, fmt.Errorf("inspect runtime attachments before closing %s: %w", taskID, err)
 	}
-	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
 
 	var task domain.Task
 	found := false
@@ -2350,11 +2399,10 @@ func (d *Daemon) closeCleanDescendantsBeforeParent(ctx context.Context, projectI
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
 	}
-	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
+	tasks, err := d.loadTaskClosePreflightDomainTasks(ctx, projectID, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("inspect child issues before closing %s: %w", taskID, err)
 	}
-	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
 	childrenByParent := daemonCloseGuardChildrenByParent(tasks)
 	root, err := naming.ParseIssueID(taskID)
 	if err != nil {
@@ -2392,6 +2440,18 @@ func (d *Daemon) closeCleanDescendantsBeforeParent(ctx context.Context, projectI
 		closed = append(closed, childResult.AutoClosedChildren...)
 	}
 	return closed, nil
+}
+
+func (d *Daemon) loadTaskClosePreflightDomainTasks(ctx context.Context, projectID, taskID string) ([]domain.Task, error) {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil, fmt.Errorf("issue store unavailable")
+	}
+	tasks, err := issueClient.ListParentChildSubtreeWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	return d.enrichTasksWithSessionState(ctx, projectID, tasks), nil
 }
 
 type daemonCloseGuardStatusRepair struct {
@@ -3157,7 +3217,7 @@ func daemonIssueWorktreeRefs(worktrees []git.Worktree) map[string]domain.IssueWo
 }
 
 func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID string) (taskCompleteCheckResult, error) {
-	tasks, err := d.loadTaskGraphDomainTasks(ctx, projectID)
+	tasks, err := d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootIssueID)
 	if err != nil {
 		return taskCompleteCheckResult{}, fmt.Errorf("inspect issue graph before completion check: %w", err)
 	}
@@ -3220,7 +3280,7 @@ func (d *Daemon) taskCompleteCheck(ctx context.Context, projectID, rootIssueID s
 }
 
 func (d *Daemon) taskGraphReadiness(ctx context.Context, projectID, rootIssueID string) (taskGraphReadinessResult, error) {
-	tasks, err := d.loadTaskGraphDomainTasks(ctx, projectID)
+	tasks, err := d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootIssueID)
 	if err != nil {
 		return taskGraphReadinessResult{}, fmt.Errorf("inspect issue graph readiness: %w", err)
 	}
@@ -3247,6 +3307,28 @@ func (d *Daemon) taskGraphReadiness(ctx context.Context, projectID, rootIssueID 
 	return ready, nil
 }
 
+func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectID, rootIssueID string) ([]domain.Task, error) {
+	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("task graph session runtime refresh failed", "project_id", projectID, "root_issue_id", rootIssueID, "error", err)
+	}
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil, fmt.Errorf("issue store unavailable")
+	}
+	tasks, err := issueClient.ListGraphReadinessWithRuntime(ctx, projectID, rootIssueID)
+	if err != nil {
+		return nil, err
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("task graph readiness loaded root-scoped tasks",
+			"project_id", projectID,
+			"root_issue_id", rootIssueID,
+			"task_count", len(tasks),
+		)
+	}
+	return d.enrichTasksWithSessionState(ctx, projectID, tasks), nil
+}
+
 func (result *taskGraphReadinessResult) removeRunnableSessionStarts(progressByIssue map[string]taskGraphSessionStartProgress) {
 	if result == nil || len(result.Runnable) == 0 || len(progressByIssue) == 0 {
 		return
@@ -3269,7 +3351,7 @@ func (d *Daemon) loadTaskGraphDomainTasks(ctx context.Context, projectID string)
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
 	}
-	tasks, err := issueClient.ListSummariesWithRuntime(ctx, projectID)
+	tasks, err := issueClient.ListSummariesWithRuntimeDependencies(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}

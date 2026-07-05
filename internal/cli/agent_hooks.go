@@ -53,9 +53,8 @@ type AgentHookOutcome struct {
 
 // RunAgentHook is the shared hook-handling port called by every CLI adapter.
 // It performs:
-//  1. hook-log emission (best effort, tagged with the agent source)
-//  2. daemon session-lifecycle notify (best effort, scoped to issue ID)
-//  3. agent-specific guard logic (currently: codex prime-evidence threading)
+//  1. runtime signal emission (best effort, tagged with the agent source)
+//  2. agent-specific guard logic (currently: codex prime-evidence threading)
 //
 // CLI adapters should render the returned GuardResponse in whatever format
 // their agent's hook protocol expects.
@@ -72,20 +71,10 @@ func RunAgentHook(ctx context.Context, deps *Dependencies, hookCtx AgentHookCont
 		return outcome, fmt.Errorf("invalid hook event: %q", event)
 	}
 
-	if issueID := strings.TrimSpace(hookCtx.IssueID); issueID != "" && deps != nil && deps.DaemonClient != nil {
+	if deps != nil && deps.DaemonClient != nil && shouldIngestAgentRuntimeSignal(hookCtx, event) {
 		notifyCtx, cancel := context.WithTimeout(ctx, hookBestEffortDaemonTimeout)
-		_ = notifyDaemonAgentSessionStatus(notifyCtx, deps, issueID, event)
+		_ = ingestAgentHookRuntimeSignalBestEffort(notifyCtx, deps, hookCtx, event)
 		cancel()
-	}
-
-	if strings.TrimSpace(hookCtx.ProjectDir) != "" && shouldAppendHookLogEvent(event) {
-		appendHookLogEventBestEffort(deps, protocol.HookLogEvent{
-			Hook:     event,
-			Worktree: strings.TrimSpace(hookCtx.ProjectDir),
-			Source:   fmt.Sprintf("%s.hook", agent),
-			Level:    "info",
-			Message:  fmt.Sprintf("%s hook: %s", agent, event),
-		})
 	}
 
 	switch agent {
@@ -117,56 +106,52 @@ func shouldAppendHookLogEvent(event string) bool {
 	}
 }
 
-func notifyDaemonAgentSessionStatus(ctx context.Context, deps *Dependencies, issueID, event string) error {
-	command := ""
-	switch event {
-	case hookEventIdlePrompt, hookEventPermissionRequest, hookEventStop, hookEventSubagentStop, hookEventSessionEnd:
-		command = commandSessionPause
-	case hookEventSessionStart, hookEventSubagentStart, hookEventUserPromptSubmit, hookEventPreToolUse:
-		command = commandSessionResume
-	default:
-		return nil
+func shouldIngestAgentRuntimeSignal(hookCtx AgentHookContext, event string) bool {
+	if !shouldAppendHookLogEvent(event) && !agentHookRuntimeSignalLifecycleRelevant(event) {
+		return false
 	}
-
-	return commandWithAgentSessionStatusBestEffort(ctx, deps, command, issueID)
+	if strings.TrimSpace(hookCtx.IssueID) != "" && agentHookRuntimeSignalLifecycleRelevant(event) {
+		return true
+	}
+	return strings.TrimSpace(hookCtx.ProjectDir) != "" && shouldAppendHookLogEvent(event)
 }
 
-func commandWithAgentSessionStatusBestEffort(ctx context.Context, deps *Dependencies, command, issueID string) error {
+func agentHookRuntimeSignalLifecycleRelevant(event string) bool {
+	switch event {
+	case hookEventIdlePrompt, hookEventPermissionRequest, hookEventStop, hookEventSubagentStop, hookEventSessionEnd,
+		hookEventSessionStart, hookEventSubagentStart, hookEventUserPromptSubmit, hookEventPreToolUse:
+		return true
+	default:
+		return false
+	}
+}
+
+func ingestAgentHookRuntimeSignalBestEffort(ctx context.Context, deps *Dependencies, hookCtx AgentHookContext, event string) error {
 	projectID := strings.TrimSpace(deps.ProjectID)
 	if projectID == "" {
 		projectID = protocol.DefaultProjectID
 	}
-	sessionID := agentHookSessionID(projectID, issueID)
-	req := agentSessionStatusRequest(command, projectID, issueID, sessionID)
-	resp, err := deps.DaemonClient.Command(ctx, req)
-	if err != nil {
-		return err
-	}
-	if err := responseError(resp, "failed to notify session status"); err != nil {
-		return err
-	}
-	return nil
-}
-
-func agentSessionStatusRequest(command, projectID, issueID, sessionID string) protocol.RequestEnvelope {
-	body, _ := json.Marshal(sessionRequestBody{
+	issueID := strings.TrimSpace(hookCtx.IssueID)
+	signal := protocol.RuntimeSignalIngestCommandBody{
+		Source:    protocol.RuntimeSignalSourceAgentHook,
+		Kind:      protocol.RuntimeSignalKindAgentActivityChanged,
 		ProjectID: projectID,
-		SessionID: sessionID,
 		IssueID:   issueID,
-	})
-	parsedSessionID, _ := naming.ParseSessionIDLoose(sessionID)
-	return protocol.RequestEnvelope{
-		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       makeRequestID(command),
-		Kind:            protocol.EnvelopeKindCommand,
-		Command:         command,
-		Meta: protocol.Metadata{
-			ProjectID: naming.ProjectID(projectID),
-			SessionID: parsedSessionID,
-		},
-		SentAt: time.Now().UTC(),
-		Body:   body,
+		SessionID: agentHookSessionID(projectID, issueID),
+		Worktree:  strings.TrimSpace(hookCtx.ProjectDir),
+		TmuxPane:  strings.TrimSpace(os.Getenv("TMUX_PANE")),
+		Agent:     string(hookCtx.Agent),
+		Hook:      event,
+		Event:     event,
+		Log:       shouldAppendHookLogEvent(event),
+		Message:   fmt.Sprintf("%s hook: %s", hookCtx.Agent, event),
+		Payload:   hookCtx.Payload,
 	}
+	if issueID == "" {
+		signal.SessionID = ""
+	}
+	_, err := deps.DaemonClient.RuntimeSignalIngest(ctx, signal)
+	return err
 }
 
 func agentHookSessionID(projectID, issueID string) string {

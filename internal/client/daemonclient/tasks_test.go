@@ -316,6 +316,56 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("list snapshot with dependencies", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				if req.Command != CommandTaskList {
+					t.Fatalf("command = %q, want %q", req.Command, CommandTaskList)
+				}
+				var body protocol.TaskListRequestBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal task.list request body: %v", err)
+				}
+				if !body.IncludeDependencies {
+					t.Fatal("include_dependencies = false, want true")
+				}
+				if body.Query != "" {
+					t.Fatalf("query = %q, want empty", body.Query)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Revision:        18,
+					OK:              true,
+					Body: mustMarshalRawTaskListSnapshotBody(t, protocol.TaskListSnapshotPayload{
+						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+						ProtocolVersion:  req.ProtocolVersion,
+						SnapshotRevision: 18,
+						ProjectID:        naming.ProjectID(wantProjectID),
+						LastCheckedAt:    mustTaskSnapshotCheckedAt(),
+						Freshness:        protocol.TaskListFreshnessFresh,
+						SummariesOnly:    true,
+						Tasks:            []domain.Task{{ID: "az-10", Title: "Task 10", Status: domain.StatusOpen}},
+					}),
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		snapshot, err := client.ListTasksSnapshotWithDependencies(context.Background())
+		if err != nil {
+			t.Fatalf("ListTasksSnapshotWithDependencies error: %v", err)
+		}
+		if snapshot.Revision != 18 {
+			t.Fatalf("revision = %d, want 18", snapshot.Revision)
+		}
+		if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].ID != "az-10" {
+			t.Fatalf("snapshot tasks = %+v", snapshot.Tasks)
+		}
+	})
+
 	t.Run("get snapshot", func(t *testing.T) {
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

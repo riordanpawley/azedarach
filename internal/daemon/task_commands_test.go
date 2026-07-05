@@ -1039,7 +1039,7 @@ func TestLoadTaskListSnapshotSharesInFlightProjectLoad(t *testing.T) {
 			Kind:            protocol.EnvelopeKindCommand,
 			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 			Command:         "task.list",
-		}, projectID, "")
+		}, projectID, "", false)
 		if !shared {
 			errCh <- errors.New("load was not shared")
 			return
@@ -1118,7 +1118,7 @@ func TestLoadTaskListSnapshotUsesDetachedBuildContext(t *testing.T) {
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 		Command:         "task.list",
-	}, projectID, "")
+	}, projectID, "", false)
 	if err != nil {
 		t.Fatalf("loadTaskListSnapshot error = %v, want detached load to succeed", err)
 	}
@@ -1198,6 +1198,148 @@ func TestHandleTaskListAppliesContentQueryInDaemon(t *testing.T) {
 	}
 	if payload.Tasks[0].Description == "" {
 		t.Fatalf("query task list lost full issue content: %+v", payload.Tasks[0])
+	}
+}
+
+func TestHandleTaskListIncludesDependenciesOnlyWhenRequested(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-list-deps"
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Parent",
+		Type:     domain.TypeEpic,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create parent issue: %v", err)
+	}
+	blockerID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Blocker",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create blocker issue: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Child",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusOpen,
+		ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatalf("create child issue: %v", err)
+	}
+	if err := issuesClient.AddDependency(ctx, childID, blockerID, string(domain.DependencyBlocks)); err != nil {
+		t.Fatalf("add blocker dependency: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 4},
+	}
+
+	decodeChild := func(t *testing.T, body []byte) domain.Task {
+		t.Helper()
+		payload, err := protocol.DecodeTaskListSnapshotPayload(body)
+		if err != nil {
+			t.Fatalf("decode task list body: %v", err)
+		}
+		for _, task := range payload.Tasks {
+			if task.ID.String() == childID {
+				return task
+			}
+		}
+		t.Fatalf("child %s missing from payload: %+v", childID, payload.Tasks)
+		return domain.Task{}
+	}
+
+	defaultResp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-list-deps-default",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.list",
+	})
+	if err != nil {
+		t.Fatalf("handle default task.list error: %v", err)
+	}
+	if !defaultResp.OK {
+		t.Fatalf("default task.list response = %+v", defaultResp.Error)
+	}
+	defaultTask := decodeChild(t, defaultResp.Body)
+	if defaultTask.ParentID == nil || defaultTask.ParentID.String() != parentID {
+		t.Fatalf("default parent = %v, want %s", defaultTask.ParentID, parentID)
+	}
+	if len(defaultTask.Dependencies) != 0 {
+		t.Fatalf("default dependencies = %+v, want none", defaultTask.Dependencies)
+	}
+
+	body, err := json.Marshal(protocol.TaskListRequestBody{IncludeDependencies: true})
+	if err != nil {
+		t.Fatalf("marshal dependency request: %v", err)
+	}
+	fullResp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-list-deps-full",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.list",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handle full-dependency task.list error: %v", err)
+	}
+	if !fullResp.OK {
+		t.Fatalf("full-dependency task.list response = %+v", fullResp.Error)
+	}
+	fullTask := decodeChild(t, fullResp.Body)
+	if fullTask.ParentID == nil || fullTask.ParentID.String() != parentID {
+		t.Fatalf("full parent = %v, want %s", fullTask.ParentID, parentID)
+	}
+	if len(fullTask.Dependencies) != 1 || fullTask.Dependencies[0].ID.String() != blockerID {
+		t.Fatalf("full dependencies = %+v, want blocker %s", fullTask.Dependencies, blockerID)
+	}
+
+	boardResp, err := d.handleBoardFetch(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-list-deps-board",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "board.fetch",
+	})
+	if err != nil {
+		t.Fatalf("handle board.fetch error: %v", err)
+	}
+	if !boardResp.OK {
+		t.Fatalf("board.fetch response = %+v", boardResp.Error)
+	}
+	boardPayload, err := protocol.DecodeBoardSnapshotPayload(boardResp.Body)
+	if err != nil {
+		t.Fatalf("decode board body: %v", err)
+	}
+	foundChild := false
+	for _, task := range boardPayload.Tasks {
+		if task.ID.String() != childID {
+			continue
+		}
+		foundChild = true
+		if len(task.Dependencies) != 0 {
+			t.Fatalf("board child dependencies = %+v, want none", task.Dependencies)
+		}
+	}
+	if !foundChild {
+		t.Fatalf("board payload missing child %s: %+v", childID, boardPayload.Tasks)
 	}
 }
 
@@ -4187,6 +4329,172 @@ func TestTaskGraphReadinessReportsMissingDependencyAndActiveSession(t *testing.T
 	}
 	if len(result.Active) != 1 || result.Active[0] != activeLeaf.String() {
 		t.Fatalf("active = %v, want [%s]", result.Active, activeLeaf.String())
+	}
+}
+
+func TestTaskGraphReadinessLoadsRootScopedTasksWithLargeUnrelatedProject(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-root-scoped-readiness"
+	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Watched root",
+		Type:     domain.TypeEpic,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	blockerID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "External blocker",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusOpen,
+	})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Watched child",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusOpen,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := issuesClient.AddDependency(ctx, childID, blockerID, string(domain.DependencyBlocks)); err != nil {
+		t.Fatalf("add blocker dependency: %v", err)
+	}
+	for i := 0; i < 250; i++ {
+		unrelatedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+			Title:    fmt.Sprintf("Unrelated %03d", i),
+			Type:     domain.TypeTask,
+			Priority: domain.P3,
+			Status:   domain.StatusOpen,
+		})
+		if err != nil {
+			t.Fatalf("create unrelated %d: %v", i, err)
+		}
+		if unrelatedID == rootID || unrelatedID == childID || unrelatedID == blockerID {
+			t.Fatalf("unexpected duplicate unrelated id %s", unrelatedID)
+		}
+	}
+
+	d := &Daemon{
+		cfg: Config{Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+	}
+	tasks, err := d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("loadTaskGraphReadinessDomainTasks error: %v", err)
+	}
+	byID := map[string]domain.Task{}
+	for _, task := range tasks {
+		byID[task.ID.String()] = task
+	}
+	if got, want := len(byID), 3; got != want {
+		t.Fatalf("root-scoped task count = %d, want %d (%s, %s, %s); tasks=%v", got, want, rootID, childID, blockerID, byID)
+	}
+	for _, wantID := range []string{rootID, childID, blockerID} {
+		if _, ok := byID[wantID]; !ok {
+			t.Fatalf("root-scoped tasks missing %s: tasks=%v", wantID, byID)
+		}
+	}
+
+	ready, err := d.taskGraphReadiness(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskGraphReadiness error: %v", err)
+	}
+	if got := ready.Blocked[childID]; !strings.Contains(got, blockerID) {
+		t.Fatalf("blocked[%s] = %q, want blocker %s", childID, got, blockerID)
+	}
+	if len(ready.Runnable) != 0 {
+		t.Fatalf("runnable = %v, want none while blocker is open", ready.Runnable)
+	}
+}
+
+func TestTaskClosePreflightLoadsRootScopedSubtreeWithLargeUnrelatedProject(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-close-scoped-subtree"
+	issuesClient := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Close root",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Close child",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusOpen,
+		ParentID: &rootID,
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	grandchildID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Close grandchild",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusOpen,
+		ParentID: &childID,
+	})
+	if err != nil {
+		t.Fatalf("create grandchild: %v", err)
+	}
+	for i := 0; i < 250; i++ {
+		unrelatedID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+			Title:    fmt.Sprintf("Unrelated %03d", i),
+			Type:     domain.TypeTask,
+			Priority: domain.P3,
+			Status:   domain.StatusOpen,
+		})
+		if err != nil {
+			t.Fatalf("create unrelated %d: %v", i, err)
+		}
+		if unrelatedID == rootID || unrelatedID == childID || unrelatedID == grandchildID {
+			t.Fatalf("unexpected duplicate unrelated id %s", unrelatedID)
+		}
+	}
+
+	d := &Daemon{
+		cfg: Config{Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+	}
+	tasks, err := d.loadTaskClosePreflightDomainTasks(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("loadTaskClosePreflightDomainTasks error: %v", err)
+	}
+	byID := map[string]domain.Task{}
+	for _, task := range tasks {
+		byID[task.ID.String()] = task
+	}
+	if got, want := len(byID), 3; got != want {
+		t.Fatalf("close preflight scoped task count = %d, want %d (%s, %s, %s); tasks=%v", got, want, rootID, childID, grandchildID, byID)
+	}
+	for _, wantID := range []string{rootID, childID, grandchildID} {
+		if _, ok := byID[wantID]; !ok {
+			t.Fatalf("close preflight scoped tasks missing %s: tasks=%v", wantID, byID)
+		}
+	}
+
+	guard := daemonCloseGuardChildBlockers(naming.IssueID(rootID), tasks, taskClosePreflightOptions{})
+	if len(guard) != 1 || !strings.Contains(guard[0], childID+" (open)") || !strings.Contains(guard[0], grandchildID+" (open)") {
+		t.Fatalf("close child guard = %+v, want root descendants only", guard)
 	}
 }
 
@@ -7260,6 +7568,89 @@ func TestRefreshWorktreeRuntimeStateSkipsClosedIssueWorktrees(t *testing.T) {
 	}
 }
 
+func TestRefreshWorktreeRuntimeStateSuppressesMissingWorktreeFromGitList(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-refresh-missing-worktree"
+	repoDir := t.TempDir()
+	missingID := "az-missing"
+	missingWorktree := filepath.Join(repoDir, "missing-"+missingID)
+
+	statusCalls := 0
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain":
+			return strings.Join([]string{
+				"worktree " + repoDir,
+				"branch refs/heads/main",
+				"",
+				"worktree " + missingWorktree,
+				"branch refs/heads/az/" + missingID,
+				"",
+			}, "\n"), nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "status" && args[3] == "--porcelain":
+			statusCalls++
+			return "", nil
+		default:
+			return "", nil
+		}
+	}}
+
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   missingID,
+		Path:      missingWorktree,
+		Branch:    "az/" + missingID,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed stale worktree projection: %v", err)
+	}
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
+		git: git.NewClient(runner, slog.Default()),
+		hub: publish.NewHub(16, 8, slog.Default()),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: store,
+		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(runner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(runner, repoDir, slog.Default()),
+		},
+	}
+	ch, cancel := d.hub.Subscribe(projectID, 0)
+	t.Cleanup(cancel)
+
+	count, err := d.refreshWorktreeRuntimeState(ctx, projectID)
+	if err != nil {
+		t.Fatalf("refreshWorktreeRuntimeState error: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("refreshWorktreeRuntimeState count = %d, want 0", count)
+	}
+	if statusCalls != 0 {
+		t.Fatalf("status calls = %d, want 0 for missing stale worktree", statusCalls)
+	}
+	if _, found, err := store.GetWorktreeStateByIssueID(ctx, projectID, missingID); err != nil {
+		t.Fatalf("get worktree state: %v", err)
+	} else if found {
+		t.Fatalf("missing worktree projection still present for %s", missingID)
+	}
+	select {
+	case evt := <-ch:
+		if evt.Event != protocol.EventWorktreeProjectionUpdated {
+			t.Fatalf("event = %s, want %s", evt.Event, protocol.EventWorktreeProjectionUpdated)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for missing worktree projection delete event")
+	}
+}
+
 func TestRefreshWorktreeRuntimeStateForIssuesDeletesClosedIssueWorktreeProjection(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-refresh-closed-target"
@@ -7708,13 +8099,21 @@ func TestRefreshWorktreeRuntimeStateMutationDoesNotBypassGitProbeBudget(t *testi
 		Reason:   "mutation:session.stop",
 	})
 	projectID := "proj-refresh-budget"
+	repoDir := t.TempDir()
+	worktreeOne := filepath.Join(repoDir, "repo-az-1")
+	worktreeTwo := filepath.Join(repoDir, "repo-az-2")
+	for _, path := range []string{worktreeOne, worktreeTwo} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("mkdir worktree %s: %v", path, err)
+		}
+	}
 	statusCalls := 0
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		switch {
 		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain":
-			return "worktree /tmp/repo-root\nbranch refs/heads/main\n\n" +
-				"worktree /tmp/repo-az-1\nbranch refs/heads/az/az-1\n\n" +
-				"worktree /tmp/repo-az-2\nbranch refs/heads/az/az-2\n", nil
+			return "worktree " + repoDir + "\nbranch refs/heads/main\n\n" +
+				"worktree " + worktreeOne + "\nbranch refs/heads/az/az-1\n\n" +
+				"worktree " + worktreeTwo + "\nbranch refs/heads/az/az-2\n", nil
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status" && args[3] == "--porcelain":
 			statusCalls++
 			return "", nil
@@ -7728,16 +8127,16 @@ func TestRefreshWorktreeRuntimeStateMutationDoesNotBypassGitProbeBudget(t *testi
 
 	now := time.Date(2026, time.May, 6, 12, 0, 0, 0, time.UTC)
 	d := &Daemon{
-		cfg: Config{RepoDir: "/tmp/repo-root", BaseBranch: "main", Logger: slog.Default()},
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
 		git: git.NewClient(runner, slog.Default()),
 		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
-			"/tmp/repo-root": store,
+			repoDir: store,
 		},
 		worktreeManagersByRoot: map[string]*git.WorktreeManager{
-			"/tmp/repo-root": git.NewWorktreeManager(runner, "/tmp/repo-root", slog.Default()),
+			repoDir: git.NewWorktreeManager(runner, repoDir, slog.Default()),
 		},
 		worktreeManagersByProject: map[string]*git.WorktreeManager{
-			projectID: git.NewWorktreeManager(runner, "/tmp/repo-root", slog.Default()),
+			projectID: git.NewWorktreeManager(runner, repoDir, slog.Default()),
 		},
 		worktreeGitProbeThrottle: newReconcileThrottle(reconcileThrottleConfig{
 			Name:                 "worktree_git_probe_test",
@@ -7760,6 +8159,87 @@ func TestRefreshWorktreeRuntimeStateMutationDoesNotBypassGitProbeBudget(t *testi
 	}
 	if statusCalls != 1 {
 		t.Fatalf("status calls = %d, want 1", statusCalls)
+	}
+}
+
+func TestRefreshWorktreeRuntimeStateTransientGitFailureKeepsProjectionAndBacksOff(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-refresh-transient"
+	repoDir := t.TempDir()
+	worktreeOne := filepath.Join(repoDir, "repo-az-1")
+	worktreeTwo := filepath.Join(repoDir, "repo-az-2")
+	for _, path := range []string{worktreeOne, worktreeTwo} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("mkdir worktree %s: %v", path, err)
+		}
+	}
+
+	statusCalls := 0
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain":
+			return "worktree " + repoDir + "\nbranch refs/heads/main\n\n" +
+				"worktree " + worktreeOne + "\nbranch refs/heads/az/az-1\n\n" +
+				"worktree " + worktreeTwo + "\nbranch refs/heads/az/az-2\n", nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "status" && args[3] == "--porcelain":
+			statusCalls++
+			return "", errors.New("git status failed: exit status 128: index.lock busy")
+		default:
+			return "", nil
+		}
+	}}
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+
+	now := time.Date(2026, time.May, 6, 12, 0, 0, 0, time.UTC)
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
+		git: git.NewClient(runner, slog.Default()),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: store,
+		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(runner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(runner, repoDir, slog.Default()),
+		},
+		worktreeGitProbeThrottle: newReconcileThrottle(reconcileThrottleConfig{
+			Name:                 "worktree_git_probe_test",
+			Budget:               1,
+			Cadence:              time.Hour,
+			UnchangedBackoffBase: time.Hour,
+			UnchangedBackoffMax:  time.Hour,
+			FailureBackoffBase:   time.Hour,
+			FailureBackoffMax:    time.Hour,
+			Now:                  func() time.Time { return now },
+		}),
+	}
+
+	count, err := d.refreshWorktreeRuntimeState(ctx, projectID)
+	if err != nil {
+		t.Fatalf("first refreshWorktreeRuntimeState error: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("first refreshWorktreeRuntimeState count = %d, want 2", count)
+	}
+	count, err = d.refreshWorktreeRuntimeState(ctx, projectID)
+	if err != nil {
+		t.Fatalf("second refreshWorktreeRuntimeState error: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("second refreshWorktreeRuntimeState count = %d, want 2", count)
+	}
+	if statusCalls != 1 {
+		t.Fatalf("status calls = %d, want 1 after transient failure backoff/budget", statusCalls)
+	}
+	worktrees, err := store.ListWorktreeStates(ctx, projectID)
+	if err != nil {
+		t.Fatalf("list worktree projections: %v", err)
+	}
+	if len(worktrees) != 2 {
+		t.Fatalf("worktree projection count = %d, want 2", len(worktrees))
 	}
 }
 

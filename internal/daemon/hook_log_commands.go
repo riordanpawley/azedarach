@@ -21,7 +21,21 @@ func (d *Daemon) handleHookLogAppend(_ context.Context, req protocol.RequestEnve
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
 	projectID := d.projectID(req.Meta)
-	evt := cmd.Event
+	evt, err := normalizeHookLogEvent(projectID, cmd.Event)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required field: event.message"), nil
+	}
+	rev, body, err := d.publishHookLogEvent(projectID, evt)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal hook log event: %v", err)), nil
+	}
+	resp := d.successResponse(req)
+	resp.Body = body
+	resp.Revision = rev
+	return resp, nil
+}
+
+func normalizeHookLogEvent(projectID string, evt protocol.HookLogEvent) (protocol.HookLogEvent, error) {
 	evt.ProjectID = naming.ProjectID(projectID)
 	evt.Hook = strings.TrimSpace(evt.Hook)
 	evt.Worktree = strings.TrimSpace(evt.Worktree)
@@ -29,25 +43,24 @@ func (d *Daemon) handleHookLogAppend(_ context.Context, req protocol.RequestEnve
 	evt.Level = strings.TrimSpace(evt.Level)
 	evt.Message = strings.TrimSpace(evt.Message)
 	if evt.Message == "" {
-		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required field: event.message"), nil
+		return protocol.HookLogEvent{}, fmt.Errorf("missing required field: event.message")
 	}
 	if evt.CreatedAt.IsZero() {
 		evt.CreatedAt = time.Now().UTC()
 	} else {
 		evt.CreatedAt = evt.CreatedAt.UTC()
 	}
+	return evt, nil
+}
 
+func (d *Daemon) publishHookLogEvent(projectID string, evt protocol.HookLogEvent) (uint64, []byte, error) {
 	d.appendHookLogEvent(projectID, evt)
 
 	body, err := json.Marshal(evt)
 	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal hook log event: %v", err)), nil
+		return 0, nil, err
 	}
-	resp := d.successResponse(req)
-	resp.Body = body
-
 	rev := d.nextRevision(projectID)
-	resp.Revision = rev
 	d.hub.Publish(protocol.EventEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		ProjectID:       naming.ProjectID(projectID),
@@ -58,7 +71,7 @@ func (d *Daemon) handleHookLogAppend(_ context.Context, req protocol.RequestEnve
 		EmittedAt:       time.Now().UTC(),
 		Body:            body,
 	})
-	return resp, nil
+	return rev, body, nil
 }
 
 func (d *Daemon) handleHookLogList(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

@@ -560,14 +560,24 @@ func TestSessionRestartAllSkipsBusySessionsByDefault(t *testing.T) {
 	if result.Restarted != 1 || result.Skipped != 1 || result.Failed != 0 {
 		t.Fatalf("result = %+v, want restarted=1 skipped=1 failed=0", result)
 	}
-	if tmuxRunner.sendKeysCalls != 2 {
-		t.Fatalf("send-keys calls = %d, want C-c and resume for idle session only", tmuxRunner.sendKeysCalls)
+	if tmuxRunner.sendKeysCalls != 3 {
+		t.Fatalf("send-keys calls = %d, want C-c, resume, and continuation submit for idle session only", tmuxRunner.sendKeysCalls)
 	}
-	if got := tmuxRunner.sendKeysTargets; !reflect.DeepEqual(got, []string{idleSession, idleSession}) {
-		t.Fatalf("sendKeysTargets = %+v, want idle session twice", got)
+	if got := tmuxRunner.sendKeysTargets; !reflect.DeepEqual(got, []string{idleSession, idleSession, idleSession}) {
+		t.Fatalf("sendKeysTargets = %+v, want idle session for interrupt, resume, and submit", got)
 	}
-	if got := tmuxRunner.sendKeysPayloads[1]; !strings.Contains(got, "codex resume") || !strings.Contains(got, "--last") {
-		t.Fatalf("resume command = %q, want codex resume --last for idle session", got)
+	if got := tmuxRunner.sendKeysPayloads[1]; !strings.Contains(got, "codex resume") || !strings.Contains(got, "--last") || strings.Contains(got, "Continue your prior task") {
+		t.Fatalf("resume command = %q, want codex resume --last without positional continuation prompt", got)
+	}
+	foundContinuationPrompt := false
+	for _, command := range tmuxRunner.commands {
+		if len(command) >= 4 && command[0] == "set-buffer" && strings.Contains(command[3], "Continue your prior task") {
+			foundContinuationPrompt = true
+			break
+		}
+	}
+	if !foundContinuationPrompt {
+		t.Fatalf("missing continuation prompt paste in tmux commands: %+v", tmuxRunner.commands)
 	}
 }
 
@@ -643,8 +653,8 @@ func TestSessionRestartAllForceBusyIncludesBusySessionsAndConfiguredFlags(t *tes
 	if result.Restarted != 2 || result.Skipped != 0 || result.Failed != 0 {
 		t.Fatalf("result = %+v, want restarted=2 skipped=0 failed=0", result)
 	}
-	if tmuxRunner.sendKeysCalls != 4 {
-		t.Fatalf("send-keys calls = %d, want C-c and resume for two sessions", tmuxRunner.sendKeysCalls)
+	if tmuxRunner.sendKeysCalls != 6 {
+		t.Fatalf("send-keys calls = %d, want C-c, resume, and continuation submit for two sessions", tmuxRunner.sendKeysCalls)
 	}
 	for _, payload := range tmuxRunner.sendKeysPayloads {
 		if strings.Contains(payload, "codex resume") && !strings.Contains(payload, "--dangerously-bypass-approvals-and-sandbox") {
@@ -3584,6 +3594,139 @@ func TestSessionPauseResumeAgentScopedTargetWritesHookActivity(t *testing.T) {
 	}
 	if row.Activity != "busy" || row.ActivitySource != "hooks" {
 		t.Fatalf("agent session activity = %s/%s, want busy/hooks", row.Activity, row.ActivitySource)
+	}
+}
+
+func TestSessionPauseResumeAgentScopedTargetRefreshesHookActivityWhenLifecycleUnchanged(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+	tests := []struct {
+		name          string
+		command       string
+		state         daemonstate.SessionState
+		staleActivity string
+		staleSource   string
+		wantActivity  string
+		handle        func(*Daemon, context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	}{
+		{
+			name:          "pause clears stale busy",
+			command:       daemonhandlers.CommandSessionPause,
+			state:         daemonstate.SessionStatePaused,
+			staleActivity: "busy",
+			staleSource:   "hooks",
+			wantActivity:  "idle",
+			handle:        (*Daemon).handleSessionPause,
+		},
+		{
+			name:          "resume clears stale idle",
+			command:       daemonhandlers.CommandSessionResume,
+			state:         daemonstate.SessionStateRunning,
+			staleActivity: "idle",
+			staleSource:   "hooks",
+			wantActivity:  "busy",
+			handle:        (*Daemon).handleSessionResume,
+		},
+		{
+			name:          "pause restores missing hook source",
+			command:       daemonhandlers.CommandSessionPause,
+			state:         daemonstate.SessionStatePaused,
+			staleActivity: "idle",
+			wantActivity:  "idle",
+			handle:        (*Daemon).handleSessionPause,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			canonicalSessionID := naming.CanonicalSessionID(projectID, issueID)
+			agentSessionID := canonicalSessionID + ".pane-190"
+			tmuxRunner := newTestTmuxRunner(canonicalSessionID)
+			close(tmuxRunner.killRelease)
+			store := daemonstate.NewStore()
+			now := time.Now().UTC()
+			store.ReplaceProjectSessions(projectID, []daemonstate.Session{
+				{
+					ID:            canonicalSessionID,
+					IssueID:       issueID,
+					State:         daemonstate.SessionStateRunning,
+					ObservedState: daemonstate.SessionStateRunning,
+					Activity:      "busy",
+					StartedAt:     &now,
+					UpdatedAt:     now,
+				},
+				{
+					ID:             agentSessionID,
+					IssueID:        issueID,
+					State:          tt.state,
+					ObservedState:  tt.state,
+					Activity:       tt.staleActivity,
+					ActivitySource: tt.staleSource,
+					StartedAt:      &now,
+					UpdatedAt:      now,
+				},
+			})
+			runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+			t.Cleanup(func() {
+				_ = runtimeStateStore.Close()
+			})
+			if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+				ID:             agentSessionID,
+				IssueID:        issueID,
+				State:          tt.state,
+				ObservedState:  tt.state,
+				Activity:       tt.staleActivity,
+				ActivitySource: tt.staleSource,
+				StartedAt:      &now,
+				UpdatedAt:      now,
+			}); err != nil {
+				t.Fatalf("seed stale agent runtime state: %v", err)
+			}
+			daemon := &Daemon{
+				cfg: Config{
+					RepoDir: ".",
+					Logger:  slog.Default(),
+				},
+				tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+				session:      daemonhandlers.NewSessionHandler(store),
+				sessionStore: store,
+				runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+					".": runtimeStateStore,
+				},
+			}
+
+			resp, err := tt.handle(daemon, context.Background(), protocol.RequestEnvelope{
+				ProtocolVersion: protocol.CurrentVersion,
+				RequestID:       "req-agent-lifecycle-unchanged",
+				Kind:            protocol.EnvelopeKindCommand,
+				Command:         tt.command,
+				Meta: protocol.Metadata{
+					ProjectID: naming.ProjectID(projectID),
+				},
+				Body: marshalJSON(map[string]string{
+					"project_id": projectID,
+					"issue_id":   issueID,
+					"session_id": agentSessionID,
+				}),
+			})
+			if err != nil {
+				t.Fatalf("handler returned error: %v", err)
+			}
+			if !resp.OK {
+				t.Fatalf("response not ok: %+v", resp.Error)
+			}
+			row, found, err := runtimeStateStore.GetSessionState(context.Background(), projectID, agentSessionID)
+			if err != nil {
+				t.Fatalf("get agent session runtime state: %v", err)
+			}
+			if !found {
+				t.Fatal("agent session runtime state not found")
+			}
+			if row.Activity != tt.wantActivity || row.ActivitySource != "hooks" {
+				t.Fatalf("agent session activity = %s/%s, want %s/hooks", row.Activity, row.ActivitySource, tt.wantActivity)
+			}
+		})
 	}
 }
 
@@ -6563,6 +6706,27 @@ func TestBuildSessionResumeCommandUsesCodexResumeLastWithOptionsBeforeSelector(t
 			t.Fatalf("command = %q, want %q after index %d", command, part, last)
 		}
 		last = idx
+	}
+	if strings.Contains(command, "Continue your prior task") {
+		t.Fatalf("command = %q, want continuation prompt delivered after launch for codex", command)
+	}
+}
+
+func TestBuildSessionResumeCommandUsesClaudeContinueWithPrompt(t *testing.T) {
+	d := &Daemon{
+		cfg: Config{
+			CLITool:                    "claude",
+			DangerouslySkipPermissions: true,
+			SessionShell:               "zsh",
+		},
+	}
+
+	command := d.buildSessionResumeCommand(protocol.DefaultProjectID, "axt-123", "claude-axt-123", false, nil)
+	wantParts := []string{`AZEDARACH_ISSUE_ID="axt-123"`, "claude", "--continue", "--dangerously-skip-permissions", "Continue your prior task"}
+	for _, part := range wantParts {
+		if !strings.Contains(command, part) {
+			t.Fatalf("command = %q, want part %q", command, part)
+		}
 	}
 }
 

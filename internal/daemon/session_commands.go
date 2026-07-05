@@ -99,8 +99,10 @@ const (
 	sessionInvariantSessionStopTargets     daemonInvariantID = daemonInvariantSessionStopTargets
 	sessionInvariantSessionReconcile       daemonInvariantID = daemonInvariantSessionReconcile
 
-	sessionConflictWindowName   = "resolve-conflict"
-	sessionActivityStartupGrace = 45 * time.Second
+	sessionConflictWindowName         = "resolve-conflict"
+	sessionActivityStartupGrace       = 45 * time.Second
+	sessionRestartContinuePromptDelay = 500 * time.Millisecond
+	sessionRestartContinuePrompt      = "Continue your prior task. Start by running `az prime` if you need to refresh issue context, then keep working from the existing conversation without waiting for further instruction."
 )
 
 func reportSessionStartProgress(ctx context.Context, phase, message string, percent int) {
@@ -1045,7 +1047,7 @@ func (d *Daemon) handleSessionPause(ctx context.Context, req protocol.RequestEnv
 	if !exists {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found: %s (use 'az start %s' to create)", cmd.IssueID, cmd.IssueID)), nil
 	}
-	if !d.sessionLifecycleTransitionNeeded(cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonstate.SessionStatePaused) {
+	if !d.sessionLifecycleOrAgentActivityTransitionNeeded(cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonstate.SessionStatePaused) {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("daemon session pause unchanged",
 				"project_id", cmd.ProjectID,
@@ -1095,7 +1097,7 @@ func (d *Daemon) handleSessionResume(ctx context.Context, req protocol.RequestEn
 	if !exists {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found: %s (use 'az start %s' to create)", cmd.IssueID, cmd.IssueID)), nil
 	}
-	if !d.sessionLifecycleTransitionNeeded(cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonstate.SessionStateAttached) {
+	if !d.sessionLifecycleOrAgentActivityTransitionNeeded(cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonstate.SessionStateAttached) {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("daemon session resume unchanged",
 				"project_id", cmd.ProjectID,
@@ -1403,6 +1405,20 @@ func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.Reque
 			result.Failed++
 			result.Sessions = append(result.Sessions, item)
 			continue
+		}
+		if d.sessionRestartNeedsPostLaunchPrompt(projectID) {
+			if err := waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
+				item.Error = err.Error()
+				result.Failed++
+				result.Sessions = append(result.Sessions, item)
+				continue
+			}
+			if err := d.tmux.PasteTextAndSubmit(ctx, sessionID, sessionRestartContinuePrompt); err != nil {
+				item.Error = err.Error()
+				result.Failed++
+				result.Sessions = append(result.Sessions, item)
+				continue
+			}
 		}
 		item.Restarted = true
 		result.Restarted++
@@ -3391,8 +3407,11 @@ func (d *Daemon) buildSessionResumeCommand(projectID, issueID, sessionID string,
 	if tool == "" {
 		tool = "claude"
 	}
+	if strings.EqualFold(tool, "claude") {
+		return d.buildClaudeContinueCommand(projectID, issueID, yolo, sessionRestartContinuePrompt)
+	}
 	if !strings.EqualFold(tool, "codex") {
-		return d.buildSessionLaunchCommand(projectID, issueID, sessionID, yolo, imagePaths, "")
+		return d.buildSessionLaunchCommand(projectID, issueID, sessionID, yolo, imagePaths, sessionRestartContinuePrompt)
 	}
 
 	parts := []string{
@@ -3413,6 +3432,31 @@ func (d *Daemon) buildSessionResumeCommand(projectID, issueID, sessionID string,
 	// Azedarach tracks tmux session IDs, not Codex conversation UUIDs.
 	// Codex's cwd filter makes --last target this worktree's latest session.
 	parts = append(parts, "--last")
+	return strings.Join(parts, " ")
+}
+
+func (d *Daemon) sessionRestartNeedsPostLaunchPrompt(projectID string) bool {
+	tool := strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool)
+	return strings.EqualFold(tool, "codex")
+}
+
+func (d *Daemon) buildClaudeContinueCommand(projectID, issueID string, yolo bool, prompt string) string {
+	projectCfg := d.runtimeConfigForProject(projectID)
+	tool := strings.TrimSpace(projectCfg.CLITool)
+	if tool == "" {
+		tool = "claude"
+	}
+	parts := []string{
+		fmt.Sprintf(`AZEDARACH_ISSUE_ID="%s"`, escapeForShellDoubleQuotes(issueID)),
+		tool,
+		"--continue",
+	}
+	if yolo || projectCfg.DangerouslySkipPermissions {
+		parts = append(parts, "--dangerously-skip-permissions")
+	}
+	if strings.TrimSpace(prompt) != "" {
+		parts = append(parts, fmt.Sprintf(`"%s"`, escapeForShellDoubleQuotes(prompt)))
+	}
 	return strings.Join(parts, " ")
 }
 
