@@ -628,7 +628,7 @@ func TestDaemonNoticeProjectionFeedsFeedbackSurfaces(t *testing.T) {
 	notice := protocol.NoticeRecord{
 		NoticeID:  "notice-op-close",
 		ProjectID: naming.ProjectID(m.daemonProjectID()),
-		Scope:     protocol.NoticeScope{Type: "issue", ID: "az-4"},
+		Scope:     protocol.NoticeScope{Type: "task", ID: "az-4"},
 		Source: &protocol.NoticeSource{
 			OperationID:    naming.OperationID("op-close"),
 			OperationKind:  daemonclient.CommandTaskClose,
@@ -1045,9 +1045,10 @@ func TestNotificationActionCenterOpenTaskRoutesUseExistingWorkspaceRoute(t *test
 		name     string
 		actionID string
 		kind     string
+		scope    string
 	}{
-		{name: "open task", actionID: "open_task", kind: "client.open_task"},
-		{name: "open workspace", actionID: "open_workspace", kind: "client.open_workspace"},
+		{name: "open task", actionID: "open_task", kind: "client.open_task", scope: "task"},
+		{name: "open workspace", actionID: "open_workspace", kind: "client.open_workspace", scope: "task"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			m := newTestModel()
@@ -1058,7 +1059,7 @@ func TestNotificationActionCenterOpenTaskRoutesUseExistingWorkspaceRoute(t *test
 				Value: overlay.NotificationActionCenterMsg{
 					ActionID:  tt.actionID,
 					Kind:      tt.kind,
-					ScopeType: "issue",
+					ScopeType: tt.scope,
 					ScopeID:   "az-1",
 				},
 			})

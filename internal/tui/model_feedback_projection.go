@@ -371,7 +371,7 @@ func taskFailureFromNotice(notice protocol.NoticeRecord, taskStatusByID map[stri
 	if notice.State != protocol.NoticeStateActive {
 		return taskMutationFailure{}, false
 	}
-	if strings.TrimSpace(notice.Scope.Type) != "issue" || taskIDKey(notice.Scope.ID) == "" {
+	if !noticeScopeTargetsTask(notice.Scope.Type) || taskIDKey(notice.Scope.ID) == "" {
 		return taskMutationFailure{}, false
 	}
 	if strings.TrimSpace(notice.Category) != "operation_failed" {
@@ -419,4 +419,13 @@ func noticeFailureRecovery(notice protocol.NoticeRecord) string {
 		}
 	}
 	return ""
+}
+
+func noticeScopeTargetsTask(scopeType string) bool {
+	switch strings.TrimSpace(scopeType) {
+	case "issue", "task":
+		return true
+	default:
+		return false
+	}
 }

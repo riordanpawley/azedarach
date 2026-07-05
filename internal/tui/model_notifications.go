@@ -371,7 +371,7 @@ func notificationActionIsClientLocal(action overlay.NotificationActionCenterMsg)
 }
 
 func notificationActionIssueID(action overlay.NotificationActionCenterMsg) string {
-	if strings.TrimSpace(action.ScopeType) == "issue" && strings.TrimSpace(action.ScopeID) != "" {
+	if noticeScopeTargetsTask(action.ScopeType) && strings.TrimSpace(action.ScopeID) != "" {
 		return strings.TrimSpace(action.ScopeID)
 	}
 	return ""
