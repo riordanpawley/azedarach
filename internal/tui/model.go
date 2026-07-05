@@ -132,20 +132,28 @@ type editTaskDetailLoadedMsg struct {
 }
 
 type pendingOperationProgress struct {
-	operationID  string
-	kind         string
-	state        protocol.OperationState
-	percent      int
-	message      string
-	errorMessage string
-	updatedAt    time.Time
+	operationID   string
+	kind          string
+	state         protocol.OperationState
+	percent       int
+	message       string
+	errorMessage  string
+	action        string
+	reason        string
+	recovery      string
+	currentStatus domain.Status
+	targetStatus  domain.Status
+	updatedAt     time.Time
 }
 
 type taskMutationFailure struct {
 	operationID    string
 	action         string
 	message        string
+	reason         string
+	recovery       string
 	previousStatus domain.Status
+	currentStatus  domain.Status
 	targetStatus   domain.Status
 	updatedAt      time.Time
 }
@@ -1274,7 +1282,23 @@ func (m *Model) applyOperationRecord(record protocol.OperationRecord, now time.T
 	}
 	if state == protocol.OperationStateFailed && (errorMessage != "" || message != "") {
 		if status, ok := m.taskStatusByID(taskID); ok {
-			errorMessage = formatOperationMutationFailure(taskID, status, record)
+			failure := operationMutationFailureDetails(taskID, status, record)
+			errorMessage = failure.Message
+			m.pendingOpsByTask[taskIDKey(taskID)] = pendingOperationProgress{
+				operationID:   operationID,
+				kind:          strings.TrimSpace(record.Kind),
+				state:         state,
+				percent:       percent,
+				message:       errorMessage,
+				errorMessage:  errorMessage,
+				action:        failure.Action,
+				reason:        failure.Reason,
+				recovery:      failure.Recovery,
+				currentStatus: failure.CurrentStatus,
+				targetStatus:  failure.TargetStatus,
+				updatedAt:     now,
+			}
+			return
 		}
 	}
 	if errorMessage != "" {
@@ -5166,6 +5190,18 @@ func (m *Model) markTaskMutationFailed(taskID, action, message string) {
 }
 
 func (m *Model) markTaskStatusMutationFailed(taskID, action string, previousStatus, targetStatus domain.Status, message string) {
+	m.markTaskMutationFailure(mutationFailureDetails{
+		TaskID:         strings.TrimSpace(taskID),
+		Action:         strings.TrimSpace(action),
+		PreviousStatus: previousStatus,
+		CurrentStatus:  previousStatus,
+		TargetStatus:   targetStatus,
+		Message:        strings.TrimSpace(message),
+	})
+}
+
+func (m *Model) markTaskMutationFailure(details mutationFailureDetails) {
+	taskID := strings.TrimSpace(details.TaskID)
 	key := taskIDKey(taskID)
 	if key == "" {
 		return
@@ -5175,10 +5211,13 @@ func (m *Model) markTaskStatusMutationFailed(taskID, action string, previousStat
 	}
 	delete(m.pendingOpsByTask, key)
 	m.pendingFailures[key] = taskMutationFailure{
-		action:         strings.TrimSpace(action),
-		message:        strings.TrimSpace(message),
-		previousStatus: previousStatus,
-		targetStatus:   targetStatus,
+		action:         strings.TrimSpace(details.Action),
+		message:        strings.TrimSpace(details.Message),
+		reason:         strings.TrimSpace(details.Reason),
+		recovery:       strings.TrimSpace(details.Recovery),
+		previousStatus: details.PreviousStatus,
+		currentStatus:  details.CurrentStatus,
+		targetStatus:   details.TargetStatus,
 		updatedAt:      time.Now(),
 	}
 }
@@ -5294,6 +5333,16 @@ func (m Model) pendingMutationForTask(taskID string) *overlay.TaskMutationProgre
 		progress.State = string(op.state)
 		progress.ProgressPercent = op.percent
 		progress.ProgressMessage = op.message
+		progress.FailureAction = op.action
+		progress.FailureReason = op.reason
+		progress.FailureRecovery = op.recovery
+		progress.CurrentStatus = op.currentStatus
+		if progress.PreviousStatus == "" {
+			progress.PreviousStatus = op.currentStatus
+		}
+		if op.targetStatus != "" {
+			progress.TargetStatus = op.targetStatus
+		}
 		if strings.TrimSpace(op.errorMessage) != "" {
 			progress.ProgressMessage = op.errorMessage
 		}
@@ -5305,7 +5354,11 @@ func (m Model) pendingMutationForTask(taskID string) *overlay.TaskMutationProgre
 		progress.State = string(protocol.OperationStateFailed)
 		progress.ProgressMessage = strings.TrimSpace(failure.message)
 		progress.PreviousStatus = failure.previousStatus
+		progress.CurrentStatus = failure.currentStatus
 		progress.TargetStatus = failure.targetStatus
+		progress.FailureAction = failure.action
+		progress.FailureReason = failure.reason
+		progress.FailureRecovery = failure.recovery
 	}
 	if runtime, ok := m.runtimeSignalsByTask[key]; ok {
 		if progress.OperationID == "" {

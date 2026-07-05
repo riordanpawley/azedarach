@@ -1494,7 +1494,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.scheduleIssuesRefreshCmd()
 			}
 			m.rollbackTaskStatus(msg.taskID, msg.previousStatus)
-			userMessage := formatStatusMutationFailure(msg.taskID, msg.previousStatus, msg.newStatus, msg.err)
+			failure := statusMutationFailureDetails(msg.taskID, msg.previousStatus, msg.newStatus, msg.err)
+			userMessage := failure.Message
 			if m.logger != nil {
 				m.logger.Warn("task status mutation failed",
 					"task_id", msg.taskID,
@@ -1504,7 +1505,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					"user_message", userMessage,
 				)
 			}
-			m.markTaskStatusMutationFailed(msg.taskID, "task.update_status", msg.previousStatus, msg.newStatus, userMessage)
+			m.markTaskMutationFailure(failure)
 			m.syncTaskWorkspaceOverlay()
 			expires := time.Now().Add(3 * time.Second)
 			if msg.newStatus == domain.StatusDone {
