@@ -425,18 +425,22 @@ guessing:
 
 ### 4. Make Completion Evidence First-Class
 
-Az already gates integration on status/mailbox evidence. The next step is to
-standardize the artifact:
+Az gates integration on status/mailbox evidence and standardizes the first
+artifact as a JSON `worker_evidence.v1` packet stored in the durable mailbox
+body. The packet is intentionally shaped so the same fields can migrate to
+first-class SQLite rows later without changing worker guidance:
 
 - worker summary
 - commands run
 - key assertions
 - files changed
-- review findings/fixes
-- PR or merge result
+- review status and findings/fixes
 - remaining risks
+- optional artifact links
 
-This should be queryable from `az orchestrate status` and visible in the TUI.
+Readiness checks surface missing or incomplete packet fields so orchestrators
+can request repair evidence before integration. The parsed packet should remain
+queryable from orchestration surfaces and visible in the TUI.
 
 ### 5. Keep Az Local-First; Treat Other Backends As Future Adapters
 

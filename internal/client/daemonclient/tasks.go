@@ -204,10 +204,15 @@ type TaskCompleteCheckResult struct {
 
 // TaskIntegrationReadiness is the daemon-owned worker integration evidence gate.
 type TaskIntegrationReadiness struct {
-	IssueID       string   `json:"issue_id"`
-	ParentIssueID string   `json:"parent_issue_id,omitempty"`
-	Ready         bool     `json:"ready"`
-	Reasons       []string `json:"reasons,omitempty"`
+	IssueID                string                       `json:"issue_id"`
+	ParentIssueID          string                       `json:"parent_issue_id,omitempty"`
+	Ready                  bool                         `json:"ready"`
+	Reasons                []string                     `json:"reasons,omitempty"`
+	EvidenceEventSeq       int64                        `json:"evidence_event_seq,omitempty"`
+	EvidencePacket         *domain.WorkerEvidencePacket `json:"evidence_packet,omitempty"`
+	EvidenceIncomplete     bool                         `json:"evidence_incomplete,omitempty"`
+	EvidenceMissingFields  []string                     `json:"evidence_missing_fields,omitempty"`
+	EvidenceInvalidReasons []string                     `json:"evidence_invalid_reasons,omitempty"`
 }
 
 type taskIntegrationReadinessRequest struct {

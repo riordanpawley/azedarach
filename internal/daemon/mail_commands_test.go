@@ -93,6 +93,76 @@ func TestMailWatchFailureStillWarnsAtInfo(t *testing.T) {
 	}
 }
 
+func TestMailListAnnotatesStructuredWorkerEvidencePayload(t *testing.T) {
+	repoDir := t.TempDir()
+	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	sendReq := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-send",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: "proj-mail"},
+		Command:         protocol.CommandMailSend,
+		Body: mustMarshal(t, protocol.MailSendCommandBody{
+			RepoDir:     repoDir,
+			ParentIssue: "az-parent",
+			IssueID:     naming.IssueID("az-child"),
+			Type:        "worker-integration-ready",
+			Body: `{
+				"schema": "worker_evidence.v1",
+				"summary": "Ready for integration.",
+				"commands_run": ["go test ./internal/daemon"],
+				"key_assertions": ["mailbox payload exposes parsed evidence"],
+				"files_changed": ["internal/daemon/mail_commands.go"],
+				"review": {"status": "clean", "findings": []},
+				"risks": ["none"]
+			}`,
+		}),
+	}
+	resp, err := d.command(context.Background(), sendReq)
+	if err != nil {
+		t.Fatalf("mail.send command error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("mail.send response error: %+v", resp.Error)
+	}
+
+	listReq := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-list",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: "proj-mail"},
+		Command:         protocol.CommandMailList,
+		Body: mustMarshal(t, protocol.MailListCommandBody{
+			RepoDir:     repoDir,
+			ParentIssue: "az-parent",
+		}),
+	}
+	resp, err = d.command(context.Background(), listReq)
+	if err != nil {
+		t.Fatalf("mail.list command error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("mail.list response error: %+v", resp.Error)
+	}
+	var events []protocol.MailEvent
+	if err := json.Unmarshal(resp.Body, &events); err != nil {
+		t.Fatalf("decode mail.list body: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %+v, want one", events)
+	}
+	validation, ok := events[0].Payload["worker_evidence_validation"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("payload = %+v, want worker_evidence_validation", events[0].Payload)
+	}
+	if validation["complete"] != true || validation["storage"] != "mailbox_body_json_v1" {
+		t.Fatalf("validation = %+v", validation)
+	}
+	if _, ok := events[0].Payload["worker_evidence"].(map[string]interface{}); !ok {
+		t.Fatalf("payload = %+v, want parsed worker_evidence", events[0].Payload)
+	}
+}
+
 func TestMailSendSerializesSequenceNumbers(t *testing.T) {
 	repoDir := t.TempDir()
 	d := New(Config{

@@ -118,7 +118,7 @@ Examples:
   az issue fanout ready --root az-123 --json
   az issue fanout drift --issue az-456 --worktree /tmp/az-456
   az mail send --parent az-123 --type dependency-ready --body "contract merged"
-  az mail send --parent az-123 --issue az-456 --type worker-integration-ready --body "tests pass; ready for integration"
+  az mail send --parent az-123 --issue az-456 --type worker-integration-ready --body '{"schema":"worker_evidence.v1",...}'
   az mail list --parent az-123 --since 40 --json
   az mail watch --parent az-123 --since 41 --jsonl
   az orchestrate status --root az-123 --since 41 --json

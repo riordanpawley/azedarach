@@ -232,10 +232,15 @@ type taskStaleCloseableCandidate struct {
 }
 
 type taskIntegrationReadinessResult struct {
-	IssueID       string   `json:"issue_id"`
-	ParentIssueID string   `json:"parent_issue_id,omitempty"`
-	Ready         bool     `json:"ready"`
-	Reasons       []string `json:"reasons,omitempty"`
+	IssueID                string                       `json:"issue_id"`
+	ParentIssueID          string                       `json:"parent_issue_id,omitempty"`
+	Ready                  bool                         `json:"ready"`
+	Reasons                []string                     `json:"reasons,omitempty"`
+	EvidenceEventSeq       int64                        `json:"evidence_event_seq,omitempty"`
+	EvidencePacket         *domain.WorkerEvidencePacket `json:"evidence_packet,omitempty"`
+	EvidenceIncomplete     bool                         `json:"evidence_incomplete,omitempty"`
+	EvidenceMissingFields  []string                     `json:"evidence_missing_fields,omitempty"`
+	EvidenceInvalidReasons []string                     `json:"evidence_invalid_reasons,omitempty"`
 }
 
 type taskMergeBaseTargetResult struct {
@@ -2930,12 +2935,35 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 	if err != nil {
 		return taskIntegrationReadinessResult{}, fmt.Errorf("list mailbox events for %s: %w", parentIssueID, err)
 	}
-	for _, evt := range events {
+	for i := len(events) - 1; i >= 0; i-- {
+		evt := events[i]
 		if naming.IssueIDsEqual(evt.IssueID, task.ID.String()) && daemonWorkerIntegrationReadyMailType(evt.Type) {
+			packet, validation := domain.ParseWorkerEvidencePacketBody(evt.Body)
+			if validation.Complete {
+				return taskIntegrationReadinessResult{
+					IssueID:          task.ID.String(),
+					ParentIssueID:    parentIssueID,
+					Ready:            true,
+					EvidenceEventSeq: evt.Seq,
+					EvidencePacket:   &packet,
+				}, nil
+			}
+			reasons := []string{fmt.Sprintf("issue %s is not closed", task.ID.String())}
+			if validation.Found {
+				reasons = append(reasons, fmt.Sprintf("worker evidence packet in mailbox event seq %d is incomplete", evt.Seq))
+			} else {
+				reasons = append(reasons, fmt.Sprintf("worker-integration-ready mailbox event seq %d does not contain a structured worker_evidence.v1 packet", evt.Seq))
+			}
+			reasons = append(reasons, validation.Problems()...)
 			return taskIntegrationReadinessResult{
-				IssueID:       task.ID.String(),
-				ParentIssueID: parentIssueID,
-				Ready:         true,
+				IssueID:                task.ID.String(),
+				ParentIssueID:          parentIssueID,
+				Ready:                  false,
+				Reasons:                reasons,
+				EvidenceEventSeq:       evt.Seq,
+				EvidenceIncomplete:     true,
+				EvidenceMissingFields:  validation.Missing,
+				EvidenceInvalidReasons: validation.Invalid,
 			}, nil
 		}
 	}

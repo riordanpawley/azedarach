@@ -6505,6 +6505,9 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *test
 			t.Fatalf("prompt = %q, want mailbox event type %s", prompt, eventType)
 		}
 	}
+	if !strings.Contains(prompt, "Evidence bodies should be JSON `worker_evidence.v1` packets with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, `risks`, and optional `artifact_links`") {
+		t.Fatalf("prompt = %q, want structured worker evidence guidance", prompt)
+	}
 	if !strings.Contains(prompt, "worker-ready and worker-complete are accepted only as legacy aliases for worker-integration-ready") {
 		t.Fatalf("prompt = %q, want legacy worker-ready/worker-complete alias guidance", prompt)
 	}
@@ -6573,6 +6576,9 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "workers reporting their own status should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`") {
 		t.Fatalf("prompt = %q, want safe worker reporting guidance", prompt)
+	}
+	if !strings.Contains(prompt, "Worker integration evidence should be a structured JSON `worker_evidence.v1` packet") {
+		t.Fatalf("prompt = %q, want structured evidence guidance", prompt)
 	}
 	if !strings.Contains(prompt, "Trust hook-backed `activity=busy|idle` for worker idleness checks") {
 		t.Fatalf("prompt = %q, want bounded tmux observation guidance", prompt)

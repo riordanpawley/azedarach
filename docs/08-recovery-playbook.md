@@ -111,13 +111,17 @@ completion guidance unless one of these is true:
 - the worker issue is already `closed`
 - a `worker-integration-ready` mailbox event exists for that worker under its
   parent issue mailbox (`worker-ready` and `worker-complete` are accepted as
-  legacy aliases)
+  legacy aliases) and its body contains a complete structured
+  `worker_evidence.v1` packet
 
 If merge guidance is blocked, recover with:
 
 1. `az issue get <issue-id>` to confirm worker status.
 2. `az mail list --parent <parent-issue> --json` to confirm event history.
-3. Ask the worker to publish `worker-integration-ready` once evidence is ready.
+3. Ask the worker to publish `worker-integration-ready` once evidence is ready
+   with a JSON body containing `schema`, `summary`, `commands_run`,
+   `key_assertions`, `files_changed`, `review`, `risks`, and optional
+   `artifact_links`.
 4. Re-run `az orchestrate integrate --issue <issue-id>`.
 
 Use `az branch merge <issue-id>` only for manual conflict or close-repair

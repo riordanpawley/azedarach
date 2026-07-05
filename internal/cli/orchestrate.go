@@ -1537,7 +1537,7 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 		commands = append(commands,
 			fmt.Sprintf("az mail list --parent %s --since 0 --json", parentIssueID),
 			fmt.Sprintf("az mail send --parent %s --issue %s --type worker-progress --body \"<progress>\"", parentIssueID, issueID),
-			fmt.Sprintf("az mail send --parent %s --issue %s --type worker-integration-ready --body \"<evidence>\"", parentIssueID, issueID),
+			fmt.Sprintf("az mail send --parent %s --issue %s --type worker-integration-ready --body '{\"schema\":\"worker_evidence.v1\",...}'", parentIssueID, issueID),
 		)
 	}
 	var b strings.Builder
@@ -1578,7 +1578,8 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 		fmt.Fprintf(&b, "- Use mailbox events for hybrid coordination: `worker-progress`, `worker-blocked`, and `worker-integration-ready`; `worker-ready` and `worker-complete` are accepted only as legacy aliases for `worker-integration-ready`.\n")
 		fmt.Fprintf(&b, "- Check inbound orchestrator messages with `az mail list --parent %s --since 0 --json` before declaring yourself blocked or idle; apply events for `%s` and continue without waiting for a separate user prompt.\n", parentIssueID, issueID)
 		fmt.Fprintf(&b, "- Report to parent `%s` with `az mail send --parent %s --issue %s --type <worker-progress|worker-blocked|worker-integration-ready> --body \"<evidence>\"`; do not use `az orchestrate message` for your own status because it is an orchestrator-to-worker live delivery command.\n", parentIssueID, parentIssueID, issueID)
-		fmt.Fprintf(&b, "- When ready for integration, set/leave the issue `in_review` and send `worker-integration-ready` to parent `%s` with concise evidence; leave integration/merge/close to the orchestrator.\n", parentIssueID)
+		fmt.Fprintf(&b, "- Evidence bodies should be JSON `worker_evidence.v1` packets with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, `risks`, and optional `artifact_links`; use `\"none\"` entries when a required list has no findings or risks.\n")
+		fmt.Fprintf(&b, "- When ready for integration, set/leave the issue `in_review` and send `worker-integration-ready` to parent `%s` with a complete `worker_evidence.v1` packet; leave integration/merge/close to the orchestrator.\n", parentIssueID)
 	} else {
 		fmt.Fprintf(&b, "- Return progress, blockers, and final results through the native subagent result channel.\n")
 		fmt.Fprintf(&b, "- Do not use `az mail` unless the orchestrator explicitly asks for mailbox coordination.\n")

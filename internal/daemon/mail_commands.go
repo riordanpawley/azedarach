@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"golang.org/x/sys/unix"
 )
@@ -187,6 +188,16 @@ func filterMailEvents(events []daemonMailEvent, since int64, limit int) []protoc
 }
 
 func mailEventToProtocol(evt daemonMailEvent) protocol.MailEvent {
+	payload := evt.Payload
+	if parsed := workerEvidencePayload(evt.Body); len(parsed) > 0 {
+		payload = make(map[string]interface{}, len(evt.Payload)+len(parsed))
+		for key, value := range evt.Payload {
+			payload[key] = value
+		}
+		for key, value := range parsed {
+			payload[key] = value
+		}
+	}
 	return protocol.MailEvent{
 		Seq:         evt.Seq,
 		ParentIssue: evt.ParentIssue,
@@ -196,8 +207,22 @@ func mailEventToProtocol(evt daemonMailEvent) protocol.MailEvent {
 		To:          evt.To,
 		Body:        evt.Body,
 		CreatedAt:   evt.CreatedAt.UTC().Format(time.RFC3339Nano),
-		Payload:     evt.Payload,
+		Payload:     payload,
 	}
+}
+
+func workerEvidencePayload(body string) map[string]interface{} {
+	packet, validation := domain.ParseWorkerEvidencePacketBody(body)
+	if !validation.Found {
+		return nil
+	}
+	payload := map[string]interface{}{
+		"worker_evidence_validation": validation,
+	}
+	if validation.Complete {
+		payload["worker_evidence"] = packet
+	}
+	return payload
 }
 
 func sanitizeMailboxKey(parentIssue string) string {

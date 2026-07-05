@@ -6645,7 +6645,7 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 	if task.ParentID != nil && strings.TrimSpace(task.ParentID.String()) != "" {
 		parentID := strings.TrimSpace(task.ParentID.String())
 		parent = fmt.Sprintf("\nParent: %s", parentID)
-		mailbox = fmt.Sprintf("- Worker mailbox: receive orchestrator messages with `az mail list --parent %s --since 0 --json`; use `az mail watch --parent %s --since <seq> --jsonl` only when explicitly asked to monitor continuously.\n", parentID, parentID)
+		mailbox = fmt.Sprintf("- Worker mailbox: receive orchestrator messages with `az mail list --parent %s --since 0 --json`; use `az mail watch --parent %s --since <seq> --jsonl` only when explicitly asked to monitor continuously. Send `worker-integration-ready` with a complete JSON `worker_evidence.v1` body containing `summary`, `commands_run`, `key_assertions`, `files_changed`, `review`, `risks`, and optional `artifact_links`.\n", parentID, parentID)
 	}
 	childWorkRecommendation := renderPrimeChildWorkRecommendation(task, tasks, tmuxAvailable)
 	return fmt.Sprintf(

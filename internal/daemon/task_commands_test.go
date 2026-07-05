@@ -4686,6 +4686,216 @@ func TestTaskIntegrationReadinessAcceptsLegacyMailboxAliases(t *testing.T) {
 	}
 }
 
+func TestTaskIntegrationReadinessRequiresCompleteWorkerEvidencePacket(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-worker-evidence-ready"
+	repoDir := t.TempDir()
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusInReview, ParentID: &parentID})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := appendMailboxEvent(repoDir, daemonMailEvent{
+		Seq:         1,
+		ParentIssue: parentID,
+		IssueID:     childID,
+		Type:        "worker-integration-ready",
+		Body: `{
+			"schema": "worker_evidence.v1",
+			"summary": "Ready for integration.",
+			"commands_run": ["go test ./internal/daemon"],
+			"key_assertions": ["integration readiness accepts complete worker evidence"],
+			"files_changed": ["internal/daemon/task_commands.go"],
+			"review": {"status": "clean", "findings": []},
+			"risks": ["none"]
+		}`,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("append mailbox event: %v", err)
+	}
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 1},
+	}
+
+	result, err := d.taskIntegrationReadiness(ctx, projectID, childID, repoDir)
+	if err != nil {
+		t.Fatalf("taskIntegrationReadiness error: %v", err)
+	}
+	if !result.Ready || result.EvidenceEventSeq != 1 || result.EvidencePacket == nil {
+		t.Fatalf("result = %+v, want ready with evidence packet", result)
+	}
+	if result.EvidencePacket.Schema != domain.WorkerEvidenceSchemaV1 {
+		t.Fatalf("evidence packet = %+v", result.EvidencePacket)
+	}
+}
+
+func TestTaskIntegrationReadinessReportsIncompleteWorkerEvidencePacket(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-worker-evidence-incomplete"
+	repoDir := t.TempDir()
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusInReview, ParentID: &parentID})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := appendMailboxEvent(repoDir, daemonMailEvent{
+		Seq:         1,
+		ParentIssue: parentID,
+		IssueID:     childID,
+		Type:        "worker-integration-ready",
+		Body:        `{"schema":"worker_evidence.v1","summary":"Ready","review":{"status":"clean","findings":[]}}`,
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("append mailbox event: %v", err)
+	}
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 1},
+	}
+
+	result, err := d.taskIntegrationReadiness(ctx, projectID, childID, repoDir)
+	if err != nil {
+		t.Fatalf("taskIntegrationReadiness error: %v", err)
+	}
+	if result.Ready || !result.EvidenceIncomplete || result.EvidenceEventSeq != 1 {
+		t.Fatalf("result = %+v, want incomplete evidence", result)
+	}
+	reasons := strings.Join(result.Reasons, "\n")
+	for _, want := range []string{"worker evidence packet in mailbox event seq 1 is incomplete", "missing commands_run", "missing files_changed", "missing key_assertions", "missing risks"} {
+		if !strings.Contains(reasons, want) {
+			t.Fatalf("reasons = %+v, missing %q", result.Reasons, want)
+		}
+	}
+}
+
+func TestTaskIntegrationReadinessLatestWorkerEvidenceEventWins(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-worker-evidence-latest"
+	repoDir := t.TempDir()
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusInReview, ParentID: &parentID})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	events := []daemonMailEvent{
+		{
+			Seq:         1,
+			ParentIssue: parentID,
+			IssueID:     childID,
+			Type:        "worker-integration-ready",
+			Body: `{
+				"schema": "worker_evidence.v1",
+				"summary": "Earlier complete packet.",
+				"commands_run": ["go test ./internal/daemon"],
+				"key_assertions": ["older complete evidence should not hide latest incomplete evidence"],
+				"files_changed": ["internal/daemon/task_commands.go"],
+				"review": {"status": "clean", "findings": []},
+				"risks": ["none"]
+			}`,
+			CreatedAt: time.Now().UTC(),
+		},
+		{
+			Seq:         2,
+			ParentIssue: parentID,
+			IssueID:     childID,
+			Type:        "worker-integration-ready",
+			Body:        `{"schema":"worker_evidence.v1","summary":"Latest packet is incomplete","review":{"status":"clean","findings":[]}}`,
+			CreatedAt:   time.Now().UTC(),
+		},
+	}
+	for _, event := range events {
+		if err := appendMailboxEvent(repoDir, event); err != nil {
+			t.Fatalf("append mailbox event seq %d: %v", event.Seq, err)
+		}
+	}
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 1},
+	}
+
+	result, err := d.taskIntegrationReadiness(ctx, projectID, childID, repoDir)
+	if err != nil {
+		t.Fatalf("taskIntegrationReadiness error: %v", err)
+	}
+	if result.Ready || !result.EvidenceIncomplete || result.EvidenceEventSeq != 2 {
+		t.Fatalf("result = %+v, want latest incomplete evidence at seq 2", result)
+	}
+}
+
+func TestTaskIntegrationReadinessAcceptsLegacyAliasOnlyWithStructuredEvidence(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-worker-evidence-legacy-alias"
+	repoDir := t.TempDir()
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusInReview, ParentID: &parentID})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := appendMailboxEvent(repoDir, daemonMailEvent{
+		Seq:         1,
+		ParentIssue: parentID,
+		IssueID:     childID,
+		Type:        "worker-complete",
+		Body: `{
+			"schema": "worker_evidence.v1",
+			"summary": "Ready through a legacy alias.",
+			"commands_run": ["go test ./internal/daemon"],
+			"key_assertions": ["legacy aliases still require structured evidence"],
+			"files_changed": ["internal/daemon/task_commands.go"],
+			"review": {"status": "clean", "findings": []},
+			"risks": ["none"]
+		}`,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("append mailbox event: %v", err)
+	}
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{projectID: 1},
+	}
+
+	result, err := d.taskIntegrationReadiness(ctx, projectID, childID, repoDir)
+	if err != nil {
+		t.Fatalf("taskIntegrationReadiness error: %v", err)
+	}
+	if !result.Ready || result.EvidencePacket == nil {
+		t.Fatalf("result = %+v, want ready with structured legacy alias evidence", result)
+	}
+}
+
 func TestTaskMergeBaseTargetSelectsNearestAncestorWorktree(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-merge-base-target"
