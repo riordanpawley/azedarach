@@ -17,6 +17,7 @@ type migration struct {
 	id          string
 	path        string
 	shouldApply func(context.Context, *sql.DB) (bool, error)
+	apply       func(context.Context, *sql.DB, string) error
 }
 
 var orderedMigrations = []migration{
@@ -44,7 +45,7 @@ var orderedMigrations = []migration{
 	{id: "0021_agent_learning_relations", path: "migrations/0021_agent_learning_relations.sql"},
 	{id: "0021_agent_learning_target_state", path: "migrations/0021_agent_learning_target_state.sql"},
 	{id: "0021_agent_learning_metadata", path: "migrations/0021_agent_learning_metadata.sql"},
-	{id: "0025_agent_learning_privacy", path: "migrations/0025_agent_learning_privacy.sql"},
+	{id: "0025_agent_learning_privacy", path: "migrations/0025_agent_learning_privacy.sql", apply: applyAgentLearningPrivacyMigration},
 }
 
 func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
@@ -70,6 +71,12 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		}
 
 		if shouldApply {
+			if m.apply != nil {
+				if err := m.apply(ctx, db, m.id); err != nil {
+					return err
+				}
+				continue
+			}
 			sqlText, err := loadMigrationSQL(m.path)
 			if err != nil {
 				return fmt.Errorf("load migration %s: %w", m.id, err)
@@ -178,6 +185,78 @@ func (c *Client) applyMigration(ctx context.Context, db *sql.DB, id, sqlText str
 	}
 
 	return nil
+}
+
+func applyAgentLearningPrivacyMigration(ctx context.Context, db *sql.DB, id string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	hasEvidencePrivate, err := txColumnExists(ctx, tx, "agent_learnings", "evidence_private")
+	if err != nil {
+		return fmt.Errorf("inspect migration %s: %w", id, err)
+	}
+	if !hasEvidencePrivate {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE agent_learnings ADD COLUMN evidence_private INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("apply migration %s: add evidence_private: %w", id, err)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_agent_learnings_active_privacy
+			ON agent_learnings(project_id, status, evidence_private, updated_at DESC, local_id)
+			WHERE deleted_at IS NULL
+	`); err != nil {
+		return fmt.Errorf("apply migration %s: create privacy index: %w", id, err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO schema_migrations (id, applied_at)
+		VALUES (?, ?)
+	`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	tx = nil
+	return nil
+}
+
+func txColumnExists(ctx context.Context, tx *sql.Tx, tableName, columnName string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info('%s')", tableName))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			columnType string
+			notNull    int
+			defaultVal any
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultVal, &primaryKey); err != nil {
+			return false, err
+		}
+		if strings.EqualFold(name, columnName) {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 func dependencyCount(tx *sql.Tx) (int, error) {
