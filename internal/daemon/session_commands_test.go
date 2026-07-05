@@ -6574,7 +6574,7 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "workers reporting their own status should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`") {
 		t.Fatalf("prompt = %q, want safe worker reporting guidance", prompt)
 	}
-	if !strings.Contains(prompt, "Trust hook-backed `activity=busy|idle` for worker idleness checks") {
+	if !strings.Contains(prompt, "Trust hook-backed `activity=busy|idle|waiting` for worker idleness checks") {
 		t.Fatalf("prompt = %q, want bounded tmux observation guidance", prompt)
 	}
 	if !strings.Contains(prompt, "treat `activity=no-agent` as an intentional session-only shell") {
