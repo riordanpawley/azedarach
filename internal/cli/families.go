@@ -1677,7 +1677,7 @@ func codexGuardValueHasPrimeEvidence(value any) bool {
 func runShellCommand(projectDir, command string) error {
 	cmd := exec.Command("/bin/sh", "-lc", command)
 	cmd.Dir = projectDir
-	cmd.Env = gitExecEnvWithoutRoutingVars()
+	cmd.Env = gitExecEnvForHookShellCommand()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
