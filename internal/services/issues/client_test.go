@@ -1720,6 +1720,40 @@ func TestClient_AppendIssueObservationEventRecordsSourceMetadata(t *testing.T) {
 	assert.Equal(t, event.ID, filtered[0].ID)
 }
 
+func TestClient_ListIssueObservationEventsNewestFirst(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Ordered observation",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	first, err := client.AppendIssueObservationEvent(ctx, taskID, IssueObservationEventParams{
+		Type:       domain.IssueEventValidationPassed,
+		ObservedAt: time.Date(2026, 7, 6, 1, 0, 0, 0, time.UTC),
+		Source:     "test",
+	})
+	require.NoError(t, err)
+	second, err := client.AppendIssueObservationEvent(ctx, taskID, IssueObservationEventParams{
+		Type:       domain.IssueEventEvidenceSubmitted,
+		ObservedAt: time.Date(2026, 7, 6, 2, 0, 0, 0, time.UTC),
+		Source:     "test",
+	})
+	require.NoError(t, err)
+
+	events, err := client.ListIssueObservationEvents(ctx, taskID, IssueObservationEventListOptions{
+		Limit:       2,
+		NewestFirst: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.Equal(t, second.ID, events[0].ID)
+	assert.Equal(t, first.ID, events[1].ID)
+}
+
 func TestClient_IssueObservationEventsSurviveHardDelete(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
