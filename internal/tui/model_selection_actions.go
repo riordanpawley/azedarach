@@ -256,6 +256,19 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
+		if action.Action == overlay.CloseFailureActionAIMerge {
+			task, _, ok := m.taskAndSessionByID(action.TaskID)
+			if !ok {
+				m.addToast(Toast{
+					Level:   ToastWarning,
+					Message: fmt.Sprintf("Issue %s is unavailable for AI merge", action.TaskID),
+					Expires: time.Now().Add(5 * time.Second),
+				})
+				return m, nil
+			}
+			m.beginMutationFeedback(fmt.Sprintf("AI merge queued for %s", action.TaskID))
+			return m.agentMergeCurrentIssueIntoDefaultTarget(task)
+		}
 		previousStatus := domain.Status(strings.TrimSpace(action.PreviousStatus))
 		targetStatus := domain.Status(strings.TrimSpace(action.TargetStatus))
 		if previousStatus == "" {

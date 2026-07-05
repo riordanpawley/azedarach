@@ -4636,6 +4636,7 @@ func (m Model) closeFailureDialogCmd(msg taskStatusResultMsg) tea.Cmd {
 		TargetStatus:            msg.newStatus.String(),
 		ForceWorktree:           msg.opts.ForceWorktree,
 		CloseCleanChildren:      msg.opts.CloseCleanChildren,
+		AllowAIMerge:            true,
 		AllowForceWorktree:      closeFailureSupportsForceWorktree(msg.err),
 		AllowCloseCleanChildren: closeFailureSupportsCloseCleanChildren(msg.err),
 	}

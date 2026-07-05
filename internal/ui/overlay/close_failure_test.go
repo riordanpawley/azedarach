@@ -11,6 +11,7 @@ func TestCloseFailureDialogActions(t *testing.T) {
 		PreviousStatus:          "in_review",
 		TargetStatus:            "closed",
 		CloseCleanChildren:      true,
+		AllowAIMerge:            true,
 		AllowForceWorktree:      true,
 		AllowCloseCleanChildren: true,
 	})
@@ -39,5 +40,15 @@ func TestCloseFailureDialogActions(t *testing.T) {
 	action = selection.Value.(CloseFailureActionMsg)
 	if action.Action != CloseFailureActionCloseCleanChildren || !action.CloseCleanChildren {
 		t.Fatalf("close-clean action = %+v, want close clean children", action)
+	}
+
+	_, cmd = dialog.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if cmd == nil {
+		t.Fatal("expected AI merge action command")
+	}
+	selection = cmd().(SelectionMsg)
+	action = selection.Value.(CloseFailureActionMsg)
+	if action.Action != CloseFailureActionAIMerge || action.TaskID != "az-1" {
+		t.Fatalf("AI merge action = %+v, want ai_merge for az-1", action)
 	}
 }

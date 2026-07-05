@@ -1905,6 +1905,149 @@ func TestTaskStatusDoneFailureShowsRecoveryDialogWithRetryActions(t *testing.T) 
 	}
 }
 
+func TestCloseFailureAIMergeActionLaunchesAgentMerge(t *testing.T) {
+	var preflightBody daemonclient.GitMergePreflightRequest
+	var resolveBody protocol.SessionResolveConflictRequestBody
+	jsonResponse := func(req protocol.RequestEnvelope, body any) (protocol.ResponseEnvelope, error) {
+		respBody, err := json.Marshal(body)
+		if err != nil {
+			return protocol.ResponseEnvelope{}, err
+		}
+		return protocol.ResponseEnvelope{
+			ProtocolVersion: req.ProtocolVersion,
+			RequestID:       req.RequestID,
+			Kind:            protocol.EnvelopeKindResponse,
+			OK:              true,
+			Body:            respBody,
+		}, nil
+	}
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandTaskMergeBaseTarget:
+				return jsonResponse(req, daemonclient.TaskMergeBaseTarget{
+					IssueID:  "az-4",
+					TargetID: mergeBaseTargetID,
+					Branch:   "main",
+				})
+			case daemonclient.CommandWorktreeList:
+				return jsonResponse(req, struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{
+					ProjectID: "default",
+					Worktrees: []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					}{
+						{Path: "/tmp/az-4", Branch: "az/az-4", IssueID: "az-4"},
+					},
+				})
+			case daemonclient.CommandRuntimeReconcileIssue:
+				return jsonResponse(req, daemonclient.RuntimeReconcileResult{ProjectID: "default"})
+			case daemonclient.CommandGitStatus:
+				return jsonResponse(req, struct {
+					Status git.GitStatus `json:"status"`
+				}{Status: git.GitStatus{HasChanges: false}})
+			case daemonclient.CommandGitMergePreflight:
+				if err := json.Unmarshal(req.Body, &preflightBody); err != nil {
+					t.Fatalf("unmarshal preflight request: %v", err)
+				}
+				return jsonResponse(req, daemonclient.GitMergePreflightResponse{
+					SourceID:       "az-4",
+					SourceWorktree: "/tmp/az-4",
+					TargetID:       mergeBaseTargetID,
+					TargetWorktree: "/repo",
+					Clean:          false,
+					ConflictFiles:  []string{"main.go"},
+				})
+			case daemonclient.CommandSessionResolveConflict:
+				if err := json.Unmarshal(req.Body, &resolveBody); err != nil {
+					t.Fatalf("unmarshal resolve request: %v", err)
+				}
+				return jsonResponse(req, protocol.SessionResolveConflictResponseBody{
+					ProjectID:     "default",
+					IssueID:       "az-4",
+					SessionID:     "default-az-4",
+					Worktree:      "/tmp/az-4",
+					WindowName:    "resolve-conflict",
+					ConflictFiles: []string{"main.go"},
+				})
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.repoDir = "/repo"
+	m.tasks = []domain.Task{{
+		ID:     "az-4",
+		Status: domain.StatusInReview,
+		Session: &domain.Session{
+			IssueID:  "az-4",
+			State:    domain.SessionIdle,
+			Worktree: "/tmp/az-4",
+		},
+	}}
+	m.overlayStack.Push(overlay.NewCloseFailureDialog(
+		"az-4",
+		"cannot close issue az-4: merge preflight would conflict in main.go",
+		overlay.CloseFailureDialogOptions{
+			PreviousStatus: "in_review",
+			TargetStatus:   "closed",
+			AllowAIMerge:   true,
+		},
+	))
+
+	afterKeyAny, selectionCmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if selectionCmd == nil {
+		t.Fatal("expected AI merge selection command")
+	}
+	selection, ok := selectionCmd().(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("selection = %T, want SelectionMsg", selectionCmd())
+	}
+	queuedAny, launchCmd := afterKeyAny.(Model).Update(selection)
+	if launchCmd == nil {
+		t.Fatal("expected AI merge launch command")
+	}
+	queued := queuedAny.(Model)
+	if queued.overlayStack.Current() != nil {
+		t.Fatalf("overlay after AI merge selection = %T, want none", queued.overlayStack.Current())
+	}
+
+	msg := launchCmd()
+	result, ok := msg.(conflictResolveAgentResultMsg)
+	if !ok {
+		t.Fatalf("AI merge command returned %T, want conflictResolveAgentResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("AI merge result err = %v", result.err)
+	}
+	if result.issueID != "az-4" || result.worktree != "/tmp/az-4" || result.windowName != "resolve-conflict" {
+		t.Fatalf("AI merge result = %+v, want az-4 /tmp/az-4 resolve-conflict", result)
+	}
+	if preflightBody.SourceID != "az-4" || preflightBody.SourceWorktree != "/tmp/az-4" || preflightBody.TargetID != mergeBaseTargetID || preflightBody.TargetRef != "main" || preflightBody.SourceBranch != "az/az-4" {
+		t.Fatalf("preflight body = %+v, want az-4 -> base main", preflightBody)
+	}
+	if resolveBody.IssueID != "az-4" || resolveBody.Worktree != "/tmp/az-4" {
+		t.Fatalf("resolve body = %+v, want issue/worktree az-4", resolveBody)
+	}
+	if len(resolveBody.ConflictFiles) != 1 || resolveBody.ConflictFiles[0] != "main.go" {
+		t.Fatalf("resolve conflict files = %+v, want main.go", resolveBody.ConflictFiles)
+	}
+	if !strings.Contains(resolveBody.Prompt, "Auto-merge the blocked preflight for az-4 -> base") {
+		t.Fatalf("resolve prompt = %q, want AI merge preflight context", resolveBody.Prompt)
+	}
+}
+
 func TestDaemonCommandsReportMissingDaemonClient(t *testing.T) {
 	m := newTestModel()
 	m.daemonClient = nil

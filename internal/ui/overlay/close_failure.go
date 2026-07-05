@@ -13,6 +13,7 @@ type CloseFailureAction string
 
 const (
 	CloseFailureActionRetry              CloseFailureAction = "retry"
+	CloseFailureActionAIMerge            CloseFailureAction = "ai_merge"
 	CloseFailureActionForceWorktree      CloseFailureAction = "force_worktree"
 	CloseFailureActionCloseCleanChildren CloseFailureAction = "close_clean_children"
 	CloseFailureActionCancel             CloseFailureAction = "cancel"
@@ -32,6 +33,7 @@ type CloseFailureDialogOptions struct {
 	TargetStatus            string
 	ForceWorktree           bool
 	CloseCleanChildren      bool
+	AllowAIMerge            bool
 	AllowForceWorktree      bool
 	AllowCloseCleanChildren bool
 }
@@ -92,6 +94,8 @@ func (c *CloseFailureDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return c, c.selectionCmd(c.actions[c.cursor])
 		case "r", "R":
 			return c, c.selectionForAction(CloseFailureActionRetry)
+		case "a", "A":
+			return c, c.selectionForAction(CloseFailureActionAIMerge)
 		case "f", "F":
 			return c, c.selectionForAction(CloseFailureActionForceWorktree)
 		case "c", "C":
@@ -138,6 +142,9 @@ func (c *CloseFailureDialog) StatusBindings() []keybinds.Binding {
 	bindings := []keybinds.Binding{
 		{Key: "j/k", Description: "navigate"},
 		{Key: "r", Description: "retry"},
+	}
+	if c.options.AllowAIMerge {
+		bindings = append(bindings, keybinds.Binding{Key: "a", Description: "AI merge"})
 	}
 	if c.options.AllowForceWorktree {
 		bindings = append(bindings, keybinds.Binding{Key: "f", Description: "force cleanup"})
@@ -263,6 +270,16 @@ func (c *CloseFailureDialog) closeFailureActions() []closeFailureActionItem {
 		force:       c.options.ForceWorktree,
 		cleanKids:   c.options.CloseCleanChildren,
 	}}
+	if c.options.AllowAIMerge {
+		actions = append(actions, closeFailureActionItem{
+			key:         "a",
+			label:       "AI merge",
+			description: "Launch an agent to resolve the blocked integration.",
+			action:      CloseFailureActionAIMerge,
+			force:       c.options.ForceWorktree,
+			cleanKids:   c.options.CloseCleanChildren,
+		})
+	}
 	if c.options.AllowForceWorktree {
 		actions = append(actions, closeFailureActionItem{
 			key:         "f",
@@ -301,6 +318,9 @@ func (c *CloseFailureDialog) reasonOrFallback() string {
 
 func (c *CloseFailureDialog) nextStepLines() []string {
 	lines := []string{"- Fix the blocker described above, then retry."}
+	if c.options.AllowAIMerge {
+		lines = append(lines, "- AI merge starts an agent when integration recovery needs help.")
+	}
 	if c.options.AllowForceWorktree {
 		lines = append(lines, "- Force cleanup discards modified or untracked worktree files.")
 	}

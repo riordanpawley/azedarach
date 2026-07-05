@@ -192,6 +192,7 @@ func goldenCloseFailureView(t *testing.T) string {
 		CloseFailureDialogOptions{
 			PreviousStatus:          "in_review",
 			TargetStatus:            "closed",
+			AllowAIMerge:            true,
 			AllowForceWorktree:      true,
 			AllowCloseCleanChildren: true,
 		},
@@ -208,6 +209,7 @@ func goldenCloseFailureSmallView(t *testing.T) string {
 		CloseFailureDialogOptions{
 			PreviousStatus:     "in_review",
 			TargetStatus:       "closed",
+			AllowAIMerge:       true,
 			AllowForceWorktree: true,
 		},
 	)
