@@ -514,6 +514,9 @@ func TestUpdate_AttachmentActionDeletedAddsToast(t *testing.T) {
 	if got := next.runtimeEvents[len(next.runtimeEvents)-1].Event; got != "ui.toast" {
 		t.Fatalf("last runtime event = %q, want %q", got, "ui.toast")
 	}
+	if next.eventTicker.Latest() != "" {
+		t.Fatalf("toast event should not populate footer ticker, got %q", next.eventTicker.Latest())
+	}
 }
 
 func TestUpdate_AttachmentActionStagedAddsToast(t *testing.T) {
@@ -536,6 +539,27 @@ func TestUpdate_AttachmentActionStagedAddsToast(t *testing.T) {
 	last := next.toasts[len(next.toasts)-1]
 	if !strings.Contains(last.Message, "Attachment staged for new task") {
 		t.Fatalf("unexpected toast message: %q", last.Message)
+	}
+}
+
+func TestCtrlGDismissesLatestToastWithoutOverlay(t *testing.T) {
+	m := newTestModel()
+	expires := time.Now().Add(time.Hour)
+	m.toasts = []Toast{
+		{Message: "first", Expires: expires},
+		{Message: "second", Expires: expires},
+	}
+
+	updated, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlG})
+	if cmd != nil {
+		t.Fatalf("expected no command when dismissing toast, got %T", cmd)
+	}
+	next := updated.(Model)
+	if len(next.toasts) != 1 {
+		t.Fatalf("toasts len = %d, want 1", len(next.toasts))
+	}
+	if got := next.toasts[0].Message; got != "first" {
+		t.Fatalf("remaining toast = %q, want first", got)
 	}
 }
 

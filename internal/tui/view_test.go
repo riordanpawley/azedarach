@@ -62,10 +62,6 @@ func TestViewWithToastKeepsStatusBarVisible(t *testing.T) {
 
 	view := m.View()
 
-	if strings.Contains(view, "test toast") && strings.Contains(strings.Split(strings.TrimRight(view, "\n"), "\n")[0], "test toast") {
-		t.Fatalf("expected no floating toast overlay in board content")
-	}
-
 	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
 	if len(lines) == 0 {
 		t.Fatalf("expected non-empty rendered view")
@@ -78,11 +74,71 @@ func TestViewWithToastKeepsStatusBarVisible(t *testing.T) {
 	if !strings.Contains(lastLine, "NORMAL") {
 		t.Fatalf("expected status bar on final line to include mode label; last line=%q", lastLine)
 	}
-	if strings.Contains(lastLine, "ui.toast") {
-		t.Fatalf("expected status bar ticker to hide raw event key; last line=%q", lastLine)
+	if strings.Contains(lastLine, "test toast") || strings.Contains(lastLine, "ui.toast") {
+		t.Fatalf("expected status bar to omit full notification text; last line=%q", lastLine)
 	}
-	if !strings.Contains(lastLine, "test toast") {
-		t.Fatalf("expected status bar ticker to include toast message; last line=%q", lastLine)
+	if !strings.Contains(view, "test toast") {
+		t.Fatalf("expected floating notification stack to include toast message; view=%q", view)
+	}
+}
+
+func TestViewWithToastsRendersBoundedFloatingStack(t *testing.T) {
+	m := newTestModel()
+	m.width = 120
+	m.height = 24
+	m.loading = false
+	expires := time.Now().Add(time.Hour)
+	for _, message := range []string{"first notice", "second notice", "third notice", "fourth notice"} {
+		m.addToast(types.Toast{
+			Message: message,
+			Expires: expires,
+		})
+	}
+
+	view := m.View()
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	if len(lines) > m.height {
+		t.Fatalf("view with toast stack is too tall: got %d lines, want <= %d", len(lines), m.height)
+	}
+	if strings.Contains(view, "first notice") {
+		t.Fatalf("expected oldest toast to be hidden from bounded stack; view=%q", view)
+	}
+	for _, message := range []string{"second notice", "third notice", "fourth notice"} {
+		if !strings.Contains(view, message) {
+			t.Fatalf("expected visible stack to include %q; view=%q", message, view)
+		}
+	}
+	lastLine := lines[len(lines)-1]
+	if strings.Contains(lastLine, "fourth notice") {
+		t.Fatalf("expected footer to stay free of notification text; last line=%q", lastLine)
+	}
+}
+
+func TestViewWithToastFitsNarrowViewport(t *testing.T) {
+	m := newTestModel()
+	m.width = 32
+	m.height = 12
+	m.loading = false
+	m.addToast(types.Toast{
+		Level:   types.ToastError,
+		Message: "mutation failed because the daemon returned a long validation message",
+		Expires: time.Now().Add(time.Hour),
+	})
+
+	view := m.View()
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	if len(lines) > m.height {
+		t.Fatalf("narrow view with toast is too tall: got %d lines, want <= %d", len(lines), m.height)
+	}
+	lastLine := lines[len(lines)-1]
+	if !strings.Contains(lastLine, "NORMAL") {
+		t.Fatalf("expected footer to remain visible on narrow viewport; last line=%q", lastLine)
+	}
+	if strings.Contains(lastLine, "mutation failed") {
+		t.Fatalf("expected footer to omit notification text on narrow viewport; last line=%q", lastLine)
+	}
+	if !strings.Contains(view, "mutation failed") {
+		t.Fatalf("expected wrapped floating notification in narrow viewport; view=%q", view)
 	}
 }
 
@@ -265,8 +321,8 @@ func TestView_TabToggleRendersCompactAndBoardSurfaces(t *testing.T) {
 	if got := getCursorPosition(compactModel); got.Column != 0 || got.Task != 1 {
 		t.Fatalf("cursor position changed across tab toggle: got (%d,%d), want (0,1)", got.Column, got.Task)
 	}
-	if !strings.Contains(compactView, "Switched to compact view") && !strings.Contains(compactView, "ui.toast") {
-		t.Fatalf("expected compact view footer to reflect view-mode toast, got %q", compactView)
+	if !strings.Contains(compactView, "Switched to compact view") {
+		t.Fatalf("expected compact view to render floating view-mode toast, got %q", compactView)
 	}
 
 	updated, _ = compactModel.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})

@@ -18,6 +18,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 	"github.com/riordanpawley/azedarach/internal/ui/statusbar"
+	"github.com/riordanpawley/azedarach/internal/ui/toast"
 )
 
 func (m Model) View() string {
@@ -79,6 +80,7 @@ func (m Model) View() string {
 		Height(contentHeight).
 		MaxHeight(contentHeight).
 		Render(mainView)
+	contentView = m.layerNotificationStack(contentView, m.width, contentHeight)
 
 	if currentOverlay != nil {
 		current := currentOverlay
@@ -129,6 +131,59 @@ func (m Model) View() string {
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, contentView, statusBarView)
+}
+
+func (m Model) layerNotificationStack(contentView string, width, height int) string {
+	if width < 1 || height < 1 || len(m.toasts) == 0 {
+		return contentView
+	}
+
+	stack := toast.New(m.styles).Render(m.toasts, width)
+	if strings.TrimSpace(ansi.Strip(stack)) == "" {
+		return contentView
+	}
+
+	stackWidth, stackHeight := renderedBlockSize(stack)
+	if stackWidth > width {
+		stackWidth = width
+	}
+	if stackHeight > height {
+		stackHeight = height
+	}
+
+	x := width - stackWidth
+	if x < 0 {
+		x = 0
+	}
+	y := height - stackHeight
+	if y < 0 {
+		y = 0
+	}
+
+	prefix := lipgloss.NewStyle().Width(x).Render("")
+	blankLine := lipgloss.NewStyle().Width(width).Render("")
+	stackLines := strings.Split(lipgloss.NewStyle().
+		Width(stackWidth).
+		MaxWidth(stackWidth).
+		Height(stackHeight).
+		MaxHeight(stackHeight).
+		Render(stack), "\n")
+	overlayLines := make([]string, height)
+	for i := range overlayLines {
+		overlayLines[i] = blankLine
+	}
+	for i, line := range stackLines {
+		row := y + i
+		if row < 0 || row >= height {
+			continue
+		}
+		overlayLines[row] = prefix + lipgloss.NewStyle().
+			Width(stackWidth).
+			MaxWidth(stackWidth).
+			Render(ansi.Cut(line, 0, stackWidth))
+	}
+
+	return m.layerWithinHeightTransparent(contentView, strings.Join(overlayLines, "\n"), height)
 }
 
 func (m Model) renderModalBackdrop(contentHeight int) string {

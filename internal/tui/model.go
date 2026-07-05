@@ -559,6 +559,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+l":
 		// Force redraw
 		return m, tea.ClearScreen
+	case "ctrl+g":
+		if m.dismissLatestToast() {
+			return m, nil
+		}
 	}
 
 	if next, cmd, handled := m.routeTransientMode(msg); handled {
@@ -3782,11 +3786,17 @@ func (m *Model) recordRuntimeEvent(evt protocol.EventEnvelope) {
 		m.runtimeEvents = append([]protocol.EventEnvelope(nil), m.runtimeEvents[len(m.runtimeEvents)-eventLogCapacity:]...)
 	}
 	if m.eventTicker != nil {
-		summary := runtimeEventSummary(evt)
-		if summary != "" {
+		if summary := runtimeEventTickerSummary(evt); summary != "" {
 			m.eventTicker.Push(summary)
 		}
 	}
+}
+
+func runtimeEventTickerSummary(evt protocol.EventEnvelope) string {
+	if strings.TrimSpace(evt.Event) == "ui.toast" {
+		return ""
+	}
+	return runtimeEventSummary(evt)
 }
 
 func runtimeEventSummary(evt protocol.EventEnvelope) string {
@@ -3880,6 +3890,14 @@ func (m *Model) expireToasts() {
 	}
 
 	m.toasts = filtered
+}
+
+func (m *Model) dismissLatestToast() bool {
+	if len(m.toasts) == 0 {
+		return false
+	}
+	m.toasts = m.toasts[:len(m.toasts)-1]
+	return true
 }
 
 // Git operation commands
