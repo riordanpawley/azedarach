@@ -7,7 +7,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/types"
-	"github.com/riordanpawley/azedarach/internal/ui/eventticker"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
@@ -24,7 +23,6 @@ type StatusBar struct {
 	filterSummary    string
 	sortSummary      string
 	loadingIndicator string
-	eventTicker      *eventticker.Ring
 	styles           *styles.Styles
 }
 
@@ -60,11 +58,6 @@ func (sb *StatusBar) SetLoadingIndicator(indicator string) {
 // SetCurrentProject sets the project name rendered at the left of the status bar.
 func (sb *StatusBar) SetCurrentProject(project string) {
 	sb.currentProject = project
-}
-
-// SetEventTicker sets the ring buffer that provides the latest event message.
-func (sb *StatusBar) SetEventTicker(ticker *eventticker.Ring) {
-	sb.eventTicker = ticker
 }
 
 func (sb *StatusBar) SetHintBindings(bindings []keybinds.Binding) {
@@ -136,13 +129,15 @@ func (sb StatusBar) Render() string {
 	if len(mandatorySlots) > 0 && contentWidth <= 18 {
 		return sb.styles.StatusBar.Width(sb.width).Render(sb.compactMandatoryStatus())
 	}
+	mandatoryFallback := sb.mandatoryFallbackToken()
+	mandatoryFallbackWidth := lipgloss.Width(sb.styles.StatusInfo.Render(mandatoryFallback))
 	modeLabel := " " + sb.mode.String() + " "
 	if sb.modeSuffix != "" {
 		modeLabel = " " + sb.mode.String() + " " + sb.modeSuffix + " "
 	}
 	modeLabelWidth := lipgloss.Width(sb.styles.StatusMode.Render(modeLabel))
 	if len(mandatorySlots) > 0 {
-		mandatoryNeed := separatorWidth + 3 // compact fallback marker "F/S"
+		mandatoryNeed := separatorWidth + mandatoryFallbackWidth
 		if contentWidth < modeLabelWidth+mandatoryNeed {
 			modeLabel = sb.mode.String()
 			modeLabelWidth = lipgloss.Width(sb.styles.StatusMode.Render(modeLabel))
@@ -158,10 +153,10 @@ func (sb StatusBar) Render() string {
 		reservedForMode := modeLabelWidth
 		switch {
 		case len(mandatorySlots) > 1:
-			// Guarantee room for compact mandatory fallback marker "F/S".
-			reservedForMode += separatorWidth + 3
+			// Guarantee room for compact mandatory fallback markers such as "F/S" or "R!/N!/F/S".
+			reservedForMode += separatorWidth + mandatoryFallbackWidth
 		case len(mandatorySlots) == 1:
-			reservedForMode += separatorWidth + 1
+			reservedForMode += separatorWidth + mandatoryFallbackWidth
 		}
 		reservedForMode += separatorWidth // separator between project and mode
 		projectWidth := contentWidth - reservedForMode
@@ -193,11 +188,6 @@ func (sb StatusBar) Render() string {
 	slots := make([]statusSlot, 0, 4)
 	if sb.loadingIndicator != "" {
 		slots = append(slots, statusSlot{style: sb.styles.StatusHint, text: sb.loadingIndicator})
-	}
-	if sb.eventTicker != nil {
-		if latest := sb.eventTicker.Latest(); latest != "" {
-			slots = append(slots, statusSlot{style: sb.styles.StatusInfo, text: latest})
-		}
 	}
 	if sb.selectionSummary != "" {
 		slots = append(slots, statusSlot{style: sb.styles.StatusInfo, text: sb.selectionSummary})
@@ -307,8 +297,8 @@ func shortModeLabel(mode types.Mode) string {
 
 func (sb StatusBar) compactMandatoryStatus() string {
 	parts := []string{shortModeLabel(sb.mode)}
-	if strings.TrimSpace(sb.alertIndicator) != "" {
-		parts = append(parts, "R!")
+	if token := compactAlertToken(sb.alertIndicator); token != "" {
+		parts = append(parts, token)
 	}
 	if strings.TrimSpace(sb.filterSummary) != "" {
 		parts = append(parts, compactFilterToken(sb.filterSummary))
@@ -320,14 +310,15 @@ func (sb StatusBar) compactMandatoryStatus() string {
 }
 
 func (sb StatusBar) mandatoryFallbackToken() string {
-	hasAlert := strings.TrimSpace(sb.alertIndicator) != ""
+	alertToken := compactAlertToken(sb.alertIndicator)
+	hasAlert := alertToken != ""
 	hasFilter := strings.TrimSpace(sb.filterSummary) != ""
 	hasSort := strings.TrimSpace(sb.sortSummary) != ""
 	switch {
 	case hasAlert && (hasFilter || hasSort):
-		return "R!/F/S"
+		return alertToken + "/F/S"
 	case hasAlert:
-		return "R!"
+		return alertToken
 	case hasFilter && hasSort:
 		return "F/S"
 	case hasFilter:
@@ -361,4 +352,23 @@ func compactSortToken(summary string) string {
 		}
 	}
 	return "S:" + field + order
+}
+
+func compactAlertToken(indicator string) string {
+	normalized := strings.ToLower(strings.TrimSpace(indicator))
+	if normalized == "" {
+		return ""
+	}
+
+	tokens := make([]string, 0, 2)
+	if strings.Contains(normalized, "recover") {
+		tokens = append(tokens, "R!")
+	}
+	if strings.Contains(normalized, "notice") || strings.Contains(normalized, "error") {
+		tokens = append(tokens, "N!")
+	}
+	if len(tokens) == 0 {
+		return "!"
+	}
+	return strings.Join(tokens, "/")
 }

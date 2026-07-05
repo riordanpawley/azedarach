@@ -52,7 +52,6 @@ func (m Model) View() string {
 		Render(mainView)
 
 	sb := statusbar.New(m.statusBarMode(), m.width, m.styles)
-	sb.SetEventTicker(m.eventTicker)
 	sb.SetCurrentProject(m.currentProject)
 	sb.SetSelectionSummary(m.selectionSummary())
 	sb.SetFilterSummary(m.filterSummary())

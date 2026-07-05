@@ -514,8 +514,17 @@ func TestUpdate_AttachmentActionDeletedAddsToast(t *testing.T) {
 	if got := next.runtimeEvents[len(next.runtimeEvents)-1].Event; got != "ui.toast" {
 		t.Fatalf("last runtime event = %q, want %q", got, "ui.toast")
 	}
-	if next.eventTicker.Latest() != "" {
-		t.Fatalf("toast event should not populate footer ticker, got %q", next.eventTicker.Latest())
+	next.width = 100
+	next.height = 24
+	next.loading = false
+	view := next.View()
+	lines := strings.Split(view, "\n")
+	footer := lines[len(lines)-1]
+	if strings.Contains(footer, "Attachment deleted") {
+		t.Fatalf("toast event should not populate footer text, footer=%q", footer)
+	}
+	if !strings.Contains(footer, "1 notice (N)") {
+		t.Fatalf("footer should route through notification indicator, footer=%q", footer)
 	}
 }
 
