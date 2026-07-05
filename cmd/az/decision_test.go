@@ -121,14 +121,14 @@ func TestParseDecisionRevisitArgs(t *testing.T) {
 
 func TestResolveDecisionLinkTarget(t *testing.T) {
 	cases := []struct {
-		name      string
-		issue     string
-		req       string
-		otherDec  string
-		ok        bool
-		wantKind  protocol.DecisionTargetKind
-		wantID    string
-		errFrag   string
+		name     string
+		issue    string
+		req      string
+		otherDec string
+		ok       bool
+		wantKind protocol.DecisionTargetKind
+		wantID   string
+		errFrag  string
 	}{
 		{name: "issue only", issue: "az-1", ok: true, wantKind: protocol.DecisionTargetIssue, wantID: "az-1"},
 		{name: "req only", req: "r-1", ok: true, wantKind: protocol.DecisionTargetRequirement, wantID: "r-1"},
@@ -161,23 +161,28 @@ func TestResolveDecisionLinkTarget(t *testing.T) {
 
 func TestParseDecisionSyncArgs(t *testing.T) {
 	cases := []struct {
-		name string
-		args []string
-		ok   bool
+		name       string
+		args       []string
+		ok         bool
+		projectDir string
 	}{
 		{name: "no flags", args: nil, ok: true},
 		{name: "with --check", args: []string{"--check"}, ok: true},
 		{name: "with --json --check", args: []string{"--json", "--check"}, ok: true},
+		{name: "with --project-dir", args: []string{"--project-dir", "/repo/worktree"}, ok: true, projectDir: "/repo/worktree"},
 		{name: "positional rejected", args: []string{"--check", "extra"}, ok: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := parseDecisionSyncArgs(tc.args)
+			opts, err := parseDecisionSyncArgs(tc.args)
 			if tc.ok && err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if !tc.ok && err == nil {
 				t.Fatalf("expected error")
+			}
+			if opts.ProjectDir != tc.projectDir {
+				t.Fatalf("ProjectDir = %q, want %q", opts.ProjectDir, tc.projectDir)
 			}
 		})
 	}
@@ -185,24 +190,29 @@ func TestParseDecisionSyncArgs(t *testing.T) {
 
 func TestParseDecisionImportArgs(t *testing.T) {
 	cases := []struct {
-		name string
-		args []string
-		ok   bool
+		name       string
+		args       []string
+		ok         bool
+		projectDir string
 	}{
 		{name: "no flags", args: nil, ok: true},
 		{name: "with --check", args: []string{"--check"}, ok: true},
 		{name: "with --force", args: []string{"--force"}, ok: true},
 		{name: "with all flags", args: []string{"--check", "--force", "--json"}, ok: true},
+		{name: "with --project-dir", args: []string{"--project-dir", "/repo/worktree"}, ok: true, projectDir: "/repo/worktree"},
 		{name: "positional rejected", args: []string{"--check", "extra"}, ok: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := parseDecisionImportArgs(tc.args)
+			opts, err := parseDecisionImportArgs(tc.args)
 			if tc.ok && err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if !tc.ok && err == nil {
 				t.Fatalf("expected error")
+			}
+			if opts.ProjectDir != tc.projectDir {
+				t.Fatalf("ProjectDir = %q, want %q", opts.ProjectDir, tc.projectDir)
 			}
 		})
 	}

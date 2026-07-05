@@ -1369,8 +1369,65 @@ func TestTaskWorkspacePreservesDetailsAcrossSummaryRefresh(t *testing.T) {
 	if !strings.Contains(view, "Long description stays visible") || !strings.Contains(view, "Detailed notes stay visible") {
 		t.Fatalf("workspace lost full details after summary refresh:\n%s", view)
 	}
-	if updated.tasks[0].Description != "Long description stays visible" || updated.tasks[0].Notes != "Detailed notes stay visible" {
-		t.Fatalf("model task details after summary refresh = %+v", updated.tasks[0])
+	if updated.tasks[0].Description != "" || updated.tasks[0].Notes != "" {
+		t.Fatalf("model task details after summary refresh = %+v, want board summary without long details", updated.tasks[0])
+	}
+}
+
+func TestTaskWorkspaceFullRefreshAllowsClearedDetails(t *testing.T) {
+	m := newTestModel()
+	task := domain.Task{
+		ID:          "az-1",
+		Title:       "Workspace task",
+		Description: "Long description should clear",
+		Design:      "Design should clear",
+		Notes:       "Notes should clear",
+		Acceptance:  "Acceptance should clear",
+		Status:      domain.StatusInProgress,
+		Priority:    domain.P2,
+		Type:        domain.TypeTask,
+	}
+	m.tasks = []domain.Task{task}
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(task, m.tasks, nil, 120, 30))
+
+	cleared := domain.Task{
+		ID:       "az-1",
+		Title:    "Workspace task after full refresh",
+		Status:   domain.StatusInReview,
+		Priority: domain.P1,
+		Type:     domain.TypeTask,
+	}
+	result, _ := m.Update(refreshTaskWorkspaceResultMsg{
+		projectID: m.daemonProjectID(),
+		revision:  1,
+		taskID:    "az-1",
+		hasTask:   true,
+		task:      cleared,
+		tasks:     []domain.Task{cleared},
+	})
+	updated := result.(Model)
+
+	workspace, ok := updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("current overlay = %T, want TaskWorkspaceOverlay", updated.overlayStack.Current())
+	}
+	view := workspace.View()
+	if !strings.Contains(view, "Workspace task after full refresh") {
+		t.Fatalf("workspace did not pick up full refresh title:\n%s", view)
+	}
+	for _, stale := range []string{
+		"Long description should clear",
+		"Design should clear",
+		"Notes should clear",
+		"Acceptance should clear",
+	} {
+		if strings.Contains(view, stale) {
+			t.Fatalf("workspace retained cleared full-detail field %q:\n%s", stale, view)
+		}
+	}
+	if updated.tasks[0].Description != "" || updated.tasks[0].Notes != "" ||
+		updated.tasks[0].Design != "" || updated.tasks[0].Acceptance != "" {
+		t.Fatalf("model task details after full refresh = %+v, want cleared details", updated.tasks[0])
 	}
 }
 
@@ -1890,7 +1947,9 @@ func TestEventLogHotkeyPushesOverlay(t *testing.T) {
 		t.Fatalf("expected EventLogOverlay on stack, got %T", current)
 	}
 
-	if view := logOverlay.View(); !strings.Contains(view, "ui.toast") {
+	model, _ := logOverlay.Update(tea.WindowSizeMsg{Width: 160, Height: 34})
+	logOverlay = model.(*overlay.EventLogOverlay)
+	if view := logOverlay.View(); !strings.Contains(view, "Toast") || !strings.Contains(view, "event seed") {
 		t.Fatalf("expected event log to render runtime events, got %q", view)
 	}
 }

@@ -51,6 +51,7 @@ func (m *Model) applyTaskEvent(evt protocol.EventEnvelope) bool {
 		if body.Task == nil {
 			return false
 		}
+		m.reconcilePendingTaskDetailsFromHydrated([]domain.Task{*body.Task})
 		m.upsertTaskFromEvent(*body.Task)
 	default:
 		return false

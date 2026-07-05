@@ -137,7 +137,8 @@ func shouldRetryReadCommandResponse(command string, resp protocol.ResponseEnvelo
 
 func isDaemonReadCommand(command string) bool {
 	switch command {
-	case CommandTaskList,
+	case CommandBoardFetch,
+		CommandTaskList,
 		CommandTaskGet,
 		CommandTaskGetMany,
 		CommandTaskGraphReadiness,

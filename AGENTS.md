@@ -61,6 +61,7 @@ fd "filename" -t f internal cmd
 - Start sessions with `az prime`.
 - Use `az issue` for tracked issue operations.
 - Track any non-trivial work in issues.
+- Do non-trivial implementation in the issue worktree/session, not directly in the main worktree; migrate any accidental main-worktree changes into the issue worktree before cleaning main.
 
 ## Spec Documentation Workflow
 

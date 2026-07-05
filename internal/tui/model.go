@@ -1853,7 +1853,7 @@ func (m Model) readTaskSnapshot(ctx context.Context, client *daemonclient.Client
 	if client == nil {
 		return daemonclient.TaskSnapshot{}, fmt.Errorf("daemon client unavailable")
 	}
-	return client.ListTasksSnapshotWithMode(ctx, daemonclient.ReadWaitModeExplicit)
+	return client.BoardSnapshotWithMode(ctx, daemonclient.ReadWaitModeExplicit)
 }
 
 func (m Model) loadOperationsCmd() tea.Cmd {
@@ -5423,6 +5423,22 @@ func (m *Model) reconcilePendingTaskDetails() {
 			continue
 		}
 		if !pending.updatedAt.IsZero() && now.Sub(pending.updatedAt) > stalePendingTTL {
+			delete(m.pendingDetails, key)
+		}
+	}
+}
+
+func (m *Model) reconcilePendingTaskDetailsFromHydrated(tasks []domain.Task) {
+	if len(m.pendingDetails) == 0 || len(tasks) == 0 {
+		return
+	}
+	for _, task := range tasks {
+		key := taskIDKey(task.ID.String())
+		pending, ok := m.pendingDetails[key]
+		if !ok {
+			continue
+		}
+		if taskDetailsMatchPending(task, pending) {
 			delete(m.pendingDetails, key)
 		}
 	}

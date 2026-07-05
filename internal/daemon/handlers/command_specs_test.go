@@ -20,6 +20,7 @@ func TestCommandSpecRegistryProjectIDPolicy(t *testing.T) {
 		{command: protocol.CommandRuntimeReconcileIssue, want: true},
 		{command: protocol.CommandIssueFanout, want: true},
 		{command: protocol.CommandHookLogList, want: true},
+		{command: protocol.CommandBoardFetch, want: true},
 		{command: protocol.CommandSpecRead, want: false},
 		{command: "unknown.command", want: false},
 	}
@@ -47,6 +48,7 @@ func TestCommandSpecRegistryDispatcherTargets(t *testing.T) {
 		{command: CommandWorktreeRemove, want: CommandDispatchWorktree, ok: true},
 		{command: CommandDevServerList, want: CommandDispatchDevServer, ok: true},
 		{command: protocol.CommandRuntimeReconcile, want: CommandDispatchNone, ok: false},
+		{command: protocol.CommandBoardFetch, want: CommandDispatchNone, ok: false},
 		{command: "task.list", want: CommandDispatchNone, ok: false},
 		{command: "unknown.command", want: CommandDispatchNone, ok: false},
 	}
@@ -68,6 +70,7 @@ func TestCommandSpecRegistryDaemonDispatchOwnership(t *testing.T) {
 		{command: protocol.CommandOperationCancel, want: true},
 		{command: protocol.CommandSpecRead, want: true},
 		{command: CommandSessionStart, want: false},
+		{command: protocol.CommandBoardFetch, want: false},
 		{command: "task.list", want: false},
 		{command: "unknown.command", want: false},
 	}
@@ -156,6 +159,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		protocol.CommandUIStateGet,
 		protocol.CommandUIStateSet,
 		protocol.CommandProjectCleanup,
+		commandBoardFetch,
 		protocol.CommandScheduledScriptsStatus,
 		commandTaskList,
 		commandTaskGet,

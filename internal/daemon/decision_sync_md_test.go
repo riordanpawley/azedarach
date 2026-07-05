@@ -42,6 +42,36 @@ func TestDecisionMDFilename(t *testing.T) {
 	}
 }
 
+func TestDecisionMDRepoDirPrefersRequestRepoDir(t *testing.T) {
+	got, err := decisionMDRepoDir("/repo/root", "/repo/worktree")
+	if err != nil {
+		t.Fatalf("decisionMDRepoDir error: %v", err)
+	}
+	if got != "/repo/worktree" {
+		t.Fatalf("decisionMDRepoDir = %q, want request repo", got)
+	}
+
+	got, err = decisionMDRepoDir("/repo/root", " ")
+	if err != nil {
+		t.Fatalf("decisionMDRepoDir fallback error: %v", err)
+	}
+	if got != "/repo/root" {
+		t.Fatalf("decisionMDRepoDir fallback = %q, want root", got)
+	}
+}
+
+func TestDecisionMDRepoDirRequiresTarget(t *testing.T) {
+	if _, err := decisionMDRepoDir(" ", " "); err == nil {
+		t.Fatal("decisionMDRepoDir with no target error = nil, want error")
+	}
+}
+
+func TestDecisionMDRepoDirRejectsRelativeTarget(t *testing.T) {
+	if _, err := decisionMDRepoDir("/repo/root", "relative/repo"); err == nil {
+		t.Fatal("decisionMDRepoDir with relative target error = nil, want error")
+	}
+}
+
 func TestRenderDecisionMarkdownContainsAllSections(t *testing.T) {
 	d := issues.Decision{
 		LocalID:      "dec-1",

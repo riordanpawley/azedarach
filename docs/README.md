@@ -28,6 +28,11 @@ This directory primarily contains **developer/internal documentation**.
 - [17-sqlite-query-plan-guardrails.md](17-sqlite-query-plan-guardrails.md)
 - [adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
 
+## Contributor Workflow
+
+- Use `az prime` at session start, keep non-trivial implementation tied to an `az issue`, and work from that issue's worktree/session instead of editing the main worktree directly.
+- If accidental main-worktree changes exist, preserve any useful state in the issue worktree before cleaning main.
+
 ## Daemon Invariant Rule
 
 - Every invariant must declare an explicit source policy: `projection`, `tmux`, or `hybrid`.
