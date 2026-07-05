@@ -242,6 +242,55 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "event-log-opened":
 		return m, tea.ClearScreen
+	case "close_failure_action":
+		m.overlayStack.Pop()
+		action, ok := msg.Value.(overlay.CloseFailureActionMsg)
+		if !ok {
+			return m, nil
+		}
+		if action.Action == overlay.CloseFailureActionCancel {
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: fmt.Sprintf("Cancelled close retry for %s", action.TaskID),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		if action.Action == overlay.CloseFailureActionAIMerge {
+			task, _, ok := m.taskAndSessionByID(action.TaskID)
+			if !ok {
+				m.addToast(Toast{
+					Level:   ToastWarning,
+					Message: fmt.Sprintf("Issue %s is unavailable for AI merge", action.TaskID),
+					Expires: time.Now().Add(5 * time.Second),
+				})
+				return m, nil
+			}
+			m.beginMutationFeedback(fmt.Sprintf("Checking AI merge readiness for %s", action.TaskID))
+			return m.agentMergeCurrentIssueIntoDefaultTarget(task)
+		}
+		previousStatus := domain.Status(strings.TrimSpace(action.PreviousStatus))
+		targetStatus := domain.Status(strings.TrimSpace(action.TargetStatus))
+		if previousStatus == "" {
+			previousStatus = domain.StatusInReview
+		}
+		if targetStatus == "" {
+			targetStatus = domain.StatusDone
+		}
+		opts := daemonclient.TaskStatusOptions{
+			ForceWorktree:      action.ForceWorktree,
+			CloseCleanChildren: action.CloseCleanChildren,
+		}
+		m.beginTaskStatusMoveFeedback(action.TaskID, previousStatus, targetStatus)
+		switch action.Action {
+		case overlay.CloseFailureActionForceWorktree:
+			m.addToast(Toast{Level: ToastWarning, Message: fmt.Sprintf("Retrying close for %s with forced worktree cleanup", action.TaskID), Expires: time.Now().Add(5 * time.Second)})
+		case overlay.CloseFailureActionCloseCleanChildren:
+			m.addToast(Toast{Level: ToastInfo, Message: fmt.Sprintf("Retrying close for %s and clean child issues", action.TaskID), Expires: time.Now().Add(5 * time.Second)})
+		default:
+			m.addToast(Toast{Level: ToastInfo, Message: fmt.Sprintf("Retrying close for %s", action.TaskID), Expires: time.Now().Add(3 * time.Second)})
+		}
+		return m, m.moveTaskStatusCmdWithOptions(action.TaskID, previousStatus, targetStatus, opts)
 	case "editor-error":
 		// Editor open error
 		m.overlayStack.Pop()

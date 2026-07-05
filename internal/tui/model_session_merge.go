@@ -660,6 +660,167 @@ func (m Model) mergeCurrentIssueIntoDefaultTarget(task *domain.Task) (tea.Model,
 	return m, m.resolveMergeTargetSelectionCmd(sourceID, targetID, true)
 }
 
+func (m Model) agentMergeCurrentIssueIntoDefaultTarget(task *domain.Task) (tea.Model, tea.Cmd) {
+	if task == nil {
+		m.addToast(Toast{
+			Level:   ToastWarning,
+			Message: "No focused issue to merge",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+	}
+
+	sourceID := task.ID.String()
+	if task.ParentID == nil {
+		return m, m.resolveAgentMergeToBaseCmd(sourceID, true)
+	}
+
+	targetID := task.ParentID.String()
+	return m, m.resolveAgentMergeTargetCmd(sourceID, targetID, true)
+}
+
+func (m Model) resolveAgentMergeToBaseCmd(sourceID string, refreshStatus bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
+		defer cancel()
+
+		sourceWorktree, err := m.resolveIssueWorktreePath(ctx, sourceID)
+		if err != nil || sourceWorktree == "" {
+			return conflictResolveAgentResultMsg{
+				issueID: sourceID,
+				err:     fmt.Errorf("source session worktree not found"),
+			}
+		}
+		return m.agentMergeToBaseCmd(sourceWorktree, sourceID, refreshStatus)()
+	}
+}
+
+func (m Model) resolveAgentMergeTargetCmd(sourceID, targetID string, refreshStatus bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
+		defer cancel()
+
+		sourceWorktree, err := m.resolveIssueWorktreePath(ctx, sourceID)
+		if err != nil || sourceWorktree == "" {
+			return conflictResolveAgentResultMsg{
+				issueID: sourceID,
+				err:     fmt.Errorf("source session worktree not found"),
+			}
+		}
+		targetWorktree, err := m.resolveIssueWorktreePath(ctx, targetID)
+		if err != nil || targetWorktree == "" {
+			return conflictResolveAgentResultMsg{
+				issueID: targetID,
+				err:     fmt.Errorf("target session worktree not found"),
+			}
+		}
+		return m.agentMergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, sourceID, targetID, refreshStatus)()
+	}
+}
+
+func (m Model) agentMergeToBaseCmd(sourceWorktree, sourceID string, refreshStatus bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		target, err := m.resolveMergeBaseTarget(ctx, sourceID)
+		if err != nil {
+			return conflictResolveAgentResultMsg{issueID: sourceID, worktree: sourceWorktree, err: err}
+		}
+
+		targetID := target.targetID
+		targetWorktree := strings.TrimSpace(target.targetWorktree)
+		if targetWorktree == "" {
+			targetWorktree = m.activeProjectPath()
+			if strings.TrimSpace(targetWorktree) == "" {
+				targetWorktree = "."
+			}
+		}
+		sourceBranch, err := m.resolveWorktreeBranch(ctx, sourceWorktree, sourceID)
+		if err != nil {
+			return conflictResolveAgentResultMsg{issueID: sourceID, worktree: sourceWorktree, err: err}
+		}
+
+		return m.agentMergeFromPreflight(ctx, overlay.MergePreflightAgentSelection{
+			SourceID:       sourceID,
+			TargetID:       targetID,
+			SourceWorktree: sourceWorktree,
+			TargetWorktree: targetWorktree,
+			TargetRef:      target.targetBranch,
+			SourceBranch:   sourceBranch,
+		}, refreshStatus)()
+	}
+}
+
+func (m Model) agentMergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, sourceID, targetID string, refreshStatus bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		sourceBranch, err := m.resolveWorktreeBranch(ctx, sourceWorktree, sourceID)
+		if err != nil {
+			return conflictResolveAgentResultMsg{issueID: targetID, worktree: targetWorktree, err: err}
+		}
+
+		return m.agentMergeFromPreflight(ctx, overlay.MergePreflightAgentSelection{
+			SourceID:       sourceID,
+			TargetID:       targetID,
+			SourceWorktree: sourceWorktree,
+			TargetWorktree: targetWorktree,
+			TargetRef:      "HEAD",
+			SourceBranch:   sourceBranch,
+		}, refreshStatus)()
+	}
+}
+
+func (m Model) agentMergeFromPreflight(ctx context.Context, selection overlay.MergePreflightAgentSelection, refreshStatus bool) tea.Cmd {
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return conflictResolveAgentResultMsg{issueID: selection.SourceID, err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		preflight := m.checkMergePreflight(
+			ctx,
+			strings.TrimSpace(selection.SourceID),
+			strings.TrimSpace(selection.TargetID),
+			strings.TrimSpace(selection.SourceWorktree),
+			strings.TrimSpace(selection.TargetWorktree),
+			strings.TrimSpace(selection.TargetRef),
+			strings.TrimSpace(selection.SourceBranch),
+			refreshStatus,
+			false,
+		)
+		if preflight == nil {
+			return mergePreflightRefreshResultMsg{cleared: true}
+		}
+		if len(preflight.conflictFiles) == 0 {
+			return *preflight
+		}
+
+		selection.ConflictFiles = mergePreflightAgentFiles(preflight)
+		return m.resolveMergePreflightWithAgentCmd(selection)()
+	}
+}
+
+func mergePreflightAgentFiles(preflight *mergePreflightFailureMsg) []string {
+	if preflight == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	files := make([]string, 0, len(preflight.conflictFiles))
+	appendFile := func(file string) {
+		file = strings.TrimSpace(file)
+		if file == "" {
+			return
+		}
+		if _, ok := seen[file]; ok {
+			return
+		}
+		seen[file] = struct{}{}
+		files = append(files, file)
+	}
+	for _, file := range preflight.conflictFiles {
+		appendFile(file)
+	}
+	return files
+}
+
 func (m Model) followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, sourceID, targetID string, targetState domain.SessionState, refreshStatus bool) tea.Cmd {
 	return func() tea.Msg {
 		return m.mergeFeatureIntoFeatureCmdWithOptions(sourceWorktree, targetWorktree, sourceID, targetID, refreshStatus, mergePreflightOptions{

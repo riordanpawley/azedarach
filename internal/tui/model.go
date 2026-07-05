@@ -4459,6 +4459,7 @@ type taskStatusResultMsg struct {
 	taskID         string
 	previousStatus domain.Status
 	newStatus      domain.Status
+	opts           daemonclient.TaskStatusOptions
 	err            error
 }
 
@@ -4475,6 +4476,7 @@ func (m Model) moveTaskStatusCmdWithOptions(taskID string, previousStatus, newSt
 				taskID:         taskID,
 				previousStatus: previousStatus,
 				newStatus:      newStatus,
+				opts:           opts,
 				err:            err,
 			}
 		}
@@ -4483,18 +4485,21 @@ func (m Model) moveTaskStatusCmdWithOptions(taskID string, previousStatus, newSt
 			taskID:         taskID,
 			previousStatus: previousStatus,
 			newStatus:      newStatus,
+			opts:           opts,
 		}
 	}
 }
 
 func (m Model) moveTaskStatusCascadeChildrenCmd(taskID string, previousStatus, newStatus domain.Status) tea.Cmd {
 	return func() tea.Msg {
-		err := m.updateTaskStatusWithTimeoutOptions(taskID, newStatus, 5*time.Second, daemonclient.TaskStatusOptions{CascadeChildren: true})
+		opts := daemonclient.TaskStatusOptions{CascadeChildren: true}
+		err := m.updateTaskStatusWithTimeoutOptions(taskID, newStatus, 5*time.Second, opts)
 		if err != nil {
 			return taskStatusResultMsg{
 				taskID:         taskID,
 				previousStatus: previousStatus,
 				newStatus:      newStatus,
+				opts:           opts,
 				err:            err,
 			}
 		}
@@ -4503,6 +4508,7 @@ func (m Model) moveTaskStatusCascadeChildrenCmd(taskID string, previousStatus, n
 			taskID:         taskID,
 			previousStatus: previousStatus,
 			newStatus:      newStatus,
+			opts:           opts,
 		}
 	}
 }
@@ -4664,6 +4670,46 @@ func taskStatusOptionsForStatus(status domain.Status) daemonclient.TaskStatusOpt
 		return daemonclient.TaskStatusOptions{}
 	}
 	return daemonclient.TaskStatusOptions{IntegrateBeforeClose: true}
+}
+
+func (m Model) closeFailureDialogCmd(msg taskStatusResultMsg) tea.Cmd {
+	if msg.err == nil || msg.newStatus != domain.StatusDone {
+		return nil
+	}
+	options := overlay.CloseFailureDialogOptions{
+		PreviousStatus:          msg.previousStatus.String(),
+		TargetStatus:            msg.newStatus.String(),
+		ForceWorktree:           msg.opts.ForceWorktree,
+		CloseCleanChildren:      msg.opts.CloseCleanChildren,
+		AllowAIMerge:            true,
+		AllowForceWorktree:      closeFailureSupportsForceWorktree(msg.err),
+		AllowCloseCleanChildren: closeFailureSupportsCloseCleanChildren(msg.err),
+	}
+	return m.openOverlay(overlay.NewCloseFailureDialog(msg.taskID, msg.err.Error(), options))
+}
+
+func closeFailureSupportsForceWorktree(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return isDirtyWorktreeRemovalError(err) ||
+		strings.Contains(message, "dirty worktree") ||
+		strings.Contains(message, "worktree has local changes") ||
+		strings.Contains(message, "modified or untracked") ||
+		strings.Contains(message, "force worktree") ||
+		strings.Contains(message, "--force-worktree")
+}
+
+func closeFailureSupportsCloseCleanChildren(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "unresolved child issues remain") ||
+		strings.Contains(message, "close clean child") ||
+		strings.Contains(message, "close-clean-children") ||
+		strings.Contains(message, "clean unresolved child")
 }
 
 func (m Model) bulkMoveNeedsCloseCleanupConfirmation(taskIDs []string, delta int) bool {
