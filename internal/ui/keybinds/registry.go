@@ -47,6 +47,7 @@ const (
 	ActionOpenSettings            ActionID = "open_settings"
 	ActionOpenDiagnostic          ActionID = "open_diagnostics"
 	ActionOpenRecovery            ActionID = "open_recovery"
+	ActionOpenNotificationHistory ActionID = "open_notification_history"
 	ActionToggleView              ActionID = "toggle_view"
 	ActionRefresh                 ActionID = "refresh"
 	ActionAttachSession           ActionID = "attach_session"
@@ -90,6 +91,7 @@ var registry = []ActionSpec{
 	{ID: ActionRefresh, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "r", Display: "r"}}, Hint: "refresh"},
 	{ID: ActionOpenDiagnostic, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "D", Display: "D"}}},
 	{ID: ActionOpenRecovery, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "n", Display: "n"}}, Hint: "recover"},
+	{ID: ActionOpenNotificationHistory, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "N", Display: "N"}}},
 	{ID: ActionToggleView, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "tab", Display: "Tab"}}, Hint: "view"},
 	{ID: ActionOpenHelp, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "?", Display: "?"}}, Hint: "help"},
 	{ID: ActionQuit, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "q", Display: "q"}}, Hint: "quit"},
@@ -184,6 +186,7 @@ var registry = []ActionSpec{
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "V (workspace)", Help: "Open dev server menu"},
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "w/W", Help: "Cleanup worktree / delete + cleanup"},
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "n", Help: "Open async failure recovery overlay"},
+	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "N", Help: "Open notification history drawer"},
 
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "Tab", Help: "Toggle compact/kanban view"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "esc", Help: "Close overlay / exit mode"},

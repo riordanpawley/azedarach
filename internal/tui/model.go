@@ -60,6 +60,7 @@ const (
 	diffPreviewMaxCharacters       = 200
 	eventTickerCapacity            = 64
 	eventLogCapacity               = 256
+	notificationHistoryCapacity    = 100
 	eventSummaryMaxRunes           = 140
 	taskCloseMutationTimeout       = 10 * time.Minute
 	worktreeCleanupMutationTimeout = 2 * time.Minute
@@ -158,6 +159,16 @@ type daemonStreamMetrics struct {
 	MaxBatchSize                int
 }
 
+type notificationHistoryEntry struct {
+	ID        string
+	CreatedAt time.Time
+	Level     ToastLevel
+	Reference string
+	Message   string
+	Read      bool
+	Dismissed bool
+}
+
 // Model is the main application state
 type Model struct {
 	// Core data
@@ -215,7 +226,10 @@ type Model struct {
 	logFilePath          string
 
 	// Toasts
-	toasts []Toast
+	toasts                []Toast
+	activeToastHistoryIDs []string
+	notificationHistory   []notificationHistoryEntry
+	notificationSeq       uint64
 	// Recoverable async failures surfaced in notifications/recovery overlay.
 	recoveryNotifications   []asyncRecoveryNotification
 	recoveryNotificationSeq uint64
@@ -345,6 +359,8 @@ func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 		runtimeSignalWorktreeByTask: make(map[string]string),
 		runtimeSignalBranchByTask:   make(map[string]string),
 		toasts:                      []Toast{},
+		activeToastHistoryIDs:       []string{},
+		notificationHistory:         []notificationHistoryEntry{},
 		recoveryNotifications:       []asyncRecoveryNotification{},
 		eventTicker:                 eventticker.NewRing(eventTickerCapacity),
 		runtimeEvents:               []protocol.EventEnvelope{},
@@ -767,6 +783,10 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keybinds.ActionOpenRecovery:
 		return m, m.openRecoveryOverlayCmd()
+
+	case keybinds.ActionOpenNotificationHistory:
+		cmd := (&m).openNotificationHistoryOverlayCmd()
+		return m, cmd
 
 	case keybinds.ActionToggleView: // Toggle view mode
 		if m.viewMode == ViewModeBoard {
@@ -3769,6 +3789,9 @@ func (m Model) renderLoading() string {
 // addToast adds a toast notification to the list
 func (m *Model) addToast(toast Toast) {
 	m.toasts = append(m.toasts, toast)
+	now := time.Now().UTC()
+	historyID := m.recordNotificationHistory(toast, now)
+	m.activeToastHistoryIDs = append(m.activeToastHistoryIDs, historyID)
 	kind := protocol.EnvelopeKind("info")
 	switch toast.Level {
 	case ToastSuccess:
@@ -3784,7 +3807,7 @@ func (m *Model) addToast(toast Toast) {
 		Event:     "ui.toast",
 		Kind:      kind,
 		Body:      []byte(toast.Message),
-		EmittedAt: time.Now().UTC(),
+		EmittedAt: now,
 	})
 }
 
@@ -3896,19 +3919,32 @@ func truncateSummary(value string) string {
 func (m *Model) expireToasts() {
 	now := time.Now()
 	filtered := make([]Toast, 0, len(m.toasts))
+	filteredHistoryIDs := make([]string, 0, len(m.toasts))
 
-	for _, toast := range m.toasts {
+	for i, toast := range m.toasts {
 		if toast.Expires.After(now) {
 			filtered = append(filtered, toast)
+			if i < len(m.activeToastHistoryIDs) {
+				filteredHistoryIDs = append(filteredHistoryIDs, m.activeToastHistoryIDs[i])
+			} else {
+				filteredHistoryIDs = append(filteredHistoryIDs, "")
+			}
 		}
 	}
 
 	m.toasts = filtered
+	m.activeToastHistoryIDs = filteredHistoryIDs
 }
 
 func (m *Model) dismissLatestToast() bool {
 	if len(m.toasts) == 0 {
 		return false
+	}
+	if len(m.activeToastHistoryIDs) == len(m.toasts) {
+		m.markNotificationDismissed(m.activeToastHistoryIDs[len(m.activeToastHistoryIDs)-1])
+		m.activeToastHistoryIDs = m.activeToastHistoryIDs[:len(m.activeToastHistoryIDs)-1]
+	} else if len(m.activeToastHistoryIDs) > len(m.toasts) {
+		m.activeToastHistoryIDs = m.activeToastHistoryIDs[:len(m.toasts)-1]
 	}
 	m.toasts = m.toasts[:len(m.toasts)-1]
 	return true

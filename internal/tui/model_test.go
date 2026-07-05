@@ -519,6 +519,100 @@ func TestUpdate_AttachmentActionDeletedAddsToast(t *testing.T) {
 	}
 }
 
+func TestNotificationHistoryRetainsOverflowAndDismissalState(t *testing.T) {
+	m := newTestModel()
+	m.width = 100
+	m.height = 24
+	m.loading = false
+	expires := time.Now().Add(time.Hour)
+	for _, message := range []string{"first notice for ctk", "second notice for ctk", "third notice for ctk", "fourth notice for ctk"} {
+		m.addToast(Toast{
+			Level:   ToastError,
+			Message: message,
+			Expires: expires,
+		})
+	}
+
+	if got, want := len(m.notificationHistory), 4; got != want {
+		t.Fatalf("notification history len = %d, want %d", got, want)
+	}
+	if got, want := m.notificationHistoryIndicator(), "4 errors (N)"; got != want {
+		t.Fatalf("notification history indicator = %q, want %q", got, want)
+	}
+	view := m.View()
+	if strings.Contains(view, "first notice for ctk") {
+		t.Fatalf("oldest notice should be hidden from floating stack, view=%q", view)
+	}
+	if !strings.Contains(view, "4 errors (N)") {
+		t.Fatalf("footer should route to history with compact error count, view=%q", view)
+	}
+
+	updated, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlG})
+	if cmd != nil {
+		t.Fatalf("dismiss latest toast cmd = %T, want nil", cmd)
+	}
+	next := updated.(Model)
+	if len(next.toasts) != 3 {
+		t.Fatalf("active toasts len = %d, want 3", len(next.toasts))
+	}
+	if len(next.notificationHistory) != 4 {
+		t.Fatalf("notification history len after dismiss = %d, want 4", len(next.notificationHistory))
+	}
+	if !next.notificationHistory[len(next.notificationHistory)-1].Dismissed {
+		t.Fatalf("latest history entry should be marked dismissed")
+	}
+}
+
+func TestNotificationHistoryDrawerMarksEntriesRead(t *testing.T) {
+	m := newTestModel()
+	m.addToast(Toast{
+		Level:   ToastWarning,
+		Message: "mutation warning for az-1",
+		Expires: time.Now().Add(time.Hour),
+	})
+
+	updated, cmd := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("N")})
+	if cmd == nil {
+		t.Fatal("expected command to open notification history overlay")
+	}
+	m = updated.(Model)
+	if _, ok := m.overlayStack.Current().(*overlay.NotificationHistoryOverlay); !ok {
+		t.Fatalf("current overlay = %T, want notification history overlay", m.overlayStack.Current())
+	}
+	if got := m.notificationHistoryIndicator(); got != "" {
+		t.Fatalf("notification history indicator after opening = %q, want empty", got)
+	}
+	for _, entry := range m.notificationHistory {
+		if !entry.Read {
+			t.Fatalf("notification history entry not marked read: %+v", entry)
+		}
+	}
+}
+
+func TestNotificationHistoryRetainsExpiredToasts(t *testing.T) {
+	m := newTestModel()
+	m.addToast(Toast{
+		Level:   ToastError,
+		Message: "expired failure for az-1",
+		Expires: time.Now().Add(-time.Minute),
+	})
+
+	m.expireToasts()
+
+	if len(m.toasts) != 0 {
+		t.Fatalf("active toasts len = %d, want 0", len(m.toasts))
+	}
+	if len(m.notificationHistory) != 1 {
+		t.Fatalf("notification history len = %d, want 1", len(m.notificationHistory))
+	}
+	if got := m.notificationHistory[0].Message; got != "expired failure for az-1" {
+		t.Fatalf("history message = %q, want expired toast message", got)
+	}
+	if got := m.notificationHistoryIndicator(); got != "1 error (N)" {
+		t.Fatalf("notification history indicator = %q, want 1 error (N)", got)
+	}
+}
+
 func TestUpdate_AttachmentActionStagedAddsToast(t *testing.T) {
 	m := newTestModel()
 
