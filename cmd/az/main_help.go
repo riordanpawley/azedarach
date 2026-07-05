@@ -149,6 +149,32 @@ func printHelpForPath(path []string) bool {
 		fmt.Println("Usage: az decision link add --id <decision-id> (--issue <id> | --req <id> | --decision <id>) [--relation <applies-to|revises|informs>] [--note <text>] [--json]")
 	case "decision link remove":
 		fmt.Println("Usage: az decision link remove --id <decision-id> (--issue <id> | --req <id> | --decision <id>) [--json]")
+	case "learn":
+		printLearnUsage()
+	case "learn add":
+		fmt.Println("Usage: az learn add --evidence <text> [--summary <text>] [--private] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--json]")
+	case "learn recall":
+		fmt.Println("Usage: az learn recall [--query <text>] [--issue <id>] [--req <id>] [--status <status> ...] [--tag <tag> ...] [--file <path> ...] [--limit N] [--include-evidence] [--include-private] [--json]")
+	case "learn show":
+		fmt.Println("Usage: az learn show <learning-id> [--json]")
+	case "learn review":
+		fmt.Println("Usage: az learn review [--queue-status <status> ...] [--issue <id>] [--req <id>] [--tag <tag> ...] [--file <path> ...] [--target-state active|retired|drifted|missing ...] [--older-than 30d] [--limit N] [--json]")
+	case "learn stale":
+		fmt.Println("Usage: az learn stale --note <text> <learning-id> [--json]")
+	case "learn demote":
+		fmt.Println("Usage: az learn demote --note <text> <learning-id> [--json]")
+	case "learn promote":
+		fmt.Println("Usage: az learn promote --target rulesync|agents|skill|spec|decision [--target-id <id-or-path>] <learning-id> [--create-target] [--target-title <text>] [--target-description <text>] [--target-issue <id>] [--decision-rationale <text>] [--decision-context <text>] [--decision-consequences <text>] [--note <text>] [--target-hash <hash>] [--target-meta key=value ...] [--json]")
+	case "learn retire":
+		fmt.Println("Usage: az learn retire --note <text> <learning-id> [--json]")
+	case "learn relate":
+		fmt.Println("Usage: az learn relate --type supersedes|conflicts --note <text> [--scope-issue <id>] [--scope-req <id>] [--scope-session <id>] [--scope-tag <tag> ...] [--scope-file <path> ...] <source-learning-id> <target-learning-id> [--json]")
+	case "learn supersede":
+		fmt.Println("Usage: az learn supersede --note <text> [--scope-issue <id>] [--scope-req <id>] [--scope-session <id>] [--scope-tag <tag> ...] [--scope-file <path> ...] <new-learning-id> <old-learning-id> [--json]")
+	case "learn doctor":
+		fmt.Println("Usage: az learn doctor [--candidate-older-than-days N] [--inactive-older-than-days N] [--limit N] [--json]")
+	case "learn gc":
+		fmt.Println("Usage: az learn gc [--confirm] [--candidate-older-than-days N] [--inactive-older-than-days N] [--limit N] [--json]")
 	case "sync":
 		fmt.Println("Usage: az sync [conflicts] [--all] [<directory>] [--project-dir <dir>] [--json]")
 	case "githooks":

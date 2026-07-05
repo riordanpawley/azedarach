@@ -142,9 +142,15 @@ func (c *Client) Subscribe(ctx context.Context, projectID string, fromRevision u
 	}
 
 	ch := make(chan protocol.EventEnvelope, 32)
+	readCtx, stopReadWatcher := context.WithCancel(ctx)
+	go func() {
+		<-readCtx.Done()
+		_ = conn.Close()
+	}()
 	go func() {
 		defer close(ch)
 		defer conn.Close()
+		defer stopReadWatcher()
 		for {
 			select {
 			case <-ctx.Done():

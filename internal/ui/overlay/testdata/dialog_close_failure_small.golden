@@ -1,0 +1,20 @@
+╭────────────────────────────────────────────────────────────────────╮
+│CLOSE BLOCKED                                                       │
+│────────────────────────────────────────────────────────────────────│
+│Issue: az-321                                                       │
+│The issue was not closed.                                           │
+│cannot close issue az-321: worktree has local changes: main.go.     │
+│Next: commit, discard, or merge the worktree changes first, then    │
+│...                                                                 │
+│                                                                    │
+│                                                                    │
+│                                                                    │
+│Actions                                                             │
+│────────────────────────────────────────────────────────────────────│
+│> r Retry close                                                     │
+│  Run the close again after fixing the blocker.                     │
+│  a AI merge                                                        │
+│  Launch an agent to resolve the blocked integration.               │
+│  f Force cleanup                                                   │
+│  Retry and allow worktree removal to discard local files.          │
+╰────────────────────────────────────────────────────────────────────╯

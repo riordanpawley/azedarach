@@ -1083,6 +1083,66 @@ func TestAIHookRunCommandRoutesPreToolUseLifecycleNotify(t *testing.T) {
 	}
 }
 
+func TestAIHookRunCommandRoutesCodexIdlePromptNotify(t *testing.T) {
+	projectDir := t.TempDir()
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")
+
+	var signals []protocol.RuntimeSignalIngestCommandBody
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case protocol.CommandRuntimeSignalIngest:
+				var body protocol.RuntimeSignalIngestCommandBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal runtime signal body: %v", err)
+				}
+				signals = append(signals, body)
+				return responseWithJSON(req, protocol.RuntimeSignalIngestResponseBody{Accepted: true, SignalID: "sig-1"}), nil
+			default:
+				t.Fatalf("unexpected daemon command for idle_prompt: %s", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		},
+	}
+	deps := &Dependencies{
+		RepoDir:      projectDir,
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
+	}
+
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.WriteString(`{"thread_id":"t-port-1"}`); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
+
+	opts, err := ParseAIHookRunArgs([]string{"--agent=codex", "--json", "idle-prompt"})
+	if err != nil {
+		t.Fatalf("ParseAIHookRunArgs error: %v", err)
+	}
+	output := captureStdout(t, func() error {
+		return AIHookRunCommand(deps, opts)
+	})
+	if strings.TrimSpace(output) != "{}" {
+		t.Fatalf("ai hook run json output = %q, want {}", output)
+	}
+	if len(signals) != 1 ||
+		signals[0].Agent != "codex" ||
+		signals[0].Event != hookEventIdlePrompt ||
+		!signals[0].Log {
+		t.Fatalf("runtime signals = %+v, want one logged idle_prompt signal", signals)
+	}
+}
+
 func TestAIHookRunCommandLeavesPostToolUseLifecycleNeutral(t *testing.T) {
 	projectDir := t.TempDir()
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")
