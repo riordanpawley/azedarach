@@ -368,12 +368,24 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 		return nil
 	}
 
+	preCommitMergeInProgress := false
+	if hookName == "pre-commit" {
+		mergeInProgress, mergeErr := gitMergeInProgress(projectDir)
+		if mergeErr != nil && opts.Verbose {
+			fmt.Fprintf(os.Stderr, "githooks pre-commit: merge state inspection failed: %v\n", mergeErr)
+		}
+		preCommitMergeInProgress = mergeInProgress
+		if preCommitMergeInProgress && opts.Verbose {
+			fmt.Fprintln(os.Stderr, "githooks pre-commit: merge in progress; skipping built-in decision sync")
+		}
+	}
+
 	// Built-in decision sync commands fire before user-configured commands so
 	// that the markdown reflects SQLite by the time other pre-commit checks
 	// (lint, formatter, etc.) inspect the tree. Built-ins are best-effort and
 	// silent unless --verbose: the daemon may not be running on a fresh clone,
 	// and a missing decision feature must not block a commit.
-	allCommands := append([]string{}, builtInDecisionCommandsForHook(hookName)...)
+	allCommands := append([]string{}, builtInDecisionCommandsForHook(hookName, projectDir, preCommitMergeInProgress)...)
 	allCommands = append(allCommands, configuredCommandsForHook(cfg, hookName)...)
 
 	for _, command := range allCommands {
@@ -390,12 +402,14 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 		}
 	}
 
-	// On pre-commit, always restage docs/decisions/ in addition to any
+	// On ordinary pre-commit, restage docs/decisions/ in addition to any
 	// user-configured restage paths, so newly synced markdown lands in the
-	// same commit as the SQLite mutation that produced it.
+	// same commit as the SQLite mutation that produced it. During merges, skip
+	// that built-in generation/restage path; dirty post-merge trees break the
+	// transactional merge path.
 	restageEnabled := cfg.GitHooks.Restage.Enabled
 	restagePaths := append([]string{}, cfg.GitHooks.Restage.Paths...)
-	if hookName == "pre-commit" {
+	if hookName == "pre-commit" && !preCommitMergeInProgress {
 		restageEnabled = true
 		restagePaths = append(restagePaths, "docs/decisions")
 	}
@@ -432,25 +446,49 @@ func loadConfigForHook(projectDir string, deps *Dependencies) (*config.Config, e
 }
 
 // builtInDecisionCommandsForHook returns the auto-injected decision sync
-// commands for a given hook. These fire regardless of whether the user has
-// populated cfg.GitHooks.Commands, so a freshly installed hook setup
-// automatically keeps SQLite and markdown in sync.
+// commands for a given hook. These normally fire regardless of whether the user
+// has populated cfg.GitHooks.Commands, so a freshly installed hook setup
+// automatically keeps SQLite and markdown in sync. The pre-commit sync is
+// suppressed during merges because generating markdown in that path can leave
+// the post-merge worktree dirty.
 //
-// pre-commit: write SQLite → docs/decisions/*.md so the markdown that lands
-// in the commit reflects the current store state.
+// ordinary pre-commit: write SQLite to docs/decisions/*.md so the markdown that
+// lands in the commit reflects the current store state.
 //
 // post-merge / post-checkout / post-rewrite: read docs/decisions/*.md back
 // into SQLite so a freshly pulled branch sees teammates' decisions without a
 // manual import. The import is clean-changes-only; conflicts are reported
 // but neither side is overwritten (use az decision import --force for that).
-func builtInDecisionCommandsForHook(hookName string) []string {
+func builtInDecisionCommandsForHook(hookName, projectDir string, preCommitMergeInProgress bool) []string {
+	projectDirFlag := ""
+	if strings.TrimSpace(projectDir) != "" {
+		projectDirFlag = " --project-dir " + shellSingleQuote(projectDir)
+	}
 	switch hookName {
 	case "pre-commit":
-		return []string{"az decision sync"}
+		if preCommitMergeInProgress {
+			return nil
+		}
+		return []string{"az decision sync" + projectDirFlag}
 	case "post-merge", "post-checkout", "post-rewrite":
-		return []string{"az decision import"}
+		return []string{"az decision import" + projectDirFlag}
 	}
 	return nil
+}
+
+func gitMergeInProgress(projectDir string) (bool, error) {
+	gitDir, err := resolveGitDirPath(projectDir)
+	if err != nil {
+		return false, err
+	}
+	data, err := os.ReadFile(filepath.Join(gitDir, "MERGE_HEAD"))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read MERGE_HEAD: %w", err)
+	}
+	return strings.TrimSpace(string(data)) != "", nil
 }
 
 func configuredCommandsForHook(cfg *config.Config, hookName string) []string {
@@ -1694,13 +1732,21 @@ func openCodePluginSource() string {
 }
 
 func resolveGitConfigPath(projectDir string) (string, error) {
+	gitDir, err := resolveGitDirPath(projectDir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(gitDir, "config"), nil
+}
+
+func resolveGitDirPath(projectDir string) (string, error) {
 	gitPath := filepath.Join(projectDir, ".git")
 	info, err := os.Stat(gitPath)
 	if err != nil {
 		return "", fmt.Errorf("stat .git: %w", err)
 	}
 	if info.IsDir() {
-		return filepath.Join(gitPath, "config"), nil
+		return gitPath, nil
 	}
 	data, err := os.ReadFile(gitPath)
 	if err != nil {
@@ -1715,5 +1761,5 @@ func resolveGitConfigPath(projectDir string) (string, error) {
 	if !filepath.IsAbs(dir) {
 		dir = filepath.Join(projectDir, dir)
 	}
-	return filepath.Join(dir, "config"), nil
+	return dir, nil
 }

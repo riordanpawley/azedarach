@@ -27,8 +27,8 @@ func (s issueDecisionService) ImportMD(ctx context.Context, req protocol.Decisio
 	if s.daemon == nil {
 		return protocol.DecisionImportMDResponseBody{}, errors.New("decision import_md unavailable: daemon nil")
 	}
-	repoDir := strings.TrimSpace(s.daemon.resolveRepoDirForProject(daemonProjectIDFromContext(ctx)))
-	if repoDir == "" {
+	repoDir, err := decisionMDRepoDir(s.daemon.resolveRepoDirForProject(daemonProjectIDFromContext(ctx)), req.RepoDir)
+	if err != nil {
 		return protocol.DecisionImportMDResponseBody{}, errors.New("decision import_md unavailable: repo dir not resolved")
 	}
 

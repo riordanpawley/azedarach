@@ -138,9 +138,9 @@ func printHelpForPath(path []string) bool {
 	case "decision revisit":
 		fmt.Println("Usage: az decision revisit --id <old-id> (--new <existing-id> | --title <text> --rationale <text>) [--context <text>] [--note <text>] [--json]")
 	case "decision sync":
-		fmt.Println("Usage: az decision sync [--check] [--json]")
+		fmt.Println("Usage: az decision sync [--check] [--project-dir <dir>] [--json]")
 	case "decision import":
-		fmt.Println("Usage: az decision import [--check] [--force] [--json]")
+		fmt.Println("Usage: az decision import [--check] [--force] [--project-dir <dir>] [--json]")
 	case "decision link":
 		printDecisionLinkUsage()
 	case "decision link list":
