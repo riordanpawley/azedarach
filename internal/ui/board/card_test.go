@@ -900,6 +900,17 @@ func TestRenderRuntimeSignals(t *testing.T) {
 			t.Fatalf("renderRuntimeSignals(...) = %q, missing preparing token", got)
 		}
 	})
+
+	t.Run("failed operation uses compact error marker", func(t *testing.T) {
+		signals := &RuntimeSignals{
+			PendingOperationState:   "failed",
+			PendingOperationPercent: 75,
+		}
+		got := stripANSI(renderRuntimeSignals(signals, styles.New()))
+		if got != "M:!" {
+			t.Fatalf("renderRuntimeSignals(...) = %q, want M:!", got)
+		}
+	})
 }
 
 func TestRenderRuntimeSignalsCompact(t *testing.T) {
@@ -941,6 +952,17 @@ func TestRenderRuntimeSignalsCompact(t *testing.T) {
 		got := stripANSI(renderRuntimeSignalsCompact(signals, styles.New()))
 		if !strings.Contains(got, "G↑2/↓3") {
 			t.Fatalf("renderRuntimeSignalsCompact(...) = %q, missing directional ahead/behind pairing", got)
+		}
+	})
+
+	t.Run("failed operation stays compact", func(t *testing.T) {
+		signals := &RuntimeSignals{
+			PendingOperationState:   "failed",
+			PendingOperationPercent: 50,
+		}
+		got := stripANSI(renderRuntimeSignalsCompact(signals, styles.New()))
+		if got != "M:!" {
+			t.Fatalf("renderRuntimeSignalsCompact(...) = %q, want M:!", got)
 		}
 	})
 }

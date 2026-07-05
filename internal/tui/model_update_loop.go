@@ -231,6 +231,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.reconcilePendingTaskDetails()
 		m.applyPendingTaskDetailOverlays()
 		m.reconcilePendingOperations()
+		m.reconcilePendingMutationFailures()
 		m.editor.ReconcileSelection(m.tasks)
 		m.applyPendingCreatedTaskSelection()
 		m.taskSnapshotCheckedAt = msg.lastCheckedAt
@@ -396,6 +397,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.scheduleIssuesRefreshCmd()
 		}
 		m.clearPendingTaskStatus(msg.issueID)
+		m.clearTaskMutationFailure(msg.issueID)
 		m.syncTaskWorkspaceOverlay()
 		m.addToast(Toast{
 			Level:   ToastSuccess,
@@ -416,6 +418,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.scheduleIssuesRefreshCmd()
 		}
 		m.clearPendingTaskStatus(msg.issueID)
+		m.clearTaskMutationFailure(msg.issueID)
 		m.syncTaskWorkspaceOverlay()
 		m.addToast(Toast{
 			Level:   ToastSuccess,
@@ -1501,7 +1504,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					"user_message", userMessage,
 				)
 			}
-			m.markTaskMutationFailed(msg.taskID, "task.update_status", userMessage)
+			m.markTaskStatusMutationFailed(msg.taskID, "task.update_status", msg.previousStatus, msg.newStatus, userMessage)
 			m.syncTaskWorkspaceOverlay()
 			expires := time.Now().Add(3 * time.Second)
 			if msg.newStatus == domain.StatusDone {
@@ -1517,6 +1520,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.newStatus != domain.StatusDone {
 			m.clearPendingTaskStatus(msg.taskID)
 		}
+		m.clearTaskMutationFailure(msg.taskID)
 		m.syncTaskWorkspaceOverlay()
 		m.addToast(Toast{
 			Level:   ToastSuccess,

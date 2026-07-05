@@ -1715,6 +1715,36 @@ func TestSpaceFourYDoneFailureShowsNormalizedMutationMessage(t *testing.T) {
 	if progress == nil || progress.State != string(protocol.OperationStateFailed) || progress.ProgressMessage != want {
 		t.Fatalf("pending mutation = %+v, want failed normalized message", progress)
 	}
+	if _, ok := afterStatus.pendingStatuses[taskIDKey("az-4")]; ok {
+		t.Fatal("failed status mutation should clear optimistic pending status")
+	}
+	if _, ok := afterStatus.pendingOpsByTask[taskIDKey("az-4")]; ok {
+		t.Fatal("local command failure should not be stored as a pending operation")
+	}
+	failure, ok := afterStatus.pendingFailures[taskIDKey("az-4")]
+	if !ok {
+		t.Fatal("expected separate task mutation failure marker")
+	}
+	if failure.previousStatus != domain.StatusInReview || failure.targetStatus != domain.StatusDone || failure.message != want {
+		t.Fatalf("failure marker = %+v, want in_review -> done with normalized message", failure)
+	}
+	signals := afterStatus.runtimeSignalsForBoard()["az-4"]
+	if signals.PendingOperationState != string(protocol.OperationStateFailed) || signals.PendingOperationID != "" {
+		t.Fatalf("card signals = %+v, want local failed mutation marker without operation id", signals)
+	}
+	staleAny, _ := afterStatus.Update(issuesLoadedMsg{
+		tasks: []domain.Task{{ID: "az-4", Title: "Ready to close", Status: domain.StatusInReview}},
+	})
+	stale := staleAny.(Model)
+	if stale.tasks[0].Status != domain.StatusInReview {
+		t.Fatalf("stale hydration after failed close status = %s, want trusted %s", stale.tasks[0].Status, domain.StatusInReview)
+	}
+	if _, ok := stale.pendingStatuses[taskIDKey("az-4")]; ok {
+		t.Fatal("stale hydration should not resurrect failed optimistic pending status")
+	}
+	if progress := stale.pendingMutationForTask("az-4"); progress == nil || progress.State != string(protocol.OperationStateFailed) {
+		t.Fatalf("stale hydration progress = %+v, want failed marker retained", progress)
+	}
 	if len(afterStatus.runtimeEvents) == 0 || string(afterStatus.runtimeEvents[len(afterStatus.runtimeEvents)-1].Body) != want {
 		t.Fatalf("last runtime event = %+v, want normalized toast history", afterStatus.runtimeEvents)
 	}
@@ -1726,7 +1756,7 @@ func TestSpaceFourYDoneFailureShowsNormalizedMutationMessage(t *testing.T) {
 	}
 	view := workspace.View()
 	for _, piece := range []string{
-		"Could not move az-4 to Done",
+		"move az-4 to Done",
 		"It stayed In Review",
 		"Done is blocked by",
 		"resolve child issues and",
@@ -1734,6 +1764,13 @@ func TestSpaceFourYDoneFailureShowsNormalizedMutationMessage(t *testing.T) {
 		if !strings.Contains(view, piece) {
 			t.Fatalf("workspace view missing %q:\n%s", piece, view)
 		}
+	}
+	doneAny, _ := stale.Update(issuesLoadedMsg{
+		tasks: []domain.Task{{ID: "az-4", Title: "Ready to close", Status: domain.StatusDone}},
+	})
+	confirmedRefresh := doneAny.(Model)
+	if _, ok := confirmedRefresh.pendingFailures[taskIDKey("az-4")]; ok {
+		t.Fatal("authoritative target status should clear obsolete failure marker")
 	}
 }
 
