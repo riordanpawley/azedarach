@@ -1890,7 +1890,9 @@ func TestEventLogHotkeyPushesOverlay(t *testing.T) {
 		t.Fatalf("expected EventLogOverlay on stack, got %T", current)
 	}
 
-	if view := logOverlay.View(); !strings.Contains(view, "ui.toast") {
+	model, _ := logOverlay.Update(tea.WindowSizeMsg{Width: 160, Height: 34})
+	logOverlay = model.(*overlay.EventLogOverlay)
+	if view := logOverlay.View(); !strings.Contains(view, "Toast") || !strings.Contains(view, "event seed") {
 		t.Fatalf("expected event log to render runtime events, got %q", view)
 	}
 }
