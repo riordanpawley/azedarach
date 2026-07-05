@@ -39,7 +39,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 	"github.com/riordanpawley/azedarach/internal/ui/diff"
-	"github.com/riordanpawley/azedarach/internal/ui/eventticker"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
@@ -58,7 +57,6 @@ const (
 
 const (
 	diffPreviewMaxCharacters       = 200
-	eventTickerCapacity            = 64
 	eventLogCapacity               = 256
 	notificationHistoryCapacity    = 100
 	eventSummaryMaxRunes           = 140
@@ -242,8 +240,7 @@ type Model struct {
 	recoveryNotifications   []asyncRecoveryNotification
 	recoveryNotificationSeq uint64
 
-	// Runtime event stream (status ticker + event-log overlay source)
-	eventTicker   *eventticker.Ring
+	// Runtime event stream backing the event-log overlay.
 	runtimeEvents []protocol.EventEnvelope
 
 	// Terminal size
@@ -370,7 +367,6 @@ func NewWithOptions(cfg *config.Config, opts ...Option) Model {
 		activeToastHistoryIDs:       []string{},
 		notificationHistory:         []notificationHistoryEntry{},
 		recoveryNotifications:       []asyncRecoveryNotification{},
-		eventTicker:                 eventticker.NewRing(eventTickerCapacity),
 		runtimeEvents:               []protocol.EventEnvelope{},
 		styles:                      styles.New(),
 		config:                      cfg,
@@ -3846,18 +3842,6 @@ func (m *Model) recordRuntimeEvent(evt protocol.EventEnvelope) {
 	if len(m.runtimeEvents) > eventLogCapacity {
 		m.runtimeEvents = append([]protocol.EventEnvelope(nil), m.runtimeEvents[len(m.runtimeEvents)-eventLogCapacity:]...)
 	}
-	if m.eventTicker != nil {
-		if summary := runtimeEventTickerSummary(evt); summary != "" {
-			m.eventTicker.Push(summary)
-		}
-	}
-}
-
-func runtimeEventTickerSummary(evt protocol.EventEnvelope) string {
-	if strings.TrimSpace(evt.Event) == "ui.toast" {
-		return ""
-	}
-	return runtimeEventSummary(evt)
 }
 
 func runtimeEventSummary(evt protocol.EventEnvelope) string {
