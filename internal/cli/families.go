@@ -349,7 +349,7 @@ func GitHooksNotifyCommand(deps *Dependencies, opts GitHooksNotifyOptions) error
 }
 
 func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
-	projectDir, err := resolveProjectDir(opts.ProjectDir, deps)
+	projectDir, err := resolveGitHookProjectDir(opts.ProjectDir, deps)
 	if err != nil {
 		return err
 	}
@@ -1568,6 +1568,25 @@ func resolveProjectDir(projectDir string, deps *Dependencies) (string, error) {
 		resolved = cwd
 	}
 	return resolved, nil
+}
+
+func resolveGitHookProjectDir(projectDir string, deps *Dependencies) (string, error) {
+	resolved := strings.TrimSpace(projectDir)
+	if resolved != "" {
+		return resolved, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		if deps != nil && strings.TrimSpace(deps.RepoDir) != "" {
+			return strings.TrimSpace(deps.RepoDir), nil
+		}
+		return "", fmt.Errorf("resolve git hook project directory: %w", err)
+	}
+	worktreeRoot, err := config.ResolveWorktreeRoot(cwd)
+	if err == nil && strings.TrimSpace(worktreeRoot) != "" {
+		return worktreeRoot, nil
+	}
+	return cwd, nil
 }
 
 func readCodexGuardState(path string) codexGuardState {

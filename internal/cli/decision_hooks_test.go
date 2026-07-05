@@ -131,6 +131,111 @@ func TestGitHooksRunCommandRestagesDecisionsIntoHookIndex(t *testing.T) {
 	}
 }
 
+func TestGitHooksRunCommandUsesCurrentWorktreeForImplicitProjectDir(t *testing.T) {
+	baseDir := t.TempDir()
+	if err := runGitCommandIsolated(baseDir, "init"); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	if err := runGitCommandIsolated(baseDir, "config", "user.name", "Test User"); err != nil {
+		t.Fatalf("git config user.name: %v", err)
+	}
+	if err := runGitCommandIsolated(baseDir, "config", "user.email", "test@example.com"); err != nil {
+		t.Fatalf("git config user.email: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "README.md"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	if err := runGitCommandIsolated(baseDir, "add", "README.md"); err != nil {
+		t.Fatalf("git add seed: %v", err)
+	}
+	if err := runGitCommandIsolated(baseDir, "commit", "-m", "seed"); err != nil {
+		t.Fatalf("git commit seed: %v", err)
+	}
+
+	worktreeDir := filepath.Join(t.TempDir(), "linked-worktree")
+	if err := runGitCommandIsolated(baseDir, "worktree", "add", worktreeDir, "-b", "hook-worktree"); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+
+	hookIndex := filepath.Join(t.TempDir(), "hook-index")
+	readTree := exec.Command("git", "-C", worktreeDir, "read-tree", "HEAD")
+	readTree.Env = append(gitExecEnvWithoutRoutingVars(), "GIT_INDEX_FILE="+hookIndex)
+	if err := readTree.Run(); err != nil {
+		t.Fatalf("seed hook index: %v", err)
+	}
+
+	fakeBin := t.TempDir()
+	fakeAz := filepath.Join(fakeBin, "az")
+	fakeAzScript := `#!/bin/sh
+set -eu
+if [ "$1" = decision ] && [ "$2" = sync ]; then
+	project=""
+	shift 2
+	while [ "$#" -gt 0 ]; do
+		if [ "$1" = "--project-dir" ]; then
+			shift
+			project="$1"
+		fi
+		shift || true
+	done
+	if [ -z "$project" ]; then
+		project="$(pwd)"
+	fi
+	mkdir -p "$project/docs/decisions"
+	printf '%s\n' "$project" > "$project/docs/decisions/generated.md"
+fi
+`
+	if err := os.WriteFile(fakeAz, []byte(fakeAzScript), 0o755); err != nil {
+		t.Fatalf("write fake az: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GIT_INDEX_FILE", hookIndex)
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(worktreeDir); err != nil {
+		t.Fatalf("chdir worktree: %v", err)
+	}
+	defer func() {
+		if chdirErr := os.Chdir(wd); chdirErr != nil {
+			t.Fatalf("restore cwd: %v", chdirErr)
+		}
+	}()
+
+	cfg := config.DefaultConfig()
+	if err := GitHooksRunCommand(&Dependencies{RepoDir: baseDir, Config: cfg}, GitHooksRunOptions{}); err != nil {
+		t.Fatalf("GitHooksRunCommand error: %v", err)
+	}
+
+	worktreeDecisionPath := filepath.Join(worktreeDir, "docs", "decisions", "generated.md")
+	data, err := os.ReadFile(worktreeDecisionPath)
+	if err != nil {
+		t.Fatalf("read worktree generated decision: %v", err)
+	}
+	wantWorktree, err := filepath.EvalSymlinks(worktreeDir)
+	if err != nil {
+		wantWorktree = worktreeDir
+	}
+	if got := strings.TrimSpace(string(data)); got != wantWorktree {
+		t.Fatalf("generated decision content = %q, want worktree project dir %q", got, wantWorktree)
+	}
+	if _, err := os.Stat(filepath.Join(baseDir, "docs", "decisions", "generated.md")); !os.IsNotExist(err) {
+		t.Fatalf("base checkout generated decision err = %v, want not exist", err)
+	}
+
+	hookIndexBlob := exec.Command("git", "-C", worktreeDir, "show", ":docs/decisions/generated.md")
+	hookIndexBlob.Env = append(gitExecEnvWithoutRoutingVars(), "GIT_INDEX_FILE="+hookIndex)
+	out, err := hookIndexBlob.Output()
+	if err != nil {
+		t.Fatalf("git show generated decision from hook index: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != wantWorktree {
+		t.Fatalf("hook index generated decision = %q, want %q", got, wantWorktree)
+	}
+}
+
 func TestGitHooksRunCommandSkipsBuiltInDecisionSyncAndRestageDuringMerge(t *testing.T) {
 	projectDir := t.TempDir()
 	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
