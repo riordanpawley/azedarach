@@ -308,6 +308,7 @@ func New(cfg Config) *Daemon {
 	specService.daemon = d
 	specHandler := daemonhandlers.NewSpecHandler(specService)
 	decisionHandler := daemonhandlers.NewDecisionHandler(issueDecisionService{daemon: d})
+	learnHandler := daemonhandlers.NewLearnHandler(issueLearnService{daemon: d})
 	d.syncBootstrapFn = d.defaultSyncBootstrap
 	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
 	d.runtimeProjectionCoalescer = newRuntimeProjectionEventCoalescer(d, defaultRuntimeProjectionCoalesceWindow)
@@ -405,6 +406,7 @@ func New(cfg Config) *Daemon {
 		prHandler,
 		specHandler,
 		decisionHandler,
+		learnHandler,
 		runtime,
 	)
 	d.apply = daemonhandlers.NewApplyHandler(d, applyRevisionAdapter{daemon: d})

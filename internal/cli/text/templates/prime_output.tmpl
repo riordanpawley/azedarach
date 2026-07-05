@@ -98,6 +98,9 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - `az decision revisit --id <old-id> (--new <existing-id> | --title <text> --rationale <text>) [--context ...] [--note ...] [--json]`
   - `az decision link list [--json] [--id <decision-id>] [--kind <issue|requirement|decision>] [--target <id>]`, `az decision link add --id <decision-id> (--issue <id> | --req <id> | --decision <id>) [--relation <applies-to|revises|informs>] [--note <text>] [--json]`, `az decision link remove --id <decision-id> (--issue <id> | --req <id> | --decision <id>) [--json]`
   - `az decision sync [--check] [--project-dir <dir>] [--json]` writes `docs/decisions/*.md` from the store; `az decision import [--check] [--force] [--project-dir <dir>] [--json]` reads markdown back into the store.
+  - Learning loop:
+  - `az learn add --issue <id> --tag <tag> --evidence <text> [--private]`, `az learn recall --query <text> [--limit N] [--include-private]`, `az learn show <learning-id>`, `az learn review [--queue-status <status>] [--older-than 30d] [--issue <id>]`, `az learn review --id <learning-id> [--id <learning-id> ...] --status accepted|rejected|stale --note <text>`, `az learn review --bulk-stale --older-than 30d --note <reason>`, `az learn promote --target rulesync|agents|skill|spec|decision --target-id <id-or-path> <learning-id>`, `az learn relate --type supersedes|conflicts --note <text> <source-learning-id> <target-learning-id>`
+  - Use `az learn` for evidence-backed observations and session discoveries. Use `az decision` for durable why/choice records; promoted learnings can become decisions, specs, AGENTS/.rulesync guidance, or skills.
   - Session/runtime operations:
   - `az session status [issue-id]`, `az worktree create <issue-id>` (prepare parent/ancestor integration target without starting a session), `az daemon start|stop|restart`, `az export --format json [--out <path>]`
   - `az session start <issue-id>` is for explicit/manual orchestration; agents should not run it unless the user asks.
@@ -110,6 +113,9 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Atomic-merge test before using `--deferred`: ask "would the parent be correct and complete if it lands in the base branch without this new piece?" If no, the new piece must land with the parent — track it as a child issue (child issues are part of the parent's merge unit and land in the same base-branch commit) or fold it into the parent's commit; do not use `--deferred`. If yes, it can land separately and `--deferred` (or a standalone issue) is appropriate. `--deferred` only changes issue bookkeeping: it skips active-issue auto-parenting and defaults priority lower; do not use it to avoid, force, or reason about worktree/session creation.
   - When a new subtask surfaces mid-work, create a child issue immediately rather than expanding the parent's description; link extra dependencies with `az issue dep add` when needed.
 {{ if .ActiveIssueClosedWarning }}{{ .ActiveIssueClosedWarning }}
+{{ end }}
+{{ if .LearningSection }}{{ .LearningSection }}
+
 {{ end }}
 {{ if .IssueSection }}{{ .IssueSection }}
 {{ end }}{{ if .QuestionFirstGuardrails }}{{ .QuestionFirstGuardrails }}

@@ -183,6 +183,13 @@ Examples:
   az decision list --issue cgn
   az decision get --id dec-1 --with-links
   az decision link add --id dec-1 --req cgn-req-1 --relation applies-to
+  az learn add --private --issue csk --tag daemon --evidence "What changed and why"
+  az learn recall --include-private --query "daemon guidance" --limit 5
+  az learn review --queue-status candidate --older-than 30d --tag daemon
+  az learn review --id learn-1 --status accepted --note "Validated against daemon path"
+  az learn review --bulk-stale --older-than 60d --note "Old candidates no longer apply"
+  az learn promote --target decision --target-id dec-1 learn-1
+  az learn relate --type supersedes --note "Newer scoped guidance replaces older generic guidance" learn-2 learn-1
   az prime
   az export --format json
   az export --format json --out snapshot.json

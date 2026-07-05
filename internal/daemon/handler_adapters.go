@@ -30,6 +30,10 @@ type issueSpecService struct {
 	daemon *Daemon
 }
 
+type issueLearnService struct {
+	daemon *Daemon
+}
+
 func (s issueSpecService) issueClient(ctx context.Context) (*issues.Client, error) {
 	if s.daemon == nil {
 		return nil, errors.New("issue store unavailable")
@@ -39,6 +43,595 @@ func (s issueSpecService) issueClient(ctx context.Context) (*issues.Client, erro
 		return nil, errors.New("issue store unavailable")
 	}
 	return client, nil
+}
+
+func (s issueLearnService) issueClient(ctx context.Context) (*issues.Client, error) {
+	if s.daemon == nil {
+		return nil, errors.New("issue store unavailable")
+	}
+	client := s.daemon.issueClientForProject(daemonProjectIDFromContext(ctx))
+	if client == nil {
+		return nil, errors.New("issue store unavailable")
+	}
+	return client, nil
+}
+
+func (s issueLearnService) Add(ctx context.Context, req protocol.LearnAddRequestBody) (protocol.LearnAddResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnAddResponseBody{}, err
+	}
+	params := issues.CreateLearningParams{
+		ProjectID:       firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)),
+		Summary:         req.Summary,
+		Evidence:        req.Evidence,
+		EvidencePrivate: req.Private,
+		Tags:            req.Tags,
+		Files:           req.Files,
+	}
+	if req.IssueID != "" {
+		issueID := req.IssueID.String()
+		params.IssueID = &issueID
+	}
+	if req.ReqID != "" {
+		reqID := req.ReqID.String()
+		params.RequirementID = &reqID
+	}
+	if req.SessionID != "" {
+		sessionID := req.SessionID.String()
+		params.SessionID = &sessionID
+	}
+	learning, err := client.CreateLearning(ctx, params)
+	if err != nil {
+		return protocol.LearnAddResponseBody{}, err
+	}
+	return protocol.LearnAddResponseBody{Learning: mapLearningToProtocol(learning, true)}, nil
+}
+
+func (s issueLearnService) Recall(ctx context.Context, req protocol.LearnRecallRequestBody) (protocol.LearnRecallResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnRecallResponseBody{}, err
+	}
+	statuses := make([]issues.LearningStatus, 0, len(req.Statuses))
+	for _, status := range req.Statuses {
+		statuses = append(statuses, issues.LearningStatus(status))
+	}
+	if len(statuses) == 0 {
+		statuses = []issues.LearningStatus{issues.LearningStatusAccepted, issues.LearningStatusPromoted}
+	}
+	filter := issues.LearningFilter{
+		ProjectID:       firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)),
+		IssueID:         req.IssueID.String(),
+		RequirementID:   req.ReqID.String(),
+		ContextIssueID:  req.ContextIssueID.String(),
+		ContextReqID:    req.ContextReqID.String(),
+		ContextTags:     req.ContextTags,
+		ContextFiles:    req.ContextFiles,
+		Query:           req.Query,
+		Statuses:        statuses,
+		Tags:            req.Tags,
+		Files:           req.Files,
+		Limit:           req.Limit,
+		IncludeEvidence: req.IncludeEvidence,
+		ExcludePrivate:  !req.IncludePrivate,
+		ActiveOnly:      true,
+	}
+	if filter.Limit == 0 {
+		filter.Limit = 5
+	}
+	rows, err := client.ListLearnings(ctx, filter)
+	if err != nil {
+		return protocol.LearnRecallResponseBody{}, err
+	}
+	out := make([]protocol.Learning, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, mapLearningToProtocol(row, req.IncludeEvidence))
+	}
+	return protocol.LearnRecallResponseBody{Learnings: out}, nil
+}
+
+func (s issueLearnService) Show(ctx context.Context, req protocol.LearnShowRequestBody) (protocol.LearnShowResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnShowResponseBody{}, err
+	}
+	row, err := client.GetLearning(ctx, req.ID)
+	if err != nil {
+		return protocol.LearnShowResponseBody{}, err
+	}
+	return protocol.LearnShowResponseBody{Learning: mapLearningToProtocol(row, true)}, nil
+}
+
+func (s issueLearnService) Review(ctx context.Context, req protocol.LearnReviewRequestBody) (protocol.LearnReviewResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnReviewResponseBody{}, err
+	}
+	ids := append([]string(nil), req.IDs...)
+	if req.ID != "" {
+		ids = append([]string{req.ID}, ids...)
+	}
+	ids = uniqueTrimmedStrings(ids)
+	if len(ids) > 0 {
+		updated, err := client.BulkReviewLearnings(ctx, issues.BulkReviewLearningsParams{
+			ProjectID: daemonProjectIDFromContext(ctx),
+			IDs:       ids,
+			Status:    issues.LearningStatus(req.Status),
+			Note:      req.Note,
+		})
+		if err != nil {
+			return protocol.LearnReviewResponseBody{}, err
+		}
+		mapped := mapLearningsToProtocol(updated, false)
+		resp := protocol.LearnReviewResponseBody{UpdatedLearnings: mapped}
+		if len(mapped) == 1 {
+			resp.Updated = &mapped[0]
+		}
+		return resp, nil
+	}
+
+	filter := learningReviewFilterFromRequest(ctx, req)
+	if req.BulkStale {
+		filter.Statuses = []issues.LearningStatus{issues.LearningStatusCandidate}
+		rows, err := client.ListLearnings(ctx, filter)
+		if err != nil {
+			return protocol.LearnReviewResponseBody{}, err
+		}
+		ids := make([]string, 0, len(rows))
+		for _, row := range rows {
+			ids = append(ids, row.LocalID)
+		}
+		if len(ids) == 0 {
+			return protocol.LearnReviewResponseBody{}, nil
+		}
+		updated, err := client.BulkReviewLearnings(ctx, issues.BulkReviewLearningsParams{
+			ProjectID: daemonProjectIDFromContext(ctx),
+			IDs:       ids,
+			Status:    issues.LearningStatusStale,
+			Note:      req.Note,
+		})
+		if err != nil {
+			return protocol.LearnReviewResponseBody{}, err
+		}
+		return protocol.LearnReviewResponseBody{UpdatedLearnings: mapLearningsToProtocol(updated, false)}, nil
+	}
+	rows, err := client.ListLearnings(ctx, filter)
+	if err != nil {
+		return protocol.LearnReviewResponseBody{}, err
+	}
+	return protocol.LearnReviewResponseBody{Learnings: mapLearningsToProtocol(rows, false)}, nil
+}
+
+func (s issueLearnService) Stale(ctx context.Context, req protocol.LearnStaleRequestBody) (protocol.LearnStaleResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnStaleResponseBody{}, err
+	}
+	updated, err := client.UpdateLearningStatus(ctx, req.ID, issues.LearningStatusStale, req.Note)
+	if err != nil {
+		return protocol.LearnStaleResponseBody{}, err
+	}
+	return protocol.LearnStaleResponseBody{Learning: mapLearningToProtocol(updated, false)}, nil
+}
+
+func (s issueLearnService) Demote(ctx context.Context, req protocol.LearnDemoteRequestBody) (protocol.LearnDemoteResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnDemoteResponseBody{}, err
+	}
+	updated, err := client.DemoteLearning(ctx, req.ID, req.Note)
+	if err != nil {
+		return protocol.LearnDemoteResponseBody{}, err
+	}
+	return protocol.LearnDemoteResponseBody{Learning: mapLearningToProtocol(updated, false)}, nil
+}
+
+func (s issueLearnService) Promote(ctx context.Context, req protocol.LearnPromoteRequestBody) (protocol.LearnPromoteResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnPromoteResponseBody{}, err
+	}
+	target := protocol.LearningPromotionTarget(req.Target)
+	targetID := strings.TrimSpace(req.TargetID)
+	targetHash := strings.TrimSpace(req.TargetHash)
+	targetMetadata := cloneStringMap(req.TargetMetadata)
+	if learningPromotionFileBacked(target) {
+		current, err := client.GetLearning(ctx, req.ID)
+		if err != nil {
+			return protocol.LearnPromoteResponseBody{}, err
+		}
+		if current.Status != issues.LearningStatusAccepted && current.Status != issues.LearningStatusPromoted {
+			return protocol.LearnPromoteResponseBody{}, fmt.Errorf("%w: learning must be accepted before promotion", domain.ErrConflict)
+		}
+		repoDir := s.repoDir(ctx)
+		expectedHash := targetHash
+		if expectedHash == "" && current.Target != nil && protocol.LearningPromotionTarget(*current.Target) == target && current.TargetID == targetID {
+			expectedHash = current.TargetHash
+		}
+		mappedCurrent := mapLearningToProtocol(current, false)
+		mappedCurrent.Target = target
+		mappedCurrent.TargetID = targetID
+		result, err := upsertManagedGuidanceBlock(repoDir, mappedCurrent, req.Note, expectedHash)
+		if err != nil {
+			_, _ = client.UpdateLearningTargetState(ctx, req.ID, issues.UpdateLearningTargetStateParams{
+				State: stateForManagedGuidanceFailure(result),
+			})
+			return protocol.LearnPromoteResponseBody{}, err
+		}
+		targetHash = result.TargetHash
+		if targetMetadata == nil {
+			targetMetadata = map[string]string{}
+		}
+		targetMetadata["path"] = result.Path
+		targetMetadata["managed_block"] = managedGuidanceBlockKind
+		targetMetadata["source_learning_id"] = current.LocalID
+	}
+	params := issues.PromoteLearningParams{
+		Target:               issues.LearningPromotionTarget(target),
+		TargetID:             targetID,
+		Note:                 req.Note,
+		TargetHash:           targetHash,
+		TargetMetadata:       targetMetadata,
+		CreateTarget:         req.CreateTarget,
+		TargetTitle:          req.TargetTitle,
+		TargetDescription:    req.TargetDescription,
+		DecisionRationale:    req.DecisionRationale,
+		DecisionContext:      req.DecisionContext,
+		DecisionConsequences: req.DecisionConsequences,
+	}
+	if req.TargetIssueID != "" {
+		issueID := req.TargetIssueID.String()
+		params.TargetIssueID = &issueID
+	}
+	row, err := client.PromoteLearning(ctx, req.ID, params)
+	if err != nil {
+		return protocol.LearnPromoteResponseBody{}, err
+	}
+	mapped := mapLearningToProtocol(row, false)
+	return protocol.LearnPromoteResponseBody{
+		Learning: mapped,
+		Guidance: learningPromotionGuidance(mapped),
+	}, nil
+}
+
+func (s issueLearnService) Retire(ctx context.Context, req protocol.LearnRetireRequestBody) (protocol.LearnRetireResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnRetireResponseBody{}, err
+	}
+	req.Note = strings.TrimSpace(req.Note)
+	if req.Note == "" {
+		return protocol.LearnRetireResponseBody{}, errors.New("retirement note is required")
+	}
+	current, err := client.GetLearning(ctx, req.ID)
+	if err != nil {
+		return protocol.LearnRetireResponseBody{}, err
+	}
+	if current.Status != issues.LearningStatusPromoted || current.Target == nil {
+		return protocol.LearnRetireResponseBody{}, fmt.Errorf("%w: learning must be promoted before retirement", domain.ErrConflict)
+	}
+	target := protocol.LearningPromotionTarget(*current.Target)
+	var updated issues.Learning
+	if learningPromotionFileBacked(target) {
+		result, err := removeManagedGuidanceBlock(s.repoDir(ctx), mapLearningToProtocol(current, false), current.TargetHash)
+		if err != nil {
+			_, _ = client.UpdateLearningTargetState(ctx, req.ID, issues.UpdateLearningTargetStateParams{
+				State: stateForManagedGuidanceFailure(result),
+			})
+			return protocol.LearnRetireResponseBody{}, err
+		}
+		if result.TargetHash != "" {
+			current.TargetHash = result.TargetHash
+		}
+		updated, err = client.UpdateLearningTargetState(ctx, req.ID, issues.UpdateLearningTargetStateParams{
+			State:          issues.LearningTargetStateRetired,
+			TargetHash:     current.TargetHash,
+			TargetMetadata: current.TargetMetadata,
+			Note:           req.Note,
+		})
+		if err != nil {
+			return protocol.LearnRetireResponseBody{}, err
+		}
+	} else {
+		updated, err = client.RetireLearningTarget(ctx, req.ID, req.Note)
+		if err != nil {
+			return protocol.LearnRetireResponseBody{}, err
+		}
+	}
+	mapped := mapLearningToProtocol(updated, false)
+	return protocol.LearnRetireResponseBody{
+		Learning: mapped,
+		Guidance: learningRetireGuidance(mapped),
+	}, nil
+}
+
+func (s issueLearnService) Relate(ctx context.Context, req protocol.LearnRelateRequestBody) (protocol.LearnRelateResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnRelateResponseBody{}, err
+	}
+	params := issues.RelateLearningParams{
+		Type:             issues.LearningRelationType(req.Type),
+		SourceLearningID: req.SourceLearningID,
+		TargetLearningID: req.TargetLearningID,
+		Note:             req.Note,
+		ScopeTags:        req.ScopeTags,
+		ScopeFiles:       req.ScopeFiles,
+	}
+	if req.ScopeIssueID != "" {
+		issueID := req.ScopeIssueID.String()
+		params.ScopeIssueID = &issueID
+	}
+	if req.ScopeReqID != "" {
+		reqID := req.ScopeReqID.String()
+		params.ScopeRequirementID = &reqID
+	}
+	if req.ScopeSessionID != "" {
+		sessionID := req.ScopeSessionID.String()
+		params.ScopeSessionID = &sessionID
+	}
+	relation, err := client.RelateLearning(ctx, params)
+	if err != nil {
+		return protocol.LearnRelateResponseBody{}, err
+	}
+	return protocol.LearnRelateResponseBody{Relation: mapLearningRelationToProtocol(relation)}, nil
+}
+
+func (s issueLearnService) Supersede(ctx context.Context, req protocol.LearnSupersedeRequestBody) (protocol.LearnSupersedeResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnSupersedeResponseBody{}, err
+	}
+	params := issues.RelateLearningParams{
+		Type:             issues.LearningRelationSupersedes,
+		SourceLearningID: req.NewLearningID,
+		TargetLearningID: req.OldLearningID,
+		Note:             req.Note,
+		ScopeTags:        req.ScopeTags,
+		ScopeFiles:       req.ScopeFiles,
+	}
+	if req.ScopeIssueID != "" {
+		issueID := req.ScopeIssueID.String()
+		params.ScopeIssueID = &issueID
+	}
+	if req.ScopeReqID != "" {
+		reqID := req.ScopeReqID.String()
+		params.ScopeRequirementID = &reqID
+	}
+	if req.ScopeSessionID != "" {
+		sessionID := req.ScopeSessionID.String()
+		params.ScopeSessionID = &sessionID
+	}
+	relation, err := client.RelateLearning(ctx, params)
+	if err != nil {
+		return protocol.LearnSupersedeResponseBody{}, err
+	}
+	return protocol.LearnSupersedeResponseBody{Relation: mapLearningRelationToProtocol(relation)}, nil
+}
+
+func (s issueLearnService) Doctor(ctx context.Context, req protocol.LearnDoctorRequestBody) (protocol.LearnDoctorResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnDoctorResponseBody{}, err
+	}
+	report, err := client.DoctorLearnings(ctx, issues.LearningMaintenanceParams{
+		ProjectID:          firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)),
+		CandidateOlderThan: learningMaintenanceAge(req.CandidateOlderThanDays),
+		InactiveOlderThan:  learningMaintenanceAge(req.InactiveOlderThanDays),
+	})
+	if err != nil {
+		return protocol.LearnDoctorResponseBody{}, err
+	}
+	findings := mapLearningMaintenanceFindings(report.Findings)
+	fileRows, err := client.ListLearnings(ctx, issues.LearningFilter{
+		ProjectID: firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)),
+		Statuses:  []issues.LearningStatus{issues.LearningStatusPromoted},
+	})
+	if err != nil {
+		return protocol.LearnDoctorResponseBody{}, err
+	}
+	fileFindings := s.doctorManagedGuidanceTargets(ctx, fileRows)
+	findings = append(findings, fileFindings...)
+	if req.Limit > 0 && len(findings) > req.Limit {
+		findings = findings[:req.Limit]
+	}
+	return protocol.LearnDoctorResponseBody{Findings: findings}, nil
+}
+
+func (s issueLearnService) GC(ctx context.Context, req protocol.LearnGCRequestBody) (protocol.LearnGCResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.LearnGCResponseBody{}, err
+	}
+	report, err := client.GCLearnings(ctx, issues.LearningGCParams{
+		LearningMaintenanceParams: issues.LearningMaintenanceParams{
+			ProjectID:          firstNonEmptyDaemon(req.ProjectID, daemonProjectIDFromContext(ctx)),
+			CandidateOlderThan: learningMaintenanceAge(req.CandidateOlderThanDays),
+			InactiveOlderThan:  learningMaintenanceAge(req.InactiveOlderThanDays),
+			Limit:              req.Limit,
+		},
+		Confirm: req.Confirm,
+	})
+	if err != nil {
+		return protocol.LearnGCResponseBody{}, err
+	}
+	return protocol.LearnGCResponseBody{
+		DryRun:  report.DryRun,
+		Deleted: mapLearningMaintenanceFindings(report.Deleted),
+		Skipped: mapLearningMaintenanceFindings(report.Skipped),
+	}, nil
+}
+
+func (s issueLearnService) repoDir(ctx context.Context) string {
+	if s.daemon == nil {
+		return ""
+	}
+	projectID := daemonProjectIDFromContext(ctx)
+	if repoDir := strings.TrimSpace(s.daemon.resolveRepoDirForProjectExact(projectID)); repoDir != "" {
+		return repoDir
+	}
+	if repoDir := strings.TrimSpace(s.daemon.resolveRepoDirForProject(projectID)); repoDir != "" {
+		return repoDir
+	}
+	return strings.TrimSpace(s.daemon.cfg.RepoDir)
+}
+
+func (s issueLearnService) doctorManagedGuidanceTargets(ctx context.Context, learnings []issues.Learning) []protocol.LearnMaintenanceFinding {
+	if len(learnings) == 0 {
+		return nil
+	}
+	repoDir := s.repoDir(ctx)
+	out := make([]protocol.LearnMaintenanceFinding, 0)
+	seen := make(map[string]struct{})
+	for _, learning := range learnings {
+		if _, ok := seen[learning.LocalID]; ok {
+			continue
+		}
+		seen[learning.LocalID] = struct{}{}
+		if learning.Target == nil || !learningPromotionFileBacked(protocol.LearningPromotionTarget(*learning.Target)) {
+			continue
+		}
+		if learning.Status != issues.LearningStatusPromoted {
+			continue
+		}
+		if learning.TargetState != "" && learning.TargetState != issues.LearningTargetStateActive {
+			continue
+		}
+		result, err := inspectManagedGuidanceBlock(repoDir, mapLearningToProtocol(learning, false))
+		if err == nil {
+			continue
+		}
+		findingType := "drifted_managed_block"
+		message := err.Error()
+		if result.BlockMissing {
+			findingType = "missing_target"
+			message = "managed guidance block is missing"
+		}
+		out = append(out, protocol.LearnMaintenanceFinding{
+			Type:       findingType,
+			Severity:   "error",
+			LearningID: learning.LocalID,
+			Message:    message,
+			Action:     "inspect the managed block and re-promote or retire explicitly",
+			Learning:   mapLearningToProtocol(learning, false),
+		})
+	}
+	return out
+}
+
+func learningMaintenanceAge(days int) time.Duration {
+	if days <= 0 {
+		return 0
+	}
+	return time.Duration(days) * 24 * time.Hour
+}
+
+func mapLearningMaintenanceFindings(findings []issues.LearningMaintenanceFinding) []protocol.LearnMaintenanceFinding {
+	if len(findings) == 0 {
+		return nil
+	}
+	out := make([]protocol.LearnMaintenanceFinding, 0, len(findings))
+	for _, finding := range findings {
+		out = append(out, protocol.LearnMaintenanceFinding{
+			Type:       finding.Type,
+			Severity:   finding.Severity,
+			LearningID: finding.LearningID,
+			Message:    finding.Message,
+			Action:     finding.Action,
+			Learning:   mapLearningToProtocol(finding.Learning, false),
+		})
+	}
+	return out
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		out[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func learningReviewFilterFromRequest(ctx context.Context, req protocol.LearnReviewRequestBody) issues.LearningFilter {
+	statuses := make([]issues.LearningStatus, 0, len(req.QueueStatuses))
+	for _, status := range req.QueueStatuses {
+		statuses = append(statuses, issues.LearningStatus(status))
+	}
+	if len(statuses) == 0 {
+		statuses = []issues.LearningStatus{issues.LearningStatusCandidate}
+	}
+	targetStates := make([]issues.LearningTargetState, 0, len(req.TargetStates))
+	for _, state := range req.TargetStates {
+		targetStates = append(targetStates, issues.LearningTargetState(state))
+	}
+	limit := req.Limit
+	if limit == 0 {
+		limit = 20
+	}
+	filter := issues.LearningFilter{
+		ProjectID:       daemonProjectIDFromContext(ctx),
+		IssueID:         req.IssueID.String(),
+		RequirementID:   req.ReqID.String(),
+		Statuses:        statuses,
+		TargetStates:    targetStates,
+		Tags:            req.Tags,
+		Files:           req.Files,
+		Limit:           limit,
+		IncludeEvidence: false,
+	}
+	if req.OlderThanSeconds > 0 {
+		cutoff := time.Now().UTC().Add(-time.Duration(req.OlderThanSeconds) * time.Second)
+		filter.UpdatedBefore = &cutoff
+	}
+	return filter
+}
+
+func mapLearningsToProtocol(rows []issues.Learning, includeEvidence bool) []protocol.Learning {
+	out := make([]protocol.Learning, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, mapLearningToProtocol(row, includeEvidence))
+	}
+	return out
+}
+
+func uniqueTrimmedStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func stateForManagedGuidanceFailure(result managedGuidanceResult) issues.LearningTargetState {
+	if result.BlockMissing {
+		return issues.LearningTargetStateMissing
+	}
+	return issues.LearningTargetStateDrifted
 }
 
 func (s issueSpecService) ListRequirements(ctx context.Context, req protocol.SpecRequirementListRequestBody) (protocol.SpecRequirementListResponseBody, error) {
@@ -463,6 +1056,148 @@ func mapLinkToProtocol(link issues.SpecLink) protocol.SpecLink {
 		out.Note = *link.Note
 	}
 	return out
+}
+
+func mapLearningToProtocol(learning issues.Learning, includeEvidence bool) protocol.Learning {
+	out := protocol.Learning{
+		ID:              learning.LocalID,
+		ProjectID:       learning.ProjectID,
+		Summary:         learning.Summary,
+		EvidencePrivate: learning.EvidencePrivate,
+		Status:          protocol.LearningStatus(learning.Status),
+		ReviewNote:      learning.ReviewNote,
+		Tags:            append([]string(nil), learning.Tags...),
+		Files:           append([]string(nil), learning.Files...),
+		CreatedAt:       formatProtocolTime(learning.CreatedAt),
+		UpdatedAt:       formatProtocolTime(learning.UpdatedAt),
+		RecallScore:     learning.RecallScore,
+		RecallReason:    learning.RecallReason,
+	}
+	if includeEvidence {
+		out.Evidence = learning.Evidence
+	}
+	if learning.IssueID != nil {
+		out.IssueID = naming.IssueID(*learning.IssueID)
+	}
+	if learning.RequirementID != nil {
+		out.ReqID = naming.RequirementID(*learning.RequirementID)
+	}
+	if learning.SessionID != nil {
+		out.SessionID = naming.SessionID(*learning.SessionID)
+	}
+	if learning.ReviewedAt != nil {
+		out.ReviewedAt = formatProtocolTime(*learning.ReviewedAt)
+	}
+	if learning.Target != nil {
+		out.Target = protocol.LearningPromotionTarget(*learning.Target)
+	}
+	out.TargetID = learning.TargetID
+	out.TargetNote = learning.TargetNote
+	if learning.PromotedAt != nil {
+		out.PromotedAt = formatProtocolTime(*learning.PromotedAt)
+	}
+	out.TargetState = protocol.LearningTargetState(learning.TargetState)
+	out.TargetHash = learning.TargetHash
+	if len(learning.TargetMetadata) > 0 {
+		out.TargetMetadata = make(map[string]string, len(learning.TargetMetadata))
+		for key, value := range learning.TargetMetadata {
+			out.TargetMetadata[key] = value
+		}
+	}
+	if learning.ExpiresAt != nil {
+		out.ExpiresAt = formatProtocolTime(*learning.ExpiresAt)
+	}
+	if learning.StaleAt != nil {
+		out.StaleAt = formatProtocolTime(*learning.StaleAt)
+	}
+	if learning.LastRecalledAt != nil {
+		out.LastRecalledAt = formatProtocolTime(*learning.LastRecalledAt)
+	}
+	out.RecallCount = learning.RecallCount
+	if learning.SupersededAt != nil {
+		out.SupersededAt = formatProtocolTime(*learning.SupersededAt)
+	}
+	if learning.TargetRetiredAt != nil {
+		out.TargetRetiredAt = formatProtocolTime(*learning.TargetRetiredAt)
+	}
+	if len(learning.Relations) > 0 {
+		out.Relations = make([]protocol.LearningRelation, 0, len(learning.Relations))
+		for _, relation := range learning.Relations {
+			out.Relations = append(out.Relations, mapLearningRelationToProtocol(relation))
+		}
+	}
+	if learning.TargetDriftedAt != nil {
+		out.TargetDriftedAt = formatProtocolTime(*learning.TargetDriftedAt)
+	}
+	return out
+}
+
+func mapLearningRelationToProtocol(relation issues.LearningRelation) protocol.LearningRelation {
+	out := protocol.LearningRelation{
+		ID:               relation.LocalID,
+		Type:             protocol.LearningRelationType(relation.Type),
+		SourceLearningID: relation.SourceLearningID,
+		TargetLearningID: relation.TargetLearningID,
+		Note:             relation.Note,
+		ScopeTags:        append([]string(nil), relation.ScopeTags...),
+		ScopeFiles:       append([]string(nil), relation.ScopeFiles...),
+		CreatedAt:        formatProtocolTime(relation.CreatedAt),
+		UpdatedAt:        formatProtocolTime(relation.UpdatedAt),
+	}
+	if relation.ScopeIssueID != nil {
+		out.ScopeIssueID = naming.IssueID(*relation.ScopeIssueID)
+	}
+	if relation.ScopeRequirementID != nil {
+		out.ScopeReqID = naming.RequirementID(*relation.ScopeRequirementID)
+	}
+	if relation.ScopeSessionID != nil {
+		out.ScopeSessionID = naming.SessionID(*relation.ScopeSessionID)
+	}
+	return out
+}
+
+func formatProtocolTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func firstNonEmptyDaemon(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func learningPromotionGuidance(learning protocol.Learning) string {
+	switch learning.Target {
+	case protocol.LearningPromotionTargetDecision:
+		return fmt.Sprintf("Promotion recorded against decision %s. Keep the decision linked to the owning issue/requirement.", learning.TargetID)
+	case protocol.LearningPromotionTargetSpec:
+		return fmt.Sprintf("Promotion recorded against spec requirement %s. Keep the issue/spec link current.", learning.TargetID)
+	case protocol.LearningPromotionTargetRulesync:
+		return fmt.Sprintf("Promotion wrote an Az-managed guidance block to Rulesync target %s. Refresh generated agent instructions from the source guidance when needed.", learning.TargetID)
+	case protocol.LearningPromotionTargetAgents:
+		return fmt.Sprintf("Promotion wrote an Az-managed guidance block to AGENTS target %s.", learning.TargetID)
+	case protocol.LearningPromotionTargetSkill:
+		return fmt.Sprintf("Promotion wrote an Az-managed guidance block to skill target %s.", learning.TargetID)
+	default:
+		return "Promotion recorded; update the selected curated guidance target and keep this learning id as evidence."
+	}
+}
+
+func learningRetireGuidance(learning protocol.Learning) string {
+	path := strings.TrimSpace(learning.TargetMetadata["path"])
+	if path == "" {
+		path = strings.TrimSpace(learning.TargetID)
+	}
+	if learningPromotionFileBacked(learning.Target) && path != "" {
+		return fmt.Sprintf("Retired Az-managed guidance block for %s from %s. Human-authored content was preserved.", learning.ID, path)
+	}
+	return fmt.Sprintf("Retired promoted learning target for %s.", learning.ID)
 }
 
 func requirementIDsToStrings(ids []naming.RequirementID) []string {

@@ -1,0 +1,362 @@
+package main
+
+import (
+	"bytes"
+	"io"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+)
+
+func TestRunLearnCommandHelpArgsReturnUsage(t *testing.T) {
+	for _, args := range [][]string{
+		{"--help"},
+		{"add", "--help"},
+		{"recall", "-h"},
+		{"show", "help"},
+		{"review", "--help"},
+		{"stale", "--help"},
+		{"demote", "--help"},
+		{"promote", "--help"},
+		{"retire", "--help"},
+		{"relate", "--help"},
+		{"supersede", "--help"},
+		{"doctor", "--help"},
+		{"gc", "--help"},
+	} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			output := captureLearnStdout(t, func() {
+				if err := runLearnCommand(nil, args); err != nil {
+					t.Fatalf("runLearnCommand() error = %v", err)
+				}
+			})
+			if !strings.Contains(output, "Usage: az learn") {
+				t.Fatalf("help output missing learn usage:\n%s", output)
+			}
+		})
+	}
+}
+
+func TestParseLearnAddArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		ok      bool
+		errFrag string
+	}{
+		{name: "minimum required", args: []string{"--evidence", "Use daemon projection before local cache."}, ok: true},
+		{name: "private evidence flag", args: []string{"--evidence", "Sensitive local detail.", "--private"}, ok: true},
+		{name: "scoped with repeated metadata", args: []string{"--issue", "csk", "--req", "req-1", "--evidence", "Evidence", "--tag", "daemon", "--tag", "daemon", "--file", "internal/foo.go"}, ok: true},
+		{name: "missing evidence", args: []string{"--summary", "No evidence"}, ok: false, errFrag: "missing required flag: --evidence"},
+		{name: "status removed from capture", args: []string{"--evidence", "Evidence", "--status", "accepted"}, ok: false, errFrag: "flag provided but not defined"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseLearnAddArgs(tc.args)
+			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+		})
+	}
+}
+
+func TestParseLearnRecallArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		ok      bool
+		errFrag string
+	}{
+		{name: "default recall", args: []string{"--query", "daemon"}, ok: true},
+		{name: "explicit private diagnostic recall", args: []string{"--query", "daemon", "--include-private", "--include-evidence"}, ok: true},
+		{name: "negative limit", args: []string{"--limit", "-1"}, ok: false, errFrag: "limit must be non-negative"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseLearnRecallArgs(tc.args)
+			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+		})
+	}
+}
+
+func TestLearningStatusLabelMarksPrivateEvidence(t *testing.T) {
+	got := learningStatusLabel(protocol.Learning{
+		Status:          protocol.LearningStatusAccepted,
+		EvidencePrivate: true,
+	})
+	if got != "accepted, private" {
+		t.Fatalf("learningStatusLabel() = %q, want private marker", got)
+	}
+}
+
+func captureLearnStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stdout: %v", err)
+	}
+	os.Stdout = w
+	defer func() {
+		os.Stdout = old
+	}()
+
+	fn()
+	_ = w.Close()
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	return buf.String()
+}
+
+func TestParseLearnReviewArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		ok      bool
+		errFrag string
+	}{
+		{name: "list candidates", args: []string{"--limit", "10"}, ok: true},
+		{name: "list filtered queue", args: []string{"--queue-status", "stale", "--queue-status", "promoted", "--issue", "csw", "--req", "req-1", "--tag", "triage", "--file", "internal/daemon/learn.go", "--target-state", "drifted", "--older-than", "30d", "--limit", "10"}, ok: true},
+		{name: "accept with note", args: []string{"--id", "learn-1", "--status", "accepted", "--note", "Verified durable enough."}, ok: true},
+		{name: "bulk selected with positional ids", args: []string{"--id", "learn-1", "--status", "rejected", "--note", "Not durable.", "learn-2"}, ok: true},
+		{name: "bulk stale old queue", args: []string{"--bulk-stale", "--older-than", "2w", "--note", "Old candidates are stale.", "--tag", "daemon"}, ok: true},
+		{name: "status without id", args: []string{"--status", "accepted", "--note", "Reviewed."}, ok: false, errFrag: "--id is required"},
+		{name: "missing status", args: []string{"--id", "learn-1", "--note", "Reviewed."}, ok: false, errFrag: "--status is required"},
+		{name: "candidate is not a review outcome", args: []string{"--id", "learn-1", "--status", "candidate"}, ok: false, errFrag: "invalid review status"},
+		{name: "missing note", args: []string{"--id", "learn-1", "--status", "accepted"}, ok: false, errFrag: "--note is required"},
+		{name: "bulk stale requires age", args: []string{"--bulk-stale", "--note", "Old candidates are stale."}, ok: false, errFrag: "--older-than is required"},
+		{name: "bulk stale rejects status", args: []string{"--bulk-stale", "--older-than", "30d", "--status", "stale", "--note", "Old candidates are stale."}, ok: false, errFrag: "does not accept --status"},
+		{name: "bad queue status", args: []string{"--queue-status", "new"}, ok: false, errFrag: "invalid queue status"},
+		{name: "bad target state", args: []string{"--target-state", "gone"}, ok: false, errFrag: "invalid target state"},
+		{name: "bad older than", args: []string{"--older-than", "soon"}, ok: false, errFrag: "invalid --older-than"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseLearnReviewArgs(tc.args)
+			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+			if tc.name == "bulk selected with positional ids" && (len(opts.IDs) != 2 || opts.IDs[0] != "learn-1" || opts.IDs[1] != "learn-2") {
+				t.Fatalf("ids = %+v, want selected ids", opts.IDs)
+			}
+			if tc.name == "list filtered queue" && (opts.OlderThan != 30*24*time.Hour || len(opts.QueueStatuses) != 2 || len(opts.TargetStates) != 1) {
+				t.Fatalf("opts = %+v, want parsed queue filters", opts)
+			}
+		})
+	}
+}
+
+func TestParseLearnStaleArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		ok      bool
+		errFrag string
+	}{
+		{name: "learning id with note", args: []string{"--note", "No longer accurate.", "learn-1"}, ok: true},
+		{name: "json", args: []string{"--json", "--note", "No longer accurate.", "learn-1"}, ok: true},
+		{name: "missing note", args: []string{"learn-1"}, ok: false, errFrag: "--note"},
+		{name: "missing id", args: []string{"--note", "No longer accurate."}, ok: false, errFrag: "usage: az learn stale"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseLearnStaleArgs(tc.args)
+			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+			if tc.ok && (opts.ID != "learn-1" || opts.Note == "") {
+				t.Fatalf("opts = %+v, want id and note", opts)
+			}
+		})
+	}
+}
+
+func TestParseLearnDemoteArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		ok      bool
+		errFrag string
+	}{
+		{name: "learning id with note", args: []string{"--note", "Needs another review.", "learn-1"}, ok: true},
+		{name: "missing note", args: []string{"learn-1"}, ok: false, errFrag: "--note"},
+		{name: "too many ids", args: []string{"--note", "Needs another review.", "learn-1", "learn-2"}, ok: false, errFrag: "usage: az learn demote"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseLearnDemoteArgs(tc.args)
+			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+			if tc.ok && (opts.ID != "learn-1" || opts.Note == "") {
+				t.Fatalf("opts = %+v, want id and note", opts)
+			}
+		})
+	}
+}
+
+func TestParseLearnPromoteArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		ok      bool
+		errFrag string
+	}{
+		{name: "decision target", args: []string{"--target", "decision", "--target-id", "dec-1", "learn-1"}, ok: true},
+		{name: "create decision target", args: []string{"--target", "decision", "--create-target", "--target-title", "Decision title", "--decision-rationale", "Rationale.", "learn-1"}, ok: true},
+		{name: "create spec target", args: []string{"--target", "spec", "--target-id", "req-1", "--create-target", "--target-title", "Requirement title", "--target-description", "Requirement body.", "learn-1"}, ok: true},
+		{name: "target state metadata", args: []string{"--target", "agents", "--target-id", "AGENTS.md", "--target-hash", "sha256:target", "--target-meta", "path=AGENTS.md", "learn-1"}, ok: true},
+		{name: "missing target", args: []string{"--target-id", "dec-1", "learn-1"}, ok: false, errFrag: "--target"},
+		{name: "missing target id", args: []string{"--target", "decision", "learn-1"}, ok: false, errFrag: "--target-id"},
+		{name: "create decision missing rationale", args: []string{"--target", "decision", "--create-target", "--target-title", "Decision title", "learn-1"}, ok: false, errFrag: "--decision-rationale"},
+		{name: "create spec without title defers existence check", args: []string{"--target", "spec", "--target-id", "req-1", "--create-target", "learn-1"}, ok: true},
+		{name: "missing learning id", args: []string{"--target", "decision", "--target-id", "dec-1"}, ok: false, errFrag: "usage: az learn promote"},
+		{name: "bad target metadata", args: []string{"--target", "agents", "--target-id", "AGENTS.md", "--target-meta", "path", "learn-1"}, ok: false, errFrag: "target-meta must be key=value"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseLearnPromoteArgs(tc.args)
+			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+		})
+	}
+}
+
+func TestParseLearnRetireArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		ok      bool
+		errFrag string
+	}{
+		{name: "learning id", args: []string{"--note", "Target removed.", "learn-1"}, ok: true},
+		{name: "json", args: []string{"--json", "--note", "Target removed.", "learn-1"}, ok: true},
+		{name: "missing note", args: []string{"learn-1"}, ok: false, errFrag: "--note"},
+		{name: "missing learning id", args: nil, ok: false, errFrag: "usage: az learn retire"},
+		{name: "too many learning ids", args: []string{"learn-1", "learn-2"}, ok: false, errFrag: "usage: az learn retire"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseLearnRetireArgs(tc.args)
+			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+			if tc.ok && (opts.ID != "learn-1" || opts.Note == "") {
+				t.Fatalf("opts = %+v, want id and note", opts)
+			}
+		})
+	}
+}
+
+func TestParseLearnRelateArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		ok      bool
+		errFrag string
+	}{
+		{name: "supersedes with scope", args: []string{"--type", "supersedes", "--note", "Newer guidance wins.", "--scope-issue", "csp", "--scope-req", "req-1", "--scope-tag", "daemon", "--scope-tag", "daemon", "--scope-file", "internal/config/config.go", "learn-2", "learn-1"}, ok: true},
+		{name: "conflicts", args: []string{"--type", "conflicts", "--note", "Needs review.", "learn-2", "learn-1"}, ok: true},
+		{name: "missing type", args: []string{"--note", "Needs review.", "learn-2", "learn-1"}, ok: false, errFrag: "--type"},
+		{name: "invalid type", args: []string{"--type", "replaces", "--note", "Needs review.", "learn-2", "learn-1"}, ok: false, errFrag: "invalid relation type"},
+		{name: "missing note", args: []string{"--type", "supersedes", "learn-2", "learn-1"}, ok: false, errFrag: "--note"},
+		{name: "missing learning ids", args: []string{"--type", "supersedes", "--note", "Needs review.", "learn-2"}, ok: false, errFrag: "usage: az learn relate"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseLearnRelateArgs(tc.args)
+			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+			if tc.ok && opts.Type == "supersedes" {
+				if opts.SourceLearningID != "learn-2" || opts.TargetLearningID != "learn-1" {
+					t.Fatalf("relation ids = %q -> %q", opts.SourceLearningID, opts.TargetLearningID)
+				}
+				if len(opts.ScopeTags) != 1 {
+					t.Fatalf("scope tags = %+v, want deduped single tag", opts.ScopeTags)
+				}
+			}
+		})
+	}
+}
+
+func TestParseLearnSupersedeArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		ok      bool
+		errFrag string
+	}{
+		{name: "supersedes with scope", args: []string{"--note", "Newer guidance wins.", "--scope-issue", "cst", "--scope-req", "req-1", "--scope-tag", "daemon", "--scope-tag", "daemon", "--scope-file", "internal/config/config.go", "learn-2", "learn-1"}, ok: true},
+		{name: "missing note", args: []string{"learn-2", "learn-1"}, ok: false, errFrag: "--note"},
+		{name: "missing learning ids", args: []string{"--note", "Needs review.", "learn-2"}, ok: false, errFrag: "usage: az learn supersede"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseLearnSupersedeArgs(tc.args)
+			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+			if tc.ok {
+				if opts.NewLearningID != "learn-2" || opts.OldLearningID != "learn-1" {
+					t.Fatalf("relation ids = %q -> %q", opts.NewLearningID, opts.OldLearningID)
+				}
+				if len(opts.ScopeTags) != 1 {
+					t.Fatalf("scope tags = %+v, want deduped single tag", opts.ScopeTags)
+				}
+			}
+		})
+	}
+}
+
+func TestParseLearnDoctorArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		ok      bool
+		errFrag string
+	}{
+		{name: "defaults", args: nil, ok: true},
+		{name: "explicit thresholds", args: []string{"--candidate-older-than-days", "14", "--inactive-older-than-days", "60", "--limit", "10", "--json"}, ok: true},
+		{name: "negative threshold", args: []string{"--candidate-older-than-days", "-1"}, ok: false, errFrag: "non-negative"},
+		{name: "positional rejected", args: []string{"learn-1"}, ok: false, errFrag: "usage: az learn doctor"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseLearnDoctorArgs(tc.args)
+			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+			if tc.ok && opts.Limit < 0 {
+				t.Fatalf("opts = %+v, want non-negative limit", opts)
+			}
+		})
+	}
+}
+
+func TestParseLearnGCArgs(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		ok      bool
+		errFrag string
+	}{
+		{name: "dry run default", args: nil, ok: true},
+		{name: "confirmed cleanup", args: []string{"--confirm", "--limit", "3"}, ok: true},
+		{name: "negative limit", args: []string{"--limit", "-1"}, ok: false, errFrag: "limit must be non-negative"},
+		{name: "positional rejected", args: []string{"learn-1"}, ok: false, errFrag: "usage: az learn gc"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseLearnGCArgs(tc.args)
+			assertParseOutcome(t, err, tc.ok, tc.errFrag)
+			if tc.ok && tc.name == "confirmed cleanup" && !opts.Confirm {
+				t.Fatalf("opts = %+v, want confirmed cleanup", opts)
+			}
+		})
+	}
+}
+
+func assertParseOutcome(t *testing.T, err error, ok bool, errFrag string) {
+	t.Helper()
+	if ok {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return
+	}
+	if err == nil {
+		t.Fatalf("expected error containing %q", errFrag)
+	}
+	if errFrag != "" && !strings.Contains(err.Error(), errFrag) {
+		t.Fatalf("error %q does not contain %q", err.Error(), errFrag)
+	}
+}

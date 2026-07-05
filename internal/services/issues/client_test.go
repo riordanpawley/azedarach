@@ -2960,7 +2960,60 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0016_issue_search_fts",
 		"0017_spec_requirement_search_fts",
 		"0018_issue_graph_closure",
+		"0019_agent_learnings",
+		"0020_agent_learning_lifecycle",
+		"0021_agent_learning_metadata",
+		"0021_agent_learning_relations",
+		"0021_agent_learning_target_state",
+		"0025_agent_learning_privacy",
 	}, got)
+}
+
+func TestClient_ReplaysAgentLearningPrivacyMigrationWhenColumnAlreadyExists(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+
+	client := NewClientAtPath(dbPath, slog.Default())
+	_, err := client.Create(ctx, CreateTaskParams{
+		Title:    "seed migrated schema",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.CloseDB())
+
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	_, err = db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE id = '0025_agent_learning_privacy'`)
+	require.NoError(t, err)
+
+	client = NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		require.NoError(t, client.CloseDB())
+	})
+	_, err = client.List(ctx)
+	require.NoError(t, err)
+
+	var applied bool
+	err = db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM schema_migrations WHERE id = '0025_agent_learning_privacy'
+		)
+	`).Scan(&applied)
+	require.NoError(t, err)
+	assert.True(t, applied)
+
+	var indexed bool
+	err = db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM sqlite_master
+			WHERE type = 'index' AND name = 'idx_agent_learnings_active_privacy'
+		)
+	`).Scan(&indexed)
+	require.NoError(t, err)
+	assert.True(t, indexed)
 }
 
 func TestClient_MigratesClosedRuntimeInvariantViolationsToInReview(t *testing.T) {
