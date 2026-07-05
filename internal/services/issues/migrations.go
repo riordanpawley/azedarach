@@ -92,6 +92,10 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
+	if err := repairAgentLearningBaseSchema(ctx, db); err != nil {
+		return fmt.Errorf("repair agent learning base schema: %w", err)
+	}
+
 	return nil
 }
 
@@ -228,6 +232,66 @@ func applyAgentLearningPrivacyMigration(ctx context.Context, db *sql.DB, id stri
 	}
 	tx = nil
 	return nil
+}
+
+func repairAgentLearningBaseSchema(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	tableExists, err := txTableExists(ctx, tx, "agent_learnings")
+	if err != nil {
+		return fmt.Errorf("inspect table: %w", err)
+	}
+	if !tableExists {
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		tx = nil
+		return nil
+	}
+
+	for _, column := range []struct {
+		name string
+		ddl  string
+	}{
+		{name: "review_note", ddl: "TEXT"},
+		{name: "reviewed_at", ddl: "TEXT"},
+	} {
+		exists, err := txColumnExists(ctx, tx, "agent_learnings", column.name)
+		if err != nil {
+			return fmt.Errorf("inspect column %s: %w", column.name, err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE agent_learnings ADD COLUMN %s %s`, column.name, column.ddl)); err != nil {
+			return fmt.Errorf("add column %s: %w", column.name, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	tx = nil
+	return nil
+}
+
+func txTableExists(ctx context.Context, tx *sql.Tx, tableName string) (bool, error) {
+	var exists bool
+	err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM sqlite_master
+			WHERE type = 'table' AND name = ?
+		)
+	`, tableName).Scan(&exists)
+	return exists, err
 }
 
 func txColumnExists(ctx context.Context, tx *sql.Tx, tableName, columnName string) (bool, error) {
