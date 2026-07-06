@@ -54,6 +54,7 @@ const (
 	commandTaskSnapshotExport   = "task.snapshot.export"
 	defaultExportFormat         = "json"
 	defaultIssueListLimit       = 200
+	defaultIssueContextRiskDays = 14
 	defaultOperationListLimit   = 50
 	sessionStartCommandTimeout  = 5 * time.Minute
 	branchMergeToBaseTimeout    = 2 * time.Minute
@@ -162,6 +163,13 @@ type IssueEventsOptions struct {
 	JSON       bool
 	EventTypes []string
 	Limit      int
+}
+
+type IssueContextRiskOptions struct {
+	Project string
+	IssueID string
+	JSON    bool
+	Since   time.Time
 }
 
 type IssueGetManyOptions struct {
@@ -2544,6 +2552,67 @@ func ParseIssueEventsArgs(args []string) (IssueEventsOptions, error) {
 	return opts, nil
 }
 
+func ParseIssueContextRiskArgs(args []string) (IssueContextRiskOptions, error) {
+	opts := IssueContextRiskOptions{}
+	issueIDFlag := ""
+	sinceRaw := fmt.Sprintf("%dd", defaultIssueContextRiskDays)
+	fs := flag.NewFlagSet("issue context-risk", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.BoolVar(&opts.JSON, "json", false, "output context risk packet as JSON")
+	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&sinceRaw, "since", sinceRaw, "recent window (for example 14d, 2w, 72h)")
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
+		return IssueContextRiskOptions{}, err
+	}
+	if fs.NArg() > 1 {
+		return IssueContextRiskOptions{}, fmt.Errorf("usage: az issue context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--json] [<issue-id>]")
+	}
+	if fs.NArg() == 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" {
+		return IssueContextRiskOptions{}, fmt.Errorf("usage: az issue context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--json] [<issue-id>]")
+	}
+	duration, err := parseIssueContextRiskWindow(sinceRaw)
+	if err != nil {
+		return IssueContextRiskOptions{}, fmt.Errorf("invalid --since: %w", err)
+	}
+	opts.Since = time.Now().UTC().Add(-duration)
+	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
+func parseIssueContextRiskWindow(raw string) (time.Duration, error) {
+	value := strings.TrimSpace(strings.ToLower(raw))
+	if value == "" {
+		return 0, fmt.Errorf("empty duration")
+	}
+	if strings.HasSuffix(value, "d") || strings.HasSuffix(value, "w") {
+		multiplier := 24 * time.Hour
+		if strings.HasSuffix(value, "w") {
+			multiplier = 7 * 24 * time.Hour
+		}
+		number := strings.TrimSpace(value[:len(value)-1])
+		n, err := strconv.Atoi(number)
+		if err != nil || n <= 0 {
+			return 0, fmt.Errorf("must be a positive duration")
+		}
+		return time.Duration(n) * multiplier, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, err
+	}
+	if duration <= 0 {
+		return 0, fmt.Errorf("must be positive")
+	}
+	return duration, nil
+}
+
 func ParseIssueGetManyArgs(args []string) (IssueGetManyOptions, error) {
 	opts := IssueGetManyOptions{}
 	ids := make([]string, 0, 4)
@@ -4157,6 +4226,69 @@ func IssueEventsCommand(deps *Dependencies, opts IssueEventsOptions) error {
 		fmt.Println()
 	}
 	return nil
+}
+
+func IssueContextRiskCommand(deps *Dependencies, opts IssueContextRiskOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	packet, err := deps.DaemonClient.TaskContextRisk(ctx, opts.IssueID, deps.RepoDir, opts.Since)
+	if err != nil {
+		if strings.Contains(err.Error(), fmt.Sprintf("issue not found: %s", opts.IssueID)) {
+			return fmt.Errorf("issue not found: %s", opts.IssueID)
+		}
+		return fmt.Errorf("failed to build context risk for %s: %w", opts.IssueID, err)
+	}
+	if opts.JSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(packet)
+	}
+	renderIssueContextRisk(packet)
+	return nil
+}
+
+func renderIssueContextRisk(packet domain.IssueContextRiskPacket) {
+	fmt.Printf("Issue context risk: %s\n", packet.IssueID)
+	if packet.ParentIssueID != "" {
+		fmt.Printf("Parent/local scope: %s\n", packet.ParentIssueID)
+	}
+	fmt.Printf("Level: %s", packet.Level)
+	if packet.Confidence > 0 {
+		fmt.Printf(" confidence=%d", packet.Confidence)
+	}
+	fmt.Println()
+	if !packet.Since.IsZero() {
+		fmt.Printf("Window since: %s\n", packet.Since.UTC().Format(time.RFC3339))
+	}
+	fmt.Printf("Candidates checked: %d; overlapping issues: %d\n", packet.CandidateCount, packet.OverlapIssueCount)
+	if len(packet.Signals) > 0 {
+		fmt.Println("Signals:")
+		for _, signal := range packet.Signals {
+			fmt.Printf("- %s\n", signal)
+		}
+	}
+	if len(packet.Clusters) > 0 {
+		fmt.Println("Clusters:")
+		for _, cluster := range packet.Clusters {
+			fmt.Printf("- %s %s: %s\n", cluster.Kind, cluster.Value, strings.Join(cluster.Issues, ", "))
+		}
+	}
+	if len(packet.CloseoutPrompts) > 0 {
+		fmt.Println("Closeout prompts:")
+		for _, prompt := range packet.CloseoutPrompts {
+			fmt.Printf("- %s\n", prompt)
+		}
+	}
+	if len(packet.HandoffFields.StructuredFields) > 0 {
+		fmt.Printf("Structured handoff fields: %s\n", strings.Join(packet.HandoffFields.StructuredFields, ", "))
+	}
 }
 
 // issueDecisionSummary is the per-decision payload embedded in `az issue get`

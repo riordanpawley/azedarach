@@ -25,6 +25,7 @@ const (
 	CommandTaskGraphReadiness   = "task.graph_readiness"
 	CommandTaskCompleteCheck    = "task.complete_check"
 	CommandTaskIntegrationReady = "task.integration_readiness"
+	CommandTaskContextRisk      = "task.context_risk"
 	CommandTaskMergeBaseTarget  = "task.merge_base_target"
 	CommandTaskFollowOnMerge    = "task.follow_on_merge_candidates"
 	CommandTaskUpdateStatus     = "task.update_status"
@@ -220,6 +221,12 @@ type TaskIntegrationReadiness struct {
 type taskIntegrationReadinessRequest struct {
 	TaskID  naming.IssueID `json:"task_id"`
 	RepoDir string         `json:"repo_dir,omitempty"`
+}
+
+type taskContextRiskRequest struct {
+	TaskID  naming.IssueID `json:"task_id"`
+	RepoDir string         `json:"repo_dir,omitempty"`
+	Since   time.Time      `json:"since,omitempty,omitzero"`
 }
 
 // TaskMergeBaseTarget is the daemon-owned task graph/worktree merge target decision.
@@ -914,6 +921,23 @@ func (c *Client) TaskIntegrationReadiness(ctx context.Context, issueID, repoDir 
 		RepoDir: strings.TrimSpace(repoDir),
 	}, &out); err != nil {
 		return TaskIntegrationReadiness{}, err
+	}
+	return out, nil
+}
+
+// TaskContextRisk returns a compact daemon-owned risk packet for repeated local issue overlap.
+func (c *Client) TaskContextRisk(ctx context.Context, issueID, repoDir string, since time.Time) (domain.IssueContextRiskPacket, error) {
+	parsedIssueID, err := naming.ParseIssueID(issueID)
+	if err != nil {
+		return domain.IssueContextRiskPacket{}, fmt.Errorf("invalid issue id: %w", err)
+	}
+	var out domain.IssueContextRiskPacket
+	if err := c.commandJSON(ctx, CommandTaskContextRisk, taskContextRiskRequest{
+		TaskID:  parsedIssueID,
+		RepoDir: strings.TrimSpace(repoDir),
+		Since:   since,
+	}, &out); err != nil {
+		return domain.IssueContextRiskPacket{}, err
 	}
 	return out, nil
 }

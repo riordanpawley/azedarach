@@ -27,6 +27,7 @@ This directory primarily contains **developer/internal documentation**.
 - [16-scheduled-project-scripts.md](16-scheduled-project-scripts.md)
 - [17-sqlite-query-plan-guardrails.md](17-sqlite-query-plan-guardrails.md)
 - [18-async-notice-architecture.md](18-async-notice-architecture.md)
+- [19-issue-context-risk.md](19-issue-context-risk.md)
 - [adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
 - [adr/2-daemon-owned-async-notices.md](adr/2-daemon-owned-async-notices.md)
 

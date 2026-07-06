@@ -261,6 +261,10 @@ func printHelpForPath(path []string) bool {
 		fmt.Println(issueSearchUsage)
 	case "issue get":
 		fmt.Println(issueGetUsage)
+	case "issue events":
+		fmt.Println(issueEventsUsage)
+	case "issue context-risk":
+		fmt.Println(issueContextRiskUsage)
 	case "issue get-many":
 		fmt.Println(issueGetManyUsage)
 	case "issue check":
@@ -358,7 +362,7 @@ func printHelpForPath(path []string) bool {
 func printIssueHelp() {
 	helpText, err := clitext.Render("issue_help", nil)
 	if err != nil {
-		fmt.Println("Usage: az issue <list|search|get|get-many|check|doctor|create|split|update|close|delete|image|document|dep|bulk-create|bulk-update|fanout> [arguments]")
+		fmt.Println("Usage: az issue <list|search|get|events|context-risk|get-many|check|doctor|create|split|update|close|delete|image|document|dep|bulk-create|bulk-update|fanout> [arguments]")
 		return
 	}
 	fmt.Print(helpText)
@@ -388,6 +392,8 @@ const (
 	issueListUsage                = "Usage: az issue list [--project <project-id>] [--json] [--deps] [--query <text>|-q <text>] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c]"
 	issueSearchUsage              = "Usage: az issue search [--project <project-id>] [--json] [--deps] [--created-after YYYY-MM-DD] [--created-before YYYY-MM-DD] [--updated-after YYYY-MM-DD] [--updated-before YYYY-MM-DD] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c] [--parent <id> ...] [--parents a,b,c] [--depends-on <id> ...] [--depends-on-ids a,b,c] (--query <text>|-q <text>|<query>)"
 	issueGetUsage                 = "Usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--with-notes] [<issue-id>]"
+	issueEventsUsage              = "Usage: az issue events [--project <project-id>] [--id <issue-id>] [--json] [--type <event-type> ...] [--types a,b] [--limit N] [<issue-id>]"
+	issueContextRiskUsage         = "Usage: az issue context-risk [--project <project-id>] [--id <issue-id>] [--since 14d] [--json] [<issue-id>]"
 	issueGetManyUsage             = "Usage: az issue get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json] [--with-notes]"
 	issueCheckUsage               = "Usage: az issue check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]"
 	issueDoctorUsage              = "Usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]"
