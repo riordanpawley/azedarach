@@ -573,7 +573,7 @@ func TestNotificationHistoryRetainsOverflowAndDismissalState(t *testing.T) {
 	}
 }
 
-func TestNotificationHistoryDrawerMarksEntriesRead(t *testing.T) {
+func TestNotificationHistoryDrawerPreservesUnreadEntries(t *testing.T) {
 	m := newTestModel()
 	m.addToast(Toast{
 		Level:   ToastWarning,
@@ -589,12 +589,12 @@ func TestNotificationHistoryDrawerMarksEntriesRead(t *testing.T) {
 	if _, ok := m.overlayStack.Current().(*overlay.NotificationHistoryOverlay); !ok {
 		t.Fatalf("current overlay = %T, want notification history overlay", m.overlayStack.Current())
 	}
-	if got := m.notificationHistoryIndicator(); got != "" {
-		t.Fatalf("notification history indicator after opening = %q, want empty", got)
+	if got := m.notificationHistoryIndicator(); got == "" {
+		t.Fatal("notification history indicator should remain until entries are marked read")
 	}
 	for _, entry := range m.notificationHistory {
-		if !entry.Read {
-			t.Fatalf("notification history entry not marked read: %+v", entry)
+		if entry.Read {
+			t.Fatalf("notification history entry should remain unread: %+v", entry)
 		}
 	}
 }

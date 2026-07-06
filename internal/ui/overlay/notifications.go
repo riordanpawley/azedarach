@@ -48,11 +48,12 @@ type NotificationActionCenterMsg struct {
 type NotificationHistoryOverlay struct {
 	twoPaneDialogChrome
 	dialogViewportState
-	items    []NotificationHistoryItem
-	selected int
-	scroll   int
-	filter   notificationActionCenterFilter
-	styles   *Styles
+	items        []NotificationHistoryItem
+	expandedItem map[string]bool
+	selected     int
+	scroll       int
+	filter       notificationActionCenterFilter
+	styles       *Styles
 }
 
 type notificationActionCenterFilter int
@@ -69,8 +70,9 @@ const (
 func NewNotificationHistoryOverlay(items []NotificationHistoryItem) *NotificationHistoryOverlay {
 	copied := append([]NotificationHistoryItem(nil), items...)
 	return &NotificationHistoryOverlay{
-		items:  copied,
-		styles: New(),
+		items:        copied,
+		expandedItem: map[string]bool{},
+		styles:       New(),
 	}
 }
 
@@ -119,13 +121,17 @@ func (o *NotificationHistoryOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				o.scroll = o.maxScroll()
 			}
 			return o, nil
-		case "enter", "a":
+		case "enter":
 			if action, ok := o.primaryAction(); ok {
 				return o, func() tea.Msg { return action }
 			}
 			return o, nil
+		case " ", "space":
+			o.toggleCurrentDetails()
+			return o, nil
 		case "m":
-			if item, ok := o.current(); ok {
+			if idx := o.currentItemIndex(); idx >= 0 {
+				item := o.items[idx]
 				action := o.actionMsg(item, "mark_read", "mark_read", "Mark read")
 				action.Read = true
 				if item.Read {
@@ -134,24 +140,27 @@ func (o *NotificationHistoryOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					action.Label = "Mark unread"
 					action.Read = false
 				}
+				o.items[idx].Read = action.Read
 				return o, func() tea.Msg { return overlaySelection("notification_mark_read", action) }
 			}
 			return o, nil
 		case "d":
-			if item, ok := o.current(); ok {
+			if idx := o.currentItemIndex(); idx >= 0 {
+				item := o.items[idx]
+				o.items[idx].Dismissed = true
 				return o, func() tea.Msg {
 					return overlaySelection("notification_dismiss", o.actionMsg(item, "dismiss", "dismiss", "Dismiss"))
 				}
 			}
 			return o, nil
 		case "D":
-			return o, func() tea.Msg { return overlaySelection("notification_dismiss_all", o.dismissAllMsg()) }
+			actions := o.dismissAllMsg()
+			o.dismissAllVisible()
+			return o, func() tea.Msg { return overlaySelection("notification_dismiss_all", actions) }
 		case "o":
-			return o.emitLocalAction("open_task", "client.open_task", "Open task")
-		case "w":
-			return o.emitLocalAction("open_workspace", "client.open_workspace", "Open workspace")
+			return o.emitOpenAction()
 		case "l":
-			return o.emitLocalAction("open_logs", "client.open_logs", "Open logs")
+			return o.emitLocalAction("open_logs", "client.open_logs", "Open event log")
 		case "c":
 			return o.emitLocalAction("copy_details", "client.copy_details", "Copy details")
 		case "r":
@@ -190,17 +199,20 @@ func (o *NotificationHistoryOverlay) View() string {
 
 func (o *NotificationHistoryOverlay) renderItems(width, height int) string {
 	filtered := o.filteredItems()
+	var b strings.Builder
+	b.WriteString(o.renderFilterTabs(width))
+	b.WriteString("\n")
 	if len(filtered) == 0 {
-		return o.styles.MenuItemDisabled.Render("No notifications yet")
+		b.WriteString(o.styles.MenuItemDisabled.Render("No notifications yet"))
+		return b.String()
 	}
 
 	detailLines := o.renderSelectedDetails(width)
-	visibleRows := max(1, height-5-len(detailLines))
+	visibleRows := max(1, height-6-len(detailLines))
 	o.ensureSelectionVisible(visibleRows)
 	start := o.scroll
 	end := min(len(filtered), start+visibleRows)
 
-	var b strings.Builder
 	b.WriteString(o.styles.MenuItem.Render(fmt.Sprintf("%s: %d", o.filterLabel(), len(filtered))))
 	b.WriteString("\n\n")
 	lastGroup := ""
@@ -229,8 +241,13 @@ func (o *NotificationHistoryOverlay) renderItems(width, height int) string {
 		if notificationItemActionable(item) {
 			actionMark = "*"
 		}
-		line := fmt.Sprintf("%s%s %s %-7s  %-14s  %s",
+		expandMark := "+"
+		if o.itemExpanded(item) {
+			expandMark = "-"
+		}
+		line := fmt.Sprintf("%s%s%s %s %-7s  %-14s  %s",
 			prefix,
+			expandMark,
 			shortNotificationTime(item.CreatedAt),
 			actionMark,
 			item.Level,
@@ -251,6 +268,19 @@ func (o *NotificationHistoryOverlay) renderItems(width, height int) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+func (o *NotificationHistoryOverlay) renderFilterTabs(width int) string {
+	labels := []string{"All", "Unread", "Errors", "Actionable", "Dismissed"}
+	tabs := make([]string, 0, len(labels))
+	for i, label := range labels {
+		if notificationActionCenterFilter(i) == o.filter {
+			tabs = append(tabs, o.styles.MenuItemActive.Render("["+label+"]"))
+			continue
+		}
+		tabs = append(tabs, o.styles.MenuItemDisabled.Render(label))
+	}
+	return ansi.Truncate("Filters: "+strings.Join(tabs, " "), max(8, width), "...")
+}
+
 func (o *NotificationHistoryOverlay) renderSelectedDetails(width int) []string {
 	item, ok := o.current()
 	if !ok {
@@ -265,7 +295,7 @@ func (o *NotificationHistoryOverlay) renderSelectedDetails(width int) []string {
 			lines = append(lines, o.styles.MenuItemDisabled.Render(line))
 		}
 	}
-	if len(lines) > 5 {
+	if !o.itemExpanded(item) && len(lines) > 5 {
 		lines = lines[:5]
 	}
 	return lines
@@ -292,9 +322,11 @@ func (o *NotificationHistoryOverlay) actionBindings() []keybinds.Binding {
 		{Key: "g/G", Description: "top/bottom"},
 		{Key: "m", Description: "read/unread"},
 		{Key: "d/D", Description: "dismiss"},
-		{Key: "Enter/a", Description: "action"},
-		{Key: "o/w", Description: "open"},
-		{Key: "l/c", Description: "logs/copy"},
+		{Key: "Space", Description: "details"},
+		{Key: "Enter", Description: "action"},
+		{Key: "o", Description: "open"},
+		{Key: "l", Description: "event log"},
+		{Key: "c", Description: "copy"},
 		{Key: "Esc/q", Description: "close"},
 	}
 	if item, ok := o.current(); ok {
@@ -307,9 +339,6 @@ func (o *NotificationHistoryOverlay) actionBindings() []keybinds.Binding {
 				continue
 			}
 			key := actionKeyHint(action)
-			if key == "" {
-				key = "a"
-			}
 			if !action.Enabled && strings.TrimSpace(action.DisabledReason) != "" {
 				label += " unavailable"
 			}
@@ -331,6 +360,40 @@ func (o *NotificationHistoryOverlay) current() (NotificationHistoryItem, bool) {
 		o.selected = len(filtered) - 1
 	}
 	return filtered[o.selected], true
+}
+
+func (o *NotificationHistoryOverlay) currentItemIndex() int {
+	seen := 0
+	for i, item := range o.items {
+		if !notificationItemMatchesFilter(item, o.filter) {
+			continue
+		}
+		if seen == o.selected {
+			return i
+		}
+		seen++
+	}
+	return -1
+}
+
+func (o *NotificationHistoryOverlay) toggleCurrentDetails() {
+	item, ok := o.current()
+	if !ok {
+		return
+	}
+	key := notificationExpansionKey(item)
+	if key == "" {
+		return
+	}
+	if o.expandedItem == nil {
+		o.expandedItem = map[string]bool{}
+	}
+	o.expandedItem[key] = !o.expandedItem[key]
+}
+
+func (o *NotificationHistoryOverlay) itemExpanded(item NotificationHistoryItem) bool {
+	key := notificationExpansionKey(item)
+	return key != "" && o.expandedItem != nil && o.expandedItem[key]
 }
 
 func (o *NotificationHistoryOverlay) ensureSelectionVisible(visibleRows int) {
@@ -382,25 +445,9 @@ func (o *NotificationHistoryOverlay) halfPageStep() int {
 func (o *NotificationHistoryOverlay) filteredItems() []NotificationHistoryItem {
 	out := make([]NotificationHistoryItem, 0, len(o.items))
 	for _, item := range o.items {
-		switch o.filter {
-		case notificationActionFilterUnread:
-			if item.Read || item.Dismissed {
-				continue
-			}
-		case notificationActionFilterErrors:
-			if strings.TrimSpace(strings.ToLower(item.Level)) != "error" {
-				continue
-			}
-		case notificationActionFilterActionable:
-			if !notificationItemActionable(item) {
-				continue
-			}
-		case notificationActionFilterDismissed:
-			if !item.Dismissed {
-				continue
-			}
+		if notificationItemMatchesFilter(item, o.filter) {
+			out = append(out, item)
 		}
-		out = append(out, item)
 	}
 	return out
 }
@@ -434,7 +481,7 @@ func (o *NotificationHistoryOverlay) primaryAction() (tea.Msg, bool) {
 	if action, ok := o.actionByKind("retry"); ok {
 		return action, true
 	}
-	for _, kind := range []string{"client.open_workspace", "client.open_task", "client.open_logs", "client.copy_details"} {
+	for _, kind := range []string{"client.open_task", "client.open_workspace", "client.open_logs", "client.copy_details"} {
 		if action, ok := o.actionByKind(kind); ok {
 			return action, true
 		}
@@ -449,6 +496,20 @@ func (o *NotificationHistoryOverlay) primaryAction() (tea.Msg, bool) {
 		}
 	}
 	return nil, false
+}
+
+func (o *NotificationHistoryOverlay) emitOpenAction() (tea.Model, tea.Cmd) {
+	for _, kind := range []string{"client.open_task", "client.open_workspace"} {
+		if action, ok := o.actionByKind(kind); ok {
+			return o, func() tea.Msg { return action }
+		}
+	}
+	if item, ok := o.current(); ok && notificationItemHasOpenTarget(item) {
+		return o, func() tea.Msg {
+			return overlaySelection("notification_action", o.actionMsg(item, "open_task", "client.open_task", "Open"))
+		}
+	}
+	return o, nil
 }
 
 func (o *NotificationHistoryOverlay) actionByKind(kind string) (tea.Msg, bool) {
@@ -510,20 +571,66 @@ func (o *NotificationHistoryOverlay) dismissAllMsg() []NotificationActionCenterM
 	return out
 }
 
+func (o *NotificationHistoryOverlay) dismissAllVisible() {
+	for i, item := range o.items {
+		if item.Dismissed || !notificationItemMatchesFilter(item, o.filter) {
+			continue
+		}
+		o.items[i].Dismissed = true
+	}
+}
+
 func overlaySelection(key string, value any) SelectionMsg {
 	return SelectionMsg{Key: key, Value: value}
 }
 
 func notificationItemActionable(item NotificationHistoryItem) bool {
-	if !item.Dismissed {
-		return true
-	}
 	for _, action := range item.Actions {
 		if action.Enabled {
 			return true
 		}
 	}
-	return false
+	return notificationItemHasOpenTarget(item)
+}
+
+func notificationItemMatchesFilter(item NotificationHistoryItem, filter notificationActionCenterFilter) bool {
+	switch filter {
+	case notificationActionFilterUnread:
+		return !item.Read && !item.Dismissed
+	case notificationActionFilterErrors:
+		return strings.TrimSpace(strings.ToLower(item.Level)) == "error"
+	case notificationActionFilterActionable:
+		return notificationItemActionable(item)
+	case notificationActionFilterDismissed:
+		return item.Dismissed
+	default:
+		return true
+	}
+}
+
+func notificationItemHasOpenTarget(item NotificationHistoryItem) bool {
+	return notificationScopeTargetsTask(item.ScopeType) && strings.TrimSpace(item.ScopeID) != ""
+}
+
+func notificationScopeTargetsTask(scopeType string) bool {
+	switch strings.TrimSpace(scopeType) {
+	case "issue", "task":
+		return true
+	default:
+		return false
+	}
+}
+
+func notificationExpansionKey(item NotificationHistoryItem) string {
+	for _, value := range []string{item.DaemonNoticeID, item.ID, item.OperationID} {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	if message := strings.TrimSpace(item.Message); message != "" {
+		return message
+	}
+	return ""
 }
 
 func notificationGroupLabel(item NotificationHistoryItem) string {
@@ -553,7 +660,7 @@ func actionKeyHint(action protocol.NoticeAction) string {
 	case "open_task":
 		return "o"
 	case "open_workspace":
-		return "w"
+		return "o"
 	case "open_logs":
 		return "l"
 	case "retry":
