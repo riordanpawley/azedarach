@@ -19,6 +19,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Start-issue wording: when the user says "start an az issue", "add/start an issue", or "create and start an issue", create or identify the issue and then run `az session start <issue-id>`. Do not treat `az issue update <issue-id> --status in_progress` as starting a session unless the user explicitly asks to mark/update status.
   - `az issue update`: use `--update-impl` only when changing implementation assignments; status/title/notes updates do not need it.
   - Status semantics: use `open` for not-yet-active work, `in_progress` while actively working, `in_review` when implementation is complete and waiting for human/orchestrator review or integration, and `closed` only after acceptance/integration is complete.
+  - Always align issue status with the agent's current action: before starting or resuming implementation, review, re-review, or follow-up fixes, move the issue to `in_progress` even if it was `in_review`; reserve `in_review` for the waiting-for-human/orchestrator handoff.
   - Blocked is not an issue status. Represent blocked work with dependency edges (`az issue dep add <blocked-issue> <blocker-issue> --type blocks`) and record blocker evidence in issue notes or mailbox events.
   - `az issue bulk-create --input issues.json --json` (create many issues, epics, or nested `children` trees from JSON when shaping a graph up front), `az issue bulk-update --input updates.json --json`, `az issue update <issue-id> --design "..."`, `az issue update <issue-id> --notes "..."`, `az issue update <issue-id> --append-notes "..."`
   - `az issue events <issue-id> [--type <event-type>] [--limit <n>] [--json]` shows durable observation/evidence events for audit and agent context without relying on free-form notes.
@@ -153,7 +154,7 @@ Active issue ID: `{{ .ActiveIssueID }}`
   - Update the active issue's design/notes as decisions change; capture subtask-level detail on the relevant child issue instead of bloating a parent/epic description.
   - `az issue get` hides historical notes in text output by default; use `az issue get <issue-id> --with-notes` only when full note history is needed.
   - Use status/priority/labels flags when state changes materially.
-  - Status update rule: move your active issue to `in_progress` when starting; use `in_review` only when the requested work is complete but awaiting review/integration; use `closed` only when acceptance criteria are met and required integration/validation is done.
+  - Status update rule: move your active issue to `in_progress` when starting or resuming agent work, including agent-led review or re-review; use `in_review` only when the requested work is complete but awaiting human/orchestrator review or integration; use `closed` only when acceptance criteria are met and required integration/validation is done.
 - Overlay edits: check `az spec read --issue <issue-id>` before behavior changes, keep `View()` and `Size()` aligned, validate default and narrow viewports, and update goldens when rendered output changes. If the work is docs/process-only, record `Spec impact: none (docs/process-only)` in issue notes.
 - `az issue --help`
 {{ if .SpecGuardrails }}- Spec workflow:

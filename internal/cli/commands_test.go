@@ -10629,6 +10629,12 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Status semantics: use `open` for not-yet-active work, `in_progress` while actively working, `in_review` when implementation is complete") {
 		t.Fatalf("prime output missing status semantics guidance: %q", output)
 	}
+	if !strings.Contains(output, "before starting or resuming implementation, review, re-review, or follow-up fixes, move the issue to `in_progress` even if it was `in_review`") {
+		t.Fatalf("prime output missing agent-active status transition guidance: %q", output)
+	}
+	if !strings.Contains(output, "reserve `in_review` for the waiting-for-human/orchestrator handoff") {
+		t.Fatalf("prime output missing in-review handoff guidance: %q", output)
+	}
 	if !strings.Contains(output, "Blocked is not an issue status. Represent blocked work with dependency edges") {
 		t.Fatalf("prime output missing blocked-as-graph guidance: %q", output)
 	}
@@ -10751,6 +10757,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "`az issue get` hides historical notes in text output by default; use `az issue get <issue-id> --with-notes` only when full note history is needed.") {
 		t.Fatalf("prime output missing tiered notes retrieval guidance: %q", output)
+	}
+	if !strings.Contains(output, "Status update rule: move your active issue to `in_progress` when starting or resuming agent work, including agent-led review or re-review") {
+		t.Fatalf("prime output missing agent review status update rule: %q", output)
 	}
 	if !strings.Contains(output, "Atomic-merge test before using `--deferred`") {
 		t.Fatalf("prime output missing atomic-merge test heading in parent/child scope section: %q", output)
