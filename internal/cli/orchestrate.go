@@ -44,6 +44,18 @@ type OrchestrateWatchOptions struct {
 	PollInterval time.Duration
 }
 
+type OrchestrateObserveOptions struct {
+	Project     string
+	RootIssueID string
+	JSON        bool
+}
+
+type ObserveOptions struct {
+	Project     string
+	RootIssueID string
+	JSON        bool
+}
+
 type OrchestrateCompleteCheckOptions struct {
 	Project     string
 	RootIssueID string
@@ -85,6 +97,10 @@ func issueCloseCommand(issueID string) string {
 	return fmt.Sprintf("az issue close --id %s", issueID)
 }
 
+var orchestrateObserveNow = func() time.Time {
+	return time.Now().UTC()
+}
+
 type orchestrateStatusResult struct {
 	RootIssueID            string                               `json:"root_issue_id"`
 	Runnable               []string                             `json:"runnable"`
@@ -93,10 +109,42 @@ type orchestrateStatusResult struct {
 	ActiveSessions         []orchestrateActiveSession           `json:"active_sessions,omitempty"`
 	SessionStartProgress   []orchestrateSessionStartProgress    `json:"session_start_progress,omitempty"`
 	StaleCloseableChildren []orchestrateStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
+	WorkerObservations     []orchestrateObservation             `json:"worker_observations,omitempty"`
 	Blocked                map[string]string                    `json:"blocked"`
 	MailboxEvents          []protocol.MailEvent                 `json:"mailbox_events"`
 	Warnings               []string                             `json:"warnings,omitempty"`
 	Advice                 map[string]interface{}               `json:"advice,omitempty"`
+}
+
+type orchestrateObserveResult struct {
+	Mode         string                        `json:"mode"`
+	RootIssueID  string                        `json:"root_issue_id,omitempty"`
+	GeneratedAt  time.Time                     `json:"generated_at"`
+	Observations []orchestrateObservation      `json:"observations"`
+	Groups       []orchestrateObservationGroup `json:"groups"`
+	Warnings     []string                      `json:"warnings,omitempty"`
+	Advice       map[string]interface{}        `json:"advice,omitempty"`
+}
+
+type orchestrateObservation struct {
+	IssueID             string                                `json:"issue_id"`
+	State               string                                `json:"state"`
+	Group               string                                `json:"group"`
+	Reason              string                                `json:"reason"`
+	Age                 string                                `json:"age"`
+	AgeSeconds          int64                                 `json:"age_seconds,omitempty"`
+	EvidenceFlags       []string                              `json:"evidence_flags"`
+	EvidenceSummary     []string                              `json:"evidence_summary,omitempty"`
+	Risks               []string                              `json:"risks,omitempty"`
+	NextActions         []string                              `json:"next_actions"`
+	LastMeaningfulEvent *domain.WorkerObservationEventSummary `json:"last_meaningful_event,omitempty"`
+	SourceTruthPolicy   domain.WorkerObservationSourcePolicy  `json:"source_truth_policy"`
+}
+
+type orchestrateObservationGroup struct {
+	Name     string   `json:"name"`
+	Title    string   `json:"title"`
+	IssueIDs []string `json:"issue_ids"`
 }
 
 type orchestrateStartResult struct {
@@ -312,6 +360,44 @@ func ParseOrchestrateWatchArgs(args []string) (OrchestrateWatchOptions, error) {
 	return opts, nil
 }
 
+func ParseOrchestrateObserveArgs(args []string) (OrchestrateObserveOptions, error) {
+	opts := OrchestrateObserveOptions{}
+	fs := flag.NewFlagSet("orchestrate observe", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&opts.RootIssueID, "root", "", "root issue id")
+	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
+	if err := fs.Parse(args); err != nil {
+		return OrchestrateObserveOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return OrchestrateObserveOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	if strings.TrimSpace(opts.RootIssueID) == "" {
+		return OrchestrateObserveOptions{}, fmt.Errorf("missing required flag: --root")
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
+func ParseObserveArgs(args []string) (ObserveOptions, error) {
+	opts := ObserveOptions{}
+	fs := flag.NewFlagSet("observe", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&opts.RootIssueID, "root", "", "optional root issue id")
+	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
+	if err := fs.Parse(args); err != nil {
+		return ObserveOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return ObserveOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	opts.RootIssueID = strings.TrimSpace(opts.RootIssueID)
+	return opts, nil
+}
+
 func ParseOrchestrateCompleteCheckArgs(args []string) (OrchestrateCompleteCheckOptions, error) {
 	opts := OrchestrateCompleteCheckOptions{}
 	fs := flag.NewFlagSet("orchestrate complete-check", flag.ContinueOnError)
@@ -472,6 +558,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		ActiveSessions:         orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
 		SessionStartProgress:   orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
 		StaleCloseableChildren: orchestrateStaleCloseableFromDaemon(ready.StaleCloseableChildren),
+		WorkerObservations:     orchestrateObservationsFromDaemon(ready.WorkerObservations, orchestrateObserveNow()),
 		Blocked:                ready.Blocked,
 		MailboxEvents:          events,
 		Warnings:               orchestrateStatusWarnings(ctx, deps, ready, len(ready.Runnable)),
@@ -545,6 +632,10 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 			}
 		}
 	}
+	if len(result.WorkerObservations) > 0 {
+		fmt.Println("Worker observations:")
+		printOrchestrateObservationGroups(result.WorkerObservations)
+	}
 	fmt.Printf("Mailbox events (latest %d, since seq>%d): %d\n", opts.Limit, opts.SinceSeq, len(result.MailboxEvents))
 	for _, evt := range result.MailboxEvents {
 		fmt.Printf("- seq=%d issue=%s type=%s from=%s to=%s\n", evt.Seq, strings.TrimSpace(evt.IssueID.String()), evt.Type, strings.TrimSpace(evt.From), strings.TrimSpace(evt.To))
@@ -558,6 +649,44 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 	fmt.Println("Next watch command (leave running while workers are active; do not add --once):")
 	fmt.Printf("- %s\n", result.Advice["watch"])
 	fmt.Printf("- %s\n", result.Advice["watch_instruction"])
+	return nil
+}
+
+func OrchestrateObserveCommand(deps *Dependencies, opts OrchestrateObserveOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	result, err := buildOrchestrateObserveForRoot(deps, opts.RootIssueID)
+	if err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(result)
+	}
+	printOrchestrateObserveResult(result)
+	return nil
+}
+
+func ObserveCommand(deps *Dependencies, opts ObserveOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	var (
+		result orchestrateObserveResult
+		err    error
+	)
+	if strings.TrimSpace(opts.RootIssueID) != "" {
+		result, err = buildOrchestrateObserveForRoot(deps, opts.RootIssueID)
+	} else {
+		result, err = buildObserveForActiveWork(deps)
+	}
+	if err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(result)
+	}
+	printOrchestrateObserveResult(result)
 	return nil
 }
 
@@ -772,6 +901,298 @@ func orchestrateStaleCloseableFromDaemon(candidates []daemonclient.TaskStaleClos
 		})
 	}
 	return out
+}
+
+func buildOrchestrateObserveForRoot(deps *Dependencies, rootIssueID string) (orchestrateObserveResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return orchestrateObserveResult{}, err
+	}
+	ready, err := deps.DaemonClient.TaskGraphReadiness(ctx, rootIssueID)
+	if err != nil {
+		return orchestrateObserveResult{}, err
+	}
+	now := orchestrateObserveNow()
+	observations := orchestrateObservationsFromDaemon(ready.WorkerObservations, now)
+	return orchestrateObserveResult{
+		Mode:         "graph",
+		RootIssueID:  ready.RootIssueID,
+		GeneratedAt:  now,
+		Observations: observations,
+		Groups:       orchestrateObservationGroups(observations),
+		Advice: map[string]interface{}{
+			"status": fmt.Sprintf("az orchestrate status --root %s --json", ready.RootIssueID),
+			"watch":  fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", ready.RootIssueID),
+		},
+	}, nil
+}
+
+func buildObserveForActiveWork(deps *Dependencies) (orchestrateObserveResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return orchestrateObserveResult{}, err
+	}
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return orchestrateObserveResult{}, fmt.Errorf("list active issue candidates: %w", err)
+	}
+	candidates := observeActiveIssueIDs(snapshot.Tasks)
+	now := orchestrateObserveNow()
+	byIssue := make(map[string]orchestrateObservation)
+	warnings := make([]string, 0)
+	for _, issueID := range candidates {
+		ready, err := deps.DaemonClient.TaskGraphReadiness(ctx, issueID)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s: %v", issueID, err))
+			continue
+		}
+		for _, observation := range orchestrateObservationsFromDaemon(ready.WorkerObservations, now) {
+			if _, exists := byIssue[observation.IssueID]; exists {
+				continue
+			}
+			byIssue[observation.IssueID] = observation
+		}
+	}
+	observations := make([]orchestrateObservation, 0, len(byIssue))
+	for _, observation := range byIssue {
+		observations = append(observations, observation)
+	}
+	sortOrchestrateObservations(observations)
+	return orchestrateObserveResult{
+		Mode:         "active",
+		GeneratedAt:  now,
+		Observations: observations,
+		Groups:       orchestrateObservationGroups(observations),
+		Warnings:     warnings,
+		Advice: map[string]interface{}{
+			"root_filter": "az observe --root <issue-id>",
+		},
+	}, nil
+}
+
+func observeActiveIssueIDs(tasks []domain.Task) []string {
+	ids := make([]string, 0, len(tasks))
+	seen := map[string]struct{}{}
+	for _, task := range tasks {
+		if task.ID.IsZero() {
+			continue
+		}
+		if !observeActiveTask(task) {
+			continue
+		}
+		id := task.ID.String()
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func observeActiveTask(task domain.Task) bool {
+	if task.HasTmuxSession || task.HasWorktree {
+		return true
+	}
+	switch task.Status {
+	case domain.StatusInProgress, domain.StatusInReview:
+		return true
+	default:
+		return false
+	}
+}
+
+func orchestrateObservationsFromDaemon(observations []domain.WorkerObservation, now time.Time) []orchestrateObservation {
+	out := make([]orchestrateObservation, 0, len(observations))
+	for _, observation := range observations {
+		out = append(out, orchestrateObservationFromDaemon(observation, now))
+	}
+	sortOrchestrateObservations(out)
+	return out
+}
+
+func orchestrateObservationFromDaemon(observation domain.WorkerObservation, now time.Time) orchestrateObservation {
+	group := orchestrateObservationActionabilityGroup(observation.State)
+	out := orchestrateObservation{
+		IssueID:             strings.TrimSpace(observation.IssueID),
+		State:               string(observation.State),
+		Group:               group,
+		Reason:              strings.TrimSpace(observation.Reason),
+		Age:                 "unknown",
+		EvidenceFlags:       orchestrateObservationEvidenceFlags(observation),
+		EvidenceSummary:     cloneObservationStrings(observation.EvidenceSummary),
+		Risks:               cloneObservationStrings(observation.Risks),
+		NextActions:         cloneObservationStrings(observation.NextActions),
+		LastMeaningfulEvent: observation.LastEvent,
+		SourceTruthPolicy:   observation.SourceTruthPolicy,
+	}
+	if observation.LastEvent != nil && !observation.LastEvent.At.IsZero() {
+		age := now.Sub(observation.LastEvent.At)
+		if age < 0 {
+			age = 0
+		}
+		out.AgeSeconds = int64(age.Round(time.Second).Seconds())
+		out.Age = formatObservationAge(age)
+	}
+	return out
+}
+
+func cloneObservationStrings(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	return append([]string(nil), values...)
+}
+
+func orchestrateObservationEvidenceFlags(observation domain.WorkerObservation) []string {
+	flags := make([]string, 0, 6)
+	if observation.LastEvent != nil {
+		flags = append(flags, "last_event")
+		switch strings.TrimSpace(observation.LastEvent.Kind) {
+		case "mailbox":
+			flags = append(flags, "mailbox_event")
+		case "issue_event":
+			flags = append(flags, "issue_event")
+		}
+	}
+	if len(observation.EvidenceSummary) > 0 {
+		flags = append(flags, "evidence_summary")
+	}
+	if len(observation.Risks) > 0 {
+		flags = append(flags, "risks")
+	}
+	if len(observation.NextActions) > 0 {
+		flags = append(flags, "next_actions")
+	}
+	return flags
+}
+
+func orchestrateObservationActionabilityGroup(state domain.WorkerObservationState) string {
+	switch state {
+	case domain.WorkerObservationWaitingHuman:
+		return "needs_human"
+	case domain.WorkerObservationReviewReady:
+		return "review_ready"
+	case domain.WorkerObservationBlocked, domain.WorkerObservationFailed, domain.WorkerObservationStale:
+		return "blocked_failed_stale"
+	case domain.WorkerObservationCleanupPending, domain.WorkerObservationDone:
+		return "cleanup"
+	default:
+		return "working"
+	}
+}
+
+func sortOrchestrateObservations(observations []orchestrateObservation) {
+	sort.SliceStable(observations, func(i, j int) bool {
+		left := orchestrateObservationGroupRank(observations[i].Group)
+		right := orchestrateObservationGroupRank(observations[j].Group)
+		if left != right {
+			return left < right
+		}
+		if observations[i].AgeSeconds != observations[j].AgeSeconds {
+			return observations[i].AgeSeconds > observations[j].AgeSeconds
+		}
+		return observations[i].IssueID < observations[j].IssueID
+	})
+}
+
+func orchestrateObservationGroups(observations []orchestrateObservation) []orchestrateObservationGroup {
+	groups := make([]orchestrateObservationGroup, 0, len(orchestrateObservationGroupOrder))
+	byName := map[string][]string{}
+	for _, observation := range observations {
+		byName[observation.Group] = append(byName[observation.Group], observation.IssueID)
+	}
+	for _, spec := range orchestrateObservationGroupOrder {
+		ids := byName[spec.name]
+		if len(ids) == 0 {
+			continue
+		}
+		groups = append(groups, orchestrateObservationGroup{
+			Name:     spec.name,
+			Title:    spec.title,
+			IssueIDs: append([]string(nil), ids...),
+		})
+	}
+	return groups
+}
+
+var orchestrateObservationGroupOrder = []struct {
+	name  string
+	title string
+}{
+	{name: "needs_human", title: "Needs human"},
+	{name: "review_ready", title: "Review-ready"},
+	{name: "blocked_failed_stale", title: "Blocked/failed/stale"},
+	{name: "working", title: "Working"},
+	{name: "cleanup", title: "Cleanup"},
+}
+
+func orchestrateObservationGroupRank(group string) int {
+	for i, spec := range orchestrateObservationGroupOrder {
+		if spec.name == group {
+			return i
+		}
+	}
+	return len(orchestrateObservationGroupOrder)
+}
+
+func formatObservationAge(age time.Duration) string {
+	if age < 0 {
+		age = 0
+	}
+	return age.Round(time.Second).String()
+}
+
+func printOrchestrateObserveResult(result orchestrateObserveResult) {
+	if strings.TrimSpace(result.RootIssueID) != "" {
+		fmt.Printf("Root issue: %s\n", result.RootIssueID)
+	} else {
+		fmt.Println("Scope: active issues")
+	}
+	printOrchestrateObservationGroups(result.Observations)
+	if len(result.Warnings) > 0 {
+		fmt.Println("Warnings:")
+		for _, warning := range result.Warnings {
+			fmt.Printf("- %s\n", warning)
+		}
+	}
+}
+
+func printOrchestrateObservationGroups(observations []orchestrateObservation) {
+	if len(observations) == 0 {
+		fmt.Println("- (no observations)")
+		return
+	}
+	byGroup := map[string][]orchestrateObservation{}
+	for _, observation := range observations {
+		byGroup[observation.Group] = append(byGroup[observation.Group], observation)
+	}
+	for _, group := range orchestrateObservationGroupOrder {
+		items := byGroup[group.name]
+		if len(items) == 0 {
+			continue
+		}
+		fmt.Printf("%s:\n", group.title)
+		for _, observation := range items {
+			age := observation.Age
+			if age == "" {
+				age = "unknown"
+			}
+			fmt.Printf("- %s state=%s age=%s\n", observation.IssueID, observation.State, age)
+			if observation.Reason != "" {
+				fmt.Printf("  reason: %s\n", observation.Reason)
+			}
+			if len(observation.EvidenceFlags) > 0 {
+				fmt.Printf("  evidence flags: %s\n", strings.Join(observation.EvidenceFlags, ", "))
+			}
+			if len(observation.NextActions) > 0 {
+				fmt.Printf("  next: %s\n", strings.Join(observation.NextActions, "; "))
+			}
+		}
+	}
 }
 
 func formatSessionStartProgress(progress orchestrateSessionStartProgress) string {

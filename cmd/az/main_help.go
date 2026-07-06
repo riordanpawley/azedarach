@@ -293,14 +293,18 @@ func printHelpForPath(path []string) bool {
 		fmt.Println(mailListUsage)
 	case "mail watch":
 		fmt.Println(mailWatchUsage)
+	case "observe":
+		fmt.Println(observeUsage)
 	case "orchestrate":
-		fmt.Println("Usage: az orchestrate <status|start|watch|prompt|message|complete-check|integrate|close-session> [arguments]")
+		fmt.Println("Usage: az orchestrate <status|start|watch|observe|prompt|message|complete-check|integrate|close-session> [arguments]")
 	case "orchestrate status":
 		fmt.Println(orchestrateStatusUsage)
 	case "orchestrate start":
 		fmt.Println(orchestrateStartUsage)
 	case "orchestrate watch":
 		fmt.Println(orchestrateWatchUsage)
+	case "orchestrate observe":
+		fmt.Println(orchestrateObserveUsage)
 	case "orchestrate prompt":
 		fmt.Println(orchestratePromptUsage)
 	case "orchestrate message":
@@ -380,9 +384,11 @@ const (
 	mailSendUsage                 = "Usage: az mail send --parent <issue-id> --type <event-type> --body <text> [--issue <issue-id>] [--from <actor>] [--to <actor>] [--json]"
 	mailListUsage                 = "Usage: az mail list --parent <issue-id> [--since <seq>] [--limit <n>] [--json]"
 	mailWatchUsage                = "Usage: az mail watch --parent <issue-id> [--since <seq>] [--jsonl] [--once]"
+	observeUsage                  = "Usage: az observe [--root <issue-id>] [--project <project-id>] [--json]"
 	orchestrateStatusUsage        = "Usage: az orchestrate status --root <issue-id> [--project <project-id>] [--since <seq>] [--limit <n>] [--json]"
 	orchestrateStartUsage         = "Usage: az orchestrate start --root <issue-id> [--project <project-id>] [--limit <n>] [--issue <issue-id> ...] [--json]"
 	orchestrateWatchUsage         = "Usage: az orchestrate watch --root <issue-id> [--project <project-id>] [--since <seq>] [--jsonl] [--once]"
+	orchestrateObserveUsage       = "Usage: az orchestrate observe --root <issue-id> [--project <project-id>] [--json]"
 	orchestratePromptUsage        = "Usage: az orchestrate prompt --issue <issue-id> [--root <issue-id>] [--coordination native|mailbox] [--project <project-id>] [--json]"
 	orchestrateMessageUsage       = "Usage: az orchestrate message --root <issue-id> --issue <issue-id> --body <text> [--type <event-type>] [--force-self-delivery] [--project <project-id>] [--json]"
 	orchestrateCompleteCheckUsage = "Usage: az orchestrate complete-check --root <issue-id> [--project <project-id>] [--json]"

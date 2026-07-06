@@ -56,7 +56,8 @@ Commands:
   issue fanout ready [--project <project-id>] --root <issue-id> [--json]  List runnable leaf issues under a fanout root
   issue fanout drift [--project <project-id>] --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
   mail <send|list|watch>  Mailbox event operations for orchestrator/worker coordination
-  orchestrate <status|start|watch|prompt|message|complete-check|integrate|close-session>  Orchestration operations for parent issues
+  observe [--root <issue-id>] [--json]  Show artifact-backed observations for active work
+  orchestrate <status|start|watch|observe|prompt|message|complete-check|integrate|close-session>  Orchestration operations for parent issues
   config set <key> <value> [--project-dir <dir>]  Update project config
   sync [conflicts] [--all] [<directory>] [--project-dir <dir>] [--json]  Refresh issue tracker state for the current project or all worktrees
   prime                Print AI session primer with current issue context
@@ -118,6 +119,9 @@ Examples:
   az issue fanout ready --root az-123 --json
   az issue fanout drift --issue az-456 --worktree /tmp/az-456
   az mail send --parent az-123 --type dependency-ready --body "contract merged"
+  az observe --json
+  az observe --root az-123
+  az orchestrate observe --root az-123 --json
   az mail send --parent az-123 --issue az-456 --type worker-integration-ready --body '{"schema":"worker_evidence.v1",...}'
   az mail list --parent az-123 --since 40 --json
   az mail watch --parent az-123 --since 41 --jsonl

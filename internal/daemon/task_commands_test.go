@@ -4844,6 +4844,49 @@ func TestTaskGraphReadinessWorkerObservationsIncludeEvidenceAndMissingProjection
 	}
 }
 
+func TestTaskGraphReadinessWorkerObservationsIncludeNonEpicRootLeaf(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	projectID := "proj-root-leaf-observation"
+	issuesClient := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:  "Ordinary active work",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create root task: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		sessionStore: daemonstate.NewStore(),
+	}
+	ready, err := d.taskGraphReadiness(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("taskGraphReadiness error: %v", err)
+	}
+	if len(ready.WorkerObservations) != 1 {
+		t.Fatalf("worker observations = %+v, want root leaf observation", ready.WorkerObservations)
+	}
+	observation := ready.WorkerObservations[0]
+	if observation.IssueID != rootID || observation.State != domain.WorkerObservationRunnable {
+		t.Fatalf("root observation = %+v", observation)
+	}
+	if !slices.Contains(ready.Runnable, rootID) {
+		t.Fatalf("runnable = %+v, want root leaf", ready.Runnable)
+	}
+}
+
 func TestTaskCompleteCheckReportsMixedStaleCloseableAndIncompleteChildren(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

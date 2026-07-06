@@ -3396,16 +3396,14 @@ func daemonTaskGraphIndexes(rootIssueID string, tasks []domain.Task) (naming.Iss
 }
 
 func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) (taskGraphReadinessResult, error) {
-	desc := daemonTaskGraphDescendants(rootID, children)
-	leaves := make([]string, 0, len(desc))
-	for _, id := range desc {
+	leafIDs := daemonTaskGraphLeafIDs(rootID, byID, children)
+	leaves := make([]string, 0, len(leafIDs))
+	for _, id := range leafIDs {
 		task := byID[id]
 		if task.Type == domain.TypeEpic {
 			continue
 		}
-		if len(children[id]) == 0 {
-			leaves = append(leaves, id.String())
-		}
+		leaves = append(leaves, id.String())
 	}
 	sort.Strings(leaves)
 	result := taskGraphReadinessResult{
@@ -3442,9 +3440,8 @@ func daemonTaskGraphReadinessFromIndexes(rootID naming.IssueID, byID map[naming.
 }
 
 func daemonTaskGraphStaleCloseableCandidates(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) []taskStaleCloseableCandidate {
-	desc := daemonTaskGraphDescendants(rootID, children)
 	out := make([]taskStaleCloseableCandidate, 0)
-	for _, id := range desc {
+	for _, id := range daemonTaskGraphLeafIDs(rootID, byID, children) {
 		task := byID[id]
 		if !daemonTaskStaleCloseableCandidate(task) {
 			continue
@@ -3503,8 +3500,8 @@ func (d *Daemon) daemonTaskGraphWorkerObservations(
 	children map[naming.IssueID][]naming.IssueID,
 	ready taskGraphReadinessResult,
 ) []domain.WorkerObservation {
-	desc := daemonTaskGraphDescendants(rootID, children)
-	if len(desc) == 0 {
+	leafIDs := daemonTaskGraphLeafIDs(rootID, byID, children)
+	if len(leafIDs) == 0 {
 		return nil
 	}
 	activeByIssue := daemonTaskGraphActiveSessionsByIssue(ready.ActiveSessions)
@@ -3514,8 +3511,8 @@ func (d *Daemon) daemonTaskGraphWorkerObservations(
 	runnable := stringSet(ready.Runnable)
 	mailByIssue := d.workerObservationMailboxEvents(rootID.String())
 
-	out := make([]domain.WorkerObservation, 0, len(desc))
-	for _, id := range desc {
+	out := make([]domain.WorkerObservation, 0, len(leafIDs))
+	for _, id := range leafIDs {
 		task := byID[id]
 		if task.ID.IsZero() || task.Type == domain.TypeEpic {
 			continue
@@ -4006,6 +4003,25 @@ func daemonTaskGraphDescendants(root naming.IssueID, children map[naming.IssueID
 		seen[cur] = struct{}{}
 		out = append(out, cur)
 		stack = append(stack, children[cur]...)
+	}
+	return out
+}
+
+func daemonTaskGraphLeafIDs(root naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) []naming.IssueID {
+	desc := daemonTaskGraphDescendants(root, children)
+	if len(desc) == 0 {
+		if task := byID[root]; !task.ID.IsZero() && task.Type != domain.TypeEpic {
+			return []naming.IssueID{root}
+		}
+		return nil
+	}
+	out := make([]naming.IssueID, 0, len(desc))
+	for _, id := range desc {
+		task := byID[id]
+		if task.ID.IsZero() || task.Type == domain.TypeEpic || len(children[id]) > 0 {
+			continue
+		}
+		out = append(out, id)
 	}
 	return out
 }

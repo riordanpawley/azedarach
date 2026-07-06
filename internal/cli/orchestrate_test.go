@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -299,6 +300,271 @@ func TestOrchestrateStatusCommandIncludesActiveSessionActivity(t *testing.T) {
 	}
 	if byID[noAgent.String()].Activity != "no-agent" || byID[noAgent.String()].ActivitySource != "session" || byID[noAgent.String()].Advice != "" {
 		t.Fatalf("no-agent active session = %+v", byID[noAgent.String()])
+	}
+}
+
+func TestOrchestrateStatusCommandIncludesWorkerObservations(t *testing.T) {
+	root := naming.IssueID("az-1")
+	review := naming.IssueID("az-2")
+	observedAt := time.Date(2026, time.July, 6, 1, 30, 0, 0, time.UTC)
+	originalNow := orchestrateObserveNow
+	orchestrateObserveNow = func() time.Time { return observedAt.Add(90 * time.Minute) }
+	t.Cleanup(func() { orchestrateObserveNow = originalNow })
+
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskGraphReadiness:
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: root.String(),
+						Blocked:     map[string]string{},
+						WorkerObservations: []domain.WorkerObservation{{
+							IssueID: review.String(),
+							State:   domain.WorkerObservationReviewReady,
+							Reason:  "issue is in_review",
+							LastEvent: &domain.WorkerObservationEventSummary{
+								Kind: "mailbox",
+								Type: "worker-integration-ready",
+								At:   observedAt,
+								Seq:  12,
+							},
+							EvidenceSummary: []string{"mailbox worker-integration-ready: validation passed"},
+							NextActions:     []string{"validate evidence, then close accepted worker: az issue close --id az-2"},
+							SourceTruthPolicy: domain.WorkerObservationSourcePolicy{
+								IssueGraph:      "projection",
+								SessionRuntime:  "hybrid",
+								MailboxEvidence: "projection",
+							},
+						}},
+					}), nil
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"project_id": protocol.DefaultProjectID,
+						"worktrees":  []map[string]string{},
+					}), nil
+				case protocol.CommandMailList:
+					return responseWithJSON(req, []protocol.MailEvent{}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestrateStatusCommand(deps, OrchestrateStatusOptions{RootIssueID: root.String(), JSON: true})
+	})
+	var result orchestrateStatusResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if len(result.WorkerObservations) != 1 {
+		t.Fatalf("worker_observations = %+v", result.WorkerObservations)
+	}
+	observation := result.WorkerObservations[0]
+	if observation.IssueID != review.String() || observation.State != string(domain.WorkerObservationReviewReady) || observation.Group != "review_ready" {
+		t.Fatalf("observation = %+v", observation)
+	}
+	if observation.Age != "1h30m0s" || observation.AgeSeconds != 5400 {
+		t.Fatalf("age = %q/%d, want 1h30m0s/5400", observation.Age, observation.AgeSeconds)
+	}
+	if !slices.Contains(observation.EvidenceFlags, "mailbox_event") || !slices.Contains(observation.EvidenceFlags, "next_actions") {
+		t.Fatalf("evidence flags = %+v", observation.EvidenceFlags)
+	}
+}
+
+func TestOrchestrateObserveCommandRendersGroupedText(t *testing.T) {
+	root := naming.IssueID("az-1")
+	waiting := naming.IssueID("az-2")
+	review := naming.IssueID("az-3")
+	observedAt := time.Date(2026, time.July, 6, 3, 0, 0, 0, time.UTC)
+	originalNow := orchestrateObserveNow
+	orchestrateObserveNow = func() time.Time { return observedAt.Add(2 * time.Hour) }
+	t.Cleanup(func() { orchestrateObserveNow = originalNow })
+
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskGraphReadiness {
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+					RootIssueID: root.String(),
+					WorkerObservations: []domain.WorkerObservation{
+						{
+							IssueID: waiting.String(),
+							State:   domain.WorkerObservationWaitingHuman,
+							Reason:  "active session is waiting for human input",
+							LastEvent: &domain.WorkerObservationEventSummary{
+								Kind: "issue_event",
+								Type: "session.waiting",
+								At:   observedAt,
+							},
+							NextActions:       []string{"inspect worker az-2 and answer the pending prompt"},
+							SourceTruthPolicy: domain.WorkerObservationSourcePolicy{IssueGraph: "projection"},
+						},
+						{
+							IssueID:           review.String(),
+							State:             domain.WorkerObservationReviewReady,
+							Reason:            "issue is in_review",
+							EvidenceSummary:   []string{"status=in_review"},
+							NextActions:       []string{"validate evidence, then close accepted worker: az issue close --id az-3"},
+							SourceTruthPolicy: domain.WorkerObservationSourcePolicy{IssueGraph: "projection"},
+						},
+					},
+					Blocked: map[string]string{},
+				}), nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestrateObserveCommand(deps, OrchestrateObserveOptions{RootIssueID: root.String()})
+	})
+	needsHumanIdx := strings.Index(output, "Needs human:")
+	reviewIdx := strings.Index(output, "Review-ready:")
+	if needsHumanIdx < 0 || reviewIdx < 0 || needsHumanIdx > reviewIdx {
+		t.Fatalf("output groups out of order:\n%s", output)
+	}
+	for _, want := range []string{
+		"Root issue: az-1",
+		"- az-2 state=waiting_human age=2h0m0s",
+		"reason: active session is waiting for human input",
+		"evidence flags: last_event, issue_event, next_actions",
+		"next: inspect worker az-2 and answer the pending prompt",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestOrchestrateObserveCommandJSONScopesToRoot(t *testing.T) {
+	root := naming.IssueID("az-root")
+	child := naming.IssueID("az-child")
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskGraphReadiness {
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				if !strings.Contains(string(req.Body), root.String()) {
+					t.Fatalf("task.graph_readiness body = %s, want root %s", string(req.Body), root.String())
+				}
+				return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+					RootIssueID: root.String(),
+					WorkerObservations: []domain.WorkerObservation{{
+						IssueID:           child.String(),
+						State:             domain.WorkerObservationRunnable,
+						Reason:            "leaf worker has no unresolved blockers or active runtime",
+						NextActions:       []string{"az orchestrate start --root az-root --issue az-child --json"},
+						SourceTruthPolicy: domain.WorkerObservationSourcePolicy{IssueGraph: "projection"},
+					}},
+					Blocked: map[string]string{},
+				}), nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return OrchestrateObserveCommand(deps, OrchestrateObserveOptions{RootIssueID: root.String(), JSON: true})
+	})
+	var result orchestrateObserveResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if result.Mode != "graph" || result.RootIssueID != root.String() {
+		t.Fatalf("result scope = mode %q root %q", result.Mode, result.RootIssueID)
+	}
+	if len(result.Observations) != 1 || result.Observations[0].IssueID != child.String() || result.Observations[0].Group != "working" {
+		t.Fatalf("observations = %+v", result.Observations)
+	}
+	if len(result.Groups) != 1 || result.Groups[0].Name != "working" || result.Groups[0].IssueIDs[0] != child.String() {
+		t.Fatalf("groups = %+v", result.Groups)
+	}
+}
+
+func TestObserveCommandWithoutRootCollectsActiveIssueObservations(t *testing.T) {
+	active := naming.IssueID("az-active")
+	worktree := naming.IssueID("az-worktree")
+	openBacklog := naming.IssueID("az-backlog")
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: active, Title: "Active work", Status: domain.StatusInProgress, Type: domain.TypeTask},
+		{ID: worktree, Title: "Open with worktree", Status: domain.StatusOpen, Type: domain.TypeTask, HasWorktree: true},
+		{ID: openBacklog, Title: "Backlog", Status: domain.StatusOpen, Type: domain.TypeTask},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
+	var graphRequests []string
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: protocol.DefaultProjectID,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: true, Body: taskListBody}, nil
+				case daemonclient.CommandTaskGraphReadiness:
+					body := string(req.Body)
+					var issueID naming.IssueID
+					switch {
+					case strings.Contains(body, active.String()):
+						issueID = active
+					case strings.Contains(body, worktree.String()):
+						issueID = worktree
+					default:
+						t.Fatalf("unexpected graph readiness body: %s", body)
+					}
+					graphRequests = append(graphRequests, issueID.String())
+					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
+						RootIssueID: issueID.String(),
+						WorkerObservations: []domain.WorkerObservation{{
+							IssueID:           issueID.String(),
+							State:             domain.WorkerObservationWorking,
+							Reason:            "active worker session is present",
+							EvidenceSummary:   []string{"status=in_progress"},
+							NextActions:       []string{"watch worker activity for " + issueID.String()},
+							SourceTruthPolicy: domain.WorkerObservationSourcePolicy{IssueGraph: "projection"},
+						}},
+						Blocked: map[string]string{},
+					}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+	}
+
+	output := captureStdout(t, func() error {
+		return ObserveCommand(deps, ObserveOptions{JSON: true})
+	})
+	var result orchestrateObserveResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, output)
+	}
+	if result.Mode != "active" {
+		t.Fatalf("mode = %q, want active", result.Mode)
+	}
+	if strings.Join(graphRequests, ",") != "az-active,az-worktree" {
+		t.Fatalf("graph requests = %+v", graphRequests)
+	}
+	if len(result.Observations) != 2 {
+		t.Fatalf("observations = %+v, want active and worktree", result.Observations)
+	}
+	for _, observation := range result.Observations {
+		if observation.IssueID == openBacklog.String() {
+			t.Fatalf("open backlog issue should not be observed: %+v", result.Observations)
+		}
 	}
 }
 
