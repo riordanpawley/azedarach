@@ -48,11 +48,12 @@ type NotificationActionCenterMsg struct {
 type NotificationHistoryOverlay struct {
 	twoPaneDialogChrome
 	dialogViewportState
-	items    []NotificationHistoryItem
-	selected int
-	scroll   int
-	filter   notificationActionCenterFilter
-	styles   *Styles
+	items        []NotificationHistoryItem
+	expandedItem map[string]bool
+	selected     int
+	scroll       int
+	filter       notificationActionCenterFilter
+	styles       *Styles
 }
 
 type notificationActionCenterFilter int
@@ -69,8 +70,9 @@ const (
 func NewNotificationHistoryOverlay(items []NotificationHistoryItem) *NotificationHistoryOverlay {
 	copied := append([]NotificationHistoryItem(nil), items...)
 	return &NotificationHistoryOverlay{
-		items:  copied,
-		styles: New(),
+		items:        copied,
+		expandedItem: map[string]bool{},
+		styles:       New(),
 	}
 }
 
@@ -119,10 +121,13 @@ func (o *NotificationHistoryOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				o.scroll = o.maxScroll()
 			}
 			return o, nil
-		case "enter", "a", " ", "space":
+		case "enter", "a":
 			if action, ok := o.primaryAction(); ok {
 				return o, func() tea.Msg { return action }
 			}
+			return o, nil
+		case " ", "space":
+			o.toggleCurrentDetails()
 			return o, nil
 		case "m":
 			if item, ok := o.current(); ok {
@@ -232,8 +237,13 @@ func (o *NotificationHistoryOverlay) renderItems(width, height int) string {
 		if notificationItemActionable(item) {
 			actionMark = "*"
 		}
-		line := fmt.Sprintf("%s%s %s %-7s  %-14s  %s",
+		expandMark := "+"
+		if o.itemExpanded(item) {
+			expandMark = "-"
+		}
+		line := fmt.Sprintf("%s%s%s %s %-7s  %-14s  %s",
 			prefix,
+			expandMark,
 			shortNotificationTime(item.CreatedAt),
 			actionMark,
 			item.Level,
@@ -281,7 +291,7 @@ func (o *NotificationHistoryOverlay) renderSelectedDetails(width int) []string {
 			lines = append(lines, o.styles.MenuItemDisabled.Render(line))
 		}
 	}
-	if len(lines) > 5 {
+	if !o.itemExpanded(item) && len(lines) > 5 {
 		lines = lines[:5]
 	}
 	return lines
@@ -308,7 +318,8 @@ func (o *NotificationHistoryOverlay) actionBindings() []keybinds.Binding {
 		{Key: "g/G", Description: "top/bottom"},
 		{Key: "m", Description: "read/unread"},
 		{Key: "d/D", Description: "dismiss"},
-		{Key: "Space/Enter/a", Description: "action"},
+		{Key: "Space", Description: "details"},
+		{Key: "Enter/a", Description: "action"},
 		{Key: "o/w", Description: "open"},
 		{Key: "l/c", Description: "logs/copy"},
 		{Key: "Esc/q", Description: "close"},
@@ -347,6 +358,26 @@ func (o *NotificationHistoryOverlay) current() (NotificationHistoryItem, bool) {
 		o.selected = len(filtered) - 1
 	}
 	return filtered[o.selected], true
+}
+
+func (o *NotificationHistoryOverlay) toggleCurrentDetails() {
+	item, ok := o.current()
+	if !ok {
+		return
+	}
+	key := notificationExpansionKey(item)
+	if key == "" {
+		return
+	}
+	if o.expandedItem == nil {
+		o.expandedItem = map[string]bool{}
+	}
+	o.expandedItem[key] = !o.expandedItem[key]
+}
+
+func (o *NotificationHistoryOverlay) itemExpanded(item NotificationHistoryItem) bool {
+	key := notificationExpansionKey(item)
+	return key != "" && o.expandedItem != nil && o.expandedItem[key]
 }
 
 func (o *NotificationHistoryOverlay) ensureSelectionVisible(visibleRows int) {
@@ -540,6 +571,18 @@ func notificationItemActionable(item NotificationHistoryItem) bool {
 		}
 	}
 	return false
+}
+
+func notificationExpansionKey(item NotificationHistoryItem) string {
+	for _, value := range []string{item.DaemonNoticeID, item.ID, item.OperationID} {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	if message := strings.TrimSpace(item.Message); message != "" {
+		return message
+	}
+	return ""
 }
 
 func notificationGroupLabel(item NotificationHistoryItem) string {
