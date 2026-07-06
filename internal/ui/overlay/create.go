@@ -540,6 +540,7 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return c, nil
 	case attachmentAddedMsg:
 		c.attachmentError = ""
+		c.upsertAttachment(msg.attachment)
 		if strings.TrimSpace(c.id) == "" {
 			return c, tea.Batch(
 				c.loadAttachments(),
@@ -562,6 +563,7 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 	case attachmentDeletedMsg:
 		c.attachmentError = ""
+		c.removeAttachment(msg.AttachmentID)
 		if strings.TrimSpace(c.id) == "" {
 			return c, c.loadAttachments()
 		}
@@ -1039,7 +1041,38 @@ func (c *CreateTaskOverlay) deleteSelectedAttachment() tea.Cmd {
 		if err := c.attachmentSvc.Delete(context.Background(), targetID, selected.ID); err != nil {
 			return errorMsg{err: err}
 		}
-		return attachmentDeletedMsg{}
+		return attachmentDeletedMsg{AttachmentID: selected.ID}
+	}
+}
+
+func (c *CreateTaskOverlay) upsertAttachment(att *attachment.Attachment) {
+	if att == nil || strings.TrimSpace(att.ID) == "" {
+		return
+	}
+	for idx := range c.attachments {
+		if c.attachments[idx].ID == att.ID {
+			c.attachments[idx] = *att
+			c.attachmentIndex = idx
+			return
+		}
+	}
+	c.attachments = append(c.attachments, *att)
+	c.attachmentIndex = len(c.attachments) - 1
+}
+
+func (c *CreateTaskOverlay) removeAttachment(attachmentID string) {
+	if strings.TrimSpace(attachmentID) == "" {
+		return
+	}
+	for idx := range c.attachments {
+		if c.attachments[idx].ID != attachmentID {
+			continue
+		}
+		c.attachments = append(c.attachments[:idx], c.attachments[idx+1:]...)
+		if c.attachmentIndex >= len(c.attachments) {
+			c.attachmentIndex = max(0, len(c.attachments)-1)
+		}
+		return
 	}
 }
 

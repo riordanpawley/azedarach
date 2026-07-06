@@ -774,6 +774,60 @@ func TestCreateTaskOverlayCtrlPWithoutIDStagesAttachment(t *testing.T) {
 	assert.NotEmpty(t, addedMsg.attachment.IssueID)
 }
 
+func TestCreateTaskOverlayShowsStagedAttachmentBeforeReload(t *testing.T) {
+	svc := &createTestAttachmentService{
+		attached: &attachment.Attachment{
+			ID:       "att-staged",
+			IssueID:  "draft-1",
+			Filename: "clipboard.png",
+			Path:     "/tmp/clipboard.png",
+			Size:     1200,
+			MimeType: "image/png",
+			Created:  time.Now(),
+		},
+	}
+	overlay := NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(nil, nil, svc)
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	require.NotNil(t, cmd)
+
+	model, reloadCmd := overlay.Update(cmd())
+	overlay = model.(*CreateTaskOverlay)
+
+	assert.Contains(t, overlay.renderAttachmentList(), "clipboard.png")
+	assert.NotNil(t, reloadCmd)
+}
+
+func TestCreateTaskOverlaySubmitIncludesStagedAttachmentBeforeReload(t *testing.T) {
+	svc := &createTestAttachmentService{
+		attached: &attachment.Attachment{
+			ID:       "att-staged",
+			IssueID:  "draft-1",
+			Filename: "clipboard.png",
+			Path:     "/tmp/clipboard.png",
+			Size:     1200,
+			MimeType: "image/png",
+			Created:  time.Now(),
+		},
+	}
+	overlay := NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(nil, nil, svc)
+	overlay.title.SetValue("Task with attachment")
+
+	_, pasteCmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	require.NotNil(t, pasteCmd)
+	model, _ := overlay.Update(pasteCmd())
+	overlay = model.(*CreateTaskOverlay)
+
+	_, submitCmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	require.NotNil(t, submitCmd)
+	msgs := batchToSlice(submitCmd())
+	require.Len(t, msgs, 1)
+
+	created, ok := msgs[0].(TaskCreatedMsg)
+	require.True(t, ok)
+	assert.Equal(t, []string{"/tmp/clipboard.png"}, created.AttachmentPaths)
+}
+
 func TestCreateTaskOverlayWithAttachmentServiceShowsGuidance(t *testing.T) {
 	svc := &createTestAttachmentService{}
 	overlay := NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(nil, nil, svc)
@@ -857,6 +911,25 @@ func TestEditTaskOverlayDeleteAttachmentWhenFocused(t *testing.T) {
 	require.NotNil(t, cmd)
 	_ = cmd()
 	assert.Equal(t, "att-1", svc.deletedID)
+}
+
+func TestCreateTaskOverlayRemovesStagedAttachmentBeforeReload(t *testing.T) {
+	svc := &createTestAttachmentService{}
+	overlay := NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(nil, nil, svc)
+	overlay.attachments = []attachment.Attachment{
+		{ID: "att-1", IssueID: "draft-1", Filename: "one.png", Path: "/tmp/one.png"},
+	}
+	overlay.focusIndex = focusAttachments
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	require.NotNil(t, cmd)
+
+	model, reloadCmd := overlay.Update(cmd())
+	overlay = model.(*CreateTaskOverlay)
+
+	assert.Equal(t, "att-1", svc.deletedID)
+	assert.Empty(t, overlay.attachments)
+	assert.NotNil(t, reloadCmd)
 }
 
 type createTestAttachmentService struct {
