@@ -2869,6 +2869,149 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	}
 }
 
+func TestTaskCloseIntegrationRetriesRepeatedlyWhenTargetHeadMovesAfterScratchValidation(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-integrate-retry-stale-target"
+	repoDir := t.TempDir()
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Retry stale target",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
+	sourceBranch := "riordan/" + taskID + "/retry-stale-target"
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      sourceWorktree,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+
+	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
+	commands := make([]string, 0, 24)
+	var scratchWorktree string
+	scratchDesiredHeads := map[string]string{}
+	targetHeadReads := 0
+	scratchAdds := 0
+	resets := make([]string, 0, 1)
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		commands = append(commands, strings.Join(args, " "))
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+			return worktreeListOutput, nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
+			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
+			return filepath.Join(repoDir, ".git"), nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
+			targetHeadReads++
+			switch targetHeadReads {
+			case 1:
+				return "target-sha-1", nil
+			case 2, 3:
+				return "target-sha-2", nil
+			default:
+				return "target-sha-3", nil
+			}
+		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
+			return scratchDesiredHeads[scratchWorktree], nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "merge-base":
+			return "base-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff" && slices.Contains(args, "--name-status"):
+			return "M\tmain.go\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-list" && args[4] == "main.."+sourceBranch:
+			return "1", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "rev-list":
+			return "0", nil
+		case len(args) >= 6 && args[0] == "-C" && args[2] == "merge-tree":
+			return "tree-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "fetch":
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "checkout":
+			return "", nil
+		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "worktree" && args[3] == "add":
+			scratchAdds++
+			scratchWorktree = args[5]
+			scratchDesiredHeads[scratchWorktree] = fmt.Sprintf("merged-sha-%d", scratchAdds)
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "merge":
+			return "merge complete", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "reset" && args[3] == "--hard":
+			resets = append(resets, args[4])
+			return "", nil
+		case len(args) >= 6 && args[0] == "-C" && args[1] == repoDir && args[2] == "worktree" && args[3] == "remove":
+			return "", nil
+		default:
+			return "", nil
+		}
+	}}
+
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: manager,
+		},
+		git:      git.NewClient(runner, logger),
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject: func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return runtimeStore
+		},
+		runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
+		logger:                  logger,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true)
+	if err != nil {
+		t.Fatalf("integrateTaskBeforeClose error: %v", err)
+	}
+	if !result.Integrated {
+		t.Fatalf("integration result = %+v, want integrated after retry", result)
+	}
+	if scratchAdds != 3 {
+		t.Fatalf("scratch merge attempts = %d, want 3", scratchAdds)
+	}
+	if !slices.Equal(resets, []string{"merged-sha-3"}) {
+		t.Fatalf("reset refs = %v, want retry final apply only", resets)
+	}
+	joined := strings.Join(commands, "\n")
+	if !strings.Contains(joined, "worktree add --detach ") || !strings.Contains(joined, " target-sha-3") {
+		t.Fatalf("git commands missing retry scratch from moved target:\n%s", joined)
+	}
+}
+
 func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ctx := context.Background()
