@@ -50,6 +50,17 @@ type MergeResult struct {
 	Message       string
 }
 
+// IsTransactionalMergeStaleTarget reports whether a transactional scratch
+// merge was validated against a target HEAD that changed before final apply.
+func IsTransactionalMergeStaleTarget(result *MergeResult) bool {
+	if result == nil || result.Success || result.HasConflicts {
+		return false
+	}
+	message := strings.TrimSpace(result.Message)
+	return strings.Contains(message, "target HEAD moved from ") &&
+		strings.Contains(message, "after scratch validation; retry integration with a fresh scratch merge")
+}
+
 // DiffFileStatus represents a changed file status from git diff --name-status.
 type DiffFileStatus string
 

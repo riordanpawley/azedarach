@@ -2099,9 +2099,9 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("checkout target branch before close integration: %w", err)
 		}
 	}
-	merge, err := d.git.MergeCleanlyTransactional(ctx, targetWorktree, source.Branch)
+	merge, err := d.mergeTaskBranchBeforeClose(ctx, projectID, taskID, targetWorktree, targetBranch, source.Branch)
 	if err != nil {
-		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge %s into %s: %w", source.Branch, targetBranch, err)
+		return taskCloseIntegrationResult{Requested: true}, err
 	}
 	if merge == nil {
 		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge %s into %s returned no result", source.Branch, targetBranch)
@@ -2123,6 +2123,34 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		TargetBranch: targetBranch,
 	}
 	return integration, nil
+}
+
+func (d *Daemon) mergeTaskBranchBeforeClose(ctx context.Context, projectID, taskID, targetWorktree, targetBranch, sourceBranch string) (*git.MergeResult, error) {
+	for attempt := 1; ; attempt++ {
+		result, err := d.git.MergeCleanlyTransactional(ctx, targetWorktree, sourceBranch)
+		if err != nil {
+			return nil, fmt.Errorf("merge %s into %s: %w", sourceBranch, targetBranch, err)
+		}
+		if result == nil {
+			return nil, fmt.Errorf("merge %s into %s returned no result", sourceBranch, targetBranch)
+		}
+		if result.Success || !git.IsTransactionalMergeStaleTarget(result) {
+			return result, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("merge %s into %s retry stopped after target HEAD moved during scratch validation: %w", sourceBranch, targetBranch, err)
+		}
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Info("retrying close integration after target HEAD moved during scratch validation",
+				"project_id", projectID,
+				"task_id", taskID,
+				"target_worktree", targetWorktree,
+				"target_branch", targetBranch,
+				"source_branch", sourceBranch,
+				"attempt", attempt,
+			)
+		}
+	}
 }
 
 func daemonWorktreeForIssue(worktrees []git.Worktree, issueID string) (git.Worktree, bool) {
